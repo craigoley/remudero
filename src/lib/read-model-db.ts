@@ -103,6 +103,18 @@ export function readModelDbDir(stateDir: string, env: NodeJS.ProcessEnv = proces
   return join(stateDir, READ_MODEL_DIRNAME);
 }
 
+/**
+ * The persistent `<stateDir>/read-model` serve publishes a view's sources file into, from the dir
+ * holding the DB: the inverse of {@link readModelDbDir}. A mapped scratch dir answers its state
+ * dir's, so a view reading beside its DB never looks on scratch for a file serve wrote to state.
+ */
+export function readModelSidecarDir(dbDir: string, env: NodeJS.ProcessEnv = process.env): string {
+  const mapping = env[READ_MODEL_DB_DIR_ENV] ?? "";
+  const at = mapping.indexOf(":");
+  if (at > 0 && mapping.length > at + 1 && resolve(mapping.slice(at + 1)) === resolve(dbDir)) return join(mapping.slice(0, at), READ_MODEL_DIRNAME);
+  return dbDir;
+}
+
 /** `<db dir>/<instance>.v<schemaVersion>.sqlite` — a schema bump is a new file. */
 export function readModelPath(stateDir: string, instance: string, schemaVersion: number): string {
   if (!INSTANCE_NAME.test(instance)) {
