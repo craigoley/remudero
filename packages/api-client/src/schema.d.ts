@@ -2806,6 +2806,62 @@ export interface components {
         registryError?: string;
       };
     };
+    /** One item of the `inbox` view (src/lib/inbox-view.ts): GET /v1/inbox's item for its section, unchanged. A `needsYou` item adds the `lane` it sits in; a `fleet` item is InboxFleetItem. */
+    InboxViewItem: {
+      proposalId: string;
+      summary?: string;
+      plain?: PlainInboxMessage;
+      stampLine?: string;
+      draftedTasks?: (InboxDraftedTask)[];
+      spawnedAt?: string;
+      reasons?: (InboxPredicateFailure)[];
+      reason?: string;
+      lane?: "ready" | "drafting" | "notReady" | "declined";
+      decision?: "file" | "merge";
+    };
+    /** Where one page of a paged view sits (docs/views.md, design D9). `next` is the next page's `cursor`, absent on the last; every page's body stays under 64 KiB. */
+    ViewPage: {
+      index: number;
+      of: number;
+      /** Items across every page of this key's filter. */
+      total: number;
+      next?: string;
+    };
+    /** GET /v1/views/inbox?section=<s>[&cursor=<n>] (docs/views.md, src/lib/inbox-view.ts): one page of one inbox section, materialized by serve's slow lane on its cadence with no reader, so a read answers from memory. Every page carries every lane's counts. Dark until state/read-model/switches.json sets `inbox` to `serve`. */
+    InboxView: {
+      view: "inbox";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      /** `inbox-store:core`: when the slow lane last classified. */
+      sources: (ViewSource)[];
+      data: {
+        section: "needsYou" | "ready" | "drafting" | "notReady" | "declined" | "fleet";
+        items: (InboxViewItem)[];
+        counts: InboxCounts;
+        page: ViewPage;
+      };
+    };
+    /** GET /v1/views/feedback[?status=<s>][&cursor=<n>] (docs/views.md, src/lib/feedback-view.ts): one page of GET /v1/feedback's entries, all or one status, materialized by serve's slow lane. An entry whose proposal PR merged reads `accepted` (projected; the view writes nothing). Dark until state/read-model/switches.json sets `feedback` to `serve`. */
+    FeedbackView: {
+      view: "feedback";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      /** `feedback-store:core`: when the slow lane last read the entries. */
+      sources: (ViewSource)[];
+      data: {
+        status: "all" | "new" | "grilling" | "proposed" | "accepted" | "rejected" | "answered";
+        entries: (FeedbackEntry)[];
+        counts: {
+          total: number;
+          byStatus: Record<string, number>;
+        };
+        page: ViewPage;
+      };
+    };
     /** GET /v1/views/now?instance=<id> (docs/views.md, src/lib/now-view.ts): everything the console's /now renders for ONE instance. The board is the legacy derivation over the read model's full fact history; `groups` precomputes the console's groupBoard; `actions` carries structured strikes; `health` is the selected instance's own host probe. Dark until state/read-model/switches.json sets `now` to `serve`. Version 2 carries no clock stamp and no now-relative value in `data` (the envelope's `generatedAt` and each source's `asOf` do), so the ETag moves only when the content does. A consumer derives a duration ("running for 12 min") from an absolute field such as a task's `startedAt`. */
     NowView: {
       view: "now";
@@ -4735,6 +4791,30 @@ export interface paths {
         };
     };
   };
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/inbox": {
+    get: {
+      responses: {
+          "200": InboxView;
+          "304": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/feedback": {
+    get: {
+      responses: {
+          "200": FeedbackView;
+          "304": undefined;
+          "400": Error;
+          "401": Error;
   "/v1/views/events": {
     get: {
       responses: {

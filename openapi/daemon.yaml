@@ -7093,6 +7093,131 @@ components:
               type: string
               description: The repo registry's refusal code; GET /v1/registry answers 503 with it.
 
+    InboxViewItem:
+      type: object
+      description: >
+        One item of the `inbox` view (src/lib/inbox-view.ts): GET /v1/inbox's item for its section,
+        unchanged. A `needsYou` item adds the `lane` it sits in; a `fleet` item is InboxFleetItem.
+      required: [proposalId]
+      properties:
+        proposalId: {type: string}
+        summary: {type: string}
+        plain:
+          $ref: "#/components/schemas/PlainInboxMessage"
+        stampLine: {type: string}
+        draftedTasks:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxDraftedTask"
+        spawnedAt: {type: string}
+        reasons:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxPredicateFailure"
+        reason: {type: string}
+        lane:
+          type: string
+          enum: [ready, drafting, notReady, declined]
+        decision:
+          type: string
+          enum: [file, merge]
+
+    ViewPage:
+      type: object
+      description: >
+        Where one page of a paged view sits (docs/views.md, design D9). `next` is the next page's
+        `cursor`, absent on the last; every page's body stays under 64 KiB.
+      required: [index, of, total]
+      properties:
+        index: {type: integer}
+        of: {type: integer}
+        total: {type: integer, description: Items across every page of this key's filter.}
+        next: {type: string}
+
+    InboxView:
+      type: object
+      description: >
+        GET /v1/views/inbox?section=<s>[&cursor=<n>] (docs/views.md, src/lib/inbox-view.ts): one page
+        of one inbox section, materialized by serve's slow lane on its cadence with no reader, so a
+        read answers from memory. Every page carries every lane's counts. Dark until
+        state/read-model/switches.json sets `inbox` to `serve`.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [inbox]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          description: "`inbox-store:core`: when the slow lane last classified."
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [section, items, counts, page]
+          properties:
+            section:
+              type: string
+              enum: [needsYou, ready, drafting, notReady, declined, fleet]
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/InboxViewItem"
+            counts:
+              $ref: "#/components/schemas/InboxCounts"
+            page:
+              $ref: "#/components/schemas/ViewPage"
+
+    FeedbackView:
+      type: object
+      description: >
+        GET /v1/views/feedback[?status=<s>][&cursor=<n>] (docs/views.md, src/lib/feedback-view.ts):
+        one page of GET /v1/feedback's entries, all or one status, materialized by serve's slow lane.
+        An entry whose proposal PR merged reads `accepted` (projected; the view writes nothing).
+        Dark until state/read-model/switches.json sets `feedback` to `serve`.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [feedback]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          description: "`feedback-store:core`: when the slow lane last read the entries."
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [status, entries, counts, page]
+          properties:
+            status:
+              type: string
+              enum: [all, new, grilling, proposed, accepted, rejected, answered]
+            entries:
+              type: array
+              items:
+                $ref: "#/components/schemas/FeedbackEntry"
+            counts:
+              type: object
+              required: [total, byStatus]
+              properties:
+                total: {type: integer}
+                byStatus:
+                  type: object
+                  additionalProperties: {type: integer}
+            page:
+              $ref: "#/components/schemas/ViewPage"
+
     NowView:
       type: object
       description: >
@@ -12732,6 +12857,87 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: The view is dark (`view_disabled`), shadowed (`view_shadow`), or has no body yet (`view_not_ready`).
+
+  /v1/views/inbox:
+    get:
+      summary: One page of one inbox section, from memory (the slow lane materializes it).
+      description: >
+        Arch Phase 4 (P4-T06). Keyed by `section` and `cursor`; each body is under 64 KiB and carries
+        every lane's counts. While dark (no `serve` switch), it answers from GET /v1/inbox's last
+        classification in this serve, or 400 when there is none yet. Same ETag and 304 rules as every
+        view. See docs/views.md.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: section
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [needsYou, ready, drafting, notReady, declined, fleet]
+        - name: cursor
+          in: query
+          required: false
+          description: The previous page's `page.next`.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxView"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The view is shadowed (`view_shadow`) or not materialized yet (`view_not_ready`).
+
+  /v1/views/feedback:
+    get:
+      summary: One page of feedback entries, all or one status, from memory (the slow lane materializes it).
+      description: >
+        Arch Phase 4 (P4-T07, read half). Keyed by `status` and `cursor`; each body is under 64 KiB and
+        carries the counts by status. While dark it is computed inline from the entries. Same ETag and
+        304 rules as every view. See docs/views.md.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [new, grilling, proposed, accepted, rejected, answered]
+        - name: cursor
+          in: query
+          required: false
+          description: The previous page's `page.next`.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackView"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The view is shadowed (`view_shadow`) or not materialized yet (`view_not_ready`).
 
   /v1/views/events:
     get:
