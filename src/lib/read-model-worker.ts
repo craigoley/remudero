@@ -13,7 +13,7 @@
  * where coverage is recorded.
  */
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, fstatSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
@@ -40,6 +40,7 @@ import {
   type OracleWindow,
 } from "./read-model-consistency.js";
 import {
+  PROJECTOR_LEASE_NAME,
   READ_MODEL_DIRNAME,
   READ_MODEL_LEASE_TTL_MS,
   ReadModelError,
@@ -206,7 +207,9 @@ export type ReadModelWorkerMessage =
   /** Each non-ledger source's latest reading, posted once per tick when one changed: a body whose data did not move is not re-posted, but its sources still age. */
   | { type: "sources"; sources: ViewSource[] }
   /** The heartbeat inside a long tick: `open` before a store's open (its quick_check), `opened` with what it took, `commit` per applied transaction. */
-  | { type: "progress"; instance: string; phase: "open" | "opened" | "commit"; ms?: number; rows?: number };
+  | { type: "progress"; instance: string; phase: "open" | "opened" | "commit"; ms?: number; rows?: number }
+  /** The view thread's own heartbeat, read by the projector thread's view lane and never relayed to serve. */
+  | { type: "view_unit"; view: string; instance?: string; phase: "start" | "end" };
 
 export interface ReadModelViewContext {
   now: number;
@@ -305,6 +308,8 @@ export interface ReadModelTickerOptions {
   oracleRunner?: ReadModelOracle;
   /** Where the background integrity check runs; in this thread by default, on a thread of its own inside serve's worker. */
   integrityCheck?: (request: IntegrityRequest, done: (result: IntegrityResult) => void) => void;
+  /** Projects nothing: attaches to the stores the projector thread holds, takes its states from `observe`, and builds view bodies only. */
+  viewsOnly?: boolean;
 }
 
 export interface IntegrityRequest {
@@ -483,6 +488,8 @@ export interface ReadModelTicker {
   release(): number;
   /** Takes every key of a view the slow lane built: each is served like a materialized body, and a key not among them is dropped. */
   accept(built: SlowLaneBodies): void;
+  /** A views-only ticker's instance states, as the projector thread last posted them. */
+  observe(instances: readonly ReadModelInstanceState[]): void;
 }
 
 /** One view, or one instance's share of a per-instance view: the unit the pass budgets, times and paces. */
@@ -594,6 +601,11 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   let switches = DEFAULT_READ_MODEL_SWITCHES;
   let switchesMtimeMs = -1;
   let switchesCheckedAt = Number.NEGATIVE_INFINITY;
+  const viewsOnly = opts.viewsOnly === true;
+  /** When the projector thread last posted its states: a views-only ticker trusts a held lease only while that is fresh. */
+  let observedAt = Number.NEGATIVE_INFINITY;
+  /** Each instance's last attach failure, logged once until it changes or clears. */
+  const attachErrors = new Map<string, string>();
 
   const log = (step: string, extra: Record<string, unknown>): void => opts.post({ type: "log", step, extra });
 
@@ -614,6 +626,33 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     slot.projector = undefined;
     slot.lease = undefined;
     slot.ino = undefined;
+  }
+
+  /**
+   * A views-only ticker's connection: the store the pointer names, attached without recovery and
+   * reattached after a rebuild swaps the file. It writes bodies under the projector's holder, so a
+   * write still fences on the lease, and only while the projector's last word on it is fresh.
+   */
+  function attachViews(slot: Slot, now: number): void {
+    const instance = slot.instance.name;
+    try {
+      const path = currentReadModelPath(opts.stateDir, instance, LEDGER_PROJECTOR_SCHEMA_VERSION);
+      if (slot.db && (slot.db.path !== path || fileIno(path) !== slot.ino)) {
+        log("read_model.reopened", { instance, reason: "the file was replaced", thread: "views" });
+        closeSlot(slot);
+      }
+      if (!slot.db && slot.state.lease === "held" && existsSync(path)) {
+        slot.db = attachReadModel(path, LEDGER_PROJECTOR_SCHEMA_VERSION);
+        slot.ino = fileIno(path);
+      }
+      attachErrors.delete(instance);
+    } catch (error) {
+      const message = (error as Error).message;
+      if (attachErrors.get(instance) !== message) log("read_model.view_attach_failed", { instance, error: message });
+      attachErrors.set(instance, message);
+    }
+    const held = slot.db !== undefined && slot.state.lease === "held" && now - observedAt < READ_MODEL_LEASE_TTL_MS;
+    slot.lease = held ? { name: PROJECTOR_LEASE_NAME, holder, ttlMs: READ_MODEL_LEASE_TTL_MS, clock } : undefined;
   }
 
   function ensureLease(slot: Slot, now: number): boolean {
@@ -911,6 +950,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   function build(unit: ViewUnit, now: number, ctx: ReadModelViewContext, generation: number, allowanceMs: number): void {
     const { view } = unit;
     const started = clock.now();
+    const named = { view: view.name, ...(unit.slot ? { instance: unit.slot.instance.name } : {}) };
+    if (viewsOnly) opts.post({ type: "view_unit", ...named, phase: "start" });
     let ready = true;
     try {
       const scoped = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
@@ -922,7 +963,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const finished = clock.now();
     unit.costMs = finished - started;
     unit.dueAt = ready ? finished + unit.costMs / READ_MODEL_VIEW_SHARE : finished;
-    if (unit.costMs > passMs) log("read_model.slow_view", { view: view.name, ...(unit.slot ? { instance: unit.slot.instance.name } : {}), ms: unit.costMs, passMs });
+    if (viewsOnly) opts.post({ type: "view_unit", ...named, phase: "end" });
+    if (unit.costMs > passMs) log("read_model.slow_view", { ...named, ms: unit.costMs, passMs, thread: viewsOnly ? "views" : "projector" });
   }
 
   const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => switches.views[unit.view.name] !== "off" && unit.dueAt <= now).sort((a, b) => a.dueAt - b.dueAt);
@@ -933,6 +975,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
    * phase has spent nothing, so it overshoots by itself at most once and is measured from then on.
    */
   function materialize(now: number, tickStart: number, only?: ViewUnit): void {
+    if (units.length === 0) return;
     const home = slots[0]?.db;
     const shadow = home ? storedShadowReadiness(home, now) : undefined;
     const ctx: ReadModelViewContext = { now, switches, instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}) })), ...(shadow ? { shadow } : {}) };
@@ -943,7 +986,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const deferred: string[] = [];
     for (const unit of dueUnits(now)) {
       if (stopRequested()) return;
-      const fits = unit.costMs === undefined ? spent === 0 : unit.costMs <= soloMs && spent + unit.costMs <= left;
+      // On the view thread a unit too big for a pass has no projection to land on: it runs first in a pass of its own.
+      const fits = unit.costMs === undefined || (viewsOnly && unit.costMs > soloMs) ? spent === 0 : unit.costMs <= soloMs && spent + unit.costMs <= left;
       if (!fits) {
         deferred.push(unit.slot ? `${unit.view.name}@${unit.slot.instance.name}` : unit.view.name);
         continue;
@@ -963,14 +1007,14 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       clocksMoved = false;
       opts.post({ type: "sources", sources: [...clocks.values()].map((clock) => clock.source) });
     }
-    opts.post({ type: "state", at: now, instances: slots.map((slot) => ({ ...slot.state })), switches });
+    if (!viewsOnly) opts.post({ type: "state", at: now, instances: slots.map((slot) => ({ ...slot.state })), switches });
   };
 
   return {
     start(): void {
       const now = clock.now();
       reloadSwitches(now);
-      if (switches.projector === "on") {
+      if (switches.projector === "on" && !viewsOnly) {
         for (const slot of slots) {
           try {
             ensureLease(slot, now);
@@ -985,6 +1029,13 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     tick(): void {
       const now = clock.now();
       reloadSwitches(now);
+      if (viewsOnly) {
+        // Nothing is built before the projector's first word: a body then always has its store behind it.
+        if (observedAt === Number.NEGATIVE_INFINITY) return;
+        for (const slot of slots) attachViews(slot, now);
+        materialize(now, now);
+        return postState(now);
+      }
       // The oracle's slices wait while any instance is still applying a backlog.
       const due = switches.projector === "on" && checking === undefined && !slots.some((slot) => slot.catchUp)
         ? slots.find((slot) => slot.checkPending && now >= slot.checkAfter)
@@ -1035,19 +1086,181 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         log("read_model.materialize_failed", { view: built.view, error: (error as Error).message });
       }
     },
+    observe(instances): void {
+      observedAt = clock.now();
+      for (const slot of slots) {
+        const state = instances.find((s) => s.instance === slot.instance.name);
+        if (state) slot.state = { ...state };
+      }
+    },
     release(): number {
       oracle.close();
       checking = undefined;
       let released = 0;
       for (const slot of slots) {
         try {
-          if (slot.db && slot.lease && releaseLease(slot.db, slot.lease)) released++;
+          if (!viewsOnly && slot.db && slot.lease && releaseLease(slot.db, slot.lease)) released++;
         } catch (error) {
           log("read_model.release_failed", { instance: slot.instance.name, error: (error as Error).message });
         }
         closeSlot(slot);
       }
       return released;
+    },
+  };
+}
+
+const READ_MODEL_VIEWS_KIND = "remudero-read-model-views" as const;
+
+/** What the view thread needs, all serializable. */
+export interface ReadModelViewsData {
+  kind: typeof READ_MODEL_VIEWS_KIND;
+  stateDir: string;
+  instances: ReadModelInstance[];
+  tickMs: number;
+  /** The projector's lease holder: bodies are written under it, so a write still fences on the lease. */
+  holder: string;
+  registry?: ReadModelWorkerData["registry"];
+  /** A module URL whose default export lists views built beside the built-in ones. */
+  viewsModule?: string;
+}
+
+/** What the projector thread tells its view thread. */
+export type ReadModelViewsInput =
+  | { type: "state"; instances: ReadModelInstanceState[] }
+  | { type: "shadow"; request: ShadowRequest }
+  | { type: "bodies"; built: SlowLaneBodies }
+  | { type: "stop" };
+
+/**
+ * The view thread's body: every view is built here, never on the projector's thread, so a build of
+ * any length delays no projection and no heartbeat. On the fleet host one `now` build held the
+ * projector's thread 352 s on 2026-10-01 and the silent-worker watchdog recycled it mid-build.
+ */
+export function runReadModelViewWorker(
+  port: { on(event: "message", run: (msg: ReadModelViewsInput) => void): unknown; postMessage(value: unknown): void; close(): void },
+  data: Omit<ReadModelViewsData, "kind">,
+  clock: Clock = systemClock,
+): void {
+  const post = (m: ReadModelWorkerMessage): void => port.postMessage(m);
+  const log = (step: string, extra: Record<string, unknown>): void => post({ type: "log", step, extra });
+  let ticker: ReadModelTicker | undefined;
+  let timer: NodeJS.Timeout | undefined;
+  let stopped = false;
+  const early: ReadModelViewsInput[] = [];
+  const handle = (msg: ReadModelViewsInput): void => {
+    if (msg.type === "stop") {
+      stopped = true;
+      clearTimeout(timer);
+      ticker?.release();
+      return port.close();
+    }
+    if (!ticker) return void early.push(msg);
+    if (msg.type === "state") ticker.observe(msg.instances);
+    else if (msg.type === "shadow") ticker.shadow(msg.request);
+    else ticker.accept(msg.built);
+  };
+  port.on("message", handle);
+  const loop = (): void => {
+    if (stopped) return;
+    // A throw here ends the thread, and the view lane respawns it: every view build already catches its own.
+    ticker!.tick();
+    timer = setTimeout(loop, data.tickMs);
+  };
+  void (async () => {
+    let extra: ReadModelView[] = [];
+    try {
+      if (data.viewsModule) extra = ((await import(data.viewsModule)) as { default: ReadModelView[] }).default;
+    } catch (error) {
+      log("read_model.views_module_failed", { module: data.viewsModule, error: (error as Error).message });
+    }
+    if (stopped) return;
+    const now = createNowView({ instances: data.instances, ledgerSource, clock, log });
+    const instances = createInstancesView({ instances: data.instances, ...data.registry, ledgerSource });
+    ticker = createReadModelTicker({
+      stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off",
+      views: [...READ_MODEL_VIEWS, now, instances, ...extra],
+    });
+    ticker.start();
+    for (const msg of early.splice(0)) handle(msg);
+    loop();
+  })();
+}
+
+/** The projector thread's handle on its view thread. */
+export interface ReadModelViewLane {
+  state(instances: ReadModelInstanceState[]): void;
+  shadow(request: ShadowRequest): void;
+  accept(built: SlowLaneBodies): void;
+  close(): void;
+}
+
+/**
+ * Spawns the view thread and relays what it posts. Its watchdog judges a build by the thread's own
+ * heartbeat and only reports one that runs past {@link READ_MODEL_STALL_MS}: killing it would only
+ * restart the same build from cold. A thread that dies is respawned after a doubling delay.
+ */
+export function threadViews(opts: {
+  data: Omit<ReadModelViewsData, "kind">;
+  relay: (msg: ReadModelWorkerMessage) => void;
+  log: (step: string, extra: Record<string, unknown>) => void;
+  workerUrl?: URL;
+  clock?: Clock;
+  every?: (run: () => void, ms: number) => () => void;
+}): ReadModelViewLane {
+  const clock = opts.clock ?? systemClock;
+  let worker: Worker | undefined;
+  let deaths = 0;
+  let closed = false;
+  let respawn: NodeJS.Timeout | undefined;
+  let building: { view: string; instance?: string; since: number; reported: boolean } | undefined;
+  const spawn = (): void => {
+    const data: ReadModelViewsData = { ...opts.data, kind: READ_MODEL_VIEWS_KIND };
+    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv });
+    worker = spawned;
+    building = undefined;
+    spawned.unref();
+    spawned.on("message", (msg: ReadModelWorkerMessage) => {
+      if (msg.type !== "view_unit") return opts.relay(msg);
+      deaths = 0;
+      building = msg.phase === "start" ? { view: msg.view, ...(msg.instance ? { instance: msg.instance } : {}), since: clock.now(), reported: false } : undefined;
+    });
+    spawned.on("error", (error) => opts.log("read_model.views_failed", { error: String(error?.message ?? error) }));
+    spawned.on("exit", (code) => {
+      if (worker !== spawned || closed) return;
+      worker = undefined;
+      deaths++;
+      const delayMs = Math.min(opts.data.tickMs * 2 ** deaths, READ_MODEL_MAX_BACKOFF_MS);
+      opts.log("read_model.views_exited", { code, deaths, respawnInMs: delayMs, ...(building ? { view: building.view } : {}) });
+      respawn = setTimeout(() => {
+        respawn = undefined;
+        if (!closed) spawn();
+      }, delayMs);
+      respawn.unref();
+    });
+  };
+  const stopWatch = (opts.every ?? everyUnref)(() => {
+    if (!building || building.reported) return;
+    const ms = clock.now() - building.since;
+    if (ms < READ_MODEL_STALL_MS) return;
+    building.reported = true;
+    opts.log("read_model.view_build_long", { view: building.view, ...(building.instance ? { instance: building.instance } : {}), ms });
+  }, READ_MODEL_SWITCH_RECHECK_MS);
+  const send = (msg: ReadModelViewsInput): void => worker?.postMessage(msg);
+  spawn();
+  return {
+    state: (instances) => send({ type: "state", instances }),
+    shadow: (request) => send({ type: "shadow", request }),
+    accept: (built) => send({ type: "bodies", built }),
+    close: () => {
+      closed = true;
+      stopWatch();
+      clearTimeout(respawn);
+      const running = worker;
+      worker = undefined;
+      running?.postMessage({ type: "stop" } satisfies ReadModelViewsInput);
+      // The stop lets the thread close its connections; one still mid-build past the bound is terminated.
+      setTimeout(() => void running?.terminate(), READ_MODEL_STOP_WAIT_MS).unref();
     },
   };
 }
@@ -1065,6 +1278,7 @@ export interface ReadModelWorkerData {
   escalationRepository?: string;
   /** The slow lane's units (read-model-slow-lane.ts); absent, no slow lane runs. */
   slowLane?: SlowLaneConfig;
+  viewsModule?: string;
 }
 
 /** The worker branch's body: tick on a timer until asked to stop, then release and signal. */
@@ -1078,16 +1292,23 @@ export function runReadModelWorker(
   const [owner, repo] = data.escalationRepository?.split("/") ?? [];
   const escalation = owner && repo ? { issues: ghIssueGateway(owner, repo), ledgerPath: join(data.stateDir, LEDGER_FILENAME), runId: READ_MODEL_WORKER_KIND } : undefined;
   let slowLane: SlowLane | undefined;
+  const log = (step: string, extra: Record<string, unknown>): void => port.postMessage({ type: "log", step, extra } satisfies ReadModelWorkerMessage);
+  const holder = randomUUID();
+  const views = threadViews({
+    data: { stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}) },
+    relay: (m) => port.postMessage(m), log, clock,
+  });
   const post = (m: ReadModelWorkerMessage): void => {
-    if (m.type === "state") slowLane?.lease(m.instances[0]?.lease === "held");
+    if (m.type === "state") {
+      slowLane?.lease(m.instances[0]?.lease === "held");
+      views.state(m.instances);
+    }
     port.postMessage(m);
   };
-  if (data.slowLane) slowLane = threadSlowLane({ config: data.slowLane, log: (step, extra) => post({ type: "log", step, extra }), onBodies: (built) => ticker.accept(built) });
-  const now = createNowView({ instances: data.instances, ledgerSource, clock, log: (step, extra) => post({ type: "log", step, extra }) });
-  const oracleRunner = threadOracle({ ...(data.escalationRepository ? { escalationRepository: data.escalationRepository } : {}), log: (step, extra) => post({ type: "log", step, extra }) });
-  const instances = createInstancesView({ instances: data.instances, ...data.registry, ledgerSource });
+  if (data.slowLane) slowLane = threadSlowLane({ config: data.slowLane, log, onBodies: (built) => views.accept(built) });
+  const oracleRunner = threadOracle({ ...(data.escalationRepository ? { escalationRepository: data.escalationRepository } : {}), log });
   const ticker = createReadModelTicker({
-    stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, stopRequested, post, views: [...READ_MODEL_VIEWS, now, instances], oracleRunner,
+    stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder, stopRequested, post, views: [], oracleRunner,
     integrityCheck: threadIntegrityCheck(), ...(escalation ? { escalation } : {}),
   });
   let timer: NodeJS.Timeout | undefined;
@@ -1098,6 +1319,7 @@ export function runReadModelWorker(
     finished = true;
     clearTimeout(timer);
     slowLane?.close();
+    views.close();
     const released = ticker.release();
     port.postMessage({ type: "log", step: "read_model.stopped", extra: { released } } satisfies ReadModelWorkerMessage);
     Atomics.store(signal, 1, 1);
@@ -1121,7 +1343,7 @@ export function runReadModelWorker(
     timer = setTimeout(loop, data.tickMs);
   };
   port.on("message", (msg) => {
-    if (msg.type === "shadow") return void ticker.shadow(msg as unknown as ShadowRequest);
+    if (msg.type === "shadow") return void views.shadow(msg as unknown as ShadowRequest);
     if (msg.type !== "stop") return;
     Atomics.store(signal, 0, 1);
     finish();
@@ -1131,6 +1353,9 @@ export function runReadModelWorker(
 
 if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === READ_MODEL_WORKER_KIND && parentPort) {
   runReadModelWorker(parentPort, workerData as ReadModelWorkerData);
+}
+if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === READ_MODEL_VIEWS_KIND && parentPort) {
+  runReadModelViewWorker(parentPort, workerData as ReadModelViewsData);
 }
 if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === READ_MODEL_ORACLE_KIND && parentPort) {
   runReadModelOracleWorker(parentPort, workerData as ReadModelOracleData);
@@ -1210,6 +1435,8 @@ export interface ReadModelWorkerOptions {
   /** What the silent-worker watchdog measures against. */
   clock?: Clock;
   slowLane?: SlowLaneConfig;
+  /** A module URL whose default export lists views the view thread builds beside the built-in ones. */
+  viewsModule?: string;
   /** Sees each worker message after the handle has applied it. */
   observe?: (msg: ReadModelWorkerMessage) => void;
 }
@@ -1307,7 +1534,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       for (const source of msg.sources) sourceClocks.set(source.name, source);
     } else if (msg.type === "progress") {
       if (msg.phase === "opened") slowestOpenMs = Math.max(slowestOpenMs, msg.ms ?? 0);
-    } else {
+    } else if (msg.type === "state") {
       at = msg.at;
       switches = msg.switches;
       deaths = 0;
@@ -1322,6 +1549,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       kind: READ_MODEL_WORKER_KIND, stateDir: opts.stateDir, instances: [...opts.instances], tickMs: opts.tickMs ?? READ_MODEL_TICK_MS, signal: shared, ...(opts.registry ? { registry: opts.registry } : {}),
       ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}),
       ...(opts.slowLane ? { slowLane: opts.slowLane } : {}),
+      ...(opts.viewsModule ? { viewsModule: opts.viewsModule } : {}),
     };
     const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv });
     signal = new Int32Array(shared);
