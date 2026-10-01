@@ -35,7 +35,7 @@ import {
   type OperatorAgentMemorySource,
   type OperatorAgentSettings,
 } from "./operator-agent.js";
-import { READ_MODEL_DIRNAME, type ReadModelDb } from "./read-model-db.js";
+import { READ_MODEL_DIRNAME, readModelSidecarDir, type ReadModelDb } from "./read-model-db.js";
 import type { ViewDefinition, ViewSource } from "./views.js";
 
 export const NAV_BADGE_VIEW_VERSION = 1;
@@ -473,7 +473,7 @@ export function createNavBadgeReadModelView<S extends { instance: string; ticked
     materialize: ({ now, instances }) => {
       const dbPath = instances.find((slot) => slot.db)?.db?.path;
       if (dbPath === undefined) return [];
-      const published = sourcesFile(join(dirname(dbPath), NAV_BADGE_SOURCES_FILE));
+      const published = sourcesFile(join(readModelSidecarDir(dirname(dbPath)), NAV_BADGE_SOURCES_FILE));
       const inputs: InstanceInputs[] = (published?.instances ?? []).map((scope) => ({
         ...scope,
         memory: () => {
