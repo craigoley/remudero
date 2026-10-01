@@ -32,6 +32,7 @@ export const REGISTERED_GARDEN_NAMES = [
   "overseer",
   "hot-file",
   "host-resource",
+  "backlog",
 ] as const;
 
 export type RegisteredGardenName = (typeof REGISTERED_GARDEN_NAMES)[number];
