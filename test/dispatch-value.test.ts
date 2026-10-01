@@ -6,13 +6,11 @@ import test from "node:test";
 import {
   buildDispatchValueContext,
   type DispatchValueContext,
-  type ClosureCalibrationSnapshot,
   type DispatchValueCalibration,
 } from "../src/lib/dispatch-value.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import { dispatchOrder, runnableCandidates, type DrainDeps, type DrainSummary } from "../src/lib/drain.js";
 import type { Plan, Task } from "../src/lib/plan.js";
-import type { ClassClosure } from "../src/lib/retro-closure.js";
 import type { Config } from "../src/lib/config.js";
 import { drainCommand } from "../src/run-task.js";
 
@@ -31,25 +29,20 @@ function task(id: string, over: Partial<Task> = {}): Task {
   };
 }
 
-function closure(taskClass: string, rate: number | "thin", costPerMerge: number | null): ClassClosure {
-  return {
-    taskClass,
-    filed: 5,
-    merged: rate === "thin" ? 1 : 4,
-    open: 1,
-    mergeRate:
-      rate === "thin"
-        ? { kind: "refused", merged: 1, denominator: 2, floor: 5 }
-        : { kind: "rate", value: rate, merged: 4, denominator: 5 },
-    costPerMerge,
-  };
-}
+const NOW = Date.parse("2026-09-11T12:00:00.000Z");
 
-function snapshots(rows: readonly ClassClosure[], prior = rows): ClosureCalibrationSnapshot[] {
-  return [
-    { ts: "2026-09-11T12:00:00.000Z", rows },
-    { ts: "2026-09-10T12:00:00.000Z", rows: prior },
-  ];
+/** Dispatched attempts for one class in the trailing window: `merged` of `total` attempts merged, each costing `cost`. */
+function attempts(taskClass: string, merged: number, total: number, cost = 1, nowMs = NOW): Array<Record<string, unknown>> {
+  const ts = new Date(nowMs - 60_000).toISOString();
+  return Array.from({ length: total }, (_, i) => {
+    const taskId = `W1-T${[...taskClass].reduce((sum, ch) => sum + ch.charCodeAt(0), 0)}0${i}`;
+    const runId = `${taskId}-1`;
+    const rows: Array<Record<string, unknown>> = [
+      { ts, run_id: runId, task_id: taskId, step: "run.start", task_class: taskClass },
+      { ts, run_id: runId, task_id: taskId, step: "verdict", verdict: i < merged ? "merged" : "failed", cost_usd: cost },
+    ];
+    return rows;
+  }).flat();
 }
 
 function ready(calibration: DispatchValueCalibration) {
@@ -76,9 +69,6 @@ ${files ? `  files:\n${files}` : ""}`;
     .join("");
 }
 
-function closureSnapshotLine(ts: string, rows: readonly unknown[]): Record<string, unknown> {
-  return { ts, run_id: `RETRO-${ts}`, task_id: "RETRO", step: "retro.closure_by_class", lane: "retro", rows };
-}
 
 async function driveDrainDispatchValue(
   seed: (root: string) => void,
@@ -127,11 +117,7 @@ test("W1-T3412 value respects explicit priority", () => {
   const lowValue = task("W1-T1", { files: ["src/a.ts"] });
   const highValue = task("W1-T2", { files: ["docs/b.md"] });
   const context = ready(
-    buildDispatchValueContext(
-      [lowValue, highValue],
-      snapshots([closure("src", 0.2, 2), closure("docs", 0.8, 1)]),
-      new Set([lowValue.id, highValue.id]),
-    ),
+    buildDispatchValueContext([lowValue, highValue], [...attempts("src", 1, 5, 2), ...attempts("docs", 4, 5, 1)], new Set([lowValue.id, highValue.id]), NOW),
   );
 
   assert.deepEqual(dispatchOrder([lowValue, highValue], context).map((item) => item.id), [highValue.id, lowValue.id]);
@@ -146,23 +132,10 @@ test("W1-T3412 value respects explicit priority", () => {
 test("W1-T3412 refuses untrusted calibration", () => {
   const left = task("W1-T1", { files: ["src/a.ts"] });
   const right = task("W1-T2", { files: ["docs/b.md"] });
-  const fixtures: Array<{ name: string; calibration: DispatchValueCalibration }> = [
-    { name: "incomplete-union", calibration: buildDispatchValueContext([left, right], snapshots([closure("src", 0.2, 1)]), new Set([left.id, right.id]), false) },
-    { name: "missing-prior-snapshot", calibration: buildDispatchValueContext([left, right], [snapshots([closure("src", 0.2, 1)])[0]], new Set([left.id, right.id])) },
-    { name: "missing-prior-class", calibration: buildDispatchValueContext([left, right], snapshots([closure("src", 0.2, 1), closure("docs", 0.4, 1)], [closure("src", 0.2, 1)]), new Set([left.id, right.id])) },
-    { name: "thin-class", calibration: buildDispatchValueContext([left, right], snapshots([closure("src", "thin", 1)]), new Set([left.id, right.id])) },
-    { name: "zero-merge-class", calibration: buildDispatchValueContext([left, right], snapshots([closure("src", 0.2, null)]), new Set([left.id, right.id])) },
-    { name: "unstable-value", calibration: buildDispatchValueContext([left, right], snapshots([closure("src", 0.8, 1)], [closure("src", 0.2, 1)]), new Set([left.id, right.id])) },
-  ];
-  for (const fixture of fixtures) {
-    assert.equal(fixture.calibration.kind, "refused", fixture.name);
-    if (fixture.calibration.kind === "refused") assert.ok(fixture.calibration.reasons.some((reason) => reason.includes(fixture.name)));
-    assert.deepEqual(
-      dispatchOrder([right, left]).map((item) => item.id),
-      [left.id, right.id],
-      `${fixture.name} retains historic priority/scope/id order`,
-    );
-  }
+  const calibration = buildDispatchValueContext([left, right], attempts("src", 1, 5), new Set([left.id, right.id]), NOW, false);
+  assert.equal(calibration.kind, "refused");
+  if (calibration.kind === "refused") assert.deepEqual(calibration.reasons, ["incomplete-union"]);
+  assert.deepEqual(dispatchOrder([right, left]).map((item) => item.id), [left.id, right.id], "an unreadable corpus retains historic priority/scope/id order");
 });
 
 test("W1-T3412 fanout breaks unavailable value ties", () => {
@@ -170,14 +143,9 @@ test("W1-T3412 fanout breaks unavailable value ties", () => {
   const childA = task("W1-T30", { files: ["plan/tasks.d/child-a.yaml"], depends_on: [parent.id] });
   const childB = task("W1-T40", { files: ["plan/tasks.d/child-b.yaml"], depends_on: [parent.id] });
   const peer = task("W1-T1", { files: ["plan/tasks.d/peer.yaml"] });
-  // The complete calibration has a trusted src class but no plan-lint row. Neither compared task
-  // therefore has a value score, so the ratified open-dependent fanout term decides the tie.
+  // Both compared tasks share one class, so their value scores tie and the open-dependent fanout decides.
   const context = ready(
-    buildDispatchValueContext(
-      [parent, childA, childB, peer],
-      snapshots([closure("src", 0.8, 1)]),
-      new Set([parent.id, childA.id, childB.id, peer.id]),
-    ),
+    buildDispatchValueContext([parent, childA, childB, peer], attempts("src", 4, 5), new Set([parent.id, childA.id, childB.id, peer.id]), NOW),
   );
   const plan: Plan = { tasks: [peer, parent, childA, childB], byId: new Map([[peer.id, peer], [parent.id, parent], [childA.id, childA], [childB.id, childB]]) };
   assert.deepEqual(dispatchOrder([peer, parent], context).map((item) => item.id), [parent.id, peer.id]);
@@ -188,11 +156,7 @@ test("W1-T3412 mutation rejects value bypass", () => {
   const lowValue = task("W1-T1", { files: ["src/a.ts"] });
   const highValue = task("W1-T2", { files: ["docs/b.md"] });
   const context = ready(
-    buildDispatchValueContext(
-      [lowValue, highValue],
-      snapshots([closure("src", 0.2, 2), closure("docs", 0.8, 1)]),
-      new Set([lowValue.id, highValue.id]),
-    ),
+    buildDispatchValueContext([lowValue, highValue], [...attempts("src", 1, 5, 2), ...attempts("docs", 4, 5, 1)], new Set([lowValue.id, highValue.id]), NOW),
   );
   const ordered = dispatchOrder([lowValue, highValue], context).map((item) => item.id);
   const bypassed = dispatchOrder([lowValue, highValue]).map((item) => item.id);
@@ -201,62 +165,26 @@ test("W1-T3412 mutation rejects value bypass", () => {
   assert.notDeepEqual(ordered, bypassed, "removing the value context must fail this discriminating assertion");
 });
 
-test("W1-T3412 drainCommand builds calibrated dispatch value from closure ledger snapshots", async () => {
+test("W1-T3412 drainCommand builds calibrated dispatch value from dispatched attempts", async () => {
   const { context, ledgerRows } = await driveDrainDispatchValue((root) => {
     const ledgerPath = statePathForRoot(root);
-    const rows = [closure("src", 0.2, 2), closure("docs", 0.8, 1)];
-    appendLedger(ledgerPath, closureSnapshotLine("2026-09-10T12:00:00.000Z", rows) as never);
-    appendLedger(ledgerPath, closureSnapshotLine("2026-09-11T12:00:00.000Z", rows) as never);
+    for (const row of [...attempts("src", 1, 5, 2, Date.now()), ...attempts("docs", 4, 5, 1, Date.now())]) appendLedger(ledgerPath, row as never);
   });
 
-  assert.ok(context, "complete stable snapshots produce a dispatch value context");
+  assert.ok(context, "dispatched attempts produce a dispatch value context");
   assert.deepEqual([...context.scoreByClass.keys()].sort(), ["docs", "src"]);
-  assert.deepEqual(
-    ledgerRows.find((row) => row.step === "dispatch.value.calibrated")?.classes,
-    ["src", "docs"],
-    "the command layer logs the calibrated classes it handed to drain.ts",
-  );
+  const calibrated = ledgerRows.find((row) => row.step === "dispatch.value.calibrated") as { classes?: Record<string, unknown> } | undefined;
+  assert.deepEqual(Object.keys(calibrated?.classes ?? {}).sort(), ["docs", "src"], "the command layer logs each class it handed to drain.ts");
 });
 
-test("W1-T3412 drainCommand refuses malformed closure snapshots before selection", async () => {
+test("W1-T3412 drainCommand refuses an incomplete ledger union", async () => {
   const { context, ledgerRows } = await driveDrainDispatchValue((root) => {
-    appendLedger(
-      statePathForRoot(root),
-      closureSnapshotLine("2026-09-11T12:00:00.000Z", [
-        { taskClass: "src", merged: 4, open: 1, costPerMerge: 1, mergeRate: { kind: "rate", value: 0.2, merged: 4 } },
-      ]) as never,
-    );
-  });
-
-  assert.equal(context, undefined);
-  assert.equal(
-    ledgerRows.find((row) => row.step === "dispatch.value.refused")?.reason,
-    "malformed-closure-snapshot",
-  );
-});
-
-test("W1-T3412 drainCommand refuses an incomplete closure ledger union", async () => {
-  const { context, ledgerRows } = await driveDrainDispatchValue((root) => {
-    mkdirSync(join(root, "state", "ledger.2026-09-09T00-00-00-000Z.ndjson"));
+    const insideWindow = new Date(Date.now() - 60_000).toISOString().replace(/[:.]/g, "-");
+    mkdirSync(join(root, "state", `ledger.${insideWindow}.ndjson`));
   });
 
   assert.equal(context, undefined);
   const refusal = ledgerRows.find((row) => row.step === "dispatch.value.refused");
   assert.equal(refusal?.reason, "incomplete-union");
   assert.equal(refusal?.unread_rotations, 1);
-});
-
-test("W1-T3412 drainCommand names valid closure classes that are too thin to calibrate", async () => {
-  const { context, ledgerRows } = await driveDrainDispatchValue((root) => {
-    const ledgerPath = statePathForRoot(root);
-    const rows = [closure("src", "thin", 1)];
-    appendLedger(ledgerPath, closureSnapshotLine("2026-09-10T12:00:00.000Z", rows) as never);
-    appendLedger(ledgerPath, closureSnapshotLine("2026-09-11T12:00:00.000Z", rows) as never);
-  });
-
-  assert.equal(context, undefined);
-  assert.equal(
-    ledgerRows.find((row) => row.step === "dispatch.value.refused")?.reason,
-    "src:thin-class",
-  );
 });

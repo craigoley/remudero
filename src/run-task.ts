@@ -1180,10 +1180,11 @@ import { activeWorkerProbes, reapGitObjects } from "./lib/object-reaper.js";
  *  rather than authorising something the operator never read. */
 export const OBJECT_REAP_CONTRACT_VERSION = "1";
 import { deriveTaskClass, implementRouteClass } from "./lib/task-class.js";
-import { guardZeroStreakRecord, type ClassClosure } from "./lib/retro-closure.js";
+import { guardZeroStreakRecord } from "./lib/retro-closure.js";
 import {
   buildDispatchValueContext,
-  type ClosureCalibrationSnapshot,
+  DISPATCH_VALUE_LEDGER_STEPS,
+  DISPATCH_VALUE_WINDOW_MS,
   type DispatchValueContext,
 } from "./lib/dispatch-value.js";
 import {
@@ -31180,24 +31181,10 @@ export function openSiblingObservation(
   };
 }
 
-function isClosureCalibrationRow(value: unknown): value is ClassClosure {
-  if (!value || typeof value !== "object") return false;
-  const row = value as Record<string, unknown>;
-  if (typeof row.taskClass !== "string") return false;
-  if (typeof row.merged !== "number" || typeof row.open !== "number") return false;
-  if (row.costPerMerge !== null && typeof row.costPerMerge !== "number") return false;
-  const rate = row.mergeRate;
-  if (!rate || typeof rate !== "object") return false;
-  const rateRecord = rate as Record<string, unknown>;
-  return rateRecord.kind === "rate"
-    ? typeof rateRecord.value === "number" && typeof rateRecord.merged === "number" && typeof rateRecord.denominator === "number"
-    : rateRecord.kind === "refused" && typeof rateRecord.merged === "number" && typeof rateRecord.denominator === "number" && typeof rateRecord.floor === "number";
-}
-
 /**
- * Build one selection cycle's pure value context from the complete rotated ledger union. The
- * selector itself gets no reader: a torn corpus, malformed closure row, or missing prior cycle is
- * named here and becomes the exact former priority/scope/id order.
+ * Build one selection cycle's pure value context from the rotated ledger union's dispatched attempts
+ * (W1-T5112). The selector itself gets no reader: only an unreadable corpus refuses, and becomes
+ * the exact former priority/scope/id order; every class is otherwise scored, thin ones near the mean.
  */
 function dispatchValueContextForSelection(
   plan: Plan,
@@ -31205,34 +31192,32 @@ function dispatchValueContextForSelection(
   stateDir: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): DispatchValueContext | undefined {
-  const union = readLedgerUnionRecordsSync(stateDir, { step: "retro.closure_by_class", refuseIncomplete: true });
+  const nowMs = systemClock.now();
+  const union = readLedgerUnionRecordsSync(stateDir, {
+    step: [...DISPATCH_VALUE_LEDGER_STEPS],
+    since: new Date(nowMs - DISPATCH_VALUE_WINDOW_MS).toISOString(),
+    refuseIncomplete: true,
+  });
   if (!union.ok) {
     log("dispatch.value.refused", { reason: "incomplete-union", unread_rotations: union.unread.length });
     return undefined;
   }
-
-  const snapshots: ClosureCalibrationSnapshot[] = [];
-  for (const record of union.rows) {
-    const ts = record.ts;
-    const rows = record.rows;
-    if (typeof ts !== "string" || Number.isNaN(Date.parse(ts)) || !Array.isArray(rows) || !rows.every(isClosureCalibrationRow)) {
-      log("dispatch.value.refused", { reason: "malformed-closure-snapshot" });
-      return undefined;
-    }
-    snapshots.push({ ts, rows });
-  }
   const calibrated = buildDispatchValueContext(
     plan.tasks,
-    snapshots,
+    union.rows,
     new Set(plan.tasks.filter((task) => !isMerged(task.id)).map((task) => task.id)),
+    nowMs,
     union.ok,
   );
   if (calibrated.kind === "refused") {
     log("dispatch.value.refused", { reason: calibrated.reasons.join(",") });
     return undefined;
   }
-  if (calibrated.refusals.length > 0) log("dispatch.value.class_refused", { reasons: calibrated.refusals });
-  log("dispatch.value.calibrated", { classes: [...calibrated.context.scoreByClass.keys()] });
+  log("dispatch.value.calibrated", {
+    classes: Object.fromEntries([...calibrated.estimates].map(([taskClass, e]) => [taskClass, { mean: e.mean, attempts: e.attempts, merges: e.merges, cost_per_attempt: e.costPerAttempt, value: e.value }])),
+    fleet: { mean: calibrated.fleet.mean, attempts: calibrated.fleet.attempts, merges: calibrated.fleet.merges },
+    refused_classes: calibrated.refusals,
+  });
   return calibrated.context;
 }
 
