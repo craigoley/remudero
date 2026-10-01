@@ -102,6 +102,25 @@ export function buildViewRoutes(views: readonly ViewDefinition[], clock: Clock =
   return buildReadModelViewRoutes({ legacy: views, clock });
 }
 
+/** A paged view's items stay under this many JSON bytes per body, so the envelope, counts and sources keep it under 64 KiB (design D9). */
+export const VIEW_PAGE_ITEM_BYTES = 56 * 1024;
+
+/** `items` split into pages of at most `maxBytes` of JSON each, in order; an item larger than that is a page by itself. Always one page at least. */
+export function pagesWithin<T>(items: readonly T[], maxBytes: number = VIEW_PAGE_ITEM_BYTES): T[][] {
+  const pages: T[][] = [[]];
+  let bytes = 0;
+  for (const item of items) {
+    const size = Buffer.byteLength(JSON.stringify(item)) + 1;
+    if (bytes + size > maxBytes && pages.at(-1)!.length > 0) {
+      pages.push([]);
+      bytes = 0;
+    }
+    pages.at(-1)!.push(item);
+    bytes += size;
+  }
+  return pages;
+}
+
 /** A read-model body's key: the request's query sorted by name, so parameter order never splits a row. */
 export function viewKey(params: URLSearchParams): string {
   return [...params]

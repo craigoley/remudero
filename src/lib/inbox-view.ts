@@ -12,7 +12,8 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { readClassificationSnapshot, writeClassificationSnapshot } from "./fleet-lane.js";
 import { pruneRatifiedProposals, updateProposalRegistry } from "./inbox.js";
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
-import { classifyAllProposalsSliced, type PanelGraphDeps } from "./panel-graph.js";
+import { classifyAllProposalsSliced, inboxLanes, peekClassifiedInbox, type PanelGraphDeps } from "./panel-graph.js";
+import { pagesWithin, viewKey, type ViewDefinition, type ViewSource } from "./views.js";
 
 /** How often the slow lane reclassifies. An unchanged input set is answered from the classifier's memo. */
 export const INBOX_CLASSIFY_INTERVAL_MS = 60_000;
@@ -26,6 +27,8 @@ export interface InboxRefreshMemo {
 }
 
 export interface InboxRefresh {
+  /** The `inbox` view's bodies over this pass, one per section page (design D9). */
+  bodies: InboxViewBody[];
   proposals: number;
   /** The states differ from the last written snapshot. */
   changed: boolean;
@@ -52,7 +55,8 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
     const writtenMs = onDisk?.generatedAt ? Date.parse(onDisk.generatedAt) : Number.NaN;
     Object.assign(memo, onDisk ? { states: statesKey(onDisk.states) } : {}, Number.isFinite(writtenMs) ? { writtenAtMs: writtenMs } : {});
   }
-  const { registryPath, proposals, classifications } = await classifyAllProposalsSliced(deps);
+  const classified = await classifyAllProposalsSliced(deps);
+  const { registryPath, proposals, classifications } = classified;
   const { prunedIds } = pruneRatifiedProposals(proposals, classifications);
   if (prunedIds.length > 0) {
     const pruned = new Set(prunedIds);
@@ -73,5 +77,83 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
     memo.writtenAtMs = now;
   }
   const writtenAt = memo.writtenAtMs;
-  return { proposals: proposals.length, changed, written, pruned: prunedIds.length, generatedAt: writtenAt === undefined ? null : fixedClock(writtenAt).iso() };
+  const source: ViewSource = { name: `inbox-store:${INBOX_VIEW_INSTANCE}`, asOf: fixedClock(now).iso(), state: "fresh" };
+  return {
+    bodies: inboxViewBodies(inboxLanes(classified, deps.inboxRoot), source),
+    proposals: proposals.length, changed, written, pruned: prunedIds.length, generatedAt: writtenAt === undefined ? null : fixedClock(writtenAt).iso(),
+  };
+}
+
+export const INBOX_VIEW_NAME = "inbox";
+export const INBOX_VIEW_VERSION = 1;
+/** The inbox is core's alone today; its source is named for the instance that classifies it. */
+const INBOX_VIEW_INSTANCE = "core";
+export const INBOX_VIEW_SECTIONS = ["needsYou", "ready", "drafting", "notReady", "declined", "fleet"] as const;
+export type InboxViewSection = (typeof INBOX_VIEW_SECTIONS)[number];
+
+type Lanes = ReturnType<typeof inboxLanes>;
+type LaneItem = { proposalId: string; lane?: string };
+
+/** One page of one section, with every lane's counts so a page alone can draw the section tabs. */
+export interface InboxViewData {
+  section: InboxViewSection;
+  items: LaneItem[];
+  counts: Lanes["counts"];
+  page: { index: number; of: number; total: number; next?: string };
+}
+
+export interface InboxViewBody {
+  key: string;
+  data: InboxViewData;
+  sources: ViewSource[];
+}
+
+function sectionItems(lanes: Lanes, section: InboxViewSection): LaneItem[] {
+  if (section !== "needsYou") return lanes[section];
+  const { ready, drafting, notReady, declined } = lanes.needsYou;
+  return [
+    ...ready.map((i) => ({ ...i, lane: "ready" })), ...drafting.map((i) => ({ ...i, lane: "drafting" })),
+    ...notReady.map((i) => ({ ...i, lane: "notReady" })), ...declined.map((i) => ({ ...i, lane: "declined" })),
+  ];
+}
+
+/**
+ * Every key of the `inbox` view: per section, pages of at most {@link pagesWithin}'s bytes. The first
+ * page is `section=<s>`; page n is `section=<s>&cursor=<offset>`, the offset of its first item. A
+ * `needsYou` item names its `lane`. No clock is in `data`, so an unchanged inbox keeps its ETags.
+ */
+export function inboxViewBodies(lanes: Lanes, source: ViewSource): InboxViewBody[] {
+  return INBOX_VIEW_SECTIONS.flatMap((section) => {
+    const items = sectionItems(lanes, section);
+    const pages = pagesWithin(items);
+    let offset = 0;
+    return pages.map((page, index) => {
+      const at = offset;
+      offset += page.length;
+      const params = new URLSearchParams(index === 0 ? { section } : { section, cursor: String(at) });
+      const next = index + 1 < pages.length ? { next: String(offset) } : {};
+      return { key: viewKey(params), data: { section, items: page, counts: lanes.counts, page: { index, of: pages.length, total: items.length, ...next } }, sources: [source] };
+    });
+  });
+}
+
+/**
+ * The `inbox` view computed on serve's main thread: the shadow comparator's legacy side, and the answer
+ * while the view is dark. It never classifies: it pages the last classification GET /v1/inbox's memo
+ * holds, so a cold serve answers that none has been made yet.
+ */
+export function inboxLegacyView(deps: PanelGraphDeps, clock = systemClock): ViewDefinition<InboxViewData> {
+  return {
+    name: INBOX_VIEW_NAME,
+    version: INBOX_VIEW_VERSION,
+    compute: (params) => {
+      const section = params.get("section");
+      if (!INBOX_VIEW_SECTIONS.includes(section as InboxViewSection)) return { error: `section must be one of ${INBOX_VIEW_SECTIONS.join(", ")}` };
+      const classified = peekClassifiedInbox(deps);
+      if (!classified) return { error: "serve has not classified the inbox yet" };
+      const source: ViewSource = { name: `inbox-store:${INBOX_VIEW_INSTANCE}`, asOf: clock.iso(), state: "fresh" };
+      const body = inboxViewBodies(inboxLanes(classified, deps.inboxRoot), source).find((b) => b.key === viewKey(params));
+      return body ? { data: body.data, sources: body.sources } : { error: `no such page: ${viewKey(params)}` };
+    },
+  };
 }

@@ -29,7 +29,7 @@
  */
 
 import type { ServerResponse } from "node:http";
-import { projectPlan, readLedgerLines } from "./status.js";
+import { projectPlan, readLedgerLines, SERVE_KEEPS_CREDITS_IN_MEMORY } from "./status.js";
 import type { BoardDeps, StatusProjection } from "./status.js";
 import type { AcceptanceCriterion, Task, TaskStatus } from "./plan.js";
 import type { Route } from "./service.js";
@@ -126,7 +126,7 @@ export function computeTaskCard(deps: BoardDeps, taskId: string): TaskCard | und
   if (!task) return undefined;
   // SAME projectPlan pass board.ts's computeBoardSnapshot already runs — see module header for
   // why this adds zero GitHub calls against the production (batched, cached) gateway.
-  const projection = projectPlan(deps.plan, deps).get(taskId);
+  const projection = projectPlan(deps.plan, { ...deps, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY }).get(taskId);
   const readLedger = deps.readLedger ?? readLedgerLines;
   const lines = readLedger(deps.ledgerPath);
   return buildTaskCard(task, projection, lines);
