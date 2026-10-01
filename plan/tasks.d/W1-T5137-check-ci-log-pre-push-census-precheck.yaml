@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -16,3 +16,14 @@
     - claim: "the check:ci-log:pre-push-census-precheck cause of PR friction has a recorded remedy"
       proof: "grep: ci-friction:check:ci-log:pre-push-census-precheck in docs/ci-friction-remedies.md"
   note: "Filed by the ci-friction gardener (W1-T4435) from a weekly pass over the ledger and gate-fire-rate.ts's own measurement. check:ci-log:pre-push-census-precheck priced at 8.6 PR minute(s) across 2 round(s) on 2 pull request(s) — the costliest cause with no open task. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person; its remedy is recorded in docs/ci-friction-remedies.md naming \"ci-friction:check:ci-log:pre-push-census-precheck\" once it lands."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.93
+    reasons:
+      - "The declared files list contains only docs/ci-friction-remedies.md, a documentation file. Nothing in the description or files touches secrets, auth, permissions, deletion, or merge/deploy/review policy."
+      - "The single acceptance criterion is a grep for a recorded remedy entry in that doc. It is verifiable from what is shown, and the change is reversible."
+      - "The gates state is clean (filingTime true, machine author). The ci-friction family has 1 merged and 0 declined tasks (Beta mean 0.92), so the plan fits established practice. The task asks for no operator-only decision."
+      - "No bounded change view was supplied, so I am relying on the declared files and description only."
+    judged_at: "2026-10-01T14:44:31.335Z"
+    pin: "a4e78079ea3ede41eb5dfb26903cda38fa82f84cce649501a6d6c92e54ebcea8"

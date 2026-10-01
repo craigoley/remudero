@@ -791,6 +791,8 @@ test("runFixRung, wired via buildSweepEffects' REAL production `readCiRollup` cl
     };
     let spawnCalls = 0;
     const effects = buildSweepEffects({
+      // W1-T4073: the fake head is no real commit; an empty head contract leaves the task as resolved.
+      resolveTaskContractAtHeadImpl: () => ({ criteria: [] }),
       owner: owner,
       repo: repo,
       config: { claudeBin: "/usr/bin/true", root } as never,

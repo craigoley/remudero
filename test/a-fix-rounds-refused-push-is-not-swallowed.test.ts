@@ -391,6 +391,8 @@ test("W1-T4693: the sweep's fix dispatch hands runFixRung the same push, so its 
       },
       decideRegisteredFixOwnerRecoveryImpl: () => ({ kind: "publish-ahead" }),
       dispatchFixPreflightStandDownImpl: async () => undefined,
+      // W1-T4073: the fixture's head is no real commit; an empty head contract keeps the task as resolved.
+      resolveTaskContractAtHeadImpl: () => ({ criteria: [] }),
       fixBranchClaimKeyImpl: () => "claim-key",
       createFixRungWorktreeImpl: () => undefined,
       captureWorktreeSnapshotImpl: () => ({ headSha: "birth123" }),

@@ -328,6 +328,11 @@ DAEMON_REPO="${RMD_DAEMON_REPO:-remudero}"
 DRAIN_LOCK="${STATE_DIR}/state/drain.lock"
 INFLIGHT_DIR="${STATE_DIR}/state/inflight"
 PAUSE_FILE="${STATE_DIR}/state/PAUSE"
+# W1-T4197: the recycle only ever removes a PAUSE it wrote itself. RECYCLE_PAUSE_BODY is the exact text
+# this run wrote (empty until it writes one), so ownership is "the file still holds that text" — an
+# operator hold that pre-dated the recycle, or replaced ours mid-run, never matches and is left alone.
+RECYCLE_PAUSE_REASON="container recycle (deploy/recycle-container.sh)"
+RECYCLE_PAUSE_BODY=""
 
 # How long to wait for in-flight workers before refusing, and how often to re-check while waiting.
 # Bounded deliberately: an unbounded wait is a hang with no visible cause, and the whole point of a
@@ -1041,11 +1046,32 @@ echo "recycle-container: pulled image id ${PULLED_IMAGE_ID}"
 # first found three workers mid-run; killing them would have lost the work and stranded their
 # `state/inflight/*.lock` files. If the wait times out, THE PAUSE COMES OFF ON THE WAY OUT — a
 # refusal that leaves the fleet paused forever is a second outage stacked on the first.
+# W1-T4197: A PAUSE ALREADY ON DISK THAT THIS SCRIPT DID NOT WRITE IS THE OPERATOR'S HOLD, and it is left
+# exactly as found — never overwritten here and never removed below. Only a PAUSE naming this script (a
+# crashed earlier recycle's leftover) is superseded, as before. The recycle's own pause is one JSON
+# line whose `reason` names deploy/recycle-container.sh: that is what marks it as the recycle's, and what
+# the drain's pause-reason reader (W1-T5127) keys on, so the reason text must not change.
 mkdir -p "$(dirname "${PAUSE_FILE}")"
-cat > "${PAUSE_FILE}" <<PAUSEJSON
-{"reason":"container recycle (deploy/recycle-container.sh)","requestedAt":"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)","pid":$$,"host":"$(hostname)"}
-PAUSEJSON
-echo "recycle-container: PAUSE engaged — new dispatch halts, in-flight work is allowed to finish"
+# A human reason may mention this script while investigating it. Only the exact reason field
+# emitted by a prior recycle identifies a stale recycle PAUSE; an unreadable or differently
+# formatted file is conservatively left to its owner.
+if [ -e "${PAUSE_FILE}" ] && ! grep -qF -- "\"reason\":\"${RECYCLE_PAUSE_REASON}\"" "${PAUSE_FILE}" 2>/dev/null; then
+  echo "recycle-container: PAUSE already engaged by someone else — left in place, and never removed by this recycle"
+else
+  RECYCLE_PAUSE_BODY="{\"reason\":\"${RECYCLE_PAUSE_REASON}\",\"requestedAt\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",\"pid\":$$,\"host\":\"$(hostname)\"}"
+  printf '%s\n' "${RECYCLE_PAUSE_BODY}" > "${PAUSE_FILE}"
+  echo "recycle-container: PAUSE engaged — new dispatch halts, in-flight work is allowed to finish"
+fi
+
+# Remove the PAUSE only if it is still the exact one this run wrote. $1 is the log line for a removal.
+clear_own_pause() {
+  if [ -n "${RECYCLE_PAUSE_BODY}" ] && [ -f "${PAUSE_FILE}" ] && [ "$(cat "${PAUSE_FILE}" 2>/dev/null)" = "${RECYCLE_PAUSE_BODY}" ]; then
+    rm -f "${PAUSE_FILE}"
+    echo "$1"
+  else
+    echo "recycle-container: PAUSE not removed — this recycle did not write the one on disk" >&2
+  fi
+}
 
 # THE LOCK COUNT ALONE IS BLIND TO A WHOLE LANE, IN BOTH DIRECTIONS (W1-T1046).
 #
@@ -1337,8 +1363,7 @@ WORKERS
     fi
     echo "  ${CONTAINER_NAME} is untouched — killing it now would lose this work and strand these" >&2
     echo "  locks. Widen the wait with RMD_RECYCLE_WAIT_S, or re-run once these finish." >&2
-    rm -f "${PAUSE_FILE}"
-    echo "recycle-container: pause removed — the refusal above must not leave the fleet paused" >&2
+    clear_own_pause "recycle-container: pause removed — the refusal above must not leave the fleet paused" >&2
     exit 1
   fi
   echo "recycle-container: ${n} lane-holding + ${lane_less_busy} lane-less worker(s) still in flight, waited ${waited}s/${WAIT_SECONDS}s — polling"
@@ -1364,8 +1389,7 @@ else
   echo "recycle-container: no existing ${CONTAINER_NAME} to stop or remove"
 fi
 
-rm -f "${PAUSE_FILE}"
-echo "recycle-container: pause cleared — the new container must not come up paused"
+clear_own_pause "recycle-container: pause cleared — the new container must not come up paused"
 
 echo "recycle-container: docker run -d --name ${CONTAINER_NAME} ${REF}"
 # Bash 3.2 treats an empty array as unset under `set -u`, even when it was initialized with `=()`.

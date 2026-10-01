@@ -39,6 +39,7 @@ function remoteWithHolder(opts: { branchPresent: boolean; fail?: "branch" | "fet
     run(args) {
       calls.push(args);
       if (args[0] === "symbolic-ref") return result(0, `${filingBranch}\n`);
+      if (args[0] === "remote") return result(0, "/tmp/local-origin.git\n"); // W1-T4447: a local origin passes the claim-ref guard
       if (args[0] === "hash-object") return result(0, "TREE\n");
       if (args[0] === "commit-tree") {
         const message = args.at(-1) ?? "";

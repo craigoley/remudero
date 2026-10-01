@@ -2881,6 +2881,46 @@ export interface components {
         page: ViewPage;
       };
     };
+    /** GET /v1/views/needs-you (docs/views.md, src/lib/needs-you-view.ts): a view of views (P4-T08). Serve recomposes it from the bodies it holds, every instance's `now` and the `inbox` view's `section=needsYou` page, whenever one moves; it reads no store. An input with no usable body is absent with a reason, never zero. Dark until state/read-model/switches.json sets `needs-you` to `serve`. */
+    NeedsYouView: {
+      view: "needs-you";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      /** The union of the inputs' sources, by name. A missing input adds an `unavailable` `read-model:<now|inbox>@<instance>` source carrying the reason. */
+      sources: (ViewSource)[];
+      data: {
+        /** Every present instance's open decisions, newest `askedAt` first (undated last). */
+        decisions: (NowDecision)[];
+        /** The `inbox` view's `section=needsYou` first page; absent with `reasons.inbox`. */
+        inbox?: {
+          items: (InboxViewItem)[];
+          counts: InboxCounts;
+          page: ViewPage;
+        };
+        /** Every instance the read model reported or holds a `now` body for, by name. One whose `now` body is missing (or not version 3) carries `reason` and no counts or actions. */
+        instances: ({
+          instance: string;
+          reason?: string;
+          counts?: {
+            decisions: number;
+            decisionsMore: number;
+            actions: number;
+          };
+          actions?: (NowAction)[];
+          decisionsReasons?: {
+            grill?: string;
+            task_question?: string;
+          };
+        })[];
+        /** Why a top-level input is absent. */
+        reasons?: {
+          inbox?: string;
+          instances?: string;
+        };
+      };
+    };
     /** GET /v1/views/now?instance=<id> (docs/views.md, src/lib/now-view.ts): everything the console's /now renders for ONE instance. The board is the legacy derivation over the read model's full fact history; `groups` precomputes the console's groupBoard; `actions` carries structured strikes; `health` is the selected instance's own host probe. Dark until state/read-model/switches.json sets `now` to `serve`. Version 2 carries no clock stamp and no now-relative value in `data` (the envelope's `generatedAt` and each source's `asOf` do), so the ETag moves only when the content does. A consumer derives a duration ("running for 12 min") from an absolute field such as a task's `startedAt`. Version 3 (P4-T08) replaced `questions` (a count) with `decisions[]`: each open decision with the route that answers it. */
     NowView: {
       view: "now";
@@ -4971,6 +5011,17 @@ export interface paths {
           "200": FeedbackView;
           "304": undefined;
           "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/needs-you": {
+    get: {
+      responses: {
+          "200": NeedsYouView;
+          "304": undefined;
           "401": Error;
           "403": Error;
           "404": undefined;
