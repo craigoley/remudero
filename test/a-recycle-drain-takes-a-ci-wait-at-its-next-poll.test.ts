@@ -54,6 +54,8 @@ test("W1-T5127: an operator pause that is not a recycle does not hand the CI wai
   assert.equal(recyclePauseDetail(root), undefined, "no PAUSE at all is not a recycle");
   requestPause(root, "investigating an incident");
   assert.equal(recyclePauseDetail(root), undefined, "an operator hold means hold, not hand off");
+  requestPause(root, "investigating deploy/recycle-container.sh");
+  assert.equal(recyclePauseDetail(root), undefined, "mentioning the script in an operator hold does not authorize a recycle handoff");
   const polls = { count: 0 };
   let stalled = false;
   const deps = pendingCi(polls, 1, () => recyclePauseDetail(root));

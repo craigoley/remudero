@@ -6,10 +6,10 @@
  */
 import { pauseDetail } from "./fleet-control.js";
 
-const RECYCLE_PAUSE = /recycle-container\.sh/;
+const RECYCLE_PAUSE = "PAUSE requested: container recycle (deploy/recycle-container.sh)";
 
 /** The PAUSE detail when the local PAUSE was engaged for a container recycle, else `undefined`. */
 export function recyclePauseDetail(root: string, readDetail: (root: string) => string | undefined = pauseDetail): string | undefined {
   const detail = readDetail(root);
-  return detail !== undefined && RECYCLE_PAUSE.test(detail) ? detail : undefined;
+  return detail === RECYCLE_PAUSE ? detail : undefined;
 }
