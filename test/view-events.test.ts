@@ -151,7 +151,9 @@ test("a body posted by the read-model worker emits a view event with cause body"
   const changed = entry("now", "instance=core", { a: 2 });
   rm.post(changed);
   const event = await stream.next((f) => f.event === "view");
-  assert.deepEqual(event.data, { view: "now", key: "instance=core", etag: changed.etag, stale: false, emittedAt: new Date(T0).toISOString(), asOf: new Date(T0).toISOString(), cause: "body" });
+  const { body, ...wire } = event.data;
+  assert.deepEqual(wire, { view: "now", key: "instance=core", etag: changed.etag, stale: false, emittedAt: new Date(T0).toISOString(), asOf: new Date(T0).toISOString(), cause: "body" });
+  assert.deepEqual(body, { ...changed.body, asOf: new Date(T0).toISOString() }, "a small body rides in its event");
   assert.equal(event.id, "b:1");
   assert.equal(stream.frames.filter((f) => f.event === "view").length, 1, "a view switched shadow emits nothing");
 });
@@ -300,4 +302,49 @@ test("the versions route answers the served etags and a matching if-none-match w
   const restarted = await serve(t, { names: ["now", "repositories"], readModel: again, clock, every: timers().every });
   assert.equal((await fetch(`${restarted.url}${VIEW_VERSIONS_PATH}`, { headers: READ })).headers.get("etag"), etag);
   assert.equal((await fetch(`${restarted.url}${VIEW_VERSIONS_PATH}`)).status, 401);
+});
+
+test("a view body under the inline limit rides in its view event", async (t) => {
+  const rm = fakeReadModel({ now: "serve", "nav-badge": "serve" });
+  const { url } = await serve(t, { names: ["now", "nav-badge"], readModel: rm, clock, every: timers().every });
+  const stream = await open(t, `${url}${VIEW_EVENTS_PATH}`);
+  await stream.next((f) => f.event === "hello");
+  const badge = entry("nav-badge", "", { agent: { count: 2 } });
+  const large = entry("now", "instance=core", { tasks: "x".repeat(8 * 1024) });
+  rm.post(badge);
+  rm.post(large);
+  const small = await stream.next((f) => f.event === "view" && f.data.view === "nav-badge");
+  const big = await stream.next((f) => f.event === "view" && f.data.view === "now");
+  // The inlined body is the one a GET answers: the judged envelope with the event's own etag.
+  assert.deepEqual(small.data.body, { ...badge.body, asOf: new Date(T0).toISOString() });
+  assert.equal(viewEtag("nav-badge", 1, false, (small.data.body as { data: unknown }).data), small.data.etag);
+  assert.equal("body" in big.data, false, "a body over the limit is refetched, never inlined");
+  assert.equal(big.data.etag, large.etag);
+});
+
+test("an emitted view event is ledgered at most once per minute per key", async (t) => {
+  const rm = fakeReadModel({ now: "serve" });
+  let at = T0;
+  const stepped: Clock = { now: () => at, date: () => new Date(at), iso: () => new Date(at).toISOString() };
+  const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const { url } = await serve(t, { names: ["now"], readModel: rm, clock: stepped, every: timers().every, log: (step, extra) => void rows.push({ step, ...(extra ? { extra } : {}) }) });
+  const stream = await open(t, `${url}${VIEW_EVENTS_PATH}`);
+  await stream.next((f) => f.event === "hello");
+  const emittedRows = () => rows.filter((r) => r.step === "view.emitted").map((r) => r.extra!);
+  for (const [offset, n] of [[0, 1], [10_000, 2], [59_999, 3], [60_000, 4]] as const) {
+    at = T0 + offset;
+    rm.post(entry("now", "instance=core", { n }));
+    await stream.next((f) => f.event === "view" && f.id?.endsWith(`:${n}`) === true);
+  }
+  at = T0 + 60_001;
+  rm.post(entry("now", "instance=site", { n: 5 }));
+  await stream.next((f) => f.event === "view" && f.data.key === "instance=site");
+  assert.equal(stream.frames.filter((f) => f.event === "view").length, 5, "control: every change was emitted");
+  const sampled = emittedRows();
+  assert.deepEqual(sampled.map((r) => [r.key, r.emittedAt]), [
+    ["instance=core", new Date(T0).toISOString()],
+    ["instance=core", new Date(T0 + 60_000).toISOString()],
+    ["instance=site", new Date(T0 + 60_001).toISOString()],
+  ]);
+  assert.deepEqual({ ...sampled[0], etag: undefined }, { view: "now", key: "instance=core", etag: undefined, cause: "body", emittedAt: new Date(T0).toISOString(), rowTs: new Date(T0).toISOString(), bytes: sampled[0]!.bytes, inline: true, subscribers: 1 });
 });

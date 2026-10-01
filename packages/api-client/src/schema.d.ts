@@ -2604,6 +2604,8 @@ export interface components {
       asOf: string | null;
       /** `body`: the read-model worker posted a new body. `judge`: re-judging the sources flipped `stale`. */
       cause: "body" | "judge";
+      /** Present when the judged body is at most 4 KiB: the whole view body a GET of (view, key) answers with this `etag`, so the client applies it without a refetch. A larger body is refetched with If-None-Match. */
+      body?: Record<string, never>;
     };
     /** The last event on a GET /v1/views/events stream that serve ends (a drain, or a subscriber stalled too long). */
     ViewHandover: {

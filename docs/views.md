@@ -74,7 +74,7 @@ reads no file and no SQLite.
 ## Push: `GET /v1/views/events` (Phase 2)
 
 One SSE stream says WHICH view bodies changed; the client refetches only those, with `If-None-Match`
-(`src/lib/view-events.ts`). It carries versions, never bodies, and **the version is the ETag**. The ETag
+(`src/lib/view-events.ts`). It carries versions, and a body only when it is small (below), and **the version is the ETag**. The ETag
 ignores times, so after a serve restart an unchanged view keeps its version and nothing is refetched.
 Read scope, like every view; schemas `ViewHello`, `ViewEvent`, `ViewHandover`, `ViewVersions` in
 `openapi/daemon.yaml`.
@@ -103,6 +103,12 @@ data: {"reason":"recycle","retryMs":0}
   `cause: judge` is the 1 s sweep re-judging each body's sources exactly as a GET does, so a stalled
   projector flips the view stale on screen without a worker message. The event's `etag` is the one the
   refetch answers with.
+- **Small bodies ride inline** (P2-05): a judged body of at most 4 KiB (nav-badge is ~1.5 KB) is the event's
+  `body`, exactly what a GET would answer, so the client applies it with no refetch. A larger body (`now`)
+  is refetched.
+- **`view.emitted`** (P2-07): at most one ledger row per view key a minute samples an emitted event, with
+  `rowTs` (the newest ledger row the body reflects), `emittedAt`, `cause`, `bytes`, `inline` and
+  `subscribers`, so the host-side hops of the latency budget (row → screen) are measured on one clock.
 - Only views switched `serve` (and the read model's own status) emit. `?views=a,b` narrows the stream.
   Keys carry the instance (`instance=console`), so one stream covers every instance.
 - **Backpressure:** while a socket holds more than 64 KiB, a new event REPLACES the one pending for its
