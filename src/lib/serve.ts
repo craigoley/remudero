@@ -2989,7 +2989,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   const serveDrain = createServeDrain({ boundMs: SERVE_RESTART_DRAIN_BOUND_MS, log: deps.log });
   let viewEventsHandover: (reason: string) => void = () => {};
   const wakeCounters = createWakeCounters();
-  const routeReads = createRouteReadRollup({ stateDir: dirname(deps.ledgerPath), log: deps.log, write: (row) => deps.log?.(ROUTE_READS_STEP, { ...row }) });
+  const routeReads = createRouteReadRollup({ stateDir: join(deps.fleetControlRoot, "state"), log: deps.log, write: (row) => deps.log?.(ROUTE_READS_STEP, { ...row }) });
   const stopRouteReads = routeReads.start();
   const stopWakeSummary = startWakeSummaryFlush({
     counters: wakeCounters,
