@@ -1172,7 +1172,7 @@ import {
   tallyDispositions,
   type CloneReapSummary,
 } from "./lib/clone-reaper.js";
-import { reapGitObjects } from "./lib/object-reaper.js";
+import { activeWorkerProbes, reapGitObjects } from "./lib/object-reaper.js";
 
 /** W1-T3092: bumped when the object reap OPERATION changes shape, so a stale ratification refuses
  *  rather than authorising something the operator never read. */
@@ -2396,6 +2396,7 @@ import { checkImageDrift, IMAGE_DRIFT_STEP } from "./lib/image-drift.js";
 import {
   acquireInflightLock,
   InflightLockError,
+  inflightLockPath,
   parseInflightLockInfo,
   readInflightLock,
   type InflightLockHandle,
@@ -15828,7 +15829,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   // reclaim rung pruneStaleRuns and logWorktreeReapBootSurvey already occupy. Unlike the
   // worktree reaper above, all three already run ARMED wherever they run today, so this needs
   // no dry-run flag of its own — see logDiskReclaimRung.
-  logDiskReclaimRung(config, log);
+  logDiskReclaimRung(config, log, { objectOwnInflightLock: basename(inflightLockPath(join(config.root, "state", "inflight"), taskId)) });
 
   const branch = `run-${runId}`;
   const worktreePath = join(worktreesDir(config), branch);
@@ -31978,6 +31979,7 @@ export function logDiskReclaimRung(
     objectOpenFileCount?: (dir: string) => number;
     /** W1-T4022: where the consecutive-refusal streak persists across daemon restarts. */
     objectStreakPath?: () => string;
+    objectOwnInflightLock?: string;
   } = {},
 ): {
   tempDirsRemoved: number;
@@ -32055,6 +32057,8 @@ export function logDiskReclaimRung(
       // the open-handle refusal fired unconditionally and the other two conditions were moot.
       openFileCount: deps.objectOpenFileCount ?? defaultOpenFileCount,
       streakPath,
+      ownInflightLock: deps.objectOwnInflightLock,
+      ...activeWorkerProbes(inflight),
     });
     objectsPruned = r.pruned;
     objectsWouldPrune = r.wouldPrune ?? 0;
