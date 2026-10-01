@@ -20,6 +20,7 @@ import { buildServeRoutes, buildServeServer, repositoriesSources, type ServeDeps
 import { makeTempDir } from "../src/lib/tmp.js";
 import { FEEDBACK_VIEW_NAME, FEEDBACK_VIEW_VERSION, materializeFeedbackView } from "../src/lib/feedback-view.js";
 import { INBOX_VIEW_NAME, INBOX_VIEW_VERSION, refreshInboxClassification } from "../src/lib/inbox-view.js";
+import type { NeedsYouData } from "../src/lib/needs-you-view.js";
 import { VIEW_EVENTS_PATH, VIEW_VERSIONS_PATH } from "../src/lib/view-events.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { declaredBody, resolve, violations, type Schema } from "./helpers/openapi-strict.js";
@@ -103,7 +104,7 @@ function fixture(t: TestCtx): { root: string; stateDir: string; deps: ServeDeps;
 /** One worker tick over core with every view switched to `serve`, so each materializes a body into the read model. */
 async function materializeAll(root: string, stateDir: string, deps: ServeDeps): Promise<void> {
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
-  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", inbox: "serve", feedback: "serve" } }));
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", inbox: "serve", feedback: "serve", "needs-you": "serve" } }));
   // One operator proposal and one feedback entry, so the slow lane's two views carry items to validate.
   writeFileSync(join(stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: [{ id: "ruling:schema", summary: "a ruling", evidenceAnchors: [] }] }));
   mkdirSync(join(root, "plan", "feedback"), { recursive: true });
@@ -137,7 +138,7 @@ async function listen(t: TestCtx, server: Server): Promise<string> {
 }
 
 /** The query each routed view is read with; a view missing here fails the corpus check below. */
-const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "" };
+const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "", "needs-you": "" };
 
 test("every registered view body validates against its declared schema", async (t) => {
   const { root, stateDir, deps, runs } = fixture(t);
@@ -172,6 +173,8 @@ test("every registered view body validates against its declared schema", async (
   assert.deepEqual(repos.projects.map((p) => [p.project, p.worst.repoName]), [["remudero", "remudero"]]);
   assert.deepEqual((bodies.get("inbox")!.data as { items: Array<{ proposalId: string; lane?: string }> }).items.map((i) => [i.proposalId, i.lane]), [["ruling:schema", "notReady"]]);
   assert.deepEqual((bodies.get("feedback")!.data as { entries: Array<{ id: string }> }).entries.map((e) => e.id), ["fb-1", "fb-schema"]);
+  const needsYou = bodies.get("needs-you")!.data as NeedsYouData;
+  assert.deepEqual([needsYou.decisions.map((d) => d.id), needsYou.inbox?.items.length, needsYou.instances[0]?.counts?.actions], [now.decisions.map((d) => d.id), 1, now.actions.length], JSON.stringify(needsYou));
 
   // P2-03: the versions map (the events stream's hello and fallback poll) names every served body.
   const versions = (await (await fetch(`${url}${VIEW_VERSIONS_PATH}`, { headers: READ })).json()) as { views: Record<string, unknown> };

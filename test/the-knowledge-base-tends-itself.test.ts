@@ -34,6 +34,7 @@ import {
   type GardenerState,
   type GardenWorkspace,
 } from "../src/lib/knowledge-gardener.js";
+import { GardenStateUnreadableError } from "../src/lib/gardener.js";
 import { buildKnowledgeInventory, danglingWhyPointers, inventoryTotals } from "../src/lib/knowledge-inventory.js";
 import { learningUsagePath, seededRandom } from "../src/lib/knowledge-value.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
@@ -311,9 +312,10 @@ test("W1-T4095: the gardener's seeded timer survives a failing pass and its stat
   assert.ok(calls >= 1, "the seeded pass acted, so it reached the throwing workspace");
   assert.ok(rows.includes("knowledge.garden_filing_failed"), "the failed filing was ledgered and the timer kept running");
   writeFileSync(gardenerStatePath(join(root, "state")), "{ torn");
-  assert.deepEqual(readGardenerState(gardenerStatePath(join(root, "state"))).classes, initialGardenerState().classes);
+  // W1-T4938: an existing bad file is refused, never reset to the prior that would forget a pending PR.
+  assert.throws(() => readGardenerState(gardenerStatePath(join(root, "state"))), GardenStateUnreadableError);
   writeFileSync(gardenerStatePath(join(root, "state")), "null");
-  assert.deepEqual(readGardenerState(gardenerStatePath(join(root, "state"))).classes, initialGardenerState().classes);
+  assert.throws(() => readGardenerState(gardenerStatePath(join(root, "state"))), GardenStateUnreadableError);
   // The log starts itself, and a marker names its action.
   const fresh = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4095-log-`));
   mkdirSync(join(fresh, "docs"));
