@@ -58,7 +58,7 @@ test("W1-T913 criterion 1 (run lane): runReview posts remudero-review=pending vi
 
   const pendingIdx = body.indexOf("postReviewPending(");
   const diffIdx = body.indexOf('execFileSync("gh", ["pr", "diff"');
-  const judgeIdx = body.indexOf("const computed = judgeReview(");
+  const judgeIdx = body.indexOf("const computed = await judgeReviewAsync(");
 
   assert.ok(pendingIdx > -1, "runReview must call postReviewPending");
   assert.ok(diffIdx > -1 && judgeIdx > -1, "could not locate runReview's expensive-work call sites");

@@ -119,8 +119,8 @@ test("wiring: runReview computes the inverse scope section AND pushes it into th
   assert.match(runReviewSrc, /if \(inverseScopeSection\) parts\.push\(inverseScopeSection\)/, "…and append it");
 
   // INDEPENDENCE: the binding verdict never sees it. Advisory means advisory.
-  const judgeIdx = runReviewSrc.indexOf("const computed = judgeReview(");
-  assert.ok(judgeIdx > -1, "could not locate the judgeReview call site");
+  const judgeIdx = runReviewSrc.indexOf("const computed = await judgeReviewAsync(");
+  assert.ok(judgeIdx > -1, "could not locate the async judgeReview call site");
   const judgeArgs = runReviewSrc.slice(judgeIdx, runReviewSrc.indexOf("});", judgeIdx) + 3);
   assert.doesNotMatch(judgeArgs, /\binverseScope(Section|AdvisorySection)\b/, "judgeReview's inputs never reference it");
 });

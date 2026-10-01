@@ -9,7 +9,17 @@
   status: queued
   attempts: 0
   origin: "oper#core-daemon-loop-profile-2026-09-29"
-  files: [src/lib/review.ts, test/a-review-proof-run-keeps-the-daemon-loop-responsive.test.ts]
+  files:
+    - src/lib/review.ts
+    - src/lib/sweep.ts
+    - src/run-task.ts
+    - test/a-review-proof-run-keeps-the-daemon-loop-responsive.test.ts
+    - test/run-review-evidence-target.test.ts
+    - test/scope-guard-overrun.test.ts
+    - test/unwired-export-advisory-section.test.ts
+    - test/inverse-scope-advisory-section.test.ts
+    - test/review-status-pending.test.ts
+    - test/a-wall-clock-bound-declares-itself.test.ts
   rationale: |
     A live CPU profile of remudero-daemon on 2026-09-29 sampled 25 minutes (SIGUSR1 + CDP). The loop
     was busy 1439 of 1511 s. Review proof execution was 159 s (11.1%):
@@ -28,5 +38,7 @@
       proof: 'grep: test("W1-T4772: a timer keeps firing while a review proof child runs" in test/a-review-proof-run-keeps-the-daemon-loop-responsive.test.ts'
     - claim: "an async proof run returns the same verdict as the synchronous one"
       proof: 'grep: test("W1-T4772: an async proof run returns the same verdict as the synchronous one" in test/a-review-proof-run-keeps-the-daemon-loop-responsive.test.ts'
+    - claim: "the production runReview path awaits async proof execution while the event loop continues"
+      proof: 'grep: test("W1-T4772: runReview keeps the timer firing while its production proof runs" in test/run-review-evidence-target.test.ts'
   falsifier: |
     Restore the spawnSync call and the timer-probe test reads zero ticks during the proof.

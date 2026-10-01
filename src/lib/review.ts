@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import { createHash } from "node:crypto";
@@ -458,6 +458,8 @@ export interface ReviewEvidence {
    *  preexistingProofHits} reuses against `baseCheckoutDir` — the same function at a different `cwd`, so one injected
    *  fake covers both sides. */
   execProof?: ProofExecutor;
+  /** Async runner used by the daemon's review path. Audit callers can keep the synchronous seam. */
+  asyncExecProof?: AsyncProofExecutor;
   /** The task's DECLARED `files:` scope (W1-T322) — read ONLY for the INVERSE-SCOPE advisory, the direction {@link
    *  "../run-task.js".scopeGuardOutOfScopeFiles} cannot see: that guard flags a diff touching an UNDECLARED file, this
    *  flags a declared file the diff never touched. Advisory only; absent ⇒ it never fires. */
@@ -1512,6 +1514,8 @@ export interface ProofExecutionDeps {
   refreshToolchain?: (cwd: string) => void;
   /** Internal retry guard; a second load failure must reach the judge. */
   loadRetried?: boolean;
+  /** Internal: setup was awaited by the async executor; reuse the one verdict classifier. */
+  preparedArgs?: readonly string[];
 }
 
 // The proof timeout is a POLICY READ (plan/policy.yaml's `proofTimeoutMs`), never a source literal (W1-T253, P37
@@ -1522,9 +1526,17 @@ function defaultProofTimeoutMs(): number {
   return loadDefaultPolicy().values.proofTimeoutMs;
 }
 const npmCiPrimed = new Set<string>();
+const npmCiPending = new Map<string, Promise<void>>();
 /** Process-wide latch for {@link ensureBrowsersOnce} — see its doc comment for why
  * this is NOT keyed by cwd the way {@link npmCiPrimed} is. */
 let browserPreflightDone = false;
+let browserPreflightPending: Promise<void> | undefined;
+
+/** Reset the process memo only in an isolated proof test, never in the review daemon. */
+export function resetBrowserPreflightForTests(): void {
+  browserPreflightDone = false;
+  browserPreflightPending = undefined;
+}
 
 /** The ONE process spawn a proof execution performs — the test/grep run itself. Injectable so a test can prove, by
  * COUNTING, that a fast-failed proof never spawns the runner at all; timing would only prove it was quick. */
@@ -1589,6 +1601,38 @@ export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs)
     encoding: "utf8",
   });
 
+/** Match execFileSync's error shape so the shared proof classifier sees identical outcomes. */
+function execFileAsync(
+  command: string,
+  args: readonly string[],
+  options: { cwd: string; env?: NodeJS.ProcessEnv; timeout?: number; killSignal?: NodeJS.Signals; maxBuffer?: number },
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(command, args as string[], { ...options, encoding: "utf8" }, (error, stdout, stderr) => {
+      if (!error) return resolve(stdout);
+      const code = (error as NodeJS.ErrnoException).code;
+      const failure = Object.assign(error, {
+        status: typeof code === "number" ? code : null,
+        code: typeof code === "number" ? undefined : code,
+        stdout,
+        stderr,
+      });
+      reject(failure);
+    });
+  });
+}
+
+export type AsyncProofSpawner = (command: string, args: readonly string[], cwd: string, timeoutMs: number) => Promise<string>;
+export type AsyncProofExecutor = (whitelisted: WhitelistedProof, cwd: string) => Promise<ReturnType<ProofExecutor>>;
+
+export const defaultAsyncProofSpawner: AsyncProofSpawner = (command, args, cwd, timeoutMs) =>
+  execFileAsync(command, args, {
+    cwd,
+    env: { ...buildProofEnv(), NODE_V8_COVERAGE: undefined },
+    timeout: timeoutMs,
+    killSignal: "SIGKILL",
+  });
+
 /** W1-T4587: checkouts the reviewer itself created for proof execution (the PR head and base
  *  worktrees). {@link ensureDeps} may replace a partial node_modules only in one of these. */
 const reviewerOwnedCheckouts = new Set<string>();
@@ -1643,6 +1687,35 @@ export function ensureDeps(
   } catch {
     /* best-effort priming; see doc comment above */
   }
+  return runnerIsPresent();
+}
+
+/** The review path primes a fresh checkout without holding the daemon's event loop. */
+export async function ensureDepsAsync(cwd: string, requiredRunnerPath?: string): Promise<boolean> {
+  const runnerIsPresent = () => requiredRunnerPath === undefined || existsSync(requiredRunnerPath);
+  const pending = npmCiPending.get(cwd);
+  if (pending) {
+    await pending;
+    return runnerIsPresent();
+  }
+  if (npmCiPrimed.has(cwd)) return runnerIsPresent();
+  npmCiPrimed.add(cwd);
+  if (!existsSync(join(cwd, "package.json"))) return runnerIsPresent();
+  const nodeModules = join(cwd, "node_modules");
+  try {
+    if (lstatSync(nodeModules).isSymbolicLink()) return runnerIsPresent();
+  } catch {
+    // A missing directory is the ordinary fresh-checkout path.
+  }
+  if (requiredRunnerPath === undefined ? existsSync(nodeModules) : runnerIsPresent()) return true;
+  if (existsSync(nodeModules) && !reviewerOwnedCheckouts.has(resolve(cwd))) return runnerIsPresent();
+  const install = execFileAsync("npm", ["ci"], { cwd, timeout: 120_000, killSignal: "SIGKILL" }).then(
+    () => undefined,
+    () => undefined, // Best effort; the runner check below decides availability.
+  );
+  npmCiPending.set(cwd, install);
+  try { await install; }
+  finally { npmCiPending.delete(cwd); }
   return runnerIsPresent();
 }
 
@@ -1709,6 +1782,97 @@ export function refreshProofToolchain(
     copyFileSync(join(installRoot, "package.json"), join(stage, "package.json"));
     copyFileSync(join(installRoot, "package-lock.json"), join(stage, "package-lock.json"));
     exec("npm", ["ci"], { cwd: stage, stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
+    const stagedModules = join(stage, "node_modules");
+    // npm ci for a package with no dependencies can succeed without creating this directory.
+    mkdirSync(stagedModules, { recursive: true });
+    writeFileSync(installHashMarkerPath(stage), installHash);
+    backup = mkdtempSync(join(dirname(installRoot), ".rmd-review-old-"));
+    const liveModules = join(installRoot, "node_modules");
+    const oldModules = join(backup, "node_modules");
+    const hadOld = existsSync(liveModules);
+    if (hadOld) rename(liveModules, oldModules);
+    try {
+      rename(stagedModules, liveModules);
+    } catch (error) {
+      console.error("review toolchain install swap failed", error);
+      failedProofToolchainInstalls.add(failedInstallKey);
+      if (hadOld) {
+        try { rename(oldModules, liveModules); }
+        catch (restoreError) {
+          console.error("review toolchain install rollback failed; old tree retained in staging backup", restoreError);
+          preserveBackup = true;
+        }
+      }
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.error("review toolchain staged install failed", error);
+    failedProofToolchainInstalls.add(failedInstallKey);
+    // A failed refresh leaves the old install serving and permits the one proof retry.
+    return false;
+  } finally {
+    if (stage) {
+      try { remove(stage, { recursive: true, force: true }); }
+      catch (error) { console.error("review toolchain staging cleanup failed", error); }
+    }
+    if (backup && !preserveBackup) {
+      try { remove(backup, { recursive: true, force: true }); }
+      catch (error) { console.error("review toolchain old-install cleanup failed", error); }
+    }
+  }
+}
+
+/** Async staged refresh keeps the same swap and rollback rules as the synchronous audit path. */
+export async function refreshProofToolchainAsync(
+  cwd: string,
+  ops: { rename?: typeof renameSync; remove?: typeof rmSync; install?: (stage: string) => Promise<void> } = {},
+): Promise<boolean> {
+  const rename = ops.rename ?? renameSync;
+  const remove = ops.remove ?? rmSync;
+  if (!reviewerOwnedCheckouts.has(resolve(cwd))) return false;
+  const modules = join(cwd, "node_modules");
+  let installRoot = cwd;
+  let linked = false;
+  try {
+    if (lstatSync(modules).isSymbolicLink()) {
+      try {
+        installRoot = dirname(realpathSync(modules));
+      } catch (error) {
+        // A dangling or unreadable shared link cannot be refreshed from this checkout.
+        return false;
+      }
+      linked = true;
+    }
+  } catch (error) {
+    // Only a missing install can be created; an unreadable install is a separate failure.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+  }
+  if (!existsSync(join(installRoot, "package-lock.json"))) return false;
+  const installHash = hashInstallInputs(installRoot);
+  const marker = installHashMarkerPath(installRoot);
+  if (linked) {
+    try {
+      if (readFileSync(marker, "utf8").trim() === installHash) return false;
+    } catch (error) {
+      // A missing marker is evidence that the canonical install has not been freshness-checked.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+    }
+  }
+  const failedInstallKey = `${resolve(installRoot)}\0${installHash}`;
+  if (failedProofToolchainInstalls.has(failedInstallKey)) return false;
+  // npm ci removes node_modules before installing. Reviewer worktrees share this canonical install
+  // with workers, so doing that in place can break running work. Install beside it, mark the new
+  // tree, then swap directories only after npm has succeeded (W1-T4933's safety boundary).
+  let stage: string | undefined;
+  let backup: string | undefined;
+  let preserveBackup = false;
+  try {
+    stage = mkdtempSync(join(dirname(installRoot), ".rmd-review-stage-"));
+    copyFileSync(join(installRoot, "package.json"), join(stage, "package.json"));
+    copyFileSync(join(installRoot, "package-lock.json"), join(stage, "package-lock.json"));
+    if (ops.install) await ops.install(stage);
+    else await execFileAsync("npm", ["ci"], { cwd: stage, timeout: 120_000, killSignal: "SIGKILL" });
     const stagedModules = join(stage, "node_modules");
     // npm ci for a package with no dependencies can succeed without creating this directory.
     mkdirSync(stagedModules, { recursive: true });
@@ -1878,6 +2042,34 @@ function ensureBrowsersOnce(cwd: string): void {
   });
 }
 
+async function ensureBrowsersOnceAsync(cwd: string): Promise<void> {
+  if (browserPreflightPending) return browserPreflightPending;
+  if (browserPreflightDone) return;
+  browserPreflightDone = true;
+  const preflight = async (): Promise<void> => {
+    const manifest = join(cwd, "node_modules", "playwright-core", "browsers.json");
+    let required: string[];
+    try {
+      required = requiredChromiumDirs(readFileSync(manifest, "utf8"));
+    } catch {
+      return; // An unreadable manifest is the same best-effort outcome as the sync preflight.
+    }
+    const missing = required.filter((dir) => !existsSync(join(playwrightCacheRoot(), dir, "INSTALLATION_COMPLETE")));
+    if (missing.length === 0) return;
+    console.log(`(browser preflight: installing Chromium for the pinned Playwright — missing ${missing.join(", ")})`);
+    try {
+      await execFileAsync(process.execPath, [pinnedPlaywrightCli(cwd), "install", "chromium"], {
+        cwd, timeout: 600_000, killSignal: "SIGKILL",
+      });
+    } catch (error) {
+      console.log(`(browser preflight: install FAILED — ${oneLineErrorCause(error)}; browser proofs may report exec_error)`);
+    }
+  };
+  browserPreflightPending = preflight();
+  try { await browserPreflightPending; }
+  finally { browserPreflightPending = undefined; }
+}
+
 const BROWSER_DRIVER_MODULES = new Set(["playwright", "playwright-core", "@playwright/test", "puppeteer", "puppeteer-core"]);
 
 /** Function-local (not module-scope) so no shared `g`-flag `lastIndex` leaks; covered via {@link resolvedTestFilesNeedBrowserPreflight}'s own fixtures (W1-T2317). */
@@ -2024,6 +2216,43 @@ function grepFilesContaining(cwd: string, fixedPattern: string): string[] | null
   } catch {
     return null;
   }
+}
+
+async function grepFilesContainingAsync(cwd: string, fixedPattern: string): Promise<string[] | null> {
+  try {
+    const stdout = await execFileAsync(
+      "grep", ["-rl", "-F", "--include=*.test.ts", "--exclude-dir=mutants-*", "--", fixedPattern, "test"],
+      { cwd },
+    );
+    return stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+  } catch {
+    // The caller probes the corpus separately, as in the synchronous path; no match is not a positive hit.
+    return null;
+  }
+}
+
+async function couldBeInterpolatedTitleAsync(cwd: string, rawName: string): Promise<boolean> {
+  try {
+    const stdout = await execFileAsync(
+      "grep", ["-rhE", "--include=*.test.ts", "--exclude-dir=mutants-*", "--", INTERPOLATED_TITLE_RE, "test"],
+      { cwd },
+    );
+    return stdout.split("\n").some((line) => interpolatedTitleStaticChunks(line).some((c) => rawName.includes(c)));
+  } catch {
+    // A successful corpus probe precedes this query, so grep's no-match answer means no interpolated title.
+    return false;
+  }
+}
+
+export async function resolveNameFilteredCandidatesAsync(cwd: string, rawName: string): Promise<NameFilterResolution> {
+  const hits = await grepFilesContainingAsync(cwd, rawName);
+  if (hits && hits.length > 0) return { status: "resolved", files: hits };
+  const corpus = await grepFilesContainingAsync(cwd, "");
+  if (!corpus || corpus.length === 0)
+    return { status: "unresolvable", reason: "no readable test corpus to search (grep, test/, or the checkout)" };
+  if (await couldBeInterpolatedTitleAsync(cwd, rawName))
+    return { status: "unresolvable", reason: "an interpolated test title could render to this name" };
+  return { status: "absent" };
 }
 
 /** Resolve the CANDIDATE test file(s) a name-filtered proof's raw name could live in (W1-T227), so {@link
@@ -2217,10 +2446,10 @@ export function execWhitelistedProof(
   // wrapper semantics), so a Vitest name-filtered proof skips it and runs its already-scoped argv
   // (the declared root is already a positional filter, per {@link parseTestTarget}) directly.
   const vitestNameFiltered = whitelisted.nameFiltered === true && whitelisted.runner === "vitest";
-  let args = whitelisted.args as readonly string[];
+  let args = (deps.preparedArgs ?? whitelisted.args) as readonly string[];
   let preflightFiles: readonly string[] | undefined =
     whitelisted.kind === "test" && !whitelisted.nameFiltered ? purePathTestFiles(whitelisted) : undefined;
-  if (whitelisted.nameFiltered && !vitestNameFiltered) {
+  if (deps.preparedArgs === undefined && whitelisted.nameFiltered && !vitestNameFiltered) {
     const resolution = resolveNameFilteredCandidates(cwd, whitelisted.label);
     // FAIL FAST on positive evidence of absence: no test file contains this name and no interpolated title could
     // render to it, so the glob run's only possible finding is the same "no-match" — reached instead by loading 168
@@ -2230,14 +2459,14 @@ export function execWhitelistedProof(
     preflightFiles = resolution.status === "resolved" ? resolution.files : undefined;
     args = narrowNameFilteredArgs(whitelisted.args, preflightFiles ?? []);
   }
-  if (vitestNameFiltered) {
+  if (deps.preparedArgs === undefined && vitestNameFiltered) {
     const scope = vitestNameFilterScope(whitelisted, cwd);
     if (scope.length === 0) return "no-match";
     args = [...args.slice(0, -1), ...scope];
   }
   // AFTER the fast path on purpose: priming a checkout's node_modules is only worth 120s of `npm ci` if we are
   // actually going to run node. `ensureDeps` is memoised per cwd, so a later proof in the same checkout still primes.
-  if (whitelisted.kind === "test") {
+  if (deps.preparedArgs === undefined && whitelisted.kind === "test") {
     const runner = checkoutRunnerPath(whitelisted, cwd);
     if (!ensureDeps(cwd, execFileSync, runner)) {
       throw new ProofRunnerUnavailableError(runner!);
@@ -2329,6 +2558,68 @@ export function execWhitelistedProof(
       if (wrapperName !== undefined) throw new PureProofNeverExecutedError(wrapperName);
     }
     return "fail"; // a single-file/grep proof's own nonzero exit is a genuine fail
+  }
+}
+
+/** Run the review's external work asynchronously, then use the existing verdict classifier. */
+export async function execWhitelistedProofAsync(
+  whitelisted: WhitelistedProof,
+  cwd: string,
+  timeoutMs = defaultProofTimeoutMs(),
+  spawn: AsyncProofSpawner = defaultAsyncProofSpawner,
+  deps: ProofExecutionDeps = {},
+): Promise<ReturnType<ProofExecutor>> {
+  const vitestNameFiltered = whitelisted.nameFiltered === true && whitelisted.runner === "vitest";
+  let args = whitelisted.args as readonly string[];
+  let preflightFiles: readonly string[] | undefined =
+    whitelisted.kind === "test" && !whitelisted.nameFiltered ? purePathTestFiles(whitelisted) : undefined;
+  if (whitelisted.nameFiltered && !vitestNameFiltered) {
+    const resolution = await resolveNameFilteredCandidatesAsync(cwd, whitelisted.label);
+    if (resolution.status === "absent") return "no-match";
+    preflightFiles = resolution.status === "resolved" ? resolution.files : undefined;
+    args = narrowNameFilteredArgs(whitelisted.args, preflightFiles ?? []);
+  }
+  if (vitestNameFiltered) {
+    const scope = vitestNameFilterScope(whitelisted, cwd);
+    if (scope.length === 0) return "no-match";
+    args = [...args.slice(0, -1), ...scope];
+  }
+  if (whitelisted.kind === "test") {
+    const runner = checkoutRunnerPath(whitelisted, cwd);
+    if (!(await ensureDepsAsync(cwd, runner))) throw new ProofRunnerUnavailableError(runner!);
+    args = argsWithCheckoutRunner(whitelisted, args, cwd);
+    if (preflightFiles === undefined || preflightFiles.length === 0 || resolvedTestFilesNeedBrowserPreflight(cwd, preflightFiles)) {
+      if (deps.preflightBrowsers) deps.preflightBrowsers(cwd);
+      else await ensureBrowsersOnceAsync(cwd);
+    }
+  }
+  // Refuse unsafe targets before the child starts, as the synchronous executor does.
+  if (whitelisted.kind === "grep") {
+    assertGrepTargetsInsideCheckout(args, cwd);
+    assertGrepTargetIsFile(args, cwd);
+  }
+  let output: string | undefined;
+  let failure: unknown;
+  try {
+    output = await spawn(whitelisted.command, args, cwd, timeoutMs);
+  } catch (error) {
+    // Replay the failed child result through the existing proof classifier below.
+    failure = error;
+  }
+  try {
+    const replay: ProofSpawner = () => {
+      if (failure !== undefined) throw failure;
+      return output!;
+    };
+    return execWhitelistedProof(whitelisted, cwd, timeoutMs, replay, {
+      preparedArgs: args,
+      loadRetried: true,
+    });
+  } catch (error) {
+    if (!(error instanceof ProofCannotLoadError) || deps.loadRetried) throw error;
+    if (deps.refreshToolchain) deps.refreshToolchain(cwd);
+    else await refreshProofToolchainAsync(cwd);
+    return execWhitelistedProofAsync(whitelisted, cwd, timeoutMs, spawn, { ...deps, loadRetried: true });
   }
 }
 
@@ -4356,6 +4647,50 @@ export function judgeReview(
     executableProofCount: executableCriteria.length,
     planLint: planOnly ? evidence.planLint : undefined,
   };
+}
+
+/** Resolve each requested head/base observation without blocking, then fold with the same judge. */
+export async function judgeReviewAsync(
+  criteria: AcceptanceCriterion[],
+  evidence: ReviewEvidence,
+): Promise<ReviewVerdict> {
+  if (!evidence.headCheckoutDir) return judgeReview(criteria, evidence);
+  type Observation =
+    | { outcome: ReturnType<ProofExecutor>; matchedLines?: string[]; loadError?: string }
+    | { error: unknown };
+  const observed = new Map<string, Observation>();
+  const keyOf = (w: WhitelistedProof, cwd: string) => JSON.stringify([cwd, w.command, [...w.args]]);
+  const asyncExec: AsyncProofExecutor = evidence.asyncExecProof ??
+    (evidence.execProof ? async (w, cwd) => evidence.execProof!(w, cwd) : execWhitelistedProofAsync);
+  // The first fold requests head runs. A passing head may request a base run in the next fold.
+  // No proof is launched until the existing judge asks for it, preserving filing carve-outs.
+  for (let pass = 0; pass <= criteria.length * 2 + 1; pass++) {
+    const pending = new Map<string, { whitelisted: WhitelistedProof; cwd: string }>();
+    const replay: ProofExecutor = (whitelisted, cwd) => {
+      const key = keyOf(whitelisted, cwd);
+      const prior = observed.get(key);
+      if (prior) {
+        if ("error" in prior) throw prior.error;
+        whitelisted.matchedLines = prior.matchedLines;
+        whitelisted.loadError = prior.loadError;
+        return prior.outcome;
+      }
+      pending.set(key, { whitelisted, cwd });
+      throw new Error("async proof observation pending");
+    };
+    const verdict = judgeReview(criteria, { ...evidence, execProof: replay });
+    if (pending.size === 0) return verdict;
+    for (const [key, { whitelisted, cwd }] of pending) {
+      try {
+        const outcome = await asyncExec(whitelisted, cwd);
+        observed.set(key, { outcome, matchedLines: whitelisted.matchedLines, loadError: whitelisted.loadError });
+      } catch (error) {
+        // Preserve this exact proof error for the next deterministic verdict fold.
+        observed.set(key, { error });
+      }
+    }
+  }
+  throw new Error("async proof observations did not converge");
 }
 
 /** W1-T4423: why a plan-only PASS is refused, or `undefined` when lint-plan RAN clean; a lint that never ran is no pass. */

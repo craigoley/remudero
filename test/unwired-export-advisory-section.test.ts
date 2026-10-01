@@ -103,8 +103,8 @@ test("wiring: runReview computes the unwired section AND pushes it into the comm
   assert.match(runReviewSrc, /if \(unwiredSection\) parts\.push\(unwiredSection\)/, "…and append it to the body");
 
   // INDEPENDENCE: the binding verdict never sees it. Advisory means advisory.
-  const judgeIdx = runReviewSrc.indexOf("const computed = judgeReview(");
-  assert.ok(judgeIdx > -1, "could not locate the judgeReview call site");
+  const judgeIdx = runReviewSrc.indexOf("const computed = await judgeReviewAsync(");
+  assert.ok(judgeIdx > -1, "could not locate the async judgeReview call site");
   const judgeArgs = runReviewSrc.slice(judgeIdx, runReviewSrc.indexOf("});", judgeIdx) + 3);
   assert.doesNotMatch(judgeArgs, /\bunwired(Section|ExportAdvisorySection)\b/, "judgeReview's inputs never reference it");
 });

@@ -75,6 +75,7 @@ import {
   extractTaskTrailerId,
   isCriterionRefusal,
   judgeReview,
+  judgeReviewAsync,
   parseAcceptanceBlock,
   parseWhitelistedProof,
   postedArmFactsFromLedger,
@@ -85,6 +86,7 @@ import type {
   AutomergeHold,
   CriterionVerdict,
   ProofExecutor,
+  ReviewEvidence,
   ReviewVerdict,
 } from "./review.js";
 import { parseLedger } from "./retro.js";
@@ -202,6 +204,24 @@ export type ReviewReuseDiscriminationResult =
 export function discriminateReviewReuse(
   input: ReviewReuseDiscriminationInput,
 ): ReviewReuseDiscriminationResult {
+  const prepared = prepareReviewReuse(input);
+  if (!prepared.ok) return prepared;
+  const computed = judgeReview(prepared.criteria, reviewReuseEvidence(input));
+  return assessReviewReuse(input, prepared.criteria, computed);
+}
+
+export async function discriminateReviewReuseAsync(
+  input: ReviewReuseDiscriminationInput,
+): Promise<ReviewReuseDiscriminationResult> {
+  const prepared = prepareReviewReuse(input);
+  if (!prepared.ok) return prepared;
+  const computed = await judgeReviewAsync(prepared.criteria, reviewReuseEvidence(input));
+  return assessReviewReuse(input, prepared.criteria, computed);
+}
+
+function prepareReviewReuse(input: ReviewReuseDiscriminationInput):
+  | { ok: true; criteria: AcceptanceCriterion[] }
+  | { ok: false; reason: string } {
   const criteria: AcceptanceCriterion[] = input.prior.criteria.map((criterion) => ({
     claim: criterion.claim,
     proof: criterion.proof,
@@ -213,8 +233,11 @@ export function discriminateReviewReuse(
   if (!input.headCheckoutDir || !input.baseCheckoutDir) {
     return { ok: false, reason: "PR-head or merge-base checkout is unavailable" };
   }
+  return { ok: true, criteria };
+}
 
-  const computed = judgeReview(criteria, {
+function reviewReuseEvidence(input: ReviewReuseDiscriminationInput): ReviewEvidence {
+  return {
     diff: input.diff,
     report: input.report,
     semantic: input.prior.criteria.map((criterion) => (criterion.met ? undefined : false)),
@@ -225,7 +248,14 @@ export function discriminateReviewReuse(
     addedTestFiles: input.addedTestFiles,
     execProof: input.execProof,
     taskDeclaredFiles: input.taskDeclaredFiles,
-  });
+  };
+}
+
+function assessReviewReuse(
+  input: ReviewReuseDiscriminationInput,
+  criteria: AcceptanceCriterion[],
+  computed: ReviewVerdict,
+): ReviewReuseDiscriminationResult {
   // W1-T4423: a plan-only verdict rests on a lint-plan run this reuse path does not repeat.
   if (computed.planOnly) return { ok: false, reason: "a plan-only verdict needs a full review to re-run lint-plan" };
 
