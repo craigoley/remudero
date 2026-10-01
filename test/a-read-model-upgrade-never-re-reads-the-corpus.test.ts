@@ -42,14 +42,24 @@ function archiveName(ms: number, gz: boolean): string {
  * Each message the handle has applied, so a test waits on the message itself instead of racing a
  * sleep against the worker thread's start (a `sleep(100)` lost that race under a loaded runner).
  */
-function heard(): { observe: (msg: ReadModelWorkerMessage) => void; next: (match: (msg: ReadModelWorkerMessage) => boolean) => Promise<ReadModelWorkerMessage> } {
+function heard(timeoutMs = 5_000): { observe: (msg: ReadModelWorkerMessage) => void; next: (match: (msg: ReadModelWorkerMessage) => boolean) => Promise<ReadModelWorkerMessage> } {
   const waiting: Array<{ match: (msg: ReadModelWorkerMessage) => boolean; resolve: (msg: ReadModelWorkerMessage) => void }> = [];
   return {
     observe: (msg) => {
       const at = waiting.findIndex((w) => w.match(msg));
       if (at >= 0) waiting.splice(at, 1)[0]?.resolve(msg);
     },
-    next: (match) => new Promise((resolve) => void waiting.push({ match, resolve })),
+    next: (match) => new Promise((resolve, reject) => {
+      // The production worker is unref'd. Keep the test alive while it awaits a message, and
+      // fail with a named missing heartbeat instead of cancelling the remaining tests.
+      const timer = setTimeout(() => {
+        const at = waiting.indexOf(waiter);
+        if (at >= 0) waiting.splice(at, 1);
+        reject(new Error("read-model worker did not post the awaited message"));
+      }, timeoutMs);
+      const waiter = { match, resolve: (msg: ReadModelWorkerMessage) => { clearTimeout(timer); resolve(msg); } };
+      waiting.push(waiter);
+    }),
   };
 }
 
@@ -57,6 +67,10 @@ function heard(): { observe: (msg: ReadModelWorkerMessage) => void; next: (match
 const HEARD_WITHIN_MS = 30_000;
 
 const isProgress = (phase: string) => (msg: ReadModelWorkerMessage): boolean => msg.type === "progress" && msg.phase === phase;
+
+test("a missing worker heartbeat fails while the event loop is still alive", async () => {
+  await assert.rejects(heard(10).next(isProgress("open")), /did not post the awaited message/);
+});
 
 /** A worker that only posts what `body` makes it post: the serve watchdog's view of a real one. */
 function scriptedWorker(body: string): URL {
