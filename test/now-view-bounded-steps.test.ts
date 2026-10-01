@@ -153,3 +153,21 @@ test("W1-T5066: a stage slower than the pass is named in its own row", (t) => {
   assert.equal(view.materialize(w.ctx).length, 1);
   assert.deepEqual(logged, [{ step: "read_model.now_slow_stage", instance: "core", stage: "plan", ms: NOW_SLOW_STAGE_MS + 1 }]);
 });
+
+test("W1-T5066: a failed stage discards its partial build and retries cleanly", (t) => {
+  const w = world(t);
+  const logged: Array<Record<string, unknown>> = [];
+  let reads = 0;
+  const view = createNowView({
+    instances: [w.instance], clock: w.clock, ...seams(w.clock, 0),
+    readPlan: () => {
+      if (++reads === 1) throw new Error("synthetic plan read failure");
+      return PLAN;
+    },
+    log: (step, extra) => void logged.push({ step, ...extra }),
+  });
+  assert.deepEqual(view.materialize(w.ctx), []);
+  assert.deepEqual(logged, [{ step: "read_model.now_view_failed", instance: "core", error: "synthetic plan read failure" }]);
+  assert.equal(view.materialize(w.ctx).length, 1);
+  assert.equal(reads, 2);
+});
