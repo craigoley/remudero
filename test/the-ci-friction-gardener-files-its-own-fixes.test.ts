@@ -38,6 +38,7 @@ import {
   ciFrictionCauseKey,
   ciFrictionGardenSpec,
   ciFrictionOrigin,
+  landedCiFrictionOrigins,
   ciFrictionRecordVerdict,
   ciFrictionRoundsFromLedger,
   readCiFrictionLedgerRecords,
@@ -253,6 +254,18 @@ test("W1-T4435: the costliest untracked cause becomes a drafted task", async () 
   // 90 (ci) + 30 (main_merge) = 120 total priced this pass, topped by the check gate-fire-rate priced higher.
   assert.match(log, /\| 2026-.*\| 120 \| check:ci \(90m\) \|/);
   assert.ok(landed[0]!.body.includes(`grep: ${ciFrictionOrigin(untracked.cause)} in ${CI_FRICTION_REMEDIES_FILE}`), "the body names the proof that will carry the shard's criterion");
+});
+
+test("only a landed ci-friction filing receipt retires its cause", () => {
+  const cause = "check:ci-log:commitlint:test-error-subclass-census-test-ts";
+  const receipt = { step: "ci-friction.scorecard", untracked: cause, pr_url: "https://github.com/acme/remudero/pull/8479" };
+  assert.deepEqual(landedCiFrictionOrigins([
+    { ...receipt, pr_url: null },
+    { ...receipt, pr_url: "https://github.com/acme/remudero/issues/8479" },
+    { ...receipt, untracked: null },
+    receipt,
+    receipt,
+  ]), [`ci-friction:${cause}`]);
 });
 
 test("W1-T4435: the gardener preserves an existing trend log while appending a new pass", () => {
@@ -486,6 +499,32 @@ test("a stale recorded ci-friction pass with no matching task re-files the findi
   writeFileSync(statePath, JSON.stringify({ classes: { draft: { alpha: 3, beta: 1 } }, lastCheap: "later", lastPass: { fingerprint } }));
   assert.equal(runGarden(fx.spec, fx.deps).prUrl, undefined);
   assert.equal(landed.length, 1);
+});
+
+test("a closed ci-friction filing is not repeated when its price changes", () => {
+  let nowMs = Date.UTC(2026, 9, 1, 20, 0);
+  const landed: string[] = [];
+  const fx = frictionFixture("ci-friction-declined-price-drift", () => {
+    const url = `https://github.com/acme/remudero/pull/${100 + landed.length}`;
+    landed.push(url);
+    return url;
+  }, { clock: clockFromMillisFn(() => nowMs) });
+  const first = runGarden(fx.spec, fx.deps);
+  assert.equal(first.prUrl, landed[0]);
+  fx.sources.ledgerRecords = () => [{
+    step: "ci-friction.scorecard", untracked: "check:reviewer-unmet", pr_url: landed[0],
+  }];
+  fx.sources.gateFireRates = () => ({
+    status: "measured", prsScanned: 20,
+    gates: [{ gate: "reviewer-unmet", prs: 20, runs: 27, redRuns: 27, refusals: 27, repaired: 27, overridden: 0, minutes: 500 }],
+    neverFired: [], alwaysFired: [],
+  });
+  fx.deps.prState = () => "closed";
+  nowMs += GARDEN_LEDGER_BUCKET_MS;
+  const second = runGarden(fx.spec, fx.deps);
+  assert.equal(second.prUrl, undefined);
+  assert.equal(landed.length, 1, "the price changed, but the landed receipt still names the declined cause");
+  assert.equal(fx.spec.inventory().untracked, undefined);
 });
 
 test("a self-hosting daemon wires the ci-friction gardener with its escalation path", async () => {
