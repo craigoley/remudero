@@ -414,33 +414,44 @@ function answeredByFact(db: ReadModelDb): (taskId: string) => string | undefined
  * A gateway over the legacy gateway's persisted snapshot (ruling Q3): open PRs, closed PRs and issues, no GitHub read.
  * `generation` is the files' mtimes, which move on every re-save; `content` moves only when what they hold does.
  */
-export function snapshotGithub(root: string, owner: string, repo: string, clock: Clock = systemClock): { github: GitHub; generation: string; content?: string; source: Omit<ViewSource, "name"> } {
+export function snapshotGithub(
+  root: string, owner: string, repo: string, clock: Clock = systemClock, opts: { refuseIncomplete?: boolean } = {},
+): { github: GitHub; generation: string; content?: string; source: Omit<ViewSource, "name">; unavailable?: string } {
   const closedCache = createBoardSnapshotCache(root, owner, repo);
-  const closed = [...(closedCache.closedSeed()?.values() ?? [])];
+  const closedSeed = closedCache.closedSeed();
+  const closed = [...(closedSeed?.values() ?? [])];
   const issues = [...(closedCache.issueSeed()?.values() ?? [])];
   const open = readOpenBoardSnapshot(root, owner, repo);
   const openRows: BoardPrRest[] = open.ok ? open.snapshot.rows : [];
   const asBatched = (r: BoardPrRest): BatchedPr => ({ number: r.number, url: r.url, state: r.state, headRefName: r.headRefName, headRefOid: r.headRefOid, body: r.body, autoMergeRequest: r.autoMergeRequest, title: r.title });
   const openNumbers = new Set(openRows.map((r) => r.number));
   const all = [...openRows.map(asBatched), ...closed.filter((r) => !openNumbers.has(r.number)).map(asBatched)];
+  // An incomplete snapshot read as complete would say no PR ever merged; refused, the gateway reads failed instead.
+  const unavailable = !opts.refuseIncomplete ? undefined : !open.ok ? open.reason : closedSeed ? undefined : "the board snapshot holds no closed pull requests";
   const github = buildBatchedGithub(owner, repo, {
-    ttlMs: Number.MAX_SAFE_INTEGER, pacer: NO_PACER, fetchAll: () => all,
+    ttlMs: Number.MAX_SAFE_INTEGER, pacer: NO_PACER,
+    fetchAll: () => {
+      if (unavailable !== undefined) throw new NowViewError(`github snapshot unavailable: ${unavailable}`);
+      return all;
+    },
     fetchAllIssues: () => issues.map((i) => ({ number: i.number, url: i.url, state: i.state, ...(i.title ? { title: i.title } : {}) })),
     exec: () => {
-      throw new NowViewError("the now view reads GitHub from the persisted snapshot only");
+      throw new NowViewError("a snapshot gateway reads GitHub from the persisted snapshot only");
     },
   });
-  const ageMs = open.ok ? clock.now() - Date.parse(open.snapshot.savedAt) : undefined;
-  const source: Omit<ViewSource, "name"> = !open.ok
-    ? { asOf: null, state: "stale", reason: open.reason }
-    : ageMs! > NOW_GITHUB_STALE_MS
-      ? { asOf: open.snapshot.savedAt, state: "stale", reason: `open pull requests last saved ${Math.round(ageMs! / 1000)} s ago` }
-      : { asOf: open.snapshot.savedAt, state: "fresh" };
+  const source = unavailable !== undefined ? { asOf: null, state: "unavailable" as const, reason: unavailable } : snapshotSource(open.ok ? open.snapshot.savedAt : null, open.ok ? undefined : open.reason, clock.now());
   const content = createHash("sha1").update(JSON.stringify([all, issues])).digest("hex").slice(0, 16);
-  return { github, generation: snapshotGeneration(root, owner, repo), content, source };
+  return { github, generation: snapshotGeneration(root, owner, repo), content, source, ...(unavailable !== undefined ? { unavailable } : {}) };
 }
 
-function snapshotGeneration(root: string, owner: string, repo: string): string {
+/** The persisted snapshot's source, judged at `nowMs` from when its open half was last saved, or why it is unreadable. */
+export function snapshotSource(savedAt: string | null, reason: string | undefined, nowMs: number): Omit<ViewSource, "name"> {
+  if (savedAt === null) return { asOf: null, state: "stale", reason };
+  const ageMs = nowMs - Date.parse(savedAt);
+  return ageMs > NOW_GITHUB_STALE_MS ? { asOf: savedAt, state: "stale", reason: `open pull requests last saved ${Math.round(ageMs / 1000)} s ago` } : { asOf: savedAt, state: "fresh" };
+}
+
+export function snapshotGeneration(root: string, owner: string, repo: string): string {
   return `${mtimeOf(boardSnapshotPath(root, owner, repo)) ?? "-"}:${mtimeOf(boardOpenSnapshotPath(root, owner, repo)) ?? "-"}`;
 }
 

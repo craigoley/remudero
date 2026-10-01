@@ -14,7 +14,7 @@ import { fixedClock, type Clock } from "../src/lib/clock.js";
 import { readClassificationSnapshot, triageFleetLane } from "../src/lib/fleet-lane.js";
 import { INBOX_CLASSIFICATION_RESTAMP_MS, refreshInboxClassification } from "../src/lib/inbox-view.js";
 import { buildInboxRoute, type PanelGraphDeps } from "../src/lib/panel-graph.js";
-import { readOnlySnapshot, runSlowLaneWorker, threadSlowLane, type SlowLaneMessage } from "../src/lib/read-model-slow-lane.js";
+import { runSlowLaneWorker, threadSlowLane, type SlowLaneMessage } from "../src/lib/read-model-slow-lane.js";
 import { runReadModelWorker } from "../src/lib/read-model-worker.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
@@ -176,16 +176,6 @@ test("the fleet lane reports the age of the classification it acted on", (t) => 
   assert.equal(triageFleetLane({ stateDir, ledgerPath: deps.ledgerPath, mergedLastDay: () => 0, approve: () => undefined, clock: fixedClock(T0) }).classificationAgeMs, undefined);
 });
 
-test("the lane's board snapshot is read but never written", () => {
-  const seeds = { closed: new Map([[1, {} as never]]), issues: new Map() };
-  let commits = 0;
-  const cache = readOnlySnapshot({ closedSeed: () => seeds.closed, issueSeed: () => seeds.issues, commitClosed: () => ++commits > 0, commitIssues: () => ++commits > 0 });
-  assert.equal(cache.closedSeed(), seeds.closed);
-  assert.equal(cache.issueSeed(), seeds.issues);
-  assert.deepEqual([cache.commitClosed([]), cache.commitIssues([])], [false, false]);
-  assert.equal(commits, 0, "serve's own gateway is the snapshot's only writer");
-});
-
 test("a slow lane unit that throws is reported and the lane keeps its cadence", async (t) => {
   const { deps } = world(t, ["ruling:a"]);
   const { port, send, posted, units } = lanePort();
@@ -201,17 +191,19 @@ test("a slow lane unit that throws is reported and the lane keeps its cadence", 
   assert.match(String(failed?.type === "log" ? failed.extra.error : undefined), /no git here/);
 });
 
-test("the lane builds its own board gateway when none is injected", async (t) => {
+test("the lane reads the owner's board snapshot when no gateway is injected", async (t) => {
   const shim = offlineGh(t);
   const { stateDir, deps } = world(t, ["ruling:a"]);
-  const { port, send, units } = lanePort();
+  const { port, send, posted, units } = lanePort();
   const { statusGithub: _injected, ...rest } = deps;
   const lane = runSlowLaneWorker(port, { inbox: { root: deps.root, planPath: deps.planPath, ledgerPath: deps.ledgerPath, inboxRoot: deps.inboxRoot, repository: "o/r" } }, { inbox: rest });
   t.after(() => lane.stop());
   send({ type: "lease", held: true });
   await until(() => units() === 1);
-  assert.ok(readClassificationSnapshot(stateDir)?.states["ruling:a"], "classified through the lane's own gateway");
-  assert.ok(shim.calls().some((call) => call.includes("repos/o/r/pulls")), "the lane's gateway read the configured repository");
+  assert.ok(readClassificationSnapshot(stateDir)?.states["ruling:a"], "classified over the snapshot's source");
+  const inbox = posted.find((m) => m.type === "bodies" && m.view === "inbox");
+  assert.equal(inbox?.type === "bodies" && inbox.bodies[0]?.sources.find((s) => s.name === "github:o/r")?.state, "unavailable", "no owner walk yet, and the body says so");
+  assert.deepEqual(shim.calls(), [], "the lane spawned no gh of its own");
 });
 
 /** A module the lane's thread can load in place of the real one. */

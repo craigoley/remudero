@@ -109,7 +109,9 @@ reads no file and no SQLite.
   serve's GitHub gateway warm. Absent or `serve`, serve does. `worker` hands the keep-warm to the
   read-model worker only while its thread is heard from and holds the core lease; otherwise serve's
   resumes within one 5 s recheck. Exactly one runs, each handover writes one `github.keep_warm.owner`
-  row, and both roll up as `github.keep_warm.rollup`.
+  row, and both roll up as `github.keep_warm.rollup`. The inbox slow lane fetches nothing: it reads the
+  board snapshot that walk persists, and its bodies carry a `github:<owner>/<repo>` source that reads
+  stale past 180 s and unavailable, with the reason, while the snapshot is missing or incomplete.
 - **Worker diagnostics.** The worker ledgers `read_model.lease_acquired` and `read_model.lease_elsewhere`
   when an instance's lease changes hands, and `read_model.slow_tick` when one projector tick takes longer
   than the 10 s stale bound. A source's staleness is judged from when its tick completed.
