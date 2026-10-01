@@ -141,6 +141,32 @@ export interface NowViewData {
 
 const RUNNING_STATUSES = new Set(["running", "fixing", "review", "diagnosing"]);
 
+/**
+ * Whether the sweep is re-emitting the disposition it already recorded for this PR: each pass writes
+ * `sweep.disposed` again, and taking that row's time moved `lastActivityAt`, `sortAt` and so the
+ * ETag on every pass with nothing changed (replayed: about 22% of `now`'s changes).
+ */
+function sweepRepeat(): (row: Row) => boolean {
+  const last = new Map<number, unknown>();
+  return (row) => {
+    if (row.step !== "sweep.disposed" || typeof row.pr_number !== "number") return false;
+    const same = last.has(row.pr_number) && last.get(row.pr_number) === row.disposition;
+    last.set(row.pr_number, row.disposition);
+    return same;
+  };
+}
+
+/** The time of each task's newest ledger row that changed something: the board's join, less sweep repeats. */
+export function changedActivityByTask(rows: ReadonlyArray<Row>): Map<string, string> {
+  const repeat = sweepRepeat();
+  const out = new Map<string, string>();
+  for (const row of rows) {
+    if (repeat(row) || typeof row.task_id !== "string" || typeof row.ts !== "string") continue;
+    out.set(row.task_id, row.ts);
+  }
+  return out;
+}
+
 function byRecency(tasks: readonly BoardRow[]): BoardRow[] {
   const at = (t: BoardRow): number => {
     const ms = t.lastActivityAt ? Date.parse(t.lastActivityAt) : Number.NaN;
@@ -197,8 +223,9 @@ const ACTION_RANK: Record<NowActionTone, number> = { exhausted: 0, held: 1, bloc
 export function nowActions(snapshot: Pick<BoardSnapshot, "blockedPrs" | "mergeHeld">, rows: ReadonlyArray<Row>): NowAction[] {
   const disposedAt = new Map<number, string>();
   const heldAt = new Map<number, string>();
+  const repeat = sweepRepeat();
   for (const row of rows) {
-    if (typeof row.pr_number !== "number" || typeof row.ts !== "string") continue;
+    if (repeat(row) || typeof row.pr_number !== "number" || typeof row.ts !== "string") continue;
     if (row.step === "sweep.disposed") disposedAt.set(row.pr_number, row.ts);
     else if (row.step === "automerge.hold_engaged") heldAt.set(row.pr_number, row.ts);
   }
@@ -266,7 +293,14 @@ export function assembleNowView(input: {
   const { snapshot } = input;
   const groups = groupNowBoard(snapshot.tasks);
   const shown = new Set([...groups.running, ...groups.needsYou, ...groups.blocked, ...groups.queued.slice(0, NOW_QUEUED_ROWS)]);
-  const tasks = byRecency(snapshot.tasks.filter((t) => shown.has(t.taskId))).map(nowTask);
+  const activity = changedActivityByTask(input.rows);
+  const tasks = byRecency(snapshot.tasks.filter((t) => shown.has(t.taskId)).map((t) => {
+    const row: BoardRow = { ...t };
+    const at = activity.get(t.taskId);
+    if (at) row.lastActivityAt = at;
+    else delete row.lastActivityAt;
+    return row;
+  })).map(nowTask);
   return {
     instance: input.instance,
     board: {
@@ -567,6 +601,16 @@ export function createNowView(opts: NowViewOptions): {
 }
 
 /**
+ * A gauge rounded down to two significant figures: exact below 100, and coarser the more there is to
+ * spare (4,321 reads 4,300; 87 reads 87). An exact reading moved the ETag on every 60 s probe.
+ */
+export function twoSignificantFigures(n: number): number {
+  if (n < 100) return n;
+  const step = 10 ** (Math.floor(Math.log10(n)) - 1);
+  return Math.floor(n / step) * step;
+}
+
+/**
  * Disk and daemon heartbeat from the instance's own state dir; the rate limit only for core, whose token serve holds.
  * The daemon's last poll is NOT a gauge: it moves on every poll, so `data` says only whether the daemon is polling,
  * and names the absolute time of its last poll once it went silent (a time that then stops moving).
@@ -586,8 +630,8 @@ export function defaultProbeHost(instance: NowInstance, isCore: boolean, clock: 
   if (!isCore) reasons.rateLimitRemaining = "serve holds core's GitHub token only; this instance's daemon spends its own";
   else if (rateLimitRemaining === undefined) reasons.rateLimitRemaining = "gh api rate_limit did not answer";
   const health: NowHealth = {
-    ...(diskFreeBytes !== undefined ? { diskFreeBytes } : {}),
-    ...(rateLimitRemaining !== undefined ? { rateLimitRemaining } : {}),
+    ...(diskFreeBytes !== undefined ? { diskFreeBytes: twoSignificantFigures(diskFreeBytes) } : {}),
+    ...(rateLimitRemaining !== undefined ? { rateLimitRemaining: twoSignificantFigures(rateLimitRemaining) } : {}),
     daemon,
     ...(Object.keys(reasons).length > 0 ? { reasons } : {}),
   };

@@ -146,7 +146,7 @@ test("every registered view body validates against its declared schema", async (
   assert.equal(((bodies.get("read-model")!.data as { shadow?: unknown[] }).shadow ?? []).length, 1, "the status body carries shadow readiness");
   const now = bodies.get("now")!.data as NowViewData;
   assert.ok(now.board.tasks.length >= 3 && now.recent.entries.length > 0 && now.recent.mergedToday.count === 1, JSON.stringify(now));
-  assert.equal(now.health.rateLimitRemaining, 4321);
+  assert.equal(now.health.rateLimitRemaining, 4300, "the gauge is rounded to two significant figures");
   const repos = bodies.get("repositories")!.data as RepositoriesData;
   assert.equal(repos.instances[0]?.summary?.repos.length, 1, JSON.stringify(repos));
   assert.deepEqual(repos.projects.map((p) => [p.project, p.worst.repoName]), [["remudero", "remudero"]]);
