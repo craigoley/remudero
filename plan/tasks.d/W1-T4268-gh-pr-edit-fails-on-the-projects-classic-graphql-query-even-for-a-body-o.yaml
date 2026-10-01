@@ -12,7 +12,7 @@
   plan_refs: ["W1-T2948"]
   priority: 2
   status: queued
-  # backlog gardener: band=2 evidence=0ff09d97cfd66e93
+  # backlog gardener: band=2 evidence=a95f0a21e55f73a1
   attempts: 0
   rationale: |
     HARVESTED VERBATIM from the fix worker dispatched at 2026-09-14T07:19:45.398Z (strike 2, round
