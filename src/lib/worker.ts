@@ -1,4 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
+import { fetchOriginRetryingRefLock, type GitRunner } from "./self-sync.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFileSync,
@@ -4790,10 +4791,12 @@ export function worktreeAdd(
     renameDir?: (from: string, to: string) => void;
     clock?: Clock;
     sleepMs?: (ms: number) => void;
+    /** The fetch's git runner; a transient ref-lock race with a concurrent fetch is retried (#8043). */
+    fetchGit?: GitRunner;
   } = {},
 ): void {
   ensureWorktreeConfigEnabled(repoDir);
-  execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "inherit" });
+  fetchOriginRetryingRefLock(deps.fetchGit ?? ((args) => execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8" })), deps.sleepMs);
   const ref = base.replace(/^origin\//, "");
   // Read the LOCAL tracking ref right after the fetch, before the worktree is cut from it — see readLocalOriginRefHead for
   // why this third reading is needed to discriminate the mechanism.
