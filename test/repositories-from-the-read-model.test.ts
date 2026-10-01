@@ -9,7 +9,7 @@ import { fixedClock, systemClock } from "../src/lib/clock.js";
 import { daemonInstanceRegistryPath } from "../src/lib/deployer.js";
 import { pauseFilePath } from "../src/lib/fleet-control.js";
 import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { acquireLease } from "../src/lib/read-model-db.js";
+import { acquireLease, READ_MODEL_DB_DIR_ENV } from "../src/lib/read-model-db.js";
 import {
   createReadModelTicker,
   ledgerSource,
@@ -200,6 +200,21 @@ test("repositories from the read model equal the repos summary of each instance"
   assert.equal(paused.active, false, "the console instance is paused");
   assert.equal(paused.health.condition, "paused");
   assert.equal(paused.telemetry.modelsused?.includes("claude-opus-5-5"), true);
+});
+
+test("with its DB on the scratch disk the read-model repositories view still reads the sources serve published to the state disk", (t) => {
+  const f = fixture(t);
+  const saved = process.env[READ_MODEL_DB_DIR_ENV];
+  process.env[READ_MODEL_DB_DIR_ENV] = `${f.stateDir}:${join(scratch(t, "repos-nvme"), "read-model")}`;
+  t.after(() => {
+    if (saved === undefined) delete process.env[READ_MODEL_DB_DIR_ENV];
+    else process.env[READ_MODEL_DB_DIR_ENV] = saved;
+  });
+  createRepositoriesSourcePublisher({ stateDir: f.stateDir, instances: () => f.sources })();
+  const run = ticker(f);
+  const data = repositories(run.tick());
+  run.release();
+  assert.deepEqual(data.instances.map((i) => i.instanceId), ["core", "console"]);
 });
 
 test("a repositories count diff is judged by the rows each id it counted", (t) => {
