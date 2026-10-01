@@ -677,6 +677,10 @@ import { assertProposedPlanLoads,
   nonPlanFilesInDiff,
   parseTriageArgs,
   parseTriageVerdict,
+  TRIAGE_COMMIT_REFUSED_STEP,
+  TRIAGE_REFUSAL_CLEARED_STEP,
+  commitTriageOrRecordRefusal,
+  refusedTriageIds,
   triageCommitMessage,
   triageDeclaredScope,
   triageEmptyScopeDisposition,
@@ -27433,6 +27437,8 @@ export function autoTriageCheck(
     /** W1-T4769: injected owner/repo resolver for the real reserver's clone path; production uses
      *  {@link resolveOwnerRepo}. */
     resolveClaimRepo?: () => { repo: string };
+    /** W1-T4203: injected read of the refused-triage-commit rows; `undefined` = unreadable. */
+    readRefusalRows?: () => Array<Record<string, unknown>> | undefined;
   } = {},
 ): AutoTriageDecision {
   const config = opts.config ?? loadConfig();
@@ -27476,8 +27482,25 @@ export function autoTriageCheck(
   // entry is claimed returns here with no git or ledger I/O. Only a would-be fire pays for the sweep.
   const first = decideAutoTriage(inputs);
   if (!first.fire) return first;
-  const sweep = triageClaimSweepForPass(config, now, inputs.candidates, opts);
-  return sweep === undefined ? first : decideAutoTriage({ ...inputs, heldCandidates: sweep });
+  // W1-T4203: an entry whose triage commit was REFUSED is terminal until cleared. An unreadable
+  // ledger reads as no refusals (the entry is retried, today's behaviour) rather than starving the rung.
+  const refused = refusedTriageIds(
+    (opts.readRefusalRows ??
+      (() => {
+        const read = readLedgerUnionRecordsSync(dirname(ledgerPathFor(config)), {
+          step: [TRIAGE_COMMIT_REFUSED_STEP, TRIAGE_REFUSAL_CLEARED_STEP],
+          refuseIncomplete: true,
+        });
+        return read.ok ? read.rows : undefined;
+      }))() ?? [],
+  );
+  const candidates = inputs.candidates.filter((c) => !refused.has(c));
+  if (candidates.length === 0) {
+    return { fire: false, reason: `every one of the ${inputs.candidates.length} candidate(s) at status: new has a refused triage commit — cleared by a ${TRIAGE_REFUSAL_CLEARED_STEP} row` };
+  }
+  const passInputs = { ...inputs, candidates };
+  const sweep = triageClaimSweepForPass(config, now, candidates, opts);
+  return decideAutoTriage(sweep === undefined ? passInputs : { ...passInputs, heldCandidates: sweep });
 }
 
 /**
@@ -42966,7 +42989,8 @@ async function triageCommandLocked(
     // triagePrompt/decideTriage/nonPlanFilesInDiff all license one. The shared function's
     // `plan/ MASTER-PLAN.md` pathspec stages the amendment; the section index is derived from
     // MASTER-PLAN.md whenever a runtime reader needs it.
-    applyPlanProposalCommit(worktreePath, commitMessage, log);
+    // W1-T4203: a refused commit leaves the entry at `status: new`; the row below is what stops the rung re-picking it.
+    commitTriageOrRecordRefusal(() => applyPlanProposalCommit(worktreePath, commitMessage, log), feedbackId, log);
 
     // OUTPUT VALIDATION (W1-T2326 Q2) — the PORT of `planCommand`'s `unreservedFiledIds` +
     // `plan.id_check`. Reserving ids is half the mint-and-reserve contract; this is the other half,

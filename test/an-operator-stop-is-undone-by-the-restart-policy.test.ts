@@ -97,13 +97,32 @@ function writeDaemonStandin(dir: string): string {
   return p;
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs: number, onTimeout: string): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
+const STARTUP_READINESS_TIMEOUT_MS = 60_000;
+
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs: number,
+  onTimeout: string,
+  clock: { now: () => number; delay: (ms: number) => Promise<void> } = {
+    now: Date.now,
+    delay: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  },
+): Promise<void> {
+  const deadline = clock.now() + timeoutMs;
   while (!predicate()) {
-    if (Date.now() > deadline) throw new Error(onTimeout);
-    await new Promise((r) => setTimeout(r, 25));
+    if (clock.now() > deadline) throw new Error(onTimeout);
+    await clock.delay(25);
   }
 }
+
+test("operator-stop readiness tolerates a slow bootstrap without relaxing the post-TERM bound", async () => {
+  let now = 0;
+  const clock = { now: () => now, delay: async () => { now += 5_000; } };
+  await waitFor(() => now >= 30_000, STARTUP_READINESS_TIMEOUT_MS, "startup timed out", clock);
+  assert.equal(now, 30_000, "a 30-second bootstrap is ready before the separate signal-latency check begins");
+  now = 0;
+  await assert.rejects(waitFor(() => false, 20_000, "startup timed out", clock), /startup timed out/);
+});
 
 interface SignalledBoot {
   code: number | null;
@@ -153,7 +172,9 @@ async function bootAndSignal(opts: { script?: string; throttleS: number }): Prom
   });
 
   try {
-    await waitFor(() => existsSync(started), 20_000, `the daemon stand-in never started: ${stderr}`);
+    // Git clone and npm setup precede the marker and can be slow under instrumented CI. The
+    // post-TERM assertion below still requires exit within 5s, independent of this startup budget.
+    await waitFor(() => existsSync(started), STARTUP_READINESS_TIMEOUT_MS, `the daemon stand-in never started: ${stderr}`);
 
     const sentAt = Date.now();
     child.kill("SIGTERM"); // exactly what tini/docker stop sends the supervised bash
