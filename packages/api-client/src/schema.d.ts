@@ -2682,7 +2682,7 @@ export interface components {
         shadow?: (ViewShadowReadiness)[];
       };
     };
-    /** One view's shadow comparator counters. `ready` needs zero `real` diffs sustained over a day of measured traffic and at least 3 x requests-per-day samples (the rule of three). */
+    /** One view's shadow comparator counters. `ready` needs zero `real` diffs sustained for a day and a day of continuous sampling since the last one: at least one sample per minute for every key the streak sampled (the shadow driver's cadence), raised to 3 x requests-per-day samples when measured traffic is higher (the rule of three). */
     ViewShadowReadiness: {
       view: string;
       requests: number;
@@ -2697,6 +2697,8 @@ export interface components {
       streakSamples: number;
       streakSinceMs: number | null;
       lastRealMs: number | null;
+      /** Keys sampled since the streak began; each owes a day of samples. */
+      keys: number;
       requestsPerDay: number | null;
       requiredSamples: number | null;
       ready: boolean;
