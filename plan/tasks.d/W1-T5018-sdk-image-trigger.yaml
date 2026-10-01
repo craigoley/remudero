@@ -1,0 +1,25 @@
+- id: W1-T5018
+  title: "Build a new image when the worker SDK changes in the lockfile"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 12.00
+  risk: medium
+  origin: "operator-approved Orca comparison, 2026-09-30"
+  files: [.github/workflows/acr-build.yml, test/acr-build-sdk-trigger.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at c94c2bf49: the image-build workflow treats a root lockfile change as material only when
+    the browser dependency changes. The image includes the worker SDK, so an SDK-only bump can leave the
+    running fleet behind the tested code.
+  design: |
+    Detect the installed worker SDK version changing between base and head, and start the normal image build.
+    Keep ordinary unrelated lockfile churn excluded. Test the trigger against the baked-path contract.
+    This task does not deploy an image or change merge policy.
+  acceptance:
+    - claim: "an SDK-only lockfile bump builds an image, while unrelated lockfile churn does not"
+      proof: 'grep: test("W1-T5018: image build detects a worker SDK lockfile bump" in test/acr-build-sdk-trigger.test.ts'
