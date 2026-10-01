@@ -9703,7 +9703,7 @@ export async function runFixRung(opts: {
      * rewound between the commit and this call raises `LanePushForeignHeadError` instead of
      * silently no-op'ing. Optional and additive — every existing test double that ignores its
      * third argument keeps working unchanged. */
-    push: (worktreePath: string, branch: string, expectedHeadSha?: string) => void;
+    push: (worktreePath: string, branch: string, expectedHeadSha?: string) => unknown;
     /** Fresh REST head read used only after the push to bind this worker to its exact output. */
     readHeadShaForProvenance?: (prUrl: string) => string;
     issues: IssueGateway;
@@ -15168,7 +15168,7 @@ export type CoveragePrecheckPorts = {
   changedFiles?: (wt: string) => string[];
   select?: (wt: string, changed: string[]) => AffectedSelection;
   manifest?: (wt: string) => { thresholdMs: number; files: Record<string, number> };
-  run?: (wt: string, suites: string[], timeoutMs: number) => CoverageRunResult;
+  run?: (wt: string, suites: string[], timeoutMs: number) => CoverageRunResult | Promise<CoverageRunResult>;
 };
 
 const COVERAGE_SRC_FILE = /^src\/.*\.ts$/;
@@ -15179,19 +15179,55 @@ const COVERAGE_TEXT_CAP = 4000;
 const realCoverageChangedFiles = (wt: string): string[] =>
   execFileSync("git", ["-C", wt, ...MERGE_BASE_DIFF_ARGS], { encoding: "utf8" }).split("\n").map((f) => f.trim()).filter(Boolean);
 
-const realCoverageRun = (wt: string, suites: string[], timeoutMs: number): CoverageRunResult => {
-  // withoutNodeTestContextEnv: diff-coverage-local.mjs shells its OWN nested `node --test`.
-  const r = withoutNodeTestContextEnv(() =>
-    spawnSync(process.execPath, [join(wt, "scripts", "diff-coverage-local.mjs"), "--base", "origin/main", "--lcov", "coverage/precheck-lcov.info", ...suites], {
-      cwd: wt,
-      encoding: "utf8",
-      timeout: timeoutMs,
-      maxBuffer: 64 * 1024 * 1024,
-    }),
-  );
-  const code = (r.error as NodeJS.ErrnoException | undefined)?.code;
-  return { status: r.status, output: `${r.stdout ?? ""}\n${r.stderr ?? ""}`, timedOut: code === "ETIMEDOUT", ...(r.error ? { spawnError: r.error.message } : {}) };
-};
+/**
+ * W1-T5074: ASYNC on purpose. `runTask` runs inside the daemon process, so a `spawnSync` here froze every
+ * sweep, tick, ledger write and the installation-token refresh timer for the precheck's whole duration
+ * (42 minutes, observed). `spawn` + a promise releases the event loop; the bound, output capture and
+ * timeout/spawn-error mapping are the ones `spawnSync` gave.
+ */
+const COVERAGE_RUN_MAX_BUFFER = 64 * 1024 * 1024;
+const realCoverageRun = (wt: string, suites: string[], timeoutMs: number): Promise<CoverageRunResult> =>
+  new Promise<CoverageRunResult>((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let spawnError: string | undefined;
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    const finish = (status: number | null) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve({ status, output: `${stdout}\n${stderr}`, timedOut, ...(spawnError === undefined ? {} : { spawnError }) });
+    };
+    // withoutNodeTestContextEnv: diff-coverage-local.mjs shells its OWN nested `node --test`. `spawn` copies
+    // the environment synchronously, so clearing it around the call is enough.
+    const child = withoutNodeTestContextEnv(() =>
+      spawn(process.execPath, [join(wt, "scripts", "diff-coverage-local.mjs"), "--base", "origin/main", "--lcov", "coverage/precheck-lcov.info", ...suites], {
+        cwd: wt,
+        stdio: ["ignore", "pipe", "pipe"],
+      }),
+    );
+    const collect = (chunk: Buffer, into: "out" | "err") => {
+      if (into === "out") stdout += chunk.toString("utf8");
+      else stderr += chunk.toString("utf8");
+      if (stdout.length + stderr.length > COVERAGE_RUN_MAX_BUFFER && spawnError === undefined) {
+        spawnError = "maxBuffer exceeded (ENOBUFS)";
+        child.kill();
+      }
+    };
+    child.stdout?.on("data", (c: Buffer) => collect(c, "out"));
+    child.stderr?.on("data", (c: Buffer) => collect(c, "err"));
+    timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, timeoutMs);
+    child.on("error", (e) => {
+      spawnError = e.message;
+      finish(null);
+    });
+    child.on("close", (code) => finish(code));
+  });
 
 /** The gate's own refusal lines (its `diff-coverage:` headline and `  - file:line` rows), bounded. */
 function coverageRefusalText(output: string): string {
@@ -15207,7 +15243,7 @@ function coverageRefusalText(output: string): string {
  * OWN measured durations for exactly the suites it runs (never a fixed number of seconds); a run over that
  * bound is `unavailable`, not `uncovered`.
  */
-export function coveragePrecheck(wt: string, ports: CoveragePrecheckPorts = {}): CoveragePrecheck {
+export async function coveragePrecheck(wt: string, ports: CoveragePrecheckPorts = {}): Promise<CoveragePrecheck> {
   const reasonOf = (e: unknown) => String((e as Error)?.message ?? e).slice(0, 300);
   let changed: string[];
   try {
@@ -15238,7 +15274,7 @@ export function coveragePrecheck(wt: string, ports: CoveragePrecheckPorts = {}):
     }
     const predictedMs = suites.reduce((sum, f) => sum + (weightedDurationMs(f, manifest) as number), 0);
     const boundMs = Math.max(manifest.thresholdMs, Math.ceil(predictedMs * (DURATION_STALENESS_FACTOR as number)));
-    const r = run(wt, suites, boundMs);
+    const r = await run(wt, suites, boundMs);
     if (r.timedOut) return { outcome: "unavailable", reason: `timed out over its ${boundMs}ms bound (manifest-measured ${predictedMs}ms for ${suites.length} suite(s))` };
     if (r.spawnError !== undefined) return { outcome: "unavailable", reason: `spawn failed: ${r.spawnError.slice(0, 300)}` };
     if (r.status === 0) return { outcome: "covered", reason: `${suites.length} scoped suite(s) cover every added src line`, suites: suites.length };
@@ -15269,15 +15305,15 @@ export function coveragePushRefusal(
 }
 
 /** W1-T4797: the fix rung's push with the precheck in front — an uncovered head never leaves the worktree. */
-export function pushFixRoundPrechecked(
+export async function pushFixRoundPrechecked(
   log: (step: string, extra?: Record<string, unknown>) => void,
   wt: string,
   branch: string,
   expectedHeadSha?: string,
   ports: CoveragePrecheckPorts = {},
   push: (wt: string, branch: string, expectedHeadSha?: string) => void = pushFixRound,
-): void {
-  const refusal = coveragePushRefusal(coveragePrecheck(wt, ports), log, "rung.fix_push");
+): Promise<void> {
+  const refusal = coveragePushRefusal(await coveragePrecheck(wt, ports), log, "rung.fix_push");
   if (refusal) throw new FixRoundPushError("run-error", refusal, refusal.text);
   push(wt, branch, expectedHeadSha);
 }
@@ -15312,7 +15348,7 @@ export async function repairCensusRefusedPush(input: {
   say: (msg: string) => void;
   /** W1-T4797: re-run a NON-hook gate (the diff-coverage precheck) after each strike's commit, before the push;
    *  a refusal it returns becomes the next strike's evidence exactly as a hook refusal does. */
-  recheck?: () => CensusPushRefusal | undefined;
+  recheck?: () => Promise<CensusPushRefusal | undefined>;
 }): Promise<CensusPushRungOutcome> {
   const { task, worktreePath: cwd, log } = input;
   const head = () => execFileSync("git", ["-C", cwd, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -15380,7 +15416,7 @@ export async function repairCensusRefusedPush(input: {
     log("census_push.strike", { strike, ...receipt.ledgerFields(result), cost_usd: result.costUsd, baseline_files: baselineFiles });
     const unoffered = baselineFiles.filter((f) => !offered.has(f));
     if (unoffered.length > 0) return { outcome: "refused", strikes: strike, refusal, reason: `raised a baseline no refusal row offers: ${unoffered.join(", ")}` };
-    const stillRefused = input.recheck?.();
+    const stillRefused = await input.recheck?.();
     if (stillRefused) {
       refusal = stillRefused;
       continue;
@@ -17119,7 +17155,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       say("fallback: pushing branch from orchestrator (outside sandbox)");
       // W1-T4797: CI's diff-coverage, scoped, BEFORE the push. `uncovered` goes to the bounded repair rung with
       // CI's own uncovered lines; `covered` and `unavailable` (ledgered with its reason) push as before.
-      const coverageRefusal = coveragePushRefusal(coveragePrecheck(worktreePath, opts.coveragePrecheckPorts), log, "fallback_push");
+      const coverageRefusal = coveragePushRefusal(await coveragePrecheck(worktreePath, opts.coveragePrecheckPorts), log, "fallback_push");
       try {
         if (coverageRefusal) throw new FixRoundPushError("run-error", coverageRefusal, coverageRefusal.text);
         gitPushRunBranch(worktreePath);
@@ -17133,7 +17169,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           spawnWallClockBoundMs: fixSpawnWallClockBoundMs(),
           spawn: trackRepairLadder(spawn, { config, log }), account, log, say,
           ...(refusalLabel === "coverage-refused"
-            ? { recheck: () => coveragePushRefusal(coveragePrecheck(worktreePath, opts.coveragePrecheckPorts), log, "fallback_push.repair") }
+            ? { recheck: async () => coveragePushRefusal(await coveragePrecheck(worktreePath, opts.coveragePrecheckPorts), log, "fallback_push.repair") }
             : {}),
         });
         if (rung.outcome === "refused") {

@@ -432,7 +432,7 @@ test("W1-T2610: both fix-rung push deps pass expectedHeadSha through pushFixRoun
   const [runTask, sweep] = ["../src/run-task.ts", "../src/lib/sweep.ts"].map((p) => readFileSync(fileURLToPath(new URL(p, import.meta.url)), "utf8"));
   // W1-T4797 adds a coverage precheck to the run loop; its wrapper still delegates to the shared push helper.
   assert.equal((runTask.match(/^ {10}push: \(wt, br, sha\) => pushFixRoundPrechecked\(/gm) ?? []).length, 1, "runTaskBody's fix rung uses the prechecked push");
-  const prechecked = runTask.split("export function pushFixRoundPrechecked(")[1]?.split("export type CensusPushRungOutcome")[0] ?? "";
+  const prechecked = runTask.split("export async function pushFixRoundPrechecked(")[1]?.split("export type CensusPushRungOutcome")[0] ?? "";
   assert.match(prechecked, /push: .* = pushFixRound,/, "the precheck defaults to the shared push helper");
   assert.match(prechecked, /push\(wt, branch, expectedHeadSha\);/, "the precheck preserves the expected head");
   assert.equal((sweep.match(/^ {12}push: pushFixRound,$/gm) ?? []).length, 1, "the sweep's fix dispatch pushes through pushFixRound");
