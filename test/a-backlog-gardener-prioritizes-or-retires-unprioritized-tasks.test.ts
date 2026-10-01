@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { applyBacklogActions, backlogGardenSpec, backlogInventory, type BacklogSources } from "../src/lib/backlog-gardener.js";
+import { fixedClock } from "../src/lib/clock.js";
 import { runGarden } from "../src/lib/gardener.js";
 import { REGISTERED_GARDEN_NAMES, gardenSchedule } from "../src/lib/garden-registry.js";
 import type { MainCommit } from "../src/lib/hot-file-gardener.js";
@@ -34,7 +35,7 @@ function fixture(t: { after: (fn: () => void) => void }, tasks: Task[], opts: { 
     ledger: () => opts.rows ?? [],
     history: () => opts.history ?? [],
     mergedLastDay: () => opts.merges ?? 2,
-    now: () => NOW,
+    clock: fixedClock(NOW.getTime()),
     fileExists: () => true,
     proofsHolding: () => new Set(opts.proofs ?? []),
   };
@@ -107,6 +108,12 @@ test("W1-T4941: an absent symptom without a historical hit stays queued", (t) =>
   const item = task("W1-T9", { rationale: "Observed dispatch.value.refused." });
   const f = fixture(t, [item]);
   assert.deepEqual(backlogInventory(f.sources).candidates[0]?.disposition, { kind: "band", band: 4 });
+});
+
+test("W1-T4941: unreadable symbol evidence stops the proposal", (t) => {
+  const item = task("W1-T11", { rationale: "Needs `liveSymbol`", files: ["src/missing.ts"] });
+  const f = fixture(t, [item]);
+  assert.throws(() => backlogInventory(f.sources), /cannot read src\/missing\.ts for symbol evidence/);
 });
 
 test("W1-T4941: proofs that became true on main justify a closed retirement", (t) => {

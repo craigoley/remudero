@@ -3,7 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { openDependentFanout } from "./dispatch-value.js";
-import { systemClock } from "./clock.js";
+import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { gardenLedgerBucket, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
 import { readMainHistory, type MainCommit } from "./hot-file-gardener.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
@@ -43,7 +43,7 @@ export interface BacklogSources {
   ledger: () => readonly Record<string, unknown>[];
   history: (sinceIso: string) => readonly MainCommit[];
   mergedLastDay: () => number;
-  now: () => Date;
+  clock: Clock;
   fileExists: (path: string) => boolean;
   proofsHolding: (plan: PlanInventory) => ReadonlySet<string>;
 }
@@ -95,7 +95,8 @@ export function backlogEvidence(
   const presentFiles = files.filter((p) => fileExists(p));
   const symbols = [...new Set([...(task.rationale ?? "").matchAll(/`([A-Za-z_$][A-Za-z0-9_$]{2,})`/g)].map((m) => m[1]!).filter((s) => !["priority", "status", "queued", "retirement"].includes(s)))];
   const source = presentFiles.flatMap((p) => {
-    try { return symbols.length > 0 ? [readFileSync(join(repoRoot, p), "utf8")] : []; } catch { return []; }
+    try { return symbols.length > 0 ? [readFileSync(join(repoRoot, p), "utf8")] : []; }
+    catch (error) { throw new Error(`backlog gardener: cannot read ${p} for symbol evidence`, { cause: error }); }
   }).join("\n");
   const presentSymbols = symbols.filter((s) => source.includes(s));
   const missingSymbols = symbols.filter((s) => !source.includes(s));
@@ -119,11 +120,11 @@ export function judgeBacklog(e: BacklogEvidence): { disposition: BacklogDisposit
 
 export function backlogInventory(sources: BacklogSources): BacklogInventory {
   const plan = sources.plan();
-  const now = sources.now();
+  const now = sources.clock.date();
   const mergeBudget = Math.max(0, Math.floor(sources.mergedLastDay()));
   if (mergeBudget === 0) return { plan, candidates: [], mergeBudget, examined: 0 };
   const rows = sources.ledger();
-  const history = sources.history(new Date(now.getTime() - 7 * 24 * 3_600_000).toISOString());
+  const history = sources.history(clockFromMillisFn(() => now.getTime() - 7 * 24 * 3_600_000).iso());
   const openIds = new Set(plan.open.map((t) => t.id));
   const fanout = openDependentFanout(plan.all, openIds);
   const proofsHolding = sources.proofsHolding(plan);
@@ -181,6 +182,7 @@ export function applyBacklogActions(root: string, shards: ReadonlyMap<string, st
 }
 
 export function backlogGardenSpec(deps: GardenerDeps, overrides: Partial<BacklogSources> = {}): GardenSpec<BacklogClass, BacklogInventory, BacklogAction, GardenCheckout> {
+  const clock = overrides.clock ?? deps.clock ?? systemClock;
   const readLedger = (): readonly Record<string, unknown>[] => {
     const result = readLedgerUnionRecordsSync(deps.stateDir, { refuseIncomplete: true });
     if (!result.ok) throw new Error(`backlog gardener: incomplete ledger union: ${result.unread.join(", ")}`);
@@ -191,8 +193,8 @@ export function backlogGardenSpec(deps: GardenerDeps, overrides: Partial<Backlog
     plan: () => planInventory(deps.repoRoot, deps.stateDir),
     ledger: readLedger,
     history: (since) => readMainHistory(deps.repoRoot, since),
-    mergedLastDay: () => readMainHistory(deps.repoRoot, new Date((deps.clock?.now() ?? Date.now()) - 24 * 3_600_000).toISOString()).filter((c) => /\(#\d+\)$/.test(c.subject)).length,
-    now: () => new Date((deps.clock?.now() ?? Date.now())),
+    mergedLastDay: () => readMainHistory(deps.repoRoot, clockFromMillisFn(() => clock.now() - 24 * 3_600_000).iso()).filter((c) => /\(#\d+\)$/.test(c.subject)).length,
+    clock,
     fileExists: (path) => existsSync(join(deps.repoRoot, path)),
     proofsHolding: (plan) => new Set(retirementCandidates(plan, deps.repoRoot).filter((a) => a.retirement === "closed").map((a) => a.target)),
     ...overrides,
