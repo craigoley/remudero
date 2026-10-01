@@ -6,6 +6,9 @@ import { readLedgerLines } from "../src/lib/status.js";
 import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
 
+const FIXTURE_NOW_MS = Date.UTC(2026, 8, 24, 11);
+const LAST_ACTIVITY_AT = new Date(FIXTURE_NOW_MS - 60 * 60_000).toISOString();
+
 // MEASURED 2026-09-24 on the fleet host, 07:30-11:30Z: 767 `sweep.dispose` and 687
 // `sweep.dispose.not_open` rows, every one matched by a `sweep.disposed` row for the same PR within
 // 5s carrying the same disposition, acted, reason and stand-down reason — 10.3% of 14,089 core rows.
@@ -21,6 +24,7 @@ function deps(over: Partial<SweepDeps> = {}): SweepDeps {
     escalate: () => {},
     ledgerPath: path,
     runId: "DAEMON-1",
+    now: () => FIXTURE_NOW_MS,
     log: (step, extra = {}) => appendLedger(path, { run_id: "DAEMON-1", task_id: "DAEMON", step, lane: "daemon", ...extra }),
     ...over,
   };
@@ -35,7 +39,7 @@ function armedPr(): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-24T10:00:00Z",
+    lastActivityAt: LAST_ACTIVITY_AT,
     headSha: "aaaa111",
     autoMergeArmed: true,
   };
@@ -51,7 +55,7 @@ function mergedUnderUsPr(): OpenPrView {
     unmetCriteria: [{ claim: "criterion one", proof: "unit test: it works", met: false, reason: "not done", proof_exec: "executed_fail" }],
     reviewSummary: "one criterion unmet",
     priorStrikes: 0,
-    lastActivityAt: "2026-09-24T10:00:00Z",
+    lastActivityAt: LAST_ACTIVITY_AT,
     headSha: "bbbb222",
     autoMergeArmed: false,
   };
