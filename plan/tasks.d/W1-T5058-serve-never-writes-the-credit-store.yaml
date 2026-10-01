@@ -1,0 +1,41 @@
+- id: W1-T5058
+  title: "SERVE'S STATUS READS WRITE THE DURABLE CREDIT STORE — every projectPlan caller on serve (legacy /v1/status board, /v1/task, /v1/drain/preview, /v1/plan/view, /v1/operator-activity) can saveCreditStore; pass a no-op writer as board-projection.ts already does, leaving the daemon the only writer"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  risk: high
+  band_meaning: span
+  origin: "2026-10-01 core-console architecture Phase 4 design (P4-T19), arch-phase4-design.md"
+  plan_refs: ["W1-T951"]
+  files:
+    - src/lib/panel-graph.ts
+    - src/lib/board.ts
+    - test/serve-never-writes-the-credit-store.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-10-01 at 431d71762: status.ts projectPlan calls writeCreditStore (default saveCreditStore)
+    whenever a live rung finds a credit the store lacks. board-projection.ts passes writeCreditStore: () => {}
+    but panel-graph.ts (drain preview, plan view, operator activity) and board.ts (the legacy /v1/status
+    board) do not, so a GET writes state. The daemon already runs projectPlan and owns the store.
+  design: |
+    Pass a no-op writeCreditStore at every serve-side projectPlan caller in panel-graph.ts and board.ts. Any
+    credit serve finds is a read-time projection only. A parity test first proves the daemon's own pass writes
+    the same credits from the same ledger, so the board is equal with serve not writing.
+  acceptance:
+    - claim: "serve status reads never write the credit store"
+      proof: 'grep: test("W1-T5058: serve status reads never write the credit store" in test/serve-never-writes-the-credit-store.test.ts'
+    - claim: "the daemon pass writes the credit serve would have found"
+      proof: 'grep: test("W1-T5058: the daemon pass writes the credit serve would have found" in test/serve-never-writes-the-credit-store.test.ts'
+  falsifier: |
+    Leave the default writer on the legacy board: a status read over a fixture with a fresh head-branch credit
+    saves the store and the first proof fails.
+  note: |
+    Design: ~/Remudero/.session-scratch/arch-phase4-design.md §5 (GET write 5) and §10.
+    Scope-time checks 2026-10-01: no run-W1-T5048..5066 branch on origin; no origin/main commit names
+    these ids; no plan record on origin/main or an open PR head covers this change. Reserved from the
+    operator checkout for this filing branch.

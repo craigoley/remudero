@@ -47,11 +47,13 @@ import {
   currentReadModelPath,
   openReadModel,
   peekLease,
+  quickCheckReadModel,
   releaseLease,
   withWriteTransaction,
   type ReadModelDb,
   type ReadModelLease,
 } from "./read-model-db.js";
+import { readModelCommand } from "./read-model-cli.js";
 import { createRepositoriesReadModelView } from "./repositories-view.js";
 import { createViewShadow, readShadowEvidence, sqliteShadowStore, type ShadowLegacy, type ShadowReadiness, type ShadowRequest, type ViewShadow } from "./view-shadow.js";
 import { oldestAsOf, viewEtag, type ViewBody, type ViewBodyEntry, type ViewSource } from "./views.js";
@@ -90,6 +92,13 @@ const READ_MODEL_ORACLE_KIND = "remudero-read-model-oracle" as const;
 export const READ_MODEL_VIEW_SHARE = 0.4;
 /** Work outstanding without a commit for this long is stalled; serve watches silent workers too. */
 export const READ_MODEL_STALL_MS = 60_000;
+/**
+ * A clean open is checked this long after it, then again at this cadence. The oracle compares rows
+ * in recent windows only; quick_check reads every page, so it alone sees a damaged b-tree, freelist
+ * or old page no query has touched yet.
+ */
+export const READ_MODEL_INTEGRITY_INTERVAL_MS = 24 * 3_600_000;
+const READ_MODEL_INTEGRITY_KIND = "remudero-read-model-integrity" as const;
 
 const VIEW_BODY_DDL = `CREATE TABLE IF NOT EXISTS view_body(view TEXT NOT NULL, key TEXT NOT NULL, version INTEGER NOT NULL,
   generation INTEGER NOT NULL, etag TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(view, key)) WITHOUT ROWID;`;
@@ -203,6 +212,8 @@ export interface ReadModelView {
   name: string;
   version: number;
   materialize(ctx: ReadModelViewContext): Array<{ key: string; data: unknown; sources: ViewSource[] }>;
+  /** Work ahead of `materialize`, one bounded step per `more()`; false while some remains, and no body is built before it is done. */
+  prepare?(ctx: ReadModelViewContext, more: () => boolean): boolean;
   /** The shadow comparator's legacy side for one key, computed in the worker beside the view's body. */
   legacy?(key: string, now: number, data: unknown): ShadowLegacy | undefined;
   /** Its bodies are per instance: each instance's is built, timed and paced as a unit of its own. */
@@ -272,6 +283,56 @@ export interface ReadModelTickerOptions {
   passBudgetMs?: number;
   /** Where slices run; in this thread by default, on the oracle's own thread inside serve's worker. */
   oracleRunner?: ReadModelOracle;
+  /** Where the background integrity check runs; in this thread by default, on a thread of its own inside serve's worker. */
+  integrityCheck?: (request: IntegrityRequest, done: (result: IntegrityResult) => void) => void;
+}
+
+export interface IntegrityRequest {
+  instance: string;
+  stateDir: string;
+  ledgerDir: string;
+  dbPath: string;
+}
+
+/** `rebuild`: what `rmd read-model rebuild` answered for a corrupt file; absent when the file was healthy or unreadable. */
+export type IntegrityResult = { ok: true; ms: number } | { ok: false; corrupt: boolean; error: string; ms: number; rebuild?: { code: number; output: string[] } };
+
+/**
+ * quick_check on a connection of its own; a corrupt file is rebuilt into a new generation and the
+ * pointer flipped (`rmd read-model rebuild`), whose fence sends the projector to the new file.
+ */
+export function checkReadModelIntegrity(
+  request: IntegrityRequest,
+  clock: Clock = systemClock,
+  rebuild: (request: IntegrityRequest) => { code: number; output: string[] } = (r) => {
+    const output: string[] = [];
+    const sink = (line: string): void => void output.push(line);
+    const code = readModelCommand(["rebuild", "--instance", r.instance, "--ledger-dir", r.ledgerDir], { stateDir: r.stateDir, clock, out: sink, error: sink });
+    return { code, output };
+  },
+): IntegrityResult {
+  const started = clock.now();
+  const check = quickCheckReadModel(request.dbPath);
+  if (check.ok) return { ok: true, ms: clock.now() - started };
+  return { ...check, ms: clock.now() - started, ...(check.corrupt ? { rebuild: rebuild(request) } : {}) };
+}
+
+/** One thread per check, which exits when done: a check is rare, and one that dies is reported, never hung on. */
+export function threadIntegrityCheck(workerUrl?: URL): NonNullable<ReadModelTickerOptions["integrityCheck"]> {
+  return (request, done) => {
+    let settled = false;
+    let failure = "";
+    const thread = new Worker(workerUrl ?? new URL(import.meta.url), { workerData: { kind: READ_MODEL_INTEGRITY_KIND, request }, execArgv: process.execArgv });
+    thread.unref();
+    thread.on("message", (result: IntegrityResult) => {
+      settled = true;
+      done(result);
+    });
+    thread.on("error", (error) => void (failure = `: ${error.message}`));
+    thread.on("exit", (code) => {
+      if (!settled) done({ ok: false, corrupt: false, error: `the integrity thread exited with code ${code}${failure}`, ms: 0 });
+    });
+  };
 }
 
 /** One oracle slice: everything a thread needs to attach to the store and check it. */
@@ -438,6 +499,8 @@ interface Slot {
   catchUp?: { startedAt: number; ticks: number; maxTickMs: number; lines: number; sourceBytes: number; loggedAt: number };
   /** Present while work is outstanding and nothing commits: the watchdog's episode. */
   stall?: { since: number; generation: number; reopened: boolean; escalated: boolean };
+  /** The next background integrity check: at once after an unclean shutdown, else on the interval. */
+  integrity?: { at: number; reason: string; running: boolean };
 }
 
 /**
@@ -482,6 +545,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   const settleMs = opts.ingestSettleMs ?? ORACLE_INGEST_SETTLE_MS;
   const sliceBudgetMs = opts.oracleSliceBudgetMs ?? ORACLE_SLICE_BUDGET_MS;
   const oracle = opts.oracleRunner ?? inProcessOracle((request) => slots.find((slot) => slot.db?.path === request.dbPath)?.db, clock, opts.escalation);
+  const integrityCheck = opts.integrityCheck ?? ((request, done) => done(checkReadModelIntegrity(request, clock)));
   /** The slot whose slice is running; one at a time across every instance. */
   let checking: Slot | undefined;
   const passMs = opts.passBudgetMs ?? READ_MODEL_LEASE_RENEW_MS * READ_MODEL_PASS_SHARE;
@@ -541,6 +605,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       slot.db = openProjectorReadModel(opts.stateDir, slot.instance.name, clock);
       slot.ino = fileIno(slot.db.path);
       opts.post({ type: "progress", instance: slot.instance.name, phase: "opened", ms: clock.now() - opening });
+      if (slot.db.uncleanShutdown) slot.integrity = { at: now, reason: "unclean shutdown", running: slot.integrity?.running ?? false };
+      slot.integrity ??= { at: now + READ_MODEL_INTEGRITY_INTERVAL_MS, reason: "periodic", running: false };
     }
     if (slot.lease && now - slot.renewedAt < READ_MODEL_LEASE_RENEW_MS) return true;
     const got = acquireLease(slot.db, { holder, clock });
@@ -594,6 +660,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   function tickSlot(slot: Slot, now: number): void {
     try {
       if (!ensureLease(slot, now)) return;
+      if (now >= slot.integrity!.at && !slot.integrity!.running) startIntegrity(slot, now);
       const result = slot.projector!.tick({ budgetMs });
       const db = slot.db!;
       const newest = db.prepare("SELECT max(ts_ms) AS m FROM seen WHERE ts_ms > 0 AND ts_ms <= ?").get(now + FUTURE_ROW_TOLERANCE_MS)?.m;
@@ -656,6 +723,18 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       }, opts.escalation) : null;
       log("read_model.stall_escalated", { ...extra, issueUrl });
     }
+  }
+
+  /** Started, never waited for: the projector ticks on beside it, and a corrupt file's rebuild flips the pointer under it. */
+  function startIntegrity(slot: Slot, now: number): void {
+    const integrity = slot.integrity!;
+    const instance = slot.instance.name;
+    integrity.running = true;
+    log("read_model.integrity_started", { instance, reason: integrity.reason });
+    integrityCheck({ instance, stateDir: opts.stateDir, ledgerDir: slot.instance.ledgerDir, dbPath: slot.db!.path }, (result) => {
+      Object.assign(integrity, { running: false, at: clock.now() + READ_MODEL_INTEGRITY_INTERVAL_MS, reason: "periodic" });
+      log(result.ok ? "read_model.integrity_ok" : "read_model.integrity_failed", { instance, startedAt: now, ...result });
+    });
   }
 
   function failSlot(slot: Slot, now: number, error: unknown): void {
@@ -751,12 +830,24 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     return comparator.shadow;
   }
 
-  function build(unit: ViewUnit, now: number, ctx: ReadModelViewContext, generation: number): void {
+  /** A view's prepare steps until `deadline`; the first is always allowed, so every build makes progress. */
+  function stepsUntil(deadline: number): () => boolean {
+    let first = true;
+    return () => {
+      const allowed = first || clock.now() < deadline;
+      first = false;
+      return allowed;
+    };
+  }
+
+  function build(unit: ViewUnit, now: number, ctx: ReadModelViewContext, generation: number, allowanceMs: number): void {
     const { view } = unit;
     const started = clock.now();
+    let ready = true;
     try {
       const scoped = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
-      for (const { key, data, sources } of view.materialize(scoped)) {
+      ready = view.prepare?.(scoped, stepsUntil(started + allowanceMs)) ?? true;
+      for (const { key, data, sources } of ready ? view.materialize(scoped) : []) {
         const stale = sources.some((source) => source.state !== "fresh");
         const etag = viewEtag(view.name, view.version, stale, data);
         const id = `${view.name}\u0000${key}`;
@@ -773,7 +864,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }
     const finished = clock.now();
     unit.costMs = finished - started;
-    unit.dueAt = finished + unit.costMs / READ_MODEL_VIEW_SHARE;
+    unit.dueAt = ready ? finished + unit.costMs / READ_MODEL_VIEW_SHARE : finished;
     if (unit.costMs > passMs) log("read_model.slow_view", { view: view.name, ...(unit.slot ? { instance: unit.slot.instance.name } : {}), ms: unit.costMs, passMs });
   }
 
@@ -788,7 +879,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const shadow = comparator?.shadow.readiness();
     const ctx: ReadModelViewContext = { now, switches, instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}) })), ...(shadow ? { shadow } : {}) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
-    if (only) return build(only, now, ctx, generation);
+    if (only) return build(only, now, ctx, generation, soloMs);
     const left = passMs - (clock.now() - tickStart);
     let spent = 0;
     const deferred: string[] = [];
@@ -800,7 +891,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         continue;
       }
       const before = clock.now();
-      build(unit, now, ctx, generation);
+      build(unit, now, ctx, generation, Math.min(soloMs, left - spent));
       spent += clock.now() - before;
     }
     if (deferred.length > 0 && now - deferredLoggedAt >= READ_MODEL_LEDGER_STALE_MS) {
@@ -910,7 +1001,8 @@ export function runReadModelWorker(
   const now = createNowView({ instances: data.instances, ledgerSource, clock, log: (step, extra) => post({ type: "log", step, extra }) });
   const oracleRunner = threadOracle({ ...(data.escalationRepository ? { escalationRepository: data.escalationRepository } : {}), log: (step, extra) => post({ type: "log", step, extra }) });
   const ticker = createReadModelTicker({
-    stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, stopRequested, post, views: [...READ_MODEL_VIEWS, now], oracleRunner, ...(escalation ? { escalation } : {}),
+    stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, stopRequested, post, views: [...READ_MODEL_VIEWS, now], oracleRunner,
+    integrityCheck: threadIntegrityCheck(), ...(escalation ? { escalation } : {}),
   });
   let timer: NodeJS.Timeout | undefined;
   let started = false;
@@ -955,6 +1047,9 @@ if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === RE
 }
 if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === READ_MODEL_ORACLE_KIND && parentPort) {
   runReadModelOracleWorker(parentPort, workerData as ReadModelOracleData);
+}
+if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === READ_MODEL_INTEGRITY_KIND && parentPort) {
+  parentPort.postMessage(checkReadModelIntegrity((workerData as { request: IntegrityRequest }).request));
 }
 
 /** The last committed bodies, read once at construction through a read-only connection. */
@@ -1005,6 +1100,8 @@ export interface ReadModelWorkerOptions {
   every?: (run: () => void, ms: number) => () => void;
   /** What the silent-worker watchdog measures against. */
   clock?: Clock;
+  /** Sees each worker message after the handle has applied it. */
+  observe?: (msg: ReadModelWorkerMessage) => void;
 }
 
 function everyUnref(run: () => void, ms: number): () => void {
@@ -1083,7 +1180,8 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   const onMessage = (msg: ReadModelWorkerMessage): void => {
     heardAt = clock.now();
     silenceLogged = false;
-    phase = msg.type === "progress" ? { instance: msg.instance, phase: msg.phase } : undefined;
+    if (msg.type === "progress") phase = { instance: msg.instance, phase: msg.phase };
+    else if (msg.type !== "log") phase = undefined;
     if (msg.type === "body") {
       bodies.set(readModelBodyKey(msg.entry.view, msg.entry.key), msg.entry);
       for (const listener of bodyListeners) listener(msg.entry);
@@ -1096,6 +1194,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       deaths = 0;
       for (const state of msg.instances) instances.set(state.instance, state);
     }
+    opts.observe?.(msg);
   };
 
   const spawn = (): void => {

@@ -1,0 +1,42 @@
+- id: W1-T5052
+  title: "THE ACTIONS PAGE REPARSES THE LEDGER PER READ — add the actions view, a fold of external_effect.reconciled fact rows, so /actions reads one materialized body"
+  repo: remudero
+  depends_on: []
+  dispatch_hold: true
+  priority: 4
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  risk: high
+  band_meaning: span
+  origin: "2026-10-01 core-console architecture Phase 4 design (P4-T13), arch-phase4-design.md"
+  files:
+    - src/lib/actions-view.ts
+    - test/actions-view.test.ts
+    - src/lib/read-model-worker.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-10-01: /v1/action-results is served by action-results.ts over a serve-side rotation memo.
+    external_effect.reconciled is not a fact step today; P4-T03 adds it to the fact set, after which the
+    page can read a materialized fold. Priority 7 of 8 in the Phase 4 pain ranking.
+  design: |
+    actions (one body across instances) folds external_effect.reconciled fact rows per instance, dirtied when
+    such a fact is applied. Reuse action-results.ts's projection of a row (move, do not copy). Source:
+    ledger:<i>. Register it in read-model-worker.ts.
+  acceptance:
+    - claim: "the actions view equals the action results route over the same ledger"
+      proof: 'grep: test("W1-T5052: the actions view equals the action results route over the same ledger" in test/actions-view.test.ts'
+    - claim: "the worker registers the actions view"
+      proof: 'grep: createActionsView( in src/lib/read-model-worker.ts'
+  falsifier: |
+    Read only the live file: a reconciled row a rotation archived is missing and the parity proof fails.
+  note: |
+    DISPATCH HOLD: waits for P4-T03 (external_effect.reconciled joins the projector's fact set). A Phase 4 critical-path task is hand-built on a run-unfiled
+    branch with no plan id, so depends_on cannot name it. RELEASE: one plan amendment deleting
+    dispatch_hold once that merges (tracked in arch-plan.md, Phase 4).
+    Design: ~/Remudero/.session-scratch/arch-phase4-design.md §1.1 and §10.
+    Scope-time checks 2026-10-01: no run-W1-T5048..5066 branch on origin; no origin/main commit names
+    these ids; no plan record on origin/main or an open PR head covers this change. Reserved from the
+    operator checkout for this filing branch.

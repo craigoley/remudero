@@ -22,9 +22,8 @@ function row(i: number): string {
   return `${JSON.stringify({ ts: new Date(T0 + i).toISOString(), step: "run.start", task_id: `T${i}`, run_id: `r-${i}` })}\n`;
 }
 
-function deps(t: TestCtx, extra: Partial<ServeDeps>): { deps: ServeDeps; ledgerPath: string } {
+function deps(extra: Partial<ServeDeps>): { deps: ServeDeps; ledgerPath: string; root: string } {
   const root = makeTempDir("serve-view-events");
-  t.after(() => rmSync(root, { recursive: true, force: true }));
   const stateDir = join(root, "state");
   mkdirSync(stateDir, { recursive: true });
   const ledgerPath = join(stateDir, "ledger.ndjson");
@@ -33,6 +32,7 @@ function deps(t: TestCtx, extra: Partial<ServeDeps>): { deps: ServeDeps; ledgerP
   writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ push: "on" }));
   const github = { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
   return {
+    root,
     ledgerPath,
     deps: {
       board: { plan: { tasks: [], byId: new Map() }, ledgerPath, github },
@@ -48,11 +48,12 @@ function deps(t: TestCtx, extra: Partial<ServeDeps>): { deps: ServeDeps; ledgerP
   };
 }
 
-async function listen(t: TestCtx, server: Server): Promise<string> {
+async function listen(t: TestCtx, server: Server, root: string): Promise<string> {
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
-  t.after(() => {
+  t.after(async () => {
     server.closeAllConnections();
-    if (server.listening) server.close();
+    if (server.listening) await new Promise<void>((done) => server.close(() => done()));
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   });
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
@@ -98,8 +99,8 @@ async function until(check: () => boolean, ms: number, what: string): Promise<vo
 }
 
 test("a ledger row reaches an events subscriber of the assembled serve over real HTTP", async (t) => {
-  const { deps: d, ledgerPath } = deps(t, { readModel: { tickMs: 20 } });
-  const url = await listen(t, buildServeServer(d));
+  const { deps: d, ledgerPath, root } = deps({ readModel: { tickMs: 20 } });
+  const url = await listen(t, buildServeServer(d), root);
   const { frames } = await stream(t, `${url}${VIEW_EVENTS_PATH}?views=read-model`);
   await until(() => frames.some((f) => f.event === "hello"), 5_000, "hello");
   const hello = frames.find((f) => f.event === "hello")!;
@@ -129,13 +130,13 @@ test("a ledger row reaches an events subscriber of the assembled serve over real
 test("an events subscriber alone does not extend recycle patience", async (t) => {
   let recheck: () => void = () => {};
   const exits: number[] = [];
-  const { deps: d } = deps(t, {
+  const { deps: d, root } = deps({
     consoleSha: resolveConsoleSha(),
     gatewayCheckout: async () => ({ state: { head: "a".repeat(40), behindBy: 2, dirty: false, checkedAt: new Date(T0).toISOString() }, restartDue: true }),
     staleExitSeams: { scheduleRecheck: (run) => ((recheck = run), () => {}), exit: (code) => void exits.push(code) },
     readModel: { workerUrl: SILENT_WORKER, every: () => () => {} },
   });
-  const url = await listen(t, buildServeServer(d));
+  const url = await listen(t, buildServeServer(d), root);
   const { frames, ended } = await stream(t, `${url}${VIEW_EVENTS_PATH}`);
   await until(() => frames.some((f) => f.event === "hello"), 5_000, "hello");
   await sleep(50);

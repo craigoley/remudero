@@ -1,0 +1,48 @@
+- id: W1-T5050
+  title: "OPERATOR ACTIVITY COSTS 1 TO 3.6 S WARM AND 42 TO 150 S COLD — /v1/operator-activity is a request-time fold with a boot prewarm; add the workstreams view over the activity_ring projection so the page reads one materialized body"
+  repo: remudero
+  depends_on: []
+  dispatch_hold: true
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "2026-10-01 core-console architecture Phase 4 design (P4-T11), arch-phase4-design.md"
+  plan_refs: ["W1-T4444", "W1-T3852"]
+  files:
+    - src/lib/workstreams-view.ts
+    - test/workstreams-view.test.ts
+    - src/lib/read-model-worker.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-01: /v1/operator-activity took 990 ms and 3,602 ms in two gentle sweeps. Its cold boot
+    prewarm is p50 42 s, p90 66 s and max 150 s over 290 serve.boot_prewarm rows (09-26 to 10-01).
+    operatorActivityCandidates takes the newest 200 rows of ANY step, so the fact store cannot answer it;
+    P4-T03 adds an activity_ring projection (the newest 500 rows of any step per instance).
+  design: |
+    workstreams (one body across instances) is materialized from activity_ring plus the board's plan. It
+    re-materializes on a ring insert, debounced 1 s. Sources: ledger:<i>, plan:<i>. Reuse the existing
+    operator-activity projection functions over ring rows (move, do not copy), so the view and the route
+    agree by construction. Register it in read-model-worker.ts.
+  acceptance:
+    - claim: "the workstreams view equals the operator activity route over the same ledger"
+      proof: 'grep: test("W1-T5050: the workstreams view equals the operator activity route over the same ledger" in test/workstreams-view.test.ts'
+    - claim: "a ring insert re-materializes the workstreams view once inside the debounce"
+      proof: 'grep: test("W1-T5050: a ring insert re-materializes the workstreams view once inside the debounce" in test/workstreams-view.test.ts'
+    - claim: "the worker registers the workstreams view"
+      proof: 'grep: createWorkstreamsView( in src/lib/read-model-worker.ts'
+  falsifier: |
+    Fold only fact steps: rows of a non-fact step the route shows are missing and the parity proof fails.
+    Re-materialize per row: a burst of inserts builds the body more than once and the second proof fails.
+  note: |
+    DISPATCH HOLD: waits for P4-T03 (the projector's activity_ring projection). A Phase 4 critical-path task is hand-built on a run-unfiled
+    branch with no plan id, so depends_on cannot name it. RELEASE: one plan amendment deleting
+    dispatch_hold once that merges (tracked in arch-plan.md, Phase 4).
+    Design: ~/Remudero/.session-scratch/arch-phase4-design.md §1.0, §1.1 and §10.
+    Scope-time checks 2026-10-01: no run-W1-T5048..5066 branch on origin; no origin/main commit names
+    these ids; no plan record on origin/main or an open PR head covers this change. Reserved from the
+    operator checkout for this filing branch.
