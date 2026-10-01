@@ -58,7 +58,7 @@ import {
 import { threadSlowLane, type SlowLane, type SlowLaneBodies, type SlowLaneConfig } from "./read-model-slow-lane.js";
 import { readModelCommand } from "./read-model-cli.js";
 import { createRepositoriesReadModelView } from "./repositories-view.js";
-import { createViewShadow, readShadowEvidence, sqliteShadowStore, storedShadowReadiness, type ShadowLegacy, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ViewShadow } from "./view-shadow.js";
+import { createViewShadow, fileShadowStore, readShadowEvidence, storedShadowReadiness, viewShadowPath, type ShadowLegacy, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ViewShadow } from "./view-shadow.js";
 import { oldestAsOf, viewEtag, type ViewBody, type ViewBodyEntry, type ViewSource } from "./views.js";
 import { describeSource, judgeSource, type SourcePhase } from "./view-freshness.js";
 
@@ -888,7 +888,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     if (home?.db === undefined || home.lease === undefined) return undefined;
     if (comparator?.db !== home.db) {
       comparator = { db: home.db, shadow: createViewShadow({
-        clock, log, store: sqliteShadowStore(home.db, home.lease),
+        clock, log, store: fileShadowStore(viewShadowPath(opts.stateDir), home.db, home.lease),
         evidence: (input) => readShadowEvidence(slots.flatMap((slot) => (slot.db ? [slot.db] : [])), input),
       }) };
     }
@@ -977,7 +977,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   function materialize(now: number, tickStart: number, only?: ViewUnit): void {
     if (units.length === 0) return;
     const home = slots[0]?.db;
-    const shadow = home ? storedShadowReadiness(home, now) : undefined;
+    const shadow = home ? storedShadowReadiness(viewShadowPath(opts.stateDir), home, now) : undefined;
     const ctx: ReadModelViewContext = { now, switches, instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}), ...(slot.lease ? { lease: slot.lease } : {}) })), ...(shadow ? { shadow } : {}) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
     if (only) return build(only, now, ctx, generation, soloMs);

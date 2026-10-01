@@ -99,8 +99,10 @@ reads no file and no SQLite.
     providers produce. The HTTP answer being a 404 does not stop the comparison. Serve also DRIVES
     every shadowed key through the same sampler on its 5 s switch recheck, so each key is compared about
     once a minute with no console traffic; a driven sample counts as a sample, never a request.
-    Readiness (`data.shadow` in `/v1/views/read-model`) is read from the persisted `view_shadow`
-    counters, so it shows from boot, not only after this process compared something.
+    Readiness (`data.shadow` in `/v1/views/read-model`) is read from the persisted counters in
+    `<stateDir>/read-model/view-shadow.json`, so it shows from boot, not only after this process
+    compared something. That file stays on the persistent disk when the DB moves to scratch, so a
+    deallocate keeps the streak; an older DB's `view_shadow` table is read until its first save.
   - `serve`: the read-model body answers. A view with no body yet answers from its Phase 0
     computation, or **404 `view_not_ready`**.
 - **Worker diagnostics.** The worker ledgers `read_model.lease_acquired` and `read_model.lease_elsewhere`

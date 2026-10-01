@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer, get, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -24,8 +24,10 @@ import {
   memberEntities,
   sumEntities,
   readShadowEvidence,
+  fileShadowStore,
   shadowReadiness,
-  sqliteShadowStore,
+  storedShadowReadiness,
+  viewShadowPath,
   withViewShadow,
   type ShadowEvidence,
   type ShadowLatest,
@@ -395,18 +397,41 @@ test("a view without a legacy body on serve's side is posted for the worker to c
   assert.equal(typeof attached.shadow, "function");
 });
 
-test("counters persist in the home read model across a restart", (t) => {
+test("counters persist in the state dir file across a restart", (t) => {
   const clock = fixedClock(T0);
-  const db = openProjectorReadModel(scratch(t, "shadow-store"), "core", clock);
+  const stateDir = scratch(t, "shadow-store");
+  const db = openProjectorReadModel(stateDir, "core", clock);
   t.after(() => db.close());
   const got = acquireLease(db, { clock });
   if (!got.ok) throw new Error("lease");
-  const first = createViewShadow({ clock, log: () => {}, evidence: () => NONE, store: sqliteShadowStore(db, got.lease) });
+  const path = viewShadowPath(stateDir);
+  const first = createViewShadow({ clock, log: () => {}, evidence: () => NONE, store: fileShadowStore(path, db, got.lease) });
   first.compare({ view: "v", key: "", requests: 4, legacy: { data: 1, asOfMs: T0 }, body: { data: 2, asOf: null } });
-  const again = createViewShadow({ clock, log: () => {}, evidence: () => NONE, store: sqliteShadowStore(db, got.lease) });
+  const again = createViewShadow({ clock, log: () => {}, evidence: () => NONE, store: fileShadowStore(path, db, got.lease) });
   const [r] = again.readiness();
   assert.equal(r!.requests, 4);
   assert.equal(r!.diffs.real, 1);
+});
+
+test("counters an older build kept in the view_shadow table migrate to the state dir file", (t) => {
+  const clock = fixedClock(T0);
+  const stateDir = scratch(t, "shadow-migrate");
+  const db = openProjectorReadModel(stateDir, "core", clock);
+  t.after(() => db.close());
+  const got = acquireLease(db, { clock });
+  if (!got.ok) throw new Error("lease");
+  const old = { requests: 7, firstRequestMs: T0 - 2 * DAY, samples: 5, diffs: { legacy_horizon: 0, timing: 0, dedupe: 0, real: 0 }, streakSamples: 5, streakSinceMs: T0 - 2 * DAY, lastRealMs: null, streakKeys: [""] };
+  db.exec("CREATE TABLE view_shadow(view TEXT PRIMARY KEY, state TEXT NOT NULL) WITHOUT ROWID");
+  db.prepare("INSERT INTO view_shadow(view, state) VALUES(?, ?)").run("v", JSON.stringify(old));
+  const path = viewShadowPath(stateDir);
+  assert.equal(existsSync(path), false);
+  assert.deepEqual(storedShadowReadiness(path, db, T0).map((s) => [s.view, s.samples, s.streakSamples]), [["v", 5, 5]], "readiness reads the table until the file exists");
+  const shadow = createViewShadow({ clock, log: () => {}, evidence: () => NONE, store: fileShadowStore(path, db, got.lease) });
+  shadow.compare({ view: "v", key: "", requests: 1, legacy: { data: 1, asOfMs: T0 }, body: { data: 1, asOf: null } });
+  const saved = JSON.parse(readFileSync(path, "utf8")) as Record<string, { samples: number; streakSamples: number; requests: number }>;
+  assert.deepEqual([saved.v!.samples, saved.v!.streakSamples, saved.v!.requests], [6, 6, 8], "the migrated streak continued and was written to the file");
+  db.exec("DELETE FROM view_shadow");
+  assert.deepEqual(storedShadowReadiness(path, db, T0).map((s) => [s.view, s.samples]), [["v", 6]], "the file wins once it exists");
 });
 
 test("the legacy repositories side is each instance's summary route computed in the worker", (t) => {
