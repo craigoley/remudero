@@ -78,6 +78,11 @@ test("W1-T5119: a live worker worktree still refuses the reap", () => {
   assert.match(String(refusalThroughWiring(torn, [], "W1-T1")), /inflight lock/, "an unparseable inflight lock fails closed");
 });
 
+test("W1-T5119: an unreadable worktree registry still refuses the reap", () => {
+  const inflight = inflightDirWith({ "W1-T1": process.pid });
+  assert.match(String(refusalThroughWiring(inflight, ["<unreadable>"], "W1-T1")), /worktree/);
+});
+
 test("W1-T5119: without the active-worker predicates the reaper still counts every lock and worktree", () => {
   const strict = { listWorktrees: () => ["/w/leftover"], listInflightLocks: () => ["W1-T1.lock"], openFileCount: () => 0 };
   assert.match(String(objectReapRefusal("/repo", "/i", strict)), /worktree/);

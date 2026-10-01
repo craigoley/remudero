@@ -30,6 +30,8 @@ export const OBJECT_PRUNE_EXPIRY = "24.hours.ago";
 /** Below this many loose objects the reap is not worth a subprocess. Reported, not silent. */
 export const LOOSE_OBJECT_FLOOR = 5000;
 
+const UNREADABLE_WORKTREE = "<unreadable>";
+
 export interface ObjectReapDeps {
   /** Registered worktrees for the repo. Non-empty REFUSES. */
   listWorktrees?: (repoDir: string) => readonly string[];
@@ -101,7 +103,7 @@ export function defaultListWorktrees(repoDir: string): readonly string[] {
       .map((l) => l.slice("worktree ".length).trim());
     return paths.slice(1);
   } catch {
-    return ["<unreadable>"]; // fail closed — an unreadable list is not an empty one
+    return [UNREADABLE_WORKTREE]; // fail closed — an unreadable list is not an empty one
   }
 }
 
@@ -151,7 +153,8 @@ export function objectReapRefusal(
   inflightDir: string,
   deps: ObjectReapDeps = {},
 ): string | undefined {
-  const worktrees = (deps.listWorktrees ?? defaultListWorktrees)(repoDir).filter((w) => deps.isWorktreeActive?.(w) ?? true);
+  const worktrees = (deps.listWorktrees ?? defaultListWorktrees)(repoDir)
+    .filter((w) => w === UNREADABLE_WORKTREE || (deps.isWorktreeActive?.(w) ?? true));
   if (worktrees.length > 0) {
     return `${worktrees.length} worktree(s) registered — a prune racing a worker can remove an object it is about to reference`;
   }
