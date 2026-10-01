@@ -3,6 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
+  priority: 2.5
   verify: auto
   principles: {tdd: strict}
   risk: high
@@ -53,11 +54,11 @@
     in a different place.
   acceptance:
     - claim: "the reclaim reports, per tree, how many bytes it could not reach and why, so a nightly that frees nothing says which reason applies"
-      proof: "unit test: the reclaim reports bytes it could not reach and the reason"
+      proof: 'grep: test("W1-T3676: the reclaim reports bytes it could not reach and the reason" in test/agent-history-reclaim-reaches-the-bulk.test.ts'
     - claim: "a refusal on a live fleet container is reported as a refusal rather than as a completed run that reclaimed nothing"
-      proof: "unit test: a refused reclaim is not reported as a clean nothing-to-do run"
+      proof: 'grep: test("W1-T3676: a refused reclaim is not reported as a clean nothing-to-do run" in test/agent-history-reclaim-reaches-the-bulk.test.ts'
     - claim: "reclaim reaches bytes held inside an always-current file, measured against a fixture whose mtime never ages"
-      proof: "unit test: reclaim reaches bytes inside an always-current file"
+      proof: 'grep: test("W1-T3676: reclaim reaches bytes inside an always-current file" in test/agent-history-reclaim-reaches-the-bulk.test.ts'
   falsifier: |
     Report only bytes freed and the first test fails with an unreachable gigabyte invisible. Exit 0
     silently on the live-container refusal and the second fails. Sweep by mtime alone and the third

@@ -7,11 +7,12 @@
   principles: {tdd: strict}
   priority: 1
   budget_usd: 10.00
-  risk: medium
+  risk: high
+  band_meaning: span
   origin: "operator session 2026-10-01: why released tasks never re-dispatch (investigation)"
   note: "reservation hand-off: plan-lifetime-judge-churn-1790850943000 -> plan-lifetime-judge-churn-1790850943000"
   plan_refs: [W1-T4025, W1-T3921, W1-T4597]
-  files: [src/run-task.ts, test/the-lifetime-judge-asks-once-per-changed-evidence.test.ts]
+  files: [src/run-task.ts, src/lib/status.ts, test/the-lifetime-judge-asks-once-per-changed-evidence.test.ts]
   status: queued
   attempts: 0
   rationale: |
@@ -31,18 +32,38 @@
     Judge-quality note: W1-T4266's needs_operator reasons describe the FEATURE's runtime operator confirmation
     (flipping a shadow instance live), not a build-time operator need.
   design: |
-    No new refusal, no new bound.
-    1. Key a lifetime-route judgment on the evidence that can change the answer: attributable dispatches, capacity
-       refusals, open-PR evidence, merge evidence, and the LAST TERMINAL VERDICT (the newest `verdict` row). Never
-       the newest arbitrary row. verify_human.* rows and dispatch telemetry never enter the key.
-    2. An unchanged key reuses the prior verdict (priorVerifyHumanVerdicts), so the judge is asked again only when
-       new evidence exists.
-    3. The shard handed to the judge states that the question is whether BUILDING the task needs the operator, not
-       whether the feature asks an operator at runtime.
+    No new refusal, no new bound. AMENDED 2026-10-01 at the operator's request ("look at how to do this in the smartest
+    way possible"), adding steps 1, 5 and 6 to the original three.
+    1. ONE CLASSIFIER FOR "THE TASK FAILED". The lifetime sensor (`taskAttributableLifetimeDispatches`,
+       src/lib/status.ts) excludes only capacity refusals and orphaned starts. A lock-busy run error, an unreadable
+       GitHub read, a containment or isolation block, `blocked_inflight` on a dead claim, and a freshness yield all
+       count as the TASK's attempts: W1-T4266's five dead-claim strikes read as five task failures. Reuse the streak
+       breaker's own `infrastructureRefusal(line)` classification (the same one `dispatchStreakTally` uses,
+       W1-T4660), so both signals agree on what is infrastructure. Never a second list.
+    2. Key a lifetime-route judgment on the evidence that can change the answer: attributable (per 1) dispatches,
+       capacity refusals, open-PR evidence, merge evidence, and the LAST TERMINAL VERDICT (the newest `verdict`
+       row). Never the newest arbitrary row. verify_human.* rows and dispatch telemetry never enter the key.
+    3. An unchanged key reuses the prior verdict (priorVerifyHumanVerdicts), so the judge is asked again only when
+       new evidence exists. That also stops the flip-flops, because unchanged facts cannot produce a second verdict.
+    4. The question handed to the judge is whether BUILDING the task needs the operator, not whether the feature
+       asks an operator at runtime. The judge also gets the task's attributable terminal-verdict history, so it
+       judges why the task keeps failing rather than its title.
+    5. A RECORDED OPERATOR RULING IS BINDING. A shard `note:` line beginning `OPERATOR RULING <YYYY-MM-DD>:
+       automate|needs_operator` is read deterministically. The route records it as the verdict, with no judge
+       spawn, until a later dated ruling replaces it. W1-T4266 carries the first one (automate, 2026-10-01).
+    6. A task whose attributable failures (per 1) are zero is never judged; its pressure is infrastructure's, and
+       the breaker and capacity paths already own that. Ledger `dispatch.lifetime_pressure.infra_only` once per
+       evidence key, so the sensor stays legible.
+    MEASURE AFTER MERGE: verify_human.judged rows with an adaptive-lifetime observed_state per day (163 over
+    2026-09-28..10-01 is the baseline), verdict flips per task, and judge spawns avoided by 5 and 6.
   acceptance:
     - claim: "an unchanged task is judged once however many telemetry rows it accrues"
       proof: 'grep: test("W1-T5109: an unchanged task is judged once however many telemetry rows it accrues" in test/the-lifetime-judge-asks-once-per-changed-evidence.test.ts'
     - claim: "a new terminal verdict re-opens the judgment"
       proof: 'grep: test("W1-T5109: a new terminal verdict re-opens the judgment" in test/the-lifetime-judge-asks-once-per-changed-evidence.test.ts'
+    - claim: "infrastructure refusals do not count as the task's lifetime attempts"
+      proof: 'grep: test("W1-T5109: infrastructure refusals do not count as the task lifetime attempts" in test/the-lifetime-judge-asks-once-per-changed-evidence.test.ts'
+    - claim: "a recorded operator ruling is honoured without a judge spawn"
+      proof: 'grep: test("W1-T5109: a recorded operator ruling is honoured without a judge spawn" in test/the-lifetime-judge-asks-once-per-changed-evidence.test.ts'
   falsifier: |
     Key on the newest arbitrary row again and the first test sees a second judge spawn after a sweep.disposed row.

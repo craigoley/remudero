@@ -3,6 +3,7 @@
   repo: remudero
   depends_on: [W1-T2529]
   type: implement
+  priority: 3
   verify: auto
   principles: {tdd: strict}
   risk: high

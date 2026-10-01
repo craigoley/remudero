@@ -3,6 +3,7 @@
   repo: remudero
   depends_on: ["W1-T3852"]
   type: implement
+  priority: 3
   verify: auto
   principles: {tdd: strict}
   budget_usd: 65.00
