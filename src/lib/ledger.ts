@@ -1575,7 +1575,7 @@ function deferStaleRotation(path: string, record: RetainedStepsRecord, missing: 
   const nowMs = systemClock.now();
   const last = record.lastDeferral;
   if (last && last.key === key && nowMs - last.atMs < LEDGER_ROTATION_SMOOTHING_WINDOW_MS) return;
-  appendFileSync(path, rotationRow("ledger.rotation_deferred", { missing_steps: missing }, (now?.() ?? new Date()).toISOString()));
+  appendFileSync(path, rotationRow("ledger.rotation_deferred", { missing_steps: missing }, now ? now().toISOString() : systemClock.iso()));
   writeFileAtomic(ledgerRetainedStepsPath(path), JSON.stringify({ ...record, lastDeferral: { key, atMs: nowMs } }));
 }
 
