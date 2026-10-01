@@ -78,9 +78,25 @@ test("standby serve does not listen on the public port before promote", { timeou
     buildInitialBoardSnapshot: () => boardGated,
     generation: { send: (m) => void sent.push(m), onMessage: (l) => void listeners.push(l) },
   });
-  t.after(() => {
-    // A failed readiness assertion must not leave the deliberately gated board boot in flight.
+  let stopping: Promise<void> | undefined;
+  const stopServe = (): Promise<void> => stopping ??= (async () => {
+    // A timed-out assertion can leave serve waiting for promotion, before its SIGTERM handler
+    // exists. Release that wait first, then stop the promoted server. A failed teardown must
+    // fail this test process promptly rather than occupying a CI shard until its job is canceled.
     releaseBoard();
+    const promotionDeadline = Date.now() + 20_000;
+    while (listeners.length === 0 && Date.now() < promotionDeadline) await sleep(20);
+    if (!sent.some((m) => m.type === "rmd.promoted")) {
+      for (const listener of listeners) listener({ type: "rmd.promote" });
+      while (!sent.some((m) => m.type === "rmd.promoted") && Date.now() < promotionDeadline) await sleep(20);
+    }
+    process.emit("SIGTERM");
+    let stopTimer: ReturnType<typeof setTimeout> | undefined;
+    const stopped = await Promise.race([
+      running.then(() => true, () => true),
+      new Promise<boolean>((resolve) => { stopTimer = setTimeout(() => resolve(false), 10_000); }),
+    ]);
+    if (stopTimer) clearTimeout(stopTimer);
     console.log = realLog;
     console.error = realErr;
     process.env.HOME = saved.HOME;
@@ -88,11 +104,16 @@ test("standby serve does not listen on the public port before promote", { timeou
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
-    process.emit("SIGTERM");
-  });
+    if (!stopped) {
+      console.error("standby serve teardown could not stop the process after promotion");
+      process.exit(1);
+    }
+  })();
+  t.signal.addEventListener("abort", () => { void stopServe(); }, { once: true });
+  t.after(stopServe);
 
   let ready: { status?: number; body: string } | undefined;
-  for (const deadline = Date.now() + 60_000; Date.now() < deadline && !ready; await sleep(100)) {
+  for (const deadline = Date.now() + 60_000; Date.now() < deadline && !ready && !t.signal.aborted; await sleep(100)) {
     ready = await overSocket(socketPath, "/v1/ready").catch(() => undefined);
   }
   assert.ok(ready, "the standby answers readiness on its private socket");
@@ -115,7 +136,7 @@ test("standby serve does not listen on the public port before promote", { timeou
   assert.deepEqual(sent, [], "nothing was announced before the promote");
 
   for (const listener of listeners) listener({ type: "rmd.promote" });
-  for (const deadline = Date.now() + 30_000; Date.now() < deadline && sent.length === 0; ) await sleep(50);
+  for (const deadline = Date.now() + 30_000; Date.now() < deadline && sent.length === 0 && !t.signal.aborted; ) await sleep(50);
   assert.deepEqual(sent, [{ type: "rmd.promoted" }], "the promote is acknowledged once the port is bound");
   const res = await fetch(`http://127.0.0.1:${port}/v1/status`, {
     headers: { authorization: `Bearer ${tokens.read}` }, signal: AbortSignal.timeout(10_000),
