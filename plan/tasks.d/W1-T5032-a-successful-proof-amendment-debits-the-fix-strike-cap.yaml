@@ -14,7 +14,7 @@
   files:
     - src/lib/sweep.ts
     - test/a-proof-amendment-identity-row-is-not-a-fix-strike.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 at origin/main a23658e66, by driving the real functions with fakes in a scratch probe (deleted afterwards) and then

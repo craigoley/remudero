@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-ci-wait-yield-by-weight-1790814555000 -> plan-ci-wait-yield-by-weight-1790814555000"
   plan_refs: [W1-T3793, W1-T4945, W1-T4998]
   files: [src/run-task.ts, test/a-ci-wait-yields-only-to-an-advance-that-restarts.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T3793 lets a build run hand off its external CI wait when the daemon is stale (run.freshness_handoff,

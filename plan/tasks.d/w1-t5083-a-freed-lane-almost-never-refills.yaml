@@ -12,7 +12,7 @@
   note: "reservation hand-off: plan-lane-refill-holds-1790836450000 -> plan-lane-refill-holds-1790836450000"
   plan_refs: [W1-T4416, W1-T4945, W1-T4662, W1-T4998]
   files: [src/lib/daemon.ts, test/a-freed-lane-refills-unless-the-daemon-would-restart.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED (core ledger union 2026-09-30..10-01): dispatch.lane_refill_held 19 times against dispatch.lane_refilled

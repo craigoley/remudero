@@ -12,7 +12,7 @@
   origin: "operator ask 2026-10-01: two shipped tasks (W1-T3376, W1-T3763) could not be reconciled because the credit lookup consults one credit row and declines"
   plan_refs: [W1-T4942, W1-T3084, W1-T3067, W1-T3063, W1-T4078, W1-T3043, W1-T441, W1-T75, W1-T3376, W1-T3763]
   files: [src/lib/status.ts, src/run-task.ts, test/a-task-credited-first-by-a-refused-pr-reconciles-from-its-later-merge.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-01 at origin/main 2d82ea51d by reading the source and REPLAYING the real `projectPlan` over the real

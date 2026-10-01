@@ -17,7 +17,7 @@
     - scripts/needs-human-issue.mjs
     - scripts/clock-sweep.mjs
     - test/a-clock-sweep-delivers-every-new-drift-and-never-goes-silent.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 at origin/main a23658e66, from the workflow runs, the issue threads and the files. SIBLING, NOT OVERLAP: W1-T5027

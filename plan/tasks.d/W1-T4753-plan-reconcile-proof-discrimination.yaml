@@ -14,7 +14,7 @@
   files:
     - src/lib/feedback-landing.ts
     - test/plan-reconcile-proof-discrimination.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED: the plan reconciliation bridge generated `grep: status: merged in <shard>`.

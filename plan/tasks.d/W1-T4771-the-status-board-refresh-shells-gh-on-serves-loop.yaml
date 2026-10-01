@@ -16,7 +16,7 @@
     - src/lib/status.ts
     - src/lib/github-transport.ts
     - src/lib/serve.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-29 on remudero-serve. We sent SIGUSR1, then took an inspector CPU sampling profile over 11 minutes

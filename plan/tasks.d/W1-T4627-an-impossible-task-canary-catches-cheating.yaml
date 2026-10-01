@@ -14,7 +14,7 @@
     - src/lib/impossible-canary.ts
     - src/run-task.ts
     - test/an-impossible-task-canary-catches-cheating.test.ts
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -15,7 +15,7 @@
     - test/helpers/mutant-module.ts
     - test/review-orphan-wiring.test.ts
     - test/the-mutant-loader-resolves-every-relative-import.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 at origin/main 1f6d904bb.

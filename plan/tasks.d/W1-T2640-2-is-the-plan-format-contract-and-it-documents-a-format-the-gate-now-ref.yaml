@@ -10,7 +10,7 @@
   files: [MASTER-PLAN.md, plan/claims.yaml, test/claims-check.test.ts]
   origin: "followup#W1-T2477-1788105355034"
   plan_refs: ["§2", "§12A", "§5C"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED AT HEAD, NOT INFERRED. Every figure below was read from the tree while filing.

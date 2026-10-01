@@ -9,7 +9,7 @@
   band_meaning: blast-radius
   budget_usd: 15.00
   priority: 2
-  status: queued
+  status: merged
   attempts: 0
   origin: "research 2026-09-30: pre-push census gap (deps-interface census red in CI after the worker's own gates)"
   plan_refs: ["W1-T3744", "W1-T3225", "W1-T4656", "W1-T4899"]
