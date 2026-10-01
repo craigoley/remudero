@@ -12,12 +12,6 @@
       "writes": ["mkdir state", "open-for-write state/escalation-link-secret", "open-for-write state/escalation-link-secret.<tmp>", "open-for-write state/ledger.ndjson", "rename state/escalation-link-secret"],
       "reason": "the link secret is created on first use, and each well-formed refused link appends escalation.link_refused, so a crawler can append to the ledger.",
       "owner": "serve boot creates the secret; refusals become an hourly rollup row (P4-T18)"
-    },
-    {
-      "route": "GET /v1/feedback",
-      "writes": ["write plan/feedback/fb-merged.yaml"],
-      "reason": "reconcileFeedbackEntries flips an entry whose proposal PR merged to accepted (and lands it in production), one writer per concurrent GET.",
-      "owner": "the feedback materializer in the slow lane, triggered by a gateway generation showing the PR merged (P4-T07)"
     }
   ]
 }

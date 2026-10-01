@@ -19,7 +19,7 @@ import { createBoardSnapshotCache, type BoardSnapshotCache } from "./board-snaps
 import { systemClock, type Clock } from "./clock.js";
 import { FEEDBACK_VIEW_NAME, FEEDBACK_VIEW_VERSION, materializeFeedbackView } from "./feedback-view.js";
 import { INBOX_CLASSIFY_INTERVAL_MS, INBOX_VIEW_NAME, INBOX_VIEW_VERSION, refreshInboxClassification, type InboxRefreshMemo } from "./inbox-view.js";
-import { ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
+import { acceptMergedFeedback, ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
 import { buildBatchedGithub, type GitHub } from "./status.js";
 import { ghTraceGateway } from "./trace.js";
 import type { ViewSource } from "./views.js";
@@ -92,7 +92,12 @@ function coreUnits(config: NonNullable<SlowLaneConfig["inbox"]>, clock: Clock, l
   };
   const feedback: SlowLaneUnit = {
     name: "feedback",
-    run: async () => ({ views: [{ view: FEEDBACK_VIEW_NAME, version: FEEDBACK_VIEW_VERSION, bodies: materializeFeedbackView({ root: deps.root, planPath: deps.planPath }, deps.statusGithub, clock) }] }),
+    run: async () => {
+      // P4-T07: the one writer of a merged proposal's `accepted`, landed as GET /v1/feedback once did per read.
+      const accepted = acceptMergedFeedback(deps.root, deps.statusGithub, deps.feedbackLand ?? {});
+      if (accepted.length > 0) log("feedback.accepted_merged", { ids: accepted });
+      return { views: [{ view: FEEDBACK_VIEW_NAME, version: FEEDBACK_VIEW_VERSION, bodies: materializeFeedbackView({ root: deps.root, planPath: deps.planPath }, deps.statusGithub, clock) }] };
+    },
   };
   return [inbox, feedback];
 }
