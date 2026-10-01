@@ -9,7 +9,10 @@
  * W1-T3225 took the census SUITES out of hooks/pre-push: spawning the runner caught none of nine
  * incidents and twice damaged the repository. This asks the same questions a different way: it
  * imports each census's own counter from scripts/, reads files, and spawns only `git merge-base`,
- * `git diff` and `git show`. It builds no fixture and starts no runner.
+ * `git diff` and `git show`. It builds no fixture and starts no runner. The ONE exception is the
+ * instrument-surface census (W1-T5101): its declarations live in src/lib/review.ts, which loads only
+ * under tsx, so a diff that can matter spawns scripts/lib/instrument-surface-census.mjs as a child
+ * (`node --import tsx`), and a diff that cannot never starts it.
  *
  * ONLY GROWTH THIS BRANCH CAUSES REFUSES. Each count is taken twice, on this tree and on the merge
  * base with `--base`, and a finding blocks only when the base did not already carry it (or this
@@ -18,9 +21,11 @@
  *
  * Exit 0 clean, 1 a caused violation, 2 could not measure (the hook does not block on 2).
  */
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { fileURLToPath } from "node:url";
 import { isMainModule } from "./lib/argv.mjs";
 import { git } from "./lib/git.mjs";
 import {
@@ -221,13 +226,89 @@ export function evaluateCensusPrecheck(input) {
   ];
 }
 
+const INSTRUMENT_SCOPE_RE = /^(?:\.github\/workflows\/|scripts\/|package\.json$|src\/lib\/review\.ts$)/;
+const INSTRUMENT_CHILD = fileURLToPath(new URL("./lib/instrument-surface-census.mjs", import.meta.url));
+const INSTRUMENT_CHILD_CWD = resolve(dirname(INSTRUMENT_CHILD), "..", "..");
+// BACKSTOP only: a healthy derivation takes well under a second; this ends a hung child as not measured.
+const INSTRUMENT_CHILD_TIME_BOUND_MS = 60_000;
+
+function isSide(side) {
+  return Boolean(side) && Array.isArray(side.candidates) && Array.isArray(side.gaps);
+}
+
+/**
+ * Runs the shared derivation as a child under tsx over `root` and its merge base. THROWS, naming why, on
+ * every way the measurement can fail (spawn error, time bound, signal, non-zero exit, output that is not
+ * the `{ head, base }` shape): the caller reports each as NOT MEASURED, never as a clean tree.
+ */
+export function measureViaChild({ root, mergeBase, run = spawnSync }) {
+  const res = run(
+    process.execPath,
+    ["--import", "tsx", INSTRUMENT_CHILD, "--root", root, "--merge-base", mergeBase],
+    { cwd: INSTRUMENT_CHILD_CWD, encoding: "utf8", timeout: INSTRUMENT_CHILD_TIME_BOUND_MS, maxBuffer: 64 * 1024 * 1024 },
+  );
+  if (res.error) throw new Error(`the derivation child could not run to completion: ${res.error.message}`);
+  if (res.signal) throw new Error(`the derivation child was ended by ${res.signal}`);
+  if (res.status !== 0) {
+    throw new Error(`the derivation child exited ${res.status}: ${String(res.stderr || "no diagnostic").trim().slice(0, 300)}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(String(res.stdout).trim());
+  } catch (e) {
+    throw new Error(`the derivation child printed output that is not JSON: ${String(e.message ?? e)}`);
+  }
+  if (!isSide(parsed?.head) || !isSide(parsed?.base)) {
+    throw new Error("the derivation child printed JSON that is not { head, base } of { candidates, gaps }");
+  }
+  return parsed;
+}
+
+/**
+ * The instrument-surface census, as a pure check over an injected measurement. A gap at head the merge base
+ * did not carry is this branch's doing: one row each, on ONE physical line, because src/run-task.ts
+ * censusPushRefusal reads a row as `^\s+[a-z][\w-]*: ` and the remedy file from a tail `... in <file>`.
+ * Every failure to measure is `unmeasured` with its reason, never an empty violation list.
+ *
+ * @param {{ changed: string[], measureInstrumentSurface?: () => { head: { candidates: string[], gaps: string[] },
+ *   base: { candidates: string[], gaps: string[] } } }} input
+ * @returns {{ violations: string[], unmeasured: string | null }}
+ */
+export function evaluateInstrumentSurface(input) {
+  if (!input.changed.some((p) => INSTRUMENT_SCOPE_RE.test(p))) return { violations: [], unmeasured: null };
+  if (typeof input.measureInstrumentSurface !== "function") return { violations: [], unmeasured: "no measurement supplied" };
+  let measured;
+  try {
+    measured = input.measureInstrumentSurface();
+  } catch (e) {
+    return { violations: [], unmeasured: String(e?.message ?? e) };
+  }
+  if (!isSide(measured?.head) || !isSide(measured?.base)) {
+    return { violations: [], unmeasured: "the measurement is not { head, base } of { candidates, gaps }" };
+  }
+  if (measured.head.candidates.length === 0) {
+    return { violations: [], unmeasured: "the derivation found no candidates at all, which is a failed read, not a clean tree" };
+  }
+  const carried = new Set(measured.base.gaps);
+  const violations = measured.head.gaps
+    .filter((path) => !carried.has(path))
+    .sort()
+    .map(
+      (path) =>
+        `instrument-surface: ${path} is neither on INSTRUMENT_SURFACE nor excused in INSTRUMENT_SURFACE_EXCLUSIONS - ` +
+        `TO FIX: add a "^${path.replace(/\./g, "\\.")}$" pattern to INSTRUMENT_SURFACE if it is gate-rule logic, ` +
+        "or record a reasoned exclusion in INSTRUMENT_SURFACE_EXCLUSIONS if it is not, both in src/lib/review.ts",
+    );
+  return { violations, unmeasured: null };
+}
+
 function gitOut(root, args) {
   const res = git(args, { cwd: root });
   if (res.status !== 0) throw new Error(`git ${args[0]}: ${(res.stderr || "no diagnostic").trim()}`);
   return res.stdout;
 }
 
-export function main(argv) {
+export function main(argv, { measure = measureViaChild } = {}) {
   let values;
   try {
     ({ values } = parseArgs({
@@ -241,6 +322,7 @@ export function main(argv) {
   const root = resolve(values.root);
   let violations;
   let changed;
+  let unmeasured = null;
   try {
     const mergeBase = gitOut(root, ["merge-base", "HEAD", values.base]).trim();
     changed = gitOut(root, ["diff", "--name-only", "--no-renames", mergeBase]).split("\n").filter(Boolean);
@@ -255,6 +337,12 @@ export function main(argv) {
       testFiles: listFixtureCopyFiles(root),
       srcFiles: listHouseLayoutSrcFiles(root),
     });
+    const instrument = evaluateInstrumentSurface({
+      changed,
+      measureInstrumentSurface: () => measure({ root, mergeBase }),
+    });
+    violations.push(...instrument.violations);
+    unmeasured = instrument.unmeasured;
   } catch (e) {
     console.error(`census-precheck: could not measure — ${String(e.message ?? e)}`);
     return 2;
@@ -262,7 +350,13 @@ export function main(argv) {
   if (violations.length > 0) {
     console.error(`census-precheck: this branch grows ${violations.length} census count(s) CI will refuse:`);
     for (const v of violations) console.error(`  ${v}`);
+    // AFTER the rows: censusPushRefusal stops at the first line that is not a row, so this cannot drop one.
+    if (unmeasured !== null) console.error(`census-precheck: instrument-surface NOT MEASURED - ${unmeasured}`);
     return 1;
+  }
+  if (unmeasured !== null) {
+    console.error(`census-precheck: instrument-surface NOT MEASURED - ${unmeasured}`);
+    return 2;
   }
   console.log(`census-precheck: OK — ${changed.length} changed file(s) checked against ${values.base}`);
   return 0;
