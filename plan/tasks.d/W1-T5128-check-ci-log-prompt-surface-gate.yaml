@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.26
   status: queued
@@ -16,3 +16,12 @@
     - claim: "the check:ci-log:prompt-surface-gate cause of PR friction has a recorded remedy"
       proof: "grep: ci-friction:check:ci-log:prompt-surface-gate in docs/ci-friction-remedies.md"
   note: "Filed by the ci-friction gardener (W1-T4435) from a weekly pass over the ledger and gate-fire-rate.ts's own measurement. check:ci-log:prompt-surface-gate priced at 12.3 PR minute(s) across 3 round(s) on 3 pull request(s) — the costliest cause with no open task. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person; its remedy is recorded in docs/ci-friction-remedies.md naming \"ci-friction:check:ci-log:prompt-surface-gate\" once it lands."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.94
+    reasons:
+      - "The filed task calls for recording a remedy for a measured CI friction cause in one declared documentation file, with a specific grep acceptance check."
+      - "The supplied gates state is clean, and the ci-friction family has one merged machine task and no declined tasks. No actual change view was supplied."
+    judged_at: "2026-10-01T13:56:50.806Z"
+    pin: "32107dd7aeb54be1b65bbbfa185141b6b6890a8426554ee737057535cab5f799"
