@@ -1,0 +1,74 @@
+- id: W1-T5140
+  title: "A PARKED WAIT STILL HOLDS EVERY DEPLOY — recycle-container.sh waits on every state/inflight lock, and a lock whose holder is parked in run.awaiting_external is not doing work; W1-T5127 hands off only the build run's own CI wait, so the sweep fix round's CI wait (holding a fix-branch claim) and the PR-merge wait still hold the recycle until WAIT_SECONDS runs out and it refuses (2026-10-01: W1-T5004's two locks held a 3000 s wait to refusal at 9441 s old; only RMD_RECYCLE_WAIT_S=5400 got through)"
+  repo: remudero
+  depends_on: [W1-T5127]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 15.00
+  risk: high
+  origin: "operator session 2026-10-01: E22, measured on the Azure host"
+  plan_refs: [W1-T5127, W1-T1211, W1-T3793, W1-T2609, W1-T2598]
+  files: [src/run-task.ts, src/lib/sweep.ts, deploy/recycle-container.sh, test/a-parked-wait-never-holds-a-recycle.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-01 ON THE AZURE HOST. deploy/recycle-container.sh engaged PAUSE and waited for
+    state/inflight to empty. Two locks stayed held: W1-T5004.lock and
+    fix-branch--craigoley--remudero--run-W1-T5004-1790846399894.lock. W1-T5004's run had parked in
+    run.awaiting_external. The recycle waited the full WAIT_SECONDS (3000 s, sized from implement.done
+    p95 2802 s) and refused, naming the oldest in-flight work at 9441 s. Only RMD_RECYCLE_WAIT_S=5400 got
+    it through. A wait on GitHub is not work, and the sweep resumes it after any restart, yet it blocks
+    every deploy for hours.
+
+    WHAT W1-T5127 COVERS AND WHAT IT DOES NOT (its branch run-W1-T5127-1790857685000, checked at 8150d3160).
+    It adds `externalWaitRecycle` to `waitForCiGreen`'s PollDeps, reads the recycle PAUSE through
+    `recyclePauseDetail` (src/lib/recycle-yield.ts), and wires it at ONE call site: the dispatch lane's
+    runTask. Two poll loops write run.awaiting_external (AWAITING_EXTERNAL_LEDGER_STEP, src/run-task.ts):
+    `waitForCiGreen` and `pollToGate`. Two waits are left holding a lock:
+      1. THE SWEEP FIX ROUND'S CI WAIT. src/lib/sweep.ts takes an inflight lock keyed by
+         `fixBranchClaimKey` before a fix round and releases it only when the round ends. The round hands
+         `runFixRung` a bare `waitForCiGreen`, so it polls CI with no recycle arm while holding the
+         fix-branch claim. That is the second lock in the measurement.
+      2. THE PR-MERGE WAIT. `pollToGate` logs `waiting_on: "pr"` and has no handoff of any kind, so a
+         run waiting for GitHub to merge holds its task lock through any recycle.
+    And the census in recycle-container.sh counts every *.lock in state/inflight without asking whether
+    its holder is waiting or working, so any wait that has no handoff yet still blocks the deploy.
+  design: |
+    The builder chooses the mechanism and says why in the PR. Two candidates:
+    (a) RELEASE AT THE WAIT. Every wait that writes run.awaiting_external yields to a recycle PAUSE the
+        way W1-T5127's CI wait does: the sweep fix round passes the recycle arm into `runFixRung`'s
+        `waitForCiGreen` and releases its fix-branch claim when it yields; the PR-merge wait gains the
+        same arm and releases the task lock. The sweep resumes the PR after the new container boots.
+        Reuse `recyclePauseDetail`, never a second PAUSE parser; an operator PAUSE that is not a recycle
+        still means hold.
+    (b) CLASSIFY AT THE CENSUS. The recycle's in-flight census treats a lock whose holder's latest
+        retained ledger row is run.awaiting_external (the same predicate as `runIsAwaitingExternal`)
+        as resumable and does not wait on it; the daemon resumes that run after the restart. A
+        fix-branch claim maps to its task through the run_id it carries. The census must not
+        re-implement the predicate in bash if a node entry point can answer it.
+    Either way: a lock whose holder is still WORKING keeps holding the recycle exactly as today, and
+    the ledger names every lock that was treated as parked (lock key, task id, run id, what it was
+    waiting on), so the drain cost stays measurable. Do not widen WAIT_SECONDS and do not add a new
+    bound or refusal.
+    MEASURE AFTER MERGE: deploy.not_idle samples with inflight_locks > 0 per recycle, and recycle
+    refusals whose named locks were all parked.
+  acceptance:
+    - claim: "a fix-branch claim whose round is only waiting on CI does not hold a recycle"
+      proof: 'grep: test("W1-T5140: a fix-branch claim whose round is only waiting on CI does not hold a recycle" in test/a-parked-wait-never-holds-a-recycle.test.ts'
+    - claim: "a run waiting on its PR to merge does not hold a recycle"
+      proof: 'grep: test("W1-T5140: a run waiting on its PR to merge does not hold a recycle" in test/a-parked-wait-never-holds-a-recycle.test.ts'
+    - claim: "a lock whose holder is still working keeps holding the recycle"
+      proof: 'grep: test("W1-T5140: a lock whose holder is still working keeps holding the recycle" in test/a-parked-wait-never-holds-a-recycle.test.ts'
+    - claim: "the ledger names each lock the recycle treated as parked"
+      proof: 'grep: test("W1-T5140: the ledger names each lock the recycle treated as parked" in test/a-parked-wait-never-holds-a-recycle.test.ts'
+  falsifier: |
+    CLOSE THIS TASK without implementation if, after W1-T5127 merges and on the latest main, both the
+    sweep fix round's CI wait and the PR-merge wait already yield to a recycle PAUSE and release their
+    locks, or recycle-container.sh's census already passes locks whose holder is awaiting external.
+    Remove the yield or classification and the first two tests see the recycle still waiting.
+  notes: |
+    reservation hand-off: file/parked-locks-1790862539457 -> file/parked-locks-1790862539457
+    SCOPE FENCE: this is the lock-holding half only. Do not change WAIT_SECONDS sizing, the lane-less
+    hung-worker predicate, or the dead-lock reclaim. Do not touch W1-T5127's CI-wait arm beyond reusing it.

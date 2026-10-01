@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import type { ClaimGitDeps } from "./dispatch-claim.js";
 import { fixedClock } from "./clock.js";
 import { classifyPushFailure } from "./task-id-reservation.js";
+import { assertClaimRefPushAllowed } from "./live-write-guard.js";
 
 /**
  * The daemon's second work-generating rung (recon-DC #2): claims and fires at most one feedback
@@ -306,6 +307,7 @@ export function gitTriageClaimReserver(deps: ClaimGitDeps): TriageClaimReserver 
       return deps.run(["commit-tree", tree, "-m", msg]).stdout.trim();
     },
     attempt(feedbackId, anchor) {
+      assertClaimRefPushAllowed(deps.run, triageClaimRef(feedbackId));
       const res = deps.run(["push", "origin", `${anchor}:${triageClaimRef(feedbackId)}`]);
       if (res.status === 0) return "created";
       return classifyPushFailure(res.stderr);
@@ -336,6 +338,7 @@ export function gitTriageClaimReserver(deps: ClaimGitDeps): TriageClaimReserver 
       const args = opts.expect
         ? ["push", `--force-with-lease=${ref}:${opts.expect}`, "origin", `:${ref}`]
         : ["push", "origin", `:${ref}`];
+      assertClaimRefPushAllowed(deps.run, ref);
       return deps.run(args).status === 0;
     },
   };

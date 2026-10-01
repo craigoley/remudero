@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-serve-board-offthread-1790812800000 -> plan-opportunity-intake-1790799000000"
   plan_refs: [W1-T3620, W1-T3925, W1-T4771]
   files: [src/run-task.ts, src/lib/serve.ts, src/lib/board.ts, src/lib/board-worker.ts, test/serve-board-projection-stays-off-the-event-loop.test.ts, test/a-wall-clock-bound-declares-itself.test.ts, test/helpers/wall-clock-bound.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T3620 measured 99 seconds between binding and the first answer, and explicitly warned

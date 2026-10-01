@@ -369,6 +369,7 @@ test("a garden PR opened ready for review is armed by the sweep once its review 
   // reviews it off its PR body's Acceptance block under the synthetic `PR-<n>` id, then its `mergeable`
   // row arms it under that same id — the path every trailer-less fleet PR takes.
   const head = "9a7bd00dcafebabe9a7bd00dcafebabe9a7bd00d";
+  const now = Date.parse("2026-09-24T12:00:00Z");
   const pr: OpenPrView = {
     prNumber: 6885,
     prUrl: "https://github.com/acme/remudero/pull/6885",
@@ -377,13 +378,12 @@ test("a garden PR opened ready for review is armed by the sweep once its review 
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-24T11:00:00Z",
+    lastActivityAt: new Date(now - 60 * 60_000).toISOString(),
     headSha: head,
     autoMergeArmed: false,
     isDraft: false,
     isPlanFiling: true,
   };
-  const now = Date.parse("2026-09-24T12:00:00Z");
   assert.match(pr.headRefName!, GARDEN_BRANCH_RE, "the head identity gate admits it");
   assert.equal(deriveDisposition(pr, DEFAULT_SWEEP_POLICY, now).disposition, "mergeable");
   assert.equal(deriveDisposition({ ...pr, isDraft: true }, DEFAULT_SWEEP_POLICY, now).disposition, "held-draft", "the draft it used to open as is what held it");

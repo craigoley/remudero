@@ -201,8 +201,12 @@ export function repositoriesShadowPairing(legacyFacts: ShadowFactsByInstance, vi
   return { members, sums, latest, derived };
 }
 
-/** `repositories`' legacy side: each instance's #7926 summary over its own ledger read, with its shadow facts. */
-export function legacyRepositories(sourcesPath: string, nowMs: number): ShadowLegacy & { facts: ShadowFactsByInstance } | undefined {
+/**
+ * `repositories`' legacy side: each instance's #7926 summary over its own ledger read, with its shadow facts.
+ * `at` names the instant each instance's seven-day window is evaluated at: the view's own summary instant,
+ * so a row entering or leaving the window between the two reads is in both windows or in neither.
+ */
+export function legacyRepositories(sourcesPath: string, nowMs: number, at: (instanceId: string) => number = () => nowMs): ShadowLegacy & { facts: ShadowFactsByInstance } | undefined {
   let published: RepositoriesSources;
   try {
     published = JSON.parse(readFileSync(sourcesPath, "utf8")) as RepositoriesSources;
@@ -211,14 +215,16 @@ export function legacyRepositories(sourcesPath: string, nowMs: number): ShadowLe
     return undefined;
   }
   const facts: ShadowFactsByInstance = {};
+  const instants: number[] = [];
   const instances: RepositoriesData["instances"] = published.instances.map(({ instanceId, options }) => {
-    const outcome = repoSummarySync({ ...options, shadowMembers: true }, nowMs);
+    instants.push(at(instanceId));
+    const outcome = repoSummarySync({ ...options, shadowMembers: true }, instants.at(-1)!);
     if (!outcome.ok) return { instanceId, reason: outcome.reason };
     facts[instanceId] = outcome.shadow ?? {};
     return { instanceId, summary: unstampedSummary(outcome.summary) };
   });
   const data: RepositoriesData = { instances, ...repositoriesPortfolio(published, { instances }) };
-  return { data, asOfMs: nowMs, facts };
+  return { data, asOfMs: instants.length > 0 ? Math.max(...instants) : nowMs, facts };
 }
 
 /** The plan each summary reads, memoized on the plan file's and `tasks.d`'s mtimes; `fresh` says whether a read would hit the memo. */
@@ -257,6 +263,8 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
   const registryFile = readOnMtimeChange(readRegistry);
   const computed = new Map<string, InstanceSummary>();
   const plans = planReader();
+  /** Each published body's per-instance summary instant and shadow facts, keyed by the very `data` it published. */
+  const shown = new WeakMap<RepositoriesData, { at: Record<string, number>; facts: ShadowFactsByInstance }>();
   let sourcesPath: string | undefined;
   type Slot = { state: S; db?: ReadModelDb } | undefined;
   /** Whether an instance's summary is recomputed now: #7926's cadence, 30 s after an input moves, else 60 s. */
@@ -286,10 +294,10 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
     version: REPOSITORIES_VIEW_VERSION,
     /** The shadow comparator's legacy side, its facts paired with this view's own summaries' facts. */
     legacy(_key, now, data) {
-      const legacy = sourcesPath === undefined ? undefined : legacyRepositories(sourcesPath, now);
+      const pair = shown.get(data as RepositoriesData);
+      const legacy = sourcesPath === undefined || pair === undefined ? undefined : legacyRepositories(sourcesPath, now, (instanceId) => pair.at[instanceId] ?? now);
       if (!legacy) return undefined;
-      const mine = Object.fromEntries([...computed].map(([instanceId, s]) => [instanceId, s.shadow ?? {}]));
-      return { data: legacy.data, asOfMs: legacy.asOfMs, ...repositoriesShadowPairing(legacy.facts, mine, data as RepositoriesData) };
+      return { data: legacy.data, asOfMs: legacy.asOfMs, ...repositoriesShadowPairing(legacy.facts, pair!.facts, data as RepositoriesData) };
     },
     /** Each due instance's plan read and summary, one step each, so a cold build is never one unit. */
     prepare: ({ now, instances }, more) => {
@@ -320,15 +328,19 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
       const sourcesMtimeMs = statSync(at.path).mtimeMs;
       const sources: ViewSource[] = [];
       const data: RepositoriesData = { instances: [], projects: [] };
+      const pair: { at: Record<string, number>; facts: ShadowFactsByInstance } = { at: {}, facts: {} };
       for (const { instanceId, options } of at.sources.instances) {
         const slot = instances.find((candidate) => candidate.state.instance === instanceId);
         if (slot) sources.push(ledgerSource(slot.state, now));
         if (due(instanceId, slot, sourcesMtimeMs, now)) refresh(instanceId, slot, options, sourcesMtimeMs, now);
         const current = computed.get(instanceId)!;
+        if (current.summary) pair.at[instanceId] = Date.parse(current.summary.generated_at);
+        pair.facts[instanceId] = current.shadow ?? {};
         sources.push(summarySource(instanceId, current));
         data.instances.push({ instanceId, ...(current.summary ? { summary: unstampedSummary(current.summary) } : {}), ...(current.reason ? { reason: current.reason } : {}) });
       }
       Object.assign(data, repositoriesPortfolio(at.sources, data, registryFile));
+      shown.set(data, pair);
       return [{ key: "", data, sources }];
     },
   };

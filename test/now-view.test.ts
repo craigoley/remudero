@@ -41,7 +41,7 @@ import { HOST_PROBE_BUDGET_MS, PLAN_BUDGET_MS } from "../src/lib/view-freshness.
 import { buildBatchedGithub, DEFAULT_LIVENESS_BOUND_MS, readLedgerLines, type GitHub } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { SHADOW_CLASSIFICATIONS, VIEW_SHADOW_DIFF_STEP, createViewShadow, readShadowEvidence } from "../src/lib/view-shadow.js";
-import { viewEtag } from "../src/lib/views.js";
+import { viewEtag, type ViewSwitchMode } from "../src/lib/views.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 type TestCtx = { after: (fn: () => void) => void };
@@ -110,7 +110,7 @@ function rig(t: TestCtx, root: string, name: string, clock: Stepped): Rig {
   };
 }
 
-function ctxOf(clock: Clock, rigs: Rig[], mode: string | null = "shadow", lease: "held" | "elsewhere" = "held"): NowViewContext {
+function ctxOf(clock: Clock, rigs: Rig[], mode: ViewSwitchMode | null = "shadow", lease: "held" | "elsewhere" = "held"): NowViewContext {
   return {
     now: clock.now(),
     ...(mode ? { switches: { views: { now: mode } } } : {}),
@@ -355,6 +355,8 @@ test("the now view stays dark until its switch reads shadow or serve", (t) => {
   assert.equal(view.materialize(ctxOf(clock, [core])).length, 1, "a new generation re-materializes");
   clock.set(T0 + NOW_REFRESH_MS);
   assert.equal(view.materialize(ctxOf(clock, [core])).length, 1, "the clock re-materializes");
+  core.append({ step: "verdict", task_id: "W1-T5", run_id: "r5", verdict: "no_pr" });
+  assert.equal(view.materialize(ctxOf(clock, [core], "auto")).length, 1, "auto builds whatever its readiness");
   const stranger = ctxOf(clock, [core]);
   assert.deepEqual(view.materialize({ ...stranger, instances: [{ ...stranger.instances[0]!, state: { ...stranger.instances[0]!.state, instance: "unknown" } }] }), []);
   assert.deepEqual(logged, []);
@@ -649,4 +651,91 @@ test("a queued order the live file's compaction changed is judged by each task's
   const queued = compareNow(view, r, body, clock.now() + 30_000).find((d) => d.path === "board.groups.queued");
   assert.ok(queued, "the two sides order the queue differently");
   assert.equal(queued.classification, "legacy_horizon", queued.reason);
+});
+
+test("a build in flight leaves the legacy side on the plan github snapshot and probe of the body it compares", (t) => {
+  // Captured 2026-10-01 13:42–13:45Z and 14:02–14:05Z: board.groups.queued and board.tasks[taskId=W1-T5091…] read real for 14
+  // newly filed tasks, prQueue.rows[prNumber=8405] for a just-opened PR, and health.daemon.state silent vs polling. Legacy read
+  // the in-flight build's held plan, GitHub snapshot and probe, which that build advances stage by stage before it publishes.
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const planPath = join(root, "plan", "tasks.yaml");
+  mkdirSync(join(root, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(planPath, "");
+  let plan = planOf([task("W1-T1"), task("W1-T2")]);
+  let open: Array<{ number: number; url: string; state: string; title: string; headRefName: string }> = [];
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir, planPath }], {
+    readPlan: () => plan,
+    listGrilling: () => [],
+    github: () => {
+      const listed = open;
+      return { github: stubGateway({ listOpenHeadBranches: () => listed }), generation: "g", source: { asOf: null, state: "fresh" } };
+    },
+  });
+  clock.set(T0 - 270_000);
+  core.append({ step: "daemon.tick" });
+  clock.set(T0);
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  assert.deepEqual(body.data.health.daemon, { state: "polling" });
+
+  // A plan merge files two tasks, a PR opens and the store is reopened; the next build gets as far as its probe.
+  plan = planOf([task("W1-T1"), task("W1-T2"), task("W1-T5091"), task("W1-T5092")]);
+  utimesSync(join(root, "plan", "tasks.d"), new Date(T0 + 60_000), new Date(T0 + 60_000));
+  open = [{ number: 8405, url: "https://github.com/o/r/pull/8405", state: "OPEN", title: "counter storage", headRefName: "run-unfiled-1" }];
+  clock.set(T0 + 90_000);
+  const reopened = openProjectorReadModel(join(root, "read-model-home"), "core", clock);
+  t.after(() => reopened.close());
+  const ctx = ctxOf(clock, [{ ...core, db: reopened }]);
+  let budget = 5;
+  assert.equal(view.prepare(ctx, () => budget-- > 0), false, "the build stopped after its probe and before it assembled a body");
+
+  const diffs = compareNow(view, core, body, T0 + 100_000);
+  assert.deepEqual(diffs.filter((d) => d.path.startsWith("board.groups") || d.path.startsWith("board.tasks") || d.path.startsWith("prQueue") || d.path.startsWith("health")), [], JSON.stringify(diffs));
+  assert.deepEqual(diffs.filter((d) => d.classification === "real"), [], JSON.stringify(diffs));
+
+  // Positive control: the build, once published, does carry what the in-flight build had read.
+  const [next] = view.materialize(ctx);
+  assert.ok(next);
+  assert.ok(next.data.board.groups.queued.includes("W1-T5091"), JSON.stringify(next.data.board.groups));
+  assert.deepEqual(next.data.prQueue.rows.map((r) => r.prNumber), [8405]);
+  assert.equal(next.data.health.daemon.state, "silent");
+});
+
+test("a task the compared body drops from its own plan is still a real now diff", (t) => {
+  // The negative control: a body missing a task its own plan holds is a wrong value, and no row or plan generation explains it.
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { readPlan: () => planOf([task("W1-T1"), task("W1-T5091")]), listGrilling: () => [] });
+  clock.set(T0);
+  core.append({ step: "daemon.tick" });
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  body.data.board.groups.queued = body.data.board.groups.queued.filter((id) => id !== "W1-T5091");
+  const queued = compareNow(view, core, body, T0 + 10_000).find((d) => d.path === "board.groups.queued");
+  assert.equal(queued?.classification, "real", JSON.stringify(queued));
+  assert.match(queued!.reason, /no measured row explains W1-T5091/);
+});
+
+test("a probe a build in flight took after the compared body is not the legacy side's probe instant", (t) => {
+  // Captured 2026-10-01T14:05:10Z: health.daemon.state legacy silent vs view polling. With no store reopen, the probe stage alone
+  // advances the held probe a minute after the published body's, and legacy judged the daemon's last poll at that later instant.
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { listGrilling: () => [] });
+  clock.set(T0 - 270_000);
+  core.append({ step: "daemon.tick" });
+  clock.set(T0);
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  clock.set(T0 + 90_000);
+  let budget = 5;
+  assert.equal(view.prepare(ctxOf(clock, [core]), () => budget-- > 0), false, "the build stopped after its probe");
+  const diffs = compareNow(view, core, body, T0 + 100_000);
+  assert.deepEqual(diffs.filter((d) => d.path.startsWith("health")), [], JSON.stringify(diffs));
+  const [next] = view.materialize(ctxOf(clock, [core]));
+  assert.equal(next?.data.health.daemon.state, "silent", "positive control: the in-flight probe did read the daemon silent");
 });

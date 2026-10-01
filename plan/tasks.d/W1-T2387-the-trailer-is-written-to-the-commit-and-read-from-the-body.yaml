@@ -10,7 +10,8 @@
   files: [src/lib/status.ts, test/trailer-surface-union.test.ts]
   origin: "operator-brief#trailer-surface-disagreement-2026-08-27"
   plan_refs: ["W1-T458", "W1-T2370", "W1-T441", "W1-T1012", "W1-T69"]
-  status: queued
+  status: blocked
+  retirement: closed
   attempts: 0
   rationale: |
     THE DEFECT, STATED AS AN ASYMMETRY RATHER THAN AN AUTHORING MISTAKE. Two surfaces can carry a
@@ -178,3 +179,4 @@
     carried the fix without carrying its own trailer. `W1-T2392` (a build can merge with no credit
     on any surface) already owns that broader mechanism question; this note credits one instance,
     it does not widen or narrow the mechanism.
+    CLOSED 2026-10-01 (operator session): this task already shipped. PR #3102 added the commit-trailer fallback to status.ts (buildCommitTrailerIndex), and its tests live in test/trailer-surface-union.test.ts. Closed, not re-proved.

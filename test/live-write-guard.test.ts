@@ -19,9 +19,14 @@ import { appendLedger } from "../src/lib/ledger.js";
 import { ledgerPathFor } from "../src/lib/ledger-path.js";
 import { buildWorkerEnv } from "../src/lib/env.js";
 import { main } from "../src/run-task.js";
+import { formatReservationAnchorMessage, gitRemoteRefReserver } from "../src/lib/task-id-reservation.js";
+import { gitTriageClaimReserver } from "../src/lib/auto-triage.js";
+import { gitDispatchClaimReserver, gitRepairClaimReserver } from "../src/lib/dispatch-claim.js";
 import {
+  assertClaimRefPushAllowed,
   assertLedgerPathNotLive,
   assertLiveWriteAllowed,
+  isNetworkRemoteUrl,
   discoverLiveLedgerRoot,
   isTestRunner,
   LiveWriteBlockedError,
@@ -436,4 +441,112 @@ test("W1-T4805: a spawned child inherits the sentinel and no app key", () => {
   assert.equal(out.inst, null);
   assert.ok(out.cfg !== null && out.cfg.includes("rmd-test-gh-config-"), "GH_CONFIG_DIR must be the empty per-process dir");
   assert.deepEqual(readdirSync(out.cfg), [], "the gh config dir must be empty — no keyring login reachable");
+});
+
+// W1-T4447: every claim-ref push (rmd-id, rmd-triage, rmd-dispatch, rmd-repair) passes ONE destination-based guard.
+type GitRun = (args: string[]) => { status: number; stdout: string; stderr: string };
+const NETWORK_ORIGINS = ["https://github.com/craigoley/remudero.git", "git@github.com:craigoley/remudero.git", "ssh://git@github.com/craigoley/remudero.git"];
+
+/** A fake git run whose origin resolves to `url`; every other argv succeeds, and each argv is recorded. */
+function fakeOriginRun(url: string): { run: GitRun; calls: string[][]; pushes: () => string[][] } {
+  const calls: string[][] = [];
+  const run: GitRun = (args) => {
+    calls.push(args);
+    if (args[0] === "remote" && args[1] === "get-url") return { status: 0, stdout: `${url}\n`, stderr: "" };
+    return { status: 0, stdout: "deadbeef\n", stderr: "" };
+  };
+  return { run, calls, pushes: () => calls.filter((c) => c[0] === "push") };
+}
+
+/** Every claim-ref push path of the four reservers, each as a thunk over one fake run. */
+function claimPushPaths(run: GitRun): Record<string, () => unknown> {
+  const id = gitRemoteRefReserver({ run, filingBranch: "run-W1-T4447-1", anchor: () => "anchor" });
+  const triage = gitTriageClaimReserver({ run, anchor: () => "anchor" });
+  const dispatch = gitDispatchClaimReserver({ run, anchor: () => "anchor" });
+  const repair = gitRepairClaimReserver({ run });
+  return {
+    "id attempt": () => id.attempt("W1-T9000", "anchor"),
+    "triage attempt": () => triage.attempt("fb-1", "anchor"),
+    "triage drop": () => triage.drop("fb-1"),
+    "dispatch attempt": () => dispatch.attempt("W1-T9000", "anchor"),
+    "dispatch drop": () => dispatch.drop("W1-T9000", { expect: "abc" }),
+    "repair attempt": () => repair.attempt(7, "anchor"),
+    "repair drop": () => repair.drop(7, "abc"),
+  };
+}
+
+test("a claim-ref push to a network origin is refused under the test runner", () => {
+  for (const url of NETWORK_ORIGINS) {
+    const fake = fakeOriginRun(url);
+    for (const [name, path] of Object.entries(claimPushPaths(fake.run))) {
+      assert.throws(
+        path,
+        (e: unknown) => e instanceof LiveWriteBlockedError && e.boundary === "git-push" && e.detail.includes(url),
+        `${name} must refuse a push to ${url}`,
+      );
+    }
+    assert.deepEqual(fake.pushes(), [], `no push may reach ${url}`);
+  }
+  // the reclaim and amend pushes of the id reserver are claim-ref pushes too
+  const reclaim = fakeOriginRun(NETWORK_ORIGINS[0]!);
+  const heldByDeadBranch: GitRun = (args) => {
+    if (args[0] === "ls-remote") return { status: 2, stdout: "", stderr: "" };
+    if (args[0] === "log") return { status: 0, stdout: formatReservationAnchorMessage({ branch: "gone", pid: 1, host: "h", startedAt: "2026-01-01T00:00:00Z", source: "automatic" }), stderr: "" };
+    return reclaim.run(args);
+  };
+  const reserver = gitRemoteRefReserver({ run: heldByDeadBranch, filingBranch: "run-W1-T4447-1", anchor: () => "anchor" });
+  assert.throws(() => reserver.reclaim!("W1-T9000"), LiveWriteBlockedError);
+  assert.deepEqual(reclaim.pushes(), []);
+  // the amend that records the filing branch: won against a local origin, then the origin turns out to be a network one
+  let origin = "/tmp/some-origin.git";
+  const flipping: GitRun = (args) => (args[0] === "remote" ? { status: 0, stdout: origin, stderr: "" } : { status: 0, stdout: "deadbeef", stderr: "" });
+  const won = gitRemoteRefReserver({ run: flipping, filingBranch: "run-W1-T4447-1", anchor: () => "anchor" });
+  assert.equal(won.attempt("W1-T9000", "anchor"), "created");
+  origin = NETWORK_ORIGINS[0]!;
+  assert.throws(() => won.recordFilingBranch!("W1-T9000", "run-W1-T4447-2"), LiveWriteBlockedError);
+});
+
+test("a claim-ref push to a local origin is still allowed under the test runner", () => {
+  for (const url of ["/tmp/some-origin.git", "file:///tmp/some-origin.git", "../relative/origin.git"]) {
+    const fake = fakeOriginRun(url);
+    for (const [name, path] of Object.entries(claimPushPaths(fake.run))) assert.doesNotThrow(path, `${name} must reach a local origin`);
+    assert.equal(fake.pushes().length, 7, `every claim push to ${url} must run`);
+  }
+  // an unresolvable origin cannot leak: the push itself fails, so the guard does not pre-empt it
+  const noOrigin: GitRun = (args) => (args[0] === "remote" ? { status: 2, stdout: "", stderr: "no such remote" } : { status: 1, stdout: "", stderr: "x" });
+  assert.doesNotThrow(() => claimPushPaths(noOrigin)["id attempt"]!());
+  // the real thing: a bare tmpdir origin, driven through a real git run, is reserved on
+  const origin = gitRepo({ bare: true, kind: "claim-guard-origin" });
+  const work = gitRepo({ cloneFrom: origin.dir, kind: "claim-guard-work" });
+  const run: GitRun = (args) => ({ status: 0, stdout: work.git(...args), stderr: "" });
+  const reserver = gitDispatchClaimReserver({ run });
+  assert.equal(reserver.attempt("W1-T9000", reserver.mintAnchor()), "created");
+  assert.ok(origin.git("for-each-ref", "refs/rmd-dispatch/").includes("W1-T9000"));
+});
+
+test("a claim-ref push is never guarded outside the test runner", () => {
+  const throwing: GitRun = () => {
+    throw new Error("a real process must not even resolve the origin");
+  };
+  assert.doesNotThrow(() => assertClaimRefPushAllowed(throwing, "refs/rmd-id/W1-T9000", REAL_RUN));
+  const fake = fakeOriginRun(NETWORK_ORIGINS[0]!);
+  assert.throws(() => assertClaimRefPushAllowed(fake.run, "refs/rmd-id/W1-T9000", TEST_RUN), LiveWriteBlockedError);
+  assert.doesNotThrow(() => assertClaimRefPushAllowed(fake.run, "refs/rmd-id/W1-T9000", { ...TEST_RUN, [LIVE_WRITE_OVERRIDE_ENV]: "1" }));
+  withLiveWritesAllowed(() => assert.doesNotThrow(() => assertClaimRefPushAllowed(fake.run, "refs/rmd-id/W1-T9000", TEST_RUN)));
+  // and a reserver in a REAL process (no runner variable) reaches its push without any origin lookup
+  const child = spawnSync(process.execPath, ["--import", "tsx", "-e",
+    `import("./src/lib/dispatch-claim.ts").then(({ gitDispatchClaimReserver }) => {
+       const calls = [];
+       const run = (a) => { calls.push(a[0]); return { status: 0, stdout: "x", stderr: "" }; };
+       gitDispatchClaimReserver({ run }).attempt("W1-T9000", "anchor");
+       console.log(JSON.stringify(calls));
+     });`],
+  { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: undefined } });
+  assert.equal(child.stdout.trim(), '["push"]', child.stderr);
+});
+
+test("isNetworkRemoteUrl separates a network remote from a filesystem one", () => {
+  for (const url of NETWORK_ORIGINS) assert.equal(isNetworkRemoteUrl(url), true, url);
+  for (const url of ["https://example.com/r.git", "git://example.com/r.git", "host:path/r.git"]) assert.equal(isNetworkRemoteUrl(url), true, url);
+  for (const url of ["/abs/origin.git", "file:///abs/origin.git", "./rel.git", "../rel.git", "origin.git", ""]) assert.equal(isNetworkRemoteUrl(url), false, url);
 });

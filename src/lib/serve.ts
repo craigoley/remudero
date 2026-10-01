@@ -84,12 +84,13 @@ import {
 } from "./ci-incidents.js";
 import { loadEscalationLinkSecret, readEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
-import { buildReadModelViewRoutes, type ViewBodySource } from "./views.js";
+import { buildReadModelViewRoutes, viewMode, type ViewBodySource } from "./views.js";
 import { createViewEvents, VIEW_EVENTS_PATH, type ViewEvents } from "./view-events.js";
 import { navBadgeView, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
 import { NOW_VIEW_NAME } from "./now-view.js";
 import { FEEDBACK_VIEW_NAME, feedbackLegacyView } from "./feedback-view.js";
 import { INBOX_VIEW_NAME, inboxLegacyView } from "./inbox-view.js";
+import { NEEDS_YOU_VIEW_NAME, withNeedsYouView } from "./needs-you-view.js";
 import { startRepositoriesSourcePublisher, type RepositoriesSources } from "./repositories-view.js";
 import { withViewShadow } from "./view-shadow.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnapshotCache, DEFAULT_POLL_MS, type BoardDeps, type BoardSnapshotSource } from "./board.js";
@@ -1339,6 +1340,8 @@ export interface GatewayCheckoutDeps {
   /** The network half, run OFF the event loop. Defaults to an async `git fetch --quiet origin`. */
   fetch?: () => Promise<void>;
   clock?: Clock;
+  /** A generation under the serve supervisor: it asks for a handoff, so it must read past the boot-sync guard. */
+  supervised?: boolean;
 }
 
 function defaultGatewayFetch(repoDir: string): () => Promise<void> {
@@ -1382,7 +1385,7 @@ export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<
   const refuse = (): string => {
     throw new Error("guard probe");
   };
-  if (checkServiceFreshness(deps.repoDir, env, { git: refuse }).status === "guarded") {
+  if (checkServiceFreshness(deps.repoDir, env, { git: refuse, ignoreReentrancyGuard: deps.supervised === true }).status === "guarded") {
     return { state: localState("guarded environment: freshness is not assessed here"), restartDue: false };
   }
   let fetchError: string | undefined;
@@ -1394,6 +1397,7 @@ export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<
   }
   const seen = new Map<string, string>();
   const svc = checkServiceFreshness(deps.repoDir, env, {
+    ignoreReentrancyGuard: deps.supervised === true,
     git: (args) => {
       if (args[0] === "fetch") {
         if (fetchError !== undefined) throw new Error(fetchError);
@@ -1828,7 +1832,7 @@ export function buildRegistryRoute(deps: RegistryRouteInput): Route {
     path: "/v1/registry",
     scope: "read",
     handler: async (_req, res) => {
-      const served = deps.readModel?.switches().views[INSTANCES_VIEW_NAME] === "serve" ? deps.readModel.body(INSTANCES_VIEW_NAME) : undefined;
+      const served = deps.readModel && viewMode(deps.readModel, INSTANCES_VIEW_NAME) === "serve" ? deps.readModel.body(INSTANCES_VIEW_NAME) : undefined;
       const answer = served ? registryFromInstances(served.body.data as InstancesData)
         : legacyRegistryBody(await read(deps.repoRegistryPath).then((text): RegistryRead => (text === undefined ? { ok: false, code: "unreadable" } : { ok: true, text })), await read(hostPath));
       sendJson(res, answer.status, answer.status === 200 ? { ...answer.body, generatedAt: clock.iso() } : answer.body);
@@ -2563,7 +2567,7 @@ function assembleServeRoutes(
     ...badgeScopes];
   const modelApprovals = deps.modelApprovals ?? [];
   const routeReads = deps.routeReadRollup ?? createRouteReadRollup();
-  const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME], servedByDefault: [readModelStatusView.name],
+  const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME], servedByDefault: [readModelStatusView.name],
     ...(readModel ? { readModel } : {}), every: deps.readModel?.every, log: deps.log, onSubscribers: (change, n, reason) => routeReads.stream("views", change, n, reason) });
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
   // server start; both the shell span and GET /v1/version close over this one value and neither
@@ -2699,7 +2703,7 @@ function assembleServeRoutes(
     }),
     buildRecentRoute(deps.board),
     ...buildReadModelViewRoutes(withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name], onServed: routeReads.served,
-      readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME], requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"] },
+      readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME], requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"] },
       legacy: [navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: navBadgeScopes }), inboxLegacyView(panelGraphDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan)] })),
     ...viewEvents.routes,
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
@@ -3035,8 +3039,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     clock: systemClock,
     write: (window) => deps.log?.("github.wake.summary", { ...wakeSummaryRow(wakeCounters, window) }),
   });
-  const readModel = deps.readModel && createReadModelWorker({ stateDir: dirname(deps.ledgerPath), instances: readModelInstances(deps), log: deps.log, escalationRepository: deps.assistantRepository,
-    registry: { repoPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot), hostPath: deps.registry?.hostRegistryPath ?? DEFAULT_HOST_INSTANCE_REGISTRY_PATH }, ...deps.readModel });
+  const readModel = deps.readModel && withNeedsYouView(createReadModelWorker({ stateDir: dirname(deps.ledgerPath), instances: readModelInstances(deps), log: deps.log, escalationRepository: deps.assistantRepository,
+    registry: { repoPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot), hostPath: deps.registry?.hostRegistryPath ?? DEFAULT_HOST_INSTANCE_REGISTRY_PATH }, ...deps.readModel }));
   const staleExit = gateStaleCodeExit({
     bootSha: consoleSha,
     log: deps.log,
@@ -3050,7 +3054,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       routeAssembly.linkRefusals.stop();
     },
     lastReadAt: () => lastReadAt,
-    assessCheckout: deps.gatewayCheckout ?? (() => assessGatewayCheckout({ repoDir: serveRepoDir() })),
+    assessCheckout: deps.gatewayCheckout ?? (() => assessGatewayCheckout({ repoDir: serveRepoDir(), supervised: deps.generation !== undefined })),
     drain: () => {
       const drained = serveDrain.drain("recycle");
       viewEventsHandover("recycle");

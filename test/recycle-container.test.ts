@@ -239,7 +239,9 @@ function writeStubs(dir: string): void {
     "        exit 0 ;;",
     "    esac",
     "    exit 0 ;;",
-    '  stop|rm|run) [ "$1" = "rm" ] && [ "$STUB_MODE" = rm-hang ] && sleep 10; exit 0 ;;',
+    // W1-T4197: this mode models an operator replacing the recycle's PAUSE with their own mid-run.
+    '  stop) [ "$STUB_MODE" = pause-swapped ] && printf \'%s\' \'{"reason":"operator hold","requestedAt":"2026-10-01T00:00:00.000Z"}\' > "$RMD_STATE_DIR/state/PAUSE"; exit 0 ;;',
+    '  rm|run) [ "$1" = "rm" ] && [ "$STUB_MODE" = rm-hang ] && sleep 10; exit 0 ;;',
     "esac",
     "exit 0",
     "",
@@ -1081,4 +1083,52 @@ test("a recycle with scratch off or an unmounted scratch root launches exactly a
   assert.equal(unmounted.status, 0, unmounted.stderr);
   assert.ok(!(unmounted.calls.find(isRun)?.argv ?? []).some((a) => a.includes(scratch.root)), "an unmounted scratch root is never bound");
   assert.match(unmounted.stdout, /scratch mounts NOT USED .* is not a mounted filesystem/);
+});
+
+// ── W1-T4197: a recycle never lifts a pause it did not write ────────────────────────────────────
+
+const OPERATOR_PAUSE = JSON.stringify({ reason: "operator hold: investigating deploy/recycle-container.sh", requestedAt: "2026-10-01T00:00:00.000Z", pid: 4242, host: "op-host" });
+
+function stateWithPause(body: string): { state: string; pausePath: string } {
+  const state = mkdtempSync(join(tmpdir(), "recycle-state-"));
+  mkdirSync(join(state, "state"), { recursive: true });
+  const pausePath = join(state, "state", "PAUSE");
+  writeFileSync(pausePath, body);
+  return { state, pausePath };
+}
+
+test("W1-T4197: a recycle leaves an operators earlier pause in place", () => {
+  // A recycle that completes: the operator's PAUSE survives byte for byte and is never overwritten.
+  const done = stateWithPause(OPERATOR_PAUSE);
+  const ok = runRecycle("good", { stateDir: done.state });
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(readFileSync(done.pausePath, "utf8"), OPERATOR_PAUSE, "the operator's pause must be untouched");
+  assert.doesNotMatch(ok.stdout, /PAUSE engaged —/, "the recycle must not claim it engaged a pause it did not write");
+  // A recycle that refuses on a live worker: the refusal path removes only its own pause, so this one stays too.
+  const refused = stateWithPause(OPERATOR_PAUSE);
+  mkdirSync(join(refused.state, "state", "inflight"), { recursive: true });
+  writeFileSync(join(refused.state, "state", "inflight", "W1-T404.lock"), JSON.stringify({ pid: 123, run_id: "run-abc", host: "5efb86ede91b", startedAt: "2026-08-18T22:00:00Z" }));
+  const refusal = runRecycle("good", { stateDir: refused.state });
+  assert.notEqual(refusal.status, 0, "a worker still in flight past the bounded wait must refuse");
+  assert.equal(readFileSync(refused.pausePath, "utf8"), OPERATOR_PAUSE, "a refusal must not delete the operator's pause");
+});
+
+test("W1-T4197: a recycle removes only the pause it wrote", () => {
+  // Its own pause (no earlier one): written with the recycle's marker, and gone after the recycle.
+  const own = mkdtempSync(join(tmpdir(), "recycle-state-"));
+  const ok = runRecycle("good", { stateDir: own });
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /PAUSE engaged —/);
+  assert.ok(!existsSync(join(own, "state", "PAUSE")), "the pause the recycle wrote must be cleared");
+  // A leftover from a crashed earlier recycle names this script, so it is the recycle's to supersede.
+  const stale = stateWithPause(JSON.stringify({ reason: "container recycle (deploy/recycle-container.sh)", requestedAt: "2026-09-01T00:00:00.000Z", pid: 1, host: "old" }));
+  const superseded = runRecycle("good", { stateDir: stale.state });
+  assert.equal(superseded.status, 0, superseded.stderr);
+  assert.ok(!existsSync(stale.pausePath), "a stale recycle pause is the recycle's own and is cleared");
+  // An operator who replaces the recycle's pause mid-run keeps theirs: the recycle's text no longer matches.
+  const swapped = mkdtempSync(join(tmpdir(), "recycle-state-"));
+  const run = runRecycle("pause-swapped", { stateDir: swapped });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(readFileSync(join(swapped, "state", "PAUSE"), "utf8"), /operator hold/, "a pause that is no longer the recycle's must survive");
+  assert.match(run.stderr, /PAUSE not removed/, "and the skipped removal must be visible");
 });

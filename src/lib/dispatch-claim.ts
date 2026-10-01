@@ -3,6 +3,7 @@ import { hostname } from "node:os";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { ledgerLivePath, ledgerRotationEntries, realLedgerFs, rotationStampIso, type LedgerGrepFsDeps } from "./ledger-union.js";
 import { classifyPushFailure } from "./task-id-reservation.js";
+import { assertClaimRefPushAllowed } from "./live-write-guard.js";
 
 /**
  * Cross-host git-ref CAS closing the dispatch-time race, in the same family as `refs/rmd-id/`
@@ -253,6 +254,7 @@ export function gitDispatchClaimReserver(deps: ClaimGitDeps): DispatchClaimReser
       return deps.run(["commit-tree", tree, "-m", msg]).stdout.trim();
     },
     attempt(taskId, anchor) {
+      assertClaimRefPushAllowed(deps.run, dispatchClaimRef(taskId));
       const res = deps.run(["push", "origin", `${anchor}:${dispatchClaimRef(taskId)}`]);
       if (res.status === 0) {
         lastStderr = undefined;
@@ -272,6 +274,7 @@ export function gitDispatchClaimReserver(deps: ClaimGitDeps): DispatchClaimReser
       const args = opts.expect
         ? ["push", `--force-with-lease=${ref}:${opts.expect}`, "origin", `:${ref}`]
         : ["push", "origin", `:${ref}`];
+      assertClaimRefPushAllowed(deps.run, ref);
       return deps.run(args).status === 0;
     },
     list() {
@@ -632,6 +635,7 @@ export function gitRepairClaimReserver(deps: ClaimGitDeps): RepairClaimReserver 
       return anchor;
     },
     attempt(prNumber, anchor) {
+      assertClaimRefPushAllowed(deps.run, repairClaimRef(prNumber));
       const res = deps.run(["push", "origin", `${anchor}:${repairClaimRef(prNumber)}`]);
       return res.status === 0 ? "created" : classifyPushFailure(res.stderr);
     },
@@ -655,12 +659,14 @@ export function gitRepairClaimReserver(deps: ClaimGitDeps): RepairClaimReserver 
     replace(prNumber, anchor, expectedAnchor) {
       if (!minted.has(anchor)) throw new Error(`repair claim anchor ${anchor} was not minted by this reserver`);
       const ref = repairClaimRef(prNumber);
+      assertClaimRefPushAllowed(deps.run, ref);
       const res = deps.run(["push", `--force-with-lease=${ref}:${expectedAnchor}`, "origin", `${anchor}:${ref}`]);
       if (res.status === 0) return "replaced";
       return classifyPushFailure(res.stderr) === "taken" ? "lost" : "unreachable";
     },
     drop(prNumber, expectedAnchor) {
       const ref = repairClaimRef(prNumber);
+      assertClaimRefPushAllowed(deps.run, ref);
       return deps.run(["push", `--force-with-lease=${ref}:${expectedAnchor}`, "origin", `:${ref}`]).status === 0;
     },
   };

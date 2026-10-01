@@ -13,7 +13,7 @@
  * GitHub facts come from the legacy gateway's persisted snapshot (ruling Q3), which now carries the
  * open half too, so the view adds no GitHub read of its own.
  *
- * DARK: the view materializes only while `switches.views.now` reads `shadow` or `serve`, and no route
+ * DARK: the view materializes only while `switches.views.now` reads `shadow`, `serve` or `auto`, and no route
  * serves it yet (P1-12 declares the route, P1-14 compares it).
  */
 import { execFileSync } from "node:child_process";
@@ -57,7 +57,7 @@ import { windowCostRows } from "./sweep.js";
 import { utcDayWindowMs } from "./time-window.js";
 import { judgeSource, PLAN_BUDGET_MS } from "./view-freshness.js";
 import { legacyRowIndex, type LegacyRows, type ShadowLatest, type ShadowSum } from "./view-shadow.js";
-import type { ViewSource } from "./views.js";
+import { effectiveViewMode, type ViewSource, type ViewSwitchMode } from "./views.js";
 
 export const NOW_VIEW_NAME = "now";
 /** 2: every clock stamp left `data`. 3: `decisions[]`, each with its answer route and tier, replaced `questions`' count (P4-T08). */
@@ -518,7 +518,7 @@ export interface NowViewContext {
   now: number;
   /** `lease`: the writer lease the board projection persists behind; absent, it lives in memory only. */
   instances: ReadonlyArray<{ state: NowSlotState; db?: ReadModelDb; lease?: ReadModelLease }>;
-  switches?: { views: Record<string, string> };
+  switches?: { views: Record<string, ViewSwitchMode> };
 }
 
 /** The instance checkout's plan: core's is serve's own; another's is its managed clone under `<root>/repos/<name>`. */
@@ -534,18 +534,24 @@ interface Held {
   recent: RecentActivityCache;
   generation: number;
   planKey: string;
-  plan: Plan;
   githubKey: string;
   gateway: ReturnType<typeof snapshotGithub>;
   at: number;
   probe?: NowHostProbe;
   healthAt: number;
+  decisionsKey: string;
+}
+
+/** What one assembled body was built from, so the shadow's legacy side reads that body's inputs and not a later build's. */
+interface Shown {
+  plan: Plan;
+  gateway: ReturnType<typeof snapshotGithub>;
+  probe: NowHostProbe;
   members: Record<string, string[]>;
-  /** The rows the body's `spendTodayUsd` added, for the shadow comparator. */
+  /** The rows the body's `spendTodayUsd` added. */
   spend: Array<[string, number]>;
   /** Each task's time the body's groups sorted it by. */
   sortedBy: Map<string, string | undefined>;
-  decisionsKey: string;
 }
 
 /** The day's cost rows `computeGlanceSpend` adds into `spendTodayUsd`. */
@@ -579,6 +585,8 @@ export function createNowView(opts: NowViewOptions): {
   const core = opts.coreInstance ?? opts.instances[0]?.name;
   const byName = new Map(opts.instances.map((i) => [i.name, i]));
   const held = new Map<string, Held>();
+  /** Keyed by the very `data` object a body published: a build in flight advances `held`, never a published body's inputs. */
+  const shown = new WeakMap<NowViewData, Shown>();
   const planCache = new Map<string, { key: string; plan: Plan }>();
   const readPlan = opts.readPlan ?? ((instance: NowInstance): Plan => {
     const path = nowPlanPath(instance);
@@ -672,7 +680,7 @@ export function createNowView(opts: NowViewOptions): {
           currentGithub: () => held.get(name)!.gateway.github, githubGeneration: () => { const g = held.get(name)!; return g.gateway.content ?? g.githubKey; },
           log: (step, extra) => log(step, { instance: name, ...extra }),
         });
-        h = { db: b.db, board, recent: createRecentActivityCache(), generation: -1, planKey: b.keys.plan, plan: b.plan!, githubKey: b.keys.github, gateway: b.gateway!, at: b.now, healthAt: Number.NEGATIVE_INFINITY, members: {}, spend: [], sortedBy: new Map(), decisionsKey: b.keys.decisions };
+        h = { db: b.db, board, recent: createRecentActivityCache(), generation: -1, planKey: b.keys.plan, githubKey: b.keys.github, gateway: b.gateway!, at: b.now, healthAt: Number.NEGATIVE_INFINITY, decisionsKey: b.keys.decisions };
         held.set(name, h);
       }
       Object.assign(h, { githubKey: b.keys.github, gateway: b.gateway });
@@ -694,8 +702,9 @@ export function createNowView(opts: NowViewOptions): {
     ["assemble", (instance, b) => {
       const { h, snapshot, rows, now, state } = b as Required<NowBuild>;
       const data = assembleNowView({ instance: instance.name, snapshot, rows, plan: b.plan!, recent: computeRecentActivity(depsOf(instance, b), h.recent, 20), health: h.probe!.health, decisions: b.decisions!, nowMs: now });
-      Object.assign(h, { generation: state.generation, planKey: b.keys.plan, plan: b.plan, at: now, members: nowCountMembers(snapshot.tasks), spend: dayCostRows(rows, now),
-        sortedBy: new Map(snapshot.tasks.map((t) => [t.taskId, t.lastActivityAt])), decisionsKey: b.keys.decisions });
+      Object.assign(h, { generation: state.generation, planKey: b.keys.plan, at: now, decisionsKey: b.keys.decisions });
+      shown.set(data, { plan: b.plan!, gateway: b.gateway!, probe: h.probe!, members: nowCountMembers(snapshot.tasks), spend: dayCostRows(rows, now),
+        sortedBy: new Map(snapshot.tasks.map((t) => [t.taskId, t.lastActivityAt])) });
       const sources: ViewSource[] = [
         ...(opts.ledgerSource ? [opts.ledgerSource(state, now)] : []),
         judgeSource({ name: `github:${instance.name}`, ...b.gateway!.source }, now),
@@ -736,7 +745,7 @@ export function createNowView(opts: NowViewOptions): {
 
   /** Each held instance this view builds for, with its store; a step that throws drops that build and is logged. */
   function eachInstance(ctx: NowViewContext, run: (instance: NowInstance, entry: { state: NowSlotState; db: ReadModelDb; lease?: ReadModelLease }) => void): void {
-    const mode = ctx.switches?.views[NOW_VIEW_NAME];
+    const mode = effectiveViewMode(ctx.switches?.views[NOW_VIEW_NAME], undefined);
     if (mode !== "shadow" && mode !== "serve") return;
     for (const { state, db, lease } of ctx.instances) {
       const instance = byName.get(state.instance);
@@ -755,7 +764,8 @@ export function createNowView(opts: NowViewOptions): {
     version: NOW_VIEW_VERSION,
     perInstance: true,
     /**
-     * The shadow comparator's legacy side for one key: GET /v1/status's board and PR queue over the
+     * The shadow comparator's legacy side for one key, over the plan, GitHub snapshot and probe the compared
+     * body was built from: GET /v1/status's board and PR queue over the
      * instance's LIVE FILE only, plus a host probe of that instance AT THE VIEW'S PROBE TIME over the live
      * rows up to it, so the daemon's poll state is compared at one instant. The probe's gauges are taken
      * from the view when both probes read them, because two samples moments apart always differ; a gauge
@@ -766,16 +776,16 @@ export function createNowView(opts: NowViewOptions): {
     legacy(key, now, view) {
       const name = decodeURIComponent(key.replace(/^instance=/, ""));
       const instance = byName.get(name);
-      const h = held.get(name);
-      if (!instance || !h || !key.startsWith("instance=")) return undefined;
       const mine = view as NowViewData;
+      const built = shown.get(mine);
+      if (!instance || !built || !key.startsWith("instance=")) return undefined;
       const ledgerPath = join(instance.ledgerDir, LEDGER_FILENAME);
       const rows = readLedgerLines(ledgerPath);
-      const deps = { plan: h.plan, ledgerPath, github: h.gateway.github, readLedger: () => rows, now: () => now };
+      const deps = { plan: built.plan, ledgerPath, github: built.gateway.github, readLedger: () => rows, now: () => now };
       const snapshot = computeBoardSnapshot(deps);
       const decisions: NowDecisionsData = { decisions: mine.decisions, ...(mine.decisionsMore ? { decisionsMore: mine.decisionsMore } : {}), ...(mine.decisionsReasons ? { decisionsReasons: mine.decisionsReasons } : {}) };
-      const legacy = assembleNowView({ instance: name, snapshot, rows, plan: h.plan, recent: [], health: mine.health, decisions, nowMs: now });
-      const probeMs = h.probe ? Date.parse(h.probe.sampledAt) : now;
+      const legacy = assembleNowView({ instance: name, snapshot, rows, plan: built.plan, recent: [], health: mine.health, decisions, nowMs: now });
+      const probeMs = Date.parse(built.probe.sampledAt);
       const readLive = opts.hostProbe?.readLive ?? readLedgerLines;
       const atProbe = { ...opts.hostProbe, readLive: (path: string) => readLive(path).filter((row) => !(typeof row.ts === "string" && Date.parse(row.ts) > probeMs)) };
       const probe = defaultProbeHost(instance, name === core, fixedClock(probeMs), atProbe).health;
@@ -788,12 +798,12 @@ export function createNowView(opts: NowViewOptions): {
       const [shownMine, shownTheirs] = [new Set(mine.board.tasks.map((t) => t.taskId)), new Set(legacy.board.tasks.map((t) => t.taskId))];
       const windowed = [...new Set([...shownMine, ...shownTheirs])].filter((id) => shownMine.has(id) !== shownTheirs.has(id));
       const row = (id: string, at: string | undefined): string | null => (at ? `${id}#${at}` : null);
-      const keys = Object.fromEntries(snapshot.tasks.map((t) => [t.taskId, { legacy: row(t.taskId, t.lastActivityAt), view: row(t.taskId, h.sortedBy.get(t.taskId)) }]));
+      const keys = Object.fromEntries(snapshot.tasks.map((t) => [t.taskId, { legacy: row(t.taskId, t.lastActivityAt), view: row(t.taskId, built.sortedBy.get(t.taskId)) }]));
       return {
         data: { ...mine, board: legacy.board, prQueue: legacy.prQueue, health },
         asOfMs: now,
-        members: Object.fromEntries(Object.entries(theirs).map(([path, ids]) => [path, { legacy: ids, view: h.members[path] ?? [] }])),
-        sums: { "board.spendTodayUsd": { legacy: dayCostRows(rows, now), view: h.spend } },
+        members: Object.fromEntries(Object.entries(theirs).map(([path, ids]) => [path, { legacy: ids, view: built.members[path] ?? [] }])),
+        sums: { "board.spendTodayUsd": { legacy: dayCostRows(rows, now), view: built.spend } },
         derived: {
           "board.taskProjection.returned": groups,
           "board.taskProjection.complete": [...groups, "board.taskProjection.total"],

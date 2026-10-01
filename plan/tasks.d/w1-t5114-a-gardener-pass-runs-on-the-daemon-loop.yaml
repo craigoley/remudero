@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-garden-off-loop-1790852416000 -> plan-garden-off-loop-1790852416000"
   plan_refs: [W1-T4998, W1-T4110, W1-T4969, W1-T5002, W1-T5003, W1-T5074]
   files: [src/lib/gardener.ts, src/lib/garden-registry.ts, src/run-task.ts, test/a-gardener-pass-never-runs-on-the-daemon-loop.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-01 (core ledger union): 11 daemon.tick_phases rows spent 4,344 s from tick start to admission

@@ -725,7 +725,7 @@ test("analytics checkpoints resume an archive-only source and hydrate routing bu
     assert.deepEqual(resumed.snapshot.routingTelemetry.buckets[0]?.fallbackReasons, []);
     assert.equal(resumed.snapshot.dimensions.find((dimension) => dimension.key === "outcome")?.buckets.find((bucket) => bucket.key === "reverted")?.count, 1);
     assert.equal(resumed.snapshot.dimensions.find((dimension) => dimension.key === "outcome")?.buckets.find((bucket) => bucket.key === "follow-up-fix")?.count, 1);
-    assert.equal(readAnalyticsCheckpoint(dir)?.version, 1, "a valid checkpoint is readable after atomic publication");
+    assert.equal(readAnalyticsCheckpoint(dir)?.version, 2, "a valid checkpoint is readable after atomic publication");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -750,7 +750,7 @@ test("checkpoint writes fail closed when the state path is not a directory", () 
   try {
     writeFileSync(notDirectory, "not a directory\n");
     writeAnalyticsCheckpoint(notDirectory, {
-      version: 1,
+      version: 2,
       source: { archives: [], live: null, lastArchive: null, liveOffset: 0 },
       tail: [],
       state: {} as never,
@@ -769,7 +769,7 @@ test("a checkpoint write cannot resurrect a vanished instance state directory", 
     mkdirSync(vanished);
     rmSync(vanished, { recursive: true });
     writeAnalyticsCheckpoint(vanished, {
-      version: 1,
+      version: 2,
       source: { archives: [], live: null, lastArchive: null, liveOffset: 0 },
       tail: [],
       state: {} as never,

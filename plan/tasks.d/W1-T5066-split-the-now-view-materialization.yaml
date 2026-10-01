@@ -14,7 +14,7 @@
   files:
     - src/lib/now-view.ts
     - test/now-view-bounded-steps.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-01 (FOLLOWUPS-1, #8254): splitting the cold repositories build and the nav-badge fold

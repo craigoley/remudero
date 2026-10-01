@@ -3,13 +3,16 @@
  * picks one class a pass, lands its changes as one PR and judges that class on its own metric.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import {
+  GardenStateUnreadableError,
+  gardenEffectsPath,
   gardenStatePath,
+  initialGardenState,
   readGardenState,
   runGarden,
   startGarden,
@@ -251,4 +254,107 @@ test("W1-T4110: a failing pass is logged under the spec's name and the timer kee
   pump.stop();
   assert.ok(ticks >= 2, `ticked ${ticks}`);
   assert.ok(rows.every((r) => r === "demo.gardener_failed") && rows.length === ticks);
+});
+
+const PENDING_PR = { prUrl: "https://github.com/acme/demo/pull/7", actionClass: "a", baseline: { trials: 0, successes: 0 } };
+
+test("W1-T4938: corrupt existing gardener state refuses a duplicate PR", () => {
+  const inv: Inv = { version: 1, metrics: { a: { trials: 0, successes: 0 }, b: { trials: 0, successes: 0 } } };
+  const cases: Array<[string, string, string]> = [
+    ["torn write", '{"classes":{"a":{"alpha":3,', "unparseable"],
+    ["no classes", JSON.stringify({ pending: PENDING_PR }), "malformed"],
+    ["class record not numbers", JSON.stringify({ classes: { a: { alpha: "3", beta: 1 } }, pending: PENDING_PR }), "malformed"],
+    ["pending class unknown", JSON.stringify({ classes: { a: { alpha: 3, beta: 1 } }, pending: { ...PENDING_PR, actionClass: "zzz" } }), "malformed"],
+    ["pending without a PR url", JSON.stringify({ classes: { a: { alpha: 3, beta: 1 } }, pending: { ...PENDING_PR, prUrl: 7 } }), "malformed"],
+    ["fingerprint not a string", JSON.stringify({ classes: { a: { alpha: 3, beta: 1 } }, lastPass: { fingerprint: 12 } }), "malformed"],
+  ];
+  for (const [label, bytes, failureClass] of cases) {
+    const dir = stateDir();
+    const path = gardenStatePath(dir, "demo");
+    writeFileSync(path, bytes);
+    const effects = gardenEffectsPath(dir, "demo");
+    writeFileSync(effects, JSON.stringify({ effects: [{ id: "e1", actionClass: "a", verdict: "credit", kind: "effect", at: "2026-09-30T00:00:00Z" }] }));
+    const landed: Array<{ title: string; body: string }> = [];
+    let opened = 0;
+    let reads = 0;
+    const rows: string[] = [];
+    const s = spec(inv, { inventory: () => { reads++; return inv; }, apply: () => { throw new Error("apply must not run"); } });
+    const deps = {
+      stateDir: dir, repoRoot: dir, openWorkspace: () => { opened++; return checkout(landed)(); }, log: (step: string) => rows.push(step), seed: 1,
+    };
+    assert.throws(
+      () => runGarden(s, deps),
+      (e: unknown) => e instanceof GardenStateUnreadableError && e.path === path && e.failureClass === failureClass && e.message.includes(path) && e.message.includes(failureClass),
+      label,
+    );
+    assert.equal(readFileSync(path, "utf8"), bytes, `${label}: the unreadable state is left for repair, never overwritten`);
+    assert.ok(existsSync(effects), `${label}: the overseer's verdicts are not consumed against a record that was not read`);
+    assert.deepEqual(landed, [], `${label}: no PR is landed`);
+    assert.equal(opened + reads, 0, `${label}: no workspace is opened and no corpus is read`);
+    assert.deepEqual(rows, [], `${label}: a refused pass writes no scorecard`);
+    assert.throws(() => readGardenState(path, ["a", "b"]), GardenStateUnreadableError, `${label}: the reader names the failure instead of returning the optimistic prior`);
+  }
+});
+
+test("W1-T4938: first boot and compatible older gardener state still load", () => {
+  const inv: Inv = { version: 1, metrics: { a: { trials: 0, successes: 0 }, b: { trials: 0, successes: 0 } } };
+  // No file: the reader returns the prior, and one pass initializes and records the state.
+  const fresh = stateDir();
+  const freshPath = gardenStatePath(fresh, "demo");
+  assert.deepEqual(readGardenState(freshPath, ["a", "b"]), initialGardenState(["a", "b"]));
+  const landed: Array<{ title: string; body: string }> = [];
+  const first = runGarden(spec(inv), { stateDir: fresh, repoRoot: fresh, openWorkspace: checkout(landed), log: () => {}, seed: 1 });
+  assert.ok(first.ran);
+  assert.equal(landed.length, 1);
+  assert.ok(readGardenState(freshPath, ["a", "b"]).pending, "the first boot pass recorded its pending PR");
+
+  // An older record: one class only, none of the later optional fields. The class a spec added since
+  // is initialized, the old record is kept, and the pass runs normally.
+  const older = stateDir();
+  const olderPath = gardenStatePath(older, "demo");
+  writeFileSync(olderPath, JSON.stringify({ classes: { a: { alpha: 5, beta: 2 } }, lastPass: { fingerprint: "f0" } }));
+  const loaded = readGardenState(olderPath, ["a", "b"]);
+  assert.deepEqual(loaded.classes, { a: { alpha: 5, beta: 2 }, b: { alpha: 3, beta: 1 } });
+  assert.deepEqual(loaded.lastPass, { fingerprint: "f0" });
+  const second: Array<{ title: string; body: string }> = [];
+  assert.ok(runGarden(spec(inv), { stateDir: older, repoRoot: older, openWorkspace: checkout(second), log: () => {}, seed: 1 }).ran);
+  assert.equal(second.length, 1);
+
+  // A full record, with every optional field a later gardener wrote, loads unchanged.
+  const full = stateDir();
+  const fullPath = gardenStatePath(full, "demo");
+  const written = {
+    classes: { a: { alpha: 4, beta: 2 }, b: { alpha: 3, beta: 3 } },
+    lastPass: { fingerprint: "f1", landed: "https://github.com/acme/demo/pull/7" },
+    lastCheap: "v1",
+    pending: { ...PENDING_PR, atMerge: { trials: 3, successes: 1 } },
+    filingFailures: { count: 2, lastAt: "2026-09-30T00:00:00.000Z", reason: "boom" },
+    foldedEffects: ["e1"],
+  };
+  writeFileSync(fullPath, JSON.stringify(written));
+  assert.deepEqual(readGardenState(fullPath, ["a", "b"]), written);
+});
+
+test("W1-T4938: unreadable gardener state is visible and repairable", async () => {
+  const dir = stateDir();
+  const inv: Inv = { version: 1, metrics: { a: { trials: 0, successes: 0 }, b: { trials: 0, successes: 0 } } };
+  const path = gardenStatePath(dir, "demo");
+  writeFileSync(path, "{not json");
+  const landed: Array<{ title: string; body: string }> = [];
+  const rows: Array<[string, Record<string, unknown> | undefined]> = [];
+  const pump = startGarden(spec(inv), { stateDir: dir, repoRoot: dir, openWorkspace: checkout(landed), log: (s, e) => rows.push([s, e]), seed: 1 }, 5);
+  const waitFor = async (done: () => boolean) => { for (let waited = 0; !done() && waited < 5000; waited += 5) await new Promise((resolve) => setTimeout(resolve, 5)); };
+  await waitFor(() => rows.length >= 2);
+  const failed = rows.find(([s]) => s === "demo.gardener_failed")?.[1];
+  assert.ok(failed, "the refused pass is ledgered as gardener_failed");
+  assert.ok(String(failed.error).includes(path), "the row names the unreadable path");
+  assert.equal(failed.path, path);
+  assert.equal(failed.failure_class, "unparseable");
+  assert.deepEqual(landed, [], "nothing lands while the state is unreadable");
+  assert.equal(readFileSync(path, "utf8"), "{not json");
+  // Repair: a valid file lets the very next tick through, with no backoff to wait out.
+  writeFileSync(path, JSON.stringify(initialGardenState(["a", "b"])));
+  await waitFor(() => landed.length > 0);
+  pump.stop();
+  assert.equal(landed.length, 1, "the pass retried after repair and landed once");
 });

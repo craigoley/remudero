@@ -287,6 +287,84 @@ test("W1-T3793: external wait handoff releases claims with freshness evidence", 
   }
 });
 
+test("W1-T5127: a recycle PAUSE hands a CI wait off as recycle_yield and releases its claims", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}daemon-external-wait-root-`));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, PLAN_YAML);
+  const cleanupGit = writeOfflineGitFixture(root);
+  const fixedTime = 1789842000000;
+  const branch = `run-T-FRESHNESS-HANDOFF-${fixedTime}`;
+  const gh = writePendingGateGh(branch);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${gh.dir}:${previousPath}`;
+  const now = t.mock.method(Date, "now", () => fixedTime);
+  const calls: SpawnWorkerArgs[] = [];
+  const spawn: typeof spawnWorker = async (args) => {
+    calls.push(args);
+    return calls.length === 1
+      ? workerResult({ text: "RECON REPORT\nOBSERVED: fixture\n" })
+      : workerResult({ text: `REPORT\nPR_URL: ${PR_URL}\n` });
+  };
+  const drops: Array<{ taskId: string; expect?: string }> = [];
+  const claimReserver: DispatchClaimReserver = {
+    mintAnchor: () => "freshness-handoff-anchor",
+    attempt: () => "created",
+    holder: () => undefined,
+    drop: (taskId, options) => {
+      drops.push({ taskId, expect: options?.expect });
+      return options?.expect === "freshness-handoff-anchor";
+    },
+  };
+
+  try {
+    const config: Config = { claudeBin: "/bin/true", root, installRoot: process.cwd() };
+    const result = await withLiveWritesAllowed(() =>
+      runTask("T-FRESHNESS-HANDOFF", {
+        skipGitSync: true,
+        planPath,
+        config,
+        github: OFFLINE_GITHUB,
+        spawn,
+        claimReserver,
+        containmentExec: holdingContainmentExec,
+        isolationExec: cleanIsolationExec,
+        externalWaitFreshness: () => undefined,
+        externalWaitRecycle: () => "PAUSE requested: container recycle (deploy/recycle-container.sh)",
+      }),
+    );
+    assert.equal(result.verdict, "handed_off", "the run returns a named hand-off with its open PR");
+    assert.equal(result.prUrl, PR_URL);
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const awaiting = ledger.findIndex((line) => line.step === "run.awaiting_external");
+    const handoff = ledger.findIndex((line) => line.step === "run.freshness_handoff");
+    assert.ok(awaiting >= 0 && handoff > awaiting, "the handoff cannot precede the retained external-wait entry");
+    assert.equal(ledger[handoff]?.trigger, "recycle", "the handoff names the recycle that caused it");
+    assert.equal(ledger[handoff]?.head_sha, HEAD_SHA);
+    assert.equal(
+      ledger.some((line) => line.step === "verdict" && line.verdict === "handed_off" && line.reason === "recycle_yield"),
+      true,
+      "the verdict names a recycle yield, not a freshness yield",
+    );
+    assert.equal(ledger.some((line) => line.step === "verdict" && line.verdict === "handed_off"), true);
+    assert.equal(
+      ledger.some((line) => line.step === "dispatch.claim_released" && line.dropped === true),
+      true,
+      "the normal runTask finally releases its cross-host claim on the voluntary handoff",
+    );
+    assert.equal(existsSync(join(root, "state", "inflight", "T-FRESHNESS-HANDOFF.lock")), false, "runTask's ordinary inflight lock is released");
+    assert.deepEqual(drops, [{ taskId: "T-FRESHNESS-HANDOFF", expect: "freshness-handoff-anchor" }]);
+  } finally {
+    now.mock.restore();
+    process.env.PATH = previousPath;
+    rmSync(gh.dir, { recursive: true, force: true });
+    cleanupGit.cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("DAEMON WIRING: the production runOne supplies a material freshness handoff only after an origin advance", async (t) => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}daemon-external-wait-daemon-root-`));
   const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}daemon-external-wait-daemon-home-`));
@@ -335,6 +413,15 @@ test("DAEMON WIRING: the production runOne supplies a material freshness handoff
     );
     cleanupGit.advanceOrigin("src/lib/daemon.ts", "advance the daemon loop");
     const newSha = originHead();
+    assert.equal(forwarded.externalWaitRecycle?.(), undefined, "no recycle PAUSE: the CI wait is not handed off (W1-T5127)");
+    mkdirSync(join(root, "state"), { recursive: true });
+    writeFileSync(join(root, "state", "PAUSE"), JSON.stringify({ reason: "container recycle (deploy/recycle-container.sh)", requestedAt: "2026-10-01T11:59:34.000Z", pid: 1, host: "Remudero" }));
+    assert.equal(
+      forwarded.externalWaitRecycle?.(),
+      "PAUSE requested: container recycle (deploy/recycle-container.sh)",
+      "the production runOne reads the recycle PAUSE from the daemon's own config root (W1-T5127)",
+    );
+    rmSync(join(root, "state", "PAUSE"), { force: true });
     assert.deepEqual(
       forwarded.externalWaitFreshness?.(),
       {

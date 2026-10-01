@@ -60,6 +60,7 @@ export interface SelfSyncDeps {
    * loop-guard env added. Tests inject a spy that just records the call — never forking.
    */
   reexec?: () => void;
+  ignoreReentrancyGuard?: boolean;
   /**
    * W1-T486: one ledger-shaped line per distinct refusal reason per process, no-op by default.
    * Carries `reason` and the two shas already in `warn()`'s message, plus a dirty-path `count`
@@ -463,7 +464,7 @@ export function checkServiceFreshness(
   env: NodeJS.ProcessEnv | Record<string, string | undefined>,
   deps: SelfSyncDeps = {},
 ): ServiceFreshness {
-  if (alreadySelfSynced(env)) return { status: "guarded" };
+  if (!deps.ignoreReentrancyGuard && alreadySelfSynced(env)) return { status: "guarded" };
   if (isCiEnv(env)) return { status: "guarded" };
 
   const git =
