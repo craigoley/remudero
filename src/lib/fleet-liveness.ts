@@ -142,7 +142,8 @@ export function judgeInstanceLiveness(instance: LivenessInstance, rows: readonly
     ...(bootError ? { bootError: bootError.error as string } : {}),
     reasons: [],
   };
-  if (stop && tsOf(stop) > heartbeatMs) {
+  // W1-T5023: only boots AFTER the STOP can outrank it; a daemon restarting past the bound is not holding.
+  if (stop && tsOf(stop) > heartbeatMs && boots.filter((ms) => ms > tsOf(stop)).length <= MAX_BOOTS_WITHOUT_HEARTBEAT) {
     // An operator STOP is a deliberate hold, not an outage: say so rather than page about it.
     return { ...result, state: "held", reasons: [`stopped by the operator: ${String(stop.detail ?? "STOP flag")}`] };
   }
