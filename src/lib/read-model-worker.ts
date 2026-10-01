@@ -18,6 +18,7 @@ import { dirname, join } from "node:path";
 import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
+import { createGithubKeepWarm, type GithubKeepWarm } from "./github-refresh-pacer.js";
 import { ghIssueGateway, tryEscalate, type EscalateDeps } from "./escalate.js";
 import { createInstancesView } from "./instances-view.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
@@ -124,7 +125,12 @@ export interface ReadModelSwitches {
   views: Record<string, ReadModelViewMode>;
   /** GET /v1/views/events' kill switch (view-events.ts); absent reads `off`, so push is dark until switched on. */
   push?: "on" | "off";
+  /** Who keeps GitHub facts warm (Phase 1 cutover); absent reads `serve`, and `worker` falls back to serve while the worker is not live. */
+  github?: "serve" | "worker";
 }
+
+/** Which keep-warm took over serve's gateway, and why. */
+export const GITHUB_FETCHER_STEP = "github.keep_warm.owner";
 
 /** An `auto` view's effective mode moved: to served on readiness, or back to legacy on a real diff or unknown readiness. */
 export const VIEW_AUTO_PROMOTED_STEP = "view.auto_promoted";
@@ -169,7 +175,7 @@ export function readReadModelSwitches(path: string): { ok: true; switches: ReadM
   } catch (error) {
     return { ok: false, reason: `switch file is not JSON: ${(error as Error).message}` };
   }
-  const obj = (raw ?? {}) as { projector?: unknown; views?: unknown; push?: unknown };
+  const obj = (raw ?? {}) as { projector?: unknown; views?: unknown; push?: unknown; github?: unknown };
   const views: Record<string, ReadModelViewMode> = {};
   for (const [name, mode] of Object.entries(typeof obj.views === "object" && obj.views !== null ? obj.views : {})) {
     if (mode !== "serve" && mode !== "shadow" && mode !== "off" && mode !== "auto") return { ok: false, reason: `view ${name} has mode ${JSON.stringify(mode)}` };
@@ -178,7 +184,8 @@ export function readReadModelSwitches(path: string): { ok: true; switches: ReadM
   const projector = obj.projector ?? "on";
   if (projector !== "on" && projector !== "off") return { ok: false, reason: `projector has mode ${JSON.stringify(projector)}` };
   if (obj.push !== undefined && obj.push !== "on" && obj.push !== "off") return { ok: false, reason: `push has mode ${JSON.stringify(obj.push)}` };
-  return { ok: true, switches: { projector, views, ...(obj.push !== undefined ? { push: obj.push } : {}) }, mtimeMs };
+  if (obj.github !== undefined && obj.github !== "serve" && obj.github !== "worker") return { ok: false, reason: `github has mode ${JSON.stringify(obj.github)}` };
+  return { ok: true, switches: { projector, views, ...(obj.push !== undefined ? { push: obj.push } : {}), ...(obj.github !== undefined ? { github: obj.github } : {}) }, mtimeMs };
 }
 
 /** One instance's projector, as the worker last saw it. Posted to the main thread every tick. */
@@ -1425,6 +1432,8 @@ export interface ReadModelWorkerHandle {
   driveShadow(sample: ShadowSample): void;
   /** Calls `listener` with each body the worker posts, after it is stored; returns the unsubscribe. */
   onBody(listener: (entry: ReadModelBodyEntry) => void): () => void;
+  /** A reader was served: paces the worker's GitHub keep-warm as serve's own is paced. */
+  noteGithubRead?(): void;
 }
 
 export interface ReadModelWorkerOptions {
@@ -1444,6 +1453,8 @@ export interface ReadModelWorkerOptions {
   viewsModule?: string;
   /** Sees each worker message after the handle has applied it. */
   observe?: (msg: ReadModelWorkerMessage) => void;
+  /** Serve's keep-warm and its gateway walk: exactly one of it and the worker's own runs (switch `github`). */
+  github?: { serve: GithubKeepWarm } & Parameters<typeof createGithubKeepWarm>[0];
 }
 
 function everyUnref(run: () => void, ms: number): () => void {
@@ -1510,6 +1521,25 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   /** What the worker last said it was doing, and the slowest store open it has reported. */
   let phase: { instance: string; phase: string } | undefined;
   let slowestOpenMs = 0;
+  const serveWarm = opts.github?.serve;
+  const workerWarm = opts.github && createGithubKeepWarm({ clock, log: opts.log, ...opts.github });
+  let githubOwner: "serve" | "worker" | undefined;
+  /** Stops one keep-warm before starting the other, so there is never a second fetcher, and a dead or unleased worker never leaves none. */
+  const handGithub = (): void => {
+    if (!serveWarm || !workerWarm) return;
+    const lease = instances.get(home)?.lease ?? "none";
+    const reason = mainSwitches.github !== "worker" ? "switched to serve"
+      : stopping || !worker ? "worker not running"
+        : lease !== "held" ? `worker lease ${lease}`
+          : clock.now() - heardAt >= READ_MODEL_LEASE_TTL_MS ? "worker silent" : undefined;
+    const owner = reason === undefined ? "worker" : "serve";
+    if (owner === githubOwner) return;
+    const was = githubOwner;
+    githubOwner = owner;
+    (owner === "worker" ? serveWarm : workerWarm).stop();
+    (owner === "worker" ? workerWarm : serveWarm).start();
+    if (was !== undefined || owner === "worker") opts.log?.(GITHUB_FETCHER_STEP, { owner, was: was ?? null, reason: reason ?? `worker holds the ${home} lease` });
+  };
 
   /**
    * The silent-worker watchdog. A worker blocked in a call, or whose loop died without an exit,
@@ -1623,12 +1653,15 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       bodyListeners.add(listener);
       return () => bodyListeners.delete(listener);
     },
+    noteGithubRead: () => workerWarm?.noteRead(),
     start: () => {
       if (worker || stopping) return;
       spawn();
+      handGithub();
       stopSwitchWatch = (opts.every ?? everyUnref)(() => {
         refreshSwitches();
         watchWorker();
+        handGithub();
         noteAutoModes();
         for (const entry of bodies.values()) if (shadowSampled(mainSwitches.views[entry.view])) driven?.(entry.view, entry.key, new URLSearchParams(entry.key), true);
       }, READ_MODEL_SWITCH_RECHECK_MS);
@@ -1639,6 +1672,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       clearTimeout(respawnTimer);
       const running = worker;
       worker = undefined;
+      handGithub();
       if (!running || !signal) return false;
       Atomics.store(signal, 0, 1);
       running.postMessage({ type: "stop" });
