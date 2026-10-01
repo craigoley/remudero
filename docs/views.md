@@ -189,7 +189,9 @@ writer lease, and how many future-dated rows were quarantined.
 
 `data.inbox`: `{ ready?, needsYou?, fleet?, reason? }`.
 - These are open inbox items by who must act.
-- The source is the classification that `GET /v1/inbox` writes (`state/inbox-classified.json`).
+- The source is `state/inbox-classified.json`, which serve's slow lane (the read-model worker's second thread,
+  `src/lib/read-model-slow-lane.ts`) rewrites every minute with or without a reader: on a change, and at least every
+  5 min. `GET /v1/inbox` writes nothing. The daemon's fleet lane files from the same file.
 
 ## `repositories` (version 2)
 
@@ -267,6 +269,38 @@ diskFreeBytes?, rateLimitRemaining?, daemon{ state, at?, reason? }, reasons? }, 
   sources. Those are GET /v1/status's board and PR queue over the instance's live file only, plus a fresh
   host probe of that instance, computed in the worker (`createNowView`'s `legacy`).
 - Probe gauges come from the view whenever both probes read them, so two samples moments apart are not a diff.
+
+## `instances` (version 1)
+
+`GET /v1/views/instances`: one instance list, saying what this serve actually serves (arch Phase 4 §4,
+W1-T5056, `src/lib/instances-view.ts`). Schema: `InstancesView` in `openapi/daemon.yaml`. Dark until
+`switches.json` sets `instances` to `serve`; until then it answers 404 (`view_disabled`, or `view_shadow`
+under `shadow`) and the console reads `/v1/registry` as before.
+
+`data.instances[]`: `{ id, registered, project?, repo?, mode?, prefix, served, liveness{ state, since? },
+readModel{ lease }, capabilities{ views[], writes[], coreOnly? } }`, one per instance any list names: the repo
+registry's live rows in file order, then any instance the worker projects that no row names, then the host copy's extra names.
+- `served` is true when the read-model worker projects the instance and its state dir is mounted in this
+  serve. A registered instance with `served: false` needs serve recreated to mount it.
+- `liveness.state` is a band over the newest projected `daemon.*` row: `down` once it is older than the
+  fleet's stale-heartbeat bound or a quiet-mode pulse's, whichever is longer; `unknown` before any row.
+  `since` is that row's own time, present while down, so the ETag moves only when the band does. The
+  gateway's liveness watch stays the escalating judge.
+- `capabilities.views` and `writes` are what serve answers for the instance (writes under its `prefix`);
+  `coreOnly` (on core) names the routes only core answers, for every instance.
+
+`data.hostRegistry`: `in_sync | drifted | unreadable | malformed`, as `/v1/registry`. `data.drift` (present
+when any list disagrees): `{ hostOnly[], repoOnly[], unmounted[], unregistered[] }`. `data.registryError` is
+the repo registry's refusal code when it could not be read.
+
+Sources: `registry:repo` (the file's mtime as `asOf`; `unavailable` with the reason when it cannot be read)
+and `ledger:<instance>` per projected instance.
+
+`GET /v1/registry` answers as a projection of this body (`registryFromInstances`) while the view is
+`serve`, with the same wire shape and no file read; otherwise it keeps its own computation, which is
+also the view's shadow side. The console's `RMD_CONTROL_REPO_INSTANCES` and
+`RMD_CONTROL_ANALYTICS_INSTANCES` retire only after the `agent`, `analytics` and `usage` views fold
+every instance in core (CONSOLE-T102).
 
 ## Console latency: `POST /v1/console/telemetry` (Phase 2)
 

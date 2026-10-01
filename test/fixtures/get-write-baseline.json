@@ -20,12 +20,6 @@
       "owner": "the feedback materializer in the slow lane, triggered by a gateway generation showing the PR merged (P4-T07)"
     },
     {
-      "route": "GET /v1/inbox",
-      "writes": ["mkdir state", "open-for-write state/inbox-classified.json.<tmp>", "rename state/inbox-classified.json"],
-      "reason": "writes the classification snapshot the daemon's fleet lane files from, so with no viewer the lane decides on stale readiness (6 h measured).",
-      "owner": "the slow lane's inbox unit (P4-T06; #8264 removes this write)"
-    },
-    {
       "route": "GET /v1/status",
       "writes": ["mkdir state", "rename state/merge-credit.json", "write state/merge-credit.json.<tmp>"],
       "reason": "projectPlan saves a head-branch or trailer credit to the durable credit store on a read; the daemon already owns that store.",

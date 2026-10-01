@@ -84,7 +84,7 @@ import {
 } from "./ci-incidents.js";
 import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
-import { buildReadModelViewRoutes } from "./views.js";
+import { buildReadModelViewRoutes, type ViewBodySource } from "./views.js";
 import { createViewEvents, VIEW_EVENTS_PATH, type ViewEvents } from "./view-events.js";
 import { navBadgeView, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
 import { NOW_VIEW_NAME } from "./now-view.js";
@@ -213,16 +213,15 @@ import {
   type ConsoleSnapshotCacheOptions,
 } from "./console-snapshot-cache.js";
 import { operatorIdentityFromFile, type OperatorIdentityFileIo } from "./operator-identity-file.js";
+import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, InstanceRegistryError, parseInstanceRegistry } from "./instance-registry.js";
 import {
-  DEFAULT_HOST_INSTANCE_REGISTRY_PATH,
-  InstanceRegistryError,
-  parseInstanceNames,
-  parseInstanceRegistry,
-  projectRegistry,
-  registryDrift,
-  type InstanceRegistry,
-  type RegistryDrift,
-} from "./instance-registry.js";
+  INSTANCES_VIEW_NAME,
+  legacyRegistryBody,
+  registryFromInstances,
+  type HostRegistryState as InstancesHostRegistryState,
+  type InstancesData,
+  type RegistryRead,
+} from "./instances-view.js";
 import { daemonInstanceRegistryPath } from "./deployer.js";
 import {
   onboardingReadiness,
@@ -289,7 +288,7 @@ export const DEFAULT_SERVE_PORT = 4317;
 
 export interface ServeDeps {
   projectionWorker?: ConsoleProjectionWorker;
-  readModel?: Pick<ReadModelWorkerOptions, "tickMs" | "stopWaitMs" | "workerUrl" | "every">;
+  readModel?: Pick<ReadModelWorkerOptions, "tickMs" | "stopWaitMs" | "workerUrl" | "every" | "slowLane">;
   consoleSnapshots?: { dir: string; prewarmPaths?: readonly string[] };
   /** Injectable ONLY so a unit test can pin the captured sha; real callers omit it and get
    *  {@link resolveConsoleSha}, resolved once at server start. */
@@ -1762,12 +1761,12 @@ export function buildVersionRoute(sha: string): Route {
 }
 /** W1-T4227 — `GET /v1/registry`'s inputs. Both paths and the reader are injectable for tests. */
 /** How the host copy compared: `unreadable`/`malformed` are notes, never a failed response. */
-export type HostRegistryState = "in_sync" | "drifted" | "unreadable" | "malformed";
+export type HostRegistryState = InstancesHostRegistryState;
 
 /**
  * W1-T4227 — `GET /v1/registry`: the fleet as projects → repos → instances, from the ONE registry
  * (`.remudero/daemon-instances.yaml`) through {@link parseInstanceRegistry}. The body is built by
- * {@link projectRegistry} from names and repos only — never a path, state dir, credential dir,
+ * `projectRegistry` from names and repos only — never a path, state dir, credential dir,
  * image or token, even though the registry rows carry the first four. `source` names WHICH
  * registry answered (`"repo"`), not where it lives on disk.
  *
@@ -1775,55 +1774,31 @@ export type HostRegistryState = "in_sync" | "drifted" | "unreadable" | "malforme
  * `drift: { hostOnly, repoOnly }`. A host copy that cannot be read (every dev machine, the console
  * container) or parsed is a `hostRegistry` NOTE and no `drift` field — never an error, because the
  * repo registry answered and the host copy is only the thing being checked against it.
+ * W1-T5056: while the `instances` view serves, the answer is that body's projection and reads no file.
  */
-export type RegistryRouteInput = NonNullable<ServeDeps["registry"]> & { repoRegistryPath: string };
+export type RegistryRouteInput = NonNullable<ServeDeps["registry"]> & { repoRegistryPath: string; readModel?: Pick<ViewBodySource, "body" | "switches"> };
 
 export function buildRegistryRoute(deps: RegistryRouteInput): Route {
   const readText = deps.readText ?? ((path: string) => fsPromises.readFile(path, "utf8"));
   const clock = deps.clock ?? systemClock;
   const hostPath = deps.hostRegistryPath ?? DEFAULT_HOST_INSTANCE_REGISTRY_PATH;
+  const read = async (path: string): Promise<string | undefined> => {
+    try {
+      return await readText(path);
+    } catch {
+      // deliberate: an unreadable repo copy answers by code and a host copy is a note; fs errors embed the path.
+      return undefined;
+    }
+  };
   return {
     method: "GET",
     path: "/v1/registry",
     scope: "read",
     handler: async (_req, res) => {
-      let registry: InstanceRegistry;
-      try {
-        registry = parseInstanceRegistry(await readText(deps.repoRegistryPath));
-      } catch (error) {
-        // Path-free refusal: fs errors embed the absolute path, so echo only the parser's code.
-        const code = error instanceof InstanceRegistryError ? error.code : "unreadable";
-        sendJson(res, 503, { error: "registry_unavailable", reason: code });
-        return;
-      }
-      const repoNames = registry.instances.filter((i) => i.live).map((i) => i.name);
-      let hostRegistry: HostRegistryState;
-      let drift: RegistryDrift | undefined;
-      let hostText: string | undefined;
-      try {
-        hostText = await readText(hostPath);
-      } catch {
-        // An absent/unreadable host copy is the normal case off the fleet host; it is a note.
-        hostText = undefined;
-      }
-      if (hostText === undefined) {
-        hostRegistry = "unreadable";
-      } else {
-        try {
-          drift = registryDrift(repoNames, parseInstanceNames(hostText));
-          hostRegistry = drift ? "drifted" : "in_sync";
-        } catch {
-          // A host copy outside the shell grammar cannot be compared; say so rather than guess.
-          hostRegistry = "malformed";
-        }
-      }
-      sendJson(res, 200, {
-        ...projectRegistry(registry),
-        source: "repo",
-        generatedAt: clock.iso(),
-        hostRegistry,
-        ...(drift ? { drift } : {}),
-      });
+      const served = deps.readModel?.switches().views[INSTANCES_VIEW_NAME] === "serve" ? deps.readModel.body(INSTANCES_VIEW_NAME) : undefined;
+      const answer = served ? registryFromInstances(served.body.data as InstancesData)
+        : legacyRegistryBody(await read(deps.repoRegistryPath).then((text): RegistryRead => (text === undefined ? { ok: false, code: "unreadable" } : { ok: true, text })), await read(hostPath));
+      sendJson(res, answer.status, answer.status === 200 ? { ...answer.body, generatedAt: clock.iso() } : answer.body);
     },
   };
 }
@@ -2553,7 +2528,7 @@ function assembleServeRoutes(
     { instanceId: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository, analytics: currentAnalyticsSnapshot, memory: operatorAgentMemory, ledgerPath: deps.ledgerPath },
     ...badgeScopes];
   const modelApprovals = deps.modelApprovals ?? [];
-  const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME], servedByDefault: [readModelStatusView.name],
+  const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME], servedByDefault: [readModelStatusView.name],
     ...(readModel ? { readModel } : {}), every: deps.readModel?.every, log: deps.log });
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
   // server start; both the shell span and GET /v1/version close over this one value and neither
@@ -2684,7 +2659,7 @@ function assembleServeRoutes(
     }),
     buildRecentRoute(deps.board),
     ...buildReadModelViewRoutes(withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name],
-      readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME], requiredParams: { [NOW_VIEW_NAME]: ["instance"] },
+      readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME], requiredParams: { [NOW_VIEW_NAME]: ["instance"] },
       legacy: [navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: navBadgeScopes })] })),
     ...viewEvents.routes,
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
@@ -2803,6 +2778,7 @@ function assembleServeRoutes(
     buildRegistryRoute({
       ...deps.registry,
       repoRegistryPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
+      ...(readModel ? { readModel } : {}),
     }),
     // W1-T4264: defaults to the SAME registry path buildRegistryRoute (above) resolves.
     buildOnboardingReadinessRoute({
@@ -3016,7 +2992,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     clock: systemClock,
     write: (window) => deps.log?.("github.wake.summary", { ...wakeSummaryRow(wakeCounters, window) }),
   });
-  const readModel = deps.readModel && createReadModelWorker({ stateDir: dirname(deps.ledgerPath), instances: readModelInstances(deps), log: deps.log, escalationRepository: deps.assistantRepository, ...deps.readModel });
+  const readModel = deps.readModel && createReadModelWorker({ stateDir: dirname(deps.ledgerPath), instances: readModelInstances(deps), log: deps.log, escalationRepository: deps.assistantRepository,
+    registry: { repoPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot), hostPath: deps.registry?.hostRegistryPath ?? DEFAULT_HOST_INSTANCE_REGISTRY_PATH }, ...deps.readModel });
   const staleExit = gateStaleCodeExit({
     bootSha: consoleSha,
     log: deps.log,

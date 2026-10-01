@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { Clock } from "../src/lib/clock.js";
 import { daemonInstanceRegistryPath } from "../src/lib/deployer.js";
+import { createInstancesView } from "../src/lib/instances-view.js";
 import { createNowView } from "../src/lib/now-view.js";
 import type { Plan } from "../src/lib/plan.js";
 import {
@@ -81,7 +82,7 @@ function materialize(root: string, stateDir: string, at: number, holder: string)
   // A RESTART re-imports the worker, so every view's in-memory state starts empty: build them afresh.
   const views = [createNavBadgeReadModelView(ledgerSource), createRepositoriesReadModelView(ledgerSource), readModelStatusView];
   assert.deepEqual(views.map((v) => v.name), READ_MODEL_VIEWS.map((v) => v.name), "the same views the worker registers");
-  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...views, now], clock, holder, post: (m) => void posted.push(m) });
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...views, now, createInstancesView({ instances: [{ name: "core", ledgerDir: stateDir }], repoPath: daemonInstanceRegistryPath(root), ledgerSource })], clock, holder, post: (m) => void posted.push(m) });
   try {
     ticker.tick();
   } finally {
@@ -109,7 +110,7 @@ test("every read-model view materializes the same etag after a serve restart", (
   const { root, stateDir } = fixture(t);
   const first = materialize(root, stateDir, T0, "serve-a");
   // CORPUS CONTROL: every registered view materialized, so none passes by being absent on both sides.
-  assert.deepEqual([...new Set([...first.values()].map((b) => b.view))].sort(), ["nav-badge", "now", "read-model", "repositories"]);
+  assert.deepEqual([...new Set([...first.values()].map((b) => b.view))].sort(), ["instances", "nav-badge", "now", "read-model", "repositories"]);
 
   const repos = first.get("repositories\u0000")!.body.data as { instances: Array<{ summary?: { repos: unknown[] } }> };
   assert.equal(repos.instances[0]?.summary?.repos.length, 1, `control: a real repositories summary, not an error body: ${JSON.stringify(repos)}`);
@@ -133,6 +134,7 @@ test("a later restart gives every view the same etag when only the clock moved",
   const paths = (id: string): string[] => differingPaths(first.get(id)!.body.data, later.get(id)!.body.data);
   assert.deepEqual(paths("now\u0000instance=core"), []);
   assert.deepEqual(paths("repositories\u0000"), []);
+  assert.deepEqual(paths("instances\u0000"), []);
   assert.deepEqual(etags(later), etags(first), "every view keeps its version across a restart 90 s later");
   // The times did move: they live in the envelope, which the etag ignores.
   assert.notEqual(later.get("now\u0000instance=core")!.body.generatedAt, first.get("now\u0000instance=core")!.body.generatedAt);

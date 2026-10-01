@@ -1760,14 +1760,18 @@ export function spawnRmdReviewForFreshTree(
   worktree: string,
   args: string[],
   onFailure?: (failure: string) => void,
+  parentEnv: NodeJS.ProcessEnv = process.env,
 ): Promise<number> {
   return new Promise<number>((resolve, reject) => {
+    // A daemon's installation token is copied at spawn and may expire during proof execution.
+    // An App-backed child mints its own fresh token in main(); other callers keep their identity.
+    const appConfigured = Boolean(parentEnv.GH_APP_ID && parentEnv.GH_APP_INSTALLATION_ID && parentEnv.GH_APP_PRIVATE_KEY_PATH);
     const child = spawn(join(worktree, "bin", "rmd"), ["review", ...args], {
       cwd: worktree,
       // W1-T4055: stderr is piped only to be TEED — every byte still reaches this process's stderr.
       stdio: ["inherit", "inherit", "pipe"],
       // The child IS at origin/main, so a self-sync there is a refusal and a wasted fetch.
-      env: { ...process.env, RMD_SELF_SYNC_DONE: "1" },
+      env: { ...parentEnv, RMD_SELF_SYNC_DONE: "1", ...(appConfigured ? { GH_TOKEN: "" } : {}) },
     });
     let held = "";
     child.stderr?.on("data", (chunk: Buffer) => {
@@ -35593,7 +35597,7 @@ export async function serveCommand(
     log,
     consoleSnapshots: { dir: join(config.root, "state", "console-snapshots"), prewarmPaths: ["/v1/operator-activity", "/v1/action-results"] },
     projectionWorker: consoleProjectionWorker(),
-    readModel: {},
+    readModel: deps.buildBatchedGithub ? {} : { slowLane: { inbox: { root: repoRoot, planPath, ledgerPath, inboxRoot: config.root, repository: `${self.owner}/${self.repo}` } } },
     // W1-T945: GET /v1/peek's root (config.root, the SAME root buildWorkerStateSensor resolves
     // state/runs/<runId>.tail against) + its liveness predicate, a closure over the REAL
     // liveInflightRuns over the REAL `<config.root>/state/inflight` lock directory — the exact
