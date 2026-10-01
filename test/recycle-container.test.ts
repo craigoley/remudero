@@ -98,6 +98,7 @@ const CONTAINER_ENV_BY_MODE: Record<string, string[]> = {
   // this fixture only) image itself bakes in — see IMAGE_ENV_BY_MODE below. A name-only diff would
   // read this as "unchanged from the image" and silently revert it (rationale 5, bullet 1).
   "shadow-declared": containerEnvLines({ override: ["GH_APP_ID", "real-appid"] }),
+  "node-options-other-flag": containerEnvLines({ overrides: { NODE_OPTIONS: "--enable-source-maps --max-old-space-size=8192" } }),
   "git-author-shell-seed": containerEnvLines({ drop: ["RMD_GIT_AUTHOR_NAME", "RMD_GIT_AUTHOR_EMAIL"] }),
   "git-author-live": containerEnvLines({
     overrides: {
@@ -263,6 +264,7 @@ function writeStubs(dir: string): void {
 
 interface RunOpts {
   scriptPath?: string;
+  args?: string[];
   stateDir?: string;
   extraEnv?: Record<string, string>;
 }
@@ -288,7 +290,7 @@ function runRecycle(mode: string, opts: RunOpts = {}): Run {
   writeFileSync(cashKeyPath, `${durableCashKey}\n`, { mode: 0o600 });
   chmodSync(cashKeyPath, 0o600);
   writeStubs(dir);
-  const r = spawnSync("bash", [opts.scriptPath ?? SCRIPT], {
+  const r = spawnSync("bash", [opts.scriptPath ?? SCRIPT, ...(opts.args ?? [])], {
     encoding: "utf8",
     cwd: REPO_ROOT,
     env: {
@@ -1131,4 +1133,70 @@ test("W1-T4197: a recycle removes only the pause it wrote", () => {
   assert.equal(run.status, 0, run.stderr);
   assert.match(readFileSync(join(swapped, "state", "PAUSE"), "utf8"), /operator hold/, "a pause that is no longer the recycle's must survive");
   assert.match(run.stderr, /PAUSE not removed/, "and the skipped removal must be visible");
+});
+
+// ── W1-T4198: a recycle --instance carries the registry's app and heap fields into the container ──
+
+/** Run `--instance fixture` against a one-record registry whose optional fields are `extra`. */
+function runInstance(extra: string[], mode = "good"): Run {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}recycle-instance-`));
+  const dirs = { state: join(root, "state"), claude: join(root, "claude"), codex: join(root, "codex"), config: join(root, "config") };
+  for (const d of Object.values(dirs)) mkdirSync(d);
+  const registry = join(root, "daemon-instances.yaml");
+  const record = [
+    "  fixture:",
+    "    repo: remudero",
+    `    state_dir: ${dirs.state}`,
+    "    container_name: remudero-fixture",
+    "    image: test-registry.azurecr.io/remudero:latest",
+    `    claude_dir: ${dirs.claude}`,
+    `    codex_dir: ${dirs.codex}`,
+    `    container_config_dir: ${dirs.config}`,
+    ...extra.map((l) => `    ${l}`),
+  ];
+  writeFileSync(registry, `${record.join("\n")}\n`);
+  return runRecycle(mode, {
+    args: ["--instance", "fixture"],
+    stateDir: dirs.state,
+    extraEnv: { RMD_INSTANCE_REGISTRY: registry, RMD_CLAUDE_DIR: dirs.claude, RMD_CODEX_DIR: dirs.codex, RMD_CONTAINER_CONFIG_DIR: dirs.config },
+  });
+}
+
+/** The `-e NAME=VALUE` values the `docker run` was given for NAME, in order. */
+function runEnvValues(run: Run, name: string): string[] {
+  const argv = run.calls.find(isRun)?.argv ?? [];
+  return argv.flatMap((a, i) => (argv[i - 1] === "-e" && a.startsWith(`${name}=`) ? [a.slice(name.length + 1)] : []));
+}
+
+test("W1-T4198: an instances app fields reach the container environment", () => {
+  const run = runInstance(["gh_app_id: 4648213", "gh_app_installation_id: 155256285", "gh_app_private_key_path: /home/node/.claude/rmd-app.pem"]);
+  assert.equal(run.status, 0, run.stderr);
+  // The live container carries different fixture values; the registry is the declared identity and wins.
+  assert.deepEqual(runEnvValues(run, "GH_APP_ID"), ["4648213"]);
+  assert.deepEqual(runEnvValues(run, "GH_APP_INSTALLATION_ID"), ["155256285"]);
+  assert.deepEqual(runEnvValues(run, "GH_APP_PRIVATE_KEY_PATH"), ["/home/node/.claude/rmd-app.pem"]);
+  // An instance that declares none leaves the captured values exactly as they were.
+  const bare = runInstance([]);
+  assert.equal(bare.status, 0, bare.stderr);
+  assert.deepEqual(runEnvValues(bare, "GH_APP_ID"), [DECLARED_RUNTIME_FIXTURE.GH_APP_ID]);
+  assert.deepEqual(runEnvValues(bare, "GH_APP_INSTALLATION_ID"), [DECLARED_RUNTIME_FIXTURE.GH_APP_INSTALLATION_ID]);
+  assert.deepEqual(runEnvValues(bare, "GH_APP_PRIVATE_KEY_PATH"), [DECLARED_RUNTIME_FIXTURE.GH_APP_PRIVATE_KEY_PATH]);
+});
+
+test("W1-T4198: an instances heap size reaches NODE_OPTIONS", () => {
+  const run = runInstance(["max_old_space_mb: 4096"]);
+  assert.equal(run.status, 0, run.stderr);
+  assert.deepEqual(runEnvValues(run, "NODE_OPTIONS"), ["--max-old-space-size=4096"], "the registry size replaces the captured one");
+  // Other flags the container carries survive; only the heap flag is replaced.
+  const merged = runInstance(["max_old_space_mb: 2048"], "node-options-other-flag");
+  assert.equal(merged.status, 0, merged.stderr);
+  assert.deepEqual(runEnvValues(merged, "NODE_OPTIONS"), ["--enable-source-maps --max-old-space-size=2048"]);
+  // Absent: the captured NODE_OPTIONS is carried untouched.
+  const bare = runInstance([]);
+  assert.deepEqual(runEnvValues(bare, "NODE_OPTIONS"), [DECLARED_RUNTIME_FIXTURE.NODE_OPTIONS]);
+  // Present but not a size: refused before anything is touched, never silently dropped.
+  const bad = runInstance(["max_old_space_mb: lots"]);
+  assert.notEqual(bad.status, 0);
+  assert.match(bad.stderr, /REFUSING -- instance 'fixture' has a malformed max_old_space_mb 'lots'/);
+  assert.equal(bad.calls.filter(isRm).length, 0, "a refusal must leave the container alone");
 });

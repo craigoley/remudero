@@ -194,6 +194,7 @@ if [ -n "$INSTANCE_NAME" ]; then
     exit 2
   fi
   repo=""; state_dir=""; container_name=""; image_ref=""; claude_dir=""; codex_dir=""; container_config_dir=""
+  max_old_space_mb=""; gh_app_id=""; gh_app_installation_id=""; gh_app_private_key_path=""
   while IFS='=' read -r key value; do
     case "$key" in
       repo) repo="$value" ;;
@@ -203,7 +204,12 @@ if [ -n "$INSTANCE_NAME" ]; then
       claude_dir) claude_dir="$value" ;;
       codex_dir) codex_dir="$value" ;;
       container_config_dir) container_config_dir="$value" ;;
-      service_user|max_old_space_mb|service_name|watchdog_service_name|watchdog_timer_name|launcher_path|revival_log|gh_app_id|gh_app_installation_id|gh_app_private_key_path) : ;;
+      # W1-T4198: these four are applied to the container's environment after the capture below.
+      max_old_space_mb) max_old_space_mb="$value" ;;
+      gh_app_id) gh_app_id="$value" ;;
+      gh_app_installation_id) gh_app_installation_id="$value" ;;
+      gh_app_private_key_path) gh_app_private_key_path="$value" ;;
+      service_user|service_name|watchdog_service_name|watchdog_timer_name|launcher_path|revival_log) : ;;
       # W1-T4227: the fleet registry's project layer, read by `rmd serve`'s GET /v1/registry.
       project|github_repo|retired) : ;;
       *) echo "recycle-container: REFUSING -- unknown field '${key}' in instance '${INSTANCE_NAME}'." >&2; exit 2 ;;
@@ -215,6 +221,10 @@ EOF
     name="${pair%%:*}"; val="${pair#*:}"
     [ -n "$val" ] || { echo "recycle-container: REFUSING -- instance '${INSTANCE_NAME}' missing required field '${name}'." >&2; exit 2; }
   done
+  case "$max_old_space_mb" in
+    "") : ;;
+    *[!0-9]*|0*) echo "recycle-container: REFUSING -- instance '${INSTANCE_NAME}' has a malformed max_old_space_mb '${max_old_space_mb}'." >&2; exit 2 ;;
+  esac
   case "$container_name" in *[!a-zA-Z0-9_.-]*|"") echo "recycle-container: REFUSING -- malformed container_name '${container_name}'." >&2; exit 2 ;; esac
   case "$image_ref" in */*:*) : ;; *) echo "recycle-container: REFUSING -- image must be a registry/name:tag reference for instance '${INSTANCE_NAME}'." >&2; exit 2 ;; esac
   case "$state_dir" in /*) : ;; *) echo "recycle-container: REFUSING -- state_dir must be absolute for instance '${INSTANCE_NAME}'." >&2; exit 2 ;; esac
@@ -768,6 +778,31 @@ else
     CAPTURED_set "${name}" "${!name-}"
     CAPTURED_SOURCE_set "${name}" "$([ -n "${!name-}" ] && echo shell || echo neither)"
   done
+fi
+
+# W1-T4198: THE REGISTRY'S APP IDENTITY AND HEAP SIZE ARE THE INSTANCE'S DECLARED CONFIGURATION, SO
+# THEY WIN OVER A CAPTURED VALUE. They were validated at parse time and then dropped, so a fresh
+# instance booted with no GitHub App identity and no heap ceiling until an operator typed them in.
+# Applied here, after the capture and before the App-auth probe below, so that probe and the
+# `docker run` both read the registry's value. A field the registry does not declare changes
+# nothing: the captured value (container, else shell) is carried exactly as before. NODE_OPTIONS
+# keeps every other flag the container carried and replaces only the heap flag.
+if [ -n "${INSTANCE_NAME}" ]; then
+  if [ -n "${gh_app_id}" ]; then CAPTURED_set GH_APP_ID "${gh_app_id}"; CAPTURED_SOURCE_set GH_APP_ID registry; fi
+  if [ -n "${gh_app_installation_id}" ]; then CAPTURED_set GH_APP_INSTALLATION_ID "${gh_app_installation_id}"; CAPTURED_SOURCE_set GH_APP_INSTALLATION_ID registry; fi
+  if [ -n "${gh_app_private_key_path}" ]; then CAPTURED_set GH_APP_PRIVATE_KEY_PATH "${gh_app_private_key_path}"; CAPTURED_SOURCE_set GH_APP_PRIVATE_KEY_PATH registry; fi
+  if [ -n "${max_old_space_mb}" ]; then
+    node_options_merged=""
+    read -r -a node_options_words <<<"$(CAPTURED_get NODE_OPTIONS)"
+    for word in "${node_options_words[@]-}"; do
+      case "${word}" in
+        ""|--max-old-space-size=*|--max_old_space_size=*) : ;;
+        *) node_options_merged="${node_options_merged:+${node_options_merged} }${word}" ;;
+      esac
+    done
+    CAPTURED_set NODE_OPTIONS "${node_options_merged:+${node_options_merged} }--max-old-space-size=${max_old_space_mb}"
+    CAPTURED_SOURCE_set NODE_OPTIONS registry
+  fi
 fi
 
 CAPTURED_TOKEN="$(CAPTURED_get GH_TOKEN)"
