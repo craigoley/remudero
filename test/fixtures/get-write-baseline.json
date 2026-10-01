@@ -8,12 +8,6 @@
       "owner": "the slow lane's host probe derives the edge and appends it once, with or without a reader (P4-T14)"
     },
     {
-      "route": "GET /v1/escalation/confirm",
-      "writes": ["mkdir state", "open-for-write state/escalation-link-secret", "open-for-write state/escalation-link-secret.<tmp>", "open-for-write state/ledger.ndjson", "rename state/escalation-link-secret"],
-      "reason": "the link secret is created on first use, and each well-formed refused link appends escalation.link_refused, so a crawler can append to the ledger.",
-      "owner": "serve boot creates the secret; refusals become an hourly rollup row (P4-T18)"
-    },
-    {
       "route": "GET /v1/feedback",
       "writes": ["write plan/feedback/fb-merged.yaml"],
       "reason": "reconcileFeedbackEntries flips an entry whose proposal PR merged to accepted (and lands it in production), one writer per concurrent GET.",

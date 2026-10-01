@@ -82,7 +82,7 @@ import {
   DEFAULT_CI_INCIDENT_MAIN_BRANCH,
   type CiIncidentState,
 } from "./ci-incidents.js";
-import { loadEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
+import { loadEscalationLinkSecret, readEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
 import { buildReadModelViewRoutes, type ViewBodySource } from "./views.js";
 import { createViewEvents, VIEW_EVENTS_PATH, type ViewEvents } from "./view-events.js";
@@ -106,6 +106,8 @@ import {
   buildDrainNowRoute,
   buildEscalationLinkAnswerRoute,
   buildEscalationLinkConfirmRoute,
+  createLinkRefusalRollup,
+  type LinkRefusalRollup,
   buildEscalationMarkHandledRoute,
   buildEscalationReplyRoute,
   buildKickRoute,
@@ -2513,6 +2515,7 @@ interface ServeRoutesAssembly {
   instanceAnalyticsCaches: AnalyticsSnapshotCache[];
   navBadgeScopes: () => NavBadgeScope[];
   viewEvents: ViewEvents;
+  linkRefusals: LinkRefusalRollup;
   /** The first GitHub App token mint. Absent when App refresh is not configured. */
   githubAppReady?: Promise<void>;
 }
@@ -2560,6 +2563,7 @@ function assembleServeRoutes(
     threadStorePath: inboxThreadStorePath(deps.fleetControlRoot),
   };
   const questionDeps: PanelActionDeps = { root: deps.questionsRoot, ledgerPath: deps.ledgerPath, issues: deps.issues };
+  const linkRefusals = createLinkRefusalRollup({ ledgerPath: deps.ledgerPath, clock: systemClock });
   // W1-T288: the SAME fleetControlDeps root/ledgerPath, plus the (optional, injectable)
   // liveness-verdict deps -- never a second root, never a second ledger read primitive.
   const controlStatusDeps: ControlStatusDeps = { ...fleetControlDeps, ...deps.controlStatus };
@@ -2701,7 +2705,7 @@ function assembleServeRoutes(
     // selfAuthenticated: the operator's phone carries no bearer token, so the link's signature is
     // the authority and each handler verifies it before anything acts. The GET is side-effect-free
     // because iMessage previews a URL it sends, which would otherwise burn every link unclicked.
-    ...escalationLinkRoutes(fleetControlDeps, deps.fleetControlRoot),
+    ...escalationLinkRoutes(fleetControlDeps, deps.fleetControlRoot, linkRefusals),
     // W1-T164: operator guidance notes — console-editable, provenance-stamped, task-scoped.
     // Rooted at `questionsRoot` (repoRoot) — the SAME durable, gitignored `plan/` store
     // worker.ts's question channel already reads/writes (see operator-notes.ts's module doc).
@@ -2878,24 +2882,24 @@ function assembleServeRoutes(
   // tier sibling, as the runtime backstop for whatever the compiler cannot see. See
   // `assertRoutesScopeComplete`'s own doc.
   assertRoutesScopeComplete(routes);
-  return { routes, instanceAnalyticsCaches, navBadgeScopes, viewEvents, githubAppReady: githubAppRefresh.ready };
+  return { routes, instanceAnalyticsCaches, navBadgeScopes, viewEvents, linkRefusals, githubAppReady: githubAppRefresh.ready };
 }
 
 /** Every REST route `rmd serve` registers — board, panel actions, panel graph, and the shell. */
 /**
  * W1-T2696's two answer routes.
  *
- * The signing secret is resolved LAZILY — assembling routes must touch no disk, and
- * `loadEscalationLinkSecret` creates the secret on first read.
+ * The signing secret is resolved LAZILY — assembling routes must touch no disk — and the GET only
+ * reads it (W1-T5057): the ping that mints a link creates it, and the POST may.
  * TRAP: resolving it here instead makes standing up a server write a file, which
  * test/console-write-entry.test.ts refuses ("obtaining the grant touches no disk at all").
  *
  * Both routes are always mounted, so a link can only be refused by a route that could have
  * verified it, never 404 by one silently left out.
  */
-function escalationLinkRoutes(panelDeps: PanelActionDeps, configRoot: string): Route[] {
+function escalationLinkRoutes(panelDeps: PanelActionDeps, configRoot: string, refusals: LinkRefusalRollup): Route[] {
   const linkDeps = { root: configRoot, secret: () => loadEscalationLinkSecret(configRoot), now: () => Date.now() };
-  return [buildEscalationLinkConfirmRoute(panelDeps, linkDeps), buildEscalationLinkAnswerRoute(panelDeps, linkDeps)];
+  return [buildEscalationLinkConfirmRoute(panelDeps, { ...linkDeps, secret: () => readEscalationLinkSecret(configRoot), refusals }), buildEscalationLinkAnswerRoute(panelDeps, linkDeps)];
 }
 
 export function buildServeRoutes(deps: ServeDeps): Route[] {
@@ -3005,6 +3009,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       liveAnalyticsCache.stop();
       stopWakeSummary();
       prewarm.stop();
+      routeAssembly.linkRefusals.stop();
     },
     lastReadAt: () => lastReadAt,
     assessCheckout: deps.gatewayCheckout ?? (() => assessGatewayCheckout({ repoDir: serveRepoDir() })),
@@ -3102,7 +3107,10 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   server.once("listening", analyticsCache.start);
   server.on("close", analyticsCache.stop);
   server.once("listening", () => { for (const cache of routeAssembly.instanceAnalyticsCaches) cache.start(); });
-  server.on("close", () => { for (const cache of routeAssembly.instanceAnalyticsCaches) cache.stop(); });
+  server.on("close", () => {
+    for (const cache of routeAssembly.instanceAnalyticsCaches) cache.stop();
+    routeAssembly.linkRefusals.stop();
+  });
   server.once("listening", liveAnalyticsCache.start);
   server.on("close", liveAnalyticsCache.stop);
   server.on("close", watchInstanceLiveness({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ledgerPath: deps.ledgerPath, log: deps.log, ...deps.instances }));
