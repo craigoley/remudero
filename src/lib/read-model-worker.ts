@@ -210,7 +210,7 @@ export type ReadModelWorkerMessage =
 
 export interface ReadModelViewContext {
   now: number;
-  instances: ReadonlyArray<{ state: ReadModelInstanceState; db?: ReadModelDb }>;
+  instances: ReadonlyArray<{ state: ReadModelInstanceState; db?: ReadModelDb; lease?: ReadModelLease }>;
   switches?: ReadModelSwitches;
   /** Each shadowed view's diff counters and cutover readiness (view-shadow.ts). */
   shadow?: ShadowReadiness[];
@@ -935,7 +935,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   function materialize(now: number, tickStart: number, only?: ViewUnit): void {
     const home = slots[0]?.db;
     const shadow = home ? storedShadowReadiness(home, now) : undefined;
-    const ctx: ReadModelViewContext = { now, switches, instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}) })), ...(shadow ? { shadow } : {}) };
+    const ctx: ReadModelViewContext = { now, switches, instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}), ...(slot.lease ? { lease: slot.lease } : {}) })), ...(shadow ? { shadow } : {}) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
     if (only) return build(only, now, ctx, generation, soloMs);
     const left = passMs - (clock.now() - tickStart);

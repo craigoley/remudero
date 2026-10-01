@@ -122,6 +122,8 @@ export interface BoardProjectionOptions {
   /** The reloaded plan snapshot (W1-T4481); a new object is diffed task by task. */
   readPlan: () => Plan;
   github: GitHub;
+  /** The gateway each derive reads when the caller swaps a re-read snapshot in; `github` otherwise. */
+  currentGithub?: () => GitHub;
   githubGeneration?: () => string;
   /** Read-only: the worker never writes the legacy credit store. */
   readCreditStore?: () => CreditStore;
@@ -195,7 +197,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   const log = opts.log ?? (() => {});
   const readCredit = opts.readCreditStore ?? (() => loadCreditStore(defaultCreditStorePath(opts.ledgerPath)));
   const readOverrides = opts.readCreditOverrideFile ?? (() => readTextOr(defaultCreditOverridePath(opts.ledgerPath), ""));
-  const githubGeneration = opts.githubGeneration ?? (() => githubGenerationOf(opts.github));
+  const gateway = (): GitHub => opts.currentGithub?.() ?? opts.github;
+  const githubGeneration = opts.githubGeneration ?? (() => githubGenerationOf(gateway()));
   db.exec(BOARD_PROJECTION_DDL);
   const sql = {
     facts: db.prepare("SELECT seq, ts, ts_ms, step, body FROM fact WHERE seq > ? ORDER BY seq"),
@@ -282,7 +285,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     const deps: DeriveDeps = {
       ...opts.deriveDeps,
       ledgerPath: opts.ledgerPath,
-      github: opts.github,
+      github: gateway(),
       readLedger: () => rows,
       now: () => clock.now(),
       readCreditStore: () => credit,
