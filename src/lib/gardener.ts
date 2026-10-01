@@ -2,6 +2,7 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { systemClock, type Clock } from "./clock.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import type { Escalation } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { sampleBeta, seededRandom } from "./knowledge-value.js";
@@ -179,11 +180,11 @@ export type GardenStateFailure = "unparseable" | "malformed";
 
 /** An existing state file the gardener cannot trust. Resetting it to the optimistic prior would forget a
  *  pending PR and open a duplicate, so the pass fails with this instead and leaves the file for repair. */
-export class GardenStateUnreadableError extends Error {
+export class GardenStateUnreadableError extends RmdError {
   readonly path: string;
   readonly failureClass: GardenStateFailure;
   constructor(path: string, failureClass: GardenStateFailure, detail: string) {
-    super(`gardener state ${path} is ${failureClass}: ${detail}; repair or remove the file and the next pass retries`);
+    super("gardener", GENERIC_EXIT_CODE, `gardener state ${path} is ${failureClass}: ${detail}; repair or remove the file and the next pass retries`, { path, failureClass });
     this.name = "GardenStateUnreadableError";
     this.path = path;
     this.failureClass = failureClass;
