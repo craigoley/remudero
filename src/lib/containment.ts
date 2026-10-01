@@ -1601,6 +1601,7 @@ export async function runWorkerSmoke(opts: {
   token?: string;
   budgetUsd?: number;
   initializeRepository?: (cwd: string) => void;
+  removeBase?: (base: string) => void;
 }): Promise<WorkerSmokeResult> {
   const config = opts.config ?? loadConfig();
   const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("worker-smoke");
@@ -1648,7 +1649,7 @@ export async function runWorkerSmoke(opts: {
   } finally {
     reapWorkerScratch(cwd);
     try {
-      rmSync(base, { recursive: true, force: true });
+      (opts.removeBase ?? ((path) => rmSync(path, { recursive: true, force: true })))(base);
     } catch (e) {
       void e; // best-effort cleanup of a disposable scratch dir
     }
@@ -1658,11 +1659,14 @@ export async function runWorkerSmoke(opts: {
 
 /** Entry for `deploy/recycle-container.sh`: print ONE `WORKER-SMOKE PASS|FAIL <reason>` line, return the exit
  *  code (0 only on PASS). Ledger failure never changes the verdict. */
-export async function workerSmokeMain(print: (line: string) => void = console.log): Promise<number> {
+export async function workerSmokeMain(
+  print: (line: string) => void = console.log,
+  opts: { config?: Config; token?: string; spawn?: typeof spawnWorker; writeLedger?: typeof appendLedger } = {},
+): Promise<number> {
   try {
-    const config = loadConfig();
+    const config = opts.config ?? loadConfig();
     const root = resolveInstallRoot(config);
-    const token = `smoke-${randomUUID()}`;
+    const token = opts.token ?? `smoke-${randomUUID()}`;
     const settingsFile = renderWorkerSettings({
       templatePath: join(root, "settings", "worker.json"),
       hooksDir: join(root, "hooks"),
@@ -1673,9 +1677,10 @@ export async function workerSmokeMain(print: (line: string) => void = console.lo
       config,
       settingsFile,
       token,
+      ...(opts.spawn ? { spawn: opts.spawn } : {}),
       ledger: (line) => {
         try {
-          appendLedger(ledgerPathFor(config), line);
+          (opts.writeLedger ?? appendLedger)(ledgerPathFor(config), line);
         } catch (e) {
           console.error(`worker-smoke: ledger append failed — ${String((e as Error)?.message ?? e)}`);
         }

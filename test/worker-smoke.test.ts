@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -10,6 +10,7 @@ import {
   WORKER_SMOKE_MAX_TURNS,
   assessWorkerSmoke,
   runWorkerSmoke,
+  workerSmokeMain,
   workerSmokePrompt,
 } from "../src/lib/containment.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -113,6 +114,72 @@ test("W1-T5017: a spawn that throws is a FAILED smoke with a ledgered reason, ne
   assert.match(r.reason, /unsupported sdk\/cli pair/);
   assert.equal(rows[0].task_id, "DEPLOY");
   assert.equal(rows[0].ok, false);
+});
+
+test("W1-T5017: disposable scratch removal failure does not erase the smoke verdict", async (t) => {
+  const config = fakeConfig();
+  t.after(() => rmSync(config.root, { recursive: true, force: true }));
+  let removalAttempts = 0;
+  const r = await runWorkerSmoke({
+    config, settingsFile: "/unused", token: TOKEN,
+    initializeRepository: () => {},
+    spawn: (async (args: { cwd: string }) => {
+      writeFileSync(join(args.cwd, "probe-ok.txt"), "ok");
+      return result();
+    }) as never,
+    removeBase: () => { removalAttempts++; throw new Error("scratch removal refused"); },
+  });
+  assert.equal(removalAttempts, 1, "the cleanup failure path actually ran");
+  assert.equal(r.ok, true, "best-effort scratch cleanup must not erase a passing smoke verdict");
+});
+
+test("W1-T5017: the recycle entry renders settings, runs the worker and durably records PASS", async (t) => {
+  const config = { ...fakeConfig(), installRoot: REPO_ROOT } as Config;
+  t.after(() => rmSync(config.root, { recursive: true, force: true }));
+  const printed: string[] = [];
+  const code = await workerSmokeMain((line) => printed.push(line), {
+    config, token: TOKEN,
+    spawn: (async (args: { cwd: string }) => {
+      writeFileSync(join(args.cwd, "probe-ok.txt"), "ok");
+      return result();
+    }) as never,
+  });
+  assert.equal(code, 0, printed.join("\n"));
+  assert.match(printed[0] ?? "", /^WORKER-SMOKE PASS /);
+  const rows = readFileSync(join(config.root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].task_id, "DEPLOY");
+  assert.equal(rows[0].ok, true);
+});
+
+test("W1-T5017: the recycle entry keeps a failed verdict when its ledger writer fails", async (t) => {
+  const config = { ...fakeConfig(), installRoot: REPO_ROOT } as Config;
+  t.after(() => rmSync(config.root, { recursive: true, force: true }));
+  const printed: string[] = [];
+  const errors: string[] = [];
+  const originalError = console.error;
+  console.error = (message: unknown) => { errors.push(String(message)); };
+  try {
+    const code = await workerSmokeMain((line) => printed.push(line), {
+      config, token: TOKEN,
+      spawn: (async () => result({ subtype: "error_during_execution" })) as never,
+      writeLedger: () => { throw new Error("ledger unavailable"); },
+    });
+    assert.equal(code, 1);
+    assert.match(printed[0] ?? "", /^WORKER-SMOKE FAIL /);
+    assert.match(errors[0] ?? "", /ledger append failed.*ledger unavailable/);
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test("W1-T5017: the recycle entry prints a failure when settings cannot be rendered", async (t) => {
+  const config = { ...fakeConfig(), installRoot: join(tmpdir(), "worker-smoke-missing-install") } as Config;
+  t.after(() => rmSync(config.root, { recursive: true, force: true }));
+  const printed: string[] = [];
+  const code = await workerSmokeMain((line) => printed.push(line), { config, token: TOKEN });
+  assert.equal(code, 1);
+  assert.match(printed[0] ?? "", /^WORKER-SMOKE FAIL /);
 });
 
 // ── the REAL recycle script against a stubbed docker ────────────────────────────────────────────
