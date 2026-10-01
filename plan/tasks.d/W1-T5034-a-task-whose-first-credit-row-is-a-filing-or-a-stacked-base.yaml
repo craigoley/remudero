@@ -1,0 +1,158 @@
+- id: W1-T5034
+  title: "A TASK WHOSE FIRST CREDIT ROW IS A FILING OR A STACKED-BASE MERGE NEVER RECONCILES, BECAUSE `deriveStatus` RETURNS THE LEDGER'S LAST `pr.opened` THE MOMENT IT READS MERGED (rung (a), no plan-only or readability test) AND `creditCandidatesFromProjection` JUDGES THAT ONE PR ONLY — W1-T3376 (credit row #5088, a `chore(plan)` filing; the build is #6455) and W1-T3763 (credit row #6019, merged into a stacked base so no `(#6019)` commit exists; the build reached main as #6020) sat `status: queued` until #8193 hand-flipped them; let the reconcile read ask whether ANOTHER merged PR carrying the task's anchored trailer reached main as a build, and keep every other consumer of the credit row exactly as it is"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-10-01: two shipped tasks (W1-T3376, W1-T3763) could not be reconciled because the credit lookup consults one credit row and declines"
+  plan_refs: [W1-T4942, W1-T3084, W1-T3067, W1-T3063, W1-T4078, W1-T3043, W1-T441, W1-T75, W1-T3376, W1-T3763]
+  files: [src/lib/status.ts, src/run-task.ts, test/a-task-credited-first-by-a-refused-pr-reconciles-from-its-later-merge.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-01 at origin/main 2d82ea51d by reading the source and REPLAYING the real `projectPlan` over the real
+    `buildBatchedGithub` with fixture rows. NOT from the host ledger: the ledger and merge-credit.json are not readable here, so
+    WHICH early rung returned the refused row for each of the two tasks is inferred (see (3)), while WHAT the code does with
+    each possible early rung is shown by the replay.
+
+    (1) THE CASES, AS THEY STAND AT 2d82ea51d. Both read `status: merged` NOW, because #8193 (aacba0ea9) hand-flipped them with
+    the 65 others it closed from the census; before that they were queued. W1-T3376: #5088 `chore(plan): file the clock census
+    ...` (position 2128 in first-parent history; its diff is a plan shard) and #6455 `fix(clock): ignore comment text in clock
+    signature census` (position 1232; scripts + test; its squash commit carries NO `Remudero-Task:` trailer, so the commit-trailer
+    surface lists only #5088, the one `git log origin/main --grep='Remudero-Task: W1-T3376'` returns). W1-T3763: #6019 has NO
+    `(#6019)` commit anywhere on origin/main (`git log origin/main --format=%s | grep '(#6019)'` is empty); the code is #6020
+    `perf(status): reuse merged trailer lookup` (position 1553; src/lib/status.ts + a test).
+
+    (2) THE MECHANISM, WITH LINES. `projectPlan` (src/lib/status.ts) derives ONE `StatusProjection` per task, so the credit
+    projection carries ONE (prNumber, prUrl) per task. `derivePrPrecedence` (src/lib/status.ts:2467) resolves it in a fixed order:
+    `correction.provenance` (2474), the durable `merge-credit.json` entry (2493), `manual.completed` (2561), then (a) the ledger's
+    LAST `pr.opened` URL (`lastPrOpened`, 1216; consulted at 2579) and, at 2584, `if (result.merged) return result;` — a MERGED
+    answer is returned at once, BEFORE rung (c)'s anchored-trailer search (2664) and its plan-only refusals (`isPlanOnlyFilingPr`
+    2675, the diff-based one after it). Rung (a) applies NEITHER refusal and has no readability test. So a task whose ledger last
+    opened a PR that merged as a filing (the plan lanes write `pr.opened` with `plan_only: true`, src/run-task.ts:29501, 42549,
+    43008; which task_id those rows are attributed to was not verified) or into a stacked base is credited to THAT PR even while a body-trailered, main-reaching build sits on the board.
+    `creditCandidatesFromProjection` (src/run-task.ts:37452) then judges only that PR: `creditSubjectIsImplementation` reads the
+    filing subject (false) or finds no subject (undefined) and `creditHasBuildDiff` reads plan-only paths (false) or none
+    (undefined); `creditIsReconcilable` (24833) is false, and `defaultCreditedMergedIds` (24839) drops the task.
+    REPLAY (scratch script, real code, fixture rows: #5088 head chore/file-w1-t3376-x and #6455 head run-W1-T3376-1790025600000,
+    both MERGED, both with the anchored trailer in the body, and a mergedPathsByPr of plan-only vs scripts+test):
+      no ledger pr.opened          -> {"source":"trailer","merged":true,"pr":6455}   (rung (c) picks the build, newest-first)
+      ledger pr.opened = #5088     -> {"source":"ledger","merged":true,"pr":5088}    (WITH `plan_only: true` on the row)
+      ledger pr.opened = #6455     -> {"source":"ledger","merged":true,"pr":6455}
+    Only the middle row is the defect, and it is the shape the plan lane's own `plan_only: true` row produces.
+
+    (3) WHAT IS PROVEN AND WHAT IS NOT. Proven: rung (a) returns a merged ledger PR without a plan-only or readable-evidence test,
+    and the board holds the build the whole time. NOT proven here: that W1-T3376's ledger last-opened was #5088 and W1-T3763's was
+    #6019, rather than the durable store or a `manual.completed` row pointing there; each of those earlier rungs also returns a
+    merged row untested, so the fix below does not depend on which one it was. W1-T4942's note says the same ("needs the daemon's
+    ledger and merge-credit.json to confirm"); this task does not need the confirmation, because it fixes the reader, not the rung.
+
+    (4) WHY THE FIX IS IN THE RECONCILE READ AND NOT IN `derivePrPrecedence`. The projection is also what `isDispatchEligible`
+    reads (`isMerged(t.id)`), and both tasks read `merged: true` there TODAY, which is correct: they must not be rebuilt.
+    Making rung (a) refuse a filing would turn those two, and every task credited the same way, into `merged: false`, i.e.
+    ELIGIBLE FOR RE-DISPATCH of finished work, the W1-T3990 / $526 loop. The wrong answer is confined to the one-way
+    `status: queued -> merged` write and to nothing else, so the repair belongs there.
+    The row is ALSO read by destructive consumers (`stampTaskMergedBy`, src/lib/sweep.ts:5616, which declines unless
+    `creditIsImplementation === true`, and `runCreditBackfill`). W1-T4942 left them on the subject path on purpose. This task
+    adds a SEPARATE field read by the reconcile alone and leaves `creditIsImplementation`/`prNumber`/`prUrl` byte-identical,
+    so neither a supersession close nor a backfill correction can move because of it.
+
+    (5) THE FAILURE MODE THAT MATTERS: CREDITING CODE THAT NEVER REACHED MAIN. #6019 is exactly that, a fleet PR merged into
+    `plan/W1-T3763-1789753690256`, never into main. The design therefore credits a later PR ONLY when there is positive evidence
+    on origin/main for IT: its `(#N)` squash commit is in the scan windows AND it is an implementation by the SAME rule the first
+    row had to meet (an implementation-shaped subject, or a readable non-empty changed-path list that is not bookkeeping-only,
+    and not a prerequisite-only body). The gateway's rows carry no base ref, so "reached main" is tested by the thing that
+    actually proves it, the `(#N)` commit; `mergeSubjects`/`mergedPaths` have an entry for a PR if and only if it has one. A task
+    whose ONLY merged credit is a stacked-base PR has no such commit, so it stays refused, which is the preserved control.
+    A merged PR is also required: candidates come from the merged half of the board snapshot the projection already fetched.
+
+    (6) COST AND POPULATION. ZERO new reads: `buildCreditCandidates` already holds `baseGithub`, whose
+    `listMergedHeadBranches()` is the merged snapshot `projectPlan` just consumed (one call over data in hand, null when the
+    batch failed), and `mergeSubjects`/`mergedPaths`/`mergeBodies` are already built. The search runs only for a task whose own
+    row is merged and NOT reconcilable, a small population (W1-T4942 measured 243 filing-shaped credit rows), never for a
+    reconcilable one. I did not enumerate how many more tasks this reaches: that needs the live board, which `gh` could not
+    read here; W1-T3376 and W1-T3763 are the two named, and the first test replays each.
+  design: |
+    (i) src/lib/status.ts: `creditsByAnchoredTrailer` gains `export`. NOTHING ELSE in that file changes. It is rung (c)'s own
+    ownership test (MERGED asserted from the PrRef, anchored trailer, no foreign run-branch), so the later-merge search applies
+    the SAME rule rather than a second derivation that could disagree with it.
+    (ii) src/run-task.ts: `CreditCandidate` is not edited (src/lib/sweep.ts stays untouched, avoiding its comment-load row);
+    a local `ReconcileCreditCandidate = CreditCandidate & { creditHasOtherBuildMerge?: boolean }` carries the new flag, and
+    `buildCreditCandidates`/`creditCandidatesFromProjection` return it (a subtype, so every caller compiles unchanged).
+    `creditHasOtherBuildMerge` is true ONLY when the row's own credit is not reconcilable and some OTHER merged PR for the same
+    task is. Absent otherwise, so a reconcilable first row is returned byte-for-byte as today.
+    (iii) `creditCandidatesFromProjection` takes a fifth optional argument `mergedCreditsFor?: (taskId: string) => readonly
+    PrRef[]` (default: none). The per-PR evidence derivation is extracted ONCE into a helper used for the row's own PR (same
+    result as today) and for each later PR: `{ creditIsImplementation, creditHasBuildDiff }` from that PR's subject, paths and
+    body. A later PR qualifies iff `state` is MERGED, its number differs from the row's, it is this task's by
+    `creditsByAnchoredTrailer("MERGED", head, body, taskId)` OR by `taskIdFromRunBranch(head) === taskId`, and
+    `creditIsReconcilable({ merged: true, ...evidence })` holds. That last clause is what carries the "reached main" test: an
+    unknown subject and an unknown or empty path list make both fields non-true, so a PR with no `(#N)` commit in the windows
+    can never qualify. A prerequisite-only body forces both false exactly as it does for the row itself (W1-T4078).
+    (iv) `buildCreditCandidates` builds `mergedCreditsFor` lazily, once, from `baseGithub.listMergedHeadBranches?.()`: a Map
+    task -> merged PrRefs (newest first), keyed by the anchored trailer line in the body and by the run-branch owner. null or an
+    absent method yields no candidates, which restores today's answer (the failure direction is a refusal, never a credit).
+    (v) `creditIsReconcilable` becomes `merged === true && (creditIsImplementation === true || creditHasBuildDiff === true ||
+    creditHasOtherBuildMerge === true)`. THE SUBJECT PATH AND THE ROW'S OWN FIELDS ARE NOT TOUCHED: `stampTaskMergedBy`,
+    `runCreditBackfill` and `reconcileImplementationEvidence` read what they read today. Only the one-way, PR-reviewed
+    `queued -> merged` write moves, and the retirement guard and review of every reconcile landing still bound it.
+    (vi) NOT IN SCOPE, said plainly: `derivePrPrecedence`'s rung order (changing it changes dispatch, see rationale (4)); the
+    4,000-commit path window and 5,000-commit subject window (a later PR outside them has no evidence and declines, the same
+    safe polarity W1-T4942 chose); a task with NO merged PR at all; and the sweep's destructive consumers.
+  acceptance:
+    - claim: "a task whose first credit row is a refused filing reconciles when a later merged PR carrying its trailer is a main-reaching build, the W1-T3376 shape (positive control)"
+      proof: 'grep: test("W1-T5034: a refused filing credited first does not hide a later merged implementation" in test/a-task-credited-first-by-a-refused-pr-reconciles-from-its-later-merge.test.ts'
+    - claim: "a task whose first credit row merged into a stacked base reconciles from the main re-land, the W1-T3763 shape"
+      proof: 'grep: test("W1-T5034: a stacked-base merge credited first does not hide the main re-land" in test/a-task-credited-first-by-a-refused-pr-reconciles-from-its-later-merge.test.ts'
+    - claim: "a filing-only credit is still refused, the preserved control"
+      proof: 'grep: test("W1-T5034: a filing-only credit is still refused" in test/a-task-credited-first-by-a-refused-pr-reconciles-from-its-later-merge.test.ts'
+    - claim: "a credit whose only PR merged into a stacked base and has no main commit is still refused, so code that never reached main never flips a task"
+      proof: 'grep: test("W1-T5034: a stacked-base-only credit with no main commit is still refused" in test/a-task-credited-first-by-a-refused-pr-reconciles-from-its-later-merge.test.ts'
+    - claim: "an unmerged later PR never earns the credit"
+      proof: 'grep: test("W1-T5034: an unmerged later PR never earns the credit" in test/a-task-credited-first-by-a-refused-pr-reconciles-from-its-later-merge.test.ts'
+    - claim: "a later merge with an unknown or empty path list never earns the credit, so a failed git read cannot flip a shard"
+      proof: 'grep: test("W1-T5034: a later merge with an unknown or empty path list never earns the credit" in test/a-task-credited-first-by-a-refused-pr-reconciles-from-its-later-merge.test.ts'
+    - claim: "a prerequisite-only later merge is refused"
+      proof: 'grep: test("W1-T5034: a prerequisite-only later merge is refused despite a code diff" in test/a-task-credited-first-by-a-refused-pr-reconciles-from-its-later-merge.test.ts'
+    - claim: "a reconcilable first credit is not re-searched, and the row's own implementation field, PR number and URL are unchanged so the destructive consumers cannot move"
+      proof: 'grep: test("W1-T5034: a reconcilable first credit is not re-searched and the destructive fields are unchanged" in test/a-task-credited-first-by-a-refused-pr-reconciles-from-its-later-merge.test.ts'
+    - claim: "the real credit builder, over a real git log and real gateway rows, reconciles the task, not only an injected map"
+      proof: 'grep: test("W1-T5034: the real credit builder reconciles a task from a real git log and gateway rows" in test/a-task-credited-first-by-a-refused-pr-reconciles-from-its-later-merge.test.ts'
+    - claim: "the new flag has a production call site in the credit builder"
+      proof: "grep: creditHasOtherBuildMerge in src/run-task.ts"
+    - claim: "the later-merge search reuses rung (c)'s own ownership predicate, exported from status.ts"
+      proof: "grep: export function creditsByAnchoredTrailer in src/lib/status.ts"
+  falsifier: |
+    Delete the `creditHasOtherBuildMerge === true` clause from `creditIsReconcilable` and the first two tests redden (the
+    filing-first and stacked-first tasks are refused again) while the preserved controls stay green. Drop the `creditIsReconcilable`
+    gate inside the later-PR search (qualify on the trailer alone) and the stacked-base-only test reddens (#6019 would credit a
+    task whose code never reached main), as does the unknown-path test. Drop the MERGED check and the unmerged test reddens.
+    Write the new flag over `creditIsImplementation` instead of beside it and the destructive-fields test reddens (the
+    supersession close would now act on the later PR). BOTH directions are needed: a test that only reddens on removal pins that the flag
+    exists, not what it decides.
+  note: |
+    DUPLICATE-SURFACE ADVISORY: W1-T75 (the monolith record for `deriveStatus`'s precedence rungs) shares src/lib/status.ts and
+    src/run-task.ts. Its own rationale records the same rung-(a) behaviour for a CLOSED last `pr.opened` (the W1-T20c/#134 stranding), which is
+    independent corroboration of mechanism (2). It is cited in plan_refs because this task is the one that does NOT change those rungs: status.ts gains a
+    single `export` and the new behaviour lives in the credit builder, by design (rationale (4)).
+    OVERLAP, NAMED: the sibling draft W1-T5029 (plan-reconcile fails loud) refactors `defaultCreditedMergedIds` into
+    `creditProjectionWithReadState` and adds a branch to `planReconcileCommand`; this task edits `creditIsReconcilable`,
+    `creditCandidatesFromProjection` and `buildCreditCandidates` only. The regions are textually apart but both live in
+    src/run-task.ts, so land them in either order and expect a mechanical merge. W1-T5035 touches `planReconcileCommand` too.
+    THE TWO EXISTING PINS THIS MUST NOT MOVE, as W1-T4942's: test/a-filing-credit-must-never-close-a-build.test.ts and
+    test/a-plan-only-filing-cannot-earn-a-merge-credit.test.ts. test/plan-reconcile-credit-parity.test.ts drives
+    `creditIsReconcilable` and `defaultCreditedMergedIds`; it must stay green unedited.
+    THE CORRECTION OF THE BRIEF: it said the commit-trailer surface is why #6455 was missed. In the code it is not: the merged
+    trailer lookup is BODY FIRST (`byTask.get(taskId) ?? commitTrailerFallback(taskId)[0]`, src/lib/status.ts
+    mergedTrailerLookup), newest PR first, so a body-trailered #6455 would beat the commit-surface #5088 if rung (c) were reached
+    at all; the replay returns #6455 with no ledger row. What hides it is an EARLIER rung returning first. The `(#6019)` claim is
+    confirmed (no such commit) and so is the position of #6455/#6020/#5088 inside both scan windows (1232/1553/2128 of 6,124).
+    RISK: high because src/run-task.ts holds the reconcile write and a wrong `true` writes `status: merged` onto a shard whose
+    work did not ship; the main-commit evidence requirement, the one-way rule, the retirement guard and the PR review of every
+    reconcile landing bound it, and the stacked-base-only test is the falsifier. status.ts gains one `export` and nothing else.
+    reservation hand-off: unknown -> file/gates-r5-1790812000000

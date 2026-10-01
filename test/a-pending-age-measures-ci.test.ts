@@ -92,13 +92,14 @@ test("W1-T4054: pr activity does not reset the pending age", () => {
 
 test("W1-T4054: no start time keeps the old fallback", () => {
   // A rollup entry with no start time (e.g. a status context never created) dates nothing, so the
-  // age falls back to the PR's last activity exactly as before: a minute old, so it waits.
+  // age falls back to the PR's last activity: a minute old, and eligible for early review.
   const [view] = viewsFor([{ name: "ci", status: "queued" }], minutesAgo(1));
   assert.ok(view);
   assert.equal(view.checksPendingSince, undefined);
   const result = deriveDisposition(view, DEFAULT_SWEEP_POLICY, NOW);
-  assert.equal(result.disposition, "wait");
+  assert.equal(result.disposition, "post-review");
   assert.match(result.reason, /^checks pending 1m/);
+  assert.match(result.reason, /review never posted/);
   assert.equal(checksPendingSinceFromRollup([], REQUIRED), undefined);
   assert.equal(checksPendingSinceFromRollup(undefined, REQUIRED), undefined);
 });

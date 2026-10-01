@@ -205,7 +205,7 @@ test("the sibling arms that already name themselves keep the exact sentences the
     "W1-T1110's blocked-fixable sentence is byte-identical",
   );
 
-  const waiting = await disposeOne(pr({ checksState: "pending", lastActivityAt: FRESH, checksPendingSince: FRESH }), []);
+  const waiting = await disposeOne(pr({ reviewState: "success", checksState: "pending", lastActivityAt: FRESH, checksPendingSince: FRESH }), []);
   assert.equal(waiting.row.disposition, "wait");
   assert.equal(
     waiting.row.stand_down_reason,
@@ -243,7 +243,7 @@ test("no disposition and no acted value changes: every fixture's tuple is what i
     ["stale deduped", pr({ lastActivityAt: ANCIENT, createdAt: ANCIENT }), [priorDisposal("stale")], {}, "stale", false],
     ["mergeable deduped", pr({ reviewState: "success" }), [priorDisposal("mergeable")], {}, "mergeable", false],
     ["blocked-fixable deduped", pr({ reviewState: "failure", unmetCriteria: UNMET }), [priorDisposal("blocked-fixable"), { step: "fix.dispatch", task_id: TASK, head_sha: HEAD }], {}, "blocked-fixable", false],
-    ["wait", pr({ checksState: "pending", lastActivityAt: FRESH, checksPendingSince: FRESH }), [], {}, "wait", false],
+    ["wait", pr({ reviewState: "success", checksState: "pending", lastActivityAt: FRESH, checksPendingSince: FRESH }), [], {}, "wait", false],
   ];
   for (const [name, view, lines, overrides, disposition, acted] of cases) {
     const { row } = await disposeOne(view, lines, overrides);

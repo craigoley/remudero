@@ -103,6 +103,8 @@ export type ReadModelViewMode = "serve" | "shadow" | "off";
 export interface ReadModelSwitches {
   projector: "on" | "off";
   views: Record<string, ReadModelViewMode>;
+  /** GET /v1/views/events' kill switch (view-events.ts); absent reads `off`, so push is dark until switched on. */
+  push?: "on" | "off";
 }
 
 export const DEFAULT_READ_MODEL_SWITCHES: ReadModelSwitches = { projector: "on", views: {} };
@@ -144,7 +146,7 @@ export function readReadModelSwitches(path: string): { ok: true; switches: ReadM
   } catch (error) {
     return { ok: false, reason: `switch file is not JSON: ${(error as Error).message}` };
   }
-  const obj = (raw ?? {}) as { projector?: unknown; views?: unknown };
+  const obj = (raw ?? {}) as { projector?: unknown; views?: unknown; push?: unknown };
   const views: Record<string, ReadModelViewMode> = {};
   for (const [name, mode] of Object.entries(typeof obj.views === "object" && obj.views !== null ? obj.views : {})) {
     if (mode !== "serve" && mode !== "shadow" && mode !== "off") return { ok: false, reason: `view ${name} has mode ${JSON.stringify(mode)}` };
@@ -152,7 +154,8 @@ export function readReadModelSwitches(path: string): { ok: true; switches: ReadM
   }
   const projector = obj.projector ?? "on";
   if (projector !== "on" && projector !== "off") return { ok: false, reason: `projector has mode ${JSON.stringify(projector)}` };
-  return { ok: true, switches: { projector, views }, mtimeMs };
+  if (obj.push !== undefined && obj.push !== "on" && obj.push !== "off") return { ok: false, reason: `push has mode ${JSON.stringify(obj.push)}` };
+  return { ok: true, switches: { projector, views, ...(obj.push !== undefined ? { push: obj.push } : {}) }, mtimeMs };
 }
 
 /** One instance's projector, as the worker last saw it. Posted to the main thread every tick. */
