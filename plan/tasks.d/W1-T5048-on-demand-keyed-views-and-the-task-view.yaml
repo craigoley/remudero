@@ -2,7 +2,6 @@
   title: "THE TASK PAGE COMPUTES ON EVERY GET — /task reads 4 to 7 core routes and the per-instance task route reads each run's PR from GitHub; add on-demand keyed views (a want message, a 300 ms async wait, 10 min eviction) and the task?instance=&id= view built from the task projection and indexed fact rows"
   repo: remudero
   depends_on: []
-  dispatch_hold: true
   priority: 2
   type: implement
   verify: auto
@@ -51,6 +50,7 @@
     Answer a cold key synchronously or not at all: the first proof times out. Never evict: the second proof
     still finds the key after 10 min with no reads. Read the PR per run: the spawn spy in the third proof fires.
   note: |
+    HOLD RELEASED 2026-10-01 (dispatch_hold deleted): P4-T04, the read-model slow-lane worker thread, merged as #8264 (1647850ad, src/lib/read-model-slow-lane.ts).
     DISPATCH HOLD: waits for P4-T04 (the read-model slow-lane worker thread). A Phase 4 critical-path task is hand-built on a run-unfiled
     branch with no plan id, so depends_on cannot name it. RELEASE: one plan amendment deleting
     dispatch_hold once that merges (tracked in arch-plan.md, Phase 4).

@@ -2,7 +2,6 @@
   title: "THE RECENT FEED FORGETS ON EVERY ROTATION — /v1/recent rebuilds its entries from the live file's retained rows, so history resets each time the core ledger rotates (about every 5 min); project classifyLine at ingestion into a persisted recent_entry table in the Phase 1 read model"
   repo: remudero
   depends_on: []
-  dispatch_hold: true
   priority: 2
   type: implement
   verify: auto
@@ -16,6 +15,7 @@
     - src/lib/recent-projection.ts
     - test/recent-projection.test.ts
     - src/lib/board.ts
+    - src/lib/ledger-projector.ts
   status: queued
   attempts: 0
   rationale: |
@@ -41,22 +41,33 @@
     table already drops duplicates).
     (iii) A read function returning the same entry shape /v1/recent sends today, with the `verb`
     and `limit` filters, and an exact merged-today count.
-    (iv) The projector's call to `projectRecentEntry` lands with the release amendment (see the
-    note). Serving /v1/recent from the read model is wired where serve reads view bodies (Phase
+    (iv) The projector calls `projectRecentEntry` through its row-projection seam: export a
+    `RECENT_ROW_PROJECTION` (a `LedgerRowProjection` whose `apply` calls `projectRecentEntry`) from
+    recent-projection.ts and register it in `LEDGER_ROW_PROJECTIONS` in ledger-projector.ts, beside
+    `REPO_ROW_PROJECTION` (#8067's seam). Serving /v1/recent from the read model is wired where serve reads view bodies (Phase
     1's views task), not here.
   acceptance:
     - claim: "recent history survives a ledger rotation and a restart of the reader"
-      proof: "unit test: recent history survives a ledger rotation and a serve restart"
+      proof: 'grep: test("W1-T4924: recent history survives a ledger rotation and a serve restart" in test/recent-projection.test.ts'
     - claim: "merged today is an exact count read from the projection"
-      proof: "unit test: merged today is an exact count from the recent projection"
+      proof: 'grep: test("W1-T4924: merged today is an exact count from the recent projection" in test/recent-projection.test.ts'
     - claim: "the live-file recent feed and the projection share one classifier"
       proof: "grep: recentEntryFromLine( in src/lib/board.ts"
+    - claim: "the ledger projector registers the recent projection"
+      proof: "grep: RECENT_ROW_PROJECTION in src/lib/ledger-projector.ts"
   falsifier: |
     Rebuild the entries from the live file instead of the table: rotating the fixture ledger
     empties the history and the first proof fails. Count merges from the retained rows: a
     merge shed by rotation drops out of the count and the second proof fails. Leave a copy of
     classifyLine in board.ts: the grep reads 0 and the two feeds can drift.
   note: |
+    HOLD RELEASED 2026-10-01: the ledger projector merged as #8067 (e6ecccb0b, src/lib/ledger-projector.ts,
+    with its LEDGER_ROW_PROJECTIONS seam). Per the release recipe below, dispatch_hold is deleted, the
+    projector module is in files:, and the call-site criterion is added. DEVIATION from the recipe's
+    literal `grep: projectRecentEntry( in <the projector module>`: #8067 calls projections through
+    LEDGER_ROW_PROJECTIONS, never by name, so the criterion greps the registration instead. Criteria 1 and 2
+    became grep proofs on the titled test (the W1-T5048..5055 form): a `unit test:` title naming a test
+    file the task creates is refused by lint-plan's proof-unit-test-unresolvable once the hold is off.
     DISPATCH HOLD: waits for the ledger projector (run-unfiled PR). The projector (Phase 1
     P1-01/P1-02, `src/lib/read-model-db.ts` and `src/lib/ledger-projector.ts` in the design) is
     being hand-built on run-unfiled branches and has no plan id, so `depends_on` cannot name it

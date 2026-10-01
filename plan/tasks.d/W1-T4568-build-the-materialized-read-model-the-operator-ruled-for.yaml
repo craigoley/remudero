@@ -12,7 +12,8 @@
   plan_refs: ["W1-T3196", "W1-T3192", "W1-T3193", "W1-T4451", "W1-T4454", "W1-T4554", "W1-T4557"]
   files:
     - DECISIONS.md
-  status: queued
+  status: blocked
+  retirement: closed
   attempts: 0
   rationale: |
     W1-T3196 (operator ruling, 2026-09-08) made the read side an incrementally maintained,
@@ -42,10 +43,20 @@
   acceptance:
     - claim: "DECISIONS.md records the chosen read-model store and why"
       proof: "grep: READ-MODEL STORE in DECISIONS.md"
+      satisfied_by: "#8010"
   falsifier: |
     CLOSE IF the operator rules the maintained projection unnecessary given W1-T4454's worker-thread
     projections, and record that ruling instead.
   note: |
+    CLOSED 2026-10-01 (operator ruling: credit it so the fleet cannot dispatch a duplicate): satisfied
+    by Phase 1 of the core-console read-path plan, never built under this id. The store decision is in
+    DECISIONS.md: #8010 (2026-09-30, "the core↔console read path becomes a materialized, pushed read
+    model (W1-T4568 released)", node:sqlite in WAL mode) and #8063 (the Phase 1 design rulings, which
+    supersede this record's "written by the daemon" note: a serve worker thread writes it behind a
+    fenced lease). Built by #8062 (the node:sqlite adapter and writer lease), #8067 (the ledger
+    projector), #8033 (the nav-badge view), #8104 (the now view) and #8324 (view bodies on their own
+    thread). The criterion's literal "READ-MODEL STORE" heading was never written, so it carries
+    satisfied_by #8010 instead of a proof.
     OPERATOR RULING 2026-09-30 (recorded in DECISIONS.md, "the verify-human queue, cleared"): STAYS DEFERRED — no release trigger has fired; re-measure the cold board read after W1-T4820 merges (over 5 s fires the trigger).
     DEFERRED BY OPERATOR RULING, 2026-09-27 (DECISIONS.md "W1-T4568: the materialized read model is
     DEFERRED"). Its prerequisites shipped, and together with W1-T4452, W1-T4567 and W1-T4582 every GET read
