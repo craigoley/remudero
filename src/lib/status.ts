@@ -1339,6 +1339,9 @@ const INFRASTRUCTURE_REFUSAL_VERDICTS: ReadonlySet<string> = new Set([
   "blocked_isolation",
   "blocked_toolchain",
   "blocked_transient",
+  "blocked_git_fetch",
+  "blocked_inflight",
+  "handed_off",
   "task_already_merged",
 ]);
 
@@ -1351,7 +1354,7 @@ const INFRASTRUCTURE_THROWN_STAGES: ReadonlySet<string> = new Set([
   "preflight.isolation",
 ]);
 
-function infrastructureRefusal(line: Record<string, unknown>): string | undefined {
+export function infrastructureRefusal(line: Record<string, unknown>): string | undefined {
   if (typeof line.verdict !== "string") return undefined;
   if (INFRASTRUCTURE_REFUSAL_VERDICTS.has(line.verdict)) return line.verdict;
   if (line.verdict === "failed" && typeof line.stage === "string" && INFRASTRUCTURE_THROWN_STAGES.has(line.stage)) return line.stage;
@@ -1635,8 +1638,8 @@ export function effectiveLifetimeDispatches(tally: LifetimeDispatchTally): numbe
   return tally.capacityBlocked > tally.starts ? tally.starts : tally.starts - tally.capacityBlocked;
 }
 
-/** W1-T4025: task-attributable lifetime pressure, not a terminal ceiling. Capacity refusals and
- * proven orphaned worker starts are host evidence, so neither spends the task's adaptive signal.
+/** W1-T4025: task-attributable lifetime pressure, not a terminal ceiling. Capacity refusals,
+ * infrastructure refusals, and proven orphaned worker starts are host evidence.
  * A run with an unknown identity remains counted: uncertainty must not buy an unbounded retry. */
 export function taskAttributableLifetimeDispatches(
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -1646,11 +1649,19 @@ export function taskAttributableLifetimeDispatches(
 ): number {
   const rows = indexedTaskRows(lines, taskId, index);
   const orphanRunIds = orphanedRunIds(lines, taskId, index, opts);
+  const infrastructureRunIds = new Set<string>();
+  for (const line of rows) {
+    if (line.task_id === taskId && line.step === "verdict" &&
+        typeof line.run_id === "string" && infrastructureRefusal(line) !== undefined) {
+      infrastructureRunIds.add(line.run_id);
+    }
+  }
   let starts = 0;
   let capacityBlocked = 0;
   for (const line of rows) {
     if (line.step === "run.start" && line.task_id === taskId) {
-      if (typeof line.run_id !== "string" || !orphanRunIds.has(line.run_id)) starts += 1;
+      if (typeof line.run_id !== "string" ||
+          (!orphanRunIds.has(line.run_id) && !infrastructureRunIds.has(line.run_id))) starts += 1;
     }
     if (line.step === "daemon.spawn_infra_blocked" && line.task === taskId) capacityBlocked += 1;
   }
