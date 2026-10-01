@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.18
   status: queued
@@ -16,3 +16,12 @@
     - claim: "the fix_refusal:the-task-declares-no-files-so-there-is-no-surface-to-stage cause of PR friction has a recorded remedy"
       proof: "grep: ci-friction:fix_refusal:the-task-declares-no-files-so-there-is-no-surface-to-stage in docs/ci-friction-remedies.md"
   note: "Filed by the ci-friction gardener (W1-T4435) from a weekly pass over the ledger and gate-fire-rate.ts's own measurement. fix_refusal:the-task-declares-no-files-so-there-is-no-surface-to-stage priced at 367.8 PR minute(s) across 68 round(s) on 48 pull request(s) — the costliest cause with no open task. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person; its remedy is recorded in docs/ci-friction-remedies.md naming \"ci-friction:fix_refusal:the-task-declares-no-files-so-there-is-no-surface-to-stage\" once it lands."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.91
+    reasons:
+      - "The filed task calls for recording a CI friction remedy in one declared documentation file, with a grep acceptance check for that record."
+      - "The gates state shows filingTime true and no concerning gate result; no actual change view was supplied."
+    judged_at: "2026-10-01T09:18:44.584Z"
+    pin: "fdfdfcd7430382137cd8205715bc16d1d45dba43d15fc5dcb76aa4d6b5f99f05"

@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-freshness-cheapest-1790787126000 -> plan-freshness-cheapest-1790787126000"
   plan_refs: [W1-T2965, W1-T3245]
   files: [src/lib/self-sync.ts, src/lib/daemon.ts, src/lib/deploy-judge.ts, test/the-daemon-restarts-for-freshness-at-its-cheapest-moment.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 (rmd ledger-grep, 2026-09-28..30): daemon.boot 24/27/27 per day; daemon.freshness_drain 36

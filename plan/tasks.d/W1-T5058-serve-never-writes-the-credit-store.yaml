@@ -15,7 +15,7 @@
     - src/lib/panel-graph.ts
     - src/lib/board.ts
     - test/serve-never-writes-the-credit-store.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-10-01 at 431d71762: status.ts projectPlan calls writeCreditStore (default saveCreditStore)

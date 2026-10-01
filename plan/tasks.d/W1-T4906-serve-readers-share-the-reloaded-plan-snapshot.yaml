@@ -17,7 +17,7 @@
     - src/lib/status-stream-publisher.ts
     - src/lib/serve-plan-reload.ts
     - src/lib/serve.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30. W1-T4481 (#7982) swaps `deps.board.plan` in place on a plan-only advance.

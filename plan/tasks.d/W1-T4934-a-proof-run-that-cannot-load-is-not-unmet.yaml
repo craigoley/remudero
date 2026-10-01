@@ -14,7 +14,7 @@
   files:
     - src/lib/review.ts
     - test/a-proof-run-that-cannot-load-is-not-unmet.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 by the coordinator. The console reviewer runs

@@ -9,7 +9,7 @@
   band_meaning: blast-radius
   budget_usd: 20.00
   priority: 2
-  status: queued
+  status: merged
   attempts: 0
   origin: "research 2026-09-30: pre-push census gap, finding 9 (plan-lint reds)"
   plan_refs: ["W1-T3225", "W1-T3730", "W1-T3814", "W1-T3843", "W1-T4399", "W1-T4656"]

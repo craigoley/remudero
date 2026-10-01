@@ -12,7 +12,7 @@
   origin: "operator ask 2026-10-01: 14 shipped plan/tasks.yaml records (W1-T112 T115 T12a T144 T160 T178 T20c T245 T246 T25 T58 T65 T86 T96) could not be flipped by rmd plan-reconcile and were hand-flipped in #8193"
   plan_refs: [W1-T3043, W1-T3084, W1-T4942, W1-T3970, W1-T2280, W1-T122, W1-T5034]
   files: [src/run-task.ts, test/plan-reconcile-names-the-tasks-yaml-records-it-cannot-flip.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-01 at origin/main 2d82ea51d. THE SMALLER OF TWO OPTIONS, CHOSEN ON THE SOURCE.

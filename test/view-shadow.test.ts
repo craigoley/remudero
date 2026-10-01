@@ -472,7 +472,8 @@ test("the worker branch hands a shadow message to its comparator", async (t) => 
   t.after(() => onMessage?.({ type: "stop" }));
   await until(() => posted.some((m) => m.type === "body" && m.entry.view === "read-model"), "the status view materialized");
   onMessage?.({ type: "shadow", view: "read-model", key: "", requests: 2, legacy: { data: { instances: [] }, asOfMs: T0 } } as { type: string });
-  assert.ok(posted.some((m) => m.type === "log" && m.step === VIEW_SHADOW_DIFF_STEP && m.extra.view === "read-model"));
+  // The comparator lives on the view thread, so the diff row arrives a message later.
+  await until(() => posted.some((m) => m.type === "log" && m.step === VIEW_SHADOW_DIFF_STEP && m.extra.view === "read-model"), "the view thread compared the sample");
 });
 
 test("serve posts a shadow sample to a real worker thread which writes the diff row", async (t) => {

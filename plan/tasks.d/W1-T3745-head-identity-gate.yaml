@@ -10,7 +10,7 @@
   origin: "observed 2026-09-17 on the live board — #5952 and #5953, opened 8 minutes apart, both refused by head-identity-gate for the same structural reason"
   plan_refs: [W1-T3388, W1-T1004]
   files: [scripts/head-identity-gate.mjs]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     reservation hand-off: unknown -> file-t3745-fix-lane-born-red

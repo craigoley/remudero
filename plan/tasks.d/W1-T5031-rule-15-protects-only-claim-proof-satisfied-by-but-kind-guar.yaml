@@ -14,7 +14,7 @@
   files:
     - src/lib/review.ts
     - test/rule-15-protects-the-criterion-kind-that-exempts-discrimination.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 at origin/main a23658e66 by running the real predicates on synthetic diffs (a scratch probe, deleted afterwards); the brief's claim reproduces exactly.

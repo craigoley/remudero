@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§5", "§8A", "W1-T2259"]
   files: [scripts/lib/repo-root.mjs, scripts/lib/argv.mjs, scripts/lib/git.mjs, scripts/lib/lcov.mjs, scripts/*.mjs, scripts/plan-state-claims.mjs, scripts/generate-capability-snapshot.mjs, .jscpd.json, test/scripts-shared-lib.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-59 (OBSERVED; the dead-script half is ALREADY W1-T2259 and is not

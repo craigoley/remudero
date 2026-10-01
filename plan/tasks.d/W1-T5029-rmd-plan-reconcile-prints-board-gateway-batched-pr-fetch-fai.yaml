@@ -14,7 +14,7 @@
   files:
     - src/run-task.ts
     - test/plan-reconcile-fails-loud-when-its-github-read-fails.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 at origin/main 1f6d904bb; the failing read was REPRODUCED here, not carried from the brief.

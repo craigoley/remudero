@@ -10,7 +10,7 @@
   files: [src/lib/inbox.ts, src/run-task.ts, test/ratify-batch.test.ts]
   origin: "operator-brief#batch-the-inbox-drain-2026-08-30"
   plan_refs: ["W1-T2455", "W1-T2428", "W1-T205", "W1-T2451"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces, anchored W1-T2471([^0-9]|$) with a [0-9] class and never a \d shorthand.

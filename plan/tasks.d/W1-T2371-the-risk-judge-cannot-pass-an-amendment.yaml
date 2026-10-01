@@ -10,7 +10,7 @@
   files: [src/lib/risk-judge.ts, src/run-task.ts, test/risk-judge-plan-only-amendment.test.ts]
   origin: oper#judge-cannot-pass-an-amendment-2026-08-27
   plan_refs: ["W1-T458", "W1-T1268", "W1-T2318", "W1-T2345"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     RE-DERIVED IN A SCRATCH WORKTREE PROVEN EQUAL TO origin/main at 25c5cd28. NO LEDGER CLAIM

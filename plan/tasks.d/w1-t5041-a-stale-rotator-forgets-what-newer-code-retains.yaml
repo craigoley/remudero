@@ -12,7 +12,7 @@
   note: "reservation hand-off: plan-stale-rotator-1790818003000 -> plan-stale-rotator-1790818003000"
   plan_refs: [W1-T4691, W1-T2425, W1-T4393]
   files: [src/lib/ledger.ts, test/a-stale-rotator-never-forgets-what-newer-code-retains.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-01 (core ledger, live + rotations): W1-T4691 (#7827, merged 2026-09-29 14:33Z) added

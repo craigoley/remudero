@@ -19,7 +19,7 @@
     - test/worktree-node-modules-lockfile-mismatch.test.ts
   origin: "oper#canonical-checkout-drift-detection-2026-09-03"
   plan_refs: ["W1-T151", "W1-T2618", "W1-T2321"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE INVESTIGATION THAT PRODUCED THIS TASK, from an earlier session's canonical-checkout-drift

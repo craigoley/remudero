@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.3
   status: queued
@@ -16,3 +16,12 @@
     - claim: "the fix_refusal:every-change-the-worker-made-is-outside-its-declared-files cause of PR friction has a recorded remedy"
       proof: "grep: ci-friction:fix_refusal:every-change-the-worker-made-is-outside-its-declared-files in docs/ci-friction-remedies.md"
   note: "Filed by the ci-friction gardener (W1-T4435) from a weekly pass over the ledger and gate-fire-rate.ts's own measurement. fix_refusal:every-change-the-worker-made-is-outside-its-declared-files priced at 255.6 PR minute(s) across 71 round(s) on 27 pull request(s) — the costliest cause with no open task. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person; its remedy is recorded in docs/ci-friction-remedies.md naming \"ci-friction:fix_refusal:every-change-the-worker-made-is-outside-its-declared-files\" once it lands."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.94
+    reasons:
+      - "The filed plan record calls for documenting a remedy to a named CI friction cause, and its only declared touched file is docs/ci-friction-remedies.md."
+      - "The gates state shows filingTime: true and no reported failure. No actual change view was supplied, so this verdict assesses the filed task, not unseen edits."
+    judged_at: "2026-10-01T09:30:22.247Z"
+    pin: "09c568904376cc0926cd96f1e95d7f0a890db47556687f12f8eb9dea228396db"
