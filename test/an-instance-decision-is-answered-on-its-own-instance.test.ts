@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { systemClock } from "../src/lib/clock.js";
 import { daemonInstanceRegistryPath } from "../src/lib/deployer.js";
+import { INSTANCE_WRITES } from "../src/lib/instances-view.js";
 import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
 import { createNowView, type NowViewContext, type NowViewData } from "../src/lib/now-view.js";
 import { loadPlan } from "../src/lib/plan.js";
@@ -137,7 +138,8 @@ test("an escalation on another instance names that instance's answer route", (t)
   const { site } = nowOf(t, f);
   assert.deepEqual(site().decisions.map((d) => [d.kind, d.answer.path]), [["escalation", "/v1/i/site/escalation/mark-handled"]]);
   const served = new Set(buildServeRoutes(f.deps).map((r) => `${r.method} ${r.path}`));
-  for (const path of ["/v1/i/site/escalation/mark-handled", "/v1/i/site/manual/approve"]) assert.ok(served.has(`POST ${path}`), `serve mounts ${path}`);
+  assert.ok(INSTANCE_WRITES.includes("manual/approve") && INSTANCE_WRITES.includes("escalation/mark-handled"), "the instances view lists both answer routes");
+  for (const write of INSTANCE_WRITES) assert.ok(served.has(`POST /v1/i/site/${write}`), `serve mounts every write the instances view lists: ${write}`);
 });
 
 test("an answer to a site decision goes to the site route and drops the decision", async (t) => {
