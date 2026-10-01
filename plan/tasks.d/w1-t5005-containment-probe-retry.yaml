@@ -11,7 +11,7 @@
   origin: "operator ask 2026-09-30: file and build what gives the fleet a leg up (throughput research)"
   note: "reservation hand-off: plan-containment-probe-retry-1790810803000 -> plan-containment-probe-retry-1790810803000"
   plan_refs: [W1-T2201, W1-T1281, W1-T4597, W1-T4660]
-  files: [src/lib/containment.ts, test/an-unproven-containment-probe-is-asked-once-more.test.ts]
+  files: [src/lib/containment.ts, test/an-unproven-containment-probe-is-asked-once-more.test.ts, test/containment.test.ts]
   status: queued
   attempts: 0
   rationale: |
