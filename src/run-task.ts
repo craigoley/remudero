@@ -5,6 +5,7 @@
 // below have SECOND callers outside doctorCommand and stay imported here too.
 import { retryWhileLockBusy } from "./lib/lock-busy-retry.js";
 import { retryPollRead } from "./lib/poll-read-retry.js";
+import { decideFreshnessRestart } from "./lib/deploy-judge.js";
 import {
   appendCaptureSurfaceFireHistory,
   judgeDiskHeadroom,
@@ -5748,6 +5749,19 @@ export interface PollDeps {
   */
   requiredContexts?: (owner: string, repo: string) => string[] | undefined;
   externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+}
+
+export function ciWaitFreshness(
+  read: () => DaemonFreshness,
+  clock: Clock = systemClock,
+): () => Extract<DaemonFreshness, { stale: true }> | undefined {
+  return () => {
+    const freshness = read();
+    if (!freshness.stale) return undefined;
+    const nowMs = clock.now();
+    const decision = decideFreshnessRestart({ changes: freshness.changes, busy: true, staleSinceMs: nowMs, nowMs, state: { total: 0, scoredShas: [] } });
+    return decision.action === "restart" ? freshness : undefined;
+  };
 }
 
 // EXPORTED INLINE, not on the tail export list its sibling `waitForCiGreen` rides: that list is the
@@ -30855,9 +30869,9 @@ function queueGovernorGateFor(
  *
  * W1-T4465: `observe` now carries the FULL `PrRef[]` batch (status.ts), not merely its length, so
  * `readOwnership` below can classify each `headRefName` for the queue governor's ownership split
- * (design (i)) off this SAME single fetch. `read` is UNCHANGED in signature and behaviour — still a
- * bare total count — because it also backs `DrainDeps.openPrCount`/`DaemonDeps.openPrCount`, the
- * W1-T172 lane-dispatch-budget input, which has no ownership concept and must not gain one here. */
+ * (design (i)) off this SAME single fetch. `read` is still the bare total. W1-T5046: the W1-T172
+ * lane budget (`DrainDeps.openPrCount`/`DaemonDeps.openPrCount`) now reads `readOwnership().owned`,
+ * because foreign PRs held every fleet lane at the WIP limit on 2026-10-01. */
 export function createOpenPrCountObservation(): {
   reset: () => void;
   observe: (openPrs: readonly PrRef[] | undefined) => void;
@@ -31423,17 +31437,13 @@ async function drainCommand(
   // W1-T3144: the queue governor counts the COMPLETE open-board batch `projectPlan` already read,
   // including PRs whose task shard is not yet on main. A gateway without that optional batch keeps
   // the prior projection fallback; a failed batch throws into W1-T342's fail-closed wrapper.
-  const openPrCount = () => boardOpenPrCount.read(() => {
-    let projected = 0;
-    for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
-    return projected;
-  });
   // W1-T4465 design (i): the SAME batch, split by fleet ownership — never a second GitHub read.
   const openPrOwnership = () => boardOpenPrCount.readOwnership(() => {
     let projected = 0;
     for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
     return projected;
   });
+  const openPrCount = () => openPrOwnership().owned;
   if (dryRun) {
     const merged = refreshMerged();
     if (opts.curated) {
@@ -33159,17 +33169,13 @@ export async function daemonCommand(
   const { openSiblingBuildFor, onOpenSiblingBuild } = openSiblingObservation("daemon", () => lastProj, log);
   // W1-T3144: identical to drainCommand — complete board depth from the projection's existing
   // batch read, with the old projection count retained only for gateways that omit that method.
-  const openPrCount = () => boardOpenPrCount.read(() => {
-    let projected = 0;
-    for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
-    return projected;
-  });
   // W1-T4465 design (i): the SAME batch, split by fleet ownership — never a second GitHub read.
   const openPrOwnership = () => boardOpenPrCount.readOwnership(() => {
     let projected = 0;
     for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
     return projected;
   });
+  const openPrCount = () => openPrOwnership().owned;
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
   if (target.dryRun) {
     // W1-T253: drain.max from the SAME loaded policy `opts` above already threaded, never
@@ -33703,10 +33709,7 @@ export async function daemonCommand(
             // W1-T3793: only the daemon offers the cooperative external-CI-wait handoff. The
             // existing adapter is material-and-clean only; unassessed, dirty, and degraded
             // readings remain undefined and therefore cannot manufacture a restart.
-            externalWaitFreshness: () => {
-              const freshness = daemonFreshnessFromService(checkServiceFreshness(effectiveRepoRoot, process.env));
-              return freshness.stale ? freshness : undefined;
-            },
+            externalWaitFreshness: ciWaitFreshness(() => daemonFreshnessFromService(checkServiceFreshness(effectiveRepoRoot, process.env))),
           }),
         readUsage: () => readUsageSnapshotPreferSdk(config),
         // THE LEDGER IS THE DEDUP (impl-FL): seed the once-per-string bound from what previous
