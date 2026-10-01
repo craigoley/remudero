@@ -102,6 +102,8 @@ export interface Route {
 /** Push one SSE event or comment. The optional id is a transport field, never JSON data. */
 export type SseSend = ((event: string, data: unknown, id?: string) => void) & {
   comment?: (text: string) => void;
+  /** Send one last event and end the stream (serve's drain hands a stream over this way). */
+  end?: (event: string, data: unknown) => void;
 };
 
 /** One SSE stream: an exact GET `path` match gated by `scope`. */
@@ -989,6 +991,9 @@ function openSse(req: IncomingMessage, res: ServerResponse, route: SseRoute, pat
     res.write(`${safeId}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
   send.comment = (text) => res.write(`: ${text.replace(/[\r\n]/g, " ")}\n\n`);
+  send.end = (event, data) => {
+    if (!res.writableEnded) res.end(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
   const unsubscribe = route.subscribe(send, req);
   log("service.sse.open", { path });
   req.on("close", () => {

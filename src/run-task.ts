@@ -611,7 +611,10 @@ import { runCensusFix, type CensusFixResult } from "./lib/census-fix.js";
 // already share (affectedSuitesStep, lib/ci-parity.ts), reused here so the new scoped-coverage
 // default step can never independently derive a second notion of "which suites reach a changed
 // src module".
-import { readAffectedSuitesInput, selectAffectedSuites, type AffectedSuitesInput } from "./lib/affected-suites.js";
+import { affectedSelectionOrFull, readAffectedSuitesInput, selectAffectedSuites, type AffectedSelection, type AffectedSuitesInput } from "./lib/affected-suites.js";
+// W1-T4797 — the tier manifest's own measured durations bound the pre-push coverage precheck.
+// @ts-expect-error a plain .mjs script with no declaration file, as the satisfied-task census import above.
+import { DEFAULT_MANIFEST_RELATIVE_PATH, DURATION_STALENESS_FACTOR, loadManifest, tierFiles, weightedDurationMs } from "../scripts/test-tier-manifest.mjs";
 import {
   consumeSourceSizeFollowup,
   classifySourceSizeSummary,
@@ -1399,6 +1402,7 @@ import {
   BRANCH_REAP_REASON_LABEL,
   readLedgerUnionBounded,
   taskIdFromRunBranch,
+  creditsByAnchoredTrailer,
   taskIdFromSlugBranch,
   readMergeCreditedTaskIds,
   isMergeCreditLine,
@@ -13615,6 +13619,8 @@ interface RunTaskBodyOptions {
   maskRules?: boolean;
   noMerge?: boolean;
   readHeadShaForProvenance?: (prUrl: string) => string;
+  /** W1-T4797: test seam for the pre-push diff-coverage precheck; production reads the real ones. */
+  coveragePrecheckPorts?: CoveragePrecheckPorts;
   /** Where a stale-proof PR-open refusal escalates; production files the task repo's own issue. */
   prOpenRefusalIssues?: IssueGateway;
   spawnWallClockBoundMs?: number;
@@ -14416,6 +14422,8 @@ async function runTask(
      *  rung — the same `?? loadDefaultPolicy()` seam `workerAbandonMs` above uses, so a test can
      *  drive both arms without editing the shipped policy file. */
     armAdhocLaneReap?: boolean;
+    /** W1-T4797: test seam for the pre-push diff-coverage precheck; production reads the real ones. */
+    coveragePrecheckPorts?: CoveragePrecheckPorts;
     /**
      * W1-T1044: override for the fix rung's worker-spawn wall-clock bound (see
      * `runFixRung`'s own `deps.spawnWallClockBoundMs` doc). Optional — omitted reads
@@ -14981,6 +14989,7 @@ export function censusPushRefusal(err: unknown): CensusPushRefusal | undefined {
 
 const CENSUS_BASELINE_FILES = ["scripts/clock-signature-baseline.json", "scripts/comment-load-baseline.json", "scripts/fixture-copy-baseline.json"];
 const CENSUS_PUSH_CHECK = "pre-push census-precheck";
+const COVERAGE_PUSH_CHECK = "pre-push coverage-precheck";
 const CENSUS_PUSH_NEVER_BYPASS =
   "Apply the remedy each row names, preferring the code change; record a baseline row only where that row offers\n" +
   "one. Never push with --no-verify or RMD_PREPUSH_GATES=0: the harness retries the push through the hook.";
@@ -15005,6 +15014,136 @@ export function pushFixRound(wt: string, branch: string, expectedHeadSha?: strin
     if (expectedHeadSha !== undefined && remote === expectedHeadSha) return;
     throw new FixRoundPushError(runErrorCause(err), censusPushRefusal(err), String((err as Error)?.message ?? err));
   }
+}
+
+/**
+ * W1-T4797: the pre-push DIFF-COVERAGE precheck's answer, as three DISTINCT values — never collapsed.
+ * `uncovered` refuses the round before any push, carrying CI's own uncovered-lines text; `covered`
+ * pushes as today; `unavailable` (timeout, spawn failure, unreadable lcov, a selector that cannot
+ * scope) ALSO pushes: a precheck that cannot look must never block.
+ */
+export type CoveragePrecheck =
+  | { outcome: "covered"; reason: string; suites: number }
+  | { outcome: "uncovered"; text: string; suites: number }
+  | { outcome: "unavailable"; reason: string };
+
+/** What one scoped `diff-coverage-local.mjs` run came back with. */
+export type CoverageRunResult = { status: number | null; output: string; timedOut: boolean; spawnError?: string };
+
+/** Everything the precheck reads or spawns, so a test can drive each arm without an instrumented suite. */
+export type CoveragePrecheckPorts = {
+  changedFiles?: (wt: string) => string[];
+  select?: (wt: string, changed: string[]) => AffectedSelection;
+  manifest?: (wt: string) => { thresholdMs: number; files: Record<string, number> };
+  run?: (wt: string, suites: string[], timeoutMs: number) => CoverageRunResult;
+};
+
+const COVERAGE_SRC_FILE = /^src\/.*\.ts$/;
+const COVERAGE_UNCOVERED_HEADLINE = /^diff-coverage: (?:BLOCKED -- this diff adds|INVALID process-boundary)/m;
+const COVERAGE_MISSING_SF = /no SF record in the coverage report/;
+const COVERAGE_TEXT_CAP = 4000;
+
+const realCoverageChangedFiles = (wt: string): string[] =>
+  execFileSync("git", ["-C", wt, ...MERGE_BASE_DIFF_ARGS], { encoding: "utf8" }).split("\n").map((f) => f.trim()).filter(Boolean);
+
+const realCoverageRun = (wt: string, suites: string[], timeoutMs: number): CoverageRunResult => {
+  // withoutNodeTestContextEnv: diff-coverage-local.mjs shells its OWN nested `node --test`.
+  const r = withoutNodeTestContextEnv(() =>
+    spawnSync(process.execPath, [join(wt, "scripts", "diff-coverage-local.mjs"), "--base", "origin/main", "--lcov", "coverage/precheck-lcov.info", ...suites], {
+      cwd: wt,
+      encoding: "utf8",
+      timeout: timeoutMs,
+      maxBuffer: 64 * 1024 * 1024,
+    }),
+  );
+  const code = (r.error as NodeJS.ErrnoException | undefined)?.code;
+  return { status: r.status, output: `${r.stdout ?? ""}\n${r.stderr ?? ""}`, timedOut: code === "ETIMEDOUT", ...(r.error ? { spawnError: r.error.message } : {}) };
+};
+
+/** The gate's own refusal lines (its `diff-coverage:` headline and `  - file:line` rows), bounded. */
+function coverageRefusalText(output: string): string {
+  const at = output.search(/^diff-coverage: (?:BLOCKED|INVALID)/m);
+  const lines = output.slice(at < 0 ? 0 : at).split("\n").filter((l) => /^diff-coverage:|^\s+- |^\s+! /.test(l));
+  return lines.join("\n").slice(0, COVERAGE_TEXT_CAP);
+}
+
+/**
+ * W1-T4797: run CI's own diff-coverage (scripts/diff-coverage-local.mjs, the same invocation, W1-T4084) over
+ * only the suites the affected-suite selector maps to the changed src files — fast tier first, widening to the
+ * slow-tier siblings only when a changed file has no `SF:` record. Each pass is bounded by the tier manifest's
+ * OWN measured durations for exactly the suites it runs (never a fixed number of seconds); a run over that
+ * bound is `unavailable`, not `uncovered`.
+ */
+export function coveragePrecheck(wt: string, ports: CoveragePrecheckPorts = {}): CoveragePrecheck {
+  const reasonOf = (e: unknown) => String((e as Error)?.message ?? e).slice(0, 300);
+  let changed: string[];
+  try {
+    changed = (ports.changedFiles ?? realCoverageChangedFiles)(wt);
+  } catch (e) {
+    return { outcome: "unavailable", reason: `changed files unreadable: ${reasonOf(e)}` };
+  }
+  if (!changed.some((f) => COVERAGE_SRC_FILE.test(f))) {
+    return { outcome: "covered", reason: "no changed src file for diff-coverage to prove", suites: 0 };
+  }
+  let selection: AffectedSelection;
+  let manifest: { thresholdMs: number; files: Record<string, number> };
+  try {
+    selection = (ports.select ?? ((w, c) => affectedSelectionOrFull(c, () => readAffectedSuitesInput(w, c))))(wt, changed);
+    manifest = (ports.manifest ?? ((w) => loadManifest(join(w, DEFAULT_MANIFEST_RELATIVE_PATH))))(wt);
+  } catch (e) {
+    return { outcome: "unavailable", reason: `could not derive the affected-suite scope: ${reasonOf(e)}` };
+  }
+  if (selection.fullRun) return { outcome: "unavailable", reason: selection.reasons[0] ?? "a changed file forces the full suite" };
+  if (selection.suites.length === 0) return { outcome: "unavailable", reason: "no suite reaches the changed src files" };
+  const tiers = tierFiles(selection.suites, manifest) as { fast: string[]; slow: string[] };
+  const passes = [tiers.fast.length > 0 ? tiers.fast : tiers.slow];
+  if (tiers.fast.length > 0 && tiers.slow.length > 0) passes.push([...tiers.fast, ...tiers.slow]);
+  const run = ports.run ?? realCoverageRun;
+  for (const suites of passes) {
+    const predictedMs = suites.reduce((sum, f) => sum + (weightedDurationMs(f, manifest) as number), 0);
+    const boundMs = Math.max(manifest.thresholdMs, Math.ceil(predictedMs * (DURATION_STALENESS_FACTOR as number)));
+    const r = run(wt, suites, boundMs);
+    if (r.timedOut) return { outcome: "unavailable", reason: `timed out over its ${boundMs}ms bound (manifest-measured ${predictedMs}ms for ${suites.length} suite(s))` };
+    if (r.spawnError !== undefined) return { outcome: "unavailable", reason: `spawn failed: ${r.spawnError.slice(0, 300)}` };
+    if (r.status === 0) return { outcome: "covered", reason: `${suites.length} scoped suite(s) cover every added src line`, suites: suites.length };
+    if (COVERAGE_UNCOVERED_HEADLINE.test(r.output)) return { outcome: "uncovered", text: coverageRefusalText(r.output), suites: suites.length };
+    if (!COVERAGE_MISSING_SF.test(r.output)) {
+      const why = /^diff-coverage-local: .*$/m.exec(r.output)?.[0] ?? `exited ${r.status}`;
+      return { outcome: "unavailable", reason: why.slice(0, 300) };
+    }
+  }
+  return { outcome: "unavailable", reason: "a changed src file has no SF record even after widening to the slow-tier siblings" };
+}
+
+/** W1-T4797: ledger the precheck's outcome and reason, then hand back a refusal only for `uncovered`. */
+export function coveragePushRefusal(
+  result: CoveragePrecheck,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  site: string,
+): CensusPushRefusal | undefined {
+  log("push.coverage_precheck", {
+    site,
+    outcome: result.outcome,
+    reason: result.outcome === "uncovered" ? "diff-coverage would refuse this head" : result.reason,
+    ...(result.outcome === "unavailable" ? {} : { suites: result.suites }),
+    ...(result.outcome === "uncovered" ? { refusal: result.text } : {}),
+  });
+  if (result.outcome !== "uncovered") return undefined;
+  return { text: `${COVERAGE_PUSH_CHECK}: CI's coverage-ratchet would refuse this head —\n${result.text}`, censuses: ["diff-coverage"], offeredBaselines: [] };
+}
+
+/** W1-T4797: the fix rung's push with the precheck in front — an uncovered head never leaves the worktree. */
+export function pushFixRoundPrechecked(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  wt: string,
+  branch: string,
+  expectedHeadSha?: string,
+  ports: CoveragePrecheckPorts = {},
+  push: (wt: string, branch: string, expectedHeadSha?: string) => void = pushFixRound,
+): void {
+  const refusal = coveragePushRefusal(coveragePrecheck(wt, ports), log, "rung.fix_push");
+  if (refusal) throw new FixRoundPushError("run-error", refusal, refusal.text);
+  push(wt, branch, expectedHeadSha);
 }
 
 export type CensusPushRungOutcome =
@@ -15035,6 +15174,9 @@ export async function repairCensusRefusedPush(input: {
   account: (r: WorkerResult) => WorkerResult;
   log: (step: string, extra?: Record<string, unknown>) => void;
   say: (msg: string) => void;
+  /** W1-T4797: re-run a NON-hook gate (the diff-coverage precheck) after each strike's commit, before the push;
+   *  a refusal it returns becomes the next strike's evidence exactly as a hook refusal does. */
+  recheck?: () => CensusPushRefusal | undefined;
 }): Promise<CensusPushRungOutcome> {
   const { task, worktreePath: cwd, log } = input;
   const head = () => execFileSync("git", ["-C", cwd, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -15052,11 +15194,13 @@ export async function repairCensusRefusedPush(input: {
         round: strike,
         branch: input.branch,
         harnessCommits,
-        evidence: { ciFailures: [{ name: CENSUS_PUSH_CHECK, logTail: refusal.text }] },
+        evidence: { ciFailures: [{ name: input.recheck ? COVERAGE_PUSH_CHECK : CENSUS_PUSH_CHECK, logTail: refusal.text }] },
         reachableRemedyFiles: refusal.offeredBaselines.map((path) => ({ path, job: "census-precheck" })),
       }),
       "",
-      "PRE-PUSH CENSUS (W1-T4656): no PR exists yet — hooks/pre-push refused this branch with the census rows above.",
+      input.recheck
+        ? "PRE-PUSH DIFF-COVERAGE (W1-T4797): no PR exists yet — CI's coverage-ratchet would refuse this head; add the tests that cover each line named above."
+        : "PRE-PUSH CENSUS (W1-T4656): no PR exists yet — hooks/pre-push refused this branch with the census rows above.",
       CENSUS_PUSH_NEVER_BYPASS,
     ].join("\n");
     const roundStart = head();
@@ -15100,6 +15244,11 @@ export async function repairCensusRefusedPush(input: {
     log("census_push.strike", { strike, ...receipt.ledgerFields(result), cost_usd: result.costUsd, baseline_files: baselineFiles });
     const unoffered = baselineFiles.filter((f) => !offered.has(f));
     if (unoffered.length > 0) return { outcome: "refused", strikes: strike, refusal, reason: `raised a baseline no refusal row offers: ${unoffered.join(", ")}` };
+    const stillRefused = input.recheck?.();
+    if (stillRefused) {
+      refusal = stillRefused;
+      continue;
+    }
     try {
       gitPushRunBranch(cwd);
     } catch (err) {
@@ -16830,23 +16979,30 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         );
       }
       say("fallback: pushing branch from orchestrator (outside sandbox)");
+      // W1-T4797: CI's diff-coverage, scoped, BEFORE the push. `uncovered` goes to the bounded repair rung with
+      // CI's own uncovered lines; `covered` and `unavailable` (ledgered with its reason) push as before.
+      const coverageRefusal = coveragePushRefusal(coveragePrecheck(worktreePath, opts.coveragePrecheckPorts), log, "fallback_push");
       try {
+        if (coverageRefusal) throw new FixRoundPushError("run-error", coverageRefusal, coverageRefusal.text);
         gitPushRunBranch(worktreePath);
       } catch (err) {
-        // W1-T4656: a census refusal is a repairable gate failure; anything else still takes run.error.
-        const refusal = censusPushRefusal(err);
+        const refusal = err instanceof FixRoundPushError ? err.refusal : censusPushRefusal(err);
         if (!refusal) throw err;
+        const refusalLabel = coverageRefusal && err instanceof FixRoundPushError ? "coverage-refused" : "census-refused";
         const rung = await repairCensusRefusedPush({
           refusal, task, runId, worktreePath, branch, resumeSessionId: impl.sessionId, mount: fixMount,
           ...(stepUpMount ? { stepUpMount } : {}), settingsFile, config, budgetUsd, ledgerPath,
           spawnWallClockBoundMs: fixSpawnWallClockBoundMs(),
           spawn: trackRepairLadder(spawn, { config, log }), account, log, say,
+          ...(refusalLabel === "coverage-refused"
+            ? { recheck: () => coveragePushRefusal(coveragePrecheck(worktreePath, opts.coveragePrecheckPorts), log, "fallback_push.repair") }
+            : {}),
         });
         if (rung.outcome === "refused") {
-          // The hook refuses every push of this head, so the worktree is the evidence W1-T434 would have pushed.
+          // The gate refuses every push of this head, so the worktree is the evidence W1-T434 would have pushed.
           log("verdict", {
             verdict: "failed",
-            reason: `census-refused push not cleared by the fix rung (${rung.reason})`,
+            reason: `${refusalLabel} push not cleared by the fix rung (${rung.reason})`,
             stage: "fallback_push.census",
             cause: "census-refused-push" satisfies RunErrorCause,
             censuses: rung.refusal.censuses,
@@ -16858,7 +17014,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
             account_label: impl.accountLabel,
             ...terminalVerdictFields(impl),
           });
-          say(`verdict: failed — census-refused push (${rung.refusal.censuses.join(", ")}); worktree kept: ${worktreePath}`);
+          say(`verdict: failed — ${refusalLabel} push (${rung.refusal.censuses.join(", ")}); worktree kept: ${worktreePath}`);
           return { taskId, runId, merged: false, costUsd, verdict: "failed" };
         }
       }
@@ -17166,7 +17322,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           execAcceptanceGateRepairProof: execGrepProofInWorktree(worktreePath),
           // W1-T2610 + W1-T4693: `expectedHeadSha` still raises `LanePushForeignHeadError` on a rewound ref;
           // a refusal or failure now throws `FixRoundPushError`, which `runFixRung` turns into a named round.
-          push: pushFixRound,
+          push: (wt, br, sha) => pushFixRoundPrechecked((step, extra) => log(step, extra), wt, br, sha),
           readHeadShaForProvenance: readHeadShaRest,
           issues: ghIssueGateway(owner, task.repo),
           ledgerPath,
@@ -24729,6 +24885,7 @@ export interface PlanReconcileDeps {
    *  `buildCreditCandidates` — the SAME projection the sweep's credit rung already trusts, never a
    *  second derivation that could disagree with it. Throwing here ABORTS the verb (see below). */
   creditedMergedIds?: () => Set<string>;
+  creditedProjection?: () => { ids: Set<string>; unknownReason?: string };
   log?: (step: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -24784,7 +24941,14 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
 
   let credited: Set<string>;
   try {
-    credited = (deps.creditedMergedIds ?? (() => defaultCreditedMergedIds()))();
+    const projection: NonNullable<PlanReconcileDeps["creditedProjection"]> = deps.creditedProjection ?? (deps.creditedMergedIds ? () => ({ ids: deps.creditedMergedIds!() }) : () => creditProjectionWithReadState());
+    const read = projection();
+    credited = read.ids;
+    if (read.unknownReason !== undefined) {
+      console.error(`### rmd plan-reconcile: UNKNOWN — the merged-PR read did not complete (${read.unknownReason}); no reconcile count can be derived from it and nothing was written`);
+      (deps.log ?? (() => {}))("plan.reconcile.unknown", { reason: read.unknownReason });
+      return 2;
+    }
   } catch (e) {
     console.error(
       `### rmd plan-reconcile: the credit projection is unreadable (${String((e as Error)?.message ?? e)}) — ` +
@@ -24831,27 +24995,34 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
  * Exported as a PREDICATE rather than inlined so a test can drive all three values directly: the
  * function below reads config, a ledger and GitHub, and none of that is the rule under test.
  */
-export function creditIsReconcilable(c: { merged?: boolean; creditIsImplementation?: boolean; creditHasBuildDiff?: boolean }): boolean {
-  return c.merged === true && (c.creditIsImplementation === true || c.creditHasBuildDiff === true);
+export function creditIsReconcilable(c: { merged?: boolean; creditIsImplementation?: boolean; creditHasBuildDiff?: boolean; creditHasOtherBuildMerge?: boolean }): boolean {
+  return c.merged === true && (c.creditIsImplementation === true || c.creditHasBuildDiff === true || c.creditHasOtherBuildMerge === true);
 }
 
 /** The default credit projection: the SAME `buildCreditCandidates` the sweep's credit rung uses,
- *  now under the SAME filter too — see {@link creditIsReconcilable}. */
-export function defaultCreditedMergedIds(
+ *  now under the SAME filter too — see {@link creditIsReconcilable}. `unknownReason` (W1-T5029) is the gateway's own marked failed/truncated read. */
+export function creditProjectionWithReadState(
   configOverride?: Config,
   checkoutRoot = repoRoot,
   creditBuilder: typeof buildCreditCandidates = buildCreditCandidates,
-): Set<string> {
+  github?: GitHub,
+): { ids: Set<string>; unknownReason?: string } {
   const config = configOverride ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
   // No ledger means no positive merge-credit evidence. Return an empty projection rather than
   // reaching for the GitHub gateway from an isolated or not-yet-initialized checkout.
-  if (!existsSync(ledgerPath)) return new Set();
+  if (!existsSync(ledgerPath)) return { ids: new Set() };
   const self = resolveOwnerRepo();
   const plan = loadPlan(join(checkoutRoot, "plan", "tasks.yaml"));
-  return new Set(
-    creditBuilder(self.owner, self.repo, plan, ledgerPath).filter(creditIsReconcilable).map((c) => c.taskId),
-  );
+  const gateway = github ?? buildBatchedGithub(self.owner, self.repo);
+  const ids = new Set(creditBuilder(self.owner, self.repo, plan, ledgerPath, undefined, gateway).filter(creditIsReconcilable).map((c) => c.taskId));
+  const state = gateway.readState?.();
+  const unknownReason = state === "failed" ? (gateway.readFailureReason?.() ?? "unknown") : state === "ok" && gateway.readTruncated?.() ? "truncated" : undefined;
+  return unknownReason === undefined ? { ids } : { ids, unknownReason };
+}
+
+export function defaultCreditedMergedIds(configOverride?: Config, checkoutRoot = repoRoot, creditBuilder: typeof buildCreditCandidates = buildCreditCandidates): Set<string> {
+  return creditProjectionWithReadState(configOverride, checkoutRoot, creditBuilder).ids;
 }
 
 /** W1-T3970: production's adapter keeps the cadence map testable without running the rest of the
@@ -37448,6 +37619,27 @@ export function prerequisiteOnlyMergeBody(body: string | undefined, taskId: stri
   return namesPrerequisite && carriesOnlyInstrument;
 }
 
+export type ReconcileCreditCandidate = CreditCandidate & { creditHasOtherBuildMerge?: boolean };
+
+function creditEvidenceFor(
+  taskId: string,
+  prNumber: number,
+  body: string | undefined,
+  mergeSubjects: ReadonlyMap<number, string>,
+  mergedPaths: ReadonlyMap<number, readonly string[]>,
+): Pick<CreditCandidate, "creditIsImplementation" | "creditHasBuildDiff"> {
+  const subjectCredit = creditSubjectIsImplementation(mergeSubjects.get(prNumber));
+  const prerequisiteOnly = prerequisiteOnlyMergeBody(body, taskId);
+  const paths = mergedPaths.get(prNumber);
+  let creditHasBuildDiff: boolean | undefined;
+  if (prerequisiteOnly === true) creditHasBuildDiff = false;
+  else if (paths !== undefined && paths.length > 0) creditHasBuildDiff = !isBookkeepingOnlyChangeset(paths);
+  // W1-T4078 — a readable, explicitly prerequisite-only body is negative evidence even when
+  // the squash commit carries the task trailer. Unreadable body evidence stays with the
+  // subject result so this repair can only subtract the measured false credit.
+  return { creditIsImplementation: prerequisiteOnly === true ? false : subjectCredit, creditHasBuildDiff };
+}
+
 /** Map one whole-plan projection to the credit consumer's narrow candidate shape. Keeping this
  * pure makes the performance refactor unable to change the merged/pr/url ownership filter. */
 export function creditCandidatesFromProjection(
@@ -37455,27 +37647,19 @@ export function creditCandidatesFromProjection(
   mergeSubjects: ReadonlyMap<number, string>,
   mergeBodies: ReadonlyMap<number, string> = new Map(),
   mergedPaths: ReadonlyMap<number, readonly string[]> = new Map(),
-): CreditCandidate[] {
-  const candidates: CreditCandidate[] = [];
+  mergedCreditsFor: (taskId: string) => readonly PrRef[] = () => [],
+): ReconcileCreditCandidate[] {
+  const candidates: ReconcileCreditCandidate[] = [];
   for (const projection of projections) {
     if (!projection.merged || projection.prNumber === undefined || projection.prUrl === undefined) continue;
-    const subjectCredit = creditSubjectIsImplementation(mergeSubjects.get(projection.prNumber));
-    const prerequisiteOnly = prerequisiteOnlyMergeBody(mergeBodies.get(projection.prNumber), projection.taskId);
-    const paths = mergedPaths.get(projection.prNumber);
-    let creditHasBuildDiff: boolean | undefined;
-    if (prerequisiteOnly === true) creditHasBuildDiff = false;
-    else if (paths !== undefined && paths.length > 0) creditHasBuildDiff = !isBookkeepingOnlyChangeset(paths);
-    candidates.push({
-      taskId: projection.taskId,
-      prNumber: projection.prNumber,
-      prUrl: projection.prUrl,
-      merged: true,
-      // W1-T4078 — a readable, explicitly prerequisite-only body is negative evidence even when
-      // the squash commit carries the task trailer. Unreadable body evidence stays with the
-      // subject result so this repair can only subtract the measured false credit.
-      creditIsImplementation: prerequisiteOnly === true ? false : subjectCredit,
-      creditHasBuildDiff,
-    });
+    const id = projection.taskId;
+    const evidence = creditEvidenceFor(id, projection.prNumber, mergeBodies.get(projection.prNumber), mergeSubjects, mergedPaths);
+    const candidate: ReconcileCreditCandidate = { taskId: id, prNumber: projection.prNumber, prUrl: projection.prUrl, merged: true, ...evidence };
+    const buildsOnMain = (pr: PrRef): boolean =>
+      pr.state === "MERGED" && pr.number !== projection.prNumber && (creditsByAnchoredTrailer("MERGED", pr.headRefName, pr.body, id) || taskIdFromRunBranch(pr.headRefName) === id) &&
+      creditIsReconcilable({ merged: true, ...creditEvidenceFor(id, pr.number, pr.body ?? mergeBodies.get(pr.number), mergeSubjects, mergedPaths) });
+    if (!creditIsReconcilable(candidate) && mergedCreditsFor(id).some(buildsOnMain)) candidate.creditHasOtherBuildMerge = true;
+    candidates.push(candidate);
   }
   return candidates;
 }
@@ -37501,7 +37685,7 @@ export function buildCreditCandidates(
   evidenceRootFor: (owner: string, repo: string) => string | undefined = creditEvidenceRootFor,
   // Injectable only for the one-read regression; production uses projectPlan's normal reader.
   readLedger: DeriveDeps["readLedger"] = readLedgerLines,
-): CreditCandidate[] {
+): ReconcileCreditCandidate[] {
   // W1-T181: wires the same fetch-size/fetch-failure observability the SERVE board gateway gets —
   // this sweep/daemon-poll gateway shells the identical `gh pr list` this outage's fix targeted.
   // W1-T3067: the free local evidence the plan-only DIFF refusal needs, built ONCE for the whole
@@ -37537,7 +37721,18 @@ export function buildCreditCandidates(
     const pr = baseGithub.prByRef(candidate.prUrl);
     if (pr?.body !== undefined) mergeBodies.set(candidate.prNumber, pr.body);
   }
-  return creditCandidatesFromProjection(projection.values(), mergeSubjects, mergeBodies, deps.mergedPathsByPr);
+  let mergedByTask: Map<string, PrRef[]> | undefined;
+  const mergedCreditsFor = (taskId: string): readonly PrRef[] => {
+    if (!mergedByTask) {
+      mergedByTask = new Map();
+      for (const pr of [...(baseGithub.listMergedHeadBranches?.() ?? [])].sort((a, b) => b.number - a.number)) {
+        const owners = new Set([...(pr.body ?? "").matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)].map((m) => m[1]!).concat(taskIdFromRunBranch(pr.headRefName) ?? []));
+        for (const id of owners) mergedByTask.set(id, [...(mergedByTask.get(id) ?? []), pr]);
+      }
+    }
+    return mergedByTask.get(taskId) ?? [];
+  };
+  return creditCandidatesFromProjection(projection.values(), mergeSubjects, mergeBodies, deps.mergedPathsByPr, mergedCreditsFor);
 }
 
 /**

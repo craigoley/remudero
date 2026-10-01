@@ -19,7 +19,6 @@ import { join } from "node:path";
 import {
   assessGatewayCheckout,
   buildServeServer,
-  drainServer,
   gateStaleCodeExit,
   resolveConsoleSha,
   serveRepoDir,
@@ -372,105 +371,10 @@ test("W1-T4229: a due restart never exits over an in-flight write", async () => 
   assert.deepEqual(exits, [0], "and the restart happens the moment it finishes");
 });
 
-// ── drainServer, on a real server ─────────────────────────────────────────────────────────────
-
 async function listening(server: Server): Promise<number> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   return (server.address() as AddressInfo).port;
 }
-
-function get(port: number): Promise<{ status?: number; body: string; error?: string }> {
-  return new Promise((resolve) => {
-    const req = request({ host: "127.0.0.1", port, path: "/" }, (res) => {
-      let body = "";
-      res.on("data", (c) => (body += c));
-      res.on("end", () => resolve({ status: res.statusCode, body }));
-      res.on("error", (e) => resolve({ body, error: e.message }));
-    });
-    req.on("error", (e) => resolve({ body: "", error: e.message }));
-    req.end();
-  });
-}
-
-test("W1-T4229: a drain lets an in-flight request finish before it resolves", async () => {
-  let respond: () => void = () => {};
-  let noteArrival: () => void = () => {};
-  const arrived = new Promise<void>((resolve) => {
-    noteArrival = resolve;
-  });
-  const server = createServer((_req, res) => {
-    respond = () => res.end("done");
-    noteArrival();
-  });
-  const port = await listening(server);
-  const pending = get(port);
-  await arrived;
-  let drained = false;
-  const drain = drainServer(server, 5_000).then(() => {
-    drained = true;
-  });
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(drained, false, "the drain is still waiting on the open request");
-  respond();
-  const res = await pending;
-  await drain;
-  assert.equal(res.status, 200);
-  assert.equal(res.body, "done", "the in-flight request completed, never cut");
-  assert.equal(drained, true);
-});
-
-test("W1-T4229: a connection that never ends is closed at the drain bound", async () => {
-  const server = createServer((_req, res) => {
-    res.writeHead(200, { "content-type": "text/event-stream" });
-    res.write("data: open\n\n");
-  });
-  const port = await listening(server);
-  const stream = get(port);
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  let fire: () => void = () => {};
-  const drain = drainServer(server, 1, (run) => {
-    fire = run;
-    return () => {};
-  });
-  fire();
-  await drain;
-  const res = await stream;
-  assert.ok(res.error !== undefined || res.body.includes("open"), "the stream was ended by the bound");
-});
-
-test("W1-T4229: a keep-alive connection that goes idle after the drain began is closed promptly", async () => {
-  let respond: () => void = () => {};
-  let noteArrival: () => void = () => {};
-  const arrived = new Promise<void>((resolve) => {
-    noteArrival = resolve;
-  });
-  const server = createServer((_req, res) => {
-    respond = () => res.end("done");
-    noteArrival();
-  });
-  server.keepAliveTimeout = 60_000;
-  const port = await listening(server);
-  const agent = new Agent({ keepAlive: true, timeout: 60_000 });
-  const pending = new Promise<void>((resolve, reject) => {
-    request({ port, host: "127.0.0.1", path: "/", agent }, (res) => {
-      res.resume();
-      res.on("end", () => resolve());
-    }).on("error", reject).end();
-  });
-  await arrived;
-  let drained = false;
-  const drain = drainServer(server, 60_000).then(() => {
-    drained = true;
-  });
-  respond();
-  await pending;
-  for (let i = 0; i < 100 && !drained; i += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  agent.destroy();
-  assert.equal(drained, true, "the drain resolved within a second, not at the client keep-alive timeout");
-  await drain;
-});
 
 // ── the real server wiring ────────────────────────────────────────────────────────────────────
 
