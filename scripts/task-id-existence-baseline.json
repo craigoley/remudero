@@ -30,5 +30,81 @@
   {
     "id": "W1-T12",
     "reason": "Pre-schema bootstrap task (\"Daemonize\"), retired without ever getting its own `- id:` plan record. src/lib/daemon.ts:4 says it plainly: \"W1-T12 (Daemonize) was split along the machine/human boundary (docs/archive/DIAGNOSIS.md, Rule 16)\" into W1-T12a/b/c; src/run-task.ts:5890 and src/lib/task-linter.ts:21 cite it alongside W1-T6/W1-T9 as one of the three malformed pre-schema tasks that motivated the task linter. It was retired in place, not filed, so it never held a plan record or a reservation ref and never will."
+  },
+  {
+    "id": "W1-T0",
+    "reason": "Range label, not a task. plan/tasks.d/W1-T2729-credit-evidence-reconcile.yaml and W1-T2730-retro-filing-governor.yaml name the \"W1-T0-499 cohort\" (the first things ever filed); the extractor reads the W1-T0 prefix of that range token as an id. No task W1-T0 exists or was ever reserved."
+  },
+  {
+    "id": "W1-T100000",
+    "reason": "Synthetic negative-control id, deliberately outside the allocator's range, quoted in plan prose as a probe (e.g. `git ls-remote origin refs/rmd-id/<id>` expected to read 0) to prove a lookup could return a miss. It was never reserved and never filed, and it must stay that way: it is evidence about the namespace, not a task. Named alongside W1-T1000000/W1-T1000001 in W1-T1016 and W1-T1018 as probe artifacts rather than filed ids."
+  },
+  {
+    "id": "W1-T1000000",
+    "reason": "Probe artifact in the reservation-ref namespace: W1-T1000000 through W1-T1000004 are out-of-range sentinels, named as such in plan/tasks.d/W1-T1016, W1-T1018, W1-T1289 and W1-T2203. Never a filed task, and no plan record declares it."
+  },
+  {
+    "id": "W1-T1000001",
+    "reason": "Probe artifact in the reservation-ref namespace, one of the W1-T1000000..W1-T1000004 out-of-range sentinels (plan/tasks.d/W1-T1016 and W1-T1018 call them \"probe artifacts rather than filed ids\"). Never a filed task."
+  },
+  {
+    "id": "W1-T1000004",
+    "reason": "Probe artifact in the reservation-ref namespace, the top of the W1-T1000000..W1-T1000004 out-of-range sentinels named in plan/tasks.d/W1-T1289 and W1-T2203. Never a filed task."
+  },
+  {
+    "id": "W1-T1657",
+    "reason": "Cited only as a `plan_refs` entry of the blocked, withdrawn record W1-T2963. Checked at ec19244e8: no `- id: W1-T1657` record exists in any plan file or in plan history, no merged PR carries a `Remudero-Task: W1-T1657` trailer, and no reservation ref holds it. The dangling reference is left in a record this task does not own rather than guessed into a different id."
+  },
+  {
+    "id": "W1-T1786799102812",
+    "reason": "Not a task id: a 13-digit epoch-millisecond timestamp captured by a branch-name regex (`run-W1-T1786799102812-1786802635382`), documented as prose in plan/tasks.d/W1-T509 and W1-T522 (\"the apparent outlier ... is documented prose\"). Never reserved, never filed."
+  },
+  {
+    "id": "W1-T2200",
+    "reason": "Left edge of the range `W1-T2200..W1-T2271` in plan/tasks.d/W1-T1076 (\"across the recent burst ... 59 shards\"). It names the start of a measured population, not a claim; no record or reservation by that id exists at ec19244e8."
+  },
+  {
+    "id": "W1-T2290",
+    "reason": "First id of the four consecutive ids an operator reserved, per plan/tasks.d/W1-T2291 (\"this one third of them ... This shard takes W1-T2291 and mints nothing\"). At ec19244e8 no reservation ref and no plan record holds W1-T2290 itself; the cite is prose about that reservation band."
+  },
+  {
+    "id": "W1-T3057",
+    "reason": "Renumbered away: plan/tasks.d/W1-T3059 records \"RENUMBERED W1-T3057 -> W1-T3059 AFTER A COLLISION THIS FILING DID NOT CAUSE\" (open PR #4463 was mid-flight on the same id). The record now lives under W1-T3059, so this id never resolves, by design."
+  },
+  {
+    "id": "W1-T3340",
+    "reason": "Cited by plan/tasks.d/W1-T3344 as an in-flight change whose branch was fetched at filing (\"W1-T3340 changes the tier manifest, src/lib/daemon.ts, and its test\"). At ec19244e8 no plan record declares it and no reservation ref holds it, so the cite is prose about a change in flight, not a claim on a filed task."
+  },
+  {
+    "id": "W1-T3650",
+    "reason": "Renumbered away: plan/tasks.d/W1-T3675 documents that a filed shard was renumbered W1-T3650 -> W1-T3655 after losing an id race (#5742), citing the stale name as the evidence for its refusal. The record lives under W1-T3655."
+  },
+  {
+    "id": "W1-T4242",
+    "reason": "Prose example, not a claim: plan/tasks.d/W1-T3070 uses `run-W1-T4242-123` as a hypothetical head ref to show the two-PR pattern is read as a claimant. At ec19244e8 no plan record declares W1-T4242 and no reservation ref holds it."
+  },
+  {
+    "id": "W1-T444444",
+    "reason": "Synthetic negative-control id, deliberately outside the allocator's range, quoted in plan prose as a probe (e.g. `git ls-remote origin refs/rmd-id/<id>` expected to read 0) to prove a lookup could return a miss. It was never reserved and never filed, and it must stay that way: it is evidence about the namespace, not a task. Used as the negative control in W1-T1013, W1-T1265 and others."
+  },
+  {
+    "id": "W1-T888888",
+    "reason": "Synthetic negative-control id, deliberately outside the allocator's range, quoted in plan prose as a probe (e.g. `git ls-remote origin refs/rmd-id/<id>` expected to read 0) to prove a lookup could return a miss. It was never reserved and never filed, and it must stay that way: it is evidence about the namespace, not a task. Used as the negative control in W1-T999."
+  },
+  {
+    "id": "W1-T966",
+    "reason": "Never merged and never present in plan: plan/tasks.d/W1-T972 records that W1-T966 (#2094) was open and unmerged when W1-T972 superseded it, and that it \"read 0 in every plan/ path, 0 in refs\". Cited in W1-T970 and W1-T972 prose about that superseded filing."
+  },
+  {
+    "id": "W1-T9999",
+    "reason": "Synthetic negative-control id, deliberately outside the allocator's range, quoted in plan prose as a probe (e.g. `git ls-remote origin refs/rmd-id/<id>` expected to read 0) to prove a lookup could return a miss. It was never reserved and never filed, and it must stay that way: it is evidence about the namespace, not a task. Also the example in `plan/tasks.d/W1-T9999-does-a-thing.yaml` quoted by W1-T2673 and the negative control in W1-T1041."
+  },
+  {
+    "id": "W1-T99999",
+    "reason": "Synthetic negative-control id, deliberately outside the allocator's range, quoted in plan prose as a probe (e.g. `git ls-remote origin refs/rmd-id/<id>` expected to read 0) to prove a lookup could return a miss. It was never reserved and never filed, and it must stay that way: it is evidence about the namespace, not a task. Used as the negative control in W1-T963 and others."
+  },
+  {
+    "id": "W1-T999999",
+    "reason": "Synthetic negative-control id, deliberately outside the allocator's range, quoted in plan prose as a probe (e.g. `git ls-remote origin refs/rmd-id/<id>` expected to read 0) to prove a lookup could return a miss. It was never reserved and never filed, and it must stay that way: it is evidence about the namespace, not a task. The most-used negative control: cited as `refs/rmd-id/W1-T999999` in 48 plan shards."
   }
 ]
