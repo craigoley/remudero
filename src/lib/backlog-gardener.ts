@@ -140,9 +140,11 @@ export function backlogInventory(sources: BacklogSources): BacklogInventory {
     if (task.priority !== undefined && (!marker || task.priority !== Number(marker[1]))) continue;
     if (examined >= mergeBudget) break;
     const evidence = backlogEvidence(task, sources.repoRoot, fanout, rows, history, now, sources.fileExists, proofsHolding.has(task.id));
-    if (marker && marker[2] === evidence.signature) continue;
-    examined++;
     const judged = judgeBacklog(evidence);
+    // A new evidence sample is not a new placement decision. In particular, rolling ledger
+    // counts change every day even while the chosen band remains the same.
+    if (marker && judged.disposition.kind === "band" && judged.disposition.band === Number(marker[1])) continue;
+    examined++;
     candidates.push({ class: judged.disposition.kind === "retire" ? "retire" : "place", target: task.id, reason: judged.reason, disposition: judged.disposition, evidence });
   }
   return { plan, candidates, mergeBudget, examined };
@@ -165,7 +167,7 @@ export function applyBacklogActions(root: string, shards: ReadonlyMap<string, st
     const declared = /^ {2}priority: (\d+)[ \t]*$/m.exec(text);
     if (!/^ {2}status: queued[ \t]*$/m.test(text) || /^ {2}retirement:/m.test(text)) continue;
     if (declared && (!old || Number(declared[1]) !== oldBand)) continue;
-    let next = old ? text.replace(MARKER, "") : text;
+    let next = old ? text.replace(/^ {2}# backlog gardener: band=(?:2|3|4) evidence=[a-f0-9]{16}\r?\n?/m, "") : text;
     if (action.disposition.kind === "band") {
       const band = action.disposition.band;
       next = declared ? next.replace(/^ {2}priority: \d+[ \t]*$/m, `  priority: ${band}`) : next.replace(/^ {2}status: queued[ \t]*$/m, `  priority: ${band}\n  status: queued`);
@@ -217,7 +219,7 @@ export function backlogGardenSpec(deps: GardenerDeps, overrides: Partial<Backlog
       return {
         paths,
         title: `chore(plan): backlog gardener proposes ${plan.acting[0]} for ${landed.length} task(s)`,
-        body: ["The backlog gardener (W1-T4941) proposes these plan-only changes. Close this PR to decline them.", "", ...landed.map((a) => `- **${a.target}**: ${a.disposition.kind === "band" ? `band ${a.disposition.band}` : a.disposition.retirement}. ${a.reason} Evidence: ${describe(a.evidence)}. Shard: \`${shards.get(a.target)}\`.`), "", "## Acceptance", ...landed.map((a) => `- claim: ${a.target} carries the proposed backlog decision\n  proof: grep: backlog gardener: in ${shards.get(a.target)}`)].join("\n"),
+        body: ["The backlog gardener (W1-T4941) proposes these plan-only changes. Close this PR to decline them.", "", ...landed.map((a) => `- **${a.target}**: ${a.disposition.kind === "band" ? `band ${a.disposition.band}` : a.disposition.retirement}. ${a.reason} Evidence: ${describe(a.evidence)}. Shard: \`${shards.get(a.target)}\`.`), "", "## Acceptance", ...landed.map((a) => `- claim: ${a.target} carries the proposed backlog decision\n  proof: grep: # backlog gardener: ${a.disposition.kind === "band" ? `band=${a.disposition.band}` : "retirement"} evidence=${a.evidence.signature} in ${shards.get(a.target)}`)].join("\n"),
       };
     },
   };

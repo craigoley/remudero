@@ -66,6 +66,20 @@ test("W1-T4941: an overtaken task is proposed for retirement with cited evidence
   assert.match(f.read(item.id), /retirement: withdrawn/);
 });
 
+test("W1-T4941: a retirement proposal proves its new decision on the shard", (t) => {
+  const item = task("W1-T13", { files: ["src/a.ts", "src/b.ts"] });
+  const f = fixture(t, [item], { history: [{ sha: "a".repeat(40), at: NOW.toISOString(), subject: "fix(core): done (#123)", files: ["src/a.ts", "src/b.ts"] }] });
+  let body = "";
+  const deps = {
+    stateDir: f.stateDir, repoRoot: f.root, log: () => {}, seed: 1,
+    openWorkspace: () => ({ root: f.root, land: (p: { body: string }) => { body = p.body; return "https://example.test/pull/1"; }, dispose: () => {} }),
+  };
+  const action = backlogInventory(f.sources).candidates[0]!;
+  runGarden(backlogGardenSpec(deps, f.sources), deps);
+  assert.match(body, new RegExp(`proof: grep: # backlog gardener: retirement evidence=${action.evidence.signature} in plan/tasks.d/W1-T13\\.yaml`));
+  assert.match(f.read(item.id), /retirement: withdrawn/);
+});
+
 test("W1-T4941: a pass is bounded and produces at most one plan-only PR", (t) => {
   const items = [task("W1-T12"), task("W1-T2"), task("W1-T7")];
   const f = fixture(t, items, { merges: 2 });
@@ -82,6 +96,10 @@ test("W1-T4941: a pass is bounded and produces at most one plan-only PR", (t) =>
   assert.equal(landed.length, 1);
   assert.deepEqual(landed[0]?.paths, [f.shards.get("W1-T2"), f.shards.get("W1-T7")]);
   assert.match(landed[0]!.body, /Evidence: fanout=/);
+  for (const action of inv.candidates) {
+    assert.match(landed[0]!.body, new RegExp(`proof: grep: # backlog gardener: band=${(action.disposition as { band: number }).band} evidence=${action.evidence.signature} in plan/tasks.d/${action.target}\\.yaml`));
+  }
+  assert.doesNotMatch(landed[0]!.body, /proof: grep: backlog gardener: in /, "the marker alone already exists on a banded task's base");
   assert.doesNotMatch(f.read("W1-T12"), /backlog gardener/);
 });
 
@@ -124,7 +142,7 @@ test("W1-T4941: proofs that became true on main justify a closed retirement", (t
   assert.match(action.reason, /Acceptance proofs now hold/);
 });
 
-test("W1-T4941: a banded task is revisited only when its evidence changes", (t) => {
+test("W1-T4941: rolling evidence does not re-propose the same band, but a changed band is proposed", (t) => {
   const item = task("W1-T8", { rationale: "Observed dispatch.value.refused." });
   let rows: Record<string, unknown>[] = [{ step: "dispatch.value.refused", ts: "2026-10-01T11:00:00.000Z" }];
   const f = fixture(t, [item]);
@@ -134,7 +152,16 @@ test("W1-T4941: a banded task is revisited only when its evidence changes", (t) 
   item.priority = 2;
   assert.deepEqual(backlogInventory(f.sources).candidates, []);
   rows = [...rows, { step: "dispatch.value.refused", ts: "2026-10-01T11:30:00.000Z" }];
-  assert.equal(backlogInventory(f.sources).candidates.length, 1);
+  assert.deepEqual(backlogInventory(f.sources).candidates, [], "a second hit leaves the placement at band 2");
+  rows = [
+    { step: "dispatch.value.refused", ts: "2026-09-30T11:00:00.000Z" },
+    { step: "dispatch.value.refused", ts: "2026-10-01T11:30:00.000Z" },
+  ];
+  const changed = backlogInventory(f.sources).candidates;
+  assert.deepEqual(changed[0]?.disposition, { kind: "band", band: 3 });
+  applyBacklogActions(f.root, f.shards, changed);
+  assert.match(f.read(item.id), /status: queued\n  # backlog gardener: band=3 evidence=[a-f0-9]{16}\n/);
+  assert.doesNotMatch(f.read(item.id), /evidence=[a-f0-9]{16}\n\n/, "replacing the old marker must not add blank lines");
   item.priority = 1;
   assert.deepEqual(backlogInventory(f.sources).candidates, [], "an operator amendment takes ownership");
 });
