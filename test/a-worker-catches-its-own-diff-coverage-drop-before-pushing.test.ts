@@ -6,7 +6,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -245,6 +245,44 @@ test("W1-T4797: a commit that drops diff coverage is returned to the worker befo
     assert.equal(rows(run.ledger, "census_push.cleared").length, 1);
   } finally {
     fx.cleanup();
+  }
+});
+
+test("W1-T4797: a still-uncovered repair gets a second strike before any push", async () => {
+  const fx = buildFixture();
+  try {
+    const { ports, calls } = scriptedPorts([ran(1, UNCOVERED_OUTPUT), ran(1, UNCOVERED_OUTPUT), ran(0, "diff-coverage: OK")]);
+    let repair = 0;
+    const run = await drive(fx, ports, (args) => {
+      repair += 1;
+      return commitIn(args.cwd!, `test: repair coverage round ${repair}`, () => {
+        mkdirSync(join(args.cwd!, "test"), { recursive: true });
+        writeFileSync(join(args.cwd!, "test", "feature.test.ts"), `// coverage repair ${repair}\n`);
+      });
+    });
+    assert.equal(run.error, undefined);
+    assert.equal(run.fixCalls.length, 2, "a still-uncovered first repair spends the second bounded strike");
+    assert.equal(calls.length, 3, "the gate checks the original commit and both repairs");
+    assert.deepEqual(rows(run.ledger, "push.coverage_precheck").map((r) => r.outcome), ["uncovered", "uncovered", "covered"]);
+    assert.equal(rows(run.ledger, "census_push.refused").length, 2);
+    assert.equal(rows(run.ledger, "census_push.cleared").length, 1);
+    assert.ok(fx.hookLog().every((line) => !line.endsWith(run.built[0]!)), "the uncovered original never reached origin");
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("W1-T4797: the default precheck shells out with its scoped suite from the worktree", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}coverage-precheck-spawn-`));
+  try {
+    mkdirSync(join(root, "scripts"));
+    writeFileSync(join(root, "scripts", "diff-coverage-local.mjs"),
+      `import { cwd, argv } from "node:process";\nif (cwd() !== ${JSON.stringify(realpathSync(root))} || !argv.includes("test/feature.test.ts")) process.exit(2);\nprocess.stdout.write("diff-coverage: OK\\n");\n`);
+    const ports = scriptedPorts([]).ports;
+    const result = coveragePrecheck(root, { ...ports, run: undefined });
+    assert.equal(result.outcome, "covered", `the real child process executes the scoped precheck: ${JSON.stringify(result)}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
