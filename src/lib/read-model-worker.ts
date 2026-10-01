@@ -18,7 +18,7 @@ import { dirname, join } from "node:path";
 import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
-import { ghIssueGateway, type EscalateDeps } from "./escalate.js";
+import { ghIssueGateway, tryEscalate, type EscalateDeps } from "./escalate.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { FUTURE_ROW_TOLERANCE_MS, LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, type LedgerProjector, type ProjectorTickResult } from "./ledger-projector.js";
 import { createNavBadgeReadModelView } from "./nav-badge-view.js";
@@ -70,6 +70,20 @@ export const READ_MODEL_CHECK_SHARE = 0.02;
  * short ticks and every lease is renewed on schedule between them.
  */
 export const READ_MODEL_PASS_SHARE = 0.5;
+/**
+ * The share of each pass kept for view bodies, and of worker time they may take: a view that cost
+ * `c` ms is not rebuilt for `c / share` ms. Measured on the host's core ledger as three instances,
+ * `now` cost 0.6-1.4 s per instance whenever a generation moved and nav-badge ~130 ms even idle,
+ * so unbudgeted bodies alone held ticks of 2-4 s beside a catch-up.
+ */
+export const READ_MODEL_VIEW_SHARE = 0.4;
+/**
+ * WATCHDOG: an instance with work outstanding (a backlog, an unread archive, a failing tick) and no
+ * commit for this long is stalled. The first bound ledgers it and reopens the store; a second
+ * bound without progress escalates. Serve's thread applies the same bound to a worker that posts
+ * nothing at all, and recycles it at twice the bound, doubling with each recycle.
+ */
+export const READ_MODEL_STALL_MS = 60_000;
 
 const VIEW_BODY_DDL = `CREATE TABLE IF NOT EXISTS view_body(view TEXT NOT NULL, key TEXT NOT NULL, version INTEGER NOT NULL,
   generation INTEGER NOT NULL, etag TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(view, key)) WITHOUT ROWID;`;
@@ -178,6 +192,8 @@ export interface ReadModelView {
   materialize(ctx: ReadModelViewContext): Array<{ key: string; data: unknown; sources: ViewSource[] }>;
   /** The shadow comparator's legacy side for one key, computed in the worker beside the view's body. */
   legacy?(key: string, now: number, data: unknown): ShadowLegacy | undefined;
+  /** Its bodies are per instance: each instance's is built, timed and paced as a unit of its own. */
+  perInstance?: boolean;
 }
 
 /** The `ledger:<i>` source every read-model view carries: stale while its projector is behind. */
@@ -235,6 +251,8 @@ export interface ReadModelTickerOptions {
   oracle?: "on" | "off";
   /** Each instance's projector budget per tick; derived from the lease timing when absent. */
   tickBudgetMs?: number;
+  /** A whole pass's budget: projection, then view bodies in what is left of it. */
+  passBudgetMs?: number;
 }
 
 export interface ReadModelTicker {
@@ -245,6 +263,16 @@ export interface ReadModelTicker {
   shadow(request: ShadowRequest): boolean;
   /** Releases every held lease and closes every DB; returns how many leases were released. */
   release(): number;
+}
+
+/** One view, or one instance's share of a per-instance view: the unit the pass budgets, times and paces. */
+interface ViewUnit {
+  view: ReadModelView;
+  slot?: Slot;
+  /** What its last build took; absent until it has run once. */
+  costMs?: number;
+  /** Not rebuilt before this: its last cost divided by {@link READ_MODEL_VIEW_SHARE}. */
+  dueAt: number;
 }
 
 class ReadModelStopRequested extends RmdError {
@@ -269,6 +297,8 @@ interface Slot {
   checkPending: boolean;
   /** Present while a backlog is being applied over several ticks; the oracle waits until it clears. */
   catchUp?: { startedAt: number; ticks: number; maxTickMs: number; lines: number; sourceBytes: number; loggedAt: number };
+  /** Present while work is outstanding and nothing commits: the watchdog's episode. */
+  stall?: { since: number; generation: number; reopened: boolean; escalated: boolean };
 }
 
 /**
@@ -310,7 +340,10 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   const tickMs = opts.tickMs ?? READ_MODEL_TICK_MS;
   const stopRequested = opts.stopRequested ?? (() => false);
   const windowMs = opts.consistencyWindowMs ?? ORACLE_DEFAULT_WINDOW_MS;
-  const budgetMs = opts.tickBudgetMs ?? (READ_MODEL_LEASE_RENEW_MS * READ_MODEL_PASS_SHARE) / Math.max(1, opts.instances.length);
+  const passMs = opts.passBudgetMs ?? READ_MODEL_LEASE_RENEW_MS * READ_MODEL_PASS_SHARE;
+  const budgetMs = opts.tickBudgetMs ?? (passMs * (1 - READ_MODEL_VIEW_SHARE)) / Math.max(1, opts.instances.length);
+  /** A view unit measured over this runs in a tick of its own, so it never lands on top of a projection. */
+  const soloMs = passMs * READ_MODEL_VIEW_SHARE;
   const switchesPath = readModelSwitchesPath(opts.stateDir);
   const slots: Slot[] = opts.instances.map((instance) => ({
     instance,
@@ -320,6 +353,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     checkAfter: 0,
     checkPending: false,
   }));
+  const units = views.flatMap((view): ViewUnit[] => (view.perInstance ? slots.map((slot) => ({ view, slot, dueAt: 0 })) : [{ view, dueAt: 0 }]));
+  let lastSolo = false;
   const lastEtag = new Map<string, string>();
   const latest = new Map<string, ViewBody>();
   let comparator: { db: ReadModelDb; shadow: ViewShadow } | undefined;
@@ -426,9 +461,48 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       // A tick that read archives, restarted the live file or needed several chunks was catching up.
       const caughtUp = result.archivesRead === 0 && !result.liveRestarted && result.transactions <= 1 && result.unread.length === 0;
       slot.checkPending = opts.oracle !== "off" && caughtUp && now >= slot.checkAfter && (!nextOracleSlice(db, now, windowMs).startsCycle || consistencyCheckDue(db, now));
+      watchProgress(slot, tickedAt, result.pending || result.unread.length > 0);
     } catch (error) {
       // failSlot logs it, backs this instance off, and closes the slot on a lost lease.
       failSlot(slot, now, error);
+      watchProgress(slot, now, true);
+    }
+  }
+
+  /**
+   * The watchdog: a tick that committed, or had nothing left to do, is progress. Outstanding work
+   * with no commit for {@link READ_MODEL_STALL_MS} ledgers the stall and reopens the store; the
+   * same again without progress escalates through the oracle's path, once per episode.
+   */
+  function watchProgress(slot: Slot, now: number, outstanding: boolean): void {
+    const generation = slot.state.generation;
+    if (!outstanding || (slot.stall && generation > slot.stall.generation)) {
+      if (slot.stall?.reopened) log("read_model.unstalled", { instance: slot.instance.name, stalledMs: now - slot.stall.since });
+      slot.stall = outstanding ? { since: now, generation, reopened: false, escalated: false } : undefined;
+      return;
+    }
+    const stall = (slot.stall ??= { since: now, generation, reopened: false, escalated: false });
+    const stalledMs = now - stall.since;
+    const extra = { instance: slot.instance.name, stalledMs, generation, reason: slot.state.reason ?? "work outstanding" };
+    if (stalledMs >= READ_MODEL_STALL_MS && !stall.reopened) {
+      stall.reopened = true;
+      log("read_model.stalled", extra);
+      closeSlot(slot);
+    } else if (stalledMs >= 2 * READ_MODEL_STALL_MS && !stall.escalated) {
+      stall.escalated = true;
+      const issueUrl = opts.escalation ? tryEscalate({
+        class: "MANUAL",
+        taskId: `READ-MODEL-${slot.instance.name.toUpperCase()}`,
+        summary: `read model ${slot.instance.name} has stopped advancing`,
+        detail: `The projector has had work outstanding for ${Math.round(stalledMs / 1000)} s with no commit, and reopening its store did not help. Last reason: ${extra.reason}.`,
+        options: [
+          { label: "rebuild the read model", detail: "Run `rmd read-model rebuild`; the views keep serving the old file until the new one passes its check.", kind: { type: "operator-only" } },
+          { label: "restart serve", detail: "Recycle the serve container; the projector resumes from its checkpoints.", kind: { type: "operator-only" } },
+        ],
+        recommendation: "restart serve",
+        consequence: "Every view that reads this instance stays stale until the projector advances.",
+      }, opts.escalation) : null;
+      log("read_model.stall_escalated", { ...extra, issueUrl });
     }
   }
 
@@ -502,28 +576,53 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     return comparator.shadow;
   }
 
-  function materialize(now: number): void {
+  function build(unit: ViewUnit, now: number, ctx: ReadModelViewContext, generation: number): void {
+    const { view } = unit;
+    const started = clock.now();
+    try {
+      const scoped = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
+      for (const { key, data, sources } of view.materialize(scoped)) {
+        const stale = sources.some((source) => source.state !== "fresh");
+        const etag = viewEtag(view.name, view.version, stale, data);
+        const id = `${view.name}\u0000${key}`;
+        if (lastEtag.get(id) === etag) continue;
+        const body: ViewBody = { view: view.name, version: view.version, generatedAt: clock.iso(), asOf: oldestAsOf(sources), stale, sources, data };
+        const entry: ReadModelBodyEntry = { view: view.name, key, version: view.version, generation, etag, body };
+        if (switches.projector === "on") persist(entry);
+        lastEtag.set(id, etag);
+        latest.set(id, body);
+        opts.post({ type: "body", entry });
+      }
+    } catch (error) {
+      log("read_model.materialize_failed", { view: view.name, error: (error as Error).message });
+    }
+    const finished = clock.now();
+    unit.costMs = finished - started;
+    unit.dueAt = finished + unit.costMs / READ_MODEL_VIEW_SHARE;
+    if (unit.costMs > passMs) log("read_model.slow_view", { view: view.name, ...(unit.slot ? { instance: unit.slot.instance.name } : {}), ms: unit.costMs, passMs });
+  }
+
+  const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => switches.views[unit.view.name] !== "off" && unit.dueAt <= now).sort((a, b) => a.dueAt - b.dueAt);
+
+  /**
+   * Builds the due view units, oldest first, in what is left of the pass that began at `tickStart`.
+   * A unit starts only if its last cost fits what is left; one never measured starts only while this
+   * phase has spent nothing, so it overshoots by itself at most once and is measured from then on.
+   */
+  function materialize(now: number, tickStart: number, only?: ViewUnit): void {
     const shadow = comparator?.shadow.readiness();
     const ctx: ReadModelViewContext = { now, switches, instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}) })), ...(shadow ? { shadow } : {}) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
-    for (const view of views) {
-      if (switches.views[view.name] === "off") continue;
-      try {
-        for (const { key, data, sources } of view.materialize(ctx)) {
-          const stale = sources.some((source) => source.state !== "fresh");
-          const etag = viewEtag(view.name, view.version, stale, data);
-          const id = `${view.name}\u0000${key}`;
-          if (lastEtag.get(id) === etag) continue;
-          const body: ViewBody = { view: view.name, version: view.version, generatedAt: clock.iso(), asOf: oldestAsOf(sources), stale, sources, data };
-          const entry: ReadModelBodyEntry = { view: view.name, key, version: view.version, generation, etag, body };
-          if (switches.projector === "on") persist(entry);
-          lastEtag.set(id, etag);
-          latest.set(id, body);
-          opts.post({ type: "body", entry });
-        }
-      } catch (error) {
-        log("read_model.materialize_failed", { view: view.name, error: (error as Error).message });
-      }
+    if (only) return build(only, now, ctx, generation);
+    const left = passMs - (clock.now() - tickStart);
+    let spent = 0;
+    for (const unit of dueUnits(now)) {
+      if (stopRequested()) return;
+      const fits = unit.costMs === undefined ? spent === 0 : unit.costMs <= soloMs && spent + unit.costMs <= left;
+      if (!fits) continue;
+      const before = clock.now();
+      build(unit, now, ctx, generation);
+      spent += clock.now() - before;
     }
   }
 
@@ -550,8 +649,14 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       reloadSwitches(now);
       // The oracle's slices wait while any instance is still applying a backlog.
       const due = switches.projector === "on" && !slots.some((slot) => slot.catchUp) ? slots.find((slot) => slot.checkPending) : undefined;
+      // A view too big to share a pass gets a tick of its own, never two in a row, so the projector keeps moving.
+      const solo = lastSolo ? undefined : dueUnits(now).find((unit) => (unit.costMs ?? 0) > soloMs);
+      lastSolo = solo !== undefined && due === undefined;
       if (due) {
         checkSlot(due, now);
+      } else if (solo) {
+        materialize(now, now, solo);
+        return postState(now);
       } else if (switches.projector === "off") {
         for (const slot of slots) slot.state.reason = "projector switched off";
       } else {
@@ -560,7 +665,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
           if (now >= slot.backoffUntil) tickSlot(slot, clock.now());
         }
       }
-      materialize(now);
+      materialize(now, now);
       postState(now);
     },
     shadow(request: ShadowRequest): boolean {
@@ -706,6 +811,8 @@ export interface ReadModelWorkerOptions {
   log?: (step: string, extra?: Record<string, unknown>) => void;
   escalationRepository?: string;
   every?: (run: () => void, ms: number) => () => void;
+  /** What the silent-worker watchdog measures against. */
+  clock?: Clock;
 }
 
 function everyUnref(run: () => void, ms: number): () => void {
@@ -746,9 +853,36 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   let stopping = false;
   let deaths = 0;
   let respawnTimer: NodeJS.Timeout | undefined;
-  const bodyListeners = new Set<(entry: ReadModelBodyEntry) => void>();
+  const clock = opts.clock ?? systemClock;
+  /** When the running worker last said anything; a worker that ticks posts its state four times a second. */
+  let heardAt = clock.now();
+  let silenceLogged = false;
+  let recycles = 0;
 
+  /**
+   * The silent-worker watchdog. A worker blocked in a call, or whose loop died without an exit,
+   * posts nothing, and every view goes stale while its last state still reads "held". Silence for
+   * {@link READ_MODEL_STALL_MS} is ledgered; silence for twice that, doubling with each recycle so a
+   * slow first open is never killed in a loop, terminates it, and the exit handler respawns it.
+   */
+  const watchWorker = (): void => {
+    const running = worker;
+    if (!running) return;
+    const silentMs = clock.now() - heardAt;
+    if (silentMs >= READ_MODEL_STALL_MS && !silenceLogged) {
+      silenceLogged = true;
+      opts.log?.("read_model.worker_silent", { silentMs, recycles });
+    }
+    if (silentMs < 2 * READ_MODEL_STALL_MS * 2 ** recycles) return;
+    recycles++;
+    opts.log?.("read_model.worker_recycled", { silentMs, recycles });
+    void running.terminate();
+  };
+
+  const bodyListeners = new Set<(entry: ReadModelBodyEntry) => void>();
   const onMessage = (msg: ReadModelWorkerMessage): void => {
+    heardAt = clock.now();
+    silenceLogged = false;
     if (msg.type === "body") {
       bodies.set(readModelBodyKey(msg.entry.view, msg.entry.key), msg.entry);
       for (const listener of bodyListeners) listener(msg.entry);
@@ -770,6 +904,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv });
     signal = new Int32Array(shared);
     worker = spawned;
+    heardAt = clock.now();
     spawned.unref();
     spawned.on("message", onMessage);
     spawned.on("error", (error) => opts.log?.("read_model.worker_failed", { error: String(error?.message ?? error) }));
@@ -802,7 +937,10 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     start: () => {
       if (worker || stopping) return;
       spawn();
-      stopSwitchWatch = (opts.every ?? everyUnref)(refreshSwitches, READ_MODEL_SWITCH_RECHECK_MS);
+      stopSwitchWatch = (opts.every ?? everyUnref)(() => {
+        refreshSwitches();
+        watchWorker();
+      }, READ_MODEL_SWITCH_RECHECK_MS);
     },
     stop: () => {
       stopping = true;

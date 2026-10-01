@@ -145,7 +145,7 @@ const BASELINE_COMMAND_NAMES = [
   "reframe",
   "risk-judge-eval",
   "rule", "relay", "release", "repair-ladder", "replay", "replay-goldens", "restore", "resume", "retro", "review", "routing-ab", "rule-efficacy", "run-task",
-  "serve", "serve-plist", "skill", "status", "stop", "sweep", "sync", "trace", "triage", "up",
+  "serve", "serve-plist", "skill", "status", "stop", "sweep", "sync", "trace", "triage", "triage-outcomes", "up",
   "verdict-calibration",
   "verify-human-sweep", "wipe-test",
 ].sort();
@@ -169,6 +169,7 @@ const BASELINE_COMMAND_NAMES = [
 // through the same applyProposalVerdict the serve routes use — join the registry.
 // W1-T4691: `release` — the sanctioned circuit-breaker release for a halted task (`rmd release
 // <task-id> --reason "<text>"`) — joins the registry.
+// W1-T3547: `triage-outcomes` — the read-only per-provider triage-lane outcome fold — joins the registry.
 // Phase 1 P1-04: `read-model` — rebuild, status and kill switches of serve's read model — joins the registry.
 test("COMMANDS carries the reviewed command-name inventory", () => {
   // The reviewed edit is the NAME added to the list above, beside its line of provenance. No count

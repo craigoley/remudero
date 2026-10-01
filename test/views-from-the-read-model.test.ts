@@ -37,11 +37,11 @@ function seedRows(dir: string, n: number): void {
   writeFileSync(join(dir, LIVE), `${lines.join("\n")}\n`);
 }
 
-/** Runs one in-process tick so the state dir holds a committed `read-model` body, as a previous serve left it. */
+/** Runs enough bounded passes for the previous serve to commit its `read-model` body. */
 function committedBody(stateDir: string, ledgerDir: string): ReadModelBodyEntry {
   let posted: ReadModelBodyEntry | undefined;
-  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], post: (m) => void (m.type === "body" && (posted = m.entry)) });
-  ticker.tick();
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], post: (m) => void (m.type === "body" && m.entry.view === "read-model" && (posted = m.entry)) });
+  for (let pass = 0; pass < 8 && !posted; pass++) ticker.tick();
   ticker.release();
   assert.ok(posted, "the previous serve committed a body");
   return posted;
@@ -188,9 +188,9 @@ test("a stale source makes the view stale and names the source", async (t) => {
   t.after(() => handle.stop());
   handle.start();
   const deadline = Date.now() + 30_000;
-  while (handle.state().instances.get("core")?.tickedAt === undefined && Date.now() < deadline) await sleep(20);
+  while ((!handle.body("read-model") || handle.state().instances.get("core")?.tickedAt === undefined) && Date.now() < deadline) await sleep(20);
   const tickedAt = handle.state().instances.get("core")?.tickedAt;
-  assert.ok(tickedAt !== undefined, "the worker ticked");
+  assert.ok(tickedAt !== undefined && handle.body("read-model"), "the worker materialized the read-model view");
   let now = tickedAt;
   const clock: Clock = { ...systemClock, now: () => now, iso: () => fixedClock(now).iso() };
   const url = await listen(t, createService({ tokens: { read: "r", write: "w" }, routes: buildReadModelViewRoutes({ legacy: [], readModel: handle, readModelViews: ["read-model"], servedByDefault: ["read-model"], clock }) }));

@@ -2344,6 +2344,39 @@ export interface components {
       file: string;
       fn: string;
     };
+    /** POST /v1/console/telemetry (src/lib/console-telemetry.ts): one batch of the console's latency beacon, at most 50 records. Fields a record carries that are not declared here are dropped. */
+    ConsoleTelemetryRequest: {
+      records: (ConsoleLatencyRecord)[];
+    };
+    /** One applied view update as the console measured it; each becomes one `console.latency` ledger row. Durations are milliseconds, 0 to 3600000, rounded. Browser-side hops are measured on the browser clock; `transportMs` alone uses `clockOffsetMs`, the offset estimated from the events stream's `hello.serverNow`. */
+    ConsoleLatencyRecord: {
+      view: string;
+      /** The view key; empty for an unkeyed view. */
+      key: string;
+      cause: "body" | "judge" | "hello" | "poll";
+      /** The serve-clock time of the view event */
+      emittedAt?: string;
+      /** View event emitted by serve to received by the browser. */
+      transportMs?: number;
+      /** The refetch */
+      fetchMs?: number;
+      /** The core read inside the refetch */
+      coreMs?: number;
+      /** Response to the view store applying it. */
+      applyMs?: number;
+      /** Store update to the next painted frame. */
+      paintMs?: number;
+      /** View event emitted to painted. */
+      totalMs?: number;
+      /** The browser clock minus serve's. */
+      clockOffsetMs?: number;
+    };
+    ConsoleTelemetryResult: {
+      /** Records ledgered as console.latency rows. */
+      accepted: number;
+      /** Records past the pace of about one row a second */
+      dropped: number;
+    };
     /** POST /v1/incidents/events's body (src/lib/incident-events.ts's `IncidentEventInput`, validated by `validateIncidentEventBody`). At most 16 KiB. The daemon scrubs `message` and `route` (query/fragment stripped; token, email and uuid shapes redacted) and caps `message` at 500 characters and `frames` at 20 before anything is fingerprinted or stored. */
     IncidentEventRequest: {
       source: "console" | "gateway" | "daemon";
@@ -2571,6 +2604,8 @@ export interface components {
       asOf: string | null;
       /** `body`: the read-model worker posted a new body. `judge`: re-judging the sources flipped `stale`. */
       cause: "body" | "judge";
+      /** Present when the judged body is at most 4 KiB: the whole view body a GET of (view, key) answers with this `etag`, so the client applies it without a refetch. A larger body is refetched with If-None-Match. */
+      body?: Record<string, never>;
     };
     /** The last event on a GET /v1/views/events stream that serve ends (a drain, or a subscriber stalled too long). */
     ViewHandover: {
@@ -2656,10 +2691,10 @@ export interface components {
       ready: boolean;
       reason: string;
     };
-    /** GET /v1/views/repositories (docs/views.md, src/lib/repositories-view.ts): the repository portfolio across every instance serve holds, in one body. Each instance's `summary` IS its GET /v1/i/<instance>/repos/summary body, computed by the read-model worker from that instance's projected `repo_row` table; `projects` precomputes the console's grouping and its "worst is <repo>" line. Dark until state/read-model/switches.json sets `repositories` to `serve`. */
+    /** GET /v1/views/repositories (docs/views.md, src/lib/repositories-view.ts): the repository portfolio across every instance serve holds, in one body. Each instance's `summary` IS its GET /v1/i/<instance>/repos/summary body, computed by the read-model worker from that instance's projected `repo_row` table; `projects` precomputes the console's grouping and its "worst is <repo>" line. Dark until state/read-model/switches.json sets `repositories` to `serve`. Version 2 carries no clock stamp in `data`: each summary's `generated_at` is its `repositories:<instance>` source's `asOf`, so the ETag moves only when the content does. */
     RepositoriesView: {
       view: "repositories";
-      version: 1;
+      version: 2;
       generatedAt: string;
       asOf: string | null;
       stale: boolean;
@@ -2669,7 +2704,7 @@ export interface components {
         /** One entry per instance serve published, in its order; `summary` absent with a `reason` until its first recompute. */
         instances: ({
           instanceId: string;
-          summary?: RepoDashboardResult;
+          summary?: RepositoriesSummary;
           /** Why `summary` is absent, or (beside a summary) why the last recompute failed and the summary shown is older. */
           reason?: string;
         })[];
@@ -2680,6 +2715,15 @@ export interface components {
         /** Present with empty arrays before serve has published the repository sources. */
         reason?: string;
       };
+    };
+    /** One instance's GET /v1/i/<instance>/repos/summary body (RepoDashboardResult) without its `generated_at`, which the view's `repositories:<instance>` source carries as `asOf`. */
+    RepositoriesSummary: {
+      source: "managed-repos" | "instance-registry" | "instance-registry+managed-repos";
+      registry?: {
+        state: "verified" | "unavailable";
+        reason?: string;
+      };
+      repos: (RepoDashboardEntry)[];
     };
     /** One project of the repositories view, with the repository whose state is worst. */
     RepositoriesProject: {
@@ -2701,10 +2745,10 @@ export interface components {
     };
     /** How far a repository's figures can be trusted, worst first: `unavailable` (no summary), `stale` (the last recompute failed; the summary shown is older), `unknown` (computed, no ledger), `verified`. The console's RepoHealthStatus. */
     RepositoryState: "unavailable" | "stale" | "unknown" | "verified";
-    /** GET /v1/views/now?instance=<id> (docs/views.md, src/lib/now-view.ts): everything the console's /now renders for ONE instance. The board is the legacy derivation over the read model's full fact history; `groups` precomputes the console's groupBoard; `actions` carries structured strikes; `health` is the selected instance's own host probe. Dark until state/read-model/switches.json sets `now` to `serve`. */
+    /** GET /v1/views/now?instance=<id> (docs/views.md, src/lib/now-view.ts): everything the console's /now renders for ONE instance. The board is the legacy derivation over the read model's full fact history; `groups` precomputes the console's groupBoard; `actions` carries structured strikes; `health` is the selected instance's own host probe. Dark until state/read-model/switches.json sets `now` to `serve`. Version 2 carries no clock stamp and no now-relative value in `data` (the envelope's `generatedAt` and each source's `asOf` do), so the ETag moves only when the content does. A consumer derives a duration ("running for 12 min") from an absolute field such as a task's `startedAt`. */
     NowView: {
       view: "now";
-      version: 1;
+      version: 2;
       generatedAt: string;
       asOf: string | null;
       stale: boolean;
@@ -2713,7 +2757,6 @@ export interface components {
       data: {
         instance: string;
         board: {
-          generated_at: string;
           counts: {
             running: number;
             queued: number;
@@ -2768,12 +2811,16 @@ export interface components {
             day: string;
           };
         };
-        /** The selected instance's own host probe; a field it could not read is absent, named in `reasons`. */
+        /** The selected instance's own host probe; a gauge it could not read is absent, named in `reasons`. The probe's sample time is the `host-probe:<i>` source's `asOf`. */
         health: {
-          sampledAt: string;
           diskFreeBytes?: number;
           rateLimitRemaining?: number;
-          lastPollAgeMs?: number;
+          /** The daemon's poll liveness. `polling` while a `daemon.*` row is under 5 min old; `silent` otherwise, with `at` the last poll's own time (absent when the live ledger has none). `at` stops moving while the daemon is silent, so a consumer ages it itself. */
+          daemon: {
+            state: "polling" | "silent";
+            at?: string;
+            reason?: string;
+          };
           reasons?: Record<string, string>;
         };
         /** Open feedback questions; core only, so another instance carries a `reason` instead. */
@@ -2794,7 +2841,7 @@ export interface components {
       prUrl?: string;
       prNumber?: number;
       phase?: string;
-      elapsedMs?: number;
+      /** The run's start; a consumer derives the running time from it (version 2 dropped `elapsedMs`). */
       startedAt?: string;
       needsHuman?: true;
       verifyHumanPending?: true;
@@ -3540,7 +3587,7 @@ export interface components {
     bearerRead: { type: "http"; scheme: "bearer" };
     /** Write-scoped bearer token. Required for any route whose `scope` is `write` (src/lib/service.ts's `Scope`). */
     bearerWrite: { type: "http"; scheme: "bearer" };
-    /** W1-T4383 ingest-only bearer token (src/lib/service.ts's `ingestTokenProvider`). Grants exactly POST /v1/incidents/events and falls through to 401 on every other route. */
+    /** W1-T4383 ingest-only bearer token (src/lib/service.ts's `ingestTokenProvider`). Grants exactly POST /v1/incidents/events and POST /v1/console/telemetry, and falls through to 401 on every other route. */
     bearerIngest: { type: "http"; scheme: "bearer" };
   };
 }
@@ -4760,6 +4807,17 @@ export interface paths {
     post: {
       responses: {
           "200": IncidentEventResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "413": IncidentIngestBodyTooLarge;
+        };
+    };
+  };
+  "/v1/console/telemetry": {
+    post: {
+      responses: {
+          "200": ConsoleTelemetryResult;
           "400": Error;
           "401": Error;
           "403": Error;
