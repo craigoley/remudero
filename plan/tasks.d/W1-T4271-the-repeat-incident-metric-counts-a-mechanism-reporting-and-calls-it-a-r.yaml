@@ -85,9 +85,10 @@
   origin: architect
   plan_refs: ["§8A", "P48", "W1-T418", "W1-T1266"]
   files: [src/lib/rule-efficacy.ts, test/rule-efficacy-signature-kind.test.ts]
-  priority: 2
-  status: queued
-  # backlog gardener: band=2 evidence=fe88ce8501bf9bf7
+  status: blocked
+  retirement: withdrawn
+  # backlog gardener: retirement evidence=2057f34a628dfee9
+
   attempts: 0
   note: |
     RATIFIED AT THE CLASS, NOT THE INSTANCE. The proposal's literal ask — promote the prose rule to an
