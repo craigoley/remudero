@@ -487,7 +487,7 @@ test("the switch reader rejects a file changed during its descriptor read", (t) 
 
 test("the ledger source reads stale when its projector is behind or has not ticked", () => {
   const base = { instance: "core", generation: 3, lease: "held" as const, failures: 0, newestTs: "2026-09-30T11:59:00.000Z" };
-  assert.deepEqual(ledgerSource({ ...base, tickedAt: T0 }, T0 + 1_000), { name: "ledger:core", asOf: base.newestTs, state: "fresh" });
+  assert.deepEqual(ledgerSource({ ...base, tickedAt: T0 }, T0 + 1_000), { name: "ledger:core", asOf: base.newestTs, state: "fresh", kind: "ledger", instance: "core", budgetMs: 10_000, lagMs: 1_000 });
   assert.equal(ledgerSource({ ...base, tickedAt: T0 }, T0 + 12_000).reason, "projector 12 s behind");
   assert.equal(ledgerSource({ ...base, tickedAt: T0, reason: "tick failed: x" }, T0 + 12_000).reason, "projector 12 s behind: tick failed: x");
   assert.equal(ledgerSource({ ...base, tickedAt: T0, reason: "unread archives: a" }, T0).state, "stale");

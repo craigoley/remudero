@@ -24,7 +24,7 @@ over one SSE stream (below); the wire shape below is the contract those phases k
 | `version` | the schema version of `data`. An added optional field keeps it. Anything a consumer could misread bumps it, and a consumer checks it before trusting `data`. |
 | `generatedAt` | when this body was computed. |
 | `asOf` | the **oldest** input's as-of time: how old the facts are, which is not the same as how old the response is. |
-| `stale` | any source is `stale` or `unavailable`; `sources[].reason` says why. |
+| `stale` | any source is `stale` or `unavailable`; `sources[].phase` says why (see Source freshness). |
 | `ETag` | weak, `W/"<view>.<version>.<hash of {version, stale, data}>"`. It ignores the times, so an unchanged view answers a matching `If-None-Match` with **304** and no body, even after a recompute. `Cache-Control: no-cache`. |
 
 **No clock in `data`.** The ETag is the view's version on the push stream, so `data` carries no
@@ -32,6 +32,38 @@ clock stamp and no value computed relative to "now" (an age, an elapsed time). T
 envelope (`generatedAt`, `asOf`, `sources[].asOf`); a consumer derives a duration from an absolute
 time in `data` that moves only when its event does (a run's `startedAt`). Otherwise every
 re-materialize and every restart would look like a change to every open console.
+
+## Source freshness (Phase 4)
+
+Each `sources[]` entry carries structured fields beside `name`, `asOf`, `state` and `reason` (all optional,
+so a reader of the four keeps working and no view's version moved; `src/lib/view-freshness.ts`):
+
+| field | meaning |
+|---|---|
+| `kind` | `ledger`, `github`, `plan`, `host-probe`, `analytics`, `inbox-store`, `repositories`, ... (the name's prefix) |
+| `instance` | the instance the source belongs to |
+| `phase` | why it is not fresh: `warming`, `catching_up`, `refreshing`, `behind`, `failed` or `elsewhere` |
+| `lagMs` | how far behind it is, measured when serve judged it for this response |
+| `etaMs` | how long until it is caught up, when that is known (a projector catching up) |
+| `budgetMs` | the bound it is judged against, so a client can age it between events |
+
+`reason` is display prose only. **Never parse it**: a console reading "catching up: ... done in about S s"
+with a regex judged core's normal post-boot catch-up stale. Read `phase` and `etaMs`.
+
+Serve judges **every** source at request time (and in the push stream's 1 s judge sweep) against one
+budget table. A source its producer called fresh whose `asOf` is older than its budget reads `stale`,
+phase `behind`, and changes the ETag. The worker posts each source's newest reading whenever it changes,
+so a body whose data did not move (and so was not re-posted) still ages from its newest reading.
+
+| kind | `asOf` | budget |
+|---|---|---|
+| `ledger` | the newest applied row | 10 s since the projector's last good tick. A catch-up is `catching_up` with `etaMs`; a lease held by another serve is `elsewhere`; a failing tick is `failed`; a body committed before serve started is `warming`. |
+| `github` | when the open-PR snapshot was saved | 180 s (three missed one-minute saves) |
+| `plan` | when the checkout was checked, or the oldest plan commit on origin/main it lacks | 120 s behind origin/main. Before, it was always `fresh`. A checkout that cannot be compared is `unavailable`. |
+| `host-probe` | the probe's sample time | 180 s (three missed 60 s probes). Before, it was always `fresh`. |
+| `analytics`, `inbox-store` | the snapshot's own time | their producers' bounds (nav-badge) |
+
+A kind with no budget row is judged only by the state its producer gave it.
 
 An input that is cold makes its value **absent with a reason**, never a zero. A view's query
 parameters narrow it; an unusable one answers 400 `invalid_request` with a `detail`.
@@ -157,7 +189,9 @@ writer lease, and how many future-dated rows were quarantined.
 
 `data.inbox`: `{ ready?, needsYou?, fleet?, reason? }`.
 - These are open inbox items by who must act.
-- The source is the classification that `GET /v1/inbox` writes (`state/inbox-classified.json`).
+- The source is `state/inbox-classified.json`, which serve's slow lane (the read-model worker's second thread,
+  `src/lib/read-model-slow-lane.ts`) rewrites every minute with or without a reader: on a change, and at least every
+  5 min. `GET /v1/inbox` writes nothing. The daemon's fleet lane files from the same file.
 
 ## `repositories` (version 2)
 
