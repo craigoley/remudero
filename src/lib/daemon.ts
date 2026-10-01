@@ -1208,6 +1208,11 @@ function transientGhDispatchFailure(err: unknown): { detail: string } | undefine
  * too. Matching the two named endpoints keeps a WRITE failure (create, merge, comment) on today's
  * fatal path unchanged, per design (iii).
  */
+/** W1-T5083: a rejection the settle loop treats as lane-local (it logs and the pass continues). */
+function refillLaneLocalRejection(err: unknown): boolean {
+  return transientGhDispatchFailure(err) === undefined && !isSpawnInfraBlocked(err) && ghLaneReadFailure(err) !== undefined;
+}
+
 function ghLaneReadFailure(err: unknown): { detail: string } | undefined {
   if (typeof err !== "object" || err === null) return undefined;
   const failure = err as NodeJS.ErrnoException & { stderr?: string | Buffer };
@@ -2639,10 +2644,11 @@ export async function runDaemon(
   // W1-T4945 — WHEN, not WHETHER: an idle daemon restarts at once, a busy one only once change plus
   // staleness pressure justifies the drain (deploy-judge's `decideFreshnessRestart`). Busy means a full
   // pass, a detached action or a review is still in flight — exactly what the drain below would wait on.
-  const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>): "restart" | "defer" => {
+  const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>, siblingInFlight = false): "restart" | "defer" => {
     const nowMs = daemonClock.now();
     staleSinceMs ??= nowMs;
     const busy =
+      siblingInFlight ||
       backgroundSweep !== undefined || sweepLiveness.inFlight || detachedSweepActionCount() > 0 || inFlightReviewCount() > 0;
     const decision = decideFreshnessRestart({ changes: freshness.changes, busy, staleSinceMs, nowMs, state: freshnessPressure });
     freshnessPressure = decision.state;
@@ -4544,20 +4550,26 @@ export async function runDaemon(
     let refillClosed: string | undefined;
     const refillLane = (lane: number, finished: Task, outcome: PromiseSettledResult<RunResult>): Task | undefined => {
       inFlightTasks.delete(finished);
-      if (outcome.status === "rejected") refillClosed ??= "a lane rejected";
+      if (outcome.status === "rejected") {
+        // W1-T5083: a lane-local rejection (the settle loop logs it and the pass continues) never closes refill.
+        if (!(outcome.reason instanceof TaskAdmissionError) && !refillLaneLocalRejection(outcome.reason)) refillClosed ??= "a lane rejected";
+      }
       // W1-T4662: `handed_off` (a healthy freshness yield) deliberately does NOT match here — only
       // a genuine, repeated `blocked_transient` API failure closes this lane's refill.
       else if (outcome.value.verdict === "blocked_transient") refillClosed ??= "blocked_transient";
       const governed = refillClosed ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
       const stopped = deps.checkStop?.();
       const paused = deps.checkPause?.();
+      // W1-T5083: the same restart decision the top of tick asks; a sibling in flight makes it busy.
+      const freshness = refillClosed ? undefined : deps.checkFreshness?.();
+      const freshnessAction = freshness?.stale ? decideFreshness(freshness, true) : undefined;
       let reason =
         refillClosed ??
         (opts.max !== undefined && attempted.length >= opts.max ? "max reached" : undefined) ??
         holdWorkerAdmission("lane-refill")?.reason ??
         (stopped ? `stop: ${stopped}` : undefined) ??
         (paused ? `pause: ${paused}` : undefined) ??
-        (deps.checkFreshness?.()?.stale ? "stale code" : undefined) ??
+        (freshnessAction === "restart" ? "stale code" : undefined) ??
         (governed ? `governor: ${governed.kind}` : undefined);
       let next: Task | undefined;
       if (reason === undefined) {
@@ -4578,7 +4590,12 @@ export async function runDaemon(
         }
       }
       if (!next) {
-        log("dispatch.lane_refill_held", { lane, finished_task: finished.id, reason: reason ?? "no disjoint runnable task within the lane budget" });
+        log("dispatch.lane_refill_held", {
+          lane,
+          finished_task: finished.id,
+          reason: reason ?? "no disjoint runnable task within the lane budget",
+          ...(freshnessAction ? { freshness_action: freshnessAction } : {}),
+        });
         return undefined;
       }
       passIds.add(next.id);
