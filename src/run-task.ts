@@ -631,6 +631,7 @@ import {
 import { appendPanelLedger, ghIssueCloser } from "./lib/panel-actions.js";
 import { proposalVerdictCommand } from "./lib/inbox-verdict-command.js";
 import { computeBoardSnapshot, type BoardDeps } from "./lib/board.js";
+import { createBoardProjectionWorker } from "./lib/board-worker.js";
 import {
   buildReadyServeServer,
   currentBranch,
@@ -35314,18 +35315,17 @@ export async function upCommand(rest: string[], deps: UpDeps = {}): Promise<numb
 
 /**
  * W1-T3620 — MEASURED ON THE LIVE DAEMON: `rmd serve` binds its port, then the first
- * `GET /v1/status` pays `computeBoardSnapshot`'s whole cold projection SYNCHRONOUSLY on the one
- * event-loop thread (99s on a freshly recycled daemon) — so a just-recycled console accepts
- * every connection and answers none, board route or otherwise, until that one call returns.
+ * `GET /v1/status` used to pay `computeBoardSnapshot`'s whole cold projection on serve's
+ * event-loop thread (99s on a freshly recycled daemon). The production route now reads the
+ * board worker's published snapshot; this gate remains for the injected precompute seam.
  *
  * This gate sits in front of the ALREADY-BUILT server's real request listeners (installed by
- * {@link serveCommand}, never inside lib/serve.ts/lib/board.ts — this task's declared scope is
- * `src/run-task.ts` alone). Before the daemon's first board projection has been attempted, a
+ * {@link serveCommand}). Before the injected first board projection has been attempted, a
  * `GET` to `boardPath` gets an INSTANT, DATED refusal — never a snapshot it cannot date — instead
  * of ever reaching the real (slow) handler. Every other request (the cheap routes: `/v1/version`,
  * the GitHub webhook, …) is forwarded unconditionally and untouched, so it never depends on
- * board readiness at all. `markReady()` is the caller's job (see `serveCommand`'s one-shot
- * background precompute below) — this gate only decides what to answer while it waits.
+ * board readiness at all. `markReady()` is the caller's job — this gate only decides what to
+ * answer while it waits.
  */
 export interface BoardColdStartGate {
   /** Wraps the server's real request listener(s): forwards everything except a pre-readiness
@@ -35402,21 +35402,21 @@ export async function serveCommand(
     branch?: (repoDir: string) => string | null;
     bindRetry?: { attempts?: number; delayMs?: number };
     buildBatchedGithub?: typeof buildBatchedGithub;
+    /** Absolute worker-walk executable in real boot tests. */
+    boardGhBin?: string;
     boardPacer?: GhCallPacer;
     loadMounts?: typeof loadMounts;
     spawn?: typeof spawnWorker;
     // W1-T2568: the wake's policy, injectable so a test drives the rung without a plan/policy.yaml
     // on disk — and so this read has a seam, which every other policy read in src/ already has.
     policy?: Policy;
-    // W1-T3620: the SAME injectable-seam shape as `buildBatchedGithub` above — real callers omit
-    // it and get the real (possibly-99s, synchronous) `computeBoardSnapshot`; a test supplies an
-    // async fake gated on a promise it controls, so the cold-start gate's refusal window is
-    // observed deterministically over a REAL bound port, never via a real 99s wait or a
-    // busy-block that would just move the same unobservability into the test. `void | Promise`
-    // (not `typeof computeBoardSnapshot`'s bare `void`) is deliberate: it is ALSO the seam a
-    // future worker-thread offload of the derivation itself (recon's own flagged follow-up) can
-    // fill without touching this call site again.
+    // W1-T3620's injectable precompute seam. Real callers omit it and use the projection worker;
+    // a test can hold an async fake open to exercise the old gate's refusal window.
     buildInitialBoardSnapshot?: (deps: BoardDeps) => void | Promise<void>;
+    /** Holds or fails the real projection thread in boot-path tests. */
+    boardProjectionOptions?: Parameters<typeof createBoardProjectionWorker>[2];
+    /** Forces a failed initial board plan read while keeping the worker's real source intact. */
+    loadBoardPlan?: typeof loadPlan;
     generation?: GenerationChannel;
   } = {},
 ): Promise<number> {
@@ -35449,7 +35449,16 @@ export async function serveCommand(
   const self = resolveOwnerRepo();
   const planPath = join(repoRoot, "plan", "tasks.yaml");
   const ledgerPath = ledgerPathFor(config);
-  const plan = loadPlan(planPath);
+  let plan: Plan;
+  let boardPlanReadFailure: string | undefined;
+  try {
+    plan = (deps.loadBoardPlan ?? loadPlan)(planPath);
+  } catch (error) {
+    boardPlanReadFailure = String((error as Error)?.message ?? error);
+    // The worker reads the real path and publishes an unavailable board. The assembly still
+    // needs a Plan shape to bind cheap routes and auth while that failure is visible.
+    plan = { tasks: [], byId: new Map() };
+  }
   const tokens = resolveServiceTokens(config.root);
   // W1-T2568: the signed GitHub-event wake's config — resolved here (never inside lib/serve.ts,
   // which stays deps-in/no-ambient-resolution) exactly like `policy`/`tokens` above. `secret` is
@@ -35462,6 +35471,7 @@ export async function serveCommand(
   const runId = `SERVE-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "SERVE", step, lane: "serve", ...extra });
+  if (boardPlanReadFailure) log("serve.board_plan_unreadable", { reason: boardPlanReadFailure });
 
   // W1-T2568 + W1-T152: SEAMED AND NON-FATAL, and it sits below `log` so a degraded read is
   // RECORDED rather than swallowed. `loadPolicy` THROWS on an absent or malformed
@@ -35527,6 +35537,7 @@ export async function serveCommand(
     ttlMs: DEFAULT_BOARD_POLL_TTL_MS,
     prewarmLeadMs: DEFAULT_BOARD_POLL_TTL_MS,
     snapshotCache: serveBoardSnapshot,
+    ghBin: deps.boardGhBin,
     // A merged PR's file list survives the restart on disk, and a miss never blocks the first snapshot.
     changedFilesCache: createChangedFilesCache(config.root, self.owner, self.repo, { log }),
   });
@@ -35592,6 +35603,15 @@ export async function serveCommand(
     github: boardGithub,
     inflightHolder: (taskId) => readInflightLock(join(config.root, "state", "inflight"), taskId),
   };
+  // Existing injected gateways retain the in-process test seam; the production gateway always
+  // publishes through the worker and never calls this projector on serve's thread.
+  const buildInitialBoardSnapshot = deps.buildInitialBoardSnapshot ??
+    (deps.buildBatchedGithub ? (d: BoardDeps) => void computeBoardSnapshot(d) : undefined);
+  const boardProjection = buildInitialBoardSnapshot ? undefined : createBoardProjectionWorker(boardGithub, {
+    planPath,
+    ledgerPath,
+    inflightDir: join(config.root, "state", "inflight"),
+  }, deps.boardProjectionOptions);
 
   // W1-T2838: do not bind until Serve's OWN first App-token mint settles. The refresher's
   // `ready` promise is fail-open and always settles, so an exchange outage still starts the
@@ -35603,6 +35623,7 @@ export async function serveCommand(
     ...(channel ? { generation: { requestHandoff: (detail) => channel.send({ ...detail, type: GENERATION_MESSAGES.handoffRequest }) } } : {}),
     boardGithubRefreshMs: DEFAULT_BOARD_POLL_TTL_MS,
     board: boardDeps,
+    boardSnapshotSource: boardProjection,
     modelApprovals: config.modelApprovals,
     // panel-graph.ts reloads plan/tasks.yaml fresh on every GET /v1/trace (its own header) --
     // planPath alone is enough, no snapshot needed here the way board.ts's does.
@@ -35665,21 +35686,19 @@ export async function serveCommand(
     },
   });
 
-  // W1-T3620: install the cold-start gate BEFORE any interface binds, so no request can reach
-  // the real (possibly 99s-cold) board handler ungated. `server.listeners("request")` is looked
-  // up fresh by the mirror-forwarding closures below on every request they receive, so replacing
-  // it here — before the bind loop — is enough for every bound interface, not just the primary.
+  // Keep W1-T3620's gate for injected precompute tests. Production's status route reads only the
+  // worker's published snapshot and returns its own dated unavailable response while cold.
   const boardGate = boardColdStartGate("/v1/status");
-  const realRequestListeners = server.listeners("request") as Array<(req: IncomingMessage, res: ServerResponse) => void>;
-  server.removeAllListeners("request");
-  server.on(
-    "request",
-    boardGate.wrap((req, res) => {
-      for (const l of realRequestListeners) l(req, res);
-    }),
-  );
-  const buildInitialBoardSnapshot = deps.buildInitialBoardSnapshot ?? ((d: BoardDeps) => void computeBoardSnapshot(d));
+  if (buildInitialBoardSnapshot) {
+    const realRequestListeners = server.listeners("request") as Array<(req: IncomingMessage, res: ServerResponse) => void>;
+    server.removeAllListeners("request");
+    server.on("request", boardGate.wrap((req, res) => {
+      for (const listener of realRequestListeners) listener(req, res);
+    }));
+  }
+  server.on("close", () => boardProjection?.stop());
   const precomputeBoard = async (): Promise<void> => {
+    if (!buildInitialBoardSnapshot) return;
     log("serve.board_precompute_started", {});
     try {
       await buildInitialBoardSnapshot(boardDeps);
@@ -35695,10 +35714,11 @@ export async function serveCommand(
     const generation = serveGeneration(server);
     onDrainRequest(channel, (reason) => void generation?.handover(reason));
     onShedRequest(channel, () => generation?.shed());
-    await listenReadiness(server, supervised.socketPath, () => [...(generation?.probes ?? []), boardComputedProbe(boardGate.isReady)], tokens.read);
+    await listenReadiness(server, supervised.socketPath, () => [...(generation?.probes ?? []), boardComputedProbe(boardProjection?.isReady ?? boardGate.isReady)], tokens.read);
     // One warm, so the gateway is primed before promotion; keep-warm itself starts only once listening.
     boardGithub.warm?.();
-    void precomputeBoard();
+    if (boardProjection) boardProjection.start();
+    else void precomputeBoard();
     log("serve.standby", { socket: supervised.socketPath });
     await awaitPromotion(channel);
     generation?.promote();
@@ -35753,22 +35773,11 @@ export async function serveCommand(
 
   log("serve.start", { port, hosts, repo: `${self.owner}/${self.repo}` });
 
-  // W1-T3620: THE ONE BACKGROUND BUILD, off the request path (design note (b)) — scheduled here,
-  // AFTER a successful bind, never before: this exact construction, scheduled unconditionally
-  // right after `buildReadyServeServer` returned, once cost a bind-FAILURE path (a held port,
-  // `listenWithReapWait` giving up above and returning 1 without ever accepting a connection) a
-  // full ~99s of wasted GitHub calls it had no reason to make — MEASURED, a "held port" test that
-  // finishes in <1s baseline took 114s with that ordering. Scheduled on the next tick so it never
-  // delays the banner below, and never re-run — a client's own request never triggers or waits on
-  // it (see `BoardColdStartGate`'s own doc). It shares `boardGithub` with the real route (board:
-  // boardDeps above), so the real route's OWN first call, once this unblocks it, reuses this
-  // call's warm gateway memos (index, changedFiles, reviewState) instead of re-paying the cold
-  // GitHub walk a second time.
-  // `finally` flips the gate open on EITHER outcome: W1-T3620's design note treats "attempted"
-  // (success OR failure) as "the projection existed" — a thrown/failed first pass must not wedge
-  // the board route in "not ready" forever when a real request would hit the identical failure
-  // and report it honestly (`github_unreachable`) instead.
+  // Start the projection only after a successful bind. The worker uses this process's one
+  // GitHub gateway for facts and publishes complete snapshots; client reads never start a pass.
+  // The injected legacy precompute remains next-tick work for its cold-gate tests.
   if (channel) channel.send({ type: GENERATION_MESSAGES.promoted });
+  else if (boardProjection) boardProjection.start();
   else setImmediate(() => void precomputeBoard());
 
   // NO TOKEN IS PRINTED. In a container stdout is `docker logs`, readable by anyone in the docker
