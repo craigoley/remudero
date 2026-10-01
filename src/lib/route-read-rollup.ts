@@ -11,6 +11,14 @@
  * A zero is not a measurement without a positive control: each layer reports whether the views
  * that replace it were read by the console inside the same zero window.
  *
+ * ONLY THE ACTIVE GENERATION WRITES (the Phase 3 invariant, #8242/#8257): serve calls `start()` when
+ * its server is `listening`, the same signal #8242 gates every other background writer on, so a
+ * standby counts nothing and writes nothing. A promoted generation starts counting fresh and TAKES
+ * OVER THE IN-PROGRESS HOUR: the draining generation's `stop` hands its partial hour to the state
+ * file as `carry` (never a ledger row), and whichever generation next closes that hour merges it
+ * into the hour's one row. A carry that arrives after its hour was already written rides in the
+ * next row, so no hour is ever written twice.
+ *
  * The final re-measure (design §9) reads the same rollup, never a probe of serve: per path handler
  * milliseconds from `finish` as a bucket histogram (p50/p99), the view responses served stale by
  * source and phase, and each push stream's subscribers, opens, closes and handovers. Every total is
@@ -95,6 +103,10 @@ export interface RouteReadsState {
   since: string | null;
   hours: number;
   routes: Record<string, Partial<Record<RouteReadCaller, RouteReadTotals>>>;
+  /** The newest hour a row was written for, so a late carry is never written as a second row. */
+  lastHour?: string;
+  /** A drained generation's partial hour, waiting for the active one to close that hour. */
+  carry?: { row: RouteReadsRow; last: Record<string, Partial<Record<RouteReadCaller, string>>> };
   latency?: Record<string, RouteLatency>;
   staleness?: ViewStaleness;
   streams?: Partial<Record<RouteReadStream, StreamCounts>>;
@@ -138,7 +150,7 @@ export interface RouteReadRollup {
   count(path: string, caller: RouteReadCaller): void;
   /** Rolls a finished hour into one row; the timer calls it, and so may a test. */
   tick(): void;
-  /** Loads the persisted totals and arms the hourly flush; the returned stop flushes the partial hour. */
+  /** Activates counting (promotion), loads the totals and arms the hourly flush; the returned stop hands the partial hour on once. */
   start(): () => void;
   summary(): RouteReadsSummary;
   /** Counts each GET, and times it from the handler call to the response's `finish` (an event stream is not timed). */
@@ -213,7 +225,45 @@ function parseState(raw: string): RouteReadsState {
   const parsed = JSON.parse(raw) as Partial<RouteReadsState>;
   if (parsed?.version !== 1 || typeof parsed.routes !== "object" || parsed.routes === null) return emptyState();
   return { version: 1, since: typeof parsed.since === "string" ? parsed.since : null, hours: Number(parsed.hours) || 0, routes: parsed.routes,
+    ...(typeof parsed.lastHour === "string" ? { lastHour: parsed.lastHour } : {}), ...(parsed.carry?.row ? { carry: parsed.carry } : {}),
     ...(parsed.latency ? { latency: parsed.latency } : {}), ...(parsed.staleness ? { staleness: parsed.staleness } : {}), ...(parsed.streams ? { streams: parsed.streams } : {}) };
+}
+
+type LastReads = Map<string, Partial<Record<RouteReadCaller, string>>>;
+
+/** Two generations' counts for one hour as one row: the earlier start, the later end, the reads summed. */
+export function mergeRouteReadRows(a: RouteReadsRow, b: RouteReadsRow): RouteReadsRow {
+  const routes: RouteReadsRow["routes"] = {};
+  for (const row of [a, b]) {
+    for (const [path, counts] of Object.entries(row.routes)) {
+      const entry = (routes[path] ??= {});
+      for (const caller of CALLERS) if (counts[caller]) entry[caller] = (entry[caller] ?? 0) + counts[caller]!;
+    }
+  }
+  const { partial: _drop, ...rest } = a;
+  const latency: Record<string, RouteLatency> = {};
+  for (const row of [a, b]) for (const [path, l] of Object.entries(row.latency ?? {})) latency[path] = addLatency(latency[path], l);
+  const staleness = a.staleness && b.staleness ? addStaleness(a.staleness, b.staleness) : a.staleness ?? b.staleness;
+  const streams: NonNullable<RouteReadsRow["streams"]> = {};
+  for (const name of STREAMS) {
+    const [x, y] = [a.streams?.[name], b.streams?.[name]];
+    if (x || y) streams[name] = { ...addStream(x, y ?? emptyStream()), subscribers: x?.subscribers ?? y!.subscribers };
+  }
+  return { ...rest, window_start: a.window_start < b.window_start ? a.window_start : b.window_start,
+    window_end: a.window_end > b.window_end ? a.window_end : b.window_end, reads: a.reads + b.reads, routes,
+    ...(Object.keys(latency).length > 0 ? { latency: Object.fromEntries(Object.entries(latency).map(([path, l]) => [path, readLatency(l)])) } : {}),
+    ...(staleness ? { staleness } : {}), ...(Object.keys(streams).length > 0 ? { streams } : {}) };
+}
+
+function mergeLast(into: LastReads, from: Record<string, Partial<Record<RouteReadCaller, string>>>): void {
+  for (const [path, byCaller] of Object.entries(from)) {
+    const entry = { ...into.get(path) };
+    for (const caller of CALLERS) {
+      const at = later(entry[caller] ?? null, byCaller[caller] ?? null);
+      if (at !== null) entry[caller] = at;
+    }
+    into.set(path, entry);
+  }
 }
 
 const later = (a: string | null, b: string | null): string | null => (a === null ? b : b === null ? a : a > b ? a : b);
@@ -256,7 +306,8 @@ export function createRouteReadRollup(opts: {
   let bucket: number | undefined;
   let windowStart = 0;
   let counts = new Map<string, Record<RouteReadCaller, number>>();
-  let last = new Map<string, Partial<Record<RouteReadCaller, string>>>();
+  let last: LastReads = new Map();
+  let active = false;
   let latency = new Map<string, RouteLatency>();
   let staleness = emptyStaleness();
   const live: Record<RouteReadStream, number> = { views: 0, status: 0 };
@@ -271,6 +322,13 @@ export function createRouteReadRollup(opts: {
       ...(active.length > 0 ? { streams: Object.fromEntries(active.map((name) => [name, { ...streams[name], subscribers: live[name] }])) } : {}),
     };
   };
+  const resetHour = (): void => {
+    counts = new Map();
+    last = new Map();
+    latency = new Map();
+    staleness = emptyStaleness();
+    streams = freshStreams();
+  };
 
   const readFile = (): RouteReadsState => {
     if (!file) return state;
@@ -283,8 +341,7 @@ export function createRouteReadRollup(opts: {
     }
   };
 
-  const flush = (endMs: number, partial: boolean): void => {
-    if (bucket === undefined) return;
+  const pendingRow = (endMs: number): RouteReadsRow => {
     const routes: RouteReadsRow["routes"] = {};
     let reads = 0;
     for (const [path, byCaller] of counts) {
@@ -292,27 +349,71 @@ export function createRouteReadRollup(opts: {
       for (const caller of CALLERS) if (byCaller[caller] > 0) routes[path]![caller] = byCaller[caller];
       reads += byCaller.console + byCaller.fleet;
     }
-    if (partial && reads === 0) return;
-    const row: RouteReadsRow = { hour: isoAt(bucket), window_start: isoAt(windowStart),
-      window_end: isoAt(endMs), ...(partial ? { partial: true as const } : {}), reads, routes, ...pendingParts() };
+    return { hour: isoAt(bucket!), window_start: isoAt(windowStart), window_end: isoAt(endMs), reads, routes, ...pendingParts() };
+  };
+
+  const persist = (next: RouteReadsState): void => {
+    state = next;
+    if (!file) return;
+    try {
+      writeAtomic(file, `${JSON.stringify(next)}\n`);
+    } catch (e) {
+      opts.log?.("serve.route_reads.persist_failed", { reason: String((e as Error)?.message ?? e) });
+    }
+  };
+
+  const emit = (row: RouteReadsRow): void => {
     try {
       opts.write?.(row);
     } catch (e) {
       opts.log?.("serve.route_reads.write_failed", { hour: row.hour, reason: String((e as Error)?.message ?? e) });
     }
+  };
+
+  /** Closes the current hour: its one row, with any carried partial hour merged in or written first. */
+  const flush = (endMs: number): void => {
+    let row = pendingRow(endMs);
     // Re-read before folding: an overlapping serve generation folds its own hours into the same file.
-    state = fold(readFile(), row, last);
-    counts = new Map();
-    last = new Map();
-    latency = new Map();
-    staleness = emptyStaleness();
-    streams = freshStreams();
-    if (!file) return;
-    try {
-      writeAtomic(file, `${JSON.stringify(state)}\n`);
-    } catch (e) {
-      opts.log?.("serve.route_reads.persist_failed", { reason: String((e as Error)?.message ?? e) });
+    let next = readFile();
+    const carry = next.carry;
+    if (carry && carry.row.hour <= row.hour) {
+      const { carry: _taken, ...rest } = next;
+      next = rest;
+      const carried = new Map<string, Partial<Record<RouteReadCaller, string>>>();
+      mergeLast(carried, carry.last);
+      if (carry.row.hour === row.hour || (next.lastHour !== undefined && carry.row.hour <= next.lastHour)) {
+        const window = carry.row.hour === row.hour ? {} : { window_start: row.window_start, window_end: row.window_end };
+        row = mergeRouteReadRows(row, { ...carry.row, hour: row.hour, ...window });
+        mergeLast(last, carry.last);
+      } else {
+        emit({ ...carry.row, partial: true });
+        next = { ...fold(next, { ...carry.row, partial: true }, carried), lastHour: carry.row.hour };
+      }
     }
+    emit(row);
+    persist({ ...fold(next, row, last), lastHour: row.hour });
+    resetHour();
+  };
+
+  /** Hands the active generation's partial hour to the state file once, for its successor to close. */
+  const handOff = (endMs: number): void => {
+    if (bucket === undefined) return;
+    const row = pendingRow(endMs);
+    if (row.reads === 0) return;
+    const lastReads: LastReads = new Map(last);
+    resetHour();
+    if (!file) {
+      emit({ ...row, partial: true });
+      state = fold(state, { ...row, partial: true }, lastReads);
+      return;
+    }
+    const next = readFile();
+    let carried = row;
+    if (next.carry?.row.hour === row.hour) {
+      carried = mergeRouteReadRows(next.carry.row, row);
+      mergeLast(lastReads, next.carry.last);
+    }
+    persist({ ...next, carry: { row: carried, last: Object.fromEntries(lastReads) } });
   };
 
   const rollTo = (nowMs: number): void => {
@@ -321,7 +422,7 @@ export function createRouteReadRollup(opts: {
       bucket = hour;
       windowStart = nowMs;
     } else if (hour > bucket) {
-      flush(bucket + HOUR_MS, false);
+      flush(bucket + HOUR_MS);
       bucket = hour;
       windowStart = hour;
     }
@@ -331,7 +432,9 @@ export function createRouteReadRollup(opts: {
     const nowMs = clock.now();
     const pending: RouteReadsRow = { hour: "", window_start: isoAt(bucket === undefined ? nowMs : windowStart),
       window_end: clock.iso(), partial: true, reads: 0, routes: Object.fromEntries([...counts].map(([path, byCaller]) => [path, { ...byCaller }])), ...pendingParts() };
-    const merged = fold(state, pending, last);
+    const carriedLast: LastReads = new Map();
+    if (state.carry) mergeLast(carriedLast, state.carry.last);
+    const merged = fold(state.carry ? fold(state, { ...state.carry.row, partial: true }, carriedLast) : state, pending, last);
     const sinceMs = merged.since === null ? nowMs : Date.parse(merged.since);
     const streak = (lastAt: string | null): number => Math.max(0, Math.floor((nowMs - (lastAt === null ? sinceMs : Date.parse(lastAt))) / DAY_MS));
     let viewReads = 0;
@@ -372,6 +475,7 @@ export function createRouteReadRollup(opts: {
 
   const rollup: RouteReadRollup = {
     count: (path, caller) => {
+      if (!active) return;
       const nowMs = clock.now();
       rollTo(nowMs);
       const byCaller = counts.get(path) ?? { console: 0, fleet: 0 };
@@ -381,14 +485,20 @@ export function createRouteReadRollup(opts: {
     },
     tick: () => rollTo(clock.now()),
     start: () => {
+      if (active) return () => {};
+      active = true;
       state = readFile();
+      bucket = undefined;
+      resetHour();
       rollTo(clock.now());
       const timer = setInterval(rollup.tick, opts.tickMs ?? ROUTE_READS_TICK_MS);
       timer.unref();
       return () => {
+        if (!active) return;
         clearInterval(timer);
         rollup.tick();
-        flush(clock.now(), true);
+        handOff(clock.now());
+        active = false;
       };
     },
     summary,
@@ -404,6 +514,7 @@ export function createRouteReadRollup(opts: {
       },
     },
     served: (view, body) => {
+      if (!active) return;
       rollTo(clock.now());
       const byView = staleness.byView[view] ?? { served: 0, stale: 0 };
       staleness.served++;
@@ -423,6 +534,7 @@ export function createRouteReadRollup(opts: {
       }
     },
     stream: (name, change, subscribers, reason) => {
+      if (!active) return;
       rollTo(clock.now());
       live[name] = subscribers;
       const counts = streams[name];

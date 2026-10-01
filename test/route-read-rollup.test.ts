@@ -9,6 +9,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
+import { createServer } from "node:http";
 import { join } from "node:path";
 import { test } from "node:test";
 import { clockFromMillisFn } from "../src/lib/clock.js";
@@ -135,8 +136,8 @@ test("the route reads get answers the persisted rollup after a restart and count
   assert.equal(first.rollup.wrap(post), post, "only reads are counted");
   first.at("2026-10-01T10:30:00Z");
   stop();
-  assert.equal(first.rows.length, 1);
-  assert.equal(first.rows[0]!.partial, true, "the stop flush persists the partial hour");
+  assert.equal(first.rows.length, 0, "a stop hands its partial hour on instead of writing a row");
+  assert.equal(JSON.parse(readFileSync(join(dir, ROUTE_READS_FILE), "utf8")).carry.row.reads, 2);
 
   const second = harness(dir, "2026-10-01T10:45:00Z");
   second.rollup.start();
@@ -160,12 +161,15 @@ test("the route reads get answers the persisted rollup after a restart and count
 test("a route read rollup that cannot read or persist its file names why and keeps counting", (t) => {
   const dir = stateDir(t);
   writeFileSync(join(dir, ROUTE_READS_FILE), "{not json");
-  const clock = clockFromMillisFn(() => Date.parse("2026-10-01T10:00:00Z"));
+  let now = Date.parse("2026-10-01T10:00:00Z");
+  const clock = clockFromMillisFn(() => now);
   const logs: string[] = [];
   const failing = createRouteReadRollup({ stateDir: dir, clock, log: (step) => logs.push(step), write: () => { throw new Error("ledger full"); } });
   const stopFailing = failing.start();
   assert.deepEqual(logs, ["serve.route_reads.unreadable"]);
   failing.count("/v1/status", "console");
+  now = Date.parse("2026-10-01T11:00:05Z");
+  failing.tick();
   stopFailing();
   assert.ok(logs.includes("serve.route_reads.write_failed"), "a ledger write failure is named");
   assert.equal(failing.summary().routes[0]!.console!.reads, 1, "and the totals still fold");
@@ -215,11 +219,130 @@ test("the served gateway counts each get by caller and writes the partial hour w
   }
   const version = summary.routes.find((r) => r.path === "/v1/version")!;
   assert.deepEqual([version.kind, version.console?.reads, version.fleet?.reads], ["other", 1, 1]);
-  const flushed = rows.filter((r) => r.step === "serve.route_reads");
-  assert.equal(flushed.length, 1, "one row for the hour, not one per request");
-  assert.deepEqual(flushed[0]!.routes, { "/v1/version": { console: 1, fleet: 1 }, "/v1/route-reads": { fleet: 1 } });
-  assert.equal(existsSync(join(root, "state", ROUTE_READS_FILE)), true, "the rollup belongs to the serve state root");
+  assert.equal(rows.filter((r) => r.step === "serve.route_reads").length, 0, "no row per request and none at close: the hour is handed on");
+  assert.deepEqual(JSON.parse(readFileSync(join(root, "state", ROUTE_READS_FILE), "utf8")).carry.row.routes,
+    { "/v1/version": { console: 1, fleet: 1 }, "/v1/route-reads": { fleet: 1 } });
   assert.equal(existsSync(join(externalLedgerDir, ROUTE_READS_FILE)), false, "an external ledger source is never a state write target");
+});
+
+test("a promoted generation takes over the in progress hour so each hour has exactly one row", (t) => {
+  const dir = stateDir(t);
+  const a = harness(dir, "2026-10-01T10:05:00Z");
+  const stopA = a.rollup.start();
+  for (let i = 0; i < 3; i++) a.rollup.count("/v1/status", "console");
+  const b = harness(dir, "2026-10-01T10:20:00Z");
+  b.rollup.count("/v1/status", "fleet");
+  b.rollup.count("/v1/status", "fleet");
+  b.at("2026-10-01T11:20:00Z");
+  b.rollup.tick();
+  assert.equal(existsSync(join(dir, ROUTE_READS_FILE)), false, "a standby counts nothing and writes nothing");
+  b.at("2026-10-01T10:30:00Z");
+  const stopB = b.rollup.start();
+  assert.equal(b.rollup.start()(), undefined, "a second promotion is a no-op");
+  b.rollup.count("/v1/views/now", "console");
+  a.at("2026-10-01T10:32:00Z");
+  a.rollup.count("/v1/status", "fleet");
+  a.at("2026-10-01T10:33:00Z");
+  stopA();
+  stopA();
+  assert.equal(a.rows.length, 0, "the draining generation writes no row");
+  b.at("2026-10-01T11:00:30Z");
+  b.rollup.tick();
+  assert.deepEqual(b.rows, [{
+    hour: "2026-10-01T10:00:00.000Z", window_start: "2026-10-01T10:05:00.000Z", window_end: "2026-10-01T11:00:00.000Z", reads: 5,
+    routes: { "/v1/views/now": { console: 1 }, "/v1/status": { console: 3, fleet: 1 } },
+  }], "one row for the hour across the swap with both generations' reads and none of the standby's");
+  const persisted = JSON.parse(readFileSync(join(dir, ROUTE_READS_FILE), "utf8"));
+  assert.deepEqual([persisted.hours, persisted.carry, persisted.lastHour], [1, undefined, "2026-10-01T10:00:00.000Z"]);
+  assert.equal(persisted.routes["/v1/status"].fleet.lastAt, "2026-10-01T10:32:00.000Z", "a carried read keeps its own time");
+
+  const late = harness(dir, "2026-10-01T10:50:00Z");
+  const stopLate = late.rollup.start();
+  late.rollup.count("/v1/recent", "fleet");
+  late.at("2026-10-01T10:59:00Z");
+  stopLate();
+  b.at("2026-10-01T12:00:30Z");
+  b.rollup.tick();
+  assert.deepEqual(b.rows.map((r) => r.hour), ["2026-10-01T10:00:00.000Z", "2026-10-01T11:00:00.000Z"], "a late carry never writes its hour twice");
+  assert.deepEqual(b.rows[1]!.routes, { "/v1/recent": { fleet: 1 } }, "it rides in the next row");
+  assert.equal(b.rows[1]!.window_start, "2026-10-01T11:00:00.000Z");
+  stopB();
+
+  const old = harness(dir, "2026-10-01T15:10:00Z");
+  const stopOld = old.rollup.start();
+  old.rollup.count("/v1/status", "fleet");
+  old.at("2026-10-01T15:20:00Z");
+  stopOld();
+  const reboot = harness(dir, "2026-10-01T18:10:00Z");
+  reboot.rollup.start();
+  reboot.rollup.count("/v1/status", "fleet");
+  reboot.at("2026-10-01T19:00:30Z");
+  reboot.rollup.tick();
+  assert.deepEqual(reboot.rows.map((r) => [r.hour, r.reads, r.partial ?? false]),
+    [["2026-10-01T15:00:00.000Z", 1, true], ["2026-10-01T18:00:00.000Z", 1, false]], "a carry whose hour nobody closed is written once as its own partial row");
+});
+
+test("a standby serve counts and writes nothing until it listens", async (t) => {
+  const root = stateDir(t);
+  mkdirSync(join(root, "plan"), { recursive: true });
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planPath = join(root, "plan", "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  const github: GitHub = { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
+  const rows: Array<{ step: string } & Record<string, unknown>> = [];
+  const deps: ServeDeps = {
+    board: { plan: { tasks: [], byId: new Map() } as Plan, ledgerPath, github },
+    panelGraph: { root, planPath, ledgerPath, github: { prView: () => null } as TraceGithub, statusGithub: github, ratify: { approve: () => {}, reframe: () => {} } as RatifyCliGateway },
+    ledgerPath,
+    issues: { close: () => {} } as IssueCloser,
+    fleetControlRoot: root,
+    questionsRoot: root,
+    tokens: { read: "standby-read", write: "standby-write" },
+    pollMs: 50,
+    log: (step, extra) => void rows.push({ step, ...extra }),
+  };
+  const server = buildServeServer(deps);
+  const smoke = createServer((req, res) => void server.emit("request", req, res));
+  await new Promise<void>((resolve) => smoke.listen(0, "127.0.0.1", resolve));
+  const headers = { authorization: "Bearer standby-read" };
+  assert.equal((await fetch(`http://127.0.0.1:${(smoke.address() as AddressInfo).port}/v1/version`, { headers })).status, 200, "the standby answers a smoke read");
+  await new Promise<void>((resolve) => smoke.close(() => resolve()));
+  const file = join(root, "state", ROUTE_READS_FILE);
+  assert.equal(existsSync(file), false, "a standby writes no rollup state");
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    assert.equal((await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/version`, { headers })).status, 200);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+  assert.equal(rows.filter((r) => r.step === "serve.route_reads").length, 0);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).carry.row.routes, { "/v1/version": { fleet: 1 } }, "only the promoted generation's read is counted");
+});
+
+test("two drains in one hour leave one carry and a rollup with no state file writes its partial row", (t) => {
+  const dir = stateDir(t);
+  const first = harness(dir, "2026-10-01T10:05:00Z");
+  const stopFirst = first.rollup.start();
+  first.rollup.count("/v1/status", "fleet");
+  first.at("2026-10-01T10:10:00Z");
+  stopFirst();
+  const second = harness(dir, "2026-10-01T10:20:00Z");
+  const stopSecond = second.rollup.start();
+  second.rollup.count("/v1/status", "console");
+  second.at("2026-10-01T10:25:00Z");
+  stopSecond();
+  const carry = JSON.parse(readFileSync(join(dir, ROUTE_READS_FILE), "utf8")).carry;
+  assert.deepEqual([carry.row.reads, carry.row.window_start, carry.row.routes], [2, "2026-10-01T10:05:00.000Z", { "/v1/status": { console: 1, fleet: 1 } }]);
+  assert.deepEqual(carry.last["/v1/status"], { fleet: "2026-10-01T10:05:00.000Z", console: "2026-10-01T10:20:00.000Z" });
+
+  const blind = harness(undefined, "2026-10-01T10:00:00Z");
+  const stopBlind = blind.rollup.start();
+  blind.rollup.count("/v1/status", "fleet");
+  stopBlind();
+  assert.deepEqual(blind.rows.map((r) => [r.reads, r.partial]), [[1, true]], "with nowhere to hand it, the partial hour is written once");
+  assert.equal(blind.rollup.summary().routes[0]!.fleet!.reads, 1);
 });
 
 function timedHarness(startIso: string) {
@@ -227,6 +350,7 @@ function timedHarness(startIso: string) {
   let monotonic = 0;
   const rows: RouteReadsRow[] = [];
   const rollup = createRouteReadRollup({ clock: clockFromMillisFn(() => now), write: (row) => rows.push(row), elapsed: () => monotonic });
+  rollup.start();
   const timed = (path: string, ms: number, contentType = "application/json; charset=utf-8"): void => {
     const res = Object.assign(new EventEmitter(), { getHeader: (name: string) => (name === "content-type" ? contentType : undefined) });
     void rollup.wrap({ method: "GET", path, scope: "read", handler: () => { monotonic += ms; } }).handler(req(), res as unknown as ServerResponse, {} as never);
@@ -359,4 +483,42 @@ test("the served gateway times view reads and counts its status stream subscribe
   assert.equal(summary.viewLatency.n, 1);
   assert.equal(summary.staleness.byView["nav-badge"]?.served, 1, "the view route told the rollup what it served");
   assert.deepEqual([summary.streams.status.opened, summary.streams.status.subscribers], [1, 1]);
+});
+
+test("a carried hour keeps its latency stale counts and stream counts in the one row and a standby adds none", (t) => {
+  const dir = stateDir(t);
+  let now = Date.parse("2026-10-01T10:05:00Z");
+  let monotonic = 0;
+  const rows: RouteReadsRow[] = [];
+  const make = () => createRouteReadRollup({ stateDir: dir, clock: clockFromMillisFn(() => now), write: (row) => rows.push(row), elapsed: () => monotonic });
+  const timed = (rollup: ReturnType<typeof make>, ms: number): void => {
+    const res = Object.assign(new EventEmitter(), { getHeader: () => "application/json" });
+    void rollup.wrap({ method: "GET", path: "/v1/views/now", scope: "read", handler: () => { monotonic += ms; } }).handler(req(), res as unknown as ServerResponse, {} as never);
+    res.emit("finish");
+  };
+  const stale = { stale: true, sources: [{ name: "ledger:core", asOf: null, state: "stale" as const, phase: "behind" as const }] };
+  const a = make();
+  const stopA = a.start();
+  timed(a, 0.8);
+  a.served("now", stale);
+  a.stream("views", "open", 1);
+  const b = make();
+  timed(b, 400);
+  b.served("now", stale);
+  b.stream("views", "open", 7);
+  now = Date.parse("2026-10-01T10:30:00Z");
+  const stopB = b.start();
+  b.stream("views", "open", 1);
+  timed(b, 2.5);
+  now = Date.parse("2026-10-01T10:31:00Z");
+  a.stream("views", "handover", 0, "recycle");
+  stopA();
+  now = Date.parse("2026-10-01T11:00:30Z");
+  b.tick();
+  assert.equal(rows.length, 1, "one row for the hour across the swap");
+  const row = rows[0]!;
+  assert.deepEqual(row.latency!["/v1/views/now"], { n: 2, maxMs: 2.5, buckets: { "1": 1, "3": 1 }, p50Ms: 1, p99Ms: 2.5 }, "the standby's 400 ms smoke read is not timed");
+  assert.deepEqual([row.staleness!.served, row.staleness!.stale], [1, 1], "the standby's served view is not counted");
+  assert.deepEqual(row.streams!.views, { opened: 2, closed: 0, peak: 1, handovers: { recycle: 1 }, subscribers: 1 }, "the live gauge is the promoted generation's");
+  stopB();
 });

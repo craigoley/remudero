@@ -400,6 +400,7 @@ test("the push stream tells the rollup each open close and handover with the sub
   const steppedClock: Clock = { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() };
   const clockTimers = timers();
   const rollup = createRouteReadRollup({ clock: steppedClock });
+  rollup.start();
   const events = createViewEvents({ names: ["now"], readModel: rm, clock: steppedClock, every: clockTimers.every, highWaterBytes: 1_000, stallMs: 60_000,
     onSubscribers: (change, n, reason) => rollup.stream("views", change, n, reason) });
   const [a, b, c] = [fakeSocket(), fakeSocket(), fakeSocket()];
