@@ -1,0 +1,19 @@
+- id: W1-T5135
+  title: "HOST azure: transcripts keeps growing (+10 MB/h, 168% of the root fall) across 17 janitor passes and no janitor rule reaps it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: high
+  band_meaning: blast-radius
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "host-resource:azure:transcripts"
+  files:
+    - deploy/rmd-host-cleanup.sh
+  acceptance:
+    - claim: "the janitor reaps transcripts on azure, so its growth rate stops being positive"
+      proof: "grep: transcripts in deploy/rmd-host-cleanup.sh"
+  note: "Filed by the host-resource gardener (W1-T4804). BEFORE: transcripts grew 10 MB/h over 24.8 h (33 samples) while the janitor ran 17 times. The gardener measures this consumer's growth rate again a week after filing and credits or debits the remedy by whether it stopped growing. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
