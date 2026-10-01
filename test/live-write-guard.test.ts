@@ -5,7 +5,7 @@
 // with auto-merge ARMED, at real model spend. These tests lock the four outward boundaries
 // shut under the test runner, and lock them OPEN everywhere else so the daemon is unaffected.
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -63,6 +63,25 @@ test("the cli test harness never resolves the live ledger path", async (t) => {
     if (originalDenyRoot === undefined) delete process.env[LIVE_LEDGER_DENY_ROOT_ENV];
     else process.env[LIVE_LEDGER_DENY_ROOT_ENV] = originalDenyRoot;
   }
+});
+
+test("the live-write guard waits for an in-progress config claim to publish its root", async () => {
+  const home = mkdtempSync(join(tmpdir(), "rmd-ledger-publish-home-"));
+  const root = join(home, "published-root");
+  const configDir = join(home, ".config", "remudero");
+  const config = join(configDir, "config.json");
+  mkdirSync(configDir, { recursive: true });
+  await writeFile(config, "");
+  const publisher = spawn(process.execPath, ["-e", `
+    const fs = require("node:fs");
+    setTimeout(async () => {
+      await fs.promises.writeFile(process.argv[2], JSON.stringify({ root: process.argv[3] }));
+      fs.renameSync(process.argv[2], process.argv[1]);
+    }, 50);
+  `, config, `${config}.publish`, root], { stdio: "ignore" });
+  const published = new Promise<void>((resolve, reject) => publisher.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`publisher exited ${code}`))));
+  assert.equal(discoverLiveLedgerRoot({ HOME: home }), root);
+  await published;
 });
 
 test("an append under the live state root from the suite is refused before writing", () => {

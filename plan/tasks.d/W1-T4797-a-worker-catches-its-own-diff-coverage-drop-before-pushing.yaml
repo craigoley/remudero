@@ -6,7 +6,9 @@
   verify: auto
   priority: 1
   risk: medium
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T4797 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   origin: "oper#diff-coverage-self-catch-2026-09-29"
   plan_refs: ["W1-T1074", "W1-T3225", "W1-T4084", "W1-T4656"]

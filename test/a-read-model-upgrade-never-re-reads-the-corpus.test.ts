@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { setTimeout as sleep } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import type { Clock } from "../src/lib/clock.js";
 import { MIN_TRANSACTION_LINES, createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
@@ -38,6 +37,26 @@ function rows(n: number, startMs: number, tag: string): string {
 function archiveName(ms: number, gz: boolean): string {
   return `ledger.${new Date(ms).toISOString().replace(/[:.]/g, "-")}.ndjson${gz ? ".gz" : ""}`;
 }
+
+/**
+ * Each message the handle has applied, so a test waits on the message itself instead of racing a
+ * sleep against the worker thread's start (a `sleep(100)` lost that race under a loaded runner).
+ */
+function heard(): { observe: (msg: ReadModelWorkerMessage) => void; next: (match: (msg: ReadModelWorkerMessage) => boolean) => Promise<ReadModelWorkerMessage> } {
+  const waiting: Array<{ match: (msg: ReadModelWorkerMessage) => boolean; resolve: (msg: ReadModelWorkerMessage) => void }> = [];
+  return {
+    observe: (msg) => {
+      const at = waiting.findIndex((w) => w.match(msg));
+      if (at >= 0) waiting.splice(at, 1)[0]?.resolve(msg);
+    },
+    next: (match) => new Promise((resolve) => void waiting.push({ match, resolve })),
+  };
+}
+
+/** A message the handle never applies fails the test here rather than hanging the run. */
+const HEARD_WITHIN_MS = 30_000;
+
+const isProgress = (phase: string) => (msg: ReadModelWorkerMessage): boolean => msg.type === "progress" && msg.phase === phase;
 
 /** A worker that only posts what `body` makes it post: the serve watchdog's view of a real one. */
 function scriptedWorker(body: string): URL {
@@ -110,45 +129,43 @@ test("the read-model ticker heartbeats around a store open and on every commit",
   assert.deepEqual(progress, ["core:open", "core:opened", "core:commit"]);
 });
 
-test("a long catch-up with progress is never recycled by the silent-worker watchdog", async (t) => {
+test("a long catch-up with progress is never recycled by the silent-worker watchdog", { timeout: HEARD_WITHIN_MS }, async (t) => {
   const stateDir = scratch(t, "reingest-busy");
   const hand = handClock(T0);
   const logged: string[] = [];
   let watch: (() => void) | undefined;
+  const messages = heard();
   const handle = createReadModelWorker({
-    stateDir, instances: [{ name: "core", ledgerDir: stateDir }], stopWaitMs: 20, clock: hand.clock,
+    stateDir, instances: [{ name: "core", ledgerDir: stateDir }], stopWaitMs: 20, clock: hand.clock, observe: messages.observe,
     workerUrl: scriptedWorker(`setInterval(() => parentPort.postMessage({ type: "progress", instance: "core", phase: "commit", rows: 64 }), 2);`),
     log: (step) => void logged.push(step), every: (run) => ((watch = run), () => undefined),
   });
   t.after(() => handle.stop());
   handle.start();
-  await sleep(300); // the worker boots
   // Twenty minutes of catch-up, each minute carrying commits: no bound is ever reached.
   for (let minute = 0; minute < 20; minute++) {
     hand.advance(READ_MODEL_STALL_MS * 1.5);
-    await sleep(30); // the worker's commits arrive at the advanced clock
+    await messages.next(isProgress("commit")); // a commit arrives at the advanced clock
     watch?.();
   }
   assert.deepEqual(logged.filter((s) => /worker_(silent|recycled|exited)/.test(s)), [], "a worker posting commits is never silent and never recycled");
 });
 
-test("a truly stuck worker is recycled and the row names the phase it went silent in", async (t) => {
+test("a truly stuck worker is recycled and the row names the phase it went silent in", { timeout: HEARD_WITHIN_MS }, async (t) => {
   const stateDir = scratch(t, "reingest-stuck");
   const hand = handClock(T0);
   const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
-  let markReady!: () => void;
-  const ready = new Promise<void>((resolve) => { markReady = resolve; });
   let watch: (() => void) | undefined;
+  const messages = heard();
   const handle = createReadModelWorker({
-    stateDir, instances: [{ name: "core", ledgerDir: stateDir }], stopWaitMs: 20, clock: hand.clock,
-    workerUrl: scriptedWorker(`parentPort.postMessage({ type: "progress", instance: "core", phase: "commit", rows: 64 });
-      parentPort.postMessage({ type: "log", step: "test.worker_ready", extra: {} }); setInterval(() => {}, 1000);`),
-    log: (step, extra) => { if (step === "test.worker_ready") markReady(); else logged.push({ step, ...(extra ? { extra } : {}) }); },
-    every: (run) => ((watch = run), () => undefined),
+    stateDir, instances: [{ name: "core", ledgerDir: stateDir }], stopWaitMs: 20, clock: hand.clock, observe: messages.observe,
+    workerUrl: scriptedWorker(`parentPort.postMessage({ type: "progress", instance: "core", phase: "commit", rows: 64 }); setInterval(() => {}, 1000);`),
+    log: (step, extra) => void logged.push({ step, ...(extra ? { extra } : {}) }), every: (run) => ((watch = run), () => undefined),
   });
   t.after(() => handle.stop());
+  const committed = messages.next(isProgress("commit"));
   handle.start();
-  await ready;
+  await committed;
   hand.advance(2 * READ_MODEL_STALL_MS);
   watch?.();
   const recycled = logged.find((l) => l.step === "read_model.worker_recycled");
@@ -156,25 +173,24 @@ test("a truly stuck worker is recycled and the row names the phase it went silen
   assert.deepEqual([recycled.extra?.phase, recycled.extra?.instance], ["commit", "core"]);
 });
 
-test("a store open is given twice the slowest open the worker reported before it is recycled", async (t) => {
+test("a store open is given twice the slowest open the worker reported before it is recycled", { timeout: HEARD_WITHIN_MS }, async (t) => {
   const stateDir = scratch(t, "reingest-open");
   const hand = handClock(T0);
   const logged: string[] = [];
-  let markReady!: () => void;
-  const ready = new Promise<void>((resolve) => { markReady = resolve; });
   let watch: (() => void) | undefined;
   const slowOpenMs = 5 * READ_MODEL_STALL_MS;
+  const messages = heard();
   const handle = createReadModelWorker({
-    stateDir, instances: [{ name: "core", ledgerDir: stateDir }], stopWaitMs: 20, clock: hand.clock,
+    stateDir, instances: [{ name: "core", ledgerDir: stateDir }], stopWaitMs: 20, clock: hand.clock, observe: messages.observe,
     workerUrl: scriptedWorker(`parentPort.postMessage({ type: "progress", instance: "core", phase: "opened", ms: ${slowOpenMs} });
-      parentPort.postMessage({ type: "progress", instance: "core", phase: "open" });
-      parentPort.postMessage({ type: "log", step: "test.worker_ready", extra: {} }); setInterval(() => {}, 1000);`),
-    log: (step) => { if (step === "test.worker_ready") markReady(); else logged.push(step); },
+      parentPort.postMessage({ type: "progress", instance: "core", phase: "open" }); setInterval(() => {}, 1000);`),
+    log: (step) => void logged.push(step),
     every: (run) => ((watch = run), () => undefined),
   });
   t.after(() => handle.stop());
+  const opening = messages.next(isProgress("open"));
   handle.start();
-  await ready;
+  await opening;
   hand.advance(2 * READ_MODEL_STALL_MS);
   watch?.();
   assert.ok(!logged.includes("read_model.worker_recycled"), "an open slower than the base bound is not killed: a respawn repeats it");

@@ -1005,6 +1005,8 @@ export interface ReadModelWorkerOptions {
   every?: (run: () => void, ms: number) => () => void;
   /** What the silent-worker watchdog measures against. */
   clock?: Clock;
+  /** Sees each worker message after the handle has applied it. */
+  observe?: (msg: ReadModelWorkerMessage) => void;
 }
 
 function everyUnref(run: () => void, ms: number): () => void {
@@ -1097,6 +1099,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       deaths = 0;
       for (const state of msg.instances) instances.set(state.instance, state);
     }
+    opts.observe?.(msg);
   };
 
   const spawn = (): void => {
