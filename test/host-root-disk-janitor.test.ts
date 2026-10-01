@@ -402,3 +402,16 @@ test("the hourly temp sweep wrapper runs the janitor in temp-only mode and refus
   assert.equal(missing.status, 2);
   assert.match(missing.stderr, /host janitor is missing or not executable/);
 });
+
+test("a clean idle checkout directly under the home is never swept by default", () => {
+  const fx = fixture();
+  repos(fx);
+  const live = ownGitDirCopy(fx, fx.home, "rmd-mint");
+  age(live);
+  const env: Record<string, string> = { ...fx.env };
+  delete env.RMD_CLEANUP_WORKTREE_ROOTS;
+  const r = spawnSync("bash", [SCRIPT], { encoding: "utf8", env: { ...process.env, RMD_CLEANUP_WORKTREE_ROOTS: undefined, ...env } as NodeJS.ProcessEnv });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(existsSync(live), true, "a home checkout is a live tree, not scratch");
+  assert.doesNotMatch(r.stdout, new RegExp(`REMOVE ${live}`));
+});
