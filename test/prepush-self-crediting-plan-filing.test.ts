@@ -6,6 +6,10 @@ import { test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { gitRepo } from "./helpers/git-repo.js";
+// @ts-expect-error -- executable .mjs script has no declaration file.
+import { gitOrThrow } from "../scripts/lib/git.mjs";
+// @ts-expect-error -- executable .mjs script has no declaration file.
+import { main as checkBranchShape } from "../scripts/worker-branch-shape.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 let sequence = 0;
@@ -40,6 +44,54 @@ function fixture(t: TestContext) {
   });
   return { work, shard, commit, push };
 }
+
+/** Exercise the decision in this test process so source coverage includes the push guard. */
+function selfCreditResult(worktreePath: string, headRef: string, runGit = gitOrThrow, headSha = "HEAD"): string | number | null | undefined {
+  const oldExitCode = process.exitCode;
+  try {
+    checkBranchShape(["--self-credit-only", "--base", "origin/main", "--head-ref", headRef,
+      "--head-sha", headSha, "--worktree-path", worktreePath], runGit);
+    return process.exitCode;
+  } finally {
+    process.exitCode = oldExitCode;
+  }
+}
+
+test("the pre-push self-credit decision covers readable and unreadable branch evidence in-process", (t) => {
+  const f = fixture(t);
+  f.shard();
+  f.commit();
+  assert.equal(selfCreditResult(f.work.dir, "run-W9-T1-1790820133000"), 1);
+  assert.equal(selfCreditResult(f.work.dir, "codex/file-W9-T1"), 0);
+  assert.equal(selfCreditResult(f.work.dir, "run-W9-T1-not-an-epoch"), 2);
+  assert.equal(selfCreditResult(f.work.dir, "run-W9-T1-1790820133000", (args: string[], options: { cwd: string }) => {
+    if (args[0] === "diff") throw new Error("diff unreadable");
+    return gitOrThrow(args, options);
+  }), 2);
+  assert.equal(selfCreditResult(f.work.dir, "run-W9-T1-1790820133000", (args: string[], options: { cwd: string }) => {
+    if (args[0] === "show") throw new Error("shard unreadable");
+    return gitOrThrow(args, options);
+  }), 2);
+
+  f.work.git("branch", "filed-shard");
+  f.work.git("switch", "--quiet", "-c", "other", "origin/main");
+  assert.equal(selfCreditResult(f.work.dir, "run-W9-T1-1790820133000", gitOrThrow, "filed-shard"), 1);
+
+  const missingId = fixture(t);
+  writeFileSync(join(missingId.work.dir, "plan", "tasks.d", "W9-T2-shard.yaml"), "- title: no id\n");
+  missingId.work.git("add", "plan/tasks.d/W9-T2-shard.yaml");
+  missingId.commit();
+  assert.equal(selfCreditResult(missingId.work.dir, "run-W9-T2-1790820133000"), 2);
+
+  const implementation = fixture(t);
+  implementation.shard();
+  writeFileSync(join(implementation.work.dir, "src", "example.ts"), "export const example = true;\n");
+  implementation.work.git("add", "src/example.ts");
+  implementation.commit();
+  assert.equal(selfCreditResult(implementation.work.dir, "run-W9-T1-1790820133000"), 0);
+  implementation.work.git("update-ref", "-d", "refs/remotes/origin/main");
+  assert.equal(selfCreditResult(implementation.work.dir, "run-W9-T1-1790820133000"), 2);
+});
 
 test("self-crediting plan filing is stopped before its first push", (t) => {
   const f = fixture(t);

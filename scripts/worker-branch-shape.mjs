@@ -312,7 +312,7 @@ export function changedFilesSinceBase(worktreePath, mergeBase) {
   }
 }
 
-export function main(argv) {
+export function main(argv, runGit = gitOrThrow) {
   const { values } = parseArgs({
     args: argv,
     options: {
@@ -339,8 +339,8 @@ export function main(argv) {
     let addedFiles;
     let changedFiles;
     try {
-      addedFiles = gitOrThrow(["diff", "--name-only", "--diff-filter=A", "-z", mergeBase, pushedHead], { cwd: worktreePath }).split("\0").filter(Boolean);
-      changedFiles = gitOrThrow(["diff", "--name-only", "-z", mergeBase, pushedHead], { cwd: worktreePath }).split("\0").filter(Boolean);
+      addedFiles = runGit(["diff", "--name-only", "--diff-filter=A", "-z", mergeBase, pushedHead], { cwd: worktreePath }).split("\0").filter(Boolean);
+      changedFiles = runGit(["diff", "--name-only", "-z", mergeBase, pushedHead], { cwd: worktreePath }).split("\0").filter(Boolean);
     } catch {
       console.error("worker-branch-shape: UNKNOWN — branch diff could not be read");
       process.exitCode = 2;
@@ -350,7 +350,7 @@ export function main(argv) {
     const shardContents = new Map();
     try {
       for (const path of shardFiles) {
-        shardContents.set(path, gitOrThrow(["show", `${pushedHead}:${path}`], { cwd: worktreePath }));
+        shardContents.set(path, runGit(["show", `${pushedHead}:${path}`], { cwd: worktreePath }));
       }
     } catch {
       console.error("worker-branch-shape: UNKNOWN — added plan shard in pushed commit could not be read");
