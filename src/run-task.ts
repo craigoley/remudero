@@ -32012,7 +32012,7 @@ export function logDiskReclaimRung(
   let workerHomesRemoved = 0;
   try {
     const root = (deps.workerHomeRoot ?? (() => workerHomeDir(config)))();
-    workerHomesRemoved = sweepWorkerHomes(root).removed.length;
+    workerHomesRemoved = sweepWorkerHomes(root, { stateRoot: config.root }).removed.length;
   } catch {
     // best-effort — a throw here must never block the dispatch or the other two sweeps
   }
@@ -33481,7 +33481,7 @@ export async function daemonCommand(
       // call (a kill -9, a crashed daemon). Same 24h age ceiling as the scratch/tmp
       // sweeps above — a still-running spawn's home is always recent (materialize
       // touches it on every use) and never collateral.
-      const homes = sweepStaleWorkerHomes(workerHomeDir(config));
+      const homes = sweepStaleWorkerHomes(workerHomeDir(config), { stateRoot: config.root });
       if (homes.removed.length) {
         log("daemon.worker_home_sweep", { removed: homes.removed.length, sample: homes.removed.slice(0, 5) });
       }
