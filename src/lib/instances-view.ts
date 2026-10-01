@@ -18,7 +18,7 @@
  * view serves. Until then it keeps its own computation, {@link legacyRegistryBody}, which is also this
  * view's shadow side. `data` carries no clock: `liveness.since` is a row's own time, stable while down.
  */
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { fixedClock } from "./clock.js";
 import { QUIET_PULSE_BOUND_MS, STALE_HEARTBEAT_POLL_MULTIPLE } from "./fleet-liveness.js";
 import {
@@ -124,12 +124,16 @@ export function registryFromInstances(data: InstancesData): RegistryRouteAnswer 
 
 function readFile(path: string | undefined): RegistryRead & { mtimeMs?: number } {
   if (path === undefined) return { ok: false, code: "unreadable" };
+  let fd: number | undefined;
   try {
-    const mtimeMs = statSync(path).mtimeMs;
-    return { ok: true, text: readFileSync(path, "utf8"), mtimeMs };
+    fd = openSync(path, "r");
+    const mtimeMs = fstatSync(fd).mtimeMs;
+    return { ok: true, text: readFileSync(fd, "utf8"), mtimeMs };
   } catch {
     // deliberate: an absent registry is a single-instance install; the code says so without the path.
     return { ok: false, code: "unreadable" };
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 
