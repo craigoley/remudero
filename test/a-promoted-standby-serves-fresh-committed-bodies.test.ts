@@ -32,7 +32,7 @@ function steppedClock(): { clock: Clock; advance: (ms: number) => void } {
   return { clock: { now: () => ms, date: () => new Date(ms), iso: () => new Date(ms).toISOString() }, advance: (by) => void (ms += by) };
 }
 
-function ledgerRows(n: number, startMs: number, tag: string): string {
+function rowLines(n: number, startMs: number, tag: string): string {
   let out = "";
   for (let i = 0; i < n; i++) out += `${JSON.stringify({ ts: new Date(startMs + i).toISOString(), step: "run.start", task_id: `T${i}`, run_id: `${tag}-${i}` })}\n`;
   return out;
@@ -46,7 +46,7 @@ function activeGeneration(t: { after: (fn: () => void) => void }) {
   const ledgerDir = scratch(t, "promote-ledger");
   const stateDir = scratch(t, "promote-state");
   mkdirSync(ledgerDir, { recursive: true });
-  writeFileSync(join(ledgerDir, "ledger.ndjson"), ledgerRows(4, T0 - 60_000, "boot"));
+  writeFileSync(join(ledgerDir, "ledger.ndjson"), rowLines(4, T0 - 60_000, "boot"));
   const { clock, advance } = steppedClock();
   const messages: ReadModelWorkerMessage[] = [];
   const instances = [{ name: "core", ledgerDir }];
@@ -74,7 +74,7 @@ test("bodies reloaded at promote carry the active generation's last commit", (t)
   const booted = standby.body("read-model");
   assert.ok(booted, "the standby warm-loaded the committed body at boot");
 
-  appendFileSync(join(active.ledgerDir, "ledger.ndjson"), ledgerRows(3, T0, "after-boot"));
+  appendFileSync(join(active.ledgerDir, "ledger.ndjson"), rowLines(3, T0, "after-boot"));
   active.advance(1_000);
   active.tickUntilNewBody();
   const latest = statusBodies(active.messages).pop()!;
