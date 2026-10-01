@@ -1,0 +1,48 @@
+- id: W1-T5041
+  title: "A STALE CHECKOUT ROTATES THE SHARED LEDGER WITH ITS OWN RETENTION SET — any rmd process appending past the ceiling rotates the core ledger, and one built before a step joined DECISION_RELEVANT_LEDGER_STEPS archives that step's rows: four tasks released 2026-09-29 sat 'indeterminate' for two days because their dispatch.breaker_released rows were archived while their dispatch.circuit_broken rows stayed live"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 15.00
+  risk: high
+  origin: "operator ask 2026-10-01: anything else to follow up on, file or build (released-task check found the four still held)"
+  note: "reservation hand-off: plan-stale-rotator-1790818003000 -> plan-stale-rotator-1790818003000"
+  plan_refs: [W1-T4691, W1-T2425, W1-T4393]
+  files: [src/lib/ledger.ts, test/a-stale-rotator-never-forgets-what-newer-code-retains.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-01 (core ledger, live + rotations): W1-T4691 (#7827, merged 2026-09-29 14:33Z) added
+    dispatch.breaker_released to DECISION_RELEVANT_LEDGER_STEPS. Yet every release row written 09-29/30 is in an
+    archive (18:49, 19:37 and 20:23 on 09-29, and 10 rows at 09-30 11:06) and none were live, while the 09-28
+    dispatch.circuit_broken rows they cancel stayed live. seedCountFromCircuitBreak therefore re-seeded priorCount
+    5-7 against a live fresh count of 0, and evaluateDispatchBreakerDetailed held W1-T4480, W1-T3116, W1-T4407 and
+    W1-T3676 'indeterminate' (dispatch.indeterminate every tick) from the release until a re-release on 10-01.
+    The 09-30 11:06 rotation was triggered by an operator `rmd next-task-id` on the VM itself (host "Remudero").
+    The host holds ~25 checkouts from 09-09..09-28 (rmd-op, rmd-pf, rmd-work/*, rmd-state2/*-work) whose ledger.ts
+    lacks the step. Current main keeps the row (measured: rotateLedger on a fixture retains it). Rotation is done by
+    whichever process crosses the ceiling, so the retention set in force is the OLDEST code that happens to append.
+  design: |
+    Self-healing, no new bound, and an append is never refused.
+    1. Every rotation persists the retention set it used as `<ledger>.retained-steps.json`, merged as a union with
+       the file's existing contents.
+    2. A rotator whose own DECISION_RELEVANT_LEDGER_STEPS lacks any step named in that file skips the rotation and
+       ledgers `ledger.rotation_deferred {missing_steps}`. The ledger grows until a current process rotates; the
+       existing backstop multiplier still bounds it.
+    3. A current rotation re-carries rows whose step is in its set but which a rotation newer than the last
+       current-code rotation archived (read only those archives). It appends them to the retained core in
+       timestamp order and ledgers `ledger.recarried {count, archives}`. This repairs damage done by pre-feature
+       checkouts too.
+  acceptance:
+    - claim: "a rotator missing a step the shared retention file names skips the rotation"
+      proof: 'grep: test("W1-T5041: a rotator missing a retained step skips the rotation" in test/a-stale-rotator-never-forgets-what-newer-code-retains.test.ts'
+    - claim: "a current rotation re-carries a decision row an older rotation archived"
+      proof: 'grep: test("W1-T5041: a current rotation re-carries a decision row an older rotation archived" in test/a-stale-rotator-never-forgets-what-newer-code-retains.test.ts'
+    - claim: "every rotation persists the union of retained steps"
+      proof: 'grep: test("W1-T5041: every rotation persists the union of retained steps" in test/a-stale-rotator-never-forgets-what-newer-code-retains.test.ts'
+  falsifier: |
+    Rotate a fixture with a retention set lacking dispatch.breaker_released after a current rotation has persisted
+    it: without the fix the release row is archived and the live file loses it.

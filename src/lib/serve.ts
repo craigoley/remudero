@@ -199,6 +199,7 @@ import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY } from "./policy.js";
 import { loadConfig, type WorkerProviderId } from "./config.js";
 import type { Config, ModelApproval } from "./config-schema.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import { createServeDrain, exitWithin } from "./serve-drain.js";
 import type { ConsoleProjectionWorker, FeedbackProjectionInput } from "./console-projection-worker.js";
 import { createConsoleSnapshotStore } from "./console-snapshot-store.js";
 import {
@@ -1423,41 +1424,6 @@ export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<
 /** W1-T4229 BACKSTOP: fires only on a connection that never ends by itself (SSE, a hung client). */
 export const SERVE_RESTART_DRAIN_BOUND_MS = 10_000;
 
-export type DrainableServer = Pick<Server, "close" | "closeIdleConnections" | "closeAllConnections">;
-
-/** Node never closes a socket that goes idle AFTER close(); unswept, a restart waited ~4 s. */
-const DRAIN_IDLE_SWEEP_MS = 50;
-
-/** Let in-flight requests finish; resolves at the last close or the bound, and never rejects. */
-export function drainServer(
-  server: DrainableServer,
-  boundMs: number = SERVE_RESTART_DRAIN_BOUND_MS,
-  schedule: (run: () => void, ms: number) => () => void = (run, ms) => {
-    const timer = setTimeout(run, ms);
-    timer.unref?.();
-    return () => clearTimeout(timer);
-  },
-): Promise<void> {
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = (): void => {
-      if (done) return;
-      done = true;
-      cancel();
-      clearInterval(sweep);
-      resolve();
-    };
-    const cancel = schedule(() => {
-      server.closeAllConnections();
-      finish();
-    }, boundMs);
-    const sweep = setInterval(() => server.closeIdleConnections(), DRAIN_IDLE_SWEEP_MS);
-    sweep.unref?.();
-    server.close(() => finish());
-    server.closeIdleConnections();
-  });
-}
-
 /** {@link gateStaleCodeExit}'s constructor deps — every side effect injectable, same discipline
  *  {@link gatePrewarmOnClients} already follows for this module's other refcount gate. */
 export interface StaleCodeExitDeps {
@@ -1490,7 +1456,7 @@ export interface StaleCodeExitDeps {
   beforeExit?: () => void;
   /** W1-T4229: {@link assessGatewayCheckout}, run at each re-check. */
   assessCheckout?: () => Promise<GatewayCheckoutAssessment>;
-  /** W1-T4229: {@link drainServer}; absent, the exit is immediate as before. */
+  /** W1-T4229: {@link createServeDrain}'s drain; absent, the exit is immediate as before. */
   drain?: () => Promise<void>;
   changedPathsSince?: ChangedPathsReader;
   reloadPlan?: (ref: string) => Promise<boolean>;
@@ -1556,7 +1522,7 @@ export function stampReadWith(route: Route, stamp: () => void): Route {
 
 export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   const resolveCurrentSha = deps.resolveCurrentSha ?? resolveConsoleSha;
-  const exit = deps.exit ?? ((code: number) => process.exit(code));
+  const exit = deps.exit ?? ((code: number) => exitWithin(code));
   const log = deps.log ?? (() => {});
   const commitsBehindOf = deps.resolveCommitsBehind ?? resolveCommitsBehind;
   const clock = deps.clock ?? systemClock;
@@ -3042,7 +3008,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   // reported nobody watching and the daemon recycled out from under an operator mid-read. See
   // {@link readAttention}.
   let lastReadAt: number | undefined;
-  let drainTarget: Server | undefined;
+  const serveDrain = createServeDrain({ boundMs: SERVE_RESTART_DRAIN_BOUND_MS, log: deps.log });
   let viewEventsHandover: (reason: string) => void = () => {};
   const wakeCounters = createWakeCounters();
   const stopWakeSummary = startWakeSummaryFlush({
@@ -3064,8 +3030,9 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     lastReadAt: () => lastReadAt,
     assessCheckout: deps.gatewayCheckout ?? (() => assessGatewayCheckout({ repoDir: serveRepoDir() })),
     drain: () => {
+      const drained = serveDrain.drain("recycle");
       viewEventsHandover("recycle");
-      return drainTarget ? drainServer(drainTarget) : Promise.resolve();
+      return drained.then(() => {});
     },
     reloadPlan: (ref) => reloadServePlan(deps.board, serveRepoDir(), ref, { log: deps.log }),
     ...deps.staleExitSeams,
@@ -3102,7 +3069,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     // `/v1/skills/run`) `HIGH_TIER_WRITE_PATHS` names client-side, read here off the route table's
     // own declared `tier` (already asserted complete, above in `buildServeRoutes`) rather than a
     // second hard-coded path list that could drift from it.
-    route.tier === "high" ? staleExit.wrapWrite(route) : stampRead(route),
+    route.tier === "high" ? staleExit.wrapWrite(route) : route.path === VIEW_EVENTS_PATH ? serveDrain.wrapStream(route) : stampRead(route),
   );
   const ingestToken = deps.tokens.ingest ?? process.env[INGEST_TOKEN_ENV] ?? readIngestTokenFile(process.env[INGEST_TOKEN_FILE_ENV], deps.log);
   const server = createService({
@@ -3122,7 +3089,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     // W1-T4244: the signed-in operator, consulted BEFORE the bearer token the console also sends.
     operatorSession: operatorSessionProvider(deps.operatorIdentity ?? operatorIdentityConfig(loadConfig, { log: deps.log }), { ...deps.operatorIdentityIo, log: deps.log }),
     routes,
-    sse: [staleExit.wrapSse(prewarm.route)],
+    sse: [serveDrain.wrapSse(staleExit.wrapSse(prewarm.route))],
     log: deps.log,
     confirmNonces,
     // W1-T404 design (iii), turned on LAST (design iii, this task): a no-op until now for want of
@@ -3136,7 +3103,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     // and HIGH after a recent step-up; the bearer token is still pinned at LOW.
     enforceWriteTiers: true,
   });
-  drainTarget = server;
+  serveDrain.attach(server);
   viewEventsHandover = routeAssembly.viewEvents.handover;
   if (readModel) {
     serveReadModels.set(server, readModel);
