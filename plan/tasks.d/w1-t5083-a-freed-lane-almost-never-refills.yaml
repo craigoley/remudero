@@ -1,0 +1,43 @@
+- id: W1-T5083
+  title: "A FREED LANE ALMOST NEVER REFILLS — W1-T4416's lane pool held 19 of 21 refills 2026-09-30..10-01: 14 because ANY rejected sibling closes refill for the whole pass, 4 because any stale reading holds it (the gate W1-T4945 did not reach); so each batch runs as slow as its slowest build (10-01: W1-T4810 merged 06:24 after 71 min and its lane sat empty behind W1-T4772's 80+ min run, with no tick, no freshness check and no admission)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 15.00
+  risk: high
+  origin: "operator ask 2026-10-01: find what keeps the fleet from building (post-fix measurement 04:47-06:24Z)"
+  note: "reservation hand-off: plan-lane-refill-holds-1790836450000 -> plan-lane-refill-holds-1790836450000"
+  plan_refs: [W1-T4416, W1-T4945, W1-T4662, W1-T4998]
+  files: [src/lib/daemon.ts, test/a-freed-lane-refills-unless-the-daemon-would-restart.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED (core ledger union 2026-09-30..10-01): dispatch.lane_refill_held 19 times against dispatch.lane_refilled
+    twice. The reasons were "a lane rejected" 14, "stale code" 4, and "no disjoint runnable task" 1. In refillLane
+    (src/lib/daemon.ts), `refillClosed` is sticky for the pass once ANY sibling's promise rejects, and most
+    rejections were the transient run errors since fixed (managed-checkout lock #8094, unreadable GitHub read
+    #8187). Separately, the refill gate holds on `deps.checkFreshness?.()?.stale`, so ANY material advance holds the
+    lane, while the top-of-tick exit now asks decideFreshness (W1-T4945) and defers a low-weight advance. Main moves
+    many times an hour, so the daemon is almost always stale. A batch therefore waits for its slowest build, with no
+    tick (none from 05:05 to after 06:24 on 10-01), no freshness check and no admission.
+  design: |
+    No new bound, no new refusal.
+    1. The refill's freshness gate asks the same decideFreshness the top of tick uses (busy is true by
+       construction while a sibling runs). It holds only on "restart". A deferred low-weight advance lets the lane
+       refill, and the restart still happens at the next idle moment or when staleness pressure decides.
+    2. A rejected sibling no longer closes refill for the pass. The rejected lane's own outcome is classified as
+       today. Refill closes only on what the top of tick would also stop for: stop, pause, governor, worker-admission
+       hold, or a repeated blocked_transient (W1-T4662).
+    3. lane_refill_held keeps its reason; add `freshness_action` when the gate consulted it.
+  acceptance:
+    - claim: "a deferred low-weight advance does not hold a freed lane"
+      proof: 'grep: test("W1-T5083: a deferred low-weight advance does not hold a freed lane" in test/a-freed-lane-refills-unless-the-daemon-would-restart.test.ts'
+    - claim: "an advance that would restart the daemon still holds the freed lane"
+      proof: 'grep: test("W1-T5083: an advance that would restart the daemon still holds the freed lane" in test/a-freed-lane-refills-unless-the-daemon-would-restart.test.ts'
+    - claim: "one rejected sibling does not close refill for the rest of the pass"
+      proof: 'grep: test("W1-T5083: one rejected sibling does not close refill for the rest of the pass" in test/a-freed-lane-refills-unless-the-daemon-would-restart.test.ts'
+  falsifier: |
+    Restore the stale-reading gate and the sticky rejection and the first and third tests see lane_refill_held.
