@@ -40,6 +40,7 @@ import {
   buildLedgerIndex,
   projectPlan,
   readLedgerLines,
+  SERVE_KEEPS_CREDITS_IN_MEMORY,
   isDispatchBreakerTripped,
   dispatchesWithoutNewOwnedPr,
   DEFAULT_MAX_TASK_DISPATCHES,
@@ -194,13 +195,28 @@ export type ReconciledFeedbackEntry = FeedbackEntry & {
 
 /**
  * Merging the proposal PR is the decision (W1-T257): a `proposed` entry whose `proposal_pr` has
- * merged reconciles to the terminal status `accepted`, rather than sitting in NEEDS ME forever.
- * Runs on every GET /v1/feedback read, self-healing entries already stuck on disk, through the
- * one batched `statusGithub` gateway GET /v1/drain/preview also uses.
+ * merged reads as the terminal status `accepted`, rather than sitting in NEEDS ME forever, through
+ * the one batched `statusGithub` gateway GET /v1/drain/preview also uses. This writes NOTHING: GET
+ * /v1/feedback and the feedback view serve it, and {@link reconcileFeedbackEntries} persists it.
  *
  * No `proposal_pr`, or one open/closed-unmerged, passes through untouched. A genuinely failed
  * read (`readFailed()`) also leaves `proposed` alone but decorates `unverified: true`.
  * Why: the reconcile-vs-sweep design and the fail-safe direction — docs/forensics/panel-graph.md
+ */
+export function projectReconciledFeedback(entries: readonly FeedbackEntry[], statusGithub: GitHub): ReconciledFeedbackEntry[] {
+  return entries.map((entry): ReconciledFeedbackEntry => {
+    if (entry.status !== "proposed" || !entry.proposal_pr) return entry;
+    const pr = statusGithub.prByRef(entry.proposal_pr);
+    if (pr && pr.state === "MERGED") return { ...entry, status: "accepted", proposal_pr: entry.proposal_pr, summary: entry.summary ?? null, answered_by: entry.answered_by ?? null };
+    if (!pr && statusGithub.readFailed?.()) return { ...entry, unverified: true };
+    return entry;
+  });
+}
+
+/**
+ * {@link projectReconciledFeedback}, persisted: each entry it reads `accepted` is written so. The ONE
+ * writer is serve's slow lane (arch Phase 4 P4-T07, {@link acceptMergedFeedback}), never a GET, so
+ * the flip happens with no reader and concurrent reads never race to land it.
  */
 export function reconcileFeedbackEntries(
   root: string,
@@ -211,13 +227,14 @@ export function reconcileFeedbackEntries(
   // Why: the incident — docs/forensics/panel-graph.md
   land?: LandFeedbackOpts,
 ): ReconciledFeedbackEntry[] {
-  return entries.map((entry) => {
-    if (entry.status !== "proposed" || !entry.proposal_pr) return entry;
-    const pr = statusGithub.prByRef(entry.proposal_pr);
-    if (pr && pr.state === "MERGED") return setFeedbackStatus(root, entry.id, "accepted", land ? { land } : {});
-    if (!pr && statusGithub.readFailed?.()) return { ...entry, unverified: true };
-    return entry;
-  });
+  return projectReconciledFeedback(entries, statusGithub).map((projected, i) =>
+    projected.status === "accepted" && entries[i]?.status === "proposed" ? setFeedbackStatus(root, projected.id, "accepted", land ? { land } : {}) : projected);
+}
+
+/** The slow lane's feedback unit's write: every proposed entry whose proposal PR merged, accepted and landed. Returns their ids. */
+export function acceptMergedFeedback(root: string, statusGithub: GitHub, land: LandFeedbackOpts): string[] {
+  const proposed = listFeedback(root, { status: "proposed" });
+  return reconcileFeedbackEntries(root, proposed, statusGithub, land).filter((entry) => entry.status === "accepted").map((entry) => entry.id);
 }
 
 /**
@@ -280,7 +297,8 @@ export function buildFeedbackInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?:
         projected = computeFeedbackProjectionSync(input);
       }
       const { entries: listed, filedTasks } = projected as Extract<FeedbackProjectionOutcome, { ok: true }>;
-      const reconciled = reconcileFeedbackEntries(deps.root, listed, deps.statusGithub, deps.feedbackLand);
+      // A read writes nothing: the slow lane persists each merged proposal's `accepted` (P4-T07).
+      const reconciled = projectReconciledFeedback(listed, deps.statusGithub);
       const decorated = filedTasks ? decorateFeedbackDischargeByTasks(reconciled, new Map(filedTasks), deps.statusGithub) : reconciled;
       const entries = statusParam ? decorated.filter((e) => e.status === statusParam) : decorated;
       if (!pageRequest) sendJson(res, 200, { entries });
@@ -638,7 +656,7 @@ export function buildDrainPreviewRoute(deps: PanelGraphDeps, readPlanSnapshot?: 
       const opts: DrainOpts = { max: parsedMax.max, until: url.searchParams.get("until") ?? undefined };
 
       const plan = readPanelPlan(deps, readPlanSnapshot);
-      const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
+      const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY });
       const isMerged = (id: string) => projection.get(id)?.merged ?? false;
       const cards = buildDrainPreview(plan, isMerged, opts);
       sendJson(res, 200, { cards });
@@ -1143,6 +1161,7 @@ export function buildOperatorActivityRoute(deps: PanelGraphDeps, readPlanSnapsho
           ledgerPath: deps.ledgerPath,
           github: deps.statusGithub,
           readLedger: () => liveLedger,
+          writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY,
         });
         sendJson(res, 200, buildOperatorActivityProjection({
           plan,
@@ -1335,7 +1354,7 @@ export function buildPlanViewRoute(deps: PanelGraphDeps, readPlanSnapshot?: () =
         return;
       }
       const plan = readPanelPlan(deps, readPlanSnapshot);
-      const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
+      const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY });
       const isMerged: MergedSet = (id) => projection.get(id)?.merged ?? false;
       const progress = computePlanProgress(plan, projection, deps.statusGithub, progressCache);
       const planRefs = planRefsFromSnapshot(plan);
@@ -1597,7 +1616,7 @@ function prepareInboxPass(
  */
 function classifyAllProposals(deps: PanelGraphDeps, loadPlanFn: (planPath: string) => Plan = deps.readPlanSnapshot ?? loadPlan): ClassifiedInbox {
   const plan = loadPlanFn(deps.planPath);
-  const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
+  const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY });
   const ledgerLines = readLedgerLines(deps.ledgerPath);
   const sha = (deps.inboxMainSha ?? readOriginMainSha)(deps.root);
   const pass = prepareInboxPass(deps, plan, projection, ledgerLines, anchorGrepFor(deps, sha));
@@ -1676,7 +1695,7 @@ function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readP
     const last = state.last;
     plan = last?.planKey !== undefined && last.planKey === planKey ? last.plan : loadPlan(deps.planPath);
   }
-  const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub, readLedger: () => ledgerLines });
+  const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub, readLedger: () => ledgerLines, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY });
   const archiveKey = archiveReleases?.size ? [...archiveReleases].sort(([a], [b]) => a.localeCompare(b)) : null;
   const key = JSON.stringify([stamps, sha ?? null, verdictDigest, projectionDigest(projection), archiveKey]);
   return { key, sha, plan, planKey, projection, ledgerLines, archiveReleases };
@@ -1706,6 +1725,11 @@ export function classifyAllProposalsMemo(deps: PanelGraphDeps, readPlanSnapshot?
   const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(pass.classifyOne), ledgerLines: fp.ledgerLines, projection: fp.projection };
   state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result };
   return result;
+}
+
+/** The last classification this deps' memo holds, without computing one: what a cheap synchronous reader may show. */
+export function peekClassifiedInbox(deps: PanelGraphDeps): ClassifiedInbox | undefined {
+  return inboxClassifyStates.get(deps)?.last?.result;
 }
 
 /** PRIMARY CONTROL on how long one inbox recompute holds the event loop: proposals classified between yields. Each can
@@ -1750,6 +1774,74 @@ export async function classifyAllProposalsSliced(
   return promise;
 }
 
+/** GET /v1/inbox's lanes over one classification pass: what the route answers, and what the inbox view pages (inbox-view.ts). */
+export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "classifications" | "ledgerLines">, inboxRoot: string) {
+  const { proposals, classifications, ledgerLines } = classified;
+  // W1-T4087: every item carries its plain message — the stored one, or its kind's template.
+  const plainStore = readPlainStore(plainStorePath(join(inboxRoot, "state")));
+
+  const ready: InboxReadyItem[] = [];
+  const drafting: InboxDraftingItem[] = [];
+  const notReady: InboxNotReadyItem[] = [];
+  const declined: InboxDeclinedItem[] = [];
+  const byId = new Map(proposals.map((p) => [p.id, p]));
+  for (const classification of classifications) {
+    const proposal = byId.get(classification.proposalId);
+    if (!proposal) continue; // unreachable — classifications are 1:1 with proposals
+    if (classification.state === "ready") {
+      ready.push({
+        proposalId: proposal.id,
+        summary: proposal.summary,
+        plain: plainInboxMessage(proposal, plainStore),
+        stampLine: classification.draft?.stampLine,
+        draftedTasks: classification.draft ? draftedTaskSummaries(classification.draft.fragmentYaml, proposal.id) : [],
+      });
+    } else if (classification.state === "drafting") {
+      drafting.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), spawnedAt: classification.draftSpawnedAt ?? "" });
+    } else if (classification.state === "declined") {
+      declined.push({
+        proposalId: proposal.id,
+        summary: proposal.summary,
+        plain: plainInboxMessage(proposal, plainStore),
+        reason: classification.declinedReason ?? "declined by an operator",
+      });
+    } else if (classification.state === "not_ready") {
+      // W1-T2604 (finding (i)): the failing predicate(s) classifyProposal already named,
+      // never a bare "not_ready" — see InboxNotReadyItem's own doc.
+      notReady.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), reasons: classification.reasons });
+    }
+  }
+  // W1-T4086: split every lane by who must act. `needsYou` holds only the operator's items;
+  // `fleet` holds the fleet's own findings with the lane each sits in. The four top-level
+  // lanes stay unchanged for one release so the console can move over without a break.
+  const isOperator = (item: { proposalId: string }) => inboxOwner({ id: item.proposalId }) === "operator";
+  const fleetDecisions = fleetLaneDecisions(ledgerLines as never, fleetLaneStoreForDisplay(join(inboxRoot, "state")));
+  const needsYou = {
+    ready: ready.filter(isOperator),
+    drafting: drafting.filter(isOperator),
+    notReady: notReady.filter(isOperator),
+    declined: declined.filter(isOperator),
+  };
+  const fleet: InboxFleetItem[] = [
+    ...ready.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "ready" as const })),
+    ...drafting.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "drafting" as const })),
+    ...notReady.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "notReady" as const })),
+    ...declined.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "declined" as const })),
+  ]
+    .filter((i) => !isOperator(i))
+    // W1-T4089: each fleet finding's latest fleet-lane decision and its plain reason.
+    .map((i) => ({ ...i, ...fleetDecisions.get(i.proposalId) }));
+  const counts = {
+    ready: ready.length,
+    drafting: drafting.length,
+    notReady: notReady.length,
+    declined: declined.length,
+    fleet: fleet.length,
+    needsYou: { ready: needsYou.ready.length, drafting: needsYou.drafting.length, notReady: needsYou.notReady.length, declined: needsYou.declined.length },
+  };
+  return { ready, drafting, notReady, declined, needsYou, fleet, counts };
+}
+
 /**
  * GET /v1/inbox — read-scoped. The ratification inbox's (W1-T110) ready and drafting tiers,
  * computed the way `rmd inbox` prints them, for the shell's NEEDS ME section. Deferred-with-
@@ -1774,71 +1866,10 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
         sendJson(res, 400, { error: "invalid_request", detail: shape.error });
         return;
       }
-      const { proposals, classifications, ledgerLines } = await classifyAllProposalsSliced(deps, readPlanSnapshot);
-      // W1-T4087: every item carries its plain message — the stored one, or its kind's template.
-      const plainStore = readPlainStore(plainStorePath(join(deps.inboxRoot, "state")));
-
-      const ready: InboxReadyItem[] = [];
-      const drafting: InboxDraftingItem[] = [];
-      const notReady: InboxNotReadyItem[] = [];
-      const declined: InboxDeclinedItem[] = [];
-      for (const classification of classifications) {
-        const proposal = proposals.find((p) => p.id === classification.proposalId);
-        if (!proposal) continue; // unreachable — classifications are 1:1 with proposals
-        if (classification.state === "ready") {
-          ready.push({
-            proposalId: proposal.id,
-            summary: proposal.summary,
-            plain: plainInboxMessage(proposal, plainStore),
-            stampLine: classification.draft?.stampLine,
-            draftedTasks: classification.draft ? draftedTaskSummaries(classification.draft.fragmentYaml, proposal.id) : [],
-          });
-        } else if (classification.state === "drafting") {
-          drafting.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), spawnedAt: classification.draftSpawnedAt ?? "" });
-        } else if (classification.state === "declined") {
-          declined.push({
-            proposalId: proposal.id,
-            summary: proposal.summary,
-            plain: plainInboxMessage(proposal, plainStore),
-            reason: classification.declinedReason ?? "declined by an operator",
-          });
-        } else if (classification.state === "not_ready") {
-          // W1-T2604 (finding (i)): the failing predicate(s) classifyProposal already named,
-          // never a bare "not_ready" — see InboxNotReadyItem's own doc.
-          notReady.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), reasons: classification.reasons });
-        }
-      }
+      const { ready, drafting, notReady, declined, needsYou, fleet, counts } = inboxLanes(await classifyAllProposalsSliced(deps, readPlanSnapshot), deps.inboxRoot);
       // A read writes nothing: the ratified-row prune and the snapshot the daemon's fleet lane acts
       // on (W1-T4089) are written by serve's slow lane on a cadence (inbox-view.ts).
-      // W1-T4086: split every lane by who must act. `needsYou` holds only the operator's items;
-      // `fleet` holds the fleet's own findings with the lane each sits in. The four top-level
-      // lanes stay unchanged for one release so the console can move over without a break.
-      const isOperator = (item: { proposalId: string }) => inboxOwner({ id: item.proposalId }) === "operator";
-      const fleetDecisions = fleetLaneDecisions(ledgerLines as never, fleetLaneStoreForDisplay(join(deps.inboxRoot, "state")));
-      const needsYou = {
-        ready: ready.filter(isOperator),
-        drafting: drafting.filter(isOperator),
-        notReady: notReady.filter(isOperator),
-        declined: declined.filter(isOperator),
-      };
-      const fleet: InboxFleetItem[] = [
-        ...ready.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "ready" as const })),
-        ...drafting.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "drafting" as const })),
-        ...notReady.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "notReady" as const })),
-        ...declined.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "declined" as const })),
-      ]
-        .filter((i) => !isOperator(i))
-        // W1-T4089: each fleet finding's latest fleet-lane decision and its plain reason.
-        .map((i) => ({ ...i, ...fleetDecisions.get(i.proposalId) }));
       const lanes = { ready, drafting, notReady, declined, fleet };
-      const counts = {
-        ready: ready.length,
-        drafting: drafting.length,
-        notReady: notReady.length,
-        declined: declined.length,
-        fleet: fleet.length,
-        needsYou: { ready: needsYou.ready.length, drafting: needsYou.drafting.length, notReady: needsYou.notReady.length, declined: needsYou.declined.length },
-      };
       if (shape.section === undefined) sendJson(res, 200, { ready, drafting, notReady, declined, needsYou, fleet, counts });
       else if (shape.section === "needsYou") sendJson(res, 200, { needsYou, counts });
       else {

@@ -1272,6 +1272,53 @@ export interface EscalationLinkDeps {
    *  shifts, so a test can drive the check-then-act window deterministically — the losing arm
    *  is otherwise reachable only by a real race between two taps. */
   readonly consume?: (root: string, signature: string) => boolean;
+  readonly refusals?: LinkRefusalRollup;
+}
+
+export const LINK_REFUSAL_ROLLUP_MS = 60 * 60_000;
+/** BACKSTOP: keys held per window; the route is unauthenticated, so invented escalation ids past this fold into one. */
+export const LINK_REFUSAL_ROLLUP_MAX_KEYS = 1_000;
+
+/** Confirm refusals held in memory (W1-T5057): one `escalation.link_refused_rollup` row per (escalation, reason) per window. */
+export interface LinkRefusalRollup {
+  record(escalationId: string, reason: string, detail: string): void;
+  flush(): void;
+  stop(): void;
+}
+
+export function createLinkRefusalRollup(opts: { ledgerPath: string; clock: Clock; intervalMs?: number }): LinkRefusalRollup {
+  const held = new Map<string, { escalation: string; reason: string; detail: string; count: number; firstAt: string; lastAt: string }>();
+  const flush = (): void => {
+    for (const [key, row] of held) {
+      try {
+        appendLedger(opts.ledgerPath, {
+          run_id: `LINK-${opts.clock.now()}`, task_id: row.escalation, step: "escalation.link_refused_rollup", phase: "confirm",
+          escalation: row.escalation, reason: row.reason, detail: row.detail, count: row.count, firstAt: row.firstAt, lastAt: row.lastAt,
+        });
+      } catch (err) {
+        console.error(`escalation.link_refused_rollup: flush failed, counts kept for the next one (${String((err as Error)?.message ?? err)})`);
+        return;
+      }
+      held.delete(key);
+    }
+  };
+  const timer = setInterval(flush, opts.intervalMs ?? LINK_REFUSAL_ROLLUP_MS);
+  timer.unref();
+  return {
+    record: (escalationId, reason, detail) => {
+      const at = opts.clock.iso();
+      const keyOf = (id: string): string => JSON.stringify([id, reason]);
+      const escalation = held.size >= LINK_REFUSAL_ROLLUP_MAX_KEYS && !held.has(keyOf(escalationId)) ? "(over-key-backstop)" : escalationId;
+      const key = keyOf(escalation);
+      const row = held.get(key) ?? { escalation, reason, detail, count: 0, firstAt: at, lastAt: at };
+      held.set(key, { ...row, detail, count: row.count + 1, lastAt: at });
+    },
+    flush,
+    stop: () => {
+      clearInterval(timer);
+      flush();
+    },
+  };
 }
 
 /** Resolve the signing secret, or answer 503 and report why. */
@@ -1311,6 +1358,7 @@ function esc(s: string): string {
 /** GET /v1/escalation/confirm — verify and show, never act. A refusal renders its reason so the
  *  operator learns whether the ping went stale, was already answered, or did not verify. */
 export function buildEscalationLinkConfirmRoute(deps: PanelActionDeps, linkDeps: EscalationLinkDeps): Route {
+  const refusals = linkDeps.refusals ?? createLinkRefusalRollup({ ledgerPath: deps.ledgerPath, clock: systemClock });
   return {
     method: "GET",
     path: "/v1/escalation/confirm",
@@ -1324,16 +1372,8 @@ export function buildEscalationLinkConfirmRoute(deps: PanelActionDeps, linkDeps:
         existsSync(escalationLinkUsedPath(linkDeps.root, sig)),
       );
       if (!check.ok) {
-        // `bad-request` is NOT ledgered: these routes are unauthenticated, so recording every
-        // malformed query would let anyone append to the ledger at will. The other three
-        // refusals imply a real link existed, which is worth a row.
-        if (check.reason !== "bad-request") {
-          ledgerLinkOutcome(deps, linkDeps, "escalation.link_refused", query.get("e") ?? "unknown", {
-            reason: check.reason,
-            detail: check.detail,
-            phase: "confirm",
-          });
-        }
+        // A malformed query is not counted; the rest are held and ledgered hourly, so a repeated GET appends nothing.
+        if (check.reason !== "bad-request") refusals.record(query.get("e") ?? "unknown", check.reason, check.detail);
         sendHtml(res, check.reason === "forged" ? 403 : 410, `<p>This link cannot be used: ${esc(check.detail)}</p>`);
         return;
       }

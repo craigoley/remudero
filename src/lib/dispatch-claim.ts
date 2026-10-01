@@ -1,5 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { hostname } from "node:os";
+import { LEDGER_FILENAME } from "./ledger-path.js";
+import { ledgerLivePath, ledgerRotationEntries, realLedgerFs, rotationStampIso, type LedgerGrepFsDeps } from "./ledger-union.js";
 import { classifyPushFailure } from "./task-id-reservation.js";
 
 /**
@@ -114,6 +116,20 @@ export interface ClaimantLivenessProbe {
   readonly pidPresent: boolean;
 }
 
+export interface ClaimMintRow {
+  readonly host: string;
+  readonly actor: string;
+  readonly ts: string;
+  readonly source: string;
+}
+
+export interface ReplacedClaimantProbe {
+  readonly localHost: string;
+  readonly lockHeldSinceMs: number;
+  readonly lockHeldSinceIso: string;
+  readonly mintRow?: ClaimMintRow;
+}
+
 export interface DispatchClaimReleaseDecision {
   readonly arm: DispatchClaimReleaseArm;
   readonly release: boolean;
@@ -126,8 +142,8 @@ export interface DispatchClaimReleaseDecision {
  *
  *  1. HOLDER — the run that took the claim drops it in a `finally`, success or not.
  *  2. EVIDENCE — the caller's own proof the task is already done; any host may drop it.
- *  3. DEAD-CLAIMANT (W1-T2784) — the anchor names THIS host and predates its PID namespace's
- *     init, so the pid can't be a survivor; `pidPresent` must also read absent (guards reuse).
+ *  3. DEAD-CLAIMANT — W1-T2784: THIS host's anchor predates its PID namespace and the pid is absent; W1-T5047: this
+ *     instance's daemon minted it on another host and this daemon took state/drain.lock after the mint.
  *  4. OPERATOR — everything else; cross-host liveness is not decidable (W1-T396).
  *
  * FALSIFIER: test/a-claim-minted-before-this-namespace-booted-has-no-claimant.test.ts. Why:
@@ -141,6 +157,7 @@ export function decideDispatchClaimRelease(i: {
   anchorIdentity?: ClaimAnchorIdentity;
   /** W1-T2784: this namespace's own identity. Absent (unreadable /proc) ⇒ arm 3 declines. */
   liveness?: ClaimantLivenessProbe;
+  replaced?: ReplacedClaimantProbe;
 }): DispatchClaimReleaseDecision {
   if (i.heldByThisRun) return { arm: "holder", release: true, reason: `this run holds ${dispatchClaimRef(i.taskId)} and is done with it` };
   if (i.evidenceObserved)
@@ -165,6 +182,19 @@ export function decideDispatchClaimRelease(i: {
         `BEFORE this host's PID namespace started ${l.namespaceBootIso}, and pid ${a.pid} is ` +
         `absent. A process cannot outlive the namespace containing it, so the claimant provably ` +
         `cannot exist; releasing.`,
+    };
+  }
+  const r = i.replaced;
+  const m = r?.mintRow;
+  if (a && r && m && a.host !== r.localHost && m.host === a.host && m.actor === "daemon" && a.mintedAtMs < r.lockHeldSinceMs) {
+    return {
+      arm: "dead-claimant",
+      release: true,
+      reason:
+        `${dispatchClaimRef(i.taskId)} is held by ${a.pid}@${a.host}, minted ${a.mintedAtIso}. This instance's ledger ` +
+        `records that daemon minting it (${m.source}, ${m.ts}), and this daemon on ${r.localHost} has held the ` +
+        `instance's single-instance lock (state/drain.lock) since ${r.lockHeldSinceIso}. The claimant's container ` +
+        `was replaced, so the claimant cannot exist; releasing.`,
     };
   }
   return {
@@ -196,6 +226,7 @@ export interface DispatchClaimReserver {
    *  decode. `undefined` when absent, unfetched, or unreadable — each declines the
    *  `dead-claimant` arm rather than releasing on a guess. Optional and last. */
   anchorMessage?(taskId: string): string | undefined;
+  list?(): string[];
 }
 
 export interface ClaimGitDeps {
@@ -242,6 +273,14 @@ export function gitDispatchClaimReserver(deps: ClaimGitDeps): DispatchClaimReser
         ? ["push", `--force-with-lease=${ref}:${opts.expect}`, "origin", `:${ref}`]
         : ["push", "origin", `:${ref}`];
       return deps.run(args).status === 0;
+    },
+    list() {
+      const res = deps.run(["ls-remote", "origin", "refs/rmd-dispatch/*"]);
+      if (res.status !== 0) return [];
+      return res.stdout
+        .split("\n")
+        .map((line) => /\srefs\/rmd-dispatch\/(\S+)$/.exec(line.trim())?.[1])
+        .filter((id): id is string => id !== undefined);
     },
     anchorMessage(taskId) {
       const sha = this.holder(taskId);
@@ -316,15 +355,18 @@ export function releaseDispatchClaim(
     /** W1-T2784: probe seam for the dead-claimant arm. Optional and last, so every existing
      *  caller and test fake keeps today's three-arm behavior unchanged when it's omitted. */
     livenessProbe?: () => ClaimantLivenessProbe | undefined;
+    replacedProbe?: (anchor: ClaimAnchorIdentity) => ReplacedClaimantProbe | undefined;
   } = {},
 ): DispatchClaimReleaseResult {
   // Only asked off the this-run path — releasing your own claim (arm 1) skips this I/O entirely.
   let anchorIdentity: ClaimAnchorIdentity | undefined;
   let liveness: ClaimantLivenessProbe | undefined;
-  if (i.anchor === undefined && i.evidenceObserved !== true && i.livenessProbe) {
+  let replaced: ReplacedClaimantProbe | undefined;
+  if (i.anchor === undefined && i.evidenceObserved !== true && (i.livenessProbe || i.replacedProbe)) {
     anchorIdentity = parseClaimAnchorMessage(reserver.anchorMessage?.(taskId));
     // The pid is only meaningful once an anchor parsed — probe after, never before.
-    if (anchorIdentity) liveness = i.livenessProbe();
+    if (anchorIdentity) liveness = i.livenessProbe?.();
+    if (anchorIdentity) replaced = i.replacedProbe?.(anchorIdentity);
   }
   const decision = decideDispatchClaimRelease({
     heldByThisRun: i.anchor !== undefined,
@@ -332,6 +374,7 @@ export function releaseDispatchClaim(
     taskId,
     anchorIdentity,
     liveness,
+    replaced,
   });
   if (!decision.release) return { ...decision, dropped: false };
   // Pinned via `--force-with-lease` to the sha just judged, so a claim re-minted since survives.
@@ -340,6 +383,71 @@ export function releaseDispatchClaim(
     return { ...decision, dropped: judged ? reserver.drop(taskId, { expect: judged }) : false };
   }
   return { ...decision, dropped: reserver.drop(taskId, i.anchor !== undefined ? { expect: i.anchor } : {}) };
+}
+
+const MINT_ROW_ARCHIVE_READS = 3;
+
+export function findClaimMintRow(
+  stateDir: string,
+  taskId: string,
+  anchor: ClaimAnchorIdentity,
+  fs: LedgerGrepFsDeps = realLedgerFs,
+): ClaimMintRow | undefined {
+  const ref = dispatchClaimRef(taskId);
+  const names = fs.existsSync(stateDir) ? fs.readdirSync(stateDir) : [];
+  const archives = ledgerRotationEntries(names, stateDir)
+    .map((entry) => ({ entry, name: entry.path.slice(stateDir.length + 1) }))
+    .filter(({ name }) => (rotationStampIso(name) ?? "") >= anchor.mintedAtIso)
+    .slice(0, MINT_ROW_ARCHIVE_READS);
+  const files = [...archives.map(({ entry, name }) => ({ path: entry.path, gzip: entry.form === "gzip", name }))];
+  if (fs.existsSync(ledgerLivePath(stateDir))) files.push({ path: ledgerLivePath(stateDir), gzip: false, name: LEDGER_FILENAME });
+  for (const file of files) {
+    const raw = fs.readFileSync(file.path);
+    const text = (file.gzip ? fs.gunzipSync(raw) : raw).toString("utf8");
+    for (const line of text.split("\n")) {
+      if (!line.includes(ref) || !line.includes("dispatch.claim")) continue;
+      const parsed = parseLedgerRow(line);
+      if (parsed.kind !== "row") continue;
+      const row = parsed.row;
+      if (row.step !== "dispatch.claim" || row.ref !== ref || row.outcome !== "created") continue;
+      if (typeof row.ts !== "string" || row.ts < anchor.mintedAtIso || row.host !== anchor.host) continue;
+      return { host: String(row.host), actor: String(row.actor ?? "unknown"), ts: row.ts, source: file.name };
+    }
+  }
+  return undefined;
+}
+
+function parseLedgerRow(line: string): { kind: "row"; row: Record<string, unknown> } | { kind: "torn" | "not-an-object" } {
+  try {
+    const row: unknown = JSON.parse(line);
+    return row !== null && typeof row === "object" ? { kind: "row", row: row as Record<string, unknown> } : { kind: "not-an-object" };
+  } catch {
+    return { kind: "torn" };
+  }
+}
+
+export function releaseReplacedContainerClaims(
+  reserver: DispatchClaimReserver,
+  i: {
+    localHost: string;
+    lockHeldSinceMs: number;
+    lockHeldSinceIso: string;
+    findMintRow: (taskId: string, anchor: ClaimAnchorIdentity) => ClaimMintRow | undefined;
+    isMerged?: (taskId: string) => boolean;
+  },
+): Array<DispatchClaimReleaseResult & { taskId: string }> {
+  return (reserver.list?.() ?? []).map((taskId) => ({
+    taskId,
+    ...releaseDispatchClaim(taskId, reserver, {
+      evidenceObserved: i.isMerged?.(taskId) === true,
+      replacedProbe: (anchor) => ({
+        localHost: i.localHost,
+        lockHeldSinceMs: i.lockHeldSinceMs,
+        lockHeldSinceIso: i.lockHeldSinceIso,
+        mintRow: i.findMintRow(taskId, anchor),
+      }),
+    }),
+  }));
 }
 
 // ── PR REPAIR CLAIMS (W1-T2677) ─────────────────────────────────────────────────────────────
