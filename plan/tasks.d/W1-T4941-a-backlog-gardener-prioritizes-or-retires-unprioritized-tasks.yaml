@@ -12,7 +12,7 @@
   origin: "operator ask 2026-09-30: start building what helps automated flow and self-improvement (queue hygiene)"
   note: "reservation hand-off: plan-backlog-gardener-1790785261000 -> plan-backlog-gardener-1790785261000"
   plan_refs: [W1-T4111, W1-T4861, W1-T4095, W1-T5112, W1-T5114, W1-T3412]
-  files: [src/lib/backlog-gardener.ts, src/lib/daemon.ts, src/lib/plan-gardener.ts, test/a-backlog-gardener-prioritizes-or-retires-unprioritized-tasks.test.ts]
+  files: [src/lib/backlog-gardener.ts, src/lib/daemon.ts, src/lib/garden-registry.ts, src/lib/plan-gardener.ts, src/run-task.ts, test/a-backlog-gardener-prioritizes-or-retires-unprioritized-tasks.test.ts]
   status: queued
   attempts: 0
   rationale: |
@@ -68,7 +68,9 @@
       proof: 'grep: test("W1-T4941: an operator-set priority is never changed" in test/a-backlog-gardener-prioritizes-or-retires-unprioritized-tasks.test.ts'
     - claim: "a stopped symptom is cited as retirement evidence"
       proof: 'grep: test("W1-T4941: a stopped symptom is cited as retirement evidence" in test/a-backlog-gardener-prioritizes-or-retires-unprioritized-tasks.test.ts'
-    - claim: "the daemon runs the gardener"
-      proof: 'grep: runBacklogGardener( in src/lib/daemon.ts'
+    - claim: "the off-loop runner builds the backlog gardener"
+      proof: 'grep: backlogGardenSpec( in src/run-task.ts'
+    - claim: "the daemon schedules the backlog garden"
+      proof: 'grep: "backlog", in src/lib/garden-registry.ts'
   falsifier: |
     Let the judge write routing or status without citing evidence and the second test finds an uncited retirement.
