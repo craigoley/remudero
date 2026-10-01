@@ -335,22 +335,16 @@ test("a locked linked worktree is kept however idle it is", () => {
   assert.match(r.stdout, new RegExp(`KEEP ${locked}: Git worktree is locked`));
 });
 
-test("an incomplete activity walk keeps the path as unknown", { skip: process.getuid?.() === 0 }, () => {
+test("an incomplete activity walk keeps the path as unknown", () => {
   const fx = fixture();
   const blind = scratchDir(fx, "rmd-blind", true);
-  const sealed = join(blind, "sealed");
-  mkdirSync(sealed);
-  writeFileSync(join(sealed, "inside"), "x");
-  age(blind);
-  chmodSync(sealed, 0o000);
-  try {
-    const r = run(fx);
-    assert.equal(r.status, 0, r.stderr + r.stdout);
-    assert.equal(existsSync(blind), true, "a walk that could not see everything must not delete");
-    assert.match(r.stdout, new RegExp(`KEEP ${blind}: activity probe failed \\(unknown\\)`));
-  } finally {
-    chmodSync(sealed, 0o755);
-  }
+  const failingFind = join(fx.root, "bin", "find");
+  writeFileSync(failingFind, "#!/usr/bin/env bash\nexit 23\n");
+  chmodSync(failingFind, 0o755);
+  const r = run(fx, { PATH: `${join(fx.root, "bin")}:${process.env.PATH ?? ""}` });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(existsSync(blind), true, "a failed walk must not delete the path for any uid");
+  assert.match(r.stdout, new RegExp(`KEEP ${blind}: activity probe failed \\(unknown\\)`));
 });
 
 test("temp-only mode sweeps scratch and coverage and leaves worktrees and transcripts alone", () => {
