@@ -190,16 +190,16 @@ fi
 # REMOTE name: `git push origin HEAD:run-W1-T3618-...` carries a local branch that is not what the
 # PR will show. stdin is unused everywhere else in this hook, so consuming it here costs nothing;
 # when it is empty — run by hand, or by this repo's own tests — fall back to the checked-out branch.
+head_ref=""
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  case "$remote_ref" in
+    refs/heads/*) head_ref="${remote_ref#refs/heads/}"; break ;;
+  esac
+done
+if [ -z "$head_ref" ]; then
+  head_ref="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+fi
 if [ -f scripts/head-identity-gate.mjs ]; then
-  head_ref=""
-  while read -r _local_ref _local_sha remote_ref _remote_sha; do
-    case "$remote_ref" in
-      refs/heads/*) head_ref="${remote_ref#refs/heads/}"; break ;;
-    esac
-  done
-  if [ -z "$head_ref" ]; then
-    head_ref="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-  fi
   if [ -n "$head_ref" ] && [ "$head_ref" != "HEAD" ]; then
     if ! node --import tsx scripts/head-identity-gate.mjs --head-ref "$head_ref"; then
       echo "pre-push: head-identity-gate would REFUSE this head in CI — advisory here, so the push" >&2
@@ -213,6 +213,21 @@ else
   echo "pre-push: scripts/head-identity-gate.mjs absent — skipped, NOT passed" >&2
 fi
 # W1-T3388 — END head-identity admission
+
+# A plan-only shard on its own run branch would create false implementation credit at merge.
+# This narrow check runs before the first push, when the branch can still be renamed. An
+# unreadable base, diff or shard is unknown, not a reason to strand fleet work.
+if [ -f scripts/worker-branch-shape.mjs ]; then
+  node scripts/worker-branch-shape.mjs --self-credit-only --base origin/main --head-ref "$head_ref"
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    echo "pre-push: worker-branch-shape could not read local evidence — not blocking" >&2
+  elif [ "$rc" -ne 0 ]; then
+    fail=1
+  fi
+else
+  echo "pre-push: scripts/worker-branch-shape.mjs absent — skipped, NOT passed" >&2
+fi
 
 # BEGIN proof-resolve precheck (2026-09-29) — the reviewer's certain proof refusals, asked before the push.
 # MEASURED 2026-09-15..29: 14 of 40 reviewer-unmet fix rounds were a `unit test:` title no test carried. The script

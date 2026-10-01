@@ -15,7 +15,8 @@
 //
 // Usage: node scripts/worker-branch-shape.mjs [--base <ref>] [--head-ref <ref>]. --base defaults
 // to origin/main (skips, not fails, the shard check when unresolvable); --head-ref defaults to
-// $GITHUB_HEAD_REF, then the current branch.
+// $GITHUB_HEAD_REF, then the current branch. --self-credit-only is the narrow pre-push mode:
+// only a plan-only shard filing on its own run branch is a refusal; unreadable evidence exits 2.
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -316,6 +317,7 @@ export function main(argv) {
       base: { type: "string" },
       "head-ref": { type: "string" },
       "worktree-path": { type: "string" },
+      "self-credit-only": { type: "boolean" },
     },
   });
 
@@ -323,6 +325,46 @@ export function main(argv) {
   const baseRef = values.base ?? "origin/main";
   const headRef = resolveHeadRef(values["head-ref"], worktreePath);
   const mergeBase = resolveMergeBase(worktreePath, baseRef);
+  const selfCreditOnly = values["self-credit-only"] === true;
+  if (selfCreditOnly) {
+    if (!headRef || !mergeBase) {
+      console.error("worker-branch-shape: UNKNOWN — head ref or merge base could not be read");
+      process.exitCode = 2;
+      return;
+    }
+    let addedFiles;
+    let changedFiles;
+    try {
+      addedFiles = gitOrThrow(["diff", "--name-only", "--diff-filter=A", "-z", mergeBase, "HEAD"], { cwd: worktreePath }).split("\0").filter(Boolean);
+      changedFiles = gitOrThrow(["diff", "--name-only", "-z", mergeBase, "HEAD"], { cwd: worktreePath }).split("\0").filter(Boolean);
+    } catch {
+      console.error("worker-branch-shape: UNKNOWN — branch diff could not be read");
+      process.exitCode = 2;
+      return;
+    }
+    const shardFiles = addedFiles.filter((path) => SHARD_FILE_RE.test(path));
+    const unreadable = shardFiles.filter((path) => readFileIfPresent(join(worktreePath, path)) === undefined);
+    if (unreadable.length > 0) {
+      console.error("worker-branch-shape: UNKNOWN — added plan shard could not be read");
+      process.exitCode = 2;
+      return;
+    }
+    const shardIds = shardTaskIds(shardFiles, (path) => readFileIfPresent(join(worktreePath, path)));
+    if (shardFiles.length > 0 && shardIds.length !== shardFiles.length) {
+      console.error("worker-branch-shape: UNKNOWN — added plan shard id could not be parsed");
+      process.exitCode = 2;
+      return;
+    }
+    const selfCrediting = isPlanOnlyDiff(changedFiles) ? shardIds.filter((id) => matchesRunBranchShape(headRef, id)) : [];
+    if (selfCrediting.length > 0) {
+      console.error(`worker-branch-shape: REFUSED [plan-filing-run-credit] — ${selfCrediting.join(", ")} is a plan-only filing on its own run branch; use a non-run filing branch`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log("worker-branch-shape: OK — no self-crediting plan filing");
+    process.exitCode = 0;
+    return;
+  }
   const commitMessages = commitMessagesSinceBase(worktreePath, mergeBase);
   const addedFiles = addedFilesSinceBase(worktreePath, mergeBase);
   const changedFiles = changedFilesSinceBase(worktreePath, mergeBase);
