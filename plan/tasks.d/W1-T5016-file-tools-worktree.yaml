@@ -1,0 +1,29 @@
+- id: W1-T5016
+  title: "Confine worker file tools to the assigned worktree and explicit scratch roots"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  origin: "operator-approved Orca comparison, 2026-09-30"
+  files: [hooks/deny-floor.sh, settings/worker.json, test/deny-floor.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at c94c2bf49: worker file tools use bypassPermissions. The deny-floor hook reads file_path and cwd
+    but does not compare them, and the settings matcher omits Read. A scratch-hook test allowed an Edit in a
+    sibling checkout. This is a file-tool boundary gap, separate from the model-driven OS containment probe.
+  design: |
+    Canonicalize the target and hook cwd, including symlink parents. Refuse Read, Write, Edit, MultiEdit and
+    NotebookEdit outside the assigned worktree except narrowly enumerated scratch and worker-home paths.
+    Add Read to the matcher. Keep Bash sandboxing as a separate boundary. Fail closed on missing or
+    unresolvable paths; add outside-cwd and symlink-escape regression cases. Do not add approval to normal work.
+    If per-run containment telemetry requires another concern, file it separately.
+  acceptance:
+    - claim: "outside-worktree file-tool access is refused while in-worktree access remains available"
+      proof: 'grep: test("W1-T5016: file tools refuse paths outside the assigned worktree" in test/deny-floor.test.ts'
+    - claim: "a symlink cannot turn an apparent in-worktree target into an outside target"
+      proof: 'grep: test("W1-T5016: file tool confinement resolves symlink parents" in test/deny-floor.test.ts'
