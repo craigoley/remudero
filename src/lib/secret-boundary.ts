@@ -25,7 +25,10 @@
 import { randomBytes } from "node:crypto";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createServer as createNetServer, type Socket } from "node:net";
-import { existsSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, unlinkSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { isMainThread, parentPort, Worker, workerData, type MessagePort } from "node:worker_threads";
+import { mintScopedToken } from "./github-app.js";
 
 /** A fresh, unguessable stand-in for a real credential — never derived from the real value, so a
  *  worker holding one learns nothing about what it substitutes for. `label` is cosmetic (it
@@ -224,10 +227,11 @@ export async function startBoundaryProxy(opts: StartBoundaryProxyOpts): Promise<
 /** What `secretBoundaryEnv` needs to build a worker's env: the running proxy's own sentinel and
  *  loopback URL, plus (optionally) the credential-helper socket a worktree's git config points
  *  at. Omitting `credentialHelperSocketPath` leaves git's own credential path untouched by this
- *  call — see worker.ts's git-config wiring, which is gated on the same field. */
+ *  call — see worker.ts's git-config wiring, which is gated on the same field. W1-T5115: the model
+ *  substitution applies only when BOTH model fields are set, so a socket-only handle is git alone. */
 export interface SecretBoundaryHandles {
-  readonly modelSentinel: string;
-  readonly modelBaseUrl: string;
+  readonly modelSentinel?: string;
+  readonly modelBaseUrl?: string;
   readonly credentialHelperSocketPath?: string;
 }
 
@@ -247,11 +251,13 @@ export function secretBoundaryEnv(
   builtEnv: Record<string, string>,
   boundary?: SecretBoundaryHandles,
 ): Record<string, string> {
-  if (!boundary) return builtEnv;
+  const modelSentinel = boundary?.modelSentinel;
+  const modelBaseUrl = boundary?.modelBaseUrl;
+  if (modelSentinel === undefined || modelBaseUrl === undefined) return builtEnv;
   const out = { ...builtEnv };
   delete out.CLAUDE_CODE_OAUTH_TOKEN;
-  out.ANTHROPIC_AUTH_TOKEN = boundary.modelSentinel;
-  out.ANTHROPIC_BASE_URL = boundary.modelBaseUrl;
+  out.ANTHROPIC_AUTH_TOKEN = modelSentinel;
+  out.ANTHROPIC_BASE_URL = modelBaseUrl;
   return out;
 }
 
@@ -340,4 +346,136 @@ export function startCredentialHelperSocket(opts: {
       });
     });
   });
+}
+
+/** W1-T5115: the daemon's one git credential socket, in a 0700 directory under its state root. */
+export function daemonGitCredentialSocketPath(stateDir: string): string {
+  return join(stateDir, "git-credential", "helper.sock");
+}
+
+/** How long a minted scoped token is reported valid — one git request uses it at once. */
+const SCOPED_TOKEN_TTL_MS = 10 * 60 * 1000;
+const SOCKET_THREAD_KIND = "rmd-git-credential-socket";
+
+type DaemonLog = (step: string, fields: Record<string, unknown>) => void;
+type SocketThreadMessage =
+  | { type: "listening" }
+  | { type: "failed"; reason: string }
+  | { type: "log"; step: string; fields: Record<string, unknown> }
+  | { type: "closed" };
+
+function rowFields(row: BoundaryLedgerRow): Record<string, unknown> {
+  return { host: row.host, decision: row.decision, status: row.status, reason: row.reason };
+}
+
+function realScopedMint(log: DaemonLog): ScopedTokenMint {
+  return async (repo) => {
+    const minted = await mintScopedToken(repo, SCOPED_TOKEN_TTL_MS, { log: (step, extra) => log(step, extra ?? {}) });
+    return minted.ok && minted.token
+      ? { ok: true, token: minted.token }
+      : { ok: false, reason: minted.reason ?? "mint returned no token" };
+  };
+}
+
+function runSocketThread(port: MessagePort, socketPath: string): void {
+  const post = (message: SocketThreadMessage) => port.postMessage(message);
+  const log: DaemonLog = (step, fields) => post({ type: "log", step, fields });
+  startCredentialHelperSocket({ socketPath, mint: realScopedMint(log), log: (row) => log(row.step, rowFields(row)) }).then(
+    (handle) => {
+      port.on("message", (message) => {
+        if (message !== "close") return;
+        void handle.close().finally(() => {
+          post({ type: "closed" });
+          port.close();
+        });
+      });
+      post({ type: "listening" });
+    },
+    (err) => post({ type: "failed", reason: String(err) }),
+  );
+}
+
+if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === SOCKET_THREAD_KIND && parentPort) {
+  runSocketThread(parentPort, (workerData as { socketPath: string }).socketPath);
+}
+
+/** On its OWN thread because the daemon's git is synchronous (`gitPushRunBranch` is an `execFileSync`): a socket on
+ *  the blocked main thread never answers the helper that push spawns, and both wait forever (MEASURED, W1-T5115). */
+function startSocketThread(socketPath: string, log: DaemonLog, threadUrl: URL): Promise<CredentialHelperSocketHandle> {
+  const worker = new Worker(threadUrl, { workerData: { kind: SOCKET_THREAD_KIND, socketPath }, execArgv: process.execArgv, env: { ...process.env } });
+  let closing = false;
+  let onClosed: (() => void) | undefined;
+  const close = (): Promise<void> =>
+    new Promise<void>((resolve) => {
+      closing = true;
+      worker.ref();
+      onClosed = resolve;
+      worker.once("exit", () => resolve());
+      worker.postMessage("close");
+    }).then(() => worker.terminate().then(() => undefined));
+  const safeLog: DaemonLog = (step, fields) => {
+    try {
+      log(step, fields);
+    } catch (err) {
+      // A failed ledger write must not crash the daemon from a thread message; stderr keeps it visible.
+      process.stderr.write(`git credential socket: ledger write failed: ${String(err)}\n`);
+    }
+  };
+  worker.on("exit", (code) => {
+    if (!closing) safeLog(LEDGER_REQUEST_STEP, rowFields(boundaryLedgerRow("github.com", "refuse", "error", `git credential socket thread exited (${code})`)));
+  });
+  return new Promise((resolve, reject) => {
+    worker.on("message", (message: SocketThreadMessage) => {
+      if (message.type === "log") safeLog(message.step, message.fields);
+      else if (message.type === "listening") {
+        worker.unref();
+        resolve({ socketPath, close });
+      } else if (message.type === "failed") {
+        closing = true;
+        void worker.terminate();
+        reject(new Error(message.reason));
+      } else onClosed?.();
+    });
+    worker.once("error", reject);
+  });
+}
+
+/**
+ * W1-T5115: start the daemon's git credential socket once `ready` — the App refresh's first-mint barrier, present only
+ * on an App-configured host — settles; with no `ready`, start nothing and keep the ambient helper. Owner-only (0600 in
+ * a 0700 directory). A start failure ledgers a value-free refusal and returns `undefined` rather than refusing the boot.
+ * `mint` is a test seam serving in-process; production gets {@link startSocketThread} and the real `mintScopedToken`.
+ */
+export async function startDaemonGitCredentialSocket(opts: {
+  ready: Promise<unknown> | undefined;
+  stateDir: string;
+  log: DaemonLog;
+  mint?: ScopedTokenMint;
+  threadUrl?: URL;
+}): Promise<CredentialHelperSocketHandle | undefined> {
+  if (!opts.ready) return undefined;
+  await opts.ready;
+  const socketPath = daemonGitCredentialSocketPath(opts.stateDir);
+  const ledgerRow = (row: BoundaryLedgerRow) => opts.log(row.step, rowFields(row));
+  let handle: CredentialHelperSocketHandle | undefined;
+  const close = async (): Promise<void> => {
+    await handle?.close();
+    rmSync(socketPath, { force: true });
+  };
+  try {
+    mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 });
+    chmodSync(dirname(socketPath), 0o700);
+    handle = opts.mint
+      ? await startCredentialHelperSocket({ socketPath, mint: opts.mint, log: ledgerRow })
+      : await startSocketThread(socketPath, opts.log, opts.threadUrl ?? new URL(import.meta.url));
+    chmodSync(socketPath, 0o600);
+  } catch (err) {
+    ledgerRow(boundaryLedgerRow("github.com", "refuse", "error", `git credential socket did not start: ${String(err)}`));
+    // A socket that bound but could not be made owner-only is closed, never handed to a worker.
+    await close().catch((closeErr) =>
+      opts.log(LEDGER_REQUEST_STEP, rowFields(boundaryLedgerRow("github.com", "refuse", "error", `socket did not close: ${String(closeErr)}`))),
+    );
+    return undefined;
+  }
+  return { socketPath, close };
 }
