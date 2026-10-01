@@ -84,7 +84,9 @@
   origin: architect
   plan_refs: ["§8A", "P48", "W1-T382", "W1-T418"]
   files: [src/lib/rule-efficacy.ts, test/bound-fire-outcome.test.ts]
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # backlog gardener: retirement evidence=34dfccf369b1e1a2
   attempts: 0
   note: |
     THIS IS THE PROMOTE-TO-INSTRUMENT THE PROPOSAL WAS REACHING FOR, built against observed evidence

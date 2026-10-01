@@ -18,8 +18,9 @@
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { statSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { basename, dirname, join, relative } from "node:path";
+import { gunzipSync } from "node:zlib";
 import {
   computeBoardSnapshot,
   computeRecentActivity,
@@ -37,6 +38,8 @@ import { deriveLastPoll, readDiskFreeBytes, readGhRateLimitRemaining } from "./d
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { feedbackDir, listFeedback, type FeedbackEntry } from "./feedback.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
+import { readTaskActivity } from "./ledger-projector.js";
+import { ledgerRotationEntries, rotationStampIso } from "./ledger-union.js";
 import {
   capDecisions,
   escalationClasses,
@@ -545,6 +548,7 @@ interface Held {
 /** What one assembled body was built from, so the shadow's legacy side reads that body's inputs and not a later build's. */
 interface Shown {
   plan: Plan;
+  planKey: string;
   gateway: ReturnType<typeof snapshotGithub>;
   probe: NowHostProbe;
   members: Record<string, string[]>;
@@ -569,6 +573,18 @@ export interface NowShadowLegacy {
   derived: Record<string, string[]>;
   rows: LegacyRows;
   sortKeys: Record<string, Record<string, ShadowLatest>>;
+  inputs: { plan: string; probeAt: string; rotationsSinceProbe: string[] };
+}
+
+/**
+ * The rows of every rotation cut after `atMs`: the live file still held them when a probe at `atMs` read it,
+ * so a later read of the live file alone misses them.
+ */
+function rotatedSince(ledgerDir: string, atMs: number): { names: string[]; rows: Row[] } {
+  const entries = ledgerRotationEntries(readdirSync(ledgerDir), ledgerDir).filter((e) => Date.parse(rotationStampIso(basename(e.path)) ?? "") > atMs);
+  const text = (path: string, gzip: boolean): string => (gzip ? gunzipSync(readFileSync(path)) : readFileSync(path)).toString("utf8");
+  const rows = entries.flatMap((e) => readLedgerLines(e.path, { existsSync: () => true, readFileSync: (path) => text(path, e.form === "gzip") }));
+  return { names: entries.map((e) => basename(e.path)), rows };
 }
 
 /** The `now` view as the read-model worker materializes it: one body per instance, keyed `instance=<name>`. */
@@ -691,6 +707,12 @@ export function createNowView(opts: NowViewOptions): {
     ["snapshot", (instance, b) => {
       const projections = b.h!.board.projections();
       b.snapshot = computeBoardSnapshot(depsOf(instance, b), { reuseProjection: (task) => projections.get(task.id) });
+      // The fact store keeps only the steps a reader decides on; a task's newest row of any step is legacy's sort time.
+      const activity = readTaskActivity(b.db);
+      for (const t of b.snapshot.tasks) {
+        const at = activity.get(t.taskId);
+        if (at) t.lastActivityAt = at;
+      }
     }],
     ["probe", (instance, b) => {
       const h = b.h!;
@@ -703,7 +725,7 @@ export function createNowView(opts: NowViewOptions): {
       const { h, snapshot, rows, now, state } = b as Required<NowBuild>;
       const data = assembleNowView({ instance: instance.name, snapshot, rows, plan: b.plan!, recent: computeRecentActivity(depsOf(instance, b), h.recent, 20), health: h.probe!.health, decisions: b.decisions!, nowMs: now });
       Object.assign(h, { generation: state.generation, planKey: b.keys.plan, at: now, decisionsKey: b.keys.decisions });
-      shown.set(data, { plan: b.plan!, gateway: b.gateway!, probe: h.probe!, members: nowCountMembers(snapshot.tasks), spend: dayCostRows(rows, now),
+      shown.set(data, { plan: b.plan!, planKey: b.keys.plan, gateway: b.gateway!, probe: h.probe!, members: nowCountMembers(snapshot.tasks), spend: dayCostRows(rows, now),
         sortedBy: new Map(snapshot.tasks.map((t) => [t.taskId, t.lastActivityAt])) });
       const sources: ViewSource[] = [
         ...(opts.ledgerSource ? [opts.ledgerSource(state, now)] : []),
@@ -787,7 +809,8 @@ export function createNowView(opts: NowViewOptions): {
       const legacy = assembleNowView({ instance: name, snapshot, rows, plan: built.plan, recent: [], health: mine.health, decisions, nowMs: now });
       const probeMs = Date.parse(built.probe.sampledAt);
       const readLive = opts.hostProbe?.readLive ?? readLedgerLines;
-      const atProbe = { ...opts.hostProbe, readLive: (path: string) => readLive(path).filter((row) => !(typeof row.ts === "string" && Date.parse(row.ts) > probeMs)) };
+      const cut = rotatedSince(instance.ledgerDir, probeMs);
+      const atProbe = { ...opts.hostProbe, readLive: (path: string) => [...cut.rows, ...readLive(path)].filter((row) => !(typeof row.ts === "string" && Date.parse(row.ts) > probeMs)) };
       const probe = defaultProbeHost(instance, name === core, fixedClock(probeMs), atProbe).health;
       const gauge = (field: "diskFreeBytes" | "rateLimitRemaining"): Partial<NowHealth> =>
         probe[field] === undefined ? {} : { [field]: mine.health[field] ?? probe[field] };
@@ -811,6 +834,7 @@ export function createNowView(opts: NowViewOptions): {
         },
         rows: legacyRowIndex(rows),
         sortKeys: Object.fromEntries(groups.map((path) => [path, keys])),
+        inputs: { plan: built.planKey, probeAt: built.probe.sampledAt, rotationsSinceProbe: cut.names },
         ...(oldest !== undefined ? { horizonMs: oldest } : {}),
       };
     },

@@ -7,7 +7,9 @@
   principles: {tdd: encouraged}
   budget_usd: 100.00
   risk: high
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=cefc03fad3b80621
   attempts: 0
   origin: "followup#DAEMON-1788584618629:2026-09-05T05:18:27.429Z:2"
   plan_refs: ["§12.3B", "W1-T230", "W1-T1215", "W1-T2677", "W1-T2722", "W1-T2851", "W1-T2855"]

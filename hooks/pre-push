@@ -218,6 +218,50 @@ else
 fi
 # W1-T3388 — END head-identity admission
 
+# W1-T4214 — BEGIN head-identity TRANSITION (BLOCKING, and only this narrow case)
+# The advisory above prints and the push goes on, and nobody reads it: a push that took #6562's head
+# from admitted to refused was the incident, and the only repair left was a new pull request. What is
+# refused here is NOT "this head is unidentified" (a first push of an ad-hoc branch legitimately is) but
+# the TRANSITION: the remote tip is admitted by head-identity-gate's own predicate and the head being
+# pushed is not, and the refusal names the identity form the remote tip had. A new branch (all-zero
+# remote sha), a deletion, a remote tip this clone does not hold, or an unreadable message is not a
+# transition — each is named as skipped, never counted as cleared, and never blocks. The ref is the
+# SAME remote ref on both sides, so a ref-shaped identity can never be lost here; what can be is a trailer.
+# Both messages are read exactly as the gate reads one (--first-parent --no-merges).
+zero_sha="0000000000000000000000000000000000000000"
+if [ -f scripts/head-identity-gate.mjs ] && [ -n "$head_ref" ] && [ -n "${_remote_sha:-}" ] \
+   && [ "$_remote_sha" != "$zero_sha" ] && [ "${_local_sha:-}" != "$zero_sha" ] && [ "$head_sha" != "HEAD" ]; then
+  if git cat-file -e "${_remote_sha}^{commit}" 2>/dev/null; then
+    RMD_IDT_REF="$head_ref" \
+    RMD_IDT_OLD="$(git log -1 --first-parent --no-merges --format=%B "$_remote_sha" 2>/dev/null)" \
+    RMD_IDT_NEW="$(git log -1 --first-parent --no-merges --format=%B "$head_sha" 2>/dev/null)" \
+    node --import tsx -e '
+      const { pathToFileURL } = require("node:url");
+      import(pathToFileURL(process.cwd() + "/scripts/head-identity-gate.mjs").href).then((gate) => {
+        const { RMD_IDT_REF: headRef, RMD_IDT_OLD: oldMsg, RMD_IDT_NEW: newMsg } = process.env;
+        if (!oldMsg || !newMsg) process.exit(2);
+        const was = gate.evaluateHeadIdentityGate({ headCommitMessage: oldMsg, headRef });
+        const now = gate.evaluateHeadIdentityGate({ headCommitMessage: newMsg, headRef });
+        if (was.ok && !now.ok) { console.error("identity LOST — the remote tip was " + was.message); process.exit(3); }
+        process.exit(0);
+      }, () => process.exit(2));
+    '
+    rc=$?
+    # EXIT 3 IS THE ONLY REFUSAL: a loader or import crash exits 1 and must not read as a violation.
+    if [ "$rc" -eq 3 ]; then
+      echo "pre-push: REFUSED — this push turns an admitted head into one head-identity-gate REFUSES." >&2
+      echo "pre-push: Add the anchored \`Remudero-Task: <id>\` trailer back to the head commit; the same" >&2
+      echo "pre-push: branch can be pushed again, no new pull request needed." >&2
+      fail=1
+    elif [ "$rc" -ne 0 ]; then
+      echo "pre-push: head-identity transition could not be judged — not blocking on an unreadable check" >&2
+    fi
+  else
+    echo "pre-push: head-identity transition — remote tip not in this clone, skipped, NOT passed" >&2
+  fi
+fi
+# W1-T4214 — END head-identity TRANSITION
+
 # A plan-only shard on its own run branch would create false implementation credit at merge.
 # This narrow check runs before the first push, when the branch can still be renamed. An
 # unreadable base, diff or shard is unknown, not a reason to strand fleet work.

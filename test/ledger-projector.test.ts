@@ -15,6 +15,7 @@ import {
   ledgerLineIdentity,
   openProjectorReadModel,
   readModelDigest,
+  readTaskActivity,
   type LedgerProjectorOptions,
 } from "../src/lib/ledger-projector.js";
 import { acquireLease, ReadModelError, type ReadModelDb } from "../src/lib/read-model-db.js";
@@ -426,4 +427,24 @@ test("the activity ring keeps the newest rows of any step and drops the oldest",
   const clean = store(t, ledgerDir, clock);
   clean.tick();
   assert.deepEqual(ring(clean.db), ring(s.db), "a clean rebuild keeps the same ring");
+});
+
+test("the task activity projection keeps each task's newest row of any step", (t) => {
+  const ledgerDir = scratch(t, "projector-ledger");
+  writeFileSync(join(ledgerDir, LIVE), body([
+    line(T0 + 2_000, "machine_judge.ruled", { task_id: "W1-T1" }),
+    line(T0 + 1_000, "run.start", { task_id: "W1-T1", run_id: "r1" }),
+    line(T0, "worker.activity", { task_id: "W1-T2" }),
+    line(T0 + 3_000, "worker.activity", { detail: { task_id: "W1-T9" } }),
+    JSON.stringify({ ts: "not a time", host: "h1", step: "worker.activity", task_id: "W1-T3" }),
+  ]));
+  const clock = fixedClock(T0 + 10_000);
+  assert.deepEqual([...readTaskActivity(openProjectorReadModel(scratch(t, "projector-state"), "core", clock))], [], "a store that never built the table reads empty");
+  const s = store(t, ledgerDir, clock);
+  s.tick();
+  const want = [["W1-T1", new Date(T0 + 2_000).toISOString()], ["W1-T2", new Date(T0).toISOString()]];
+  assert.deepEqual([...readTaskActivity(s.db)].sort(), want, "a step the fact store skips still dates its task, and an older row read later does not");
+  const clean = store(t, ledgerDir, clock);
+  clean.tick();
+  assert.deepEqual([...readTaskActivity(clean.db)].sort(), want, "a clean rebuild keeps the same rows");
 });

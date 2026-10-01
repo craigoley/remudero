@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { INSTRUMENT_SURFACE, INSTRUMENT_SURFACE_EXCLUSIONS, detectInstrumentEntanglement, judgeReview } from "../src/lib/review.js";
+// @ts-ignore the executable .mjs module has no declaration file.
+import { deriveInstrumentCandidates, findUnexplainedGaps, harvestTokens, liveTree } from "../scripts/lib/instrument-surface-census.mjs";
 
 // ── W1-T402: "INSTRUMENT_SURFACE was hand-enumerated against one day's tree and missed the rule
 // files of five REQUIRED jobs ... and the only thing asking anyone to re-check membership is a
@@ -17,86 +16,6 @@ import { INSTRUMENT_SURFACE, INSTRUMENT_SURFACE_EXCLUSIONS, detectInstrumentEnta
 // ──────────────────────────────────────────────────────────────────────────────────────────────
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
-
-function git(args: string[]): string {
-  return execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8" });
-}
-
-// Extension alternation ordered LONGEST-FIRST and anchored at the token's end (`\b`). W1-T402's
-// design recorded the trap directly: an alternation ordered `js` before `json` truncates
-// `.jscpd.json` to `.jscpd.js` — untracked, and silently dropped by the tracked-file filter below
-// — so the first hand-derivation reported the clearest instrument in the repo as underivable.
-const EXT_RE = "(?:cjs|mjs|json|yaml|yml|ts|sh|js)";
-const TOKEN_RE = new RegExp(`[A-Za-z0-9_./-]+\\.${EXT_RE}\\b`, "g");
-
-/** Path-like tokens ending in a rule/config extension, in declaration order, longest-ext-first. */
-function harvestTokens(text: string): string[] {
-  return [...text.matchAll(TOKEN_RE)].map((m) => m[0].replace(/^\.\//, ""));
-}
-
-/** Under `src/`, `apps/`, `packages/`, or `test/` — the product/test halves, never a candidate. */
-function isProductOrTestPath(path: string): boolean {
-  return /^(src|apps|packages|test)\//.test(path);
-}
-
-/**
- * Derives candidate gate-rule paths from the live tree (W1-T402 design clause (i), "declared-
- * plus-derived"): harvest path-like tokens out of every workflow file plus package.json's
- * `scripts` values, restrict to tracked, non-product/non-test paths, then follow ONE level into
- * any harvested script's own source for the sibling config files it reads (this is how
- * `scripts/mutation-nightly-scope.json` — never itself named in a `run:` line, only reached via
- * `scripts/mutation-ratchet.mjs`'s own `join(__dirname, ...)` default) is recovered without an
- * unbounded, over-eager recursive harvest (the design's own rejected alternative — it pulled in
- * `src/run-task.ts` and `src/lib/review.ts`, which would fire this alarm on nearly every PR).
- */
-function deriveInstrumentCandidates(): string[] {
-  const tracked = new Set(git(["ls-files"]).split("\n").filter(Boolean));
-  const workflowFiles = [...tracked].filter((f) => f.startsWith(".github/workflows/") && /\.ya?ml$/.test(f));
-
-  const stageA = new Set<string>();
-  for (const f of workflowFiles) {
-    for (const t of harvestTokens(readFileSync(join(REPO_ROOT, f), "utf8"))) stageA.add(t);
-  }
-  const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { scripts?: Record<string, string> };
-  for (const t of harvestTokens(Object.values(pkg.scripts ?? {}).join("\n"))) stageA.add(t);
-
-  const candidates = new Set([...stageA].filter((f) => tracked.has(f) && !isProductOrTestPath(f)));
-
-  const STRING_LIT_RE = /["']([A-Za-z0-9_./-]+\.(?:json|ya?ml))["']/g;
-  const scriptCandidates = [...candidates].filter((f) => /\.(mjs|cjs|ts|sh)$/.test(f));
-  for (const s of scriptCandidates) {
-    const abs = join(REPO_ROOT, s);
-    if (!existsSync(abs)) continue;
-    const src = readFileSync(abs, "utf8");
-    const dir = s.split("/").slice(0, -1).join("/");
-    for (const m of src.matchAll(STRING_LIT_RE)) {
-      const rel = m[1].replace(/^\.\//, "");
-      for (const c of [rel, dir ? `${dir}/${rel}` : rel]) {
-        if (tracked.has(c) && !isProductOrTestPath(c)) candidates.add(c);
-      }
-    }
-  }
-  return [...candidates].sort();
-}
-
-/**
- * THE ALARM ITSELF, pure: a derived candidate is unexplained when it matches neither
- * `declaredRe` (the BLOCKING authority) nor carries a non-blank reason in `exclusions`. Never
- * consults anything but its three arguments, so it is exercised directly against fabricated
- * fixtures below (proving the mechanism in isolation) and against the real tree's own derivation
- * (proving today's repo is clean) without duplicating the check's logic between the two.
- */
-function findUnexplainedGaps(
-  candidates: string[],
-  declaredRe: RegExp,
-  exclusions: Readonly<Record<string, string>>,
-): string[] {
-  return candidates.filter((c) => {
-    if (declaredRe.test(c)) return false;
-    const reason = exclusions[c];
-    return typeof reason !== "string" || reason.trim().length === 0;
-  });
-}
 
 const DECLARED_RE = new RegExp(INSTRUMENT_SURFACE.join("|"));
 
@@ -186,10 +105,10 @@ diff --git a/src/lib/widget.ts b/src/lib/widget.ts
 // ── the completeness check itself, run for real against the live tree ──────────────────────────
 
 test("instrument-surface completeness: every gate-rule-like path this tree's own workflows/package.json reference is either declared or has a recorded, reasoned exclusion", () => {
-  const candidates = deriveInstrumentCandidates();
+  const candidates: string[] = deriveInstrumentCandidates(liveTree(REPO_ROOT));
   assert.ok(candidates.length > 15, "sanity: the derivation is actually finding real candidates, not running vacuously");
 
-  const gaps = findUnexplainedGaps(candidates, DECLARED_RE, INSTRUMENT_SURFACE_EXCLUSIONS);
+  const gaps: string[] = findUnexplainedGaps(candidates, DECLARED_RE, INSTRUMENT_SURFACE_EXCLUSIONS);
   assert.deepEqual(
     gaps,
     [],

@@ -17,7 +17,9 @@
     - openapi/daemon.yaml
     - test/spec-conformance.test.ts
     - test/spec-conformance-wiring.test.ts
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=16487ea7980fcf76
   attempts: 0
   rationale: |
     Warp's factory build guide describes a `validate-changes-match-specs` step that checks the

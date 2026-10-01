@@ -10,7 +10,9 @@
   files: [src/lib/sweep.ts, src/run-task.ts, test/a-capped-pr-advances-to-a-corrected-task-contract.test.ts]
   origin: "recon#pr-6153-capped-contract-amendment-2026-09-20"
   plan_refs: ["W1-T77", "W1-T78", "W1-T100", "W1-T150", "W1-T168", "W1-T3579", "W1-T3306", "W1-T3817"]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=40cc069e89b3a380
   attempts: 0
   rationale: |
     OBSERVED on PR #6153. Its current head 59885503 was reviewed at 2026-09-19T23:14:57Z

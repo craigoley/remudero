@@ -586,12 +586,18 @@ export function triageEmptyScopeDisposition(
 /** commitlint's body-max-line-length bound, mirrored from commitlint.config.mjs. */
 export const COMMIT_BODY_MAX_LINE = 100;
 
-/** Word-wrap one prose line to the body budget (never used on Acceptance bullets). */
+/** Word-wrap one prose line to the body budget (never used on Acceptance bullets); a token over it is hard-split. */
 export function wrapBodyLine(line: string, max: number = COMMIT_BODY_MAX_LINE): string[] {
   if (line.length <= max) return [line];
   const out: string[] = [];
   let cur = "";
-  for (const word of line.split(" ")) {
+  for (let word of line.split(" ")) {
+    while (word.length > max) {
+      if (cur) out.push(cur);
+      out.push(word.slice(0, max));
+      cur = "";
+      word = word.slice(max);
+    }
     if (cur && (cur + " " + word).length > max) {
       out.push(cur);
       cur = word;
@@ -689,6 +695,41 @@ export function triageCommitMessage(opts: {
     "",
     `Remudero-Task: ${taskId}`,
   ].join("\n");
+}
+
+/** W1-T4203: a refused triage commit writes the terminal row; a later clearing row re-opens the entry. */
+export const TRIAGE_COMMIT_REFUSED_STEP = "triage.commit_refused";
+export const TRIAGE_REFUSAL_CLEARED_STEP = "triage.refusal_cleared";
+
+export function commitTriageOrRecordRefusal(
+  commit: () => void,
+  feedbackId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): void {
+  try {
+    commit();
+  } catch (e) {
+    log(TRIAGE_COMMIT_REFUSED_STEP, {
+      feedback_id: feedbackId,
+      terminal: true,
+      retryable: false,
+      error: String((e as Error)?.message ?? e),
+    });
+    throw e;
+  }
+}
+
+export function refusedTriageIds(rows: readonly Record<string, unknown>[]): Set<string> {
+  const refused = new Set<string>();
+  const ordered = rows
+    .filter((r) => r.step === TRIAGE_COMMIT_REFUSED_STEP || r.step === TRIAGE_REFUSAL_CLEARED_STEP)
+    .sort((a, b) => String(a.ts ?? "").localeCompare(String(b.ts ?? "")));
+  for (const r of ordered) {
+    if (typeof r.feedback_id !== "string") continue;
+    if (r.step === TRIAGE_COMMIT_REFUSED_STEP) refused.add(r.feedback_id);
+    else refused.delete(r.feedback_id);
+  }
+  return refused;
 }
 
 // ── THE GRILL: the needs-human escalation payload (W1-T42) ──────────────────────────────────

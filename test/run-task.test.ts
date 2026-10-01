@@ -90,7 +90,7 @@ import { readlineAsk, type GitRunner, materializeOriginShards, escalateCommand, 
   buildOpenPrViews,
   STALL_WINDOW, resolveAlreadySatisfiedWithRetry, ALREADY_SATISFIED_VERIFY_ATTEMPTS, type AlreadySatisfiedClaim, type AlreadySatisfiedResolution,
 } from "../src/run-task.js";
-import { DAEMON_DRAFT_BATCH_CAP } from "../src/lib/inbox.js";
+import { DAEMON_DRAFT_BATCH_CAP, draftAttemptKey, resolvedInboxDraftLane } from "../src/lib/inbox.js";
 import { requestStop } from "../src/lib/fleet-control.js";
 import { LaunchdPlistError } from "../src/lib/launchd.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -8966,7 +8966,7 @@ test("W1-T2564: an ORDINARY failure still writes its attempt key — W1-T192's t
   const attempts = JSON.parse(readFileSync(join(root, "state", "inbox-draft-attempts.json"), "utf8"));
   assert.equal(
     attempts.P1,
-    "::0",
+    draftAttemptKey({ id: "P1", summary: "s", evidenceAnchors: [] }, resolvedInboxDraftLane()),
     "a genuinely-attempted failure must still be throttled — this fix narrows the write to refusals ONLY",
   );
 });
@@ -8989,7 +8989,10 @@ test("W1-T2564: the attempt-key migration runs ONCE per daemon start, not per po
 
   await hook(); // poll 1: migration frees P1, it becomes due, the batch runs and re-keys it
   assert.equal(batches, 1, "the poisoned key must be re-opened so the proposal is drafted once more");
-  assert.equal(JSON.parse(readFileSync(join(root, "state", "inbox-draft-attempts.json"), "utf8")).P1, "::0");
+  assert.equal(
+    JSON.parse(readFileSync(join(root, "state", "inbox-draft-attempts.json"), "utf8")).P1,
+    draftAttemptKey({ id: "P1", summary: "s", evidenceAnchors: [] }, resolvedInboxDraftLane()),
+  );
 
   await hook(); // poll 2: the migration must NOT fire again
   await hook();

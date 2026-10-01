@@ -69,7 +69,9 @@
   origin: "followup:DAEMON-1789306309171:2026-09-13T13:53:53.493Z:0"
   plan_refs: ["W1-T505", "W1-T971"]
   files: [src/lib/worker-home.ts, src/lib/worker.ts, test/worker-home.test.ts]
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=cfeecc05028b3c34
   attempts: 0
   note: |
     risk:high is set deliberately, matching W1-T505's and W1-T971's own precedent for this exact

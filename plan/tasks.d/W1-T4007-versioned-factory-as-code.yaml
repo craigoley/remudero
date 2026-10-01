@@ -16,7 +16,9 @@
     - openapi/daemon.yaml
     - test/factory-definition.test.ts
     - test/factory-definition-wiring.test.ts
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=f4a020d80adbc5cf
   attempts: 0
   rationale: |
     Warp's Software Factory work reframes engineering from operating isolated interactive agents to

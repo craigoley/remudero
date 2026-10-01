@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 // scripts/task-id-existence-check.mjs
 //
-// TASK-ID EXISTENCE gate (W1-T1048). Every `W1-T<n>` cited under `src/` or `deploy/` must resolve
+// TASK-ID EXISTENCE gate (W1-T1048). Every `W1-T<n>` cited under `src/`, `deploy/` or `plan/` must resolve
 // to a reservation ref (`refs/rmd-id/W1-T<n>` on the remote) or a declared plan record (`- id:` in
 // plan/tasks.yaml or plan/tasks.d/*.yaml). Either alone is a valid claim.
 //
 // INVARIANT: this checks EXISTENCE, never ownership -- citing an id in shipped source is normal
 // and never itself forbidden, only citing one that resolves nowhere is. `test/` is excluded by
-// construction (scan roots default to `src`, `deploy`): its fixture ids are synthetic, never real.
+// construction (scan roots default to `src`, `deploy`, `plan`): its fixture ids are synthetic, never
+// real. `plan/` joined the roots in W1-T4212: a record could cite an id resolving nowhere unseen.
 // Why: #2251 shipped an id neither reserved nor declared; nothing caught it until an open PR
 // needed renumbering. docs/forensics/task-id-existence-check.md#module-header.
 //
@@ -18,7 +19,7 @@
 //
 // Usage: node scripts/task-id-existence-check.mjs [--dir <path>]... [--plan-tasks-file <path>]
 //   [--plan-tasks-dir <path>] [--baseline <path>] [--remote <name>] [--base <ref>] [--cwd <path>]
-//   [--owner <name>] [--repo <name>] [--head-ref <ref>] [--require-open-prs]. Defaults: src,deploy; plan/tasks.yaml; plan/tasks.d; origin.
+//   [--owner <name>] [--repo <name>] [--head-ref <ref>] [--require-open-prs]. Defaults: src,deploy,plan; plan/tasks.yaml; plan/tasks.d; origin.
 //
 // Exported pure pieces let the fixture test drive each surface independently; main is exported so
 // the CLI itself (spawn + exit code) can be proved too.
@@ -763,7 +764,7 @@ export function main(argv) {
   });
 
   const cwd = values.cwd ?? process.cwd();
-  const dirs = values.dir && values.dir.length > 0 ? values.dir : ["src", "deploy"];
+  const dirs = values.dir && values.dir.length > 0 ? values.dir : ["src", "deploy", "plan"];
 
   let baseline;
   try {

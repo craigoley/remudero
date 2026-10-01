@@ -6,7 +6,9 @@
   verify: auto
   risk: medium
   band_meaning: blast-radius
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=becc088aa91aa00e
   attempts: 0
   origin: "operator-approved merge-queue prerequisites 2026-09-29 (merge-queue plan item C); rehearsed on craigoley/remudero-sandbox"
   files: [src/lib/arm-auto-merge.ts, test/a-pr-the-merge-queue-keeps-ejecting-is-not-re-enqueued-forever.test.ts]

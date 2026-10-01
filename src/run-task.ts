@@ -163,13 +163,13 @@ import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe
 import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { runGarden, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./lib/gardener.js";
-import { boundedGardenPassSpawn, childGardenPassSpawn, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { gardenPassDue, runGarden, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./lib/gardener.js";
+import { boundedGardenPassSpawn, childGardenPassSpawn, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
-import { CONFIG_GARDEN_NAME, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
+import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec, testManifestProposalPath, type TestProposalFeed } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionLedgerRecords, readGateFireRateReport, freshCiFrictionPlanOrigins, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
@@ -677,6 +677,10 @@ import { assertProposedPlanLoads,
   nonPlanFilesInDiff,
   parseTriageArgs,
   parseTriageVerdict,
+  TRIAGE_COMMIT_REFUSED_STEP,
+  TRIAGE_REFUSAL_CLEARED_STEP,
+  commitTriageOrRecordRefusal,
+  refusedTriageIds,
   triageCommitMessage,
   triageDeclaredScope,
   triageEmptyScopeDisposition,
@@ -735,6 +739,7 @@ import {
   classifyProposal,
   draftAttemptKey,
   draftsDueOnDaemon,
+  resolvedInboxDraftLane,
   decideDraftDeferral,
   declinedReasonInLedger,
   type ProposalVerdictKind,
@@ -13703,7 +13708,7 @@ interface RunTaskBodyOptions {
   readHeadShaForProvenance?: (prUrl: string) => string;
   /** W1-T4797: test seam for the pre-push diff-coverage precheck; production reads the real ones. */
   coveragePrecheckPorts?: CoveragePrecheckPorts;
-  /** Where a stale-proof PR-open refusal escalates; production files the task repo's own issue. */
+  /** Where a stale-proof PR-open refusal or managed-checkout install failure escalates; production files the task repo's own issue. */
   prOpenRefusalIssues?: IssueGateway;
   spawnWallClockBoundMs?: number;
   workerRuleHeadlinesEnabled?: boolean;
@@ -13786,6 +13791,36 @@ export class ManagedCheckoutRefreshRefusedError extends RmdError {
   }
 }
 
+/**
+ * W1-T4933: the REVIEWER's call site of the staged install. `reviewCommand` cuts its worktrees from a managed checkout and
+ * links that checkout's node_modules, so a tree that predates the lockfile fails the proofs it runs (six on console PR #1866).
+ * Dispatch's {@link refreshManagedCheckout} shares no path with it. Under the same checkout lock; a held lock or a failed
+ * install is ledgered and the review goes on against the tree that is there (a failure keeps the old one).
+ */
+export function refreshReviewSubjectInstall(
+  repoDir: string,
+  lockPath: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  escalate?: (failure: StagedInstallFailure) => void,
+  install: (repoDir: string) => void = (dir) => void stagedInstall(dir, { log, escalate }),
+): void {
+  if (!existsSync(join(repoDir, "node_modules"))) return;
+  let lock: DrainLockHandle;
+  try {
+    lock = acquireDrainLock(lockPath);
+  } catch (error) {
+    log("review.subject_install_skipped", { reason: `another dispatch holds ${lockPath} (${String((error as Error)?.message ?? error)})` });
+    return;
+  }
+  try {
+    install(repoDir);
+  } catch (error) {
+    log("review.subject_install_kept_stale", { reason: String((error as Error)?.message ?? error).slice(0, 512) });
+  } finally {
+    lock.release();
+  }
+}
+
 export function isManagedCheckoutLockBusy(error: unknown): boolean {
   return error instanceof ManagedCheckoutRefreshRefusedError && error.reason.startsWith("another dispatch holds ");
 }
@@ -13808,17 +13843,21 @@ export type ManagedCheckoutRefresh = { release: () => void } & (
  * W1-T4356: keep `repoDir` current before a worktree borrows its install. Only a checkout with its OWN node_modules is
  * borrowed (`resolveNodeModulesSource` prefers it); any other worktree links the install root the entrypoint keeps fresh.
  * A clean checkout behind origin/main is fast-forwarded and `install` reinstalls on the lockfile change (a failed install
- * reverts the fast-forward, so the next dispatch retries it rather than borrowing a broken tree); a dirty, diverged
- * or off-main one, or one a live worker still borrows from, is left untouched. The lock at `lockPath` is held until the
+ * reverts the fast-forward, so the next dispatch retries it rather than borrowing a broken tree). W1-T4933: the SAME staged
+ * install also runs on a clean checkout whose code is already current, because its tree can predate the lockfile; a failure
+ * there keeps the old tree and the dispatch goes on. A dirty, diverged or off-main one, or one a live worker still borrows from, is left untouched. The lock at `lockPath` is held until the
  * caller's run.lock marks its own borrower, so a peer dispatch never mutates the tree under a worktree it could not yet see.
  */
 export function refreshManagedCheckout(
   repoDir: string,
   lockPath: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  install: (repoDir: string) => void = (dir) => void ensureInstallFresh(dir),
+  install?: (repoDir: string) => void,
+  escalate?: (failure: StagedInstallFailure) => void,
 ): ManagedCheckoutRefresh {
   if (!existsSync(join(repoDir, "node_modules"))) return { kind: "unborrowed", release: () => {} };
+  // W1-T4933: staged and swapped, never the in-place clear-then-fill of ensureInstallFresh, which empties a tree others are linked to.
+  const runInstall = install ?? ((dir: string) => void stagedInstall(dir, { log, escalate }));
   let lock: DrainLockHandle;
   try {
     lock = acquireDrainLock(lockPath);
@@ -13843,7 +13882,16 @@ export function refreshManagedCheckout(
       return skip(`could not fetch origin (${String((error as Error)?.message ?? error)})`);
     }
     const beforeSha = git("rev-parse", "HEAD");
-    if (beforeSha === git("rev-parse", "origin/main")) return { kind: "current", release };
+    if (beforeSha === git("rev-parse", "origin/main")) {
+      // W1-T4933: code that is already current can still sit on a tree that predates its lockfile. A failed refresh keeps
+      // the old tree (stagedInstall ledgered and escalated it); the dispatch goes on and W1-T4193 names any mismatch it causes.
+      try {
+        runInstall(repoDir);
+      } catch (error) {
+        log("managed_checkout.install_kept_stale", { reason: String((error as Error)?.message ?? error).slice(0, 512) });
+      }
+      return { kind: "current", release };
+    }
     if (git("merge-base", "HEAD", "origin/main") !== beforeSha) return skip("checkout has diverged from origin/main");
     const borrower = listRegisteredWorktrees(repoDir).find(({ path }) => {
       const held = path === repoDir ? undefined : readRunLock(path);
@@ -13853,7 +13901,7 @@ export function refreshManagedCheckout(
     git("merge", "--ff-only", "--quiet", "origin/main");
     log("managed_checkout.fast_forward", { before_sha: beforeSha, after_sha: git("rev-parse", "HEAD") });
     try {
-      install(repoDir);
+      runInstall(repoDir);
     } catch (error) {
       // Revert, so the checkout still reads as behind and the next dispatch retries the install instead of linking it.
       git("reset", "--quiet", "--keep", beforeSha);
@@ -14568,8 +14616,10 @@ async function runTask(
      * the REAL `runTask()` catch branch that drops this run's dispatch claim on that refusal.
      */
     worktreeBaseDeps?: Parameters<typeof worktreeAdd>[4];
-    /** W1-T4356: reinstalls a fast-forwarded managed checkout; default {@link ensureInstallFresh}'s `npm ci`. */
+    /** W1-T4356/W1-T4933: refreshes a managed checkout whose lockfile hash moved; default {@link stagedInstall}. */
     managedCheckoutInstall?: (repoDir: string) => void;
+    /** Test gateway for checkout install escalation; production uses the task repo's issue gateway. */
+    prOpenRefusalIssues?: IssueGateway;
     instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
     pairedTrial?: Partial<PairedTrialInput>;
     pairedTrialHost?: "daemon";
@@ -15885,7 +15935,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   let checkoutRefresh: ManagedCheckoutRefresh;
   try {
     checkoutRefresh = await retryWhileLockBusy(
-      () => refreshManagedCheckout(repoDir, join(config.root, "state", `managed-checkout-${task.repo}.lock`), log, opts.managedCheckoutInstall),
+      () => refreshManagedCheckout(repoDir, join(config.root, "state", `managed-checkout-${task.repo}.lock`), log, opts.managedCheckoutInstall, (failure) => {
+        void tryEscalate(managedCheckoutInstallEscalation(failure, task.id, runId), { issues: opts.prOpenRefusalIssues ?? ghIssueGateway(owner, task.repo), ledgerPath, runId });
+      }),
       isManagedCheckoutLockBusy,
       { log },
     );
@@ -18838,6 +18890,8 @@ interface ReviewCommandDeps {
    * reviews validate the managed clone before target data is read. */
   enforceReviewSubjectCheckout?: boolean;
   resolveOwnerRepo?: typeof resolveOwnerRepo;
+  /** W1-T4933: brings an explicit target's managed checkout install in line with its lockfile before proofs run; default {@link stagedInstall}. */
+  refreshSubjectInstall?: (repoDir: string) => void;
 }
 
 type ReviewSubjectFailureReason =
@@ -19310,6 +19364,16 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     return 1;
   }
   const subjectRepoDir = subjectCheckout.repoDir;
+  // W1-T4933: a satellite's managed checkout is the reviewer's install source too; only a validated one (never the test fallback).
+  if (subjectCheckout.explicitTarget && subjectRepoDir !== repoRoot && (reviewSubject.ok || deps.refreshSubjectInstall !== undefined)) {
+    refreshReviewSubjectInstall(
+      subjectRepoDir,
+      join(config.root, "state", `managed-checkout-${repo}.lock`),
+      log,
+      (failure) => void tryEscalate(managedCheckoutInstallEscalation(failure, taskId ?? `PR-${view.number}`, runId), { issues: ghIssueGateway(owner, repo), ledgerPath, runId }),
+      deps.refreshSubjectInstall,
+    );
+  }
   // W1-T322: the same plan lookup this block already does for `criteria` also carries the
   // task's declared scope — an advisory-only input judgeReview needs. Stays `undefined` on ANY
   // read/parse failure (see the catch below), exactly like `criteria` degrading to the body's
@@ -27374,6 +27438,8 @@ export function autoTriageCheck(
     /** W1-T4769: injected owner/repo resolver for the real reserver's clone path; production uses
      *  {@link resolveOwnerRepo}. */
     resolveClaimRepo?: () => { repo: string };
+    /** W1-T4203: injected read of the refused-triage-commit rows; `undefined` = unreadable. */
+    readRefusalRows?: () => Array<Record<string, unknown>> | undefined;
   } = {},
 ): AutoTriageDecision {
   const config = opts.config ?? loadConfig();
@@ -27417,8 +27483,25 @@ export function autoTriageCheck(
   // entry is claimed returns here with no git or ledger I/O. Only a would-be fire pays for the sweep.
   const first = decideAutoTriage(inputs);
   if (!first.fire) return first;
-  const sweep = triageClaimSweepForPass(config, now, inputs.candidates, opts);
-  return sweep === undefined ? first : decideAutoTriage({ ...inputs, heldCandidates: sweep });
+  // W1-T4203: an entry whose triage commit was REFUSED is terminal until cleared. An unreadable
+  // ledger reads as no refusals (the entry is retried, today's behaviour) rather than starving the rung.
+  const refused = refusedTriageIds(
+    (opts.readRefusalRows ??
+      (() => {
+        const read = readLedgerUnionRecordsSync(dirname(ledgerPathFor(config)), {
+          step: [TRIAGE_COMMIT_REFUSED_STEP, TRIAGE_REFUSAL_CLEARED_STEP],
+          refuseIncomplete: true,
+        });
+        return read.ok ? read.rows : undefined;
+      }))() ?? [],
+  );
+  const candidates = inputs.candidates.filter((c) => !refused.has(c));
+  if (candidates.length === 0) {
+    return { fire: false, reason: `every one of the ${inputs.candidates.length} candidate(s) at status: new has a refused triage commit — cleared by a ${TRIAGE_REFUSAL_CLEARED_STEP} row` };
+  }
+  const passInputs = { ...inputs, candidates };
+  const sweep = triageClaimSweepForPass(config, now, candidates, opts);
+  return decideAutoTriage(sweep === undefined ? passInputs : { ...passInputs, heldCandidates: sweep });
 }
 
 /**
@@ -32959,7 +33042,7 @@ export interface GardenBuildContext {
 }
 
 /** One pass of one garden; it logs its own failure under the garden's own step name and never throws. */
-export type RegisteredGardenPass = () => void | Promise<void>;
+export type RegisteredGardenPass = (() => void | Promise<void>) & { due?: () => boolean };
 
 /** W1-T5114: the ONE place each registered garden is built, for the daemon's in-process mode and `rmd garden run`. */
 export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBuildContext, opts: { hourly?: boolean } = {}): RegisteredGardenPass | Promise<RegisteredGardenPass> {
@@ -32973,13 +33056,14 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     log,
     ...(escalate ? { escalate } : {}),
   });
-  const gardenPass = <C extends string, I, A extends GardenAction<C>>(spec: GardenSpec<C, I, A, GardenCheckout>, d: GardenerDeps): RegisteredGardenPass => () => {
+  const withDue = (pass: () => void | Promise<void>, due: () => boolean): RegisteredGardenPass => Object.assign(pass, { due });
+  const gardenPass = <C extends string, I, A extends GardenAction<C>>(spec: GardenSpec<C, I, A, GardenCheckout>, d: GardenerDeps): RegisteredGardenPass => withDue(() => {
     try {
       runGarden(spec, d);
     } catch (e) {
       log(`${spec.name}.gardener_failed`, { error: String((e as Error)?.message ?? e) });
     }
-  };
+  }, () => gardenPassDue(spec, d));
   const noPass: RegisteredGardenPass = () => {};
   switch (name) {
     case "plan": {
@@ -33010,7 +33094,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "test": {
       const d = deps("test");
       return loadTestManifestProbe(repoRoot).then(
-        (probe): RegisteredGardenPass => async () => {
+        (probe): RegisteredGardenPass => withDue(async () => {
           try {
             let feed: TestProposalFeed | { status: "failed"; error: string } | undefined;
             if (opts.hourly) {
@@ -33028,7 +33112,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
           } catch (e) {
             log("test.gardener_failed", { error: String((e as Error)?.message ?? e) });
           }
-        },
+        }, () => gardenPassDue(testGardenSpec(d, probe), d)),
         (e: unknown) => {
           log("test.gardener_failed", { error: String((e as Error)?.message ?? e) });
           return noPass;
@@ -33043,13 +33127,13 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         (m: { buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] } }): RegisteredGardenPass => {
           const workerEnv = buildWorkerEnv({}, process.env, { allowApiKey: config.overflow === "api_key" });
           const mountRecommendations = mountRecommendationSource({ build: m.buildMountHeadroomSweep, stateDir, mountsFile: mountsPath(repoRoot), billingMode: billingMode(Object.keys(workerEnv)), log });
-          return () => {
+          return withDue(() => {
             try {
               runConfigGarden(configGardenSpec(d, { mountRecommendations }), d, { mountRecommendations });
             } catch (e) {
               log(`${CONFIG_GARDEN_NAME}.gardener_failed`, { error: String((e as Error)?.message ?? e) });
             }
-          };
+          }, () => configCanariesDue(stateDir) || gardenPassDue(configGardenSpec(d, { mountRecommendations }), d));
         },
         (e: unknown) => {
           log("config.gardener_failed", { error: String((e as Error)?.message ?? e) });
@@ -33154,6 +33238,15 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       };
     }
   }
+}
+
+export function registeredGardenDueProbe(name: RegisteredGardenName, ctx: GardenBuildContext): () => boolean {
+  let probe: (() => boolean) | undefined;
+  Promise.resolve(buildRegisteredGarden(name, ctx)).then(
+    (pass) => { probe = pass.due; },
+    (e: unknown) => ctx.log(GARDEN_DUE_FAILED_STEP, { name, error: String((e as Error)?.message ?? e) }),
+  );
+  return () => (probe ? probe() : true);
 }
 
 /** Build the named garden and run ONE pass of it; resolves 0 once the pass has run (it logs its own failures). */
@@ -33407,7 +33500,8 @@ export async function daemonCommand(
     deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : childGardenPassSpawn(),
     2,
   );
-  const offLoopGarden = (name: RegisteredGardenName) => (intervalMs: number) => startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log });
+  const offLoopGarden = (name: RegisteredGardenName) => (intervalMs: number) =>
+    startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, ...(deps.gardenPassesInProcess ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) });
   if (!target.isSelf && !flagValue(rest, "--plan")) {
     const repoDir = join(reposDir, target.repo);
     if (!existsSync(repoDir)) {
@@ -42896,7 +42990,8 @@ async function triageCommandLocked(
     // triagePrompt/decideTriage/nonPlanFilesInDiff all license one. The shared function's
     // `plan/ MASTER-PLAN.md` pathspec stages the amendment; the section index is derived from
     // MASTER-PLAN.md whenever a runtime reader needs it.
-    applyPlanProposalCommit(worktreePath, commitMessage, log);
+    // W1-T4203: a refused commit leaves the entry at `status: new`; the row below is what stops the rung re-picking it.
+    commitTriageOrRecordRefusal(() => applyPlanProposalCommit(worktreePath, commitMessage, log), feedbackId, log);
 
     // OUTPUT VALIDATION (W1-T2326 Q2) — the PORT of `planCommand`'s `unreservedFiledIds` +
     // `plan.id_check`. Reserving ids is half the mint-and-reserve contract; this is the other half,
@@ -43876,7 +43971,8 @@ export function buildInboxDraftHook(
         log("inbox.draft_readiness_unavailable", { error: String((e as Error)?.message ?? e) });
       }
 
-      const due = draftsDueOnDaemon(proposals, drafts, attempts, DAEMON_DRAFT_BATCH_CAP, draftReadiness);
+      const draftLane = resolvedInboxDraftLane(repoRoot);
+      const due = draftsDueOnDaemon(proposals, drafts, attempts, DAEMON_DRAFT_BATCH_CAP, draftReadiness, draftLane);
       if (due.length === 0) return;
 
       // W1-T2561: NAME THE DEFERRAL, NEVER CAP SILENTLY. `draftsDueOnDaemon` now returns at most
@@ -43886,7 +43982,7 @@ export function buildInboxDraftHook(
       // tell a paced drain from a wedged one. This is a pure observation — a count of a set already
       // computed above, spawning nothing — and `deferred: 0` on an uncapped poll is a real reading,
       // not silence, so the row is written unconditionally.
-      const eligible = draftsDueOnDaemon(proposals, drafts, attempts, 0, draftReadiness);
+      const eligible = draftsDueOnDaemon(proposals, drafts, attempts, 0, draftReadiness, draftLane);
       log("inbox.draft_batch", {
         eligible: eligible.length,
         drafting: due.length,
@@ -43998,7 +44094,7 @@ export function buildInboxDraftHook(
         // change. This is the ONLY arm that skips the write; an ordinary failure still keys, so
         // W1-T192's throttle is untouched (its own test pins that).
         if (outcome.ok || !outcome.refused) {
-          nextAttempts[outcome.proposalId] = draftAttemptKey(proposal);
+          nextAttempts[outcome.proposalId] = draftAttemptKey(proposal, draftLane);
         } else {
           refusedThisBatch.push(outcome.proposalId);
         }
@@ -48615,6 +48711,7 @@ function commandSyntax(name: string): string {
 // InstallFreshnessDeps consumers below) keeps its import path unchanged. This is a
 // PURE MOVE — the function body and behaviour are byte-identical to the pre-move version.
 import { reconcilePlan, type ReconcileSummary } from "./lib/plan-reconcile.js";
+import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 export { hashInstallInputs, installHashMarkerPath };
 

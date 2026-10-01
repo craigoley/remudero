@@ -390,6 +390,7 @@ async function runT4193(
     spawnReturns?: boolean;
     readRemoteHead?: (repoDir: string, ref: string) => string;
     managedCheckoutInstall?: (repoDir: string) => void;
+    installFailureIssues?: { create: (title: string, body: string, labels: string[]) => string; listOpen: () => [] };
   } = {},
 ): Promise<T4193Run> {
   const planPath = join(root, "tasks.yaml");
@@ -423,6 +424,7 @@ async function runT4193(
         claimReserver: reserver,
         ...(opts.readRemoteHead ? { worktreeBaseDeps: { readRemoteHead: opts.readRemoteHead } } : {}),
         managedCheckoutInstall: opts.managedCheckoutInstall,
+        prOpenRefusalIssues: opts.installFailureIssues,
       }),
     );
   } catch (e) {
@@ -687,6 +689,27 @@ test("W1-T4356: an install that fails after the fast-forward is reverted and ref
   }
 });
 
+test("W1-T4933: default staged install failure reaches the dispatch escalation gateway once", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4933-escalate-`));
+  try {
+    const { repoDir } = t4193Fixture(root, { "package.json": pkgJson("t4193-core", { a: "^1.0.0" }) });
+    mkdirSync(join(repoDir, "node_modules"));
+    const created: string[] = [];
+    const r = await runT4193(root, { installFailureIssues: {
+      listOpen: () => [],
+      create: (title) => {
+        created.push(title);
+        return "https://example.invalid/issues/install-failure";
+      },
+    } });
+    assert.ok(r.ledger.some((row) => row.step === "managed_checkout.install_failed"), "the real npm ci default failed on the absent lockfile");
+    assert.equal(created.length, 1, "the dispatch callback delivered one escalation through the offline gateway");
+    assert.match(created[0] ?? "", /staged install|install failed|lockfile/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T4356: a checkout without its own node_modules is not borrowed, so it is never touched or locked", () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4356-unborrowed-`));
   try {
@@ -703,14 +726,16 @@ test("W1-T4356: a checkout without its own node_modules is not borrowed, so it i
   }
 });
 
-test("W1-T4356: a current checkout is left alone and its lock is held until released", () => {
+test("W1-T4356: a current checkout keeps its code and its lock is held until released (W1-T4933: its install is refreshed)", () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4356-current-`));
   try {
     const { repoDir } = t4193Fixture(root, { "package.json": pkgJson("t4193-core", { a: "^1.0.0" }) });
     mkdirSync(join(repoDir, "node_modules"));
     const lockPath = join(root, "state", "refresh.lock");
-    const out = refreshManagedCheckout(repoDir, lockPath, refreshLog().log, () => assert.fail("never installs"));
+    const installs: string[] = [];
+    const out = refreshManagedCheckout(repoDir, lockPath, refreshLog().log, (dir) => void installs.push(dir));
     assert.equal(out.kind, "current");
+    assert.deepEqual(installs, [repoDir], "W1-T4933: code that is current still has its install compared with its lockfile");
     assert.throws(() => refreshManagedCheckout(repoDir, lockPath, refreshLog().log), (e: unknown) =>
       e instanceof ManagedCheckoutRefreshRefusedError && /another dispatch holds/.test(e.message), "a peer is refused while it is held");
     out.release();

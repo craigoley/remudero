@@ -507,6 +507,39 @@ export function evaluateCommitTrailerGate({ trailerCommits, changedPaths, taskFi
 }
 
 /**
+ * W1-T4206 — THE TASK IDENTITY SURFACES, IN THE REVIEWER'S ORDER. `resolveReviewTaskId` (run-task.ts)
+ * reads the body's `Remudero-Task:` trailer first and, absent one, the task id a fleet `run-<taskId>-<epochMs>`
+ * head ref carries; `reviewCommand` then synthesizes a trailer from that recovered id. This gate and
+ * proof-discrimination-gate read the body alone, so a trailerless run-branch PR was judged one way by the
+ * reviewer and refused another here, costing a CI round. Both gates now resolve identity through THIS function.
+ * `surface` is `"trailer"`, `"head-ref"` or `undefined`; `read` names every surface consulted, for a refusal.
+ * @param {{ body?: string, headRefName?: string, planOnly?: boolean }} input
+ * @returns {{ taskId: string | undefined, surface: "trailer" | "head-ref" | undefined, read: string }}
+ */
+export function resolveTaskIdentity({ body, headRefName, planOnly = false }) {
+  const trailerId = extractTaskTrailerId(body ?? "");
+  if (trailerId !== undefined) return { taskId: trailerId, surface: "trailer", read: `the PR body's Remudero-Task trailer (${trailerId})` };
+  const fromRef = planOnly ? undefined : taskIdFromRunBranch(headRefName);
+  if (fromRef !== undefined) {
+    return { taskId: fromRef, surface: "head-ref", read: `the run-shaped head ref "${headRefName}" (${fromRef}); the PR body carried no trailer` };
+  }
+  const refNote = planOnly
+    ? "a plan-only diff recovers no identity from the head ref"
+    : headRefName === undefined || headRefName === "" ? "no head ref was supplied" : `the head ref "${headRefName}" is not a run-<taskId>-<epochMs> branch`;
+  return { taskId: undefined, surface: undefined, read: `the PR body (no Remudero-Task trailer) and the head ref (${refNote}); the trailer must be in the PR body` };
+}
+
+/** True only when the range's changed paths are known, non-empty and all in plan scope. */
+export function isPlanOnlyDiff(changedPaths) {
+  return changedPaths !== undefined && changedPaths.length > 0 && changedPaths.every(isInPlanScope);
+}
+
+/** The body the shared predicates should judge: a head-ref-recovered identity is carried as a trailer line, as the reviewer does. */
+export function bodyWithRecoveredIdentity(body, identity) {
+  return identity.surface === "head-ref" ? `${body ?? ""}\n\nRemudero-Task: ${identity.taskId}\n` : (body ?? "");
+}
+
+/**
  * The gate's own verdict: the bot exemption first, then Rule 15 and the three structural refusals
  * (plan-only-implementation, follow-up-commit-implementation, and W1-T3658's trailer/body proof
  * divergence), then `acceptanceAuthorTimeCheck` (no `expectedTaskId` — this job has no PR-to-task
@@ -547,9 +580,9 @@ export function evaluateGate({ body, authorLogin, headRefName, trailerResolves, 
   const proofDivergence = trailerBodyProofDivergenceRefusal({ body, taskAcceptanceForId });
   if (proofDivergence !== undefined) return proofDivergence;
   // W1-T3747: reconcile only a credited implementation; filings/body-only PRs stay silent.
-  const planOnly = changedPaths !== undefined && changedPaths.length > 0 && changedPaths.every(isInPlanScope);
-  const trailerId = extractTaskTrailerId(body ?? "");
-  const creditedTaskId = planOnly ? undefined : (trailerId ?? taskIdFromRunBranch(headRefName));
+  const planOnly = isPlanOnlyDiff(changedPaths);
+  const identity = resolveTaskIdentity({ body, headRefName, planOnly });
+  const creditedTaskId = planOnly ? undefined : identity.taskId;
   if (creditedTaskId !== undefined && taskFilesForId !== undefined) {
     let declaredFiles;
     let declaredAcceptance;
@@ -568,10 +601,12 @@ export function evaluateGate({ body, authorLogin, headRefName, trailerResolves, 
       if (violations.length > 0) return { ok: false, defect: "credited-test-path", message: violations.map((v) => v.message).join(" ") };
     }
   }
-  const result = acceptanceAuthorTimeCheck(body, trailerResolves === undefined ? {} : { trailerResolves });
+  const judged = bodyWithRecoveredIdentity(body, identity);
+  const result = acceptanceAuthorTimeCheck(judged, trailerResolves === undefined ? {} : { trailerResolves });
   // The shared predicate still uses the lightweight ID resolver. Only the reviewer's non-empty
   // criteria at this PR head can justify skipping the body's proof-shape check.
-  return result.ok ? authorTimeProofShapeRefusal(body, result, criteriaFromHeadPlan, root) : result;
+  if (result.ok) return authorTimeProofShapeRefusal(judged, result, criteriaFromHeadPlan, root);
+  return { ...result, message: `${result.message} Task identity was read from ${identity.read}.` };
 }
 
 /**
@@ -717,7 +752,11 @@ export function main(argv, { root = REPO_ROOT } = {}) {
       authorLogin: payload.authorLogin,
       headRefName: payload.headRefName,
       trailerResolves: planTrailerResolver(root),
-      criteriaFromHeadPlan: criteriaResolveAtHead({ body: payload.body, headSha: payload.headSha, root }),
+      criteriaFromHeadPlan: criteriaResolveAtHead({
+        body: bodyWithRecoveredIdentity(payload.body, resolveTaskIdentity({ body: payload.body, headRefName: payload.headRefName, planOnly: isPlanOnlyDiff(changedPaths) })),
+        headSha: payload.headSha,
+        root,
+      }),
       introducedTaskIds: introducedShardTaskIds({ baseSha: effectiveBaseSha, headSha: payload.headSha, root }),
       trailerCommits,
       changedPaths,

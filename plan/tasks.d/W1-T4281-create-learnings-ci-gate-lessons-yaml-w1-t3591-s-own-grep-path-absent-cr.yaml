@@ -10,7 +10,9 @@
   origin: "proof-debt:W1-T3591"
   plan_refs: ["W1-T33", "W1-T2477", "W1-T3591"]
   files: [learnings/ci-gate-lessons.yaml]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=a275b3b51e221cc4
   attempts: 0
   rationale: |
     GROUNDED FROM SOURCE, not assumed. `src/lib/measurement-cadence.ts:2717` defines

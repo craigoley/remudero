@@ -31,5 +31,7 @@
   origin: "feedback#FD-2026-09-03-fb-repair-blocked-ambiguous-2956"
   plan_refs: ["§7B", "§5D", "P25"]
   files: [CLAUDE.md]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=ae649c01e31358f7
   attempts: 0
