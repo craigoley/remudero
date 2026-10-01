@@ -271,8 +271,8 @@ test("wiring: runReview computes the scope section AND pushes it into the commen
   assert.match(runReviewSrc, /if \(scopeSection\) parts\.push\(scopeSection\)/, "…and actually append it to the body");
 
   // INDEPENDENCE: the binding verdict never sees it. Advisory means advisory.
-  const judgeIdx = runReviewSrc.indexOf("const computed = judgeReview(");
-  assert.ok(judgeIdx > -1, "could not locate the judgeReview call site");
+  const judgeIdx = runReviewSrc.indexOf("const computed = await judgeReviewAsync(");
+  assert.ok(judgeIdx > -1, "could not locate the async judgeReview call site");
   const judgeArgs = runReviewSrc.slice(judgeIdx, runReviewSrc.indexOf("});", judgeIdx) + 3);
   assert.doesNotMatch(judgeArgs, /\bscope(Section|AdvisorySection)\b/, "judgeReview's inputs never reference it");
 });
