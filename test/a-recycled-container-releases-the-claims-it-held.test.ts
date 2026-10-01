@@ -167,7 +167,7 @@ test("W1-T5047: the mint row is found in the first archive after the claim and n
   assert.equal(findClaimMintRow(stateDir, "W1-T4266", anchor), undefined);
 
   // The live file is read too, and a torn line in it is skipped.
-  writeFileSync(join(stateDir, "ledger.ndjson"), `{torn\n${JSON.stringify(claimRow)}\n`);
+  writeFileSync(join(stateDir, "ledger.ndjson"), `{torn dispatch.claim ${dispatchClaimRef("W1-T4266")}\n"dispatch.claim ${dispatchClaimRef("W1-T4266")}"\n${JSON.stringify(claimRow)}\n`);
   assert.equal(findClaimMintRow(stateDir, "W1-T4266", anchor)?.source, "ledger.ndjson");
   assert.equal(findClaimMintRow(join(dir, "absent"), "W1-T4266", anchor), undefined);
 });

@@ -419,9 +419,8 @@ function parseLedgerRow(line: string): Record<string, unknown> | undefined {
   try {
     const row: unknown = JSON.parse(line);
     return row !== null && typeof row === "object" ? (row as Record<string, unknown>) : undefined;
-  } catch (error) {
-    if (error instanceof SyntaxError) return undefined;
-    throw error;
+  } catch {
+    return undefined;
   }
 }
 
