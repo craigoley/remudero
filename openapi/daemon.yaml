@@ -7689,6 +7689,94 @@ components:
         sha:
           type: string
 
+    RouteReadTotals:
+      type: object
+      description: One caller's reads of one route since the rollup began, and the newest read's time.
+      required: [reads, lastAt]
+      properties:
+        reads:
+          type: integer
+        lastAt:
+          type: [string, "null"]
+
+    RouteReadLayerSummary:
+      type: object
+      description: >
+        One legacy cache layer's gate G reading. zeroConsoleDays counts whole days since the layer's
+        newest console read, or since the rollup began. positiveControl is true when the views that
+        replace it were read by the console inside that zero window; gateHolds needs both.
+      required: [layer, paths, consoleReads, lastConsoleReadAt, zeroConsoleDays, positiveControl, gateHolds]
+      properties:
+        layer:
+          type: string
+        paths:
+          type: array
+          items:
+            type: string
+        consoleReads:
+          type: integer
+        lastConsoleReadAt:
+          type: [string, "null"]
+        zeroConsoleDays:
+          type: integer
+        positiveControl:
+          type: boolean
+        gateHolds:
+          type: boolean
+
+    RouteReadSummary:
+      type: object
+      description: One served route's reads by caller. console and fleet are absent until that caller reads it.
+      required: [path, kind, layers, zeroConsoleDays]
+      properties:
+        path:
+          type: string
+        kind:
+          type: string
+          enum: [view, legacy, other]
+        layers:
+          type: array
+          items:
+            type: string
+        zeroConsoleDays:
+          type: integer
+        console:
+          $ref: "#/components/schemas/RouteReadTotals"
+        fleet:
+          $ref: "#/components/schemas/RouteReadTotals"
+
+    RouteReadsResult:
+      type: object
+      description: >
+        GET /v1/route-reads's body (src/lib/route-read-rollup.ts): the hourly serve.route_reads
+        rollup folded into totals, plus the current hour's counts.
+      required: [asOf, since, hours, gateDays, views, layers, routes]
+      properties:
+        asOf:
+          type: string
+        since:
+          type: [string, "null"]
+        hours:
+          type: integer
+        gateDays:
+          type: integer
+        views:
+          type: object
+          required: [consoleReads, lastConsoleReadAt]
+          properties:
+            consoleReads:
+              type: integer
+            lastConsoleReadAt:
+              type: [string, "null"]
+        layers:
+          type: array
+          items:
+            $ref: "#/components/schemas/RouteReadLayerSummary"
+        routes:
+          type: array
+          items:
+            $ref: "#/components/schemas/RouteReadSummary"
+
     # ── W1-T4610 -- the inbox and escalation routes' payloads. Each schema below is derived from
     # the TypeScript type its handler sends (src/lib/panel-graph.ts, src/lib/inbox-responder.ts,
     # src/lib/inbox-plain.ts, src/lib/inbox.ts, src/lib/fleet-lane.ts, src/lib/panel-actions.ts,
@@ -12819,6 +12907,27 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/VersionResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/route-reads:
+    get:
+      summary: Gate G's evidence -- console and fleet reads per legacy route, view route and cache layer.
+      description: >
+        src/lib/route-read-rollup.ts. Serve counts every GET by route and caller (the console when
+        the request crossed the Cloudflare edge, else the fleet) and writes one serve.route_reads
+        ledger row per hour, never one per request. This route answers from memory and writes nothing.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The rollup's totals and each layer's zero-console-read streak.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouteReadsResult"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
