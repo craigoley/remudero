@@ -162,20 +162,21 @@ import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe
 import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { startGarden, type GardenCheckout, type GardenerDeps } from "./lib/gardener.js";
-import { productionGardenerOverseerPorts, startGardenerOverseer } from "./lib/gardener-overseer.js";
+import { runGarden, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./lib/gardener.js";
+import { childGardenPassSpawn, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
-import { configGardenSpec, mountRecommendationSource, startConfigGarden } from "./lib/config-gardener.js";
-import { loadTestManifestProbe, refreshTestManifestProposalAsync, startTestGarden, testGardenSpec } from "./lib/test-gardener.js";
+import { CONFIG_GARDEN_NAME, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
+import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec, testManifestProposalPath, type TestProposalFeed } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
-import { ciFailureSignature, startCiFrictionGardener, readCiFrictionLedgerRecords, readGateFireRateReport, freshCiFrictionPlanOrigins, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
+import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionLedgerRecords, readGateFireRateReport, freshCiFrictionPlanOrigins, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
-import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, selectorShadowFlakeLedger, startSelectorShadowGardener } from "./lib/selector-shadow-gardener.js";
+import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, runSelectorShadowGardener, selectorShadowFlakeLedger } from "./lib/selector-shadow-gardener.js";
 import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, startMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
-import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener, startEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
+import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, openIncidentFeedbackOrigins, startSreLane } from "./lib/sre-lane.js";
-import { fileConsumerVia, gitHeartbeatSource, startHostResourceGardener } from "./lib/host-resource-gardener.js";
+import { fileConsumerVia, gitHeartbeatSource, HOST_RESOURCE, runHostResourcePass } from "./lib/host-resource-gardener.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreRunbookCatalog } from "./lib/sre-runbooks.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
@@ -32865,6 +32866,237 @@ export function knowledgeGardenWorkspace(opts: {
   };
 }
 
+/** What {@link buildRegisteredGarden} builds a garden over: the daemon's own config, repo and ledger writers. */
+export interface GardenBuildContext {
+  config: Config;
+  repoRoot: string;
+  owner: string;
+  repo: string;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  raiseDuplicate: (e: Escalation) => string;
+}
+
+/** One pass of one garden; it logs its own failure under the garden's own step name and never throws. */
+export type RegisteredGardenPass = () => void | Promise<void>;
+
+/** W1-T5114: the ONE place each registered garden is built, for the daemon's in-process mode and `rmd garden run`. */
+export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBuildContext, opts: { hourly?: boolean } = {}): RegisteredGardenPass | Promise<RegisteredGardenPass> {
+  const { config, repoRoot, owner, repo, log, raiseDuplicate } = ctx;
+  const stateDir = join(config.root, "state");
+  const deps = (garden: Parameters<typeof gardenCheckout>[0]["name"], escalate?: (e: Escalation) => string): GardenerDeps => ({
+    stateDir,
+    repoRoot,
+    openWorkspace: () => gardenCheckout({ name: garden, repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log }),
+    prState: (prUrl: string) => gardenPrState(owner, repo, prUrl, ghJson),
+    log,
+    ...(escalate ? { escalate } : {}),
+  });
+  const failed = (step: string, extra: Record<string, unknown> = {}) => (e: unknown) => log(step, { ...extra, error: String((e as Error)?.message ?? e) });
+  const gardenPass = <C extends string, I, A extends GardenAction<C>>(spec: GardenSpec<C, I, A, GardenCheckout>, d: GardenerDeps): RegisteredGardenPass => () => {
+    try {
+      runGarden(spec, d);
+    } catch (e) {
+      failed(`${spec.name}.gardener_failed`)(e);
+    }
+  };
+  const noPass: RegisteredGardenPass = () => {};
+  switch (name) {
+    case "plan": {
+      const d = deps("plan");
+      return gardenPass(planGardenSpec(d), d);
+    }
+    // W1-T4116: the gates tighten, refresh and propose demoting themselves from their own
+    // measurements. The ratchets are ES modules, so the garden starts once they have loaded.
+    case "gate": {
+      const d = deps("gate");
+      return loadGateProbes(repoRoot).then(
+        (probes) => gardenPass(gateGardenSpec(d, probes), d),
+        (e: unknown) => {
+          failed("gate.gardener_failed")(e);
+          return noPass;
+        },
+      );
+    }
+    // W1-T4112: the test suite tends itself — a material duration proposal is
+    // adopted, a repeat flaker is retiered to the slow tier, and a stale one-way
+    // baseline shrinks, all read from scripts/test-tier-manifest.mjs's own
+    // functions and the ledger's `test.flake_retry` rows. Same async-probe-load
+    // shape as the gate garden just above, since the manifest is also an ES module.
+    case "test": {
+      const d = deps("test");
+      return loadTestManifestProbe(repoRoot).then(
+        (probe): RegisteredGardenPass => async () => {
+          try {
+            let feed: TestProposalFeed | { status: "failed"; error: string } | undefined;
+            if (opts.hourly) {
+              try {
+                feed = await refreshTestManifestProposalAsync(owner, repo, stateDir);
+              } catch (e) {
+                feed = { status: "failed", error: String((e as Error)?.message ?? e) };
+                log("test.evidence_failed", { error: feed.error });
+              }
+            }
+            const pass = runGarden(testGardenSpec(d, probe), d);
+            if (opts.hourly) {
+              log("test.pass", { ran: pass.ran, feed, pr_url: pass.prUrl ?? null, proposal_present: existsSync(testManifestProposalPath(stateDir)) });
+            }
+          } catch (e) {
+            failed("test.gardener_failed")(e);
+          }
+        },
+        (e: unknown) => {
+          failed("test.gardener_failed")(e);
+          return noPass;
+        },
+      );
+    }
+    // W1-T4113: worker configuration tends itself — budgets, mounts and the learnings cap, each a
+    // canary it judges and rolls back. The headroom sweep is an ES module, so it starts once loaded.
+    case "config": {
+      const d = deps("config");
+      return import(pathToFileURL(join(repoRoot, "scripts", "mount-headroom-sweep.mjs")).href).then(
+        (m: { buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] } }): RegisteredGardenPass => {
+          const workerEnv = buildWorkerEnv({}, process.env, { allowApiKey: config.overflow === "api_key" });
+          const mountRecommendations = mountRecommendationSource({ build: m.buildMountHeadroomSweep, stateDir, mountsFile: mountsPath(repoRoot), billingMode: billingMode(Object.keys(workerEnv)), log });
+          return () => {
+            try {
+              runConfigGarden(configGardenSpec(d, { mountRecommendations }), d, { mountRecommendations });
+            } catch (e) {
+              failed(`${CONFIG_GARDEN_NAME}.gardener_failed`)(e);
+            }
+          };
+        },
+        (e: unknown) => {
+          failed("config.gardener_failed")(e);
+          return noPass;
+        },
+      );
+    }
+    // W1-T4117: an export the adoption scan reported unreferenced twice, and that grep
+    // finds named nowhere else, is deleted in a small batch.
+    case "export": {
+      const d = deps("export");
+      return gardenPass(exportGardenSpec(d), d);
+    }
+    // W1-T4435: the fleet prices its own slowest gate. Every extra-head cause (a red
+    // required check, main merging in, a merge conflict, a refused fix-lane commit) is
+    // priced in PR MINUTES — never fire count — from the ledger union and gate-fire-
+    // rate.ts's own measurement (W1-T4115); the costliest cause with no open task is
+    // drafted as one, parked for a person.
+    case "ci-friction": {
+      const d = deps("ci-friction", raiseDuplicate);
+      const sources: CiFrictionGardenSources = {
+        ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
+        gateFireRates: () => readGateFireRateReport(stateDir),
+        planOrigins: () => freshCiFrictionPlanOrigins(repoRoot),
+        mintTaskId: ciLearningTaskIdMinter(repoRoot),
+      };
+      return gardenPass(ciFrictionGardenSpec(d, sources), d);
+    }
+    // W1-T4439: aggregate complete coverage-shard shadow records before W1-T4406
+    // may narrow CI. A real miss opens a parked task naming the observed edge.
+    case "selector-shadow": {
+      const d: GardenerDeps = {
+        stateDir,
+        repoRoot,
+        openWorkspace: () => gardenCheckout({ name: "selector-shadow", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log }),
+        log,
+      };
+      return async () => {
+        try {
+          const runs = await readSelectorShadowRunsAsync(owner, repo, undefined, {
+            cachePath: join(stateDir, "selector-shadow-log-cache.json"),
+            warn: (message) => log("selector-shadow.cache_failed", { message }),
+            onFlakes: selectorShadowFlakeLedger(log),
+          });
+          await runSelectorShadowGardener(d, () => runs, (miss) => readSelectorShadowChangedPaths(owner, repo, miss), ciLearningTaskIdMinter(repoRoot));
+        } catch (e) {
+          failed("selector-shadow.gardener_failed")(e);
+        }
+      };
+    }
+    case "evidence-coverage":
+      return () => {
+        try {
+          runEvidenceCoverageGardener(daemonEvidenceCoverageInput({ stateDir, root: repoRoot, log }));
+        } catch (e) {
+          failed("evidence_coverage.gardener_failed", { reason: "a pass that throws is logged and the next tick tries again" })(e);
+        }
+      };
+    // W1-T4802: the overseer watches every gardener -- liveness, the effect of merged changes and
+    // churn -- and folds effect back into each class's Beta record. Off: state/GARDENER_OVERSEER_OFF.
+    case "overseer":
+      return () => {
+        try {
+          runGardenerOverseer(productionGardenerOverseerPorts({ stateDir, repoRoot, owner, repo, fetch: ghJson, log, escalate: raiseDuplicate }));
+        } catch (e) {
+          failed("gardener_overseer.overseer_failed")(e);
+        }
+      };
+    // W1-T4803: the files merge conflicts strand pull requests on, ranked by PR minutes; the
+    // costliest one no task restructures is filed as one plan-only proposal.
+    case "hot-file": {
+      const d = deps("hot-file", raiseDuplicate);
+      const sources: HotFileGardenSources = {
+        ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
+        mainHistory: (sinceIso) => readMainHistory(repoRoot, sinceIso),
+        planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
+        mintTaskId: ciLearningTaskIdMinter(repoRoot),
+        fileExists: (file) => existsSync(join(repoRoot, file)),
+      };
+      return gardenPass(hotFileGardenSpec(d, sources), d);
+    }
+    // W1-T4804: host disk, swap and inodes are projected to full from the heartbeat history and
+    // answered in tiers against each host's own janitor cadence. Off: state/HOST_RESOURCE_OFF.
+    case "host-resource": {
+      const mintTaskId = ciLearningTaskIdMinter(repoRoot);
+      const ports = {
+        stateDir,
+        log,
+        readHeartbeats: gitHeartbeatSource(repoRoot),
+        handoff: (h: { id: string; raw: string; origin: string }) => void captureFeedback(repoRoot, { id: h.id, raw: h.raw, origin: h.origin as FeedbackOrigin }),
+        openIncidentOrigins: () => openIncidentFeedbackOrigins(repoRoot),
+        escalate: raiseDuplicate,
+        planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
+        fileConsumer: fileConsumerVia(() => gardenCheckout({ name: "host-resource", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log }), mintTaskId),
+      };
+      return () => {
+        try {
+          runHostResourcePass(ports);
+        } catch (error) {
+          log(`${HOST_RESOURCE}.failed`, { error: String((error as Error)?.message ?? error), reason: "a pass that throws is logged and the next tick tries again" });
+        }
+      };
+    }
+  }
+}
+
+/** Build the named garden and run ONE pass of it; resolves 0 once the pass has run (it logs its own failures). */
+export function runRegisteredGardenPass(name: RegisteredGardenName, args: readonly string[], ctx: GardenBuildContext, signal: { readonly stopped: boolean } = { stopped: false }): Promise<number> {
+  const run = (pass: RegisteredGardenPass): Promise<number> => Promise.resolve(pass()).then(() => 0);
+  const built = buildRegisteredGarden(name, ctx, { hourly: args.includes(GARDEN_HOURLY_FLAG) });
+  return built instanceof Promise ? built.then((pass) => (signal.stopped ? 0 : run(pass))) : run(built);
+}
+
+/** `rmd garden run <name> [--hourly]` — one pass of one registered garden, the daemon's off-loop child (W1-T5114). */
+async function gardenCommand(rest: string[]): Promise<number> {
+  const [sub, name] = rest;
+  const badArg = unknownArgError("garden", rest.slice(2), [], [GARDEN_HOURLY_FLAG]);
+  if (sub !== "run" || name === undefined || !isRegisteredGardenName(name) || badArg) {
+    console.error(`${badArg ?? `rmd garden: usage: ${commandSyntax("garden")} — gardens: ${REGISTERED_GARDEN_NAMES.join(", ")}`}\n` + USAGE);
+    return 2;
+  }
+  const config = loadConfig();
+  const ledgerPath = ledgerPathFor(config);
+  const self = resolveOwnerRepo();
+  const runId = `GARDEN-${name}-${Date.now()}`;
+  const log = (step: string, extra: Record<string, unknown> = {}) =>
+    appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra });
+  const raiseDuplicate = (e: Escalation): string =>
+    escalate({ ...e, runId }, { issues: ghIssueGateway(self.owner, self.repo), ledgerPath, runId });
+  return await runRegisteredGardenPass(name, rest.slice(2), { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate });
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -32921,6 +33153,7 @@ export async function daemonCommand(
      *  no-tools spawn; a test injects a fake so the block-escalation wiring is exercised without
      *  a real worker spawn. */
     escalationJudge?: (e: Escalation) => Promise<EscalationJudgeVerdict>;
+    gardenPassesInProcess?: boolean;
   } = {},
 ): Promise<number> {
   // W1-T2697: mark THIS process as the daemon BEFORE anything below can append a ledger row —
@@ -33084,6 +33317,9 @@ export async function daemonCommand(
   let plan: Plan;
   const raiseDuplicate = (e: Escalation): string =>
     escalate({ ...e, runId }, { issues: ghIssueGateway(target.owner, target.repo), ledgerPath, runId });
+  const gardenContext: GardenBuildContext = { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate };
+  const gardenPassSpawn: GardenPassSpawn = deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : childGardenPassSpawn();
+  const offLoopGarden = (name: RegisteredGardenName) => (intervalMs: number) => startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log });
   if (!target.isSelf && !flagValue(rest, "--plan")) {
     const repoDir = join(reposDir, target.repo);
     if (!existsSync(repoDir)) {
@@ -33869,202 +34105,13 @@ export async function daemonCommand(
               },
               // W1-T4111: the plan queue proposes its own duplicates and dead tasks for operator review.
               gardens: [
-                (intervalMs: number) => {
-                  const planGarden = {
-                    stateDir: join(config.root, "state"),
-                    repoRoot,
-                    openWorkspace: () => gardenCheckout({ name: "plan", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
-                    prState: (prUrl: string) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
-                    log,
-                  };
-                  return startGarden(planGardenSpec(planGarden), planGarden, intervalMs);
-                },
-                // W1-T4116: the gates tighten, refresh and propose demoting themselves from their own
-                // measurements. The ratchets are ES modules, so the garden starts once they have loaded.
-                (intervalMs: number) => {
-                  const gateGarden = {
-                    stateDir: join(config.root, "state"),
-                    repoRoot,
-                    openWorkspace: () => gardenCheckout({ name: "gate", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
-                    prState: (prUrl: string) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
-                    log,
-                  };
-                  let garden: { stop: () => void } | undefined;
-                  let stopped = false;
-                  loadGateProbes(repoRoot).then(
-                    (probes) => {
-                      if (!stopped) garden = startGarden(gateGardenSpec(gateGarden, probes), gateGarden, intervalMs);
-                    },
-                    (e: unknown) => log("gate.gardener_failed", { error: String((e as Error)?.message ?? e) }),
-                  );
-                  return {
-                    stop: () => {
-                      stopped = true;
-                      garden?.stop();
-                    },
-                  };
-                },
-                // W1-T4112: the test suite tends itself — a material duration proposal is
-                // adopted, a repeat flaker is retiered to the slow tier, and a stale one-way
-                // baseline shrinks, all read from scripts/test-tier-manifest.mjs's own
-                // functions and the ledger's `test.flake_retry` rows. Same async-probe-load
-                // shape as the gate garden just above, since the manifest is also an ES module.
-                (intervalMs: number) => {
-                  const testGarden = {
-                    stateDir: join(config.root, "state"),
-                    repoRoot,
-                    openWorkspace: () => gardenCheckout({ name: "test", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
-                    prState: (prUrl: string) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
-                    log,
-                  };
-                  let garden: { stop: () => void } | undefined;
-                  let stopped = false;
-                  loadTestManifestProbe(repoRoot).then(
-                    (probe) => {
-                      if (!stopped) garden = startTestGarden(testGardenSpec(testGarden, probe), testGarden, () => refreshTestManifestProposalAsync(self.owner, self.repo, testGarden.stateDir), intervalMs);
-                    },
-                    (e: unknown) => log("test.gardener_failed", { error: String((e as Error)?.message ?? e) }),
-                  );
-                  return {
-                    stop: () => {
-                      stopped = true;
-                      garden?.stop();
-                    },
-                  };
-                },
-                // W1-T4113: worker configuration tends itself — budgets, mounts and the learnings cap, each a
-                // canary it judges and rolls back. The headroom sweep is an ES module, so it starts once loaded.
-                (intervalMs: number) => {
-                  const configGarden = {
-                    stateDir: join(config.root, "state"),
-                    repoRoot,
-                    openWorkspace: () => gardenCheckout({ name: "config", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
-                    prState: (prUrl: string) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
-                    log,
-                  };
-                  let garden: { stop: () => void } | undefined;
-                  let stopped = false;
-                  import(pathToFileURL(join(repoRoot, "scripts", "mount-headroom-sweep.mjs")).href).then(
-                    (m: { buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] } }) => {
-                      const workerEnv = buildWorkerEnv({}, process.env, { allowApiKey: config.overflow === "api_key" });
-                      const mountRecommendations = mountRecommendationSource({ build: m.buildMountHeadroomSweep, stateDir: configGarden.stateDir, mountsFile: mountsPath(repoRoot), billingMode: billingMode(Object.keys(workerEnv)), log });
-                      if (!stopped) garden = startConfigGarden(configGardenSpec(configGarden, { mountRecommendations }), configGarden, { mountRecommendations }, intervalMs);
-                    },
-                    (e: unknown) => log("config.gardener_failed", { error: String((e as Error)?.message ?? e) }),
-                  );
-                  return {
-                    stop: () => {
-                      stopped = true;
-                      garden?.stop();
-                    },
-                  };
-                },
-                // W1-T4117: an export the adoption scan reported unreferenced twice, and that grep
-                // finds named nowhere else, is deleted in a small batch.
-                (intervalMs: number) => {
-                  const exportGarden = {
-                    stateDir: join(config.root, "state"),
-                    repoRoot,
-                    openWorkspace: () => gardenCheckout({ name: "export", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
-                    prState: (prUrl: string) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
-                    log,
-                  };
-                  return startGarden(exportGardenSpec(exportGarden), exportGarden, intervalMs);
-                },
-                // W1-T4435: the fleet prices its own slowest gate. Every extra-head cause (a red
-                // required check, main merging in, a merge conflict, a refused fix-lane commit) is
-                // priced in PR MINUTES — never fire count — from the ledger union and gate-fire-
-                // rate.ts's own measurement (W1-T4115); the costliest cause with no open task is
-                // drafted as one, parked for a person.
-                (intervalMs: number) => {
-                  const stateDir = join(config.root, "state");
-                  const ciFrictionGarden: GardenerDeps = {
-                    stateDir,
-                    repoRoot,
-                    openWorkspace: () => gardenCheckout({ name: "ci-friction", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
-                    prState: (prUrl: string) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
-                    log,
-                    escalate: raiseDuplicate,
-                  };
-                  const sources: CiFrictionGardenSources = {
-                    ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
-                    gateFireRates: () => readGateFireRateReport(stateDir),
-                    planOrigins: () => freshCiFrictionPlanOrigins(repoRoot),
-                    mintTaskId: ciLearningTaskIdMinter(repoRoot),
-                  };
-                  return startCiFrictionGardener(ciFrictionGarden, sources, intervalMs);
-                },
-                // W1-T4439: aggregate complete coverage-shard shadow records before W1-T4406
-                // may narrow CI. A real miss opens a parked task naming the observed edge.
-                (intervalMs: number) => startSelectorShadowGardener(
-                  {
-                    stateDir: join(config.root, "state"),
-                    repoRoot,
-                    openWorkspace: () => gardenCheckout({ name: "selector-shadow", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
-                    log,
-                  },
-                  () => readSelectorShadowRunsAsync(self.owner, self.repo, undefined, {
-                    cachePath: join(config.root, "state", "selector-shadow-log-cache.json"),
-                    warn: (message) => log("selector-shadow.cache_failed", { message }),
-                    onFlakes: selectorShadowFlakeLedger(log),
-                  }),
-                  (miss) => readSelectorShadowChangedPaths(self.owner, self.repo, miss),
-                  ciLearningTaskIdMinter(repoRoot),
-                  intervalMs,
-                ),
-                (intervalMs: number) => startEvidenceCoverageGardener(() => runEvidenceCoverageGardener(daemonEvidenceCoverageInput({ stateDir: join(config.root, "state"), root: repoRoot, log })), log, intervalMs),
-                // W1-T4802: the overseer watches every gardener -- liveness, the effect of merged changes and
-                // churn -- and folds effect back into each class's Beta record. Off: state/GARDENER_OVERSEER_OFF.
-                (intervalMs: number) => startGardenerOverseer(
-                  productionGardenerOverseerPorts({ stateDir: join(config.root, "state"), repoRoot, owner: self.owner, repo: self.repo, fetch: ghJson, log, escalate: raiseDuplicate }),
-                  intervalMs,
-                ),
+                ...REGISTERED_GARDEN_NAMES.slice(0, REGISTERED_GARDEN_NAMES.indexOf("hot-file")).map(offLoopGarden),
                 // Operator ruling 2026-09-29: the LLM judge in the middle of machine-filed work.
                 (intervalMs: number) => startMachineFilingJudge(
                   productionMachineFilingJudgePorts({ repoRoot, stateDir: join(config.root, "state"), worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
                   intervalMs,
                 ),
-                // W1-T4803: the files merge conflicts strand pull requests on, ranked by PR minutes; the
-                // costliest one no task restructures is filed as one plan-only proposal. Appended after the
-                // established gardens so their positions in the list stay where their tests expect them.
-                (intervalMs: number) => {
-                  const stateDir = join(config.root, "state");
-                  const hotFileGarden: GardenerDeps = {
-                    stateDir,
-                    repoRoot,
-                    openWorkspace: () => gardenCheckout({ name: "hot-file", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
-                    prState: (prUrl: string) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
-                    log,
-                    escalate: raiseDuplicate,
-                  };
-                  const hotFileSources: HotFileGardenSources = {
-                    ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
-                    mainHistory: (sinceIso) => readMainHistory(repoRoot, sinceIso),
-                    planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
-                    mintTaskId: ciLearningTaskIdMinter(repoRoot),
-                    fileExists: (file) => existsSync(join(repoRoot, file)),
-                  };
-                  return startGarden(hotFileGardenSpec(hotFileGarden, hotFileSources), hotFileGarden, intervalMs);
-                },
-                // W1-T4804: host disk, swap and inodes are projected to full from the heartbeat history and
-                // answered in tiers against each host's own janitor cadence. Off: state/HOST_RESOURCE_OFF.
-                (intervalMs: number) => {
-                  const stateDir = join(config.root, "state");
-                  const mintTaskId = ciLearningTaskIdMinter(repoRoot);
-                  return startHostResourceGardener(
-                    {
-                      stateDir,
-                      log,
-                      readHeartbeats: gitHeartbeatSource(repoRoot),
-                      handoff: (h) => void captureFeedback(repoRoot, { id: h.id, raw: h.raw, origin: h.origin as FeedbackOrigin }),
-                      openIncidentOrigins: () => openIncidentFeedbackOrigins(repoRoot),
-                      escalate: raiseDuplicate,
-                      planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
-                      fileConsumer: fileConsumerVia(() => gardenCheckout({ name: "host-resource", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }), mintTaskId),
-                    },
-                    intervalMs,
-                  );
-                },
+                ...REGISTERED_GARDEN_NAMES.slice(REGISTERED_GARDEN_NAMES.indexOf("hot-file")).map(offLoopGarden),
                 // W1-T4385: the SRE lane, in its OWN lane rather than sharing the core dispatch
                 // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). "Only on the SRE
                 // registry instance" has no selector yet -- `RegistryInstance` carries no role or
@@ -48215,6 +48262,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T4691: the sanctioned release for a task the dispatch circuit breaker has halted with no new owned PR since — a trip the breaker's own W1-T2425 restart guard deliberately never clears on its own. Appends an explicit, attributable dispatch.breaker_released ledger row (never an inference, never an archive read) that dispatchesWithoutNewOwnedPr/seedCountFromCircuitBreak read exactly like a new pr.opened, so the task is dispatchable on the daemon's next tick; best-effort closes the task's open circuit-breaker needs-human issue with a pointer to the row.",
   },
   {
+    name: "garden",
+    syntax: "rmd garden run <name> [--hourly]",
+    summary: "Run one pass of one registered gardener (the daemon's off-loop child).",
+    detail: "W1-T5114: builds the named garden from the shared registry (buildRegisteredGarden) and runs exactly one pass, appending to the same ledger the daemon does. The daemon spawns this per gardener pass so no pass runs on its event loop; --hourly also refreshes the test garden's hourly CI evidence.",
+  },
+  {
     name: "escalate",
     syntax: "rmd escalate --class <BLOCKED|MANUAL|HARD_STOP> --task <id> --summary <s> [--detail <d>] [--recommendation <r>] [--option \"label|detail\"]...",
     summary: "Open a needs-human GitHub issue; MANUAL/HARD_STOP also fire a real-time ping.",
@@ -49055,6 +49108,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       return await releaseCommand(rest);
     },
   ],
+  ["garden", async (rest) => await gardenCommand(rest)],
   ["escalate", async (rest) => await escalateCommand(rest)],
   ["notify", async (rest) => await notifyCommand(rest)],
   ["feedback", async (rest) => await feedbackCommand(rest)],

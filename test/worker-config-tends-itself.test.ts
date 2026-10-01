@@ -387,6 +387,7 @@ test("W1-T4113: a self-hosting daemon wires the config gardener", async () => {
   let captured: DaemonDeps | undefined;
   try {
     await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      gardenPassesInProcess: true,
       runDaemon: async (_plan, d): Promise<DaemonSummary> => {
         captured = d;
         return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
