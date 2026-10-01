@@ -19,7 +19,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { parseInstanceRegistry, type RegistryInstance } from "./instance-registry.js";
 import { readOnMtimeChange, startSourcePublisher } from "./nav-badge-view.js";
 import { loadPlan, type Plan } from "./plan.js";
-import { READ_MODEL_DIRNAME, type ReadModelDb } from "./read-model-db.js";
+import { READ_MODEL_DIRNAME, readModelSidecarDir, type ReadModelDb } from "./read-model-db.js";
 import {
   REPO_TELEMETRY_CACHE_TTL_MS,
   REPO_TELEMETRY_MIN_AGE_MS,
@@ -278,7 +278,7 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
   const published = (instances: ReadonlyArray<{ db?: ReadModelDb }>): { path: string; sources?: RepositoriesSources } | undefined => {
     const dbPath = instances.find((slot) => slot.db)?.db?.path;
     if (dbPath === undefined) return undefined;
-    sourcesPath = join(dirname(dbPath), REPOSITORIES_SOURCES_FILE);
+    sourcesPath = join(readModelSidecarDir(dirname(dbPath)), REPOSITORIES_SOURCES_FILE);
     return { path: sourcesPath, sources: sourcesFile(sourcesPath) };
   };
   return {

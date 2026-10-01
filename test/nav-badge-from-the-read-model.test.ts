@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -34,6 +34,7 @@ import {
 } from "../src/lib/read-model-worker.js";
 import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
+import { READ_MODEL_DB_DIR_ENV } from "../src/lib/read-model-db.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { buildReadModelViewRoutes, renderView, type ViewBody, type ViewSource } from "../src/lib/views.js";
 
@@ -184,6 +185,22 @@ test("the read-model nav badge equals the phase 0 computation over the same inpu
   }
   const sources = bodies.get("")!.body.sources.map((source) => source.name);
   assert.deepEqual(sources, ["analytics:core", "analytics:console", "ledger:core", "ledger:console", "inbox-classification"]);
+});
+
+test("with its DB on the scratch disk the read-model nav badge still reads the sources serve published to the state disk", async (t) => {
+  const f = await fixture(t);
+  const dbDir = join(scratch(t, "nav-badge-nvme"), "read-model");
+  const saved = process.env[READ_MODEL_DB_DIR_ENV];
+  process.env[READ_MODEL_DB_DIR_ENV] = `${f.stateDir}:${dbDir}`;
+  t.after(() => {
+    if (saved === undefined) delete process.env[READ_MODEL_DB_DIR_ENV];
+    else process.env[READ_MODEL_DB_DIR_ENV] = saved;
+  });
+  assert.equal(createNavBadgeSourcePublisher({ stateDir: f.stateDir, inboxStateDir: join(f.inboxRoot, "state"), scopes: () => f.scopes })(), true);
+  assert.ok(existsSync(navBadgeSourcesPath(f.stateDir)), "serve publishes to the persistent state disk");
+  const bodies = tickBodies(f);
+  assert.ok(existsSync(join(dbDir, "core.v1.sqlite")), "the ticker opened its DB on the scratch disk");
+  assert.deepEqual(data(bodies.get("")), legacyData(f));
 });
 
 test("a restarted serve answers the read-model nav badge warm from its persisted body and analytics source", async (t) => {
