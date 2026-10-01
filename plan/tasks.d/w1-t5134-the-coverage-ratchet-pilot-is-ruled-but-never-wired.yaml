@@ -1,0 +1,87 @@
+- id: W1-T5134
+  title: "THE COVERAGE-RATCHET PILOT IS RULED BUT NEVER WIRED — the operator chose coverage-ratchet as the first gate-posture pilot on 2026-09-30, and no production path routes its finding through decideGatePosture, so a coverage shortfall still just fails CI instead of letting the judge pick STOP or LAND+DEBT"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-01: W1-T3801 derives as merged from the ruling PR #7966, but its implementation criteria were never built"
+  note: "reservation hand-off: file/automation-tier4-1790858804430 -> file/automation-tier4-1790858804430"
+  plan_refs: ["W1-T3801", "W1-T3954", "W1-T3330", "W1-T3318", "W1-T3321"]
+  files:
+    - src/lib/gate-posture.ts
+    - scripts/coverage-ratchet.mjs
+    - src/lib/coverage-improvement.ts
+    - src/run-task.ts
+    - test/gate-posture-production-adapter.test.ts
+  rationale: |
+    WHY THIS EXISTS. W1-T3801 asked for the first production gate-posture pilot. Its first criterion was
+    satisfied_by the ruling PR #7966, which carries the Remudero-Task trailer, so the task DERIVES as merged
+    and the fleet will never dispatch it. Its other six criteria, the implementation, were never built.
+    This shard carries exactly those, so the fleet can build them.
+
+    WHAT IS ALREADY TRUE ON MAIN (checked at 832c59e2b). The seam exists: `decideGatePosture`
+    (src/lib/gate-posture.ts) with its fallbacks and LAND+DEBT downgrade. One pilot is wired through it,
+    `ci:source-size` (W1-T3954, #6387): `buildSourceSizeGatePostureRuntime` and
+    `reportWorkerSourceSizeFollowupWithGatePosture` in src/run-task.ts, tested in
+    test/gate-posture-production-adapter.test.ts under W1-T3954 titles. THE OPERATOR RULED A DIFFERENT
+    FIRST PILOT on 2026-09-30 (DECISIONS.md, "the verify-human queue, cleared"): `coverage-ratchet`. That
+    is not wired. scripts/coverage-ratchet.mjs still says "one coverage-improvement task is owed (tier two,
+    not yet wired)" for the 85-90 band, and nothing outside tests consumes src/lib/coverage-improvement.ts's
+    debt builders. The census already lists `script:scripts/coverage-ratchet.mjs` and `ci:coverage-ratchet`
+    as repairable surfaces (gate-posture.ts).
+  design: |
+    (i) REUSE THE SEAM, DO NOT FORK IT. Wire coverage-ratchet the way source-size is wired: a runtime
+    builder that supplies the judge, spend collector and one bounded consumer, and a reporter that calls
+    `decideGatePosture` with a coverage finding. Do not copy the source-size consumer. If a shared helper
+    falls out, extract it and keep the source-size tests unchanged.
+
+    (ii) THE GATE SUPPLIES THE FACT. The finding is deterministic: measured branch coverage below the
+    ratchet. The judge chooses only the consequence, STOP or PROCEED (LAND+DEBT) with ONE coverage-improvement
+    debt task filed idempotently through src/lib/coverage-improvement.ts. A healthy path must not spawn a
+    judge, and the judge must not be able to argue the finding away. The judge never receives raw source,
+    only the paths and percentages the ratchet already emits.
+
+    (iii) FAIL SAFE. A judge outage, malformed consequence, or a failed debt filing restores the ratchet's
+    CURRENT behaviour. A recoverable shortfall may not become STOP only because the model is cautious.
+    Coverage-ratchet is not a security or merge-authority gate, which is why it was ruled the first pilot.
+
+    (iv) IDEMPOTENT AND VISIBLE. One bounded debt action, deduplicated across retries by the existing
+    coverage-debt signature, and a ledger decision carrying gate, finding, consequence, fallback, verdict
+    and side-effect result without raw sensitive context.
+
+    (v) WHERE THE FACT IS AVAILABLE is part of the build. The ratchet runs in CI and the judge runs in the
+    worker, so choose the production call site that already holds the coverage result and say in the PR why.
+    If no such site exists without a new approval step in the ordinary PR flow, STOP and report the
+    evidence; do not insert a human gate.
+
+    (vi) VERIFY BOTH SIDES. Test the finding and no-finding paths, outage, malformed output, recoverable
+    STOP, retry deduplication, and the unchanged behaviour of the source-size pilot and every other gate.
+    Then show one bounded run after the tests pass; an unobserved integration is not green.
+  acceptance:
+    - claim: "a coverage-ratchet finding reaches the judge, which chooses only the consequence"
+      proof: 'grep: test("W1-T5134: a coverage-ratchet finding reaches the judge, which chooses only the consequence" in test/gate-posture-production-adapter.test.ts'
+    - claim: "a healthy coverage run and every other gate never spawn the risk judge"
+      proof: 'grep: test("W1-T5134: a healthy coverage run and every other gate never spawn the risk judge" in test/gate-posture-production-adapter.test.ts'
+    - claim: "a judge outage, a malformed consequence, or a failed debt filing restores the ratchet's existing behaviour"
+      proof: 'grep: test("W1-T5134: a judge outage or a failed debt filing restores the existing ratchet behaviour" in test/gate-posture-production-adapter.test.ts'
+    - claim: "a recoverable coverage shortfall cannot stop only because the model is conservative"
+      proof: 'grep: test("W1-T5134: a recoverable shortfall cannot stop only because the model is conservative" in test/gate-posture-production-adapter.test.ts'
+    - claim: "the side effect is one idempotent coverage-improvement task recorded in a privacy-safe ledger decision"
+      proof: 'grep: test("W1-T5134: the side effect is one idempotent debt task recorded in a privacy-safe ledger decision" in test/gate-posture-production-adapter.test.ts'
+    - claim: "one bounded run through the adapter records its observed outcome and leaves the source-size pilot unchanged"
+      proof: 'grep: test("W1-T5134: one coverage-ratchet run through the adapter records its observed outcome" in test/gate-posture-production-adapter.test.ts'
+  falsifier: |
+    CLOSE THIS TASK without implementation if, after fetching the latest main,
+    `git grep -n "decideGatePosture(" -- src ':!test/**'` shows a production caller that routes a
+    COVERAGE-RATCHET finding through it and already meets the outage, recoverability, side-effect, retry
+    and ledger criteria above. The source-size caller alone does not count: it is a different gate.
+  notes: |
+    SCOPE FENCE: one gate, the one the operator ruled. Do not wire every discovered surface, do not put an
+    approval step in the ordinary PR flow, and do not give the judge authority over deterministic facts.
+    If the call-site finding in (v) changes the files or side effect materially, split the work into a new
+    task rather than widening this one.
