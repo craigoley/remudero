@@ -15169,6 +15169,8 @@ export type CoveragePrecheckPorts = {
   select?: (wt: string, changed: string[]) => AffectedSelection;
   manifest?: (wt: string) => { thresholdMs: number; files: Record<string, number> };
   run?: (wt: string, suites: string[], timeoutMs: number) => CoverageRunResult | Promise<CoverageRunResult>;
+  /** Bounds captured output in the real runner; the default retains spawnSync's 64 MiB ceiling. */
+  maxOutputBytes?: number;
 };
 
 const COVERAGE_SRC_FILE = /^src\/.*\.ts$/;
@@ -15186,7 +15188,7 @@ const realCoverageChangedFiles = (wt: string): string[] =>
  * timeout/spawn-error mapping are the ones `spawnSync` gave.
  */
 const COVERAGE_RUN_MAX_BUFFER = 64 * 1024 * 1024;
-const realCoverageRun = (wt: string, suites: string[], timeoutMs: number): Promise<CoverageRunResult> =>
+const realCoverageRun = (wt: string, suites: string[], timeoutMs: number, maxOutputBytes: number): Promise<CoverageRunResult> =>
   new Promise<CoverageRunResult>((resolve) => {
     let stdout = "";
     let stderr = "";
@@ -15211,7 +15213,7 @@ const realCoverageRun = (wt: string, suites: string[], timeoutMs: number): Promi
     const collect = (chunk: Buffer, into: "out" | "err") => {
       if (into === "out") stdout += chunk.toString("utf8");
       else stderr += chunk.toString("utf8");
-      if (stdout.length + stderr.length > COVERAGE_RUN_MAX_BUFFER && spawnError === undefined) {
+      if (stdout.length + stderr.length > maxOutputBytes && spawnError === undefined) {
         spawnError = "maxBuffer exceeded (ENOBUFS)";
         child.kill();
       }
@@ -15267,7 +15269,7 @@ export async function coveragePrecheck(wt: string, ports: CoveragePrecheckPorts 
   const tiers = tierFiles(selection.suites, manifest) as { fast: string[]; slow: string[] };
   const passes = [tiers.fast.length > 0 ? tiers.fast : tiers.slow];
   if (tiers.fast.length > 0 && tiers.slow.length > 0) passes.push([...tiers.fast, ...tiers.slow]);
-  const run = ports.run ?? realCoverageRun;
+  const run = ports.run ?? ((w: string, suites: string[], timeoutMs: number) => realCoverageRun(w, suites, timeoutMs, ports.maxOutputBytes ?? COVERAGE_RUN_MAX_BUFFER));
   for (const suites of passes) {
     if (suites.length > PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING) {
       return { outcome: "unavailable", reason: `${suites.length} suite(s) are too wide to precheck quickly (over preflight's scoped ceiling of ${PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING})` };

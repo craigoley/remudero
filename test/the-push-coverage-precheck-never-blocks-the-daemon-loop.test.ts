@@ -77,4 +77,10 @@ test("W1-T5074: a precheck outcome is unchanged by the async conversion", async 
   const noWorktree = await coveragePrecheck(join(tmpdir(), `${RMD_TMP_PREFIX}precheck-async-absent-${process.pid}`), realRunPorts(30_000));
   assert.equal(noWorktree.outcome, "unavailable");
   assert.match((noWorktree as { reason: string }).reason, /spawn failed: /);
+
+  const overOutputCap = await withWorktree(`process.stdout.write("x".repeat(4096));\n`, (root) =>
+    coveragePrecheck(root, { ...realRunPorts(30_000), maxOutputBytes: 1024 }),
+  );
+  assert.equal(overOutputCap.outcome, "unavailable");
+  assert.match((overOutputCap as { reason: string }).reason, /maxBuffer exceeded \(ENOBUFS\)/);
 });
