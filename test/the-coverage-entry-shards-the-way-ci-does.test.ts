@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
-import { CI_COVERAGE_SHARD_COUNT, coverageScratchDir, coverageShardConcurrency, runCiParity } from "../src/lib/ci-parity.js";
+import { CI_COVERAGE_SHARD_COUNT, coverageGateLockDir, coverageScratchDir, coverageShardConcurrency, runCiParity, testWithCoverageLeaf } from "../src/lib/ci-parity.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -39,7 +39,7 @@ function coverageFixtureRoot(): string {
   return root;
 }
 
-function coverageSpawn(repoRoot: string, options: { emptySelectionShard?: number; missingArtifactShard?: number; missingSummaryShard?: number } = {}) {
+function coverageSpawn(repoRoot: string, options: { emptySelectionShard?: number; missingArtifactShard?: number; missingSummaryShard?: number; missingCompactShard?: number } = {}) {
   const calls: Call[] = [];
   const spawn: PreflightSpawn = (file, args, opts) => {
     calls.push({ file, args, opts });
@@ -61,10 +61,19 @@ function coverageSpawn(repoRoot: string, options: { emptySelectionShard?: number
       return { status: 0, stdout, stderr: "" };
     }
     if (args.some((a) => a.endsWith("coverage-merge-ratchet.mjs"))) {
+      if (args.includes("--compact-output")) {
+        const compactDir = args[args.indexOf("--compact-output") + 1]!;
+        const shard = Number(compactDir.match(/shard-(\d+)/)?.[1]);
+        if (shard !== options.missingCompactShard) {
+          mkdirSync(compactDir, { recursive: true });
+          writeFileSync(join(compactDir, `coverage-bundle-${shard}-0000000000000-0.json`), "{}\n");
+        }
+        return { status: 0, stdout: "coverage-merge-ratchet: rawBytes=10 compactBytes=5 peakBytes=15\n", stderr: "" };
+      }
       const output = args[args.indexOf("--output") + 1]!;
       mkdirSync(dirname(output), { recursive: true });
       writeFileSync(output, "SF:src/lib/ci-parity.ts\nDA:1,1\nend_of_record\n");
-      return { status: 0, stdout: "coverage-merge-ratchet: merged 4 raw shard(s)\n", stderr: "" };
+      return { status: 0, stdout: "coverage-merge-ratchet: inputBytes=20 stagingBytes=10 peakBytes=30\n", stderr: "" };
     }
     if (file === "git" && args[0] === "rev-parse") return { status: 0, stdout: `${PINNED_BASE_SHA}\n`, stderr: "" };
     if (file === "git" && args[0] === "diff") return { status: 0, stdout: "diff --git a/src/lib/ci-parity.ts b/src/lib/ci-parity.ts\n+covered\n", stderr: "" };
@@ -80,7 +89,7 @@ function coverageSpawn(repoRoot: string, options: { emptySelectionShard?: number
       // `[ ! -s coverage/lcov.info ]` check with "no lcov produced" — a green suite and a red job,
       // with no failing test to point at. The merge here is stubbed and never creates that file,
       // so there was nothing to clean up in the first place.
-      rmSync(join(repoRoot, "coverage", "raw-shards"), { recursive: true, force: true });
+      rmSync(coverageScratchDir(repoRoot), { recursive: true, force: true });
     },
   };
 }
@@ -107,15 +116,15 @@ test("coverage entry runs CI's four shard selectors, then merges the shard raw c
       assert.equal(call.file, process.execPath, "each coverage shard shells node directly, as ci.yml does");
       assert.equal(call.args.includes(join(REPO_ROOT, "scripts", "test-with-retry.mjs")), false, "coverage shards do not use ci's retry wrapper");
       assert.equal(call.args.some((arg) => arg.startsWith("--test-shard=")), false, "coverage shards receive duration-balanced file lists, not Node's opaque shard assignment");
-      assert.ok(call.opts?.env?.NODE_V8_COVERAGE?.includes("coverage/raw-shards/shard-"), "each shard writes raw coverage to its own artifact directory");
+      assert.ok(call.opts?.env?.NODE_V8_COVERAGE?.includes("raw-shards/shard-"), "each shard writes raw coverage to its own artifact directory");
     }
 
-    const mergeIndex = calls.findIndex((c) => c.args.some((a) => a.endsWith("coverage-merge-ratchet.mjs")));
+    const mergeIndex = calls.findIndex((c) => c.args.some((a) => a.endsWith("coverage-merge-ratchet.mjs")) && c.args.includes("--output"));
     assert.ok(mergeIndex >= 0, "the coverage entry must invoke the existing merge script");
     const merge = calls[mergeIndex]!;
     assert.equal(merge.args[0], "--expose-internals");
     assert.deepEqual(merge.args.slice(2, 4), ["--output", join(fixtureRoot, "coverage", "lcov.info")]);
-    assert.equal(merge.args.slice(4).length, CI_COVERAGE_SHARD_COUNT, "all four raw shard directories must be merge inputs");
+    assert.equal(merge.args.slice(4).length, CI_COVERAGE_SHARD_COUNT, "all four compact shard directories must be merge inputs");
 
     const ratchetIndex = calls.findIndex((c) => c.args.some((a) => a.endsWith("coverage-ratchet.mjs")));
     const diffIndex = calls.findIndex((c) => c.args.some((a) => a.endsWith("diff-coverage.mjs")));
@@ -131,7 +140,7 @@ test("coverage entry runs CI's four shard selectors, then merges the shard raw c
 test("nested parity cannot erase an outer run's raw coverage shards", () => {
   const fixtureRoot = coverageFixtureRoot();
   const scratch = coverageScratchDir(fixtureRoot);
-  const outerRaw = join(fixtureRoot, "coverage", "raw-shards", "shard-1", "raw");
+  const outerRaw = join(scratch, "raw-shards", "shard-1", "raw");
   const sentinel = join(outerRaw, "coverage-outer-0000000000000-0.json");
   const priorTmp = process.env.TMPDIR;
   const { calls, spawn, cleanup } = coverageSpawn(fixtureRoot);
@@ -164,7 +173,7 @@ test("coverage entry refuses a partial shard artifact set before merge or covera
 
     assert.equal(coverage.ok, false);
     assert.match(coverage.detail, /expected raw V8 coverage for shard 3/);
-    assert.equal(calls.some((c) => c.args.some((a) => a.endsWith("coverage-merge-ratchet.mjs"))), false);
+    assert.equal(calls.some((c) => c.args.includes("--output")), false);
     assert.equal(calls.some((c) => c.args.some((a) => a.endsWith("coverage-ratchet.mjs"))), false);
     assert.equal(calls.some((c) => c.args.some((a) => a.endsWith("diff-coverage.mjs"))), false);
   } finally {
@@ -198,7 +207,7 @@ test("coverage entry refuses a shard with no # tests summary as unverified", () 
 
     assert.equal(coverage.ok, false);
     assert.match(coverage.detail, /shard 2\/4 produced no # tests summary/);
-    assert.equal(calls.some((c) => c.args.some((a) => a.endsWith("coverage-merge-ratchet.mjs"))), false);
+    assert.equal(calls.some((c) => c.args.includes("--output")), false);
   } finally {
     cleanup();
     rmSync(fixtureRoot, { recursive: true, force: true });
@@ -212,4 +221,83 @@ test("coverage shard scheduling is CPU-bounded while the shard count stays CI's 
   assert.equal(coverageShardConcurrency(2), 2);
   assert.equal(coverageShardConcurrency(1), 1);
   assert.equal(coverageShardConcurrency(0), 1);
+});
+
+test("W1-T4951: low disk refuses before creating a coverage shard", () => {
+  const root = coverageFixtureRoot();
+  const { calls, spawn, cleanup } = coverageSpawn(root);
+  try {
+    const result = testWithCoverageLeaf(root, spawn, join(root, "coverage", "lcov.info"), () => 1);
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /need \d+ before starting coverage shards/);
+    assert.equal(calls.length, 0);
+    assert.equal(existsSync(coverageScratchDir(root)), false);
+  } finally {
+    cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4951: a second parity gate cannot reuse the active scratch", () => {
+  const root = coverageFixtureRoot();
+  const { calls, spawn, cleanup } = coverageSpawn(root);
+  const lock = coverageGateLockDir(root);
+  mkdirSync(lock);
+  try {
+    const result = testWithCoverageLeaf(root, spawn, join(root, "coverage", "lcov.info"));
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /another local gate owns/);
+    assert.equal(calls.length, 0);
+    assert.equal(existsSync(lock), true);
+  } finally {
+    rmSync(lock, { recursive: true, force: true });
+    cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4951: missing compact shard refuses the merged coverage gate", () => {
+  const root = coverageFixtureRoot();
+  const { calls, spawn, cleanup } = coverageSpawn(root, { missingCompactShard: 3 });
+  try {
+    const result = testWithCoverageLeaf(root, spawn, join(root, "coverage", "lcov.info"));
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /expected compact V8 coverage for shard 3/);
+    assert.equal(calls.some((call) => call.args.includes("--output")), false);
+  } finally {
+    cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4951: coverage scratch is outside the checkout and socket-safe", () => {
+  const root = coverageFixtureRoot();
+  try {
+    const scratch = coverageScratchDir(root);
+    assert.equal(scratch.startsWith(`${root}/`), false);
+    assert.ok(scratch.length <= 60, `socket-safe scratch path: ${scratch}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4951: merger staging uses the reserved scratch volume", () => {
+  const root = coverageFixtureRoot();
+  const { calls, spawn, cleanup } = coverageSpawn(root);
+  const measured: string[] = [];
+  try {
+    const result = testWithCoverageLeaf(root, spawn, join(root, "coverage", "lcov.info"), (path) => {
+      measured.push(path);
+      return 100 * 1024 ** 3;
+    });
+    assert.equal(result.ok, true);
+    const merge = calls.find((call) => call.args.includes("--output"));
+    assert.ok(merge);
+    assert.equal(merge.opts?.env?.TMPDIR, coverageScratchDir(root));
+    assert.equal(measured[0], dirname(coverageScratchDir(root)));
+    assert.ok(merge.args.slice(4).every((path) => path.startsWith(coverageScratchDir(root))));
+  } finally {
+    cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
 });

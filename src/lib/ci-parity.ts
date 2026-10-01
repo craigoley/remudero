@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statfsSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { availableParallelism, tmpdir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
@@ -31,6 +32,8 @@ const SELF_SYNC_GUARD_ENV_NAME = "RMD_SELF_SYNC_DONE";
 const TSX_LOADER_PATH = require.resolve("tsx");
 const WORKER_CONTAINMENT_URL = new URL("./worker-containment.ts", import.meta.url).href;
 export const CI_COVERAGE_SHARD_COUNT = 4;
+const COVERAGE_FREE_RESERVE_BYTES = 20 * 1024 ** 3;
+const MAX_COVERAGE_SCRATCH_PATH = 60;
 
 /** A local route is deliberately narrower than CI parity: it is permission to re-drive one stale
  * verdict, not permission to run an arbitrary check name copied from GitHub. */
@@ -792,26 +795,37 @@ function changedFilesListPath(repoRoot: string, spawn: PreflightSpawn): string {
  *  drift the way a hand-copied argv does.
  *  Why: docs/forensics/ci-parity.md. */
 export function coverageScratchDir(repoRoot: string): string {
-  // The test runner and fixtures both derive temporary paths from TMPDIR. Keeping it below the
-  // checkout makes a fixture intended to be outside Git resolve INSIDE that checkout, defeating
-  // its non-repository control and the worker-home placement invariant. A stable sibling remains
-  // cleared by a top-level testWithCoverageLeaf before the next coverage run without changing that meaning.
-  return join(dirname(repoRoot), ".remudero-coverage", basename(repoRoot), "tmp");
+  const name = `rmd-c-${createHash("sha256").update(realpathSync(repoRoot)).digest("hex").slice(0, 12)}`;
+  // A nested gate inherits TMPDIR from its caller. Find the same volume root even then.
+  let base = resolve(tmpdir());
+  try { base = realpathSync(base); } catch { /* The caller's unresolved TMPDIR is refused below. */ }
+  for (let path = base; path !== dirname(path); path = dirname(path)) {
+    if (basename(path) === name) {
+      base = dirname(path);
+      break;
+    }
+  }
+  return join(base, name);
+}
+
+export function coverageGateLockDir(repoRoot: string): string {
+  const name = createHash("sha256").update(realpathSync(repoRoot)).digest("hex").slice(0, 12);
+  // The slot must remain the same even when two invocations choose different TMPDIR volumes.
+  return join("/tmp", `rmd-c-${name}.lock`);
 }
 
 function pathIsWithin(parent: string, candidate: string): boolean {
   const isWithin = (root: string, path: string) => path === root || path.startsWith(`${root}${sep}`);
   if (isWithin(resolve(parent), resolve(candidate))) return true;
   try {
-    return isWithin(realpathSync(parent), realpathSync(candidate));
+    const canonicalCandidate = existsSync(candidate)
+      ? realpathSync(candidate)
+      : join(realpathSync(dirname(candidate)), basename(candidate));
+    return isWithin(realpathSync(parent), canonicalCandidate);
   } catch {
     // An unreadable/unresolvable TMPDIR must not authorize clearing the stable scratch.
     return true;
   }
-}
-
-function coverageShardRoot(repoRoot: string): string {
-  return join(repoRoot, "coverage", "raw-shards");
 }
 
 function coverageShardRawDir(shardRoot: string, shard: number): string {
@@ -872,7 +886,7 @@ function coverageMergeArgs(repoRoot: string, lcovPath: string, shardRoot: string
     join(repoRoot, "scripts", "coverage-merge-ratchet.mjs"),
     "--output",
     lcovPath,
-    ...Array.from({ length: CI_COVERAGE_SHARD_COUNT }, (_, i) => coverageShardRawDir(shardRoot, i + 1)),
+    ...Array.from({ length: CI_COVERAGE_SHARD_COUNT }, (_, i) => join(shardRoot, `shard-${i + 1}`, "compact")),
   ];
 }
 
@@ -883,13 +897,15 @@ function testWithCoverageShards(
   scratchDir: string,
   shardRoot: string,
 ): CiParityLeafResult {
+  let retainedCompactBytes = 0;
+  let peakBytes = 0;
+  let rawBytes = 0;
   try {
     rmSync(shardRoot, { recursive: true, force: true });
     mkdirSync(shardRoot, { recursive: true });
   } catch {
     // Deliberate: setup failure is re-read below as the concrete missing-shard artifact refusal.
   }
-  const outputs = new Map<number, string>();
   let base: string;
   try {
     base = requirePinnedBase(repoRoot, spawn);
@@ -919,26 +935,31 @@ function testWithCoverageShards(
     const spawnFailed = spawnFailureDetail(label, res);
     if (spawnFailed) return { ok: false, detail: spawnFailed };
     const output = `${res.stdout ?? ""}${res.stderr ?? ""}`;
-    outputs.set(shard, output);
     if (res.status !== 0) return { ok: false, detail: `FAIL — ${label}\n${output.trim()}` };
+    if (!coverageOutputHasTestSummary(output)) {
+      return { ok: false, detail: `FAIL — coverage-ratchet: shard ${shard}/${CI_COVERAGE_SHARD_COUNT} produced no # tests summary; refusing to fold an unverified shard into the coverage total.` };
+    }
+    if (!coverageRawDirHasArtifact(rawDir)) {
+      return { ok: false, detail: `FAIL — coverage-ratchet: expected raw V8 coverage for shard ${shard}; refusing a partial merge.` };
+    }
+    const compactDir = join(shardRoot, `shard-${shard}`, "compact");
+    const compact = shellOut(spawn, `${label} compact raw V8 coverage`, process.execPath,
+      ["--expose-internals", join(repoRoot, "scripts", "coverage-merge-ratchet.mjs"), "--compact-output", compactDir, rawDir],
+      { cwd: repoRoot, env: { TMPDIR: scratchDir }, retainSuccessOutput: true });
+    if (!compact.ok) return compact;
+    const metrics = compact.successOutput?.text.match(/rawBytes=(\d+) compactBytes=(\d+) peakBytes=(\d+)/);
+    if (!metrics) return { ok: false, detail: `FAIL — coverage-ratchet: shard ${shard} compaction reported no byte measurements` };
+    rawBytes += Number(metrics[1]);
+    peakBytes = Math.max(peakBytes, retainedCompactBytes + Number(metrics[3]));
+    retainedCompactBytes += Number(metrics[2]);
+    if (!coverageRawDirHasArtifact(compactDir)) {
+      return { ok: false, detail: `FAIL — coverage-ratchet: expected compact V8 coverage for shard ${shard}; refusing a partial merge.` };
+    }
+    rmSync(rawDir, { recursive: true, force: true });
   }
-  const seamProducedShardEvidence =
-    [...outputs.values()].some((output) => output.trim() !== "") ||
-    Array.from({ length: CI_COVERAGE_SHARD_COUNT }, (_, i) => coverageShardRawDir(shardRoot, i + 1)).some(coverageRawDirHasArtifact);
-  if (seamProducedShardEvidence) {
-    for (let shard = 1; shard <= CI_COVERAGE_SHARD_COUNT; shard += 1) {
-      if (!coverageOutputHasTestSummary(outputs.get(shard) ?? "")) {
-        return {
-          ok: false,
-          detail: `FAIL — coverage-ratchet: shard ${shard}/${CI_COVERAGE_SHARD_COUNT} produced no # tests summary; refusing to fold an unverified shard into the coverage total.`,
-        };
-      }
-      if (!coverageRawDirHasArtifact(coverageShardRawDir(shardRoot, shard))) {
-        return {
-          ok: false,
-          detail: `FAIL — coverage-ratchet: expected raw V8 coverage for shard ${shard}; refusing a partial merge.`,
-        };
-      }
+  for (let shard = 1; shard <= CI_COVERAGE_SHARD_COUNT; shard += 1) {
+    if (!coverageRawDirHasArtifact(join(shardRoot, `shard-${shard}`, "compact"))) {
+      return { ok: false, detail: `FAIL — coverage-ratchet: expected compact V8 coverage for shard ${shard}; refusing a partial merge.` };
     }
   }
   const merge = shellOut(
@@ -946,45 +967,66 @@ function testWithCoverageShards(
     "coverage-merge-ratchet.mjs --output coverage/lcov.info (4 coverage shards)",
     process.execPath,
     coverageMergeArgs(repoRoot, lcovPath, shardRoot),
-    { cwd: repoRoot },
+    { cwd: repoRoot, env: { TMPDIR: scratchDir }, retainSuccessOutput: true },
   );
   if (!merge.ok) return merge;
+  const mergeMetrics = merge.successOutput?.text.match(/inputBytes=(\d+) stagingBytes=(\d+) peakBytes=(\d+)/);
+  if (!mergeMetrics) return { ok: false, detail: "FAIL — coverage-ratchet: merger reported no byte measurements" };
+  peakBytes = Math.max(peakBytes, Number(mergeMetrics[3]));
   return {
     ok: true,
-    detail: `PASS — coverage-ratchet:test-with-coverage (${CI_COVERAGE_SHARD_COUNT} shard(s)); merged coverage/lcov.info`,
+    detail: `PASS — coverage-ratchet:test-with-coverage (${CI_COVERAGE_SHARD_COUNT} shard(s)); ` +
+      `merged coverage/lcov.info; rawBytes=${rawBytes} compactBytes=${retainedCompactBytes} ` +
+      `mergeInputBytes=${mergeMetrics[1]} stagingBytes=${mergeMetrics[2]} peakBytes=${peakBytes}`,
   };
 }
 
-function testWithCoverageLeaf(repoRoot: string, spawn: PreflightSpawn, lcovPath: string): CiParityLeafResult {
+export function testWithCoverageLeaf(
+  repoRoot: string, spawn: PreflightSpawn, lcovPath: string,
+  freeBytes: (path: string) => number = (path) => {
+    const stats = statfsSync(path, { bigint: true });
+    return Number(stats.bavail * stats.bsize);
+  },
+): CiParityLeafResult {
   const stableScratch = coverageScratchDir(repoRoot);
   const activeTmp = process.env.TMPDIR;
-  mkdirSync(join(repoRoot, "coverage"), { recursive: true });
-  mkdirSync(stableScratch, { recursive: true });
-  const nested = activeTmp !== undefined && pathIsWithin(stableScratch, activeTmp);
+  if (pathIsWithin(repoRoot, stableScratch) || stableScratch.length > MAX_COVERAGE_SCRATCH_PATH) {
+    return { ok: false, detail: `FAIL — coverage-ratchet: scratch path ${stableScratch} must be outside the checkout and at most ${MAX_COVERAGE_SCRATCH_PATH} characters; set TMPDIR to a short isolated scratch volume.` };
+  }
+  const available = freeBytes(dirname(stableScratch));
+  if (available < COVERAGE_FREE_RESERVE_BYTES) {
+    return { ok: false, detail: `FAIL — coverage-ratchet: scratch volume has ${available} free bytes; need ${COVERAGE_FREE_RESERVE_BYTES} before starting coverage shards. Set TMPDIR to an isolated scratch volume with sufficient space.` };
+  }
+  const lockDir = coverageGateLockDir(repoRoot);
+  try {
+    mkdirSync(lockDir);
+  } catch (error) {
+    return { ok: false, detail: `FAIL — coverage-ratchet: another local gate owns ${lockDir}; wait for it to finish or use an isolated scratch volume (${String(error)}).` };
+  }
+  const nested = activeTmp !== undefined && existsSync(stableScratch) && pathIsWithin(stableScratch, activeTmp);
 
   let scratchDir = stableScratch;
   let ownedNestedScratch: string | undefined;
-  if (nested) {
-    // The `env` passed to spawn affects only the child; re-entrancy belongs to this process's
-    // actual environment. Resolve aliases before making the child so shard fixtures and Git see
-    // the same path, then give the nested leaf a child it can never clear out from under its caller.
-    mkdirSync(activeTmp, { recursive: true });
-    scratchDir = mkdtempSync(join(realpathSync(activeTmp), "nested-coverage-"));
-    ownedNestedScratch = scratchDir;
-  } else {
-    // CLEARED, NOT JUST CREATED: the runner clears its scratch on a normal exit, so this bounds the abnormal one.
-    rmSync(stableScratch, { recursive: true, force: true });
-    mkdirSync(stableScratch, { recursive: true });
-    scratchDir = realpathSync(stableScratch);
-  }
-
   try {
-    return testWithCoverageShards(repoRoot, spawn, lcovPath, scratchDir,
-      nested ? join(scratchDir, "raw-shards") : coverageShardRoot(repoRoot));
+    mkdirSync(join(repoRoot, "coverage"), { recursive: true });
+    if (nested) {
+      // Resolve aliases before making the child; never clear an outer gate's scratch.
+      mkdirSync(activeTmp, { recursive: true });
+      scratchDir = mkdtempSync(join(realpathSync(stableScratch), "n-"));
+      ownedNestedScratch = scratchDir;
+    } else {
+      rmSync(stableScratch, { recursive: true, force: true });
+      mkdirSync(stableScratch, { recursive: true });
+      scratchDir = realpathSync(stableScratch);
+    }
+    return testWithCoverageShards(repoRoot, spawn, lcovPath, scratchDir, join(scratchDir, "raw-shards"));
   } finally {
     if (ownedNestedScratch !== undefined) {
       rmSync(ownedNestedScratch, { recursive: true, force: true });
+    } else {
+      rmSync(stableScratch, { recursive: true, force: true });
     }
+    rmSync(lockDir, { recursive: true, force: true });
   }
 }
 
