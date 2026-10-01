@@ -60,12 +60,12 @@ test("a PR whose checks are pending and whose head is younger than the ceiling d
   // THE REGRESSION. Before the fix this exact shape produced `blocked-ambiguous` and an issue.
   const d = deriveDisposition(pr({ lastActivityAt: mins(6) }), DEFAULT_SWEEP_POLICY, NOW);
 
-  // ASSERT THE ABSENCE OF THE ESCALATE PATH, not merely that the code ran: `blocked-ambiguous` is
-  // the ONLY disposition that reaches the clarification rung's `escalate` closure, so a `wait`
-  // here is the absence of the escalate call, structurally.
-  assert.equal(d.disposition, "wait");
+  // `blocked-ambiguous` alone reaches the clarification rung's `escalate` closure. A fresh
+  // pending PR may now start its review while CI runs, without filing an escalation.
+  assert.equal(d.disposition, "post-review");
   assert.notEqual(d.disposition, "blocked-ambiguous");
-  assert.match(d.reason, /checks pending 6m \(< 60m ceiling\) — waiting/);
+  assert.match(d.reason, /checks pending 6m/);
+  assert.match(d.reason, /review never posted/);
 });
 
 test("a genuinely ambiguous PR past the ceiling STILL escalates — W1-T78's purpose survives", () => {
@@ -91,7 +91,7 @@ test("PR 1038's real recorded shape does not escalate, while PR 921's 7h45m shap
   // merged by 21:50 — six minutes. #921 sat with no progress for 7h45m and genuinely needed a human.
   // A discriminator that cannot separate these is not a discriminator.
   const t1038 = deriveDisposition(pr({ prNumber: 1038, lastActivityAt: mins(6) }), DEFAULT_SWEEP_POLICY, NOW);
-  assert.equal(t1038.disposition, "wait", "#1038 resolved on its own — escalating it was the defect");
+  assert.equal(t1038.disposition, "post-review", "#1038 resolved on its own — escalating it was the defect");
 
   const t921 = deriveDisposition(
     pr({ prNumber: 921, lastActivityAt: mins(7 * 60 + 45) }),
