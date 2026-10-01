@@ -17,6 +17,7 @@
   priority: 2
   status: queued
   # backlog gardener: band=2 evidence=1d0f335823e0cea6
+
   attempts: 0
   rationale: |
     THE OPERATOR RULED THAT RETRO PROPOSALS ARE RECORDS (DECISIONS.md, 2026-09-22, W1-T3102): option

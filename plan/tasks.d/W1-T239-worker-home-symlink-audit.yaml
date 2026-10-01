@@ -46,6 +46,7 @@
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=86ee7ac8fe01904f
+
   attempts: 0
   note: "OPERATOR RULING 2026-09-30 (recorded in DECISIONS.md, 'the verify-human queue, cleared'): NO DESTRUCTIVE LIVE DRILL. Each link's verdict comes from what the fleet already records per host. The keychain link is macOS-only and not needed on the Linux fleet. Sequenced after W1-T4348, which changes the .claude link. FILED 2026-07-21, unpromoted - this is a hygiene/audit task and should not displace the spawn-path fix
     (W1-T235) or the gate-integrity ladder. Citation verified at origin/main 2d33735: worker-home.ts:72-83

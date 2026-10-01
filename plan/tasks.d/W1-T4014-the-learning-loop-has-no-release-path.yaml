@@ -13,6 +13,7 @@
   priority: 2
   status: queued
   # backlog gardener: band=2 evidence=d196fd3099db8925
+
   attempts: 0
   rationale: |
     MEASURED 2026-09-22 over `plan/tasks.d/` and `origin/main`'s history:

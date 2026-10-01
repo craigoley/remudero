@@ -13,7 +13,8 @@
   files: [src/lib/sweep.ts, src/run-task.ts, test/a-synthetic-fix-task-declares-its-pr-surface.test.ts, scripts/test-tier-manifest.json]
   priority: 3
   status: queued
-  # backlog gardener: band=3 evidence=658bfc61819da7a3
+  # backlog gardener: band=3 evidence=d1f908577d3589ac
+
   attempts: 0
   rationale: |
     MEASURED (ledger union, 2026-09-18..22; 116 successful harness commits as the control).

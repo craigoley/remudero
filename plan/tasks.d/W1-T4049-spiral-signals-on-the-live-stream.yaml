@@ -17,6 +17,7 @@
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=6335d6c597f95e73
+
   attempts: 0
   rationale: |
     THE OPERATOR RETIRED THE LLM FLIGHT JUDGE AND KEPT THE DETERMINISTIC PREDICATES (W1-T360,

@@ -13,7 +13,8 @@
   plan_refs: ["W1-T3704"]
   priority: 2
   status: queued
-  # backlog gardener: band=2 evidence=4cfe1eed2687d1bc
+  # backlog gardener: band=2 evidence=27164813ec5de901
+
   attempts: 0
   rationale: |
     MEASURED ON THE LIVE FLEET, 2026-09-22, across all three daemon state directories:

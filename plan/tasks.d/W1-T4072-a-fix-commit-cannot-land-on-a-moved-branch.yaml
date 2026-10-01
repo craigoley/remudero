@@ -13,7 +13,8 @@
   files: [src/run-task.ts, src/lib/sweep.ts, test/a-fix-commit-cannot-land-on-a-moved-branch.test.ts, scripts/test-tier-manifest.json]
   priority: 3
   status: queued
-  # backlog gardener: band=3 evidence=da3e83b9bdf2d786
+  # backlog gardener: band=3 evidence=4b68ef4b87da79d5
+
   attempts: 0
   rationale: |
     OBSERVED 2026-09-22 on run-W1-T4024-1790100143000.

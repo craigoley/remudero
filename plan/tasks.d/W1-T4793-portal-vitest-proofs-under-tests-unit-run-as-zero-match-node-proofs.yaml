@@ -13,6 +13,7 @@
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=25af6ad0e1a02818
+
   attempts: 0
   rationale: |
     W1-T3525 introduced the owner/repo-keyed suite registry, yet private portal PR #8 (PORTAL-T1) has

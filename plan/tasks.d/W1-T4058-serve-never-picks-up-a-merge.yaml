@@ -14,6 +14,7 @@
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=00d3b2b882af2428
+
   attempts: 0
   rationale: |
     OBSERVED 2026-09-22 ON THE AZURE HOST.

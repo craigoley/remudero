@@ -13,7 +13,8 @@
   plan_refs: ["W1-T2766", "W1-T81", "W1-T92", "W1-T101", "skill-draft:25c3724cf6958acf"]
   priority: 3
   status: queued
-  # backlog gardener: band=3 evidence=66fd19f88c94a774
+  # backlog gardener: band=3 evidence=4a7b7c50918c0d11
+
   attempts: 0
   rationale: |
     VERIFIED AT SOURCE. `PROCEDURAL_STEP_TEXT` (src/lib/skill-workshop.ts:38-41) holds two entries today:

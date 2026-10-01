@@ -12,7 +12,8 @@
   files: [src/run-task.ts, test/an-untasked-pr-silently-skips-the-semantic-reviewer.test.ts]
   priority: 3
   status: queued
-  # backlog gardener: band=3 evidence=17af475687fff2f5
+  # backlog gardener: band=3 evidence=649096cb88c6b31c
+
   attempts: 0
   rationale: |
     THE SKIP IS ONE CONDITIONAL AND IT HAS NO RECOVERY ARM. `run-task.ts` resolves review metadata

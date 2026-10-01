@@ -94,6 +94,7 @@
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=a94dfbee1fc991da
+
   attempts: 0
   note: "FILED 2026-09-11 from feedback#followup:DAEMON-1789089508795:2026-09-11T02:10:13.613Z:1 (run
     W1-T3367, PR #5050). Deliberately does NOT presuppose a worktree-isolation leak: a source audit at

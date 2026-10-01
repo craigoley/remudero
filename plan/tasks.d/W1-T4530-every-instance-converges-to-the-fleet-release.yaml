@@ -19,6 +19,7 @@
   priority: 2
   status: queued
   # backlog gardener: band=2 evidence=0690a86ca33589dc
+
   attempts: 0
   rationale: |
     READ 2026-09-24 at origin/main 9aa0dd61. Names are symbols; re-verify at your head.

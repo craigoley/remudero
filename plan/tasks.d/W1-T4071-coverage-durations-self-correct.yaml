@@ -14,6 +14,7 @@
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=cde6f8297dd9f80a
+
   attempts: 0
   rationale: |
     MEASURED 2026-09-22 from 15 successful source-PR CI runs x 4 coverage shards (job logs) and 80 sampled runs.

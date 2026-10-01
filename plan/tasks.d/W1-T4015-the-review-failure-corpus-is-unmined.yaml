@@ -12,7 +12,8 @@
   plan_refs: ["W1-T2957", "W1-T4014"]
   priority: 3
   status: queued
-  # backlog gardener: band=3 evidence=e0000e864b623afd
+  # backlog gardener: band=3 evidence=b220a90303d4c82e
+
   attempts: 0
   rationale: |
     `ci-failure-corpus.ts` opens by naming why a red GATE is minable:

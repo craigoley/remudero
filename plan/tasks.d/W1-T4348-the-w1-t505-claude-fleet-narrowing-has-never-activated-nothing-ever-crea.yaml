@@ -72,6 +72,7 @@
   priority: 2
   status: queued
   # backlog gardener: band=2 evidence=cfeecc05028b3c34
+
   attempts: 0
   note: |
     risk:high is set deliberately, matching W1-T505's and W1-T971's own precedent for this exact

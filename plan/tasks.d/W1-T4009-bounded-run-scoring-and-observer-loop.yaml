@@ -20,6 +20,7 @@
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=9d25c88bd761815b
+
   attempts: 0
   rationale: |
     Warp's scoring and observer material closes the loop that most agent products leave open: retain

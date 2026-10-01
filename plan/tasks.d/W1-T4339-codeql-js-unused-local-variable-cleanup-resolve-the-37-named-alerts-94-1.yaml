@@ -54,6 +54,7 @@
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=c62580a61dd65bfa
+
   attempts: 0
   note: "REGRADED medium->high at filing per Rule 19's own sizing exemption (the W1-T180/W1-T68 precedent):
     37 alerts scattered across many modules mechanically count as many subsystems under task-linter.ts's

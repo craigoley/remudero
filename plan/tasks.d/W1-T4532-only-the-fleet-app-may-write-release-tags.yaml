@@ -15,6 +15,7 @@
   priority: 2
   status: queued
   # backlog gardener: band=2 evidence=aa7250f029addd12
+
   attempts: 0
   rationale: |
     Once W1-T4530 ships, pushing refs/tags/ring/fleet/<id> tells every instance to deploy. Anyone with write access

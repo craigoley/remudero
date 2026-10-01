@@ -13,7 +13,8 @@
   files: [src/lib/read-plane.ts, src/lib/read-plane.worker.ts, src/run-task.ts, src/lib/daemon.ts, test/the-tick-reads-run-off-the-event-loop.test.ts, scripts/test-tier-manifest.json]
   priority: 3
   status: queued
-  # backlog gardener: band=3 evidence=2fdf81d4fbee088b
+  # backlog gardener: band=3 evidence=3ec5d18ac208f72f
+
   attempts: 0
   rationale: |
     MEASURED 2026-09-22 (loop-lag rows, 4-day union, and a replay of the live code in the daemon container with a spawn

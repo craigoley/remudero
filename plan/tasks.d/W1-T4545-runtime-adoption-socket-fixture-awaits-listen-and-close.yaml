@@ -15,6 +15,7 @@
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=c120b84ca8c479a5
+
   attempts: 0
   rationale: |
     OBSERVED in the full `rmd preflight --ci-parity` at head `323c21f28598` against

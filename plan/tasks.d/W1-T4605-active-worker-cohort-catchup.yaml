@@ -19,6 +19,7 @@
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=e3c93f1fe8bbbd89
+
   rationale: |
     After the W1-T4599 repair reached Azure, the core daemon's detached cohort
     pass ran from 11:07 to 11:12 UTC and audited one malformed archive without

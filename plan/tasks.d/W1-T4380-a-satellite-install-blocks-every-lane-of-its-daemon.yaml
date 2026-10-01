@@ -13,6 +13,7 @@
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=300d89992d2d9d7c
+
   attempts: 0
   rationale: |
     READ 2026-09-23 on the W1-T4260 build (PR #6840). Names are symbols; re-verify at your head.

@@ -87,6 +87,7 @@
   priority: 4
   status: queued
   # backlog gardener: band=4 evidence=f74758a6f6f847fd
+
   attempts: 0
   note: |
     OPERATOR RULING 2026-09-30 (recorded in DECISIONS.md, "the verify-human queue, cleared"): THE LIVE LAUNCHD HALF IS DROPPED (the fleet restarts through deploy/recycle-container.sh), and with it the fourth criterion and docs/deploy-supervisor.md, so the note below about verify:human no longer applies. The headless dirt-shape drill targets the container instance checkout and launcher convergence, where an untracked file still silently blocks convergence.
