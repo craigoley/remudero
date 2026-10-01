@@ -40,8 +40,8 @@ export const INSTANCES_VIEW_NAME = "instances";
 export const INSTANCES_VIEW_VERSION = 1;
 /** The views serve answers for every instance it projects. */
 export const INSTANCE_VIEWS: readonly string[] = ["now", "repositories", "read-model", INSTANCES_VIEW_NAME];
-/** The writes each served instance answers under its prefix (`instanceRouteSet`'s control routes). */
-export const INSTANCE_WRITES: readonly string[] = ["control/pause", "control/resume", "control/stop"];
+/** The writes each served instance answers under its prefix (`instanceRouteSet`'s controls and the answers `now` names). */
+export const INSTANCE_WRITES: readonly string[] = ["control/pause", "control/resume", "control/stop", "manual/approve", "escalation/mark-handled"];
 /** What only core answers: no `/v1/i/<x>` copy exists, so a console reads core's for every instance. */
 export const CORE_ONLY_ROUTES: readonly string[] = ["analytics", "feedback", "inbox", "nav-badge"];
 /** PRIMARY CONTROL: DOWN after the stale-heartbeat bound, or a quiet-mode pulse's, whichever is longer (fleet-liveness.ts). */

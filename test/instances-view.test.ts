@@ -100,7 +100,7 @@ test("W1-T5056: a registered instance that serve does not mount is listed as unm
   assert.equal(byId.console.served, true);
   assert.equal(byId.console.mode, "shadow");
   assert.equal(byId.console.prefix, "/v1/i/console");
-  assert.deepEqual(byId.console.capabilities.writes, ["control/pause", "control/resume", "control/stop"]);
+  assert.deepEqual(byId.console.capabilities.writes, ["control/pause", "control/resume", "control/stop", "manual/approve", "escalation/mark-handled"]);
   assert.equal(byId.console.capabilities.coreOnly, undefined);
   assert.ok(byId.core.capabilities.coreOnly?.includes("inbox"));
   assert.equal(byId.core.readModel.lease, "held");
