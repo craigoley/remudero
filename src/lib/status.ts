@@ -1144,6 +1144,8 @@ export interface LedgerIndex {
   readonly byStep: ReadonlyMap<string, ReadonlyArray<Record<string, unknown>>>;
   /** Every `pr_url` carried by a `plan_only: true` `pr.opened` row — `isPlanOnlyFilingPr`'s set. */
   readonly planOnlyFilingPrUrls: ReadonlySet<string>;
+  /** Positive plan-only review evidence, tied to the exact PR head so a later implementation push is not refused. */
+  readonly planOnlyReviewedHeads: ReadonlyMap<string, ReadonlySet<string>>;
   /** W1-T3523: the newest parseable `ts` anywhere in `rows` — {@link orphanedRunIds}'s ledger-derived
    *  "now", computed ONCE here rather than re-scanned per task (R-23's own discipline). Undefined
    *  when no row carries a parseable `ts` at all. */
@@ -1166,6 +1168,7 @@ export function buildLedgerIndex(rows: ReadonlyArray<Record<string, unknown>>): 
   const byTask = new Map<string, Array<Record<string, unknown>>>();
   const byStep = new Map<string, Array<Record<string, unknown>>>();
   const planOnlyFilingPrUrls = new Set<string>();
+  const planOnlyReviewedHeads = new Map<string, Set<string>>();
   let latestTsMs: number | undefined;
   for (const row of rows) {
     const step = row.step;
@@ -1173,6 +1176,12 @@ export function buildLedgerIndex(rows: ReadonlyArray<Record<string, unknown>>): 
       pushIndexed(byStep, step, row);
       if (step === "pr.opened" && row.plan_only === true && typeof row.pr_url === "string") {
         planOnlyFilingPrUrls.add(row.pr_url);
+      }
+      if (step === "review.posted" && row.plan_only === true &&
+          typeof row.pr_url === "string" && typeof row.head_sha === "string") {
+        const heads = planOnlyReviewedHeads.get(row.pr_url) ?? new Set<string>();
+        heads.add(row.head_sha);
+        planOnlyReviewedHeads.set(row.pr_url, heads);
       }
     }
     const taskId = row.task_id;
@@ -1186,7 +1195,7 @@ export function buildLedgerIndex(rows: ReadonlyArray<Record<string, unknown>>): 
       if (Number.isFinite(ms) && (latestTsMs === undefined || ms > latestTsMs)) latestTsMs = ms;
     }
   }
-  return { rows, byTask, byStep, planOnlyFilingPrUrls, latestTsMs };
+  return { rows, byTask, byStep, planOnlyFilingPrUrls, planOnlyReviewedHeads, latestTsMs };
 }
 
 /** The empty bucket handed back for an id the index saw no rows for — never `lines`. */
@@ -2436,9 +2445,25 @@ function isPlanOnlyFilingPr(
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
   prUrl: string,
   index?: LedgerIndex,
+  headSha?: string,
 ): boolean {
-  if (index !== undefined && index.rows === ledgerLines) return index.planOnlyFilingPrUrls.has(prUrl);
-  return ledgerLines.some((l) => l.step === "pr.opened" && l.pr_url === prUrl && l.plan_only === true);
+  if (index !== undefined && index.rows === ledgerLines) {
+    return index.planOnlyFilingPrUrls.has(prUrl) ||
+      (headSha !== undefined && index.planOnlyReviewedHeads.get(prUrl)?.has(headSha) === true);
+  }
+  return ledgerLines.some((l) =>
+    l.pr_url === prUrl && l.plan_only === true &&
+    (l.step === "pr.opened" || (headSha !== undefined && l.step === "review.posted" && l.head_sha === headSha)));
+}
+
+/** The review row only offers a safe durable-credit refusal after its head is checked against the merged PR. */
+function hasPlanOnlyReviewForPr(
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  prUrl: string,
+  index?: LedgerIndex,
+): boolean {
+  if (index !== undefined && index.rows === ledgerLines) return index.planOnlyReviewedHeads.has(prUrl);
+  return ledgerLines.some((l) => l.step === "review.posted" && l.plan_only === true && l.pr_url === prUrl && typeof l.head_sha === "string");
 }
 
 /** SUBTRACT-ONLY: an uncredited projection returns untouched, so no row can manufacture credit. The
@@ -2506,7 +2531,12 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
       const alreadyInvalidated = entry.source === "head-branch" ? durableCredit.invalidated?.["head-branch"] : undefined;
       const planOnlyPaths =
         !alreadyInvalidated && entry.source === "head-branch" ? deps.mergedPathsByPr?.get(entry.prNumber) : undefined;
-      const isRevalidatedPlanOnly = planOnlyPaths !== undefined && planOnlyPaths.length > 0 && isPlanOnlyChangeset(planOnlyPaths);
+      const reviewedPr = !alreadyInvalidated && entry.source === "head-branch" &&
+        hasPlanOnlyReviewForPr(ledgerLines, entry.prUrl, ledgerIndex)
+        ? deps.github.prByRef(entry.prUrl) : null;
+      const isRevalidatedPlanOnly = isPlanOnlyChangeset(planOnlyPaths ?? []) ||
+        (reviewedPr?.headRefOid !== undefined &&
+          isPlanOnlyFilingPr(ledgerLines, entry.prUrl, ledgerIndex, reviewedPr.headRefOid));
       if (!alreadyInvalidated && !isRevalidatedPlanOnly) {
         const base: StatusProjection = {
           taskId: task.id,
@@ -2617,6 +2647,10 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
     // would sail past `isPlanOnlyFilingPr` below and get re-persisted in the SAME projection that just
     // refused it, undoing the revalidation before this function even returns.
     const invalidatedUrl = creditStore[task.id]?.invalidated?.["head-branch"]?.prUrl;
+    const planOnlyByDiff = (pr: PrRef): boolean => {
+      const files = deps.mergedPathsByPr?.get(pr.number) ?? deps.github.changedFiles?.(pr.url);
+      return files !== undefined && isPlanOnlyChangeset(files);
+    };
     const hit = cands.find(
       (pr) =>
         pr.state.toUpperCase() === "MERGED" &&
@@ -2626,7 +2660,8 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
         // W1-T1004: this rung had NO plan-only guard at all before — a filing PR dispatched from this task's
         // OWN worktree, which the retro, triage and plan flows reuse, would otherwise credit the task it just
         // filed unconditionally.
-        !isPlanOnlyFilingPr(ledgerLines, pr.url, ledgerIndex),
+        !isPlanOnlyFilingPr(ledgerLines, pr.url, ledgerIndex, pr.headRefOid) &&
+        !planOnlyByDiff(pr),
     );
     if (!hit) return undefined;
     // W1-T951 DELIVERABLE A: a merged branch hit is a NEW live credit the durable store lacks — the durable
@@ -2672,7 +2707,7 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
     // W1-T1004: the ledger-backed plan-only-FILING refusal, checked BEFORE and INDEPENDENTLY of
     // `ownsOwnRunBranch`, unlike the diff-based refusal below — a filing PR dispatched from this task's OWN run
     // branch sits on that branch too, so that test would wave it through by construction.
-    const planOnlyFilingRefusal = wouldCredit && isPlanOnlyFilingPr(ledgerLines, trailerPr.url, ledgerIndex);
+    const planOnlyFilingRefusal = wouldCredit && isPlanOnlyFilingPr(ledgerLines, trailerPr.url, ledgerIndex, trailerPr.headRefOid);
     // W1-T413: the DIFF-BASED plan-only refusal, for any hit that would otherwise credit and that the ledger
     // check did not refuse.
     //

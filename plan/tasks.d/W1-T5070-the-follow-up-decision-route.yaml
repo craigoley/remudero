@@ -1,0 +1,56 @@
+- id: W1-T5070
+  title: "THE CONSOLE'S FOLLOW-UP CONTROLS HAVE ALWAYS 404'D — the console posts snooze, reject, revoke and answer to /v1/operator-agent/follow-ups/decision, which core never served; add the write route over the existing follow-up policy so a control lands as a ledger row the follow-ups read folds"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  risk: high
+  band_meaning: span
+  origin: "2026-10-01 core-console architecture Phase 4 design (§8 route exclusions, operator decision 1), arch-phase4-design.md"
+  files:
+    - src/lib/operator-agent.ts
+    - test/operator-agent-follow-up-decision-route.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-10-01 on origin/main: the console's recordFollowUpAction (remudero-console lib/rmd-control.ts)
+    POSTs {followUpId, action: snooze|reject|revoke|answer, until?, answer?, note?} to
+    /v1/operator-agent/follow-ups/decision. core src/ has no literal for that path; it serves only the GET
+    /v1/operator-agent/follow-ups read (buildOperatorAgentFollowUpReadRoute). The console therefore excludes
+    the route from its core-read contract baseline, and every follow-up control has refused as
+    persistence_unavailable since it shipped. The policy half already exists in follow-up-policy.ts
+    (applyFollowUpControl, followUpReceipt, the panel.follow_up_control and panel.follow_up_receipt steps the
+    read folds); only the write route is missing. The design calls this a real feature to file in core.
+  design: |
+    Add buildOperatorAgentFollowUpDecisionRoute in operator-agent.ts beside the read route and register it in
+    the same route list: POST, scope write, tier low, validated through jsonAction like the proposals
+    decision route. Resolve the candidate from the same follow-up history reader; an unknown followUpId
+    answers 404 not_found. snooze, reject and revoke go through applyFollowUpControl and append its event as a
+    FOLLOW_UP_CONTROL_STEP panel row in the shape foldFollowUpHistory reads (candidate_id, at, control, state,
+    until, reason). answer goes through followUpReceipt with answered true and appends a
+    FOLLOW_UP_RECEIPT_STEP row. A policy error (snooze without a future until, an already terminal candidate)
+    answers 409 conflict and appends nothing. The 200 body is {ok, followUpId, action, at, receipt:
+    {contactState, deliveryState?}}, the fields the console's normalizedFollowUpReceipt reads. The route never
+    marks a follow-up completed and never authorizes an external action.
+  acceptance:
+    - claim: "a snoozed follow-up reads back as snoozed through the follow-ups read route"
+      proof: 'grep: test("W1-T5070: a snoozed follow-up reads back as snoozed through the follow-ups read route" in test/operator-agent-follow-up-decision-route.test.ts'
+    - claim: "a control on a terminal follow-up is refused with a conflict and appends nothing"
+      proof: 'grep: test("W1-T5070: a control on a terminal follow-up is refused with a conflict and appends nothing" in test/operator-agent-follow-up-decision-route.test.ts'
+    - claim: "an answer appends a receipt row and never marks the follow-up completed"
+      proof: 'grep: test("W1-T5070: an answer appends a receipt row and never marks the follow-up completed" in test/operator-agent-follow-up-decision-route.test.ts'
+    - claim: "the route builder exists in operator-agent.ts"
+      proof: 'grep: buildOperatorAgentFollowUpDecisionRoute( in src/lib/operator-agent.ts'
+  falsifier: |
+    Append a row whose fields the fold does not read: the first proof reads the follow-up back as scheduled.
+    Skip the applyFollowUpControl error check: the second proof finds an appended row.
+  note: |
+    Console side: once this merges, the console drops /v1/operator-agent/follow-ups/decision from
+    scripts/core-read-contract-baseline.json (CONSOLE-T103's contract-baseline work, or its own small task).
+    Design: ~/Remudero/.session-scratch/arch-phase4-design.md §8 (route exclusions) and §1.1 (agent row).
+    Scope-time checks 2026-10-01: no run-W1-T5070 branch on origin; no origin/main commit names the id; no
+    plan record on origin/main or an open PR head names follow-ups/decision. Reserved from the operator
+    checkout for this filing branch.

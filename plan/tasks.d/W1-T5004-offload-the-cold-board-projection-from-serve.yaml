@@ -1,0 +1,61 @@
+- id: W1-T5004
+  title: "Offload the cold board projection from serve's event loop"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 45.00
+  risk: high
+  band_meaning: span
+  origin: "2026-09-30 operator console follow-up: full parity serve boot returned HTTP 408 while its cold board projection held the loop"
+  note: "reservation hand-off: plan-serve-board-offthread-1790812800000 -> plan-opportunity-intake-1790799000000"
+  plan_refs: [W1-T3620, W1-T3925, W1-T4771]
+  files: [src/run-task.ts, src/lib/serve.ts, src/lib/board.ts, src/lib/board-worker.ts, test/serve-board-projection-stays-off-the-event-loop.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T3620 measured 99 seconds between binding and the first answer, and explicitly warned
+    that deferring a synchronous projection with setImmediate still blocks every route. Its
+    current implementation nevertheless schedules computeBoardSnapshot in setImmediate on
+    serve's thread; its acceptance test substitutes an async fake at that seam. A full local
+    CI-parity shard on 2026-09-30 received HTTP 408, not 200, from an authenticated /v1/status
+    call in test/serve-command-boot.test.ts after 118 seconds. A repeat of the same source SHA
+    cleared an unrelated timing assertion and failed this boot request instead. The board
+    GitHub-fact refresh work in W1-T4771 does not move the remaining synchronous plan/ledger
+    projection off the event loop. This is a live responsiveness gap, not a reason to widen
+    the client's timeout or teach the test to ignore the default production path.
+  design: |
+    Run the initial and subsequent expensive board projections on a dedicated worker or an
+    equivalent off-event-loop execution lane. Preserve one bounded, viewer-gated GitHub fact
+    source; do not duplicate cold GitHub scans in main and worker. Transfer a source-qualified,
+    dated snapshot back to the serving thread and publish it atomically. Until the first
+    snapshot exists, /v1/status returns an explicit dated unavailable/not-ready response;
+    /v1/version, auth refusals, and other cheap routes continue answering within the existing
+    client budget. A worker crash, stale facts, or an unreadable plan/ledger must be exposed as
+    unavailable or stale, never a fabricated zero or an unbounded wait. Keep the default
+    production construction under test, not only buildInitialBoardSnapshot's injected async
+    fake. Reconcile the worker result with the existing board cache, status response schema,
+    source timestamps, and shutdown lifecycle so a later request cannot trigger the same
+    synchronous cold projection again. Measure boot-to-first-answer and event-loop lag under
+    a representative plan/ledger corpus; prove the failing 408 shape against the merge base.
+  acceptance:
+    - claim: "the default cold projection does not block cheap routes"
+      proof: 'grep: test("W1-T5004: default cold projection leaves cheap routes responsive" in test/serve-board-projection-stays-off-the-event-loop.test.ts'
+    - claim: "status gives a dated bounded answer while the worker is still cold"
+      proof: 'grep: test("W1-T5004: cold status is bounded and explicitly unavailable" in test/serve-board-projection-stays-off-the-event-loop.test.ts'
+    - claim: "the worker publishes one fresh snapshot and a subsequent read never recomputes cold on serve"
+      proof: 'grep: test("W1-T5004: worker snapshot reaches status without a serve-thread recompute" in test/serve-board-projection-stays-off-the-event-loop.test.ts'
+    - claim: "worker failure stays visible and does not fabricate healthy board counts"
+      proof: 'grep: test("W1-T5004: worker failure is unavailable not zero" in test/serve-board-projection-stays-off-the-event-loop.test.ts'
+    - claim: "the default serve construction actually invokes the board projection worker"
+      proof: 'grep: createBoardProjectionWorker( in src/run-task.ts'
+    - claim: "the real boot path answers and shuts down on the configured interface"
+      proof: 'grep: test("W1-T5004: real serve boot answers while projection is cold" in test/serve-board-projection-stays-off-the-event-loop.test.ts'
+  falsifier: |
+    Restore the synchronous default computeBoardSnapshot call inside serve's setImmediate:
+    the first two tests must fail while a representative cold projection is held open.
+    Force a worker crash before its first result: the response must remain dated and
+    unavailable, and /v1/version must still answer. A fixture that injects an async fake
+    but never exercises the default production construction does not satisfy this task.
