@@ -136,15 +136,19 @@ test("a truly stuck worker is recycled and the row names the phase it went silen
   const stateDir = scratch(t, "reingest-stuck");
   const hand = handClock(T0);
   const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  let markReady!: () => void;
+  const ready = new Promise<void>((resolve) => { markReady = resolve; });
   let watch: (() => void) | undefined;
   const handle = createReadModelWorker({
     stateDir, instances: [{ name: "core", ledgerDir: stateDir }], stopWaitMs: 20, clock: hand.clock,
-    workerUrl: scriptedWorker(`parentPort.postMessage({ type: "progress", instance: "core", phase: "commit", rows: 64 }); setInterval(() => {}, 1000);`),
-    log: (step, extra) => void logged.push({ step, ...(extra ? { extra } : {}) }), every: (run) => ((watch = run), () => undefined),
+    workerUrl: scriptedWorker(`parentPort.postMessage({ type: "progress", instance: "core", phase: "commit", rows: 64 });
+      parentPort.postMessage({ type: "log", step: "test.worker_ready", extra: {} }); setInterval(() => {}, 1000);`),
+    log: (step, extra) => { if (step === "test.worker_ready") markReady(); else logged.push({ step, ...(extra ? { extra } : {}) }); },
+    every: (run) => ((watch = run), () => undefined),
   });
   t.after(() => handle.stop());
   handle.start();
-  await sleep(100);
+  await ready;
   hand.advance(2 * READ_MODEL_STALL_MS);
   watch?.();
   const recycled = logged.find((l) => l.step === "read_model.worker_recycled");
@@ -156,17 +160,21 @@ test("a store open is given twice the slowest open the worker reported before it
   const stateDir = scratch(t, "reingest-open");
   const hand = handClock(T0);
   const logged: string[] = [];
+  let markReady!: () => void;
+  const ready = new Promise<void>((resolve) => { markReady = resolve; });
   let watch: (() => void) | undefined;
   const slowOpenMs = 5 * READ_MODEL_STALL_MS;
   const handle = createReadModelWorker({
     stateDir, instances: [{ name: "core", ledgerDir: stateDir }], stopWaitMs: 20, clock: hand.clock,
     workerUrl: scriptedWorker(`parentPort.postMessage({ type: "progress", instance: "core", phase: "opened", ms: ${slowOpenMs} });
-      parentPort.postMessage({ type: "progress", instance: "core", phase: "open" }); setInterval(() => {}, 1000);`),
-    log: (step) => void logged.push(step), every: (run) => ((watch = run), () => undefined),
+      parentPort.postMessage({ type: "progress", instance: "core", phase: "open" });
+      parentPort.postMessage({ type: "log", step: "test.worker_ready", extra: {} }); setInterval(() => {}, 1000);`),
+    log: (step) => { if (step === "test.worker_ready") markReady(); else logged.push(step); },
+    every: (run) => ((watch = run), () => undefined),
   });
   t.after(() => handle.stop());
   handle.start();
-  await sleep(100);
+  await ready;
   hand.advance(2 * READ_MODEL_STALL_MS);
   watch?.();
   assert.ok(!logged.includes("read_model.worker_recycled"), "an open slower than the base bound is not killed: a respawn repeats it");
