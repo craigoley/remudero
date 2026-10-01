@@ -230,6 +230,25 @@ for pair in "STATE_DIR:$STATE_DIR" "IMAGE:$IMAGE" "SERVICE_USER:$SERVICE_USER" "
 done
 case "$MAX_OLD_SPACE_MB" in ''|*[!0-9]*) echo "install-host-units: FATAL — RMD_NODE_MAX_OLD_SPACE_MB must be an integer, got '${MAX_OLD_SPACE_MB}'." >&2; exit 2 ;; esac
 case "$STATE_DIR" in /*) : ;; *) echo "install-host-units: FATAL — RMD_STATE_DIR must be absolute, got '${STATE_DIR}'." >&2; exit 2 ;; esac
+
+# THE INSTALL ROOT INSTALLS ONLY WHAT MAIN HOLDS. On 2026-10-01 a host session edited
+# ${STATE_DIR}/daemon-install in place and ran this --install from it: unmerged files went live,
+# and `rmd deploy-run` then refused the dirty root for hours. deploy-run and the watchdog converge
+# already refuse a dirty install root; this closes the hand-run path. A dev checkout is not the
+# install root and is unaffected. GIT_OPTIONAL_LOCKS=0 so a sudo run never writes a root-owned
+# index; a failed status is refused too, since an unreadable tree is not a clean one.
+if [ "$MODE" = "install" ] && [ -d "${STATE_DIR}/daemon-install" ] && \
+   [ "$(cd "${SCRIPT_DIR}/.." && pwd -P)" = "$(cd "${STATE_DIR}/daemon-install" && pwd -P)" ]; then
+  if ! local_edits="$(GIT_OPTIONAL_LOCKS=0 git -c safe.directory='*' -C "${SCRIPT_DIR}/.." status --porcelain 2>&1)"; then
+    local_edits="git status failed: ${local_edits}"
+  fi
+  if [ -n "$local_edits" ]; then
+    echo "install-host-units: FATAL -- the install root ${STATE_DIR}/daemon-install has local edits; it installs only what origin/main holds:" >&2
+    printf '%s\n' "$local_edits" | sed 's/^/  /' >&2
+    echo "  Land the change as a PR; rmd deploy-run fast-forwards this checkout and installs it." >&2
+    exit 2
+  fi
+fi
 case "$CONTAINER_NAME" in *[!a-zA-Z0-9_.-]*|"") echo "install-host-units: FATAL -- container name must be Docker-safe, got '${CONTAINER_NAME}'." >&2; exit 2 ;; esac
 case "$SERVICE_UNIT_NAME" in *.service) : ;; *) echo "install-host-units: FATAL -- service_name must end in .service, got '${SERVICE_UNIT_NAME}'." >&2; exit 2 ;; esac
 case "$WATCHDOG_SERVICE_NAME" in *.service) : ;; *) echo "install-host-units: FATAL -- watchdog_service_name must end in .service, got '${WATCHDOG_SERVICE_NAME}'." >&2; exit 2 ;; esac
