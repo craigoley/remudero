@@ -7,3 +7,12 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
 - `ci-friction:check:ci-log:coverage-ratchet` — inspect the coverage-ratchet report for the
   uncovered changed lines, add focused tests for those behaviors, and rerun the coverage gate
   against the same committed tree before pushing.
+
+- `ci-friction:fix_refusal:no-anchored-commit-message-line-in-the-report` — the shell-less
+  harness requires the worker's REPORT to end with an anchored `COMMIT_MESSAGE:` line that
+  names the commit subject in Conventional Commits format (`type(scope): subject`, lower-case,
+  no final period, at most 100 characters total). Without this line, the harness cannot commit
+  the worker's edits to the branch. To fix: add `COMMIT_MESSAGE: <type>(<scope>): <subject>`
+  as the last line of your REPORT, exactly anchored at the line start, following Conventional
+  Commits conventions (type is one of: build, chore, ci, docs, feat, fix, perf, refactor,
+  revert, style, test; subject starts lower-case).
