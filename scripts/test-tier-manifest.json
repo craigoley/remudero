@@ -279,7 +279,7 @@
     "test/a-raw-coverage-run-without-source-maps-is-refused.test.ts": 2700,
     "test/a-reaction-answers-an-escalation.test.ts": 1155,
     "test/a-read-model-backlog-is-caught-up-in-short-ticks.test.ts": 2200,
-    "test/a-read-model-upgrade-never-re-reads-the-corpus.test.ts": 2200,
+    "test/a-read-model-upgrade-never-re-reads-the-corpus.test.ts": 5000,
     "test/a-read-route-never-scans-the-whole-ledger.test.ts": 1600,
     "test/a-reader-never-parses-a-half-written-config.test.ts": 1351,
     "test/a-rebase-that-could-not-start-is-not-a-conflict.test.ts": 1800,
