@@ -53,10 +53,12 @@ import {
   type ReadModelDb,
   type ReadModelLease,
 } from "./read-model-db.js";
+import { threadSlowLane, type SlowLane, type SlowLaneConfig } from "./read-model-slow-lane.js";
 import { readModelCommand } from "./read-model-cli.js";
 import { createRepositoriesReadModelView } from "./repositories-view.js";
 import { createViewShadow, readShadowEvidence, sqliteShadowStore, type ShadowLegacy, type ShadowReadiness, type ShadowRequest, type ViewShadow } from "./view-shadow.js";
 import { oldestAsOf, viewEtag, type ViewBody, type ViewBodyEntry, type ViewSource } from "./views.js";
+import { describeSource, judgeSource, type SourcePhase } from "./view-freshness.js";
 
 const READ_MODEL_WORKER_KIND = "remudero-read-model" as const;
 /** The SSE publisher's cadence (design §1.1). */
@@ -188,6 +190,8 @@ export interface ReadModelInstanceState {
   newestTs: string | null;
   /** Present while one of its oracle slices is running. */
   checking?: true;
+  /** Present while a backlog is being applied: how far behind, and the ETA measured at `at`. */
+  catchUp?: { rowsBehind: number; etaMs: number; at: number };
 }
 
 export type ReadModelBodyEntry = ViewBodyEntry;
@@ -196,6 +200,8 @@ export type ReadModelWorkerMessage =
   | { type: "body"; entry: ReadModelBodyEntry }
   | { type: "state"; at: number; instances: ReadModelInstanceState[]; switches: ReadModelSwitches }
   | { type: "log"; step: string; extra: Record<string, unknown> }
+  /** Each non-ledger source's latest reading, posted once per tick when one changed: a body whose data did not move is not re-posted, but its sources still age. */
+  | { type: "sources"; sources: ViewSource[] }
   /** The heartbeat inside a long tick: `open` before a store's open (its quick_check), `opened` with what it took, `commit` per applied transaction. */
   | { type: "progress"; instance: string; phase: "open" | "opened" | "commit"; ms?: number; rows?: number };
 
@@ -220,14 +226,25 @@ export interface ReadModelView {
   perInstance?: boolean;
 }
 
-/** The `ledger:<i>` source every read-model view carries: stale while its projector is behind. */
+/** Why a projector that is not fresh is not: the structured half of its `reason`. */
+function ledgerPhase(state: ReadModelInstanceState): SourcePhase {
+  if (state.lease === "elsewhere") return "elsewhere";
+  if (state.failures > 0) return "failed";
+  if (state.catchUp) return "catching_up";
+  return state.tickedAt === undefined ? "warming" : "behind";
+}
+
+/** The `ledger:<i>` source every read-model view carries: stale while its projector is behind, with why and, catching up, when it is done. */
 export function ledgerSource(state: ReadModelInstanceState, now: number, staleMs: number = READ_MODEL_LEDGER_STALE_MS): ViewSource {
-  const name = `${LEDGER_SOURCE_PREFIX}${state.instance}`;
-  if (state.tickedAt === undefined) return { name, asOf: state.newestTs, state: "stale", reason: state.reason ?? "projector has not ticked yet" };
-  const behindMs = now - state.tickedAt;
-  if (behindMs > staleMs) return { name, asOf: state.newestTs, state: "stale", reason: `projector ${Math.round(behindMs / 1000)} s behind${state.reason ? `: ${state.reason}` : ""}` };
-  if (state.reason) return { name, asOf: state.newestTs, state: "stale", reason: state.reason };
-  return { name, asOf: state.newestTs, state: "fresh" };
+  const base = describeSource({ name: `${LEDGER_SOURCE_PREFIX}${state.instance}`, asOf: state.newestTs, state: "fresh", budgetMs: staleMs });
+  const behindMs = state.tickedAt === undefined ? undefined : Math.max(0, now - state.tickedAt);
+  const lag = behindMs === undefined ? {} : { lagMs: behindMs };
+  const eta = state.catchUp ? { etaMs: Math.max(0, state.catchUp.etaMs - (now - state.catchUp.at)) } : {};
+  const stale = (reason: string): ViewSource => ({ ...base, state: "stale", reason, phase: ledgerPhase(state), ...lag, ...eta });
+  if (behindMs === undefined) return stale(state.reason ?? "projector has not ticked yet");
+  if (behindMs > staleMs) return stale(`projector ${Math.round(behindMs / 1000)} s behind${state.reason ? `: ${state.reason}` : ""}`);
+  if (state.reason) return stale(state.reason);
+  return { ...base, ...lag };
 }
 
 /** The read model's own status, one body per serve: what each projector has applied and who holds it. */
@@ -565,6 +582,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   let lastSolo = false;
   const lastEtag = new Map<string, string>();
   const latest = new Map<string, ViewBody>();
+  const clocks = new Map<string, { key: string; source: ViewSource }>();
+  let clocksMoved = false;
   let comparator: { db: ReadModelDb; shadow: ViewShadow } | undefined;
   let deferredLoggedAt = Number.NEGATIVE_INFINITY;
   let switches = DEFAULT_READ_MODEL_SWITCHES;
@@ -647,11 +666,13 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     if (!result.pending) {
       log("read_model.caught_up", { instance, ms: ended - run.startedAt, ticks: run.ticks, maxTickMs: run.maxTickMs, rows: run.lines, budgetMs });
       slot.catchUp = undefined;
+      delete slot.state.catchUp;
       return;
     }
     const rowsBehind = Math.round((result.backlogBytes * run.lines) / Math.max(1, run.sourceBytes));
     const etaMs = Math.round((result.backlogBytes * Math.max(1, ended - run.startedAt)) / Math.max(1, run.sourceBytes));
     slot.state.reason = `catching up: about ${rowsBehind} rows (${result.backlogBytes} bytes) behind, done in about ${Math.ceil(etaMs / 1000)} s`;
+    slot.state.catchUp = { rowsBehind, etaMs, at: ended };
     if (ended - run.loggedAt < READ_MODEL_LEDGER_STALE_MS) return;
     run.loggedAt = ended;
     log("read_model.catch_up", { instance, rowsBehind, bytesBehind: result.backlogBytes, etaMs, ticks: run.ticks, maxTickMs: run.maxTickMs, budgetMs });
@@ -848,6 +869,13 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       const scoped = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
       ready = view.prepare?.(scoped, stepsUntil(started + allowanceMs)) ?? true;
       for (const { key, data, sources } of ready ? view.materialize(scoped) : []) {
+        for (const source of sources) {
+          if (source.name.startsWith(LEDGER_SOURCE_PREFIX)) continue;
+          const reading = JSON.stringify({ ...source, lagMs: undefined });
+          if (clocks.get(source.name)?.key === reading) continue;
+          clocks.set(source.name, { key: reading, source });
+          clocksMoved = true;
+        }
         const stale = sources.some((source) => source.state !== "fresh");
         const etag = viewEtag(view.name, view.version, stale, data);
         const id = `${view.name}\u0000${key}`;
@@ -900,7 +928,13 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }
   }
 
-  const postState = (now: number): void => opts.post({ type: "state", at: now, instances: slots.map((slot) => ({ ...slot.state })), switches });
+  const postState = (now: number): void => {
+    if (clocksMoved) {
+      clocksMoved = false;
+      opts.post({ type: "sources", sources: [...clocks.values()].map((clock) => clock.source) });
+    }
+    opts.post({ type: "state", at: now, instances: slots.map((slot) => ({ ...slot.state })), switches });
+  };
 
   return {
     start(): void {
@@ -985,6 +1019,8 @@ export interface ReadModelWorkerData {
   signal: SharedArrayBuffer;
   /** `owner/name` the oracle's escalations are filed on; the worker builds its own issue gateway. */
   escalationRepository?: string;
+  /** The slow lane's units (read-model-slow-lane.ts); absent, no slow lane runs. */
+  slowLane?: SlowLaneConfig;
 }
 
 /** The worker branch's body: tick on a timer until asked to stop, then release and signal. */
@@ -997,7 +1033,12 @@ export function runReadModelWorker(
   const stopRequested = (): boolean => Atomics.load(signal, 0) === 1;
   const [owner, repo] = data.escalationRepository?.split("/") ?? [];
   const escalation = owner && repo ? { issues: ghIssueGateway(owner, repo), ledgerPath: join(data.stateDir, LEDGER_FILENAME), runId: READ_MODEL_WORKER_KIND } : undefined;
-  const post = (m: ReadModelWorkerMessage): void => port.postMessage(m);
+  let slowLane: SlowLane | undefined;
+  const post = (m: ReadModelWorkerMessage): void => {
+    if (m.type === "state") slowLane?.lease(m.instances[0]?.lease === "held");
+    port.postMessage(m);
+  };
+  if (data.slowLane) slowLane = threadSlowLane({ config: data.slowLane, log: (step, extra) => post({ type: "log", step, extra }) });
   const now = createNowView({ instances: data.instances, ledgerSource, clock, log: (step, extra) => post({ type: "log", step, extra }) });
   const oracleRunner = threadOracle({ ...(data.escalationRepository ? { escalationRepository: data.escalationRepository } : {}), log: (step, extra) => post({ type: "log", step, extra }) });
   const ticker = createReadModelTicker({
@@ -1011,6 +1052,7 @@ export function runReadModelWorker(
     if (finished) return;
     finished = true;
     clearTimeout(timer);
+    slowLane?.close();
     const released = ticker.release();
     port.postMessage({ type: "log", step: "read_model.stopped", extra: { released } } satisfies ReadModelWorkerMessage);
     Atomics.store(signal, 1, 1);
@@ -1119,6 +1161,7 @@ export interface ReadModelWorkerOptions {
   every?: (run: () => void, ms: number) => () => void;
   /** What the silent-worker watchdog measures against. */
   clock?: Clock;
+  slowLane?: SlowLaneConfig;
   /** Sees each worker message after the handle has applied it. */
   observe?: (msg: ReadModelWorkerMessage) => void;
 }
@@ -1137,6 +1180,7 @@ export function readModelBodyKey(view: string, key = ""): string {
 export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWorkerHandle {
   const bodies = new Map<string, ReadModelBodyEntry>();
   const instances = new Map<string, ReadModelInstanceState>();
+  const sourceClocks = new Map<string, ViewSource>();
   let switches = DEFAULT_READ_MODEL_SWITCHES;
   let at: number | undefined;
   const home = opts.instances[0]?.name ?? "core";
@@ -1209,7 +1253,9 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       posted.add(readModelBodyKey(msg.entry.view, msg.entry.key));
       for (const listener of bodyListeners) listener(msg.entry);
     } else if (msg.type === "log") opts.log?.(msg.step, msg.extra);
-    else if (msg.type === "progress") {
+    else if (msg.type === "sources") {
+      for (const source of msg.sources) sourceClocks.set(source.name, source);
+    } else if (msg.type === "progress") {
       if (msg.phase === "opened") slowestOpenMs = Math.max(slowestOpenMs, msg.ms ?? 0);
     } else {
       at = msg.at;
@@ -1225,6 +1271,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     const data: ReadModelWorkerData = {
       kind: READ_MODEL_WORKER_KIND, stateDir: opts.stateDir, instances: [...opts.instances], tickMs: opts.tickMs ?? READ_MODEL_TICK_MS, signal: shared,
       ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}),
+      ...(opts.slowLane ? { slowLane: opts.slowLane } : {}),
     };
     const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv });
     signal = new Int32Array(shared);
@@ -1250,13 +1297,13 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     state: () => ({ ...(at === undefined ? {} : { at }), instances, switches, ...(warm.reason ? { warmBoot: warm.reason } : {}) }),
     body: (view, key = "") => bodies.get(readModelBodyKey(view, key)),
     judge: (sources, now) => sources.map((source) => {
-      if (!source.name.startsWith(LEDGER_SOURCE_PREFIX)) return source;
+      if (!source.name.startsWith(LEDGER_SOURCE_PREFIX)) return judgeSource(sourceClocks.get(source.name) ?? source, now);
       const instance = source.name.slice(LEDGER_SOURCE_PREFIX.length);
       const state = instances.get(instance);
       if (state?.tickedAt !== undefined) return ledgerSource(state, now);
       const committed = committedAt.get(instance);
       if (committed !== undefined && now - committed <= READ_MODEL_LEDGER_STALE_MS) return { name: source.name, asOf: source.asOf, state: "fresh" };
-      return state ? ledgerSource(state, now) : { ...source, state: "stale", reason: "read model warming: this body was committed before serve started" };
+      return state ? ledgerSource(state, now) : { ...describeSource(source), state: "stale", phase: "warming", reason: "read model warming: this body was committed before serve started" };
     }),
     reload: () => {
       const again = loadCommittedViewBodies(opts.stateDir, home);
