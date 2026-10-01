@@ -57,7 +57,7 @@ import {
 import { threadSlowLane, type SlowLane, type SlowLaneConfig } from "./read-model-slow-lane.js";
 import { readModelCommand } from "./read-model-cli.js";
 import { createRepositoriesReadModelView } from "./repositories-view.js";
-import { createViewShadow, readShadowEvidence, sqliteShadowStore, type ShadowLegacy, type ShadowReadiness, type ShadowRequest, type ViewShadow } from "./view-shadow.js";
+import { createViewShadow, readShadowEvidence, sqliteShadowStore, storedShadowReadiness, type ShadowLegacy, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ViewShadow } from "./view-shadow.js";
 import { oldestAsOf, viewEtag, type ViewBody, type ViewBodyEntry, type ViewSource } from "./views.js";
 import { describeSource, judgeSource, type SourcePhase } from "./view-freshness.js";
 
@@ -905,7 +905,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
    * phase has spent nothing, so it overshoots by itself at most once and is measured from then on.
    */
   function materialize(now: number, tickStart: number, only?: ViewUnit): void {
-    const shadow = comparator?.shadow.readiness();
+    const home = slots[0]?.db;
+    const shadow = home ? storedShadowReadiness(home, now) : undefined;
     const ctx: ReadModelViewContext = { now, switches, instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}) })), ...(shadow ? { shadow } : {}) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
     if (only) return build(only, now, ctx, generation, soloMs);
@@ -1131,6 +1132,8 @@ export interface ReadModelWorkerHandle {
   stop(): boolean;
   /** Hands one sampled shadow request to the worker, which diffs it off serve's main thread. */
   shadow(request: ShadowRequest): void;
+  /** While started, offers `sample` every key of each view switched `shadow` on each switch recheck; its throttle keeps one per sample period. */
+  driveShadow(sample: ShadowSample): void;
   /** Calls `listener` with each body the worker posts, after it is stored; returns the unsubscribe. */
   onBody(listener: (entry: ReadModelBodyEntry) => void): () => void;
 }
@@ -1185,6 +1188,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   };
   refreshSwitches();
   let stopSwitchWatch: () => void = () => {};
+  let driven: ShadowSample | undefined;
 
   let worker: Worker | undefined;
   let signal: Int32Array | undefined;
@@ -1285,6 +1289,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     }),
     switches: () => mainSwitches,
     shadow: (request) => worker?.postMessage({ type: "shadow", ...request }),
+    driveShadow: (sample) => void (driven = sample),
     onBody: (listener) => {
       bodyListeners.add(listener);
       return () => bodyListeners.delete(listener);
@@ -1295,6 +1300,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       stopSwitchWatch = (opts.every ?? everyUnref)(() => {
         refreshSwitches();
         watchWorker();
+        for (const entry of bodies.values()) if (mainSwitches.views[entry.view] === "shadow") driven?.(entry.view, entry.key, new URLSearchParams(entry.key), true);
       }, READ_MODEL_SWITCH_RECHECK_MS);
     },
     stop: () => {
