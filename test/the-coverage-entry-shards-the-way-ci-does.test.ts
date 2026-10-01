@@ -39,7 +39,7 @@ function coverageFixtureRoot(): string {
   return root;
 }
 
-function coverageSpawn(repoRoot: string, options: { emptySelectionShard?: number; missingArtifactShard?: number; missingSummaryShard?: number; missingCompactShard?: number } = {}) {
+function coverageSpawn(repoRoot: string, options: { emptySelectionShard?: number; missingArtifactShard?: number; missingSummaryShard?: number; missingCompactShard?: number; vanishingCompactShard?: number } = {}) {
   const calls: Call[] = [];
   const spawn: PreflightSpawn = (file, args, opts) => {
     calls.push({ file, args, opts });
@@ -67,6 +67,9 @@ function coverageSpawn(repoRoot: string, options: { emptySelectionShard?: number
         if (shard !== options.missingCompactShard) {
           mkdirSync(compactDir, { recursive: true });
           writeFileSync(join(compactDir, `coverage-bundle-${shard}-0000000000000-0.json`), "{}\n");
+        }
+        if (shard === CI_COVERAGE_SHARD_COUNT && options.vanishingCompactShard !== undefined) {
+          rmSync(join(dirname(dirname(compactDir)), `shard-${options.vanishingCompactShard}`, "compact"), { recursive: true, force: true });
         }
         return { status: 0, stdout: "coverage-merge-ratchet: rawBytes=10 compactBytes=5 peakBytes=15\n", stderr: "" };
       }
@@ -263,6 +266,20 @@ test("W1-T4951: missing compact shard refuses the merged coverage gate", () => {
     const result = testWithCoverageLeaf(root, spawn, join(root, "coverage", "lcov.info"), () => Number.MAX_SAFE_INTEGER);
     assert.equal(result.ok, false);
     assert.match(result.detail, /expected compact V8 coverage for shard 3/);
+    assert.equal(calls.some((call) => call.args.includes("--output")), false);
+  } finally {
+    cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4951: a compact shard that disappears after compaction refuses the final merge", () => {
+  const root = coverageFixtureRoot();
+  const { calls, spawn, cleanup } = coverageSpawn(root, { vanishingCompactShard: 1 });
+  try {
+    const result = testWithCoverageLeaf(root, spawn, join(root, "coverage", "lcov.info"), () => Number.MAX_SAFE_INTEGER);
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /expected compact V8 coverage for shard 1/);
     assert.equal(calls.some((call) => call.args.includes("--output")), false);
   } finally {
     cleanup();
