@@ -96,7 +96,11 @@ reads no file and no SQLite.
     response, a sample (at most one a minute per key) goes to the worker's comparator
     (`src/lib/view-shadow.ts`), which diffs the view body against the legacy side: serve's rendered
     legacy body for nav-badge, and for now and repositories the core computation the worker's legacy
-    providers produce. The HTTP answer being a 404 does not stop the comparison.
+    providers produce. The HTTP answer being a 404 does not stop the comparison. Serve also DRIVES
+    every shadowed key through the same sampler on its 5 s switch recheck, so each key is compared about
+    once a minute with no console traffic; a driven sample counts as a sample, never a request.
+    Readiness (`data.shadow` in `/v1/views/read-model`) is read from the persisted `view_shadow`
+    counters, so it shows from boot, not only after this process compared something.
   - `serve`: the read-model body answers. A view with no body yet answers from its Phase 0
     computation, or **404 `view_not_ready`**.
 - **Worker diagnostics.** The worker ledgers `read_model.lease_acquired` and `read_model.lease_elsewhere`

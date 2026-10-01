@@ -406,9 +406,19 @@ const SHADOW_DDL = "CREATE TABLE IF NOT EXISTS view_shadow(view TEXT PRIMARY KEY
 export function sqliteShadowStore(db: ReadModelDb, lease: ReadModelLease): ShadowStore {
   withWriteTransaction(db, lease, () => db.exec(SHADOW_DDL));
   return {
-    load: () => Object.fromEntries(db.prepare("SELECT view, state FROM view_shadow").all().map((row) => [String(row.view), JSON.parse(String(row.state)) as ViewShadowState])),
+    load: () => storedShadowStates(db),
     save: (view, state) => void withWriteTransaction(db, lease, () => db.prepare("INSERT INTO view_shadow(view, state) VALUES(?, ?) ON CONFLICT(view) DO UPDATE SET state = excluded.state").run(view, JSON.stringify(state))),
   };
+}
+
+function storedShadowStates(db: ReadModelDb): Record<string, ViewShadowState> {
+  if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'view_shadow'").get() === undefined) return {};
+  return Object.fromEntries(db.prepare("SELECT view, state FROM view_shadow").all().map((row) => [String(row.view), JSON.parse(String(row.state)) as ViewShadowState]));
+}
+
+/** Readiness as the persisted counters say, read-only: it shows from boot, before this process compared anything. */
+export function storedShadowReadiness(db: ReadModelDb, nowMs: number): ShadowReadiness[] {
+  return Object.entries(storedShadowStates(db)).sort(([a], [b]) => a.localeCompare(b)).map(([view, s]) => shadowReadiness(view, s, nowMs));
 }
 
 function emptyState(): ViewShadowState {
@@ -496,6 +506,9 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
   };
 }
 
+/** Offers one view key to the comparator; a `synthetic` offer is the shadow driver's and is no request. */
+export type ShadowSample = (view: string, key: string, params: URLSearchParams, synthetic?: boolean) => void;
+
 /**
  * Serve's side: counts every shadow request and passes on at most one per {@link VIEW_SHADOW_SAMPLE_MS}
  * per view key, on a deferred turn after the response finished, with the request count it stands for.
@@ -505,14 +518,14 @@ export function createShadowSampler(opts: {
   sampleMs?: number;
   defer?: (run: () => void) => void;
   send: (sample: { view: string; key: string; params: URLSearchParams; requests: number }) => void;
-}): (view: string, key: string, params: URLSearchParams) => void {
+}): ShadowSample {
   const clock = opts.clock ?? systemClock;
   const defer = opts.defer ?? ((run: () => void) => void setImmediate(run));
   const last = new Map<string, number>();
   const pending = new Map<string, number>();
-  return (view, key, params) => {
+  return (view, key, params, synthetic = false) => {
     const id = `${view}\u0000${key}`;
-    const requests = (pending.get(id) ?? 0) + 1;
+    const requests = (pending.get(id) ?? 0) + (synthetic ? 0 : 1);
     const now = clock.now();
     if (now - (last.get(id) ?? Number.NEGATIVE_INFINITY) < (opts.sampleMs ?? VIEW_SHADOW_SAMPLE_MS)) return void pending.set(id, requests);
     last.set(id, now);
@@ -530,7 +543,7 @@ export interface ShadowRequest {
 }
 
 /** Legacy bodies serve's main thread already knows how to compute, rendered for a sampled request. */
-export function legacyViewSampler(opts: { legacy: readonly ViewDefinition[]; post: (request: ShadowRequest) => void; clock?: Clock; defer?: (run: () => void) => void }): (view: string, key: string, params: URLSearchParams) => void {
+export function legacyViewSampler(opts: { legacy: readonly ViewDefinition[]; post: (request: ShadowRequest) => void; clock?: Clock; defer?: (run: () => void) => void }): ShadowSample {
   const clock = opts.clock ?? systemClock;
   const legacy = new Map(opts.legacy.map((view) => [view.name, view]));
   return createShadowSampler({
@@ -545,7 +558,14 @@ export function legacyViewSampler(opts: { legacy: readonly ViewDefinition[]; pos
   });
 }
 
-/** The view routes' options with the shadow sampler attached when serve runs a read-model worker. */
-export function withViewShadow(handle: { shadow(request: ShadowRequest): void } | undefined, opts: ReadModelViewRoutesOptions): ReadModelViewRoutesOptions {
-  return handle ? { ...opts, shadow: legacyViewSampler({ legacy: opts.legacy, post: (request) => handle.shadow(request), ...(opts.clock ? { clock: opts.clock } : {}) }) } : opts;
+/**
+ * The view routes' options with the shadow sampler attached when serve runs a read-model worker. The
+ * handle's shadow driver offers the same sampler every shadowed key on a cadence, so readiness accrues
+ * with no console traffic; the per-key throttle is shared, so the driver never adds to its bound.
+ */
+export function withViewShadow(handle: { shadow(request: ShadowRequest): void; driveShadow?(sample: ShadowSample): void } | undefined, opts: ReadModelViewRoutesOptions): ReadModelViewRoutesOptions {
+  if (!handle) return opts;
+  const shadow = legacyViewSampler({ legacy: opts.legacy, post: (request) => handle.shadow(request), ...(opts.clock ? { clock: opts.clock } : {}) });
+  handle.driveShadow?.(shadow);
+  return { ...opts, shadow };
 }
