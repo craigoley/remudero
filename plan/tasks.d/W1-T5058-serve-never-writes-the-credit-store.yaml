@@ -15,7 +15,9 @@
     - src/lib/panel-graph.ts
     - src/lib/board.ts
     - test/serve-never-writes-the-credit-store.test.ts
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T5058 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     READ 2026-10-01 at 431d71762: status.ts projectPlan calls writeCreditStore (default saveCreditStore)
