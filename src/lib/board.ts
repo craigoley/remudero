@@ -21,6 +21,7 @@ import {
   projectPlan,
   readLedgerLines,
   readLedgerTail,
+  SERVE_KEEPS_CREDITS_IN_MEMORY,
   type BoardDeps,
   type DeriveDeps,
   type LedgerTailCache,
@@ -429,6 +430,7 @@ export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptio
     ...deps,
     github: snapshotGithub,
     readLedger: () => lines,
+    writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY,
     ...(options.reuseProjection ? { reuseProjection: options.reuseProjection } : {}),
   };
   const byId = projectPlan(deps.plan, effectiveDeps);
