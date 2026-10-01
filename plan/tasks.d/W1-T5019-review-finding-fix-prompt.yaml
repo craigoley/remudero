@@ -1,0 +1,28 @@
+- id: W1-T5019
+  title: "Return verified line-anchored review findings to the repair worker"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 18.00
+  risk: high
+  band_meaning: span
+  origin: "operator-approved Orca comparison, 2026-09-30"
+  files: [src/lib/prompt-render.ts, src/run-task.ts, test/review-finding-fix-prompt.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at c94c2bf49: review.finding rows preserve validated path, line, mechanism and remedy, but
+    renderFixPrompt shows only unmet claim and reason. No reader returns a same-head finding to a repair prompt.
+    W1-T4848 created the receipt; this task consumes it without changing the review gate.
+  design: |
+    Join verified findings by exact head SHA and criterion index to the unmet criteria in both immediate and
+    sweep redispatch fix prompts. Render path:line, mechanism and remedy as advisory evidence. Ignore stale,
+    malformed or unmatched findings and never execute reviewer text. Keep one pass over all unmet criteria.
+  acceptance:
+    - claim: "a same-head verified finding reaches the repair prompt with its anchor and remedy"
+      proof: 'grep: test("W1-T5019: same-head review finding reaches the fix prompt" in test/review-finding-fix-prompt.test.ts'
+    - claim: "a stale or unverified finding cannot contaminate a later head"
+      proof: 'grep: test("W1-T5019: stale review finding is omitted from the fix prompt" in test/review-finding-fix-prompt.test.ts'
