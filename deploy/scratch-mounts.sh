@@ -1,45 +1,25 @@
 #!/usr/bin/env bash
 # scratch-mounts — bind the REBUILDABLE, I/O-heavy paths of a Remudero container to the host's
-# ephemeral local NVMe (/mnt/scratch) instead of the data disk (/mnt/rmd).
+# ephemeral local NVMe (/mnt/scratch) instead of the IOPS-capped data disk (/mnt/rmd).
+# Why, what moves, the operator runbook and the rollback: docs/operator-guide.md "Scratch-disk mounts".
 #
-# WHY. MEASURED 2026-10-01: the data disk, a 128 GB StandardSSD capped near 500 IOPS, sat at 85-93%
-# utilisation under real load, mostly small reads from worker tests and git in worktrees (the daemon
-# alone read 34.6 MB per 20 s). /mnt/scratch, a 440 GB local NVMe, sat at about 1%. Everything moved
-# here can be rebuilt: worktrees are re-created per run, tmp is scratch by definition, coverage is
-# re-measured, and the read model rebuilds itself from the ledger on an empty directory (~40 s).
-# NOTHING AUTHORITATIVE MOVES: the ledger, repos, lanes, plan state, the read-model switch file and
-# every other state file stay on the data disk, so a rollback loses nothing.
+# INVARIANT: nothing authoritative moves. Only worktrees, the shared tmp, coverage scratch, the read
+# model's DB files (rebuilt from the ledger on an empty dir) and each container's /tmp are bound here;
+# the ledger, repos, lanes, plan and every state file, the read-model switch file included, stay put.
+# DARK until RMD_SCRATCH=on or the switch file exists; an unmounted or unwritable scratch root makes
+# the launch run exactly as before and say why. Falsifier: test/scratch-mounts.test.ts.
 #
-# WHAT MOVES (host source under ${RMD_SCRATCH_ROOT}/rmd/<state-dir name>/ -> container path):
-#   worktrees          -> /home/node/Remudero/worktrees
-#   tmp                -> /home/node/Remudero/tmp           (settings files handed to workers)
-#   remudero-coverage  -> /home/node/Remudero/.remudero-coverage
-#   read-model         -> /home/node/rmd-scratch/read-model  (RMD_READ_MODEL_DB_DIR maps state/ there)
-#   containers/<name>/tmp -> /tmp                           (emptied at each launch, as a new
-#                                                            container's own /tmp always was)
+# A deallocate wipes scratch, so each launch records its dirs in <state-dir>/.scratch-mounts and
+# `--restore` (docker.service's ExecStartPre, from install-container-runtime-mount-order.sh)
+# re-creates them with that file's owner before docker restarts a container. That drop-in orders
+# docker After=/Wants= rmd-scratch.service, never RequiresMountsFor=/mnt/scratch: a script mounts
+# the disk, not a mount unit, so at boot that directive would order docker after nothing.
 #
-# SHIPS DARK. Nothing binds until the operator turns it on, in the same window as the Phase 3
-# `serve-container.sh --replace` (docs/operator-guide.md "Scratch-disk mounts"):
-#   on   RMD_SCRATCH=on, or the switch file ${RMD_SCRATCH_SWITCH} exists
-#   off  RMD_SCRATCH=off, or no switch file: every launch is exactly today's
-# An unmounted or unwritable scratch root is never an error: the launch proceeds without these
-# binds and says why. Scratch is EPHEMERAL (a deallocate wipes it), so each launch records the
-# directories it bound in <state-dir>/.scratch-mounts, and `--restore` (docker.service's
-# ExecStartPre, installed by deploy/install-container-runtime-mount-order.sh) re-creates them with
-# that file's owner before docker restarts any container. That drop-in orders docker After= and
-# Wants= rmd-scratch.service, never RequiresMountsFor=/mnt/scratch: a script mounts that disk, not a
-# mount unit, so at boot the directive would order docker after nothing. RMD_SCRATCH_STATE_DIRS names
-# the other instances' state dirs for it; RMD_SCRATCH_LIB_PATH (default /usr/local/bin/
-# rmd-scratch-mounts, written only on a real host) is where it installs this file.
-#
-# USAGE
-#   . deploy/scratch-mounts.sh; scratch_plan <state-dir> <container>; scratch_prepare; scratch_fresh_tmp
-#   deploy/scratch-mounts.sh --restore <state-dir>...      # as root, at docker start
-#
-# TEST SEAMS (production defaults shown)
-#   RMD_SCRATCH_ROOT         /mnt/scratch
-#   RMD_SCRATCH_SWITCH       /etc/remudero/scratch-mounts.on
-#   RMD_SCRATCH_MOUNTS_FILE  /proc/mounts   (the root must be its own mount, not a bare directory)
+# USAGE  . scratch-mounts.sh; scratch_plan <state-dir> <container>; scratch_prepare; scratch_fresh_tmp
+#        scratch-mounts.sh --restore <state-dir>...                  (root, at docker start)
+# SEAMS  RMD_SCRATCH_ROOT (/mnt/scratch), RMD_SCRATCH_SWITCH (/etc/remudero/scratch-mounts.on),
+#        RMD_SCRATCH_MOUNTS_FILE (/proc/mounts); the installer's RMD_SCRATCH_STATE_DIRS and
+#        RMD_SCRATCH_LIB_PATH (/usr/local/bin/rmd-scratch-mounts, written only on a real host).
 
 SCRATCH_STATE_DEST="/home/node/Remudero"
 SCRATCH_READ_MODEL_DEST="/home/node/rmd-scratch/read-model"
