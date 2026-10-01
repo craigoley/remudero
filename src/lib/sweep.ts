@@ -7145,6 +7145,20 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `finished still blocks the merge; escalating once rather than waiting on something that will not arrive`,
   },
   {
+    // Start one exact-input review after CI has registered, while its long checks still run.
+    disposition: "post-review",
+    when: (pr, policy, _ageDays, now) => {
+      const age = pendingAgeMinutes(pr, now);
+      return pr.checksState === "pending" && pr.reviewState === "none" &&
+        pr.requiredContextsUnreadable !== true && pr.reviewPostRefused !== true &&
+        (pr.priorReviewAttemptsForInput ?? 0) === 0 &&
+        age !== undefined && age >= 1 && age < policy.pendingCeilingMinutes;
+    },
+    reason: (pr, _policy, _ageDays, now) =>
+      `checks pending ${Math.floor(pendingAgeMinutes(pr, now) ?? 0)}m, review never posted — ` +
+      `running one exact-input review alongside CI through the bounded post-review lane`,
+  },
+  {
     // WAIT (W1-T114). Never reached with a FAILING review or red checks — rows 4-7 claimed those,
     // so only checks-pending survives here. Requires a DATABLE age; undated pending falls through
     // to the catch-all unchanged, the pre-W1-T114 behaviour for callers that never wired the
