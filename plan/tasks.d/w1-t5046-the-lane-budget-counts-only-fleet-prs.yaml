@@ -1,0 +1,39 @@
+- id: W1-T5046
+  title: "THE LANE BUDGET STILL COUNTS EVERY OPEN PR — W1-T4465 made the queue governor count only fleet-owned PRs, but laneDispatchBudget (drain.ts) still takes the bare total from openPrCount, so operator run-unfiled, plan-filing and codex PRs hold dispatch at the WIP limit: 2026-10-01 01:46Z dispatch.wip_deferred at observed_open_count 12 while about half were foreign"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 10.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-10-01: build the stuck tasks or fix the root cause (dispatch stall investigation)"
+  note: "reservation hand-off: plan-lane-budget-owned-1790819572000 -> plan-lane-budget-owned-1790819572000"
+  plan_refs: [W1-T4465, W1-T172, W1-T343, W1-T3144]
+  files: [src/run-task.ts, test/the-lane-budget-counts-only-fleet-owned-prs.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-01: after W1-T4998 the daemon reached admission in 57 s, and then logged dispatch.wip_deferred
+    {lane_count: 2, wip_limit: 10, observed_open_count: 12}. Of the 12 open PRs, four were operator run-unfiled-*
+    sessions and others were plan-filing or codex/* branches. isFleetOwnedRunBranch classifies all of those as
+    foreign, so the W1-T4465 governor would admit. The daemon's other WIP gate, laneDispatchBudget
+    (min(lanes, wipLimit - openPrCount)), takes `openPrCount` from createOpenPrCountObservation().read, which is
+    the bare total. W1-T4465's doc deliberately left this closure on the total ("has no ownership concept and must
+    not gain one here"); that was scope, not a stated reason. The result: every operator or session PR removes a
+    fleet lane.
+  design: |
+    Both commands (drainCommand and daemonCommand) pass the FLEET-OWNED count from the same batch
+    (`boardOpenPrCount.readOwnership(...).owned`) as the lane budget's openPrCount, with the same fail-closed
+    fallback readOwnership already takes when no head refs were observed (everything counts as owned).
+    The dispatch.wip_deferred row gains `observed_foreign_count`, so a hold shows its split. No bound changes;
+    wipLimit stays the policy value.
+  acceptance:
+    - claim: "foreign open PRs do not consume the lane budget"
+      proof: 'grep: test("W1-T5046: foreign open PRs do not consume the lane budget" in test/the-lane-budget-counts-only-fleet-owned-prs.test.ts'
+    - claim: "an unobservable ownership split still counts every open PR"
+      proof: 'grep: test("W1-T5046: an unobservable ownership split still counts every open PR" in test/the-lane-budget-counts-only-fleet-owned-prs.test.ts'
+  falsifier: |
+    Pass the bare total back to laneDispatchBudget and the first test sees a zero budget with only foreign PRs open.
