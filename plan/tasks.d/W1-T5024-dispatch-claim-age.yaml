@@ -1,0 +1,25 @@
+- id: W1-T5024
+  title: "Show the age of a dispatch claim and escalate a stale cross-host claim once"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator-approved Orca comparison, 2026-09-30"
+  files: [src/lib/status-board.ts, src/lib/dispatch-claim.ts, test/dispatch-claim-age.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at c94c2bf49: a claim anchor carries mintedAtMs, but the board prints no age and cross-host
+    claimant liveness is undecidable. A claim can remain held forever with only a holder and drop command.
+  design: |
+    Project ageMs from mintedAtMs on the board row. Past a bounded age, open one deduplicated human escalation
+    that identifies the exact claim and operator-only release command. Never release an uncertain claim
+    automatically. Resolve the escalation when the claim disappears; keep normal dispatch flow unchanged.
+  acceptance:
+    - claim: "a stale claim shows its age and raises one operator-only escalation"
+      proof: 'grep: test("W1-T5024: aged dispatch claim is visible and escalates once" in test/dispatch-claim-age.test.ts'
