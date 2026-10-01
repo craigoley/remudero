@@ -2,6 +2,7 @@
   title: "ROUTE FROM BENCHMARK-READY MODEL POOLS — session-aware model-plus-effort selection with outcome/cost evidence, explicit readiness, and a fixed baseline fallback"
   repo: remudero
   depends_on: [W1-T167, W1-T250, W1-T3576, W1-T3762]
+  priority: 2
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -64,4 +65,17 @@
     Select a failed candidate, use an incomparable benchmark to promote a model, impute missing cost
     or quality as zero, change a session's route without a declared refusal, or hide the baseline
     fallback. The corresponding proof must fail.
-  note: "This layers a selection contract over W1-T167/W1-T250/W1-T3576/W1-T3762; it does not replace class policy, probe evidence, or assignment telemetry. W1-T4607 supplies a sourced case file; live-fleet completion evidence waits for W1-T4608's exact verification join; comparable offline benchmark pools can proceed. reservation hand-off: run-W1-T3956-17899977143N -> run-W1-T3956-1789997714300"
+  note: |
+    CONSOLE FOLLOW-ON (operator ruling 2026-10-01, which revives this feature with its console
+    page): this feature's work includes its app.remudero.com page, the model routing page
+    (/routing): pool readiness per task class, each candidate's benchmark evidence, and the chosen
+    model and effort with its fallback and route receipt. When this task merges, file ONE console
+    shard in craigoley/remudero-console (id reserved from the console operator checkout) that builds
+    the page against the core contract as merged: the exact /v1 route(s) and the openapi/daemon.yaml
+    schema at the merge sha, pinned with the console's pin-core-read-schemas script. If the merged
+    feature serves no GET route the page can read, file that core route first; never let the console
+    guess it (memory console-task-before-core-contract). Do NOT revive the stale console shards
+    UI-T52 and API-T53: they were built against console-designed routes core never served, and
+    CONSOLE-T107 (console #1894) deleted what they built. The page stays deleted until then. Tracked
+    in ~/Remudero/.session-scratch/arch-plan.md OPEN ITEMS A3.
+    This layers a selection contract over W1-T167/W1-T250/W1-T3576/W1-T3762; it does not replace class policy, probe evidence, or assignment telemetry. W1-T4607 supplies a sourced case file; live-fleet completion evidence waits for W1-T4608's exact verification join; comparable offline benchmark pools can proceed. reservation hand-off: run-W1-T3956-17899977143N -> run-W1-T3956-1789997714300

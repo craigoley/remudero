@@ -62,4 +62,17 @@
     Mark a change conformant without a current originating spec, accept an unmapped material
     criterion, reuse a result after the spec or factory revision changes, or turn unavailable
     evidence into a pass. The corresponding proof must fail.
-  note: "This is a post-implementation evidence contract, not a second acceptance parser, merge gate, or autonomous approval path. reservation hand-off: run-W1-T4010-<epochMs>"
+  note: |
+    CONSOLE FOLLOW-ON (operator ruling 2026-10-01, which revives this feature with its console
+    page): this feature's work includes its app.remudero.com page, the factory conformance page
+    (/factory/conformance): each change's spec revision, acceptance mapping, verification evidence
+    and fail-closed state. When this task merges, file ONE console shard in
+    craigoley/remudero-console (id reserved from the console operator checkout) that builds the page
+    against the core contract as merged: the exact /v1 route(s) and the openapi/daemon.yaml schema
+    at the merge sha, pinned with the console's pin-core-read-schemas script. If the merged feature
+    serves no GET route the page can read, file that core route first; never let the console guess
+    it (memory console-task-before-core-contract). Do NOT revive the stale console shards UI-T57 and
+    API-T58: they were built against console-designed routes core never served, and CONSOLE-T107
+    (console #1894) deleted what they built. The page stays deleted until then. Tracked in
+    ~/Remudero/.session-scratch/arch-plan.md OPEN ITEMS A3.
+    This is a post-implementation evidence contract, not a second acceptance parser, merge gate, or autonomous approval path. reservation hand-off: run-W1-T4010-<epochMs>

@@ -2,7 +2,6 @@
   title: "THE AGENT PAGES FOLD PANEL FACTS PER REQUEST AND THE CONSOLE RUNS A SECOND PROPOSAL ENGINE — add the agent view family (?part= proposals, history, settings, experiments, delegations, capabilities, follow-ups, promotions, actions, consequences, intent-plans) over panel.* facts with a persisted incremental fold per instance, so core is the only engine"
   repo: remudero
   depends_on: []
-  dispatch_hold: true
   priority: 3
   type: implement
   verify: auto
@@ -42,6 +41,7 @@
     Re-fold from seq 0 every pass: a 50k-row delta exceeds the pass budget in one unit and the second proof
     fails. Drop a part: its parity check fails against the route.
   note: |
+    HOLD RELEASED 2026-10-01 (dispatch_hold deleted): P4-T02, structured view freshness (ViewSource kind, phase, lagMs, etaMs, budgetMs), merged as #8271 (d6ff36c5f).
     DISPATCH HOLD: waits for P4-T02 (structured view freshness: ViewSource kind, phase, lagMs, etaMs, budgetMs). A Phase 4 critical-path task is hand-built on a run-unfiled
     branch with no plan id, so depends_on cannot name it. RELEASE: one plan amendment deleting
     dispatch_hold once that merges (tracked in arch-plan.md, Phase 4).

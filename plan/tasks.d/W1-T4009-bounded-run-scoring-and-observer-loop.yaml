@@ -67,4 +67,17 @@
     Score an unobserved run as healthy, retain a raw prompt or credential, let an LLM judge invent
     missing evidence, propose a config change without a reproducible baseline, or apply an observer
     proposal to a live flow. The corresponding proof must fail.
-  note: "This is a bounded observer loop above W1-T3882 and W1-T3853, not autonomous self-modification or a transcript archive. reservation hand-off: run-W1-T4009-<epochMs>"
+  note: |
+    CONSOLE FOLLOW-ON (operator ruling 2026-10-01, which revives this feature with its console
+    page): this feature's work includes its app.remudero.com page, the scoring section of the
+    factory page (/factory, owned by W1-T4007's follow-on): scorer state, score bundles and the
+    observer's non-authoritative proposals. When this task merges, file ONE console shard in
+    craigoley/remudero-console (id reserved from the console operator checkout) that builds the page
+    against the core contract as merged: the exact /v1 route(s) and the openapi/daemon.yaml schema
+    at the merge sha, pinned with the console's pin-core-read-schemas script. If the merged feature
+    serves no GET route the page can read, file that core route first; never let the console guess
+    it (memory console-task-before-core-contract). Do NOT revive the stale console shards UI-T56 and
+    API-T57: they were built against console-designed routes core never served, and CONSOLE-T107
+    (console #1894) deleted what they built. The page stays deleted until then. Tracked in
+    ~/Remudero/.session-scratch/arch-plan.md OPEN ITEMS A3.
+    This is a bounded observer loop above W1-T3882 and W1-T3853, not autonomous self-modification or a transcript archive. reservation hand-off: run-W1-T4009-<epochMs>

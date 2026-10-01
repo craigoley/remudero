@@ -2,7 +2,6 @@
   title: "THE ANALYTICS REFRESH RUNS P90 49 S ON SERVE AND THE CONSOLE MERGES INSTANCES ITSELF — move the refresh to the slow lane, persist each instance's output as a source_snapshot row, and serve analytics (merged across instances) and usage views from it; the worker reads its own row instead of nav-badge-sources.json"
   repo: remudero
   depends_on: []
-  dispatch_hold: true
   priority: 4
   type: implement
   verify: auto
@@ -39,6 +38,7 @@
     Keep the snapshot in memory only: a restarted worker answers nothing until a refresh and the second proof
     fails. Serve core's snapshot alone: the merge proof misses the second instance.
   note: |
+    HOLD RELEASED 2026-10-01 (dispatch_hold deleted): P4-T04, the read-model slow-lane worker thread, merged as #8264 (1647850ad, src/lib/read-model-slow-lane.ts).
     DISPATCH HOLD: waits for P4-T04 (the read-model slow-lane worker thread). A Phase 4 critical-path task is hand-built on a run-unfiled
     branch with no plan id, so depends_on cannot name it. RELEASE: one plan amendment deleting
     dispatch_hold once that merges (tracked in arch-plan.md, Phase 4).

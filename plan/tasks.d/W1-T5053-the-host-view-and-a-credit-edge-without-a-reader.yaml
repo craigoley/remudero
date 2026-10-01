@@ -2,7 +2,6 @@
   title: "A CREDIT-STATE EDGE IS LEDGERED ONLY IF SOMEONE READS — GET /v1/account-usage appends the credit transition, and /v1/daemon-health runs a synchronous rate_limit read; add the host view (control status, account usage, routing, skills, self-measurement, exact gauges) with the probe owning the edge row and the rate_limit read async"
   repo: remudero
   depends_on: []
-  dispatch_hold: true
   priority: 3
   type: implement
   verify: auto
@@ -42,6 +41,7 @@
     Leave the append in the route: with no reader the edge is never written (first proof), and a read appends
     (second proof).
   note: |
+    HOLD RELEASED 2026-10-01 (dispatch_hold deleted): P4-T04, the read-model slow-lane worker thread, merged as #8264 (1647850ad, src/lib/read-model-slow-lane.ts). PARTLY DONE: #8292 (4d6a37424) already records the credit-state edge in the slow lane, so the account-usage GET writes nothing; build on it and do not re-add it. What remains is the host view itself and its registration in read-model-worker.ts.
     DISPATCH HOLD: waits for P4-T04 (the read-model slow-lane worker thread). A Phase 4 critical-path task is hand-built on a run-unfiled
     branch with no plan id, so depends_on cannot name it. RELEASE: one plan amendment deleting
     dispatch_hold once that merges (tracked in arch-plan.md, Phase 4).
