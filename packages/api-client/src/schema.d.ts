@@ -2579,7 +2579,18 @@ export interface components {
       /** The input's own as-of time; null when it has none yet. */
       asOf: string | null;
       state: "fresh" | "stale" | "unavailable";
+      /** Display prose only; never parse it. The structured fields below say why (src/lib/view-freshness.ts). */
       reason?: string;
+      kind?: "ledger" | "read-model" | "github" | "plan" | "host-probe" | "analytics" | "inbox-store" | "feedback-store" | "question-store" | "incidents-store" | "git" | "account" | "registry" | "repositories";
+      instance?: string;
+      /** Why the source is not fresh. */
+      phase?: "warming" | "catching_up" | "refreshing" | "behind" | "failed" | "elsewhere";
+      /** How far behind the source is, measured when serve judged it for this response. */
+      lagMs?: number;
+      /** How long until the source is caught up, when that is known (a catching-up projector). */
+      etaMs?: number;
+      /** The bound the source is judged against, so a client can age it between events. */
+      budgetMs?: number;
     };
     /** GET /v1/views/versions and the `hello` event on GET /v1/views/events (docs/views.md): the version of every served view body, which is its ETag, by view name and key. A view whose switch is not `serve` has no versions and is listed in `disabled`. */
     ViewVersions: {
