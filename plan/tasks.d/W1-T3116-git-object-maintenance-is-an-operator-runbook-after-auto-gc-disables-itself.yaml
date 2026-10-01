@@ -107,17 +107,17 @@
     becomes the independent detector for a controller that stopped making progress.
   acceptance:
     - claim: "daemon boot reads only the cheap existing failure signal, and neither boot nor any per-review/per-task dispatch path starts, awaits or surveys a repository-maintenance subprocess before useful queue work"
-      proof: "unit test: test/repository-maintenance-controller.test.ts"
+      proof: 'grep: test("W1-T3116: boot and dispatch never start, await or survey repository maintenance" in test/repository-maintenance-controller.test.ts'
     - claim: "one daemon-lifetime cadence invokes the installed Git maintenance tasks asynchronously at most daily and never shells raw `git gc`, `git prune`, `--prune=now` or an external scheduler"
-      proof: "unit test: test/repository-maintenance-controller.test.ts"
+      proof: 'grep: test("W1-T3116: maintenance runs the installed git maintenance tasks asynchronously at most daily" in test/repository-maintenance-controller.test.ts'
     - claim: "full GC is authorized only with a persistent failed-GC marker, zero active RMD lanes and a complete survey, then Git's object-database lock supplies cross-process exclusion; idle registered worktrees do not refuse it, while busy or unreadable state defers without losing the due episode"
-      proof: "unit test: test/repository-maintenance-controller.test.ts"
+      proof: 'grep: test("W1-T3116: full gc is authorized only with a failed-gc marker, no active lanes and a complete survey" in test/repository-maintenance-controller.test.ts'
     - claim: "RMD never writes or removes `gc.log`; full-maintenance success requires Git to return zero and the post-survey to find the marker absent, while a failed run, timeout or surviving marker enters backoff"
-      proof: "unit test: test/repository-maintenance-controller.test.ts"
+      proof: 'grep: test("W1-T3116: rmd never writes or removes the gc log and success requires the marker gone" in test/repository-maintenance-controller.test.ts'
     - claim: "autonomous daily success cadence and bounded failure backoff survive daemon restarts, and repeated failure escalates once rather than retrying or paging every poll"
-      proof: "unit test: test/repository-maintenance-controller.test.ts"
+      proof: 'grep: test("W1-T3116: cadence and backoff survive restarts and repeated failure escalates once" in test/repository-maintenance-controller.test.ts'
     - claim: "the ledger and status projection expose before/after object counts, duration, outcome and next retry, while the W1-T2529 heartbeat remains an independent off-box signal"
-      proof: "unit test: test/repository-maintenance-controller.test.ts"
+      proof: 'grep: test("W1-T3116: the ledger and status expose object counts, duration, outcome and next retry" in test/repository-maintenance-controller.test.ts'
     - claim: "the production daemon composition has exactly one repository-maintenance cadence call and no `logDiskReclaimRung` or dispatch call reaches the old object reaper"
       proof: "grep: runRepositoryMaintenanceRung( in src/run-task.ts"
   falsifier: |
