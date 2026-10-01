@@ -19,10 +19,9 @@
  * into the hour's one row. A carry that arrives after its hour was already written rides in the
  * next row, so no hour is ever written twice.
  *
- * The final re-measure (design §9) reads the same rollup, never a probe of serve: per path handler
- * milliseconds from `finish` as a bucket histogram (p50/p99), the view responses served stale by
- * source and phase, and each push stream's subscribers, opens, closes and handovers. Every total is
- * a cumulative counter, so a window is the difference of two reads.
+ * The final re-measure (design §9) reads this too, never a probe of serve: per path handler ms as a
+ * p50/p99 histogram, stale view responses by source and phase, and each push stream's subscribers
+ * and handovers. Totals are cumulative counters, so a window is the difference of two reads.
  */
 import type { IncomingMessage } from "node:http";
 import { readFileSync } from "node:fs";
