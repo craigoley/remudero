@@ -219,10 +219,18 @@ function gardenStateFault(parsed: unknown): string | undefined {
 /** The recorded state; a MISSING file is first boot and gets the optimistic prior. An existing file that
  *  cannot be read, parsed or validated throws {@link GardenStateUnreadableError} — never the prior. */
 export function readGardenState<C extends string>(path: string, classes: readonly C[]): GardenState<C> {
-  if (!existsSync(path)) return initialGardenState(classes);
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (e) {
+    // existsSync also returns false when a parent directory is inaccessible. Only a confirmed
+    // missing file is first boot; every other read failure must stop the pass.
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return initialGardenState(classes);
+    throw new GardenStateUnreadableError(path, "unparseable", String((e as Error)?.message ?? e));
+  }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(path, "utf8"));
+    parsed = JSON.parse(raw);
   } catch (e) {
     throw new GardenStateUnreadableError(path, "unparseable", String((e as Error)?.message ?? e));
   }
