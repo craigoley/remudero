@@ -6609,8 +6609,17 @@ async function runReview(args: {
     local: (sha) => execFileSync("git", ["-C", repoRoot, "diff", `origin/main...${sha}`], { encoding: "utf8", maxBuffer: 1 << 26 }),
   });
   if (diffOutcome.kind === "refused") {
-    log("review.diff_unreadable", { pr_url: prUrl, reason: diffOutcome.reason });
-    throw new Error(`rmd review: ${diffOutcome.reason}`);
+    // The pending status remains unsatisfied. Record a named refusal and return a withheld
+    // result so both the CLI and sweep can retry or escalate without losing this attempt.
+    log("review.diff_unreadable", { pr_url: prUrl, head_sha: headSha, reason: diffOutcome.reason });
+    log("review.stood_down", { pr_url: prUrl, head_sha: headSha, reason: diffOutcome.reason });
+    say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${diffOutcome.reason}`);
+    return {
+      state: "failure", criteria: [], testTheater: false,
+      summary: `review stood down: ${diffOutcome.reason}`,
+      floorDegraded: false, capped: false, keywordOnly: false, planOnly: false,
+      headSha, reviewerOutcome: "not_attempted_diff_unreadable", verdictWithheld: diffOutcome.reason,
+    };
   }
   if (diffOutcome.source === "local") log("review.diff_local_fallback", { pr_url: prUrl, head_sha: headSha });
   const diff = diffOutcome.diff;
