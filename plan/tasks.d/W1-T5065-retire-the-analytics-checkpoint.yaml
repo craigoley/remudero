@@ -1,0 +1,42 @@
+- id: W1-T5065
+  title: "RETIRE THE ANALYTICS CHECKPOINT FILE AND CACHES — analytics-route.ts read and write of the checkpoint file, createAnalyticsSnapshotCache (15 min per instance) and live-analytics-snapshot-cache.ts, once the slow lane's source_snapshot rows serve analytics"
+  repo: remudero
+  depends_on: ["W1-T5055"]
+  dispatch_hold: true
+  priority: 4
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "2026-10-01 core-console architecture Phase 4 design (P4-T3x (analytics checkpoint)), arch-phase4-design.md"
+  files:
+    - src/lib/analytics-route.ts
+    - src/lib/live-analytics-snapshot-cache.ts
+    - src/lib/serve.ts
+    - test/retire-the-analytics-checkpoint.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-10-01: the analytics checkpoint format and two in-memory caches persist what the read model's source_snapshot rows now hold (W1-T5055). Retirement order puts this last (D10).
+  design: |
+    Delete the checkpoint file format and both caches. The refresh code stays (it runs in the slow lane).
+  acceptance:
+    - claim: "the analytics checkpoint retired route answers from its view"
+      proof: 'grep: test("W1-T5065: the analytics checkpoint retired route answers from its view" in test/retire-the-analytics-checkpoint.test.ts'
+    - claim: "serve assembles no analytics checkpoint"
+      proof: 'grep: test("W1-T5065: serve assembles no analytics checkpoint" in test/retire-the-analytics-checkpoint.test.ts'
+  falsifier: |
+    Leave the analytics checkpoint constructed in serve: the absence proof finds it. Answer the route from the legacy path: the first proof sees the legacy body.
+  note: |
+    DISPATCH HOLD: waits for gate G: (i) the replacement view has been `serve` for 7 days with shadow readiness held; (ii) the
+    serve.route_reads rollup (P4-T01, critical path, no plan id yet) shows 0 console-token reads of
+    every legacy path this layer serves for 7 days, with the replacement view's own reads > 0 in the
+    same window; (iii) serve RSS p50 and loop-lag p99 over 24 h are no worse after deletion.
+    RELEASE: one plan amendment deleting dispatch_hold, with the gate's rollup evidence quoted in the release PR body (tracked in
+    arch-plan.md, Phase 4). The gate is a measured zero, not intent (D7).
+    Design: ~/Remudero/.session-scratch/arch-phase4-design.md §6, D7 and §10.
+    Scope-time checks 2026-10-01: no run-W1-T5048..5066 branch on origin; no origin/main commit names
+    these ids; no plan record on origin/main or an open PR head covers this change. Reserved from the
+    operator checkout for this filing branch.
