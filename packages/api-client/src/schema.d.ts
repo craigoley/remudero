@@ -4791,11 +4791,6 @@ export interface paths {
         };
     };
   };
-          "403": Error;
-          "404": undefined;
-        };
-    };
-  };
   "/v1/views/inbox": {
     get: {
       responses: {
@@ -4815,6 +4810,11 @@ export interface paths {
           "304": undefined;
           "400": Error;
           "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
   "/v1/views/events": {
     get: {
       responses: {
