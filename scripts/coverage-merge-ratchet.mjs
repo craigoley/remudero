@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { copyFileSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, copyFileSync, fstatSync, linkSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, relative, resolve } from 'node:path';
 import { createRequire } from 'node:module';
@@ -10,6 +10,15 @@ import { isMainModule } from "./lib/argv.mjs";
 const RAW_COVERAGE_FILE = /^coverage-\d+-\d{13}-\d+\.json$/;
 const COMPACT_COVERAGE_FILE = /^coverage-bundle-\d+-\d{13}-\d+\.json$/;
 const COMPACT_FORMAT = 'rmd-v8-coverage-bundle-v1';
+
+function fileBytes(file) {
+  const descriptor = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    return fstatSync(descriptor).size;
+  } finally {
+    closeSync(descriptor);
+  }
+}
 
 function coverageFilesUnder(directory, includeBundles = false) {
   const root = resolve(directory);
@@ -55,9 +64,11 @@ function loadTestCoverage() {
 export function stageRawCoverageFile(file, staged, { link = linkSync, copy = copyFileSync } = {}) {
   try {
     link(file, staged);
+    return 0;
   } catch (error) {
     if (error.code !== 'EXDEV') throw error;
     copy(file, staged);
+    return fileBytes(staged);
   }
 }
 
@@ -94,13 +105,18 @@ function withStagedRawCoverage(directories, collect) {
   const TestCoverage = loadTestCoverage();
   const staging = mkdtempSync(join(tmpdir(), 'rmd-merge-node-coverage-'));
   let rawFileCount = 0;
+  let inputBytes = 0;
+  let stagedBytes = 0;
+  let peakBytes = 0;
   try {
     for (const directory of directories) {
       const files = coverageFilesUnder(directory, true);
       if (files.length === 0) throw new Error(`${directory} contains no V8 coverage files`);
       for (const file of files) {
         if (COMPACT_COVERAGE_FILE.test(basename(file))) {
-          const bundle = JSON.parse(readFileSync(file, 'utf8'));
+          const source = readFileSync(file, 'utf8');
+          inputBytes += Buffer.byteLength(source);
+          const bundle = JSON.parse(source);
           if (bundle.format !== COMPACT_FORMAT || !Array.isArray(bundle.sourceMaps) || !Array.isArray(bundle.reports)) {
             throw new Error(`${file} is not a valid ${COMPACT_FORMAT} report`);
           }
@@ -116,17 +132,23 @@ function withStagedRawCoverage(directories, collect) {
               sourceMapCache[url] = bundle.sourceMaps[sourceMapIndex];
             }
             const stagedName = `coverage-${process.pid}-${Date.now()}-${rawFileCount}.json`;
-            writeFileSync(join(staging, stagedName), JSON.stringify({
+            const stagedPath = join(staging, stagedName);
+            const stagedSource = JSON.stringify({
               result: report.result,
               'source-map-cache': sourceMapCache,
-            }));
+            });
+            writeFileSync(stagedPath, stagedSource);
+            stagedBytes += Buffer.byteLength(stagedSource);
             rawFileCount += 1;
           }
         } else {
           const stagedName = `coverage-${process.pid}-${Date.now()}-${rawFileCount}.json`;
-          stageRawCoverageFile(file, join(staging, stagedName));
+          const stagedPath = join(staging, stagedName);
+          stagedBytes += stageRawCoverageFile(file, stagedPath);
+          inputBytes += fileBytes(stagedPath);
           rawFileCount += 1;
         }
+        peakBytes = Math.max(peakBytes, inputBytes + stagedBytes);
       }
     }
     const collector = new TestCoverage(
@@ -138,7 +160,7 @@ function withStagedRawCoverage(directories, collect) {
       true,
       { line: 0, branch: 0, function: 0 },
     );
-    return collect(collector, rawFileCount);
+    return collect(collector, rawFileCount, { inputBytes, stagingBytes: stagedBytes, peakBytes, stagingDir: staging });
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }
@@ -203,10 +225,10 @@ export function compactRawCoverageDirectories(directories) {
  * repository-pinned Node implementation merge source ranges before assigning LCOV indexes.
  */
 export function mergeRawCoverageDirectories(directories) {
-  return withStagedRawCoverage(directories, (collector, rawFileCount) => {
+  return withStagedRawCoverage(directories, (collector, rawFileCount, bytes) => {
     const summary = collector.summary();
     if (summary.files.length === 0) throw new Error('raw coverage merge produced no source records');
-    return { rawFileCount, summary };
+    return { rawFileCount, summary, ...bytes };
   });
 }
 
@@ -245,20 +267,25 @@ function main(argv) {
     const existing = readdirSync(outputDirectory)
       .filter((name) => RAW_COVERAGE_FILE.test(name) || COMPACT_COVERAGE_FILE.test(name));
     if (existing.length > 0) throw new Error(`${outputDirectory} already contains compact coverage files`);
+    const rawBytes = positionals.flatMap((directory) => coverageFilesUnder(directory)).reduce((sum, file) => sum + fileBytes(file), 0);
     const { rawFileCount, bundle } = compactRawCoverageDirectories(positionals);
     const timestamp = Date.now();
     const output = join(outputDirectory, `coverage-bundle-${process.pid}-${timestamp}-0.json`);
-    writeFileSync(output, JSON.stringify(bundle));
+    const compactSource = JSON.stringify(bundle);
+    writeFileSync(output, compactSource);
+    const compactBytes = Buffer.byteLength(compactSource);
     console.log(
       `coverage-merge-ratchet: bundled ${positionals.length} raw shard(s), ${rawFileCount} V8 file(s), ` +
-        `${bundle.reports.length} retained process report(s), ${bundle.sourceMaps.length} unique source map(s) -> ${output}`,
+        `${bundle.reports.length} retained process report(s), ${bundle.sourceMaps.length} unique source map(s), ` +
+        `rawBytes=${rawBytes} compactBytes=${compactBytes} peakBytes=${rawBytes + compactBytes} -> ${output}`,
     );
   } else {
-    const { rawFileCount, summary } = mergeRawCoverageDirectories(positionals);
+    const { rawFileCount, summary, inputBytes, stagingBytes, peakBytes, stagingDir } = mergeRawCoverageDirectories(positionals);
     writeFileSync(values.output, renderCoverageSummary(summary));
     console.log(
       `coverage-merge-ratchet: ${positionals.length} raw shard(s), ${rawFileCount} V8 file(s), ` +
-        `${summary.files.length} source record(s) -> ${values.output}`,
+        `${summary.files.length} source record(s), inputBytes=${inputBytes} stagingBytes=${stagingBytes} ` +
+        `peakBytes=${peakBytes} stagingDir=${stagingDir} -> ${values.output}`,
     );
   }
 }

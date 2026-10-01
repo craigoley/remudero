@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -36,6 +36,21 @@ test('raw coverage staging copies only when a cross-device hard link is impossib
     assert.equal(copies, 1);
     assert.equal(readFileSync(staged, 'utf8'), readFileSync(raw, 'utf8'));
     assert.notEqual(statSync(raw).ino, statSync(staged).ino, 'fallback must be a copy, not a link');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('raw coverage byte measurement rejects a swapped symlink after a cross-device copy', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rmd-coverage-symlink-'));
+  const raw = join(root, 'raw.json');
+  const staged = join(root, 'staged.json');
+  try {
+    writeFileSync(raw, '{"result":[]}\n');
+    assert.throws(() => stageRawCoverageFile(raw, staged, {
+      link: () => { throw Object.assign(new Error('cross-device link'), { code: 'EXDEV' }); },
+      copy: () => symlinkSync(raw, staged),
+    }), (error: unknown) => (error as NodeJS.ErrnoException).code === 'ELOOP');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -279,6 +294,68 @@ test('compact shard reports defer source-map translation and preserve every LCOV
     summaryTotals(readFileSync(compactLcov, 'utf8')),
     summaryTotals(readFileSync(directLcov, 'utf8')),
   );
+});
+
+test("W1-T4951: compacted four-shard coverage preserves line and branch totals", (context) => {
+  const root = mkdtempSync(join(tmpdir(), 'rmd-four-shard-'));
+  const rawDirs = Array.from({ length: 4 }, (_, index) => join(root, `raw-${index + 1}`));
+  const compactDirs = Array.from({ length: 4 }, (_, index) => join(root, `compact-${index + 1}`));
+  const direct = join(root, 'direct.info');
+  const compact = join(root, 'compact.info');
+  try {
+    for (let index = 0; index < 4; index += 1) {
+      mkdirSync(rawDirs[index]!);
+      execFileSync(process.execPath, [
+        '--enable-source-maps', '--experimental-test-coverage', '--test-coverage-exclude=test/**',
+        '--test', `--test-name-pattern=${index % 2 === 0 ? 'provider selector uses the subscription' : 'provider selector excludes an exhausted'}`,
+        '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', 'test/worker-provider.test.ts',
+      ], { cwd: process.cwd(), env: coverageEnv(rawDirs[index]!), stdio: 'pipe' });
+      // Full suites carry large test source maps that are excluded from the final ratio.
+      // Keep this extra V8 report valid so the pinned Node merger must read and skip it.
+      const url = `file://${join(process.cwd(), 'test', `excluded-${index}.test.ts`)}`;
+      writeFileSync(join(rawDirs[index]!, `coverage-9-0000000000000-${index}.json`), JSON.stringify({
+        result: [{ scriptId: String(index), url, functions: [{ functionName: '', ranges: [
+          { startOffset: 0, endOffset: 1, count: 1 },
+        ], isBlockCoverage: true }] }],
+        'source-map-cache': { [url]: { version: 3, sources: [url], names: [], mappings: '', sourcesContent: ['x'.repeat(2 * 1024 * 1024)] } },
+      }));
+    }
+    const directLog = runMerger(direct, ...rawDirs);
+    const peak = (log: string) => Number(log.match(/peakBytes=(\d+)/)?.[1]);
+    let retainedBytes = 0;
+    let compactPeak = 0;
+    for (let index = 0; index < 4; index += 1) {
+      const log = runCompactor(compactDirs[index]!, rawDirs[index]!);
+      compactPeak = Math.max(compactPeak, retainedBytes + peak(log));
+      retainedBytes += Number(log.match(/compactBytes=(\d+)/)?.[1]);
+    }
+    const compactLog = execFileSync(process.execPath,
+      ['--expose-internals', 'scripts/coverage-merge-ratchet.mjs', '--output', compact, ...compactDirs],
+      { cwd: process.cwd(), env: { ...process.env, TMPDIR: root }, encoding: 'utf8', stdio: 'pipe' });
+    const directLcov = readFileSync(direct, 'utf8');
+    const compactLcov = readFileSync(compact, 'utf8');
+    assert.equal(compactLcov, directLcov, 'all SF, DA, and BRDA fields must match pinned Node');
+    assert.ok(summaryTotals(compactLcov).BRF > 0);
+    assert.ok(summaryTotals(compactLcov).LF > 0);
+    compactPeak = Math.max(compactPeak, peak(compactLog));
+    assert.ok(compactPeak < peak(directLog), `compact peak ${compactPeak} must be below raw peak ${peak(directLog)}`);
+    assert.ok(compactLog.includes(`stagingDir=${root}/rmd-merge-node-coverage-`));
+    context.diagnostic(`raw peak ${peak(directLog)} bytes; compact peak ${compactPeak} bytes`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('corrupt compact coverage refuses the pinned-Node merge', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rmd-corrupt-compact-'));
+  const compact = join(root, 'compact');
+  mkdirSync(compact);
+  try {
+    writeFileSync(join(compact, 'coverage-bundle-1-0000000000000-0.json'), '{}');
+    assert.throws(() => runMerger(join(root, 'merged.info'), compact), /not a valid rmd-v8-coverage-bundle-v1 report/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('compact shard reports retain distinct source-map topologies for one script URL', () => {
