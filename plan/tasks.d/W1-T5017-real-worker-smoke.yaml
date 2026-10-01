@@ -1,0 +1,27 @@
+- id: W1-T5017
+  title: "Smoke-test a real worker before accepting a runtime image update"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 25.00
+  risk: high
+  origin: "operator-approved Orca comparison, 2026-09-30"
+  files: [src/lib/containment.ts, deploy/recycle-container.sh, test/worker-smoke.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at c94c2bf49: CI fakes the worker query seam and image verification checks binary versions,
+    but no deploy step starts a real worker after an SDK or CLI change. A version-incompatible image can pass
+    source tests and still fail at first task dispatch.
+  design: |
+    Add a bounded smoke mode that starts one real worker query with a trivial prompt and checks a containment
+    verdict and clean termination. Invoke it during container recycle before accepting the replacement image.
+    A smoke failure triggers the existing rollback path and does not strand a PR. Keep the smoke's spend and
+    output bounded and ledger its result. SDK/CLI version-pair pinning is separate if it needs its own change.
+  acceptance:
+    - claim: "recycle invokes one real worker smoke and rolls back on a failed verdict"
+      proof: 'grep: test("W1-T5017: recycle refuses a replacement image whose real worker smoke fails" in test/worker-smoke.test.ts'
+  note: "reservation hand-off: run-W1-T5017-1790813900000 -> file/plan-5016-5025-1790815200000"

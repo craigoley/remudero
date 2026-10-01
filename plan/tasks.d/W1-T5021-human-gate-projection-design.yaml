@@ -1,0 +1,33 @@
+- id: W1-T5021
+  title: "Design one actionable human-gate projection with Inbox as its front door"
+  repo: remudero
+  depends_on: []
+  type: diagnose
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 12.00
+  risk: medium
+  origin: "operator-approved Orca comparison, 2026-09-30"
+  plan_refs: [W1-T3186, W1-T507, W1-T3395]
+  files: [docs/recon/human-gate-projection.md]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at c94c2bf49: status-board, now-view, inbox and ask-classification expose different partial
+    human-owed populations and counts. Feedback-new, pin decisions, some dependency holds and stale-reviewer
+    conditions lack one consistent action path. W1-T3186 rules that Inbox is the only front door; the older
+    broad shell-unification task was retired. A cross-source implementation is too large for one PR.
+  design: |
+    Specify the smallest HumanGate record (kind, key, ownerSurface, openedAt, url, reason, resolutionVerb),
+    source-by-source inclusion, de-duplication, expiration, ownership and count semantics. Cover escalations,
+    held merges, blocked PRs, new feedback, dependency review, verify-human, missing pin, stale reviewer and
+    status-board operator items. Trace one classifyAskRecordItem call path into Inbox and /v1/status needsYou.
+    Separate machine-actionable repair from true human judgement. Output independently buildable child tasks,
+    each with a test and no added PR approval gate. Do not implement the projection in this design task.
+  acceptance:
+    - claim: "the design names every source, owner action and expiry rule without adding a second front door"
+      proof: 'grep: Source-to-HumanGate contract in docs/recon/human-gate-projection.md'
+    - claim: "the design splits implementation into independent bounded tasks"
+      proof: 'grep: Implementation slices in docs/recon/human-gate-projection.md'
+  note: "reservation hand-off: run-W1-T5021-1790813900000 -> file/plan-5016-5025-1790815200000"
