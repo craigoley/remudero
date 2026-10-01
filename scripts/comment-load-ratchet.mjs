@@ -424,6 +424,20 @@ function reportBlocks(blocks) {
   console.error(`  docs/comment-standard.md states what a block must keep: the invariant, the trap, the falsifier, the citation.`);
 }
 
+/** W1-T3085: refused paths with uncommitted edits. [] for no paths (a bare `status --` lists the
+ *  whole tree) and when git fails: the note is advisory, so the refusal stands either way. */
+export function uncommittedAmong(root, paths) {
+  if (paths.length === 0) return [];
+  const res = spawnGit(["status", "--porcelain", "--", ...paths], { cwd: root });
+  if (res.status !== 0) return [];
+  return res.stdout.split("\n").filter(Boolean).map((line) => line.slice(3));
+}
+
+function reportUncommitted(dirty, base) {
+  if (dirty.length === 0) return;
+  console.error(`  NOTE: uncommitted edit(s) in ${dirty.join(", ")} were NOT measured: this reads the committed diff ${base}...HEAD. Commit (or amend), then re-run.`);
+}
+
 function printLargest(comments, totals) {
   const top = Object.entries(comments).sort((a, b) => b[1] - a[1]).slice(0, 10);
   const pct = totals.comments + totals.code === 0 ? 0 : (100 * totals.comments) / (totals.comments + totals.code);
@@ -527,7 +541,10 @@ export function main(argv) {
   }
   if (causedViolations.length > 0) reportGrowth(causedViolations, baselineRelPath);
   if (blocks.length > 0) reportBlocks(blocks);
-  if (causedViolations.length > 0 || blocks.length > 0) return 1;
+  if (causedViolations.length > 0 || blocks.length > 0) {
+    reportUncommitted(uncommittedAmong(root, [...new Set([...causedViolations.map((v) => v.path), ...blocks.map((b) => b.file)])]), base);
+    return 1;
+  }
 
   const pct = (100 * measured.totals.comments) / (measured.totals.comments + measured.totals.code);
   console.log(
