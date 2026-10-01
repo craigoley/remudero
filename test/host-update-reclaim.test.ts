@@ -630,15 +630,18 @@ function printWithPaths(stateDir: string, credDir: string, scriptPath = SCRIPT, 
 // 10080 - 90) — the same ts-vs-reader-clock mismatch #2250 fixed, except here the reader is a
 // subprocess no injected JS clock can shift at all. Deriving the baseline from the SAME real
 // `date` the script itself calls keeps the fixture's clock and the subject's clock the same one,
-// regardless of shift.
-const REAL_NOW_MS = Number(spawnSync("date", ["-u", "+%s"]).stdout.toString().trim()) * 1000;
+// regardless of shift. Read it for EACH fixture: a module-load snapshot ages while a long
+// coverage shard runs, turning a 90-minute expiry into 95 minutes by the time this test executes.
+function realNowMs(): number {
+  return Number(spawnSync("date", ["-u", "+%s"]).stdout.toString().trim()) * 1000;
+}
 
 /** A credential directory whose token expires `offsetMs` from now (negative ⇒ already expired). */
-function credFixture(offsetMs: number): string {
+function credFixture(offsetMs: number, readNowMs: () => number = realNowMs): string {
   const dir = mkdtempSync(join(tmpdir(), "host-update-cred-"));
   writeFileSync(
     join(dir, ".credentials.json"),
-    JSON.stringify({ claudeAiOauth: { accessToken: "sk-ant-oat01-x", expiresAt: REAL_NOW_MS + offsetMs } }),
+    JSON.stringify({ claudeAiOauth: { accessToken: "sk-ant-oat01-x", expiresAt: readNowMs() + offsetMs } }),
   );
   return dir;
 }
@@ -708,6 +711,18 @@ test("a bare CLAUDE_CODE_OAUTH_TOKEN is no longer suggested — it authenticates
   const { dead } = stateFixture();
   const run = printWithPaths(dead, credFixture(8 * 3600_000));
   assert.doesNotMatch(run.out, /-e CLAUDE_CODE_OAUTH_TOKEN/, "the token alone yields rate_limits_available:false");
+});
+
+test("host-update credential fixture reads its clock at creation, not module load", () => {
+  let nowMs = 1_000_000_000;
+  const expiry = (dir: string): number => {
+    const raw = JSON.parse(readFileSync(join(dir, ".credentials.json"), "utf8")) as { claudeAiOauth: { expiresAt: number } };
+    return raw.claudeAiOauth.expiresAt;
+  };
+  const first = expiry(credFixture(-90 * 60_000, () => nowMs));
+  nowMs += 5 * 60_000; // simulate this suite spending five minutes before a later fixture is created
+  const second = expiry(credFixture(-90 * 60_000, () => nowMs));
+  assert.equal(second - first, 5 * 60_000, "a later fixture must not reuse the module-import clock");
 });
 
 test("an EXPIRED credential WARNS, naming how long ago — the check that cost four restarts", () => {
