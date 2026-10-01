@@ -272,6 +272,30 @@ test("W1-T4797: a still-uncovered repair gets a second strike before any push", 
   }
 });
 
+test("W1-T4797: two still-uncovered repairs leave the branch unpushed with a failed verdict", async () => {
+  const fx = buildFixture();
+  try {
+    const { ports, calls } = scriptedPorts([ran(1, UNCOVERED_OUTPUT), ran(1, UNCOVERED_OUTPUT), ran(1, UNCOVERED_OUTPUT)]);
+    let repair = 0;
+    const run = await drive(fx, ports, (args) => {
+      repair += 1;
+      return commitIn(args.cwd!, `test: incomplete coverage round ${repair}`, () => {
+        mkdirSync(join(args.cwd!, "test"), { recursive: true });
+        writeFileSync(join(args.cwd!, "test", "feature.test.ts"), `// incomplete repair ${repair}\n`);
+      });
+    });
+    assert.equal(run.error, undefined);
+    assert.equal(run.result?.verdict, "failed");
+    assert.equal(run.fixCalls.length, 2, "the fix rung spends only its two allowed strikes");
+    assert.equal(calls.length, 3);
+    assert.deepEqual(fx.hookLog(), [], "an uncovered branch never leaves the worktree");
+    const verdict = rows(run.ledger, "verdict").at(-1);
+    assert.match(String(verdict?.reason), /coverage-refused push not cleared by the fix rung/);
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("W1-T4797: the default precheck shells out with its scoped suite from the worktree", () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}coverage-precheck-spawn-`));
   try {
