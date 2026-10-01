@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -36,6 +36,21 @@ test('raw coverage staging copies only when a cross-device hard link is impossib
     assert.equal(copies, 1);
     assert.equal(readFileSync(staged, 'utf8'), readFileSync(raw, 'utf8'));
     assert.notEqual(statSync(raw).ino, statSync(staged).ino, 'fallback must be a copy, not a link');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('raw coverage byte measurement rejects a swapped symlink after a cross-device copy', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rmd-coverage-symlink-'));
+  const raw = join(root, 'raw.json');
+  const staged = join(root, 'staged.json');
+  try {
+    writeFileSync(raw, '{"result":[]}\n');
+    assert.throws(() => stageRawCoverageFile(raw, staged, {
+      link: () => { throw Object.assign(new Error('cross-device link'), { code: 'EXDEV' }); },
+      copy: () => symlinkSync(raw, staged),
+    }), (error: unknown) => (error as NodeJS.ErrnoException).code === 'ELOOP');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
