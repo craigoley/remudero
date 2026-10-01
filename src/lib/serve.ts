@@ -94,6 +94,7 @@ import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnaps
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
 import { buildInstanceGatewayRoutes, CORE_INSTANCE, instanceStateRoot, livenessInstances, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
 import { createReadModelWorker, READ_MODEL_VIEWS, readModelStatusView, type ReadModelInstance, type ReadModelWorkerHandle, type ReadModelWorkerOptions } from "./read-model-worker.js";
+import { CONSOLE_CACHED_READ_PATHS, ROUTE_READS_STEP, buildRouteReadsRoute, createRouteReadRollup, type RouteReadRollup } from "./route-read-rollup.js";
 import { buildOperatorAgentAnswer, buildOperatorAgentAnswerRoute, readInboxAnswerEvidence } from "./operator-agent-answer.js";
 import { buildOperatorAgentActionHandoffRoutes } from "./operator-agent-action-handoff.js";
 import {
@@ -287,6 +288,7 @@ export function resolveEscalationOptionAffordance(option: EscalationOption): Esc
 export const DEFAULT_SERVE_PORT = 4317;
 
 export interface ServeDeps {
+  routeReadRollup?: RouteReadRollup;
   projectionWorker?: ConsoleProjectionWorker;
   readModel?: Pick<ReadModelWorkerOptions, "tickMs" | "stopWaitMs" | "workerUrl" | "every" | "slowLane">;
   consoleSnapshots?: { dir: string; prewarmPaths?: readonly string[] };
@@ -669,7 +671,6 @@ export const CONSOLE_UNBOUNDED_LEDGER_READ_BASELINE: readonly string[] = [
 export const CONSOLE_STATUS_FULL_TASK_THRESHOLD = 500; // PRIMARY CONTROL
 export const CONSOLE_STATUS_RENDERED_TASK_LIMIT = 120; // BACKSTOP
 export const CONSOLE_STATUS_RESPONSE_SIZE_RATCHET_BYTES = 96_000;
-const CONSOLE_CACHED_READ_PATHS = new Set(["/v1/status", "/v1/recent", "/v1/inbox", "/v1/daemon-health", "/v1/repos", "/v1/repos/summary", "/v1/feedback", "/v1/operator-activity"]);
 const BLOCKING_REQUEST_PATH_SYMBOLS = [
   "readFileSync",
   "writeFileSync",
@@ -2774,6 +2775,7 @@ function assembleServeRoutes(
     // 2026-09-16 and 2026-09-26). It says what this surface is and where to go instead.
     buildGatewayIndexRoute(),
     buildVersionRoute(consoleSha),
+    buildRouteReadsRoute(deps.routeReadRollup ?? createRouteReadRollup()),
     // W1-T4227: the fleet's one registry, read-only — see buildRegistryRoute's own doc.
     buildRegistryRoute({
       ...deps.registry,
@@ -2987,6 +2989,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   const serveDrain = createServeDrain({ boundMs: SERVE_RESTART_DRAIN_BOUND_MS, log: deps.log });
   let viewEventsHandover: (reason: string) => void = () => {};
   const wakeCounters = createWakeCounters();
+  const routeReads = createRouteReadRollup({ stateDir: dirname(deps.ledgerPath), log: deps.log, write: (row) => deps.log?.(ROUTE_READS_STEP, { ...row }) });
+  const stopRouteReads = routeReads.start();
   const stopWakeSummary = startWakeSummaryFlush({
     counters: wakeCounters,
     clock: systemClock,
@@ -3002,6 +3006,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       analyticsCache.stop();
       liveAnalyticsCache.stop();
       stopWakeSummary();
+      stopRouteReads();
       prewarm.stop();
     },
     lastReadAt: () => lastReadAt,
@@ -3032,6 +3037,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       consoleSha,
       confirmNonces,
       githubEventWake: deps.githubEventWake && { ...deps.githubEventWake, counters: wakeCounters },
+      routeReadRollup: routeReads,
       liveMetrics: deps.liveMetrics ?? liveAnalyticsCache.current,
       // W1-T4229: /v1/daemon-health reports the SAME reading the restart decision acts on.
       daemonHealth: { ...deps.daemonHealth, gatewayCheckout: deps.daemonHealth?.gatewayCheckout ?? staleExit.checkout },
@@ -3046,7 +3052,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     // `/v1/skills/run`) `HIGH_TIER_WRITE_PATHS` names client-side, read here off the route table's
     // own declared `tier` (already asserted complete, above in `buildServeRoutes`) rather than a
     // second hard-coded path list that could drift from it.
-    route.tier === "high" ? staleExit.wrapWrite(route) : route.path === VIEW_EVENTS_PATH ? serveDrain.wrapStream(route) : stampRead(route),
+    routeReads.wrap(route.tier === "high" ? staleExit.wrapWrite(route) : route.path === VIEW_EVENTS_PATH ? serveDrain.wrapStream(route) : stampRead(route)),
   );
   const ingestToken = deps.tokens.ingest ?? process.env[INGEST_TOKEN_ENV] ?? readIngestTokenFile(process.env[INGEST_TOKEN_FILE_ENV], deps.log);
   const server = createService({
@@ -3097,6 +3103,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   server.on("close", prewarm.stop);
   if (keepWarm) server.once("listening", keepWarm.start);
   server.on("close", stopWakeSummary);
+  server.on("close", stopRouteReads);
   server.once("listening", analyticsCache.start);
   server.on("close", analyticsCache.stop);
   server.once("listening", () => { for (const cache of routeAssembly.instanceAnalyticsCaches) cache.start(); });
