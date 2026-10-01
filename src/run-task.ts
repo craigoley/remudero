@@ -19553,7 +19553,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
         const raw = fetchView(combinedStatusRestArgs(owner, repo, view.headRefOid)) as {
           statuses?: Array<{ context?: string; state?: string }>;
         };
-        if (!Array.isArray(raw?.statuses)) throw new Error("combined commit status has no statuses array");
+        if (!raw || !Array.isArray(raw.statuses)) throw new Error("combined commit status has no statuses array");
         const state = raw.statuses.find((entry) => entry.context === REVIEW_CONTEXT)?.state;
         if (state === undefined) return undefined;
         if (state === "success" || state === "pending") return state;
