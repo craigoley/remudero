@@ -94,7 +94,11 @@ test("a warm-loaded body committed within the stale bound is not marked warming"
   assert.equal(committed, active.clock.now(), "the lease row says when the holder last committed");
 
   const standby = createReadModelWorker({ stateDir: active.stateDir, instances: active.instances, clock: active.clock });
-  assert.deepEqual(standby.judge(warmSource, committed! + 5_000), [{ name: "ledger:core", asOf: null, state: "fresh" }], "the DB was committed 5 s ago: fresh, not warming");
+  const fresh = standby.judge(warmSource, committed! + 5_000)[0];
+  assert.equal(fresh?.state, "fresh", "the DB was committed 5 s ago: fresh, not warming");
+  assert.equal(fresh?.phase, undefined);
+  assert.equal(fresh?.kind, "ledger", "warm sources keep the structured freshness fields");
+  assert.equal(fresh?.lagMs, 5_000, "warm lag measures time since the commit, not the last ledger row");
   const late = standby.judge(warmSource, committed! + READ_MODEL_LEDGER_STALE_MS + 1)[0];
   assert.equal(late?.state, "stale", "past the stale bound with no tick of its own, the body is stale again");
   assert.match(late?.reason ?? "", /warming/);
