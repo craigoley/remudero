@@ -2357,13 +2357,6 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
     "trackedFiles is only ever called with deploy/*.sh and test/*.test.ts patterns — never src/",
   ),
   refusedForPredicate(
-    "test/instrument-surface-completeness.test.ts",
-    "b",
-    "`git(['ls-files'])` enumerates the whole tracked tree (includes src/), but isProductOrTestPath explicitly EXCLUDES src/, " +
-      "apps/, packages/ and test/ paths from the derived candidate set the suite asserts about — the walked-and-asserted " +
-      "population is deliberately everything BUT src/",
-  ),
-  refusedForPredicate(
     "test/ledger-read-intent.test.ts",
     "a",
     "`git ls-files src/lib/status.ts` checks exactly one file is tracked, and a dedicated test pins the enforced corpus stays " +
