@@ -329,3 +329,95 @@ export function replayDeployRestartFrequency(scores: readonly number[], threshol
   }
   return { restarts, finalTotal: total };
 }
+
+/**
+ * W1-T4945 — the daemon's own loop, dispatch, drain and ledger code, plus what decides how it resolves. An
+ * advance touching one changes what the RUNNING daemon does next, so it is worth a drain even while busy.
+ */
+export const DAEMON_SELF_PATH_PREFIXES: readonly string[] = [
+  "src/lib/daemon",
+  "src/lib/drain",
+  "src/lib/dispatch-",
+  "src/lib/ledger",
+  "src/lib/self-sync.ts",
+  "bin/",
+  "package.json",
+  "package-lock.json",
+  "tsconfig.json",
+];
+
+export const FRESHNESS_DECISION_STEP = "daemon.freshness_decision";
+
+/** Freshness weight on deploy-judge's own scale: the daemon's own code is full weight, all else as deployed. */
+export function freshnessAdvanceWorth(change: DeployWorthChange): DeployWorthVerdict {
+  if (change.files.some((file) => DAEMON_SELF_PATH_PREFIXES.some((prefix) => file.startsWith(prefix)))) {
+    return {
+      score: 18,
+      reason: "the daemon's own loop, dispatch, drain or ledger code changed",
+      source: "deterministic",
+    };
+  }
+  return deterministicDeployWorth(change);
+}
+
+export interface FreshnessDecision {
+  action: "restart" | "defer";
+  reason: string;
+  /** Change pressure: the summed freshness weight of every advance scored this lifetime. */
+  weight: number;
+  /** Staleness pressure: grows linearly from the first stale reading, reaching the threshold at the horizon. */
+  agePressure: number;
+  pressure: number;
+  state: DeployRestartPressureState;
+}
+
+/**
+ * Decide WHEN, not WHETHER, to take a material advance (W1-T4945). Idle: restart now, which costs only a boot.
+ * Busy: restart through the existing drain only once change pressure plus staleness pressure reaches the
+ * recorded threshold, so a change to the daemon's own code goes at once and a low-weight one waits for an idle
+ * moment — never past the horizon, because staleness alone reaches the threshold there. `changes` undefined means
+ * the advance could not be read, which counts as full weight: an unknown advance never waits.
+ */
+export function decideFreshnessRestart(input: {
+  changes?: readonly DeployWorthChange[];
+  busy: boolean;
+  staleSinceMs: number;
+  nowMs: number;
+  state: DeployRestartPressureState;
+  threshold?: RecordedDeployRestartThreshold;
+  ageHorizonMs?: number;
+}): FreshnessDecision {
+  const threshold = input.threshold ?? DEPLOY_RESTART_SCORE_THRESHOLD;
+  const horizonMs = input.ageHorizonMs ?? DEPLOY_RESTART_RATE_CEILING_MS;
+  const scored = accumulateDeployRestartPressure(input.changes ?? [], input.state, {
+    threshold,
+    nowMs: input.nowMs,
+    rateCeilingMs: 0,
+    scoreChange: freshnessAdvanceWorth,
+  });
+  const weight = input.changes === undefined ? Math.max(scored.total, threshold.value) : scored.total;
+  const agePressure = Math.floor((threshold.value * Math.max(0, input.nowMs - input.staleSinceMs)) / horizonMs);
+  const pressure = weight + agePressure;
+  const state = { total: weight, scoredShas: scored.state.scoredShas };
+  if (!input.busy) {
+    return { action: "restart", reason: "idle: nothing in flight, so the restart costs only a boot", weight, agePressure, pressure, state };
+  }
+  if (pressure >= threshold.value) {
+    return {
+      action: "restart",
+      reason: `busy, but pressure ${pressure} (change ${weight} + staleness ${agePressure}) >= ${threshold.value}: drain and restart`,
+      weight,
+      agePressure,
+      pressure,
+      state,
+    };
+  }
+  return {
+    action: "defer",
+    reason: `busy, and pressure ${pressure} (change ${weight} + staleness ${agePressure}) < ${threshold.value}: wait for an idle moment`,
+    weight,
+    agePressure,
+    pressure,
+    state,
+  };
+}

@@ -39,6 +39,7 @@ import type { BenchmarkCohortPassResult } from "./benchmark-cohort.js";
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
+import { decideFreshnessRestart, FRESHNESS_DECISION_STEP, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
 import {
   nextRunnable,
@@ -669,7 +670,7 @@ export type DaemonFreshnessNotStale =
  * dependency tree never survives into the relaunched process (W1-T151). */
 export type DaemonFreshness =
   | { stale: false; notStale?: DaemonFreshnessNotStale }
-  | { stale: true; oldSha: string; newSha: string; installNeeded?: boolean };
+  | { stale: true; oldSha: string; newSha: string; installNeeded?: boolean; changes?: readonly DeployWorthChange[] };
 
 /** W1-T3618 — a sweep pass's OWN report of a freshness discovery {@link DaemonDeps.checkFreshness}
  *  cannot see: reviewer-code freshness is read inside the sweep's review path, once per pass and
@@ -2339,6 +2340,9 @@ export async function runDaemon(
   // measured 12.5 min on 2026-09-30). `backgroundSweep` is the outstanding `runGatedSweep` call, cleared
   // the moment it returns; each completed pass is queued once and consumed, in order, by the next tick.
   let backgroundSweep: Promise<void> | undefined;
+  // W1-T4945 — this lifetime's freshness pressure, and when it first read stale; see `decideFreshness`.
+  let freshnessPressure: DeployRestartPressureState = { total: 0, scoredShas: [] };
+  let staleSinceMs: number | undefined;
   const completedSweeps: Array<{ outcome: SweepCycleOutcome | undefined; durationMs: number }> = [];
   let latestSweepOutcome: SweepCycleOutcome | undefined;
   let staleReviewerAction: StaleReviewerRecurrenceAction = { kind: "silent" };
@@ -2630,6 +2634,29 @@ export async function runDaemon(
       ...(outcome.arm === "dirty" && outcome.newSha ? { new_sha: outcome.newSha } : {}),
       ...(outcome.arm === "immaterial" ? { old_sha: outcome.oldSha, new_sha: outcome.newSha } : {}),
     });
+  };
+
+  // W1-T4945 — WHEN, not WHETHER: an idle daemon restarts at once, a busy one only once change plus
+  // staleness pressure justifies the drain (deploy-judge's `decideFreshnessRestart`). Busy means a full
+  // pass, a detached action or a review is still in flight — exactly what the drain below would wait on.
+  const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>): "restart" | "defer" => {
+    const nowMs = daemonClock.now();
+    staleSinceMs ??= nowMs;
+    const busy =
+      backgroundSweep !== undefined || sweepLiveness.inFlight || detachedSweepActionCount() > 0 || inFlightReviewCount() > 0;
+    const decision = decideFreshnessRestart({ changes: freshness.changes, busy, staleSinceMs, nowMs, state: freshnessPressure });
+    freshnessPressure = decision.state;
+    log(FRESHNESS_DECISION_STEP, {
+      action: decision.action,
+      busy,
+      weight: decision.weight,
+      age_pressure: decision.agePressure,
+      pressure: decision.pressure,
+      reason: decision.reason,
+      old_sha: freshness.oldSha,
+      new_sha: freshness.newSha,
+    });
+    return decision.action;
   };
 
   // One stale-exit path for both freshness boundaries. Both must preserve the same install, bounded pass, named
@@ -3078,14 +3105,16 @@ export async function runDaemon(
       // gets exactly one. Not a timer or backoff — those need sizing against a moving merge rate
       // (W1-T312, W1-T380, W1-T382). One-shot: the three-clocks guard (W1-T126) fires at the next
       // tick boundary, and the operator holds above still outrank it (W1-T936).
-      if (cyclesEntered > 0) {
+      if (cyclesEntered === 0) {
+        staleSinceMs ??= daemonClock.now();
+        log("daemon.freshness_deferred", {
+          old_sha: freshness.oldSha,
+          new_sha: freshness.newSha,
+          phase: "pre_cycle",
+        });
+      } else if (decideFreshness(freshness) === "restart") {
         return stopForFreshness(freshness);
       }
-      log("daemon.freshness_deferred", {
-        old_sha: freshness.oldSha,
-        new_sha: freshness.newSha,
-        phase: "pre_cycle",
-      });
     }
     cyclesEntered++;
 

@@ -329,7 +329,11 @@ test("DAEMON WIRING: the production runOne supplies a material freshness handoff
     assert.equal(result.verdict, "handed_off");
     assert.ok(forwarded, "the daemon runOne invokes its configured runTask implementation");
     const freshness = forwarded.externalWaitFreshness?.();
-    assert.deepEqual(freshness, { stale: true, oldSha, newSha }, "only a clean material origin advance crosses the daemon handoff boundary");
+    assert.deepEqual(
+      freshness,
+      { stale: true, oldSha, newSha, changes: [{ sha: newSha, subject: "advance source for freshness handoff", files: ["src/freshness.ts"] }] },
+      "only a clean material origin advance crosses the daemon handoff boundary, carrying the commit it advanced by (W1-T4945)",
+    );
   } finally {
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
