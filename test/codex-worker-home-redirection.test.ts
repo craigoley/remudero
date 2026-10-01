@@ -87,6 +87,28 @@ function interactiveBashAnthropicKey(env: Record<string, string | undefined>): s
   return match[1];
 }
 
+test("W1-T2800: an interactive startup banner does not erase the redirected-home key boundary", () => {
+  const root = scratch();
+  try {
+    const operatorHome = operatorHomeWithRcSentinel(root);
+    writeFileSync(join(operatorHome, ".bashrc"), `printf 'RMD_STARTUP_BANNER\\n'\nexport ANTHROPIC_API_KEY=${SENTINEL}\n`);
+    const workerHome = perRunWorkerHomeDir(join(root, "worker-homes"), "BANNER", { perSpawn: true });
+    materializeOutsideRepo(workerHome, operatorHome);
+    const env = codexSpawnEnvForTest(fakeConfig(root), {
+      cwd: root, prompt: "p", runId: "BANNER", workerHome, zdotdir: join(root, "zdotdir"), env: {},
+    });
+    const unsafeEnv = { ...env, HOME: operatorHome };
+    const startup = execFileSync("bash", ["-ic", "true"], {
+      encoding: "utf8", env: unsafeEnv, stdio: ["ignore", "pipe", "ignore"],
+    });
+    assert.match(startup, /RMD_STARTUP_BANNER/, "the control must prove startup text was emitted");
+    assert.equal(interactiveBashAnthropicKey(unsafeEnv), SENTINEL, "the operator-home leak remains the positive control");
+    assert.equal(interactiveBashAnthropicKey(env), "", "the redirected home still hides that key");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // ── the leak itself: asserted on the VALUE, per the falsifier ───────────────────────────────────
 
 test("W1-T2800: the sentinel exported only from an rc file is UNREACHABLE through the Codex spawn env — HOME resolves to a redirected per-spawn home whose rc files are blank", () => {
