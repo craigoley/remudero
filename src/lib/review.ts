@@ -9152,6 +9152,9 @@ export interface PostReviewStatusGuardedOpts {
   /** Fresh lifecycle read for THIS attempt — real callers pass `() => fetchPrLifecycle(prUrl)`,
    * tests inject a fake. Called INSIDE the lock, never before (see the module doc above). */
   fetchLifecycle: () => PrLifecycleState;
+  /** Latest GitHub commit status for this context, read inside the lock on a decision replay.
+   * A later pending claim can replace the status even though the ledger's terminal decision remains final. */
+  fetchCurrentStatus?: () => PostableReviewState | undefined;
   /** Injected raw poster for tests. Defaults to {@link postReviewStatus}, which already retries a TRANSIENT gh error
    *  internally (rule (iv) above). May return a Promise, as the default does, or `void`. */
   post?: (o: {
@@ -9258,48 +9261,72 @@ export async function postReviewStatusGuarded(
       : undefined;
     const replacingDegradedTerminal = opts.reopenedDegradedTerminal === true && priorDecision !== undefined &&
       isReopenableDegradedTerminal(priorDecision, true);
+    const withholdReplay = (reason: string): PostReviewStatusGuardedResult => {
+      appendLedger(opts.ledgerPath, {
+        run_id: opts.runId, task_id: opts.taskId, step: "review.post_refused",
+        head_sha: opts.sha, attempted_state: opts.state, evidence: opts.evidence, reason,
+        ...(opts.prUrl !== undefined ? { pr_url: opts.prUrl } : {}),
+        ...(opts.reviewDecisionDigest !== undefined ? { review_decision_digest: opts.reviewDecisionDigest } : {}),
+      });
+      return { posted: false, reason };
+    };
+    let restoreTerminal = false;
     if (!lifecycle.merged && !lifecycle.closed && priorDecision && !replacingDegradedTerminal) {
       if (opts.state === "pending") {
         return { posted: false, replayed: true, effectiveState: priorDecision.state,
           reason: "cannot-evaluate hold cannot overwrite a terminal verdict for the same review decision" };
       }
       if (priorDecision.state === opts.state) {
-        return { posted: false, replayed: true, effectiveState: priorDecision.state, reason: "terminal verdict already exists for this review decision" };
+        if (opts.fetchCurrentStatus) {
+          let current: PostableReviewState | undefined;
+          try {
+            current = opts.fetchCurrentStatus();
+          } catch (error) {
+            return withholdReplay(`could not verify the live remudero-review status: ${String(error)}`);
+          }
+          if (current === "pending" || current === undefined) restoreTerminal = true;
+          else if (current !== priorDecision.state) {
+            return withholdReplay(`live remudero-review is ${current} while the final decision is ${priorDecision.state}; refusing to overwrite a conflicting terminal status`);
+          }
+        }
+        if (!restoreTerminal) return { posted: false, replayed: true, effectiveState: priorDecision.state, reason: "terminal verdict already exists for this review decision" };
       }
-      const reason = `contradictory ${opts.state} attempted after terminal ${priorDecision.state} for review decision ${opts.reviewDecisionDigest}`;
-      appendLedger(opts.ledgerPath, {
-        run_id: opts.runId, task_id: opts.taskId, step: "review.verdict_conflict",
-        pr_url: opts.prUrl, head_sha: opts.sha, review_decision_digest: opts.reviewDecisionDigest,
-        ...(opts.reviewEngineRevision !== undefined ? { review_engine_revision: opts.reviewEngineRevision } : {}),
-        prior_state: priorDecision.state, attempted_state: opts.state,
-        prior_evaluator: priorDecision.evaluatorProvenance,
-        attempted_evaluator: opts.evaluatorProvenance ?? null,
-      });
-      try {
-        await post({
-          owner: opts.owner,
-          repo: opts.repo,
-          sha: opts.sha,
-          state: "failure",
-          description:
-            opts.reviewerCodeFreshness?.status === "fresh"
-              ? reviewDescriptionWithCodeProvenance(
-                  "remudero-review: conflicting verdicts for identical decision input — operator adjudication required",
-                  opts.reviewerCodeFreshness.codeSha,
-                )
-              : "remudero-review: conflicting verdicts for identical decision input — operator adjudication required",
-        });
-        return { posted: true, conflict: true, effectiveState: "failure", reason };
-      } catch (error) {
+      if (!restoreTerminal) {
+        const reason = `contradictory ${opts.state} attempted after terminal ${priorDecision.state} for review decision ${opts.reviewDecisionDigest}`;
         appendLedger(opts.ledgerPath, {
-          run_id: opts.runId, task_id: opts.taskId, step: "review.post_failed", head_sha: opts.sha,
-          attempted_state: "failure", review_decision_digest: opts.reviewDecisionDigest, error: String(error),
+          run_id: opts.runId, task_id: opts.taskId, step: "review.verdict_conflict",
+          pr_url: opts.prUrl, head_sha: opts.sha, review_decision_digest: opts.reviewDecisionDigest,
           ...(opts.reviewEngineRevision !== undefined ? { review_engine_revision: opts.reviewEngineRevision } : {}),
+          prior_state: priorDecision.state, attempted_state: opts.state,
+          prior_evaluator: priorDecision.evaluatorProvenance,
+          attempted_evaluator: opts.evaluatorProvenance ?? null,
         });
+        try {
+          await post({
+            owner: opts.owner,
+            repo: opts.repo,
+            sha: opts.sha,
+            state: "failure",
+            description:
+              opts.reviewerCodeFreshness?.status === "fresh"
+                ? reviewDescriptionWithCodeProvenance(
+                    "remudero-review: conflicting verdicts for identical decision input — operator adjudication required",
+                    opts.reviewerCodeFreshness.codeSha,
+                  )
+                : "remudero-review: conflicting verdicts for identical decision input — operator adjudication required",
+          });
+          return { posted: true, conflict: true, effectiveState: "failure", reason };
+        } catch (error) {
+          appendLedger(opts.ledgerPath, {
+            run_id: opts.runId, task_id: opts.taskId, step: "review.post_failed", head_sha: opts.sha,
+            attempted_state: "failure", review_decision_digest: opts.reviewDecisionDigest, error: String(error),
+            ...(opts.reviewEngineRevision !== undefined ? { review_engine_revision: opts.reviewEngineRevision } : {}),
+          });
+        }
+        return { posted: false, conflict: true, effectiveState: "failure", reason };
       }
-      return { posted: false, conflict: true, effectiveState: "failure", reason };
     }
-    const decision = decideReviewStatusPost(
+    const decision = restoreTerminal ? { post: true as const } : decideReviewStatusPost(
       {
         headSha: opts.sha,
         state: opts.state,

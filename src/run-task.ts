@@ -18816,6 +18816,7 @@ interface ReviewCommandDeps {
   buildBaseProof?: typeof buildBaseProofDir;
   runReview?: typeof runReview;
   postStatus?: typeof postReviewStatusGuarded;
+  reviewerCodeFreshness?: () => ReviewerCodeFreshness;
   /** W1-T913: injectable so a test can observe the pending post without a real `gh` spawn — see
    *  `postReviewPending`'s call site below. Defaults to the real {@link postReviewPending}. */
   postReviewPending?: typeof postReviewPending;
@@ -19205,6 +19206,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     buildBaseProof,
     runReview: runReviewDep,
     postStatus: postStatusDep,
+    reviewerCodeFreshness: reviewerCodeFreshnessDep,
     postReviewPending: postReviewPendingDep,
     fetchHead,
     executionMode,
@@ -19217,6 +19219,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     buildBaseProof: buildBaseProofDir,
     runReview,
     postStatus: postReviewStatusGuarded,
+    reviewerCodeFreshness: () => checkReviewerCodeFreshness(repoRoot, process.env),
     postReviewPending,
     fetchHead: realDeps().reviewWorktree.fetch,
     executionMode: "deterministic" as const,
@@ -19514,7 +19517,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           // makes `judgeReview` mark the verdict `keywordOnly`+`capped`, exactly
           // the documented fallback (criterion 5) — never silent.
           headCheckoutDir: worktreePath,
-          reviewerCodeFreshness: () => checkReviewerCodeFreshness(repoRoot, process.env),
+          reviewerCodeFreshness: reviewerCodeFreshnessDep,
           // The three base facts, threaded by NAME so a reader (and test/preexisting-proof-hits-wiring)
           // can see each one reach the evidence: the dir, the per-proof unreadable set (W1-T460), and
           // whether the dir is a checkout a `unit test:` proof may honestly be re-run in (R-11).
@@ -19533,8 +19536,51 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       ),
   );
 
+  // A final review decision is immutable, but GitHub's commit status is last-write-wins. A stale
+  // daemon may have posted pending after that decision; replay must check the live context and
+  // restore the already-judged terminal status instead of reporting a success that GitHub cannot see.
+  let replayStatusAction: "restored" | "confirmed" | undefined;
+  if (verdict.decisionDisposition === "replayed" && verdict.reviewDecisionDigest) {
+    const restored = await postStatusDep({
+      owner, repo, sha: view.headRefOid, state: verdict.state,
+      description: reviewPostedDescription(verdict),
+      taskId: taskId ?? `PR-${view.number}`, evidence: reviewEvidenceStrength(verdict.criteria),
+      ledgerPath, runId, prUrl: view.url, reviewInputDigest: inputDigest,
+      reviewDecisionDigest: verdict.reviewDecisionDigest,
+      reviewEngineRevision: REVIEW_ENGINE_REVISION,
+      reviewerCodeFreshness: reviewerCodeFreshnessDep(),
+      fetchLifecycle: () => fetchPrLifecycle(view.url),
+      fetchCurrentStatus: (): "success" | "failure" | "pending" | undefined => {
+        const raw = fetchView(combinedStatusRestArgs(owner, repo, view.headRefOid)) as {
+          statuses?: Array<{ context?: string; state?: string }>;
+        };
+        if (!raw || !Array.isArray(raw.statuses)) throw new Error("combined commit status has no statuses array");
+        const state = raw.statuses.find((entry) => entry.context === REVIEW_CONTEXT)?.state;
+        if (state === undefined) return undefined;
+        if (state === "success" || state === "pending") return state;
+        if (state === "failure" || state === "error") return "failure";
+        throw new Error(`unrecognized remudero-review state: ${state}`);
+      },
+    });
+    if (restored.posted) {
+      replayStatusAction = "restored";
+      log("review.posted", {
+        context: REVIEW_CONTEXT, state: verdict.state, head_sha: view.headRefOid, pr_url: view.url,
+        review_input_digest: inputDigest, review_engine_revision: REVIEW_ENGINE_REVISION,
+        review_decision_digest: verdict.reviewDecisionDigest, decision_verdict: verdict,
+        evaluator_provenance: verdict.evaluatorProvenance,
+        reviewer_outcome: verdict.reviewerOutcome, proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
+        status_recovered: true,
+      });
+    } else if (restored.replayed) {
+      replayStatusAction = "confirmed";
+    } else {
+      verdict.verdictWithheld = restored.reason ?? "could not restore the live remudero-review status";
+    }
+  }
+
   console.log(
-    `\nremudero-review=${verdict.state} ${verdict.verdictWithheld ? "WITHHELD" : "posted"} to ${view.url} (head ${verdict.headSha.slice(0, 7)})` +
+    `\nremudero-review=${verdict.state} ${verdict.verdictWithheld ? "WITHHELD" : replayStatusAction ?? "posted"} to ${view.url} (head ${verdict.headSha.slice(0, 7)})` +
       (verdict.verdictWithheld ? ` — ${verdict.verdictWithheld}` : "") +
       (reviewVerdictAnnotation(verdict) ? ` — ${reviewVerdictAnnotation(verdict)}` : "") +
       // W1-T1085: the same three-way fact the status itself renders — a plan-only PR is not a
