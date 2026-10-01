@@ -156,10 +156,7 @@ APP_PRIVATE_KEY_MOUNT_DEST="/home/node/.rmd-github-app-private-key.pem"
 SERVE_PORT_OVERRIDE="${RMD_SERVE_PORT:-}"
 SERVE_PORT="${SERVE_PORT_OVERRIDE:-4317}"
 SERVE_BIND_HOST="0.0.0.0"
-# P3 WARM HANDOFF (docs/operator-guide.md, "Serve supervisor"): the core gateway runs under the serve
-# supervisor, which holds the port and swaps serve generations behind it, so a code change no longer
-# refuses a connection. RMD_SERVE_SUPERVISOR=off launches serve directly, exactly as before.
-SERVE_SUPERVISOR="${RMD_SERVE_SUPERVISOR:-on}"
+SERVE_SUPERVISOR="${RMD_SERVE_SUPERVISOR:-on}" # docs/operator-guide.md "Serve supervisor"; off = direct launch
 SERVE_GENS_DIR="${RMD_SERVE_GENS_DIR:-${HOME:-/root}/rmd-serve-gens}"
 SERVE_GENS_MOUNT_DEST="/home/node/rmd-serve-gens"
 SERVE_SUPERVISOR_ENTRY="/app/src/lib/serve-supervisor-main.ts"
@@ -239,7 +236,6 @@ if [ -n "${INSTANCE_NAME}" ]; then
 fi
 
 DAEMON_REPO_DIR="${STATE_MOUNT_DEST}/${DAEMON_REPO}"
-# The supervisor is commissioned on the core gateway first; another instance keeps the direct launch.
 if [ -n "${INSTANCE_NAME}" ]; then SERVE_SUPERVISOR=off; fi
 
 # ── 1. REFUSE TO RUN INSIDE A CONTAINER ─────────────────────────────────────────────────────────
@@ -630,8 +626,6 @@ SERVE_GENS_ARGS=()
 SERVE_CMD=(./bin/rmd serve --host "${SERVE_BIND_HOST}" --port "${SERVE_PORT}")
 if [ "${SERVE_SUPERVISOR}" = "on" ]; then
   SERVE_GENS_ARGS=(-v "${SERVE_GENS_DIR}:${SERVE_GENS_MOUNT_DEST}" -e "RMD_SERVE_GENS_DIR=${SERVE_GENS_MOUNT_DEST}")
-  # THE SUPERVISOR IS BAKED: it runs from the image's /app, so an image built before it cannot run it.
-  # That image serves directly instead, and says so in `docker logs`; it never fails to start.
   SERVE_CMD=(sh -c "if [ -f ${SERVE_SUPERVISOR_ENTRY} ]; then exec node --import /app/node_modules/tsx/dist/loader.mjs ${SERVE_SUPERVISOR_ENTRY} -- serve --host ${SERVE_BIND_HOST} --port ${SERVE_PORT}; fi; echo 'rmd-serve: this image has no serve supervisor; serving directly' >&2; exec ./bin/rmd serve --host ${SERVE_BIND_HOST} --port ${SERVE_PORT}")
 fi
 RUN_ARGS=(

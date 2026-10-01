@@ -70,8 +70,8 @@ export async function prepareSlotDeps(dir: string, activeDir: string, run: RunCo
   const modules = join(dir, "node_modules");
   await run("rm", ["-rf", modules], dir);
   if (resolve(activeDir) !== resolve(dir) && hashInstallInputs(activeDir) === want && readMarker(activeDir) === want) {
-    // GNU `cp -al` links off the loop in a child; BSD cp has no -l, so the in-process walk is the fallback.
     await run("cp", ["-al", join(activeDir, "node_modules"), modules], dir).catch((err: unknown) => {
+      // GNU `cp -al` links off the loop in a child; BSD cp has no -l, so the in-process walk is the fallback.
       rmSync(modules, { recursive: true, force: true });
       linkTree(join(activeDir, "node_modules"), modules);
       return `in-process link after: ${err instanceof Error ? err.message : String(err)}`;
