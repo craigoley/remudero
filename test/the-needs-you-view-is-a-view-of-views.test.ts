@@ -98,6 +98,15 @@ test("the needs you view recomposes when one instance now body changes", () => {
   assert.equal(view.body("repositories")?.view, "repositories", "every other body still reads through");
   assert.equal(view.bodies.get(`${NEEDS_YOU_VIEW_NAME}\u0000`), after, "the composite is in the bodies the events stream walks");
   assert.equal(view.bodies.size, handle.bodies.size + 1);
+  const id = `${NEEDS_YOU_VIEW_NAME}\u0000`;
+  let walked = false;
+  view.bodies.forEach((e, key) => void (walked ||= key === id && e === after));
+  assert.deepEqual([view.bodies.has(id), [...view.bodies.keys()].includes(id), [...view.bodies.values()].includes(after), [...view.bodies.entries()].some(([k]) => k === id), [...view.bodies].some(([k]) => k === id), walked],
+    [true, true, true, true, true, true], "every way of walking the bodies sees the composite");
+  const late: ViewBodyEntry[] = [];
+  view.onBody((e) => void late.push(e))();
+  post(now("core", []));
+  assert.deepEqual(late, [], "an unsubscribed listener hears nothing");
 });
 
 test("a needs you input with no body reads absent with a reason never zero", () => {
