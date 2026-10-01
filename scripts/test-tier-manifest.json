@@ -1830,6 +1830,7 @@
     "test/spawn-nopid-diagnosis.test.ts": 3100,
     "test/specialist-panel.test.ts": 1200,
     "test/spend-figures-name-their-channel.test.ts": 820,
+    "test/spend-is-counted-once-at-its-producer.test.ts": 4000,
     "test/spend-observability-fields.test.ts": 4729,
     "test/spiral-golden.test.ts": 1000,
     "test/sre-governor.test.ts": 1300,
