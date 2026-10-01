@@ -42,3 +42,21 @@
     row corrects the one pairing it produced. PORTAL-T12's own merged credit is genuine and is a
     different pairing, so it is untouched by this row.
   author_class: operator
+- task: W1-T5016
+  pr: 8212
+  action: remove-credit
+  reason: >
+    Operator-directed correction, observed 2026-10-01. PR 8212 changed only
+    plan/tasks.d/W1-T5016-file-tools-worktree.yaml. It filed the task from a
+    run-shaped branch but did not implement worker file-tool confinement. The
+    live merge-credit store attributed this plan-only merge to W1-T5016.
+  author_class: operator
+- task: W1-T5017
+  pr: 8213
+  action: remove-credit
+  reason: >
+    Operator-directed correction, observed 2026-10-01. PR 8213 changed only
+    plan/tasks.d/W1-T5017-real-worker-smoke.yaml. It filed the task from a
+    run-shaped branch but did not implement a real-worker smoke. The live
+    merge-credit store attributed this plan-only merge to W1-T5017.
+  author_class: operator

@@ -1,0 +1,125 @@
+- id: W1-T5031
+  title: "RULE 15 PROTECTS ONLY claim/proof/satisfied_by, BUT `kind: guard` EXEMPTS A CRITERION FROM THE PROOF-DISCRIMINATION GATE — `planTasksCriterionFieldLines` (src/lib/review.ts) names three fields in `criterionFieldNames`, so a diff that only ADDS `kind: guard` under an existing criterion of the PR's own task record returns `criterionFieldTampered` false (measured 2026-09-30) while `scripts/proof-discrimination-gate.mjs` resolves criteria AT THE PR HEAD and skips head-versus-base discrimination for that criterion; add `kind` to the protected set, and leave `holdout` out because it exempts nothing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator ask 2026-09-30: a PR can exempt one of its own criteria from discrimination with a line Rule 15 never sees"
+  plan_refs: [W1-T58, W1-T400, W1-T2909, W1-T4419, W1-T3099, W1-T3344, W1-T4904]
+  files:
+    - src/lib/review.ts
+    - test/rule-15-protects-the-criterion-kind-that-exempts-discrimination.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 at origin/main a23658e66 by running the real predicates on synthetic diffs (a scratch probe, deleted afterwards); the brief's claim reproduces exactly.
+
+    (1) THE HOLE. `planTasksCriterionFieldLines` (src/lib/review.ts) holds `const criterionFieldNames = new Set(["claim", "proof", "satisfied_by"])`
+    and counts an add/del line only when its key is in that set (plus block-scalar continuations of those keys and, under a known
+    `acceptance:` line, deeper-indented lines). `criterionFieldTampered` is `addedField || removedField` over it. A diff that touches a
+    shard under `plan/tasks.d/` and only ADDS `      kind: guard` beneath an existing `claim:`/`proof:` pair returns FALSE, and so does a
+    lone added `kind:` line with no context at all and a lone REMOVED `kind: guard`; the same shard diff ADDING `satisfied_by: "#123"`
+    or editing `proof:` returns TRUE. Through `checkSatisfiedByGuard(diff, {})` the `kind` diff PASSES (`pass: true`) and the
+    `satisfied_by` and `proof` diffs FAIL. The four shared consumers of the one predicate inherit the blind spot:
+    `checkSatisfiedByGuard` and `judgeReview`'s `criteriaTampered` (src/lib/review.ts), `rule15SplitViolation` (src/lib/ci-parity.ts,
+    the pre-push refusal) and `judgeRule15` (scripts/rule15-precheck.mjs).
+
+    (2) WHAT `kind: guard` BUYS. `scripts/proof-discrimination-gate.mjs` resolves the PR's criteria AT THE PR HEAD
+    (`criteriaForReview` -> `resolvePlanCriteriaAtHead(body, root, "plan/tasks.yaml", headSha)`), so the head version of the PR's own
+    record is what it reads, and in `evaluateProofDiscrimination` a criterion whose `kind === "guard"` is counted as `guarded` and
+    `continue`d BEFORE the head-versus-base proof run (W1-T4419). Two more readers skip a guard: `proofGrepAlreadyTrueViolations`
+    (src/lib/task-linter.ts, the filing-time `proof-grep-already-true` lint) and `proof-base-stale.ts`. So a builder whose proof passes
+    at both head and base (the exact shape proof-discrimination exists to refuse) can add one line to its own record and be exempt,
+    with nothing in Rule 15 objecting. The standing rule is that a builder may not edit a criterion to match the diff; Rule 15 is
+    that rule's enforcement (W1-T58, widened to appends by W1-T400 and to block scalars by W1-T2909), and each of those earlier holes
+    was closed the same way: by naming the missing shape in this one function.
+
+    (3) WHICH OTHER FIELDS CHANGE HOW A CRITERION IS JUDGED. I read every criterion-level key any judge reads
+    (`grep -rhoE '\b(c|criterion|crit|entry)\.(\w+)'` over review.ts, task-linter.ts, proof-base-stale.ts, the gate script and plan.ts;
+    the only criterion keys that appear are claim, proof, satisfied_by, holdout, kind), then decided each on whether an edit
+    changes a VERDICT or an EXEMPTION:
+      - `kind`: EXEMPTS from the discrimination gate and two lints (above). Protect it.
+      - `holdout`: does NOT change judging. src/lib/review.ts folds a holdout criterion into `state` IDENTICALLY to a visible one
+        ('visible and holdout fold into `state` identically above', in `judgeReview`), and it is worker-hidden only through
+        `visibleCriteria` (src/lib/plan.ts) plus a separate per-run `rewardHackingGap` measurement that is 'never a gate'. The repo
+        already treats it as decorative to a contract's meaning: `taskContractRevision` (src/run-task.ts) excludes it, where
+        `taskRulingPin` (src/lib/task-linter.ts) includes it because that pin guards a different thing (machine-authored
+        execution authority). Adding or removing `holdout: true` exempts a criterion from nothing. LEAVE IT OUT; protecting it would
+        refuse a legitimate operator amendment for no judging change.
+      - task-level `verify`, `risk`, `depends_on`, `retirement`, `files`: these decide DISPATCH ELIGIBILITY and sizing, not how a
+        criterion is judged, and each is already covered by its own control (the `risk_ruling` pin, `taskRulingPin`, the
+        merged-task field-change lint). Out of scope here, one concern per task.
+      - `status`, `attempts`, `note`, `rationale`, `design`, `falsifier`: bookkeeping and prose, edited legitimately on every
+        dispatch; they must stay outside the set (a control below pins that a status/attempts bump still passes).
+
+    (4) FILINGS STAY ALLOWED, AND THE PREDICATE NEED NOT KNOW "NEW RECORD". `criterionFieldTampered` is diff-derived ONLY and already
+    returns true for a whole NEW criterion (its `claim:`/`proof:` lines are added lines, W1-T400). The exemption for a filing is at the
+    CALLERS: `checkSatisfiedByGuard` passes when `meta.planOnly && meta.humanAuthored`, `judgeReview` sets `criteriaTampered` only when
+    `!planOnly`, `rule15SplitViolation` and `judgeRule15` pass a plan-only diff. A new record that declares its own `kind: guard` is
+    therefore ALREADY a tampered-true diff and is allowed exactly because it is a plan-only filing, so adding `kind` to the set
+    changes nothing for it, and the amendment class (an operator-authored plan-only PR, such as W1-T4902's amendment) is likewise
+    unchanged. The ONLY diffs whose verdict moves are those that carry a `kind:` line into a diff that is NOT a human plan-only one,
+    which is precisely the builder-edits-own-record case.
+
+    (5) MEASURED COST OF THE CHANGE. With the one-word change applied in a scratch tree, the probe flips to TRUE for the added, the
+    context-free added and the removed `kind:` diffs and stays FALSE for an `attempts` bump and for an added `holdout: true`; and
+    290 tests across test/rule15-*.test.ts, rule-15-16-filing-misattribution, a-rule-15-split-is-known-before-the-push,
+    the-rule-15-refusal-accuses-a-filing-of-tampering-and-names-no-remedy, golden-verdicts, a-guard-criterion-is-exempt-from-proof-discrimination,
+    review.test.ts, rubric-authorship-wiring, a-mixed-plan-and-source-diff-is-refused-before-push and enforcement-data-carveout
+    all pass (0 fail). Only three plan records carry a `kind: guard` line today (all in one merged shard, W1-T2951), so no existing
+    shard is disturbed.
+  design: |
+    (i) In `planTasksCriterionFieldLines` (src/lib/review.ts) the function-local `criterionFieldNames` gains `"kind"`, and the comment
+    above it (currently 'The three fields Rule 15 protects') is reworded to name the set by its reason: every key a judge reads to
+    EXEMPT a criterion or decide its verdict. `criterionFieldTampered`'s doc comment and `checkSatisfiedByGuard`'s `edit` message
+    gain the word `kind`. Nothing else in the predicate changes: the block-scalar walk and the fail-closed indentation arm already
+    apply to any name in the set.
+    (ii) THE SET IS NAME-BASED, LIKE THE OTHER THREE, NOT ACCEPTANCE-SCOPED. A `kind:` key outside an `acceptance:` block would also
+    trip. That is acceptable and stated: no task-level `kind` exists in the schema (`Task` in src/lib/plan.ts has none), and a hunk
+    that omits the `acceptance:` line must still be caught, which is why the existing fail-closed arm exists.
+    (iii) `holdout` IS DELIBERATELY NOT ADDED, and a test pins that decision by name so the next person who adds it sees the
+    reasoning (finding (3)) instead of re-deriving it.
+    (iv) NOT IN SCOPE, said plainly. (a) `taskRulingPin` does not include `kind` either, so a machine-authored `verify: auto` task
+    whose record gains `kind: guard` after its filing-time risk ruling does not invalidate the pin; that is W1-T3344's surface and
+    deserves its own task. (b) W1-T4419's design says plan.ts parses and validates `kind` and that an all-guard task is refused; in
+    origin/main src/lib/plan.ts has no `kind` handling (`grep -n kind src/lib/plan.ts` finds only `PlanError`'s own kind) and I found no
+    all-guards refusal anywhere in src/ or scripts/ (`grep -rn 'allGuard\|all.*guard'`), so a task whose every criterion is `kind: guard`
+    is not refused. That gap is a separate finding for the operator, not something this task fixes. (c) There is no derived census of
+    'protected fields equals judged fields'. The nearest pattern, test/the-ruling-pin-binds-execution-authority.test.ts, is a
+    hand-written table for a different predicate; this task adds the same shape (one table, decided per field) and does not build a
+    source-scanning census, because `kind` is not typed on `AcceptanceCriterion` for one to derive from.
+  acceptance:
+    - claim: "a diff that only adds `kind: guard` under an existing criterion trips criterionFieldTampered, the exact diff measured false before"
+      proof: 'grep: test("W1-T5031: a diff that only adds kind: guard under an existing criterion trips criterionFieldTampered" in test/rule-15-protects-the-criterion-kind-that-exempts-discrimination.test.ts'
+    - claim: "removing or changing a kind line, and a kind line with no acceptance context in the hunk, trip it too"
+      proof: 'grep: test("W1-T5031: a removed kind line and a context-free added kind line trip it too" in test/rule-15-protects-the-criterion-kind-that-exempts-discrimination.test.ts'
+    - claim: "a non-plan-only PR that adds kind: guard is refused by checkSatisfiedByGuard and by judgeReview as criteriaTampered"
+      proof: 'grep: test("W1-T5031: a builder PR that adds kind: guard to its own record is refused by the guard and the review" in test/rule-15-protects-the-criterion-kind-that-exempts-discrimination.test.ts'
+    - claim: "a plan-only human filing whose new record declares its own kind: guard still passes the guard, the preserved exemption"
+      proof: 'grep: test("W1-T5031: a plan-only human filing that declares its own kind: guard still passes" in test/rule-15-protects-the-criterion-kind-that-exempts-discrimination.test.ts'
+    - claim: "bookkeeping lines in a record (attempts, status) and an added holdout line still do not trip it, so the protected set is not over-widened"
+      proof: 'grep: test("W1-T5031: attempts and status bumps and an added holdout line do not trip it" in test/rule-15-protects-the-criterion-kind-that-exempts-discrimination.test.ts'
+    - claim: "the protected set is decided per field: claim, proof, satisfied_by and kind protected, holdout and status not"
+      proof: 'grep: test("W1-T5031: every criterion field that exempts a criterion from a gate is protected and holdout is not" in test/rule-15-protects-the-criterion-kind-that-exempts-discrimination.test.ts'
+    - claim: "the production predicate names kind in its protected set, so the pre-push refusal and the review read the same field list"
+      proof: 'grep: "satisfied_by", "kind"]) in src/lib/review.ts'
+  falsifier: |
+    Revert the one added name and the first, second and third tests redden (the predicate is false again for every `kind` diff)
+    while the preserved-filing, bookkeeping and per-field tests stay green, which is what shows the change moves only the `kind`
+    diffs. Add `"holdout"` to the set instead and the bookkeeping test and the per-field table redden. CLOSE IF an acceptance
+    criterion's `kind` is already protected by a check that is not `criterionFieldTampered` and refuses a builder's edit to it.
+  note: |
+    RISK: high because src/lib/review.ts is the reviewer and Rule 15's enforcement point, which the operator's brief puts in the high
+    band; the change is one set member plus comments, and it can only make the guard refuse MORE builder diffs, never fewer.
+    src/lib/review.ts carries a comment-load row in scripts/comment-load-baseline.json: keep the rewritten comment within the
+    existing row's budget and do not raise or delete it.
+    The fixture shape to copy is test/rule15-block-scalar-proof.test.ts (a synthetic multi-file diff string fed to
+    `criterionFieldTampered`, `checkSatisfiedByGuard` and `judgeReview`); the new suite must not edit it.
+    The `grep:` for the production proof is the literal tail of the new set, `"satisfied_by", "kind"])`, on ONE physical line; the
+    builder must keep the set on one line so the proof matches (an array wrapped by a formatter would not).
+    reservation hand-off: unknown -> file/gates-r5-1790812000000

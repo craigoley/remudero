@@ -11,8 +11,9 @@
  * branch or the head commit's `Remudero-Task:` trailer names) and the verdicts from `certainHeadRefusals`, which is
  * built on the reviewer's own resolver and executor and reports only what the reviewer is CERTAIN to refuse.
  *
- * TWO SEVERITIES, ON PURPOSE. A test-title miss BLOCKS: naming a test with the proof's exact title is always within a
- * worker's reach. A grep miss is REPORTED and does not block: a plan's grep can be wrong in a way the worker may not
+ * TWO SEVERITIES, ON PURPOSE. A test-title miss BLOCKS, and so does a `grep: test("<title>"` miss against a test file that
+ * exists (W1-T5026, #8156): naming a test with the proof's exact title is always within a worker's reach. Any other grep
+ * miss is REPORTED and does not block: a plan's grep can be wrong in a way the worker may not
  * edit (Standing rule 15), and refusing the push there would strand the task with no pull request at all, which is
  * worse than the review refusal it predicts.
  *
@@ -49,7 +50,7 @@ export function proofResolveVerdict({ diff, headRef, headMessage, resolveCriteri
   if (refusals.length === 0 && stale.length === 0) {
     return { exit: 0, lines: [`proof-resolve-precheck: OK -- ${criteria.length} ${taskId} criteria, none the reviewer is certain to refuse`] };
   }
-  const blocking = refusals.filter((r) => !/^grep:/.test(r.proof));
+  const blocking = refusals.filter((r) => r.blocking === true || !/^grep:/.test(r.proof));
   const lines = [];
   if (refusals.length > 0) {
     lines.push(
@@ -70,6 +71,8 @@ export function proofResolveVerdict({ diff, headRef, headMessage, resolveCriteri
     lines.push(
       "  TO FIX: a `unit test:` proof is matched as a LITERAL substring of a test NAME (test(\"...\") / it(\"...\")),",
       "  never of a comment or a file name. Rename or add the test so its title contains the proof text exactly.",
+      "  A `grep: test(\"<title>\"` proof ends at the closing quote: the test's title must end exactly there, or the",
+      "  operator must re-anchor the proof (a builder may not edit a criterion). Report the pattern defect, do not push.",
       "  Doing it now costs one edit; after the push it costs a CI cycle, a review and a fix round.",
     );
   } else {

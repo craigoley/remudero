@@ -1,0 +1,101 @@
+- id: W1-T5030
+  title: "A SWEEP PASS CLOSES EVERY PR WHOSE ONLY RED IS `proof-discrimination` AND WHOSE OBSERVED DIFF IS EMPTY, WITH NO PER-PASS BOUND — W1-T4957 (#8177) added `await deps.close(pr, reason)` to the stale-proof arm of `runSweep`, so one mis-observed empty `changedFiles` across N open PRs is N autonomous closes in one pass; cap it at 2 per pass, carry the rest to the next pass under a named stand-down reason that never falls through to the ci-log route, and declare the cap a PRIMARY CONTROL"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator ask 2026-09-30: W1-T4957 merged an autonomous close with no per-pass bound; bound it the way MERGE_PROBE_LIMIT bounds a probe"
+  plan_refs: [W1-T4957, W1-T1266, W1-T4914, W1-T1201]
+  files:
+    - src/lib/sweep.ts
+    - test/a-sweep-pass-caps-its-stale-proof-supersession-closes.test.ts
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T5030 — Every acceptance proof now holds on main, and did not when it was filed.
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 at origin/main 1f6d904bb by reading the merged code (bf1dc52c0, #8177) and its test, not from the brief.
+
+    (1) THE UNBOUNDED CLOSE. In `runSweep` (src/lib/sweep.ts) the `blocked-fixable` arm now computes
+    `staleProofs = proofDiscriminationEvidenceFromCheckLog(ciFailuresForFix)` (defined only when EVERY failing check is
+    `proof-discrimination` and its log tail says 'proof(s) pass at both PR head and merge base'). When
+    `staleProofs && pr.changedFiles?.length === 0` it builds a `superseded — the stale-proof red leaves nothing in this PR's
+    diff against main (...)` reason, sets `extraDisposedFields = { ..., stale_proof_superseded: true }`, runs
+    `await deps.close(pr, reason)` and `break`s. Nothing counts how many times that has happened this pass: the walk is a
+    plain loop over every open PR, and each PR that matches closes.
+
+    (2) WHAT A FALSE EMPTY DIFF COSTS. `changedFiles` is an observed field of `OpenPrView`: `[]` means 'GitHub listed no
+    changed files', `undefined` means 'not observed' (the code already distinguishes them with `?.length === 0`). A failed or
+    truncated files read that resolves to `[]`, or a base that moved so a whole stack reads empty, is one bad input, and the
+    red it combines with (a stale-proof proof-discrimination failure) is what a stacked child shows once its parent merges (#8177's own
+    log names 'the merged stack parent'). Everything
+    that gates the close is per-PR evidence read in the same pass from the same source, so the errors are CORRELATED: one
+    wrong read is many closes. A close is not cheaply reversible (the fleet's standing instruction is never to close and reopen a PR).
+
+    (3) THE HOUSE PATTERN. Bounds on an autonomous write exist here already and declare their kind: MERGE_PROBE_LIMIT
+    (src/lib/merge-probe.ts) is 'PRIMARY CONTROL on the git work one pass may spend; unprobed pairs carry over to the next
+    pass', and `MAX_ESCALATION_CLOSES_PER_CYCLE` (20) bounds the escalation closer so a backlog 'drains across several
+    sweeps, never one'. test/bound-kind-declared.test.ts refuses a new exported constant whose name contains MAX, CAP,
+    LIMIT, CEIL, BOUND, TIMEOUT or THRESHOLD unless its own line or the comment block directly above carries the literal
+    `BACKSTOP` or `PRIMARY CONTROL`.
+
+    (4) WHY 2 AND WHY PRIMARY CONTROL. The close is the normal, intended path for a stale stacked child, so the cap is what
+    normally limits the burst, not a last resort after another control has failed: PRIMARY CONTROL. I have not measured how
+    many such PRs one pass sees (W1-T4957 merged today, so there is no population yet); 2 is a starting value chosen so the
+    first wrong read costs at most two closes and a real backlog still drains in a few ticks. If the operator wants a
+    number from data, the first week of `stale_proof_superseded` rows on `sweep.disposed` prices it.
+  design: |
+    (i) `export const MAX_STALE_PROOF_CLOSES_PER_PASS = 2;` in src/lib/sweep.ts, its doc comment beginning 'PRIMARY CONTROL
+    on how many stale-proof supersession closes one sweep pass may make; a PR over the cap keeps its red and is re-derived
+    next pass.' A per-pass counter `let staleProofCloses = 0;` sits beside `pendingReviews`, before the PR walk.
+    (ii) In the stale-proof arm, BEFORE building the superseded reason: when `staleProofCloses >= MAX_STALE_PROOF_CLOSES_PER_PASS`
+    set `acted = false`, `standDownReason = `stale-proof supersession close deferred — ${MAX_STALE_PROOF_CLOSES_PER_PASS}
+    already made this pass; this PR carries to the next pass``, `extraDisposedFields = { ...extraDisposedFields,
+    stale_proof_close_deferred: true }`, and `break`. THE BREAK IS THE POINT: the deferred PR must not fall through to
+    `claimFixDispatch`/`dispatchFix`, because a ci-log worker cannot edit the stale proof and would spend a fix strike on
+    a PR this arm has already classified as superseded. Otherwise `staleProofCloses += 1` and the existing close runs
+    exactly as today; the counter counts ATTEMPTS, so a close that throws still spends its slot.
+    (iii) LEDGERED ON THE EXISTING ROW, NOT A NEW STEP. The deferral rides `sweep.disposed` as `stale_proof_close_deferred`
+    beside `stand_down_reason`, the way `stale_proof_superseded` already does. No new ledger step name is minted (a new
+    `appendLine` step needs a ledger-rotation census entry, which the `extraDisposedFields` doc in runSweep notes every
+    existing rider avoids). Like every stand-down, that row is written per PR per pass, so it reads as one named deferral per
+    pass, not a silent skip.
+    (iv) `--dry-run` is unaffected: `acted` is already forced false before this arm, so neither branch runs.
+    (v) NOT IN SCOPE: the routing to the proof-amendment lane (the non-empty-diff arm, unchanged), how `changedFiles` is
+    observed, and the choice of 2 beyond what (4) says.
+  acceptance:
+    - claim: "a pass closes at most the cap of stale-proof superseded PRs"
+      proof: 'grep: test("W1-T5030: a pass closes at most the cap of stale-proof superseded PRs" in test/a-sweep-pass-caps-its-stale-proof-supersession-closes.test.ts'
+    - claim: "a PR over the cap carries to the next pass with a named reason and is never routed to the ci-log worker"
+      proof: 'grep: test("W1-T5030: a PR over the cap carries with a named reason and never reaches the fix worker" in test/a-sweep-pass-caps-its-stale-proof-supersession-closes.test.ts'
+    - claim: "the carried PR is closed on the next pass"
+      proof: 'grep: test("W1-T5030: a carried PR is closed on the next pass" in test/a-sweep-pass-caps-its-stale-proof-supersession-closes.test.ts'
+    - claim: "a pass at or under the cap closes every stale-proof superseded PR, the W1-T4957 control preserved"
+      proof: 'grep: test("W1-T5030: a pass at the cap still closes every stale-proof superseded PR" in test/a-sweep-pass-caps-its-stale-proof-supersession-closes.test.ts'
+    - claim: "a stale-proof PR whose diff is not empty spends no slot of the cap"
+      proof: 'grep: test("W1-T5030: a stale-proof PR with a non-empty diff spends no close slot" in test/a-sweep-pass-caps-its-stale-proof-supersession-closes.test.ts'
+    - claim: "the deferral is recorded on the sweep.disposed row as a field, with no new ledger step"
+      proof: 'grep: test("W1-T5030: the deferral rides the disposed row and mints no new step" in test/a-sweep-pass-caps-its-stale-proof-supersession-closes.test.ts'
+    - claim: "the cap constant is read by the stale-proof arm, a production use"
+      proof: "grep: MAX_STALE_PROOF_CLOSES_PER_PASS in src/lib/sweep.ts"
+  falsifier: |
+    Delete the counter check and the first test reddens (three PRs, three closes); remove the `break` after the deferral and
+    the second test reddens (the deferred PR reaches `dispatchFix`). Make the counter count only successful closes and the
+    throwing-close case inside the first test reddens. The preserved-control test stays green under all three, which is what
+    shows the cap binds only above 2 and leaves W1-T4957's behaviour alone at or under it.
+  note: |
+    bound-kind census: a name containing MAX must declare its kind, and this one does in the doc comment above the `export
+    const`; do not rename it to dodge the scan. src/lib/sweep.ts carries a comment-load row
+    (scripts/comment-load-baseline.json); the change is one constant, one counter and one branch, so keep the doc comment
+    inside that row rather than raising or deleting it.
+    The existing test, test/a-red-proof-discrimination-check-reaches-proof-amendment.test.ts, is the fixture pattern (an
+    `OpenPrView` with `changedFiles: []`, a `close` dep recording calls); the new suite reuses its shape and must not
+    edit it.
+    RISK: high because this is the sweep's autonomous close path in src/lib/sweep.ts, which the operator's brief puts in the high band; the
+    change only ever closes FEWER PRs per pass than today.
+    reservation hand-off: unknown -> file/gates-r5-1790812000000

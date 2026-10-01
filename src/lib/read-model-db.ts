@@ -242,6 +242,22 @@ export function openReadModel(opts: ReadModelOpenOptions): ReadModelDb {
   return db;
 }
 
+/**
+ * Attaches a second connection to a store another connection already manages (the oracle's
+ * thread beside the projector's): no directory, no DDL, no quick_check and never a recovery, so it
+ * can never move a live file aside. Writes still go through a lease's fence.
+ */
+export function attachReadModel(path: string, schemaVersion: number): ReadModelDb {
+  const { DatabaseSync: Database } = require("node:sqlite") as typeof import("node:sqlite");
+  const db = wrap(new Database(path, { timeout: READ_MODEL_BUSY_TIMEOUT_MS }), path, schemaVersion, false);
+  const stored = db.meta("schema_version");
+  if (stored !== String(schemaVersion)) {
+    db.close();
+    throw new ReadModelError("schema_mismatch", `${path} holds schema ${stored}, expected ${schemaVersion}`, { path, stored });
+  }
+  return db;
+}
+
 export interface ReadModelLease {
   readonly name: string;
   readonly holder: string;

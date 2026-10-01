@@ -1,0 +1,115 @@
+- id: W1-T5035
+  title: "`rmd plan-reconcile` READS plan/tasks.d ONLY AND SAYS NOTHING ABOUT plan/tasks.yaml, SO 193 QUEUED RECORDS THERE ARE INVISIBLE TO IT AND PR #8193 HAD TO HAND-FLIP 14 OF THEM — the credit projection already covers those records (`defaultCreditedMergedIds` loads tasks.yaml through `loadPlan`), only the shard reader and writer stop at tasks.d; have the verb apply its OWN pure decision (`reconcilePlan`) to each tasks.yaml record read-only and print the queued count plus the ids it would have flipped, never writing tasks.yaml, whose header says it is never machine-rewritten"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-10-01: 14 shipped plan/tasks.yaml records (W1-T112 T115 T12a T144 T160 T178 T20c T245 T246 T25 T58 T65 T86 T96) could not be flipped by rmd plan-reconcile and were hand-flipped in #8193"
+  plan_refs: [W1-T3043, W1-T3084, W1-T4942, W1-T3970, W1-T2280, W1-T122, W1-T5034]
+  files: [src/run-task.ts, test/plan-reconcile-names-the-tasks-yaml-records-it-cannot-flip.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-01 at origin/main 2d82ea51d. THE SMALLER OF TWO OPTIONS, CHOSEN ON THE SOURCE.
+
+    (1) WHAT THE VERB DOES TODAY (src/run-task.ts). `planReconcileCommand` (24766) reads shards with `readPlanShards(shardDir)`
+    (24735; `plan/tasks.d/*.yaml`, one `- id:` per file) and writes each rewritten text back to the SAME path. It never opens
+    plan/tasks.yaml. CORRECTION OF THE BRIEF: the verb does NOT print "208 queued entries in tasks.yaml it can never touch";
+    `renderPlanReconcile` (24893) prints only the shard count and the `skipped:` breakdown of the SHARDS, and no source line
+    mentions tasks.yaml. The number came from the measuring agent's own count (it reproduces: 194 queued at this head, 208 before
+    #8193's 14 flips). The honest state is worse than the brief put it: the verb is SILENT about those records.
+
+    (2) THE POPULATION, my own script over plan/tasks.yaml at this head: 269 `- id:` records, no id duplicated and none also a
+    shard. Folding the verb's own pure `reconcilePlan` over them with every task treated as credited: 193 rewrites, skipped
+    `status-not-queued` 16, `retired` 46, `no-status-field` 14 (so 193 queued and not retired, the ceiling of what a read could
+    ever name). Every one of the 193 rewrites changes exactly ONE line of its record and the record's line count, which is the
+    property the shard path already relies on.
+
+    (3) THE CREDIT IS ALREADY COMPUTED FOR THEM. `defaultCreditedMergedIds` (24839) builds the plan with
+    `loadPlan(join(checkoutRoot, "plan", "tasks.yaml"))`, which merges tasks.yaml and tasks.d (src/lib/plan.ts, W1-T122), so the
+    credited-id Set already contains tasks.yaml tasks. Only `readPlanShards` and the write stop short. So the GAP is the reader
+    and writer, not the projection.
+
+    (4) WHY REPORT-ONLY AND NOT A WRITE, the smaller correct option. (a) plan/tasks.yaml's own header says "STATUS IS DERIVED FROM
+    GITHUB — this file is never machine-rewritten ... A YAML round-trip would destroy these comments and a machine writer would
+    race the human editor"; a 13,285-line hand-maintained file with 269 records is exactly that file. (b) Every record there has
+    the identical line `  status: queued`, so a write needs a position-keyed splice and a guard that the spliced line belongs to
+    the intended record; that is a new write path in the verb whose one-way property is its safety. (c) The read half alone
+    closes the defect named ("invisible"): an operator runs the dry run, sees the ids, and flips them with the same one-field edit
+    #8193 made. A report cannot flip a shard wrongly. A write can be a later task if the report proves worth automating.
+
+    (5) WHAT THE SCAN WINDOWS DO, AND WHY THIS TASK DOES NOT TOUCH THEM. `MERGE_SUBJECT_SCAN_LIMIT` is 5000 and
+    `MERGED_PATHS_SCAN_LIMIT` is 4000 (src/run-task.ts:37360, 37354). origin/main has 6,124 first-parent commits, and the merge
+    commits of the 14 sit at first-parent positions 5,556-6,013 (W1-T160 #853 at 5556; T178 #423 at 5813; T112 #491 at 5777;
+    T115 #279 at 5917; T96 #187 at 5952; T25 #170 at 5957; T20c #134 at 6004; T65 #122 at 6013; T58 #635 at 5678; T246 #697 at
+    5653; T245 #651 at 5670; T12a #725 at 5627; T86 and T144 not located by subject). All are past BOTH windows, so their credit
+    rows read `creditIsImplementation: undefined`/`creditHasBuildDiff: undefined` and `creditIsReconcilable` declines them: THE
+    REPORT THIS TASK ADDS WILL NOT NAME THEM, it will count them in the queued total. That is the stated limit, not a hidden one.
+    RAISE vs REPORT: neither belongs here. The windows are cost backstops (a whole-history `git log --first-parent --name-only`
+    measured 1.67 s at -n 4000 and 1.48 s at -n 8000 here, so cost is not what binds), but raising them changes WHICH shards
+    flip, in bulk, across the whole old plan; that is a credit-semantics decision with its own preserved controls, and
+    "report as outside the window" needs the candidate rows, not the id Set this verb receives. File it separately; it is the
+    task that actually lets these 14 flip without a hand edit.
+  design: |
+    (i) src/run-task.ts: `readInlinePlanRecords(planPath)` splits `plan/tasks.yaml` at each line matching `^- id: ` into
+    `{ taskId, text }`, the same record shape `readPlanShards` returns. A file that does not exist returns `undefined` (a
+    `--plan` fixture directory with no sibling monolith has nothing to report). A file that exists and cannot be read THROWS.
+    (ii) `PlanReconcileDeps` gains `readInlineRecords?: () => Array<{ taskId: string; text: string }> | undefined`, default
+    `() => readInlinePlanRecords(join(dirname(shardDir), "tasks.yaml"))`.
+    (iii) `planReconcileCommand`, AFTER `credited` is read and the shard decision is made, folds the SAME pure `reconcilePlan`
+    over the inline records with `(id) => credited.has(id)`. Its `writes` are DISCARDED, never applied, in dry-run and under
+    `--write` alike; only `summary.rewritten` (the creditable ids) and `summary.skipped["not-credited-merged"]` are read. The
+    queued total is their sum, so a retired, merged or field-less record is never counted or named.
+    (iv) `renderPlanReconcile(summary, write, inline?)` gains an optional third argument and, ONLY when the queued total is
+    non-zero, appends one block: `plan/tasks.yaml is read-only to this verb (it is never machine-rewritten): <N> queued record(s)
+    outside the reconcile; <K> credited merged: <ids>` followed, when K > 0, by `flip these by hand in a plan-only PR`. With K =
+    0 only the count is printed. With no inline records, or none queued, the output is BYTE-IDENTICAL to today's.
+    (v) An unreadable tasks.yaml prints `plan/tasks.yaml: unreadable (<reason>), its queued records were not counted` and the verb
+    carries on: exit codes are unchanged (0 read fine, 1 thrown projection, 2 unreadable shards), because this is an additional
+    report and must never turn a working reconcile into a failure; but it is NEVER rendered as "no records".
+    (vi) The `plan.reconcile` ledger row gains `inline_queued` and `inline_creditable` (counts only).
+    (vii) NOT IN SCOPE: any write to plan/tasks.yaml; the two scan windows; the unreadable-GitHub-read abort (the W1-T5029 draft);
+    `buildCreditCandidates` (W1-T5034).
+  acceptance:
+    - claim: "a dry run names the credited queued plan/tasks.yaml records and counts the queued total, writing nothing"
+      proof: 'grep: test("W1-T5035: a dry run names the credited monolith records it cannot flip" in test/plan-reconcile-names-the-tasks-yaml-records-it-cannot-flip.test.ts'
+    - claim: "a shard still flips under --write, no tasks.yaml byte is written, and the records are still named"
+      proof: 'grep: test("W1-T5035: --write flips a shard, writes no monolith byte and still names the records" in test/plan-reconcile-names-the-tasks-yaml-records-it-cannot-flip.test.ts'
+    - claim: "a retired, already-merged or status-less tasks.yaml record is never counted or named, so a retirement is never overwritten or reported as creditable"
+      proof: 'grep: test("W1-T5035: a retired or merged monolith record is never named as creditable" in test/plan-reconcile-names-the-tasks-yaml-records-it-cannot-flip.test.ts'
+    - claim: "with no queued tasks.yaml record, or no tasks.yaml at all, the output is byte-identical to before"
+      proof: 'grep: test("W1-T5035: with no queued monolith record the output is byte-identical to before" in test/plan-reconcile-names-the-tasks-yaml-records-it-cannot-flip.test.ts'
+    - claim: "records sharing identical status lines are decided by their own id, never by a global replace"
+      proof: 'grep: test("W1-T5035: a monolith record is decided by its own id so identical status lines never collide" in test/plan-reconcile-names-the-tasks-yaml-records-it-cannot-flip.test.ts'
+    - claim: "an unreadable tasks.yaml is reported as unreadable and never read as no records, and the exit code is unchanged"
+      proof: 'grep: test("W1-T5035: an unreadable monolith is reported and never read as no records" in test/plan-reconcile-names-the-tasks-yaml-records-it-cannot-flip.test.ts'
+    - claim: "the default reader splits the real plan/tasks.yaml into one record per id, none lost or merged"
+      proof: 'grep: test("W1-T5035: the default reader splits the real monolith into its records" in test/plan-reconcile-names-the-tasks-yaml-records-it-cannot-flip.test.ts'
+    - claim: "the inline reader has a production call site in the verb"
+      proof: "grep: readInlinePlanRecords( in src/run-task.ts"
+  falsifier: |
+    Apply the inline `writes` (drop the discard in design (iii)) and the `--write` test reddens on a changed tasks.yaml byte.
+    Count a retired record as queued and the retirement test reddens. Replace the per-record fold with one global
+    `text.replace(/^  status: queued/m, ...)` over the whole file and the identical-status-lines test reddens (the wrong record
+    is rewritten). Treat a thrown read as an empty list and the unreadable test reddens. Print the block unconditionally and the
+    byte-identical test reddens. BOTH directions are needed.
+  note: |
+    OVERLAP, NAMED: `planReconcileCommand` is also edited by the sibling drafts W1-T5029 (an UNKNOWN exit-2 arm placed right
+    after the projection read) and, in `buildCreditCandidates` below it, by W1-T5034. This task's block sits after the shard fold
+    and does not move either; expect a mechanical merge in src/run-task.ts in any order. `renderPlanReconcile`'s existing
+    callers pass two arguments and keep their exact output.
+    EXISTING PINS THAT MUST NOT MOVE: test/plan-reconcile-credit-parity.test.ts, test/the-plan-reconciler-runs-on-a-cadence.test.ts
+    and test/a-status-flip-is-not-a-task-edit.test.ts. The measurement-cadence rung reaches the verb's core through
+    `buildPlanReconcileProductionInput` with its own `readShards`, not through `planReconcileCommand`, so it is unaffected.
+    NOT VERIFIED HERE: whether the credit projection reports any of the 14 as credited-merged at a live board (the windows in
+    rationale (5) say it will not for the 12 located; that needs `gh`). #8193 flipped them on the satisfied-task census (every
+    proof passes at main), not on credit.
+    VOCABULARY: the tests call plan/tasks.yaml the monolith (the repo's own word, lib/plan.ts `planMonolith`) so no title carries a regex dot.
+    RISK: high because src/run-task.ts holds the reconcile write; this task adds no write and only reads a file it never opens
+    today.
+    reservation hand-off: unknown -> file/gates-r5-1790812000000

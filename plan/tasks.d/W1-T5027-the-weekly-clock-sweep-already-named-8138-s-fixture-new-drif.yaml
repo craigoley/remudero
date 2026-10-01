@@ -1,0 +1,117 @@
+- id: W1-T5027
+  title: "THE WEEKLY CLOCK SWEEP ALREADY NAMED #8138'S FIXTURE (NEW DRIFT, 2026-09-21) BUT THE ONE SERIAL JOB IS OUTGROWING ITS 30-MINUTE CAP — 25.5 MIN ON 09-21, CANCELLED AT 29 MIN 48 S ON 09-28 WITH THE DELIVERY STEP SKIPPED AND NO REPORT — SO THE INSTRUMENT GOES SILENT EXACTLY WHEN THE POPULATION GROWS; sweep the most recently touched suites first under an internal budget below the cap, and name every suite it did not reach"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: a named-constant date fixture (#8138) slipped past scripts/expiring-fixture-census.mjs and took every PR's coverage shard red at +14 days; add a dynamic scan"
+  plan_refs: [W1-T1128, W1-T1104, W1-T3276, W1-T3030, W1-T4948, W1-T2897]
+  files:
+    - scripts/clock-sweep.mjs
+    - test/a-clock-sweep-reaches-its-newest-suites-inside-its-budget.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 at origin/main 1f6d904bb. THE DYNAMIC SCAN THE OPERATOR ASKED FOR ALREADY EXISTS, AND IT DID NAME
+    THE #8138 FIXTURE; THIS TASK DOES NOT BUILD A SECOND ONE. `scripts/clock-shift.mjs` is the preload (FK_SHIFT_DAYS shifts
+    the no-arg `Date.now()` and `new Date()`, leaves `Date.parse`, `Date.UTC`, performance.now and timers alone);
+    `scripts/clock-sweep.mjs` derives the candidate population and runs ONE FILE PER INVOCATION at +400 days;
+    `.github/workflows/clock-sweep.yml` runs it every Monday 05:23Z; `classifySweep` already flags a NEW drifting suite at
+    any count (W1-T3276). An RMD_TEST_CLOCK_SKEW_DAYS preload, a time-bomb-scan script and a second weekly job would each
+    duplicate one of those.
+
+    (1) THE INSTRUMENT SEES THE BOMB, AND SAW IT. The fixture (`const RECENT = "2026-09-16T18:50:00Z"`, `lastActivityAt:
+    RECENT`, no `now`) landed in #5831 on 2026-09-17T01:55Z. It is in `deriveCandidates()` (468 candidates today; the
+    regexes key on `lastActivityAt` and any date literal, so a named constant is no obstacle, the one shape the static
+    census cannot see). Replayed on the pre-fix file (bfc69ee68^) with `FK_SHIFT_DAYS=<n> node --test --import tsx
+    --import $PWD/scripts/clock-shift.mjs`: 16 pass / 0 fail at -12 and -8 days, 8 fail at 0 (today), +7 and +400. The
+    scheduled run of 2026-09-21 (run 35590593553, sweep step 10:47:41 to 11:13:10) printed `NEW DRIFT - 7 suite(s) NOT in
+    scripts/clock-sweep-baseline.json's recorded set` with test/a-verdict-is-reused-when-nothing-it-judged-changed.test.ts
+    FIRST in the list, nine days before main went red.
+
+    (2) IT WAS DELIVERED AS A COMMENT ON A LONG-LIVED THREAD AND NO FIX LANDED FOR NINE DAYS. The step 'Open or update a needs-human issue on
+    drift' printed `commented on existing issue #5513`: that issue was opened 2026-09-14 (label `backlog`, 4 comments,
+    last updated 09-24, still open), because needs-human-issue.mjs keys ONE thread per `--source clock-sweep`. A new
+    suite is a new comment, not a new escalation. That delivery defect is real and is a FOLLOW-UP here (it needs a workflow
+    edit and a per-suite source key); it is NOT this task. Also measured, in the 09-14 report that opened #5513: 3 of its
+    7 'drifting' suites (serve.density-ia, serve.live-state, console-shell-client) fail for `browserType.launch: Executable
+    doesn't exist` (the job never runs `npx playwright install`), a failure at +0 days that the sweep reports as clock drift
+    with a 'fails by +7 days' fuse. A second FOLLOW-UP, not this task.
+
+    (3) THE RUN THAT FOLLOWED NEVER FINISHED. Scheduled runs of clock-sweep.yml (9 total): 09-07 success, 09-14 failure,
+    09-21 failure (sweep step 25 min 29 s), 09-28 CANCELLED: sweep step 05:34:37 to 06:04:25 (29 min 48 s, the job's
+    `timeout-minutes: 30`), and 'Open or update a needs-human issue on drift' is `if: failure()`, so it was SKIPPED (a
+    cancelled job is not a failure). No report, no fuse bisection, no comment. The candidate count went 326 (09-14,
+    per #5513's captured output) to 468 today; the script header still says 'all 42 candidates' and the workflow comment
+    says a sweep 'completes in ~10-11 minutes'. A cancelled instrument reports the same thing whether the suites are clean
+    or on fire: the repo's 'a silence reads as success' defect.
+
+    (4) WHAT THIS TASK DELIBERATELY DOES NOT DO. It does not add concurrency, shards or a matrix job (that is the
+    structural fix, and it needs a workflow edit plus a decision about ledger and port collisions under parallel
+    shifted runs: FOLLOW-UP, stated explicitly), does not add a workflow file, does not change `AGE_SURFACE_RE`, the
+    ceiling, the ladder or the +400 shift, and does not touch `scripts/expiring-fixture-census.mjs` (its static
+    detector remains blind to a named constant; the sweep, not the census, is the catch for that shape).
+    CLAUDE.md's clock-signature census walks `src/` only (scripts/clock-signature-ratchet.mjs, `join(root, "src")`), so
+    scripts/ and test/ are outside it; no bare `Date.now()` is added to src/run-task.ts.
+  design: |
+    (i) `orderNewestFirst(suites, touchedAt)` (scripts/clock-sweep.mjs), pure: sort by the last commit time of the
+    suite's test file, newest first, ties and unknown files by name. `touchedAt` is an injected
+    `() => Map<suite, epochSeconds>`; the default reads ONE `git log --format=%ct --name-only -- test/` (the workflow
+    checks out with fetch-depth 0). If the read fails the order is the existing name order AND the report says
+    'order: name (git history unreadable)' — never a silent fallback.
+    (ii) `SWEEP_BUDGET_MS` (PRIMARY CONTROL on how long one sweep may spend running suites, declared as such in its
+    doc comment; set to 27 minutes, under the workflow's 30-minute timeout-minutes, which stays the BACKSTOP). `main`
+    takes an injected `now` (default Date.now, real because the sweep's own process clock is never shifted: only the
+    child gets the preload) and checks the budget BEFORE starting each suite.
+    (iii) When the budget runs out, the remaining suites are not run and are NAMED: `UNREACHED — N suite(s) not run
+    inside the 27-minute budget (oldest-touched last): <first ten> + M more`, and `ok` is false, so the workflow's
+    `if: failure()` delivery fires. A sweep that reaches every suite prints no such section and behaves exactly as today.
+    `classifySweep` is unchanged: an unreached suite is not a pass and not a drift, so it is a third value the summary
+    carries (`unreached`), never folded into `immune`.
+    (iv) The report's existing header lines are kept; one line is added: `order: newest-touched first`.
+    (v) ONE test really shells out for the default `touchedAt` seam against a throwaway git repo with two commits
+    (CLAUDE.md coverage trap: a default seam every test fakes is unreachable), and an in-process test drives `main` with
+    an injected clock, runner and derive, as test/clock-sweep.test.ts already does.
+  acceptance:
+    - claim: "the most recently touched suites run first, so a fixture added this week is swept before any old suite"
+      proof: 'grep: test("W1-T5027: the newest-touched suite is swept first" in test/a-clock-sweep-reaches-its-newest-suites-inside-its-budget.test.ts'
+    - claim: "a sweep that exhausts its budget stops, names every suite it did not reach, and fails so the delivery step fires"
+      proof: 'grep: test("W1-T5027: a sweep that exhausts its budget names the suites it did not reach and fails" in test/a-clock-sweep-reaches-its-newest-suites-inside-its-budget.test.ts'
+    - claim: "a sweep that finishes inside its budget reports no unreached section and passes as before, the positive control"
+      proof: 'grep: test("W1-T5027: a sweep inside its budget reaches every suite and reports none unreached" in test/a-clock-sweep-reaches-its-newest-suites-inside-its-budget.test.ts'
+    - claim: "an unreadable git history falls back to name order and the report says so"
+      proof: 'grep: test("W1-T5027: unreadable git history falls back to name order and says so" in test/a-clock-sweep-reaches-its-newest-suites-inside-its-budget.test.ts'
+    - claim: "a suite that stamps a named date constant into an age field is in the derived population, the #8138 shape"
+      proof: 'grep: test("W1-T5027: a named-constant date fixture is in the derived population" in test/a-clock-sweep-reaches-its-newest-suites-inside-its-budget.test.ts'
+    - claim: "the default touched-at seam reads real git history from a throwaway repository"
+      proof: 'grep: test("W1-T5027: the default touched-at seam reads real git history" in test/a-clock-sweep-reaches-its-newest-suites-inside-its-budget.test.ts'
+    - claim: "the sweep reads its budget, a production use of the new constant"
+      proof: "grep: SWEEP_BUDGET_MS in scripts/clock-sweep.mjs"
+  falsifier: |
+    Remove the budget check and the second test reddens (the sweep runs past its budget and names nothing); keep the
+    check but skip the ordering and the first test reddens (the newest suite is swept last, so it is the one a budget
+    cuts). Change the exit to 0 on unreached and the second test reddens on the exit code. The positive control (third
+    test) stays green in all three, which is what shows the bound fires only on exhaustion.
+  note: |
+    COMMENT-LOAD CEILING: scripts/clock-sweep.mjs sits at 153 of 153 comment lines in scripts/comment-load-baseline.json, so
+    this edit must REMOVE as many comment lines as it adds (the SWEEP_BUDGET_MS doc comment and the UNREACHED block included);
+    never raise the row. W1-T5033 also edits this file with a comment-neutral change; merge order between them is free.
+    RISK BAND: `high` / `band_meaning: span` is Rule 19 SIZING (the script and its new suite read as two subsystems at `medium`),
+    not danger: a scripts-only change to a weekly non-required job.
+    THE DECISION THIS BUYS, stated for the operator: at today's population the budget WILL fire every week (the last
+    two full runs were 25.5 and more than 29.8 minutes), so the sweep goes red and names its oldest-touched tail until
+    the structural follow-up (concurrency or shards, plus a workflow edit, plus a scheduled re-measure of the +400d
+    run time) lands. That is the honest state of the instrument: today it is silent. The budget is sized ABOVE the 09-21
+    runtime so it is a backstop for growth, not a bound that fires on the healthy size (this repo's recurring defect);
+    if the operator reads 27 minutes as too tight, the constant is the one edit.
+    scripts/ changes are diff-coverage-gated in CI even though `rmd preflight`'s scoped check says 'nothing to prove' on a
+    scripts-only diff: run `npm run diff-coverage:local -- <tests>` on a committed tree and confirm
+    `grep -c '^SF:scripts/clock-sweep.mjs$' <lcov>` is non-zero. Editing scripts/clock-sweep.mjs also fires
+    clock-sweep.yml's own pull_request trigger (paths include scripts/clock-sweep.mjs): that run is not required and
+    will take the full sweep.
+    reservation hand-off: unknown -> file/gates-r5-1790812000000
