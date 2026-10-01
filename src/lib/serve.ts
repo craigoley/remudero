@@ -205,6 +205,7 @@ import { loadConfig, type WorkerProviderId } from "./config.js";
 import type { Config, ModelApproval } from "./config-schema.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { createServeDrain, exitWithin } from "./serve-drain.js";
+import { githubAuthProbe, gatewayPrimedProbe, planLoadedProbe, readModelWarmProbe, type ReadinessProbe } from "./serve-generation.js";
 import type { ConsoleProjectionWorker, FeedbackProjectionInput } from "./console-projection-worker.js";
 import { createConsoleSnapshotStore } from "./console-snapshot-store.js";
 import {
@@ -394,6 +395,7 @@ export interface ServeDeps {
   /** W1-T4229: defaults to {@link assessGatewayCheckout} over {@link serveRepoDir}. */
   gatewayCheckout?: () => Promise<GatewayCheckoutAssessment>;
   staleExitSeams?: Pick<StaleCodeExitDeps, "scheduleRecheck" | "exit" | "drain">;
+  generation?: { requestHandoff(detail: Record<string, unknown>): void };
   /**
    * W1-T288: GET /v1/control/status's daemon-liveness verdict deps (injectable ledger reader /
    * clock / liveness bound — see panel-actions.ts's `ControlStatusDeps` for each field's real
@@ -1464,6 +1466,7 @@ export interface StaleCodeExitDeps {
   drain?: () => Promise<void>;
   changedPathsSince?: ChangedPathsReader;
   reloadPlan?: (ref: string) => Promise<boolean>;
+  requestHandoff?: (detail: Record<string, unknown>) => void;
 }
 /** What {@link gateStaleCodeExit} hands back — a wrapper for the console's ONE SSE route and a
  *  wrapper for each HIGH-tier write route, both feeding the SAME internal decision. */
@@ -1479,6 +1482,7 @@ export interface StaleCodeExitGate {
   /** What the cadence runs; resolves once its checkout read has landed and been acted on. */
   recheck(): Promise<void>;
   stop(): void;
+  handover(reason: string): Promise<void>;
 }
 /**
  * W1-T2229 design: the console notices its OWN code is stale and ends its own process — at a
@@ -1544,6 +1548,8 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   let staleSince: number | undefined;
   let checkout: GatewayCheckoutAssessment | undefined;
   let exiting = false;
+  let handoffAsked: string | undefined;
+  let exited: Promise<void> | undefined;
   let dirtyReported: string | undefined;
   const readChangedPaths = deps.changedPathsSince ?? ((boot, target) => changedPathsSince(boot, target, serveRepoDir()));
   const relevance = new Map<string, boolean | "pending">();
@@ -1602,13 +1608,13 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
     const commitsBehind = localBehind === undefined && originBehind === undefined ? undefined : (localBehind ?? 0) + (originBehind ?? 0);
     const lastRead = deps.lastReadAt?.();
     const msSinceLastRead = lastRead === undefined ? undefined : Math.max(0, clock.now() - lastRead);
-    const patienceMs = consoleRecyclePatienceMs(clients, commitsBehind, msSinceLastRead);
+    const patienceMs = deps.requestHandoff ? 0 : consoleRecyclePatienceMs(clients, commitsBehind, msSinceLastRead);
     const staleForMs = clock.now() - staleSince;
     // Somebody is watching and the backlog has not yet earned the interruption. The re-check
     // below keeps asking, and the backlog grows on its own — which is what turns a watched
     // console from "never" into "soon enough" without ever reading a threshold.
     if (staleForMs < patienceMs) return;
-    log("serve.stale_code_exit", {
+    const decision = {
       bootSha: deps.bootSha,
       currentSha,
       clients,
@@ -1618,20 +1624,36 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
       patienceMs,
       msSinceLastRead,
       ...(checkoutBehind ? { reason: "checkout_behind", checkout: checkout?.state } : {}),
-    });
+    };
+    if (deps.requestHandoff) {
+      const key = `${currentSha} ${originBehind ?? ""}`;
+      if (key === handoffAsked) return;
+      handoffAsked = key;
+      log("serve.handoff_requested", decision);
+      return deps.requestHandoff(decision);
+    }
+    log("serve.stale_code_exit", decision);
+    void drainThenExit();
+  };
+  // exit(0): unless-stopped restarts it and entrypoint.sh's sync_tree fast-forwards the clone.
+  const drainThenExit = (): Promise<void> => {
+    if (exited) return exited;
     exiting = true;
     stopRecheck();
-    // exit(0): unless-stopped restarts it and entrypoint.sh's sync_tree fast-forwards the clone.
     const finish = (): void => {
       deps.beforeExit?.();
       exit(0);
     };
-    if (!deps.drain) return finish();
-    deps.drain().then(finish, (err: unknown) => {
+    if (!deps.drain) {
+      finish();
+      return (exited = Promise.resolve());
+    }
+    exited = deps.drain().then(finish, (err: unknown) => {
       // A failed drain still ends in the restart it was preparing; the reason is kept.
       log("serve.drain_failed", { reason: err instanceof Error ? err.message : String(err) });
       finish();
     });
+    return exited;
   };
   const noteCheckout = (next: GatewayCheckoutAssessment): void => {
     checkout = next;
@@ -1671,6 +1693,10 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
     checkout: () => checkout?.state,
     recheck,
     stop: stopRecheck,
+    handover: (reason) => {
+      log("serve.handover_drain", { reason, bootSha: deps.bootSha });
+      return drainThenExit();
+    },
     wrapSse(route) {
       return {
         ...route,
@@ -3025,6 +3051,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       return drained.then(() => {});
     },
     reloadPlan: (ref) => reloadServePlan(deps.board, serveRepoDir(), ref, { log: deps.log }),
+    ...(deps.generation ? { requestHandoff: (detail: Record<string, unknown>) => deps.generation?.requestHandoff(detail) } : {}),
     ...deps.staleExitSeams,
   });
   // THE CLOCK PORT, never the legacy signature. clock-signature-census ratchets that shape per
@@ -3122,16 +3149,27 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   });
   server.once("listening", liveAnalyticsCache.start);
   server.on("close", liveAnalyticsCache.stop);
-  server.on("close", watchInstanceLiveness({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ledgerPath: deps.ledgerPath, log: deps.log, ...deps.instances }));
-  const stopIncidentInvariants = startIncidentInvariantsMonitor(deps.ledgerPath, {
-    ...deps.incidentInvariants,
-    log: deps.log,
+  const startLedgerWriters = (): void => {
+    server.on("close", watchInstanceLiveness({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ledgerPath: deps.ledgerPath, log: deps.log, ...deps.instances }));
+    server.on("close", startIncidentInvariantsMonitor(deps.ledgerPath, { ...deps.incidentInvariants, log: deps.log }));
+  };
+  if (deps.generation) server.setMaxListeners(server.getMaxListeners() + 1).once("listening", startLedgerWriters);
+  else startLedgerWriters();
+  const githubAuth = { settled: routeAssembly.githubAppReady === undefined };
+  void routeAssembly.githubAppReady?.then(() => (githubAuth.settled = true));
+  serveGenerations.set(server, {
+    handover: (reason) => staleExit.handover(reason),
+    probes: [planLoadedProbe(() => deps.board.plan, consoleSha), githubAuthProbe(() => githubAuth.settled), gatewayPrimedProbe(github), readModelWarmProbe(readModel)],
   });
-  server.on("close", stopIncidentInvariants);
   return { server, githubAppReady: routeAssembly.githubAppReady };
 }
 
 const serveReadModels = new WeakMap<Server, ReadModelWorkerHandle>();
+const serveGenerations = new WeakMap<Server, { handover: (reason: string) => Promise<void>; probes: ReadinessProbe[] }>();
+
+export function serveGeneration(server: Server): { handover: (reason: string) => Promise<void>; probes: ReadinessProbe[] } | undefined {
+  return serveGenerations.get(server);
+}
 
 export function readModelInstances(deps: Pick<ServeDeps, "ledgerPath" | "questionsRoot" | "instances" | "assistantRepository"> & { panelGraph?: Pick<ServeDeps["panelGraph"], "planPath"> }): ReadModelInstance[] {
   const core = { name: deps.instances?.coreInstance ?? CORE_INSTANCE, ledgerDir: dirname(deps.ledgerPath), feedbackRoot: deps.questionsRoot,
