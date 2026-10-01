@@ -1272,18 +1272,14 @@ export interface EscalationLinkDeps {
    *  shifts, so a test can drive the check-then-act window deterministically — the losing arm
    *  is otherwise reachable only by a real race between two taps. */
   readonly consume?: (root: string, signature: string) => boolean;
-  /** Where GET /v1/escalation/confirm counts its refusals (W1-T5057); absent, the route keeps its own. */
   readonly refusals?: LinkRefusalRollup;
 }
 
-/** How often held confirm refusals become ledger rows: one row per (escalation, reason) per window. */
 export const LINK_REFUSAL_ROLLUP_MS = 60 * 60_000;
-/** BACKSTOP: distinct (escalation, reason) keys held between flushes. The route is unauthenticated, so
- *  a crawler inventing escalation ids must not grow serve's heap; past this, refusals fold into one key. */
+/** BACKSTOP: keys held per window; the route is unauthenticated, so invented escalation ids past this fold into one. */
 export const LINK_REFUSAL_ROLLUP_MAX_KEYS = 1_000;
 
-/** Confirm-page refusals held in memory, so the GET writes nothing (W1-T5057). Each window flushes one
- *  `escalation.link_refused_rollup` row per (escalation, reason); serve flushes the rest at exit. */
+/** Confirm refusals held in memory (W1-T5057): one `escalation.link_refused_rollup` row per (escalation, reason) per window. */
 export interface LinkRefusalRollup {
   record(escalationId: string, reason: string, detail: string): void;
   flush(): void;
@@ -1377,9 +1373,7 @@ export function buildEscalationLinkConfirmRoute(deps: PanelActionDeps, linkDeps:
         existsSync(escalationLinkUsedPath(linkDeps.root, sig)),
       );
       if (!check.ok) {
-        // `bad-request` is NOT counted: a malformed query is an unauthenticated probe. The other
-        // three imply a real link existed; they are held and ledgered as an hourly rollup row, so a
-        // repeated GET (a crawler retrying a stale link) appends nothing.
+        // A malformed query is not counted; the rest are held and ledgered hourly, so a repeated GET appends nothing.
         if (check.reason !== "bad-request") refusals.record(query.get("e") ?? "unknown", check.reason, check.detail);
         sendHtml(res, check.reason === "forged" ? 403 : 410, `<p>This link cannot be used: ${esc(check.detail)}</p>`);
         return;
