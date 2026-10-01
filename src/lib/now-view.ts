@@ -441,6 +441,7 @@ export function createNowView(opts: NowViewOptions): {
   version: number;
   materialize(ctx: NowViewContext): Array<{ key: string; data: NowViewData; sources: ViewSource[] }>;
   legacy(key: string, now: number, view: unknown): NowShadowLegacy | undefined;
+  perInstance: true;
 } {
   const clock = opts.clock ?? systemClock;
   const log = opts.log ?? (() => {});
@@ -514,6 +515,7 @@ export function createNowView(opts: NowViewOptions): {
   return {
     name: NOW_VIEW_NAME,
     version: NOW_VIEW_VERSION,
+    perInstance: true,
     /**
      * The shadow comparator's legacy side for one key: GET /v1/status's board and PR queue over the
      * instance's LIVE FILE only, plus a fresh host probe of that instance. The probe's gauges are taken
