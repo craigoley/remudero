@@ -98,7 +98,7 @@ test("coverage entry runs CI's four shard selectors, then merges the shard raw c
   const fixtureRoot = coverageFixtureRoot();
   const { calls, spawn, cleanup } = coverageSpawn(fixtureRoot);
   try {
-    const result = runCiParity(fixtureRoot, { spawn });
+    const result = runCiParity(fixtureRoot, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
 
     const selectorCalls = calls.filter((c) => selectorShardNumber(c.args) !== undefined);
     assert.deepEqual(
@@ -149,7 +149,7 @@ test("nested parity cannot erase an outer run's raw coverage shards", () => {
   writeFileSync(sentinel, "{}\n");
   process.env.TMPDIR = scratch;
   try {
-    const result = runCiParity(fixtureRoot, { spawn });
+    const result = runCiParity(fixtureRoot, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
     assert.equal(result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage")?.ok, true);
     assert.equal(existsSync(sentinel), true, "a nested run must not clear already-produced outer coverage");
     for (const call of calls.filter((c) => shardNumber(c.args) !== undefined)) {
@@ -168,7 +168,7 @@ test("coverage entry refuses a partial shard artifact set before merge or covera
   const fixtureRoot = coverageFixtureRoot();
   const { calls, spawn, cleanup } = coverageSpawn(fixtureRoot, { missingArtifactShard: 3 });
   try {
-    const result = runCiParity(fixtureRoot, { spawn });
+    const result = runCiParity(fixtureRoot, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
     const coverage = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage")!;
 
     assert.equal(coverage.ok, false);
@@ -186,7 +186,7 @@ test("coverage entry refuses an empty duration-balanced selector before spawning
   const fixtureRoot = coverageFixtureRoot();
   const { calls, spawn, cleanup } = coverageSpawn(fixtureRoot, { emptySelectionShard: 3 });
   try {
-    const result = runCiParity(fixtureRoot, { spawn });
+    const result = runCiParity(fixtureRoot, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
     const coverage = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage")!;
 
     assert.equal(coverage.ok, false);
@@ -202,7 +202,7 @@ test("coverage entry refuses a shard with no # tests summary as unverified", () 
   const fixtureRoot = coverageFixtureRoot();
   const { calls, spawn, cleanup } = coverageSpawn(fixtureRoot, { missingSummaryShard: 2 });
   try {
-    const result = runCiParity(fixtureRoot, { spawn });
+    const result = runCiParity(fixtureRoot, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
     const coverage = result.steps.find((s) => s.name === "coverage-ratchet:test-with-coverage")!;
 
     assert.equal(coverage.ok, false);
@@ -244,7 +244,7 @@ test("W1-T4951: a second parity gate cannot reuse the active scratch", () => {
   const lock = coverageGateLockDir(root);
   mkdirSync(lock);
   try {
-    const result = testWithCoverageLeaf(root, spawn, join(root, "coverage", "lcov.info"));
+    const result = testWithCoverageLeaf(root, spawn, join(root, "coverage", "lcov.info"), () => Number.MAX_SAFE_INTEGER);
     assert.equal(result.ok, false);
     assert.match(result.detail, /another local gate owns/);
     assert.equal(calls.length, 0);
@@ -260,7 +260,7 @@ test("W1-T4951: missing compact shard refuses the merged coverage gate", () => {
   const root = coverageFixtureRoot();
   const { calls, spawn, cleanup } = coverageSpawn(root, { missingCompactShard: 3 });
   try {
-    const result = testWithCoverageLeaf(root, spawn, join(root, "coverage", "lcov.info"));
+    const result = testWithCoverageLeaf(root, spawn, join(root, "coverage", "lcov.info"), () => Number.MAX_SAFE_INTEGER);
     assert.equal(result.ok, false);
     assert.match(result.detail, /expected compact V8 coverage for shard 3/);
     assert.equal(calls.some((call) => call.args.includes("--output")), false);

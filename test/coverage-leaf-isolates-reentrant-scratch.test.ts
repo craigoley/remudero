@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { defaultPreflightSpawn, type PreflightSpawn } from "../src/lib/commit-message.js";
 import { CI_PARITY_TABLE, coverageScratchDir } from "../src/lib/ci-parity.js";
+import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PINNED_BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -24,14 +25,16 @@ function coverageSpawn(
     }
     if (args.includes("--experimental-test-coverage")) {
       onShardTmp(opts?.env?.TMPDIR);
-      return { status: failShard ? 1 : 0, stdout: "", stderr: "" };
+      if (failShard) return { status: 1, stdout: "", stderr: "fixture shard failed" };
     }
+    const coverage = coverageParitySpawnResult(file, args, opts);
+    if (coverage) return coverage;
     return { status: 0, stdout: "", stderr: "" };
   };
 }
 
 test("nested coverage runs isolate scratch without deleting the parent TMPDIR", () => {
-  const repoRoot = mkdtempSync(join(tmpdir(), "rmd-reentrant-coverage-"));
+  const repoRoot = mkdtempSync(join(tmpdir(), "r-"));
   const parentTmp = coverageScratchDir(repoRoot);
   const activeTmpAlias = join(repoRoot, "scratch-alias");
   const sentinel = join(parentTmp, "caller-fixture");
@@ -48,7 +51,7 @@ test("nested coverage runs isolate scratch without deleting the parent TMPDIR", 
       assert.equal(dirname(nestedTmp), realpathSync(parentTmp), "nested scratch stays under the canonical bounded sibling namespace");
       assert.ok(existsSync(nestedTmp), "the nested scratch exists while its shard runs");
     }, failShard);
-    return { steps: entry!.run!(repoRoot, spawn), nestedTmp };
+    return { steps: entry!.run!(repoRoot, spawn, () => Number.MAX_SAFE_INTEGER), nestedTmp };
   };
 
   try {
@@ -79,7 +82,7 @@ test("nested coverage runs isolate scratch without deleting the parent TMPDIR", 
 });
 
 test("a top-level coverage run keeps the stable sibling TMPDIR and does not confuse a prefixed neighbor", () => {
-  const repoRoot = mkdtempSync(join(tmpdir(), "rmd-top-level-coverage-"));
+  const repoRoot = mkdtempSync(join(tmpdir(), "t-"));
   const stableTmp = coverageScratchDir(repoRoot);
   const neighborTmp = `${stableTmp}-neighbor`;
   const stale = join(stableTmp, "stale-run");
@@ -98,13 +101,13 @@ test("a top-level coverage run keeps the stable sibling TMPDIR and does not conf
     assert.ok(entry?.run, "control: the coverage-ratchet job is mirrored locally");
     const steps = entry!.run!(repoRoot, coverageSpawn((tmp) => {
       shardTmp = tmp;
-      assert.equal(tmp, realpathSync(stableTmp), "a top-level shard uses the canonical stable scratch path");
-      assert.equal(existsSync(stale), false, "a top-level run clears stale scratch first");
+      assert.equal(tmp, realpathSync(join(neighborTmp, basename(stableTmp))), "a top-level shard uses the selected volume's canonical scratch path");
+      assert.ok(existsSync(stale), "scratch on a different volume is not cleared");
       assert.ok(existsSync(neighbor), "cleanup must not hit a path that merely shares its prefix");
-    }));
+    }), () => Number.MAX_SAFE_INTEGER);
 
     assert.ok(steps.find((step) => step.name === "coverage-ratchet:test-with-coverage")?.ok);
-    assert.equal(shardTmp, realpathSync(stableTmp));
+    assert.equal(shardTmp, join(neighborTmp, basename(stableTmp)));
     assert.ok(existsSync(neighbor), "the unrelated neighbor remains intact after the run");
   } finally {
     if (previousTmp === undefined) delete process.env.TMPDIR;
@@ -116,9 +119,9 @@ test("a top-level coverage run keeps the stable sibling TMPDIR and does not conf
 });
 
 test("an unresolvable caller TMPDIR fails closed and preserves stable coverage scratch", () => {
-  const repoRoot = mkdtempSync(join(tmpdir(), "rmd-unresolvable-coverage-"));
+  const repoRoot = mkdtempSync(join(tmpdir(), "u-"));
   const stableTmp = coverageScratchDir(repoRoot);
-  const missingCallerTmp = join(repoRoot, "not-created-yet");
+  const missingCallerTmp = join(repoRoot, "x");
   const sentinel = join(stableTmp, "caller-fixture");
   const previousTmp = process.env.TMPDIR;
   let nestedTmp: string | undefined;
@@ -131,18 +134,12 @@ test("an unresolvable caller TMPDIR fails closed and preserves stable coverage s
 
     const entry = CI_PARITY_TABLE.find((row) => row.job === "coverage-ratchet");
     assert.ok(entry?.run, "control: the coverage-ratchet job is mirrored locally");
-    const steps = entry!.run!(repoRoot, coverageSpawn((tmp) => {
-      nestedTmp = tmp;
-      assert.ok(existsSync(sentinel), "an unresolved caller TMPDIR must never authorize clearing stable scratch");
-      assert.ok(nestedTmp, "the fail-closed path still gives the shard isolated scratch");
-      assert.equal(dirname(nestedTmp), realpathSync(missingCallerTmp), "the isolated scratch is nested beneath the caller path once created");
-      assert.ok(existsSync(nestedTmp), "nested scratch exists while its shard runs");
-    }));
+    const steps = entry!.run!(repoRoot, coverageSpawn((tmp) => { nestedTmp = tmp; }), () => Number.MAX_SAFE_INTEGER);
 
     const coverage = steps.find((step) => step.name === "coverage-ratchet:test-with-coverage");
-    assert.ok(coverage?.ok, coverage?.detail);
-    assert.ok(nestedTmp, "the fail-closed control reached a coverage shard");
-    assert.equal(existsSync(nestedTmp), false, "the nested invocation removes only its own scratch");
+    assert.equal(coverage?.ok, false);
+    assert.match(coverage?.detail ?? "", /scratch path/);
+    assert.equal(nestedTmp, undefined, "an unresolved caller path inside the checkout cannot launch a shard");
     assert.deepEqual(readdirSync(stableTmp), ["caller-fixture"], "the unresolved path leaves parent scratch untouched");
   } finally {
     if (previousTmp === undefined) delete process.env.TMPDIR;
@@ -154,7 +151,7 @@ test("an unresolvable caller TMPDIR fails closed and preserves stable coverage s
 });
 
 test("real coverage shards can run under nested TMPDIR without erasing the live parent fixture", () => {
-  const repoRoot = mkdtempSync(join(tmpdir(), "rmd-real-reentrant-coverage-"));
+  const repoRoot = mkdtempSync(join(tmpdir(), "v-"));
   const parentTmp = coverageScratchDir(repoRoot);
   const sentinel = join(parentTmp, "caller-fixture");
   const probe = join(repoRoot, "test", "nested-coverage-probe.test.mjs");
@@ -172,9 +169,8 @@ test("real coverage shards can run under nested TMPDIR without erasing the live 
     if (args.some((arg) => arg.endsWith("scripts/test-tier-manifest.mjs")) && args.includes("--select-all")) {
       return { status: 0, stdout: "test/nested-coverage-probe.test.mjs\n", stderr: "" };
     }
-    if (args.some((arg) => arg.endsWith("coverage-merge-ratchet.mjs"))) {
-      return { status: 0, stdout: "", stderr: "" };
-    }
+    const coverage = coverageParitySpawnResult(file, args, opts);
+    if (coverage && !args.includes("--experimental-test-coverage")) return coverage;
     if (args.includes("--experimental-test-coverage")) {
       assert.ok(existsSync(sentinel), "the parent fixture remains present before the real child starts");
       assert.notEqual(opts?.env?.TMPDIR, parentTmp, "the real child receives an isolated nested path");
@@ -213,7 +209,7 @@ test("real coverage shards can run under nested TMPDIR without erasing the live 
 
     const entry = CI_PARITY_TABLE.find((row) => row.job === "coverage-ratchet");
     assert.ok(entry?.run, "control: the coverage-ratchet job is mirrored locally");
-    const steps = entry!.run!(repoRoot, spawn);
+    const steps = entry!.run!(repoRoot, spawn, () => Number.MAX_SAFE_INTEGER);
     const coverage = steps.find((step) => step.name === "coverage-ratchet:test-with-coverage");
     assert.ok(coverage?.ok, coverage?.detail);
     assert.ok(existsSync(sentinel), "the parent fixture survives all real coverage shard processes");

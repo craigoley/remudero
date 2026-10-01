@@ -8,6 +8,7 @@ import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import { CI_PARITY_TABLE, parseCiJobNames, runCiParity } from "../src/lib/ci-parity.js";
 import { preflightCommand } from "../src/run-task.js";
 import { skipInMutationSandbox } from "./helpers/mutation-sandbox.js";
+import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -48,6 +49,8 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
       const shard = args[args.indexOf("--shard") + 1]?.match(/^(\d+)\/4$/)?.[1];
       return shard ? { status: 0, stdout: `test/coverage-shard-${shard}.test.ts\n`, stderr: "" } : { status: 1, stdout: "", stderr: "invalid selector shard" };
     }
+    const coverage = coverageParitySpawnResult(file, args, opts);
+    if (coverage) return coverage;
     return { status: 0, stdout: "", stderr: "" };
   };
   return { spawn, calls };
@@ -67,7 +70,7 @@ function lintPlanParityCall(calls: ReturnType<typeof recordingSpawn>["calls"]) {
 
 test("W1-T4026: lint-plan parity leaf receives CI semantics", () => {
   const { spawn, calls } = recordingSpawn();
-  runCiParity(REPO_ROOT, { spawn });
+  runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
 
   const lintPlan = lintPlanParityCall(calls);
   assert.deepEqual(lintPlan.args, ["run", "--silent", "lint-plan", "--", "--base", PINNED_BASE_SHA]);
@@ -77,7 +80,7 @@ test("W1-T4026: lint-plan parity leaf receives CI semantics", () => {
 
 test("W1-T4026: lint-plan CI semantics do not widen to another parity leaf", () => {
   const { spawn, calls } = recordingSpawn();
-  runCiParity(REPO_ROOT, { spawn });
+  runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
 
   lintPlanParityCall(calls);
   const sibling = calls.find((entry) => entry.file === "npm" && entry.args.includes("assertion-discrimination"));
@@ -87,7 +90,7 @@ test("W1-T4026: lint-plan CI semantics do not widen to another parity leaf", () 
 
 test("W1-T4026: lint-plan CI semantics retain the self-sync scrub", () => {
   const { spawn, calls } = recordingSpawn();
-  runCiParity(REPO_ROOT, { spawn });
+  runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
 
   const lintPlan = lintPlanParityCall(calls);
   assert.equal(lintPlan.opts?.env?.RMD_SELF_SYNC_DONE, undefined);
@@ -136,7 +139,7 @@ jobs:
     runs-on: ubuntu-latest
     steps: []
 `;
-  const result = runCiParity(REPO_ROOT, { spawn, ciYamlText: syntheticCiYaml });
+  const result = runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER, ciYamlText: syntheticCiYaml });
   const drift = result.steps.find((s) => s.name === "ci-parity:drift")!;
   assert.equal(drift.ok, false, "an unmirrored, unexcluded new job must turn the drift step red");
   assert.match(drift.detail, /brand-new-gate-nobody-mirrored-yet/, "the drift step must NAME the missing job, not just fail silently");
@@ -159,7 +162,7 @@ jobs:
     runs-on: ubuntu-latest
     steps: []
 `;
-  const result = runCiParity(REPO_ROOT, { spawn, ciYamlText: syntheticCiYaml });
+  const result = runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER, ciYamlText: syntheticCiYaml });
   const drift = result.steps.find((s) => s.name === "ci-parity:drift")!;
   assert.equal(drift.ok, true, "every job in this synthetic file has a table entry — the drift step must stay green");
 });
@@ -168,7 +171,7 @@ jobs:
 
 test("coverage-ratchet job: refreshes origin/main (git fetch) BEFORE computing the three-dot diff diff-coverage.mjs consumes", () => {
   const { spawn, calls } = recordingSpawn();
-  runCiParity(REPO_ROOT, { spawn });
+  runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
 
   const fetchIdx = calls.findIndex((c) => c.file === "git" && c.args.join(" ") === "fetch origin main" && c.opts?.cwd === REPO_ROOT);
   assert.ok(fetchIdx >= 0, "expected a `git fetch origin main` call to refresh the base before any diff");
@@ -186,7 +189,7 @@ test("coverage-ratchet job: the diff piped into diff-coverage.mjs is exactly wha
     "fetch origin main": { status: 0 },
     [`diff ${PINNED_RANGE}`]: { status: 0, stdout: sentinelDiff },
   });
-  runCiParity(REPO_ROOT, { spawn });
+  runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
 
   const diffCoverageCall = calls.find((c) => c.args.some((a) => a.includes("diff-coverage.mjs")));
   assert.ok(diffCoverageCall, "expected a diff-coverage.mjs invocation");
@@ -197,7 +200,7 @@ test("coverage-ratchet job: the diff piped into diff-coverage.mjs is exactly wha
 
 test("coverage-ratchet job: coverage retains source maps and test exclusions while four duration-balanced selectors partition the full manifest", () => {
   const { spawn, calls } = recordingSpawn();
-  runCiParity(REPO_ROOT, { spawn });
+  runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
 
   const coverageCalls = calls.filter((c) => c.args.includes("--experimental-test-coverage"));
   assert.equal(coverageCalls.length, 4, "expected one coverage invocation for every CI shard");
@@ -224,7 +227,7 @@ test("coverage-ratchet job: the coverage invocation's argv has no scope-narrowin
 
 test("mutation-ratchet job: the trigger step calls scripts/mutation-ratchet.mjs --changed-files — the SAME script (and same path-filter mode) ci.yml's own trigger step calls, never a re-decided predicate", () => {
   const { spawn, calls } = recordingSpawn();
-  runCiParity(REPO_ROOT, { spawn });
+  runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
 
   const trigger = calls.find((c) => c.args.some((a) => a.includes("mutation-ratchet.mjs")) && c.args.includes("--changed-files"));
   assert.ok(trigger, "expected scripts/mutation-ratchet.mjs --changed-files <path>, the SAME predicate ci.yml's mutation-ratchet job's trigger step calls");
@@ -241,7 +244,7 @@ test("mutation-ratchet job: a diff the trigger script reports as NOT required ne
   const { spawn, calls } = recordingSpawn({
     "mutation-ratchet.mjs --changed-files": { status: 0, stdout: "mutation-ratchet: skip -- no relevant path touched\n" },
   });
-  const result = runCiParity(REPO_ROOT, { spawn });
+  const result = runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
 
   const strykerCalled = calls.some((c) => c.file.includes("stryker") || c.args.some((a) => a.includes("stryker")));
   assert.equal(strykerCalled, false, "a skip verdict must never shell out to stryker");
@@ -255,7 +258,7 @@ test("mutation-ratchet job: a diff the trigger script reports as REQUIRED does r
     stryker: { status: 0 },
     "mutation-ratchet.mjs --report": { status: 0 },
   });
-  const result = runCiParity(REPO_ROOT, { spawn });
+  const result = runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
 
   const strykerCalled = calls.some((c) => c.file.includes("stryker") || c.args.some((a) => a.includes("stryker")));
   assert.ok(strykerCalled, "a REQUIRED verdict must run stryker, same as CI would");
@@ -265,7 +268,7 @@ test("mutation-ratchet job: a diff the trigger script reports as REQUIRED does r
 
 test("containment-probe job: the trigger step calls .github/scripts/containment-diff-trigger.ts — the SAME script (containmentTrigger()) ci.yml's own trigger step calls", () => {
   const { spawn, calls } = recordingSpawn();
-  runCiParity(REPO_ROOT, { spawn });
+  runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
 
   const trigger = calls.find((c) => c.args.some((a) => a.includes("containment-diff-trigger.ts")));
   assert.ok(trigger, "expected .github/scripts/containment-diff-trigger.ts to be invoked");
@@ -275,7 +278,7 @@ test("containment-probe job: a diff the trigger reports as not required never ru
   const { spawn, calls } = recordingSpawn({
     "containment-diff-trigger.ts": { status: 0, stdout: "containment-probe: not required for this diff — no changed path touches sandbox/hooks/env/deny-floor.\n" },
   });
-  const result = runCiParity(REPO_ROOT, { spawn });
+  const result = runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
 
   const probeCalled = calls.some((c) => c.args.some((a) => a.includes("containment.test.ts")));
   assert.equal(probeCalled, false);
@@ -286,7 +289,7 @@ test("containment-probe job: a diff the trigger reports as REQUIRED does run tes
   const { spawn, calls } = recordingSpawn({
     "containment-diff-trigger.ts": { status: 0, stdout: "containment-probe: REQUIRED — touches .claude/settings.json\n" },
   });
-  const result = runCiParity(REPO_ROOT, { spawn });
+  const result = runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
 
   const probeCalled = calls.some((c) => c.args.some((a) => a.includes("containment.test.ts")));
   assert.ok(probeCalled);
@@ -300,7 +303,7 @@ test("runCiParity: every table entry's step(s) run and report regardless of an e
     "leak-grep.sh": { status: 1, stderr: "found a plaintext secret" },
     jscpd: { status: 1, stderr: "duplication over threshold" },
   });
-  const result = runCiParity(REPO_ROOT, { spawn });
+  const result = runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
 
   const leakGrep = result.steps.find((s) => s.name === "leak-grep")!;
   const jscpd = result.steps.find((s) => s.name === "jscpd-gate")!;
@@ -315,7 +318,7 @@ test("runCiParity: every table entry's step(s) run and report regardless of an e
 
 test("runCiParity: every step's detail names itself in both directions (PASS/FAIL/EXCLUDED), never legible only as a missing success line", () => {
   const { spawn } = recordingSpawn();
-  const result = runCiParity(REPO_ROOT, { spawn });
+  const result = runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
   for (const step of result.steps) {
     assert.match(step.detail, new RegExp(`^${step.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: (PASS|FAIL|EXCLUDED)`), `step '${step.name}' detail does not name itself: ${step.detail}`);
   }
@@ -328,7 +331,7 @@ test("runCiParity: a step whose spawn THROWS (binary missing) is caught and repo
     if (args.some((a) => a.includes("leak-grep.sh"))) throw new Error("ENOENT: bash not found");
     return { status: 0, stdout: "", stderr: "" };
   };
-  const result = runCiParity(REPO_ROOT, { spawn });
+  const result = runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
 
   const leakGrep = result.steps.find((s) => s.name === "leak-grep")!;
   assert.equal(leakGrep.ok, false, "an unrunnable toolchain must be a FAILED step, never silently passed");
@@ -351,7 +354,7 @@ test("runCiParity: a spawn that fails for a non-exit reason (status: null, e.g. 
     }
     return { status: 0, stdout: "", stderr: "" };
   };
-  const result = runCiParity(REPO_ROOT, { spawn });
+  const result = runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
 
   const leakGrep = result.steps.find((s) => s.name === "leak-grep")!;
   assert.equal(leakGrep.ok, false, "a spawn that never exited must never read as a passing step");
@@ -373,7 +376,7 @@ test("runCiParity: an entry whose run() ITSELF throws (not just a leaf's spawn i
     if (file === "git" && args.includes("rev-parse")) throw new Error("ENOENT: git not found");
     return { status: 0, stdout: "", stderr: "" };
   };
-  const result = runCiParity(REPO_ROOT, { spawn });
+  const result = runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
 
   const lintPlanError = result.steps.find((s) => s.name === "lint-plan:error");
   assert.ok(lintPlanError, "expected a 'lint-plan:error' step from runCiParity's top-level catch");

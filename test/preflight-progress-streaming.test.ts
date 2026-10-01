@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { runCiParity } from "../src/lib/ci-parity.js";
 import { defaultPreflightSpawn, type PreflightSpawn } from "../src/lib/commit-message.js";
+import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -152,9 +153,11 @@ test("W1-T3299 (supersedes the two-step shape): the full suite streams, the cove
       const shard = args[args.indexOf("--shard") + 1]?.match(/^(\d+)\/4$/)?.[1];
       return shard ? { status: 0, stdout: `test/coverage-shard-${shard}.test.ts\n`, stderr: "" } : { status: 1, stdout: "", stderr: "invalid selector shard" };
     }
+    const coverage = coverageParitySpawnResult(file, args, opts);
+    if (coverage) return coverage;
     return { status: 0, stdout: "", stderr: "" };
   };
-  runCiParity(REPO_ROOT, { spawn });
+  runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
 
   const suite = calls.find((c) => c.file === "npm" && c.args.join(" ") === "run test:ci");
   assert.ok(suite, "the ci job must still shell `npm run test:ci`");

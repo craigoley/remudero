@@ -13,11 +13,12 @@ import {
   type PreflightSummary,
 } from "../src/lib/ci-parity.js";
 import { preflightCommand } from "../src/run-task.js";
+import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
 
 const BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
 
 function ciParitySpawn(behind: { kind: "count"; value: number } | { kind: "unknown"; reason: string }): PreflightSpawn {
-  return (file, args) => {
+  return (file, args, opts) => {
     const key = [file, ...args].join(" ");
     if (key.includes("git log")) return { status: 0, stdout: "\0feat(test): fixture\n", stderr: "" };
     if (key.includes("rev-list")) {
@@ -44,6 +45,8 @@ function ciParitySpawn(behind: { kind: "count"; value: number } | { kind: "unkno
     if (key.includes("containment-diff-trigger.ts")) {
       return { status: 0, stdout: "containment-probe: not required for this diff\n", stderr: "" };
     }
+    const coverage = coverageParitySpawnResult(file, args, opts);
+    if (coverage) return coverage;
     return { status: 0, stdout: "", stderr: "" };
   };
 }
@@ -59,6 +62,7 @@ async function runCiParityPreflight(
   try {
     code = await preflightCommand(["--ci-parity", "--summary-file", out], {
       spawn: ciParitySpawn(behind),
+      coverageFreeBytes: () => Number.MAX_SAFE_INTEGER,
       loadavg: () => [0.5, 0.5, 0.5],
       cpuCount: 4,
     });

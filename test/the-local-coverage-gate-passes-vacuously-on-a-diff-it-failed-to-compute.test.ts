@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 
 import { CI_PARITY_TABLE, EMPTY_DIFF_COVERAGE_REFUSAL } from "../src/lib/ci-parity.js";
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
+import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SHA = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
@@ -41,6 +42,8 @@ function seam(diff: SpawnResult): { spawn: PreflightSpawn; stdinSeen: (string | 
       stdinSeen.push((opts as { input?: string } | undefined)?.input);
       return { status: 0, stdout: "diff-coverage: OK — every added line covered", stderr: "" };
     }
+    const coverage = coverageParitySpawnResult(file, args, opts);
+    if (coverage) return coverage;
     return { status: 0, stdout: "", stderr: "" }; // base-refresh, coverage shards, merge, ratchet
   };
   return { spawn, stdinSeen };
@@ -50,7 +53,7 @@ function diffCoverageStep(diff: SpawnResult): { step: { name: string; ok: boolea
   const entry = CI_PARITY_TABLE.find((e) => e.job === "coverage-ratchet");
   assert.ok(entry?.run, "the coverage-ratchet entry must exist and be runnable");
   const { spawn, stdinSeen } = seam(diff);
-  const steps = entry.run(REPO_ROOT, spawn);
+  const steps = entry.run(REPO_ROOT, spawn, () => Number.MAX_SAFE_INTEGER);
   const step = steps.find((s) => s.name === "coverage-ratchet:diff-coverage");
   assert.ok(step, `the entry must emit a diff-coverage step; saw ${steps.map((s) => s.name).join(", ")}`);
   return { step, stdinSeen };

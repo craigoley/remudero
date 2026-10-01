@@ -443,7 +443,7 @@ export interface CiParityEntry {
   workflow?: string;
   mirrored: boolean;
   reason?: string;
-  run?: (repoRoot: string, spawn: PreflightSpawn) => CiParityStepResult[];
+  run?: (repoRoot: string, spawn: PreflightSpawn, coverageFreeBytes?: (path: string) => number) => CiParityStepResult[];
 }
 
 /** Parse ci.yml's top-level job keys. Pure text-in/array-out, so a falsifier hands it a synthetic document. */
@@ -1728,10 +1728,10 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
   {
     job: "coverage-ratchet",
     mirrored: true,
-    run: (repoRoot, spawn) => {
+    run: (repoRoot, spawn, coverageFreeBytes = undefined) => {
       const lcovPath = join(repoRoot, "coverage", "lcov.info");
       const refresh = runStep("coverage-ratchet:base-refresh", () => refreshOriginMain(repoRoot, spawn));
-      const test = runStep("coverage-ratchet:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath));
+      const test = runStep("coverage-ratchet:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath, coverageFreeBytes));
       if (!test.ok) return [refresh, test];
       const ratchet = runStep("coverage-ratchet:ratchet", () =>
         shellOut(spawn, "coverage-ratchet.mjs", process.execPath, [join(repoRoot, "scripts", "coverage-ratchet.mjs"), "--lcov", lcovPath, "--baseline", join(repoRoot, "scripts", "coverage-baseline.json")], {
@@ -2018,6 +2018,8 @@ export const PR_WORKFLOW_PARITY_TABLE: CiParityEntry[] = [
 
 export interface CiParityDeps {
   spawn?: PreflightSpawn;
+  /** Allows a fixture to provide its measured scratch capacity without changing the production floor. */
+  coverageFreeBytes?: (path: string) => number;
   /** Test seam for ci.yml's half of the drift check — production reads it off disk. */
   ciYamlText?: string;
   /** Test seam for the standalone pull-request workflow half of the drift check. */
@@ -2072,7 +2074,7 @@ export function runCiParity(repoRoot: string, deps: CiParityDeps = {}): CiParity
   const jobSteps = [...CI_PARITY_TABLE, ...standaloneTable].flatMap((entry): CiParityStepResult[] => {
     if (!entry.mirrored) return [excludedStep(entry.job, entry.reason ?? "no reason recorded")];
     try {
-      return entry.run!(repoRoot, spawn);
+      return entry.run!(repoRoot, spawn, deps.coverageFreeBytes);
     } catch (e) {
       return [toolchainFailure(`${entry.job}:error`, e)];
     }
@@ -3567,6 +3569,7 @@ export function affectedSuitesStep(
 
 export interface PreflightCoverageDeps {
   spawn?: PreflightSpawn;
+  coverageFreeBytes?: (path: string) => number;
   /** Test seam — production reads the lcov this mode's own step just wrote. */
   lcovText?: string;
 }
@@ -3636,7 +3639,7 @@ export function runPreflightCoverage(repoRoot: string, deps: PreflightCoverageDe
   });
 
   const lcovPath = join(repoRoot, "coverage", "lcov.info");
-  const test = runStep("coverage-mode:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath));
+  const test = runStep("coverage-mode:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath, deps.coverageFreeBytes));
   steps.push(test);
   if (!test.ok) return { steps, ok: false };
 

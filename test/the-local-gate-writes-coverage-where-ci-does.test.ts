@@ -42,24 +42,29 @@ function coverageCall(repoRoot = REPO_ROOT): { args: string[]; env?: NodeJS.Proc
   const calls: { args: string[]; env?: NodeJS.ProcessEnv }[] = [];
   const entry = CI_PARITY_TABLE.find((e) => e.job === "coverage-ratchet");
   assert.ok(entry?.run, "control: the coverage-ratchet entry exists and is mirrored locally");
-  entry!.run!(repoRoot, recordingSpawn(calls));
+  entry!.run!(repoRoot, recordingSpawn(calls), () => Number.MAX_SAFE_INTEGER);
   const call = calls.find((c) => c.args.includes("--experimental-test-coverage"));
   assert.ok(call, "control: the leaf really did spawn the coverage command");
   return call!;
 }
 
 test("coverage shards use canonical TMPDIR paths when the sibling scratch parent is symlinked", () => {
-  const tempRoot = mkdtempSync(join(tmpdir(), "rmd-gate-coverage-path-"));
+  const tempRoot = mkdtempSync(join(tmpdir(), "g-"));
   const repoRoot = join(tempRoot, "repo");
-  const physicalScratchParent = join(tempRoot, "physical-coverage");
-  const scratchParentAlias = join(tempRoot, ".remudero-coverage");
+  const physicalScratchParent = join(tempRoot, "p");
+  const scratchParentAlias = join(tempRoot, "a");
   mkdirSync(repoRoot);
   mkdirSync(physicalScratchParent);
   symlinkSync(physicalScratchParent, scratchParentAlias, "dir");
+  const previousTmp = process.env.TMPDIR;
+  process.env.TMPDIR = scratchParentAlias;
   const scratch = coverageScratchDir(repoRoot);
   try {
-    assert.equal(coverageCall(repoRoot).env?.TMPDIR, realpathSync(scratch));
+    assert.equal(dirname(scratch), realpathSync(physicalScratchParent));
+    assert.equal(coverageCall(repoRoot).env?.TMPDIR, scratch);
   } finally {
+    if (previousTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTmp;
     rmSync(scratch, { recursive: true, force: true });
     rmSync(scratchParentAlias, { force: true });
     rmSync(physicalScratchParent, { recursive: true, force: true });
@@ -70,7 +75,8 @@ test("coverage shards use canonical TMPDIR paths when the sibling scratch parent
 
 test("that scratch is a stable sibling namespace, never a child of the Git worktree", () => {
   const dir = coverageScratchDir(REPO_ROOT);
-  assert.equal(dir, join(dirname(REPO_ROOT), ".remudero-coverage", basename(REPO_ROOT), "tmp"));
+  assert.equal(dirname(dir), realpathSync(tmpdir()));
+  assert.match(basename(dir), /^rmd-c-[a-f0-9]{12}$/);
   assert.ok(!dir.startsWith(`${REPO_ROOT}/`), `must be outside the checkout; got ${dir}`);
 });
 
