@@ -591,7 +591,6 @@ $(render_cash_boot_secrets)
 
 docker rm -f ${CONTAINER_NAME} >/dev/null 2>&1 || true
 
-# Scratch I/O stays dark until switched on; an unusable scratch disk launches as before.
 SCRATCH_ARGS=()
 if [ -r ${BIN_DIR}/rmd-scratch-mounts ]; then
   . ${BIN_DIR}/rmd-scratch-mounts
