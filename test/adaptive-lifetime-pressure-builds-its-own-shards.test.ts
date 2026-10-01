@@ -48,7 +48,7 @@ function fixture(): { dir: string; plan: Plan; ledgerPath: string; config: Confi
 
 /** The key `routeAdaptiveLifetimePressure` must build for the ledger written below. Held as a
  *  literal on purpose — see this file's header. */
-const SETTLED_KEY = "T4025-C:adaptive-lifetime=0:capacity=1:open=1:merged=0:last=pr.opened:unavailable";
+const SETTLED_KEY = "T4025-C:adaptive-lifetime=0:capacity=1:open=1:merged=0:last=verdict:unavailable:0";
 
 function writeLedger(ledgerPath: string, rows: Record<string, unknown>[]): void {
   writeFileSync(ledgerPath, rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
@@ -76,7 +76,8 @@ test("routeAdaptiveLifetimePressure projects a task's pressure evidence into the
     });
 
     assert.equal(result.judged, 0, "a settled shard spends no judge call");
-    assert.deepEqual(result.skipped, ["T4025-C"], "the shard is recognised as already settled, by its projected key");
+    assert.deepEqual(result.skipped, ["T4025-C"], "infrastructure-only pressure cannot summon a task judge");
+    assert.ok(readFileSync(ledgerPath, "utf8").includes(`"observed_state":"${SETTLED_KEY}"`));
     assert.deepEqual(result.needsOperator, []);
     assert.deepEqual(result.automated, []);
     assert.deepEqual(result.deferred, []);
@@ -89,7 +90,7 @@ test("routeAdaptiveLifetimePressure counts merge and open-PR evidence, and repor
   const { dir, plan, ledgerPath, config } = fixture();
   try {
     // A DIFFERENT population: two open PRs, one merge verdict, and a terminal verdict row last.
-    const key = "T4025-C:adaptive-lifetime=0:capacity=0:open=2:merged=1:last=verdict:merged";
+    const key = "T4025-C:adaptive-lifetime=0:capacity=0:open=2:merged=1:last=verdict:merged:1";
     writeLedger(ledgerPath, [
       { step: "pr.opened", task_id: "T4025-C" },
       { step: "pr.opened", task_id: "T4025-C" },
@@ -106,7 +107,8 @@ test("routeAdaptiveLifetimePressure counts merge and open-PR evidence, and repor
     });
 
     assert.equal(result.judged, 0);
-    assert.deepEqual(result.skipped, ["T4025-C"], "merge evidence and the trailing verdict row both reach the key");
+    assert.deepEqual(result.skipped, ["T4025-C"], "zero attributable attempts do not summon a judge");
+    assert.ok(readFileSync(ledgerPath, "utf8").includes(`"observed_state":"${key}"`));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -143,12 +145,15 @@ test("routeAdaptiveLifetimePressure asks the judge about a shard whose evidence 
 test("routeAdaptiveLifetimePressure records sampled agreement through its production ledger adapter", async () => {
   const { dir, plan, ledgerPath, config } = fixture();
   try {
-    writeLedger(ledgerPath, []);
     const id = Array.from({ length: 1000 }, (_, i) => `T-ADAPTIVE-SHADOW-${i}`)
       .find((candidate) => shadowJudgeSampled(
-        `verify-human:${candidate}:adaptive-lifetime=0:capacity=0:open=0:merged=0:last=unavailable:unavailable`,
+        `verify-human:${candidate}:adaptive-lifetime=1:capacity=0:open=0:merged=0:last=verdict:failed:1`,
       ));
     assert.ok(id, "the fixture selects a stable sampled adaptive observation");
+    writeLedger(ledgerPath, [
+      { step: "run.start", task_id: id, run_id: "r1" },
+      { step: "verdict", task_id: id, run_id: "r1", verdict: "failed", stage: "implement", reason: "retry" },
+    ]);
     const task = { ...plan.byId.get("T4025-C")!, id };
     const spawn: typeof spawnWorker = async () => ({
       text: "VERIFY_HUMAN_DECISION: backlog\nVERIFY_HUMAN_REASON: stable fixture",
@@ -197,8 +202,11 @@ test("productionLifetimePressureHook reads its plan WHEN IT FIRES, not when it i
     await hook([plan.byId.get("T4025-C")!]);
     assert.equal(planReads, 1, "the plan is read at fire time, so a later tick's projection wins");
 
-    // The shard is settled by the row above, so no judge call is spent and nothing is written.
-    assert.equal(readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).length, 3, "the hook wrote no rows");
+    // The zero-attempt marker is written once, with no judge call or duplicate on a later tick.
+    assert.equal(readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).length, 4);
+    await hook([plan.byId.get("T4025-C")!]);
+    assert.equal(planReads, 2, "the later tick reads its plan again");
+    assert.equal(readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).length, 4, "the hook does not repeat the same marker");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
