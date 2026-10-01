@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.68
   status: queued
@@ -16,3 +16,12 @@
     - claim: "the check:ci-log:test-slow cause of PR friction has a recorded remedy"
       proof: "grep: ci-friction:check:ci-log:test-slow in docs/ci-friction-remedies.md"
   note: "Filed by the ci-friction gardener (W1-T4435) from a weekly pass over the ledger and gate-fire-rate.ts's own measurement. check:ci-log:test-slow priced at 6.7 PR minute(s) across 6 round(s) on 6 pull request(s) — the costliest cause with no open task. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person; its remedy is recorded in docs/ci-friction-remedies.md naming \"ci-friction:check:ci-log:test-slow\" once it lands."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.94
+    reasons:
+      - "The filed task proposes recording a remedy for a measured CI friction cause in docs/ci-friction-remedies.md, the sole declared file."
+      - "The acceptance criterion specifies a grep-verifiable entry, the gates state reports filingTime true, and the supplied record shows no operator-only decision or sensitive or irreversible action."
+    judged_at: "2026-10-01T16:07:22.819Z"
+    pin: "5b7aecbe440fc22085babdfb375a6c132ab5c1d5f89a68176990a6e995242183"
