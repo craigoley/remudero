@@ -622,6 +622,13 @@ else
   echo "serve-container: resource policy NOT applied — ${SCRIPT_ROOT}/deploy/resource-policy.sh is absent"
 fi
 
+SCRATCH_ARGS=() # deploy/scratch-mounts.sh: rebuildable I/O on the local NVMe; dark until switched on
+if [ -f "${SCRIPT_ROOT}/deploy/scratch-mounts.sh" ]; then
+  . "${SCRIPT_ROOT}/deploy/scratch-mounts.sh"
+  if scratch_plan "${STATE_DIR}" "${CONTAINER_NAME}" && [ "${DRY_RUN}" -ne 1 ]; then scratch_prepare || true; fi
+  echo "serve-container: scratch mounts ${SCRATCH_NOTE}"
+fi
+
 SERVE_GENS_ARGS=()
 SERVE_CMD=(./bin/rmd serve --host "${SERVE_BIND_HOST}" --port "${SERVE_PORT}")
 if [ "${SERVE_SUPERVISOR}" = "on" ]; then
@@ -659,6 +666,7 @@ RUN_ARGS=(
   "${OPERATOR_IDENTITY_ARGS[@]+"${OPERATOR_IDENTITY_ARGS[@]}"}"
   "${INGEST_TOKEN_ARGS[@]+"${INGEST_TOKEN_ARGS[@]}"}"
   "${SERVE_GENS_ARGS[@]+"${SERVE_GENS_ARGS[@]}"}"
+  "${SCRATCH_ARGS[@]+"${SCRATCH_ARGS[@]}"}"
   "${REF}"
   "${SERVE_CMD[@]}"
 )
@@ -706,6 +714,7 @@ if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
   docker rm "${CONTAINER_NAME}" >/dev/null
 fi
 
+if [ "${#SCRATCH_ARGS[@]}" -gt 0 ]; then scratch_fresh_tmp; fi
 echo "serve-container: docker run -d --name ${CONTAINER_NAME} ${REF}"
 docker "${RUN_ARGS[@]}" >/dev/null
 

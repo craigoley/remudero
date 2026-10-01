@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { createRequire } from "node:module";
 import { hostname } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
@@ -88,12 +88,27 @@ export interface ReadModelOpenOptions {
   generation?: string | null;
 }
 
-/** `<stateDir>/read-model/<instance>.v<schemaVersion>.sqlite` — a schema bump is a new file. */
+/**
+ * `<stateDir>:<dir>`: the DB files of THAT state dir live in `<dir>` (deploy/scratch-mounts.sh binds
+ * the scratch disk there). Keyed by state dir, so a test or a worker with its own state dir is never
+ * redirected; the switch and sources files stay in `<stateDir>/read-model` on the persistent disk.
+ */
+export const READ_MODEL_DB_DIR_ENV = "RMD_READ_MODEL_DB_DIR";
+
+/** Where one state dir's DB files, pointer and generations live. */
+export function readModelDbDir(stateDir: string, env: NodeJS.ProcessEnv = process.env): string {
+  const mapping = env[READ_MODEL_DB_DIR_ENV] ?? "";
+  const at = mapping.indexOf(":");
+  if (at > 0 && resolve(mapping.slice(0, at)) === resolve(stateDir) && mapping.length > at + 1) return mapping.slice(at + 1);
+  return join(stateDir, READ_MODEL_DIRNAME);
+}
+
+/** `<db dir>/<instance>.v<schemaVersion>.sqlite` — a schema bump is a new file. */
 export function readModelPath(stateDir: string, instance: string, schemaVersion: number): string {
   if (!INSTANCE_NAME.test(instance)) {
     throw new ReadModelError("bad_instance", `instance name ${JSON.stringify(instance)} is not a safe file name`);
   }
-  return join(stateDir, READ_MODEL_DIRNAME, `${instance}.v${schemaVersion}.sqlite`);
+  return join(readModelDbDir(stateDir), `${instance}.v${schemaVersion}.sqlite`);
 }
 
 /** `<instance>.v<N>.g<generation>.sqlite`: a rebuild writes a NEW file and never renames over an open one. */
@@ -233,7 +248,7 @@ export function openReadModel(opts: ReadModelOpenOptions): ReadModelDb {
   if (readOnly) {
     raw = connect(path, true);
   } else {
-    mkdirSync(join(opts.stateDir, READ_MODEL_DIRNAME), { recursive: true });
+    mkdirSync(dirname(path), { recursive: true });
     try {
       raw = connect(path, false);
     } catch (error) {

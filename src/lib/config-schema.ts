@@ -389,6 +389,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_MAIL_COMMAND", "Overrides the mail command used for notification delivery.", ["src/lib/notify.ts"]),
   envEntry("RMD_OPENWEIGHT_API_KEY", "Supplies the Azure API key to the daemon-local open-weight adapter; it is never copied into a worker environment.", ["src/lib/worker-provider.ts"]),
   envEntry("RMD_OPERATOR_IDENTITY_PATH", "Names the read-only mounted file holding serve's operator identity when config.json has none.", ["src/lib/operator-identity-file.ts"]),
+  envEntry("RMD_READ_MODEL_DB_DIR", "Maps one state dir to the directory holding its read-model DB files as <stateDir>:<dir>; set by deploy/scratch-mounts.sh.", ["src/lib/read-model-db.ts"]),
   envEntry("RMD_RESTART_THROTTLE_S", "Documents restart throttling excluded from proof environments.", ["src/lib/review.ts"]),
   envEntry("RMD_SELF_SYNC_DONE", "Guards CLI self-sync re-exec loops.", ["src/lib/self-sync.ts", "src/lib/commit-message.ts", "src/run-task.ts"]),
   envEntry("RMD_SERVE_HOST", "Overrides operator console bind hosts.", ["src/lib/serve.ts", "src/lib/launchd.ts", "src/run-task.ts"]),
