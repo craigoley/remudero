@@ -75,7 +75,7 @@ function fixture(t: TestCtx): { root: string; stateDir: string; deps: ServeDeps;
   writeFileSync(join(stateDir, "ledger.ndjson"), rows.map((r) => `${JSON.stringify({ host: "h1", ...r })}\n`).join(""));
   // One open decision of each store-backed kind, so `decisions` items are validated, not an empty array.
   mkdirSync(join(root, "plan", "feedback"), { recursive: true });
-  writeFileSync(join(root, "plan", "feedback", "fb-1.yaml"), `id: fb-1\nts: "${iso(3_600_000)}"\nraw: "which page first?"\nstatus: grilling\n`);
+  writeFileSync(join(root, "plan", "feedback", "fb-1.yaml"), `id: fb-1\nts: "${iso(3_600_000)}"\nraw: "which page first?"\nattachments: []\norigin: cli\nstatus: grilling\nproposal_pr: null\n`);
   writeFileSync(join(root, "plan", "questions.ndjson"), `${JSON.stringify({ ts: iso(1_800_000), task: "W1-T2", question: "keep the alias?", current_assumption: "yes", impact_if_wrong: "low" })}\n`);
   const runs: Array<() => void> = [];
   const ledgerPath = join(stateDir, "ledger.ndjson");
@@ -171,7 +171,7 @@ test("every registered view body validates against its declared schema", async (
   assert.deepEqual(instances.instances.map((i) => [i.id, i.registered, i.served, i.project]), [["core", true, true, "remudero"]], JSON.stringify(instances));
   assert.deepEqual(repos.projects.map((p) => [p.project, p.worst.repoName]), [["remudero", "remudero"]]);
   assert.deepEqual((bodies.get("inbox")!.data as { items: Array<{ proposalId: string; lane?: string }> }).items.map((i) => [i.proposalId, i.lane]), [["ruling:schema", "notReady"]]);
-  assert.deepEqual((bodies.get("feedback")!.data as { entries: Array<{ id: string }> }).entries.map((e) => e.id), ["fb-schema"]);
+  assert.deepEqual((bodies.get("feedback")!.data as { entries: Array<{ id: string }> }).entries.map((e) => e.id), ["fb-1", "fb-schema"]);
 
   // P2-03: the versions map (the events stream's hello and fallback poll) names every served body.
   const versions = (await (await fetch(`${url}${VIEW_VERSIONS_PATH}`, { headers: READ })).json()) as { views: Record<string, unknown> };
