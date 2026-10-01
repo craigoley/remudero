@@ -33,7 +33,9 @@ import { LEDGER_FILENAME } from "./ledger-path.js";
 import { buildOperatorAgentAnswerRoute, readInboxAnswerEvidence } from "./operator-agent-answer.js";
 import { inboxThreadStorePath } from "./panel-graph.js";
 import {
+  buildApproveManualRoute,
   buildControlStatusRoute,
+  buildEscalationMarkHandledRoute,
   buildAssistantControlRoute,
   buildAssistantControlCapabilityRoute,
   buildAssistantControlReceiptRoute,
@@ -181,6 +183,9 @@ export function instanceRouteSet(
     buildPauseRoute(panel),
     buildResumeRoute(panel),
     buildStopRoute(panel),
+    // The answer routes `now` names for this instance's own escalations (now-decisions.ts).
+    buildApproveManualRoute(panel),
+    buildEscalationMarkHandledRoute(panel),
     ...(assistantControl ? [buildAssistantControlRoute(assistantControl), buildAssistantControlCapabilityRoute(assistantControl), buildAssistantControlReceiptRoute(assistantControl)] : []),
   ];
 }

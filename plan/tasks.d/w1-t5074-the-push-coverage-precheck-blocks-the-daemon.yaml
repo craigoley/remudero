@@ -1,0 +1,37 @@
+- id: W1-T5074
+  title: "THE PUSH COVERAGE PRECHECK BLOCKS THE WHOLE DAEMON — realCoverageRun is a spawnSync inside runTask, which runs in the daemon process, so for its whole duration no sweep, tick, review, other lane, ledger write or token-refresh timer runs: 2026-10-01 W1-T4772's precheck froze the core daemon for 42 minutes and its push then failed on the installation token that could not refresh"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 15.00
+  risk: high
+  origin: "operator session 2026-10-01: the core daemon wrote no ledger row 04:04-04:47Z"
+  note: "reservation hand-off: plan-precheck-async-1790830431000 -> plan-precheck-async-1790830431000"
+  plan_refs: [W1-T4797, W1-T463, W1-T4041]
+  files: [src/run-task.ts, test/the-push-coverage-precheck-never-blocks-the-daemon-loop.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-01 (core host): W1-T4772's fallback push ran coveragePrecheck (W1-T4797, #8194). Its
+    diff-coverage-local child (parent pid = the daemon's own node process) ran 1839 files for 42 minutes. The ledger
+    holds no row from 04:15 to 04:47Z apart from serve's: the daemon loop was blocked, because realCoverageRun uses
+    spawnSync and runTask runs in the daemon process. When the operator killed the child, the push failed with
+    "Invalid username or token". The daemon's installation-token refresher is a timer (startInstallationTokenRefresh),
+    and timers cannot fire while the loop is blocked. #8285 skips a precheck wider than preflight's scoped ceiling
+    (40 suites), but a pass at or under 40 suites still blocks the loop for its whole duration.
+  design: |
+    Make the precheck asynchronous end to end. realCoverageRun uses spawn with a promise, and keeps the same bound,
+    the same output capture and the same timeout/spawn-error mapping. coveragePrecheck becomes async, and every
+    caller awaits it: the fallback push, the fix rung's pushFixRoundPrechecked, and the repair rung's `recheck`
+    (widen its type to return a promise). Behaviour and outcomes are unchanged; only the event loop is released.
+    No new bound.
+  acceptance:
+    - claim: "the daemon loop keeps running while a coverage precheck is in flight"
+      proof: 'grep: test("W1-T5074: the daemon loop keeps running while a coverage precheck is in flight" in test/the-push-coverage-precheck-never-blocks-the-daemon-loop.test.ts'
+    - claim: "a precheck outcome is unchanged by the async conversion"
+      proof: 'grep: test("W1-T5074: a precheck outcome is unchanged by the async conversion" in test/the-push-coverage-precheck-never-blocks-the-daemon-loop.test.ts'
+  falsifier: |
+    Restore spawnSync and the first test sees a timer scheduled before the precheck fire only after it returns.

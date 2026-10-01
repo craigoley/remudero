@@ -646,6 +646,7 @@ import {
   resolveServePort,
   resolveServiceTokens,
   SERVE_EXPECTED_BRANCH,
+  resolveAccountFilePath,
   serviceTokensPath,
   stopServeReadModel,
   defaultIsListening,
@@ -15120,6 +15121,9 @@ export function coveragePrecheck(wt: string, ports: CoveragePrecheckPorts = {}):
   if (tiers.fast.length > 0 && tiers.slow.length > 0) passes.push([...tiers.fast, ...tiers.slow]);
   const run = ports.run ?? realCoverageRun;
   for (const suites of passes) {
+    if (suites.length > PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING) {
+      return { outcome: "unavailable", reason: `${suites.length} suite(s) are too wide to precheck quickly (over preflight's scoped ceiling of ${PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING})` };
+    }
     const predictedMs = suites.reduce((sum, f) => sum + (weightedDurationMs(f, manifest) as number), 0);
     const boundMs = Math.max(manifest.thresholdMs, Math.ceil(predictedMs * (DURATION_STALENESS_FACTOR as number)));
     const r = run(wt, suites, boundMs);
@@ -35614,7 +35618,8 @@ export async function serveCommand(
     log,
     consoleSnapshots: { dir: join(config.root, "state", "console-snapshots"), prewarmPaths: ["/v1/operator-activity", "/v1/action-results"] },
     projectionWorker: consoleProjectionWorker(),
-    readModel: deps.buildBatchedGithub ? {} : { slowLane: { inbox: { root: repoRoot, planPath, ledgerPath, inboxRoot: config.root, repository: `${self.owner}/${self.repo}` } } },
+    readModel: deps.buildBatchedGithub ? {} : { slowLane: { inbox: { root: repoRoot, planPath, ledgerPath, inboxRoot: config.root, repository: `${self.owner}/${self.repo}` },
+      accountUsage: { ledgerPath, root: config.root, accountFilePath: resolveAccountFilePath(undefined) } } },
     // W1-T945: GET /v1/peek's root (config.root, the SAME root buildWorkerStateSensor resolves
     // state/runs/<runId>.tail against) + its liveness predicate, a closure over the REAL
     // liveInflightRuns over the REAL `<config.root>/state/inflight` lock directory — the exact

@@ -16,6 +16,8 @@ import {
   lastRecordedCreditState,
   readAccountUsageFile,
   readCreditState,
+  recordCreditStateEdge,
+  type AccountUsageDeps,
   type AccountUsageSnapshot,
   type AccountUsageInput,
 } from "../src/lib/account-usage.js";
@@ -104,7 +106,7 @@ test("W1-T2688: the credit state is read from the existing usage surface when th
 
       const rows: Array<Record<string, unknown>> = [];
       const written: LedgerLine[] = [];
-      const route = buildAccountUsageRoute({
+      const deps: AccountUsageDeps = {
         ledgerPath: join(dir, `${field}.ledger.ndjson`),
         accountFilePath: path,
         readLedger: () => rows,
@@ -114,12 +116,14 @@ test("W1-T2688: the credit state is read from the existing usage surface when th
         },
         now: () => Date.parse("2026-09-05T12:00:00Z"),
         resolveCeiling: () => ({ usd: 150, provenance: "default", committedDefaultUsd: 150 }),
-      });
-      const { status, parsed } = await invokeRoute(route);
+      };
+      const { status, parsed } = await invokeRoute(buildAccountUsageRoute(deps));
       assert.equal(status, 200);
       assert.equal(parsed.creditState, "credits", `route read '${field}' from cachedUsageUtilization`);
       assert.equal(parsed.creditStateField, field);
-      assert.equal(written.length, 1, "the route recorded the first known state once");
+      assert.equal(written.length, 0, "the GET records nothing (arch Phase 4 P4-T14): the slow lane owns the edge");
+      recordCreditStateEdge(deps);
+      assert.equal(written.length, 1, "the edge recorder recorded the first known state once");
       assert.equal(written[0]?.step, CREDIT_STATE_STEP);
       assert.equal(written[0]?.state, "credits");
       assert.equal(written[0]?.field, field);
@@ -207,7 +211,7 @@ test("W1-T2688: the transition edge writes one row; an unchanged state writes no
   const lines: Array<Record<string, unknown>> = [];
   const written: LedgerLine[] = [];
   let raw: unknown = "subscription";
-  const route = buildAccountUsageRoute({
+  const deps: AccountUsageDeps = {
     ledgerPath: "/tmp/w1-t2688-credit-transition-ledger.ndjson",
     readLedger: () => lines,
     readAccount: () => ({
@@ -225,17 +229,19 @@ test("W1-T2688: the transition edge writes one row; an unchanged state writes no
     },
     now: () => Date.parse(at),
     resolveCeiling: () => ({ usd: 150, provenance: "default", committedDefaultUsd: 150 }),
-  });
+  };
 
-  await invokeRoute(route);
-  await invokeRoute(route);
-  assert.equal(written.length, 1, "first known subscription is recorded once, not every poll");
+  await invokeRoute(buildAccountUsageRoute(deps));
+  assert.equal(written.length, 0, "a read records no edge");
+  recordCreditStateEdge(deps);
+  recordCreditStateEdge(deps);
+  assert.equal(written.length, 1, "first known subscription is recorded once, not every pass");
   assert.equal(written[0]?.state, "subscription");
   assert.equal(written[0]?.previous, undefined);
 
   raw = "credits";
-  await invokeRoute(route);
-  await invokeRoute(route);
+  recordCreditStateEdge(deps);
+  recordCreditStateEdge(deps);
   assert.equal(written.length, 2, "the subscription -> credits edge adds exactly one row");
   assert.deepEqual(
     { step: written[1]?.step, state: written[1]?.state, previous: written[1]?.previous, field: written[1]?.field },

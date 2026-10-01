@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdtempSync,
   readFileSync,
@@ -1056,6 +1057,57 @@ test("the installer installs the hourly temp sweep and its schedule and keeps th
     assert.match(run([], env, root).stdout, new RegExp(`DRIFTED ${cronFile}`));
     writeFileSync(sweep, "#!/bin/sh\nexit 0\n");
     assert.match(run([], env, root).stdout, new RegExp(`DRIFTED ${sweep}`));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an install run from a dirty install root is refused and installs nothing", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-installroot-handrun-"));
+  try {
+    const stateDir = join(root, "state-root");
+    mkdirSync(stateDir, { recursive: true });
+    const installRoot = join(stateDir, "daemon-install");
+    const repo = gitRepo({ kind: "install-root-handrun" });
+    renameSync(repo.dir, installRoot);
+    cpSync("deploy", join(installRoot, "deploy"), { recursive: true });
+    git(installRoot, ["add", "deploy"]);
+    git(installRoot, ["commit", "--quiet", "-m", "main's deploy"]);
+    const installer = join(installRoot, "deploy", "install-host-units.sh");
+    const hostEnv = (state: string, out: string) => ({
+      ...process.env,
+      RMD_STATE_DIR: state,
+      RMD_UNIT_DIR: join(out, "systemd"),
+      RMD_BIN_DIR: join(out, "bin"),
+      RMD_LAUNCHER_PATH: join(out, "rmd-relaunch.sh"),
+      RMD_REVIVAL_LOG: join(out, "revivals.log"),
+      RMD_NODE_MAX_OLD_SPACE_MB: "8192",
+    });
+    const install = (state: string, out: string) =>
+      spawnSync("bash", [installer, "--install"], { encoding: "utf8", env: hostEnv(state, out) });
+
+    const clean = install(stateDir, join(root, "clean"));
+    assert.equal(clean.status, 0, clean.stderr);
+    assert.ok(existsSync(join(root, "clean", "rmd-relaunch.sh")), "a clean install root installs");
+
+    // the shape found on the host: a tracked edit plus a new untracked file, never committed
+    writeFileSync(join(installRoot, "deploy", "rmd-host-cleanup.sh"), "#!/bin/sh\n# hand edit\n");
+    writeFileSync(join(installRoot, "deploy", "rmd-tmp-sweep.sh"), "#!/bin/sh\n");
+    writeFileSync(join(installRoot, "deploy", "rmd-hand-install-only.sh"), "#!/bin/sh\n");
+    const dirty = install(stateDir, join(root, "dirty"));
+    assert.equal(dirty.status, 2, dirty.stdout);
+    assert.match(dirty.stderr, /the install root .*daemon-install has local edits/);
+    assert.match(dirty.stderr, / M deploy\/rmd-host-cleanup\.sh/);
+    assert.match(dirty.stderr, / M deploy\/rmd-tmp-sweep\.sh/);
+    assert.match(dirty.stderr, /\?\? deploy\/rmd-hand-install-only\.sh/);
+    assert.equal(existsSync(join(root, "dirty")), false, "a refused install writes nothing");
+
+    // the same tree used as a dev checkout (not this state root's install root) still installs
+    const elsewhere = join(root, "other-state");
+    mkdirSync(elsewhere);
+    const dev = install(elsewhere, join(root, "dev"));
+    assert.equal(dev.status, 0, dev.stderr);
+    assert.ok(existsSync(join(root, "dev", "rmd-relaunch.sh")));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
