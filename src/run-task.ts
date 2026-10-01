@@ -26727,6 +26727,8 @@ export type PreflightCommandDeps = PreflightDeps & {
   loadavg?: () => readonly number[] | undefined;
   cpuCount?: number;
   coverageFreeBytes?: (path: string) => number;
+  /** Fake nested parity fixtures use a distinct lock while the outer real gate owns its lock. */
+  coverageLockDiscriminator?: string;
 };
 
 export async function preflightCommand(rest: string[], deps: PreflightCommandDeps = {}): Promise<number> {
@@ -26764,7 +26766,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   const scopedCoverage = rest.includes("--no-fast")
     ? undefined
     : preflightCheckResult("fast-coverage:invocation", () => runPreflightScopedDiffCoverage(repoRoot, { spawn: deps.spawn }));
-  const ciParity = rest.includes("--ci-parity") ? runCiParity(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes }) : undefined;
+  const ciParity = rest.includes("--ci-parity") ? runCiParity(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator }) : undefined;
   const coverage = rest.includes("--coverage") ? runPreflightCoverage(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes }) : undefined;
   // W1-T3738: opt-in, because each proof spawns a real base worktree and a real test — the
   // 29-second default tier cannot absorb that. Named in the coverage line below either way.
