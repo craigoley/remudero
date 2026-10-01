@@ -19,7 +19,7 @@ import { LEDGER_FILENAME, ledgerPathFor } from "./ledger-path.js";
 import { LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel } from "./ledger-projector.js";
 import { ORACLE_DEFAULT_WINDOW_MS, ReadModelConsistencyError, runConsistencyCheck } from "./read-model-consistency.js";
 import {
-  PROJECTOR_LEASE_NAME, READ_MODEL_DIRNAME, READ_MODEL_LEASE_TTL_MS, acquireLease, currentReadModelPath, openReadModel, peekLease,
+  PROJECTOR_LEASE_NAME, READ_MODEL_DIRNAME, READ_MODEL_LEASE_TTL_MS, acquireLease, currentReadModelPath, openReadModel, peekLease, readModelDbDir,
   publishReadModelGeneration, readModelPointerPath, releaseLease,
 } from "./read-model-db.js";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -132,7 +132,7 @@ function fileBytes(path: string): number {
 }
 
 function instanceStatus(stateDir: string, instance: string, version: number, files: string[], now: number): InstanceStatus {
-  const dir = join(stateDir, READ_MODEL_DIRNAME);
+  const dir = readModelDbDir(stateDir);
   const bytes = (name: string): number => fileBytes(join(dir, name)) + fileBytes(join(dir, `${name}-wal`));
   const status: InstanceStatus = { instance, schemaVersion: version, current: version === LEDGER_PROJECTOR_SCHEMA_VERSION, dbBytes: files.reduce((sum, f) => sum + bytes(f), 0) };
   if (!status.current) return status;
@@ -166,7 +166,7 @@ function instanceStatus(stateDir: string, instance: string, version: number, fil
 }
 
 export function readModelStatus(stateDir: string, clock: Clock = systemClock): InstanceStatus[] {
-  const dir = join(stateDir, READ_MODEL_DIRNAME);
+  const dir = readModelDbDir(stateDir);
   const groups = new Map<string, { instance: string; version: number; files: string[] }>();
   for (const name of existsSync(dir) ? readdirSync(dir) : []) {
     const m = DB_FILE.exec(name) ?? POINTER_FILE.exec(name);
@@ -186,7 +186,7 @@ function statusCommand(stateDir: string, clock: Clock, json: boolean, out: (l: s
     out(JSON.stringify({ stateDir, instances: all }, null, 2));
     return 0;
   }
-  if (all.length === 0) out(`no read model under ${join(stateDir, READ_MODEL_DIRNAME)}`);
+  if (all.length === 0) out(`no read model under ${readModelDbDir(stateDir)}`);
   for (const s of all) {
     if (!s.current) {
       out(`${s.instance} v${s.schemaVersion}: not the current schema (v${LEDGER_PROJECTOR_SCHEMA_VERSION}), ${s.dbBytes} bytes`);
@@ -242,7 +242,7 @@ export function reapReadModelGenerations(stateDir: string, instance: string, clo
   if (!existsSync(pointer)) return [];
   const now = clock.now();
   if (now - statSync(pointer).mtimeMs < graceMs) return [];
-  const dir = join(stateDir, READ_MODEL_DIRNAME);
+  const dir = readModelDbDir(stateDir);
   const current = currentReadModelPath(stateDir, instance, version);
   const removed: string[] = [];
   for (const name of readdirSync(dir)) {

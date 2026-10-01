@@ -69,7 +69,7 @@ test("W1-T2877: check mode reports missing units and changes nothing", () => {
 
     const install = run(["--install"], {}, root);
     assert.equal(install.status, 0, `install failed: ${install.stderr}`);
-    assert.equal(countFiles(root), 7, "install must render all seven units");
+    assert.equal(countFiles(root), 8, "install must render all seven units and the scratch-mount library");
 
     const after = run([], {}, root);
     assert.equal(after.status, 0, "check after install must be clean");

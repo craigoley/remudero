@@ -575,6 +575,15 @@ $(render_cash_boot_secrets)
 
 docker rm -f ${CONTAINER_NAME} >/dev/null 2>&1 || true
 
+# deploy/scratch-mounts.sh: rebuildable I/O (worktrees, tmp, coverage, read model) on the local NVMe.
+# Dark until /etc/remudero/scratch-mounts.on exists; an unusable scratch disk launches as before.
+SCRATCH_ARGS=()
+if [ -r ${BIN_DIR}/rmd-scratch-mounts ]; then
+  . ${BIN_DIR}/rmd-scratch-mounts
+  if scratch_plan "\$STATE_DIR" ${CONTAINER_NAME} && scratch_prepare; then scratch_fresh_tmp; fi
+  echo "rmd-relaunch: scratch mounts \$SCRATCH_NOTE"
+fi
+
 # --restart=on-failure:5 IS DELIBERATE: exit 0 is a STOP and must not be undone. Reboot survival is
 # rmd-fleet.service; crash recovery past the budget is rmd-fleet-watchdog.timer.
 # NODE_OPTIONS: without it V8 caps at ~2GB and the retro rung aborts at ~2046 MB on a 7.9GB host.
@@ -598,6 +607,7 @@ docker run -d --name ${CONTAINER_NAME} \\
   -v ${CONTAINER_CONFIG_DIR}:/home/node/.config/remudero \\
   -v "\$STATE_DIR":/home/node/Remudero \\
   -v ${CLAUDE_DIR}:/home/node/.claude \\
+  "\${SCRATCH_ARGS[@]+"\${SCRATCH_ARGS[@]}"}" \\
   "\$IMAGE" \\
   ./bin/rmd daemon --repo ${DAEMON_REPO} --allow-self-target
 
@@ -751,9 +761,12 @@ effective_directives() {
   printf '%s\n' "$1" | sed -e 's/[[:space:]]*$//' -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d'
 }
 
+render_scratch_lib() { cat "${SCRIPT_DIR}/scratch-mounts.sh"; }
+
 # path : renderer : mode
 UNITS="
 ${LAUNCHER}:render_launcher:0755
+${BIN_DIR}/rmd-scratch-mounts:render_scratch_lib:0755
 ${UNIT_DIR}/${SERVICE_UNIT_NAME}:render_fleet_service:0644
 ${UNIT_DIR}/${WATCHDOG_SERVICE_NAME}:render_watchdog_service:0644
 ${UNIT_DIR}/${WATCHDOG_TIMER_NAME}:render_watchdog_timer:0644
