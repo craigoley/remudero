@@ -1,0 +1,44 @@
+- id: W1-T5062
+  title: "RETIRE SERVE'S SEVEN ROTATION MEMOS — action-results, follow-up-policy, panel-graph (operator-activity and attention census), the operator-agent panel memo, measurement-cadence and cost-anomaly each hold rows in serve's heap; the fact-store views replace them"
+  repo: remudero
+  depends_on: ["W1-T5050", "W1-T5051", "W1-T5052", "W1-T5053"]
+  dispatch_hold: true
+  priority: 4
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "2026-10-01 core-console architecture Phase 4 design (P4-T3x (rotation memo)), arch-phase4-design.md"
+  files:
+    - src/lib/action-results.ts
+    - src/lib/follow-up-policy.ts
+    - src/lib/panel-graph.ts
+    - src/lib/operator-agent.ts
+    - src/lib/serve.ts
+    - test/retire-the-serve-rotation-memos.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-10-01: seven serve-facing rotation memos re-fold archives per route. The agent, actions, workstreams, inbox census and host views replace them.
+  design: |
+    Delete serve's memo construction per route as its view serves. The DAEMON-side users of measurement-cadence and cost-anomaly stay; only serve's copies retire. Measure serve heap before and after.
+  acceptance:
+    - claim: "the rotation memo retired route answers from its view"
+      proof: 'grep: test("W1-T5062: the rotation memo retired route answers from its view" in test/retire-the-serve-rotation-memos.test.ts'
+    - claim: "serve assembles no rotation memo"
+      proof: 'grep: test("W1-T5062: serve assembles no rotation memo" in test/retire-the-serve-rotation-memos.test.ts'
+  falsifier: |
+    Leave the rotation memo constructed in serve: the absence proof finds it. Answer the route from the legacy path: the first proof sees the legacy body.
+  note: |
+    DISPATCH HOLD: waits for gate G: (i) the replacement view has been `serve` for 7 days with shadow readiness held; (ii) the
+    serve.route_reads rollup (P4-T01, critical path, no plan id yet) shows 0 console-token reads of
+    every legacy path this layer serves for 7 days, with the replacement view's own reads > 0 in the
+    same window; (iii) serve RSS p50 and loop-lag p99 over 24 h are no worse after deletion.
+    RELEASE: one plan amendment deleting dispatch_hold, with the gate's rollup evidence quoted in the release PR body (tracked in
+    arch-plan.md, Phase 4). The gate is a measured zero, not intent (D7).
+    Design: ~/Remudero/.session-scratch/arch-phase4-design.md §6, D7 and §10.
+    Scope-time checks 2026-10-01: no run-W1-T5048..5066 branch on origin; no origin/main commit names
+    these ids; no plan record on origin/main or an open PR head covers this change. Reserved from the
+    operator checkout for this filing branch.

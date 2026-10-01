@@ -1,0 +1,42 @@
+- id: W1-T5061
+  title: "RETIRE THE CONSOLE SNAPSHOT CACHE — console-snapshot-cache.ts, console-snapshot-store.ts, serve's CONSOLE_CACHED_READ_PATHS (8 paths), state/console-snapshots/ and the boot prewarm, once now, inbox, feedback, host, repositories and workstreams serve"
+  repo: remudero
+  depends_on: ["W1-T5050", "W1-T5053"]
+  dispatch_hold: true
+  priority: 4
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "2026-10-01 core-console architecture Phase 4 design (P4-T3x (snapshot cache)), arch-phase4-design.md"
+  files:
+    - src/lib/console-snapshot-cache.ts
+    - src/lib/console-snapshot-store.ts
+    - src/lib/serve.ts
+    - test/retire-the-console-snapshot-cache.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-01: 8 of 20 snapshot-cached reads were stale (40%), inbox on every read. The views replace every cached path.
+  design: |
+    Delete the snapshot cache, store, prewarm and the cached-path set. /v1/status and /v1/recent stay as uncached diagnostic routes for the CLI, served from the worker's board and recent (no memo).
+  acceptance:
+    - claim: "the snapshot cache retired route answers from its view"
+      proof: 'grep: test("W1-T5061: the snapshot cache retired route answers from its view" in test/retire-the-console-snapshot-cache.test.ts'
+    - claim: "serve assembles no snapshot cache"
+      proof: 'grep: test("W1-T5061: serve assembles no snapshot cache" in test/retire-the-console-snapshot-cache.test.ts'
+  falsifier: |
+    Leave the snapshot cache constructed in serve: the absence proof finds it. Answer the route from the legacy path: the first proof sees the legacy body.
+  note: |
+    DISPATCH HOLD: waits for gate G: (i) the replacement view has been `serve` for 7 days with shadow readiness held; (ii) the
+    serve.route_reads rollup (P4-T01, critical path, no plan id yet) shows 0 console-token reads of
+    every legacy path this layer serves for 7 days, with the replacement view's own reads > 0 in the
+    same window; (iii) serve RSS p50 and loop-lag p99 over 24 h are no worse after deletion; the inbox and feedback paths go first.
+    RELEASE: one plan amendment deleting dispatch_hold, with the gate's rollup evidence quoted in the release PR body (tracked in
+    arch-plan.md, Phase 4). The gate is a measured zero, not intent (D7).
+    Design: ~/Remudero/.session-scratch/arch-phase4-design.md §6, D7 and §10.
+    Scope-time checks 2026-10-01: no run-W1-T5048..5066 branch on origin; no origin/main commit names
+    these ids; no plan record on origin/main or an open PR head covers this change. Reserved from the
+    operator checkout for this filing branch.

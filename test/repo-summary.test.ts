@@ -186,6 +186,14 @@ const measured = (runs: { succeeded: number; failed: number }): RepoTelemetry =>
   tokens7d: 0, cache_read_tokens7d: 0, cash_usd_7d: 0, subscription: null, modelsused: [],
 });
 
+test("a down repository's reason names when its heartbeat stopped and does not age with the clock", () => {
+  const down = { paused: false, stopped: false, lastDaemonMs: NOW_MS - 45 * 60_000, alerts: [] as string[] };
+  const ok = measured({ succeeded: 3, failed: 1 });
+  const at = (nowMs: number) => deriveRepoCondition(ok, down, nowMs);
+  assert.equal(at(NOW_MS).condition, "down", "positive control: the repo is down at both instants");
+  assert.deepEqual(at(NOW_MS + 10 * 60_000), at(NOW_MS), "ten minutes later the repositories body is unchanged");
+});
+
 test("a repository's condition comes from pause state heartbeat incidents and run outcomes", () => {
   const live = { paused: false, stopped: false, lastDaemonMs: NOW_MS - 60_000, alerts: [] as string[] };
   const ok = measured({ succeeded: 3, failed: 1 });
@@ -193,7 +201,7 @@ test("a repository's condition comes from pause state heartbeat incidents and ru
   assert.deepEqual(deriveRepoCondition(ok, { ...live, paused: true }, NOW_MS), { condition: "paused", reasons: ["instance is paused"] });
   assert.deepEqual(deriveRepoCondition(ok, { ...live, stopped: true }, NOW_MS), { condition: "paused", reasons: ["instance is stopped"] });
   assert.deepEqual(deriveRepoCondition(ok, { ...live, lastDaemonMs: null }, NOW_MS), { condition: "down", reasons: ["no daemon heartbeat in the ledger"] });
-  assert.deepEqual(deriveRepoCondition(ok, { ...live, lastDaemonMs: NOW_MS - 45 * 60_000 }, NOW_MS), { condition: "down", reasons: ["no daemon heartbeat for 45 min"] });
+  assert.deepEqual(deriveRepoCondition(ok, { ...live, lastDaemonMs: NOW_MS - 45 * 60_000 }, NOW_MS), { condition: "down", reasons: [`no daemon heartbeat since ${new Date(NOW_MS - 45 * 60_000).toISOString()}`] });
   assert.deepEqual(deriveRepoCondition(ok, { ...live, alerts: ["x"] }, NOW_MS), { condition: "degraded", reasons: ["1 open incident(s)"] });
   assert.deepEqual(deriveRepoCondition(measured({ succeeded: 1, failed: 2 }), live, NOW_MS), { condition: "degraded", reasons: ["2 failed vs 1 succeeded runs in 7d"] });
   assert.deepEqual(deriveRepoCondition(measured({ succeeded: 0, failed: 0 }), undefined, NOW_MS), { condition: "idle", reasons: ["no finished run in 7d"] });

@@ -1,0 +1,45 @@
+- id: W1-T5056
+  title: "NO INSTANCE LIST SAYS WHAT SERVE ACTUALLY SERVES — core keeps the repo registry, the host registry and the mount set, and the console three more lists; add the instances view (served and mounted, liveness, lease, capabilities, drift including unmounted) and answer /v1/registry as its projection"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "2026-10-01 core-console architecture Phase 4 design (P4-T17), arch-phase4-design.md"
+  files:
+    - src/lib/instances-view.ts
+    - test/instances-view.test.ts
+    - src/lib/read-model-worker.ts
+    - src/lib/serve.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-10-01: the console keeps RMD_CONTROL_REPO_INSTANCES, RMD_CONTROL_ANALYTICS_INSTANCES, a
+    discovered /v1/registry and a hard-coded OWNED_REPOSITORY_REGISTRY. Core has the repo registry, the host
+    registry and the mount set fixed at container create. None of them states which instances serve mounts
+    and serves, so a registered but unmounted instance is invisible until a read 404s.
+  design: |
+    instances: one entry per instance known to any list, with project and repo (registry), mounted and live
+    (serve's mount set and liveness), lease, capabilities (which views and writes exist for it), and drift
+    (registered but unmounted, mounted but unregistered). Dirtied by registry file fingerprints and liveness
+    changes. Source: registry, ledger:<i>. Register it in read-model-worker.ts. GET /v1/registry answers as a
+    projection of the view's body, keeping its current wire shape.
+  acceptance:
+    - claim: "a registered instance that serve does not mount is listed as unmounted drift"
+      proof: 'grep: test("W1-T5056: a registered instance that serve does not mount is listed as unmounted drift" in test/instances-view.test.ts'
+    - claim: "the registry route is a projection of the instances view"
+      proof: 'grep: test("W1-T5056: the registry route is a projection of the instances view" in test/instances-view.test.ts'
+    - claim: "the worker registers the instances view"
+      proof: 'grep: createInstancesView( in src/lib/read-model-worker.ts'
+  falsifier: |
+    Build the list from the registry alone: the unmounted instance reads as served. Keep a separate registry
+    route computation: the projection proof diverges on a fixture with drift.
+  note: |
+    Design: ~/Remudero/.session-scratch/arch-phase4-design.md §4 and §10.
+    Scope-time checks 2026-10-01: no run-W1-T5048..5066 branch on origin; no origin/main commit names
+    these ids; no plan record on origin/main or an open PR head covers this change. Reserved from the
+    operator checkout for this filing branch.

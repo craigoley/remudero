@@ -1,0 +1,48 @@
+- id: W1-T5055
+  title: "THE ANALYTICS REFRESH RUNS P90 49 S ON SERVE AND THE CONSOLE MERGES INSTANCES ITSELF — move the refresh to the slow lane, persist each instance's output as a source_snapshot row, and serve analytics (merged across instances) and usage views from it; the worker reads its own row instead of nav-badge-sources.json"
+  repo: remudero
+  depends_on: []
+  dispatch_hold: true
+  priority: 4
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "2026-10-01 core-console architecture Phase 4 design (P4-T16), arch-phase4-design.md"
+  files:
+    - src/lib/analytics-view.ts
+    - test/analytics-view.test.ts
+    - src/lib/read-model-worker.ts
+    - src/lib/nav-badge-view.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-01: the analytics refresh is p50 8 s, p90 49 s and max 90 s for core. The console merges
+    instances itself (aggregateOverview), reading 1 + 3N routes per page, and /fleet reads usage separately.
+    D10: analytics is NOT re-derived from facts in Phase 4; its output persists in the read model instead.
+  design: |
+    The slow lane (P4-T04) runs the existing refresh (code unchanged, moved threads) per instance and writes
+    source_snapshot(instance, name, as_of, body) for console-v1, signals and usage-v1. analytics merges every
+    instance's snapshot in core; usage carries the usage-v1 numbers /fleet needs. Both answer from the
+    persisted rows after a restart. nav-badge-view.ts reads the worker's own row and nav-badge-sources.json is
+    retired. Sources: analytics:<i>. Register both in read-model-worker.ts.
+  acceptance:
+    - claim: "the analytics view merges every instance snapshot"
+      proof: 'grep: test("W1-T5055: the analytics view merges every instance snapshot" in test/analytics-view.test.ts'
+    - claim: "after a restart the analytics view answers from the persisted source snapshot"
+      proof: 'grep: test("W1-T5055: after a restart the analytics view answers from the persisted source snapshot" in test/analytics-view.test.ts'
+    - claim: "the worker registers the analytics view"
+      proof: 'grep: createAnalyticsView( in src/lib/read-model-worker.ts'
+  falsifier: |
+    Keep the snapshot in memory only: a restarted worker answers nothing until a refresh and the second proof
+    fails. Serve core's snapshot alone: the merge proof misses the second instance.
+  note: |
+    DISPATCH HOLD: waits for P4-T04 (the read-model slow-lane worker thread). A Phase 4 critical-path task is hand-built on a run-unfiled
+    branch with no plan id, so depends_on cannot name it. RELEASE: one plan amendment deleting
+    dispatch_hold once that merges (tracked in arch-plan.md, Phase 4).
+    Design: ~/Remudero/.session-scratch/arch-phase4-design.md §1.1, D10 and §10.
+    Scope-time checks 2026-10-01: no run-W1-T5048..5066 branch on origin; no origin/main commit names
+    these ids; no plan record on origin/main or an open PR head covers this change. Reserved from the
+    operator checkout for this filing branch.

@@ -1,0 +1,40 @@
+- id: W1-T5054
+  title: "THE INCIDENTS PAGE STITCHES THREE READS — add the incidents view over the incident lifecycle store, the emergency-stop panel fold and per-instance daemon liveness bands"
+  repo: remudero
+  depends_on: ["W1-T5051"]
+  priority: 3
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 18.00
+  risk: high
+  band_meaning: span
+  origin: "2026-10-01 core-console architecture Phase 4 design (P4-T15), arch-phase4-design.md"
+  files:
+    - src/lib/incidents-view.ts
+    - test/incidents-view.test.ts
+    - src/lib/read-model-worker.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-10-01: /incidents reads /v1/incidents, the operator-agent emergency state and daemon health
+    separately (3 core reads). The emergency fold is the panel.operator_agent_emergency_* fold that the agent
+    view family (W1-T5051) persists per instance.
+  design: |
+    incidents (one body across instances): the incident lifecycle store (file fingerprint), the emergency-stop
+    fold reused from W1-T5051, and liveness bands from the heartbeat. Dirtied by a store fingerprint change, a
+    panel fact or a band change. Sources: incidents-store, ledger:<i>. Register it in read-model-worker.ts.
+  acceptance:
+    - claim: "an emergency stop row appears in the incidents view"
+      proof: 'grep: test("W1-T5054: an emergency stop row appears in the incidents view" in test/incidents-view.test.ts'
+    - claim: "a heartbeat inside its band leaves the incidents view etag unchanged"
+      proof: 'grep: test("W1-T5054: a heartbeat inside its band leaves the incidents view etag unchanged" in test/incidents-view.test.ts'
+    - claim: "the worker registers the incidents view"
+      proof: 'grep: createIncidentsView( in src/lib/read-model-worker.ts'
+  falsifier: |
+    Omit the panel fold: the emergency stop is missing. Carry the raw heartbeat time: every beat moves the ETag.
+  note: |
+    Design: ~/Remudero/.session-scratch/arch-phase4-design.md §1.1 and §10.
+    Scope-time checks 2026-10-01: no run-W1-T5048..5066 branch on origin; no origin/main commit names
+    these ids; no plan record on origin/main or an open PR head covers this change. Reserved from the
+    operator checkout for this filing branch.

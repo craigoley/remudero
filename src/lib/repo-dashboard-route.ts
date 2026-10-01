@@ -371,7 +371,7 @@ export function deriveRepoCondition(t: RepoTelemetry, signals: RepoInstanceSigna
   if (signals) {
     const ageMs = signals.lastDaemonMs === null ? null : nowMs - signals.lastDaemonMs;
     if (ageMs === null || ageMs > DEFAULT_LIVENESS_BOUND_MS) {
-      return { condition: "down", reasons: [ageMs === null ? "no daemon heartbeat in the ledger" : `no daemon heartbeat for ${Math.round(ageMs / 60_000)} min`] };
+      return { condition: "down", reasons: [signals.lastDaemonMs === null ? "no daemon heartbeat in the ledger" : `no daemon heartbeat since ${fixedClock(signals.lastDaemonMs).iso()}`] };
     }
     if (signals.alerts && signals.alerts.length > 0) reasons.push(`${signals.alerts.length} open incident(s)`);
   }
