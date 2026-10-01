@@ -17,6 +17,7 @@
 // to origin/main (skips, not fails, the shard check when unresolvable); --head-ref defaults to
 // $GITHUB_HEAD_REF, then the current branch. --self-credit-only is the narrow pre-push mode:
 // only a plan-only shard filing on its own run branch is a refusal; unreadable evidence exits 2.
+// --head-sha supplies the pushed commit to that mode when it differs from the checked-out HEAD.
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -226,14 +227,15 @@ export function evaluateWorkerBranchShape({ headRef, commitMessages, addedFiles,
   };
 }
 
-/** The common ancestor of baseRef and HEAD, read locally only (never fetched). Undefined, not
+/** The common ancestor of baseRef and head, read locally only (never fetched). Undefined, not
  *  a throw, when unresolvable — every caller below then degrades to "nothing new seen".
  * @param {string} worktreePath
  * @param {string} baseRef
+ * @param {string} head
  */
-export function resolveMergeBase(worktreePath, baseRef) {
+export function resolveMergeBase(worktreePath, baseRef, head = "HEAD") {
   try {
-    return gitOrThrow(["merge-base", baseRef, "HEAD"], { cwd: worktreePath });
+    return gitOrThrow(["merge-base", baseRef, head], { cwd: worktreePath });
   } catch {
     return undefined;
   }
@@ -316,6 +318,7 @@ export function main(argv) {
     options: {
       base: { type: "string" },
       "head-ref": { type: "string" },
+      "head-sha": { type: "string" },
       "worktree-path": { type: "string" },
       "self-credit-only": { type: "boolean" },
     },
@@ -324,32 +327,37 @@ export function main(argv) {
   const worktreePath = values["worktree-path"] ?? process.cwd();
   const baseRef = values.base ?? "origin/main";
   const headRef = resolveHeadRef(values["head-ref"], worktreePath);
-  const mergeBase = resolveMergeBase(worktreePath, baseRef);
   const selfCreditOnly = values["self-credit-only"] === true;
+  const pushedHead = selfCreditOnly ? values["head-sha"] || "HEAD" : "HEAD";
+  const mergeBase = resolveMergeBase(worktreePath, baseRef, pushedHead);
   if (selfCreditOnly) {
-    if (!headRef || !mergeBase) {
-      console.error("worker-branch-shape: UNKNOWN — head ref or merge base could not be read");
+    if (!headRef || (headRef.startsWith("run-") && !/^run-.+-[0-9]+$/.test(headRef)) || !mergeBase) {
+      console.error("worker-branch-shape: UNKNOWN — pushed head or merge base could not be read");
       process.exitCode = 2;
       return;
     }
     let addedFiles;
     let changedFiles;
     try {
-      addedFiles = gitOrThrow(["diff", "--name-only", "--diff-filter=A", "-z", mergeBase, "HEAD"], { cwd: worktreePath }).split("\0").filter(Boolean);
-      changedFiles = gitOrThrow(["diff", "--name-only", "-z", mergeBase, "HEAD"], { cwd: worktreePath }).split("\0").filter(Boolean);
+      addedFiles = gitOrThrow(["diff", "--name-only", "--diff-filter=A", "-z", mergeBase, pushedHead], { cwd: worktreePath }).split("\0").filter(Boolean);
+      changedFiles = gitOrThrow(["diff", "--name-only", "-z", mergeBase, pushedHead], { cwd: worktreePath }).split("\0").filter(Boolean);
     } catch {
       console.error("worker-branch-shape: UNKNOWN — branch diff could not be read");
       process.exitCode = 2;
       return;
     }
     const shardFiles = addedFiles.filter((path) => SHARD_FILE_RE.test(path));
-    const unreadable = shardFiles.filter((path) => readFileIfPresent(join(worktreePath, path)) === undefined);
-    if (unreadable.length > 0) {
-      console.error("worker-branch-shape: UNKNOWN — added plan shard could not be read");
+    const shardContents = new Map();
+    try {
+      for (const path of shardFiles) {
+        shardContents.set(path, gitOrThrow(["show", `${pushedHead}:${path}`], { cwd: worktreePath }));
+      }
+    } catch {
+      console.error("worker-branch-shape: UNKNOWN — added plan shard in pushed commit could not be read");
       process.exitCode = 2;
       return;
     }
-    const shardIds = shardTaskIds(shardFiles, (path) => readFileIfPresent(join(worktreePath, path)));
+    const shardIds = shardTaskIds(shardFiles, (path) => shardContents.get(path));
     if (shardFiles.length > 0 && shardIds.length !== shardFiles.length) {
       console.error("worker-branch-shape: UNKNOWN — added plan shard id could not be parsed");
       process.exitCode = 2;

@@ -191,13 +191,17 @@ fi
 # PR will show. stdin is unused everywhere else in this hook, so consuming it here costs nothing;
 # when it is empty — run by hand, or by this repo's own tests — fall back to the checked-out branch.
 head_ref=""
+head_sha=""
 while read -r _local_ref _local_sha remote_ref _remote_sha; do
   case "$remote_ref" in
-    refs/heads/*) head_ref="${remote_ref#refs/heads/}"; break ;;
+    refs/heads/*) head_ref="${remote_ref#refs/heads/}"; head_sha="$_local_sha"; break ;;
   esac
 done
 if [ -z "$head_ref" ]; then
   head_ref="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+fi
+if [ -z "$head_sha" ]; then
+  head_sha="HEAD"
 fi
 if [ -f scripts/head-identity-gate.mjs ]; then
   if [ -n "$head_ref" ] && [ "$head_ref" != "HEAD" ]; then
@@ -218,7 +222,7 @@ fi
 # This narrow check runs before the first push, when the branch can still be renamed. An
 # unreadable base, diff or shard is unknown, not a reason to strand fleet work.
 if [ -f scripts/worker-branch-shape.mjs ]; then
-  node scripts/worker-branch-shape.mjs --self-credit-only --base origin/main --head-ref "$head_ref"
+  node scripts/worker-branch-shape.mjs --self-credit-only --base origin/main --head-ref "$head_ref" --head-sha "$head_sha"
   rc=$?
   if [ "$rc" -eq 2 ]; then
     echo "pre-push: worker-branch-shape could not read local evidence — not blocking" >&2

@@ -33,7 +33,7 @@ function fixture(t: TestContext) {
     work.git("add", "plan/tasks.d/W9-T1-shard.yaml");
   };
   const commit = () => work.git("commit", "--quiet", "-m", "file a plan shard");
-  const push = (head: string) => spawnSync("git", ["push", "origin", `HEAD:refs/heads/${head}`], {
+  const push = (head: string, source = "HEAD") => spawnSync("git", ["push", "origin", `${source}:refs/heads/${head}`], {
     cwd: work.dir,
     encoding: "utf8",
     env: { ...process.env, RMD_PREPUSH_GATES: "1" },
@@ -59,6 +59,7 @@ test("non-crediting filings and implementation branches remain pushable", (t) =>
   assert.equal(ordinary.status, 0, ordinary.stderr);
   const malformedRun = filing.push("run-W9-T1-not-an-epoch");
   assert.equal(malformedRun.status, 0, malformedRun.stderr);
+  assert.match(malformedRun.stderr, /could not read.*not blocking/);
 
   const implementation = fixture(t);
   implementation.shard();
@@ -67,6 +68,27 @@ test("non-crediting filings and implementation branches remain pushable", (t) =>
   implementation.commit();
   const built = implementation.push("run-W9-T1-1790820133001");
   assert.equal(built.status, 0, built.stderr);
+});
+
+test("the committed shard, not a dirty working-tree copy, decides the push", (t) => {
+  const f = fixture(t);
+  f.shard();
+  f.commit();
+  writeFileSync(join(f.work.dir, "plan", "tasks.d", "W9-T1-shard.yaml"), "- id: W9-T2\n  title: uncommitted edit\n");
+  const result = f.push("run-W9-T1-1790820133003");
+  assert.notEqual(result.status, 0, result.stderr);
+  assert.match(result.stderr, /plan-filing-run-credit/);
+});
+
+test("the pushed source commit, not the checked-out HEAD, decides the push", (t) => {
+  const f = fixture(t);
+  f.shard();
+  f.commit();
+  f.work.git("branch", "filed-shard");
+  f.work.git("switch", "--quiet", "-c", "other", "origin/main");
+  const result = f.push("run-W9-T1-1790820133004", "filed-shard");
+  assert.notEqual(result.status, 0, result.stderr);
+  assert.match(result.stderr, /plan-filing-run-credit/);
 });
 
 test("unreadable branch-shape evidence cannot strand a push", (t) => {
