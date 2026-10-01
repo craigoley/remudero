@@ -10,7 +10,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -73,6 +73,11 @@ function fixture(): Fixture {
       RMD_CLEANUP_LSOF: lsof,
       RMD_CLEANUP_FSID: fsid,
       RMD_CLEANUP_WATCH_ROOTS: "",
+      // the clone roots and coverage caches default to the real home; a case that sweeps them
+      // names its own, and unpublished HEADs are bundled under the fixture, never /mnt/rmd
+      RMD_CLEANUP_WORKTREE_ROOTS: "",
+      RMD_CLEANUP_COVERAGE_PATHS: "",
+      RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT: join(root, "wt-archive"),
       IDLE_MINUTES: "720",
     },
   };
@@ -176,16 +181,17 @@ test("W1-T4770: a dirty or unsaved worktree is kept with its reason", () => {
 
   for (const wt of [saved, dirty, unsaved, landed, notLanded]) age(wt);
 
-  const r = run(fx);
+  // the bundle archive shares the root filesystem here, so an unpublished HEAD has nowhere safe to go
+  const r = run(fx, { FAKE_ARCHIVE_FSID: "1" });
   assert.equal(r.status, 0, r.stderr + r.stdout);
   assert.equal(existsSync(saved), false, "a clean worktree whose HEAD is on a remote branch is removed");
   assert.equal(existsSync(landed), false, "a clean worktree whose task landed on origin/main is removed");
   assert.equal(existsSync(dirty), true, "uncommitted changes must never be swept");
   assert.match(r.stdout, new RegExp(`KEEP ${dirty}: uncommitted changes`));
   assert.equal(existsSync(unsaved), true, "commits that are not on GitHub must never be swept");
-  assert.match(r.stdout, new RegExp(`KEEP ${unsaved}: HEAD not on a remote branch`));
+  assert.match(r.stdout, new RegExp(`KEEP ${unsaved}: unpublished HEAD could not be archived safely`));
   assert.equal(existsSync(notLanded), true, "a run branch whose task is not on main is unsaved");
-  assert.match(r.stdout, new RegExp(`KEEP ${notLanded}: HEAD not on a remote branch`));
+  assert.match(r.stdout, new RegExp(`KEEP ${notLanded}: unpublished HEAD could not be archived safely`));
 });
 
 test("W1-T4770: dry run changes nothing and a same-filesystem archive is refused", () => {
@@ -245,4 +251,167 @@ test("W1-T4770: the archive ages out only the archive itself", () => {
   assert.equal(existsSync(old), false, "an archive file past ARCHIVE_DAYS is removed");
   assert.equal(existsSync(recent), true);
   assert.equal(existsSync(outside), true);
+});
+
+/** A tree with its own `.git` directory, copied from the fixture origin at `<parent>/<name>`. */
+function ownGitDirCopy(fx: Fixture, parent: string, name: string): string {
+  const origin = join(fx.root, "origin.git");
+  mkdirSync(parent, { recursive: true });
+  const p = join(parent, name);
+  git(parent, "clone", "--quiet", origin, p);
+  return p;
+}
+
+test("an unpublished worktree is bundled to the archive before it is removed", () => {
+  const fx = fixture();
+  const { addWorktree } = repos(fx);
+  const unsaved = addWorktree("unsaved", "unsaved-branch");
+  git(unsaved, "commit", "--allow-empty", "-m", "local only");
+  const head = git(unsaved, "rev-parse", "HEAD").trim();
+  age(unsaved);
+
+  const r = run(fx);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(existsSync(unsaved), false, "once its HEAD is bundled the clean tree is reclaimable");
+  const archive = fx.env.RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT;
+  const bundle = join(archive, `unsaved-${head}.bundle`);
+  assert.match(r.stdout, new RegExp(`ARCHIVE-WORKTREE ${unsaved} HEAD=${head} -> ${bundle}`));
+  assert.match(git(fx.root, "bundle", "list-heads", bundle), new RegExp(`^${head} HEAD`), "the bundle holds the unpublished HEAD");
+  assert.deepEqual(readdirSync(archive), [`unsaved-${head}.bundle`], "no temp bundle is left behind");
+});
+
+test("a standalone clone under a configured root is removed only when clean and idle and unprotected", () => {
+  const fx = fixture();
+  repos(fx);
+  const clones = join(fx.root, "clones");
+  const clean = ownGitDirCopy(fx, clones, "clean");
+  const dirty = ownGitDirCopy(fx, clones, "dirty");
+  writeFileSync(join(dirty, "uncommitted.txt"), "x\n");
+  const protectedClone = ownGitDirCopy(fx, clones, "protected");
+  const ignored = ownGitDirCopy(fx, clones, "ignored");
+  writeFileSync(join(ignored, ".git", "info", "exclude"), "node_modules\nstate\n");
+  mkdirSync(join(ignored, "state"));
+  writeFileSync(join(ignored, "state", "ledger.ndjson"), "{}\n");
+  const disposable = ownGitDirCopy(fx, clones, "disposable");
+  writeFileSync(join(disposable, ".git", "info", "exclude"), "node_modules\n");
+  mkdirSync(join(disposable, "node_modules"));
+  writeFileSync(join(disposable, "node_modules", "x.js"), "1\n");
+  const fresh = ownGitDirCopy(fx, clones, "fresh");
+  const notGit = join(clones, "plain");
+  mkdirSync(notGit);
+  for (const p of [clean, dirty, protectedClone, ignored, disposable, notGit]) age(p);
+  // fresh only by its Git metadata: a status or fetch refreshes .git and is not user activity
+  age(fresh);
+  writeFileSync(join(fresh, ".git", "index"), readFileSync(join(fresh, ".git", "index")));
+
+  const r = run(fx, { RMD_CLEANUP_WORKTREE_ROOTS: clones, RMD_CLEANUP_PROTECTED_WORKTREE_ROOTS: protectedClone });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(existsSync(clean), false, "a clean idle clone whose HEAD is on origin is reclaimed");
+  assert.match(r.stdout, new RegExp(`REMOVE ${clean} \\(standalone clone\\)`));
+  assert.equal(existsSync(fresh), false, "a write to .git alone does not make a clone active");
+  assert.equal(existsSync(disposable), false, "node_modules is regenerable");
+  assert.equal(existsSync(dirty), true);
+  assert.match(r.stdout, new RegExp(`KEEP ${dirty}: uncommitted changes`));
+  assert.equal(existsSync(protectedClone), true);
+  assert.match(r.stdout, new RegExp(`KEEP ${protectedClone}: protected by janitor configuration`));
+  assert.equal(existsSync(join(ignored, "state", "ledger.ndjson")), true, "unknown ignored data is never swept");
+  assert.match(r.stdout, new RegExp(`KEEP ${ignored}: ignored data includes paths beyond node_modules`));
+  assert.equal(existsSync(notGit), true);
+  assert.match(r.stdout, new RegExp(`KEEP ${notGit}: Git metadata is missing`));
+});
+
+test("a locked linked worktree is kept however idle it is", () => {
+  const fx = fixture();
+  const { main, addWorktree } = repos(fx);
+  const locked = addWorktree("locked", "locked-branch");
+  git(locked, "commit", "--allow-empty", "-m", "work");
+  git(locked, "push", "origin", "locked-branch");
+  git(main, "worktree", "lock", locked);
+  age(locked);
+
+  const r = run(fx);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(existsSync(locked), true, "a lock is an explicit keep");
+  assert.match(r.stdout, new RegExp(`KEEP ${locked}: Git worktree is locked`));
+});
+
+test("an incomplete activity walk keeps the path as unknown", () => {
+  const fx = fixture();
+  const blind = scratchDir(fx, "rmd-blind", true);
+  const failingFind = join(fx.root, "bin", "find");
+  writeFileSync(failingFind, "#!/usr/bin/env bash\nexit 23\n");
+  chmodSync(failingFind, 0o755);
+  const r = run(fx, { PATH: `${join(fx.root, "bin")}:${process.env.PATH ?? ""}` });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(existsSync(blind), true, "a failed walk must not delete the path for any uid");
+  assert.match(r.stdout, new RegExp(`KEEP ${blind}: activity probe failed \\(unknown\\)`));
+});
+
+test("temp-only mode sweeps scratch and coverage and leaves worktrees and transcripts alone", () => {
+  const fx = fixture();
+  const { addWorktree } = repos(fx);
+  const saved = addWorktree("saved", "saved-branch");
+  git(saved, "commit", "--allow-empty", "-m", "work");
+  git(saved, "push", "origin", "saved-branch");
+  age(saved);
+  const transcriptDir = join(fx.home, "agent", ".claude", "projects", "p");
+  mkdirSync(transcriptDir, { recursive: true });
+  writeFileSync(join(transcriptDir, "session.jsonl"), "{}\n");
+  age(transcriptDir);
+  const idle = scratchDir(fx, "rmd-idle", true);
+  const coverage = join(fx.root, "coverage-cache");
+  mkdirSync(coverage);
+  writeFileSync(join(coverage, "lcov.info"), "x");
+  age(coverage);
+  const freshCoverage = join(fx.root, "coverage-fresh");
+  mkdirSync(freshCoverage);
+  writeFileSync(join(freshCoverage, "lcov.info"), "x");
+
+  const r = run(fx, { RMD_CLEANUP_ONLY_TMP: "1", RMD_CLEANUP_COVERAGE_PATHS: `${coverage}:${freshCoverage}` });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.match(r.stdout, /temporary-roots-only mode/);
+  assert.equal(existsSync(idle), false, "the temp roots are still swept");
+  assert.equal(existsSync(coverage), false, "an idle coverage cache is regenerable");
+  assert.equal(existsSync(freshCoverage), true, "a coverage cache written recently is in use");
+  assert.equal(existsSync(saved), true, "worktrees are the six-hourly pass's job");
+  assert.equal(existsSync(join(transcriptDir, "session.jsonl")), true, "transcripts are not archived in temp-only mode");
+  assert.equal(existsSync(fx.archive), false);
+});
+
+test("an invalid temp-only flag is refused before anything is touched", () => {
+  const fx = fixture();
+  const idle = scratchDir(fx, "rmd-idle", true);
+  const r = run(fx, { RMD_CLEANUP_ONLY_TMP: "yes" });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /RMD_CLEANUP_ONLY_TMP must be 0 or 1/);
+  assert.equal(existsSync(idle), true);
+});
+
+test("the hourly temp sweep wrapper runs the janitor in temp-only mode and refuses a missing janitor", () => {
+  const fx = fixture();
+  const idle = scratchDir(fx, "rmd-idle", true);
+  const wrapper = (extra: Record<string, string>) =>
+    spawnSync("bash", ["deploy/rmd-tmp-sweep.sh"], { encoding: "utf8", env: { ...process.env, ...fx.env, ...extra } });
+
+  const ok = wrapper({ RMD_HOST_CLEANUP_SCRIPT: join(process.cwd(), SCRIPT), IDLE_MINUTES: "" });
+  assert.equal(ok.status, 0, ok.stderr + ok.stdout);
+  assert.match(ok.stdout, /temporary-roots-only mode/);
+  assert.equal(existsSync(idle), false, "the wrapper's six-hour default sweeps a 13-hour-old dir");
+
+  const missing = wrapper({ RMD_HOST_CLEANUP_SCRIPT: join(fx.root, "absent.sh") });
+  assert.equal(missing.status, 2);
+  assert.match(missing.stderr, /host janitor is missing or not executable/);
+});
+
+test("a clean idle checkout directly under the home is never swept by default", () => {
+  const fx = fixture();
+  repos(fx);
+  const live = ownGitDirCopy(fx, fx.home, "rmd-mint");
+  age(live);
+  const env: Record<string, string> = { ...fx.env };
+  delete env.RMD_CLEANUP_WORKTREE_ROOTS;
+  const r = spawnSync("bash", [SCRIPT], { encoding: "utf8", env: { ...process.env, RMD_CLEANUP_WORKTREE_ROOTS: undefined, ...env } as NodeJS.ProcessEnv });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(existsSync(live), true, "a home checkout is a live tree, not scratch");
+  assert.doesNotMatch(r.stdout, new RegExp(`REMOVE ${live}`));
 });

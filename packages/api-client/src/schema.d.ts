@@ -3107,6 +3107,43 @@ export interface components {
     VersionResult: {
       sha: string;
     };
+    /** One caller's reads of one route since the rollup began, and the newest read's time. */
+    RouteReadTotals: {
+      reads: number;
+      lastAt: string | null;
+    };
+    /** One legacy cache layer's gate G reading. zeroConsoleDays counts whole days since the layer's newest console read, or since the rollup began. positiveControl is true when the views that replace it were read by the console inside that zero window; gateHolds needs both. */
+    RouteReadLayerSummary: {
+      layer: string;
+      paths: (string)[];
+      consoleReads: number;
+      lastConsoleReadAt: string | null;
+      zeroConsoleDays: number;
+      positiveControl: boolean;
+      gateHolds: boolean;
+    };
+    /** One served route's reads by caller. console and fleet are absent until that caller reads it. */
+    RouteReadSummary: {
+      path: string;
+      kind: "view" | "legacy" | "other";
+      layers: (string)[];
+      zeroConsoleDays: number;
+      console?: RouteReadTotals;
+      fleet?: RouteReadTotals;
+    };
+    /** GET /v1/route-reads's body (src/lib/route-read-rollup.ts): the hourly serve.route_reads rollup folded into totals, plus the current hour's counts. */
+    RouteReadsResult: {
+      asOf: string;
+      since: string | null;
+      hours: number;
+      gateDays: number;
+      views: {
+        consoleReads: number;
+        lastConsoleReadAt: string | null;
+      };
+      layers: (RouteReadLayerSummary)[];
+      routes: (RouteReadSummary)[];
+    };
     /** One option on an inbox item's plain message (src/lib/inbox-plain.ts's `PlainOption`). */
     PlainOption: {
       label: string;
@@ -4778,6 +4815,15 @@ export interface paths {
     get: {
       responses: {
           "200": VersionResult;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/route-reads": {
+    get: {
+      responses: {
+          "200": RouteReadsResult;
           "401": Error;
           "403": Error;
         };
