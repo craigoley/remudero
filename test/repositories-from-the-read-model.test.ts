@@ -33,7 +33,7 @@ import {
 import { buildServeServer, repositoriesSources, type ServeDeps } from "../src/lib/serve.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { VIEW_SHADOW_DIFF_STEP, createViewShadow, readShadowEvidence, type ShadowRequest } from "../src/lib/view-shadow.js";
-import type { ViewBody } from "../src/lib/views.js";
+import type { ViewBody, ViewSource } from "../src/lib/views.js";
 
 // P1-08: the repositories view is #7926's repos summary for every instance, computed from each instance's
 // read-model `repo_row` table, counted once however many rotations carry a row, and dark until switched.
@@ -362,6 +362,8 @@ test("an instance with no read model or no summary yet is absent with a reason",
   assert.deepEqual(byId.get("core"), { instanceId: "core", reason: "the read model has not projected this instance's ledger yet" });
   assert.deepEqual(byId.get("site"), { instanceId: "site", reason: "the read model does not project this instance" });
   assert.equal(unticked.sources.find((s) => s.name === "repositories:core")?.state, "unavailable");
+  assert.equal(unticked.sources.find((s) => s.name === "repositories:core")?.phase, "warming", "a projector that never ticked is warming, so the comparator skips the sample");
+  assert.equal(unticked.sources.find((s) => s.name === "repositories:site")?.phase, undefined, "an instance the read model does not project is not warming");
 
   const broken = view.materialize({ now: NOW + 300_000, instances: [{ state: { instance: "core", generation: 3, lease: "held", failures: 0, newestTs: null, tickedAt: NOW }, db: { path: dbPath, prepare: () => { throw new Error("no such table: repo_row"); } } as never }] })[0];
   assert.match(broken.data.instances[0].reason ?? "", /repository rows unreadable: no such table/);
@@ -608,4 +610,35 @@ test("a cost row inside both windows that the view lacks is still a real reposit
   const tokens = diffs.find((d) => d.path === "instances[instanceId=core].summary.repos[id=craigoley/remudero].telemetry.tokens7d");
   assert.equal(tokens?.classification, "real", JSON.stringify(diffs));
   assert.match(tokens!.reason, /a residual of 1234 no measured row explains \(c-T7#implement\.done@/);
+});
+
+test("a summary computed while the projector catches up says so until it is recomputed", (t) => {
+  // 2026-10-01T17:39:04Z: core caught up at 17:39:00.6, but the summary computed mid-catch-up (0 runs, heartbeat
+  // 09-10) was still cached and its source read fresh, so the comparator counted "down" vs "healthy" as real.
+  const f = fixture(t);
+  createRepositoriesSourcePublisher({ stateDir: f.stateDir, instances: () => f.sources.slice(0, 1) })();
+  const view = createRepositoriesReadModelView<ReadModelInstanceState>(ledgerSource);
+  const db = { path: join(f.stateDir, "read-model", "core.v1.sqlite"), prepare: () => ({ all: () => [], get: () => undefined }) } as never;
+  const state: ReadModelInstanceState = { instance: "core", generation: 1, lease: "held", failures: 0, newestTs: null, tickedAt: NOW, catchUp: { rowsBehind: 9, etaMs: 1_000, at: NOW } };
+  const source = (now: number, s: ReadModelInstanceState): ViewSource => view.materialize({ now, instances: [{ state: s, db }] })[0]!.sources.find((x) => x.name === "repositories:core")!;
+  assert.deepEqual([source(NOW, state).state, source(NOW, state).phase], ["stale", "catching_up"]);
+  const { catchUp: _done, ...rest } = state;
+  const caughtUp: ReadModelInstanceState = { ...rest, generation: 2 };
+  assert.deepEqual([source(NOW + 5_000, caughtUp).state, source(NOW + 5_000, caughtUp).phase], ["stale", "catching_up"], "the cached summary is still the partial one");
+  assert.deepEqual([source(NOW + 61_000, caughtUp).state, source(NOW + 61_000, caughtUp).phase], ["fresh", undefined], "recomputed once caught up");
+});
+
+test("a later worker attempt read only by legacy does not drop the recon row inside both windows", (t) => {
+  // Captured 2026-10-01T18:27:18Z: cache_read_tokens7d view 2780545074 > legacy 2780430258 by exactly
+  // W1-T5017#recon.done@18:18:34.607 (114816). Legacy read the ledger at the sample, after the run's costed
+  // worker.attempt at 18:27:11 landed, and the unwindowed run pass let that later row drop the earlier recon.done.
+  const f = fixture(t);
+  const run = "W1-T5017-1790877166949";
+  const at = NOW - 600_000;
+  const attempt = JSON.stringify({ ts: new Date(at).toISOString(), step: "worker.attempt", task_id: "W1-T5017", run_id: run, billing_mode: "subscription", tokens: { input: 143_259, output: 1_757, cacheRead: 114_816 } });
+  const recon = JSON.stringify({ ts: new Date(at).toISOString(), step: "recon.done", task_id: "W1-T5017", run_id: run, billing_mode: "subscription", total_cost_usd: 0, tokens: { input: 143_259, output: 1_757, cacheRead: 114_816 } });
+  const later = JSON.stringify({ ts: new Date(NOW + 10_000).toISOString(), step: "worker.attempt", task_id: "W1-T5017", run_id: run, billing_mode: "subscription", total_cost_usd: 1.63, tokens: { input: 1, output: 1, cacheRead: 4_232_695 } });
+  const diffs = sampleLater(t, f, [attempt, recon], [later], 20_000);
+  assert.deepEqual(diffs.filter((d) => d.classification === "real"), [], JSON.stringify(diffs));
+  assert.deepEqual(diffs.map((d) => d.path), [], "both sides evaluated the same rows at the build instant");
 });

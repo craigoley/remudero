@@ -150,6 +150,10 @@ interface InstanceSummary {
   reason?: string;
   /** Each own repository's shadow facts, by repository id. */
   shadow?: Record<string, RepoShadowFacts>;
+  /** The summary was computed while the instance's projector was still catching up, so from a partial ledger. */
+  partial?: true;
+  /** No summary yet because the instance's projector has not ticked: the read model is still warming. */
+  warming?: true;
 }
 
 type ShadowFactsByInstance = Record<string, Record<string, RepoShadowFacts>>;
@@ -252,7 +256,7 @@ function planReader(): { read: (path: string) => Plan; fresh: (path: string) => 
 }
 
 /** `repositories` materialized by the read-model worker; `ledgerSource` is the worker's own, passed in. */
-export function createRepositoriesReadModelView<S extends { instance: string; tickedAt?: number; generation: number }>(ledgerSource: (state: S, now: number) => ViewSource): {
+export function createRepositoriesReadModelView<S extends { instance: string; tickedAt?: number; generation: number; catchUp?: unknown }>(ledgerSource: (state: S, now: number) => ViewSource): {
   name: string;
   version: number;
   prepare(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }, more: () => boolean): boolean;
@@ -279,9 +283,11 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
     const prior = computed.get(instanceId);
     const generation = slot?.state.generation ?? -1;
     const next = summarize(slot, options, now, plans.read);
+    const partial = slot?.state.catchUp !== undefined ? { partial: true as const } : {};
+    const warming = slot?.db !== undefined && slot.state.tickedAt === undefined ? { warming: true as const } : {};
     computed.set(instanceId, next.summary
-      ? { atMs: now, generation, sourcesMtimeMs, summary: next.summary, ...(next.shadow ? { shadow: next.shadow } : {}) }
-      : { atMs: now, generation, sourcesMtimeMs, reason: next.reason, ...(prior?.summary ? { summary: prior.summary, ...(prior.shadow ? { shadow: prior.shadow } : {}) } : {}) });
+      ? { atMs: now, generation, sourcesMtimeMs, summary: next.summary, ...(next.shadow ? { shadow: next.shadow } : {}), ...partial }
+      : { atMs: now, generation, sourcesMtimeMs, reason: next.reason, ...warming, ...(prior?.summary ? { summary: prior.summary, ...(prior.shadow ? { shadow: prior.shadow } : {}), ...(prior.partial ? { partial: true as const } : {}) } : {}) });
   };
   const published = (instances: ReadonlyArray<{ db?: ReadModelDb }>): { path: string; sources?: RepositoriesSources } | undefined => {
     const dbPath = instances.find((slot) => slot.db)?.db?.path;
@@ -388,11 +394,12 @@ function summarize(
   return outcome.ok ? { summary: outcome.summary, ...(outcome.shadow ? { shadow: outcome.shadow } : {}) } : { reason: outcome.reason };
 }
 
-/** Absent until the first summary, stale while the last recompute failed (#7928), else fresh. */
+/** Absent until the first summary, catching up while it was computed from a partial ledger, stale while the last recompute failed (#7928), else fresh. */
 function summarySource(instanceId: string, current: InstanceSummary): ViewSource {
   const name = `repositories:${instanceId}`;
   const asOf = current.summary?.generated_at ?? null;
-  if (current.summary === undefined) return { name, asOf, state: "unavailable", reason: current.reason };
+  if (current.summary === undefined) return { name, asOf, state: "unavailable", reason: current.reason, ...(current.warming ? { phase: "warming" as const } : {}) };
+  if (current.partial) return { name, asOf, state: "stale", phase: "catching_up", reason: "computed while the ledger projector was catching up" };
   if (current.reason) return { name, asOf, state: "stale", reason: current.reason };
   return { name, asOf, state: "fresh" };
 }

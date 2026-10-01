@@ -23,7 +23,7 @@ import { join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { READ_MODEL_DIRNAME, withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
-import { renderView, type ReadModelViewRoutesOptions, type ViewDefinition } from "./views.js";
+import { renderView, type ReadModelViewRoutesOptions, type SourcePhase, type ViewDefinition, type ViewSource } from "./views.js";
 
 export const VIEW_SHADOW_DIFF_STEP = "view.shadow_diff";
 /** Design §5: a sampled comparator, one comparison per minute per view key. */
@@ -42,6 +42,20 @@ const ID_KEYS = ["taskId", "task_id", "instanceId", "id", "repo", "prNumber", "n
 /** Build and freshness stamps: they differ on every recompute, so they are never a diff. */
 const TIME_KEYS: ReadonlySet<string> = new Set(["generatedAt", "generated_at", "asOf", "as_of"]);
 const TIME_LEAF = /(At|_at|Ms|_ms|Age|_age)$/;
+
+/** The phases in which a source says its side is still being built, so its body is not yet a comparable answer. */
+const UNREADY_PHASES: ReadonlySet<SourcePhase> = new Set<SourcePhase>(["warming", "catching_up"]);
+
+/**
+ * Why a side's sources say it is not ready to be compared, from their structured `phase`: still warming or
+ * catching up. A rebuild after a deploy or a cold start re-reads the ledger, and a body built mid-rebuild
+ * differs from legacy by construction (2026-10-01 17:38Z). A bare `unavailable` can be structural (an
+ * instance with no plan), so it is compared.
+ */
+export function unreadySources(sources: readonly ViewSource[] | undefined): string | undefined {
+  const unready = (sources ?? []).filter((s) => s.phase !== undefined && UNREADY_PHASES.has(s.phase));
+  return unready.length === 0 ? undefined : unready.map((s) => `${s.name} ${s.phase}`).join(", ");
+}
 
 export type ShadowClassification = "legacy_horizon" | "timing" | "dedupe" | "real";
 export const SHADOW_CLASSIFICATIONS: readonly ShadowClassification[] = ["legacy_horizon", "timing", "dedupe", "real"];
@@ -516,6 +530,8 @@ export interface ShadowLegacy {
   derived?: Readonly<Record<string, readonly string[]>>;
   /** What each side was computed from (a plan generation, a probe instant), carried onto the diff row as evidence. */
   inputs?: Readonly<Record<string, unknown>>;
+  /** Why legacy's own sources say it is not ready ({@link unreadySources}): the sample is skipped, not compared. */
+  unready?: string;
 }
 
 /** A derived path takes its inputs' classes: `real` unless an input differs and every differing input is explained. */
@@ -539,6 +555,10 @@ export interface ViewShadowState {
   lastRealMs: number | null;
   /** The keys sampled since the streak began; absent in a state persisted before it was counted. */
   streakKeys?: string[];
+  /** Samples not compared because a side said it was not ready, and the latest one's reason. */
+  skipped?: number;
+  lastSkippedMs?: number;
+  lastSkipReason?: string;
 }
 
 export interface ShadowReadiness extends Omit<ViewShadowState, "streakKeys"> {
@@ -609,6 +629,7 @@ export function shadowReadiness(view: string, state: ViewShadowState, nowMs: num
   else if (s.streakSamples < requiredSamples) reason = `${s.streakSamples} of ${requiredSamples} samples since the last real diff (a day at one per minute for ${keys} key(s))`;
   else reason = `zero real diffs in ${s.streakSamples} samples over ${Math.floor(streakMs / DAY_MS)} day(s)`;
   const ready = streakMs >= DAY_MS && s.streakSamples >= requiredSamples;
+  if (!ready && s.skipped) reason += `; ${s.skipped} sample(s) skipped while a side was not ready (last: ${s.lastSkipReason})`;
   return { view, ...s, keys, requestsPerDay: requestsPerDay === null ? null : Math.round(requestsPerDay), requiredSamples, ready, reason };
 }
 
@@ -623,10 +644,12 @@ export interface ShadowComparison {
   view: string;
   key: string;
   diffs: Array<{ path: string; classification: ShadowClassification; reason: string }>;
+  /** Why the sample was not compared: a side said it was not ready. */
+  skipped?: string;
 }
 
 export interface ViewShadow {
-  compare(input: { view: string; key: string; requests: number; legacy: ShadowLegacy; body: { data: unknown; asOf: string | null } }): ShadowComparison;
+  compare(input: { view: string; key: string; requests: number; legacy: ShadowLegacy; body: { data: unknown; asOf: string | null; sources?: readonly ViewSource[] } }): ShadowComparison;
   readiness(): ShadowReadiness[];
 }
 
@@ -641,6 +664,13 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
       const state = stateOf(view);
       state.requests += requests;
       state.firstRequestMs ??= now;
+      const viewUnready = unreadySources(body.sources);
+      const unready = legacy.unready !== undefined ? `legacy ${legacy.unready}` : viewUnready === undefined ? undefined : `view ${viewUnready}`;
+      if (unready !== undefined) {
+        Object.assign(state, { skipped: (state.skipped ?? 0) + 1, lastSkippedMs: now, lastSkipReason: unready });
+        opts.store?.save(view, state);
+        return { view, key, diffs: [], skipped: unready };
+      }
       state.samples++;
       state.streakSinceMs ??= now;
       const raw = diffViewData(legacy.data, body.data).map((d) => {
@@ -727,7 +757,8 @@ export function legacyViewSampler(opts: { legacy: readonly ViewDefinition[]; pos
       const rendered = definition ? renderView(definition, clock, params) : undefined;
       if (rendered === undefined || "error" in rendered) return opts.post({ view, key, requests });
       const asOf = rendered.body.asOf === null ? Number.NaN : Date.parse(rendered.body.asOf);
-      opts.post({ view, key, requests, legacy: { data: rendered.body.data, asOfMs: Number.isFinite(asOf) ? asOf : clock.now() } });
+      const unready = unreadySources(rendered.body.sources);
+      opts.post({ view, key, requests, legacy: { data: rendered.body.data, asOfMs: Number.isFinite(asOf) ? asOf : clock.now(), ...(unready ? { unready } : {}) } });
     },
   });
 }
