@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 // `configPath()` resolves `<homedir()>/.config/remudero/config.json` through the same reader the
@@ -33,8 +33,8 @@ import { WORKER_HOME_SYMLINKS } from "./worker-home.js";
  * the installed CLI is UNMEASURED, and this repo has already paid for bounds that fire on healthy
  * conditions, so `probeContainment` records the verdict and does not throw on it.
  *
- * Runs once per run, not per spawn: the settings file, host and CLI version are constant across a
- * run's spawns, so the fact proven once holds for all of them.
+ * Called once per run; an unproven first attempt may use one more spawn with a fresh token. The
+ * settings file, host and CLI version are constant across the run's spawns.
  *
  * FALSIFIER: test/containment.test.ts. // Why: docs/forensics/containment.md#module-header.
  */
@@ -1036,9 +1036,11 @@ export async function probeContainment(opts: {
   // GATE 2 — empirical: an outside-cwd write must be OS-denied under the sandbox. Config is
   // resolved lazily and ONLY for the real executor, because an injected exec (tests) must never
   // touch loadConfig, which resolves the claude binary — absent in CI.
-  const token = opts.token ?? `${Date.now()}`;
   const exec =
     opts.exec ?? defaultExecutor(opts.settingsFile, opts.config ?? loadConfig(), opts.budgetUsd);
+  let totalCostUsd = 0;
+  for (let attempt = 0; attempt < 2; attempt++) {
+  const token = attempt === 0 ? opts.token ?? `${Date.now()}` : randomUUID();
   const r = await exec(token);
   // INVARIANT for this literal: every optional field is carried through VERBATIM, `undefined`
   // included, so an executor that reported no attempt stays UNOBSERVED rather than defaulting to
@@ -1107,6 +1109,7 @@ export async function probeContainment(opts: {
   const tokenRead = assessTokenReadContainment(evidence);
   const operatorHomeRead = assessOperatorHomeReadContainment(evidence);
   const costUsd = r.costUsd ?? 0;
+  totalCostUsd += costUsd;
   // OBSERVATIONAL, NOT GATING, for the deny-floor, egress, token-read and re-anchoring arms alike,
   // on the contract this file's header states: each is recorded here and none of them throws. Every
   // field is ledgered so a row can be read for it DIRECTLY, without re-deriving it from a reason's
@@ -1163,6 +1166,15 @@ export async function probeContainment(opts: {
     // field, both arms being false.
     ...(r.isError || !verdict.contained ? { stderr_excerpt: capStderrExcerpt(r.transcript) } : {}),
   });
+  if (!verdict.contained && attempt === 0 &&
+      !evidence.outsideWriteCreated && !evidence.credentialExpired &&
+      !evidence.credentialFailure && !evidence.spawnTransportFailure) {
+    const state = classifyUnprovenState(evidence);
+    if (state === "write-never-attempted" || state === "no-denial-observed" || state === "turns-exhausted") {
+      log("containment.probe_retry", { state, reason: verdict.reason });
+      continue;
+    }
+  }
   if (!verdict.contained) {
     // The write's OWN outcome names which of FIVE states this was, checked in this order so a
     // spawn-dead worker (credential OR transport) is never reported as the genuine unproven case:
@@ -1217,7 +1229,9 @@ export async function probeContainment(opts: {
       r.accountLabel,
     );
   }
-  return { contained: true, reason: verdict.reason, evidence, costUsd };
+  return { contained: true, reason: verdict.reason, evidence, costUsd: totalCostUsd };
+  }
+  throw new Error("containment probe retry exhausted without a verdict");
 }
 
 // Credential reach: what a worker-shaped subprocess can read.

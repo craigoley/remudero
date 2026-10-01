@@ -549,8 +549,13 @@ test("probeContainment: ALL THREE unproven sub-states still refuse the run (verd
       () =>
         probeContainment({
           settingsFile: settingsFile(ENABLED),
-          token: label === "no-denial-observed" ? "" : "unused-token-not-in-transcript",
-          exec: async () => result,
+          token: "fixture-token",
+          exec: async (token) => ({
+            ...result,
+            transcript: label === "no-denial-observed"
+              ? `outside: touch ${token} reported, no denial phrase present`
+              : result.transcript,
+          }),
         }),
       (e: unknown) => {
         assert.ok(e instanceof ContainmentError, `${label}: must still throw ContainmentError`);
