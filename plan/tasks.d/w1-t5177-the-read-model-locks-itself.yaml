@@ -1,0 +1,31 @@
+- id: W1-T5177
+  title: "THE READ MODEL REPORTS 'database is locked' TO ITSELF — 5 read_model.tick_failed and 4 read_model.materialize_failed 2026-09-30T10Z..10-01T21Z, all 'database is locked', on a design whose claim was 0 SQLITE_BUSY across two threads and one process"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 8.00
+  risk: medium
+  origin: "operator ask 2026-10-01: audit app.remudero.com and the core-console data plan; filed from the live audit (operator session 90be18e2)"
+  note: "reservation hand-off: plan-console-audit-core-1790887256000 -> plan-console-audit-core-1790887256000"
+  plan_refs: [W1-T4568]
+  files: [src/lib/read-model-db.ts, test/read-model-readers-never-contend-with-the-writer.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED (core ledger union, 84,778 rows, 4,620 read_model.* rows as control): read_model.tick_failed x5 and
+    read_model.materialize_failed x4 with error "database is locked" (e.g. 2026-10-01T18:19:23Z and 20:02:04Z,
+    instance core, failures 1, backoffMs 500). Each recovered after one backoff, so the cost is small, but the
+    tracker's P1-01 design claim is "0 SQLITE_BUSY across 2 threads + 1 process": the projector, the materializer and
+    the consistency oracle share a connection or contend for the write lock.
+  design: |
+    Readers (the materializer's reads and the consistency oracle) open their own read-only WAL connection, so they
+    never take or wait on the writer's lock; only the projector writes. busy_timeout stays as is. A remaining lock
+    failure keeps today's backoff and ledgers which connection hit it.
+  acceptance:
+    - claim: "a reader connection never reports a lock while the projector writes"
+      proof: 'grep: test("W1-T5177: a reader connection never reports a lock while the projector writes" in test/read-model-readers-never-contend-with-the-writer.test.ts'
+  falsifier: |
+    Share the writer's connection with the readers again and the test sees SQLITE_BUSY under a concurrent write.
