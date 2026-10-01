@@ -5,7 +5,7 @@
 // one store and one ledger, each materialize every registered view; their ETags must agree, and so must
 // the bodies a restarted serve warm-loads from the read model.
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { Clock } from "../src/lib/clock.js";
@@ -122,17 +122,60 @@ test("every read-model view materializes the same etag after a serve restart", (
   assert.deepEqual(Object.fromEntries(warm.bodies.map((b) => [`${b.view}\u0000${b.key}`, b.etag])), etags(first), "the bodies a restarted serve warm-loads carry the same versions");
 });
 
-test("a later restart moves only the clock-stamped views and only in their clock-derived fields", (t) => {
+test("a later restart gives every view the same etag when only the clock moved", (t) => {
   const { root, stateDir } = fixture(t);
   const first = materialize(root, stateDir, T0, "serve-a");
   const later = materialize(root, stateDir, T0 + 90_000, "serve-b");
-  const unstamped = (bodies: Map<string, ViewBodyEntry>): Record<string, string> =>
-    Object.fromEntries(Object.entries(etags(bodies)).filter(([id]) => !id.startsWith("now\u0000") && !id.startsWith("repositories\u0000")));
-  assert.deepEqual(Object.keys(unstamped(first)).sort(), ["nav-badge\u0000", "read-model\u0000"]);
-  assert.deepEqual(unstamped(later), unstamped(first), "nav-badge and read-model keep their versions 90 s later");
-  // FINDING, pinned so it cannot drift silently: `now` and `repositories` carry clock stamps inside
-  // `data`, so their ETags move on every re-materialize and on every restart, with no other change.
+  // CORPUS CONTROL: the clock-sensitive views are really compared, not absent on both sides.
+  assert.ok(first.has("now\u0000instance=core") && first.has("repositories\u0000"), [...first.keys()].join(","));
+  // Version 2 moved every clock stamp out of `data` (board.generated_at, health.sampledAt, health.lastPollAgeMs,
+  // each summary's generated_at): 90 s later nothing a consumer renders changed, so no version may either.
   const paths = (id: string): string[] => differingPaths(first.get(id)!.body.data, later.get(id)!.body.data);
-  assert.deepEqual(paths("now\u0000instance=core"), ["board.generated_at", "health.lastPollAgeMs", "health.sampledAt"]);
-  assert.deepEqual(paths("repositories\u0000"), ["instances.0.summary.generated_at"]);
+  assert.deepEqual(paths("now\u0000instance=core"), []);
+  assert.deepEqual(paths("repositories\u0000"), []);
+  assert.deepEqual(etags(later), etags(first), "every view keeps its version across a restart 90 s later");
+  // The times did move: they live in the envelope, which the etag ignores.
+  assert.notEqual(later.get("now\u0000instance=core")!.body.generatedAt, first.get("now\u0000instance=core")!.body.generatedAt);
+});
+
+test("a re-materialize over unchanged content posts no new body and a real change posts a new etag", (t) => {
+  const { root, stateDir } = fixture(t);
+  const clock = { at: T0 };
+  const now = createNowView({
+    instances: [{ name: "core", ledgerDir: stateDir, repo: "craigoley/remudero", feedbackRoot: root }],
+    clock: { now: () => clock.at, date: () => new Date(clock.at), iso: () => new Date(clock.at).toISOString() },
+    readPlan: plan, github: () => ({ github: fakeGitHub(), generation: "g", source: { asOf: iso(0), state: "fresh" } }),
+    hostProbe: { rateLimit: () => 4321, diskFree: () => 10_000 },
+  });
+  const posted: ReadModelWorkerMessage[] = [];
+  const views = [createRepositoriesReadModelView(ledgerSource), now];
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views,
+    clock: { now: () => clock.at, date: () => new Date(clock.at), iso: () => new Date(clock.at).toISOString() }, holder: "serve-a", post: (m) => void posted.push(m) });
+  t.after(() => ticker.release());
+  const bodies = (): ViewBodyEntry[] => posted.flatMap((m) => (m.type === "body" ? [m.entry] : []));
+  /** The worker ticks every 250 ms; stepping 5 s keeps each projector inside its 10 s stale bound, as in production. */
+  const runTo = (ms: number): void => {
+    while (clock.at < ms) {
+      clock.at = Math.min(ms, clock.at + 5_000);
+      ticker.tick();
+    }
+  };
+  ticker.tick();
+  const first = new Map(bodies().map((b) => [b.view, b.etag]));
+  assert.deepEqual([...first.keys()].sort(), ["now", "repositories"], "control: both clock-sensitive views posted a first body");
+
+  // Past both views' refresh cadences (now 30 s, repositories 60 s), with no new row: each re-materializes, and
+  // the worker posts only a body whose etag moved.
+  const before = bodies().length;
+  runTo(T0 + 120_000);
+  assert.deepEqual(bodies().slice(before).map((b) => b.view), [], "an unchanged view posts nothing on a re-materialize");
+
+  // A real change: W1-T2's run merges. The board and the portfolio both move.
+  runTo(T0 + 240_000);
+  appendFileSync(join(stateDir, "ledger.ndjson"), `${JSON.stringify({ host: "h1", ts: iso(-200_000), step: "verdict", run_id: "r2", task_id: "W1-T2", verdict: "merged", pr_url: "https://github.com/craigoley/remudero/pull/2" })}\n`);
+  const mark = bodies().length;
+  runTo(T0 + 400_000);
+  const moved = new Map(bodies().slice(mark).map((b) => [b.view, b.etag]));
+  assert.ok(moved.has("now") && moved.get("now") !== first.get("now"), "the merge gives now a new etag");
+  assert.ok(moved.has("repositories") && moved.get("repositories") !== first.get("repositories"), "the merge gives repositories a new etag");
 });

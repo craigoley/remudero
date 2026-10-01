@@ -76,6 +76,7 @@
     "sweep",
     "sync",
     "triage",
+    "triage-outcomes",
     "up",
     "verdict-calibration",
     "verify-human-sweep",
