@@ -46,6 +46,11 @@ RMD_DAEMON_RUNTIME_ENV_VARS=(
   RMD_FOUNDRY_CLAUDE_API_KEY
 )
 
+RMD_DERIVED_RUNTIME_ENV_VARS=(
+  RMD_READ_MODEL_DB_DIR
+  RMD_WORKER_HOME_DIR
+)
+
 RMD_OPENWEIGHT_API_KEY_PATH="${RMD_OPENWEIGHT_API_KEY_PATH:-${HOME:-/root}/.local/share/remudero/secrets/openweight-api-key}"
 
 # W1-T1222: the console's own runtime names, read by `resolveServeHosts` in src/lib/serve.ts, NOT
