@@ -1342,6 +1342,12 @@ const INFRASTRUCTURE_REFUSAL_VERDICTS: ReadonlySet<string> = new Set([
   "task_already_merged",
 ]);
 
+/** These also consume no task attempt for lifetime judgment, but the existing dispatch breaker
+ * counts them. Keep the two decisions separate so a new terminal verdict cannot reset its streak. */
+const LIFETIME_ONLY_REFUSAL_VERDICTS: ReadonlySet<string> = new Set([
+  "blocked_git_fetch", "blocked_inflight", "handed_off",
+]);
+
 /** A THROWN run's `failed` verdict (run-task.ts `endThrownRun`) at one of these stages is a deferral the harness
  *  refused before any worker ran — 10 lock-contention refusals tripped W1-T4684's breaker on 2026-09-29. */
 const INFRASTRUCTURE_THROWN_STAGES: ReadonlySet<string> = new Set([
@@ -1351,11 +1357,16 @@ const INFRASTRUCTURE_THROWN_STAGES: ReadonlySet<string> = new Set([
   "preflight.isolation",
 ]);
 
-function infrastructureRefusal(line: Record<string, unknown>): string | undefined {
+export function infrastructureRefusal(line: Record<string, unknown>): string | undefined {
   if (typeof line.verdict !== "string") return undefined;
   if (INFRASTRUCTURE_REFUSAL_VERDICTS.has(line.verdict)) return line.verdict;
   if (line.verdict === "failed" && typeof line.stage === "string" && INFRASTRUCTURE_THROWN_STAGES.has(line.stage)) return line.stage;
   return undefined;
+}
+
+export function lifetimeInfrastructureRefusal(line: Record<string, unknown>): string | undefined {
+  return infrastructureRefusal(line) ??
+    (typeof line.verdict === "string" && LIFETIME_ONLY_REFUSAL_VERDICTS.has(line.verdict) ? line.verdict : undefined);
 }
 
 /** Options shared by {@link orphanedRunIds} and every counter built on it — never widened for
@@ -1635,8 +1646,8 @@ export function effectiveLifetimeDispatches(tally: LifetimeDispatchTally): numbe
   return tally.capacityBlocked > tally.starts ? tally.starts : tally.starts - tally.capacityBlocked;
 }
 
-/** W1-T4025: task-attributable lifetime pressure, not a terminal ceiling. Capacity refusals and
- * proven orphaned worker starts are host evidence, so neither spends the task's adaptive signal.
+/** W1-T4025: task-attributable lifetime pressure, not a terminal ceiling. Capacity refusals,
+ * infrastructure refusals, and proven orphaned worker starts are host evidence.
  * A run with an unknown identity remains counted: uncertainty must not buy an unbounded retry. */
 export function taskAttributableLifetimeDispatches(
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -1646,11 +1657,19 @@ export function taskAttributableLifetimeDispatches(
 ): number {
   const rows = indexedTaskRows(lines, taskId, index);
   const orphanRunIds = orphanedRunIds(lines, taskId, index, opts);
+  const infrastructureRunIds = new Set<string>();
+  for (const line of rows) {
+    if (line.task_id === taskId && line.step === "verdict" &&
+        typeof line.run_id === "string" && lifetimeInfrastructureRefusal(line) !== undefined) {
+      infrastructureRunIds.add(line.run_id);
+    }
+  }
   let starts = 0;
   let capacityBlocked = 0;
   for (const line of rows) {
     if (line.step === "run.start" && line.task_id === taskId) {
-      if (typeof line.run_id !== "string" || !orphanRunIds.has(line.run_id)) starts += 1;
+      if (typeof line.run_id !== "string" ||
+          (!orphanRunIds.has(line.run_id) && !infrastructureRunIds.has(line.run_id))) starts += 1;
     }
     if (line.step === "daemon.spawn_infra_blocked" && line.task === taskId) capacityBlocked += 1;
   }

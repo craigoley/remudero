@@ -1410,6 +1410,7 @@ import {
   addLifetimeDispatchTallies,
   effectiveLifetimeDispatches,
   hasRepeatedTaskAttributableLifetimeDispatches,
+  lifetimeInfrastructureRefusal,
   lifetimeDispatchTally,
   taskAttributableLifetimeDispatches,
   type LifetimeDispatchTally,
@@ -44631,49 +44632,80 @@ type AdaptiveLifetimePressureRoute = Pick<VerifyHumanRouteDeps, "runId"> & {
   shadowJudgeSpawns?: { primary: typeof spawnWorker; shadow: typeof spawnWorker };
 };
 
+function latestLifetimeOperatorRuling(note: string | undefined): { date: string; decision: "automate" | "needs_operator" } | undefined {
+  if (!note) return undefined;
+  let latest: { date: string; decision: "automate" | "needs_operator" } | undefined;
+  for (const match of note.matchAll(/^OPERATOR RULING (\d{4}-\d{2}-\d{2}): (automate|needs_operator)\b/gm)) {
+    const date = match[1]!;
+    if (!latest || date >= latest.date) latest = { date, decision: match[2] as "automate" | "needs_operator" };
+  }
+  return latest;
+}
+
 /** Route repeated attributable dispatch pressure through the existing three-way LLM judge. */
 export async function routeAdaptiveLifetimePressure(
   tasks: readonly Task[],
   deps: AdaptiveLifetimePressureRoute,
 ): Promise<VerifyHumanRouteResult> {
   const rows = readLedgerLines(deps.ledgerPath) as unknown as Record<string, unknown>[];
-  const shards = tasks.map((task): ShardUnderJudgement => {
+  const shards: ShardUnderJudgement[] = [];
+  const infraOnly: string[] = [];
+  const rulings = new Map<string, VerifyHumanVerdict>();
+  for (const task of tasks) {
     const taskRows = rows.filter((row) => row.task_id === task.id || row.task === task.id);
     const attributableDispatches = taskAttributableLifetimeDispatches(rows, task.id);
     const capacityRefusals = taskRows.filter((row) => row.step === "daemon.spawn_infra_blocked").length;
     const openPrEvidence = taskRows.filter((row) => row.step === "pr.opened").length;
     const mergeEvidence = taskRows.filter((row) => row.step === "verdict.merged" || (row.step === "verdict" && row.verdict === "merged")).length;
-    const lastOutcome = [...taskRows].reverse().find((row) => typeof row.step === "string");
-    const lastStep = typeof lastOutcome?.step === "string" ? lastOutcome.step : "unavailable";
-    const lastVerdict = typeof lastOutcome?.verdict === "string" ? lastOutcome.verdict : "unavailable";
+    const terminalRows = taskRows.filter((row) => row.step === "verdict");
+    const lastTerminal = terminalRows.at(-1);
+    const lastVerdict = typeof lastTerminal?.verdict === "string" ? lastTerminal.verdict : "unavailable";
+    const attributableHistory = terminalRows
+      .filter((row) => lifetimeInfrastructureRefusal(row) === undefined)
+      .map((row) => `${String(row.verdict ?? "unavailable")}: ${String(row.reason ?? row.stage ?? "no reason recorded")}`);
+    const ruling = latestLifetimeOperatorRuling(task.note);
+    const key = `${task.id}:adaptive-lifetime=${attributableDispatches}:capacity=${capacityRefusals}:` +
+      `open=${openPrEvidence}:merged=${mergeEvidence}:last=verdict:${lastVerdict}:${terminalRows.length}` +
+      (ruling ? `:ruling=${ruling.date}:${ruling.decision}` : "");
+    if (attributableDispatches === 0) {
+      infraOnly.push(task.id);
+      if (!rows.some((row) => row.step === "dispatch.lifetime_pressure.infra_only" && row.task_id === task.id && row.observed_state === key)) {
+        appendLedger(deps.ledgerPath, { run_id: deps.runId, task_id: task.id,
+          step: "dispatch.lifetime_pressure.infra_only", observed_state: key } as LedgerLine);
+      }
+      continue;
+    }
     const evidence =
       `adaptive lifetime pressure: attributable dispatches=${attributableDispatches}; ` +
       `capacity refusals=${capacityRefusals}; open PR evidence=${openPrEvidence}; ` +
-      `merge evidence=${mergeEvidence}; last step=${lastStep}; last verdict=${lastVerdict}; ` +
-      `current run=${deps.runId}`;
-    return {
+      `merge evidence=${mergeEvidence}; last terminal verdict=${lastVerdict}; ` +
+      `attributable terminal-verdict history=${attributableHistory.join(" | ") || "none"}`;
+    const shard: ShardUnderJudgement = {
       id: task.id,
       title: task.title ?? task.id,
-      rationale: "Repeated attributable dispatch pressure was observed; decide whether to automate, backlog, or ask the operator.",
+      rationale: "Decide whether BUILDING the task needs the operator. Runtime operator confirmation " +
+        "inside the feature is not a build-time need. Judge why attributable attempts keep failing; " +
+        "choose automate, backlog, or needs_operator for the build process.",
       acceptance: (task.acceptance ?? []).map((criterion) => criterion.claim),
       ageDays: 0,
       depsAllMerged: (task.depends_on ?? []).every((id) => planTaskLanded(deps.plan.byId.get(id))),
       citedInSrc: idCitedInSrc(task.id, deps.root),
       evidence,
-      observationKey:
-        `${task.id}:adaptive-lifetime=${attributableDispatches}:capacity=${capacityRefusals}:` +
-        `open=${openPrEvidence}:merged=${mergeEvidence}:last=${lastStep}:${lastVerdict}`,
+      observationKey: key,
     };
-  });
-  return routeVerifyHumanBacklog(shards, {
-    judge: shadowedVerifyHumanJudge({
+    shards.push(shard);
+    if (ruling) rulings.set(key, { decision: ruling.decision, reason: `Operator ruling ${ruling.date}: ${ruling.decision}` });
+  }
+  const judge = shadowedVerifyHumanJudge({
       mounts: loadMounts(mountsPath(deps.root)),
       config: deps.config,
       cwd: deps.root,
       settingsFile: join(deps.root, "settings", "worker.json"),
       log: (step, fields) => appendLedger(deps.ledgerPath, { run_id: deps.runId, step, ...fields } as LedgerLine),
       spawns: deps.shadowJudgeSpawns,
-    }),
+    });
+  const result = await routeVerifyHumanBacklog(shards, {
+    judge: async (shard) => rulings.get(observedStateKey(shard)) ?? judge(shard),
     priorVerdicts: priorVerifyHumanVerdicts(rows),
     maxJudged: tasks.length,
     stageProposal: (proposal) =>
@@ -44681,6 +44713,8 @@ export async function routeAdaptiveLifetimePressure(
     appendRow: (row) => appendLedger(deps.ledgerPath, row as LedgerLine),
     runId: deps.runId,
   });
+  result.skipped.push(...infraOnly);
+  return result;
 }
 
 /**

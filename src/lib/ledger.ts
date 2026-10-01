@@ -509,10 +509,11 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // re-offer marker. Both survive rotation so a restart cannot turn the retry into a loop.
   "implement.harness_commit_refused",
   "dispatch.harness_commit_retry",
-  // W1-T3758: lifetime dispatch eligibility subtracts these capacity refusals from the
-  // historical start count. Rotating one away would make an infrastructure outage spend task
-  // lifetime budget after the next daemon boot.
+  // W1-T3758: lifetime pressure subtracts capacity refusals and dedups infra-only markers.
+  // Losing either row on rotation spends task budget or repeats a marker after a daemon restart.
+  // Readers: taskAttributableLifetimeDispatches and routeAdaptiveLifetimePressure.
   "daemon.spawn_infra_blocked",
+  "dispatch.lifetime_pressure.infra_only",
   // W1-T316: `escalateLifetimeCapExceeded`'s (run-task.ts) dedup marker, written whether or not
   // delivery succeeds; dropping it re-opens a duplicate lifetime-cap escalation.
   "dispatch.lifetime_capped.escalated",
