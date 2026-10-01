@@ -11,9 +11,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { Clock } from "../src/lib/clock.js";
 import { daemonInstanceRegistryPath } from "../src/lib/deployer.js";
+import { createInstancesView, type InstancesData } from "../src/lib/instances-view.js";
 import { createNowView, nowActions, type NowViewData } from "../src/lib/now-view.js";
 import type { Plan } from "../src/lib/plan.js";
-import { createReadModelTicker, READ_MODEL_VIEWS, readModelSwitchesPath } from "../src/lib/read-model-worker.js";
+import { createReadModelTicker, ledgerSource, READ_MODEL_VIEWS, readModelSwitchesPath } from "../src/lib/read-model-worker.js";
 import { createRepositoriesSourcePublisher, type RepositoriesData } from "../src/lib/repositories-view.js";
 import { buildServeRoutes, buildServeServer, repositoriesSources, type ServeDeps } from "../src/lib/serve.js";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -95,14 +96,15 @@ function fixture(t: TestCtx): { root: string; stateDir: string; deps: ServeDeps;
 /** One worker tick over core with every view switched to `serve`, so each materializes a body into the read model. */
 function materializeAll(root: string, stateDir: string, deps: ServeDeps): void {
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
-  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve" } }));
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve" } }));
   createRepositoriesSourcePublisher({ stateDir, instances: () => repositoriesSources(deps) })();
   const now = createNowView({
     instances: [{ name: "core", ledgerDir: stateDir, repo: "craigoley/remudero", feedbackRoot: root }],
     clock, readPlan: plan, github: () => ({ github: fakeGitHub(), generation: "g", source: { asOf: iso(0), state: "fresh" } }),
     hostProbe: { rateLimit: () => 4321, diskFree: () => 10_000 },
   });
-  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now], clock, holder: "schema-test", post: () => {} });
+  const instances = createInstancesView({ instances: [{ name: "core", ledgerDir: stateDir }], repoPath: daemonInstanceRegistryPath(root), ledgerSource });
+  const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now, instances], clock, holder: "schema-test", post: () => {} });
   ticker.tick();
   // A shadow sample, so the read-model status body carries the comparator's readiness too.
   assert.equal(ticker.shadow({ view: "now", key: "instance=core", requests: 1 }), true);
@@ -120,7 +122,7 @@ async function listen(t: TestCtx, server: Server): Promise<string> {
 }
 
 /** The query each routed view is read with; a view missing here fails the corpus check below. */
-const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core" };
+const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "" };
 
 test("every registered view body validates against its declared schema", async (t) => {
   const { root, stateDir, deps, runs } = fixture(t);
@@ -149,6 +151,8 @@ test("every registered view body validates against its declared schema", async (
   assert.equal(now.health.rateLimitRemaining, 4300, "the gauge is rounded to two significant figures");
   const repos = bodies.get("repositories")!.data as RepositoriesData;
   assert.equal(repos.instances[0]?.summary?.repos.length, 1, JSON.stringify(repos));
+  const instances = bodies.get("instances")!.data as InstancesData;
+  assert.deepEqual(instances.instances.map((i) => [i.id, i.registered, i.served, i.project]), [["core", true, true, "remudero"]], JSON.stringify(instances));
   assert.deepEqual(repos.projects.map((p) => [p.project, p.worst.repoName]), [["remudero", "remudero"]]);
 
   // P2-03: the versions map (the events stream's hello and fallback poll) names every served body.

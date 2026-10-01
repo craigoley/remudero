@@ -19,6 +19,7 @@ import { isMainThread, parentPort, Worker, workerData } from "node:worker_thread
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghIssueGateway, tryEscalate, type EscalateDeps } from "./escalate.js";
+import { createInstancesView } from "./instances-view.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { FUTURE_ROW_TOLERANCE_MS, LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, type LedgerProjector, type ProjectorTickResult } from "./ledger-projector.js";
 import { createNavBadgeReadModelView } from "./nav-badge-view.js";
@@ -1015,6 +1016,8 @@ export interface ReadModelWorkerData {
   stateDir: string;
   instances: ReadModelInstance[];
   tickMs: number;
+  /** The repo and host instance registries the `instances` view joins with the mounts (instances-view.ts). */
+  registry?: { repoPath?: string; hostPath?: string };
   /** `[0]` is set by the main thread to ask for a stop; `[1]` by the worker once its leases are released. */
   signal: SharedArrayBuffer;
   /** `owner/name` the oracle's escalations are filed on; the worker builds its own issue gateway. */
@@ -1041,8 +1044,9 @@ export function runReadModelWorker(
   if (data.slowLane) slowLane = threadSlowLane({ config: data.slowLane, log: (step, extra) => post({ type: "log", step, extra }) });
   const now = createNowView({ instances: data.instances, ledgerSource, clock, log: (step, extra) => post({ type: "log", step, extra }) });
   const oracleRunner = threadOracle({ ...(data.escalationRepository ? { escalationRepository: data.escalationRepository } : {}), log: (step, extra) => post({ type: "log", step, extra }) });
+  const instances = createInstancesView({ instances: data.instances, ...data.registry, ledgerSource });
   const ticker = createReadModelTicker({
-    stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, stopRequested, post, views: [...READ_MODEL_VIEWS, now], oracleRunner,
+    stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, stopRequested, post, views: [...READ_MODEL_VIEWS, now, instances], oracleRunner,
     integrityCheck: threadIntegrityCheck(), ...(escalation ? { escalation } : {}),
   });
   let timer: NodeJS.Timeout | undefined;
@@ -1135,6 +1139,7 @@ export interface ReadModelWorkerOptions {
   stateDir: string;
   instances: readonly ReadModelInstance[];
   tickMs?: number;
+  registry?: ReadModelWorkerData["registry"];
   stopWaitMs?: number;
   workerUrl?: URL;
   log?: (step: string, extra?: Record<string, unknown>) => void;
@@ -1246,7 +1251,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   const spawn = (): void => {
     const shared = new SharedArrayBuffer(8);
     const data: ReadModelWorkerData = {
-      kind: READ_MODEL_WORKER_KIND, stateDir: opts.stateDir, instances: [...opts.instances], tickMs: opts.tickMs ?? READ_MODEL_TICK_MS, signal: shared,
+      kind: READ_MODEL_WORKER_KIND, stateDir: opts.stateDir, instances: [...opts.instances], tickMs: opts.tickMs ?? READ_MODEL_TICK_MS, signal: shared, ...(opts.registry ? { registry: opts.registry } : {}),
       ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}),
       ...(opts.slowLane ? { slowLane: opts.slowLane } : {}),
     };

@@ -7015,6 +7015,84 @@ components:
         ledger), `verified`. The console's RepoHealthStatus.
       enum: [unavailable, stale, unknown, verified]
 
+    InstancesView:
+      type: object
+      description: >
+        GET /v1/views/instances (docs/views.md, src/lib/instances-view.ts; W1-T5056): ONE instance list
+        saying what this serve serves. One entry per instance any list names (the repo registry, the host
+        registry, the read-model worker's mounts), with its registry project and repo, whether serve
+        mounts and projects it, a liveness band, its read-model lease, and the views and writes serve
+        answers for it. `drift` names every disagreement. GET /v1/registry answers as a projection of
+        this body while it serves. Dark until state/read-model/switches.json sets `instances` to `serve`.
+        No clock in `data`: `liveness.since` is the newest daemon row's own time.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [instances]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [instances, hostRegistry]
+          properties:
+            instances:
+              type: array
+              items:
+                type: object
+                required: [id, registered, prefix, served, liveness, readModel, capabilities]
+                properties:
+                  id: {type: string}
+                  registered: {type: boolean, description: A live row of the repo registry.}
+                  project: {type: string}
+                  repo: {type: string, description: "`owner/name` on GitHub."}
+                  mode: {type: string, enum: [live, shadow]}
+                  prefix: {type: string, description: "`/v1/i/<id>`."}
+                  served:
+                    type: boolean
+                    description: Projected by this serve with its state dir mounted; false is "recreate serve to mount it".
+                  liveness:
+                    type: object
+                    required: [state]
+                    description: >
+                      A band over the newest projected `daemon.*` row: `down` past the fleet's stale-heartbeat
+                      bound (or a quiet-mode pulse's, whichever is longer), `unknown` before any.
+                    properties:
+                      state: {type: string, enum: [up, down, unknown]}
+                      since: {type: string, format: date-time}
+                  readModel:
+                    type: object
+                    required: [lease]
+                    properties:
+                      lease: {type: string, enum: [held, elsewhere, none]}
+                  capabilities:
+                    type: object
+                    required: [views, writes]
+                    properties:
+                      views: {type: array, items: {type: string}}
+                      writes: {type: array, items: {type: string}, description: "Under `prefix`, e.g. `control/pause`."}
+                      coreOnly: {type: array, items: {type: string}, description: Routes only core answers, for every instance.}
+            hostRegistry: {type: string, enum: [in_sync, drifted, unreadable, malformed]}
+            drift:
+              type: object
+              required: [hostOnly, repoOnly, unmounted, unregistered]
+              properties:
+                hostOnly: {type: array, items: {type: string}}
+                repoOnly: {type: array, items: {type: string}}
+                unmounted: {type: array, items: {type: string}, description: Registered but not served.}
+                unregistered: {type: array, items: {type: string}, description: Served but in no repo registry row.}
+            registryError:
+              type: string
+              description: The repo registry's refusal code; GET /v1/registry answers 503 with it.
+
     NowView:
       type: object
       description: >
@@ -12627,6 +12705,33 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: The view is dark (`view_disabled`), shadowed with the console's legacy primary (`view_shadow`), or not served yet for that instance (`view_not_ready`).
+
+  /v1/views/instances:
+    get:
+      summary: Every instance and what this serve serves for it, served from the read model.
+      description: >
+        W1-T5056 (arch Phase 4 design §4). Replaces /v1/registry, RMD_CONTROL_REPO_INSTANCES and
+        RMD_CONTROL_ANALYTICS_INSTANCES as the console's instance list. DARK: it answers 404
+        `view_disabled` until state/read-model/switches.json sets `instances` to `serve`, and `shadow`
+        answers 404 `view_shadow` while the worker compares it with the legacy /v1/registry computation.
+        Same ETag and 304 rules as every view. See docs/views.md.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstancesView"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The view is dark (`view_disabled`), shadowed (`view_shadow`), or has no body yet (`view_not_ready`).
 
   /v1/views/events:
     get:

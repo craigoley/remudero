@@ -2756,6 +2756,56 @@ export interface components {
     };
     /** How far a repository's figures can be trusted, worst first: `unavailable` (no summary), `stale` (the last recompute failed; the summary shown is older), `unknown` (computed, no ledger), `verified`. The console's RepoHealthStatus. */
     RepositoryState: "unavailable" | "stale" | "unknown" | "verified";
+    /** GET /v1/views/instances (docs/views.md, src/lib/instances-view.ts; W1-T5056): ONE instance list saying what this serve serves. One entry per instance any list names (the repo registry, the host registry, the read-model worker's mounts), with its registry project and repo, whether serve mounts and projects it, a liveness band, its read-model lease, and the views and writes serve answers for it. `drift` names every disagreement. GET /v1/registry answers as a projection of this body while it serves. Dark until state/read-model/switches.json sets `instances` to `serve`. No clock in `data`: `liveness.since` is the newest daemon row's own time. */
+    InstancesView: {
+      view: "instances";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        instances: ({
+          id: string;
+          /** A live row of the repo registry. */
+          registered: boolean;
+          project?: string;
+          /** `owner/name` on GitHub. */
+          repo?: string;
+          mode?: "live" | "shadow";
+          /** `/v1/i/<id>`. */
+          prefix: string;
+          /** Projected by this serve with its state dir mounted; false is "recreate serve to mount it". */
+          served: boolean;
+          /** A band over the newest projected `daemon.*` row: `down` past the fleet's stale-heartbeat bound (or a quiet-mode pulse's, whichever is longer), `unknown` before any. */
+          liveness: {
+            state: "up" | "down" | "unknown";
+            since?: string;
+          };
+          readModel: {
+            lease: "held" | "elsewhere" | "none";
+          };
+          capabilities: {
+            views: (string)[];
+            /** Under `prefix`, e.g. `control/pause`. */
+            writes: (string)[];
+            /** Routes only core answers */
+            coreOnly?: (string)[];
+          };
+        })[];
+        hostRegistry: "in_sync" | "drifted" | "unreadable" | "malformed";
+        drift?: {
+          hostOnly: (string)[];
+          repoOnly: (string)[];
+          /** Registered but not served. */
+          unmounted: (string)[];
+          /** Served but in no repo registry row. */
+          unregistered: (string)[];
+        };
+        /** The repo registry's refusal code; GET /v1/registry answers 503 with it. */
+        registryError?: string;
+      };
+    };
     /** GET /v1/views/now?instance=<id> (docs/views.md, src/lib/now-view.ts): everything the console's /now renders for ONE instance. The board is the legacy derivation over the read model's full fact history; `groups` precomputes the console's groupBoard; `actions` carries structured strikes; `health` is the selected instance's own host probe. Dark until state/read-model/switches.json sets `now` to `serve`. Version 2 carries no clock stamp and no now-relative value in `data` (the envelope's `generatedAt` and each source's `asOf` do), so the ETag moves only when the content does. A consumer derives a duration ("running for 12 min") from an absolute field such as a task's `startedAt`. */
     NowView: {
       view: "now";
@@ -4668,6 +4718,17 @@ export interface paths {
           "200": NowView;
           "304": undefined;
           "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/instances": {
+    get: {
+      responses: {
+          "200": InstancesView;
+          "304": undefined;
           "401": Error;
           "403": Error;
           "404": undefined;
