@@ -177,6 +177,7 @@ function reclaimRun(holderMessage: string, holderBranchPresent: "absent" | "pres
     if (args[0] === "push") return { status: 0, stdout: "", stderr: "" };
     if (args[0] === "symbolic-ref") return { status: 0, stdout: "run-filer\n", stderr: "" };
     if (args[0] === "rev-parse") return { status: 0, stdout: "run-filer\n", stderr: "" };
+    if (args[0] === "remote") return { status: 0, stdout: "/tmp/local-origin.git\n", stderr: "" }; // W1-T4447: a local origin passes the claim-ref guard
     throw new Error(`unexpected git command: ${args.join(" ")}`);
   };
 }
