@@ -520,7 +520,7 @@
     "test/an-availability-probe-reads-the-limit-that-stops-it.test.ts": 1000,
     "test/an-edit-reruns-only-what-reads-the-body.test.ts": 714,
     "test/an-emergency-stop-read-never-reparses-the-archives.test.ts": 1200,
-    "test/an-empty-scratch-read-model-is-rebuilt-from-the-ledger.test.ts": 1600,
+    "test/an-empty-scratch-read-model-is-rebuilt-from-the-ledger.test.ts": 5000,
     "test/an-environmental-block-is-re-offered-when-the-environment-changes.test.ts": 329,
     "test/an-environmental-re-offer-sees-a-replaced-host.test.ts": 432,
     "test/an-escalated-terminal-head-stands-down-before-redispatch.test.ts": 1900,
