@@ -514,6 +514,8 @@ export interface ShadowLegacy {
   sortKeys?: Readonly<Record<string, Readonly<Record<string, ShadowLatest>>>>;
   /** A value computed only from other paths (a rate from two counts): explained exactly when they are. */
   derived?: Readonly<Record<string, readonly string[]>>;
+  /** What each side was computed from (a plan generation, a probe instant), carried onto the diff row as evidence. */
+  inputs?: Readonly<Record<string, unknown>>;
 }
 
 /** A derived path takes its inputs' classes: `real` unless an input differs and every differing input is explained. */
@@ -669,7 +671,7 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
           const d = raw.find((r) => r.path === path)!;
           return { legacy: excerpt(d.legacy), view: excerpt(d.view) };
         };
-        opts.log(VIEW_SHADOW_DIFF_STEP, { view, key, classes, diffs: diffs.map((d) => (d.classification === "real" ? { ...d, ...sides(d.path) } : d)) });
+        opts.log(VIEW_SHADOW_DIFF_STEP, { view, key, classes, ...(legacy.inputs ? { inputs: legacy.inputs } : {}), diffs: diffs.map((d) => (d.classification === "real" ? { ...d, ...sides(d.path) } : d)) });
       }
       opts.store?.save(view, state);
       return { view, key, diffs };

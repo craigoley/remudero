@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
@@ -738,4 +738,86 @@ test("a probe a build in flight took after the compared body is not the legacy s
   assert.deepEqual(diffs.filter((d) => d.path.startsWith("health")), [], JSON.stringify(diffs));
   const [next] = view.materialize(ctxOf(clock, [core]));
   assert.equal(next?.data.health.daemon.state, "silent", "positive control: the in-flight probe did read the daemon silent");
+});
+
+test("a task whose newest row is a step the fact store skips sorts by that row on both sides", (t) => {
+  // Captured 2026-10-01 16:08–16:48Z on core: board.groups.queued read real for W1-T5147, whose only rows were machine_judge.*,
+  // a step the fact store never keeps, so the view sorted it last while legacy sorted it first; and board.groups.running read
+  // real with the same members in another order, W1-T4933's newest row being sweep.fix.strike_schedule_plan.
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { listGrilling: () => [] });
+  clock.set(T0);
+  core.append({ step: "run.start", task_id: "W1-T1", run_id: "r1" });
+  clock.set(T0 + 10_000);
+  core.append({ step: "run.start", task_id: "W1-T2", run_id: "r2" });
+  clock.set(T0 + 20_000);
+  core.append({ step: "worker.activity", task_id: "W1-T1", run_id: "r1" });
+  clock.set(T0 + 30_000);
+  core.append({ step: "machine_judge.ruled", task_id: "W1-T5", action: "proceed" });
+  clock.set(T0 + 40_000);
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  assert.deepEqual(body.data.board.groups.running, ["W1-T1", "W1-T2"], "the newer worker.activity row leads");
+  assert.equal(body.data.board.groups.queued[0], "W1-T5", "a task with only machine_judge rows sorts by them");
+  const diffs = compareNow(view, core, body, T0 + 50_000);
+  assert.deepEqual(diffs.filter((d) => d.path.startsWith("board.groups")), [], JSON.stringify(diffs));
+  assert.deepEqual(diffs.filter((d) => d.classification === "real"), [], JSON.stringify(diffs));
+});
+
+test("a running order no sort-key row explains is still a real now diff", (t) => {
+  // The negative control: the same members in an order neither side's rows give is a wrong value, not an order to ignore.
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { listGrilling: () => [] });
+  clock.set(T0);
+  core.append({ step: "run.start", task_id: "W1-T1", run_id: "r1" });
+  clock.set(T0 + 10_000);
+  core.append({ step: "run.start", task_id: "W1-T2", run_id: "r2" });
+  clock.set(T0 + 20_000);
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  assert.deepEqual(body.data.board.groups.running, ["W1-T2", "W1-T1"]);
+  body.data.board.groups.running = ["W1-T1", "W1-T2"];
+  const running = compareNow(view, core, body, T0 + 30_000).find((d) => d.path === "board.groups.running");
+  assert.equal(running?.classification, "real", JSON.stringify(running));
+});
+
+test("a rotation after the view's probe leaves the legacy probe on the rows that probe read", (t) => {
+  // Captured 2026-10-01T16:18:08Z and 16:38:54Z: health.daemon.{state,at,reason} read legacy silent at a carried 16:00:06 or
+  // 16:27:19 row against view polling. The 16:17:23 and 16:37:53 rotations moved every newer daemon.* row out of the live file
+  // after the view had probed it, and legacy re-read the live file alone.
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { listGrilling: () => [] });
+  clock.set(T0 - 600_000);
+  core.append({ step: "daemon.boot" });
+  clock.set(T0 - 60_000);
+  core.append({ step: "daemon.tick" });
+  clock.set(T0);
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  assert.deepEqual(body.data.health.daemon, { state: "polling" });
+  const live = join(core.ledgerDir, "ledger.ndjson");
+  const text = readFileSync(live, "utf8");
+  const rotation = `ledger.${new Date(T0 + 30_000).toISOString().replace(/[:.]/g, "-")}.ndjson.gz`;
+  writeFileSync(join(core.ledgerDir, rotation), gzipSync(text));
+  writeFileSync(join(core.ledgerDir, `ledger.${new Date(T0 - 900_000).toISOString().replace(/[:.]/g, "-")}.ndjson`), "");
+  writeFileSync(live, `${text.split("\n").filter((l) => l.includes("daemon.boot")).join("\n")}\n`);
+  const logged: Array<Record<string, unknown>> = [];
+  const judge = (data: NowViewData) => {
+    const legacy = view.legacy("instance=core", T0 + 60_000, data);
+    assert.ok(legacy);
+    const shadow = createViewShadow({ clock: fixedClock(T0 + 60_000), log: (_step, extra) => logged.push(extra), evidence: (input) => readShadowEvidence([core.db], input) });
+    return shadow.compare({ view: "now", key: "instance=core", requests: 0, legacy, body: { data, asOf: null } }).diffs.filter((d) => d.path.startsWith("health"));
+  };
+  assert.deepEqual(judge(body.data), [], "legacy probes the ledger as it stood at the view's probe");
+  // Negative control: a daemon state the rows at the probe do not give is still real.
+  body.data.health = { ...body.data.health, daemon: { state: "silent", at: new Date(T0 - 600_000).toISOString(), reason: "no daemon.* row for over 5 min" } };
+  const wrong = judge(body.data);
+  assert.equal(wrong.find((d) => d.path === "health.daemon.state")?.classification, "real", JSON.stringify(wrong));
+  assert.deepEqual(logged.at(-1)?.inputs, { plan: "none", probeAt: new Date(T0).toISOString(), rotationsSinceProbe: [rotation] }, "the diff row names what legacy read");
 });
