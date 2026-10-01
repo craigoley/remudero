@@ -14,7 +14,9 @@
   files:
     - src/lib/sweep.ts
     - test/a-sweep-pass-caps-its-stale-proof-supersession-closes.test.ts
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T5030 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 at origin/main 1f6d904bb by reading the merged code (bf1dc52c0, #8177) and its test, not from the brief.
