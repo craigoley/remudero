@@ -12,6 +12,8 @@
  *   shared fd and says `rmd.promoted` → `rmd.drain` the old one → `serve.handoff_done`.
  * A standby that fails readiness is killed and never serves (`serve.handoff_aborted`); the active
  * generation keeps serving. A promoted generation that dies is replaced from the previous slot.
+ * A COLD start has no generation to protect, so it promotes once the standby listens and serves degraded
+ * until ready (`serve.cold_start_degraded`, then `serve.cold_start_ready`): gating it only kept 4317 dark.
  *
  * Kill switch: `RMD_SERVE_HANDOFF=off`, or a `handoff.off` file in the generations directory, turns a
  * handoff request back into today's behaviour: drain, exit 0, and docker restarts the container.
@@ -94,6 +96,8 @@ interface Generation {
   process: GenerationProcess;
   exited: Promise<void>;
   isAlive: () => boolean;
+  /** It asked for a handoff before it was active; the ask is replayed once it is promoted. */
+  asked: boolean;
 }
 
 export interface ServeSupervisor {
@@ -207,9 +211,11 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     const proc = spawn(command(slot), { [SERVE_ROLE_ENV]: "standby", [SERVE_READY_SOCKET_ENV]: socketPath, [SELF_SYNC_GUARD_ENV]: "1" });
     let alive = true;
     const exited = new Promise<void>((resolve) => proc.onExit(() => ((alive = false), resolve())));
-    const generation: Generation = { id, slot, socketPath, process: proc, exited, isAlive: () => alive };
+    const generation: Generation = { id, slot, socketPath, process: proc, exited, isAlive: () => alive, asked: false };
     proc.onMessage((message) => {
-      if (message.type === GENERATION_MESSAGES.handoffRequest && generation === active) void supervisor.requestHandoff();
+      if (message.type !== GENERATION_MESSAGES.handoffRequest) return;
+      if (generation === active) void supervisor.requestHandoff();
+      else generation.asked = true;
     });
     proc.onExit((code, signal) => {
       if (generation === active && !stopping) void replaceCrashed(generation, code, signal);
@@ -230,14 +236,52 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
       if (clock.now() >= deadline) return { ok: false, criterion: "ready_bound", detail: last };
       await sleep(pollMs);
     }
+    const smoke = await smokeFailure(generation);
+    return smoke ? { ok: false, ...smoke } : { ok: true };
+  };
+
+  const smokeFailure = async (generation: Generation): Promise<{ criterion: string; detail: unknown } | undefined> => {
     for (const path of SMOKE_PATHS) {
       const reply = await get(generation.socketPath, path).catch((err: unknown) => ({ status: 0, body: errorText(err) }));
-      if (reply.status !== 200) return { ok: false, criterion: `smoke ${path}`, detail: { status: reply.status } };
+      if (reply.status !== 200) return { criterion: `smoke ${path}`, detail: { status: reply.status } };
       if (path === "/v1/version" && (safeJson(reply.body) as { sha?: string } | undefined)?.sha !== generation.slot.sha) {
-        return { ok: false, criterion: "smoke /v1/version", detail: { sha: safeJson(reply.body), want: generation.slot.sha } };
+        return { criterion: "smoke /v1/version", detail: { sha: safeJson(reply.body), want: generation.slot.sha } };
       }
     }
-    return { ok: true };
+    return undefined;
+  };
+
+  /** Cold start: wait only for the private socket to answer at all; its readiness verdict is reported, not gated. */
+  const awaitListening = async (generation: Generation): Promise<{ criterion: string; detail?: unknown } | undefined> => {
+    const deadline = clock.now() + readyBoundMs;
+    for (;;) {
+      if (!generation.isAlive()) return { criterion: "exited" };
+      const reply = await get(generation.socketPath, `${SERVE_READY_PATH}?bodies=0`).catch((err: unknown) => ({ status: 0, body: errorText(err) }));
+      if (reply.status !== 0) return undefined;
+      if (clock.now() >= deadline) return { criterion: "listen_bound", detail: reply.body };
+      await sleep(pollMs);
+    }
+  };
+
+  /** The handoff gate's criteria, as names a promoted cold generation does not yet meet. */
+  const coldUnmet = async (generation: Generation): Promise<string[]> => {
+    const ready = await get(generation.socketPath, SERVE_READY_PATH).catch((err: unknown) => ({ status: 0, body: errorText(err) }));
+    if (ready.status !== 200) return unmetCriteria(ready.body);
+    const smoke = await smokeFailure(generation);
+    return smoke ? [smoke.criterion] : [];
+  };
+
+  /** A degraded cold generation is re-checked until it meets them, so the ledger says when it stopped serving 503s. */
+  const watchColdStart = async (generation: Generation, startedAt: number): Promise<void> => {
+    while (generation === active && generation.isAlive() && !stopping) {
+      await sleep(pollMs);
+      if ((await coldUnmet(generation)).length === 0) return opts.log("serve.cold_start_ready", { sha: generation.slot.sha, readyMs: clock.now() - startedAt });
+    }
+  };
+
+  const activate = (generation: Generation): void => {
+    active = generation;
+    if (generation.asked) void supervisor.requestHandoff();
   };
 
   /** The active generation's served body count: a standby must not be thinner than what it replaces. */
@@ -340,7 +384,7 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
       return;
     }
     previous = from.slot;
-    active = up.generation;
+    activate(up.generation);
     crashes = 0;
     const drainMs = await drainOld(from, "handoff");
     opts.log("serve.handoff_done", { fromSha: from.slot.sha, toSha: slot.sha, deps: slot.deps, prepMs, readyMs: up.readyMs, drainMs, peakBytes: largestRss || undefined });
@@ -360,7 +404,7 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     await sleep(Math.min(60_000, 1_000 * 2 ** (crashes - 1)));
     const up = await bringUp(slot);
     if (up.generation) {
-      active = up.generation;
+      activate(up.generation);
       previous = undefined;
       return;
     }
@@ -371,14 +415,22 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   const supervisor: ServeSupervisor = {
     activeSha: () => active?.slot.sha,
     start: async () => {
-      const up = await bringUp(opts.coldSlot);
-      if (!up.generation) {
-        opts.log("serve.cold_start_failed", { sha: opts.coldSlot.sha, criterion: up.criterion, detail: up.detail });
+      const startedAt = clock.now();
+      const generation = fork(opts.coldSlot);
+      const failure = (await awaitListening(generation)) ?? ((await promote(generation)) ? undefined : { criterion: "promote" });
+      if (failure) {
+        generation.process.kill("SIGKILL");
+        opts.log("serve.cold_start_failed", { sha: opts.coldSlot.sha, ...failure });
         exit(1);
         return;
       }
-      active = up.generation;
-      opts.log("serve.supervisor_ready", { sha: opts.coldSlot.sha, readyMs: up.readyMs });
+      activate(generation);
+      const readyMs = clock.now() - startedAt;
+      opts.log("serve.supervisor_ready", { sha: opts.coldSlot.sha, readyMs });
+      const unmet = await coldUnmet(generation);
+      if (unmet.length === 0) return;
+      opts.log("serve.cold_start_degraded", { sha: opts.coldSlot.sha, unmet, readyMs });
+      void watchColdStart(generation, startedAt);
     },
     requestHandoff: () => {
       if (stopping) return Promise.resolve();
@@ -406,6 +458,12 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     },
   };
   return supervisor;
+}
+
+function unmetCriteria(body: string): string[] {
+  const report = safeJson(body) as { criteria?: Array<{ name: string; ok: boolean }> } | undefined;
+  const names = Array.isArray(report?.criteria) ? report.criteria.filter((c) => !c.ok).map((c) => c.name) : [];
+  return names.length > 0 ? names : ["ready"];
 }
 
 function safeJson(text: string): unknown {
