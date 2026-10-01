@@ -105,6 +105,11 @@ reads no file and no SQLite.
     deallocate keeps the streak; an older DB's `view_shadow` table is read until its first save.
   - `serve`: the read-model body answers. A view with no body yet answers from its Phase 0
     computation, or **404 `view_not_ready`**.
+- **GitHub fetcher (Phase 1 cutover).** `"github"?: "serve"|"worker"` in the same file picks who keeps
+  serve's GitHub gateway warm. Absent or `serve`, serve does. `worker` hands the keep-warm to the
+  read-model worker only while its thread is heard from and holds the core lease; otherwise serve's
+  resumes within one 5 s recheck. Exactly one runs, each handover writes one `github.keep_warm.owner`
+  row, and both roll up as `github.keep_warm.rollup`.
 - **Worker diagnostics.** The worker ledgers `read_model.lease_acquired` and `read_model.lease_elsewhere`
   when an instance's lease changes hands, and `read_model.slow_tick` when one projector tick takes longer
   than the 10 s stale bound. A source's staleness is judged from when its tick completed.
