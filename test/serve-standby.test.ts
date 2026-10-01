@@ -98,8 +98,9 @@ test("standby serve does not listen on the public port before promote", { timeou
   releaseBoard();
   await sleep(50);
   const tokens = JSON.parse(readFileSync(join(root, "state", "service-tokens.json"), "utf8")) as { read: string };
-  const version = await overSocket(socketPath, "/v1/version", tokens.read);
-  assert.equal(version.status, 200, "real read routes answer over the private socket for the supervisor's smoke test");
+  const version = await overSocket(socketPath, "/v1/version");
+  assert.equal(version.status, 200, "real read routes answer over the private socket for the supervisor's smoke test, with no secret in hand");
+  assert.equal((await overSocket(socketPath, "/v1/version", "not-the-token")).status, 401, "a credential that is offered is still checked");
   const after = await overSocket(socketPath, "/v1/ready");
   assert.equal(after.status, 200, `ready once the board is computed: ${after.body}`);
   assert.equal(await refused(port), true, "still unbound: readiness alone never binds");

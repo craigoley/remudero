@@ -35451,7 +35451,7 @@ export async function serveCommand(
   if (supervised && channel) {
     const generation = serveGeneration(server);
     onDrainRequest(channel, (reason) => void generation?.handover(reason));
-    await listenReadiness(server, supervised.socketPath, () => [...(generation?.probes ?? []), boardComputedProbe(boardGate.isReady)]);
+    await listenReadiness(server, supervised.socketPath, () => [...(generation?.probes ?? []), boardComputedProbe(boardGate.isReady)], tokens.read);
     void precomputeBoard();
     log("serve.standby", { socket: supervised.socketPath });
     await awaitPromotion(channel);

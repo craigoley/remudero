@@ -130,12 +130,15 @@ export function readModelWarmProbe(readModel: Pick<ReadModelWorkerHandle, "bodie
 /**
  * The private listener: `/v1/ready` answers here and nowhere else; every other request is handed to
  * the real server's own listeners, so the supervisor's smoke GETs exercise the routes a client will.
+ * The socket is reachable only inside the container, where the token file is readable anyway, so an
+ * unauthenticated request here is sent on with the read token: the supervisor never handles a secret.
  */
-export async function listenReadiness(server: Server, socketPath: string, probes: () => readonly ReadinessProbe[]): Promise<Server> {
+export async function listenReadiness(server: Server, socketPath: string, probes: () => readonly ReadinessProbe[], readToken?: string): Promise<Server> {
   if (existsSync(socketPath)) rmSync(socketPath);
   const privateServer = createServer((req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname !== SERVE_READY_PATH) {
+      if (readToken && !req.headers.authorization) req.headers.authorization = `Bearer ${readToken}`;
       for (const listener of server.listeners("request") as Array<(a: IncomingMessage, b: ServerResponse) => void>) listener(req, res);
       return;
     }
