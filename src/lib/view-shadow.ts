@@ -27,6 +27,8 @@ export const VIEW_SHADOW_DIFF_STEP = "view.shadow_diff";
 /** Design §5: a sampled comparator, one comparison per minute per view key. */
 export const VIEW_SHADOW_SAMPLE_MS = 60_000;
 const DAY_MS = 24 * 60 * 60_000;
+/** How much of each side of a `real` diff its ledger row carries. */
+const SHADOW_EXCERPT_CHARS = 400;
 /**
  * The rule of three: zero failures in n independent samples bounds the failure rate below 3/n at 95%.
  * A view is ready when that bound, times its measured daily traffic, is under one wrong response a day.
@@ -52,6 +54,8 @@ export interface ShadowFieldDiff {
   sum?: ShadowSum;
   /** The row a latest-time value is, on each side. */
   latest?: ShadowLatest;
+  /** Per listed id, the row each side sorted it by, when the list is ordered by time. */
+  sortKeys?: Readonly<Record<string, ShadowLatest>>;
 }
 
 /** The rows each side added into one sum, `[identity, amount]`; `precision` is the rounding the value carries. */
@@ -80,6 +84,7 @@ export interface ShadowEvidence {
   legacyHorizonMs?: number;
   /** Of the diff's ids, the ones any ledger row names; an id no row names says nothing. */
   named: ReadonlySet<string>;
+  /** Named by a row legacy's read could not see: older than its horizon, or one its own rows lack. */
   namedBeforeHorizon: ReadonlySet<string>;
   namedInGap: ReadonlySet<string>;
   /** Ledger rows stamped between the two sides' as-of times. */
@@ -87,6 +92,8 @@ export interface ShadowEvidence {
   /** What the legacy reader counted more than once, when it reports it. */
   duplicateIds: ReadonlySet<string>;
   duplicateRows: number;
+  /** Legacy's own rows, when it names them: a sort-key row they lack is one legacy could not see. */
+  legacyRows?: LegacyRows;
 }
 
 function canonical(value: unknown): string {
@@ -117,6 +124,34 @@ function uniqueBy(items: readonly unknown[], k: string): Map<string, unknown> | 
   return out;
 }
 
+const isFlatList = (items: readonly unknown[]): boolean => items.every((x) => !isRecord(x) && !Array.isArray(x));
+
+/**
+ * The elements two lists both hold that changed place: those outside one longest subsequence both
+ * keep in the same order (patience sorting, n log n). `a` and `b` hold no duplicates.
+ */
+export function movedIds(a: readonly string[], b: readonly string[]): string[] {
+  const at = new Map(b.map((x, i) => [x, i]));
+  const common = a.filter((x) => at.has(x));
+  const tails: number[] = [];
+  const prev: number[] = [];
+  common.forEach((x, i) => {
+    const pos = at.get(x)!;
+    let lo = 0;
+    let hi = tails.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (at.get(common[tails[mid]!]!)! < pos) lo = mid + 1;
+      else hi = mid;
+    }
+    prev[i] = lo > 0 ? tails[lo - 1]! : -1;
+    tails[lo] = i;
+  });
+  const kept = new Set<string>();
+  for (let i = tails.at(-1) ?? -1; i >= 0; i = prev[i]!) kept.add(common[i]!);
+  return common.filter((x) => !kept.has(x));
+}
+
 function walk(a: unknown, b: unknown, path: string, ids: string[], out: ShadowFieldDiff[]): void {
   if (canonical(a) === canonical(b)) return;
   if (isRecord(a) && isRecord(b)) {
@@ -133,7 +168,7 @@ function walk(a: unknown, b: unknown, path: string, ids: string[], out: ShadowFi
       for (const id of [...new Set([...left.keys(), ...right.keys()])]) walk(left.get(id), right.get(id), `${path}[${k}=${id}]`, [...ids, id], out);
       return;
     }
-    if (a.every((x) => !isRecord(x) && !Array.isArray(x)) && b.every((x) => !isRecord(x) && !Array.isArray(x))) {
+    if (isFlatList(a) && isFlatList(b)) {
       const inA = new Set(a.map(String));
       const inB = new Set(b.map(String));
       const differ = [...new Set([...inA, ...inB])].filter((x) => inA.has(x) !== inB.has(x));
@@ -153,6 +188,12 @@ export function diffViewData(legacy: unknown, view: unknown): ShadowFieldDiff[] 
   const out: ShadowFieldDiff[] = [];
   walk(legacy, view, "", [], out);
   return out;
+}
+
+/** A value as a `real` diff's ledger row carries it, so the diff can be re-judged from the row alone. */
+function excerpt(value: unknown): string {
+  const text = JSON.stringify(value) ?? "undefined";
+  return text.length > SHADOW_EXCERPT_CHARS ? `${text.slice(0, SHADOW_EXCERPT_CHARS)}…` : text;
 }
 
 function hasDuplicates(values: readonly unknown[]): boolean {
@@ -184,6 +225,12 @@ export function memberEntities(members: ShadowMembers): string[] {
   return [...new Set(memberDelta(members).map(entityOf))];
 }
 
+/** One id's own measured explanation: a row between the two ages names it, else a row legacy's read could not see. */
+function explainId(id: string, ev: ShadowEvidence): ShadowClassification {
+  const entity = entityOf(id);
+  return ev.namedInGap.has(entity) ? "timing" : ev.legacyHorizonMs !== undefined && ev.namedBeforeHorizon.has(entity) ? "legacy_horizon" : "real";
+}
+
 /**
  * A count diff, explained id by id from its measured members: legacy's extra counts of one id are
  * `dedupe`; an id only one side counts is `timing` when a row between the two ages names it, else
@@ -207,9 +254,7 @@ function classifyAggregate(legacy: number, view: number, members: ShadowMembers,
     }
     units.dedupe += Math.max(0, dl - 1);
     if (Math.min(dl, 1) === dv) continue;
-    const entity = entityOf(id);
-    const cls: ShadowClassification = ev.namedInGap.has(entity) ? "timing"
-      : ev.legacyHorizonMs !== undefined && ev.namedBeforeHorizon.has(entity) ? "legacy_horizon" : "real";
+    const cls = explainId(id, ev);
     units[cls]++;
     if (cls === "real") unexplained.push(id);
   }
@@ -260,9 +305,7 @@ function classifySum(legacy: number, view: number, sum: ShadowSum, ev: ShadowEvi
     }
     amounts.dedupe += Math.abs(one) * Math.max(0, ls.length - 1);
     if (Math.min(ls.length, 1) === vs.length) continue;
-    const entity = entityOf(id);
-    const cls: ShadowClassification = ev.namedInGap.has(entity) ? "timing"
-      : ev.legacyHorizonMs !== undefined && ev.namedBeforeHorizon.has(entity) ? "legacy_horizon" : "real";
+    const cls = explainId(id, ev);
     amounts[cls] += Math.abs(one);
     if (cls === "real") unexplained.push(id);
   }
@@ -282,6 +325,61 @@ function classifyLatest(legacy: string, view: string, latest: ShadowLatest, ev: 
 }
 
 /**
+ * A list of ids (a board group), judged member by member as a count is: an id only one side lists is
+ * explained by its own rows. An order diff is explained when the ids whose sort-key rows explain
+ * nothing keep the same relative order on both sides; every explained id that moved counts once.
+ * A duplicate legacy listed is `dedupe`; one the view listed is `real`.
+ */
+/**
+ * Why one id sorts differently, from the row each side sorted it by: the later row landed between the
+ * two ages (`timing`), or it is the view's and legacy's own rows lack it (`legacy_horizon`). Checked in
+ * memory, so judging a thousand-id order costs no read.
+ */
+function explainOrder(key: ShadowLatest | undefined, ev: ShadowEvidence): ShadowClassification {
+  const ms = (row: string | null): number => (row === null ? Number.NEGATIVE_INFINITY : Date.parse(row.slice(row.indexOf("#") + 1)));
+  if (!key || ms(key.legacy) === ms(key.view)) return "real";
+  const viewLater = ms(key.view) > ms(key.legacy);
+  const at = ms(viewLater ? key.view : key.legacy);
+  const [lo, hi] = [Math.min(ev.legacyAsOfMs ?? 0, ev.viewAsOfMs ?? 0), Math.max(ev.legacyAsOfMs ?? 0, ev.viewAsOfMs ?? 0)];
+  if (at > lo && at <= hi) return "timing";
+  const id = entityOf((key.view ?? key.legacy)!);
+  const seen = (ev.legacyRows?.[id] ?? []).some((row) => Number(row.split("|")[0]) === at);
+  return viewLater && ev.legacyRows !== undefined && !seen && at <= (ev.legacyAsOfMs ?? Number.POSITIVE_INFINITY) ? "legacy_horizon" : "real";
+}
+
+function classifyList(legacy: readonly unknown[], view: readonly unknown[], ev: ShadowEvidence, sortKeys: Readonly<Record<string, ShadowLatest>> = {}): { classification: ShadowClassification; reason: string } {
+  const [l, v] = [[...new Set(legacy.map(String))], [...new Set(view.map(String))]];
+  const units: Record<ShadowClassification, number> = { dedupe: legacy.length - l.length, timing: 0, legacy_horizon: 0, real: view.length - v.length };
+  const unexplained: string[] = units.real > 0 ? ["(a view duplicate)"] : [];
+  const judge = (id: string, cls = explainId(id, ev)): void => {
+    units[cls]++;
+    if (cls === "real") unexplained.push(id);
+  };
+  const [inL, inV] = [new Set(l), new Set(v)];
+  for (const id of [...new Set([...l, ...v])].filter((x) => inL.has(x) !== inV.has(x)).sort()) judge(id);
+  const [cl, cv] = [l.filter((id) => inV.has(id)), v.filter((id) => inL.has(id))];
+  const order = (id: string): ShadowClassification => explainOrder(sortKeys[id], ev);
+  const fixed = new Set(cl.filter((id) => order(id) === "real"));
+  const skeleton = movedIds(cl.filter((id) => fixed.has(id)), cv.filter((id) => fixed.has(id)));
+  for (const id of skeleton) judge(id, "real");
+  const slots = (ids: readonly string[]): Map<string, number> => {
+    const out = new Map<string, number>();
+    let n = 0;
+    for (const id of ids) if (fixed.has(id)) n++; else out.set(id, n);
+    return out;
+  };
+  const [sl, sv] = [slots(cl), slots(cv)];
+  const among = new Set(movedIds(cl.filter((id) => !fixed.has(id)), cv.filter((id) => !fixed.has(id))));
+  for (const id of cl) if (!fixed.has(id) && (sl.get(id) !== sv.get(id) || among.has(id))) judge(id, order(id));
+  const breakdown = SHADOW_CLASSIFICATIONS.filter((c) => units[c] > 0).map((c) => `${units[c]} ${c}`).join(", ");
+  const named = unexplained.length > 10 ? `${unexplained.slice(0, 10).join(" ")} and ${unexplained.length - 10} more` : unexplained.join(" ");
+  if (units.real > 0) return { classification: "real", reason: `no measured row explains ${named} (${breakdown})` };
+  if (breakdown === "") return { classification: "real", reason: "the lists hold the same ids in the same order, so they differ in element type" };
+  const top = (["dedupe", "timing", "legacy_horizon"] as const).reduce((a, b) => (units[b] > units[a] ? b : a));
+  return { classification: top, reason: `every listed id differing or moved is explained (${breakdown})` };
+}
+
+/**
  * Classifies one differing path. Checked in order, each on its own evidence: `dedupe`, then `timing`,
  * then `legacy_horizon`; anything left is `real`. A diff is judged on its own ids or members only, so a
  * busy ledger or a duplicate elsewhere cannot explain away a diff no measured row names.
@@ -296,6 +394,7 @@ export function classifyShadowDiff(diff: ShadowFieldDiff, ev: ShadowEvidence): {
   if (Array.isArray(legacy) && Array.isArray(view) && hasDuplicates(legacy) && canonical(uniqueInOrder(legacy)) === canonical(view)) {
     return { classification: "dedupe", reason: `legacy lists ${legacy.length - view.length} duplicate element(s)` };
   }
+  if (Array.isArray(legacy) && Array.isArray(view) && isFlatList(legacy) && isFlatList(view)) return classifyList(legacy, view, ev, diff.sortKeys);
   if (typeof legacy === "number" && typeof view === "number" && legacy > view
     && any(ev.duplicateIds)) {
     return { classification: "dedupe", reason: `legacy counted ${legacy - view} more; it read ${ev.duplicateRows} duplicate row(s)` };
@@ -321,10 +420,45 @@ function namedBy(db: ReadModelDb, ids: readonly string[], where: string, params:
   return out;
 }
 
-/** The evidence the read model itself holds: which rows name the diff's ids, and when. */
+/** The rows legacy read, by the id each names, as `<tsMs>|<step>`: what its read saw, so what it could not. */
+export type LegacyRows = Readonly<Record<string, readonly string[]>>;
+
+/** Indexes a legacy read's rows by the task and the pull request each names. */
+export function legacyRowIndex(rows: ReadonlyArray<Record<string, unknown>>): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const row of rows) {
+    const ms = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
+    if (!Number.isFinite(ms)) continue;
+    const task = typeof row.task_id === "string" ? row.task_id : row.task;
+    for (const id of [task, row.pr_number]) if (typeof id === "string" || typeof id === "number") (out[String(id)] ??= []).push(`${ms}|${String(row.step)}`);
+  }
+  return out;
+}
+
+/**
+ * The `ids` named by a fact row between legacy's horizon and its read time that legacy's own rows lack:
+ * compaction prunes the live file per step and per pull request, so legacy misses rows newer than its
+ * oldest one too. A row older than the horizon is unseen already, and is not read again.
+ */
+function unseenBy(db: ReadModelDb, ids: readonly string[], rows: LegacyRows, fromMs: number, asOfMs: number): string[] {
+  const out = new Set<string>();
+  const seen = new Map<string, Set<string>>();
+  for (let at = 0; at < ids.length; at += 400) {
+    const chunk = ids.slice(at, at + 400);
+    const sql = `SELECT task_id, step, ts_ms FROM fact WHERE task_id IN (${chunk.map(() => "?").join(",")}) AND ts_ms >= ? AND ts_ms <= ?`;
+    for (const row of db.prepare(sql).all(...chunk, fromMs, asOfMs)) {
+      const id = String(row.task_id);
+      const keys = seen.get(id) ?? seen.set(id, new Set(rows[id] ?? [])).get(id)!;
+      if (!keys.has(`${String(row.ts_ms)}|${String(row.step)}`)) out.add(id);
+    }
+  }
+  return [...out];
+}
+
+/** The evidence the read model itself holds: which rows name the diff's ids, and when; `legacyRows` adds legacy's own read. */
 export function readShadowEvidence(
   dbs: readonly ReadModelDb[],
-  input: { ids: readonly string[]; legacyAsOfMs: number | null; viewAsOfMs: number | null; legacyHorizonMs?: number; duplicates?: { rows: number; ids: readonly string[] } },
+  input: { ids: readonly string[]; legacyAsOfMs: number | null; viewAsOfMs: number | null; legacyHorizonMs?: number; duplicates?: { rows: number; ids: readonly string[] }; legacyRows?: LegacyRows },
 ): ShadowEvidence {
   const ids = [...new Set(input.ids)];
   const named = new Set<string>();
@@ -334,9 +468,16 @@ export function readShadowEvidence(
   const lo = Math.min(input.legacyAsOfMs ?? 0, input.viewAsOfMs ?? 0);
   const hi = Math.max(input.legacyAsOfMs ?? 0, input.viewAsOfMs ?? 0);
   const gap = input.legacyAsOfMs !== null && input.viewAsOfMs !== null && lo < hi;
+  const live = input.legacyRows;
+  for (const id of live ? ids : []) {
+    if (!live![id]) continue;
+    named.add(id);
+    if (gap && live![id]!.some((key) => Number(key.split("|")[0]) > lo && Number(key.split("|")[0]) <= hi)) inGap.add(id);
+  }
   for (const db of dbs) {
     for (const id of namedBy(db, ids, "", [])) named.add(id);
     if (input.legacyHorizonMs !== undefined) for (const id of namedBy(db, ids, " AND ts_ms < ?", [input.legacyHorizonMs])) before.add(id);
+    if (live) for (const id of unseenBy(db, ids.filter((id) => !before.has(id)), live, input.legacyHorizonMs ?? 0, input.legacyAsOfMs ?? Number.MAX_SAFE_INTEGER)) before.add(id);
     if (!gap) continue;
     for (const id of namedBy(db, ids, " AND ts_ms > ? AND ts_ms <= ?", [lo, hi])) inGap.add(id);
     rowsInGap += Number(db.prepare("SELECT count(*) AS n FROM seen WHERE ts_ms > ? AND ts_ms <= ?").get(lo, hi)?.n ?? 0);
@@ -346,6 +487,7 @@ export function readShadowEvidence(
     ...(input.legacyHorizonMs !== undefined ? { legacyHorizonMs: input.legacyHorizonMs } : {}),
     named, namedBeforeHorizon: before, namedInGap: inGap, rowsInGap,
     duplicateIds: new Set(input.duplicates?.ids ?? []), duplicateRows: input.duplicates?.rows ?? 0,
+    ...(live ? { legacyRows: live } : {}),
   };
 }
 
@@ -362,6 +504,10 @@ export interface ShadowLegacy {
   sums?: Readonly<Record<string, ShadowSum>>;
   /** Per latest-time path, the row each side's value is. */
   latest?: Readonly<Record<string, ShadowLatest>>;
+  /** The rows legacy's read held ({@link legacyRowIndex}): a row it lacks is one it could not see. */
+  rows?: LegacyRows;
+  /** Per time-ordered list path, each id's sort-key row on each side (`<id>#<ts>`). */
+  sortKeys?: Readonly<Record<string, Readonly<Record<string, ShadowLatest>>>>;
   /** A value computed only from other paths (a rate from two counts): explained exactly when they are. */
   derived?: Readonly<Record<string, readonly string[]>>;
 }
@@ -479,13 +625,15 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
         const members = legacy.members?.[d.path];
         const sum = legacy.sums?.[d.path];
         const latest = legacy.latest?.[d.path];
-        return { ...d, ...(members ? { members } : {}), ...(sum ? { sum } : {}), ...(latest ? { latest } : {}) };
+        const sortKeys = legacy.sortKeys?.[d.path];
+        return { ...d, ...(members ? { members } : {}), ...(sum ? { sum } : {}), ...(latest ? { latest } : {}), ...(sortKeys ? { sortKeys } : {}) };
       });
       const viewAsOf = body.asOf === null ? null : Date.parse(body.asOf);
       const ev = opts.evidence({
         view, ids: raw.flatMap((d) => [...d.ids, ...(d.members ? memberEntities(d.members) : []), ...(d.sum ? sumEntities(d.sum) : []),
           ...(d.latest ? [d.latest.legacy, d.latest.view].flatMap((row) => (row === null ? [] : [entityOf(row)])) : [])]), legacyAsOfMs: legacy.asOfMs, viewAsOfMs: Number.isFinite(viewAsOf) ? viewAsOf : null,
         ...(legacy.horizonMs !== undefined ? { legacyHorizonMs: legacy.horizonMs } : {}), ...(legacy.duplicates ? { duplicates: legacy.duplicates } : {}),
+        ...(legacy.rows ? { legacyRows: legacy.rows } : {}),
       });
       const judged = raw.filter((d) => !legacy.derived?.[d.path]).map((d) => ({ path: d.path, ...classifyShadowDiff(d, ev) }));
       const diffs = raw.map((d) => {
@@ -497,7 +645,11 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
       else state.streakSamples++;
       if (diffs.length > 0) {
         const classes = Object.fromEntries(SHADOW_CLASSIFICATIONS.map((c) => [c, diffs.filter((d) => d.classification === c).length]));
-        opts.log(VIEW_SHADOW_DIFF_STEP, { view, key, classes, diffs });
+        const sides = (path: string): { legacy: string; view: string } => {
+          const d = raw.find((r) => r.path === path)!;
+          return { legacy: excerpt(d.legacy), view: excerpt(d.view) };
+        };
+        opts.log(VIEW_SHADOW_DIFF_STEP, { view, key, classes, diffs: diffs.map((d) => (d.classification === "real" ? { ...d, ...sides(d.path) } : d)) });
       }
       opts.store?.save(view, state);
       return { view, key, diffs };

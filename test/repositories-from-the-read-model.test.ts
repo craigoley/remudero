@@ -32,7 +32,7 @@ import {
 } from "../src/lib/repositories-view.js";
 import { buildServeServer, repositoriesSources, type ServeDeps } from "../src/lib/serve.js";
 import { makeTempDir } from "../src/lib/tmp.js";
-import { VIEW_SHADOW_DIFF_STEP, type ShadowRequest } from "../src/lib/view-shadow.js";
+import { VIEW_SHADOW_DIFF_STEP, createViewShadow, readShadowEvidence, type ShadowRequest } from "../src/lib/view-shadow.js";
 import type { ViewBody } from "../src/lib/views.js";
 
 // P1-08: the repositories view is #7926's repos summary for every instance, computed from each instance's
@@ -525,4 +525,20 @@ test("a cold repositories build reads each plan and each summary as a step of it
   assert.deepEqual(view.materialize({ now: NOW, instances })[0].data.instances, whole.instances, "the stepped summaries are the one-unit build's");
   assert.equal(stepsUntilDone(NOW + 1_000), 0, "nothing is due inside the cadence");
   assert.equal(stepsUntilDone(NOW + 61_000), 2, "a recompute over unchanged plans is the two summaries");
+});
+
+test("a usage window's percent_used is explained by the newer reading it is", () => {
+  // Captured 2026-10-01T05:39:01Z: ...telemetry.subscription.windows[1].percent_used read real beside a timing observed_at;
+  // the readings are the core ledger's worker.assignment windows at 05:54:45.422Z (58) and 06:04:56.451Z (59).
+  const at = (percent: number, observed: string) => ({ provider: "claude", window: "weekly (all models)", percent_used: percent, resets_at: "2026-10-04T05:00:00.441142+00:00", observed_at: observed });
+  const data = (window: ReturnType<typeof at>) => ({ instances: [{ instanceId: "core", summary: { repos: [{ id: "craigoley/remudero", telemetry: { subscription: { calls7d: 1, tokens7d: 1, windows: [window] } } }] } }], projects: [] });
+  const judge = (legacy: ReturnType<typeof at>, view: ReturnType<typeof at>): Array<[string, string]> => {
+    const shadow = createViewShadow({ clock: fixedClock(Date.parse("2026-10-01T06:05:00.000Z")), log: () => {}, evidence: (input) => readShadowEvidence([], input) });
+    const pairing = repositoriesShadowPairing({}, {}, data(view) as unknown as RepositoriesData);
+    const legacySide = { data: data(legacy), asOfMs: Date.parse("2026-10-01T06:05:00.000Z"), derived: pairing.derived };
+    const got = shadow.compare({ view: "repositories", key: "", requests: 0, legacy: legacySide, body: { data: data(view), asOf: "2026-10-01T05:55:00.000Z" } });
+    return got.diffs.map((d) => [d.path.replace(/^.*windows\[0\]\./, ""), d.classification]);
+  };
+  assert.deepEqual(judge(at(59, "2026-10-01T06:04:56.451Z"), at(58, "2026-10-01T05:54:45.422Z")), [["observed_at", "timing"], ["percent_used", "timing"]]);
+  assert.deepEqual(judge(at(59, "2026-10-01T05:54:45.422Z"), at(58, "2026-10-01T05:54:45.422Z")), [["percent_used", "real"]], "one reading two percentages is a bug");
 });

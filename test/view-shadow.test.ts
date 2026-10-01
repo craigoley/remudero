@@ -17,7 +17,9 @@ import {
   createShadowSampler,
   createViewShadow,
   diffViewData,
+  legacyRowIndex,
   legacyViewSampler,
+  movedIds,
   memberEntities,
   sumEntities,
   readShadowEvidence,
@@ -25,6 +27,7 @@ import {
   sqliteShadowStore,
   withViewShadow,
   type ShadowEvidence,
+  type ShadowLatest,
   type ShadowRequest,
 } from "../src/lib/view-shadow.js";
 import { buildReadModelViewRoutes, type ViewBodyEntry, type ViewDefinition } from "../src/lib/views.js";
@@ -82,7 +85,7 @@ test("a shadow diff names the differing fields and its classification", (t) => {
   assert.deepEqual(result.diffs.map((d) => [d.path, d.classification]), [["board.tasks[taskId=W1-T9].status", "real"]]);
   assert.equal(logged.length, 1);
   assert.equal(logged[0]![0], VIEW_SHADOW_DIFF_STEP);
-  assert.deepEqual(logged[0]![1].diffs, result.diffs);
+  assert.deepEqual(logged[0]![1].diffs, result.diffs.map((d) => ({ ...d, legacy: '"queued"', view: '"running"' })), "a real diff's row carries both sides");
   assert.deepEqual(logged[0]![1].classes, { legacy_horizon: 0, timing: 0, dedupe: 0, real: 1 });
   assert.equal(logged[0]![1].view, "now");
   assert.equal(logged[0]![1].key, "instance=core");
@@ -462,4 +465,117 @@ test("serve posts a shadow sample to a real worker thread which writes the diff 
   const [, extra] = logs.find(([step]) => step === VIEW_SHADOW_DIFF_STEP)!;
   assert.equal(extra?.view, "read-model");
   await until(() => Array.isArray((handle.body("read-model")?.body.data as { shadow?: unknown }).shadow), "the status view shows readiness");
+});
+
+/**
+ * Captured on the host, 2026-10-01T06:33Z: `now?instance=console` `board.groups.queued` classified `real`
+ * with the same 167 ids on both sides. UI-T36 and UI-T35 sort by a `sweep.disposed` row the live file's
+ * compaction pruned (09-21T16:03, 09-20T21:13), newer than its oldest row (09-14T01:14), so legacy
+ * dated them by their merge; UI-T37 swapped places with UI-T35 as a result.
+ */
+const CONSOLE_SAMPLE_MS = Date.parse("2026-10-01T06:33:28.040Z");
+const CONSOLE_HORIZON_MS = Date.parse("2026-09-14T01:14:47.493Z");
+const QUEUED_LEGACY = ["UI-T54", "API-T55", "UI-T53", "UI-T50", "UI-T51", "API-T53", "API-T54", "API-T51", "API-T52", "API-T39", "UI-T38", "UI-T47", "UI-T49", "UI-T45", "CONSOLE-T34", "UI-T44", "API-T48", "API-T50", "API-T47", "API-T49", "API-T45", "API-T41", "API-T46", "API-T42", "UI-T40", "API-T34", "API-T40", "UI-T37", "UI-T36", "UI-T35", "API-T37"];
+const QUEUED_VIEW = ["UI-T54", "API-T55", "UI-T36", "UI-T53", "UI-T50", "UI-T51", "API-T53", "API-T54", "API-T51", "API-T52", "API-T39", "UI-T38", "UI-T47", "UI-T49", "UI-T45", "CONSOLE-T34", "UI-T44", "API-T48", "API-T50", "API-T47", "API-T49", "API-T45", "API-T41", "API-T46", "API-T42", "UI-T40", "API-T34", "API-T40", "UI-T35", "UI-T37", "API-T37"];
+
+/** The console's live rows for the three tasks, and each one's sort-key row on each side. */
+const CONSOLE_LIVE = legacyRowIndex([
+  { ts: "2026-09-14T01:14:47.493Z", step: "dispatch.starvation.escalated", task_id: "daemon" },
+  { ts: "2026-09-20T20:28:12.102Z", step: "verdict.merged", task_id: "UI-T35" },
+  { ts: "2026-09-20T20:28:13.999Z", step: "verdict.merged", task_id: "UI-T36" },
+  { ts: "2026-09-20T20:47:36.765Z", step: "verdict.merged", task_id: "UI-T37" },
+]);
+
+function queuedClass(sortKeys: Record<string, ShadowLatest>, rows?: ReturnType<typeof legacyRowIndex>): { classification: string; reason: string } {
+  const diff = diffViewData({ queued: QUEUED_LEGACY }, { queued: QUEUED_VIEW })[0]!;
+  assert.deepEqual(diff.ids, [], "the same ids on both sides: nothing to read rows for");
+  const ev = readShadowEvidence([], { ids: diff.ids, legacyAsOfMs: CONSOLE_SAMPLE_MS, viewAsOfMs: CONSOLE_SAMPLE_MS, legacyHorizonMs: CONSOLE_HORIZON_MS, ...(rows ? { legacyRows: rows } : {}) });
+  return classifyShadowDiff({ ...diff, sortKeys }, ev);
+}
+
+const keyed = (id: string, legacy: string, view: string): [string, ShadowLatest] => [id, { legacy: `${id}#${legacy}`, view: `${id}#${view}` }];
+
+test("a group listing the same ids in another order is explained by rows the live file pruned", () => {
+  const sortKeys = Object.fromEntries([
+    keyed("UI-T36", "2026-09-20T20:28:13.999Z", "2026-09-21T16:03:10.652Z"),
+    keyed("UI-T35", "2026-09-20T20:28:12.102Z", "2026-09-20T21:13:00.205Z"),
+    keyed("UI-T37", "2026-09-20T20:47:36.765Z", "2026-09-20T20:47:36.765Z"),
+  ]);
+  const got = queuedClass(sortKeys, CONSOLE_LIVE);
+  assert.equal(got.classification, "legacy_horizon", got.reason);
+  assert.match(got.reason, /2 legacy_horizon/);
+  assert.equal(queuedClass(sortKeys).classification, "real", "without legacy's own rows a pruned row newer than its oldest one is invisible");
+  const held = { ...CONSOLE_LIVE, "UI-T36": [...CONSOLE_LIVE["UI-T36"]!, `${Date.parse("2026-09-21T16:03:10.652Z")}|sweep.disposed`] };
+  assert.equal(queuedClass(sortKeys, held).classification, "real", "a sort-key row legacy held explains nothing: the view's row must be one it lacks");
+});
+
+test("an order diff whose moved id nothing explains is real", () => {
+  const sortKeys = Object.fromEntries([
+    keyed("UI-T36", "2026-09-20T20:28:13.999Z", "2026-09-21T16:03:10.652Z"),
+    keyed("UI-T35", "2026-09-20T20:28:12.102Z", "2026-09-20T20:28:12.102Z"),
+  ]);
+  const got = queuedClass(sortKeys, CONSOLE_LIVE);
+  assert.equal(got.classification, "real", got.reason);
+  assert.match(got.reason, /no measured row explains UI-T3[57]/);
+  assert.deepEqual(movedIds(["a", "b", "c", "d"], ["d", "a", "b", "c"]), ["d"]);
+  const gap = classifyShadowDiff({ path: "q", legacy: ["a", "b"], view: ["b", "a"], ids: [], sortKeys: Object.fromEntries([keyed("b", "2026-10-01T06:00:00.000Z", "2026-10-01T06:30:00.000Z")]) },
+    readShadowEvidence([], { ids: [], legacyAsOfMs: CONSOLE_SAMPLE_MS, viewAsOfMs: Date.parse("2026-10-01T06:20:00.000Z") }));
+  assert.equal(gap.classification, "timing", "a sort-key row between the two ages");
+});
+
+test("a group member only one side lists is judged on its own rows and never by a neighbour", (t) => {
+  const db = evidenceDb(t);
+  const ev = (ids: string[]): ShadowEvidence => readShadowEvidence([db], { ids, legacyAsOfMs: T0, viewAsOfMs: T0, legacyHorizonMs: T0 - DAY });
+  const one = diffViewData({ blocked: ["W1-T1"] }, { blocked: ["W1-T1", "W1-T3"] })[0]!;
+  assert.equal(classifyShadowDiff(one, ev(one.ids)).classification, "legacy_horizon");
+  const two = diffViewData({ blocked: [] }, { blocked: ["W1-T3", "W1-T2"] })[0]!;
+  const got = classifyShadowDiff(two, ev(two.ids));
+  assert.equal(got.classification, "real", "W1-T3's horizon row does not explain W1-T2");
+  assert.match(got.reason, /no measured row explains W1-T2 \(1 legacy_horizon, 1 real\)/);
+  const dup = diffViewData({ blocked: ["W1-T3", "W1-T3"] }, { blocked: ["W1-T3", "W1-T3"] });
+  assert.deepEqual(dup, []);
+  const viewDup = classifyShadowDiff({ path: "blocked", legacy: ["W1-T3"], view: ["W1-T3", "W1-T3"], ids: [] }, ev([]));
+  assert.equal(viewDup.classification, "real", viewDup.reason);
+  const typed = classifyShadowDiff({ path: "blocked", legacy: [1], view: ["1"], ids: [] }, ev([]));
+  assert.equal(typed.classification, "real", typed.reason);
+});
+
+test("a member legacy read after the view's age is timing by legacy's own row before the projector ingests it", (t) => {
+  // Captured 2026-10-01T05:47:09Z after serve recycled at 05:42:08: board.counts.running read real for W1-T4810,
+  // whose dispatch.claim (05:46:25.298Z) legacy's live file held and the read model had not yet ingested.
+  const db = evidenceDb(t);
+  const claim = { ts: "2026-10-01T05:46:25.298Z", step: "dispatch.claim", task_id: "W1-T4810", run_id: "W1-T4810-1790831583056" };
+  const input = { ids: ["W1-T4810"], legacyAsOfMs: Date.parse("2026-10-01T05:47:09.082Z"), viewAsOfMs: Date.parse("2026-10-01T05:42:08.142Z"), legacyHorizonMs: T0 - DAY };
+  const members = { legacy: ["W1-T4810"], view: [] };
+  const diff = { path: "board.counts.running", legacy: 1, view: 0, ids: [], members };
+  const seen = classifyShadowDiff(diff, readShadowEvidence([db], { ...input, legacyRows: legacyRowIndex([claim]) }));
+  assert.equal(seen.classification, "timing", seen.reason);
+  assert.equal(classifyShadowDiff(diff, readShadowEvidence([db], input)).classification, "real", "the read model alone holds no row for it yet");
+  const pr = readShadowEvidence([db], { ...input, ids: ["8280"], legacyRows: legacyRowIndex([{ ts: "2026-10-01T05:46:30.000Z", step: "sweep.disposed", pr_number: 8280 }]) });
+  assert.ok(pr.namedInGap.has("8280"), "a pull request's row names its number");
+});
+
+test("a member named only by a row compaction pruned after legacy's horizon is legacy_horizon", (t) => {
+  // Measured on core 2026-10-01T07:2xZ: W1-T3741 has 39 fact rows since the live file's oldest row (09-25T16:50:54Z),
+  // and the live file holds 10 of them; its 09-28 run.start is gone from it, so legacy and the view disagree on it.
+  const dir = scratch(t, "shadow-pruned");
+  const kept = [
+    { ts: "2026-09-25T16:50:54.561Z", step: "daemon.boot", task_id: "daemon" },
+    { ts: "2026-09-28T07:51:51.578Z", step: "verdict", task_id: "W1-T3741", verdict: "failed" },
+  ];
+  const pruned = { ts: "2026-09-28T07:47:25.515Z", step: "run.start", task_id: "W1-T3741" };
+  writeFileSync(join(dir, "ledger.ndjson"), [...kept, pruned].map((r) => JSON.stringify(r)).join("\n") + "\n");
+  const clock = fixedClock(Date.parse("2026-10-01T06:36:51.199Z"));
+  const db = openProjectorReadModel(scratch(t, "shadow-pruned-state"), "core", clock);
+  t.after(() => db.close());
+  const got = acquireLease(db, { clock });
+  if (!got.ok) throw new Error("lease");
+  createLedgerProjector({ ledgerDir: dir, db, lease: got.lease, clock }).tick();
+  const input = { ids: ["W1-T3741"], legacyAsOfMs: clock.now(), viewAsOfMs: clock.now(), legacyHorizonMs: Date.parse("2026-09-25T16:50:54.561Z") };
+  const diff = { path: "board.counts.blocked", legacy: 0, view: 1, ids: [], members: { legacy: [], view: ["W1-T3741"] } };
+  const seen = classifyShadowDiff(diff, readShadowEvidence([db], { ...input, legacyRows: legacyRowIndex(kept) }));
+  assert.equal(seen.classification, "legacy_horizon", seen.reason);
+  assert.equal(classifyShadowDiff(diff, readShadowEvidence([db], input)).classification, "real", "every row of it is newer than legacy's oldest one");
+  const whole = classifyShadowDiff(diff, readShadowEvidence([db], { ...input, legacyRows: legacyRowIndex([...kept, pruned]) }));
+  assert.equal(whole.classification, "real", "a live file holding every row explains nothing");
 });
