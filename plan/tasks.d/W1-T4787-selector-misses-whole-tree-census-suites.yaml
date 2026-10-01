@@ -5,7 +5,9 @@
   type: implement
   verify: auto
   risk: medium
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=00e3fa631c6da32a
   attempts: 0
   origin: "selector-shadow audit 2026-09-29; consolidates W1-T4733 W1-T4734 W1-T4735 W1-T4736 W1-T4737 W1-T4740 W1-T4741 W1-T4754 W1-T4755"
   plan_refs: [W1-T4404, W1-T4439, W1-T4406]

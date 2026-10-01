@@ -17,7 +17,9 @@
     - test/coordination-board-scope.test.ts
     - test/coordination-board-lifecycle.test.ts
     - test/coordination-board-redaction.test.ts
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=f9195f4bfbbd33bd
   attempts: 0
   rationale: |
     Kilo Swarm gives child sessions a shared board for findings and handoffs, while Agent Manager

@@ -32,5 +32,7 @@
   origin: architect
   plan_refs: ["§7", "P25"]
   files: [src/lib/retro.ts, src/run-task.ts, test/routed-followups-retire.test.ts, test/the-followup-retirement-arm-has-a-call-site.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=2a2aaf25f3f7c798
   attempts: 0

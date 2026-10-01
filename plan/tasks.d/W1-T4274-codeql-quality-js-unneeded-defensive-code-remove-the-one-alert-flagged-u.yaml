@@ -51,5 +51,7 @@
   origin: architect
   plan_refs: ["§5D"]
   files: [test/codeql-unneeded-defensive-code-144.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=bfc807176f971ab1
   attempts: 0

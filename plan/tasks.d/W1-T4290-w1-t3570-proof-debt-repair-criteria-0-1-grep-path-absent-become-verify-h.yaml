@@ -78,7 +78,9 @@
   origin: architect
   plan_refs: ["§5C"]
   files: [plan/tasks.yaml]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=96846d7c305a5453
   attempts: 0
   note: "Drafted from the proof-queue-audit finding's claim text alone (W1-T3570's full entry was not in
     context at drafting time) — the implementer verifies the task from source before editing, per the

@@ -17,7 +17,9 @@
     - openapi/daemon.yaml
     - test/factory-metrics.test.ts
     - test/factory-metrics-wiring.test.ts
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=1506c2f3991c0bbe
   attempts: 0
   rationale: |
     Warp defines factory success by shipped product relative to inference cost and human time, and

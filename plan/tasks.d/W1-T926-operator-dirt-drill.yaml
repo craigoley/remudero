@@ -84,7 +84,9 @@
   origin: feedback#fb-1784913390318-1fcb63
   plan_refs: ["§4A", "W1-T147", "W1-T191", "W1-T243", "W1-T445", "W1-T446", "W1-T924", "W1-T925"]
   files: [scripts/operator-dirt-drill.mjs, test/operator-dirt-drill.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=f74758a6f6f847fd
   attempts: 0
   note: |
     OPERATOR RULING 2026-09-30 (recorded in DECISIONS.md, "the verify-human queue, cleared"): THE LIVE LAUNCHD HALF IS DROPPED (the fleet restarts through deploy/recycle-container.sh), and with it the fourth criterion and docs/deploy-supervisor.md, so the note below about verify:human no longer applies. The headless dirt-shape drill targets the container instance checkout and launcher convergence, where an untracked file still silently blocks convergence.

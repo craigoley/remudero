@@ -21,7 +21,9 @@
     - test/human-handoff-escalation.test.ts
     - test/human-handoff-expiry.test.ts
     - test/human-handoff-closure.test.ts
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=2d27285fb66170c7
   attempts: 0
   rationale: |
     Proactive follow-up and agent handoff can safely ask a human, but a Needs me item without an owner,

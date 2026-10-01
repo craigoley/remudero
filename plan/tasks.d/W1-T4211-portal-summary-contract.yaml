@@ -10,7 +10,9 @@
   origin: "feedback#fb-1789327800532-71d91d"
   plan_refs: []
   files: [src/lib/serve.ts, test/portal-summary-contract.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=0ae687d982a8268f
   attempts: 0
   rationale: |
     READ 2026-09-23 AT origin/main b5c2804 during a backlog triage of feedback entries still at `status: new` that no plan record cited. File:line citations are from that read and are approximate (~); re-verify at your head before relying on them (binding rule: distrust the prompt over the installed code).
