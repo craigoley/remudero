@@ -35,7 +35,7 @@
  *          trap CLAUDE.md documents fires if this test suite only ever proves the fake.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync, lstatSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -559,7 +559,7 @@ test("W1-T4193: a refused worktree that cannot be removed is ledgered and still 
       readRemoteHead: (dir, ref) => {
         for (const line of gitIn(dir, "worktree", "list", "--porcelain").split("\n")) {
           const path = line.startsWith("worktree ") ? line.slice("worktree ".length) : undefined;
-          if (path && path !== repoDir) gitIn(dir, "worktree", "lock", path);
+          if (path && realpathSync(path) !== realpathSync(repoDir)) gitIn(dir, "worktree", "lock", path);
         }
         return gitIn(dir, "ls-remote", "origin", `refs/heads/${ref}`).split("\t")[0]!;
       },
