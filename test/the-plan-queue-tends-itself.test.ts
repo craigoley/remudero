@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { setTimeout as wait } from "node:timers/promises";
 
 import { fixedClock } from "../src/lib/clock.js";
 import { runDaemon, type DaemonDeps, type DaemonSummary } from "../src/lib/daemon.js";
@@ -297,8 +298,15 @@ test("W1-T4111: a self-hosting daemon wires the plan gardener", async () => {
       },
     });
     assert.ok((captured?.gardens?.length ?? 0) >= 1, "the plan gardener is the first wired garden");
-    captured!.gardens![0]!(60_000).stop();
-    const state = readGardenState(gardenStatePath(join(root, "state"), "plan"), PLAN_GARDEN_CLASSES);
+    const garden = captured!.gardens![0]!(60_000);
+    const statePath = gardenStatePath(join(root, "state"), "plan");
+    const deadline = Date.now() + 5_000;
+    try {
+      while (!readGardenState(statePath, PLAN_GARDEN_CLASSES).lastPass && Date.now() < deadline) await wait(10);
+    } finally {
+      garden.stop();
+    }
+    const state = readGardenState(statePath, PLAN_GARDEN_CLASSES);
     assert.ok(state.lastPass, "the wired garden ran a pass over this repo's plan");
     assert.equal(state.pending, undefined, "with every class off, nothing was proposed");
   } finally {

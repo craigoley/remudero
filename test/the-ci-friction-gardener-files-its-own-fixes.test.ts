@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFile
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { setTimeout as wait } from "node:timers/promises";
 
 import {
   GARDEN_FILING_ESCALATE_AT,
@@ -508,9 +509,19 @@ test("a self-hosting daemon wires the ci-friction gardener with its escalation p
     });
     // plan, gate, test, config, export, then ci-friction (W1-T4435).
     const garden = captured!.gardens![5]!(60_000);
-    garden.stop();
     // No ledger rotation exists in this fresh root, so the pass fails loudly under its own name.
-    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
+    const ledgerPath = join(root, "state", "ledger.ndjson");
+    const deadline = Date.now() + 10_000;
+    let ledger = "";
+    try {
+      while (Date.now() < deadline) {
+        ledger = readFileSync(ledgerPath, "utf8");
+        if (/"step":"ci-friction\.gardener_failed".*no ledger rotations/.test(ledger)) break;
+        await wait(20);
+      }
+    } finally {
+      garden.stop();
+    }
     assert.match(ledger, /"step":"ci-friction\.gardener_failed".*no ledger rotations/);
   } finally {
     if (oldHome === undefined) delete process.env.HOME;

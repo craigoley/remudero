@@ -49,6 +49,43 @@ export const GARDEN_HOURLY_FLAG = "--hourly";
 /** Runs ONE pass of the named garden and resolves with its exit code (null when it died on a signal). */
 export type GardenPassSpawn = (name: RegisteredGardenName, args: readonly string[], signal: { readonly stopped: boolean }) => Promise<number | null>;
 
+/** Share a small host budget across all garden starters. A busy garden keeps its own pending
+ * pass rather than spawning a second child, while queued passes from other gardens wait here. */
+export function boundedGardenPassSpawn(spawnPass: GardenPassSpawn, width: number): GardenPassSpawn {
+  if (!Number.isInteger(width) || width < 1) throw new Error("garden pass width must be a positive integer");
+  type Pending = {
+    name: RegisteredGardenName;
+    args: readonly string[];
+    signal: { readonly stopped: boolean };
+    resolve: (exit: number | null) => void;
+    reject: (error: unknown) => void;
+  };
+  const pending: Pending[] = [];
+  let active = 0;
+  const admit = (): void => {
+    while (active < width && pending.length > 0) {
+      const next = pending.shift()!;
+      if (next.signal.stopped) {
+        next.resolve(null);
+        continue;
+      }
+      active += 1;
+      // An asynchronous turn keeps a synchronous throwing spawn inside the same settle path.
+      Promise.resolve()
+        .then(() => next.signal.stopped ? null : spawnPass(next.name, next.args, next.signal))
+        .then(next.resolve, next.reject)
+        .finally(() => {
+          active -= 1;
+          admit();
+        });
+    }
+  };
+  return (name, args, signal) => new Promise<number | null>((resolve, reject) => {
+    pending.push({ name, args, signal, resolve, reject });
+    admit();
+  });
+}
+
 /** Each garden's own pacing, carried over from its former in-process starter. */
 interface GardenSchedule {
   /** The timer period, from the daemon's poll interval. */
