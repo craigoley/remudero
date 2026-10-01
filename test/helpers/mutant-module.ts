@@ -1,5 +1,5 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
@@ -48,7 +48,7 @@ import { fileURLToPath } from "node:url";
 /** `test/` — the copy's home. Inside the project root, and already coverage-excluded. */
 const TEST_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-/** `src/lib/` with a trailing separator, for absolutising the copy's sibling specifiers. */
+/** `src/lib/`, the default origin directory for absolutising the copy's relative specifiers. */
 const LIB_DIR = join(TEST_DIR, "..", "src", "lib") + "/";
 
 const created: string[] = [];
@@ -61,17 +61,36 @@ process.on("exit", () => {
 });
 
 /**
+ * Matches every RELATIVE module specifier a copy can carry: `from "./x"` (import and re-export),
+ * a bare `import "./x"`, and a dynamic `import("./x")`, single or double quoted. Group 1 is the
+ * keyword prefix, 2 the quote, 3 the specifier. Package names and `node:` builtins do not start
+ * `./` or `../`, so they never match.
+ */
+const RELATIVE_SPECIFIER = /(\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)(["'])(\.{1,2}\/[^"'\n]*)\2/g;
+
+/**
+ * Pure. Rewrite every relative specifier in `source` to an absolute path resolved against
+ * `originDir` (the directory the source was copied FROM), extension kept. W1-T5028: the copy no
+ * longer sits beside what it imports, and one regex for `./x.js` left `../scripts/x.mjs`,
+ * `./lib/x.js`, `import("./x.js")` and `export * from` resolving against `test/mutants-XXXXXX/`.
+ */
+export function rewriteRelativeSpecifiers(source: string, originDir: string): string {
+  return source.replace(
+    RELATIVE_SPECIFIER,
+    (_m, head: string, quote: string, spec: string) => `${head}${quote}${resolve(originDir, spec)}${quote}`,
+  );
+}
+
+/**
  * Write `mutatedSource` as `<fileName>` in a fresh `test/mutants-XXXXXX/` directory and return the
  * path to `await import()`.
  *
- * `mutatedSource` is the caller's already-mutated text of a `src/lib` module. Its same-directory
- * specifiers are absolutised here, because the copy no longer sits beside its siblings.
+ * `mutatedSource` is the caller's already-mutated text of the module at `originDir` (default
+ * `src/lib/`; pass `join(REPO_ROOT, "src")` for `src/run-task.ts`). Every relative specifier is
+ * absolutised against `originDir` by `rewriteRelativeSpecifiers`.
  */
-export function writeMutantModule(fileName: string, mutatedSource: string): string {
-  const rewritten = mutatedSource.replace(
-    /from "\.\/([A-Za-z0-9._-]+)\.js"/g,
-    (_m, name: string) => `from "${LIB_DIR}${name}.js"`,
-  );
+export function writeMutantModule(fileName: string, mutatedSource: string, originDir: string = LIB_DIR): string {
+  const rewritten = rewriteRelativeSpecifiers(mutatedSource, originDir);
   const dir = mkdtempSync(join(TEST_DIR, "mutants-"));
   created.push(dir);
   const path = join(dir, fileName);
