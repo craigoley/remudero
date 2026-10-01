@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HOOK = join(REPO_ROOT, "hooks", "pre-push");
@@ -17,11 +17,10 @@ const ZERO = "0".repeat(40);
  * predicate, re-exported into the fixture so the hook's own import path resolves.
  */
 function fixture(): string {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-prepush-idt-"));
+  const dir = gitRepo({ kind: "prepush-idt", seedCommit: false }).dir;
   symlinkSync(join(REPO_ROOT, "node_modules"), join(dir, "node_modules"));
   mkdirSync(join(dir, "scripts"), { recursive: true });
   writeFileSync(join(dir, "scripts", "head-identity-gate.mjs"), `export * from ${JSON.stringify(GATE_URL)};\n`);
-  execFileSync("git", ["init", "-q"], { cwd: dir });
   return dir;
 }
 
