@@ -109,6 +109,23 @@ test("a plan-closed W1-T1041 has a source-qualified history item instead of an o
   assert.ok(result.items[0]?.sourceFacts.some((fact) => fact.source === "plan-lifecycle" && fact.detail.includes("retirement closed")));
 });
 
+test("W1-T4884: a stale verify-human ask remains in source-qualified history", () => {
+  const result = buildAttentionCensus(input({
+    views: [],
+    classifications: [{ proposalId: "verify-human:W1-T216", state: "retired", reasons: [],
+      retiredReason: "verify-human:W1-T216's current plan task is verify: auto without a dispatch hold" }],
+    taskFacts: new Map([["W1-T216", { verify: "auto", repo: "remudero", title: "Autonomous maintenance", dispatchHold: false }]]),
+    sources: { plan: "observed", registry: "observed", liveLedger: "observed", archiveLedger: "partial", githubProjection: "observed" },
+  }));
+  assert.equal(result.counts.decision, 0);
+  assert.equal(result.counts.history, 1);
+  assert.equal(result.state, "partial");
+  assert.equal(result.verifiedCounts.history, 0);
+  assert.equal(result.items[0]?.attention, "history");
+  assert.ok(result.items[0]?.sourceFacts.some((fact) => fact.source === "plan" && fact.detail.includes("verify: auto")));
+  assert.ok(result.items[0]?.sourceFacts.some((fact) => fact.source === "classification" && fact.detail.includes("without a dispatch hold")));
+});
+
 test("W1-T4742: missing evidence is partial rather than a healthy zero", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-attention-census-"));
   mkdirSync(join(root, "plan"), { recursive: true });
