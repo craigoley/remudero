@@ -33,7 +33,7 @@
   "scripts/claude-md-budget-baseline.json": 0,
   "scripts/clock-shift.mjs": 19,
   "scripts/clock-sweep-baseline.json": 0,
-  "scripts/clock-sweep.mjs": 153,
+  "scripts/clock-sweep.mjs": 137,
   "scripts/comment-load-baseline.json": 0,
   "scripts/coverage-baseline.json": 0,
   "scripts/coverage-merge-ratchet.mjs": 13,
