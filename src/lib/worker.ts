@@ -4901,6 +4901,9 @@ async function worktreeGit(args: string[], forwardOutput = false): Promise<strin
 
 /** Daemon-safe counterpart to {@link worktreeAdd}: identical order, ledger rows and refusals,
  * with Git subprocesses awaited so the event loop can service other dispatch work. */
+/** W1-T5120: catch-ups of a freshly cut worktree to a still-moving remote head before the stale-base refusal stands. */
+export const WORKTREE_CATCH_UP_ATTEMPTS = 3;
+
 export async function worktreeAddAsync(
   repoDir: string,
   worktreePath: string,
@@ -4927,21 +4930,39 @@ export async function worktreeAddAsync(
     localRefHead = "unreadable";
   }
   await worktreeGit(["-C", repoDir, "worktree", "add", "-b", branch, "--no-track", worktreePath, base], true);
-  const createdBase = (await worktreeGit(["-C", worktreePath, "rev-parse", "HEAD"])).trim();
+  let createdBase = (await worktreeGit(["-C", worktreePath, "rev-parse", "HEAD"])).trim();
   recordWorktreeBase(worktreePath, createdBase);
 
   let remoteHead: string | undefined;
   let remoteError: unknown;
-  try {
-    if (deps.readRemoteHead) remoteHead = deps.readRemoteHead(repoDir, ref);
-    else {
-      const output = await worktreeGit(["-C", repoDir, "ls-remote", "--exit-code", "origin", `refs/heads/${ref}`]);
-      remoteHead = output.split(/\s+/)[0]?.trim();
-      if (!remoteHead) throw new Error(`empty ls-remote output for refs/heads/${ref}`);
+  const readRemote = async (): Promise<void> => {
+    remoteHead = undefined;
+    remoteError = undefined;
+    try {
+      if (deps.readRemoteHead) remoteHead = deps.readRemoteHead(repoDir, ref);
+      else {
+        const output = await worktreeGit(["-C", repoDir, "ls-remote", "--exit-code", "origin", `refs/heads/${ref}`]);
+        remoteHead = output.split(/\s+/)[0]?.trim();
+        if (!remoteHead) throw new Error(`empty ls-remote output for refs/heads/${ref}`);
+      }
+    } catch (error) {
+      // Preserve the failure for assertWorktreeBaseCurrent's warning and base_uncheckable row.
+      remoteError = error;
     }
-  } catch (error) {
-    // Preserve the failure for assertWorktreeBaseCurrent's warning and base_uncheckable row.
-    remoteError = error;
+  };
+  await readRemote();
+  for (let attempt = 1; attempt <= WORKTREE_CATCH_UP_ATTEMPTS && remoteHead !== undefined && remoteHead !== createdBase; attempt++) {
+    const from = createdBase;
+    try {
+      await worktreeGit(["-C", repoDir, "fetch", "origin", "--quiet"]);
+      await worktreeGit(["-C", worktreePath, "merge", "--ff-only", "--quiet", remoteHead]);
+    } catch {
+      break; // W1-T5120: a head this fresh worktree cannot fast-forward to stays refused by assertWorktreeBaseCurrent below
+    }
+    createdBase = (await worktreeGit(["-C", worktreePath, "rev-parse", "HEAD"])).trim();
+    recordWorktreeBase(worktreePath, createdBase);
+    deps.log?.("worktree.base_caught_up", { from, to: createdBase, attempt });
+    await readRemote();
   }
   let behind: number | "unknown" = "unknown";
   if (remoteHead !== undefined && remoteHead !== createdBase) {
