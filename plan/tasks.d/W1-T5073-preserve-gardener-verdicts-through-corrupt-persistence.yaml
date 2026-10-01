@@ -1,0 +1,62 @@
+- id: W1-T5073
+  title: "Preserve gardener overseer verdicts when effects or overseer state is unreadable"
+  repo: remudero
+  depends_on: [W1-T4938]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator gardener follow-up 2026-10-01; source and W1-T4802 test audit"
+  note: "reservation hand-off: plan-gardener-verdict-recovery-1790828334498 -> plan-gardener-verdict-recovery-1790828334498"
+  plan_refs: [W1-T4802, W1-T4938, W1-T4950]
+  files: [src/lib/gardener.ts, src/lib/gardener-overseer.ts, test/gardener-overseer.test.ts, test/a-gardener-judges-its-own-actions.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T4938 fails closed on the gardener's own corrupt state, but the verdict handoff remains
+    fail-open. readGardenEffects returns [] for an existing unreadable effects file. The overseer
+    appends to that result and can overwrite the file while its separate `verdicts` array already
+    marks those effect IDs issued. A later pass then does not reissue them, permanently losing
+    the credit/debit that should teach the gardener. readOverseerState also resets corrupt state
+    to empty, so a pass can replay old verdicts and lose episode/pr history. The existing
+    W1-T4802 test explicitly asserts this empty-on-corruption behavior; it is not first boot.
+    Separately, foldGardenEffects retains only the newest 200 folded IDs while the overseer's
+    effects file retains older verdicts. A read-only control with 201 credits applied the first
+    201 once, then applied the oldest again on the next healthy pass (alpha 204 -> 205).
+    These are separate persisted files and a separate recovery protocol from W1-T4938.
+  design: |
+    Distinguish an absent first-boot file from an existing unreadable, malformed, or structurally
+    invalid effects/overseer file. Refuse that pass with the exact path and failure class;
+    preserve both files and all pending effects, record the timed failure, and retry after
+    operator repair. Do not turn unreadable evidence into an empty healthy verdict population.
+    Make the issued-verdict-to-effects handoff recoverable across interruption between the two
+    atomic writes: on a subsequent healthy pass, reconstruct every retained issued verdict
+    not yet folded by its gardener, without re-crediting an ID already folded. Keep the
+    existing first-boot path, age bound, class-specific outcome math, and one-verdict-per-ID
+    semantics, including when more than 200 verdicts exist. Prune acknowledged effects or
+    maintain a durable bounded replay cursor before folded IDs age out; never discard an
+    unacknowledged verdict. Avoid an unbounded replay or a new autonomous policy action. Expose any receipt
+    missing beyond the retained window as unavailable, never as a measured zero.
+  acceptance:
+    - claim: "a corrupt effects file cannot be treated as an empty handoff or overwritten"
+      proof: 'grep: test("W1-T5073: corrupt effects refuse a gardener pass without losing verdicts" in test/a-gardener-judges-its-own-actions.test.ts'
+    - claim: "the overseer preserves unreadable state instead of replaying an optimistic empty history"
+      proof: 'grep: test("W1-T5073: corrupt overseer state refuses and preserves issued verdicts" in test/gardener-overseer.test.ts'
+    - claim: "a crash between effects and overseer writes is reconciled without double credit"
+      proof: 'grep: test("W1-T5073: interrupted verdict handoff replays once after repair" in test/gardener-overseer.test.ts'
+    - claim: "a retained effects file cannot re-credit verdicts after 200 folded IDs"
+      proof: 'grep: test("W1-T5073: the 201st verdict never re-credits an older ID" in test/gardener-overseer.test.ts'
+    - claim: "missing first-boot files and healthy verdict folding remain supported"
+      proof: 'grep: test("W1-T5073: absent files initialize and healthy effects fold once" in test/gardener-overseer.test.ts'
+    - claim: "the timed overseer logs persistence failure and retries after repair"
+      proof: 'grep: test("W1-T5073: overseer timer reports corrupt persistence and retries" in test/gardener-overseer.test.ts'
+  falsifier: |
+    Seed an issued but not folded credit, corrupt its effects file, and run both timers. Current
+    code reads [] and can overwrite the bytes; the fix must leave them unchanged, open no new
+    PR, and record failure. Restore a valid effects file and verify that the same verdict is
+    folded exactly once. Delete the first-boot file instead: normal initialization must pass.
+    Issue 201 distinct credits and run two healthy passes over the retained effects: no class
+    alpha may change on pass two, including for the oldest verdict that left the 200-ID cache.
