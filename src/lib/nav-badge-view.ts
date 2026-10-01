@@ -227,7 +227,7 @@ interface InstanceInputs {
 
 function countInstance(input: InstanceInputs, nowMs: number, sources: ViewSource[]): CountedInstance {
   const analyticsState = sourceAge(input.analytics?.asOf ?? null, nowMs, ANALYTICS_STALE_AFTER_MS);
-  sources.push({ name: `analytics:${input.instanceId}`, asOf: input.analytics?.asOf ?? null, state: analyticsState });
+  sources.push({ name: `analytics:${input.instanceId}`, asOf: input.analytics?.asOf ?? null, state: analyticsState, kind: "analytics", budgetMs: ANALYTICS_STALE_AFTER_MS });
   const base = { instanceId: input.instanceId, ...(input.repository ? { repository: input.repository } : {}) };
   if (input.repository === undefined) return { badge: { ...base, reason: "serve names no repository for this instance" }, ids: [] };
   if (input.analytics === null || analyticsState === "unavailable") return { badge: { ...base, reason: "analytics has not completed its first refresh" }, ids: [] };
@@ -268,7 +268,10 @@ function sumAgent(counted: readonly CountedInstance[]): NavBadgeData["agent"] {
 type Classification = ReturnType<typeof readClassificationSnapshot>;
 
 function inboxCounts(classified: Classification, nowMs: number, sources: ViewSource[]): NavBadgeData["inbox"] {
-  sources.push({ name: "inbox-classification", asOf: classified?.generatedAt ?? null, state: classified ? sourceAge(classified.generatedAt, nowMs, INBOX_STALE_AFTER_MS) : "unavailable" });
+  sources.push({
+    name: "inbox-classification", asOf: classified?.generatedAt ?? null, state: classified ? sourceAge(classified.generatedAt, nowMs, INBOX_STALE_AFTER_MS) : "unavailable",
+    kind: "inbox-store", budgetMs: INBOX_STALE_AFTER_MS,
+  });
   if (!classified) return { reason: "no inbox classification has been written yet" };
   let ready = 0;
   let needsYou = 0;
