@@ -9,7 +9,7 @@
   status: queued
   attempts: 0
   origin: "oper#core-daemon-loop-profile-2026-09-29"
-  files: [src/lib/review.ts, test/a-review-proof-run-keeps-the-daemon-loop-responsive.test.ts]
+  files: [src/lib/review.ts, src/lib/sweep.ts, src/run-task.ts, test/a-review-proof-run-keeps-the-daemon-loop-responsive.test.ts]
   rationale: |
     A live CPU profile of remudero-daemon on 2026-09-29 sampled 25 minutes (SIGUSR1 + CDP). The loop
     was busy 1439 of 1511 s. Review proof execution was 159 s (11.1%):

@@ -1263,6 +1263,7 @@ import {
   floorDegradedAnnotation,
   isTddStrict,
   judgeReview,
+  judgeReviewAsync,
   judgeRubric,
   lastPendingReviewStatusFromLedger,
   assessPendingReviewOwner,
@@ -1509,6 +1510,7 @@ import {
   defaultSweepGhRun,
   dispatchFixCatchOutcome,
   discriminateReviewReuse,
+  discriminateReviewReuseAsync,
   escalationTaskIdFor,
   fixDispatchErrorClass,
   fixDispatchSignalDeath,
@@ -2043,7 +2045,7 @@ export function buildSweepEffects(
                 : "merge-base proof evidence is unavailable";
           } else {
             const diff = String(ghExec(["pr", "diff", pr.prUrl], { encoding: "utf8", maxBuffer: 1 << 26 }));
-            const discriminated = discriminateReviewReuse({
+            const discriminated = await discriminateReviewReuseAsync({
               prior,
               diff,
               report: pr.body ?? "",
@@ -6833,7 +6835,7 @@ async function runReview(args: {
   // completed.
   // W1-T4423: a plan-only PASS names lint-plan, so the review runs it on the target repo's plan at this head.
   const planLint = planOnlySkip ? await (args.lintPlanForReviewFn ?? lintPlanForReview)(args.headCheckoutDir) : undefined;
-  const computed = judgeReview(criteria, {
+  const computed = await judgeReviewAsync(criteria, {
     diff,
     report,
     planLint,
