@@ -62,5 +62,10 @@ export async function runServeSupervisor(argv: readonly string[], opts: Supervis
   return supervisor;
 }
 
-// The container's direct entry; tests drive runServeSupervisor itself.
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) void runServeSupervisor(process.argv.slice(2));
+// diff-cov: process-boundary - the container's direct entry; tests drive runServeSupervisor itself.
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  runServeSupervisor(process.argv.slice(2)).catch((err: unknown) => {
+    console.error(`rmd serve-supervisor: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+    process.exit(1);
+  });
+}
