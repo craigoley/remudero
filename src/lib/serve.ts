@@ -2561,7 +2561,7 @@ function assembleServeRoutes(
     threadStorePath: inboxThreadStorePath(deps.fleetControlRoot),
   };
   const questionDeps: PanelActionDeps = { root: deps.questionsRoot, ledgerPath: deps.ledgerPath, issues: deps.issues };
-  const linkRefusals = createLinkRefusalRollup({ ledgerPath: deps.ledgerPath, now: () => systemClock.now() });
+  const linkRefusals = createLinkRefusalRollup({ ledgerPath: deps.ledgerPath, clock: systemClock });
   // W1-T288: the SAME fleetControlDeps root/ledgerPath, plus the (optional, injectable)
   // liveness-verdict deps -- never a second root, never a second ledger read primitive.
   const controlStatusDeps: ControlStatusDeps = { ...fleetControlDeps, ...deps.controlStatus };

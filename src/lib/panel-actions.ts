@@ -1286,15 +1286,14 @@ export interface LinkRefusalRollup {
   stop(): void;
 }
 
-export function createLinkRefusalRollup(opts: { ledgerPath: string; now: () => number; intervalMs?: number }): LinkRefusalRollup {
-  const held = new Map<string, { escalation: string; reason: string; detail: string; count: number; firstAt: number; lastAt: number }>();
+export function createLinkRefusalRollup(opts: { ledgerPath: string; clock: Clock; intervalMs?: number }): LinkRefusalRollup {
+  const held = new Map<string, { escalation: string; reason: string; detail: string; count: number; firstAt: string; lastAt: string }>();
   const flush = (): void => {
     for (const [key, row] of held) {
       try {
         appendLedger(opts.ledgerPath, {
-          run_id: `LINK-${opts.now()}`, task_id: row.escalation, step: "escalation.link_refused_rollup", phase: "confirm",
-          escalation: row.escalation, reason: row.reason, detail: row.detail, count: row.count,
-          firstAt: new Date(row.firstAt).toISOString(), lastAt: new Date(row.lastAt).toISOString(),
+          run_id: `LINK-${opts.clock.now()}`, task_id: row.escalation, step: "escalation.link_refused_rollup", phase: "confirm",
+          escalation: row.escalation, reason: row.reason, detail: row.detail, count: row.count, firstAt: row.firstAt, lastAt: row.lastAt,
         });
       } catch (err) {
         console.error(`escalation.link_refused_rollup: flush failed, counts kept for the next one (${String((err as Error)?.message ?? err)})`);
@@ -1307,7 +1306,7 @@ export function createLinkRefusalRollup(opts: { ledgerPath: string; now: () => n
   timer.unref();
   return {
     record: (escalationId, reason, detail) => {
-      const at = opts.now();
+      const at = opts.clock.iso();
       const keyOf = (id: string): string => JSON.stringify([id, reason]);
       const escalation = held.size >= LINK_REFUSAL_ROLLUP_MAX_KEYS && !held.has(keyOf(escalationId)) ? "(over-key-backstop)" : escalationId;
       const key = keyOf(escalation);
@@ -1359,7 +1358,7 @@ function esc(s: string): string {
 /** GET /v1/escalation/confirm — verify and show, never act. A refusal renders its reason so the
  *  operator learns whether the ping went stale, was already answered, or did not verify. */
 export function buildEscalationLinkConfirmRoute(deps: PanelActionDeps, linkDeps: EscalationLinkDeps): Route {
-  const refusals = linkDeps.refusals ?? createLinkRefusalRollup({ ledgerPath: deps.ledgerPath, now: linkDeps.now });
+  const refusals = linkDeps.refusals ?? createLinkRefusalRollup({ ledgerPath: deps.ledgerPath, clock: systemClock });
   return {
     method: "GET",
     path: "/v1/escalation/confirm",

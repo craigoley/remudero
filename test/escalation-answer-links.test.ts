@@ -20,6 +20,7 @@ import { renderEscalationPing } from "../src/lib/notify.js";
 import { buildEscalationLinkAnswerRoute, buildEscalationLinkConfirmRoute, createLinkRefusalRollup } from "../src/lib/panel-actions.js";
 import { appendThreadMessage } from "../src/lib/inbox-thread.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { fixedClock } from "../src/lib/clock.js";
 
 /**
  * test/escalation-answer-links.test.ts — W1-T2696.
@@ -385,7 +386,7 @@ test("W1-T2696: the confirm route ledgers a forged link and renders why, without
   try {
     const url = mintOptionLink("W1-T1", "MANUAL", EXECUTABLE, SECRET, NOW, BASE)!;
     const tampered = url.replace(/s=[0-9a-f]{64}/, `s=${"0".repeat(64)}`);
-    const refusals = createLinkRefusalRollup({ ledgerPath, now: () => NOW });
+    const refusals = createLinkRefusalRollup({ ledgerPath, clock: fixedClock(NOW) });
     const route = buildEscalationLinkConfirmRoute({ root: r, ledgerPath, threadStorePath } as any, { root: r, secret: () => SECRET, now: () => NOW, refusals });
     const { res, captured } = fakeRes();
     route.handler(reqFor(tampered), res, CTX);

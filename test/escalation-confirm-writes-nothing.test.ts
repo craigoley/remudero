@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { escalationLinkSecretPath, EscalationLinkSecretMissingError, loadEscalationLinkSecret, mintOptionLink, readEscalationLinkSecret } from "../src/lib/escalate.js";
+import { fixedClock } from "../src/lib/clock.js";
 import { InvalidSecretFileError } from "../src/lib/fs-race-safe.js";
 import { createLinkRefusalRollup, LINK_REFUSAL_ROLLUP_MAX_KEYS } from "../src/lib/panel-actions.js";
 import { buildServeRoutes } from "../src/lib/serve.js";
@@ -108,7 +109,7 @@ function rows(ledgerPath: string): Array<Record<string, unknown>> {
 test("W1-T5057: refusals are flushed as one hourly rollup row per escalation and reason", async () => {
   const { root, ledgerPath } = fixture();
   let now = NOW;
-  const rollup = createLinkRefusalRollup({ ledgerPath, now: () => now });
+  const rollup = createLinkRefusalRollup({ ledgerPath, clock: { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() } });
   try {
     rollup.record("ESC-1", "forged", "signature did not verify");
     now += 1_000;
@@ -139,7 +140,7 @@ test("W1-T5057: refusals are flushed as one hourly rollup row per escalation and
 
 test("W1-T5057: the rollup flushes on its own cadence with no reader", async () => {
   const { root, ledgerPath } = fixture();
-  const rollup = createLinkRefusalRollup({ ledgerPath, now: () => NOW, intervalMs: 20 });
+  const rollup = createLinkRefusalRollup({ ledgerPath, clock: fixedClock(NOW), intervalMs: 20 });
   try {
     rollup.record("ESC-1", "expired", "link expired");
     const deadline = Date.now() + 2_000;
@@ -153,7 +154,7 @@ test("W1-T5057: the rollup flushes on its own cadence with no reader", async () 
 
 test("W1-T5057: invented escalation ids past the key backstop fold into one row", () => {
   const { root, ledgerPath } = fixture();
-  const rollup = createLinkRefusalRollup({ ledgerPath, now: () => NOW });
+  const rollup = createLinkRefusalRollup({ ledgerPath, clock: fixedClock(NOW) });
   try {
     for (let i = 0; i < LINK_REFUSAL_ROLLUP_MAX_KEYS + 5; i++) rollup.record(`ESC-${i}`, "forged", "signature did not verify");
     rollup.record("ESC-0", "forged", "signature did not verify");
@@ -172,7 +173,7 @@ test("W1-T5057: a rollup flush that cannot append keeps its counts for the next 
   const { root, ledgerPath } = fixture();
   const blocked = join(root, "not-a-dir");
   writeFileSync(blocked, "");
-  const rollup = createLinkRefusalRollup({ ledgerPath: join(blocked, "ledger.ndjson"), now: () => NOW });
+  const rollup = createLinkRefusalRollup({ ledgerPath: join(blocked, "ledger.ndjson"), clock: fixedClock(NOW) });
   const errors: string[] = [];
   const original = console.error;
   console.error = (message: string) => void errors.push(message);
