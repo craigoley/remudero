@@ -22,8 +22,8 @@ import { loadCreditStore } from "./status.js";
  * by whether its PR merges. The PR opens ready for review — never a draft — and flows through the
  * fleet's review and auto-merge like every other PR; closing it is how a person declines it.
  *
- * REPRIORITIZE is deliberately absent: dispatch already orders the queue by measured value
- * (dispatch-value.ts, W1-T3412), so writing `priority:` from the same evidence would count it twice.
+ * REPRIORITIZE belongs to the backlog gardener (W1-T4941), which places unprioritized work in
+ * coarse bands. W1-T5112 orders within those bands by per-class measured value when available.
  */
 
 export type PlanGardenClass = "merge" | "retire";

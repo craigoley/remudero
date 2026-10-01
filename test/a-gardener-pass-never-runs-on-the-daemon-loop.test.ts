@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { clockFromMillisFn } from "../src/lib/clock.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import {
+  boundedGardenPassSpawn,
   childGardenPassSpawn,
   GARDEN_HOURLY_FLAG,
   GARDEN_PASS_STEP,
@@ -72,6 +73,47 @@ test("W1-T5114: a garden tick is skipped while its pass is still running", async
   assert.ok(calls.length >= 2, "the next tick after the pass settles runs again");
   assert.deepEqual(calls[1], [], "the same bucket is not refreshed twice once a pass succeeded");
   assert.equal(out.filter((r) => r.step === GARDEN_PASS_STEP).length, 1);
+});
+
+test("registered gardens share two child slots and a stopped queued pass never spawns", async () => {
+  const started: string[] = [];
+  const release: Array<(exit: number) => void> = [];
+  const spawn = boundedGardenPassSpawn((name) => {
+    started.push(name);
+    return new Promise<number>((resolve) => release.push(resolve));
+  }, 2);
+  const signals = [{ stopped: false }, { stopped: false }, { stopped: false }, { stopped: false }];
+  const passes = [
+    spawn("plan", [], signals[0]!),
+    spawn("gate", [], signals[1]!),
+    spawn("test", [], signals[2]!),
+    spawn("config", [], signals[3]!),
+  ];
+  await wait(0);
+  assert.deepEqual(started, ["plan", "gate"], "only two expensive children start at once");
+  signals[2]!.stopped = true;
+  release[0]!(0);
+  assert.equal(await passes[0], 0);
+  await wait(0);
+  assert.deepEqual(started, ["plan", "gate", "config"], "a stopped queued pass is skipped and the next live one starts");
+  assert.equal(await passes[2], null);
+  release[1]!(0);
+  release[2]!(0);
+  assert.deepEqual(await Promise.all([passes[1], passes[3]]), [0, 0]);
+});
+
+test("a failed garden child releases its shared slot", async () => {
+  const started: string[] = [];
+  const spawn = boundedGardenPassSpawn((name) => {
+    started.push(name);
+    if (name === "plan") throw new Error("spawn EAGAIN");
+    return Promise.resolve(0);
+  }, 1);
+  const first = spawn("plan", [], { stopped: false });
+  const second = spawn("gate", [], { stopped: false });
+  await assert.rejects(first, /spawn EAGAIN/);
+  assert.equal(await second, 0);
+  assert.deepEqual(started, ["plan", "gate"]);
 });
 
 test("W1-T5114: each garden keeps its own pacing, and a failed spawn is logged rather than thrown", async (t) => {

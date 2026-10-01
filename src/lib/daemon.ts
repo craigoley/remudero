@@ -1001,7 +1001,8 @@ export interface DaemonDeps {
   /** W1-T4095: the knowledge gardener — scores, prunes and consolidates the knowledge base on its own
    *  timer beside the main loop, and lands its changes as one reviewed PR per pass. */
   knowledgeGardener?: GardenerDeps<GardenWorkspace>;
-  /** W1-T4110: further gardeners (gardener.ts specs), each started on its own timer beside the main loop. */
+  /** W1-T4110/W1-T4941: registered gardens, including the backlog gardener, start off the loop
+   * through `rmd garden run <name>` on independent timers. */
   gardens?: ReadonlyArray<(intervalMs: number) => { stop: () => void }>;
   /** W1-T4088: answers operator replies on inbox threads, on its own timer beside the main loop. */
   inboxResponder?: InboxResponderDeps;

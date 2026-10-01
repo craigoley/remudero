@@ -32,6 +32,7 @@ export const REGISTERED_GARDEN_NAMES = [
   "overseer",
   "hot-file",
   "host-resource",
+  "backlog",
 ] as const;
 
 export type RegisteredGardenName = (typeof REGISTERED_GARDEN_NAMES)[number];
@@ -43,11 +44,51 @@ export function isRegisteredGardenName(name: string): name is RegisteredGardenNa
 /** The ledger step one row per pass carries, so a slow gardener is named rather than inferred from loop lag. */
 export const GARDEN_PASS_STEP = "garden.pass";
 
+/** A garden's due probe threw; its pass runs anyway and reports the failure itself. */
+export const GARDEN_DUE_FAILED_STEP = "garden.due_failed";
+
 /** The child's flag for "this pass also refreshes its hourly evidence" (the test garden's feed). */
 export const GARDEN_HOURLY_FLAG = "--hourly";
 
 /** Runs ONE pass of the named garden and resolves with its exit code (null when it died on a signal). */
 export type GardenPassSpawn = (name: RegisteredGardenName, args: readonly string[], signal: { readonly stopped: boolean }) => Promise<number | null>;
+
+/** Share a small host budget across all garden starters. A busy garden keeps its own pending
+ * pass rather than spawning a second child, while queued passes from other gardens wait here. */
+export function boundedGardenPassSpawn(spawnPass: GardenPassSpawn, width: number): GardenPassSpawn {
+  if (!Number.isInteger(width) || width < 1) throw new Error("garden pass width must be a positive integer");
+  type Pending = {
+    name: RegisteredGardenName;
+    args: readonly string[];
+    signal: { readonly stopped: boolean };
+    resolve: (exit: number | null) => void;
+    reject: (error: unknown) => void;
+  };
+  const pending: Pending[] = [];
+  let active = 0;
+  const admit = (): void => {
+    while (active < width && pending.length > 0) {
+      const next = pending.shift()!;
+      if (next.signal.stopped) {
+        next.resolve(null);
+        continue;
+      }
+      active += 1;
+      // An asynchronous turn keeps a synchronous throwing spawn inside the same settle path.
+      Promise.resolve()
+        .then(() => next.signal.stopped ? null : spawnPass(next.name, next.args, next.signal))
+        .then(next.resolve, next.reject)
+        .finally(() => {
+          active -= 1;
+          admit();
+        });
+    }
+  };
+  return (name, args, signal) => new Promise<number | null>((resolve, reject) => {
+    pending.push({ name, args, signal, resolve, reject });
+    admit();
+  });
+}
 
 /** Each garden's own pacing, carried over from its former in-process starter. */
 interface GardenSchedule {
@@ -77,6 +118,9 @@ export interface GardenOffLoopWiring {
   spawnPass: GardenPassSpawn;
   log: (step: string, extra?: Record<string, unknown>) => void;
   clock?: Clock;
+  /** Whether a pass would do anything ({@link gardenPassDue}). Absent, every tick spawns. A pass that would
+   *  skip costs a file read here instead of a whole child process; a probe that throws spawns the pass. */
+  due?: () => boolean;
 }
 
 export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: number, wiring: GardenOffLoopWiring): { stop: () => void } {
@@ -88,11 +132,18 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
   let reportedBucket: number | undefined;
   const tick = (): void => {
     if (running || signal.stopped || clock.now() - lastStartMs < schedule.minIntervalMs) return;
+    const bucket = gardenLedgerBucket(clock);
+    const hourly = schedule.hourly && bucket !== reportedBucket;
+    if (!hourly && wiring.due) {
+      try {
+        if (!wiring.due()) return;
+      } catch (e) {
+        wiring.log(GARDEN_DUE_FAILED_STEP, { name, error: String((e as Error)?.message ?? e) });
+      }
+    }
     running = true;
     const startedMs = clock.now();
     lastStartMs = startedMs;
-    const bucket = gardenLedgerBucket(clock);
-    const hourly = schedule.hourly && bucket !== reportedBucket;
     const settle = (exit: number | null, error?: string): void => {
       running = false;
       if (hourly && exit === 0) reportedBucket = bucket;

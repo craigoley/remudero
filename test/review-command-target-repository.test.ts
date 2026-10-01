@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { test } from "node:test";
@@ -86,6 +86,44 @@ function verdict(head: string): ReviewRunResult {
     planOnly: false,
   };
 }
+
+test("a replayed review checks the target head's live status and records a restored terminal post", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-review-replay-target-"));
+  try {
+    const target = initTargetRepo(root);
+    let reads = 0;
+    let posts = 0;
+    const code = await reviewCommand("8", ["--repo", "acme/portal"], {
+      enforceReviewSubjectCheckout: true,
+      fetchView: (args) => {
+        if (args[1]?.endsWith(`/commits/${target.head}/status`)) {
+          reads++;
+          return { statuses: [{ context: "remudero-review", state: "pending" }] };
+        }
+        return restPull("Remudero-Task: W1-TARGET", target.head);
+      },
+      loadConfig: () => ({ root, installRoot: REPO_ROOT }) as Config,
+      fetchHead: () => {},
+      postReviewPending: async () => ({ posted: false }) as never,
+      materialize: () => ({ worktreePath: undefined, failure: { errorClass: "test", message: "skip worktree" } }) as never,
+      runReview: (async () => ({ ...verdict(target.head), decisionDisposition: "replayed", reviewDecisionDigest: "v2:prior" })) as never,
+      reviewerCodeFreshness: () => ({ status: "fresh", codeSha: CONTROLLER_HEAD, originMainSha: CONTROLLER_HEAD, advance: "none" }),
+      postStatus: (async (opts) => {
+        posts++;
+        assert.equal(opts.sha, target.head);
+        assert.equal(opts.fetchCurrentStatus?.(), "pending");
+        return { posted: true };
+      }) as typeof postReviewStatusGuarded,
+    });
+    assert.equal(code, 0);
+    assert.equal(reads, 1);
+    assert.equal(posts, 1);
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
+    assert.match(ledger, /"step":"review.posted".*"status_recovered":true/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("target review uses only the target checkout", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-review-target-root-"));

@@ -163,12 +163,13 @@ import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe
 import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { runGarden, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./lib/gardener.js";
-import { childGardenPassSpawn, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { gardenPassDue, runGarden, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./lib/gardener.js";
+import { boundedGardenPassSpawn, childGardenPassSpawn, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
+import { backlogGardenSpec } from "./lib/backlog-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
-import { CONFIG_GARDEN_NAME, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
+import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec, testManifestProposalPath, type TestProposalFeed } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionLedgerRecords, readGateFireRateReport, freshCiFrictionPlanOrigins, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
@@ -262,7 +263,7 @@ export const RUN_BRANCH_UNFILED_RE = /^run-unfiled-\d+$/;
  *  schedule and builds no filed task, and it is not a fleet run either — so it has its own form rather
  *  than borrowing {@link RUN_BRANCH_UNFILED_FORM}, which the sweep treats as a fleet worker's. Only the
  *  registered gardeners match, so an arbitrary `*-garden-*` branch is not admitted. */
-export const GARDEN_NAMES = ["knowledge", "plan", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource"] as const;
+export const GARDEN_NAMES = ["knowledge", "plan", "backlog", "gate", "test", "config", "export", "ci-friction", "selector-shadow", "hot-file", "machine-judge", "host-resource"] as const;
 export type GardenName = (typeof GARDEN_NAMES)[number];
 export const GARDEN_BRANCH_FORM = "<gardener>-garden-<epochMs>";
 export const GARDEN_BRANCH_RE = new RegExp(`^(?:${GARDEN_NAMES.join("|")})-garden-\\d+$`);
@@ -734,6 +735,7 @@ import {
   classifyProposal,
   draftAttemptKey,
   draftsDueOnDaemon,
+  resolvedInboxDraftLane,
   decideDraftDeferral,
   declinedReasonInLedger,
   type ProposalVerdictKind,
@@ -18861,6 +18863,7 @@ interface ReviewCommandDeps {
   buildBaseProof?: typeof buildBaseProofDir;
   runReview?: typeof runReview;
   postStatus?: typeof postReviewStatusGuarded;
+  reviewerCodeFreshness?: () => ReviewerCodeFreshness;
   /** W1-T913: injectable so a test can observe the pending post without a real `gh` spawn — see
    *  `postReviewPending`'s call site below. Defaults to the real {@link postReviewPending}. */
   postReviewPending?: typeof postReviewPending;
@@ -19252,6 +19255,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     buildBaseProof,
     runReview: runReviewDep,
     postStatus: postStatusDep,
+    reviewerCodeFreshness: reviewerCodeFreshnessDep,
     postReviewPending: postReviewPendingDep,
     fetchHead,
     executionMode,
@@ -19264,6 +19268,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     buildBaseProof: buildBaseProofDir,
     runReview,
     postStatus: postReviewStatusGuarded,
+    reviewerCodeFreshness: () => checkReviewerCodeFreshness(repoRoot, process.env),
     postReviewPending,
     fetchHead: realDeps().reviewWorktree.fetch,
     executionMode: "deterministic" as const,
@@ -19571,7 +19576,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           // makes `judgeReview` mark the verdict `keywordOnly`+`capped`, exactly
           // the documented fallback (criterion 5) — never silent.
           headCheckoutDir: worktreePath,
-          reviewerCodeFreshness: () => checkReviewerCodeFreshness(repoRoot, process.env),
+          reviewerCodeFreshness: reviewerCodeFreshnessDep,
           // The three base facts, threaded by NAME so a reader (and test/preexisting-proof-hits-wiring)
           // can see each one reach the evidence: the dir, the per-proof unreadable set (W1-T460), and
           // whether the dir is a checkout a `unit test:` proof may honestly be re-run in (R-11).
@@ -19590,8 +19595,51 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       ),
   );
 
+  // A final review decision is immutable, but GitHub's commit status is last-write-wins. A stale
+  // daemon may have posted pending after that decision; replay must check the live context and
+  // restore the already-judged terminal status instead of reporting a success that GitHub cannot see.
+  let replayStatusAction: "restored" | "confirmed" | undefined;
+  if (verdict.decisionDisposition === "replayed" && verdict.reviewDecisionDigest) {
+    const restored = await postStatusDep({
+      owner, repo, sha: view.headRefOid, state: verdict.state,
+      description: reviewPostedDescription(verdict),
+      taskId: taskId ?? `PR-${view.number}`, evidence: reviewEvidenceStrength(verdict.criteria),
+      ledgerPath, runId, prUrl: view.url, reviewInputDigest: inputDigest,
+      reviewDecisionDigest: verdict.reviewDecisionDigest,
+      reviewEngineRevision: REVIEW_ENGINE_REVISION,
+      reviewerCodeFreshness: reviewerCodeFreshnessDep(),
+      fetchLifecycle: () => fetchPrLifecycle(view.url),
+      fetchCurrentStatus: (): "success" | "failure" | "pending" | undefined => {
+        const raw = fetchView(combinedStatusRestArgs(owner, repo, view.headRefOid)) as {
+          statuses?: Array<{ context?: string; state?: string }>;
+        };
+        if (!raw || !Array.isArray(raw.statuses)) throw new Error("combined commit status has no statuses array");
+        const state = raw.statuses.find((entry) => entry.context === REVIEW_CONTEXT)?.state;
+        if (state === undefined) return undefined;
+        if (state === "success" || state === "pending") return state;
+        if (state === "failure" || state === "error") return "failure";
+        throw new Error(`unrecognized remudero-review state: ${state}`);
+      },
+    });
+    if (restored.posted) {
+      replayStatusAction = "restored";
+      log("review.posted", {
+        context: REVIEW_CONTEXT, state: verdict.state, head_sha: view.headRefOid, pr_url: view.url,
+        review_input_digest: inputDigest, review_engine_revision: REVIEW_ENGINE_REVISION,
+        review_decision_digest: verdict.reviewDecisionDigest, decision_verdict: verdict,
+        evaluator_provenance: verdict.evaluatorProvenance,
+        reviewer_outcome: verdict.reviewerOutcome, proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
+        status_recovered: true,
+      });
+    } else if (restored.replayed) {
+      replayStatusAction = "confirmed";
+    } else {
+      verdict.verdictWithheld = restored.reason ?? "could not restore the live remudero-review status";
+    }
+  }
+
   console.log(
-    `\nremudero-review=${verdict.state} ${verdict.verdictWithheld ? "WITHHELD" : "posted"} to ${view.url} (head ${verdict.headSha.slice(0, 7)})` +
+    `\nremudero-review=${verdict.state} ${verdict.verdictWithheld ? "WITHHELD" : replayStatusAction ?? "posted"} to ${view.url} (head ${verdict.headSha.slice(0, 7)})` +
       (verdict.verdictWithheld ? ` — ${verdict.verdictWithheld}` : "") +
       (reviewVerdictAnnotation(verdict) ? ` — ${reviewVerdictAnnotation(verdict)}` : "") +
       // W1-T1085: the same three-way fact the status itself renders — a plan-only PR is not a
@@ -32968,7 +33016,7 @@ export interface GardenBuildContext {
 }
 
 /** One pass of one garden; it logs its own failure under the garden's own step name and never throws. */
-export type RegisteredGardenPass = () => void | Promise<void>;
+export type RegisteredGardenPass = (() => void | Promise<void>) & { due?: () => boolean };
 
 /** W1-T5114: the ONE place each registered garden is built, for the daemon's in-process mode and `rmd garden run`. */
 export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBuildContext, opts: { hourly?: boolean } = {}): RegisteredGardenPass | Promise<RegisteredGardenPass> {
@@ -32982,18 +33030,23 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     log,
     ...(escalate ? { escalate } : {}),
   });
-  const gardenPass = <C extends string, I, A extends GardenAction<C>>(spec: GardenSpec<C, I, A, GardenCheckout>, d: GardenerDeps): RegisteredGardenPass => () => {
+  const withDue = (pass: () => void | Promise<void>, due: () => boolean): RegisteredGardenPass => Object.assign(pass, { due });
+  const gardenPass = <C extends string, I, A extends GardenAction<C>>(spec: GardenSpec<C, I, A, GardenCheckout>, d: GardenerDeps): RegisteredGardenPass => withDue(() => {
     try {
       runGarden(spec, d);
     } catch (e) {
       log(`${spec.name}.gardener_failed`, { error: String((e as Error)?.message ?? e) });
     }
-  };
+  }, () => gardenPassDue(spec, d));
   const noPass: RegisteredGardenPass = () => {};
   switch (name) {
     case "plan": {
       const d = deps("plan");
       return gardenPass(planGardenSpec(d), d);
+    }
+    case "backlog": {
+      const d = deps("backlog");
+      return gardenPass(backlogGardenSpec(d), d);
     }
     // W1-T4116: the gates tighten, refresh and propose demoting themselves from their own
     // measurements. The ratchets are ES modules, so the garden starts once they have loaded.
@@ -33015,7 +33068,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "test": {
       const d = deps("test");
       return loadTestManifestProbe(repoRoot).then(
-        (probe): RegisteredGardenPass => async () => {
+        (probe): RegisteredGardenPass => withDue(async () => {
           try {
             let feed: TestProposalFeed | { status: "failed"; error: string } | undefined;
             if (opts.hourly) {
@@ -33033,7 +33086,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
           } catch (e) {
             log("test.gardener_failed", { error: String((e as Error)?.message ?? e) });
           }
-        },
+        }, () => gardenPassDue(testGardenSpec(d, probe), d)),
         (e: unknown) => {
           log("test.gardener_failed", { error: String((e as Error)?.message ?? e) });
           return noPass;
@@ -33048,13 +33101,13 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         (m: { buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] } }): RegisteredGardenPass => {
           const workerEnv = buildWorkerEnv({}, process.env, { allowApiKey: config.overflow === "api_key" });
           const mountRecommendations = mountRecommendationSource({ build: m.buildMountHeadroomSweep, stateDir, mountsFile: mountsPath(repoRoot), billingMode: billingMode(Object.keys(workerEnv)), log });
-          return () => {
+          return withDue(() => {
             try {
               runConfigGarden(configGardenSpec(d, { mountRecommendations }), d, { mountRecommendations });
             } catch (e) {
               log(`${CONFIG_GARDEN_NAME}.gardener_failed`, { error: String((e as Error)?.message ?? e) });
             }
-          };
+          }, () => configCanariesDue(stateDir) || gardenPassDue(configGardenSpec(d, { mountRecommendations }), d));
         },
         (e: unknown) => {
           log("config.gardener_failed", { error: String((e as Error)?.message ?? e) });
@@ -33159,6 +33212,15 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       };
     }
   }
+}
+
+export function registeredGardenDueProbe(name: RegisteredGardenName, ctx: GardenBuildContext): () => boolean {
+  let probe: (() => boolean) | undefined;
+  Promise.resolve(buildRegisteredGarden(name, ctx)).then(
+    (pass) => { probe = pass.due; },
+    (e: unknown) => ctx.log(GARDEN_DUE_FAILED_STEP, { name, error: String((e as Error)?.message ?? e) }),
+  );
+  return () => (probe ? probe() : true);
 }
 
 /** Build the named garden and run ONE pass of it; resolves 0 once the pass has run (it logs its own failures). */
@@ -33408,8 +33470,12 @@ export async function daemonCommand(
   const raiseDuplicate = (e: Escalation): string =>
     escalate({ ...e, runId }, { issues: ghIssueGateway(target.owner, target.repo), ledgerPath, runId });
   const gardenContext: GardenBuildContext = { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate };
-  const gardenPassSpawn: GardenPassSpawn = deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : childGardenPassSpawn();
-  const offLoopGarden = (name: RegisteredGardenName) => (intervalMs: number) => startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log });
+  const gardenPassSpawn: GardenPassSpawn = boundedGardenPassSpawn(
+    deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : childGardenPassSpawn(),
+    2,
+  );
+  const offLoopGarden = (name: RegisteredGardenName) => (intervalMs: number) =>
+    startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, ...(deps.gardenPassesInProcess ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) });
   if (!target.isSelf && !flagValue(rest, "--plan")) {
     const repoDir = join(reposDir, target.repo);
     if (!existsSync(repoDir)) {
@@ -43878,7 +43944,8 @@ export function buildInboxDraftHook(
         log("inbox.draft_readiness_unavailable", { error: String((e as Error)?.message ?? e) });
       }
 
-      const due = draftsDueOnDaemon(proposals, drafts, attempts, DAEMON_DRAFT_BATCH_CAP, draftReadiness);
+      const draftLane = resolvedInboxDraftLane(repoRoot);
+      const due = draftsDueOnDaemon(proposals, drafts, attempts, DAEMON_DRAFT_BATCH_CAP, draftReadiness, draftLane);
       if (due.length === 0) return;
 
       // W1-T2561: NAME THE DEFERRAL, NEVER CAP SILENTLY. `draftsDueOnDaemon` now returns at most
@@ -43888,7 +43955,7 @@ export function buildInboxDraftHook(
       // tell a paced drain from a wedged one. This is a pure observation — a count of a set already
       // computed above, spawning nothing — and `deferred: 0` on an uncapped poll is a real reading,
       // not silence, so the row is written unconditionally.
-      const eligible = draftsDueOnDaemon(proposals, drafts, attempts, 0, draftReadiness);
+      const eligible = draftsDueOnDaemon(proposals, drafts, attempts, 0, draftReadiness, draftLane);
       log("inbox.draft_batch", {
         eligible: eligible.length,
         drafting: due.length,
@@ -44000,7 +44067,7 @@ export function buildInboxDraftHook(
         // change. This is the ONLY arm that skips the write; an ordinary failure still keys, so
         // W1-T192's throttle is untouched (its own test pins that).
         if (outcome.ok || !outcome.refused) {
-          nextAttempts[outcome.proposalId] = draftAttemptKey(proposal);
+          nextAttempts[outcome.proposalId] = draftAttemptKey(proposal, draftLane);
         } else {
           refusedThisBatch.push(outcome.proposalId);
         }

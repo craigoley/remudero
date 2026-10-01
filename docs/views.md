@@ -99,10 +99,17 @@ reads no file and no SQLite.
     providers produce. The HTTP answer being a 404 does not stop the comparison. Serve also DRIVES
     every shadowed key through the same sampler on its 5 s switch recheck, so each key is compared about
     once a minute with no console traffic; a driven sample counts as a sample, never a request.
-    Readiness (`data.shadow` in `/v1/views/read-model`) is read from the persisted `view_shadow`
-    counters, so it shows from boot, not only after this process compared something.
+    Readiness (`data.shadow` in `/v1/views/read-model`) is read from the persisted counters in
+    `<stateDir>/read-model/view-shadow.json`, so it shows from boot, not only after this process
+    compared something. That file stays on the persistent disk when the DB moves to scratch, so a
+    deallocate keeps the streak; an older DB's `view_shadow` table is read until its first save.
   - `serve`: the read-model body answers. A view with no body yet answers from its Phase 0
     computation, or **404 `view_not_ready`**.
+- **GitHub fetcher (Phase 1 cutover).** `"github"?: "serve"|"worker"` in the same file picks who keeps
+  serve's GitHub gateway warm. Absent or `serve`, serve does. `worker` hands the keep-warm to the
+  read-model worker only while its thread is heard from and holds the core lease; otherwise serve's
+  resumes within one 5 s recheck. Exactly one runs, each handover writes one `github.keep_warm.owner`
+  row, and both roll up as `github.keep_warm.rollup`.
 - **Worker diagnostics.** The worker ledgers `read_model.lease_acquired` and `read_model.lease_elsewhere`
   when an instance's lease changes hands, and `read_model.slow_tick` when one projector tick takes longer
   than the 10 s stale bound. A source's staleness is judged from when its tick completed.

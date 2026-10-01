@@ -54,6 +54,52 @@ const digestInput = {
   declaredFiles: ["src/a.ts", "test/a.test.ts"],
 };
 
+test("a replay restores a final review displaced by pending, but never overwrites a conflicting final status", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-review-status-replay-"));
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    const digest = reviewDecisionDigest(digestInput);
+    appendLedger(ledgerPath, {
+      run_id: "original", task_id: TASK, step: "review.posted", pr_url: PR, head_sha: HEAD,
+      review_decision_digest: digest, state: "success", decision_verdict: verdict("success"),
+    });
+    let current: ReviewState | undefined = "pending";
+    const posts: ReviewState[] = [];
+    const options = {
+      owner: "o", repo: "r", sha: HEAD, state: "success" as const, taskId: TASK,
+      evidence: "executed" as const, ledgerPath, runId: "replay", prUrl: PR,
+      reviewDecisionDigest: digest, fetchLifecycle: () => ({ merged: false, closed: false }),
+      fetchCurrentStatus: () => current,
+      post: ({ state }: { state: ReviewState }) => { posts.push(state); current = state; },
+    };
+    const restored = await postReviewStatusGuarded(options);
+    assert.equal(restored.posted, true, "the live pending status must be replaced by the proven final decision");
+    assert.deepEqual(posts, ["success"]);
+
+    const confirmed = await postReviewStatusGuarded(options);
+    assert.equal(confirmed.replayed, true, "a matching live final status needs no extra post");
+    assert.deepEqual(posts, ["success"]);
+
+    current = undefined;
+    const absent = await postReviewStatusGuarded(options);
+    assert.equal(absent.posted, true, "a missing live context also needs restoration");
+    assert.deepEqual(posts, ["success", "success"]);
+
+    current = "failure";
+    const conflict = await postReviewStatusGuarded(options);
+    assert.equal(conflict.posted, false, "a different final status requires investigation");
+    assert.match(conflict.reason ?? "", /conflicting terminal status/);
+    assert.deepEqual(posts, ["success", "success"]);
+
+    const unreadable = await postReviewStatusGuarded({ ...options, fetchCurrentStatus: () => { throw new Error("transport down"); } });
+    assert.equal(unreadable.posted, false);
+    assert.match(unreadable.reason ?? "", /could not verify the live/);
+    assert.equal(readLedgerLines(ledgerPath).filter((line) => line.step === "review.post_refused").length, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("W1-T2722: the decision digest covers every material input and excludes operational/model-sample churn", () => {
   const base = reviewDecisionDigest(digestInput);
   const changes = [
