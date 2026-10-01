@@ -31195,7 +31195,7 @@ function dispatchValueContextForSelection(
   const nowMs = systemClock.now();
   const union = readLedgerUnionRecordsSync(stateDir, {
     step: [...DISPATCH_VALUE_LEDGER_STEPS],
-    since: new Date(nowMs - DISPATCH_VALUE_WINDOW_MS).toISOString(),
+    since: fixedClock(nowMs - DISPATCH_VALUE_WINDOW_MS).iso(),
     refuseIncomplete: true,
   });
   if (!union.ok) {
