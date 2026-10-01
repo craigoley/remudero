@@ -83,7 +83,16 @@ export function discoverLiveLedgerRoot(env: NodeJS.ProcessEnv = process.env): st
   const home = env.HOME || homedir();
   const config = join(home, ".config", "remudero", "config.json");
   try {
-    const parsed = JSON.parse(readFileSync(config, "utf8")) as unknown;
+    // loadConfig() first claims this path with an empty file, then atomically renames
+    // published JSON over it. A parallel test process must wait for that claim to
+    // finish before deriving the root it protects from live writes.
+    let raw = readFileSync(config, "utf8");
+    for (let attempt = 1; raw === "" && attempt < 40; attempt++) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+      raw = readFileSync(config, "utf8");
+    }
+    if (raw === "") throw new Error(`live ledger root unavailable: ${config} stayed empty while being published`);
+    const parsed = JSON.parse(raw) as unknown;
     if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
       const root = (parsed as Record<string, unknown>).root;
       if (typeof root === "string" && isAbsolute(root) && root.trim()) return resolve(root);
