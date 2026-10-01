@@ -7,7 +7,7 @@
  * the writer lease whose fence is re-checked inside every write transaction.
  */
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { createRequire } from "node:module";
 import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -64,6 +64,8 @@ export interface ReadModelDb {
   readonly readOnly: boolean;
   /** Set when open found an unusable file and moved it aside before creating a fresh one. */
   readonly recoveredFrom?: { corruptPath: string; reason: string };
+  /** A writer found the previous writer's dirty marker: it never closed, so the caller checks integrity in the background. */
+  readonly uncleanShutdown?: boolean;
   exec(sql: string): void;
   /** `bigInts` reads every INTEGER column as a bigint (64-bit identity hashes need it). */
   prepare(sql: string, opts?: { bigInts?: boolean }): ReadModelStatement;
@@ -151,12 +153,19 @@ function sqliteErrcode(error: unknown): number | undefined {
   return typeof code === "number" ? code : undefined;
 }
 
-function wrap(raw: DatabaseSync, path: string, schemaVersion: number, readOnly: boolean, recoveredFrom?: ReadModelDb["recoveredFrom"]): ReadModelDb {
+/** `<db>.dirty`: written by a writable open, removed by its close; one left behind names an unclean shutdown. */
+export function readModelDirtyMarkerPath(path: string): string {
+  return `${path}.dirty`;
+}
+
+/** `marker`: the dirty marker this connection wrote and its close removes; only openReadModel's writer owns one. */
+function wrap(raw: DatabaseSync, path: string, schemaVersion: number, readOnly: boolean, recoveredFrom?: ReadModelDb["recoveredFrom"], marker?: { path: string; unclean: boolean }): ReadModelDb {
   return {
     path,
     schemaVersion,
     readOnly,
     ...(recoveredFrom ? { recoveredFrom } : {}),
+    ...(marker?.unclean ? { uncleanShutdown: true } : {}),
     exec: (sql) => raw.exec(sql),
     prepare: (sql, opts = {}) => {
       const statement: StatementSync = raw.prepare(sql);
@@ -165,11 +174,18 @@ function wrap(raw: DatabaseSync, path: string, schemaVersion: number, readOnly: 
     },
     meta: (key) => raw.prepare("SELECT v FROM meta WHERE k = ?").get(key)?.v as string | undefined,
     inTransaction: () => raw.isTransaction,
-    close: () => raw.close(),
+    close: () => {
+      raw.close();
+      if (marker) rmSync(marker.path, { force: true });
+    },
   };
 }
 
-/** Opens the connection. A writer also proves the file is a healthy database; any failure throws. */
+/**
+ * Opens the connection; any failure throws. A writer runs NO integrity check here: `PRAGMA quick_check`
+ * reads every page, 105 s for the 498 MB core file on the loaded host, so the open trusts SQLite's
+ * own WAL recovery and the caller checks in the background after an unclean shutdown.
+ */
 function connect(path: string, readOnly: boolean): DatabaseSync {
   const { DatabaseSync: Database } = require("node:sqlite") as typeof import("node:sqlite");
   const raw = new Database(path, { readOnly, timeout: READ_MODEL_BUSY_TIMEOUT_MS });
@@ -177,8 +193,6 @@ function connect(path: string, readOnly: boolean): DatabaseSync {
   try {
     raw.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY;
       PRAGMA journal_size_limit=${READ_MODEL_JOURNAL_SIZE_LIMIT_BYTES};`);
-    const check = raw.prepare("PRAGMA quick_check").get()?.quick_check;
-    if (check !== "ok") throw Object.assign(new Error(`quick_check: ${String(check)}`), { errcode: SQLITE_CORRUPT });
     return raw;
   } catch (error) {
     raw.close();
@@ -229,7 +243,9 @@ export function openReadModel(opts: ReadModelOpenOptions): ReadModelDb {
       raw = connect(path, false);
     }
   }
-  const db = wrap(raw, path, opts.schemaVersion, readOnly, recoveredFrom);
+  const marker = readOnly ? undefined : { path: readModelDirtyMarkerPath(path), unclean: existsSync(readModelDirtyMarkerPath(path)) };
+  if (marker) writeFileSync(marker.path, `${process.pid}\n`, { flush: true });
+  const db = wrap(raw, path, opts.schemaVersion, readOnly, recoveredFrom, marker);
   if (!readOnly) {
     immediate(db, () => db.exec(`${BASE_DDL} ${opts.ddl ?? ""}
       INSERT OR IGNORE INTO meta(k, v) VALUES('schema_version', '${opts.schemaVersion}');`));
@@ -240,6 +256,25 @@ export function openReadModel(opts: ReadModelOpenOptions): ReadModelDb {
     throw new ReadModelError("schema_mismatch", `${path} holds schema ${stored}, expected ${opts.schemaVersion}`, { path, stored });
   }
   return db;
+}
+
+/**
+ * The integrity check the open no longer runs, on its own read-only connection so a writer keeps
+ * committing beside it. `corrupt` separates a damaged file (rebuild it) from one that could not be read
+ * at all (busy, missing: ask again later); a rebuild of a healthy-but-unreadable file would be waste.
+ */
+export function quickCheckReadModel(path: string): { ok: true } | { ok: false; corrupt: boolean; error: string } {
+  let raw: DatabaseSync | undefined;
+  try {
+    raw = connect(path, true);
+    const problems = raw.prepare("PRAGMA quick_check").all().map((row) => String(row.quick_check));
+    return problems.length === 1 && problems[0] === "ok" ? { ok: true } : { ok: false, corrupt: true, error: `quick_check: ${problems.slice(0, 5).join("; ")}` };
+  } catch (error) {
+    const code = sqliteErrcode(error);
+    return { ok: false, corrupt: code === SQLITE_CORRUPT || code === SQLITE_NOTADB, error: (error as Error).message };
+  } finally {
+    raw?.close();
+  }
 }
 
 /**

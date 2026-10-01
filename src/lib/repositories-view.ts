@@ -212,22 +212,27 @@ export function legacyRepositories(sourcesPath: string, nowMs: number): ShadowLe
   return { data, asOfMs: nowMs, facts };
 }
 
-function planReader(): (path: string) => Plan {
+/** The plan each summary reads, memoized on the plan file's and `tasks.d`'s mtimes; `fresh` says whether a read would hit the memo. */
+function planReader(): { read: (path: string) => Plan; fresh: (path: string) => boolean } {
   const memo = new Map<string, { stamp: string; plan: Plan }>();
-  return (path) => {
-    const stamp = [path, join(dirname(path), "tasks.d")].map((p) => {
-      try {
-        return String(statSync(p).mtimeMs);
-      } catch {
-        // deliberate: an absent tasks.d is part of the stamp; loadPlan reports an unreadable plan itself.
-        return "absent";
-      }
-    }).join("|");
-    const hit = memo.get(path);
-    if (hit?.stamp === stamp) return hit.plan;
-    const plan = loadPlan(path);
-    memo.set(path, { stamp, plan });
-    return plan;
+  const stampOf = (path: string): string => [path, join(dirname(path), "tasks.d")].map((p) => {
+    try {
+      return String(statSync(p).mtimeMs);
+    } catch {
+      // deliberate: an absent tasks.d is part of the stamp; loadPlan reports an unreadable plan itself.
+      return "absent";
+    }
+  }).join("|");
+  return {
+    read: (path) => {
+      const stamp = stampOf(path);
+      const hit = memo.get(path);
+      if (hit?.stamp === stamp) return hit.plan;
+      const plan = loadPlan(path);
+      memo.set(path, { stamp, plan });
+      return plan;
+    },
+    fresh: (path) => memo.get(path)?.stamp === stampOf(path),
   };
 }
 
@@ -235,14 +240,38 @@ function planReader(): (path: string) => Plan {
 export function createRepositoriesReadModelView<S extends { instance: string; tickedAt?: number; generation: number }>(ledgerSource: (state: S, now: number) => ViewSource): {
   name: string;
   version: number;
+  prepare(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }, more: () => boolean): boolean;
   materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }): Array<{ key: string; data: RepositoriesData; sources: ViewSource[] }>;
   legacy(key: string, now: number, data: unknown): ShadowLegacy | undefined;
 } {
   const sourcesFile = readOnMtimeChange(readSources);
   const registryFile = readOnMtimeChange(readRegistry);
   const computed = new Map<string, InstanceSummary>();
-  const readPlan = planReader();
+  const plans = planReader();
   let sourcesPath: string | undefined;
+  type Slot = { state: S; db?: ReadModelDb } | undefined;
+  /** Whether an instance's summary is recomputed now: #7926's cadence, 30 s after an input moves, else 60 s. */
+  const due = (instanceId: string, slot: Slot, sourcesMtimeMs: number, now: number): boolean => {
+    const prior = computed.get(instanceId);
+    if (!prior) return true;
+    const ageMs = now - prior.atMs;
+    const moved = prior.generation !== (slot?.state.generation ?? -1) || prior.sourcesMtimeMs !== sourcesMtimeMs;
+    return ageMs >= REPO_TELEMETRY_CACHE_TTL_MS || (moved && ageMs >= REPO_TELEMETRY_MIN_AGE_MS);
+  };
+  const refresh = (instanceId: string, slot: Slot, options: RepositoriesInstanceOptions, sourcesMtimeMs: number, now: number): void => {
+    const prior = computed.get(instanceId);
+    const generation = slot?.state.generation ?? -1;
+    const next = summarize(slot, options, now, plans.read);
+    computed.set(instanceId, next.summary
+      ? { atMs: now, generation, sourcesMtimeMs, summary: next.summary, ...(next.shadow ? { shadow: next.shadow } : {}) }
+      : { atMs: now, generation, sourcesMtimeMs, reason: next.reason, ...(prior?.summary ? { summary: prior.summary, ...(prior.shadow ? { shadow: prior.shadow } : {}) } : {}) });
+  };
+  const published = (instances: ReadonlyArray<{ db?: ReadModelDb }>): { path: string; sources?: RepositoriesSources } | undefined => {
+    const dbPath = instances.find((slot) => slot.db)?.db?.path;
+    if (dbPath === undefined) return undefined;
+    sourcesPath = join(dirname(dbPath), REPOSITORIES_SOURCES_FILE);
+    return { path: sourcesPath, sources: sourcesFile(sourcesPath) };
+  };
   return {
     name: "repositories",
     version: REPOSITORIES_VIEW_VERSION,
@@ -253,35 +282,44 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
       const mine = Object.fromEntries([...computed].map(([instanceId, s]) => [instanceId, s.shadow ?? {}]));
       return { data: legacy.data, asOfMs: legacy.asOfMs, ...repositoriesShadowPairing(legacy.facts, mine, data as RepositoriesData) };
     },
+    /** Each due instance's plan read and summary, one step each, so a cold build is never one unit. */
+    prepare: ({ now, instances }, more) => {
+      const at = published(instances);
+      if (at?.sources === undefined) return true;
+      const sourcesMtimeMs = statSync(at.path).mtimeMs;
+      for (const { instanceId, options } of at.sources.instances) {
+        const slot = instances.find((candidate) => candidate.state.instance === instanceId);
+        if (!due(instanceId, slot, sourcesMtimeMs, now)) continue;
+        const planPath = options.planPath ?? join(options.root, "plan", "tasks.yaml");
+        if (slot?.db !== undefined && slot.state.tickedAt !== undefined && !plans.fresh(planPath)) {
+          if (!more()) return false;
+          try {
+            plans.read(planPath);
+          } catch {
+            // deliberate: the summary step reads the plan again and turns this failure into the instance's reason.
+          }
+        }
+        if (!more()) return false;
+        refresh(instanceId, slot, options, sourcesMtimeMs, now);
+      }
+      return true;
+    },
     materialize: ({ now, instances }) => {
-      const dbPath = instances.find((slot) => slot.db)?.db?.path;
-      if (dbPath === undefined) return [];
-      const path = join(dirname(dbPath), REPOSITORIES_SOURCES_FILE);
-      sourcesPath = path;
-      const published = sourcesFile(path);
-      if (published === undefined) return [{ key: "", data: { instances: [], projects: [], reason: "serve has not published the repository sources yet" }, sources: [] }];
-      const sourcesMtimeMs = statSync(path).mtimeMs;
+      const at = published(instances);
+      if (at === undefined) return [];
+      if (at.sources === undefined) return [{ key: "", data: { instances: [], projects: [], reason: "serve has not published the repository sources yet" }, sources: [] }];
+      const sourcesMtimeMs = statSync(at.path).mtimeMs;
       const sources: ViewSource[] = [];
       const data: RepositoriesData = { instances: [], projects: [] };
-      for (const { instanceId, options } of published.instances) {
+      for (const { instanceId, options } of at.sources.instances) {
         const slot = instances.find((candidate) => candidate.state.instance === instanceId);
         if (slot) sources.push(ledgerSource(slot.state, now));
-        const prior = computed.get(instanceId);
-        const generation = slot?.state.generation ?? -1;
-        const ageMs = prior ? now - prior.atMs : Number.POSITIVE_INFINITY;
-        const moved = prior !== undefined && (prior.generation !== generation || prior.sourcesMtimeMs !== sourcesMtimeMs);
-        let current = prior;
-        if (!prior || ageMs >= REPO_TELEMETRY_CACHE_TTL_MS || (moved && ageMs >= REPO_TELEMETRY_MIN_AGE_MS)) {
-          const next = summarize(slot, options, now, readPlan);
-          current = next.summary
-            ? { atMs: now, generation, sourcesMtimeMs, summary: next.summary, ...(next.shadow ? { shadow: next.shadow } : {}) }
-            : { atMs: now, generation, sourcesMtimeMs, reason: next.reason, ...(prior?.summary ? { summary: prior.summary, ...(prior.shadow ? { shadow: prior.shadow } : {}) } : {}) };
-          computed.set(instanceId, current);
-        }
-        sources.push(summarySource(instanceId, current!));
-        data.instances.push({ instanceId, ...(current!.summary ? { summary: unstampedSummary(current!.summary) } : {}), ...(current!.reason ? { reason: current!.reason } : {}) });
+        if (due(instanceId, slot, sourcesMtimeMs, now)) refresh(instanceId, slot, options, sourcesMtimeMs, now);
+        const current = computed.get(instanceId)!;
+        sources.push(summarySource(instanceId, current));
+        data.instances.push({ instanceId, ...(current.summary ? { summary: unstampedSummary(current.summary) } : {}), ...(current.reason ? { reason: current.reason } : {}) });
       }
-      Object.assign(data, repositoriesPortfolio(published, data, registryFile));
+      Object.assign(data, repositoriesPortfolio(at.sources, data, registryFile));
       return [{ key: "", data, sources }];
     },
   };

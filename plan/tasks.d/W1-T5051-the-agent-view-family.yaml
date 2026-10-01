@@ -1,0 +1,51 @@
+- id: W1-T5051
+  title: "THE AGENT PAGES FOLD PANEL FACTS PER REQUEST AND THE CONSOLE RUNS A SECOND PROPOSAL ENGINE — add the agent view family (?part= proposals, history, settings, experiments, delegations, capabilities, follow-ups, promotions, actions, consequences, intent-plans) over panel.* facts with a persisted incremental fold per instance, so core is the only engine"
+  repo: remudero
+  depends_on: []
+  dispatch_hold: true
+  priority: 3
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 35.00
+  risk: high
+  band_meaning: span
+  origin: "2026-10-01 core-console architecture Phase 4 design (P4-T12), arch-phase4-design.md"
+  plan_refs: ["W1-T4563"]
+  files:
+    - src/lib/agent-view.ts
+    - test/agent-view.test.ts
+    - src/lib/read-model-worker.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-01: after #8127 the operator-agent GETs answer in 4 to 59 ms, but each is still a
+    per-request fold with a live-file parse, and the agent pages read about 4N routes across N instances.
+    The console keeps its own proposal engine (src/lib/agent.ts) beside core's nav-badge fold (#8033), so
+    the proposal list exists twice. The ranking puts this below inbox, feedback and workstreams: the gain is
+    one engine and one read per page, not latency.
+  design: |
+    agent?part=<part>&instance= from panel.operator_agent_{proposal,decision,outcome,settings,...} facts
+    (isFactStep keeps every panel. step) plus the analytics source_snapshot per instance for proposals and
+    settings. The fold state is persisted per instance (agent_fold(instance, last_seq, state_json)) and only
+    fact rows with seq > last_seq are folded, in chunks bounded by the pass budget, so a large delta spreads
+    across passes. The nav-badge fold reuses it. Register it in read-model-worker.ts. /context stays a direct
+    keyed GET.
+  acceptance:
+    - claim: "each agent view part equals its operator agent route over the same ledger"
+      proof: 'grep: test("W1-T5051: each agent view part equals its operator agent route over the same ledger" in test/agent-view.test.ts'
+    - claim: "a large panel fact delta is folded across passes within budget"
+      proof: 'grep: test("W1-T5051: a large panel fact delta is folded across passes within budget" in test/agent-view.test.ts'
+    - claim: "the worker registers the agent view"
+      proof: 'grep: createAgentView( in src/lib/read-model-worker.ts'
+  falsifier: |
+    Re-fold from seq 0 every pass: a 50k-row delta exceeds the pass budget in one unit and the second proof
+    fails. Drop a part: its parity check fails against the route.
+  note: |
+    DISPATCH HOLD: waits for P4-T02 (structured view freshness: ViewSource kind, phase, lagMs, etaMs, budgetMs). A Phase 4 critical-path task is hand-built on a run-unfiled
+    branch with no plan id, so depends_on cannot name it. RELEASE: one plan amendment deleting
+    dispatch_hold once that merges (tracked in arch-plan.md, Phase 4).
+    Design: ~/Remudero/.session-scratch/arch-phase4-design.md §1.1, §7.1 and §10.
+    Scope-time checks 2026-10-01: no run-W1-T5048..5066 branch on origin; no origin/main commit names
+    these ids; no plan record on origin/main or an open PR head covers this change. Reserved from the
+    operator checkout for this filing branch.

@@ -1,0 +1,46 @@
+- id: W1-T5047
+  title: "A RECYCLED DAEMON CONTAINER ORPHANS ITS DISPATCH CLAIMS FOREVER — the dead-claimant arm releases only a claim minted on THIS host, the host is the container id, and every recycle mints a new one: 8 claims from 4 vanished containers were held 2026-09-18..28, and W1-T4266, W1-T3676, W1-T3854 and W1-T4457 could never dispatch (W1-T4266 tripped its breaker on four blocked_inflight refusals)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-10-01: what to do with W1-T4266, and should it be taken care of automatically"
+  note: "reservation hand-off: plan-lane-budget-owned-1790819572000 -> plan-lane-budget-owned-1790819572000"
+  plan_refs: [W1-T2784, W1-T396, W1-T3979, W1-T4769]
+  files: [src/lib/dispatch-claim.ts, src/run-task.ts, test/a-recycled-container-releases-the-claims-it-held.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-01: refs/rmd-dispatch/* held 8 claims whose anchors name containers that no longer exist on the
+    host (9d20a25259e1 09-18, 52abd52a2256 09-21, 04270370982e and 9afc076586ad 09-26, 6dae8df56713 09-27,
+    19b81d3f2845 09-27/28). Four belong to unmerged tasks. W1-T4266 was dispatched four times on 09-30 05:24-06:03,
+    and each run found the claim taken, logged blocked_inflight and spent a breaker strike until it tripped. The
+    claims were removed by hand on 10-01 after proving each container was gone (docker ps -a). decideDispatchClaimRelease's
+    dead-claimant arm (W1-T2784) needs `anchor.host === localHost`, but `hostname()` in a container is its id, so
+    after any recycle a claim is "cross-host" and falls to the operator arm forever. The deploy tick recycles the
+    core container on every image drift.
+  design: |
+    Proof, not time (the module's own rule).
+    1. New claim anchors also carry the daemon INSTANCE name, e.g.
+       `rmd-dispatch claim <pid>@<host> <iso> instance=<name>`. parseClaimAnchorMessage keeps reading the old form.
+    2. The dead-claimant arm also fires when the anchor names THIS instance (the instance field, or for a legacy
+       anchor a `daemon.boot` row of this instance's ledger whose host equals the anchor host), the claim was
+       minted before this process's own `daemon.boot`, and the ledger shows a newer `daemon.boot` on a different
+       host. A single-container instance has then provably replaced the claimant's container.
+    3. Claims from an operator CLI (no instance, no matching boot row) still fall to the operator arm.
+    4. The daemon sweeps refs/rmd-dispatch/* once at boot with this decision and releases the dead ones, ledgering
+       dispatch.claim_released {arm: dead-claimant, evidence}.
+  acceptance:
+    - claim: "a claim minted by this instance's replaced container is released at boot"
+      proof: 'grep: test("W1-T5047: a claim minted by this instance replaced container is released at boot" in test/a-recycled-container-releases-the-claims-it-held.test.ts'
+    - claim: "an operator CLI claim from another host is never auto-released"
+      proof: 'grep: test("W1-T5047: an operator CLI claim from another host is never auto-released" in test/a-recycled-container-releases-the-claims-it-held.test.ts'
+    - claim: "a claim minted after this process booted is never released"
+      proof: 'grep: test("W1-T5047: a claim minted after this process booted is never released" in test/a-recycled-container-releases-the-claims-it-held.test.ts'
+  falsifier: |
+    Keep the host-equality requirement and the first test sees the recycled container's claim held.

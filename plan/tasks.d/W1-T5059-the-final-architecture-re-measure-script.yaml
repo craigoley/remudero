@@ -1,0 +1,40 @@
+- id: W1-T5059
+  title: "THE PLAN-COMPLETE RE-MEASURE HAS NO COMMITTED INSTRUMENT — commit the gentle probe and the independent recounts (merged today, running, open grill entries) with per-rotation-form controls, refusing a recount whose control read zero files of a form"
+  repo: remudero
+  depends_on: []
+  priority: 4
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: low
+  origin: "2026-10-01 core-console architecture Phase 4 design (P4-T20), arch-phase4-design.md"
+  files:
+    - scripts/arch-remeasure.mjs
+    - test/arch-remeasure.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    The Phase 4 design (§9) defines plan-complete targets measured over 7 days: view p99, stale share, reads
+    per page, and correct counts by independent recount over the ledger union. The probe used so far
+    (p4proto/gentle4.mjs) lives in a session scratch directory. House doctrine: a zero is not a measurement
+    until a positive control proves the query could see its corpus, and each rotation form must be proven read.
+  design: |
+    scripts/arch-remeasure.mjs: (i) the gentle probe (sequential, 3 s gap, aborts on two consecutive loop-lag
+    windows over 10 s); (ii) recounts over the ledger union in all three rotation forms: today's verdict.merged
+    distinct by PR versus now.recent.mergedToday, running versus board.counts.running at the same asOf, open
+    grill entries versus decisions of kind grill. Each recount prints its per-form file counts and exits
+    non-zero naming oracle_blind when any form contributed zero files.
+  acceptance:
+    - claim: "a recount refuses when one rotation form contributed zero files"
+      proof: 'grep: test("W1-T5059: a recount refuses when one rotation form contributed zero files" in test/arch-remeasure.test.ts'
+    - claim: "the script names the refusal"
+      proof: 'grep: oracle_blind in scripts/arch-remeasure.mjs'
+  falsifier: |
+    Count only the live file and the dated archives: a fixture holding merges only in the other form reads a
+    clean zero instead of refusing.
+  note: |
+    Design: ~/Remudero/.session-scratch/arch-phase4-design.md §9 and §10.
+    Scope-time checks 2026-10-01: no run-W1-T5048..5066 branch on origin; no origin/main commit names
+    these ids; no plan record on origin/main or an open PR head covers this change. Reserved from the
+    operator checkout for this filing branch.

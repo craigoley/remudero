@@ -5,6 +5,7 @@
 // below have SECOND callers outside doctorCommand and stay imported here too.
 import { retryWhileLockBusy } from "./lib/lock-busy-retry.js";
 import { retryPollRead } from "./lib/poll-read-retry.js";
+import { decideFreshnessRestart } from "./lib/deploy-judge.js";
 import {
   appendCaptureSurfaceFireHistory,
   judgeDiskHeadroom,
@@ -5759,6 +5760,19 @@ export interface PollDeps {
   */
   requiredContexts?: (owner: string, repo: string) => string[] | undefined;
   externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+}
+
+export function ciWaitFreshness(
+  read: () => DaemonFreshness,
+  clock: Clock = systemClock,
+): () => Extract<DaemonFreshness, { stale: true }> | undefined {
+  return () => {
+    const freshness = read();
+    if (!freshness.stale) return undefined;
+    const nowMs = clock.now();
+    const decision = decideFreshnessRestart({ changes: freshness.changes, busy: true, staleSinceMs: nowMs, nowMs, state: { total: 0, scoredShas: [] } });
+    return decision.action === "restart" ? freshness : undefined;
+  };
 }
 
 // EXPORTED INLINE, not on the tail export list its sibling `waitForCiGreen` rides: that list is the
@@ -24896,8 +24910,21 @@ export interface PlanReconcileDeps {
    *  `buildCreditCandidates` — the SAME projection the sweep's credit rung already trusts, never a
    *  second derivation that could disagree with it. Throwing here ABORTS the verb (see below). */
   creditedMergedIds?: () => Set<string>;
+  readInlineRecords?: () => Array<{ taskId: string; text: string }> | undefined;
   creditedProjection?: () => { ids: Set<string>; unknownReason?: string };
   log?: (step: string, extra?: Record<string, unknown>) => void;
+}
+
+export function readInlinePlanRecords(planPath: string): Array<{ taskId: string; text: string }> | undefined {
+  if (!existsSync(planPath)) return undefined;
+  const lines = readFileSync(planPath, "utf8").split(/(?<=\n)/);
+  const out: Array<{ taskId: string; text: string }> = [];
+  for (const line of lines) {
+    const id = line.match(/^- id: (\S+)/)?.[1];
+    if (id) out.push({ taskId: id, text: line });
+    else if (out.length > 0) out[out.length - 1]!.text += line;
+  }
+  return out;
 }
 
 /** Read `plan/tasks.d/*.yaml` as `{ taskId, path, text }`, skipping anything without an `- id:`. */
@@ -24977,14 +25004,25 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
       if (path) put(path, w.text);
     }
   }
+  let inline: InlineReconcileReport | undefined;
+  try {
+    const records = (deps.readInlineRecords ?? (() => readInlinePlanRecords(join(dirname(shardDir), "tasks.yaml"))))();
+    const decided = records && reconcilePlan(records, (id) => credited.has(id)).summary;
+    if (decided) inline = { queued: decided.rewritten.length + decided.skipped["not-credited-merged"], creditable: decided.rewritten };
+  } catch (e) {
+    inline = { unreadable: String((e as Error)?.message ?? e) };
+  }
   (deps.log ?? (() => {}))("plan.reconcile", {
     mode: write ? "write" : "dry-run",
     rewritten: summary.rewritten.length,
     skipped: summary.skipped,
+    ...(inline && "queued" in inline ? { inline_queued: inline.queued, inline_creditable: inline.creditable.length } : {}),
   });
-  console.log(renderPlanReconcile(summary, write));
+  console.log(renderPlanReconcile(summary, write, inline));
   return 0;
 }
+
+type InlineReconcileReport = { queued: number; creditable: readonly string[] } | { unreadable: string };
 
 /**
  * W1-T3084 — THE ONE RULE BOTH RUNGS APPLY. `sweep.ts:1347` declines any candidate whose
@@ -25073,7 +25111,7 @@ export function buildPlanReconcileProductionInput(deps: PlanReconcileProductionI
 export const PLAN_RECONCILE_REVIEW_FILE_CEILING = 300;
 
 /** The operator-facing summary. Names the mode FIRST, so a dry run can never be misread as applied. */
-export function renderPlanReconcile(summary: ReconcileSummary, write: boolean): string {
+export function renderPlanReconcile(summary: ReconcileSummary, write: boolean, inline?: InlineReconcileReport): string {
   const skipped = Object.entries(summary.skipped)
     .filter(([, n]) => n > 0)
     .map(([k, n]) => `${k}=${n}`)
@@ -25086,7 +25124,12 @@ export function renderPlanReconcile(summary: ReconcileSummary, write: boolean): 
     `### rmd plan-reconcile${write ? " --write" : " (dry run — nothing written)"}\n` +
     `${summary.rewritten.length} shard(s) ${write ? "reconciled" : "would be reconciled"} to status: merged` +
     (skipped ? `\nskipped: ${skipped}` : "") +
-    (summary.rewritten.length > 0 && !write ? reviewHint : "")
+    (summary.rewritten.length > 0 && !write ? reviewHint : "") +
+    (inline && "unreadable" in inline ? `\nplan/tasks.yaml: unreadable (${inline.unreadable}), its queued records were not counted` : "") +
+    (inline && "queued" in inline && inline.queued > 0
+      ? `\nplan/tasks.yaml is read-only to this verb (it is never machine-rewritten): ${inline.queued} queued record(s) outside the reconcile; ${inline.creditable.length} credited merged` +
+        (inline.creditable.length > 0 ? `: ${inline.creditable.join(" ")}\nflip these by hand in a plan-only PR` : "")
+      : "")
   );
 }
 
@@ -30837,9 +30880,9 @@ function queueGovernorGateFor(
  *
  * W1-T4465: `observe` now carries the FULL `PrRef[]` batch (status.ts), not merely its length, so
  * `readOwnership` below can classify each `headRefName` for the queue governor's ownership split
- * (design (i)) off this SAME single fetch. `read` is UNCHANGED in signature and behaviour — still a
- * bare total count — because it also backs `DrainDeps.openPrCount`/`DaemonDeps.openPrCount`, the
- * W1-T172 lane-dispatch-budget input, which has no ownership concept and must not gain one here. */
+ * (design (i)) off this SAME single fetch. `read` is still the bare total. W1-T5046: the W1-T172
+ * lane budget (`DrainDeps.openPrCount`/`DaemonDeps.openPrCount`) now reads `readOwnership().owned`,
+ * because foreign PRs held every fleet lane at the WIP limit on 2026-10-01. */
 export function createOpenPrCountObservation(): {
   reset: () => void;
   observe: (openPrs: readonly PrRef[] | undefined) => void;
@@ -31405,17 +31448,13 @@ async function drainCommand(
   // W1-T3144: the queue governor counts the COMPLETE open-board batch `projectPlan` already read,
   // including PRs whose task shard is not yet on main. A gateway without that optional batch keeps
   // the prior projection fallback; a failed batch throws into W1-T342's fail-closed wrapper.
-  const openPrCount = () => boardOpenPrCount.read(() => {
-    let projected = 0;
-    for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
-    return projected;
-  });
   // W1-T4465 design (i): the SAME batch, split by fleet ownership — never a second GitHub read.
   const openPrOwnership = () => boardOpenPrCount.readOwnership(() => {
     let projected = 0;
     for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
     return projected;
   });
+  const openPrCount = () => openPrOwnership().owned;
   if (dryRun) {
     const merged = refreshMerged();
     if (opts.curated) {
@@ -33141,17 +33180,13 @@ export async function daemonCommand(
   const { openSiblingBuildFor, onOpenSiblingBuild } = openSiblingObservation("daemon", () => lastProj, log);
   // W1-T3144: identical to drainCommand — complete board depth from the projection's existing
   // batch read, with the old projection count retained only for gateways that omit that method.
-  const openPrCount = () => boardOpenPrCount.read(() => {
-    let projected = 0;
-    for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
-    return projected;
-  });
   // W1-T4465 design (i): the SAME batch, split by fleet ownership — never a second GitHub read.
   const openPrOwnership = () => boardOpenPrCount.readOwnership(() => {
     let projected = 0;
     for (const p of lastProj?.values() ?? []) if (p.prState === "OPEN") projected++;
     return projected;
   });
+  const openPrCount = () => openPrOwnership().owned;
   // DRY-RUN: preview the resolved target + planned sequence, spawn NOTHING, take NO lock.
   if (target.dryRun) {
     // W1-T253: drain.max from the SAME loaded policy `opts` above already threaded, never
@@ -33685,10 +33720,7 @@ export async function daemonCommand(
             // W1-T3793: only the daemon offers the cooperative external-CI-wait handoff. The
             // existing adapter is material-and-clean only; unassessed, dirty, and degraded
             // readings remain undefined and therefore cannot manufacture a restart.
-            externalWaitFreshness: () => {
-              const freshness = daemonFreshnessFromService(checkServiceFreshness(effectiveRepoRoot, process.env));
-              return freshness.stale ? freshness : undefined;
-            },
+            externalWaitFreshness: ciWaitFreshness(() => daemonFreshnessFromService(checkServiceFreshness(effectiveRepoRoot, process.env))),
           }),
         readUsage: () => readUsageSnapshotPreferSdk(config),
         // THE LEDGER IS THE DEDUP (impl-FL): seed the once-per-string bound from what previous
