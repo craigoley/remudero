@@ -32,6 +32,8 @@ const DAY_MS = 24 * 60 * 60_000;
  * A view is ready when that bound, times its measured daily traffic, is under one wrong response a day.
  */
 const RULE_OF_THREE = 3;
+/** One full day of samples per key at the sampling cadence: the shadow driver samples every key at it. */
+const CADENCE_SAMPLES_PER_DAY = DAY_MS / VIEW_SHADOW_SAMPLE_MS;
 const ID_KEYS = ["taskId", "task_id", "instanceId", "id", "repo", "prNumber", "number", "name", "key"] as const;
 /** Build and freshness stamps: they differ on every recompute, so they are never a diff. */
 const TIME_KEYS: ReadonlySet<string> = new Set(["generatedAt", "generated_at", "asOf", "as_of"]);
@@ -385,10 +387,14 @@ export interface ViewShadowState {
   streakSamples: number;
   streakSinceMs: number | null;
   lastRealMs: number | null;
+  /** The keys sampled since the streak began; absent in a state persisted before it was counted. */
+  streakKeys?: string[];
 }
 
-export interface ShadowReadiness extends ViewShadowState {
+export interface ShadowReadiness extends Omit<ViewShadowState, "streakKeys"> {
   view: string;
+  /** How many keys the streak sampled: each owes the cadence's full day of samples. */
+  keys: number;
   requestsPerDay: number | null;
   requiredSamples: number | null;
   ready: boolean;
@@ -422,26 +428,29 @@ export function storedShadowReadiness(db: ReadModelDb, nowMs: number): ShadowRea
 }
 
 function emptyState(): ViewShadowState {
-  return { requests: 0, firstRequestMs: null, samples: 0, diffs: { legacy_horizon: 0, timing: 0, dedupe: 0, real: 0 }, streakSamples: 0, streakSinceMs: null, lastRealMs: null };
+  return { requests: 0, firstRequestMs: null, samples: 0, diffs: { legacy_horizon: 0, timing: 0, dedupe: 0, real: 0 }, streakSamples: 0, streakSinceMs: null, lastRealMs: null, streakKeys: [] };
 }
 
 /**
- * Ready only on SUSTAINED zero `real` diffs: the run of samples since the last one must span a full
- * day of traffic and hold at least 3 x requests-per-day samples. Both numbers come from the view's own
- * measured traffic, so a busy view needs more evidence than a quiet one.
+ * Ready only on SUSTAINED zero `real` diffs: the run of samples since the last one must span a full day
+ * and hold a full day of continuous sampling, one sample per key per {@link VIEW_SHADOW_SAMPLE_MS}. The
+ * sampler never exceeds that cadence, so the count alone proves the sampling ran for a day: a restart
+ * or a stalled worker only delays it. Measured request traffic raises the floor to 3 x requests-per-day
+ * (the rule of three), so a busy view needs more evidence than the cadence gives it.
  */
-export function shadowReadiness(view: string, s: ViewShadowState, nowMs: number): ShadowReadiness {
+export function shadowReadiness(view: string, state: ViewShadowState, nowMs: number): ShadowReadiness {
+  const { streakKeys, ...s } = state;
+  const keys = Math.max(1, streakKeys?.length ?? 0);
   const spanMs = s.firstRequestMs === null ? 0 : nowMs - s.firstRequestMs;
   const requestsPerDay = spanMs >= DAY_MS ? (s.requests * DAY_MS) / spanMs : null;
-  const requiredSamples = requestsPerDay === null ? null : Math.max(1, Math.ceil(RULE_OF_THREE * requestsPerDay));
+  const requiredSamples = Math.max(keys * CADENCE_SAMPLES_PER_DAY, Math.ceil(RULE_OF_THREE * (requestsPerDay ?? 0)));
   const streakMs = s.streakSinceMs === null ? 0 : nowMs - s.streakSinceMs;
   let reason: string;
-  if (requestsPerDay === null) reason = "traffic not yet observed over a full day";
-  else if (streakMs < DAY_MS) reason = s.lastRealMs === null ? "zero real diffs, but for under a day" : "a real diff within the last day";
-  else if (s.streakSamples < requiredSamples!) reason = `${s.streakSamples} of ${requiredSamples} samples since the last real diff`;
+  if (streakMs < DAY_MS) reason = s.lastRealMs === null ? "zero real diffs, but for under a day" : "a real diff within the last day";
+  else if (s.streakSamples < requiredSamples) reason = `${s.streakSamples} of ${requiredSamples} samples since the last real diff (a day at one per minute for ${keys} key(s))`;
   else reason = `zero real diffs in ${s.streakSamples} samples over ${Math.floor(streakMs / DAY_MS)} day(s)`;
-  const ready = requestsPerDay !== null && streakMs >= DAY_MS && s.streakSamples >= requiredSamples!;
-  return { view, ...s, requestsPerDay: requestsPerDay === null ? null : Math.round(requestsPerDay), requiredSamples, ready, reason };
+  const ready = streakMs >= DAY_MS && s.streakSamples >= requiredSamples;
+  return { view, ...s, keys, requestsPerDay: requestsPerDay === null ? null : Math.round(requestsPerDay), requiredSamples, ready, reason };
 }
 
 export interface ViewShadowOptions {
@@ -493,8 +502,8 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
         return inputs ? { path: d.path, ...classifyDerived(inputs, judged) } : judged.find((j) => j.path === d.path)!;
       });
       for (const d of diffs) state.diffs[d.classification]++;
-      if (diffs.some((d) => d.classification === "real")) Object.assign(state, { streakSamples: 0, streakSinceMs: now, lastRealMs: now });
-      else state.streakSamples++;
+      if (diffs.some((d) => d.classification === "real")) Object.assign(state, { streakSamples: 0, streakSinceMs: now, lastRealMs: now, streakKeys: [] });
+      else Object.assign(state, { streakSamples: state.streakSamples + 1, streakKeys: [...new Set([...state.streakKeys ?? [], key])] });
       if (diffs.length > 0) {
         const classes = Object.fromEntries(SHADOW_CLASSIFICATIONS.map((c) => [c, diffs.filter((d) => d.classification === c).length]));
         opts.log(VIEW_SHADOW_DIFF_STEP, { view, key, classes, diffs });

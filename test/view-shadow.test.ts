@@ -13,6 +13,7 @@ import { legacyRepositories, repositoriesSourcesPath } from "../src/lib/reposito
 import { makeTempDir } from "../src/lib/tmp.js";
 import {
   VIEW_SHADOW_DIFF_STEP,
+  VIEW_SHADOW_SAMPLE_MS,
   classifyShadowDiff,
   createShadowSampler,
   createViewShadow,
@@ -244,23 +245,22 @@ test("readiness flips only on sustained zero real diffs over a day of measured t
   const sample = (requests: number): void => void shadow.compare({ view: "nav-badge", key: "", requests, legacy: { data: { n: real ? 1 : 2 }, asOfMs: T0 }, body: { data: { n: 2 }, asOf: null } });
   sample(10);
   assert.equal(shadow.readiness()[0]!.ready, false);
-  assert.match(shadow.readiness()[0]!.reason, /traffic not yet observed over a full day/);
+  assert.match(shadow.readiness()[0]!.reason, /zero real diffs, but for under a day/);
   for (let i = 0; i < 24; i++) {
     clock.advance(HOUR);
     sample(10);
   }
   let r = shadow.readiness()[0]!;
   assert.equal(r.requestsPerDay, 250, "250 requests over the first day");
-  assert.equal(r.requiredSamples, 750, "3 x requests per day: the rule of three");
-  assert.equal(r.ready, false, "25 samples cannot bound a 250-a-day view");
-  assert.match(r.reason, /25 of 750 samples/);
-  const every = DAY / 250;
-  for (let i = 0; i < 725; i++) {
-    clock.advance(every);
-    sample(1);
+  assert.equal(r.requiredSamples, 1440, "a day of samples at one a minute outweighs 3 x 250 requests a day");
+  assert.equal(r.ready, false, "25 samples are not a day of sampling");
+  assert.match(r.reason, /25 of 1440 samples since the last real diff \(a day at one per minute for 1 key\(s\)\)/);
+  for (let i = 0; i < 1415; i++) {
+    clock.advance(VIEW_SHADOW_SAMPLE_MS);
+    sample(0);
   }
   r = shadow.readiness()[0]!;
-  assert.equal(r.streakSamples, 750);
+  assert.equal(r.streakSamples, 1440);
   assert.equal(r.ready, true, r.reason);
   real = true;
   sample(1);
@@ -270,22 +270,47 @@ test("readiness flips only on sustained zero real diffs over a day of measured t
   assert.equal(r.diffs.real, 1);
   assert.match(r.reason, /a real diff within the last day/);
   let steps = 0;
-  for (r = shadow.readiness()[0]!; r.streakSamples < r.requiredSamples!; r = shadow.readiness()[0]!) {
-    assert.equal(r.ready, false, `not ready at ${r.streakSamples} of ${r.requiredSamples}`);
-    clock.advance(every);
-    sample(1);
+  for (r = shadow.readiness()[0]!; !r.ready; r = shadow.readiness()[0]!) {
+    clock.advance(VIEW_SHADOW_SAMPLE_MS);
+    sample(0);
     steps++;
   }
-  assert.equal(r.ready, true, r.reason);
-  assert.ok(steps >= 750, `the streak restarted from zero after the real diff (${steps} samples)`);
+  assert.ok(steps >= 1440, `the streak restarted from zero after the real diff (${steps} samples)`);
   const busy = shadowReadiness("busy", { ...r, streakSamples: 1_000_000, streakSinceMs: clock.now() - HOUR }, clock.now());
   assert.equal(busy.ready, false, "any number of samples inside one hour is not sustained");
   assert.match(busy.reason, /a real diff within the last day/);
-  const quiet = shadowReadiness("quiet", { ...r, requests: 3, firstRequestMs: clock.now() - DAY, streakSamples: 9, streakSinceMs: clock.now() - DAY, lastRealMs: null }, clock.now());
-  assert.equal(quiet.requiredSamples, 9, "a quiet view needs fewer samples");
-  assert.equal(quiet.ready, true);
-  const fresh = shadowReadiness("fresh", { ...quiet, streakSinceMs: clock.now() - HOUR }, clock.now());
+  const loud = shadowReadiness("loud", { ...r, requests: 1_000, firstRequestMs: clock.now() - DAY, streakSamples: 2_999, streakSinceMs: clock.now() - DAY }, clock.now());
+  assert.equal(loud.requiredSamples, 3_000, "measured traffic above the cadence raises the floor: the rule of three");
+  assert.equal(loud.ready, false);
+  const fresh = shadowReadiness("fresh", { ...r, lastRealMs: null, streakSinceMs: clock.now() - HOUR }, clock.now());
   assert.match(fresh.reason, /zero real diffs, but for under a day/);
+});
+
+test("synthetic samples with no request traffic make readiness a day of sampling every key", () => {
+  // 2026-10-01T06:46Z: now had 55 synthetic samples over 3 keys and 0 requests, and readiness read
+  // "traffic not yet observed over a full day" with requestsPerDay null, a floor no sample could move.
+  const clock = steppedClock();
+  const shadow = createViewShadow({ clock, log: () => {}, evidence: () => NONE });
+  const keys = ["instance=console", "instance=core", "instance=site"];
+  const minute = (): void => {
+    for (const key of keys) shadow.compare({ view: "now", key, requests: 0, legacy: { data: { n: 1 }, asOfMs: T0 }, body: { data: { n: 1 }, asOf: null } });
+    clock.advance(VIEW_SHADOW_SAMPLE_MS);
+  };
+  for (let i = 0; i < 1439; i++) minute();
+  let r = shadow.readiness()[0]!;
+  assert.equal(r.keys, 3);
+  assert.equal(r.requiredSamples, 3 * 1440, "one sample per minute per key for a day");
+  assert.equal(r.ready, false, `a day minus one minute: ${r.reason}`);
+  minute();
+  r = shadow.readiness()[0]!;
+  assert.equal(r.ready, true, r.reason);
+  assert.match(r.reason, /zero real diffs in 4320 samples over 1 day/);
+  assert.equal(r.requestsPerDay, 0, "a day of synthetic samples measures zero requests, not unknown");
+  const gappy = shadowReadiness("now", { ...r, streakSamples: 3 * 720, streakKeys: keys }, clock.now());
+  assert.equal(gappy.ready, false, "a day with half its minutes unsampled is not continuous");
+  const persisted = shadowReadiness("now", { ...r, streakKeys: undefined }, clock.now());
+  assert.equal(persisted.keys, 1, "a state stored before keys were counted owes one key's day");
+  assert.equal("streakKeys" in persisted, false, "the key list stays in the store");
 });
 
 test("the sampler passes one request per minute per key and counts the rest", () => {

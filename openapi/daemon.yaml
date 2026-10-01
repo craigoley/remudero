@@ -6873,9 +6873,11 @@ components:
     ViewShadowReadiness:
       type: object
       description: >
-        One view's shadow comparator counters. `ready` needs zero `real` diffs sustained over a day of
-        measured traffic and at least 3 x requests-per-day samples (the rule of three).
-      required: [view, requests, firstRequestMs, samples, diffs, streakSamples, streakSinceMs, lastRealMs, requestsPerDay, requiredSamples, ready, reason]
+        One view's shadow comparator counters. `ready` needs zero `real` diffs sustained for a day and a
+        day of continuous sampling since the last one: at least one sample per minute for every key the
+        streak sampled (the shadow driver's cadence), raised to 3 x requests-per-day samples when measured
+        traffic is higher (the rule of three).
+      required: [view, requests, firstRequestMs, samples, diffs, streakSamples, streakSinceMs, lastRealMs, keys, requestsPerDay, requiredSamples, ready, reason]
       properties:
         view: {type: string}
         requests: {type: integer}
@@ -6892,6 +6894,7 @@ components:
         streakSamples: {type: integer}
         streakSinceMs: {type: [integer, "null"]}
         lastRealMs: {type: [integer, "null"]}
+        keys: {type: integer, description: "Keys sampled since the streak began; each owes a day of samples."}
         requestsPerDay: {type: [integer, "null"]}
         requiredSamples: {type: [integer, "null"]}
         ready: {type: boolean}
