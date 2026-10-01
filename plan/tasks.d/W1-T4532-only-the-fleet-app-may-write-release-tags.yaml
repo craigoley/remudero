@@ -34,5 +34,5 @@
     confidence: 1
     reasons:
       - "deterministic backstop: it deletes data, branches, archives or ledgers (\"delete release, ring and revoked tags\") — irreversible or privileged work goes to a person"
-    judged_at: "2026-09-30T21:42:01.797Z"
-    pin: "6ce8742df25149e82fd4ba9ea0c39bcc73bda81236ebe64c73e03603966c9686"
+    judged_at: "2026-10-01T20:56:44.356Z"
+    pin: "07539a2e16eb15d775a10cfd98b23e7df1c967547f2c5d573a75fce8ae20da22"
