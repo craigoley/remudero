@@ -7965,7 +7965,7 @@
   repo: remudero
   depends_on: [W1-T1D]
   type: implement
-  verify: auto
+  verify: human
   principles: {tdd: strict}
   budget_usd: 100.00
   rationale: "Docs-as-code fails because it assumes humans notice when documentation falls behind. The
@@ -8116,7 +8116,7 @@
   repo: remudero
   depends_on: [W1-T29, W1-T33]
   type: implement
-  verify: auto
+  verify: human
   principles: {tdd: strict}
   budget_usd: 100.00
   rationale: "Extends W1-T29 plan-claims to KNOWLEDGE. Provenance decays: a fact pinned to SDK 0.3.209 must
@@ -8247,7 +8247,7 @@
   repo: remudero
   depends_on: [W1-T33]
   type: implement
-  verify: auto
+  verify: human
   principles: {tdd: strict}
   budget_usd: 100.00
   rationale: "MASTER-PLAN §8A: makes 'compression is a deliverable' ENFORCED, not aspirational — the same
