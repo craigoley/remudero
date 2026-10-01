@@ -49,7 +49,7 @@ export const SWEEP_SHIFT_DAYS = 400;
  * "fails by +N days" rather than only "fails at +400". Only ever run for an already-failing suite,
  * so this costs nothing on a green sweep.
  */
-export const FUSE_LADDER_DAYS = [7, 14, 30, 90, 180, 400];
+export const FUSE_LADDER_DAYS = [0, 7, 14, 30, 90, 180, 400];
 
 /**
  * NEVER RUN. These reach the real worker spawn primitive with no stub.
@@ -306,7 +306,7 @@ export function main({
     for (const d of drifted) {
       const fuse = bisectFuse(d.suite, run);
       log(`\n  test/${d.suite}.test.ts`);
-      log(`    fails by      : +${fuse ?? SWEEP_SHIFT_DAYS} days from now${fuse ? "" : " (only at the full shift)"}`);
+      log(fuse === 0 ? "    fails by      : +0 days - NOT CLOCK DRIFT: fails with no shift (a runner or environment defect, for example a missing browser)" : `    fails by      : +${fuse ?? SWEEP_SHIFT_DAYS} days from now${fuse ? "" : " (only at the full shift)"}`);
       for (const t of failingTitles(d.output)) log(`    failing test  : ${t}`);
       log(`    reproduce     : FK_SHIFT_DAYS=${fuse ?? SWEEP_SHIFT_DAYS} node --test --import tsx --import scripts/clock-shift.mjs test/${d.suite}.test.ts`);
       log(`    likely fix    : the fixture holds a DATE LITERAL compared against a real clock. Derive it at run time and assert its margin against the policy that judges it (PR #1116 is the shape).`);
