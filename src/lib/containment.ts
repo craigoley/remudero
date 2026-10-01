@@ -1632,7 +1632,7 @@ export async function runWorkerSmoke(opts: {
     result = { ...verdict, costUsd: r.costUsd };
     opts.ledger?.({
       run_id: `worker-smoke-${token}`,
-      task_id: "W1-T5017",
+      task_id: "DEPLOY",
       step: "worker_smoke",
       ok: verdict.ok,
       reason: verdict.reason,
@@ -1644,7 +1644,7 @@ export async function runWorkerSmoke(opts: {
   } catch (e) {
     const reason = `spawn failed — ${String((e as Error)?.message ?? e).slice(0, WORKER_SMOKE_EXCERPT_CHARS)}`;
     result = { ok: false, reason, costUsd: 0 };
-    opts.ledger?.({ run_id: `worker-smoke-${token}`, task_id: "W1-T5017", step: "worker_smoke", ok: false, reason });
+    opts.ledger?.({ run_id: `worker-smoke-${token}`, task_id: "DEPLOY", step: "worker_smoke", ok: false, reason });
   } finally {
     reapWorkerScratch(cwd);
     try {

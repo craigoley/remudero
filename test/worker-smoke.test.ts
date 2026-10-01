@@ -92,6 +92,7 @@ test("W1-T5017: the runner makes one bounded real spawn and ledgers its verdict"
   assert.ok(typeof seen[0].maxBudgetUsd === "number" && (seen[0].maxBudgetUsd as number) <= 1, "spend is bounded");
   assert.equal(seen[0].prompt, workerSmokePrompt(TOKEN));
   assert.equal(rows.length, 1);
+  assert.equal(rows[0].task_id, "DEPLOY");
   assert.equal(rows[0].step, "worker_smoke");
   assert.equal(rows[0].ok, true);
 });
@@ -110,6 +111,7 @@ test("W1-T5017: a spawn that throws is a FAILED smoke with a ledgered reason, ne
   });
   assert.equal(r.ok, false);
   assert.match(r.reason, /unsupported sdk\/cli pair/);
+  assert.equal(rows[0].task_id, "DEPLOY");
   assert.equal(rows[0].ok, false);
 });
 
