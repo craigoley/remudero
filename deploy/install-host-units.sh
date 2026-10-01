@@ -49,7 +49,8 @@
 #   RMD_STATE_DIR RMD_IMAGE RMD_SERVICE_USER RMD_NODE_MAX_OLD_SPACE_MB
 #   RMD_GH_APP_ID RMD_GH_APP_INSTALLATION_ID RMD_GH_APP_PRIVATE_KEY_PATH
 #   RMD_UNIT_DIR RMD_BIN_DIR RMD_LAUNCHER_PATH RMD_REVIVAL_LOG
-#   RMD_CLEANUP_PATH RMD_CLEANUP_LOG RMD_CRONTAB_CMD   (W1-T4770: the root-disk janitor + its cron)
+#   RMD_CLEANUP_PATH RMD_CLEANUP_LOG RMD_CRONTAB_CMD   (W1-T4770: root-disk janitor + cron)
+#   RMD_TMP_SWEEP_PATH RMD_TMP_SWEEP_CRON_PATH          (W1-T5036: guarded hourly temp sweep)
 set -euo pipefail
 
 MODE="check"
@@ -831,6 +832,18 @@ if [ -z "$CLEANUP_PATH" ] && [ "$UNIT_DIR" = "/etc/systemd/system" ] && { [ -z "
 fi
 if [ -n "$CLEANUP_PATH" ]; then
   require_abs_path "RMD_CLEANUP_PATH" "$CLEANUP_PATH"
+  TMP_SWEEP_SRC="${SCRIPT_DIR}/rmd-tmp-sweep.sh"
+  TMP_SWEEP_PATH="${RMD_TMP_SWEEP_PATH-$(dirname "$CLEANUP_PATH")/rmd-tmp-sweep.sh}"
+  TMP_SWEEP_CRON_PATH="${RMD_TMP_SWEEP_CRON_PATH-}"
+  if [ -z "$TMP_SWEEP_CRON_PATH" ] && [ "$UNIT_DIR" = "/etc/systemd/system" ] && { [ -z "$INSTANCE_NAME" ] || [ "$INSTANCE_NAME" = "core" ]; }; then
+    TMP_SWEEP_CRON_PATH="/etc/cron.d/rmd-tmp-sweep"
+  fi
+  require_abs_path "RMD_TMP_SWEEP_PATH" "$TMP_SWEEP_PATH"
+  if [ -n "$TMP_SWEEP_CRON_PATH" ]; then
+    require_abs_path "RMD_TMP_SWEEP_CRON_PATH" "$TMP_SWEEP_CRON_PATH"
+    TMP_SWEEP_CRON_LINE="0 * * * * root RMD_HOST_CLEANUP_SCRIPT=${CLEANUP_PATH} ${TMP_SWEEP_PATH} >> ${RMD_CLEANUP_LOG:-$(dirname "$CLEANUP_PATH")/host-cleanup.log} 2>&1"
+    TMP_SWEEP_CRON_CONTENT="$(printf 'SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n%s\n' "$TMP_SWEEP_CRON_LINE")"
+  fi
   CLEANUP_LOG="${RMD_CLEANUP_LOG:-$(dirname "$CLEANUP_PATH")/host-cleanup.log}"
   CLEANUP_CRON_LINE="${CLEANUP_CRON_SCHEDULE} ${CLEANUP_PATH} >> ${CLEANUP_LOG} 2>&1"
   CRONTAB_CMD="${RMD_CRONTAB_CMD-crontab}"
@@ -850,6 +863,10 @@ if [ -n "$CLEANUP_PATH" ]; then
     echo "install-host-units: FATAL -- ${CLEANUP_SRC} is missing; the janitor cannot be installed." >&2
     exit 2
   fi
+  if [ ! -r "$TMP_SWEEP_SRC" ]; then
+    echo "install-host-units: FATAL -- ${TMP_SWEEP_SRC} is missing; the temp sweep cannot be installed." >&2
+    exit 2
+  fi
   current_cron="$(crontab_read)"
   janitor_cron="$(cron_lines_for_janitor "$current_cron")"
   if [ "$MODE" = "check" ]; then
@@ -867,6 +884,23 @@ if [ -n "$CLEANUP_PATH" ]; then
     else
       echo "install-host-units: ok      crontab entry for $CLEANUP_PATH"
     fi
+    if [ ! -e "$TMP_SWEEP_PATH" ]; then
+      echo "install-host-units: MISSING $TMP_SWEEP_PATH"; drift=$(( drift + 1 ))
+    elif ! cmp -s "$TMP_SWEEP_SRC" "$TMP_SWEEP_PATH"; then
+      echo "install-host-units: DRIFTED $TMP_SWEEP_PATH (differs from deploy/rmd-tmp-sweep.sh)"; drift=$(( drift + 1 ))
+    else
+      echo "install-host-units: ok      $TMP_SWEEP_PATH"
+    fi
+    if [ -n "$TMP_SWEEP_CRON_PATH" ]; then
+      current_tmp_sweep_cron="$(cat "$TMP_SWEEP_CRON_PATH" 2>/dev/null || true)"
+      if [ ! -e "$TMP_SWEEP_CRON_PATH" ]; then
+        echo "install-host-units: MISSING $TMP_SWEEP_CRON_PATH"; drift=$(( drift + 1 ))
+      elif [ "$current_tmp_sweep_cron" != "$TMP_SWEEP_CRON_CONTENT" ]; then
+        echo "install-host-units: DRIFTED $TMP_SWEEP_CRON_PATH (hourly 6-hour guarded temp sweep differs)"; drift=$(( drift + 1 ))
+      else
+        echo "install-host-units: ok      $TMP_SWEEP_CRON_PATH"
+      fi
+    fi
   else
     mkdir -p "$(dirname "$CLEANUP_PATH")"
     # keep the differing hand-installed host copy once: adoption must not destroy its values
@@ -879,6 +913,29 @@ if [ -n "$CLEANUP_PATH" ]; then
     chmod 0755 "$tmp"
     mv -f "$tmp" "$CLEANUP_PATH"
     echo "install-host-units: wrote   $CLEANUP_PATH"
+    mkdir -p "$(dirname "$TMP_SWEEP_PATH")"
+    if [ -e "$TMP_SWEEP_PATH" ] && ! cmp -s "$TMP_SWEEP_SRC" "$TMP_SWEEP_PATH" && [ ! -e "${TMP_SWEEP_PATH}.pre-6h-sweep" ]; then
+      cp -p "$TMP_SWEEP_PATH" "${TMP_SWEEP_PATH}.pre-6h-sweep"
+      echo "install-host-units: saved   ${TMP_SWEEP_PATH}.pre-6h-sweep (the previous temp sweep wrapper)"
+    fi
+    tmp="${TMP_SWEEP_PATH}.tmp.$$"
+    cp "$TMP_SWEEP_SRC" "$tmp"
+    chmod 0755 "$tmp"
+    mv -f "$tmp" "$TMP_SWEEP_PATH"
+    echo "install-host-units: wrote   $TMP_SWEEP_PATH"
+    if [ -n "$TMP_SWEEP_CRON_PATH" ]; then
+      mkdir -p "$(dirname "$TMP_SWEEP_CRON_PATH")"
+      current_tmp_sweep_cron="$(cat "$TMP_SWEEP_CRON_PATH" 2>/dev/null || true)"
+      if [ -e "$TMP_SWEEP_CRON_PATH" ] && [ "$current_tmp_sweep_cron" != "$TMP_SWEEP_CRON_CONTENT" ] && [ ! -e "${TMP_SWEEP_CRON_PATH}.pre-6h-sweep" ]; then
+        cp -p "$TMP_SWEEP_CRON_PATH" "${TMP_SWEEP_CRON_PATH}.pre-6h-sweep"
+        echo "install-host-units: saved   ${TMP_SWEEP_CRON_PATH}.pre-6h-sweep (the previous temp sweep schedule)"
+      fi
+      tmp="${TMP_SWEEP_CRON_PATH}.tmp.$$"
+      printf '%s\n' "$TMP_SWEEP_CRON_CONTENT" > "$tmp"
+      chmod 0644 "$tmp"
+      mv -f "$tmp" "$TMP_SWEEP_CRON_PATH"
+      echo "install-host-units: wrote   $TMP_SWEEP_CRON_PATH"
+    fi
     rest_cron="$(cron_without_janitor "$current_cron")"
     if [ -n "$rest_cron" ]; then
       printf '%s\n%s\n' "$rest_cron" "$CLEANUP_CRON_LINE" | crontab_write
