@@ -248,7 +248,8 @@ function isParkedMachineProposal(task: Task): boolean {
     ((task.origin?.startsWith("ci-learning:") === true && task.files[0] === "learnings/ci.yaml") ||
       ((task.origin?.startsWith("selector-shadow:") === true || task.origin?.startsWith("selector-shadow-miss:") === true) &&
         task.files[0] === "src/lib/affected-suites.ts") ||
-      (task.origin?.startsWith("ci-friction:") === true && task.files[0] === "docs/ci-friction-remedies.md"))
+      (task.origin?.startsWith("ci-friction:") === true && task.files[0] === "docs/ci-friction-remedies.md") ||
+      (task.origin?.startsWith("host-resource:") === true && task.files[0] === "deploy/rmd-host-cleanup.sh"))
   );
 }
 
