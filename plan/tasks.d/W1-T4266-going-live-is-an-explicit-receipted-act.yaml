@@ -16,6 +16,7 @@
     - src/lib/serve.ts
   status: queued
   attempts: 0
+  note: "OPERATOR RULING 2026-10-01: automate. Building this task needs no operator; the operator confirmation is the feature's own runtime step (the go-live endpoint asks for it). The lifetime-pressure judge's repeated needs_operator verdicts confused the two."
   rationale: |
     The intended onboarding ends with an explicit confirmation before going live (operator's stated flow:
     authenticate → select repo → choose task types → proof policy → dry run and inspect → explicit
