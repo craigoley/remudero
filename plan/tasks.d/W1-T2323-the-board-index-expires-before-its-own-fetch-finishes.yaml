@@ -10,7 +10,10 @@
   files: [src/lib/status.ts, src/run-task.ts, test/board-index-ttl-outlives-its-fetch.test.ts]
   origin: "operator-brief#board-index-ttl-2026-08-26"
   plan_refs: ["W1-T2318", "W1-T2319", "W1-T377", "W1-T1066"]
-  status: queued
+  status: blocked
+  retirement: closed
+  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
+  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
   attempts: 0
   rationale: |
     MEASURED 2026-08-26. The daemon builds its gateway as `buildBatchedGithub(o, r, { log })` — no
