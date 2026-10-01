@@ -13,7 +13,7 @@
   files: [src/lib/draft-routing.ts, src/lib/worker.ts, src/lib/worker-provider.ts, src/run-task.ts, .remudero/mounts.yaml, test/the-draft-lane-routes-by-measured-clean-rate.test.ts, scripts/test-tier-manifest.json]
   priority: 2
   status: queued
-  # backlog gardener: band=2 evidence=719ffb90bf13be49
+  # backlog gardener: band=2 evidence=e6a259086491e223
   attempts: 0
   rationale: |
     MEASURED (ledger union; 09-10..18 read through a file, 09-19..22 from the 4-day dump).
