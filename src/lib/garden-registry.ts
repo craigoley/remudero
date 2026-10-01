@@ -73,11 +73,13 @@ export function gardenSchedule(name: RegisteredGardenName): GardenSchedule {
  * Start one registered garden: a pass at once, then one per interval, never two at once. The `running`
  * flag skips a tick while that garden's pass is still in flight, exactly as each in-process starter did.
  */
-export function startGardenOffLoop(
-  name: RegisteredGardenName,
-  intervalMs: number,
-  deps: { spawnPass: GardenPassSpawn; log: (step: string, extra?: Record<string, unknown>) => void; clock?: Clock },
-): { stop: () => void } {
+export interface GardenOffLoopDeps {
+  spawnPass: GardenPassSpawn;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  clock?: Clock;
+}
+
+export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: number, deps: GardenOffLoopDeps): { stop: () => void } {
   const clock = deps.clock ?? systemClock;
   const schedule = gardenSchedule(name);
   const signal = { stopped: false };

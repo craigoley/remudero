@@ -33088,7 +33088,7 @@ async function gardenCommand(rest: string[]): Promise<number> {
   const config = loadConfig();
   const ledgerPath = ledgerPathFor(config);
   const self = resolveOwnerRepo();
-  const runId = `GARDEN-${name}-${Date.now()}`;
+  const runId = `GARDEN-${name}-${nextLaneEpochMs()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra });
   const raiseDuplicate = (e: Escalation): string =>
