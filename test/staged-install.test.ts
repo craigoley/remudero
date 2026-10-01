@@ -151,7 +151,8 @@ test("W1-T4933: a failed staged install keeps the old tree and escalates once pe
         escalate: (failure) => void escalations.push(failure),
       });
 
-    assert.throws(attempt, (e: unknown) => e instanceof StagedInstallFailedError && /ETIMEDOUT/.test(e.message));
+    assert.throws(attempt, (e: unknown) =>
+      e instanceof StagedInstallFailedError && e.kind === "install" && e.exitCode === 1 && /ETIMEDOUT/.test(e.message));
     assert.ok(existsSync(join(repoDir, "node_modules", "old-tree.txt")), "the old tree is still the one serving");
     assert.equal(existsSync(join(repoDir, "node_modules", "new-tree.txt")), false, "no half-installed tree was swapped in");
     assert.equal(readFileSync(installHashMarkerPath(repoDir), "utf8"), "hash-of-the-2026-09-24-inputs", "the marker still names the old inputs");

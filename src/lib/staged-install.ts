@@ -32,6 +32,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import type { Escalation } from "./escalate.js";
 
@@ -61,9 +62,12 @@ export interface StagedInstallOptions {
 export type StagedInstallOutcome = "noop" | "refreshed" | "skipped_symlink";
 
 /** The install ran and the old tree was kept. Carries the hash so a caller can key on it. */
-export class StagedInstallFailedError extends Error {
+export class StagedInstallFailedError extends RmdError {
   constructor(readonly failure: StagedInstallFailure) {
-    super(`staged install failed in ${failure.repoDir} (lockfile ${failure.hash.slice(0, 12)}): ${failure.error}`);
+    super("install", GENERIC_EXIT_CODE, `staged install failed in ${failure.repoDir} (lockfile ${failure.hash.slice(0, 12)}): ${failure.error}`, {
+      repoDir: failure.repoDir,
+      hash: failure.hash,
+    });
     this.name = "StagedInstallFailedError";
   }
 }
