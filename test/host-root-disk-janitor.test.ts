@@ -253,8 +253,8 @@ test("W1-T4770: the archive ages out only the archive itself", () => {
   assert.equal(existsSync(outside), true);
 });
 
-/** A standalone clone (its own `.git` directory) of the fixture origin at `<root>/<name>`. */
-function standaloneClone(fx: Fixture, parent: string, name: string): string {
+/** A tree with its own `.git` directory, copied from the fixture origin at `<parent>/<name>`. */
+function ownGitDirCopy(fx: Fixture, parent: string, name: string): string {
   const origin = join(fx.root, "origin.git");
   mkdirSync(parent, { recursive: true });
   const p = join(parent, name);
@@ -284,19 +284,19 @@ test("a standalone clone under a configured root is removed only when clean and 
   const fx = fixture();
   repos(fx);
   const clones = join(fx.root, "clones");
-  const clean = standaloneClone(fx, clones, "clean");
-  const dirty = standaloneClone(fx, clones, "dirty");
+  const clean = ownGitDirCopy(fx, clones, "clean");
+  const dirty = ownGitDirCopy(fx, clones, "dirty");
   writeFileSync(join(dirty, "uncommitted.txt"), "x\n");
-  const protectedClone = standaloneClone(fx, clones, "protected");
-  const ignored = standaloneClone(fx, clones, "ignored");
+  const protectedClone = ownGitDirCopy(fx, clones, "protected");
+  const ignored = ownGitDirCopy(fx, clones, "ignored");
   writeFileSync(join(ignored, ".git", "info", "exclude"), "node_modules\nstate\n");
   mkdirSync(join(ignored, "state"));
   writeFileSync(join(ignored, "state", "ledger.ndjson"), "{}\n");
-  const disposable = standaloneClone(fx, clones, "disposable");
+  const disposable = ownGitDirCopy(fx, clones, "disposable");
   writeFileSync(join(disposable, ".git", "info", "exclude"), "node_modules\n");
   mkdirSync(join(disposable, "node_modules"));
   writeFileSync(join(disposable, "node_modules", "x.js"), "1\n");
-  const fresh = standaloneClone(fx, clones, "fresh");
+  const fresh = ownGitDirCopy(fx, clones, "fresh");
   const notGit = join(clones, "plain");
   mkdirSync(notGit);
   for (const p of [clean, dirty, protectedClone, ignored, disposable, notGit]) age(p);
