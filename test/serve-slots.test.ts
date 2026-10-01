@@ -87,6 +87,22 @@ test("the in-process link is the fallback when cp cannot hard-link", async () =>
   assert.equal(statSync(join(slot, file)).ino, statSync(join(active, file)).ino);
 });
 
+test("a slot on another mount than the active one installs when neither link can cross it", async () => {
+  const active = slotDir("lock-1", { marker: true });
+  const slot = slotDir("lock-1");
+  const calls: string[] = [];
+  const noCp: RunCommand = async (command, args, cwd) => {
+    if (command === "cp") throw new Error("cp: cannot create hard link: Invalid cross-device link");
+    return recordingRun(calls)(command, args, cwd);
+  };
+  const crossDevice = (): void => {
+    throw Object.assign(new Error("EXDEV: cross-device link not permitted"), { code: "EXDEV" });
+  };
+  assert.equal(await prepareSlotDeps(slot, active, noCp, crossDevice), "installed");
+  assert.deepEqual(calls.filter((c) => c.startsWith("npm")), [`npm ci --no-audit --no-fund @${slot}`]);
+  assert.equal(readFileSync(installHashMarkerPath(slot), "utf8"), hashInstallInputs(slot));
+});
+
 test("linkTree mirrors directories, files and symlinks", () => {
   const from = slotDir("x", { marker: false });
   const to = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}link-`)), "nm");

@@ -64,20 +64,31 @@ export function linkTree(from: string, to: string): void {
 }
 
 /** Make `dir`'s node_modules match its own lockfile; returns how. */
-export async function prepareSlotDeps(dir: string, activeDir: string, run: RunCommand = runCommand): Promise<"reused" | "linked" | "installed"> {
+export async function prepareSlotDeps(dir: string, activeDir: string, run: RunCommand = runCommand, link: (from: string, to: string) => void = linkTree): Promise<"reused" | "linked" | "installed"> {
   const want = hashInstallInputs(dir);
   if (readMarker(dir) === want) return "reused";
   const modules = join(dir, "node_modules");
   await run("rm", ["-rf", modules], dir);
   if (resolve(activeDir) !== resolve(dir) && hashInstallInputs(activeDir) === want && readMarker(activeDir) === want) {
-    await run("cp", ["-al", join(activeDir, "node_modules"), modules], dir).catch((err: unknown) => {
-      // GNU `cp -al` links off the loop in a child; BSD cp has no -l, so the in-process walk is the fallback.
-      rmSync(modules, { recursive: true, force: true });
-      linkTree(join(activeDir, "node_modules"), modules);
-      return `in-process link after: ${err instanceof Error ? err.message : String(err)}`;
-    });
-    writeMarker(dir, want);
-    return "linked";
+    const linked = await run("cp", ["-al", join(activeDir, "node_modules"), modules], dir).then(
+      () => true,
+      () => {
+        // GNU `cp -al` links off the loop in a child; BSD cp has no -l, so the in-process walk is the fallback.
+        rmSync(modules, { recursive: true, force: true });
+        try {
+          link(join(activeDir, "node_modules"), modules);
+          return true;
+        } catch {
+          // EXDEV: the boot checkout and the slots are separate bind mounts, so neither can link; install instead.
+          rmSync(modules, { recursive: true, force: true });
+          return false;
+        }
+      },
+    );
+    if (linked) {
+      writeMarker(dir, want);
+      return "linked";
+    }
   }
   await run("npm", ["ci", "--no-audit", "--no-fund"], dir);
   writeMarker(dir, want);
