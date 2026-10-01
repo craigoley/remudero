@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.12
   status: queued
@@ -16,3 +16,12 @@
     - claim: "the fix_refusal:the-worker-changed-nothing cause of PR friction has a recorded remedy"
       proof: "grep: ci-friction:fix_refusal:the-worker-changed-nothing in docs/ci-friction-remedies.md"
   note: "Filed by the ci-friction gardener (W1-T4435) from a weekly pass over the ledger and gate-fire-rate.ts's own measurement. fix_refusal:the-worker-changed-nothing priced at 486.8 PR minute(s) across 122 round(s) on 77 pull request(s) — the costliest cause with no open task. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person; its remedy is recorded in docs/ci-friction-remedies.md naming \"ci-friction:fix_refusal:the-worker-changed-nothing\" once it lands."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.93
+    reasons:
+      - "The filed plan calls for recording a remedy for a named CI friction cause, and the declared scope is one documentation file with a specific grep acceptance check."
+      - "The supplied gates state shows filingTime true and no concerning gate result. No actual change view was supplied."
+    judged_at: "2026-10-01T08:10:28.455Z"
+    pin: "7bd703e66fcea25bba5f28c8c6601eed58e4a77a38301078940d1b8781e8d7b5"
