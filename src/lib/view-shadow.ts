@@ -19,8 +19,10 @@
  * The request path never pays for this: the route only notes the request after its response finished,
  * the legacy side is computed on a deferred turn, and the diff and its evidence run in the worker.
  */
+import { join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
-import { withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
+import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
+import { READ_MODEL_DIRNAME, withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
 import { renderView, type ReadModelViewRoutesOptions, type ViewDefinition } from "./views.js";
 
 export const VIEW_SHADOW_DIFF_STEP = "view.shadow_diff";
@@ -552,25 +554,34 @@ export interface ShadowStore {
   save(view: string, state: ViewShadowState): void;
 }
 
-const SHADOW_DDL = "CREATE TABLE IF NOT EXISTS view_shadow(view TEXT PRIMARY KEY, state TEXT NOT NULL) WITHOUT ROWID";
+/** On the persistent state disk beside the switch file: the DB may live on scratch a deallocate wipes. */
+export function viewShadowPath(stateDir: string): string {
+  return join(stateDir, READ_MODEL_DIRNAME, "view-shadow.json");
+}
 
-/** Counters survive a serve restart in the home read model, written behind its lease. */
-export function sqliteShadowStore(db: ReadModelDb, lease: ReadModelLease): ShadowStore {
-  withWriteTransaction(db, lease, () => db.exec(SHADOW_DDL));
+/** Counters survive a restart and a scratch wipe in `path`, written only behind the home read model's lease. */
+export function fileShadowStore(path: string, db: ReadModelDb, lease: ReadModelLease): ShadowStore {
+  const states = storedShadowStates(path, db);
   return {
-    load: () => storedShadowStates(db),
-    save: (view, state) => void withWriteTransaction(db, lease, () => db.prepare("INSERT INTO view_shadow(view, state) VALUES(?, ?) ON CONFLICT(view) DO UPDATE SET state = excluded.state").run(view, JSON.stringify(state))),
+    load: () => ({ ...states }),
+    save: (view, state) => {
+      states[view] = state;
+      withWriteTransaction(db, lease, () => writeAtomic(path, JSON.stringify(states)));
+    },
   };
 }
 
-function storedShadowStates(db: ReadModelDb): Record<string, ViewShadowState> {
+/** The file; until its first save, the `view_shadow` table an older build kept in the DB, so a streak carries over. */
+function storedShadowStates(path: string, db: ReadModelDb): Record<string, ViewShadowState> {
+  const text = readFileIfExists(path);
+  if (text !== undefined) return JSON.parse(text) as Record<string, ViewShadowState>;
   if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'view_shadow'").get() === undefined) return {};
   return Object.fromEntries(db.prepare("SELECT view, state FROM view_shadow").all().map((row) => [String(row.view), JSON.parse(String(row.state)) as ViewShadowState]));
 }
 
 /** Readiness as the persisted counters say, read-only: it shows from boot, before this process compared anything. */
-export function storedShadowReadiness(db: ReadModelDb, nowMs: number): ShadowReadiness[] {
-  return Object.entries(storedShadowStates(db)).sort(([a], [b]) => a.localeCompare(b)).map(([view, s]) => shadowReadiness(view, s, nowMs));
+export function storedShadowReadiness(path: string, db: ReadModelDb, nowMs: number): ShadowReadiness[] {
+  return Object.entries(storedShadowStates(path, db)).sort(([a], [b]) => a.localeCompare(b)).map(([view, s]) => shadowReadiness(view, s, nowMs));
 }
 
 function emptyState(): ViewShadowState {

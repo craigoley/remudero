@@ -9,8 +9,8 @@
 //     and passes the reset (a pause) when one refresh costs more than that share allows;
 //   - secondary: a rate-limited refresh backs off on the transport's own refusal floor,
 //     doubling per consecutive refusal.
-// The module owns no GitHub call. Serve's gateway runs it today; the read-model worker takes it
-// over as the single fetcher at the Phase 1 cutover.
+// The module owns no GitHub call. Serve runs it, or the read-model worker does when switches.json
+// reads `"github": "worker"` (read-model-worker.ts hands exactly one of them the gateway).
 import { DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS, type GhRateLimitReading } from "./github-transport.js";
 import { systemClock, type Clock } from "./clock.js";
 import type { SseRoute } from "./service.js";
@@ -237,6 +237,13 @@ export function createGithubKeepWarm(opts: {
       if (running) return;
       running = true;
       windowStart = clock.iso();
+      // A walk the other keep-warm counted before a handover paces this one but is never counted twice.
+      const held = opts.telemetry()?.last;
+      if (held && held.seq !== lastSeq) {
+        lastSeq = held.seq;
+        last = held;
+        if (held.rateLimited) consecutiveRateLimited = Math.max(1, consecutiveRateLimited);
+      }
       schedule(0);
       scheduleRollup();
     },

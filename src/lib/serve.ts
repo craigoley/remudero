@@ -2999,9 +2999,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   github.serveOffLoop?.();
   const statusStream = buildStatusStream(deps.board, deps.pollMs ?? DEFAULT_POLL_MS);
   const refreshMs = deps.boardGithubRefreshMs ?? DEFAULT_BOARD_PREWARM_MS;
-  const keepWarm = github.warmsOffLoop?.()
-    ? createGithubKeepWarm({ refresh: () => github.warm?.(), telemetry: () => github.warmTelemetry?.(), targetFreshnessMs: refreshMs, log: deps.log })
-    : undefined;
+  const walk = { refresh: () => github.warm?.(), telemetry: () => github.warmTelemetry?.(), targetFreshnessMs: refreshMs, log: deps.log };
+  const keepWarm = github.warmsOffLoop?.() ? createGithubKeepWarm(walk) : undefined;
   const prewarm = keepWarm ? keepWarm.gate(statusStream) : gatePrewarmOnClients(statusStream, github, refreshMs);
   // W1-T500: resolved ONCE, here, and threaded to BOTH `buildServeRoutes` (the mounted
   // `POST /v1/confirm` route's issuing store, via `deps.confirmNonces` below) and `createService`
@@ -3040,7 +3039,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     write: (window) => deps.log?.("github.wake.summary", { ...wakeSummaryRow(wakeCounters, window) }),
   });
   const readModel = deps.readModel && withNeedsYouView(createReadModelWorker({ stateDir: dirname(deps.ledgerPath), instances: readModelInstances(deps), log: deps.log, escalationRepository: deps.assistantRepository,
-    registry: { repoPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot), hostPath: deps.registry?.hostRegistryPath ?? DEFAULT_HOST_INSTANCE_REGISTRY_PATH }, ...deps.readModel }));
+    registry: { repoPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot), hostPath: deps.registry?.hostRegistryPath ?? DEFAULT_HOST_INSTANCE_REGISTRY_PATH },
+    ...(keepWarm ? { github: { serve: keepWarm, ...walk } } : {}), ...deps.readModel }));
   const staleExit = gateStaleCodeExit({
     bootSha: consoleSha,
     log: deps.log,
@@ -3075,6 +3075,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     stampReadWith(route, () => {
       lastReadAt = systemClock.now();
       prewarm.noteRead();
+      readModel?.noteGithubRead?.();
     });
   const routeAssembly = assembleServeRoutes(
     {
