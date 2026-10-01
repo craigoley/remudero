@@ -12227,6 +12227,8 @@ export function terminalVerdictFields(r: WorkerResult | null): {
   tokens?: WorkerResult["tokens"];
   worker_duration_ms?: number;
   total_cost_usd?: number;
+  /** W1-T4066: this cost restates the worker row's own, so the spend series must not count it again. */
+  spend_role?: "restated";
   success?: boolean;
 } {
   if (!r) return { model: null, served_model: null };
@@ -12244,6 +12246,7 @@ export function terminalVerdictFields(r: WorkerResult | null): {
     tokens: r.tokens,
     ...(r.workerDurationMs === undefined ? {} : { worker_duration_ms: r.workerDurationMs }),
     total_cost_usd: r.costUsd,
+    spend_role: "restated",
     success,
   };
 }
