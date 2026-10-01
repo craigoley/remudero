@@ -168,6 +168,7 @@ import {
   type MainRunGapDispatch,
   type MainRunGapHistory,
 } from "./main-run-gaps.js";
+import { mutationVerdictRunIdsFromLedger, pullMutationVerdicts, readMutationVerdictZip } from "./mutation-verdict-pull.js";
 import {
   REFUSAL_AMENDMENT_STEP,
   draftRefusalAmendment,
@@ -1301,6 +1302,7 @@ export interface BuildSweepEffectsDeps {
    *  `ghJson` already satisfies `GhApiFetcher`; a test swaps this for a fixture that never
    *  spawns `gh`. */
   ghJsonImpl?: GhApiFetcher;
+  ghBufferImpl?: (args: string[]) => Buffer;
   fixBranchClaimKeyImpl?: SweepRuntimeFn;
   boundedWorktreeOwnerPathImpl?: SweepRuntimeFn;
   decideRegisteredFixOwnerRecoveryImpl?: SweepRuntimeFn;
@@ -1489,6 +1491,9 @@ export function rebaseDirtyFleetBranchViaGit(
   }
 }
 
+/** W1-T2927: artifact ids already read; process-lifetime because effects are rebuilt every poll. */
+const settledMutationVerdictArtifacts = new Set<number>();
+
 /**
  * W1-T3654 — the ONE recorded member list for {@link buildSweepEffects}' return surface. Both
  * `test/build-sweep-effects-takes-one-deps-object.test.ts` (the entrypoint-only suite) and
@@ -1534,6 +1539,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "readMainRepair",
   // W1-T4817: finds a main commit no workflow ran on and dispatches its workflows at main's head.
   "reconcileMainRunGaps",
+  "pullMutationVerdicts",
   "readStaleRedWorkflowRuns",
   "runStaleRedLocalRoute",
   "releaseStaleRed",
@@ -1585,6 +1591,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readMainTip"
   | "readMainRepair"
   | "reconcileMainRunGaps"
+  | "pullMutationVerdicts"
   | "readStaleRedWorkflowRuns"
   | "runStaleRedLocalRoute"
   | "releaseStaleRed"
@@ -1671,6 +1678,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     worktreeAddImpl: worktreeAddForBuild = worktreeAdd,
     gitPushRunBranchImpl: gitPushRunBranchForBuild = gitPushRunBranch,
     ghJsonImpl: ghJsonForBuild = ghJson,
+    ghBufferImpl: ghBufferForBuild = readMutationVerdictZip,
     fixBranchClaimKeyImpl: fixBranchClaimKey = requiredSweepRuntime("fixBranchClaimKeyImpl"),
     boundedWorktreeOwnerPathImpl: boundedWorktreeOwnerPath = requiredSweepRuntime("boundedWorktreeOwnerPathImpl"),
     decideRegisteredFixOwnerRecoveryImpl: decideRegisteredFixOwnerRecovery = requiredSweepRuntime("decideRegisteredFixOwnerRecoveryImpl"),
@@ -3364,6 +3372,24 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           ghRunImpl("gh", ["api", "-X", "POST", `repos/${owner}/${repo}/actions/workflows/${workflowFile}/dispatches`, "-f", `ref=${ref}`]);
         },
       });
+    },
+
+    pullMutationVerdicts: async (recorded) => {
+      try {
+        const { rows, unread } = pullMutationVerdicts({
+          owner,
+          repo,
+          recorded,
+          settled: settledMutationVerdictArtifacts,
+          readJson: (args) => paceGhEntry(pacer, isGhRateLimitError, () => ghJsonForBuild(args)),
+          readZip: (args) => paceGhEntry(pacer, isGhRateLimitError, () => ghBufferForBuild(args)),
+        });
+        for (const u of unread) log("sweep.mutation_verdict_pull.error", { phase: "artifact", ...u });
+        return rows;
+      } catch (e) {
+        log("sweep.mutation_verdict_pull.error", { phase: "list", error: String((e as Error)?.message ?? e) });
+        return [];
+      }
     },
 
     // W1-T2620 (design iv) — THE LEAF IS THE ONE THAT EXISTS: the SAME `pushEmptyCommit` leaf
@@ -8642,6 +8668,8 @@ export interface SweepDeps {
    *  `runSweep` writes each as a ledger row. Called once per full pass, never per light-pass PR.
    *  Omitted, the sweep never looks. A THROW is contained and logged: it never fails the pass. */
   reconcileMainRunGaps?: (history: MainRunGapHistory) => Promise<readonly MainRunGapDispatch[]>;
+  /** W1-T2927 — pulls CI's `mutation-verdict-ledger` artifact (see mutation-verdict-pull.ts). */
+  pullMutationVerdicts?: (recorded: ReadonlySet<string>) => Promise<readonly Record<string, unknown>[]>;
   /** W1-T2620 — RELEASE the one base-caused stand-down chosen this pass: never a loop, the same
    *  AT-MOST-ONCE shape the update-branch dep uses. THE LEAF IS THE ONE THAT EXISTS, never a second
    *  outward path. Omitted, the target still stands down with the ordinary sentence; a THROW is
@@ -9973,6 +10001,17 @@ export async function runSweep(
       }
     } catch (e) {
       log("sweep.main_run_gap.error", { phase: "reconcile", error: String((e as Error)?.message ?? e) });
+    }
+  }
+
+  // Full passes only: one paced list per pass, deduped on the ledger's own run_ids.
+  if (deps.pullMutationVerdicts && deps.repairAdmissionSurface !== "light") {
+    try {
+      const pulled = await deps.pullMutationVerdicts(mutationVerdictRunIdsFromLedger(ledgerLines));
+      for (const row of pulled) appendLine(deps.ledgerPath, row as Parameters<typeof appendLine>[1]);
+      if (pulled.length > 0) log("sweep.mutation_verdict_pull.ingested", { rows: pulled.length });
+    } catch (e) {
+      log("sweep.mutation_verdict_pull.error", { phase: "ingest", error: String((e as Error)?.message ?? e) });
     }
   }
 

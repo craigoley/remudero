@@ -168,6 +168,8 @@ function buildEffects(
     reclaimWorkerImpl: undefined,
     disarmImpl: undefined,
     readJsonImpl: readJsonImpl,
+    // The sweep's mutation-verdict pull lists CI artifacts through ghJsonImpl; none exist here.
+    ghJsonImpl: () => ({ artifacts: [] }),
   });
   return {
     ...effects,
