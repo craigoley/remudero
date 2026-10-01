@@ -2806,10 +2806,66 @@ export interface components {
         registryError?: string;
       };
     };
-    /** GET /v1/views/now?instance=<id> (docs/views.md, src/lib/now-view.ts): everything the console's /now renders for ONE instance. The board is the legacy derivation over the read model's full fact history; `groups` precomputes the console's groupBoard; `actions` carries structured strikes; `health` is the selected instance's own host probe. Dark until state/read-model/switches.json sets `now` to `serve`. Version 2 carries no clock stamp and no now-relative value in `data` (the envelope's `generatedAt` and each source's `asOf` do), so the ETag moves only when the content does. A consumer derives a duration ("running for 12 min") from an absolute field such as a task's `startedAt`. */
+    /** One item of the `inbox` view (src/lib/inbox-view.ts): GET /v1/inbox's item for its section, unchanged. A `needsYou` item adds the `lane` it sits in; a `fleet` item is InboxFleetItem. */
+    InboxViewItem: {
+      proposalId: string;
+      summary?: string;
+      plain?: PlainInboxMessage;
+      stampLine?: string;
+      draftedTasks?: (InboxDraftedTask)[];
+      spawnedAt?: string;
+      reasons?: (InboxPredicateFailure)[];
+      reason?: string;
+      lane?: "ready" | "drafting" | "notReady" | "declined";
+      decision?: "file" | "merge";
+    };
+    /** Where one page of a paged view sits (docs/views.md, design D9). `next` is the next page's `cursor`, absent on the last; every page's body stays under 64 KiB. */
+    ViewPage: {
+      index: number;
+      of: number;
+      /** Items across every page of this key's filter. */
+      total: number;
+      next?: string;
+    };
+    /** GET /v1/views/inbox?section=<s>[&cursor=<n>] (docs/views.md, src/lib/inbox-view.ts): one page of one inbox section, materialized by serve's slow lane on its cadence with no reader, so a read answers from memory. Every page carries every lane's counts. Dark until state/read-model/switches.json sets `inbox` to `serve`. */
+    InboxView: {
+      view: "inbox";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      /** `inbox-store:core`: when the slow lane last classified. */
+      sources: (ViewSource)[];
+      data: {
+        section: "needsYou" | "ready" | "drafting" | "notReady" | "declined" | "fleet";
+        items: (InboxViewItem)[];
+        counts: InboxCounts;
+        page: ViewPage;
+      };
+    };
+    /** GET /v1/views/feedback[?status=<s>][&cursor=<n>] (docs/views.md, src/lib/feedback-view.ts): one page of GET /v1/feedback's entries, all or one status, materialized by serve's slow lane. An entry whose proposal PR merged reads `accepted` (projected; the view writes nothing). Dark until state/read-model/switches.json sets `feedback` to `serve`. */
+    FeedbackView: {
+      view: "feedback";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      /** `feedback-store:core`: when the slow lane last read the entries. */
+      sources: (ViewSource)[];
+      data: {
+        status: "all" | "new" | "grilling" | "proposed" | "accepted" | "rejected" | "answered";
+        entries: (FeedbackEntry)[];
+        counts: {
+          total: number;
+          byStatus: Record<string, number>;
+        };
+        page: ViewPage;
+      };
+    };
+    /** GET /v1/views/now?instance=<id> (docs/views.md, src/lib/now-view.ts): everything the console's /now renders for ONE instance. The board is the legacy derivation over the read model's full fact history; `groups` precomputes the console's groupBoard; `actions` carries structured strikes; `health` is the selected instance's own host probe. Dark until state/read-model/switches.json sets `now` to `serve`. Version 2 carries no clock stamp and no now-relative value in `data` (the envelope's `generatedAt` and each source's `asOf` do), so the ETag moves only when the content does. A consumer derives a duration ("running for 12 min") from an absolute field such as a task's `startedAt`. Version 3 (P4-T08) replaced `questions` (a count) with `decisions[]`: each open decision with the route that answers it. */
     NowView: {
       view: "now";
-      version: 2;
+      version: 3;
       generatedAt: string;
       asOf: string | null;
       stale: boolean;
@@ -2884,12 +2940,38 @@ export interface components {
           };
           reasons?: Record<string, string>;
         };
-        /** Open feedback questions; core only, so another instance carries a `reason` instead. */
-        questions: ({
-          count: number;
-        }) | ({
-          reason: string;
-        });
+        /** Every open decision for this instance, newest first, at most 50 (src/lib/now-decisions.ts). */
+        decisions: (NowDecision)[];
+        /** How many open decisions past the cap `decisions` leaves out. */
+        decisionsMore?: number;
+        /** Why a decision source was not read for this instance, by kind (`grill`, `task_question`): both live in core, so another instance names why. Its decisions are absent, never zero. */
+        decisionsReasons?: {
+          grill?: string;
+          task_question?: string;
+        };
+      };
+    };
+    /** One open thing the operator answers, with the ONE route that steers the answer. `answer.tier` is that route's write tier: a `high` one still needs the console's /v1/confirm nonce. `fields` are sent as given; the operator's own input goes in the route's text field (`text` for /v1/feedback, `answer` for /v1/questions/answer) or, for `choice`, the `disposition` picked from `options`. */
+    NowDecision: {
+      /** Stable: `grill:<feedbackId>`, `question:<task>:<ts>`, `manual:<task>:<issueUrl>` or `escalation:<task>:<issueUrl>`. */
+      id: string;
+      kind: "grill" | "task_question" | "manual_approval" | "escalation";
+      instance: string;
+      taskId?: string;
+      title: string;
+      /** Bounded to 2048 characters; the full text is in the task or feedback entry. */
+      prompt: string;
+      options?: (string)[];
+      currentAssumption?: string;
+      impactIfWrong?: "low" | "med";
+      askedAt?: string;
+      answer: {
+        method: "POST";
+        /** Core's own decisions name the unprefixed route. Another instance's escalation names that instance's mount, `/v1/i/<instance>/manual/approve` or `/v1/i/<instance>/escalation/mark-handled`, so the answer lands in its own state. */
+        path: string;
+        tier: "low" | "middle" | "high";
+        fields: Record<string, string>;
+        input: "text" | "choice" | "none";
       };
     };
     /** One board row as /now renders it; other StatusProjection fields stay on GET /v1/status. */
@@ -4131,6 +4213,28 @@ export interface paths {
         };
     };
   };
+  "/v1/i/{instance}/manual/approve": {
+    post: {
+      responses: {
+          "200": ApproveManualResult;
+          "400": Error;
+          "401": Error;
+          "403": HighTierRefusal;
+          "503": InstanceUnavailable;
+        };
+    };
+  };
+  "/v1/i/{instance}/escalation/mark-handled": {
+    post: {
+      responses: {
+          "200": MarkEscalationHandledResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "503": InstanceUnavailable;
+        };
+    };
+  };
   "/v1/operator-agent/ask": {
     post: {
       responses: {
@@ -4812,6 +4916,30 @@ export interface paths {
       responses: {
           "200": InstancesView;
           "304": undefined;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/inbox": {
+    get: {
+      responses: {
+          "200": InboxView;
+          "304": undefined;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/feedback": {
+    get: {
+      responses: {
+          "200": FeedbackView;
+          "304": undefined;
+          "400": Error;
           "401": Error;
           "403": Error;
           "404": undefined;

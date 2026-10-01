@@ -7093,6 +7093,131 @@ components:
               type: string
               description: The repo registry's refusal code; GET /v1/registry answers 503 with it.
 
+    InboxViewItem:
+      type: object
+      description: >
+        One item of the `inbox` view (src/lib/inbox-view.ts): GET /v1/inbox's item for its section,
+        unchanged. A `needsYou` item adds the `lane` it sits in; a `fleet` item is InboxFleetItem.
+      required: [proposalId]
+      properties:
+        proposalId: {type: string}
+        summary: {type: string}
+        plain:
+          $ref: "#/components/schemas/PlainInboxMessage"
+        stampLine: {type: string}
+        draftedTasks:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxDraftedTask"
+        spawnedAt: {type: string}
+        reasons:
+          type: array
+          items:
+            $ref: "#/components/schemas/InboxPredicateFailure"
+        reason: {type: string}
+        lane:
+          type: string
+          enum: [ready, drafting, notReady, declined]
+        decision:
+          type: string
+          enum: [file, merge]
+
+    ViewPage:
+      type: object
+      description: >
+        Where one page of a paged view sits (docs/views.md, design D9). `next` is the next page's
+        `cursor`, absent on the last; every page's body stays under 64 KiB.
+      required: [index, of, total]
+      properties:
+        index: {type: integer}
+        of: {type: integer}
+        total: {type: integer, description: Items across every page of this key's filter.}
+        next: {type: string}
+
+    InboxView:
+      type: object
+      description: >
+        GET /v1/views/inbox?section=<s>[&cursor=<n>] (docs/views.md, src/lib/inbox-view.ts): one page
+        of one inbox section, materialized by serve's slow lane on its cadence with no reader, so a
+        read answers from memory. Every page carries every lane's counts. Dark until
+        state/read-model/switches.json sets `inbox` to `serve`.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [inbox]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          description: "`inbox-store:core`: when the slow lane last classified."
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [section, items, counts, page]
+          properties:
+            section:
+              type: string
+              enum: [needsYou, ready, drafting, notReady, declined, fleet]
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/InboxViewItem"
+            counts:
+              $ref: "#/components/schemas/InboxCounts"
+            page:
+              $ref: "#/components/schemas/ViewPage"
+
+    FeedbackView:
+      type: object
+      description: >
+        GET /v1/views/feedback[?status=<s>][&cursor=<n>] (docs/views.md, src/lib/feedback-view.ts):
+        one page of GET /v1/feedback's entries, all or one status, materialized by serve's slow lane.
+        An entry whose proposal PR merged reads `accepted` (projected; the view writes nothing).
+        Dark until state/read-model/switches.json sets `feedback` to `serve`.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [feedback]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          description: "`feedback-store:core`: when the slow lane last read the entries."
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [status, entries, counts, page]
+          properties:
+            status:
+              type: string
+              enum: [all, new, grilling, proposed, accepted, rejected, answered]
+            entries:
+              type: array
+              items:
+                $ref: "#/components/schemas/FeedbackEntry"
+            counts:
+              type: object
+              required: [total, byStatus]
+              properties:
+                total: {type: integer}
+                byStatus:
+                  type: object
+                  additionalProperties: {type: integer}
+            page:
+              $ref: "#/components/schemas/ViewPage"
+
     NowView:
       type: object
       description: >
@@ -7103,7 +7228,8 @@ components:
         state/read-model/switches.json sets `now` to `serve`. Version 2 carries no clock stamp and
         no now-relative value in `data` (the envelope's `generatedAt` and each source's `asOf` do),
         so the ETag moves only when the content does. A consumer derives a duration ("running for
-        12 min") from an absolute field such as a task's `startedAt`.
+        12 min") from an absolute field such as a task's `startedAt`. Version 3 (P4-T08) replaced
+        `questions` (a count) with `decisions[]`: each open decision with the route that answers it.
       required: [view, version, generatedAt, asOf, stale, sources, data]
       properties:
         view:
@@ -7111,7 +7237,7 @@ components:
           enum: [now]
         version:
           type: integer
-          enum: [2]
+          enum: [3]
         generatedAt: {type: string, format: date-time}
         asOf: {type: [string, "null"]}
         stale: {type: boolean}
@@ -7122,7 +7248,7 @@ components:
             $ref: "#/components/schemas/ViewSource"
         data:
           type: object
-          required: [instance, board, prQueue, actions, recent, health, questions]
+          required: [instance, board, prQueue, actions, recent, health, decisions]
           properties:
             instance: {type: string}
             board:
@@ -7237,17 +7363,61 @@ components:
                 reasons:
                   type: object
                   additionalProperties: {type: string}
-            questions:
-              description: Open feedback questions; core only, so another instance carries a `reason` instead.
-              oneOf:
-                - type: object
-                  required: [count]
-                  properties:
-                    count: {type: integer}
-                - type: object
-                  required: [reason]
-                  properties:
-                    reason: {type: string}
+            decisions:
+              type: array
+              description: Every open decision for this instance, newest first, at most 50 (src/lib/now-decisions.ts).
+              items:
+                $ref: "#/components/schemas/NowDecision"
+            decisionsMore:
+              type: integer
+              description: How many open decisions past the cap `decisions` leaves out.
+            decisionsReasons:
+              type: object
+              description: >
+                Why a decision source was not read for this instance, by kind (`grill`, `task_question`):
+                both live in core, so another instance names why. Its decisions are absent, never zero.
+              properties:
+                grill: {type: string}
+                task_question: {type: string}
+
+    NowDecision:
+      type: object
+      description: >
+        One open thing the operator answers, with the ONE route that steers the answer. `answer.tier` is
+        that route's write tier: a `high` one still needs the console's /v1/confirm nonce. `fields` are
+        sent as given; the operator's own input goes in the route's text field (`text` for /v1/feedback,
+        `answer` for /v1/questions/answer) or, for `choice`, the `disposition` picked from `options`.
+      required: [id, kind, instance, title, prompt, answer]
+      properties:
+        id:
+          type: string
+          description: "Stable: `grill:<feedbackId>`, `question:<task>:<ts>`, `manual:<task>:<issueUrl>` or `escalation:<task>:<issueUrl>`."
+        kind: {type: string, enum: [grill, task_question, manual_approval, escalation]}
+        instance: {type: string}
+        taskId: {type: string}
+        title: {type: string}
+        prompt: {type: string, description: Bounded to 2048 characters; the full text is in the task or feedback entry.}
+        options: {type: array, items: {type: string}}
+        currentAssumption: {type: string}
+        impactIfWrong: {type: string, enum: [low, med]}
+        askedAt: {type: string, format: date-time}
+        answer:
+          type: object
+          required: [method, path, tier, fields, input]
+          properties:
+            method: {type: string, enum: [POST]}
+            path:
+              type: string
+              description: >
+                Core's own decisions name the unprefixed route. Another instance's escalation names that
+                instance's mount, `/v1/i/<instance>/manual/approve` or `/v1/i/<instance>/escalation/mark-handled`,
+                so the answer lands in its own state.
+              pattern: "^/v1/(i/[^/]+/)?(feedback|questions/answer|manual/approve|escalation/mark-handled)$"
+            tier: {type: string, enum: [low, middle, high]}
+            fields:
+              type: object
+              additionalProperties: {type: string}
+            input: {type: string, enum: [text, choice, none]}
 
     NowTask:
       type: object
@@ -10853,6 +11023,80 @@ paths:
               schema:
                 $ref: "#/components/schemas/InstanceUnavailable"
 
+  /v1/i/{instance}/manual/approve:
+    post:
+      summary: Approve a MANUAL-queue item of this registered instance -- closes its GitHub issue.
+      description: >
+        The unprefixed /v1/manual/approve, rooted in THIS instance's state: `panel.manual_approved`
+        lands in its own ledger. The `now` view names this route for another instance's MANUAL
+        escalations (docs/views.md).
+      security:
+        - bearerWrite: []
+      parameters:
+        - name: instance
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApproveManualRequest"
+      responses:
+        "200":
+          description: The issue was closed and the approval recorded in this instance's ledger.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApproveManualResult"
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/HighTierForbidden" }
+        "503":
+          description: The registered instance's state or plan is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceUnavailable"
+
+  /v1/i/{instance}/escalation/mark-handled:
+    post:
+      summary: Mark an escalation of this registered instance handled -- closes its GitHub issue.
+      description: >
+        The unprefixed /v1/escalation/mark-handled, rooted in THIS instance's state:
+        `panel.escalation_marked_handled` lands in its own ledger and `precision` is computed from it.
+        The `now` view names this route for another instance's escalations (docs/views.md).
+      security:
+        - bearerWrite: []
+      parameters:
+        - name: instance
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MarkEscalationHandledRequest"
+      responses:
+        "200":
+          description: The issue was closed and the action recorded in this instance's ledger.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MarkEscalationHandledResult"
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "503":
+          description: The registered instance's state or plan is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceUnavailable"
+
   /v1/operator-agent/ask:
     post:
       summary: Read-only, evidence-cited answer-v1 for this serving instance's repository.
@@ -12934,6 +13178,87 @@ paths:
         "404":
           description: The view is dark (`view_disabled`), shadowed (`view_shadow`), or has no body yet (`view_not_ready`).
 
+  /v1/views/inbox:
+    get:
+      summary: One page of one inbox section, from memory (the slow lane materializes it).
+      description: >
+        Arch Phase 4 (P4-T06). Keyed by `section` and `cursor`; each body is under 64 KiB and carries
+        every lane's counts. While dark (no `serve` switch), it answers from GET /v1/inbox's last
+        classification in this serve, or 400 when there is none yet. Same ETag and 304 rules as every
+        view. See docs/views.md.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: section
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [needsYou, ready, drafting, notReady, declined, fleet]
+        - name: cursor
+          in: query
+          required: false
+          description: The previous page's `page.next`.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxView"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The view is shadowed (`view_shadow`) or not materialized yet (`view_not_ready`).
+
+  /v1/views/feedback:
+    get:
+      summary: One page of feedback entries, all or one status, from memory (the slow lane materializes it).
+      description: >
+        Arch Phase 4 (P4-T07, read half). Keyed by `status` and `cursor`; each body is under 64 KiB and
+        carries the counts by status. While dark it is computed inline from the entries. Same ETag and
+        304 rules as every view. See docs/views.md.
+      security:
+        - bearerRead: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [new, grilling, proposed, accepted, rejected, answered]
+        - name: cursor
+          in: query
+          required: false
+          description: The previous page's `page.next`.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackView"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The view is shadowed (`view_shadow`) or not materialized yet (`view_not_ready`).
+
   /v1/views/events:
     get:
       summary: SSE stream of view versions -- a `hello` map on connect, then one `view` event per changed ETag.
@@ -13527,8 +13852,10 @@ paths:
       description: >
         src/lib/panel-actions.ts's `buildEscalationLinkConfirmRoute`. Registered read-scoped but
         self-authenticated. On a verified link it renders an HTML form that POSTs the same query to
-        /v1/escalation/answer; a refusal renders its reason as HTML. Refusals other than a
-        malformed query are ledgered as `escalation.link_refused` (phase `confirm`).
+        /v1/escalation/answer; a refusal renders its reason as HTML. The route writes nothing
+        (W1-T5057): it reads the link secret without creating it (503 when none was minted), and
+        refusals other than a malformed query are held in memory and ledgered as one
+        `escalation.link_refused_rollup` row per escalation and reason per hour (phase `confirm`).
       security: []
       parameters:
         - name: e

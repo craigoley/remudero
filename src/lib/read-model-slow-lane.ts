@@ -17,10 +17,13 @@ import { join } from "node:path";
 import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
 import { createBoardSnapshotCache, type BoardSnapshotCache } from "./board-snapshot-cache.js";
 import { systemClock, type Clock } from "./clock.js";
-import { INBOX_CLASSIFY_INTERVAL_MS, refreshInboxClassification, type InboxRefreshMemo } from "./inbox-view.js";
+import { FEEDBACK_VIEW_NAME, FEEDBACK_VIEW_VERSION, materializeFeedbackView } from "./feedback-view.js";
+import { INBOX_CLASSIFY_INTERVAL_MS, INBOX_VIEW_NAME, INBOX_VIEW_VERSION, refreshInboxClassification, type InboxRefreshMemo } from "./inbox-view.js";
 import { ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
+import { recordCreditStateEdge } from "./account-usage.js";
 import { buildBatchedGithub, type GitHub } from "./status.js";
 import { ghTraceGateway } from "./trace.js";
+import type { ViewSource } from "./views.js";
 
 const SLOW_LANE_KIND = "remudero-read-model-slow-lane" as const;
 /** BACKSTOP: the lane's heap; a unit that outgrows it kills this thread, never serve's. */
@@ -34,18 +37,28 @@ const SLOW_LANE_GITHUB_TTL_MS = 150_000;
 export interface SlowLaneConfig {
   /** The inbox unit's inputs; absent, the lane has no inbox unit. */
   inbox?: { root: string; planPath: string; ledgerPath: string; inboxRoot: string; repository: string };
+  /** The credit-edge unit's inputs (account-usage.ts); absent, the lane records no credit edge. */
+  accountUsage?: { ledgerPath: string; root: string; accountFilePath?: string };
   intervalMs?: number;
 }
 
 type SlowLaneData = SlowLaneConfig & { kind: typeof SLOW_LANE_KIND };
 
+/** One view's every key, as a unit built it: the read-model worker persists and serves them, and drops any key not among them. */
+export interface SlowLaneBodies {
+  view: string;
+  version: number;
+  bodies: Array<{ key: string; data: unknown; sources: ViewSource[] }>;
+}
+
 export type SlowLaneMessage =
   | { type: "log"; step: string; extra: Record<string, unknown> }
-  | { type: "unit"; unit: string; ok: boolean; ms: number };
+  | { type: "unit"; unit: string; ok: boolean; ms: number }
+  | ({ type: "bodies" } & SlowLaneBodies);
 
 interface SlowLaneUnit {
   name: string;
-  run(): Promise<Record<string, unknown> & { changed?: boolean }>;
+  run(): Promise<{ views: SlowLaneBodies[] }>;
 }
 
 /** The board snapshot serve's own gateway keeps, read to seed this one and never written from here. */
@@ -58,7 +71,8 @@ function laneGithub(inboxRoot: string, owner: string, repo: string, log: (step: 
   return buildBatchedGithub(owner, repo, { log, ttlMs: SLOW_LANE_GITHUB_TTL_MS, snapshotCache });
 }
 
-function inboxUnit(config: NonNullable<SlowLaneConfig["inbox"]>, clock: Clock, log: (step: string, extra?: Record<string, unknown>) => void, seams: Partial<PanelGraphDeps>): SlowLaneUnit {
+/** The inbox and feedback units: both read core's checkout, through one board gateway. */
+function coreUnits(config: NonNullable<SlowLaneConfig["inbox"]>, clock: Clock, log: (step: string, extra?: Record<string, unknown>) => void, seams: Partial<PanelGraphDeps>): SlowLaneUnit[] {
   const [owner = "", repo = ""] = config.repository.split("/");
   const deps: PanelGraphDeps = {
     root: config.root,
@@ -71,12 +85,29 @@ function inboxUnit(config: NonNullable<SlowLaneConfig["inbox"]>, clock: Clock, l
     ...seams,
   };
   const memo: InboxRefreshMemo = {};
-  return {
+  const inbox: SlowLaneUnit = {
     name: "inbox",
     run: async () => {
       const refreshed = await refreshInboxClassification(deps, memo, clock);
       if (refreshed.changed) log("inbox.classification_written", { proposals: refreshed.proposals, pruned: refreshed.pruned, at: refreshed.generatedAt });
-      return { ...refreshed };
+      return { views: [{ view: INBOX_VIEW_NAME, version: INBOX_VIEW_VERSION, bodies: refreshed.bodies }] };
+    },
+  };
+  const feedback: SlowLaneUnit = {
+    name: "feedback",
+    run: async () => ({ views: [{ view: FEEDBACK_VIEW_NAME, version: FEEDBACK_VIEW_VERSION, bodies: materializeFeedbackView({ root: deps.root, planPath: deps.planPath }, deps.statusGithub, clock) }] }),
+  };
+  return [inbox, feedback];
+}
+
+/** The host probe's credit-state edge (P4-T14): appended once per change, with or without a reader. */
+function creditEdgeUnit(config: NonNullable<SlowLaneConfig["accountUsage"]>, log: (step: string, extra?: Record<string, unknown>) => void): SlowLaneUnit {
+  return {
+    name: "credit-edge",
+    run: async () => {
+      const line = recordCreditStateEdge(config);
+      if (line) log("account.credit_edge_recorded", { state: line.state, previous: line.previous ?? null });
+      return { views: [] };
     },
   };
 }
@@ -99,7 +130,7 @@ export function runSlowLaneWorker(
   });
   const intervalMs = data.intervalMs ?? INBOX_CLASSIFY_INTERVAL_MS;
   const log = (step: string, extra: Record<string, unknown> = {}): void => port.postMessage({ type: "log", step, extra } satisfies SlowLaneMessage);
-  const units: SlowLaneUnit[] = data.inbox ? [inboxUnit(data.inbox, clock, log, opts.inbox ?? {})] : [];
+  const units: SlowLaneUnit[] = [...(data.inbox ? coreUnits(data.inbox, clock, log, opts.inbox ?? {}) : []), ...(data.accountUsage ? [creditEdgeUnit(data.accountUsage, log)] : [])];
   let held = false;
   let running = false;
   let stopped = false;
@@ -112,7 +143,7 @@ export function runSlowLaneWorker(
         const started = clock.now();
         let ok = true;
         try {
-          await unit.run();
+          for (const built of (await unit.run()).views) port.postMessage({ type: "bodies", ...built } satisfies SlowLaneMessage);
         } catch (error) {
           ok = false;
           log("read_model.slow_unit_failed", { unit: unit.name, error: String((error as Error)?.message ?? error) });
@@ -152,7 +183,13 @@ export interface SlowLane {
 }
 
 /** The read-model worker's handle on the lane's thread: spawned on the first held lease, respawned after a death. */
-export function threadSlowLane(opts: { config: SlowLaneConfig; workerUrl?: URL; log: (step: string, extra: Record<string, unknown>) => void }): SlowLane {
+export function threadSlowLane(opts: {
+  config: SlowLaneConfig;
+  workerUrl?: URL;
+  log: (step: string, extra: Record<string, unknown>) => void;
+  /** Each view a unit built, every key of it. */
+  onBodies?: (built: SlowLaneBodies) => void;
+}): SlowLane {
   const baseMs = opts.config.intervalMs ?? INBOX_CLASSIFY_INTERVAL_MS;
   let worker: Worker | undefined;
   let held = false;
@@ -166,6 +203,7 @@ export function threadSlowLane(opts: { config: SlowLaneConfig; workerUrl?: URL; 
     spawned.unref();
     spawned.on("message", (msg: SlowLaneMessage) => {
       if (msg.type === "log") opts.log(msg.step, msg.extra);
+      else if (msg.type === "bodies") opts.onBodies?.({ view: msg.view, version: msg.version, bodies: msg.bodies });
       else if (msg.ok) deaths = 0;
     });
     spawned.on("error", (error) => opts.log("read_model.slow_lane_failed", { error: String(error?.message ?? error) }));

@@ -71,7 +71,7 @@ function lanePort(): { port: Parameters<typeof runSlowLaneWorker>[0]; send: (msg
     port: { on: (_event, run) => (onMessage = run), postMessage: (m) => void posted.push(m as SlowLaneMessage) },
     send: (msg) => onMessage?.(msg),
     posted,
-    units: () => posted.filter((m) => m.type === "unit").length,
+    units: () => posted.filter((m) => m.type === "unit" && m.unit === "inbox").length,
   };
 }
 
@@ -196,7 +196,7 @@ test("a slow lane unit that throws is reported and the lane keeps its cadence", 
   send({ type: "ping" });
   send({ type: "lease", held: true });
   await until(() => units() === 1);
-  assert.deepEqual(posted.filter((m) => m.type === "unit").map((m) => m.type === "unit" && m.ok), [false]);
+  assert.deepEqual(posted.filter((m) => m.type === "unit").map((m) => m.type === "unit" && [m.unit, m.ok]), [["inbox", false], ["feedback", true]], "one unit failing leaves the other running");
   const failed = posted.find((m) => m.type === "log" && m.step === "read_model.slow_unit_failed");
   assert.match(String(failed?.type === "log" ? failed.extra.error : undefined), /no git here/);
 });

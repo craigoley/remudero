@@ -54,10 +54,10 @@ import {
   type ReadModelDb,
   type ReadModelLease,
 } from "./read-model-db.js";
-import { threadSlowLane, type SlowLane, type SlowLaneConfig } from "./read-model-slow-lane.js";
+import { threadSlowLane, type SlowLane, type SlowLaneBodies, type SlowLaneConfig } from "./read-model-slow-lane.js";
 import { readModelCommand } from "./read-model-cli.js";
 import { createRepositoriesReadModelView } from "./repositories-view.js";
-import { createViewShadow, readShadowEvidence, sqliteShadowStore, type ShadowLegacy, type ShadowReadiness, type ShadowRequest, type ViewShadow } from "./view-shadow.js";
+import { createViewShadow, readShadowEvidence, sqliteShadowStore, storedShadowReadiness, type ShadowLegacy, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ViewShadow } from "./view-shadow.js";
 import { oldestAsOf, viewEtag, type ViewBody, type ViewBodyEntry, type ViewSource } from "./views.js";
 import { describeSource, judgeSource, type SourcePhase } from "./view-freshness.js";
 
@@ -201,6 +201,8 @@ export type ReadModelWorkerMessage =
   | { type: "body"; entry: ReadModelBodyEntry }
   | { type: "state"; at: number; instances: ReadModelInstanceState[]; switches: ReadModelSwitches }
   | { type: "log"; step: string; extra: Record<string, unknown> }
+  /** A key the slow lane's view no longer has (a page that emptied): serve forgets its body. */
+  | { type: "drop"; view: string; key: string }
   /** Each non-ledger source's latest reading, posted once per tick when one changed: a body whose data did not move is not re-posted, but its sources still age. */
   | { type: "sources"; sources: ViewSource[] }
   /** The heartbeat inside a long tick: `open` before a store's open (its quick_check), `opened` with what it took, `commit` per applied transaction. */
@@ -479,6 +481,8 @@ export interface ReadModelTicker {
   shadow(request: ShadowRequest): boolean;
   /** Releases every held lease and closes every DB; returns how many leases were released. */
   release(): number;
+  /** Takes every key of a view the slow lane built: each is served like a materialized body, and a key not among them is dropped. */
+  accept(built: SlowLaneBodies): void;
 }
 
 /** One view, or one instance's share of a per-instance view: the unit the pass budgets, times and paces. */
@@ -862,6 +866,48 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     };
   }
 
+  /** One materialized body: its source readings are noted, and it is persisted and posted only when its ETag moved. */
+  function publish(name: string, version: number, key: string, data: unknown, sources: ViewSource[], generation: number): void {
+    for (const source of sources) {
+      if (source.name.startsWith(LEDGER_SOURCE_PREFIX)) continue;
+      const reading = JSON.stringify({ ...source, lagMs: undefined });
+      if (clocks.get(source.name)?.key === reading) continue;
+      clocks.set(source.name, { key: reading, source });
+      clocksMoved = true;
+    }
+    const stale = sources.some((source) => source.state !== "fresh");
+    const etag = viewEtag(name, version, stale, data);
+    const id = `${name}\u0000${key}`;
+    if (lastEtag.get(id) === etag) return;
+    const body: ViewBody = { view: name, version, generatedAt: clock.iso(), asOf: oldestAsOf(sources), stale, sources, data };
+    const entry: ReadModelBodyEntry = { view: name, key, version, generation, etag, body };
+    if (switches.projector === "on") persist(entry);
+    lastEtag.set(id, etag);
+    latest.set(id, body);
+    opts.post({ type: "body", entry });
+  }
+
+  /** Every key this view has served: this run's and, from the home store, an earlier run's. */
+  function knownKeys(view: string): Set<string> {
+    const keys = new Set([...lastEtag.keys()].filter((id) => id.startsWith(`${view}\u0000`)).map((id) => id.slice(view.length + 1)));
+    const db = slots[0]?.db;
+    for (const row of db ? db.prepare("SELECT key FROM view_body WHERE view = ?").all(view) : []) keys.add(String(row.key));
+    return keys;
+  }
+
+  /** A key a view no longer has: forgotten here, deleted from the store, and dropped from serve's memory. */
+  function drop(view: string, key: string): void {
+    const id = `${view}\u0000${key}`;
+    lastEtag.delete(id);
+    latest.delete(id);
+    const home = slots[0];
+    if (switches.projector === "on" && home?.db && home.lease) {
+      const db = home.db;
+      withWriteTransaction(db, home.lease, () => db.prepare("DELETE FROM view_body WHERE view = ? AND key = ?").run(view, key));
+    }
+    opts.post({ type: "drop", view, key });
+  }
+
   function build(unit: ViewUnit, now: number, ctx: ReadModelViewContext, generation: number, allowanceMs: number): void {
     const { view } = unit;
     const started = clock.now();
@@ -869,25 +915,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     try {
       const scoped = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
       ready = view.prepare?.(scoped, stepsUntil(started + allowanceMs)) ?? true;
-      for (const { key, data, sources } of ready ? view.materialize(scoped) : []) {
-        for (const source of sources) {
-          if (source.name.startsWith(LEDGER_SOURCE_PREFIX)) continue;
-          const reading = JSON.stringify({ ...source, lagMs: undefined });
-          if (clocks.get(source.name)?.key === reading) continue;
-          clocks.set(source.name, { key: reading, source });
-          clocksMoved = true;
-        }
-        const stale = sources.some((source) => source.state !== "fresh");
-        const etag = viewEtag(view.name, view.version, stale, data);
-        const id = `${view.name}\u0000${key}`;
-        if (lastEtag.get(id) === etag) continue;
-        const body: ViewBody = { view: view.name, version: view.version, generatedAt: clock.iso(), asOf: oldestAsOf(sources), stale, sources, data };
-        const entry: ReadModelBodyEntry = { view: view.name, key, version: view.version, generation, etag, body };
-        if (switches.projector === "on") persist(entry);
-        lastEtag.set(id, etag);
-        latest.set(id, body);
-        opts.post({ type: "body", entry });
-      }
+      for (const { key, data, sources } of ready ? view.materialize(scoped) : []) publish(view.name, view.version, key, data, sources, generation);
     } catch (error) {
       log("read_model.materialize_failed", { view: view.name, error: (error as Error).message });
     }
@@ -905,7 +933,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
    * phase has spent nothing, so it overshoots by itself at most once and is measured from then on.
    */
   function materialize(now: number, tickStart: number, only?: ViewUnit): void {
-    const shadow = comparator?.shadow.readiness();
+    const home = slots[0]?.db;
+    const shadow = home ? storedShadowReadiness(home, now) : undefined;
     const ctx: ReadModelViewContext = { now, switches, instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}) })), ...(shadow ? { shadow } : {}) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
     if (only) return build(only, now, ctx, generation, soloMs);
@@ -994,6 +1023,18 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         return false;
       }
     },
+    accept(built: SlowLaneBodies): void {
+      const mode = switches.views[built.view];
+      if (mode !== "shadow" && mode !== "serve") return;
+      const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
+      try {
+        for (const { key, data, sources } of built.bodies) publish(built.view, built.version, key, data, sources, generation);
+        const keep = new Set(built.bodies.map((body) => body.key));
+        for (const key of knownKeys(built.view)) if (!keep.has(key)) drop(built.view, key);
+      } catch (error) {
+        log("read_model.materialize_failed", { view: built.view, error: (error as Error).message });
+      }
+    },
     release(): number {
       oracle.close();
       checking = undefined;
@@ -1041,7 +1082,7 @@ export function runReadModelWorker(
     if (m.type === "state") slowLane?.lease(m.instances[0]?.lease === "held");
     port.postMessage(m);
   };
-  if (data.slowLane) slowLane = threadSlowLane({ config: data.slowLane, log: (step, extra) => post({ type: "log", step, extra }) });
+  if (data.slowLane) slowLane = threadSlowLane({ config: data.slowLane, log: (step, extra) => post({ type: "log", step, extra }), onBodies: (built) => ticker.accept(built) });
   const now = createNowView({ instances: data.instances, ledgerSource, clock, log: (step, extra) => post({ type: "log", step, extra }) });
   const oracleRunner = threadOracle({ ...(data.escalationRepository ? { escalationRepository: data.escalationRepository } : {}), log: (step, extra) => post({ type: "log", step, extra }) });
   const instances = createInstancesView({ instances: data.instances, ...data.registry, ledgerSource });
@@ -1131,6 +1172,8 @@ export interface ReadModelWorkerHandle {
   stop(): boolean;
   /** Hands one sampled shadow request to the worker, which diffs it off serve's main thread. */
   shadow(request: ShadowRequest): void;
+  /** While started, offers `sample` every key of each view switched `shadow` on each switch recheck; its throttle keeps one per sample period. */
+  driveShadow(sample: ShadowSample): void;
   /** Calls `listener` with each body the worker posts, after it is stored; returns the unsubscribe. */
   onBody(listener: (entry: ReadModelBodyEntry) => void): () => void;
 }
@@ -1185,6 +1228,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   };
   refreshSwitches();
   let stopSwitchWatch: () => void = () => {};
+  let driven: ShadowSample | undefined;
 
   let worker: Worker | undefined;
   let signal: Int32Array | undefined;
@@ -1235,6 +1279,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       bodies.set(readModelBodyKey(msg.entry.view, msg.entry.key), msg.entry);
       for (const listener of bodyListeners) listener(msg.entry);
     } else if (msg.type === "log") opts.log?.(msg.step, msg.extra);
+    else if (msg.type === "drop") bodies.delete(readModelBodyKey(msg.view, msg.key));
     else if (msg.type === "sources") {
       for (const source of msg.sources) sourceClocks.set(source.name, source);
     } else if (msg.type === "progress") {
@@ -1285,6 +1330,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     }),
     switches: () => mainSwitches,
     shadow: (request) => worker?.postMessage({ type: "shadow", ...request }),
+    driveShadow: (sample) => void (driven = sample),
     onBody: (listener) => {
       bodyListeners.add(listener);
       return () => bodyListeners.delete(listener);
@@ -1295,6 +1341,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       stopSwitchWatch = (opts.every ?? everyUnref)(() => {
         refreshSwitches();
         watchWorker();
+        for (const entry of bodies.values()) if (mainSwitches.views[entry.view] === "shadow") driven?.(entry.view, entry.key, new URLSearchParams(entry.key), true);
       }, READ_MODEL_SWITCH_RECHECK_MS);
     },
     stop: () => {
