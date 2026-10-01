@@ -12,7 +12,7 @@
   note: "reservation hand-off: plan-local-gate-disk-1790799000002 -> plan-opportunity-intake-1790799000000"
   plan_refs: [W1-T294, W1-T4436]
   files: [src/lib/ci-parity.ts, scripts/coverage-merge-ratchet.mjs, test/the-coverage-entry-shards-the-way-ci-does.test.ts, test/merge-lcov.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The local CI-parity leaf keeps four raw V8 shard trees until the final LCOV merge. On this

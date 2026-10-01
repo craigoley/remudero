@@ -13,7 +13,7 @@
   files:
     - src/lib/operator-agent.ts
     - test/operator-agent-follow-up-decision-route.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-10-01 on origin/main: the console's recordFollowUpAction (remudero-console lib/rmd-control.ts)

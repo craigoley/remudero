@@ -10,7 +10,7 @@
   risk: high
   origin: "operator-approved Orca comparison, 2026-09-30"
   files: [src/lib/containment.ts, deploy/recycle-container.sh, test/worker-smoke.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at c94c2bf49: CI fakes the worker query seam and image verification checks binary versions,

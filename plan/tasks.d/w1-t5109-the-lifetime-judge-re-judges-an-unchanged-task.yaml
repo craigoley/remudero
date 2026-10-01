@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-lifetime-judge-churn-1790850943000 -> plan-lifetime-judge-churn-1790850943000"
   plan_refs: [W1-T4025, W1-T3921, W1-T4597]
   files: [src/run-task.ts, src/lib/status.ts, test/the-lifetime-judge-asks-once-per-changed-evidence.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-28..10-01 (core ledger union): 163 verify_human.judged rows carry an adaptive-lifetime

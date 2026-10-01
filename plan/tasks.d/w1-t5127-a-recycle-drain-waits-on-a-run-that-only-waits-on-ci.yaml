@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-recycle-drain-yield-1790857309000 -> plan-recycle-drain-yield-1790857309000"
   plan_refs: [W1-T3793, W1-T5037, W1-T4945, W1-T2681]
   files: [src/run-task.ts, test/a-recycle-drain-takes-a-ci-wait-at-its-next-poll.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-01 (core host and ledger union): the image-drift recycle logged deploy.not_idle every 5 min from

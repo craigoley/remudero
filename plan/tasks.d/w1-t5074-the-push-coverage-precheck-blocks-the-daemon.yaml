@@ -12,7 +12,7 @@
   note: "reservation hand-off: plan-precheck-async-1790830431000 -> plan-precheck-async-1790830431000"
   plan_refs: [W1-T4797, W1-T463, W1-T4041]
   files: [src/run-task.ts, test/the-push-coverage-precheck-never-blocks-the-daemon-loop.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-01 (core host): W1-T4772's fallback push ran coveragePrecheck (W1-T4797, #8194). Its

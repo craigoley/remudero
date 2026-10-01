@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-backlog-gardener-1790785261000 -> plan-backlog-gardener-1790785261000"
   plan_refs: [W1-T4111, W1-T4861, W1-T4095, W1-T5112, W1-T5114, W1-T3412]
   files: [src/lib/backlog-gardener.ts, src/lib/daemon.ts, src/lib/garden-registry.ts, src/lib/plan-gardener.ts, src/run-task.ts, test/a-backlog-gardener-prioritizes-or-retires-unprioritized-tasks.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30: 266 queued tasks, 176 with no `priority:` (absent priority sorts LAST in the drain, so

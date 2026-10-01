@@ -16,7 +16,7 @@
     - src/lib/task-id-reservation.ts
     - src/lib/auto-triage.ts
     - src/lib/dispatch-claim.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-24: a worker worktree's test run wrote the shared pause hold to the live origin and held
