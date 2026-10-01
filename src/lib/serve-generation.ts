@@ -150,6 +150,6 @@ export async function listenReadiness(server: Server, socketPath: string, probes
     privateServer.once("error", reject);
     privateServer.listen(socketPath, resolve);
   });
-  server.once("close", () => privateServer.close());
+  server.setMaxListeners(server.getMaxListeners() + 1).once("close", () => privateServer.close());
   return privateServer;
 }
