@@ -15,12 +15,18 @@ import {
   READ_MODEL_SELF_HEALED_STEP,
   ReadModelConsistencyError,
   consistencyCheckDue,
-  ORACLE_SLICE_MS,
+  ORACLE_DEFAULT_WINDOW_MS,
+  ORACLE_SEED_ROWS_PER_MS,
   advanceOracleSlice,
   factColumns,
   nextOracleSlice,
+  readIngestMark,
+  recordIngestMark,
   runConsistencyCheck,
+  settledIngestMark,
+  ORACLE_INGEST_SETTLE_MS,
   type ConsistencyCheckOptions,
+  type OracleWindow,
 } from "../src/lib/read-model-consistency.js";
 import { acquireLease, type ReadModelDb, type ReadModelLease } from "../src/lib/read-model-db.js";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -208,12 +214,12 @@ test("a failed escalation of a lost row is retried on the next run", (t) => {
 test("a mismatch that is gone on the recheck is transient and changes nothing", (t) => {
   const f = projected(t);
   let reads = 0;
-  const lateRow = row(T0 + 20_000, "run.start", { task_id: "W1-T99" });
+  // The first read of the live file misses its last row (a reader racing a rewrite); the recheck sees it.
   const fs: LedgerGrepFsDeps = {
     ...realLedgerFs,
     readFileSync: (path) => {
       const buf = realLedgerFs.readFileSync(path);
-      return path.endsWith(LIVE) && reads++ === 0 ? Buffer.concat([buf, Buffer.from(`${lateRow}\n`)]) : buf;
+      return path.endsWith(LIVE) && reads++ === 0 ? buf.subarray(0, buf.lastIndexOf(0x0a, buf.length - 2) + 1) : buf;
     },
   };
   const before = readModelDigest(f.db);
@@ -333,17 +339,148 @@ test("the oracle schedule is due first then hourly after agreement and sooner af
 test("the rolling slice cursor starts a new cycle when it is finished or unreadable", (t) => {
   const f = projected(t);
   const setCursor = (v: string) => f.db.prepare("INSERT INTO meta(k, v) VALUES('oracle_slice', ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v").run(v);
-  const first = nextOracleSlice(f.db, CHECK_AT, 2 * ORACLE_SLICE_MS);
+  const end = CHECK_AT - ORACLE_CLOSED_LAG_MS;
+  // Six rows per slice at the seed rate: the fixture's 12 rows take two slices.
+  const budget = 6 / ORACLE_SEED_ROWS_PER_MS;
+  const first = nextOracleSlice(f.db, CHECK_AT, ORACLE_DEFAULT_WINDOW_MS, budget);
   assert.equal(first.startsCycle, true);
-  assert.deepEqual(first.window, { t0: CHECK_AT - ORACLE_CLOSED_LAG_MS - ORACLE_SLICE_MS, t1: CHECK_AT - ORACLE_CLOSED_LAG_MS });
-  advanceOracleSlice(f.db, f.lease, first.cursor);
-  const second = nextOracleSlice(f.db, CHECK_AT + 60_000, 2 * ORACLE_SLICE_MS);
+  assert.deepEqual(first.window, { t0: T0 + 6_000, t1: end }, "the newest six rows, up to the closed-window edge");
+  advanceOracleSlice(f.db, f.lease, first);
+  const second = nextOracleSlice(f.db, CHECK_AT + 60_000, ORACLE_DEFAULT_WINDOW_MS, budget);
   assert.equal(second.startsCycle, false, "the cycle resumes from the stored cursor, whatever the clock says");
-  assert.deepEqual(second.window, { t0: first.window.t0 - ORACLE_SLICE_MS, t1: first.window.t0 });
-  advanceOracleSlice(f.db, f.lease, second.cursor);
-  assert.equal(nextOracleSlice(f.db, CHECK_AT, 2 * ORACLE_SLICE_MS).startsCycle, true, "a finished cycle starts another");
+  // Six more of the store's rows: the torn line at T0+0.5 s is an identity too.
+  assert.deepEqual(second.window, { t0: T0 + 500, t1: T0 + 5_999 }, "the next six rows, just below the first slice");
+  advanceOracleSlice(f.db, f.lease, second);
+  const third = nextOracleSlice(f.db, CHECK_AT, ORACLE_DEFAULT_WINDOW_MS, budget);
+  assert.deepEqual(third.window, { t0: end - ORACLE_DEFAULT_WINDOW_MS, t1: T0 + 499 }, "fewer rows than the budget left: the last slice runs to the floor");
+  advanceOracleSlice(f.db, f.lease, third);
+  assert.equal(nextOracleSlice(f.db, CHECK_AT, ORACLE_DEFAULT_WINDOW_MS, budget).startsCycle, true, "a finished cycle starts another");
   setCursor("{not json");
   assert.equal(nextOracleSlice(f.db, CHECK_AT).startsCycle, true, "an unreadable cursor starts a cycle rather than stalling");
+});
+
+test("oracle slices are sized by row count so a busy day splits and quiet days merge and one cycle covers every row once", (t) => {
+  const db = openProjectorReadModel(scratch(t, "oracle-slices"), "core", fixedClock(CHECK_AT));
+  t.after(() => db.close());
+  const got = acquireLease(db, { clock: fixedClock(CHECK_AT) });
+  assert.ok(got.ok);
+  const DAY = 86_400_000;
+  const end = CHECK_AT - ORACLE_CLOSED_LAG_MS;
+  // Day 2 back is busy (120 rows); every other day of the week holds 3.
+  const seen = db.prepare("INSERT INTO seen(ts_ms, h) VALUES(?, ?)");
+  let h = 0n;
+  for (let day = 0; day < 7; day++) {
+    const n = day === 2 ? 120 : 3;
+    for (let i = 0; i < n; i++) seen.run(end - day * DAY - 1 - Math.floor((i * (DAY - 2)) / n), h++);
+  }
+  const total = Number(db.prepare("SELECT count(*) AS n FROM seen WHERE ts_ms BETWEEN ? AND ?").get(end - ORACLE_DEFAULT_WINDOW_MS, end)?.n);
+  assert.equal(total, 6 * 3 + 120);
+  const budget = 20 / ORACLE_SEED_ROWS_PER_MS;
+  const windows: OracleWindow[] = [];
+  const count = (w: OracleWindow) => Number(db.prepare("SELECT count(*) AS n FROM seen WHERE ts_ms BETWEEN ? AND ?").get(w.t0, w.t1)?.n);
+  for (let i = 0; i < 100; i++) {
+    const slice = nextOracleSlice(db, CHECK_AT + i * 60_000, ORACLE_DEFAULT_WINDOW_MS, budget);
+    if (i > 0 && slice.startsCycle) break;
+    assert.equal(slice.targetRows, 20);
+    windows.push(slice.window);
+    advanceOracleSlice(db, got.lease, slice);
+  }
+  assert.equal(windows[0]!.t1, end, "the cycle starts at the closed-window edge");
+  assert.equal(windows.at(-1)!.t0, end - ORACLE_DEFAULT_WINDOW_MS, "and ends at the window's floor");
+  for (let i = 1; i < windows.length; i++) assert.equal(windows[i]!.t1, windows[i - 1]!.t0 - 1, `slice ${i} starts where slice ${i - 1} ended: no gap and no overlap`);
+  assert.equal(windows.reduce((sum, w) => sum + count(w), 0), total, "every row is checked exactly once in the cycle");
+  assert.ok(windows.every((w) => count(w) <= 20), "no slice holds more rows than its budget");
+  const busy = windows.filter((w) => w.t1 > end - 3 * DAY && w.t0 < end - 2 * DAY);
+  assert.ok(busy.length >= 6, `the busy day split across ${busy.length} slices`);
+  assert.ok(windows.some((w) => w.t1 - w.t0 > 2 * DAY), "quiet days merged into one slice");
+  assert.ok(windows.length < 7 + 6, "fewer slices than a fixed day each plus the busy day's split");
+});
+
+test("the next oracle slice is sized from the rate the last one measured", (t) => {
+  const f = projected(t);
+  const first = nextOracleSlice(f.db, CHECK_AT, ORACLE_DEFAULT_WINDOW_MS, 0.1);
+  assert.equal(first.targetRows, ORACLE_SEED_ROWS_PER_MS * 0.1, "the seed rate before any slice is measured");
+  advanceOracleSlice(f.db, f.lease, first, { rows: 300, ms: 1 });
+  const second = nextOracleSlice(f.db, CHECK_AT, ORACLE_DEFAULT_WINDOW_MS, 0.1);
+  assert.equal(second.targetRows, Math.floor(((ORACLE_SEED_ROWS_PER_MS + 300) / 2) * 0.1), "halfway to the measured 300 rows per ms");
+  advanceOracleSlice(f.db, f.lease, second, { rows: 0, ms: 0 });
+  assert.equal(nextOracleSlice(f.db, CHECK_AT, ORACLE_DEFAULT_WINDOW_MS, 0.1).targetRows, second.targetRows, "a slice that measured nothing keeps the rate");
+});
+
+test("a slice reads only the archives whose recorded span meets its window", (t) => {
+  const f = projected(t);
+  const reads: string[] = [];
+  const counting: LedgerGrepFsDeps = { ...realLedgerFs, readFileSync: (path) => (reads.push(path.split("/").pop()!), realLedgerFs.readFileSync(path)) };
+  const first = check(f, { fs: counting });
+  assert.equal(first.files.skipped, 0, "no span is known before the first read");
+  const gz = reads.find((name) => name.endsWith(".gz"))!;
+  assert.ok(gz, "the control: the first check read the gzip archive");
+  reads.length = 0;
+  // The gzip archive, rotated at T0+4.5 s, holds T0..T0+4 s: its stamp alone cannot rule out a window
+  // from T0+4.2 s, its span can, so it is never opened again.
+  const later = check(f, { fs: counting, window: { t0: T0 + 4_200, t1: T0 + 11_000 } });
+  assert.equal(later.outcome, "agree");
+  assert.equal(later.files.skipped, 1);
+  assert.ok(!reads.includes(gz), `read ${reads.join(", ")}`);
+  // A span is only as good as the file it measured: an archive whose size changed is read again.
+  writeFileSync(join(f.rowsDir, gz), gzipSync(text([...f.lines.slice(0, 5), f.lines[10]!])));
+  reads.length = 0;
+  check(f, { fs: counting, window: { t0: T0 + 4_200, t1: T0 + 11_000 } });
+  assert.ok(reads.includes(gz), "the rewritten archive was read again");
+});
+
+test("unreadable ingest marks read as none and the next record starts afresh", (t) => {
+  const f = projected(t);
+  f.db.prepare("INSERT INTO meta(k, v) VALUES('oracle_ingest_marks', '{not json') ON CONFLICT(k) DO UPDATE SET v = excluded.v").run();
+  assert.equal(settledIngestMark(f.db, CHECK_AT), undefined);
+  assert.equal(recordIngestMark(f.db, f.lease, CHECK_AT), CHECK_AT, "a fresh mark is taken now");
+  assert.equal(settledIngestMark(f.db, CHECK_AT + ORACLE_INGEST_SETTLE_MS)?.atMs, CHECK_AT, "and settles a settle period later");
+  assert.equal(recordIngestMark(f.db, f.lease, CHECK_AT + 1), CHECK_AT, "no second mark inside half a settle period");
+});
+
+test("a late-arriving row never causes a false drift escalation", (t) => {
+  const f = projected(t);
+  // What the projector had applied when the mark was taken; the rows below arrive after it.
+  const mark = readIngestMark(f.db, T0 + 60_000);
+  const late = [row(T0 + 5_500, "run.start", { task_id: "LATE-1" }), row(T0 + 2_500, "run.start", { task_id: "LATE-2" }), row(T0 + 7_500, "run.start", { task_id: "LATE-3" })];
+  writeFileSync(join(f.rowsDir, LIVE), `${readFileSync(join(f.rowsDir, LIVE), "utf8")}${late[0]}\n`);
+  // A late-cut rotation: an archive of old rows that appears after the projector's last tick.
+  writeFileSync(join(f.rowsDir, archiveName(T0 + 9_900)), text([late[1]!]));
+  // It also repeats an applied row, which is still compared: its copy below the mark settles it.
+  writeFileSync(join(f.rowsDir, `${archiveName(T0 + 9_950)}.gz`), gzipSync(text([late[2]!, f.lines[4]!])));
+  const issues = fakeIssues();
+  const escalation = { issues, ledgerPath: join(scratch(t, "oracle-late-esc"), LIVE), runId: "rm" };
+  const before = readModelDigest(f.db);
+  let compared = 0;
+  for (let hour = 0; hour < 3; hour++) {
+    const run = check(f, { ingestMark: mark, escalation }, fixedClock(CHECK_AT + hour * 3_600_000));
+    assert.equal(run.outcome, "agree", `check ${hour + 1} agrees: late rows are unsettled, not drift`);
+    assert.equal(run.unsettled, 3);
+    assert.equal(run.healedRows, 0);
+    compared = run.ledgerRows;
+  }
+  assert.deepEqual(issues.titles, [], "nothing escalated");
+  assert.equal(readModelDigest(f.db), before, "nothing was healed into the store");
+  assert.ok(metrics(f).every((m) => m.step === READ_MODEL_CONSISTENCY_STEP && m.outcome === "agree" && m.unsettled === 3));
+
+  // Once the projector has applied them and a later mark covers them, they are compared, and agree.
+  createLedgerProjector({ ledgerDir: f.rowsDir, db: f.db, lease: f.lease, clock: fixedClock(T0 + 120_000) }).tick();
+  const covered = check(f, { ingestMark: readIngestMark(f.db, T0 + 120_000) });
+  assert.equal(covered.outcome, "agree");
+  assert.equal(covered.unsettled, 0);
+  assert.equal(covered.ledgerRows, compared, "the same rows, every one of them now compared");
+});
+
+test("a drift below the ingest mark is healed while a late row above it waits", (t) => {
+  const f = projected(t);
+  const mark = readIngestMark(f.db, T0 + 60_000);
+  writeFileSync(join(f.rowsDir, LIVE), `${readFileSync(join(f.rowsDir, LIVE), "utf8")}${row(T0 + 5_500, "run.start", { task_id: "LATE-1" })}\n`);
+  f.db.exec("DELETE FROM fact WHERE seq = (SELECT min(seq) FROM fact)");
+  const run = check(f, { ingestMark: mark });
+  assert.equal(run.outcome, "healed");
+  assert.deepEqual([run.mismatches.missing, run.mismatches.factMissing, run.unsettled], [0, 1, 1]);
+  const [metric] = metrics(f);
+  assert.equal(metric?.ingest_mark_age_ms, CHECK_AT - (T0 + 60_000), "the metric row names how old its mark was");
 });
 
 test("a slice window retains only its own rows from the union read", (t) => {

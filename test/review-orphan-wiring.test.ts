@@ -165,14 +165,9 @@ test("W1-T1015: inverting the attribution fails the foreign-push control", async
   const mutatedSha = createHash("sha256").update(mutatedSrc).digest("hex");
   assert.notEqual(mutatedSha, originalSha, "the mutation must change the source");
 
-  // `writeMutantModule` normally copies a `src/lib` module and rewrites same-directory imports.
-  // `run-task.ts` sits at `src/` and imports both `./lib/*` and `./cli/*` modules, so resolve all
-  // of its relative imports to the real source tree before using the same in-repo mutant location.
-  const mutantSourceForLoader = mutatedSrc.replace(
-    /from "\.\/([^\"]+)\.js"/g,
-    (_m, name: string) => `from "${join(process.cwd(), "src", name)}.js"`,
-  ).replace(/from "\.\.\/([^\"]+\.mjs)"/g, (_m, name: string) => `from "${join(process.cwd(), name)}"`);
-  const mutantPath = writeMutantModule("run-task.ts", mutantSourceForLoader);
+  // `run-task.ts` sits at `src/`, so its relative imports (`./lib/*`, `./cli/*`, `../scripts/*`,
+  // dynamic `import()`) resolve against that origin directory through the shared helper.
+  const mutantPath = writeMutantModule("run-task.ts", mutatedSrc, /* originDir */ join(process.cwd(), "src"));
   const mutant = (await import(mutantPath)) as typeof import("../src/run-task.js");
   const ledger = [
     ledgerLine("review.posted", "W1-A", PRIOR_A),

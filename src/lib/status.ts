@@ -2294,7 +2294,7 @@ function branchClaimsOtherTask(head: string | undefined, taskId: string): boolea
  * asserted MERGED **here**, from the PrRef, not trusted from a method name a fixture may implement with any
  * state. Why: the old assert refused seven merged, correctly-trailered PRs — docs/forensics/status.md
  */
-function creditsByAnchoredTrailer(
+export function creditsByAnchoredTrailer(
   state: string,
   head: string | undefined,
   body: string | undefined,

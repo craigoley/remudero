@@ -424,8 +424,32 @@ export type ServiceFreshness =
       status: "assessed";
       dirty: boolean;
       // What the advance touched; `undefined` means unreadable, which reads as material (W1-T2964).
-      behind: { oldSha: string; newSha: string; changedPaths?: string[]; diffUnreadable?: string } | null;
+      behind: {
+        oldSha: string;
+        newSha: string;
+        changedPaths?: string[];
+        diffUnreadable?: string;
+        changes?: AdvanceCommit[];
+        logUnreadable?: string;
+      } | null;
     };
+
+export interface AdvanceCommit {
+  sha: string;
+  subject?: string;
+  files: string[];
+}
+
+export function parseAdvanceCommits(text: string): AdvanceCommit[] {
+  return text
+    .split("\x1e")
+    .map((chunk) => chunk.split("\n").map((line) => line.trim()))
+    .filter((lines) => lines[0]!.length > 0)
+    .map(([header, ...files]) => {
+      const [sha, subject] = header!.split("\x1f");
+      return { sha: sha!, ...(subject ? { subject } : {}), files: files.filter((file) => file.length > 0) };
+    });
+}
 
 /**
  * The paths whose content can change what a RUNNING daemon does: what it loads into its resident
@@ -504,10 +528,24 @@ export function checkServiceFreshness(
     changedPaths = undefined;
     diffUnreadable = unreadable;
   }
+  let changes: AdvanceCommit[] | undefined;
+  let logUnreadable: string | undefined;
+  try {
+    changes = parseAdvanceCommits(git(["log", "--format=%x1e%H%x1f%s", "--name-only", `${headSha}..${originSha}`]));
+  } catch (err) {
+    const unreadable = err instanceof Error ? err.message : String(err);
+    logUnreadable = unreadable;
+  }
   return {
     status: "assessed",
     dirty,
-    behind: { oldSha: headSha, newSha: originSha, changedPaths, diffUnreadable },
+    behind: {
+      oldSha: headSha,
+      newSha: originSha,
+      changedPaths,
+      diffUnreadable,
+      ...(changes ? { changes } : { logUnreadable }),
+    },
   };
 }
 
@@ -544,7 +582,8 @@ export function daemonFreshnessFromService(svc: ServiceFreshness): DaemonFreshne
       notStale: { arm: "immaterial", oldSha: svc.behind.oldSha, newSha: svc.behind.newSha },
     };
   }
-  return { stale: true, oldSha: svc.behind.oldSha, newSha: svc.behind.newSha };
+  const { oldSha, newSha, changes } = svc.behind;
+  return { stale: true, oldSha, newSha, ...(changes ? { changes } : {}) };
 }
 
 export type ReviewerCodeFreshness =

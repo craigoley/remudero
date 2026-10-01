@@ -1,0 +1,155 @@
+- id: W1-T5033
+  title: "THE WEEKLY CLOCK SWEEP NAMED #8138'S FIXTURE NINE DAYS EARLY AND NOTHING ACTED ON IT, BECAUSE ITS DELIVERY IS ONE SHARED THREAD PER SOURCE (A NEW DRIFTING SUITE IS A COMMENT ON AN OLD ISSUE, OR A NEW 13-SUITE AGGREGATE AFTER A HUMAN RELABELS IT), THE DELIVERY STEP IS `if: failure()` SO A RUN CANCELLED BY `timeout-minutes` (09-28, AND THE 09-30 PR RUN) DELIVERS NOTHING, AND A SUITE THAT FAILS WITH NO CLOCK SHIFT IS REPORTED AS DRIFT 'BY +7 DAYS' — deliver each NEW drifting suite as its own needs-human issue, deliver a cancelled run, and label a +0-day failure as NOT CLOCK DRIFT"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: a named-constant date fixture (#8138) slipped past scripts/expiring-fixture-census.mjs and took every PR's coverage shard red at +14 days; the weekly sweep had already reported it on 2026-09-21 and nothing acted on the report"
+  plan_refs: [W1-T3030, W1-T3276, W1-T1128, W1-T1104, W1-T3018, W1-T4563]
+  files:
+    - .github/workflows/clock-sweep.yml
+    - scripts/clock-sweep-deliver.mjs
+    - scripts/needs-human-issue.mjs
+    - scripts/clock-sweep.mjs
+    - test/a-clock-sweep-delivers-every-new-drift-and-never-goes-silent.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 at origin/main a23658e66, from the workflow runs, the issue threads and the files. SIBLING, NOT OVERLAP: W1-T5027
+    makes the sweep FINISH inside its budget and name the suites it did not reach. This task is what happens to a report once it
+    exists, or fails to exist. It does not touch the budget, the ordering, the +400 shift, the ladder's upper rungs, `AGE_SURFACE_RE`,
+    the ceiling or scripts/clock-sweep-baseline.json.
+
+    (1) ONE THREAD PER SOURCE, AND A NEW SUITE IS NOT A NEW ESCALATION. `scripts/needs-human-issue.mjs` keys delivery on
+    `markerFor(source)` (`<!-- needs-human:clock-sweep -->`), and `deliver()` lists open issues WITH THE `needs-human` LABEL and COMMENTS
+    on the first whose body carries the marker. Issue #5513 (opened 2026-09-14 11:02Z by the bot, label `needs-human`) took the
+    2026-09-21 report (run 35590593553) as a COMMENT: `NEW DRIFT - 7 suite(s)`, test/a-verdict-is-reused-when-nothing-it-judged-changed.test.ts
+    first. Nobody was paged about a new suite because nothing new opened. THE MECHANISM HAS A SECOND ARM THE SUBJECT DID NOT SEE: on
+    2026-09-22 a human relabelled #5513 `needs-human` -> `needs-action`, and on 09-24 -> `backlog` (4 comments, still open), which
+    takes it OUT of the label-filtered lookup, so the 09-24 workflow_dispatch run (36045188675: 410 candidates, 13 NEW, 17 drifting,
+    over the ceiling of 11) opened a SECOND issue, #7059, a 13-suite aggregate, also `backlog` now. Two open issues carry the same
+    marker. Either way a suite's identity is nowhere: it is a line in a 30 KB log.
+    The fix keys one issue per NEW drifting suite (`--source clock-sweep:<suite>` gives the marker `<!-- needs-human:clock-sweep:<suite> -->`,
+    which does NOT contain the aggregate marker, because `includes` needs the closing ` -->`), and looks the suite's issue up
+    WITHOUT the label filter so that a triaged thread is commented on, never duplicated weekly per suite (13 suites would otherwise
+    be 13 new issues a week after the first relabel).
+
+    (2) A CANCELLED RUN DELIVERS NOTHING. The step 'Open or update a needs-human issue on drift' is `if: failure() && github.event_name
+    != 'pull_request'`. The 2026-09-28 schedule run (36382473646) was killed by `timeout-minutes: 30` (sweep step 05:34:37 to 06:04:25):
+    job conclusion `cancelled`, the delivery step and the resolver both `skipped`, no issue, no comment. MEASURED on the same run
+    that an `always()` step DOES run after a timeout cancel (the artifact upload ran at 06:04:25 and stored a 9,766-byte partial
+    report), so the delivery can too. The 09-30 pull_request run (36755951612) was cancelled at 30 min the same way; that event is
+    excluded from delivery and stays so. A cancelled sweep is the repo's 'a silence reads as success' defect: it reads the same whether
+    the suites are clean or on fire.
+
+    (3) A +0-DAY FAILURE READS AS CLOCK DRIFT, BUT THE NAMED SUITES ARE GONE. VERIFIED: `FUSE_LADDER_DAYS = [7, 14, 30, 90, 180, 400]`
+    starts at +7, so a suite that fails with NO shift is printed `fails by : +7 days from now` under the header 'pass today and
+    FAIL in the future'. The 09-14 report for #5513 has three `browserType.launch: Executable doesn't exist` failures (serve.density-ia,
+    serve.live-state, console-shell-client) and the job never runs `npx playwright install`; console-shell-client was in the 09-21
+    NEW DRIFT list. CORRECTION: all THREE SUITES NO LONGER EXIST. #7313 (W1-T4563, 2026-09-26) retired the in-process console and deleted
+    test/console-shell-client.test.ts, test/serve.density-ia.test.ts and test/serve.live-state.test.ts; `deriveCandidates()` at
+    a23658e66 returns 468 suites and NONE of them launches a browser (no candidate imports playwright or calls `.launch(`). So the
+    browser defect is LATENT, not live, and this task does NOT add a Chromium install (W1-T3018's rule stands: under CI a missing
+    browser is a failure to be reported as itself, never skipped, and an install step would be ~1 min a run for zero suites today).
+    It fixes the CLASS: the mis-labelling. Replayed locally (container, CI=true) at +0 and +400: provider-routing-console and
+    the-plan-queue-tends-itself fail at +0 (and +400) and w1-t143-diff-coverage fails at +0 (8 of 15) and +400 (11 of 15);
+    all three are in the 09-24 NEW DRIFT list. These are container measurements, not CI ones (CI may differ), but they show the class
+    is not only browsers, and the first sweep after this lands settles which are +0 failures in CI.
+    a-verdict-is-reused-when-nothing-it-judged-changed passes at +400 here (fixed by #8138), the positive control that the replay sees a cured suite.
+
+    (4) CENSUSES THAT CONSTRAIN THIS (read, not assumed). scripts/clock-sweep.mjs is at 153 of 153 comment lines in
+    scripts/comment-load-baseline.json: ANY added comment line in that file is refused, and the ceiling must not be raised, so its
+    edit here is COMMENT-NEUTRAL (two code lines) and W1-T5027's SWEEP_BUDGET_MS doc comment collides with the same ceiling (see
+    note). test/ci-cache-concurrency-and-job-timeouts.test.ts requires every job in a PR-firing workflow to keep a positive
+    `timeout-minutes` and every setup-node `cache: npm`. test/a-recovered-scheduled-job-leaves-its-escalation-open-forever.test.ts
+    requires clock-sweep.yml to keep `needs-human-issue.mjs`, `--resolved --source <s>` and an `if: success()` resolver.
+    test/workflow-harness-import-parity.test.ts scans every `node --test` step for the tmp-hygiene import. test/workflow-playwright-install.test.ts
+    and test/workflow-job-timeouts.test.ts read ci.yml only. `ci-control-plane-precheck` (scripts/ci-control-plane-precheck.mjs)
+    fires on any `.github/workflows/` edit and refuses only a pull_request check absent from ci-gate.yml's lists: this task adds
+    STEPS, never a job, so the registry is unchanged. scripts/unwired-gate-check.mjs is satisfied because the workflow invokes
+    the new script. test/needs-human-issue.test.ts and test/a-recovered-scheduled-job-leaves-its-escalation-open-forever.test.ts pin
+    `deliver()`'s default argv, so its default listing must stay label-filtered and limit 100.
+  design: |
+    (i) `.github/workflows/clock-sweep.yml`: the existing aggregate step becomes `if: (failure() || cancelled()) && github.event_name
+    != 'pull_request'` and gains a `--preamble` built from `steps.sweep.outcome` (passed through env, never interpolated into the
+    script) saying the sweep step ended `failure` / `cancelled` and, for cancelled, that the report is PARTIAL (progress lines only:
+    the drift section prints at the end). Its `test -s sweep-report.txt ||` fallback is kept. A human-cancelled workflow_dispatch also
+    delivers; the preamble names the outcome so that reads as what it is. A new step directly after it, `if: failure() && github.event_name
+    != 'pull_request'`, runs `node scripts/clock-sweep-deliver.mjs --report sweep-report.txt` with the same GH_TOKEN, RUN_URL and
+    RUN_WHEN env. The `if: success()` resolver, the `if: always()` upload, `timeout-minutes: 30`, the two self-check steps and the PR
+    paths filter are untouched. No new job, no concurrency block, no Chromium install (rationale 3).
+    (ii) `scripts/clock-sweep-deliver.mjs` (new). Pure `parseNewDrift(reportText)`: find the `NEW DRIFT - N suite(s)` header, read
+    the consecutive `  test/<name>.test.ts` lines after it (name restricted to `[A-Za-z0-9._-]+`, so a name can never break the HTML-comment
+    marker), and for each find its detail block (the `  test/<name>.test.ts` line FOLLOWED BY a `    fails by` line, then every line
+    indented four spaces) and its `+N days` fuse. PROVEN against the real 09-24 report (#7059's body): 13 of 13 suites parsed, fuse and block
+    found for each. A missing block gives `fuse: null` and no detail, never a dropped suite. Pure `issueFor(entry, {runUrl, when})`
+    returns `{source: 'clock-sweep:<suite>', title, body}` built with needs-human-issue.mjs's own `buildBody` and `markerFor` (no second envelope):
+    title `clock-sweep: <suite> drifts on the wall clock (fails by +N days)`; for `+0`, `clock-sweep: <suite> fails with NO clock shift
+    (a runner or environment defect, NOT clock drift)`; a preamble naming the repo's two repairs (derive the fixture at run time, or record
+    it in driftingSuitesAtCapture with a reason) and saying the issue is CLOSED BY THE FIXING PR. `deliverNewDrift({reportText, deliverFn, env,
+    log})` calls `deliver({..., anyLabel: true})` per suite and returns an exit code: 0 when nothing is new or every delivery succeeded, 1 when any
+    throws, continuing past a failure so one bad delivery cannot hide the rest (loud: the failing suite is named). `main` reads
+    `--report <path>`; an unreadable report is exit 1, never a silent 0. ONE CLI line guard, as clock-sweep.mjs uses.
+    (iii) `scripts/needs-human-issue.mjs`: `deliver()` gains an optional `anyLabel = false`. False (every existing caller) is byte-identical
+    argv: `--label <label>`, `--limit 100`. True drops the label filter and raises the limit to 1000, so a thread a human relabelled to
+    `backlog` is still found by its marker; creation still applies `--label needs-human`. `resolve()` and `decideDelivery` are untouched, and the
+    aggregate CLI step keeps its label-filtered lookup (whether a triaged aggregate should keep receiving comments is a separate product
+    ruling; #7059 duplicating #5513 is recorded in the note, not decided here).
+    (iv) `scripts/clock-sweep.mjs`, COMMENT-NEUTRAL, two code lines: `FUSE_LADDER_DAYS` gains a leading `0`, and the `fails by` report line
+    prints `+0 days - NOT CLOCK DRIFT: fails with no shift (a runner or environment defect, for example a missing browser)` when `fuse === 0`
+    (and never `(only at the full shift)`, which `fuse ? '' : ...` would print for 0). `classifySweep`, the ceiling arithmetic, `main`'s loop and its exit
+    code are unchanged: a +0 failure still fails the sweep and still counts, it is only no longer CALLED drift. Re-classifying it out of `drifted`
+    edits main()'s loop and `ok`, which W1-T5027 owns: a follow-up once that lands.
+    (v) ONE test really shells out (the default seam): the CLI run over a real report file with a stub `gh` first on PATH that records its argv, so
+    the file read, the `deliver` default `exec` and the arg assembly are all exercised for real; every other case drives `deliverNewDrift` and
+    `main` in-process with an injected `deliverFn`/`exec`/`run`/`derive` (scripts are diff-coverage-gated and a spawned child does not count).
+  acceptance:
+    - claim: "a cancelled sweep still reaches the delivery step: the aggregate step's condition names cancelled() beside failure(), and a pull_request run is still excluded"
+      proof: 'grep: test("W1-T5033: a cancelled sweep still reaches the delivery step" in test/a-clock-sweep-delivers-every-new-drift-and-never-goes-silent.test.ts'
+    - claim: "a new drifting suite opens its own needs-human issue even while the shared thread is open, and two new suites are two issues, never a comment on the old thread"
+      proof: 'grep: test("W1-T5033: each new drifting suite opens its own needs-human issue beside an open shared thread" in test/a-clock-sweep-delivers-every-new-drift-and-never-goes-silent.test.ts'
+    - claim: "a suite that already has an issue is commented on, never duplicated, even when a human relabelled that issue away from needs-human"
+      proof: 'grep: test("W1-T5033: a relabelled per-suite issue is commented on, never duplicated" in test/a-clock-sweep-delivers-every-new-drift-and-never-goes-silent.test.ts'
+    - claim: "a report with no NEW DRIFT section delivers nothing and exits 0, the positive control that the fan-out fires only on new drift"
+      proof: 'grep: test("W1-T5033: a report with no new drift delivers nothing" in test/a-clock-sweep-delivers-every-new-drift-and-never-goes-silent.test.ts'
+    - claim: "a failed delivery is loud: one suite's delivery failing exits 1, names the suite, and does not stop the others"
+      proof: 'grep: test("W1-T5033: a failed delivery exits 1, names the suite, and does not stop the rest" in test/a-clock-sweep-delivers-every-new-drift-and-never-goes-silent.test.ts'
+    - claim: "a suite that fails with no clock shift is reported as NOT CLOCK DRIFT and its issue is titled as a runner defect"
+      proof: 'grep: test("W1-T5033: a failure at +0 days is reported as not clock drift" in test/a-clock-sweep-delivers-every-new-drift-and-never-goes-silent.test.ts'
+    - claim: "a suite that only fails shifted keeps its +N fuse and is not labelled unshifted, the positive control"
+      proof: 'grep: test("W1-T5033: a suite that only fails shifted keeps its fuse and is not labelled unshifted" in test/a-clock-sweep-delivers-every-new-drift-and-never-goes-silent.test.ts'
+    - claim: "the default deliver() listing is unchanged for every existing caller: label-filtered, limit 100, one thread per source, and the resolver stays success-only"
+      proof: 'grep: test("W1-T5033: the shared one-thread-per-source delivery and its success-only resolver are unchanged" in test/a-clock-sweep-delivers-every-new-drift-and-never-goes-silent.test.ts'
+    - claim: "the CLI reads a real report file and reaches gh through PATH, the default seam exercised for real"
+      proof: 'grep: test("W1-T5033: the CLI reads a real report and delivers through gh on PATH" in test/a-clock-sweep-delivers-every-new-drift-and-never-goes-silent.test.ts'
+    - claim: "the workflow invokes the new fan-out script, a production use"
+      proof: 'grep: clock-sweep-deliver\.mjs in .github/workflows/clock-sweep.yml'
+  falsifier: |
+    Revert `|| cancelled()` and the first test reddens (the cancelled arm is skipped again). Point the fan-out back at `--source clock-sweep` and the
+    second reddens (one comment, no issue). Drop `anyLabel` and the third reddens (a relabelled thread is duplicated). Put `0` back out of the ladder
+    and the +0 test reddens while the shifted-fuse control stays green. The no-new-drift and unchanged-default tests stay green in all four, which is what
+    shows each change fires only on its own shape.
+  note: |
+    RISK BAND: `high` / `band_meaning: span` is Rule 19 SIZING (a workflow and three scripts read as more than one subsystem at `medium`), not
+    danger: a weekly non-required job. SEQUENCING WITH W1-T5027, which also edits scripts/clock-sweep.mjs: THE TWO ARE INDEPENDENT BY DESIGN (this one
+    touches only the ladder constant and one report line) BUT BOTH MEET THE COMMENT-LOAD CEILING: clock-sweep.mjs is at 153/153, so W1-T5027's
+    SWEEP_BUDGET_MS doc comment and UNREACHED block cannot land as drafted without removing an equal number of comment lines from that file
+    (recording a LOWER count, never raising the row); whoever lands second merges origin/main. W1-T5027 also makes the sweep red every week at
+    today's population, so the per-suite fan-out is what turns that red into named, separately tracked work.
+    DECISIONS FOR THE OPERATOR, stated so they are not made by accident: (a) per-suite issues are NOT auto-closed on recovery (no resolver keyed by prefix: the
+    fixing PR closes the issue, and the preamble says so); a prefix resolver that closes a suite's issue once a COMPLETE later run no longer names it is the
+    follow-up, and needs W1-T5027's 'unreached' list to know a run was complete. (b) The aggregate thread keeps its label-filtered lookup, so a
+    relabelled aggregate is still replaced by a new one (#7059 after #5513); this task fixes that for per-suite issues only. (c) No Chromium install:
+    add one (`npx playwright install chromium`, no --with-deps, per W1-T1027) the day a browser-launching suite enters the derived population; until then
+    it would be dead time in a job that already overruns its cap. (d) `workflow_dispatch` cancelled by a human also opens an issue; its preamble says
+    `cancelled`.
+    scripts/ changes are diff-coverage-gated in CI even though `rmd preflight`'s scoped check says 'nothing to prove' on a scripts-only diff: run
+    `npm run diff-coverage:local -- <tests>` on a committed tree and confirm `grep -c '^SF:scripts/clock-sweep-deliver.mjs$' <lcov>` is non-zero.
+    Editing the workflow and scripts/clock-sweep.mjs fires clock-sweep.yml's own pull_request trigger: that run is not required, takes the full sweep,
+    will be cancelled at 30 minutes (as 09-30's was), and delivers nothing because the `pull_request` event is excluded.
+    reservation hand-off: unknown -> file/gates-r5-1790812000000

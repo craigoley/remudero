@@ -11,6 +11,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { buildServeServer, resolveConsoleSha, type ServeDeps } from "../src/lib/serve.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { VIEW_EVENTS_PATH } from "../src/lib/view-events.js";
+import { readModelSwitchesPath } from "../src/lib/read-model-worker.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const READ = { authorization: "Bearer read-token" };
@@ -28,6 +29,8 @@ function deps(t: TestCtx, extra: Partial<ServeDeps>): { deps: ServeDeps; ledgerP
   mkdirSync(stateDir, { recursive: true });
   const ledgerPath = join(stateDir, "ledger.ndjson");
   writeFileSync(ledgerPath, row(0) + row(1));
+  mkdirSync(join(stateDir, "read-model"), { recursive: true });
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ push: "on" }));
   const github = { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
   return {
     ledgerPath,

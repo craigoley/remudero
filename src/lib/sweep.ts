@@ -72,6 +72,7 @@ import {
   automergeHoldFromLedger,
   cappedOverrideFromLedger,
   decideAutoMergeArm,
+  extractTaskTrailerId,
   isCriterionRefusal,
   judgeReview,
   parseAcceptanceBlock,
@@ -3303,9 +3304,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
       const original = readFileSync(join(repoDir, shardRelPath), "utf8");
       const marker =
-        `sweep-flagged proof (${proof0.proofExec}) — an Architect must correct this criterion's ` +
+        `sweep-flagged proof — an Architect must correct this criterion's ` +
         `proof; W1-T3390 plan-only repair rung, PR #${pr.prNumber}, ${new Date(nowMsImpl()).toISOString()}`;
-      const flagged = insertPlanRepairFlag(original, proof0.proof, marker);
+      const flagged = flagStaleProofs(original, evidence.proofs, marker);
       if (!flagged) {
         planRepairLog("text_drift", { shard: shardRelPath });
         return true;
@@ -3343,8 +3344,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           title: `chore(plan): flag a stale proof in ${taskId}'s shard for architect repair`,
           body: buildPlanPrBodyImpl({
             intro:
-              `AUTOMATED PLAN REPAIR (W1-T3390): ${pr.prUrl} is capped and its shared fix budget is ` +
-              `spent. Its criterion "${proof0.claim}" declares proof \`${proof0.proof}\`, which review ` +
+              `AUTOMATED PLAN REPAIR (W1-T3390): ${pr.prUrl} cannot clear its proof check and no fix worker ` +
+              `is dispatched. Its criterion "${proof0.claim}" declares proof \`${proof0.proof}\`, which review ` +
               `found \`${proof0.proofExec}\` — that text cannot be corrected from inside a non-plan-only ` +
               `PR (Standing rule 15). This plan-only PR flags the line for an Architect; it does not ` +
               `rewrite it.`,
@@ -7965,6 +7966,12 @@ export function proofDiscriminationEvidenceFromCheckLog(
     : undefined;
 }
 
+/** W1-T4943: trailered exactly as the proof-discrimination gate reads it (the BODY trailer, not `pr.taskId`, which also counts a run branch). */
+export function carriesTaskTrailer(pr: Pick<OpenPrView, "taskId" | "body">): boolean {
+  if (pr.taskId === undefined) return false;
+  return pr.body === undefined || extractTaskTrailerId(pr.body) !== undefined;
+}
+
 /** One of the four preconditions {@link diagnoseCappedRoutingBlock} names — matched to this
  *  task's own filed rationale (W1-T3669), in the SAME order the routing block in
  *  {@link runSweep} reads them. */
@@ -8134,6 +8141,46 @@ export function insertPlanRepairFlag(shardText: string, proof: string, marker: s
   const indent = /^(\s*)/.exec(lines[idx])?.[1] ?? "";
   lines.splice(idx, 0, `${indent}# ${marker}`);
   return lines.join("\n");
+}
+
+const SHARD_CLAIM_LINE = /^\s*(?:-\s+)?claim:\s*(.*?)\s*$/;
+const SHARD_PROOF_LINE = /^\s*(?:-\s+)?proof:/;
+
+/** W1-T4943: the `claim:` of the unique criterion whose `proof:` line carries `proof` (undefined when absent or ambiguous). */
+export function claimForProof(shardText: string, proof: string): string | undefined {
+  const lines = shardText.split("\n");
+  const claims = new Set<string>();
+  lines.forEach((line, at) => {
+    if (!SHARD_PROOF_LINE.test(line) || !line.includes(proof)) return;
+    for (let back = at - 1; back >= 0; back--) {
+      const found = SHARD_CLAIM_LINE.exec(lines[back]!);
+      if (!found) continue;
+      claims.add(found[1]!.replace(/^(["'])(.*)\1$/, "$2"));
+      return;
+    }
+  });
+  return claims.size === 1 ? [...claims][0] : undefined;
+}
+
+/** W1-T4943: flag EVERY stale proof beside its resolved claim with `marker`, editing no claim/proof/satisfied_by/kind line; undefined when any proof has drifted off the shard. */
+export function flagStaleProofs(
+  shardText: string,
+  proofs: ProofDiscriminationEvidence["proofs"],
+  marker: string,
+): string | undefined {
+  let flagged: string | undefined = shardText;
+  for (const stale of proofs) {
+    const claim = claimForProof(shardText, stale.proof) ?? stale.claim;
+    flagged = insertPlanRepairFlag(
+      flagged,
+      stale.proof,
+      `${marker} — criterion "${claim}" (${stale.proofExec}). Options for an Architect: drop it if it is a ` +
+        `preservation criterion (precedent #8099), mark it satisfied_by the merged stack parent, or re-point ` +
+        `its proof at a line the PR adds.`,
+    );
+    if (flagged === undefined) return undefined;
+  }
+  return flagged;
 }
 
 /** TERMINAL-STATE PREDICATE (W1-T177) — the ONE definition every spending site and the operator
@@ -9201,6 +9248,12 @@ const inFlightReviewKeys = new Set<string>();
  *  the review mutex. // Why: 13 dispatches across two PRs against a cap of 2. */
 const inFlightFixKeys = new Set<string>();
 
+/** W1-T5032 — a proof amendment's `fix.dispatch` identity row is an idempotency record, never a strike;
+ *  hidden from `priorStrikesFor` and `freshFixDispatchCount` here, while `lookupIdentity` still reads it. */
+export function isProofAmendmentIdentityRow(line: Record<string, unknown>): boolean {
+  return line.step === "fix.dispatch" && line.kind === "proof_amendment";
+}
+
 /** W1-T2788 — select the fix-rung ledger generation attributable to `currentHeadSha`. New rows name
  *  the head they targeted and require exact equality; legacy rows carry no head and reset only at a
  *  trustworthy observation for this task at the current head, so an incomplete history fails closed
@@ -9213,7 +9266,7 @@ export function fixLedgerRowsForHead(
   if (!taskId) return [];
   if (!currentHeadSha) {
     return lines.filter(
-      (line) => line.task_id === taskId && (line.step === "fix.dispatch" || line.step === "fix.review"),
+      (line) => line.task_id === taskId && (line.step === "fix.dispatch" || line.step === "fix.review") && !isProofAmendmentIdentityRow(line),
     );
   }
 
@@ -9232,6 +9285,7 @@ export function fixLedgerRowsForHead(
     if (line.task_id !== taskId) continue;
     const strike = typeof line.strike === "number" ? line.strike : undefined;
     if (line.step === "fix.dispatch") {
+      if (isProofAmendmentIdentityRow(line)) continue;
       const taggedHead = typeof line.head_sha === "string" ? line.head_sha : undefined;
       const belongsToHead = taggedHead !== undefined
         ? taggedHead === currentHeadSha
@@ -9579,6 +9633,9 @@ export function readyDraftPullRequest(
     io.log("sweep.draft_ready_failed", { ...row, reason: e instanceof Error ? e.message : String(e) });
   }
 }
+
+/** PRIMARY CONTROL on how many stale-proof supersession closes one sweep pass may make; a PR over the cap keeps its red and is re-derived next pass. */
+export const MAX_STALE_PROOF_CLOSES_PER_PASS = 2;
 
 /** W1-T4702 — the last incomplete-union reason logged, so a persistent gap is logged once. */
 let lastReportedAnomalyGap: string | undefined;
@@ -10044,6 +10101,8 @@ export async function runSweep(
     reviewKey: string;
     mode: ReviewDispatchMode;
   }> = [];
+  // W1-T5030: close ATTEMPTS the stale-proof supersession arm has made this pass.
+  let staleProofCloses = 0;
 
   /** The tail every disposition shares once `acted`, `actionError` and `standDownReason` are known —
    *  factored out so the synchronous walk and the concurrent review batch ledger and log IDENTICALLY.
@@ -10978,10 +11037,8 @@ export async function runSweep(
               // routed on — a failing review carries the unmet set, a blocked_ci PR carries ci-log
               // evidence, never a mix. W1-T2236: the review branch also carries
               // `actionableGateFailures`. W1-T2231: the dedup gate reads `acted`, never `spent`.
-              const staleProofs = proofDiscriminationEvidenceFromCheckLog(ciFailuresForFix);
-              const fixEvidence = staleProofs
-                ? { unmetCriteria: [], proofDiscrimination: staleProofs }
-                : isBlockedCi(pr)
+              const staleProofs = carriesTaskTrailer(pr) ? proofDiscriminationEvidenceFromCheckLog(ciFailuresForFix) : undefined;
+              const fixEvidence = isBlockedCi(pr)
                 ? { unmetCriteria: [], ciFailures: ciFailuresForFix }
                 : {
                     unmetCriteria: pr.unmetCriteria,
@@ -11005,6 +11062,14 @@ export async function runSweep(
                 break;
               }
               if (staleProofs && pr.changedFiles?.length === 0) {
+                if (staleProofCloses >= MAX_STALE_PROOF_CLOSES_PER_PASS) {
+                  // W1-T5030: the break keeps a deferred PR off `dispatchFix` — a ci-log worker cannot edit a stale proof.
+                  acted = false;
+                  standDownReason = `stale-proof supersession close deferred — ${MAX_STALE_PROOF_CLOSES_PER_PASS} already made this pass; this PR carries to the next pass`;
+                  extraDisposedFields = { ...extraDisposedFields, stale_proof_close_deferred: true };
+                  break;
+                }
+                staleProofCloses += 1;
                 let carried = "no merged stack parent could be read";
                 try {
                   const stack = deps.stackPrerequisite?.(pr);
@@ -11063,6 +11128,17 @@ export async function runSweep(
                   scripts: ratchetScripts,
                 });
               }
+              if (staleProofs && (!deps.dispatchPlanOnlyRepair || priorPlanRepairStrikesFromLedger(pr, ledgerLines) >= MAX_PLAN_REPAIR_STRIKES)) {
+                reason = `stale-proof red on ${staleProofs.proofs.map((p) => p.proof).join("; ")} — the plan-shard flag is spent or unwired, so no worker is dispatched`;
+                const flagEscalated = ledgerLines.some((line) =>
+                  line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
+                  line.head_sha === pr.headSha && line.stale_proof_escalated === true);
+                if (!flagEscalated) await deps.escalate(pr, reason, renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
+                extraDisposedFields = { ...extraDisposedFields, stale_proof_escalated: true };
+                acted = false;
+                standDownReason = reason;
+                break;
+              }
               // W1-T2520 — THE FIX-DISPATCH CLAIM. See {@link claimFixDispatch} for why a claim
               // alone, without the fresh re-read it also performs, would not have stopped the
               // observed race. A refusal spends nothing and stands down like any declined lane.
@@ -11085,18 +11161,19 @@ export async function runSweep(
               }
               // W1-T3390 — fires here, in place of `dispatchFix` below, once the disposition
               // decision above found the body budget spent and a plan-shard repair still owed.
-              if (planShardRepairDue && deps.dispatchPlanOnlyRepair && proofDiscrimination) {
+              const planRepairEvidence = planShardRepairDue ? proofDiscrimination : staleProofs;
+              if (deps.dispatchPlanOnlyRepair && planRepairEvidence) {
                 const dispatchPlanOnlyRepair = deps.dispatchPlanOnlyRepair;
                 if (deps.detachFixWait) {
                   detachSweepAction(
-                    fixClaim.run(() => dispatchPlanOnlyRepair(pr, proofDiscrimination)),
+                    fixClaim.run(() => dispatchPlanOnlyRepair(pr, planRepairEvidence)),
                     // Shares "fix-dispatch"'s kind, deliberately: a plan-shard repair and an
                     // ordinary body repair must never race for the SAME task's detached slot.
                     { actionKind: "fix-dispatch", taskId: pr.taskId ?? `PR-${pr.prNumber}` },
                   );
                   break;
                 }
-                const planRepairOutcome = await fixClaim.run(() => dispatchPlanOnlyRepair(pr, proofDiscrimination));
+                const planRepairOutcome = await fixClaim.run(() => dispatchPlanOnlyRepair(pr, planRepairEvidence));
                 if (planRepairOutcome !== undefined) spent = dispatchFixSpent(planRepairOutcome);
                 break;
               }

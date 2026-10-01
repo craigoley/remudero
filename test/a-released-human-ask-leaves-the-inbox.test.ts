@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,18 +16,18 @@ const OTHER = "verify-human:W1-T217";
 const RULING = "ruling:operator-choice";
 const UNKNOWN = "new-producer:incomplete";
 
-function fixture(heldTaskId?: string): { deps: PanelGraphDeps; ledgerPath: string } {
+function fixture(heldTaskId?: string, autoTaskId?: string, missingTaskId?: string): { deps: PanelGraphDeps; ledgerPath: string; planPath: string } {
   const root = mkdtempSync(join(tmpdir(), "rmd-inbox-attention-"));
   mkdirSync(join(root, "state"), { recursive: true });
   mkdirSync(join(root, "plan"), { recursive: true });
   const planPath = join(root, "plan", "tasks.yaml");
-  writeFileSync(planPath, ["W1-T216", "W1-T217"].map((id) => `
+  writeFileSync(planPath, ["W1-T216", "W1-T217"].filter((id) => id !== missingTaskId).map((id) => `
 - id: ${id}
   title: "a controlled task"
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: ${id === autoTaskId ? "auto" : "human"}
   ${id === heldTaskId ? "dispatch_hold: true" : ""}
   risk: high
   status: queued
@@ -44,6 +44,7 @@ function fixture(heldTaskId?: string): { deps: PanelGraphDeps; ledgerPath: strin
   writeFileSync(ledgerPath, "");
   return {
     ledgerPath,
+    planPath,
     deps: {
       root,
       inboxRoot: root,
@@ -108,6 +109,35 @@ test("a machine release cannot retire an explicitly held security ask", async ()
   const visible = await threads(world.deps);
   assert.ok(visible.some((row) => row.proposalId === HUMAN && row.attention === "decision"));
   assert.ok(visible.some((row) => row.proposalId === OTHER));
+});
+
+test("W1-T4884: verify-auto retires only its stale human ask without erasing the registry", async () => {
+  const world = fixture(undefined, "W1-T216");
+  const classified = classifyAllProposalsMemo(world.deps);
+  const stale = classified.classifications.find((row) => row.proposalId === HUMAN);
+  assert.equal(stale?.state, "retired");
+  assert.match(stale?.retiredReason ?? "", /verify: auto/);
+  assert.equal(classified.classifications.find((row) => row.proposalId === OTHER)?.state, "not_ready");
+  assert.ok(classified.proposals.some((row) => row.id === HUMAN), "retirement keeps the registry record");
+  const visible = await threads(world.deps);
+  assert.ok(!visible.some((row) => row.proposalId === HUMAN));
+  assert.ok(visible.some((row) => row.proposalId === OTHER));
+  writeFileSync(world.planPath, readFileSync(world.planPath, "utf8").replace("verify: auto", "verify: human"));
+  assert.equal(classifyAllProposalsMemo(world.deps).classifications.find((row) => row.proposalId === HUMAN)?.state, "not_ready");
+  assert.ok((await threads(world.deps)).some((row) => row.proposalId === HUMAN), "plan reversal restores the ask");
+});
+
+test("W1-T4884: a held or unverified task keeps its human ask", async () => {
+  const cases = [
+    fixture("W1-T216", "W1-T216"),
+    fixture(),
+    fixture(undefined, undefined, "W1-T216"),
+  ];
+  for (const world of cases) {
+    const classified = classifyAllProposalsMemo(world.deps);
+    assert.notEqual(classified.classifications.find((row) => row.proposalId === HUMAN)?.state, "retired");
+    assert.ok((await threads(world.deps)).some((row) => row.proposalId === HUMAN));
+  }
 });
 
 test("W1-T4738: no release evidence keeps the ask visible", async () => {

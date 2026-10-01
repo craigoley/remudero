@@ -43,6 +43,7 @@ function pr(over: Partial<OpenPrView> = {}): OpenPrView {
     prNumber: 8088,
     prUrl: PR_URL,
     taskId: TASK,
+    body: `Remudero-Task: ${TASK}\n`,
     reviewState: "pending",
     checksState: "red",
     unmetCriteria: [],
@@ -88,8 +89,11 @@ async function sweep(view: OpenPrView, extra: Partial<SweepDeps> = {}): Promise<
 
 test("W1-T4957: a red proof-discrimination check with stale proofs routes to proof amendment, not ci-log", async () => {
   const observed = await sweep(pr());
-  assert.equal(observed.fixed.length, 1, "the red is dispatched once, to the fix rung");
-  const evidence = observed.fixed[0]!;
+  assert.equal(observed.fixed.length, 0, "W1-T4943: a trailered stale-proof red is flagged on the plan, never sent to a worker");
+  const evidence: FixDispatchEvidence = {
+    unmetCriteria: [],
+    proofDiscrimination: proofDiscriminationEvidenceFromCheckLog(pr().ciFailures!),
+  };
   assert.equal(evidence.ciFailures, undefined, "no ci-log evidence rides a stale-proof dispatch");
   assert.deepEqual(
     evidence.proofDiscrimination?.proofs.map((p) => [p.proof, p.proofExec]),
@@ -148,10 +152,16 @@ test("W1-T4957: an empty-diff close without a readable merged parent still close
 });
 
 test("W1-T4957: an unobserved diff is never read as an empty one", async () => {
-  const observed = await sweep(pr({ changedFiles: undefined }));
+  let flagged = 0;
+  const observed = await sweep(pr({ changedFiles: undefined }), {
+    dispatchPlanOnlyRepair: () => {
+      flagged++;
+      return true;
+    },
+  });
   assert.deepEqual(observed.closed, [], "an unknown diff never closes a PR");
-  assert.equal(observed.fixed.length, 1);
-  assert.equal(observed.fixed[0]!.proofDiscrimination?.proofs.length, 2);
+  assert.equal(flagged, 1, "W1-T4943: the unobserved diff is flagged on the plan");
+  assert.deepEqual(observed.fixed, []);
 });
 
 test("W1-T4957: a proof-discrimination red beside another red keeps the ci-log route", async () => {

@@ -1,0 +1,25 @@
+- id: W1-T5023
+  title: "Do not let a STOP row hide a later daemon crash-loop"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 10.00
+  risk: medium
+  origin: "operator-approved Orca comparison, 2026-09-30"
+  files: [src/lib/fleet-liveness.ts, test/fleet-liveness.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at c94c2bf49: fleet-liveness returns held immediately when STOP follows the last heartbeat.
+    That return precedes the boot-since-heartbeat crash-loop bound, so later repeated boots without a heartbeat
+    can remain displayed as an intentional hold indefinitely.
+  design: |
+    Evaluate boots after STOP before accepting held. Preserve a genuine quiet STOP as held, but report the
+    existing crash-loop state once the boot bound is crossed without heartbeat. Do not alter the bound itself.
+  acceptance:
+    - claim: "STOP followed by repeated boots without heartbeat becomes crash-loop, while quiet STOP stays held"
+      proof: 'grep: test("W1-T5023: boots after STOP outrank held liveness" in test/fleet-liveness.test.ts'
+  note: "reservation hand-off: run-W1-T5023-1790813900000 -> file/plan-5016-5025-1790815200000"
