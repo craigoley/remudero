@@ -163,13 +163,13 @@ import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe
 import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { runGarden, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./lib/gardener.js";
-import { boundedGardenPassSpawn, childGardenPassSpawn, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { gardenPassDue, runGarden, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./lib/gardener.js";
+import { boundedGardenPassSpawn, childGardenPassSpawn, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
-import { CONFIG_GARDEN_NAME, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
+import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec, testManifestProposalPath, type TestProposalFeed } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionLedgerRecords, readGateFireRateReport, freshCiFrictionPlanOrigins, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
@@ -32958,7 +32958,7 @@ export interface GardenBuildContext {
 }
 
 /** One pass of one garden; it logs its own failure under the garden's own step name and never throws. */
-export type RegisteredGardenPass = () => void | Promise<void>;
+export type RegisteredGardenPass = (() => void | Promise<void>) & { due?: () => boolean };
 
 /** W1-T5114: the ONE place each registered garden is built, for the daemon's in-process mode and `rmd garden run`. */
 export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBuildContext, opts: { hourly?: boolean } = {}): RegisteredGardenPass | Promise<RegisteredGardenPass> {
@@ -32972,13 +32972,14 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     log,
     ...(escalate ? { escalate } : {}),
   });
-  const gardenPass = <C extends string, I, A extends GardenAction<C>>(spec: GardenSpec<C, I, A, GardenCheckout>, d: GardenerDeps): RegisteredGardenPass => () => {
+  const withDue = (pass: () => void | Promise<void>, due: () => boolean): RegisteredGardenPass => Object.assign(pass, { due });
+  const gardenPass = <C extends string, I, A extends GardenAction<C>>(spec: GardenSpec<C, I, A, GardenCheckout>, d: GardenerDeps): RegisteredGardenPass => withDue(() => {
     try {
       runGarden(spec, d);
     } catch (e) {
       log(`${spec.name}.gardener_failed`, { error: String((e as Error)?.message ?? e) });
     }
-  };
+  }, () => gardenPassDue(spec, d));
   const noPass: RegisteredGardenPass = () => {};
   switch (name) {
     case "plan": {
@@ -33009,7 +33010,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "test": {
       const d = deps("test");
       return loadTestManifestProbe(repoRoot).then(
-        (probe): RegisteredGardenPass => async () => {
+        (probe): RegisteredGardenPass => withDue(async () => {
           try {
             let feed: TestProposalFeed | { status: "failed"; error: string } | undefined;
             if (opts.hourly) {
@@ -33027,7 +33028,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
           } catch (e) {
             log("test.gardener_failed", { error: String((e as Error)?.message ?? e) });
           }
-        },
+        }, () => gardenPassDue(testGardenSpec(d, probe), d)),
         (e: unknown) => {
           log("test.gardener_failed", { error: String((e as Error)?.message ?? e) });
           return noPass;
@@ -33042,13 +33043,13 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         (m: { buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] } }): RegisteredGardenPass => {
           const workerEnv = buildWorkerEnv({}, process.env, { allowApiKey: config.overflow === "api_key" });
           const mountRecommendations = mountRecommendationSource({ build: m.buildMountHeadroomSweep, stateDir, mountsFile: mountsPath(repoRoot), billingMode: billingMode(Object.keys(workerEnv)), log });
-          return () => {
+          return withDue(() => {
             try {
               runConfigGarden(configGardenSpec(d, { mountRecommendations }), d, { mountRecommendations });
             } catch (e) {
               log(`${CONFIG_GARDEN_NAME}.gardener_failed`, { error: String((e as Error)?.message ?? e) });
             }
-          };
+          }, () => configCanariesDue(stateDir) || gardenPassDue(configGardenSpec(d, { mountRecommendations }), d));
         },
         (e: unknown) => {
           log("config.gardener_failed", { error: String((e as Error)?.message ?? e) });
@@ -33153,6 +33154,15 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       };
     }
   }
+}
+
+export function registeredGardenDueProbe(name: RegisteredGardenName, ctx: GardenBuildContext): () => boolean {
+  let probe: (() => boolean) | undefined;
+  Promise.resolve(buildRegisteredGarden(name, ctx)).then(
+    (pass) => { probe = pass.due; },
+    (e: unknown) => ctx.log(GARDEN_DUE_FAILED_STEP, { name, error: String((e as Error)?.message ?? e) }),
+  );
+  return () => (probe ? probe() : true);
 }
 
 /** Build the named garden and run ONE pass of it; resolves 0 once the pass has run (it logs its own failures). */
@@ -33406,7 +33416,8 @@ export async function daemonCommand(
     deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : childGardenPassSpawn(),
     2,
   );
-  const offLoopGarden = (name: RegisteredGardenName) => (intervalMs: number) => startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log });
+  const offLoopGarden = (name: RegisteredGardenName) => (intervalMs: number) =>
+    startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, ...(deps.gardenPassesInProcess ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) });
   if (!target.isSelf && !flagValue(rest, "--plan")) {
     const repoDir = join(reposDir, target.repo);
     if (!existsSync(repoDir)) {

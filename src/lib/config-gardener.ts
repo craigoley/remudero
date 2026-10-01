@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 
-import { fixedClock, systemClock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { aggregateCacheHitTotals, deriveKnowledgeBudgetCap, measureKnowledgeBudgetPressure, TRIVIAL_DROPPED_WEIGHT_CHARS, type CacheHitTokens, type KnowledgeBudgetDerivation } from "./digest.js";
 import {
   cohortGuardMetrics,
@@ -615,6 +615,14 @@ export interface TendResult {
  * observing: the cohort against the rest, one guarded step ({@link stepCanary}). A breach lands a
  * revert of exactly the canary's lines and debits the class; a promotion credits it.
  */
+/** Whether {@link tendConfigCanaries} would tend anything now: an active canary whose tend interval has
+ *  elapsed. Read the same way, writing nothing, so a parent can skip a config pass that would do nothing. */
+export function configCanariesDue(stateDir: string, clock: Clock = systemClock): boolean {
+  const file = readConfigCanaryFile(stateDir);
+  if (!file.canaries.some((c) => isPromotionActive(c.promotion.state))) return false;
+  return file.lastTendMs === undefined || clock.now() - file.lastTendMs >= CONFIG_TEND_INTERVAL_MS;
+}
+
 export function tendConfigCanaries(deps: GardenerDeps, runs: () => RunSummary[]): TendResult[] {
   const nowMs = (deps.clock ?? systemClock).now();
   const file = readConfigCanaryFile(deps.stateDir);
