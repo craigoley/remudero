@@ -11,6 +11,7 @@ import { loadPlan } from "../src/lib/plan.js";
 import { serveCommand } from "../src/run-task.js";
 import { fakeGitHub, type FakeGitHub } from "./helpers/fake-github.js";
 import { ghShim } from "./helpers/gh-shim.js";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 const gatewayShim = ghShim([{ when: "api ", stdout: "[]" }], { kind: "board-projection-gh" });
@@ -92,7 +93,7 @@ test("W1-T5004: default cold projection leaves cheap routes responsive", async (
   const version = await fetch(`${url}/v1/version`);
   assert.equal(version.status, 200);
   const bootToFirstAnswerMs = Date.now() - startedAt;
-  assert.ok(Date.now() - started < 600, "the worker's held projection cannot hold the HTTP loop");
+  assertWallClockBound(Date.now() - started, 600, "the worker's held projection cannot hold the HTTP loop");
   let last = Date.now();
   let largestLag = 0;
   const probe = setInterval(() => {
@@ -106,7 +107,7 @@ test("W1-T5004: default cold projection leaves cheap routes responsive", async (
     clearInterval(probe);
   }
   t.diagnostic(`1800 tasks / 20000 ledger rows: boot-to-first-answer=${bootToFirstAnswerMs}ms, max event-loop lag=${largestLag}ms`);
-  assert.ok(largestLag < 600, "the representative projection cannot hold the serving loop");
+  assertWallClockBound(largestLag, 600, "the representative projection cannot hold the serving loop");
 });
 
 test("W1-T5004: cold status is bounded and explicitly unavailable", async (t) => {
@@ -114,7 +115,7 @@ test("W1-T5004: cold status is bounded and explicitly unavailable", async (t) =>
   const started = Date.now();
   const response = await fetch(`${url}/v1/status`);
   assert.equal(response.status, 503);
-  assert.ok(Date.now() - started < 600);
+  assertWallClockBound(Date.now() - started, 600, "cold status responds before the projection completes");
   const body = await response.json() as Record<string, unknown>;
   assert.equal(body.error, "board_unavailable");
   assert.equal(body.reason, "not_ready");
@@ -254,7 +255,7 @@ test("W1-T5004: real serve boot answers while projection is cold", async (t) => 
   const headers = { authorization: `Bearer ${token}` };
   const started = Date.now();
   assert.equal((await fetch(`http://127.0.0.1:${port}/v1/version`, { headers })).status, 200);
-  assert.ok(Date.now() - started < 1_000, "the real boot path answers inside the client budget");
+  assertWallClockBound(Date.now() - started, 1_000, "the real boot path answers inside the client budget");
   const cold = await fetch(`http://127.0.0.1:${port}/v1/status`, { headers });
   assert.equal(cold.status, 503);
   const coldBody = await cold.json() as Record<string, unknown>;

@@ -16,8 +16,8 @@ const HELPER_IMPORT = "helpers/wall-clock-bound.js";
 // It also adds the hung-gh /v1/status budget file: one more declaring file and assertion site.
 // PR #8080 adds the read-model worker's main-loop timing test: one declaring file and two sites.
 // PR #8229 declares the drain watchdog's elapsed-time assertion: one file and one site.
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 25;
-const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 39;
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 26;
+const RECORDED_DECLARED_WALL_CLOCK_BOUND_SITES = 43;
 const WALL_CLOCK_BOUND_FILE_FLOOR = 3;
 const WALL_CLOCK_BOUND_SITE_FLOOR = 4;
 
