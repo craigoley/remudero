@@ -497,3 +497,32 @@ test("an unreadable registry makes every repository its own project and says why
   assert.equal(repositories(again.tick()).projectsReason, "no instance names a registry");
   again.release();
 });
+
+test("a cold repositories build reads each plan and each summary as a step of its own", (t) => {
+  const f = fixture(t);
+  createRepositoriesSourcePublisher({ stateDir: f.stateDir, instances: () => f.sources })();
+  const run = ticker(f);
+  const whole = repositories(run.tick());
+  run.release();
+  const dbs = ["core", "console"].map((name) => openProjectorReadModel(f.stateDir, name));
+  t.after(() => dbs.forEach((db) => db.close()));
+  const instances = dbs.map((db, i) => ({ state: { instance: ["core", "console"][i], generation: 1, lease: "held" as const, failures: 0, newestTs: null, tickedAt: NOW }, db }));
+  const view = createRepositoriesReadModelView(ledgerSource);
+  const stepsUntilDone = (now: number): number => {
+    let steps = 0;
+    for (let done = false, calls = 0; !done && calls < 20; calls++) {
+      let allowed = true;
+      done = view.prepare({ now, instances }, () => {
+        if (!allowed) return false;
+        allowed = false;
+        steps += 1;
+        return true;
+      });
+    }
+    return steps;
+  };
+  assert.equal(stepsUntilDone(NOW), 4, "core's plan, core's summary, console's plan, console's summary");
+  assert.deepEqual(view.materialize({ now: NOW, instances })[0].data.instances, whole.instances, "the stepped summaries are the one-unit build's");
+  assert.equal(stepsUntilDone(NOW + 1_000), 0, "nothing is due inside the cadence");
+  assert.equal(stepsUntilDone(NOW + 61_000), 2, "a recompute over unchanged plans is the two summaries");
+});

@@ -1,0 +1,53 @@
+- id: W1-T4949
+  title: "Promote measured retro debt and quality opportunities through one governed intake"
+  repo: remudero
+  depends_on: [W1-T4938]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 38.00
+  risk: high
+  origin: "operator gardener follow-up 2026-09-30: code quality, tech debt, plan-to-task triage, and innovation exploitation"
+  note: "reservation hand-off: plan-opportunity-intake-1790799000000 -> plan-opportunity-intake-1790799000000"
+  plan_refs: [W1-T4110, W1-T4111, W1-T4941]
+  files: [src/lib/opportunity-intake.ts, src/lib/retro.ts, src/lib/codeql-quality-intake.ts, src/lib/ci-friction-gardener.ts, src/lib/daemon.ts, test/one-opportunity-intake-promotes-standing-debt.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    The standing-debt line in MASTER-PLAN.md reports open entries with growing cumulative
+    dwell, then says no downstream rung reads it. Existing CodeQL quality intake,
+    ci-friction gardener, retro follow-up harvest, and plan gardener each own useful evidence;
+    another free-running scan loop would duplicate work and flood the operator Inbox. W1-T4941
+    separately judges already-filed unprioritized tasks; this task owns new evidence becoming
+    one governed candidate, not reprioritizing that queue.
+  design: |
+    Define one typed candidate at the shared routing boundary with source, repo, stable key,
+    observed-at/source anchor, freshness/availability, population and denominator, priced
+    impact with units, proposed remedy, authority level, and related task/PR. Start with the
+    current standing retro-debt entries; verify the section and its count before promotion,
+    refuse a missing or changed format instead of reporting an empty corpus. Reuse current
+    CodeQL/CI-friction/follow-up source readers and the normal machine-filing risk judge;
+    do not create four new gardeners. Dedupe by stable source key against active proposals,
+    filed tasks, and merged credit, including text that changes between retro cycles. Admit
+    at most one newly actionable candidate per pass. Ordinary bounded work goes to the
+    normal plan-PR path; privileged or policy choices alone reach the operator Inbox. No
+    proof, merge, or deploy policy is changed by a candidate without the governed review.
+  acceptance:
+    - claim: "a positive-control standing debt entry reaches one candidate with source and freshness"
+      proof: 'grep: test("W1-T4949: a standing debt entry reaches one sourced candidate" in test/one-opportunity-intake-promotes-standing-debt.test.ts'
+    - claim: "an existing task or PR and a reworded cycle cannot create duplicate work"
+      proof: 'grep: test("W1-T4949: existing work and reworded debt dedupe by source key" in test/one-opportunity-intake-promotes-standing-debt.test.ts'
+    - claim: "a missing or malformed source refuses promotion instead of claiming zero debt"
+      proof: 'grep: test("W1-T4949: unreadable standing debt is unavailable not empty" in test/one-opportunity-intake-promotes-standing-debt.test.ts'
+    - claim: "CodeQL and CI-friction evidence enter the same candidate contract without new scan loops"
+      proof: 'grep: test("W1-T4949: CodeQL and CI friction reuse their existing source readers" in test/one-opportunity-intake-promotes-standing-debt.test.ts'
+    - claim: "one pass is bounded and sends only human authority decisions to Inbox"
+      proof: 'grep: test("W1-T4949: a pass promotes at most one candidate through the existing risk judge" in test/one-opportunity-intake-promotes-standing-debt.test.ts'
+    - claim: "the daemon actually invokes the shared intake"
+      proof: 'grep: runOpportunityIntake( in src/lib/daemon.ts'
+  falsifier: |
+    Remove the production routing call: a fixture with one novel, source-qualified standing
+    debt entry yields no governed candidate. Change its cycle prose without changing the
+    numbered identity: a second task is forbidden. Remove the source section: a healthy
+    zero is forbidden.

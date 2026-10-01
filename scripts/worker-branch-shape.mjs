@@ -15,7 +15,9 @@
 //
 // Usage: node scripts/worker-branch-shape.mjs [--base <ref>] [--head-ref <ref>]. --base defaults
 // to origin/main (skips, not fails, the shard check when unresolvable); --head-ref defaults to
-// $GITHUB_HEAD_REF, then the current branch.
+// $GITHUB_HEAD_REF, then the current branch. --self-credit-only is the narrow pre-push mode:
+// only a plan-only shard filing on its own run branch is a refusal; unreadable evidence exits 2.
+// --head-sha supplies the pushed commit to that mode when it differs from the checked-out HEAD.
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -225,14 +227,15 @@ export function evaluateWorkerBranchShape({ headRef, commitMessages, addedFiles,
   };
 }
 
-/** The common ancestor of baseRef and HEAD, read locally only (never fetched). Undefined, not
+/** The common ancestor of baseRef and head, read locally only (never fetched). Undefined, not
  *  a throw, when unresolvable — every caller below then degrades to "nothing new seen".
  * @param {string} worktreePath
  * @param {string} baseRef
+ * @param {string} head
  */
-export function resolveMergeBase(worktreePath, baseRef) {
+export function resolveMergeBase(worktreePath, baseRef, head = "HEAD") {
   try {
-    return gitOrThrow(["merge-base", baseRef, "HEAD"], { cwd: worktreePath });
+    return gitOrThrow(["merge-base", baseRef, head], { cwd: worktreePath });
   } catch {
     return undefined;
   }
@@ -309,20 +312,67 @@ export function changedFilesSinceBase(worktreePath, mergeBase) {
   }
 }
 
-export function main(argv) {
+export function main(argv, runGit = gitOrThrow) {
   const { values } = parseArgs({
     args: argv,
     options: {
       base: { type: "string" },
       "head-ref": { type: "string" },
+      "head-sha": { type: "string" },
       "worktree-path": { type: "string" },
+      "self-credit-only": { type: "boolean" },
     },
   });
 
   const worktreePath = values["worktree-path"] ?? process.cwd();
   const baseRef = values.base ?? "origin/main";
   const headRef = resolveHeadRef(values["head-ref"], worktreePath);
-  const mergeBase = resolveMergeBase(worktreePath, baseRef);
+  const selfCreditOnly = values["self-credit-only"] === true;
+  const pushedHead = selfCreditOnly ? values["head-sha"] || "HEAD" : "HEAD";
+  const mergeBase = resolveMergeBase(worktreePath, baseRef, pushedHead);
+  if (selfCreditOnly) {
+    if (!headRef || (headRef.startsWith("run-") && !/^run-.+-[0-9]+$/.test(headRef)) || !mergeBase) {
+      console.error("worker-branch-shape: UNKNOWN — pushed head or merge base could not be read");
+      process.exitCode = 2;
+      return;
+    }
+    let addedFiles;
+    let changedFiles;
+    try {
+      addedFiles = runGit(["diff", "--name-only", "--diff-filter=A", "-z", mergeBase, pushedHead], { cwd: worktreePath }).split("\0").filter(Boolean);
+      changedFiles = runGit(["diff", "--name-only", "-z", mergeBase, pushedHead], { cwd: worktreePath }).split("\0").filter(Boolean);
+    } catch {
+      console.error("worker-branch-shape: UNKNOWN — branch diff could not be read");
+      process.exitCode = 2;
+      return;
+    }
+    const shardFiles = addedFiles.filter((path) => SHARD_FILE_RE.test(path));
+    const shardContents = new Map();
+    try {
+      for (const path of shardFiles) {
+        shardContents.set(path, runGit(["show", `${pushedHead}:${path}`], { cwd: worktreePath }));
+      }
+    } catch {
+      console.error("worker-branch-shape: UNKNOWN — added plan shard in pushed commit could not be read");
+      process.exitCode = 2;
+      return;
+    }
+    const shardIds = shardTaskIds(shardFiles, (path) => shardContents.get(path));
+    if (shardFiles.length > 0 && shardIds.length !== shardFiles.length) {
+      console.error("worker-branch-shape: UNKNOWN — added plan shard id could not be parsed");
+      process.exitCode = 2;
+      return;
+    }
+    const selfCrediting = isPlanOnlyDiff(changedFiles) ? shardIds.filter((id) => matchesRunBranchShape(headRef, id)) : [];
+    if (selfCrediting.length > 0) {
+      console.error(`worker-branch-shape: REFUSED [plan-filing-run-credit] — ${selfCrediting.join(", ")} is a plan-only filing on its own run branch; use a non-run filing branch`);
+      process.exitCode = 1;
+      return;
+    }
+    console.log("worker-branch-shape: OK — no self-crediting plan filing");
+    process.exitCode = 0;
+    return;
+  }
   const commitMessages = commitMessagesSinceBase(worktreePath, mergeBase);
   const addedFiles = addedFilesSinceBase(worktreePath, mergeBase);
   const changedFiles = changedFilesSinceBase(worktreePath, mergeBase);

@@ -1,0 +1,57 @@
+- id: W1-T4951
+  title: "Bound local CI-parity coverage disk without weakening its four-shard proof"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 30.00
+  risk: high
+  origin: "operator gardener follow-up 2026-09-30; measured concurrent local gates consumed disk headroom"
+  note: "reservation hand-off: plan-local-gate-disk-1790799000002 -> plan-opportunity-intake-1790799000000"
+  plan_refs: [W1-T294, W1-T4436]
+  files: [src/lib/ci-parity.ts, scripts/coverage-merge-ratchet.mjs, test/the-coverage-entry-shards-the-way-ci-does.test.ts, test/merge-lcov.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    The local CI-parity leaf keeps four raw V8 shard trees until the final LCOV merge. On this
+    Mac, concurrent preflights drove available disk from 30 GiB to 19 GiB within minutes;
+    a prior completed raw set was approximately 16 GiB. CI already compacts per-shard upload
+    artifacts, but the local leaf does not. Simply copying that compaction step may not
+    lower peak bytes: the final pinned-Node merger reconstructs every raw report in staging.
+    A resource fix must measure the peak, not just shrink retained files after the run.
+    A nested scratch path also made a Unix socket fixture exceed the host's pathname limit
+    in an isolated Azure parity run; shorter paths must still remain outside the checkout.
+    A later four-shard run passed its tests but the merger staged into root `/tmp` and hit
+    ENOSPC after about 12.8 GiB of copies while `/mnt/scratch` still had 260 GiB free.
+  design: |
+    Instrument raw, compact, staging, and peak bytes on the exact pinned Node and prove the
+    new path lowers the peak under a representative four-shard corpus. Establish one local
+    gate slot and a pre-run free-space reserve; refuse before creating partial shards if
+    headroom is inadequate, with a named remedy such as an isolated scratch volume.
+    Stream/compact only if byte-equivalent LCOV line and branch records remain after the
+    final merge. Never clear another run's scratch or reuse a different tree's coverage.
+    Preserve nested TMPDIR isolation, the per-shard `# tests` positive control, all four
+    V8 artifacts, and fail-closed missing/corrupt shard behavior. Keep scratch paths short
+    enough for Unix sockets created by the full-suite fixtures, without moving TMPDIR
+    inside the repository or weakening their outside-checkout controls. Bind the merger's
+    `os.tmpdir()` staging to the same measured, reserved volume as the raw shards; checking
+    free bytes on one filesystem must never silently write the peak to another.
+  acceptance:
+    - claim: "insufficient free space refuses before instrumented shards start"
+      proof: 'grep: test("W1-T4951: low disk refuses before creating a coverage shard" in test/the-coverage-entry-shards-the-way-ci-does.test.ts'
+    - claim: "one active local gate does not overlap another gate's scratch"
+      proof: 'grep: test("W1-T4951: a second parity gate cannot reuse the active scratch" in test/the-coverage-entry-shards-the-way-ci-does.test.ts'
+    - claim: "a measured smaller peak retains identical pinned-Node LCOV fields"
+      proof: 'grep: test("W1-T4951: compacted four-shard coverage preserves line and branch totals" in test/merge-lcov.test.ts'
+    - claim: "missing or corrupt coverage never reports a passing gate"
+      proof: 'grep: test("W1-T4951: missing compact shard refuses the merged coverage gate" in test/the-coverage-entry-shards-the-way-ci-does.test.ts'
+    - claim: "the isolated scratch path stays outside the checkout and leaves room for Unix socket fixtures"
+      proof: 'grep: test("W1-T4951: coverage scratch is outside the checkout and socket-safe" in test/the-coverage-entry-shards-the-way-ci-does.test.ts'
+    - claim: "the merger stages on the volume whose free-space reserve was measured"
+      proof: 'grep: test("W1-T4951: merger staging uses the reserved scratch volume" in test/the-coverage-entry-shards-the-way-ci-does.test.ts'
+  falsifier: |
+    Delete the free-space check: a low-disk fixture begins shard 1. Delete one compact
+    shard: the final merge must fail. Reintroduce a divergent LCOV branch ID or an
+    unverified shard summary: the equivalence and positive-control tests must fail.

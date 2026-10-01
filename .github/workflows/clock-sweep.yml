@@ -102,18 +102,30 @@ jobs:
       # forked a duplicate, and `--source` keeps this job's failures out of mutation-nightly's
       # thread.
       - name: Open or update a needs-human issue on drift
+        if: (failure() || cancelled()) && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_WHEN: ${{ github.event_name }}
+          SWEEP_OUTCOME: ${{ steps.sweep.outcome }}
+        run: |
+          set -euo pipefail
+          test -s sweep-report.txt || echo "(no report captured -- the run failed before the sweep produced output)" > sweep-report.txt
+          PREAMBLE="The sweep step ended: ${SWEEP_OUTCOME}."
+          if [ "${SWEEP_OUTCOME}" = "cancelled" ]; then PREAMBLE="${PREAMBLE} The report is PARTIAL (progress lines only: the drift section prints at the end)."; fi
+          node scripts/needs-human-issue.mjs \
+            --source clock-sweep \
+            --title "clock-sweep: a fixture drifts on the wall clock" \
+            --body-file sweep-report.txt \
+            --preamble "${PREAMBLE}"
+
+      - name: Open one needs-human issue per NEW drifting suite
         if: failure() && github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RUN_WHEN: ${{ github.event_name }}
-        run: |
-          set -euo pipefail
-          test -s sweep-report.txt || echo "(no report captured -- the run failed before the sweep produced output)" > sweep-report.txt
-          node scripts/needs-human-issue.mjs \
-            --source clock-sweep \
-            --title "clock-sweep: a fixture drifts on the wall clock" \
-            --body-file sweep-report.txt
+        run: node scripts/clock-sweep-deliver.mjs --report sweep-report.txt
 
       # W1-T3030 — THE CLOSING HALF OF THE DELIVERY ABOVE. Without it a recovered job leaves its
       # delivery-of-record open forever: the general escalation reconciler only closes issues with
