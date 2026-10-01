@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mapBoardPr, type RestPullRow } from "../src/lib/open-prs-rest.js";
+import { BOARD_MAX_PAGES, mapBoardPr, type RestPullRow } from "../src/lib/open-prs-rest.js";
 import { buildBatchedGithub, type BatchedPr, type PrRef } from "../src/lib/status.js";
 
 const HEAD_ONE = "1111111111111111111111111111111111111111";
@@ -95,8 +95,8 @@ test("failure and truncation signals are unchanged and rows without REST head.sh
   });
 
   const open = truncated.listOpenHeadBranches?.() ?? [];
-  assert.equal(calls, 50, "the existing board ceiling is unchanged");
+  assert.equal(calls, BOARD_MAX_PAGES, "the board ceiling is unchanged");
   assert.equal(truncated.readTruncated?.(), true);
-  assert.equal(open.length, 5_000);
+  assert.equal(open.length, BOARD_MAX_PAGES * 100);
   assert.equal(open.every((row) => row.headRefOid === undefined), true);
 });

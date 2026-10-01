@@ -9,7 +9,7 @@ import {
   type BoardSnapshotIo,
 } from "../src/lib/board-snapshot-cache.js";
 import { buildBatchedGithub } from "../src/lib/status.js";
-import type { BoardIssueRest, BoardPrRest } from "../src/lib/open-prs-rest.js";
+import { BOARD_MAX_PAGES, type BoardIssueRest, type BoardPrRest } from "../src/lib/open-prs-rest.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 function root(): string {
@@ -343,14 +343,14 @@ test("truncated and failed GitHub reads cannot replace the last complete on-disk
     const finalPath = boardSnapshotPath(dir, "o", "r");
     const before = readFileSync(finalPath, "utf8");
 
-    const changed = Array.from({ length: 1_500 }, (_, i) => closed(10_000 - i, new Date(Date.UTC(2026, 8, 6) - i * 60_000).toISOString()));
+    const changed = Array.from({ length: BOARD_MAX_PAGES * 30 }, (_, i) => closed(10_000 - i, new Date(Date.UTC(2026, 8, 6) - i * 60_000).toISOString()));
     const calls: string[][] = [];
     const truncated = buildBatchedGithub("o", "r", {
       snapshotCache: cache,
       exec: pagingExec({ open: [], closed: changed, issues: [] }, calls),
     });
     truncated.listMergedHeadBranches!();
-    assert.equal(count(calls, /state=closed/), 50, "the fixture reaches the real truncation ceiling");
+    assert.equal(count(calls, /state=closed/), BOARD_MAX_PAGES, "the fixture reaches the real truncation ceiling");
     assert.equal(truncated.readTruncated?.(), true);
     assert.equal(readFileSync(finalPath, "utf8"), before, "a truncated fetch is not committed");
 

@@ -317,7 +317,7 @@ void test("a row held by both halves resolves to its TERMINAL state, never the s
 void test("the closed walk's page bounds and short-circuit are untouched", () => {
   assert.match(REST_SRC, /const BOARD_FULL_PAGE_SIZE = 100;/, "not tuned to reduce a count");
   assert.match(REST_SRC, /const BOARD_DELTA_PAGE_SIZE = 30;/);
-  assert.match(REST_SRC, /const BOARD_MAX_PAGES = 50;/);
+  assert.match(REST_SRC, /export const BOARD_MAX_PAGES = 200;/);
   assert.match(REST_SRC, /reachedKnown = true;/, "the stop test still exists and still stops on a known row");
   assert.match(REST_SRC, /if \(reachedKnown \|\| rows\.length < perPage\) break;/);
 });

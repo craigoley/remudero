@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { Task } from "../src/lib/plan.js";
-import { fetchBoardPrsRest, type GhApiFetcher, type RestPullRow } from "../src/lib/open-prs-rest.js";
+import { BOARD_MAX_PAGES, fetchBoardPrsRest, type GhApiFetcher, type RestPullRow } from "../src/lib/open-prs-rest.js";
 import { buildBatchedGithub, deriveStatus } from "../src/lib/status.js";
 
 /**
@@ -15,13 +15,12 @@ import { buildBatchedGithub, deriveStatus } from "../src/lib/status.js";
  * `GitHub.readTruncated()` accessor, and `derivePrPrecedence`'s existing `readFailed()` defer arm
  * now also deferring on it — ONLY the absence-conclusion, never a credit already found above it.
  *
- * `BOARD_FULL_PAGE_SIZE` (100) and `BOARD_MAX_PAGES` (50) are not exported from open-prs-rest.ts
- * (they are runaway-guard internals, not a public contract), so this file pins their documented
- * values locally -- a future change to either constant fails these tests loudly rather than
- * silently stopping to exercise the ceiling.
+ * `BOARD_MAX_PAGES` is exported from open-prs-rest.ts and imported here, so a change to it moves these
+ * fixtures with it instead of silently stopping to exercise the ceiling. `BOARD_FULL_PAGE_SIZE` (100)
+ * is still not exported, so this file pins that documented value locally.
  */
 const FULL_PAGE_SIZE = 100;
-const MAX_PAGES = 50;
+const MAX_PAGES = BOARD_MAX_PAGES;
 
 function task(over: Partial<Task> = {}): Task {
   return {
@@ -86,7 +85,7 @@ test("fetchBoardPrsRest: the OPEN (hot) walk alone hits BOARD_MAX_PAGES and sets
     if (q.includes("state=open")) {
       calls.open += 1;
       // Always a FULL page: never triggers the `rows.length < perPage` early break, so the hot
-      // loop walks every one of the 50 pages and hits the ceiling.
+      // loop walks every page up to BOARD_MAX_PAGES and hits the ceiling.
       return Array.from({ length: FULL_PAGE_SIZE }, (_, i) => fillerRow(1_000_000 + calls.open * 1000 + i));
     }
     calls.closed += 1;
@@ -138,7 +137,7 @@ test("fetchBoardPrsRest: neither walk approaching the ceiling leaves truncated f
 /**
  * An `opts.exec` that forces the CLOSED (cold) half to truncate: every closed page returns a
  * FULL {@link FULL_PAGE_SIZE} rows for all {@link MAX_PAGES} pages the walk is allowed, so it
- * never takes the `rows.length < perPage` early exit and hits the ceiling on page 50. The OPEN
+ * never takes the `rows.length < perPage` early exit and hits the ceiling on page BOARD_MAX_PAGES. The OPEN
  * (hot) half always answers empty, so it is never the cause of the truncation this fixture
  * produces -- isolating the binding half exactly as the two `fetchBoardPrsRest`-level tests above
  * do directly. `credit`, if given, is spliced into page 1 -- i.e. INSIDE the reached view; leaving
