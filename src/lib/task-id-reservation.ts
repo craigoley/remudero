@@ -3,6 +3,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isAllocatableTaskId } from "./task-id.js";
+import { assertClaimRefPushAllowed } from "./live-write-guard.js";
 
 /**
  * Atomic reservation of a minted task id — the piece {@link mintNextTaskIdWithHistory} skips. The
@@ -609,6 +610,7 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
       return deps.run(["commit-tree", tree, "-m", msg]).stdout.trim();
     },
     attempt(taskId, anchor) {
+      assertClaimRefPushAllowed(deps.run, taskIdReservationRef(taskId));
       const res = deps.run(["push", "origin", `${anchor}:${taskIdReservationRef(taskId)}`]);
       if (res.status === 0) {
         lastStderr = undefined;
@@ -661,6 +663,7 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
         takenOverFrom,
       });
       const amended = deps.run(["commit-tree", tree, "-p", "FETCH_HEAD", "-m", message]).stdout.trim();
+      assertClaimRefPushAllowed(deps.run, ref);
       const pushed = deps.run(["push", "origin", `${amended}:${ref}`]);
       if (pushed.status !== 0) {
         lastStderr = pushed.stderr;
@@ -679,6 +682,7 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
       const tree = deps.run(["hash-object", "-t", "tree", "/dev/null"]).stdout.trim();
       const msg = formatReservationAnchorMessage({ branch, pid: process.pid, host: hostname(), startedAt: reservationNowIso(), source: "automatic" });
       const amended = deps.run(["commit-tree", tree, "-p", previousAnchor, "-m", msg]).stdout.trim();
+      assertClaimRefPushAllowed(deps.run, taskIdReservationRef(taskId));
       const res = deps.run(["push", "origin", `${amended}:${taskIdReservationRef(taskId)}`]);
       if (res.status !== 0) {
         lastStderr = res.stderr;

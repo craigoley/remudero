@@ -89,7 +89,7 @@ test("gitDispatchClaimReserver records a failing attempt's stderr and CLEARS it 
   fail = false;
   assert.equal(reserver.attempt("W1-T9001", "deadbeef"), "created");
   assert.equal(reserver.lastAttemptStderr?.(), undefined, "a success must not leave a stale cause behind");
-  assert.deepEqual(calls[0], ["push", "origin", `deadbeef:${dispatchClaimRef("W1-T9001")}`]);
+  assert.deepEqual(calls.find((c) => c[0] === "push"), ["push", "origin", `deadbeef:${dispatchClaimRef("W1-T9001")}`]);
 });
 
 test("a reserver that omits lastAttemptStderr still satisfies the interface — the seam is optional", () => {

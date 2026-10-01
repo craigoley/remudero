@@ -276,3 +276,22 @@ export function assertLiveWriteAllowed(
   if (liveWriteExemptDepth > 0) return; // inside withLiveWritesAllowed
   throw new LiveWriteBlockedError(boundary, detail);
 }
+
+/** W1-T4447: true for a network remote URL (scheme other than file://, or scp-style host:path). */
+export function isNetworkRemoteUrl(url: string): boolean {
+  const u = url.trim();
+  if (/^file:/i.test(u)) return false;
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(u) || /^[^/\s:.][^/\s:]*:/.test(u);
+}
+
+/** W1-T4447: refuse a claim-ref push to a NETWORK origin under the test runner; a no-op (no git call) elsewhere. */
+export function assertClaimRefPushAllowed(
+  run: (args: string[]) => { status: number; stdout: string; stderr: string },
+  ref: string,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if (!isTestRunner(env) || env[LIVE_WRITE_OVERRIDE_ENV] === "1" || liveWriteExemptDepth > 0) return;
+  const res = run(["remote", "get-url", "origin"]);
+  const url = res.status === 0 ? res.stdout.trim() : "";
+  if (url && isNetworkRemoteUrl(url)) assertLiveWriteAllowed("git-push", `claim ref ${ref} pushed to the network origin ${url}`, env);
+}
