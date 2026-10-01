@@ -2647,6 +2647,10 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
     // would sail past `isPlanOnlyFilingPr` below and get re-persisted in the SAME projection that just
     // refused it, undoing the revalidation before this function even returns.
     const invalidatedUrl = creditStore[task.id]?.invalidated?.["head-branch"]?.prUrl;
+    const planOnlyByDiff = (pr: PrRef): boolean => {
+      const files = deps.mergedPathsByPr?.get(pr.number) ?? deps.github.changedFiles?.(pr.url);
+      return files !== undefined && isPlanOnlyChangeset(files);
+    };
     const hit = cands.find(
       (pr) =>
         pr.state.toUpperCase() === "MERGED" &&
@@ -2657,7 +2661,7 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
         // OWN worktree, which the retro, triage and plan flows reuse, would otherwise credit the task it just
         // filed unconditionally.
         !isPlanOnlyFilingPr(ledgerLines, pr.url, ledgerIndex, pr.headRefOid) &&
-        !isPlanOnlyChangeset(deps.mergedPathsByPr?.get(pr.number) ?? deps.github.changedFiles?.(pr.url) ?? []),
+        !planOnlyByDiff(pr),
     );
     if (!hit) return undefined;
     // W1-T951 DELIVERABLE A: a merged branch hit is a NEW live credit the durable store lacks — the durable
