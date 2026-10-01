@@ -1592,6 +1592,9 @@ export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs)
 /** W1-T4587: checkouts the reviewer itself created for proof execution (the PR head and base
  *  worktrees). {@link ensureDeps} may replace a partial node_modules only in one of these. */
 const reviewerOwnedCheckouts = new Set<string>();
+// One failed staged install per canonical install and lockfile hash per reviewer process. A
+// network timeout cannot become a two-minute retry for every criterion in the same review.
+const failedProofToolchainInstalls = new Set<string>();
 export function registerReviewerCheckout(path: string): void {
   reviewerOwnedCheckouts.add(resolve(path));
 }
@@ -1693,6 +1696,8 @@ export function refreshProofToolchain(
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
     }
   }
+  const failedInstallKey = `${resolve(installRoot)}\0${installHash}`;
+  if (failedProofToolchainInstalls.has(failedInstallKey)) return false;
   // npm ci removes node_modules before installing. Reviewer worktrees share this canonical install
   // with workers, so doing that in place can break running work. Install beside it, mark the new
   // tree, then swap directories only after npm has succeeded (W1-T4933's safety boundary).
@@ -1717,6 +1722,7 @@ export function refreshProofToolchain(
       rename(stagedModules, liveModules);
     } catch (error) {
       console.error("review toolchain install swap failed", error);
+      failedProofToolchainInstalls.add(failedInstallKey);
       if (hadOld) {
         try { rename(oldModules, liveModules); }
         catch (restoreError) {
@@ -1729,6 +1735,7 @@ export function refreshProofToolchain(
     return true;
   } catch (error) {
     console.error("review toolchain staged install failed", error);
+    failedProofToolchainInstalls.add(failedInstallKey);
     // A failed refresh leaves the old install serving and permits the one proof retry.
     return false;
   } finally {

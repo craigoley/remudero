@@ -182,6 +182,21 @@ test("W1-T4111: the inventory skips credited and shared-shard tasks, and a proof
   assert.throws(() => planInventory(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4111-empty-`)), "/nowhere"), /cannot read plan file/);
 });
 
+test("a merged task is held while the durable credit store catches up", () => {
+  const root = planRepo([
+    { id: "W1-T1", title: "merged", proof: "grep: shipped-lesson in learnings/ci-gate-lessons.yaml" },
+    { id: "W1-T2", title: "still open", proof: "grep: shipped-lesson in learnings/ci-gate-lessons.yaml" },
+  ]);
+  const stateDir = join(root, "state");
+  assert.deepEqual(planInventory(root, stateDir).open.map((t) => t.id), ["W1-T1", "W1-T2"]);
+  // GitHub's squash body can carry the task line inside the body, before its final co-author trailer.
+  execFileSync("git", ["-C", root, "-c", "user.email=g@example.invalid", "-c", "user.name=g", "commit", "-q", "--allow-empty",
+    "-m", "ship W1-T1", "-m", "Remudero-Task: W1-T1\n\nCo-authored-by: Example <e@example.invalid>"]);
+  assert.equal(existsSync(join(stateDir, "merge-credit.json")), false, "the credit writer has not run yet");
+  assert.deepEqual(planInventory(root, stateDir).open.map((t) => t.id), ["W1-T2"]);
+  assert.deepEqual(retirementCandidates(planInventory(root, stateDir), root).map((a) => a.target), ["W1-T2"]);
+});
+
 test("no garden PR is ever opened as a draft, a reviewed retirement included", () => {
   // Operator ruling 2026-09-24: a draft sits like a stuck PR. The whole path — the plan gardener's
   // reviewed `retire` class, landed through the real gardenCheckout — opens a PR ready for review.
@@ -340,7 +355,7 @@ test("an unreadable filing commit never closes a task", () => {
   const root = planRepo([{ id: "W1-T2", title: "really shipped", proof: "grep: shipped-lesson in learnings/ci-gate-lessons.yaml" }], { git: false });
   assert.equal(grepProofHolds(root, "grep: shipped-lesson in learnings/ci-gate-lessons.yaml"), true);
   assert.equal(filingRef(root, "plan/tasks.d/W1-T2-x.yaml"), undefined);
-  assert.deepEqual(retirementCandidates(planInventory(root, join(root, "state")), root), []);
+  assert.throws(() => planInventory(root, join(root, "state")), /cannot read task trailers from main history/);
   // A ref git cannot read, and a proof that is not a grep, are unknown — never a guess either way.
   const repo = planRepo([]);
   assert.equal(grepProofHeldAt(repo, "no-such-ref", "grep: seed in learnings/ci-gate-lessons.yaml"), undefined);
