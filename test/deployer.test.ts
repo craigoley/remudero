@@ -1070,3 +1070,33 @@ test("recon-GF: a FAILING launchctl query reports liveness as UNOBSERVED, never 
     );
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("W1-T4200: an operator marker reaches the guarded deploy path on a drift-only tick", () => {
+  // The launcher passes imageDriftOnly on EVERY tick; the image here is current (nothing baked
+  // behind), so before the fix the tick returned early and the marker was never read.
+  const go = makeDeps({ markerPresent: true, installHead: "old", originMain: "new" });
+  const out = runDeployCycle(go.deps, { imageDriftOnly: true });
+  assert.equal(out.deployed, true);
+  assert.equal(out.toHead, "new");
+  assert.ok(go.calls.includes("pullFf") && go.calls.includes("kickstart") && go.calls.includes("clearMarker"));
+  // The guards an unmarked full deploy has still apply: a busy fleet aborts BEFORE the pull.
+  const busy = makeDeps({ markerPresent: true, installHead: "old", originMain: "new", idle: { workers: 1, inflightLocks: 0, worktreeLocks: 0 } });
+  const held = runDeployCycle(busy.deps, { imageDriftOnly: true });
+  assert.equal(held.deployed, false);
+  assert.match(held.reason, /not-idle/);
+  assert.ok(!busy.calls.includes("pullFf") && !busy.calls.includes("kickstart"));
+  // A stale-running daemon over a current checkout is likewise the operator's to restart.
+  const stale = decideDeployTrigger({ markerPresent: true, autoMode: false, installHead: "same", originMain: "same", runningHead: "older", imageDriftOnly: true });
+  assert.equal(stale.deploy, true);
+  assert.match(stale.reason, /operator marker present/);
+});
+
+test("W1-T4200: a drift-only tick with no marker still returns early", () => {
+  const r = makeDeps({ markerPresent: false, installHead: "old", originMain: "new" });
+  const out = runDeployCycle(r.deps, { imageDriftOnly: true });
+  assert.equal(out.deployed, false);
+  assert.ok(!r.calls.includes("pullFf") && !r.calls.includes("kickstart") && !r.calls.includes("probeIdle"));
+  const stale = decideDeployTrigger({ markerPresent: false, autoMode: false, installHead: "same", originMain: "same", runningHead: "older", imageDriftOnly: true });
+  assert.equal(stale.deploy, false);
+  assert.equal(stale.blocker?.kind, "stale_running_daemon");
+});

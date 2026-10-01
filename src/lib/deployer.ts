@@ -495,13 +495,19 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
   // freshness check exits 75 and the entrypoint re-fetches, tens of times a day, in seconds.
   // Having the tick also act on `behind`/`runningStale` would put a second actor on the daemon's
   // own job and race it. The operator's `rmd deploy` keeps today's full reading.
-  const restartReasons = i.imageDriftOnly === true ? false : behind || runningStale;
+  // W1-T4200: a PRESENT operator marker is that same operator's request, and the launcher passes
+  // `--image-drift-only` on every tick — so under the blind reading below the marker was never read
+  // and `rmd deploy` wrote a request only a hand-run deploy-run could act on. A marker widens the
+  // tick to the full reading (the guards after the decision are the same ones an unmarked full
+  // deploy has); no marker leaves the tick blind, exactly as before.
+  const tickBlind = i.imageDriftOnly === true && !i.markerPresent;
+  const restartReasons = tickBlind ? false : behind || runningStale;
   // W1-T3694 — THE TICK'S OWN BLOCKER. `restartReasons` above DISCARDS `runningStale` whenever
   // `imageDriftOnly` is true; that discard is correct (W1-T3245) but must not be reported as
   // "up-to-date" below, which is what let a stale-running daemon read healthy for over an hour on
   // 2026-09-16. `undefined` `runningHead` still reads STALE (fail-eager, per this function's own
   // header) but there is no sha to name in a blocker, so that case is left to the reason text alone.
-  const runningStaleIgnoredByTick = i.imageDriftOnly === true && runningStale;
+  const runningStaleIgnoredByTick = tickBlind && runningStale;
   const staleDaemonBlocker: StaleRunningDaemonBlocker | undefined =
     runningStaleIgnoredByTick && i.runningHead !== undefined
       ? {
@@ -517,7 +523,7 @@ export function decideDeployTrigger(i: TriggerInputs): Decision {
   // W1-T3245: in the tick's reading the REASON must name the image too. `behind` can be true while
   // the tick is deliberately ignoring it, and reporting "install behind origin/main" for a recycle
   // sends the reader to the checkout — which is exactly the misattribution W1-T3240 fixed.
-  const why = i.imageDriftOnly === true
+  const why = tickBlind
     ? `running image predates ${i.imageBakedCommitsBehind} baked-path commit(s) — a merged change to ` +
       `${IMAGE_BAKED_PATHS.join(" or ")} is published and not running (mount staleness is the daemon's own restart)`
     : behind
