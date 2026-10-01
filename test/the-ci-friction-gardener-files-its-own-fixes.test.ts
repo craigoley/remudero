@@ -68,12 +68,15 @@ test("the ci-friction origin census sees a merged filing while the daemon checko
   const staleHead = daemon.git("rev-parse", "HEAD");
 
   writeFileSync(join(author.dir, "plan", "tasks.d", "filing.yaml"),
-    '- id: W1-T2\n  origin: "ci-friction:fix_refusal:the-worker-changed-nothing"\n');
+    '- id: W1-T2\n  origin: "ci-friction:fix_refusal:the-worker-changed-nothing"\n' +
+    "- id: W1-T3\n  origin: 'ci-friction:single-quoted'\n");
   author.git("add", "plan/tasks.d/filing.yaml");
   author.git("commit", "-q", "-m", "file priced cause");
   author.git("push", "-q", "origin", "main");
 
-  assert.deepEqual(freshCiFrictionPlanOrigins(daemon.dir), ["ci-friction:fix_refusal:the-worker-changed-nothing"]);
+  assert.deepEqual(freshCiFrictionPlanOrigins(daemon.dir), [
+    "ci-friction:fix_refusal:the-worker-changed-nothing", "ci-friction:single-quoted",
+  ]);
   assert.equal(daemon.git("rev-parse", "HEAD"), staleHead, "read the fetched tree without changing the daemon checkout");
   daemon.git("remote", "set-url", "origin", join(daemon.dir, "missing-origin"));
   assert.throws(() => freshCiFrictionPlanOrigins(daemon.dir), "an unreadable remote cannot become an empty origin set");
