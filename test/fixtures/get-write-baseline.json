@@ -2,12 +2,6 @@
   "about": "Every GET route that writes state, and why. A GET that writes makes that state depend on whether anyone read. This list only shrinks: arch Phase 4 design section 5 names each owner, and test/no-get-route-writes-state.test.ts refuses a new entry and a stale one.",
   "entries": [
     {
-      "route": "GET /v1/account-usage",
-      "writes": ["mkdir state", "open-for-write state/ledger.ndjson"],
-      "reason": "appendCreditStateTransition ledgers account.credit_state on each credit-state edge, so an edge is recorded only if someone happens to read.",
-      "owner": "the slow lane's host probe derives the edge and appends it once, with or without a reader (P4-T14)"
-    },
-    {
       "route": "GET /v1/feedback",
       "writes": ["write plan/feedback/fb-merged.yaml"],
       "reason": "reconcileFeedbackEntries flips an entry whose proposal PR merged to accepted (and lands it in production), one writer per concurrent GET.",
