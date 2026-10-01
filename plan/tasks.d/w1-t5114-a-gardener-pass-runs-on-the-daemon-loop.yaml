@@ -1,0 +1,53 @@
+- id: W1-T5114
+  title: "EVERY GARDENER PASS RUNS ON THE DAEMON'S EVENT LOOP — startGarden calls the fully synchronous runGarden on a 60 s setInterval inside the daemon process, so each pass (inventory reads over the ledger union, git, gh) blocks admission for its whole duration: on 2026-10-01 gardener passes took ~1,620 s of the 4,344 s that 11 ticks spent reaching admission, and boot to first admission ran 423-1,235 s"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-10-01: trace what still delays admission after W1-T4998"
+  note: "reservation hand-off: plan-garden-off-loop-1790852416000 -> plan-garden-off-loop-1790852416000"
+  plan_refs: [W1-T4998, W1-T4110, W1-T4969, W1-T5002, W1-T5003, W1-T5074]
+  files: [src/lib/gardener.ts, src/lib/garden-registry.ts, src/run-task.ts, test/a-gardener-pass-never-runs-on-the-daemon-loop.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-01 (core ledger union): 11 daemon.tick_phases rows spent 4,344 s from tick start to admission
+    (p50 308 s, max 929 s) while ms_in_cadences was 12-119 s. Silent gaps (no ledger row; the loop was blocked)
+    ending in a gardener's scorecard total ~1,620 s: config 839 s (max 243), hot-file 405 s (max 341), host-resource
+    117 s, plan 105 s, test 80 s, ci-friction 72 s. Across 7 boots, the first admission came 423-1,235 s after
+    daemon.boot, with plan/config/hot-file/test/ci-friction passes inside every window. daemon.loop_lag (1 s
+    interval probe) logged 54 stalls totalling ~4,626 s, max 562 s. Cause: src/lib/gardener.ts `startGarden` runs
+    `runGarden` synchronously, first at start and then on setInterval(intervalMs), and the daemon starts every
+    garden with intervalMs = pollIntervalMs (60 s) (src/lib/daemon.ts, `deps.gardens ... start(pollIntervalMs)`).
+    runGarden's cheap check short-circuits an unchanged pass, but any merge changes most gardeners' inputs, so
+    full passes run many times an hour, each holding the thread that admits builds. W1-T4969, W1-T5002 and W1-T5003
+    each trim one gardener's synchronous cost; this task removes the whole class from the daemon loop.
+    Also measured (out of scope here): the background sweep's own synchronous stretches took ~1,270 s of the same
+    windows (post_fix_reverification 347 s, github.wake.check_settled 316 s, plan_filing_classified 269 s,
+    review.capacity 158 s).
+  design: |
+    No new bound, no new refusal.
+    1. Move each garden's construction behind a registry (src/lib/garden-registry.ts): name -> buildRegisteredGarden({name, root,
+       repoRoot, owner, repo}) returning the spec and deps the daemon wiring builds today. The daemon wiring in
+       run-task.ts and a new `rmd garden run <name>` entry use the same registry, so the two cannot drift.
+    2. startGarden runs a pass by spawning `rmd garden run <name>` ASYNCHRONOUSLY (child_process.spawn, awaited
+       on exit) instead of calling runGarden in-process. The existing `running` flag still skips a tick while that
+       garden's pass is in flight. The child appends to the same ledger, so every scorecard, judged and filing row
+       is unchanged.
+    3. Ledger `garden.pass {name, ms, exit}` per pass, so a slow gardener is named rather than inferred from loop lag.
+  acceptance:
+    - claim: "a gardener pass never runs on the daemon event loop"
+      proof: 'grep: test("W1-T5114: a gardener pass never runs on the daemon event loop" in test/a-gardener-pass-never-runs-on-the-daemon-loop.test.ts'
+    - claim: "a garden tick is skipped while that garden's pass is still running"
+      proof: 'grep: test("W1-T5114: a garden tick is skipped while its pass is still running" in test/a-gardener-pass-never-runs-on-the-daemon-loop.test.ts'
+    - claim: "the daemon wiring and the garden CLI build each garden from the same registry"
+      proof: 'grep: test("W1-T5114: the daemon wiring and the garden CLI build each garden from the same registry" in test/a-gardener-pass-never-runs-on-the-daemon-loop.test.ts'
+    - claim: "the daemon wiring builds its gardens through the registry"
+      proof: 'grep: buildRegisteredGarden( in src/run-task.ts'
+  falsifier: |
+    Call runGarden in-process again and the first test sees a 1 s timer scheduled before the pass fire only after it.
