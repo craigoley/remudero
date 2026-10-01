@@ -114,6 +114,7 @@ test("W1-T5041: a current rotation re-carries a decision row an older rotation a
   assert.ok(!live.includes("W1-T-OLD"), "an archive from before the last current rotation is not re-read");
   assert.ok(live.includes('"step":"ledger.recarried"'), "the re-carry is ledgered");
   assert.ok(live.indexOf(released) < live.indexOf('"step":"ledger.recarried"'));
+  assert.ok(live.includes(`"unreadable_archives":[{"name":"${tornArchive.split("/").pop()}"`), "a torn archive is recorded, not hidden");
   // The next current rotation finds the row already live and re-carries nothing twice.
   oversized(ledger, live.trim().split("\n"));
   const again = rotateLedger(ledger, { ceilingBytes: CEILING, smoothingWindowMs: 0 });

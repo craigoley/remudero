@@ -1023,11 +1023,6 @@ export function ledgerCarriedPrefixPath(ledgerPath: string): string {
   return `${ledgerPath}.carried.json`;
 }
 
-/** W1-T5041 — sidecar recording the union of every retention set a rotation has used, so a rotator built
- *  before a step joined {@link DECISION_RELEVANT_LEDGER_STEPS} can see what it would drop. Measured
- *  2026-10-01: a host checkout predating `dispatch.breaker_released` archived every release row written
- *  09-29/30, the breaker re-seeded from the trips they cancelled, and four released tasks sat indeterminate.
- *  `lastFullRotationMs` is the real time of the last rotation whose own set covered the record. */
 export function ledgerRetainedStepsPath(ledgerPath: string): string {
   return `${ledgerPath}.retained-steps.json`;
 }
@@ -1038,19 +1033,19 @@ interface RetainedStepsRecord {
   lastDeferral?: { key: string; atMs: number };
 }
 
-type RetainedStepsRead = { state: "absent" } | { state: "unreadable" } | { state: "ok"; record: RetainedStepsRecord };
+type RetainedStepsRead = { status: "absent" } | { status: "unreadable" } | { status: "ok"; record: RetainedStepsRecord };
 
 function readRetainedSteps(ledgerPath: string): RetainedStepsRead {
   const path = ledgerRetainedStepsPath(ledgerPath);
-  if (!existsSync(path)) return { state: "absent" };
+  if (!existsSync(path)) return { status: "absent" };
   try {
     const raw = JSON.parse(readFileSync(path, "utf8")) as Partial<RetainedStepsRecord>;
-    if (!Array.isArray(raw.steps) || !raw.steps.every((x) => typeof x === "string")) return { state: "unreadable" };
+    if (!Array.isArray(raw.steps) || !raw.steps.every((x) => typeof x === "string")) return { status: "unreadable" };
     const last = typeof raw.lastFullRotationMs === "number" && Number.isFinite(raw.lastFullRotationMs) ? raw.lastFullRotationMs : undefined;
     const deferral = raw.lastDeferral && typeof raw.lastDeferral.key === "string" && typeof raw.lastDeferral.atMs === "number" ? raw.lastDeferral : undefined;
-    return { state: "ok", record: { steps: raw.steps, lastFullRotationMs: last, lastDeferral: deferral } };
+    return { status: "ok", record: { steps: raw.steps, lastFullRotationMs: last, lastDeferral: deferral } };
   } catch {
-    return { state: "unreadable" };
+    return { status: "unreadable" };
   }
 }
 
@@ -1058,25 +1053,24 @@ function rotationRow(step: string, fields: Record<string, unknown>, nowIso: stri
   return JSON.stringify({ ts: nowIso, run_id: "ledger-rotation", task_id: "_ledger", step, host: hostname(), ...fields }) + "\n";
 }
 
-/** Rows an earlier rotation archived although this rotation's set retains their step: only archives whose name
- *  stamp AND real mtime are newer than the last full rotation, so compaction's old-day files are never re-read.
- *  A torn archive is skipped; a row already live is never carried twice. */
 function rowsToRecarry(
   dir: string,
   lastFullRotationMs: number,
   retained: ReadonlySet<string>,
   live: ReadonlySet<string>,
   fs: ArchiveNamingFs,
-): { rows: ParsedLedgerLine[]; archives: string[] } {
+): { rows: ParsedLedgerLine[]; archives: string[]; torn: Array<{ name: string; reason: string }> } {
   const rows: ParsedLedgerLine[] = [];
   const archives: string[] = [];
+  const torn: Array<{ name: string; reason: string }> = [];
   for (const { name, mtimeMs } of archiveMtimes(dir, fs)) {
     if (mtimeMs <= lastFullRotationMs || Date.parse(rotationStampIso(name)!) <= lastFullRotationMs) continue;
     let text: string;
     try {
       const buf = readFileSync(join(dir, name));
       text = (name.endsWith(".gz") ? gunzipSync(buf) : buf).toString("utf8");
-    } catch {
+    } catch (error) {
+      torn.push({ name, reason: String((error as Error)?.message ?? error).slice(0, 120) });
       continue;
     }
     let found = false;
@@ -1090,7 +1084,7 @@ function rowsToRecarry(
     if (found) archives.push(name);
   }
   rows.sort((a, b) => (a.tsMs ?? 0) - (b.tsMs ?? 0));
-  return { rows, archives };
+  return { rows, archives, torn };
 }
 
 function sha256Hex(buf: Buffer): string {
@@ -1338,9 +1332,7 @@ export interface LedgerRotationResult {
    *  (see {@link HEALTH_STEP_RETENTION_WINDOW_MS}/{@link RENDER_STEP_RETENTION_WINDOW_MS}), plus
    *  anything appended after the snapshot (see doc below). */
   retainedLineCount?: number;
-  /** W1-T5041: steps the shared record retains that this rotator does not — set when it deferred instead. */
   deferredMissingSteps?: string[];
-  /** W1-T5041: decision rows a stale rotation archived that this one carried back into the live core. */
   recarriedLineCount?: number;
 }
 
@@ -1533,7 +1525,6 @@ export function rotateLedger(
     archiveFsDeps?: LedgerArchiveFsDeps;
     /** Cadence window, default {@link LEDGER_ROTATION_SMOOTHING_WINDOW_MS}; 0 rotates on every crossing. */
     smoothingWindowMs?: number;
-    /** W1-T5041: this rotator's own retention set, default {@link DECISION_RELEVANT_LEDGER_STEPS}. */
     retainedSteps?: ReadonlySet<string>;
   } = {},
 ): LedgerRotationResult {
@@ -1556,10 +1547,8 @@ export function rotateLedger(
     if (!ledgerRotationDue(fsDeps.statSize(path), ceilingBytes, dirname(path), archiveFsDeps, windowMs)) return { rotated: false };
     const own = opts.retainedSteps ?? DECISION_RELEVANT_LEDGER_STEPS;
     const shared = readRetainedSteps(path);
-    const record = shared.state === "ok" ? shared.record : undefined;
+    const record = shared.status === "ok" ? shared.record : undefined;
     const missing = (record?.steps ?? []).filter((step) => !own.has(step)).sort();
-    // W1-T5041: below the backstop a stale rotator leaves rotation to current code; past it, it rotates but
-    // retains the recorded steps too, so growth stays bounded and nothing newer code needs is archived.
     if (missing.length > 0 && fsDeps.statSize(path) <= ceilingBytes * LEDGER_ROTATION_BACKSTOP_MULTIPLIER) {
       deferStaleRotation(path, record!, missing, opts.now);
       return { rotated: false, deferredMissingSteps: missing };
@@ -1568,7 +1557,7 @@ export function rotateLedger(
       retained: new Set([...own, ...(record?.steps ?? [])]),
       current: missing.length === 0,
       record,
-      unreadable: shared.state === "unreadable",
+      unreadable: shared.status === "unreadable",
     });
     if (result.rotated) {
       const steps = [...new Set([...own, ...(record?.steps ?? [])])].sort();
@@ -1581,7 +1570,6 @@ export function rotateLedger(
   }
 }
 
-/** W1-T5041 — a deferred rotation is ledgered once per missing set per pacing window, never per append. */
 function deferStaleRotation(path: string, record: RetainedStepsRecord, missing: string[], now: (() => Date) | undefined): void {
   const key = missing.join(",");
   const nowMs = systemClock.now();
@@ -1610,7 +1598,7 @@ function rotateLedgerLocked(
   const lastFull = retention.current ? retention.record?.lastFullRotationMs : undefined;
   const recarry =
     lastFull === undefined
-      ? { rows: [] as ParsedLedgerLine[], archives: [] as string[] }
+      ? { rows: [] as ParsedLedgerLine[], archives: [] as string[], torn: [] as Array<{ name: string; reason: string }> }
       : rowsToRecarry(dirname(path), lastFull, retention.retained, new Set(snapshot.split("\n")), archiveFsDeps);
 
   // W1-T4100: heal on-disk names that ran ahead of their write time; the newest safe stamp is the
@@ -1834,7 +1822,9 @@ function rotateLedgerLocked(
 
   const recarriedCount = recarry.rows.filter((p) => keptCandidates.includes(p)).length;
   const noteContent =
-    (recarriedCount > 0 ? rotationRow("ledger.recarried", { count: recarriedCount, archives: recarry.archives }, nowIso) : "") +
+    (recarriedCount > 0 || recarry.torn.length > 0
+      ? rotationRow("ledger.recarried", { count: recarriedCount, archives: recarry.archives, unreadable_archives: recarry.torn }, nowIso)
+      : "") +
     (retention.unreadable ? rotationRow("ledger.retained_steps_unreadable", { path: ledgerRetainedStepsPath(path) }, nowIso) : "");
   const newLiveContent = coreContent + noteContent + pointerContent + tail;
   const swapped = writeFileAtomic(path, newLiveContent, () => {
