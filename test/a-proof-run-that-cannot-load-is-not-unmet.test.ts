@@ -152,6 +152,23 @@ test("a refresh uses the real canonical root behind a linked install", () => {
   }
 });
 
+test("a timed-out staged install is attempted once per canonical lockfile hash in one review", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-proof-timeout-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  t.mock.method(console, "error", () => {});
+  registerReviewerCheckout(dir);
+  writeFileSync(join(dir, "package.json"), "{}\n");
+  writeFileSync(join(dir, "package-lock.json"), '{"version":1}\n');
+  let attempts = 0;
+  const timedOut = (() => { attempts++; throw new Error("npm ci timed out"); }) as never;
+  assert.equal(refreshProofToolchain(dir, timedOut), false);
+  assert.equal(refreshProofToolchain(dir, timedOut), false);
+  assert.equal(attempts, 1, "another criterion must not pay the same two-minute install timeout");
+  writeFileSync(join(dir, "package-lock.json"), '{"version":2}\n');
+  assert.equal(refreshProofToolchain(dir, timedOut), false);
+  assert.equal(attempts, 2, "a new lockfile is a distinct install attempt");
+});
+
 test("a refresh refuses a dangling shared link and an unreadable canonical marker", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-proof-marker-"));
   const linked = mkdtempSync(join(tmpdir(), "rmd-proof-marker-link-"));
