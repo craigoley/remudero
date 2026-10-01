@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-dispatch-value-calibration-1790852354000 -> plan-dispatch-value-calibration-1790852354000"
   plan_refs: [W1-T3412, W1-T4941, W1-T4111, W1-T5113]
   files: [src/lib/dispatch-value.ts, src/run-task.ts, test/dispatch-value-degrades-per-class-and-smooths-its-estimate.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-01 (core ledger union, retro.closure_by_class, 83 snapshots since 09-20):

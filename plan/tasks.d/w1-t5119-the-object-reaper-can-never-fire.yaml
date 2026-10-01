@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-objstore-and-stale-base-1790853121000 -> plan-objstore-and-stale-base-1790853121000"
   plan_refs: [W1-T3092, W1-T4022, W1-T3090, W1-T2529, W1-T3116, W1-T4356]
   files: [src/lib/object-reaper.ts, src/run-task.ts, test/the-object-reaper-counts-only-active-workers.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-01 (core host, repos/remudero): 85,464 loose objects (2.08 GiB; 56,481 older than 7 days),
