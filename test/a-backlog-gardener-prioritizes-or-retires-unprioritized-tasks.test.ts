@@ -139,6 +139,22 @@ test("W1-T4941: a banded task is revisited only when its evidence changes", (t) 
   assert.deepEqual(backlogInventory(f.sources).candidates, [], "an operator amendment takes ownership");
 });
 
+test("W1-T4941: the default ledger reader sees live symptoms and refuses an incomplete archive", (t) => {
+  const item = task("W1-T9", { rationale: "Observed dispatch.value.refused." });
+  const f = fixture(t, [item]);
+  writeFileSync(join(f.stateDir, "ledger.ndjson"), JSON.stringify({ step: "dispatch.value.refused", ts: "2026-10-01T11:00:00.000Z" }) + "\n");
+  const deps = {
+    stateDir: f.stateDir, repoRoot: f.root, log: () => {},
+    openWorkspace: () => ({ root: f.root, land: () => undefined, dispose: () => {} }),
+  };
+  const { ledger: _fixtureLedger, ...overrides } = f.sources;
+  const spec = backlogGardenSpec(deps, overrides);
+  assert.equal(spec.inventory().candidates[0]?.evidence.symptoms[0]?.recent, 1, "the default reads the live ledger row");
+
+  writeFileSync(join(f.stateDir, "ledger.2026-09-30T00-00-00-000Z.ndjson.gz"), "not a gzip archive");
+  assert.throws(() => spec.inventory(), /backlog gardener: incomplete ledger union/, "a partial corpus cannot price a backlog decision");
+});
+
 test("W1-T4941: the backlog gardener uses the off-loop garden registry and a conforming branch", () => {
   assert.ok(REGISTERED_GARDEN_NAMES.includes("backlog"));
   assert.equal(gardenSchedule("backlog").intervalFor(60_000), 60_000);
