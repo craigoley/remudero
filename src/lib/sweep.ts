@@ -9627,6 +9627,9 @@ export function readyDraftPullRequest(
   }
 }
 
+/** PRIMARY CONTROL on how many stale-proof supersession closes one sweep pass may make; a PR over the cap keeps its red and is re-derived next pass. */
+export const MAX_STALE_PROOF_CLOSES_PER_PASS = 2;
+
 /** W1-T4702 — the last incomplete-union reason logged, so a persistent gap is logged once. */
 let lastReportedAnomalyGap: string | undefined;
 
@@ -10091,6 +10094,8 @@ export async function runSweep(
     reviewKey: string;
     mode: ReviewDispatchMode;
   }> = [];
+  // W1-T5030: close ATTEMPTS the stale-proof supersession arm has made this pass.
+  let staleProofCloses = 0;
 
   /** The tail every disposition shares once `acted`, `actionError` and `standDownReason` are known —
    *  factored out so the synchronous walk and the concurrent review batch ledger and log IDENTICALLY.
@@ -11050,6 +11055,14 @@ export async function runSweep(
                 break;
               }
               if (staleProofs && pr.changedFiles?.length === 0) {
+                if (staleProofCloses >= MAX_STALE_PROOF_CLOSES_PER_PASS) {
+                  // W1-T5030: the break keeps a deferred PR off `dispatchFix` — a ci-log worker cannot edit a stale proof.
+                  acted = false;
+                  standDownReason = `stale-proof supersession close deferred — ${MAX_STALE_PROOF_CLOSES_PER_PASS} already made this pass; this PR carries to the next pass`;
+                  extraDisposedFields = { ...extraDisposedFields, stale_proof_close_deferred: true };
+                  break;
+                }
+                staleProofCloses += 1;
                 let carried = "no merged stack parent could be read";
                 try {
                   const stack = deps.stackPrerequisite?.(pr);
