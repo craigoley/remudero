@@ -20,6 +20,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { type Clock, systemClock } from "./clock.js";
+import { defaultIsPidAlive } from "./drain-lock.js";
+import { isHolderStale, readFileIfExists } from "./fs-race-safe.js";
 
 /** How old an unreachable object must be before it is eligible. The SECOND of the two barriers:
  *  it is what makes a wrong quiet verdict survivable, so it is never omitted and never zero. */
@@ -35,6 +37,12 @@ export interface ObjectReapDeps {
   listInflightLocks?: () => readonly string[];
   /** Open-handle count under `.git`. Non-zero REFUSES; unreadable must return >0 (fail closed). */
   openFileCount?: (dir: string) => number;
+  /** W1-T5119: the CALLING run's own inflight lock file name; it is not another worker, so it never refuses. */
+  ownInflightLock?: string;
+  /** W1-T5119: whether a lock file names a live holder. Absent counts every lock (the strict default). */
+  isInflightLockActive?: (lockFile: string) => boolean;
+  /** W1-T5119: whether a registered worktree has a live worker. Absent counts every worktree (the strict default). */
+  isWorktreeActive?: (worktreePath: string) => boolean;
   /** Loose object count. */
   looseObjectCount?: (repoDir: string) => number;
   /** Runs the prune. Injected so a test can assert the ARGV, which is where the expiry lives. */
@@ -143,11 +151,12 @@ export function objectReapRefusal(
   inflightDir: string,
   deps: ObjectReapDeps = {},
 ): string | undefined {
-  const worktrees = (deps.listWorktrees ?? defaultListWorktrees)(repoDir);
+  const worktrees = (deps.listWorktrees ?? defaultListWorktrees)(repoDir).filter((w) => deps.isWorktreeActive?.(w) ?? true);
   if (worktrees.length > 0) {
     return `${worktrees.length} worktree(s) registered — a prune racing a worker can remove an object it is about to reference`;
   }
-  const locks = (deps.listInflightLocks ?? (() => defaultListInflightLocks(inflightDir)))();
+  const locks = (deps.listInflightLocks ?? (() => defaultListInflightLocks(inflightDir)))()
+    .filter((lock) => lock !== deps.ownInflightLock && (deps.isInflightLockActive?.(lock) ?? true));
   if (locks.length > 0) {
     return `${locks.length} inflight lock(s) held — the fleet is mid-dispatch`;
   }
@@ -156,6 +165,32 @@ export function objectReapRefusal(
     return `${open} open handle(s) under .git — a live process holds the object store`;
   }
   return undefined;
+}
+
+/**
+ * W1-T5119: the ACTIVE-worker probes the rung hands {@link objectReapRefusal}, so the operator's rule ("no prune while an active
+ * worker uses the store") is measured, not approximated by counting files. An inflight lock or a worktree run lock (`<path>.lock`)
+ * counts while its holder is live by {@link isHolderStale}; an unreadable lock counts as live (fail closed), a missing run lock
+ * does not (a leftover registration with no worker).
+ */
+export function activeWorkerProbes(
+  inflightDir: string,
+  isPidAlive: (pid: number) => boolean = defaultIsPidAlive,
+): Pick<ObjectReapDeps, "isInflightLockActive" | "isWorktreeActive"> {
+  const live = (raw: string | undefined, absentIsLive: boolean): boolean => {
+    if (raw === undefined) return absentIsLive;
+    let holder: { pid?: unknown; host?: string; startedAt?: string };
+    try {
+      holder = JSON.parse(raw) as typeof holder;
+    } catch {
+      return true; // a torn or garbled lock cannot prove its holder dead, so it still refuses the prune
+    }
+    return typeof holder?.pid !== "number" || !isHolderStale({ ...holder, pid: holder.pid }, { isPidAlive });
+  };
+  return {
+    isInflightLockActive: (lockFile) => live(readFileIfExists(join(inflightDir, lockFile)), true),
+    isWorktreeActive: (worktreePath) => live(readFileIfExists(`${worktreePath}.lock`), false),
+  };
 }
 
 /** Read the streak at `path`. Absent or malformed reads as a fresh, zero streak — a corrupt or
