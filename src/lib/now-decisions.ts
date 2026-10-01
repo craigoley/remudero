@@ -14,7 +14,7 @@
  * reply text is NOT offered: `/v1/escalation/reply` steers nothing yet (W1-T4471), so the question route
  * that does is the only text answer. Every field is an absolute time or content: no clock in `data`.
  */
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { BoardRow } from "./board.js";
 import { ESCALATION_OPTION_ROUTES } from "./escalate.js";
@@ -162,12 +162,16 @@ export function readQuestionStore(root: string): { lines: QuestionStoreLine[]; m
   const path = questionStorePath(root);
   let text: string;
   let mtimeMs: number;
+  let fd: number | undefined;
   try {
-    mtimeMs = statSync(path).mtimeMs;
-    text = readFileSync(path, "utf8");
+    fd = openSync(path, "r");
+    mtimeMs = fstatSync(fd).mtimeMs;
+    text = readFileSync(fd, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { lines: [] };
     return { reason: `the question store is unreadable: ${(error as NodeJS.ErrnoException).code ?? (error as Error).message}` };
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
   const lines: QuestionStoreLine[] = [];
   for (const raw of text.split("\n")) {
