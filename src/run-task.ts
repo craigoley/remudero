@@ -5,6 +5,7 @@
 // below have SECOND callers outside doctorCommand and stay imported here too.
 import { retryWhileLockBusy } from "./lib/lock-busy-retry.js";
 import { retryPollRead } from "./lib/poll-read-retry.js";
+import { recyclePauseDetail } from "./lib/recycle-yield.js";
 import { decideFreshnessRestart } from "./lib/deploy-judge.js";
 import {
   appendCaptureSurfaceFireHistory,
@@ -5773,6 +5774,7 @@ export interface PollDeps {
   */
   requiredContexts?: (owner: string, repo: string) => string[] | undefined;
   externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+  externalWaitRecycle?: () => string | undefined;
 }
 
 export function ciWaitFreshness(
@@ -5963,6 +5965,16 @@ export type CiGateOutcome =
       sha: string;
       oldSha: string;
       newSha: string;
+      recycle?: never;
+      checks?: never;
+      checkCount?: never;
+    }
+  | {
+      state: "freshness_handoff";
+      sha: string;
+      recycle: string;
+      oldSha?: never;
+      newSha?: never;
       checks?: never;
       checkCount?: never;
     };
@@ -6218,6 +6230,11 @@ async function waitForCiGreen(
           newSha: freshness.newSha,
         };
       }
+    }
+    const recycle = deps.externalWaitRecycle?.();
+    if (recycle) {
+      log("run.freshness_handoff", { waiting_on: "ci", head_sha: sha, trigger: "recycle", detail: recycle });
+      return { state: "freshness_handoff", sha, recycle };
     }
     if (i === 0 || i % 5 === 0) log("ci.polling", { ci: String(ci?.conclusion ?? ci?.status ?? "pending") });
     if (stall.stalled && !rollupHasRunningCheck(roll)) {
@@ -13650,6 +13667,7 @@ interface RunTaskBodyOptions {
   claimReserver?: DispatchClaimReserver;
   containmentExec?: ProbeExecutor;
   externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+  externalWaitRecycle?: () => string | undefined;
   isolationExec?: IsolationProbeExecutor;
   managedCheckoutInstall?: (repoDir: string) => void;
   maskLearnings?: boolean;
@@ -14418,6 +14436,7 @@ async function runTask(
      *  spawning a real sandboxed worker. Default: the real spawn-backed executor. */
     containmentExec?: ProbeExecutor;
     externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+    externalWaitRecycle?: () => string | undefined;
     /** Injectable isolation-probe executor (W1-T91) — the isolation sibling of
      *  `containmentExec` above, driving the REAL blocked_isolation catch branch. Default: the
      *  real spawn-backed executor. */
@@ -17170,6 +17189,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // is red and GitHub will not merge). Pending is never treated as pass.
     const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra), 6, {
       externalWaitFreshness: opts.externalWaitFreshness,
+      externalWaitRecycle: opts.externalWaitRecycle,
     });
     if (ci.state === "freshness_handoff") {
       // W1-T4662: this is a HAND-OFF, never a failure — a healthy run that reached the CI-wait
@@ -17177,8 +17197,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // to share `blocked_transient` with a genuine, repeated Anthropic-side API error, which made
       // the daemon's cross-task API-window hold and lane refill back dispatch off a signal that
       // named nothing wrong. The shared RunResult union names this outcome directly.
-      const reason = "freshness_yield";
-      say("daemon freshness handoff: CI is pending; leaving PR open for the refreshed daemon");
+      const reason = ci.recycle === undefined ? "freshness_yield" : "recycle_yield";
+      say(`daemon ${ci.recycle === undefined ? "freshness" : "recycle"} handoff: CI is pending; leaving PR open for the refreshed daemon`);
       log("verdict", {
         verdict: "handed_off",
         pr_url: prUrl,
@@ -33996,6 +34016,7 @@ export async function daemonCommand(
             // existing adapter is material-and-clean only; unassessed, dirty, and degraded
             // readings remain undefined and therefore cannot manufacture a restart.
             externalWaitFreshness: ciWaitFreshness(() => daemonFreshnessFromService(checkServiceFreshness(effectiveRepoRoot, process.env))),
+            externalWaitRecycle: () => recyclePauseDetail(config.root),
           }),
         readUsage: () => readUsageSnapshotPreferSdk(config),
         // THE LEDGER IS THE DEDUP (impl-FL): seed the once-per-string bound from what previous
