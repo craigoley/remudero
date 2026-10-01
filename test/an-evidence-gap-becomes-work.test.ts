@@ -13,6 +13,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { setTimeout as wait } from "node:timers/promises";
 import { parse as parseYaml } from "yaml";
 
 import type { Clock } from "../src/lib/clock.js";
@@ -435,8 +436,16 @@ test("a self-hosting daemon's eighth garden runs an evidence-coverage pass again
     // plan, gate, test, config, export, ci-friction, selector-shadow, then this gardener.
     const start = captured?.gardens?.[7];
     assert.ok(start, "an eighth garden is wired after the selector-shadow gardener");
-    start!(60 * 60 * 1000).stop();
-    const state = JSON.parse(readFileSync(evidenceCoverageStatePath(join(root, "state")), "utf8"));
+    const garden = start!(60 * 60 * 1000);
+    const statePath = evidenceCoverageStatePath(join(root, "state"));
+    const deadline = Date.now() + 10_000;
+    try {
+      while (!existsSync(statePath) && Date.now() < deadline) await wait(20);
+    } finally {
+      garden.stop();
+    }
+    assert.equal(existsSync(statePath), true, "the queued evidence-coverage pass completed");
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
     assert.equal(typeof state.lastPassAt, "string", "the pass ran at once and recorded itself in the daemon's state dir");
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
