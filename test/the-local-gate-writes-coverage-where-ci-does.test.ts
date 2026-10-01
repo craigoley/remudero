@@ -23,6 +23,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { CI_PARITY_TABLE, coverageScratchDir } from "../src/lib/ci-parity.js";
 import { defaultPreflightSpawn, type PreflightSpawn } from "../src/lib/commit-message.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PINNED_BASE_SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -49,7 +50,7 @@ function coverageCall(repoRoot = REPO_ROOT): { args: string[]; env?: NodeJS.Proc
 }
 
 test("coverage shards use canonical TMPDIR paths when the sibling scratch parent is symlinked", () => {
-  const tempRoot = mkdtempSync(join(tmpdir(), "g-"));
+  const tempRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}g-`));
   const repoRoot = join(tempRoot, "repo");
   const physicalScratchParent = join(tempRoot, "p");
   const scratchParentAlias = join(tempRoot, "a");

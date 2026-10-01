@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { defaultPreflightSpawn, type PreflightSpawn } from "../src/lib/commit-message.js";
 import { CI_PARITY_TABLE, coverageScratchDir } from "../src/lib/ci-parity.js";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -34,7 +35,7 @@ function coverageSpawn(
 }
 
 test("nested coverage runs isolate scratch without deleting the parent TMPDIR", () => {
-  const repoRoot = mkdtempSync(join(tmpdir(), "r-"));
+  const repoRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}r-`));
   const parentTmp = coverageScratchDir(repoRoot);
   const activeTmpAlias = join(repoRoot, "scratch-alias");
   const sentinel = join(parentTmp, "caller-fixture");
@@ -82,7 +83,7 @@ test("nested coverage runs isolate scratch without deleting the parent TMPDIR", 
 });
 
 test("a top-level coverage run keeps the stable sibling TMPDIR and does not confuse a prefixed neighbor", () => {
-  const repoRoot = mkdtempSync(join(tmpdir(), "t-"));
+  const repoRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t-`));
   const stableTmp = coverageScratchDir(repoRoot);
   const neighborTmp = `${stableTmp}-neighbor`;
   const stale = join(stableTmp, "stale-run");
@@ -119,7 +120,7 @@ test("a top-level coverage run keeps the stable sibling TMPDIR and does not conf
 });
 
 test("an unresolvable caller TMPDIR fails closed and preserves stable coverage scratch", () => {
-  const repoRoot = mkdtempSync(join(tmpdir(), "u-"));
+  const repoRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}u-`));
   const stableTmp = coverageScratchDir(repoRoot);
   const missingCallerTmp = join(repoRoot, "x");
   const sentinel = join(stableTmp, "caller-fixture");
@@ -151,7 +152,7 @@ test("an unresolvable caller TMPDIR fails closed and preserves stable coverage s
 });
 
 test("real coverage shards can run under nested TMPDIR without erasing the live parent fixture", () => {
-  const repoRoot = mkdtempSync(join(tmpdir(), "v-"));
+  const repoRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}v-`));
   const parentTmp = coverageScratchDir(repoRoot);
   const sentinel = join(parentTmp, "caller-fixture");
   const probe = join(repoRoot, "test", "nested-coverage-probe.test.mjs");
