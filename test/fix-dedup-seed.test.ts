@@ -145,6 +145,8 @@ test("W1-T1127: a fix dispatch whose own failure is swallowed no longer records 
       appendLedger(ledgerPath, { run_id: runId, task_id: "SWEEP", step, lane: "sweep", ...extra });
     const plan = { tasks: [], byId: new Map() };
     const effects = buildSweepEffects({
+      // W1-T4073: the fake head is no real commit; an empty head contract leaves the task as resolved.
+      resolveTaskContractAtHeadImpl: () => ({ criteria: [] }),
       owner: owner,
       repo: repo,
       config: { root } as never,
@@ -250,6 +252,8 @@ test("W1-T1127: a dispatch that reaches the worker still seeds the dedup exactly
     };
     let spawnCalls = 0;
     const effects = buildSweepEffects({
+      // W1-T4073: the fake head is no real commit; an empty head contract leaves the task as resolved.
+      resolveTaskContractAtHeadImpl: () => ({ criteria: [] }),
       owner: owner,
       repo: repo,
       config: { claudeBin: "/usr/bin/true", root } as never,
@@ -371,6 +375,8 @@ test("W1-T1127: a preflight stand-down (PR already terminal) is distinguishable 
       appendLedger(ledgerPath, { run_id: runId, task_id: "SWEEP", step, lane: "sweep", ...extra });
     const plan = { tasks: [], byId: new Map() };
     const effects = buildSweepEffects({
+      // W1-T4073: the fake head is no real commit; an empty head contract leaves the task as resolved.
+      resolveTaskContractAtHeadImpl: () => ({ criteria: [] }),
       owner: owner,
       repo: repo,
       config: { root } as never,

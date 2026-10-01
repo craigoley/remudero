@@ -299,6 +299,8 @@ test("dispatchFix REFUSES a synthetic PR whose head claims another task, before 
   try {
     mkdirSync(join(root, "repos"), { recursive: true });
     const effects = buildSweepEffects({
+      // W1-T4073: the fake head is no real commit; an empty head contract leaves the task as resolved.
+      resolveTaskContractAtHeadImpl: () => ({ criteria: [] }),
       owner: "acme",
       repo: "scratch-fy-repo",
       config: { root } as never,
@@ -383,6 +385,8 @@ test("dispatchFix sends the production RETRO trailer/head shape to a worker unde
   let spawnCalls = 0;
   try {
     const effects = (await import("../src/run-task.js")).buildSweepEffects({
+      // W1-T4073: the fake head is no real commit; an empty head contract leaves the task as resolved.
+      resolveTaskContractAtHeadImpl: () => ({ criteria: [] }),
       owner: owner,
       repo: repo,
       config: { claudeBin: "/usr/bin/true", root } as never,

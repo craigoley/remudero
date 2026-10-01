@@ -252,6 +252,7 @@ test("W1-T2402 integration: a spawn killed by signal is ledgered with a structur
       log: log,
       policy: DEFAULT_SWEEP_POLICY,
       reviewRunner: undefined,
+      resolveTaskContractAtHeadImpl: () => ({ criteria: [] }),
       spawnImpl: async () => {
         throw Object.assign(new Error("Claude Code process terminated by signal SIGKILL"), {
           signal: "SIGKILL",
