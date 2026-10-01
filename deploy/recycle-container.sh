@@ -110,6 +110,7 @@ set -euo pipefail
 # fallback, host-update.sh's own fallback, and deploy/runtime-env-vars.sh's real array never
 # disagree, so the fallback cannot silently go stale either.
 RMD_DAEMON_RUNTIME_ENV_VARS=(GH_TOKEN RMD_RESTART_THROTTLE_S RMD_FRESHNESS_RESTART_MAX GH_APP_ID GH_APP_INSTALLATION_ID GH_APP_PRIVATE_KEY_PATH RMD_GIT_AUTHOR_NAME RMD_GIT_AUTHOR_EMAIL NODE_OPTIONS RMD_OPENWEIGHT_API_KEY RMD_FOUNDRY_CLAUDE_ENDPOINT RMD_FOUNDRY_CLAUDE_API_KEY)
+RMD_DERIVED_RUNTIME_ENV_VARS=(RMD_READ_MODEL_DB_DIR RMD_WORKER_HOME_DIR)
 RUNTIME_ENV_VARS_FILE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)/runtime-env-vars.sh" || true
 if [ -n "${RUNTIME_ENV_VARS_FILE:-}" ] && [ -f "${RUNTIME_ENV_VARS_FILE}" ]; then
   # shellcheck source=./runtime-env-vars.sh
@@ -647,7 +648,7 @@ CAPTURED_SOURCE_get() { local ref="CAPTURED_SOURCE__$1"; printf '%s' "${!ref-}";
 
 is_declared_runtime_var() {
   local needle="$1" candidate
-  for candidate in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}"; do
+  for candidate in "${RMD_DAEMON_RUNTIME_ENV_VARS[@]}" "${RMD_DERIVED_RUNTIME_ENV_VARS[@]-}"; do
     [ "${candidate}" = "${needle}" ] && return 0
   done
   return 1
