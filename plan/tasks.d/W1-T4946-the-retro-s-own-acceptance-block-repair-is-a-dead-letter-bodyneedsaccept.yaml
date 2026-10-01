@@ -11,7 +11,9 @@
   origin: "followup:DAEMON-1789365794642:2026-09-14T07:13:36.301Z:0"
   plan_refs: ["W1-T136", "W1-T3386", "W1-T3508"]
   files: [src/run-task.ts, test/retro-acceptance-repair.test.ts]
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # backlog gardener: retirement evidence=43558c9066688820
   attempts: 0
   rationale: |
     OBSERVED (RETRO-1789367285330, run DAEMON-1789365794642, PR #5499): a retro/plan-sync PR opened

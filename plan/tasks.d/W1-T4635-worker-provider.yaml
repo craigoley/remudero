@@ -7,7 +7,9 @@
   principles: {tdd: strict}
   budget_usd: 15.50
   risk: medium
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # backlog gardener: retirement evidence=5cdb43c119a97456
   attempts: 0
   origin: architect
   plan_refs: ["§7", "P25", "W1-T2473", "W1-T2828"]
