@@ -35411,6 +35411,8 @@ export async function serveCommand(
     buildInitialBoardSnapshot?: (deps: BoardDeps) => void | Promise<void>;
     /** Holds or fails the real projection thread in boot-path tests. */
     boardProjectionOptions?: Parameters<typeof createBoardProjectionWorker>[2];
+    /** Forces a failed initial board plan read while keeping the worker's real source intact. */
+    loadBoardPlan?: typeof loadPlan;
     generation?: GenerationChannel;
   } = {},
 ): Promise<number> {
@@ -35446,7 +35448,7 @@ export async function serveCommand(
   let plan: Plan;
   let boardPlanReadFailure: string | undefined;
   try {
-    plan = loadPlan(planPath);
+    plan = (deps.loadBoardPlan ?? loadPlan)(planPath);
   } catch (error) {
     boardPlanReadFailure = String((error as Error)?.message ?? error);
     // The worker reads the real path and publishes an unavailable board. The assembly still

@@ -29,6 +29,10 @@ async function fixture(t: { after(fn: () => void | Promise<void>): void }, optio
   missingSource?: "plan" | "ledger";
   staleGithub?: boolean;
   crashWorker?: boolean;
+  spawnFailWorker?: boolean;
+  throwGithubFact?: boolean;
+  slowGithubFact?: boolean;
+  trailerLookup?: "ready" | "unavailable";
   intervalMs?: number;
   staleMs?: number;
 } = {}) {
@@ -45,9 +49,14 @@ async function fixture(t: { after(fn: () => void | Promise<void>): void }, optio
     JSON.stringify({ ts: "2026-09-30T12:00:00Z", task_id: `W1-T${index % (options.taskCount ?? 1) + 1}`, step: "run.start", run_id: `r${index}` }) + "\n",
   ).join(""));
   const github: FakeGitHub = fakeGitHub({
-    listMergedHeadBranches: () => [],
+    listMergedHeadBranches: () => {
+      if (options.throwGithubFact) throw new Error("forced board fact failure");
+      if (options.slowGithubFact) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5_600);
+      return [];
+    },
     listOpenHeadBranches: () => [],
     findMergedByHeadBranch: () => [],
+    ...(options.trailerLookup ? { mergedTrailerLookup: () => options.trailerLookup === "ready" ? (_taskId: string) => null : null } : {}),
     ...(options.staleGithub ? { factsAgeMs: () => 60_000, factsStale: () => true } : {}),
   });
   const worker = createBoardProjectionWorker(github, { planPath, ledgerPath, inflightDir: join(root, "inflight") }, {
@@ -55,6 +64,7 @@ async function fixture(t: { after(fn: () => void | Promise<void>): void }, optio
     delayMs: options.delayMs,
     staleMs: options.staleMs,
     ...(options.crashWorker ? { workerUrl: new URL('data:text/javascript,throw new Error("forced board worker crash")') } : {}),
+    ...(options.spawnFailWorker ? { workerUrl: new URL("https://example.invalid/worker.js") } : {}),
   });
   const route = buildStatusRoute({ plan: loadPlan(planPath), ledgerPath, github }, undefined, worker);
   const server = createHttpServer((req, res) => {
@@ -86,6 +96,39 @@ async function ready(worker: BoardProjectionWorker, boundMs = 10_000): Promise<v
   while (!worker.isReady() && Date.now() < deadline) await sleep(20);
   assert.equal(worker.isReady(), true, JSON.stringify(worker.current()));
 }
+
+async function expectUnavailableReason(worker: BoardProjectionWorker, marker: string): Promise<void> {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const state = worker.current();
+    if (state.state === "unavailable" && state.reason.includes(marker)) return;
+    await sleep(20);
+  }
+  assert.fail(`board never reported ${marker}: ${JSON.stringify(worker.current())}`);
+}
+
+test("W1-T5004: a synchronous worker spawn refusal stays unavailable", async (t) => {
+  const { worker } = await fixture(t, { spawnFailWorker: true });
+  await expectUnavailableReason(worker, "worker_spawn_failed");
+});
+
+test("W1-T5004: a failed GitHub fact reaches the worker as an error", async (t) => {
+  const { worker } = await fixture(t, { throwGithubFact: true });
+  await expectUnavailableReason(worker, "forced board fact failure");
+});
+
+test("W1-T5004: an unanswered GitHub fact times out", async (t) => {
+  const { worker } = await fixture(t, { slowGithubFact: true, intervalMs: 60_000 });
+  await expectUnavailableReason(worker, "timed out");
+});
+
+test("W1-T5004: merged-trailer lookup preserves ready and unavailable answers", async (t) => {
+  for (const trailerLookup of ["ready", "unavailable"] as const) {
+    const { worker, github } = await fixture(t, { trailerLookup });
+    await ready(worker);
+    assert.ok(github.calls.some((call) => call.method === "mergedTrailerLookup"), `${trailerLookup} lookup reached the parent`);
+  }
+});
 
 test("W1-T5004: default cold projection leaves cheap routes responsive", async (t) => {
   const { worker, url, startedAt } = await fixture(t, { delayMs: 200, taskCount: 1_800, ledgerRows: 20_000 });
@@ -241,6 +284,7 @@ test("W1-T5004: real serve boot answers while projection is cold", async (t) => 
     branch: () => "main",
     boardGhBin: join(gatewayShim.dir, "gh"),
     boardProjectionOptions: { delayMs: 2_000 },
+    loadBoardPlan: () => { throw new Error("forced initial board plan read failure"); },
   });
   t.after(async () => {
     process.emit("SIGTERM");
@@ -253,6 +297,7 @@ test("W1-T5004: real serve boot answers while projection is cold", async (t) => 
   assert.ok(lines.some((line) => line.includes(`127.0.0.1:${port}`)), "the configured interface bound");
   const token = (JSON.parse(readFileSync(join(root, "state", "service-tokens.json"), "utf8")) as { read: string }).read;
   const headers = { authorization: `Bearer ${token}` };
+  assert.match(readFileSync(join(root, "state", "ledger.ndjson"), "utf8"), /serve\.board_plan_unreadable.*forced initial board plan read failure/);
   const started = Date.now();
   assert.equal((await fetch(`http://127.0.0.1:${port}/v1/version`, { headers })).status, 200);
   assertWallClockBound(Date.now() - started, 1_000, "the real boot path answers inside the client budget");
