@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -19,7 +19,7 @@ import {
 import { HOST_RESOURCE_MIN_INTERVAL_MS } from "../src/lib/host-resource-gardener.js";
 import { OVERSEER_MIN_INTERVAL_MS } from "../src/lib/gardener-overseer.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { buildRegisteredGarden, daemonCommand, runRegisteredGardenPass, type GardenBuildContext } from "../src/run-task.js";
+import { buildRegisteredGarden, daemonCommand, gardenCommand, runRegisteredGardenPass, type GardenBuildContext } from "../src/run-task.js";
 
 // MEASURED 2026-10-01: eleven daemon ticks spent 4,344 s reaching admission; ~1,620 s of the silent-loop gaps ended
 // in a gardener's scorecard, because every garden starter ran its synchronous pass on the daemon's event loop.
@@ -168,4 +168,67 @@ test("W1-T5114: the daemon wiring and the garden CLI build each garden from the 
     assert.equal(typeof built, "function", `${name} builds a pass`);
   }
   assert.equal(await runRegisteredGardenPass("gate", [], ctx, { stopped: true }), 0, "a pass stopped before its garden loads never runs");
+});
+
+test("W1-T5114: every registered garden's pass records its own failure and never throws", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-failure-`));
+  const bare = join(root, "not-a-repo");
+  mkdirSync(join(root, "state"), { recursive: true });
+  mkdirSync(bare, { recursive: true });
+  const oldPath = process.env.PATH;
+  // No `gh` on PATH: every GitHub read inside a pass fails fast instead of reaching the network.
+  process.env.PATH = "/usr/bin:/bin";
+  t.after(() => { process.env.PATH = oldPath; rmSync(root, { recursive: true, force: true }); });
+  const failures: string[] = [];
+  const ctxFor = (repoRoot: string, throwing: boolean): GardenBuildContext => ({
+    config: { claudeBin: "/bin/true", root } as GardenBuildContext["config"],
+    repoRoot,
+    owner: "acme",
+    repo: "remudero",
+    log: (step: string) => {
+      if (/failed$/.test(step)) return void failures.push(step);
+      if (throwing) throw new Error(`log refused ${step}`);
+    },
+    raiseDuplicate: () => "",
+  });
+  const runPass = async (name: (typeof REGISTERED_GARDEN_NAMES)[number], ctx: GardenBuildContext) => {
+    const pass = await buildRegisteredGarden(name, ctx, { hourly: true });
+    await pass();
+  };
+  // A repo with no scripts: the three ES-module gardens fail to load and record it under their own names.
+  for (const name of ["gate", "test", "config"] as const) await runPass(name, ctxFor(bare, false));
+  // The real repo with a log that refuses every non-failure row: each loaded pass fails inside and records it.
+  for (const name of ["test", "config", "selector-shadow", "evidence-coverage"] as const) await runPass(name, ctxFor(process.cwd(), true));
+  // A root that is not a git repo: the host-resource and overseer passes fail on their first read.
+  for (const name of ["host-resource", "overseer"] as const) await runPass(name, ctxFor(bare, true));
+  for (const step of [
+    "gate.gardener_failed",
+    "test.gardener_failed",
+    "config.gardener_failed",
+    "test.evidence_failed",
+    "selector-shadow.gardener_failed",
+    "evidence_coverage.gardener_failed",
+    "host_resource.failed",
+    "gardener_overseer.overseer_failed",
+  ]) assert.ok(failures.includes(step), `${step} is recorded (saw ${failures.join(", ")})`);
+});
+
+test("W1-T5114: rmd garden run runs one pass of a registered garden and refuses an unknown one", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-cli-home-`));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+  assert.equal(await gardenCommand(["run", "not-a-garden"]), 2);
+  assert.equal(await gardenCommand(["run", "evidence-coverage", "--bogus"]), 2);
+  assert.equal(await gardenCommand(["run", "evidence-coverage"]), 0);
+  const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
+  assert.match(ledger, /"run_id":"GARDEN-evidence-coverage-\d+","task_id":"DAEMON"/);
 });

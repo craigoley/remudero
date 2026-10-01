@@ -33078,7 +33078,7 @@ export function runRegisteredGardenPass(name: RegisteredGardenName, args: readon
 }
 
 /** `rmd garden run <name> [--hourly]` — one pass of one registered garden, the daemon's off-loop child (W1-T5114). */
-async function gardenCommand(rest: string[]): Promise<number> {
+export async function gardenCommand(rest: string[]): Promise<number> {
   const [sub, name] = rest;
   const badArg = unknownArgError("garden", rest.slice(2), [], [GARDEN_HOURLY_FLAG]);
   if (sub !== "run" || name === undefined || !isRegisteredGardenName(name) || badArg) {
