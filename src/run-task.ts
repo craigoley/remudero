@@ -13708,7 +13708,7 @@ interface RunTaskBodyOptions {
   readHeadShaForProvenance?: (prUrl: string) => string;
   /** W1-T4797: test seam for the pre-push diff-coverage precheck; production reads the real ones. */
   coveragePrecheckPorts?: CoveragePrecheckPorts;
-  /** Where a stale-proof PR-open refusal escalates; production files the task repo's own issue. */
+  /** Where a stale-proof PR-open refusal or managed-checkout install failure escalates; production files the task repo's own issue. */
   prOpenRefusalIssues?: IssueGateway;
   spawnWallClockBoundMs?: number;
   workerRuleHeadlinesEnabled?: boolean;
@@ -13791,6 +13791,36 @@ export class ManagedCheckoutRefreshRefusedError extends RmdError {
   }
 }
 
+/**
+ * W1-T4933: the REVIEWER's call site of the staged install. `reviewCommand` cuts its worktrees from a managed checkout and
+ * links that checkout's node_modules, so a tree that predates the lockfile fails the proofs it runs (six on console PR #1866).
+ * Dispatch's {@link refreshManagedCheckout} shares no path with it. Under the same checkout lock; a held lock or a failed
+ * install is ledgered and the review goes on against the tree that is there (a failure keeps the old one).
+ */
+export function refreshReviewSubjectInstall(
+  repoDir: string,
+  lockPath: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  escalate?: (failure: StagedInstallFailure) => void,
+  install: (repoDir: string) => void = (dir) => void stagedInstall(dir, { log, escalate }),
+): void {
+  if (!existsSync(join(repoDir, "node_modules"))) return;
+  let lock: DrainLockHandle;
+  try {
+    lock = acquireDrainLock(lockPath);
+  } catch (error) {
+    log("review.subject_install_skipped", { reason: `another dispatch holds ${lockPath} (${String((error as Error)?.message ?? error)})` });
+    return;
+  }
+  try {
+    install(repoDir);
+  } catch (error) {
+    log("review.subject_install_kept_stale", { reason: String((error as Error)?.message ?? error).slice(0, 512) });
+  } finally {
+    lock.release();
+  }
+}
+
 export function isManagedCheckoutLockBusy(error: unknown): boolean {
   return error instanceof ManagedCheckoutRefreshRefusedError && error.reason.startsWith("another dispatch holds ");
 }
@@ -13813,17 +13843,21 @@ export type ManagedCheckoutRefresh = { release: () => void } & (
  * W1-T4356: keep `repoDir` current before a worktree borrows its install. Only a checkout with its OWN node_modules is
  * borrowed (`resolveNodeModulesSource` prefers it); any other worktree links the install root the entrypoint keeps fresh.
  * A clean checkout behind origin/main is fast-forwarded and `install` reinstalls on the lockfile change (a failed install
- * reverts the fast-forward, so the next dispatch retries it rather than borrowing a broken tree); a dirty, diverged
- * or off-main one, or one a live worker still borrows from, is left untouched. The lock at `lockPath` is held until the
+ * reverts the fast-forward, so the next dispatch retries it rather than borrowing a broken tree). W1-T4933: the SAME staged
+ * install also runs on a clean checkout whose code is already current, because its tree can predate the lockfile; a failure
+ * there keeps the old tree and the dispatch goes on. A dirty, diverged or off-main one, or one a live worker still borrows from, is left untouched. The lock at `lockPath` is held until the
  * caller's run.lock marks its own borrower, so a peer dispatch never mutates the tree under a worktree it could not yet see.
  */
 export function refreshManagedCheckout(
   repoDir: string,
   lockPath: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  install: (repoDir: string) => void = (dir) => void ensureInstallFresh(dir),
+  install?: (repoDir: string) => void,
+  escalate?: (failure: StagedInstallFailure) => void,
 ): ManagedCheckoutRefresh {
   if (!existsSync(join(repoDir, "node_modules"))) return { kind: "unborrowed", release: () => {} };
+  // W1-T4933: staged and swapped, never the in-place clear-then-fill of ensureInstallFresh, which empties a tree others are linked to.
+  const runInstall = install ?? ((dir: string) => void stagedInstall(dir, { log, escalate }));
   let lock: DrainLockHandle;
   try {
     lock = acquireDrainLock(lockPath);
@@ -13848,7 +13882,16 @@ export function refreshManagedCheckout(
       return skip(`could not fetch origin (${String((error as Error)?.message ?? error)})`);
     }
     const beforeSha = git("rev-parse", "HEAD");
-    if (beforeSha === git("rev-parse", "origin/main")) return { kind: "current", release };
+    if (beforeSha === git("rev-parse", "origin/main")) {
+      // W1-T4933: code that is already current can still sit on a tree that predates its lockfile. A failed refresh keeps
+      // the old tree (stagedInstall ledgered and escalated it); the dispatch goes on and W1-T4193 names any mismatch it causes.
+      try {
+        runInstall(repoDir);
+      } catch (error) {
+        log("managed_checkout.install_kept_stale", { reason: String((error as Error)?.message ?? error).slice(0, 512) });
+      }
+      return { kind: "current", release };
+    }
     if (git("merge-base", "HEAD", "origin/main") !== beforeSha) return skip("checkout has diverged from origin/main");
     const borrower = listRegisteredWorktrees(repoDir).find(({ path }) => {
       const held = path === repoDir ? undefined : readRunLock(path);
@@ -13858,7 +13901,7 @@ export function refreshManagedCheckout(
     git("merge", "--ff-only", "--quiet", "origin/main");
     log("managed_checkout.fast_forward", { before_sha: beforeSha, after_sha: git("rev-parse", "HEAD") });
     try {
-      install(repoDir);
+      runInstall(repoDir);
     } catch (error) {
       // Revert, so the checkout still reads as behind and the next dispatch retries the install instead of linking it.
       git("reset", "--quiet", "--keep", beforeSha);
@@ -14573,8 +14616,10 @@ async function runTask(
      * the REAL `runTask()` catch branch that drops this run's dispatch claim on that refusal.
      */
     worktreeBaseDeps?: Parameters<typeof worktreeAdd>[4];
-    /** W1-T4356: reinstalls a fast-forwarded managed checkout; default {@link ensureInstallFresh}'s `npm ci`. */
+    /** W1-T4356/W1-T4933: refreshes a managed checkout whose lockfile hash moved; default {@link stagedInstall}. */
     managedCheckoutInstall?: (repoDir: string) => void;
+    /** Test gateway for checkout install escalation; production uses the task repo's issue gateway. */
+    prOpenRefusalIssues?: IssueGateway;
     instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
     pairedTrial?: Partial<PairedTrialInput>;
     pairedTrialHost?: "daemon";
@@ -15890,7 +15935,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   let checkoutRefresh: ManagedCheckoutRefresh;
   try {
     checkoutRefresh = await retryWhileLockBusy(
-      () => refreshManagedCheckout(repoDir, join(config.root, "state", `managed-checkout-${task.repo}.lock`), log, opts.managedCheckoutInstall),
+      () => refreshManagedCheckout(repoDir, join(config.root, "state", `managed-checkout-${task.repo}.lock`), log, opts.managedCheckoutInstall, (failure) => {
+        void tryEscalate(managedCheckoutInstallEscalation(failure, task.id, runId), { issues: opts.prOpenRefusalIssues ?? ghIssueGateway(owner, task.repo), ledgerPath, runId });
+      }),
       isManagedCheckoutLockBusy,
       { log },
     );
@@ -18843,6 +18890,8 @@ interface ReviewCommandDeps {
    * reviews validate the managed clone before target data is read. */
   enforceReviewSubjectCheckout?: boolean;
   resolveOwnerRepo?: typeof resolveOwnerRepo;
+  /** W1-T4933: brings an explicit target's managed checkout install in line with its lockfile before proofs run; default {@link stagedInstall}. */
+  refreshSubjectInstall?: (repoDir: string) => void;
 }
 
 type ReviewSubjectFailureReason =
@@ -19315,6 +19364,16 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     return 1;
   }
   const subjectRepoDir = subjectCheckout.repoDir;
+  // W1-T4933: a satellite's managed checkout is the reviewer's install source too; only a validated one (never the test fallback).
+  if (subjectCheckout.explicitTarget && subjectRepoDir !== repoRoot && (reviewSubject.ok || deps.refreshSubjectInstall !== undefined)) {
+    refreshReviewSubjectInstall(
+      subjectRepoDir,
+      join(config.root, "state", `managed-checkout-${repo}.lock`),
+      log,
+      (failure) => void tryEscalate(managedCheckoutInstallEscalation(failure, taskId ?? `PR-${view.number}`, runId), { issues: ghIssueGateway(owner, repo), ledgerPath, runId }),
+      deps.refreshSubjectInstall,
+    );
+  }
   // W1-T322: the same plan lookup this block already does for `criteria` also carries the
   // task's declared scope — an advisory-only input judgeReview needs. Stays `undefined` on ANY
   // read/parse failure (see the catch below), exactly like `criteria` degrading to the body's
@@ -48651,6 +48710,7 @@ function commandSyntax(name: string): string {
 // InstallFreshnessDeps consumers below) keeps its import path unchanged. This is a
 // PURE MOVE — the function body and behaviour are byte-identical to the pre-move version.
 import { reconcilePlan, type ReconcileSummary } from "./lib/plan-reconcile.js";
+import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 export { hashInstallInputs, installHashMarkerPath };
 
