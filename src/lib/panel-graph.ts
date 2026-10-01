@@ -40,6 +40,7 @@ import {
   buildLedgerIndex,
   projectPlan,
   readLedgerLines,
+  SERVE_KEEPS_CREDITS_IN_MEMORY,
   isDispatchBreakerTripped,
   dispatchesWithoutNewOwnedPr,
   DEFAULT_MAX_TASK_DISPATCHES,
@@ -638,7 +639,7 @@ export function buildDrainPreviewRoute(deps: PanelGraphDeps, readPlanSnapshot?: 
       const opts: DrainOpts = { max: parsedMax.max, until: url.searchParams.get("until") ?? undefined };
 
       const plan = readPanelPlan(deps, readPlanSnapshot);
-      const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
+      const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY });
       const isMerged = (id: string) => projection.get(id)?.merged ?? false;
       const cards = buildDrainPreview(plan, isMerged, opts);
       sendJson(res, 200, { cards });
@@ -1143,6 +1144,7 @@ export function buildOperatorActivityRoute(deps: PanelGraphDeps, readPlanSnapsho
           ledgerPath: deps.ledgerPath,
           github: deps.statusGithub,
           readLedger: () => liveLedger,
+          writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY,
         });
         sendJson(res, 200, buildOperatorActivityProjection({
           plan,
@@ -1335,7 +1337,7 @@ export function buildPlanViewRoute(deps: PanelGraphDeps, readPlanSnapshot?: () =
         return;
       }
       const plan = readPanelPlan(deps, readPlanSnapshot);
-      const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
+      const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY });
       const isMerged: MergedSet = (id) => projection.get(id)?.merged ?? false;
       const progress = computePlanProgress(plan, projection, deps.statusGithub, progressCache);
       const planRefs = planRefsFromSnapshot(plan);
@@ -1597,7 +1599,7 @@ function prepareInboxPass(
  */
 function classifyAllProposals(deps: PanelGraphDeps, loadPlanFn: (planPath: string) => Plan = deps.readPlanSnapshot ?? loadPlan): ClassifiedInbox {
   const plan = loadPlanFn(deps.planPath);
-  const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
+  const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY });
   const ledgerLines = readLedgerLines(deps.ledgerPath);
   const sha = (deps.inboxMainSha ?? readOriginMainSha)(deps.root);
   const pass = prepareInboxPass(deps, plan, projection, ledgerLines, anchorGrepFor(deps, sha));
@@ -1676,7 +1678,7 @@ function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readP
     const last = state.last;
     plan = last?.planKey !== undefined && last.planKey === planKey ? last.plan : loadPlan(deps.planPath);
   }
-  const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub, readLedger: () => ledgerLines });
+  const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub, readLedger: () => ledgerLines, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY });
   const archiveKey = archiveReleases?.size ? [...archiveReleases].sort(([a], [b]) => a.localeCompare(b)) : null;
   const key = JSON.stringify([stamps, sha ?? null, verdictDigest, projectionDigest(projection), archiveKey]);
   return { key, sha, plan, planKey, projection, ledgerLines, archiveReleases };

@@ -18,12 +18,6 @@
       "writes": ["write plan/feedback/fb-merged.yaml"],
       "reason": "reconcileFeedbackEntries flips an entry whose proposal PR merged to accepted (and lands it in production), one writer per concurrent GET.",
       "owner": "the feedback materializer in the slow lane, triggered by a gateway generation showing the PR merged (P4-T07)"
-    },
-    {
-      "route": "GET /v1/status",
-      "writes": ["mkdir state", "rename state/merge-credit.json", "write state/merge-credit.json.<tmp>"],
-      "reason": "projectPlan saves a head-branch or trailer credit to the durable credit store on a read; the daemon already owns that store.",
-      "owner": "the daemon; serve passes a no-op credit-store writer to every projectPlan caller (P4-T19)"
     }
   ]
 }
