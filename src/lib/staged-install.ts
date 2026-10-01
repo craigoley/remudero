@@ -34,7 +34,8 @@ import { basename, dirname, join } from "node:path";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import type { Escalation } from "./escalate.js";
 
-/** Same generous bound as run-task.ts's NPM_CI_TIMEOUT_MS (that file imports this one, never the reverse). */
+/** A BACKSTOP for a wedged `npm ci` (dead registry socket, hung postinstall), never the control that ends a healthy one:
+ *  the same generous 10 minutes as run-task.ts's NPM_CI_TIMEOUT_MS (that file imports this one, never the reverse). */
 export const STAGED_NPM_CI_TIMEOUT_MS = 600_000;
 
 export interface StagedInstallFailure {
