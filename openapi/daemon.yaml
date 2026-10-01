@@ -7228,7 +7228,8 @@ components:
         state/read-model/switches.json sets `now` to `serve`. Version 2 carries no clock stamp and
         no now-relative value in `data` (the envelope's `generatedAt` and each source's `asOf` do),
         so the ETag moves only when the content does. A consumer derives a duration ("running for
-        12 min") from an absolute field such as a task's `startedAt`.
+        12 min") from an absolute field such as a task's `startedAt`. Version 3 (P4-T08) replaced
+        `questions` (a count) with `decisions[]`: each open decision with the route that answers it.
       required: [view, version, generatedAt, asOf, stale, sources, data]
       properties:
         view:
@@ -7236,7 +7237,7 @@ components:
           enum: [now]
         version:
           type: integer
-          enum: [2]
+          enum: [3]
         generatedAt: {type: string, format: date-time}
         asOf: {type: [string, "null"]}
         stale: {type: boolean}
@@ -7247,7 +7248,7 @@ components:
             $ref: "#/components/schemas/ViewSource"
         data:
           type: object
-          required: [instance, board, prQueue, actions, recent, health, questions]
+          required: [instance, board, prQueue, actions, recent, health, decisions]
           properties:
             instance: {type: string}
             board:
@@ -7362,17 +7363,61 @@ components:
                 reasons:
                   type: object
                   additionalProperties: {type: string}
-            questions:
-              description: Open feedback questions; core only, so another instance carries a `reason` instead.
-              oneOf:
-                - type: object
-                  required: [count]
-                  properties:
-                    count: {type: integer}
-                - type: object
-                  required: [reason]
-                  properties:
-                    reason: {type: string}
+            decisions:
+              type: array
+              description: Every open decision for this instance, newest first, at most 50 (src/lib/now-decisions.ts).
+              items:
+                $ref: "#/components/schemas/NowDecision"
+            decisionsMore:
+              type: integer
+              description: How many open decisions past the cap `decisions` leaves out.
+            decisionsReasons:
+              type: object
+              description: >
+                Why a decision source was not read for this instance, by kind (`grill`, `task_question`):
+                both live in core, so another instance names why. Its decisions are absent, never zero.
+              properties:
+                grill: {type: string}
+                task_question: {type: string}
+
+    NowDecision:
+      type: object
+      description: >
+        One open thing the operator answers, with the ONE route that steers the answer. `answer.tier` is
+        that route's write tier: a `high` one still needs the console's /v1/confirm nonce. `fields` are
+        sent as given; the operator's own input goes in the route's text field (`text` for /v1/feedback,
+        `answer` for /v1/questions/answer) or, for `choice`, the `disposition` picked from `options`.
+      required: [id, kind, instance, title, prompt, answer]
+      properties:
+        id:
+          type: string
+          description: "Stable: `grill:<feedbackId>`, `question:<task>:<ts>`, `manual:<task>:<issueUrl>` or `escalation:<task>:<issueUrl>`."
+        kind: {type: string, enum: [grill, task_question, manual_approval, escalation]}
+        instance: {type: string}
+        taskId: {type: string}
+        title: {type: string}
+        prompt: {type: string, description: Bounded to 2048 characters; the full text is in the task or feedback entry.}
+        options: {type: array, items: {type: string}}
+        currentAssumption: {type: string}
+        impactIfWrong: {type: string, enum: [low, med]}
+        askedAt: {type: string, format: date-time}
+        answer:
+          type: object
+          required: [method, path, tier, fields, input]
+          properties:
+            method: {type: string, enum: [POST]}
+            path:
+              type: string
+              description: >
+                Core's own decisions name the unprefixed route. Another instance's escalation names that
+                instance's mount, `/v1/i/<instance>/manual/approve` or `/v1/i/<instance>/escalation/mark-handled`,
+                so the answer lands in its own state.
+              pattern: "^/v1/(i/[^/]+/)?(feedback|questions/answer|manual/approve|escalation/mark-handled)$"
+            tier: {type: string, enum: [low, middle, high]}
+            fields:
+              type: object
+              additionalProperties: {type: string}
+            input: {type: string, enum: [text, choice, none]}
 
     NowTask:
       type: object
@@ -10791,6 +10836,80 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "503":
+          description: The registered instance's state or plan is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceUnavailable"
+
+  /v1/i/{instance}/manual/approve:
+    post:
+      summary: Approve a MANUAL-queue item of this registered instance -- closes its GitHub issue.
+      description: >
+        The unprefixed /v1/manual/approve, rooted in THIS instance's state: `panel.manual_approved`
+        lands in its own ledger. The `now` view names this route for another instance's MANUAL
+        escalations (docs/views.md).
+      security:
+        - bearerWrite: []
+      parameters:
+        - name: instance
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApproveManualRequest"
+      responses:
+        "200":
+          description: The issue was closed and the approval recorded in this instance's ledger.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApproveManualResult"
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/HighTierForbidden" }
+        "503":
+          description: The registered instance's state or plan is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceUnavailable"
+
+  /v1/i/{instance}/escalation/mark-handled:
+    post:
+      summary: Mark an escalation of this registered instance handled -- closes its GitHub issue.
+      description: >
+        The unprefixed /v1/escalation/mark-handled, rooted in THIS instance's state:
+        `panel.escalation_marked_handled` lands in its own ledger and `precision` is computed from it.
+        The `now` view names this route for another instance's escalations (docs/views.md).
+      security:
+        - bearerWrite: []
+      parameters:
+        - name: instance
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MarkEscalationHandledRequest"
+      responses:
+        "200":
+          description: The issue was closed and the action recorded in this instance's ledger.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MarkEscalationHandledResult"
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "503":
           description: The registered instance's state or plan is unavailable.
           content:

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
@@ -41,6 +41,7 @@ import { HOST_PROBE_BUDGET_MS, PLAN_BUDGET_MS } from "../src/lib/view-freshness.
 import { buildBatchedGithub, DEFAULT_LIVENESS_BOUND_MS, readLedgerLines, type GitHub } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { SHADOW_CLASSIFICATIONS, VIEW_SHADOW_DIFF_STEP } from "../src/lib/view-shadow.js";
+import { viewEtag } from "../src/lib/views.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 type TestCtx = { after: (fn: () => void) => void };
@@ -359,7 +360,7 @@ test("the now view stays dark until its switch reads shadow or serve", (t) => {
   assert.deepEqual(logged, []);
 });
 
-test("questions are counted for core only and one failing instance leaves the others", (t) => {
+test("decisions come from core's stores for core only and one failing instance leaves the others", (t) => {
   const root = scratch(t);
   const clock = stepped();
   const core = rig(t, root, "core", clock);
@@ -368,7 +369,7 @@ test("questions are counted for core only and one failing instance leaves the ot
   const feedbackRoot = join(root, "checkout");
   mkdirSync(join(feedbackRoot, "plan", "feedback"), { recursive: true });
   for (const [id, status] of [["fb-1", "grilling"], ["fb-2", "grilling"], ["fb-3", "new"]]) {
-    writeFileSync(join(feedbackRoot, "plan", "feedback", `${id}.yaml`), `id: ${id}\nstatus: ${status}\n`);
+    writeFileSync(join(feedbackRoot, "plan", "feedback", `${id}.yaml`), `id: ${id}\nts: "2026-09-30T10:00:00.000Z"\nraw: "which way for ${id}?"\nstatus: ${status}\n`);
   }
   const logged: Array<Record<string, unknown>> = [];
   const view = viewOf(clock, [
@@ -384,12 +385,62 @@ test("questions are counted for core only and one failing instance leaves the ot
     log: (step, extra) => logged.push({ step, ...extra }),
   });
   const bodies = view.materialize(ctxOf(clock, [core, site, bare]));
-  assert.deepEqual(only(bodies).questions, { count: 2 });
-  assert.deepEqual(only(bodies, "instance=site").questions, { reason: "feedback questions live in core only" });
+  assert.deepEqual(only(bodies).decisions.map((d) => [d.id, d.answer.path, d.answer.fields]), [["grill:fb-1", "/v1/feedback", { replyTo: "fb-1" }], ["grill:fb-2", "/v1/feedback", { replyTo: "fb-2" }]]);
+  assert.equal(only(bodies).decisionsReasons, undefined);
+  assert.deepEqual(only(bodies, "instance=site").decisionsReasons, { grill: "feedback questions live in core only", task_question: "the question store core answers is core's own" });
   assert.equal(bodies.some((b) => b.key === "instance=bare"), false);
   assert.deepEqual(logged, [{ step: "read_model.now_view_failed", instance: "bare", error: "plan unreadable" }]);
   const unrooted = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }]).materialize(ctxOf(clock, [core]));
-  assert.deepEqual(only(unrooted).questions, { reason: "no feedback root is configured" });
+  assert.deepEqual(only(unrooted).decisionsReasons, { grill: "no feedback root is configured", task_question: "no feedback root is configured" });
+});
+
+/** Core with a feedback root and a QUESTION on the open task W1-T1, asked at T0 - 1 h. */
+function questionRig(t: TestCtx): { clock: Stepped; core: Rig; view: ReturnType<typeof createNowView>; feedbackRoot: string } {
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const feedbackRoot = join(root, "checkout");
+  mkdirSync(join(feedbackRoot, "plan"), { recursive: true });
+  const asked = { ts: new Date(T0 - 3_600_000).toISOString(), task: "W1-T1", question: "keep the old route for one release?", current_assumption: "yes, one release", impact_if_wrong: "low" };
+  writeFileSync(join(feedbackRoot, "plan", "questions.ndjson"), `${JSON.stringify(asked)}\n`);
+  core.append({ step: "daemon.tick" });
+  return { clock, core, feedbackRoot, view: viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir, feedbackRoot }], { listGrilling: () => [] }) };
+}
+
+test("an unanswered task question appears as a decision with the questions answer route", (t) => {
+  const { clock, core, view } = questionRig(t);
+  const data = only(view.materialize(ctxOf(clock, [core])));
+  assert.deepEqual(data.decisions, [{
+    id: `question:W1-T1:${new Date(T0 - 3_600_000).toISOString()}`, kind: "task_question", instance: "core", taskId: "W1-T1", title: "task W1-T1",
+    prompt: "keep the old route for one release?", askedAt: new Date(T0 - 3_600_000).toISOString(), currentAssumption: "yes, one release", impactIfWrong: "low",
+    answer: { method: "POST", path: "/v1/questions/answer", tier: "low", fields: { taskId: "W1-T1" }, input: "text" },
+  }]);
+});
+
+test("a panel question answered row removes the decision", (t) => {
+  const { clock, core, view } = questionRig(t);
+  const before = only(view.materialize(ctxOf(clock, [core])));
+  assert.equal(before.decisions.length, 1, "control: the question is open first");
+  // The answer route's store write failed (recorded_to_question_store false): the ledgered fact alone answers it.
+  clock.set(T0 + 1_000);
+  core.append({ step: "panel.question_answered", task_id: "W1-T1", answer: "yes", recorded_to_question_store: false });
+  const after = only(view.materialize(ctxOf(clock, [core])));
+  assert.deepEqual(after.decisions, []);
+  assert.notEqual(viewEtag("now", 3, false, after), viewEtag("now", 3, false, before), "the decision's absence moves the etag");
+});
+
+test("an answer in the question store removes the decision and the clock alone never moves the etag", (t) => {
+  const { clock, core, view, feedbackRoot } = questionRig(t);
+  const first = only(view.materialize(ctxOf(clock, [core])));
+  clock.set(T0 + NOW_REFRESH_MS + 1_000);
+  const later = only(view.materialize(ctxOf(clock, [core])));
+  assert.equal(viewEtag("now", 3, false, later), viewEtag("now", 3, false, first), "a re-materialize 31 s later changes nothing in data");
+  appendFileSync(join(feedbackRoot, "plan", "questions.ndjson"), `${JSON.stringify({ ts: new Date(T0).toISOString(), task: "W1-T1", answer: "no", origin: "tok" })}\n`);
+  // A distinct mtime whatever the filesystem's resolution: the answer is what moved it.
+  utimesSync(join(feedbackRoot, "plan", "questions.ndjson"), new Date(T0), new Date("2030-01-01T00:00:00.000Z"));
+  clock.set(T0 + NOW_REFRESH_MS + 2_000);
+  const answered = view.materialize(ctxOf(clock, [core]));
+  assert.deepEqual(only(answered).decisions, [], "the store's mtime made the view due before its 30 s refresh");
 });
 
 test("the default seams read each instance's own plan and snapshot", (t) => {
@@ -463,7 +514,7 @@ test("a now shadow sample is diffed against the legacy live-file board and each 
   const clock = stepped();
   let free = 1_000;
   // Every probe reads a different free-disk figure, as two samples moments apart do.
-  const view = viewOf(clock, [{ name: "core", ledgerDir }], { countQuestions: () => 0, hostProbe: { rateLimit: () => 4321, diskFree: () => (free += 7) } });
+  const view = viewOf(clock, [{ name: "core", ledgerDir }], { listGrilling: () => [], hostProbe: { rateLimit: () => 4321, diskFree: () => (free += 7) } });
   const posted: ReadModelWorkerMessage[] = [];
   const ticker = createReadModelTicker({ stateDir: ledgerDir, instances: [{ name: "core", ledgerDir }], views: [view], clock, holder: "shadow-now", post: (m) => void posted.push(m) });
   t.after(() => ticker.release());

@@ -246,7 +246,7 @@ answers from memory. Schema: `InboxView` in `openapi/daemon.yaml`.
 - Source: `feedback-store:core`, budget 180 s.
 - Dark until `switches.json` sets `feedback` to `serve`; while dark it is computed inline from the entries.
 
-## `now` (version 2)
+## `now` (version 3)
 
 `GET /v1/views/now?instance=<id>`: everything the console's /now renders for one instance. Schema:
 `NowView` in `openapi/daemon.yaml`.
@@ -258,7 +258,9 @@ answers from memory. Schema: `InboxView` in `openapi/daemon.yaml`.
 
 `data`: `{ instance, board{ counts, spendTodayUsd, taskProjection, tasks[], groups{ running,
 needsYou, blocked, queued } }, prQueue, actions[], recent{ entries[], mergedToday{ count, day } }, health{
-diskFreeBytes?, rateLimitRemaining?, daemon{ state, at?, reason? }, reasons? }, questions }`.
+diskFreeBytes?, rateLimitRemaining?, daemon{ state, at?, reason? }, reasons? }, decisions[], decisionsMore?, decisionsReasons? }`.
+- Version 3 (P4-T08) replaced `questions` (`{ count }` or `{ reason }`) with `decisions[]`, so the console answers in
+  place. A consumer checks `version === 3`; one release reads both 2 and 3.
 - Version 2 (P2-BUILD-B) removed every clock value from `data`: `board.generated_at` (use the envelope's
   `generatedAt`), `health.sampledAt` (the `host-probe:<i>` source's `asOf`), `health.lastPollAgeMs` and
   `tasks[].elapsedMs` (derive the running time from `startedAt`). There is no v1 body; a consumer checks
@@ -273,7 +275,27 @@ diskFreeBytes?, rateLimitRemaining?, daemon{ state, at?, reason? }, reasons? }, 
 - `groups` is the console's `groupBoard` as ordered id lists.
 - `actions[].strike` is `{ n, of }`, parsed once from the sweep's reason.
 - `health` is the selected instance's own host probe. A field it could not read is absent and named in `health.reasons`.
-- `questions` is `{ count }` for core and `{ reason }` for any other instance.
+- `decisions[]` is every open thing the operator answers (`src/lib/now-decisions.ts`), newest first, at most 50
+  (`decisionsMore` counts the rest): `{ id, kind, instance, taskId?, title, prompt, options?, currentAssumption?,
+  impactIfWrong?, askedAt?, answer{ method, path, tier, fields, input } }`.
+
+  | kind | source | `answer.path` (tier) |
+  |---|---|---|
+  | `grill` | core's feedback entries parked `grilling` | `POST /v1/feedback` with `replyTo` (low) |
+  | `task_question` | core's `plan/questions.ndjson`: a QUESTION on an open task with no later answer line or `panel.question_answered` fact | `POST /v1/questions/answer` (low) |
+  | `manual_approval` | an open escalation of class MANUAL on the instance's board | `POST /v1/manual/approve` (high: the console runs the confirm nonce) |
+  | `escalation` | any other open escalation with an issue | `POST /v1/escalation/mark-handled` with a `disposition` from `options` (low) |
+
+  An answer re-materializes the body at once: a `panel.question_answered` row moves the generation, and a
+  reply or a store append moves core's feedback dir or question store, which the view fingerprints. The
+  decision then leaves `decisions` and the ETag moves; the clock alone never moves it. An escalation's reply
+  text is not offered as an answer: `/v1/escalation/reply` steers nothing yet (W1-T4471).
+
+  Each escalation is answered on its OWN instance. Core's decisions name the unprefixed routes above; another
+  instance's name its mount, `/v1/i/<instance>/manual/approve` or `/v1/i/<instance>/escalation/mark-handled`.
+  That route closes the issue and ledgers into the instance's own state, and the decision leaves that
+  instance's body once its GitHub snapshot reads the issue closed.
+- `decisionsReasons` names a source not read for this instance, by kind: grill and task questions live in core.
 - Under `shadow`, the comparator (`src/lib/view-shadow.ts`) diffs a sampled body against `/now`'s legacy
   sources. Those are GET /v1/status's board and PR queue over the instance's live file only, plus a fresh
   host probe of that instance, computed in the worker (`createNowView`'s `legacy`).
