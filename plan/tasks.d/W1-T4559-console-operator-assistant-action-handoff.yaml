@@ -17,7 +17,7 @@
     - openapi/daemon.yaml
     - test/operator-agent-action-handoff.test.ts
     - test/operator-agent-action-route.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Core has bounded automation and consequence/approval primitives, but no versioned,

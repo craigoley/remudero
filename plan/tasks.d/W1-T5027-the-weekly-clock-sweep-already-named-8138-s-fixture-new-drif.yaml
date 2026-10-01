@@ -14,7 +14,7 @@
   files:
     - scripts/clock-sweep.mjs
     - test/a-clock-sweep-reaches-its-newest-suites-inside-its-budget.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 at origin/main 1f6d904bb. THE DYNAMIC SCAN THE OPERATOR ASKED FOR ALREADY EXISTS, AND IT DID NAME

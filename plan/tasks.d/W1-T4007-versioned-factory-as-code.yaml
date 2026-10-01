@@ -67,4 +67,17 @@
     promote a candidate whose tool or routing dependency is unavailable, accept a secret or raw
     instruction in the manifest, or turn an invalid definition into a healthy default. The
     corresponding proof must fail.
-  note: "This is the factory-as-code composition layer above existing trigger, action, routing, and experiment contracts; it does not create a remote shell or autonomous promotion path. reservation hand-off: run-W1-T4007-<epochMs>"
+  note: |
+    CONSOLE FOLLOW-ON (operator ruling 2026-10-01, which revives this feature with its console
+    page): this feature's work includes its app.remudero.com page, the factory page (/factory): the
+    active factory revision, its flow, roles, tools, routing and trigger identity, and promotion and
+    rollback history. W1-T4008 and W1-T4009 add sections to the same page. When this task merges,
+    file ONE console shard in craigoley/remudero-console (id reserved from the console operator
+    checkout) that builds the page against the core contract as merged: the exact /v1 route(s) and
+    the openapi/daemon.yaml schema at the merge sha, pinned with the console's pin-core-read-schemas
+    script. If the merged feature serves no GET route the page can read, file that core route first;
+    never let the console guess it (memory console-task-before-core-contract). Do NOT revive the
+    stale console shards UI-T56 and API-T57: they were built against console-designed routes core
+    never served, and CONSOLE-T107 (console #1894) deleted what they built. The page stays deleted
+    until then. Tracked in ~/Remudero/.session-scratch/arch-plan.md OPEN ITEMS A3.
+    This is the factory-as-code composition layer above existing trigger, action, routing, and experiment contracts; it does not create a remote shell or autonomous promotion path. reservation hand-off: run-W1-T4007-<epochMs>

@@ -14,7 +14,7 @@
     - test/host-units-install.test.ts
   origin: "fleet-lifeguard#tracked-host-unit-drift-2026-09-06"
   plan_refs: ["W1-T2856", "W1-T2877", "W1-T2932"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED READ-ONLY ON AZURE AT 2026-09-06T10:06Z. Running the tracked

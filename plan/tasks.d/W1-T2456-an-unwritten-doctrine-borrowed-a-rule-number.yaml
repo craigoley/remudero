@@ -10,7 +10,7 @@
   files: [MASTER-PLAN.md, src/lib/policy.ts, src/lib/retro.ts, src/lib/onboard/synthesize.ts, src/run-task.ts, test/rule-15-16-filing-misattribution.test.ts]
   origin: "operator-ruling#auto-filing-permitted-2026-08-29"
   plan_refs: ["W1-T2279", "W1-T2455"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     THE ID. Eight surfaces, anchored `W1-T2456([^0-9]|$)` with a `[0-9]` class and never `\d`.

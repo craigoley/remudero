@@ -10,7 +10,7 @@
   origin: retro#recon-2026-09-05
   plan_refs: ["§8A", "§12A", "W1-T2507"]
   files: [DIAGNOSIS.md, FINDINGS.md, docs/archive/DIAGNOSIS.md, docs/archive/FINDINGS.md, README.md, src/run-task.ts, src/lib/worker.ts, src/lib/drain-lock.ts, src/lib/worker-home.ts, src/lib/inflight-lock.ts, test/credential-arms-match-the-observed-text.test.ts, scripts/task-id-existence-baseline.json, test/root-level-markdown-census.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Audit recon-2026-09-05 R-58 (OBSERVED). At f7ceb86, `DIAGNOSIS.md` and `FINDINGS.md` sit at

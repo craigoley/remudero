@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-lane-budget-owned-1790819572000 -> plan-lane-budget-owned-1790819572000"
   plan_refs: [W1-T2784, W1-T396, W1-T3979, W1-T4769]
   files: [src/lib/dispatch-claim.ts, src/run-task.ts, test/a-recycled-container-releases-the-claims-it-held.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-01: refs/rmd-dispatch/* held 8 claims whose anchors name containers that no longer exist on the

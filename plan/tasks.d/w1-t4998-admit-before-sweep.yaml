@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-admit-before-sweep-1790807174000 -> plan-admit-before-sweep-1790807174000"
   plan_refs: [W1-T4945, W1-T4465, W1-T2965, W1-T3618]
   files: [src/lib/daemon.ts, test/admission-does-not-wait-behind-the-sweep.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-30 (core ledger, union of live + rotations): each cycle ran daemon.boot -> daemon.tick ->

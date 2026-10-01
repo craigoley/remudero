@@ -12,7 +12,7 @@
   files:
     - src/lib/ledger-compact.ts
     - test/no-union-read-decompresses-a-million-row-archive.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     RESCOPED BEFORE FILING. The id was reserved for a per-archive step index (a sidecar naming which steps

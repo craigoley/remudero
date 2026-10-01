@@ -9735,7 +9735,8 @@
   origin: architect
   plan_refs: ["§2", "§4"]
   files: [src/lib/status.ts, src/run-task.ts]
-  status: queued
+  status: blocked
+  retirement: closed
   attempts: 0
   note: "After this merges, the operator runs: ./bin/rmd correct W1-T20c --pr 134 — then rmd drain
     --dry-run must DROP W1-T20c and LIST W1-T20d (the linter chain unblocks). Rule 18 live confirmation.
@@ -9745,7 +9746,11 @@
     blocked by assertRunnable (PlanError, plan.ts:244) on the very crediting gap it fixes. W1-T62 is a
     credited true ancestor (the write-side guard; also W1-T69's own dep). One-time bootstrap seam — rmd
     correct cannot be reachable before this task builds, by the mechanism this task exists to fix. After
-    this task merges, the operator credits W1-T69 (#131) and W1-T20c (#134) via rmd correct."
+    this task merges, the operator credits W1-T69 (#131) and W1-T20c (#134) via rmd correct. CLOSED 2026-10-01 (operator
+    instruction to retire it): THIS RECORD IS COMPLETE AND NOTHING REMAINS TO BUILD. #138 (2026-07-16) hoisted operator corrections
+    above rung (a) in deriveStatus and added the rmd correct writer; test/correction-supremacy.test.ts and test/correct.test.ts pin
+    it. Its acceptance criteria are PRESERVED UNCHANGED: closed, not re-proved. Criteria 3 and 4 carry prose proofs that no longer
+    resolve, and a plan edit that marks a legacy record merged re-lints those proofs and fails, so it is closed with retirement."
 
 # JOINT P21+P22 ratification (three-task family; P21 SUPERSEDED-BY-P22, absorbed into W1-T76). DEVIATION
 # from the ADDENDUM's two: the fix-worker (P21's content) serves BOTH the manual run-task path AND the

@@ -15,7 +15,7 @@
     - test/instances-view.test.ts
     - src/lib/read-model-worker.ts
     - src/lib/serve.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ 2026-10-01: the console keeps RMD_CONTROL_REPO_INSTANCES, RMD_CONTROL_ANALYTICS_INSTANCES, a
