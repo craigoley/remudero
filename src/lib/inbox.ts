@@ -30,6 +30,9 @@ import { workerLedgerFields, type WorkerResult } from "./worker.js";
 import type { InterpretReplyResult } from "./reply-interpreter.js";
 import { isMap, isScalar, isSeq, parse as parseYaml, parseDocument, stringify as stringifyYaml } from "yaml";
 import { RmdError } from "./errors.js";
+import { loadMounts, mountsPath } from "./mounts.js";
+import { repoRoot } from "./repo-location.js";
+import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedModel } from "./worker-provider.js";
 
 /**
  * `rmd inbox` — the ratification inbox's deterministic core (MASTER-PLAN P25(i), W1-T110).
@@ -497,10 +500,36 @@ export function proposalsNeedingDraft(proposals: Proposal[], drafts: DraftCache,
 // cause fingerprint; {@link DraftAttemptCache} records the key last attempted, win or lose, so a failed attempt is
 // not repeated either.
 
-/** A proposal's current draft-cause fingerprint: its evidence-anchor set plus its reframe-round count. It changes
- *  exactly when a genuinely different draft becomes worth attempting, never on poll count alone. */
-export function draftAttemptKey(proposal: Proposal): string {
-  return `${anchorFingerprint(proposal.evidenceAnchors)}::${(proposal.reframeHistory ?? []).length}`;
+/** The configured drafting lane whose attempts share one idempotence key. */
+export interface DraftLaneIdentity {
+  leadDeployment: string;
+  effort: string;
+  escalationDeployment?: string;
+  escalationEffort?: string;
+}
+
+/** Resolve the same synthesis mount and cash capability row that the draft spawn uses. */
+export function resolvedInboxDraftLane(): DraftLaneIdentity {
+  const mounts = loadMounts(mountsPath(repoRoot));
+  const mount = mounts.synthesis.inbox_draft;
+  const leadDeployment = mount.provider === "cash"
+    ? openWeightCandidatesForCapability(
+      mounts.capabilities,
+      openWeightCapabilityForRequestedModel(mounts.capabilities, mount.model),
+      mount.effort,
+    )[0]!
+    : mount.model;
+  return mount.provider === "cash"
+    ? { leadDeployment, effort: mount.effort, escalationDeployment: "sonnet", escalationEffort: "medium" }
+    : { leadDeployment, effort: mount.effort };
+}
+
+/** A proposal's current draft-cause fingerprint includes the lead and the cash lane's Sonnet rescue.
+ *  Stored keys from an older lane become due once; a clean cached draft still wins before this comparison. */
+export function draftAttemptKey(proposal: Proposal, lane: DraftLaneIdentity = resolvedInboxDraftLane()): string {
+  return `${anchorFingerprint(proposal.evidenceAnchors)}::${(proposal.reframeHistory ?? []).length}::${JSON.stringify([
+    lane.leadDeployment, lane.effort, lane.escalationDeployment ?? null, lane.escalationEffort ?? null,
+  ])}`;
 }
 
 /** `<config.root>/state/inbox-draft-attempts.json` — one {@link draftAttemptKey} per proposal id, recording the cause
@@ -545,9 +574,10 @@ export function draftsDueOnDaemon(
   attempts: DraftAttemptCache,
   cap: number = DAEMON_DRAFT_BATCH_CAP,
   ctx?: ReadinessContext,
+  lane: DraftLaneIdentity = resolvedInboxDraftLane(),
 ): Proposal[] {
   const due = rankDraftSelection(
-    proposalsNeedingDraft(proposals, drafts, ctx).filter((p) => attempts[p.id] !== draftAttemptKey(p)),
+    proposalsNeedingDraft(proposals, drafts, ctx).filter((p) => attempts[p.id] !== draftAttemptKey(p, lane)),
     drafts,
   );
   return cap > 0 ? due.slice(0, cap) : due;
