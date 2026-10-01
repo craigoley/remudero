@@ -54,6 +54,16 @@
 // unreadable diff, `changedPathsAtHead`'s own `undefined`) refuses the whole head, the same
 // self-limiting shape the bump exemption already proved.
 //
+// W1-T3745: THE REFUSAL NOW NAMES THE REPAIR THAT ACTUALLY WORKS. Two pull requests
+// (#5952, #5953) opened eight minutes apart on `fix-<slug>-<epochMs>` branches were both
+// refused with a message that only re-listed the two conforming branch forms — advice a PR
+// author cannot act on, because GitHub does not let an open pull request's head ref be
+// renamed once the PR exists. This gate refuses at push in hooks/pre-push (W1-T3388's own
+// entrypoint here) BEFORE a pull request exists, while a branch is still free to rename; the
+// refusal text below distinguishes that free moment from the fixed one that follows, and names
+// the amend-a-trailer repair — the one route that works on an EXISTING pull request, because its
+// head ref cannot be renamed in GitHub after the fact.
+//
 // Usage: node --import tsx scripts/head-identity-gate.mjs --head-ref <ref>
 // [--worktree-path <path>] (ref falls back to $GITHUB_HEAD_REF; path defaults to cwd).
 
@@ -223,10 +233,15 @@ export function evaluateHeadIdentityGate({ headCommitMessage, headRef, changedPa
     defect: "unidentified-head",
     message:
       "REFUSED — this head matches neither conforming form and carries no valid Remudero-Task " +
-      "trailer. Satisfy one: (1) push to a session branch shaped " +
+      "trailer. This gate refuses at push in hooks/pre-push, before a pull request exists, " +
+      "because the branch is still free to rename there. Satisfy one NOW, while it is free: " +
+      "(1) push to a session branch shaped " +
       `\`${RUN_BRANCH_FILED_FORM}\` when building a filed task, or \`${RUN_BRANCH_UNFILED_FORM}\` ` +
       "when the work has no filed task, or (2) carry an anchored `Remudero-Task: <id>` trailer " +
-      "on the head commit (either is enough — see W1-T3388).",
+      "on the head commit (either is enough — see W1-T3388). If a pull request is ALREADY open, " +
+      "renaming is no longer an option — a pull request's head ref cannot be renamed in GitHub " +
+      "once it exists — so the repair is to amend the head commit to add the trailer and " +
+      "force-push the same branch, not to open a new one.",
   };
 }
 
