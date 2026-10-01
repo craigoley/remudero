@@ -18,6 +18,8 @@ import { createReadModelTicker, ledgerSource, READ_MODEL_VIEWS, readModelSwitche
 import { createRepositoriesSourcePublisher, type RepositoriesData } from "../src/lib/repositories-view.js";
 import { buildServeRoutes, buildServeServer, repositoriesSources, type ServeDeps } from "../src/lib/serve.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { FEEDBACK_VIEW_NAME, FEEDBACK_VIEW_VERSION, materializeFeedbackView } from "../src/lib/feedback-view.js";
+import { INBOX_VIEW_NAME, INBOX_VIEW_VERSION, refreshInboxClassification } from "../src/lib/inbox-view.js";
 import { VIEW_EVENTS_PATH, VIEW_VERSIONS_PATH } from "../src/lib/view-events.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { declaredBody, resolve, violations, type Schema } from "./helpers/openapi-strict.js";
@@ -99,9 +101,13 @@ function fixture(t: TestCtx): { root: string; stateDir: string; deps: ServeDeps;
 }
 
 /** One worker tick over core with every view switched to `serve`, so each materializes a body into the read model. */
-function materializeAll(root: string, stateDir: string, deps: ServeDeps): void {
+async function materializeAll(root: string, stateDir: string, deps: ServeDeps): Promise<void> {
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
-  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve" } }));
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", inbox: "serve", feedback: "serve" } }));
+  // One operator proposal and one feedback entry, so the slow lane's two views carry items to validate.
+  writeFileSync(join(stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: [{ id: "ruling:schema", summary: "a ruling", evidenceAnchors: [] }] }));
+  mkdirSync(join(root, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(root, "plan", "feedback", "fb-schema.yaml"), ["id: fb-schema", `ts: '${iso(60_000)}'`, "raw: a fixture note", "attachments: []", "origin: cli", "status: new", "proposal_pr: null", ""].join("\n"));
   createRepositoriesSourcePublisher({ stateDir, instances: () => repositoriesSources(deps) })();
   const now = createNowView({
     instances: [{ name: "core", ledgerDir: stateDir, repo: "craigoley/remudero", feedbackRoot: root }],
@@ -111,6 +117,10 @@ function materializeAll(root: string, stateDir: string, deps: ServeDeps): void {
   const instances = createInstancesView({ instances: [{ name: "core", ledgerDir: stateDir }], repoPath: daemonInstanceRegistryPath(root), ledgerSource });
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...READ_MODEL_VIEWS, now, instances], clock, holder: "schema-test", post: () => {} });
   ticker.tick();
+  // The slow lane's views, built as its units build them and handed over as the worker does.
+  const panel = { ...deps.panelGraph, inboxRoot: root, ratify: { approve: () => {}, reframe: () => {} }, inboxMainSha: () => "a".repeat(40), inboxGrepAnchor: () => true };
+  ticker.accept({ view: INBOX_VIEW_NAME, version: INBOX_VIEW_VERSION, bodies: (await refreshInboxClassification(panel, {}, clock)).bodies });
+  ticker.accept({ view: FEEDBACK_VIEW_NAME, version: FEEDBACK_VIEW_VERSION, bodies: materializeFeedbackView({ root, planPath: deps.panelGraph.planPath }, fakeGitHub(), clock) });
   // A shadow sample, so the read-model status body carries the comparator's readiness too.
   assert.equal(ticker.shadow({ view: "now", key: "instance=core", requests: 1 }), true);
   ticker.tick();
@@ -127,11 +137,11 @@ async function listen(t: TestCtx, server: Server): Promise<string> {
 }
 
 /** The query each routed view is read with; a view missing here fails the corpus check below. */
-const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "" };
+const QUERY: Record<string, string> = { "nav-badge": "", "read-model": "", repositories: "", now: "?instance=core", instances: "", inbox: "?section=needsYou", feedback: "" };
 
 test("every registered view body validates against its declared schema", async (t) => {
   const { root, stateDir, deps, runs } = fixture(t);
-  materializeAll(root, stateDir, deps);
+  await materializeAll(root, stateDir, deps);
   const routed = buildServeRoutes(deps).filter((r) => r.path.startsWith("/v1/views/") && r.path !== VIEW_EVENTS_PATH && r.path !== VIEW_VERSIONS_PATH)
     .map((r) => r.path.slice("/v1/views/".length)).sort();
   // CORPUS CONTROL: a view routed with no query here would pass by never being read.
@@ -160,6 +170,8 @@ test("every registered view body validates against its declared schema", async (
   const instances = bodies.get("instances")!.data as InstancesData;
   assert.deepEqual(instances.instances.map((i) => [i.id, i.registered, i.served, i.project]), [["core", true, true, "remudero"]], JSON.stringify(instances));
   assert.deepEqual(repos.projects.map((p) => [p.project, p.worst.repoName]), [["remudero", "remudero"]]);
+  assert.deepEqual((bodies.get("inbox")!.data as { items: Array<{ proposalId: string; lane?: string }> }).items.map((i) => [i.proposalId, i.lane]), [["ruling:schema", "notReady"]]);
+  assert.deepEqual((bodies.get("feedback")!.data as { entries: Array<{ id: string }> }).entries.map((e) => e.id), ["fb-schema"]);
 
   // P2-03: the versions map (the events stream's hello and fallback poll) names every served body.
   const versions = (await (await fetch(`${url}${VIEW_VERSIONS_PATH}`, { headers: READ })).json()) as { views: Record<string, unknown> };
@@ -187,7 +199,7 @@ test("the strict view validator refuses an undeclared field and a wrong enum in 
 
 test("a version 2 view body refuses every clock stamp version 1 carried in data", async (t) => {
   const { root, stateDir, deps, runs } = fixture(t);
-  materializeAll(root, stateDir, deps);
+  await materializeAll(root, stateDir, deps);
   const url = await listen(t, buildServeServer(deps));
   for (const each of runs) each();
   const read = async (path: string): Promise<{ version: number; data: Record<string, unknown> }> => (await (await fetch(`${url}${path}`, { headers: READ })).json()) as { version: number; data: Record<string, unknown> };

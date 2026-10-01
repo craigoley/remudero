@@ -8,22 +8,10 @@
       "owner": "the slow lane's host probe derives the edge and appends it once, with or without a reader (P4-T14)"
     },
     {
-      "route": "GET /v1/escalation/confirm",
-      "writes": ["mkdir state", "open-for-write state/escalation-link-secret", "open-for-write state/escalation-link-secret.<tmp>", "open-for-write state/ledger.ndjson", "rename state/escalation-link-secret"],
-      "reason": "the link secret is created on first use, and each well-formed refused link appends escalation.link_refused, so a crawler can append to the ledger.",
-      "owner": "serve boot creates the secret; refusals become an hourly rollup row (P4-T18)"
-    },
-    {
       "route": "GET /v1/feedback",
       "writes": ["write plan/feedback/fb-merged.yaml"],
       "reason": "reconcileFeedbackEntries flips an entry whose proposal PR merged to accepted (and lands it in production), one writer per concurrent GET.",
       "owner": "the feedback materializer in the slow lane, triggered by a gateway generation showing the PR merged (P4-T07)"
-    },
-    {
-      "route": "GET /v1/status",
-      "writes": ["mkdir state", "rename state/merge-credit.json", "write state/merge-credit.json.<tmp>"],
-      "reason": "projectPlan saves a head-branch or trailer credit to the durable credit store on a read; the daemon already owns that store.",
-      "owner": "the daemon; serve passes a no-op credit-store writer to every projectPlan caller (P4-T19)"
     }
   ]
 }

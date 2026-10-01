@@ -1,9 +1,10 @@
 import { ghExec } from "./github-transport.js";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { createOrReadExclusive, createOrReadPublished, HEX_SECRET_RE, InvalidSecretFileError } from "./fs-race-safe.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { appendLedger } from "./ledger.js";
 import { appendThreadMessage } from "./inbox-thread.js";
 import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
@@ -1540,6 +1541,25 @@ export function loadEscalationLinkSecret(
   if (!HEX_SECRET_RE.test(secret)) {
     throw new InvalidSecretFileError(path, `holds ${secret.length} characters after trim, not a 64-hex secret`);
   }
+  return secret;
+}
+
+/** No secret under this state root: no answer link was ever minted here, so none can verify. */
+export class EscalationLinkSecretMissingError extends RmdError {
+  readonly reason = "escalation-link-secret-missing";
+  constructor(readonly path: string) {
+    super("registry", GENERIC_EXIT_CODE, `escalation-link-secret-missing: ${path} does not exist, so no answer link was minted under this root`, { path });
+    this.name = "EscalationLinkSecretMissingError";
+  }
+}
+
+/** {@link loadEscalationLinkSecret} without the create (W1-T5057): what GET /v1/escalation/confirm
+ *  verifies with, so a read never writes. The ping that mints a link creates the secret first. */
+export function readEscalationLinkSecret(root: string): string {
+  const path = escalationLinkSecretPath(root);
+  if (!existsSync(path)) throw new EscalationLinkSecretMissingError(path);
+  const secret = readFileSync(path, "utf8").trim();
+  if (!HEX_SECRET_RE.test(secret)) throw new InvalidSecretFileError(path, `holds ${secret.length} characters after trim, not a 64-hex secret`);
   return secret;
 }
 

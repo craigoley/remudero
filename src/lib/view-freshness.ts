@@ -23,6 +23,8 @@ export const GITHUB_BUDGET_MS = 180_000;
 export const PLAN_BUDGET_MS = 120_000;
 /** Three missed host probes at the 60 s cadence. */
 export const HOST_PROBE_BUDGET_MS = 180_000;
+/** Three missed slow-lane passes at its 60 s cadence (inbox-view.ts's INBOX_CLASSIFY_INTERVAL_MS). */
+export const SLOW_LANE_STORE_BUDGET_MS = 180_000;
 
 /**
  * THE budget table: a source of this kind whose input is older than its budget is stale. A kind with
@@ -33,6 +35,8 @@ export const SOURCE_BUDGET_MS: Partial<Record<SourceKind, number>> = {
   github: GITHUB_BUDGET_MS,
   plan: PLAN_BUDGET_MS,
   "host-probe": HOST_PROBE_BUDGET_MS,
+  "inbox-store": SLOW_LANE_STORE_BUDGET_MS,
+  "feedback-store": SLOW_LANE_STORE_BUDGET_MS,
 };
 
 /** A source name's kind, from its `<kind>:<instance>` prefix, when that prefix is a known kind. */

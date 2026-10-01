@@ -215,6 +215,33 @@ or `view_shadow` under `shadow`) and the console reads each instance's `repos/su
   transport failure.
 - `data.projectsReason` is present when the registry could not be read.
 
+## `inbox` (version 1)
+
+`GET /v1/views/inbox?section=<s>[&cursor=<n>]`: one page of one inbox section, materialized by serve's
+slow lane (the read-model worker's second thread, `src/lib/read-model-slow-lane.ts`) every minute with
+or without a reader, from the same classification pass that writes `state/inbox-classified.json`. A read
+answers from memory. Schema: `InboxView` in `openapi/daemon.yaml`.
+- `section` is required: `needsYou`, `ready`, `drafting`, `notReady`, `declined` or `fleet`. A request
+  without it answers 400 `invalid_request`.
+- `data`: `{ section, items[], counts, page{ index, of, total, next? } }`. Each item is GET /v1/inbox's
+  item for that lane; a `needsYou` item adds its `lane`. `counts` is GET /v1/inbox's counts, on every page.
+- Pages: every body stays under 64 KiB. The first page has no `cursor`; `page.next` is the next page's
+  `cursor`. A page that empties is dropped from memory and the store, so it is never served stale.
+- Source: `inbox-store:core`, `asOf` the pass's time, budget 180 s (three missed passes).
+- Dark until `switches.json` sets `inbox` to `serve`. While dark (or before its first body) it answers from
+  GET /v1/inbox's last classification in this serve and never classifies on a read: 400 when there is none.
+  Under `shadow` that is the comparator's legacy side.
+
+## `feedback` (version 1)
+
+`GET /v1/views/feedback[?status=<s>][&cursor=<n>]`: one page of GET /v1/feedback's entries, all of them
+(no `status`) or one status, materialized by the slow lane on the same cadence. Schema: `FeedbackView`.
+- `data`: `{ status, entries[], counts{ total, byStatus }, page }`. Pages as for `inbox`.
+- An entry whose proposal PR merged reads `accepted`, as GET /v1/feedback's body does after its write. The
+  view only projects it: it writes nothing. A PR the gateway could not read marks the entry `unverified`.
+- Source: `feedback-store:core`, budget 180 s.
+- Dark until `switches.json` sets `feedback` to `serve`; while dark it is computed inline from the entries.
+
 ## `now` (version 3)
 
 `GET /v1/views/now?instance=<id>`: everything the console's /now renders for one instance. Schema:

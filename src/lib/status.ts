@@ -711,6 +711,10 @@ export function saveCreditStore(path: string, store: CreditStore, fsDeps: Credit
   }
 }
 
+/** The `writeCreditStore` every serve-side projectPlan caller passes (W1-T5058): a credit serve finds is a
+ *  read-time projection only. The daemon runs projectPlan with the default writer and owns the store. */
+export const SERVE_KEEPS_CREDITS_IN_MEMORY = (_store: CreditStore): void => {};
+
 /** Merges one newly-discovered credit into the store, immutably. Idempotent: a source already recorded is left
  *  untouched, which keeps the function correct standing alone even though the durable rung returns first. */
 export function recordCredit(store: CreditStore, taskId: string, entry: CreditStoreEntry): CreditStore {
