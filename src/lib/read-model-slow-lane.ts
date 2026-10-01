@@ -20,6 +20,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { FEEDBACK_VIEW_NAME, FEEDBACK_VIEW_VERSION, materializeFeedbackView } from "./feedback-view.js";
 import { INBOX_CLASSIFY_INTERVAL_MS, INBOX_VIEW_NAME, INBOX_VIEW_VERSION, refreshInboxClassification, type InboxRefreshMemo } from "./inbox-view.js";
 import { ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
+import { recordCreditStateEdge } from "./account-usage.js";
 import { buildBatchedGithub, type GitHub } from "./status.js";
 import { ghTraceGateway } from "./trace.js";
 import type { ViewSource } from "./views.js";
@@ -36,6 +37,8 @@ const SLOW_LANE_GITHUB_TTL_MS = 150_000;
 export interface SlowLaneConfig {
   /** The inbox unit's inputs; absent, the lane has no inbox unit. */
   inbox?: { root: string; planPath: string; ledgerPath: string; inboxRoot: string; repository: string };
+  /** The credit-edge unit's inputs (account-usage.ts); absent, the lane records no credit edge. */
+  accountUsage?: { ledgerPath: string; root: string; accountFilePath?: string };
   intervalMs?: number;
 }
 
@@ -97,6 +100,18 @@ function coreUnits(config: NonNullable<SlowLaneConfig["inbox"]>, clock: Clock, l
   return [inbox, feedback];
 }
 
+/** The host probe's credit-state edge (P4-T14): appended once per change, with or without a reader. */
+function creditEdgeUnit(config: NonNullable<SlowLaneConfig["accountUsage"]>, log: (step: string, extra?: Record<string, unknown>) => void): SlowLaneUnit {
+  return {
+    name: "credit-edge",
+    run: async () => {
+      const line = recordCreditStateEdge(config);
+      if (line) log("account.credit_edge_recorded", { state: line.state, previous: line.previous ?? null });
+      return { views: [] };
+    },
+  };
+}
+
 type Port = { on(event: "message", run: (msg: { type?: string; held?: unknown }) => void): unknown; postMessage(value: unknown): void };
 
 /**
@@ -115,7 +130,7 @@ export function runSlowLaneWorker(
   });
   const intervalMs = data.intervalMs ?? INBOX_CLASSIFY_INTERVAL_MS;
   const log = (step: string, extra: Record<string, unknown> = {}): void => port.postMessage({ type: "log", step, extra } satisfies SlowLaneMessage);
-  const units: SlowLaneUnit[] = data.inbox ? coreUnits(data.inbox, clock, log, opts.inbox ?? {}) : [];
+  const units: SlowLaneUnit[] = [...(data.inbox ? coreUnits(data.inbox, clock, log, opts.inbox ?? {}) : []), ...(data.accountUsage ? [creditEdgeUnit(data.accountUsage, log)] : [])];
   let held = false;
   let running = false;
   let stopped = false;
