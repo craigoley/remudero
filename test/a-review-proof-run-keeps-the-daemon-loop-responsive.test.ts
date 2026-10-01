@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -14,6 +14,7 @@ import {
   ProofCannotLoadError,
   refreshProofToolchainAsync,
   registerReviewerCheckout,
+  resolveNameFilteredCandidatesAsync,
 } from "../src/lib/review.js";
 import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 import { discriminateReviewReuseAsync } from "../src/lib/sweep.js";
@@ -37,6 +38,40 @@ function installFixture(): string {
   writeFileSync(join(dir, "package-lock.json"),
     '{"name":"async-proof-fixture","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"async-proof-fixture","version":"1.0.0"}}}\n');
   return dir;
+}
+
+function isolatedInstallFixture(): { parent: string; dir: string } {
+  const parent = mkdtempSync(join(tmpdir(), "rmd-async-review-isolated-"));
+  const dir = join(parent, "checkout");
+  mkdirSync(dir);
+  writeFileSync(join(dir, "package.json"), '{"name":"async-proof-fixture","version":"1.0.0"}\n');
+  writeFileSync(join(dir, "package-lock.json"),
+    '{"name":"async-proof-fixture","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"async-proof-fixture","version":"1.0.0"}}}\n');
+  return { parent, dir };
+}
+
+const browserManifest = JSON.stringify({
+  browsers: [{ name: "chromium", revision: "1234", installByDefault: true }],
+});
+const browserTap = "TAP version 13\n1..1\nok 1 - browser proof\n# tests 1\n# pass 1\n# fail 0\n# duration_ms 1\n";
+
+function browserFixture(manifest: string | undefined, cliSource = "process.exit(0);\n"): string {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-async-browser-"));
+  mkdirSync(join(dir, "test"));
+  mkdirSync(join(dir, "node_modules", "playwright-core"), { recursive: true });
+  mkdirSync(join(dir, "node_modules", "playwright"));
+  writeFileSync(join(dir, "package.json"), '{"type":"module"}\n');
+  writeFileSync(join(dir, "test", "browser.test.ts"),
+    'import { chromium } from "playwright"; test("browser proof", () => { void chromium; });\n');
+  if (manifest !== undefined) writeFileSync(join(dir, "node_modules", "playwright-core", "browsers.json"), manifest);
+  writeFileSync(join(dir, "node_modules", "playwright", "cli.js"), cliSource);
+  return dir;
+}
+
+async function runBrowserProof(review: typeof import("../src/lib/review.js"), dir: string): Promise<void> {
+  const proof = review.parseWhitelistedProof("unit test: test/browser.test.ts");
+  assert.ok(proof);
+  assert.equal(await review.execWhitelistedProofAsync(proof, dir, 2_000, async () => browserTap), "pass");
 }
 
 test("W1-T4772: a timer keeps firing while a review proof child runs", async () => {
@@ -138,6 +173,45 @@ test("async name lookup scopes a real test proof and preserves its TAP verdict",
   }
 });
 
+test("async title lookup distinguishes absence from an interpolated declaration", async () => {
+  const dir = fixture();
+  try {
+    writeFileSync(join(dir, "test", "profiles.test.ts"),
+      'test(`profile coverage: \'${profile}\' is accepted and produces stable output`, () => {});\n');
+    assert.deepEqual(await resolveNameFilteredCandidatesAsync(dir, "a title absent from every test"), { status: "absent" });
+    assert.deepEqual(
+      await resolveNameFilteredCandidatesAsync(dir, "profile coverage: 'alpha' is accepted and produces stable output"),
+      { status: "unresolvable", reason: "an interpolated test title could render to this name" },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("async Vitest proofs scope matching files and refuse an empty suite", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-async-vitest-"));
+  const target = { owner: "craigoley", repo: "remudero-site" };
+  try {
+    mkdirSync(join(dir, "tests"));
+    const proof = parseWhitelistedProof("unit test: alpha passes", target);
+    assert.ok(proof);
+    assert.equal(await execWhitelistedProofAsync(proof, dir, 1_000), "no-match");
+
+    mkdirSync(join(dir, "node_modules", "vitest"), { recursive: true });
+    writeFileSync(join(dir, "node_modules", "vitest", "vitest.mjs"), "");
+    writeFileSync(join(dir, "tests", "alpha.test.ts"), 'test("alpha passes", () => {});\n');
+    const tap = "TAP version 13\n1..1\nok 1 - tests/alpha.test.ts # time=3ms {\n" +
+      "    1..1\n    ok 1 - alpha passes # time=1ms\n}\n";
+    const outcome = await execWhitelistedProofAsync(proof, dir, 1_000, async (_command, args) => {
+      assert.ok(args.includes("tests/alpha.test.ts"));
+      return tap;
+    }, { preflightBrowsers: () => {} });
+    assert.equal(outcome, "pass");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("async dependency priming and staged refresh spawn the package command off-loop", async () => {
   const priming = installFixture();
   const refresh = installFixture();
@@ -168,6 +242,73 @@ test("async dependency priming and staged refresh spawn the package command off-
   }
 });
 
+test("async browser preflight treats a missing manifest as unreadable", async () => {
+  const dir = browserFixture(undefined);
+  const cache = mkdtempSync(join(tmpdir(), "rmd-async-browser-cache-"));
+  const previous = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  process.env.PLAYWRIGHT_BROWSERS_PATH = cache;
+  try {
+    await runBrowserProof(await import(`../src/lib/review.js?browser-unreadable-${Date.now()}`), dir);
+  } finally {
+    if (previous === undefined) delete process.env.PLAYWRIGHT_BROWSERS_PATH;
+    else process.env.PLAYWRIGHT_BROWSERS_PATH = previous;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(cache, { recursive: true, force: true });
+  }
+});
+
+test("async browser preflight skips an already installed pinned browser", async () => {
+  const dir = browserFixture(browserManifest, 'import { writeFileSync } from "node:fs"; writeFileSync("unexpected-install", "called");\n');
+  const cache = mkdtempSync(join(tmpdir(), "rmd-async-browser-cache-"));
+  const previous = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  process.env.PLAYWRIGHT_BROWSERS_PATH = cache;
+  try {
+    mkdirSync(join(cache, "chromium-1234"));
+    writeFileSync(join(cache, "chromium-1234", "INSTALLATION_COMPLETE"), "done");
+    await runBrowserProof(await import(`../src/lib/review.js?browser-installed-${Date.now()}`), dir);
+    assert.equal(existsSync(join(dir, "unexpected-install")), false);
+  } finally {
+    if (previous === undefined) delete process.env.PLAYWRIGHT_BROWSERS_PATH;
+    else process.env.PLAYWRIGHT_BROWSERS_PATH = previous;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(cache, { recursive: true, force: true });
+  }
+});
+
+test("async browser preflight shares one in-flight install and remembers completion", async () => {
+  const cache = mkdtempSync(join(tmpdir(), "rmd-async-browser-cache-"));
+  const dir = browserFixture(browserManifest,
+    'import { appendFileSync } from "node:fs"; appendFileSync("install-calls", "x"); setTimeout(() => process.exit(0), 120);\n');
+  const previous = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  process.env.PLAYWRIGHT_BROWSERS_PATH = cache;
+  try {
+    const review = await import(`../src/lib/review.js?browser-pending-${Date.now()}`);
+    await Promise.all([runBrowserProof(review, dir), runBrowserProof(review, dir)]);
+    await runBrowserProof(review, dir);
+    assert.equal(readFileSync(join(dir, "install-calls"), "utf8"), "x", "one pinned install serves concurrent and later proofs");
+  } finally {
+    if (previous === undefined) delete process.env.PLAYWRIGHT_BROWSERS_PATH;
+    else process.env.PLAYWRIGHT_BROWSERS_PATH = previous;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(cache, { recursive: true, force: true });
+  }
+});
+
+test("async browser install failure stays best effort for the proof verdict", async () => {
+  const cache = mkdtempSync(join(tmpdir(), "rmd-async-browser-cache-"));
+  const dir = browserFixture(browserManifest, "process.exit(3);\n");
+  const previous = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  process.env.PLAYWRIGHT_BROWSERS_PATH = cache;
+  try {
+    await runBrowserProof(await import(`../src/lib/review.js?browser-failed-${Date.now()}`), dir);
+  } finally {
+    if (previous === undefined) delete process.env.PLAYWRIGHT_BROWSERS_PATH;
+    else process.env.PLAYWRIGHT_BROWSERS_PATH = previous;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(cache, { recursive: true, force: true });
+  }
+});
+
 test("async staged refresh preserves the old install when its swap fails", async () => {
   const dir = installFixture();
   try {
@@ -188,6 +329,89 @@ test("async staged refresh preserves the old install when its swap fails", async
     assert.equal(renames, 3, "the rollback restored the original tree");
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("async staged refresh resolves shared installs, honors their hash marker, and refuses broken links", async () => {
+  const { parent, dir: canonical } = isolatedInstallFixture();
+  const checkout = join(parent, "review-head");
+  const dangling = join(parent, "dangling-head");
+  const unreadable = isolatedInstallFixture();
+  try {
+    mkdirSync(checkout);
+    mkdirSync(join(canonical, "node_modules"));
+    symlinkSync(join(canonical, "node_modules"), join(checkout, "node_modules"), "dir");
+    registerReviewerCheckout(checkout);
+    assert.equal(await refreshProofToolchainAsync(checkout, {
+      install: async (stage) => { mkdirSync(join(stage, "node_modules")); },
+    }), true);
+    assert.equal(await refreshProofToolchainAsync(checkout, {
+      install: async () => { throw new Error("a fresh shared install must not run twice"); },
+    }), false, "the installed hash marker prevents a second refresh");
+
+    mkdirSync(dangling);
+    symlinkSync(join(parent, "missing-install"), join(dangling, "node_modules"), "dir");
+    registerReviewerCheckout(dangling);
+    assert.equal(await refreshProofToolchainAsync(dangling), false);
+
+    const unreadableHead = join(unreadable.parent, "review-head");
+    mkdirSync(unreadableHead);
+    mkdirSync(join(unreadable.dir, "node_modules"));
+    mkdirSync(join(unreadable.dir, "node_modules", ".rmd-install-hash"));
+    symlinkSync(join(unreadable.dir, "node_modules"), join(unreadableHead, "node_modules"), "dir");
+    registerReviewerCheckout(unreadableHead);
+    assert.equal(await refreshProofToolchainAsync(unreadableHead), false, "an unreadable marker cannot certify freshness");
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+    rmSync(unreadable.parent, { recursive: true, force: true });
+  }
+});
+
+test("async staged refresh records failed install and preserves old modules when rollback fails", async () => {
+  const failedInstall = isolatedInstallFixture();
+  const rollback = isolatedInstallFixture();
+  try {
+    registerReviewerCheckout(failedInstall.dir);
+    assert.equal(await refreshProofToolchainAsync(failedInstall.dir, {
+      install: async () => { throw new Error("offline install"); },
+    }), false);
+
+    registerReviewerCheckout(rollback.dir);
+    mkdirSync(join(rollback.dir, "node_modules"));
+    writeFileSync(join(rollback.dir, "node_modules", "sentinel"), "old install");
+    let renames = 0;
+    assert.equal(await refreshProofToolchainAsync(rollback.dir, {
+      install: async (stage) => { mkdirSync(join(stage, "node_modules")); },
+      rename: (from, to) => {
+        renames++;
+        if (renames >= 2) throw new Error("swap and rollback refused");
+        renameSync(from, to);
+      },
+    }), false);
+    assert.equal(renames, 3);
+    const backups = readdirSync(rollback.parent).filter((name) => name.startsWith(".rmd-review-old-"));
+    assert.equal(backups.length, 1, "the old tree is kept when rollback cannot restore it");
+    assert.equal(readFileSync(join(rollback.parent, backups[0]!, "node_modules", "sentinel"), "utf8"), "old install");
+  } finally {
+    rmSync(failedInstall.parent, { recursive: true, force: true });
+    rmSync(rollback.parent, { recursive: true, force: true });
+  }
+});
+
+test("async staged refresh reports cleanup failures without discarding the installed tree", async () => {
+  const { parent, dir } = isolatedInstallFixture();
+  try {
+    registerReviewerCheckout(dir);
+    mkdirSync(join(dir, "node_modules"));
+    let cleanupCalls = 0;
+    assert.equal(await refreshProofToolchainAsync(dir, {
+      install: async (stage) => { mkdirSync(join(stage, "node_modules")); },
+      remove: () => { cleanupCalls++; throw new Error("cleanup refused"); },
+    }), true);
+    assert.equal(cleanupCalls, 2, "both staging and old-install cleanup were attempted");
+    assert.equal(existsSync(join(dir, "node_modules", ".rmd-install-hash")), true);
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
   }
 });
 
