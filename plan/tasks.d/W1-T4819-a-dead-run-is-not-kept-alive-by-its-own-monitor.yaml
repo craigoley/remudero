@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-followups-1790712493000 -> plan-followups-1790712493000"
   plan_refs: [W1-T3523]
   files: [src/lib/status.ts, src/lib/cost-anomaly.ts, test/a-dead-run-is-not-kept-alive-by-its-own-monitor.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-29 (rmd ledger-grep, fleet host): run.running_long rows by day were 09-25 52,166, 09-26 23,423,

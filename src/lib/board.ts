@@ -465,7 +465,7 @@ export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptio
   // "0 merged" as fact (fb-1784902052582-c124f9).
   const github_unreachable = safeReadFailed(effectiveDeps.github);
   const now = deps.now ?? Date.now;
-  const generatedAt = new Date().toISOString();
+  const generatedAt = new Date(now()).toISOString();
   const { blockedPrs, blockedPrsUnverifiedReason, mergeHeld } = deriveBoardStatusSections(effectiveDeps, lines);
   const prQueue = derivePrQueue(effectiveDeps, lines, tasks, mergeHeld, generatedAt, options.lastGoodPrQueueAt, prQueueIndex);
   const githubFactsAgeMs = safeFactsAgeMs(effectiveDeps.github);

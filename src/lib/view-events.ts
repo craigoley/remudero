@@ -13,6 +13,7 @@
  *   stale with no worker message, exactly as a GET would re-judge it).
  * - `: hb` every 25 s, so an idle proxy never cuts the stream.
  * - `handover` ends every stream when serve drains, and a subscriber stalled past its bound.
+ * - A small body rides in its `view` event (P2-05); `view.emitted` samples one event per key a minute (P2-07).
  *
  * BACKPRESSURE IS LATEST-VALUE-WINS PER KEY (D4): while a socket holds more than the high-water mark, a
  * new event REPLACES the one pending for its key, so memory is bounded by keys, not by time stalled.
@@ -26,7 +27,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { ifNoneMatchHits } from "./console-snapshot-cache.js";
 import type { ReadModelWorkerHandle } from "./read-model-worker.js";
 import type { Route } from "./service.js";
-import { oldestAsOf, viewEtag, type ViewBodyEntry } from "./views.js";
+import { oldestAsOf, viewEtag, type ViewBodyEntry, type ViewSource } from "./views.js";
 
 export const VIEW_EVENTS_PATH = "/v1/views/events";
 export const VIEW_VERSIONS_PATH = "/v1/views/versions";
@@ -40,6 +41,12 @@ export const VIEW_EVENTS_HIGH_WATER_BYTES = 64 * 1024;
 export const VIEW_EVENTS_STALL_MS = 60_000;
 /** The EventSource reconnect delay the stream advertises. */
 export const VIEW_EVENTS_RETRY_MS = 3_000;
+/** A judged body this small rides in its `view` event as `body`, exactly as a GET answers it, so it costs no
+ *  refetch (design §4.2 lever 1: nav-badge is ~1.5 KB; `now`, ~100 KB, is refetched). */
+export const VIEW_EVENTS_INLINE_BYTES = 4 * 1024;
+/** One `view.emitted` ledger row per key at most this often: a latency sample, not a log of every event. Its
+ *  `rowTs` (the newest ledger row the body reflects) and `emittedAt` time the host-side hops on one clock. */
+export const VIEW_EMITTED_SAMPLE_MS = 60_000;
 
 /** One served view's version per key, and the views whose switch is not `serve`. */
 export interface ViewVersions {
@@ -59,6 +66,7 @@ export interface ViewEventsOptions {
   log?: (step: string, extra?: Record<string, unknown>) => void;
   highWaterBytes?: number;
   stallMs?: number;
+  inlineBytes?: number;
 }
 
 export interface ViewEvents {
@@ -81,6 +89,12 @@ interface Judged {
   etag: string;
   stale: boolean;
   asOf: string | null;
+  sources: ViewSource[];
+}
+
+/** The newest row a body reflects: the latest `asOf` among its `ledger:<instance>` sources. */
+function newestLedgerRow(sources: readonly ViewSource[]): string | null {
+  return sources.filter((source) => source.name.startsWith("ledger:") && source.asOf !== null).map((source) => source.asOf!).sort().pop() ?? null;
 }
 
 function everyUnref(run: () => void, ms: number): () => void {
@@ -99,6 +113,8 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
   const every = opts.every ?? everyUnref;
   const highWater = opts.highWaterBytes ?? VIEW_EVENTS_HIGH_WATER_BYTES;
   const stallMs = opts.stallMs ?? VIEW_EVENTS_STALL_MS;
+  const inlineBytes = opts.inlineBytes ?? VIEW_EVENTS_INLINE_BYTES;
+  const sampledAt = new Map<string, number>();
   const subs = new Set<Subscriber>();
   const emitted = new Map<string, string>();
   let seq = 0;
@@ -114,7 +130,7 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
     const sources = readModel.judge(entry.body.sources, now);
     const stale = sources.some((source) => source.state !== "fresh");
     const etag = stale === entry.body.stale ? entry.etag : viewEtag(entry.view, entry.version, stale, entry.body.data);
-    return { entry, etag, stale, asOf: oldestAsOf(sources) };
+    return { entry, etag, stale, asOf: oldestAsOf(sources), sources };
   };
 
   const current = (now: number): Map<string, Judged> => {
@@ -167,12 +183,20 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
   };
 
   const emit = (judged: Judged, cause: "body" | "judge", now: number): void => {
-    const { entry, etag, stale, asOf } = judged;
+    const { entry, etag, stale, asOf, sources } = judged;
     const id = `${entry.view}\u0000${entry.key}`;
     if (emitted.get(id) === etag) return;
     emitted.set(id, etag);
     seq += 1;
-    const text = frame("view", { view: entry.view, key: entry.key, etag, stale, emittedAt: clock.iso(), asOf, cause }, `${bootId}:${seq}`);
+    const body = { ...entry.body, stale, asOf, sources };
+    const bytes = Buffer.byteLength(JSON.stringify(body));
+    const emittedAt = clock.iso();
+    const event = { view: entry.view, key: entry.key, etag, stale, emittedAt, asOf, cause };
+    const text = frame("view", bytes <= inlineBytes ? { ...event, body } : event, `${bootId}:${seq}`);
+    if (now - (sampledAt.get(id) ?? Number.NEGATIVE_INFINITY) >= VIEW_EMITTED_SAMPLE_MS) {
+      sampledAt.set(id, now);
+      opts.log?.("view.emitted", { view: entry.view, key: entry.key, etag, cause, emittedAt, rowTs: newestLedgerRow(sources), bytes, inline: bytes <= inlineBytes, subscribers: subs.size });
+    }
     for (const sub of subs) if (!sub.views || sub.views.has(entry.view)) deliver(sub, id, text, now);
   };
 

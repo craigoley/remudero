@@ -18,7 +18,7 @@ import { dirname, join } from "node:path";
 import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
-import { ghIssueGateway, type EscalateDeps } from "./escalate.js";
+import { ghIssueGateway, tryEscalate, type EscalateDeps } from "./escalate.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { FUTURE_ROW_TOLERANCE_MS, LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, type LedgerProjector, type ProjectorTickResult } from "./ledger-projector.js";
 import { createNavBadgeReadModelView } from "./nav-badge-view.js";
@@ -88,6 +88,8 @@ const READ_MODEL_ORACLE_KIND = "remudero-read-model-oracle" as const;
  * so unbudgeted bodies alone held ticks of 2-4 s beside a catch-up.
  */
 export const READ_MODEL_VIEW_SHARE = 0.4;
+/** Work outstanding without a commit for this long is stalled; serve watches silent workers too. */
+export const READ_MODEL_STALL_MS = 60_000;
 
 const VIEW_BODY_DDL = `CREATE TABLE IF NOT EXISTS view_body(view TEXT NOT NULL, key TEXT NOT NULL, version INTEGER NOT NULL,
   generation INTEGER NOT NULL, etag TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(view, key)) WITHOUT ROWID;`;
@@ -429,6 +431,8 @@ interface Slot {
   markAt?: number;
   /** Present while a backlog is being applied over several ticks; the oracle waits until it clears. */
   catchUp?: { startedAt: number; ticks: number; maxTickMs: number; lines: number; sourceBytes: number; loggedAt: number };
+  /** Present while work is outstanding and nothing commits: the watchdog's episode. */
+  stall?: { since: number; generation: number; reopened: boolean; escalated: boolean };
 }
 
 /**
@@ -595,12 +599,52 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       slot.backoffUntil = 0;
       // A tick that read archives, restarted the live file or needed several chunks was catching up.
       const caughtUp = result.archivesRead === 0 && !result.liveRestarted && result.transactions <= 1 && result.unread.length === 0;
-      if (opts.oracle === "off") return;
-      if (slot.markAt === undefined || tickedAt - slot.markAt >= settleMs / 2) slot.markAt = recordIngestMark(db, slot.lease!, tickedAt, settleMs);
-      slot.checkPending = caughtUp && now >= slot.checkAfter && (!nextOracleSlice(db, now, windowMs, sliceBudgetMs).startsCycle || consistencyCheckDue(db, now));
+      if (opts.oracle !== "off") {
+        if (slot.markAt === undefined || tickedAt - slot.markAt >= settleMs / 2) slot.markAt = recordIngestMark(db, slot.lease!, tickedAt, settleMs);
+        slot.checkPending = caughtUp && now >= slot.checkAfter && (!nextOracleSlice(db, now, windowMs, sliceBudgetMs).startsCycle || consistencyCheckDue(db, now));
+      }
+      watchProgress(slot, tickedAt, result.pending || result.unread.length > 0);
     } catch (error) {
       // failSlot logs it, backs this instance off, and closes the slot on a lost lease.
       failSlot(slot, now, error);
+      watchProgress(slot, now, true);
+    }
+  }
+
+  /**
+   * The watchdog: a tick that committed, or had nothing left to do, is progress. Outstanding work
+   * with no commit for {@link READ_MODEL_STALL_MS} ledgers the stall and reopens the store; the
+   * same again without progress escalates through the oracle's path, once per episode.
+   */
+  function watchProgress(slot: Slot, now: number, outstanding: boolean): void {
+    const generation = slot.state.generation;
+    if (!outstanding || (slot.stall && generation > slot.stall.generation)) {
+      if (slot.stall?.reopened) log("read_model.unstalled", { instance: slot.instance.name, stalledMs: now - slot.stall.since });
+      slot.stall = outstanding ? { since: now, generation, reopened: false, escalated: false } : undefined;
+      return;
+    }
+    const stall = (slot.stall ??= { since: now, generation, reopened: false, escalated: false });
+    const stalledMs = now - stall.since;
+    const extra = { instance: slot.instance.name, stalledMs, generation, reason: slot.state.reason ?? "work outstanding" };
+    if (stalledMs >= READ_MODEL_STALL_MS && !stall.reopened) {
+      stall.reopened = true;
+      log("read_model.stalled", extra);
+      closeSlot(slot);
+    } else if (stalledMs >= 2 * READ_MODEL_STALL_MS && !stall.escalated) {
+      stall.escalated = true;
+      const issueUrl = opts.escalation ? tryEscalate({
+        class: "MANUAL",
+        taskId: `READ-MODEL-${slot.instance.name.toUpperCase()}`,
+        summary: `read model ${slot.instance.name} has stopped advancing`,
+        detail: `The projector has had work outstanding for ${Math.round(stalledMs / 1000)} s with no commit, and reopening its store did not help. Last reason: ${extra.reason}.`,
+        options: [
+          { label: "rebuild the read model", detail: "Run `rmd read-model rebuild`; the views keep serving the old file until the new one passes its check.", kind: { type: "operator-only" } },
+          { label: "restart serve", detail: "Recycle the serve container; the projector resumes from its checkpoints.", kind: { type: "operator-only" } },
+        ],
+        recommendation: "restart serve",
+        consequence: "Every view that reads this instance stays stale until the projector advances.",
+      }, opts.escalation) : null;
+      log("read_model.stall_escalated", { ...extra, issueUrl });
     }
   }
 
@@ -941,6 +985,8 @@ export interface ReadModelWorkerOptions {
   log?: (step: string, extra?: Record<string, unknown>) => void;
   escalationRepository?: string;
   every?: (run: () => void, ms: number) => () => void;
+  /** What the silent-worker watchdog measures against. */
+  clock?: Clock;
 }
 
 function everyUnref(run: () => void, ms: number): () => void {
@@ -981,9 +1027,36 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   let stopping = false;
   let deaths = 0;
   let respawnTimer: NodeJS.Timeout | undefined;
-  const bodyListeners = new Set<(entry: ReadModelBodyEntry) => void>();
+  const clock = opts.clock ?? systemClock;
+  /** When the running worker last said anything; a worker that ticks posts its state four times a second. */
+  let heardAt = clock.now();
+  let silenceLogged = false;
+  let recycles = 0;
 
+  /**
+   * The silent-worker watchdog. A worker blocked in a call, or whose loop died without an exit,
+   * posts nothing, and every view goes stale while its last state still reads "held". Silence for
+   * {@link READ_MODEL_STALL_MS} is ledgered; silence for twice that, doubling with each recycle so a
+   * slow first open is never killed in a loop, terminates it, and the exit handler respawns it.
+   */
+  const watchWorker = (): void => {
+    const running = worker;
+    if (!running) return;
+    const silentMs = clock.now() - heardAt;
+    if (silentMs >= READ_MODEL_STALL_MS && !silenceLogged) {
+      silenceLogged = true;
+      opts.log?.("read_model.worker_silent", { silentMs, recycles });
+    }
+    if (silentMs < 2 * READ_MODEL_STALL_MS * 2 ** recycles) return;
+    recycles++;
+    opts.log?.("read_model.worker_recycled", { silentMs, recycles });
+    void running.terminate();
+  };
+
+  const bodyListeners = new Set<(entry: ReadModelBodyEntry) => void>();
   const onMessage = (msg: ReadModelWorkerMessage): void => {
+    heardAt = clock.now();
+    silenceLogged = false;
     if (msg.type === "body") {
       bodies.set(readModelBodyKey(msg.entry.view, msg.entry.key), msg.entry);
       for (const listener of bodyListeners) listener(msg.entry);
@@ -1005,6 +1078,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv });
     signal = new Int32Array(shared);
     worker = spawned;
+    heardAt = clock.now();
     spawned.unref();
     spawned.on("message", onMessage);
     spawned.on("error", (error) => opts.log?.("read_model.worker_failed", { error: String(error?.message ?? error) }));
@@ -1037,7 +1111,10 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     start: () => {
       if (worker || stopping) return;
       spawn();
-      stopSwitchWatch = (opts.every ?? everyUnref)(refreshSwitches, READ_MODEL_SWITCH_RECHECK_MS);
+      stopSwitchWatch = (opts.every ?? everyUnref)(() => {
+        refreshSwitches();
+        watchWorker();
+      }, READ_MODEL_SWITCH_RECHECK_MS);
     },
     stop: () => {
       stopping = true;

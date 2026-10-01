@@ -15,7 +15,9 @@
     - test/triage-lane-outcomes.test.ts
   origin: "operator-session#open-weight-research-2026-09-13"
   plan_refs: ["W1-T3545", "W1-T3546", "W1-T3549", "W1-T3558", "W1-T3570", "W1-T3749", "W1-T4907"]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T3547 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   note: |
     REWRITTEN 2026-09-30 (operator ruling): the original scope, a static mount flip of `synthesis.triage`

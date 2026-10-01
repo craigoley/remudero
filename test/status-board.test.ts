@@ -134,6 +134,27 @@ test("buildStatusBoard: LIVENESS — running HEAD vs origin/main STALE flag, reu
   assert.deepEqual(notRunning.liveness.headVsOriginMain, { status: "unknown" });
 });
 
+// W1-T3759: a running daemon with NO `daemon.boot` head_sha on record must render `unknown` — not a
+// comparison against a substitute sha — and its next action must name the missing input rather than
+// prescribe `rmd deploy`, which skips for that same missing record.
+test("buildStatusBoard: LIVENESS — a running daemon with no daemon.boot head_sha on record reads unknown (never a substitute comparison), and names the gap instead of `rmd deploy`", () => {
+  const ledgerPath = join(mkdtempSync(join(tmpdir(), "status-board-ledger-")), "ledger.ndjson");
+  // A daemon.boot line with NO head_sha field at all — the exact "missing running head" input.
+  writeFileSync(ledgerPath, JSON.stringify(ledgerLine({ step: "daemon.boot" })) + "\n");
+  const daemonRunning: StatusBoardDeps["queryService"] = (service) =>
+    service === "daemon" ? { running: true, pid: 1 } : { running: false, pid: null };
+
+  const model = buildStatusBoard(tmpRoot(), ledgerPath, baseDeps({ queryService: daemonRunning, resolveOriginMainSha: () => "c".repeat(40) }));
+
+  assert.deepEqual(model.liveness.headVsOriginMain, { status: "unknown" });
+  assert.match(model.liveness.nextAction ?? "", /unknown running head/);
+  assert.match(model.liveness.nextAction ?? "", /cannot clear this/);
+  assert.doesNotMatch(model.liveness.nextAction ?? "", /`rmd deploy` to fast-forward/);
+
+  const text = renderStatusBoardText(model);
+  assert.match(text, /head vs origin\/main\s*:\s*unknown/);
+});
+
 // ── ACCEPTANCE 2 (incident-a falsifier): a seeded DEPLOY_FAILED marker renders in LATCHES with
 // its age + stated consequence + the section's single next action ─────────────────────────────
 

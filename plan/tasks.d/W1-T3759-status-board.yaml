@@ -10,7 +10,9 @@
   origin: "decomposed from W1-T3755 under Rule 19 — that task is the deployer-side record's lifetime; this is what the board must render when the record is absent regardless"
   plan_refs: [W1-T3755, W1-T3756]
   files: [src/lib/status-board.ts]
-  status: queued
+  status: blocked
+  retirement: closed
+  # plan gardener: retire W1-T3759 — Every acceptance proof now holds on main, and did not when it was filed.
   attempts: 0
   note: |
     reservation hand-off: unknown -> amend-t3755-scope

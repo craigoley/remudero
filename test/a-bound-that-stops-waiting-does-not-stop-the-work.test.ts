@@ -55,7 +55,12 @@ async function driveWithHangingSweep(iterations: number) {
     fixturePlan(),
     {
       refreshMerged: () => NONE_MERGED,
-      runOne: async (id) => ({ taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" }),
+      // W1-T4998: a tick no longer waits for the sweep, so each iteration outlasts the bound itself —
+      // the same device test (3) below uses — or the run ends before the bound can ever fire.
+      runOne: async (id) => {
+        await new Promise((r) => setTimeout(r, 30));
+        return { taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" };
+      },
       sleep: REAL_SLEEP,
       sweep: () => {
         sweepStarts++;
@@ -123,7 +128,11 @@ test("work that is still progressing is never terminated by the bound firing", a
     fixturePlan(),
     {
       refreshMerged: () => NONE_MERGED,
-      runOne: async (id) => ({ taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" }),
+      // W1-T4998: outlasts the bound, since the tick no longer waits for the sweep itself.
+      runOne: async (id) => {
+        await new Promise((r) => setTimeout(r, 30));
+        return { taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" };
+      },
       sleep: REAL_SLEEP,
       sweep: () => {
         sweepPromise = new Promise<void>((resolve) => {

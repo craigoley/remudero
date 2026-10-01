@@ -43,7 +43,8 @@ import { buildBatchedGithub, readLedgerLines, type BatchedPr, type GitHub } from
 import type { ViewSource } from "./views.js";
 
 export const NOW_VIEW_NAME = "now";
-export const NOW_VIEW_VERSION = 1;
+/** 2: every clock stamp left `data` (the envelope and `sources` carry them), so the ETag moves only with content. */
+export const NOW_VIEW_VERSION = 2;
 /** Re-materialize at least this often with no new row: `elapsedMs`, the liveness bound and the 6 h cooldown move with the clock. */
 export const NOW_REFRESH_MS = 30_000;
 /** The host probes' cadence (design §3.5), per instance. */
@@ -52,6 +53,8 @@ export const NOW_HOST_PROBE_MS = 60_000;
 export const NOW_QUEUED_ROWS = 50;
 /** The open snapshot is re-saved at least every minute while its gateway runs; three misses make it stale. */
 export const NOW_GITHUB_STALE_MS = 3 * OPEN_SNAPSHOT_RESAVE_MS;
+/** A daemon with no `daemon.*` row for this long reads silent: the console's own health-freshness bound. */
+export const NOW_DAEMON_SILENT_MS = 5 * 60_000;
 
 /** One instance as the worker knows it; `repo`, `planPath` and `feedbackRoot` come from serve's registry resolution. */
 export interface NowInstance {
@@ -75,7 +78,6 @@ export interface NowTask {
   prUrl?: string;
   prNumber?: number;
   phase?: string;
-  elapsedMs?: number;
   startedAt?: string;
   needsHuman?: true;
   verifyHumanPending?: true;
@@ -104,19 +106,26 @@ export interface NowAction {
   sortAt?: string;
 }
 
+/** The daemon's poll liveness: `at` appears only once it went silent, and then stays put until it polls again. */
+export type NowDaemonPoll = { state: "polling" } | { state: "silent"; at?: string; reason: string };
+
 export interface NowHealth {
-  sampledAt: string;
   diskFreeBytes?: number;
   rateLimitRemaining?: number;
-  lastPollAgeMs?: number;
+  daemon: NowDaemonPoll;
   /** Why a field is absent, per field. */
   reasons?: Record<string, string>;
+}
+
+/** One host probe: the gauges `data` carries, plus the sample time the `host-probe:<i>` source carries. */
+export interface NowHostProbe {
+  sampledAt: string;
+  health: NowHealth;
 }
 
 export interface NowViewData {
   instance: string;
   board: {
-    generated_at: string;
     counts: { running: number; queued: number; blocked: number };
     spendTodayUsd: number;
     taskProjection: { complete: boolean; returned: number; limit: number; total: number };
@@ -236,7 +245,7 @@ function nowTask(row: BoardRow): NowTask {
     taskId: row.taskId, title: row.title, status: row.status, risk: row.risk,
     ...(row.lastActivityAt ? { lastActivityAt: row.lastActivityAt } : {}), ...(row.prUrl ? { prUrl: row.prUrl } : {}),
     ...(row.prNumber !== undefined ? { prNumber: row.prNumber } : {}), ...(row.phase ? { phase: row.phase } : {}),
-    ...(row.elapsedMs !== undefined ? { elapsedMs: row.elapsedMs } : {}), ...(row.startedAt ? { startedAt: row.startedAt } : {}),
+    ...(row.startedAt ? { startedAt: row.startedAt } : {}),
     ...(row.needsHuman ? { needsHuman: row.needsHuman } : {}), ...(row.verifyHumanPending ? { verifyHumanPending: row.verifyHumanPending } : {}),
     ...(escalation ? { escalation } : {}),
     ...(t?.servedModel || t?.requestedModel ? { worker: { ...(t.servedModel ? { servedModel: t.servedModel } : {}), ...(t.requestedModel ? { requestedModel: t.requestedModel } : {}) } } : {}),
@@ -261,7 +270,6 @@ export function assembleNowView(input: {
   return {
     instance: input.instance,
     board: {
-      generated_at: snapshot.generated_at,
       counts: { running: snapshot.counts.running, queued: snapshot.counts.queued, blocked: snapshot.counts.blocked },
       spendTodayUsd: snapshot.spend.spendTodayUsd,
       taskProjection: { complete: tasks.length === snapshot.tasks.length, returned: tasks.length, limit: NOW_QUEUED_ROWS, total: snapshot.tasks.length },
@@ -413,7 +421,7 @@ interface Held {
   githubKey: string;
   gateway: ReturnType<typeof snapshotGithub>;
   at: number;
-  health?: NowHealth;
+  probe?: NowHostProbe;
   healthAt: number;
   members: Record<string, string[]>;
 }
@@ -459,7 +467,7 @@ export function createNowView(opts: NowViewOptions): {
     const [owner, repo] = (instance.repo ?? "/").split("/");
     return snapshotGeneration(dirname(instance.ledgerDir), owner!, repo!);
   };
-  const probeHost = (instance: NowInstance, isCore: boolean): NowHealth => defaultProbeHost(instance, isCore, clock, opts.hostProbe);
+  const probeHost = (instance: NowInstance, isCore: boolean): NowHostProbe => defaultProbeHost(instance, isCore, clock, opts.hostProbe);
   const countQuestions = opts.countQuestions ?? ((instance: NowInstance) => listFeedback(instance.feedbackRoot!, { status: "grilling" }).length);
 
   function materializeOne(instance: NowInstance, state: NowSlotState, db: ReadModelDb, now: number): { key: string; data: NowViewData; sources: ViewSource[] } | undefined {
@@ -488,18 +496,18 @@ export function createNowView(opts: NowViewOptions): {
     const deps = { plan, ledgerPath, github: gateway.github, readLedger: () => rows as Array<Record<string, unknown>>, now: () => clock.now() };
     const snapshot = computeBoardSnapshot(deps, { reuseProjection: (task) => projections.get(task.id) });
     const isCore = instance.name === core;
-    if (!h.health || now - h.healthAt >= NOW_HOST_PROBE_MS) {
-      h.health = probeHost(instance, isCore);
+    if (!h.probe || now - h.healthAt >= NOW_HOST_PROBE_MS) {
+      h.probe = probeHost(instance, isCore);
       h.healthAt = now;
     }
     const questions = isCore && instance.feedbackRoot ? { count: countQuestions(instance) } : { reason: isCore ? "no feedback root is configured" : "feedback questions live in core only" };
-    const data = assembleNowView({ instance: instance.name, snapshot, rows, plan, recent: computeRecentActivity(deps, h.recent, 20), health: h.health, questions, nowMs: now });
+    const data = assembleNowView({ instance: instance.name, snapshot, rows, plan, recent: computeRecentActivity(deps, h.recent, 20), health: h.probe.health, questions, nowMs: now });
     Object.assign(h, { generation: state.generation, planKey: pk, plan, at: now, members: nowCountMembers(snapshot.tasks) });
     const sources: ViewSource[] = [
       ...(opts.ledgerSource ? [opts.ledgerSource(state, now)] : []),
       { name: `github:${instance.name}`, ...gateway.source },
       { name: `plan:${instance.name}`, asOf: fixedClock(Number(pk.split(":")[0]) || now).iso(), state: "fresh" },
-      { name: `host-probe:${instance.name}`, asOf: h.health.sampledAt, state: "fresh" },
+      { name: `host-probe:${instance.name}`, asOf: h.probe.sampledAt, state: "fresh" },
     ];
     return { key: `instance=${encodeURIComponent(instance.name)}`, data, sources };
   }
@@ -526,10 +534,10 @@ export function createNowView(opts: NowViewOptions): {
       const deps = { plan: h.plan, ledgerPath, github: h.gateway.github, readLedger: () => rows, now: () => now };
       const snapshot = computeBoardSnapshot(deps);
       const legacy = assembleNowView({ instance: name, snapshot, rows, plan: h.plan, recent: [], health: mine.health, questions: mine.questions, nowMs: now });
-      const probe = probeHost(instance, name === core);
-      const gauge = (field: "diskFreeBytes" | "rateLimitRemaining" | "lastPollAgeMs"): Partial<NowHealth> =>
+      const probe = probeHost(instance, name === core).health;
+      const gauge = (field: "diskFreeBytes" | "rateLimitRemaining"): Partial<NowHealth> =>
         probe[field] === undefined ? {} : { [field]: mine.health[field] ?? probe[field] };
-      const health: NowHealth = { sampledAt: mine.health.sampledAt, ...gauge("diskFreeBytes"), ...gauge("rateLimitRemaining"), ...gauge("lastPollAgeMs"), ...(probe.reasons ? { reasons: probe.reasons } : {}) };
+      const health: NowHealth = { ...gauge("diskFreeBytes"), ...gauge("rateLimitRemaining"), daemon: probe.daemon, ...(probe.reasons ? { reasons: probe.reasons } : {}) };
       const oldest = rows.map((row) => (typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN)).filter(Number.isFinite).sort((a, b) => a - b)[0];
       const theirs = nowCountMembers(snapshot.tasks);
       return {
@@ -558,23 +566,30 @@ export function createNowView(opts: NowViewOptions): {
   };
 }
 
-/** Disk and daemon heartbeat from the instance's own state dir; the rate limit only for core, whose token serve holds. */
-export function defaultProbeHost(instance: NowInstance, isCore: boolean, clock: Clock = systemClock, deps: NonNullable<NowViewOptions["hostProbe"]> = {}): NowHealth {
+/**
+ * Disk and daemon heartbeat from the instance's own state dir; the rate limit only for core, whose token serve holds.
+ * The daemon's last poll is NOT a gauge: it moves on every poll, so `data` says only whether the daemon is polling,
+ * and names the absolute time of its last poll once it went silent (a time that then stops moving).
+ */
+export function defaultProbeHost(instance: NowInstance, isCore: boolean, clock: Clock = systemClock, deps: NonNullable<NowViewOptions["hostProbe"]> = {}): NowHostProbe {
   const now = clock.now();
   const reasons: Record<string, string> = {};
   const diskFreeBytes = (deps.diskFree ?? readDiskFreeBytes)(instance.ledgerDir);
   if (diskFreeBytes === undefined) reasons.diskFreeBytes = `statfs of ${instance.ledgerDir} failed`;
   const poll = deriveLastPoll((deps.readLive ?? readLedgerLines)(join(instance.ledgerDir, LEDGER_FILENAME)));
-  const lastPollAgeMs = poll.lastPollTs ? Math.max(0, now - Date.parse(poll.lastPollTs)) : undefined;
-  if (lastPollAgeMs === undefined) reasons.lastPollAgeMs = "no daemon.* row in the instance's live ledger";
+  const daemon: NowDaemonPoll = !poll.lastPollTs
+    ? { state: "silent", reason: "no daemon.* row in the instance's live ledger" }
+    : now - Date.parse(poll.lastPollTs) > NOW_DAEMON_SILENT_MS
+      ? { state: "silent", at: poll.lastPollTs, reason: `no daemon.* row for over ${NOW_DAEMON_SILENT_MS / 60_000} min` }
+      : { state: "polling" };
   const rateLimitRemaining = isCore ? (deps.rateLimit ?? readGhRateLimitRemaining)() : undefined;
   if (!isCore) reasons.rateLimitRemaining = "serve holds core's GitHub token only; this instance's daemon spends its own";
   else if (rateLimitRemaining === undefined) reasons.rateLimitRemaining = "gh api rate_limit did not answer";
-  return {
-    sampledAt: fixedClock(now).iso(),
+  const health: NowHealth = {
     ...(diskFreeBytes !== undefined ? { diskFreeBytes } : {}),
     ...(rateLimitRemaining !== undefined ? { rateLimitRemaining } : {}),
-    ...(lastPollAgeMs !== undefined ? { lastPollAgeMs } : {}),
+    daemon,
     ...(Object.keys(reasons).length > 0 ? { reasons } : {}),
   };
+  return { sampledAt: fixedClock(now).iso(), health };
 }

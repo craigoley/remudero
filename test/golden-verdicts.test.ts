@@ -211,6 +211,12 @@ test("GOLDEN — KNOWLEDGE REPAIR: retargeting an existing operator-impact learn
   assert.equal(checkDrillCoverage(diff).pass, true);
 });
 
+test("GOLDEN — CI COMMITLINT LESSON: the cited incident executes and arms from its YAML entry", () => {
+  const { verdict, golden } = judgeCase("ci-commitlint-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+});
+
 test("GOLDEN — KNOWLEDGE RETIRE LEDGER: the observed ledger learning retirement keeps its text and arms with a golden replay", () => {
   const { verdict, golden } = judgeCase("knowledge-retire-ledger");
   assert.equal(golden.violation, "none");

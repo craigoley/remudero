@@ -86,6 +86,7 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
   ["POST /v1/confirm", "W1-T4584 surfaced -- confirm-nonce flow covered in test/console-merge-hold-control.test.ts"],
   ["POST /v1/hooks/github", "W1-T4584 surfaced -- webhook ingest covered in test/ci-incidents.test.ts and test/route-scope-matrix.test.ts"],
   ["POST /v1/incidents/events", "W1-T4584 surfaced -- covered in test/incident-events.test.ts"],
+  ["POST /v1/console/telemetry", "P2-06: ingest-only ledger write and token scope are exercised through buildServeServer in test/console-telemetry.test.ts"],
   ["POST /v1/operator-agent/ask", "W1-T4584 surfaced -- covered in test/operator-agent-answer-route.test.ts"],
   ["POST /v1/operator-agent/consequences", "W1-T4584 surfaced -- covered in test/operator-agent-consequences-list.test.ts"],
   ["POST /v1/operator-agent/consequences/decision", "W1-T4584 surfaced -- covered in test/operator-agent-consequences-list.test.ts"],

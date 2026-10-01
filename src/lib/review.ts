@@ -2,7 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { classifyFailure } from "./classify.js";
@@ -18,6 +18,7 @@ import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { playwrightCacheRoot } from "./worker-home.js";
+import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import {
   COMPANION_PATH_CLASSES,
   type CompanionPathClass,
@@ -44,13 +45,11 @@ import {
 /** The commit-status context string the merge gate keys on. Never change casually. */
 export const REVIEW_CONTEXT = "remudero-review";
 
-/** A commit-status state. GitHub statuses also allow `pending`/`error`; the gate uses these two. */
-export type ReviewState = "success" | "failure";
+/** A judged success/failure or a cannot-evaluate hold, posted as pending until the toolchain is repaired. */
+export type ReviewState = "success" | "failure" | "pending";
 
-/** The wider range {@link postReviewStatus} may POST: {@link ReviewState} plus `pending`, kept a SEPARATE type because
- *  `ReviewState` is a JUDGED verdict and must never admit "in progress". A detection-time pending post is a fact about
- *  timing, so it gets its own type rather than widening the one every exhaustive switch already reads (W1-T913). */
-export type PostableReviewState = ReviewState | "pending";
+/** States the commit-status poster accepts. */
+export type PostableReviewState = ReviewState;
 
 /** Stable identity for the material a review judges: the PR head binds the diff, the exact body the authored claims,
  *  so a new commit OR a body edit earns a fresh retry budget while comments, labels and other `updated_at` churn do
@@ -59,6 +58,8 @@ export type PostableReviewState = ReviewState | "pending";
  *  semantics (the closed console suite registry) without advancing this revision, so a v1 terminal cached before
  *  that change stayed an exact cache hit and replayed instead of executing the newly routable proofs. */
 export const REVIEW_ENGINE_REVISION = "reviewer-scope-context-v2";
+/** Changes both exact-head identities when the proof loader's verdict semantics change. */
+const PROOF_LOAD_REVISION = "cannot-load-v1";
 
 export function reviewInputDigest(
   headSha: string,
@@ -66,7 +67,7 @@ export function reviewInputDigest(
   engineRevision: string = REVIEW_ENGINE_REVISION,
 ): string {
   const encoded = JSON.stringify({ version: 2, engineRevision, headSha, body });
-  return `v2:${createHash("sha256").update(encoded, "utf8").digest("hex")}`;
+  return `v2:${createHash("sha256").update(encoded, "utf8").update(PROOF_LOAD_REVISION).digest("hex")}`;
 }
 
 export const REVIEW_DECISION_POLICY_REVISION = "review-policy-v1";
@@ -109,7 +110,7 @@ export function reviewDecisionDigest(input: ReviewDecisionDigestInput): string {
     ...(input.ownership !== undefined ? { ownership: input.ownership.map((finding) => finding.kind === "unknown"
       ? { id: finding.id, file: finding.file, kind: finding.kind } : finding) } : {}),
   });
-  return `v2:${createHash("sha256").update(encoded, "utf8").digest("hex")}`;
+  return `v2:${createHash("sha256").update(encoded, "utf8").update(PROOF_LOAD_REVISION).digest("hex")}`;
 }
 
 /** Stable identity of the reviewer contract, independent of a PR head, diff, or prose report.
@@ -256,6 +257,7 @@ export type ProofSkipReason =
   | "prose-no-match"
   | "exec-error"
   | "runtime-broken"
+  | "cannot-load"
   | "incomplete-run"
   | "runner-absent"
   | "no-exec-context"
@@ -279,6 +281,7 @@ export type ProofExecOutcome =
   | "executed_fail"
   | "not_executable"
   | "exec_error"
+  | "cannot_evaluate"
   | "executed_stale"
   | "base_unreadable"
   | "not_yet_built"
@@ -368,6 +371,8 @@ export interface CriterionVerdict {
   /** See {@link ProofExecOutcome}. Always present — `not_executable` is the safe
    * default when the proof is prose, or no PR-head checkout was supplied. */
   proof_exec: ProofExecOutcome;
+  /** The bounded runner diagnostic when `proof_exec` is `cannot_evaluate`. */
+  loadError?: string;
   /** See {@link ProofSkipReason}. Absent when the proof executed. */
   proof_skip?: ProofSkipReason;
   /** `met` as computed by the mechanical floor, BEFORE any semantic downgrade (W1-T178). Optional so the
@@ -493,6 +498,8 @@ export interface UnwiredAdvisory {
 /** The rolled-up review verdict — exactly what {@link postReviewStatus} posts. */
 export interface ReviewVerdict {
   state: ReviewState;
+  /** A proof runner could not load files even after its bounded refresh and retry. */
+  cannotEvaluate?: boolean;
   criteria: CriterionVerdict[];
   /** True when the diff adds tests that assert nothing (a global fail signal). */
   testTheater: boolean;
@@ -780,6 +787,10 @@ export interface WhitelistedProof {
    * the reviewer's own working directory. Node itself is the reviewer process's runtime and so
    * needs no entry here; Vitest is a pinned dependency the checkout must actually contain. */
   runner?: "vitest";
+  /** Test files named by the PR diff; used to focus a bare title when its source is known. */
+  diffTestFiles?: readonly string[];
+  /** Bounded diagnostic from a runner whose test files failed to load. */
+  loadError?: string;
 }
 
 const TEST_PATH_RE = /\btest\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?\b/;
@@ -1486,11 +1497,21 @@ export function parseWhitelistedProof(proof: string, target?: SuiteRegistryTarge
 /** Executes a {@link WhitelistedProof}'s argv and reports the outcome — injectable so unit tests fake
  *  pass/fail/no-match/throw without touching the filesystem. `"no-match"` (name-filtered proofs only) means the run
  *  completed but ZERO tests matched: NOT a failing test, so the caller degrades it to `not_executable`. */
+export type ProofResult = "pass" | "fail" | "no-match" | "cannot-load";
 export type ProofExecutor = (whitelisted: WhitelistedProof, cwd: string) => "pass" | "fail" | "no-match";
+export class ProofCannotLoadError extends RmdError {
+  constructor(readonly loadError: string) {
+    super("usage", GENERIC_EXIT_CODE, `proof test files could not load after a toolchain refresh: ${loadError}`, { loadError });
+  }
+}
 export type BrowserPreflightRunner = (cwd: string) => void;
 
 export interface ProofExecutionDeps {
   preflightBrowsers?: BrowserPreflightRunner;
+  /** Called once after a measured module-load failure, before the one retry. */
+  refreshToolchain?: (cwd: string) => void;
+  /** Internal retry guard; a second load failure must reach the judge. */
+  loadRetried?: boolean;
 }
 
 // The proof timeout is a POLICY READ (plan/policy.yaml's `proofTimeoutMs`), never a source literal (W1-T253, P37
@@ -1631,6 +1652,121 @@ function checkoutRunnerPath(whitelisted: WhitelistedProof, cwd: string): string 
 function argsWithCheckoutRunner(whitelisted: WhitelistedProof, args: readonly string[], cwd: string): readonly string[] {
   const runner = checkoutRunnerPath(whitelisted, cwd);
   return runner === undefined ? args : [runner, ...args.slice(1)];
+}
+
+/** Refresh a reviewer-owned checkout once after measured module-load failure. Worktrees link the
+ * canonical install: invoke the package manager at that real root only when its installed hash
+ * predates its own lockfile, never through the link (W1-T4933's freshness contract). */
+export function refreshProofToolchain(
+  cwd: string,
+  exec: typeof execFileSync = execFileSync,
+  ops: { rename?: typeof renameSync; remove?: typeof rmSync } = {},
+): boolean {
+  const rename = ops.rename ?? renameSync;
+  const remove = ops.remove ?? rmSync;
+  if (!reviewerOwnedCheckouts.has(resolve(cwd))) return false;
+  const modules = join(cwd, "node_modules");
+  let installRoot = cwd;
+  let linked = false;
+  try {
+    if (lstatSync(modules).isSymbolicLink()) {
+      try {
+        installRoot = dirname(realpathSync(modules));
+      } catch (error) {
+        // A dangling or unreadable shared link cannot be refreshed from this checkout.
+        return false;
+      }
+      linked = true;
+    }
+  } catch (error) {
+    // Only a missing install can be created; an unreadable install is a separate failure.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+  }
+  if (!existsSync(join(installRoot, "package-lock.json"))) return false;
+  const installHash = hashInstallInputs(installRoot);
+  const marker = installHashMarkerPath(installRoot);
+  if (linked) {
+    try {
+      if (readFileSync(marker, "utf8").trim() === installHash) return false;
+    } catch (error) {
+      // A missing marker is evidence that the canonical install has not been freshness-checked.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+    }
+  }
+  // npm ci removes node_modules before installing. Reviewer worktrees share this canonical install
+  // with workers, so doing that in place can break running work. Install beside it, mark the new
+  // tree, then swap directories only after npm has succeeded (W1-T4933's safety boundary).
+  let stage: string | undefined;
+  let backup: string | undefined;
+  let preserveBackup = false;
+  try {
+    stage = mkdtempSync(join(dirname(installRoot), ".rmd-review-stage-"));
+    copyFileSync(join(installRoot, "package.json"), join(stage, "package.json"));
+    copyFileSync(join(installRoot, "package-lock.json"), join(stage, "package-lock.json"));
+    exec("npm", ["ci"], { cwd: stage, stdio: "pipe", timeout: 120_000, killSignal: "SIGKILL" });
+    const stagedModules = join(stage, "node_modules");
+    // npm ci for a package with no dependencies can succeed without creating this directory.
+    mkdirSync(stagedModules, { recursive: true });
+    writeFileSync(installHashMarkerPath(stage), installHash);
+    backup = mkdtempSync(join(dirname(installRoot), ".rmd-review-old-"));
+    const liveModules = join(installRoot, "node_modules");
+    const oldModules = join(backup, "node_modules");
+    const hadOld = existsSync(liveModules);
+    if (hadOld) rename(liveModules, oldModules);
+    try {
+      rename(stagedModules, liveModules);
+    } catch (error) {
+      console.error("review toolchain install swap failed", error);
+      if (hadOld) {
+        try { rename(oldModules, liveModules); }
+        catch (restoreError) {
+          console.error("review toolchain install rollback failed; old tree retained in staging backup", restoreError);
+          preserveBackup = true;
+        }
+      }
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.error("review toolchain staged install failed", error);
+    // A failed refresh leaves the old install serving and permits the one proof retry.
+    return false;
+  } finally {
+    if (stage) {
+      try { remove(stage, { recursive: true, force: true }); }
+      catch (error) { console.error("review toolchain staging cleanup failed", error); }
+    }
+    if (backup && !preserveBackup) {
+      try { remove(backup, { recursive: true, force: true }); }
+      catch (error) { console.error("review toolchain old-install cleanup failed", error); }
+    }
+  }
+}
+
+/** Choose files by observed title text, then by the single test file named in the diff. A bare
+ * title with no identifiable file searches the registered root except its e2e population. */
+function vitestNameFilterScope(w: WhitelistedProof, cwd: string): string[] {
+  const root = w.args.at(-1);
+  if (!root) return [];
+  let entries: string[];
+  try {
+    entries = readdirSync(join(cwd, root), { recursive: true }) as string[];
+  } catch (error) {
+    throw new Error(`cannot inspect Vitest test root ${root}: ${String(error)}`);
+  }
+  const files = entries
+    .filter((entry) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(entry) && !/(?:^|\/)e2e\//.test(entry))
+    .map((entry) => `${root.replace(/\/$/, "")}/${entry}`);
+  const diffHits = files.filter((file) => w.diffTestFiles?.includes(file));
+  if (diffHits.length === 1) return diffHits;
+  const titleHits = files.filter((file) => {
+    try { return readFileSync(join(cwd, file), "utf8").includes(w.label); }
+    catch (error) {
+      // Keep an unreadable candidate in scope: its loader must reveal the error, not a guessed absence.
+      return true;
+    }
+  });
+  return titleHits.length > 0 ? titleHits : files;
 }
 
 /**
@@ -2046,7 +2182,7 @@ export function execWhitelistedProof(
   timeoutMs = defaultProofTimeoutMs(),
   spawn: ProofSpawner = defaultProofSpawner,
   deps: ProofExecutionDeps = {},
-): "pass" | "fail" | "no-match" {
+): ReturnType<ProofExecutor> {
   // THE REAL PROOF EXECUTOR: run a {@link WhitelistedProof}'s argv, no shell, in `cwd`, under a hard per-proof timeout,
   // so a hanging test can never stall the required check into the absent-check deadlock class. `"pass"` on a clean
   // exit 0, `"fail"` on a genuine clean nonzero exit; it THROWS — the caller surfacing `exec_error` and the keyword
@@ -2076,6 +2212,11 @@ export function execWhitelistedProof(
     preflightFiles = resolution.status === "resolved" ? resolution.files : undefined;
     args = narrowNameFilteredArgs(whitelisted.args, preflightFiles ?? []);
   }
+  if (vitestNameFiltered) {
+    const scope = vitestNameFilterScope(whitelisted, cwd);
+    if (scope.length === 0) return "no-match";
+    args = [...args.slice(0, -1), ...scope];
+  }
   // AFTER the fast path on purpose: priming a checkout's node_modules is only worth 120s of `npm ci` if we are
   // actually going to run node. `ensureDeps` is memoised per cwd, so a later proof in the same checkout still primes.
   if (whitelisted.kind === "test") {
@@ -2097,7 +2238,19 @@ export function execWhitelistedProof(
   }
   try {
     const stdout = spawn(whitelisted.command, args, cwd, timeoutMs);
-    if (whitelisted.nameFiltered) return vitestNameFiltered ? vitestNameFilteredOutcome(stdout) : nameFilteredOutcome(stdout);
+    if (whitelisted.nameFiltered) {
+      const outcome = vitestNameFiltered ? vitestNameFilteredOutcome(stdout) : nameFilteredOutcome(stdout);
+      if (outcome === "cannot-load" && !deps.loadRetried) {
+        recordLoadError(whitelisted, stdout);
+        (deps.refreshToolchain ?? refreshProofToolchain)(cwd);
+        return execWhitelistedProof(whitelisted, cwd, timeoutMs, spawn, { ...deps, loadRetried: true });
+      }
+      if (outcome === "cannot-load") {
+        recordLoadError(whitelisted, stdout);
+        throw new ProofCannotLoadError(whitelisted.loadError!);
+      }
+      return outcome;
+    }
     // W1-T3208: a dialect grep's own compiled pattern/path names the exact self-declaration text to
     // exclude. `dialectGrepTargetPath` returning a path
     // confirms both the dialect shape (not the legacy fenced, author-selected argv) AND that
@@ -2113,7 +2266,7 @@ export function execWhitelistedProof(
     }
     return "pass";
   } catch (e) {
-    const err = e as NodeJS.ErrnoException & { status?: number | null; stdout?: string | Buffer | null };
+    const err = e as NodeJS.ErrnoException & { status?: number | null; stdout?: string | Buffer | null; stderr?: string | Buffer | null };
     // A TIMEOUT IS NOT A VERDICT, AND THE GUARD BELOW CANNOT SEE ONE (W1-T2742). `execFileSync` kills the child with
     // SIGTERM at `timeoutMs`, but `node --test` TRAPS SIGTERM and shuts down cleanly, so the error carries `status:
     // 1`, `signal: null`, `killed: undefined` — MEASURED — and reads as an ordinary nonzero exit, grading a merely
@@ -2124,7 +2277,18 @@ export function execWhitelistedProof(
     // TAP stream node still attaches to the error rather than trusting the code.
     if (whitelisted.nameFiltered) {
       const stdout = typeof err.stdout === "string" ? err.stdout : (err.stdout?.toString("utf8") ?? "");
-      return vitestNameFiltered ? vitestNameFilteredOutcome(stdout) : nameFilteredOutcome(stdout);
+      const stderr = typeof err.stderr === "string" ? err.stderr : (err.stderr?.toString("utf8") ?? "");
+      const outcome = vitestNameFiltered ? vitestNameFilteredOutcome(stdout, stderr) : nameFilteredOutcome(stdout, stderr);
+      if (outcome === "cannot-load" && !deps.loadRetried) {
+        recordLoadError(whitelisted, `${stdout}\n${stderr}`);
+        (deps.refreshToolchain ?? refreshProofToolchain)(cwd);
+        return execWhitelistedProof(whitelisted, cwd, timeoutMs, spawn, { ...deps, loadRetried: true });
+      }
+      if (outcome === "cannot-load") {
+        recordLoadError(whitelisted, `${stdout}\n${stderr}`);
+        throw new ProofCannotLoadError(whitelisted.loadError!);
+      }
+      return outcome;
     }
     // grep exit 2 means it could not even LOOK — a renamed or missing target, a read error — distinct from exit 1's
     // "looked, found nothing" (W1-T219, recon R-13(iv)). Only the latter is evidence of absence.
@@ -2224,6 +2388,22 @@ function hasFinalSummary(stdout: string): boolean {
   return /^# duration_ms\b/m.test(stdout);
 }
 
+export const MODULE_LOAD_ERROR_RE = /Cannot find (?:package|module)|ERR_MODULE_NOT_FOUND/i;
+function recordLoadError(w: WhitelistedProof, output: string): void {
+  w.loadError = output.split("\n").find((line) => MODULE_LOAD_ERROR_RE.test(line))?.trim().slice(0, 180) ?? "test files failed to load";
+}
+
+/** A completed run with no leaf result and failing file wrappers never tested the proof. The
+ * module diagnostic distinguishes a mixed wrapper run whose majority failed while other files
+ * merely contained no matching title. */
+function wrappersCouldNotLoad(failed: number, total: number, stdout: string, stderr: string): boolean {
+  if (failed === 0) return false;
+  if (failed === total) return true;
+  const moduleErrors = (stdout.match(/Cannot find (?:package|module)|ERR_MODULE_NOT_FOUND/gi) ?? []).length ||
+    (MODULE_LOAD_ERROR_RE.test(stderr) ? 1 : 0);
+  return moduleErrors > failed / 2;
+}
+
 /** Read a name-filtered run's TAP stdout for the verdict of the REAL (non-file-wrapper) subtests it matched,
  * independent of the process exit code. Zero real matches on a COMPLETED run ⇒ "fail" (W1-T72's guard: a named test
  * absent from the head is unmet, never a silent pass via the trivial "0 children ⇒ ok" wrapper). Zero real matches on
@@ -2231,13 +2411,19 @@ function hasFinalSummary(stdout: string): boolean {
  * evidence of absence. Collateral `not ok` lines from files the pattern never matched are ignored: their names ARE
  * wrapper names. TRAP: on the old rule truncation read identically to "test not found", and a criterion whose test sat
  * late in discovery order flapped fail → pass → fail on one unchanged head commit. */
-export function nameFilteredOutcome(stdout: string): "pass" | "fail" | "no-match" {
+export function nameFilteredOutcome(stdout: string, stderr = ""): ProofResult {
   let matched = false;
   let anyRealFailure = false;
+  let wrappers = 0;
+  let failedWrappers = 0;
   for (const line of stdout.split("\n")) {
     const m = TAP_RESULT_LINE_RE.exec(line);
     if (!m) continue;
-    if (isFileWrapperResultName(m[2])) continue; // a file's own trivial wrapper, not a real match
+    if (isFileWrapperResultName(m[2])) {
+      wrappers++;
+      if (m[1] === "not ok") failedWrappers++;
+      continue;
+    }
     matched = true;
     if (m[1] === "not ok") anyRealFailure = true;
   }
@@ -2248,6 +2434,7 @@ export function nameFilteredOutcome(stdout: string): "pass" | "fail" | "no-match
           "inconclusive, not evidence the named test is missing",
       );
     }
+    if (wrappersCouldNotLoad(failedWrappers, wrappers, stdout, stderr)) return "cannot-load";
     // ZERO tests matched and the run COMPLETED (a trailing summary is present, so this is not a timeout). The named
     // test does not exist — a proof-authoring mismatch, NOT a failing test. TRAP: returning "fail" here minted a false
     // `executed_fail` that hard-blocked PRs whose real tests pass under a different name (#466/W1-T183).
@@ -2282,8 +2469,9 @@ export const VITEST_TAP_SKIP_RE = /#\s*SKIP\b/i;
  *  evidence the criterion's behaviour was exercised. Zero non-skipped leaves on an INCOMPLETE run
  *  throws, inconclusive rather than absence — mirrors {@link nameFilteredOutcome}'s own truncation
  *  guard, read off the TAP plan count instead of node's trailing summary line. */
-export function vitestNameFilteredOutcome(stdout: string): "pass" | "fail" | "no-match" {
+export function vitestNameFilteredOutcome(stdout: string, stderr = ""): ProofResult {
   let topLevelSeen = 0;
+  let failedWrappers = 0;
   let matchedNonSkipped = false;
   let anyRealFailure = false;
   for (const line of stdout.split("\n")) {
@@ -2291,6 +2479,7 @@ export function vitestNameFilteredOutcome(stdout: string): "pass" | "fail" | "no
     if (!m) continue;
     if (m[1].length === 0) {
       topLevelSeen += 1; // the file's own wrapper line, never a real leaf result
+      if (m[2] === "not ok") failedWrappers++;
       continue;
     }
     if (VITEST_TAP_SKIP_RE.test(m[3])) continue; // skipped — not evidence either way
@@ -2306,6 +2495,7 @@ export function vitestNameFilteredOutcome(stdout: string): "pass" | "fail" | "no
           "inconclusive, not evidence the named test is missing",
       );
     }
+    if (wrappersCouldNotLoad(failedWrappers, topLevelSeen, stdout, stderr)) return "cannot-load";
     // Every selected leaf reported `# SKIP` (Vitest's all-skipped zero-exit trap) or none ran at all,
     // on a run that COMPLETED. Neither is a passing observation — no-match, not a silent pass.
     return "no-match";
@@ -2503,7 +2693,8 @@ function classifyBaseProofOutcome(
     // Only a run that genuinely COMPLETED with a non-pass result discriminates. A base run that could not execute at
     // all — a spawn ENOENT, a timeout, or the two `PureProof…Error` classes for a runner that never reached a real
     // subtest — THROWS out of `exec` and is caught below as `base_unknown`.
-    return exec(whitelisted, baseCwd) === "pass" ? "stale" : "discriminates";
+    const outcome = exec(whitelisted, baseCwd);
+    return outcome === "pass" ? "stale" : "discriminates";
   } catch {
     return "base_unknown";
   }
@@ -2689,12 +2880,17 @@ export function judgeCriterion(
   // `executed_pass` means MET even if the report never claimed it (kills #100), `executed_fail` means UNMET even if
   // the report keyword-claimed it (kills W1-T51). `exec_error` degrades to the keyword floor: never a silent hard-fail.
   let proofExec: ProofExecOutcome = "not_executable";
+  let loadError: string | undefined;
   // W1-DH: WHY a criterion did not execute. `proof_exec: "not_executable"` alone conflates a proof that never PARSED
   // with one that parsed and named nothing, and a CAPPED 0/N looked identical either way.
   let proofSkip: ProofSkipReason | undefined;
   if (execCtx) {
     const whitelisted = parseWhitelistedProof(criterion.proof, execCtx.target);
     if (whitelisted) {
+      if (whitelisted.nameFiltered && whitelisted.runner === "vitest") {
+        whitelisted.diffTestFiles = [...(execCtx.diffFiles ?? [])].filter((file) =>
+          /^tests\//.test(file) && /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file));
+      }
       proofSkip = undefined;
       // Checked BEFORE spawning anything (W1-T456, DEFECT A): an exact-path `unit test:` proof whose target is ABSENT
       // on the head but DECLARED by this diff's own plan shard is a forward reference, not a failure — spawning
@@ -2872,7 +3068,13 @@ export function judgeCriterion(
             reason = `proof executed and FAILED on the PR head (${whitelisted.kind}: ${whitelisted.label}) — overrides any keyword coverage`;
           }
         } catch (e) {
-          if (e instanceof ProofRunnerUnavailableError) {
+          if (e instanceof ProofCannotLoadError) {
+            proofExec = "cannot_evaluate";
+            proofSkip = "cannot-load";
+            loadError = e.loadError;
+            met = false;
+            reason = `proof cannot-evaluate: test files failed to load after one toolchain refresh (${e.loadError})`;
+          } else if (e instanceof ProofRunnerUnavailableError) {
             proofExec = "not_executable";
             proofSkip = "runner-absent";
             reason =
@@ -2951,7 +3153,7 @@ export function judgeCriterion(
     }
   }
 
-  return { ...base, met, reason, proof_exec: proofExec, proof_skip: proofSkip, floorMet, holdout: !!criterion.holdout };
+  return { ...base, met, reason, proof_exec: proofExec, proof_skip: proofSkip, ...(loadError ? { loadError } : {}), floorMet, holdout: !!criterion.holdout };
 }
 
 /** The slice of {@link Task} the merged-claim audit needs — just enough to name a finding without importing all of
@@ -3832,7 +4034,7 @@ export interface ProofExecutionMemo {
 export function memoizeProofExecutor(exec: ProofExecutor): ProofExecutionMemo {
   // Two maps rather than one sentinel-bearing map: a cached THROW and a cached "no-match" must not be distinguishable
   // only by a value that could itself be a legitimate result.
-  const returned = new Map<string, "pass" | "fail" | "no-match">();
+  const returned = new Map<string, ReturnType<ProofExecutor>>();
   const thrown = new Map<string, unknown>();
   let uniqueRuns = 0;
   let reuses = 0;
@@ -3848,7 +4050,7 @@ export function memoizeProofExecutor(exec: ProofExecutor): ProofExecutionMemo {
       }
       if (returned.has(key)) {
         reuses += 1;
-        return returned.get(key) as "pass" | "fail" | "no-match";
+        return returned.get(key) as ReturnType<ProofExecutor>;
       }
       uniqueRuns += 1;
       try {
@@ -3983,6 +4185,7 @@ export function judgeReview(
   // happened not to execute" — the same shape `criteriaTampered` uses. A code diff is byte-identical: `unmetForState
   // === unmet`.
   const unmetForState = planOnly ? floorUnmet : unmet;
+  const cannotEvaluate = verdicts.some((v) => v.proof_exec === "cannot_evaluate");
   const planLintRefusal = planOnly ? planLintRefusalText(evidence.planLint) : undefined;
   const failsWithoutUnknown =
     planLintRefusal !== undefined ||
@@ -3996,7 +4199,7 @@ export function judgeReview(
     refusalContradictions.length > 0 ||
     unprovenancedDecisionsEntries.length > 0;
   // W1-T4414: an unreadable reservation is never a pass; alone, it is WITHHELD rather than posted.
-  const state: ReviewState = failsWithoutUnknown || idOwnershipUnknown ? "failure" : "success";
+  const state: ReviewState = cannotEvaluate ? "pending" : failsWithoutUnknown || idOwnershipUnknown ? "failure" : "success";
 
   // The reward-hacking measurement, over ALL criteria (W1-T166): visible and holdout fold into `state` identically
   // above, and this is a SEPARATE per-run measurement of the gap, never a gate. `null` when either side is empty.
@@ -4010,7 +4213,7 @@ export function judgeReview(
   // `testTheater`/`noCriteria`/`criteriaTampered`/`changesetContradictions` are all structural, so they bind the floor
   // exactly as they bind `state`: a tampering or contradiction failure can never be suppressed by verdict stability,
   // which only ever forgives a SEMANTIC downgrade. The anchor a re-review of an unchanged head checks.
-  const floorState: ReviewState =
+  const floorState: ReviewState = cannotEvaluate ? "pending" :
     planLintRefusal !== undefined ||
     noCriteria ||
     floorUnmet.length > 0 ||
@@ -4061,7 +4264,9 @@ export function judgeReview(
     unmetForState.length === 0 && !testTheater && !noCriteria && !criteriaTampered && idCollisions.length === 0 && idOwnership.length === 0 &&
     changesetContradictions.length === 0 && refusalContradictions.length === 0 && unprovenancedDecisionsEntries.length === 0;
   const summary =
-    state === "success"
+    state === "pending"
+      ? `remudero-review: cannot-evaluate — ${visibleCriteria(verdicts).find((v) => v.proof_exec === "cannot_evaluate")?.loadError ?? "proof test files could not load"}`.slice(0, 140)
+      : state === "success"
       ? planOnly
         ? planOnlySummary(verdicts.length, evidence.planLint)
         : capped
@@ -4096,6 +4301,7 @@ export function judgeReview(
 
   return {
     state,
+    cannotEvaluate,
     criteria: verdicts,
     testTheater,
     summary,
@@ -8553,6 +8759,16 @@ export async function acquireReviewStatusLock(
 
 // ── W1-T228: the single guarded post site ─────────────────────────────────
 
+/** The issue transport this posting path uses. Keep it structural so review's module graph
+ * does not load the worker/escalation graph merely to judge or post a status. */
+interface ReviewIssueGateway {
+  create(title: string, body: string, labels: string[]): string;
+  listOpen?(label: string): Array<{ number: number; url: string; title?: string; body?: string }>;
+  closeWithComment?(url: string, comment: string): void;
+  comment?(url: string, body: string): void;
+  ensureLabel?(label: string): boolean;
+}
+
 export interface PostReviewStatusGuardedOpts {
   owner: string;
   repo: string;
@@ -8590,6 +8806,8 @@ export interface PostReviewStatusGuardedOpts {
     state: PostableReviewState;
     description?: string;
   }) => void | Promise<void>;
+  /** Injectable issue transport for the one cannot-evaluate escalation per head. */
+  issues?: ReviewIssueGateway;
   lockOpts?: AcquireReviewStatusLockOpts;
 }
 
@@ -8686,6 +8904,10 @@ export async function postReviewStatusGuarded(
     const replacingDegradedTerminal = opts.reopenedDegradedTerminal === true && priorDecision !== undefined &&
       isReopenableDegradedTerminal(priorDecision, true);
     if (!lifecycle.merged && !lifecycle.closed && priorDecision && !replacingDegradedTerminal) {
+      if (opts.state === "pending") {
+        return { posted: false, replayed: true, effectiveState: priorDecision.state,
+          reason: "cannot-evaluate hold cannot overwrite a terminal verdict for the same review decision" };
+      }
       if (priorDecision.state === opts.state) {
         return { posted: false, replayed: true, effectiveState: priorDecision.state, reason: "terminal verdict already exists for this review decision" };
       }
@@ -8773,6 +8995,33 @@ export async function postReviewStatusGuarded(
         posted: false,
         reason: `posting remudero-review failed and was not applied (see the review.post_failed ledger line): ${message}`,
       };
+    }
+    if (opts.state === "pending" && opts.description?.startsWith("remudero-review: cannot-evaluate") && opts.prUrl &&
+        !lines.some((line) => line.step === "review.cannot_evaluate_escalated" && line.task_id === opts.taskId && line.head_sha === opts.sha)) {
+      // Load escalation only for this exceptional pending path. Its worker graph reaches review
+      // through eval-card; a top-level import closes a cycle and fails the dependency gate.
+      const escalationModule = "./escalate.js";
+      const { ghIssueGateway, tryEscalate } = await import(escalationModule);
+      const issueUrl = tryEscalate({
+        class: "MANUAL",
+        taskId: opts.taskId,
+        runId: opts.runId,
+        headSha: opts.sha,
+        cause: "review",
+        summary: `PR ${opts.prUrl} proof runner cannot load test files`,
+        detail: `${opts.description}. The toolchain refresh and one retry did not resolve the load error.`,
+        options: [{ label: "Repair reviewer toolchain", detail: "Refresh the canonical install, then rerun this head's review." }],
+        recommendation: "Repair reviewer toolchain",
+        consequence: "The required review remains pending and the PR cannot merge.",
+      }, {
+        issues: opts.issues ?? ghIssueGateway(opts.owner, opts.repo),
+        ledgerPath: opts.ledgerPath,
+        runId: opts.runId,
+      });
+      if (issueUrl) appendLedger(opts.ledgerPath, {
+        run_id: opts.runId, task_id: opts.taskId, step: "review.cannot_evaluate_escalated",
+        pr_url: opts.prUrl, head_sha: opts.sha, issue_url: issueUrl,
+      });
     }
     return { posted: true };
   } finally {

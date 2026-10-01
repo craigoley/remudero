@@ -4,6 +4,7 @@
 // src/lib/report-commands.ts (W1-T2888); it imports them from lib/doctor.js directly. The symbols
 // below have SECOND callers outside doctorCommand and stay imported here too.
 import { retryWhileLockBusy } from "./lib/lock-busy-retry.js";
+import { retryPollRead } from "./lib/poll-read-retry.js";
 import {
   appendCaptureSurfaceFireHistory,
   judgeDiskHeadroom,
@@ -858,7 +859,13 @@ import {
   runAutomatedRetroSubprocess,
 } from "./lib/retro-subprocess.js";
 import { regenerateOrientation } from "./lib/orientation.js";
-import { filedTaskIdFromRunBranch, openPullRequestChecked, type OpenPullRequestProofRunner } from "./lib/pr-open.js";
+import {
+  filedTaskIdFromRunBranch,
+  openPullRequestChecked,
+  PrOpenRefusedError,
+  recordRefusedPrOpen,
+  type OpenPullRequestProofRunner,
+} from "./lib/pr-open.js";
 import {
   buildPlanPrBody,
   bodyNeedsAcceptanceRepair,
@@ -924,6 +931,7 @@ import { routingAbCommand } from "./lib/routing-experiments.js";
 import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-canary.js";
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
+import { foldTriageLaneOutcomes, triageOutcomesCommand } from "./lib/triage-lane-outcomes.js";
 import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, callerOwnsBenchmarkReceipt, executingHarnessRevision, withCallerOwnedReceipt, type BenchmarkStackEvidence, spawnFailureDetail, attemptAssignmentJoin, benchmarkEvidenceLedgerPath, dispatchTaskShape, fixLaneBenchmarkWork, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput } from "./lib/benchmark-run.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
@@ -2414,6 +2422,7 @@ import {
   decideAutomaticBranchReap,
   DECLARED_BRANCH_GUARDS,
   declaredGuardsBlockSpan,
+  DECLARED_BRANCH_GUARDS_FILE,
   nextMergedHeadCache,
   nextNoPrHeadCache,
   parseBranchCitationHits,
@@ -5753,12 +5762,12 @@ export async function pollToGate(
   const { owner, repo, number } = pollRestTarget(prUrl, "pollToGate");
   const readings: (RollupEntry[] | undefined)[] = [];
   for (let i = 0; ; i++) {
-    const row = (await read(singlePrRestArgs(owner, repo, number))) as RestPullRow;
+    const row = (await retryPollRead(() => read(singlePrRestArgs(owner, repo, number)), { log, sleep })) as RestPullRow;
     const state = prStateFromRest(row);
     if (state === "MERGED") return { merged: true, reason: "checks green" };
     if (state === "CLOSED") return { merged: false, verdict: "blocked_ci", reason: "pr closed" };
     const sha = mapRestPr(row).headRefOid;
-    const roll = await restRollupFor(owner, repo, sha, read);
+    const roll = await retryPollRead(() => restRollupFor(owner, repo, sha, read), { log, sleep });
     const checks = rollupCheckSummary(roll);
     const red = roll.find((c) => isTerminalRed(String(c.conclusion ?? c.state ?? "")));
     if (red) {
@@ -6122,9 +6131,10 @@ async function waitForCiGreen(
   const readings: (RollupEntry[] | undefined)[] = [];
   let sha = "";
   for (let i = 0; ; i++) {
-    const row = (await read(singlePrRestArgs(owner, repo, number))) as RestPullRow;
-    sha = mapRestPr(row).headRefOid;
-    const roll = await restRollupFor(owner, repo, sha, read);
+    const row = (await retryPollRead(() => read(singlePrRestArgs(owner, repo, number)), { log, sleep })) as RestPullRow;
+    const headSha = mapRestPr(row).headRefOid;
+    sha = headSha;
+    const roll = await retryPollRead(() => restRollupFor(owner, repo, headSha, read), { log, sleep });
     const state = ciGateFromRollup(roll, requiredContexts);
     // W1-T2804: the sha this iteration RESOLVED and judged rides out with the verdict. It is the
     // already-resolved head, never a second read — a second read is a second chance to skew.
@@ -13605,6 +13615,8 @@ interface RunTaskBodyOptions {
   maskRules?: boolean;
   noMerge?: boolean;
   readHeadShaForProvenance?: (prUrl: string) => string;
+  /** Where a stale-proof PR-open refusal escalates; production files the task repo's own issue. */
+  prOpenRefusalIssues?: IssueGateway;
   spawnWallClockBoundMs?: number;
   workerRuleHeadlinesEnabled?: boolean;
   worktreeBaseDeps?: Parameters<typeof worktreeAdd>[4];
@@ -14899,6 +14911,22 @@ export function endThrownRun(
     cause: runErrorCause(err),
     cost_usd: costUsd,
   }));
+}
+
+/** Best-effort worktree reclaim for a run that is ending: a failed remove is ledgered, never thrown over the verdict. */
+export function reclaimRunWorktree(
+  repoDir: string,
+  worktreePath: string,
+  on: string,
+  log: RunTaskContext["log"],
+  remove: (repoDir: string, worktreePath: string) => void = worktreeRemove,
+): void {
+  try {
+    remove(repoDir, worktreePath);
+    log("worktree.remove", { on });
+  } catch (e) {
+    log("worktree.remove.error", { on, error: String((e as Error)?.message ?? e) });
+  }
 }
 
 /** W1-T4708: a pre-worktree refusal that RETURNS gets the same one terminal row, carrying the verdict it returns. */
@@ -16852,7 +16880,33 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       gitPushRunBranch(worktreePath, { force: true });
     }
     if (!prUrl) {
-      const prCreate = ghPrCreateFillCommand(worktreePath, owner, task.repo, branch, lastCommitSubject(worktreePath));
+      let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
+      try {
+        prCreate = ghPrCreateFillCommand(worktreePath, owner, task.repo, branch, lastCommitSubject(worktreePath));
+      } catch (err) {
+        if (!(err instanceof PrOpenRefusedError)) throw err;
+        // The branch is already on origin (both push paths ran above), so a refusal names it rather than stranding it.
+        const headSha = execFileSync("git", ["-C", worktreePath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+        const issues = opts.prOpenRefusalIssues ?? ghIssueGateway(owner, task.repo);
+        const issueUrl = recordRefusedPrOpen(err, { taskId, branch, headSha }, log, { issues, ledgerPath, runId });
+        reclaimRunWorktree(repoDir, worktreePath, "pr_open.refused", log);
+        log("verdict", {
+          verdict: "failed",
+          reason: boundedVerdictReason(err.message),
+          stage: "pr_open.refused",
+          cause: "base-proof-refused" satisfies RunErrorCause,
+          branch,
+          head_sha: headSha,
+          refusal_class: err.refusalClass,
+          ...(issueUrl ? { issue_url: issueUrl } : {}),
+          cost_usd: costUsd,
+          billing_mode: billingMode(impl.childEnvKeys),
+          account_label: impl.accountLabel,
+          ...terminalVerdictFields(impl),
+        });
+        say(`verdict: failed — PR open refused (${err.refusalClass}); branch ${branch} kept on origin at ${headSha}`);
+        return { taskId, runId, merged: false, costUsd, verdict: "failed" };
+      }
       prUrl = runGhPrCreate(prCreate, branch, log, say).prUrl;
       // A worker may have opened this exact PR without reporting its URL. The generic-422
       // adoption above discovers it only here, after the earlier direct-PR normalization point.
@@ -21308,8 +21362,8 @@ export function reapBranchesCommand(
   const readFile = opts.readFile ?? ((p: string) => readFileSync(p, "utf8"));
   let declarationBlock: { file: string; start: number; end: number } | undefined;
   try {
-    const span = declaredGuardsBlockSpan(readFile(join(checkoutRoot, "src/run-task.ts")));
-    if (span) declarationBlock = { file: "src/run-task.ts", ...span };
+    const span = declaredGuardsBlockSpan(readFile(join(checkoutRoot, DECLARED_BRANCH_GUARDS_FILE)));
+    if (span) declarationBlock = { file: DECLARED_BRANCH_GUARDS_FILE, ...span };
   } catch {
     // A repoRoot resolved to something unreadable (or an injected `readFile` standing in for
     // that failure in tests) is not fatal: the reverse orphan check simply excludes nothing,
@@ -47664,6 +47718,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T3718: the fix rung can stall with every provider refusing and both paid rungs switched off, and the only trace was one fix.spawn_infra_blocked ledger row. This reports the durable stall record (since when, for how long, and per provider whether it is FULL or CANNOT BE ASKED -- only the first argues for paying) and prices each paid rung: the one config edit that arms it (workerProviders.cashFallbackWhenBlocked, overflow: \"api_key\"), what it bills, its dailyCapUsd ceiling, and what would still refuse it with the switch on. REPORT-ONLY: it never writes config -- enabling a paid fallback spends money and stays an operator act. --json prints the same as one object.",
   },
   {
+    name: "triage-outcomes",
+    syntax: "rmd triage-outcomes [--json]",
+    summary: "Count the triage lane's terminal outcomes per provider and model; routes nothing.",
+    detail: "W1-T3547: folds the rows the triage lane already writes (triage.start, triage.synthesized, triage.relint, triage.relint_refused, triage.error, triage.grill_opened, pr.opened), joined by run id, over the three-form ledger union read with refuseIncomplete, so a partial corpus is refused rather than counted. Per provider and model it reports runs, terminal outcomes (propose, no_task, grill, error, relint_refused), attempts per run, relints, and cost with api-billed spend and subscription notional kept apart; a missing cost reads unknown, never zero. A run with no terminal row is censored, never scored. A group with fewer than 20 terminal runs is an insufficient sample and prints no rates. It never declares a winner and changes no mount, provider, config or spawn; the report names its confound, since a squeeze divert lands on whatever feedback arrives while both subscriptions are blocked. READ-ONLY. --json prints the same as one object.",
+  },
+  {
     name: "census-membership",
     syntax: "rmd census-membership [--base <ref>] [--files]",
     summary: "Name the population-walking census suites this diff enters.",
@@ -48608,6 +48668,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["ci-failures", (rest) => ciFailuresCommand(rest)],
   ["board", (rest) => boardCommand(rest)],
   ["census-membership", (rest) => censusMembershipCommand(rest)],
+  ["triage-outcomes", (rest) => triageOutcomesCommand(rest, (rows) => foldTriageLaneOutcomes(rows))],
   [
     "repair-ladder",
     (rest) => {

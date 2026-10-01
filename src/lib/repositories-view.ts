@@ -32,7 +32,8 @@ import {
 import type { ShadowLegacy } from "./view-shadow.js";
 import type { ViewSource } from "./views.js";
 
-export const REPOSITORIES_VIEW_VERSION = 1;
+/** 2: each summary's `generated_at` left `data` for its `repositories:<instance>` source's `asOf`, so the ETag moves only with content. */
+export const REPOSITORIES_VIEW_VERSION = 2;
 export const REPOSITORIES_SOURCES_FILE = "repositories-sources.json";
 
 /** The options each instance's summary route is built with, as serve's main thread resolved them. */
@@ -57,8 +58,17 @@ export interface RepositoriesProject {
   worst: { state: RepositoryState; repoId: string; repoName: string };
 }
 
+/** An instance's summary route body without its clock stamp, which the instance's source carries instead. */
+export type RepositoriesSummary = Omit<RepoDashboardResult, "generated_at">;
+
+/** Drops the summary's `generated_at`: a clock stamp inside `data` would move the view's ETag on every recompute. */
+export function unstampedSummary(summary: RepoDashboardResult): RepositoriesSummary {
+  const { generated_at: _stamp, ...rest } = summary;
+  return rest;
+}
+
 export interface RepositoriesData {
-  instances: Array<{ instanceId: string; summary?: RepoDashboardResult; reason?: string }>;
+  instances: Array<{ instanceId: string; summary?: RepositoriesSummary; reason?: string }>;
   /** The console's groupRepoProjects, precomputed: registry projects in first-seen order. */
   projects: RepositoriesProject[];
   /** Why every repository is its own project: the registry naming projects could not be read. */
@@ -196,7 +206,7 @@ export function legacyRepositories(sourcesPath: string, nowMs: number): ShadowLe
     const outcome = repoSummarySync({ ...options, shadowMembers: true }, nowMs);
     if (!outcome.ok) return { instanceId, reason: outcome.reason };
     facts[instanceId] = outcome.shadow ?? {};
-    return { instanceId, summary: outcome.summary };
+    return { instanceId, summary: unstampedSummary(outcome.summary) };
   });
   const data: RepositoriesData = { instances, ...repositoriesPortfolio(published, { instances }) };
   return { data, asOfMs: nowMs, facts };
@@ -269,7 +279,7 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
           computed.set(instanceId, current);
         }
         sources.push(summarySource(instanceId, current!));
-        data.instances.push({ instanceId, ...(current!.summary ? { summary: current!.summary } : {}), ...(current!.reason ? { reason: current!.reason } : {}) });
+        data.instances.push({ instanceId, ...(current!.summary ? { summary: unstampedSummary(current!.summary) } : {}), ...(current!.reason ? { reason: current!.reason } : {}) });
       }
       Object.assign(data, repositoriesPortfolio(published, data, registryFile));
       return [{ key: "", data, sources }];

@@ -5,6 +5,7 @@
   type: implement
   verify: auto
   risk: medium
+  priority: 3
   status: queued
   attempts: 0
   origin: "oper#core-daemon-loop-profile-2026-09-29"
