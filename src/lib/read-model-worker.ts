@@ -195,7 +195,9 @@ export type ReadModelBodyEntry = ViewBodyEntry;
 export type ReadModelWorkerMessage =
   | { type: "body"; entry: ReadModelBodyEntry }
   | { type: "state"; at: number; instances: ReadModelInstanceState[]; switches: ReadModelSwitches }
-  | { type: "log"; step: string; extra: Record<string, unknown> };
+  | { type: "log"; step: string; extra: Record<string, unknown> }
+  /** The heartbeat inside a long tick: `open` before a store's open (its quick_check), `opened` with what it took, `commit` per applied transaction. */
+  | { type: "progress"; instance: string; phase: "open" | "opened" | "commit"; ms?: number; rows?: number };
 
 export interface ReadModelViewContext {
   now: number;
@@ -595,8 +597,11 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       closeSlot(slot);
     }
     if (!slot.db) {
+      const opening = clock.now();
+      opts.post({ type: "progress", instance: slot.instance.name, phase: "open" });
       slot.db = openProjectorReadModel(opts.stateDir, slot.instance.name, clock);
       slot.ino = fileIno(slot.db.path);
+      opts.post({ type: "progress", instance: slot.instance.name, phase: "opened", ms: clock.now() - opening });
       if (slot.db.uncleanShutdown) slot.integrity = { at: now, reason: "unclean shutdown", running: slot.integrity?.running ?? false };
       slot.integrity ??= { at: now + READ_MODEL_INTEGRITY_INTERVAL_MS, reason: "periodic", running: false };
     }
@@ -617,6 +622,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         beforeCheckpoint: () => {
           if (stopRequested()) throw new ReadModelStopRequested();
         },
+        onCommit: (_source, rows) => opts.post({ type: "progress", instance: slot.instance.name, phase: "commit", rows }),
       });
     }
     slot.lease = got.lease;
@@ -1116,24 +1122,32 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   let heardAt = clock.now();
   let silenceLogged = false;
   let recycles = 0;
+  /** What the worker last said it was doing, and the slowest store open it has reported. */
+  let phase: { instance: string; phase: string } | undefined;
+  let slowestOpenMs = 0;
 
   /**
    * The silent-worker watchdog. A worker blocked in a call, or whose loop died without an exit,
-   * posts nothing, and every view goes stale while its last state still reads "held". Silence for
-   * {@link READ_MODEL_STALL_MS} is ledgered; silence for twice that, doubling with each recycle so a
-   * slow first open is never killed in a loop, terminates it, and the exit handler respawns it.
+   * posts nothing, and every view goes stale while its last state still reads "held". A worker
+   * making progress is never silent: it posts a heartbeat per committed transaction and around
+   * each store open. Silence for {@link READ_MODEL_STALL_MS} is ledgered with the phase it was
+   * last in; silence for twice that, doubling with each recycle, terminates it (exit code 1) and
+   * the exit handler respawns it. A store open, one sync quick_check, is given twice the slowest
+   * open the worker has reported, since killing it only starts the same open again.
    */
   const watchWorker = (): void => {
     const running = worker;
     if (!running) return;
     const silentMs = clock.now() - heardAt;
+    const last = phase ? { phase: phase.phase, instance: phase.instance } : {};
     if (silentMs >= READ_MODEL_STALL_MS && !silenceLogged) {
       silenceLogged = true;
-      opts.log?.("read_model.worker_silent", { silentMs, recycles });
+      opts.log?.("read_model.worker_silent", { silentMs, recycles, ...last });
     }
-    if (silentMs < 2 * READ_MODEL_STALL_MS * 2 ** recycles) return;
+    const boundMs = Math.max(2 * READ_MODEL_STALL_MS * 2 ** recycles, phase?.phase === "open" ? 2 * slowestOpenMs : 0);
+    if (silentMs < boundMs) return;
     recycles++;
-    opts.log?.("read_model.worker_recycled", { silentMs, recycles });
+    opts.log?.("read_model.worker_recycled", { silentMs, recycles, boundMs, ...last });
     void running.terminate();
   };
 
@@ -1141,11 +1155,14 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   const onMessage = (msg: ReadModelWorkerMessage): void => {
     heardAt = clock.now();
     silenceLogged = false;
+    phase = msg.type === "progress" ? { instance: msg.instance, phase: msg.phase } : undefined;
     if (msg.type === "body") {
       bodies.set(readModelBodyKey(msg.entry.view, msg.entry.key), msg.entry);
       for (const listener of bodyListeners) listener(msg.entry);
     } else if (msg.type === "log") opts.log?.(msg.step, msg.extra);
-    else {
+    else if (msg.type === "progress") {
+      if (msg.phase === "opened") slowestOpenMs = Math.max(slowestOpenMs, msg.ms ?? 0);
+    } else {
       at = msg.at;
       switches = msg.switches;
       deaths = 0;
@@ -1163,6 +1180,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     signal = new Int32Array(shared);
     worker = spawned;
     heardAt = clock.now();
+    phase = undefined;
     spawned.unref();
     spawned.on("message", onMessage);
     spawned.on("error", (error) => opts.log?.("read_model.worker_failed", { error: String(error?.message ?? error) }));
