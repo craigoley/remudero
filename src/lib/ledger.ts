@@ -1,4 +1,5 @@
 import {
+  appendFileSync,
   chmodSync,
   closeSync,
   cpSync,
@@ -18,7 +19,7 @@ import {
 import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { gzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { ExternalEffectResult } from "./action-reconciliation.js";
 import { defaultIsPidAlive, parseDrainLockInfo, type DrainLockInfo } from "./drain-lock.js";
@@ -1022,6 +1023,70 @@ export function ledgerCarriedPrefixPath(ledgerPath: string): string {
   return `${ledgerPath}.carried.json`;
 }
 
+export function ledgerRetainedStepsPath(ledgerPath: string): string {
+  return `${ledgerPath}.retained-steps.json`;
+}
+
+interface RetainedStepsRecord {
+  steps: string[];
+  lastFullRotationMs?: number;
+  lastDeferral?: { key: string; atMs: number };
+}
+
+type RetainedStepsRead = { status: "absent" } | { status: "unreadable" } | { status: "ok"; record: RetainedStepsRecord };
+
+function readRetainedSteps(ledgerPath: string): RetainedStepsRead {
+  const path = ledgerRetainedStepsPath(ledgerPath);
+  if (!existsSync(path)) return { status: "absent" };
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8")) as Partial<RetainedStepsRecord>;
+    if (!Array.isArray(raw.steps) || !raw.steps.every((x) => typeof x === "string")) return { status: "unreadable" };
+    const last = typeof raw.lastFullRotationMs === "number" && Number.isFinite(raw.lastFullRotationMs) ? raw.lastFullRotationMs : undefined;
+    const deferral = raw.lastDeferral && typeof raw.lastDeferral.key === "string" && typeof raw.lastDeferral.atMs === "number" ? raw.lastDeferral : undefined;
+    return { status: "ok", record: { steps: raw.steps, lastFullRotationMs: last, lastDeferral: deferral } };
+  } catch {
+    return { status: "unreadable" };
+  }
+}
+
+function rotationRow(step: string, fields: Record<string, unknown>, nowIso: string): string {
+  return JSON.stringify({ ts: nowIso, run_id: "ledger-rotation", task_id: "_ledger", step, host: hostname(), ...fields }) + "\n";
+}
+
+function rowsToRecarry(
+  dir: string,
+  lastFullRotationMs: number,
+  retained: ReadonlySet<string>,
+  live: ReadonlySet<string>,
+  fs: ArchiveNamingFs,
+): { rows: ParsedLedgerLine[]; archives: string[]; torn: Array<{ name: string; reason: string }> } {
+  const rows: ParsedLedgerLine[] = [];
+  const archives: string[] = [];
+  const torn: Array<{ name: string; reason: string }> = [];
+  for (const { name, mtimeMs } of archiveMtimes(dir, fs)) {
+    if (mtimeMs <= lastFullRotationMs || Date.parse(rotationStampIso(name)!) <= lastFullRotationMs) continue;
+    let text: string;
+    try {
+      const buf = readFileSync(join(dir, name));
+      text = (name.endsWith(".gz") ? gunzipSync(buf) : buf).toString("utf8");
+    } catch (error) {
+      torn.push({ name, reason: String((error as Error)?.message ?? error).slice(0, 120) });
+      continue;
+    }
+    let found = false;
+    for (const raw of text.split("\n")) {
+      if (raw.trim() === "" || live.has(raw)) continue;
+      const parsed = parseLedgerLine(raw);
+      if (!parsed.step || !retained.has(parsed.step)) continue;
+      rows.push(parsed);
+      found = true;
+    }
+    if (found) archives.push(name);
+  }
+  rows.sort((a, b) => (a.tsMs ?? 0) - (b.tsMs ?? 0));
+  return { rows, archives, torn };
+}
+
 function sha256Hex(buf: Buffer): string {
   return createHash("sha256").update(buf).digest("hex");
 }
@@ -1267,6 +1332,8 @@ export interface LedgerRotationResult {
    *  (see {@link HEALTH_STEP_RETENTION_WINDOW_MS}/{@link RENDER_STEP_RETENTION_WINDOW_MS}), plus
    *  anything appended after the snapshot (see doc below). */
   retainedLineCount?: number;
+  deferredMissingSteps?: string[];
+  recarriedLineCount?: number;
 }
 
 /**
@@ -1458,6 +1525,7 @@ export function rotateLedger(
     archiveFsDeps?: LedgerArchiveFsDeps;
     /** Cadence window, default {@link LEDGER_ROTATION_SMOOTHING_WINDOW_MS}; 0 rotates on every crossing. */
     smoothingWindowMs?: number;
+    retainedSteps?: ReadonlySet<string>;
   } = {},
 ): LedgerRotationResult {
   const ceilingBytes = opts.ceilingBytes ?? LEDGER_ROTATION_CEILING_BYTES;
@@ -1477,10 +1545,45 @@ export function rotateLedger(
     // already small and there is nothing left to do (see the doc above).
     if (!ledgerExceedsRotationCeiling(path, ceilingBytes, fsDeps)) return { rotated: false };
     if (!ledgerRotationDue(fsDeps.statSize(path), ceilingBytes, dirname(path), archiveFsDeps, windowMs)) return { rotated: false };
-    return rotateLedgerLocked(path, ceilingBytes, archiveFsDeps, opts.now);
+    const own = opts.retainedSteps ?? DECISION_RELEVANT_LEDGER_STEPS;
+    const shared = readRetainedSteps(path);
+    const record = shared.status === "ok" ? shared.record : undefined;
+    const missing = (record?.steps ?? []).filter((step) => !own.has(step)).sort();
+    if (missing.length > 0 && fsDeps.statSize(path) <= ceilingBytes * LEDGER_ROTATION_BACKSTOP_MULTIPLIER) {
+      deferStaleRotation(path, record!, missing, opts.now);
+      return { rotated: false, deferredMissingSteps: missing };
+    }
+    const result = rotateLedgerLocked(path, ceilingBytes, archiveFsDeps, opts.now, {
+      retained: new Set([...own, ...(record?.steps ?? [])]),
+      current: missing.length === 0,
+      record,
+      unreadable: shared.status === "unreadable",
+    });
+    if (result.rotated) {
+      const steps = [...new Set([...own, ...(record?.steps ?? [])])].sort();
+      const lastFullRotationMs = missing.length === 0 ? systemClock.now() : record?.lastFullRotationMs;
+      writeFileAtomic(ledgerRetainedStepsPath(path), JSON.stringify({ steps, lastFullRotationMs, lastDeferral: record?.lastDeferral }));
+    }
+    return result;
   } finally {
     release();
   }
+}
+
+function deferStaleRotation(path: string, record: RetainedStepsRecord, missing: string[], now: (() => Date) | undefined): void {
+  const key = missing.join(",");
+  const nowMs = systemClock.now();
+  const last = record.lastDeferral;
+  if (last && last.key === key && nowMs - last.atMs < LEDGER_ROTATION_SMOOTHING_WINDOW_MS) return;
+  appendFileSync(path, rotationRow("ledger.rotation_deferred", { missing_steps: missing }, now ? now().toISOString() : systemClock.iso()));
+  writeFileAtomic(ledgerRetainedStepsPath(path), JSON.stringify({ ...record, lastDeferral: { key, atMs: nowMs } }));
+}
+
+interface RotationRetention {
+  retained: ReadonlySet<string>;
+  current: boolean;
+  record: RetainedStepsRecord | undefined;
+  unreadable: boolean;
 }
 
 /** The rotation proper — runs ONLY with the rotation lock held (see {@link rotateLedger}). */
@@ -1489,8 +1592,14 @@ function rotateLedgerLocked(
   ceilingBytes: number,
   archiveFsDeps: ArchiveNamingFs,
   now: (() => Date) | undefined,
+  retention: RotationRetention,
 ): LedgerRotationResult {
   const { size: size0, content: snapshot, bytes: snapshotBytes, identity: snapshotIdentity } = readSnapshotWithIdentity(path);
+  const lastFull = retention.current ? retention.record?.lastFullRotationMs : undefined;
+  const recarry =
+    lastFull === undefined
+      ? { rows: [] as ParsedLedgerLine[], archives: [] as string[], torn: [] as Array<{ name: string; reason: string }> }
+      : rowsToRecarry(dirname(path), lastFull, retention.retained, new Set(snapshot.split("\n")), archiveFsDeps);
 
   // W1-T4100: heal on-disk names that ran ahead of their write time; the newest safe stamp is the
   // floor this rotation's own name must clear.
@@ -1518,10 +1627,13 @@ function rotateLedgerLocked(
 
   // Parsed exactly once, in file order — every retention pass below tracks lines by object
   // identity (never re-parses/re-matches raw text) so original order is always recoverable.
-  const originalOrder: ParsedLedgerLine[] = snapshot
-    .split("\n")
-    .filter((raw) => raw.trim() !== "")
-    .map(parseLedgerLine);
+  const originalOrder: ParsedLedgerLine[] = [
+    ...recarry.rows,
+    ...snapshot
+      .split("\n")
+      .filter((raw) => raw.trim() !== "")
+      .map(parseLedgerLine),
+  ];
 
   // ── PASS 1: classify — decision, model-attribution, health and render-relevant candidates
   // against pure noise. Render membership (W1-T275) keeps daemon.headroom and the kick rows out of
@@ -1530,7 +1642,7 @@ function rotateLedgerLocked(
   for (const parsed of originalOrder) {
     if (
       parsed.step &&
-      (DECISION_RELEVANT_LEDGER_STEPS.has(parsed.step) ||
+      (retention.retained.has(parsed.step) ||
         isModelAttributionStep(parsed.step) ||
         isHealthOrDeployStep(parsed.step) ||
         isRenderRelevantStep(parsed.step))
@@ -1708,7 +1820,13 @@ function rotateLedgerLocked(
       }) + "\n";
   }
 
-  const newLiveContent = coreContent + pointerContent + tail;
+  const recarriedCount = recarry.rows.filter((p) => keptCandidates.includes(p)).length;
+  const noteContent =
+    (recarriedCount > 0 || recarry.torn.length > 0
+      ? rotationRow("ledger.recarried", { count: recarriedCount, archives: recarry.archives, unreadable_archives: recarry.torn }, nowIso)
+      : "") +
+    (retention.unreadable ? rotationRow("ledger.retained_steps_unreadable", { path: ledgerRetainedStepsPath(path) }, nowIso) : "");
+  const newLiveContent = coreContent + noteContent + pointerContent + tail;
   const swapped = writeFileAtomic(path, newLiveContent, () => {
     // Immediately before the rename: is the live path STILL the inode this rotation snapshotted?
     // If not, something replaced it and renaming would clobber it. (A ledger REMOVED mid-rotation
@@ -1731,6 +1849,7 @@ function rotateLedgerLocked(
     archivePath,
     archivedLineCount,
     retainedLineCount: keptLines.length + (pointerContent ? 1 : 0),
+    recarriedLineCount: recarriedCount,
   };
 }
 
