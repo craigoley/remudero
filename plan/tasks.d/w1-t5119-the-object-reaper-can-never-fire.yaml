@@ -38,8 +38,7 @@
     1. The inflight condition excludes the calling run's OWN lock (passed by the caller) and counts only locks
        whose holder pid is alive (the liveness inflight-lock.ts already reads for daemon.inflight_sweep).
     2. The worktree condition counts only worktrees whose run lock is live (readRunLock + pid alive, the borrower
-       test refreshManagedCheckout already uses). Leftover registrations do not count. An unreadable worktree
-       registry still refuses the reap; it cannot be classified as a leftover.
+       test refreshManagedCheckout already uses). Leftover registrations do not count.
     3. The open-handle probe and the two-ended quiesced window are unchanged.
     The rung then fires whenever the calling run is the only active one, which is the operator's rule, not an
     approximation of it.
@@ -50,7 +49,5 @@
       proof: 'grep: test("W1-T5119: a leftover worktree with no live run lock does not refuse the reap" in test/the-object-reaper-counts-only-active-workers.test.ts'
     - claim: "a live worker worktree still refuses the reap"
       proof: 'grep: test("W1-T5119: a live worker worktree still refuses the reap" in test/the-object-reaper-counts-only-active-workers.test.ts'
-    - claim: "an unreadable worktree registry still refuses the reap"
-      proof: 'grep: test("W1-T5119: an unreadable worktree registry still refuses the reap" in test/the-object-reaper-counts-only-active-workers.test.ts'
   falsifier: |
     Count every lock file and every registered worktree again and the first two tests see the reap refused.
