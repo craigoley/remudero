@@ -122,6 +122,8 @@ test("W1-T1044: the tick after an abandoned sweep reaches dispatch", async () =>
       refreshMerged: () => NONE_MERGED,
       runOne: async (id) => {
         dispatched.push(id);
+        // W1-T4998: the tick no longer waits for the sweep, so the run outlasts the bound itself.
+        await new Promise((r) => setTimeout(r, 30));
         return { taskId: id, runId: `${id}-run`, merged: true, costUsd: 0, verdict: "merged" };
       },
       sleep: REAL_SLEEP,
