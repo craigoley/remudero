@@ -1358,6 +1358,8 @@ import {
   parseClaimAnchorMessage,
   pidIsPresent,
   readNamespaceBootMs,
+  findClaimMintRow,
+  releaseReplacedContainerClaims,
   type DispatchClaimReserver,
 } from "./lib/dispatch-claim.js";
 import {
@@ -32871,6 +32873,7 @@ export async function daemonCommand(
     processKill?: (pid: number, signal: NodeJS.Signals) => boolean;
     /** Best-effort boot projection for provider routing; production writes one bounded state file. */
     writeProviderRoutingStatus?: (root: string, input: ProviderRoutingWriteInput) => void;
+    bootClaimReserver?: DispatchClaimReserver;
     /** Injectable clock for the daily-cost consultation. Production keeps the real clock. */
     now?: () => number;
     /** W1-T3401: injectable residual escalation judge for `escalateBlock` below (the SAME seam
@@ -33257,6 +33260,20 @@ export async function daemonCommand(
       return 1;
     }
     throw e;
+  }
+  const bootClaimLockMs = deps.now?.() ?? systemClock.now();
+  try {
+    const swept = releaseReplacedContainerClaims(deps.bootClaimReserver ?? dispatchClaimReserverFor(join(config.root, "repos", target.repo)), {
+      localHost: hostname(),
+      lockHeldSinceMs: bootClaimLockMs,
+      lockHeldSinceIso: new Date(bootClaimLockMs).toISOString(),
+      findMintRow: (taskId, anchor) => findClaimMintRow(dirname(ledgerPath), taskId, anchor),
+    });
+    for (const claim of swept) {
+      log("dispatch.claim_released", { ref: dispatchClaimRef(claim.taskId), surface: "boot-sweep", arm: claim.arm, release: claim.release, dropped: claim.dropped, reason: claim.reason });
+    }
+  } catch (error) {
+    log("dispatch.claim_sweep_failed", { surface: "boot-sweep", error: String((error as Error)?.message ?? error).slice(0, 300) });
   }
   // Publish only after this process owns the shared daemon/drain lock. Dry-run returned above,
   // and a refused second daemon returned from the catch, so neither can replace material state.

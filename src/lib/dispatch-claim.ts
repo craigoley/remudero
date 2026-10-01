@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { hostname } from "node:os";
+import { ledgerLivePath, ledgerRotationEntries, realLedgerFs, rotationStampIso, type LedgerGrepFsDeps } from "./ledger-union.js";
 import { classifyPushFailure } from "./task-id-reservation.js";
 
 /**
@@ -114,6 +115,27 @@ export interface ClaimantLivenessProbe {
   readonly pidPresent: boolean;
 }
 
+/** W1-T5047: the claim's own `dispatch.claim` created row, found in THIS instance's ledger. */
+export interface ClaimMintRow {
+  readonly host: string;
+  readonly actor: string;
+  readonly ts: string;
+  /** The ledger file the row was read from, so the release row names its evidence. */
+  readonly source: string;
+}
+
+/**
+ * W1-T5047: proof a claim's claimant was this instance's daemon in a container since replaced.
+ * `lockHeldSinceMs` is when THIS daemon took the instance's single-instance lock (state/drain.lock):
+ * a daemon cannot keep running once another daemon of the same instance holds that lock.
+ */
+export interface ReplacedClaimantProbe {
+  readonly localHost: string;
+  readonly lockHeldSinceMs: number;
+  readonly lockHeldSinceIso: string;
+  readonly mintRow?: ClaimMintRow;
+}
+
 export interface DispatchClaimReleaseDecision {
   readonly arm: DispatchClaimReleaseArm;
   readonly release: boolean;
@@ -141,6 +163,8 @@ export function decideDispatchClaimRelease(i: {
   anchorIdentity?: ClaimAnchorIdentity;
   /** W1-T2784: this namespace's own identity. Absent (unreadable /proc) ⇒ arm 3 declines. */
   liveness?: ClaimantLivenessProbe;
+  /** W1-T5047: the replaced-container proof. Absent, or any clause unproven ⇒ arm 3 declines. */
+  replaced?: ReplacedClaimantProbe;
 }): DispatchClaimReleaseDecision {
   if (i.heldByThisRun) return { arm: "holder", release: true, reason: `this run holds ${dispatchClaimRef(i.taskId)} and is done with it` };
   if (i.evidenceObserved)
@@ -165,6 +189,19 @@ export function decideDispatchClaimRelease(i: {
         `BEFORE this host's PID namespace started ${l.namespaceBootIso}, and pid ${a.pid} is ` +
         `absent. A process cannot outlive the namespace containing it, so the claimant provably ` +
         `cannot exist; releasing.`,
+    };
+  }
+  const r = i.replaced;
+  const m = r?.mintRow;
+  if (a && r && m && a.host !== r.localHost && m.host === a.host && m.actor === "daemon" && a.mintedAtMs < r.lockHeldSinceMs) {
+    return {
+      arm: "dead-claimant",
+      release: true,
+      reason:
+        `${dispatchClaimRef(i.taskId)} is held by ${a.pid}@${a.host}, minted ${a.mintedAtIso}. This instance's ledger ` +
+        `records that daemon minting it (${m.source}, ${m.ts}), and this daemon on ${r.localHost} has held the ` +
+        `instance's single-instance lock (state/drain.lock) since ${r.lockHeldSinceIso}. The claimant's container ` +
+        `was replaced, so the claimant cannot exist; releasing.`,
     };
   }
   return {
@@ -196,6 +233,8 @@ export interface DispatchClaimReserver {
    *  decode. `undefined` when absent, unfetched, or unreadable — each declines the
    *  `dead-claimant` arm rather than releasing on a guess. Optional and last. */
   anchorMessage?(taskId: string): string | undefined;
+  /** W1-T5047: every task id holding a dispatch claim on origin; `[]` when unreadable. Optional. */
+  list?(): string[];
 }
 
 export interface ClaimGitDeps {
@@ -242,6 +281,14 @@ export function gitDispatchClaimReserver(deps: ClaimGitDeps): DispatchClaimReser
         ? ["push", `--force-with-lease=${ref}:${opts.expect}`, "origin", `:${ref}`]
         : ["push", "origin", `:${ref}`];
       return deps.run(args).status === 0;
+    },
+    list() {
+      const res = deps.run(["ls-remote", "origin", "refs/rmd-dispatch/*"]);
+      if (res.status !== 0) return [];
+      return res.stdout
+        .split("\n")
+        .map((line) => /\srefs\/rmd-dispatch\/(\S+)$/.exec(line.trim())?.[1])
+        .filter((id): id is string => id !== undefined);
     },
     anchorMessage(taskId) {
       const sha = this.holder(taskId);
@@ -316,15 +363,19 @@ export function releaseDispatchClaim(
     /** W1-T2784: probe seam for the dead-claimant arm. Optional and last, so every existing
      *  caller and test fake keeps today's three-arm behavior unchanged when it's omitted. */
     livenessProbe?: () => ClaimantLivenessProbe | undefined;
+    /** W1-T5047: probe seam for the replaced-container proof, asked only once an anchor parsed. */
+    replacedProbe?: (anchor: ClaimAnchorIdentity) => ReplacedClaimantProbe | undefined;
   } = {},
 ): DispatchClaimReleaseResult {
   // Only asked off the this-run path — releasing your own claim (arm 1) skips this I/O entirely.
   let anchorIdentity: ClaimAnchorIdentity | undefined;
   let liveness: ClaimantLivenessProbe | undefined;
-  if (i.anchor === undefined && i.evidenceObserved !== true && i.livenessProbe) {
+  let replaced: ReplacedClaimantProbe | undefined;
+  if (i.anchor === undefined && i.evidenceObserved !== true && (i.livenessProbe || i.replacedProbe)) {
     anchorIdentity = parseClaimAnchorMessage(reserver.anchorMessage?.(taskId));
     // The pid is only meaningful once an anchor parsed — probe after, never before.
-    if (anchorIdentity) liveness = i.livenessProbe();
+    if (anchorIdentity) liveness = i.livenessProbe?.();
+    if (anchorIdentity) replaced = i.replacedProbe?.(anchorIdentity);
   }
   const decision = decideDispatchClaimRelease({
     heldByThisRun: i.anchor !== undefined,
@@ -332,6 +383,7 @@ export function releaseDispatchClaim(
     taskId,
     anchorIdentity,
     liveness,
+    replaced,
   });
   if (!decision.release) return { ...decision, dropped: false };
   // Pinned via `--force-with-lease` to the sha just judged, so a claim re-minted since survives.
@@ -340,6 +392,82 @@ export function releaseDispatchClaim(
     return { ...decision, dropped: judged ? reserver.drop(taskId, { expect: judged }) : false };
   }
   return { ...decision, dropped: reserver.drop(taskId, i.anchor !== undefined ? { expect: i.anchor } : {}) };
+}
+
+/** How many archives after a claim's mint time {@link findClaimMintRow} reads: its row lands in the first
+ *  rotation after it, so the bound only caps the read, and a miss keeps the claim (fail closed). */
+const MINT_ROW_ARCHIVE_READS = 3;
+
+/**
+ * W1-T5047: the claim's own `dispatch.claim` created row in this instance's ledger — the live file and
+ * the first rotations stamped at or after the claim was minted — or `undefined` when not found there.
+ */
+export function findClaimMintRow(
+  stateDir: string,
+  taskId: string,
+  anchor: ClaimAnchorIdentity,
+  fs: LedgerGrepFsDeps = realLedgerFs,
+): ClaimMintRow | undefined {
+  const ref = dispatchClaimRef(taskId);
+  const names = fs.existsSync(stateDir) ? fs.readdirSync(stateDir) : [];
+  const archives = ledgerRotationEntries(names, stateDir)
+    .map((entry) => ({ entry, name: entry.path.slice(stateDir.length + 1) }))
+    .filter(({ name }) => (rotationStampIso(name) ?? "") >= anchor.mintedAtIso)
+    .slice(0, MINT_ROW_ARCHIVE_READS);
+  const files = [...archives.map(({ entry, name }) => ({ path: entry.path, gzip: entry.form === "gzip", name }))];
+  if (fs.existsSync(ledgerLivePath(stateDir))) files.push({ path: ledgerLivePath(stateDir), gzip: false, name: "ledger.ndjson" });
+  for (const file of files) {
+    const raw = fs.readFileSync(file.path);
+    const text = (file.gzip ? fs.gunzipSync(raw) : raw).toString("utf8");
+    for (const line of text.split("\n")) {
+      if (!line.includes(ref) || !line.includes("dispatch.claim")) continue;
+      const row = parseLedgerRow(line);
+      if (row?.step !== "dispatch.claim" || row.ref !== ref || row.outcome !== "created") continue;
+      if (typeof row.ts !== "string" || row.ts < anchor.mintedAtIso || row.host !== anchor.host) continue;
+      return { host: String(row.host), actor: String(row.actor ?? "unknown"), ts: row.ts, source: file.name };
+    }
+  }
+  return undefined;
+}
+
+function parseLedgerRow(line: string): Record<string, unknown> | undefined {
+  try {
+    const row: unknown = JSON.parse(line);
+    return row !== null && typeof row === "object" ? (row as Record<string, unknown>) : undefined;
+  } catch (error) {
+    // A torn ledger line is not the claim's row; the search moves to the next line.
+    if (error instanceof SyntaxError) return undefined;
+    throw error;
+  }
+}
+
+/**
+ * W1-T5047: the boot sweep. For every claim on origin, asks {@link releaseDispatchClaim} with the
+ * evidence arm (a merged task) and the replaced-container proof, and returns each decision. Run once,
+ * right after the daemon takes its single-instance lock.
+ */
+export function releaseReplacedContainerClaims(
+  reserver: DispatchClaimReserver,
+  i: {
+    localHost: string;
+    lockHeldSinceMs: number;
+    lockHeldSinceIso: string;
+    findMintRow: (taskId: string, anchor: ClaimAnchorIdentity) => ClaimMintRow | undefined;
+    isMerged?: (taskId: string) => boolean;
+  },
+): Array<DispatchClaimReleaseResult & { taskId: string }> {
+  return (reserver.list?.() ?? []).map((taskId) => ({
+    taskId,
+    ...releaseDispatchClaim(taskId, reserver, {
+      evidenceObserved: i.isMerged?.(taskId) === true,
+      replacedProbe: (anchor) => ({
+        localHost: i.localHost,
+        lockHeldSinceMs: i.lockHeldSinceMs,
+        lockHeldSinceIso: i.lockHeldSinceIso,
+        mintRow: i.findMintRow(taskId, anchor),
+      }),
+    }),
+  }));
 }
 
 // ── PR REPAIR CLAIMS (W1-T2677) ─────────────────────────────────────────────────────────────
