@@ -260,3 +260,16 @@ test("spawnRmdReviewForFreshTree executes the fresh tree's bash rmd wrapper and 
   const code = await spawnRmdReviewForFreshTree(dir, ["5883", "7"]);
   assert.equal(code, 7, "the executable wrapper's own exit code must come back verbatim");
 });
+
+test("an App-backed fresh-tree review starts with a new token while a non-App review keeps its caller token", async () => {
+  const dir = makeTempDir("fresh-tree-review-token");
+  mkdirSync(join(dir, "bin"), { recursive: true });
+  const wrapper = join(dir, "bin", "rmd");
+  writeFileSync(wrapper, '#!/usr/bin/env bash\n[ "$RMD_SELF_SYNC_DONE" = "1" ] || exit 41\nif [ "$2" = app ]; then [ -z "${GH_TOKEN:-}" ] || exit 42; else [ "$GH_TOKEN" = operator ] || exit 43; fi\n');
+  chmodSync(wrapper, 0o755);
+  const appEnv = { ...process.env, GH_TOKEN: "inherited-installation-token", GH_APP_ID: "1", GH_APP_INSTALLATION_ID: "2", GH_APP_PRIVATE_KEY_PATH: "/mounted/key" };
+  assert.equal(await spawnRmdReviewForFreshTree(dir, ["app"], undefined, appEnv), 0);
+  assert.equal(appEnv.GH_TOKEN, "inherited-installation-token", "the daemon's own token is untouched");
+  const operatorEnv = { ...process.env, GH_TOKEN: "operator", GH_APP_ID: "", GH_APP_INSTALLATION_ID: "", GH_APP_PRIVATE_KEY_PATH: "" };
+  assert.equal(await spawnRmdReviewForFreshTree(dir, ["operator"], undefined, operatorEnv), 0);
+});
