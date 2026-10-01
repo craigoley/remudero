@@ -11,7 +11,7 @@ import { test } from "node:test";
 import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
 import { readModelCommand } from "../src/lib/read-model-cli.js";
 import { READ_MODEL_DB_DIR_ENV, readModelDbDir } from "../src/lib/read-model-db.js";
-import { createReadModelTicker, readModelSwitchesPath, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
+import { createReadModelTicker, readModelStatusView, readModelSwitchesPath, type ReadModelView, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 
 function scratch(t: { after: (fn: () => void) => void }, kind: string): string {
@@ -67,6 +67,29 @@ test("a missing scratch read-model dir is rebuilt in full from the ledger and th
   out.length = 0;
   assert.equal(readModelCommand(["status"], { stateDir, out: (l) => void out.push(l) }), 0);
   assert.match(out.join("\n"), /core v1: seen 40/, "status reads the DB where it now lives");
+});
+
+test("shadow readiness counters survive a deallocate that wipes the scratch read model", (t) => {
+  const stateDir = scratch(t, "scratch-rm-shadow-state");
+  const dbDir = join(scratch(t, "scratch-rm-shadow-nvme"), "read-model");
+  withDbDir(t, `${stateDir}:${dbDir}`);
+  const ledgerDir = rowsDir(t);
+  const badge: ReadModelView = { name: "nav-badge", version: 1, materialize: () => [{ key: "", data: { count: 2 }, sources: [] }] };
+  const tickerOver = (posted: ReadModelWorkerMessage[]) => createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], post: (m) => void posted.push(m), oracle: "off", views: [badge, readModelStatusView] });
+  const shown = (posted: ReadModelWorkerMessage[]) => posted.flatMap((m) => (m.type === "body" && m.entry.view === "read-model" ? [m.entry.body.data as { shadow?: Array<{ view: string; samples: number; streakSamples: number }> }] : [])).at(-1)?.shadow;
+
+  const before = tickerOver([]);
+  before.tick();
+  for (let i = 0; i < 3; i++) assert.equal(before.shadow({ view: "nav-badge", key: "", requests: 1, legacy: { data: { count: 2 }, asOfMs: Date.parse("2026-10-01T00:00:00.000Z") } }), true);
+  before.release();
+  rmSync(dbDir, { recursive: true, force: true });
+
+  const posted: ReadModelWorkerMessage[] = [];
+  const after = tickerOver(posted);
+  t.after(() => void after.release());
+  after.tick();
+  assert.ok(existsSync(join(dbDir, "core.v1.sqlite")), "the wiped DB was rebuilt on scratch");
+  assert.deepEqual(shown(posted)?.map((s) => [s.view, s.samples, s.streakSamples]), [["nav-badge", 3, 3]], "the streak outlived the scratch disk");
 });
 
 test("the DB dir mapping applies only to the state dir it names", () => {
