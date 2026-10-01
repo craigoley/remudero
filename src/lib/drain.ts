@@ -697,15 +697,29 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
  *  offer, so a disjoint set is not truncated away first. */
 export function runnableCandidates(plan: Plan, isMerged: MergedSet, limit: number, opts: NextRunnableOpts = {}): Task[] {
   if (limit <= 0) return [];
-  const eligible: Task[] = [];
-  for (const t of dispatchOrder(plan.tasks, opts.dispatchValueContext)) {
-    if (isDispatchEligible(plan, t, isMerged, opts)) eligible.push(t);
-  }
+  const eligible = dispatchEligibleCandidates(plan, isMerged, opts);
   const collected = packDisjointFirst(eligible, limit, opts.observedByTask ?? NO_OBSERVED_SCOPE);
   // W1-T2397: observe, then dispatch anyway — the same placement `nextRunnable` uses, one level over,
   // so it cannot alter the batch. This is the DAEMON's selector: `runDaemon` calls this one.
   for (const t of collected) observeOpenSibling(t, opts);
   return collected;
+}
+
+/** The dispatcher's exact eligibility pass, before its disjoint lane packing. A read-only
+ *  frontier needs membership for every task, not an N-lane pack of all N candidates. */
+function dispatchEligibleCandidates(plan: Plan, isMerged: MergedSet, opts: NextRunnableOpts): Task[] {
+  const eligible: Task[] = [];
+  for (const t of dispatchOrder(plan.tasks, opts.dispatchValueContext)) {
+    if (isDispatchEligible(plan, t, isMerged, opts)) eligible.push(t);
+  }
+  return eligible;
+}
+
+/** Every eligible id through the SAME predicate and filter callbacks as the dispatcher, without
+ *  disjoint packing. This is membership only: never use it to choose a dispatch lane or infer
+ *  that two tasks are safe to run together. */
+export function runnableCandidateIds(plan: Plan, isMerged: MergedSet, opts: NextRunnableOpts = {}): ReadonlySet<string> {
+  return new Set(dispatchEligibleCandidates(plan, isMerged, opts).map((task) => task.id));
 }
 
 /** W1-T476's greedy disjointness-first pack: fills up to `limit` slots from `eligible` (already in
