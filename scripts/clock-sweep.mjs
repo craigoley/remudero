@@ -285,7 +285,7 @@ export function main({
     return 0;
   }
 
-  let touched = new Map();
+  let touched;
   let order = "name (git history unreadable)";
   try {
     touched = touchedAt();
