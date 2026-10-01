@@ -701,7 +701,7 @@ test("a build in flight leaves the legacy side on the plan github snapshot and p
   assert.equal(next.data.health.daemon.state, "silent");
 });
 
-test("a task the plan and the compared body both lack is still a real now diff", (t) => {
+test("a task the compared body drops from its own plan is still a real now diff", (t) => {
   // The negative control: a body missing a task its own plan holds is a wrong value, and no row or plan generation explains it.
   const root = scratch(t);
   const clock = stepped();
