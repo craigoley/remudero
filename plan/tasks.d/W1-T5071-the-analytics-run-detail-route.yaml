@@ -1,0 +1,65 @@
+- id: W1-T5071
+  title: "THE CONSOLE'S RUN EXPLORER HAS ALWAYS 404'D — /analytics/runs/[runId] reads /v1/analytics/runs/{runId}?projection=console-v1, which core never served; answer it as a keyed detail read from the run's indexed fact rows, never a fold on the GET"
+  repo: remudero
+  depends_on: []
+  dispatch_hold: true
+  priority: 4
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "2026-10-01 core-console architecture Phase 4 design (§1.1 row 7, §1.3, §8 route exclusions, operator decision 1), arch-phase4-design.md"
+  files:
+    - src/lib/analytics-run-route.ts
+    - test/analytics-run-route.test.ts
+    - src/lib/ledger-projector.ts
+    - src/lib/read-model-worker.ts
+    - src/lib/serve.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-10-01 on origin/main: the console's run explorer (remudero-console
+    app/api/console/analytics/runs/[runId]/route.ts, CONSOLE-T7) GETs
+    /v1/analytics/runs/{runId}?projection=console-v1. core src/ has no literal for that path; it serves only
+    the aggregate GET /v1/analytics. The console excludes the route from its core-read contract baseline and
+    the page has rendered unavailable since it shipped. The design lists it as a direct keyed GET (a rare
+    detail read, not a pushed view) and as a real feature to file in core. The fact store already carries
+    run_id on every fact row (ledger-projector.ts) but has no index on it.
+  design: |
+    (i) ledger-projector.ts: add CREATE INDEX IF NOT EXISTS fact_run ON fact(run_id, seq) WHERE run_id IS NOT
+    NULL, beside fact_task. (ii) src/lib/analytics-run-route.ts: GET /v1/analytics/runs/{runId}, read scope.
+    Main never opens SQLite: the route asks the read-model worker for the run key through W1-T5048's keyed
+    want path, which builds the body from the run's fact rows by run_id. The key is NOT materialized for push
+    and is evicted like any keyed view. The console-v1 body names only allowlisted fields: generatedAt,
+    task, provider, effort, outcome, measurements, models {configured, routed, and served only with a
+    servedReceiptId}, trace (at most 200 events, text fields at most 500 chars), links (at most 20) and
+    redactions naming each withheld field with its reason. An unknown run answers 404 not_found; a key not
+    ready within the wait answers 404 view_not_ready with retryMs. The GET writes nothing (the GETs-never-write
+    census covers it). (iii) Register the run key in read-model-worker.ts and the route in serve.ts.
+  acceptance:
+    - claim: "a run detail read is answered from the run's fact rows by run id"
+      proof: 'grep: test("W1-T5071: a run detail read is answered from the run fact rows by run id" in test/analytics-run-route.test.ts'
+    - claim: "an unknown run id answers not found"
+      proof: 'grep: test("W1-T5071: an unknown run id answers not found" in test/analytics-run-route.test.ts'
+    - claim: "the run body bounds its trace and names withheld fields"
+      proof: 'grep: test("W1-T5071: the run body bounds its trace and names withheld fields" in test/analytics-run-route.test.ts'
+    - claim: "the fact store indexes run ids"
+      proof: 'grep: fact_run ON fact(run_id in src/lib/ledger-projector.ts'
+  falsifier: |
+    Scan the ledger union per request: the first proof's fixture counts a ledger read. Copy unnamed upstream
+    fields through: the third proof finds a prompt field in the body. Drop the index: the fourth proof reads 0.
+  note: |
+    DISPATCH HOLD: waits for W1-T5048 (on-demand keyed views, filed in #8258 and itself held). depends_on
+    cannot name it until that shard is on main. RELEASE: one plan amendment deleting dispatch_hold once
+    W1-T5048 merges (tracked in arch-plan.md, Phase 4).
+    Reachability: after CONSOLE-T107 deletes the routing inspector, the console's only in-app link to
+    /analytics/runs/[runId] is gone; the page stays reachable by URL. Priority 4 matches the design's rank 7
+    (rare detail read), as the P4-FILE leaves mapped it.
+    Console side: once this merges, the console drops /v1/analytics/runs/{} from
+    scripts/core-read-contract-baseline.json.
+    Design: ~/Remudero/.session-scratch/arch-phase4-design.md §1.1 row 7, §1.3 and §8.
+    Scope-time checks 2026-10-01: no run-W1-T5071 branch on origin; no origin/main commit names the id; no
+    plan record on origin/main or an open PR head names analytics/runs. Reserved from the operator checkout
+    for this filing branch.
