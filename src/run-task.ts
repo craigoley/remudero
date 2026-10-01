@@ -1402,6 +1402,7 @@ import {
   BRANCH_REAP_REASON_LABEL,
   readLedgerUnionBounded,
   taskIdFromRunBranch,
+  creditsByAnchoredTrailer,
   taskIdFromSlugBranch,
   readMergeCreditedTaskIds,
   isMergeCreditLine,
@@ -24884,6 +24885,7 @@ export interface PlanReconcileDeps {
    *  `buildCreditCandidates` — the SAME projection the sweep's credit rung already trusts, never a
    *  second derivation that could disagree with it. Throwing here ABORTS the verb (see below). */
   creditedMergedIds?: () => Set<string>;
+  creditedProjection?: () => { ids: Set<string>; unknownReason?: string };
   log?: (step: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -24939,7 +24941,14 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
 
   let credited: Set<string>;
   try {
-    credited = (deps.creditedMergedIds ?? (() => defaultCreditedMergedIds()))();
+    const projection: NonNullable<PlanReconcileDeps["creditedProjection"]> = deps.creditedProjection ?? (deps.creditedMergedIds ? () => ({ ids: deps.creditedMergedIds!() }) : () => creditProjectionWithReadState());
+    const read = projection();
+    credited = read.ids;
+    if (read.unknownReason !== undefined) {
+      console.error(`### rmd plan-reconcile: UNKNOWN — the merged-PR read did not complete (${read.unknownReason}); no reconcile count can be derived from it and nothing was written`);
+      (deps.log ?? (() => {}))("plan.reconcile.unknown", { reason: read.unknownReason });
+      return 2;
+    }
   } catch (e) {
     console.error(
       `### rmd plan-reconcile: the credit projection is unreadable (${String((e as Error)?.message ?? e)}) — ` +
@@ -24986,27 +24995,34 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
  * Exported as a PREDICATE rather than inlined so a test can drive all three values directly: the
  * function below reads config, a ledger and GitHub, and none of that is the rule under test.
  */
-export function creditIsReconcilable(c: { merged?: boolean; creditIsImplementation?: boolean; creditHasBuildDiff?: boolean }): boolean {
-  return c.merged === true && (c.creditIsImplementation === true || c.creditHasBuildDiff === true);
+export function creditIsReconcilable(c: { merged?: boolean; creditIsImplementation?: boolean; creditHasBuildDiff?: boolean; creditHasOtherBuildMerge?: boolean }): boolean {
+  return c.merged === true && (c.creditIsImplementation === true || c.creditHasBuildDiff === true || c.creditHasOtherBuildMerge === true);
 }
 
 /** The default credit projection: the SAME `buildCreditCandidates` the sweep's credit rung uses,
- *  now under the SAME filter too — see {@link creditIsReconcilable}. */
-export function defaultCreditedMergedIds(
+ *  now under the SAME filter too — see {@link creditIsReconcilable}. `unknownReason` (W1-T5029) is the gateway's own marked failed/truncated read. */
+export function creditProjectionWithReadState(
   configOverride?: Config,
   checkoutRoot = repoRoot,
   creditBuilder: typeof buildCreditCandidates = buildCreditCandidates,
-): Set<string> {
+  github?: GitHub,
+): { ids: Set<string>; unknownReason?: string } {
   const config = configOverride ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
   // No ledger means no positive merge-credit evidence. Return an empty projection rather than
   // reaching for the GitHub gateway from an isolated or not-yet-initialized checkout.
-  if (!existsSync(ledgerPath)) return new Set();
+  if (!existsSync(ledgerPath)) return { ids: new Set() };
   const self = resolveOwnerRepo();
   const plan = loadPlan(join(checkoutRoot, "plan", "tasks.yaml"));
-  return new Set(
-    creditBuilder(self.owner, self.repo, plan, ledgerPath).filter(creditIsReconcilable).map((c) => c.taskId),
-  );
+  const gateway = github ?? buildBatchedGithub(self.owner, self.repo);
+  const ids = new Set(creditBuilder(self.owner, self.repo, plan, ledgerPath, undefined, gateway).filter(creditIsReconcilable).map((c) => c.taskId));
+  const state = gateway.readState?.();
+  const unknownReason = state === "failed" ? (gateway.readFailureReason?.() ?? "unknown") : state === "ok" && gateway.readTruncated?.() ? "truncated" : undefined;
+  return unknownReason === undefined ? { ids } : { ids, unknownReason };
+}
+
+export function defaultCreditedMergedIds(configOverride?: Config, checkoutRoot = repoRoot, creditBuilder: typeof buildCreditCandidates = buildCreditCandidates): Set<string> {
+  return creditProjectionWithReadState(configOverride, checkoutRoot, creditBuilder).ids;
 }
 
 /** W1-T3970: production's adapter keeps the cadence map testable without running the rest of the
@@ -37603,6 +37619,27 @@ export function prerequisiteOnlyMergeBody(body: string | undefined, taskId: stri
   return namesPrerequisite && carriesOnlyInstrument;
 }
 
+export type ReconcileCreditCandidate = CreditCandidate & { creditHasOtherBuildMerge?: boolean };
+
+function creditEvidenceFor(
+  taskId: string,
+  prNumber: number,
+  body: string | undefined,
+  mergeSubjects: ReadonlyMap<number, string>,
+  mergedPaths: ReadonlyMap<number, readonly string[]>,
+): Pick<CreditCandidate, "creditIsImplementation" | "creditHasBuildDiff"> {
+  const subjectCredit = creditSubjectIsImplementation(mergeSubjects.get(prNumber));
+  const prerequisiteOnly = prerequisiteOnlyMergeBody(body, taskId);
+  const paths = mergedPaths.get(prNumber);
+  let creditHasBuildDiff: boolean | undefined;
+  if (prerequisiteOnly === true) creditHasBuildDiff = false;
+  else if (paths !== undefined && paths.length > 0) creditHasBuildDiff = !isBookkeepingOnlyChangeset(paths);
+  // W1-T4078 — a readable, explicitly prerequisite-only body is negative evidence even when
+  // the squash commit carries the task trailer. Unreadable body evidence stays with the
+  // subject result so this repair can only subtract the measured false credit.
+  return { creditIsImplementation: prerequisiteOnly === true ? false : subjectCredit, creditHasBuildDiff };
+}
+
 /** Map one whole-plan projection to the credit consumer's narrow candidate shape. Keeping this
  * pure makes the performance refactor unable to change the merged/pr/url ownership filter. */
 export function creditCandidatesFromProjection(
@@ -37610,27 +37647,19 @@ export function creditCandidatesFromProjection(
   mergeSubjects: ReadonlyMap<number, string>,
   mergeBodies: ReadonlyMap<number, string> = new Map(),
   mergedPaths: ReadonlyMap<number, readonly string[]> = new Map(),
-): CreditCandidate[] {
-  const candidates: CreditCandidate[] = [];
+  mergedCreditsFor: (taskId: string) => readonly PrRef[] = () => [],
+): ReconcileCreditCandidate[] {
+  const candidates: ReconcileCreditCandidate[] = [];
   for (const projection of projections) {
     if (!projection.merged || projection.prNumber === undefined || projection.prUrl === undefined) continue;
-    const subjectCredit = creditSubjectIsImplementation(mergeSubjects.get(projection.prNumber));
-    const prerequisiteOnly = prerequisiteOnlyMergeBody(mergeBodies.get(projection.prNumber), projection.taskId);
-    const paths = mergedPaths.get(projection.prNumber);
-    let creditHasBuildDiff: boolean | undefined;
-    if (prerequisiteOnly === true) creditHasBuildDiff = false;
-    else if (paths !== undefined && paths.length > 0) creditHasBuildDiff = !isBookkeepingOnlyChangeset(paths);
-    candidates.push({
-      taskId: projection.taskId,
-      prNumber: projection.prNumber,
-      prUrl: projection.prUrl,
-      merged: true,
-      // W1-T4078 — a readable, explicitly prerequisite-only body is negative evidence even when
-      // the squash commit carries the task trailer. Unreadable body evidence stays with the
-      // subject result so this repair can only subtract the measured false credit.
-      creditIsImplementation: prerequisiteOnly === true ? false : subjectCredit,
-      creditHasBuildDiff,
-    });
+    const id = projection.taskId;
+    const evidence = creditEvidenceFor(id, projection.prNumber, mergeBodies.get(projection.prNumber), mergeSubjects, mergedPaths);
+    const candidate: ReconcileCreditCandidate = { taskId: id, prNumber: projection.prNumber, prUrl: projection.prUrl, merged: true, ...evidence };
+    const buildsOnMain = (pr: PrRef): boolean =>
+      pr.state === "MERGED" && pr.number !== projection.prNumber && (creditsByAnchoredTrailer("MERGED", pr.headRefName, pr.body, id) || taskIdFromRunBranch(pr.headRefName) === id) &&
+      creditIsReconcilable({ merged: true, ...creditEvidenceFor(id, pr.number, pr.body ?? mergeBodies.get(pr.number), mergeSubjects, mergedPaths) });
+    if (!creditIsReconcilable(candidate) && mergedCreditsFor(id).some(buildsOnMain)) candidate.creditHasOtherBuildMerge = true;
+    candidates.push(candidate);
   }
   return candidates;
 }
@@ -37656,7 +37685,7 @@ export function buildCreditCandidates(
   evidenceRootFor: (owner: string, repo: string) => string | undefined = creditEvidenceRootFor,
   // Injectable only for the one-read regression; production uses projectPlan's normal reader.
   readLedger: DeriveDeps["readLedger"] = readLedgerLines,
-): CreditCandidate[] {
+): ReconcileCreditCandidate[] {
   // W1-T181: wires the same fetch-size/fetch-failure observability the SERVE board gateway gets —
   // this sweep/daemon-poll gateway shells the identical `gh pr list` this outage's fix targeted.
   // W1-T3067: the free local evidence the plan-only DIFF refusal needs, built ONCE for the whole
@@ -37692,7 +37721,18 @@ export function buildCreditCandidates(
     const pr = baseGithub.prByRef(candidate.prUrl);
     if (pr?.body !== undefined) mergeBodies.set(candidate.prNumber, pr.body);
   }
-  return creditCandidatesFromProjection(projection.values(), mergeSubjects, mergeBodies, deps.mergedPathsByPr);
+  let mergedByTask: Map<string, PrRef[]> | undefined;
+  const mergedCreditsFor = (taskId: string): readonly PrRef[] => {
+    if (!mergedByTask) {
+      mergedByTask = new Map();
+      for (const pr of [...(baseGithub.listMergedHeadBranches?.() ?? [])].sort((a, b) => b.number - a.number)) {
+        const owners = new Set([...(pr.body ?? "").matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)].map((m) => m[1]!).concat(taskIdFromRunBranch(pr.headRefName) ?? []));
+        for (const id of owners) mergedByTask.set(id, [...(mergedByTask.get(id) ?? []), pr]);
+      }
+    }
+    return mergedByTask.get(taskId) ?? [];
+  };
+  return creditCandidatesFromProjection(projection.values(), mergeSubjects, mergeBodies, deps.mergedPathsByPr, mergedCreditsFor);
 }
 
 /**

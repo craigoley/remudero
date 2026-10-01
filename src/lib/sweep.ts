@@ -9248,6 +9248,12 @@ const inFlightReviewKeys = new Set<string>();
  *  the review mutex. // Why: 13 dispatches across two PRs against a cap of 2. */
 const inFlightFixKeys = new Set<string>();
 
+/** W1-T5032 — a proof amendment's `fix.dispatch` identity row is an idempotency record, never a strike;
+ *  hidden from `priorStrikesFor` and `freshFixDispatchCount` here, while `lookupIdentity` still reads it. */
+export function isProofAmendmentIdentityRow(line: Record<string, unknown>): boolean {
+  return line.step === "fix.dispatch" && line.kind === "proof_amendment";
+}
+
 /** W1-T2788 — select the fix-rung ledger generation attributable to `currentHeadSha`. New rows name
  *  the head they targeted and require exact equality; legacy rows carry no head and reset only at a
  *  trustworthy observation for this task at the current head, so an incomplete history fails closed
@@ -9260,7 +9266,7 @@ export function fixLedgerRowsForHead(
   if (!taskId) return [];
   if (!currentHeadSha) {
     return lines.filter(
-      (line) => line.task_id === taskId && (line.step === "fix.dispatch" || line.step === "fix.review"),
+      (line) => line.task_id === taskId && (line.step === "fix.dispatch" || line.step === "fix.review") && !isProofAmendmentIdentityRow(line),
     );
   }
 
@@ -9279,6 +9285,7 @@ export function fixLedgerRowsForHead(
     if (line.task_id !== taskId) continue;
     const strike = typeof line.strike === "number" ? line.strike : undefined;
     if (line.step === "fix.dispatch") {
+      if (isProofAmendmentIdentityRow(line)) continue;
       const taggedHead = typeof line.head_sha === "string" ? line.head_sha : undefined;
       const belongsToHead = taggedHead !== undefined
         ? taggedHead === currentHeadSha
@@ -9626,6 +9633,9 @@ export function readyDraftPullRequest(
     io.log("sweep.draft_ready_failed", { ...row, reason: e instanceof Error ? e.message : String(e) });
   }
 }
+
+/** PRIMARY CONTROL on how many stale-proof supersession closes one sweep pass may make; a PR over the cap keeps its red and is re-derived next pass. */
+export const MAX_STALE_PROOF_CLOSES_PER_PASS = 2;
 
 /** W1-T4702 — the last incomplete-union reason logged, so a persistent gap is logged once. */
 let lastReportedAnomalyGap: string | undefined;
@@ -10091,6 +10101,8 @@ export async function runSweep(
     reviewKey: string;
     mode: ReviewDispatchMode;
   }> = [];
+  // W1-T5030: close ATTEMPTS the stale-proof supersession arm has made this pass.
+  let staleProofCloses = 0;
 
   /** The tail every disposition shares once `acted`, `actionError` and `standDownReason` are known —
    *  factored out so the synchronous walk and the concurrent review batch ledger and log IDENTICALLY.
@@ -11050,6 +11062,14 @@ export async function runSweep(
                 break;
               }
               if (staleProofs && pr.changedFiles?.length === 0) {
+                if (staleProofCloses >= MAX_STALE_PROOF_CLOSES_PER_PASS) {
+                  // W1-T5030: the break keeps a deferred PR off `dispatchFix` — a ci-log worker cannot edit a stale proof.
+                  acted = false;
+                  standDownReason = `stale-proof supersession close deferred — ${MAX_STALE_PROOF_CLOSES_PER_PASS} already made this pass; this PR carries to the next pass`;
+                  extraDisposedFields = { ...extraDisposedFields, stale_proof_close_deferred: true };
+                  break;
+                }
+                staleProofCloses += 1;
                 let carried = "no merged stack parent could be read";
                 try {
                   const stack = deps.stackPrerequisite?.(pr);
