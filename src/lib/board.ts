@@ -540,6 +540,15 @@ export interface BoardSnapshotCache {
   get(deps: BoardDeps): BoardSnapshot;
 }
 
+/** A projection published by an off-thread producer. Absence has a dated reason, never counts. */
+export type BoardSnapshotState =
+  | { state: "ready"; snapshot: BoardSnapshot }
+  | { state: "unavailable"; buildStartedAt: string; checkedAt: string; reason: string };
+
+export interface BoardSnapshotSource {
+  current(): BoardSnapshotState;
+}
+
 /** `github.readFailed?.()` guarded (W1-T184): a gateway that THROWS from `readFailed()` itself
  *  (not merely fails soft) would otherwise blow up the cache-key computation and 500 the whole
  *  /v1/status request. Fails closed — an unreadable health signal reads as an outage, never a
@@ -895,14 +904,19 @@ export function requestAcknowledgesRecap(headerValue: string | string[] | undefi
  * evening to an effectively permanent few-second recap window.
  */
 // Why: the recap-window incident this ack gate fixes — docs/forensics/board.md#buildstatusroute
-export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore): Route {
+export function buildStatusRoute(deps: BoardDeps, lastSeen?: LastSeenStore, source?: BoardSnapshotSource): Route {
   const cache = createBoardSnapshotCache();
   return {
     method: "GET",
     path: "/v1/status",
     scope: "read",
     handler: (req, res) => {
-      const snapshot = cache.get(deps);
+      const state = source?.current();
+      if (state?.state === "unavailable") {
+        sendJson(res, 503, { error: "board_unavailable", ...state }, { "retry-after": "5" });
+        return;
+      }
+      const snapshot = state?.snapshot ?? cache.get(deps);
       if (!lastSeen) {
         sendJson(res, 200, snapshot, staleSourceHeaders(snapshot));
         return;

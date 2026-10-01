@@ -92,7 +92,7 @@ import { FEEDBACK_VIEW_NAME, feedbackLegacyView } from "./feedback-view.js";
 import { INBOX_VIEW_NAME, inboxLegacyView } from "./inbox-view.js";
 import { startRepositoriesSourcePublisher, type RepositoriesSources } from "./repositories-view.js";
 import { withViewShadow } from "./view-shadow.js";
-import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnapshotCache, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
+import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnapshotCache, DEFAULT_POLL_MS, type BoardDeps, type BoardSnapshotSource } from "./board.js";
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
 import { buildInstanceGatewayRoutes, CORE_INSTANCE, instanceStateRoot, livenessInstances, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
 import { createReadModelWorker, READ_MODEL_VIEWS, readModelStatusView, type ReadModelInstance, type ReadModelWorkerHandle, type ReadModelWorkerOptions } from "./read-model-worker.js";
@@ -361,6 +361,8 @@ export interface ServeDeps {
    * go stale). Only meaningful for a gateway implementing {@link GitHub.warm}; a no-op otherwise.
    */
   boardGithubRefreshMs?: number;
+  /** Published off-thread board projection for the production status route. */
+  boardSnapshotSource?: BoardSnapshotSource;
   /**
    * W1-T183: per-phase elapsed-time ANOMALY thresholds (ms), keyed by {@link Phase} (plus a
    * `default` fallback for a phase not listed) — DATA, not a constant baked into the row
@@ -2648,7 +2650,11 @@ function assembleServeRoutes(
     ledgerPath: deps.ledgerPath,
     root: deps.fleetControlRoot,
     ...(operatorAgentMemory ? { memory: operatorAgentMemory } : {}),
-    goalBoard: () => ({ plan: deps.board.plan, snapshot: goalBoardCache.get(deps.board) }),
+    goalBoard: () => {
+      const state = deps.boardSnapshotSource?.current();
+      if (state?.state === "unavailable") return undefined;
+      return { plan: deps.board.plan, snapshot: state?.snapshot ?? goalBoardCache.get(deps.board) };
+    },
   });
   prewarmOperatorAgentReads(deps.ledgerPath).catch((e) => deps.log?.("serve.operator_agent_prewarm_failed", { reason: String((e as Error)?.message ?? e) }));
   // W1-T3893: the operator self-service surface (inventory/forget/revoke/export) over the SAME
@@ -2681,7 +2687,7 @@ function assembleServeRoutes(
   const assistantControl = { ...fleetControlDeps, claimRoot: deps.fleetControlRoot,
     instance: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository, bootSha: consoleSha };
   const rawRoutes = [
-    withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen), modelApprovals), readLadder),
+    withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen, deps.boardSnapshotSource), modelApprovals), readLadder),
     ...buildRepoDashboardRoutes({
       root: deps.questionsRoot,
       repoRegistryPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot),
