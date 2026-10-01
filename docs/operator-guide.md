@@ -1007,8 +1007,8 @@ redeliver a failed webhook, so use **Redeliver** after correcting a `401`, `403`
 3. it promotes the standby on the same socket, then drains the old generation.
 
 A build that fails readiness never serves (`serve.handoff_aborted`). A promoted build that crashes is
-replaced from the previous slot (`serve.handoff_rolled_back`). A cold start has nothing serving to
-protect, so its generation is promoted as soon as it listens and serves degraded until ready
+replaced from the previous slot (`serve.handoff_rolled_back`). A cold start, or a crash replacement, has
+nothing serving to protect, so its generation is promoted as soon as it listens and serves degraded until ready
 (`serve.cold_start_degraded` names the unmet criteria, `serve.cold_start_ready` follows); only a
 generation that never listens or dies first exits (`serve.cold_start_failed`). The ledger rows are `serve.handoff_*`,
 `serve.generation_*` and `serve.drain_phase`.

@@ -4,7 +4,8 @@
  * a tiny HTTP server, so a swap is exercised end to end without booting the whole of serve.
  *
  * argv: <port> <sha> <mode>. Modes: `ok`; `never-ready` (readiness stays 503); `wrong-sha` (ready,
- * but /v1/version reports another build); `crash-after-promote` (dies right after it binds).
+ * but /v1/version reports another build); `crash-after-promote` (dies right after it binds); `status-503`
+ * (ready, but /v1/status answers 503 as a warming board does).
  */
 import { createServer } from "node:http";
 import { createServeDrain, exitWithin } from "../../src/lib/serve-drain.js";
@@ -20,7 +21,7 @@ const server = createServer((req, res) => {
   req.resume();
   req.on("end", () => {
     setTimeout(() => {
-      res.writeHead(200, { "content-type": "application/json", "x-sha": sha });
+      res.writeHead(mode === "status-503" && req.url === "/v1/status" ? 503 : 200, { "content-type": "application/json", "x-sha": sha });
       res.end(JSON.stringify(req.url === "/v1/version" && mode !== "wrong-sha" ? { sha } : { sha: mode === "wrong-sha" ? "someone-else" : sha, url: req.url }));
     }, 2);
   });

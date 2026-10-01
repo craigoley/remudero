@@ -12,8 +12,8 @@
  *   shared fd and says `rmd.promoted` → `rmd.drain` the old one → `serve.handoff_done`.
  * A standby that fails readiness is killed and never serves (`serve.handoff_aborted`); the active
  * generation keeps serving. A promoted generation that dies is replaced from the previous slot.
- * A COLD start has no generation to protect, so it promotes once the standby listens and serves degraded
- * until ready (`serve.cold_start_degraded`, then `serve.cold_start_ready`): gating it only kept 4317 dark.
+ * A COLD start, or replacing the only generation after a crash, has nothing to protect, so it promotes once
+ * the standby listens and serves degraded until ready (`serve.cold_start_degraded`, then `serve.cold_start_ready`): gating it only kept 4317 dark.
  *
  * Kill switch: `RMD_SERVE_HANDOFF=off`, or a `handoff.off` file in the generations directory, turns a
  * handoff request back into today's behaviour: drain, exit 0, and docker restarts the container.
@@ -330,6 +330,26 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     return { generation, readyMs: clock.now() - startedAt };
   };
 
+  /** Nothing is serving (a cold start, or the only generation died): promote once it listens; the gate is reported, never enforced. */
+  const bringUpAlone = async (slot: PreparedSlot): Promise<{ generation?: Generation; criterion?: string; detail?: unknown; startedAt: number; readyMs: number }> => {
+    const startedAt = clock.now();
+    const generation = fork(slot);
+    const failure = (await awaitListening(generation)) ?? ((await promote(generation)) ? undefined : { criterion: "promote" });
+    if (failure) {
+      generation.process.kill("SIGKILL");
+      return { ...failure, startedAt, readyMs: clock.now() - startedAt };
+    }
+    activate(generation);
+    return { generation, startedAt, readyMs: clock.now() - startedAt };
+  };
+
+  const reportAlone = async (generation: Generation, startedAt: number, readyMs: number): Promise<void> => {
+    const unmet = await coldUnmet(generation);
+    if (unmet.length === 0) return;
+    opts.log("serve.cold_start_degraded", { sha: generation.slot.sha, unmet, readyMs });
+    void watchColdStart(generation, startedAt);
+  };
+
   /** Tier 1: the active generation drops its rebuildable caches, then free memory is measured again. */
   const shedActive = async (generation: Generation, freeBefore: number): Promise<number | undefined> => {
     const reply = new Promise<GenerationMessage | undefined>((resolve) => {
@@ -402,11 +422,10 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     opts.log(rollback ? "serve.handoff_rolled_back" : "serve.generation_crashed", { sha: dead.slot.sha, toSha: slot.sha, code, signal, crashes });
     // Self-healing back-off: a build that dies at once must not become a fork loop.
     await sleep(Math.min(60_000, 1_000 * 2 ** (crashes - 1)));
-    const up = await bringUp(slot);
+    const up = await bringUpAlone(slot);
     if (up.generation) {
-      activate(up.generation);
       previous = undefined;
-      return;
+      return reportAlone(up.generation, up.startedAt, up.readyMs);
     }
     opts.log("serve.generation_restart_failed", { sha: slot.sha, criterion: up.criterion });
     await legacyExit("restart_failed");
@@ -415,22 +434,14 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   const supervisor: ServeSupervisor = {
     activeSha: () => active?.slot.sha,
     start: async () => {
-      const startedAt = clock.now();
-      const generation = fork(opts.coldSlot);
-      const failure = (await awaitListening(generation)) ?? ((await promote(generation)) ? undefined : { criterion: "promote" });
-      if (failure) {
-        generation.process.kill("SIGKILL");
-        opts.log("serve.cold_start_failed", { sha: opts.coldSlot.sha, ...failure });
+      const up = await bringUpAlone(opts.coldSlot);
+      if (!up.generation) {
+        opts.log("serve.cold_start_failed", { sha: opts.coldSlot.sha, criterion: up.criterion, detail: up.detail });
         exit(1);
         return;
       }
-      activate(generation);
-      const readyMs = clock.now() - startedAt;
-      opts.log("serve.supervisor_ready", { sha: opts.coldSlot.sha, readyMs });
-      const unmet = await coldUnmet(generation);
-      if (unmet.length === 0) return;
-      opts.log("serve.cold_start_degraded", { sha: opts.coldSlot.sha, unmet, readyMs });
-      void watchColdStart(generation, startedAt);
+      opts.log("serve.supervisor_ready", { sha: opts.coldSlot.sha, readyMs: up.readyMs });
+      await reportAlone(up.generation, up.startedAt, up.readyMs);
     },
     requestHandoff: () => {
       if (stopping) return Promise.resolve();
