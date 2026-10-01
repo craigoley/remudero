@@ -3048,6 +3048,37 @@ export interface components {
       zeroConsoleDays: number;
       console?: RouteReadTotals;
       fleet?: RouteReadTotals;
+      latency?: RouteLatencyReading;
+    };
+    /** Handler milliseconds from the handler call to the response's finish, as a cumulative bucket histogram keyed by each bucket's upper bound (+Inf past the last). A percentile reads as its bucket's bound capped at maxMs, and is null with no reads. A window is the difference of two reads. */
+    RouteLatencyReading: {
+      n: number;
+      maxMs: number;
+      buckets: Record<string, number>;
+      p50Ms: number | null;
+      p99Ms: number | null;
+    };
+    /** View responses answered with a body (200 or 304), the stale ones, and per stale source the count by phase (none when the source named no phase); worstPhases names each source's worst. */
+    RouteReadStaleness: {
+      served: number;
+      stale: number;
+      byView: Record<string, {
+        served: number;
+        stale: number;
+      }>;
+      bySource: Record<string, {
+        stale: number;
+        phases: Record<string, number>;
+      }>;
+      worstPhases: Record<string, "warming" | "refreshing" | "catching_up" | "behind" | "elsewhere" | "failed" | "none">;
+    };
+    /** One push stream's live subscribers, its peak, and its opens, client closes and handovers by reason (slow_consumer is a dropped subscriber). */
+    RouteReadStream: {
+      opened: number;
+      closed: number;
+      peak: number;
+      handovers: Record<string, number>;
+      subscribers: number;
     };
     /** GET /v1/route-reads's body (src/lib/route-read-rollup.ts): the hourly serve.route_reads rollup folded into totals, plus the current hour's counts. */
     RouteReadsResult: {
@@ -3061,6 +3092,12 @@ export interface components {
       };
       layers: (RouteReadLayerSummary)[];
       routes: (RouteReadSummary)[];
+      viewLatency: RouteLatencyReading;
+      staleness: RouteReadStaleness;
+      streams: {
+        views: RouteReadStream;
+        status: RouteReadStream;
+      };
     };
     /** One option on an inbox item's plain message (src/lib/inbox-plain.ts's `PlainOption`). */
     PlainOption: {

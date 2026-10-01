@@ -7574,13 +7574,93 @@ components:
           $ref: "#/components/schemas/RouteReadTotals"
         fleet:
           $ref: "#/components/schemas/RouteReadTotals"
+        latency:
+          $ref: "#/components/schemas/RouteLatencyReading"
+
+    RouteLatencyReading:
+      type: object
+      description: >
+        Handler milliseconds from the handler call to the response's finish, as a cumulative bucket
+        histogram keyed by each bucket's upper bound (+Inf past the last). A percentile reads as its
+        bucket's bound capped at maxMs, and is null with no reads. A window is the difference of two reads.
+      required: [n, maxMs, buckets, p50Ms, p99Ms]
+      properties:
+        n:
+          type: integer
+        maxMs:
+          type: number
+        buckets:
+          type: object
+          additionalProperties:
+            type: integer
+        p50Ms:
+          type: [number, "null"]
+        p99Ms:
+          type: [number, "null"]
+
+    RouteReadStaleness:
+      type: object
+      description: >
+        View responses answered with a body (200 or 304), the stale ones, and per stale source the
+        count by phase (none when the source named no phase); worstPhases names each source's worst.
+      required: [served, stale, byView, bySource, worstPhases]
+      properties:
+        served:
+          type: integer
+        stale:
+          type: integer
+        byView:
+          type: object
+          additionalProperties:
+            type: object
+            required: [served, stale]
+            properties:
+              served:
+                type: integer
+              stale:
+                type: integer
+        bySource:
+          type: object
+          additionalProperties:
+            type: object
+            required: [stale, phases]
+            properties:
+              stale:
+                type: integer
+              phases:
+                type: object
+                additionalProperties:
+                  type: integer
+        worstPhases:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [warming, refreshing, catching_up, behind, elsewhere, failed, none]
+
+    RouteReadStream:
+      type: object
+      description: One push stream's live subscribers, its peak, and its opens, client closes and handovers by reason (slow_consumer is a dropped subscriber).
+      required: [opened, closed, peak, handovers, subscribers]
+      properties:
+        opened:
+          type: integer
+        closed:
+          type: integer
+        peak:
+          type: integer
+        handovers:
+          type: object
+          additionalProperties:
+            type: integer
+        subscribers:
+          type: integer
 
     RouteReadsResult:
       type: object
       description: >
         GET /v1/route-reads's body (src/lib/route-read-rollup.ts): the hourly serve.route_reads
         rollup folded into totals, plus the current hour's counts.
-      required: [asOf, since, hours, gateDays, views, layers, routes]
+      required: [asOf, since, hours, gateDays, views, layers, routes, viewLatency, staleness, streams]
       properties:
         asOf:
           type: string
@@ -7606,6 +7686,18 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/RouteReadSummary"
+        viewLatency:
+          $ref: "#/components/schemas/RouteLatencyReading"
+        staleness:
+          $ref: "#/components/schemas/RouteReadStaleness"
+        streams:
+          type: object
+          required: [views, status]
+          properties:
+            views:
+              $ref: "#/components/schemas/RouteReadStream"
+            status:
+              $ref: "#/components/schemas/RouteReadStream"
 
     # ── W1-T4610 -- the inbox and escalation routes' payloads. Each schema below is derived from
     # the TypeScript type its handler sends (src/lib/panel-graph.ts, src/lib/inbox-responder.ts,
