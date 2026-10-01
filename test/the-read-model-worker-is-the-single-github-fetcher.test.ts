@@ -4,6 +4,7 @@
 
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import type { AddressInfo } from "node:net";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -258,6 +259,11 @@ setInterval(() => parentPort.postMessage({ type: "state", at: 1, instances: [{ i
     }
     assert.deepEqual(rows, ["worker"], "serve's own keep-warm is handed to the leased worker");
     assert.ok(walks >= 1, "a positive control: serve's keep-warm walked the gateway before the handover");
+    const before = walks;
+    const { port } = server.address() as AddressInfo;
+    await fetch(`http://127.0.0.1:${port}/v1/version`, { headers: { authorization: "Bearer r" } });
+    for (let i = 0; i < 100 && walks === before; i++) await sleep(10);
+    assert.ok(walks > before, "a read served by serve wakes the worker's keep-warm, which now owns the gateway");
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
