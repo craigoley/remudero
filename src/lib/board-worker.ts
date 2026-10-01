@@ -1,6 +1,7 @@
 /** The status board's plan/ledger projection runs here, never in serve's request loop. */
 import { MessageChannel, Worker, isMainThread, parentPort, receiveMessageOnPort, workerData, type MessagePort } from "node:worker_threads";
 import { statSync } from "node:fs";
+import { performance } from "node:perf_hooks";
 import { createBoardSnapshotCache, type BoardSnapshot, type BoardSnapshotCache, type BoardSnapshotSource, type BoardSnapshotState } from "./board.js";
 import { systemClock, type Clock } from "./clock.js";
 import { readInflightLock } from "./inflight-lock.js";
@@ -23,24 +24,35 @@ type WorkerInput = {
   intervalMs: number;
   delayMs: number;
 };
-type FactRequest = { kind: "fact"; method: string; args: unknown[] };
-type FactReply = { ok: true; value: unknown } | { ok: false; error: string };
+type FactRequest = { kind: "fact"; id: number; method: string; args: unknown[] };
+type FactReply = { id: number } & ({ ok: true; value: unknown } | { ok: false; error: string });
 type ProjectionMessage =
   | { kind: "snapshot"; snapshot: BoardSnapshot }
   | { kind: "failure"; reason: string };
 
 function projectionGithub(input: WorkerInput): GitHub {
   const signal = new Int32Array(input.signal);
+  let nextId = 0;
   const call = (method: string, args: unknown[] = []): unknown => {
-    Atomics.store(signal, 0, 0);
-    parentPort!.postMessage({ kind: "fact", method, args } satisfies FactRequest);
-    if (Atomics.wait(signal, 0, 0, FACT_REPLY_BOUND_MS) === "timed-out") {
-      throw new Error(`board GitHub fact ${method} timed out`);
+    const id = ++nextId;
+    const deadline = performance.now() + FACT_REPLY_BOUND_MS;
+    parentPort!.postMessage({ kind: "fact", id, method, args } satisfies FactRequest);
+    for (;;) {
+      // Arm before draining the port: a reply arriving between the drain and a later arm
+      // would otherwise lose its wake. A timed-out fact may still reply after the next fact
+      // starts, so only this request's id may satisfy the call.
+      Atomics.store(signal, 0, 0);
+      let queued;
+      while ((queued = receiveMessageOnPort(input.replyPort))) {
+        const reply = queued.message as FactReply;
+        if (reply.id !== id) continue;
+        if (!reply.ok) throw new Error(reply.error);
+        return reply.value;
+      }
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) throw new Error(`board GitHub fact ${method} timed out`);
+      Atomics.wait(signal, 0, 0, remaining);
     }
-    const reply = receiveMessageOnPort(input.replyPort)?.message as FactReply | undefined;
-    if (!reply) throw new Error(`board GitHub fact ${method} had no reply`);
-    if (!reply.ok) throw new Error(reply.error);
-    return reply.value;
   };
   const facade: Record<string, (...args: unknown[]) => unknown> = {};
   for (const method of input.methods) {
@@ -153,9 +165,9 @@ export function createBoardProjectionWorker(
               : message.method === "lookupMergedTrailer"
                 ? mergedLookup?.(String(message.args[0])) ?? null
                 : (github[message.method as keyof GitHub] as (...args: unknown[]) => unknown).apply(github, message.args);
-            reply = { ok: true, value };
+            reply = { id: message.id, ok: true, value };
           } catch (error) {
-            reply = { ok: false, error: String((error as Error)?.message ?? error) };
+            reply = { id: message.id, ok: false, error: String((error as Error)?.message ?? error) };
           }
           replyPort?.postMessage(reply);
           Atomics.store(wake, 0, 1);

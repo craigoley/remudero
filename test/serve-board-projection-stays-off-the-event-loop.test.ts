@@ -32,6 +32,7 @@ async function fixture(t: { after(fn: () => void | Promise<void>): void }, optio
   spawnFailWorker?: boolean;
   throwGithubFact?: boolean;
   slowGithubFact?: boolean;
+  lateGithubHealthFact?: boolean;
   trailerLookup?: "ready" | "unavailable";
   intervalMs?: number;
   staleMs?: number;
@@ -48,7 +49,15 @@ async function fixture(t: { after(fn: () => void | Promise<void>): void }, optio
   writeFileSync(ledgerPath, Array.from({ length: options.ledgerRows ?? 0 }, (_, index) =>
     JSON.stringify({ ts: "2026-09-30T12:00:00Z", task_id: `W1-T${index % (options.taskCount ?? 1) + 1}`, step: "run.start", run_id: `r${index}` }) + "\n",
   ).join(""));
+  let delayedHealthFact = false;
   const github: FakeGitHub = fakeGitHub({
+    readFailed: () => {
+      if (options.lateGithubHealthFact && !delayedHealthFact) {
+        delayedHealthFact = true;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5_300);
+      }
+      return false;
+    },
     listMergedHeadBranches: () => {
       if (options.throwGithubFact) throw new Error("forced board fact failure");
       if (options.slowGithubFact) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5_600);
@@ -120,6 +129,13 @@ test("W1-T5004: a failed GitHub fact reaches the worker as an error", async (t) 
 test("W1-T5004: an unanswered GitHub fact times out", async (t) => {
   const { worker } = await fixture(t, { slowGithubFact: true, intervalMs: 60_000 });
   await expectUnavailableReason(worker, "timed out");
+});
+
+test("board worker discards a late timed-out health reply before reading merged PRs", { timeout: 30_000 }, async (t) => {
+  const { worker, github } = await fixture(t, { lateGithubHealthFact: true, intervalMs: 60_000 });
+  await ready(worker, 20_000);
+  assert.equal(worker.current().state, "ready", "the first pass recovers without waiting for the next minute-long tick");
+  assert.ok(github.calls.some((call) => call.method === "listMergedHeadBranches"), "merged PRs were read after the late health reply");
 });
 
 test("W1-T5004: merged-trailer lookup preserves ready and unavailable answers", async (t) => {

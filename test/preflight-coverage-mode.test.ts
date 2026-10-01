@@ -8,6 +8,7 @@ import type { PreflightSpawn } from "../src/lib/commit-message.js";
 import { runPreflightCoverage } from "../src/lib/ci-parity.js";
 import { FAST_GATE_STEPS, runPreflightFast } from "../src/lib/ci-parity.js";
 import { preflightCommand } from "../src/run-task.js";
+import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
 
 // ── W1-T1074: `rmd preflight --coverage` — diff-coverage, at author-time, on its OWN base ────
 //
@@ -48,6 +49,8 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
       const shard = args[args.indexOf("--shard") + 1]?.match(/^(\d+)\/4$/)?.[1];
       return shard ? { status: 0, stdout: `test/coverage-shard-${shard}.test.ts\n`, stderr: "" } : { status: 1, stdout: "", stderr: "invalid selector shard" };
     }
+    const coverage = coverageParitySpawnResult(file, args, opts);
+    if (coverage) return coverage;
     return { status: 0, stdout: "", stderr: "" };
   };
   return { spawn, calls };
@@ -70,7 +73,7 @@ test("runPreflightCoverage: refreshes origin/main (git fetch) BEFORE deriving th
     [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
     [`diff ${PINNED_RANGE}`]: { status: 0, stdout: "diff --git a/src/lib/example.ts b/src/lib/example.ts\n+x\n" },
   });
-  runPreflightCoverage(REPO_ROOT, { spawn, lcovText: SOME_LCOV });
+  runPreflightCoverage(REPO_ROOT, { coverageFreeBytes: () => Number.MAX_SAFE_INTEGER,  spawn, lcovText: SOME_LCOV });
 
   const fetchIdx = calls.findIndex((c) => c.file === "git" && c.args.join(" ") === "fetch origin main");
   assert.ok(fetchIdx >= 0, "expected a `git fetch origin main` call to refresh the base");
@@ -91,7 +94,7 @@ test("runPreflightCoverage: the diff piped into diff-coverage.mjs is exactly wha
     [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
     [`diff ${PINNED_RANGE}`]: { status: 0, stdout: sentinelDiff },
   });
-  runPreflightCoverage(REPO_ROOT, { spawn, lcovText: SOME_LCOV });
+  runPreflightCoverage(REPO_ROOT, { coverageFreeBytes: () => Number.MAX_SAFE_INTEGER,  spawn, lcovText: SOME_LCOV });
 
   const diffCoverageCall = calls.find((c) => c.args.some((a) => a.includes("diff-coverage.mjs")));
   assert.ok(diffCoverageCall, "expected a diff-coverage.mjs invocation");
@@ -102,7 +105,7 @@ test("runPreflightCoverage: a base-refresh failure REFUSES immediately — no ch
   const { spawn, calls } = recordingSpawn({
     "fetch origin main": { status: 1, stderr: "could not resolve origin" },
   });
-  const result = runPreflightCoverage(REPO_ROOT, { spawn, lcovText: SOME_LCOV });
+  const result = runPreflightCoverage(REPO_ROOT, { coverageFreeBytes: () => Number.MAX_SAFE_INTEGER,  spawn, lcovText: SOME_LCOV });
 
   assert.equal(result.ok, false);
   assert.equal(result.steps.length, 1, "only the base-refresh step should be reported once it fails");
@@ -119,7 +122,7 @@ test("runPreflightCoverage: an EMPTY diff (origin/main...HEAD touches nothing) i
   const { spawn, calls } = recordingSpawn({
     [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "" },
   });
-  const result = runPreflightCoverage(REPO_ROOT, { spawn, lcovText: SOME_LCOV });
+  const result = runPreflightCoverage(REPO_ROOT, { coverageFreeBytes: () => Number.MAX_SAFE_INTEGER,  spawn, lcovText: SOME_LCOV });
 
   assert.equal(result.ok, false, "an empty diff must never read as a pass");
   const scopeStep = result.steps.find((s) => s.name === "coverage-mode:diff-scope")!;
@@ -137,7 +140,7 @@ test("runPreflightCoverage: a TREE DIRTY in a diffed file is REFUSED, not report
     [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
     "status --porcelain": { status: 0, stdout: " M src/lib/example.ts\n" },
   });
-  const result = runPreflightCoverage(REPO_ROOT, { spawn, lcovText: SOME_LCOV });
+  const result = runPreflightCoverage(REPO_ROOT, { coverageFreeBytes: () => Number.MAX_SAFE_INTEGER,  spawn, lcovText: SOME_LCOV });
 
   assert.equal(result.ok, false, "a dirty diffed file must never read as a pass");
   const treeStep = result.steps.find((s) => s.name === "coverage-mode:tree-clean")!;
@@ -154,7 +157,7 @@ test("runPreflightCoverage: a diffed file with NO uncommitted change (clean tree
     [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
     "status --porcelain": { status: 0, stdout: "" },
   });
-  const result = runPreflightCoverage(REPO_ROOT, { spawn, lcovText: SOME_LCOV });
+  const result = runPreflightCoverage(REPO_ROOT, { coverageFreeBytes: () => Number.MAX_SAFE_INTEGER,  spawn, lcovText: SOME_LCOV });
 
   const treeStep = result.steps.find((s) => s.name === "coverage-mode:tree-clean")!;
   assert.equal(treeStep.ok, true, "a clean tree must pass this step");
@@ -166,7 +169,7 @@ test("runPreflightCoverage: the dirty-tree check is SCOPED to exactly the diffed
     [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
     "status --porcelain": { status: 0, stdout: "" },
   });
-  runPreflightCoverage(REPO_ROOT, { spawn, lcovText: SOME_LCOV });
+  runPreflightCoverage(REPO_ROOT, { coverageFreeBytes: () => Number.MAX_SAFE_INTEGER,  spawn, lcovText: SOME_LCOV });
 
   const statusCall = calls.find((c) => c.file === "git" && c.args[0] === "status");
   assert.ok(statusCall, "expected a git status --porcelain call");
@@ -182,7 +185,7 @@ test("runPreflightCoverage: a changed source file with NO lcov SF: record yields
   });
   // lcov this run produced never saw src/lib/example.ts at all — no SF: record for it.
   const lcovMissingTheFile = "TN:\nSF:src/lib/other.ts\nDA:1,1\nend_of_record\n";
-  const result = runPreflightCoverage(REPO_ROOT, { spawn, lcovText: lcovMissingTheFile });
+  const result = runPreflightCoverage(REPO_ROOT, { coverageFreeBytes: () => Number.MAX_SAFE_INTEGER,  spawn, lcovText: lcovMissingTheFile });
 
   assert.equal(result.ok, false, "an unproven file must never let the overall run read as a pass");
   const instrumentation = result.steps.find((s) => s.name === "coverage-mode:instrumentation")!;
@@ -201,7 +204,7 @@ test("runPreflightCoverage: a changed TEST file with no SF: record is fine — t
   });
   // lcov instruments the source file but (as node --test's own coverage does) carries no SF:
   // record for the test file itself.
-  const result = runPreflightCoverage(REPO_ROOT, { spawn, lcovText: SOME_LCOV });
+  const result = runPreflightCoverage(REPO_ROOT, { coverageFreeBytes: () => Number.MAX_SAFE_INTEGER,  spawn, lcovText: SOME_LCOV });
 
   const instrumentation = result.steps.find((s) => s.name === "coverage-mode:instrumentation")!;
   assert.equal(instrumentation.ok, true, "a test file carrying no SF: record must never be treated as an unproven SOURCE file");
@@ -214,7 +217,7 @@ test("runPreflightCoverage: every changed source file instrumented — the posit
     "status --porcelain": { status: 0, stdout: "" },
     [`diff ${PINNED_RANGE}`]: { status: 0, stdout: "diff --git a/src/lib/example.ts b/src/lib/example.ts\n+x\n" },
   });
-  const result = runPreflightCoverage(REPO_ROOT, { spawn, lcovText: SOME_LCOV });
+  const result = runPreflightCoverage(REPO_ROOT, { coverageFreeBytes: () => Number.MAX_SAFE_INTEGER,  spawn, lcovText: SOME_LCOV });
 
   const instrumentation = result.steps.find((s) => s.name === "coverage-mode:instrumentation")!;
   assert.equal(instrumentation.ok, true);
@@ -236,7 +239,7 @@ test("runPreflightCoverage: the suite run itself failing (e.g. a real test failu
     // invocation is what fails now; the short-circuit it must produce is unchanged.
     "test/coverage-shard-1.test.ts": { status: 1, stderr: "1 test failed" },
   });
-  const result = runPreflightCoverage(REPO_ROOT, { spawn, lcovText: SOME_LCOV });
+  const result = runPreflightCoverage(REPO_ROOT, { coverageFreeBytes: () => Number.MAX_SAFE_INTEGER,  spawn, lcovText: SOME_LCOV });
 
   const testStep = result.steps.find((s) => s.name === "coverage-mode:test-with-coverage")!;
   assert.equal(testStep.ok, false);
@@ -252,7 +255,7 @@ test("runPreflightCoverage: the coverage runs retain source-map and test exclusi
     [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
     "status --porcelain": { status: 0, stdout: "" },
   });
-  runPreflightCoverage(REPO_ROOT, { spawn, lcovText: SOME_LCOV });
+  runPreflightCoverage(REPO_ROOT, { coverageFreeBytes: () => Number.MAX_SAFE_INTEGER,  spawn, lcovText: SOME_LCOV });
 
   const coverageCalls = calls.filter((c) => c.args.includes("--experimental-test-coverage"));
   assert.equal(coverageCalls.length, 4, "expected one coverage invocation for each CI shard");
@@ -283,7 +286,7 @@ test(
         [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
         "status --porcelain": { status: 0, stdout: "" },
       });
-      const result = runPreflightCoverage(emptyRoot, { spawn });
+      const result = runPreflightCoverage(emptyRoot, { coverageFreeBytes: () => Number.MAX_SAFE_INTEGER,  spawn });
 
       assert.equal(result.ok, false, "an unreadable lcov must never let the overall run read as a pass");
       const instrumentation = result.steps.find((s) => s.name === "coverage-mode:instrumentation");
@@ -373,7 +376,7 @@ test("preflightCommand: --coverage ADDS the coverage-mode steps after the three 
   };
   let code: number;
   try {
-    code = await preflightCommand(["--coverage"], { spawn });
+    code = await preflightCommand(["--coverage"], { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
   } finally {
     console.log = originalLog;
   }
@@ -414,7 +417,7 @@ test("preflightCommand: --coverage is a recognised flag — passing it never tri
   };
   let code: number;
   try {
-    code = await preflightCommand(["--coverage"], { spawn });
+    code = await preflightCommand(["--coverage"], { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
   } finally {
     console.error = originalError;
   }
