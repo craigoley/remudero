@@ -31,7 +31,6 @@ import type { InterpretReplyResult } from "./reply-interpreter.js";
 import { isMap, isScalar, isSeq, parse as parseYaml, parseDocument, stringify as stringifyYaml } from "yaml";
 import { RmdError } from "./errors.js";
 import { loadMounts, mountsPath } from "./mounts.js";
-import { repoRoot } from "./repo-location.js";
 import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedModel } from "./worker-provider.js";
 
 /**
@@ -508,9 +507,10 @@ export interface DraftLaneIdentity {
   escalationEffort?: string;
 }
 
-/** Resolve the same synthesis mount and cash capability row that the draft spawn uses. */
-export function resolvedInboxDraftLane(): DraftLaneIdentity {
-  const mounts = loadMounts(mountsPath(repoRoot));
+/** Resolve the same synthesis mount and cash capability row that the draft spawn uses.
+ *  The daemon passes its installation root explicitly; direct library callers use their checkout. */
+export function resolvedInboxDraftLane(repoDir: string = process.cwd()): DraftLaneIdentity {
+  const mounts = loadMounts(mountsPath(repoDir));
   const mount = mounts.synthesis.inbox_draft;
   const leadDeployment = mount.provider === "cash"
     ? openWeightCandidatesForCapability(

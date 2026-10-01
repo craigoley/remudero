@@ -734,6 +734,7 @@ import {
   classifyProposal,
   draftAttemptKey,
   draftsDueOnDaemon,
+  resolvedInboxDraftLane,
   decideDraftDeferral,
   declinedReasonInLedger,
   type ProposalVerdictKind,
@@ -43821,7 +43822,8 @@ export function buildInboxDraftHook(
         log("inbox.draft_readiness_unavailable", { error: String((e as Error)?.message ?? e) });
       }
 
-      const due = draftsDueOnDaemon(proposals, drafts, attempts, DAEMON_DRAFT_BATCH_CAP, draftReadiness);
+      const draftLane = resolvedInboxDraftLane(repoRoot);
+      const due = draftsDueOnDaemon(proposals, drafts, attempts, DAEMON_DRAFT_BATCH_CAP, draftReadiness, draftLane);
       if (due.length === 0) return;
 
       // W1-T2561: NAME THE DEFERRAL, NEVER CAP SILENTLY. `draftsDueOnDaemon` now returns at most
@@ -43831,7 +43833,7 @@ export function buildInboxDraftHook(
       // tell a paced drain from a wedged one. This is a pure observation — a count of a set already
       // computed above, spawning nothing — and `deferred: 0` on an uncapped poll is a real reading,
       // not silence, so the row is written unconditionally.
-      const eligible = draftsDueOnDaemon(proposals, drafts, attempts, 0, draftReadiness);
+      const eligible = draftsDueOnDaemon(proposals, drafts, attempts, 0, draftReadiness, draftLane);
       log("inbox.draft_batch", {
         eligible: eligible.length,
         drafting: due.length,
@@ -43943,7 +43945,7 @@ export function buildInboxDraftHook(
         // change. This is the ONLY arm that skips the write; an ordinary failure still keys, so
         // W1-T192's throttle is untouched (its own test pins that).
         if (outcome.ok || !outcome.refused) {
-          nextAttempts[outcome.proposalId] = draftAttemptKey(proposal);
+          nextAttempts[outcome.proposalId] = draftAttemptKey(proposal, draftLane);
         } else {
           refusedThisBatch.push(outcome.proposalId);
         }
