@@ -66,9 +66,14 @@ function fixture(t: TestCtx): { root: string; stateDir: string; deps: ServeDeps;
     { ts: iso(4 * 3_600_000), step: "verdict", run_id: "r1", task_id: "W1-T1", verdict: "merged", pr_url: "https://github.com/craigoley/remudero/pull/1" },
     { ts: iso(3 * 3_600_000), step: "implement.done", run_id: "r1", billing_mode: "api", total_cost_usd: 1.5, served_model: "claude-opus-5-5", tokens: { input: 10, output: 5 } },
     { ts: iso(2 * 3_600_000), step: "run.start", run_id: "r2", task_id: "W1-T2", repo: "craigoley/remudero", run_type: "implement" },
+    { ts: iso(90 * 60_000), step: "escalation.issue_opened", task_id: "W1-T3", issue_url: "https://github.com/craigoley/remudero/issues/9", class: "BLOCKED" },
     { ts: iso(60_000), step: "daemon.tick" },
   ];
   writeFileSync(join(stateDir, "ledger.ndjson"), rows.map((r) => `${JSON.stringify({ host: "h1", ...r })}\n`).join(""));
+  // One open decision of each store-backed kind, so `decisions` items are validated, not an empty array.
+  mkdirSync(join(root, "plan", "feedback"), { recursive: true });
+  writeFileSync(join(root, "plan", "feedback", "fb-1.yaml"), `id: fb-1\nts: "${iso(3_600_000)}"\nraw: "which page first?"\nstatus: grilling\n`);
+  writeFileSync(join(root, "plan", "questions.ndjson"), `${JSON.stringify({ ts: iso(1_800_000), task: "W1-T2", question: "keep the alias?", current_assumption: "yes", impact_if_wrong: "low" })}\n`);
   const runs: Array<() => void> = [];
   const ledgerPath = join(stateDir, "ledger.ndjson");
   const planPath = join(root, "plan", "tasks.yaml");
@@ -146,6 +151,7 @@ test("every registered view body validates against its declared schema", async (
   assert.equal(((bodies.get("read-model")!.data as { shadow?: unknown[] }).shadow ?? []).length, 1, "the status body carries shadow readiness");
   const now = bodies.get("now")!.data as NowViewData;
   assert.ok(now.board.tasks.length >= 3 && now.recent.entries.length > 0 && now.recent.mergedToday.count === 1, JSON.stringify(now));
+  assert.deepEqual(now.decisions.map((d) => d.kind).sort(), ["escalation", "grill", "task_question"], JSON.stringify(now.decisions));
   assert.equal(now.health.rateLimitRemaining, 4300, "the gauge is rounded to two significant figures");
   const repos = bodies.get("repositories")!.data as RepositoriesData;
   assert.equal(repos.instances[0]?.summary?.repos.length, 1, JSON.stringify(repos));
@@ -183,7 +189,7 @@ test("a version 2 view body refuses every clock stamp version 1 carried in data"
   const read = async (path: string): Promise<{ version: number; data: Record<string, unknown> }> => (await (await fetch(`${url}${path}`, { headers: READ })).json()) as { version: number; data: Record<string, unknown> };
   const now = await read("/v1/views/now?instance=core");
   const repos = await read("/v1/views/repositories");
-  assert.deepEqual([now.version, repos.version], [2, 2]);
+  assert.deepEqual([now.version, repos.version], [3, 2]);
   const nowSchema = declaredBody("/v1/views/now", "GET", 200);
   const reposSchema = declaredBody("/v1/views/repositories", "GET", 200);
   // CONTROL: the served bodies pass, so each refusal below is the stamp's alone.
@@ -199,6 +205,7 @@ test("a version 2 view body refuses every clock stamp version 1 carried in data"
     { ...now, data: { ...now.data, board: { ...board, tasks: [{ ...task, elapsedMs: 1000 }] } } },
   ];
   assert.deepEqual(stamped.map((body) => violations(body, nowSchema).length), [1, 1, 1, 1]);
+  assert.equal(violations({ ...now, data: { ...now.data, questions: { count: 1 } } }, nowSchema).length, 1, "version 3 carries decisions, never the old count");
   const instances = repos.data.instances as Array<Record<string, unknown>>;
   const summary = instances[0]!.summary as Record<string, unknown>;
   assert.equal(violations({ ...repos, data: { ...repos.data, instances: [{ ...instances[0], summary: { ...summary, generated_at: iso(0) } }] } }, reposSchema).length, 1);

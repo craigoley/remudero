@@ -8,7 +8,7 @@
  * - `actions`: blocked PRs and merge holds with a structured `strike`, replacing the console's regex.
  * - `recent` and an exact `mergedToday`.
  * - `health`: the SELECTED instance's own host probes. Today's /now shows core's for every repository.
- * - `questions`: core only (feedback lives in core); other instances name why they have none.
+ * - `decisions`: every open thing the operator answers, each with the route that steers it (now-decisions.ts).
  *
  * GitHub facts come from the legacy gateway's persisted snapshot (ruling Q3), which now carries the
  * open half too, so the view adds no GitHub read of its own.
@@ -33,8 +33,19 @@ import { boardOpenSnapshotPath, boardSnapshotPath, createBoardSnapshotCache, OPE
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { deriveLastPoll, readDiskFreeBytes, readGhRateLimitRemaining } from "./daemon-health.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
-import { listFeedback } from "./feedback.js";
+import { feedbackDir, listFeedback, type FeedbackEntry } from "./feedback.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
+import {
+  capDecisions,
+  escalationClasses,
+  escalationDecisions,
+  grillDecisions,
+  questionStorePath,
+  readQuestionStore,
+  taskQuestionDecisions,
+  type NowDecision,
+  type QuestionStoreLine,
+} from "./now-decisions.js";
 import type { BoardPrRest } from "./open-prs-rest.js";
 import { loadPlanQuarantiningDuplicates, type Plan } from "./plan.js";
 import type { ReadModelDb } from "./read-model-db.js";
@@ -43,8 +54,8 @@ import { buildBatchedGithub, readLedgerLines, type BatchedPr, type GitHub } from
 import type { ViewSource } from "./views.js";
 
 export const NOW_VIEW_NAME = "now";
-/** 2: every clock stamp left `data` (the envelope and `sources` carry them), so the ETag moves only with content. */
-export const NOW_VIEW_VERSION = 2;
+/** 2: every clock stamp left `data`. 3: `decisions[]`, each with its answer route and tier, replaced `questions`' count (P4-T08). */
+export const NOW_VIEW_VERSION = 3;
 /** Re-materialize at least this often with no new row: `elapsedMs`, the liveness bound and the 6 h cooldown move with the clock. */
 export const NOW_REFRESH_MS = 30_000;
 /** The host probes' cadence (design §3.5), per instance. */
@@ -136,8 +147,15 @@ export interface NowViewData {
   actions: NowAction[];
   recent: { entries: Array<{ ts: string; verb: string; taskId: string; title: string; detail?: string; costUsd?: number; prUrl?: string }>; mergedToday: { count: number; day: string } };
   health: NowHealth;
-  questions: { count: number } | { reason: string };
+  decisions: NowDecision[];
+  /** How many open decisions past the cap `decisions` leaves out. */
+  decisionsMore?: number;
+  /** Why a decision source was not read for this instance, by kind; its decisions are then absent, never zero. */
+  decisionsReasons?: Partial<Record<"grill" | "task_question", string>>;
 }
+
+/** The `decisions` half of one instance's body. */
+export type NowDecisionsData = Pick<NowViewData, "decisions" | "decisionsMore" | "decisionsReasons">;
 
 const RUNNING_STATUSES = new Set(["running", "fixing", "review", "diagnosing"]);
 
@@ -287,7 +305,7 @@ export function assembleNowView(input: {
   plan: Plan;
   recent: ReturnType<typeof computeRecentActivity>;
   health: NowHealth;
-  questions: NowViewData["questions"];
+  decisions: NowDecisionsData;
   nowMs: number;
 }): NowViewData {
   const { snapshot } = input;
@@ -321,7 +339,7 @@ export function assembleNowView(input: {
       mergedToday: mergedTodayCount(input.rows, input.plan, input.nowMs),
     },
     health: input.health,
-    questions: input.questions,
+    ...input.decisions,
   };
 }
 
@@ -372,6 +390,15 @@ function mtimeOf(path: string): number | undefined {
 
 const NO_PACER = { wait(): void {}, recordResult(): void {} };
 
+/** A task's newest `panel.question_answered` fact time, by its task index: the route ledgers one even when its store write failed. */
+function answeredByFact(db: ReadModelDb): (taskId: string) => string | undefined {
+  const query = db.prepare("SELECT max(ts) AS ts FROM fact WHERE task_id = ? AND step = 'panel.question_answered'");
+  return (taskId) => {
+    const ts = query.get(taskId)?.ts;
+    return typeof ts === "string" ? ts : undefined;
+  };
+}
+
 /** A gateway over the legacy gateway's persisted snapshot (ruling Q3): open PRs, closed PRs and issues, no GitHub read. */
 export function snapshotGithub(root: string, owner: string, repo: string, clock: Clock = systemClock): { github: GitHub; generation: string; source: Omit<ViewSource, "name"> } {
   const closedCache = createBoardSnapshotCache(root, owner, repo);
@@ -418,7 +445,8 @@ export interface NowViewOptions {
     rateLimit?: () => number | undefined;
     diskFree?: (path: string) => number | undefined;
   };
-  countQuestions?: (instance: NowInstance) => number;
+  /** Core's feedback entries parked `grilling`; `listFeedback` over its `feedbackRoot` by default. */
+  listGrilling?: (instance: NowInstance) => FeedbackEntry[];
 }
 
 /** The slice of the worker's per-instance state this view reads (structurally the worker's `ReadModelInstanceState`). */
@@ -458,6 +486,7 @@ interface Held {
   probe?: NowHostProbe;
   healthAt: number;
   members: Record<string, string[]>;
+  decisionsKey: string;
 }
 
 /** The legacy side of one shadow sample (view-shadow.ts): what /now shows today, in the view's shape. */
@@ -502,14 +531,35 @@ export function createNowView(opts: NowViewOptions): {
     return snapshotGeneration(dirname(instance.ledgerDir), owner!, repo!);
   };
   const probeHost = (instance: NowInstance, isCore: boolean): NowHostProbe => defaultProbeHost(instance, isCore, clock, opts.hostProbe);
-  const countQuestions = opts.countQuestions ?? ((instance: NowInstance) => listFeedback(instance.feedbackRoot!, { status: "grilling" }).length);
+  const listGrilling = opts.listGrilling ?? ((instance: NowInstance) => listFeedback(instance.feedbackRoot!, { status: "grilling" }));
+  /** Core's feedback dir and question store, so an answer landing in either re-materializes at once. */
+  const decisionsKey = (instance: NowInstance): string =>
+    instance.name === core && instance.feedbackRoot ? `${mtimeOf(feedbackDir(instance.feedbackRoot)) ?? "-"}:${mtimeOf(questionStorePath(instance.feedbackRoot)) ?? "-"}` : "none";
+  /** One instance's open decisions: grill and task questions from core's stores, escalations from its own board. */
+  const decisionsOf = (instance: NowInstance, db: ReadModelDb, snapshot: BoardSnapshot, rows: ReadonlyArray<Row>): NowDecisionsData => {
+    const reasons: NonNullable<NowViewData["decisionsReasons"]> = {};
+    const all = escalationDecisions(instance.name, snapshot.tasks, escalationClasses(rows));
+    if (instance.name !== core) {
+      reasons.grill = "feedback questions live in core only";
+      reasons.task_question = "the question store core answers is core's own";
+    } else if (!instance.feedbackRoot) {
+      reasons.grill = reasons.task_question = "no feedback root is configured";
+    } else {
+      all.push(...grillDecisions(instance.name, listGrilling(instance)));
+      const store = readQuestionStore(instance.feedbackRoot);
+      if ("reason" in store) reasons.task_question = store.reason;
+      else all.push(...taskQuestionDecisions(instance.name, store.lines as QuestionStoreLine[], answeredByFact(db), snapshot.tasks));
+    }
+    return { ...capDecisions(all), ...(Object.keys(reasons).length > 0 ? { decisionsReasons: reasons } : {}) };
+  };
 
   function materializeOne(instance: NowInstance, state: NowSlotState, db: ReadModelDb, now: number): { key: string; data: NowViewData; sources: ViewSource[] } | undefined {
     const pk = planKey(instance);
     const gk = githubKey(instance);
     let h = held.get(instance.name);
     if (h && h.db !== db) h = undefined;
-    const due = !h || h.generation !== state.generation || h.planKey !== pk || h.githubKey !== gk || now - h.at >= NOW_REFRESH_MS;
+    const dk = decisionsKey(instance);
+    const due = !h || h.generation !== state.generation || h.planKey !== pk || h.githubKey !== gk || h.decisionsKey !== dk || now - h.at >= NOW_REFRESH_MS;
     if (!due) return undefined;
     const cachedPlan = planCache.get(instance.name);
     const plan = cachedPlan?.key === pk ? cachedPlan.plan : readPlan(instance);
@@ -521,7 +571,7 @@ export function createNowView(opts: NowViewOptions): {
         db, ledgerPath, readPlan: () => planCache.get(instance.name)!.plan, github: gateway.github, githubGeneration: () => gk, clock, instance: instance.name,
         log: (step, extra) => log(step, { instance: instance.name, ...extra }),
       });
-      h = { db, board, recent: createRecentActivityCache(), generation: -1, planKey: pk, plan, githubKey: gk, gateway, at: now, healthAt: Number.NEGATIVE_INFINITY, members: {} };
+      h = { db, board, recent: createRecentActivityCache(), generation: -1, planKey: pk, plan, githubKey: gk, gateway, at: now, healthAt: Number.NEGATIVE_INFINITY, members: {}, decisionsKey: dk };
       held.set(instance.name, h);
     }
     h.board.update({ force: true });
@@ -534,9 +584,9 @@ export function createNowView(opts: NowViewOptions): {
       h.probe = probeHost(instance, isCore);
       h.healthAt = now;
     }
-    const questions = isCore && instance.feedbackRoot ? { count: countQuestions(instance) } : { reason: isCore ? "no feedback root is configured" : "feedback questions live in core only" };
-    const data = assembleNowView({ instance: instance.name, snapshot, rows, plan, recent: computeRecentActivity(deps, h.recent, 20), health: h.probe.health, questions, nowMs: now });
-    Object.assign(h, { generation: state.generation, planKey: pk, plan, at: now, members: nowCountMembers(snapshot.tasks) });
+    const decisions = decisionsOf(instance, db, snapshot, rows);
+    const data = assembleNowView({ instance: instance.name, snapshot, rows, plan, recent: computeRecentActivity(deps, h.recent, 20), health: h.probe.health, decisions, nowMs: now });
+    Object.assign(h, { generation: state.generation, planKey: pk, plan, at: now, members: nowCountMembers(snapshot.tasks), decisionsKey: dk });
     const sources: ViewSource[] = [
       ...(opts.ledgerSource ? [opts.ledgerSource(state, now)] : []),
       { name: `github:${instance.name}`, ...gateway.source },
@@ -554,7 +604,7 @@ export function createNowView(opts: NowViewOptions): {
      * The shadow comparator's legacy side for one key: GET /v1/status's board and PR queue over the
      * instance's LIVE FILE only, plus a fresh host probe of that instance. The probe's gauges are taken
      * from the view when both probes read them, because two samples moments apart always differ; a gauge
-     * one side could not read, or a different reason, still diffs. Actions, recent and questions have
+     * one side could not read, or a different reason, still diffs. Actions, recent and decisions have
      * no separate legacy computation and are carried from the view.
      */
     legacy(key, now, view) {
@@ -567,7 +617,8 @@ export function createNowView(opts: NowViewOptions): {
       const rows = readLedgerLines(ledgerPath);
       const deps = { plan: h.plan, ledgerPath, github: h.gateway.github, readLedger: () => rows, now: () => now };
       const snapshot = computeBoardSnapshot(deps);
-      const legacy = assembleNowView({ instance: name, snapshot, rows, plan: h.plan, recent: [], health: mine.health, questions: mine.questions, nowMs: now });
+      const decisions: NowDecisionsData = { decisions: mine.decisions, ...(mine.decisionsMore ? { decisionsMore: mine.decisionsMore } : {}), ...(mine.decisionsReasons ? { decisionsReasons: mine.decisionsReasons } : {}) };
+      const legacy = assembleNowView({ instance: name, snapshot, rows, plan: h.plan, recent: [], health: mine.health, decisions, nowMs: now });
       const probe = probeHost(instance, name === core).health;
       const gauge = (field: "diskFreeBytes" | "rateLimitRemaining"): Partial<NowHealth> =>
         probe[field] === undefined ? {} : { [field]: mine.health[field] ?? probe[field] };
