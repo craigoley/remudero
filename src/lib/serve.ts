@@ -2990,7 +2990,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   let viewEventsHandover: (reason: string) => void = () => {};
   const wakeCounters = createWakeCounters();
   const routeReads = createRouteReadRollup({ stateDir: dirname(deps.ledgerPath), log: deps.log, write: (row) => deps.log?.(ROUTE_READS_STEP, { ...row }) });
-  const stopRouteReads = routeReads.start();
+  let stopRouteReads = (): void => {};
   const stopWakeSummary = startWakeSummaryFlush({
     counters: wakeCounters,
     clock: systemClock,
@@ -3103,7 +3103,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   server.on("close", prewarm.stop);
   if (keepWarm) server.once("listening", keepWarm.start);
   server.on("close", stopWakeSummary);
-  server.on("close", stopRouteReads);
+  server.once("listening", () => (stopRouteReads = routeReads.start()));
+  server.on("close", () => stopRouteReads());
   server.once("listening", analyticsCache.start);
   server.on("close", analyticsCache.stop);
   server.once("listening", () => { for (const cache of routeAssembly.instanceAnalyticsCaches) cache.start(); });
