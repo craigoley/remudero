@@ -1,0 +1,79 @@
+- id: W1-T5117
+  title: "RATCHET-REPAIR ADMISSION TRUSTS A COMPOSITE CHECK NAME, NOT ITS FAILING STEP — the comment-load-ratchet check run is the AND of three steps, so an expiring-fixture-census or console-parity red is advertised as a recorded-number repair the baseline generator cannot make"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 24.00
+  risk: high
+  band_meaning: span
+  origin: "re-filed 2026-10-01 from the never-filed W1-T3455 shard (branch plan/W1-T3455-log-proven-ratchet-admission, 2026-09-12), re-verified against origin/main 1247a5663; operator ruling 2026-10-01 (verify, file real ones)"
+  plan_refs: ["W1-T2998", "W1-T3289", "W1-T4004", "W1-T4399"]
+  files:
+    - src/lib/sweep.ts
+    - test/ratchet-repair-admission-reads-the-failing-step.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    THE INCIDENT (2026-09-12, from the original shard). PRs #5285, #5286 and #5289 were red on
+    `comment-load-ratchet`. The sweep's dispatch reason named `npm run comment-load-ratchet` as the
+    deterministic remedy. #5285's real job log showed the comment-load step printing `OK`, and the
+    NEXT step, the expiring-fixture census, failing on a hard-coded date. Recording
+    scripts/comment-load-baseline.json could not fix it.
+
+    THE CHECK IS STILL COMPOSITE at origin/main 1247a5663. Since W1-T4399, .github/workflows/ci.yml
+    runs the light gates as steps of the `commitlint` job and posts each check run itself:
+    `report "comment-load-ratchet"` takes the outcomes of THREE steps: comment-load-ratchet,
+    expiring-fixture-census and console-parity. Any one failing turns the `comment-load-ratchet`
+    check red.
+
+    REPRODUCED at origin/main 1247a5663 on 2026-10-01. A PR red on `comment-load-ratchet`, whose
+    one CiFailure's `logTail` reads `comment-load-ratchet: OK` then
+    `expiring-fixture-census: BLOCKED ...`, gets:
+      - `recordableRatchetRepairFor(pr)` returns `["comment-load-ratchet"]`;
+      - `ratifiedBaselineRatchetRepairFor(pr)` (W1-T4004) returns `["comment-load-ratchet"]`.
+    Both decide from `redRequiredChecks` and `CiFailure.name` alone and never read `logTail`.
+
+    CONSEQUENCE TODAY. `recordableRatchetRepairEnabled` ships `false` (plan/policy.yaml), so the
+    only live effect is the `blocked-fixable` reason text. It tells the operator and the ci-log
+    worker that the whole fix is a recorded number, which is false. If the policy is enabled, the
+    W1-T4004 executor would run the comment-load generator on a PR whose comment-load step already
+    passed. The generator's own signal is green, so its no-record verifier would not catch it.
+  design: |
+    Make admission EVIDENCE-backed in both predicates. Keep the registries as the authority for
+    which generators are candidates. Each admitted generator must also be supported by a bounded,
+    exact, generator-owned diagnostic in the corresponding `CiFailure.logTail`, for example the
+    comment-load ratchet's own BLOCKED line.
+      - Not proof: a job or check name alone, a generic "TO FIX", another step's remedy, an empty
+        or unreadable tail, or a marker belonging to a different generator.
+      - Detectors are explicit per generator. Never infer from package scripts or parse step names
+        as prose.
+    Missing proof DECLINES to the ordinary ci-log path, which already carries the real tail.
+    Preserve all-or-nothing: one unproven failure in a mixed red set declines every deterministic
+    repair. A direct, proven diagnostic stays admissible, so this is not a blanket disable.
+    Keep `recordableRatchetRepairEnabled` false. Change no workflow topology, generator script,
+    registry entry, worker prompt, review policy or merge policy.
+  acceptance:
+    - claim: "a comment-load-ratchet check whose comment-load step passed while the expiring-fixture census failed is not admitted as a recordable repair by either predicate"
+      proof: "unit test: a composite comment-load red with a passing comment-load step declines ratchet repair"
+    - claim: "a generator-owned exact diagnostic still admits its matching generator"
+      proof: "unit test: a proven comment-load diagnostic still admits the comment-load generator"
+    - claim: "empty or unreadable or mismatched or generic log evidence declines rather than admitting any generator"
+      proof: "unit test: insufficient ratchet log evidence declines every generator"
+    - claim: "one unproven failure in a mixed red set declines every deterministic repair"
+      proof: "unit test: one unproven ratchet failure declines the whole red set"
+  falsifier: |
+    Replay #5285's evidence: one CiFailure named `comment-load-ratchet` whose logTail reads
+    `comment-load-ratchet: OK` then an expiring-fixture-census BLOCKED line. At filing, both
+    predicates return `["comment-load-ratchet"]` from the name alone. If both already return
+    undefined, close this task without implementation. Mutation: remove the evidence check; the
+    composite assertion must fail.
+  note: |
+    ID PROVENANCE: reserved fresh with `rmd next-task-id --branch` from the operator checkout. The
+    old id W1-T3455 was never filed on main; it is not reused. The old branch is kept.
+    SCOPE CHANGE from the old shard: it named only `recordableRatchetRepairFor`. W1-T4004 has since
+    added `ratifiedBaselineRatchetRepairFor`, the predicate the live executor actually uses, and it
+    has the same defect, so both are in scope.
+    PRIORITY 3: the policy ships disabled, so today the harm is a misleading dispatch reason.
