@@ -37,6 +37,7 @@ import type { BoardPrRest } from "../src/lib/open-prs-rest.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import { acquireLease, type ReadModelDb } from "../src/lib/read-model-db.js";
 import { createReadModelTicker, readModelSwitchesPath, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
+import { HOST_PROBE_BUDGET_MS, PLAN_BUDGET_MS } from "../src/lib/view-freshness.js";
 import { buildBatchedGithub, DEFAULT_LIVENESS_BOUND_MS, readLedgerLines, type GitHub } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { SHADOW_CLASSIFICATIONS, VIEW_SHADOW_DIFF_STEP } from "../src/lib/view-shadow.js";
@@ -309,7 +310,9 @@ test("the now view shows open pull requests from the persisted snapshot", (t) =>
   assert.deepEqual(data.prQueue.rows.map((r) => [r.prNumber, r.taskId]), [[9001, "W1-T7"]]);
   assert.equal(data.board.tasks.find((x) => x.taskId === "W1-T7")?.prUrl, "https://github.com/o/r/pull/9001");
   const githubSource = bodies[0]!.sources.find((s) => s.name === "github:console");
-  assert.deepEqual(githubSource, { name: "github:console", asOf: new Date(T0 + OPEN_SNAPSHOT_RESAVE_MS).toISOString(), state: "fresh" });
+  assert.deepEqual(githubSource, {
+    name: "github:console", asOf: new Date(T0 + OPEN_SNAPSHOT_RESAVE_MS).toISOString(), state: "fresh", kind: "github", instance: "console", budgetMs: NOW_GITHUB_STALE_MS, lagMs: 0,
+  });
   clock.set(T0 + OPEN_SNAPSHOT_RESAVE_MS + NOW_GITHUB_STALE_MS + 1_000);
   assert.match(String(snapshotGithub(instanceRoot, "o", "r", clock).source.reason), /last saved 181 s ago/);
 });
@@ -457,9 +460,22 @@ test("the default seams read each instance's own plan and snapshot", (t) => {
   const bodies = view.materialize({ ...x, instances: [...x.instances, { ...x.instances[0]!, state: { ...x.instances[0]!.state, instance: "x" } }] });
   const data = only(bodies);
   assert.deepEqual(data.board.tasks.map((r) => r.taskId), ["W1-T1"]);
-  assert.deepEqual(bodies[0]!.sources.map((s) => `${s.name}=${s.state}`), ["ledger:core=fresh", "github:core=stale", "plan:core=fresh", "host-probe:core=fresh"]);
-  assert.equal(bodies[0]!.sources.find((s) => s.name === "plan:core")?.asOf, new Date(statSync(planPath).mtimeMs).toISOString());
+  // The default plan judge reads git, and this checkout is no repository: unknowable, never assumed fresh.
+  assert.deepEqual(bodies[0]!.sources.map((s) => `${s.name}=${s.state}`), ["ledger:core=fresh", "github:core=stale", "plan:core=unavailable", "host-probe:core=fresh"]);
+  assert.match(String(bodies[0]!.sources.find((s) => s.name === "plan:core")?.reason), /cannot compare the plan's checkout with origin\/main/);
   assert.match(String(logged[0]?.error), /names no repository/);
+});
+
+test("the now view judges its plan and host probe sources instead of calling them fresh", (t) => {
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { planBehind: () => ({ commits: 1, sinceMs: T0 - PLAN_BUDGET_MS - 1_000 }) });
+  const sources = view.materialize(ctxOf(clock, [core]))[0]!.sources;
+  const plan = sources.find((s) => s.name === "plan:core");
+  assert.deepEqual({ state: plan?.state, phase: plan?.phase, reason: plan?.reason, budgetMs: plan?.budgetMs }, { state: "stale", phase: "behind", reason: "plan 1 merge behind origin/main", budgetMs: PLAN_BUDGET_MS });
+  const probe = sources.find((s) => s.name === "host-probe:core");
+  assert.deepEqual([probe?.state, probe?.kind, probe?.budgetMs, probe?.asOf], ["fresh", "host-probe", HOST_PROBE_BUDGET_MS, new Date(T0).toISOString()]);
 });
 
 test("merged today is exact: one per task and pull request, today and in the plan only", () => {

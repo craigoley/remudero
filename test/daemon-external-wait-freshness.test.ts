@@ -162,7 +162,7 @@ function workerResult(over: Partial<WorkerResult>): WorkerResult {
   };
 }
 
-function writeOfflineGitFixture(root: string): { advanceOrigin: () => void; cleanup: () => void } {
+function writeOfflineGitFixture(root: string): { advanceOrigin: (file?: string, subject?: string) => void; cleanup: () => void } {
   const origin = gitRepo({ bare: true, kind: "freshness-handoff-origin" });
   const seed = gitRepo({ seedCommit: false, kind: "freshness-handoff-seed" });
   seed.addRemote("origin", origin.dir);
@@ -176,11 +176,11 @@ function writeOfflineGitFixture(root: string): { advanceOrigin: () => void; clea
   execFileSync("git", ["-C", repo, "config", "user.email", "test@example.invalid"]);
   execFileSync("git", ["-C", repo, "config", "user.name", "test"]);
   return {
-    advanceOrigin: () => {
-      mkdirSync(join(seed.dir, "src"), { recursive: true });
-      writeFileSync(join(seed.dir, "src", "freshness.ts"), "export const fresh = true;\n");
+    advanceOrigin: (file = "src/freshness.ts", subject = "advance source for freshness handoff") => {
+      mkdirSync(join(seed.dir, file, ".."), { recursive: true });
+      writeFileSync(join(seed.dir, file), "export const fresh = true;\n");
       seed.git("add", "-A");
-      seed.git("commit", "-q", "-m", "advance source for freshness handoff");
+      seed.git("commit", "-q", "-m", subject);
       seed.git("push", "-q", "origin", "main");
     },
     cleanup: () => {
@@ -321,18 +321,32 @@ test("DAEMON WIRING: the production runOne supplies a material freshness handoff
     assert.equal(code, 0, "the composition root reaches the injected daemon loop");
     assert.ok(captured, "the composition root supplies its real runOne closure");
     const oldSha = execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const originHead = () =>
+      execFileSync("git", ["-C", repoRoot, "ls-remote", "origin", "refs/heads/main"], { encoding: "utf8" }).trim().split(/\s+/)[0];
     cleanupGit.advanceOrigin();
-    const newSha = execFileSync("git", ["-C", repoRoot, "ls-remote", "origin", "refs/heads/main"], { encoding: "utf8" })
-      .trim()
-      .split(/\s+/)[0];
+    const lowSha = originHead();
     const result = await captured.runOne("T-FRESHNESS-HANDOFF");
     assert.equal(result.verdict, "handed_off");
     assert.ok(forwarded, "the daemon runOne invokes its configured runTask implementation");
-    const freshness = forwarded.externalWaitFreshness?.();
+    assert.equal(
+      forwarded.externalWaitFreshness?.(),
+      undefined,
+      "a low-weight advance a busy daemon defers does not end the run's CI wait (W1-T5037)",
+    );
+    cleanupGit.advanceOrigin("src/lib/daemon.ts", "advance the daemon loop");
+    const newSha = originHead();
     assert.deepEqual(
-      freshness,
-      { stale: true, oldSha, newSha, changes: [{ sha: newSha, subject: "advance source for freshness handoff", files: ["src/freshness.ts"] }] },
-      "only a clean material origin advance crosses the daemon handoff boundary, carrying the commit it advanced by (W1-T4945)",
+      forwarded.externalWaitFreshness?.(),
+      {
+        stale: true,
+        oldSha,
+        newSha,
+        changes: [
+          { sha: newSha, subject: "advance the daemon loop", files: ["src/lib/daemon.ts"] },
+          { sha: lowSha, subject: "advance source for freshness handoff", files: ["src/freshness.ts"] },
+        ],
+      },
+      "an advance that restarts a busy daemon crosses the handoff boundary, carrying the commits it advanced by (W1-T4945)",
     );
   } finally {
     if (previousHome === undefined) delete process.env.HOME;

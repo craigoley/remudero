@@ -24,11 +24,30 @@ import { systemClock, type Clock } from "./clock.js";
 import { ifNoneMatchHits } from "./console-snapshot-cache.js";
 import type { Route } from "./service.js";
 
+/** What a view source is (the `<kind>:<instance>` prefix of its name); its budget is in view-freshness.ts. */
+export type SourceKind =
+  | "ledger" | "read-model" | "github" | "plan" | "host-probe" | "analytics" | "inbox-store" | "feedback-store"
+  | "question-store" | "incidents-store" | "git" | "account" | "registry" | "repositories";
+
+/** Why a view source is not fresh. */
+export type SourcePhase = "warming" | "catching_up" | "refreshing" | "behind" | "failed" | "elsewhere";
+
+/** One input a view was computed from. `reason` is display prose only; the structured fields say why (view-freshness.ts). */
 export interface ViewSource {
   name: string;
   asOf: string | null;
   state: "fresh" | "stale" | "unavailable";
   reason?: string;
+  kind?: SourceKind;
+  instance?: string;
+  /** Why the source is not fresh. */
+  phase?: SourcePhase;
+  /** How far behind it is, measured when it was judged. */
+  lagMs?: number;
+  /** How long until it is caught up, when that is known. */
+  etaMs?: number;
+  /** The bound it is judged against, so a client can age it between events. */
+  budgetMs?: number;
 }
 
 export interface ViewDefinition<T = unknown> {

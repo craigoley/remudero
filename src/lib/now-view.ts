@@ -16,8 +16,9 @@
  * DARK: the view materializes only while `switches.views.now` reads `shadow` or `serve`, and no route
  * serves it yet (P1-12 declares the route, P1-14 compares it).
  */
+import { execFileSync } from "node:child_process";
 import { statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import {
   computeBoardSnapshot,
   computeRecentActivity,
@@ -51,6 +52,7 @@ import { loadPlanQuarantiningDuplicates, type Plan } from "./plan.js";
 import type { ReadModelDb } from "./read-model-db.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { buildBatchedGithub, readLedgerLines, type BatchedPr, type GitHub } from "./status.js";
+import { judgeSource, PLAN_BUDGET_MS } from "./view-freshness.js";
 import type { ViewSource } from "./views.js";
 
 export const NOW_VIEW_NAME = "now";
@@ -447,6 +449,48 @@ export interface NowViewOptions {
   };
   /** Core's feedback entries parked `grilling`; `listFeedback` over its `feedbackRoot` by default. */
   listGrilling?: (instance: NowInstance) => FeedbackEntry[];
+  /** How far each instance's checkout is behind origin/main's plan; production reads git ({@link gitPlanBehind}). */
+  planBehind?: (instance: NowInstance) => PlanBehind;
+}
+
+/** How many plan-touching commits on origin/main a checkout lacks, and the oldest one's time; or why that is unknowable. */
+export type PlanBehind = { commits: number; sinceMs?: number } | { reason: string };
+
+/**
+ * Compares a plan's checkout with its origin/main. The commit log is read only when the pair of
+ * heads moved since `memo` last saw them, so a materialize costs one `git rev-parse` per instance.
+ */
+export function gitPlanBehind(
+  planPath: string,
+  memo: { heads?: string; result?: PlanBehind } = {},
+  git: (args: string[]) => string = (args) => execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+): PlanBehind {
+  const dir = dirname(dirname(planPath));
+  try {
+    const heads = git(["-C", dir, "rev-parse", "HEAD", "origin/main"]).trim();
+    if (memo.heads === heads && memo.result) return memo.result;
+    const [head, main] = heads.split("\n");
+    const paths = [relative(dir, planPath), relative(dir, join(dirname(planPath), "tasks.d"))];
+    const times = head === main ? [] : git(["-C", dir, "log", "--format=%ct", `${head}..${main}`, "--", ...paths]).split("\n").filter(Boolean).map(Number);
+    const result: PlanBehind = times.length === 0 ? { commits: 0 } : { commits: times.length, sinceMs: Math.min(...times) * 1000 };
+    Object.assign(memo, { heads, result });
+    return result;
+  } catch (error) {
+    return { reason: `cannot compare the plan's checkout with origin/main: ${String((error as Error).message).split("\n")[0]}` };
+  }
+}
+
+/**
+ * The `plan:<i>` source. A checkout as new as origin/main's plan is fresh as of now; one behind it is
+ * as old as the oldest plan commit it lacks, which the budget table judges, so a checkout behind for
+ * longer than {@link PLAN_BUDGET_MS} reads stale, phase `behind`.
+ */
+export function planSource(name: string, behind: PlanBehind, now: number): ViewSource {
+  if ("reason" in behind) return judgeSource({ name, asOf: null, state: "unavailable", reason: behind.reason }, now);
+  if (behind.sinceMs === undefined) return judgeSource({ name, asOf: fixedClock(now).iso(), state: "fresh" }, now);
+  const reason = `plan ${behind.commits} merge${behind.commits === 1 ? "" : "s"} behind origin/main`;
+  const judged = judgeSource({ name, asOf: fixedClock(behind.sinceMs).iso(), state: "fresh" }, now);
+  return judged.state === "fresh" ? judged : { ...judged, reason };
 }
 
 /** The slice of the worker's per-instance state this view reads (structurally the worker's `ReadModelInstanceState`). */
@@ -552,6 +596,14 @@ export function createNowView(opts: NowViewOptions): {
     }
     return { ...capDecisions(all), ...(Object.keys(reasons).length > 0 ? { decisionsReasons: reasons } : {}) };
   };
+  const behindMemo = new Map<string, { heads?: string; result?: PlanBehind }>();
+  const planBehind = opts.planBehind ?? ((instance: NowInstance): PlanBehind => {
+    const path = nowPlanPath(instance);
+    if (!path) return { reason: `instance ${instance.name} names no repository, so it has no plan` };
+    const memo = behindMemo.get(instance.name) ?? {};
+    behindMemo.set(instance.name, memo);
+    return gitPlanBehind(path, memo);
+  });
 
   function materializeOne(instance: NowInstance, state: NowSlotState, db: ReadModelDb, now: number): { key: string; data: NowViewData; sources: ViewSource[] } | undefined {
     const pk = planKey(instance);
@@ -589,9 +641,9 @@ export function createNowView(opts: NowViewOptions): {
     Object.assign(h, { generation: state.generation, planKey: pk, plan, at: now, members: nowCountMembers(snapshot.tasks), decisionsKey: dk });
     const sources: ViewSource[] = [
       ...(opts.ledgerSource ? [opts.ledgerSource(state, now)] : []),
-      { name: `github:${instance.name}`, ...gateway.source },
-      { name: `plan:${instance.name}`, asOf: fixedClock(Number(pk.split(":")[0]) || now).iso(), state: "fresh" },
-      { name: `host-probe:${instance.name}`, asOf: h.probe.sampledAt, state: "fresh" },
+      judgeSource({ name: `github:${instance.name}`, ...gateway.source }, now),
+      planSource(`plan:${instance.name}`, planBehind(instance), now),
+      judgeSource({ name: `host-probe:${instance.name}`, asOf: h.probe.sampledAt, state: "fresh" }, now),
     ];
     return { key: `instance=${encodeURIComponent(instance.name)}`, data, sources };
   }
