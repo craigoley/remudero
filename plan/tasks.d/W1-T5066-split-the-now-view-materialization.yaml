@@ -1,0 +1,46 @@
+- id: W1-T5066
+  title: "THE NOW VIEW IS THE LARGEST TICK UNIT — after #8254 every read-model tick over the 2.5 s pass comes from now, up to 2.4 s per instance; build it in bounded prepare steps (plan, board update, snapshot, host probe, questions, recent) so no single unit exceeds the pass"
+  repo: remudero
+  depends_on: []
+  dispatch_hold: true
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "2026-10-01 FOLLOWUPS-1 finding on #8254 (core-console architecture Phase 4 follow-up a)"
+  files:
+    - src/lib/now-view.ts
+    - test/now-view-bounded-steps.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-01 (FOLLOWUPS-1, #8254): splitting the cold repositories build and the nav-badge fold
+    into bounded steps cut the max tick from 7.29 s to 3.91 s and the largest nav-badge unit from 5.68 s to
+    58 ms. Every tick still over 2.5 s comes from now, at up to 2.4 s per instance: createNowView's
+    materializeOne loads the plan, force-updates the board projection, computes the board snapshot, probes the
+    host, counts questions and computes recent in one unit.
+  design: |
+    Give the now view a prepare(ctx, more) (the hook #8254 adds to ReadModelView): one step per stage per
+    instance, held in the view's per-instance state, so materialize builds a body only when every stage of
+    that instance is done. The plan parse (about 1.06 s) is one step on its own and is reused while its
+    mtime key holds. The body is deep-equal to an unstepped build. Unit cost is logged per stage.
+  acceptance:
+    - claim: "the now view builds an instance across bounded steps within the pass budget"
+      proof: 'grep: test("W1-T5066: the now view builds an instance across bounded steps within the pass budget" in test/now-view-bounded-steps.test.ts'
+    - claim: "a stepped now body equals an unstepped build"
+      proof: 'grep: test("W1-T5066: a stepped now body equals an unstepped build" in test/now-view-bounded-steps.test.ts'
+  falsifier: |
+    Run every stage in one prepare step: with a stage clock of 600 ms per stage the unit exceeds the pass and
+    the first proof fails.
+  note: |
+    DISPATCH HOLD: waits for (1) #8254 (run-unfiled, adds the ReadModelView prepare hook) and (2) the
+    Phase 4 critical-path P4-T02 (structured freshness) and P4-T08 (now v3 decisions), which rewrite
+    now-view.ts and are hand-built on run-unfiled branches with no plan id. RELEASE: one plan amendment
+    deleting dispatch_hold once all three merge (tracked in arch-plan.md, Phase 4).
+    Design: ~/Remudero/.session-scratch/arch-phase4-design.md §7.1.
+    Scope-time checks 2026-10-01: no run-W1-T5048..5066 branch on origin; no origin/main commit names
+    these ids; no plan record on origin/main or an open PR head covers this change. Reserved from the
+    operator checkout for this filing branch.

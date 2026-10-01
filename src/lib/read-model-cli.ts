@@ -252,7 +252,7 @@ export function reapReadModelGenerations(stateDir: string, instance: string, clo
     if (now - statSync(path).mtimeMs < graceMs) continue;
     const lease = peekLease(path);
     if (lease && lease.expiresMs > now) continue;
-    for (const suffix of ["", "-wal", "-shm"]) rmSync(path + suffix, { force: true });
+    for (const suffix of ["", "-wal", "-shm", ".dirty"]) rmSync(path + suffix, { force: true });
     removed.push(name);
   }
   return removed;

@@ -229,3 +229,67 @@ test("W1-T3996: loadCreditStore round-trips an invalidated entry off real JSON, 
     "sanity: a missing file still degrades to the documented empty store",
   );
 });
+
+test("a reviewed plan-only filing at the merged head cannot keep durable branch credit", () => {
+  const taskId = "W9-T8212";
+  const url = "u/8212";
+  const head = "plan-only-head";
+  let store: CreditStore = recordCredit({}, taskId, {
+    source: "head-branch", prUrl: url, prNumber: 8212, prState: "MERGED",
+  });
+  const pr = { number: 8212, url, state: "MERGED", headRefName: `run-${taskId}-123`, headRefOid: head };
+  const github = {
+    ...noLiveEvidence(),
+    prByRef: () => pr,
+    findMergedByHeadBranch: () => [pr],
+  } as GitHub;
+  const projection = deriveStatus(task(taskId), {
+    ledgerPath: "/tmp/does-not-exist/ledger.ndjson",
+    github,
+    readLedger: () => [{ step: "review.posted", pr_url: url, head_sha: head, plan_only: true }],
+    readCreditStore: () => store,
+    writeCreditStore: (next) => { store = next; },
+  });
+  assert.equal(projection.merged, false);
+  assert.equal(projection.status, "queued");
+  assert.equal(store[taskId]?.invalidated?.["head-branch"]?.prNumber, 8212);
+});
+
+test("a plan-only review for an older head cannot uncredit a later implementation", () => {
+  const taskId = "W9-T8213";
+  const url = "u/8213";
+  const store: CreditStore = recordCredit({}, taskId, {
+    source: "head-branch", prUrl: url, prNumber: 8213, prState: "MERGED",
+  });
+  const projection = deriveStatus(task(taskId), {
+    ledgerPath: "/tmp/does-not-exist/ledger.ndjson",
+    github: {
+      ...forbidPrReads(),
+      prByRef: () => ({ number: 8213, url, state: "MERGED", headRefOid: "implementation-head" }),
+    },
+    readLedger: () => [{ step: "review.posted", pr_url: url, head_sha: "older-plan-head", plan_only: true }],
+    readCreditStore: () => store,
+  });
+  assert.equal(projection.merged, true);
+  assert.equal(projection.prNumber, 8213);
+});
+
+test("a new branch-credit candidate with a plan-only diff is refused before it is persisted", () => {
+  const taskId = "W9-T8214";
+  const url = "u/8214";
+  const pr = { number: 8214, url, state: "MERGED", headRefName: `run-${taskId}-123` };
+  let writes = 0;
+  const projection = deriveStatus(task(taskId), {
+    ledgerPath: "/tmp/does-not-exist/ledger.ndjson",
+    github: {
+      ...noLiveEvidence(),
+      findMergedByHeadBranch: () => [pr],
+      changedFiles: () => ["plan/tasks.d/W9-T8214-filing.yaml"],
+    },
+    readLedger: () => [],
+    readCreditStore: () => ({}),
+    writeCreditStore: () => { writes += 1; },
+  });
+  assert.equal(projection.merged, false);
+  assert.equal(writes, 0);
+});

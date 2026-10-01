@@ -27,6 +27,7 @@ import {
   nowPlanPath,
   parseStrike,
   snapshotGithub,
+  twoSignificantFigures,
   type NowInstance,
   type NowViewContext,
   type NowViewData,
@@ -211,8 +212,8 @@ test("the now view reports host health for the selected instance, not core", (t)
   const coreHealth = only(bodies).health;
   const siteHealth = only(bodies, "instance=site").health;
   // Core last polled 6 min ago (silent, stamped with that poll's own time); the site 1 min ago (polling, no time).
-  assert.deepEqual({ disk: coreHealth.diskFreeBytes, rate: coreHealth.rateLimitRemaining, daemon: coreHealth.daemon }, { disk: 111, rate: 4321, daemon: { state: "silent", at: new Date(T0).toISOString(), reason: "no daemon.* row for over 5 min" } });
-  assert.deepEqual({ disk: siteHealth.diskFreeBytes, rate: siteHealth.rateLimitRemaining, daemon: siteHealth.daemon }, { disk: 222, rate: undefined, daemon: { state: "polling" } });
+  assert.deepEqual({ disk: coreHealth.diskFreeBytes, rate: coreHealth.rateLimitRemaining, daemon: coreHealth.daemon }, { disk: 110, rate: 4300, daemon: { state: "silent", at: new Date(T0).toISOString(), reason: "no daemon.* row for over 5 min" } });
+  assert.deepEqual({ disk: siteHealth.diskFreeBytes, rate: siteHealth.rateLimitRemaining, daemon: siteHealth.daemon }, { disk: 220, rate: undefined, daemon: { state: "polling" } });
   assert.match(siteHealth.reasons?.rateLimitRemaining ?? "", /core's GitHub token/);
   const hostSource = bodies.find((b) => b.key === "instance=site")?.sources.find((s) => s.name === "host-probe:site");
   assert.equal(hostSource?.asOf, new Date(T0 + 360_000).toISOString());
@@ -230,8 +231,8 @@ test("an action's strike count is a structured field", () => {
   assert.deepEqual(parseStrike("its shared fix budget is exhausted (2/2)"), { n: 2, of: 2 });
   assert.equal(parseStrike("conflicted with main"), undefined);
   const rows = [
-    { ts: "2026-09-30T11:00:00.000Z", step: "sweep.disposed", pr_number: 11 },
-    { ts: "2026-09-30T11:05:00.000Z", step: "sweep.disposed", pr_number: 11 },
+    { ts: "2026-09-30T11:00:00.000Z", step: "sweep.disposed", pr_number: 11, disposition: "wait" },
+    { ts: "2026-09-30T11:05:00.000Z", step: "sweep.disposed", pr_number: 11, disposition: "blocked-fixable" },
     { ts: "2026-09-30T11:10:00.000Z", step: "automerge.hold_engaged", pr_number: 13 },
     { ts: "2026-09-30T11:11:00.000Z", step: "sweep.disposed" },
   ];
@@ -467,4 +468,41 @@ test("a now shadow sample is diffed against the legacy live-file board and each 
     "W1-T3's archived block moves it between two counts: measured horizon rows name it");
   assert.equal(diffs.filter((d) => d.classification === "real").length, 0, JSON.stringify(diffs));
   assert.equal(diffs.some((d) => d.path.startsWith("health") || d.path.startsWith("prQueue") || d.path.startsWith("recent")), false, "the probes and the PR queue agree");
+});
+
+test("a sweep re-emitting the disposition it already recorded changes nothing in the now body", (t) => {
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  boardRows(core, clock);
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }]);
+  const sweep = (disposition: string): void => core.append({ step: "sweep.disposed", task_id: "W1-T4", pr_number: 40, disposition, reason: `${disposition} (strike 1/2)` });
+  const activity = (d: NowViewData): string | undefined => d.board.tasks.find((x) => x.taskId === "W1-T4")?.lastActivityAt;
+  const sortAt = (d: NowViewData): string | undefined => d.actions.find((a) => a.prNumber === 40)?.sortAt;
+
+  clock.set(T0 + 120_000);
+  sweep("blocked-fixable");
+  const first = only(view.materialize(ctxOf(clock, [core])));
+  // Positive control: the sweep row is both W1-T4's activity and its action's time, so the equality below compares them.
+  assert.equal(activity(first), new Date(T0 + 120_000).toISOString());
+  assert.equal(sortAt(first), new Date(T0 + 120_000).toISOString(), JSON.stringify(first.actions));
+
+  clock.set(T0 + 150_000);
+  sweep("blocked-fixable");
+  const repeated = view.materialize(ctxOf(clock, [core]));
+  assert.equal(repeated.length, 1, "the new generation re-materialized the body");
+  assert.deepEqual(only(repeated), first, "the same disposition again is not activity: the body, and so its ETag, is unchanged");
+
+  clock.set(T0 + 180_000);
+  sweep("blocked-ambiguous");
+  const changed = only(view.materialize(ctxOf(clock, [core])));
+  assert.equal(activity(changed), new Date(T0 + 180_000).toISOString(), "a new disposition is activity");
+  assert.equal(sortAt(changed), new Date(T0 + 180_000).toISOString());
+});
+
+test("host gauges are rounded down to two significant figures", () => {
+  assert.deepEqual([0, 87, 99, 100, 4_321, 4_399, 5_000, 50_123_456_789].map(twoSignificantFigures), [0, 87, 99, 100, 4_300, 4_300, 5_000, 50_000_000_000]);
+  const probe = (rate: number, free: number) => defaultProbeHost({ name: "core", ledgerDir: "/nonexistent-now-view" }, true, stepped(), { readLive: () => [], rateLimit: () => rate, diskFree: () => free }).health;
+  assert.deepEqual(probe(4_321, 12_345_678_901), probe(4_388, 12_399_999_999), "two probes a minute apart read the same gauges");
+  assert.notDeepEqual(probe(4_321, 1_000), probe(4_288, 1_000), "a gauge crossing a figure still moves");
 });

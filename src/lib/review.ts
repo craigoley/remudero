@@ -6819,6 +6819,7 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
     "claim, for the same reason, as scripts/rule25-precheck.mjs above. It also FAILS OPEN on an " +
     "unreadable merged surface, so it cannot manufacture a refusal CI would not already reach.",
   "scripts/clock-shift.mjs": "clock-drift ops tool for clock-sweep.yml, not a quality gate",
+  "scripts/clock-sweep-deliver.mjs": "clock-drift ops tool for clock-sweep.yml, not a quality gate",
   "scripts/clock-sweep.mjs": "clock-drift ops tool for clock-sweep.yml, not a quality gate",
   "scripts/flake-retry-aggregate.mjs":
     "VERIFIED NON-INSTRUMENT (W1-T2904) — reads scripts/test-with-retry.mjs's own FLAKE-RETRY lines and " +
@@ -7900,8 +7901,9 @@ function planTasksCriterionFieldLines(lines: DiffLine[], kind: "add" | "del"): D
   // explicit indent digit, and NOTHING else on the line. That is the only shape whose CONTINUATION lines carry no
   // `key:` prefix, which is exactly what Rule 15 must see into.
   const blockScalarOpenerRe = /^[|>][+-]?\d*$/;
-  // The three fields Rule 15 protects (W1-T58/W1-T400) — see criterionFieldTampered above.
-  const criterionFieldNames = new Set(["claim", "proof", "satisfied_by"]);
+  // Every key a judge reads to EXEMPT a criterion or decide its verdict (W1-T58/W1-T400/W1-T5031): `kind: guard`
+  // skips proof-discrimination. `holdout` is deliberately absent: it changes no verdict and exempts nothing.
+  const criterionFieldNames = new Set(["claim", "proof", "satisfied_by", "kind"]);
 
   const out: DiffLine[] = [];
   let currentFile = "";
@@ -7951,7 +7953,7 @@ function planTasksCriterionFieldLines(lines: DiffLine[], kind: "add" | "del"): D
 }
 
 /** RULE 15's shared diff-derived predicate (W1-T58, ratifies P3 via P8/RETRO-1784058021334): true when a diff either
- * ADDS a `claim:`/`proof:`/`satisfied_by:` line or REMOVES an existing one, in `plan/tasks.yaml` or a
+ * ADDS a `claim:`/`proof:`/`satisfied_by:`/`kind:` line or REMOVES an existing one, in `plan/tasks.yaml` or a
  * `plan/tasks.d/*.yaml` shard (W1-T399). A removed field line is present whether the TEXT changed or the whole
  * criterion was deleted; an added one is present whether an EXISTING criterion gained a field or a WHOLE NEW criterion
  * was APPENDED — a pure append tripped neither disjunct before W1-T400 widened the ADD side (#1295). Both read as "the
@@ -7993,7 +7995,7 @@ export function checkSatisfiedByGuard(diff: string, meta: RubricPrMeta = {}): Ru
   // hand-opened PR — naming an author the review path could not know AND denying a property it had just computed true.
   const edit =
     "plan/tasks.yaml's (or a plan/tasks.d/ shard's) acceptance criteria were added/edited (an added " +
-    "claim/proof/satisfied_by field — including a whole new criterion appended after the existing ones — " +
+    "claim/proof/satisfied_by/kind field — including a whole new criterion appended after the existing ones — " +
     "or an edited/removed one)";
   // THE FULL REMEDY LIVES HERE, deliberately not in `failSummary`: that string is the commit-status description and is
   // cut at 140 characters, while this `reason` has no cap. IT HAS TWO HALVES BECAUSE ONE IS NOT ENOUGH, and that is

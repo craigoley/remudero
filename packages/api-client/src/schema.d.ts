@@ -2811,7 +2811,7 @@ export interface components {
             day: string;
           };
         };
-        /** The selected instance's own host probe; a gauge it could not read is absent, named in `reasons`. The probe's sample time is the `host-probe:<i>` source's `asOf`. */
+        /** The selected instance's own host probe; a gauge it could not read is absent, named in `reasons`. The probe's sample time is the `host-probe:<i>` source's `asOf`. Each gauge is rounded down to two significant figures (exact below 100). */
         health: {
           diskFreeBytes?: number;
           rateLimitRemaining?: number;
@@ -2856,7 +2856,7 @@ export interface components {
         requestedModel?: string;
       };
     };
-    /** The console's actionQueueFromStatus, precomputed. `strike` is parsed once from the sweep's reason in every form it writes, replacing the console's regex; `sortAt` is the row's own time. */
+    /** The console's actionQueueFromStatus, precomputed. `strike` is parsed once from the sweep's reason in every form it writes, replacing the console's regex; `sortAt` is the time of the sweep row that began the PR's current disposition (a re-emitted one does not move it). */
     NowAction: {
       kind: "blocked_pr" | "merge_held";
       taskId?: string;
