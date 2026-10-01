@@ -10,7 +10,7 @@
 import { computeFeedbackProjectionSync, taskOriginsOf, type FeedbackProjectionInput, type FeedbackProjectionOutcome } from "./console-projection-worker.js";
 import { systemClock, type Clock } from "./clock.js";
 import { FEEDBACK_STATUSES, type FeedbackEntry } from "./feedback.js";
-import { decorateFeedbackDischargeByTasks, type PanelGraphDeps, type ReconciledFeedbackEntry } from "./panel-graph.js";
+import { decorateFeedbackDischargeByTasks, projectReconciledFeedback, type PanelGraphDeps, type ReconciledFeedbackEntry } from "./panel-graph.js";
 import type { Plan } from "./plan.js";
 import type { GitHub } from "./status.js";
 import { pagesWithin, viewKey, type ViewDefinition, type ViewSource } from "./views.js";
@@ -40,13 +40,7 @@ export interface FeedbackViewBody {
  * merged reads accepted (the fields `setFeedbackStatus` would write), an unreadable PR is `unverified`.
  */
 export function projectFeedbackEntries(entries: readonly FeedbackEntry[], filedTasks: ReadonlyMap<string, string[]> | undefined, github: GitHub): ReconciledFeedbackEntry[] {
-  const reconciled = entries.map((entry): ReconciledFeedbackEntry => {
-    if (entry.status !== "proposed" || !entry.proposal_pr) return entry;
-    const pr = github.prByRef(entry.proposal_pr);
-    if (pr && pr.state === "MERGED") return { ...entry, status: "accepted", proposal_pr: entry.proposal_pr, summary: entry.summary ?? null, answered_by: entry.answered_by ?? null };
-    if (!pr && github.readFailed?.()) return { ...entry, unverified: true };
-    return entry;
-  });
+  const reconciled = projectReconciledFeedback(entries, github);
   return filedTasks ? decorateFeedbackDischargeByTasks(reconciled, filedTasks, github) : reconciled;
 }
 

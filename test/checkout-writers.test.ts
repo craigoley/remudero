@@ -28,6 +28,7 @@ import { test } from "node:test";
 import { buildPanelGraphRoutes, reconcileFeedbackEntries } from "../src/lib/panel-graph.js";
 import { createService } from "../src/lib/service.js";
 import { buildDeployLogger } from "../src/lib/deployer.js";
+import { runSlowLaneWorker } from "../src/lib/read-model-slow-lane.js";
 import { listFeedback, setFeedbackStatus } from "../src/lib/feedback.js";
 import { LANDING_BRANCH } from "../src/lib/feedback-landing.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
@@ -218,23 +219,25 @@ test("TRAP 3: unrelated dirt in the tree is NOT swept into the landing", () => {
 });
 
 
-test("THE ROUTE ITSELF leaves the tree clean, so dropping the wiring at the call site is caught", () => {
-  // The tests above drive `reconcileFeedbackEntries` DIRECTLY, so they would still pass if someone
-  // removed `deps.feedbackLand` from the route that calls it (panel-graph.ts) — which is exactly the
-  // shape of the original defect: a correct function, unwired at one call site. This drives the real
-  // GET /v1/feedback route through createService, the same plumbing test/panel-graph.test.ts uses.
+test("THE SLOW LANE lands a merged proposal and GET /v1/feedback leaves the tree untouched", () => {
+  // The tests above drive `reconcileFeedbackEntries` DIRECTLY, so they would still pass if its one
+  // caller dropped `feedbackLand` — the shape of the original defect: a correct function, unwired at
+  // one call site. Since P4-T07 that caller is serve's slow lane, never the GET: the GET only projects
+  // `accepted`, and the lane's feedback unit lands it. Both are driven here through their real wiring.
   const f = fixtureRepo();
-  // OUTSIDE the repo root — a ledger inside it would be untracked dirt of the test's own making and
-  // would fail the clean-tree assertion for a reason that has nothing to do with the code under test.
-  const ledgerDir = mkdtempSync(join(tmpdir(), "rmd-ep-ledger-"));
-  const ledgerPath = join(ledgerDir, "ledger.ndjson");
+  // OUTSIDE the repo root — a ledger or plan inside it would be untracked dirt of the test's own making
+  // and would fail the clean-tree assertion for a reason that has nothing to do with the code under test.
+  const outside = mkdtempSync(join(tmpdir(), "rmd-ep-ledger-"));
+  const ledgerPath = join(outside, "ledger.ndjson");
+  const planPath = join(outside, "tasks.yaml");
   writeFileSync(ledgerPath, "");
+  writeFileSync(planPath, "[]\n");
   return withLiveWritesAllowed(async () => {
     const server = createService({
       tokens: { read: "r", write: "w" },
       routes: buildPanelGraphRoutes({
         root: f.root,
-        planPath: join(f.root, "plan", "tasks.yaml"),
+        planPath,
         ledgerPath,
         github: { prView: () => null } as never,
         statusGithub: mergedGithub(),
@@ -243,15 +246,33 @@ test("THE ROUTE ITSELF leaves the tree clean, so dropping the wiring at the call
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as AddressInfo).port;
+    const posted: Array<{ type: string; step?: string; extra?: { ids?: string[] }; unit?: string }> = [];
+    let onMessage: ((msg: { type?: string; held?: unknown }) => void) | undefined;
+    const lane = runSlowLaneWorker(
+      { on: (_event, run) => (onMessage = run), postMessage: (m) => void posted.push(m as never) },
+      { inbox: { root: f.root, planPath, ledgerPath, inboxRoot: outside, repository: "o/r" }, intervalMs: 60_000 },
+      { schedule: () => () => {}, inbox: { statusGithub: mergedGithub(), feedbackLand: { gh: fakeGh() } } },
+    );
     try {
       const res = await fetch(`http://127.0.0.1:${port}/v1/feedback`, { headers: { authorization: "Bearer r" } });
       assert.equal(res.status, 200, "the route still answers");
-      assert.equal(porcelain(f.root), "", `the route must leave the tree CLEAN; saw:\n${porcelain(f.root)}`);
+      const body = (await res.json()) as { entries: Array<{ id: string; status: string }> };
+      assert.equal(body.entries.find((e) => e.id === f.id)?.status, "accepted", "the GET serves the merged proposal as accepted");
+      assert.equal(porcelain(f.root), "", `the GET must leave the tree CLEAN; saw:\n${porcelain(f.root)}`);
+      assert.throws(() => git(f.bare, "rev-parse", "--verify", "--quiet", LANDING_BRANCH), "the GET landed nothing: no reader writes");
+      assert.match(readFileSync(join(f.root, "plan", "feedback", `${f.id}.yaml`), "utf8"), /status: proposed/);
+
+      onMessage?.({ type: "lease", held: true });
+      const deadline = Date.now() + 10_000;
+      while (!posted.some((m) => m.type === "unit" && m.unit === "feedback") && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.deepEqual(posted.find((m) => m.step === "feedback.accepted_merged")?.extra?.ids, [f.id], "the lane accepted the merged proposal with no reader");
+      assert.equal(porcelain(f.root), "", `the lane must leave the tree CLEAN; saw:\n${porcelain(f.root)}`);
       assert.match(landedContent(f.bare, `plan/feedback/${f.id}.yaml`), /status: accepted/);
     } finally {
+      lane.stop();
       server.close();
       f.cleanup();
-      rmSync(ledgerDir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
     }
   });
 });
