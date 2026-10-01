@@ -644,8 +644,19 @@ import {
   SERVE_EXPECTED_BRANCH,
   serviceTokensPath,
   stopServeReadModel,
+  serveGeneration,
   defaultIsListening,
 } from "./lib/serve.js";
+import {
+  awaitPromotion,
+  boardComputedProbe,
+  GENERATION_MESSAGES,
+  listenReadiness,
+  onDrainRequest,
+  processChannel,
+  supervisedRole,
+  type GenerationChannel,
+} from "./lib/serve-generation.js";
 import { consoleProjectionWorker } from "./lib/console-snapshot-cache.js";
 import { runRelayClient } from "./lib/relay-client.js";
 import { assertProposedPlanLoads,
@@ -35164,6 +35175,7 @@ export async function serveCommand(
     // future worker-thread offload of the derivation itself (recon's own flagged follow-up) can
     // fill without touching this call site again.
     buildInitialBoardSnapshot?: (deps: BoardDeps) => void | Promise<void>;
+    generation?: GenerationChannel;
   } = {},
 ): Promise<number> {
   // `--host` was documented in USAGE and read by resolveServeHosts, but was NOT in this
@@ -35343,7 +35355,10 @@ export async function serveCommand(
   // `ready` promise is fail-open and always settles, so an exchange outage still starts the
   // console in an honestly degraded state instead of racing the first board read with an empty
   // GH_TOKEN.
+  const supervised = supervisedRole(process.env);
+  const channel = supervised && (deps.generation ?? processChannel());
   const server = await buildReadyServeServer({
+    ...(channel ? { generation: { requestHandoff: (detail) => channel.send({ ...detail, type: GENERATION_MESSAGES.handoffRequest }) } } : {}),
     boardGithubRefreshMs: DEFAULT_BOARD_POLL_TTL_MS,
     board: boardDeps,
     modelApprovals: config.modelApprovals,
@@ -35420,6 +35435,27 @@ export async function serveCommand(
       for (const l of realRequestListeners) l(req, res);
     }),
   );
+  const buildInitialBoardSnapshot = deps.buildInitialBoardSnapshot ?? ((d: BoardDeps) => void computeBoardSnapshot(d));
+  const precomputeBoard = async (): Promise<void> => {
+    log("serve.board_precompute_started", {});
+    try {
+      await buildInitialBoardSnapshot(boardDeps);
+      log("serve.board_precompute_done", {});
+    } catch (e) {
+      log("serve.board_precompute_failed", { error: String((e as Error)?.message ?? e) });
+    } finally {
+      boardGate.markReady();
+    }
+  };
+  // P3 STANDBY: warm everything, answer readiness privately, and bind the shared port only when promoted.
+  if (supervised && channel) {
+    const generation = serveGeneration(server);
+    onDrainRequest(channel, (reason) => void generation?.handover(reason));
+    await listenReadiness(server, supervised.socketPath, () => [...(generation?.probes ?? []), boardComputedProbe(boardGate.isReady)]);
+    void precomputeBoard();
+    log("serve.standby", { socket: supervised.socketPath });
+    await awaitPromotion(channel);
+  }
 
   // BIND EACH NAMED INTERFACE — never the wildcard. `listen(port)` alone defaults to `::`
   // (every interface) while the banner printed "localhost", so the surface was wide open and
@@ -35485,20 +35521,8 @@ export async function serveCommand(
   // (success OR failure) as "the projection existed" — a thrown/failed first pass must not wedge
   // the board route in "not ready" forever when a real request would hit the identical failure
   // and report it honestly (`github_unreachable`) instead.
-  const buildInitialBoardSnapshot = deps.buildInitialBoardSnapshot ?? ((d: BoardDeps) => void computeBoardSnapshot(d));
-  setImmediate(() => {
-    log("serve.board_precompute_started", {});
-    void (async () => {
-      try {
-        await buildInitialBoardSnapshot(boardDeps);
-        log("serve.board_precompute_done", {});
-      } catch (e) {
-        log("serve.board_precompute_failed", { error: String((e as Error)?.message ?? e) });
-      } finally {
-        boardGate.markReady();
-      }
-    })();
-  });
+  if (channel) channel.send({ type: GENERATION_MESSAGES.promoted });
+  else setImmediate(() => void precomputeBoard());
 
   // NO TOKEN IS PRINTED. In a container stdout is `docker logs`, readable by anyone in the docker
   // group and kept past the process, so the banner names the tokens file. See resolveServiceTokens for rotation.
