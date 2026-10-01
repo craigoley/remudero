@@ -5,11 +5,10 @@
  */
 import assert from "node:assert/strict";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { createServer } from "node:http";
-import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { clockFromMillisFn } from "../src/lib/clock.js";
@@ -190,7 +189,8 @@ test("the served gateway counts each get by caller and writes the partial hour w
   mkdirSync(join(root, "state"), { recursive: true });
   const planPath = join(root, "plan", "tasks.yaml");
   writeFileSync(planPath, "[]\n");
-  const ledgerPath = join(root, "state", "ledger.ndjson");
+  const externalLedgerDir = stateDir(t);
+  const ledgerPath = join(externalLedgerDir, "ledger.ndjson");
   const github: GitHub = { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
   const rows: Array<{ step: string } & Record<string, unknown>> = [];
   const deps: ServeDeps = {
@@ -221,6 +221,7 @@ test("the served gateway counts each get by caller and writes the partial hour w
   assert.equal(rows.filter((r) => r.step === "serve.route_reads").length, 0, "no row per request and none at close: the hour is handed on");
   assert.deepEqual(JSON.parse(readFileSync(join(root, "state", ROUTE_READS_FILE), "utf8")).carry.row.routes,
     { "/v1/version": { console: 1, fleet: 1 }, "/v1/route-reads": { fleet: 1 } });
+  assert.equal(existsSync(join(externalLedgerDir, ROUTE_READS_FILE)), false, "an external ledger source is never a state write target");
 });
 
 test("a promoted generation takes over the in progress hour so each hour has exactly one row", (t) => {
