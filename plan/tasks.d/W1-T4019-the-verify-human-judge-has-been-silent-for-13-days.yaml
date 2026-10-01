@@ -10,7 +10,8 @@
   files: [src/lib/measurement-cadence.ts]
   origin: oper#fleet-health-2026-09-22
   plan_refs: ["W1-T3188", "W1-T3271", "W1-T4014"]
-  status: queued
+  status: blocked
+  retirement: closed
   attempts: 0
   rationale: |
     W1-T3188 built exactly the thing the operator asked for again on 2026-09-22. Its own header
@@ -90,3 +91,4 @@
     reservation hand-off: plan/file-vh-cadence-1790076888 -> plan/file-vh-cadence-1790076888
 
     Minted on the filing branch, which `rmd next-task-id` now requires.
+    CLOSED 2026-10-01 (operator session): superseded. #6547 pointed the verify-human judge at the checkout, which was the cause of the silence, and #4907 already wires a verify_human summary into every measurement_cadence.ran row. Closed, not re-proved.
