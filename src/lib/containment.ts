@@ -1604,7 +1604,7 @@ export async function runWorkerSmoke(opts: {
 }): Promise<WorkerSmokeResult> {
   const config = opts.config ?? loadConfig();
   const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("worker-smoke");
-  const token = opts.token ?? `smoke-${Date.now()}`;
+  const token = opts.token ?? `smoke-${randomUUID()}`;
   const base = join(config.root, "tmp", `worker-smoke-${token}`);
   const cwd = join(base, "cwd");
   mkdirSync(cwd, { recursive: true });
@@ -1662,7 +1662,7 @@ export async function workerSmokeMain(print: (line: string) => void = console.lo
   try {
     const config = loadConfig();
     const root = resolveInstallRoot(config);
-    const token = `smoke-${Date.now()}`;
+    const token = `smoke-${randomUUID()}`;
     const settingsFile = renderWorkerSettings({
       templatePath: join(root, "settings", "worker.json"),
       hooksDir: join(root, "hooks"),
