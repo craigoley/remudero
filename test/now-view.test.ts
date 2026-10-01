@@ -11,7 +11,7 @@ import {
   readOpenBoardSnapshot,
   type BoardSnapshotIo,
 } from "../src/lib/board-snapshot-cache.js";
-import type { Clock } from "../src/lib/clock.js";
+import { fixedClock, type Clock } from "../src/lib/clock.js";
 import { createLedgerProjector, openProjectorReadModel, type LedgerProjector } from "../src/lib/ledger-projector.js";
 import {
   NOW_GITHUB_STALE_MS,
@@ -40,7 +40,7 @@ import { createReadModelTicker, readModelSwitchesPath, type ReadModelWorkerMessa
 import { HOST_PROBE_BUDGET_MS, PLAN_BUDGET_MS } from "../src/lib/view-freshness.js";
 import { buildBatchedGithub, DEFAULT_LIVENESS_BOUND_MS, readLedgerLines, type GitHub } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
-import { SHADOW_CLASSIFICATIONS, VIEW_SHADOW_DIFF_STEP } from "../src/lib/view-shadow.js";
+import { SHADOW_CLASSIFICATIONS, VIEW_SHADOW_DIFF_STEP, createViewShadow, readShadowEvidence } from "../src/lib/view-shadow.js";
 import { viewEtag } from "../src/lib/views.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
@@ -572,4 +572,81 @@ test("host gauges are rounded down to two significant figures", () => {
   const probe = (rate: number, free: number) => defaultProbeHost({ name: "core", ledgerDir: "/nonexistent-now-view" }, true, stepped(), { readLive: () => [], rateLimit: () => rate, diskFree: () => free }).health;
   assert.deepEqual(probe(4_321, 12_345_678_901), probe(4_388, 12_399_999_999), "two probes a minute apart read the same gauges");
   assert.notDeepEqual(probe(4_321, 1_000), probe(4_288, 1_000), "a gauge crossing a figure still moves");
+});
+
+/** One shadow comparison of a materialized `now` body against its legacy side, judged on the rig's own read model. */
+function compareNow(view: ReturnType<typeof createNowView>, r: Rig, body: { data: NowViewData; sources: Array<{ asOf: string | null }> }, now: number): Array<{ path: string; classification: string; reason: string }> {
+  const legacy = view.legacy("instance=core", now, body.data);
+  assert.ok(legacy, "the view holds core");
+  const shadow = createViewShadow({ clock: fixedClock(now), log: () => {}, evidence: (input) => readShadowEvidence([r.db], input) });
+  const asOf = body.sources.flatMap((s) => (s.asOf ? [s.asOf] : [])).sort()[0] ?? null;
+  return shadow.compare({ view: "now", key: "instance=core", requests: 0, legacy, body: { data: body.data, asOf } }).diffs;
+}
+
+test("a sample taken before the read model ingests a claim is timing across counts groups spend and the task window", (t) => {
+  // Captured 2026-10-01T05:47:09Z: board.counts.running, groups.running, spendTodayUsd, taskProjection.returned and a
+  // whole board.tasks[taskId=…] entry read real while W1-T4810's newest rows sat in the live file only.
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const queued = Array.from({ length: NOW_QUEUED_ROWS + 5 }, (_, i) => task(`W1-T${100 + i}`));
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { readPlan: () => planOf([task("W1-T4810"), ...queued]), listGrilling: () => [] });
+  clock.set(T0);
+  core.append({ step: "daemon.tick" });
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  const late = [
+    { ts: new Date(T0 + 60_000).toISOString(), host: "h1", step: "run.start", task_id: "W1-T4810", run_id: "W1-T4810-1790831583056" },
+    { ts: new Date(T0 + 61_000).toISOString(), host: "h1", step: "implement.done", task_id: "W1-T4810", run_id: "W1-T4810-1790831583056", cost_usd: 0.42 },
+  ];
+  appendFileSync(join(core.ledgerDir, "ledger.ndjson"), late.map((r) => `${JSON.stringify(r)}\n`).join(""));
+  const diffs = compareNow(view, core, body, T0 + 90_000);
+  const byPath = Object.fromEntries(diffs.map((d) => [d.path, d.classification]));
+  assert.equal(byPath["board.counts.running"], "timing", JSON.stringify(diffs));
+  assert.equal(byPath["board.groups.running"], "timing");
+  assert.equal(byPath["board.groups.queued"], "timing");
+  assert.equal(byPath["board.spendTodayUsd"], "timing");
+  assert.equal(byPath["board.taskProjection.returned"], "timing");
+  assert.equal(byPath[`board.tasks[taskId=W1-T${100 + NOW_QUEUED_ROWS - 1}]`], "timing", "the task the window let in on one side only");
+  assert.deepEqual(diffs.filter((d) => d.classification === "real"), []);
+});
+
+test("the daemon's poll state is compared at the view's own probe instant", (t) => {
+  // Captured 2026-10-01T05:37:24Z: health.daemon.{state,at,reason} read real because legacy probed minutes after the view.
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { listGrilling: () => [] });
+  clock.set(T0 - 270_000);
+  core.append({ step: "daemon.tick" });
+  clock.set(T0);
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  assert.deepEqual(body.data.health.daemon, { state: "polling" });
+  const diffs = compareNow(view, core, body, T0 + 90_000);
+  assert.deepEqual(diffs.filter((d) => d.path.startsWith("health")), [], "both sides judge the poll 4.5 min old, not 6");
+});
+
+test("a queued order the live file's compaction changed is judged by each task's own sort-key row", (t) => {
+  // Captured 2026-10-01T06:33Z on the console instance: board.groups.queued read real with the same ids on both
+  // sides. Compaction had pruned UI-T36's and UI-T35's newest sweep.disposed rows from the live file only.
+  const root = scratch(t);
+  const clock = stepped();
+  const r = rig(t, root, "core", clock);
+  const view = viewOf(clock, [{ name: "core", ledgerDir: r.ledgerDir }], { readPlan: () => planOf([task("UI-T35"), task("UI-T36"), task("UI-T37")]), listGrilling: () => [] });
+  const at = (ts: string, step: string, id: string): Record<string, unknown> => ({ ts, step, task_id: id, run_id: `r-${id}`, pr_number: 1 });
+  const kept = [
+    at("2026-09-20T20:28:12.102Z", "verdict.merged", "UI-T35"),
+    at("2026-09-20T20:28:13.999Z", "verdict.merged", "UI-T36"),
+    at("2026-09-20T20:47:36.765Z", "verdict.merged", "UI-T37"),
+  ];
+  const pruned = [at("2026-09-20T21:13:00.205Z", "sweep.disposed", "UI-T35"), at("2026-09-21T16:03:10.652Z", "sweep.disposed", "UI-T36")];
+  r.append(...kept, ...pruned);
+  clock.set(Date.parse("2026-10-01T06:33:28.040Z"));
+  const [body] = view.materialize(ctxOf(clock, [r]));
+  assert.ok(body);
+  writeFileSync(join(r.ledgerDir, "ledger.ndjson"), kept.map((r) => `${JSON.stringify({ host: "h1", ...r })}\n`).join(""));
+  const queued = compareNow(view, r, body, clock.now() + 30_000).find((d) => d.path === "board.groups.queued");
+  assert.ok(queued, "the two sides order the queue differently");
+  assert.equal(queued.classification, "legacy_horizon", queued.reason);
 });
