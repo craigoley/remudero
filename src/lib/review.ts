@@ -1532,6 +1532,12 @@ const npmCiPending = new Map<string, Promise<void>>();
 let browserPreflightDone = false;
 let browserPreflightPending: Promise<void> | undefined;
 
+/** Reset the process memo only in an isolated proof test, never in the review daemon. */
+export function resetBrowserPreflightForTests(): void {
+  browserPreflightDone = false;
+  browserPreflightPending = undefined;
+}
+
 /** The ONE process spawn a proof execution performs — the test/grep run itself. Injectable so a test can prove, by
  * COUNTING, that a fast-failed proof never spawns the runner at all; timing would only prove it was quick. */
 export type ProofSpawner = (command: string, args: readonly string[], cwd: string, timeoutMs: number) => string;

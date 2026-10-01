@@ -14,6 +14,7 @@ import {
   ProofCannotLoadError,
   refreshProofToolchainAsync,
   registerReviewerCheckout,
+  resetBrowserPreflightForTests,
   resolveNameFilteredCandidatesAsync,
 } from "../src/lib/review.js";
 import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
@@ -68,10 +69,10 @@ function browserFixture(manifest: string | undefined, cliSource = "process.exit(
   return dir;
 }
 
-async function runBrowserProof(review: typeof import("../src/lib/review.js"), dir: string): Promise<void> {
-  const proof = review.parseWhitelistedProof("unit test: test/browser.test.ts");
+async function runBrowserProof(dir: string): Promise<void> {
+  const proof = parseWhitelistedProof("unit test: test/browser.test.ts");
   assert.ok(proof);
-  assert.equal(await review.execWhitelistedProofAsync(proof, dir, 2_000, async () => browserTap), "pass");
+  assert.equal(await execWhitelistedProofAsync(proof, dir, 2_000, async () => browserTap), "pass");
 }
 
 test("W1-T4772: a timer keeps firing while a review proof child runs", async () => {
@@ -248,7 +249,8 @@ test("async browser preflight treats a missing manifest as unreadable", async ()
   const previous = process.env.PLAYWRIGHT_BROWSERS_PATH;
   process.env.PLAYWRIGHT_BROWSERS_PATH = cache;
   try {
-    await runBrowserProof(await import(`../src/lib/review.js?browser-unreadable-${Date.now()}`), dir);
+    resetBrowserPreflightForTests();
+    await runBrowserProof(dir);
   } finally {
     if (previous === undefined) delete process.env.PLAYWRIGHT_BROWSERS_PATH;
     else process.env.PLAYWRIGHT_BROWSERS_PATH = previous;
@@ -263,9 +265,10 @@ test("async browser preflight skips an already installed pinned browser", async 
   const previous = process.env.PLAYWRIGHT_BROWSERS_PATH;
   process.env.PLAYWRIGHT_BROWSERS_PATH = cache;
   try {
+    resetBrowserPreflightForTests();
     mkdirSync(join(cache, "chromium-1234"));
     writeFileSync(join(cache, "chromium-1234", "INSTALLATION_COMPLETE"), "done");
-    await runBrowserProof(await import(`../src/lib/review.js?browser-installed-${Date.now()}`), dir);
+    await runBrowserProof(dir);
     assert.equal(existsSync(join(dir, "unexpected-install")), false);
   } finally {
     if (previous === undefined) delete process.env.PLAYWRIGHT_BROWSERS_PATH;
@@ -282,9 +285,9 @@ test("async browser preflight shares one in-flight install and remembers complet
   const previous = process.env.PLAYWRIGHT_BROWSERS_PATH;
   process.env.PLAYWRIGHT_BROWSERS_PATH = cache;
   try {
-    const review = await import(`../src/lib/review.js?browser-pending-${Date.now()}`);
-    await Promise.all([runBrowserProof(review, dir), runBrowserProof(review, dir)]);
-    await runBrowserProof(review, dir);
+    resetBrowserPreflightForTests();
+    await Promise.all([runBrowserProof(dir), runBrowserProof(dir)]);
+    await runBrowserProof(dir);
     assert.equal(readFileSync(join(dir, "install-calls"), "utf8"), "x", "one pinned install serves concurrent and later proofs");
   } finally {
     if (previous === undefined) delete process.env.PLAYWRIGHT_BROWSERS_PATH;
@@ -300,7 +303,8 @@ test("async browser install failure stays best effort for the proof verdict", as
   const previous = process.env.PLAYWRIGHT_BROWSERS_PATH;
   process.env.PLAYWRIGHT_BROWSERS_PATH = cache;
   try {
-    await runBrowserProof(await import(`../src/lib/review.js?browser-failed-${Date.now()}`), dir);
+    resetBrowserPreflightForTests();
+    await runBrowserProof(dir);
   } finally {
     if (previous === undefined) delete process.env.PLAYWRIGHT_BROWSERS_PATH;
     else process.env.PLAYWRIGHT_BROWSERS_PATH = previous;
