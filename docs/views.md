@@ -27,6 +27,12 @@ over one SSE stream (below); the wire shape below is the contract those phases k
 | `stale` | any source is `stale` or `unavailable`; `sources[].reason` says why. |
 | `ETag` | weak, `W/"<view>.<version>.<hash of {version, stale, data}>"`. It ignores the times, so an unchanged view answers a matching `If-None-Match` with **304** and no body, even after a recompute. `Cache-Control: no-cache`. |
 
+**No clock in `data`.** The ETag is the view's version on the push stream, so `data` carries no
+clock stamp and no value computed relative to "now" (an age, an elapsed time). Those live in the
+envelope (`generatedAt`, `asOf`, `sources[].asOf`); a consumer derives a duration from an absolute
+time in `data` that moves only when its event does (a run's `startedAt`). Otherwise every
+re-materialize and every restart would look like a change to every open console.
+
 An input that is cold makes its value **absent with a reason**, never a zero. A view's query
 parameters narrow it; an unusable one answers 400 `invalid_request` with a `detail`.
 
@@ -137,14 +143,16 @@ writer lease, and how many future-dated rows were quarantined.
 - These are open inbox items by who must act.
 - The source is the classification that `GET /v1/inbox` writes (`state/inbox-classified.json`).
 
-## `repositories` (version 1)
+## `repositories` (version 2)
 
 Dark until `switches.json` sets `repositories` to `serve`; until then it answers 404 (`view_disabled`,
 or `view_shadow` under `shadow`) and the console reads each instance's `repos/summary` as before. Schema: `RepositoriesView` in `openapi/daemon.yaml`.
 
 `data.instances[]`: `{ instanceId, summary?, reason? }`, one per instance serve holds.
 - `summary` IS that instance's `GET /v1/i/<instance>/repos/summary` body (`RepoDashboardResult`),
-  computed by the read-model worker from the instance's projected `repo_row` table (`src/lib/repositories-view.ts`).
+  computed by the read-model worker from the instance's projected `repo_row` table (`src/lib/repositories-view.ts`),
+  less its `generated_at` (`RepositoriesSummary`). That time is the `repositories:<instance>` source's `asOf`.
+- Version 2 (P2-BUILD-B) moved `generated_at` out of `data`; version 1 carried it in each summary.
 - A `reason` beside a `summary` means the last recompute failed and the summary shown is older.
 
 `data.projects[]`: `{ project, repos[{ id, reponame, instanceId, state }], worst{ state, repoId, repoName } }`.
@@ -157,7 +165,7 @@ or `view_shadow` under `shadow`) and the console reads each instance's `repos/su
   transport failure.
 - `data.projectsReason` is present when the registry could not be read.
 
-## `now` (version 1)
+## `now` (version 2)
 
 `GET /v1/views/now?instance=<id>`: everything the console's /now renders for one instance. Schema:
 `NowView` in `openapi/daemon.yaml`.
@@ -167,9 +175,18 @@ or `view_shadow` under `shadow`) and the console reads each instance's `repos/su
   answers 404 (`view_disabled`, or `view_shadow` under `shadow`), and the console reads `/v1/status` and
   `/v1/recent` as before.
 
-`data`: `{ instance, board{ generated_at, counts, spendTodayUsd, taskProjection, tasks[], groups{ running,
-needsYou, blocked, queued } }, prQueue, actions[], recent{ entries[], mergedToday{ count, day } }, health,
-questions }`.
+`data`: `{ instance, board{ counts, spendTodayUsd, taskProjection, tasks[], groups{ running,
+needsYou, blocked, queued } }, prQueue, actions[], recent{ entries[], mergedToday{ count, day } }, health{
+diskFreeBytes?, rateLimitRemaining?, daemon{ state, at?, reason? }, reasons? }, questions }`.
+- Version 2 (P2-BUILD-B) removed every clock value from `data`: `board.generated_at` (use the envelope's
+  `generatedAt`), `health.sampledAt` (the `host-probe:<i>` source's `asOf`), `health.lastPollAgeMs` and
+  `tasks[].elapsedMs` (derive the running time from `startedAt`). There is no v1 body; a consumer checks
+  `version === 2`.
+- `health.daemon` is `{ state: "polling" }` while the instance's newest `daemon.*` row is under 5 min old, else
+  `{ state: "silent", at, reason }`, where `at` is that row's own time (absent when the live ledger has none). It
+  changes only when the daemon goes silent or resumes, so a consumer ages `at` itself.
+- The gauges `diskFreeBytes` and `rateLimitRemaining` are exact, so they move the ETag at most once per host
+  probe (60 s).
 - `groups` is the console's `groupBoard` as ordered id lists.
 - `actions[].strike` is `{ n, of }`, parsed once from the sweep's reason.
 - `health` is the selected instance's own host probe. A field it could not read is absent and named in `health.reasons`.

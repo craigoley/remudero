@@ -210,15 +210,17 @@ test("the now view reports host health for the selected instance, not core", (t)
   const bodies = view.materialize(ctxOf(clock, [core, site]));
   const coreHealth = only(bodies).health;
   const siteHealth = only(bodies, "instance=site").health;
-  assert.deepEqual({ disk: coreHealth.diskFreeBytes, rate: coreHealth.rateLimitRemaining, age: coreHealth.lastPollAgeMs }, { disk: 111, rate: 4321, age: 360_000 });
-  assert.deepEqual({ disk: siteHealth.diskFreeBytes, rate: siteHealth.rateLimitRemaining, age: siteHealth.lastPollAgeMs }, { disk: 222, rate: undefined, age: 60_000 });
+  // Core last polled 6 min ago (silent, stamped with that poll's own time); the site 1 min ago (polling, no time).
+  assert.deepEqual({ disk: coreHealth.diskFreeBytes, rate: coreHealth.rateLimitRemaining, daemon: coreHealth.daemon }, { disk: 111, rate: 4321, daemon: { state: "silent", at: new Date(T0).toISOString(), reason: "no daemon.* row for over 5 min" } });
+  assert.deepEqual({ disk: siteHealth.diskFreeBytes, rate: siteHealth.rateLimitRemaining, daemon: siteHealth.daemon }, { disk: 222, rate: undefined, daemon: { state: "polling" } });
   assert.match(siteHealth.reasons?.rateLimitRemaining ?? "", /core's GitHub token/);
   const hostSource = bodies.find((b) => b.key === "instance=site")?.sources.find((s) => s.name === "host-probe:site");
   assert.equal(hostSource?.asOf, new Date(T0 + 360_000).toISOString());
 
-  const blind = defaultProbeHost({ name: "core", ledgerDir: join(root, "nowhere") }, true, clock, { rateLimit: () => undefined, diskFree: () => undefined });
-  assert.deepEqual(Object.keys(blind.reasons ?? {}).sort(), ["diskFreeBytes", "lastPollAgeMs", "rateLimitRemaining"]);
-  assert.deepEqual([blind.diskFreeBytes, blind.lastPollAgeMs, blind.rateLimitRemaining], [undefined, undefined, undefined]);
+  const blind = defaultProbeHost({ name: "core", ledgerDir: join(root, "nowhere") }, true, clock, { rateLimit: () => undefined, diskFree: () => undefined }).health;
+  assert.deepEqual(Object.keys(blind.reasons ?? {}).sort(), ["diskFreeBytes", "rateLimitRemaining"]);
+  assert.deepEqual([blind.diskFreeBytes, blind.rateLimitRemaining], [undefined, undefined]);
+  assert.deepEqual(blind.daemon, { state: "silent", reason: "no daemon.* row in the instance's live ledger" });
 });
 
 test("an action's strike count is a structured field", () => {

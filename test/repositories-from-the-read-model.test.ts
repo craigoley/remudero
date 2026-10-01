@@ -27,6 +27,8 @@ import {
   startRepositoriesSourcePublisher,
   type RepositoriesData,
   type RepositoriesSources,
+  type RepositoriesSummary,
+  unstampedSummary,
 } from "../src/lib/repositories-view.js";
 import { buildServeServer, repositoriesSources, type ServeDeps } from "../src/lib/serve.js";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -172,12 +174,13 @@ function repositories(entry: ReadModelBodyEntry | undefined): RepositoriesData {
   return entry.body.data as RepositoriesData;
 }
 
-/** The legacy route's JSON through its default path: the off-thread repo ledger index over the rotations. */
-async function legacySummary(options: RepositoriesSources["instances"][number]["options"]): Promise<RepoDashboardResult> {
+/** The legacy route's JSON through its default path (the off-thread repo ledger index over the rotations), less the
+ *  `generated_at` stamp that view version 2 moves to the instance's source. */
+async function legacySummary(options: RepositoriesSources["instances"][number]["options"]): Promise<RepositoriesSummary> {
   const summary = buildRepoDashboardRoutes({ ...options, clock: fixedClock(NOW) }).find((route) => route.path === "/v1/repos/summary")!;
   let sent = "";
   await summary.handler({ url: "/v1/repos/summary", headers: {} } as never, { writeHead: () => undefined, end: (text: string) => void (sent = text) } as never, {} as never);
-  return JSON.parse(sent) as RepoDashboardResult;
+  return unstampedSummary(JSON.parse(sent) as RepoDashboardResult);
 }
 
 test("repositories from the read model equal the repos summary of each instance", async (t) => {
