@@ -176,8 +176,7 @@ test("W1-T4942: the real credit builder reads merge paths from git", () => {
   assert.equal(creditIsReconcilable(code[0]!), true);
 
   const filing = build("W1-T4942", 9102, mergeEvidenceAt(9102, "chore: wip", "plan/tasks.d/W1-T4942-x.yaml"));
-  assert.equal(filing[0]?.creditHasBuildDiff, false);
-  assert.equal(creditIsReconcilable(filing[0]!), false);
+  assert.deepEqual(filing, [], "a plan-only merge is refused before credit candidacy");
 
   const absent = build("W1-T4942", 9103, mergeEvidenceAt(9999, "fix(plan): other pr", "src/lib/plan.ts"));
   assert.equal(absent[0]?.creditHasBuildDiff, undefined, "a PR outside the read window is unknown");
