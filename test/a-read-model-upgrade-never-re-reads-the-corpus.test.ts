@@ -184,7 +184,8 @@ test("a store open is given twice the slowest open the worker reported before it
     stateDir, instances: [{ name: "core", ledgerDir: stateDir }], stopWaitMs: 20, clock: hand.clock, observe: messages.observe,
     workerUrl: scriptedWorker(`parentPort.postMessage({ type: "progress", instance: "core", phase: "opened", ms: ${slowOpenMs} });
       parentPort.postMessage({ type: "progress", instance: "core", phase: "open" }); setInterval(() => {}, 1000);`),
-    log: (step) => void logged.push(step), every: (run) => ((watch = run), () => undefined),
+    log: (step) => void logged.push(step),
+    every: (run) => ((watch = run), () => undefined),
   });
   t.after(() => handle.stop());
   const opening = messages.next(isProgress("open"));

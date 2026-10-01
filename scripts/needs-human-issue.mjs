@@ -144,7 +144,7 @@ function ghJson(args, exec) {
 }
 
 export function deliver(
-  { source, title, body, label = 'needs-human', repo },
+  { source, title, body, label = 'needs-human', repo, anyLabel = false },
   exec = (file, args) => execFileSync(file, args, { encoding: 'utf8' }),
 ) {
   const marker = markerFor(source);
@@ -152,10 +152,11 @@ export function deliver(
 
   // A missing label must not sink the delivery: `gh issue list --label` errors when the label does
   // not exist yet, and an unnotified human is a worse outcome than an unlabelled issue.
+  // `anyLabel` (W1-T5033) finds a thread a human relabelled away from `label`; creation still applies it.
   let open = [];
   try {
     open = ghJson(
-      ['issue', 'list', ...repoArgs, '--state', 'open', '--label', label, '--limit', '100', '--json', 'number,body,title'],
+      ['issue', 'list', ...repoArgs, '--state', 'open', ...(anyLabel ? [] : ['--label', label]), '--limit', anyLabel ? '1000' : '100', '--json', 'number,body,title'],
       exec,
     );
   } catch {

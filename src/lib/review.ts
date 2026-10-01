@@ -6819,6 +6819,7 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
     "claim, for the same reason, as scripts/rule25-precheck.mjs above. It also FAILS OPEN on an " +
     "unreadable merged surface, so it cannot manufacture a refusal CI would not already reach.",
   "scripts/clock-shift.mjs": "clock-drift ops tool for clock-sweep.yml, not a quality gate",
+  "scripts/clock-sweep-deliver.mjs": "clock-drift ops tool for clock-sweep.yml, not a quality gate",
   "scripts/clock-sweep.mjs": "clock-drift ops tool for clock-sweep.yml, not a quality gate",
   "scripts/flake-retry-aggregate.mjs":
     "VERIFIED NON-INSTRUMENT (W1-T2904) — reads scripts/test-with-retry.mjs's own FLAKE-RETRY lines and " +
