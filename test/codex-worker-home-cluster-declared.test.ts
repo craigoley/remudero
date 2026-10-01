@@ -64,12 +64,14 @@ test("W1-T2850: the probe works when the interpreter is NOT at the path the test
     /ENOENT/,
     "a hardcoded path that is absent is exactly how this failed on the mini",
   );
-  const out = execFileSync("bash", ["-ic", 'printf %s "${ANTHROPIC_API_KEY-}"'], {
+  // Interactive startup can print a host-local banner before the command. Frame only the
+  // probe's own output so PATH resolution remains the claim, not silence from /etc/bash.bashrc.
+  const out = execFileSync("bash", ["-ic", 'printf "\\nRMD_PROBE=%s\\n" "${ANTHROPIC_API_KEY-}"'], {
     encoding: "utf8",
     env,
     stdio: ["ignore", "pipe", "ignore"],
   });
-  assert.equal(out, "sentinel-value", "PATH resolution reads the env back correctly");
+  assert.match(out, /(?:^|\n)RMD_PROBE=sentinel-value\n$/, "PATH resolution reads the env back correctly");
 });
 
 test("W1-T2850: NO host cluster is declared for this file — a cluster over a fixed defect is a false attribution", () => {

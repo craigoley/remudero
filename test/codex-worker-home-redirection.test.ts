@@ -75,11 +75,16 @@ function materializeOutsideRepo(workerHome: string, realHome: string): void {
  * defect permanently — which is the trap W1-T2850's own design (iii) names.
  */
 function interactiveBashAnthropicKey(env: Record<string, string | undefined>): string {
-  return execFileSync("bash", ["-ic", "printf %s \"${ANTHROPIC_API_KEY-}\""], {
+  // Interactive startup may print a host-local banner before the probe. Read only the
+  // command's framed value; an exact whole-stdout assertion is not portable to that host.
+  const output = execFileSync("bash", ["-ic", "printf '\\nRMD_KEY_PROBE=%s\\n' \"${ANTHROPIC_API_KEY-}\""], {
     encoding: "utf8",
     env,
     stdio: ["ignore", "pipe", "ignore"],
   });
+  const match = /(?:^|\n)RMD_KEY_PROBE=([^\n]*)\n$/.exec(output);
+  assert.ok(match, "the interactive shell must execute the framed key probe");
+  return match[1];
 }
 
 // ── the leak itself: asserted on the VALUE, per the falsifier ───────────────────────────────────
