@@ -88,6 +88,8 @@ import { buildReadModelViewRoutes, type ViewBodySource } from "./views.js";
 import { createViewEvents, VIEW_EVENTS_PATH, type ViewEvents } from "./view-events.js";
 import { navBadgeView, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
 import { NOW_VIEW_NAME } from "./now-view.js";
+import { FEEDBACK_VIEW_NAME, feedbackLegacyView } from "./feedback-view.js";
+import { INBOX_VIEW_NAME, inboxLegacyView } from "./inbox-view.js";
 import { startRepositoriesSourcePublisher, type RepositoriesSources } from "./repositories-view.js";
 import { withViewShadow } from "./view-shadow.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnapshotCache, DEFAULT_POLL_MS, type BoardDeps } from "./board.js";
@@ -2528,7 +2530,7 @@ function assembleServeRoutes(
     { instanceId: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository, analytics: currentAnalyticsSnapshot, memory: operatorAgentMemory, ledgerPath: deps.ledgerPath },
     ...badgeScopes];
   const modelApprovals = deps.modelApprovals ?? [];
-  const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME], servedByDefault: [readModelStatusView.name],
+  const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME], servedByDefault: [readModelStatusView.name],
     ...(readModel ? { readModel } : {}), every: deps.readModel?.every, log: deps.log });
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
   // server start; both the shell span and GET /v1/version close over this one value and neither
@@ -2659,8 +2661,8 @@ function assembleServeRoutes(
     }),
     buildRecentRoute(deps.board),
     ...buildReadModelViewRoutes(withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name],
-      readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME], requiredParams: { [NOW_VIEW_NAME]: ["instance"] },
-      legacy: [navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: navBadgeScopes })] })),
+      readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME], requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"] },
+      legacy: [navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: navBadgeScopes }), inboxLegacyView(panelGraphDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan)] })),
     ...viewEvents.routes,
     buildInboxDigestsRoute({ root: deps.fleetControlRoot }),
     withRepairLadder(buildDaemonHealthRoute(daemonHealthDeps), readLadder),

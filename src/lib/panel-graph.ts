@@ -1710,6 +1710,11 @@ export function classifyAllProposalsMemo(deps: PanelGraphDeps, readPlanSnapshot?
   return result;
 }
 
+/** The last classification this deps' memo holds, without computing one: what a cheap synchronous reader may show. */
+export function peekClassifiedInbox(deps: PanelGraphDeps): ClassifiedInbox | undefined {
+  return inboxClassifyStates.get(deps)?.last?.result;
+}
+
 /** PRIMARY CONTROL on how long one inbox recompute holds the event loop: proposals classified between yields. Each can
  *  cost a `git grep` spawn (~8 ms) per uncached anchor, so ten is well under 200 ms even on a cold commit. */
 export const INBOX_CLASSIFY_SLICE = 10;
@@ -1752,6 +1757,74 @@ export async function classifyAllProposalsSliced(
   return promise;
 }
 
+/** GET /v1/inbox's lanes over one classification pass: what the route answers, and what the inbox view pages (inbox-view.ts). */
+export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "classifications" | "ledgerLines">, inboxRoot: string) {
+  const { proposals, classifications, ledgerLines } = classified;
+  // W1-T4087: every item carries its plain message — the stored one, or its kind's template.
+  const plainStore = readPlainStore(plainStorePath(join(inboxRoot, "state")));
+
+  const ready: InboxReadyItem[] = [];
+  const drafting: InboxDraftingItem[] = [];
+  const notReady: InboxNotReadyItem[] = [];
+  const declined: InboxDeclinedItem[] = [];
+  const byId = new Map(proposals.map((p) => [p.id, p]));
+  for (const classification of classifications) {
+    const proposal = byId.get(classification.proposalId);
+    if (!proposal) continue; // unreachable — classifications are 1:1 with proposals
+    if (classification.state === "ready") {
+      ready.push({
+        proposalId: proposal.id,
+        summary: proposal.summary,
+        plain: plainInboxMessage(proposal, plainStore),
+        stampLine: classification.draft?.stampLine,
+        draftedTasks: classification.draft ? draftedTaskSummaries(classification.draft.fragmentYaml, proposal.id) : [],
+      });
+    } else if (classification.state === "drafting") {
+      drafting.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), spawnedAt: classification.draftSpawnedAt ?? "" });
+    } else if (classification.state === "declined") {
+      declined.push({
+        proposalId: proposal.id,
+        summary: proposal.summary,
+        plain: plainInboxMessage(proposal, plainStore),
+        reason: classification.declinedReason ?? "declined by an operator",
+      });
+    } else if (classification.state === "not_ready") {
+      // W1-T2604 (finding (i)): the failing predicate(s) classifyProposal already named,
+      // never a bare "not_ready" — see InboxNotReadyItem's own doc.
+      notReady.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), reasons: classification.reasons });
+    }
+  }
+  // W1-T4086: split every lane by who must act. `needsYou` holds only the operator's items;
+  // `fleet` holds the fleet's own findings with the lane each sits in. The four top-level
+  // lanes stay unchanged for one release so the console can move over without a break.
+  const isOperator = (item: { proposalId: string }) => inboxOwner({ id: item.proposalId }) === "operator";
+  const fleetDecisions = fleetLaneDecisions(ledgerLines as never, fleetLaneStoreForDisplay(join(inboxRoot, "state")));
+  const needsYou = {
+    ready: ready.filter(isOperator),
+    drafting: drafting.filter(isOperator),
+    notReady: notReady.filter(isOperator),
+    declined: declined.filter(isOperator),
+  };
+  const fleet: InboxFleetItem[] = [
+    ...ready.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "ready" as const })),
+    ...drafting.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "drafting" as const })),
+    ...notReady.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "notReady" as const })),
+    ...declined.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "declined" as const })),
+  ]
+    .filter((i) => !isOperator(i))
+    // W1-T4089: each fleet finding's latest fleet-lane decision and its plain reason.
+    .map((i) => ({ ...i, ...fleetDecisions.get(i.proposalId) }));
+  const counts = {
+    ready: ready.length,
+    drafting: drafting.length,
+    notReady: notReady.length,
+    declined: declined.length,
+    fleet: fleet.length,
+    needsYou: { ready: needsYou.ready.length, drafting: needsYou.drafting.length, notReady: needsYou.notReady.length, declined: needsYou.declined.length },
+  };
+  return { ready, drafting, notReady, declined, needsYou, fleet, counts };
+}
+
 /**
  * GET /v1/inbox — read-scoped. The ratification inbox's (W1-T110) ready and drafting tiers,
  * computed the way `rmd inbox` prints them, for the shell's NEEDS ME section. Deferred-with-
@@ -1776,71 +1849,10 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
         sendJson(res, 400, { error: "invalid_request", detail: shape.error });
         return;
       }
-      const { proposals, classifications, ledgerLines } = await classifyAllProposalsSliced(deps, readPlanSnapshot);
-      // W1-T4087: every item carries its plain message — the stored one, or its kind's template.
-      const plainStore = readPlainStore(plainStorePath(join(deps.inboxRoot, "state")));
-
-      const ready: InboxReadyItem[] = [];
-      const drafting: InboxDraftingItem[] = [];
-      const notReady: InboxNotReadyItem[] = [];
-      const declined: InboxDeclinedItem[] = [];
-      for (const classification of classifications) {
-        const proposal = proposals.find((p) => p.id === classification.proposalId);
-        if (!proposal) continue; // unreachable — classifications are 1:1 with proposals
-        if (classification.state === "ready") {
-          ready.push({
-            proposalId: proposal.id,
-            summary: proposal.summary,
-            plain: plainInboxMessage(proposal, plainStore),
-            stampLine: classification.draft?.stampLine,
-            draftedTasks: classification.draft ? draftedTaskSummaries(classification.draft.fragmentYaml, proposal.id) : [],
-          });
-        } else if (classification.state === "drafting") {
-          drafting.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), spawnedAt: classification.draftSpawnedAt ?? "" });
-        } else if (classification.state === "declined") {
-          declined.push({
-            proposalId: proposal.id,
-            summary: proposal.summary,
-            plain: plainInboxMessage(proposal, plainStore),
-            reason: classification.declinedReason ?? "declined by an operator",
-          });
-        } else if (classification.state === "not_ready") {
-          // W1-T2604 (finding (i)): the failing predicate(s) classifyProposal already named,
-          // never a bare "not_ready" — see InboxNotReadyItem's own doc.
-          notReady.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), reasons: classification.reasons });
-        }
-      }
+      const { ready, drafting, notReady, declined, needsYou, fleet, counts } = inboxLanes(await classifyAllProposalsSliced(deps, readPlanSnapshot), deps.inboxRoot);
       // A read writes nothing: the ratified-row prune and the snapshot the daemon's fleet lane acts
       // on (W1-T4089) are written by serve's slow lane on a cadence (inbox-view.ts).
-      // W1-T4086: split every lane by who must act. `needsYou` holds only the operator's items;
-      // `fleet` holds the fleet's own findings with the lane each sits in. The four top-level
-      // lanes stay unchanged for one release so the console can move over without a break.
-      const isOperator = (item: { proposalId: string }) => inboxOwner({ id: item.proposalId }) === "operator";
-      const fleetDecisions = fleetLaneDecisions(ledgerLines as never, fleetLaneStoreForDisplay(join(deps.inboxRoot, "state")));
-      const needsYou = {
-        ready: ready.filter(isOperator),
-        drafting: drafting.filter(isOperator),
-        notReady: notReady.filter(isOperator),
-        declined: declined.filter(isOperator),
-      };
-      const fleet: InboxFleetItem[] = [
-        ...ready.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "ready" as const })),
-        ...drafting.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "drafting" as const })),
-        ...notReady.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "notReady" as const })),
-        ...declined.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "declined" as const })),
-      ]
-        .filter((i) => !isOperator(i))
-        // W1-T4089: each fleet finding's latest fleet-lane decision and its plain reason.
-        .map((i) => ({ ...i, ...fleetDecisions.get(i.proposalId) }));
       const lanes = { ready, drafting, notReady, declined, fleet };
-      const counts = {
-        ready: ready.length,
-        drafting: drafting.length,
-        notReady: notReady.length,
-        declined: declined.length,
-        fleet: fleet.length,
-        needsYou: { ready: needsYou.ready.length, drafting: needsYou.drafting.length, notReady: needsYou.notReady.length, declined: needsYou.declined.length },
-      };
       if (shape.section === undefined) sendJson(res, 200, { ready, drafting, notReady, declined, needsYou, fleet, counts });
       else if (shape.section === "needsYou") sendJson(res, 200, { needsYou, counts });
       else {
