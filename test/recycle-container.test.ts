@@ -1087,7 +1087,7 @@ test("a recycle with scratch off or an unmounted scratch root launches exactly a
 
 // ── W1-T4197: a recycle never lifts a pause it did not write ────────────────────────────────────
 
-const OPERATOR_PAUSE = JSON.stringify({ reason: "operator hold: investigating", requestedAt: "2026-10-01T00:00:00.000Z", pid: 4242, host: "op-host" });
+const OPERATOR_PAUSE = JSON.stringify({ reason: "operator hold: investigating deploy/recycle-container.sh", requestedAt: "2026-10-01T00:00:00.000Z", pid: 4242, host: "op-host" });
 
 function stateWithPause(body: string): { state: string; pausePath: string } {
   const state = mkdtempSync(join(tmpdir(), "recycle-state-"));

@@ -1052,7 +1052,10 @@ echo "recycle-container: pulled image id ${PULLED_IMAGE_ID}"
 # line whose `reason` names deploy/recycle-container.sh: that is what marks it as the recycle's, and what
 # the drain's pause-reason reader (W1-T5127) keys on, so the reason text must not change.
 mkdir -p "$(dirname "${PAUSE_FILE}")"
-if [ -e "${PAUSE_FILE}" ] && ! grep -qF -- "${RECYCLE_PAUSE_REASON}" "${PAUSE_FILE}" 2>/dev/null; then
+# A human reason may mention this script while investigating it. Only the exact reason field
+# emitted by a prior recycle identifies a stale recycle PAUSE; an unreadable or differently
+# formatted file is conservatively left to its owner.
+if [ -e "${PAUSE_FILE}" ] && ! grep -qF -- "\"reason\":\"${RECYCLE_PAUSE_REASON}\"" "${PAUSE_FILE}" 2>/dev/null; then
   echo "recycle-container: PAUSE already engaged by someone else — left in place, and never removed by this recycle"
 else
   RECYCLE_PAUSE_BODY="{\"reason\":\"${RECYCLE_PAUSE_REASON}\",\"requestedAt\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",\"pid\":$$,\"host\":\"$(hostname)\"}"
