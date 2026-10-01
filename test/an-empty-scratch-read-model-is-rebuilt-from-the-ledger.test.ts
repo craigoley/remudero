@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fixedClock } from "../src/lib/clock.js";
 import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
 import { readModelCommand } from "../src/lib/read-model-cli.js";
 import { READ_MODEL_DB_DIR_ENV, readModelDbDir } from "../src/lib/read-model-db.js";
@@ -74,8 +75,11 @@ test("shadow readiness counters survive a deallocate that wipes the scratch read
   const dbDir = join(scratch(t, "scratch-rm-shadow-nvme"), "read-model");
   withDbDir(t, `${stateDir}:${dbDir}`);
   const ledgerDir = rowsDir(t);
+  // Keep the view scheduler and these timestamped rows at one instant; wall-clock pressure in
+  // parallel coverage shards can defer a view past the assertion's single tick.
+  const clock = fixedClock(Date.parse("2026-10-01T00:01:00.000Z"));
   const badge: ReadModelView = { name: "nav-badge", version: 1, materialize: () => [{ key: "", data: { count: 2 }, sources: [] }] };
-  const tickerOver = (posted: ReadModelWorkerMessage[]) => createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], post: (m) => void posted.push(m), oracle: "off", views: [badge, readModelStatusView] });
+  const tickerOver = (posted: ReadModelWorkerMessage[]) => createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], post: (m) => void posted.push(m), oracle: "off", views: [badge, readModelStatusView], clock });
   const shown = (posted: ReadModelWorkerMessage[]) => posted.flatMap((m) => (m.type === "body" && m.entry.view === "read-model" ? [m.entry.body.data as { shadow?: Array<{ view: string; samples: number; streakSamples: number }> }] : [])).at(-1)?.shadow;
 
   const before = tickerOver([]);

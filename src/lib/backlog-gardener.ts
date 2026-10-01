@@ -107,12 +107,10 @@ export function backlogEvidence(
   return { ...facts, signature: evidenceHash(facts) };
 }
 
-/** Retirement requires positive evidence. A missing recent row alone is never enough. */
+/** Retirement requires proof or a merged replacement, not an unexplained quiet period. */
 export function judgeBacklog(e: BacklogEvidence): { disposition: BacklogDisposition; reason: string } {
   if (e.proofsHold) return { disposition: { kind: "retire", retirement: "closed" }, reason: "Acceptance proofs now hold on main and did not at filing." };
   if (e.overtaken) return { disposition: { kind: "retire", retirement: "withdrawn" }, reason: `Merged commit ${e.overtaken.sha} covered its declared surface: ${e.overtaken.files.join(", ")}.` };
-  const stopped = e.symptoms.filter((s) => s.earlier > 0 && s.recent === 0);
-  if (stopped.length > 0 && e.fanout === 0) return { disposition: { kind: "retire", retirement: "withdrawn" }, reason: `Previously observed symptom stopped in the trailing day: ${stopped.map((s) => `${s.step} (${s.earlier} earlier, 0 recent)`).join(", ")}.` };
   if (e.fanout > 0 || e.symptoms.some((s) => s.recent > s.previousDay && s.recent > 0)) return { disposition: { kind: "band", band: 2 }, reason: e.fanout > 0 ? `Unblocks ${e.fanout} open dependent(s).` : "Its cited symptom is growing against the previous day." };
   if (e.symptoms.some((s) => s.recent > 0)) return { disposition: { kind: "band", band: 3 }, reason: "Its cited symptom remains live." };
   return { disposition: { kind: "band", band: 4 }, reason: "No observed live symptom or open dependent; the task remains valid." };
@@ -140,9 +138,11 @@ export function backlogInventory(sources: BacklogSources): BacklogInventory {
     if (task.priority !== undefined && (!marker || task.priority !== Number(marker[1]))) continue;
     if (examined >= mergeBudget) break;
     const evidence = backlogEvidence(task, sources.repoRoot, fanout, rows, history, now, sources.fileExists, proofsHolding.has(task.id));
-    if (marker && marker[2] === evidence.signature) continue;
-    examined++;
     const judged = judgeBacklog(evidence);
+    // A new evidence sample is not a new placement decision. In particular, rolling ledger
+    // counts change every day even while the chosen band remains the same.
+    if (marker && judged.disposition.kind === "band" && judged.disposition.band === Number(marker[1])) continue;
+    examined++;
     candidates.push({ class: judged.disposition.kind === "retire" ? "retire" : "place", target: task.id, reason: judged.reason, disposition: judged.disposition, evidence });
   }
   return { plan, candidates, mergeBudget, examined };
@@ -165,7 +165,7 @@ export function applyBacklogActions(root: string, shards: ReadonlyMap<string, st
     const declared = /^ {2}priority: (\d+)[ \t]*$/m.exec(text);
     if (!/^ {2}status: queued[ \t]*$/m.test(text) || /^ {2}retirement:/m.test(text)) continue;
     if (declared && (!old || Number(declared[1]) !== oldBand)) continue;
-    let next = old ? text.replace(MARKER, "") : text;
+    let next = old ? text.replace(/^ {2}# backlog gardener: band=(?:2|3|4) evidence=[a-f0-9]{16}\r?\n?/m, "") : text;
     if (action.disposition.kind === "band") {
       const band = action.disposition.band;
       next = declared ? next.replace(/^ {2}priority: \d+[ \t]*$/m, `  priority: ${band}`) : next.replace(/^ {2}status: queued[ \t]*$/m, `  priority: ${band}\n  status: queued`);
@@ -217,7 +217,7 @@ export function backlogGardenSpec(deps: GardenerDeps, overrides: Partial<Backlog
       return {
         paths,
         title: `chore(plan): backlog gardener proposes ${plan.acting[0]} for ${landed.length} task(s)`,
-        body: ["The backlog gardener (W1-T4941) proposes these plan-only changes. Close this PR to decline them.", "", ...landed.map((a) => `- **${a.target}**: ${a.disposition.kind === "band" ? `band ${a.disposition.band}` : a.disposition.retirement}. ${a.reason} Evidence: ${describe(a.evidence)}. Shard: \`${shards.get(a.target)}\`.`), "", "## Acceptance", ...landed.map((a) => `- claim: ${a.target} carries the proposed backlog decision\n  proof: grep: backlog gardener: in ${shards.get(a.target)}`)].join("\n"),
+        body: ["The backlog gardener (W1-T4941) proposes these plan-only changes. Close this PR to decline them.", "", ...landed.map((a) => `- **${a.target}**: ${a.disposition.kind === "band" ? `band ${a.disposition.band}` : a.disposition.retirement}. ${a.reason} Evidence: ${describe(a.evidence)}. Shard: \`${shards.get(a.target)}\`.`), "", "## Acceptance", ...landed.map((a) => `- claim: ${a.target} carries the proposed backlog decision\n  proof: grep: # backlog gardener: ${a.disposition.kind === "band" ? `band=${a.disposition.band}` : "retirement"} evidence=${a.evidence.signature} in ${shards.get(a.target)}`)].join("\n"),
       };
     },
   };
