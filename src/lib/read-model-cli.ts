@@ -38,6 +38,8 @@ export type ViewSwitch = "serve" | "shadow" | "off" | "auto";
 export interface ReadModelSwitches {
   projector: ProjectorSwitch;
   views: Record<string, ViewSwitch>;
+  /** Keys this CLI never sets (`push`, `github`) round-trip untouched, so a view switch cannot reset them. */
+  [other: string]: unknown;
 }
 
 export interface ReadModelCliOptions {
@@ -57,7 +59,7 @@ export function readReadModelSwitches(stateDir: string): ReadModelSwitches {
   const path = readModelSwitchesPath(stateDir);
   if (!existsSync(path)) return { projector: "on", views: {} };
   const raw = JSON.parse(readFileSync(path, "utf8")) as Partial<ReadModelSwitches>;
-  return { projector: raw.projector === "off" ? "off" : "on", views: { ...(raw.views ?? {}) } };
+  return { ...raw, projector: raw.projector === "off" ? "off" : "on", views: { ...(raw.views ?? {}) } };
 }
 
 const USAGE = "usage: rmd read-model rebuild [--instance <id>] [--ledger-dir <dir>] [--window-days <n>] | status [--json] | switch <projector|<view>> <mode>";
