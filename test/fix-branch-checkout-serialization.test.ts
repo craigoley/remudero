@@ -444,6 +444,8 @@ async function driveDispatchFix(
   let threw: unknown;
   try {
     const effects = buildSweepEffects({
+      // W1-T4073: the fake head is no real commit; an empty head contract leaves the task as resolved.
+      resolveTaskContractAtHeadImpl: () => ({ criteria: [] }),
       owner: "acme",
       repo: "scratch-fbcs-repo",
       config: { root } as never,

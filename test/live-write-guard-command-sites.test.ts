@@ -997,6 +997,8 @@ test("GUARDED SITE sweep fix-rung push: dispatchFix drives runFixRung to its bes
     let fixSpawns = 0;
     const steps: string[] = [];
     const effects = buildSweepEffects({
+      // W1-T4073: the fixture's head is no real commit; an empty head contract keeps the task as resolved.
+      resolveTaskContractAtHeadImpl: () => ({ criteria: [] }),
       owner: "acme",
       repo: "sandboxrepo",
       config: { claudeBin: "/usr/bin/true", root, installRoot: REPO_ROOT } as never,
