@@ -1,0 +1,30 @@
+- id: W1-T5022
+  title: "Escalate an aged dependency-review hold once, with a named owner action"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator-approved Orca comparison, 2026-09-30"
+  files: [src/lib/dep-review.ts, src/run-task.ts, test/dep-review-held-escalation.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at c94c2bf49: a dependency-review escalation opens a human issue, but a hold caused by red
+    checks is ledger-only. Sweep treats the PR as active while the normal fix rung excludes dependency branches.
+    A persistent hold can therefore have no owner action.
+  design: |
+    After a bounded age on the same held head, open one deduplicated escalation using the existing dependency
+    escalation builder. Name the blocker and safe operator action, and close or resolve the ask when the head
+    changes or checks recover. Do not escalate short-lived red checks and do not make the PR require routine
+    human approval. Surface through the unified human-gate projection when it exists, but do not depend on it.
+  acceptance:
+    - claim: "a persistent held dependency PR opens one actionable escalation, not one per sweep"
+      proof: 'grep: test("W1-T5022: aged dependency hold escalates once per head" in test/dep-review-held-escalation.test.ts'
+    - claim: "a recovered or changed head retires the old hold escalation"
+      proof: 'grep: test("W1-T5022: recovered dependency hold retires its escalation" in test/dep-review-held-escalation.test.ts'
+  note: "reservation hand-off: run-W1-T5022-1790813900000 -> file/plan-5016-5025-1790815200000"

@@ -12639,7 +12639,10 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
-          description: Serve runs no read-model worker (`read_model_absent`).
+          description: >
+            Serve runs no read-model worker (`read_model_absent`), or the push kill switch is not on
+            (`push_disabled`: state/read-model/switches.json lacks `"push": "on"`). Switching push off ends
+            every open stream with a `handover` whose reason is `push_disabled`.
 
   /v1/views/versions:
     get:

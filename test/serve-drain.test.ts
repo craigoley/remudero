@@ -11,6 +11,7 @@ import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { join } from "node:path";
 import { createServeDrain, EXIT_WATCHDOG_SCRIPT, exitWithin } from "../src/lib/serve-drain.js";
 import { createService, type SseRoute, type SseSend } from "../src/lib/service.js";
+import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const TOKENS = { read: "read-token", write: "write-token" };
@@ -328,7 +329,7 @@ test("an exit blocked by a worker thread in a native call is killed at the deadl
   const ms = performance.now() - startedAt;
   assert.equal(signal, "SIGKILL", `the blocked exit was killed, not joined (code ${code}, ${stderr})`);
   assert.match(stderr, /exit still blocked after 300 ms/);
-  assert.ok(ms < 20_000, `killed near the deadline, not after the query (${Math.round(ms)} ms)`);
+  assertWallClockBound(ms, 20_000, `killed near the deadline, not after the query (${Math.round(ms)} ms)`);
 });
 
 test("the exit watchdog leaves alone a process that is no longer its parent", async () => {

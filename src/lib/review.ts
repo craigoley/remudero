@@ -2044,6 +2044,8 @@ export interface CertainHeadRefusal {
   claim: string;
   proof: string;
   why: string;
+  /** Set ONLY for a `grep: test("<title>"` proof whose test file exists at head: the builder wrote that title (W1-T5026). */
+  blocking?: true;
 }
 
 /** True when every line of the candidate files that carries `label` is a comment line: node --test can match no title
@@ -2051,6 +2053,11 @@ export interface CertainHeadRefusal {
 function titleOnlyInComments(cwd: string, files: readonly string[], label: string): boolean {
   const lines = files.flatMap((f) => readFileSync(join(cwd, f), "utf8").split("\n").filter((l) => l.includes(label)));
   return lines.length > 0 && lines.every((l) => /^\s*(\/\/|\/\*|\*)/.test(l));
+}
+
+/** A `test("<title>"` pattern aimed at a test file that EXISTS: the builder authors those titles, so a miss is theirs to fix. */
+function isTitleLiteralOfExistingTest(pattern: string, target: string, cwd: string): boolean {
+  return /^test\("/.test(pattern) && !pattern.includes("\n") && target.startsWith("test/") && existsSync(join(cwd, target));
 }
 
 /**
@@ -2075,6 +2082,7 @@ export function certainHeadRefusals(
     const w = c.satisfied_by ? null : parseWhitelistedProof(proof);
     if (!w) continue;
     let why: string | undefined;
+    let blocking = false;
     if (w.kind === "test" && w.nameFiltered && w.runner !== "vitest") {
       if (looksLikeProseDescription(w.label)) continue;
       const resolution = resolveNameFilteredCandidates(cwd, w.label);
@@ -2087,12 +2095,15 @@ export function certainHeadRefusals(
       if (!existsSync(join(cwd, w.label))) why = `the test file ${w.label} does not exist`;
     } else if (w.kind === "grep" && dialectGrepTargetPath(w) !== undefined) {
       try {
-        if (exec(w, cwd) !== "pass") why = `grep finds no match: the reviewer runs grep -arn -- '${w.args[2]}' ${w.args[3]}`;
+        if (exec(w, cwd) !== "pass") {
+          why = `grep finds no match: the reviewer runs grep -arn -- '${w.args[2]}' ${w.args[3]}`;
+          blocking = isTitleLiteralOfExistingTest(w.args[2]!, w.args[3]!, cwd);
+        }
       } catch {
         continue; // deliberate: an exec error is an environment gap the reviewer degrades, never a certain refusal
       }
     }
-    if (why) refusals.push({ claim: c.claim, proof, why });
+    if (why) refusals.push({ claim: c.claim, proof, why, ...(blocking ? { blocking: true as const } : {}) });
   }
   return refusals;
 }

@@ -101,6 +101,8 @@ export interface LedgerProjectorOptions {
   /** Runs after an archive descriptor is opened and identified, before its contents are read. */
   beforeArchiveRead?: (path: string) => void;
   projections?: readonly LedgerRowProjection[];
+  /** Runs after each committed transaction: the worker's heartbeat, so a long catch-up is never read as silence. */
+  onCommit?: (source: string, lines: number) => void;
 }
 
 export interface ProjectorTickResult {
@@ -124,6 +126,8 @@ export interface ProjectorTickResult {
   /** Source bytes (compressed, for an archive) this tick consumed, and those still unapplied when it stopped. */
   sourceBytes: number;
   backlogBytes: number;
+  /** Read archives whose pre-head checkpoint was given its head this tick, without a re-read. */
+  upgraded: number;
 }
 
 export interface LedgerProjector {
@@ -134,6 +138,9 @@ export interface LedgerProjector {
    */
   tick(budget?: { budgetMs: number }): ProjectorTickResult;
 }
+
+/** A read archive whose checkpoint predates heads, given its head without re-reading it. */
+type ArchiveUpgrade = { name: string; ino: string; size: number; fp: string };
 
 interface Checkpoint {
   ino: string;
@@ -201,8 +208,10 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
 
   /** Where the next transaction ends: the whole range, or as many lines as fit what is left of the budget. */
   function rangeEnd(buf: Buffer, from: number, to: number, c: ProjectorTickResult): number {
-    if (linesPerMs === undefined || deadline === Number.POSITIVE_INFINITY) return to;
-    let lines = Math.max(c.transactions === 0 ? MIN_TRANSACTION_LINES : 1, Math.floor(linesPerMs * (deadline - clock.now())));
+    if (deadline === Number.POSITIVE_INFINITY) return to;
+    // An unmeasured rate is calibrated on a small transaction: a whole archive in one, on a starved
+    // host, outlasted the silent-worker watchdog, and every respawn began that same transaction again.
+    let lines = linesPerMs === undefined ? MIN_TRANSACTION_LINES : Math.max(c.transactions === 0 ? MIN_TRANSACTION_LINES : 1, Math.floor(linesPerMs * (deadline - clock.now())));
     let at = from;
     while (lines-- > 0) {
       const nl = buf.indexOf(0x0a, at);
@@ -273,6 +282,7 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
       sql.generation.run();
     });
     c.transactions++;
+    opts.onCommit?.(source, c.lines - linesBefore);
     // A transaction too fast to time is measured as 1 ms: skipping it would pin a collapsed estimate forever.
     if (c.lines > linesBefore) linesPerMs = (c.lines - linesBefore) / Math.max(1, clock.now() - started);
   }
@@ -282,9 +292,20 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
     return prev.fp !== null && prev.fp.startsWith(PARTIAL_ARCHIVE) ? Number(prev.fp.slice(PARTIAL_ARCHIVE.length).split(":")[0]) : undefined;
   }
 
-  /** Whether a checkpoint describes these bytes: same size and head. A checkpoint without a head is re-read once. */
+  /**
+   * Whether a checkpoint describes these bytes: same size and head. A checkpoint written before
+   * archives carried a head (`fp` null when read whole, `partial:<length>` mid-file) is matched by
+   * name and size and given its head on first touch: re-reading every such archive re-applied the
+   * whole corpus, ~5M rows on the host, on each boot.
+   */
   function sameArchive(prev: Checkpoint, head: string, size: number): boolean {
-    return prev.size === size && prev.fp !== null && (prev.fp === `${ARCHIVE_HEAD}${head}` || (prev.fp.startsWith(PARTIAL_ARCHIVE) && prev.fp.endsWith(`:${head}`)));
+    if (prev.size !== size || prev.fp === null) return prev.size === size && prev.off === size;
+    if (isLegacyPartial(prev.fp)) return true;
+    return prev.fp === `${ARCHIVE_HEAD}${head}` || (prev.fp.startsWith(PARTIAL_ARCHIVE) && prev.fp.endsWith(`:${head}`));
+  }
+
+  function isLegacyPartial(fp: string): boolean {
+    return fp.startsWith(PARTIAL_ARCHIVE) && !fp.includes(":", PARTIAL_ARCHIVE.length);
   }
 
   /** The part of an archive not yet applied, in source bytes; a partial one is prorated. */
@@ -294,7 +315,7 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
     return length === undefined ? 0 : Math.round(size * (1 - prev.off / length));
   }
 
-  function ingestArchive(entry: LedgerCorpusEntry, known: Map<string, Checkpoint>, now: number, c: ProjectorTickResult): boolean {
+  function ingestArchive(entry: LedgerCorpusEntry, known: Map<string, Checkpoint>, now: number, c: ProjectorTickResult, upgrades: ArchiveUpgrade[]): boolean {
     const name = basename(entry.path);
     let data: Buffer;
     let ino: string;
@@ -308,7 +329,10 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
       ino = String(st.ino);
       size = Number(st.size);
       head = headFingerprint(fd, size);
-      if (archiveBacklog(prev, head, size) === 0) return true; // a rotation is immutable once named
+      if (archiveBacklog(prev, head, size) === 0) {
+        if (prev!.fp === null) upgrades.push({ name, ino, size, fp: `${ARCHIVE_HEAD}${head}` });
+        return true; // a rotation is immutable once named
+      }
       if (spent(c)) {
         c.pending = true;
         c.backlogBytes += archiveBacklog(prev, head, size);
@@ -325,7 +349,7 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
     } finally {
       if (fd !== undefined) closeSync(fd);
     }
-    const partial = prev !== undefined && partialLength(prev) !== undefined && sameArchive(prev, head, size) ? prev : undefined;
+    const partial = prev !== undefined && partialLength(prev) === data.length && sameArchive(prev, head, size) ? prev : undefined;
     let off = partial ? partial.off : 0;
     do {
       if (spent(c)) {
@@ -351,10 +375,17 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
     listedAt = now;
     const names = readdirSync(ledgerDir);
     let complete = true;
-    for (const entry of ledgerRotationEntries(names, ledgerDir)) complete = ingestArchive(entry, known, now, c) && complete;
+    const upgrades: ArchiveUpgrade[] = [];
+    for (const entry of ledgerRotationEntries(names, ledgerDir)) complete = ingestArchive(entry, known, now, c, upgrades) && complete;
     const present = new Set(names);
     const gone = [...known.keys()].filter((name) => !present.has(name));
-    if (gone.length > 0) withWriteTransaction(db, lease, () => gone.forEach((name) => sql.forget.run(name)));
+    if (gone.length > 0 || upgrades.length > 0) {
+      withWriteTransaction(db, lease, () => {
+        gone.forEach((name) => sql.forget.run(name));
+        for (const u of upgrades) sql.checkpoint.run(u.name, u.ino, u.size, u.size, u.fp);
+      });
+      c.upgraded += upgrades.length;
+    }
     // Close the gate only on a settled mtime: a change inside the same timestamp tick would not move it.
     gateMtimeMs = complete && now - dirMtimeMs > DIR_GATE_SETTLE_MS ? dirMtimeMs : undefined;
   }
@@ -412,7 +443,7 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
       deadline = budget ? now + budget.budgetMs : Number.POSITIVE_INFINITY;
       const c: ProjectorTickResult = {
         listed: false, archivesRead: 0, liveBytes: 0, liveRestarted: false, lines: 0, fresh: 0, duplicates: 0,
-        facts: 0, quarantined: 0, torn: 0, transactions: 0, unread: [], pending: false, sourceBytes: 0, backlogBytes: 0,
+        facts: 0, quarantined: 0, torn: 0, transactions: 0, unread: [], pending: false, sourceBytes: 0, backlogBytes: 0, upgraded: 0,
       };
       const known = new Map<string, Checkpoint>();
       for (const row of sql.checkpoints.all()) {

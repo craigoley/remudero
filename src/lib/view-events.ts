@@ -14,6 +14,8 @@
  * - `: hb` every 25 s, so an idle proxy never cuts the stream.
  * - `handover` ends every stream when serve drains, and a subscriber stalled past its bound.
  * - A small body rides in its `view` event (P2-05); `view.emitted` samples one event per key a minute (P2-07).
+ * - KILL SWITCH: `"push": "on"` in the read model's switches.json; absent or `off` answers 404 `push_disabled`, and
+ *   switching it off ends every open stream (`handover`) within a sweep.
  *
  * BACKPRESSURE IS LATEST-VALUE-WINS PER KEY (D4): while a socket holds more than the high-water mark, a
  * new event REPLACES the one pending for its key, so memory is bounded by keys, not by time stalled.
@@ -120,6 +122,8 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
   let seq = 0;
   let stopRunning: (() => void) | undefined;
 
+  const pushOn = (): boolean => opts.readModel?.switches().push === "on";
+
   const served = (name: string): boolean => {
     const mode = opts.readModel?.switches().views[name];
     return (mode ?? (opts.servedByDefault?.includes(name) ? "serve" : "off")) === "serve";
@@ -201,6 +205,10 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
   };
 
   const sweep = (): void => {
+    if (!pushOn()) {
+      for (const sub of [...subs]) end(sub, "push_disabled");
+      return;
+    }
     const now = clock.now();
     for (const judged of current(now).values()) emit(judged, "judge", now);
     for (const sub of subs) stalled(sub, now);
@@ -238,6 +246,11 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
       if (!readModel) {
         res.writeHead(404, { "content-type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ error: "read_model_absent" }));
+        return;
+      }
+      if (!pushOn()) {
+        res.writeHead(404, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "push_disabled" }));
         return;
       }
       const filter = new URL(req.url ?? "/", "http://localhost").searchParams.get("views");

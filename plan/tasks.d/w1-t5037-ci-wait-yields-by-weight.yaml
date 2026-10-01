@@ -1,0 +1,39 @@
+- id: W1-T5037
+  title: "A BUILD RUN WAITING ON CI STILL YIELDS TO ANY CODE ADVANCE — the daemon's externalWaitFreshness closure hands off on every material advance, but after W1-T4945 a busy daemon defers a low-weight advance, so the run gives up its CI wait and no restart follows"
+  repo: remudero
+  depends_on: [W1-T4945]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 10.00
+  risk: high
+  band_meaning: span
+  origin: "W1-T4945 build (#8223) flagged deviation 2; operator ask 2026-09-30: file and build what gives the fleet a leg up"
+  note: "reservation hand-off: plan-ci-wait-yield-by-weight-1790814555000 -> plan-ci-wait-yield-by-weight-1790814555000"
+  plan_refs: [W1-T3793, W1-T4945, W1-T4998]
+  files: [src/run-task.ts, test/a-ci-wait-yields-only-to-an-advance-that-restarts.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    W1-T3793 lets a build run hand off its external CI wait when the daemon is stale (run.freshness_handoff,
+    verdict handed_off/freshness_yield): about 31 of 113 build verdicts 2026-09-28..30. The closure in run-task.ts
+    (`externalWaitFreshness`, built in the daemon's drain deps) returns any stale material reading. W1-T4945 makes a
+    busy daemon defer a low-weight advance (other src/, weight 1) until idle or until staleness pressure reaches the
+    threshold within deploy-judge's 60-minute horizon. A run waiting on CI makes the daemon busy, so a low-weight
+    advance now ends that run's wait with no restart following: the yield costs the run its CI/review follow-through
+    and buys nothing.
+  design: |
+    The closure yields only when the advance ALONE would restart a busy daemon: freshnessAdvanceWorth (deploy-judge,
+    W1-T4945) summed over the stale reading's `changes` reaches DEPLOY_RESTART_SCORE_THRESHOLD, or the reading has
+    `logUnreadable` (an unknown change counts as full weight, as in W1-T4945). Otherwise it returns undefined and the
+    run keeps waiting. A daemon restart forced later by staleness pressure still drains, and the drain waits for the
+    run as it does today. No new bound and no new refusal.
+  acceptance:
+    - claim: "a low-weight advance does not end the CI wait of a build run"
+      proof: 'grep: test("W1-T5037: a low-weight advance does not end the CI wait of a build run" in test/a-ci-wait-yields-only-to-an-advance-that-restarts.test.ts'
+    - claim: "an advance to the daemon's own loop code still hands the CI wait off"
+      proof: 'grep: test("W1-T5037: an advance to the daemon loop still hands the CI wait off" in test/a-ci-wait-yields-only-to-an-advance-that-restarts.test.ts'
+  falsifier: |
+    Return every stale reading from the closure again and the first test sees run.freshness_handoff on a weight-1
+    advance.

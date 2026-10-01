@@ -1,0 +1,26 @@
+- id: W1-T5025
+  title: "Do not display stale worker telemetry for an unevidenced process"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 10.00
+  risk: low
+  origin: "operator-approved Orca comparison, 2026-09-30"
+  files: [src/lib/status.ts, test/status.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at c94c2bf49: status keeps the running status word for a run backed by an open PR, even when
+    processUnevidenced is true, and still emits the run's last workerState and workerTelemetry. The status
+    word is intentional; presenting a last-known worker activity as current is not.
+  design: |
+    When processUnevidenced, omit live worker telemetry or mark it explicitly unknown with its last-seen
+    timestamp. Preserve the open-PR status word and phase contract from W1-T4443. Verify the console consumer
+    before choosing omit versus explicit unknown; do not treat missing process evidence as proof of a dead PR.
+  acceptance:
+    - claim: "an open PR can remain running without displaying a dead worker as active"
+      proof: 'grep: test("W1-T5025: process-unevidenced run has no live worker telemetry" in test/status.test.ts'
+  note: "reservation hand-off: run-W1-T5025-1790813900000 -> file/plan-5016-5025-1790815200000"

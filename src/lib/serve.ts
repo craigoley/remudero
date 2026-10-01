@@ -3056,7 +3056,6 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     lastReadAt: () => lastReadAt,
     assessCheckout: deps.gatewayCheckout ?? (() => assessGatewayCheckout({ repoDir: serveRepoDir() })),
     drain: () => {
-      readModel?.stop();
       const drained = serveDrain.drain("recycle");
       viewEventsHandover("recycle");
       return drained.then(() => {});

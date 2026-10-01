@@ -1,0 +1,122 @@
+- id: W1-T5032
+  title: "A SUCCESSFUL PROOF AMENDMENT DEBITS THE FIX-STRIKE CAP — `recordIdentity` (src/run-task.ts, `buildProofAmendmentWritePorts`) appends an UNNUMBERED `fix.dispatch` row with `kind: proof_amendment` and `fixLedgerRowsForHead` (src/lib/sweep.ts) hands it to BOTH strike tallies, so `claimFixDispatch`'s regime-blind fresh count reads 1 worker strike + 1 amendment row = 2 against a `fixStrikeCap` of 2 and refuses `fix strikes exhausted under the claim` right after the amendment PR opens, and `priorStrikesFor` does the same whenever the regime reads keyword_only; drop the identity row from the tally at its one shared chokepoint and leave every other `fix.dispatch` reader and the row itself alone"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator ask 2026-09-30: another agent found that a proof amendment's own identity row spends a fix strike; re-verified in source, with a correction to the mechanism"
+  plan_refs: [W1-T3434, W1-T4957, W1-T4902, W1-T2520, W1-T2788, W1-T2306]
+  files:
+    - src/lib/sweep.ts
+    - test/a-proof-amendment-identity-row-is-not-a-fix-strike.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 at origin/main a23658e66, by driving the real functions with fakes in a scratch probe (deleted afterwards) and then
+    trial-patching the fix in a scratch tree. The finding reproduces, but its stated mechanism is only half right, and the correction
+    matters to the fix.
+
+    (1) THE ROW. `buildProofAmendmentWritePorts` (src/run-task.ts) implements `recordIdentity` as
+    `log("fix.dispatch", { kind: "proof_amendment", task_id, pr_number, identity_key, amendment_url, amendment_number })`. It has no `strike`,
+    no `head_sha`, no `verdict_regime`, no `round`, no `mode`. `requestProofAmendment` (src/lib/proof-amendment.ts) calls it once on
+    creating an amendment PR and once more when it ADOPTS an already-open one (probed-existing arm), so a re-dispatch writes another. Its
+    only intended job is idempotency: `lookupIdentity` (same ports) reads the newest `fix.dispatch` row with `kind === "proof_amendment"` and
+    the same `identity_key` so a re-dispatch resumes the open amendment instead of opening a second. Both routes share the writer: the
+    capped-green route (`dispatchProofAmendmentWrite`, called from `runFixRung` when `fixMode === "proof-discrimination"`) and any future
+    route through `requestProofAmendment`.
+
+    (2) WHO TALLIES IT. Both strike tallies go through `fixLedgerRowsForHead` (src/lib/sweep.ts), which keeps every `fix.dispatch` row for the
+    task and never looks at `kind`:
+      - `freshFixDispatchCount` (sweep.ts), read by `claimFixDispatch` UNDER THE CLAIM, counts DISTINCT `strike` numbers plus every row that
+        has none ('unnumbered'). REGIME-BLIND. The identity row is unnumbered, so it adds 1. Probe on [worker strike 1 at head H1,
+        `sweep.disposed` at H1, identity row]: `fixLedgerRowsForHead` returns BOTH `fix.dispatch` rows and the count is 2, equal to the ceiling
+        (`fixCeilingInForce` = `strikeCap` = `fixStrikeCap` default 2, src/lib/config.ts), so `claimFixDispatch` refuses with
+        `fix strikes exhausted under the claim (2/2)`. THIS IS THE ALWAYS-ON DEBIT.
+      - `priorStrikesFor` (src/run-task.ts), feeding `OpenPrView.priorStrikes` at its two view-build sites, counts rows per regime. The identity
+        row carries no `verdict_regime`, and `strikeRegimeOf` reads an untagged row as `keyword_only`. Probe: under `keyword_only`, 1 -> 2
+        with the identity row (with and without a head sha); under `executed` it stays 1, because the regime amnesty drops the untagged row.
+        So the brief's 'strike count went 1 -> 2' is REAL ONLY WHEN `currentStrikeRegimeFor` reads keyword_only (no executed proof in
+        the latest `review.posted`), which is the default and the check-log route's shape. The executed-regime immunity is ACCIDENTAL: W1-T2306
+        already named 'an omission read as keyword_only BY CONSTRUCTION' as the defect class for the body-repair writer, so it must not be relied on.
+      - `deriveStrikeHistory` (run-task.ts) requires a numeric `strike`, so it already ignores the row.
+
+    (3) CONSEQUENCE. After a worker's strike on a stale-proof PR opens an amendment, the PR's own head is unchanged (the amendment is a separate
+    plan-only PR), so the next sweep pass reads 2 of 2 at the same head and stands down / escalates as 'strikes exhausted' while the
+    amendment it just opened is still waiting to merge. The amendment lane (W1-T3434) and the stale-proof route (W1-T4957, #8177) are the
+    two features the row serves.
+
+    (4) THE OTHER READERS OF `fix.dispatch`, LISTED BECAUSE THE FIX MUST NOT DISTURB THEM (`grep -rn 'fix.dispatch' src scripts`):
+    `lookupIdentity` (run-task.ts, reads the row: MUST keep finding it); the lane-owner probe (run-task.ts, 'fix.dispatch found for this pull
+    request': a live amendment SHOULD read as an owned lane); `fixRungStalledWithoutNewHead` (sweep.ts, any `fix.dispatch` clears 'stalled');
+    the analytics and forensics readers (retro.ts, workflow-mining.ts, knowledge-gaps.ts, knowledge-outcome.ts, routing-experiments.ts,
+    field-trials-flow.ts, board.ts, status.ts, benchmark-run.ts, ci-friction-gardener.ts, hot-file-gardener.ts, wipe-test.ts), which count or
+    classify by `run_id`/`mode` and are cosmetic here. Only the two strike tallies treat the row as a STRIKE, so only the shared helper
+    that feeds them is changed.
+
+    (5) WHY NOT A NEW STEP NAME (the other option in the ask). (a) `lookupIdentity`, `requestProofAmendment`'s idempotency and the lane-owner
+    probe would all have to learn the new name, and every row already in the live ledger carries `fix.dispatch` + `kind: proof_amendment`, so a
+    rename leaves those un-found and a second amendment PR opens for any open one. (b) A new `appendLedger` step needs a ledger-rotation
+    retained-steps entry (`DECISION_RELEVANT_LEDGER_STEPS` in src/lib/ledger.ts, which holds `"fix.dispatch"`), which is the cost the W1-T2520-era riders avoid.
+    (c) test/a-capped-proof-repair-amends-the-plan-not-the-pr-body.test.ts asserts by source text that run-task.ts carries
+    `kind: "proof_amendment"` on the durable `fix.dispatch` record, so it pins the writer as it is. (d) THE ledger-literal CENSUS DOES NOT
+    CONSTRAIN THIS: `test/ledger-literal-census.test.ts` scans `src/` for the ledger FILENAME literal only (`LEDGER_FILENAME`, allowed in
+    ledger-path.ts and ledger-union.ts); it says nothing about step names. The constraint that does exist on a new step is the retention set
+    `DECISION_RELEVANT_LEDGER_STEPS`, reason (b). So the smaller and safer fix is to exclude the row from the tally, not to rename it.
+
+    (6) MEASURED COST OF THE FIX. Trial-patched in a scratch tree (an exported predicate and two call sites in `fixLedgerRowsForHead`), the probe
+    reads 1 and 1 for both regimes and both head modes, the fresh-count equivalent reads 1, and 328 tests across test/sweep.test.ts,
+    the-fix-rung-strike-cap-does-not-bind, strike-accounting, strike-cap-cumulative, fix-strikes-reset-on-new-head, body-repair-strike-counts,
+    a-capped-proof-repair-amends-the-plan-not-the-pr-body, a-red-proof-discrimination-check-reaches-proof-amendment and
+    the-strike-regime-of-an-unjudged-round pass (0 fail). run-task.ts does not change.
+  design: |
+    (i) src/lib/sweep.ts gains `export function isProofAmendmentIdentityRow(line: Record<string, unknown>): boolean`, true for
+    `line.step === "fix.dispatch" && line.kind === "proof_amendment"`, with a doc comment that says what the row is (an idempotency record,
+    never a strike) and names `priorStrikesFor` and `freshFixDispatchCount` as the tallies it is hidden from. It sits immediately above
+    `fixLedgerRowsForHead` so the two halves read together.
+    (ii) `fixLedgerRowsForHead` excludes such a row in BOTH of its branches: the no-head `lines.filter(...)` adds `&& !isProofAmendmentIdentityRow(line)`,
+    and the head-selecting loop adds `if (isProofAmendmentIdentityRow(line)) continue;` at the top of its `fix.dispatch` arm. The chokepoint is
+    chosen because `priorStrikesFor`, `deriveStrikeHistory` and `freshFixDispatchCount` ALL read through it, so one predicate fixes the regime-blind
+    count and the regime-aware one and cannot be fixed in one and forgotten in the other.
+    (iii) THE ROW ITSELF IS UNCHANGED: same step, same fields, same writer, so `lookupIdentity`, the lane-owner probe and every analytics
+    reader keep seeing it. The fix changes how the two tallies READ, never what is written, as `priorStrikesFor`'s own doc says of its
+    amnesty ('This never mutates the ledger').
+    (iv) NOT IN SCOPE, said plainly. (a) Stamping `verdict_regime`/`head_sha` on the identity row would make `priorStrikesFor` agree
+    under the executed regime but leaves `freshFixDispatchCount` counting it, and would make the row look like a strike everywhere else, so it is not
+    the fix. (b) Whether the stale-proof route should reach the amendment writer at all is the other researcher's finding on
+    `dispatchProofAmendmentWrite` being unreachable behind the not-green `continue`; this task only stops the row that path (and the capped-green
+    path) writes from spending a strike.
+  acceptance:
+    - claim: "the identity row the real recordIdentity port writes leaves the strike tally below the cap, the exact 1 to 2 debit measured"
+      proof: 'grep: test("W1-T5032: the identity row a proof amendment writes leaves the strike tally below the cap" in test/a-proof-amendment-identity-row-is-not-a-fix-strike.test.ts'
+    - claim: "the identity row is not a strike under either regime and with or without a head sha"
+      proof: 'grep: test("W1-T5032: a proof-amendment identity row is not a strike under either regime" in test/a-proof-amendment-identity-row-is-not-a-fix-strike.test.ts'
+    - claim: "a sweep under a worker strike plus an amendment identity row still claims and dispatches the fix worker"
+      proof: 'grep: test("W1-T5032: a worker strike plus an amendment identity row still dispatches under the claim" in test/a-proof-amendment-identity-row-is-not-a-fix-strike.test.ts'
+    - claim: "a real worker dispatch still counts: cap worker rows exhaust the tally and refuse the claim, the preserved-count control"
+      proof: 'grep: test("W1-T5032: a real worker dispatch still counts toward the cap" in test/a-proof-amendment-identity-row-is-not-a-fix-strike.test.ts'
+    - claim: "the identity row is still written and still resolved by lookupIdentity, so a re-dispatch opens no second amendment"
+      proof: 'grep: test("W1-T5032: the identity row is still written and resolved by its key" in test/a-proof-amendment-identity-row-is-not-a-fix-strike.test.ts'
+    - claim: "the production ledger selector skips the identity row in its head-selecting loop, a production call site of the helper"
+      proof: 'grep: isProofAmendmentIdentityRow(line)) continue in src/lib/sweep.ts'
+  falsifier: |
+    Remove either exclusion in `fixLedgerRowsForHead` and a test reddens: drop the head-branch `continue` and the fresh-count and head-keyed tallies
+    read 2 again; drop the no-head filter and the no-head case of the regime test reddens. Make the predicate match on `step` alone and the
+    preserved-count test reddens (a real worker row is swallowed). Stop the row being written and the still-written test reddens. CLOSE IF a
+    `fix.dispatch` row with `kind: proof_amendment` is already excluded from `fixLedgerRowsForHead`'s output.
+  note: |
+    RISK: high because src/lib/sweep.ts carries the strike cap that bounds autonomous worker spend and the escalation path; the change can only make
+    a tally read LOWER by exactly the rows of one kind, so it can allow one more worker dispatch where today a stale-proof PR escalates, never fewer.
+    BOUND CENSUS: the cap is unchanged and no constant is added, so test/bound-kind-declared.test.ts is not touched.
+    src/lib/sweep.ts carries a comment-load row (scripts/comment-load-baseline.json); keep the new doc comment short and inside it, never raise or delete the row.
+    Fixtures to reuse, not edit: test/the-fix-rung-strike-cap-does-not-bind.test.ts (`runSweep` with a real ledger file, `pr()`, `fakeDeps()`,
+    `standDownReasonFor`; its acceptance 2 is the cap-refusal control) and test/a-capped-proof-repair-amends-the-plan-not-the-pr-body.test.ts
+    (`buildProofAmendmentWritePorts` with a fake `log`). For the first test import the REAL `buildProofAmendmentWritePorts`, call `recordIdentity`,
+    and feed the rows it logged to the real `priorStrikesFor`; hand-writing the row would repeat the vacuous-wire shape W1-T2968 names.
+    The `grep:` production proof anchors on the one-line guard `if (isProofAmendmentIdentityRow(line)) continue;` in the head-selecting loop; keep it
+    on one physical line so it matches.
+    reservation hand-off: unknown -> file/gates-r5-1790812000000

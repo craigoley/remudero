@@ -51,7 +51,7 @@ reads no file and no SQLite.
   says which. A re-judged `stale` changes the ETag.
 - **Keys.** The query string, sorted by parameter name, selects the body (`?instance=console`); an
   unkeyed view has the empty key.
-- **Switches: dark by default.** `state/read-model/switches.json` holds `{"projector": "on"|"off", "views":
+- **Switches: dark by default.** `state/read-model/switches.json` holds `{"projector": "on"|"off", "push"?: "on"|"off", "views":
   {"<name>": "serve"|"shadow"|"off"}}`, and serve re-reads it every 5 s off the request path. A view
   with no entry, or no file at all, is **dark**: it answers as `off`. Only the `read-model` status view
   serves without an entry. An absent file writes one `read_model.switch_absent` row and an unreadable
@@ -70,6 +70,10 @@ reads no file and no SQLite.
 - **Worker diagnostics.** The worker ledgers `read_model.lease_acquired` and `read_model.lease_elsewhere`
   when an instance's lease changes hands, and `read_model.slow_tick` when one projector tick takes longer
   than the 10 s stale bound. A source's staleness is judged from when its tick completed.
+- **Materialize budget (P2-08).** View units share the pass budget with projection. The worker
+  measures each unit and paces later builds by its cost; a unit that will not fit is deferred to a
+  later pass. `read_model.materialize_deferred` records due units skipped for budget, at most once
+  per 10 s. A unit too large to share a pass runs in a solo tick.
 
 ## Push: `GET /v1/views/events` (Phase 2)
 
@@ -118,6 +122,12 @@ data: {"reason":"recycle","retryMs":0}
   so the drain is not held and EventSource reconnects immediately.
 - **Not read attention.** An open stream never extends serve's recycle patience (a console tab left
   open would otherwise hold a stale serve up to an hour). The refetches it causes are ordinary reads.
+
+- **Kill switch.** The stream is DARK until `state/read-model/switches.json` says `"push": "on"`. Absent
+  or `off`, it answers 404 `push_disabled`, and switching it off hands every open stream over
+  (`handover`, reason `push_disabled`) within the 1 s sweep. The client's reconnect then gets the 404
+  and falls back to the versions poll below, which stays up. A bad `push` value makes the whole file
+  unreadable, which keeps push off.
 
 `GET /v1/views/versions` answers the same map as JSON, with its own ETag (304 when unchanged): the
 client's fallback poll while its stream is down.
