@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 3.82
   status: queued
@@ -16,3 +16,13 @@
     - claim: "the check:ci-log:license-review cause of PR friction has a recorded remedy"
       proof: "grep: ci-friction:check:ci-log:license-review in docs/ci-friction-remedies.md"
   note: "Filed by the ci-friction gardener (W1-T4435) from a weekly pass over the ledger and gate-fire-rate.ts's own measurement. check:ci-log:license-review priced at 1.2 PR minute(s) across 1 round(s) on 1 pull request(s) — the costliest cause with no open task. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person; its remedy is recorded in docs/ci-friction-remedies.md naming \"ci-friction:check:ci-log:license-review\" once it lands."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The declared files list contains only docs/ci-friction-remedies.md. That is a documentation file, so the plan record shows no secrets, auth, deletion, merge or deploy policy, or infrastructure change."
+      - "The single acceptance criterion is a grep for a marker string in that doc. It can be checked mechanically, so the finding is verifiable from what is shown."
+      - "The task asks for no operator-only decision. Its author family has 2 merged and 0 declined tasks (Beta mean 0.88), and the gates state is clean (filingTime true, machine author)."
+    judged_at: "2026-10-01T23:48:13.545Z"
+    pin: "b85ed0b1bef516f8ac8db1dcc0a534d5d91dba6aa0bdfdabe275c52267a57f41"
