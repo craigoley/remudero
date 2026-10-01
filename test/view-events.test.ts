@@ -8,6 +8,10 @@ import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import type { Clock } from "../src/lib/clock.js";
 import { createService } from "../src/lib/service.js";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { readReadModelSwitches } from "../src/lib/read-model-worker.js";
+import { makeTempDir } from "../src/lib/tmp.js";
 import { createViewEvents, VIEW_EVENTS_PATH, VIEW_VERSIONS_PATH, type ViewEventsOptions } from "../src/lib/view-events.js";
 import { viewEtag, type ViewBodyEntry, type ViewSource } from "../src/lib/views.js";
 
@@ -24,13 +28,13 @@ function entry(view: string, key: string, data: unknown): ViewBodyEntry {
 function fakeReadModel(views: Record<string, "serve" | "shadow" | "off">) {
   const bodies = new Map<string, ViewBodyEntry>();
   const listeners = new Set<(e: ViewBodyEntry) => void>();
-  const state = { stalled: false };
+  const state = { stalled: false, push: "on" as "on" | "off" | undefined };
   return {
     state,
     bodies,
     listeners,
     judge: (sources: readonly ViewSource[]) => sources.map((s) => (state.stalled ? { ...s, state: "stale" as const, reason: "projector stalled" } : s)),
-    switches: () => ({ projector: "on" as const, views }),
+    switches: () => ({ projector: "on" as const, views, ...(state.push ? { push: state.push } : {}) }),
     onBody: (listener: (e: ViewBodyEntry) => void) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -347,4 +351,44 @@ test("an emitted view event is ledgered at most once per minute per key", async 
     ["instance=site", new Date(T0 + 60_001).toISOString()],
   ]);
   assert.deepEqual({ ...sampled[0], etag: undefined }, { view: "now", key: "instance=core", etag: undefined, cause: "body", emittedAt: new Date(T0).toISOString(), rowTs: new Date(T0).toISOString(), bytes: sampled[0]!.bytes, inline: true, subscribers: 1 });
+});
+
+test("the events route answers 404 push_disabled while the push switch is off", async (t) => {
+  const rm = fakeReadModel({ now: "serve" });
+  rm.post(entry("now", "instance=core", { a: 1 }));
+  const clockTimers = timers();
+  const { url, events } = await serve(t, { names: ["now"], readModel: rm, clock, every: clockTimers.every });
+  for (const push of [undefined, "off"] as const) {
+    rm.state.push = push;
+    const res = await fetch(`${url}${VIEW_EVENTS_PATH}`, { headers: READ });
+    assert.equal(res.status, 404, `push ${push ?? "absent"}`);
+    assert.deepEqual(await res.json(), { error: "push_disabled" });
+  }
+  assert.equal((await fetch(`${url}${VIEW_VERSIONS_PATH}`, { headers: READ })).status, 200, "the versions poll stays up: it is the fallback");
+
+  // Switched on, a stream opens; switched off again, the next sweep hands it over.
+  rm.state.push = "on";
+  const stream = await open(t, `${url}${VIEW_EVENTS_PATH}`);
+  await stream.next((f) => f.event === "hello");
+  assert.equal(events.subscribers(), 1);
+  rm.state.push = "off";
+  clockTimers.fire(1_000);
+  const handover = await stream.next((f) => f.event === "handover");
+  assert.deepEqual(handover.data, { reason: "push_disabled", retryMs: 0 });
+  assert.equal(events.subscribers(), 0);
+  rm.post(entry("now", "instance=core", { a: 2 }));
+  assert.equal(stream.frames.filter((f) => f.event === "view").length, 0, "nothing emits to a handed-over stream");
+});
+
+test("the switch file's push mode is parsed and a bad one refuses the whole file", (t) => {
+  const dir = makeTempDir("push-switch");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, "switches.json");
+  const read = (body: unknown) => (writeFileSync(path, JSON.stringify(body)), readReadModelSwitches(path));
+  const on = read({ push: "on", views: { now: "serve" } });
+  assert.ok(on.ok && on.switches.push === "on");
+  const absent = read({ views: {} });
+  assert.ok(absent.ok && absent.switches.push === undefined, "absent stays absent, which reads as off");
+  assert.deepEqual(read({ push: "yes" }), { ok: false, reason: 'push has mode "yes"' });
 });
