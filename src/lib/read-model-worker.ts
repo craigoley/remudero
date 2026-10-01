@@ -71,6 +71,13 @@ export const READ_MODEL_CHECK_SHARE = 0.02;
  */
 export const READ_MODEL_PASS_SHARE = 0.5;
 /**
+ * The share of each pass kept for view bodies, and of worker time they may take: a view that cost
+ * `c` ms is not rebuilt for `c / share` ms. Measured on the host's core ledger as three instances,
+ * `now` cost 0.6-1.4 s per instance whenever a generation moved and nav-badge ~130 ms even idle,
+ * so unbudgeted bodies alone held ticks of 2-4 s beside a catch-up.
+ */
+export const READ_MODEL_VIEW_SHARE = 0.4;
+/**
  * WATCHDOG: an instance with work outstanding (a backlog, an unread archive, a failing tick) and no
  * commit for this long is stalled. The first bound ledgers it and reopens the store; a second
  * bound without progress escalates. Serve's thread applies the same bound to a worker that posts
@@ -185,6 +192,8 @@ export interface ReadModelView {
   materialize(ctx: ReadModelViewContext): Array<{ key: string; data: unknown; sources: ViewSource[] }>;
   /** The shadow comparator's legacy side for one key, computed in the worker beside the view's body. */
   legacy?(key: string, now: number, data: unknown): ShadowLegacy | undefined;
+  /** Its bodies are per instance: each instance's is built, timed and paced as a unit of its own. */
+  perInstance?: boolean;
 }
 
 /** The `ledger:<i>` source every read-model view carries: stale while its projector is behind. */
@@ -242,8 +251,8 @@ export interface ReadModelTickerOptions {
   oracle?: "on" | "off";
   /** Each instance's projector budget per tick; derived from the lease timing when absent. */
   tickBudgetMs?: number;
-  /** The views' materialize budget per tick (P2-08); one instance's projector budget when absent. */
-  materializeBudgetMs?: number;
+  /** A whole pass's budget: projection, then view bodies in what is left of it. */
+  passBudgetMs?: number;
 }
 
 export interface ReadModelTicker {
@@ -254,6 +263,16 @@ export interface ReadModelTicker {
   shadow(request: ShadowRequest): boolean;
   /** Releases every held lease and closes every DB; returns how many leases were released. */
   release(): number;
+}
+
+/** One view, or one instance's share of a per-instance view: the unit the pass budgets, times and paces. */
+interface ViewUnit {
+  view: ReadModelView;
+  slot?: Slot;
+  /** What its last build took; absent until it has run once. */
+  costMs?: number;
+  /** Not rebuilt before this: its last cost divided by {@link READ_MODEL_VIEW_SHARE}. */
+  dueAt: number;
 }
 
 class ReadModelStopRequested extends RmdError {
@@ -321,8 +340,10 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   const tickMs = opts.tickMs ?? READ_MODEL_TICK_MS;
   const stopRequested = opts.stopRequested ?? (() => false);
   const windowMs = opts.consistencyWindowMs ?? ORACLE_DEFAULT_WINDOW_MS;
-  const budgetMs = opts.tickBudgetMs ?? (READ_MODEL_LEASE_RENEW_MS * READ_MODEL_PASS_SHARE) / Math.max(1, opts.instances.length);
-  const materializeBudgetMs = opts.materializeBudgetMs ?? budgetMs;
+  const passMs = opts.passBudgetMs ?? READ_MODEL_LEASE_RENEW_MS * READ_MODEL_PASS_SHARE;
+  const budgetMs = opts.tickBudgetMs ?? (passMs * (1 - READ_MODEL_VIEW_SHARE)) / Math.max(1, opts.instances.length);
+  /** A view unit measured over this runs in a tick of its own, so it never lands on top of a projection. */
+  const soloMs = passMs * READ_MODEL_VIEW_SHARE;
   const switchesPath = readModelSwitchesPath(opts.stateDir);
   const slots: Slot[] = opts.instances.map((instance) => ({
     instance,
@@ -332,11 +353,11 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     checkAfter: 0,
     checkPending: false,
   }));
+  const units = views.flatMap((view): ViewUnit[] => (view.perInstance ? slots.map((slot) => ({ view, slot, dueAt: 0 })) : [{ view, dueAt: 0 }]));
+  let lastSolo = false;
   const lastEtag = new Map<string, string>();
   const latest = new Map<string, ViewBody>();
   let comparator: { db: ReadModelDb; shadow: ViewShadow } | undefined;
-  /** Where the next materialize pass starts: the first view a pass over budget deferred, so none starves. */
-  let nextView = 0;
   let deferredLoggedAt = Number.NEGATIVE_INFINITY;
   let switches = DEFAULT_READ_MODEL_SWITCHES;
   let switchesMtimeMs = -1;
@@ -556,41 +577,61 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     return comparator.shadow;
   }
 
-  function materialize(now: number): void {
+  function build(unit: ViewUnit, now: number, ctx: ReadModelViewContext, generation: number): void {
+    const { view } = unit;
+    const started = clock.now();
+    try {
+      const scoped = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
+      for (const { key, data, sources } of view.materialize(scoped)) {
+        const stale = sources.some((source) => source.state !== "fresh");
+        const etag = viewEtag(view.name, view.version, stale, data);
+        const id = `${view.name}\u0000${key}`;
+        if (lastEtag.get(id) === etag) continue;
+        const body: ViewBody = { view: view.name, version: view.version, generatedAt: clock.iso(), asOf: oldestAsOf(sources), stale, sources, data };
+        const entry: ReadModelBodyEntry = { view: view.name, key, version: view.version, generation, etag, body };
+        if (switches.projector === "on") persist(entry);
+        lastEtag.set(id, etag);
+        latest.set(id, body);
+        opts.post({ type: "body", entry });
+      }
+    } catch (error) {
+      log("read_model.materialize_failed", { view: view.name, error: (error as Error).message });
+    }
+    const finished = clock.now();
+    unit.costMs = finished - started;
+    unit.dueAt = finished + unit.costMs / READ_MODEL_VIEW_SHARE;
+    if (unit.costMs > passMs) log("read_model.slow_view", { view: view.name, ...(unit.slot ? { instance: unit.slot.instance.name } : {}), ms: unit.costMs, passMs });
+  }
+
+  const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => switches.views[unit.view.name] !== "off" && unit.dueAt <= now).sort((a, b) => a.dueAt - b.dueAt);
+
+  /**
+   * Builds the due view units, oldest first, in what is left of the pass that began at `tickStart`.
+   * A unit starts only if its last cost fits what is left; one never measured starts only while this
+   * phase has spent nothing, so it overshoots by itself at most once and is measured from then on.
+   */
+  function materialize(now: number, tickStart: number, only?: ViewUnit): void {
     const shadow = comparator?.shadow.readiness();
     const ctx: ReadModelViewContext = { now, switches, instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}) })), ...(shadow ? { shadow } : {}) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
-    const started = clock.now();
-    const order = [...views.slice(nextView), ...views.slice(0, nextView)];
-    nextView = 0;
-    for (const [i, view] of order.entries()) {
-      // BUDGET (P2-08): a pass over budget defers the rest to the next tick, which starts with them; one view always runs.
-      const spent = clock.now() - started;
-      if (i > 0 && spent > materializeBudgetMs) {
-        nextView = views.indexOf(view);
-        if (now - deferredLoggedAt >= READ_MODEL_LEDGER_STALE_MS) {
-          deferredLoggedAt = now;
-          log("read_model.materialize_deferred", { ms: spent, budgetMs: materializeBudgetMs, deferred: order.slice(i).map((v) => v.name) });
-        }
-        return;
+    if (only) return build(only, now, ctx, generation);
+    const left = passMs - (clock.now() - tickStart);
+    let spent = 0;
+    const deferred: string[] = [];
+    for (const unit of dueUnits(now)) {
+      if (stopRequested()) return;
+      const fits = unit.costMs === undefined ? spent === 0 : unit.costMs <= soloMs && spent + unit.costMs <= left;
+      if (!fits) {
+        deferred.push(unit.slot ? `${unit.view.name}@${unit.slot.instance.name}` : unit.view.name);
+        continue;
       }
-      if (switches.views[view.name] === "off") continue;
-      try {
-        for (const { key, data, sources } of view.materialize(ctx)) {
-          const stale = sources.some((source) => source.state !== "fresh");
-          const etag = viewEtag(view.name, view.version, stale, data);
-          const id = `${view.name}\u0000${key}`;
-          if (lastEtag.get(id) === etag) continue;
-          const body: ViewBody = { view: view.name, version: view.version, generatedAt: clock.iso(), asOf: oldestAsOf(sources), stale, sources, data };
-          const entry: ReadModelBodyEntry = { view: view.name, key, version: view.version, generation, etag, body };
-          if (switches.projector === "on") persist(entry);
-          lastEtag.set(id, etag);
-          latest.set(id, body);
-          opts.post({ type: "body", entry });
-        }
-      } catch (error) {
-        log("read_model.materialize_failed", { view: view.name, error: (error as Error).message });
-      }
+      const before = clock.now();
+      build(unit, now, ctx, generation);
+      spent += clock.now() - before;
+    }
+    if (deferred.length > 0 && now - deferredLoggedAt >= READ_MODEL_LEDGER_STALE_MS) {
+      deferredLoggedAt = now;
+      log("read_model.materialize_deferred", { ms: spent, budgetMs: Math.max(0, left), deferred });
     }
   }
 
@@ -617,8 +658,14 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       reloadSwitches(now);
       // The oracle's slices wait while any instance is still applying a backlog.
       const due = switches.projector === "on" && !slots.some((slot) => slot.catchUp) ? slots.find((slot) => slot.checkPending) : undefined;
+      // A view too big to share a pass gets a tick of its own, never two in a row, so the projector keeps moving.
+      const solo = lastSolo ? undefined : dueUnits(now).find((unit) => (unit.costMs ?? 0) > soloMs);
+      lastSolo = solo !== undefined && due === undefined;
       if (due) {
         checkSlot(due, now);
+      } else if (solo) {
+        materialize(now, now, solo);
+        return postState(now);
       } else if (switches.projector === "off") {
         for (const slot of slots) slot.state.reason = "projector switched off";
       } else {
@@ -627,7 +674,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
           if (now >= slot.backoffUntil) tickSlot(slot, clock.now());
         }
       }
-      materialize(now);
+      materialize(now, now);
       postState(now);
     },
     shadow(request: ShadowRequest): boolean {

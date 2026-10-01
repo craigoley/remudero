@@ -6721,6 +6721,12 @@ components:
           type: string
           enum: [body, judge]
           description: "`body`: the read-model worker posted a new body. `judge`: re-judging the sources flipped `stale`."
+        body:
+          type: object
+          description: >
+            Present when the judged body is at most 4 KiB: the whole view body a GET of (view, key)
+            answers with this `etag`, so the client applies it without a refetch. A larger body is
+            refetched with If-None-Match.
 
     ViewHandover:
       type: object
@@ -6880,6 +6886,8 @@ components:
         GET /v1/i/<instance>/repos/summary body, computed by the read-model worker from that
         instance's projected `repo_row` table; `projects` precomputes the console's grouping and its
         "worst is <repo>" line. Dark until state/read-model/switches.json sets `repositories` to `serve`.
+        Version 2 carries no clock stamp in `data`: each summary's `generated_at` is its
+        `repositories:<instance>` source's `asOf`, so the ETag moves only when the content does.
       required: [view, version, generatedAt, asOf, stale, sources, data]
       properties:
         view:
@@ -6887,7 +6895,7 @@ components:
           enum: [repositories]
         version:
           type: integer
-          enum: [1]
+          enum: [2]
         generatedAt: {type: string, format: date-time}
         asOf: {type: [string, "null"]}
         stale: {type: boolean}
@@ -6909,7 +6917,7 @@ components:
                 properties:
                   instanceId: {type: string}
                   summary:
-                    $ref: "#/components/schemas/RepoDashboardResult"
+                    $ref: "#/components/schemas/RepositoriesSummary"
                   reason:
                     type: string
                     description: Why `summary` is absent, or (beside a summary) why the last recompute failed and the summary shown is older.
@@ -6926,6 +6934,29 @@ components:
             reason:
               type: string
               description: Present with empty arrays before serve has published the repository sources.
+
+    RepositoriesSummary:
+      type: object
+      description: >
+        One instance's GET /v1/i/<instance>/repos/summary body (RepoDashboardResult) without its
+        `generated_at`, which the view's `repositories:<instance>` source carries as `asOf`.
+      required: [source, repos]
+      properties:
+        source:
+          type: string
+          enum: [managed-repos, instance-registry, instance-registry+managed-repos]
+        registry:
+          type: object
+          required: [state]
+          properties:
+            state:
+              type: string
+              enum: [verified, unavailable]
+            reason: {type: string}
+        repos:
+          type: array
+          items:
+            $ref: "#/components/schemas/RepoDashboardEntry"
 
     RepositoriesProject:
       type: object
@@ -6972,7 +7003,10 @@ components:
         /now renders for ONE instance. The board is the legacy derivation over the read model's full
         fact history; `groups` precomputes the console's groupBoard; `actions` carries structured
         strikes; `health` is the selected instance's own host probe. Dark until
-        state/read-model/switches.json sets `now` to `serve`.
+        state/read-model/switches.json sets `now` to `serve`. Version 2 carries no clock stamp and
+        no now-relative value in `data` (the envelope's `generatedAt` and each source's `asOf` do),
+        so the ETag moves only when the content does. A consumer derives a duration ("running for
+        12 min") from an absolute field such as a task's `startedAt`.
       required: [view, version, generatedAt, asOf, stale, sources, data]
       properties:
         view:
@@ -6980,7 +7014,7 @@ components:
           enum: [now]
         version:
           type: integer
-          enum: [1]
+          enum: [2]
         generatedAt: {type: string, format: date-time}
         asOf: {type: [string, "null"]}
         stale: {type: boolean}
@@ -6996,9 +7030,8 @@ components:
             instance: {type: string}
             board:
               type: object
-              required: [generated_at, counts, spendTodayUsd, taskProjection, tasks, groups]
+              required: [counts, spendTodayUsd, taskProjection, tasks, groups]
               properties:
-                generated_at: {type: string}
                 counts:
                   type: object
                   required: [running, queued, blocked]
@@ -7083,13 +7116,26 @@ components:
                     day: {type: string}
             health:
               type: object
-              description: The selected instance's own host probe; a field it could not read is absent, named in `reasons`.
-              required: [sampledAt]
+              description: >
+                The selected instance's own host probe; a gauge it could not read is absent, named in
+                `reasons`. The probe's sample time is the `host-probe:<i>` source's `asOf`.
+              required: [daemon]
               properties:
-                sampledAt: {type: string}
                 diskFreeBytes: {type: number}
                 rateLimitRemaining: {type: integer}
-                lastPollAgeMs: {type: number}
+                daemon:
+                  type: object
+                  description: >
+                    The daemon's poll liveness. `polling` while a `daemon.*` row is under 5 min old;
+                    `silent` otherwise, with `at` the last poll's own time (absent when the live ledger
+                    has none). `at` stops moving while the daemon is silent, so a consumer ages it itself.
+                  required: [state]
+                  properties:
+                    state:
+                      type: string
+                      enum: [polling, silent]
+                    at: {type: string, format: date-time}
+                    reason: {type: string}
                 reasons:
                   type: object
                   additionalProperties: {type: string}
@@ -7118,8 +7164,9 @@ components:
         prUrl: {type: string}
         prNumber: {type: integer}
         phase: {type: string}
-        elapsedMs: {type: number}
-        startedAt: {type: string}
+        startedAt:
+          type: string
+          description: The run's start; a consumer derives the running time from it (version 2 dropped `elapsedMs`).
         needsHuman: {type: boolean, enum: [true]}
         verifyHumanPending: {type: boolean, enum: [true]}
         escalation:

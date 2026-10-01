@@ -7,6 +7,7 @@
  * restart diff was taken against and installs it with one assignment.
  */
 import { execFile } from "node:child_process";
+import { isMainThread, parentPort, threadId, Worker, workerData } from "node:worker_threads";
 import { systemClock, type Clock } from "./clock.js";
 import { mergePlanBlobsQuarantiningDuplicates, readBlobsAtRef, type Plan, type QuarantinedTask } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -33,7 +34,9 @@ export function touchesReloadablePlan(changedPaths: readonly string[] | undefine
 /** BACKSTOP: fires only on a hung git; it bounds one reload attempt. */
 export const PLAN_RELOAD_TIMEOUT_MS = 30_000;
 
-export type PlanRead = { plan: Plan; quarantined: QuarantinedTask[] };
+export type PlanRead = { plan: Plan; quarantined: QuarantinedTask[]; gitMs?: number; parseMs?: number; threadId?: number };
+
+const PLAN_RELOAD_WORKER_KIND = "remudero-serve-plan-reload" as const;
 
 function gitAsync(repoDir: string, args: string[], stdin?: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -50,7 +53,15 @@ function gitAsync(repoDir: string, args: string[], stdin?: string): Promise<stri
 /** The plan AT `ref`, from committed objects and never the working tree: the blob for the monolith,
  *  one `ls-tree`, ONE `cat-file --batch` for the shards. Async, so serve's event loop never waits on
  *  git. A duplicated id and its dependents are quarantined and returned; every other error throws. */
-export async function readServePlanAtRef(repoDir: string, ref: string): Promise<PlanRead> {
+export async function readServePlanAtRef(repoDir: string, ref: string, clock: Clock = systemClock): Promise<PlanRead> {
+  const startedAt = clock.now();
+  const blobs = await readServePlanBlobs(repoDir, ref);
+  const parsedAt = clock.now();
+  const read = mergePlanBlobsQuarantiningDuplicates(blobs);
+  return { ...read, gitMs: parsedAt - startedAt, parseMs: clock.now() - parsedAt, threadId };
+}
+
+async function readServePlanBlobs(repoDir: string, ref: string): Promise<Array<{ label: string; text: string }>> {
   const blobs: Array<{ label: string; text: string }> = [
     { label: `${ref}:${PLAN_MONOLITH}`, text: await gitAsync(repoDir, ["show", `${ref}:${PLAN_MONOLITH}`]) },
   ];
@@ -65,12 +76,73 @@ export async function readServePlanAtRef(repoDir: string, ref: string): Promise<
     const texts = readBlobsAtRef(() => raw, ref, shardPaths);
     shardPaths.forEach((path, i) => blobs.push({ label: `${ref}:${path}`, text: texts[i]! }));
   }
-  return mergePlanBlobsQuarantiningDuplicates(blobs);
+  return blobs;
+}
+
+type ReloadMessage = { ok: true; read: PlanRead } | { ok: false; reason: string };
+
+/** The worker branch's body, named so the parent can cover it: coverage instruments the parent thread only. */
+export async function serveOnePlanReload(
+  input: { repoDir: string; ref: string },
+  port: { postMessage(value: ReloadMessage): void } | null,
+): Promise<void> {
+  try {
+    port?.postMessage({ ok: true, read: await readServePlanAtRef(input.repoDir, input.ref) });
+  } catch (err) {
+    port?.postMessage({ ok: false, reason: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === PLAN_RELOAD_WORKER_KIND) void serveOnePlanReload(workerData, parentPort);
+
+const workerFailures = new WeakSet<Error>();
+
+export const isPlanReloadWorkerFailure = (err: unknown): boolean => err instanceof Error && workerFailures.has(err);
+
+function workerFailure(reason: string): Error {
+  const failure = new Error(reason);
+  workerFailures.add(failure);
+  return failure;
+}
+
+/** {@link readServePlanAtRef} on a one-shot worker thread: git is async already, and the parse over
+ *  every task no longer holds serve's event loop. A worker that answers `ok: false` rejects as a failed
+ *  read; one that cannot start or dies first rejects with an error {@link isPlanReloadWorkerFailure} recognises. */
+export function readServePlanOffLoop(repoDir: string, ref: string, workerUrl: URL = new URL(import.meta.url)): Promise<PlanRead> {
+  return new Promise((resolve, reject) => {
+    let worker: Worker;
+    try {
+      worker = new Worker(workerUrl, { workerData: { kind: PLAN_RELOAD_WORKER_KIND, repoDir, ref }, execArgv: process.execArgv });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      reject(workerFailure(reason));
+      return;
+    }
+    worker.once("message", (message: ReloadMessage) => {
+      void worker.terminate();
+      if (message.ok) resolve(message.read);
+      else reject(new Error(message.reason));
+    });
+    worker.once("error", (err) => reject(workerFailure(err.message)));
+    worker.once("exit", (code) => reject(workerFailure(`serve plan reload worker exited with code ${code}`)));
+  });
+}
+
+/** The default read: off the loop, and inline when the worker itself could not do the job. */
+async function readServePlanPreferringWorker(repoDir: string, ref: string, options: ServePlanReloadOptions): Promise<PlanRead> {
+  try {
+    return await (options.offLoop ?? readServePlanOffLoop)(repoDir, ref);
+  } catch (err) {
+    if (!isPlanReloadWorkerFailure(err)) throw err;
+    options.log?.("serve.plan_reload_worker_failed", { ref, reason: (err as Error).message });
+    return readServePlanAtRef(repoDir, ref);
+  }
 }
 
 /** Seams for a hermetic test. */
 export interface ServePlanReloadOptions {
   read?: (repoDir: string, ref: string) => Promise<PlanRead>;
+  offLoop?: (repoDir: string, ref: string) => Promise<PlanRead>;
   clock?: Clock;
   log?: (step: string, extra?: Record<string, unknown>) => void;
 }
@@ -92,7 +164,7 @@ export async function reloadServePlan(
   const startedAt = clock.now();
   let read: PlanRead;
   try {
-    read = await (options.read ?? readServePlanAtRef)(repoDir, ref);
+    read = await (options.read ?? ((dir, at) => readServePlanPreferringWorker(dir, at, options)))(repoDir, ref);
   } catch (err) {
     log("serve.plan_reload_failed", { ref, reason: err instanceof Error ? err.message : String(err) });
     return false;
@@ -101,6 +173,6 @@ export async function reloadServePlan(
     log("serve.plan_quarantined", { ref, ids: read.quarantined.map((q) => q.id), files: read.quarantined.flatMap((q) => q.files) });
   }
   board.plan = read.plan;
-  log("serve.plan_reloaded", { ref, tasks: read.plan.tasks.length, elapsedMs: clock.now() - startedAt });
+  log("serve.plan_reloaded", { ref, tasks: read.plan.tasks.length, elapsedMs: clock.now() - startedAt, gitMs: read.gitMs, parseMs: read.parseMs });
   return true;
 }

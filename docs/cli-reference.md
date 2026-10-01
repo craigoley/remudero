@@ -45,6 +45,7 @@ usage:
   rmd ci-failures [--days N]   # Report the window's red CI gates, each paired with the commit that repaired it.
   rmd board [--repo <owner/repo> ...]   # Print what is open, and what is red, across every fleet repository.
   rmd repair-ladder [--json]   # Report the repair ladder's live state and price each paid fallback rung; changes nothing.
+  rmd triage-outcomes [--json]   # Count the triage lane's terminal outcomes per provider and model; routes nothing.
   rmd census-membership [--base <ref>] [--files]   # Name the population-walking census suites this diff enters.
   rmd caller-sweep <symbol> [<symbol>...] [--files]   # Name the suites reachable from a changed symbol, including through its src/ callers.
   rmd ci-learning [--days N] [--force]   # Stage a marked, parked shard for each repaired CI failure in the window.
@@ -422,6 +423,16 @@ rmd repair-ladder [--json]
 ```
 
 W1-T3718: the fix rung can stall with every provider refusing and both paid rungs switched off, and the only trace was one fix.spawn_infra_blocked ledger row. This reports the durable stall record (since when, for how long, and per provider whether it is FULL or CANNOT BE ASKED -- only the first argues for paying) and prices each paid rung: the one config edit that arms it (workerProviders.cashFallbackWhenBlocked, overflow: "api_key"), what it bills, its dailyCapUsd ceiling, and what would still refuse it with the switch on. REPORT-ONLY: it never writes config -- enabling a paid fallback spends money and stays an operator act. --json prints the same as one object.
+
+### `rmd triage-outcomes`
+
+Count the triage lane's terminal outcomes per provider and model; routes nothing.
+
+```
+rmd triage-outcomes [--json]
+```
+
+W1-T3547: folds the rows the triage lane already writes (triage.start, triage.synthesized, triage.relint, triage.relint_refused, triage.error, triage.grill_opened, pr.opened), joined by run id, over the three-form ledger union read with refuseIncomplete, so a partial corpus is refused rather than counted. Per provider and model it reports runs, terminal outcomes (propose, no_task, grill, error, relint_refused), attempts per run, relints, and cost with api-billed spend and subscription notional kept apart; a missing cost reads unknown, never zero. A run with no terminal row is censored, never scored. A group with fewer than 20 terminal runs is an insufficient sample and prints no rates. It never declares a winner and changes no mount, provider, config or spawn; the report names its confound, since a squeeze divert lands on whatever feedback arrives while both subscriptions are blocked. READ-ONLY. --json prints the same as one object.
 
 ### `rmd census-membership`
 

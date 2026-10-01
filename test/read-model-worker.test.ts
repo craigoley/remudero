@@ -135,7 +135,8 @@ test("serve's main loop lag stays under 50 ms while the worker rebuilds", async 
 
   // Positive control: the same rebuild run on the main thread holds the loop, so the probe can see a stall.
   const inlineState = scratch(t, "rmw-lag-inline");
-  const inline = createReadModelTicker({ stateDir: inlineState, instances: [{ name: "core", ledgerDir }], post: () => {} });
+  // Unbudgeted: the control is the whole rebuild in one tick, however loaded the machine is.
+  const inline = createReadModelTicker({ stateDir: inlineState, instances: [{ name: "core", ledgerDir }], post: () => {}, tickBudgetMs: Number.POSITIVE_INFINITY });
   const control = loopProbe();
   inline.tick();
   const inlineLag = control.stop();
@@ -200,9 +201,9 @@ test("a restarted worker serves its last committed bodies before its first tick"
   corpus(ledgerDir, 1, 6, 2);
   const sink = collect();
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], post: sink.post });
-  ticker.tick();
+  for (let pass = 0; pass < 8 && !sink.messages.some((m) => m.type === "body" && m.entry.view === "read-model"); pass++) ticker.tick();
   assert.equal(ticker.release(), 1);
-  const posted = sink.messages.filter((m) => m.type === "body").pop();
+  const posted = sink.messages.filter((m) => m.type === "body" && m.entry.view === "read-model").pop();
   assert.ok(posted?.type === "body");
 
   const logs: string[] = [];

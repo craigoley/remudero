@@ -76,7 +76,7 @@ import {
   type TraceChain,
   type TraceGithub,
 } from "./trace.js";
-import { computeFeedbackProjectionSync, indexedDischargeGithub, type FeedbackProjectionInput, type FeedbackProjectionOutcome } from "./console-projection-worker.js";
+import { computeFeedbackProjectionSync, indexedDischargeGithub, taskOriginsOf, type FeedbackProjectionInput, type FeedbackProjectionOutcome } from "./console-projection-worker.js";
 import type { Route } from "./service.js";
 import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
 import { appendDailyCostCeilingOverrideAudit } from "./ledger.js";
@@ -142,6 +142,7 @@ export interface PanelGraphDeps {
    *  path-based rendering helpers may also consult it independently. */
   planPath: string;
   ledgerPath: string;
+  readPlanSnapshot?: () => Plan;
   /** Fault seam for the reply's second durable write; production uses appendPanelLedger. */
   appendInboxReplyAudit?: typeof appendPanelLedger;
   /** Fault seam for the first durable write; a pre-write failure is not a delivered reply. */
@@ -252,7 +253,7 @@ export function decorateFeedbackDischargeByTasks(
 }
 
 /** GET /v1/feedback[?status=<status>] — the feedback inbox, read-scoped. */
-export function buildFeedbackInboxRoute(deps: PanelGraphDeps): Route {
+export function buildFeedbackInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
   return {
     method: "GET",
     path: "/v1/feedback",
@@ -273,7 +274,8 @@ export function buildFeedbackInboxRoute(deps: PanelGraphDeps): Route {
       }
       // The entries and a fresh plan parse come off-thread when serve wired a worker (W1-T4454). Fail-soft:
       // an unreadable plan degrades to no discharge flags, never a 500 over a decoration.
-      const input = { root: deps.root, planPath: deps.planPath };
+      const snapshot = readPlanSnapshot?.();
+      const input = { root: deps.root, planPath: deps.planPath, ...(snapshot ? { taskOrigins: taskOriginsOf(snapshot) } : {}) };
       let projected = deps.projectFeedback ? await deps.projectFeedback(input) : computeFeedbackProjectionSync(input);
       if (!projected.ok) {
         deps.logProjection?.("serve.projection_worker_fallback", { route: "/v1/feedback", reason: projected.reason });
@@ -487,7 +489,7 @@ export function buildPreviewFeedbackRoute(deps: PanelGraphDeps): Route {
  * looked up as a feedback entry and traces forward (out to its proposal PR / tasks / runs).
  * Returns both the structured {@link TraceChain} and the pre-rendered `rmd trace` text tree.
  */
-export function buildTraceRoute(deps: PanelGraphDeps): Route {
+export function buildTraceRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
   return {
     method: "GET",
     path: "/v1/trace",
@@ -500,7 +502,7 @@ export function buildTraceRoute(deps: PanelGraphDeps): Route {
         return;
       }
 
-      const plan = loadPlan(deps.planPath);
+      const plan = readPanelPlan(deps, readPlanSnapshot);
       const ledgerLines = readLedgerLines(deps.ledgerPath);
       const task = plan.byId.get(id);
 
@@ -1595,7 +1597,7 @@ function prepareInboxPass(
  * {@link classifyAllProposalsMemo}; this path shares only the per-commit anchor grep and the per-plan-object fragment
  * verdicts, both of which answer exactly what a recompute would.
  */
-function classifyAllProposals(deps: PanelGraphDeps, loadPlanFn: (planPath: string) => Plan = loadPlan): ClassifiedInbox {
+function classifyAllProposals(deps: PanelGraphDeps, loadPlanFn: (planPath: string) => Plan = deps.readPlanSnapshot ?? loadPlan): ClassifiedInbox {
   const plan = loadPlanFn(deps.planPath);
   const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub });
   const ledgerLines = readLedgerLines(deps.ledgerPath);
@@ -2539,8 +2541,8 @@ export function buildPanelReadRoutes(deps: PanelGraphDeps, readPlanSnapshot?: ()
   return [
     buildActionResultsRoute(deps.ledgerPath),
     buildOperatorActivityRoute(deps, readPlanSnapshot),
-    buildFeedbackInboxRoute(deps),
-    buildTraceRoute(deps),
+    buildFeedbackInboxRoute(deps, readPlanSnapshot),
+    buildTraceRoute(deps, readPlanSnapshot),
     buildDrainPreviewRoute(deps, readPlanSnapshot),
     buildPlanViewRoute(deps, readPlanSnapshot),
     buildInboxRoute(deps, readPlanSnapshot),
@@ -2569,5 +2571,6 @@ export function buildPanelWriteRoutes(deps: PanelGraphDeps): Route[] {
 
 /** Every panel graph route, for a caller registering the full set at once (`rmd serve` wiring). */
 export function buildPanelGraphRoutes(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route[] {
-  return [...buildPanelReadRoutes(deps, readPlanSnapshot), ...buildPanelWriteRoutes(deps)];
+  const bound = readPlanSnapshot ? { ...deps, readPlanSnapshot } : deps;
+  return [...buildPanelReadRoutes(bound, readPlanSnapshot), ...buildPanelWriteRoutes(bound)];
 }
