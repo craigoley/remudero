@@ -68,7 +68,7 @@
       proof: 'grep: test("W1-T4941: an operator-set priority is never changed" in test/a-backlog-gardener-prioritizes-or-retires-unprioritized-tasks.test.ts'
     - claim: "a stopped symptom is cited as retirement evidence"
       proof: 'grep: test("W1-T4941: a stopped symptom is cited as retirement evidence" in test/a-backlog-gardener-prioritizes-or-retires-unprioritized-tasks.test.ts'
-    - claim: "the daemon runs the gardener"
-      proof: 'grep: runBacklogGardener( in src/lib/daemon.ts'
+    - claim: "the daemon runs the backlog gardener through the off-loop registry"
+      proof: 'grep: test("W1-T4941: the backlog gardener uses the off-loop garden registry and a conforming branch" in test/a-backlog-gardener-prioritizes-or-retires-unprioritized-tasks.test.ts'
   falsifier: |
     Let the judge write routing or status without citing evidence and the second test finds an uncited retirement.
