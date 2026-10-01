@@ -170,14 +170,14 @@ test("W1-T2402: dispatchFixCatchOutcome and fixDispatchSignalDeath are synchrono
 // pre-strike case end to end: the spawn itself is what dies, so `dispatchStarted` is false and the
 // row must both carry the structural signal AND still propagate to runSweep's `acted:false`.
 
-function ghShim(dir: string, headRefName: string): void {
+function ghShim(dir: string, headRefName: string, headSha: string): void {
   writeFileSync(
     join(dir, "gh"),
     [
       "#!/bin/sh",
       'case "$*" in',
       '  *"headRefName"*) printf \'{"headRefName":"%s","body":""}\\n\' ' + JSON.stringify(headRefName) + " ;;",
-      '  *"api"*"pulls/"*) echo \'{"state":"open","merged":false,"head":{"sha":"deadbeef"}}\' ;;',
+      `  *"api"*"pulls/"*) echo '{"state":"open","merged":false,"head":{"sha":"${headSha}"}}' ;;`,
       "  *) echo '{}' ;;",
       "esac",
       "",
@@ -228,7 +228,7 @@ test("W1-T2402 integration: a spawn killed by signal is ledgered with a structur
   execFileSync("git", ["clone", "--quiet", bare, repoDir], { encoding: "utf8", env: GIT_ENV });
   execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
   execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
-  ghShim(bin, branch);
+  ghShim(bin, branch, "cafefeed88");
 
   const savedPath = process.env.PATH;
   process.env.PATH = `${bin}:${savedPath}`;
