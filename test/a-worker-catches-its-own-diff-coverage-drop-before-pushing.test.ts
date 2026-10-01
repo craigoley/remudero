@@ -296,14 +296,14 @@ test("W1-T4797: two still-uncovered repairs leave the branch unpushed with a fai
   }
 });
 
-test("W1-T4797: the default precheck shells out with its scoped suite from the worktree", () => {
+test("W1-T4797: the default precheck shells out with its scoped suite from the worktree", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}coverage-precheck-spawn-`));
   try {
     mkdirSync(join(root, "scripts"));
     writeFileSync(join(root, "scripts", "diff-coverage-local.mjs"),
       `import { cwd, argv } from "node:process";\nif (cwd() !== ${JSON.stringify(realpathSync(root))} || !argv.includes("test/feature.test.ts")) process.exit(2);\nprocess.stdout.write("diff-coverage: OK\\n");\n`);
     const ports = scriptedPorts([]).ports;
-    const result = coveragePrecheck(root, { ...ports, run: undefined });
+    const result = await coveragePrecheck(root, { ...ports, run: undefined });
     assert.equal(result.outcome, "covered", `the real child process executes the scoped precheck: ${JSON.stringify(result)}`);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -345,66 +345,66 @@ test("W1-T4797: a precheck that cannot run pushes anyway and ledgers why", async
   }
 });
 
-test("W1-T4797: each way the precheck cannot look is unavailable, never uncovered", () => {
-  const unavailable = (ports: CoveragePrecheckPorts) => {
-    const r = coveragePrecheck("/w", ports);
+test("W1-T4797: each way the precheck cannot look is unavailable, never uncovered", async () => {
+  const unavailable = async (ports: CoveragePrecheckPorts) => {
+    const r = await coveragePrecheck("/w", ports);
     assert.equal(r.outcome, "unavailable");
     return (r as { reason: string }).reason;
   };
   const base = scriptedPorts([]).ports;
-  assert.match(unavailable({ ...base, changedFiles: () => { throw new Error("git said no"); } }), /changed files unreadable: git said no/);
-  assert.match(unavailable({ ...base, select: () => { throw new Error("no graph"); } }), /could not derive the affected-suite scope: no graph/);
-  assert.match(unavailable({ ...base, select: () => selection([], { fullRun: true, reasons: ["full run: test/helpers/x.ts forces it"] }) }), /forces it/);
-  assert.match(unavailable({ ...base, select: () => selection([]) }), /no suite reaches/);
-  assert.match(unavailable(scriptedPorts([ran(null, "", { spawnError: "spawn ENOENT" })]).ports), /spawn failed: spawn ENOENT/);
-  assert.match(unavailable(scriptedPorts([ran(1, "diff-coverage-local: no lcov produced -- FAILING.")]).ports), /no lcov produced/);
-  assert.match(unavailable(scriptedPorts([ran(2, "")]).ports), /exited 2/);
-  assert.equal(coveragePrecheck("/w", { ...base, changedFiles: () => ["docs/x.md", "test/a.test.ts"] }).outcome, "covered", "no src change, nothing to prove");
+  assert.match(await unavailable({ ...base, changedFiles: () => { throw new Error("git said no"); } }), /changed files unreadable: git said no/);
+  assert.match(await unavailable({ ...base, select: () => { throw new Error("no graph"); } }), /could not derive the affected-suite scope: no graph/);
+  assert.match(await unavailable({ ...base, select: () => selection([], { fullRun: true, reasons: ["full run: test/helpers/x.ts forces it"] }) }), /forces it/);
+  assert.match(await unavailable({ ...base, select: () => selection([]) }), /no suite reaches/);
+  assert.match(await unavailable(scriptedPorts([ran(null, "", { spawnError: "spawn ENOENT" })]).ports), /spawn failed: spawn ENOENT/);
+  assert.match(await unavailable(scriptedPorts([ran(1, "diff-coverage-local: no lcov produced -- FAILING.")]).ports), /no lcov produced/);
+  assert.match(await unavailable(scriptedPorts([ran(2, "")]).ports), /exited 2/);
+  assert.equal((await coveragePrecheck("/w", { ...base, changedFiles: () => ["docs/x.md", "test/a.test.ts"] })).outcome, "covered", "no src change, nothing to prove");
 });
 
-test("W1-T4797: the bound is the manifest's own measured duration for the suites it runs, and widening is only for a missing SF record", () => {
+test("W1-T4797: the bound is the manifest's own measured duration for the suites it runs, and widening is only for a missing SF record", async () => {
   const files = { "test/fast.test.ts": 1000, "test/also.test.ts": 2000, "test/slow.test.ts": 9000 };
   const missing = "diff-coverage: BLOCKED -- changed source file(s) have no SF record in the coverage report; coverage would otherwise pass vacuously:";
   const widened = scriptedPorts([ran(1, missing), ran(0, "diff-coverage: OK")], Object.keys(files), files);
-  assert.equal(coveragePrecheck("/w", widened.ports).outcome, "covered");
+  assert.equal((await coveragePrecheck("/w", widened.ports)).outcome, "covered");
   assert.deepEqual(widened.calls.map((c) => c.suites), [["test/fast.test.ts", "test/also.test.ts"], ["test/fast.test.ts", "test/also.test.ts", "test/slow.test.ts"]]);
   assert.deepEqual(widened.calls.map((c) => c.timeoutMs), [6000, 24000], "twice the measured sum of exactly the suites that pass runs");
 
   const stillMissing = scriptedPorts([ran(1, missing), ran(1, missing)], Object.keys(files), files);
-  const r = coveragePrecheck("/w", stillMissing.ports);
+  const r = await coveragePrecheck("/w", stillMissing.ports);
   assert.equal(r.outcome, "unavailable");
   assert.match((r as { reason: string }).reason, /no SF record even after widening/);
 
   const covered = scriptedPorts([ran(0, "")], Object.keys(files), files);
-  coveragePrecheck("/w", covered.ports);
+  await coveragePrecheck("/w", covered.ports);
   assert.equal(covered.calls.length, 1, "a covered fast tier never pays for the slow siblings");
 
   const slowOnly = scriptedPorts([ran(0, "")], ["test/slow.test.ts"], files);
-  coveragePrecheck("/w", slowOnly.ports);
+  await coveragePrecheck("/w", slowOnly.ports);
   assert.deepEqual(slowOnly.calls.map((c) => c.suites), [["test/slow.test.ts"]], "a selection with no fast suite runs its slow ones directly");
 });
 
-test("W1-T4797: an INVALID directive is refused like CI refuses it, and the refusal text stays bounded", () => {
+test("W1-T4797: an INVALID directive is refused like CI refuses it, and the refusal text stays bounded", async () => {
   const invalid = `diff-coverage: INVALID process-boundary directive(s) -- the gate fails closed:\n  - src/x.ts:3 -- bad\n${"  - src/y.ts:1\n".repeat(1000)}`;
-  const r = coveragePrecheck("/w", scriptedPorts([ran(1, invalid)]).ports);
+  const r = await coveragePrecheck("/w", scriptedPorts([ran(1, invalid)]).ports);
   assert.equal(r.outcome, "uncovered");
   assert.ok((r as { text: string }).text.length <= 4000);
   assert.match((r as { text: string }).text, /INVALID process-boundary/);
 });
 
-test("W1-T4797: the fix rung's push is refused before it leaves the worktree when the head is uncovered", () => {
+test("W1-T4797: the fix rung's push is refused before it leaves the worktree when the head is uncovered", async () => {
   const logged: Array<[string, Record<string, unknown> | undefined]> = [];
   const log = (step: string, extra?: Record<string, unknown>) => void logged.push([step, extra]);
   const pushed: string[] = [];
   const push = (wt: string, _branch: string, sha?: string) => void pushed.push(`${wt}@${sha}`);
 
-  assert.throws(
+  await assert.rejects(
     () => pushFixRoundPrechecked(log, "/w", "run-b", "abc", scriptedPorts([ran(1, UNCOVERED_OUTPUT)]).ports, push),
     (e: unknown) => e instanceof FixRoundPushError && /src\/feature\.ts:2/.test(e.refusal?.text ?? "") && e.refusal?.censuses[0] === "diff-coverage",
   );
   assert.deepEqual(pushed, [], "an uncovered head was never pushed");
 
-  pushFixRoundPrechecked(log, "/w", "run-b", "def", scriptedPorts([ran(0, "")]).ports, push);
+  await pushFixRoundPrechecked(log, "/w", "run-b", "def", scriptedPorts([ran(0, "")]).ports, push);
   assert.deepEqual(pushed, ["/w@def"]);
   assert.deepEqual(logged.map(([step, extra]) => [step, extra?.outcome, extra?.site]), [["push.coverage_precheck", "uncovered", "rung.fix_push"], ["push.coverage_precheck", "covered", "rung.fix_push"]]);
 });

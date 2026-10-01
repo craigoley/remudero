@@ -23,17 +23,17 @@ function ports(n: number, calls: string[][]): CoveragePrecheckPorts {
   };
 }
 
-test("a coverage precheck wider than the preflight scoped ceiling is skipped as unavailable without spawning", () => {
+test("a coverage precheck wider than the preflight scoped ceiling is skipped as unavailable without spawning", async () => {
   const calls: string[][] = [];
-  const result = coveragePrecheck("/w", ports(PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING + 1, calls));
+  const result = await coveragePrecheck("/w", ports(PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING + 1, calls));
   assert.equal(result.outcome, "unavailable");
   assert.match((result as { reason: string }).reason, /too wide to precheck quickly/);
   assert.equal(calls.length, 0, "no instrumented run is spawned");
 });
 
-test("a coverage precheck within the preflight scoped ceiling still runs", () => {
+test("a coverage precheck within the preflight scoped ceiling still runs", async () => {
   const calls: string[][] = [];
-  const result = coveragePrecheck("/w", ports(PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING, calls));
+  const result = await coveragePrecheck("/w", ports(PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING, calls));
   assert.equal(result.outcome, "covered");
   assert.equal(calls.length, 1);
 });
