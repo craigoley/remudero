@@ -13,6 +13,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { hashInstallInputs, installHashMarkerPath } from "../src/lib/install-hash.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { gitRepo } from "./helpers/git-repo.js";
 import {
   StagedInstallFailedError,
   managedCheckoutInstallEscalation,
@@ -25,7 +26,7 @@ import { acquireDrainLock } from "../src/lib/drain-lock.js";
 const pkg = (deps: Record<string, string>) => JSON.stringify({ name: "console", version: "0.0.0", dependencies: deps });
 
 /** A checkout at `<root>/repos/console` whose node_modules was installed from OLDER inputs than its lockfile. */
-function staleCheckout(root: string): string {
+function lockfileDriftTree(root: string): string {
   const repoDir = join(root, "repos", "console");
   mkdirSync(join(repoDir, "node_modules", "dep"), { recursive: true });
   writeFileSync(join(repoDir, "package.json"), pkg({ dep: "^1.0.0", "@vercel/functions": "^2.0.0" }));
@@ -54,26 +55,26 @@ function withRoot(body: (root: string) => void): void {
   }
 }
 
-const gitIn = (dir: string, ...args: string[]) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: "pipe" });
+/** A working clone sitting exactly at its bare origin's main, which holds `files` — refreshManagedCheckout reads it as `current`. */
+const currentWithOrigin = (files: Record<string, string>): string => {
+  const origin = gitRepo({ bare: true, kind: "w1-t4933-origin" });
+  const clone = gitRepo({ cloneFrom: origin.dir, kind: "w1-t4933-clone" });
+  for (const [name, body] of Object.entries(files)) writeFileSync(join(clone.dir, name), body);
+  clone.git("add", "-A");
+  clone.git("commit", "--quiet", "-m", "seed");
+  clone.git("push", "--quiet", "origin", "HEAD:main");
+  clone.git("fetch", "--quiet", "origin");
+  return clone.dir;
+};
 
 test("W1-T4933: a current checkout with a stale install is reinstalled on a lockfile change", () => {
   withRoot((root) => {
     // A real clone sitting exactly at origin/main — refreshManagedCheckout returns `current` and (before this task) never installed.
-    const origin = join(root, "origin.git");
-    execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin], { stdio: "pipe" });
-    const repoDir = join(root, "repos", "console");
-    mkdirSync(join(root, "repos"), { recursive: true });
-    execFileSync("git", ["clone", "-q", origin, repoDir], { stdio: "pipe" });
-    gitIn(repoDir, "config", "user.email", "t4933@example.invalid");
-    gitIn(repoDir, "config", "user.name", "t4933");
-    gitIn(repoDir, "checkout", "-q", "-b", "main");
-    writeFileSync(join(repoDir, ".gitignore"), "node_modules\n");
-    writeFileSync(join(repoDir, "package.json"), pkg({ dep: "^1.0.0", "@vercel/functions": "^2.0.0" }));
-    writeFileSync(join(repoDir, "package-lock.json"), '{"lockfileVersion":3,"note":"2026-09-27"}\n');
-    gitIn(repoDir, "add", "-A");
-    gitIn(repoDir, "commit", "-q", "-m", "lockfile adds @vercel/functions");
-    gitIn(repoDir, "push", "-q", "origin", "main");
-    gitIn(repoDir, "fetch", "-q", "origin");
+    const repoDir = currentWithOrigin({
+      ".gitignore": "node_modules\n",
+      "package.json": pkg({ dep: "^1.0.0", "@vercel/functions": "^2.0.0" }),
+      "package-lock.json": '{"lockfileVersion":3,"note":"2026-09-27"}\n',
+    });
     mkdirSync(join(repoDir, "node_modules", "dep"), { recursive: true });
     writeFileSync(join(repoDir, "node_modules", "old-tree.txt"), "installed 2026-09-24\n");
     writeFileSync(installHashMarkerPath(repoDir), "hash-of-the-2026-09-24-inputs");
@@ -97,7 +98,7 @@ test("W1-T4933: a current checkout with a stale install is reinstalled on a lock
 
 test("W1-T4933: a staged install never empties the live node_modules while it runs", () => {
   withRoot((root) => {
-    const repoDir = staleCheckout(root);
+    const repoDir = lockfileDriftTree(root);
     const live = join(repoDir, "node_modules");
     const seen: Array<{ phase: string; oldTreeServing: boolean; depResolvable: boolean }> = [];
     const probe = (phase: string) =>
@@ -127,7 +128,7 @@ test("W1-T4933: a staged install never empties the live node_modules while it ru
 
 test("W1-T4933: a matching lockfile hash is a no-op that never runs npm", () => {
   withRoot((root) => {
-    const repoDir = staleCheckout(root);
+    const repoDir = lockfileDriftTree(root);
     writeFileSync(installHashMarkerPath(repoDir), hashInstallInputs(repoDir));
     const out = stagedInstall(repoDir, { runInstall: () => assert.fail("a matching hash must not reinstall") });
     assert.equal(out, "noop");
@@ -137,7 +138,7 @@ test("W1-T4933: a matching lockfile hash is a no-op that never runs npm", () => 
 
 test("W1-T4933: a failed staged install keeps the old tree and escalates once per lockfile hash", () => {
   withRoot((root) => {
-    const repoDir = staleCheckout(root);
+    const repoDir = lockfileDriftTree(root);
     const escalations: StagedInstallFailure[] = [];
     const rows: Array<[string, Record<string, unknown> | undefined]> = [];
     const attempt = () =>
@@ -171,7 +172,7 @@ test("W1-T4933: a failed staged install keeps the old tree and escalates once pe
 
 test("W1-T4933: a staged tree that does not resolve a direct dependency is never swapped in", () => {
   withRoot((root) => {
-    const repoDir = staleCheckout(root);
+    const repoDir = lockfileDriftTree(root);
     assert.throws(
       () =>
         stagedInstall(repoDir, {
@@ -188,7 +189,7 @@ test("W1-T4933: a staged tree that does not resolve a direct dependency is never
 
 test("W1-T4933: workspace package.json files are staged so npm ci sees the same workspaces", () => {
   withRoot((root) => {
-    const repoDir = staleCheckout(root);
+    const repoDir = lockfileDriftTree(root);
     writeFileSync(join(repoDir, "package.json"), JSON.stringify({ name: "core", workspaces: ["packages/*"], dependencies: { dep: "^1.0.0" } }));
     mkdirSync(join(repoDir, "packages", "api-client"), { recursive: true });
     writeFileSync(join(repoDir, "packages", "api-client", "package.json"), '{"name":"@x/api-client"}');
@@ -227,18 +228,7 @@ test("W1-T4933: the escalation names the repo and the hash and offers an actiona
 
 test("W1-T4933: a failed install on a current checkout keeps the dispatch going and ledgers why", () => {
   withRoot((root) => {
-    const origin = join(root, "origin.git");
-    execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin], { stdio: "pipe" });
-    const repoDir = join(root, "repos", "console");
-    mkdirSync(join(root, "repos"), { recursive: true });
-    execFileSync("git", ["clone", "-q", origin, repoDir], { stdio: "pipe" });
-    gitIn(repoDir, "config", "user.email", "t4933@example.invalid");
-    gitIn(repoDir, "config", "user.name", "t4933");
-    gitIn(repoDir, "checkout", "-q", "-b", "main");
-    writeFileSync(join(repoDir, "README.md"), "x\n");
-    gitIn(repoDir, "add", "-A");
-    gitIn(repoDir, "commit", "-q", "-m", "seed");
-    gitIn(repoDir, "push", "-q", "origin", "main");
+    const repoDir = currentWithOrigin({ "README.md": "x\n" });
     mkdirSync(join(repoDir, "node_modules"));
     const rows: Array<[string, Record<string, unknown> | undefined]> = [];
     const out = refreshManagedCheckout(repoDir, join(root, "state", "refresh.lock"), (s, x) => void rows.push([s, x]), () => {
@@ -252,7 +242,7 @@ test("W1-T4933: a failed install on a current checkout keeps the dispatch going 
 
 test("W1-T4933: the reviewer's refresh installs under the checkout lock, skips a held lock, and survives a failed install", () => {
   withRoot((root) => {
-    const repoDir = staleCheckout(root);
+    const repoDir = lockfileDriftTree(root);
     const lockPath = join(root, "state", "managed-checkout-console.lock");
     const rows: Array<[string, Record<string, unknown> | undefined]> = [];
     const log = (s: string, x?: Record<string, unknown>) => void rows.push([s, x]);

@@ -31,6 +31,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { systemClock, type Clock } from "./clock.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import type { Escalation } from "./escalate.js";
 
@@ -45,7 +46,7 @@ export interface StagedInstallFailure {
   error: string;
 }
 
-export interface StagedInstallDeps {
+export interface StagedInstallOptions {
   hash?: (repoDir: string) => string;
   /** Runs `npm ci` in `stagingDir` (which holds copies of the install inputs). Throws on failure. */
   runInstall?: (stagingDir: string) => void;
@@ -54,7 +55,7 @@ export interface StagedInstallDeps {
   log?: (step: string, extra?: Record<string, unknown>) => void;
   /** Called at most once per lockfile hash, on a failed install. Its own failure never masks the install error. */
   escalate?: (failure: StagedInstallFailure) => void;
-  now?: () => number;
+  clock?: Clock;
 }
 
 export type StagedInstallOutcome = "noop" | "refreshed" | "skipped_symlink";
@@ -159,10 +160,10 @@ function defaultRunInstall(stagingDir: string): void {
  * Returns `"noop"` on a matching hash. THROWS {@link StagedInstallFailedError} after ledgering
  * `managed_checkout.install_failed` and escalating once per lockfile hash; the old tree is still in place.
  */
-export function stagedInstall(repoDir: string, deps: StagedInstallDeps = {}): StagedInstallOutcome {
+export function stagedInstall(repoDir: string, deps: StagedInstallOptions = {}): StagedInstallOutcome {
   const hash = deps.hash ?? ((dir: string) => hashInstallInputs(dir));
   const log = deps.log ?? (() => {});
-  const now = deps.now ?? Date.now;
+  const clock = deps.clock ?? systemClock;
   const liveTree = join(repoDir, "node_modules");
   const markerPath = installHashMarkerPath(repoDir);
 
@@ -182,7 +183,7 @@ export function stagedInstall(repoDir: string, deps: StagedInstallDeps = {}): St
     return "skipped_symlink";
   }
 
-  const startedAt = now();
+  const startedAt = clock.now();
   const stagingRoot = join(dirname(repoDir), `.rmd-staged-install-${basename(repoDir)}`);
   const stagingDir = join(stagingRoot, "stage");
   const previousTree = join(stagingRoot, "previous");
@@ -214,7 +215,7 @@ export function stagedInstall(repoDir: string, deps: StagedInstallDeps = {}): St
       swapped,
       error: failure.error,
       escalated: !escalated,
-      elapsed_ms: now() - startedAt,
+      elapsed_ms: clock.now() - startedAt,
     });
     if (!escalated) {
       // Mark BEFORE delivering: an escalation that throws must not be retried on every dispatch.
@@ -238,7 +239,7 @@ export function stagedInstall(repoDir: string, deps: StagedInstallDeps = {}): St
     repo: basename(repoDir),
     before_hash: before ?? null,
     after_hash: wanted,
-    elapsed_ms: now() - startedAt,
+    elapsed_ms: clock.now() - startedAt,
   });
   return "refreshed";
 }
