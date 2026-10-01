@@ -16,7 +16,7 @@
     - scripts/lib/instrument-surface-census.mjs
     - test/instrument-surface-completeness.test.ts
     - test/census-precheck-refuses-an-undeclared-instrument-surface-path.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-01 at origin/main 431d71762, by running the real scripts on the real trees; every claim below was reproduced, not copied from the brief.

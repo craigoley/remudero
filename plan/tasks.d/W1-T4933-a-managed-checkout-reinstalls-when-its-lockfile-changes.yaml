@@ -15,7 +15,7 @@
     - src/lib/staged-install.ts
     - test/staged-install.test.ts
     - src/run-task.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 by the coordinator in the container remudero-console-daemon. The managed

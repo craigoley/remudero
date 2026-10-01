@@ -11,7 +11,7 @@
   origin: "oper#followups-research-2026-09-22"
   plan_refs: [W1-T3557, W1-T4051]
   files: [src/lib/sweep.ts, src/run-task.ts, test/the-fix-rung-reads-its-contract-at-the-pr-head.test.ts, scripts/test-tier-manifest.json]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-22.

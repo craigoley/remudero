@@ -44,4 +44,4 @@
     - claim: "the reviewer is the module's call site, so the fallback is reachable from a real review"
       proof: "grep: fetchPrDiff( in src/run-task.ts"
   files: [src/lib/pr-diff.ts, src/run-task.ts, test/a-review-that-cannot-read-its-diff-refuses.test.ts]
-  status: queued
+  status: merged
