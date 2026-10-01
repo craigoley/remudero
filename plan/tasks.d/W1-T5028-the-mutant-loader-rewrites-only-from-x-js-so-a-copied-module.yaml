@@ -1,0 +1,92 @@
+- id: W1-T5028
+  title: "THE MUTANT LOADER REWRITES ONLY `from \"./x.js\"` SO A COPIED MODULE WITH ANY OTHER RELATIVE IMPORT RESOLVES AGAINST test/mutants-XXXX/ AND FAILS TO LOAD ON CI — #8161 (W1-T4937) added `import … from \"../scripts/satisfied-task-census.mjs\"` to src/run-task.ts, test/review-orphan-wiring.test.ts's W1-T1015 control copies that file, its ad hoc regex patched only `./` imports, and coverage-shard plus coverage-ratchet went red though the test passed on main; replace the ad hoc rewrite with ONE helper that resolves every relative static, dynamic and re-export specifier against the original file's directory, and refuse a test that rewrites imports by hand"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: #8161's CI red was a mutant loader that could not resolve a new ../ import; it was patched ad hoc by commit 7c0cdb9f2 and nothing stops the next one"
+  plan_refs: [W1-T963, W1-T1015, W1-T4937]
+  files:
+    - test/helpers/mutant-module.ts
+    - test/review-orphan-wiring.test.ts
+    - test/the-mutant-loader-resolves-every-relative-import.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 at origin/main 1f6d904bb.
+
+    (1) THE MECHANISM. `writeMutantModule` (test/helpers/mutant-module.ts) writes a mutated COPY of a source under
+    test/mutants-XXXXXX/ (so coverage keeps its record, W1-T963) and absolutises the copy's sibling imports with ONE
+    regex, `/from "\.\/([A-Za-z0-9._-]+)\.js"/g`, resolving against `src/lib/`. Any other relative specifier
+    (`../x.mjs`, `./lib/x.js`, `import("./x.js")`, `export * from "./x.js"`, a `.json`) is left untouched and
+    resolves against the copy's own directory, where nothing exists.
+
+    (2) THE INCIDENT. #8161 added line 18 of src/run-task.ts, `import { censusSatisfiedTasks } from
+    "../scripts/satisfied-task-census.mjs";`. test/review-orphan-wiring.test.ts 'W1-T1015: inverting the attribution fails
+    the foreign-push control' copies src/run-task.ts (a `src/` file, not `src/lib/`), so it carries a SECOND ad hoc
+    rewrite, `.replace(/from "\.\/([^\"]+)\.js"/g, ...)` for `./lib/*` and `./cli/*`, that also touches only `./`. The new
+    `../` import resolved under test/, the copy failed to load on CI and took coverage-shard and coverage-ratchet red,
+    while the same test had passed on main before that import landed. Commit 7c0cdb9f2
+    bolted a third `.replace(/from "\.\.\/([^\"]+\.mjs)"/g, ...)` on, scoped to `.mjs`. The next `../` import of
+    another extension, or a `.ts`, fails the same way.
+
+    (3) A SECOND HOLE THE PATCH LEAVES, MEASURED BY READING THE SOURCE. src/run-task.ts carries three real dynamic
+    imports, `await import("./lib/review.js")`, `./lib/drain.js` and `./lib/daemon.js` in `loadHeavyVerb`; neither ad hoc
+    rewrite matches `import(`. A mutant run that reaches `loadHeavyVerb` resolves them under test/mutants-XXXXXX/lib/ and
+    throws ERR_MODULE_NOT_FOUND at CALL time, not load time, so it would pass review until a test happens to call it.
+
+    (4) POPULATION. Nine test files import `writeMutantModule` (a-hand-rolled-mutation-test-collides-with-the-real-harness,
+    changeset-shorthand-anchor, review-engine-revision-rearm, review-orphan-wiring, specialist-panel, sweep,
+    the-quotation-guard-covers-one-arm-of-four, trailer-credit-plan-only, triage-proof-dialect). The others copy a `src/lib`
+    module (sampled: sweep.ts, review.ts, status.ts) and rely on the default; review-orphan-wiring's W1-T1015 control copies `src/run-task.ts` and hand-rolls.
+    A scan for a regex literal inside `.replace(` that names `from "` finds exactly one file, test/review-orphan-wiring.test.ts
+    (lines 171-174), so the guard below bites one site today and every future one.
+    A `src/lib` module with its first `../` or dynamic import would hit the same hole in its own caller with no warning.
+  design: |
+    (i) test/helpers/mutant-module.ts exports `rewriteRelativeSpecifiers(source, originDir)`: pure; rewrites EVERY
+    relative specifier that starts `./` or `../`, in `from "…"`, `export … from "…"`, bare `import "…"` and `import("…")`,
+    single or double quoted, to an absolute path `resolve(originDir, specifier)` with the extension kept. Bare package
+    names and `node:` builtins are untouched. `writeMutantModule(fileName, mutatedSource, originDir = LIB_DIR)` calls it in
+    place of its one regex, so every existing caller is covered with no edit and `src/run-task.ts` passes
+    `join(REPO_ROOT, "src")`.
+    (ii) test/review-orphan-wiring.test.ts drops both ad hoc `.replace` calls and passes the origin directory.
+    (iii) The new suite holds a census: every `test/*.test.ts` except itself and architecture-fitness (whose own
+    controls are the shape written out as strings, the same self-match reason it skips itself) is read, and any
+    `.replace(` whose regex literal names `from "` or `from \"` is reported. The detector is driven first with the exact
+    ad hoc snippet this task removes, or it is vacuous (the positive control architecture-fitness.test.ts already sets
+    for its tmpdir census).
+    (iv) NOT IN SCOPE: the shadow-checkout variant in acceptance-block-diagnostics.test.ts (it copies the whole tracked
+    tree and resolves by real relative path, so nothing is rewritten), the tmpdir census, and any change to where copies
+    are written.
+  acceptance:
+    - claim: "a ../ import in a copied module resolves against the original directory, the #8161 shape"
+      proof: 'grep: test("W1-T5028: a parent-relative import of a copied module resolves against the original directory" in test/the-mutant-loader-resolves-every-relative-import.test.ts'
+    - claim: "a dynamic import and an export-from specifier are rewritten too"
+      proof: 'grep: test("W1-T5028: a dynamic import and an export-from specifier are rewritten too" in test/the-mutant-loader-resolves-every-relative-import.test.ts'
+    - claim: "a bare package name and a node builtin are left alone, the negative control"
+      proof: 'grep: test("W1-T5028: a package name and a node builtin are not rewritten" in test/the-mutant-loader-resolves-every-relative-import.test.ts'
+    - claim: "a copy whose source imports a ../scripts/*.mjs module loads and exposes that module's export"
+      proof: 'grep: test("W1-T5028: a copy importing a scripts mjs module loads" in test/the-mutant-loader-resolves-every-relative-import.test.ts'
+    - claim: "the census detector flags the ad hoc rewrite this task removes"
+      proof: 'grep: test("W1-T5028: the census detector flags an ad hoc import rewrite" in test/the-mutant-loader-resolves-every-relative-import.test.ts'
+    - claim: "no test file rewrites import specifiers with its own regex"
+      proof: 'grep: test("W1-T5028: no test rewrites import specifiers by hand" in test/the-mutant-loader-resolves-every-relative-import.test.ts'
+    - claim: "the run-task mutant control now resolves its origin through the shared helper"
+      proof: "grep: originDir in test/review-orphan-wiring.test.ts"
+  falsifier: |
+    Restore the one-regex body of `writeMutantModule` and the parent-relative and dynamic-import tests redden, and the
+    mjs-loading test fails with ERR_MODULE_NOT_FOUND, which is the CI red this task names. Re-add an ad hoc `.replace`
+    over `from "` to any test and the census test names the file. The negative control (package names untouched) stays
+    green under both, which is what shows the rewrite is not a blanket replace.
+  note: |
+    RISK BAND: `high` / `band_meaning: span` is Rule 19 SIZING, not danger: the task spans three test-side names (the helper, its
+    caller and the new suite), which lint-plan counts as three subsystems at `low`. The change is test-only.
+    Test-only, so it carries no `src/` change and diff-coverage has nothing to gate (ci.yml excludes `test/**` from the
+    lcov). Standing rule 25 (instrument isolation) does not apply: this is a test helper, not a measurement instrument.
+    The 7c0cdb9f2 patch is removed by this task, not kept beside the helper.
+    reservation hand-off: unknown -> file/gates-r5-1790812000000

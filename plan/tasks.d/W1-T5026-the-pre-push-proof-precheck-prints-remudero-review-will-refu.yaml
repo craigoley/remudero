@@ -1,0 +1,92 @@
+- id: W1-T5026
+  title: "THE PRE-PUSH PROOF PRECHECK PRINTS 'remudero-review WILL REFUSE' FOR A `grep: test(\"<title>\"` PROOF WHOSE TITLE NO TEST FILE CARRIES AND THEN EXITS 0, SO THE PUSH PROCEEDS — #8156 (W1-T4914) named its test longer than the pattern that ends at the closing quote, the precheck reported the miss and let the push through, and the fix cost a round; a title-literal grep miss against an existing test file is as certain a refusal as a missing `unit test:` title, so block it and keep every other grep miss report-only"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: #8156 (W1-T4914) head 6e681e1aa named its clean-merge test longer than the proof pattern; the pre-push precheck reported the miss and did not stop the push"
+  plan_refs: [W1-T4921, W1-T4914, W1-T3225, W1-T3738]
+  files:
+    - src/lib/review.ts
+    - scripts/proof-resolve-precheck.mjs
+    - test/a-grep-proof-naming-a-title-no-test-carries-blocks-the-push.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 at origin/main 1f6d904bb; the shape was replayed here, not carried from the brief.
+
+    (1) THE CASE. W1-T4914's record carried `grep: test("W1-T4914: a clean test merge is recorded as clean" in
+    test/merge-probe.test.ts`. The builder named the test "W1-T4914: a clean test merge is recorded as clean with no
+    conflicting paths". The proof pattern ENDS at the closing quote (`...recorded as clean"`), so a longer title is a
+    miss: the quote must follow `clean` and it follows `paths`. Reported on the head by the pre-push precheck, then
+    by remudero-review as a failure, then fixed in a round.
+
+    (2) REPLAYED AT THIS TREE, with a throwaway checkout holding one test file that carries exactly the long title.
+    `certainHeadRefusals` (src/lib/review.ts, the `w.kind === "grep"` arm) returns the refusal for the short pattern
+    and none for a pattern that names the whole title. `proofResolveVerdict` (scripts/proof-resolve-precheck.mjs) over
+    that refusal printed `remudero-review WILL REFUSE 1 of W1-T4914's proofs on this head` plus `(grep misses are
+    reported, not blocking ...)` and returned exit 0. hooks/pre-push block 'BEGIN proof-resolve precheck' fails the
+    push only on rc != 0 and != 2, so exit 0 means the push proceeds.
+
+    (3) WHY THE EXEMPTION EXISTS, AND WHY IT OVER-REACHES. The script header says a plan's grep can be wrong in a way a
+    worker may not edit (Standing rule 15), and that blocking would strand the task with no PR. That holds for a
+    wrapped multi-line YAML pattern and for a pattern matching source prose. It does NOT hold for a `test("<title>"`
+    pattern whose target is a TEST FILE THE BUILDER IS WRITING: the builder authors that file's titles, so the title is
+    always within reach, exactly the argument the script already makes for blocking a `unit test:` title miss. (The
+    filing convention for these proofs, `grep: test("<exact title>" in test/<new-file>.test.ts`, deliberately ends the
+    pattern at the closing quote so a longer title is a miss; that is why the builder must write the title verbatim.)
+
+    (4) WHAT THIS DOES NOT MEASURE. I did not count how many build heads since 2026-09-01 carried this miss; one named
+    case (#8156) is the demand, and the population is the follow-up if the operator wants a price. The rule is narrow by
+    construction (see design), so it cannot strand a task the existing exemption protects.
+
+    (5) OVERLAP. W1-T4921 (merged as #8162) already edits proofResolveVerdict for the plan-only-build and stale-proof
+    arms and is the nearest neighbour; this task touches the refusal's severity, not those arms. Its shard still reads
+    `status: queued` (CLAUDE.md: a shard's status field is not a completion signal).
+  design: |
+    (i) `CertainHeadRefusal` (src/lib/review.ts) gains `blocking?: true`, set ONLY by the grep arm of
+    `certainHeadRefusals` when ALL of: the proof's pattern (`w.args[2]`) matches `^test\("` and contains no newline,
+    and its target (`dialectGrepTargetPath`) is a path under test/ that EXISTS in `cwd`. The field is omitted otherwise,
+    so every existing deepEqual over refusals stays green. A missing target file stays report-only (a forward reference
+    the builder is about to create is the `unit test:` pure-path arm's business, not this one's).
+    (ii) `proofResolveVerdict` computes `blocking` as `refusals.filter((r) => r.blocking === true || !/^grep:/.test(r.proof))`.
+    Nothing else in that function changes: the exit is still 1 on any blocking refusal and 0 otherwise, the stale and
+    SKIP arms are untouched, and the TO FIX text for a title miss now also names the quote rule: the pattern ends at
+    the closing quote, so the test's title must end exactly there or the proof must be re-anchored by the operator.
+    (iii) hooks/pre-push is NOT edited: its existing arm already turns exit 1 into `fail=1` and exit 2 into a note. The
+    criteria prove that with the block's real text, so a later edit to the hook cannot drop it silently.
+    (iv) ONE test really shells out: the script runs as a child against a throwaway git repository whose `run-<id>-`
+    branch head carries the #8156 shape, because every other test injects the refusal list and would leave the
+    script's real `main()` path uncovered (CLAUDE.md coverage trap).
+  acceptance:
+    - claim: "a title-literal grep proof whose title no test file carries is refused and the verdict blocks, the #8156 shape"
+      proof: 'grep: test("W1-T5026: a title grep the test file does not carry blocks the push" in test/a-grep-proof-naming-a-title-no-test-carries-blocks-the-push.test.ts'
+    - claim: "a grep miss that is not a title literal, or is wrapped over several lines, is still only reported and exits 0"
+      proof: 'grep: test("W1-T5026: a grep miss that is not a title literal stays report-only" in test/a-grep-proof-naming-a-title-no-test-carries-blocks-the-push.test.ts'
+    - claim: "a title grep whose target file does not exist at head stays report-only"
+      proof: 'grep: test("W1-T5026: a title grep against an absent target stays report-only" in test/a-grep-proof-naming-a-title-no-test-carries-blocks-the-push.test.ts'
+    - claim: "a title grep that does match the carried title is neither reported nor blocked, the positive control"
+      proof: 'grep: test("W1-T5026: a title grep that matches the carried title is not reported" in test/a-grep-proof-naming-a-title-no-test-carries-blocks-the-push.test.ts'
+    - claim: "the script, run as a child process in a fixture checkout, exits 1 on the shape and 0 on its near neighbour"
+      proof: 'grep: test("W1-T5026: the precheck script exits 1 for a real title miss" in test/a-grep-proof-naming-a-title-no-test-carries-blocks-the-push.test.ts'
+    - claim: "the hook block's own text fails the push on exit 1 and only notes exit 2"
+      proof: 'grep: test("W1-T5026: the pre-push proof-resolve block fails on exit 1 and not on exit 2" in test/a-grep-proof-naming-a-title-no-test-carries-blocks-the-push.test.ts'
+    - claim: "the grep arm marks the refusal blocking, a production call site of the new field"
+      proof: "grep: blocking: true in src/lib/review.ts"
+  falsifier: |
+    Delete the `blocking` assignment in the grep arm and the first test reddens (exit 0 for the #8156 shape) while the
+    report-only tests stay green; widen it to every grep miss and the second and third tests redden. BOTH directions are
+    needed: a test that only reddens on removal pins that the field exists, not what it decides.
+  note: |
+    NOT IN SCOPE: the wrapped-multi-line exemption itself, `kind: guard`, the stale-at-merge-base report (W1-T4921),
+    `unit test:` title handling, and any change to hooks/pre-push. The builder must not edit a criterion (Standing rule
+    15): when a title miss is the PLAN's pattern being wrong rather than the test's title, the precheck's exit 1 is
+    still right to stop the push, and the builder reports the pattern defect instead of pushing.
+    RISK: high because src/lib/review.ts is the reviewer's own module and a wrong `blocking` refuses a push in every
+    worker worktree (core.hooksPath=hooks), the blast radius hooks/pre-push's own header names.
+    reservation hand-off: unknown -> file/gates-r5-1790812000000
