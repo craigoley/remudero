@@ -235,7 +235,10 @@ export function projectRepoTelemetry(
   const { plan, nowMs } = sources;
   if (!sources.ledger) return UNKNOWN;
   const seen = new Set<string>();
+  // A row after `nowMs` changes nothing: the run-level passes below are unwindowed, so a later worker.attempt
+  // would drop an in-window recon.done from a reader that merely read later (2026-10-01T18:27:18Z, W1-T5017).
   const ledger = sources.ledger.filter((row) => {
+    if (Date.parse(str(row.ts) ?? "") > nowMs) return false;
     const key = JSON.stringify(row);
     if (seen.has(key)) return false;
     seen.add(key);

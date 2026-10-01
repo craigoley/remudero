@@ -630,3 +630,33 @@ test("a member named only by a row compaction pruned after legacy's horizon is l
   const whole = classifyShadowDiff(diff, readShadowEvidence([db], { ...input, legacyRows: legacyRowIndex([...kept, pruned]) }));
   assert.equal(whole.classification, "real", "a live file holding every row explains nothing");
 });
+
+test("a sample is skipped and never compared while either side says it is not ready", () => {
+  // 2026-10-01 17:38:02-17:40:48Z: serve restarted onto 23a76fb9 and re-read the ledger. Bodies built mid-rebuild
+  // said so in their sources (ledger:core catching_up, then "not projected yet"), yet every diff they made was real.
+  const clock = steppedClock();
+  const shadow = createViewShadow({ clock, log: () => {}, evidence: () => NONE });
+  const sample = (legacy: Record<string, unknown>, sources: Array<Record<string, unknown>>): ReturnType<typeof shadow.compare> =>
+    shadow.compare({ view: "repositories", key: "", requests: 1, legacy: { data: { condition: "healthy" }, asOfMs: T0, ...legacy }, body: { data: { condition: "down" }, asOf: null, sources: sources as never } });
+  const catchingUp = sample({}, [{ name: "ledger:core", asOf: null, state: "stale", phase: "catching_up" }, { name: "repositories:core", asOf: null, state: "fresh" }]);
+  assert.deepEqual(catchingUp, { view: "repositories", key: "", diffs: [], skipped: "view ledger:core catching_up" });
+  assert.equal(sample({}, [{ name: "repositories:core", asOf: null, state: "unavailable", phase: "warming" }]).skipped, "view repositories:core warming");
+  assert.equal(sample({ unready: "analytics:core warming" }, []).skipped, "legacy analytics:core warming");
+  let r = shadow.readiness()[0]!;
+  assert.deepEqual([r.samples, r.diffs.real, r.skipped, r.lastSkipReason, r.lastSkippedMs], [0, 0, 3, "legacy analytics:core warming", T0]);
+  assert.match(r.reason, /; 3 sample\(s\) skipped while a side was not ready \(last: legacy analytics:core warming\)/);
+  // The negative controls: a body whose sources claim it is ready, or are merely behind or structurally
+  // unavailable (an instance with no plan), and that differs is a real diff.
+  const ready = sample({}, [{ name: "ledger:core", asOf: null, state: "stale", phase: "behind" }, { name: "plan:core", asOf: null, state: "unavailable" }]);
+  assert.equal(ready.skipped, undefined);
+  assert.deepEqual(ready.diffs.map((d) => d.classification), ["real"]);
+  r = shadow.readiness()[0]!;
+  assert.deepEqual([r.samples, r.diffs.real, r.skipped], [1, 1, 3]);
+});
+
+test("legacy's own unready sources ride on the sampled request", () => {
+  const posted: ShadowRequest[] = [];
+  const warming: ViewDefinition = { name: "nav-badge", version: 1, compute: () => ({ data: { count: 0 }, sources: [{ name: "analytics:core", asOf: null, state: "unavailable", phase: "warming" }] }) };
+  legacyViewSampler({ legacy: [warming], clock: fixedClock(T0), defer: (run) => run(), post: (request) => posted.push(request) })("nav-badge", "", new URLSearchParams());
+  assert.equal(posted[0]?.legacy?.unready, "analytics:core warming");
+});
