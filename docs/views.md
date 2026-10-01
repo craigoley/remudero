@@ -64,6 +64,9 @@ reads no file and no SQLite.
 - **Worker diagnostics.** The worker ledgers `read_model.lease_acquired` and `read_model.lease_elsewhere`
   when an instance's lease changes hands, and `read_model.slow_tick` when one projector tick takes longer
   than the 10 s stale bound. A source's staleness is judged from when its tick completed.
+- **Materialize budget (P2-08).** A tick materializes views until it has spent one instance's projector
+  budget; the views left over run first on the next tick (`read_model.materialize_deferred`, at most one row
+  per 10 s), so a slow view bounds the tick without starving the others. One view always runs.
 
 ## Push: `GET /v1/views/events` (Phase 2)
 

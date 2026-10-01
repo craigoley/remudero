@@ -242,6 +242,8 @@ export interface ReadModelTickerOptions {
   oracle?: "on" | "off";
   /** Each instance's projector budget per tick; derived from the lease timing when absent. */
   tickBudgetMs?: number;
+  /** The views' materialize budget per tick (P2-08); one instance's projector budget when absent. */
+  materializeBudgetMs?: number;
 }
 
 export interface ReadModelTicker {
@@ -320,6 +322,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   const stopRequested = opts.stopRequested ?? (() => false);
   const windowMs = opts.consistencyWindowMs ?? ORACLE_DEFAULT_WINDOW_MS;
   const budgetMs = opts.tickBudgetMs ?? (READ_MODEL_LEASE_RENEW_MS * READ_MODEL_PASS_SHARE) / Math.max(1, opts.instances.length);
+  const materializeBudgetMs = opts.materializeBudgetMs ?? budgetMs;
   const switchesPath = readModelSwitchesPath(opts.stateDir);
   const slots: Slot[] = opts.instances.map((instance) => ({
     instance,
@@ -332,6 +335,9 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   const lastEtag = new Map<string, string>();
   const latest = new Map<string, ViewBody>();
   let comparator: { db: ReadModelDb; shadow: ViewShadow } | undefined;
+  /** Where the next materialize pass starts: the first view a pass over budget deferred, so none starves. */
+  let nextView = 0;
+  let deferredLoggedAt = Number.NEGATIVE_INFINITY;
   let switches = DEFAULT_READ_MODEL_SWITCHES;
   let switchesMtimeMs = -1;
   let switchesCheckedAt = Number.NEGATIVE_INFINITY;
@@ -554,7 +560,20 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const shadow = comparator?.shadow.readiness();
     const ctx: ReadModelViewContext = { now, switches, instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}) })), ...(shadow ? { shadow } : {}) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
-    for (const view of views) {
+    const started = clock.now();
+    const order = [...views.slice(nextView), ...views.slice(0, nextView)];
+    nextView = 0;
+    for (const [i, view] of order.entries()) {
+      // BUDGET (P2-08): a pass over budget defers the rest to the next tick, which starts with them; one view always runs.
+      const spent = clock.now() - started;
+      if (i > 0 && spent > materializeBudgetMs) {
+        nextView = views.indexOf(view);
+        if (now - deferredLoggedAt >= READ_MODEL_LEDGER_STALE_MS) {
+          deferredLoggedAt = now;
+          log("read_model.materialize_deferred", { ms: spent, budgetMs: materializeBudgetMs, deferred: order.slice(i).map((v) => v.name) });
+        }
+        return;
+      }
       if (switches.views[view.name] === "off") continue;
       try {
         for (const { key, data, sources } of view.materialize(ctx)) {
