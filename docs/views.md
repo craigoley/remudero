@@ -246,6 +246,20 @@ answers from memory. Schema: `InboxView` in `openapi/daemon.yaml`.
 - Source: `feedback-store:core`, budget 180 s.
 - Dark until `switches.json` sets `feedback` to `serve`; while dark it is computed inline from the entries.
 
+## `needs-you` (version 1)
+
+`GET /v1/views/needs-you`: the console's /needs-you in one read (P4-T08). Schema: `NeedsYouView`.
+- A view of views: serve's main thread recomposes it from bodies it already holds, every instance's `now`
+  and the `inbox` view's `section=needsYou` page, when one of them moves. It reads no store.
+- `data`: `{ decisions[], inbox?{ items, counts, page }, instances[]{ instance, reason?, counts?{ decisions,
+  decisionsMore, actions }, actions?, decisionsReasons? }, reasons?{ inbox?, instances? } }`.
+- `decisions[]` merges every instance's `now` decisions, newest `askedAt` first; each keeps its `instance`
+  and answer route.
+- An input with no usable body is absent with a reason, never zero: the instance (or `inbox`) carries the
+  reason, and an `unavailable` source `read-model:now@<i>` (or `read-model:inbox@core`) names it.
+- Sources: the union of the inputs' sources. Dark until `switches.json` sets `needs-you` to `serve`; while
+  dark it answers 404 `view_disabled`.
+
 ## `now` (version 3)
 
 `GET /v1/views/now?instance=<id>`: everything the console's /now renders for one instance. Schema:

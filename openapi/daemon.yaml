@@ -7261,6 +7261,88 @@ components:
             page:
               $ref: "#/components/schemas/ViewPage"
 
+    NeedsYouView:
+      type: object
+      description: >
+        GET /v1/views/needs-you (docs/views.md, src/lib/needs-you-view.ts): a view of views (P4-T08).
+        Serve recomposes it from the bodies it holds, every instance's `now` and the `inbox` view's
+        `section=needsYou` page, whenever one moves; it reads no store. An input with no usable body
+        is absent with a reason, never zero. Dark until state/read-model/switches.json sets
+        `needs-you` to `serve`.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [needs-you]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          description: >
+            The union of the inputs' sources, by name. A missing input adds an `unavailable`
+            `read-model:<now|inbox>@<instance>` source carrying the reason.
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [decisions, instances]
+          properties:
+            decisions:
+              type: array
+              description: Every present instance's open decisions, newest `askedAt` first (undated last).
+              items:
+                $ref: "#/components/schemas/NowDecision"
+            inbox:
+              type: object
+              description: The `inbox` view's `section=needsYou` first page; absent with `reasons.inbox`.
+              required: [items, counts, page]
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/InboxViewItem"
+                counts:
+                  $ref: "#/components/schemas/InboxCounts"
+                page:
+                  $ref: "#/components/schemas/ViewPage"
+            instances:
+              type: array
+              description: >
+                Every instance the read model reported or holds a `now` body for, by name. One whose
+                `now` body is missing (or not version 3) carries `reason` and no counts or actions.
+              items:
+                type: object
+                required: [instance]
+                properties:
+                  instance: {type: string}
+                  reason: {type: string}
+                  counts:
+                    type: object
+                    required: [decisions, decisionsMore, actions]
+                    properties:
+                      decisions: {type: integer}
+                      decisionsMore: {type: integer}
+                      actions: {type: integer}
+                  actions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/NowAction"
+                  decisionsReasons:
+                    type: object
+                    properties:
+                      grill: {type: string}
+                      task_question: {type: string}
+            reasons:
+              type: object
+              description: Why a top-level input is absent.
+              properties:
+                inbox: {type: string}
+                instances: {type: string}
+
     NowView:
       type: object
       description: >
@@ -13334,6 +13416,31 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: The view is shadowed (`view_shadow`) or not materialized yet (`view_not_ready`).
+
+  /v1/views/needs-you:
+    get:
+      summary: Every open decision across instances, the inbox needsYou page, and each instance's actions, in one read.
+      description: >
+        Arch Phase 4 (P4-T08). A view of views recomposed on serve's main thread from the `now` and
+        `inbox` bodies; no query parameters. While dark it answers 404 `view_disabled` (no legacy
+        computation). Same ETag and 304 rules as every view. See docs/views.md.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NeedsYouView"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The view is dark (`view_disabled`), shadowed (`view_shadow`) or not composed (`view_not_ready`).
 
   /v1/views/events:
     get:
