@@ -24,7 +24,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { Task } from "./plan.js";
+import type { Plan, Task } from "./plan.js";
 import {
   createLedgerTailCache,
   deriveStatus,
@@ -142,7 +142,9 @@ interface PublisherState {
   bootId: string;
   generation: number;
   subscribers: Set<SseSend>;
-  deps: BoardDeps;
+  source: BoardDeps;
+  readLedger: (path: string) => Array<Record<string, unknown>>;
+  primedPlan: Plan;
   lastSent: Map<string, string>;
   lastLineCount: number;
   pollTimer: ReturnType<typeof setInterval>;
@@ -155,18 +157,29 @@ interface PublisherState {
  *  `bootId` mismatch and gets `resync`, never a silently-wrong generation comparison. */
 let publisher: PublisherState | null = null;
 
+function primeNewTasks(state: PublisherState, deps: BoardDeps, priorLines: Array<Record<string, unknown>>): void {
+  if (deps.plan === state.primedPlan) return;
+  state.primedPlan = deps.plan;
+  const prior: BoardDeps = { ...deps, readLedger: () => priorLines };
+  for (const t of deps.plan.tasks) {
+    if (!state.lastSent.has(t.id)) state.lastSent.set(t.id, JSON.stringify(deriveForStream(prior, t, priorLines)));
+  }
+}
+
 function tick(state: PublisherState): void {
-  const lines = state.deps.readLedger!(state.deps.ledgerPath);
+  const deps: BoardDeps = { ...state.source, readLedger: state.readLedger };
+  const lines = state.readLedger(deps.ledgerPath);
+  primeNewTasks(state, deps, lines.slice(0, state.lastLineCount));
   if (lines.length <= state.lastLineCount) return;
   const newLines = lines.slice(state.lastLineCount);
   state.lastLineCount = lines.length;
 
   for (const taskId of taskIdsOf(newLines)) {
-    const task = state.deps.plan.byId.get(taskId);
+    const task = deps.plan.byId.get(taskId);
     if (!task) continue; // a ledger line for a task not (or no longer) in the plan.
     // Re-derive off the FULL `lines` (not just `newLines`) — liveRunSpend needs the task's whole
     // current run, and deriveStatus itself always re-reads the ledger too.
-    const projection = deriveForStream(state.deps, task, lines);
+    const projection = deriveForStream(deps, task, lines);
     const serialized = JSON.stringify(projection);
     if (state.lastSent.get(taskId) === serialized) continue; // no actual flip (incl. spend) — don't spam.
     state.lastSent.set(taskId, serialized);
@@ -199,7 +212,9 @@ function startPublisher(deps: BoardDeps, pollMs: number, heartbeatMs: number): P
     bootId: randomUUID(),
     generation: 0,
     subscribers: new Set(),
-    deps: effectiveDeps,
+    source: deps,
+    readLedger,
+    primedPlan: deps.plan,
     lastSent,
     lastLineCount: primingLines.length,
     pollTimer: undefined as unknown as ReturnType<typeof setInterval>,

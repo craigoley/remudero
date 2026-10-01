@@ -10,7 +10,7 @@
  */
 import { isMainThread, parentPort, threadId, Worker, workerData } from "node:worker_threads";
 import { listFeedback, type FeedbackEntry } from "./feedback.js";
-import { loadPlan } from "./plan.js";
+import { loadPlan, type Plan } from "./plan.js";
 import { feedbackOriginTag, type DischargeGithub } from "./trace.js";
 
 const CONSOLE_PROJECTION_WORKER_KIND = "remudero-console-projection" as const;
@@ -18,6 +18,11 @@ const CONSOLE_PROJECTION_WORKER_KIND = "remudero-console-projection" as const;
 export interface FeedbackProjectionInput {
   root: string;
   planPath: string;
+  taskOrigins?: Array<[string, string]>;
+}
+
+export function taskOriginsOf(plan: Plan): Array<[string, string]> {
+  return plan.tasks.flatMap((task): Array<[string, string]> => (task.origin ? [[task.id, task.origin]] : []));
 }
 
 export type FeedbackProjectionOutcome =
@@ -36,13 +41,9 @@ export type FeedbackProjectionOutcome =
 export function computeFeedbackProjectionSync(input: FeedbackProjectionInput): FeedbackProjectionOutcome {
   const entries = listFeedback(input.root, {});
   try {
-    const plan = loadPlan(input.planPath);
     const byOrigin = new Map<string, string[]>();
-    for (const task of plan.tasks) {
-      if (!task.origin) continue;
-      const ids = byOrigin.get(task.origin) ?? [];
-      ids.push(task.id);
-      byOrigin.set(task.origin, ids);
+    for (const [id, origin] of input.taskOrigins ?? taskOriginsOf(loadPlan(input.planPath))) {
+      byOrigin.set(origin, [...(byOrigin.get(origin) ?? []), id]);
     }
     const filedTasks = entries.map((e): [string, string[]] => [e.id, byOrigin.get(feedbackOriginTag(e.id)) ?? []]);
     return { ok: true, entries, filedTasks, threadId };
