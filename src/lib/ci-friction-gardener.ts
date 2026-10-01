@@ -373,6 +373,18 @@ export function costliestUntrackedCause(priced: readonly CiFrictionCausePrice[],
   return priced.find((p) => !held.has(ciFrictionOrigin(p.cause)));
 }
 
+/** A landed filing stays decided even when its price changes or the PR is closed. The scorecard
+ * is written only after `land` returns a PR URL; a pass with no PR is not a decision. */
+export function landedCiFrictionOrigins(records: readonly LedgerRecord[]): string[] {
+  const origins = new Set<string>();
+  for (const row of records) {
+    if (row.step !== "ci-friction.scorecard" || typeof row.pr_url !== "string" || !PR_URL_RE.test(row.pr_url) ||
+        typeof row.untracked !== "string" || !/^(check|main_merge|conflict|fix_refusal):.+$/.test(row.untracked)) continue;
+    origins.add(`ci-friction:${row.untracked}`);
+  }
+  return [...origins];
+}
+
 /** Where a person records that a drafted cause's remedy landed — a task's acceptance proof points
  *  here, and the file need not exist yet at filing time (an absent path is simply no match). */
 export const CI_FRICTION_REMEDIES_FILE = "docs/ci-friction-remedies.md";
@@ -508,9 +520,10 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       return `${head}:${gardenLedgerBucket(clock)}:${liveAccessStamp()}:${fileStamp(report)}:${archives}`;
     },
     inventory: () => {
-      const rounds = ciFrictionRoundsFromLedger(sources.ledgerRecords());
+      const records = sources.ledgerRecords();
+      const rounds = ciFrictionRoundsFromLedger(records);
       const priced = priceCiFrictionCauses(rounds, sources.gateFireRates?.(), clock.now());
-      return { priced, untracked: costliestUntrackedCause(priced, sources.planOrigins()) };
+      return { priced, untracked: costliestUntrackedCause(priced, [...sources.planOrigins(), ...landedCiFrictionOrigins(records)]) };
     },
     // The plan's own `origin:` lines decide whether the costliest cause is filed — never a recorded
     // fingerprint alone, which a pass that drew no action or failed to land could have left behind.

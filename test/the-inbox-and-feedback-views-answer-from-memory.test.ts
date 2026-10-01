@@ -249,6 +249,7 @@ test("the inbox view is materialized by a real slow lane with no reader and serv
   const body = (await res.json()) as { data: { items: Array<{ proposalId: string }>; counts: { needsYou: { notReady: number } } }; sources: ViewSource[] };
   assert.equal(body.data.items.length, 5);
   assert.equal(body.data.counts.needsYou.notReady, 5);
-  assert.deepEqual(body.sources.map((s) => [s.name, s.state, s.kind]), [["inbox-store:core", "fresh", "inbox-store"]]);
+  // E27: the lane reads the owner's board snapshot, and with none written yet the body names that gap.
+  assert.deepEqual(body.sources.map((s) => [s.name, s.state, s.kind]), [["inbox-store:core", "fresh", "inbox-store"], ["github:o/r", "unavailable", "github"]]);
   assert.equal((await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/views/inbox`)).status, 400, "a read without a section is refused");
 });

@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.98
   status: queued
@@ -16,3 +16,12 @@
     - claim: "the check:ci-log:assertion-discrimination cause of PR friction has a recorded remedy"
       proof: "grep: ci-friction:check:ci-log:assertion-discrimination in docs/ci-friction-remedies.md"
   note: "Filed by the ci-friction gardener (W1-T4435) from a weekly pass over the ledger and gate-fire-rate.ts's own measurement. check:ci-log:assertion-discrimination priced at 3.7 PR minute(s) across 2 round(s) on 2 pull request(s) — the costliest cause with no open task. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person; its remedy is recorded in docs/ci-friction-remedies.md naming \"ci-friction:check:ci-log:assertion-discrimination\" once it lands."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.94
+    reasons:
+      - "The filed task calls for recording a remedy for a named CI friction cause, and its only declared file is docs/ci-friction-remedies.md."
+      - "The supplied gates state is filingTime true, and the ci-friction family track record shows 1 merged and 0 declined machine tasks. No actual change view is supplied."
+    judged_at: "2026-10-01T21:07:47.547Z"
+    pin: "e5ed73dfbc7755a7f6b7bef9197f80c4212dea55edb47e79810268c68b9314e0"

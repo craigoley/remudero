@@ -10,7 +10,7 @@
   risk: medium
   origin: "operator-approved Orca comparison, 2026-09-30"
   files: [src/lib/fleet-liveness.ts, test/fleet-liveness.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at c94c2bf49: fleet-liveness returns held immediately when STOP follows the last heartbeat.

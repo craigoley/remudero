@@ -10,19 +10,22 @@
  * and a unit that then succeeds resets it.
  *
  * Today's one unit is the inbox classification (inbox-view.ts), which the daemon's fleet lane acts
- * on. THIS FILE IS LOADED TWICE, as read-model-worker.ts is: `workerData.kind` gates the thread's
+ * on. The lane makes no GitHub call: it reads the board snapshot whichever keep-warm owns the fetch
+ * (switches.json `github`) persists through serve's gateway, the source the board and now view read.
+ * THIS FILE IS LOADED TWICE, as read-model-worker.ts is: `workerData.kind` gates the thread's
  * branch, whose body is {@link runSlowLaneWorker}, named so a test can run it in-process.
  */
 import { join } from "node:path";
 import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
-import { createBoardSnapshotCache, type BoardSnapshotCache } from "./board-snapshot-cache.js";
 import { systemClock, type Clock } from "./clock.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { FEEDBACK_VIEW_NAME, FEEDBACK_VIEW_VERSION, materializeFeedbackView } from "./feedback-view.js";
 import { INBOX_CLASSIFY_INTERVAL_MS, INBOX_VIEW_NAME, INBOX_VIEW_VERSION, refreshInboxClassification, type InboxRefreshMemo } from "./inbox-view.js";
 import { acceptMergedFeedback, ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
 import { recordCreditStateEdge } from "./account-usage.js";
-import { buildBatchedGithub, type GitHub } from "./status.js";
-import { ghTraceGateway } from "./trace.js";
+import { snapshotGeneration, snapshotGithub, snapshotSource } from "./now-view.js";
+import type { GitHub } from "./status.js";
+import type { TraceGithub } from "./trace.js";
 import type { ViewSource } from "./views.js";
 
 const SLOW_LANE_KIND = "remudero-read-model-slow-lane" as const;
@@ -30,8 +33,6 @@ const SLOW_LANE_KIND = "remudero-read-model-slow-lane" as const;
 export const SLOW_LANE_HEAP_MB = 1_024;
 /** BACKSTOP: the ceiling of the doubling respawn delay after the thread dies. */
 export const SLOW_LANE_MAX_RESPAWN_MS = 30 * 60_000;
-/** The board gateway's TTL in serve (DEFAULT_BOARD_POLL_TTL_MS); the lane's own gateway uses the same. */
-const SLOW_LANE_GITHUB_TTL_MS = 150_000;
 
 /** What the lane needs, all serializable: `workerData` cannot carry a closure. */
 export interface SlowLaneConfig {
@@ -61,45 +62,75 @@ interface SlowLaneUnit {
   run(): Promise<{ views: SlowLaneBodies[] }>;
 }
 
-/** The board snapshot serve's own gateway keeps, read to seed this one and never written from here. */
-export function readOnlySnapshot(cache: BoardSnapshotCache): BoardSnapshotCache {
-  return { closedSeed: () => cache.closedSeed(), issueSeed: () => cache.issueSeed(), commitClosed: () => false, commitIssues: () => false };
+class SlowLaneGithubRefused extends RmdError {
+  constructor() {
+    super("read-model", GENERIC_EXIT_CODE, "the slow lane makes no GitHub call; it reads the owner's board snapshot");
+  }
 }
 
-function laneGithub(inboxRoot: string, owner: string, repo: string, log: (step: string, extra?: Record<string, unknown>) => void): GitHub {
-  const snapshotCache = readOnlySnapshot(createBoardSnapshotCache(inboxRoot, owner, repo, { log }));
-  return buildBatchedGithub(owner, repo, { log, ttlMs: SLOW_LANE_GITHUB_TTL_MS, snapshotCache });
+/** The units never trace a PR; a call that reaches this is refused loudly rather than spawning a fetch. */
+export const slowLaneTraceGithub: TraceGithub = {
+  prView: () => {
+    throw new SlowLaneGithubRefused();
+  },
+};
+
+/**
+ * The owner's persisted board snapshot as a gateway, re-read when serve's gateway re-saves it and judged
+ * afresh each pass, so a fetcher that stopped reads stale with its age. An incomplete snapshot reads failed
+ * (unavailable, with why) rather than as a board with no merged PRs.
+ */
+export function ownerSnapshotGithub(root: string, owner: string, repo: string, clock: Clock): () => { github: GitHub; source: ViewSource } {
+  let held: { generation: string; built: ReturnType<typeof snapshotGithub> } | undefined;
+  return () => {
+    const generation = snapshotGeneration(root, owner, repo);
+    if (held?.generation !== generation) held = { generation, built: snapshotGithub(root, owner, repo, clock, { refuseIncomplete: true }) };
+    const { built } = held;
+    const judged = built.unavailable !== undefined ? built.source : snapshotSource(built.source.asOf, built.source.reason, clock.now());
+    return { github: built.github, source: { name: `github:${owner}/${repo}`, ...judged } };
+  };
 }
 
 /** The inbox and feedback units: both read core's checkout, through one board gateway. */
 function coreUnits(config: NonNullable<SlowLaneConfig["inbox"]>, clock: Clock, log: (step: string, extra?: Record<string, unknown>) => void, seams: Partial<PanelGraphDeps>): SlowLaneUnit[] {
   const [owner = "", repo = ""] = config.repository.split("/");
+  const snapshot = seams.statusGithub ? undefined : ownerSnapshotGithub(config.inboxRoot, owner, repo, clock);
   const deps: PanelGraphDeps = {
     root: config.root,
     planPath: config.planPath,
     ledgerPath: config.ledgerPath,
     inboxRoot: config.inboxRoot,
-    github: ghTraceGateway(owner, repo),
-    statusGithub: seams.statusGithub ?? laneGithub(config.inboxRoot, owner, repo, log),
+    github: slowLaneTraceGithub,
+    statusGithub: seams.statusGithub ?? snapshot!().github,
     ratify: ratifyCliGateway(config.root, join(config.inboxRoot, "state", "logs")),
     ...seams,
   };
+  /** Points the units at the owner's latest snapshot; the deps object stays the same, so the inbox memo keyed by it survives. */
+  const githubSource = (): ViewSource[] => {
+    if (!snapshot) return [];
+    const read = snapshot();
+    deps.statusGithub = read.github;
+    return [read.source];
+  };
+  const withSource = (bodies: SlowLaneBodies["bodies"], extra: ViewSource[]): SlowLaneBodies["bodies"] => bodies.map((b) => ({ ...b, sources: [...b.sources, ...extra] }));
   const memo: InboxRefreshMemo = {};
   const inbox: SlowLaneUnit = {
     name: "inbox",
     run: async () => {
+      const github = githubSource();
       const refreshed = await refreshInboxClassification(deps, memo, clock);
       if (refreshed.changed) log("inbox.classification_written", { proposals: refreshed.proposals, pruned: refreshed.pruned, at: refreshed.generatedAt });
-      return { views: [{ view: INBOX_VIEW_NAME, version: INBOX_VIEW_VERSION, bodies: refreshed.bodies }] };
+      return { views: [{ view: INBOX_VIEW_NAME, version: INBOX_VIEW_VERSION, bodies: withSource(refreshed.bodies, github) }] };
     },
   };
   const feedback: SlowLaneUnit = {
     name: "feedback",
     run: async () => {
       // P4-T07: the one writer of a merged proposal's `accepted`, landed as GET /v1/feedback once did per read.
+      const github = githubSource();
       const accepted = acceptMergedFeedback(deps.root, deps.statusGithub, deps.feedbackLand ?? {});
       if (accepted.length > 0) log("feedback.accepted_merged", { ids: accepted });
-      return { views: [{ view: FEEDBACK_VIEW_NAME, version: FEEDBACK_VIEW_VERSION, bodies: materializeFeedbackView({ root: deps.root, planPath: deps.planPath }, deps.statusGithub, clock) }] };
+      return { views: [{ view: FEEDBACK_VIEW_NAME, version: FEEDBACK_VIEW_VERSION, bodies: withSource(materializeFeedbackView({ root: deps.root, planPath: deps.planPath }, deps.statusGithub, clock), github) }] };
     },
   };
   return [inbox, feedback];

@@ -30,8 +30,8 @@ export const DIR_GATE_SETTLE_MS = 2_000;
 export const DIR_GATE_RELIST_MS = 60_000;
 /** The fewest lines a tick's first transaction applies, so a collapsed rate estimate still moves a backlog. */
 export const MIN_TRANSACTION_LINES = 64;
-/** The fact set's version: a step added to {@link isFactStep} bumps it, so a store built before re-reads the ledger in place. */
-export const FACT_SET_VERSION = 2;
+/** The fact set's version: a step added to {@link isFactStep} bumps it, so a store built before re-reads the ledger in place. 3: every costed row. */
+export const FACT_SET_VERSION = 3;
 /** How many of the newest rows of any step the activity ring keeps (Phase 4 design, `workstreams`). */
 export const ACTIVITY_RING_ROWS = 500;
 const FINGERPRINT_BYTES = 4_096;
@@ -66,6 +66,18 @@ export function isFactStep(step: string): boolean {
   return DECISION_RELEVANT_LEDGER_STEPS.has(step) || RENDER_RELEVANT_LEDGER_STEPS.has(step)
     || MODEL_ATTRIBUTION_LEDGER_STEPS.has(step) || step === "worker.assignment" || step === EXTERNAL_EFFECT_RECONCILED_STEP
     || step.startsWith("panel.");
+}
+
+/** A row's numeric spend field: the day's spend sums every run's first costed row, of whatever step it is. */
+const COST_KEY = '"cost_usd":';
+
+/**
+ * Whether the fact store keeps a parsed row: a fact step, or any row carrying a numeric `cost_usd`.
+ * `containment.probe` and `isolation.probe` price a run minutes before its first fact-step cost, and
+ * a store without them read the day's spend short by that run (host, 2026-10-01T21:10:40Z).
+ */
+export function isFactRow(row: Record<string, unknown>, factStep: (step: string) => boolean = isFactStep): row is Record<string, unknown> & { step: string } {
+  return typeof row.step === "string" && (factStep(row.step) || typeof row.cost_usd === "number");
 }
 
 /** Row identity: `(ts_ms, first 8 bytes of sha1(line))`, the exact-line equivalence W1-T4820 uses. */
@@ -325,13 +337,13 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
       for (const p of projections) if (p.markers.some((marker) => line.includes(marker))) p.apply(db, line, id, parse);
       // A second `"step":"` means the first may be nested, so only a parse can name the row's step.
       const ambiguous = at >= 0 && line.includes(STEP_KEY, at + STEP_KEY.length);
-      if (!ambiguous && !(at >= 0 && factStep(scanned))) continue;
+      if (!ambiguous && !(at >= 0 && factStep(scanned)) && !line.includes(COST_KEY)) continue;
       const row = parse();
       if (!row) {
         c.torn++;
         continue;
       }
-      if (typeof row.step !== "string" || !factStep(row.step)) continue;
+      if (!isFactRow(row, factStep)) continue;
       const task = typeof row.task_id === "string" ? row.task_id : typeof row.task === "string" ? row.task : null;
       sql.fact.run(id.ts, id.tsMs, row.step, task, typeof row.run_id === "string" ? row.run_id : null, line);
       c.facts++;

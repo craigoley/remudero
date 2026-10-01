@@ -414,33 +414,44 @@ function answeredByFact(db: ReadModelDb): (taskId: string) => string | undefined
  * A gateway over the legacy gateway's persisted snapshot (ruling Q3): open PRs, closed PRs and issues, no GitHub read.
  * `generation` is the files' mtimes, which move on every re-save; `content` moves only when what they hold does.
  */
-export function snapshotGithub(root: string, owner: string, repo: string, clock: Clock = systemClock): { github: GitHub; generation: string; content?: string; source: Omit<ViewSource, "name"> } {
+export function snapshotGithub(
+  root: string, owner: string, repo: string, clock: Clock = systemClock, opts: { refuseIncomplete?: boolean } = {},
+): { github: GitHub; generation: string; content?: string; source: Omit<ViewSource, "name">; unavailable?: string } {
   const closedCache = createBoardSnapshotCache(root, owner, repo);
-  const closed = [...(closedCache.closedSeed()?.values() ?? [])];
+  const closedSeed = closedCache.closedSeed();
+  const closed = [...(closedSeed?.values() ?? [])];
   const issues = [...(closedCache.issueSeed()?.values() ?? [])];
   const open = readOpenBoardSnapshot(root, owner, repo);
   const openRows: BoardPrRest[] = open.ok ? open.snapshot.rows : [];
   const asBatched = (r: BoardPrRest): BatchedPr => ({ number: r.number, url: r.url, state: r.state, headRefName: r.headRefName, headRefOid: r.headRefOid, body: r.body, autoMergeRequest: r.autoMergeRequest, title: r.title });
   const openNumbers = new Set(openRows.map((r) => r.number));
   const all = [...openRows.map(asBatched), ...closed.filter((r) => !openNumbers.has(r.number)).map(asBatched)];
+  // An incomplete snapshot read as complete would say no PR ever merged; refused, the gateway reads failed instead.
+  const unavailable = !opts.refuseIncomplete ? undefined : !open.ok ? open.reason : closedSeed ? undefined : "the board snapshot holds no closed pull requests";
   const github = buildBatchedGithub(owner, repo, {
-    ttlMs: Number.MAX_SAFE_INTEGER, pacer: NO_PACER, fetchAll: () => all,
+    ttlMs: Number.MAX_SAFE_INTEGER, pacer: NO_PACER,
+    fetchAll: () => {
+      if (unavailable !== undefined) throw new NowViewError(`github snapshot unavailable: ${unavailable}`);
+      return all;
+    },
     fetchAllIssues: () => issues.map((i) => ({ number: i.number, url: i.url, state: i.state, ...(i.title ? { title: i.title } : {}) })),
     exec: () => {
-      throw new NowViewError("the now view reads GitHub from the persisted snapshot only");
+      throw new NowViewError("a snapshot gateway reads GitHub from the persisted snapshot only");
     },
   });
-  const ageMs = open.ok ? clock.now() - Date.parse(open.snapshot.savedAt) : undefined;
-  const source: Omit<ViewSource, "name"> = !open.ok
-    ? { asOf: null, state: "stale", reason: open.reason }
-    : ageMs! > NOW_GITHUB_STALE_MS
-      ? { asOf: open.snapshot.savedAt, state: "stale", reason: `open pull requests last saved ${Math.round(ageMs! / 1000)} s ago` }
-      : { asOf: open.snapshot.savedAt, state: "fresh" };
+  const source = unavailable !== undefined ? { asOf: null, state: "unavailable" as const, reason: unavailable } : snapshotSource(open.ok ? open.snapshot.savedAt : null, open.ok ? undefined : open.reason, clock.now());
   const content = createHash("sha1").update(JSON.stringify([all, issues])).digest("hex").slice(0, 16);
-  return { github, generation: snapshotGeneration(root, owner, repo), content, source };
+  return { github, generation: snapshotGeneration(root, owner, repo), content, source, ...(unavailable !== undefined ? { unavailable } : {}) };
 }
 
-function snapshotGeneration(root: string, owner: string, repo: string): string {
+/** The persisted snapshot's source, judged at `nowMs` from when its open half was last saved, or why it is unreadable. */
+export function snapshotSource(savedAt: string | null, reason: string | undefined, nowMs: number): Omit<ViewSource, "name"> {
+  if (savedAt === null) return { asOf: null, state: "stale", reason };
+  const ageMs = nowMs - Date.parse(savedAt);
+  return ageMs > NOW_GITHUB_STALE_MS ? { asOf: savedAt, state: "stale", reason: `open pull requests last saved ${Math.round(ageMs / 1000)} s ago` } : { asOf: savedAt, state: "fresh" };
+}
+
+export function snapshotGeneration(root: string, owner: string, repo: string): string {
   return `${mtimeOf(boardSnapshotPath(root, owner, repo)) ?? "-"}:${mtimeOf(boardOpenSnapshotPath(root, owner, repo)) ?? "-"}`;
 }
 
@@ -551,6 +562,8 @@ interface Shown {
   planKey: string;
   gateway: ReturnType<typeof snapshotGithub>;
   probe: NowHostProbe;
+  /** When the build began: a rotation cut after it moved rows the live file then held. */
+  builtMs: number;
   members: Record<string, string[]>;
   /** The rows the body's `spendTodayUsd` added. */
   spend: Array<[string, number]>;
@@ -573,18 +586,35 @@ export interface NowShadowLegacy {
   derived: Record<string, string[]>;
   rows: LegacyRows;
   sortKeys: Record<string, Record<string, ShadowLatest>>;
-  inputs: { plan: string; probeAt: string; rotationsSinceProbe: string[] };
+  inputs: { plan: string; probeAt: string; rotationsSinceProbe: string[]; builtAt: string; rotationsSinceBuild: string[] };
 }
 
 /**
- * The rows of every rotation cut after `atMs`: the live file still held them when a probe at `atMs` read it,
- * so a later read of the live file alone misses them.
+ * Each rotation cut after `atMs`, with its rows: the live file still held them when a read at `atMs` took
+ * it, so a later read of the live file alone misses them.
  */
-function rotatedSince(ledgerDir: string, atMs: number): { names: string[]; rows: Row[] } {
-  const entries = ledgerRotationEntries(readdirSync(ledgerDir), ledgerDir).filter((e) => Date.parse(rotationStampIso(basename(e.path)) ?? "") > atMs);
+function rotatedSince(ledgerDir: string, atMs: number): Array<{ name: string; cutMs: number; rows: Row[] }> {
   const text = (path: string, gzip: boolean): string => (gzip ? gunzipSync(readFileSync(path)) : readFileSync(path)).toString("utf8");
-  const rows = entries.flatMap((e) => readLedgerLines(e.path, { existsSync: () => true, readFileSync: (path) => text(path, e.form === "gzip") }));
-  return { names: entries.map((e) => basename(e.path)), rows };
+  return ledgerRotationEntries(readdirSync(ledgerDir), ledgerDir)
+    .map((e) => ({ e, cutMs: Date.parse(rotationStampIso(basename(e.path)) ?? "") }))
+    .filter(({ cutMs }) => cutMs > atMs)
+    .map(({ e, cutMs }) => ({ name: basename(e.path), cutMs, rows: readLedgerLines(e.path, { existsSync: () => true, readFileSync: (path) => text(path, e.form === "gzip") }) }));
+}
+
+/**
+ * The live file as a build that began before `cut` was taken read it: the cut rows and the live rows, each
+ * once, in time order. A rotation keeps an older row in the new live file and moves the newer ones out,
+ * so file order would put that older row last (PR #8485's `post-review` after its `wait`, 21:30Z).
+ */
+function liveAsOfBuild(cut: ReadonlyArray<{ rows: Row[] }>, live: Row[]): Row[] {
+  if (cut.length === 0) return live;
+  const seen = new Set<string>();
+  const rows = [...cut.flatMap((c) => c.rows), ...live].filter((row) => {
+    const id = JSON.stringify(row);
+    return !seen.has(id) && Boolean(seen.add(id));
+  });
+  const at = (row: Row): string => (typeof row.ts === "string" ? row.ts : "");
+  return rows.sort((a, b) => (at(a) < at(b) ? -1 : at(a) > at(b) ? 1 : 0));
 }
 
 /** The `now` view as the read-model worker materializes it: one body per instance, keyed `instance=<name>`. */
@@ -725,7 +755,7 @@ export function createNowView(opts: NowViewOptions): {
       const { h, snapshot, rows, now, state } = b as Required<NowBuild>;
       const data = assembleNowView({ instance: instance.name, snapshot, rows, plan: b.plan!, recent: computeRecentActivity(depsOf(instance, b), h.recent, 20), health: h.probe!.health, decisions: b.decisions!, nowMs: now });
       Object.assign(h, { generation: state.generation, planKey: b.keys.plan, at: now, decisionsKey: b.keys.decisions });
-      shown.set(data, { plan: b.plan!, planKey: b.keys.plan, gateway: b.gateway!, probe: h.probe!, members: nowCountMembers(snapshot.tasks), spend: dayCostRows(rows, now),
+      shown.set(data, { plan: b.plan!, planKey: b.keys.plan, gateway: b.gateway!, probe: h.probe!, builtMs: now, members: nowCountMembers(snapshot.tasks), spend: dayCostRows(rows, now),
         sortedBy: new Map(snapshot.tasks.map((t) => [t.taskId, t.lastActivityAt])) });
       const sources: ViewSource[] = [
         ...(opts.ledgerSource ? [opts.ledgerSource(state, now)] : []),
@@ -788,10 +818,10 @@ export function createNowView(opts: NowViewOptions): {
     /**
      * The shadow comparator's legacy side for one key, over the plan, GitHub snapshot and probe the compared
      * body was built from: GET /v1/status's board and PR queue over the
-     * instance's LIVE FILE only, plus a host probe of that instance AT THE VIEW'S PROBE TIME over the live
-     * rows up to it, so the daemon's poll state is compared at one instant. The probe's gauges are taken
-     * from the view when both probes read them, because two samples moments apart always differ; a gauge
-     * one side could not read, or a different reason, still diffs. Actions, recent and decisions have
+     * instance's LIVE FILE only, as it stood when the build began, plus a host probe of that instance AT THE
+     * VIEW'S PROBE TIME over the live rows up to it, so the daemon's poll state is compared at one instant.
+     * The gauges are the ones that probe captured: a comparison makes no `gh` or statfs call of its own.
+     * Actions, recent and decisions have
      * no separate legacy computation and are carried from the view. The task window is derived from the
      * groups, the day's spend is paired row by row, and the live rows read go along as evidence.
      */
@@ -802,19 +832,23 @@ export function createNowView(opts: NowViewOptions): {
       const built = shown.get(mine);
       if (!instance || !built || !key.startsWith("instance=")) return undefined;
       const ledgerPath = join(instance.ledgerDir, LEDGER_FILENAME);
-      const rows = readLedgerLines(ledgerPath);
+      const probeMs = Date.parse(built.probe.sampledAt);
+      const cut = rotatedSince(instance.ledgerDir, Math.min(probeMs, built.builtMs));
+      const sinceBuild = cut.filter((c) => c.cutMs > built.builtMs);
+      const sinceProbe = cut.filter((c) => c.cutMs > probeMs);
+      const rows = liveAsOfBuild(sinceBuild, readLedgerLines(ledgerPath));
       const deps = { plan: built.plan, ledgerPath, github: built.gateway.github, readLedger: () => rows, now: () => now };
       const snapshot = computeBoardSnapshot(deps);
       const decisions: NowDecisionsData = { decisions: mine.decisions, ...(mine.decisionsMore ? { decisionsMore: mine.decisionsMore } : {}), ...(mine.decisionsReasons ? { decisionsReasons: mine.decisionsReasons } : {}) };
       const legacy = assembleNowView({ instance: name, snapshot, rows, plan: built.plan, recent: [], health: mine.health, decisions, nowMs: now });
-      const probeMs = Date.parse(built.probe.sampledAt);
       const readLive = opts.hostProbe?.readLive ?? readLedgerLines;
-      const cut = rotatedSince(instance.ledgerDir, probeMs);
-      const atProbe = { ...opts.hostProbe, readLive: (path: string) => [...cut.rows, ...readLive(path)].filter((row) => !(typeof row.ts === "string" && Date.parse(row.ts) > probeMs)) };
-      const probe = defaultProbeHost(instance, name === core, fixedClock(probeMs), atProbe).health;
-      const gauge = (field: "diskFreeBytes" | "rateLimitRemaining"): Partial<NowHealth> =>
-        probe[field] === undefined ? {} : { [field]: mine.health[field] ?? probe[field] };
-      const health: NowHealth = { ...gauge("diskFreeBytes"), ...gauge("rateLimitRemaining"), daemon: probe.daemon, ...(probe.reasons ? { reasons: probe.reasons } : {}) };
+      const captured = built.probe.health;
+      const atProbe = {
+        readLive: (path: string) => [...sinceProbe.flatMap((c) => c.rows), ...readLive(path)].filter((row) => !(typeof row.ts === "string" && Date.parse(row.ts) > probeMs)),
+        rateLimit: () => captured.rateLimitRemaining,
+        diskFree: () => captured.diskFreeBytes,
+      };
+      const health = defaultProbeHost(instance, name === core, fixedClock(probeMs), atProbe).health;
       const oldest = rows.map((row) => (typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN)).filter(Number.isFinite).sort((a, b) => a - b)[0];
       const theirs = nowCountMembers(snapshot.tasks);
       const groups = Object.keys(legacy.board.groups).map((group) => `board.groups.${group}`);
@@ -834,7 +868,10 @@ export function createNowView(opts: NowViewOptions): {
         },
         rows: legacyRowIndex(rows),
         sortKeys: Object.fromEntries(groups.map((path) => [path, keys])),
-        inputs: { plan: built.planKey, probeAt: built.probe.sampledAt, rotationsSinceProbe: cut.names },
+        inputs: {
+          plan: built.planKey, probeAt: built.probe.sampledAt, rotationsSinceProbe: sinceProbe.map((c) => c.name),
+          builtAt: fixedClock(built.builtMs).iso(), rotationsSinceBuild: sinceBuild.map((c) => c.name),
+        },
         ...(oldest !== undefined ? { horizonMs: oldest } : {}),
       };
     },
