@@ -1339,10 +1339,13 @@ const INFRASTRUCTURE_REFUSAL_VERDICTS: ReadonlySet<string> = new Set([
   "blocked_isolation",
   "blocked_toolchain",
   "blocked_transient",
-  "blocked_git_fetch",
-  "blocked_inflight",
-  "handed_off",
   "task_already_merged",
+]);
+
+/** These also consume no task attempt for lifetime judgment, but the existing dispatch breaker
+ * counts them. Keep the two decisions separate so a new terminal verdict cannot reset its streak. */
+const LIFETIME_ONLY_REFUSAL_VERDICTS: ReadonlySet<string> = new Set([
+  "blocked_git_fetch", "blocked_inflight", "handed_off",
 ]);
 
 /** A THROWN run's `failed` verdict (run-task.ts `endThrownRun`) at one of these stages is a deferral the harness
@@ -1359,6 +1362,11 @@ export function infrastructureRefusal(line: Record<string, unknown>): string | u
   if (INFRASTRUCTURE_REFUSAL_VERDICTS.has(line.verdict)) return line.verdict;
   if (line.verdict === "failed" && typeof line.stage === "string" && INFRASTRUCTURE_THROWN_STAGES.has(line.stage)) return line.stage;
   return undefined;
+}
+
+export function lifetimeInfrastructureRefusal(line: Record<string, unknown>): string | undefined {
+  return infrastructureRefusal(line) ??
+    (typeof line.verdict === "string" && LIFETIME_ONLY_REFUSAL_VERDICTS.has(line.verdict) ? line.verdict : undefined);
 }
 
 /** Options shared by {@link orphanedRunIds} and every counter built on it — never widened for
@@ -1652,7 +1660,7 @@ export function taskAttributableLifetimeDispatches(
   const infrastructureRunIds = new Set<string>();
   for (const line of rows) {
     if (line.task_id === taskId && line.step === "verdict" &&
-        typeof line.run_id === "string" && infrastructureRefusal(line) !== undefined) {
+        typeof line.run_id === "string" && lifetimeInfrastructureRefusal(line) !== undefined) {
       infrastructureRunIds.add(line.run_id);
     }
   }

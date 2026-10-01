@@ -1410,7 +1410,7 @@ import {
   addLifetimeDispatchTallies,
   effectiveLifetimeDispatches,
   hasRepeatedTaskAttributableLifetimeDispatches,
-  infrastructureRefusal,
+  lifetimeInfrastructureRefusal,
   lifetimeDispatchTally,
   taskAttributableLifetimeDispatches,
   type LifetimeDispatchTally,
@@ -44661,7 +44661,7 @@ export async function routeAdaptiveLifetimePressure(
     const lastTerminal = terminalRows.at(-1);
     const lastVerdict = typeof lastTerminal?.verdict === "string" ? lastTerminal.verdict : "unavailable";
     const attributableHistory = terminalRows
-      .filter((row) => infrastructureRefusal(row) === undefined)
+      .filter((row) => lifetimeInfrastructureRefusal(row) === undefined)
       .map((row) => `${String(row.verdict ?? "unavailable")}: ${String(row.reason ?? row.stage ?? "no reason recorded")}`);
     const ruling = latestLifetimeOperatorRuling(task.note);
     const key = `${task.id}:adaptive-lifetime=${attributableDispatches}:capacity=${capacityRefusals}:` +
