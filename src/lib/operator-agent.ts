@@ -58,9 +58,14 @@ import {
   type ReplaySummary,
 } from "./experiment-promotion.js";
 import {
+  appendFollowUpControl,
+  appendFollowUpReceipt,
+  applyFollowUpControl,
   evaluateFollowUpPolicy,
   createFollowUpHistoryReader,
+  followUpReceipt,
   type FollowUpCandidate,
+  type FollowUpControl,
 } from "./follow-up-policy.js";
 import {
   classifyConsequenceAction,
@@ -477,6 +482,7 @@ export type OperatorAgentRouteDependencies = Pick<PanelActionDeps, "ledgerPath">
 
 type ProposalRegistrationInput = { proposal: OperatorAgentProposal };
 type ProposalDecisionInput = { proposalId: string; decision: OperatorAgentDecision; note?: string };
+type FollowUpDecisionInput = { followUpId: string; action: FollowUpControl | "answer"; until?: string; answer?: string; note?: string };
 type ProposalOutcomeInput = { proposalId: string; outcome: OperatorAgentOutcome };
 type OperatorAgentSettingsInput = { settings: OperatorAgentSettings; scope?: OperatorAgentSettingsScope };
 type ExperimentRegistrationInput = { experiment: OperatorAgentExperiment };
@@ -1001,6 +1007,23 @@ function validateDecision(body: unknown): { error: string } | ProposalDecisionIn
   if (!isDecision(body.decision)) return { error: "decision must be accepted, rejected, or more-info" };
   if (body.note !== undefined && !boundedString(body.note, MAX_NOTE)) return { error: "note must be a non-empty string within the operator-agent bound" };
   return { proposalId: body.proposalId.trim(), decision: body.decision, ...(body.note ? { note: body.note.trim() } : {}) };
+}
+
+function validateFollowUpDecision(body: unknown): { error: string } | FollowUpDecisionInput {
+  if (!isRecord(body)) return { error: "body must be a JSON object" };
+  if (!boundedString(body.followUpId, MAX_ID)) return { error: "followUpId is required" };
+  const action = body.action;
+  if (action !== "snooze" && action !== "reject" && action !== "revoke" && action !== "answer") return { error: "action must be snooze, reject, revoke, or answer" };
+  if (body.until !== undefined && !iso(body.until)) return { error: "until must be an ISO timestamp" };
+  if (body.note !== undefined && !boundedString(body.note, MAX_TEXT)) return { error: "note must be a non-empty string within the operator-agent bound" };
+  if (action === "answer" && !boundedString(body.answer, MAX_TEXT)) return { error: "answer requires a non-empty answer within the operator-agent bound" };
+  return {
+    followUpId: body.followUpId.trim(),
+    action,
+    ...(body.until ? { until: body.until } : {}),
+    ...(typeof body.answer === "string" ? { answer: body.answer.trim() } : {}),
+    ...(body.note ? { note: body.note.trim() } : {}),
+  };
 }
 
 function validateOutcome(body: unknown): { error: string } | ProposalOutcomeInput {
@@ -2581,6 +2604,42 @@ export function buildOperatorAgentFollowUpReadRoute(deps: OperatorAgentRouteDepe
   };
 }
 
+export function buildOperatorAgentFollowUpDecisionRoute(deps: OperatorAgentRouteDependencies): Route {
+  const readHistory = createFollowUpHistoryReader();
+  return {
+    method: "POST",
+    path: "/v1/operator-agent/follow-ups/decision",
+    scope: "write",
+    tier: "low",
+    handler: jsonAction(validateFollowUpDecision, async (input, req, res) => {
+      const now = clockFromMillisFn(deps.now).now();
+      const history = (await readHistory(deps.ledgerPath, now)).find((item) => item.candidateId === input.followUpId);
+      if (!history) {
+        sendJson(res, 404, { error: "not_found", detail: `no follow-up "${input.followUpId}"` });
+        return;
+      }
+      const ledger = { ledgerPath: deps.ledgerPath, now: clockFromMillisFn(deps.now), origin: bearerTokenId(req) };
+      if (input.action === "answer") {
+        const receipt = followUpReceipt(history, { answered: true, at: now });
+        if ("error" in receipt) {
+          sendJson(res, 409, { error: "conflict", detail: receipt.error });
+          return;
+        }
+        appendFollowUpReceipt(ledger, receipt, history.candidateId);
+        sendJson(res, 200, { ok: true, followUpId: history.candidateId, action: input.action, at: receipt.at, receipt: { contactState: "answered", deliveryState: "delivered" } });
+        return;
+      }
+      const event = applyFollowUpControl(history, input.action, { ...(input.until ? { until: input.until } : {}), at: now });
+      if ("error" in event) {
+        sendJson(res, 409, { error: "conflict", detail: event.error });
+        return;
+      }
+      appendFollowUpControl(ledger, input.note ? { ...event, reason: input.note } : event);
+      sendJson(res, 200, { ok: true, followUpId: history.candidateId, action: input.action, at: event.at, receipt: { contactState: event.state ?? "recorded" } });
+    }),
+  };
+}
+
 /** GET /v1/operator-agent/settings — durable settings or explicit conservative defaults. */
 export function buildOperatorAgentSettingsReadRoute(deps: OperatorAgentRouteDependencies): Route {
   return {
@@ -3913,6 +3972,7 @@ export function buildOperatorAgentRoutes(deps: OperatorAgentRouteDependencies): 
     ...buildOperatorAgentConsequencesWriteRefusalRoutes(),
     ...buildOperatorPreferenceRoutes(deps),
     buildOperatorAgentFollowUpReadRoute(deps),
+    buildOperatorAgentFollowUpDecisionRoute(deps),
     buildOperatorAgentSettingsReadRoute(deps),
     buildOperatorAgentSettingsWriteRoute(deps),
     buildOperatorAgentDelegationHandoffRoute(deps),

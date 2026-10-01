@@ -5418,6 +5418,46 @@ components:
           type: string
           format: date-time
 
+    FollowUpDecisionRequest:
+      type: object
+      required: [followUpId, action]
+      properties:
+        followUpId:
+          type: string
+        action:
+          type: string
+          enum: [snooze, reject, revoke, answer]
+        until:
+          type: string
+          format: date-time
+        answer:
+          type: string
+        note:
+          type: string
+
+    FollowUpDecisionResult:
+      type: object
+      required: [ok, followUpId, action, at, receipt]
+      properties:
+        ok:
+          type: boolean
+        followUpId:
+          type: string
+        action:
+          type: string
+          enum: [snooze, reject, revoke, answer]
+        at:
+          type: string
+          format: date-time
+        receipt:
+          type: object
+          required: [contactState]
+          properties:
+            contactState:
+              type: string
+            deliveryState:
+              type: string
+
     FollowUpList:
       type: object
       required: [followUps, source]
@@ -12898,6 +12938,39 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+
+  /v1/operator-agent/follow-ups/decision:
+    post:
+      summary: Record an operator control on one follow-up (snooze, reject, revoke, answer).
+      description: >
+        Appends the control as the ledger row the follow-ups read folds. An answer appends a receipt
+        that is never `completed` and never permission to act. A policy refusal (a snooze without a
+        future `until`, a control on an already terminal follow-up) answers 409 and appends nothing.
+      security:
+        - bearerWrite: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FollowUpDecisionRequest"
+      responses:
+        "200":
+          description: Control recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FollowUpDecisionResult"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
 
   /v1/skills:
     get:

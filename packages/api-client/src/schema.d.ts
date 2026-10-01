@@ -2039,6 +2039,23 @@ export interface components {
       notificationPolicy?: FollowUpNotificationPolicy;
       snoozedUntil?: string;
     };
+    FollowUpDecisionRequest: {
+      followUpId: string;
+      action: "snooze" | "reject" | "revoke" | "answer";
+      until?: string;
+      answer?: string;
+      note?: string;
+    };
+    FollowUpDecisionResult: {
+      ok: boolean;
+      followUpId: string;
+      action: "snooze" | "reject" | "revoke" | "answer";
+      at: string;
+      receipt: {
+        contactState: string;
+        deliveryState?: string;
+      };
+    };
     FollowUpList: {
       followUps: (FollowUpHistory)[];
       source: "ledger";
@@ -4816,6 +4833,18 @@ export interface paths {
           "200": FollowUpList;
           "401": Error;
           "403": Error;
+        };
+    };
+  };
+  "/v1/operator-agent/follow-ups/decision": {
+    post: {
+      responses: {
+          "200": FollowUpDecisionResult;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "404": Error;
+          "409": Error;
         };
     };
   };

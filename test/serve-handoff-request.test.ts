@@ -9,11 +9,13 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildServeServer, gateStaleCodeExit, resolveConsoleSha, serveGeneration, type GatewayCheckoutAssessment, type ServeDeps } from "../src/lib/serve.js";
+import { assessGatewayCheckout, buildServeServer, gateStaleCodeExit, resolveConsoleSha, serveGeneration, type GatewayCheckoutAssessment, type ServeDeps } from "../src/lib/serve.js";
 import { fixedClock } from "../src/lib/clock.js";
+import { SELF_SYNC_GUARD_ENV } from "../src/lib/self-sync.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { Plan } from "../src/lib/plan.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const CLOCK = fixedClock(Date.parse("2026-10-01T12:00:00Z"));
 const BEHIND: GatewayCheckoutAssessment = {
@@ -135,4 +137,32 @@ test("a standby serve starts no background writer until it listens", async () =>
   const unsupervised = buildServeServer(handoffServeDeps({ incidentInvariants: { ...incidentInvariants, setInterval: ((() => (legacy.push("incident"), 0)) as unknown) as typeof setInterval } }));
   assert.deepEqual(legacy, ["incident"], "unsupervised, the writers start at construction exactly as before");
   unsupervised.close();
+});
+
+test("a supervised serve reads its real checkout past the boot-sync guard the supervisor sets, so it can ask for a handoff", async (t) => {
+  const upstream = gitRepo({ kind: "handoff-upstream" });
+  const served = gitRepo({ kind: "handoff-served", cloneFrom: upstream.dir });
+  t.after(() => {
+    upstream.cleanup();
+    served.cleanup();
+  });
+  mkdirSync(join(upstream.dir, "src", "lib"), { recursive: true });
+  writeFileSync(join(upstream.dir, "src", "lib", "serve.ts"), "export {};\n");
+  upstream.git("add", "src/lib/serve.ts");
+  upstream.git("commit", "--quiet", "-m", "a serve change");
+  const saved = process.env[SELF_SYNC_GUARD_ENV];
+  process.env[SELF_SYNC_GUARD_ENV] = "1";
+  t.after(() => {
+    if (saved === undefined) delete process.env[SELF_SYNC_GUARD_ENV];
+    else process.env[SELF_SYNC_GUARD_ENV] = saved;
+  });
+  const env = { [SELF_SYNC_GUARD_ENV]: "1" };
+
+  const unsupervised = await assessGatewayCheckout({ repoDir: served.dir, env, clock: CLOCK });
+  assert.equal(unsupervised.restartDue, false);
+  assert.match(unsupervised.state.detail ?? "", /guarded/, "a self-synced CLI child still never assesses");
+
+  const supervised = await assessGatewayCheckout({ repoDir: served.dir, env, clock: CLOCK, supervised: true });
+  assert.equal(supervised.state.behindBy, 1);
+  assert.equal(supervised.restartDue, true, "the generation sees main moved a path it loads");
 });

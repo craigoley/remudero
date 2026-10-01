@@ -38,7 +38,6 @@ const TWO_RUN_CORPUS: Array<Record<string, unknown>> = [
     step: "verdict",
     lane: "run-task",
     model: "sonnet",
-    total_cost_usd: 1.5,
     tokens: { input: 1000, output: 200, cacheRead: 500, cacheCreation: 50 },
   },
   {
@@ -48,9 +47,11 @@ const TWO_RUN_CORPUS: Array<Record<string, unknown>> = [
     step: "verdict",
     lane: "triage",
     model: "opus",
-    total_cost_usd: 2.5,
     tokens: { input: 2000, output: 300, cacheRead: 100, cacheCreation: 0 },
   },
+  // W1-T4066: the cost is counted at the row that PRODUCED it (the worker), never at the verdict that restates it.
+  { ts: "2026-08-14T00:00:00.500Z", task_id: "W1-T1", run_id: "R1", step: "implement.done", lane: "run-task", model: "sonnet", total_cost_usd: 1.5 },
+  { ts: "2026-08-14T00:00:02.500Z", task_id: "W1-T2", run_id: "R2", step: "implement.done", lane: "triage", model: "opus", total_cost_usd: 2.5 },
 ];
 
 // ── acceptance (i): the projection emits every metric key the console catalog names ────────────
@@ -113,7 +114,7 @@ test("console-v1 projection: once a corpus has real data, the previously-uncolle
     "cache.reuse matches digest.ts's own cacheHitRatio formula",
   );
   assert.equal(byKey["cache.reuse"].notCollectedReason, undefined);
-  assert.equal(byKey["cost.modeled.usd"].value, 4, "1.5 + 2.5 off total_cost_usd, never the cost_usd typo");
+  assert.equal(byKey["cost.modeled.usd"].value, 4, "1.5 + 2.5 off the producing rows' total_cost_usd, never the cost_usd typo");
   assert.equal(byKey["duration.p50.ms"].value, 1000, "nearest-rank p50 of [1000ms, 3000ms] is the lower sample");
   // queue.pending stays not-collected even with a real corpus: this route has no live queue read.
   assert.equal(byKey["queue.pending"].value, null);

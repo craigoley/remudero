@@ -5,6 +5,7 @@
 // below have SECOND callers outside doctorCommand and stay imported here too.
 import { retryWhileLockBusy } from "./lib/lock-busy-retry.js";
 import { retryPollRead } from "./lib/poll-read-retry.js";
+import { recyclePauseDetail } from "./lib/recycle-yield.js";
 import { decideFreshnessRestart } from "./lib/deploy-judge.js";
 import {
   appendCaptureSurfaceFireHistory,
@@ -1181,10 +1182,11 @@ import { activeWorkerProbes, reapGitObjects } from "./lib/object-reaper.js";
  *  rather than authorising something the operator never read. */
 export const OBJECT_REAP_CONTRACT_VERSION = "1";
 import { deriveTaskClass, implementRouteClass } from "./lib/task-class.js";
-import { guardZeroStreakRecord, type ClassClosure } from "./lib/retro-closure.js";
+import { guardZeroStreakRecord } from "./lib/retro-closure.js";
 import {
   buildDispatchValueContext,
-  type ClosureCalibrationSnapshot,
+  DISPATCH_VALUE_LEDGER_STEPS,
+  DISPATCH_VALUE_WINDOW_MS,
   type DispatchValueContext,
 } from "./lib/dispatch-value.js";
 import {
@@ -5774,6 +5776,7 @@ export interface PollDeps {
   */
   requiredContexts?: (owner: string, repo: string) => string[] | undefined;
   externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+  externalWaitRecycle?: () => string | undefined;
 }
 
 export function ciWaitFreshness(
@@ -5964,6 +5967,16 @@ export type CiGateOutcome =
       sha: string;
       oldSha: string;
       newSha: string;
+      recycle?: never;
+      checks?: never;
+      checkCount?: never;
+    }
+  | {
+      state: "freshness_handoff";
+      sha: string;
+      recycle: string;
+      oldSha?: never;
+      newSha?: never;
       checks?: never;
       checkCount?: never;
     };
@@ -6219,6 +6232,11 @@ async function waitForCiGreen(
           newSha: freshness.newSha,
         };
       }
+    }
+    const recycle = deps.externalWaitRecycle?.();
+    if (recycle) {
+      log("run.freshness_handoff", { waiting_on: "ci", head_sha: sha, trigger: "recycle", detail: recycle });
+      return { state: "freshness_handoff", sha, recycle };
     }
     if (i === 0 || i % 5 === 0) log("ci.polling", { ci: String(ci?.conclusion ?? ci?.status ?? "pending") });
     if (stall.stalled && !rollupHasRunningCheck(roll)) {
@@ -12227,6 +12245,8 @@ export function terminalVerdictFields(r: WorkerResult | null): {
   tokens?: WorkerResult["tokens"];
   worker_duration_ms?: number;
   total_cost_usd?: number;
+  /** W1-T4066: this cost restates the worker row's own, so the spend series must not count it again. */
+  spend_role?: "restated";
   success?: boolean;
 } {
   if (!r) return { model: null, served_model: null };
@@ -12244,6 +12264,7 @@ export function terminalVerdictFields(r: WorkerResult | null): {
     tokens: r.tokens,
     ...(r.workerDurationMs === undefined ? {} : { worker_duration_ms: r.workerDurationMs }),
     total_cost_usd: r.costUsd,
+    spend_role: "restated",
     success,
   };
 }
@@ -13651,6 +13672,7 @@ interface RunTaskBodyOptions {
   claimReserver?: DispatchClaimReserver;
   containmentExec?: ProbeExecutor;
   externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+  externalWaitRecycle?: () => string | undefined;
   isolationExec?: IsolationProbeExecutor;
   managedCheckoutInstall?: (repoDir: string) => void;
   maskLearnings?: boolean;
@@ -14419,6 +14441,7 @@ async function runTask(
      *  spawning a real sandboxed worker. Default: the real spawn-backed executor. */
     containmentExec?: ProbeExecutor;
     externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+    externalWaitRecycle?: () => string | undefined;
     /** Injectable isolation-probe executor (W1-T91) — the isolation sibling of
      *  `containmentExec` above, driving the REAL blocked_isolation catch branch. Default: the
      *  real spawn-backed executor. */
@@ -17171,6 +17194,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // is red and GitHub will not merge). Pending is never treated as pass.
     const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra), 6, {
       externalWaitFreshness: opts.externalWaitFreshness,
+      externalWaitRecycle: opts.externalWaitRecycle,
     });
     if (ci.state === "freshness_handoff") {
       // W1-T4662: this is a HAND-OFF, never a failure — a healthy run that reached the CI-wait
@@ -17178,8 +17202,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // to share `blocked_transient` with a genuine, repeated Anthropic-side API error, which made
       // the daemon's cross-task API-window hold and lane refill back dispatch off a signal that
       // named nothing wrong. The shared RunResult union names this outcome directly.
-      const reason = "freshness_yield";
-      say("daemon freshness handoff: CI is pending; leaving PR open for the refreshed daemon");
+      const reason = ci.recycle === undefined ? "freshness_yield" : "recycle_yield";
+      say(`daemon ${ci.recycle === undefined ? "freshness" : "recycle"} handoff: CI is pending; leaving PR open for the refreshed daemon`);
       log("verdict", {
         verdict: "handed_off",
         pr_url: prUrl,
@@ -31181,24 +31205,10 @@ export function openSiblingObservation(
   };
 }
 
-function isClosureCalibrationRow(value: unknown): value is ClassClosure {
-  if (!value || typeof value !== "object") return false;
-  const row = value as Record<string, unknown>;
-  if (typeof row.taskClass !== "string") return false;
-  if (typeof row.merged !== "number" || typeof row.open !== "number") return false;
-  if (row.costPerMerge !== null && typeof row.costPerMerge !== "number") return false;
-  const rate = row.mergeRate;
-  if (!rate || typeof rate !== "object") return false;
-  const rateRecord = rate as Record<string, unknown>;
-  return rateRecord.kind === "rate"
-    ? typeof rateRecord.value === "number" && typeof rateRecord.merged === "number" && typeof rateRecord.denominator === "number"
-    : rateRecord.kind === "refused" && typeof rateRecord.merged === "number" && typeof rateRecord.denominator === "number" && typeof rateRecord.floor === "number";
-}
-
 /**
- * Build one selection cycle's pure value context from the complete rotated ledger union. The
- * selector itself gets no reader: a torn corpus, malformed closure row, or missing prior cycle is
- * named here and becomes the exact former priority/scope/id order.
+ * Build one selection cycle's pure value context from the rotated ledger union's dispatched attempts
+ * (W1-T5112). The selector itself gets no reader: only an unreadable corpus refuses, and becomes
+ * the exact former priority/scope/id order; every class is otherwise scored, thin ones near the mean.
  */
 function dispatchValueContextForSelection(
   plan: Plan,
@@ -31206,34 +31216,32 @@ function dispatchValueContextForSelection(
   stateDir: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): DispatchValueContext | undefined {
-  const union = readLedgerUnionRecordsSync(stateDir, { step: "retro.closure_by_class", refuseIncomplete: true });
+  const nowMs = systemClock.now();
+  const union = readLedgerUnionRecordsSync(stateDir, {
+    step: [...DISPATCH_VALUE_LEDGER_STEPS],
+    since: fixedClock(nowMs - DISPATCH_VALUE_WINDOW_MS).iso(),
+    refuseIncomplete: true,
+  });
   if (!union.ok) {
     log("dispatch.value.refused", { reason: "incomplete-union", unread_rotations: union.unread.length });
     return undefined;
   }
-
-  const snapshots: ClosureCalibrationSnapshot[] = [];
-  for (const record of union.rows) {
-    const ts = record.ts;
-    const rows = record.rows;
-    if (typeof ts !== "string" || Number.isNaN(Date.parse(ts)) || !Array.isArray(rows) || !rows.every(isClosureCalibrationRow)) {
-      log("dispatch.value.refused", { reason: "malformed-closure-snapshot" });
-      return undefined;
-    }
-    snapshots.push({ ts, rows });
-  }
   const calibrated = buildDispatchValueContext(
     plan.tasks,
-    snapshots,
+    union.rows,
     new Set(plan.tasks.filter((task) => !isMerged(task.id)).map((task) => task.id)),
+    nowMs,
     union.ok,
   );
   if (calibrated.kind === "refused") {
     log("dispatch.value.refused", { reason: calibrated.reasons.join(",") });
     return undefined;
   }
-  if (calibrated.refusals.length > 0) log("dispatch.value.class_refused", { reasons: calibrated.refusals });
-  log("dispatch.value.calibrated", { classes: [...calibrated.context.scoreByClass.keys()] });
+  log("dispatch.value.calibrated", {
+    classes: Object.fromEntries([...calibrated.estimates].map(([taskClass, e]) => [taskClass, { mean: e.mean, attempts: e.attempts, merges: e.merges, cost_per_attempt: e.costPerAttempt, value: e.value }])),
+    fleet: { mean: calibrated.fleet.mean, attempts: calibrated.fleet.attempts, merges: calibrated.fleet.merges },
+    refused_classes: calibrated.refusals,
+  });
   return calibrated.context;
 }
 
@@ -34001,6 +34009,7 @@ export async function daemonCommand(
             // existing adapter is material-and-clean only; unassessed, dirty, and degraded
             // readings remain undefined and therefore cannot manufacture a restart.
             externalWaitFreshness: ciWaitFreshness(() => daemonFreshnessFromService(checkServiceFreshness(effectiveRepoRoot, process.env))),
+            externalWaitRecycle: () => recyclePauseDetail(config.root),
           }),
         readUsage: () => readUsageSnapshotPreferSdk(config),
         // THE LEDGER IS THE DEDUP (impl-FL): seed the once-per-string bound from what previous

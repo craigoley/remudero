@@ -74,6 +74,7 @@ test("W1-T3762 criterion 1: the terminal verdict receipt carries the assignment 
     tokens: { input: 100, output: 25, cacheRead: 0, cacheCreation: 0 },
     worker_duration_ms: 1500,
     total_cost_usd: 0,
+    spend_role: "restated",
     success: true,
   });
 });
@@ -273,9 +274,9 @@ test("deriveAnalyticsSnapshot: invocationsUnmeasuredBefore renders, never a fals
 test("deriveAnalyticsSnapshot: question 2 — worker rows grouped by lane and model, cost summed off total_cost_usd (never the cost_usd typo)", () => {
   const snap = deriveAnalyticsSnapshot(
     [
-      { step: "verdict", lane: "run-task", model: "sonnet", total_cost_usd: 1.5, cost_usd: 999 },
-      { step: "verdict", lane: "run-task", model: "sonnet", total_cost_usd: 0.5 },
-      { step: "verdict", lane: "triage", model: "opus", total_cost_usd: 2 },
+      { step: "implement.done", lane: "run-task", model: "sonnet", total_cost_usd: 1.5, cost_usd: 999 },
+      { step: "implement.done", lane: "run-task", model: "sonnet", total_cost_usd: 0.5 },
+      { step: "implement.done", lane: "triage", model: "opus", total_cost_usd: 2 },
       { step: "run.start", task_id: "W1-T1" }, // no `model` field at all — not a worker row
     ],
     "2026-08-14T00:00:00.000Z",

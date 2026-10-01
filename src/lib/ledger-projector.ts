@@ -13,10 +13,10 @@ import { closeSync, fstatSync, openSync, readFileSync, readSync, readdirSync, st
 import { basename, join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { systemClock, type Clock } from "./clock.js";
-import { DECISION_RELEVANT_LEDGER_STEPS, MODEL_ATTRIBUTION_LEDGER_STEPS, RENDER_RELEVANT_LEDGER_STEPS } from "./ledger.js";
+import { DECISION_RELEVANT_LEDGER_STEPS, EXTERNAL_EFFECT_RECONCILED_STEP, MODEL_ATTRIBUTION_LEDGER_STEPS, RENDER_RELEVANT_LEDGER_STEPS } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { ledgerRotationEntries, type LedgerCorpusEntry } from "./ledger-union.js";
-import { openReadModel, withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
+import { openReadModel, withWriteTransaction, type ReadModelDb, type ReadModelLease, type ReadModelStatement } from "./read-model-db.js";
 import { REPO_ROW_PROJECTION } from "./repo-ledger-index.js";
 
 export const LEDGER_PROJECTOR_SCHEMA_VERSION = 1;
@@ -30,6 +30,10 @@ export const DIR_GATE_SETTLE_MS = 2_000;
 export const DIR_GATE_RELIST_MS = 60_000;
 /** The fewest lines a tick's first transaction applies, so a collapsed rate estimate still moves a backlog. */
 export const MIN_TRANSACTION_LINES = 64;
+/** The fact set's version: a step added to {@link isFactStep} bumps it, so a store built before re-reads the ledger in place. */
+export const FACT_SET_VERSION = 2;
+/** How many of the newest rows of any step the activity ring keeps (Phase 4 design, `workstreams`). */
+export const ACTIVITY_RING_ROWS = 500;
 const FINGERPRINT_BYTES = 4_096;
 /**
  * An archive checkpoint names its bytes, never its inode: a deleted archive's inode is recycled, so
@@ -60,7 +64,8 @@ export function openProjectorReadModel(stateDir: string, instance: string, clock
 /** The steps the fact store keeps (design §3.5 `FACT_STEPS`); every other row is identity-only. */
 export function isFactStep(step: string): boolean {
   return DECISION_RELEVANT_LEDGER_STEPS.has(step) || RENDER_RELEVANT_LEDGER_STEPS.has(step)
-    || MODEL_ATTRIBUTION_LEDGER_STEPS.has(step) || step === "worker.assignment" || step.startsWith("panel.");
+    || MODEL_ATTRIBUTION_LEDGER_STEPS.has(step) || step === "worker.assignment" || step === EXTERNAL_EFFECT_RECONCILED_STEP
+    || step.startsWith("panel.");
 }
 
 /** Row identity: `(ts_ms, first 8 bytes of sha1(line))`, the exact-line equivalence W1-T4820 uses. */
@@ -83,10 +88,36 @@ export interface LedgerRowProjection {
   ddl: string;
   markers: readonly string[];
   apply(db: ReadModelDb, line: string, id: { ts: string; tsMs: number; h: bigint }, parse: () => Record<string, unknown> | undefined): void;
+  /** Runs once per transaction after its rows are applied, before its checkpoint. */
+  settle?(db: ReadModelDb): void;
 }
 
+const activityRingInserts = new WeakMap<ReadModelDb, ReadModelStatement>();
+
+/**
+ * The newest {@link ACTIVITY_RING_ROWS} rows of ANY step: operator activity ranks the newest rows of
+ * every step, which `fact` cannot answer. Each transaction inserts its rows and then trims the ring
+ * back to the newest by `(ts_ms, h)`, so any read order leaves the same rows.
+ */
+export const ACTIVITY_RING_PROJECTION: LedgerRowProjection = {
+  name: "activity_ring",
+  version: 1,
+  tables: ["activity_ring"],
+  ddl: "CREATE TABLE IF NOT EXISTS activity_ring(ts_ms INTEGER NOT NULL, h INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(ts_ms, h)) WITHOUT ROWID;",
+  markers: [STEP_KEY],
+  apply(db, line, id) {
+    let insert = activityRingInserts.get(db);
+    if (!insert) activityRingInserts.set(db, insert = db.prepare("INSERT OR IGNORE INTO activity_ring(ts_ms, h, body) VALUES(?, ?, ?)"));
+    insert.run(id.tsMs, id.h, line);
+  },
+  settle(db) {
+    db.prepare(`DELETE FROM activity_ring WHERE (ts_ms, h) < (SELECT ts_ms, h FROM activity_ring ORDER BY ts_ms DESC, h DESC
+      LIMIT 1 OFFSET ${ACTIVITY_RING_ROWS - 1})`).run();
+  },
+};
+
 /** Every projection a store carries; a view that needs a table no projection keeps adds one here. */
-export const LEDGER_ROW_PROJECTIONS: readonly LedgerRowProjection[] = [REPO_ROW_PROJECTION];
+export const LEDGER_ROW_PROJECTIONS: readonly LedgerRowProjection[] = [REPO_ROW_PROJECTION, ACTIVITY_RING_PROJECTION];
 
 export interface LedgerProjectorOptions {
   /** The instance's state dir: the one holding its live ledger and rotation archives. */
@@ -223,7 +254,8 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
 
   /** Creates each projection's tables; one this store has not built empties the store so the tick re-reads it all. */
   function buildProjections(): void {
-    const stale = projections.filter((p) => db.prepare("SELECT v FROM meta WHERE k = ?").get(`projection:${p.name}`)?.v !== String(p.version));
+    const versions = [{ name: "fact", version: FACT_SET_VERSION }, ...projections];
+    const stale = versions.filter((p) => db.prepare("SELECT v FROM meta WHERE k = ?").get(`projection:${p.name}`)?.v !== String(p.version));
     if (stale.length > 0) {
       withWriteTransaction(db, lease, () => {
         for (const p of projections) db.exec(p.ddl);
@@ -277,6 +309,7 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
     const linesBefore = c.lines;
     withWriteTransaction(db, lease, () => {
       apply();
+      for (const p of projections) p.settle?.(db);
       opts.beforeCheckpoint?.(source);
       sql.checkpoint.run(source, checkpoint.ino, checkpoint.size, checkpoint.off, checkpoint.fp);
       sql.generation.run();

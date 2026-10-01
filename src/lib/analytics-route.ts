@@ -114,6 +114,7 @@ import {
   type JudgeLabelsInput,
   type JudgeLabelStore,
 } from "./judge-calibration.js";
+import { isProducedSpendRow, spendAmountUsd } from "./spend-rows.js";
 
 /** One (lane, model) bucket of question 2 — worker counts and cost by lane/model. */
 export interface WorkerLaneModelBucket {
@@ -585,6 +586,7 @@ interface AnalyticsAccumulator {
   invocationsByVerb: Record<string, number>;
   invocationsMeasured: boolean;
   workersByKey: Map<string, WorkerLaneModelBucket>;
+  producedSpendUsd: number;
   startsByRun: Map<string, { ts: number; taskId: string }>;
   verdictsByRun: Map<string, number>;
   workerDurationsByLane: Map<string, { count: number; totalMs: number }>;
@@ -642,7 +644,7 @@ type CheckpointBreakdownState = {
   workCategories: Map<string, number>;
 };
 
-const CHECKPOINT_VERSION = 1 as const;
+const CHECKPOINT_VERSION = 2 as const;
 const CHECKPOINT_FILENAME = ".analytics-console-v1.checkpoint.json";
 const CHECKPOINT_HISTORY_BUCKETS = 30;
 const CHECKPOINT_DAY_MS = 24 * 60 * 60 * 1000;
@@ -659,6 +661,7 @@ type AnalyticsCheckpointState = {
   invocationsByVerb: Record<string, number>;
   invocationsMeasured: boolean;
   workersByLaneModel: WorkerLaneModelBucket[];
+  producedSpendUsd: number;
   startsByRun: Array<[string, { ts: number; taskId: string }]>;
   verdictsByRun: Array<[string, number]>;
   workerDurationsByLane: Array<[string, { count: number; totalMs: number }]>;
@@ -829,6 +832,7 @@ function analyticsAccumulator(): AnalyticsAccumulator {
     invocationsByVerb: {},
     invocationsMeasured: false,
     workersByKey: new Map(),
+    producedSpendUsd: 0,
     startsByRun: new Map(),
     verdictsByRun: new Map(),
     workerDurationsByLane: new Map(),
@@ -913,7 +917,9 @@ function captureCheckpointLine(acc: AnalyticsAccumulator, line: Record<string, u
     bucket.inputTokens += tokens.input;
     bucket.cacheRead += tokens.cacheRead;
     bucket.cacheCreation += tokens.cacheCreation;
-    bucket.costUsd += num(line.total_cost_usd) ?? 0;
+  }
+  if (day !== undefined && isProducedSpendRow(line)) {
+    checkpointHistoryBucket(acc.checkpointHistory, day).costUsd += spendAmountUsd(line) ?? 0;
   }
 
   // W1-T4024 — cash-lane money comes from WORKER rows that name their provider, never from
@@ -1519,13 +1525,15 @@ function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string,
     acc.invocationsByVerb[verb] = (acc.invocationsByVerb[verb] ?? 0) + 1;
   }
 
+  if (isProducedSpendRow(line)) acc.producedSpendUsd += spendAmountUsd(line) ?? 0;
+
   const model = str(line.model);
   if (model !== undefined) {
     const lane = str(line.lane) ?? "unknown";
     const key = `${lane}\0${model}`;
     const bucket = acc.workersByKey.get(key) ?? { lane, model, count: 0, totalCostUsd: 0 };
     bucket.count += 1;
-    bucket.totalCostUsd += num(line.total_cost_usd) ?? 0;
+    if (isProducedSpendRow(line)) bucket.totalCostUsd += spendAmountUsd(line) ?? 0;
     acc.workersByKey.set(key, bucket);
 
     // W1-T3623: `tokens` rides the SAME line as `model`/`total_cost_usd` (workerLedgerFields
@@ -1590,7 +1598,7 @@ function snapshotFromAccumulator(
   }
 
   const workersByLaneModel = [...acc.workersByKey.values()];
-  const costModeledUsd = workersByLaneModel.reduce((sum, bucket) => sum + bucket.totalCostUsd, 0);
+  const costModeledUsd = acc.producedSpendUsd;
   const tokensTotal =
     acc.tokensTotal.input + acc.tokensTotal.output + acc.tokensTotal.cacheRead + acc.tokensTotal.cacheCreation;
 
@@ -1775,6 +1783,7 @@ function serializeCheckpointState(acc: AnalyticsAccumulator): AnalyticsCheckpoin
     invocationsByVerb: { ...acc.invocationsByVerb },
     invocationsMeasured: acc.invocationsMeasured,
     workersByLaneModel: [...acc.workersByKey.values()].map((bucket) => ({ ...bucket })),
+    producedSpendUsd: acc.producedSpendUsd,
     startsByRun: [...acc.startsByRun.entries()].map(([key, value]) => [key, { ...value }]),
     verdictsByRun: [...acc.verdictsByRun.entries()],
     workerDurationsByLane: [...acc.workerDurationsByLane.entries()].map(([key, value]) => [key, { ...value }]),
@@ -1827,6 +1836,7 @@ function hydrateCheckpointState(state: AnalyticsCheckpointState): AnalyticsAccum
   acc.invocationsByVerb = { ...state.invocationsByVerb };
   acc.invocationsMeasured = state.invocationsMeasured;
   for (const bucket of state.workersByLaneModel) acc.workersByKey.set(`${bucket.lane}\0${bucket.model}`, { ...bucket });
+  acc.producedSpendUsd = state.producedSpendUsd;
   for (const [key, value] of state.startsByRun) acc.startsByRun.set(key, { ...value });
   for (const [key, value] of state.verdictsByRun) acc.verdictsByRun.set(key, value);
   for (const [key, value] of state.workerDurationsByLane) acc.workerDurationsByLane.set(key, { ...value });

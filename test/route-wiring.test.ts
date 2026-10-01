@@ -124,6 +124,10 @@ const COVERAGE_DEBT: ReadonlyMap<string, string> = new Map([
     "ledger-only operator-agent decision write; route behavior and read/write separation are covered in test/operator-agent.test.ts",
   ],
   [
+    "POST /v1/operator-agent/follow-ups/decision",
+    "W1-T5070: ledger-only follow-up control write; routing, conflict refusal and read-back are covered in test/operator-agent-follow-up-decision-route.test.ts",
+  ],
+  [
     "POST /v1/operator-agent/proposals/outcome",
     "ledger-only operator-agent outcome write; route behavior and read/write separation are covered in test/operator-agent.test.ts",
   ],
