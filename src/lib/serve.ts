@@ -3158,15 +3158,18 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   void routeAssembly.githubAppReady?.then(() => (githubAuth.settled = true));
   serveGenerations.set(server, {
     handover: (reason) => staleExit.handover(reason),
+    promote: () => readModel?.reload(),
+    shed: () => analyticsCache.shed(),
     probes: [planLoadedProbe(() => deps.board.plan, consoleSha), githubAuthProbe(() => githubAuth.settled), gatewayPrimedProbe(github), readModelWarmProbe(readModel)],
   });
   return { server, githubAppReady: routeAssembly.githubAppReady };
 }
 
 const serveReadModels = new WeakMap<Server, ReadModelWorkerHandle>();
-const serveGenerations = new WeakMap<Server, { handover: (reason: string) => Promise<void>; probes: ReadinessProbe[] }>();
+type ServeGenerationHooks = { handover: (reason: string) => Promise<void>; promote: () => void; shed: () => void; probes: ReadinessProbe[] };
+const serveGenerations = new WeakMap<Server, ServeGenerationHooks>();
 
-export function serveGeneration(server: Server): { handover: (reason: string) => Promise<void>; probes: ReadinessProbe[] } | undefined {
+export function serveGeneration(server: Server): ServeGenerationHooks | undefined {
   return serveGenerations.get(server);
 }
 

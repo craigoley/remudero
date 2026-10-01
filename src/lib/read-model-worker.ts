@@ -1157,6 +1157,23 @@ export function loadCommittedViewBodies(stateDir: string, home: string): { bodie
   }
 }
 
+/**
+ * When each instance's lease holder last committed or renewed: every fenced write and every renewal
+ * stamps `expires_ms` as that moment plus the TTL. A released or absent lease is no evidence at all.
+ */
+export function committedTickTimes(stateDir: string, instances: readonly ReadModelInstance[]): Map<string, number> {
+  const times = new Map<string, number>();
+  for (const { name } of instances) {
+    try {
+      const lease = peekLease(currentReadModelPath(stateDir, name, LEDGER_PROJECTOR_SCHEMA_VERSION));
+      if (lease) times.set(name, lease.expiresMs - READ_MODEL_LEASE_TTL_MS);
+    } catch {
+      continue; // no DB file yet, or an unreadable pointer: that instance's warm bodies stay "warming"
+    }
+  }
+  return times;
+}
+
 export interface ReadModelWorkerHandle {
   /** Keyed `<view>\u0000<key>`; loaded from the DB at construction, then replaced by each posted body. */
   readonly bodies: ReadonlyMap<string, ReadModelBodyEntry>;
@@ -1170,6 +1187,8 @@ export interface ReadModelWorkerHandle {
   start(): void;
   /** Asks the worker to release its leases and waits, bounded, for it. True when it confirmed. */
   stop(): boolean;
+  /** Re-reads the committed bodies the worker has not replaced; a promoted standby calls it, so it never serves its boot-time copies. */
+  reload(): number;
   /** Hands one sampled shadow request to the worker, which diffs it off serve's main thread. */
   shadow(request: ShadowRequest): void;
   /** While started, offers `sample` every key of each view switched `shadow` on each switch recheck; its throttle keeps one per sample period. */
@@ -1216,6 +1235,9 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   const warm = loadCommittedViewBodies(opts.stateDir, home);
   for (const entry of warm.bodies) bodies.set(readModelBodyKey(entry.view, entry.key), entry);
   opts.log?.("read_model.warm_boot", { bodies: warm.bodies.length, ...(warm.reason ? { reason: warm.reason } : {}) });
+  /** Keys the running worker has posted: newer than anything committed, so a reload leaves them alone. */
+  const posted = new Set<string>();
+  let committedAt = committedTickTimes(opts.stateDir, opts.instances);
   const switchesPath = readModelSwitchesPath(opts.stateDir);
   let mainSwitches = DEFAULT_READ_MODEL_SWITCHES;
   let darkReason: string | undefined;
@@ -1277,6 +1299,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     else if (msg.type !== "log") phase = undefined;
     if (msg.type === "body") {
       bodies.set(readModelBodyKey(msg.entry.view, msg.entry.key), msg.entry);
+      posted.add(readModelBodyKey(msg.entry.view, msg.entry.key));
       for (const listener of bodyListeners) listener(msg.entry);
     } else if (msg.type === "log") opts.log?.(msg.step, msg.extra);
     else if (msg.type === "drop") bodies.delete(readModelBodyKey(msg.view, msg.key));
@@ -1325,9 +1348,28 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     body: (view, key = "") => bodies.get(readModelBodyKey(view, key)),
     judge: (sources, now) => sources.map((source) => {
       if (!source.name.startsWith(LEDGER_SOURCE_PREFIX)) return judgeSource(sourceClocks.get(source.name) ?? source, now);
-      const state = instances.get(source.name.slice(LEDGER_SOURCE_PREFIX.length));
+      const instance = source.name.slice(LEDGER_SOURCE_PREFIX.length);
+      const state = instances.get(instance);
+      if (state?.tickedAt !== undefined) return ledgerSource(state, now);
+      const committed = committedAt.get(instance);
+      if (committed !== undefined && now - committed <= READ_MODEL_LEDGER_STALE_MS) {
+        return describeSource({ name: source.name, asOf: source.asOf, state: "fresh", lagMs: Math.max(0, now - committed) });
+      }
       return state ? ledgerSource(state, now) : { ...describeSource(source), state: "stale", phase: "warming", reason: "read model warming: this body was committed before serve started" };
     }),
+    reload: () => {
+      const again = loadCommittedViewBodies(opts.stateDir, home);
+      committedAt = committedTickTimes(opts.stateDir, opts.instances);
+      let replaced = 0;
+      for (const entry of again.bodies) {
+        const key = readModelBodyKey(entry.view, entry.key);
+        if (posted.has(key) || bodies.get(key)?.etag === entry.etag) continue;
+        bodies.set(key, entry);
+        replaced++;
+      }
+      opts.log?.("read_model.reloaded", { bodies: again.bodies.length, replaced, ...(again.reason ? { reason: again.reason } : {}) });
+      return replaced;
+    },
     switches: () => mainSwitches,
     shadow: (request) => worker?.postMessage({ type: "shadow", ...request }),
     driveShadow: (sample) => void (driven = sample),

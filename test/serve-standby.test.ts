@@ -143,6 +143,13 @@ test("standby serve does not listen on the public port before promote", { timeou
   });
   assert.equal(res.status, 200, "the promoted generation serves the public port with its board already computed");
   await res.arrayBuffer(); // Server.close waits for active responses; finish this client before shutdown.
+  const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
+  assert.match(ledger, /"step":"read_model\.reloaded"/, "promote reloads the committed view bodies the standby loaded at boot");
+
+  for (const listener of listeners) listener({ type: "rmd.shed" });
+  const shedReply = (sent as GenerationMessage[])[1];
+  assert.equal(shedReply?.type, "rmd.shed_done", "a shed request is answered with the generation's resident bytes");
+  assert.equal(typeof shedReply?.beforeBytes, "number");
 
   process.emit("SIGTERM");
   assert.equal(await running, 0);

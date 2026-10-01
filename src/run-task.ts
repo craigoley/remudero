@@ -658,6 +658,7 @@ import {
   GENERATION_MESSAGES,
   listenReadiness,
   onDrainRequest,
+  onShedRequest,
   processChannel,
   supervisedRole,
   type GenerationChannel,
@@ -35680,12 +35681,14 @@ export async function serveCommand(
   if (supervised && channel) {
     const generation = serveGeneration(server);
     onDrainRequest(channel, (reason) => void generation?.handover(reason));
+    onShedRequest(channel, () => generation?.shed());
     await listenReadiness(server, supervised.socketPath, () => [...(generation?.probes ?? []), boardComputedProbe(boardGate.isReady)], tokens.read);
     // One warm, so the gateway is primed before promotion; keep-warm itself starts only once listening.
     boardGithub.warm?.();
     void precomputeBoard();
     log("serve.standby", { socket: supervised.socketPath });
     await awaitPromotion(channel);
+    generation?.promote();
   }
 
   // BIND EACH NAMED INTERFACE — never the wildcard. `listen(port)` alone defaults to `::`
