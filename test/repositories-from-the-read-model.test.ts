@@ -144,7 +144,7 @@ function fixture(t: TestCtx): Fixture {
   return { root, stateDir, consoleRoot, sources };
 }
 
-function ticker(f: Fixture, opts: { now?: number; holder?: string; view?: ReturnType<typeof createRepositoriesReadModelView<ReadModelInstanceState>> } = {}): { tick: () => ReadModelBodyEntry | undefined; release: () => void; shadow: (request: ShadowRequest) => boolean; logs: Array<{ step: string; extra: Record<string, unknown> }> } {
+function ticker(f: Fixture, opts: { now?: number; holder?: string; view?: ReturnType<typeof createRepositoriesReadModelView<ReadModelInstanceState>> } = {}): { tick: () => ReadModelBodyEntry | undefined; release: () => void; shadow: (request: ShadowRequest) => boolean; logs: Array<{ step: string; extra: Record<string, unknown> }>; at: (ms: number) => void } {
   let last: ReadModelBodyEntry | undefined;
   const logs: Array<{ step: string; extra: Record<string, unknown> }> = [];
   let now = opts.now ?? NOW;
@@ -166,6 +166,7 @@ function ticker(f: Fixture, opts: { now?: number; holder?: string; view?: Return
     release: () => void inner.release(),
     shadow: (request) => inner.shadow(request),
     logs,
+    at: (ms) => void (now = ms),
   };
 }
 
@@ -556,4 +557,55 @@ test("a usage window's percent_used is explained by the newer reading it is", ()
   };
   assert.deepEqual(judge(at(59, "2026-10-01T06:04:56.451Z"), at(58, "2026-10-01T05:54:45.422Z")), [["observed_at", "timing"], ["percent_used", "timing"]]);
   assert.deepEqual(judge(at(59, "2026-10-01T05:54:45.422Z"), at(58, "2026-10-01T05:54:45.422Z")), [["percent_used", "real"]], "one reading two percentages is a bug");
+});
+
+/** A worker cost row, as `projectRepoTelemetry` sums it into tokens7d, cache reads and the subscription split. */
+function costRow(ts: number, taskId: string, step: string, input: number): string {
+  return JSON.stringify({ ts: new Date(ts).toISOString(), step, task_id: taskId, run_id: `${taskId}-run`, billing_mode: "subscription", total_cost_usd: 0.1, tokens: { input, output: 0, cacheRead: input } });
+}
+
+/** One sampled comparison taken `laterMs` after the body was built, as the shadow driver takes it on the host. */
+function sampleLater(t: TestCtx, f: Fixture, before: string[], after: string[], laterMs: number): Array<{ path: string; classification: string; reason: string }> {
+  const live = join(f.stateDir, "ledger.ndjson");
+  writeFileSync(live, `${readFileSync(live, "utf8")}${before.map((line) => `${line}\n`).join("")}`);
+  createRepositoriesSourcePublisher({ stateDir: f.stateDir, instances: () => f.sources })();
+  const run = ticker(f);
+  t.after(() => run.release());
+  repositories(run.tick());
+  writeFileSync(live, `${readFileSync(live, "utf8")}${after.map((line) => `${line}\n`).join("")}`);
+  run.at(NOW + laterMs);
+  assert.equal(run.shadow({ view: "repositories", key: "", requests: 1 }), true, "the worker computed the legacy side and compared");
+  return (run.logs.filter((l) => l.step === VIEW_SHADOW_DIFF_STEP).at(-1)?.extra.diffs ?? []) as Array<{ path: string; classification: string; reason: string }>;
+}
+
+const WEEK_MS = 7 * 24 * 3_600_000;
+
+test("a cost row leaving the seven-day window between the build and the sample is no repositories diff", (t) => {
+  // Captured 2026-10-01T07:57:45Z: telemetry.tokens7d read real, its residual 458255 exactly RETRO#retro.synthesized@2026-09-24T07:57:24,
+  // the row then crossing the window edge: the view's summary was evaluated before it aged out and legacy's after.
+  const f = fixture(t);
+  const edge = costRow(NOW - WEEK_MS + 10_000, "RETRO", "retro.synthesized", 458_255);
+  const diffs = sampleLater(t, f, [edge], [], 20_000);
+  assert.deepEqual(diffs.filter((d) => d.path.includes("tokens7d") || d.path.includes("calls7d")), [], JSON.stringify(diffs));
+  assert.deepEqual(diffs.filter((d) => d.classification === "real"), [], JSON.stringify(diffs));
+});
+
+test("a cost row written seconds after the repositories build is no diff when legacy reads at the build instant", (t) => {
+  // Captured 2026-10-01T14:02:14Z: residual 814006 exactly TRIAGE-fb-1789303258903-a19164#triage.synthesized@14:01:55, 19 s
+  // before the sample: legacy's window closed at the sample instant and took in a row the view's earlier summary could not.
+  const f = fixture(t);
+  const fresh = costRow(NOW + 10_000, "TRIAGE-fb-1789303258903-a19164", "triage.synthesized", 814_006);
+  const diffs = sampleLater(t, f, [], [fresh], 20_000);
+  assert.deepEqual(diffs.filter((d) => d.classification === "real"), [], JSON.stringify(diffs));
+  assert.deepEqual(diffs.map((d) => d.path), [], "both sides evaluated the same window over the same rows");
+});
+
+test("a cost row inside both windows that the view lacks is still a real repositories diff", (t) => {
+  // The negative control: a row older than the view's own summary instant, missing from the view, is a wrong value.
+  const f = fixture(t);
+  const missed = costRow(NOW - 3_600_000, "c-T7", "implement.done", 1_234);
+  const diffs = sampleLater(t, f, [], [missed], 20_000);
+  const tokens = diffs.find((d) => d.path === "instances[instanceId=core].summary.repos[id=craigoley/remudero].telemetry.tokens7d");
+  assert.equal(tokens?.classification, "real", JSON.stringify(diffs));
+  assert.match(tokens!.reason, /a residual of 1234 no measured row explains \(c-T7#implement\.done@/);
 });
