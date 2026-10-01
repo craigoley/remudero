@@ -66,6 +66,9 @@ function projectorOf(stateDir: string, instances: Array<{ name: string; ledgerDi
 }
 
 test("a six minute view build neither stalls projection nor silences the read-model worker", async (t) => {
+  // Stop the writer before scratch() removes its state directory in the after hooks.
+  let handle: ReturnType<typeof createReadModelWorker> | undefined;
+  t.after(() => void handle?.stop());
   const stateDir = scratch(t, "slowview-state");
   const ledgerDir = scratch(t, "slowview-ledger");
   writeFileSync(join(ledgerDir, LIVE), row(Date.now(), "boot"));
@@ -86,12 +89,11 @@ export default [{ name: "slow", version: 1, materialize: () => {
   const logs: string[] = [];
   const states: Array<{ at: number; newestTs: string | null }> = [];
   let watch: (() => void) | undefined;
-  const handle = createReadModelWorker({
+  handle = createReadModelWorker({
     stateDir, instances: [{ name: "core", ledgerDir }], tickMs: 20, clock: scaled, viewsModule,
     log: (step) => void logs.push(step), every: (run) => ((watch = run), () => undefined),
     observe: (m) => void (m.type === "state" && states.push({ at: Date.now(), newestTs: m.instances[0]?.newestTs ?? null })),
   });
-  t.after(() => handle.stop());
   handle.start();
   await until(() => states.some((s) => s.newestTs !== null), "the projector applied the boot row");
   const appended: Array<{ at: number; ts: string }> = [];
