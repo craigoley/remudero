@@ -500,6 +500,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   const lastEtag = new Map<string, string>();
   const latest = new Map<string, ViewBody>();
   let comparator: { db: ReadModelDb; shadow: ViewShadow } | undefined;
+  let deferredLoggedAt = Number.NEGATIVE_INFINITY;
   let switches = DEFAULT_READ_MODEL_SWITCHES;
   let switchesMtimeMs = -1;
   let switchesCheckedAt = Number.NEGATIVE_INFINITY;
@@ -784,13 +785,21 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     if (only) return build(only, now, ctx, generation);
     const left = passMs - (clock.now() - tickStart);
     let spent = 0;
+    const deferred: string[] = [];
     for (const unit of dueUnits(now)) {
       if (stopRequested()) return;
       const fits = unit.costMs === undefined ? spent === 0 : unit.costMs <= soloMs && spent + unit.costMs <= left;
-      if (!fits) continue;
+      if (!fits) {
+        deferred.push(unit.slot ? `${unit.view.name}@${unit.slot.instance.name}` : unit.view.name);
+        continue;
+      }
       const before = clock.now();
       build(unit, now, ctx, generation);
       spent += clock.now() - before;
+    }
+    if (deferred.length > 0 && now - deferredLoggedAt >= READ_MODEL_LEDGER_STALE_MS) {
+      deferredLoggedAt = now;
+      log("read_model.materialize_deferred", { ms: spent, budgetMs: Math.max(0, left), deferred });
     }
   }
 

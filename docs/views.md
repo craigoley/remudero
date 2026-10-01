@@ -70,6 +70,10 @@ reads no file and no SQLite.
 - **Worker diagnostics.** The worker ledgers `read_model.lease_acquired` and `read_model.lease_elsewhere`
   when an instance's lease changes hands, and `read_model.slow_tick` when one projector tick takes longer
   than the 10 s stale bound. A source's staleness is judged from when its tick completed.
+- **Materialize budget (P2-08).** View units share the pass budget with projection. The worker
+  measures each unit and paces later builds by its cost; a unit that will not fit is deferred to a
+  later pass. `read_model.materialize_deferred` records due units skipped for budget, at most once
+  per 10 s. A unit too large to share a pass runs in a solo tick.
 
 ## Push: `GET /v1/views/events` (Phase 2)
 
