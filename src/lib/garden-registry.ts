@@ -22,7 +22,6 @@ import { SELF_SYNC_GUARD_ENV } from "./self-sync.js";
 /** The gardens the daemon runs off its loop, in the order its `gardens` list has always wired them. */
 export const REGISTERED_GARDEN_NAMES = [
   "plan",
-  "backlog",
   "gate",
   "test",
   "config",
@@ -33,6 +32,7 @@ export const REGISTERED_GARDEN_NAMES = [
   "overseer",
   "hot-file",
   "host-resource",
+  "backlog",
 ] as const;
 
 export type RegisteredGardenName = (typeof REGISTERED_GARDEN_NAMES)[number];
