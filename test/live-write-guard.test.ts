@@ -516,18 +516,12 @@ test("a claim-ref push to a local origin is still allowed under the test runner"
   const noOrigin: GitRun = (args) => (args[0] === "remote" ? { status: 2, stdout: "", stderr: "no such remote" } : { status: 1, stdout: "", stderr: "x" });
   assert.doesNotThrow(() => claimPushPaths(noOrigin)["id attempt"]!());
   // the real thing: a bare tmpdir origin, driven through a real git run, is reserved on
-  const origin = mkdtempSync(join(tmpdir(), "rmd-claim-guard-origin-"));
-  execFileSync("git", ["init", "--bare", "-q", origin]);
-  const work = mkdtempSync(join(tmpdir(), "rmd-claim-guard-work-"));
-  execFileSync("git", ["init", "-q", work]);
-  execFileSync("git", ["-C", work, "remote", "add", "origin", origin]);
-  const run: GitRun = (args) => {
-    const r = spawnSync("git", ["-C", work, ...args], { encoding: "utf8" });
-    return { status: r.status ?? 1, stdout: r.stdout, stderr: r.stderr };
-  };
+  const origin = gitRepo({ bare: true, kind: "claim-guard-origin" });
+  const work = gitRepo({ cloneFrom: origin.dir, kind: "claim-guard-work" });
+  const run: GitRun = (args) => ({ status: 0, stdout: work.git(...args), stderr: "" });
   const reserver = gitDispatchClaimReserver({ run });
   assert.equal(reserver.attempt("W1-T9000", reserver.mintAnchor()), "created");
-  assert.ok(execFileSync("git", ["-C", origin, "for-each-ref", "refs/rmd-dispatch/"], { encoding: "utf8" }).includes("W1-T9000"));
+  assert.ok(origin.git("for-each-ref", "refs/rmd-dispatch/").includes("W1-T9000"));
 });
 
 test("a claim-ref push is never guarded outside the test runner", () => {
