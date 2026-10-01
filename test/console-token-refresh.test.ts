@@ -179,18 +179,17 @@ test("W1-T3807 follow-up: the production serve assembly wires the live snapshot 
   assert.equal(providerReads, 1, "the cache reads the provider snapshot once at startup, not per analytics request");
 });
 
-test("W1-T3807 follow-up: stale serve cleanup stops both analytics caches before exit", async () => {
+test("stale serve cleanup stops both analytics caches through an injected exit without arming the watchdog", async () => {
   const root = tmpRoot();
   let analyticsStops = 0;
   let liveStops = 0;
   const exits: number[] = [];
-  const originalExit = process.exit;
-  process.exit = ((code?: number) => {
-    exits.push(code ?? 0);
-    return undefined as never;
-  }) as typeof process.exit;
   const server = buildServeServer(depsFor(root, {
     consoleSha: "a".repeat(40),
+    // Mocking process.exit after the production path arms its out-of-process
+    // SIGKILL watchdog kills the runner itself. This existing seam observes the
+    // requested exit without changing the live watchdog behavior.
+    staleExitSeams: { exit: (code) => { exits.push(code); } },
     analytics: {
       schedule: () => ({ unref() {}, cancel: () => { analyticsStops += 1; } }),
     },
@@ -218,7 +217,6 @@ test("W1-T3807 follow-up: stale serve cleanup stops both analytics caches before
     assert.ok(liveStops >= 1, "live analytics cache was stopped before the process exit");
   } finally {
     server.close();
-    process.exit = originalExit;
   }
 });
 
