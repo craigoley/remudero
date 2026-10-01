@@ -1,3 +1,5 @@
+import { isProducedSpendRow, spendAmountUsd } from "./spend-rows.js";
+
 export type TimeSeriesPoint = {
   t: string;
   value?: number | null;
@@ -193,8 +195,9 @@ export function createHistoricalSeriesAccumulator(): HistoricalSeriesAccumulator
         bucket.inputTokens += tokens.input;
         bucket.cacheRead += tokens.cacheRead;
         bucket.cacheCreation += tokens.cacheCreation;
-        bucket.costUsd += number(line.total_cost_usd) ?? 0;
       }
+      // W1-T4066: the row that PRODUCED a cost carries it once — never a `verdict`'s restatement of its last worker.
+      if (isProducedSpendRow(line)) bucket.costUsd += spendAmountUsd(line) ?? 0;
     },
     build(nowIso) {
       return buildHistoricalSeries(state, nowIso);

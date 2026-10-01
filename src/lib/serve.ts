@@ -1340,6 +1340,8 @@ export interface GatewayCheckoutDeps {
   /** The network half, run OFF the event loop. Defaults to an async `git fetch --quiet origin`. */
   fetch?: () => Promise<void>;
   clock?: Clock;
+  /** A generation under the serve supervisor: it asks for a handoff, so it must read past the boot-sync guard. */
+  supervised?: boolean;
 }
 
 function defaultGatewayFetch(repoDir: string): () => Promise<void> {
@@ -1383,7 +1385,7 @@ export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<
   const refuse = (): string => {
     throw new Error("guard probe");
   };
-  if (checkServiceFreshness(deps.repoDir, env, { git: refuse }).status === "guarded") {
+  if (checkServiceFreshness(deps.repoDir, env, { git: refuse, ignoreReentrancyGuard: deps.supervised === true }).status === "guarded") {
     return { state: localState("guarded environment: freshness is not assessed here"), restartDue: false };
   }
   let fetchError: string | undefined;
@@ -1395,6 +1397,7 @@ export async function assessGatewayCheckout(deps: GatewayCheckoutDeps): Promise<
   }
   const seen = new Map<string, string>();
   const svc = checkServiceFreshness(deps.repoDir, env, {
+    ignoreReentrancyGuard: deps.supervised === true,
     git: (args) => {
       if (args[0] === "fetch") {
         if (fetchError !== undefined) throw new Error(fetchError);
@@ -3051,7 +3054,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       routeAssembly.linkRefusals.stop();
     },
     lastReadAt: () => lastReadAt,
-    assessCheckout: deps.gatewayCheckout ?? (() => assessGatewayCheckout({ repoDir: serveRepoDir() })),
+    assessCheckout: deps.gatewayCheckout ?? (() => assessGatewayCheckout({ repoDir: serveRepoDir(), supervised: deps.generation !== undefined })),
     drain: () => {
       const drained = serveDrain.drain("recycle");
       viewEventsHandover("recycle");
