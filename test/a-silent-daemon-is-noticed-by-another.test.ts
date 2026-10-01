@@ -236,7 +236,7 @@ test("boots past the bound with no sweep between are down even while the sweep i
 });
 
 test("an operator stop is held and not escalated", (t) => {
-  const stop = { ts: "2026-09-23T21:15:00.000Z", step: "daemon.stop", detail: "operator hold" };
+  const stop = { ts: "2026-09-23T22:04:00.000Z", step: "daemon.stop", detail: "operator hold" };
   const f = fleet(t, { live: [sweep(LAST_SWEEP), stop, ...crashLoop()] });
   const { calls, gh } = fakeGh();
   watch(f, gh, () => NOW).tick();

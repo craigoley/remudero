@@ -71,5 +71,7 @@
   files: [src/lib/skill-workshop.ts, test/an-outcome-only-signal-never-becomes-an-injectable-skill.test.ts]
   origin: "skill-draft-review#d625783bf2e72aed"
   plan_refs: ["W1-T87", "W1-T2766", "P13"]
+  priority: 3
   status: queued
+  # backlog gardener: band=3 evidence=cb9f1c4698cb5296
   attempts: 0

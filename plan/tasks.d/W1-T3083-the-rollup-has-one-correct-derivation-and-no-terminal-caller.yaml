@@ -52,4 +52,6 @@
     - claim: "an outcome the classifier cannot name is pending rather than green"
       proof: "grep: fail closed on a word we cannot name in test/a-commit-status-is-not-a-check-run.test.ts"
   files: [src/lib/pr-checks.ts, src/run-task.ts, test/a-commit-status-is-not-a-check-run.test.ts, test/help-renders-a-summary-not-a-paragraph.test.ts, docs/cli-reference.md]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=c04ef46d17d0b85c

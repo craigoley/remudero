@@ -38,7 +38,7 @@ interface FakeGeneration extends GenerationProcess {
   slot: PreparedSlot;
 }
 
-function fakeFleet(behaviour: (slot: PreparedSlot) => { readyAfter?: number; never?: boolean; sha?: string; noPromote?: boolean } = () => ({})) {
+function fakeFleet(behaviour: (slot: PreparedSlot) => { readyAfter?: number; never?: boolean; sha?: string; noPromote?: boolean; smoke503?: boolean; deaf?: boolean } = () => ({})) {
   const generations: FakeGeneration[] = [];
   const bySocket = new Map<string, { gen: FakeGeneration; polls: number }>();
   let n = 0;
@@ -78,6 +78,8 @@ function fakeFleet(behaviour: (slot: PreparedSlot) => { readyAfter?: number; nev
     const entry = bySocket.get(socketPath);
     if (!entry) throw new Error("no such socket");
     const b = behaviour(entry.gen.slot);
+    if (b.deaf) throw new Error("ECONNREFUSED");
+    if (path === "/v1/status" && b.smoke503) return { status: 503, body: "{}" };
     if (path.startsWith("/v1/ready")) {
       entry.polls += 1;
       const ready = !b.never && entry.polls > (b.readyAfter ?? 0);
@@ -268,13 +270,101 @@ test("a promoted generation that crashes is replaced from the previous slot and 
   target = "sha-3";
 });
 
-test("a cold start that never becomes ready exits 1, and a failed restart falls back to a container restart", async () => {
-  const fleet = fakeFleet(() => ({ never: true }));
+test("a cold start whose smoke read answers 503 is promoted degraded and the supervisor never exits", async () => {
+  let smoke503 = true;
+  const fleet = fakeFleet((slot) => ({ smoke503: slot.sha === "sha-1" && smoke503 }));
+  const { supervisor, logs, exits } = decisionSupervisor(fleet, { sleep: () => tick(1) });
+  await supervisor.start();
+  assert.deepEqual(exits, [], "nothing else serves 4317, so a warming generation is never a reason to exit");
+  assert.deepEqual(fleet.generations[0].sent.map((m) => m.type), ["rmd.promote"], "the only generation was promoted");
+  assert.equal(supervisor.activeSha(), "sha-1");
+  assert.deepEqual(logs.find((l) => l.step === "serve.cold_start_degraded")?.extra?.unmet, ["smoke /v1/status"]);
+  smoke503 = false;
+  for (let i = 0; i < 50 && !logs.some((l) => l.step === "serve.cold_start_ready"); i += 1) await tick(2);
+  assert.equal(logs.find((l) => l.step === "serve.cold_start_ready")?.extra?.sha, "sha-1", "the ledger says when it stopped serving 503s");
+  assert.equal(logs.some((l) => l.step === "serve.cold_start_failed"), false);
+});
+
+test("a cold start with board_computed false past the ready bound is promoted and the supervisor never exits", async () => {
+  let mode: "board" | "deaf" | "never" | "ready" = "board";
+  const fleet = fakeFleet(() => (mode === "board" ? { readyAfter: 1_000_000 } : mode === "deaf" ? { deaf: true } : mode === "never" ? { never: true } : {}));
   let now = 0;
-  const { supervisor, exits, steps } = decisionSupervisor(fleet, { clock: { now: () => (now += 10_000), iso: () => "" } as never, readyBoundMs: 1 });
+  const { supervisor, logs, exits } = decisionSupervisor(fleet, { clock: { now: () => (now += 10_000), iso: () => "" } as never, readyBoundMs: 1, sleep: () => tick(1) });
+  await supervisor.start();
+  assert.deepEqual(exits, []);
+  assert.equal(supervisor.activeSha(), "sha-1");
+  assert.deepEqual(logs.find((l) => l.step === "serve.cold_start_degraded")?.extra?.unmet, ["board_computed"]);
+  for (const next of ["deaf", "never", "ready"] as const) {
+    await tick(10);
+    mode = next;
+  }
+  for (let i = 0; i < 50 && !logs.some((l) => l.step === "serve.cold_start_ready"); i += 1) await tick(2);
+  assert.ok(logs.some((l) => l.step === "serve.cold_start_ready"), "a refused or non-JSON readiness read keeps it degraded, not failed");
+  assert.deepEqual(exits, []);
+  await supervisor.shutdown("test");
+});
+
+test("a cold generation that asked for a handoff while standby gets it once promoted", async () => {
+  const fleet = fakeFleet();
+  const get = fleet.get;
+  let asked = false;
+  fleet.get = async (socketPath, path) => {
+    if (!asked && socketPath === "/sock/1") (asked = true), fleet.generations[0].emit({ type: "rmd.handoff_request" });
+    return get?.(socketPath, path) ?? { status: 0, body: "" };
+  };
+  const { supervisor, logs } = decisionSupervisor(fleet);
+  await supervisor.start();
+  for (let i = 0; i < 50 && supervisor.activeSha() !== "sha-2"; i += 1) await tick(1);
+  assert.equal(supervisor.activeSha(), "sha-2", "the ask made before promotion was replayed, not dropped");
+  assert.ok(logs.some((l) => l.step === "serve.handoff_done"));
+});
+
+test("a handoff whose standby smoke read answers 503 is still aborted and the old generation keeps serving", async () => {
+  const fleet = fakeFleet((slot) => ({ smoke503: slot.sha === "sha-2" }));
+  const { supervisor, logs } = decisionSupervisor(fleet);
+  await supervisor.start();
+  await supervisor.requestHandoff();
+  assert.equal(logs.find((l) => l.step === "serve.handoff_aborted")?.extra?.criterion, "smoke /v1/status");
+  assert.deepEqual(fleet.generations[1].killed, ["SIGKILL"], "the standby never served");
+  assert.equal(supervisor.activeSha(), "sha-1");
+  assert.deepEqual(fleet.generations[0].sent.map((m) => m.type), ["rmd.promote"], "the serving generation was never drained");
+});
+
+test("a rollback to the previous slot is promoted even while its smoke read answers 503", async () => {
+  let rolledBack = false;
+  const fleet = fakeFleet((slot) => ({ smoke503: slot.sha === "sha-1" && rolledBack }));
+  const { supervisor, logs, exits } = decisionSupervisor(fleet, { sleep: () => tick(1) });
+  await supervisor.start();
+  await supervisor.requestHandoff();
+  rolledBack = true;
+  fleet.generations[1].die(1);
+  for (let i = 0; i < 50 && supervisor.activeSha() !== "sha-1"; i += 1) await tick(1);
+  assert.equal(supervisor.activeSha(), "sha-1");
+  assert.deepEqual(exits, []);
+  assert.deepEqual(logs.find((l) => l.step === "serve.cold_start_degraded")?.extra?.unmet, ["smoke /v1/status"]);
+  await supervisor.shutdown("test");
+});
+
+test("a cold start that never listens exits 1, and a failed restart falls back to a container restart", async () => {
+  const fleet = fakeFleet(() => ({ deaf: true }));
+  let now = 0;
+  const { supervisor, exits, logs } = decisionSupervisor(fleet, { clock: { now: () => (now += 10_000), iso: () => "" } as never, readyBoundMs: 1 });
   await supervisor.start();
   assert.deepEqual(exits, [1]);
-  assert.ok(steps().includes("serve.cold_start_failed"));
+  assert.equal(logs.find((l) => l.step === "serve.cold_start_failed")?.extra?.criterion, "listen_bound");
+
+  const dying = fakeFleet(() => ({ deaf: true }));
+  const died = decisionSupervisor(dying, { sleep: async () => dying.generations[0]?.die(1) });
+  await died.supervisor.start();
+  assert.equal(died.logs.find((l) => l.step === "serve.cold_start_failed")?.extra?.criterion, "exited");
+
+  const mute = fakeFleet(() => ({ noPromote: true }));
+  const unpromoted = decisionSupervisor(mute);
+  const starting = unpromoted.supervisor.start();
+  await tick(1);
+  mute.generations[0].die(1);
+  await starting;
+  assert.equal(unpromoted.logs.find((l) => l.step === "serve.cold_start_failed")?.extra?.criterion, "promote");
 
   let broken = false;
   const flaky = fakeFleet(() => (broken ? { noPromote: true } : {}));
@@ -412,6 +502,25 @@ test("a generation that crashes after promote is rolled back to the previous bui
   assert.equal(supervisor.activeSha(), "sha-1");
   const reply = await hit(port, false, "GET");
   assert.equal(reply.sha, "sha-1", "the rolled-back build serves the port");
+  await supervisor.shutdown("test");
+});
+
+test("the only generation crashing is replaced and promoted even while its smoke read answers 503", { timeout: 120_000 }, async () => {
+  const port = await freePort();
+  const modes: Record<string, string> = {};
+  const { supervisor, logs, exits } = realSupervisor(port, modes);
+  await supervisor.start();
+  assert.equal((await hit(port, false, "GET")).status, 200);
+  modes["sha-1"] = "status-503";
+  process.kill(Number(logs.find((l) => l.step === "serve.generation_forked")?.extra?.pid), "SIGKILL");
+  const degradedAfterCrash = (): boolean => logs.slice(logs.findIndex((l) => l.step === "serve.generation_crashed")).some((l) => l.step === "serve.cold_start_degraded");
+  for (let i = 0; i < 400 && !(logs.some((l) => l.step === "serve.generation_crashed") && degradedAfterCrash()); i += 1) await tick(25);
+  assert.deepEqual(exits, [], "nothing else was serving, so a warming replacement is never a reason to exit");
+  assert.ok(degradedAfterCrash(), "the replacement was promoted and ledgered as degraded");
+  assert.equal(logs.some((l) => l.step === "serve.generation_restart_failed"), false);
+  assert.equal(logs.filter((l) => l.step === "serve.generation_forked").length, 2);
+  const reply = await hit(port, false, "GET");
+  assert.deepEqual({ status: reply.status, sha: reply.sha }, { status: 200, sha: "sha-1" }, "the replacement serves the port");
   await supervisor.shutdown("test");
 });
 

@@ -51,7 +51,9 @@
   origin: architect
   plan_refs: ["§5", "§5C"]
   files: [docs/codeql-unused-locals-2026.md, test/codeql-unused-locals-backlog.test.ts, test/codeql-unused-locals-probe.test.ts, src/lib/worker.ts, src/lib/drain-lock.ts, src/lib/inflight-lock.ts, src/lib/escalate.ts, src/lib/sweep.ts, src/lib/review.ts, src/lib/status.ts, src/run-task.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=c62580a61dd65bfa
   attempts: 0
   note: "REGRADED medium->high at filing per Rule 19's own sizing exemption (the W1-T180/W1-T68 precedent):
     37 alerts scattered across many modules mechanically count as many subsystems under task-linter.ts's

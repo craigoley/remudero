@@ -10,7 +10,9 @@
   files: [src/lib/compaction.ts, src/lib/prompt-render.ts, test/gh-pr-edit-fallback-contract.test.ts]
   origin: "retro#RETRO-1789367285330"
   plan_refs: ["W1-T2948"]
+  priority: 3
   status: queued
+  # backlog gardener: band=3 evidence=1e1aeb69af8e2635
   attempts: 0
   rationale: |
     HARVESTED VERBATIM from the fix worker dispatched at 2026-09-14T07:19:45.398Z (strike 2, round

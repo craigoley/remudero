@@ -619,3 +619,64 @@ test("W1-T2324 FALSIFIER: the pre-fix pattern DROPPED these ids rather than trun
     assert.equal(DECLARED_ID_LINE_RE_FOR_TEST.exec(line)?.[1], id);
   }
 });
+
+// ── W1-T4212: THE SCAN ALSO READS plan/ ─────────────────────────────────────────────────────
+//
+// The gate scanned only src and deploy, so a plan record could cite an id that resolves nowhere --
+// a typo, an id renumbered away, a probe left in prose -- with nothing to say so. plan/ is now a
+// default scan root; the ids it already cited that resolve nowhere are baselined with reasons.
+
+test("W1-T4212: an unresolved id in plan fails the gate", () => {
+  const root = mkFixtureRoot();
+  const remote = makeEmptyBareRemote();
+  try {
+    writeFileSync(
+      join(root, "plan", "tasks.d", "W1-T88100-a-record.yaml"),
+      "- id: W1-T88100\n  rationale: |\n    renumbered away from W1-T88101, which nothing ever reserved\n",
+    );
+    const result = runCli(["--cwd", root, "--baseline", writeBaseline(root, []), "--remote", remote]);
+    const output = result.stdout + result.stderr;
+    assert.notEqual(result.status, 0, output);
+    assert.match(output, /FAILED/);
+    assert.match(output, /W1-T88101/);
+    assert.match(output, /plan\/tasks\.d\/W1-T88100-a-record\.yaml:3/);
+    assert.doesNotMatch(output, /W1-T88100\n/); // its own declared id resolves, never named as a failure
+  } finally {
+    cleanup(root, remote);
+  }
+});
+
+test("W1-T4212: a plan record citing a declared, reserved or baselined id passes", () => {
+  const root = mkFixtureRoot();
+  const remote = makeBareRemoteWithReservation("W1-T88103");
+  try {
+    writeFileSync(
+      join(root, "plan", "tasks.d", "W1-T88100-a-record.yaml"),
+      "- id: W1-T88100\n  depends_on: [W1-T88100]\n  rationale: |\n    see W1-T88103 (reserved) and W1-T88104 (baselined)\n",
+    );
+    const baseline = writeBaseline(root, [{ id: "W1-T88104", reason: "a probe id named in prose, never filed" }]);
+    const result = runCli(["--cwd", root, "--baseline", baseline, "--remote", remote]);
+    const output = result.stdout + result.stderr;
+    assert.equal(result.status, 0, output);
+    assert.match(output, /BASELINE {2}W1-T88104/);
+  } finally {
+    cleanup(root, remote);
+  }
+});
+
+test("W1-T4212: the shipped baseline carries a written reason for every id plan cited that resolves nowhere", () => {
+  const entries = JSON.parse(readFileSync(join(REPO_ROOT, "scripts", "task-id-existence-baseline.json"), "utf8")) as Array<{
+    id: string;
+    reason: string;
+  }>;
+  const byId = new Map(entries.map((e) => [e.id, e.reason]));
+  // The measured residue at origin/main ec19244e8, each one checked against plan/ before baselining.
+  const residue = [
+    "W1-T0", "W1-T100000", "W1-T1000000", "W1-T1000001", "W1-T1000004", "W1-T1657", "W1-T1786799102812",
+    "W1-T2200", "W1-T2290", "W1-T3057", "W1-T3340", "W1-T3650", "W1-T4242", "W1-T444444", "W1-T888888",
+    "W1-T966", "W1-T9999", "W1-T99999", "W1-T999999",
+  ];
+  for (const id of residue) {
+    assert.ok((byId.get(id) ?? "").trim().length > 20, `${id} has no written baseline reason`);
+  }
+});

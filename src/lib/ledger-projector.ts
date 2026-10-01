@@ -116,8 +116,42 @@ export const ACTIVITY_RING_PROJECTION: LedgerRowProjection = {
   },
 };
 
+const taskActivityUpserts = new WeakMap<ReadModelDb, ReadModelStatement>();
+
+/**
+ * Each task's newest row of ANY step, by its `task_id`: the board's `lastActivityAt` join, which `fact`
+ * cannot answer because it keeps only the steps a reader decides on. The newer row wins, so any read order
+ * leaves the same row.
+ */
+export const TASK_ACTIVITY_PROJECTION: LedgerRowProjection = {
+  name: "task_activity",
+  version: 1,
+  tables: ["task_activity"],
+  ddl: "CREATE TABLE IF NOT EXISTS task_activity(task_id TEXT PRIMARY KEY, ts_ms INTEGER NOT NULL, ts TEXT NOT NULL) WITHOUT ROWID;",
+  markers: ['"task_id":"'],
+  apply(db, _line, _id, parse) {
+    const row = parse();
+    const ts = row?.ts;
+    const tsMs = typeof ts === "string" ? Date.parse(ts) : Number.NaN;
+    if (typeof row?.task_id !== "string" || !Number.isFinite(tsMs)) return;
+    let upsert = taskActivityUpserts.get(db);
+    if (!upsert) {
+      taskActivityUpserts.set(db, upsert = db.prepare(`INSERT INTO task_activity(task_id, ts_ms, ts) VALUES(?, ?, ?)
+        ON CONFLICT(task_id) DO UPDATE SET ts_ms = excluded.ts_ms, ts = excluded.ts WHERE excluded.ts_ms > task_activity.ts_ms`));
+    }
+    upsert.run(row.task_id, tsMs, ts as string);
+  },
+};
+
+/** Each task's newest row time of any step, from {@link TASK_ACTIVITY_PROJECTION}; empty for a store that has not built it. */
+export function readTaskActivity(db: ReadModelDb): Map<string, string> {
+  const built = db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'task_activity'").get() !== undefined;
+  const rows = built ? db.prepare("SELECT task_id, ts FROM task_activity").all() : [];
+  return new Map(rows.map((r) => [String(r.task_id), String(r.ts)]));
+}
+
 /** Every projection a store carries; a view that needs a table no projection keeps adds one here. */
-export const LEDGER_ROW_PROJECTIONS: readonly LedgerRowProjection[] = [REPO_ROW_PROJECTION, ACTIVITY_RING_PROJECTION];
+export const LEDGER_ROW_PROJECTIONS: readonly LedgerRowProjection[] = [REPO_ROW_PROJECTION, ACTIVITY_RING_PROJECTION, TASK_ACTIVITY_PROJECTION];
 
 export interface LedgerProjectorOptions {
   /** The instance's state dir: the one holding its live ledger and rotation archives. */

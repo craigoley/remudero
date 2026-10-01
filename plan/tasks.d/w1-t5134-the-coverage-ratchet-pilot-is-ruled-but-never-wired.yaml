@@ -7,7 +7,9 @@
   principles: {tdd: strict}
   risk: high
   budget_usd: 45.00
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=c4c9e77a6d9fc006
   attempts: 0
   origin: "operator session 2026-10-01: W1-T3801 derives as merged from the ruling PR #7966, but its implementation criteria were never built"
   note: "reservation hand-off: file/automation-tier4-1790858804430 -> file/automation-tier4-1790858804430"

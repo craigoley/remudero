@@ -12,7 +12,9 @@
     reservation hand-off: run-W1-T4527-1790294141611 -> plan-file-W1-T4527-1790294141611
   plan_refs: ["W1-T4528", "W1-T4530"]
   files: [plan/tasks.d/W1-T4532-only-the-fleet-app-may-write-release-tags.yaml]
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=aa7250f029addd12
   attempts: 0
   rationale: |
     Once W1-T4530 ships, pushing refs/tags/ring/fleet/<id> tells every instance to deploy. Anyone with write access

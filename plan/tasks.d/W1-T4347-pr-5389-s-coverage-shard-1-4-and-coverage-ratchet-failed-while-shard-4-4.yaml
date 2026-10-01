@@ -10,7 +10,9 @@
   files: [docs/audits/pr-5389-coverage-shard-classification.md, docs/docs-index.json]
   origin: "followup:DAEMON-1789303069637:2026-09-13T13:21:14.481Z:0"
   plan_refs: ["W1-T108", "W1-T133", "W1-T297", "W1-T3512", "§5"]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=f5c0c48acd4b706b
   attempts: 0
   rationale: |
     THE FOLLOW-UP'S PREMISE WAS CHECKED AGAINST SOURCE, NOT TAKEN ON FAITH, AND IT DOES NOT HOLD.

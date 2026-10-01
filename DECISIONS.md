@@ -10,6 +10,8 @@ decision reversible.
 
 ## 2026-09-15 — OPERATOR DECISION: W1-T3572 — a bounded CHECK-RUNNER, not a Bash function
 
+Status: accepted
+
 *Operator-authored, recorded by hand at the operator's instruction on 2026-09-15 ("go with your
 recommendation"), resolving W1-T3572, which was parked at `verify: human` because it asks whether
 every shell-capable lane stays premium or warrants a bounded execution surface.*
@@ -48,6 +50,8 @@ whenever their prompt exceeds that. The operator has accepted nano for this purp
 
 ## 2026-09-09 — OPERATOR DECISION: W1-T3076 chosen bound — (a) first, then (c); NOT (b)
 
+Status: accepted
+
 *Operator-authored, not a machine auto-choose resolution. Recorded by hand at the operator's
 instruction on 2026-09-09 ("go with your recommendations"), resolving W1-T3076, which was parked at
 `verify: human` because it asks a design question rather than describing a build.*
@@ -82,6 +86,8 @@ instruction on 2026-09-09 ("go with your recommendations"), resolving W1-T3076, 
 
 ## 2026-09-09 — OPERATOR DECISION: the deterministic ratchet repair is RATIFIED, and it is not a config flip
 
+Status: accepted
+
 *Operator-authored, recorded at the operator's instruction on 2026-09-09.*
 
 - **RATIFIED: a red ratchet whose remedy is a RECORDED NUMBER may be repaired automatically.**
@@ -108,6 +114,8 @@ instruction on 2026-09-09 ("go with your recommendations"), resolving W1-T3076, 
   today with the repair withheld.
 
 ## 2026-09-09 — OPERATOR DECISION: a deploy is CHANGE-AND-RISK GATED, not human gated
+
+Status: accepted
 
 *Operator-authored, not a machine auto-choose resolution. Recorded by hand at the operator's
 instruction on 2026-09-09 ("Ratify"), ratifying W1-T3199, which was parked at `verify: human`
@@ -142,6 +150,8 @@ operator's own, given 2026-09-08 and restated 2026-09-09.*
   judge is additive and removing its call site returns the previous behaviour.
 
 ## 2026-07-20 — OPERATOR DECISION: WS-2 deferral, overnight posture, P34 family
+
+Status: accepted
 
 *Operator-authored, not a machine auto-choose resolution. This file's other entries are
 `DECISION_REQUEST` resolutions written by the control plane; this one is recorded by hand at the
@@ -463,6 +473,8 @@ circuit-breaker as the per-task guards. Both prerequisites pulled to the immedia
 
 ## 2026-07-28 — OPERATOR RULING: the headroom governor ships ENABLED by default (SUPERSEDES fb-1784894405468-a4153e's DEFAULT clause; its flag architecture stands)
 
+Status: accepted
+
 *Operator-authored, not a machine auto-choose resolution — recorded by hand at the operator's
 instruction and marked so, exactly as the 2026-07-20 entry above.*
 
@@ -511,6 +523,8 @@ instruction and marked so, exactly as the 2026-07-20 entry above.*
 - Rollback: revert the PR.
 
 ## 2026-07-30 — W1-T262 re-dispatch: already-satisfied, no-op close
+
+Status: accepted
 
 - Options: (A) close as already-satisfied, no functional code change, record the closure in
   DECISIONS.md (RECOMMENDED) | (B) make no PR at all, report the finding only, leaving no audit
@@ -568,6 +582,8 @@ instruction and marked so, exactly as the 2026-07-20 entry above.*
 - Rollback: revert the PR.
 
 ## 2026-07-31 — W1-T201 re-dispatch: already-satisfied, no-op close (OPERATOR-RULED)
+
+Status: accepted
 
 *Operator-ruled closure, recorded at the operator's instruction — not a machine auto-choose
 resolution, and marked so in the manner of the 2026-07-20 and 2026-07-28 entries above.*
@@ -629,6 +645,8 @@ resolution, and marked so in the manner of the 2026-07-20 and 2026-07-28 entries
 
 ## 2026-07-31 — W1-T254 re-dispatch: already-satisfied, no-op close (OPERATOR-RULED)
 
+Status: accepted
+
 *Operator-ruled closure, recorded at the operator's instruction — not a machine auto-choose
 resolution, and marked so in the manner of the 2026-07-20 and 2026-07-31 (W1-T201) entries above.*
 
@@ -689,6 +707,8 @@ resolution, and marked so in the manner of the 2026-07-20 and 2026-07-31 (W1-T20
 
 ## 2026-07-31 — W1-T254 re-dispatch (second occurrence): already-satisfied, no-op close
 
+Status: accepted
+
 - Options: (A) close as already-satisfied, no functional code change, record the closure here
   (RECOMMENDED) | (B) re-diff `src/lib/daemon.ts`, `src/lib/sweep.ts`, `src/run-task.ts` and the two
   test files as if the task were unstarted — rejected for the same reason as the entry immediately
@@ -745,6 +765,8 @@ resolution, and marked so in the manner of the 2026-07-20 and 2026-07-31 (W1-T20
   ledger line written.
 
 ## 2026-07-31 — W1-T254 re-dispatch (third occurrence): already-satisfied, no-op close
+
+Status: accepted
 
 - Options: (A) close as already-satisfied, no functional code change, record the closure here
   (RECOMMENDED) | (B) re-diff `src/lib/daemon.ts`, `src/lib/sweep.ts`, `src/run-task.ts` and the two
@@ -805,6 +827,8 @@ resolution, and marked so in the manner of the 2026-07-20 and 2026-07-31 (W1-T20
   ledger line written.
 
 ## 2026-07-31 — W1-T254 re-dispatch (fourth occurrence): already-satisfied, no-op close
+
+Status: accepted
 
 - Options: (A) close as already-satisfied, no functional code change, record the closure here
   (RECOMMENDED) | (B) re-diff `src/lib/daemon.ts`, `src/lib/sweep.ts`, `src/run-task.ts` and the two
@@ -871,6 +895,8 @@ resolution, and marked so in the manner of the 2026-07-20 and 2026-07-31 (W1-T20
 
 ## 2026-07-31 — W1-T254 re-dispatch (fifth occurrence): already-satisfied, no-op close
 
+Status: accepted
+
 - Options: (A) close as already-satisfied, no functional code change, record the closure here
   (RECOMMENDED) | (B) reimplement as if unstarted — rejected for the same reason as all four
   entries above: the target state already exists identically on this branch.
@@ -902,6 +928,8 @@ resolution, and marked so in the manner of the 2026-07-20 and 2026-07-31 (W1-T20
   ledger line written.
 
 ## 2026-08-04 — RULING: daemon parallelism stays at N=1 (no parallel dispatch lanes)
+
+Status: accepted
 
 No entry in this file, MASTER-PLAN.md, or plan/tasks.yaml has ever ruled on **daemon parallelism**
 — i.e. the in-process lane width of `rmd daemon`'s own dispatch loop (`runDaemon`,
@@ -952,6 +980,8 @@ Not in scope here: building daemon-side lanes, moving N, or the W1-T325 `dispatc
   ledger line written.
 
 ## 2026-08-04 — AMENDMENT: the ruling above is OVERRIDDEN; build daemon parallelism
+
+Status: accepted
 
 **The operator has overridden the N=1 ruling.** The entry above is not deleted, because its three
 blockers are the engineering work; it is superseded as a *decision* and retained as an *obstacle
@@ -1026,6 +1056,8 @@ W1-T343 must prove that rather than assume it.
 
 ## 2026-08-11 — W1-T413 re-dispatch: already-satisfied, no-op close
 
+Status: accepted
+
 - Options: (A) close as already-satisfied, no functional code change, record the closure in
   DECISIONS.md and supply the missing `Remudero-Task: W1-T413` trailer this PR itself carries
   (RECOMMENDED) | (B) re-touch `src/lib/status.ts` / `test/trailer-credit-plan-only.test.ts` with a
@@ -1074,6 +1106,8 @@ W1-T343 must prove that rather than assume it.
 - Rollback: revert this PR — removes only this DECISIONS.md entry; no runtime code touched.
 
 ## 2026-08-11 — PROPOSAL (AWAITING RATIFICATION): keep the harness Apache-2.0; put the licence boundary at the relay
+
+Status: accepted
 
 **Operator direction record (not an auto-choose resolution, and NOT a ratification).** The operator
 directed this licence analysis in two briefs and supplied the constraint it solves; he has **not**
@@ -1238,6 +1272,8 @@ used. Recorded so the next reader does not re-derive it.
 
 ## 2026-08-12 — RELAY AUTH MODEL (Tier 2): the relay asserts the human, the instance decides — AWAITING RATIFICATION
 
+Status: accepted
+
 Operator direction record (not an auto-choose resolution): the goal is to reach the console at
 remudero.com seamlessly, starting from "go to an IP" if that is what today allows. D-11 already
 settles the TRANSPORT — each cell dials out with an enrollment token, no inbound ports, the relay a
@@ -1363,6 +1399,8 @@ ordering IS the finding**, and it is now: rule the second factor → W1-T404 →
 
 ## 2026-08-14 — RULING: publish the console at console.remudero.com behind Cloudflare, accepting that Cloudflare reads it (OPERATOR-RULED)
 
+Status: accepted
+
 *Operator-ruled closure, recorded at the operator's instruction. This entry decides the question the
 2026-08-12 relay auth entry named and deliberately left open; it takes no other decision.*
 
@@ -1448,6 +1486,8 @@ and that ordering is unchanged by where the console is published.
 
 ## 2026-08-15 — RULING: the Spanish name is the brand, the Americanized vocabulary is the interface (OPERATOR-RULED)
 
+Status: accepted
+
 *Operator-ruled direction record, recorded at the operator's instruction.* The repository, the binary
 (`rmd`) and `remudero.com` do not change. What changes is the words the console shows a person.
 
@@ -1520,6 +1560,8 @@ It has simply never reached the console. Future surface work should sound like t
 
 ## 2026-08-16 — RULING: the fleet gates on IRREVERSIBILITY, not on outwardness (W1-T919)
 
+Status: accepted
+
 **THE PRINCIPLE.** What earns a gate is whether an act can be taken back, not whether it reaches
 outside this machine. Outwardness is a proxy that mis-sorts in both directions: opening an issue is
 outward and trivially reversible; deleting a branch is local and not.
@@ -1559,6 +1601,8 @@ or change any disposition. The ruling comes first; the disposition follows behin
 entry, and carries its own evidence.
 
 ## 2026-08-16 — RULING: sessions may READ with `az vm run-command`, never MUTATE, and must DISCLOSE — recorded as ADVICE, not as a control (OPERATOR-RULED)
+
+Status: accepted
 
 *Operator-ruled direction record, recorded at the operator's instruction.* The wording — sessions may
 READ, never MUTATE, and must DISCLOSE — is the operator's, as is the ruling that it be recorded as
@@ -1628,6 +1672,8 @@ inherit it, and that is a decision about provisioning, not about this verb.
 
 ## 2026-08-18 — RULING: remudero is BRING-YOUR-OWN-SUBSCRIPTION; customers are a direction, not a current target (OPERATOR-RULED)
 
+Status: accepted
+
 *Operator-ruled direction record, recorded at the operator's instruction. It records intent and takes
 no architectural decision of its own; the shape below is a direction, not a design.*
 
@@ -1686,6 +1732,8 @@ customer, and their gate config would be editable by their own fleet exactly as 
 **Rollback:** delete this entry and the §6 pointer. It changes no behaviour, so nothing else moves.
 
 ## 2026-08-18 — RULING: `src/run-task.ts` stays one file and the fleet accepts ONE EFFECTIVE DISPATCH LANE (W1-T471) (OPERATOR-RULED)
+
+Status: accepted
 
 *Operator-ruled architecture record, recorded at the operator's instruction.* The ruling — one
 effective lane is accepted, splitting is refused, re-scoping is refused — is the operator's. The
@@ -1756,6 +1804,8 @@ written — the collisions it reports are real.
 would then be neither required nor forbidden, exactly as before.
 ## 2026-08-19 — RULING: five automation rulings — the fleet files, arms and merges without asking (OPERATOR-RULED)
 
+Status: accepted
+
 *Operator-ruled record, recorded at the operator's instruction.* The five rulings below are the
 operator's; the measurements were gathered to support them, not to make them. The through-line is
 automation: each says what the fleet may now do without asking.
@@ -1811,6 +1861,8 @@ as an observation and a candidate shard; whether manual completion should be ass
 concern and is not decided here.
 
 ## 2026-08-19 — RULING: W1-T472 and W1-T446 take the efficient option WITH telemetry; the site splits, the console does not (OPERATOR-RULED) (ITS CONSOLE CLAUSE SUPERSEDED BY OPERATOR RULING 2026-09-15)
+
+Status: accepted
 
 *Operator-ruled record, recorded at the operator's instruction.* The three rulings are the operator's;
 the measurements were taken to serve them, not to make them. `W1-T472` and `W1-T446` are re-banded to
@@ -1873,6 +1925,8 @@ this repo only) or `W1-T12e` (whose drill has not happened and will produce no P
 `verify-not-auto` rather than `unmet-deps`). W1-T1029 (#2207) files that class.
 
 ## 2026-08-19 — RULING: the risk judge's value is UNTESTED, not disproven — W1-T478 and W1-T1031 build before it is ruled on (OPERATOR-RULED)
+
+Status: accepted
 
 *Operator-ruled record, recorded at the operator's instruction.* The ruling is the operator's; the
 measurements below were taken to serve it, not to make it. This entry records a MEASUREMENT and a
@@ -1954,6 +2008,8 @@ outstanding work on its own — and is not corrected here.
 that the question is currently unanswerable and names the two builds that would make it answerable.
 
 ## 2026-09-02 — VERIFICATION: the bring-your-own-subscription ruling's two open questions, re-read against Anthropic's primary Claude Code pages (SESSION-RECORDED, NOT A RULING)
+
+Status: accepted
 
 *Operator-authored in the sense this file uses the term — recorded by hand at the operator's
 instruction ("go ahead with the follow-up work identified", 2026-09-02), not by the control plane —
@@ -2056,6 +2112,8 @@ links and were not read.
 
 ## 2026-09-02 — OPERATOR RULING (W1-T1260): the whole-plan lint signal — NONE of the three
 
+Status: accepted
+
 *Operator-authored, recorded at the operator's instruction. W1-T1260 is `verify: human` and its
 deliverable is exactly this record; `ruling-verify` refuses a DECISIONS.md task at `verify: auto`
 and `isDispatchEligible` returns false before the linter is consulted, so it could never
@@ -2115,6 +2173,8 @@ an approach this ruling does not authorise.
 No code was written; nothing else changes.
 
 ## 2026-09-04 — RECOMMENDATION (W1-T2790): derive the host-caused registry periodically and commit it; prefer a self-declaring seam over a second enumerative matcher (PREPARED FOR RATIFICATION, NOT YET RULED)
+
+Status: accepted
 
 - **Chosen (RECOMMENDED, auto):** shape (c) — derive periodically and commit. Recorded here as what
   it is and nothing more: the machine's §4 auto-choose resolution of the DECISION_REQUEST this task
@@ -2225,6 +2285,8 @@ set, prefer (d) alone and leave the registry hand-written.
 
 ## 2026-09-08 — HISTORICAL RECOMMENDATION (W1-T3075): order the frontier by MEASURED EXPECTED VALUE per class after `priority`, dependency fan-out as the tie-break, gated on W1-T3074's closure table (SUPERSEDED BY OPERATOR RATIFICATION 2026-09-11)
 
+Status: superseded by OPERATOR RATIFICATION 2026-09-11
+
 - **Historical recommendation (auto):** shape (b) — measured expected value per class, with (c) as
   its tie-break. This was the machine's §4 recommendation before the operator ruled. It is retained
   as provenance only; the 2026-09-11 operator ratification below is the sole operative W1-T3075
@@ -2326,6 +2388,8 @@ records the decision only: W1-T3412 owns the selector implementation, and this r
 changes its threshold nor grants a new routing or capacity policy.
 
 ## 2026-09-08 — RECOMMENDATION (W1-T3076): give retirement a real effect FIRST, then admit automatic filing per class by closure rate — no global throttle, and the governor reads the corpus, never the commit ratio (PREPARED FOR RATIFICATION, NOT YET RULED)
+
+Status: accepted
 
 - **Chosen (RECOMMENDED, auto):** shape (a) first, then (c). Recorded here as what it is and
   nothing more: the machine's §4 auto-choose resolution of the DECISION_REQUEST this task raised.
@@ -2445,6 +2509,8 @@ refused; W1-T3076 returns to `status: queued` with its question open.
 
 ## 2026-09-08 — OPERATOR RULING (W1-T3173): the operator console is a BUNDLED REACT SPA in `apps/dashboard`, served by `rmd serve` (OPERATOR-RULED) (SUPERSEDED BY OPERATOR RULING 2026-09-15)
 
+Status: superseded by OPERATOR RULING 2026-09-15
+
 *Operator-ruled, recorded at the operator's instruction — not a machine auto-choose. The ruling is
 his ("I am good with all of your recommendations", 2026-09-08, on a recommendation that named this
 shard explicitly); this entry transcribes it. Per the decision-authority ruling
@@ -2475,6 +2541,8 @@ src/run-task.ts`; there is no `dist/`), and a second test runner alongside `node
 
 ## 2026-09-08 — OPERATOR RULING (W1-T3186): THE INBOX IS THE ONLY FRONT DOOR for an ask; change management is its own area; NEEDS ME is dissolved
 
+Status: accepted
+
 *Operator-ruled, recorded at the operator's instruction — not a machine auto-choose. His words,
 2026-09-08: "Anything that truly needs me should come in through the inbox... Maybe we need a
 separate area for pr management that is not NEEDS ME or Inbox."*
@@ -2501,6 +2569,8 @@ dissolution rides with W1-T3173, so the IA is not built twice.
 **Rollback:** revert this entry; W1-T3187 stands on its own regardless.
 
 ## 2026-09-08 — OPERATOR RULING (W1-T3196): THE READ SIDE IS A MATERIALIZED PROJECTION, not a recompute
+
+Status: accepted
 
 *Operator-ruled, recorded at the operator's instruction — not a machine auto-choose. Raised by him,
 2026-09-08: "are we sure this is the right setup for fetching the backend data? Should we use CQRS
@@ -2533,6 +2603,8 @@ trusts is worse than latency he can see.
 
 ## 2026-09-08 — OPERATOR RULING (W1-T3199): a deploy is CHANGE-AND-RISK GATED, not human gated
 
+Status: accepted
+
 *Operator-ruled, recorded at the operator's instruction — not a machine auto-choose. His words,
 2026-09-08: "the judge should not be human gated, it should be change and risk gated... The llm
 judge can decide that much better than a human can in the moment."*
@@ -2562,6 +2634,8 @@ a **restart-rate ceiling** the accumulator cannot argue with, distinct from the 
 **Rollback:** revert this entry; W1-T3200 (the host-adaptable seam) stands on its own regardless and
 is worth shipping either way.
 ## 2026-09-08 — OPERATOR RULING (W1-T3212): an agent MAY record a ruling; a judge gates it, and only a risky or bad one reaches the operator
+
+Status: accepted
 
 *Operator-ruled, recorded at the operator's instruction — not a machine auto-choose. His words,
 2026-09-08: "An agent should absolutely be able to record a ruling. It should only escalate to human
@@ -2605,6 +2679,8 @@ agent-recorded ruling lands as an amendment beneath it, exactly as today.
 
 ## 2026-09-10 — OPERATOR RULING (W1-T3318): REPAIR, ROUTE, CLOSE — blocked is not a resting state
 
+Status: accepted
+
 *Operator-ruled, recorded at the operator's instruction — not a machine auto-choose. His words,
 2026-09-10: "the goal should never be to block prs. The goal should be to fix them and get them
 through the system or spin off follow-up tasks if they can't be easily fixed in-line"; "the only
@@ -2646,6 +2722,8 @@ reviewable implementation.
 dependent conversions lose this settled policy reference.
 
 ## 2026-09-15 — OPERATOR RULING: THE CONSOLE IS ITS OWN REPOSITORY
+
+Status: accepted
 
 *Operator-authored, recorded by hand at the operator's instruction on 2026-09-15: "I want console to
 be its own repo, like we built. Retire or rewrite that old decision."*
@@ -2689,6 +2767,8 @@ this entry records a decision, and the repository split it describes already exi
 of it.
 
 ## 2026-09-16 — OPERATOR RULING: app.remudero.com is the console. The daemon's surface is a diagnostic, not a UI project.
+
+Status: accepted
 
 *Operator-authored, recorded at the operator's instruction on 2026-09-16, answering a question put
 with the measurement below: "app.remudero.com is canonical — retire or migrate the 34 daemon-shell
@@ -2737,6 +2817,8 @@ No gate, predicate or build changes either way — this entry records a decision
 
 ## 2026-09-26 — OPERATOR RULING: the daemon's localhost console is REMOVED; the diagnostic page does not stay
 
+Status: accepted
+
 *Operator-authored, recorded at the operator's instruction on 2026-09-26: "there is still an old
 localhost console that needs to be removed", then "feel free to cleanup the old localhost console
 to make this all less confusing and migrate over anything that hasn't been migrated".*
@@ -2764,6 +2846,8 @@ old shell and is removed with it.
 **Rollback:** revert W1-T4563's PR. app.remudero.com is unaffected either way.
 
 ## 2026-09-16 — OPERATOR RULING: the implement lane runs on ANY provider, per-provider, not Claude-only
+
+Status: accepted
 
 **Operator-authored.** An agent proposed the opposite ruling in this session and was overruled; this
 entry records the decision that was actually made, and why the agent's reasoning was wrong.
@@ -2799,6 +2883,8 @@ right, only the conclusion drawn from it was wrong.
 entry alone — it records a decision.
 
 ## 2026-09-16 — OPERATOR RULING: a session lesson is LANDED, not harvested; and the squeeze seats are deleted
+
+Status: accepted
 
 **Operator-authored** (ruling on an agent recommendation, same session). Two decisions the shift-left
 audit forced, both closing filed questions rather than leaving them open.
@@ -2862,6 +2948,8 @@ all. The measurement is `ls plan/feedback | wc -l` against its 204 baseline.
 
 ## 2026-09-21 — RE-RECORDED OPERATOR RULINGS FROM THE FEEDBACK QUEUE
 
+Status: accepted
+
 These five entries are permanent authority records, not new rulings. Each fenced quotation is the
 feedback entry's `raw` field verbatim, and each provenance line says `re-recorded from plan/feedback`
 so the authority survives the draining feedback queue.
@@ -2914,6 +3002,8 @@ also describes shipped code (#5837); reverting the ruling does not revert that P
 
 ## 2026-09-22 — OPERATOR DECISION: W1-T3102 — retro proposals are RECORDS, not prose
 
+Status: accepted
+
 *Operator-authored, recorded by hand at the operator's instruction on 2026-09-22 ("1 - records"),
 resolving W1-T3102, which was parked at `verify: human` because it asks the operator to choose a
 record shape. `ruling-verify` correctly refuses this task at `verify: auto`; the entry below is the
@@ -2957,6 +3047,8 @@ reverts everything it decided.
 
 ## 2026-09-22 — OPERATOR DECISION: W1-T3103 — the allowlist proxy, not the two-phase worktree
 
+Status: accepted
+
 *Operator-authored, recorded by hand at the operator's instruction on 2026-09-22 ("2 - go with your
 recommendations"), resolving W1-T3103, which was parked at `verify: human` and which deliberately
 offered no recommendation of its own.*
@@ -2999,6 +3091,8 @@ namespace removed and no token in env — and for an allowlist-confined single p
 moves, because no code ships with this entry.
 
 ## 2026-09-24 — OPERATOR RULING: model tiering — Opus first on high-risk and design work, subscription only; Sol vs Sonnet as an A/B; a capped cash trial
+
+Status: accepted
 
 **Operator-authored**, relayed to the building session by its coordinating session on 2026-09-24. It
 rules on three conflicts that session reported against earlier rulings. The research behind them,
@@ -3072,6 +3166,8 @@ risk:high rows in the mount table.
 
 ## 2026-09-24 — OPERATOR FOLLOW-UP: Luna is an economy candidate, not a balanced worker fallback
 
+Status: accepted
+
 **Chosen (RECOMMENDED, auto):** Place Sol-class candidates on the Codex balanced ladder while
 retaining Luna on economy and leaving the separate cash policy unchanged.
 
@@ -3102,6 +3198,8 @@ interpreting the data.
 
 ## 2026-09-24 — OPERATOR FOLLOW-UP: ready Luna cash lane and bounded Foundry Opus emergency
 
+Status: accepted
+
 **Operator-authored direction:** Set up GPT-6 Luna and Opus 5.5 on cash now. Keep simple work on
 the inexpensive OSS-120b, nano, and Luna routes. Opus is an exception for a subscription squeeze,
 with at most $5 per UTC day in ordinary cash allowance and $10 during a squeeze, inside the shared
@@ -3131,6 +3229,8 @@ Microsoft Foundry Claude Messages API and deployment guidance; Anthropic Opus 5.
 
 ## 2026-09-29 — OPERATOR RULING: a balanced subscription squeeze runs on Foundry Sonnet 5.5
 
+Status: accepted
+
 **Operator-authored direction:** Switch the cash lanes to Sonnet 5.5, as a **balanced squeeze
 emergency**. When both subscriptions block a balanced (`sonnet`) task, it runs on Foundry Claude
 Sonnet 5.5. Routine cash stays on the measured gpt-5-nano, gpt-oss-120b and Luna rows.
@@ -3149,6 +3249,8 @@ Sonnet 5.5. Routine cash stays on the measured gpt-5-nano, gpt-oss-120b and Luna
 
 ## 2026-09-26 — W1-T4583: the in-repo contract-coverage ratchet is RETIRED; the contract is checked where it is served and where it is consumed
 
+Status: accepted
+
 *Operator direction record: carried out under the operator's 2026-09-26 instruction to "file items that need filed, fix items that need fixed, build items that need built" for the old-console follow-up audit that named this ratchet as measuring nothing.*
 
 `scripts/contract-coverage-ratchet.mjs` (W1-T3174) counted `/v1` routes an IN-REPO client called that
@@ -3160,6 +3262,8 @@ SERVED route to be declared or in a shrink-only baseline and every declared rout
 of the spec. Rollback: restore the script, its baseline and its ci.yml step from the parent of this PR.
 
 ## 2026-09-27 — OPERATOR RULING: W1-T4568's materialized read model is DEFERRED; re-measure before building
+
+Status: accepted
 
 *Operator-ruled 2026-09-27, answering "do we still build a materialized DB between the daemon and the console?"
 with "defer and re-measure".*
@@ -3176,6 +3280,8 @@ recommended store (in-process, no new dependency). Rollback: release W1-T4568 fo
 
 
 ## 2026-09-29 — OPERATOR DECISION: retire the outcome-only approved skill and the retro's learnings promotion pass
+
+Status: accepted
 
 *Operator direction record: the operator delegated these two calls to the coordinator's recommendation
 on 2026-09-29 ("proceed"). Recorded by hand; not a machine auto-choose resolution.*
@@ -3210,6 +3316,8 @@ ledger (all three rotation forms, deduplicated):
 
 
 ## 2026-09-29 — OPERATOR RULING: an LLM judge in the middle of machine-filed work; the operator RATIFIES it to release
+
+Status: accepted
 
 *Operator-authored, recorded at the operator's instruction on 2026-09-29:*
 
@@ -3303,6 +3411,8 @@ literal header; records already pinned stay valid, and reverting any one to `ver
 
 ## 2026-09-30 — OPERATOR RULINGS: the verify-human queue, cleared
 
+Status: accepted
+
 **Operator-authored direction:** each ruling below is the operator's own, given in chat on 2026-09-30 in answer to per-task recommendations. The operator session recorded them; it did not originate them. Every task was first re-checked against main and the fleet ledger, and each entry states the evidence.
 
 - **W1-T3570: STOP nano as the inbox-draft lead.** On the slim prompt, nano drafts were lint-clean 49/200 (25%), and only 48 of 199 proposals ever drafted clean. Claude lanes were 100%, and nano itself was 12/12 on the full prompt. The lead moves to cash `gpt-6-luna` (#7963), with nano and gpt-oss-120b as fallbacks. Report: `docs/recon/openweight-inbox-draft-trial.md` (#7965).
@@ -3328,6 +3438,8 @@ literal header; records already pinned stay valid, and reverting any one to `ver
 
 
 ## 2026-09-30 — OPERATOR RULING: the core↔console read path becomes a materialized, pushed read model (W1-T4568 released)
+
+Status: accepted
 
 *Operator-authored direction, given in chat on 2026-09-30, answering the architecture review of the console's data path: "I like the plan that you've put together … We're going to proceed through with all phases." This SUPERSEDES the same day's earlier item "W1-T4568: stays DEFERRED" (#7966).*
 
@@ -3376,6 +3488,8 @@ Each phase is measured against the 2026-09-29/30 baseline.
 
 ## 2026-09-30 — OPERATOR RULING: Phase 1 read-model design choices
 
+Status: accepted
+
 *Operator-authored direction, given in chat on 2026-09-30: the operator approved the Phase 1 design with every recommendation. The design is `~/Remudero/.session-scratch/arch-phase1-design.md` (operator session), and its §6 lists the questions ruled here.*
 
 **Amends:**
@@ -3394,6 +3508,8 @@ Each phase is measured against the 2026-09-29/30 baseline.
 **Rollback:** the read model stays additive until Phase 4, per #8010, and a kill switch in `state/read-model/switches.json` turns off the projector or any view. Moving the writer elsewhere later is safe because the lease already fences writers.
 
 ## 2026-09-30 — OPERATOR RULING: serve keeps GitHub facts warm with no viewer, paced by quota headroom (amends W1-T154)
+
+Status: accepted
 
 *Operator-authored direction, given in chat on 2026-09-30 as "go with your recommendations", answering whether serve should keep its GitHub facts fresh when no console is reading. The operator session recorded it; it did not originate it.*
 
@@ -3414,6 +3530,8 @@ Each phase is measured against the 2026-09-29/30 baseline.
 **Rollback:** re-gate the refresh on a reader. The pacer keeps its readers-active input, so this is a change to one call site in serve.
 
 ## 2026-10-01 — OPERATOR RULING: bulk-close the legacy queued records, and raise the board read cap to 200 pages
+
+Status: accepted
 
 *Operator-authored direction, given in chat on 2026-10-01 in answer to a recommendation and four questions. The operator session recorded it; it did not originate it.*
 

@@ -72,7 +72,7 @@ ${files ? `  files:\n${files}` : ""}`;
 
 async function driveDrainDispatchValue(
   seed: (root: string) => void,
-): Promise<{ context: DispatchValueContext | undefined; ledgerRows: Array<Record<string, unknown>> }> {
+): Promise<{ context: DispatchValueContext | undefined; ledgerRows: Array<Record<string, unknown>>; summaryLines: string[] }> {
   const root = mkdtempSync(join(tmpdir(), "rmd-dispatch-value-"));
   const planDir = mkdtempSync(join(tmpdir(), "rmd-dispatch-value-plan-"));
   const planPath = join(planDir, "tasks.yaml");
@@ -83,30 +83,54 @@ async function driveDrainDispatchValue(
   seed(root);
 
   let context: DispatchValueContext | undefined;
+  const summaryLines: string[] = [];
   try {
-    const code = await drainCommand([], {
-      config: { claudeBin: "/bin/true", root } as Config,
-      planPath,
-      skipGitSync: true,
-      githubFactory: () => ({ findMergedByTrailer: () => null }) as never,
-      notifyChannel: { send: () => true } as never,
-      runDrain: async (plan: Plan, deps: DrainDeps): Promise<DrainSummary> => {
-        context = deps.buildDispatchValueContext?.(plan, () => false);
-        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, resumeCommand: "rmd drain" };
-      },
-    });
+    // Node 22's test runner can misparse a child's non-ASCII stdout as its serialized result
+    // (nodejs/node#64061). The drain summary contains box-drawing characters, so capture only
+    // this fixture's own console output while retaining it for assertions below.
+    const originalLog = console.log;
+    console.log = (...parts: unknown[]) => { summaryLines.push(parts.map(String).join(" ")); };
+    let code: number;
+    try {
+      code = await drainCommand([], {
+        config: { claudeBin: "/bin/true", root } as Config,
+        planPath,
+        skipGitSync: true,
+        githubFactory: () => ({ findMergedByTrailer: () => null }) as never,
+        notifyChannel: { send: () => true } as never,
+        runDrain: async (plan: Plan, deps: DrainDeps): Promise<DrainSummary> => {
+          context = deps.buildDispatchValueContext?.(plan, () => false);
+          return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, resumeCommand: "rmd drain" };
+        },
+      });
+    } finally {
+      console.log = originalLog;
+    }
     assert.equal(code, 0, "the injected drain loop returns a clean stop");
     const ledgerRows = readFileSync(statePathForRoot(root), "utf8")
       .trim()
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line) as Record<string, unknown>);
-    return { context, ledgerRows };
+    return { context, ledgerRows, summaryLines };
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(planDir, { recursive: true, force: true });
   }
 }
+
+test("dispatch-value fixture captures its Unicode drain summary before Node 22's test transport sees it", async () => {
+  const originalLog = console.log;
+  let leaked = 0;
+  console.log = () => { leaked++; };
+  try {
+    const { summaryLines } = await driveDrainDispatchValue(() => {});
+    assert.equal(leaked, 0, "the fixture must not write the Unicode banner into node:test stdout");
+    assert.ok(summaryLines.some((line) => line.includes("── drain summary")), "the real summary was rendered and captured");
+  } finally {
+    console.log = originalLog;
+  }
+});
 
 function writePlan(path: string, body: string): void {
   mkdirSync(dirname(path), { recursive: true });

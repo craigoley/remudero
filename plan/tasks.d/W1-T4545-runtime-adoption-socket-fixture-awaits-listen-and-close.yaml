@@ -12,7 +12,9 @@
     - test/runtime-adoption-is-reported-not-gated.test.ts
   origin: "operator-session#preflight-runtime-adoption-socket-eaddrinuse-2026-09-25"
   plan_refs: []
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=c120b84ca8c479a5
   attempts: 0
   rationale: |
     OBSERVED in the full `rmd preflight --ci-parity` at head `323c21f28598` against

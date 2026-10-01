@@ -11,7 +11,9 @@
   origin: "oper#followups-research-2026-09-22"
   plan_refs: [W1-T4056, W1-T104, W1-T345]
   files: [src/lib/escalation-debounce.ts, src/lib/main-health-rung.ts, src/lib/escalation-catalogue.ts, src/lib/escalate.ts, test/escalations-confirm-against-their-own-recovery.test.ts, scripts/test-tier-manifest.json]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=96d725c3c2f2fa6e
   attempts: 0
   rationale: |
     MEASURED (GitHub issues created 09-15..22; 4-day ledger union).

@@ -359,6 +359,24 @@ function gardenFilingEscalation(name: string, failures: NonNullable<GardenState<
   };
 }
 
+/**
+ * Whether a pass of `spec` would do anything, read the way {@link runGarden} reads it before its first
+ * expensive step, and writing nothing. A pending PR or waiting overseer effects are always due (the pass
+ * judges and folds them); a filing retry wait is not; otherwise only a changed cheap fingerprint is. A
+ * daemon spawning each pass as its own process asks this first, so an idle garden costs a file read
+ * rather than a process boot. An unreadable state file throws, and the caller runs the pass, which logs it.
+ */
+export function gardenPassDue<C extends string>(
+  spec: Pick<GardenSpec<C, unknown, GardenAction<C>, GardenCheckout>, "name" | "classes" | "cheapFingerprint">,
+  deps: Pick<GardenerDeps, "stateDir" | "clock">,
+): boolean {
+  const state = readGardenState(gardenStatePath(deps.stateDir, spec.name), spec.classes);
+  if (existsSync(gardenEffectsPath(deps.stateDir, spec.name))) return true;
+  if ((gardenFilingRetryAt(state.filingFailures) ?? 0) > (deps.clock ?? systemClock).now()) return false;
+  if (state.pending) return true;
+  return state.lastCheap !== spec.cheapFingerprint();
+}
+
 /** One pass of the gardener `spec` describes. Returns what it did. */
 export function runGarden<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
   spec: GardenSpec<C, I, A, W>,

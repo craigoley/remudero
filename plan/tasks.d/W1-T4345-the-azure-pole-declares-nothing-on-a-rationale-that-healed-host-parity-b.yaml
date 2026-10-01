@@ -13,7 +13,9 @@
     - test/host-parity-azure-pole.test.ts
   origin: "followup#DAEMON-1788783316728-w1-t3020-sandbox-suite-reds-2026-09-07"
   plan_refs: ["W1-T2790", "W1-T2785", "W1-T2776", "W1-T2234"]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=2ea93fe5c590fe2d
   attempts: 0
   rationale: |
     THE REPORT THAT PROMPTS THIS, ATTRIBUTED RATHER THAN ADOPTED. W1-T3020's run (PR #4394)

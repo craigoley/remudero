@@ -11,7 +11,9 @@
   origin: "skill-draft:de866b8a3997b473"
   plan_refs: ["W1-T3101", "W1-T3137"]
   files: [src/lib/skill-workshop.ts, src/run-task.ts, test/skill-workshop.test.ts, test/a-staged-skill-reaches-the-worker-prompt.test.ts]
+  priority: 2
   status: queued
+  # backlog gardener: band=2 evidence=2ba8d2b2d2f79019
   attempts: 0
   rationale: |
     DISCOVERED while drafting the ratification for skill-draft:de866b8a3997b473 (W1-T4340,

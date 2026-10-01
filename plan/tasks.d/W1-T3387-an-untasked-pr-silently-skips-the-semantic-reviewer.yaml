@@ -10,7 +10,9 @@
   origin: "operator-session#capped-prs-do-not-merge-2026-09-11"
   plan_refs: ["W1-T3386", "W1-T3388"]
   files: [src/run-task.ts, test/an-untasked-pr-silently-skips-the-semantic-reviewer.test.ts]
+  priority: 3
   status: queued
+  # backlog gardener: band=3 evidence=17af475687fff2f5
   attempts: 0
   rationale: |
     THE SKIP IS ONE CONDITIONAL AND IT HAS NO RECOVERY ARM. `run-task.ts` resolves review metadata
