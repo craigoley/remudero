@@ -7,7 +7,11 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   COMMIT_BODY_MAX_LINE,
+  TRIAGE_COMMIT_REFUSED_STEP,
+  TRIAGE_REFUSAL_CLEARED_STEP,
   assertProposedPlanLoads,
+  commitTriageOrRecordRefusal,
+  refusedTriageIds,
   fitAcceptanceBullet,
   wrapBodyLine,
   buildGrillEscalation,
@@ -1448,5 +1452,116 @@ test("W1-T2205: a triage GRILL driven through the FAITHFUL overlapping fixture (
     process.env.HOME = savedHome;
     process.env.PATH = savedPath;
     for (const d of [bare, home, configRoot, shimDir]) rmSync(d, { recursive: true, force: true });
+  }
+});
+
+// ── W1-T4203: a refused triage commit is neither emitted nor retried ───────────────────────
+
+test("W1-T4203: no triage commit body line exceeds 100 characters", () => {
+  const longToken = "plan/" + "very-long-directory-name/".repeat(5) + "file.yaml";
+  assert.ok(longToken.length > COMMIT_BODY_MAX_LINE);
+  for (const l of wrapBodyLine(`see ${longToken} now`)) assert.ok(l.length <= COMMIT_BODY_MAX_LINE, `${l.length}`);
+  assert.equal(wrapBodyLine("x".repeat(250)).join(""), "x".repeat(250), "a hard split loses no characters");
+  const messages = [
+    triageCommitMessage({
+      decision: { action: "no_task", status: "rejected", detail: longToken },
+      feedbackId: LONG_ID,
+      taskId: "TRIAGE-x",
+    }),
+    triageCommitMessage({
+      decision: {
+        action: "grill",
+        status: "grilling",
+        detail: longToken,
+        options: [{ label: "a", detail: "aa" }, { label: "b", detail: "bb" }],
+        recommendation: "a",
+      },
+      feedbackId: LONG_ID,
+      taskId: "TRIAGE-x",
+      grillIssueUrl: `https://github.com/craigoley/remudero/issues/${"9".repeat(120)}`,
+    }),
+    triageCommitMessage({
+      decision: { action: "propose", status: "proposed", detail: longToken, files: ["plan/tasks.yaml"] },
+      feedbackId: LONG_ID,
+      taskId: "TRIAGE-x",
+    }),
+  ];
+  for (const msg of messages) {
+    for (const line of msg.split("\n").slice(1)) {
+      assert.ok(line.length <= COMMIT_BODY_MAX_LINE, `body line blows the budget (${line.length}): ${line}`);
+    }
+  }
+});
+
+test("W1-T4203: a refused triage commit is not re-triaged", async () => {
+  // (1) A refused commit writes ONE terminal, non-retryable row naming the refusal, and still throws.
+  const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  assert.throws(
+    () =>
+      commitTriageOrRecordRefusal(
+        () => {
+          throw new Error("body-max-line-length refused");
+        },
+        ENTRY.id,
+        (step, extra) => rows.push({ step, extra }),
+      ),
+    /body-max-line-length refused/,
+  );
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].step, TRIAGE_COMMIT_REFUSED_STEP);
+  assert.deepEqual(rows[0].extra, {
+    feedback_id: ENTRY.id,
+    terminal: true,
+    retryable: false,
+    error: "body-max-line-length refused",
+  });
+  // A commit that succeeds writes nothing.
+  commitTriageOrRecordRefusal(() => undefined, ENTRY.id, (step) => rows.push({ step }));
+  assert.equal(rows.length, 1);
+
+  // (2) The refusal holds until a clearing row, in ts order, per entry.
+  const refusal = (id: string, ts: string) => ({ step: TRIAGE_COMMIT_REFUSED_STEP, feedback_id: id, ts });
+  const cleared = (id: string, ts: string) => ({ step: TRIAGE_REFUSAL_CLEARED_STEP, feedback_id: id, ts });
+  assert.deepEqual([...refusedTriageIds([refusal("a", "2026-01-01"), refusal("b", "2026-01-02")])].sort(), ["a", "b"]);
+  assert.deepEqual([...refusedTriageIds([cleared("a", "2026-01-03"), refusal("a", "2026-01-01")])], [], "cleared after");
+  assert.deepEqual([...refusedTriageIds([cleared("a", "2026-01-01"), refusal("a", "2026-01-02")])], ["a"], "refused after");
+  assert.deepEqual([...refusedTriageIds([{ step: TRIAGE_COMMIT_REFUSED_STEP }, { step: "other", feedback_id: "a" }])], []);
+
+  // (3) THE WIRING: autoTriageCheck never fires on a refused entry and does again once it is cleared.
+  const { autoTriageCheck } = await import("../src/run-task.js");
+  const { loadPolicy, policyPath } = await import("../src/lib/policy.js");
+  const { newFeedbackIdsOldestFirst } = await import("../src/lib/auto-triage.js");
+  const candidates = newFeedbackIdsOldestFirst(REPO_ROOT);
+  assert.ok(candidates.length >= 1, "this checkout holds at least one status: new entry to exercise");
+  const shipped = loadPolicy(policyPath(REPO_ROOT));
+  const policy = { ...shipped, values: { ...shipped.values, autoTriage: { enabled: true, minIntervalMinutes: 1, maxPerDay: 50 } } };
+  const root = mkdtempSync(join(tmpdir(), "rmd-triage-refused-"));
+  mkdirSync(join(root, "state"), { recursive: true });
+  try {
+    const config = { root, claudeBin: "/bin/true" } as unknown as import("../src/lib/config.js").Config;
+    const claimReserver = { mintAnchor: () => "a", attempt: () => "created", claimedIds: () => new Map() } as never;
+    const args = { config, policy, now: new Date(), deferralPending: true, dispatchCount: 1, laneBudget: 1, claimReserver };
+    const [head] = candidates;
+    const before = autoTriageCheck({ ...args, readRefusalRows: () => [] });
+    assert.equal(before.fire && before.feedbackId, head, "unrefused, the oldest entry fires");
+    const allRefused = candidates.map((c, i) => refusal(c, `2026-01-01T00:00:0${i % 10}Z`));
+    const blocked = autoTriageCheck({ ...args, readRefusalRows: () => allRefused });
+    assert.equal(blocked.fire, false, "every candidate refused: nothing fires");
+    assert.match(blocked.reason, /refused triage commit/);
+    const headOnly = autoTriageCheck({ ...args, readRefusalRows: () => [refusal(head, "2026-01-01")] });
+    assert.notEqual(headOnly.fire && headOnly.feedbackId, head, "the refused head is passed over");
+    const after = autoTriageCheck({ ...args, readRefusalRows: () => [refusal(head, "2026-01-01"), cleared(head, "2026-01-02")] });
+    assert.equal(after.fire && after.feedbackId, head, "a clearing row makes it eligible again");
+    // The DEFAULT read: a real ledger on disk, written through the real append path.
+    const { appendLedger } = await import("../src/lib/ledger.js");
+    const { ledgerPathFor } = await import("../src/lib/ledger-path.js");
+    for (const c of candidates) appendLedger(ledgerPathFor(config), { run_id: "TRIAGE-x", task_id: `TRIAGE-${c}`, step: TRIAGE_COMMIT_REFUSED_STEP, feedback_id: c });
+    const real = autoTriageCheck(args);
+    assert.equal(real.fire, false, "the default ledger read sees the written refusal rows");
+    // An unreadable ledger retries (today's behaviour), never starves the rung.
+    const unreadable = autoTriageCheck({ ...args, readRefusalRows: () => undefined });
+    assert.equal(unreadable.fire && unreadable.feedbackId, head);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
