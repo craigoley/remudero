@@ -143,6 +143,30 @@ test("parked selector and CI friction proposals file without becoming auto-runna
   assert.ok(refused.violations.some((v) => v.check === "machine-filing-admission"));
 });
 
+test("W1-T4804: host-resource proposals stay parked for human review on the declared janitor path", () => {
+  const filed = task({
+    author_class: "machine",
+    origin: "host-resource:azure:transcripts",
+    files: ["deploy/rmd-host-cleanup.sh"],
+  });
+  const options = {
+    machineFilingAdmission: {
+      plan: planFor(filed), releasedIds: new Set<string>(), pathExists: () => true,
+    },
+  };
+  const admitted = lintTask(filed, options);
+  assert.equal(admitted.violations.find((v) => v.check === "machine-filing-admission"), undefined);
+  assert.equal(filed.verify, "human");
+
+  const wrongFile = { ...filed, files: ["src/lib/plan.ts"] };
+  const refused = lintTask(wrongFile, {
+    machineFilingAdmission: {
+      plan: planFor(wrongFile), releasedIds: new Set<string>(), pathExists: () => true,
+    },
+  });
+  assert.ok(refused.violations.some((v) => v.check === "machine-filing-admission"));
+});
+
 test("W1-T4940: deduplicated selector-shadow-miss proposals stay parked at human verification", () => {
   const filed = task({
     author_class: "machine",
