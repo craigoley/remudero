@@ -84,7 +84,7 @@ function fakeWorker(text: string): WorkerResult {
 
 const RECENT = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 
-function ghShim(dir: string, headRefName: string): void {
+function ghShim(dir: string, headRefName: string, headSha: string): void {
   writeFileSync(
     join(dir, "gh"),
     [
@@ -99,7 +99,7 @@ function ghShim(dir: string, headRefName: string): void {
       // (`gh api repos/{owner}/{repo}/pulls/{n}`) — an OPEN, unmerged PR every time, so the
       // preflight never stands the dispatch down for either fixture below. `waitForCiGreen`
       // reads this SAME endpoint now too, for its own PR-row/head-sha lookup (W1-T2268).
-      '  *"api"*"pulls/"*) echo \'{"state":"open","merged":false,"head":{"sha":"deadbeef"}}\' ;;',
+      `  *"api"*"pulls/"*) echo '{"state":"open","merged":false,"head":{"sha":"${headSha}"}}' ;;`,
       "  *) echo '{}' ;;",
       "esac",
       "",
@@ -131,7 +131,7 @@ test("W1-T1127: a fix dispatch whose own failure is swallowed no longer records 
   const owner = "acme";
   const repo = "w1t1127-precrash-repo"; // never created under root/repos — `git fetch` throws
   const branch = "fix/w1t1127-precrash";
-  ghShim(bin, branch);
+  ghShim(bin, branch, "deadbeef01");
   const savedPath = process.env.PATH;
   process.env.PATH = `${bin}:${savedPath}`;
   try {
@@ -232,7 +232,7 @@ function realRepoFixture(): { bare: string; root: string; bin: string; repo: str
   execFileSync("git", ["clone", "--quiet", bare, repoDir], { encoding: "utf8", env: GIT_ENV });
   execFileSync("git", ["-C", repoDir, "config", "user.name", "remudero-test"], { encoding: "utf8" });
   execFileSync("git", ["-C", repoDir, "config", "user.email", "test@remudero.invalid"], { encoding: "utf8" });
-  ghShim(bin, branch);
+  ghShim(bin, branch, "cafefeed77");
   return { bare, root, bin, repo, branch, owner };
 }
 

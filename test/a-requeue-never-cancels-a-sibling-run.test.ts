@@ -5,7 +5,7 @@
 // the older run's aggregate `coverage-ratchet` "failure" (over cancelled shards) spent two ci-log fix
 // strikes. It ended only when a new head was pushed. While a run for the head is live, the sweep waits.
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -73,4 +73,14 @@ test("W1-T4586: with no live run for the head, the existing bounded re-queue sti
   await runSweep([cancelled], idle, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(idle.requeued, ["coverage-ratchet"], "one bounded re-queue, exactly as W1-T1223 ships it");
   assert.equal(idle.fixed, 0);
+});
+
+test("a stale red snapshot cannot re-queue an old job over a new PR head's CI", async () => {
+  const cancelled = pr({ ciFailures: [{ name: "coverage-ratchet", logTail: "" }], cancelledRequiredChecks: [{ name: "coverage-ratchet", jobId: "110537194330" }] });
+  const stale = deps(false);
+  stale.readLiveState = () => ({ ok: true, state: "OPEN", headSha: "new-head" });
+  await runSweep([cancelled], stale, DEFAULT_SWEEP_POLICY);
+  assert.deepEqual(stale.requeued, [], "the old job is never rerun after a new head appears");
+  assert.equal(stale.fixed, 0, "the old red spends no fix strike");
+  assert.match(readFileSync(stale.ledgerPath, "utf8"), /PR head advanced from bd5ae661 to new-head/);
 });

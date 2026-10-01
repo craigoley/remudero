@@ -10870,6 +10870,13 @@ export async function runSweep(
                 standDownReason = terminal;
                 break;
               }
+              // The open-PR snapshot may predate a push. Re-queueing one of its cancelled jobs
+              // would start an old workflow attempt in ci-<pr> and cancel the new head's CI run.
+              if (live?.ok && live.headSha && live.headSha !== pr.headSha) {
+                acted = false;
+                standDownReason = `PR head advanced from ${pr.headSha} to ${live.headSha} — awaiting the new head's checks`;
+                break;
+              }
               // W1-T3980 — the CodeQL-blocker route: the same hold, claim and host admission as the
               // ordinary dispatch below, its dedupe key ledgered BEFORE the worker starts, and the
               // scanner fact handed over as fenced ci-log evidence. None of the red-check machinery
