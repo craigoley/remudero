@@ -1,0 +1,93 @@
+- id: W1-T5100
+  title: "`rmd plan-reconcile` JUDGES A QUEUED SHARD ONLY IF ITS MERGE LIES INSIDE TWO FIXED GIT SCAN WINDOWS (`MERGE_SUBJECT_SCAN_LIMIT` 5000 commits, `MERGED_PATHS_SCAN_LIMIT` 4000) AND A SHARD OUTSIDE BOTH READS `creditIsImplementation: undefined`, SO `creditIsReconcilable` DECLINES IT AND THE VERB FILES IT UNDER `not-credited-merged` WITH NO WORD THAT THE ANSWER WAS NEVER AVAILABLE — at about 121 commits a day a merge leaves the subject window in roughly 41 days; the candidate rows already say which shards are merged-but-unjudgeable, so have the verb name them in a WINDOW-SHORT line with their count and exit 2, never flipping one, never moving a window"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator ask 2026-10-01: a failed read now prints UNKNOWN (W1-T5029), but a read that SUCCEEDED over a window too short for the oldest queued shard is still a confident-looking zero; the 14 plan/tasks.yaml records hand-flipped in #8193 were all past both windows"
+  plan_refs: [W1-T5029, W1-T5035, W1-T5034, W1-T3043, W1-T3084, W1-T3063, W1-T3067, W1-T415, W1-T3873]
+  files:
+    - src/run-task.ts
+    - test/plan-reconcile-names-the-shards-its-scan-window-cannot-judge.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-01 at origin/main 10579515f (the first four numbers were first taken at 431d71762 and re-taken at this head); every command is read-only.
+
+    (1) WHERE THE WINDOWS ARE. The brief's two constants are right but they are not the board's. src/run-task.ts holds `MERGED_PATHS_SCAN_LIMIT = 4000` (the `git log origin/main --first-parent --name-only -n` read in `readMergedPathsByPr`)
+    and `MERGE_SUBJECT_SCAN_LIMIT = 5000` (the `git log origin/main --format=%s -n` read in `readMergeSubjectsByPr`), both local git reads, both described in their own comments as a BACKSTOP on cost, not a correctness bound. The merged-PR read through the board gateway is a
+    third and separate bound: `BOARD_MAX_PAGES = 50` pages of 100 per half in `fetchBoardPrsRest` (src/lib/open-prs-rest.ts). What a window decides: `creditCandidatesFromProjection`
+    calls `creditSubjectIsImplementation(mergeSubjects.get(pr))` and reads `mergedPaths.get(pr)`; a PR number absent from both maps leaves BOTH `creditIsImplementation` and `creditHasBuildDiff` undefined, and
+    `creditIsReconcilable` (`merged === true && (creditIsImplementation === true || creditHasBuildDiff === true || creditHasOtherBuildMerge === true)`) is false. The shard is then skipped as `not-credited-merged`, the same label a shard
+    that was never merged gets, and `renderPlanReconcile` prints only the count. The merged flag itself does NOT come from those windows: `buildCommitTrailerIndex` (src/lib/status.ts) reads the WHOLE of `git log origin/main` with no `-n`, so a task with a `Remudero-Task:` commit trailer is
+    `merged` however old it is. That asymmetry is the defect: the verb knows the task shipped (a candidate row exists, merged true) and has no evidence to say whether the shipping change was an implementation.
+
+    (2) HOW FAST THE WINDOWS MOVE. `git log origin/main --since='14 days ago' --format=%H | wc -l` = 1695 commits (about 121 a day; the repo has 6181 commits since 2026-07-14). `git log origin/main -1 --skip=4999 --format='%h %cI'` puts the subject-window floor at 278f45cae, 2026-08-12, and `--skip=3999`
+    puts the paths-window floor at 167c68445, 2026-08-25. So a merge becomes unjudgeable about 41 days after it lands (5000 / 121) unless an operator flips its shard first. Both windows must miss for a candidate to be undecidable (either one hit supplies evidence), so the subject window is the binding one.
+
+    (3) THE POPULATION TODAY, MEASURED TWO WAYS.
+    (a) FROM GIT ALONE: a script over `git ls-tree --name-only origin/main plan/tasks.d/` reading each shard with `git show`, and over `git log origin/main --format='%H%x00%s%x00%b%x1e'` parsed with the same anchored trailer regex and `(#N)` subject rule
+    as `buildCommitTrailerIndex`: 2422 shards, 224 retired, 221 queued and not retired; 44 of the 221 carry a merged trailer commit on origin/main; 43 of the 44 have their `(#N)` merge inside both the 5000 and the 4000 window; ONE is outside both, W1-T413 at log
+    position 5025 (first-parent 4999), PR #1602, whose merge is the docs close-out `docs: close W1-T413 re-dispatch as already-satisfied (no-op) (#1602)`, a filing-shaped subject that credits nothing in any case. The next-deepest queued shard with a merge, W1-T2323 (#3093), sits at
+    position 3749: 252 commits from the paths-window edge and 1251 (about 10 days at 121 a day) from the subject-window edge. So TODAY the window hides no judgeable tasks.d shard; in about ten days the first one crosses.
+    (b) THROUGH THE REAL CODE: a scratch script (deleted afterwards) built a REAL `buildBatchedGithub("craigoley", "remudero", { exec })` whose `exec` shells a read-only REST shim for `api repos/...` GET calls (no CLI, no write), then called the REAL `buildCreditCandidates` with the checkout's own git as evidence root
+    and an EMPTY ledger (the sandbox has none, so ledger-only credits are absent and every figure below is a lower bound). Result: 1768 merged candidate rows over the whole plan, 1753 `creditIsReconcilable`, 38 of the 221 queued tasks.d shards reconcilable (so the verb's real dry run flips 38), and exactly 8 merged candidates with BOTH evidence fields undefined and no
+    other build merge: W1-T110 (#368), W1-T154 (#388), W1-T1 (#255), W1-T46 (#245), W1-T50 (#249), W1-T54b (#80), W1-T167 (#606), W1-T2615 (#6728). Seven are old and not in tasks.d (their ids are plan/tasks.yaml records, the population W1-T5035 reports); W1-T2615 is #6728, whose squash subject carries no `(#N)` on origin/main
+    (`git log origin/main --format=%s | grep -n '(#6728)'` is empty), a SECOND cause of the same undefined, so the line must not claim the window is the only cause. None of the 8 is a queued tasks.d shard, which agrees with (a).
+
+    (4) WHAT I FOUND THAT THE BRIEF DID NOT SAY, AND DID NOT FIX HERE. The board half truncates on this repo today. `GET repos/craigoley/remudero/pulls?state=closed&per_page=100&page=N` returns 100 rows through page 65 and 82 on page 66, then 0: 6582 closed pull requests against a cap of 50 pages (5000 rows).
+    The same REAL gateway probe from (3b) reported `readState() === 'ok'`, `readTruncated() === true`, 52 REST calls (2 open pages, 50 closed), and the page-50 floor is `updated_at` 2026-08-18T02:49:29Z (#2106), so 1582 closed PRs (24 percent) are never read by a cold walk, and `creditProjectionWithReadState` builds a cold gateway
+    (no `snapshotCache`). W1-T5029 (#8233) made a truncated read UNKNOWN, so on this repository `rmd plan-reconcile` should print UNKNOWN (truncated) and exit 2 on EVERY run today. I could not run the verb itself (it needs the ledger, the config and the GitHub CLI); the claim rests on the gateway probe plus the verb's own
+    source. If it holds, the zero this task targets is not even reachable until that arm is made coverage-aware, and the WINDOW-SHORT line below must therefore also print on the UNKNOWN arm (design (iv)). The cure for the board arm (a floor accessor on the gateway, or a wider page bound) is a different file set and a different risk, and is left to its own task.
+
+    (5) WHY NOT WIDEN THE WINDOWS, AND WHY NOT COMPARE DATES. Widening is cheap in time (`git log origin/main --first-parent --name-only -n 4000` took 1.67 s here and `-n 8000`, which is the whole history, 1.40 s; the subject read for -n 5000 took 0.10 s) but it changes WHICH shards flip, in bulk, across the whole old plan: a credit-semantics decision that W1-T5035's rationale already
+    declined to bundle, and the same builder feeds the sweep's destructive credit rung. A date comparison (oldest queued shard's filing date against the oldest row the read reached) needs a window floor the gateway does not expose, and for the git windows it would approximate what the candidate rows state exactly. The candidate rows are the exact signal: a row with `merged === true`
+    and no evidence IS a shard the windows failed to reach, and a shard that never merged has no candidate row at all, so this cannot fire on the healthy population (the repo's recurring defect is a bound that fires on a healthy condition).
+  design: |
+    (i) src/run-task.ts, `creditProjectionWithReadState`: keep the candidate array in a local, derive `ids` exactly as today (`.filter(creditIsReconcilable).map(taskId)`), and additionally derive `windowShort`: the taskIds of rows with `merged === true`, `creditIsImplementation === undefined`, `creditHasBuildDiff === undefined` and `creditHasOtherBuildMerge !== true`, sorted.
+    The return gains `windowShort` ONLY when non-empty (the same omit-when-absent shape `unknownReason` already has), so `defaultCreditedMergedIds` and every existing deep-equality assertion on the projection are byte-identical. No new read: the rows are the ones `buildCreditCandidates` already built.
+    (ii) `PlanReconcileDeps.creditedProjection`'s return type gains `windowShort?: readonly string[]`. An injected `creditedMergedIds` has none, so its contract is unchanged.
+    (iii) A new exported pure function `windowShortShards(shards, credited, windowShort)` in src/run-task.ts returns the ids of shards that BOTH are in `windowShort` AND would be skipped as `not-credited-merged` by the existing `reconcileShardStatus` (so a retired, merged or status-less shard is never named, and a retirement is never reported as a gap). It imports `reconcileShardStatus` from the module `reconcilePlan` already comes from.
+    (iv) `planReconcileCommand`, after the existing summary is printed (dry run and `--write` alike): when `windowShortShards` is non-empty, write to stderr `### rmd plan-reconcile: WINDOW-SHORT — <N> queued shard(s) are merged on origin/main but their merge subject and changed paths are outside the credit scan windows (subjects: last <MERGE_SUBJECT_SCAN_LIMIT> commits, paths: last <MERGED_PATHS_SCAN_LIMIT>) or carry no (#N), so they cannot be judged and were NOT flipped: <ids>`,
+    listing at most 20 ids and `(+K more)` after them, followed by `flip them by hand in a plan-only PR`; log `plan.reconcile.window_short` with the count; return 2. The stdout summary is byte-identical to today's. Under `--write` the shards the credit DID prove are still written exactly as today (each is individually credited and the flip is one-way), then the verb exits 2, so a caller chaining on the exit code cannot read the run as complete.
+    On the UNKNOWN arm (W1-T5029) nothing is written and the exit stays 2; the WINDOW-SHORT line is printed after the UNKNOWN line when `windowShort` is present, because both are true and the second is otherwise unobservable behind the first (rationale (4)).
+    (v) NOTHING IS WIDENED AND NOTHING IS ADDED TO THE WRITE SET. `readMergeSubjectsByPr`, `readMergedPathsByPr`, both constants, `fetchBoardPrsRest` and `BOARD_MAX_PAGES` are untouched; `reconcileShardStatus`'s decision is untouched; the only new behaviour is a report and a non-zero exit, so the change can only REFUSE or REPORT more.
+    (vi) COMMENT LOAD. src/run-task.ts is at its comment-load ceiling (scripts/comment-load-baseline.json row `src/run-task.ts`). The edit ADDS NO NET COMMENT LINES: any comment it adds is paid for by deleting or tightening one of the touched function's own, and a new function carries no doc block beyond the one line `creditProjectionWithReadState`'s neighbours already use.
+    (vii) NOT IN SCOPE, NAMED. The board-truncation arm and the page bound (rationale (4)); the W1-T5035 monolith report (its sibling edit sits in the same function: expect a mechanical merge, this task's block sits after the summary print and before the return, and theirs after the shard fold);
+    the no-ledger early return in `creditProjectionWithReadState` (an empty projection by design); raising either git window.
+  acceptance:
+    - claim: "a dry run over a queued shard whose merge is merged-with-no-evidence prints WINDOW-SHORT naming it and the count on stderr and exits 2, and the stdout summary is unchanged"
+      proof: 'grep: test("W1-T5100: a queued shard merged outside both scan windows prints WINDOW-SHORT and exits 2" in test/plan-reconcile-names-the-shards-its-scan-window-cannot-judge.test.ts'
+    - claim: "--write still flips the shards the credit proved and never the window-short one, then exits 2"
+      proof: 'grep: test("W1-T5100: --write still flips the judged shards and never the window-short one, then exits 2" in test/plan-reconcile-names-the-shards-its-scan-window-cannot-judge.test.ts'
+    - claim: "the positive control: when no queued shard is window-short the stdout, stderr and exit code are byte-identical to today's"
+      proof: 'grep: test("W1-T5100: a window that covers every queued shard prints byte-identical output and exits 0" in test/plan-reconcile-names-the-shards-its-scan-window-cannot-judge.test.ts'
+    - claim: "a filing-shaped merge, a retired shard and a never-merged shard are never named window-short, so the line cannot fire on a healthy population"
+      proof: 'grep: test("W1-T5100: a filing-shaped merge, a retired shard and an unmerged shard are never window-short" in test/plan-reconcile-names-the-shards-its-scan-window-cannot-judge.test.ts'
+    - claim: "an UNKNOWN read keeps its own line and exit code and names the window-short shards too"
+      proof: 'grep: test("W1-T5100: an UNKNOWN read keeps its own line and exit code and names the window-short shards too" in test/plan-reconcile-names-the-shards-its-scan-window-cannot-judge.test.ts'
+    - claim: "the projection omits windowShort when no candidate is short, and an injected credit set keeps its old contract"
+      proof: 'grep: test("W1-T5100: the projection omits windowShort when no candidate is short and an injected set is unchanged" in test/plan-reconcile-names-the-shards-its-scan-window-cannot-judge.test.ts'
+    - claim: "the real credit builder over a real git history longer than the subject window reports the task window-short (the real default seam, no fake builder)"
+      proof: 'grep: test("W1-T5100: the real credit builder over a real git history longer than the subject window reports the task window-short" in test/plan-reconcile-names-the-shards-its-scan-window-cannot-judge.test.ts'
+    - claim: "the same history with the merge inside the window is judged and flipped, the positive control for the real seam"
+      proof: 'grep: test("W1-T5100: the same history inside the window is judged and flipped, the positive control for the real seam" in test/plan-reconcile-names-the-shards-its-scan-window-cannot-judge.test.ts'
+    - claim: "the pure helper that names the shards has a production call site in the verb"
+      proof: "grep: windowShortShards( in src/run-task.ts"
+    - claim: "the WINDOW-SHORT line is a production literal, on one physical line"
+      proof: "grep: rmd plan-reconcile: WINDOW-SHORT in src/run-task.ts"
+  falsifier: |
+    Drop the `windowShort` derivation in `creditProjectionWithReadState` and the first, second, fifth and seventh tests redden on exit 0 and a missing line; the positive-control tests stay green, which is what shows the change moves only the short cases. Derive `windowShort` from `!creditIsReconcilable` instead of from the undefined evidence and the filing-shaped-merge test reddens (a merge whose subject says `chore(plan)` is judged, not short).
+    Name a never-merged shard (no candidate row) or a retired shard and the never-window-short test reddens. Make `--write` skip the judged writes when a shard is short and the second test reddens on the missing write. Print WINDOW-SHORT on stdout and the byte-identical test reddens. The real-seam pair is the only test that reads real git: a fake builder returning `creditIsImplementation: undefined` cannot prove that a history past `MERGE_SUBJECT_SCAN_LIMIT`
+    produces that value, and the control history (merge inside the window) must flip. BOTH directions are needed. CLOSE IF the verb already names shards whose credit evidence is absent, or if W1-T5035's block has folded this report in.
+  note: |
+    RISK: high because src/run-task.ts is the file the reconcile write lives in and `status: merged` is a one-way plan write; this task adds no write and only ever REFUSES to call a run complete, which is why band_meaning is blast-radius and not span.
+    The real-seam fixtures copy test/a-task-credited-first-by-a-refused-pr-reconciles-from-its-later-merge.test.ts (the real `buildCreditCandidates` with a throwaway git repo as the injected evidence root and a gateway fixture) and the failing-gateway shape in test/plan-reconcile-fails-loud-when-its-github-read-fails.test.ts (`withLedgerRoot`, the `run` capture of stdout and stderr). Build the long history with `git fast-import` (one stream, a few thousand empty commits, well under a second), put the task's squash commit
+    `feat(x): build (#N)` with a `Remudero-Task:` trailer FIRST so it is the oldest, then `MERGE_SUBJECT_SCAN_LIMIT + 50` filler commits; the control repo puts the same commit newest. Import both constants from src/run-task.ts rather than writing 5000. Wrap the real builder as `(o, r, p, l, log, github) => buildCreditCandidates(o, r, p, l, log, github, () => root)` and hand it to `creditProjectionWithReadState(cfg, root, wrapper, gateway)`;
+    the default seam's own `resolveOwnerRepo` is NOT reached, so the test stays inside its throwaway directory. Existing pins that must not move: test/plan-reconcile-credit-parity.test.ts, test/plan-reconcile-fails-loud-when-its-github-read-fails.test.ts, test/the-plan-reconciler-runs-on-a-cadence.test.ts. docs/cli-reference.md is generated from the command registry and the one-line `detail` is NOT changed, so no regen.
+    NOT MEASURED, SAID PLAINLY: (a) the verb itself end to end (ledger, config and the GitHub CLI are absent here), including whether it really exits 2 UNKNOWN on every cold run today; (b) credits that exist only in the ledger (the probe used an empty one); (c) whether the 2026-10-11 estimate holds, it assumes 121 commits a day continue. Filed from a REST shim that only issues GET reads; nothing was written to GitHub.
