@@ -113,6 +113,7 @@ test("standby serve does not listen on the public port before promote", { timeou
   assert.deepEqual(sent, [{ type: "rmd.promoted" }], "the promote is acknowledged once the port is bound");
   const res = await fetch(`http://127.0.0.1:${port}/v1/status`, { headers: { authorization: `Bearer ${tokens.read}` } });
   assert.equal(res.status, 200, "the promoted generation serves the public port with its board already computed");
+  await res.arrayBuffer(); // Server.close waits for active responses; finish this client before shutdown.
 
   process.emit("SIGTERM");
   assert.equal(await running, 0);
