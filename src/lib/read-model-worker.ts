@@ -26,16 +26,24 @@ import { createNowView } from "./now-view.js";
 import {
   ORACLE_DEFAULT_WINDOW_MS,
   ORACLE_DRIFT_INTERVAL_MS,
+  ORACLE_INGEST_SETTLE_MS,
+  ORACLE_SLICE_BUDGET_MS,
   advanceOracleSlice,
   consistencyCheckDue,
   nextOracleSlice,
+  recordIngestMark,
+  retryOracleSlice,
   runConsistencyCheck,
+  settledIngestMark,
+  type IngestMark,
+  type OracleWindow,
 } from "./read-model-consistency.js";
 import {
   READ_MODEL_DIRNAME,
   READ_MODEL_LEASE_TTL_MS,
   ReadModelError,
   acquireLease,
+  attachReadModel,
   currentReadModelPath,
   openReadModel,
   peekLease,
@@ -70,6 +78,9 @@ export const READ_MODEL_CHECK_SHARE = 0.02;
  * short ticks and every lease is renewed on schedule between them.
  */
 export const READ_MODEL_PASS_SHARE = 0.5;
+/** BACKSTOP: the oracle thread's heap; a slice that outgrows it kills that thread, never serve's. */
+export const READ_MODEL_ORACLE_HEAP_MB = 1_024;
+const READ_MODEL_ORACLE_KIND = "remudero-read-model-oracle" as const;
 /**
  * The share of each pass kept for view bodies, and of worker time they may take: a view that cost
  * `c` ms is not rebuilt for `c / share` ms. Measured on the host's core ledger as three instances,
@@ -77,12 +88,7 @@ export const READ_MODEL_PASS_SHARE = 0.5;
  * so unbudgeted bodies alone held ticks of 2-4 s beside a catch-up.
  */
 export const READ_MODEL_VIEW_SHARE = 0.4;
-/**
- * WATCHDOG: an instance with work outstanding (a backlog, an unread archive, a failing tick) and no
- * commit for this long is stalled. The first bound ledgers it and reopens the store; a second
- * bound without progress escalates. Serve's thread applies the same bound to a worker that posts
- * nothing at all, and recycles it at twice the bound, doubling with each recycle.
- */
+/** Work outstanding without a commit for this long is stalled; serve watches silent workers too. */
 export const READ_MODEL_STALL_MS = 60_000;
 
 const VIEW_BODY_DDL = `CREATE TABLE IF NOT EXISTS view_body(view TEXT NOT NULL, key TEXT NOT NULL, version INTEGER NOT NULL,
@@ -171,6 +177,8 @@ export interface ReadModelInstanceState {
   failures: number;
   /** The `ts` of the newest applied (not quarantined) row. */
   newestTs: string | null;
+  /** Present while one of its oracle slices is running. */
+  checking?: true;
 }
 
 export type ReadModelBodyEntry = ViewBodyEntry;
@@ -252,10 +260,134 @@ export interface ReadModelTickerOptions {
   consistencyWindowMs?: number;
   /** "off" leaves every tick to the projector: a suite that pins what each tick projects. */
   oracle?: "on" | "off";
+  /** How old an ingest mark must be before the oracle compares the rows below it. */
+  ingestSettleMs?: number;
+  /** One slice's time budget; the measured rows per ms turn it into a row count. */
+  oracleSliceBudgetMs?: number;
   /** Each instance's projector budget per tick; derived from the lease timing when absent. */
   tickBudgetMs?: number;
   /** A whole pass's budget: projection, then view bodies in what is left of it. */
   passBudgetMs?: number;
+  /** Where slices run; in this thread by default, on the oracle's own thread inside serve's worker. */
+  oracleRunner?: ReadModelOracle;
+}
+
+/** One oracle slice: everything a thread needs to attach to the store and check it. */
+export interface OracleSliceRequest {
+  instance: string;
+  stateDir: string;
+  ledgerDir: string;
+  dbPath: string;
+  lease: { name: string; holder: string; ttlMs: number };
+  window: OracleWindow;
+  mark: IngestMark;
+}
+
+/** `died`: the slice never finished (its thread ran out of memory or exited), so it is retried smaller, never skipped. */
+export type OracleSliceResult = { ok: true; rows: number; elapsedMs: number } | { ok: false; error: string; leaseLost: boolean; died?: true };
+
+/** Runs oracle slices. `done` is called exactly once, before `run` returns or later. */
+export interface ReadModelOracle {
+  run(request: OracleSliceRequest, done: (result: OracleSliceResult) => void): void;
+  close(): void;
+}
+
+/** One slice against an open store, under the request's lease holder; every failure becomes a result. */
+export function checkOracleSlice(db: ReadModelDb, request: OracleSliceRequest, clock: Clock, escalation?: EscalateDeps): OracleSliceResult {
+  try {
+    const run = runConsistencyCheck({
+      db, ledgerDir: request.ledgerDir, instance: request.instance, metricLedgerPath: join(request.stateDir, LEDGER_FILENAME),
+      lease: { ...request.lease, clock }, clock, window: request.window, ingestMark: request.mark, ...(escalation ? { escalation } : {}),
+    });
+    return { ok: true, rows: run.ledgerRows, elapsedMs: run.elapsedMs };
+  } catch (error) {
+    return { ok: false, error: (error as Error).message, leaseLost: error instanceof ReadModelError && error.reason === "lease_lost" };
+  }
+}
+
+/** Slices run in the calling thread, on the ticker's own connection: `done` is called before `run` returns. */
+export function inProcessOracle(dbFor: (request: OracleSliceRequest) => ReadModelDb | undefined, clock: Clock, escalation?: EscalateDeps): ReadModelOracle {
+  return {
+    run: (request, done) => {
+      const db = dbFor(request);
+      done(db ? checkOracleSlice(db, request, clock, escalation) : { ok: false, error: `no open store for ${request.instance}`, leaseLost: false });
+    },
+    close: () => {},
+  };
+}
+
+/**
+ * Slices run on a thread of their own with their own connection, so however long one takes, the
+ * projector's ticks go on. A slice cost 0.03-1.9 s on the fleet host, but one that healed held the
+ * projector's thread 19.5 min on 2026-09-30, and every view went stale behind it. The thread is
+ * spawned on first use and again after it dies; a slice in flight when it dies fails, never hangs.
+ */
+export function threadOracle(opts: { workerUrl?: URL; escalationRepository?: string; log: (step: string, extra: Record<string, unknown>) => void }): ReadModelOracle {
+  let worker: Worker | undefined;
+  let pending: { id: number; done: (result: OracleSliceResult) => void } | undefined;
+  let seq = 0;
+  const settle = (result: OracleSliceResult): void => {
+    const waiting = pending;
+    pending = undefined;
+    waiting?.done(result);
+  };
+  const spawn = (): Worker => {
+    const data: ReadModelOracleData = { kind: READ_MODEL_ORACLE_KIND, ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}) };
+    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv, resourceLimits: { maxOldGenerationSizeMb: READ_MODEL_ORACLE_HEAP_MB } });
+    spawned.unref();
+    spawned.on("message", (msg: { type?: string; id?: number; result?: OracleSliceResult }) => {
+      if (msg.type === "done" && msg.id === pending?.id) settle(msg.result!);
+    });
+    spawned.on("error", (error) => opts.log("read_model.oracle_failed", { error: String(error?.message ?? error) }));
+    spawned.on("exit", (code) => {
+      if (worker !== spawned) return;
+      worker = undefined;
+      settle({ ok: false, error: `the oracle thread exited with code ${code}`, leaseLost: false, died: true });
+    });
+    return spawned;
+  };
+  return {
+    run: (request, done) => {
+      worker ??= spawn();
+      pending = { id: ++seq, done };
+      worker.postMessage({ type: "check", id: pending.id, request });
+    },
+    close: () => {
+      pending = undefined;
+      const running = worker;
+      worker = undefined;
+      void running?.terminate();
+    },
+  };
+}
+
+interface ReadModelOracleData {
+  kind: typeof READ_MODEL_ORACLE_KIND;
+  escalationRepository?: string;
+}
+
+/** The oracle thread's body: attach to each store once, run each slice, post its result. */
+export function runReadModelOracleWorker(
+  port: { on(event: "message", run: (msg: { type?: string; id?: number; request?: OracleSliceRequest }) => void): unknown; postMessage(value: unknown): void },
+  data: ReadModelOracleData,
+  clock: Clock = systemClock,
+): void {
+  const stores = new Map<string, ReadModelDb>();
+  const [owner, repo] = data.escalationRepository?.split("/") ?? [];
+  port.on("message", (msg) => {
+    if (msg.type !== "check" || !msg.request) return;
+    const request = msg.request;
+    let result: OracleSliceResult;
+    try {
+      let db = stores.get(request.dbPath);
+      if (!db) stores.set(request.dbPath, (db = attachReadModel(request.dbPath, LEDGER_PROJECTOR_SCHEMA_VERSION)));
+      const escalation = owner && repo ? { issues: ghIssueGateway(owner, repo), ledgerPath: join(request.stateDir, LEDGER_FILENAME), runId: READ_MODEL_WORKER_KIND } : undefined;
+      result = checkOracleSlice(db, request, clock, escalation);
+    } catch (error) {
+      result = { ok: false, error: `the oracle could not attach to ${request.dbPath}: ${(error as Error).message}`, leaseLost: false };
+    }
+    port.postMessage({ type: "done", id: msg.id, result });
+  });
 }
 
 export interface ReadModelTicker {
@@ -298,6 +430,8 @@ interface Slot {
   checkAfter: number;
   /** Set by a caught-up projector tick when a slice is due; the NEXT tick runs it instead of projecting. */
   checkPending: boolean;
+  /** When this slot's newest ingest mark was taken; a new one is due half a settle period later. */
+  markAt?: number;
   /** Present while a backlog is being applied over several ticks; the oracle waits until it clears. */
   catchUp?: { startedAt: number; ticks: number; maxTickMs: number; lines: number; sourceBytes: number; loggedAt: number };
   /** Present while work is outstanding and nothing commits: the watchdog's episode. */
@@ -343,6 +477,11 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   const tickMs = opts.tickMs ?? READ_MODEL_TICK_MS;
   const stopRequested = opts.stopRequested ?? (() => false);
   const windowMs = opts.consistencyWindowMs ?? ORACLE_DEFAULT_WINDOW_MS;
+  const settleMs = opts.ingestSettleMs ?? ORACLE_INGEST_SETTLE_MS;
+  const sliceBudgetMs = opts.oracleSliceBudgetMs ?? ORACLE_SLICE_BUDGET_MS;
+  const oracle = opts.oracleRunner ?? inProcessOracle((request) => slots.find((slot) => slot.db?.path === request.dbPath)?.db, clock, opts.escalation);
+  /** The slot whose slice is running; one at a time across every instance. */
+  let checking: Slot | undefined;
   const passMs = opts.passBudgetMs ?? READ_MODEL_LEASE_RENEW_MS * READ_MODEL_PASS_SHARE;
   const budgetMs = opts.tickBudgetMs ?? (passMs * (1 - READ_MODEL_VIEW_SHARE)) / Math.max(1, opts.instances.length);
   /** A view unit measured over this runs in a tick of its own, so it never lands on top of a projection. */
@@ -463,7 +602,10 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       slot.backoffUntil = 0;
       // A tick that read archives, restarted the live file or needed several chunks was catching up.
       const caughtUp = result.archivesRead === 0 && !result.liveRestarted && result.transactions <= 1 && result.unread.length === 0;
-      slot.checkPending = opts.oracle !== "off" && caughtUp && now >= slot.checkAfter && (!nextOracleSlice(db, now, windowMs).startsCycle || consistencyCheckDue(db, now));
+      if (opts.oracle !== "off") {
+        if (slot.markAt === undefined || tickedAt - slot.markAt >= settleMs / 2) slot.markAt = recordIngestMark(db, slot.lease!, tickedAt, settleMs);
+        slot.checkPending = caughtUp && now >= slot.checkAfter && (!nextOracleSlice(db, now, windowMs, sliceBudgetMs).startsCycle || consistencyCheckDue(db, now));
+      }
       watchProgress(slot, tickedAt, result.pending || result.unread.length > 0);
     } catch (error) {
       // failSlot logs it, backs this instance off, and closes the slot on a lost lease.
@@ -524,10 +666,11 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   /**
-   * One slice of the oracle's rolling cycle, as a tick of its own: the projector does not run in it.
-   * By the lease holder only, never beside a rebuild; the next is paced by what this one cost.
+   * Starts one slice of the oracle's rolling cycle on the oracle runner: by the lease holder only,
+   * never beside a rebuild, and only below an ingest mark a settle period old. The projector keeps
+   * ticking while it runs; the next slice waits in proportion to what this one cost.
    */
-  function checkSlot(slot: Slot, now: number): void {
+  function startCheck(slot: Slot, now: number): void {
     slot.checkPending = false;
     try {
       if (!ensureLease(slot, now)) return;
@@ -538,20 +681,42 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         slot.checkAfter = now + ORACLE_DRIFT_INTERVAL_MS;
         return log("read_model.consistency_deferred", { instance, reason: `a rebuild holds ${rebuild}`, retryInMs: ORACLE_DRIFT_INTERVAL_MS });
       }
-      const { window, cursor } = nextOracleSlice(db, now, windowMs);
-      try {
-        runConsistencyCheck({
-          db, ledgerDir: slot.instance.ledgerDir, instance, metricLedgerPath: join(opts.stateDir, LEDGER_FILENAME), lease: slot.lease!, clock, window,
-          ...(opts.escalation ? { escalation: opts.escalation } : {}),
-        });
-      } catch (error) {
-        if (error instanceof ReadModelError && error.reason === "lease_lost") throw error;
-        slot.checkAfter = now + ORACLE_DRIFT_INTERVAL_MS;
-        log("read_model.consistency_failed", { instance, window: [window.t0, window.t1], error: (error as Error).message, retryInMs: ORACLE_DRIFT_INTERVAL_MS });
+      // Only rows the projector had applied a settle period ago are compared: a late row is never drift.
+      const mark = settledIngestMark(db, now, settleMs);
+      if (mark === undefined) {
+        slot.checkAfter = now + settleMs;
+        return log("read_model.consistency_deferred", { instance, reason: `no ingest mark is ${settleMs} ms old yet`, retryInMs: settleMs });
       }
-      advanceOracleSlice(db, slot.lease!, cursor);
-      const finished = clock.now();
-      slot.checkAfter = Math.max(slot.checkAfter, finished + (finished - now) / READ_MODEL_CHECK_SHARE);
+      const slice = nextOracleSlice(db, now, windowMs, sliceBudgetMs);
+      const lease = slot.lease!;
+      checking = slot;
+      slot.state.checking = true;
+      oracle.run(
+        { instance, stateDir: opts.stateDir, ledgerDir: slot.instance.ledgerDir, dbPath: db.path, lease: { name: lease.name, holder: lease.holder, ttlMs: lease.ttlMs }, window: slice.window, mark },
+        (result) => finishCheck(slot, db, slice, now, result),
+      );
+    } catch (error) {
+      // failSlot logs it, backs this instance off, and closes the slot on a lost lease.
+      failSlot(slot, now, error);
+    }
+  }
+
+  function finishCheck(slot: Slot, db: ReadModelDb, slice: ReturnType<typeof nextOracleSlice>, started: number, result: OracleSliceResult): void {
+    checking = undefined;
+    delete slot.state.checking;
+    const now = clock.now();
+    const instance = slot.instance.name;
+    try {
+      if (!result.ok && result.leaseLost) throw new ReadModelError("lease_lost", result.error);
+      if (!result.ok) {
+        slot.checkAfter = now + ORACLE_DRIFT_INTERVAL_MS;
+        log("read_model.consistency_failed", { instance, window: [slice.window.t0, slice.window.t1], error: result.error, retryInMs: ORACLE_DRIFT_INTERVAL_MS });
+      }
+      // A slot reopened meanwhile plans its next slice afresh from its own store.
+      if (slot.db !== db || slot.lease === undefined) return;
+      if (!result.ok && result.died) retryOracleSlice(db, slot.lease, slice);
+      else advanceOracleSlice(db, slot.lease, slice, result.ok ? { rows: result.rows, ms: result.elapsedMs } : undefined);
+      slot.checkAfter = Math.max(slot.checkAfter, now + (now - started) / READ_MODEL_CHECK_SHARE);
     } catch (error) {
       // failSlot logs it, backs this instance off, and closes the slot on a lost lease.
       failSlot(slot, now, error);
@@ -651,16 +816,19 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       const now = clock.now();
       reloadSwitches(now);
       // The oracle's slices wait while any instance is still applying a backlog.
-      const due = switches.projector === "on" && !slots.some((slot) => slot.catchUp) ? slots.find((slot) => slot.checkPending) : undefined;
+      const due = switches.projector === "on" && checking === undefined && !slots.some((slot) => slot.catchUp)
+        ? slots.find((slot) => slot.checkPending && now >= slot.checkAfter)
+        : undefined;
+      // A slice is started, never waited for: on the oracle's thread it runs while this tick projects.
+      if (due) startCheck(due, now);
       // A view too big to share a pass gets a tick of its own, never two in a row, so the projector keeps moving.
       const solo = lastSolo ? undefined : dueUnits(now).find((unit) => (unit.costMs ?? 0) > soloMs);
-      lastSolo = solo !== undefined && due === undefined;
-      if (due) {
-        checkSlot(due, now);
-      } else if (solo) {
+      lastSolo = solo !== undefined;
+      if (solo) {
         materialize(now, now, solo);
         return postState(now);
-      } else if (switches.projector === "off") {
+      }
+      if (switches.projector === "off") {
         for (const slot of slots) slot.state.reason = "projector switched off";
       } else {
         for (const slot of slots) {
@@ -686,6 +854,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       }
     },
     release(): number {
+      oracle.close();
+      checking = undefined;
       let released = 0;
       for (const slot of slots) {
         try {
@@ -723,8 +893,9 @@ export function runReadModelWorker(
   const escalation = owner && repo ? { issues: ghIssueGateway(owner, repo), ledgerPath: join(data.stateDir, LEDGER_FILENAME), runId: READ_MODEL_WORKER_KIND } : undefined;
   const post = (m: ReadModelWorkerMessage): void => port.postMessage(m);
   const now = createNowView({ instances: data.instances, ledgerSource, clock, log: (step, extra) => post({ type: "log", step, extra }) });
+  const oracleRunner = threadOracle({ ...(data.escalationRepository ? { escalationRepository: data.escalationRepository } : {}), log: (step, extra) => post({ type: "log", step, extra }) });
   const ticker = createReadModelTicker({
-    stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, stopRequested, post, views: [...READ_MODEL_VIEWS, now], ...(escalation ? { escalation } : {}),
+    stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, stopRequested, post, views: [...READ_MODEL_VIEWS, now], oracleRunner, ...(escalation ? { escalation } : {}),
   });
   let timer: NodeJS.Timeout | undefined;
   let started = false;
@@ -766,6 +937,9 @@ export function runReadModelWorker(
 
 if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === READ_MODEL_WORKER_KIND && parentPort) {
   runReadModelWorker(parentPort, workerData as ReadModelWorkerData);
+}
+if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === READ_MODEL_ORACLE_KIND && parentPort) {
+  runReadModelOracleWorker(parentPort, workerData as ReadModelOracleData);
 }
 
 /** The last committed bodies, read once at construction through a read-only connection. */

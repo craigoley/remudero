@@ -173,11 +173,13 @@ test("a rebuild whose own check disagrees leaves the live file untouched", (t) =
   const live = openProjectorReadModel(stateDir, "core", clock);
   t.after(() => live.close());
   live.exec("INSERT INTO meta(k, v) VALUES('marker', 'old')");
-  // A writer stalled mid-line: the projector waits for its newline, the union reads it anyway.
-  writeFileSync(join(stateDir, LIVE), `${readFileSync(join(stateDir, LIVE), "utf8")}${row(T0 + 20_000, "run.start")}`);
+  // An archive named a month before its own rows: the projector applies them, the window's union
+  // read skips an archive rotated before the window, so the store holds a row the ledger read lacks.
+  // (A row past the projector's checkpoint, such as a writer stalled mid-line, is unsettled, not drift.)
+  writeFileSync(join(stateDir, `ledger.${new Date(T0 - 30 * 86_400_000).toISOString().replace(/[:.]/g, "-")}.ndjson`), `${row(T0 + 20_000, "run.start")}\n`);
   const r = run(stateDir, ["rebuild"]);
   assert.equal(r.code, 1);
-  assert.match(r.err.join("\n"), /failed its own consistency check \(drift: \{"missing":1/);
+  assert.match(r.err.join("\n"), /failed its own consistency check \(escalated: \{"missing":0,"ledgerLost":1/);
   assert.equal(live.meta("marker"), "old");
   assert.deepEqual(sqliteFiles(stateDir), ["core.v1.sqlite"], "the unpublished generation is removed");
   assert.equal(existsSync(readModelPointerPath(stateDir, "core", 1)), false);
@@ -232,22 +234,24 @@ test("status reports lag counts quarantine size lease and the last check per ins
   writeFileSync(join(stateDir, LIVE), `${readFileSync(join(stateDir, LIVE), "utf8")}${row(NOW + 3_600_000, "run.start")}\n`);
   createLedgerProjector({ ledgerDir: stateDir, db, lease: held.lease, clock }).tick();
   writeFileSync(join(stateDir, LIVE), `${readFileSync(join(stateDir, LIVE), "utf8")}${row(T0 + 50_000, "run.start")}\n`);
+  // The appended row is past the checkpoint, so it is behind, not drift; a lost fact is the drift the check heals.
+  db.exec("DELETE FROM fact WHERE seq = (SELECT max(seq) FROM fact)");
   runConsistencyCheck({ db, ledgerDir: stateDir, instance: "core", metricLedgerPath: join(scratch(t, "metric"), LIVE), lease: held.lease, clock });
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
   writeFileSync(join(stateDir, "read-model", "core.v0.sqlite"), "");
 
   const [old, core] = readModelStatus(stateDir, clock).sort((a, b) => a.schemaVersion - b.schemaVersion);
   assert.deepEqual(old, { instance: "core", schemaVersion: 0, current: false, dbBytes: 0 });
-  assert.deepEqual(core!.rows, { seen: 12, fact: 6, quarantine: 1 });
-  assert.equal(core!.newestAppliedTs, new Date(T0 + 50_000).toISOString(), "the healed row is the newest applied");
-  assert.equal(core!.lagMs, NOW - T0 - 50_000);
+  assert.deepEqual(core!.rows, { seen: 11, fact: 5, quarantine: 1 });
+  assert.equal(core!.newestAppliedTs, new Date(T0 + 9_000).toISOString(), "the row appended after the tick is not applied");
+  assert.equal(core!.lagMs, NOW - T0 - 9_000);
   assert.ok(core!.liveBytesBehind! > 0, "the row appended after the tick is behind");
   assert.ok(core!.dbBytes > 0);
   assert.deepEqual(core!.lease && [core.lease.holder, core.lease.live], ["worker", true]);
   assert.equal(core!.lastCheck?.outcome, "healed");
 
   const text = run(stateDir, ["status"]).out.join("\n");
-  assert.match(text, /core v1: seen 12 fact 6 quarantine 1/);
+  assert.match(text, /core v1: seen 11 fact 5 quarantine 1/);
   assert.match(text, /lease worker pid \d+ on /);
   assert.match(text, /last check healed at /);
   assert.match(text, /core v0: not the current schema/);
