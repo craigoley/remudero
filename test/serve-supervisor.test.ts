@@ -172,6 +172,34 @@ test("insufficient cgroup headroom defers the handoff and ledgers the reason", a
   assert.equal(fleet.generations.length, 1, "no standby is forked while headroom is short");
   assert.deepEqual(exits, [0], "repeated deferrals fall back to today's restart rather than never recycling");
   assert.equal(logs.filter((l) => l.step === "serve.handoff_deferred").length, 3);
+  assert.equal(logs.find((l) => l.step === "serve.handoff_shed")?.extra?.answered, false, "a generation that never answers the shed is waited out by its backstop");
+});
+
+test("a memory-short handoff asks the active generation to shed before it defers", async () => {
+  const fleet = fakeFleet();
+  const shedAsked = (): boolean => fleet.generations[0]?.sent.some((m) => m.type === "rmd.shed") ?? false;
+  const { supervisor, logs } = decisionSupervisor(fleet, {
+    freeMemory: () => (shedAsked() ? 9_000 : 1_000),
+    rss: () => 5_000,
+    shedBackstopMs: 123,
+    sleep: (ms) => (ms === 123 ? new Promise<void>(() => {}) : Promise.resolve()),
+  });
+  await supervisor.start();
+  const cold = fleet.generations[0];
+  const send = cold.send.bind(cold);
+  cold.send = (message) => {
+    send(message);
+    if (message.type === "rmd.shed") queueMicrotask(() => cold.emit({ type: "rmd.shed_done", beforeBytes: 5_000, afterBytes: 3_000 }));
+  };
+  await supervisor.requestHandoff();
+  assert.deepEqual(cold.sent.map((m) => m.type), ["rmd.promote", "rmd.shed", "rmd.drain"], "tier 1 runs before the standby is forked");
+  const shed = logs.find((l) => l.step === "serve.handoff_shed")?.extra;
+  assert.deepEqual(
+    { answered: shed?.answered, beforeBytes: shed?.beforeBytes, afterBytes: shed?.afterBytes, freeBefore: shed?.freeBefore, freeAfter: shed?.freeAfter, needBytes: shed?.needBytes },
+    { answered: true, beforeBytes: 5_000, afterBytes: 3_000, freeBefore: 1_000, freeAfter: 9_000, needBytes: 5_000 },
+  );
+  assert.equal(logs.some((l) => l.step === "serve.handoff_deferred"), false, "the shed freed enough, so nothing defers");
+  assert.equal(supervisor.activeSha(), "sha-2", "the handoff went ahead");
 });
 
 test("handoff requests coalesce, and only the active generation can ask", async () => {

@@ -2037,6 +2037,7 @@ export interface AnalyticsSnapshotCache {
   refresh(): Promise<void>;
   start(): void;
   stop(): void;
+  shed(): void;
 }
 
 function freezeAnalyticsSnapshot(value: AnalyticsSnapshot): AnalyticsSnapshot {
@@ -2299,7 +2300,7 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
 
     let operation!: Promise<void>;
     operation = Promise.resolve()
-      .then(() => readSnapshot(deps.stateDir, clock, refreshController.signal, checkpoint))
+      .then(() => readSnapshot(deps.stateDir, clock, refreshController.signal, (checkpoint ??= readAnalyticsCheckpoint(deps.stateDir))))
       .then((result) => {
         refreshController.signal.throwIfAborted();
         const next = "snapshot" in result ? result.snapshot : result;
@@ -2357,6 +2358,11 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
       void refresh();
     },
     stop,
+    shed: () => {
+      value = coldAnalyticsSnapshot();
+      checkpoint = undefined;
+      log("serve.analytics_shed", {});
+    },
   };
 }
 

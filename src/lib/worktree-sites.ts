@@ -214,6 +214,18 @@ export const WORKTREE_SITE_REGISTRY: WorktreeSiteRow[] = [
         "isn't based on origin/main at all.",
     },
   },
+  {
+    file: "src/lib/serve-slots.ts",
+    site: "createSlotPreparer",
+    creates: "a DETACHED serve generation slot at origin/main's newest sha, reused for every later handoff",
+    disposition: {
+      kind: "exempt",
+      because:
+        "worktreeAdd always names a branch, and a serve generation slot runs code, never commits it: it is " +
+        "cut detached at the sha the supervisor just fetched from origin/main, so it IS origin/main at the " +
+        "instant it is cut, and the readiness probe's /v1/version smoke read refuses a slot at any other sha.",
+    },
+  },
 ];
 
 /** Files under `dir`, recursively, `.ts` only. Read with `readFileSync`, never grepped: two files

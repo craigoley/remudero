@@ -994,6 +994,40 @@ The marker absence is meaningful only after the daemon sweep evidence: it means 
 consumed the durable wake, not that the service failed to write it. GitHub does not automatically
 redeliver a failed webhook, so use **Redeliver** after correcting a `401`, `403`, `413`, or `503`.
 
+### Serve supervisor: code changes without a restart (Phase 3)
+
+`deploy/serve-container.sh` launches the core gateway under the **serve supervisor**
+(`src/lib/serve-supervisor-main.ts`, run from the image's baked `/app`). The supervisor holds port
+4317. When serve finds relevant new code on main, it asks for a handoff instead of exiting:
+
+1. the supervisor checks out main in the inactive slot (`~/rmd-serve-gens/a` or `b`) and makes its
+   `node_modules` match the lockfile (reuse, hard-link, or `npm ci`) while the old generation serves;
+2. it boots a standby generation and waits for its readiness probe and smoke reads;
+3. it promotes the standby on the same socket, then drains the old generation.
+
+A build that fails readiness never serves (`serve.handoff_aborted`). A promoted build that crashes is
+replaced from the previous slot (`serve.handoff_rolled_back`). The ledger rows are `serve.handoff_*`,
+`serve.generation_*` and `serve.drain_phase`.
+
+**Install it (once; this is the last cold restart):**
+
+```sh
+gh workflow run acr-build.yml --ref main        # an image whose /app has the supervisor
+# wait for the build, then on the host:
+./deploy/serve-container.sh --replace
+docker exec remudero-serve ps -o pid,args -C node   # ground truth: a node .../serve-supervisor-main.ts parent
+```
+
+An image built before the supervisor still starts. It serves directly, and `docker logs` says
+`this image has no serve supervisor; serving directly`.
+
+**Turn it off:**
+
+| scope | command | effect |
+|---|---|---|
+| per handoff, no restart | `touch ~/rmd-serve-gens/handoff.off` | a handoff request drains and exits 0, and docker restarts the container (the old behaviour); `rm` the file to re-enable |
+| full rollback | `RMD_SERVE_SUPERVISOR=off ./deploy/serve-container.sh --replace` | today's direct `./bin/rmd serve` launch, with no gens mount |
+
 ### Attaching a data disk to the container host
 
 The Azure host's OS disk is 30 GB and the image store fills it. Standard practice is a separate

@@ -17,6 +17,7 @@ import {
   githubAuthProbe,
   listenReadiness,
   onDrainRequest,
+  onShedRequest,
   planLoadedProbe,
   processChannel,
   readinessReport,
@@ -124,4 +125,27 @@ test("the process channel carries promote and drain from the supervisor and send
   proc.emit("message", { type: GENERATION_MESSAGES.drain, reason: "handoff" });
   proc.emit("message", { type: GENERATION_MESSAGES.drain });
   assert.deepEqual(drains, ["handoff", "handover"]);
+});
+
+test("the active generation sheds its caches on request and reports resident bytes", () => {
+  const listeners: Array<(m: GenerationMessage) => void> = [];
+  const sent: GenerationMessage[] = [];
+  const channel = { send: (m: GenerationMessage) => void sent.push(m), onMessage: (l: (m: GenerationMessage) => void) => void listeners.push(l) };
+  let shed = 0;
+  let collected = 0;
+  let rss = 5_000;
+  onShedRequest(channel, () => void (shed += 1, (rss = 3_000)), () => rss, () => void (collected += 1));
+  for (const l of listeners) l({ type: GENERATION_MESSAGES.drain });
+  assert.equal(shed, 0, "only a shed request sheds");
+  for (const l of listeners) l({ type: GENERATION_MESSAGES.shed });
+  assert.equal(shed, 1);
+  assert.equal(collected, 1, "a full collection follows when the runtime exposes one");
+  assert.deepEqual(sent, [{ type: "rmd.shed_done", beforeBytes: 5_000, afterBytes: 3_000, gc: true }]);
+
+  const plain: GenerationMessage[] = [];
+  const own: Array<(m: GenerationMessage) => void> = [];
+  onShedRequest({ send: (m) => void plain.push(m), onMessage: (l) => void own.push(l) }, () => {}, undefined, undefined);
+  for (const l of own) l({ type: GENERATION_MESSAGES.shed });
+  assert.equal(plain[0]?.gc, false, "with no exposed collector the reply says so");
+  assert.equal(typeof plain[0]?.beforeBytes, "number", "the default reads this process's resident bytes");
 });

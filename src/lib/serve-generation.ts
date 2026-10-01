@@ -24,6 +24,8 @@ export const GENERATION_MESSAGES = {
   promoted: "rmd.promoted",
   drain: "rmd.drain",
   handoffRequest: "rmd.handoff_request",
+  shed: "rmd.shed",
+  shed_done: "rmd.shed_done",
 } as const;
 
 export interface GenerationMessage {
@@ -75,6 +77,20 @@ export function awaitPromotion(channel: GenerationChannel): Promise<void> {
 export function onDrainRequest(channel: GenerationChannel, drain: (reason: string) => void): void {
   channel.onMessage((message) => {
     if (message.type === GENERATION_MESSAGES.drain) drain(message.reason ?? "handover");
+  });
+}
+
+/**
+ * Memory tier 1 (design §1 "Memory"): the supervisor asks the ACTIVE generation to drop its rebuildable
+ * caches before it forks a standby, then re-measures. The reply carries resident bytes before and after.
+ */
+export function onShedRequest(channel: GenerationChannel, shed: () => void, rss: () => number = () => process.memoryUsage().rss, gc: (() => void) | undefined = (globalThis as { gc?: () => void }).gc): void {
+  channel.onMessage((message) => {
+    if (message.type !== GENERATION_MESSAGES.shed) return;
+    const beforeBytes = rss();
+    shed();
+    gc?.();
+    channel.send({ type: GENERATION_MESSAGES.shed_done, beforeBytes, afterBytes: rss(), gc: gc !== undefined });
   });
 }
 

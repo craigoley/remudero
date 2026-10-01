@@ -222,9 +222,11 @@ test("the real registry declares EXACTLY the five exempt raw sites — the two t
   // same reason addWorktree above is exempt. The count moves 3 -> 4 deliberately, which is what
   // this pin exists to make someone say out loud. W1-T4638 moves it 4 -> 5: a sealed paired side
   // attempt is cut DETACHED because any branch it named is one dispatch and credit could read.
+  // Phase 3 moves it 5 -> 6: a serve generation slot is cut DETACHED at the sha just fetched.
   assert.deepEqual(exempt, [
     "src/lib/composition-root.ts::addWorktree",
     "src/lib/paired-trial.ts::cutSealedAttemptTree",
+    "src/lib/serve-slots.ts::createSlotPreparer",
     "src/lib/sweep.ts::rebaseDirtyFleetBranchViaGit",
     "src/run-task.ts::buildBaseProofDir",
     "src/run-task.ts::createFixRungWorktree",
@@ -299,6 +301,7 @@ test("findRawWorktreeAddSites finds every real raw site, including both canonica
     [
       "src/lib/composition-root.ts::addWorktree",
       "src/lib/paired-trial.ts::cutSealedAttemptTree",
+      "src/lib/serve-slots.ts::createSlotPreparer",
       "src/lib/sweep.ts::rebaseDirtyFleetBranchViaGit",
       "src/lib/worker.ts::worktreeAdd",
       "src/lib/worker.ts::worktreeAddAsync",
