@@ -426,6 +426,7 @@ test("a self-hosting daemon's eighth garden runs an evidence-coverage pass again
   let captured: DaemonDeps | undefined;
   try {
     await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      gardenPassesInProcess: true,
       runDaemon: async (_plan, d): Promise<DaemonSummary> => {
         captured = d;
         return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };

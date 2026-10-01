@@ -161,6 +161,8 @@ export const CLI_ONLY = {
     [
       "daemon",
       "daemon-plist",
+      // W1-T5114: the daemon's own off-loop gardener child; one pass, spawned per tick, never a console action.
+      "garden",
       "deploy",
       "deploy-run",
       "deploy-plist",
