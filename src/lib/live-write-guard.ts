@@ -83,9 +83,6 @@ export function discoverLiveLedgerRoot(env: NodeJS.ProcessEnv = process.env): st
   const home = env.HOME || homedir();
   const config = join(home, ".config", "remudero", "config.json");
   try {
-    // loadConfig() first claims this path with an empty file, then atomically renames
-    // published JSON over it. A parallel test process must wait for that claim to
-    // finish before deriving the root it protects from live writes.
     let raw = readFileSync(config, "utf8");
     for (let attempt = 1; raw === "" && attempt < 40; attempt++) {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);

@@ -74,8 +74,8 @@ test("the live-write guard waits for an in-progress config claim to publish its 
   await writeFile(config, "");
   const publisher = spawn(process.execPath, ["-e", `
     const fs = require("node:fs");
-    setTimeout(() => {
-      fs.writeFileSync(process.argv[2], JSON.stringify({ root: process.argv[3] }));
+    setTimeout(async () => {
+      await fs.promises.writeFile(process.argv[2], JSON.stringify({ root: process.argv[3] }));
       fs.renameSync(process.argv[2], process.argv[1]);
     }, 50);
   `, config, `${config}.publish`, root], { stdio: "ignore" });
