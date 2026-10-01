@@ -1,0 +1,27 @@
+- id: W1-T5020
+  title: "Preserve executable proof context when an unmet review is reloaded from the ledger"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 15.00
+  risk: medium
+  origin: "operator-approved Orca comparison, 2026-09-30"
+  files: [src/run-task.ts, test/review-unmet-ledger-roundtrip.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at c94c2bf49: unmetFromLedger reconstructs unmet criteria with proof empty and proof_exec
+    not_executable, even when the original criterion carried proof context. A sweep-dispatched repair thus
+    receives less evidence than the immediate in-rung repair.
+  design: |
+    Persist the original proof and proof_exec with review.posted unmet criteria, or rehydrate both from its
+    decision verdict. Preserve unknown when older rows lack the fields; do not fabricate not_executable.
+    Keep the ledger schema backward compatible and the review gate unchanged.
+  acceptance:
+    - claim: "an executable unmet proof survives a review-posted ledger round trip"
+      proof: 'grep: test("W1-T5020: unmet review proof survives a ledger round trip" in test/review-unmet-ledger-roundtrip.test.ts'
+    - claim: "legacy missing proof data remains unknown rather than a false nonexecutable verdict"
+      proof: 'grep: test("W1-T5020: missing legacy proof context stays unknown" in test/review-unmet-ledger-roundtrip.test.ts'
