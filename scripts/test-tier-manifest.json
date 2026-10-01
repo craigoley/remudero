@@ -2109,7 +2109,7 @@
     "test/verdict-calibration.test.ts": 2200,
     "test/verify-image-probes.test.ts": 2500,
     "test/view-shadow.test.ts": 2700,
-    "test/views-from-the-read-model.test.ts": 2900,
+    "test/views-from-the-read-model.test.ts": 5000,
     "test/w1-t143-diff-coverage.test.ts": 7462,
     "test/w1-t187-benchmark.test.ts": 3900,
     "test/w1-t187-derive-status-standalone.test.ts": 706,
