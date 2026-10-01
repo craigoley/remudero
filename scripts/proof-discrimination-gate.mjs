@@ -10,9 +10,9 @@ import { spawnSync } from "node:child_process";
 import { parseArgs } from "node:util";
 import { isMainModule } from "./lib/argv.mjs";
 import { REPO_ROOT } from "./lib/repo-root.mjs";
-import { readEventPayload } from "./acceptance-author-gate.mjs";
+import { bodyWithRecoveredIdentity, readEventPayload, resolveTaskIdentity } from "./acceptance-author-gate.mjs";
 import { CHECK_PROOF_EXIT } from "../src/run-task.ts";
-import { extractTaskTrailerId, parseAcceptanceBlock, parseWhitelistedProof, resolvePlanCriteriaAtHead } from "../src/lib/review.ts";
+import { parseAcceptanceBlock, parseWhitelistedProof, resolvePlanCriteriaAtHead } from "../src/lib/review.ts";
 
 function defaultGit(args, root) {
   return spawnSync("git", ["-C", root, ...args], { encoding: "utf8" });
@@ -205,9 +205,11 @@ export function main(argv, {
     log.error(`proof-discrimination: REFUSED — ${base.message}`);
     return 1;
   }
-  const { criteria, source } = resolveCriteria(payload.body, payload.headSha, { root });
+  // W1-T4206: the reviewer's identity surfaces, in its order — the body trailer, then a run-shaped head ref.
+  const identity = resolveTaskIdentity({ body: payload.body, headRefName: payload.headRefName });
+  const { criteria, source } = resolveCriteria(bodyWithRecoveredIdentity(payload.body, identity), payload.headSha, { root });
   const result = evaluateProofDiscrimination(criteria, base.mergeBase, runProof);
-  const taskId = extractTaskTrailerId(payload.body ?? "");
+  const taskId = identity.taskId;
   const allowed = staleAllowanceFor(taskId, baseline(root));
   const verdict = judgeStaleAgainstAllowance(result.stale.length, allowed);
   // W1-T3729 design (ii): SKIPPED IS REPORTED, NEVER SILENT — on every verdict path below, so a
@@ -248,8 +250,8 @@ export function main(argv, {
     }
     log.error(
       taskId
-        ? `Allowance for ${taskId}: ${verdict.allowed} (scripts/proof-discrimination-baseline.json); this PR carries ${verdict.staleCount}, ${verdict.excess} over.`
-        : "No resolvable Remudero-Task trailer, so no grandfathered allowance applies: a PR authoring its own body criteria has no backlog to inherit.",
+        ? `Allowance for ${taskId}: ${verdict.allowed} (scripts/proof-discrimination-baseline.json); this PR carries ${verdict.staleCount}, ${verdict.excess} over. Task identity was read from ${identity.read}.`
+        : `No resolvable Remudero-Task trailer (task identity read from ${identity.read}), so no grandfathered allowance applies: a PR authoring its own body criteria has no backlog to inherit.`,
     );
     log.error("Remedy: replace each stale proof with one that names behavior this PR changes, then rerun this check.");
     return 1;
