@@ -400,24 +400,39 @@ export function readOnMtimeChange<T>(read: (path: string) => T): (path: string) 
   };
 }
 
+/** A fold reads at most this many fact `seq` per step, so a large fact delta spreads over several ticks. */
+export const NAV_BADGE_FOLD_CHUNK = 50_000;
+
 interface MemoryFold {
+  /** Every fact through this `seq` has been folded. */
   seq: number;
   rows: Array<{ tsMs: number; seq: number; row: OperatorAgentMemoryLedgerRow }>;
 }
 
-/** Operator-agent rows from the fact store, folded incrementally past the last applied `seq`. */
-function operatorAgentFacts(folds: WeakMap<ReadModelDb, MemoryFold>, db: ReadModelDb): readonly OperatorAgentMemoryLedgerRow[] {
+/** The store's fold and its newest `seq`; a store that shrank under the fold (rebuilt in place) folds again from its first row. */
+function memoryFold(folds: WeakMap<ReadModelDb, MemoryFold>, db: ReadModelDb): { fold: MemoryFold; max: number } {
+  const max = Number(db.prepare("SELECT coalesce(max(seq), 0) AS m FROM fact").get()?.m);
   let fold = folds.get(db);
-  // A projector that rebuilt this store in place restarts `seq`: fold again from the first row.
-  if (!fold || Number(db.prepare("SELECT coalesce(max(seq), 0) AS m FROM fact").get()?.m) < fold.seq) folds.set(db, (fold = { seq: 0, rows: [] }));
-  const fresh = db.prepare(`SELECT seq, ts_ms, body FROM fact WHERE seq > ? AND step IN (${OPERATOR_AGENT_MEMORY_STEPS.map(() => "?").join(", ")}) ORDER BY seq`)
-    .all(fold.seq, ...OPERATOR_AGENT_MEMORY_STEPS);
+  if (!fold || max < fold.seq) folds.set(db, (fold = { seq: 0, rows: [] }));
+  return { fold, max };
+}
+
+/** Folds the operator-agent facts past the fold's `seq` through `through`. */
+function foldThrough(fold: MemoryFold, db: ReadModelDb, through: number): void {
+  const fresh = db.prepare(`SELECT seq, ts_ms, body FROM fact WHERE seq > ? AND seq <= ? AND step IN (${OPERATOR_AGENT_MEMORY_STEPS.map(() => "?").join(", ")}) ORDER BY seq`)
+    .all(fold.seq, through, ...OPERATOR_AGENT_MEMORY_STEPS);
   for (const fact of fresh) {
-    fold.seq = Number(fact.seq);
     const row = selectOperatorAgentMemoryRow(JSON.parse(String(fact.body)) as Record<string, unknown>);
-    if (row) fold.rows.push({ tsMs: Number(fact.ts_ms), seq: fold.seq, row });
+    if (row) fold.rows.push({ tsMs: Number(fact.ts_ms), seq: Number(fact.seq), row });
   }
+  fold.seq = through;
   if (fresh.length > 0) fold.rows.sort((a, b) => a.tsMs - b.tsMs || a.seq - b.seq);
+}
+
+/** Operator-agent rows from the fact store, folded incrementally past the last folded `seq`. */
+function operatorAgentFacts(folds: WeakMap<ReadModelDb, MemoryFold>, db: ReadModelDb): readonly OperatorAgentMemoryLedgerRow[] {
+  const { fold, max } = memoryFold(folds, db);
+  if (max > fold.seq) foldThrough(fold, db, max);
   return fold.rows.map((entry) => entry.row);
 }
 
@@ -428,9 +443,10 @@ function operatorAgentFacts(folds: WeakMap<ReadModelDb, MemoryFold>, db: ReadMod
  * instance, and one per `?instances=<one>`. `ledgerSource` is the worker's own, passed in so this
  * module never imports the worker.
  */
-export function createNavBadgeReadModelView<S extends { instance: string; tickedAt?: number }>(ledgerSource: (state: S, now: number) => ViewSource): {
+export function createNavBadgeReadModelView<S extends { instance: string; tickedAt?: number }>(ledgerSource: (state: S, now: number) => ViewSource, foldChunk = NAV_BADGE_FOLD_CHUNK): {
   name: string;
   version: number;
+  prepare(ctx: { instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }, more: () => boolean): boolean;
   materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }): Array<{ key: string; data: NavBadgeData; sources: ViewSource[] }>;
 } {
   const folds = new WeakMap<ReadModelDb, MemoryFold>();
@@ -439,6 +455,18 @@ export function createNavBadgeReadModelView<S extends { instance: string; ticked
   return {
     name: "nav-badge",
     version: NAV_BADGE_VIEW_VERSION,
+    /** Folds each projected instance's fact delta one chunk per step, so a cold fold is never one unit. */
+    prepare: ({ instances }, more) => {
+      for (const { state, db } of instances) {
+        if (db === undefined || state.tickedAt === undefined) continue;
+        const { fold, max } = memoryFold(folds, db);
+        while (fold.seq < max) {
+          if (!more()) return false;
+          foldThrough(fold, db, Math.min(max, fold.seq + foldChunk));
+        }
+      }
+      return true;
+    },
     materialize: ({ now, instances }) => {
       const dbPath = instances.find((slot) => slot.db)?.db?.path;
       if (dbPath === undefined) return [];

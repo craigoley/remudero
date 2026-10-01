@@ -44,12 +44,15 @@ const BASELINE_PATH = join(REPO, "scripts", "clock-sweep-baseline.json");
 /** The one shift. See the header for why one, and why this size. */
 export const SWEEP_SHIFT_DAYS = 400;
 
+/** PRIMARY CONTROL on how long one sweep may spend running suites; the workflow's 30-minute timeout is the BACKSTOP. */
+export const SWEEP_BUDGET_MS = 27 * 60 * 1000;
+
 /**
  * Shifts used to BOUND THE FUSE of a suite that drifted — smallest-first, so the report can say
  * "fails by +N days" rather than only "fails at +400". Only ever run for an already-failing suite,
  * so this costs nothing on a green sweep.
  */
-export const FUSE_LADDER_DAYS = [7, 14, 30, 90, 180, 400];
+export const FUSE_LADDER_DAYS = [0, 7, 14, 30, 90, 180, 400];
 
 /**
  * NEVER RUN. These reach the real worker spawn primitive with no stub.
@@ -83,19 +86,7 @@ export const CLOCK_ARTIFACTS = new Map([
   // the only environment whose verdict this gate acts on. Its stated mechanism ("reads the REAL
   // on-disk ledger through a Date.now()-derived window cutoff") no longer holds there.
   //
-  // IT WAS BRIEFLY RESTORED ON A LOCAL MEASUREMENT THAT WAS NOT EVIDENCE, and the mistake is
-  // recorded because the next person will be tempted the same way: in a dev container the suite
-  // fails at +400d — twice, reproducibly — but it ALSO fails UNSHIFTED there, so the failure has
-  // nothing to do with the clock and says nothing about this exclusion. Two runs in one container
-  // are one measurement taken twice. THE CONTROL THAT SETTLES IT IS THE UNSHIFTED RUN, not a
-  // repeat of the shifted one:
-  //   node --test --import tsx test/emissions.test.ts            # must PASS, or your box is the
-  //   FK_SHIFT_DAYS=400 node --test --import tsx \               # variable, not the clock
-  //     --import "$PWD/scripts/clock-shift.mjs" test/emissions.test.ts
-  // (the absolute `--import` matters — a bare `scripts/clock-shift.mjs` resolves as a PACKAGE and
-  // dies with ERR_MODULE_NOT_FOUND, which reads as a clock failure and is not one.)
-  //
-  // Re-excluding it needs a mechanism measured where the gate runs, not a restored copy of this one.
+  // A dev container fails it at +400d AND unshifted, which says nothing about the clock: the control is the UNSHIFTED run (absolute `--import`, a bare path resolves as a package). Re-excluding it needs a mechanism measured where the gate runs.
   ["serve.glance", "drives a Playwright page whose BROWSER clock is unshifted, so server-rendered shifted times disagree with it (observed: `was \"in 9600h1m\"`)"],
 ]);
 
@@ -124,6 +115,24 @@ export function deriveCandidates(testDir = TEST_DIR) {
     })
     .map(suiteName)
     .sort();
+}
+
+/** Newest-touched first; ties and files with no history by name. `touchedAt` is Map<suite, epochSeconds>. */
+export function orderNewestFirst(suites, touchedAt) {
+  return [...suites].sort((a, b) => (touchedAt.get(b) ?? 0) - (touchedAt.get(a) ?? 0) || (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/** Last commit time of each suite's file from ONE `git log` (the first mention is the newest). Throws when history is unreadable. */
+export function readTouchedAt(cwd = REPO, exec = execFileSync) {
+  const out = exec("git", ["-C", cwd, "log", "--format=%ct", "--name-only", "--", "test/"], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+  const touched = new Map();
+  let when = 0;
+  for (const line of String(out).split("\n")) {
+    const file = /^test\/([^/]+)\.test\.ts$/.exec(line);
+    if (/^\d+$/.test(line)) when = Number(line);
+    else if (file && !touched.has(file[1])) touched.set(file[1], when);
+  }
+  return touched;
 }
 
 /** The candidates this sweep will actually execute: derived, minus the never-run set. */
@@ -229,14 +238,7 @@ export function failingTitles(output) {
   return [...output.matchAll(/^not ok \d+ - (.+)$/gm)].map((m) => m[1].trim()).slice(0, 5);
 }
 
-/**
- * TEMPORARY DIAGNOSTIC (W1-T1104 round 2): the report's own `failingTitles` names WHICH test
- * failed but never WHY, and this task hit a suite (four of them, in fact) that failed
- * deterministically in CI across three separate runs while passing every local repro attempted —
- * `failingTitles` alone gave no way to tell an assertion mismatch from an unrelated throw. This
- * captures the first raw TAP diagnostic block (the YAML under the first `not ok` line) so a report
- * read on a machine nobody can log into still carries the actual failure, not just its title.
- */
+/** W1-T1104: the first raw TAP diagnostic block under the first `not ok`, so a report read where nobody can log in carries WHY, not only the title. */
 export function firstFailureDetail(output) {
   const lines = String(output).split("\n");
   const start = lines.findIndex((l) => /^not ok \d+ - /.test(l));
@@ -260,6 +262,8 @@ export function main({
   // W1-T3276 — injected beside `ceiling` and for the same reason: the suite must be able to state
   // a recorded set without rewriting the shipped baseline.
   recorded = DRIFT_BASELINE.driftingSuitesAtCapture ?? [],
+  touchedAt = readTouchedAt,
+  now = Date.now,
   log = console.log,
   write = (s) => process.stdout.write(s),
 } = {}) {
@@ -281,21 +285,40 @@ export function main({
     return 0;
   }
 
+  let touched;
+  let order = "name (git history unreadable)";
+  try {
+    touched = touchedAt();
+    order = "newest-touched first";
+  } catch {
+    touched = new Map();
+  }
+  log(`  order: ${order}`);
+  const ordered = orderNewestFirst(runnable, touched);
+
   // PER-SUITE PROGRESS, written as it goes. The full sweep runs for tens of minutes; a job that
   // prints nothing until the end is indistinguishable from a stalled one (and `tee`'s block
   // buffering makes that worse), so each line lands as its suite finishes.
   const results = new Map();
   let done = 0;
-  for (const suite of runnable) {
+  const started = now();
+  for (const suite of ordered) {
+    if (now() - started >= SWEEP_BUDGET_MS) break;
     const r = run(suite, SWEEP_SHIFT_DAYS);
     results.set(suite, r);
     done++;
     const verdict = r.failed ? (CLOCK_ARTIFACTS.has(suite) ? "fail (known artifact)" : "FAIL") : "ok";
     write(`  [${String(done).padStart(3)}/${runnable.length}] ${verdict.padEnd(21)} ${suite}\n`);
   }
-  const { drifted, newDrift, staleExclusions, ok } = classifySweep(results, CLOCK_ARTIFACTS, ceiling, recorded);
+  const { drifted, newDrift, staleExclusions, ok: classified } = classifySweep(results, CLOCK_ARTIFACTS, ceiling, recorded);
+  const unreached = ordered.slice(done);
+  const ok = classified && unreached.length === 0;
 
   log("");
+  if (unreached.length) {
+    log(`UNREACHED — ${unreached.length} suite(s) not run inside the ${SWEEP_BUDGET_MS / 60000}-minute budget (oldest-touched last): ${unreached.slice(0, 10).join(", ")}${unreached.length > 10 ? ` + ${unreached.length - 10} more` : ""}`);
+    log("");
+  }
   // ── THE REPORT. An operator reads this months from now with no context, so it names the suite,
   // the failing test, the fuse, and what to do — never just "the shifted run failed". Printed
   // whenever there IS drift, even a run that stays under the ceiling and therefore still exits
@@ -306,7 +329,7 @@ export function main({
     for (const d of drifted) {
       const fuse = bisectFuse(d.suite, run);
       log(`\n  test/${d.suite}.test.ts`);
-      log(`    fails by      : +${fuse ?? SWEEP_SHIFT_DAYS} days from now${fuse ? "" : " (only at the full shift)"}`);
+      log(fuse === 0 ? "    fails by      : +0 days - NOT CLOCK DRIFT: fails with no shift (a runner or environment defect, for example a missing browser)" : `    fails by      : +${fuse ?? SWEEP_SHIFT_DAYS} days from now${fuse ? "" : " (only at the full shift)"}`);
       for (const t of failingTitles(d.output)) log(`    failing test  : ${t}`);
       log(`    reproduce     : FK_SHIFT_DAYS=${fuse ?? SWEEP_SHIFT_DAYS} node --test --import tsx --import scripts/clock-shift.mjs test/${d.suite}.test.ts`);
       log(`    likely fix    : the fixture holds a DATE LITERAL compared against a real clock. Derive it at run time and assert its margin against the policy that judges it (PR #1116 is the shape).`);

@@ -1,0 +1,39 @@
+- id: W1-T5057
+  title: "AN UNAUTHENTICATED GET APPENDS TO THE LEDGER — /v1/escalation/confirm ledgers every refused link and creates the link secret on first use; create the secret at serve boot and hold refusals as one hourly rollup row per escalation and reason"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "2026-10-01 core-console architecture Phase 4 design (P4-T18), arch-phase4-design.md"
+  files:
+    - src/lib/panel-actions.ts
+    - test/escalation-confirm-writes-nothing.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    READ 2026-10-01 at 431d71762: buildEscalationLinkConfirmRoute (panel-actions.ts) calls ledgerLinkOutcome
+    with escalation.link_refused on every refusal other than bad-request, and resolveSecret creates the secret
+    file through loadEscalationLinkSecret on first use. The route is selfAuthenticated, so a crawler retrying
+    a stale link appends a row per request. One of the five GET writers the GETs-never-write ratchet counts.
+  design: |
+    Resolve (create) the link secret once when the route is built at serve boot, not inside the handler.
+    Refusals accumulate in memory keyed (escalation id, reason) and flush one
+    escalation.link_refused_rollup {escalation, reason, count, firstAt, lastAt} row per key per hour (and on
+    shutdown), so a repeated GET is idempotent. The POST answer route keeps its current ledgering.
+  acceptance:
+    - claim: "repeating a refused escalation confirm get appends no ledger row"
+      proof: 'grep: test("W1-T5057: repeating a refused escalation confirm get appends no ledger row" in test/escalation-confirm-writes-nothing.test.ts'
+    - claim: "refusals are flushed as one hourly rollup row per escalation and reason"
+      proof: 'grep: test("W1-T5057: refusals are flushed as one hourly rollup row per escalation and reason" in test/escalation-confirm-writes-nothing.test.ts'
+  falsifier: |
+    Keep the per-request ledgerLinkOutcome: two refused GETs append two rows and the first proof fails.
+  note: |
+    Design: ~/Remudero/.session-scratch/arch-phase4-design.md §5 (GET write 2) and §10.
+    Scope-time checks 2026-10-01: no run-W1-T5048..5066 branch on origin; no origin/main commit names
+    these ids; no plan record on origin/main or an open PR head covers this change. Reserved from the
+    operator checkout for this filing branch.

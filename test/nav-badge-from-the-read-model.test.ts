@@ -345,3 +345,32 @@ test("a fact store that shrank under the fold is folded again from its first row
   db.exec(`DELETE FROM fact WHERE seq >= ${decision}`);
   assert.equal(count(), 2, "without its decision the proposal is visible again");
 });
+
+test("a cold nav-badge fold takes one chunk per step and builds the body an unchunked fold builds", async (t) => {
+  const f = await fixture(t);
+  createNavBadgeSourcePublisher({ stateDir: f.stateDir, inboxStateDir: join(f.inboxRoot, "state"), scopes: () => f.scopes })();
+  tickBodies(f);
+  const db = openProjectorReadModel(f.stateDir, "core");
+  t.after(() => db.close());
+  const max = Number(db.prepare("SELECT max(seq) AS m FROM fact").get()?.m);
+  assert.ok(max > 2, "the fixture's fact store spans several chunks");
+  const instances = [{ state: { instance: "core", generation: 1, lease: "held" as const, failures: 0, newestTs: null, tickedAt: NOW }, db }];
+  const chunked = createNavBadgeReadModelView(ledgerSource, 2);
+  let steps = 0;
+  let calls = 0;
+  for (let done = false; !done && calls < 50; calls++) {
+    let allowed = true;
+    done = chunked.prepare({ instances }, () => {
+      if (!allowed) return false;
+      allowed = false;
+      steps += 1;
+      return true;
+    });
+  }
+  assert.equal(steps, Math.ceil(max / 2), "each step folds at most one chunk");
+  assert.equal(calls, steps, "a prepare that may take one step is done only on the last chunk");
+  const body = chunked.materialize({ now: NOW, instances });
+  assert.equal((body[1].data as NavBadgeData).agent.count, 1, "the decision folded in a later chunk hides the accepted proposal");
+  assert.deepEqual(body, createNavBadgeReadModelView(ledgerSource).materialize({ now: NOW, instances }));
+  assert.equal(chunked.prepare({ instances }, () => assert.fail("a caught-up fold takes no step")), true);
+});

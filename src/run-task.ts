@@ -24885,8 +24885,21 @@ export interface PlanReconcileDeps {
    *  `buildCreditCandidates` — the SAME projection the sweep's credit rung already trusts, never a
    *  second derivation that could disagree with it. Throwing here ABORTS the verb (see below). */
   creditedMergedIds?: () => Set<string>;
+  readInlineRecords?: () => Array<{ taskId: string; text: string }> | undefined;
   creditedProjection?: () => { ids: Set<string>; unknownReason?: string };
   log?: (step: string, extra?: Record<string, unknown>) => void;
+}
+
+export function readInlinePlanRecords(planPath: string): Array<{ taskId: string; text: string }> | undefined {
+  if (!existsSync(planPath)) return undefined;
+  const lines = readFileSync(planPath, "utf8").split(/(?<=\n)/);
+  const out: Array<{ taskId: string; text: string }> = [];
+  for (const line of lines) {
+    const id = line.match(/^- id: (\S+)/)?.[1];
+    if (id) out.push({ taskId: id, text: line });
+    else if (out.length > 0) out[out.length - 1]!.text += line;
+  }
+  return out;
 }
 
 /** Read `plan/tasks.d/*.yaml` as `{ taskId, path, text }`, skipping anything without an `- id:`. */
@@ -24966,14 +24979,25 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
       if (path) put(path, w.text);
     }
   }
+  let inline: InlineReconcileReport | undefined;
+  try {
+    const records = (deps.readInlineRecords ?? (() => readInlinePlanRecords(join(dirname(shardDir), "tasks.yaml"))))();
+    const decided = records && reconcilePlan(records, (id) => credited.has(id)).summary;
+    if (decided) inline = { queued: decided.rewritten.length + decided.skipped["not-credited-merged"], creditable: decided.rewritten };
+  } catch (e) {
+    inline = { unreadable: String((e as Error)?.message ?? e) };
+  }
   (deps.log ?? (() => {}))("plan.reconcile", {
     mode: write ? "write" : "dry-run",
     rewritten: summary.rewritten.length,
     skipped: summary.skipped,
+    ...(inline && "queued" in inline ? { inline_queued: inline.queued, inline_creditable: inline.creditable.length } : {}),
   });
-  console.log(renderPlanReconcile(summary, write));
+  console.log(renderPlanReconcile(summary, write, inline));
   return 0;
 }
+
+type InlineReconcileReport = { queued: number; creditable: readonly string[] } | { unreadable: string };
 
 /**
  * W1-T3084 — THE ONE RULE BOTH RUNGS APPLY. `sweep.ts:1347` declines any candidate whose
@@ -25062,7 +25086,7 @@ export function buildPlanReconcileProductionInput(deps: PlanReconcileProductionI
 export const PLAN_RECONCILE_REVIEW_FILE_CEILING = 300;
 
 /** The operator-facing summary. Names the mode FIRST, so a dry run can never be misread as applied. */
-export function renderPlanReconcile(summary: ReconcileSummary, write: boolean): string {
+export function renderPlanReconcile(summary: ReconcileSummary, write: boolean, inline?: InlineReconcileReport): string {
   const skipped = Object.entries(summary.skipped)
     .filter(([, n]) => n > 0)
     .map(([k, n]) => `${k}=${n}`)
@@ -25075,7 +25099,12 @@ export function renderPlanReconcile(summary: ReconcileSummary, write: boolean): 
     `### rmd plan-reconcile${write ? " --write" : " (dry run — nothing written)"}\n` +
     `${summary.rewritten.length} shard(s) ${write ? "reconciled" : "would be reconciled"} to status: merged` +
     (skipped ? `\nskipped: ${skipped}` : "") +
-    (summary.rewritten.length > 0 && !write ? reviewHint : "")
+    (summary.rewritten.length > 0 && !write ? reviewHint : "") +
+    (inline && "unreadable" in inline ? `\nplan/tasks.yaml: unreadable (${inline.unreadable}), its queued records were not counted` : "") +
+    (inline && "queued" in inline && inline.queued > 0
+      ? `\nplan/tasks.yaml is read-only to this verb (it is never machine-rewritten): ${inline.queued} queued record(s) outside the reconcile; ${inline.creditable.length} credited merged` +
+        (inline.creditable.length > 0 ? `: ${inline.creditable.join(" ")}\nflip these by hand in a plan-only PR` : "")
+      : "")
   );
 }
 

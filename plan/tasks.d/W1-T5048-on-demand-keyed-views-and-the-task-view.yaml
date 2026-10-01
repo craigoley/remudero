@@ -1,0 +1,60 @@
+- id: W1-T5048
+  title: "THE TASK PAGE COMPUTES ON EVERY GET — /task reads 4 to 7 core routes and the per-instance task route reads each run's PR from GitHub; add on-demand keyed views (a want message, a 300 ms async wait, 10 min eviction) and the task?instance=&id= view built from the task projection and indexed fact rows"
+  repo: remudero
+  depends_on: []
+  dispatch_hold: true
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "2026-10-01 core-console architecture Phase 4 design (P4-T09), arch-phase4-design.md"
+  plan_refs: ["W1-T4924"]
+  files:
+    - src/lib/view-demand.ts
+    - src/lib/task-view.ts
+    - test/view-demand.test.ts
+    - test/task-view.test.ts
+    - src/lib/read-model-worker.ts
+    - src/lib/views.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-01 (Phase 4 gentle probe, host): the console's /task page performs 4 to 7 core reads per
+    render, and the per-instance /v1/i/<x>/task route reads each run's PR from GitHub. Materializing every
+    task is wasteful (2,647 tasks), so the view must be keyed and built on demand. Per-task detail inside
+    now would churn the whole now ETag; a keyed task view keeps it out.
+  design: |
+    (i) src/lib/view-demand.ts: a GET for an unmaterialized key posts want{view, key} to the read-model worker
+    and main awaits the body ASYNCHRONOUSLY for up to 300 ms (the loop is never blocked and SQLite is never
+    touched on main). A miss past 300 ms answers 404 view_not_ready with retryMs. A key stays materialized
+    while it was read in the last 10 min or is named in an open stream's ?views= filter, then it is evicted.
+    Pending wants are bounded at 64. views.ts's read-model view routes call it on a key miss.
+    (ii) src/lib/task-view.ts: task?instance=&id= from the task_projection row, fact rows by task_id
+    (indexed), the peek tail file and the trace summary. PR state comes from the worker's GitHub gateway,
+    never from a per-run GitHub read. Sources: ledger:<i>, github:<i>, plan:<i>.
+    (iii) Register the view in read-model-worker.ts and handle the want message there.
+  acceptance:
+    - claim: "a first read of an unmaterialized task key is answered after one worker pass"
+      proof: 'grep: test("W1-T5048: a first read of an unmaterialized task key is answered after one worker pass" in test/view-demand.test.ts'
+    - claim: "an unread keyed view is evicted after ten minutes"
+      proof: 'grep: test("W1-T5048: an unread keyed view is evicted after ten minutes" in test/view-demand.test.ts'
+    - claim: "the task view reads pull request state from the gateway and spawns no GitHub read"
+      proof: 'grep: test("W1-T5048: the task view reads pr state from the gateway and spawns no github read" in test/task-view.test.ts'
+    - claim: "the read-model view routes ask for a missing key"
+      proof: 'grep: awaitViewDemand( in src/lib/views.ts'
+    - claim: "the worker registers the task view"
+      proof: 'grep: createTaskView( in src/lib/read-model-worker.ts'
+  falsifier: |
+    Answer a cold key synchronously or not at all: the first proof times out. Never evict: the second proof
+    still finds the key after 10 min with no reads. Read the PR per run: the spawn spy in the third proof fires.
+  note: |
+    DISPATCH HOLD: waits for P4-T04 (the read-model slow-lane worker thread). A Phase 4 critical-path task is hand-built on a run-unfiled
+    branch with no plan id, so depends_on cannot name it. RELEASE: one plan amendment deleting
+    dispatch_hold once that merges (tracked in arch-plan.md, Phase 4).
+    Design: ~/Remudero/.session-scratch/arch-phase4-design.md §1.1, §1.2 and §10.
+    Scope-time checks 2026-10-01: no run-W1-T5048..5066 branch on origin; no origin/main commit names
+    these ids; no plan record on origin/main or an open PR head covers this change. Reserved from the
+    operator checkout for this filing branch.

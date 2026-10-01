@@ -59,3 +59,37 @@ test("a measured view that fits the pass has no budget deferral", (t) => {
   assert.deepEqual(tick(), ["a"]);
   assert.equal(deferred().length, 0);
 });
+
+test("a view with prepare steps spreads a long build over ticks and posts its body only once prepared", (t) => {
+  const stateDir = makeTempDir("materialize-steps");
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  let at = T0;
+  const clock: Clock = { now: () => at, date: () => new Date(at), iso: () => new Date(at).toISOString() };
+  let done = 0;
+  const perTick: number[] = [];
+  const view: ReadModelView = {
+    name: "stepped", version: 1,
+    prepare: (_ctx, more) => {
+      let steps = 0;
+      while (done < 10 && more()) {
+        at += 15;
+        done += 1;
+        steps += 1;
+      }
+      perTick.push(steps);
+      return done === 10;
+    },
+    materialize: () => [{ key: "", data: { done }, sources: [] }],
+  };
+  const bodies: unknown[] = [];
+  const ticker = createReadModelTicker({ stateDir, instances: [], views: [view], clock, holder: "steps", post: (m) => void (m.type === "body" && bodies.push(m.entry.body.data)), passBudgetMs: 100 });
+  ticker.tick();
+  assert.deepEqual(perTick, [3], "steps stop at the 40 ms view share; the first is always allowed");
+  assert.deepEqual(bodies, [], "no body before prepare is done");
+  for (let i = 0; i < 20 && bodies.length === 0; i++) {
+    at += 250;
+    ticker.tick();
+  }
+  assert.deepEqual(bodies, [{ done: 10 }]);
+  assert.deepEqual(perTick, [3, 3, 3, 1]);
+});
