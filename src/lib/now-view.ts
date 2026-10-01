@@ -17,6 +17,7 @@
  * serves it yet (P1-12 declares the route, P1-14 compares it).
  */
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import {
@@ -49,7 +50,7 @@ import {
 } from "./now-decisions.js";
 import type { BoardPrRest } from "./open-prs-rest.js";
 import { loadPlanQuarantiningDuplicates, type Plan } from "./plan.js";
-import type { ReadModelDb } from "./read-model-db.js";
+import type { ReadModelDb, ReadModelLease } from "./read-model-db.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { buildBatchedGithub, readLedgerLines, type BatchedPr, type GitHub } from "./status.js";
 import { windowCostRows } from "./sweep.js";
@@ -404,8 +405,11 @@ function answeredByFact(db: ReadModelDb): (taskId: string) => string | undefined
   };
 }
 
-/** A gateway over the legacy gateway's persisted snapshot (ruling Q3): open PRs, closed PRs and issues, no GitHub read. */
-export function snapshotGithub(root: string, owner: string, repo: string, clock: Clock = systemClock): { github: GitHub; generation: string; source: Omit<ViewSource, "name"> } {
+/**
+ * A gateway over the legacy gateway's persisted snapshot (ruling Q3): open PRs, closed PRs and issues, no GitHub read.
+ * `generation` is the files' mtimes, which move on every re-save; `content` moves only when what they hold does.
+ */
+export function snapshotGithub(root: string, owner: string, repo: string, clock: Clock = systemClock): { github: GitHub; generation: string; content?: string; source: Omit<ViewSource, "name"> } {
   const closedCache = createBoardSnapshotCache(root, owner, repo);
   const closed = [...(closedCache.closedSeed()?.values() ?? [])];
   const issues = [...(closedCache.issueSeed()?.values() ?? [])];
@@ -427,7 +431,8 @@ export function snapshotGithub(root: string, owner: string, repo: string, clock:
     : ageMs! > NOW_GITHUB_STALE_MS
       ? { asOf: open.snapshot.savedAt, state: "stale", reason: `open pull requests last saved ${Math.round(ageMs! / 1000)} s ago` }
       : { asOf: open.snapshot.savedAt, state: "fresh" };
-  return { github, generation: snapshotGeneration(root, owner, repo), source };
+  const content = createHash("sha1").update(JSON.stringify([all, issues])).digest("hex").slice(0, 16);
+  return { github, generation: snapshotGeneration(root, owner, repo), content, source };
 }
 
 function snapshotGeneration(root: string, owner: string, repo: string): string {
@@ -509,7 +514,8 @@ export interface NowSlotState {
 
 export interface NowViewContext {
   now: number;
-  instances: ReadonlyArray<{ state: NowSlotState; db?: ReadModelDb }>;
+  /** `lease`: the writer lease the board projection persists behind; absent, it lives in memory only. */
+  instances: ReadonlyArray<{ state: NowSlotState; db?: ReadModelDb; lease?: ReadModelLease }>;
   switches?: { views: Record<string, string> };
 }
 
@@ -620,7 +626,7 @@ export function createNowView(opts: NowViewOptions): {
     return gitPlanBehind(path, memo);
   });
 
-  function materializeOne(instance: NowInstance, state: NowSlotState, db: ReadModelDb, now: number): { key: string; data: NowViewData; sources: ViewSource[] } | undefined {
+  function materializeOne(instance: NowInstance, state: NowSlotState, db: ReadModelDb, now: number, lease?: ReadModelLease): { key: string; data: NowViewData; sources: ViewSource[] } | undefined {
     const pk = planKey(instance);
     const gk = githubKey(instance);
     let h = held.get(instance.name);
@@ -633,14 +639,19 @@ export function createNowView(opts: NowViewOptions): {
     planCache.set(instance.name, { key: pk, plan });
     const gateway = h && h.githubKey === gk ? h.gateway : github(instance);
     const ledgerPath = join(instance.ledgerDir, LEDGER_FILENAME);
-    if (!h || h.githubKey !== gk) {
+    // One projection per store, kept across snapshot re-saves: the gateway is swapped in and only a
+    // change in what the snapshot holds restamps every task. Behind the lease it persists, so a restart reuses it.
+    if (!h) {
+      const name = instance.name;
       const board = createBoardProjection({
-        db, ledgerPath, readPlan: () => planCache.get(instance.name)!.plan, github: gateway.github, githubGeneration: () => gk, clock, instance: instance.name,
-        log: (step, extra) => log(step, { instance: instance.name, ...extra }),
+        db, ...(lease ? { lease } : {}), ledgerPath, readPlan: () => planCache.get(name)!.plan, github: gateway.github, clock, instance: name,
+        currentGithub: () => held.get(name)!.gateway.github, githubGeneration: () => { const g = held.get(name)!; return g.gateway.content ?? g.githubKey; },
+        log: (step, extra) => log(step, { instance: name, ...extra }),
       });
       h = { db, board, recent: createRecentActivityCache(), generation: -1, planKey: pk, plan, githubKey: gk, gateway, at: now, healthAt: Number.NEGATIVE_INFINITY, members: {}, spend: [], sortedBy: new Map(), decisionsKey: dk };
-      held.set(instance.name, h);
+      held.set(name, h);
     }
+    Object.assign(h, { githubKey: gk, gateway });
     h.board.update({ force: true });
     const rows = h.board.rows();
     const projections = h.board.projections();
@@ -722,11 +733,11 @@ export function createNowView(opts: NowViewOptions): {
       const mode = ctx.switches?.views[NOW_VIEW_NAME];
       if (mode !== "shadow" && mode !== "serve") return [];
       const out: Array<{ key: string; data: NowViewData; sources: ViewSource[] }> = [];
-      for (const { state, db } of ctx.instances) {
+      for (const { state, db, lease } of ctx.instances) {
         const instance = byName.get(state.instance);
         if (!instance || !db || state.lease !== "held") continue;
         try {
-          const body = materializeOne(instance, state, db, ctx.now);
+          const body = materializeOne(instance, state, db, ctx.now, lease);
           if (body) out.push(body);
         } catch (error) {
           log("read_model.now_view_failed", { instance: state.instance, error: (error as Error).message });
