@@ -389,6 +389,7 @@ function applyProjections(db: ReadModelDb, projections: readonly LedgerRowProjec
     const parse = (): Record<string, unknown> | undefined => (parsed ??= { row: parseLine(line) }).row;
     for (const p of projections) if (p.markers.some((marker) => line.includes(marker))) p.apply(db, line, ledgerLineIdentity(line), parse);
   }
+  for (const p of projections) p.settle?.(db);
 }
 
 function parseLine(line: string): Record<string, unknown> | undefined {
@@ -404,7 +405,7 @@ function parseLine(line: string): Record<string, unknown> | undefined {
 /**
  * Recomputes each row projection over the window's lines in a scratch database, with the projector's
  * own `apply`, and compares it with the store. A table keyed on `(ts_ms, h)` is compared row for row
- * inside the window; any other table (an aggregate such as a heartbeat) is seeded with the stored rows
+ * inside the window; any other table (an aggregate such as a heartbeat, or one its projection settles) is seeded with the stored rows
  * first, so drift means the window's lines would still move it.
  */
 function compareProjections(
@@ -426,7 +427,7 @@ function compareProjections(
       scratch.exec(p.ddl);
       for (const table of p.tables) {
         const columns = tableColumns(db, table);
-        windowed.set(table, columns.includes("ts_ms") && columns.includes("h"));
+        windowed.set(table, p.settle === undefined && columns.includes("ts_ms") && columns.includes("h"));
         if (windowed.get(table)) continue;
         const insert = scratch.prepare(`INSERT OR REPLACE INTO ${table}(${columns.join(", ")}) VALUES(${columns.map(() => "?").join(", ")})`);
         for (const row of db.prepare(`SELECT * FROM ${table}`, { bigInts: true }).all()) insert.run(...columns.map((c) => row[c]));
