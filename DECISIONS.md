@@ -3412,3 +3412,23 @@ Each phase is measured against the 2026-09-29/30 baseline.
 - **The pacer is one reusable module.** At the Phase 1 cutover (Q3 of the Phase 1 rulings above), the read-model worker becomes the single GitHub fetcher and takes over the refresh with this same pacer. Until then, the off-loop gateway runs it.
 
 **Rollback:** re-gate the refresh on a reader. The pacer keeps its readers-active input, so this is a change to one call site in serve.
+
+## 2026-10-01 — OPERATOR RULING: bulk-close the legacy queued records, and raise the board read cap to 200 pages
+
+*Operator-authored direction, given in chat on 2026-10-01 in answer to a recommendation and four questions. The operator session recorded it; it did not originate it.*
+
+**Why this exists.** A census at origin/main 1f6d904bb found 464 `status: queued` records, 297 of them with a merged crediting PR. Dispatch derives "merged" from the `Remudero-Task:` trailer on merged PRs, not from the plan `status:` field, so a stale `queued` cannot cause a re-dispatch. It is untidiness: the queue reads larger than it is, and `rmd plan-reconcile` cannot clear it. #8330 flipped the 50 shards it could, and 172 of the stragglers sit in the `plan/tasks.yaml` monolith, which that verb never reads.
+
+**Ruled:**
+- **Close the stale queue by hand, with `status: blocked` plus `retirement: closed`.** `status: merged` is the wrong word for these records: their proofs are prose or resolve to no test, so `lint-plan`'s changed-tasks pass refuses the flip. `blocked` plus a legal `retirement:` passes with the proof findings downgraded to warnings. The precedents are W1-T1014 and W1-T1120 ("complete, nothing to build, acceptance preserved, closed not re-proved"). Each closed record carries a `# CLOSED 2026-10-01 BY OPERATOR RULING` comment. Acceptance text is untouched.
+- **153 records closed in one plan-only PR** (149 in `plan/tasks.yaml`, 4 shards). The set is the REVIEW table of #8193, still queued, minus the holds below. Three of them (W1-T29, W1-T34, W1-T38) also move `verify: auto` to `verify: human`, because their `paste-then-revert` proofs fail the headless-fitness lint on an auto record.
+- **Held back, 20 records with a live dependent.** A retirement-carrying dependency counts as never merged (`plan.ts`), so retiring one would strand a record that still has to be built. Hold is transitive: W1-T119, W1-T154, W1-T167, W1-T17, W1-T18, W1-T19, W1-T203, W1-T23, W1-T24, W1-T250, W1-T26, W1-T27, W1-T35, W1-T36, W1-T40, W1-T41, W1-T43, W1-T44, W1-T6 and W1-T7. The dependents that pin them are W1-T130, W1-T128, W1-T3958, W1-T12e, W1-T204, W1-T41, W1-T43, W2-T2, W2-T3, W3-T6, W3-T7, W3-T8 and W1-T7B. They stay `queued` until those dependents are built or retired. (The chat estimate was 14 direct holds. Counting the transitive ones gives 20.)
+- **W1-T79 and W1-T100 are held.** `test/task-linter.test.ts` loads both from the live plan as its canonical proof-dialect regression corpus and asserts their proofs block. A retired record downgrades those findings to warnings, so closing them fails two tests. They stay `queued`.
+- **W1-T3801 is held.** It derives as merged, but its first gate-posture pilot (`coverage-ratchet`, ruled 2026-09-30 above) is not built. It needs its own follow-up task, so closing it would hide the remainder.
+- **The 17 filing-only records are left alone.** Their only crediting merges are plan-only filings, so the work they describe still has to be built.
+- **W1-T75 is retired** (#8342), on the same grounds: #138 hoisted operator corrections above rung (a), nothing remains, acceptance is preserved and not re-proved.
+- **`BOARD_MAX_PAGES` goes from 50 to 200, globally** (#8362), exported so tests import it rather than copy a literal. At 100 rows per cold page, 50 pages saw 5,000 of about 6,700 closed PRs, so every cold read truncated and, since W1-T5029, `rmd plan-reconcile` exited 2 UNKNOWN. 200 pages reads 20,000 PRs and leaves about 130 days of headroom at about 100 closed PRs a day. It is a stopgap. W1-T5099 (coverage-aware truncated read) is the long-run answer and now builds against the constant (#8363).
+
+**Not ruled here:** the follow-up builds (W1-T5099 to W1-T5102) go to the fleet, not to this session.
+
+**Rollback:** every closed record reverts by setting its `status:` back to `queued` and deleting its `retirement:` line and `# CLOSED` comment. The cap reverts by one constant.
