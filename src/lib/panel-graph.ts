@@ -92,7 +92,7 @@ import { buildActionResultsRoute } from "./action-results.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, rotationStampIso } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
-import { fleetLaneDecisions, readFleetLaneStore, writeClassificationSnapshot, type FleetLaneDecision } from "./fleet-lane.js";
+import { fleetLaneDecisions, readFleetLaneStore, type FleetLaneDecision } from "./fleet-lane.js";
 import { inboxOwner } from "./inbox-owner.js";
 import { plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
 import {
@@ -120,9 +120,7 @@ import {
   parseProposalRegistryResult,
   applyProposalVerdict,
   type ProposalVerdictKind,
-  pruneRatifiedProposals,
   refusalReason,
-  updateProposalRegistry,
   type AnchorGrepCache,
   type DraftCache,
   type EvidenceAnchor,
@@ -1776,7 +1774,7 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
         sendJson(res, 400, { error: "invalid_request", detail: shape.error });
         return;
       }
-      const { registryPath, proposals, classifications, ledgerLines } = await classifyAllProposalsSliced(deps, readPlanSnapshot);
+      const { proposals, classifications, ledgerLines } = await classifyAllProposalsSliced(deps, readPlanSnapshot);
       // W1-T4087: every item carries its plain message — the stored one, or its kind's template.
       const plainStore = readPlainStore(plainStorePath(join(deps.inboxRoot, "state")));
 
@@ -1810,21 +1808,8 @@ export function buildInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
           notReady.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), reasons: classification.reasons });
         }
       }
-      // A "ratified" classification is detected off the ledger (W1-T190); detection alone leaves
-      // the drifted row on disk, so heal it here (a no-op write when nothing needs healing).
-      // Races three other writers of this file (W1-T240): reapply prunedIds against a fresh
-      // read under lock, never blind-write the array this handler read at request start.
-      const { prunedIds } = pruneRatifiedProposals(proposals, classifications);
-      if (prunedIds.length > 0) {
-        const prunedIdSet = new Set(prunedIds);
-        updateProposalRegistry(registryPath, (current) => {
-          const fresh = current.filter((p) => !prunedIdSet.has(p.id));
-          return fresh.length === current.length ? null : fresh;
-        });
-      }
-      // W1-T4089: the daemon's fleet lane files only what this classification calls ready, so it
-      // acts on the same readiness truth the operator sees rather than a second, cheaper guess.
-      writeClassificationSnapshot(join(deps.inboxRoot, "state"), classifications);
+      // A read writes nothing: the ratified-row prune and the snapshot the daemon's fleet lane acts
+      // on (W1-T4089) are written by serve's slow lane on a cadence (inbox-view.ts).
       // W1-T4086: split every lane by who must act. `needsYou` holds only the operator's items;
       // `fleet` holds the fleet's own findings with the lane each sits in. The four top-level
       // lanes stay unchanged for one release so the console can move over without a break.
