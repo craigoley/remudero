@@ -1,0 +1,98 @@
+- id: W1-T5029
+  title: "`rmd plan-reconcile` PRINTS 'board gateway: batched PR fetch failed (unknown): spawnSync gh ENOENT' AND THEN THE CONFIDENT '0 shard(s) would be reconciled · skipped: not-credited-merged=256' AND EXITS 0, SO A FAILED MERGED-PR READ IS INDISTINGUISHABLE FROM 'NOTHING IS STALE' WHILE 78 OF 256 QUEUED RECORDS CARRY A MERGED Remudero-Task: TRAILER ON MAIN — the gateway marks the failure (`readFailed()` is true, reason `unknown`) and the verb never asks; make a failed or truncated read print an UNKNOWN line naming the reason, write nothing under --write, and exit 2, while a readable empty projection still exits 0"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-09-30: in a session with no gh CLI, rmd plan-reconcile reported 0 shards would be reconciled and exited 0 after two 'batched PR fetch failed' lines"
+  plan_refs: [W1-T3043, W1-T3084, W1-T3970, W1-T181, W1-T119, W1-T415]
+  files:
+    - src/run-task.ts
+    - test/plan-reconcile-fails-loud-when-its-github-read-fails.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 at origin/main 1f6d904bb; the failing read was REPRODUCED here, not carried from the brief.
+
+    (1) THE REPRODUCTION. `buildCreditCandidates(owner, repo, plan, ledgerPath, undefined, gateway)` with a
+    `buildBatchedGithub` whose `exec` throws `ENOENT` (the no-gh-CLI shape) printed `board gateway: batched PR fetch
+    failed (unknown): spawnSync cli ENOENT` TWICE, returned 0 candidates, and afterwards that same gateway reported
+    `readFailed() === true`, `readFailureReason() === "unknown"`, `readTruncated() === false`. So the gateway did mark the
+    failure (W1-T181's pairing) and the two stderr lines are all the operator gets: `planReconcileCommand` never asks.
+
+    (2) WHY THE EXISTING ABORT DOES NOT FIRE. The verb's own header says 'AN UNREADABLE PROJECTION ABORTS ... treating a
+    failed credit read as "nothing merged" would be silently correct here but would report "0 to reconcile" as if it were a
+    finding. Exit non-zero and say so instead.' It aborts only on a THROW from `creditedMergedIds`. The gateway swallows
+    its fetch error by design (the W1-T181 catch returns `[]` paired with failure flags), `buildCreditCandidates` returns
+    `[]`, and `defaultCreditedMergedIds` turns that into an empty Set: no throw, exit 0. The doc's promise is kept for a
+    throwing read and broken for the one read that actually fails in production.
+
+    (3) THE COST OF THE SILENCE. At this head 256 shards read `status: queued` and 78 of them have a
+    `Remudero-Task: <id>` trailer on a commit on origin/main (the brief's 77 at an earlier head; counted from
+    `git log origin/main --format=%B` against `plan/tasks.d`). Not all 78 are reconcilable (the credit predicate also
+    needs an implementation-shaped merge), so 78 is an upper bound, but the verb's dry run told an operator with no gh
+    `0 shard(s) would be reconciled`, which reads as a finding and is a read failure. A `--write` in that state is
+    harmless (an empty credit set writes nothing) but prints the same false summary.
+
+    (4) WHAT IS ALREADY RIGHT AND MUST NOT MOVE. A readable empty projection (GitHub answered, nothing is stale) is a real
+    0 and exits 0; the thrown-projection arm exits 1; the shard-read arm exits 2. `defaultCreditedMergedIds` has
+    other callers (W1-T3970's measurement-cadence rung through `buildPlanReconcileProductionInput`, which already
+    omits its rung for the tick on any throw): its return type and behaviour stay as they are.
+    A new `extends Error` class is not an option, because test/error-subclass-census.test.ts holds the direct-subclass
+    population at its recorded ceiling.
+  design: |
+    (i) `creditProjectionWithReadState(configOverride?, checkoutRoot?, creditBuilder?, github?)` (src/run-task.ts): the body
+    of `defaultCreditedMergedIds`, but it builds its own `buildBatchedGithub(self.owner, self.repo)` (injectable), passes
+    it to `creditBuilder` as the existing trailing `github` argument, and AFTER the build returns
+    `{ ids, unknownReason }`. `unknownReason` is `github.readFailureReason?.() ?? "unknown"` when
+    `github.readState?.() === "failed"`, `"truncated"` when the state is `"ok"` and `github.readTruncated?.()` is true (a
+    partial read omits rows, the same false 'nothing stale'), and absent otherwise. `readState()` first, because
+    `readTruncated()` forces a fetch when none was made and a test that injects a fake builder must not shell out. The
+    no-ledger early return stays (it is an empty projection by design and is named in the note below).
+    `defaultCreditedMergedIds` becomes `creditProjectionWithReadState(...).ids`, byte-for-byte the old result.
+    (ii) `PlanReconcileDeps` gains `creditedProjection?: () => { ids: Set<string>; unknownReason?: string }`. When present it
+    is used in place of `creditedMergedIds`; the production default is `() => creditProjectionWithReadState()`. An injected
+    `creditedMergedIds` keeps its exact old contract, so every existing test passes unedited.
+    (iii) `planReconcileCommand`, right after the projection is read and BEFORE `reconcilePlan` or any write: when
+    `unknownReason` is set, print `### rmd plan-reconcile: UNKNOWN — the merged-PR read did not complete (<reason>); no
+    reconcile count can be derived from it and nothing was written` to stderr, log `plan.reconcile.unknown` with the reason,
+    and return 2, in BOTH dry-run and `--write`. The `0 shard(s) would be reconciled` summary is never printed on this path.
+    Exit 2 joins the shard-read arm's 'could not read an input'; exit 1 stays the throw arm; exit 0 stays 'read fine'.
+    (iv) ONE test drives the real failing read end to end: a real `buildBatchedGithub` whose `exec` throws, through the real
+    `buildCreditCandidates`, in a throwaway checkout holding a tiny plan and an empty ledger (the seam's default path is
+    otherwise unreachable when every test injects a fake).
+  acceptance:
+    - claim: "a dry run whose merged-PR read failed prints UNKNOWN with the reason and exits 2, never the zero-shard summary"
+      proof: 'grep: test("W1-T5029: a failed merged-PR read makes a dry run print UNKNOWN and exit 2" in test/plan-reconcile-fails-loud-when-its-github-read-fails.test.ts'
+    - claim: "--write with a failed read writes no shard and exits 2"
+      proof: 'grep: test("W1-T5029: a failed merged-PR read under --write writes nothing and exits 2" in test/plan-reconcile-fails-loud-when-its-github-read-fails.test.ts'
+    - claim: "a readable empty projection still prints its count and exits 0, the preserved control"
+      proof: 'grep: test("W1-T5029: a readable empty projection still prints the count and exits 0" in test/plan-reconcile-fails-loud-when-its-github-read-fails.test.ts'
+    - claim: "a truncated merged-PR read is UNKNOWN too"
+      proof: 'grep: test("W1-T5029: a truncated merged-PR read is UNKNOWN too" in test/plan-reconcile-fails-loud-when-its-github-read-fails.test.ts'
+    - claim: "a thrown projection still exits 1 and an injected credit set keeps its old contract"
+      proof: 'grep: test("W1-T5029: the thrown-projection arm still exits 1 and an injected set is unchanged" in test/plan-reconcile-fails-loud-when-its-github-read-fails.test.ts'
+    - claim: "the real gateway, failing for real, is reported UNKNOWN by the default projection"
+      proof: 'grep: test("W1-T5029: a real failing gateway read is reported UNKNOWN by the default projection" in test/plan-reconcile-fails-loud-when-its-github-read-fails.test.ts'
+    - claim: "the default projection is the new function, a production call site"
+      proof: "grep: creditProjectionWithReadState( in src/run-task.ts"
+  falsifier: |
+    Drop the `unknownReason` check in `planReconcileCommand` and the first two tests redden on exit 0 and the zero-shard
+    summary; make the check fire on an empty Set instead of a failed read and the preserved-control test reddens (a
+    healthy nothing-to-do becomes UNKNOWN, which is this repo's recurring bound-that-fires-on-a-healthy-condition defect).
+    BOTH directions are needed.
+  note: |
+    OUT OF SCOPE, NAMED: (a) `defaultCreditedMergedIds`'s no-ledger early return also yields an empty Set that reads as
+    'nothing merged' (a checkout with no ledger has no positive merge evidence, which is why it returns early); that is the
+    same class, a different cause, and is not folded in here. (b) The gateway classifies an `ENOENT` spawn as reason
+    `unknown`, so the new line reads `(unknown)`; a `gh_missing` reason would be a separate change to `classifyGhFailure`.
+    (c) The measurement-cadence rung keeps its own fail-closed catch. (d) docs/cli-reference.md is generated from the
+    command registry and only needs a regen if the one-line command description changes; this does not change it.
+    RISK: high because src/run-task.ts is the file the reconcile write lives in and `status: merged` is a one-way plan
+    write; the change only ever REFUSES to report, it never adds a write, which is why it is safe to file at high.
+    reservation hand-off: unknown -> file/gates-r5-1790812000000
