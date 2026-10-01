@@ -149,7 +149,7 @@ test("serve is launched with a memory ceiling that bounds a leak and leaves room
   const { args, out } = serveRunArgs();
   assert.ok(args.includes("--memory=5120m"), `a 5 GiB ceiling, 1.4x the highest reading of 3.64 GiB: ${args.join(" ")}`);
   assert.ok(args.includes("--memory-swap=6144m"), "1 GiB of swap before the kernel kills anything");
-  assert.ok(args.includes("--memory-reservation=3072m"), "the protected reserve is unchanged, so no build daemon's ceiling moves");
+  assert.ok(args.includes("--memory-reservation=3072m"), "serve retains a protected 3 GiB share of host memory");
   assert.ok(!args.some((a) => a.startsWith("--cpus=")), "no CPU quota by default — the weight already wins contention");
   assert.match(out, /memory ceiling 5120 MiB \(\+1024 MiB swap\)/);
 });
