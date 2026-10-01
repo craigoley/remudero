@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -186,7 +186,8 @@ test("the served gateway counts each get by caller and writes the partial hour w
   mkdirSync(join(root, "state"), { recursive: true });
   const planPath = join(root, "plan", "tasks.yaml");
   writeFileSync(planPath, "[]\n");
-  const ledgerPath = join(root, "state", "ledger.ndjson");
+  const externalLedgerDir = stateDir(t);
+  const ledgerPath = join(externalLedgerDir, "ledger.ndjson");
   const github: GitHub = { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
   const rows: Array<{ step: string } & Record<string, unknown>> = [];
   const deps: ServeDeps = {
@@ -217,6 +218,8 @@ test("the served gateway counts each get by caller and writes the partial hour w
   const flushed = rows.filter((r) => r.step === "serve.route_reads");
   assert.equal(flushed.length, 1, "one row for the hour, not one per request");
   assert.deepEqual(flushed[0]!.routes, { "/v1/version": { console: 1, fleet: 1 }, "/v1/route-reads": { fleet: 1 } });
+  assert.equal(existsSync(join(root, "state", ROUTE_READS_FILE)), true, "the rollup belongs to the serve state root");
+  assert.equal(existsSync(join(externalLedgerDir, ROUTE_READS_FILE)), false, "an external ledger source is never a state write target");
 });
 
 function timedHarness(startIso: string) {
