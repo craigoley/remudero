@@ -73,14 +73,14 @@ export function gardenSchedule(name: RegisteredGardenName): GardenSchedule {
  * Start one registered garden: a pass at once, then one per interval, never two at once. The `running`
  * flag skips a tick while that garden's pass is still in flight, exactly as each in-process starter did.
  */
-export interface GardenOffLoopDeps {
+export interface GardenOffLoopWiring {
   spawnPass: GardenPassSpawn;
   log: (step: string, extra?: Record<string, unknown>) => void;
   clock?: Clock;
 }
 
-export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: number, deps: GardenOffLoopDeps): { stop: () => void } {
-  const clock = deps.clock ?? systemClock;
+export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: number, wiring: GardenOffLoopWiring): { stop: () => void } {
+  const clock = wiring.clock ?? systemClock;
   const schedule = gardenSchedule(name);
   const signal = { stopped: false };
   let running = false;
@@ -96,11 +96,11 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
     const settle = (exit: number | null, error?: string): void => {
       running = false;
       if (hourly && exit === 0) reportedBucket = bucket;
-      deps.log(GARDEN_PASS_STEP, { name, ms: clock.now() - startedMs, exit, ...(error === undefined ? {} : { error }) });
+      wiring.log(GARDEN_PASS_STEP, { name, ms: clock.now() - startedMs, exit, ...(error === undefined ? {} : { error }) });
     };
     let pass: Promise<number | null>;
     try {
-      pass = deps.spawnPass(name, hourly ? [GARDEN_HOURLY_FLAG] : [], signal);
+      pass = wiring.spawnPass(name, hourly ? [GARDEN_HOURLY_FLAG] : [], signal);
     } catch (e) {
       const error = String((e as Error)?.message ?? e);
       settle(null, error);
