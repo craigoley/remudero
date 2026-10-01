@@ -2220,6 +2220,7 @@ async function grepFilesContainingAsync(cwd: string, fixedPattern: string): Prom
     );
     return stdout.split("\n").map((line) => line.trim()).filter(Boolean);
   } catch {
+    // The caller probes the corpus separately, as in the synchronous path; no match is not a positive hit.
     return null;
   }
 }
@@ -2232,6 +2233,7 @@ async function couldBeInterpolatedTitleAsync(cwd: string, rawName: string): Prom
     );
     return stdout.split("\n").some((line) => interpolatedTitleStaticChunks(line).some((c) => rawName.includes(c)));
   } catch {
+    // A successful corpus probe precedes this query, so grep's no-match answer means no interpolated title.
     return false;
   }
 }
@@ -2595,6 +2597,7 @@ export async function execWhitelistedProofAsync(
   try {
     output = await spawn(whitelisted.command, args, cwd, timeoutMs);
   } catch (error) {
+    // Replay the failed child result through the existing proof classifier below.
     failure = error;
   }
   try {
@@ -4676,6 +4679,7 @@ export async function judgeReviewAsync(
         const outcome = await asyncExec(whitelisted, cwd);
         observed.set(key, { outcome, matchedLines: whitelisted.matchedLines, loadError: whitelisted.loadError });
       } catch (error) {
+        // Preserve this exact proof error for the next deterministic verdict fold.
         observed.set(key, { error });
       }
     }
