@@ -31,7 +31,7 @@ function withDbDir(t: { after: (fn: () => void) => void }, value: string): void 
 
 const ROWS = 40;
 
-function ledgerDirWithRows(t: { after: (fn: () => void) => void }): string {
+function rowsDir(t: { after: (fn: () => void) => void }): string {
   const dir = scratch(t, "scratch-rm-ledger");
   let text = "";
   for (let i = 0; i < ROWS; i++) text += `${JSON.stringify({ ts: new Date(Date.parse("2026-10-01T00:00:00.000Z") + i).toISOString(), step: "run.start", task_id: `T${i}`, run_id: `r-${i}` })}\n`;
@@ -45,7 +45,7 @@ test("a missing scratch read-model dir is rebuilt in full from the ledger and th
   const dbDir = join(scratchRoot, "rmd", "state2", "read-model");
   assert.equal(existsSync(dbDir), false, "the scratch disk was just wiped by a deallocate");
   withDbDir(t, `${stateDir}:${dbDir}`);
-  const ledgerDir = ledgerDirWithRows(t);
+  const ledgerDir = rowsDir(t);
 
   const out: string[] = [];
   assert.equal(readModelCommand(["switch", "projector", "on"], { stateDir, out: (l) => void out.push(l), error: (l) => void out.push(l) }), 0);
