@@ -2,6 +2,7 @@
 import { MessageChannel, Worker, isMainThread, parentPort, receiveMessageOnPort, workerData, type MessagePort } from "node:worker_threads";
 import { statSync } from "node:fs";
 import { createBoardSnapshotCache, type BoardSnapshot, type BoardSnapshotCache, type BoardSnapshotSource, type BoardSnapshotState } from "./board.js";
+import { systemClock, type Clock } from "./clock.js";
 import { readInflightLock } from "./inflight-lock.js";
 import { loadPlan } from "./plan.js";
 import type { BoardDeps, GitHub } from "./status.js";
@@ -97,23 +98,24 @@ export interface BoardProjectionWorker extends BoardSnapshotSource {
 export function createBoardProjectionWorker(
   github: GitHub,
   input: { planPath: string; ledgerPath: string; inflightDir: string },
-  options: { intervalMs?: number; delayMs?: number; staleMs?: number; workerUrl?: URL } = {},
+  options: { intervalMs?: number; delayMs?: number; staleMs?: number; workerUrl?: URL; clock?: Clock } = {},
 ): BoardProjectionWorker {
-  const buildStartedAt = new Date().toISOString();
+  const clock = options.clock ?? systemClock;
+  const buildStartedAt = clock.iso();
   let state: BoardSnapshotState = { state: "unavailable", buildStartedAt, checkedAt: buildStartedAt, reason: "not_ready" };
   let thread: Worker | undefined;
   let replyPort: MessagePort | undefined;
   let stopped = false;
   let mergedLookup: ((taskId: string) => ReturnType<GitHub["findMergedByTrailer"]>) | null = null;
   const unavailable = (reason: string): void => {
-    state = { state: "unavailable", buildStartedAt, checkedAt: new Date().toISOString(), reason };
+    state = { state: "unavailable", buildStartedAt, checkedAt: clock.iso(), reason };
   };
   const handle: BoardProjectionWorker = {
     current() {
-      if (state.state === "ready" && Date.now() - Date.parse(state.snapshot.generated_at) > (options.staleMs ?? BOARD_PROJECTION_STALE_MS)) {
-        return { state: "unavailable", buildStartedAt, checkedAt: new Date().toISOString(), reason: "projection_stale" };
+      if (state.state === "ready" && clock.now() - Date.parse(state.snapshot.generated_at) > (options.staleMs ?? BOARD_PROJECTION_STALE_MS)) {
+        return { state: "unavailable", buildStartedAt, checkedAt: clock.iso(), reason: "projection_stale" };
       }
-      return state.state === "unavailable" ? { ...state, checkedAt: new Date().toISOString() } : state;
+      return state.state === "unavailable" ? { ...state, checkedAt: clock.iso() } : state;
     },
     isReady: () => handle.current().state === "ready",
     start() {
