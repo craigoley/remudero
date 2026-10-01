@@ -1302,7 +1302,9 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       const state = instances.get(instance);
       if (state?.tickedAt !== undefined) return ledgerSource(state, now);
       const committed = committedAt.get(instance);
-      if (committed !== undefined && now - committed <= READ_MODEL_LEDGER_STALE_MS) return { name: source.name, asOf: source.asOf, state: "fresh" };
+      if (committed !== undefined && now - committed <= READ_MODEL_LEDGER_STALE_MS) {
+        return describeSource({ name: source.name, asOf: source.asOf, state: "fresh", lagMs: Math.max(0, now - committed) });
+      }
       return state ? ledgerSource(state, now) : { ...describeSource(source), state: "stale", phase: "warming", reason: "read model warming: this body was committed before serve started" };
     }),
     reload: () => {

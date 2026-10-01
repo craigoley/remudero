@@ -33,16 +33,20 @@ function overSocket(socketPath: string, path: string, token?: string): Promise<{
       res.on("data", (c) => (body += c));
       res.on("end", () => resolve({ status: res.statusCode, body }));
     });
+    req.setTimeout(5_000, () => req.destroy(new Error(`private serve request timed out: ${path}`)));
     req.on("error", reject);
     req.end();
   });
 }
 
 async function refused(port: number): Promise<boolean> {
+  const signal = AbortSignal.timeout(5_000);
   try {
-    await fetch(`http://127.0.0.1:${port}/v1/version`);
+    const res = await fetch(`http://127.0.0.1:${port}/v1/version`, { signal });
+    await res.arrayBuffer();
     return false;
-  } catch {
+  } catch (err) {
+    if (signal.aborted) throw err;
     return true;
   }
 }
@@ -75,6 +79,8 @@ test("standby serve does not listen on the public port before promote", { timeou
     generation: { send: (m) => void sent.push(m), onMessage: (l) => void listeners.push(l) },
   });
   t.after(() => {
+    // A failed readiness assertion must not leave the deliberately gated board boot in flight.
+    releaseBoard();
     console.log = realLog;
     console.error = realErr;
     process.env.HOME = saved.HOME;
@@ -111,8 +117,11 @@ test("standby serve does not listen on the public port before promote", { timeou
   for (const listener of listeners) listener({ type: "rmd.promote" });
   for (const deadline = Date.now() + 30_000; Date.now() < deadline && sent.length === 0; ) await sleep(50);
   assert.deepEqual(sent, [{ type: "rmd.promoted" }], "the promote is acknowledged once the port is bound");
-  const res = await fetch(`http://127.0.0.1:${port}/v1/status`, { headers: { authorization: `Bearer ${tokens.read}` } });
+  const res = await fetch(`http://127.0.0.1:${port}/v1/status`, {
+    headers: { authorization: `Bearer ${tokens.read}` }, signal: AbortSignal.timeout(10_000),
+  });
   assert.equal(res.status, 200, "the promoted generation serves the public port with its board already computed");
+  await res.arrayBuffer(); // Server.close waits for active responses; finish this client before shutdown.
   const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
   assert.match(ledger, /"step":"read_model\.reloaded"/, "promote reloads the committed view bodies the standby loaded at boot");
 
