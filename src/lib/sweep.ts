@@ -9248,6 +9248,12 @@ const inFlightReviewKeys = new Set<string>();
  *  the review mutex. // Why: 13 dispatches across two PRs against a cap of 2. */
 const inFlightFixKeys = new Set<string>();
 
+/** W1-T5032 — a proof amendment's `fix.dispatch` identity row is an idempotency record, never a strike;
+ *  hidden from `priorStrikesFor` and `freshFixDispatchCount` here, while `lookupIdentity` still reads it. */
+export function isProofAmendmentIdentityRow(line: Record<string, unknown>): boolean {
+  return line.step === "fix.dispatch" && line.kind === "proof_amendment";
+}
+
 /** W1-T2788 — select the fix-rung ledger generation attributable to `currentHeadSha`. New rows name
  *  the head they targeted and require exact equality; legacy rows carry no head and reset only at a
  *  trustworthy observation for this task at the current head, so an incomplete history fails closed
@@ -9260,7 +9266,7 @@ export function fixLedgerRowsForHead(
   if (!taskId) return [];
   if (!currentHeadSha) {
     return lines.filter(
-      (line) => line.task_id === taskId && (line.step === "fix.dispatch" || line.step === "fix.review"),
+      (line) => line.task_id === taskId && (line.step === "fix.dispatch" || line.step === "fix.review") && !isProofAmendmentIdentityRow(line),
     );
   }
 
@@ -9279,6 +9285,7 @@ export function fixLedgerRowsForHead(
     if (line.task_id !== taskId) continue;
     const strike = typeof line.strike === "number" ? line.strike : undefined;
     if (line.step === "fix.dispatch") {
+      if (isProofAmendmentIdentityRow(line)) continue;
       const taggedHead = typeof line.head_sha === "string" ? line.head_sha : undefined;
       const belongsToHead = taggedHead !== undefined
         ? taggedHead === currentHeadSha

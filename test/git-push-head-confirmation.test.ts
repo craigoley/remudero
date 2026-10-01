@@ -428,10 +428,13 @@ test("W1-T2610: control — with no rewind, the same wiring pushes normally and 
 
 // ── claim 4 (structural) — BOTH literal call sites carry the wiring, not just one ───────────
 
-test("W1-T2610: both fix-rung push deps route through pushFixRound, which passes expectedHeadSha to gitPushRunBranch (grep-verifiable)", () => {
+test("W1-T2610: both fix-rung push deps pass expectedHeadSha through pushFixRound to gitPushRunBranch (grep-verifiable)", () => {
   const [runTask, sweep] = ["../src/run-task.ts", "../src/lib/sweep.ts"].map((p) => readFileSync(fileURLToPath(new URL(p, import.meta.url)), "utf8"));
-  // W1-T4693: the run loop's dep and the sweep's dep are the one shared helper, not two closures.
-  assert.equal((runTask.match(/^ {10}push: pushFixRound,$/gm) ?? []).length, 1, "runTaskBody's fix rung pushes through pushFixRound");
+  // W1-T4797 adds a coverage precheck to the run loop; its wrapper still delegates to the shared push helper.
+  assert.equal((runTask.match(/^ {10}push: \(wt, br, sha\) => pushFixRoundPrechecked\(/gm) ?? []).length, 1, "runTaskBody's fix rung uses the prechecked push");
+  const prechecked = runTask.split("export function pushFixRoundPrechecked(")[1]?.split("export type CensusPushRungOutcome")[0] ?? "";
+  assert.match(prechecked, /push: .* = pushFixRound,/, "the precheck defaults to the shared push helper");
+  assert.match(prechecked, /push\(wt, branch, expectedHeadSha\);/, "the precheck preserves the expected head");
   assert.equal((sweep.match(/^ {12}push: pushFixRound,$/gm) ?? []).length, 1, "the sweep's fix dispatch pushes through pushFixRound");
   assert.match(runTask, /pushFixRoundImpl: pushFixRound,/, "the sweep entrypoint injects the same helper");
   assert.match(runTask, /gitPushRunBranch\(wt, \{ expectedHeadSha, exec: /, "the helper threads expectedHeadSha to the leaf");
