@@ -1406,6 +1406,65 @@ WORKERS
   waited=$((waited + POLL_INTERVAL_S))
 done
 
+# ── 5.5. SMOKE A REAL WORKER ON THE PULLED IMAGE BEFORE ACCEPTING IT (W1-T5017) ─────────────────
+# CI fakes the worker query seam and verify-image.sh compares binary VERSIONS, so an SDK/CLI change
+# can pass both and still die at the first task dispatch. This starts ONE throwaway container on the
+# pulled image, runs ONE real worker query with a trivial prompt (src/lib/containment.ts
+# workerSmokeMain: a containment verdict plus clean termination, bounded in turns and spend, result
+# ledgered) and accepts the image only on exit 0.
+#
+# IT RUNS HERE — AFTER THE DRAIN WAIT AND BEFORE `docker stop` — SO THE ROLLBACK IS THE REFUSAL ITSELF.
+# The running container has not been touched; a failed smoke takes the pause off on the way out
+# exactly as section 5's refusal does and exits 1, leaving the fleet on the image it was serving. A
+# smoke run after section 6 would have to rebuild the old container from a tag the pull just moved.
+#
+# `docker container run`, not `docker run`: the same command, spelled so this probe is never mistaken
+# for the daemon's own launch below. The verdict is the EXIT CODE (workerSmokeMain exits 0 only on
+# PASS); the printed `WORKER-SMOKE <PASS|FAIL> <reason>` line is the explanation. A hang is a failure.
+SMOKE_NAME="${CONTAINER_NAME}-worker-smoke"
+SMOKE_TIMEOUT_S="${RMD_RECYCLE_SMOKE_TIMEOUT_S:-300}"
+SMOKE_ARGS=(
+  --rm --name "${SMOKE_NAME}"
+  --cap-drop ALL
+  --security-opt seccomp=unconfined
+  --security-opt apparmor=unconfined
+  --security-opt systempaths=unconfined
+  --user 1000:1000
+  -e RMD_SKIP_BOOTSTRAP=1
+  "${RUN_ENV_ARGS[@]}"
+  -v "${STATE_DIR}:${STATE_MOUNT_DEST}"
+  -v "${CRED_DIR}:${CRED_MOUNT_DEST}"
+)
+if [ "${#CODEX_MOUNT_ARGS[@]}" -gt 0 ]; then
+  SMOKE_ARGS+=("${CODEX_MOUNT_ARGS[@]}")
+fi
+if [ "${#CONTAINER_CONFIG_MOUNT_ARGS[@]}" -gt 0 ]; then
+  SMOKE_ARGS+=("${CONTAINER_CONFIG_MOUNT_ARGS[@]}")
+fi
+SMOKE_ARGS+=(
+  -w /app "${PULLED_IMAGE_ID}"
+  node --import tsx -e 'import("./src/lib/containment.ts").then((m) => m.workerSmokeMain()).then((c) => process.exit(c))'
+)
+SMOKE_TIMEOUT_CMD=()
+if command -v timeout >/dev/null 2>&1; then
+  SMOKE_TIMEOUT_CMD=(timeout "${SMOKE_TIMEOUT_S}")
+fi
+echo "recycle-container: worker smoke — one real worker query on ${PULLED_IMAGE_ID} (bounded ${SMOKE_TIMEOUT_S}s)"
+set +e
+SMOKE_OUTPUT="$("${SMOKE_TIMEOUT_CMD[@]+"${SMOKE_TIMEOUT_CMD[@]}"}" docker container run "${SMOKE_ARGS[@]}" 2>&1)"
+SMOKE_RC=$?
+set -e
+SMOKE_LINE="$(printf '%s\n' "${SMOKE_OUTPUT}" | grep -E '^WORKER-SMOKE ' | tail -1 || true)"
+if [ "${SMOKE_RC}" -ne 0 ]; then
+  docker container rm -f "${SMOKE_NAME}" >/dev/null 2>&1 || true
+  echo "recycle-container: REFUSING — the real worker smoke FAILED (exit ${SMOKE_RC}) on ${PULLED_IMAGE_ID}." >&2
+  echo "  ${SMOKE_LINE:-no WORKER-SMOKE verdict line was printed (hang, crash or timeout)}" >&2
+  echo "  ${CONTAINER_NAME} is untouched and STILL RUNNING on its current image — the replacement was NOT accepted." >&2
+  clear_own_pause "recycle-container: pause removed — the refusal above must not leave the fleet paused" >&2
+  exit 1
+fi
+echo "recycle-container: worker smoke PASSED — ${SMOKE_LINE:-exit 0}"
+
 # ── 6. STOP + REMOVE THE OLD CONTAINER, CLEAR THE PAUSE, START THE NEW ONE ──────────────────────
 # `docker stop` (not `-f`/`kill`) sends SIGTERM first, giving the daemon's own signal handler a
 # chance to release the drain lock cleanly before this script ever removes the container — the
