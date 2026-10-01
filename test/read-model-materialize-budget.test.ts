@@ -43,12 +43,13 @@ test("a materialize pass names budget-deferred units and later builds them", (t)
 });
 
 test("a materialize deferral is sampled at most once per stale window", (t) => {
-  const { tick, advance, deferred } = rig(t, { slow: 150, a: 10, b: 10 });
+  const { tick, advance, deferred } = rig(t, { slow: 150, a: 50, b: 50 });
   for (let i = 0; i < 6; i++) tick();
   assert.equal(deferred().length, 1);
   advance(10_000);
   tick();
-  assert.ok(deferred().length <= 2, "a new sample is allowed only after the stale window");
+  tick();
+  assert.equal(deferred().length, 2, "a later budget deferral produces a new sample");
 });
 
 test("a measured view that fits the pass has no budget deferral", (t) => {
