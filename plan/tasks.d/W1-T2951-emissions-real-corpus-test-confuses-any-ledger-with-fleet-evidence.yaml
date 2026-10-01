@@ -12,7 +12,7 @@
     - test/emissions.test.ts
   origin: "operator-session#emissions-host-state-full-suite-race-2026-09-06"
   plan_refs: ["W1-T444", "W1-T2479"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED ON MAIN DURING FULL LOCAL PREFLIGHT AT 2026-09-06T08:28Z. The test named

@@ -15,7 +15,7 @@
     - src/lib/review.ts
     - scripts/proof-resolve-precheck.mjs
     - test/a-grep-proof-naming-a-title-no-test-carries-blocks-the-push.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 at origin/main 1f6d904bb; the shape was replayed here, not carried from the brief.

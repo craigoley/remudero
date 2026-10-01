@@ -10,7 +10,7 @@
   files: [test/a-worker-worktree-carries-a-real-node-modules.test.ts]
   origin: "operator-session#build-pass-measured-2026-09-07"
   plan_refs: ["W1-T2312", "W1-T2313", "W1-T2777", "W1-T137"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-07 IN THE RUNNING AZURE CONTAINER, READ-ONLY. Of seven live worktrees under

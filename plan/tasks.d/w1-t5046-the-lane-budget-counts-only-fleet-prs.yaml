@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-lane-budget-owned-1790819572000 -> plan-lane-budget-owned-1790819572000"
   plan_refs: [W1-T4465, W1-T172, W1-T343, W1-T3144]
   files: [src/run-task.ts, test/the-lane-budget-counts-only-fleet-owned-prs.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-01: after W1-T4998 the daemon reached admission in 57 s, and then logged dispatch.wip_deferred

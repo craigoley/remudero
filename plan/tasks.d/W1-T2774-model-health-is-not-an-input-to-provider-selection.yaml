@@ -20,7 +20,7 @@
     - test/mounts.test.ts
   origin: "operator-session#health-aware-dual-provider-routing-2026-09-03"
   plan_refs: ["W1-T5", "W1-T2572", "W1-T2573", "W1-T2748", "W1-T2772"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at 2026-09-03T13:56Z from Anthropic's public Statuspage v2 endpoints, after the

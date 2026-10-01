@@ -10,7 +10,7 @@
   files: [scripts/acceptance-author-gate.mjs, test/a-body-proof-that-names-a-missing-path-is-refused.test.ts]
   origin: oper#pr-queue-sweep-2026-09-16
   plan_refs: ["W1-T3651", "W1-T3653"]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED THREE TIMES IN ONE EVENING, 2026-09-16, on two pull requests:

@@ -12,7 +12,7 @@
   origin: "research 2026-09-30 (amendment-writer audit): the builder of #8177 reported three limits; reading the writer end to end shows the amendment is unreachable on this route, not merely refusable"
   plan_refs: [W1-T4957, W1-T3390, W1-T3434, W1-T3306, W1-T4902]
   files: [src/lib/sweep.ts, test/a-stale-proof-red-flags-the-plan-not-a-worker.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 at origin/main 1f6d904bb, by driving the shipped `runFixRung` with fakes (scratch test, deleted) and by calling the shipped pure

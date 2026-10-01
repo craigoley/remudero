@@ -109,7 +109,7 @@
   origin: feedback#fb-1786006232525-6d94d8
   plan_refs: ["W1-T79", "W1-T213", "W1-T445", "W1-T446", "W1-T452", "W1-T907", "W1-T924", "W1-T1134"]
   files: [docs/operator-guide.md, docs/cli-reference.md, src/run-task.ts, test/docs-claims.test.ts, test/cli-reference.test.ts, plan/claims.yaml]
-  status: queued
+  status: merged
   attempts: 0
   note: |
     verify:auto — every criterion is decidable in-process over text: a pure check with a red fixture

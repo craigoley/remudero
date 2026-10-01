@@ -10,7 +10,7 @@
   files: [src/lib/plan-architect.ts, src/run-task.ts, test/a-refused-commit-leaves-no-staged-residue.test.ts]
   origin: "operator-session#deploy-visibility-2026-09-09"
   plan_refs: ["W1-T1089", "W1-T2551", "W1-T446"]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
