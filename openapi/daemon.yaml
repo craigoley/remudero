@@ -7203,7 +7203,13 @@ components:
           required: [method, path, tier, fields, input]
           properties:
             method: {type: string, enum: [POST]}
-            path: {type: string, enum: [/v1/feedback, /v1/questions/answer, /v1/manual/approve, /v1/escalation/mark-handled]}
+            path:
+              type: string
+              description: >
+                Core's own decisions name the unprefixed route. Another instance's escalation names that
+                instance's mount, `/v1/i/<instance>/manual/approve` or `/v1/i/<instance>/escalation/mark-handled`,
+                so the answer lands in its own state.
+              pattern: "^/v1/(i/[^/]+/)?(feedback|questions/answer|manual/approve|escalation/mark-handled)$"
             tier: {type: string, enum: [low, middle, high]}
             fields:
               type: object
@@ -10627,6 +10633,80 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "503":
+          description: The registered instance's state or plan is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceUnavailable"
+
+  /v1/i/{instance}/manual/approve:
+    post:
+      summary: Approve a MANUAL-queue item of this registered instance -- closes its GitHub issue.
+      description: >
+        The unprefixed /v1/manual/approve, rooted in THIS instance's state: `panel.manual_approved`
+        lands in its own ledger. The `now` view names this route for another instance's MANUAL
+        escalations (docs/views.md).
+      security:
+        - bearerWrite: []
+      parameters:
+        - name: instance
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApproveManualRequest"
+      responses:
+        "200":
+          description: The issue was closed and the approval recorded in this instance's ledger.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApproveManualResult"
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/HighTierForbidden" }
+        "503":
+          description: The registered instance's state or plan is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceUnavailable"
+
+  /v1/i/{instance}/escalation/mark-handled:
+    post:
+      summary: Mark an escalation of this registered instance handled -- closes its GitHub issue.
+      description: >
+        The unprefixed /v1/escalation/mark-handled, rooted in THIS instance's state:
+        `panel.escalation_marked_handled` lands in its own ledger and `precision` is computed from it.
+        The `now` view names this route for another instance's escalations (docs/views.md).
+      security:
+        - bearerWrite: []
+      parameters:
+        - name: instance
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MarkEscalationHandledRequest"
+      responses:
+        "200":
+          description: The issue was closed and the action recorded in this instance's ledger.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MarkEscalationHandledResult"
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
         "503":
           description: The registered instance's state or plan is unavailable.
           content:

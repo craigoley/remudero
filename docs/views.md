@@ -257,6 +257,11 @@ diskFreeBytes?, rateLimitRemaining?, daemon{ state, at?, reason? }, reasons? }, 
   reply or a store append moves core's feedback dir or question store, which the view fingerprints. The
   decision then leaves `decisions` and the ETag moves; the clock alone never moves it. An escalation's reply
   text is not offered as an answer: `/v1/escalation/reply` steers nothing yet (W1-T4471).
+
+  Each escalation is answered on its OWN instance. Core's decisions name the unprefixed routes above; another
+  instance's name its mount, `/v1/i/<instance>/manual/approve` or `/v1/i/<instance>/escalation/mark-handled`.
+  That route closes the issue and ledgers into the instance's own state, and the decision leaves that
+  instance's body once its GitHub snapshot reads the issue closed.
 - `decisionsReasons` names a source not read for this instance, by kind: grill and task questions live in core.
 - Under `shadow`, the comparator (`src/lib/view-shadow.ts`) diffs a sampled body against `/now`'s legacy
   sources. Those are GET /v1/status's board and PR queue over the instance's live file only, plus a fresh

@@ -2861,7 +2861,8 @@ export interface components {
       askedAt?: string;
       answer: {
         method: "POST";
-        path: "/v1/feedback" | "/v1/questions/answer" | "/v1/manual/approve" | "/v1/escalation/mark-handled";
+        /** Core's own decisions name the unprefixed route. Another instance's escalation names that instance's mount, `/v1/i/<instance>/manual/approve` or `/v1/i/<instance>/escalation/mark-handled`, so the answer lands in its own state. */
+        path: string;
         tier: "low" | "middle" | "high";
         fields: Record<string, string>;
         input: "text" | "choice" | "none";
@@ -4025,6 +4026,28 @@ export interface paths {
     post: {
       responses: {
           "200": OperatorAgentAnswer;
+          "400": Error;
+          "401": Error;
+          "403": Error;
+          "503": InstanceUnavailable;
+        };
+    };
+  };
+  "/v1/i/{instance}/manual/approve": {
+    post: {
+      responses: {
+          "200": ApproveManualResult;
+          "400": Error;
+          "401": Error;
+          "403": HighTierRefusal;
+          "503": InstanceUnavailable;
+        };
+    };
+  };
+  "/v1/i/{instance}/escalation/mark-handled": {
+    post: {
+      responses: {
+          "200": MarkEscalationHandledResult;
           "400": Error;
           "401": Error;
           "403": Error;

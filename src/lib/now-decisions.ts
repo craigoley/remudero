@@ -9,6 +9,8 @@
  * | `manual_approval` | a board task whose open escalation is class MANUAL | `POST /v1/manual/approve {taskId, issueUrl}` |
  * | `escalation` | any other open escalation on the board | `POST /v1/escalation/mark-handled {taskId, issueUrl, class, disposition}` |
  *
+ * An escalation is answered on its OWN instance: another instance's routes are `/v1/i/<instance>/…`.
+ *
  * Each answer names its route's write tier from {@link ESCALATION_OPTION_ROUTES}, the table serve's
  * route tiers are copied into, so a `high` answer still runs the console's confirm nonce. An escalation's
  * reply text is NOT offered: `/v1/escalation/reply` steers nothing yet (W1-T4471), so the question route
@@ -126,8 +128,13 @@ export function escalationClasses(rows: ReadonlyArray<Record<string, unknown>>):
   return out;
 }
 
-/** Each open escalation on the board with an issue to act on: MANUAL ones are approved, the rest marked handled. */
-export function escalationDecisions(instance: string, tasks: readonly BoardRow[], opened: ReadonlyMap<string, { class?: string; ts?: string }>): NowDecision[] {
+/** `/v1/manual/approve` as `instance` answers it: unprefixed on core, else under its own `/v1/i/<instance>/` mount. */
+export function instanceAnswerPath(instance: string, isCore: boolean, path: string): string {
+  return isCore ? path : `/v1/i/${instance}/${path.slice("/v1/".length)}`;
+}
+
+/** Each open escalation on the board with an issue to act on: MANUAL ones are approved, the rest marked handled, each on its own instance's route. */
+export function escalationDecisions(instance: string, tasks: readonly BoardRow[], opened: ReadonlyMap<string, { class?: string; ts?: string }>, isCore = true): NowDecision[] {
   return tasks.flatMap((t): NowDecision[] => {
     if (!t.needsHuman || !t.escalationIssueUrl) return [];
     const row = opened.get(t.taskId);
@@ -137,10 +144,10 @@ export function escalationDecisions(instance: string, tasks: readonly BoardRow[]
     const base = { instance, taskId: t.taskId, title, prompt: bounded(t.escalationTitle ?? t.title), ...(askedAt ? { askedAt } : {}) };
     if (cls === "MANUAL") {
       return [{ ...base, id: `manual:${t.taskId}:${t.escalationIssueUrl}`, kind: "manual_approval",
-        answer: { method: "POST", path: "/v1/manual/approve", tier: ESCALATION_OPTION_ROUTES["/v1/manual/approve"], fields: { taskId: t.taskId, issueUrl: t.escalationIssueUrl }, input: "none" } }];
+        answer: { method: "POST", path: instanceAnswerPath(instance, isCore, "/v1/manual/approve"), tier: ESCALATION_OPTION_ROUTES["/v1/manual/approve"], fields: { taskId: t.taskId, issueUrl: t.escalationIssueUrl }, input: "none" } }];
     }
     return [{ ...base, id: `escalation:${t.taskId}:${t.escalationIssueUrl}`, kind: "escalation", options: [...ESCALATION_DISPOSITIONS],
-      answer: { method: "POST", path: "/v1/escalation/mark-handled", tier: ESCALATION_OPTION_ROUTES["/v1/escalation/mark-handled"],
+      answer: { method: "POST", path: instanceAnswerPath(instance, isCore, "/v1/escalation/mark-handled"), tier: ESCALATION_OPTION_ROUTES["/v1/escalation/mark-handled"],
         fields: { taskId: t.taskId, issueUrl: t.escalationIssueUrl, class: cls ?? "UNKNOWN" }, input: "choice" } }];
   });
 }

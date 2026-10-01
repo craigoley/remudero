@@ -582,7 +582,7 @@ export function createNowView(opts: NowViewOptions): {
   /** One instance's open decisions: grill and task questions from core's stores, escalations from its own board. */
   const decisionsOf = (instance: NowInstance, db: ReadModelDb, snapshot: BoardSnapshot, rows: ReadonlyArray<Row>): NowDecisionsData => {
     const reasons: NonNullable<NowViewData["decisionsReasons"]> = {};
-    const all = escalationDecisions(instance.name, snapshot.tasks, escalationClasses(rows));
+    const all = escalationDecisions(instance.name, snapshot.tasks, escalationClasses(rows), instance.name === core);
     if (instance.name !== core) {
       reasons.grill = "feedback questions live in core only";
       reasons.task_question = "the question store core answers is core's own";
