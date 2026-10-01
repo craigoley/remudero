@@ -18,7 +18,7 @@ import {
   resolveNameFilteredCandidatesAsync,
 } from "../src/lib/review.js";
 import { assertWallClockBound } from "./helpers/wall-clock-bound.js";
-import { discriminateReviewReuseAsync } from "../src/lib/sweep.js";
+import { discriminateReviewReuse, discriminateReviewReuseAsync } from "../src/lib/sweep.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -177,13 +177,33 @@ test("async name lookup scopes a real test proof and preserves its TAP verdict",
 test("async title lookup distinguishes absence from an interpolated declaration", async () => {
   const dir = fixture();
   try {
+    writeFileSync(join(dir, "test", "profiles.test.ts"), 'test("ordinary", () => {});\n');
+    assert.deepEqual(await resolveNameFilteredCandidatesAsync(dir, "a title absent from every test"), { status: "absent" });
     writeFileSync(join(dir, "test", "profiles.test.ts"),
       'test(`profile coverage: \'${profile}\' is accepted and produces stable output`, () => {});\n');
-    assert.deepEqual(await resolveNameFilteredCandidatesAsync(dir, "a title absent from every test"), { status: "absent" });
     assert.deepEqual(
       await resolveNameFilteredCandidatesAsync(dir, "profile coverage: 'alpha' is accepted and produces stable output"),
       { status: "unresolvable", reason: "an interpolated test title could render to this name" },
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("async proof execution errors preserve the reviewer's fail-closed verdict", async () => {
+  const dir = fixture();
+  try {
+    const verdict = await judgeReviewAsync(
+      [{ claim: "proof marker exists", proof: "grep: proofMarker in src/example.ts" }],
+      {
+        diff: "diff --git a/src/example.ts b/src/example.ts\n+proofMarker\n",
+        report: "proof marker exists",
+        headCheckoutDir: dir,
+        asyncExecProof: async () => { throw new Error("synthetic proof execution failure"); },
+      },
+    );
+    assert.equal(verdict.criteria[0]?.proof_exec, "exec_error");
+    assert.notEqual(verdict.state, "success");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -456,9 +476,11 @@ test("sweep reuse awaits head and base proof observations", async () => {
     const diff = "diff --git a/src/example.ts b/src/example.ts\n+export const reuseProofMarker = true;\n";
     const report = "reuse proof marker exists";
     const prior = judgeReview(criteria, { diff, report, headCheckoutDir: head });
-    const result = await discriminateReviewReuseAsync({
+    const input = {
       prior, diff, report, headCheckoutDir: head, baseCheckoutDir: base, baseIsCheckout: true,
-    });
+    };
+    const result = await discriminateReviewReuseAsync(input);
+    assert.deepEqual(result, discriminateReviewReuse(input));
     assert.equal(result.ok, true);
     if (result.ok) assert.equal(result.verdict.criteria[0]?.proof_exec, "executed_pass");
   } finally {
