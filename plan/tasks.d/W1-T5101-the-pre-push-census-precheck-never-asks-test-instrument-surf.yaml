@@ -1,0 +1,169 @@
+- id: W1-T5101
+  title: "THE PRE-PUSH `census-precheck` NEVER ASKS `test/instrument-surface-completeness.test.ts`'S QUESTION — A DIFF THAT ADDS A WORKFLOW-REFERENCED GATE-RULE-LIKE PATH WITH NO `INSTRUMENT_SURFACE` ENTRY AND NO `INSTRUMENT_SURFACE_EXCLUSIONS` REASON PASSES THE HOOK AND REDDENS CI (#8235 / W1-T5033: `scripts/clock-sweep-deliver.mjs`, fixed by one exclusion line in 1d9e74890); the derivation lives only inside that test file, so extract it to one shared module both consume, run it from `scripts/census-precheck.mjs` over this tree and the merge base, and refuse GROWTH it causes with a TO FIX row, a blocking exit 1, and a visible `not measured` exit 2 whenever it cannot read the tree"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-10-01: PR #8235 passed pre-push census-precheck and every scoped local gate, then went red in CI's rule-checks population step on a census the pre-push gate does not run; two build agents could not finish a local preflight in the sandbox, so the pre-push gate is the only fast place to catch it"
+  plan_refs: [W1-T402, W1-T3225, W1-T4656, W1-T5033]
+  files:
+    - scripts/census-precheck.mjs
+    - scripts/lib/instrument-surface-census.mjs
+    - test/instrument-surface-completeness.test.ts
+    - test/census-precheck-refuses-an-undeclared-instrument-surface-path.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-01 at origin/main 431d71762, by running the real scripts on the real trees; every claim below was reproduced, not copied from the brief.
+
+    (1) THE MISS, REPRODUCED. Worktree at 1d9e74890^ (the head of branch run-W1-T5033-1790813600002 BEFORE its one-line fix, 5 files changed against
+    its merge base: .github/workflows/clock-sweep.yml, scripts/clock-sweep-deliver.mjs, scripts/clock-sweep.mjs, scripts/needs-human-issue.mjs and a
+    test). `node scripts/census-precheck.mjs --base origin/main` there prints `census-precheck: OK - 5 changed file(s) checked against origin/main` and
+    exits 0. `node --test --import tsx test/instrument-surface-completeness.test.ts` in the same tree is 12 pass / 1 fail, and the failure message is
+    the one the brief quotes: `derived candidate(s) neither in INSTRUMENT_SURFACE nor excused in INSTRUMENT_SURFACE_EXCLUSIONS (src/lib/review.ts):
+    scripts/clock-sweep-deliver.mjs`. The fix commit 1d9e74890 is one line in src/lib/review.ts (an INSTRUMENT_SURFACE_EXCLUSIONS entry beside the
+    siblings scripts/clock-sweep.mjs and scripts/clock-shift.mjs). The CI step name (`rule-checks population`) and the cost in CI cycles are the
+    brief's account; the census test failing on exactly that tree, with exactly that message, is what I measured.
+
+    (2) WHY NOTHING EXISTING CAN ASK IT. `scripts/census-precheck.mjs` imports each census's OWN counter from scripts/ (clock-signature-ratchet,
+    comment-load-ratchet, fixture-copy-census, house-layout-census, deps-interface-census). The instrument-surface census has no such export:
+    `harvestTokens`, `isProductOrTestPath`, `deriveInstrumentCandidates` and `findUnexplainedGaps` are all FILE-LOCAL functions of
+    test/instrument-surface-completeness.test.ts, and importing a node:test file runs its tests (the reason scripts/fixture-copy-census.mjs exists
+    at all). So the brief's "reuse the census's own exported derivation" is not literally possible today: there is nothing exported. The honest
+    options are (a) re-implement it in census-precheck, which is the shape that disagrees with CI the first time either side is edited, or (b) move
+    the one derivation to a module both import. This task takes (b).
+
+    (3) THE DECLARATIONS ARE TYPESCRIPT, THE HOOK IS PLAIN NODE. `INSTRUMENT_SURFACE` and `INSTRUMENT_SURFACE_EXCLUSIONS` are exports of
+    src/lib/review.ts, which imports its siblings with `.js` specifiers and so loads only under tsx. hooks/pre-push runs
+    `node scripts/census-precheck.mjs --base origin/main` with no tsx (its neighbours rule15-precheck, rule25-precheck and proof-resolve-precheck
+    each run `node --import tsx`), and test/a-census-this-branch-grows-is-refused-before-the-push.test.ts and
+    test/census-precheck-counts-the-house-layout-ratchet.test.ts install a hook fixture that copies only a fixed list of scripts, with no src/ tree
+    at all. A static import of review.ts from census-precheck would therefore break both suites and every plain-node invocation. The shape that
+    needs no hook edit and no fixture edit is a CHILD PROCESS: census-precheck spawns `node --import tsx scripts/lib/instrument-surface-census.mjs`
+    only when the diff can matter, and that child imports review.ts for the declarations. Measured on this tree: `import("./src/lib/review.ts")`
+    under tsx is 92 ms; a prototype that derives candidates on this tree and on the merge base and reports the gaps of each takes 446 ms
+    end to end on the 1d9e74890^ worktree (673 ms on main).
+
+    (4) THE PROTOTYPE DISCRIMINATES. Run on the 1d9e74890^ worktree with the merge base as the base: 98 candidates at head with ONE gap
+    (scripts/clock-sweep-deliver.mjs) against 97 candidates at the merge base with NO gap. That is exactly the shape the growth rule needs: the
+    branch caused the gap. Re-run on origin/main itself the head gap list is empty, so the new check does not fire on a healthy main.
+
+    (5) WHY GROWTH-ONLY AND NOT "ANY GAP AT HEAD". census-precheck's own header states the rule: only growth this branch causes refuses, because
+    blocking every push on a census main already fails is a bound firing on a healthy condition. The instrument-surface census is already red in
+    CI for any PR whatever its cause, so the pre-push value is exactly the cases the PR itself introduces. Each side derives with the HEAD
+    declarations (the child imports one review.ts), so a branch that REMOVES a declaration for a still-referenced path is not seen here; CI's census
+    still catches it. That residual is stated, not hidden.
+
+    (6) THE ROW MUST SURVIVE THE CENSUS PUSH RUNG. src/run-task.ts `censusPushRefusal` collects refusal rows only while a line matches
+    `^\s+[a-z][\w-]*: ` and stops at the first line that does not, and it reads a row's offered remedy file from a tail matching
+    `\bor record .* in (\S+)$`. A separate indented `  TO FIX:` continuation line (the style rule15-precheck uses) starts with a capital letter and
+    would END the row list, dropping every later row; a row that does not end in `... in <file>` offers no remedy file, so a fix worker is not told it
+    may edit src/lib/review.ts. The row therefore carries its TO FIX text on the SAME physical line and ends `... both in src/lib/review.ts`,
+    which `censusPushRefusal` reads as census `instrument-surface` offering `src/lib/review.ts`.
+  design: |
+    (i) SHARED DERIVATION. New scripts/lib/instrument-surface-census.mjs holds the derivation moved VERBATIM out of
+    test/instrument-surface-completeness.test.ts: `harvestTokens`, `isProductOrTestPath`, `deriveInstrumentCandidates`, `findUnexplainedGaps`, and
+    one `declaredInstrumentRe(surface)` that builds the declared-path regex from the surface list. `deriveInstrumentCandidates` takes
+    `{ tracked: Set<string>, readText: (path) => string | null }` instead of reading the live tree itself, so the SAME function runs over this
+    tree (`git ls-files` plus the file system) and over the merge base (`git ls-tree -r --name-only <sha>` plus `git show <sha>:<path>`). A missing
+    package.json is no scripts; a malformed one throws, and the throw is the not-measured path below. The module imports no TypeScript at load;
+    its CLI entry (guarded by `isMainModule`) imports src/lib/review.ts dynamically, derives both sides, and prints ONE JSON line
+    `{ head: { candidates, gaps }, base: { candidates, gaps } }`, exiting non-zero with a stderr diagnostic on any failure. Git goes through
+    scripts/lib/git.mjs like every other script.
+    test/instrument-surface-completeness.test.ts then IMPORTS these functions and keeps every one of its existing tests and assertions unchanged
+    (only the local definitions are replaced by the import and a thin live-tree wrapper); no test title there changes.
+
+    (ii) THE CHECK, A SEPARATE PURE FUNCTION. `evaluateCensusPrecheck` keeps its signature and its string[] result, so its existing callers and suites are
+    untouched. scripts/census-precheck.mjs gains an exported `evaluateInstrumentSurface(input)` returning
+    `{ violations: string[], unmeasured: string | null }`, over `input.changed` and an injected `input.measureInstrumentSurface()` that returns the
+    child's `{ head, base }`. SCOPE: it runs only when `changed` holds a path under `.github/workflows/` or `scripts/`, `package.json`, or
+    `src/lib/review.ts` (a candidate can newly appear only through those, and the declarations live in the last); otherwise it returns
+    `{ violations: [], unmeasured: null }` without calling the seam, so a source-only or plan-only push pays nothing and the existing hook-fixture
+    suites, which change only src/ files, never reach the child. An in-scope diff with no seam supplied is NOT a skip: it returns
+    `unmeasured: "no measurement supplied"`.
+
+    (iii) CAUSED, NOT PRESENT. A violation is each path in `head.gaps` that is not in `base.gaps`, sorted, one row each, on ONE physical line:
+    `instrument-surface: <path> is neither on INSTRUMENT_SURFACE nor excused in INSTRUMENT_SURFACE_EXCLUSIONS - TO FIX: add a "^<path with dots escaped>$"
+    pattern to INSTRUMENT_SURFACE if it is gate-rule logic, or record a reasoned exclusion in INSTRUMENT_SURFACE_EXCLUSIONS if it is not, both in
+    src/lib/review.ts`. That names the two places and ends in the `... in <file>` shape of finding (6).
+
+    (iv) BLOCKING, AND THE THIRD VALUE. The check BLOCKS: a violation joins the other censuses' rows, `main` exits 1, and the hook fails the push,
+    because CI refuses the same condition with no override. Unreadable is a different answer and is never a pass. EVERY failure of the measurement
+    maps to `unmeasured` with a reason: the child cannot spawn, exceeds its time bound (spawnSync `timeout`, 60 s), is ended by a signal, exits
+    non-zero (stderr excerpt kept), prints something that is not the expected JSON shape, reports ZERO head candidates (a derivation that saw no
+    workflow at all is a failed read, not a clean tree; the live tree has 98), or the merge-base side fails. `main` then prints
+    `census-precheck: instrument-surface NOT MEASURED - <reason>` to stderr AFTER any violation rows (so `censusPushRefusal`, which stops at the first
+    non-row line, still reads every row), never prints the `OK` line, and exits 2 when nothing else violated (the hook already treats 2 as
+    visible-but-not-blocking, W1-T3225 era contract), or 1 when another census did refuse. The spawn goes through an injectable `run` seam
+    (`measureViaChild({ root, mergeBase, run = spawnSync })`) so each failure arm has its own test, and the default seam is exercised for real below.
+
+    (v) NOTHING ELSE CHANGES. hooks/pre-push is not edited (the child adds `--import tsx` itself, spawned with the repo's own cwd so tsx resolves; the
+    hook still runs `node scripts/census-precheck.mjs`). The header of census-precheck.mjs, which says it spawns "only `git merge-base`, `git diff` and
+    `git show`", is updated to name the one child and why (the declarations are TypeScript). INSTRUMENT_SURFACE and INSTRUMENT_SURFACE_EXCLUSIONS are
+    not touched, and neither new file is referenced from a workflow, so neither can itself become a census candidate.
+  acceptance:
+    - claim: "a diff that adds a workflow-referenced script with no declaration or exclusion is refused, the row naming the path, INSTRUMENT_SURFACE, INSTRUMENT_SURFACE_EXCLUSIONS and src/lib/review.ts on one line"
+      proof: 'grep: test("W1-T5101: a diff that adds a workflow-referenced script with no declaration or exclusion is refused naming both places to record it" in test/census-precheck-refuses-an-undeclared-instrument-surface-path.test.ts'
+    - claim: "positive control: the same diff with the path declared on INSTRUMENT_SURFACE passes, and with a reasoned exclusion passes, but a blank exclusion reason does not"
+      proof: 'grep: test("W1-T5101: the same diff with the path declared on INSTRUMENT_SURFACE passes" in test/census-precheck-refuses-an-undeclared-instrument-surface-path.test.ts'
+    - claim: "an exclusion carrying a real reason silences the row and a blank one does not, the CI census rule reused unchanged"
+      proof: 'grep: test("W1-T5101: the same diff with a reasoned exclusion passes and a blank reason does not" in test/census-precheck-refuses-an-undeclared-instrument-surface-path.test.ts'
+    - claim: "a gap the merge base already carries is not this branch's doing and is not refused"
+      proof: 'grep: test("W1-T5101: a gap the merge base already carries is not caused by this branch" in test/census-precheck-refuses-an-undeclared-instrument-surface-path.test.ts'
+    - claim: "a diff touching no workflow, manifest, script or reviewer path never calls the derivation"
+      proof: 'grep: test("W1-T5101: a diff touching no workflow, manifest, script or reviewer path skips the derivation" in test/census-precheck-refuses-an-undeclared-instrument-surface-path.test.ts'
+    - claim: "a derivation that throws is reported not measured, exits 2 when nothing else violated and never prints OK"
+      proof: 'grep: test("W1-T5101: a tree the derivation cannot read is reported not measured, exits 2 and never prints OK" in test/census-precheck-refuses-an-undeclared-instrument-surface-path.test.ts'
+    - claim: "a derivation that finds zero candidates is not measured, never clean"
+      proof: 'grep: test("W1-T5101: a derivation that finds no candidates is not measured rather than clean" in test/census-precheck-refuses-an-undeclared-instrument-surface-path.test.ts'
+    - claim: "a child that prints malformed output, is stopped on its time bound or exits non-zero is not measured, one arm each"
+      proof: 'grep: test("W1-T5101: a child that prints malformed output or is stopped on its time bound is not measured" in test/census-precheck-refuses-an-undeclared-instrument-surface-path.test.ts'
+    - claim: "the refusal row keeps the shape the census push rung parses: censusPushRefusal reads census instrument-surface offering src/lib/review.ts, and a not-measured line after the rows does not drop one"
+      proof: 'grep: test("W1-T5101: a refusal row keeps the shape the census push rung parses and offers the reviewer file as its remedy" in test/census-precheck-refuses-an-undeclared-instrument-surface-path.test.ts'
+    - claim: "real shell-out: main run on a fixture git repository built with test/helpers/git-repo.ts, through the DEFAULT child seam, returns 1 for an undeclared workflow-referenced script and 0 for one a real INSTRUMENT_SURFACE entry covers"
+      proof: 'grep: test("W1-T5101: the CLI run on a real fixture git repository refuses an undeclared path and passes a declared one" in test/census-precheck-refuses-an-undeclared-instrument-surface-path.test.ts'
+    - claim: "real shell-out, failure arm: the default child run on a directory that is not a git repository is not measured (exit 2), not clean"
+      proof: 'grep: test("W1-T5101: a real child run on a directory that is not a git repository is not measured" in test/census-precheck-refuses-an-undeclared-instrument-surface-path.test.ts'
+    - claim: "the production gate spawns the shared derivation module, so the pre-push check and the CI census cannot derive differently"
+      proof: 'grep: instrument-surface-census\.mjs in scripts/census-precheck.mjs'
+    - claim: "the pure check is an exported production symbol of the precheck"
+      proof: 'grep: export function evaluateInstrumentSurface( in scripts/census-precheck.mjs'
+    - claim: "the CI census suite imports the derivation from the shared module instead of keeping its own copy"
+      proof: 'grep: from "\.\./scripts/lib/instrument-surface-census\.mjs" in test/instrument-surface-completeness.test.ts'
+  falsifier: |
+    Delete the `evaluateInstrumentSurface` call from `main` and the refusal, the real-shell-out and the row-shape tests redden while the
+    positive-control, scope and baseline tests stay green; that split is the evidence the call is load-bearing. Replace the head-minus-base set
+    difference with the head gap list alone and the not-caused test reddens. Replace any `unmeasured` assignment with an empty violation list and
+    the matching failure-arm test reddens (the derivation-throws, zero-candidates, malformed-output, stopped-on-time-bound and non-git-directory
+    tests each own one arm). Re-inline a private derivation in test/instrument-surface-completeness.test.ts and the shared-import grep fails.
+    CLOSE IF the CI census is already asked before the push by another gate (a check that spawns or imports test/instrument-surface-completeness.test.ts
+    or this derivation from hooks/pre-push), or if INSTRUMENT_SURFACE_EXCLUSIONS is replaced by a mechanism that needs no per-path declaration.
+  note: |
+    RISK high: scripts/census-precheck.mjs runs in hooks/pre-push in every worker worktree, where a wrong refusal stops the fleet pushing, not one PR.
+    That is why the check is growth-only, scoped, and degrades to a VISIBLE exit 2 (never a refusal) on anything it cannot read. band_meaning is span:
+    the build touches the pre-push gate script AND the shared module the CI census suite now imports, so a defect in either side moves two consumers.
+    FILES BEYOND THE BRIEF'S TWO, and why: the derivation was file-local to the CI census test, so reusing it means moving it, which adds
+    scripts/lib/instrument-surface-census.mjs and an edit to test/instrument-surface-completeness.test.ts (definitions replaced by an import, every
+    assertion and title unchanged). The edit must not weaken that suite: run it before and after and compare the `# tests` and `# pass` counts.
+    PROOF PATTERNS: this draft cannot verify them with `grep -arn -- '<pattern>' <path>` because no test file exists yet; the builder must, after
+    writing the tests, run that exact invocation for every `test("W1-T5101: ...` pattern and require one hit each (the titles are literals with no
+    regex metacharacters and no ` in ` inside, by construction). The three `grep:` production proofs match one physical line each; keep
+    `export function evaluateInstrumentSurface(` and the child path literal on single lines, and keep the shared-module import on one line
+    (a formatter-wrapped import still keeps its `from "..."` tail on one line).
+    FIXTURE SHAPE: the real-shell-out tests run `main(["--root", dir, "--base", "main"])` in-process on a repo made with test/helpers/git-repo.ts and
+    take the default child seam, which spawns the REAL repo's child (cwd is the real repo so tsx resolves) over the fixture tree; the declarations
+    are therefore the live review.ts, so the positive control uses a path the live surface already covers (a `scripts/<name>-ratchet.mjs`) and
+    the exclusion control uses a live exclusion key (scripts/check.mjs). Do not copy src/ into the fixture. Each default-seam test costs a tsx
+    start (about 0.5 to 1 s); keep them to the two named tests. A new test file with no scripts/test-tier-manifest.json row is the fast tier and is admitted.
+    Build the refusal fixtures with the workflow file referencing the new script in a `run:` line, the way .github/workflows/clock-sweep.yml does.
+    scripts/comment-load-baseline.json has no row for scripts/census-precheck.mjs (the default bucket, 250 comment lines, against its current 35) and
+    records new files automatically; stay inside the bucket. Run `node --test --import tsx` over the two instrument/census suites plus
+    test/a-census-this-branch-grows-is-refused-before-the-push.test.ts, test/census-precheck-counts-the-house-layout-ratchet.test.ts and
+    test/census-precheck-counts-the-deps-interface-ceilings.test.ts and read the `# tests`/`# fail` summary after `ls` confirms each path.
+    OUT OF SCOPE, said plainly: removing a declaration for a still-referenced path is seen only by CI's census (both sides use the head declarations);
+    a stale base ref is the caller's business exactly as for the other censuses (`--base` and the existing git error arm already return 2).

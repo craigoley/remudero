@@ -1,0 +1,261 @@
+- id: W1-T5102
+  title: "THE WEEKLY CLOCK SWEEP IS STILL ONE SERIAL JOB OVER 476 SUITES UNDER A 30-MINUTE CAP — 25.5 MIN ON 09-21, CANCELLED AT 29 MIN 48 S ON 09-28 — SO W1-T5027'S 27-MINUTE BUDGET WILL FIRE EVERY WEEK AND THE SWEEP WILL GO RED NAMING AN UNREACHED TAIL UNTIL THE STRUCTURAL FIX LANDS; run it as a matrix of 6 shards, each taking a deterministic name-ordered slice (`--shard i/n`), and merge the shards' results into the ONE report `classifySweep` and the W1-T5033 delivery already consume, naming any shard that produced nothing"
+  repo: remudero
+  depends_on: [W1-T5027, W1-T5033]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-10-01: the structural fix that the W1-T5027 and W1-T5033 notes name as their follow-up (concurrency or shards, collisions decided, the +400d run time re-measured), so the sweep stops going red every week on its own size"
+  plan_refs: [W1-T5027, W1-T5033, W1-T4948, W1-T3276, W1-T1128, W1-T1104, W1-T3030, W1-T3018, W1-T1027, W1-T1131]
+  files:
+    - .github/workflows/clock-sweep.yml
+    - .github/workflows/ci-gate.yml
+    - scripts/clock-sweep.mjs
+    - scripts/clock-sweep-aggregate.mjs
+    - src/lib/review.ts
+    - test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-01 at origin/main 431d71762 (reading `git show origin/main:<path>`), the two in-flight branches
+    run-W1-T5027-1790813600001 and run-W1-T5033-1790813600002 (PRs 8234 and 8235, not merged when this was drafted), the
+    clock-sweep.yml run records and a local timed replay. THIS TASK IS BUILT AFTER BOTH (depends_on): it edits the same two
+    files and reads their contracts, and it must not be built against the pre-T5027 main.
+
+    (1) THE PROBLEM THIS CLOSES, AS THE TWO NOTES STATE IT. `.github/workflows/clock-sweep.yml` is ONE job, `timeout-minutes: 30`,
+    running `scripts/clock-sweep.mjs` over every derived candidate, one file per invocation at +400 days, serially. Measured
+    job runs: 09-21 (run 35590593553) sweep step 10:47:41 to 11:13:10 = 25 min 29 s; 09-24 workflow_dispatch (36045188675)
+    19 min 46 s for 410 candidates; 09-28 (36382473646) sweep step 05:34:37 to 06:04:25 = 29 min 48 s, CANCELLED by the job
+    timeout with the delivery step skipped; the 09-30 pull_request run (36755951612) and PR 8234's run (36799885008) were
+    cancelled at 30 minutes the same way. `deriveCandidates()` returns 476 suites today, up from 326 on 09-14, 410 on 09-24 and 468
+    on 09-30 (about 9 a day). W1-T5027 adds `SWEEP_BUDGET_MS` (27 minutes) that
+    stops the loop, names the unreached suites and exits 1; its own note says the budget WILL fire every week at today's
+    population until a structural fix lands, and W1-T5033's note says the per-suite issues are what turn that red into named
+    work. This is that structural fix. Without it the instrument is red and partial every Monday: the oldest-touched tail is never swept.
+
+    (2) HOW N WAS DECIDED, THE ARITHMETIC. Per-suite time on a CI runner, from the runs above: 09-24 is (19.8 min minus about 35 s
+    of checkout, setup-node and `npm ci`, read from the 09-28 step timestamps: 8 s + 6 s + 9 s + self-checks under 2 s) over 410 suites =
+    2.8 s a suite; 09-28 is 1788 s over about 468 = 3.8 s a suite or more, because it was cut off, not finished (468 is the 09-30 count;
+    the 09-28 count was a little lower, so read it as approximate). A LOCAL TIMED REPLAY of all 476 suites (the real `runSuite`, one
+    file per invocation at +400, `CI=true`, 4-core container, serial) took 37.0 min: mean 4.67 s, median 1.7 s, p90 5.0 s, max 266 s.
+    It is a heavy-tailed population: the five slowest suites (retro-marker-atomic 266 s, measurement-cadence 253 s,
+    read-model-worker 214 s, live-write-guard-command-sites 141 s, run-task 89 s) are 43% of the time, and 57 suites failed in the
+    container (container-bound, not the 11 recorded drifters), spending 20.5 of the 37 minutes. Capping those five at 20 s gives 21.1 min,
+    2.7 s a suite, which agrees with CI's 2.8 on 09-24. So CI sits at 2.7 to 3.8 s a suite and the PLANNING RATE is the container's raw
+    mean, 4.7 s, above every CI figure. Because the tail is heavy, N is sized on the WORST SHARD of the real replay under the real
+    partition (round-robin over the name-sorted list), not on the mean. The sizing target is the worst shard at one third of the
+    30-minute cap, the 3x headroom the workflow's own R-50 comment already uses.
+      N = 4: balanced 119 x 4.7 s = 9.3 min + 0.6 min setup = 9.9 min, BUT the replay's shards were [8.4, 5.0, 8.6, 15.1] min: the worst
+      is 15.7 min with setup, 1.9x under the cap and 1.7x under the budget. Too tight for a population growing 9 suites a day.
+      N = 5: replay [6.7, 5.6, 3.5, 16.5, 4.8], worst 17.1 min: WORSE than N = 4, because one shard drew the 266 s suite. More shards do
+      not help until the heavy suites are spread, which is why the worst shard, not the mean, is the figure.
+      N = 6: balanced 80 x 4.7 s = 6.3 min + 0.6 = 6.9 min (4.3x under the cap); replay [3.6, 8.7, 7.2, 5.2, 6.2, 6.1] min, worst 8.7 + 0.6 =
+      9.3 min = 3.2x under the cap, the target met on the measured worst case. The 27-minute budget holds 27 x 60 / 4.7 = 345 suites a
+      shard = 2070 suites in all, 4.3x today's population; at the observed +9 a day that is about 177 days away.
+      N = 8: replay worst 7.6 min + 0.6, 3.7x: buys 1 minute for two more setups. N = 6 is chosen.
+    Cost: about 6 x 0.6 + 37.3 = 41 runner-minutes at the planning rate (43 at the replay's raw total) against the 26 to 30 minutes a
+    run takes today when it finishes at all. N is ONE number in two places (the matrix list and the denominator of `--shard i/N`);
+    a test pins them equal.
+
+    (3) COLLISIONS UNDER PARALLEL SHIFTED RUNS, DECIDED (the T5027 and T5033 notes both flag this as open). THERE IS NONE TO DECIDE
+    BETWEEN SHARDS, BECAUSE A MATRIX SHARD IS ITS OWN HOSTED RUNNER: its own VM, filesystem, checkout, loopback interface and
+    temp root. Nothing is shared between shards but the artifact store, written after the suites finish. Evidence read from the
+    476 derived suites: 0 call `.listen(` with a literal nonzero port (`grep -nE '\.listen\(\s*[1-9][0-9]*'` over the candidate list), 37
+    use `.listen(` at all and each takes an ephemeral port; the only fixed-port strings are `4317` URLs inside `test/digest.test.ts`
+    and comments in `test/serve.test.ts`, none of them bound. 119 suites read `REPO_ROOT` or `process.cwd()`; the one that names a
+    ledger under the checkout (`test/run-task.test.ts`, `join(REPO_ROOT, "ledger.ndjson")`) names a path in ITS runner's checkout.
+    `scripts/clock-shift.mjs` moves only the no-arg `Date.now()` and `new Date()` of the one child process it is preloaded into;
+    it writes nothing, so no clock state crosses a shard. WITHIN a shard nothing changes: one suite at a time, each with its own
+    `TMPDIR` (W1-T4948's `runSuite`). THE DECISION FOR THE OPERATOR: concurrency INSIDE one runner (a worker pool, `xargs -P`) is
+    REJECTED and out of scope, because that is where suites would share a cwd, a loopback and the 119 `REPO_ROOT` users, and no
+    one has measured them for concurrent-write safety; the matrix gets the same wall-clock by construction. The one collision class a
+    matrix does introduce is the ARTIFACT NAME: `upload-artifact` refuses a duplicate name (the 09-21 log shows `overwrite: false`),
+    so each shard uploads `clock-sweep-shard-<i>` and the merged report keeps the existing name `clock-sweep-report`.
+
+    (4) CHROMIUM, DECIDED FROM EVIDENCE: NOT INSTALLED, AND A GUARD SO IT CANNOT BECOME SILENTLY NEEDED. The 09-14 report named
+    three `browserType.launch: Executable doesn't exist` suites (serve.density-ia, serve.live-state, console-shell-client). W1-T5033's
+    rationale 3 records that #7313 deleted all three. Re-measured here at 431d71762: the repo's own definition of a
+    browser-launching file (`test/serve-browser-teardown.test.ts` greps for `chromium.launch(`; `test/browser-absence.ts` is the shared
+    gate) matches 10 files under test/ and NONE is in the 476-suite population (a file-by-file intersection of the candidate list
+    with `grep -lE 'browser-absence|from "playwright|chromium\.launch|\.launch\('` is empty). Three candidates mention `playwright` in
+    prose only (`a-playwright-bump-rebuilds-the-image`, `light-pass-requeue-admission`, `push-ci-on-main`). So a Chromium install
+    would be about a minute of dead time in each of four shards for zero suites, and the shard job installs none. W1-T3018's rule
+    stands (a missing browser under CI is a failure reported as itself, never skipped). What is new: a pure `browserSuites(suites,
+    read)` names any population member that holds `chromium.launch(` or imports `browser-absence`, and the merged report fails with
+    a `BROWSER SUITES IN THE POPULATION` section naming them and the one remedy (`npx playwright install chromium`, no `--with-deps`,
+    per W1-T1027, in the shard job). That fires only when the condition it names occurs. Side observation, NOT fixed here:
+    `CLOCK_ARTIFACTS` still lists `serve.glance`, whose file `test/serve.glance.test.ts` does not exist, so the entry can never be
+    seen as stale; a separate cleanup.
+
+    (5) THE +400d RE-MEASURE, DECIDED. The shift stays +400 (the script header's argument that a larger shift dominates a smaller one is
+    untouched, as W1-T5027 and W1-T5033 both left it). What is re-measured is the RUN TIME that sized N, and it becomes a standing output
+    of every weekly run instead of a one-off: each shard's results file records its suite count and `elapsedMs`, and the merged report
+    prints a `shard timing` table (`shard 2/6  80 suites  6.9 min of a 30-minute cap`). A line `SHARD NEAR CAP` is printed, as a
+    WARNING that does not change the exit code, when any shard took 20 minutes or more (two thirds of the cap, 2.2x the replay's worst shard and 2.9x the balanced estimate),
+    naming the one edit that buys headroom (the matrix list and its denominator, kept in lockstep by a test). A bound that failed
+    the run on that figure would fire on a healthy shard size; the budget is already the failing bound. THE FIRST SWEEP AFTER THIS LANDS
+    IS THE ACTUAL CI MEASUREMENT of the sharded time. I could not run the workflow from here, so 9.5 minutes a shard is an estimate
+    from the three CI figures above, not an observation.
+
+    (6) WHY THE SLICE IS TAKEN FROM THE NAME-SORTED LIST, NOT FROM THE NEWEST-FIRST ORDER (a deliberate departure from the brief's
+    first idea, stated). Every shard must slice the SAME list. The newest-first order depends on `readTouchedAt`, one `git log`, and
+    W1-T5027 makes an unreadable history fall back to name order and say so in that one process's own report; if ONE shard's read failed, its order would
+    differ from its siblings', the slices would overlap and leave gaps, and no suite would say so. `deriveCandidates()` is already
+    name-sorted and depends on nothing but the checkout. So: slice = the suites at name-sorted positions k with k % n === i - 1
+    (round-robin, so adjacent names, which share a prefix family, land in different shards and every shard gets a mix of new and
+    old), THEN each shard orders ITS slice newest-first with W1-T5027's `orderNewestFirst`, so a shard's budget cut still takes its
+    own oldest-touched tail. The merge cross-checks (candidate count, shard count, disjoint slices whose union is the whole
+    population) and a mismatch is a failure, never a quiet partial.
+
+    (7) WHY THE SHARDS DO NOT CLASSIFY. `classifySweep` judges drift against a GLOBAL ceiling (`DRIFT_CEILING`, 11) and a
+    global recorded set; a shard holding 4 of the 11 recorded drifters would read as 'below ceiling'. So a shard writes its raw results (and
+    the fuse bisection, which needs to run suites, so it happens in the shard, in parallel) and the merge job calls the one unchanged
+    `classifySweep` over the union and renders the same report text through one shared `renderReport`. Then
+    `scripts/clock-sweep-deliver.mjs`'s `parseNewDrift` (W1-T5033) reads the merged report exactly as it reads today's, with no change.
+
+    (8) WHAT IS NOT CHANGED. `classifySweep`, `FUSE_LADDER_DAYS`, `AGE_SURFACE_RE`, the ceiling, `SPAWN_REACHING`, `CLOCK_ARTIFACTS`,
+    `SWEEP_SHIFT_DAYS`, `scripts/clock-shift.mjs`, `scripts/clock-sweep-baseline.json`, `scripts/needs-human-issue.mjs`,
+    `scripts/clock-sweep-deliver.mjs` and W1-T5033's test file are untouched. W1-T5033's test reads step blocks by name, the
+    `if:` conditions and `SWEEP_OUTCOME: ${{ steps.sweep.outcome }}`; the merge step therefore keeps `id: sweep` and the three step
+    names it reads, so that suite stays green unedited.
+  design: |
+    (i) `scripts/clock-sweep.mjs`. Pure `parseShard(spec)`: `i/n` with integers 1 <= i <= n <= 64, else null. Pure
+    `shardSlice(suites, i, n)`: `suites.filter((_, k) => k % n === i - 1)` over the name-sorted runnable list. `main` gains
+    `--shard i/n` and `--results-out <path>` (a bad spec, or `n > 1` without `--results-out`, prints the flag's name and returns 2:
+    a sharded run's own classification against a global ceiling would be wrong, so it is refused rather than allowed). With no
+    `--shard`, or `--shard 1/1` and no `--results-out`, the process is the single sweep of today and W1-T5027: same lines, same
+    exit codes, byte for byte (the positive control). With `--results-out`, the process runs its slice (W1-T5027's newest-first
+    order and 27-minute budget, per shard), bisects the fuse of each failing non-artifact suite, writes ONE JSON file
+    `{version: 1, shard, of, candidates, runnable, order, elapsedMs, ran: [...], unreached: [...], results: [{suite, failed}], drift:
+    [{suite, fuse, titles, detail}]}` through an injected `writeJson` (real default `writeFileSync`), prints the progress lines it
+    prints today plus one `shard i/n : k suites` line, and exits 0, or 1 when the budget left suites unreached.
+    The report block of `main` moves, verbatim and with its comments, into an exported pure `renderReport({drift, newDrift,
+    staleExclusions, unreached, budgetMinutes, ceiling, ok, ...})` returning the log lines, and a small `describeDrift(row, run)`
+    returns the `{suite, fuse, titles, detail}` row `main` and a shard both build. Pure `browserSuites(suites, read)` returns the
+    suites whose text holds `chromium.launch(` or `browser-absence`; `main` calls it over the runnable list and `renderReport`
+    prints the BROWSER SUITES section and fails when it is non-empty.
+    COMMENT-LOAD CEILING: scripts/clock-sweep.mjs is recorded at 137 in scripts/comment-load-baseline.json (W1-T5027 cut the real count from
+    153 to 137 and PR 8251 lowered the row to match), so there is NO headroom. This edit must REMOVE as many comment lines as it adds: the report block
+    keeps its comments as it moves, each new function takes at most a one-line doc comment, and the stale prose goes (the header's
+    'all 42 candidates', the 'TEMPORARY DIAGNOSTIC' history that W1-T5027 already folded, the long W1-T1104 `emissions` block). Never raise the row.
+    (ii) `scripts/clock-sweep-aggregate.mjs` (new). `main({argv, readFile, derive, ...})`: `--dir <dir> --shards <n>`. Reads
+    `<dir>/clock-sweep-shard-<i>.json` for i = 1..n. For a shard file that is absent, unreadable or not version 1, it computes the
+    suites that shard WOULD have run from its own checkout (`shardSlice(runnableCandidates(derive()), i, n)`) and reports
+    `MISSING SHARD i/n` with the first ten and the count, as unreached, so a shard killed by the job timeout is named with its suites
+    rather than silent. It fails when shards disagree on `candidates` or `of`, when `--shards` is not the recorded `of`, or when the
+    slices overlap or do not cover the derived population. It rebuilds the `results` Map from every shard, calls the unchanged
+    `classifySweep(results, CLOCK_ARTIFACTS, DRIFT_CEILING, recorded)`, rebuilds the drift rows from the shards' `drift` records,
+    prints the same header lines as a single sweep plus `shards : n/n present`, a `shard timing` table and `SHARD NEAR CAP` for any
+    shard at 20 minutes or more, and then `renderReport`. Exit 0 only when classify is ok, nothing is unreached or missing, and no
+    browser suite is present. It is listed in src/lib/review.ts's `INSTRUMENT_SURFACE_EXCLUSIONS` beside its two siblings (the
+    instrument-surface census refused W1-T5033's delivery script until it was, so run that census first).
+    (iii) `.github/workflows/clock-sweep.yml`. Job `clock-sweep` becomes the shard job: `name: clock-sweep shard (${{ matrix.shard }}/6)`,
+    `strategy: {fail-fast: false, matrix: {shard: [1, 2, 3, 4, 5, 6]}}` (`fail-fast: false` is load-bearing: one cancelled shard must not cancel
+    its siblings and take their results with it), `timeout-minutes: 30` (the backstop, unchanged), `permissions: contents: read` only. Its steps are
+    today's checkout (`fetch-depth: 0`), setup-node, `npm ci`, the two self-check steps (the harness-import parity scan still sees two `node --test`
+    steps), the `--list` step with `--shard ${{ matrix.shard }}/6`, and the sweep step `node scripts/clock-sweep.mjs --shard ${{ matrix.shard }}/6
+    --results-out clock-sweep-shard-${{ matrix.shard }}.json | tee clock-sweep-shard-${{ matrix.shard }}.txt` under `set -o pipefail`
+    (the existing comment on why stays true), then an `if: always()` upload of both files as artifact `clock-sweep-shard-${{ matrix.shard }}`.
+    A second job `clock-sweep-report` (`needs: clock-sweep`, `if: always()`, `timeout-minutes: 10`, `permissions: contents: read` and
+    `issues: write`, name `clock-sweep-report (merge the shards, classify, deliver)`) checks out, sets up node with `cache: npm`, runs `npm ci`,
+    downloads `clock-sweep-shard-*` with `merge-multiple: true` into `shards/` (the same pinned `actions/download-artifact` sha ci.yml
+    already uses), and runs, under `set -o pipefail`, `node scripts/clock-sweep-aggregate.mjs --dir shards --shards 6 | tee sweep-report.txt` as
+    the step `id: sweep` named `Merge the shard reports and classify`. After it come W1-T5033's three delivery steps (same names, same `if:`
+    conditions, `SWEEP_OUTCOME: ${{ steps.sweep.outcome }}` kept, plus an added `SHARDS_RESULT: ${{ needs.clock-sweep.result }}` appended to
+    the `--preamble`), the `Close this job's needs-human issue once it recovers` step with `if: success() && needs.clock-sweep.result ==
+    'success' && github.event_name != 'pull_request'`, and the `Upload the sweep report` step, unchanged. The `pull_request` `paths`
+    filter gains the aggregate script and the new test file. The header comment's 'completes in ~10-11 minutes' is replaced by the measured figure.
+    (iv) `.github/workflows/ci-gate.yml`: in the ADVISORY list the one old name `clock-sweep (+400d, artifacts excluded by name)` is replaced
+    by `clock-sweep shard (1/6)` .. `clock-sweep shard (6/6)` and `clock-sweep-report (merge the shards, classify, deliver)`, the names
+    `derivePrCheckCandidates` expands from the matrix and the job name (a plain-array matrix is the shape its expander supports). Without
+    it `ci-control-plane-precheck` and `test/every-pr-check-is-required-or-advisory.test.ts` refuse the workflow edit. MEASURED in a scratch tree: a skeleton of this job layout at 4 shards (a plain-array matrix, `fail-fast: false`, the shard name template, a second `timeout-minutes` job) made `staticControlPlaneVerdict` report 5 registry gaps with the old ADVISORY list and `ok` with the five names added, and test/every-pr-check-is-required-or-advisory.test.ts, test/ci-cache-concurrency-and-job-timeouts.test.ts, test/workflow-harness-import-parity.test.ts and test/a-recovered-scheduled-job-leaves-its-escalation-open-forever.test.ts stayed 31 of 31 green on it. They stay ADVISORY: the sweep is not a
+    required check and a red shifted run must not hold a merge (W1-T1131). `npm run capability-snapshot:check` was run against a synthetic
+    ADVISORY edit in a scratch tree and stayed OK, but the builder runs it on the real diff.
+    (v) The test file. In-process cases drive `main` and the aggregate with injected `run`, `derive`, `touchedAt`, `now`, `writeJson`
+    and `readFile`, as test/clock-sweep.test.ts does. ONE case really shells out (the default seams are otherwise unreachable, and a
+    spawned child does not count toward diff-coverage, so the in-process cases carry the coverage): it builds a throwaway mini checkout
+    under an `rmd-`-prefixed temp root (a copy of scripts/clock-sweep.mjs, scripts/lib/argv.mjs, scripts/lib/repo-root.mjs,
+    scripts/clock-sweep-aggregate.mjs, scripts/clock-sweep-baseline.json and scripts/clock-shift.mjs plus five tiny passing suites that
+    carry an age token and a date literal, with the real `node_modules` symlinked in for `--import tsx`), runs the real CLI as `--shard 1/2
+    --results-out` and `--shard 2/2 --results-out`, then runs the real aggregate CLI over the two files it wrote, and asserts the files
+    exist, the slices partition the five suites, and the merged report passes with exit 0; deleting shard 2's file and re-running the
+    aggregate exits 1 and names `MISSING SHARD 2/2`.
+  acceptance:
+    - claim: "every runnable suite lands in exactly one shard and the shards are disjoint, for several shard counts including one larger than the population"
+      proof: 'grep: test("W1-T5102: every runnable suite lands in exactly one shard" in test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts'
+    - claim: "the slice depends on the name order only, so an unreadable git history in one shard cannot make two shards overlap"
+      proof: 'grep: test("W1-T5102: the slice is the same with and without readable git history" in test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts'
+    - claim: "a sweep that fits one shard prints and exits exactly as the unsharded sweep does, the positive control"
+      proof: 'grep: test("W1-T5102: a one-shard sweep prints and exits exactly as the unsharded sweep" in test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts'
+    - claim: "a malformed shard spec, or a sharded run with no results file, is refused and names the flag instead of classifying a slice against the global ceiling"
+      proof: 'grep: test("W1-T5102: a malformed shard spec or a sharded run with no results file is refused" in test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts'
+    - claim: "a shard run writes its results file with the fuse and detail of each failing suite, runs newest-touched first inside its budget, and classifies nothing itself"
+      proof: 'grep: test("W1-T5102: a shard writes its results file and classifies nothing itself" in test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts'
+    - claim: "the merge of two shards produces the same drift report text the unsharded sweep produces over the same results, judged by the one classifySweep"
+      proof: 'grep: test("W1-T5102: the merged report equals the unsharded report over the same results" in test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts'
+    - claim: "the merged report still feeds the W1-T5033 new-drift parser, one entry per new drifting suite"
+      proof: 'grep: test("W1-T5102: the merged report is read by the new-drift delivery parser" in test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts'
+    - claim: "a shard that produced no file is named with the suites it would have run and the merge fails, never a quiet partial"
+      proof: 'grep: test("W1-T5102: a missing shard is named with its suites and the merge fails" in test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts'
+    - claim: "shards that disagree on the candidate population or the shard count fail the merge"
+      proof: 'grep: test("W1-T5102: shards that disagree on the population fail the merge" in test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts'
+    - claim: "a shard that ran near its cap is a printed warning that does not fail the merge, while a normal shard prints none, the positive control"
+      proof: 'grep: test("W1-T5102: a shard near its cap is a warning and a normal shard prints none" in test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts'
+    - claim: "the real derived population holds no browser-launching suite, which is the evidence that the shard job installs no Chromium"
+      proof: 'grep: test("W1-T5102: the real population holds no browser-launching suite" in test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts'
+    - claim: "a browser-launching suite that enters the population fails the merged report and names the suite and the remedy"
+      proof: 'grep: test("W1-T5102: a browser-launching suite in the population fails the report" in test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts'
+    - claim: "the real CLIs shard a throwaway mini checkout, write the results files, and the real aggregate merges them, exiting 1 and naming the shard when one file is removed"
+      proof: 'grep: test("W1-T5102: the real CLIs shard a throwaway checkout and merge its results" in test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts'
+    - claim: "the workflow runs the shard matrix with fail-fast off, the matrix length equals the denominator and the merge job count, and each shard uploads its own artifact"
+      proof: 'grep: test("W1-T5102: the workflow runs the shard matrix and merges every shard" in test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts'
+    - claim: "the merge job delivers on failure or cancellation, excludes pull_request, and its resolver also requires the shards to have succeeded"
+      proof: 'grep: test("W1-T5102: the merge job delivers and resolves under the same guards as before" in test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts'
+    - claim: "every shard check and the merge check the workflow registers is named in the ci-gate advisory list"
+      proof: 'grep: test("W1-T5102: every shard and the merge job is registered in the ci-gate advisory list" in test/a-clock-sweep-runs-as-shards-and-merges-one-report.test.ts'
+    - claim: "the sweep script slices its population by shard, a production use of the new function"
+      proof: "grep: shardSlice in scripts/clock-sweep.mjs"
+    - claim: "the merge script renders the shared report and classifies through the one classifySweep, a production use"
+      proof: "grep: renderReport in scripts/clock-sweep-aggregate.mjs"
+    - claim: "the workflow invokes the merge script, the production wiring"
+      proof: 'grep: clock-sweep-aggregate\.mjs in .github/workflows/clock-sweep.yml'
+    - claim: "the workflow names the shard matrix and turns fail-fast off"
+      proof: "grep: fail-fast: false in .github/workflows/clock-sweep.yml"
+    - claim: "the new script is recorded as an ops tool in the instrument-surface exclusions"
+      proof: 'grep: clock-sweep-aggregate\.mjs in src/lib/review.ts'
+    - claim: "the shard checks are registered in the ci-gate advisory list"
+      proof: "grep: clock-sweep shard in .github/workflows/ci-gate.yml"
+  falsifier: |
+    Slice by `k % n === i` (off by one) and the first test reddens (one suite in no shard, or the last shard empty). Slice from the
+    newest-first order and the second test reddens (the slice moves with git history). Classify inside the shard and the merged-report
+    test reddens, because a shard's drifters are judged against the global ceiling. Drop the missing-shard arm and the missing-shard test
+    reddens (a killed shard reads as a clean sweep: the exact silence this task exists to end). Set `fail-fast` back to its default and
+    the workflow test reddens. Change the matrix to seven entries and leave the denominator at 6 and the workflow test reddens on
+    the pairing. The one-shard positive control and the normal-shard control stay green in all of them, which is what shows each
+    change fires only on its own shape. CLOSE IF the W1-T5027 budget alone is measured finishing the full population inside 27
+    minutes on a CI runner (the sweep then does not need splitting; the 09-28 run says it does not).
+  note: |
+    RISK: `high` / `band_meaning: span` is Rule 19 SIZING and the honest cost of what this touches, not a guess at danger: a workflow, two
+    scripts, the ci-gate registry, one census line in src/lib/review.ts and the suite read as several subsystems at `medium`. Every
+    path is an instrument or an ops tool of a weekly job that is not a required check; the one control-plane edit (ci-gate.yml's ADVISORY
+    names) cannot hold a merge, and Rule 25 is not tripped because no src/ product path rides along (src/lib/review.ts is itself on
+    INSTRUMENT_SURFACE; W1-T5033 made the same one-line edit).
+    LOCAL REPLAY, FOR THE RATIO ONLY (4-core container, `CI=true`, all 476 runnable suites, one invocation each at +400 with the real
+    `runSuite`, serial): the per-suite times are kept beside this draft as clock-sweep-replay-times.tsv (suite, ms, failed), 476 rows; totals and the
+    per-shard splits are in rationale (2). The container failed 57 suites for container reasons, so its failing-suite times are an upper bound on CI's.
+    NOT VERIFIED FROM HERE: (a) the sharded wall-clock on a hosted runner (the first scheduled sweep after landing is that
+    measurement; the report's `shard timing` table is where to read it); (b) that the GitHub-hosted runner for this repo is the 2-core
+    or the 4-core class (it changes seconds a suite, not the shape: N = 6 has 3.2x headroom on the replay's worst shard); (c) the
+    pinned `actions/download-artifact` sha is the one ci.yml uses (3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c, v8.0.1), reused rather than re-resolved.
+    TWO DECISIONS LEFT OPEN ON PURPOSE. (1) The per-suite issues W1-T5033 fans out are still closed by the fixing PR; a prefix resolver
+    that closes one once a COMPLETE later run no longer names it can now be built, because the merged report carries `shards : n/n present`
+    and an UNREACHED list that say whether a run was complete (the follow-up W1-T5033's note named). (2) `serve.glance` in `CLOCK_ARTIFACTS`
+    names a suite file that no longer exists (rationale 4); delete the entry in its own change.
+    scripts/ changes are diff-coverage-gated in CI even though `rmd preflight`'s scoped check says 'nothing to prove' on a scripts-only diff: run
+    `npm run diff-coverage:local -- <tests>` on a committed tree and confirm `grep -c '^SF:scripts/clock-sweep-aggregate.mjs$' <lcov>` and the
+    same for scripts/clock-sweep.mjs are non-zero (name the sha). Editing the workflow fires clock-sweep.yml's own pull_request trigger: that run is
+    not required, now takes four shards, and delivers nothing because the `pull_request` event is excluded.
