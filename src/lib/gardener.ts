@@ -173,16 +173,62 @@ export function gardenStatePath(stateDir: string, name: string): string {
   return join(stateDir, `${name}-gardener.json`);
 }
 
+/** Why an EXISTING state file could not be trusted: `unparseable` is bytes that are not JSON (or cannot
+ *  be read), `malformed` is JSON that is not a gardener state. A missing file is neither: it is first boot. */
+export type GardenStateFailure = "unparseable" | "malformed";
+
+/** An existing state file the gardener cannot trust. Resetting it to the optimistic prior would forget a
+ *  pending PR and open a duplicate, so the pass fails with this instead and leaves the file for repair. */
+export class GardenStateUnreadableError extends Error {
+  readonly path: string;
+  readonly failureClass: GardenStateFailure;
+  constructor(path: string, failureClass: GardenStateFailure, detail: string) {
+    super(`gardener state ${path} is ${failureClass}: ${detail}; repair or remove the file and the next pass retries`);
+    this.name = "GardenStateUnreadableError";
+    this.path = path;
+    this.failureClass = failureClass;
+  }
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const isCount = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0;
+const isOutcome = (v: unknown): boolean => isRecord(v) && isCount(v.trials) && isCount(v.successes);
+
+/** The first structural fault in a parsed state, or `undefined`. Optional fields may be absent (an older
+ *  record), a class the spec has added since may be absent (it is initialized), but nothing present may
+ *  be the wrong shape: a pass acts on every one of these. */
+function gardenStateFault(parsed: unknown): string | undefined {
+  if (!isRecord(parsed)) return "the file is not a JSON object";
+  if (!isRecord(parsed.classes)) return "`classes` is missing or not an object";
+  for (const [name, c] of Object.entries(parsed.classes)) {
+    if (!isRecord(c) || !isCount(c.alpha) || !isCount(c.beta)) return `class \`${name}\` has no numeric alpha and beta`;
+  }
+  const { pending, lastPass, lastCheap, filingFailures, foldedEffects } = parsed;
+  if (pending !== undefined) {
+    if (!isRecord(pending) || typeof pending.prUrl !== "string") return "`pending` has no PR url";
+    if (typeof pending.actionClass !== "string" || !(pending.actionClass in parsed.classes)) return "`pending` names a class the record does not hold";
+    if (!isOutcome(pending.baseline) || (pending.atMerge !== undefined && !isOutcome(pending.atMerge))) return "`pending` has a malformed baseline";
+  }
+  if (lastPass !== undefined && (!isRecord(lastPass) || typeof lastPass.fingerprint !== "string" || (lastPass.landed !== undefined && typeof lastPass.landed !== "string"))) return "`lastPass` is not a fingerprint";
+  if (lastCheap !== undefined && typeof lastCheap !== "string") return "`lastCheap` is not a string";
+  if (filingFailures !== undefined && (!isRecord(filingFailures) || !isCount(filingFailures.count) || typeof filingFailures.lastAt !== "string" || typeof filingFailures.reason !== "string")) return "`filingFailures` is malformed";
+  if (foldedEffects !== undefined && (!Array.isArray(foldedEffects) || foldedEffects.some((id) => typeof id !== "string"))) return "`foldedEffects` is not a list of ids";
+  return undefined;
+}
+
+/** The recorded state; a MISSING file is first boot and gets the optimistic prior. An existing file that
+ *  cannot be read, parsed or validated throws {@link GardenStateUnreadableError} — never the prior. */
 export function readGardenState<C extends string>(path: string, classes: readonly C[]): GardenState<C> {
   if (!existsSync(path)) return initialGardenState(classes);
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as GardenState<C>;
-    return parsed && parsed.classes ? { ...initialGardenState(classes), ...parsed } : initialGardenState(classes);
-  } catch {
-    // deliberate: an unreadable state restarts every class at its optimistic prior; nothing is lost
-    // that the next passes cannot re-learn.
-    return initialGardenState(classes);
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (e) {
+    throw new GardenStateUnreadableError(path, "unparseable", String((e as Error)?.message ?? e));
   }
+  const fault = gardenStateFault(parsed);
+  if (fault) throw new GardenStateUnreadableError(path, "malformed", fault);
+  return { ...initialGardenState(classes), ...(parsed as GardenState<C>), classes: { ...initialGardenState(classes).classes, ...(parsed as GardenState<C>).classes } };
 }
 
 /**
@@ -419,7 +465,9 @@ export function startGarden<C extends string, I, A extends GardenAction<C>, W ex
     try {
       runGarden(spec, deps);
     } catch (e) {
-      deps.log(`${spec.name}.gardener_failed`, { error: String((e as Error)?.message ?? e) });
+      // An unreadable state file also names its path and failure class, so the row says what to repair.
+      const unreadable = e instanceof GardenStateUnreadableError ? { path: e.path, failure_class: e.failureClass } : {};
+      deps.log(`${spec.name}.gardener_failed`, { error: String((e as Error)?.message ?? e), ...unreadable });
     } finally {
       running = false;
     }
