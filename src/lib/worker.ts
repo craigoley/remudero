@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
-import { fetchOriginRetryingRefLock, type GitRunner } from "./self-sync.js";
+import { fetchOriginRetryingRefLock, type GitRunner } from "./git-fetch-retry.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFileSync,
