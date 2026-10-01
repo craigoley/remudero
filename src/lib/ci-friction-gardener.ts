@@ -341,6 +341,31 @@ export function ciFrictionOrigin(cause: CiFrictionCause): string {
   return `ci-friction:${ciFrictionCauseKey(cause)}`;
 }
 
+/** The daemon's image checkout may trail a just-merged filing for minutes. Read origins from a
+ * freshly fetched main tree before minting another task for the same cause. An unreadable remote
+ * fails the garden pass; an old local plan is not evidence that the cause is untracked. */
+export function freshCiFrictionPlanOrigins(repoRoot: string): string[] {
+  const options = { encoding: "utf8" as const, timeout: 20_000, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } };
+  execFileSync("git", ["-C", repoRoot, "fetch", "--quiet", "--no-write-fetch-head", "origin",
+    "+refs/heads/main:refs/remotes/origin/main"], options);
+  const shards = relative(repoRoot, join(resolveRepoLayout(repoRoot).planDir, "tasks.d"));
+  const lines = execFileSync("git", ["-C", repoRoot, "grep", "-h", "-E",
+    "^[[:space:]]*origin:[[:space:]]*", "origin/main", "--", shards], options).trim().split("\n");
+  if (lines.length === 0 || !lines[0]) throw new Error("ci-friction plan origin census found no task origins on fetched main");
+  return lines.flatMap((line) => {
+    const raw = line.replace(/^[ \t]*origin:[ \t]*/, "").trim();
+    if (raw.startsWith('"ci-friction:') && raw.endsWith('"')) {
+      const value: unknown = JSON.parse(raw);
+      return typeof value === "string" && value.startsWith("ci-friction:") ? [value] : [];
+    }
+    if (raw.startsWith("'ci-friction:") && raw.endsWith("'")) {
+      const value = raw.slice(1, -1).replace(/''/g, "'");
+      return value.startsWith("ci-friction:") ? [value] : [];
+    }
+    return raw.startsWith("ci-friction:") ? [raw] : [];
+  });
+}
+
 /** The costliest priced cause with no queued task already tracking it — `undefined` when every
  *  measured cause already has one, which proposes nothing rather than a duplicate. */
 export function costliestUntrackedCause(priced: readonly CiFrictionCausePrice[], planOrigins: readonly string[]): CiFrictionCausePrice | undefined {

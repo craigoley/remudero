@@ -195,13 +195,28 @@ export type ReconciledFeedbackEntry = FeedbackEntry & {
 
 /**
  * Merging the proposal PR is the decision (W1-T257): a `proposed` entry whose `proposal_pr` has
- * merged reconciles to the terminal status `accepted`, rather than sitting in NEEDS ME forever.
- * Runs on every GET /v1/feedback read, self-healing entries already stuck on disk, through the
- * one batched `statusGithub` gateway GET /v1/drain/preview also uses.
+ * merged reads as the terminal status `accepted`, rather than sitting in NEEDS ME forever, through
+ * the one batched `statusGithub` gateway GET /v1/drain/preview also uses. This writes NOTHING: GET
+ * /v1/feedback and the feedback view serve it, and {@link reconcileFeedbackEntries} persists it.
  *
  * No `proposal_pr`, or one open/closed-unmerged, passes through untouched. A genuinely failed
  * read (`readFailed()`) also leaves `proposed` alone but decorates `unverified: true`.
  * Why: the reconcile-vs-sweep design and the fail-safe direction — docs/forensics/panel-graph.md
+ */
+export function projectReconciledFeedback(entries: readonly FeedbackEntry[], statusGithub: GitHub): ReconciledFeedbackEntry[] {
+  return entries.map((entry): ReconciledFeedbackEntry => {
+    if (entry.status !== "proposed" || !entry.proposal_pr) return entry;
+    const pr = statusGithub.prByRef(entry.proposal_pr);
+    if (pr && pr.state === "MERGED") return { ...entry, status: "accepted", proposal_pr: entry.proposal_pr, summary: entry.summary ?? null, answered_by: entry.answered_by ?? null };
+    if (!pr && statusGithub.readFailed?.()) return { ...entry, unverified: true };
+    return entry;
+  });
+}
+
+/**
+ * {@link projectReconciledFeedback}, persisted: each entry it reads `accepted` is written so. The ONE
+ * writer is serve's slow lane (arch Phase 4 P4-T07, {@link acceptMergedFeedback}), never a GET, so
+ * the flip happens with no reader and concurrent reads never race to land it.
  */
 export function reconcileFeedbackEntries(
   root: string,
@@ -212,13 +227,14 @@ export function reconcileFeedbackEntries(
   // Why: the incident — docs/forensics/panel-graph.md
   land?: LandFeedbackOpts,
 ): ReconciledFeedbackEntry[] {
-  return entries.map((entry) => {
-    if (entry.status !== "proposed" || !entry.proposal_pr) return entry;
-    const pr = statusGithub.prByRef(entry.proposal_pr);
-    if (pr && pr.state === "MERGED") return setFeedbackStatus(root, entry.id, "accepted", land ? { land } : {});
-    if (!pr && statusGithub.readFailed?.()) return { ...entry, unverified: true };
-    return entry;
-  });
+  return projectReconciledFeedback(entries, statusGithub).map((projected, i) =>
+    projected.status === "accepted" && entries[i]?.status === "proposed" ? setFeedbackStatus(root, projected.id, "accepted", land ? { land } : {}) : projected);
+}
+
+/** The slow lane's feedback unit's write: every proposed entry whose proposal PR merged, accepted and landed. Returns their ids. */
+export function acceptMergedFeedback(root: string, statusGithub: GitHub, land: LandFeedbackOpts): string[] {
+  const proposed = listFeedback(root, { status: "proposed" });
+  return reconcileFeedbackEntries(root, proposed, statusGithub, land).filter((entry) => entry.status === "accepted").map((entry) => entry.id);
 }
 
 /**
@@ -281,7 +297,8 @@ export function buildFeedbackInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?:
         projected = computeFeedbackProjectionSync(input);
       }
       const { entries: listed, filedTasks } = projected as Extract<FeedbackProjectionOutcome, { ok: true }>;
-      const reconciled = reconcileFeedbackEntries(deps.root, listed, deps.statusGithub, deps.feedbackLand);
+      // A read writes nothing: the slow lane persists each merged proposal's `accepted` (P4-T07).
+      const reconciled = projectReconciledFeedback(listed, deps.statusGithub);
       const decorated = filedTasks ? decorateFeedbackDischargeByTasks(reconciled, new Map(filedTasks), deps.statusGithub) : reconciled;
       const entries = statusParam ? decorated.filter((e) => e.status === statusParam) : decorated;
       if (!pageRequest) sendJson(res, 200, { entries });

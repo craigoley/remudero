@@ -12523,6 +12523,15 @@ export function deriveWindowCostUsd(
   windowStartMs: number,
   windowEndMs: number,
 ): number {
+  return windowCostRows(lines, windowStartMs, windowEndMs).reduce((total, [, cost]) => total + cost, 0);
+}
+
+/** The rows {@link deriveWindowCostUsd} adds, one per run, each `[<task>#<run>@<ts of its cost line>, cost]`. */
+export function windowCostRows(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  windowStartMs: number,
+  windowEndMs: number,
+): Array<[string, number]> {
   const byRun = new Map<string, Record<string, unknown>[]>();
   for (const line of lines) {
     const ts = typeof line.ts === "string" ? line.ts : undefined;
@@ -12534,13 +12543,13 @@ export function deriveWindowCostUsd(
     if (bucket) bucket.push(line);
     else byRun.set(runId, [line]);
   }
-  let total = 0;
-  for (const runLines of byRun.values()) {
+  const rows: Array<[string, number]> = [];
+  for (const [runId, runLines] of byRun) {
     const verdictLine = runLines.find((l) => l.step === "verdict");
     const costLine = verdictLine ?? runLines.find((l) => typeof l.cost_usd === "number");
-    if (costLine && typeof costLine.cost_usd === "number") total += costLine.cost_usd;
+    if (costLine && typeof costLine.cost_usd === "number") rows.push([`${String(costLine.task_id ?? `run:${runId}`)}#${runId}@${String(costLine.ts)}`, costLine.cost_usd]);
   }
-  return total;
+  return rows;
 }
 
 // W1-T2895: `utcDayWindowMs`/`utcWeekWindowMs` moved to the leaf module `time-window.ts` — this

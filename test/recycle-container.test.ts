@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = join(REPO_ROOT, "deploy", "recycle-container.sh");
@@ -170,6 +171,7 @@ function writeStubs(dir: string): void {
     "        printf '%s\\t%s\\ttrue\\n' \"$RMD_CLAUDE_DIR\" /home/node/.claude",
     '        if [ -d "${RMD_CODEX_DIR:-}" ]; then printf \'%s\\t%s\\ttrue\\n\' "$RMD_CODEX_DIR" /home/node/.codex; fi',
     '        if [ -d "${RMD_CONTAINER_CONFIG_DIR:-}" ]; then printf \'%s\\t%s\\ttrue\\n\' "$RMD_CONTAINER_CONFIG_DIR" /home/node/.config/remudero; fi',
+    '        if [ -n "${STUB_EXTRA_MOUNTS:-}" ]; then printf \'%s\\n\' "$STUB_EXTRA_MOUNTS"; fi',
     "        exit 0 ;;",
     "      *Config.Image*)",
     '        echo "test-registry/remudero:old"',
@@ -1018,4 +1020,58 @@ test("W1-T1069: MUTANT: a fallback array edited out of sync with deploy/runtime-
   const mutantFallback = extractBashArray(mutated, "RMD_DAEMON_RUNTIME_ENV_VARS");
   const sharedNames = extractBashArray(readFileSync(SHARED_RUNTIME_VARS_FILE, "utf8"), "RMD_DAEMON_RUNTIME_ENV_VARS");
   assert.notDeepEqual([...mutantFallback].sort(), [...sharedNames].sort(), "a drifted fallback must actually differ, or this proves nothing");
+});
+
+/** A scratch root the fixture declares mounted (deploy/scratch-mounts.sh reads the mounts table). */
+function scratchFixture(): { root: string; env: Record<string, string> } {
+  const base = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}recycle-scratch-`));
+  const root = join(base, "nvme");
+  mkdirSync(root);
+  writeFileSync(join(base, "mounts"), `/dev/nvme1n1 ${root} ext4 rw 0 0\n`);
+  return { root, env: { RMD_SCRATCH: "on", RMD_SCRATCH_ROOT: root, RMD_SCRATCH_MOUNTS_FILE: join(base, "mounts") } };
+}
+
+test("a switched-on daemon recycle binds the rebuildable dirs to scratch and its runtime contract checks them", () => {
+  const scratch = scratchFixture();
+  const state = mkdtempSync(join(tmpdir(), "recycle-state-"));
+  const key = state.split("/").pop()!;
+  const base = join(scratch.root, "rmd", key);
+  const binds: Array<[string, string]> = [
+    [join(base, "worktrees"), "/home/node/Remudero/worktrees"],
+    [join(base, "tmp"), "/home/node/Remudero/tmp"],
+    [join(base, "remudero-coverage"), "/home/node/Remudero/.remudero-coverage"],
+    [join(base, "repos-coverage"), "/home/node/Remudero/repos/.remudero-coverage"],
+    [join(base, "read-model"), "/home/node/rmd-scratch/read-model"],
+    [join(base, "worker-homes"), "/home/node/rmd-scratch/worker-homes"],
+    [join(base, "containers", "remudero-daemon", "tmp"), "/tmp"],
+  ];
+  const containerTmp = binds[binds.length - 1][0];
+  mkdirSync(containerTmp, { recursive: true });
+  writeFileSync(join(containerTmp, "left-by-the-old-container"), "x");
+  const mounted = binds.map(([src, dest]) => `${src}\t${dest}\ttrue`).join("\n");
+  const run = runRecycle("good", { stateDir: state, extraEnv: { ...scratch.env, STUB_EXTRA_MOUNTS: mounted } });
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  const argv = run.calls.find(isRun)?.argv ?? [];
+  for (const [src, dest] of binds) assert.ok(argv.includes(`${src}:${dest}`), `bound ${dest}: ${argv.join(" ")}`);
+  assert.ok(argv.includes("RMD_READ_MODEL_DB_DIR=/home/node/Remudero/state:/home/node/rmd-scratch/read-model"));
+  assert.ok(argv.includes("RMD_WORKER_HOME_DIR=/home/node/Remudero:/home/node/rmd-scratch/worker-homes"), "the daemon's worker homes follow their bind");
+  for (const [src] of binds) assert.ok(existsSync(src), `created ${src}`);
+  assert.deepEqual(readdirSync(containerTmp), [], "the new container starts with an empty /tmp, as a new container always did");
+  assert.deepEqual(readFileSync(join(state, ".scratch-mounts"), "utf8").trim().split("\n"), binds.map(([src]) => src).sort(), "the boot-time restore list names every bound dir");
+
+  const unbound = runRecycle("good", { stateDir: mkdtempSync(join(tmpdir(), "recycle-state-")), extraEnv: scratch.env });
+  assert.notEqual(unbound.status, 0, "a container that came up without the scratch binds fails the runtime contract");
+  assert.match(unbound.stdout + unbound.stderr, /FAILED RUNTIME CONTRACT/);
+});
+
+test("a recycle with scratch off or an unmounted scratch root launches exactly as before", () => {
+  const scratch = scratchFixture();
+  const off = runRecycle("good", { extraEnv: { ...scratch.env, RMD_SCRATCH: "off" } });
+  assert.equal(off.status, 0, off.stderr);
+  assert.ok(!(off.calls.find(isRun)?.argv ?? []).some((a) => a.includes("rmd-scratch") || a.includes(scratch.root)), "no scratch bind while switched off");
+  assert.match(off.stdout, /scratch mounts off/);
+  const unmounted = runRecycle("good", { extraEnv: { ...scratch.env, RMD_SCRATCH_MOUNTS_FILE: join(scratch.root, "no-mounts-table") } });
+  assert.equal(unmounted.status, 0, unmounted.stderr);
+  assert.ok(!(unmounted.calls.find(isRun)?.argv ?? []).some((a) => a.includes(scratch.root)), "an unmounted scratch root is never bound");
+  assert.match(unmounted.stdout, /scratch mounts NOT USED .* is not a mounted filesystem/);
 });

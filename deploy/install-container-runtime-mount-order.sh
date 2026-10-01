@@ -32,6 +32,8 @@ DOCKER_DROPIN_DIR="${RMD_DOCKER_DROPIN_DIR:-/etc/systemd/system/docker.service.d
 CONTAINERD_DROPIN_DIR="${RMD_CONTAINERD_DROPIN_DIR:-/etc/systemd/system/containerd.service.d}"
 CONTAINERD_ROOT="${RMD_CONTAINERD_ROOT:-/var/lib/containerd}"
 MOUNTS_FILE="${RMD_PROC_MOUNTS_FILE:-/proc/mounts}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+SCRATCH_LIB_PATH="${RMD_SCRATCH_LIB_PATH:-/usr/local/bin/rmd-scratch-mounts}"
 
 MODE="check"
 case "${1:-}" in
@@ -170,8 +172,15 @@ render_docker_dropin() {
 # RequiresMountsFor= across every drop-in for a unit, so this row and any other row both apply.
 [Unit]
 RequiresMountsFor=${DOCKER_ROOT} ${CONTAINERD_ROOT} ${RMD_STATE_DIR}
+After=rmd-scratch.service
+Wants=rmd-scratch.service
+
+[Service]
+ExecStartPre=-/bin/bash ${SCRATCH_LIB_PATH} --restore ${RMD_STATE_DIR}${RMD_SCRATCH_STATE_DIRS:+ ${RMD_SCRATCH_STATE_DIRS}}
 EOF
 }
+
+render_scratch_lib() { cat "${SCRIPT_DIR}/scratch-mounts.sh"; }
 
 # ── write $2's stdout to $1 atomically: render into a same-directory temp file, then rename ─────
 atomic_write() {
@@ -228,6 +237,11 @@ if [ "${MODE}" = "install" ]; then
   require_root
   atomic_write "${CONTAINERD_DROPIN_DIR}/${DROPIN_FILENAME}" render_containerd_dropin
   atomic_write "${DOCKER_DROPIN_DIR}/${DROPIN_FILENAME}" render_docker_dropin
+  if [ -n "${RMD_SCRATCH_LIB_PATH:-}" ] || [ "${DOCKER_DROPIN_DIR}" = "/etc/systemd/system/docker.service.d" ]; then
+    atomic_write "${SCRATCH_LIB_PATH}" render_scratch_lib
+    chmod 0755 "${SCRATCH_LIB_PATH}"
+    echo "install-container-runtime-mount-order: wrote ${SCRATCH_LIB_PATH} (the scratch restore docker runs first)"
+  fi
   echo "install-container-runtime-mount-order: wrote ${CONTAINERD_DROPIN_DIR}/${DROPIN_FILENAME} and ${DOCKER_DROPIN_DIR}/${DROPIN_FILENAME}"
   systemctl daemon-reload
   echo "install-container-runtime-mount-order: ran systemctl daemon-reload"

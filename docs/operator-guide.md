@@ -994,6 +994,130 @@ The marker absence is meaningful only after the daemon sweep evidence: it means 
 consumed the durable wake, not that the service failed to write it. GitHub does not automatically
 redeliver a failed webhook, so use **Redeliver** after correcting a `401`, `403`, `413`, or `503`.
 
+### Serve supervisor: code changes without a restart (Phase 3)
+
+`deploy/serve-container.sh` launches the core gateway under the **serve supervisor**
+(`src/lib/serve-supervisor-main.ts`, run from the image's baked `/app`). The supervisor holds port
+4317. When serve finds relevant new code on main, it asks for a handoff instead of exiting:
+
+1. the supervisor checks out main in the inactive slot (`~/rmd-serve-gens/a` or `b`) and makes its
+   `node_modules` match the lockfile (reuse, hard-link, or `npm ci`) while the old generation serves;
+2. it boots a standby generation and waits for its readiness probe and smoke reads;
+3. it promotes the standby on the same socket, then drains the old generation.
+
+A build that fails readiness never serves (`serve.handoff_aborted`). A promoted build that crashes is
+replaced from the previous slot (`serve.handoff_rolled_back`). The ledger rows are `serve.handoff_*`,
+`serve.generation_*` and `serve.drain_phase`.
+
+**Install it (once; this is the last cold restart):**
+
+```sh
+gh workflow run acr-build.yml --ref main        # an image whose /app has the supervisor
+# wait for the build, then on the host:
+./deploy/serve-container.sh --replace
+docker exec remudero-serve ps -o pid,args -C node   # ground truth: a node .../serve-supervisor-main.ts parent
+```
+
+An image built before the supervisor still starts. It serves directly, and `docker logs` says
+`this image has no serve supervisor; serving directly`.
+
+**Turn it off:**
+
+| scope | command | effect |
+|---|---|---|
+| per handoff, no restart | `touch ~/rmd-serve-gens/handoff.off` | a handoff request drains and exits 0, and docker restarts the container (the old behaviour); `rm` the file to re-enable |
+| full rollback | `RMD_SERVE_SUPERVISOR=off ./deploy/serve-container.sh --replace` | today's direct `./bin/rmd serve` launch, with no gens mount |
+
+### Scratch-disk mounts: rebuildable I/O on the local NVMe
+
+**Why.** Measured 2026-10-01: the data disk `/mnt/rmd` (128 GB StandardSSD, about 500 IOPS) ran at
+85–93% utilisation under real load, mostly small reads from worker tests and git in worktrees.
+`/mnt/scratch` (440 GB local NVMe, ephemeral) ran at about 1%. `deploy/scratch-mounts.sh` binds the
+**rebuildable** paths there; every launch path uses it (`serve-container.sh`, `recycle-container.sh`,
+and the fleet launcher `install-host-units.sh` renders, which the watchdog converges).
+
+| moves to `/mnt/scratch/rmd/<state dir name>/` | container path |
+|---|---|
+| `worktrees` | `/home/node/Remudero/worktrees` |
+| `tmp` | `/home/node/Remudero/tmp` |
+| `remudero-coverage` | `/home/node/Remudero/.remudero-coverage` |
+| `repos-coverage` (coverage scratch beside the managed checkouts) | `/home/node/Remudero/repos/.remudero-coverage` |
+| `read-model` (DB files, pointer, generations) | `/home/node/rmd-scratch/read-model`, via `RMD_READ_MODEL_DB_DIR=/home/node/Remudero/state:/home/node/rmd-scratch/read-model` |
+| `worker-homes` (the per-spawn `worker-home-*` HOMEs, made and reaped per spawn) | `/home/node/rmd-scratch/worker-homes`, via `RMD_WORKER_HOME_DIR=/home/node/Remudero:/home/node/rmd-scratch/worker-homes` |
+| `containers/<name>/tmp` (emptied at each launch) | `/tmp` |
+
+Each launch creates the state-side mount points (for example `repos/.remudero-coverage`) as the
+fleet user first, so docker never creates one as root and a rollback leaves it writable.
+`deploy/host-update.sh --print-daemon-run` prints the same binds, and a `mkdir -p` for them, when the
+switch is on.
+
+**Nothing authoritative moves.** The ledger, `repos/`, `lanes/`, the plan, `state/` files and the
+read-model switch file (`state/read-model/switches.json`) stay on `/mnt/rmd`. A deallocate wipes
+scratch. That is safe: worktrees and tmp are per run, and the read model rebuilds itself from the
+ledger on an empty directory (about 40 s of stale views). Each launch records its directories in
+`<state dir>/.scratch-mounts`, and docker's `ExecStartPre` re-creates them before docker restarts any
+container. The binds **ship dark**: nothing changes until `/etc/remudero/scratch-mounts.on` exists.
+An unmounted or unwritable `/mnt/scratch` never blocks a launch; the launch says
+`scratch mounts NOT USED — …` and runs as before.
+
+**Turn it on (one window, together with the Phase 3 serve `--replace`).** Run as the fleet user
+from a checkout of main on the host:
+
+```sh
+# 0. Read-only pre-checks
+findmnt /mnt/scratch && df -h /mnt/scratch /mnt/rmd && id -u          # a mounted NVMe; uid 1000
+# 1. The image (the serve supervisor needs it; src merges do not build it)
+gh workflow run acr-build.yml --ref main                              # wait for it to finish
+# 2. Boot-time ordering and restore (root, once): docker starts after rmd-scratch.service and
+#    re-creates every recorded scratch dir first. Name every instance's state dir.
+sudo RMD_STATE_DIR=/home/craigoleyagent/rmd-state2 \
+  RMD_SCRATCH_STATE_DIRS="/mnt/rmd/remudero-console-state /home/craigoleyagent/rmd-site-state" \
+  ./deploy/install-container-runtime-mount-order.sh --install
+systemctl cat docker.service | grep -E 'rmd-scratch|ExecStartPre'   # After=, Wants=, ExecStartPre=
+./deploy/install-host-units.sh || sudo ./deploy/install-host-units.sh --install   # core launcher + /usr/local/bin/rmd-scratch-mounts
+for i in site console; do ./deploy/install-host-units.sh --instance "$i" || sudo ./deploy/install-host-units.sh --install --instance "$i"; done
+# 3. Switch it on
+sudo install -D -m 0644 /dev/null /etc/remudero/scratch-mounts.on
+# 4. Daemons: each recycle waits out in-flight workers, then prints "scratch mounts on — …"
+#    and "runtime contract healthy" (the contract now checks the five scratch binds too)
+./deploy/recycle-container.sh --instance core
+./deploy/recycle-container.sh --instance console
+./deploy/recycle-container.sh --instance site
+# 5. Serve, last: check the plan, then replace
+./deploy/serve-container.sh --dry-run | grep -E 'scratch|rmd-scratch'
+./deploy/serve-container.sh --replace
+```
+
+**Verify (ground truth, not the scripts' own report):**
+
+```sh
+for c in remudero-daemon remudero-serve remudero-console-daemon remudero-site-daemon; do
+  docker inspect "$c" --format '{{.Name}}{{range .Mounts}} {{.Destination}}<-{{.Source}}{{end}}' | tr ' ' '\n' | grep -E '^/|scratch'
+done
+docker exec remudero-serve df -h /tmp /home/node/Remudero/worktrees /home/node/rmd-scratch/read-model   # all on the NVMe device
+docker exec remudero-serve df -h /home/node/Remudero/state                                             # still the data disk
+docker exec remudero-serve ./bin/rmd read-model status          # "core v1: seen N" climbs to the ledger's size within a minute
+grep -c '"read_model.caught_up"' ~/rmd-state2/state/ledger.ndjson # one more row than before the replace
+iostat -dx 10 3                                                  # compare the data disk's %util with the pre-check
+```
+
+**Roll back (the data on `/mnt/rmd` was never touched):**
+
+```sh
+sudo rm /etc/remudero/scratch-mounts.on
+./deploy/recycle-container.sh --instance core   # then console and site
+./deploy/serve-container.sh --replace
+```
+
+The read model reopens its old files under `~/rmd-state2/state/read-model` and catches up from their
+checkpoints. The old worktree, tmp and coverage directories reappear as they were. `git worktree
+prune` drops the entries whose scratch directories are gone. For one launch only, `RMD_SCRATCH=off`
+in front of any of the three scripts does the same. The docker drop-in can stay: with no switch file,
+no launch records anything new, and the restore only re-creates empty directories.
+
+**After a deallocate** nothing is needed: `rmd-scratch.service` re-formats and mounts the NVMe, docker's
+`ExecStartPre` re-creates the directories, and serve rebuilds the read model on its first tick.
+
 ### Attaching a data disk to the container host
 
 The Azure host's OS disk is 30 GB and the image store fills it. Standard practice is a separate

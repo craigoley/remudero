@@ -7689,6 +7689,186 @@ components:
         sha:
           type: string
 
+    RouteReadTotals:
+      type: object
+      description: One caller's reads of one route since the rollup began, and the newest read's time.
+      required: [reads, lastAt]
+      properties:
+        reads:
+          type: integer
+        lastAt:
+          type: [string, "null"]
+
+    RouteReadLayerSummary:
+      type: object
+      description: >
+        One legacy cache layer's gate G reading. zeroConsoleDays counts whole days since the layer's
+        newest console read, or since the rollup began. positiveControl is true when the views that
+        replace it were read by the console inside that zero window; gateHolds needs both.
+      required: [layer, paths, consoleReads, lastConsoleReadAt, zeroConsoleDays, positiveControl, gateHolds]
+      properties:
+        layer:
+          type: string
+        paths:
+          type: array
+          items:
+            type: string
+        consoleReads:
+          type: integer
+        lastConsoleReadAt:
+          type: [string, "null"]
+        zeroConsoleDays:
+          type: integer
+        positiveControl:
+          type: boolean
+        gateHolds:
+          type: boolean
+
+    RouteReadSummary:
+      type: object
+      description: One served route's reads by caller. console and fleet are absent until that caller reads it.
+      required: [path, kind, layers, zeroConsoleDays]
+      properties:
+        path:
+          type: string
+        kind:
+          type: string
+          enum: [view, legacy, other]
+        layers:
+          type: array
+          items:
+            type: string
+        zeroConsoleDays:
+          type: integer
+        console:
+          $ref: "#/components/schemas/RouteReadTotals"
+        fleet:
+          $ref: "#/components/schemas/RouteReadTotals"
+        latency:
+          $ref: "#/components/schemas/RouteLatencyReading"
+
+    RouteLatencyReading:
+      type: object
+      description: >
+        Handler milliseconds from the handler call to the response's finish, as a cumulative bucket
+        histogram keyed by each bucket's upper bound (+Inf past the last). A percentile reads as its
+        bucket's bound capped at maxMs, and is null with no reads. A window is the difference of two reads.
+      required: [n, maxMs, buckets, p50Ms, p99Ms]
+      properties:
+        n:
+          type: integer
+        maxMs:
+          type: number
+        buckets:
+          type: object
+          additionalProperties:
+            type: integer
+        p50Ms:
+          type: [number, "null"]
+        p99Ms:
+          type: [number, "null"]
+
+    RouteReadStaleness:
+      type: object
+      description: >
+        View responses answered with a body (200 or 304), the stale ones, and per stale source the
+        count by phase (none when the source named no phase); worstPhases names each source's worst.
+      required: [served, stale, byView, bySource, worstPhases]
+      properties:
+        served:
+          type: integer
+        stale:
+          type: integer
+        byView:
+          type: object
+          additionalProperties:
+            type: object
+            required: [served, stale]
+            properties:
+              served:
+                type: integer
+              stale:
+                type: integer
+        bySource:
+          type: object
+          additionalProperties:
+            type: object
+            required: [stale, phases]
+            properties:
+              stale:
+                type: integer
+              phases:
+                type: object
+                additionalProperties:
+                  type: integer
+        worstPhases:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [warming, refreshing, catching_up, behind, elsewhere, failed, none]
+
+    RouteReadStream:
+      type: object
+      description: One push stream's live subscribers, its peak, and its opens, client closes and handovers by reason (slow_consumer is a dropped subscriber).
+      required: [opened, closed, peak, handovers, subscribers]
+      properties:
+        opened:
+          type: integer
+        closed:
+          type: integer
+        peak:
+          type: integer
+        handovers:
+          type: object
+          additionalProperties:
+            type: integer
+        subscribers:
+          type: integer
+
+    RouteReadsResult:
+      type: object
+      description: >
+        GET /v1/route-reads's body (src/lib/route-read-rollup.ts): the hourly serve.route_reads
+        rollup folded into totals, plus the current hour's counts.
+      required: [asOf, since, hours, gateDays, views, layers, routes, viewLatency, staleness, streams]
+      properties:
+        asOf:
+          type: string
+        since:
+          type: [string, "null"]
+        hours:
+          type: integer
+        gateDays:
+          type: integer
+        views:
+          type: object
+          required: [consoleReads, lastConsoleReadAt]
+          properties:
+            consoleReads:
+              type: integer
+            lastConsoleReadAt:
+              type: [string, "null"]
+        layers:
+          type: array
+          items:
+            $ref: "#/components/schemas/RouteReadLayerSummary"
+        routes:
+          type: array
+          items:
+            $ref: "#/components/schemas/RouteReadSummary"
+        viewLatency:
+          $ref: "#/components/schemas/RouteLatencyReading"
+        staleness:
+          $ref: "#/components/schemas/RouteReadStaleness"
+        streams:
+          type: object
+          required: [views, status]
+          properties:
+            views:
+              $ref: "#/components/schemas/RouteReadStream"
+            status:
+              $ref: "#/components/schemas/RouteReadStream"
+
     # ── W1-T4610 -- the inbox and escalation routes' payloads. Each schema below is derived from
     # the TypeScript type its handler sends (src/lib/panel-graph.ts, src/lib/inbox-responder.ts,
     # src/lib/inbox-plain.ts, src/lib/inbox.ts, src/lib/fleet-lane.ts, src/lib/panel-actions.ts,
@@ -12819,6 +12999,27 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/VersionResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/route-reads:
+    get:
+      summary: Gate G's evidence -- console and fleet reads per legacy route, view route and cache layer.
+      description: >
+        src/lib/route-read-rollup.ts. Serve counts every GET by route and caller (the console when
+        the request crossed the Cloudflare edge, else the fleet) and writes one serve.route_reads
+        ledger row per hour, never one per request. This route answers from memory and writes nothing.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The rollup's totals and each layer's zero-console-read streak.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouteReadsResult"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":

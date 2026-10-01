@@ -169,7 +169,7 @@ import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { configGardenSpec, mountRecommendationSource, startConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, startTestGarden, testGardenSpec } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
-import { ciFailureSignature, startCiFrictionGardener, readCiFrictionLedgerRecords, readGateFireRateReport, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
+import { ciFailureSignature, startCiFrictionGardener, readCiFrictionLedgerRecords, readGateFireRateReport, freshCiFrictionPlanOrigins, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, selectorShadowFlakeLedger, startSelectorShadowGardener } from "./lib/selector-shadow-gardener.js";
 import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, startMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
@@ -649,8 +649,20 @@ import {
   resolveAccountFilePath,
   serviceTokensPath,
   stopServeReadModel,
+  serveGeneration,
   defaultIsListening,
 } from "./lib/serve.js";
+import {
+  awaitPromotion,
+  boardComputedProbe,
+  GENERATION_MESSAGES,
+  listenReadiness,
+  onDrainRequest,
+  onShedRequest,
+  processChannel,
+  supervisedRole,
+  type GenerationChannel,
+} from "./lib/serve-generation.js";
 import { consoleProjectionWorker } from "./lib/console-snapshot-cache.js";
 import { runRelayClient } from "./lib/relay-client.js";
 import { assertProposedPlanLoads,
@@ -19189,6 +19201,13 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   // fields, so nothing downstream of `body` can tell which transport served it.
   const args = reviewViewArgs(owner, repo, prArg);
   const raw = fetchView(args);
+  // The sweep's open-PR snapshot can age while earlier reviews run. The numeric arm already
+  // fetched the live REST row, so decline a closed PR before fetching its head or building a
+  // worktree. The guarded poster still makes the final lifecycle check for an in-flight close.
+  if (reviewPrNumber(prArg) !== undefined && (raw as RestPullRow).state === "closed") {
+    console.log(`rmd review: PR #${prArg} closed before review; no verdict posted`);
+    return 2;
+  }
   const view = (reviewPrNumber(prArg) !== undefined ? mapRestPr(raw as RestPullRow) : raw) as {
     headRefOid: string;
     headRefName: string;
@@ -31995,7 +32014,7 @@ export function logDiskReclaimRung(
   let workerHomesRemoved = 0;
   try {
     const root = (deps.workerHomeRoot ?? (() => workerHomeDir(config)))();
-    workerHomesRemoved = sweepWorkerHomes(root).removed.length;
+    workerHomesRemoved = sweepWorkerHomes(root, { stateRoot: config.root }).removed.length;
   } catch {
     // best-effort — a throw here must never block the dispatch or the other two sweeps
   }
@@ -33464,7 +33483,7 @@ export async function daemonCommand(
       // call (a kill -9, a crashed daemon). Same 24h age ceiling as the scratch/tmp
       // sweeps above — a still-running spawn's home is always recent (materialize
       // touches it on every use) and never collateral.
-      const homes = sweepStaleWorkerHomes(workerHomeDir(config));
+      const homes = sweepStaleWorkerHomes(workerHomeDir(config), { stateRoot: config.root });
       if (homes.removed.length) {
         log("daemon.worker_home_sweep", { removed: homes.removed.length, sample: homes.removed.slice(0, 5) });
       }
@@ -33970,7 +33989,7 @@ export async function daemonCommand(
                   const sources: CiFrictionGardenSources = {
                     ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
                     gateFireRates: () => readGateFireRateReport(stateDir),
-                    planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
+                    planOrigins: () => freshCiFrictionPlanOrigins(repoRoot),
                     mintTaskId: ciLearningTaskIdMinter(repoRoot),
                   };
                   return startCiFrictionGardener(ciFrictionGarden, sources, intervalMs);
@@ -35394,6 +35413,7 @@ export async function serveCommand(
     // future worker-thread offload of the derivation itself (recon's own flagged follow-up) can
     // fill without touching this call site again.
     buildInitialBoardSnapshot?: (deps: BoardDeps) => void | Promise<void>;
+    generation?: GenerationChannel;
   } = {},
 ): Promise<number> {
   // `--host` was documented in USAGE and read by resolveServeHosts, but was NOT in this
@@ -35573,7 +35593,10 @@ export async function serveCommand(
   // `ready` promise is fail-open and always settles, so an exchange outage still starts the
   // console in an honestly degraded state instead of racing the first board read with an empty
   // GH_TOKEN.
+  const supervised = supervisedRole(process.env);
+  const channel = supervised && (deps.generation ?? processChannel());
   const server = await buildReadyServeServer({
+    ...(channel ? { generation: { requestHandoff: (detail) => channel.send({ ...detail, type: GENERATION_MESSAGES.handoffRequest }) } } : {}),
     boardGithubRefreshMs: DEFAULT_BOARD_POLL_TTL_MS,
     board: boardDeps,
     modelApprovals: config.modelApprovals,
@@ -35651,6 +35674,31 @@ export async function serveCommand(
       for (const l of realRequestListeners) l(req, res);
     }),
   );
+  const buildInitialBoardSnapshot = deps.buildInitialBoardSnapshot ?? ((d: BoardDeps) => void computeBoardSnapshot(d));
+  const precomputeBoard = async (): Promise<void> => {
+    log("serve.board_precompute_started", {});
+    try {
+      await buildInitialBoardSnapshot(boardDeps);
+      log("serve.board_precompute_done", {});
+    } catch (e) {
+      log("serve.board_precompute_failed", { error: String((e as Error)?.message ?? e) });
+    } finally {
+      boardGate.markReady();
+    }
+  };
+  // P3 STANDBY: warm everything, answer readiness privately, and bind the shared port only when promoted.
+  if (supervised && channel) {
+    const generation = serveGeneration(server);
+    onDrainRequest(channel, (reason) => void generation?.handover(reason));
+    onShedRequest(channel, () => generation?.shed());
+    await listenReadiness(server, supervised.socketPath, () => [...(generation?.probes ?? []), boardComputedProbe(boardGate.isReady)], tokens.read);
+    // One warm, so the gateway is primed before promotion; keep-warm itself starts only once listening.
+    boardGithub.warm?.();
+    void precomputeBoard();
+    log("serve.standby", { socket: supervised.socketPath });
+    await awaitPromotion(channel);
+    generation?.promote();
+  }
 
   // BIND EACH NAMED INTERFACE — never the wildcard. `listen(port)` alone defaults to `::`
   // (every interface) while the banner printed "localhost", so the surface was wide open and
@@ -35716,20 +35764,8 @@ export async function serveCommand(
   // (success OR failure) as "the projection existed" — a thrown/failed first pass must not wedge
   // the board route in "not ready" forever when a real request would hit the identical failure
   // and report it honestly (`github_unreachable`) instead.
-  const buildInitialBoardSnapshot = deps.buildInitialBoardSnapshot ?? ((d: BoardDeps) => void computeBoardSnapshot(d));
-  setImmediate(() => {
-    log("serve.board_precompute_started", {});
-    void (async () => {
-      try {
-        await buildInitialBoardSnapshot(boardDeps);
-        log("serve.board_precompute_done", {});
-      } catch (e) {
-        log("serve.board_precompute_failed", { error: String((e as Error)?.message ?? e) });
-      } finally {
-        boardGate.markReady();
-      }
-    })();
-  });
+  if (channel) channel.send({ type: GENERATION_MESSAGES.promoted });
+  else setImmediate(() => void precomputeBoard());
 
   // NO TOKEN IS PRINTED. In a container stdout is `docker logs`, readable by anyone in the docker
   // group and kept past the process, so the banner names the tokens file. See resolveServiceTokens for rotation.

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdtempSync,
   readFileSync,
@@ -69,7 +70,7 @@ test("W1-T2877: check mode reports missing units and changes nothing", () => {
 
     const install = run(["--install"], {}, root);
     assert.equal(install.status, 0, `install failed: ${install.stderr}`);
-    assert.equal(countFiles(root), 7, "install must render all seven units");
+    assert.equal(countFiles(root), 8, "install must render all seven units and the scratch-mount library");
 
     const after = run([], {}, root);
     assert.equal(after.status, 0, "check after install must be clean");
@@ -1002,6 +1003,111 @@ test("W1-T4770: the installer leaves exactly one cleanup crontab entry", () => {
     assert.equal(readFileSync(`${cleanup}.pre-t4770`, "utf8"), "#!/bin/sh\nexit 0\n", "the replaced host copy is kept once");
     writeFileSync(table, readFileSync(table, "utf8").replace("7 */6", "9 */2"));
     assert.match(run([], env, root).stdout, /DRIFTED crontab entry/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the installer installs the hourly temp sweep and its schedule and keeps the old schedule once", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-hostunits-"));
+  try {
+    const table = join(root, "crontab.txt");
+    const fake = join(root, "fake-crontab");
+    writeFileSync(
+      fake,
+      `#!/usr/bin/env bash\ncase "$1" in\n  -l) [ -f "${table}" ] && cat "${table}" || { echo "no crontab" >&2; exit 1; } ;;\n  -) cat > "${table}" ;;\nesac\n`,
+    );
+    chmodSync(fake, 0o755);
+    const home = join(root, "home");
+    const cleanup = join(home, "rmd-host-cleanup.sh");
+    const sweep = join(home, "rmd-tmp-sweep.sh");
+    const cronFile = join(root, "cron.d", "rmd-tmp-sweep");
+    const env = { RMD_CLEANUP_PATH: cleanup, RMD_CRONTAB_CMD: fake, RMD_TMP_SWEEP_CRON_PATH: cronFile };
+    const expectedCron =
+      "SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n" +
+      `0 * * * * root RMD_HOST_CLEANUP_SCRIPT=${cleanup} ${sweep} >> ${join(home, "host-cleanup.log")} 2>&1\n`;
+
+    const before = run([], env, root);
+    assert.equal(before.status, 1);
+    assert.match(before.stdout, new RegExp(`MISSING ${sweep}`));
+    assert.match(before.stdout, new RegExp(`MISSING ${cronFile}`));
+    assert.equal(existsSync(sweep), false, "check must not install the sweep");
+
+    // the old shallow mtime + rm -rf schedule is already there
+    mkdirSync(join(root, "cron.d"));
+    const shallow = "0 * * * * root find /tmp -maxdepth 1 -name 'rmd-*' -mmin +180 -exec rm -rf {} +\n";
+    writeFileSync(cronFile, shallow);
+
+    const first = run(["--install"], env, root);
+    assert.equal(first.status, 0, first.stderr);
+    assert.equal(readFileSync(sweep, "utf8"), readFileSync("deploy/rmd-tmp-sweep.sh", "utf8"));
+    assert.ok((statSync(sweep).mode & 0o111) !== 0, "the installed sweep is executable");
+    assert.equal(readFileSync(cronFile, "utf8"), expectedCron);
+    assert.equal(readFileSync(`${cronFile}.pre-6h-sweep`, "utf8"), shallow, "the replaced schedule is kept");
+
+    const second = run(["--install"], env, root);
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal(readFileSync(`${cronFile}.pre-6h-sweep`, "utf8"), shallow, "a rerun never overwrites the kept schedule");
+    const clean = run([], env, root);
+    assert.equal(clean.status, 0, clean.stdout);
+    assert.match(clean.stdout, new RegExp(`ok      ${sweep}`));
+    assert.match(clean.stdout, new RegExp(`ok      ${cronFile}`));
+
+    writeFileSync(cronFile, shallow);
+    assert.match(run([], env, root).stdout, new RegExp(`DRIFTED ${cronFile}`));
+    writeFileSync(sweep, "#!/bin/sh\nexit 0\n");
+    assert.match(run([], env, root).stdout, new RegExp(`DRIFTED ${sweep}`));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an install run from a dirty install root is refused and installs nothing", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-installroot-handrun-"));
+  try {
+    const stateDir = join(root, "state-root");
+    mkdirSync(stateDir, { recursive: true });
+    const installRoot = join(stateDir, "daemon-install");
+    const repo = gitRepo({ kind: "install-root-handrun" });
+    renameSync(repo.dir, installRoot);
+    cpSync("deploy", join(installRoot, "deploy"), { recursive: true });
+    git(installRoot, ["add", "deploy"]);
+    git(installRoot, ["commit", "--quiet", "-m", "main's deploy"]);
+    const installer = join(installRoot, "deploy", "install-host-units.sh");
+    const hostEnv = (state: string, out: string) => ({
+      ...process.env,
+      RMD_STATE_DIR: state,
+      RMD_UNIT_DIR: join(out, "systemd"),
+      RMD_BIN_DIR: join(out, "bin"),
+      RMD_LAUNCHER_PATH: join(out, "rmd-relaunch.sh"),
+      RMD_REVIVAL_LOG: join(out, "revivals.log"),
+      RMD_NODE_MAX_OLD_SPACE_MB: "8192",
+    });
+    const install = (state: string, out: string) =>
+      spawnSync("bash", [installer, "--install"], { encoding: "utf8", env: hostEnv(state, out) });
+
+    const clean = install(stateDir, join(root, "clean"));
+    assert.equal(clean.status, 0, clean.stderr);
+    assert.ok(existsSync(join(root, "clean", "rmd-relaunch.sh")), "a clean install root installs");
+
+    // the shape found on the host: a tracked edit plus a new untracked file, never committed
+    writeFileSync(join(installRoot, "deploy", "rmd-host-cleanup.sh"), "#!/bin/sh\n# hand edit\n");
+    writeFileSync(join(installRoot, "deploy", "rmd-tmp-sweep.sh"), "#!/bin/sh\n");
+    writeFileSync(join(installRoot, "deploy", "rmd-hand-install-only.sh"), "#!/bin/sh\n");
+    const dirty = install(stateDir, join(root, "dirty"));
+    assert.equal(dirty.status, 2, dirty.stdout);
+    assert.match(dirty.stderr, /the install root .*daemon-install has local edits/);
+    assert.match(dirty.stderr, / M deploy\/rmd-host-cleanup\.sh/);
+    assert.match(dirty.stderr, / M deploy\/rmd-tmp-sweep\.sh/);
+    assert.match(dirty.stderr, /\?\? deploy\/rmd-hand-install-only\.sh/);
+    assert.equal(existsSync(join(root, "dirty")), false, "a refused install writes nothing");
+
+    // the same tree used as a dev checkout (not this state root's install root) still installs
+    const elsewhere = join(root, "other-state");
+    mkdirSync(elsewhere);
+    const dev = install(elsewhere, join(root, "dev"));
+    assert.equal(dev.status, 0, dev.stderr);
+    assert.ok(existsSync(join(root, "dev", "rmd-relaunch.sh")));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

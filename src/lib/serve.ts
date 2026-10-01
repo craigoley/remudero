@@ -96,6 +96,7 @@ import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnaps
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
 import { buildInstanceGatewayRoutes, CORE_INSTANCE, instanceStateRoot, livenessInstances, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
 import { createReadModelWorker, READ_MODEL_VIEWS, readModelStatusView, type ReadModelInstance, type ReadModelWorkerHandle, type ReadModelWorkerOptions } from "./read-model-worker.js";
+import { CONSOLE_CACHED_READ_PATHS, ROUTE_READS_STEP, buildRouteReadsRoute, createRouteReadRollup, type RouteReadRollup } from "./route-read-rollup.js";
 import { buildOperatorAgentAnswer, buildOperatorAgentAnswerRoute, readInboxAnswerEvidence } from "./operator-agent-answer.js";
 import { buildOperatorAgentActionHandoffRoutes } from "./operator-agent-action-handoff.js";
 import {
@@ -204,6 +205,7 @@ import { loadConfig, type WorkerProviderId } from "./config.js";
 import type { Config, ModelApproval } from "./config-schema.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { createServeDrain, exitWithin } from "./serve-drain.js";
+import { githubAuthProbe, gatewayPrimedProbe, planLoadedProbe, readModelWarmProbe, type ReadinessProbe } from "./serve-generation.js";
 import type { ConsoleProjectionWorker, FeedbackProjectionInput } from "./console-projection-worker.js";
 import { createConsoleSnapshotStore } from "./console-snapshot-store.js";
 import {
@@ -291,6 +293,7 @@ export function resolveEscalationOptionAffordance(option: EscalationOption): Esc
 export const DEFAULT_SERVE_PORT = 4317;
 
 export interface ServeDeps {
+  routeReadRollup?: RouteReadRollup;
   projectionWorker?: ConsoleProjectionWorker;
   readModel?: Pick<ReadModelWorkerOptions, "tickMs" | "stopWaitMs" | "workerUrl" | "every" | "slowLane">;
   consoleSnapshots?: { dir: string; prewarmPaths?: readonly string[] };
@@ -392,6 +395,7 @@ export interface ServeDeps {
   /** W1-T4229: defaults to {@link assessGatewayCheckout} over {@link serveRepoDir}. */
   gatewayCheckout?: () => Promise<GatewayCheckoutAssessment>;
   staleExitSeams?: Pick<StaleCodeExitDeps, "scheduleRecheck" | "exit" | "drain">;
+  generation?: { requestHandoff(detail: Record<string, unknown>): void };
   /**
    * W1-T288: GET /v1/control/status's daemon-liveness verdict deps (injectable ledger reader /
    * clock / liveness bound — see panel-actions.ts's `ControlStatusDeps` for each field's real
@@ -673,7 +677,6 @@ export const CONSOLE_UNBOUNDED_LEDGER_READ_BASELINE: readonly string[] = [
 export const CONSOLE_STATUS_FULL_TASK_THRESHOLD = 500; // PRIMARY CONTROL
 export const CONSOLE_STATUS_RENDERED_TASK_LIMIT = 120; // BACKSTOP
 export const CONSOLE_STATUS_RESPONSE_SIZE_RATCHET_BYTES = 96_000;
-const CONSOLE_CACHED_READ_PATHS = new Set(["/v1/status", "/v1/recent", "/v1/inbox", "/v1/daemon-health", "/v1/repos", "/v1/repos/summary", "/v1/feedback", "/v1/operator-activity"]);
 const BLOCKING_REQUEST_PATH_SYMBOLS = [
   "readFileSync",
   "writeFileSync",
@@ -1463,6 +1466,7 @@ export interface StaleCodeExitDeps {
   drain?: () => Promise<void>;
   changedPathsSince?: ChangedPathsReader;
   reloadPlan?: (ref: string) => Promise<boolean>;
+  requestHandoff?: (detail: Record<string, unknown>) => void;
 }
 /** What {@link gateStaleCodeExit} hands back — a wrapper for the console's ONE SSE route and a
  *  wrapper for each HIGH-tier write route, both feeding the SAME internal decision. */
@@ -1478,6 +1482,7 @@ export interface StaleCodeExitGate {
   /** What the cadence runs; resolves once its checkout read has landed and been acted on. */
   recheck(): Promise<void>;
   stop(): void;
+  handover(reason: string): Promise<void>;
 }
 /**
  * W1-T2229 design: the console notices its OWN code is stale and ends its own process — at a
@@ -1543,6 +1548,8 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
   let staleSince: number | undefined;
   let checkout: GatewayCheckoutAssessment | undefined;
   let exiting = false;
+  let handoffAsked: string | undefined;
+  let exited: Promise<void> | undefined;
   let dirtyReported: string | undefined;
   const readChangedPaths = deps.changedPathsSince ?? ((boot, target) => changedPathsSince(boot, target, serveRepoDir()));
   const relevance = new Map<string, boolean | "pending">();
@@ -1601,13 +1608,13 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
     const commitsBehind = localBehind === undefined && originBehind === undefined ? undefined : (localBehind ?? 0) + (originBehind ?? 0);
     const lastRead = deps.lastReadAt?.();
     const msSinceLastRead = lastRead === undefined ? undefined : Math.max(0, clock.now() - lastRead);
-    const patienceMs = consoleRecyclePatienceMs(clients, commitsBehind, msSinceLastRead);
+    const patienceMs = deps.requestHandoff ? 0 : consoleRecyclePatienceMs(clients, commitsBehind, msSinceLastRead);
     const staleForMs = clock.now() - staleSince;
     // Somebody is watching and the backlog has not yet earned the interruption. The re-check
     // below keeps asking, and the backlog grows on its own — which is what turns a watched
     // console from "never" into "soon enough" without ever reading a threshold.
     if (staleForMs < patienceMs) return;
-    log("serve.stale_code_exit", {
+    const decision = {
       bootSha: deps.bootSha,
       currentSha,
       clients,
@@ -1617,20 +1624,36 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
       patienceMs,
       msSinceLastRead,
       ...(checkoutBehind ? { reason: "checkout_behind", checkout: checkout?.state } : {}),
-    });
+    };
+    if (deps.requestHandoff) {
+      const key = `${currentSha} ${originBehind ?? ""}`;
+      if (key === handoffAsked) return;
+      handoffAsked = key;
+      log("serve.handoff_requested", decision);
+      return deps.requestHandoff(decision);
+    }
+    log("serve.stale_code_exit", decision);
+    void drainThenExit();
+  };
+  // exit(0): unless-stopped restarts it and entrypoint.sh's sync_tree fast-forwards the clone.
+  const drainThenExit = (): Promise<void> => {
+    if (exited) return exited;
     exiting = true;
     stopRecheck();
-    // exit(0): unless-stopped restarts it and entrypoint.sh's sync_tree fast-forwards the clone.
     const finish = (): void => {
       deps.beforeExit?.();
       exit(0);
     };
-    if (!deps.drain) return finish();
-    deps.drain().then(finish, (err: unknown) => {
+    if (!deps.drain) {
+      finish();
+      return (exited = Promise.resolve());
+    }
+    exited = deps.drain().then(finish, (err: unknown) => {
       // A failed drain still ends in the restart it was preparing; the reason is kept.
       log("serve.drain_failed", { reason: err instanceof Error ? err.message : String(err) });
       finish();
     });
+    return exited;
   };
   const noteCheckout = (next: GatewayCheckoutAssessment): void => {
     checkout = next;
@@ -1670,6 +1693,10 @@ export function gateStaleCodeExit(deps: StaleCodeExitDeps): StaleCodeExitGate {
     checkout: () => checkout?.state,
     recheck,
     stop: stopRecheck,
+    handover: (reason) => {
+      log("serve.handover_drain", { reason, bootSha: deps.bootSha });
+      return drainThenExit();
+    },
     wrapSse(route) {
       return {
         ...route,
@@ -2533,8 +2560,9 @@ function assembleServeRoutes(
     { instanceId: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository, analytics: currentAnalyticsSnapshot, memory: operatorAgentMemory, ledgerPath: deps.ledgerPath },
     ...badgeScopes];
   const modelApprovals = deps.modelApprovals ?? [];
+  const routeReads = deps.routeReadRollup ?? createRouteReadRollup();
   const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME], servedByDefault: [readModelStatusView.name],
-    ...(readModel ? { readModel } : {}), every: deps.readModel?.every, log: deps.log });
+    ...(readModel ? { readModel } : {}), every: deps.readModel?.every, log: deps.log, onSubscribers: (change, n, reason) => routeReads.stream("views", change, n, reason) });
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
   // server start; both the shell span and GET /v1/version close over this one value and neither
   // ever re-resolves it. See resolveConsoleSha for why re-reading per request would be worse
@@ -2664,7 +2692,7 @@ function assembleServeRoutes(
       planPath: deps.panelGraph.planPath,
     }),
     buildRecentRoute(deps.board),
-    ...buildReadModelViewRoutes(withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name],
+    ...buildReadModelViewRoutes(withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name], onServed: routeReads.served,
       readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME], requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"] },
       legacy: [navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: navBadgeScopes }), inboxLegacyView(panelGraphDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan)] })),
     ...viewEvents.routes,
@@ -2780,6 +2808,7 @@ function assembleServeRoutes(
     // 2026-09-16 and 2026-09-26). It says what this surface is and where to go instead.
     buildGatewayIndexRoute(),
     buildVersionRoute(consoleSha),
+    buildRouteReadsRoute(routeReads),
     // W1-T4227: the fleet's one registry, read-only — see buildRegistryRoute's own doc.
     buildRegistryRoute({
       ...deps.registry,
@@ -2993,6 +3022,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   const serveDrain = createServeDrain({ boundMs: SERVE_RESTART_DRAIN_BOUND_MS, log: deps.log });
   let viewEventsHandover: (reason: string) => void = () => {};
   const wakeCounters = createWakeCounters();
+  const routeReads = createRouteReadRollup({ stateDir: join(deps.fleetControlRoot, "state"), log: deps.log, write: (row) => deps.log?.(ROUTE_READS_STEP, { ...row }) });
+  let stopRouteReads = (): void => {};
   const stopWakeSummary = startWakeSummaryFlush({
     counters: wakeCounters,
     clock: systemClock,
@@ -3008,6 +3039,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       analyticsCache.stop();
       liveAnalyticsCache.stop();
       stopWakeSummary();
+      stopRouteReads();
       prewarm.stop();
       routeAssembly.linkRefusals.stop();
     },
@@ -3019,6 +3051,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       return drained.then(() => {});
     },
     reloadPlan: (ref) => reloadServePlan(deps.board, serveRepoDir(), ref, { log: deps.log }),
+    ...(deps.generation ? { requestHandoff: (detail: Record<string, unknown>) => deps.generation?.requestHandoff(detail) } : {}),
     ...deps.staleExitSeams,
   });
   // THE CLOCK PORT, never the legacy signature. clock-signature-census ratchets that shape per
@@ -3039,6 +3072,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       consoleSha,
       confirmNonces,
       githubEventWake: deps.githubEventWake && { ...deps.githubEventWake, counters: wakeCounters },
+      routeReadRollup: routeReads,
       liveMetrics: deps.liveMetrics ?? liveAnalyticsCache.current,
       // W1-T4229: /v1/daemon-health reports the SAME reading the restart decision acts on.
       daemonHealth: { ...deps.daemonHealth, gatewayCheckout: deps.daemonHealth?.gatewayCheckout ?? staleExit.checkout },
@@ -3053,7 +3087,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     // `/v1/skills/run`) `HIGH_TIER_WRITE_PATHS` names client-side, read here off the route table's
     // own declared `tier` (already asserted complete, above in `buildServeRoutes`) rather than a
     // second hard-coded path list that could drift from it.
-    route.tier === "high" ? staleExit.wrapWrite(route) : route.path === VIEW_EVENTS_PATH ? serveDrain.wrapStream(route) : stampRead(route),
+    routeReads.wrap(route.tier === "high" ? staleExit.wrapWrite(route) : route.path === VIEW_EVENTS_PATH ? serveDrain.wrapStream(route) : stampRead(route)),
   );
   const ingestToken = deps.tokens.ingest ?? process.env[INGEST_TOKEN_ENV] ?? readIngestTokenFile(process.env[INGEST_TOKEN_FILE_ENV], deps.log);
   const server = createService({
@@ -3073,7 +3107,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     // W1-T4244: the signed-in operator, consulted BEFORE the bearer token the console also sends.
     operatorSession: operatorSessionProvider(deps.operatorIdentity ?? operatorIdentityConfig(loadConfig, { log: deps.log }), { ...deps.operatorIdentityIo, log: deps.log }),
     routes,
-    sse: [serveDrain.wrapSse(staleExit.wrapSse(prewarm.route))],
+    sse: [serveDrain.wrapSse(staleExit.wrapSse(routeReads.wrapSse("status", prewarm.route)))],
     log: deps.log,
     confirmNonces,
     // W1-T404 design (iii), turned on LAST (design iii, this task): a no-op until now for want of
@@ -3104,6 +3138,8 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   server.on("close", prewarm.stop);
   if (keepWarm) server.once("listening", keepWarm.start);
   server.on("close", stopWakeSummary);
+  server.once("listening", () => (stopRouteReads = routeReads.start()));
+  server.on("close", () => stopRouteReads());
   server.once("listening", analyticsCache.start);
   server.on("close", analyticsCache.stop);
   server.once("listening", () => { for (const cache of routeAssembly.instanceAnalyticsCaches) cache.start(); });
@@ -3113,16 +3149,30 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   });
   server.once("listening", liveAnalyticsCache.start);
   server.on("close", liveAnalyticsCache.stop);
-  server.on("close", watchInstanceLiveness({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ledgerPath: deps.ledgerPath, log: deps.log, ...deps.instances }));
-  const stopIncidentInvariants = startIncidentInvariantsMonitor(deps.ledgerPath, {
-    ...deps.incidentInvariants,
-    log: deps.log,
+  const startLedgerWriters = (): void => {
+    server.on("close", watchInstanceLiveness({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ledgerPath: deps.ledgerPath, log: deps.log, ...deps.instances }));
+    server.on("close", startIncidentInvariantsMonitor(deps.ledgerPath, { ...deps.incidentInvariants, log: deps.log }));
+  };
+  if (deps.generation) server.setMaxListeners(server.getMaxListeners() + 1).once("listening", startLedgerWriters);
+  else startLedgerWriters();
+  const githubAuth = { settled: routeAssembly.githubAppReady === undefined };
+  void routeAssembly.githubAppReady?.then(() => (githubAuth.settled = true));
+  serveGenerations.set(server, {
+    handover: (reason) => staleExit.handover(reason),
+    promote: () => readModel?.reload(),
+    shed: () => analyticsCache.shed(),
+    probes: [planLoadedProbe(() => deps.board.plan, consoleSha), githubAuthProbe(() => githubAuth.settled), gatewayPrimedProbe(github), readModelWarmProbe(readModel)],
   });
-  server.on("close", stopIncidentInvariants);
   return { server, githubAppReady: routeAssembly.githubAppReady };
 }
 
 const serveReadModels = new WeakMap<Server, ReadModelWorkerHandle>();
+type ServeGenerationHooks = { handover: (reason: string) => Promise<void>; promote: () => void; shed: () => void; probes: ReadinessProbe[] };
+const serveGenerations = new WeakMap<Server, ServeGenerationHooks>();
+
+export function serveGeneration(server: Server): ServeGenerationHooks | undefined {
+  return serveGenerations.get(server);
+}
 
 export function readModelInstances(deps: Pick<ServeDeps, "ledgerPath" | "questionsRoot" | "instances" | "assistantRepository"> & { panelGraph?: Pick<ServeDeps["panelGraph"], "planPath"> }): ReadModelInstance[] {
   const core = { name: deps.instances?.coreInstance ?? CORE_INSTANCE, ledgerDir: dirname(deps.ledgerPath), feedbackRoot: deps.questionsRoot,

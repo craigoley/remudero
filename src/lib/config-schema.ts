@@ -389,12 +389,18 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_MAIL_COMMAND", "Overrides the mail command used for notification delivery.", ["src/lib/notify.ts"]),
   envEntry("RMD_OPENWEIGHT_API_KEY", "Supplies the Azure API key to the daemon-local open-weight adapter; it is never copied into a worker environment.", ["src/lib/worker-provider.ts"]),
   envEntry("RMD_OPERATOR_IDENTITY_PATH", "Names the read-only mounted file holding serve's operator identity when config.json has none.", ["src/lib/operator-identity-file.ts"]),
+  envEntry("RMD_READ_MODEL_DB_DIR", "Maps one state dir to the directory holding its read-model DB files as <stateDir>:<dir>; set by deploy/scratch-mounts.sh.", ["src/lib/read-model-db.ts"]),
   envEntry("RMD_RESTART_THROTTLE_S", "Documents restart throttling excluded from proof environments.", ["src/lib/review.ts"]),
   envEntry("RMD_SELF_SYNC_DONE", "Guards CLI self-sync re-exec loops.", ["src/lib/self-sync.ts", "src/lib/commit-message.ts", "src/run-task.ts"]),
   envEntry("RMD_SERVE_HOST", "Overrides operator console bind hosts.", ["src/lib/serve.ts", "src/lib/launchd.ts", "src/run-task.ts"]),
+  envEntry("RMD_SERVE_GENS_DIR", "Names the directory holding the serve supervisor's two generation slots and its handoff.off switch.", ["src/lib/serve-supervisor-main.ts"]),
+  envEntry("RMD_SERVE_HANDOFF", "Set to off to make the serve supervisor answer a handoff request with today's drain and container restart.", ["src/lib/serve-supervisor.ts"]),
   envEntry("RMD_SERVE_INGEST_TOKEN", "Supplies serve's optional bearer token that is accepted only on the incident ingest route.", ["src/lib/serve.ts"]),
   envEntry("RMD_SERVE_INGEST_TOKEN_FILE", "Names the read-only mounted file holding serve's incident ingest token when RMD_SERVE_INGEST_TOKEN is unset.", ["src/lib/serve.ts"]),
   envEntry("RMD_SERVE_NETWORK", "Declares container-network context for serve wildcard binds.", ["src/lib/serve.ts"]),
+  envEntry("RMD_SERVE_READY_SOCKET", "Names the private unix socket a supervised standby serve answers readiness on.", ["src/lib/serve-generation.ts"]),
+  envEntry("RMD_SERVE_ROLE", "Set to standby by the serve supervisor so serve warms and waits for promotion before binding its port.", ["src/lib/serve-generation.ts"]),
+  envEntry("RMD_WORKER_HOME_DIR", "Maps one config root to the directory holding its worker homes as <root>:<dir>; set by deploy/scratch-mounts.sh.", ["src/lib/config.ts"]),
 ];
 
 function configField(

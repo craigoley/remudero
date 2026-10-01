@@ -159,7 +159,8 @@ const canonicalJson = (value: unknown): string => JSON.stringify(value);
 /**
  * Pairs each side's shadow facts under their diff paths into `RepositoriesData`
  * (`instances[instanceId=…].summary.repos[id=…].<field>`). `errorrate` and `cost_7d` are derived from the
- * counts and sum they are computed from. `condition` and `reasons` are derived from the run counts only when
+ * counts and sum they are computed from; a usage window's `percent_used` from the reading it is, `observed_at`.
+ * `condition` and `reasons` are derived from the run counts only when
  * legacy's own signals, given the view's run counts, reproduce the view's exactly; otherwise they stay `real`.
  */
 export function repositoriesShadowPairing(legacyFacts: ShadowFactsByInstance, viewFacts: ShadowFactsByInstance, view: RepositoriesData | undefined): Required<Pick<ShadowLegacy, "members" | "sums" | "latest" | "derived">> {
@@ -187,6 +188,14 @@ export function repositoriesShadowPairing(legacyFacts: ShadowFactsByInstance, vi
         derived[`${base}.health.condition`] = runs;
         derived[`${base}.health.reasons`] = runs;
       }
+    }
+  }
+  for (const { instanceId, summary } of view?.instances ?? []) {
+    for (const repo of summary?.repos ?? []) {
+      repo.telemetry?.subscription?.windows.forEach((_, i) => {
+        const at = `instances[instanceId=${instanceId}].summary.repos[id=${repo.id}].telemetry.subscription.windows[${i}]`;
+        derived[`${at}.percent_used`] = [`${at}.observed_at`];
+      });
     }
   }
   return { members, sums, latest, derived };

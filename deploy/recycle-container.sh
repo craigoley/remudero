@@ -1383,6 +1383,19 @@ if [ -f "${SCRIPT_DIR:-}/resource-policy.sh" ]; then
 else
   echo "recycle-container: resource policy NOT applied — ${SCRIPT_DIR:-<unknown>}/resource-policy.sh is absent"
 fi
+SCRATCH_ARGS=() # deploy/scratch-mounts.sh: rebuildable I/O on the local NVMe; dark until switched on
+if [ -f "${SCRIPT_DIR:-}/scratch-mounts.sh" ]; then
+  . "${SCRIPT_DIR}/scratch-mounts.sh"
+  if scratch_plan "${STATE_DIR}" "${CONTAINER_NAME}" && scratch_prepare; then
+    scratch_fresh_tmp
+    while IFS='	' read -r scratch_src scratch_dest; do
+      RUNTIME_CONTRACT_EXPECT_ARGS+=(--expect "${scratch_src}" "${scratch_dest}" rw)
+    done <<EOF
+${SCRATCH_BINDS}
+EOF
+  fi
+  echo "recycle-container: scratch mounts ${SCRATCH_NOTE}"
+fi
 DOCKER_RUN_ARGS=(
   -d --name "${CONTAINER_NAME}"
   --restart=on-failure:5
@@ -1401,6 +1414,9 @@ if [ "${#CODEX_MOUNT_ARGS[@]}" -gt 0 ]; then
 fi
 if [ "${#CONTAINER_CONFIG_MOUNT_ARGS[@]}" -gt 0 ]; then
   DOCKER_RUN_ARGS+=("${CONTAINER_CONFIG_MOUNT_ARGS[@]}")
+fi
+if [ "${#SCRATCH_ARGS[@]}" -gt 0 ]; then
+  DOCKER_RUN_ARGS+=("${SCRATCH_ARGS[@]}")
 fi
 DOCKER_RUN_ARGS+=("${REF}" ./bin/rmd daemon --repo "${DAEMON_REPO}" --allow-self-target)
 docker run "${DOCKER_RUN_ARGS[@]}" >/dev/null

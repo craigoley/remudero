@@ -3107,6 +3107,80 @@ export interface components {
     VersionResult: {
       sha: string;
     };
+    /** One caller's reads of one route since the rollup began, and the newest read's time. */
+    RouteReadTotals: {
+      reads: number;
+      lastAt: string | null;
+    };
+    /** One legacy cache layer's gate G reading. zeroConsoleDays counts whole days since the layer's newest console read, or since the rollup began. positiveControl is true when the views that replace it were read by the console inside that zero window; gateHolds needs both. */
+    RouteReadLayerSummary: {
+      layer: string;
+      paths: (string)[];
+      consoleReads: number;
+      lastConsoleReadAt: string | null;
+      zeroConsoleDays: number;
+      positiveControl: boolean;
+      gateHolds: boolean;
+    };
+    /** One served route's reads by caller. console and fleet are absent until that caller reads it. */
+    RouteReadSummary: {
+      path: string;
+      kind: "view" | "legacy" | "other";
+      layers: (string)[];
+      zeroConsoleDays: number;
+      console?: RouteReadTotals;
+      fleet?: RouteReadTotals;
+      latency?: RouteLatencyReading;
+    };
+    /** Handler milliseconds from the handler call to the response's finish, as a cumulative bucket histogram keyed by each bucket's upper bound (+Inf past the last). A percentile reads as its bucket's bound capped at maxMs, and is null with no reads. A window is the difference of two reads. */
+    RouteLatencyReading: {
+      n: number;
+      maxMs: number;
+      buckets: Record<string, number>;
+      p50Ms: number | null;
+      p99Ms: number | null;
+    };
+    /** View responses answered with a body (200 or 304), the stale ones, and per stale source the count by phase (none when the source named no phase); worstPhases names each source's worst. */
+    RouteReadStaleness: {
+      served: number;
+      stale: number;
+      byView: Record<string, {
+        served: number;
+        stale: number;
+      }>;
+      bySource: Record<string, {
+        stale: number;
+        phases: Record<string, number>;
+      }>;
+      worstPhases: Record<string, "warming" | "refreshing" | "catching_up" | "behind" | "elsewhere" | "failed" | "none">;
+    };
+    /** One push stream's live subscribers, its peak, and its opens, client closes and handovers by reason (slow_consumer is a dropped subscriber). */
+    RouteReadStream: {
+      opened: number;
+      closed: number;
+      peak: number;
+      handovers: Record<string, number>;
+      subscribers: number;
+    };
+    /** GET /v1/route-reads's body (src/lib/route-read-rollup.ts): the hourly serve.route_reads rollup folded into totals, plus the current hour's counts. */
+    RouteReadsResult: {
+      asOf: string;
+      since: string | null;
+      hours: number;
+      gateDays: number;
+      views: {
+        consoleReads: number;
+        lastConsoleReadAt: string | null;
+      };
+      layers: (RouteReadLayerSummary)[];
+      routes: (RouteReadSummary)[];
+      viewLatency: RouteLatencyReading;
+      staleness: RouteReadStaleness;
+      streams: {
+        views: RouteReadStream;
+        status: RouteReadStream;
+      };
+    };
     /** One option on an inbox item's plain message (src/lib/inbox-plain.ts's `PlainOption`). */
     PlainOption: {
       label: string;
@@ -4778,6 +4852,15 @@ export interface paths {
     get: {
       responses: {
           "200": VersionResult;
+          "401": Error;
+          "403": Error;
+        };
+    };
+  };
+  "/v1/route-reads": {
+    get: {
+      responses: {
+          "200": RouteReadsResult;
           "401": Error;
           "403": Error;
         };

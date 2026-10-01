@@ -49,7 +49,8 @@
 #   RMD_STATE_DIR RMD_IMAGE RMD_SERVICE_USER RMD_NODE_MAX_OLD_SPACE_MB
 #   RMD_GH_APP_ID RMD_GH_APP_INSTALLATION_ID RMD_GH_APP_PRIVATE_KEY_PATH
 #   RMD_UNIT_DIR RMD_BIN_DIR RMD_LAUNCHER_PATH RMD_REVIVAL_LOG
-#   RMD_CLEANUP_PATH RMD_CLEANUP_LOG RMD_CRONTAB_CMD   (W1-T4770: the root-disk janitor + its cron)
+#   RMD_CLEANUP_PATH RMD_CLEANUP_LOG RMD_CRONTAB_CMD   (W1-T4770: root-disk janitor + cron)
+#   RMD_TMP_SWEEP_PATH RMD_TMP_SWEEP_CRON_PATH          (W1-T5036: guarded hourly temp sweep)
 set -euo pipefail
 
 MODE="check"
@@ -230,6 +231,21 @@ for pair in "STATE_DIR:$STATE_DIR" "IMAGE:$IMAGE" "SERVICE_USER:$SERVICE_USER" "
 done
 case "$MAX_OLD_SPACE_MB" in ''|*[!0-9]*) echo "install-host-units: FATAL — RMD_NODE_MAX_OLD_SPACE_MB must be an integer, got '${MAX_OLD_SPACE_MB}'." >&2; exit 2 ;; esac
 case "$STATE_DIR" in /*) : ;; *) echo "install-host-units: FATAL — RMD_STATE_DIR must be absolute, got '${STATE_DIR}'." >&2; exit 2 ;; esac
+
+# The install root installs only what main holds: a hand edit there went live unmerged on 2026-10-01
+# and blocked deploy-run. No optional locks, so a sudo run never writes a root-owned index.
+if [ "$MODE" = "install" ] && [ -d "${STATE_DIR}/daemon-install" ] && \
+   [ "$(cd "${SCRIPT_DIR}/.." && pwd -P)" = "$(cd "${STATE_DIR}/daemon-install" && pwd -P)" ]; then
+  if ! local_edits="$(GIT_OPTIONAL_LOCKS=0 git -c safe.directory='*' -C "${SCRIPT_DIR}/.." status --porcelain 2>&1)"; then
+    local_edits="git status failed: ${local_edits}"
+  fi
+  if [ -n "$local_edits" ]; then
+    echo "install-host-units: FATAL -- the install root ${STATE_DIR}/daemon-install has local edits; it installs only what origin/main holds:" >&2
+    printf '%s\n' "$local_edits" | sed 's/^/  /' >&2
+    echo "  Land the change as a PR; rmd deploy-run fast-forwards this checkout and installs it." >&2
+    exit 2
+  fi
+fi
 case "$CONTAINER_NAME" in *[!a-zA-Z0-9_.-]*|"") echo "install-host-units: FATAL -- container name must be Docker-safe, got '${CONTAINER_NAME}'." >&2; exit 2 ;; esac
 case "$SERVICE_UNIT_NAME" in *.service) : ;; *) echo "install-host-units: FATAL -- service_name must end in .service, got '${SERVICE_UNIT_NAME}'." >&2; exit 2 ;; esac
 case "$WATCHDOG_SERVICE_NAME" in *.service) : ;; *) echo "install-host-units: FATAL -- watchdog_service_name must end in .service, got '${WATCHDOG_SERVICE_NAME}'." >&2; exit 2 ;; esac
@@ -575,6 +591,13 @@ $(render_cash_boot_secrets)
 
 docker rm -f ${CONTAINER_NAME} >/dev/null 2>&1 || true
 
+SCRATCH_ARGS=()
+if [ -r ${BIN_DIR}/rmd-scratch-mounts ]; then
+  . ${BIN_DIR}/rmd-scratch-mounts
+  if scratch_plan "\$STATE_DIR" ${CONTAINER_NAME} && scratch_prepare; then scratch_fresh_tmp; fi
+  echo "rmd-relaunch: scratch mounts \$SCRATCH_NOTE"
+fi
+
 # --restart=on-failure:5 IS DELIBERATE: exit 0 is a STOP and must not be undone. Reboot survival is
 # rmd-fleet.service; crash recovery past the budget is rmd-fleet-watchdog.timer.
 # NODE_OPTIONS: without it V8 caps at ~2GB and the retro rung aborts at ~2046 MB on a 7.9GB host.
@@ -598,6 +621,7 @@ docker run -d --name ${CONTAINER_NAME} \\
   -v ${CONTAINER_CONFIG_DIR}:/home/node/.config/remudero \\
   -v "\$STATE_DIR":/home/node/Remudero \\
   -v ${CLAUDE_DIR}:/home/node/.claude \\
+  "\${SCRATCH_ARGS[@]+"\${SCRATCH_ARGS[@]}"}" \\
   "\$IMAGE" \\
   ./bin/rmd daemon --repo ${DAEMON_REPO} --allow-self-target
 
@@ -751,9 +775,12 @@ effective_directives() {
   printf '%s\n' "$1" | sed -e 's/[[:space:]]*$//' -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d'
 }
 
+render_scratch_lib() { cat "${SCRIPT_DIR}/scratch-mounts.sh"; }
+
 # path : renderer : mode
 UNITS="
 ${LAUNCHER}:render_launcher:0755
+${BIN_DIR}/rmd-scratch-mounts:render_scratch_lib:0755
 ${UNIT_DIR}/${SERVICE_UNIT_NAME}:render_fleet_service:0644
 ${UNIT_DIR}/${WATCHDOG_SERVICE_NAME}:render_watchdog_service:0644
 ${UNIT_DIR}/${WATCHDOG_TIMER_NAME}:render_watchdog_timer:0644
@@ -804,6 +831,18 @@ if [ -z "$CLEANUP_PATH" ] && [ "$UNIT_DIR" = "/etc/systemd/system" ] && { [ -z "
 fi
 if [ -n "$CLEANUP_PATH" ]; then
   require_abs_path "RMD_CLEANUP_PATH" "$CLEANUP_PATH"
+  TMP_SWEEP_SRC="${SCRIPT_DIR}/rmd-tmp-sweep.sh"
+  TMP_SWEEP_PATH="${RMD_TMP_SWEEP_PATH-$(dirname "$CLEANUP_PATH")/rmd-tmp-sweep.sh}"
+  TMP_SWEEP_CRON_PATH="${RMD_TMP_SWEEP_CRON_PATH-}"
+  if [ -z "$TMP_SWEEP_CRON_PATH" ] && [ "$UNIT_DIR" = "/etc/systemd/system" ] && { [ -z "$INSTANCE_NAME" ] || [ "$INSTANCE_NAME" = "core" ]; }; then
+    TMP_SWEEP_CRON_PATH="/etc/cron.d/rmd-tmp-sweep"
+  fi
+  require_abs_path "RMD_TMP_SWEEP_PATH" "$TMP_SWEEP_PATH"
+  if [ -n "$TMP_SWEEP_CRON_PATH" ]; then
+    require_abs_path "RMD_TMP_SWEEP_CRON_PATH" "$TMP_SWEEP_CRON_PATH"
+    TMP_SWEEP_CRON_LINE="0 * * * * root RMD_HOST_CLEANUP_SCRIPT=${CLEANUP_PATH} ${TMP_SWEEP_PATH} >> ${RMD_CLEANUP_LOG:-$(dirname "$CLEANUP_PATH")/host-cleanup.log} 2>&1"
+    TMP_SWEEP_CRON_CONTENT="$(printf 'SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n%s\n' "$TMP_SWEEP_CRON_LINE")"
+  fi
   CLEANUP_LOG="${RMD_CLEANUP_LOG:-$(dirname "$CLEANUP_PATH")/host-cleanup.log}"
   CLEANUP_CRON_LINE="${CLEANUP_CRON_SCHEDULE} ${CLEANUP_PATH} >> ${CLEANUP_LOG} 2>&1"
   CRONTAB_CMD="${RMD_CRONTAB_CMD-crontab}"
@@ -823,6 +862,10 @@ if [ -n "$CLEANUP_PATH" ]; then
     echo "install-host-units: FATAL -- ${CLEANUP_SRC} is missing; the janitor cannot be installed." >&2
     exit 2
   fi
+  if [ ! -r "$TMP_SWEEP_SRC" ]; then
+    echo "install-host-units: FATAL -- ${TMP_SWEEP_SRC} is missing; the temp sweep cannot be installed." >&2
+    exit 2
+  fi
   current_cron="$(crontab_read)"
   janitor_cron="$(cron_lines_for_janitor "$current_cron")"
   if [ "$MODE" = "check" ]; then
@@ -840,6 +883,23 @@ if [ -n "$CLEANUP_PATH" ]; then
     else
       echo "install-host-units: ok      crontab entry for $CLEANUP_PATH"
     fi
+    if [ ! -e "$TMP_SWEEP_PATH" ]; then
+      echo "install-host-units: MISSING $TMP_SWEEP_PATH"; drift=$(( drift + 1 ))
+    elif ! cmp -s "$TMP_SWEEP_SRC" "$TMP_SWEEP_PATH"; then
+      echo "install-host-units: DRIFTED $TMP_SWEEP_PATH (differs from deploy/rmd-tmp-sweep.sh)"; drift=$(( drift + 1 ))
+    else
+      echo "install-host-units: ok      $TMP_SWEEP_PATH"
+    fi
+    if [ -n "$TMP_SWEEP_CRON_PATH" ]; then
+      current_tmp_sweep_cron="$(cat "$TMP_SWEEP_CRON_PATH" 2>/dev/null || true)"
+      if [ ! -e "$TMP_SWEEP_CRON_PATH" ]; then
+        echo "install-host-units: MISSING $TMP_SWEEP_CRON_PATH"; drift=$(( drift + 1 ))
+      elif [ "$current_tmp_sweep_cron" != "$TMP_SWEEP_CRON_CONTENT" ]; then
+        echo "install-host-units: DRIFTED $TMP_SWEEP_CRON_PATH (hourly 6-hour guarded temp sweep differs)"; drift=$(( drift + 1 ))
+      else
+        echo "install-host-units: ok      $TMP_SWEEP_CRON_PATH"
+      fi
+    fi
   else
     mkdir -p "$(dirname "$CLEANUP_PATH")"
     # keep the differing hand-installed host copy once: adoption must not destroy its values
@@ -852,6 +912,29 @@ if [ -n "$CLEANUP_PATH" ]; then
     chmod 0755 "$tmp"
     mv -f "$tmp" "$CLEANUP_PATH"
     echo "install-host-units: wrote   $CLEANUP_PATH"
+    mkdir -p "$(dirname "$TMP_SWEEP_PATH")"
+    if [ -e "$TMP_SWEEP_PATH" ] && ! cmp -s "$TMP_SWEEP_SRC" "$TMP_SWEEP_PATH" && [ ! -e "${TMP_SWEEP_PATH}.pre-6h-sweep" ]; then
+      cp -p "$TMP_SWEEP_PATH" "${TMP_SWEEP_PATH}.pre-6h-sweep"
+      echo "install-host-units: saved   ${TMP_SWEEP_PATH}.pre-6h-sweep (the previous temp sweep wrapper)"
+    fi
+    tmp="${TMP_SWEEP_PATH}.tmp.$$"
+    cp "$TMP_SWEEP_SRC" "$tmp"
+    chmod 0755 "$tmp"
+    mv -f "$tmp" "$TMP_SWEEP_PATH"
+    echo "install-host-units: wrote   $TMP_SWEEP_PATH"
+    if [ -n "$TMP_SWEEP_CRON_PATH" ]; then
+      mkdir -p "$(dirname "$TMP_SWEEP_CRON_PATH")"
+      current_tmp_sweep_cron="$(cat "$TMP_SWEEP_CRON_PATH" 2>/dev/null || true)"
+      if [ -e "$TMP_SWEEP_CRON_PATH" ] && [ "$current_tmp_sweep_cron" != "$TMP_SWEEP_CRON_CONTENT" ] && [ ! -e "${TMP_SWEEP_CRON_PATH}.pre-6h-sweep" ]; then
+        cp -p "$TMP_SWEEP_CRON_PATH" "${TMP_SWEEP_CRON_PATH}.pre-6h-sweep"
+        echo "install-host-units: saved   ${TMP_SWEEP_CRON_PATH}.pre-6h-sweep (the previous temp sweep schedule)"
+      fi
+      tmp="${TMP_SWEEP_CRON_PATH}.tmp.$$"
+      printf '%s\n' "$TMP_SWEEP_CRON_CONTENT" > "$tmp"
+      chmod 0644 "$tmp"
+      mv -f "$tmp" "$TMP_SWEEP_CRON_PATH"
+      echo "install-host-units: wrote   $TMP_SWEEP_CRON_PATH"
+    fi
     rest_cron="$(cron_without_janitor "$current_cron")"
     if [ -n "$rest_cron" ]; then
       printf '%s\n%s\n' "$rest_cron" "$CLEANUP_CRON_LINE" | crontab_write

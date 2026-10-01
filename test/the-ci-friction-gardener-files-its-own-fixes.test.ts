@@ -42,6 +42,7 @@ import {
   readCiFrictionLedgerRecords,
   ciFrictionShardYaml,
   costliestUntrackedCause,
+  freshCiFrictionPlanOrigins,
   priceCiFrictionCauses,
   PR_URL_RE,
   readGateFireRateReport,
@@ -53,6 +54,33 @@ import { clockFromMillisFn } from "../src/lib/clock.js";
 import { gateFireRatesPath, type GateFireRateReport } from "../src/lib/gate-fire-rate.js";
 import type { LedgerRecord } from "../src/lib/retro.js";
 import { gitRepo } from "./helpers/git-repo.js";
+
+test("the ci-friction origin census sees a merged filing while the daemon checkout trails main", () => {
+  const author = gitRepo({ kind: "ci-friction-author" });
+  const remote = gitRepo({ kind: "ci-friction-remote", bare: true });
+  mkdirSync(join(author.dir, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(author.dir, "plan", "tasks.d", "baseline.yaml"), "- id: W1-T1\n  origin: baseline\n");
+  author.git("add", "plan/tasks.d");
+  author.git("commit", "-q", "-m", "seed plan");
+  author.addRemote("origin", remote.dir);
+  author.git("push", "-q", "origin", "main");
+  const daemon = gitRepo({ kind: "ci-friction-daemon", cloneFrom: remote.dir });
+  const staleHead = daemon.git("rev-parse", "HEAD");
+
+  writeFileSync(join(author.dir, "plan", "tasks.d", "filing.yaml"),
+    '- id: W1-T2\n  origin: "ci-friction:fix_refusal:the-worker-changed-nothing"\n' +
+    "- id: W1-T3\n  origin: 'ci-friction:single-quoted'\n");
+  author.git("add", "plan/tasks.d/filing.yaml");
+  author.git("commit", "-q", "-m", "file priced cause");
+  author.git("push", "-q", "origin", "main");
+
+  assert.deepEqual(freshCiFrictionPlanOrigins(daemon.dir), [
+    "ci-friction:fix_refusal:the-worker-changed-nothing", "ci-friction:single-quoted",
+  ]);
+  assert.equal(daemon.git("rev-parse", "HEAD"), staleHead, "read the fetched tree without changing the daemon checkout");
+  daemon.git("remote", "set-url", "origin", join(daemon.dir, "missing-origin"));
+  assert.throws(() => freshCiFrictionPlanOrigins(daemon.dir), "an unreadable remote cannot become an empty origin set");
+});
 
 test("readGateFireRateReport returns only a present, parseable persisted report", () => {
   const root = gitRepo({ kind: "w1t4435-gate-fire-rate-report" }).dir;

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -9,6 +10,17 @@ import { HOST_CAUSED_SUITE_REDS } from "../src/lib/ci-parity.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SUBJECT = "test/codex-worker-home-redirection.test.ts";
+
+function interactiveBashProbe(env: Record<string, string | undefined>): string {
+  const out = execFileSync("bash", ["-ic", 'printf "\\nRMD_PROBE=%s\\n" "${ANTHROPIC_API_KEY-}"'], {
+    encoding: "utf8",
+    env,
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  const match = /(?:^|\n)RMD_PROBE=([^\n]*)\n$/.exec(out);
+  assert.ok(match, "the interactive shell must execute the framed PATH probe");
+  return match[1];
+}
 
 /**
  * test/codex-worker-home-cluster-declared.test.ts — W1-T2850.
@@ -64,12 +76,22 @@ test("W1-T2850: the probe works when the interpreter is NOT at the path the test
     /ENOENT/,
     "a hardcoded path that is absent is exactly how this failed on the mini",
   );
-  const out = execFileSync("bash", ["-ic", 'printf %s "${ANTHROPIC_API_KEY-}"'], {
-    encoding: "utf8",
-    env,
-    stdio: ["ignore", "pipe", "ignore"],
-  });
-  assert.equal(out, "sentinel-value", "PATH resolution reads the env back correctly");
+  // Interactive startup can print a host-local banner before the command. Frame only the
+  // probe's own output so PATH resolution remains the claim, not silence from /etc/bash.bashrc.
+  assert.equal(interactiveBashProbe(env), "sentinel-value", "PATH resolution reads the env back correctly");
+});
+
+test("W1-T2850: an interactive startup banner cannot hide the PATH probe value", () => {
+  const home = mkdtempSync(join(tmpdir(), "rmd-bash-banner-"));
+  try {
+    writeFileSync(join(home, ".bashrc"), "printf 'RMD_STARTUP_BANNER\\n'\n");
+    const env = { PATH: process.env.PATH, HOME: home, ANTHROPIC_API_KEY: "sentinel-value" };
+    const startup = execFileSync("bash", ["-ic", "true"], { encoding: "utf8", env, stdio: ["ignore", "pipe", "ignore"] });
+    assert.match(startup, /RMD_STARTUP_BANNER/, "the control must prove startup text was actually emitted");
+    assert.equal(interactiveBashProbe(env), "sentinel-value");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("W1-T2850: NO host cluster is declared for this file — a cluster over a fixed defect is a false attribution", () => {

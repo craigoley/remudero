@@ -260,6 +260,30 @@ if [ "${PRINT_DAEMON_RUN}" -eq 1 ]; then
     echo "host-update: NOTE — no container config directory at ${CONTAINER_CONFIG_DIR}; the printed daemon keeps its existing Claude-only provider policy." >&2
     echo "  Commission it first or set RMD_CONTAINER_CONFIG_DIR; no empty root-owned bind directory will be created." >&2
   fi
+  # The real launchers (the rendered rmd-relaunch, serve-container.sh, recycle-container.sh) add
+  # deploy/scratch-mounts.sh's binds when its switch is on; print the same lines, planned only.
+  DAEMON_SCRATCH_LINES=""
+  SERVE_SCRATCH_LINES=""
+  SCRATCH_MKDIR_LINE=""
+  SCRATCH_LIB="$(dirname "$0")/scratch-mounts.sh"
+  [ -r "${SCRATCH_LIB}" ] || SCRATCH_LIB="/usr/local/bin/rmd-scratch-mounts"
+  if [ -r "${SCRATCH_LIB}" ]; then
+    . "${SCRATCH_LIB}"
+    for scratch_container in remudero-daemon remudero-serve; do
+      scratch_lines=""
+      if scratch_plan "${STATE_DIR}" "${scratch_container}"; then
+        for ((i = 0; i < ${#SCRATCH_ARGS[@]}; i += 2)); do
+          printf -v scratch_lines '%s    %s %s \\\n' "${scratch_lines}" "${SCRATCH_ARGS[i]}" "${SCRATCH_ARGS[i + 1]}"
+        done
+        for scratch_dir in "${SCRATCH_DIRS[@]}" "${STATE_DIR}/repos/.remudero-coverage"; do
+          case " ${SCRATCH_MKDIR_LINE} " in *" ${scratch_dir} "*) ;; *) SCRATCH_MKDIR_LINE="${SCRATCH_MKDIR_LINE} ${scratch_dir}" ;; esac
+        done
+      fi
+      [ "${scratch_container}" = remudero-daemon ] && DAEMON_SCRATCH_LINES="${scratch_lines}" || SERVE_SCRATCH_LINES="${scratch_lines}"
+    done
+    echo "host-update: scratch mounts ${SCRATCH_NOTE}"
+    [ -n "${SCRATCH_MKDIR_LINE}" ] && printf -v SCRATCH_MKDIR_LINE '  mkdir -p%s   # the scratch binds, owned by you, before docker run\n' "${SCRATCH_MKDIR_LINE}"
+  fi
   # ── THE PRINTED PATH IS CHECKED BEFORE IT IS PRINTED ───────────────────────────────────────
   # MEASURED 2026-08-12, and this is the failure being fixed: on the Azure host `${HOME}/rmd-state`
   # holds a ledger that STOPS ON AUG 8 (100,330 bytes) while `${HOME}/rmd-state2` is live
@@ -356,6 +380,7 @@ if [ "${PRINT_DAEMON_RUN}" -eq 1 ]; then
   cat <<PRINTED
 host-update: DAEMON-MODE INVOCATION — printed only. Nothing has been started and nothing was run.
 
+${SCRATCH_MKDIR_LINE}
   # THE DAEMON. --restart=on-failure matches launchd KeepAlive{SuccessfulExit:false}: exit 0 means
   # a deliberate stop (daemonExitCode maps 'stopped' and 'max_reached' to 0) and must NOT restart;
   # nonzero includes 'stale', which REQUIRES the restart to pick up merged code (W1-T126).
@@ -447,7 +472,7 @@ host-update: DAEMON-MODE INVOCATION — printed only. Nothing has been started a
     -e RMD_FOUNDRY_CLAUDE_API_KEY="\${RMD_FOUNDRY_CLAUDE_API_KEY:-}" \\
 ${CODEX_MOUNT_LINE}${CONTAINER_CONFIG_MOUNT_LINE}    -v ${STATE_DIR}:${STATE_MOUNT_DEST} \\
     -v ${CRED_DIR}:${CRED_MOUNT_DEST} \\
-    ${REF} \\
+${DAEMON_SCRATCH_LINES}    ${REF} \\
     ./bin/rmd daemon --repo ${DAEMON_REPO} --allow-self-target
 
   # THE CONSOLE, IF WANTED, IS A SEPARATE CONTAINER WITH A DIFFERENT POLICY. serve returns 0 on a
@@ -479,7 +504,7 @@ ${CODEX_MOUNT_LINE}${CONTAINER_CONFIG_MOUNT_LINE}    -v ${STATE_DIR}:${STATE_MOU
     -e RMD_SERVE_HOST="\${RMD_SERVE_HOST:-0.0.0.0}" \\
     -e RMD_SERVE_NETWORK="\${RMD_SERVE_NETWORK:-container}" \\
     -v ${STATE_DIR}:${STATE_MOUNT_DEST} \\
-    ${REF} \\
+${SERVE_SCRATCH_LINES}    ${REF} \\
     ./bin/rmd serve
 
   # W1-T2568: this printed block carries no secret-file mount at all (it never has — neither the

@@ -159,6 +159,8 @@ export interface ReadModelViewRoutesOptions {
   shadow?: (view: string, key: string, params: URLSearchParams) => void;
   /** Views that serve their body with no switch entry; every other view defaults to `off`. */
   servedByDefault?: readonly string[];
+  /** Told of each view response answered with a body (200 or 304), so stale answers are counted by source. */
+  onServed?: (view: string, body: ViewBody) => void;
 }
 
 /**
@@ -221,6 +223,7 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
         return;
       }
       const { body, etag } = rendered;
+      opts.onServed?.(name, body);
       if (ifNoneMatchHits(req.headers["if-none-match"], etag)) {
         res.writeHead(304, { etag, "cache-control": "no-cache" });
         res.end();
