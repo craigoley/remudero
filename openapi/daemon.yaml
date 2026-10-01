@@ -13326,8 +13326,10 @@ paths:
       description: >
         src/lib/panel-actions.ts's `buildEscalationLinkConfirmRoute`. Registered read-scoped but
         self-authenticated. On a verified link it renders an HTML form that POSTs the same query to
-        /v1/escalation/answer; a refusal renders its reason as HTML. Refusals other than a
-        malformed query are ledgered as `escalation.link_refused` (phase `confirm`).
+        /v1/escalation/answer; a refusal renders its reason as HTML. The route writes nothing
+        (W1-T5057): it reads the link secret without creating it (503 when none was minted), and
+        refusals other than a malformed query are held in memory and ledgered as one
+        `escalation.link_refused_rollup` row per escalation and reason per hour (phase `confirm`).
       security: []
       parameters:
         - name: e

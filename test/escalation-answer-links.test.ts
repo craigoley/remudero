@@ -17,7 +17,7 @@ import {
   type OptionLinkClaims,
 } from "../src/lib/escalate.js";
 import { renderEscalationPing } from "../src/lib/notify.js";
-import { buildEscalationLinkAnswerRoute, buildEscalationLinkConfirmRoute } from "../src/lib/panel-actions.js";
+import { buildEscalationLinkAnswerRoute, buildEscalationLinkConfirmRoute, createLinkRefusalRollup } from "../src/lib/panel-actions.js";
 import { appendThreadMessage } from "../src/lib/inbox-thread.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
@@ -385,10 +385,14 @@ test("W1-T2696: the confirm route ledgers a forged link and renders why, without
   try {
     const url = mintOptionLink("W1-T1", "MANUAL", EXECUTABLE, SECRET, NOW, BASE)!;
     const tampered = url.replace(/s=[0-9a-f]{64}/, `s=${"0".repeat(64)}`);
-    const route = buildEscalationLinkConfirmRoute({ root: r, ledgerPath, threadStorePath } as any, { root: r, secret: () => SECRET, now: () => NOW });
+    const refusals = createLinkRefusalRollup({ ledgerPath, now: () => NOW });
+    const route = buildEscalationLinkConfirmRoute({ root: r, ledgerPath, threadStorePath } as any, { root: r, secret: () => SECRET, now: () => NOW, refusals });
     const { res, captured } = fakeRes();
     route.handler(reqFor(tampered), res, CTX);
     assert.equal(captured.status, 403);
+    // W1-T5057: the refusal is held and ledgered by the rollup's flush, never by the GET itself.
+    assert.equal(existsSync(ledgerPath), false);
+    refusals.stop();
     assert.match(readFileSync(ledgerPath, "utf8"), /"phase":"confirm"/);
     assert.match(readFileSync(ledgerPath, "utf8"), /"reason":"forged"/);
     // An expired link renders 410 rather than 403 — a stale ping is not an attack.
