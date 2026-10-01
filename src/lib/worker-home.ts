@@ -560,6 +560,9 @@ export interface WorkerHomeSweepOpts {
    *  thing that authorises removing a home before the age ceiling. Defaults to
    *  `<dirname(root)>/state/ledger.ndjson`. */
   ledgerPath?: string;
+  /** The config root whose `state/` holds the inflight locks and the ledger, when the homes were
+   *  relocated off it (RMD_WORKER_HOME_DIR). Defaults to `dirname(root)`. */
+  stateRoot?: string;
   /** W1-T1064: print before clearing, always — called once per removal naming the home, its run id and
    *  the evidence that judged it dead, and once at the end of EVERY pass including the zero-removed
    *  case, so a pass that found nothing stale never reads the same as one that never ran. */
@@ -638,8 +641,9 @@ export function sweepStaleWorkerHomes(root: string, opts: WorkerHomeSweepOpts = 
   const kept: string[] = [];
   const parent = dirname(root);
   const prefix = `${basename(root)}-`;
-  const inflightDir = opts.inflightDir ?? join(parent, "state", "inflight");
-  const ledgerPath = opts.ledgerPath ?? join(parent, "state", LEDGER_FILENAME);
+  const stateRoot = opts.stateRoot ?? parent;
+  const inflightDir = opts.inflightDir ?? join(stateRoot, "state", "inflight");
+  const ledgerPath = opts.ledgerPath ?? join(stateRoot, "state", LEDGER_FILENAME);
 
   let entries: string[];
   try {

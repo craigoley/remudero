@@ -1041,8 +1041,15 @@ and the fleet launcher `install-host-units.sh` renders, which the watchdog conve
 | `worktrees` | `/home/node/Remudero/worktrees` |
 | `tmp` | `/home/node/Remudero/tmp` |
 | `remudero-coverage` | `/home/node/Remudero/.remudero-coverage` |
+| `repos-coverage` (coverage scratch beside the managed checkouts) | `/home/node/Remudero/repos/.remudero-coverage` |
 | `read-model` (DB files, pointer, generations) | `/home/node/rmd-scratch/read-model`, via `RMD_READ_MODEL_DB_DIR=/home/node/Remudero/state:/home/node/rmd-scratch/read-model` |
+| `worker-homes` (the per-spawn `worker-home-*` HOMEs, made and reaped per spawn) | `/home/node/rmd-scratch/worker-homes`, via `RMD_WORKER_HOME_DIR=/home/node/Remudero:/home/node/rmd-scratch/worker-homes` |
 | `containers/<name>/tmp` (emptied at each launch) | `/tmp` |
+
+Each launch creates the state-side mount points (for example `repos/.remudero-coverage`) as the
+fleet user first, so docker never creates one as root and a rollback leaves it writable.
+`deploy/host-update.sh --print-daemon-run` prints the same binds, and a `mkdir -p` for them, when the
+switch is on.
 
 **Nothing authoritative moves.** The ledger, `repos/`, `lanes/`, the plan, `state/` files and the
 read-model switch file (`state/read-model/switches.json`) stay on `/mnt/rmd`. A deallocate wipes

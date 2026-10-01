@@ -1040,19 +1040,23 @@ test("a switched-on daemon recycle binds the rebuildable dirs to scratch and its
     [join(base, "worktrees"), "/home/node/Remudero/worktrees"],
     [join(base, "tmp"), "/home/node/Remudero/tmp"],
     [join(base, "remudero-coverage"), "/home/node/Remudero/.remudero-coverage"],
+    [join(base, "repos-coverage"), "/home/node/Remudero/repos/.remudero-coverage"],
     [join(base, "read-model"), "/home/node/rmd-scratch/read-model"],
+    [join(base, "worker-homes"), "/home/node/rmd-scratch/worker-homes"],
     [join(base, "containers", "remudero-daemon", "tmp"), "/tmp"],
   ];
-  mkdirSync(binds[4][0], { recursive: true });
-  writeFileSync(join(binds[4][0], "left-by-the-old-container"), "x");
+  const containerTmp = binds[binds.length - 1][0];
+  mkdirSync(containerTmp, { recursive: true });
+  writeFileSync(join(containerTmp, "left-by-the-old-container"), "x");
   const mounted = binds.map(([src, dest]) => `${src}\t${dest}\ttrue`).join("\n");
   const run = runRecycle("good", { stateDir: state, extraEnv: { ...scratch.env, STUB_EXTRA_MOUNTS: mounted } });
   assert.equal(run.status, 0, run.stdout + run.stderr);
   const argv = run.calls.find(isRun)?.argv ?? [];
   for (const [src, dest] of binds) assert.ok(argv.includes(`${src}:${dest}`), `bound ${dest}: ${argv.join(" ")}`);
   assert.ok(argv.includes("RMD_READ_MODEL_DB_DIR=/home/node/Remudero/state:/home/node/rmd-scratch/read-model"));
+  assert.ok(argv.includes("RMD_WORKER_HOME_DIR=/home/node/Remudero:/home/node/rmd-scratch/worker-homes"), "the daemon's worker homes follow their bind");
   for (const [src] of binds) assert.ok(existsSync(src), `created ${src}`);
-  assert.deepEqual(readdirSync(binds[4][0]), [], "the new container starts with an empty /tmp, as a new container always did");
+  assert.deepEqual(readdirSync(containerTmp), [], "the new container starts with an empty /tmp, as a new container always did");
   assert.deepEqual(readFileSync(join(state, ".scratch-mounts"), "utf8").trim().split("\n"), binds.map(([src]) => src).sort(), "the boot-time restore list names every bound dir");
 
   const unbound = runRecycle("good", { stateDir: mkdtempSync(join(tmpdir(), "recycle-state-")), extraEnv: scratch.env });

@@ -3,8 +3,9 @@
 # ephemeral local NVMe (/mnt/scratch) instead of the IOPS-capped data disk (/mnt/rmd).
 # Why, what moves, the operator runbook and the rollback: docs/operator-guide.md "Scratch-disk mounts".
 #
-# INVARIANT: nothing authoritative moves. Only worktrees, the shared tmp, coverage scratch, the read
-# model's DB files (rebuilt from the ledger on an empty dir) and each container's /tmp are bound here;
+# INVARIANT: nothing authoritative moves. Only worktrees, the shared tmp, coverage scratch (the state
+# root's and repos/'s), the read model's DB files (rebuilt from the ledger on an empty dir), the
+# per-spawn worker homes (made and reaped per spawn) and each container's /tmp are bound here;
 # the ledger, repos, lanes, plan and every state file, the read-model switch file included, stay put.
 # DARK until RMD_SCRATCH=on or the switch file exists; an unmounted or unwritable scratch root makes
 # the launch run exactly as before and say why. Falsifier: test/scratch-mounts.test.ts.
@@ -23,6 +24,7 @@
 
 SCRATCH_STATE_DEST="/home/node/Remudero"
 SCRATCH_READ_MODEL_DEST="/home/node/rmd-scratch/read-model"
+SCRATCH_WORKER_HOME_DEST="/home/node/rmd-scratch/worker-homes"
 SCRATCH_MANIFEST_NAME=".scratch-mounts"
 
 scratch_root() { printf '%s' "${RMD_SCRATCH_ROOT:-/mnt/scratch}"; }
@@ -74,7 +76,9 @@ scratch_plan() {
   SCRATCH_BINDS="${base}/worktrees	${SCRATCH_STATE_DEST}/worktrees
 ${base}/tmp	${SCRATCH_STATE_DEST}/tmp
 ${base}/remudero-coverage	${SCRATCH_STATE_DEST}/.remudero-coverage
+${base}/repos-coverage	${SCRATCH_STATE_DEST}/repos/.remudero-coverage
 ${base}/read-model	${SCRATCH_READ_MODEL_DEST}
+${base}/worker-homes	${SCRATCH_WORKER_HOME_DEST}
 ${SCRATCH_CONTAINER_TMP}	/tmp"
   local src dest
   while IFS='	' read -r src dest; do
@@ -84,7 +88,8 @@ ${SCRATCH_CONTAINER_TMP}	/tmp"
 ${SCRATCH_BINDS}
 EOF
   SCRATCH_ARGS+=(-e "RMD_READ_MODEL_DB_DIR=${SCRATCH_STATE_DEST}/state:${SCRATCH_READ_MODEL_DEST}")
-  SCRATCH_NOTE="on — worktrees, tmp, coverage, the read model and /tmp under ${base}"
+  SCRATCH_ARGS+=(-e "RMD_WORKER_HOME_DIR=${SCRATCH_STATE_DEST}:${SCRATCH_WORKER_HOME_DEST}")
+  SCRATCH_NOTE="on — worktrees, tmp, coverage, the read model, worker homes and /tmp under ${base}"
   return 0
 }
 
@@ -100,6 +105,14 @@ scratch_prepare() {
       return 1
     fi
   done
+  # Docker would create a missing mount point on the state disk as root, and a rollback would then
+  # leave e.g. repos/.remudero-coverage unwritable to the fleet. Make each one ours first.
+  local src dest
+  while IFS='	' read -r src dest; do
+    case "${dest}" in "${SCRATCH_STATE_DEST}/"*) mkdir -p "${SCRATCH_STATE_DIR}/${dest#"${SCRATCH_STATE_DEST}/"}" 2>/dev/null || true ;; esac
+  done <<EOF
+${SCRATCH_BINDS}
+EOF
   manifest="${SCRATCH_STATE_DIR}/${SCRATCH_MANIFEST_NAME}"
   tmp="${manifest}.tmp.$$"
   if { [ -r "${manifest}" ] && cat "${manifest}"; printf '%s\n' "${SCRATCH_DIRS[@]}"; } | sort -u > "${tmp}" 2>/dev/null; then

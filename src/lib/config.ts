@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { canonicalWorkerProviderId, validateConfigShape, WORKER_PROVIDER_IDS, type Config, type WorkerProviderId } from "./config-schema.js";
 import { createOrReadPublished } from "./fs-race-safe.js";
 export { canonicalWorkerProviderId, WORKER_PROVIDER_IDS } from "./config-schema.js";
@@ -283,9 +283,17 @@ export function workerZdotdir(config: Config): string {
  * a worker's shell-snapshot rc (see {@link workerShell}) regardless of host. Derived from
  * `config.root`; default `<root>/worker-home`, overridable via `workerHomeRoot`.
  */
-export function workerHomeDir(config: Config): string {
-  return config.workerHomeRoot ?? join(config.root, "worker-home");
+export function workerHomeDir(config: Config, env: NodeJS.ProcessEnv = process.env): string {
+  if (config.workerHomeRoot) return config.workerHomeRoot;
+  // `<root>:<dir>` (deploy/scratch-mounts.sh): this root's worker homes live under the scratch-backed
+  // `<dir>`, so the per-spawn `worker-home-*` siblings move with it. Keyed by root, like the read model.
+  const mapping = env[WORKER_HOME_DIR_ENV] ?? "";
+  const at = mapping.indexOf(":");
+  if (at > 0 && mapping.length > at + 1 && resolve(mapping.slice(0, at)) === resolve(config.root)) return join(mapping.slice(at + 1), "worker-home");
+  return join(config.root, "worker-home");
 }
+
+export const WORKER_HOME_DIR_ENV = "RMD_WORKER_HOME_DIR";
 
 /**
  * Cache root shared by every worker and daemon process on the host. A per-run HOME is deliberate
