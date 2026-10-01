@@ -31,6 +31,8 @@ export const HANDOFF_OFF_FILE = "handoff.off";
 export const STANDBY_READY_BOUND_MS = 330_000;
 /** The drain's own bound (10 s) plus the exit watchdog (5 s), with room: past it the old generation is killed. */
 export const DRAIN_BACKSTOP_MS = 30_000;
+/** BACKSTOP on a generation that never answers a shed request; a healthy one answers in milliseconds. */
+export const SHED_BACKSTOP_MS = 10_000;
 export const SMOKE_PATHS = ["/v1/version", "/v1/status", "/v1/views/versions"] as const;
 
 /** One forked generation, as the supervisor sees it. */
@@ -82,6 +84,7 @@ export interface ServeSupervisorOptions {
   drainBackstopMs?: number;
   /** When memory is short, a handoff waits this long before it asks again. */
   deferMs?: number;
+  shedBackstopMs?: number;
 }
 
 interface Generation {
@@ -185,6 +188,7 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   const pollMs = opts.pollMs ?? 500;
   const drainBackstopMs = opts.drainBackstopMs ?? DRAIN_BACKSTOP_MS;
   const deferMs = opts.deferMs ?? 60_000;
+  const shedBackstopMs = opts.shedBackstopMs ?? SHED_BACKSTOP_MS;
 
   let next = 0;
   let active: Generation | undefined;
@@ -282,6 +286,20 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     return { generation, readyMs: clock.now() - startedAt };
   };
 
+  /** Tier 1: the active generation drops its rebuildable caches, then free memory is measured again. */
+  const shedActive = async (generation: Generation, freeBefore: number): Promise<number | undefined> => {
+    const reply = new Promise<GenerationMessage | undefined>((resolve) => {
+      generation.process.onMessage((message) => message.type === GENERATION_MESSAGES.shed_done && resolve(message));
+      void generation.exited.then(() => resolve(undefined));
+      void sleep(shedBackstopMs).then(() => resolve(undefined));
+    });
+    generation.process.send({ type: GENERATION_MESSAGES.shed });
+    const done = await reply;
+    const freeAfter = freeMemory();
+    opts.log("serve.handoff_shed", { generation: generation.id, answered: done !== undefined, beforeBytes: done?.beforeBytes, afterBytes: done?.afterBytes, freeBefore, freeAfter, needBytes: largestRss });
+    return freeAfter;
+  };
+
   const legacyExit = async (reason: string): Promise<void> => {
     opts.log("serve.handoff_legacy_exit", { reason, sha: active?.slot.sha });
     await supervisor.shutdown(reason);
@@ -304,8 +322,10 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
       opts.log("serve.handoff_skipped", { sha: slot.sha, reason: slot.sha === from.slot.sha ? "already_serving" : "failed_before" });
       return;
     }
-    const free = freeMemory();
-    if (free !== undefined && largestRss > 0 && free < largestRss) {
+    const short = (bytes: number | undefined): bytes is number => bytes !== undefined && largestRss > 0 && bytes < largestRss;
+    let free = freeMemory();
+    if (short(free)) free = await shedActive(from, free);
+    if (short(free)) {
       deferrals += 1;
       opts.log("serve.handoff_deferred", { reason: "memory", freeBytes: free, needBytes: largestRss, deferrals, sha: slot.sha });
       if (deferrals >= 3) return legacyExit("memory");
