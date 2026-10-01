@@ -13,7 +13,7 @@
   files:
     - src/lib/status.ts
     - test/project-plan-trailer-lookup.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED on the live Azure daemon while diagnosing the missing current-head review for PR #6005

@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-stale-stack-proofs-1790795466000 -> plan-stale-stack-proofs-1790795466000"
   plan_refs: [W1-T3306, W1-T4581, W1-T4902]
   files: [src/lib/sweep.ts, src/run-task.ts, test/a-red-proof-discrimination-check-reaches-proof-amendment.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-30 (fleet ledger): #8104 merged the read-model worker and views tests at 18:16Z. #8080 and #8088

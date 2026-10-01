@@ -82,6 +82,7 @@ export const PRODUCER_IDENTITIES: Readonly<Record<string, ProducerIdentity>> = O
   FIX: producer("fix", "Fix Rung"),
   FLEET: producer("fleet", "Fleet"),
   SERVE: producer("serve", "Serve"),
+  CONSOLE: producer("console", "Console Telemetry"),
   RELAY: producer("relay", "Relay"),
   BATCH: producer("batch", "Batch Approve"),
   CLI: producer("cli", "CLI"),

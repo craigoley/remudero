@@ -15,7 +15,7 @@
     - test/the-wipe-test-can-only-ask-about-learnings.test.ts
     - test/worker-peek.test.ts
     - test/live-write-guard.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED: core's ledger.2026-09-30T03-50-43-904Z.ndjson.gz contains five

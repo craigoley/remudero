@@ -16,7 +16,7 @@
     - deploy/install-host-units.sh
     - test/host-root-disk-janitor.test.ts
     - test/host-units-install.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-29 (read-only `ssh remudero cat ~/rmd-host-cleanup.sh` and `crontab -l`): the

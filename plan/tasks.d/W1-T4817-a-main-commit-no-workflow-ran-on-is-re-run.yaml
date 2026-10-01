@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-followups-1790712493000 -> plan-followups-1790712493000"
   plan_refs: [W1-T4809]
   files: [src/lib/main-run-gaps.ts, src/lib/sweep.ts, .github/workflows/ci.yml, .github/workflows/main-tripwire.yml, test/a-main-commit-no-workflow-ran-on-is-re-run.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-29: main commits 30f3c7b58 (#7823, 15:06) and 9b694d664 (15:24) have zero workflow runs of any

@@ -12,7 +12,7 @@
   origin: "operator ask 2026-09-30: is there any tool that reports EXISTING queued tasks whose every proof already passes at origin/main (W1-T3558 sat queued and dispatchable after its three unit test proofs resolved)"
   plan_refs: [W1-T3961, W1-T1053, W1-T2477, W1-T4111, W1-T4861, W1-T4904, W1-T3558]
   files: [src/run-task.ts, docs/cli-reference.md, test/proof-queue-audit-names-a-task-whose-proofs-pass.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 at origin/main 76c9b670d. THE DETECTOR EXISTS; THE GAP IS THAT NOTHING CALLS IT.

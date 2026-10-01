@@ -1,0 +1,87 @@
+- id: W1-T4943
+  title: "A RED proof-discrimination CHECK ON A TRAILERED PR WITH A NON-EMPTY DIFF IS ROUTED (#8177) TO A FIX WORKER THAT CAN NEVER CLEAR IT — the proof-amendment write it reaches is not called until CI is green (run-task.ts:11293 continues first), would be refused `review-not-success` on the seeded round (proof-amendment.ts:94), and would drift on a claim that is the proof string; probed on main, strike 1 is proof-discrimination and strike 2 is ci-log, zero proof_amendment rows"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "research 2026-09-30 (amendment-writer audit): the builder of #8177 reported three limits; reading the writer end to end shows the amendment is unreachable on this route, not merely refusable"
+  plan_refs: [W1-T4957, W1-T3390, W1-T3434, W1-T3306, W1-T4902]
+  files: [src/lib/sweep.ts, test/a-stale-proof-red-flags-the-plan-not-a-worker.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-09-30 at origin/main 1f6d904bb, by driving the shipped `runFixRung` with fakes (scratch test, deleted) and by calling the shipped pure
+    functions. #8177 (W1-T4957) sends a stale-proof red to the `proof-discrimination` fix mode. THE WRITER THAT MODE FEEDS NEVER RUNS ON THIS ROUTE.
+
+    (1) UNREACHABLE. `runFixRung` calls `dispatchProofAmendmentWrite` only after the strike's push has been followed by a GREEN CI wait
+    (src/run-task.ts:11498). A proposal-only worker does not move the head, the required `proof-discrimination` check stays red, and
+    `ciGateState(ci) !== "green"` at run-task.ts:11293 hits `continue` (run-task.ts:11390) first, setting `noReviewYet`. Probed with a red
+    `waitForCiGreen`: strike 1 logs `fix.dispatch mode=proof-discrimination` then `fix.ci_not_green`; strike 2 logs `fix.dispatch mode=ci-log`; no
+    `proof_amendment.requested` row exists. The second worker is exactly the ci-log worker #8177 set out to avoid. `proofDiscriminationNow`
+    (run-task.ts:10722) requires `!noReviewYet`, so the mode never returns.
+
+    (2) REFUSED IF REACHED. With a green wait the probe logs `proof_amendment.requested outcome=ineligible reason=review-not-success` on round 1.
+    `buildFixRungDispatchArgs` seeds `initialReview.state = "failure"` (run-task.ts:37785) and `proofAmendmentIneligibleReason` returns on
+    `pr.reviewState !== "success"` (src/lib/proof-amendment.ts:94). The capped-green route shares that seed, so W1-T3434's own writer is ineligible on round 1
+    there too; it reached `refused` only on round 2, where `runReview` had replaced the seed.
+
+    (3) CLAIM DRIFT. The gate's log carries no claim, so `proofDiscriminationEvidenceFromCheckLog` (src/lib/sweep.ts:7940) sets `claim = proof`. The writer
+    then calls `replaceProofScalar(text, claim, oldProof, newProof)`, whose nearest-preceding-`claim:` test (src/lib/proof-amendment.ts:266-277) cannot contain
+    the proof string: measured on the W1-T4957 shard, claim=proof string returns `undefined` (`shard-drifted`, proof-amendment.ts:443-445), the real claim returns text.
+
+    (4) A SUCCESS WOULD STILL DEBIT A STRIKE. `recordIdentity` logs the amendment as `fix.dispatch kind=proof_amendment` (src/run-task.ts:11989), and
+    `priorStrikesFor` counts every `fix.dispatch` row: measured 1 row -> 1, plus the identity row -> 2, which is `fixStrikeCap` 2, so the PR escalates as
+    "strikes exhausted" the pass after its amendment opens. That is a defect of the capped-green route as well and is NOT fixed here (see design (v)).
+
+    WHY NOT FIX THE WRITER. The writer's authority is a worker proposing a replacement `proof:` that the parent only checks for head-vs-base discrimination (passes at head,
+    fails at base, not the plan shard). It never checks that the proof still proves the CLAIM, so on this route it is the act Standing rule 15 forbids, editing a criterion
+    to match the diff: a stale proof is either work a merged parent already landed or a preservation invariant (#8099 dropped one by hand from W1-T4902 for exactly that
+    reason), and only an Architect can tell which. Re-classifying `kind: guard` is worse: `criterionFieldTampered` protects only claim/proof/satisfied_by
+    (src/lib/review.ts:7687), so a `kind:` edit is invisible to Rule 15. The lane that already does the safe thing is W1-T3390's `dispatchPlanOnlyRepair`
+    (src/lib/sweep.ts:3262): no worker, a plan-only PR that adds a YAML comment beside the stale proof and edits no claim/proof/satisfied_by line, bounded by
+    `MAX_PLAN_REPAIR_STRIKES` (2) and deduped on branch `plan-repair/<taskId>`. It is reached only from the capped-green route and flags only `proofs[0]`.
+
+    WHY TRAILERED ONLY. The gate resolves criteria from the PLAN at the PR head for a trailered PR and falls back to the body only when that is empty
+    (scripts/proof-discrimination-gate.mjs:36-40). For a PR with no task trailer the body IS the criteria, a ci-log worker can edit it, and the
+    proof-discrimination prompt tells that worker NOT to (src/lib/prompt-render.ts:734-740), so #8177 also regressed that shape.
+  design: |
+    (i) In runSweep's blocked-fixable arm (src/lib/sweep.ts, after the empty-diff close and before any worker claim), when `staleProofs` reads AND `pr.taskId` is set
+    AND the diff is non-empty or unobserved AND `deps.dispatchPlanOnlyRepair` is wired: dispatch `dispatchPlanOnlyRepair(pr, staleProofs)` under the same claim and
+    detach wrapper W1-T3390's branch uses, and do NOT call `deps.dispatchFix`. No worker, no strike. The empty-diff close keeps its place in front.
+    (ii) When `priorPlanRepairStrikesFromLedger(pr, ledgerLines)` has reached `MAX_PLAN_REPAIR_STRIKES`, or `dispatchPlanOnlyRepair` is not wired, escalate through the existing
+    `deps.escalate` with a reason naming the stale proofs; never fall through to a worker.
+    (iii) A PR with no `pr.taskId` keeps the ci-log evidence (`fixEvidence` without `proofDiscrimination`): `staleProofs` is read only when `pr.taskId` is set.
+    (iv) New exported pure helpers in src/lib/sweep.ts: `claimForProof(shardText, proof)` returns the `claim:` text of the unique criterion whose `proof:` line carries that proof
+    (undefined when absent or ambiguous), and `flagStaleProofs(shardText, proofs, marker)` applies `insertPlanRepairFlag` to EVERY stale proof, placing the resolved claim in each marker
+    and listing the Architect's options (drop a preservation criterion, precedent #8099; `satisfied_by` the merged stack parent; re-point the proof at a line the PR adds), and returns
+    undefined when any proof no longer appears. `dispatchPlanOnlyRepair` uses them in place of its `proofs[0]` read.
+    (v) NOT IN SCOPE, said plainly: the four writer defects above stay in the capped-green route and are a separate filing (call the writer before the green wait or eligibility by
+    evidence source; give the identity row its own step or exclude `kind: proof_amendment` from `fixLedgerRowsForHead`). No `kind: guard`, `satisfied_by` or drop is ever written by automation.
+    The FixMode prompt text ("The review was CAPPED") is correct for the capped route and is no longer reached by check-log evidence, so it is not edited.
+  acceptance:
+    - claim: "a stale-proof red on a trailered PR with a non-empty diff dispatches the plan-only flag and no worker"
+      proof: 'grep: test("W1-T4943: a stale-proof red on a trailered PR flags the plan and dispatches no worker" in test/a-stale-proof-red-flags-the-plan-not-a-worker.test.ts'
+    - claim: "with the plan-repair budget spent it escalates and still dispatches no worker"
+      proof: 'grep: test("W1-T4943: a stale-proof red with the plan-repair budget spent escalates and dispatches no worker" in test/a-stale-proof-red-flags-the-plan-not-a-worker.test.ts'
+    - claim: "a stale-proof red on a PR with no task trailer keeps the ci-log route"
+      proof: 'grep: test("W1-T4943: a stale-proof red on a PR with no task trailer keeps the ci-log route" in test/a-stale-proof-red-flags-the-plan-not-a-worker.test.ts'
+    - claim: "an empty diff is still closed as superseded before any flag is opened"
+      proof: 'grep: test("W1-T4943: an empty-diff stale-proof red is closed as superseded before any flag" in test/a-stale-proof-red-flags-the-plan-not-a-worker.test.ts'
+    - claim: "the flag marks every stale proof beside its resolved claim and refuses a drifted one"
+      proof: 'grep: test("W1-T4943: flagStaleProofs marks every stale proof beside its resolved claim and refuses a drifted one" in test/a-stale-proof-red-flags-the-plan-not-a-worker.test.ts'
+    - claim: "the claim resolver exists as an exported pure function"
+      proof: "grep: export function claimForProof in src/lib/sweep.ts"
+  falsifier: |
+    Remove the new arm and the first test sees `dispatchFix` called with `proofDiscrimination` evidence (the #8177 behaviour, a worker whose proposal is never applied). Let the arm fire
+    with no `pr.taskId` and the third test sees no ci-log dispatch. Keep the `proofs[0]`-only flag and the fifth test finds one unmarked proof. A test that only reddens on removal pins
+    that the arm exists, not what it decides: the second and third tests are the two directions.
+  note: |
+    RISK: high because it changes which actor spends on a red PR and writes a plan PR. The flag lane edits no claim/proof/satisfied_by line, so it needs no Rule 15 carve-out.
+    OVERLAP: W1-T4957 (merged) owns the evidence builder and the empty-diff close; this task narrows its routing and does not touch `proofDiscriminationEvidenceFromCheckLog`'s output shape.
+    A builder who finds the flag PR unreadable to the operator should widen the marker text, never the authority. NOT MEASURED: the fleet ledger is not on disk in the research session,
+    so how many stale-proof reds reached a worker in production is unknown; the routing facts above were probed on main with fakes.

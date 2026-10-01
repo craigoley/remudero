@@ -89,7 +89,7 @@ export interface BodyDefect {
 }
 
 export interface BodyRepairDeps {
-  /** The PR's head ref, e.g. `run-W1-T2480-1788150533485`. A trailer is derived from it. */
+  /** The PR's head ref, e.g. `run-W1-T<n>-<epochMs>`. A trailer is derived from it. */
   headRef?: string;
   /**
    * Runs a `grep:` proof and reports how many lines it matched. INJECTED, so this module stays
