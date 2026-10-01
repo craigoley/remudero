@@ -901,7 +901,7 @@ import {
   MAX_RETAINED_LINES_PER_STEP,
 } from "./lib/ledger.js";
 import type { LedgerLine } from "./lib/ledger.js";
-import { clockFromDateFn, systemClock, type Clock } from "./lib/clock.js";
+import { clockFromDateFn, clockFromMillisFn, fixedClock, systemClock, type Clock } from "./lib/clock.js";
 import {
   VERIFY_HUMAN_JUDGED_STEP,
   judgeVerifyHumanShard,
@@ -1359,6 +1359,8 @@ import {
   parseClaimAnchorMessage,
   pidIsPresent,
   readNamespaceBootMs,
+  findClaimMintRow,
+  releaseReplacedContainerClaims,
   type DispatchClaimReserver,
 } from "./lib/dispatch-claim.js";
 import {
@@ -32885,6 +32887,7 @@ export async function daemonCommand(
     processKill?: (pid: number, signal: NodeJS.Signals) => boolean;
     /** Best-effort boot projection for provider routing; production writes one bounded state file. */
     writeProviderRoutingStatus?: (root: string, input: ProviderRoutingWriteInput) => void;
+    bootClaimReserver?: DispatchClaimReserver;
     /** Injectable clock for the daily-cost consultation. Production keeps the real clock. */
     now?: () => number;
     /** W1-T3401: injectable residual escalation judge for `escalateBlock` below (the SAME seam
@@ -33267,6 +33270,20 @@ export async function daemonCommand(
       return 1;
     }
     throw e;
+  }
+  const bootClaimLock = fixedClock(clockFromMillisFn(deps.now).now());
+  try {
+    const swept = releaseReplacedContainerClaims(deps.bootClaimReserver ?? dispatchClaimReserverFor(join(config.root, "repos", target.repo)), {
+      localHost: hostname(),
+      lockHeldSinceMs: bootClaimLock.now(),
+      lockHeldSinceIso: bootClaimLock.iso(),
+      findMintRow: (taskId, anchor) => findClaimMintRow(dirname(ledgerPath), taskId, anchor),
+    });
+    for (const claim of swept) {
+      log("dispatch.claim_released", { ref: dispatchClaimRef(claim.taskId), surface: "boot-sweep", arm: claim.arm, release: claim.release, dropped: claim.dropped, reason: claim.reason });
+    }
+  } catch (error) {
+    log("dispatch.claim_sweep_failed", { surface: "boot-sweep", error: String((error as Error)?.message ?? error).slice(0, 300) });
   }
   // Publish only after this process owns the shared daemon/drain lock. Dry-run returned above,
   // and a refused second daemon returned from the catch, so neither can replace material state.
