@@ -10216,10 +10216,7 @@
   origin: architect
   plan_refs: ["§2", "§4B"]
   files: [src/run-task.ts, src/lib/self-sync.ts]
-  status: blocked
-  retirement: closed
-  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
-  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
+  status: queued
   attempts: 0
   note: "Operator-requested verbatim 2026-07-16. Completes the W1-T60 pair: plan freshness (shipped) +
     code freshness (this). The refuse path exists so rmd never destroys local state to help. RISK raised
@@ -10903,10 +10900,7 @@
   origin: architect
   plan_refs: ["P22", "§3"]
   files: [src/lib/sweep.ts, src/run-task.ts]
-  status: blocked
-  retirement: closed
-  # CLOSED 2026-10-01 BY OPERATOR RULING (DECISIONS.md, "bulk close of legacy queued records"): a merged crediting PR
-  # exists, nothing remains to build, acceptance is preserved and NOT re-proved here.
+  status: queued
   attempts: 0
   note: "CORRECTED 2026-07-17: the original note claimed rmd fix (W1-T95) bridges blocked_ci — FALSIFIED
     live the same day, verbatim: 'rmd fix — PR #170 is not fixable: ... (no block evidence to drive the
