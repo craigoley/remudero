@@ -1,0 +1,47 @@
+- id: W1-T5127
+  title: "A RECYCLE DRAIN WAITS ON A RUN THAT IS ONLY WAITING ON CI — recycle-container.sh engages PAUSE (no new dispatch) and then waits, bounded, for every state/inflight lock to clear; a build run polling GitHub CI holds its lock for the whole CI cycle and every fix round, so the whole fleet admits nothing meanwhile (2026-10-01 11:05-12:20+: W1-T5004's run, 3 h old, five fix rounds, held the drain while the fleet sat paused)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 12.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-10-01: follow up on everything (clean-window measurement found the fleet paused)"
+  note: "reservation hand-off: plan-recycle-drain-yield-1790857309000 -> plan-recycle-drain-yield-1790857309000"
+  plan_refs: [W1-T3793, W1-T5037, W1-T4945, W1-T2681]
+  files: [src/run-task.ts, test/a-recycle-drain-takes-a-ci-wait-at-its-next-poll.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-01 (core host and ledger union): the image-drift recycle logged deploy.not_idle every 5 min from
+    11:32 (workers 0, inflight_locks 2, worktree_locks 1). recycle-container.sh had engaged state/PAUSE (requestedAt
+    11:59:34, and an earlier pause held admission from 11:05: daemon.admission_held control PAUSE on the full-sweep
+    and lane-refill surfaces). The locks were W1-T5004's run (started 09:20) and its fix branch: PR #8339, five
+    commits, last 11:51, CI in progress since 11:53, coverage-ratchet running since 12:12. The run was only polling
+    CI (ci.polling every ~40 s), which is work the sweep resumes after any restart. Over 2026-09-26..10-01: 34
+    deploy.not_idle samples (about 170 min of drain wait), 31 of them with an inflight lock held, and 4
+    deploy.idle_ceiling_forced. W1-T3793 already lets a run hand off its external CI wait when the daemon's code is
+    stale (run.freshness_handoff); W1-T5037 narrowed that to restart-worthy advances. A pending recycle IS a restart,
+    but the wait does not know about it.
+  design: |
+    No new bound, no new refusal: extend the existing external-wait handoff.
+    1. The daemon-built `externalWaitFreshness` closure (via ciWaitFreshness) also hands off when the fleet PAUSE is
+       engaged for a container recycle. The PAUSE file's reason names deploy/recycle-container.sh; read it through
+       the existing fleet-control reader, never a second parser. The run ends `handed_off` with reason
+       recycle_yield at its next CI poll, releases its inflight lock as a handoff already does, and the sweep resumes
+       the PR after the new container boots.
+    2. Only a run in an EXTERNAL wait yields (the same boundary W1-T3793 uses). A run whose worker is still working
+       is never interrupted; the recycle's bounded wait still covers it.
+    3. An operator PAUSE that is not a recycle does not trigger the yield: an operator hold means hold, not hand off.
+    4. Ledger `run.freshness_handoff` with `trigger: "recycle"` so the drain cost is measurable.
+    MEASURE AFTER MERGE: deploy.not_idle samples with inflight_locks>0 per recycle, and deploy.idle_ceiling_forced.
+  acceptance:
+    - claim: "a run waiting on CI hands off at its next poll when a recycle pause is engaged"
+      proof: 'grep: test("W1-T5127: a run waiting on CI hands off at its next poll when a recycle pause is engaged" in test/a-recycle-drain-takes-a-ci-wait-at-its-next-poll.test.ts'
+    - claim: "an operator pause that is not a recycle does not hand the CI wait off"
+      proof: 'grep: test("W1-T5127: an operator pause that is not a recycle does not hand the CI wait off" in test/a-recycle-drain-takes-a-ci-wait-at-its-next-poll.test.ts'
+  falsifier: |
+    Drop the recycle arm from the closure and the first test sees the run keep polling under the recycle pause.
