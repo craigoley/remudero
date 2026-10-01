@@ -47,11 +47,25 @@ export interface PlanInventory {
  *  different subjects (one ci-learning lesson per gate) score 0.8 against each other. */
 export const DUPLICATE_TITLE_SIMILARITY = 1;
 
+/** A merge may reach main before the daemon refreshes merge-credit.json. A trailer in reachable
+ * main history is a reason to HOLD a retirement proposal, not to grant build credit: the durable
+ * credit resolver also checks PR scope and the independent head-branch path. */
+export function mainTrailerTaskIds(repoRoot: string): Set<string> {
+  const result = spawnSync("git", ["-C", repoRoot, "log", "--format=%B", "--grep=^Remudero-Task:", "HEAD"], {
+    encoding: "utf8", maxBuffer: 32 * 1024 * 1024,
+  });
+  if (result.status !== 0 || result.error) {
+    throw new Error(`plan gardener: cannot read task trailers from main history: ${result.error?.message ?? String(result.stderr ?? "").trim()}`);
+  }
+  return new Set([...result.stdout.matchAll(/^Remudero-Task:[ \t]+([A-Za-z0-9][A-Za-z0-9-]*)[ \t]*$/gm)].map((m) => m[1]!));
+}
+
 export function planInventory(repoRoot: string, stateDir: string): PlanInventory {
   const layout = resolveRepoLayout(repoRoot);
   const plan = loadPlan(layout.planMonolith);
   const credited = loadCreditStore(join(stateDir, "merge-credit.json"));
-  const open = plan.tasks.filter((t) => t.status === "queued" && !t.retirement && !credited[t.id]);
+  const inMain = mainTrailerTaskIds(repoRoot);
+  const open = plan.tasks.filter((t) => t.status === "queued" && !t.retirement && !credited[t.id] && !inMain.has(t.id));
   return { open, all: plan.tasks, shards: planShards(repoRoot) };
 }
 

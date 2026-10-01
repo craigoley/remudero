@@ -173,17 +173,6 @@ export function creditTransitionLedgerLine(
   return line;
 }
 
-/** Append one credit-state transition row, and none for unknown or unchanged readings. */
-export function appendCreditStateTransition(
-  ledgerPath: string,
-  lines: ReadonlyArray<Record<string, unknown>>,
-  reading: CreditReading,
-  writeLedger: typeof appendLedger = appendLedger,
-): void {
-  const line = creditTransitionLedgerLine(lines, reading);
-  if (line) writeLedger(ledgerPath, line);
-}
-
 /** Why the usage half of the panel is UNKNOWN, when it is. Absent ⇒ the reading is good. */
 export type UsageUnknownReason = "unreadable" | "no-cache" | "account-mismatch" | "too-old";
 
@@ -662,8 +651,24 @@ export interface AccountUsageDeps {
   writeLedger?: typeof appendLedger;
 }
 
+function readMergedAccount(deps: AccountUsageDeps): AccountUsageInput {
+  const readAccount = deps.readAccount ?? (() => readAccountUsageFile(deps.accountFilePath));
+  // See AccountUsageProjection's doc. `deps.root` unset ⇒ no projection is looked for.
+  const readProjection =
+    deps.readUsageProjection ??
+    (() => (deps.root ? readAccountUsageProjection(accountUsageProjectionPath(deps.root)) : undefined));
+  return mergeAccountUsageProjection(readAccount(), readProjection());
+}
+
+/** The credit-state edge, ledgered once by serve's slow lane with or without a reader (P4-T14); returns the appended line. */
+export function recordCreditStateEdge(deps: AccountUsageDeps): LedgerLine | undefined {
+  const line = creditTransitionLedgerLine((deps.readLedger ?? readLedgerLines)(deps.ledgerPath), readCreditState(readMergedAccount(deps)));
+  if (line) (deps.writeLedger ?? appendLedger)(deps.ledgerPath, line);
+  return line;
+}
+
 /** `GET /v1/account-usage` — read-scoped, computed fresh per request, no cache or memoization
- *  (see this module's header for why). */
+ *  (see this module's header for why); it writes nothing. */
 export function buildAccountUsageRoute(deps: AccountUsageDeps): Route {
   return {
     method: "GET",
@@ -672,17 +677,9 @@ export function buildAccountUsageRoute(deps: AccountUsageDeps): Route {
     handler: (_req, res) => {
       const now = deps.now ?? Date.now;
       const readLedger = deps.readLedger ?? readLedgerLines;
-      const readAccount = deps.readAccount ?? (() => readAccountUsageFile(deps.accountFilePath));
-      // See AccountUsageProjection's doc. `deps.root` unset ⇒ no projection is looked for.
-      const readProjection =
-        deps.readUsageProjection ??
-        (() => (deps.root ? readAccountUsageProjection(accountUsageProjectionPath(deps.root)) : undefined));
       const policy = deps.policy ?? loadDefaultPolicy();
       const resolveCeiling = deps.resolveCeiling ?? (() => resolveDailyCostCeiling(deps.root ?? process.cwd(), policy));
-      const account = mergeAccountUsageProjection(readAccount(), readProjection());
-      const lines = readLedger(deps.ledgerPath);
-      appendCreditStateTransition(deps.ledgerPath, lines, readCreditState(account), deps.writeLedger ?? appendLedger);
-      sendJson(res, 200, deriveAccountUsage(account, lines, now(), resolveCeiling()));
+      sendJson(res, 200, deriveAccountUsage(readMergedAccount(deps), readLedger(deps.ledgerPath), now(), resolveCeiling()));
     },
   };
 }

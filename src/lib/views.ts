@@ -24,11 +24,30 @@ import { systemClock, type Clock } from "./clock.js";
 import { ifNoneMatchHits } from "./console-snapshot-cache.js";
 import type { Route } from "./service.js";
 
+/** What a view source is (the `<kind>:<instance>` prefix of its name); its budget is in view-freshness.ts. */
+export type SourceKind =
+  | "ledger" | "read-model" | "github" | "plan" | "host-probe" | "analytics" | "inbox-store" | "feedback-store"
+  | "question-store" | "incidents-store" | "git" | "account" | "registry" | "repositories";
+
+/** Why a view source is not fresh. */
+export type SourcePhase = "warming" | "catching_up" | "refreshing" | "behind" | "failed" | "elsewhere";
+
+/** One input a view was computed from. `reason` is display prose only; the structured fields say why (view-freshness.ts). */
 export interface ViewSource {
   name: string;
   asOf: string | null;
   state: "fresh" | "stale" | "unavailable";
   reason?: string;
+  kind?: SourceKind;
+  instance?: string;
+  /** Why the source is not fresh. */
+  phase?: SourcePhase;
+  /** How far behind it is, measured when it was judged. */
+  lagMs?: number;
+  /** How long until it is caught up, when that is known. */
+  etaMs?: number;
+  /** The bound it is judged against, so a client can age it between events. */
+  budgetMs?: number;
 }
 
 export interface ViewDefinition<T = unknown> {
@@ -81,6 +100,25 @@ const NOT_SERVED = { serve: "view_not_ready", shadow: "view_shadow", off: "view_
 /** One read-scoped route per view, at `/v1/views/<name>`. */
 export function buildViewRoutes(views: readonly ViewDefinition[], clock: Clock = systemClock): Route[] {
   return buildReadModelViewRoutes({ legacy: views, clock });
+}
+
+/** A paged view's items stay under this many JSON bytes per body, so the envelope, counts and sources keep it under 64 KiB (design D9). */
+export const VIEW_PAGE_ITEM_BYTES = 56 * 1024;
+
+/** `items` split into pages of at most `maxBytes` of JSON each, in order; an item larger than that is a page by itself. Always one page at least. */
+export function pagesWithin<T>(items: readonly T[], maxBytes: number = VIEW_PAGE_ITEM_BYTES): T[][] {
+  const pages: T[][] = [[]];
+  let bytes = 0;
+  for (const item of items) {
+    const size = Buffer.byteLength(JSON.stringify(item)) + 1;
+    if (bytes + size > maxBytes && pages.at(-1)!.length > 0) {
+      pages.push([]);
+      bytes = 0;
+    }
+    pages.at(-1)!.push(item);
+    bytes += size;
+  }
+  return pages;
 }
 
 /** A read-model body's key: the request's query sorted by name, so parameter order never splits a row. */

@@ -24,7 +24,7 @@ over one SSE stream (below); the wire shape below is the contract those phases k
 | `version` | the schema version of `data`. An added optional field keeps it. Anything a consumer could misread bumps it, and a consumer checks it before trusting `data`. |
 | `generatedAt` | when this body was computed. |
 | `asOf` | the **oldest** input's as-of time: how old the facts are, which is not the same as how old the response is. |
-| `stale` | any source is `stale` or `unavailable`; `sources[].reason` says why. |
+| `stale` | any source is `stale` or `unavailable`; `sources[].phase` says why (see Source freshness). |
 | `ETag` | weak, `W/"<view>.<version>.<hash of {version, stale, data}>"`. It ignores the times, so an unchanged view answers a matching `If-None-Match` with **304** and no body, even after a recompute. `Cache-Control: no-cache`. |
 
 **No clock in `data`.** The ETag is the view's version on the push stream, so `data` carries no
@@ -32,6 +32,38 @@ clock stamp and no value computed relative to "now" (an age, an elapsed time). T
 envelope (`generatedAt`, `asOf`, `sources[].asOf`); a consumer derives a duration from an absolute
 time in `data` that moves only when its event does (a run's `startedAt`). Otherwise every
 re-materialize and every restart would look like a change to every open console.
+
+## Source freshness (Phase 4)
+
+Each `sources[]` entry carries structured fields beside `name`, `asOf`, `state` and `reason` (all optional,
+so a reader of the four keeps working and no view's version moved; `src/lib/view-freshness.ts`):
+
+| field | meaning |
+|---|---|
+| `kind` | `ledger`, `github`, `plan`, `host-probe`, `analytics`, `inbox-store`, `repositories`, ... (the name's prefix) |
+| `instance` | the instance the source belongs to |
+| `phase` | why it is not fresh: `warming`, `catching_up`, `refreshing`, `behind`, `failed` or `elsewhere` |
+| `lagMs` | how far behind it is, measured when serve judged it for this response |
+| `etaMs` | how long until it is caught up, when that is known (a projector catching up) |
+| `budgetMs` | the bound it is judged against, so a client can age it between events |
+
+`reason` is display prose only. **Never parse it**: a console reading "catching up: ... done in about S s"
+with a regex judged core's normal post-boot catch-up stale. Read `phase` and `etaMs`.
+
+Serve judges **every** source at request time (and in the push stream's 1 s judge sweep) against one
+budget table. A source its producer called fresh whose `asOf` is older than its budget reads `stale`,
+phase `behind`, and changes the ETag. The worker posts each source's newest reading whenever it changes,
+so a body whose data did not move (and so was not re-posted) still ages from its newest reading.
+
+| kind | `asOf` | budget |
+|---|---|---|
+| `ledger` | the newest applied row | 10 s since the projector's last good tick. A catch-up is `catching_up` with `etaMs`; a lease held by another serve is `elsewhere`; a failing tick is `failed`; a body committed before serve started is `warming`. |
+| `github` | when the open-PR snapshot was saved | 180 s (three missed one-minute saves) |
+| `plan` | when the checkout was checked, or the oldest plan commit on origin/main it lacks | 120 s behind origin/main. Before, it was always `fresh`. A checkout that cannot be compared is `unavailable`. |
+| `host-probe` | the probe's sample time | 180 s (three missed 60 s probes). Before, it was always `fresh`. |
+| `analytics`, `inbox-store` | the snapshot's own time | their producers' bounds (nav-badge) |
+
+A kind with no budget row is judged only by the state its producer gave it.
 
 An input that is cold makes its value **absent with a reason**, never a zero. A view's query
 parameters narrow it; an unusable one answers 400 `invalid_request` with a `detail`.
@@ -64,7 +96,11 @@ reads no file and no SQLite.
     response, a sample (at most one a minute per key) goes to the worker's comparator
     (`src/lib/view-shadow.ts`), which diffs the view body against the legacy side: serve's rendered
     legacy body for nav-badge, and for now and repositories the core computation the worker's legacy
-    providers produce. The HTTP answer being a 404 does not stop the comparison.
+    providers produce. The HTTP answer being a 404 does not stop the comparison. Serve also DRIVES
+    every shadowed key through the same sampler on its 5 s switch recheck, so each key is compared about
+    once a minute with no console traffic; a driven sample counts as a sample, never a request.
+    Readiness (`data.shadow` in `/v1/views/read-model`) is read from the persisted `view_shadow`
+    counters, so it shows from boot, not only after this process compared something.
   - `serve`: the read-model body answers. A view with no body yet answers from its Phase 0
     computation, or **404 `view_not_ready`**.
 - **Worker diagnostics.** The worker ledgers `read_model.lease_acquired` and `read_model.lease_elsewhere`
@@ -157,7 +193,9 @@ writer lease, and how many future-dated rows were quarantined.
 
 `data.inbox`: `{ ready?, needsYou?, fleet?, reason? }`.
 - These are open inbox items by who must act.
-- The source is the classification that `GET /v1/inbox` writes (`state/inbox-classified.json`).
+- The source is `state/inbox-classified.json`, which serve's slow lane (the read-model worker's second thread,
+  `src/lib/read-model-slow-lane.ts`) rewrites every minute with or without a reader: on a change, and at least every
+  5 min. `GET /v1/inbox` writes nothing. The daemon's fleet lane files from the same file.
 
 ## `repositories` (version 2)
 
@@ -181,7 +219,34 @@ or `view_shadow` under `shadow`) and the console reads each instance's `repos/su
   transport failure.
 - `data.projectsReason` is present when the registry could not be read.
 
-## `now` (version 2)
+## `inbox` (version 1)
+
+`GET /v1/views/inbox?section=<s>[&cursor=<n>]`: one page of one inbox section, materialized by serve's
+slow lane (the read-model worker's second thread, `src/lib/read-model-slow-lane.ts`) every minute with
+or without a reader, from the same classification pass that writes `state/inbox-classified.json`. A read
+answers from memory. Schema: `InboxView` in `openapi/daemon.yaml`.
+- `section` is required: `needsYou`, `ready`, `drafting`, `notReady`, `declined` or `fleet`. A request
+  without it answers 400 `invalid_request`.
+- `data`: `{ section, items[], counts, page{ index, of, total, next? } }`. Each item is GET /v1/inbox's
+  item for that lane; a `needsYou` item adds its `lane`. `counts` is GET /v1/inbox's counts, on every page.
+- Pages: every body stays under 64 KiB. The first page has no `cursor`; `page.next` is the next page's
+  `cursor`. A page that empties is dropped from memory and the store, so it is never served stale.
+- Source: `inbox-store:core`, `asOf` the pass's time, budget 180 s (three missed passes).
+- Dark until `switches.json` sets `inbox` to `serve`. While dark (or before its first body) it answers from
+  GET /v1/inbox's last classification in this serve and never classifies on a read: 400 when there is none.
+  Under `shadow` that is the comparator's legacy side.
+
+## `feedback` (version 1)
+
+`GET /v1/views/feedback[?status=<s>][&cursor=<n>]`: one page of GET /v1/feedback's entries, all of them
+(no `status`) or one status, materialized by the slow lane on the same cadence. Schema: `FeedbackView`.
+- `data`: `{ status, entries[], counts{ total, byStatus }, page }`. Pages as for `inbox`.
+- An entry whose proposal PR merged reads `accepted`, as GET /v1/feedback's body does after its write. The
+  view only projects it: it writes nothing. A PR the gateway could not read marks the entry `unverified`.
+- Source: `feedback-store:core`, budget 180 s.
+- Dark until `switches.json` sets `feedback` to `serve`; while dark it is computed inline from the entries.
+
+## `now` (version 3)
 
 `GET /v1/views/now?instance=<id>`: everything the console's /now renders for one instance. Schema:
 `NowView` in `openapi/daemon.yaml`.
@@ -193,7 +258,9 @@ or `view_shadow` under `shadow`) and the console reads each instance's `repos/su
 
 `data`: `{ instance, board{ counts, spendTodayUsd, taskProjection, tasks[], groups{ running,
 needsYou, blocked, queued } }, prQueue, actions[], recent{ entries[], mergedToday{ count, day } }, health{
-diskFreeBytes?, rateLimitRemaining?, daemon{ state, at?, reason? }, reasons? }, questions }`.
+diskFreeBytes?, rateLimitRemaining?, daemon{ state, at?, reason? }, reasons? }, decisions[], decisionsMore?, decisionsReasons? }`.
+- Version 3 (P4-T08) replaced `questions` (`{ count }` or `{ reason }`) with `decisions[]`, so the console answers in
+  place. A consumer checks `version === 3`; one release reads both 2 and 3.
 - Version 2 (P2-BUILD-B) removed every clock value from `data`: `board.generated_at` (use the envelope's
   `generatedAt`), `health.sampledAt` (the `host-probe:<i>` source's `asOf`), `health.lastPollAgeMs` and
   `tasks[].elapsedMs` (derive the running time from `startedAt`). There is no v1 body; a consumer checks
@@ -208,11 +275,63 @@ diskFreeBytes?, rateLimitRemaining?, daemon{ state, at?, reason? }, reasons? }, 
 - `groups` is the console's `groupBoard` as ordered id lists.
 - `actions[].strike` is `{ n, of }`, parsed once from the sweep's reason.
 - `health` is the selected instance's own host probe. A field it could not read is absent and named in `health.reasons`.
-- `questions` is `{ count }` for core and `{ reason }` for any other instance.
+- `decisions[]` is every open thing the operator answers (`src/lib/now-decisions.ts`), newest first, at most 50
+  (`decisionsMore` counts the rest): `{ id, kind, instance, taskId?, title, prompt, options?, currentAssumption?,
+  impactIfWrong?, askedAt?, answer{ method, path, tier, fields, input } }`.
+
+  | kind | source | `answer.path` (tier) |
+  |---|---|---|
+  | `grill` | core's feedback entries parked `grilling` | `POST /v1/feedback` with `replyTo` (low) |
+  | `task_question` | core's `plan/questions.ndjson`: a QUESTION on an open task with no later answer line or `panel.question_answered` fact | `POST /v1/questions/answer` (low) |
+  | `manual_approval` | an open escalation of class MANUAL on the instance's board | `POST /v1/manual/approve` (high: the console runs the confirm nonce) |
+  | `escalation` | any other open escalation with an issue | `POST /v1/escalation/mark-handled` with a `disposition` from `options` (low) |
+
+  An answer re-materializes the body at once: a `panel.question_answered` row moves the generation, and a
+  reply or a store append moves core's feedback dir or question store, which the view fingerprints. The
+  decision then leaves `decisions` and the ETag moves; the clock alone never moves it. An escalation's reply
+  text is not offered as an answer: `/v1/escalation/reply` steers nothing yet (W1-T4471).
+
+  Each escalation is answered on its OWN instance. Core's decisions name the unprefixed routes above; another
+  instance's name its mount, `/v1/i/<instance>/manual/approve` or `/v1/i/<instance>/escalation/mark-handled`.
+  That route closes the issue and ledgers into the instance's own state, and the decision leaves that
+  instance's body once its GitHub snapshot reads the issue closed.
+- `decisionsReasons` names a source not read for this instance, by kind: grill and task questions live in core.
 - Under `shadow`, the comparator (`src/lib/view-shadow.ts`) diffs a sampled body against `/now`'s legacy
   sources. Those are GET /v1/status's board and PR queue over the instance's live file only, plus a fresh
   host probe of that instance, computed in the worker (`createNowView`'s `legacy`).
 - Probe gauges come from the view whenever both probes read them, so two samples moments apart are not a diff.
+
+## `instances` (version 1)
+
+`GET /v1/views/instances`: one instance list, saying what this serve actually serves (arch Phase 4 §4,
+W1-T5056, `src/lib/instances-view.ts`). Schema: `InstancesView` in `openapi/daemon.yaml`. Dark until
+`switches.json` sets `instances` to `serve`; until then it answers 404 (`view_disabled`, or `view_shadow`
+under `shadow`) and the console reads `/v1/registry` as before.
+
+`data.instances[]`: `{ id, registered, project?, repo?, mode?, prefix, served, liveness{ state, since? },
+readModel{ lease }, capabilities{ views[], writes[], coreOnly? } }`, one per instance any list names: the repo
+registry's live rows in file order, then any instance the worker projects that no row names, then the host copy's extra names.
+- `served` is true when the read-model worker projects the instance and its state dir is mounted in this
+  serve. A registered instance with `served: false` needs serve recreated to mount it.
+- `liveness.state` is a band over the newest projected `daemon.*` row: `down` once it is older than the
+  fleet's stale-heartbeat bound or a quiet-mode pulse's, whichever is longer; `unknown` before any row.
+  `since` is that row's own time, present while down, so the ETag moves only when the band does. The
+  gateway's liveness watch stays the escalating judge.
+- `capabilities.views` and `writes` are what serve answers for the instance (writes under its `prefix`);
+  `coreOnly` (on core) names the routes only core answers, for every instance.
+
+`data.hostRegistry`: `in_sync | drifted | unreadable | malformed`, as `/v1/registry`. `data.drift` (present
+when any list disagrees): `{ hostOnly[], repoOnly[], unmounted[], unregistered[] }`. `data.registryError` is
+the repo registry's refusal code when it could not be read.
+
+Sources: `registry:repo` (the file's mtime as `asOf`; `unavailable` with the reason when it cannot be read)
+and `ledger:<instance>` per projected instance.
+
+`GET /v1/registry` answers as a projection of this body (`registryFromInstances`) while the view is
+`serve`, with the same wire shape and no file read; otherwise it keeps its own computation, which is
+also the view's shadow side. The console's `RMD_CONTROL_REPO_INSTANCES` and
+`RMD_CONTROL_ANALYTICS_INSTANCES` retire only after the `agent`, `analytics` and `usage` views fold
+every instance in core (CONSOLE-T102).
 
 ## Console latency: `POST /v1/console/telemetry` (Phase 2)
 
