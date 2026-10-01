@@ -1,0 +1,48 @@
+- id: W1-T5109
+  title: "THE LIFETIME-PRESSURE JUDGE RE-JUDGES AN UNCHANGED TASK — routeAdaptiveLifetimePressure keys each verdict on `last=<step>:<verdict>` of the task's newest ledger row, including its own verify_human.judged row and routine sweep/dispatch telemetry, so 163 judgments in ~3 days (up to 10 per task) re-asked identical evidence and flipped between automate and needs_operator"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 10.00
+  risk: medium
+  origin: "operator session 2026-10-01: why released tasks never re-dispatch (investigation)"
+  note: "reservation hand-off: plan-lifetime-judge-churn-1790850943000 -> plan-lifetime-judge-churn-1790850943000"
+  plan_refs: [W1-T4025, W1-T3921, W1-T4597]
+  files: [src/run-task.ts, test/the-lifetime-judge-asks-once-per-changed-evidence.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-09-28..10-01 (core ledger union): 163 verify_human.judged rows carry an adaptive-lifetime
+    observed_state, over 53 tasks: W1-T4266 10 times, W1-T4686 10, W1-T4627 8, and W1-T3676, W1-T3765, W1-T4481 and
+    W1-T4769 6 each. The observed_state suffix changes with whatever row the task last produced:
+    `last=managed_checkout.refresh_refused`, `last=sweep.disposed`, `last=dispatch.skipped`,
+    `last=run.running_long`, `last=dispatch.claim_released`, and `last=verify_human.judged`, which is the judge's
+    own previous verdict. So priorVerifyHumanVerdicts never matches, and the same evidence is judged again. Verdicts
+    flip on unchanged facts: W1-T3760 needs_operator, then automate, then needs_operator within 3.5 h; W1-T3765
+    automate, then needs_operator, then automate.
+    Context, measured in the same pass: the lifetime count is telemetry (drain.ts isDispatchEligible logs
+    dispatch.lifetime_pressure but never refuses), and this route passes no `release` hook. So a verdict changes no
+    dispatch. Its only effects are judge spawns and inbox proposals, which stageInboxProposalOnce dedupes by id.
+    Released tasks that "never re-dispatch" were waiting on queue order (absent priority sorts last), not on this
+    route.
+    Judge-quality note: W1-T4266's needs_operator reasons describe the FEATURE's runtime operator confirmation
+    (flipping a shadow instance live), not a build-time operator need.
+  design: |
+    No new refusal, no new bound.
+    1. Key a lifetime-route judgment on the evidence that can change the answer: attributable dispatches, capacity
+       refusals, open-PR evidence, merge evidence, and the LAST TERMINAL VERDICT (the newest `verdict` row). Never
+       the newest arbitrary row. verify_human.* rows and dispatch telemetry never enter the key.
+    2. An unchanged key reuses the prior verdict (priorVerifyHumanVerdicts), so the judge is asked again only when
+       new evidence exists.
+    3. The shard handed to the judge states that the question is whether BUILDING the task needs the operator, not
+       whether the feature asks an operator at runtime.
+  acceptance:
+    - claim: "an unchanged task is judged once however many telemetry rows it accrues"
+      proof: 'grep: test("W1-T5109: an unchanged task is judged once however many telemetry rows it accrues" in test/the-lifetime-judge-asks-once-per-changed-evidence.test.ts'
+    - claim: "a new terminal verdict re-opens the judgment"
+      proof: 'grep: test("W1-T5109: a new terminal verdict re-opens the judgment" in test/the-lifetime-judge-asks-once-per-changed-evidence.test.ts'
+  falsifier: |
+    Key on the newest arbitrary row again and the first test sees a second judge spawn after a sweep.disposed row.
