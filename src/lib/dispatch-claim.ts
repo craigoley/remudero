@@ -406,8 +406,10 @@ export function findClaimMintRow(
     const text = (file.gzip ? fs.gunzipSync(raw) : raw).toString("utf8");
     for (const line of text.split("\n")) {
       if (!line.includes(ref) || !line.includes("dispatch.claim")) continue;
-      const row = parseLedgerRow(line);
-      if (row?.step !== "dispatch.claim" || row.ref !== ref || row.outcome !== "created") continue;
+      const parsed = parseLedgerRow(line);
+      if (parsed.kind !== "row") continue;
+      const row = parsed.row;
+      if (row.step !== "dispatch.claim" || row.ref !== ref || row.outcome !== "created") continue;
       if (typeof row.ts !== "string" || row.ts < anchor.mintedAtIso || row.host !== anchor.host) continue;
       return { host: String(row.host), actor: String(row.actor ?? "unknown"), ts: row.ts, source: file.name };
     }
@@ -415,12 +417,12 @@ export function findClaimMintRow(
   return undefined;
 }
 
-function parseLedgerRow(line: string): Record<string, unknown> | undefined {
+function parseLedgerRow(line: string): { kind: "row"; row: Record<string, unknown> } | { kind: "torn" | "not-an-object" } {
   try {
     const row: unknown = JSON.parse(line);
-    return row !== null && typeof row === "object" ? (row as Record<string, unknown>) : undefined;
+    return row !== null && typeof row === "object" ? { kind: "row", row: row as Record<string, unknown> } : { kind: "not-an-object" };
   } catch {
-    return undefined;
+    return { kind: "torn" };
   }
 }
 
