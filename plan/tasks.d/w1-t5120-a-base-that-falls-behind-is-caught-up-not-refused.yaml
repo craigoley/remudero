@@ -12,7 +12,7 @@
   note: "reservation hand-off: plan-objstore-and-stale-base-1790853121000 -> plan-objstore-and-stale-base-1790853121000"
   plan_refs: [W1-T405, W1-T2621, W1-T5119]
   files: [src/lib/worker.ts, test/a-base-that-falls-behind-is-caught-up-not-refused.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED (core ledger 2026-09-28..10-01): 10 runs logged worktree.stale_base and ended `failed` before any work

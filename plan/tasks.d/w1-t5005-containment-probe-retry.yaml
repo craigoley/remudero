@@ -12,7 +12,7 @@
   note: "reservation hand-off: plan-containment-probe-retry-1790810803000 -> plan-containment-probe-retry-1790810803000"
   plan_refs: [W1-T2201, W1-T1281, W1-T4597, W1-T4660]
   files: [src/lib/containment.ts, test/an-unproven-containment-probe-is-asked-once-more.test.ts, test/containment.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-28..30 (core ledger, live + rotations): 7 blocked_containment verdicts, every one with the
