@@ -296,7 +296,7 @@ export function evaluateInstrumentSurface(input) {
     .map(
       (path) =>
         `instrument-surface: ${path} is neither on INSTRUMENT_SURFACE nor excused in INSTRUMENT_SURFACE_EXCLUSIONS - ` +
-        `TO FIX: add a "^${path.replace(/\./g, "\\.")}$" pattern to INSTRUMENT_SURFACE if it is gate-rule logic, ` +
+        `TO FIX: add a "^${path.replace(/[\\.]/g, "\\$&")}$" pattern to INSTRUMENT_SURFACE if it is gate-rule logic, ` +
         "or record a reasoned exclusion in INSTRUMENT_SURFACE_EXCLUSIONS if it is not, both in src/lib/review.ts",
     );
   return { violations, unmeasured: null };
