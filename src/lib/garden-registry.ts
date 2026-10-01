@@ -100,7 +100,8 @@ export function startGardenOffLoop(
     try {
       pass = deps.spawnPass(name, hourly ? [GARDEN_HOURLY_FLAG] : [], signal);
     } catch (e) {
-      settle(null, String((e as Error)?.message ?? e));
+      const error = String((e as Error)?.message ?? e);
+      settle(null, error);
       return;
     }
     pass.then(

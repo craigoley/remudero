@@ -32891,12 +32891,11 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     log,
     ...(escalate ? { escalate } : {}),
   });
-  const failed = (step: string, extra: Record<string, unknown> = {}) => (e: unknown) => log(step, { ...extra, error: String((e as Error)?.message ?? e) });
   const gardenPass = <C extends string, I, A extends GardenAction<C>>(spec: GardenSpec<C, I, A, GardenCheckout>, d: GardenerDeps): RegisteredGardenPass => () => {
     try {
       runGarden(spec, d);
     } catch (e) {
-      failed(`${spec.name}.gardener_failed`)(e);
+      log(`${spec.name}.gardener_failed`, { error: String((e as Error)?.message ?? e) });
     }
   };
   const noPass: RegisteredGardenPass = () => {};
@@ -32912,7 +32911,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       return loadGateProbes(repoRoot).then(
         (probes) => gardenPass(gateGardenSpec(d, probes), d),
         (e: unknown) => {
-          failed("gate.gardener_failed")(e);
+          log("gate.gardener_failed", { error: String((e as Error)?.message ?? e) });
           return noPass;
         },
       );
@@ -32941,11 +32940,11 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
               log("test.pass", { ran: pass.ran, feed, pr_url: pass.prUrl ?? null, proposal_present: existsSync(testManifestProposalPath(stateDir)) });
             }
           } catch (e) {
-            failed("test.gardener_failed")(e);
+            log("test.gardener_failed", { error: String((e as Error)?.message ?? e) });
           }
         },
         (e: unknown) => {
-          failed("test.gardener_failed")(e);
+          log("test.gardener_failed", { error: String((e as Error)?.message ?? e) });
           return noPass;
         },
       );
@@ -32962,12 +32961,12 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
             try {
               runConfigGarden(configGardenSpec(d, { mountRecommendations }), d, { mountRecommendations });
             } catch (e) {
-              failed(`${CONFIG_GARDEN_NAME}.gardener_failed`)(e);
+              log(`${CONFIG_GARDEN_NAME}.gardener_failed`, { error: String((e as Error)?.message ?? e) });
             }
           };
         },
         (e: unknown) => {
-          failed("config.gardener_failed")(e);
+          log("config.gardener_failed", { error: String((e as Error)?.message ?? e) });
           return noPass;
         },
       );
@@ -33011,7 +33010,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
           });
           await runSelectorShadowGardener(d, () => runs, (miss) => readSelectorShadowChangedPaths(owner, repo, miss), ciLearningTaskIdMinter(repoRoot));
         } catch (e) {
-          failed("selector-shadow.gardener_failed")(e);
+          log("selector-shadow.gardener_failed", { error: String((e as Error)?.message ?? e) });
         }
       };
     }
@@ -33020,7 +33019,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         try {
           runEvidenceCoverageGardener(daemonEvidenceCoverageInput({ stateDir, root: repoRoot, log }));
         } catch (e) {
-          failed("evidence_coverage.gardener_failed", { reason: "a pass that throws is logged and the next tick tries again" })(e);
+          log("evidence_coverage.gardener_failed", { reason: "a pass that throws is logged and the next tick tries again", error: String((e as Error)?.message ?? e) });
         }
       };
     // W1-T4802: the overseer watches every gardener -- liveness, the effect of merged changes and
@@ -33030,7 +33029,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         try {
           runGardenerOverseer(productionGardenerOverseerPorts({ stateDir, repoRoot, owner, repo, fetch: ghJson, log, escalate: raiseDuplicate }));
         } catch (e) {
-          failed("gardener_overseer.overseer_failed")(e);
+          log("gardener_overseer.overseer_failed", { error: String((e as Error)?.message ?? e) });
         }
       };
     // W1-T4803: the files merge conflicts strand pull requests on, ranked by PR minutes; the
