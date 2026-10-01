@@ -203,6 +203,8 @@ export interface ReadModelView {
   name: string;
   version: number;
   materialize(ctx: ReadModelViewContext): Array<{ key: string; data: unknown; sources: ViewSource[] }>;
+  /** Work ahead of `materialize`, one bounded step per `more()`; false while some remains, and no body is built before it is done. */
+  prepare?(ctx: ReadModelViewContext, more: () => boolean): boolean;
   /** The shadow comparator's legacy side for one key, computed in the worker beside the view's body. */
   legacy?(key: string, now: number, data: unknown): ShadowLegacy | undefined;
   /** Its bodies are per instance: each instance's is built, timed and paced as a unit of its own. */
@@ -751,12 +753,24 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     return comparator.shadow;
   }
 
-  function build(unit: ViewUnit, now: number, ctx: ReadModelViewContext, generation: number): void {
+  /** A view's prepare steps until `deadline`; the first is always allowed, so every build makes progress. */
+  function stepsUntil(deadline: number): () => boolean {
+    let first = true;
+    return () => {
+      const allowed = first || clock.now() < deadline;
+      first = false;
+      return allowed;
+    };
+  }
+
+  function build(unit: ViewUnit, now: number, ctx: ReadModelViewContext, generation: number, allowanceMs: number): void {
     const { view } = unit;
     const started = clock.now();
+    let ready = true;
     try {
       const scoped = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
-      for (const { key, data, sources } of view.materialize(scoped)) {
+      ready = view.prepare?.(scoped, stepsUntil(started + allowanceMs)) ?? true;
+      for (const { key, data, sources } of ready ? view.materialize(scoped) : []) {
         const stale = sources.some((source) => source.state !== "fresh");
         const etag = viewEtag(view.name, view.version, stale, data);
         const id = `${view.name}\u0000${key}`;
@@ -773,7 +787,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }
     const finished = clock.now();
     unit.costMs = finished - started;
-    unit.dueAt = finished + unit.costMs / READ_MODEL_VIEW_SHARE;
+    unit.dueAt = ready ? finished + unit.costMs / READ_MODEL_VIEW_SHARE : finished;
     if (unit.costMs > passMs) log("read_model.slow_view", { view: view.name, ...(unit.slot ? { instance: unit.slot.instance.name } : {}), ms: unit.costMs, passMs });
   }
 
@@ -788,7 +802,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const shadow = comparator?.shadow.readiness();
     const ctx: ReadModelViewContext = { now, switches, instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}) })), ...(shadow ? { shadow } : {}) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
-    if (only) return build(only, now, ctx, generation);
+    if (only) return build(only, now, ctx, generation, soloMs);
     const left = passMs - (clock.now() - tickStart);
     let spent = 0;
     const deferred: string[] = [];
@@ -800,7 +814,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         continue;
       }
       const before = clock.now();
-      build(unit, now, ctx, generation);
+      build(unit, now, ctx, generation, Math.min(soloMs, left - spent));
       spent += clock.now() - before;
     }
     if (deferred.length > 0 && now - deferredLoggedAt >= READ_MODEL_LEDGER_STALE_MS) {
