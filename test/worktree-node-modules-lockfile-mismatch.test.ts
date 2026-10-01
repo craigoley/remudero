@@ -703,14 +703,16 @@ test("W1-T4356: a checkout without its own node_modules is not borrowed, so it i
   }
 });
 
-test("W1-T4356: a current checkout is left alone and its lock is held until released", () => {
+test("W1-T4356: a current checkout keeps its code and its lock is held until released (W1-T4933: its install is refreshed)", () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t4356-current-`));
   try {
     const { repoDir } = t4193Fixture(root, { "package.json": pkgJson("t4193-core", { a: "^1.0.0" }) });
     mkdirSync(join(repoDir, "node_modules"));
     const lockPath = join(root, "state", "refresh.lock");
-    const out = refreshManagedCheckout(repoDir, lockPath, refreshLog().log, () => assert.fail("never installs"));
+    const installs: string[] = [];
+    const out = refreshManagedCheckout(repoDir, lockPath, refreshLog().log, (dir) => void installs.push(dir));
     assert.equal(out.kind, "current");
+    assert.deepEqual(installs, [repoDir], "W1-T4933: code that is current still has its install compared with its lockfile");
     assert.throws(() => refreshManagedCheckout(repoDir, lockPath, refreshLog().log), (e: unknown) =>
       e instanceof ManagedCheckoutRefreshRefusedError && /another dispatch holds/.test(e.message), "a peer is refused while it is held");
     out.release();
