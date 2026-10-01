@@ -5572,8 +5572,7 @@ if (args[0] === "pr" && args[1] === "view" && field && field.startsWith("headRef
       runId: "SWEEP-1",
       plan: plan,
       log: (step, extra) => { logs.push({ step, extra }); },
-      policy: DEFAULT_SWEEP_POLICY,
-      resolveTaskContractAtHeadImpl: () => ({ criteria: [] }),
+      policy: DEFAULT_SWEEP_POLICY, resolveTaskContractAtHeadImpl: () => ({ criteria: [] }),
     });
     const mergeConflict: MergeConflictEvidence = {
       files: [{ path: "src/x.ts", oursDeleted: 0, theirsDeleted: 0 }],
