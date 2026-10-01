@@ -33156,7 +33156,6 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
   }
 }
 
-/** The parent's view of whether a registered garden's next pass would do anything; true until the garden is built. */
 export function registeredGardenDueProbe(name: RegisteredGardenName, ctx: GardenBuildContext): () => boolean {
   let probe: (() => boolean) | undefined;
   Promise.resolve(buildRegisteredGarden(name, ctx)).then(

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { clockFromMillisFn } from "../src/lib/clock.js";
 import { GARDEN_HOURLY_FLAG, GARDEN_PASS_STEP, startGardenOffLoop, type GardenPassSpawn } from "../src/lib/garden-registry.js";
+import { CONFIG_TEND_INTERVAL_MS, configCanariesDue, configCanariesPath } from "../src/lib/config-gardener.js";
 import { gardenEffectsPath, gardenPassDue, gardenStatePath } from "../src/lib/gardener.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { buildRegisteredGarden, registeredGardenDueProbe, type GardenBuildContext } from "../src/run-task.js";
@@ -108,4 +109,21 @@ test("the daemon's due probe answers from the built garden and is due until it i
   const overseer = registeredGardenDueProbe("overseer", ctx);
   await settle();
   assert.equal(overseer(), true, "a garden with no due probe of its own always spawns");
+});
+
+test("config is due only while an active canary's tend interval has elapsed", (t) => {
+  const now = Date.parse("2026-10-01T16:00:00Z");
+  const clock = clockFromMillisFn(() => now);
+  const dir = stateDir(t);
+  const write = (state: string, lastTendMs?: number) =>
+    writeFileSync(configCanariesPath(dir), JSON.stringify({ canaries: [{ promotion: { state } }], ...(lastTendMs === undefined ? {} : { lastTendMs }) }));
+  assert.equal(configCanariesDue(dir, clock), false, "no canaries, nothing to tend");
+  write("rolled_back");
+  assert.equal(configCanariesDue(dir, clock), false, "a finished canary needs no tending");
+  write("shadow");
+  assert.equal(configCanariesDue(dir, clock), true, "an active canary never tended is due");
+  write("shadow", now - 60_000);
+  assert.equal(configCanariesDue(dir, clock), false, "tended a minute ago, not due");
+  write("shadow", now - CONFIG_TEND_INTERVAL_MS);
+  assert.equal(configCanariesDue(dir, clock), true, "its tend interval has elapsed");
 });
