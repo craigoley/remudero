@@ -70,6 +70,8 @@ export const NOW_HOST_PROBE_MS = 60_000;
 export const NOW_QUEUED_ROWS = 50;
 /** The open snapshot is re-saved at least every minute while its gateway runs; three misses make it stale. */
 export const NOW_GITHUB_STALE_MS = 3 * OPEN_SNAPSHOT_RESAVE_MS;
+/** One build stage slower than the read model's 2.5 s pass is named in `read_model.now_slow_stage`. */
+export const NOW_SLOW_STAGE_MS = 2_500;
 /** A daemon with no `daemon.*` row for this long reads silent: the console's own health-freshness bound. */
 export const NOW_DAEMON_SILENT_MS = 5 * 60_000;
 
@@ -568,6 +570,7 @@ export function createNowView(opts: NowViewOptions): {
   name: string;
   version: number;
   materialize(ctx: NowViewContext): Array<{ key: string; data: NowViewData; sources: ViewSource[] }>;
+  prepare(ctx: NowViewContext, more: () => boolean): boolean;
   legacy(key: string, now: number, view: unknown): NowShadowLegacy | undefined;
   perInstance: true;
 } {
@@ -626,53 +629,125 @@ export function createNowView(opts: NowViewOptions): {
     return gitPlanBehind(path, memo);
   });
 
-  function materializeOne(instance: NowInstance, state: NowSlotState, db: ReadModelDb, now: number, lease?: ReadModelLease): { key: string; data: NowViewData; sources: ViewSource[] } | undefined {
-    const pk = planKey(instance);
-    const gk = githubKey(instance);
-    let h = held.get(instance.name);
-    if (h && h.db !== db) h = undefined;
-    const dk = decisionsKey(instance);
-    const due = !h || h.generation !== state.generation || h.planKey !== pk || h.githubKey !== gk || h.decisionsKey !== dk || now - h.at >= NOW_REFRESH_MS;
-    if (!due) return undefined;
-    const cachedPlan = planCache.get(instance.name);
-    const plan = cachedPlan?.key === pk ? cachedPlan.plan : readPlan(instance);
-    planCache.set(instance.name, { key: pk, plan });
-    const gateway = h && h.githubKey === gk ? h.gateway : github(instance);
-    const ledgerPath = join(instance.ledgerDir, LEDGER_FILENAME);
-    // One projection per store, kept across snapshot re-saves: the gateway is swapped in and only a
-    // change in what the snapshot holds restamps every task. Behind the lease it persists, so a restart reuses it.
-    if (!h) {
+  /** One instance's build in flight: each stage is one prepare step, and its partial state waits here across ticks. */
+  interface NowBuild {
+    db: ReadModelDb;
+    lease?: ReadModelLease;
+    state: NowSlotState;
+    now: number;
+    stage: number;
+    keys: { plan: string; github: string; decisions: string };
+    plan?: Plan;
+    gateway?: ReturnType<typeof snapshotGithub>;
+    h?: Held;
+    rows?: ReadonlyArray<Row>;
+    snapshot?: BoardSnapshot;
+    decisions?: NowDecisionsData;
+    body?: { key: string; data: NowViewData; sources: ViewSource[] };
+  }
+  const builds = new Map<string, NowBuild>();
+  const ledgerPathOf = (instance: NowInstance): string => join(instance.ledgerDir, LEDGER_FILENAME);
+  const depsOf = (instance: NowInstance, b: NowBuild) => ({
+    plan: b.plan!, ledgerPath: ledgerPathOf(instance), github: b.gateway!.github, readLedger: () => b.rows as Array<Record<string, unknown>>, now: () => clock.now(),
+  });
+  /** The stages of one build, in order; the plan parse (about 1 s on core) is a stage of its own. */
+  const STAGES: ReadonlyArray<[string, (instance: NowInstance, b: NowBuild) => void]> = [
+    ["plan", (instance, b) => {
+      const cachedPlan = planCache.get(instance.name);
+      b.plan = cachedPlan?.key === b.keys.plan ? cachedPlan.plan : readPlan(instance);
+      planCache.set(instance.name, { key: b.keys.plan, plan: b.plan });
+    }],
+    ["github", (instance, b) => {
+      const h = held.get(instance.name);
+      b.gateway = h && h.db === b.db && h.githubKey === b.keys.github ? h.gateway : github(instance);
+    }],
+    ["board", (instance, b) => {
       const name = instance.name;
-      const board = createBoardProjection({
-        db, ...(lease ? { lease } : {}), ledgerPath, readPlan: () => planCache.get(name)!.plan, github: gateway.github, clock, instance: name,
-        currentGithub: () => held.get(name)!.gateway.github, githubGeneration: () => { const g = held.get(name)!; return g.gateway.content ?? g.githubKey; },
-        log: (step, extra) => log(step, { instance: name, ...extra }),
-      });
-      h = { db, board, recent: createRecentActivityCache(), generation: -1, planKey: pk, plan, githubKey: gk, gateway, at: now, healthAt: Number.NEGATIVE_INFINITY, members: {}, spend: [], sortedBy: new Map(), decisionsKey: dk };
-      held.set(name, h);
+      let h = held.get(name);
+      // One projection per store, kept across snapshot re-saves: the gateway is swapped in and only a
+      // change in what the snapshot holds restamps every task. Behind the lease it persists, so a restart reuses it.
+      if (!h || h.db !== b.db) {
+        const board = createBoardProjection({
+          db: b.db, ...(b.lease ? { lease: b.lease } : {}), ledgerPath: ledgerPathOf(instance), readPlan: () => planCache.get(name)!.plan, github: b.gateway!.github, clock, instance: name,
+          currentGithub: () => held.get(name)!.gateway.github, githubGeneration: () => { const g = held.get(name)!; return g.gateway.content ?? g.githubKey; },
+          log: (step, extra) => log(step, { instance: name, ...extra }),
+        });
+        h = { db: b.db, board, recent: createRecentActivityCache(), generation: -1, planKey: b.keys.plan, plan: b.plan!, githubKey: b.keys.github, gateway: b.gateway!, at: b.now, healthAt: Number.NEGATIVE_INFINITY, members: {}, spend: [], sortedBy: new Map(), decisionsKey: b.keys.decisions };
+        held.set(name, h);
+      }
+      Object.assign(h, { githubKey: b.keys.github, gateway: b.gateway });
+      h.board.update({ force: true });
+      b.h = h;
+      b.rows = h.board.rows();
+    }],
+    ["snapshot", (instance, b) => {
+      const projections = b.h!.board.projections();
+      b.snapshot = computeBoardSnapshot(depsOf(instance, b), { reuseProjection: (task) => projections.get(task.id) });
+    }],
+    ["probe", (instance, b) => {
+      const h = b.h!;
+      if (h.probe && b.now - h.healthAt < NOW_HOST_PROBE_MS) return;
+      h.probe = probeHost(instance, instance.name === core);
+      h.healthAt = b.now;
+    }],
+    ["decisions", (instance, b) => void (b.decisions = decisionsOf(instance, b.db, b.snapshot!, b.rows!))],
+    ["assemble", (instance, b) => {
+      const { h, snapshot, rows, now, state } = b as Required<NowBuild>;
+      const data = assembleNowView({ instance: instance.name, snapshot, rows, plan: b.plan!, recent: computeRecentActivity(depsOf(instance, b), h.recent, 20), health: h.probe!.health, decisions: b.decisions!, nowMs: now });
+      Object.assign(h, { generation: state.generation, planKey: b.keys.plan, plan: b.plan, at: now, members: nowCountMembers(snapshot.tasks), spend: dayCostRows(rows, now),
+        sortedBy: new Map(snapshot.tasks.map((t) => [t.taskId, t.lastActivityAt])), decisionsKey: b.keys.decisions });
+      const sources: ViewSource[] = [
+        ...(opts.ledgerSource ? [opts.ledgerSource(state, now)] : []),
+        judgeSource({ name: `github:${instance.name}`, ...b.gateway!.source }, now),
+        planSource(`plan:${instance.name}`, planBehind(instance), now),
+        judgeSource({ name: `host-probe:${instance.name}`, asOf: h.probe!.sampledAt, state: "fresh" }, now),
+      ];
+      b.body = { key: `instance=${encodeURIComponent(instance.name)}`, data, sources };
+    }],
+  ];
+
+  /**
+   * Advances one instance's build while `more()` allows, starting one only when it is due. True once
+   * there is nothing left to do for it: its body is ready, or no build was due.
+   */
+  function step(instance: NowInstance, entry: { state: NowSlotState; db: ReadModelDb; lease?: ReadModelLease }, now: number, more: () => boolean): boolean {
+    let b = builds.get(instance.name);
+    if (b && b.db !== entry.db) b = undefined;
+    if (!b) {
+      const keys = { plan: planKey(instance), github: githubKey(instance), decisions: decisionsKey(instance) };
+      const h = held.get(instance.name);
+      const due = !h || h.db !== entry.db || h.generation !== entry.state.generation || h.planKey !== keys.plan || h.githubKey !== keys.github
+        || h.decisionsKey !== keys.decisions || now - h.at >= NOW_REFRESH_MS;
+      if (!due) return true;
+      b = { db: entry.db, ...(entry.lease ? { lease: entry.lease } : {}), state: entry.state, now, stage: 0, keys };
+      builds.set(instance.name, b);
     }
-    Object.assign(h, { githubKey: gk, gateway });
-    h.board.update({ force: true });
-    const rows = h.board.rows();
-    const projections = h.board.projections();
-    const deps = { plan, ledgerPath, github: gateway.github, readLedger: () => rows as Array<Record<string, unknown>>, now: () => clock.now() };
-    const snapshot = computeBoardSnapshot(deps, { reuseProjection: (task) => projections.get(task.id) });
-    const isCore = instance.name === core;
-    if (!h.probe || now - h.healthAt >= NOW_HOST_PROBE_MS) {
-      h.probe = probeHost(instance, isCore);
-      h.healthAt = now;
+    while (b.stage < STAGES.length) {
+      if (!more()) return false;
+      const [stage, run] = STAGES[b.stage]!;
+      const started = clock.now();
+      run(instance, b);
+      const ms = clock.now() - started;
+      if (ms > NOW_SLOW_STAGE_MS) log("read_model.now_slow_stage", { instance: instance.name, stage, ms });
+      b.stage++;
     }
-    const decisions = decisionsOf(instance, db, snapshot, rows);
-    const data = assembleNowView({ instance: instance.name, snapshot, rows, plan, recent: computeRecentActivity(deps, h.recent, 20), health: h.probe.health, decisions, nowMs: now });
-    Object.assign(h, { generation: state.generation, planKey: pk, plan, at: now, members: nowCountMembers(snapshot.tasks), spend: dayCostRows(rows, now),
-      sortedBy: new Map(snapshot.tasks.map((t) => [t.taskId, t.lastActivityAt])), decisionsKey: dk });
-    const sources: ViewSource[] = [
-      ...(opts.ledgerSource ? [opts.ledgerSource(state, now)] : []),
-      judgeSource({ name: `github:${instance.name}`, ...gateway.source }, now),
-      planSource(`plan:${instance.name}`, planBehind(instance), now),
-      judgeSource({ name: `host-probe:${instance.name}`, asOf: h.probe.sampledAt, state: "fresh" }, now),
-    ];
-    return { key: `instance=${encodeURIComponent(instance.name)}`, data, sources };
+    return true;
+  }
+
+  /** Each held instance this view builds for, with its store; a step that throws drops that build and is logged. */
+  function eachInstance(ctx: NowViewContext, run: (instance: NowInstance, entry: { state: NowSlotState; db: ReadModelDb; lease?: ReadModelLease }) => void): void {
+    const mode = ctx.switches?.views[NOW_VIEW_NAME];
+    if (mode !== "shadow" && mode !== "serve") return;
+    for (const { state, db, lease } of ctx.instances) {
+      const instance = byName.get(state.instance);
+      if (!instance || !db || state.lease !== "held") continue;
+      try {
+        run(instance, { state, db, ...(lease ? { lease } : {}) });
+      } catch (error) {
+        builds.delete(instance.name);
+        log("read_model.now_view_failed", { instance: state.instance, error: (error as Error).message });
+      }
+    }
   }
 
   return {
@@ -729,20 +804,21 @@ export function createNowView(opts: NowViewOptions): {
         ...(oldest !== undefined ? { horizonMs: oldest } : {}),
       };
     },
+    /** W1-T5066: one bounded step per stage per instance; the worker builds no body until every stage is done. */
+    prepare(ctx, more) {
+      let done = true;
+      eachInstance(ctx, (instance, entry) => void (done = step(instance, entry, ctx.now, more) && done));
+      return done;
+    },
+    /** Takes each finished build's body; an instance with none in flight is built here in one go, as a caller with no `prepare` expects. */
     materialize(ctx) {
-      const mode = ctx.switches?.views[NOW_VIEW_NAME];
-      if (mode !== "shadow" && mode !== "serve") return [];
       const out: Array<{ key: string; data: NowViewData; sources: ViewSource[] }> = [];
-      for (const { state, db, lease } of ctx.instances) {
-        const instance = byName.get(state.instance);
-        if (!instance || !db || state.lease !== "held") continue;
-        try {
-          const body = materializeOne(instance, state, db, ctx.now, lease);
-          if (body) out.push(body);
-        } catch (error) {
-          log("read_model.now_view_failed", { instance: state.instance, error: (error as Error).message });
-        }
-      }
+      eachInstance(ctx, (instance, entry) => {
+        step(instance, entry, ctx.now, () => true);
+        const body = builds.get(instance.name)?.body;
+        builds.delete(instance.name);
+        if (body) out.push(body);
+      });
       return out;
     },
   };
