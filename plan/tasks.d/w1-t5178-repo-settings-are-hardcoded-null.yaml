@@ -1,0 +1,37 @@
+- id: W1-T5178
+  title: "EVERY REPOSITORY'S SETTINGS READ 'NOT REPORTED' BECAUSE CORE HARD-CODES THEM NULL — repo-dashboard-route.ts types proofpolicy, workerpoolsize and alertthreshold as null and always returns null, although the proof policy, lane count and alert thresholds exist in config and policy"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 10.00
+  risk: medium
+  origin: "operator ask 2026-10-01: audit app.remudero.com and the core-console data plan; filed from the live audit (operator session 90be18e2)"
+  note: "reservation hand-off: plan-console-audit-core-1790887256000 -> plan-console-audit-core-1790887256000"
+  plan_refs: [W1-T4103, W1-T3783]
+  files: [src/lib/repo-dashboard-route.ts, test/repo-settings-report-their-effective-values.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-01 on app.remudero.com/repos/craigoley%2Fremudero/settings: Proof policy, Worker pool size and
+    Alert threshold all "Not reported · writes unavailable"; the overview card says "Not computed by core". Cause:
+    src/lib/repo-dashboard-route.ts declares RepoDashboardSettings as { proofpolicy: null; workerpoolsize: null;
+    alertthreshold: null } and returns those nulls for every repository. The console also reads
+    repos[].settings.configSource, which core never declares (console tests/unit/contract/core-field-baseline.json;
+    tracker E3 "field baseline to 0").
+  design: |
+    Serve each repository's EFFECTIVE settings, read-only, from the sources that already decide them: the proof
+    policy from the repo's policy/plan config, the worker pool size from the daemon instance's lane count, and the
+    alert threshold from the policy the alerting path uses. Each value carries configSource (organization default or
+    repository override), source and freshness, and is declared in openapi, so the console's baseline entry for
+    settings.configSource can be removed. A value with no source stays null with a stated reason. No write path is
+    added (writes remain a separate contract).
+  acceptance:
+    - claim: "a repository reports its effective proof policy, worker pool size and alert threshold with their source"
+      proof: 'grep: test("W1-T5178: a repository reports its effective settings with their source" in test/repo-settings-report-their-effective-values.test.ts'
+    - claim: "a setting with no source stays null with a reason"
+      proof: 'grep: test("W1-T5178: a setting with no source stays null with a reason" in test/repo-settings-report-their-effective-values.test.ts'
+  falsifier: |
+    Restore the hard-coded nulls and the first test sees no proof policy.

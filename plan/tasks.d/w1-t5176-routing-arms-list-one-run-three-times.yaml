@@ -1,0 +1,35 @@
+- id: W1-T5176
+  title: "THE ROUTING-ARMS TABLE LISTS EACH TRIAL RUN THREE TIMES AND CUTS ITS REASON MID-WORD — usage-telemetry markersFrom turns every non-decision field into its own marker, so trial, trialArm and trialReason become three arm rows for the same runs, and every value is sliced to 64 characters ('ledger source unreadable or in')"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 3
+  budget_usd: 8.00
+  risk: medium
+  origin: "operator ask 2026-10-01: audit app.remudero.com and the core-console data plan; filed from the live audit (operator session 90be18e2)"
+  note: "reservation hand-off: plan-console-audit-core-1790887256000 -> plan-console-audit-core-1790887256000"
+  plan_refs: [W1-T4024, W1-T3623]
+  files: [src/lib/usage-telemetry.ts, test/a-trial-run-is-one-routing-arm.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-01 on app.remudero.com/analytics, "Marked routing arms (7 days)": rows trial=inbox-bakeoff-...,
+    trialArm=cash and trialReason=inbox-draft bake-off each repeat the same 63/49/17 runs, and two rows read
+    "trialReason=trial spend evidence unavailable: ledger source unreadable or in". Cause: markersFrom
+    (src/lib/usage-telemetry.ts) keeps any string decision field as a marker (worker.ts writes trial, trialArm and
+    trialReason together) and slices every value to 64 characters; the arms reducer keys one row per (marker, value).
+  design: |
+    A routing trial is ONE arm: group trial + trialArm into a single arm row keyed (trial id, arm); trialReason
+    becomes that row's reason metadata, not a marker of its own. A value too long to show whole is cut at a word
+    boundary with an ellipsis and keeps its full text in a reasonFull field; nothing is sliced mid-word. Other
+    markers keep today's behaviour. The usage-v1 projection version is bumped if the row shape changes, and the
+    console follow-up is filed against the merged shape.
+  acceptance:
+    - claim: "a trial run appears as one arm row with its reason as metadata"
+      proof: 'grep: test("W1-T5176: a trial run appears as one arm row with its reason as metadata" in test/a-trial-run-is-one-routing-arm.test.ts'
+    - claim: "a long reason is never cut mid-word"
+      proof: 'grep: test("W1-T5176: a long reason is never cut mid-word" in test/a-trial-run-is-one-routing-arm.test.ts'
+  falsifier: |
+    Restore markersFrom's per-field markers and the first test sees three rows for one trial run.

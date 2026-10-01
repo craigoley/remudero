@@ -1,0 +1,44 @@
+- id: W1-T5175
+  title: "SERVE IS OOM-KILLED AND CANNOT NAME WHAT HOLDS ITS MEMORY — the kernel killed serve's node at 2026-10-01 16:09:17Z (memcg, anon-rss 5.0 GB of the 5 GiB container limit); serve sits at 3.8-4.2 GiB minutes after start, and no ledger row says which cache, projector or view body holds it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-10-01: audit app.remudero.com and the core-console data plan; filed from the live audit (operator session 90be18e2)"
+  note: "reservation hand-off: plan-console-audit-core-1790887256000 -> plan-console-audit-core-1790887256000"
+  plan_refs: [W1-T4102, W1-T4267, W1-T5055]
+  files: [src/lib/serve.ts, src/lib/serve-memory.ts, test/serve-names-and-relieves-its-memory-pressure.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-01 (host kernel log, read-only): "Memory cgroup out of memory: Killed process 4166669 (node)
+    anon-rss:5000916kB" in the serve container's memcg at 16:09:17Z. The core-console tracker records "no OOM in the
+    kernel log" for 16:06-16:07 only, so this kill is untracked; it fell in the 15:57-16:07 console-dark window.
+    Serve then ran at 3.8-4.2 GiB of its 5 GiB limit within minutes of each start (docker stats), and at 3.1 GB RSS
+    and up to 3.5 cores at 18:12Z. During shadow, serve holds the legacy caches AND three projectors plus view bodies,
+    so the footprint is paid twice until Phase 4 retires the legacy caches (tracker B11). Nothing measures which
+    holder is large, so neither the cause of an OOM nor the effect of a fix can be read from the ledger.
+  design: |
+    No new bound, no new refusal.
+    1. A serve.memory sample row every few minutes: rss, heapUsed, external and arrayBuffers, plus a size estimate
+       per named holder (each legacy route cache, each read-model generation's view bodies, the board snapshot, the
+       usage and analytics refresh results). Each holder reports its own entry count and approximate bytes.
+    2. A tiered, self-healing response to the container's own headroom (read from the cgroup, not a fixed number):
+       as headroom shrinks, first drop legacy caches for views already served or in shadow (they rebuild on demand),
+       then shed the largest refreshable holder. Each step ledgers serve.memory_relieved with the holder and bytes. Nothing
+       refuses a request.
+    3. The row is read by the existing incident path, so a repeated relief escalates once rather than silently.
+  acceptance:
+    - claim: "serve ledgers a memory sample that names each holder's size"
+      proof: 'grep: test("W1-T5175: serve ledgers a memory sample that names each holder size" in test/serve-names-and-relieves-its-memory-pressure.test.ts'
+    - claim: "shrinking headroom drops a served view's legacy cache first"
+      proof: 'grep: test("W1-T5175: shrinking headroom drops a served view legacy cache first" in test/serve-names-and-relieves-its-memory-pressure.test.ts'
+    - claim: "serve samples its memory from its own loop"
+      proof: 'grep: sampleServeMemory( in src/lib/serve.ts'
+  falsifier: |
+    Remove the relief arm and the second test sees no cache dropped as headroom falls.

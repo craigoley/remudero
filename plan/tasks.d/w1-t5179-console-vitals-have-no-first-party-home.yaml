@@ -1,0 +1,40 @@
+- id: W1-T5179
+  title: "THE CONSOLE'S CORE WEB VITALS LEAVE ONLY FOR GOOGLE ANALYTICS, AND ONLY WITH CONSENT — there is no first-party LCP/INP/CLS history to gate a change on; give core a route-group-only vitals ingest into the ledger and a p75 read per route group"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 10.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-10-01: audit app.remudero.com and the core-console data plan; filed from the live audit (operator session 90be18e2)"
+  note: "reservation hand-off: plan-console-audit-core-1790887256000 -> plan-console-audit-core-1790887256000 When this merges, file ONE console shard pinned to the merged route and payload (the console's app/_components/console-web-vitals.tsx already computes route_group and the metric; it adds a first-party send beside the GA one)."
+  plan_refs: [W1-T4611]
+  files: [src/lib/console-vitals.ts, src/lib/serve.ts, test/console-vitals-are-ingested-by-route-group.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-01: remudero-console app/_components/console-web-vitals.tsx sends LCP/INP/CLS/FCP/TTFB only via
+    gtag, only when the GA consent key is "granted", and only as a route group (never a repository, query or task).
+    Nothing first-party stores them, so Core Web Vitals cannot be read per route, trended, or used to judge a
+    console change; a browser audit of a backgrounded tab cannot measure paint metrics at all. The console is the
+    operator's own instrument, so a first-party, route-group-only vitals record carries no third-party exposure.
+  design: |
+    A write-scoped POST route (same token class as the fleet-control writes) accepts a small batch of
+    {metric, value, rating, routeGroup, navigationType}, validates names, ranges and route groups against an allow
+    list, and appends one ledger row per metric (console.web_vital). Ingest is paced per source so a burst
+    coalesces. A read route returns p75 per (route group, metric) over a trailing window, with sample counts. No
+    user, repository, query or URL ever enters a row.
+  acceptance:
+    - claim: "a vital is ingested as a route-group-only ledger row"
+      proof: 'grep: test("W1-T5179: a vital is ingested as a route-group-only ledger row" in test/console-vitals-are-ingested-by-route-group.test.ts'
+    - claim: "the read returns p75 per route group and metric with its sample count"
+      proof: 'grep: test("W1-T5179: the read returns p75 per route group and metric with its sample count" in test/console-vitals-are-ingested-by-route-group.test.ts'
+    - claim: "a payload carrying a repository or URL is refused"
+      proof: 'grep: test("W1-T5179: a payload carrying a repository or URL is refused" in test/console-vitals-are-ingested-by-route-group.test.ts'
+    - claim: "serve routes the vitals ingest"
+      proof: 'grep: ingestConsoleVitals( in src/lib/serve.ts'
+  falsifier: |
+    Drop the allow-list check and the third test sees a URL stored in the ledger.
