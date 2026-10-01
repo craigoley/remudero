@@ -1976,6 +1976,7 @@
     "test/the-filing-protocol-is-generated.test.ts": 839,
     "test/the-first-board-read-waits-for-the-first-mint.test.ts": 209,
     "test/the-fix-prompt-is-optimized-against-its-own-graders.test.ts": 270,
+    "test/the-fix-rung-reads-its-contract-at-the-pr-head.test.ts": 1700,
     "test/the-fix-rung-strike-cap-does-not-bind.test.ts": 1400,
     "test/the-fix-rung-survives-an-exhausted-subscription.test.ts": 1600,
     "test/the-fleet-cannot-tell-it-has-crossed-into-credits.test.ts": 1100,

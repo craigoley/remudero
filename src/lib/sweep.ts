@@ -85,6 +85,7 @@ import type {
   ArmDecision,
   AutomergeHold,
   CriterionVerdict,
+  PlanCriteriaAtHeadResult,
   ProofExecutor,
   ReviewEvidence,
   ReviewVerdict,
@@ -431,6 +432,18 @@ export function fixRungTaskFor(
   };
 }
 
+/** The closed set of ids that are never plan tasks: a `PR-<n>` escalation id and the four orchestrator lanes. */
+type FixRungTask = {
+  id: string;
+  title: string;
+  risk: TaskRisk;
+  acceptance: AcceptanceCriterion[];
+  budget_usd?: number;
+  files: string[];
+};
+
+const NEVER_A_PLAN_TASK_ID = /^(?:PR-\d+|RETRO|TRIAGE-.+|PLAN-.+|APPROVE-.+)$/;
+
 /**
  * W1-T4460 design note (ii): a PR's task id can be genuinely ABSENT from the plan SNAPSHOT this
  * sweep loaded without being absent from the plan itself — the snapshot merely predates the shard
@@ -459,7 +472,7 @@ export function fixRungTaskWithPlanReload(
   const staleSnapshotMiss =
     pr.taskId !== undefined &&
     !plan.tasks.some((t) => t.id === pr.taskId) &&
-    !/^(?:PR-\d+|RETRO|TRIAGE-.+|PLAN-.+|APPROVE-.+)$/.test(pr.taskId);
+    !NEVER_A_PLAN_TASK_ID.test(pr.taskId);
   if (staleSnapshotMiss && reloadPlan) {
     let fresh: Plan | undefined;
     try {
@@ -475,6 +488,55 @@ export function fixRungTaskWithPlanReload(
     }
   }
   return fixRungTaskFor(plan, pr, body, headRefName, changedPaths);
+}
+
+/**
+ * W1-T4073: whether {@link fixRungTaskAtHead} has a plan record to look for — a real plan task id,
+ * never the `PR-<n>`/orchestrator-lane shapes (no record exists at any head, so the read is waste).
+ */
+export function fixRungWantsHeadContract(pr: { taskId?: string }): pr is { taskId: string } {
+  return pr.taskId !== undefined && !NEVER_A_PLAN_TASK_ID.test(pr.taskId);
+}
+
+/**
+ * W1-T4073: the fix rung's task contract AT THE PR HEAD it is repairing, not the daemon's boot
+ * snapshot. The #6630 round rendered `task.files` from a plan 27 minutes stale, so the worker built
+ * a test file #6627 had already replaced and the harness committed it. `resolved` is
+ * `resolvePlanCriteriaAtHead`'s read of `plan/tasks.yaml` at that head (see
+ * `resolveFixRungTaskContractAtHead`), and the ONE returned task feeds the prompt, the scope guard
+ * and the harness commit alike — all three read `opts.task`, so there is no second contract.
+ *
+ * UNREADABLE NEVER FALLS BACK: an unresolvable head sha, a thrown resolver or a `divergence` stands
+ * the round down, named — the snapshot is the very thing this task refuses to trust. A record the
+ * head plan does not carry at all (a readable plan, no such id) is NOT unreadable: it leaves the
+ * task exactly as `fixRungTaskWithPlanReload` resolved it. One the head DOES carry replaces
+ * acceptance, files, risk and budget and is never synthetic, even when the snapshot lacked it.
+ */
+export function fixRungTaskAtHead(
+  current: { task: FixRungTask; synthetic: boolean },
+  taskId: string,
+  resolved: PlanCriteriaAtHeadResult | undefined,
+  resolveError?: string,
+): { standDown: string } | { task: FixRungTask; synthetic: boolean } {
+  if (resolved === undefined || resolved.divergence !== undefined) {
+    const why = resolveError ?? resolved?.divergence?.reason ?? "no contract returned";
+    return { standDown: `fix rung: PR-head task contract unreadable — ${why}` };
+  }
+  const carried =
+    resolved.criteria.length > 0 || resolved.taskDeclaredFiles !== undefined || resolved.taskRisk !== undefined;
+  if (!carried) return current;
+  const { task } = current;
+  return {
+    task: {
+      ...task,
+      id: taskId,
+      risk: resolved.taskRisk ?? task.risk,
+      acceptance: resolved.criteria,
+      files: resolved.taskDeclaredFiles ?? [],
+      ...(resolved.taskBudgetUsd !== undefined ? { budget_usd: resolved.taskBudgetUsd } : {}),
+    },
+    synthetic: false,
+  };
 }
 
 /**
@@ -1178,6 +1240,15 @@ export interface BuildSweepEffectsDeps {
    *  production defaults to a real disk read of this repo's own `plan/tasks.yaml`; a test replaces
    *  it to avoid touching the filesystem or to assert the miss/reload sequence directly. */
   reloadPlanForFixImpl?: () => Plan | undefined;
+  /** W1-T4073 — resolves a fix dispatch's task contract from the plan AT THE PR HEAD (the checkout
+   *  it just created is where the head's objects are local). `undefined` means unreadable. Omitted
+   *  keeps the pre-W1-T4073 snapshot contract, so fixtures that never touch it need no update;
+   *  production wires `resolveFixRungTaskContractAtHead`. */
+  resolveTaskContractAtHeadImpl?: (
+    prUrl: string,
+    taskId: string,
+    repoDir: string,
+  ) => PlanCriteriaAtHeadResult | undefined | Promise<PlanCriteriaAtHeadResult | undefined>;
   createFixRungWorktreeImpl?: SweepRuntimeFn;
   captureWorktreeSnapshotImpl?: SweepRuntimeFn;
   runFixRungImpl?: SweepRuntimeFn;
@@ -1571,6 +1642,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     ghLiveStateImpl: ghLiveState = requiredSweepRuntime("ghLiveStateImpl"),
     fixRungTaskForImpl: fixRungTaskForForBuild = fixRungTaskFor,
     reloadPlanForFixImpl,
+    resolveTaskContractAtHeadImpl,
     createFixRungWorktreeImpl: createFixRungWorktree = requiredSweepRuntime("createFixRungWorktreeImpl"),
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit = requiredSweepRuntime("captureWorktreeSnapshotImpl"),
     runFixRungImpl: runFixRung = requiredSweepRuntime("runFixRungImpl"),
@@ -2488,7 +2560,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // classified fixable and then silently skipped every poll.
         // W1-T4460: a stale plan snapshot is tried once more via a fresh read (fixRungTaskWithPlanReload)
         // before a genuinely-filed task id is ever minted a synthetic identity — see that function's doc.
-        const { task, synthetic } = fixRungTaskWithPlanReload(
+        const snapshotResolved = fixRungTaskWithPlanReload(
           plan,
           pr,
           headRef.body,
@@ -2497,6 +2569,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           reloadPlanForFix,
           log,
         );
+        // W1-T4073: `let` — the PR-head contract below may replace both once the checkout exists.
+        let { task, synthetic } = snapshotResolved;
         if (synthetic) log("sweep.fix.synthetic_task", { pr_number: pr.prNumber, task_id: task.id });
         // W1-T4667: the parallel-attempts DECISION for this repair round — never an effect. No
         // spawn, push or worktree happens here; `planParallelAttempts` only says whether this
@@ -2866,6 +2940,32 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           throw e;
         }
         const birthWorktreeSnapshot = captureWorktreeSnapshotViaGit(worktreePath);
+
+        // W1-T4073: the contract this round is built from is the plan AT THE PR HEAD, resolved
+        // against the checkout just made (its objects are local) — never `plan`, which is the
+        // daemon's boot snapshot. Everything below (prompt, scope guard, harness commit) reads it.
+        if (resolveTaskContractAtHeadImpl && fixRungWantsHeadContract(pr)) {
+          let resolved: PlanCriteriaAtHeadResult | undefined;
+          let resolveError: string | undefined;
+          try {
+            resolved = await resolveTaskContractAtHeadImpl(pr.prUrl, pr.taskId, worktreePath);
+          } catch (e) {
+            // A throwing resolver is exactly as unreadable as one returning `undefined`; the message
+            // rides into the stand-down reason so the ledger names WHICH it was.
+            resolveError = `resolver threw: ${String((e as Error)?.message ?? e)}`;
+          }
+          const atHead = fixRungTaskAtHead({ task, synthetic }, pr.taskId, resolved, resolveError);
+          if ("standDown" in atHead) {
+            log("sweep.fix.head_contract_unreadable", {
+              pr_number: pr.prNumber,
+              task_id: pr.taskId,
+              head_sha: pr.headSha,
+              reason: atHead.standDown,
+            });
+            return;
+          }
+          ({ task, synthetic } = atHead);
+        }
 
         const mountsTable = loadMounts(mountsPath(repoRoot));
         const fixMount: Mount = resolveMount(mountsTable, "fix", task.risk);
