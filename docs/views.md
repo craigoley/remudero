@@ -201,8 +201,10 @@ diskFreeBytes?, rateLimitRemaining?, daemon{ state, at?, reason? }, reasons? }, 
 - `health.daemon` is `{ state: "polling" }` while the instance's newest `daemon.*` row is under 5 min old, else
   `{ state: "silent", at, reason }`, where `at` is that row's own time (absent when the live ledger has none). It
   changes only when the daemon goes silent or resumes, so a consumer ages `at` itself.
-- The gauges `diskFreeBytes` and `rateLimitRemaining` are exact, so they move the ETag at most once per host
-  probe (60 s).
+- The gauges `diskFreeBytes` and `rateLimitRemaining` are rounded down to two significant figures (exact
+  below 100), so a reading that barely moved between two 60 s probes does not move the ETag.
+- `tasks[].lastActivityAt` and `actions[].sortAt` move only on a row that changed something: a
+  `sweep.disposed` row re-emitting the disposition already recorded for that PR is not activity.
 - `groups` is the console's `groupBoard` as ordered id lists.
 - `actions[].strike` is `{ n, of }`, parsed once from the sweep's reason.
 - `health` is the selected instance's own host probe. A field it could not read is absent and named in `health.reasons`.
