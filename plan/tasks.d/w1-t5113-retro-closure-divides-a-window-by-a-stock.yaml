@@ -1,0 +1,40 @@
+- id: W1-T5113
+  title: "THE RETRO'S CLOSURE-BY-CLASS RATE DIVIDES A WINDOW'S MERGES BY THE WHOLE OPEN BACKLOG AND UNDER-CREDITS THE MERGES — src read 0.000-0.020 across 14 snapshots (merged 0-13 over a denominator of ~650 open tasks), while GitHub merged 10 run-W1 PRs in a window credited 4, and 15 in a window credited 0"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 12.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-10-01: go ahead with every follow-up, research deeply (calibration research)"
+  note: "reservation hand-off: plan-dispatch-value-calibration-1790852354000 -> plan-dispatch-value-calibration-1790852354000"
+  plan_refs: [W1-T51, W1-T3412, W1-T5112]
+  files: [src/lib/retro-closure.ts, src/lib/retro.ts, test/retro-closure-rates-merges-per-attempt.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-01 (83 retro.closure_by_class rows): closureByClass (src/lib/retro-closure.ts) uses
+    `denominator = merged + open` when filings are not supplied, which is always in production (filed: "not supplied").
+    `open` is the WHOLE open backlog of the class (src ~606-671), and `merged` counts only the merges credited inside
+    the retro window, which runs since the last marker (2-7 h). The rate is a window flow divided by a standing stock,
+    so it tracks window length and backlog size, not closure. Separately, `shipped` under-credits: 09-30
+    06:38-12:41Z credited 4 src merges where GitHub merged 10 run-W1 PRs, and 10-01 01:44-09:03Z credited 0 where
+    GitHub merged 15. That is likely because only runs whose run.start falls inside the window are joined, while a
+    merge in the window often belongs to a run started before it. The retro report and every reader of
+    retro.closure_by_class (until W1-T5112, dispatch value) see a misleading number.
+  design: |
+    1. The rate's denominator is the class's DISPATCHED ATTEMPTS in the window (run.start), with filings as the
+       alternative when supplied, never the open backlog. `open` stays as its own column.
+    2. Merges are credited by MERGE TIME inside the window, joined to their run (or task) for the class, whatever the
+       run's start. The shipped union (ledger ∪ GitHub trailered merges, W1-T51) keeps its sources.
+    3. The rendered cell names both counts ("12 of 31 attempts").
+  acceptance:
+    - claim: "the closure rate is merges over dispatched attempts, not over the open backlog"
+      proof: 'grep: test("W1-T5113: the closure rate is merges over dispatched attempts, not over the open backlog" in test/retro-closure-rates-merges-per-attempt.test.ts'
+    - claim: "a merge inside the window is credited even when its run started before the window"
+      proof: 'grep: test("W1-T5113: a merge inside the window is credited even when its run started before the window" in test/retro-closure-rates-merges-per-attempt.test.ts'
+  falsifier: |
+    Restore `merged + open` and the first test sees a rate near zero for a class that merged half its attempts.

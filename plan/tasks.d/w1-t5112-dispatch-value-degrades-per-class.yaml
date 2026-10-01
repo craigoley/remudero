@@ -1,0 +1,59 @@
+- id: W1-T5112
+  title: "THE DISPATCH VALUE CALIBRATION NEVER ACTIVATES — buildDispatchValueContext returns `refused` for the WHOLE queue when ANY class is unmeasurable, and docs/design/plan-lint never merge, so it has refused every cycle (178 dispatch.value.refused rows 2026-09-28..10-01); `src` also fails a 10% two-snapshot stability gate on a rate that swings 0.000-0.020 between snapshots; nothing ranks the ~235 unprioritized tasks"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-10-01: go ahead with every follow-up, research deeply and innovate (calibration research)"
+  note: "reservation hand-off: plan-dispatch-value-calibration-1790852354000 -> plan-dispatch-value-calibration-1790852354000"
+  plan_refs: [W1-T3412, W1-T4941, W1-T4111, W1-T5113]
+  files: [src/lib/dispatch-value.ts, src/run-task.ts, test/dispatch-value-degrades-per-class-and-smooths-its-estimate.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-01 (core ledger union, retro.closure_by_class, 83 snapshots since 09-20):
+    - The calibration has been refused every cycle: 178 dispatch.value.refused rows in three days. Example reason:
+      "design:zero-merge-class,docs:zero-merge-class,plan-lint:zero-merge-class,retro:thin-class,src:unstable-value,
+      triage:thin-class".
+    - ALL-OR-NOTHING: after the class loop, `if (refusals.length > 0) return { kind: "refused" }` discards every
+      measurable class AND the open-dependent fanout tie-break. docs (0 of 70-81), design (0 of 8) and plan-lint
+      (0 of 21-27) never record a merge in any snapshot, so the calibration can never be ready.
+    - `src` IS NOT MEASURABLE AS FED. Its last 14 snapshot rates were 0.003, 0.003, 0.014, 0.020, 0.008, 0, 0.002,
+      0.018, 0.006, 0.003, 0.001, 0, 0.002 and 0, with costPerMerge 0.115-6.278 or null. The score is
+      mergeRate/costPerMerge between two consecutive snapshots compared at a 10% tolerance (stable), so it never holds.
+      The input is the defect (W1-T5113): each snapshot divides the merges credited in its own retro window (2-7 h)
+      by the WHOLE open src backlog (~650), and it under-credits merges (GitHub merged 10 run-W1 PRs on 09-30
+      06:38-12:41Z against a credited 4, and 15 on 10-01 01:44-09:03Z against 0).
+    - CONSEQUENCE: dispatch orders by priority, then scope, then id. plan-gardener.ts omits REPRIORITIZE on the premise
+      that "dispatch already orders the queue by measured value" (W1-T3412), which is false in production. W1-T4941
+      is unbuilt. Nothing ranks the backlog.
+  design: |
+    No hard threshold, no new refusal. Degrade per class and carry uncertainty instead of gating on it.
+    1. PER-CLASS DEGRADE: buildDispatchValueContext returns `ready` with whatever classes it can score. An
+       unmeasurable class is listed in `refusals` and its tasks keep the historic priority/scope/id order among
+       themselves. The fanout tie-break (openDependentFanout) is always available. `refused` remains only for a corpus
+       that cannot be read at all (incomplete union, malformed rows).
+    2. ITS OWN ESTIMATOR, NOT THE RETRO SNAPSHOT: value per class = P(merge per dispatched attempt) / cost per
+       attempt, over a trailing window of the ledger union. Attempts are run.start rows of W1 build runs. Merges are
+       verdict.merged / merge credits joined by run id. Cost is the run's cost_usd. Estimate P with a Beta posterior
+       (prior from the fleet-wide rate, weight 1-2 pseudo-attempts) and rank by the posterior mean, so a thin class
+       sits near the fleet mean with wide uncertainty instead of being refused. Record the effective sample size per
+       class in dispatch.value.calibrated.
+    3. SMOOTHING REPLACES THE STABILITY GATE: the trailing window and the posterior make consecutive cycles move
+       smoothly. DISPATCH_VALUE_STABILITY_TOLERANCE and the two-snapshot comparison are removed, and the window
+       length is policy data, not a gate.
+    4. ledger `dispatch.value.calibrated {classes:{<class>:{mean, attempts, merges}}, refused_classes}` every cycle.
+  acceptance:
+    - claim: "an unmeasurable class no longer refuses the whole calibration"
+      proof: 'grep: test("W1-T5112: an unmeasurable class no longer refuses the whole calibration" in test/dispatch-value-degrades-per-class-and-smooths-its-estimate.test.ts'
+    - claim: "a thin class is scored near the fleet mean rather than refused"
+      proof: 'grep: test("W1-T5112: a thin class is scored near the fleet mean rather than refused" in test/dispatch-value-degrades-per-class-and-smooths-its-estimate.test.ts'
+    - claim: "value is merges per dispatched attempt, not merges over the open backlog"
+      proof: 'grep: test("W1-T5112: value is merges per dispatched attempt, not merges over the open backlog" in test/dispatch-value-degrades-per-class-and-smooths-its-estimate.test.ts'
+  falsifier: |
+    Restore the all-or-nothing return and the first test sees `refused` with docs at zero merges.
