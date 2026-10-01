@@ -1,6 +1,7 @@
 import { inflateRawSync } from "node:zlib";
 import { ghExec } from "./github-transport.js";
 import type { LedgerLine } from "./ledger.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
 import { MUTATION_GATE_VERDICT_STEP } from "./retro.js";
 
 // ── W1-T2927: the host half of the mutation-verdict transport (MASTER-PLAN D-10) ─────────────
@@ -95,7 +96,7 @@ export function ledgerTextFromArtifactZip(zip: Buffer): string | undefined {
     const name = zip.subarray(at + 46, at + 46 + nameLen).toString("utf8");
     const local = zip.readUInt32LE(at + 42);
     at = next;
-    if (name.split("/").pop() !== "ledger.ndjson" || local + 30 > zip.length) continue;
+    if (name.split("/").pop() !== LEDGER_FILENAME || local + 30 > zip.length) continue;
     const start = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);
     const body = zip.subarray(start, start + size);
     if (method === 0) return body.toString("utf8");
