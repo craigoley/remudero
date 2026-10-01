@@ -52,6 +52,7 @@ import {
   type ReadModelDb,
   type ReadModelLease,
 } from "./read-model-db.js";
+import { threadSlowLane, type SlowLane, type SlowLaneConfig } from "./read-model-slow-lane.js";
 import { createRepositoriesReadModelView } from "./repositories-view.js";
 import { createViewShadow, readShadowEvidence, sqliteShadowStore, type ShadowLegacy, type ShadowReadiness, type ShadowRequest, type ViewShadow } from "./view-shadow.js";
 import { oldestAsOf, viewEtag, type ViewBody, type ViewBodyEntry, type ViewSource } from "./views.js";
@@ -894,6 +895,8 @@ export interface ReadModelWorkerData {
   signal: SharedArrayBuffer;
   /** `owner/name` the oracle's escalations are filed on; the worker builds its own issue gateway. */
   escalationRepository?: string;
+  /** The slow lane's units (read-model-slow-lane.ts); absent, no slow lane runs. */
+  slowLane?: SlowLaneConfig;
 }
 
 /** The worker branch's body: tick on a timer until asked to stop, then release and signal. */
@@ -906,7 +909,12 @@ export function runReadModelWorker(
   const stopRequested = (): boolean => Atomics.load(signal, 0) === 1;
   const [owner, repo] = data.escalationRepository?.split("/") ?? [];
   const escalation = owner && repo ? { issues: ghIssueGateway(owner, repo), ledgerPath: join(data.stateDir, LEDGER_FILENAME), runId: READ_MODEL_WORKER_KIND } : undefined;
-  const post = (m: ReadModelWorkerMessage): void => port.postMessage(m);
+  let slowLane: SlowLane | undefined;
+  const post = (m: ReadModelWorkerMessage): void => {
+    if (m.type === "state") slowLane?.lease(m.instances[0]?.lease === "held");
+    port.postMessage(m);
+  };
+  if (data.slowLane) slowLane = threadSlowLane({ config: data.slowLane, log: (step, extra) => post({ type: "log", step, extra }) });
   const now = createNowView({ instances: data.instances, ledgerSource, clock, log: (step, extra) => post({ type: "log", step, extra }) });
   const oracleRunner = threadOracle({ ...(data.escalationRepository ? { escalationRepository: data.escalationRepository } : {}), log: (step, extra) => post({ type: "log", step, extra }) });
   const ticker = createReadModelTicker({
@@ -919,6 +927,7 @@ export function runReadModelWorker(
     if (finished) return;
     finished = true;
     clearTimeout(timer);
+    slowLane?.close();
     const released = ticker.release();
     port.postMessage({ type: "log", step: "read_model.stopped", extra: { released } } satisfies ReadModelWorkerMessage);
     Atomics.store(signal, 1, 1);
@@ -1005,6 +1014,7 @@ export interface ReadModelWorkerOptions {
   every?: (run: () => void, ms: number) => () => void;
   /** What the silent-worker watchdog measures against. */
   clock?: Clock;
+  slowLane?: SlowLaneConfig;
 }
 
 function everyUnref(run: () => void, ms: number): () => void {
@@ -1103,6 +1113,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     const data: ReadModelWorkerData = {
       kind: READ_MODEL_WORKER_KIND, stateDir: opts.stateDir, instances: [...opts.instances], tickMs: opts.tickMs ?? READ_MODEL_TICK_MS, signal: shared,
       ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}),
+      ...(opts.slowLane ? { slowLane: opts.slowLane } : {}),
     };
     const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv });
     signal = new Int32Array(shared);

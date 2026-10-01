@@ -19,9 +19,9 @@ import { appendPanelLedger } from "./panel-actions.js";
  *     rule), declining the newer with a plain reason — one task, not several;
  *   - FILES findings the inbox classification calls ready, through the ordinary `rmd approve`, which
  *     re-checks readiness and opens the same gate-compliant plan PR an operator's approve does.
- * It reads that classification from the snapshot `GET /v1/inbox` writes, so a finding the inbox has
- * retired (merged task, adoption finding gone, resolved referent, superseded) never reaches it, and
- * with no snapshot it does nothing.
+ * It reads that classification from the snapshot serve's slow lane writes on a cadence, whether or not
+ * anyone reads the inbox (inbox-view.ts), so a finding the inbox has retired (merged task, adoption
+ * finding gone, resolved referent, superseded) never reaches it, and with no snapshot it does nothing.
  *
  * PACE, NOT A CAP. It files no more in a day than the fleet merged in the last day, minus what it
  * already filed in that day, so filing follows real throughput, rises when the fleet is fast, and
@@ -54,18 +54,14 @@ export function classificationSnapshotPath(stateDir: string): string {
   return `${stateDir}/inbox-classified.json`;
 }
 
-/** Written by `GET /v1/inbox` on every read: each proposal's current classification state. */
-export function writeClassificationSnapshot(stateDir: string, classifications: Array<{ proposalId: string; state: string }>): void {
+/** Written by serve's slow lane (inbox-view.ts), never by a read: each proposal's current classification state. */
+export function writeClassificationSnapshot(stateDir: string, classifications: Array<{ proposalId: string; state: string }>, clock: Clock = systemClock): void {
   const states: Record<string, string> = {};
   for (const c of classifications) states[c.proposalId] = c.state;
-  writeAtomic(classificationSnapshotPath(stateDir), JSON.stringify({ generatedAt: systemClock.iso(), states }) + "\n");
+  writeAtomic(classificationSnapshotPath(stateDir), JSON.stringify({ generatedAt: clock.iso(), states }) + "\n");
 }
 
-function readClassificationStates(stateDir: string): Record<string, string> | undefined {
-  return readClassificationSnapshot(stateDir)?.states;
-}
-
-/** The last `GET /v1/inbox` classification, with when it was written; undefined when none is readable. */
+/** The last written classification, with when it was written; undefined when none is readable. */
 export function readClassificationSnapshot(stateDir: string): { generatedAt: string | null; states: Record<string, string> } | undefined {
   const raw = readJson(classificationSnapshotPath(stateDir));
   if (!raw) return undefined;
@@ -159,13 +155,18 @@ export interface FleetLanePass {
   merged: string[];
   /** How many more this pass could have filed under the pace. */
   room: number;
+  /** How old the classification this pass acted on was; absent when it carried no time. */
+  classificationAgeMs?: number;
 }
 
 /** One pass over the fleet lane. Pure over its deps except for the ledger rows and approve calls. */
 export function triageFleetLane(deps: FleetLaneDeps): FleetLanePass {
   const now = (deps.clock ?? systemClock).now();
-  const states = readClassificationStates(deps.stateDir);
-  if (!states) return { filed: [], merged: [], room: 0 };
+  const snapshot = readClassificationSnapshot(deps.stateDir);
+  if (!snapshot) return { filed: [], merged: [], room: 0 };
+  const { states } = snapshot;
+  const generatedMs = snapshot.generatedAt === null ? Number.NaN : Date.parse(snapshot.generatedAt);
+  const age = Number.isFinite(generatedMs) ? { classificationAgeMs: now - generatedMs } : {};
   const ledger = readLedger(deps.ledgerPath);
   const store = readFleetLaneStore(deps.stateDir);
   const proposals = parseProposalRegistry(readJson(`${deps.stateDir}/inbox-proposals.json`));
@@ -217,7 +218,7 @@ export function triageFleetLane(deps: FleetLaneDeps): FleetLanePass {
     deps.approve(p.id);
     filed.push(p.id);
   }
-  return { filed, merged, room: room - filed.length };
+  return { filed, merged, room: room - filed.length, ...age };
 }
 
 /** The latest fleet-lane decision per finding, for `GET /v1/inbox`'s fleet list: the lane's own store
@@ -248,7 +249,9 @@ export function startFleetLane(
     running = true;
     try {
       const result = pass();
-      if (result.filed.length + result.merged.length > 0) log("fleet_lane.pass", { filed: result.filed.length, merged: result.merged.length, room: result.room });
+      if (result.filed.length + result.merged.length > 0) {
+        log("fleet_lane.pass", { filed: result.filed.length, merged: result.merged.length, room: result.room, classificationAgeMs: result.classificationAgeMs });
+      }
     } catch (e) {
       log("fleet_lane.failed", { error: String((e as Error)?.message ?? e) });
     } finally {

@@ -157,7 +157,9 @@ writer lease, and how many future-dated rows were quarantined.
 
 `data.inbox`: `{ ready?, needsYou?, fleet?, reason? }`.
 - These are open inbox items by who must act.
-- The source is the classification that `GET /v1/inbox` writes (`state/inbox-classified.json`).
+- The source is `state/inbox-classified.json`, which serve's slow lane (the read-model worker's second thread,
+  `src/lib/read-model-slow-lane.ts`) rewrites every minute with or without a reader: on a change, and at least every
+  5 min. `GET /v1/inbox` writes nothing. The daemon's fleet lane files from the same file.
 
 ## `repositories` (version 2)
 

@@ -289,7 +289,7 @@ export const DEFAULT_SERVE_PORT = 4317;
 
 export interface ServeDeps {
   projectionWorker?: ConsoleProjectionWorker;
-  readModel?: Pick<ReadModelWorkerOptions, "tickMs" | "stopWaitMs" | "workerUrl" | "every">;
+  readModel?: Pick<ReadModelWorkerOptions, "tickMs" | "stopWaitMs" | "workerUrl" | "every" | "slowLane">;
   consoleSnapshots?: { dir: string; prewarmPaths?: readonly string[] };
   /** Injectable ONLY so a unit test can pin the captured sha; real callers omit it and get
    *  {@link resolveConsoleSha}, resolved once at server start. */

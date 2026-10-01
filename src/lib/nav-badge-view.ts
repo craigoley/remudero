@@ -46,8 +46,8 @@ const THRESHOLDS = { minimumRuns: 5, highTokensPerRun: 50_000, queuedTasks: 5, s
 /** An analytics snapshot older than two refresh cycles plus a timed-out scan has missed a refresh. */
 const ANALYTICS_STALE_AFTER_MS = 2 * ANALYTICS_REFRESH_INTERVAL_MS + ANALYTICS_REFRESH_TIMEOUT_MS;
 
-/** `GET /v1/inbox` rewrites the classification on every read, and the console reads it every few seconds while open. */
-const INBOX_STALE_AFTER_MS = 10 * 60_000;
+/** Serve's slow lane rewrites the classification at least every half of this, with or without a reader (inbox-view.ts). */
+export const INBOX_STALE_AFTER_MS = 10 * 60_000;
 
 /** How many visible proposal ids ride with the agent count. */
 const MAX_PROPOSAL_IDS = 20;
