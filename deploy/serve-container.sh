@@ -156,6 +156,10 @@ APP_PRIVATE_KEY_MOUNT_DEST="/home/node/.rmd-github-app-private-key.pem"
 SERVE_PORT_OVERRIDE="${RMD_SERVE_PORT:-}"
 SERVE_PORT="${SERVE_PORT_OVERRIDE:-4317}"
 SERVE_BIND_HOST="0.0.0.0"
+SERVE_SUPERVISOR="${RMD_SERVE_SUPERVISOR:-on}" # docs/operator-guide.md "Serve supervisor"; off = direct launch
+SERVE_GENS_DIR="${RMD_SERVE_GENS_DIR:-${HOME:-/root}/rmd-serve-gens}"
+SERVE_GENS_MOUNT_DEST="/home/node/rmd-serve-gens"
+SERVE_SUPERVISOR_ENTRY="/app/src/lib/serve-supervisor-main.ts"
 SERVE_NETWORK_ENV_VALUE="container"
 
 BANNER_WAIT_S="${RMD_SERVE_BANNER_WAIT_S:-60}"
@@ -232,6 +236,7 @@ if [ -n "${INSTANCE_NAME}" ]; then
 fi
 
 DAEMON_REPO_DIR="${STATE_MOUNT_DEST}/${DAEMON_REPO}"
+if [ -n "${INSTANCE_NAME}" ]; then SERVE_SUPERVISOR=off; fi
 
 # ── 1. REFUSE TO RUN INSIDE A CONTAINER ─────────────────────────────────────────────────────────
 # Same refusal, same reason, as recycle-container.sh section 1: this file is COPYed into the image
@@ -617,6 +622,12 @@ else
   echo "serve-container: resource policy NOT applied — ${SCRIPT_ROOT}/deploy/resource-policy.sh is absent"
 fi
 
+SERVE_GENS_ARGS=()
+SERVE_CMD=(./bin/rmd serve --host "${SERVE_BIND_HOST}" --port "${SERVE_PORT}")
+if [ "${SERVE_SUPERVISOR}" = "on" ]; then
+  SERVE_GENS_ARGS=(-v "${SERVE_GENS_DIR}:${SERVE_GENS_MOUNT_DEST}" -e "RMD_SERVE_GENS_DIR=${SERVE_GENS_MOUNT_DEST}")
+  SERVE_CMD=(sh -c "if [ -f ${SERVE_SUPERVISOR_ENTRY} ]; then exec node --import /app/node_modules/tsx/dist/loader.mjs ${SERVE_SUPERVISOR_ENTRY} -- serve --host ${SERVE_BIND_HOST} --port ${SERVE_PORT}; fi; echo 'rmd-serve: this image has no serve supervisor; serving directly' >&2; exec ./bin/rmd serve --host ${SERVE_BIND_HOST} --port ${SERVE_PORT}")
+fi
 RUN_ARGS=(
   run -d --name "${CONTAINER_NAME}"
   --restart=unless-stopped
@@ -647,8 +658,9 @@ RUN_ARGS=(
   "${GITHUB_WEBHOOK_SECRET_ARGS[@]+"${GITHUB_WEBHOOK_SECRET_ARGS[@]}"}"
   "${OPERATOR_IDENTITY_ARGS[@]+"${OPERATOR_IDENTITY_ARGS[@]}"}"
   "${INGEST_TOKEN_ARGS[@]+"${INGEST_TOKEN_ARGS[@]}"}"
+  "${SERVE_GENS_ARGS[@]+"${SERVE_GENS_ARGS[@]}"}"
   "${REF}"
-  ./bin/rmd serve --host "${SERVE_BIND_HOST}" --port "${SERVE_PORT}"
+  "${SERVE_CMD[@]}"
 )
 
 if [ "${DRY_RUN}" -eq 1 ]; then
@@ -675,6 +687,16 @@ echo "serve-container: preflight docker pull ${REF}"
 if ! docker pull "${REF}" >/dev/null 2>&1; then
   echo "serve-container: REFUSING — target image ${REF} could not be pulled; existing container was left untouched." >&2
   exit 1
+fi
+
+if [ "${SERVE_SUPERVISOR}" = "on" ]; then
+  mkdir -p "${SERVE_GENS_DIR}"
+  if [ ! -w "${SERVE_GENS_DIR}" ]; then
+    echo "serve-container: REFUSING — serve generations directory is not writable by this host user: ${SERVE_GENS_DIR}" >&2
+    echo "  The supervisor checks out and installs the next serve generation there as uid 1000." >&2
+    exit 1
+  fi
+  echo "serve-container: serve supervisor ON — generations in ${SERVE_GENS_DIR} (touch ${SERVE_GENS_DIR}/handoff.off to recycle the old way)"
 fi
 
 if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
