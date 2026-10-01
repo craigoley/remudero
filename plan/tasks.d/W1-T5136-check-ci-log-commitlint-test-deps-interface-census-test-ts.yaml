@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.44
   status: queued
@@ -16,3 +16,13 @@
     - claim: "the check:ci-log:commitlint:test-deps-interface-census-test-ts cause of PR friction has a recorded remedy"
       proof: "grep: ci-friction:check:ci-log:commitlint:test-deps-interface-census-test-ts in docs/ci-friction-remedies.md"
   note: "Filed by the ci-friction gardener (W1-T4435) from a weekly pass over the ledger and gate-fire-rate.ts's own measurement. check:ci-log:commitlint:test-deps-interface-census-test-ts priced at 9 PR minute(s) across 4 round(s) on 3 pull request(s) — the costliest cause with no open task. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person; its remedy is recorded in docs/ci-friction-remedies.md naming \"ci-friction:check:ci-log:commitlint:test-deps-interface-census-test-ts\" once it lands."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.91
+    reasons:
+      - "The filed task asks for a recorded remedy for a measured CI friction cause, and its acceptance criterion targets the declared documentation file."
+      - "The gates state reports filingTime true, and the family track record shows one merged and zero declined machine tasks."
+      - "No actual change view is supplied, so this verdict is based on the filed plan record and gates state, not on code or a diff."
+    judged_at: "2026-10-01T14:44:13.821Z"
+    pin: "59bc5756d1521bb195e216c92f887880489cd312e3201d8aa531165962143854"
