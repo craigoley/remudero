@@ -29,7 +29,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { ifNoneMatchHits } from "./console-snapshot-cache.js";
 import type { ReadModelWorkerHandle } from "./read-model-worker.js";
 import type { Route } from "./service.js";
-import { oldestAsOf, viewEtag, type ViewBodyEntry, type ViewSource } from "./views.js";
+import { oldestAsOf, viewEtag, viewMode, type ViewBodyEntry, type ViewSource } from "./views.js";
 
 export const VIEW_EVENTS_PATH = "/v1/views/events";
 export const VIEW_VERSIONS_PATH = "/v1/views/versions";
@@ -61,7 +61,7 @@ export interface ViewEventsOptions {
   names: readonly string[];
   /** Views that serve their body with no switch entry (the read model's own status). */
   servedByDefault?: readonly string[];
-  readModel?: Pick<ReadModelWorkerHandle, "bodies" | "judge" | "switches" | "onBody">;
+  readModel?: Pick<ReadModelWorkerHandle, "bodies" | "body" | "judge" | "switches" | "onBody">;
   clock?: Clock;
   bootId?: string;
   every?: (run: () => void, ms: number) => () => void;
@@ -127,7 +127,7 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
   const pushOn = (): boolean => opts.readModel?.switches().push === "on";
 
   const served = (name: string): boolean => {
-    const mode = opts.readModel?.switches().views[name];
+    const mode = viewMode(opts.readModel, name);
     return (mode ?? (opts.servedByDefault?.includes(name) ? "serve" : "off")) === "serve";
   };
 

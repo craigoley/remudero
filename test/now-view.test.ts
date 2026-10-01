@@ -41,7 +41,7 @@ import { HOST_PROBE_BUDGET_MS, PLAN_BUDGET_MS } from "../src/lib/view-freshness.
 import { buildBatchedGithub, DEFAULT_LIVENESS_BOUND_MS, readLedgerLines, type GitHub } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { SHADOW_CLASSIFICATIONS, VIEW_SHADOW_DIFF_STEP, createViewShadow, readShadowEvidence } from "../src/lib/view-shadow.js";
-import { viewEtag } from "../src/lib/views.js";
+import { viewEtag, type ViewSwitchMode } from "../src/lib/views.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 type TestCtx = { after: (fn: () => void) => void };
@@ -110,7 +110,7 @@ function rig(t: TestCtx, root: string, name: string, clock: Stepped): Rig {
   };
 }
 
-function ctxOf(clock: Clock, rigs: Rig[], mode: string | null = "shadow", lease: "held" | "elsewhere" = "held"): NowViewContext {
+function ctxOf(clock: Clock, rigs: Rig[], mode: ViewSwitchMode | null = "shadow", lease: "held" | "elsewhere" = "held"): NowViewContext {
   return {
     now: clock.now(),
     ...(mode ? { switches: { views: { now: mode } } } : {}),
@@ -355,6 +355,8 @@ test("the now view stays dark until its switch reads shadow or serve", (t) => {
   assert.equal(view.materialize(ctxOf(clock, [core])).length, 1, "a new generation re-materializes");
   clock.set(T0 + NOW_REFRESH_MS);
   assert.equal(view.materialize(ctxOf(clock, [core])).length, 1, "the clock re-materializes");
+  core.append({ step: "verdict", task_id: "W1-T5", run_id: "r5", verdict: "no_pr" });
+  assert.equal(view.materialize(ctxOf(clock, [core], "auto")).length, 1, "auto builds whatever its readiness");
   const stranger = ctxOf(clock, [core]);
   assert.deepEqual(view.materialize({ ...stranger, instances: [{ ...stranger.instances[0]!, state: { ...stranger.instances[0]!.state, instance: "unknown" } }] }), []);
   assert.deepEqual(logged, []);

@@ -84,7 +84,7 @@ import {
 } from "./ci-incidents.js";
 import { loadEscalationLinkSecret, readEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { classifyAskRecordItem } from "./ask-classification.js";
-import { buildReadModelViewRoutes, type ViewBodySource } from "./views.js";
+import { buildReadModelViewRoutes, viewMode, type ViewBodySource } from "./views.js";
 import { createViewEvents, VIEW_EVENTS_PATH, type ViewEvents } from "./view-events.js";
 import { navBadgeView, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
 import { NOW_VIEW_NAME } from "./now-view.js";
@@ -1831,7 +1831,7 @@ export function buildRegistryRoute(deps: RegistryRouteInput): Route {
     path: "/v1/registry",
     scope: "read",
     handler: async (_req, res) => {
-      const served = deps.readModel?.switches().views[INSTANCES_VIEW_NAME] === "serve" ? deps.readModel.body(INSTANCES_VIEW_NAME) : undefined;
+      const served = deps.readModel && viewMode(deps.readModel, INSTANCES_VIEW_NAME) === "serve" ? deps.readModel.body(INSTANCES_VIEW_NAME) : undefined;
       const answer = served ? registryFromInstances(served.body.data as InstancesData)
         : legacyRegistryBody(await read(deps.repoRegistryPath).then((text): RegistryRead => (text === undefined ? { ok: false, code: "unreadable" } : { ok: true, text })), await read(hostPath));
       sendJson(res, answer.status, answer.status === 200 ? { ...answer.body, generatedAt: clock.iso() } : answer.body);

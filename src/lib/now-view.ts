@@ -13,7 +13,7 @@
  * GitHub facts come from the legacy gateway's persisted snapshot (ruling Q3), which now carries the
  * open half too, so the view adds no GitHub read of its own.
  *
- * DARK: the view materializes only while `switches.views.now` reads `shadow` or `serve`, and no route
+ * DARK: the view materializes only while `switches.views.now` reads `shadow`, `serve` or `auto`, and no route
  * serves it yet (P1-12 declares the route, P1-14 compares it).
  */
 import { execFileSync } from "node:child_process";
@@ -57,7 +57,7 @@ import { windowCostRows } from "./sweep.js";
 import { utcDayWindowMs } from "./time-window.js";
 import { judgeSource, PLAN_BUDGET_MS } from "./view-freshness.js";
 import { legacyRowIndex, type LegacyRows, type ShadowLatest, type ShadowSum } from "./view-shadow.js";
-import type { ViewSource } from "./views.js";
+import { effectiveViewMode, type ViewSource, type ViewSwitchMode } from "./views.js";
 
 export const NOW_VIEW_NAME = "now";
 /** 2: every clock stamp left `data`. 3: `decisions[]`, each with its answer route and tier, replaced `questions`' count (P4-T08). */
@@ -518,7 +518,7 @@ export interface NowViewContext {
   now: number;
   /** `lease`: the writer lease the board projection persists behind; absent, it lives in memory only. */
   instances: ReadonlyArray<{ state: NowSlotState; db?: ReadModelDb; lease?: ReadModelLease }>;
-  switches?: { views: Record<string, string> };
+  switches?: { views: Record<string, ViewSwitchMode> };
 }
 
 /** The instance checkout's plan: core's is serve's own; another's is its managed clone under `<root>/repos/<name>`. */
@@ -736,7 +736,7 @@ export function createNowView(opts: NowViewOptions): {
 
   /** Each held instance this view builds for, with its store; a step that throws drops that build and is logged. */
   function eachInstance(ctx: NowViewContext, run: (instance: NowInstance, entry: { state: NowSlotState; db: ReadModelDb; lease?: ReadModelLease }) => void): void {
-    const mode = ctx.switches?.views[NOW_VIEW_NAME];
+    const mode = effectiveViewMode(ctx.switches?.views[NOW_VIEW_NAME], undefined);
     if (mode !== "shadow" && mode !== "serve") return;
     for (const { state, db, lease } of ctx.instances) {
       const instance = byName.get(state.instance);

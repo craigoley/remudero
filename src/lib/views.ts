@@ -143,7 +143,37 @@ export interface ViewBodyEntry {
 export interface ViewBodySource {
   body(view: string, key?: string): ViewBodyEntry | undefined;
   judge(sources: readonly ViewSource[], now: number): ViewSource[];
-  switches(): { views: Record<string, "serve" | "shadow" | "off"> };
+  switches(): { views: Record<string, ViewSwitchMode> };
+}
+
+/** `auto` serves exactly while the view's shadow readiness reads ready, and is `shadow` otherwise. */
+export type ViewSwitchMode = "serve" | "shadow" | "off" | "auto";
+export type EffectiveViewMode = Exclude<ViewSwitchMode, "auto">;
+/** The read model's own status view, whose body carries every shadowed view's persisted readiness. */
+export const READ_MODEL_STATUS_VIEW = "read-model";
+/** The fields of view-shadow.ts's `ShadowReadiness` an `auto` switch reads (a type import of it would be a cycle). */
+export type ShownReadiness = { ready: boolean; reason: string; samples: number | null; lastRealMs: number | null };
+
+/** `view`'s readiness as the status body last showed it; with none shown it is unknown, so not ready, and says so. */
+export function shownReadiness(readModel: Pick<ViewBodySource, "body"> | undefined, view: string): ShownReadiness {
+  const shown = (readModel?.body(READ_MODEL_STATUS_VIEW)?.body.data as { shadow?: Array<ShownReadiness & { view: string }> } | undefined)?.shadow?.find((r) => r.view === view);
+  return shown ?? { ready: false, reason: "shadow readiness unknown: the read model's status body shows none for this view", samples: null, lastRealMs: null };
+}
+
+/** The mode a switch acts as now. Every switch reader resolves through this, so `auto` means one thing everywhere. */
+export function effectiveViewMode(mode: ViewSwitchMode | undefined, readiness: Pick<ShownReadiness, "ready"> | undefined): EffectiveViewMode | undefined {
+  return mode === "auto" ? (readiness?.ready === true ? "serve" : "shadow") : mode;
+}
+
+/** A view's effective mode as serve's main thread sees it: its switch, and for `auto` the readiness its status body shows. */
+export function viewMode(readModel: Pick<ViewBodySource, "body" | "switches"> | undefined, view: string): EffectiveViewMode | undefined {
+  const mode = readModel?.switches().views[view];
+  return effectiveViewMode(mode, mode === "auto" ? shownReadiness(readModel, view) : undefined);
+}
+
+/** `auto` keeps the comparator sampling while it serves: a served view is demoted only by a diff it is still looked for. */
+export function shadowSampled(mode: ViewSwitchMode | undefined): boolean {
+  return mode === "shadow" || mode === "auto";
 }
 
 export interface ReadModelViewRoutesOptions {
@@ -175,6 +205,7 @@ export interface ReadModelViewRoutesOptions {
  * - `shadow` keeps LEGACY PRIMARY: the legacy computation answers, else 404 `view_shadow` so the console
  *   reads its own legacy routes; every request is offered to the shadow comparator after it finished.
  * - `off` answers from the legacy computation, else 404 `view_disabled`: the console's fallback path.
+ * - `auto` answers as `serve` while {@link effectiveViewMode} says so, else as `shadow`; it is sampled in both.
  *
  * A request reads memory only. The bodies, the instance states and the switches all arrive off the
  * request path (design D5).
@@ -206,9 +237,9 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
         res.end(JSON.stringify({ error: "invalid_request", detail: `the ${name} view needs ?${missing}=` }));
         return;
       }
-      const mode = opts.readModel?.switches().views[name] ?? (opts.servedByDefault?.includes(name) ? "serve" : "off");
+      const mode = viewMode(opts.readModel, name) ?? (opts.servedByDefault?.includes(name) ? "serve" : "off");
       const shadow = opts.shadow;
-      if (mode === "shadow" && shadow) res.once("finish", () => shadow(name, viewKey(params), params));
+      if (shadowSampled(opts.readModel?.switches().views[name]) && shadow) res.once("finish", () => shadow(name, viewKey(params), params));
       const entry = mode === "serve" ? opts.readModel?.body(name, viewKey(params)) : undefined;
       const fallback = legacy.get(name);
       const rendered = entry && opts.readModel ? judged(opts.readModel, entry) : fallback ? renderView(fallback, clock, params) : undefined;
