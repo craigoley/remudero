@@ -135,8 +135,8 @@ function makeOrigin(feedbackId?: string): string {
  *  `opts.ciConclusion` overrides `statusCheckRollup`'s `ci` conclusion (default `SUCCESS`) —
  *  `"FAILURE"` drives `waitForCiGreen` RED on its first poll instead of green, reaching
  *  approveCommand's `ci !== "green"` cleanup branch rather than the review/arm continuation.
- *  `opts.failPrDiff` makes `gh pr diff` (inside `runReview`) exit non-zero — an exception
- *  `reviewCommand` does not itself catch, reaching approveCommand's outer `catch` cleanup.
+ *  `opts.failPrDiff` makes `gh pr diff` (inside `runReview`) exit non-zero — the reviewer
+ *  withholds its verdict and approveCommand returns a failed review without an exception.
  *  `opts.prDiffLive` makes `gh pr diff` print the pushed branch's REAL diff against `main`
  *  instead of nothing — the triage lane's plan-only and provenance guards read it, so an empty
  *  diff stops that run short of its gate.
@@ -840,25 +840,18 @@ test("GUARDED SITE approve ci-red: the REAL gateway reaches the ci!==green clean
   assert.ok(!ledgerLines.some((l) => l.step === "approve.error"), "a red ci is a clean return, never a throw");
 });
 
-// ── run-task.ts's `catch (e) { ...; removeApproveWorktree(); throw e; }` ────────────────────
-// Neither drive above ever throws PAST `result.ok` (the full-success test completes cleanly;
-// the ci-red test returns 1 cleanly) — this is the only remaining branch: `gh pr diff` (inside
-// `runReview`, called only once `ci` IS green) fails non-zero, an exception `reviewCommand`
-// does not itself catch, unwinding through approveCommand's own `catch` — proving it removes
-// the worktree/run-lock and RE-THROWS, rather than swallowing a genuine mid-review failure.
-test("GUARDED SITE approve review-throws: the REAL gateway reaches the catch-cleanup-and-rethrow branch", async () => {
-  let threw: unknown;
+// A diff failure after the PR opens is a review refusal, not an exception from approveCommand.
+// The separate degraded-mint case below still proves the outer catch and cleanup branch.
+test("GUARDED SITE approve unreadable review diff: the REAL gateway withholds the verdict and exits cleanly", async () => {
+  let code: number | undefined;
   const ledgerLines = await withApproveFullHarness("P-REVTHROW", { failPrDiff: true }, async (root) => {
-    await withLiveWritesAllowed(() => approveCommand(["P-REVTHROW"], { config: { claudeBin: "/usr/bin/true", root, installRoot: REPO_ROOT } as never })).catch(
-      (e) => {
-        threw = e;
-      },
-    );
-    return undefined;
+    code = await withLiveWritesAllowed(() => approveCommand(["P-REVTHROW"], { config: { claudeBin: "/usr/bin/true", root, installRoot: REPO_ROOT } as never }));
+    return code;
   });
-  assert.ok(threw, "a mid-review gh failure must unwind all the way out of approveCommand, never resolve silently");
-  assert.ok(ledgerLines.some((l) => l.step === "approve.error"), "the catch block's own ledger line must have fired");
-  assert.ok(ledgerLines.some((l) => l.step === "pr.opened"), "the throw happened AFTER the PR opened (mid-review), not before");
+  assert.equal(code, 2, "an unreadable review diff must leave the PR unapproved");
+  assert.ok(!ledgerLines.some((l) => l.step === "approve.error"), "a withheld review is a clean failed result");
+  assert.ok(ledgerLines.some((l) => l.step === "pr.opened"), "the diff failed after the PR opened");
+  assert.ok(!ledgerLines.some((l) => l.step === "automerge.armed"), "the unreadable diff must never arm merge");
 });
 
 // ── run-task.ts:12761-12775 and :12841-12855 — approveCommand's REAL gateway on a DEGRADED

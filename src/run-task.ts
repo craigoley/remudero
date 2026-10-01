@@ -2476,6 +2476,7 @@ import {
 // (e.g. test/repo-root-identity.test.ts) keeps working unchanged; `repoRoot`/`resolveOwnerRepo`
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
+import { fetchPrDiff } from "./lib/pr-diff.js";
 import { asOwnerRepoUnresolvable } from "./lib/owner-repo.js";
 import { resolveRepoLayout } from "./lib/repo-layout.js";
 export { resolveRepoRoot };
@@ -6619,7 +6620,26 @@ async function runReview(args: {
   }
   // Source-text compatibility for W1-T913's pre-existing ordering proof:
   // execFileSync("gh", ["pr", "diff", prUrl])
-  const diff = ghExec(["pr", "diff", prUrl], { encoding: "utf8", maxBuffer: 1 << 26 });
+  // W1-T3093: `gh pr diff` is refused above 300 files; only that size case falls back to a local comparison.
+  const diffOutcome = fetchPrDiff(prUrl, headSha, {
+    api: (u) => String(ghExec(["pr", "diff", u], { encoding: "utf8", maxBuffer: 1 << 26 })),
+    local: (sha) => execFileSync("git", ["-C", repoRoot, "diff", `origin/main...${sha}`], { encoding: "utf8", maxBuffer: 1 << 26 }),
+  });
+  if (diffOutcome.kind === "refused") {
+    // The pending status remains unsatisfied. Record a named refusal and return a withheld
+    // result so both the CLI and sweep can retry or escalate without losing this attempt.
+    log("review.diff_unreadable", { pr_url: prUrl, head_sha: headSha, reason: diffOutcome.reason });
+    log("review.stood_down", { pr_url: prUrl, head_sha: headSha, reason: diffOutcome.reason });
+    say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${diffOutcome.reason}`);
+    return {
+      state: "failure", criteria: [], testTheater: false,
+      summary: `review stood down: ${diffOutcome.reason}`,
+      floorDegraded: false, capped: false, keywordOnly: false, planOnly: false,
+      headSha, reviewerOutcome: "not_attempted_diff_unreadable", verdictWithheld: diffOutcome.reason,
+    };
+  }
+  if (diffOutcome.source === "local") log("review.diff_local_fallback", { pr_url: prUrl, head_sha: headSha });
+  const diff = diffOutcome.diff;
   const scopeContext = reviewScopeContext(diff, task.files);
   const criteria = task.acceptance ?? [];
   const ownership = reviewReservationOwnershipEvidence(diff, args.headRefName, args.headCheckoutDir);
