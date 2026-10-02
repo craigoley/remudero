@@ -1,0 +1,35 @@
+- id: W1-T5320
+  title: "An audited artifact-retirement workflow for retired Azure state roots: manifest first, reversible archive second, delete only after the retention interval and a fresh reference census"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 100.00
+  rationale: "Operator-observed host facts: core remudero-daemon mounts /home/craigoleyagent/rmd-state2 (named by its systemd and cron configuration); legacy /home/craigoleyagent/rmd-state is inactive and holds only an empty state/ directory; remudero-site has its own protected /mnt/rmd/remudero-site-state; remudero-site-daemon is intentionally exited after a STOP pending the cross-repo proof-runner repair and has no site systemd supervisor yet. Nothing today retires an old state root with evidence, so cleanup would be a guess against live mounts."
+  design: |
+    GATED. The default-path/config inconsistencies must be resolved by the separate multi-repository supervisor task before any old state root is retired; this task must not start retiring until that is proven, and must refuse to run while it is not.
+    NEVER DESTRUCTIVE IN THE FIRST PASS. Do not delete, move, prune or relaunch any active or retained item.
+    PHASE 1, MANIFEST: per artifact record owner, retention reason, byte size, age, and every reference across active Docker mounts, fstab, systemd, cron, deploy scripts and Git worktrees, plus an explicit non-live proof.
+    POSITIVE CONTROLS: the census must be shown to see the live core state root (rmd-state2) and the live site state root (/mnt/rmd/remudero-site-state); a census that cannot see them refuses to certify anything.
+    PHASE 2, ARCHIVE: only eligible artifacts are archived to the data disk with a reversible receipt (restore verified).
+    PHASE 3, DELETE: only after the retention interval has elapsed and a fresh reference census is clean.
+    POST-ACTION CHECKS: neither daemon's source/state mount nor its control marker path changed.
+  acceptance:
+    - claim: "the manifest records owner, retention reason, size, age and all reference classes with a non-live proof per artifact"
+      proof: "unit test: test/state-artifact-retirement-manifest.test.ts"
+    - claim: "positive controls prove the census sees live core and site state, and a blind census refuses to certify"
+      proof: "unit test: test/state-artifact-retirement-census.test.ts"
+    - claim: "archive writes a reversible receipt, and delete refuses before the retention interval or on a stale census"
+      proof: "unit test: test/state-artifact-retirement-archive.test.ts"
+    - claim: "post-action checks prove daemon source/state mounts and control marker paths are unchanged"
+      proof: "unit test: test/state-artifact-retirement-postcheck.test.ts"
+    - claim: "the CLI invokes the gated artifact-retirement workflow"
+      proof: "grep: retireStateArtifacts( in src/run-task.ts"
+  risk: high
+  origin: feedback#fb-1789303258903-a19164
+  plan_refs: ["§7B"]
+  files: [src/state-artifact-retirement.ts, src/run-task.ts, test/state-artifact-retirement-manifest.test.ts, test/state-artifact-retirement-census.test.ts, test/state-artifact-retirement-archive.test.ts, test/state-artifact-retirement-postcheck.test.ts]
+  status: queued
+  attempts: 0
+  note: "risk:high — touches host state roots, though phase 1 is read-only. Gated on the separate multi-repo supervisor task; no depends_on id is set because that task is not yet filed under a known id."

@@ -12,10 +12,11 @@ import {
 } from "../src/lib/board-snapshot-cache.js";
 import type { Clock } from "../src/lib/clock.js";
 import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { NOW_REFRESH_MS, createNowView, planStamp, sharedPlan, snapshotGithub, type NowInstance, type NowViewContext, type NowViewOptions } from "../src/lib/now-view.js";
+import { NOW_REFRESH_MS, createNowView, planStamp, snapshotGithub, type NowInstance, type NowViewContext, type NowViewOptions } from "../src/lib/now-view.js";
 import type { BoardIssueRest, BoardPrRest } from "../src/lib/open-prs-rest.js";
 import { loadPlanQuarantiningDuplicates, type Plan, type Task } from "../src/lib/plan.js";
 import { createTaskView, taskViewKey, type TaskViewData } from "../src/lib/task-view.js";
+import { swapThreadPlanParser, threadPlan } from "../src/lib/thread-plan.js";
 import { TASK_VIEW_NAME, createDemandBook } from "../src/lib/view-demand.js";
 import { acquireLease, type ReadModelDb } from "../src/lib/read-model-db.js";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -281,16 +282,17 @@ function planFile(root: string, title: string): string {
 test("one parse of a plan file serves every caller until its stamp moves", (t) => {
   const path = planFile(scratch(t), "first");
   let loads = 0;
-  const load = (p: string): Plan => (loads++, loadPlanQuarantiningDuplicates(p).plan);
+  const prior = swapThreadPlanParser((p) => (loads++, loadPlanQuarantiningDuplicates(p)));
+  t.after(() => swapThreadPlanParser(prior));
   const stamp = planStamp(path);
-  const a = sharedPlan(path, stamp, load);
-  const b = sharedPlan(path, stamp, load);
+  const a = threadPlan(path);
+  const b = threadPlan(path);
   assert.equal(loads, 1);
   assert.equal(a, b);
   writeFileSync(path, fs.readFileSync(path, "utf8").replace("title: first", "title: second"));
   utimesSync(path, new Date(T0 + 1_000), new Date(T0 + 1_000));
   assert.notEqual(planStamp(path), stamp);
-  assert.equal(sharedPlan(path, planStamp(path), load).byId.get("W1-T1")?.title, "second");
+  assert.equal(threadPlan(path).byId.get("W1-T1")?.title, "second");
   assert.equal(loads, 2, "a moved stamp is read again");
 });
 
@@ -298,11 +300,13 @@ test("the now and task views read one shared parse of their plan", (t) => {
   const { clock, stores, base } = setup(t, ["core"]);
   const planPath = planFile(scratch(t), "the file's title");
   // Seed the thread's memo with a marked parse: a view that loads its own copy shows the file's title instead.
-  const marked = sharedPlan(planPath, planStamp(planPath), (p) => {
-    const plan = loadPlanQuarantiningDuplicates(p).plan;
-    plan.byId.get("W1-T1")!.title = "the shared parse";
-    return plan;
+  const prior = swapThreadPlanParser((p) => {
+    const read = loadPlanQuarantiningDuplicates(p);
+    read.plan.byId.get("W1-T1")!.title = "the shared parse";
+    return read;
   });
+  t.after(() => swapThreadPlanParser(prior));
+  const marked = threadPlan(planPath);
   assert.equal(marked.byId.get("W1-T1")?.title, "the shared parse");
   const instance = { ...base.instances[0]!, planPath };
   const { readPlan: _injected, ...defaults } = base;

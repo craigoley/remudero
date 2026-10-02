@@ -1,0 +1,51 @@
+- id: W1-T5318
+  title: "MOST CLOSED PRS NEVER GET A TERMINAL LEDGER ROW — only 191 of 761 swept PRs carry a recorded merge fact, because verdict.merged is written per PLAN TASK by the sweep's credit backfill, so ledger carry (#8651) keeps every other merged PR's sweep rows in every rotation"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 12.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 5da5b764, 2026-10-02: arch-plan E35 (ledger rotation every ~5 min on the fleet host)"
+  files: [src/lib/sweep.ts, src/lib/ledger-carry.ts, src/lib/ledger.ts, src/run-task.ts, test/w1-t5318-every-closed-pr-has-one-terminal-ledger-row.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-02 on the fleet host (header of src/lib/ledger-carry.ts): the carried core of each
+    rotation was 3.8 MB of a 4 MiB ceiling. 699 KB of it was sweep.disposed rows of 719 PRs that had already
+    merged, but only 191 of the 761 swept PRs carry a recorded merge fact. pruneCarriedRows drops a PR's
+    sweep rows only on such a fact (recordedMergeKey: a verdict.merged row, or a run's verdict row reading
+    merged). So most merged PRs' rows ride every rotation, and the live file rotates about every 5 minutes.
+    WHY MOST MERGES LACK THE ROW. verdict.merged has one writer, runCreditBackfill (src/lib/sweep.ts). Its
+    candidates come from buildCreditCandidates and creditCandidatesFromProjection (src/run-task.ts), which
+    walk PLAN TASKS (projectPlan) and yield at most one PR per task. A PR with no plan task never becomes a
+    candidate: plan filings, gardener and judge PRs, run-unfiled fixes and dependency bumps. Neither does a
+    second PR for a task that is already credited. The run's own verdict merged row (the merge path in
+    src/run-task.ts that logs pr.merged) covers only PRs that a run merged itself. A PR CLOSED without merging
+    gets no terminal row from any writer. Every PR-lifecycle reader therefore sees an open-looking PR forever.
+  design: |
+    Ledger one terminal row per PR, from the PR's own closed state and not from the plan. In the sweep, a
+    reconciler reads GitHub's recently closed PRs, using the merged batch the sweep's gateway already caches
+    (buildBatchedGithub) so no new read is added per poll. For each closed PR the ledger has seen (any row
+    naming its pr_url) that has no terminal row yet, it appends exactly one pr.terminal row with pr_url,
+    pr_number, state (merged or closed), the GitHub merged_at or closed_at time, and source. Dedup reads the
+    union of live file and archives, not the live file alone, so a rotation cannot cause a second row.
+    Register pr.terminal among the carried steps in src/lib/ledger.ts. In src/lib/ledger-carry.ts,
+    recordedMergeKey also treats a pr.terminal row as the PR's terminal fact (merged or closed). The existing
+    keptAfterMerge carve-out (MERGED_KEPT_DISPOSITIONS and keep_head_branch) still keeps the rows that live
+    readers ask for. verdict.merged keeps its per-task credit meaning; pr.terminal does not replace it.
+  acceptance:
+    - claim: "a merged PR that names no plan task gets exactly one terminal merge row"
+      proof: 'grep: test("W1-T5318: a merged PR with no plan task gets exactly one terminal merge row" in test/w1-t5318-every-closed-pr-has-one-terminal-ledger-row.test.ts'
+    - claim: "a PR closed without merging gets exactly one terminal closed row"
+      proof: 'grep: test("W1-T5318: a PR closed without merging gets exactly one terminal closed row" in test/w1-t5318-every-closed-pr-has-one-terminal-ledger-row.test.ts'
+    - claim: "a second reconcile pass, including one after the live file rotated, appends no duplicate terminal row"
+      proof: 'grep: test("W1-T5318: a second reconcile pass appends no duplicate terminal row" in test/w1-t5318-every-closed-pr-has-one-terminal-ledger-row.test.ts'
+    - claim: "ledger carry drops the sweep rows of a PR whose only terminal fact is the new row while still keeping the acted repair-surface rows"
+      proof: 'grep: test("W1-T5318: ledger carry drops the sweep rows of a PR whose only merge fact is the terminal row" in test/w1-t5318-every-closed-pr-has-one-terminal-ledger-row.test.ts'
+  falsifier: |
+    Feed the reconciler only plan-task PRs (today's candidate set) and the first two tests find no terminal
+    row. Drop pr.terminal from recordedMergeKey and the fourth sees the merged PR's sweep rows carried.

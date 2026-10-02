@@ -37,3 +37,11 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 0.84
+    reasons:
+      - "high-risk verdict at confidence 0.84 — on the change's description/files alone, no diff was read — The filing names the measured CI cost and desired prevention, but supplies no proposed mechanism for preventing coverage-ratchet fix rounds; alignment with existing coverage requirements cannot be verified from what is shown.; on the change's description/files alone, no diff was read — The sole acceptance proof greps for a test declaration; that establishes text presence, not that the test passes or the harness prevents the failure.; on the change's description/files alone, no diff was read — The supplied escalation rule explicitly requires HIGH when the finding cannot be verified from the shown evidence."
+    judged_at: "2026-10-02T18:56:08.145Z"
+    pin: "17a861f1f9cd907098b8aee7e8d37f6ed14255c0e1e2833622d682c9bf87cf4c"
