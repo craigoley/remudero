@@ -2,7 +2,6 @@
   title: "AN INBOX THREAD IS POLLED EVERY 8 S AND TOOK 15.2 S COLD — /v1/inbox/threads is a request-time compute; add the on-demand inbox-thread?id= view over the thread store and that proposal's classification, so a reply moves its ETag and push retires the poll"
   repo: remudero
   depends_on: ["W1-T5048"]
-  dispatch_hold: true
   priority: 1
   type: implement
   verify: auto
@@ -37,6 +36,14 @@
     Key the body on the proposal alone: a reply leaves the ETag unchanged and the first proof fails. Rebuild
     on every pass with a fresh timestamp: the second proof sees the ETag move.
   note: |
+    HOLD RELEASED 2026-10-02: P4-T06 merged as #8278 (the paged inbox and feedback views).
+    Verified at origin/main 3966713a: inbox-view.ts builds classified inbox bodies, and the
+    read-model worker relays slow-lane bodies to the view worker. The keyed-view dependency
+    W1-T5048 also merged as #8617; depends_on remains unchanged for the selector to verify.
+    No live run branch or exact recent merged implementation credit exists for this task
+    (99 merged PRs were the corpus control). The hold remained on main and all three open PR
+    heads; each tree contained this task once as the subject-sweep positive control.
+    Historical hold and release condition, now satisfied:
     DISPATCH HOLD: waits for P4-T06 (the inbox view and its per-proposal classification). A Phase 4 critical-path task is hand-built on a run-unfiled
     branch with no plan id, so depends_on cannot name it. RELEASE: one plan amendment deleting
     dispatch_hold once that merges (tracked in arch-plan.md, Phase 4).
