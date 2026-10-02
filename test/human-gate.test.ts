@@ -12,6 +12,7 @@ import { acquireLease } from "../src/lib/read-model-db.js";
 import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
 import type { GitHub } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { resolve, violations } from "./helpers/openapi-strict.js";
 
 const ASKED = "2026-10-02T12:00:00.000Z";
 
@@ -75,6 +76,20 @@ test("change-management gates stay outside the Inbox count", () => {
   assert.deepEqual(result.count.inbox, { count: 1 });
   assert.deepEqual(result.count.changeManagement, { count: 1 });
   assert.deepEqual(result.count.byKind, { escalation: 1 });
+});
+
+test("human gate wire schema declares qualified counts and refuses undeclared fields", () => {
+  const schema = resolve({ $ref: "#/components/schemas/HumanGateProjection" });
+  const complete = projectHumanGates([source([observation("schema")])]);
+  const partial = projectHumanGates([source([], { state: "partial" })]);
+  const unavailable = projectHumanGates([]);
+  for (const value of [complete, partial, unavailable]) assert.deepEqual(violations(value, schema), []);
+  assert.equal(violations({ ...complete, count: { ...complete.count, inbox: { count: 1, atLeast: 1 } } }, schema).length, 1);
+  assert.equal(violations({ ...complete, count: { ...complete.count, inbox: {} } }, schema).length, 1);
+  assert.equal(violations({ ...complete, count: { ...complete.count, byKind: { invented: 1 } } }, schema).length, 1);
+  assert.equal(violations({ ...complete, gates: [{ ...complete.gates[0], title: "not on the wire" }] }, schema).length, 1);
+  assert.equal(violations({ ...complete, gates: [{ ...complete.gates[0], kind: "invented" }] }, schema).length, 1);
+  assert.equal(violations({ ...complete, sources: [{ ...complete.sources[0], state: "invented" }] }, schema).length, 1);
 });
 
 test("source times sort oldest first with deterministic unknown-time and equal-time ordering", () => {
