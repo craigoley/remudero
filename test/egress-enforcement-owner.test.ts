@@ -369,3 +369,14 @@ test("a successful broker leaves no egress_unenforced field on the ledger row", 
   assert.equal("egress_unenforced" in workerLedgerFields({ ...result, egressUnenforced: undefined }), false);
   assert.equal(workerLedgerFields({ ...result, egressUnenforced: "x" }).egress_unenforced, "x");
 });
+
+test("the SOCKS positive control refuses a broker whose SOCKS reply does not match", async (t) => {
+  const proxy = await containment.startWorkerEgressProxy(settings);
+  try {
+    // HTTP's control compares strings and still passes; only the SOCKS reply comparison is made to fail.
+    const mock = t.mock.method(Buffer.prototype, "equals", () => false);
+    try {
+      await assert.rejects(proxy.verifyAllowed(), /worker SOCKS egress positive control failed/);
+    } finally { mock.mock.restore(); }
+  } finally { await proxy.close(); }
+});
