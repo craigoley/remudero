@@ -296,6 +296,33 @@ test("W1-T4938: corrupt existing gardener state refuses a duplicate PR", () => {
   }
 });
 
+test("W1-T5073: corrupt effects refuse a gardener pass without losing verdicts", () => {
+  const dir = stateDir();
+  const inv: Inv = { version: 1, metrics: { a: { trials: 0, successes: 0 }, b: { trials: 0, successes: 0 } } };
+  const path = gardenEffectsPath(dir, "demo");
+  const statePath = gardenStatePath(dir, "demo");
+  const state = JSON.stringify(initialGardenState(["a", "b"]));
+  writeFileSync(statePath, state);
+  const landed: Array<{ title: string; body: string }> = [];
+  const rows: Array<[string, Record<string, unknown> | undefined]> = [];
+  const deps = { stateDir: dir, repoRoot: dir, openWorkspace: checkout(landed), log: (step: string, extra?: Record<string, unknown>) => rows.push([step, extra]), seed: 1 };
+  for (const bytes of ["{bad", JSON.stringify({ effects: [{ id: "e1" }] })]) {
+    writeFileSync(path, bytes);
+    assert.throws(() => runGarden(spec(inv), deps), /demo-gardener-effects\.json.*(unparseable|malformed)/);
+    assert.equal(readFileSync(path, "utf8"), bytes);
+    assert.equal(readFileSync(statePath, "utf8"), state);
+    assert.equal(landed.length, 0);
+  }
+  const timer = startGarden(spec(inv), deps, 1000);
+  timer.stop();
+  const failure = rows.find(([step]) => step === "demo.gardener_failed")?.[1];
+  assert.equal(failure?.path, path);
+  assert.equal(failure?.failure_class, "malformed");
+  writeFileSync(path, JSON.stringify({ effects: [{ id: "e1", actionClass: "a", verdict: "credit", kind: "effect", at: "2026-09-30T00:00:00Z" }] }));
+  runGarden(spec(inv, { candidates: () => [] }), deps);
+  assert.equal(readGardenState(statePath, ["a", "b"]).classes.a.alpha, 4);
+});
+
 test("W1-T4938: first boot and compatible older gardener state still load", () => {
   const inv: Inv = { version: 1, metrics: { a: { trials: 0, successes: 0 }, b: { trials: 0, successes: 0 } } };
   // No file: the reader returns the prior, and one pass initializes and records the state.
