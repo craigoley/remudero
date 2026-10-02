@@ -1,0 +1,59 @@
+- id: W1-T100001
+  title: "The Inbox cannot show conversations while its first list read waits for a fleet-wide classification pass — serve a source-qualified thread-list projection outside the request path"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: medium
+  origin: "2026-10-02 operator Inbox usability report and live re-check"
+  plan_refs: ["W1-T5049", "W1-T4261"]
+  files:
+    - src/lib/panel-graph.ts
+    - src/lib/inbox-thread-list-view.ts
+    - src/lib/read-model-worker.ts
+    - test/inbox-thread-list-view.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at 747ec739781ce27f96c4558e65204576863b6a1f: buildInboxThreadsRoute in
+    src/lib/panel-graph.ts awaits classifyAllProposalsSliced before sending its list. The live
+    console reports /v1/inbox/threads timed out after 5000 ms. Its current client accepts the
+    legacy threads body as verified; an ignored stale flag would therefore be unsafe.
+    Issue #8451 covers classification-source freshness, and W1-T5049 covers a keyed single-thread
+    view. This task owns the initial LIST path, not their replacement or a timeout increase.
+  design: |
+    Reuse the existing maintained classification/read-model machinery after inspecting current
+    head and the open issue #8451 work. Build a thread-list projection outside the HTTP handler,
+    keyed by thread messages, read marks, plan/proposal inputs and classification source identity.
+    Warm it without a browser request and coalesce concurrent refresh work. A first GET must not
+    await a full proposal-classification pass, and a reply/read/input change must invalidate the
+    correct projection. Preserve thread identity, ownership and decision semantics.
+    Only source-verified fresh rows may use the legacy successful threads response. Missing,
+    unreadable or partial source evidence must remain explicit unavailable, never an empty success.
+    If serving stale/partial rows requires a versioned envelope, negotiate the capability and file
+    the narrow console consumer separately; old clients must not silently mark those rows verified.
+    Retain source age and completeness independently of projection-build time. Measure real cold
+    and warm list latency, classifier work and coalescing, with a positive-control non-empty corpus.
+    The existing five-second console timeout is a compatibility observation, not a new PR gate.
+    Failure of this read projection must not block unrelated PR flow or mutate routing.
+  acceptance:
+    - claim: "a first thread-list read does not await a deliberately blocked classifier"
+      proof: 'grep: first thread-list read does not await a blocked classifier in test/inbox-thread-list-view.test.ts'
+    - claim: "missing or incomplete source evidence cannot become a verified empty inbox"
+      proof: 'grep: incomplete thread-list evidence is not a verified empty inbox in test/inbox-thread-list-view.test.ts'
+    - claim: "reply, read cursor and proposal input changes invalidate the appropriate list projection"
+      proof: 'grep: thread-list inputs invalidate the projection in test/inbox-thread-list-view.test.ts'
+    - claim: "concurrent reads share maintained projection work and retain the source timestamp"
+      proof: 'grep: concurrent thread-list reads retain source age in test/inbox-thread-list-view.test.ts'
+  falsifier: |
+    Replace the maintained projection read with classifyAllProposalsSliced: the blocked-classifier
+    test cannot return. Return {threads: []} on source failure: the evidence test rejects it.
+    Use build time as source time or omit reply/read invalidation: the remaining tests fail.
+  note: |
+    Reserved on refs/rmd-id/W1-T100001 for codex/inbox-thread-list-budget-plan. No live run branch
+    or exact merged task credit was found (99 merged PRs were the corpus control). Subject counts
+    on main and six fetched open PR heads were zero for this list projection; W1-T5049 was present
+    once on every tree as the positive control. This is a plan-only filing, not implementation credit.
