@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readRoutingDailyStatus } from "../src/lib/routing-daily-status.js";
 import { fixedClock } from "../src/lib/clock.js";
@@ -59,5 +59,18 @@ test("analytics serves bounded daily freshness through the configured state dire
       { writeHead: () => {}, end: (value: string) => { body = value; } } as never, { params: {} });
     assert.equal(JSON.parse(body).state, "fresh");
     assert.equal(JSON.parse(body).sources.length, 1);
+  } finally { f.close(); }
+});
+
+
+test("daily review refuses symlink replacement of its private report", () => {
+  const f = fixture();
+  try {
+    const alternate = f.path + ".alternate";
+    writeFileSync(alternate, JSON.stringify(report()));
+    symlinkSync(alternate, f.path);
+    const result = readRoutingDailyStatus(f.dir, now);
+    assert.equal(result.state, "unavailable");
+    assert.deepEqual(result.alerts, ["daily-review-unreadable"]);
   } finally { f.close(); }
 });
