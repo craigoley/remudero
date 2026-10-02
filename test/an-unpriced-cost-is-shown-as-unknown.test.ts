@@ -1,17 +1,42 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { accumulateUsageLine, buildUsageProjection, usageTelemetryState } from "../src/lib/usage-telemetry.js";
 import { createAnalyticsSnapshotCache, writeAnalyticsCheckpoint, deriveAnalyticsSnapshot, deriveAnalyticsSnapshotFromCheckpointedLedger } from "../src/lib/analytics-route.js";
 import { deriveDayUnpricedRows, checkCostGovernor, DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
+import { costGovernorGateFor } from "../src/run-task.js";
 
 const now = "2026-10-02T12:00:00Z";
 const rows = [undefined, 0, 2, -1, NaN].map((cost, i) => ({
   step: "implement.done", ts: "2026-10-02T11:00:00Z", run_id: `R${i}`, provider: "cash", model: "model-a", lane: "implement",
   ...(cost === undefined ? {} : { total_cost_usd: cost }),
 }));
+
+test("the governor records changed uncertainty once and keeps the known dollar ceiling enforced", () => {
+  const fixture = writeLedger([...rows, { step: "verdict", ts: "2026-10-02T11:00:00Z", run_id: "DAY-KNOWN", cost_usd: 2 }]);
+  try {
+    const gate = costGovernorGateFor(fixture.path, "GOVERNOR-RUN", () => Date.parse(now));
+    const receipts = () => readFileSync(fixture.path, "utf8").trim().split("\n").map(line => JSON.parse(line))
+      .filter(row => row.step === "cost_governor.uncertain");
+    assert.equal(gate(25), undefined);
+    assert.deepEqual(receipts().map(row => [row.known_day_cost_usd, row.unpriced_rows, row.cost_basis, row.cash_admission]),
+      [[2, 3, "notional-ledger", "conservative-reservation"]]);
+    assert.equal(gate(25), undefined);
+    assert.equal(receipts().length, 1, "an unchanged consultation does not repeat its receipt");
+    fixture.append([{ ...rows[0]!, run_id: "missing-again" }]);
+    assert.equal(gate(25), undefined);
+    assert.deepEqual(receipts().map(row => row.unpriced_rows), [3, 4]);
+    fixture.append([{ step: "verdict", ts: "2026-10-02T11:00:00Z", run_id: "priced-again", cost_usd: 30 }]);
+    const blocked = gate(25)!;
+    assert.equal(blocked.deferred, true);
+    assert.equal(blocked.costState, "uncertain");
+    assert.equal(blocked.observedDayCostUsd, 32);
+    assert.equal(blocked.unpricedRows, 4);
+    assert.equal(receipts().length, 3);
+  } finally { rmSync(fixture.dir, { recursive: true, force: true }); }
+});
 
 test("W1-T4687: a row with no recorded cost is counted as unpriced, never as zero", () => {
   const state = usageTelemetryState();
