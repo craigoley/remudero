@@ -1,0 +1,46 @@
+- id: W1-T5372
+  title: "Surface feedback decisions with measured triage age and readable question context"
+  repo: remudero
+  depends_on: [W1-T5332]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "2026-10-02 operator approved the human-gate implementation follow-ups"
+  plan_refs: [W1-T5021, W1-T2278]
+  files: [src/lib/human-gate.ts, src/lib/now-view.ts, src/lib/now-decisions.ts, test/human-gate-feedback.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at 009a9111cf38344f6ee79c96f8fd18219a0b3688: the approved design's
+    slice 6 adds proposed and ageing new feedback. Existing grilling entries include
+    technical work and previously answered policy, so an ID alone is not a decision card.
+  design: |
+    Implement projectFeedbackGates and consume it in now-view. Preserve the source's full
+    question, summary, timestamp and existing resolution URL. Proposed feedback awaiting a
+    real choice is one source-qualified ask; accepted, rejected and answered entries are
+    records. A grilling entry with a durable recorded answer is not a new policy choice;
+    surface lifecycle inconsistency as repair evidence, without silently rewriting it here.
+    Measure time from new feedback to triage using consenting enrolled roots and all ledger
+    rotation forms, with positive controls, observation-window coverage and censored entries.
+    Record the resulting age evidence in the implementation PR before choosing a threshold.
+    A new entry within the measured window remains machine work; overdue unclaimed feedback
+    remains visible with a triage resolution verb. Do not confuse ageing with permission
+    to approve, fabricate a bound from an empty sample, enable disabled auto-triage, or block PRs.
+    If no usable age evidence exists, expose an explicitly uncalibrated source/backlog and
+    emit one deduplicated evidence-collection follow-up rather than a verified zero.
+  acceptance:
+    - claim: "the production now view consumes the feedback adapter"
+      proof: 'grep: projectFeedbackGates( in src/lib/now-view.ts'
+    - claim: "only unresolved choices become feedback decision gates"
+      proof: 'grep: resolved feedback remains a record and an unanswered proposal remains an ask in test/human-gate-feedback.test.ts'
+    - claim: "triage age is measured rather than guessed or fabricated from zero"
+      proof: 'grep: feedback age uses measured evidence and preserves uncalibrated windows in test/human-gate-feedback.test.ts'
+    - claim: "an existing operator answer is not presented as a fresh policy decision"
+      proof: 'grep: recorded answers expose lifecycle repair rather than repeat a settled question in test/human-gate-feedback.test.ts'
+  falsifier: |
+    Count accepted feedback as an ask, invent a timeout from an uncovered window,
+    or lose the existing question context: the corresponding fixture fails.
