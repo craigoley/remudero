@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 
 import type { SummarizeDeps } from "./feedback.js";
@@ -47,6 +48,8 @@ export interface PlainInboxMessage {
   options: PlainOption[];
   /** Who wrote it: the model writer, or the per-kind template. */
   source: "writer" | "template";
+  /** Cache provenance, not a verification of the writer's factual claims. */
+  sourceFingerprint?: string;
 }
 
 /** Who speaks every inbox message — the standard's first part. */
@@ -103,9 +106,8 @@ export function checkPlainMessage(m: PlainInboxMessage): PlainCheckResult {
 // ── The per-kind templates ─────────────────────────────────────────────────────────────────────
 
 const ASK_OPTIONS: PlainOption[] = [
-  { label: "Go ahead", consequence: "The fleet turns this into planned work and starts on it." },
-  { label: "Drop it", consequence: "The item is closed. You can bring it back later." },
-  { label: "Change it", consequence: "Tell the daemon what to change, and it redrafts the item." },
+  { label: "Explain this item", consequence: "Ask for the original evidence and exact decision." },
+  { label: "Leave undecided", consequence: "This summary alone provides no authorization to act." },
 ];
 
 function daysWaiting(summary: string): string {
@@ -131,15 +133,15 @@ const fleetFinding = (what: string, headline: string): Template => () => ({
 const TEMPLATES: Record<string, Template> = {
   "verify-human": (summary) => ({
     headline: "A planned task needs a person to check it",
-    whatHappened: `This task was set aside for a person to check by hand, and it has waited ${daysWaiting(summary)}. An automatic review looked again and agrees it still needs you.`,
-    whatWeNeed: "Decide whether the fleet should go ahead, drop the task, or change it.",
-    ifNothingHappens: "The task stays blocked, and any work that depends on it keeps waiting.",
+    whatHappened: `The record asks for a manual check and reports a wait of ${daysWaiting(summary)}. This summary does not verify the task's current status.`,
+    whatWeNeed: "Review the original question and current evidence before deciding.",
+    ifNothingHappens: "No decision is made here. Check the current task for any blocked work.",
   }),
   ruling: () => ({
     headline: "A decision is waiting for your ruling",
-    whatHappened: "The fleet reached a question that only you can decide, so it stopped and asked.",
-    whatWeNeed: "Choose how the fleet should proceed.",
-    ifNothingHappens: "The work behind this question stays paused.",
+    whatHappened: "The record requests an operator ruling; this summary does not verify the question or its current status.",
+    whatWeNeed: "Read the recorded question and confirm its scope before deciding.",
+    ifNothingHappens: "No decision is recorded by viewing this summary.",
   }),
   adoption: fleetFinding(
     "A feature was added to the code some time ago, but nothing uses it yet.",
@@ -177,9 +179,9 @@ const TEMPLATES: Record<string, Template> = {
 
 const UNKNOWN_TEMPLATE: Template = () => ({
   headline: "The fleet has an item for you to look at",
-  whatHappened: "A part of the fleet raised this item, and it is a new kind the daemon has not seen before.",
-  whatWeNeed: "Read the details and decide whether the fleet should go ahead, drop it, or change it.",
-  ifNothingHappens: "The item stays in your inbox.",
+  whatHappened: "A record is available, but this summary does not verify its current facts or requested action.",
+  whatWeNeed: "Read the original details before making a decision.",
+  ifNothingHappens: "No decision or change is made by viewing this summary.",
 });
 
 /** The kinds that have a written template (every kind seen live on 2026-09-22). */
@@ -247,6 +249,10 @@ export async function writePlainMessage(
 
 export type PlainStore = Record<string, PlainInboxMessage>;
 
+export function plainSourceFingerprint(proposal: { id: string; summary: string }): string {
+  return createHash("sha256").update(JSON.stringify(["inbox-plain-v2", proposal.id, proposal.summary])).digest("hex");
+}
+
 export function plainStorePath(stateDir: string): string {
   return `${stateDir}/inbox-plain.json`;
 }
@@ -263,12 +269,19 @@ export function readPlainStore(path: string): PlainStore {
   }
 }
 
-/** The plain message the console shows for one item: the stored one if it still passes the
- *  check, otherwise the template. Pure over its inputs. */
-export function plainInboxMessage(proposal: { id: string; summary: string }, store: PlainStore): PlainInboxMessage {
+function currentStoredMessage(proposal: { id: string; summary: string }, store: PlainStore): PlainInboxMessage | undefined {
   const stored = store[proposal.id];
-  if (stored && checkPlainMessage(stored).ok) return stored;
-  return plainTemplate(proposal);
+  if (stored?.sourceFingerprint !== plainSourceFingerprint(proposal)) return undefined;
+  try {
+    return checkPlainMessage(stored).ok ? stored : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Legacy or changed-source messages remain in the store but cannot be rendered as current. */
+export function plainInboxMessage(proposal: { id: string; summary: string }, store: PlainStore): PlainInboxMessage {
+  return currentStoredMessage(proposal, store) ?? plainTemplate(proposal);
 }
 
 export interface PlainBackfillDeps {
@@ -277,21 +290,27 @@ export interface PlainBackfillDeps {
   summarize?: SummarizeDeps["summarize"];
 }
 
-/** Write plain messages for operator-owned items that have none yet, oldest registry order first,
+/** Write plain messages for operator-owned items with no current message, oldest registry order first,
  *  one at a time so a slow writer never piles up. Returns how many it wrote. */
 export async function backfillPlainMessages(deps: PlainBackfillDeps, max: number): Promise<number> {
   const path = plainStorePath(deps.stateDir);
+  const snapshot = readPlainStore(path);
   const pending = deps
     .readProposals()
-    .filter((p) => inboxOwner(p) === "operator" && !readPlainStore(path)[p.id])
+    .filter((p) => inboxOwner(p) === "operator" && !currentStoredMessage(p, snapshot))
     .slice(0, max);
+  let written = 0;
   for (const proposal of pending) {
     const message = await writePlainMessage(proposal, { summarize: deps.summarize });
+    const current = deps.readProposals().find((p) => p.id === proposal.id);
+    if (!current || inboxOwner(current) !== "operator" || plainSourceFingerprint(current) !== plainSourceFingerprint(proposal)) continue;
     const store = readPlainStore(path);
-    store[proposal.id] = message;
+    if (currentStoredMessage(current, store)) continue;
+    store[proposal.id] = { ...message, sourceFingerprint: plainSourceFingerprint(proposal) };
     writeAtomic(path, JSON.stringify(store, null, 2) + "\n");
+    written += 1;
   }
-  return pending.length;
+  return written;
 }
 
 /** Run {@link backfillPlainMessages} on its own timer, one item per tick, never two at once — the
