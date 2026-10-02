@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
-import { runPreflightCoverage } from "../src/lib/ci-parity.js";
+import { runPreflightCoverage as runPreflightCoverageEngine, type PreflightCoverageDeps } from "../src/lib/ci-parity.js";
 import { FAST_GATE_STEPS, runPreflightFast } from "../src/lib/ci-parity.js";
 import { preflightCommand } from "../src/run-task.js";
 import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
@@ -21,6 +21,11 @@ import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
 // no test suite now that this mode exists beside it.
 
 const REPO_ROOT = process.cwd();
+
+// These fixtures fake the coverage subprocess while the outer full gate owns the real lock.
+function runPreflightCoverage(repoRoot: string, deps: PreflightCoverageDeps = {}) {
+  return runPreflightCoverageEngine(repoRoot, { ...deps, coverageLockDiscriminator: randomUUID() });
+}
 
 /** Records every spawn call and answers from a lookup table keyed by a substring of
  *  `[file, ...args].join(" ")`, falling back to a clean `{status: 0}` for anything unlisted —
@@ -65,7 +70,7 @@ test("runPreflightCoverage: takes no diff/range parameter at all — a caller ca
   // `(repoRoot, deps = {})` reports 1 — that itself is the falsifiable part of this claim: a
   // THIRD parameter (a diff, a range) would push the count to 2 whether or not it carried a
   // default, so 1 proves no scope/diff-injecting parameter exists alongside `deps`.
-  assert.equal(runPreflightCoverage.length, 1, "runPreflightCoverage must accept only (repoRoot, deps = {}) — no scope/diff-injecting parameter");
+  assert.equal(runPreflightCoverageEngine.length, 1, "runPreflightCoverage must accept only (repoRoot, deps = {}) — no scope/diff-injecting parameter");
 });
 
 test("runPreflightCoverage: refreshes origin/main (git fetch) BEFORE deriving the three-dot changed-file list, and BEFORE the diff piped into diff-coverage.mjs", () => {
@@ -280,7 +285,11 @@ test(
     // That is exactly why diff-coverage reported those lines as added-and-uncovered. This test
     // omits `lcovText` so the REAL read runs, against a repoRoot that carries no
     // `coverage/lcov.info` at all, so it throws and the catch arm is the thing under test.
-    const emptyRoot = mkdtempSync(join(tmpdir(), "preflight-coverage-no-lcov-"));
+    // This is a second fake repository. Anchor it outside the parent gate's nested TMPDIR so
+    // this fixture reaches the unreadable-lcov arm, not the unrelated scratch path-length guard.
+    const emptyRoot = mkdtempSync(join("/tmp", "rmd-no-lcov-"));
+    const previousTmp = process.env.TMPDIR;
+    process.env.TMPDIR = "/tmp";
     try {
       const { spawn, calls } = recordingSpawn({
         [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
@@ -307,6 +316,8 @@ test(
       const diffCoverageCalled = calls.some((c) => c.args.some((a) => a.includes("diff-coverage.mjs")));
       assert.equal(diffCoverageCalled, false, "diff-coverage.mjs is never asked for a verdict over an lcov that could not be read");
     } finally {
+      if (previousTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTmp;
       rmSync(emptyRoot, { recursive: true, force: true });
     }
   },
@@ -376,14 +387,14 @@ test("preflightCommand: --coverage ADDS the coverage-mode steps after the three 
   };
   let code: number;
   try {
-    code = await preflightCommand(["--coverage"], { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
+    code = await preflightCommand(["--coverage"], { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER, coverageLockDiscriminator: randomUUID() });
   } finally {
     console.log = originalLog;
   }
   assert.equal(code, 1, "an empty-diff refusal under --coverage must fail the overall command even when the three hand-route steps are clean");
   assert.ok(lines.some((l) => l.includes("typecheck: PASS")), "the hand-route steps still print");
   assert.ok(lines.some((l) => l.includes("coverage-mode:diff-scope") && l.includes("REFUSED")), "the coverage-mode steps print too, under --coverage");
-  assert.equal(lines.some((l) => l.includes("ci-parity")), false, "no --ci-parity output when only --coverage was passed");
+  assert.equal(lines.some((l) => l.startsWith("ci-parity:")), false, "no --ci-parity step output when only --coverage was passed");
 });
 
 test("preflightCommand: WITHOUT --coverage, no coverage-mode step runs or prints — the shipped hand route (and --ci-parity/--fast) is untouched", async () => {
@@ -417,7 +428,7 @@ test("preflightCommand: --coverage is a recognised flag — passing it never tri
   };
   let code: number;
   try {
-    code = await preflightCommand(["--coverage"], { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
+    code = await preflightCommand(["--coverage"], { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER, coverageLockDiscriminator: randomUUID() });
   } finally {
     console.error = originalError;
   }

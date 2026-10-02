@@ -14,6 +14,7 @@
  * step existed (acceptance 5).
  */
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -205,7 +206,7 @@ test("CI_PARITY_TABLE: the 'ci' job entry runs a DEDICATED ci:host-caused-suite-
 
 test("runCiParity: ci:host-caused-suite-reds is present in the full run's steps and reports independently — same discipline as every other named step", () => {
   const { spawn } = recordingSpawn();
-  const result = runCiParity(REPO_ROOT, { spawn });
+  const result = runCiParity(REPO_ROOT, { spawn, coverageLockDiscriminator: randomUUID() });
   const step = result.steps.find((s) => s.name === "ci:host-caused-suite-reds")!;
   assert.ok(step, "expected the step in the full runCiParity output");
   assert.equal(step.ok, true);
@@ -254,7 +255,7 @@ test("computeHostFacts / parseBashMajorVersion: an UNPARSEABLE or missing bash v
 
 test("runCiParity: ci:test's own FAIL is completely unaffected by ci:host-caused-suite-reds — a diff-caused (or ANY undeclared) red stays loud and blocking regardless of what the triage step names", () => {
   const { spawn } = recordingSpawn({ "npm run test:ci": { status: 1, stderr: "not ok 1 - some brand new test this diff broke" } });
-  const result = runCiParity(REPO_ROOT, { spawn });
+  const result = runCiParity(REPO_ROOT, { spawn, coverageLockDiscriminator: randomUUID() });
 
   const ciTest = result.steps.find((s) => s.name === "ci:test")!;
   assert.equal(ciTest.ok, false, "ci:test's own exit-code-derived verdict is untouched");
@@ -336,7 +337,7 @@ test("the pole axis cannot alter ci:test's verdict — every fact combination st
   for (const facts of combos) assert.equal(hostCausedSuiteRedsStep(facts).ok, true);
 
   const { spawn } = recordingSpawn({ "npm run test:ci": { status: 1, stderr: "not ok 1 - independent suite failure" } });
-  const result = runCiParity(REPO_ROOT, { spawn });
+  const result = runCiParity(REPO_ROOT, { spawn, coverageLockDiscriminator: randomUUID() });
   assert.equal(result.steps.find((step) => step.name === "ci:test")?.ok, false);
   assert.equal(result.steps.find((step) => step.name === "ci:host-caused-suite-reds")?.ok, true);
 });

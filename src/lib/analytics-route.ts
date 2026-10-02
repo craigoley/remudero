@@ -2055,6 +2055,7 @@ export interface AnalyticsSnapshotCache {
   start(): void;
   stop(): void;
   shed(): void;
+  restore(reason: string): Promise<void>;
 }
 
 function freezeAnalyticsSnapshot(value: AnalyticsSnapshot): AnalyticsSnapshot {
@@ -2271,6 +2272,7 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
   let inFlight: Promise<void> | undefined;
   let started = false;
   let stopped = false;
+  let shedPending = false;
 
   const cancelTimer = (): void => {
     timer?.cancel();
@@ -2329,6 +2331,7 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
           if (hasRetainedEvidence && sourceReadable) writeAnalyticsCheckpoint(deps.stateDir, result.checkpoint);
         }
         value = freezeAnalyticsSnapshot(next);
+        shedPending = false;
         log("serve.analytics_refresh.completed", {
           duration_ms: Math.max(0, clock.now() - beganAt),
           as_of: value.asOf,
@@ -2378,7 +2381,13 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
     shed: () => {
       value = coldAnalyticsSnapshot();
       checkpoint = undefined;
+      shedPending = true;
       log("serve.analytics_shed", {});
+    },
+    restore: (reason) => {
+      if (!shedPending) return Promise.resolve();
+      log("serve.analytics_restore", { reason });
+      return refresh();
     },
   };
 }

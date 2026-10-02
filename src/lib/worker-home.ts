@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 
 import { randomBytes, randomUUID } from "node:crypto";
 import {
+  chmodSync,
   closeSync,
   existsSync,
   linkSync,
@@ -77,6 +78,54 @@ export interface WorkerHomeSymlink {
  *  when it exists and to the wholesale `.claude` when it does not, so upgrading before the sibling is
  *  populated breaks no host. // Why: docs/forensics/worker-home.md#the-claude-grant. */
 export const WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH = ".claude-fleet";
+
+const claudeFleetSeedFsOps = { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, rmSync, chmodSync };
+type ClaudeFleetSeedFsOps = typeof claudeFleetSeedFsOps;
+
+/** Seed the real home's credential-only grant once, before a worker home is planned. The exclusive
+ * directory create protects a refreshed token from concurrent spawns; an existing sibling is owned
+ * by the worker's token refresh and must never be copied over. */
+export function seedClaudeFleetCredentials(opts: {
+  realHome: string;
+  fsImpl?: Partial<ClaudeFleetSeedFsOps>;
+}): void {
+  const f = { ...claudeFleetSeedFsOps, ...opts.fsImpl };
+  const targetDir = join(opts.realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
+  if (f.existsSync(targetDir)) return;
+
+  let credential: Buffer;
+  try {
+    credential = f.readFileSync(join(opts.realHome, ".claude", ".credentials.json"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+
+  // Prepare the private file before publishing the directory, then claim the directory with an
+  // exclusive mkdir. A competing seed gets EEXIST and leaves the winner's token untouched.
+  const stagedFile = join(opts.realHome, `.claude-fleet-seed-${randomUUID()}`);
+  let createdDir = false;
+  let published = false;
+  try {
+    f.writeFileSync(stagedFile, credential, { mode: 0o600, flag: "wx" });
+    f.chmodSync(stagedFile, 0o600);
+    try {
+      f.mkdirSync(targetDir, { mode: 0o700 });
+      createdDir = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+      throw error;
+    }
+    f.chmodSync(targetDir, 0o700);
+    f.renameSync(stagedFile, join(targetDir, ".credentials.json"));
+    published = true;
+  } finally {
+    if (!published) {
+      f.rmSync(stagedFile, { force: true });
+      if (createdDir) f.rmSync(targetDir, { recursive: true, force: true });
+    }
+  }
+}
 
 /** Where Playwright keeps its browser builds. `PLAYWRIGHT_BROWSERS_PATH` wins when set to a real path, which is how CI
  *  images relocate the cache; the literal `"0"` means "inside node_modules" and is NOT a directory, so it falls
@@ -369,6 +418,15 @@ export class WorkerHomePlacementError extends Error {
         "inside a git work tree; point workerHomeRoot (or root) somewhere outside every checkout.",
     );
   }
+}
+
+/** Spawn entry point: publish the narrow real-home grant before materialization resolves `.claude`.
+ * Keep the placement refusal ahead of the seed so an invalid worker home writes nothing. */
+export function materializeSpawnWorkerHome(opts: Parameters<typeof materializeWorkerHome>[0]): WorkerHomePlan {
+  const gitAncestor = gitWorkTreeAncestor(opts.workerHome, opts.exists ?? existsSync);
+  if (gitAncestor) throw new WorkerHomePlacementError(opts.workerHome, gitAncestor);
+  seedClaudeFleetCredentials({ realHome: opts.realHome });
+  return materializeWorkerHome(opts);
 }
 
 /** Materialize a {@link WorkerHomePlan} on disk: guarantee every rc file exists and is EMPTY, and

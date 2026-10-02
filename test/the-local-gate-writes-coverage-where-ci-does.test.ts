@@ -16,6 +16,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, realpathSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -43,14 +44,15 @@ function coverageCall(repoRoot = REPO_ROOT): { args: string[]; env?: NodeJS.Proc
   const calls: { args: string[]; env?: NodeJS.ProcessEnv }[] = [];
   const entry = CI_PARITY_TABLE.find((e) => e.job === "coverage-ratchet");
   assert.ok(entry?.run, "control: the coverage-ratchet entry exists and is mirrored locally");
-  entry!.run!(repoRoot, recordingSpawn(calls), () => Number.MAX_SAFE_INTEGER);
+  entry!.run!(repoRoot, recordingSpawn(calls), () => Number.MAX_SAFE_INTEGER, randomUUID());
   const call = calls.find((c) => c.args.includes("--experimental-test-coverage"));
   assert.ok(call, "control: the leaf really did spawn the coverage command");
   return call!;
 }
 
 test("coverage shards use canonical TMPDIR paths when the sibling scratch parent is symlinked", () => {
-  const tempRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}g-`));
+  // This is a top-level sibling-volume fixture, not a child of the outer coverage TMPDIR.
+  const tempRoot = mkdtempSync(join("/tmp", `${RMD_TMP_PREFIX}g-`));
   const repoRoot = join(tempRoot, "repo");
   const physicalScratchParent = join(tempRoot, "p");
   const scratchParentAlias = join(tempRoot, "a");
@@ -76,9 +78,16 @@ test("coverage shards use canonical TMPDIR paths when the sibling scratch parent
 
 test("that scratch is a stable sibling namespace, never a child of the Git worktree", () => {
   const dir = coverageScratchDir(REPO_ROOT);
-  assert.equal(dirname(dir), realpathSync(tmpdir()));
   assert.match(basename(dir), /^rmd-c-[a-f0-9]{12}$/);
   assert.ok(!dir.startsWith(`${REPO_ROOT}/`), `must be outside the checkout; got ${dir}`);
+  const previousTmp = process.env.TMPDIR;
+  try {
+    process.env.TMPDIR = join(dir, "node-coverage-fixture");
+    assert.equal(coverageScratchDir(REPO_ROOT), dir, "an inherited nested TMPDIR must not compound the scratch path");
+  } finally {
+    if (previousTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTmp;
+  }
 });
 
 test("an injected env is MERGED over process.env, never replacing it", () => {

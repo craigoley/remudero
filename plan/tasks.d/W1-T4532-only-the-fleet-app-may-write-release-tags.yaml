@@ -13,7 +13,9 @@
   plan_refs: ["W1-T4528", "W1-T4530"]
   files: [plan/tasks.d/W1-T4532-only-the-fleet-app-may-write-release-tags.yaml]
   priority: 2
-  status: queued
+  status: blocked
+  retirement: retired
+  # plan gardener: retire W1-T4532 — It depends on W1-T4528, which will never be built.
   # backlog gardener: band=2 evidence=aa7250f029addd12
   attempts: 0
   rationale: |

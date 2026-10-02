@@ -40,3 +40,23 @@ test("a shed analytics cache serves cold and its next refresh resumes from the d
   assert.deepEqual(priors, [false, true], "the refresh after a shed resumes from the checkpoint the first one wrote to disk");
   assert.deepEqual(cache.current().invocationsByVerb, warm.invocationsByVerb, "and serves the same counts again");
 });
+
+test("a shed analytics cache asked to restore refreshes at once and ledgers why", async (t) => {
+  const stateDir = mkdtempSync(join(tmpdir(), "rmd-analytics-restore-"));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  writeFileSync(join(stateDir, "ledger.ndjson"), `${JSON.stringify({ ts: "2026-10-01T00:00:00.000Z", step: "cli.invoked", verb: "status" })}\n`);
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const cache = createAnalyticsSnapshotCache({ stateDir, schedule: noTimers, log: (step, extra) => void logs.push({ step, extra }) });
+  await cache.refresh();
+  await cache.restore("handoff_abandoned");
+  assert.equal(logs.filter((l) => l.step === "serve.analytics_refresh.started").length, 1, "an unshed cache has nothing to restore");
+
+  cache.shed();
+  assert.equal(cache.current().asOf, null, "positive control: the shed left the cold shape");
+  await cache.restore("handoff_abandoned");
+  assert.deepEqual(logs.find((l) => l.step === "serve.analytics_restore")?.extra, { reason: "handoff_abandoned" });
+  assert.notEqual(cache.current().asOf, null, "the restore re-warmed the snapshot without waiting for the refresh timer");
+  assert.notEqual(cache.current().invocationsByVerb.status, undefined);
+  await cache.restore("handoff_abandoned");
+  assert.equal(logs.filter((l) => l.step === "serve.analytics_restore").length, 1, "a second ask after the re-warm is a no-op");
+});
