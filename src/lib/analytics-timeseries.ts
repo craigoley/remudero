@@ -1,10 +1,11 @@
-import { isProducedSpendRow, spendAmountUsd } from "./spend-rows.js";
+import { spendRoleOf, spendAmountUsd } from "./spend-rows.js";
 
 export type TimeSeriesPoint = {
   t: string;
   value?: number | null;
   gap?: boolean;
   note?: string;
+  unpricedRows?: number;
 };
 
 export type LedgerTimeSeries = {
@@ -43,6 +44,7 @@ type HistoricalBucket = {
   inputTokens: number;
   cacheCreation: number;
   costUsd: number;
+  unpricedRows: number;
   durationsMs: number[];
 };
 
@@ -55,6 +57,7 @@ function emptyHistoricalBucket(): HistoricalBucket {
     inputTokens: 0,
     cacheCreation: 0,
     costUsd: 0,
+    unpricedRows: 0,
     durationsMs: [],
   };
 }
@@ -142,7 +145,7 @@ function buildHistoricalSeries(state: Map<string, HistoricalBucket>, nowIso: str
     if (bucket === undefined || bucket.observed !== true) return gapPoint(day, "missing");
     if (id === "runs.completed") return observedPoint(day, bucket.completedRuns);
     if (id === "tokens.total") return observedPoint(day, bucket.tokensTotal);
-    if (id === "cost.modeled.usd") return observedPoint(day, bucket.costUsd);
+    if (id === "cost.modeled.usd") return { ...observedPoint(day, bucket.costUsd), unpricedRows: bucket.unpricedRows, ...(bucket.unpricedRows ? { note: "known spend plus unpriced receipts; total uncertain" } : {}) };
     if (id === "cache.reuse") {
       const denominator = bucket.cacheRead + bucket.inputTokens + bucket.cacheCreation;
       return denominator > 0 ? observedPoint(day, bucket.cacheRead / denominator) : gapPoint(day, "not-collected");
@@ -197,7 +200,10 @@ export function createHistoricalSeriesAccumulator(): HistoricalSeriesAccumulator
         bucket.cacheCreation += tokens.cacheCreation;
       }
       // W1-T4066: the row that PRODUCED a cost carries it once — never a `verdict`'s restatement of its last worker.
-      if (isProducedSpendRow(line)) bucket.costUsd += spendAmountUsd(line) ?? 0;
+      if (spendRoleOf(line) === "produced") {
+        const cost = spendAmountUsd(line);
+        if (cost === undefined || cost < 0) bucket.unpricedRows++; else bucket.costUsd += cost;
+      }
     },
     build(nowIso) {
       return buildHistoricalSeries(state, nowIso);

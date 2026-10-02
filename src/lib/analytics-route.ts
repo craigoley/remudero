@@ -115,7 +115,7 @@ import {
   type JudgeLabelsInput,
   type JudgeLabelStore,
 } from "./judge-calibration.js";
-import { isProducedSpendRow, spendAmountUsd } from "./spend-rows.js";
+import { isProducedSpendRow, spendAmountUsd, spendRoleOf } from "./spend-rows.js";
 import {
   ROUTING_POOL_VERSION,
   buildRoutingPoolProjection,
@@ -130,6 +130,7 @@ export interface WorkerLaneModelBucket {
   model: string;
   count: number;
   totalCostUsd: number;
+  unpricedCostRows?: number;
 }
 
 /** One run's wall-clock (question 3) — a `run.start`→`verdict` join for one `run_id`. */
@@ -165,6 +166,7 @@ export interface RoutingTelemetryBucket {
   totalTokens: number;
   totalDurationMs: number;
   totalCostUsd: number;
+  unpricedCostRows?: number;
   fallbackReasons: Array<{ reason: string; count: number }>;
 }
 
@@ -174,6 +176,7 @@ export interface RoutingTelemetryDay {
   terminalResults: number;
   totalTokens: number;
   totalCostUsd: number;
+  unpricedCostRows?: number;
 }
 
 /**
@@ -216,6 +219,7 @@ export interface CashSpendWindow {
   toDay: string;
   usd: number;
   rows: number;
+  unpricedRows?: number;
   /** FALSE when the window starts before the oldest retained day, or covers a day restored from a
    *  checkpoint that predates cash collection. A compacting ledger must never read as a falling spend. */
   complete: boolean;
@@ -254,11 +258,13 @@ function cashSpend(history: CheckpointHistoryState, nowIso: string): CashSpendSn
     const fromDay = utcDayFromTimestamp(end - (days - 1) * CHECKPOINT_DAY_MS);
     let usd = 0;
     let rows = 0;
+    let unpricedRows = 0;
     let uncollected = 0;
     for (const [day, bucket] of history.days) {
       if (day < fromDay || day > toDay) continue;
       usd += bucket.cashUsd ?? 0;
       rows += bucket.cashRows ?? 0;
+      unpricedRows += bucket.cashUnpricedRows ?? 0;
       if (bucket.observed && bucket.cashCollected !== true) uncollected += 1;
     }
     const startsBeforeHistory = oldest === undefined || fromDay < oldest;
@@ -276,6 +282,7 @@ function cashSpend(history: CheckpointHistoryState, nowIso: string): CashSpendSn
       toDay,
       usd: Math.round(usd * 1e6) / 1e6,
       rows,
+      unpricedRows,
       complete: !startsBeforeHistory && uncollected === 0,
       ...(reason ? { reason } : {}),
     };
@@ -333,6 +340,7 @@ export interface AnalyticsSnapshot {
   /** Question 2: worker counts and cost, grouped by lane (`"unknown"` for a pre-W1-T477 row that
    *  carries no `lane` field) and model. */
   workersByLaneModel: WorkerLaneModelBucket[];
+  costAccounting?: { pricedUsd: number; unpricedRows: number; state: "complete" | "uncertain" };
   /** Question 3: per-run wall-clock, `run.start`→`verdict` joins that resolved. */
   taskDurationsMs: TaskDurationEntry[];
   /** Question 3's explicit no-terminal bucket — a `run.start` with no matching `verdict` line
@@ -595,6 +603,7 @@ interface AnalyticsAccumulator {
   invocationsMeasured: boolean;
   workersByKey: Map<string, WorkerLaneModelBucket>;
   producedSpendUsd: number;
+  unpricedSpendRows?: number;
   startsByRun: Map<string, { ts: number; taskId: string }>;
   verdictsByRun: Map<string, number>;
   workerDurationsByLane: Map<string, { count: number; totalMs: number }>;
@@ -629,6 +638,8 @@ type CheckpointHistoryBucket = {
   inputTokens: number;
   cacheCreation: number;
   costUsd: number;
+  unpricedCostRows?: number;
+  cashUnpricedRows?: number;
   durationsMs: number[];
   /** W1-T4024 — cash-lane money folded into this day. Optional because checkpoints written before
    *  W1-T4024 restore buckets without it; see `cashCollected`. */
@@ -670,6 +681,7 @@ type AnalyticsCheckpointState = {
   invocationsMeasured: boolean;
   workersByLaneModel: WorkerLaneModelBucket[];
   producedSpendUsd: number;
+  unpricedSpendRows?: number;
   startsByRun: Array<[string, { ts: number; taskId: string }]>;
   verdictsByRun: Array<[string, number]>;
   workerDurationsByLane: Array<[string, { count: number; totalMs: number }]>;
@@ -841,6 +853,7 @@ function analyticsAccumulator(): AnalyticsAccumulator {
     invocationsMeasured: false,
     workersByKey: new Map(),
     producedSpendUsd: 0,
+    unpricedSpendRows: 0,
     startsByRun: new Map(),
     verdictsByRun: new Map(),
     workerDurationsByLane: new Map(),
@@ -926,8 +939,11 @@ function captureCheckpointLine(acc: AnalyticsAccumulator, line: Record<string, u
     bucket.cacheRead += tokens.cacheRead;
     bucket.cacheCreation += tokens.cacheCreation;
   }
-  if (day !== undefined && isProducedSpendRow(line)) {
-    checkpointHistoryBucket(acc.checkpointHistory, day).costUsd += spendAmountUsd(line) ?? 0;
+  if (day !== undefined && spendRoleOf(line) === "produced") {
+    const bucket = checkpointHistoryBucket(acc.checkpointHistory, day);
+    const cost = spendAmountUsd(line);
+    if (cost === undefined || cost < 0) bucket.unpricedCostRows = (bucket.unpricedCostRows ?? 0) + 1;
+    else bucket.costUsd += cost;
   }
 
   // W1-T4024 — cash-lane money comes from WORKER rows that name their provider, never from
@@ -937,7 +953,9 @@ function captureCheckpointLine(acc: AnalyticsAccumulator, line: Record<string, u
   // is NOT the source: its terminals are joined from `verdict` rows alone (66 of 602 assignments).
   if (day !== undefined && step === "implement.done" && str(line.provider) === "cash") {
     const bucket = checkpointHistoryBucket(acc.checkpointHistory, day);
-    bucket.cashUsd = (bucket.cashUsd ?? 0) + (num(line.total_cost_usd) ?? 0);
+    const cost = num(line.total_cost_usd);
+    if (cost === undefined || cost < 0) bucket.cashUnpricedRows = (bucket.cashUnpricedRows ?? 0) + 1;
+    else bucket.cashUsd = (bucket.cashUsd ?? 0) + cost;
     bucket.cashRows = (bucket.cashRows ?? 0) + 1;
   }
 
@@ -981,7 +999,7 @@ function checkpointTimeSeries(state: CheckpointHistoryState, nowIso: string): Le
     if (bucket === undefined || !bucket.observed) return { t: `${day}T00:00:00.000Z`, value: null, gap: true, note: "missing" };
     if (id === "runs.completed") return { t: `${day}T00:00:00.000Z`, value: bucket.completedRuns, gap: false };
     if (id === "tokens.total") return { t: `${day}T00:00:00.000Z`, value: bucket.tokensTotal, gap: false };
-    if (id === "cost.modeled.usd") return { t: `${day}T00:00:00.000Z`, value: bucket.costUsd, gap: false };
+    if (id === "cost.modeled.usd") return { t: `${day}T00:00:00.000Z`, value: bucket.costUsd, gap: false, unpricedRows: bucket.unpricedCostRows ?? 0, ...((bucket.unpricedCostRows ?? 0) > 0 ? { note: "known spend plus unpriced receipts; total uncertain" } : {}) };
     if (id === "cache.reuse") {
       const denominator = bucket.cacheRead + bucket.inputTokens + bucket.cacheCreation;
       return denominator > 0
@@ -1323,7 +1341,8 @@ function applyRoutingTerminal(
   else if (terminal.success === false) bucket.failures += 1;
   bucket.totalTokens += terminal.tokens;
   bucket.totalDurationMs += terminal.durationMs ?? 0;
-  bucket.totalCostUsd += terminal.costUsd ?? 0;
+  if (terminal.costUsd === undefined) bucket.unpricedCostRows = (bucket.unpricedCostRows ?? 0) + 1;
+  else bucket.totalCostUsd += terminal.costUsd;
   for (const reason of terminalFallbackReasons(assignment, terminal)) {
     bucket.fallbackReasons.set(reason, (bucket.fallbackReasons.get(reason) ?? 0) + 1);
   }
@@ -1331,7 +1350,8 @@ function applyRoutingTerminal(
     const current = acc.daysByDay.get(terminal.day) ?? { day: terminal.day, terminalResults: 0, totalTokens: 0, totalCostUsd: 0 };
     current.terminalResults += 1;
     current.totalTokens += terminal.tokens;
-    current.totalCostUsd += terminal.costUsd ?? 0;
+    if (terminal.costUsd === undefined) current.unpricedCostRows = (current.unpricedCostRows ?? 0) + 1;
+    else current.totalCostUsd += terminal.costUsd;
     acc.daysByDay.set(terminal.day, current);
   }
 }
@@ -1533,7 +1553,11 @@ function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string,
     acc.invocationsByVerb[verb] = (acc.invocationsByVerb[verb] ?? 0) + 1;
   }
 
-  if (isProducedSpendRow(line)) acc.producedSpendUsd += spendAmountUsd(line) ?? 0;
+  if (spendRoleOf(line) === "produced") {
+    const cost = spendAmountUsd(line);
+    if (cost === undefined || cost < 0) acc.unpricedSpendRows = (acc.unpricedSpendRows ?? 0) + 1;
+    else acc.producedSpendUsd += cost;
+  }
 
   const model = str(line.model);
   if (model !== undefined) {
@@ -1541,7 +1565,11 @@ function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string,
     const key = `${lane}\0${model}`;
     const bucket = acc.workersByKey.get(key) ?? { lane, model, count: 0, totalCostUsd: 0 };
     bucket.count += 1;
-    if (isProducedSpendRow(line)) bucket.totalCostUsd += spendAmountUsd(line) ?? 0;
+    if (spendRoleOf(line) === "produced") {
+      const cost = spendAmountUsd(line);
+      if (cost === undefined || cost < 0) bucket.unpricedCostRows = (bucket.unpricedCostRows ?? 0) + 1;
+      else bucket.totalCostUsd += cost;
+    }
     acc.workersByKey.set(key, bucket);
 
     // W1-T3623: `tokens` rides the SAME line as `model`/`total_cost_usd` (workerLedgerFields
@@ -1615,6 +1643,7 @@ function snapshotFromAccumulator(
     measures: ANALYTICS_SCOPE_NOTE,
     invocationsByVerb: acc.invocationsByVerb,
     workersByLaneModel,
+    costAccounting: { pricedUsd: costModeledUsd, unpricedRows: acc.unpricedSpendRows ?? 0, state: (acc.unpricedSpendRows ?? 0) > 0 ? "uncertain" : "complete" },
     taskDurationsMs,
     noTerminalTaskCount,
     workerDurationsByLane: [...acc.workerDurationsByLane.entries()].map(([lane, value]) => ({
@@ -1792,6 +1821,7 @@ function serializeCheckpointState(acc: AnalyticsAccumulator): AnalyticsCheckpoin
     invocationsMeasured: acc.invocationsMeasured,
     workersByLaneModel: [...acc.workersByKey.values()].map((bucket) => ({ ...bucket })),
     producedSpendUsd: acc.producedSpendUsd,
+    unpricedSpendRows: acc.unpricedSpendRows,
     startsByRun: [...acc.startsByRun.entries()].map(([key, value]) => [key, { ...value }]),
     verdictsByRun: [...acc.verdictsByRun.entries()],
     workerDurationsByLane: [...acc.workerDurationsByLane.entries()].map(([key, value]) => [key, { ...value }]),
@@ -1845,6 +1875,7 @@ function hydrateCheckpointState(state: AnalyticsCheckpointState): AnalyticsAccum
   acc.invocationsMeasured = state.invocationsMeasured;
   for (const bucket of state.workersByLaneModel) acc.workersByKey.set(`${bucket.lane}\0${bucket.model}`, { ...bucket });
   acc.producedSpendUsd = state.producedSpendUsd;
+  acc.unpricedSpendRows = state.unpricedSpendRows;
   for (const [key, value] of state.startsByRun) acc.startsByRun.set(key, { ...value });
   for (const [key, value] of state.verdictsByRun) acc.verdictsByRun.set(key, value);
   for (const [key, value] of state.workerDurationsByLane) acc.workerDurationsByLane.set(key, { ...value });
@@ -1949,7 +1980,7 @@ export async function deriveAnalyticsSnapshotFromCheckpointedLedger(
 ): Promise<AnalyticsSnapshotReadResult> {
   const currentSource = checkpointSource(stateDir);
   const priorLiveMalformed = priorCheckpoint?.state.routingTelemetry?.malformedSources?.some(([, finding]) => finding.form === "live") ?? false;
-  const canResume = priorCheckpoint !== undefined && priorCheckpoint.state.usage !== undefined &&
+  const canResume = priorCheckpoint !== undefined && priorCheckpoint.state.usage?.costAccountingVersion === 1 &&
     priorCheckpoint.state.routingTelemetry?.benchmarkVersion === BENCHMARK_QUALITY_VERSION &&
     priorCheckpoint.state.routingTelemetry?.benchmarkCounters !== undefined &&
     Array.isArray(priorCheckpoint.state.routingTelemetry?.malformedSources) &&
@@ -2267,7 +2298,7 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
   const schedule = deps.schedule ?? systemSchedule;
   const log = deps.log ?? (() => {});
   let checkpoint = readAnalyticsCheckpoint(deps.stateDir);
-  let value = checkpoint === undefined ? coldAnalyticsSnapshot() : freezeAnalyticsSnapshot(attachUsageProjection(checkpoint.snapshot, checkpoint.state.usage));
+  let value = checkpoint === undefined || checkpoint.state.usage?.costAccountingVersion !== 1 ? coldAnalyticsSnapshot() : freezeAnalyticsSnapshot(attachUsageProjection(checkpoint.snapshot, checkpoint.state.usage));
   let timer: AnalyticsTimer | undefined;
   let controller: AbortController | undefined;
   let inFlight: Promise<void> | undefined;
