@@ -82,7 +82,7 @@ test("daily routing review preserves missing and malformed sources instead of cl
   } finally { f.close(); }
 });
 
-test("daily routing review quarantines future timestamps and retains non-starters and cost missingness", async () => {
+test("daily routing review retains raw receipts and writes hashed findings to a private quarantine manifest", async () => {
   const f = fixture();
   try {
     writeFileSync(join(f.sources[0]!.stateDir, "ledger.ndjson"), ndjson([assignment("1"),
