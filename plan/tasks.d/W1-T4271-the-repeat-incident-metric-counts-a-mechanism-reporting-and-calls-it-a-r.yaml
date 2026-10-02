@@ -85,9 +85,9 @@
   origin: architect
   plan_refs: ["§8A", "P48", "W1-T418", "W1-T1266"]
   files: [src/lib/rule-efficacy.ts, src/lib/measurement-cadence.ts, src/run-task.ts, test/rule-efficacy-signature-kind.test.ts, test/rule-efficacy.test.ts, test/a-rule-about-a-gate-cannot-be-measured-by-the-ledger.test.ts, test/a-rule-that-keeps-failing-becomes-an-instrument.test.ts, test/measurement-cadence-delta.test.ts, test/measurement-cadence.test.ts]
-  priority: 2
-  status: queued
-  # backlog gardener: band=2 evidence=85fc03976cd9945c
+  status: blocked
+  retirement: withdrawn
+  # backlog gardener: retirement evidence=2cec11c3d996515e
   attempts: 0
   note: |
     OPERATOR AMENDMENT 2026-10-02: making the shipped ci.stalled rule ACTIVITY-shaped changes every suite that used it to manufacture a recurrence, and rmd rule-efficacy printed UNPROVEN as REPEATING; the build (#8713) needs those suites, the cadence report's rule-table option and the command's verdict line, which files: omitted.
