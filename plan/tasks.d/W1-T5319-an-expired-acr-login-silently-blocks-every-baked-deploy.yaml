@@ -1,0 +1,58 @@
+- id: W1-T5319
+  title: "AN EXPIRED ACR LOGIN BLOCKS BAKED DEPLOYS UNTIL A PERSON LOGS IN — 2026-10-02 serve-container.sh --replace refused because docker pull said authentication required, and nothing refreshed the host's registry login or told anyone"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 12.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 5da5b764, 2026-10-02 12:46Z driver note: serve --replace refused on an expired ACR token"
+  files: [deploy/acr-login.sh, deploy/serve-container.sh, deploy/host-update.sh, deploy/recycle-container.sh, deploy/install-host-units.sh, scripts/fleet-heartbeat.sh, src/lib/host-resource-gardener.ts, test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-02 12:46Z on the fleet host: deploy/serve-container.sh --replace refused with "target
+    image ... could not be pulled" because docker pull said "authentication required". The host's ACR access
+    token had expired. Running az acr login -n synthwatcholey0620 with the host's existing az session fixed
+    it at once. Earlier the same day (02:00Z) a deploy also needed a manual az acr login before its pull.
+    WHERE THE LOGIN LIVES TODAY. Three scripts each run their own copy of az acr login before pulling:
+    deploy/host-update.sh (section 2, "AUTHENTICATE BEFORE DESTROYING ANYTHING"), deploy/recycle-container.sh
+    (section 4, "AUTHENTICATE, THEN PULL") and deploy/verify-image.sh. deploy/serve-container.sh runs none.
+    W1-T4005 added only its preflight docker pull, which refuses safely but cannot recover.
+    WHERE A FAILURE GOES. When recycle-container.sh refuses (including a failed az acr login), runDeployCycle
+    (src/lib/deployer.ts) catches the backend's throw as deploy.restart_refused and calls deps.alert. In
+    realDeployDeps that alert only writes deploy-failed.json and the last-failed marker under the state root,
+    which the status board shows. No issue is opened, so a registry login that cannot be refreshed (for
+    example an expired az session) blocks every image-drift recycle and every baked deploy until someone
+    happens to look.
+  design: |
+    One login helper, refreshed on a timer, with an escalation when the refresh itself fails.
+    (1) deploy/acr-login.sh holds the single az acr login routine (registry from the same variable the three
+    scripts use). It fails with the az error text. host-update.sh, recycle-container.sh and serve-container.sh
+    source it instead of their own copies. serve-container.sh calls it before its preflight docker pull, and
+    the existing refusal still stands when the login fails.
+    (2) Run with --refresh, it logs in and writes acr-login.json (result ok or failed, ts, reason) in the
+    fleet state directory. deploy/install-host-units.sh installs a systemd timer that runs it well inside the
+    ACR token lifetime, in the same render-and-install shape as the existing watchdog and reaper timers.
+    (3) scripts/fleet-heartbeat.sh publishes acr_login_result and acr_login_ts from that file. The
+    host-resource gardener (src/lib/host-resource-gardener.ts) already reads every heartbeat-* payload and
+    escalates through its escalate port once per episode. It escalates needs-human when acr_login_result is
+    failed, naming the host, the reason and the az login command, and it closes the episode when a later beat
+    reads ok. A host with no az CLI publishes acr_login_result=unavailable, and that is not escalated.
+  acceptance:
+    - claim: "serve-container.sh logs in to the registry through the shared helper before its preflight pull"
+      proof: 'grep: test("W1-T5319: serve-container logs in to the registry before its preflight pull" in test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts'
+    - claim: "a refresh whose az acr login fails records a failed result with the az reason"
+      proof: 'grep: test("W1-T5319: the refresh records a failed az acr login with its reason" in test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts'
+    - claim: "a heartbeat carrying a failed registry refresh escalates needs-human exactly once per episode"
+      proof: 'grep: test("W1-T5319: a failed registry refresh escalates once as needs-human" in test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts'
+    - claim: "a refresh that recovers closes the episode so a later failure escalates again"
+      proof: 'grep: test("W1-T5319: a refresh that recovers clears the episode so the next failure escalates again" in test/w1-t5319-the-acr-login-refreshes-itself-and-escalates-when-it-cannot.test.ts'
+    - claim: "the host units install a timer that runs the registry refresh"
+      proof: 'grep: acr-login\.sh --refresh in deploy/install-host-units.sh'
+  falsifier: |
+    Drop the helper call from serve-container.sh and the first test sees docker pull run with no login before
+    it. Stop reading acr_login_result in the gardener and the third test sees no escalation.
