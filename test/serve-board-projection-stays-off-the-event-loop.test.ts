@@ -6,8 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildStatusRoute, createBoardSnapshotCache } from "../src/lib/board.js";
-import { computeWorkerBoardSnapshot, createBoardProjectionWorker, type BoardProjectionWorker } from "../src/lib/board-worker.js";
-import { loadPlan } from "../src/lib/plan.js";
+import { boardWorkerPass, computeWorkerBoardSnapshot, createBoardProjectionWorker, type BoardProjectionWorker } from "../src/lib/board-worker.js";
+import { loadPlan, loadPlanQuarantiningDuplicates } from "../src/lib/plan.js";
+import { swapThreadPlanParser } from "../src/lib/thread-plan.js";
 import { serveCommand } from "../src/run-task.js";
 import { fakeGitHub, type FakeGitHub } from "./helpers/fake-github.js";
 import { ghShim } from "./helpers/gh-shim.js";
@@ -325,4 +326,50 @@ test("W1-T5004: real serve boot answers while projection is cold", async (t) => 
   assert.equal((await fetch(`http://127.0.0.1:${port}/v1/status`)).status, 401);
   process.emit("SIGTERM");
   assert.equal(await running, 0);
+});
+
+const planTask = (id: string): string => [
+  `- id: ${id}`, "  title: worker fixture", "  repo: remudero", "  depends_on: []",
+  "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0", "",
+].join("\n");
+
+async function publishedIds(url: string, until: (ids: string[]) => boolean): Promise<string[]> {
+  const deadline = Date.now() + 5_000;
+  let ids: string[] = [];
+  while (Date.now() < deadline) {
+    const body = await (await fetch(`${url}/v1/status`)).json() as { tasks?: Array<{ taskId: string }> };
+    ids = (body.tasks ?? []).map((task) => task.taskId);
+    if (until(ids)) break;
+    await sleep(30);
+  }
+  return ids;
+}
+
+test("the running board worker publishes a filed task and drops a retired one after the plan file changes", async (t) => {
+  const { worker, planPath, url } = await fixture(t, { intervalMs: 100 });
+  await ready(worker);
+  writeFileSync(planPath, planTask("W1-T1") + planTask("W1-T2"));
+  assert.deepEqual(await publishedIds(url, (ids) => ids.includes("W1-T2")), ["W1-T1", "W1-T2"], "a filed task appears without a worker restart");
+  writeFileSync(planPath, planTask("W1-T2"));
+  assert.deepEqual(await publishedIds(url, (ids) => !ids.includes("W1-T1")), ["W1-T2"], "a retired task disappears without a worker restart");
+});
+
+test("a board worker pass parses an unchanged plan once and re-reads it when the file changes", async (t) => {
+  const { github, planPath, ledgerPath } = await fixture(t);
+  let parses = 0;
+  const prior = swapThreadPlanParser((path) => {
+    parses++;
+    return loadPlanQuarantiningDuplicates(path);
+  });
+  t.after(() => void swapThreadPlanParser(prior));
+  const input = { planPath, ledgerPath, inflightDir: join(planPath, "..", "inflight") };
+  const cache = createBoardSnapshotCache();
+  const first = boardWorkerPass(input, github, cache);
+  const second = boardWorkerPass(input, github, cache);
+  assert.equal(parses, 1, "an unchanged plan is not re-parsed");
+  assert.deepEqual(second, first, "an unchanged plan keeps the same board");
+  writeFileSync(planPath, planTask("W1-T2"));
+  const changed = boardWorkerPass(input, github, cache);
+  assert.equal(parses, 2, "a changed plan file is parsed again");
+  assert.deepEqual(changed.tasks.map((task) => task.taskId), ["W1-T2"]);
 });
