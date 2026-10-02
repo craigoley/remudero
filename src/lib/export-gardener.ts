@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join, posix } from "node:path";
 
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec, Outcome } from "./gardener.js";
@@ -293,26 +293,61 @@ export function exportGardenCandidates(inv: ExportInventory, repoRoot: string): 
   return out;
 }
 
+/** Where each deletion's proof is appended (W1-T5278): a test that passes only while the export is
+ *  gone, so it fails at base and the PR's `unit test:` proof discriminates. */
+const EXPORT_GARDEN_TEST_FILE = "test/export-gardener-removes-unreferenced-exports.test.ts";
+const EXPORT_GARDEN_TEST_HEADER = `import assert from "node:assert/strict";\nimport { test } from "node:test";\n`;
+
+/** The title of the test that proves `a`'s export is gone — also the PR's claim and its proof. */
+const goneTitle = (a: { file: string; name: string }) => `${a.name} is not exported from ${basename(a.file, ".ts")}`;
+
+function goneTest(a: { file: string; name: string }): string {
+  const rel = posix.relative(posix.dirname(EXPORT_GARDEN_TEST_FILE), a.file).replace(/\.ts$/, ".js");
+  const spec = rel.startsWith(".") ? rel : `./${rel}`;
+  return `\ntest("${goneTitle(a)}", async () => {\n  const module = await import("${spec}");\n  assert.equal(Object.hasOwn(module, "${a.name}"), false);\n});\n`;
+}
+
 /** Delete each action's export in `root`, re-checked there: a declaration that no longer reads
- *  whole, or a name something now mentions, is left alone. Returns the actions deleted. */
+ *  whole, or a name something now mentions, is left alone. Each deletion appends its proving test to
+ *  {@link EXPORT_GARDEN_TEST_FILE}; one whose test cannot be written (the file unreadable, the title
+ *  already there, the append withdrawn) is withdrawn too, never shipped without a proof. Returns the
+ *  actions deleted. */
 export function applyExportDeletions(
   root: string,
   actions: ExportGardenAction[],
   atomicWrite: typeof writeAtomic = writeAtomic,
 ): ExportGardenAction[] {
   const done: ExportGardenAction[] = [];
+  const testsPath = join(root, EXPORT_GARDEN_TEST_FILE);
   for (const a of actions) {
     const path = join(root, a.file);
     const text = readFileIfExists(path);
     if (text === undefined) continue;
     const span = exportDeclarationSpan(text, a.name);
     if (!span || referencesOutside(root, a.file, a.name, span).length > 0) continue;
+    let tests: string | undefined;
+    try {
+      tests = readFileIfExists(testsPath);
+    } catch {
+      continue; // deliberate: an unreadable test file cannot carry the proof, so the deletion waits
+    }
+    if (tests?.includes(goneTitle(a))) continue;
+    const base = tests ?? EXPORT_GARDEN_TEST_HEADER;
     // Replace only the exact bytes the candidate was rechecked against. A concurrent edit between
     // the read and staged rename withdraws the write instead of discarding that edit.
-    const replaced = atomicWrite(path, deleteSpan(text, span), {
+    const deleted = deleteSpan(text, span);
+    const replaced = atomicWrite(path, deleted, {
       beforeRename: () => readFileIfExists(path) === text,
     });
     if (!replaced) continue;
+    const appended = atomicWrite(testsPath, `${base}${base.endsWith("\n") ? "" : "\n"}${goneTest(a)}`, {
+      beforeRename: () => readFileIfExists(testsPath) === tests,
+    });
+    if (!appended) {
+      // The proof could not be written, so the deletion is put back — under the same guard.
+      atomicWrite(path, text, { beforeRename: () => readFileIfExists(path) === deleted });
+      continue;
+    }
     done.push(a);
   }
   return done;
@@ -325,7 +360,7 @@ function prBody(done: ExportGardenAction[]): string {
     ...done.map((a) => `- \`${a.name}\` in \`${a.file}\` (\`${a.id}\`)`),
     "",
     "## Acceptance",
-    ...done.flatMap((a) => [`- claim: \`${a.name}\` is deleted from ${a.file} and nothing else in the repository referenced it`, "  proof: the required CI checks pass on this PR"]),
+    ...done.flatMap((a) => [`- claim: ${goneTitle(a)}`, `  proof: unit test: ${goneTitle(a)}`]),
   ].join("\n");
 }
 
@@ -359,7 +394,7 @@ export function exportGardenSpec(deps: GardenerDeps): GardenSpec<ExportGardenCla
       record.deletions.push(...done.map((a) => ({ id: a.id, file: a.file, name: a.name, proposedAt: a.scannedAt })));
       writeAtomic(exportGardenRecordPath(deps.stateDir), JSON.stringify(record, null, 2) + "\n");
       return {
-        paths: [...new Set(done.map((a) => a.file))].sort(),
+        paths: [...new Set(done.map((a) => a.file)), EXPORT_GARDEN_TEST_FILE].sort(),
         title: `refactor(lib): the export gardener deletes ${done.length} unreferenced export(s)`,
         body: prBody(done),
       };

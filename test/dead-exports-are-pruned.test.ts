@@ -101,7 +101,7 @@ test("W1-T4117: an export reported unreferenced twice is deleted in a small batc
   const second = h.pass();
   assert.equal(h.landed.length, 1, "the second report lands one PR");
   const pr = h.landed[0]!;
-  assert.deepEqual(pr.paths, ["src/lib/dead.ts"]);
+  assert.deepEqual(pr.paths, ["src/lib/dead.ts", "test/export-gardener-removes-unreferenced-exports.test.ts"], "each deletion carries its proving test (W1-T5278)");
   assert.match(pr.title, /^refactor\(lib\): the export gardener deletes \d+ unreferenced export/);
   assert.ok(pr.title.length <= 100, pr.title);
 
