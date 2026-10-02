@@ -33568,7 +33568,11 @@ export async function daemonCommand(
     ...reviewerCodeRecoveryFromLoadedModule(daemonModuleRepoDir, daemonLoadedCodeSha),
     freshTreeReviewAvailable: true,
   };
-  const buildSweepHook: DaemonSweepHookBuilder = deps.buildSweepHook ?? daemonDefaultBuildSweepHook;
+  const buildSweepHook: DaemonSweepHookBuilder = (...args) => withGoalRemeasurement(
+    (deps.buildSweepHook ?? daemonDefaultBuildSweepHook)(...args),
+    () => remeasureSettledGoals({ repoRoot: targetCheckoutRoot, stateDir: join(config.root, "state"),
+      tasks: activePlanRef.current.tasks, settled: (id) => lastProj?.get(id)?.indeterminate ? undefined : lastProj?.get(id)?.merged,
+      log }), log);
   const buildSweepLightHook: DaemonSweepLightHookBuilder = deps.buildSweepLightHook ?? daemonDefaultBuildSweepLightHook;
 
   // ── REPO TARGETING + self-target GUARD (fix/daemon-repo-targeting). The daemon must know
@@ -34549,7 +34553,7 @@ export async function daemonCommand(
         // trips GitHub's secondary rate limit at the poll cadence cannot collide. `github` (the
         // param before this one) is left undefined so the hook builds its own board gateway,
         // which is the ONLY construction this pacer can actually reach.
-        sweep: withGoalRemeasurement(buildSweepHook(
+        sweep: buildSweepHook(
           target.owner,
           target.repo,
           config,
@@ -34579,9 +34583,7 @@ export async function daemonCommand(
           // W1-T4471: the one real wiring of the owner-reply reader.
           ghEscalationAnswerGateway(target.owner, target.repo),
           gitCredentialSocket?.socketPath,
-        ), () => remeasureSettledGoals({ repoRoot: targetCheckoutRoot, stateDir: join(config.root, "state"),
-          tasks: activePlanRef.current.tasks, settled: (id) => lastProj?.get(id)?.indeterminate ? undefined : lastProj?.get(id)?.merged,
-          log }), log),
+        ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
         // flight, so a green PR whose review went absent re-posts within one poll
