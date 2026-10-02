@@ -19,7 +19,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
-import { snapshotGeneration, snapshotGithub, type NowInstance } from "./now-view.js";
+import { sharedPlan, snapshotGeneration, snapshotGithub, type NowInstance } from "./now-view.js";
 import { loadPlanQuarantiningDuplicates, type AcceptanceCriterion, type Task } from "./plan.js";
 import type { ReadModelDb } from "./read-model-db.js";
 import type { GitHub, StatusProjection } from "./status.js";
@@ -168,7 +168,7 @@ export function createTaskView(opts: TaskViewOptions): {
     if (mtime === undefined) return { source: { asOf: null, state: "unavailable" as const, reason: `the plan file ${path} is absent` } };
     const stamp = `${mtime}:${mtimeOf(join(dirname(path), "tasks.d")) ?? "-"}`;
     let held = plans.get(instance.name);
-    if (held?.stamp !== stamp) plans.set(instance.name, (held = { stamp, plan: loadPlanQuarantiningDuplicates(path).plan }));
+    if (held?.stamp !== stamp) plans.set(instance.name, (held = { stamp, plan: sharedPlan(path, stamp) }));
     const task = held.plan.byId.get(id);
     return { ...(task ? { task } : {}), source: { asOf: fixedClock(mtime).iso(), state: "fresh" as const } };
   });
