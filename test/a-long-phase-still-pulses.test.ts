@@ -113,7 +113,7 @@ test("a pulse tick writes nothing while a daemon.* work row is fresher than one 
   const state: LivenessPulseState = { lastWorkRowAtMs: 0, lastTickAtMs: 0 };
   noteDaemonRow(state, "daemon.alive", 1_000);
   livenessPulseTick(state, 1_050, 60, (s) => written.push(s), (x) => lags.push(x.observedAtMs - x.dueAtMs));
-  assert.deepEqual(written, [], "a daemon whose phases already report pays nothing");
+  assert.equal(written.length, 0, "a daemon whose phases already report pays nothing");
   noteDaemonRow(state, LIVENESS_PULSE_STEP, 1_100);
   noteDaemonRow(state, "daemon.loop_lag", 1_100);
   noteDaemonRow(state, "sweep.pass", 1_100);

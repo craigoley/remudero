@@ -1,28 +1,17 @@
 /**
  * lib/liveness-pulse.ts — E32: a busy daemon must not read "silent" while its event loop is free.
  *
- * Every liveness reader (`deriveLastPoll`: the now view, doctor, the panel, the status board) takes
- * the newest `daemon.`-prefixed row. The rows that keep that prefix fresh come from per-phase tickers
- * (`daemon.alive` in retro, sweep and dispatch) and from tick boundaries, so a phase with no ticker
- * writes nothing under the prefix for as long as it runs.
+ * Every liveness reader (`deriveLastPoll`) takes the newest `daemon.*` row, but those rows come from
+ * per-phase tickers and tick boundaries, so a phase with no ticker writes none for as long as it runs.
+ * MEASURED 2026-10-02, 48 h of the core ledger deduplicated by row: 119 gaps over 5 min. In 93 the
+ * same process kept writing its own work rows with no gap over 5 min (a free loop, falsely "silent");
+ * 10 were loop stalls (`daemon.loop_lag` > 30 s past interval), 4 recycles, 12 unattributable.
  *
- * MEASURED 2026-10-02 over 48 h of the core ledger (233 rotations plus the live file, deduplicated by
- * row): 119 gaps over 5 min between `daemon.*` rows. In 93 of them the same daemon process kept writing
- * its own non-`daemon.*` rows (sweep, gardens, the machine judge) with no gap of its own over 5 min, so
- * its event loop was free and the "silent" reading was false. 10 were real loop stalls (a
- * `daemon.loop_lag` row over 30 s past its interval), 4 were recycles, and 12 had a 5 min hole in the
- * process's own rows with no lag sampler running in that phase, so nothing can say which they were.
- *
- * THE PULSE: one timer for the daemon's whole life, beside every phase. A timer only fires while the
- * event loop is free, so the pulse is evidence of exactly what a liveness reader should mean: the process
- * exists and its loop turns. A dead process or a blocked loop writes nothing, and still reads silent.
- * It writes only when no other `daemon.*` row has been written for one poll interval, so a daemon whose
- * phases already report pays nothing. The pulse is not a progress signal: `quiet_ms` says how long
- * the daemon has gone without a row of its own work, so a wedged await stays visible as a number that
- * keeps growing.
- *
- * Each pulse tick also reports its own lateness through the daemon's loop-lag rule, so a stall in a
- * phase with no ticker of its own is named rather than inferred from absence (the 12 unknown gaps).
+ * THE PULSE: one timer for the daemon's life. A timer fires only on a free loop, so a dead process or
+ * a blocked loop still reads silent. It writes only after one poll interval with no other `daemon.*`
+ * row. It is not progress: `quiet_ms` grows while no work row lands, so a wedged await stays visible.
+ * Each tick also reports its own lateness as `daemon.loop_lag` (phase `pulse`), naming stalls in
+ * phases that had no sampler — the 12 unattributable gaps.
  */
 
 /** The pulse row. It keeps the `daemon.` prefix every liveness reader selects on. */
