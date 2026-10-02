@@ -32,7 +32,7 @@ function scratch(t: TestCtx, kind: string): string {
 
 function seeded(t: TestCtx, kind: string): string {
   const dir = scratch(t, kind);
-  seedLedger(dir);
+  seedRunRows(dir);
   return dir;
 }
 
@@ -41,7 +41,7 @@ function mutableClock(): Clock & { advance(ms: number): void } {
   return { now: () => at, date: () => new Date(at), iso: () => new Date(at).toISOString(), advance: (ms) => void (at += ms) };
 }
 
-function seedLedger(dir: string): void {
+function seedRunRows(dir: string): void {
   mkdirSync(dir, { recursive: true });
   const rows = [0, 1, 2].map((i) => JSON.stringify({ ts: new Date(T0 - 60_000 + i).toISOString(), step: "run.start", task_id: `T${i}`, run_id: `T${i}-1` }));
   writeFileSync(join(dir, "ledger.ndjson"), `${rows.join("\n")}\n`);
