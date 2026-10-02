@@ -569,6 +569,8 @@ interface Shown {
   spend: Array<[string, number]>;
   /** Each task's time the body's groups sorted it by. */
   sortedBy: Map<string, string | undefined>;
+  /** Each queued pull request's `sweep.disposed` row the body's disposition came from. */
+  disposedAt: Map<number, string | undefined>;
 }
 
 /** The day's cost rows `computeGlanceSpend` adds into `spendTodayUsd`. */
@@ -586,6 +588,7 @@ export interface NowShadowLegacy {
   derived: Record<string, string[]>;
   rows: LegacyRows;
   sortKeys: Record<string, Record<string, ShadowLatest>>;
+  from: Record<string, ShadowLatest>;
   inputs: { plan: string; probeAt: string; rotationsSinceProbe: string[]; builtAt: string; rotationsSinceBuild: string[] };
 }
 
@@ -756,7 +759,7 @@ export function createNowView(opts: NowViewOptions): {
       const data = assembleNowView({ instance: instance.name, snapshot, rows, plan: b.plan!, recent: computeRecentActivity(depsOf(instance, b), h.recent, 20), health: h.probe!.health, decisions: b.decisions!, nowMs: now });
       Object.assign(h, { generation: state.generation, planKey: b.keys.plan, at: now, decisionsKey: b.keys.decisions });
       shown.set(data, { plan: b.plan!, planKey: b.keys.plan, gateway: b.gateway!, probe: h.probe!, builtMs: now, members: nowCountMembers(snapshot.tasks), spend: dayCostRows(rows, now),
-        sortedBy: new Map(snapshot.tasks.map((t) => [t.taskId, t.lastActivityAt])) });
+        sortedBy: new Map(snapshot.tasks.map((t) => [t.taskId, t.lastActivityAt])), disposedAt: new Map(snapshot.prQueue.rows.map((r) => [r.prNumber, r.observedAt])) });
       const sources: ViewSource[] = [
         ...(opts.ledgerSource ? [opts.ledgerSource(state, now)] : []),
         judgeSource({ name: `github:${instance.name}`, ...b.gateway!.source }, now),
@@ -856,6 +859,11 @@ export function createNowView(opts: NowViewOptions): {
       const windowed = [...new Set([...shownMine, ...shownTheirs])].filter((id) => shownMine.has(id) !== shownTheirs.has(id));
       const row = (id: string, at: string | undefined): string | null => (at ? `${id}#${at}` : null);
       const keys = Object.fromEntries(snapshot.tasks.map((t) => [t.taskId, { legacy: row(t.taskId, t.lastActivityAt), view: row(t.taskId, built.sortedBy.get(t.taskId)) }]));
+      // Rotation keeps a pull request's one acted disposition per head and archives the newer unacted ones,
+      // so the live file can decide a disposition from a row the view's newer one superseded (#8495, 23:36Z).
+      const disposedAt = new Map(snapshot.prQueue.rows.map((r) => [r.prNumber, r.observedAt]));
+      const prs = [...new Set([...disposedAt.keys(), ...built.disposedAt.keys()])].map((pr) => [pr, `prQueue.rows[prNumber=${pr}]`] as const);
+      const from = Object.fromEntries(prs.map(([pr, path]) => [`${path}.disposition`, { legacy: row(String(pr), disposedAt.get(pr)), view: row(String(pr), built.disposedAt.get(pr)) }]));
       return {
         data: { ...mine, board: legacy.board, prQueue: legacy.prQueue, health },
         asOfMs: now,
@@ -865,9 +873,11 @@ export function createNowView(opts: NowViewOptions): {
           "board.taskProjection.returned": groups,
           "board.taskProjection.complete": [...groups, "board.taskProjection.total"],
           ...Object.fromEntries(windowed.map((id) => [`board.tasks[taskId=${id}]`, groups])),
+          ...Object.fromEntries(prs.map(([, path]) => [`${path}.queueClass`, [`${path}.disposition`]])),
         },
         rows: legacyRowIndex(rows),
         sortKeys: Object.fromEntries(groups.map((path) => [path, keys])),
+        from,
         inputs: {
           plan: built.planKey, probeAt: built.probe.sampledAt, rotationsSinceProbe: sinceProbe.map((c) => c.name),
           builtAt: fixedClock(built.builtMs).iso(), rotationsSinceBuild: sinceBuild.map((c) => c.name),

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -243,6 +243,37 @@ test("a repositories count diff is judged by the rows each id it counted", (t) =
   const failed = sample().find((d) => d.path === `${base}.runs7d.failed`)!;
   assert.equal(failed.classification, "real");
   assert.match(failed.reason, /no measured row explains c-T9#.*1 dedupe, 1 real/);
+});
+
+test("a console task filed after the repositories build is no diff when legacy reads the plan that build read", (t) => {
+  // Captured 2026-10-01T23:30:01Z: instances[instanceId=console]...health.queued legacy 26 vs view 23, "no measured row explains
+  // CONSOLE-T111 CONSOLE-T112 CONSOLE-T113": #1906 wrote their shards at 23:29:37 after the console summary was computed,
+  // and legacy loaded the console plan afresh at the sample while the view's summary had read the plan before them.
+  const f = fixture(t);
+  createRepositoriesSourcePublisher({ stateDir: f.stateDir, instances: () => f.sources })();
+  const run = ticker(f);
+  t.after(() => run.release());
+  const body = repositories(run.tick());
+  const consolePlan = f.sources.find((s) => s.instanceId === "console")!.options.planPath!;
+  const built = `${statSync(consolePlan).mtimeMs}|`;
+  const health = (): { queued: number } => body.instances.find((i) => i.instanceId === "console")!.summary!.repos[0]!.health as unknown as { queued: number };
+  assert.equal(health().queued, 1);
+  const filed = ["CONSOLE-T111", "CONSOLE-T112", "CONSOLE-T113"].map((id) => planYaml("craigoley/remudero-console", [id])).join("");
+  writeFileSync(consolePlan, `${readFileSync(consolePlan, "utf8")}${filed}`);
+  utimesSync(consolePlan, new Date(NOW + 60_000), new Date(NOW + 60_000));
+  const sample = (): { diffs: Array<{ path: string; classification: string }>; inputs?: { plan?: Record<string, string> } } => {
+    assert.equal(run.shadow({ view: "repositories", key: "", requests: 1 }), true, "the worker computed the legacy side and compared");
+    const row = run.logs.filter((l) => l.step === VIEW_SHADOW_DIFF_STEP).at(-1);
+    return { diffs: (row?.extra.diffs ?? []) as Array<{ path: string; classification: string }>, ...(row ? { inputs: row.extra.inputs as never } : {}) };
+  };
+  const paired = sample();
+  assert.deepEqual(paired.diffs.filter((d) => d.path.includes("queued")), [], JSON.stringify(paired.diffs));
+  // Negative control: a queued count the paired plan does not give stays real, and its row names the plan each instance read.
+  health().queued = 7;
+  const wrong = sample();
+  const base = "instances[instanceId=console].summary.repos[id=craigoley/remudero-console].health";
+  assert.equal(wrong.diffs.find((d) => d.path === `${base}.queued`)?.classification, "real", JSON.stringify(wrong.diffs));
+  assert.ok(wrong.inputs?.plan?.console?.startsWith(built), `the diff row names the console plan the body read: ${JSON.stringify(wrong.inputs)}`);
 });
 
 test("a repositories sum and the condition it drives are judged by the rows each side added", (t) => {

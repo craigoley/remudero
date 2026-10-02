@@ -150,6 +150,8 @@ interface InstanceSummary {
   reason?: string;
   /** Each own repository's shadow facts, by repository id. */
   shadow?: Record<string, RepoShadowFacts>;
+  /** The plan the summary read, with its file stamp: legacy evaluates that one, not one filed since. */
+  plan?: PlanRead;
   /** The summary was computed while the instance's projector was still catching up, so from a partial ledger. */
   partial?: true;
   /** No summary yet because the instance's projector has not ticked: the read model is still warming. */
@@ -157,6 +159,9 @@ interface InstanceSummary {
 }
 
 type ShadowFactsByInstance = Record<string, Record<string, RepoShadowFacts>>;
+
+/** A plan as one read loaded it, and the plan file's and `tasks.d`'s mtimes it was loaded at. */
+type PlanRead = { plan: Plan; key: string };
 
 const canonicalJson = (value: unknown): string => JSON.stringify(value);
 
@@ -210,7 +215,12 @@ export function repositoriesShadowPairing(legacyFacts: ShadowFactsByInstance, vi
  * `at` names the instant each instance's seven-day window is evaluated at: the view's own summary instant,
  * so a row entering or leaving the window between the two reads is in both windows or in neither.
  */
-export function legacyRepositories(sourcesPath: string, nowMs: number, at: (instanceId: string) => number = () => nowMs): ShadowLegacy & { facts: ShadowFactsByInstance } | undefined {
+export function legacyRepositories(
+  sourcesPath: string,
+  nowMs: number,
+  at: (instanceId: string) => number = () => nowMs,
+  planOf: (instanceId: string) => Plan | undefined = () => undefined,
+): ShadowLegacy & { facts: ShadowFactsByInstance } | undefined {
   let published: RepositoriesSources;
   try {
     published = JSON.parse(readFileSync(sourcesPath, "utf8")) as RepositoriesSources;
@@ -222,7 +232,8 @@ export function legacyRepositories(sourcesPath: string, nowMs: number, at: (inst
   const instants: number[] = [];
   const instances: RepositoriesData["instances"] = published.instances.map(({ instanceId, options }) => {
     instants.push(at(instanceId));
-    const outcome = repoSummarySync({ ...options, shadowMembers: true }, instants.at(-1)!);
+    const plan = planOf(instanceId);
+    const outcome = repoSummarySync({ ...options, shadowMembers: true, ...(plan ? { readPlan: () => plan } : {}) }, instants.at(-1)!);
     if (!outcome.ok) return { instanceId, reason: outcome.reason };
     facts[instanceId] = outcome.shadow ?? {};
     return { instanceId, summary: unstampedSummary(outcome.summary) };
@@ -232,7 +243,7 @@ export function legacyRepositories(sourcesPath: string, nowMs: number, at: (inst
 }
 
 /** The plan each summary reads, memoized on the plan file's and `tasks.d`'s mtimes; `fresh` says whether a read would hit the memo. */
-function planReader(): { read: (path: string) => Plan; fresh: (path: string) => boolean } {
+function planReader(): { read: (path: string) => Plan; held: (path: string) => PlanRead | undefined; fresh: (path: string) => boolean } {
   const memo = new Map<string, { stamp: string; plan: Plan }>();
   const stampOf = (path: string): string => [path, join(dirname(path), "tasks.d")].map((p) => {
     try {
@@ -251,6 +262,10 @@ function planReader(): { read: (path: string) => Plan; fresh: (path: string) => 
       memo.set(path, { stamp, plan });
       return plan;
     },
+    held: (path) => {
+      const hit = memo.get(path);
+      return hit && { plan: hit.plan, key: hit.stamp };
+    },
     fresh: (path) => memo.get(path)?.stamp === stampOf(path),
   };
 }
@@ -267,8 +282,9 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
   const registryFile = readOnMtimeChange(readRegistry);
   const computed = new Map<string, InstanceSummary>();
   const plans = planReader();
-  /** Each published body's per-instance summary instant and shadow facts, keyed by the very `data` it published. */
-  const shown = new WeakMap<RepositoriesData, { at: Record<string, number>; facts: ShadowFactsByInstance }>();
+  /** Each published body's per-instance summary instant, shadow facts and plan, keyed by the very `data` it published. */
+  type Pair = { at: Record<string, number>; facts: ShadowFactsByInstance; plans: Record<string, PlanRead> };
+  const shown = new WeakMap<RepositoriesData, Pair>();
   let sourcesPath: string | undefined;
   type Slot = { state: S; db?: ReadModelDb } | undefined;
   /** Whether an instance's summary is recomputed now: #7926's cadence, 30 s after an input moves, else 60 s. */
@@ -282,12 +298,17 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
   const refresh = (instanceId: string, slot: Slot, options: RepositoriesInstanceOptions, sourcesMtimeMs: number, now: number): void => {
     const prior = computed.get(instanceId);
     const generation = slot?.state.generation ?? -1;
-    const next = summarize(slot, options, now, plans.read);
+    let read: PlanRead | undefined;
+    const next = summarize(slot, options, now, (path) => {
+      const plan = plans.read(path);
+      read = plans.held(path);
+      return plan;
+    });
     const partial = slot?.state.catchUp !== undefined ? { partial: true as const } : {};
     const warming = slot?.db !== undefined && slot.state.tickedAt === undefined ? { warming: true as const } : {};
     computed.set(instanceId, next.summary
-      ? { atMs: now, generation, sourcesMtimeMs, summary: next.summary, ...(next.shadow ? { shadow: next.shadow } : {}), ...partial }
-      : { atMs: now, generation, sourcesMtimeMs, reason: next.reason, ...warming, ...(prior?.summary ? { summary: prior.summary, ...(prior.shadow ? { shadow: prior.shadow } : {}), ...(prior.partial ? { partial: true as const } : {}) } : {}) });
+      ? { atMs: now, generation, sourcesMtimeMs, summary: next.summary, ...(next.shadow ? { shadow: next.shadow } : {}), ...(read ? { plan: read } : {}), ...partial }
+      : { atMs: now, generation, sourcesMtimeMs, reason: next.reason, ...warming, ...(prior?.summary ? { summary: prior.summary, ...(prior.shadow ? { shadow: prior.shadow } : {}), ...(prior.plan ? { plan: prior.plan } : {}), ...(prior.partial ? { partial: true as const } : {}) } : {}) });
   };
   const published = (instances: ReadonlyArray<{ db?: ReadModelDb }>): { path: string; sources?: RepositoriesSources } | undefined => {
     const dbPath = instances.find((slot) => slot.db)?.db?.path;
@@ -301,9 +322,12 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
     /** The shadow comparator's legacy side, its facts paired with this view's own summaries' facts. */
     legacy(_key, now, data) {
       const pair = shown.get(data as RepositoriesData);
-      const legacy = sourcesPath === undefined || pair === undefined ? undefined : legacyRepositories(sourcesPath, now, (instanceId) => pair.at[instanceId] ?? now);
+      const legacy = sourcesPath === undefined || pair === undefined
+        ? undefined
+        : legacyRepositories(sourcesPath, now, (instanceId) => pair.at[instanceId] ?? now, (instanceId) => pair.plans[instanceId]?.plan);
       if (!legacy) return undefined;
-      return { data: legacy.data, asOfMs: legacy.asOfMs, ...repositoriesShadowPairing(legacy.facts, pair!.facts, data as RepositoriesData) };
+      const inputs = { plan: Object.fromEntries(Object.entries(pair!.plans).map(([instanceId, read]) => [instanceId, read.key])) };
+      return { data: legacy.data, asOfMs: legacy.asOfMs, inputs, ...repositoriesShadowPairing(legacy.facts, pair!.facts, data as RepositoriesData) };
     },
     /** Each due instance's plan read and summary, one step each, so a cold build is never one unit. */
     prepare: ({ now, instances }, more) => {
@@ -334,7 +358,7 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
       const sourcesMtimeMs = statSync(at.path).mtimeMs;
       const sources: ViewSource[] = [];
       const data: RepositoriesData = { instances: [], projects: [] };
-      const pair: { at: Record<string, number>; facts: ShadowFactsByInstance } = { at: {}, facts: {} };
+      const pair: Pair = { at: {}, facts: {}, plans: {} };
       for (const { instanceId, options } of at.sources.instances) {
         const slot = instances.find((candidate) => candidate.state.instance === instanceId);
         if (slot) sources.push(ledgerSource(slot.state, now));
@@ -342,6 +366,7 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
         const current = computed.get(instanceId)!;
         if (current.summary) pair.at[instanceId] = Date.parse(current.summary.generated_at);
         pair.facts[instanceId] = current.shadow ?? {};
+        if (current.plan) pair.plans[instanceId] = current.plan;
         sources.push(summarySource(instanceId, current));
         data.instances.push({ instanceId, ...(current.summary ? { summary: unstampedSummary(current.summary) } : {}), ...(current.reason ? { reason: current.reason } : {}) });
       }

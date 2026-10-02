@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 3.64
   status: queued
@@ -16,3 +16,13 @@
     - claim: "the check:ci-log:coverage-shard:test-every-message-names-one-declared-sender-test-ts cause of PR friction has a recorded remedy"
       proof: "grep: ci-friction:check:ci-log:coverage-shard:test-every-message-names-one-declared-sender-test-ts in docs/ci-friction-remedies.md"
   note: "Filed by the ci-friction gardener (W1-T4435) from a weekly pass over the ledger and gate-fire-rate.ts's own measurement. check:ci-log:coverage-shard:test-every-message-names-one-declared-sender-test-ts priced at 1.7 PR minute(s) across 1 round(s) on 1 pull request(s) — the costliest cause with no open task. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person; its remedy is recorded in docs/ci-friction-remedies.md naming \"ci-friction:check:ci-log:coverage-shard:test-every-message-names-one-declared-sender-test-ts\" once it lands."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.93
+    reasons:
+      - "The declared files list names only docs/ci-friction-remedies.md, a documentation file. Nothing in the description or files touches secrets, auth, deletion, merge/deploy policy, or infrastructure."
+      - "The acceptance criterion is a single grep for a recorded remedy entry, so it can be verified mechanically (verify: auto). It asks for no operator-only decision."
+      - "The ci-friction family has a clean record, with 2 merged and 0 declined machine tasks. The gates state shows no concerns, and the PR will still go through CI and review."
+    judged_at: "2026-10-01T23:45:12.107Z"
+    pin: "4e40fde42b16caa58dee57809756d81b8b3aea57641043c3706ee009aae88b54"
