@@ -61,7 +61,7 @@ export interface HandoffActionProfile {
 }
 
 export interface HandoffEscalationPolicy {
-  /** Age, per level, after which an unowned item is due to escalate to the next chain entry. */
+  /** How long an item may sit unowned since it was last offered before it is due to escalate. */
   afterMs: number;
   chain: string[];
 }
@@ -308,7 +308,9 @@ export function assessHumanHandoff(handoff: HumanHandoff, now: number): HandoffA
   const ownerState = live ? "claimed" : handoff.claim ? "claim_expired" : "unclaimed";
   const ageMs = Math.max(0, now - Date.parse(handoff.createdAt));
   const msToDeadline = Date.parse(handoff.responseDeadline) - now;
-  const escalationDue = !handoff.closure && !live && ageMs >= handoff.escalationPolicy.afterMs * (handoff.escalationLevel + 1);
+  // Measured from the last time the item was offered to someone new, so each chain entry gets its own window.
+  const offeredAt = [...handoff.receipts].reverse().find((receipt) => receipt.kind === "escalated" || receipt.kind === "reassigned")?.at ?? handoff.createdAt;
+  const escalationDue = !handoff.closure && !live && now - Date.parse(offeredAt) >= handoff.escalationPolicy.afterMs;
   const quiet = inHandoffQuietHours(now, handoff.quietHours);
   let state: HandoffState;
   if (handoff.closure) state = "closed";

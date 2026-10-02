@@ -67,6 +67,7 @@ import {
   type FollowUpCandidate,
   type FollowUpControl,
   type FollowUpEvaluation,
+  type FollowUpHistory,
 } from "./follow-up-policy.js";
 import {
   appendHumanHandoff,
@@ -2605,6 +2606,9 @@ export interface OperatorAgentFollowUpHandoffContext {
   escalationPolicy: HandoffEscalationPolicy;
   /** The authority the original follow-up carried; defaults to advice-only, so a handoff never starts wider. */
   actionProfile?: HandoffActionProfile;
+  /** Passed straight to the follow-up policy, so a blocked dependency or exhausted history is seen. */
+  dependencyAvailable?: boolean;
+  existing?: readonly FollowUpHistory[];
   ledgerPath?: string;
   origin?: string;
 }
@@ -2619,7 +2623,11 @@ export function handOffOperatorAgentFollowUp(
   candidate: FollowUpCandidate,
   context: OperatorAgentFollowUpHandoffContext,
 ): { evaluation: FollowUpEvaluation; handoff: HumanHandoff | null; refusal?: string } {
-  const evaluation = evaluateFollowUpPolicy(candidate, { now: context.now });
+  const evaluation = evaluateFollowUpPolicy(candidate, {
+    now: context.now,
+    ...(context.dependencyAvailable === undefined ? {} : { dependencyAvailable: context.dependencyAvailable }),
+    ...(context.existing ? { existing: context.existing } : {}),
+  });
   const needsHuman = evaluation.state === "blocked" || (evaluation.state === "eligible" && candidate.nextQuestion !== undefined);
   if (!needsHuman) return { evaluation, handoff: null };
   const deadline = candidate.deadline && Date.parse(candidate.deadline) > context.now ? Date.parse(candidate.deadline) : context.now + FOLLOW_UP_HANDOFF_DEFAULT_RESPONSE_MS;
