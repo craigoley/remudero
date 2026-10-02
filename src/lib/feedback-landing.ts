@@ -153,10 +153,8 @@ export interface LandFeedbackOpts {
   /** Test seam for preserving the self/core identity without reading the caller's cwd. */
   sourceRepository?: LandingRepository;
   requestReview?: LandingReviewRequest;
-  /** Ledger writer for the plan-PR preflight's `plan_pr.preflight_*` lines (W1-T5348). */
   log?: (step: string, extra?: Record<string, unknown>) => void;
-  /** W1-T5348: the plan-PR preflight over the commit about to be pushed. Real callers omit it and get
-   *  {@link planPrPreflightAtCommit} on this checkout; a test injects one. */
+  /** W1-T5348: the plan-PR preflight over the commit about to be pushed; omitted, {@link planPrPreflightAtCommit}. */
   planPrPreflight?: (commitSha: string, pr: { title: string; body: string }) => PlanPrPreflightResult;
 }
 
@@ -193,8 +191,6 @@ export interface LandFeedbackResult {
 
 const ACKNOWLEDGEMENT_PATH_LIMIT = 50;
 
-/** W1-T5348: trees the plan-PR preflight refused, by tree sha — a poll over unchanged content is refused from here
- *  instead of materializing and re-checking the same tree every pass. */
 const refusedPlanPrTrees = new Map<string, PlanPrPreflightResult>();
 
 function defaultGit(root: string): GitExec {
@@ -835,8 +831,7 @@ function finishLanding(
     // value the union above was read against. The #954 guard below must move WITH this call on
     // any future refactor — dropping it silently reopens the hole #954 closed.
     assertLiveWriteAllowed("git-push", `force-pushing the ${kind.branch} branch`);
-    // W1-T5348: preflight the commit about to be pushed on its OWN tree — this checkout's HEAD is not it, which is
-    // why the pre-push hook never could. A tree already refused is refused again without re-running the checks.
+    // W1-T5348: preflight this commit's own tree (HEAD is not it); a tree refused once is not re-checked each poll.
     const preflight = opts.planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommit(root, sha, pr));
     const verdict = refusedPlanPrTrees.get(b.treeSha) ?? preflight(commitSha, { title: kind.prTitle, body: kind.prBody(b.unlanded) });
     if (!verdict.ok) refusedPlanPrTrees.set(b.treeSha, verdict);

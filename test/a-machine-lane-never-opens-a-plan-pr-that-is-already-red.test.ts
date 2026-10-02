@@ -25,7 +25,7 @@ import {
   planPrPreflightAllows,
   planPrPreflightAtCommit,
   refuseRedPlanPr,
-  type PlanPrPreflightDeps,
+  type PlanPrPreflightChecks,
   type PlanPrPreflightResult,
 } from "../src/lib/plan-pr-emitter.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -55,7 +55,7 @@ function grepAtHeadAndBase(cwd: string, proof: string): number {
 const GREEN = { status: 0, output: "" };
 
 /** Every check green except the proof check, which really greps the tree and origin/main. */
-const offlineDeps: PlanPrPreflightDeps = {
+const offlineChecks: PlanPrPreflightChecks = {
   lintPlan: () => GREEN,
   taskIdExistence: () => GREEN,
   shardCensus: () => GREEN,
@@ -89,13 +89,13 @@ function originWith(files: Record<string, string>, kind: string) {
 
 test("a clean tree passes every check and an unreadable check is reported without refusing", () => {
   const f = originWith({ "README.md": "seed\n" }, "w5348-pure");
-  const clean = planPrPreflight({ cwd: f.clone.dir, title: "chore(plan): file one task", body: "no acceptance block" }, offlineDeps);
+  const clean = planPrPreflight({ cwd: f.clone.dir, title: "chore(plan): file one task", body: "no acceptance block" }, offlineChecks);
   assert.deepEqual(clean, { ok: true, failures: [], unreadable: [] });
 
   const down = planPrPreflight(
     { cwd: f.clone.dir, title: "chore(plan): file one task", body: "" },
     {
-      ...offlineDeps,
+      ...offlineChecks,
       taskIdExistence: () => ({ status: null, output: "" }),
       shardCensus: () => {
         throw new Error("spawn ENOENT");
@@ -116,7 +116,7 @@ test("each red check refuses by name: plan lint, unreserved id, over-long or unt
   const r = planPrPreflight(
     { cwd: f.clone.dir, title: `chore(plan): ${"x".repeat(100)}`, body: "" },
     {
-      ...offlineDeps,
+      ...offlineChecks,
       lintPlan: red("lint-plan-precheck: the plan lint CI runs on this diff REFUSES it [proof-dialect]:\n  ✗ W9-T1"),
       taskIdExistence: red("\ntask-id-existence: FAILED -- W9-T1 is not reserved"),
       shardCensus: red("TAP version 13\nnot ok 1 - every shard on main is lintable\n# fail 1"),
@@ -132,7 +132,7 @@ test("each red check refuses by name: plan lint, unreserved id, over-long or unt
   assert.match(r.failures[2].firstLine, /header-max-length/);
   assert.match(r.failures[3].firstLine, /^not ok 1/);
 
-  const untyped = planPrPreflight({ cwd: f.clone.dir, title: "Plan: file it", body: "" }, offlineDeps);
+  const untyped = planPrPreflight({ cwd: f.clone.dir, title: "Plan: file it", body: "" }, offlineChecks);
   assert.deepEqual(untyped.failures.map((x) => x.check), ["pr-title"]);
 });
 
@@ -145,20 +145,20 @@ test("a PR-body proof that already passes at origin/main is red; a shard proof t
 
   const stale = planPrPreflight(
     { cwd: f.clone.dir, title: "chore(feedback): land pending filings", body: "## Acceptance\n- fb-acc lands | grep: fb-acc in plan/feedback/fb-acc.yaml" },
-    offlineDeps,
+    offlineChecks,
   );
   assert.equal(stale.ok, false, "the #7946 shape: the record id is already on origin/main, so the proof cannot discriminate");
   assert.equal(stale.failures[0].check, "proof-discrimination");
   assert.match(stale.failures[0].firstLine, /fb-acc/);
 
-  const noTest = planPrPreflight({ cwd: f.clone.dir, title: "chore(plan): x", body: "## Acceptance\n- c | unit test: nothing" }, { ...offlineDeps, checkProof: () => 3 });
+  const noTest = planPrPreflight({ cwd: f.clone.dir, title: "chore(plan): x", body: "## Acceptance\n- c | unit test: nothing" }, { ...offlineChecks, checkProof: () => 3 });
   assert.match(noTest.failures[0]?.firstLine ?? "", /matches no tests/);
 
-  const flaky = planPrPreflight({ cwd: f.clone.dir, title: "chore(plan): x", body: "## Acceptance\n- c | grep: W9-T7 in plan/tasks.d/W9-T7-future.yaml" }, { ...offlineDeps, checkProof: () => 4 });
+  const flaky = planPrPreflight({ cwd: f.clone.dir, title: "chore(plan): x", body: "## Acceptance\n- c | grep: W9-T7 in plan/tasks.d/W9-T7-future.yaml" }, { ...offlineChecks, checkProof: () => 4 });
   assert.equal(flaky.ok, true, "an exec error is unreadable, not red");
   assert.equal(flaky.unreadable[0].check, "proof-discrimination");
 
-  const filing = planPrPreflight({ cwd: f.clone.dir, title: "chore(plan): file W9-T7", body: "## Acceptance\n- filed | grep: W9-T7 in plan/tasks.d/W9-T7-future.yaml" }, offlineDeps);
+  const filing = planPrPreflight({ cwd: f.clone.dir, title: "chore(plan): file W9-T7", body: "## Acceptance\n- filed | grep: W9-T7 in plan/tasks.d/W9-T7-future.yaml" }, offlineChecks);
   assert.deepEqual(filing, { ok: true, failures: [], unreadable: [] }, "an unbuilt task's own proof fails at head by design");
 });
 
@@ -224,7 +224,7 @@ function garden(cloneDir: string, fetcher: (args: string[]) => unknown, rows: Lo
     log: (step, extra) => rows.push({ step, extra }),
     clock: fixedClock(1790000005348),
     fetcher,
-    preflight: (input) => planPrPreflight(input, offlineDeps),
+    preflight: (input) => planPrPreflight(input, offlineChecks),
   });
 }
 
@@ -282,7 +282,7 @@ test("feedback-landing's accept path never pushes a landing whose record id is a
   const rows: LogRow[] = [];
   const { gh, calls } = fakeGh();
   let preflights = 0;
-  const planPrPreflight = (sha: string, pr: { title: string; body: string }) => (preflights++, planPrPreflightAtCommit(f.clone.dir, sha, pr, offlineDeps));
+  const planPrPreflight = (sha: string, pr: { title: string; body: string }) => (preflights++, planPrPreflightAtCommit(f.clone.dir, sha, pr, offlineChecks));
   const opts = { gh, log: (step: string, extra?: Record<string, unknown>) => rows.push({ step, extra }), planPrPreflight };
 
   const first = withLiveWritesAllowed(() => landFeedback(f.clone.dir, opts));
@@ -305,7 +305,7 @@ test("a clean feedback landing still pushes and opens its PR", () => {
   writeFileSync(join(f.clone.dir, "plan", "feedback", "fb-new.yaml"), "id: fb-new\nstatus: new\nraw: fresh\n");
   const { gh, calls } = fakeGh();
   const r = withLiveWritesAllowed(() =>
-    landFeedback(f.clone.dir, { gh, planPrPreflight: (sha, pr) => planPrPreflightAtCommit(f.clone.dir, sha, pr, offlineDeps) }),
+    landFeedback(f.clone.dir, { gh, planPrPreflight: (sha, pr) => planPrPreflightAtCommit(f.clone.dir, sha, pr, offlineChecks) }),
   );
   assert.equal(r.landed, true, JSON.stringify(r));
   assert.equal(r.pushed, true);

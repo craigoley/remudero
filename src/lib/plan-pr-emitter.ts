@@ -493,14 +493,6 @@ export interface PlanPrPreflightReading {
   status: number | null;
   output: string;
 }
-/** Seams for the four checks that shell out; each defaults to the real one run inside `cwd`. */
-export interface PlanPrPreflightDeps {
-  lintPlan?: (cwd: string) => PlanPrPreflightReading;
-  taskIdExistence?: (cwd: string) => PlanPrPreflightReading;
-  shardCensus?: (cwd: string) => PlanPrPreflightReading;
-  /** `rmd check-proof <proof> --base origin/main`'s exit status. */
-  checkProof?: (cwd: string, proof: string) => number | null;
-}
 
 const TASK_ID_SCRIPT = "scripts/task-id-existence-check.mjs";
 const SHARD_CENSUS_TEST = "test/every-shard-on-main-is-lintable.test.ts";
@@ -520,23 +512,26 @@ function runInTree(cwd: string, relPath: string, argv: string[]): PlanPrPrefligh
   return { status: r.status, output: `${r.stdout ?? ""}\n${r.stderr ?? ""}` };
 }
 
-const defaultPreflightDeps: Required<PlanPrPreflightDeps> = {
-  lintPlan: (cwd) => {
+/** The four checks that shell out, each run inside `cwd`; `checkProof` answers `rmd check-proof`'s exit status. */
+const defaultPreflightChecks = {
+  lintPlan: (cwd: string): PlanPrPreflightReading => {
     const lines: string[] = [];
     const status = runLintPlanPrecheck({ cwd, log: (l: string) => lines.push(l), warn: (l: string) => lines.push(l) }) as number;
     return { status, output: lines.join("\n") };
   },
-  taskIdExistence: (cwd) => {
+  taskIdExistence: (cwd: string): PlanPrPreflightReading => {
     const r = runInTree(cwd, TASK_ID_SCRIPT, [TASK_ID_SCRIPT, "--base", "origin/main", "--require-open-prs"]);
     return r.status === 1 && TASK_ID_UNREADABLE_RE.test(r.output) ? { ...r, status: null } : r;
   },
-  shardCensus: (cwd) => {
+  shardCensus: (cwd: string): PlanPrPreflightReading => {
     const r = runInTree(cwd, SHARD_CENSUS_TEST, ["--import", "tsx", "--test", "--test-reporter=tap", SHARD_CENSUS_TEST]);
     // A run with no failing-test count is not a result (a load error exits 1 too).
     return r.status === 1 && !/^# fail [1-9]/m.test(r.output) ? { ...r, status: null } : r;
   },
-  checkProof: (cwd, proof) => runInTree(cwd, RUN_TASK_ENTRY, ["--import", "tsx", RUN_TASK_ENTRY, "check-proof", proof, "--base", "origin/main"]).status,
+  checkProof: (cwd: string, proof: string): number | null => runInTree(cwd, RUN_TASK_ENTRY, ["--import", "tsx", RUN_TASK_ENTRY, "check-proof", proof, "--base", "origin/main"]).status,
 };
+/** A test's stand-ins for any of {@link defaultPreflightChecks}. */
+export type PlanPrPreflightChecks = Partial<typeof defaultPreflightChecks>;
 
 function firstLineOf(output: string, status: number | null): string {
   const lines = output.split("\n").map((l) => l.trim()).filter(Boolean);
@@ -591,8 +586,8 @@ function proofDiscrimination(cwd: string, body: string, checkProof: (cwd: string
  * task-id-existence `--require-open-prs`, proof discrimination of the PR body and of each changed shard through
  * `rmd check-proof --base origin/main`, the PR-title lint, and the `every-shard-on-main-is-lintable` census.
  */
-export function planPrPreflight(input: { cwd: string; title: string; body: string }, deps: PlanPrPreflightDeps = {}): PlanPrPreflightResult {
-  const d = { ...defaultPreflightDeps, ...deps };
+export function planPrPreflight(input: { cwd: string; title: string; body: string }, checks: PlanPrPreflightChecks = {}): PlanPrPreflightResult {
+  const d = { ...defaultPreflightChecks, ...checks };
   const failures: PlanPrPreflightFinding[] = [];
   const unreadable: PlanPrPreflightFinding[] = [];
   const read = (check: PlanPrPreflightCheck, run: () => PlanPrPreflightReading): void => {
@@ -618,7 +613,7 @@ export function planPrPreflight(input: { cwd: string; title: string; body: strin
 
 /** {@link planPrPreflight} on a commit no checkout has at HEAD (feedback-landing's `commit-tree` sha): a detached
  *  worktree of it is materialized beside `repoDir`, borrows its node_modules, and is removed after. */
-export function planPrPreflightAtCommit(repoDir: string, commitSha: string, pr: { title: string; body: string }, deps: PlanPrPreflightDeps = {}): PlanPrPreflightResult {
+export function planPrPreflightAtCommit(repoDir: string, commitSha: string, pr: { title: string; body: string }, checks: PlanPrPreflightChecks = {}): PlanPrPreflightResult {
   const parent = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-pr-preflight-`));
   const tree = join(parent, "tree");
   try {
@@ -629,7 +624,7 @@ export function planPrPreflightAtCommit(repoDir: string, commitSha: string, pr: 
   }
   try {
     if (existsSync(join(repoDir, "node_modules"))) symlinkSync(join(repoDir, "node_modules"), join(tree, "node_modules"));
-    return planPrPreflight({ cwd: tree, ...pr }, deps);
+    return planPrPreflight({ cwd: tree, ...pr }, checks);
   } finally {
     spawnSync("git", ["-C", repoDir, "worktree", "remove", "--force", tree], { stdio: "pipe" });
     rmSync(parent, { recursive: true, force: true });
