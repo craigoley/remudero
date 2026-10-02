@@ -4,6 +4,7 @@
 // src/lib/report-commands.ts (W1-T2888); it imports them from lib/doctor.js directly. The symbols
 // below have SECOND callers outside doctorCommand and stay imported here too.
 import { retryWhileLockBusy } from "./lib/lock-busy-retry.js";
+import { loadProposalRecords } from "./lib/plan-proposals.js";
 import { retryPollRead } from "./lib/poll-read-retry.js";
 import { recyclePauseDetail } from "./lib/recycle-yield.js";
 import { decideFreshnessRestart } from "./lib/deploy-judge.js";
@@ -26144,6 +26145,13 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
       const message = e instanceof PolicyError ? e.message : String((e as Error)?.message ?? e);
       console.error(`✗ plan/policy.yaml: ${message}`);
     }
+  }
+
+  try {
+    loadProposalRecords(join(dirname(planPath), "proposals.d"));
+  } catch (error) {
+    failing++;
+    console.error(`✗ plan/proposals.d: ${(error as Error).message}`);
   }
 
   // W1-T324: three summary shapes, chosen by mode — every shape keeps the literal
