@@ -182,3 +182,35 @@ exit 1
     assert.match(args, /dst=\/field-trials\/site,readonly/);
   } finally { f.close(); }
 });
+
+
+test("scheduled field-trial collection uses current mounted source for every stage", () => {
+  const f = fixture();
+  try {
+    const registry = join(f.dir, "instances.yaml"), bin = join(f.dir, "bin"), log = join(f.dir, "docker-calls");
+    mkdirSync(bin);
+    for (const source of f.sources) {
+      mkdirSync(join(source.stateDir, "state"));
+      writeFileSync(join(source.stateDir, "state/ledger.ndjson"), ndjson([assignment("1")]));
+    }
+    writeFileSync(registry, f.sources.map(source => `  ${source.label}:\n    state_dir: ${source.stateDir}`).join("\n") + "\n");
+    writeFileSync(join(bin, "flock"), "#!/bin/sh\nexit 0\n"); chmodSync(join(bin, "flock"), 0o700);
+    writeFileSync(join(bin, "docker"), `#!/bin/sh
+if [ "$1" = inspect ]; then echo test-image; exit 0; fi
+if [ "$1" = exec ]; then echo test-credential; exit 0; fi
+printf '%s\\n' "$*" >> "$TEST_DOCKER_CALLS"
+exit 0
+`); chmodSync(join(bin, "docker"), 0o700);
+    const result = spawnSync("bash", [join(root, "deploy/field-trials-refresh.sh")], { cwd: root, encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, RMD_INSTANCE_REGISTRY: registry,
+        RMD_FIELD_TRIALS_CASE_FILES: "", TEST_DOCKER_CALLS: log } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, "");
+    const calls = readFileSync(log, "utf8").trim().split("\n");
+    assert.equal(calls.length, 3, JSON.stringify({ calls, stdout: result.stdout, stderr: result.stderr }));
+    for (const call of calls) assert.match(call, /--workdir \/home\/node\/Remudero\/remudero/);
+    assert.match(calls[1]!, /scripts\/private-field-trials-case-files.mjs/);
+    assert.match(calls[2]!, /\/home\/node\/Remudero\/remudero\/bin\/rmd field-trials/);
+    assert.doesNotMatch(calls.join("\n"), /--workdir \/app|\/app\/bin\/rmd/);
+  } finally { f.close(); }
+});

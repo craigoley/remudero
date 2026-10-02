@@ -70,7 +70,7 @@ else
   docker run --rm --network host --volumes-from remudero-daemon \
     --env "GH_APP_ID=$APP_ID" --env "GH_APP_INSTALLATION_ID=$INSTALLATION_ID" \
     --env "GH_APP_PRIVATE_KEY_PATH=$KEY_PATH" \
-    --workdir /app --entrypoint /bin/sh "$IMAGE" \
+    --workdir /home/node/Remudero/remudero --entrypoint /bin/sh "$IMAGE" \
     -c 'umask 077; exec "$@"' field-trials-refresh /usr/local/bin/node \
     --import tsx scripts/private-field-trials-case-files.mjs
 fi
@@ -78,11 +78,11 @@ fi
 docker run --rm --network host --volumes-from remudero-daemon \
   --mount "type=bind,src=$SITE/state,dst=/field-trials/site,readonly" \
   --mount "type=bind,src=$CONSOLE/state,dst=/field-trials/console,readonly" \
-  "${CASE_MOUNT[@]}" \
+  ${CASE_MOUNT[@]+"${CASE_MOUNT[@]}"} \
   --env "GH_APP_ID=$APP_ID" --env "GH_APP_INSTALLATION_ID=$INSTALLATION_ID" \
   --env "GH_APP_PRIVATE_KEY_PATH=$KEY_PATH" \
-  --workdir /app --entrypoint /bin/sh "$IMAGE" \
-  -c 'umask 077; exec "$@"' field-trials-refresh /app/bin/rmd field-trials \
+  --workdir /home/node/Remudero/remudero --entrypoint /bin/sh "$IMAGE" \
+  -c 'umask 077; exec "$@"' field-trials-refresh /home/node/Remudero/remudero/bin/rmd field-trials \
   --source core=craigoley/remudero --source site=craigoley/remudero-site --source console=craigoley/remudero-console \
   --ledger core=/home/node/Remudero/state --ledger site=/field-trials/site --ledger console=/field-trials/console \
   --out-dir /home/node/Remudero/state/field-trials --max-pages "$MAX_PAGES" \
