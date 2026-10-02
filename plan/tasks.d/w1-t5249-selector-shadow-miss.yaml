@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 4
   status: queued
@@ -16,3 +16,15 @@
   acceptance:
     - claim: "the narrow selector includes test/next-task-id-prefix.test.ts when this edge is exercised"
       proof: "grep: test/next-task-id-prefix\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The declared scope is a single file, src/lib/affected-suites.ts, which the description presents as a test-selector mapping. It does not appear to touch secrets, auth, deletion, merge or deploy policy, or other irreversible actions."
+      - "The acceptance criterion is a mechanical grep check, so it can be verified automatically (verify: auto). The task does not ask for any operator-only decision."
+      - "The change adds a test file to the narrow selector, so it only widens test coverage. The PR still goes through CI and review."
+      - "The family has no track record (0 merged, 0 declined; Beta mean 0.50). That is neutral rather than concerning, and it is not enough to raise the risk on a small, well-scoped change."
+      - "No bounded change view was supplied, so the assessment rests on the description and the declared file list only."
+    judged_at: "2026-10-02T12:42:54.014Z"
+    pin: "6cf87937213cbfbfd1465018687f3ba8fea480fb811c0b6c78b29742eef1720e"

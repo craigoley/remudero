@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 4
   status: queued
@@ -16,3 +16,14 @@
   acceptance:
     - claim: "the narrow selector includes test/one-effect-surface-has-one-recorded-list.test.ts when this edge is exercised"
       proof: "grep: test/one-effect-surface-has-one-recorded-list\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.85
+    reasons:
+      - "The declared scope is a single file, src/lib/affected-suites.ts. It adds one test path to the narrow selector, so the change is narrow and fully described by the task."
+      - "The description and acceptance criteria do not mention secrets, auth, deletion, merge or deploy policy, infrastructure, or any irreversible action. They also do not ask for an operator-only decision."
+      - "Acceptance is a grep check for the test path in the selector file, so it can be verified from what is shown. No bounded change view was supplied, so I cannot confirm the actual touched files match the declared list."
+      - "The family has no track record (0 merged, 0 declined; Beta mean 0.50). That is neutral, not concerning. The PR still goes through CI and review."
+    judged_at: "2026-10-02T12:43:22.449Z"
+    pin: "906d2f3cdf54ce923306555e6cf23a3478e8ab11271749d0508e9f7c7f91af7b"

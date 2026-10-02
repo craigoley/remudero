@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 4
   status: queued
@@ -16,3 +16,13 @@
   acceptance:
     - claim: "the narrow selector includes test/every-gate-knows-how-often-it-fires.test.ts when this edge is exercised"
       proof: "grep: test/every-gate-knows-how-often-it-fires\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The description and declared files show one file, src/lib/affected-suites.ts. The task adds a test file to the narrow selector, and its acceptance check is a grep, so it can be verified automatically."
+      - "Nothing in the description or files points to secrets, auth, deletion, merge or deploy policy, or an irreversible action. It also doesn't ask for an operator decision."
+      - "The family has no track record (0 merged, 0 declined), so I can't count a clean history in its favour. The change is still small and in scope, and it will go through CI and review."
+    judged_at: "2026-10-02T12:39:33.785Z"
+    pin: "6d8c388ae53a689f2b25c627a777cf54a553f045f5dbc04f4cd35204fcfcd11c"
