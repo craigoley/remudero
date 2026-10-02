@@ -1,0 +1,54 @@
+- id: W1-T5341
+  title: "Run fresh prospective calibration from pinned runtime evidence, not retrospective fleet history"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "2026-10-02 approved benchmark follow-ups; paid pilot already authorized at 100 USD total for seven days"
+  plan_refs: [W1-T4647, W1-T4603, W1-T4575]
+  files: [src/lib/benchmark-aa-readiness.ts, src/lib/benchmark-aa-prospective.ts, src/run-task.ts, test/benchmark-aa-readiness.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at 5bea7aaf0caaec3f7f8599e990866249a6406d28: prospective registration and
+    paired execution already exist. The live core state inventory on 2026-10-02 contained
+    a September retrospective report with integrity concerns, not a fresh prospective receipt.
+    That report names missing joins, unknown costs, differential missingness and unpinned
+    revisions; it cannot authorize the paid arm. Other state roots were not excluded by that
+    bounded inventory, so check all registered protocols before creating a new one.
+  design: |
+    Add a small explicit readiness/run driver around the existing subscription-only paired
+    seam. Derive immutable harness, prompt, tool, scorer and environment pins from the executing
+    runtime and refuse unknown or drifting pins. Reconcile existing registrations across the
+    three opted-in instance roots, with identity-qualified receipts and no duplicate trial.
+    Freeze an eligible, consented task/fixture population before running; preserve the eligibility
+    denominator and refusals, not only completed pairs. Produce resumable assignment, attempt,
+    terminal and verified-outcome joins using the existing allocation receipt and seeded order.
+    Report missingness per arm and stage, untriggered exclusions, observed cash separately from
+    notional usage, and source-window completeness. Never repair old missing pins by guessing.
+    Reuse the existing one-pair slot and bounded attempts; no route, PR or daemon hold is added.
+    No API-billed call or paid-pilot activation belongs to this task. Emit the existing fresh
+    calibration receipt only when its real integrity predicates pass, otherwise name the next
+    machine-repairable gap and file a deduplicated follow-up. A small sample is inconclusive,
+    never a fabricated win or a new arbitrary hard floor. Preserve the approved paid budget.
+    Research: Microsoft's primary SRM diagnosis describes failures in assignment, execution,
+    logging and analysis: https://www.microsoft.com/en-us/research/articles/diagnosing-sample-ratio-mismatch-in-a-b-testing/
+  acceptance:
+    - claim: "the explicit CLI path reaches the readiness driver"
+      proof: 'grep: runBenchmarkAaReadiness( in src/run-task.ts'
+    - claim: "the driver reuses paired execution with runtime-derived immutable provenance"
+      proof: 'grep: calibration driver refuses drifting runtime pins before dispatch in test/benchmark-aa-readiness.test.ts'
+    - claim: "resumption preserves one trial and joins without duplicate attempts"
+      proof: 'grep: calibration resumes identity-qualified assignments without replaying completed pairs in test/benchmark-aa-readiness.test.ts'
+    - claim: "eligibility and missing evidence survive the report instead of becoming zero"
+      proof: 'grep: calibration reports eligibility and per-stage missingness by arm in test/benchmark-aa-readiness.test.ts'
+    - claim: "calibration never spends through the paid lane or holds ordinary work"
+      proof: 'grep: calibration refuses API billing without blocking PR flow in test/benchmark-aa-readiness.test.ts'
+  falsifier: |
+    Swap a pinned revision, omit the eligibility denominator, collapse unknown cost to zero,
+    or replay a completed pair after restart: the corresponding production-driver fixture fails.

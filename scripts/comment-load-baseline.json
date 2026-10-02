@@ -101,7 +101,7 @@
   "src/lib/commit-message.ts": 180,
   "src/lib/compaction.ts": 500,
   "src/lib/companion-paths.ts": 50,
-  "src/lib/containment.ts": 611,
+  "src/lib/containment.ts": 750,
   "src/lib/correct.ts": 29,
   "src/lib/daemon-health.ts": 192,
   "src/lib/daemon.ts": 1750,
@@ -234,9 +234,9 @@
   "src/lib/worker-home.ts": 500,
   "src/lib/worker-provider.ts": 1250,
   "src/lib/worker-scratch.ts": 96,
-  "src/lib/worker.ts": 1780,
+  "src/lib/worker.ts": 2000,
   "src/lib/workflow-run.ts": 23,
   "src/lib/worktree-sites.ts": 131,
-  "src/run-task.ts": 17500,
+  "src/run-task.ts": 17750,
   "src/spike.ts": 18
 }

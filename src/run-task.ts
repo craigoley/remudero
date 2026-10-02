@@ -13596,6 +13596,8 @@ export function buildRuleHeadlinesPart(
  * NOTIONAL; window pressure is the HeadroomTracker's job (W1-T4), never a dollar cap.
  */
 export const DEFAULT_BUDGET_USD = 100.0;
+/** W1-T3387: the semantic reviewer's hard cap for a PR with no task id (and so no declared `budget_usd`). */
+export const UNTASKED_REVIEW_BUDGET_USD = 15;
 
 /**
  * Pure predicate: should the run emit a SOFT budget WARNING now? True exactly when
@@ -19519,7 +19521,18 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   let spawnReviewer = false, reviewerMount: Mount | undefined;
   let settingsFile = "";
   if (executionMode === "semantic") {
+    // W1-T3387: an untrailered / unfiled PR is still a PR the fleet chose to review. No task id means
+    // nobody DECLARED a risk, not that the risk is low — so the `PR-<number>` identity (the one every
+    // ledger row above already uses) reviews under the default risk and a default hard cap instead of
+    // skipping the reviewer and letting the keyword floor decide alone.
+    if (!taskId) {
+      taskRisk ??= DEFAULT_RISK;
+      taskBudgetUsd ??= UNTASKED_REVIEW_BUDGET_USD;
+      log("review.reviewer.untasked_defaults", { task_risk: taskRisk, hard_cap_usd: taskBudgetUsd });
+    }
     if (taskRisk === undefined || taskBudgetUsd === undefined) {
+      // A task id WAS derived but its shard gave no risk/budget at this head, and that is a plan-resolution fault, not an untasked PR.
+      // Its reason stays distinct from `semantic-setup-unavailable`.
       log("review.reviewer.skipped", {
         reason: "head-task-metadata-unavailable",
         missing: [taskRisk === undefined ? "risk" : undefined, taskBudgetUsd === undefined ? "budget_usd" : undefined].filter(Boolean),
