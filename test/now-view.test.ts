@@ -647,11 +647,11 @@ test("a daemon row appended after the probe read but stamped before its instant 
   const core = rig(t, root, "core", clock);
   const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { listGrilling: () => [] });
   const probeMs = T0 + 358;
-  core.append({ step: "daemon.idle_starved.pulse", ts: new Date(probeMs - 303_358).toISOString() });
+  core.append({ step: "daemon.idle_starved.pulse", ts: new Date(probeMs - 603_358).toISOString() });
   clock.set(probeMs);
   const [body] = view.materialize(ctxOf(clock, [core]));
   assert.ok(body);
-  assert.equal(body.data.health.daemon.state, "silent", "the probe read the last pulse 5 min 3 s old");
+  assert.equal(body.data.health.daemon.state, "silent", "the probe read the last idle pulse 10 min 3 s old, past two cadences");
   const silent = compareNow(view, core, body, probeMs + 22_000).filter((d) => d.path.startsWith("health"));
   assert.deepEqual(silent, [], "a genuinely silent daemon reads silent on both sides");
   appendFileSync(join(core.ledgerDir, "ledger.ndjson"), `${JSON.stringify({ ts: new Date(T0).toISOString(), step: "daemon.idle_starved.pulse", task_id: "DAEMON" })}\n`);
