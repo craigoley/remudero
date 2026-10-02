@@ -1,0 +1,64 @@
+- id: W1-T5376
+  title: "Reconsider an unarmed reviewed PR only when fresh head-specific facts resolve a failed arm"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "2026-10-02 operator approved investigation and filing of the follow-ups"
+  plan_refs: [W1-T1117, W1-T1079, W1-T970, W1-T3995]
+  files: [src/lib/arm-auto-merge.ts, src/lib/sweep.ts, test/failed-arm-fresh-evidence.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at 009a9111cf38344f6ee79c96f8fd18219a0b3688: armFailureAction
+    (src/lib/arm-auto-merge.ts:1288) leaves generic not-mergeable prose unknown.
+    src/lib/sweep.ts:10845 records that failed attempt as acted true; its reader
+    at 9114 inserts the same head into prior.armed, and 10598 stands down even
+    when GitHub's autoMergeArmed is false. The fixture at
+    test/arm-failure-classification.test.ts:140 intentionally proves that behavior.
+    W1-T1117 correctly prevents blind retries; this task supplies a separate path
+    for new attributable evidence, not a wider error regex. Issue 8150 and feedback
+    fb-1789301944158-5ef7b8 describe the corresponding post-review handoff symptom.
+    INFERRED: status propagation can produce that symptom; its historical frequency
+    and the cause of the specific old PR are not measured here. GitHub documents
+    asynchronous mergeability computation and mergeable null, not a retry guarantee:
+    https://docs.github.com/en/rest/pulls/pulls#get-a-pull-request
+  design: |
+    Add decideArmReprobeFromFacts and consume it in the sweep mergeable arm. Keep
+    armFailureAction's unknown classification and the existing transport/race classes.
+    Distinguish attempted-but-unarmed from actually armed without deleting old ledger
+    history. A prior unknown attempt may be reconsidered only after fresh, attributable
+    facts for the exact PR and head establish a material change: publish-complete review
+    evidence or a changed base/mergeability fact that resolves the earlier ambiguity.
+    A clock advance or the same successful API read is not a material change. Null,
+    unreadable, conflicting, wrong-head, failed-check or still-ambiguous facts stay
+    non-actionable and visible as such, never successful or already armed.
+    Re-run every ordinary author, acceptance, review, hold, irreversible and stack-parent
+    guard before any newly eligible attempt. This is not a new merge permission and must
+    not route around those guards or change direct-merge behavior. Observe an existing
+    arm without re-arming it. Use a durable exact-input evidence fingerprint so unchanged
+    facts, concurrent readers and restarts cannot spend another attempt. One attempt
+    per newly qualified evidence state, using the existing sweep cadence; no counter or
+    guessed time ceiling, empty commit, unconditional retry or new PR hold. Record the
+    previous failure, evidence, changed condition and actual outcome distinctly.
+    Test the production sweep consumer, not only the pure classifier. Preserve the old
+    unknown/no-new-evidence refusal fixture and add failing-first same-head/new-evidence
+    fixtures, including a review-publication race. This task is the engineering response
+    to the already-authorized filing question, not another operator decision.
+  acceptance:
+    - claim: "the sweep consumes fresh attributable evidence before reconsidering a failed arm"
+      proof: 'grep: decideArmReprobeFromFacts( in src/lib/sweep.ts'
+    - claim: "unknown, conflicting and wrong-head facts cannot unlock another arm attempt"
+      proof: 'grep: ambiguous or wrong-head evidence never reopens a failed arm in test/failed-arm-fresh-evidence.test.ts'
+    - claim: "new same-head evidence can recover a failed handoff while unchanged evidence remains deduplicated"
+      proof: 'grep: changed attributable facts reopen one failed arm and survive restart in test/failed-arm-fresh-evidence.test.ts'
+    - claim: "fresh evidence never bypasses existing holds and merge authority"
+      proof: 'grep: a fresh arm fact does not bypass a standing refusal in test/failed-arm-fresh-evidence.test.ts'
+  falsifier: |
+    Replaying identical evidence spends again, a clock-only change unlocks unknown,
+    a conflict is called armed, or a hold is bypassed: its corresponding fixture fails.

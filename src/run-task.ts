@@ -173,7 +173,7 @@ import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec, testManifestProposalPath, type TestProposalFeed } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
-import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
+import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, runSelectorShadowGardener, selectorShadowFlakeLedger } from "./lib/selector-shadow-gardener.js";
 import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, startMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
@@ -977,7 +977,7 @@ import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-for
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
-import { escalateRepeatingRules, ruleEfficacyReport } from "./lib/rule-efficacy.js";
+import { escalateRepeatingRules, ruleEfficacyReport, type RuleSignature } from "./lib/rule-efficacy.js";
 import {
   buildAuthorityReport,
   authorityLedgerPattern,
@@ -13595,6 +13595,8 @@ export function buildRuleHeadlinesPart(
  * NOTIONAL; window pressure is the HeadroomTracker's job (W1-T4), never a dollar cap.
  */
 export const DEFAULT_BUDGET_USD = 100.0;
+/** W1-T3387: the semantic reviewer's hard cap for a PR with no task id (and so no declared `budget_usd`). */
+export const UNTASKED_REVIEW_BUDGET_USD = 15;
 
 /**
  * Pure predicate: should the run emit a SOFT budget WARNING now? True exactly when
@@ -19518,7 +19520,18 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
   let spawnReviewer = false, reviewerMount: Mount | undefined;
   let settingsFile = "";
   if (executionMode === "semantic") {
+    // W1-T3387: an untrailered / unfiled PR is still a PR the fleet chose to review. No task id means
+    // nobody DECLARED a risk, not that the risk is low — so the `PR-<number>` identity (the one every
+    // ledger row above already uses) reviews under the default risk and a default hard cap instead of
+    // skipping the reviewer and letting the keyword floor decide alone.
+    if (!taskId) {
+      taskRisk ??= DEFAULT_RISK;
+      taskBudgetUsd ??= UNTASKED_REVIEW_BUDGET_USD;
+      log("review.reviewer.untasked_defaults", { task_risk: taskRisk, hard_cap_usd: taskBudgetUsd });
+    }
     if (taskRisk === undefined || taskBudgetUsd === undefined) {
+      // A task id WAS derived but its shard gave no risk/budget at this head, and that is a plan-resolution fault, not an untasked PR.
+      // Its reason stays distinct from `semantic-setup-unavailable`.
       log("review.reviewer.skipped", {
         reason: "head-task-metadata-unavailable",
         missing: [taskRisk === undefined ? "risk" : undefined, taskBudgetUsd === undefined ? "budget_usd" : undefined].filter(Boolean),
@@ -22747,7 +22760,7 @@ export function ciLearningTaskIdMinter(root: string): (filingBranch?: string) =>
   };
 }
 
-export function ruleEfficacyCommand(rest: string[], opts: { stateDir?: string } = {}): number {
+export function ruleEfficacyCommand(rest: string[], opts: { stateDir?: string; signatures?: readonly RuleSignature[] } = {}): number {
   const badArg = unknownArgError("rule-efficacy", rest, [], ["--no-escalate"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -22768,7 +22781,7 @@ export function ruleEfficacyCommand(rest: string[], opts: { stateDir?: string } 
     return 1;
   }
 
-  const report = ruleEfficacyReport(stateDir);
+  const report = opts.signatures ? ruleEfficacyReport(stateDir, opts.signatures) : ruleEfficacyReport(stateDir);
   console.log(`rmd rule-efficacy — over the unioned ledger at ${stateDir}`);
   // `report.ledger` is only ever unset when the signature table has no measurable rule at all
   // (lib/rule-efficacy.ts's own module-level falsifier covers that shape) — RULE_SIGNATURES,
@@ -22783,6 +22796,10 @@ export function ruleEfficacyCommand(rest: string[], opts: { stateDir?: string } 
       console.log(`                why: ${r.why}`);
     } else if (r.status === "PREVENTING") {
       console.log(`  PREVENTING    ${r.ruleId}  (0 since ${r.effectiveDate})`);
+    } else if (r.status === "UNPROVEN") {
+      // W1-T4271: activity matches, never recurrences — the count is shown, the verdict is not REPEATING.
+      console.log(`  UNPROVEN      ${r.ruleId}  (${r.recurrences.length} activity match(es) since ${r.effectiveDate})`);
+      console.log(`                why: ${r.why}`);
     } else {
       const dates = r.recurrences.map((x) => x.ts).join(", ");
       console.log(`  REPEATING     ${r.ruleId}  (${r.recurrences.length} since ${r.effectiveDate}: ${dates})`);
@@ -33233,8 +33250,10 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // drafted as one, parked for a person.
     case "ci-friction": {
       const d = deps("ci-friction", raiseDuplicate);
+      let handFixes: ReturnType<typeof readCiFrictionHandFixes> | undefined;
       const sources: CiFrictionGardenSources = {
         ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
+        handFixes: () => handFixes ??= readCiFrictionHandFixes(repoRoot, stateDir, owner, repo),
         gateFireRates: () => readGateFireRateReport(stateDir),
         planState: () => readCiFrictionPlanState(repoRoot),
         ownerSearch: gitCiFrictionOwnerSearch((args) => execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 })),

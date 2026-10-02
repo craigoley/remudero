@@ -1,0 +1,50 @@
+- id: W1-T5355
+  title: "SERVE'S MEMORY SAMPLE NAMES 2.6 MB OF A 3.8 GB PROCESS — the W1-T5175 holders sum to 2.56 MB while rss runs 2.8-4.7 GB and the main heap 0.5 GB; worker-thread heaps, instance analytics caches and the goal board are unnamed, and a low-headroom streak with nothing to drop never escalates"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-02: gap review of W1-T5175 (#8686) against its first 50 serve.memory rows"
+  plan_refs: [W1-T5175, W1-T4102]
+  files: [src/lib/serve.ts, src/lib/serve-memory.ts, src/lib/incident-invariants.ts, test/serve-memory-names-where-rss-lives.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-02 16:33-19:05Z, 50 serve.memory rows:
+    - rss 2.82-4.70 GB, heapUsed 0.45-1.63 GB, external about 14 MB;
+    - named holders 2.55-2.57 MB in total, so under 0.1% of rss is attributed;
+    - `limit_bytes` 8.05 GB, headroom 52-64%.
+    Two to four GB of rss sits outside the main isolate's heap and outside every named holder. The likely
+    owners are the read-model worker threads (read-model-worker.ts / read-model-slow-lane.ts spawn
+    `new Worker(...)`), each a separate V8 heap that counts toward rss but not the main heapUsed.
+    `createServeMemoryRegistry` in src/lib/serve.ts registers analytics, live-analytics, board-snapshot,
+    view-bodies and the legacy route caches. It does not register `routeAssembly.instanceAnalyticsCaches`,
+    whose entries each have `current()` and `shed()`, or `goalBoardCache`. Account-usage keeps no cache: it
+    reads the file on every request, so there is nothing to register there.
+    `startServeMemoryMonitor` advances its escalation streak only when a relief fired. Relief has had nothing
+    to drop (0 `serve.memory_relieved` rows), so falling headroom never escalates. That is exactly the OOM
+    shape. W1-T5175's design point 3 ("read by the existing incident path") has no incident-invariants rule
+    reading serve.memory.
+  design: |
+    1. Sample each live read-model worker thread's heap as a `worker-heap:<kind>` holder. Use
+       `worker.getHeapStatistics()` where the runtime has it. Otherwise use a message round-trip that returns
+       `v8.getHeapStatistics()` from inside the thread, with a timeout that names the thread as unsized.
+       Add `unattributed_bytes = rss - heapTotal - external - sum(worker heaps)` to the row.
+    2. Register every `instanceAnalyticsCaches` entry as `snapshotHolder("analytics:<instance>", current, shed)`,
+       and `goalBoardCache` as a measured holder.
+    3. Add an incident-invariants rule `serve-memory-headroom` that reads serve.memory rows. It fires when
+       headroom stays below `LEGACY_RELIEF_HEADROOM` across its long and short windows, whether or not a
+       relief fired. Keep the monitor's own escalation for reliefs.
+    No new bound and no refusal, as in W1-T5175.
+  acceptance:
+    - claim: "a serve memory sample names each worker thread's heap, every instance analytics cache and the unattributed remainder, and sustained low headroom with nothing to relieve fires an incident invariant"
+      proof: "unit test: test/serve-memory-names-where-rss-lives.test.ts"
+  falsifier: |
+    Remove the worker-heap holders. The suite's fake 900 MB worker reports no `worker-heap:` holder, and
+    `unattributed_bytes` absorbs it. Remove the rule, and a series below 25% headroom with zero reliefs yields
+    no finding.

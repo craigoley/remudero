@@ -1,0 +1,51 @@
+- id: W1-T5354
+  title: "WORKER GREP AND GLOB STILL READ OUTSIDE THE WORKTREE — rule 14 confines Read, but Grep in content mode returns the same file bodies and settings/worker.json's matcher never sends Glob or Grep to the hook; a Codex worker's own edit tool is not a Claude tool name rule 14 knows"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  origin: "operator session 2026-10-02: gap review of W1-T5016 (#8683)"
+  plan_refs: [W1-T5016]
+  files: [hooks/deny-floor.sh, settings/worker.json, test/worker-grep-and-glob-stay-in-the-worktree.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    W1-T5016 confined Read/Write/Edit/MultiEdit/NotebookEdit to the assigned worktree. It did this through
+    `--confine-file-tools` and rule 14 of hooks/deny-floor.sh. Grep with `output_mode: content` returns file
+    bodies, the same exposure as Read, and Glob enumerates names. Neither is in settings/worker.json's
+    PreToolUse matcher (`Bash|Read|Write|Edit|MultiEdit|NotebookEdit`). A worker can therefore still Grep a
+    sibling worktree or the canonical checkout and act on foreign code. The `permissions.deny` Read rules
+    still cover the secret paths.
+    MEASURED over 7 days: about 348 Grep and 27 Glob worker calls (Grep 341 succeeded, 2 errored), against
+    about 1,248 Reads. `worker.activity` does not record `tool_input`, so the paths in use are unknown. The
+    common shape, with no path, must keep working.
+    Codex workers get the same floor through `codexPreToolUseProfile` (src/lib/worker-provider.ts), but rule
+    14 keys on Claude tool names. Codex edits files with its own patch tool, so it is unconfined by rule 14 if
+    that tool reaches the hook under another name. If it never reaches the hook, Codex rests on its
+    `--sandbox workspace-write` boundary alone. Which one holds is not yet measured.
+  design: |
+    1. Add `Glob|Grep` to settings/worker.json's matcher, and handle both in rule 14:
+       - the target is `.tool_input.path`. When it is absent or empty, the target is the hook's cwd, which is
+         allowed. Unlike Read, an absent path never fails closed;
+       - for Glob, also take the literal prefix of an ABSOLUTE `pattern`, up to its first glob
+         metacharacter, as a second target;
+       - each target goes through the same canonicalize, `..` and ft_under checks, and the same allow-list:
+         the worktree, node_modules reads, TMPDIR, worker-home, and the session's ~/.claude/projects slug.
+       Relative patterns and Grep's `glob` filter are relative to the target and need no check.
+    2. Codex. Find the tool name and payload Codex's PreToolUse hook receives for a file edit, with a fixture
+       captured from the installed codex. If its edit tool reaches the hook, add that name to the matcher, and
+       have rule 14 read the edited paths from the patch's file headers (`*** Update File:` / `*** Add File:` /
+       `*** Delete File:`) through the same checks. If it does not reach the hook, the suite asserts that, and
+       the design is recorded as follows: Codex file confinement is its `workspace-write` sandbox, not rule
+       14. Any Codex-side mechanism is then a separate task named in the PR body, not built here.
+  acceptance:
+    - claim: "a worker Grep or Glob naming a path outside the worktree is refused, one with no path, an in-worktree path or a node_modules path is allowed, and a Codex file edit outside the worktree is either refused by rule 14 or shown not to reach the hook"
+      proof: "unit test: test/worker-grep-and-glob-stay-in-the-worktree.test.ts"
+  falsifier: |
+    Drop Grep and Glob from rule 14's case arm. The suite's `Grep path=/sibling-worktree` and
+    `Glob pattern=/sibling/**/*.ts` cases exit 0. Make an absent path fail closed, and the no-path Grep case is
+    refused.

@@ -94,7 +94,7 @@
     - claim: "describeWorkerSkillReachability's own existing contract, false for an empty settingSources array and true for project, is unchanged -- the W1-T3137 regression test still passes"
       proof: "unit test: describeWorkerSkillReachability s own existing contract false for an empty"
     - claim: "the one production call site in retroCommand no longer sources the staged reachability line from describeWorkerSkillReachability, and two drafts in the same batch with different applies-to content get DIFFERENT reachability lines"
-      proof: "unit test: test/a-staged-skill-reaches-the-worker-prompt.test.ts"
+      proof: "unit test: two drafts in one batch with different applies-to get different reachability lines"
   falsifier: |
     CLOSE WITHOUT BUILDING if test/a-repo-skill-no-worker-can-reach.test.ts (W1-T3137) has
     since been amended to widen WORKER_SETTING_SOURCES to include 'project' -- re-check

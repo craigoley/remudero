@@ -1,0 +1,51 @@
+- id: W1-T5345
+  title: "A LANE IS FREE ONCE ITS PULL REQUEST IS OPEN — an implement lane holds its slot from pr.opened through the CI wait and the in-run review, which was 36.7% of all busy lane time on 2026-10-02 (median 11.0 min, p90 50.8 min per run), while the sweep already reviews, fixes and merges open PRs and the handed_off verdict already lets a run leave its PR to it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-02: implement dispatch admission research (lane-time attribution)"
+  plan_refs: [W1-T4662, W1-T5037, W1-T5127, W1-T4945]
+  files: [src/run-task.ts, test/a-lane-is-free-once-its-pull-request-is-open.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    `sweep.dispatchLanes` is 2, and every one of the 157 `dispatch.concurrent_set` rows in 09-25..10-02 has
+    lane_count 2. Selection is not the limit: there were 224 runnable tasks, and "no disjoint runnable task"
+    appears twice in 7 days. MEASURED 10-02 (1,780 busy lane-minutes over 48 implement runs): pr.opened ->
+    verdict 36.7%, worker implementing 25.7%, containment and isolation probes 18.1%, push and PR open 7.2%.
+    The mean slot is 37.1 min, so 2 lanes cap at 3.2 runs/h. 2.5/h was measured.
+    The mechanism to give the slot back already exists. `waitForCiGreen` (src/run-task.ts) returns
+    `freshness_handoff` when `externalWaitFreshness` or `externalWaitRecycle` says so. It logs
+    `run.freshness_handoff`, and the run ends with verdict `handed_off`: 6 of them on 10-02. W1-T4662 made
+    `handed_off` a non-failure that neither throttles dispatch nor closes refill. `handed_off` is in drain.ts's
+    `NON_HALTING_VERDICTS`, and the open PR keeps the task from re-dispatch. The sweep then owns that PR's
+    review, fix rung (`hostWorkerBudget` 8) and auto-merge arm. Handing off every run at PR open would cut the
+    mean slot to about 23 min, or about 5 runs/h at 2 lanes. That adds no concurrent implementers, so the memory
+    exposure is unchanged. wipLimit stays 10 (operator decision 2026-10-02). More open PRs reach that limit
+    sooner, and `dispatch.wip_deferred` / the queue governor already hold dispatch when they do.
+  design: |
+    1. Add a third yield trigger to the CI wait, next to `externalWaitFreshness` / `externalWaitRecycle`: a
+       `handOffAtPrOpen` option. The daemon's runOne passes it as true; `rmd run-task` by hand and `rmd drain`
+       leave it off and keep today's in-run wait. When set, the wait yields on its first poll, after
+       `run.awaiting_external` is written (the W1-T3793 order). It logs
+       `run.freshness_handoff { waiting_on: "ci", trigger: "pr_open", head_sha }`, and the run ends `handed_off`
+       with reason `pr_open_yield` through the existing branch: same verdict fields, claim and lock release.
+    2. Before handing off, list every step the in-run path does after CI green: the review post, the auto-merge
+       arm, fix rounds, follow-up harvest, and credit rows. Assert in the test that each has a sweep-side owner.
+       Any step without one either moves ahead of the yield, or the yield is skipped for that run with a named
+       `run.handoff_declined` reason. Never drop it silently.
+    3. A run whose PR open itself failed, or whose head has no PR, never hands off.
+    No change to wipLimit, reviewLanes, dispatchLanes or the sweep's own admission bounds.
+  acceptance:
+    - claim: "with the PR-open handoff on, a run that opened its pull request ends handed_off with reason pr_open_yield on the first CI poll and writes a pr_open freshness_handoff row, with the option off the run still waits for CI in-lane, and a run with no pull request never hands off"
+      proof: "unit test: test/a-lane-is-free-once-its-pull-request-is-open.test.ts"
+  falsifier: |
+    Drop the `handOffAtPrOpen` arm from the CI wait. The suite's run with the option on polls CI to its fake
+    green and posts its own review instead of returning `handed_off`, and no `trigger: "pr_open"` row is
+    written.

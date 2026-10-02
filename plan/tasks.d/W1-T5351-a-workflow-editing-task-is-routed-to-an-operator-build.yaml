@@ -1,0 +1,44 @@
+- id: W1-T5351
+  title: "A TASK THAT MUST EDIT A WORKFLOW FILE IS ROUTED TO AN OPERATOR BUILD — the fleet GitHub App has no workflows permission, so a worker's push touching .github/workflows/ is remote-rejected after a full build (W1-T3720, 2026-10-02T18:40:59Z), and five more runnable tasks declare a workflow path in files:"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  origin: "operator session 2026-10-02: runnable-queue proof audit (workflow-push-rejected); operator declined to grant the App workflows permission"
+  plan_refs: [W1-T4818, W1-T3720, W1-T5018, W1-T4690, W1-T5102, W1-T4057, W1-T4071]
+  files: [src/lib/drain.ts, test/a-workflow-editing-task-is-routed-to-an-operator-build.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-02T18:40:59Z: W1-T3720's push came back with `! [remote rejected] ... refusing to allow a
+    GitHub App to create or update workflow .github/workflows/ci.yml without workflows permission`. Its design
+    (ii) is a workflow change. That was a whole build (claim, probes, worker, PR) spent on a push that cannot
+    land. The fleet App lacks the `workflows` permission, and the operator declined to grant it (2026-10-02).
+    So every task whose build must change `.github/workflows/` fails the same way.
+    The audit of 181 runnable tasks found 6 such tasks: W1-T3720, W1-T5018, W1-T4690, W1-T5102, W1-T4057 and
+    W1-T4071. Five declare the workflow path in `files:`. W1-T3720 names `ci.yml` only in prose, so this
+    filter cannot see it until its `files:` names the workflow it edits. That is a plan-only amendment, left to
+    the operator.
+    `isDispatchEligible` (src/lib/drain.ts) already routes one class away from workers: W1-T4818's record
+    tasks are declined and named once through `onRecordTaskRouted` / `recordTaskRoutedLogger`
+    (`dispatch.record_task_routed`).
+  design: |
+    In `isDispatchEligible`, after the record-task arm:
+    - a task whose `files:` has any entry under `.github/workflows/` is declined with a new filter reason
+      `operator-build`, reported through `opts.onFiltered`;
+    - add the reason to the filter-reason union and its census record, so the idle census, which both
+      the drain and the long-running dispatcher feed from `onFiltered`, names it;
+    - name the task once per drain through an `onOperatorBuildRouted` hook and a logger mirroring
+      `recordTaskRoutedLogger` (`dispatch.operator_build_routed { task, paths }`).
+    An operator-released id (`releasedIds`) is still declined: release lifts `verify: human`, not the App's
+    missing permission. Nothing else changes: an operator can still build the task by hand on a session branch.
+  acceptance:
+    - claim: "a runnable task whose files list a path under .github/workflows/ is declined with reason operator-build and named once per drain, a released id is still declined, and a task with no workflow path is offered as before"
+      proof: "unit test: test/a-workflow-editing-task-is-routed-to-an-operator-build.test.ts"
+  falsifier: |
+    Remove the workflow arm. The suite's plan with one `files: [.github/workflows/ci.yml, src/x.ts]` task offers
+    it as a runnable candidate, and no `dispatch.operator_build_routed` row is logged.
