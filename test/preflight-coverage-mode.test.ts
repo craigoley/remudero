@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -286,7 +285,11 @@ test(
     // That is exactly why diff-coverage reported those lines as added-and-uncovered. This test
     // omits `lcovText` so the REAL read runs, against a repoRoot that carries no
     // `coverage/lcov.info` at all, so it throws and the catch arm is the thing under test.
-    const emptyRoot = mkdtempSync(join(tmpdir(), "preflight-coverage-no-lcov-"));
+    // This is a second fake repository. Anchor it outside the parent gate's nested TMPDIR so
+    // this fixture reaches the unreadable-lcov arm, not the unrelated scratch path-length guard.
+    const emptyRoot = mkdtempSync(join("/tmp", "preflight-coverage-no-lcov-"));
+    const previousTmp = process.env.TMPDIR;
+    process.env.TMPDIR = "/tmp";
     try {
       const { spawn, calls } = recordingSpawn({
         [`diff --name-only ${PINNED_RANGE}`]: { status: 0, stdout: "src/lib/example.ts\n" },
@@ -313,6 +316,8 @@ test(
       const diffCoverageCalled = calls.some((c) => c.args.some((a) => a.includes("diff-coverage.mjs")));
       assert.equal(diffCoverageCalled, false, "diff-coverage.mjs is never asked for a verdict over an lcov that could not be read");
     } finally {
+      if (previousTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTmp;
       rmSync(emptyRoot, { recursive: true, force: true });
     }
   },
