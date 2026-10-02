@@ -31301,6 +31301,8 @@ function readAvailableMibBounded(
     try {
       return read();
     } catch (e) {
+      // Not swallowed: kept as the error the dispatch_memory_unreadable row records and the
+      // throw below re-raises once the bound is spent — a failed read never becomes a number.
       lastError = e;
     }
   }
