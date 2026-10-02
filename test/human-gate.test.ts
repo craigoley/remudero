@@ -130,6 +130,7 @@ function materialize(t: { after(fn: () => void): void }, opts: { count?: number;
     instances: [{ db, lease: lease.lease, state: { instance: "core", generation: 0, lease: "held", failures: 0, tickedAt: clock.now(), newestTs: null } }],
   });
   assert.equal(bodies.length, 1);
+  assert.equal(view.version, 3, "the optional projection preserves the existing Now view contract");
   return bodies[0]!.data;
 }
 

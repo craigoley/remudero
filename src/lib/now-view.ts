@@ -64,8 +64,7 @@ import { legacyRowIndex, type LegacyRows, type ShadowLatest, type ShadowSum } fr
 import { effectiveViewMode, type ViewSource, type ViewSwitchMode } from "./views.js";
 
 export const NOW_VIEW_NAME = "now";
-/** 4 adds source-qualified human gates; the original decision routes and fields remain unchanged. */
-export const NOW_VIEW_VERSION = 4;
+export const NOW_VIEW_VERSION = 3;
 /** Re-materialize at least this often with no new row: `elapsedMs`, the liveness bound and the 6 h cooldown move with the clock. */
 export const NOW_REFRESH_MS = 30_000;
 /** The host probes' cadence (design §3.5), per instance. */
