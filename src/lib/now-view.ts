@@ -144,6 +144,8 @@ export interface NowHealth {
 export interface NowHostProbe {
   sampledAt: string;
   health: NowHealth;
+  /** How many rows the probe's live-ledger read returned: until a rotation cuts it the file only grows, so that prefix is what it saw. */
+  liveRows?: number;
 }
 
 export interface NowViewData {
@@ -853,7 +855,11 @@ export function createNowView(opts: NowViewOptions): {
       const live = readLedgerLines(ledgerPath);
       // Each computation reads the rows the live file held over the window it evaluates, up to the body's build.
       const board = ledgerRowsOver(instance.ledgerDir, { fromMs: built.builtMs - NOW_LEGACY_ROW_WINDOW_MS, toMs: built.builtMs }, live, rowsPass);
-      const probed = ledgerRowsOver(instance.ledgerDir, { fromMs: probeMs, toMs: probeMs }, opts.hostProbe?.readLive?.(ledgerPath) ?? live, rowsPass);
+      const probeLive = opts.hostProbe?.readLive?.(ledgerPath) ?? live;
+      const probed = ledgerRowsOver(instance.ledgerDir, { fromMs: probeMs, toMs: probeMs }, probeLive, rowsPass);
+      // A row appended after the probe's read can carry an earlier stamp (a pulse stamped to the second, 2026-10-02 05:32Z site),
+      // so with no cut since, legacy reads the very prefix the probe read rather than the rows stamped by its instant.
+      const probeRows = probed.read.rotations.length === 0 && built.probe.liveRows !== undefined ? probeLive.slice(0, built.probe.liveRows) : probed.rows;
       const spent = ledgerRowsOver(instance.ledgerDir, { fromMs: utcDayWindowMs(built.builtMs)[0], toMs: built.builtMs }, live, costsPass);
       rowsPass.complete();
       costsPass.complete();
@@ -864,7 +870,7 @@ export function createNowView(opts: NowViewOptions): {
       const legacy = assembleNowView({ instance: name, snapshot, rows, plan: built.plan, recent: [], health: mine.health, decisions, nowMs: now });
       legacy.board.spendTodayUsd = deriveDayCostUsd(spent.rows, built.builtMs);
       const captured = built.probe.health;
-      const atProbe = { readLive: () => probed.rows, rateLimit: () => captured.rateLimitRemaining, diskFree: () => captured.diskFreeBytes };
+      const atProbe = { readLive: () => probeRows, rateLimit: () => captured.rateLimitRemaining, diskFree: () => captured.diskFreeBytes };
       const health = defaultProbeHost(instance, name === core, fixedClock(probeMs), atProbe).health;
       const oldest = rows.map((row) => (typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN)).filter(Number.isFinite).sort((a, b) => a - b)[0];
       const theirs = nowCountMembers(snapshot.tasks);
@@ -893,7 +899,7 @@ export function createNowView(opts: NowViewOptions): {
         sortKeys: Object.fromEntries(groups.map((path) => [path, keys])),
         from,
         inputs: {
-          plan: built.planKey, probeAt: built.probe.sampledAt, builtAt: fixedClock(built.builtMs).iso(),
+          plan: built.planKey, probeAt: built.probe.sampledAt, builtAt: fixedClock(built.builtMs).iso(), probeRows: probeRows.length,
           windows: { board: board.read, probe: probed.read, spend: spent.read },
         },
         ...(oldest !== undefined ? { horizonMs: oldest } : {}),
@@ -939,8 +945,13 @@ export function defaultProbeHost(instance: NowInstance, isCore: boolean, clock: 
   const reasons: Record<string, string> = {};
   const diskFreeBytes = (deps.diskFree ?? readDiskFreeBytes)(instance.ledgerDir);
   if (diskFreeBytes === undefined) reasons.diskFreeBytes = `statfs of ${instance.ledgerDir} failed`;
+<<<<<<< HEAD
   const poll = deriveLastPoll((deps.readLive ?? readLedgerLines)(join(instance.ledgerDir, LEDGER_FILENAME)));
   const silentAfterMs = Math.max(NOW_DAEMON_SILENT_MS, NOW_DAEMON_SILENT_CADENCES * poll.pollIntervalMs);
+=======
+  const live = (deps.readLive ?? readLedgerLines)(join(instance.ledgerDir, LEDGER_FILENAME));
+  const poll = deriveLastPoll(live);
+>>>>>>> origin/main
   const daemon: NowDaemonPoll = !poll.lastPollTs
     ? { state: "silent", reason: "no daemon.* row in the instance's live ledger" }
     : now - Date.parse(poll.lastPollTs) > silentAfterMs
@@ -955,5 +966,5 @@ export function defaultProbeHost(instance: NowInstance, isCore: boolean, clock: 
     daemon,
     ...(Object.keys(reasons).length > 0 ? { reasons } : {}),
   };
-  return { sampledAt: fixedClock(now).iso(), health };
+  return { sampledAt: fixedClock(now).iso(), health, liveRows: live.length };
 }
