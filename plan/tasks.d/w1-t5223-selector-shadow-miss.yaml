@@ -1,0 +1,29 @@
+- id: W1-T5223
+  title: "REPAIR THE SELECTOR EDGE INTO test/a-refused-pr-open-names-its-branch.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=0140d95b35f086e4
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/a-refused-pr-open-names-its-branch.test.ts"
+  files: [src/lib/affected-suites.ts]
+  note: "W1-T4439 first observed a narrow miss on coverage run 36981405010 for PR #8551 at 4c047d2bde8c73d7adbe7230cda7aeca3c4be247: src/lib/daemon-health.ts, src/lib/now-view.ts, src/lib/poll-interval.ts, test/an-idle-pulse-on-schedule-never-reads-silent.test.ts, test/entrypoint-boot.test.ts -> test/a-refused-pr-open-names-its-branch.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again."
+  acceptance:
+    - claim: "the narrow selector includes test/a-refused-pr-open-names-its-branch.test.ts when this edge is exercised"
+      proof: "grep: test/a-refused-pr-open-names-its-branch\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.85
+    reasons:
+      - "The description and declared files show a single-file change to src/lib/affected-suites.ts. Its purpose is to add a test file to the narrow test selector, and the acceptance check is a grep for that path."
+      - "Nothing in the description touches secrets, auth, permissions, deletion, merge or deploy policy, or irreversible actions. It also asks for no operator decision."
+      - "The acceptance criterion can be checked mechanically (verify: auto). The change still has to pass CI and review."
+      - "The family track record is empty (0 merged, 0 declined; Beta mean 0.50). That is a lack of evidence, not a sign of failure, and it doesn't outweigh how small and checkable this change is."
+    judged_at: "2026-10-02T10:57:15.760Z"
+    pin: "930df2db83ef4ccdd2b75c5a06da371f50b0032f696dfe68b0fe6c407a2305fa"

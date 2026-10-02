@@ -14,7 +14,16 @@
   plan_refs: ["W1-T4528"]
   files: [src/lib/release-tags.ts, src/lib/deployer.ts, test/the-primary-bakes-a-release-before-the-fleet.test.ts]
   priority: 2
-  status: queued
+  # refusal-amendment (W1-T4529, run W1-T4529-1790927258425, 2026-10-02T08:21:26.033Z): the worker refused criterion 1 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
+  #   worker evidence: The task's prerequisite W1-T4528, which would provide `release-tags.ts` and tag minting, is retired and absent at HEAD, so a healthy release cannot be promoted to a `ring/fleet/<id>` tag.
+  # refusal-amendment (W1-T4529, run W1-T4529-1790927258425, 2026-10-02T08:21:26.033Z): the worker refused criterion 2 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
+  #   worker evidence: Revocation also mints through `release-tags.ts`, which was never built, so `revoked/<id>` cannot be minted.
+  # refusal-amendment (W1-T4529, run W1-T4529-1790927258425, 2026-10-02T08:21:26.033Z): the worker refused criterion 3 [premise-rotted] — proposed close-unbuilt: the premise no longer holds at HEAD — close this task unbuilt, or restate the premise it should build on
+  #   worker evidence: `deployer.ts` is meant to call `checkReleaseBake` from `release-tags.ts`, which does not exist, and the plan retired the whole chain.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
+  status: blocked
+  retirement: retired
+  # plan gardener: retire W1-T4529 — It depends on W1-T4528, which will never be built.
   # backlog gardener: band=2 evidence=3b9c18755c806c11
   attempts: 0
   rationale: |

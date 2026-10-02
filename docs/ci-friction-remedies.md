@@ -16,6 +16,12 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   uncovered changed lines, add focused tests for those behaviors, and rerun the coverage gate
   against the same committed tree before pushing.
 
+- `ci-friction:check:ci-log:commitlint` — the required commitlint check rejected the pull
+  request title. Read the check output, then rewrite the PR title as a Conventional Commit
+  header (`type(scope): lower-case subject`) using an allowed type, keeping it at 100
+  characters or fewer and without a final period. The check validates the PR title, so amend
+  that title and rerun commitlint; changing branch commit messages alone does not fix it.
+
 - `ci-friction:check:ci-log:coverage-ratchet:diff-coverage-blocked-this-diff-adds-source-line-s-with-zero` —
   the diff-coverage gate found added source lines with no coverage. Use the gate's uncovered-line
   report to identify each behavior, add focused tests that execute those lines, then commit the
@@ -114,6 +120,15 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   illustrate a placeholder), use the placeholder form instead (e.g., `W1-T<n>` or `W1-TNNNN`)
   — these carry no digits and will not match the citation scan.
 
+- `ci-friction:check:ci-log:lint-plan` — the required `lint-plan` CI job refused a plan change.
+  Reproduce the diff-scoped check locally with `npm run --silent lint-plan:fast`, which runs the
+  offline linter against the merge base and `origin/main` scope used by CI. If it reports a
+  violation, fix the offending task shard's proof, metadata, or other reported field; lint-plan
+  violations are repaired in that shard, not in a shared baseline. If CI reports
+  `lint-plan:error` before the linter runs, inspect the `lint-plan:base-refresh` output and restore
+  a reachable, pinned `origin/main` ref, then rerun the linter. Keep the failure output with the
+  fix so the changed plan can be checked again before pushing.
+
 - `ci-friction:conflict:merge-conflict` — a pull request cannot be merged automatically
   because the branch has diverged from main and git cannot resolve the conflicts in the
   files being changed. This commonly occurs when multiple PRs modify the same file (such as
@@ -125,3 +140,41 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   --force-with-lease` or `git push -f`). If the conflict is in a plan file, coordinate with
   other in-flight PRs to sequence merges carefully, or consider splitting the plan changes
   into separate PRs to minimize collision surface.
+
+- `ci-friction:check:gate-fix` — a pull request failed review with no unmet acceptance
+  criteria, but the sweep identified one or more structured gate failures with a single,
+  unambiguous remedy for each (W1-T2236, W1-T923). The fix rung dispatches in `gate-fix` mode
+  carrying that specific remedy instead of the old behavior of "empty reviewer-unmet" dispatches.
+  To fix: read the dispatch prompt's `actionableGateFailures` section carefully; it names a
+  SINGLE remedy that the sweep has already verified is both structured and actionable (not a
+  choice). Implement that exact remedy — for example, if it names "fix a merge conflict in
+  CHANGELOG.md", resolve that conflict, test, and commit; if it names a specific lint-plan
+  violation, repair the plan shard and re-run the linter. The remedy text is VERBATIM from the
+  gate's own structured failure ledger, not a human interpretation — follow it precisely.
+  Do not attempt to guess additional remedies or solve for criteria; the sweep already
+  determined that applying this one remedy is the correct path forward.
+
+- `ci-friction:check:reviewer-unmet` — a pull request's acceptance proof for a criterion
+  is non-executable: typically, a `unit test:` proof whose title does not match any actual
+  test name in the test files. This includes titles that appear only in comments rather than
+  in actual `test(...)` invocations. When a worker writes an acceptance criterion with such a
+  proof, the PR enters reviewer-unmet mode and dispatches to a fix worker, only to have the
+  reviewer reject the criterion's proof at review time. The pre-push hook (see
+  `scripts/proof-resolve-precheck.mjs` and `certainHeadRefusals` in `src/lib/review.ts`)
+  catches certain proof failures before pushing. To fix: (1) when authoring acceptance
+  criteria, ensure your `unit test:` proofs match the exact test name or file path in the
+  codebase (run `npm run --silent source-text-census -- test/` to verify your test file
+  names); (2) if adding a new acceptance criterion with a test proof, write the test first
+  and verify the proof matches its actual name before opening the PR; (3) the pre-push hook
+  will warn you of certain mismatches (`no file under test/ contains the title` or `only in
+  comments`) — fix those before pushing. If the hook passes but the reviewer still rejects
+  the proof, re-read the test file to ensure the title is in a `test(...)` invocation, not
+  only in a comment header.
+
+- `ci-friction:check:ci-log:head-identity-gate` — the PR head did not expose an identity the
+  required `head-identity-gate` could verify. For new work, use a session branch shaped
+  `run-<taskId>-<epochMs>` for a filed task or `run-unfiled-<epochMs>` for unfiled work. For an
+  existing PR whose head ref cannot be renamed, amend its head commit with an anchored
+  `Remudero-Task: <id>` trailer and push that update. The gate inspects the actual PR head commit,
+  following first parents and ignoring merge commits, so a base-branch update merge cannot supply
+  the identity; check the exact head ref and commit before retrying the gate.

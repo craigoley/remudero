@@ -6,7 +6,7 @@
   verify: auto
   priority: 1.75
   risk: low
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:reviewer-unmet"

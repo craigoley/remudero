@@ -1,0 +1,29 @@
+- id: W1-T5224
+  title: "REPAIR THE SELECTOR EDGE INTO test/a-stalled-repair-ladder-is-one-fleet-state.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=0140d95b35f086e4
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/a-stalled-repair-ladder-is-one-fleet-state.test.ts"
+  files: [src/lib/affected-suites.ts]
+  note: "W1-T4439 first observed a narrow miss on coverage run 36981405010 for PR #8551 at 4c047d2bde8c73d7adbe7230cda7aeca3c4be247: src/lib/daemon-health.ts, src/lib/now-view.ts, src/lib/poll-interval.ts, test/an-idle-pulse-on-schedule-never-reads-silent.test.ts, test/entrypoint-boot.test.ts -> test/a-stalled-repair-ladder-is-one-fleet-state.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again."
+  acceptance:
+    - claim: "the narrow selector includes test/a-stalled-repair-ladder-is-one-fleet-state.test.ts when this edge is exercised"
+      proof: "grep: test/a-stalled-repair-ladder-is-one-fleet-state\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The description and declared files show a single-file change to src/lib/affected-suites.ts. Its purpose is to add one test path to the narrow selector, which is a coverage-selection tweak."
+      - "The description and files list don't show any contact with secrets, auth, permissions, deletion, merge/deploy/review policy, or irreversible actions. The acceptance criterion is a grep that can be checked automatically (verify: auto)."
+      - "The family has no track record (0 merged, 0 declined; Beta mean 0.50). That is neutral, not a sign of concern. The gates state shows nothing alarming, and the PR still has to pass CI and review."
+      - "No bounded change view was supplied, so I am relying only on the description and declared files."
+    judged_at: "2026-10-02T10:57:26.033Z"
+    pin: "752ee60c08bc64256e16a69dd8c234a5bc517990adfb28ba246e444fcbe14cb4"

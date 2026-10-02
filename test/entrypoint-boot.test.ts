@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { DAEMON_EXIT_BLOCKED, DAEMON_EXIT_IDLE_STARVED, DAEMON_EXIT_STALE } from "../src/lib/daemon.js";
+import { IDLE_STARVED_PULSE_MS, IDLE_STARVED_PULSE_STEP } from "../src/lib/poll-interval.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -874,6 +875,41 @@ test("idle_starved: six empty PR checks still run the full-state probe before th
   assert.match(run.stderr, /idle_starved: wake .*pr-board probe exit 10/);
   const ledger = readFileSync(join(home, "Remudero", "state", "ledger.ndjson"), "utf8");
   assert.equal(ledger.split("daemon.idle_starved.pulse").length - 1, 7);
+});
+
+test("idle_starved: the pulse sleeps the cadence the silence readers take from IDLE_STARVED_PULSE_MS", () => {
+  const origin = makeOrigin();
+  mkdirSync(join(origin, "deploy"), { recursive: true });
+  writeFileSync(join(origin, "deploy", "idle-starved-probe.sh"), readFileSync(join(REPO_ROOT, "deploy", "idle-starved-probe.sh")));
+  writeFileSync(join(origin, "bin", "rmd"), [
+    "#!/usr/bin/env bash",
+    'state="$HOME/Remudero/state"',
+    'mkdir -p "$state" "$HOME/Remudero/repos"',
+    'if [ ! -e "$state/first-run" ]; then',
+    '  touch "$state/first-run"',
+    '  git clone -q "$RMD_REPO_URL" "$HOME/Remudero/repos/remudero-site"',
+    `  exit ${DAEMON_EXIT_IDLE_STARVED}`,
+    "fi",
+    "exit 0",
+    "",
+  ].join("\n"), { mode: 0o755 });
+  git(origin, ["add", "-A"]);
+  commit(origin, "pulse cadence fixture");
+  const home = freshHome();
+  const run = boot(home, origin, {
+    cmd: ["./bin/rmd", "daemon", "--repo", "fake/remudero-site"],
+    env: { RMD_RESTART_THROTTLE_S: "1", GH_TOKEN: "fixture-token" },
+    stubs: {
+      sleep: '#!/usr/bin/env bash\nprintf \'%s\\n\' "$1" >> "$HOME/Remudero/state/pulse-sleeps"\nexit 0\n',
+      gh: '#!/usr/bin/env bash\nprintf "[{\\"number\\":1}]"\n',
+    },
+  });
+  assert.equal(run.status, 0, run.stderr);
+  const ledger = readFileSync(join(home, "Remudero", "state", "ledger.ndjson"), "utf8");
+  assert.equal(ledger.split(IDLE_STARVED_PULSE_STEP).length - 1, 1, "positive control: one pulse ran before the PR woke it");
+  const sleeps = readFileSync(join(home, "Remudero", "state", "pulse-sleeps"), "utf8").trim().split("\n").map(Number);
+  // The loop sleeps the cadence less its cohort pass, which the entrypoint bounds at 120 s.
+  for (const s of sleeps) assert.ok(s <= IDLE_STARVED_PULSE_MS / 1000 && s > IDLE_STARVED_PULSE_MS / 1000 - 120, `pulse slept ${s}s`);
 });
 
 test("idle_starved: an inbox reply between the Node decision and quiet sleep still wakes the daemon", () => {

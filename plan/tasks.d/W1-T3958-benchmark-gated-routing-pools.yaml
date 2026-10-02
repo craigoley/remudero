@@ -19,7 +19,7 @@
     - test/model-pool-readiness.test.ts
     - test/model-pool-selection.test.ts
     - test/model-pool-fallback.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Kilo Auto Model is a useful product parallel because it turns model choice into a measured,

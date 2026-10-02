@@ -1,0 +1,29 @@
+- id: W1-T5216
+  title: "REPAIR THE SELECTOR EDGE INTO test/a-freshness-drain-keeps-reviewing.test.ts — a coverage shard failure its retry did not recover was missed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 4
+  status: queued
+  # backlog gardener: band=4 evidence=0140d95b35f086e4
+  attempts: 0
+  author_class: machine
+  origin: "selector-shadow-miss:test/a-freshness-drain-keeps-reviewing.test.ts"
+  files: [src/lib/affected-suites.ts]
+  note: "W1-T4439 first observed a narrow miss on coverage run 36981405010 for PR #8551 at 4c047d2bde8c73d7adbe7230cda7aeca3c4be247: src/lib/daemon-health.ts, src/lib/now-view.ts, src/lib/poll-interval.ts, test/an-idle-pulse-on-schedule-never-reads-silent.test.ts, test/entrypoint-boot.test.ts -> test/a-freshness-drain-keeps-reviewing.test.ts. The failing shard concluded failure, so its retry did not recover it. The changed paths are candidate missing edges, not guessed import edges. Later misses of the same suite are ledgered as selector-shadow.miss_evidence rows naming this task rather than filed again."
+  acceptance:
+    - claim: "the narrow selector includes test/a-freshness-drain-keeps-reviewing.test.ts when this edge is exercised"
+      proof: "grep: test/a-freshness-drain-keeps-reviewing\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The declared scope is a single file, src/lib/affected-suites.ts. The change adds one test path to the narrow selector, which is a small and reversible edit."
+      - "The description and acceptance criteria don't mention secrets, auth, permissions, deletion, merge, deploy or review policy changes. They also don't ask for an operator decision."
+      - "The acceptance criterion is a grep for the test path in the file, so it can be checked automatically (verify: auto)."
+      - "The family track record is empty (0 merged, 0 declined; Beta mean 0.50). That gives no evidence of danger. The change would still go through CI and review."
+    judged_at: "2026-10-02T10:51:17.205Z"
+    pin: "df90ea361ac32e4497b292e428a2dd4c5b0debf902fb107150bf30673d794a26"

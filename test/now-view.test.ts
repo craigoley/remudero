@@ -638,6 +638,35 @@ test("the daemon's poll state is compared at the view's own probe instant", (t) 
   assert.deepEqual(diffs.filter((d) => d.path.startsWith("health")), [], "both sides judge the poll 4.5 min old, not 6");
 });
 
+test("a daemon row appended after the probe read but stamped before its instant leaves both sides on that read", (t) => {
+  // Captured 2026-10-02T05:32:20Z on site: health.daemon.state legacy polling vs view silent at 05:26:55. deploy/entrypoint.sh
+  // stamps each idle_starved pulse to the second, so the 05:31:58.000 pulse landed after the 05:31:58.358 probe had read the
+  // live file. Legacy re-read the file 22 s later and took every row stamped by the probe's instant, that pulse included.
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { listGrilling: () => [] });
+  const probeMs = T0 + 358;
+  core.append({ step: "daemon.idle_starved.pulse", ts: new Date(probeMs - 603_358).toISOString() });
+  clock.set(probeMs);
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  assert.equal(body.data.health.daemon.state, "silent", "the probe read the last idle pulse 10 min 3 s old, past two cadences");
+  const silent = compareNow(view, core, body, probeMs + 22_000).filter((d) => d.path.startsWith("health"));
+  assert.deepEqual(silent, [], "a genuinely silent daemon reads silent on both sides");
+  appendFileSync(join(core.ledgerDir, "ledger.ndjson"), `${JSON.stringify({ ts: new Date(T0).toISOString(), step: "daemon.idle_starved.pulse", task_id: "DAEMON" })}\n`);
+  const late = compareNow(view, core, body, probeMs + 22_000).filter((d) => d.path.startsWith("health"));
+  assert.deepEqual(late, [], "legacy reads the rows the probe read, not every row stamped by its instant");
+  // Negative control: the next probe reads the pulse, and a body claiming silent against it is real.
+  clock.set(probeMs + 60_000);
+  const [next] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(next);
+  assert.equal(next.data.health.daemon.state, "polling", "positive control: the pulse is in the file");
+  next.data.health = { ...next.data.health, daemon: { state: "silent", at: new Date(probeMs - 303_358).toISOString(), reason: "no daemon.* row for over 5 min" } };
+  const wrong = compareNow(view, core, next, probeMs + 82_000);
+  assert.equal(wrong.find((d) => d.path === "health.daemon.state")?.classification, "real", JSON.stringify(wrong));
+});
+
 test("a queued order the live file's compaction changed is judged by each task's own sort-key row", (t) => {
   // Captured 2026-10-01T06:33Z on the console instance: board.groups.queued read real with the same ids on both
   // sides. Compaction had pruned UI-T36's and UI-T35's newest sweep.disposed rows from the live file only.
@@ -831,7 +860,7 @@ test("a rotation after the view's probe leaves the legacy probe on the rows that
   assert.equal(wrong.find((d) => d.path === "health.daemon.state")?.classification, "real", JSON.stringify(wrong));
   const read = (from: number, rotations: string[]) => ({ from: new Date(from).toISOString(), rotations, unread: [] });
   assert.deepEqual(logged.at(-1)?.inputs, {
-    plan: "none", probeAt: new Date(T0).toISOString(), builtAt: new Date(T0).toISOString(),
+    plan: "none", probeAt: new Date(T0).toISOString(), builtAt: new Date(T0).toISOString(), probeRows: 2,
     windows: { board: read(T0 - NOW_LEGACY_ROW_WINDOW_MS, [plain, rotation]), probe: read(T0, [rotation]), spend: read(Date.parse("2026-09-30T00:00:00.000Z"), [plain, rotation]) },
   }, "the diff row names what each window of legacy read");
 });

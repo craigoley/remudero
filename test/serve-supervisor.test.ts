@@ -107,6 +107,7 @@ function decisionSupervisor(fleet: ReturnType<typeof fakeFleet>, extra: Partial<
     sleep: async () => {},
     freeMemory: () => undefined,
     rss: () => undefined,
+    peakRss: () => undefined,
     socketPathFor: (n) => `/sock/${n}`,
     ...extra,
   });
@@ -191,7 +192,7 @@ test("a memory-short handoff asks the active generation to shed before it defers
   const send = cold.send.bind(cold);
   cold.send = (message) => {
     send(message);
-    if (message.type === "rmd.shed") queueMicrotask(() => cold.emit({ type: "rmd.shed_done", beforeBytes: 5_000, afterBytes: 3_000 }));
+    if (message.type === "rmd.shed") queueMicrotask(() => cold.emit({ type: "rmd.shed_done", beforeBytes: 5_000, afterBytes: 3_000, heapBeforeBytes: 4_000, heapAfterBytes: 1_000, gc: true }));
   };
   await supervisor.requestHandoff();
   assert.deepEqual(cold.sent.map((m) => m.type), ["rmd.promote", "rmd.shed", "rmd.drain"], "tier 1 runs before the standby is forked");
@@ -200,8 +201,82 @@ test("a memory-short handoff asks the active generation to shed before it defers
     { answered: shed?.answered, beforeBytes: shed?.beforeBytes, afterBytes: shed?.afterBytes, freeBefore: shed?.freeBefore, freeAfter: shed?.freeAfter, needBytes: shed?.needBytes },
     { answered: true, beforeBytes: 5_000, afterBytes: 3_000, freeBefore: 1_000, freeAfter: 9_000, needBytes: 5_000 },
   );
+  assert.deepEqual(
+    { gc: shed?.gc, heapBeforeBytes: shed?.heapBeforeBytes, heapAfterBytes: shed?.heapAfterBytes },
+    { gc: true, heapBeforeBytes: 4_000, heapAfterBytes: 1_000 },
+    "the shed row carries what the collection freed and whether one ran",
+  );
   assert.equal(logs.some((l) => l.step === "serve.handoff_deferred"), false, "the shed freed enough, so nothing defers");
   assert.equal(supervisor.activeSha(), "sha-2", "the handoff went ahead");
+});
+
+test("a standby needs its boot peak and not its resident bytes at promotion", async () => {
+  const fleet = fakeFleet();
+  // Every generation reads 1 000 resident now; the cold one peaked at 1 500 while it booted.
+  const { supervisor, logs } = decisionSupervisor(fleet, { freeMemory: () => 1_400, rss: () => 1_000, peakRss: (pid) => (pid === 1 ? 1_500 : undefined), deferMs: 1 });
+  await supervisor.start();
+  await supervisor.requestHandoff();
+  const deferred = logs.find((l) => l.step === "serve.handoff_deferred")?.extra;
+  assert.deepEqual(
+    { freeBytes: deferred?.freeBytes, needBytes: deferred?.needBytes, activeRssBytes: deferred?.activeRssBytes, activePeakBytes: deferred?.activePeakBytes },
+    { freeBytes: 1_400, needBytes: 1_500, activeRssBytes: 1_000, activePeakBytes: 1_500 },
+    "1 400 free covers the 1 000 resident at promotion but not the 1 500 boot peak",
+  );
+  await supervisor.shutdown("test");
+});
+
+/** The cold generation answers every shed at once, as a real one does. */
+function answerSheds(cold: FakeGeneration): void {
+  const send = cold.send.bind(cold);
+  cold.send = (message) => {
+    send(message);
+    if (message.type === "rmd.shed") queueMicrotask(() => cold.emit({ type: "rmd.shed_done", beforeBytes: 5_000, afterBytes: 5_000 }));
+  };
+}
+
+test("a shed generation left serving by an abandoned handoff is asked to restore at once", async () => {
+  const fleet = fakeFleet((slot) => (slot.sha === "sha-2" ? { never: true } : {}));
+  const shedAsked = (): boolean => fleet.generations[0]?.sent.some((m) => m.type === "rmd.shed") ?? false;
+  let now = 0;
+  const { supervisor, logs } = decisionSupervisor(fleet, {
+    freeMemory: () => (shedAsked() ? 9_000 : 1_000),
+    rss: () => 5_000,
+    clock: { now: () => (now += 1_000), iso: () => "" } as never,
+    readyBoundMs: 5_000,
+  });
+  await supervisor.start();
+  const cold = fleet.generations[0];
+  answerSheds(cold);
+  await supervisor.requestHandoff();
+  assert.equal(logs.find((l) => l.step === "serve.handoff_aborted")?.extra?.criterion, "ready_bound", "positive control: the standby the shed made room for never became ready");
+  assert.deepEqual(cold.sent.map((m) => m.type), ["rmd.promote", "rmd.shed", "rmd.restore"], "the shed generation still serves, so it re-warms now rather than on its refresh schedule");
+  assert.deepEqual(logs.find((l) => l.step === "serve.shed_restore")?.extra, { generation: 1, freeBytes: 9_000, needBytes: 5_000 });
+  await supervisor.requestHandoff();
+  assert.equal(cold.sent.filter((m) => m.type === "rmd.restore").length, 1, "a handoff that sheds nothing restores nothing");
+});
+
+test("a shed generation waiting on a memory retry stays cold until the handoff ends", async () => {
+  const fleet = fakeFleet();
+  let releaseRetry: () => void = () => {};
+  const { supervisor, logs, exits } = decisionSupervisor(fleet, {
+    freeMemory: () => 1_000,
+    rss: () => 5_000,
+    deferMs: 50,
+    sleep: (ms) => (ms === 50 ? new Promise<void>((resolve) => (releaseRetry = resolve)) : Promise.resolve()),
+  });
+  await supervisor.start();
+  const cold = fleet.generations[0];
+  answerSheds(cold);
+  await supervisor.requestHandoff();
+  assert.equal(logs.filter((l) => l.step === "serve.handoff_deferred").length, 1, "positive control: the shed did not free enough and a retry is pending");
+  assert.equal(cold.sent.some((m) => m.type === "rmd.restore"), false, "re-warming now would only be shed again by the retry");
+  for (let i = 0; i < 20 && exits.length === 0; i += 1) {
+    releaseRetry();
+    await tick(1);
+  }
+  assert.deepEqual(exits, [0], "the third deferral replaces the process");
+  assert.equal(cold.sent.some((m) => m.type === "rmd.restore"), false, "a replaced generation has nothing to restore");
+  assert.equal(logs.some((l) => l.step === "serve.shed_restore"), false);
 });
 
 test("handoff requests coalesce, and only the active generation can ask", async () => {
@@ -526,12 +601,27 @@ test("the only generation crashing is replaced and promoted even while its smoke
 
 // ── the default seams ───────────────────────────────────────────────────────────────────────────
 
+test("cgroup headroom counts clean page cache as reclaimable", () => {
+  // The fleet serve cgroup 2026-10-02 07:28Z: current 3 593 220 096 of which file 171 245 568 (clean).
+  const stat = "anon 3304325120\nfile 171245568\nkernel 113684480\nshmem 0\nfile_dirty 77824\nfile_writeback 0\n";
+  const files: Record<string, string> = { "/cg/memory.max": "5368709120\n", "/cg/memory.current": "3593220096\n", "/cg/memory.stat": stat };
+  assert.equal(cgroupFreeMemory((p) => files[p], "/cg"), 5_368_709_120 - (3_593_220_096 - (171_245_568 - 77_824)));
+  const shmem: Record<string, string> = { ...files, "/cg/memory.stat": "file 1000\nshmem 400\nfile_dirty 100\nfile_writeback 50\n" };
+  assert.equal(cgroupFreeMemory((p) => shmem[p], "/cg"), 5_368_709_120 - 3_593_220_096 + 450, "shmem and dirty or writeback pages are not reclaimable");
+  const noStat = (p: string): string => {
+    if (p.endsWith("memory.stat")) throw new Error("ENOENT");
+    return files[p];
+  };
+  assert.equal(cgroupFreeMemory(noStat, "/cg"), 5_368_709_120 - 3_593_220_096, "without memory.stat every charged byte counts");
+});
+
 test("the supervisor's default seams read cgroup memory, procfs and the kill switch", async () => {
   const files: Record<string, string> = { "/cg/memory.max": "5368709120\n", "/cg/memory.current": "1073741824\n" };
   assert.equal(cgroupFreeMemory((p) => files[p], "/cg"), 4_294_967_296);
   assert.equal(cgroupFreeMemory((p) => (p.endsWith("max") ? "max\n" : "1"), "/cg"), undefined, "an unbounded cgroup never defers");
   assert.equal(cgroupFreeMemory(() => { throw new Error("ENOENT"); }), undefined);
   assert.equal(cgroupFreeMemory(undefined, "/definitely/not/a/cgroup"), undefined);
+  assert.equal(procRss(1, () => "VmHWM:\t  4096 kB\nVmRSS:\t  2048 kB\n", "VmHWM"), 4_194_304);
   assert.equal(procRss(1, () => "Name:\tnode\nVmRSS:\t  2048 kB\n"), 2_097_152);
   assert.equal(procRss(1, () => "Name:\tnode\n"), undefined);
   assert.equal(procRss(1, () => { throw new Error("ENOENT"); }), undefined);
@@ -543,7 +633,7 @@ test("the supervisor's default seams read cgroup memory, procfs and the kill swi
   assert.equal(handoffSwitch({}, gens)(), false, "an operator can turn handoff off with one file");
   assert.deepEqual(generationCommand(["serve", "--port", "4317"])({ dir: "/gens/a", sha: "s" }), {
     exec: "/gens/a/src/run-task.ts",
-    execArgv: ["--import", "file:///gens/a/node_modules/tsx/dist/loader.mjs"],
+    execArgv: ["--expose-gc", "--import", "file:///gens/a/node_modules/tsx/dist/loader.mjs"],
     args: ["serve", "--port", "4317"],
     cwd: "/gens/a",
   });
