@@ -67,6 +67,21 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   to something your implementation genuinely changed, then verify the revised proof passes
   head-only before pushing.
 
+- `ci-friction:check:ci-log:acceptance-author-gate` — a pull request's acceptance criteria
+  failed validation at author-time (before a full CI cycle). The `acceptance-author-gate`
+  required check validates the `## Acceptance` block in the PR body, any `Remudero-Task:`
+  trailer, and acceptance proofs against the declared task's criteria. To fix: check the
+  gate's error message for the specific defect (e.g., `proof-shape`, `trailer-body-proof-divergence`,
+  `grep-proof-target-missing`, `rule-15-split`, or `plan-only-implementation-trailer`). Common
+  fixes include: (1) ensure the `## Acceptance` block uses recognized proof syntax (`grep: <pattern> in <path>`
+  or `unit test: <name>`); (2) verify grep proof target files exist at the current HEAD;
+  (3) if a `Remudero-Task:` trailer is present, ensure its acceptance proofs match the task's
+  declared criteria in the plan, or remove the trailer and author the body's own `## Acceptance` block;
+  (4) if the PR is plan-only (no implementation files), remove any `Remudero-Task:` trailer
+  or implement the non-plan files declared in the task; (5) for multi-commit PRs, check that
+  follow-up commits do not add implementation trailers to plan-only diffs. Run `node --import tsx scripts/acceptance-author-gate.mjs --event-path <event.json>`
+  locally with a test event payload to validate before pushing.
+
 - `ci-friction:conflict:merge-conflict` — a pull request cannot be merged automatically
   because the branch has diverged from main and git cannot resolve the conflicts in the
   files being changed. This commonly occurs when multiple PRs modify the same file (such as
