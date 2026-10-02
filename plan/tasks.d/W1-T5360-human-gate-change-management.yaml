@@ -7,7 +7,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 15.00
-  risk: medium
+  risk: high
   band_meaning: blast-radius
   origin: "2026-10-02 operator approved the human-gate implementation follow-ups"
   plan_refs: [W1-T5021, W1-T3186]
@@ -19,7 +19,8 @@
     blocked PR dispositions and operator merge holds, while the approved W1-T5021
     design specifies separate Inbox and change-management ownership. This is slice 3.
   design: |
-    Feed source-qualified nowActions into the shared human-gate projector. A repairing
+    Feed source-qualified nowActions into the shared human-gate projector through
+    projectChangeManagementGates, called by now-view. A repairing
     disposition is machine work and produces no human gate. An exhausted repair becomes
     an Inbox ask with its failed attempts, source evidence and one available resolution verb.
     An unknown disposition preserves uncertainty and evidence instead of presenting success.
@@ -29,6 +30,8 @@
     Reuse existing source-owned actions; never create a new approval, dispatch or merge hold.
     Do not alter repair capacity, strike policy, auto-merge policy or accepted operator rulings.
   acceptance:
+    - claim: "the production now view consumes the new source adapter"
+      proof: 'grep: projectChangeManagementGates( in src/lib/now-view.ts'
     - claim: "a PR with an active automated repair never becomes a human decision"
       proof: 'grep: a repairing PR produces no human gate in test/human-gate-change-management.test.ts'
     - claim: "exhausted repair and a standing hold have distinct ownership"
