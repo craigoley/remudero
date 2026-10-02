@@ -304,7 +304,7 @@ const goneTitle = (a: { file: string; name: string }) => `${a.name} is not expor
 function goneTest(a: { file: string; name: string }): string {
   const rel = posix.relative(posix.dirname(EXPORT_GARDEN_TEST_FILE), a.file).replace(/\.ts$/, ".js");
   const spec = rel.startsWith(".") ? rel : `./${rel}`;
-  return `\ntest("${goneTitle(a)}", async () => {\n  const module = await import("${spec}");\n  assert.equal(Object.hasOwn(module, "${a.name}"), false);\n});\n`;
+  return `\ntest("${goneTitle(a)}", async () => {\n  const module = await import(${JSON.stringify(spec)});\n  assert.equal(Object.hasOwn(module, "${a.name}"), false);\n});\n`;
 }
 
 /** Delete each action's export in `root`, re-checked there: a declaration that no longer reads
