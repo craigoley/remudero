@@ -71,6 +71,7 @@ usage:
   rmd sync [--dry-run]   # The sanctioned dedupe-then-pull recipe for a behind-and-dirty checkout.
   rmd doctor [--json]   # One local, read-only health check with a meaningful exit code (0/1/2).
   rmd status [--json]   # One verb for 'is it running' and 'why is it stalled' from one read model.
+  rmd mcp [--enable-write]   # Serve the operator inbox, ledger and case-file tools over local MCP stdio.
   rmd case-file <task-id> [--json] | --tasks <id,id,...> [--tasks-file <path>] [--json]   # Read one task's sourced plan, run, PR, review, CI, and release evidence.
   rmd sweep [--repo <name>] [--dry-run]   # Level-triggered PR-pipeline reconciler: re-derive disposition, take one action.
   rmd fix <pr-number> [--repo <name>]   # Operator verb for the fix rung: dispatch the same rung `rmd sweep` uses.
@@ -684,6 +685,16 @@ rmd status [--json]
 ```
 
 W1-T279+W1-T280: ONE verb answering 'is it running' AND 'why is it stalled' from ONE read model. LOCAL (no network): LIVENESS (daemon/serve/deploy-supervisor running/pid/boot-time, running HEAD vs origin/main with a STALE flag, crash-loop), LATCHES (every state marker — STOP/PAUSE/DEPLOY_FAILED/DEPLOY_AUTO/inflight locks/pending kicks/drain-now — with its age and stated consequence), LAST CYCLE (the newest daemon.summary). DERIVED: BLOCKERS BY CLASS (circuit-broken w/ reset note, dispatch.indeterminate w/ gh-window note, blocked PRs by sweep.ts's own named reason), QUEUE HEAD (next dispatchables, perpetual-attempt tasks flagged with observed per-cycle cost), INBOX (ready/not-ready counts, head not-ready reason), HEADROOM (newest telemetry + enforcement on/off from the same switch the daemon reads) — these read a batched GitHub gateway and degrade to a stated unknown on an outage, never a gate on the local sections. Each section ends with at most one next action. --json emits the exact same read model the text renders. Read-only: writes nothing, spawns nothing, always exits 0 (bad args aside).
+
+### `rmd mcp`
+
+Serve the operator inbox, ledger and case-file tools over local MCP stdio.
+
+```
+rmd mcp [--enable-write]
+```
+
+Uses the existing service-token file and control-server URL (RMD_OPERATOR_MCP_URL). Read tools preserve unavailable evidence. --enable-write exposes only the console's low-tier question-answer route with its write token; no second approval or deployment authority is added.
 
 ### `rmd case-file`
 

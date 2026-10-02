@@ -1,3 +1,4 @@
+import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
 // The doctorCommand-only reads (DOCTOR_USAGE_EXIT, buildDoctorReport, readGitLocks, readMemInfo,
 // readPauseAgeMs, refuseUnsupportedArgs, classifyReadFailure, readDiskTotalBytes,
 // classifyWorktreeBase, MemInfo, WorktreeBaseRow, readNvmrcVersion) moved with doctorCommand to
@@ -48602,6 +48603,12 @@ const COMMANDS: readonly CommandSpec[] = [
     detail: "W1-T279+W1-T280: ONE verb answering 'is it running' AND 'why is it stalled' from ONE read model. LOCAL (no network): LIVENESS (daemon/serve/deploy-supervisor running/pid/boot-time, running HEAD vs origin/main with a STALE flag, crash-loop), LATCHES (every state marker — STOP/PAUSE/DEPLOY_FAILED/DEPLOY_AUTO/inflight locks/pending kicks/drain-now — with its age and stated consequence), LAST CYCLE (the newest daemon.summary). DERIVED: BLOCKERS BY CLASS (circuit-broken w/ reset note, dispatch.indeterminate w/ gh-window note, blocked PRs by sweep.ts's own named reason), QUEUE HEAD (next dispatchables, perpetual-attempt tasks flagged with observed per-cycle cost), INBOX (ready/not-ready counts, head not-ready reason), HEADROOM (newest telemetry + enforcement on/off from the same switch the daemon reads) — these read a batched GitHub gateway and degrade to a stated unknown on an outage, never a gate on the local sections. Each section ends with at most one next action. --json emits the exact same read model the text renders. Read-only: writes nothing, spawns nothing, always exits 0 (bad args aside).",
   },
   {
+    name: "mcp",
+    syntax: "rmd mcp [--enable-write]",
+    summary: "Serve the operator inbox, ledger and case-file tools over local MCP stdio.",
+    detail: "Uses the existing service-token file and control-server URL (RMD_OPERATOR_MCP_URL). Read tools preserve unavailable evidence. --enable-write exposes only the console's low-tier question-answer route with its write token; no second approval or deployment authority is added.",
+  },
+  {
     name: "case-file",
     syntax: "rmd case-file <task-id> [--json] | --tasks <id,id,...> [--tasks-file <path>] [--json]",
     summary: "Read one task's sourced plan, run, PR, review, CI, and release evidence.",
@@ -49465,6 +49472,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["sync", (rest) => syncCommand(rest)],
   ["doctor", async (rest) => await doctorCommand(rest, { repoRoot })],
   ["status", async (rest) => await statusCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo })],
+  ["mcp", async (rest) => await operatorMcpCommand(rest, loadConfig(), repoRoot, (deps) => createOperatorMcpServer(deps))],
   ["case-file", async (rest) => await caseFileCommand(rest, { usage: USAGE, repoRoot, resolveOwnerRepo })],
   ["sweep", async (rest) => await sweepCommand(rest)],
   [
