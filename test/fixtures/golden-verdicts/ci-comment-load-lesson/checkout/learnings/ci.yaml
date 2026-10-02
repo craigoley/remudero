@@ -1,0 +1,20 @@
+- id: comment-load-ratchet-lane
+  subsystem: ci
+  lifecycle: active
+  files:
+    - ".github/workflows/ci.yml"
+    - "docs/comment-standard.md"
+    - "scripts/comment-load-baseline.json"
+    - "scripts/comment-load-ratchet.mjs"
+  fact: >-
+    Before changing the comment-load gate, its workflow, baseline, or documented policy, run
+    `npm run --silent comment-load-signal`. The gate refuses either per-file comment growth over
+    its baseline or a newly added comment block over 25 lines. If the signal prints a baseline JSON
+    row, review and record that exact row in `scripts/comment-load-baseline.json`, then rerun the
+    signal; otherwise trim the added comments until it reports OK. See `docs/comment-standard.md`
+    for the measured paths and comment limits.
+  evidence: >-
+    The comment-load-ratchet measures the source paths listed in docs/comment-standard.md,
+    comparing file comment counts with scripts/comment-load-baseline.json and checking added
+    blocks; its CLI signal prints the proposed baseline row when a file exceeds its ceiling.
+  src: "ci-learning:5505:comment-load-ratchet"

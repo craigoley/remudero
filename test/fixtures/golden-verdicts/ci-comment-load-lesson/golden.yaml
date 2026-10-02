@@ -1,0 +1,13 @@
+violation: none
+rule: >
+  W1-T3625: the comment-load guidance must be grounded in the observed refusal and its
+  acceptance proof must execute against the active CI learning entry.
+verdict:
+  state: success
+  capped: false
+  testTheater: false
+  criteriaTampered: false
+arm: true
+criteria:
+  - met: true
+    proof_exec: executed_pass
