@@ -108,6 +108,7 @@ export interface Task {
   repo: string;
   depends_on: string[];
   plan_refs?: string[];
+  goal?: string;
   /** The PR corpus a machine-filed CI-learning shard was mined from. Written by the ci-learning
    *  rung on all 42 such shards and, until this field existed, DROPPED by the loader — so a title
    *  claiming "36 PULL REQUESTS" reached consumers with none attached. */
@@ -447,6 +448,7 @@ export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicat
       title: req(e.title as string, "title", id),
       repo: req(e.repo as string, "repo", id),
       depends_on: Array.isArray(e.depends_on) ? (e.depends_on as string[]) : [],
+      goal: typeof e.goal === "string" ? e.goal : undefined,
       plan_refs: Array.isArray(e.plan_refs) ? (e.plan_refs as string[]) : undefined,
       ci_learning_prs: Array.isArray(e.ci_learning_prs)
         ? (e.ci_learning_prs as unknown[]).filter((n): n is number => typeof n === "number")
