@@ -21,6 +21,8 @@ export interface RoutingExperiment {
   codexModel: RegExp;
   startedOn: string;
   revisitOn: string;
+  /** Daily review starts at revisitOn; sample sufficiency remains a separate condition. */
+  reviewCadence?: "daily";
   /** Fewer tasks than this in either arm is reported as an insufficient sample, never a verdict. */
   minTasksPerArm: number;
 }
@@ -54,7 +56,7 @@ export const ROUTING_EXPERIMENTS: readonly RoutingExperiment[] = [
     capability: "balanced", effort: "high",
     arms: { claude: "sonnet", codex: "sol61" },
     claudeModel: new RegExp(`^${model}$`), codexModel: /^gpt-6\.1-sol$/,
-    startedOn: "2026-10-02", revisitOn: "2026-10-16", minTasksPerArm: 20,
+    startedOn: "2026-10-02", revisitOn: "2026-10-02", reviewCadence: "daily" as const, minTasksPerArm: 20,
   })),
 ];
 
@@ -160,6 +162,8 @@ export interface ExperimentReport {
   startedOn: string;
   revisitOn: string;
   revisitDue: boolean;
+  reviewCadence: "daily" | "scheduled";
+  nextReviewOn: string;
   assignments: number;
   excludedAssignments: { genericUnit: number; changedTreatment: number; unverifiedTreatment: number };
   /** Tasks whose tagged assignments landed in BOTH arms; counted under their first arm. */
@@ -281,6 +285,10 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
     startedOn: experiment.startedOn,
     revisitOn: experiment.revisitOn,
     revisitDue: today >= experiment.revisitOn,
+    reviewCadence: experiment.reviewCadence ?? "scheduled",
+    nextReviewOn: experiment.reviewCadence === "daily" && today >= experiment.revisitOn
+      ? new Date(Date.parse(`${today}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10)
+      : experiment.revisitOn,
     assignments: assignmentTask.size,
     excludedAssignments,
     mixedTasks: [...armsSeen.values()].filter((seen) => seen.size > 1).length,
@@ -317,6 +325,7 @@ export async function routingAbCommand(rest: string[], opts: RoutingAbCommandOpt
   for (const report of reports) {
     const status = report.sufficient ? "measured" : "insufficient sample";
     print(`${report.id}: ${status}; ${report.assignments} assignments, ${report.mixedTasks} tasks in both arms, ${report.crossoverTasks} crossover tasks; ${report.excludedAssignments.genericUnit} generic units, ${report.excludedAssignments.changedTreatment} changed treatments and ${report.excludedAssignments.unverifiedTreatment} unverified treatments excluded; revisit ${report.revisitOn}${report.revisitDue ? " (DUE)" : ""}`);
+    if (report.reviewCadence === "daily") print(`  daily provisional review; next ${report.nextReviewOn}; minimum sample and matched-cohort review required before a routing conclusion`);
     for (const arm of report.arms) {
       print(
         `  ${arm.arm} (${arm.provider}): ${arm.tasks} tasks, ${arm.merged} merged (${fmt(arm.mergeRate, 100, "%")}), ` +

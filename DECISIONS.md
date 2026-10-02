@@ -3559,8 +3559,9 @@ Operator-authored: Craig requested Sol 6.1 routing, switch data for Field Trials
 Operator authorized the subscription switch, Field Trials capture and Azure cash deployment.
 `gpt-6.1-sol` leads balanced/frontier Codex rows; old Sol versions are availability fallbacks.
 Economy and Claude frontier preference are unchanged. Concrete-model epochs `sol61-vs-sonnet55`
-and `sol61-vs-sonnet5` preserve the earlier comparisons and require 20 tasks per arm before review
-on 2026-10-16. This is a model-version rollout, not a measured quality promotion or public result.
+and `sol61-vs-sonnet5` preserve the earlier comparisons and require 20 tasks per arm for a
+comparison. The operator's same-day correction below replaces the October 16 review date.
+This is a model-version rollout, not a measured quality promotion or public result.
 
 Azure account catalog and quota confirmed `gpt-6.1-sol` / `2026-09-29` in East US 2; deployment
 `synthwatch-foundry/gpt-6.1-sol` was provisioned GlobalStandard at capacity 100. Cash balanced
@@ -3570,3 +3571,17 @@ in force. Sol tools use Responses, preserve reasoning items, stop on local tool 
 before every turn and account for cache writes and whole-request long-context pricing. See
 `docs/model-routing.md` for sources, cohort IDs and rollback: move the lead back to `gpt-6-sol`
 through a reviewed mounts change; never rewrite prior ledger records or experiment epochs.
+
+## 2026-10-02 — Review the Sol 6.1 switch daily
+
+Operator-authored: Craig asked to review daily instead of waiting until October 16.
+
+The new Sol 6.1 epochs are due for daily provisional review starting today. The existing daily
+fleet refresh produces private routing reviews from the three ledger forms for core, site and
+console before it calls GitHub, so remote collection trouble does not hide local evidence.
+Dated reports retain sample growth, missingness, crossovers and source-quality warnings. Reports
+keep repositories separate and count an insufficient sample as provisional. Twenty tasks per arm
+is still the comparison minimum; a daily report or that minimum alone is not a routing promotion,
+verified completion, causal result or permission to publish. Matched-cohort review and the current
+spend limits remain required. Rollback: remove the daily review step and restore the prior dates;
+retain all dated reports and experiment identities.
