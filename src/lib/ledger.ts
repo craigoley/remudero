@@ -116,6 +116,10 @@ export const FOLLOW_UP_CONTROL_STEP = "panel.follow_up_control";
 export const FOLLOW_UP_RECEIPT_STEP = "panel.follow_up_receipt";
 export const FOLLOW_UP_POLICY_STEP = "panel.follow_up_policy";
 
+/** W1-T3897: a human-handoff-v1 snapshot plus the receipt that produced it. Deciding state: losing it
+ * on rotation would drop an owner, a claim lease, an escalation, or a closure after restart. */
+export const HUMAN_HANDOFF_LEDGER_STEP = "panel.human_handoff";
+
 /** THE #212 CONJUNCTION (W1-T127 design note i): a strike is recorded only where a worker RAN and a
  *  judgment was POSTED. Both halves are asserted, never either, so this cannot degrade to one half
  *  of the conjunction it checks. Pure and total; callers supply what they observed. */
@@ -719,6 +723,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   FOLLOW_UP_CONTROL_STEP,
   FOLLOW_UP_RECEIPT_STEP,
   FOLLOW_UP_POLICY_STEP,
+  // W1-T3897: human-handoff-v1 snapshots fold back into the "Needs me" queue after restart.
+  HUMAN_HANDOFF_LEDGER_STEP,
   CONTEXT_ITEM_LEDGER_STEP,
   CONTEXT_REVOKED_LEDGER_STEP,
   CONTEXT_DELETED_LEDGER_STEP,
