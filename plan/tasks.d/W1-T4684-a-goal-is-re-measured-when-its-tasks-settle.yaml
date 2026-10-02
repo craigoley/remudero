@@ -24,7 +24,8 @@
     (i) plan/goals.d/G-*.yaml: symptom, measurement command, baseline, direction; tasks gain an optional goal: field.
     (ii) When all of a goal's tasks settle, re-run the measurement and ledger goal.moved / goal.unmoved with both values.
     (iii) Unmoved goals are retro input; the console shows spend and movement per goal; a goal with poor spend-to-movement
-    drops in priority rather than stopping. First retrofit: PR-flow, CI redesign, model evidence.
+    is proposed for lower priority through the existing governed plan flow rather than stopping or mutating its priority
+    directly. First retrofit: PR-flow, CI redesign, model evidence. Console rendering is a separate console-repo companion.
   acceptance:
     - claim: "a goal is re-measured when its last task settles"
       proof: 'grep: test("W1-T4684: a goal is re-measured when its last task settles" in test/a-goal-is-re-measured-when-its-tasks-settle.test.ts'
