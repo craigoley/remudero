@@ -279,7 +279,7 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
         touchViewDemand(opts.readModel, name, key, clock.now());
         return answer(entry);
       }
-      void awaitViewDemand(opts.readModel, name, key).then((demanded) => {
+      void awaitViewDemand(opts.readModel, name, key, { clock }).then((demanded) => {
         if (demanded.ok) return answer(demanded.entry);
         res.writeHead(404, { "content-type": "application/json; charset=utf-8", "retry-after": String(Math.max(1, Math.ceil(demanded.retryMs / 1000))) });
         res.end(JSON.stringify({ error: "view_not_ready", view: name, reason: demanded.reason, retryMs: demanded.retryMs }));

@@ -112,6 +112,8 @@ export interface ViewDemandOptions {
   retryMs?: number;
   /** Runs `run` after `ms` and returns its cancel; defaults to an unref'd timer. */
   after?: (run: () => void, ms: number) => () => void;
+  /** Stamps the want, so a read that follows it does not re-want within {@link VIEW_DEMAND_TOUCH_MS}. */
+  clock?: Clock;
 }
 
 interface DemandState {
@@ -165,7 +167,8 @@ export function awaitViewDemand(source: ViewDemandSource, view: string, key: str
     });
     cancel = (opts.after ?? unrefTimer)(() => settle({ ok: false, reason: "timeout", retryMs }), opts.waitMs ?? VIEW_DEMAND_WAIT_MS);
     // The listener is in place before the worker is told, so a body that lands at once is not missed.
-    if (!source.want!(view, key)) settle({ ok: false, reason: "no_worker", retryMs });
+    if (source.want!(view, key)) state.touchedAt.set(id, (opts.clock ?? systemClock).now());
+    else settle({ ok: false, reason: "no_worker", retryMs });
   });
   // A refusal settles inside the executor, before there is a promise to file.
   if (!settled) state.pending.set(id, waiting);
