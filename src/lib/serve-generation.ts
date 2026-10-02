@@ -26,6 +26,7 @@ export const GENERATION_MESSAGES = {
   handoffRequest: "rmd.handoff_request",
   shed: "rmd.shed",
   shed_done: "rmd.shed_done",
+  restore: "rmd.restore",
 } as const;
 
 export interface GenerationMessage {
@@ -82,15 +83,32 @@ export function onDrainRequest(channel: GenerationChannel, drain: (reason: strin
 
 /**
  * Memory tier 1 (design §1 "Memory"): the supervisor asks the ACTIVE generation to drop its rebuildable
- * caches before it forks a standby, then re-measures. The reply carries resident bytes before and after.
+ * caches before it forks a standby, then re-measures. The reply carries resident and V8 heap bytes before
+ * and after. Dropped references free nothing until a collection runs, and V8 keeps freed pages resident,
+ * so `afterBytes` alone reads ~`beforeBytes` (7 of 7 live sheds on 2026-10-02): the heap pair is what the
+ * collection actually freed. Supervised generations run with `--expose-gc` ({@link generationCommand}).
  */
-export function onShedRequest(channel: GenerationChannel, shed: () => void, rss: () => number = () => process.memoryUsage().rss, gc: (() => void) | undefined = (globalThis as { gc?: () => void }).gc): void {
+export function onShedRequest(
+  channel: GenerationChannel,
+  shed: () => void,
+  rss: () => number = () => process.memoryUsage().rss,
+  gc: (() => void) | undefined = (globalThis as { gc?: () => void }).gc,
+  heapUsed: () => number = () => process.memoryUsage().heapUsed,
+): void {
   channel.onMessage((message) => {
     if (message.type !== GENERATION_MESSAGES.shed) return;
     const beforeBytes = rss();
+    const heapBeforeBytes = heapUsed();
     shed();
     gc?.();
-    channel.send({ type: GENERATION_MESSAGES.shed_done, beforeBytes, afterBytes: rss(), gc: gc !== undefined });
+    channel.send({ type: GENERATION_MESSAGES.shed_done, beforeBytes, afterBytes: rss(), heapBeforeBytes, heapAfterBytes: heapUsed(), gc: gc !== undefined });
+  });
+}
+
+/** The supervisor abandoned the handoff a shed was for: re-warm what {@link onShedRequest} dropped. */
+export function onRestoreRequest(channel: GenerationChannel, restore: (reason: string) => void): void {
+  channel.onMessage((message) => {
+    if (message.type === GENERATION_MESSAGES.restore) restore(message.reason ?? "restore");
   });
 }
 

@@ -3172,13 +3172,14 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     handover: (reason) => staleExit.handover(reason),
     promote: () => readModel?.reload(),
     shed: () => analyticsCache.shed(),
+    restore: (reason) => void analyticsCache.restore(reason),
     probes: [planLoadedProbe(() => deps.board.plan, consoleSha), githubAuthProbe(() => githubAuth.settled), gatewayPrimedProbe(github), readModelWarmProbe(readModel)],
   });
   return { server, githubAppReady: routeAssembly.githubAppReady };
 }
 
 const serveReadModels = new WeakMap<Server, ReadModelWorkerHandle>();
-type ServeGenerationHooks = { handover: (reason: string) => Promise<void>; promote: () => void; shed: () => void; probes: ReadinessProbe[] };
+type ServeGenerationHooks = { handover: (reason: string) => Promise<void>; promote: () => void; shed: () => void; restore: (reason: string) => void; probes: ReadinessProbe[] };
 const serveGenerations = new WeakMap<Server, ServeGenerationHooks>();
 
 export function serveGeneration(server: Server): ServeGenerationHooks | undefined {

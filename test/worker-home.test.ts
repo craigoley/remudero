@@ -9,6 +9,7 @@ import fs, {
   readlinkSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -17,6 +18,7 @@ import { dirname, join, relative, sep } from "node:path";
 import { test } from "node:test";
 
 import { workerHomeDir, type Config } from "../src/lib/config.js";
+import { spawnWorker } from "../src/lib/worker.js";
 import {
   CLAUDE_CONFIG_BACKUP_PREFIX,
   CLAUDE_CONFIG_REL,
@@ -31,6 +33,7 @@ import {
   perRunWorkerHomeDir,
   playwrightCacheRelPath,
   playwrightCacheRoot,
+  seedClaudeFleetCredentials,
   sweepClaudeConfigBackups,
   workerHomePlan,
   workerKeychainPaths,
@@ -202,6 +205,148 @@ test("materializeWorkerHome: self-heals a symlink pointing at a STALE real-HOME 
 });
 
 // ── W1-T505: narrow the `.claude` grant to a credential-only sibling ───────
+
+test("given an injected real-home fixture whose .claude holds a .credentials.json, the seed uses private modes", () => {
+  const realHome = tmp();
+  try {
+    mkdirSync(join(realHome, ".claude"));
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), "token");
+    seedClaudeFleetCredentials({ realHome });
+    const fleet = join(realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
+    assert.deepEqual(readdirSync(fleet), [".credentials.json"]);
+    assert.equal(readFileSync(join(fleet, ".credentials.json"), "utf8"), "token");
+    assert.equal(statSync(fleet).mode & 0o777, 0o700);
+    assert.equal(statSync(join(fleet, ".credentials.json")).mode & 0o777, 0o600);
+  } finally {
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
+test("given an injected real-home fixture whose .claude-fleet ALREADY exists, the seed never overwrites it", () => {
+  const realHome = tmp();
+  try {
+    mkdirSync(join(realHome, ".claude"));
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), "stale");
+    const fleet = join(realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
+    mkdirSync(fleet);
+    writeFileSync(join(fleet, ".credentials.json"), "refreshed");
+    seedClaudeFleetCredentials({ realHome });
+    assert.equal(readFileSync(join(fleet, ".credentials.json"), "utf8"), "refreshed");
+    assert.deepEqual(readdirSync(realHome).sort(), [".claude", ".claude-fleet"]);
+  } finally {
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
+test("a concurrent .claude-fleet create wins without replacing its credential", () => {
+  const realHome = tmp();
+  try {
+    mkdirSync(join(realHome, ".claude"));
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), "stale");
+    const fleet = join(realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
+    seedClaudeFleetCredentials({
+      realHome,
+      fsImpl: {
+        mkdirSync: ((path: string) => {
+          assert.equal(path, fleet);
+          mkdirSync(fleet);
+          writeFileSync(join(fleet, ".credentials.json"), "refreshed");
+          throw Object.assign(new Error("concurrent seed"), { code: "EEXIST" });
+        }) as typeof mkdirSync,
+      },
+    });
+    assert.equal(readFileSync(join(fleet, ".credentials.json"), "utf8"), "refreshed");
+    assert.deepEqual(readdirSync(realHome).sort(), [".claude", ".claude-fleet"]);
+  } finally {
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
+test("given an injected real-home fixture with no real .claude credential, the seed creates nothing", () => {
+  const realHome = tmp();
+  try {
+    mkdirSync(join(realHome, ".claude"));
+    assert.doesNotThrow(() => seedClaudeFleetCredentials({ realHome }));
+    assert.deepEqual(readdirSync(realHome), [".claude"]);
+  } finally {
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
+test("an unreadable real credential is reported rather than treated as absent", () => {
+  const realHome = tmp();
+  try {
+    assert.throws(
+      () => seedClaudeFleetCredentials({
+        realHome,
+        fsImpl: {
+          readFileSync: (() => { throw Object.assign(new Error("denied"), { code: "EACCES" }); }) as typeof readFileSync,
+        },
+      }),
+      { code: "EACCES" },
+    );
+    assert.deepEqual(readdirSync(realHome), []);
+  } finally {
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
+test("a failed seed publish removes its private staging paths and reports the error", () => {
+  const realHome = tmp();
+  try {
+    mkdirSync(join(realHome, ".claude"));
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), "token");
+    assert.throws(
+      () => seedClaudeFleetCredentials({
+        realHome,
+        fsImpl: {
+          renameSync: (() => { throw Object.assign(new Error("denied"), { code: "EACCES" }); }) as typeof fs.renameSync,
+        },
+      }),
+      { code: "EACCES" },
+    );
+    assert.deepEqual(readdirSync(realHome), [".claude"]);
+  } finally {
+    rmSync(realHome, { recursive: true, force: true });
+  }
+});
+
+test("the seed is invoked before materializeWorkerHome on the spawn path", async () => {
+  const realHome = tmp();
+  const root = tmp();
+  const previousHome = process.env.HOME;
+  try {
+    mkdirSync(join(realHome, ".claude"));
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), "token");
+    writeFileSync(join(realHome, ".claude", "settings.json"), "operator settings");
+    process.env.HOME = realHome;
+    let spawned = false;
+    await spawnWorker({
+      cwd: process.cwd(),
+      permissionMode: "bypassPermissions",
+      settingsFile: join(process.cwd(), "settings", "worker.json"),
+      prompt: "credential grant fixture",
+      mountProvider: "codex",
+      config: { claudeBin: "/unused", root, workerProviders: { enabled: ["codex"] } },
+      providerRouting: {
+        spawnCodex: async ({ workerHome }) => {
+          spawned = true;
+          const fleet = join(realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
+          assert.equal(readlinkSync(join(workerHome, ".claude")), fleet);
+          assert.equal(readFileSync(join(workerHome, ".claude", ".credentials.json"), "utf8"), "token");
+          assert.equal(existsSync(join(workerHome, ".claude", "settings.json")), false);
+          return { text: "ok", model: "codex", provider: "codex" } as never;
+        },
+      },
+    });
+    assert.equal(spawned, true);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    rmSync(realHome, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 //
 // Today's grant hands a worker the operator's WHOLE `.claude` (measured 1.8GB: 10,101
 // session transcripts, a writable `settings.json` that can inject env vars into the

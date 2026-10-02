@@ -17,6 +17,7 @@ import {
   githubAuthProbe,
   listenReadiness,
   onDrainRequest,
+  onRestoreRequest,
   onShedRequest,
   planLoadedProbe,
   processChannel,
@@ -140,7 +141,7 @@ test("the active generation sheds its caches on request and reports resident byt
   for (const l of listeners) l({ type: GENERATION_MESSAGES.shed });
   assert.equal(shed, 1);
   assert.equal(collected, 1, "a full collection follows when the runtime exposes one");
-  assert.deepEqual(sent, [{ type: "rmd.shed_done", beforeBytes: 5_000, afterBytes: 3_000, gc: true }]);
+  assert.deepEqual(sent, [{ type: "rmd.shed_done", beforeBytes: 5_000, afterBytes: 3_000, heapBeforeBytes: sent[0]?.heapBeforeBytes, heapAfterBytes: sent[0]?.heapAfterBytes, gc: true }]);
 
   const plain: GenerationMessage[] = [];
   const own: Array<(m: GenerationMessage) => void> = [];
@@ -148,4 +149,32 @@ test("the active generation sheds its caches on request and reports resident byt
   for (const l of own) l({ type: GENERATION_MESSAGES.shed });
   assert.equal(plain[0]?.gc, false, "with no exposed collector the reply says so");
   assert.equal(typeof plain[0]?.beforeBytes, "number", "the default reads this process's resident bytes");
+});
+
+test("a shed reports the heap its collection freed after the shed ran", () => {
+  const listeners: Array<(m: GenerationMessage) => void> = [];
+  const sent: GenerationMessage[] = [];
+  let heap = 4_000;
+  let dropped = false;
+  // Resident bytes never move (V8 keeps freed pages); only a collection after the shed shrinks the heap.
+  onShedRequest({ send: (m) => void sent.push(m), onMessage: (l) => void listeners.push(l) }, () => void (dropped = true), () => 9_000, () => void (heap = dropped ? 1_000 : heap), () => heap);
+  for (const l of listeners) l({ type: GENERATION_MESSAGES.shed });
+  assert.deepEqual(sent, [{ type: "rmd.shed_done", beforeBytes: 9_000, afterBytes: 9_000, heapBeforeBytes: 4_000, heapAfterBytes: 1_000, gc: true }]);
+  const real: GenerationMessage[] = [];
+  const own: Array<(m: GenerationMessage) => void> = [];
+  onShedRequest({ send: (m) => void real.push(m), onMessage: (l) => void own.push(l) }, () => {});
+  for (const l of own) l({ type: GENERATION_MESSAGES.shed });
+  assert.equal(typeof real[0]?.heapBeforeBytes, "number", "the default reads this process's V8 heap");
+});
+
+test("a restore request re-warms the generation after an abandoned handoff", () => {
+  const listeners: Array<(m: GenerationMessage) => void> = [];
+  const channel = { send: () => {}, onMessage: (l: (m: GenerationMessage) => void) => void listeners.push(l) };
+  const restored: string[] = [];
+  onRestoreRequest(channel, (reason) => restored.push(reason));
+  for (const l of listeners) l({ type: GENERATION_MESSAGES.shed });
+  assert.deepEqual(restored, [], "only a restore request restores");
+  for (const l of listeners) l({ type: GENERATION_MESSAGES.restore, reason: "handoff_abandoned" });
+  for (const l of listeners) l({ type: GENERATION_MESSAGES.restore });
+  assert.deepEqual(restored, ["handoff_abandoned", "restore"]);
 });
