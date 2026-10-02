@@ -260,7 +260,7 @@ test("rmd garden replay ci-friction prints the ladder and refuses a bad argument
     JSON.stringify({ step: "fix.dispatch", run_id: "run-1", mode: "reviewer-unmet", round: 1, ts: new Date(NOW - 20 * HOUR).toISOString() }),
   ].join("\n") + "\n");
   const said: string[] = [];
-  const rc = gardenReplayCommand(["ci-friction", "--days", "2", "--step-hours", "24"], { say: (l) => said.push(l), now: () => NOW, stateDir, repoRoot: repo.dir });
+  const rc = gardenReplayCommand(["ci-friction", "--days", "2", "--step-hours", "24"], { say: (l) => said.push(l), clock: clockFromMillisFn(() => NOW), stateDir, repoRoot: repo.dir });
   assert.equal(rc, 0);
   assert.match(said.join("\n"), /draft check:reviewer-unmet \(rung 1\)/);
   const err = console.error;

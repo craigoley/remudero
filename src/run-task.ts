@@ -33330,12 +33330,17 @@ export function runRegisteredGardenPass(name: RegisteredGardenName, args: readon
   return built instanceof Promise ? built.then((pass) => (signal.stopped ? 0 : run(pass))) : run(built);
 }
 
-/** `rmd garden replay ci-friction [--days <n>] [--step-hours <h>]` — the ci-friction ladder replayed
- *  over the past window from the ledger union and main's plan history, read-only: nothing is filed. */
 export const GARDEN_REPLAY_DAYS_FLAG = "--days";
 export const GARDEN_REPLAY_STEP_FLAG = "--step-hours";
 
-export function gardenReplayCommand(rest: string[], deps: { say?: (line: string) => void; now?: () => number; stateDir?: string; repoRoot?: string } = {}): number {
+export interface GardenReplayOptions {
+  say?: (line: string) => void;
+  clock?: Clock;
+  stateDir?: string;
+  repoRoot?: string;
+}
+
+export function gardenReplayCommand(rest: string[], opts: GardenReplayOptions = {}): number {
   const [name, ...flags] = rest;
   const badArg = unknownArgError("garden", flags, [GARDEN_REPLAY_DAYS_FLAG, GARDEN_REPLAY_STEP_FLAG]);
   const value = (flag: string, fallback: number): number => {
@@ -33349,11 +33354,11 @@ export function gardenReplayCommand(rest: string[], deps: { say?: (line: string)
     console.error(`${badArg ?? "rmd garden: usage: rmd garden replay ci-friction [--days <n>] [--step-hours <h>]"}\n` + USAGE);
     return 2;
   }
-  const say = deps.say ?? ((line: string) => console.log(line));
-  const root = deps.repoRoot ?? repoRoot;
-  const stateDir = deps.stateDir ?? join(loadConfig().root, "state");
+  const say = opts.say ?? ((line: string) => console.log(line));
+  const root = opts.repoRoot ?? repoRoot;
+  const stateDir = opts.stateDir ?? join(loadConfig().root, "state");
   const git: CiFrictionGit = (args) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-  const toMs = (deps.now ?? Date.now)();
+  const toMs = (opts.clock ?? systemClock).now();
   const lines = replayCiFriction({
     records: readCiFrictionLedgerRecords(stateDir),
     tasks: readCiFrictionPlanTimeline(git, relative(root, join(resolveRepoLayout(root).planDir, "tasks.d"))),
@@ -33367,9 +33372,9 @@ export function gardenReplayCommand(rest: string[], deps: { say?: (line: string)
 }
 
 /** `rmd garden run <name> [--hourly]` — one pass of one registered garden, the daemon's off-loop child (W1-T5114). */
-export async function gardenCommand(rest: string[], deps: { say?: (line: string) => void; now?: () => number } = {}): Promise<number> {
+export async function gardenCommand(rest: string[]): Promise<number> {
   const [sub, name] = rest;
-  if (sub === "replay") return gardenReplayCommand(rest.slice(1), deps);
+  if (sub === "replay") return gardenReplayCommand(rest.slice(1));
   const badArg = unknownArgError("garden", rest.slice(2), [], [GARDEN_HOURLY_FLAG]);
   if (sub !== "run" || name === undefined || !isRegisteredGardenName(name) || badArg) {
     console.error(`${badArg ?? `rmd garden: usage: ${commandSyntax("garden")} — gardens: ${REGISTERED_GARDEN_NAMES.join(", ")}`}\n` + USAGE);

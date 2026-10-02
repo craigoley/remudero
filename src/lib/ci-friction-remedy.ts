@@ -23,6 +23,7 @@
  *    cause one rung up (`ci-friction:<cause>#r<N>`), carrying what the last rung tried and measured; the
  *    third failed rung goes to a person instead of a fourth task.
  */
+import { fixedClock } from "./clock.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 
 /** The fields of one priced round this module reads. */
@@ -392,9 +393,9 @@ export function replayCiFrictionLadder(input: {
     const pick = priced
       .map(({ key }) => ciFrictionCauseState(key, asOf, visible, t))
       .find((s): s is Extract<CiFrictionCauseState, { state: "draft" | "escalate" }> => s.state === "draft" || s.state === "escalate");
-    steps.push({ at: new Date(t).toISOString(), causes, ...(pick ? { next: { key: pick.key, state: pick.state, rung: pick.rung } } : {}) });
+    steps.push({ at: fixedClock(t).iso(), causes, ...(pick ? { next: { key: pick.key, state: pick.state, rung: pick.rung } } : {}) });
     if (pick && input.simulateFilings !== false) {
-      own.push({ id: `replay-${own.length + 1}`, origin: ciFrictionRungOrigin(pick.key, pick.rung), status: "queued", retired: false, files: ["(replayed filing)"], filedAt: new Date(t).toISOString() });
+      own.push({ id: `replay-${own.length + 1}`, origin: ciFrictionRungOrigin(pick.key, pick.rung), status: "queued", retired: false, files: ["(replayed filing)"], filedAt: fixedClock(t).iso() });
     }
   }
   return steps;
