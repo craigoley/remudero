@@ -40,7 +40,7 @@ import type { Plan, Task } from "../src/lib/plan.js";
 import { acquireLease, type ReadModelDb } from "../src/lib/read-model-db.js";
 import { createReadModelTicker, readModelSwitchesPath, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
 import { HOST_PROBE_BUDGET_MS, PLAN_BUDGET_MS } from "../src/lib/view-freshness.js";
-import { buildBatchedGithub, DEFAULT_LIVENESS_BOUND_MS, readLedgerLines, type BatchedPr, type GitHub } from "../src/lib/status.js";
+import { buildBatchedGithub, DEFAULT_LIVENESS_BOUND_MS, defaultCreditStorePath, readLedgerLines, saveCreditStore, type BatchedPr, type CreditStore, type GitHub } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { SHADOW_CLASSIFICATIONS, VIEW_SHADOW_DIFF_STEP, createViewShadow, readShadowEvidence } from "../src/lib/view-shadow.js";
 import { viewEtag, type ViewSwitchMode } from "../src/lib/views.js";
@@ -1141,4 +1141,52 @@ test("a row stamped after the body's build is in neither side of a now sample", 
   const late = liveLines(core).slice(-2).map((l) => l.replace(new Date(T0 + 60_000).toISOString(), new Date(T0 - 1_000).toISOString()));
   writeFileSync(join(core.ledgerDir, "ledger.ndjson"), `${[...liveLines(core).slice(0, -2), ...late].join("\n")}\n`);
   assert.deepEqual([...new Set(view.legacy("instance=core", T0 + 90_000, body.data)?.rows["W1-T4"])].map((k) => k.split("|")[1]).sort(), ["implement.done", "run.start"]);
+});
+
+test("a run whose only recent rows are steps the fact store skips stays running in the view as in legacy", (t) => {
+  // Captured 2026-10-02T13:12:49Z: board.tasks[taskId=W1-T5073].status legacy running vs view queued (phase, worker,
+  // counts and groups with it). Its newest fact row was the 12:41:35 worker.assignment and its newest row the 12:57:18
+  // worker.activity, so from 13:11:35 the view's liveness bound read the run dead while legacy's rows kept it alive.
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { listGrilling: () => [] });
+  clock.set(T0);
+  core.append({ step: "run.start", task_id: "W1-T1", run_id: "W1-T1-1" });
+  clock.set(T0 + 60_000);
+  core.append({ step: "worker.assignment", task_id: "W1-T1", run_id: "W1-T1-1" });
+  clock.set(T0 + 20 * 60_000);
+  core.append({ step: "worker.activity", task_id: "W1-T1", run_id: "W1-T1-1" }, { step: "worker.state", task_id: "W1-T1", run_id: "W1-T1-1", state: "working" });
+  clock.set(T0 + 35 * 60_000);
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  assert.deepEqual(body.data.board.groups.running, ["W1-T1"], JSON.stringify(body.data.board.groups));
+  const diffs = compareNow(view, core, body, T0 + 35 * 60_000 + 30_000);
+  assert.deepEqual(diffs.filter((d) => d.classification === "real"), [], JSON.stringify(diffs));
+  // Negative control: a body that reads the run dead where legacy's rows keep it alive stays real.
+  body.data.board.groups.running = [];
+  body.data.board.groups.queued = ["W1-T1", ...(body.data.board.groups.queued ?? [])];
+  const wrong = compareNow(view, core, body, T0 + 35 * 60_000 + 30_000).find((d) => d.path === "board.groups.running");
+  assert.equal(wrong?.classification, "real", JSON.stringify(wrong));
+});
+
+test("a durable credit written after the now build is no diff when legacy replays the credit store that build read", (t) => {
+  // The credit store and its overrides are files beside the ledger: the board projection read them at its update, and a
+  // legacy side reading merge-credit.json again at the sample credits a task the compared body never could.
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { listGrilling: () => [] });
+  clock.set(T0);
+  core.append({ step: "daemon.tick" });
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  assert.ok(body.data.board.groups.queued?.includes("W1-T2"), JSON.stringify(body.data.board.groups));
+  const store: CreditStore = { "W1-T2": { trailer: { source: "trailer", prUrl: "https://github.com/o/r/pull/9", prNumber: 9, prState: "MERGED" } } };
+  saveCreditStore(defaultCreditStorePath(join(core.ledgerDir, "ledger.ndjson")), store);
+  const diffs = compareNow(view, core, body, T0 + 30_000);
+  assert.deepEqual(diffs.filter((d) => d.classification === "real"), [], JSON.stringify(diffs));
+  // Positive control: the store as written credits the task, so a legacy side reading it now would differ.
+  const credited = computeBoardSnapshot({ plan: PLAN, ledgerPath: join(core.ledgerDir, "ledger.ndjson"), github: stubGateway(), readLedger: () => readLedgerLines(join(core.ledgerDir, "ledger.ndjson")), now: () => T0 });
+  assert.equal(credited.tasks.find((x) => x.taskId === "W1-T2")?.status, "merged");
 });

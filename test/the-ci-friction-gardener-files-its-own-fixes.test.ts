@@ -43,21 +43,28 @@ import {
   ciFrictionRoundsFromLedger,
   readCiFrictionLedgerRecords,
   ciFrictionShardYaml,
-  costliestUntrackedCause,
-  freshCiFrictionPlanOrigins,
+  readCiFrictionPlanState,
   priceCiFrictionCauses,
   PR_URL_RE,
   readGateFireRateReport,
   runPrIndex,
   type CiFrictionGardenSources,
 } from "../src/lib/ci-friction-gardener.js";
+import type { CiFrictionRemedyTask, OwnerSearch } from "../src/lib/ci-friction-remedy.js";
+
+/** Every cause is owned by one source file, so a draft always has a surface to name. */
+const ANY_OWNER: OwnerSearch = { filesContaining: () => [{ file: "src/lib/owner.ts", hits: 1 }], fileExists: () => true };
+/** A plan holding one queued remedy per origin. */
+function queued(origins: readonly string[]): { tasks: CiFrictionRemedyTask[] } {
+  return { tasks: origins.map((origin, i) => ({ id: `W1-T80${i}`, origin, status: "queued", retired: false, files: ["src/lib/owner.ts"] })) };
+}
 import type { GardenerDeps } from "../src/lib/gardener.js";
 import { clockFromMillisFn } from "../src/lib/clock.js";
 import { gateFireRatesPath, type GateFireRateReport } from "../src/lib/gate-fire-rate.js";
 import type { LedgerRecord } from "../src/lib/retro.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
-test("the ci-friction origin census sees a merged filing while the daemon checkout trails main", () => {
+test("the ci-friction plan census reads fetched main, times a build by its trailer, and degrades on a dead remote", () => {
   const author = gitRepo({ kind: "ci-friction-author" });
   const remote = gitRepo({ kind: "ci-friction-remote", bare: true });
   mkdirSync(join(author.dir, "plan", "tasks.d"), { recursive: true });
@@ -68,20 +75,32 @@ test("the ci-friction origin census sees a merged filing while the daemon checko
   author.git("push", "-q", "origin", "main");
   const daemon = gitRepo({ kind: "ci-friction-daemon", cloneFrom: remote.dir });
   const staleHead = daemon.git("rev-parse", "HEAD");
+  assert.deepEqual(readCiFrictionPlanState(daemon.dir).tasks, [], "no ci-friction origin yet is an empty census, not an error");
 
   writeFileSync(join(author.dir, "plan", "tasks.d", "filing.yaml"),
-    '- id: W1-T2\n  origin: "ci-friction:fix_refusal:the-worker-changed-nothing"\n' +
-    "- id: W1-T3\n  origin: 'ci-friction:single-quoted'\n");
+    '- id: W1-T2\n  title: "refusal remedy"\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: low\n  status: merged\n  attempts: 0\n' +
+    '  origin: "ci-friction:fix_refusal:the-worker-changed-nothing"\n  files:\n    - src/run-task.ts\n  acceptance:\n    - claim: "c"\n      proof: "unit test: t"\n' +
+    "- id: W1-T3\n  title: \"docs record\"\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: low\n  status: merged\n  attempts: 0\n" +
+    "  origin: 'ci-friction:check:reviewer-unmet'\n  files:\n    - docs/ci-friction-remedies.md\n  acceptance:\n    - claim: \"c\"\n      proof: \"unit test: t\"\n");
   author.git("add", "plan/tasks.d/filing.yaml");
-  author.git("commit", "-q", "-m", "file priced cause");
+  author.git("commit", "-q", "-m", "file priced causes");
+  writeFileSync(join(author.dir, "built.txt"), "x\n");
+  author.git("add", "built.txt");
+  author.git("commit", "-q", "-m", "fix: the remedy\n\nRemudero-Task: W1-T2");
   author.git("push", "-q", "origin", "main");
 
-  assert.deepEqual(freshCiFrictionPlanOrigins(daemon.dir), [
-    "ci-friction:fix_refusal:the-worker-changed-nothing", "ci-friction:single-quoted",
+  const fresh = readCiFrictionPlanState(daemon.dir);
+  assert.equal(fresh.degraded, undefined);
+  assert.deepEqual(fresh.tasks.map((t) => [t.id, t.origin, t.files, typeof t.mergedAt]), [
+    ["W1-T2", "ci-friction:fix_refusal:the-worker-changed-nothing", ["src/run-task.ts"], "string"],
+    ["W1-T3", "ci-friction:check:reviewer-unmet", ["docs/ci-friction-remedies.md"], "string"],
   ]);
   assert.equal(daemon.git("rev-parse", "HEAD"), staleHead, "read the fetched tree without changing the daemon checkout");
+
   daemon.git("remote", "set-url", "origin", join(daemon.dir, "missing-origin"));
-  assert.throws(() => freshCiFrictionPlanOrigins(daemon.dir), "an unreadable remote cannot become an empty origin set");
+  const degraded = readCiFrictionPlanState(daemon.dir);
+  assert.match(degraded.degraded ?? "", /^fetch failed \(.+\); read the last fetched origin\/main$/);
+  assert.equal(degraded.tasks.length, 2, "a dead remote reads the last fetched main instead of failing the pass");
 });
 
 test("readGateFireRateReport returns only a present, parseable persisted report", () => {
@@ -176,17 +195,19 @@ test("W1-T4435: the costliest untracked cause becomes a drafted task", async () 
   const untracked = { cause: { kind: "main_merge" as const, name: "src/lib/shared.ts" }, minutes: 30, rounds: 1, prs: 1 };
   const priced = [tracked, untracked];
 
-  // Its origin is already on a queued task — the costliest cause is skipped in favour of the next.
-  assert.equal(costliestUntrackedCause(priced, [ciFrictionOrigin(tracked.cause)]), untracked);
-  assert.equal(costliestUntrackedCause(priced, [ciFrictionOrigin(tracked.cause), ciFrictionOrigin(untracked.cause)]), undefined);
+  void priced;
 
-  // The rendered shard is a real, lintable plan record — parked for a person, Law 5's mark riding it.
-  const yaml = ciFrictionShardYaml(untracked, "W1-T9001");
+  // The rendered shard is a real, lintable plan record that names the owning code and a regression
+  // test — never the remedies doc — parked for the judge, Law 5's mark riding it.
+  const yaml = ciFrictionShardYaml({ price: untracked, rung: 1, owner: { files: ["src/lib/shared.ts"], why: ["src/lib/shared.ts: main merged over it"] }, rounds: [] }, "W1-T9001");
   assert.match(yaml, /^- id: W1-T9001$/m);
   assert.match(yaml, /^ {2}verify: human$/m);
   assert.match(yaml, /^ {2}author_class: machine$/m);
   assert.match(yaml, new RegExp(`^ {2}origin: "ci-friction:main_merge:src/lib/shared\\.ts"$`, "m"));
-  assert.match(yaml, new RegExp(`proof: "grep: ${ciFrictionOrigin(untracked.cause)} in ${CI_FRICTION_REMEDIES_FILE}"`));
+  assert.match(yaml, /^ {4}- src\/lib\/shared\.ts$/m);
+  assert.match(yaml, /^ {4}- test\/w1-t9001-src-lib-shared-ts-is-prevented\.test\.ts$/m);
+  assert.match(yaml, /proof: "unit test: W1-T9001: main_merge:src\/lib\/shared\.ts is prevented, not retried"/);
+  assert.doesNotMatch(yaml, new RegExp(CI_FRICTION_REMEDIES_FILE.replace(".", "\\.")));
   const verdict = ciFrictionRecordVerdict(yaml, "test");
   assert.equal(verdict.ok, true, verdict.reason);
 
@@ -226,7 +247,8 @@ test("W1-T4435: the costliest untracked cause becomes a drafted task", async () 
       neverFired: [],
       alwaysFired: [],
     }),
-    planOrigins: () => [ciFrictionOrigin(tracked.cause)],
+    planState: () => queued([ciFrictionOrigin(tracked.cause)]),
+    ownerSearch: ANY_OWNER,
     mintTaskId: (branch) => (assert.equal(branch, "ci-friction-garden-test"), `W1-T900${++minted}`),
   };
 
@@ -236,7 +258,8 @@ test("W1-T4435: the costliest untracked cause becomes a drafted task", async () 
 
   const pass = runGarden(spec, deps);
   assert.deepEqual(pass.plan?.acting, ["draft"]);
-  assert.equal(pass.plan?.actions[0]?.target, ciFrictionCauseKey(untracked.cause));
+  assert.equal(pass.plan?.actions[0]?.target, ciFrictionOrigin(untracked.cause));
+  assert.equal(ciFrictionCauseKey(untracked.cause), "main_merge:src/lib/shared.ts");
   assert.equal(landed.length, 1);
   assert.equal("review" in landed[0]!, false, "never held or drafted — reviewed and auto-merges like every fleet PR");
   assert.match(landed[0]!.body, /^\*\*Judged by its outcome\.\*\* The ci-friction gardener's `draft` changes are judged by whether this PR merges/);
@@ -253,7 +276,7 @@ test("W1-T4435: the costliest untracked cause becomes a drafted task", async () 
   assert.match(log, /\| pass \| total PR minutes \| costliest cause \|/);
   // 90 (ci) + 30 (main_merge) = 120 total priced this pass, topped by the check gate-fire-rate priced higher.
   assert.match(log, /\| 2026-.*\| 120 \| check:ci \(90m\) \|/);
-  assert.ok(landed[0]!.body.includes(`grep: ${ciFrictionOrigin(untracked.cause)} in ${CI_FRICTION_REMEDIES_FILE}`), "the body names the proof that will carry the shard's criterion");
+  assert.match(shard, /^ {2}rationale: \|$/m, "the record carries its evidence pack");
 });
 
 test("only a landed ci-friction filing receipt retires its cause", () => {
@@ -291,9 +314,10 @@ test("W1-T4435: the gardener preserves an existing trend log while appending a n
   const sources: CiFrictionGardenSources = {
     ledgerRecords: () => [
       { step: "pr.opened", run_id: "run-existing-log", pr_url: "https://github.com/acme/remudero/pull/5", ts: "2026-09-24T04:00:00.000Z" },
-      { step: "fix.dispatch", run_id: "run-existing-log", mode: "merge-conflict", round: 1, ts: "2026-09-24T04:25:00.000Z" },
+      { step: "fix.dispatch", run_id: "run-existing-log", mode: "reviewer-unmet", round: 1, ts: "2026-09-24T04:25:00.000Z" },
     ],
-    planOrigins: () => [],
+    planState: () => ({ tasks: [] }),
+    ownerSearch: ANY_OWNER,
     mintTaskId: (branch) => (assert.equal(branch, "ci-friction-garden-test"), "W1-T9003"),
   };
 
@@ -322,7 +346,8 @@ test("W1-T4767: an unreadable ledger fails the garden pass without a zero scorec
   };
   const sources: CiFrictionGardenSources = {
     ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
-    planOrigins: () => [],
+    planState: () => ({ tasks: [] }),
+    ownerSearch: ANY_OWNER,
     mintTaskId: () => { throw new Error("no task should be minted"); },
   };
   const spec = ciFrictionGardenSpec(deps, sources);
@@ -362,7 +387,8 @@ test("a growing live ledger does not re-read the ci-friction union within the ho
   };
   const sources: CiFrictionGardenSources = {
     ledgerRecords: () => (reads++, []),
-    planOrigins: () => [],
+    planState: () => ({ tasks: [] }),
+    ownerSearch: ANY_OWNER,
     mintTaskId: () => assert.fail("nothing to mint"),
   };
   const spec = ciFrictionGardenSpec(deps, sources);
@@ -412,7 +438,8 @@ function frictionFixture(kind: string, land: GardenCheckout["land"], extra: Part
       neverFired: [],
       alwaysFired: [],
     }),
-    planOrigins: () => origins,
+    planState: () => queued(origins),
+    ownerSearch: ANY_OWNER,
     mintTaskId: () => `W1-T95${String(++minted).padStart(2, "0")}`,
   };
   return { repo, deps, events, sources, spec: ciFrictionGardenSpec(deps, sources), track: (o: string[]) => { origins = o; } };
@@ -579,8 +606,8 @@ test("a sweep fix round with no pr.opened is priced by its own worker minutes an
     { step: "fix.dispatch", run_id: "DAEMON-1", round: "resume", mode: "body-repair", head_sha: "bbb", ts: "2026-09-29T15:00:00.000Z" },
   ];
   assert.deepEqual(ciFrictionRoundsFromLedger(records), [
-    { pr: 7816, cause: { kind: "check", name: "reviewer-unmet" }, minutes: 14.5, at: "2026-09-29T13:36:01.000Z" },
-    { pr: 7830, cause: { kind: "check", name: "ci-log" }, minutes: 5, at: "2026-09-29T13:40:00.000Z" },
+    { pr: 7816, cause: { kind: "check", name: "reviewer-unmet" }, minutes: 14.5, at: "2026-09-29T13:36:01.000Z", detail: "reviewer-unmet round" },
+    { pr: 7830, cause: { kind: "check", name: "ci-log" }, minutes: 5, at: "2026-09-29T13:40:00.000Z", detail: "ci-log round" },
   ]);
 });
 

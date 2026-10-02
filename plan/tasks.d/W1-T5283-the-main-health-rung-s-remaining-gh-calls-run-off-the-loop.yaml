@@ -1,0 +1,53 @@
+- id: W1-T5283
+  title: "THE MAIN-HEALTH RUNG'S REMAINING gh CALLS STILL BLOCK THE DAEMON LOOP — its issue gateway (ghIssueGateway), CI-failure read (fetchCiFailures) and requeue (requeueActionsJob) are synchronous gh spawns, though the rung already awaits the last two"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  priority: 2
+  origin: "operator session 2026-10-02: core daemon CPU profile (E36) and #8674's follow-up audit"
+  plan_refs: [W1-T4970, W1-T3991, W1-T4446, W1-T1223]
+  files: [src/lib/main-health-rung.ts, src/lib/escalate.ts, src/run-task.ts, test/the-main-health-rung-never-blocks-on-gh.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-02. A live CPU profile of the core daemon caught a 144 s loop stall. 50.2 s of it was in
+    spawnSync < execFileSync < ghJson < main-health-rung.ts < runTask. #8674 (unfiled) moved the rung's
+    `deps.fetch` reads (repo metadata, the head commit, the rollup, run history) to ghJsonAsync. Three gh
+    paths in the same rung are still synchronous. daemonCommand in src/run-task.ts wires them into
+    buildMainHealthRung:
+    (a) `issues: ghIssueGateway(target.owner, target.repo)` (src/lib/escalate.ts). The rung calls
+    `deps.issues.listOpen(...)`, `closeWithComment` and the open path synchronously when main turns red or green.
+    (b) `readCiFailures: (rollup) => fetchCiFailures(...)`. fetchCiFailures (src/run-task.ts) reads each failed
+    job's log with synchronous gh, although `loadCiFailureWindowAsync` already shows the async shape.
+    (c) `requeueCheck: (failure) => requeueActionsJob(...)`. requeueActionsJob's default `exec` is ghExec.
+    The rung already does `await deps.readCiFailures(...)` and `await deps.requeueCheck!(...)`, so (b) and (c)
+    need only async implementations. (a) needs its gateway type widened.
+    NOT THIS TASK: applyGhReadCadence's blocking sleep (defaultBlockingSleepSync) under ghJsonAsync is already
+    filed as W1-T4970. Build it there, not here.
+  design: |
+    (i) Add async variants of fetchCiFailures and requeueActionsJob over ghJsonAsync (or an async ghExec twin
+    with ghJsonAsync's timeout and SIGTERM-then-SIGKILL escalation). They return the same values, reasons and
+    ledger rows as the sync forms. Keep the sync forms for their CLI callers.
+    (ii) Add an async issue gateway beside ghIssueGateway in src/lib/escalate.ts, with the same argv and the same
+    write classification. Widen the rung's `issues` port to accept Promise returns and await each call.
+    The opened, closed and deduplicated issue set must not change.
+    (iii) Wire all three async forms in daemonCommand.
+  acceptance:
+    - claim: "the rung's issue gateway lets a timer fire while its gh call is in flight"
+      proof: 'grep: test("W1-T5283: the main health issue gateway lets a timer fire while gh is in flight" in test/the-main-health-rung-never-blocks-on-gh.test.ts'
+    - claim: "the rung's CI-failure read lets a timer fire while its gh reads are in flight"
+      proof: 'grep: test("W1-T5283: the ci failure read lets a timer fire while gh is in flight" in test/the-main-health-rung-never-blocks-on-gh.test.ts'
+    - claim: "the rung's requeue lets a timer fire while its gh call is in flight"
+      proof: 'grep: test("W1-T5283: the requeue lets a timer fire while gh is in flight" in test/the-main-health-rung-never-blocks-on-gh.test.ts'
+    - claim: "the async forms open close and requeue exactly what the sync forms did"
+      proof: 'grep: test("W1-T5283: the awaited issue and requeue calls act exactly as the sync ones did" in test/the-main-health-rung-never-blocks-on-gh.test.ts'
+    - claim: "the new suite runs and passes"
+      proof: "unit test: test/the-main-health-rung-never-blocks-on-gh.test.ts"
+  falsifier: |
+    Wire any one of the three back to its sync form and its timer-probe test sees the timer fire only after the
+    call settles.

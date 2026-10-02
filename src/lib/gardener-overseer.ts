@@ -1,7 +1,11 @@
 import { existsSync, lstatSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-import { ciFrictionCauseKey, ciFrictionOrigin, CI_FRICTION_REMEDIES_FILE, type CiFrictionCause } from "./ci-friction-gardener.js";
+import { ciFrictionRoundsFromLedger, readCiFrictionLedgerRecords, readCiFrictionPlanTasks, remedyRoundsOf, type CiFrictionGit } from "./ci-friction-gardener.js";
+import { ciFrictionRemedyEffect, isDocOnlyRemedy, parseCiFrictionOrigin, type CiFrictionRemedyTask, type RemedyRound } from "./ci-friction-remedy.js";
+import { relative } from "node:path";
+import { resolveRepoLayout } from "./repo-layout.js";
+import { execFileSync } from "node:child_process";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { Escalation } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -90,6 +94,10 @@ export interface EffectReading {
   after: number;
   /** One standard error of `before`. */
   se: number;
+  /** A reading that decides its own verdict (a significance test, not one standard error) sets it. */
+  verdict?: "credit" | "debit";
+  /** Why, for the ledger row. */
+  reason?: string;
 }
 
 export interface TrackedGardenerPr {
@@ -519,14 +527,16 @@ export function runGardenerOverseer(deps: GardenerOverseerPorts): OverseerPass {
   // EFFECT — a merged change whose targeted cost fell beyond one standard error credits its class; a rise debits it.
   const merged = Object.values(state.prs).filter((p): p is TrackedGardenerPr & { info: GardenerPrInfo & { mergedAt: string } } => p.info?.state === "merged" && typeof p.info.mergedAt === "string" && p.actionClass !== "");
   for (const pr of merged) {
-    const id = `effect:${pr.url}`;
+    // ci-friction's effect is judged by the remedy's share of fix rounds (ci-friction-remedy.ts) from
+    // 2026-10-02; the old decayed-minutes verdicts stand under their own id and these are new ones.
+    const id = pr.gardener === "ci-friction" ? `effect:v2:${pr.url}` : `effect:${pr.url}`;
     if (hasVerdict(id)) continue;
     const reading = deps.effectReading?.({ ...pr, mergedAt: pr.info.mergedAt }, rows);
     if (!reading) continue;
-    const verdict = reading.before - reading.after > reading.se ? "credit" : reading.after - reading.before > reading.se ? "debit" : undefined;
+    const verdict = reading.verdict ?? (reading.before - reading.after > reading.se ? "credit" : reading.after - reading.before > reading.se ? "debit" : undefined);
     if (!verdict) continue;
     issue({ id, gardener: pr.gardener, actionClass: pr.actionClass, verdict, kind: "effect" });
-    deps.log(`${OVERSEER_NAME}.effect_verdict`, { gardener: pr.gardener, class: pr.actionClass, pr_url: pr.url, verdict, before: reading.before, after: reading.after, se: reading.se });
+    deps.log(`${OVERSEER_NAME}.effect_verdict`, { gardener: pr.gardener, class: pr.actionClass, pr_url: pr.url, verdict, before: reading.before, after: reading.after, se: reading.se, ...(reading.reason ? { reason: reading.reason } : {}) });
   }
 
   // CHURN — near-identical merges from one gardener and class, landing faster than its metric could move.
@@ -611,29 +621,33 @@ export function startGardenerOverseer(deps: GardenerOverseerPorts, intervalMs: n
 }
 
 /**
- * What a merged ci-friction `draft` did to the cost it named: the filing pass's own priced minutes for
- * the cause versus the latest pass's, read only once the filed task's remedy has landed. Other
- * gardeners are judged by their own `GardenSpec.metric` inside `runGarden`.
+ * What a merged ci-friction `draft` did to its cause, judged on the REMEDY's build — not the filing PR's
+ * merge, which only adds a plan record. Undecided until the filed task's build has merged and its
+ * equal before/after windows hold enough evidence (`ciFrictionRemedyEffect`). A docs-only record is a
+ * debit as soon as it merges: it changes no code path, so the filing bought nothing.
  */
 export function ciFrictionEffectReading(
   pr: { gardener: string; url: string; mergedAt: string },
   rows: readonly Row[],
-  remedyLanded: (origin: string) => boolean,
+  remedyFor: (origin: string) => CiFrictionRemedyTask | undefined,
+  rounds: () => readonly RemedyRound[],
+  nowMs: number,
 ): EffectReading | undefined {
   if (pr.gardener !== "ci-friction") return undefined;
-  const cards = rows.filter((r) => r.step === "ci-friction.scorecard");
-  const filing = cards.find((r) => r.pr_url === pr.url);
-  const key = typeof filing?.untracked === "string" ? filing.untracked : undefined;
-  if (!filing || !key) return undefined;
-  const minutesOf = (row: Row): { cause: CiFrictionCause; minutes: number; rounds: number } | undefined => {
-    const priced = Array.isArray(row.priced) ? (row.priced as Array<{ cause: CiFrictionCause; minutes: number; rounds: number }>) : [];
-    return priced.find((p) => ciFrictionCauseKey(p.cause) === key);
-  };
-  const before = minutesOf(filing);
-  if (!before || !remedyLanded(ciFrictionOrigin(before.cause))) return undefined;
-  const latest = cards.filter((r) => tsOf(r) > Date.parse(pr.mergedAt)).sort((a, b) => tsOf(a) - tsOf(b)).at(-1);
-  if (!latest) return undefined;
-  return { before: before.minutes, after: minutesOf(latest)?.minutes ?? 0, se: before.minutes / Math.sqrt(Math.max(before.rounds, 1)) };
+  const filing = rows.find((r) => r.step === "ci-friction.scorecard" && r.pr_url === pr.url);
+  const origin = typeof filing?.untracked === "string" ? `ci-friction:${filing.untracked}` : undefined;
+  const parsed = origin ? parseCiFrictionOrigin(origin) : undefined;
+  if (!origin || !parsed) return undefined;
+  const remedy = remedyFor(origin);
+  const mergedAtMs = Date.parse(remedy?.mergedAt ?? "");
+  if (!remedy || !Number.isFinite(mergedAtMs)) return undefined;
+  if (isDocOnlyRemedy(remedy)) {
+    return { before: 0, after: 0, se: 0, verdict: "debit", reason: `${remedy.id} was built as a docs-only record, which changes no code path` };
+  }
+  const effect = ciFrictionRemedyEffect(rounds(), parsed.key, mergedAtMs, nowMs);
+  if (effect.verdict !== "credit" && effect.verdict !== "debit") return undefined;
+  const share = (w: { k: number; n: number }) => (w.n > 0 ? w.k / w.n : 0);
+  return { before: share(effect.before), after: share(effect.after), se: 0, verdict: effect.verdict, reason: `${remedy.id}: ${effect.reason}` };
 }
 
 /** The production wiring: the ledger union, GitHub REST for PRs, and the ci-friction remedies file. */
@@ -648,9 +662,32 @@ export function productionGardenerOverseerPorts(opts: {
   clock?: Clock;
 }): GardenerOverseerPorts {
   const clock = opts.clock ?? systemClock;
-  const remedyLanded = (origin: string): boolean => {
-    const path = join(opts.repoRoot, CI_FRICTION_REMEDIES_FILE);
-    return existsSync(path) && readFileSync(path, "utf8").includes(origin);
+  // Read lazily and once per pass: only a merged ci-friction filing awaiting its verdict needs them.
+  let remedies: CiFrictionRemedyTask[] | undefined;
+  let rounds: RemedyRound[] | undefined;
+  const git: CiFrictionGit = (args) => execFileSync("git", ["-C", opts.repoRoot, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  // An unreadable plan or ledger leaves the effect UNMEASURED, under a row naming why — never a verdict.
+  const remedyFor = (origin: string): CiFrictionRemedyTask | undefined => {
+    if (!remedies) {
+      try {
+        remedies = readCiFrictionPlanTasks(git, relative(opts.repoRoot, join(resolveRepoLayout(opts.repoRoot).planDir, "tasks.d")));
+      } catch (error) {
+        opts.log(`${OVERSEER_NAME}.remedy_plan_unreadable`, { error: String((error as Error)?.message ?? error).split("\n")[0] });
+        remedies = [];
+      }
+    }
+    return remedies.find((t) => t.origin === origin);
+  };
+  const roundsOnce = (): RemedyRound[] => {
+    if (!rounds) {
+      try {
+        rounds = remedyRoundsOf(ciFrictionRoundsFromLedger(readCiFrictionLedgerRecords(opts.stateDir)));
+      } catch (error) {
+        opts.log(`${OVERSEER_NAME}.remedy_rounds_unreadable`, { error: String((error as Error)?.message ?? error) });
+        rounds = [];
+      }
+    }
+    return rounds;
   };
   return {
     stateDir: opts.stateDir,
@@ -675,6 +712,6 @@ export function productionGardenerOverseerPorts(opts: {
         return undefined;
       }
     },
-    effectReading: (pr, rows) => ciFrictionEffectReading(pr, rows, remedyLanded),
+    effectReading: (pr, rows) => ciFrictionEffectReading(pr, rows, remedyFor, roundsOnce, clock.now()),
   };
 }

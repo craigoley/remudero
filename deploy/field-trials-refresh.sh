@@ -43,6 +43,16 @@ exec 9>"$LOCK"
 if ! flock -n 9; then echo "field-trials-refresh: another pass is active"; exit 0; fi
 IMAGE="$(docker inspect remudero-daemon --format '{{.Image}}')"
 test -n "$IMAGE" || { echo "field-trials-refresh: core image unavailable" >&2; exit 2; }
+# Review local evidence BEFORE GitHub collection: a remote outage cannot suppress the daily
+# routing review. Use the mounted runtime checkout, not the image's older /app experiment table.
+docker run --rm --network none --volumes-from remudero-daemon \
+  --mount "type=bind,src=$SITE/state,dst=/field-trials/site,readonly" \
+  --mount "type=bind,src=$CONSOLE/state,dst=/field-trials/console,readonly" \
+  --workdir /home/node/Remudero/remudero --entrypoint /bin/sh "$IMAGE" \
+  -c 'umask 077; exec "$@"' routing-daily-review /usr/local/bin/node \
+  --import tsx scripts/private-routing-daily-review.mjs \
+  --source core=/home/node/Remudero/state --source site=/field-trials/site --source console=/field-trials/console \
+  --out-dir /home/node/Remudero/state/field-trials/routing-daily
 APP_ID="$(docker exec remudero-daemon printenv GH_APP_ID)"
 INSTALLATION_ID="$(docker exec remudero-daemon printenv GH_APP_INSTALLATION_ID)"
 KEY_PATH="$(docker exec remudero-daemon printenv GH_APP_PRIVATE_KEY_PATH)"

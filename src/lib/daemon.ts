@@ -33,6 +33,7 @@ import type {
   WipeTestCadenceRunResult,
 } from "./measurement-cadence.js";
 import { buildMeasurementCadenceRow } from "./measurement-cadence.js";
+import { runOpportunityIntake, productionOpportunityIntakePorts, type OpportunityIntakePorts } from "./opportunity-intake.js";
 import type { BoardReviewCadenceDecision, BoardReviewReport } from "./board-review.js";
 import type { DigestCadenceRunResult } from "./digest.js";
 import type { LedgerCompactionDecision, LedgerCompactionOutcome } from "./ledger-compaction-rung.js";
@@ -1078,6 +1079,7 @@ export interface DaemonDeps {
   /** W1-T2923: one scheduler over repository-intake rungs. The check is pure from this module's
    *  perspective; run-task.ts owns markers, policy, GitHub, filesystem and worker effects. */
   checkIntakeRungs?: () => readonly IntakeRungDecision[];
+  opportunityIntake?: OpportunityIntakePorts;
   /** Run one enabled intake rung selected by {@link checkIntakeRungs}. */
   runIntakeRung?: (decision: Extract<IntakeRungDecision, { fire: true }>) => Promise<IntakeRungRunResult> | IntakeRungRunResult;
   /** The board-review rung, wired. Its unit is the whole open board rather than one PR, and it has its own policy row
@@ -3810,7 +3812,14 @@ export async function runDaemon(
             continue;
           }
           log("intake_cadence.fired", { rung: decision.rung, reason: decision.reason });
-          if (deps.runIntakeRung) {
+          if (decision.rung === "codeqlQuality" && (deps.opportunityIntake || deps.knowledgeGardener)) {
+            try {
+              const result = await runOpportunityIntake(deps.opportunityIntake ?? productionOpportunityIntakePorts(deps.knowledgeGardener!));
+              log("opportunity_intake.ran", { ...result, rung: decision.rung });
+            } catch (error) {
+              log("opportunity_intake.failed", { reason: String(error) });
+            }
+          } else if (deps.runIntakeRung) {
             try {
               log("intake_cadence.ran", await deps.runIntakeRung(decision));
             } catch (e) {

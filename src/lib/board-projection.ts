@@ -25,7 +25,7 @@ import { projectionAgesWithTheClock } from "./board.js";
 import { systemClock, type Clock } from "./clock.js";
 import { tryEscalate, type EscalateDeps, type Escalation } from "./escalate.js";
 import type { Plan, Task } from "./plan.js";
-import { withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
+import { withWriteTransaction, type ReadModelDb, type ReadModelLease, type ReadModelStatement } from "./read-model-db.js";
 import {
   DEFAULT_LIVENESS_BOUND_MS,
   defaultCreditOverridePath,
@@ -52,6 +52,8 @@ export const BOARD_CROSS_TASK_STEPS: ReadonlySet<string> = new Set(["daemon.boot
  *  `orphanedRunIds` reads the ledger's newest `ts` from every row. */
 export const BOARD_UNREAD_STEPS: ReadonlySet<string> = new Set(["sweep.pass", "sweep.summary", "incident.event", "main.health.observed"]);
 const LATEST_TS_META = "board.latest_ts_ms";
+/** The step of the one row per run that stands for its newest non-fact row (`run_activity`), so its liveness reads as legacy's. */
+export const BOARD_RUN_ACTIVITY_STEP = "read_model.run_activity";
 
 export const BOARD_PROJECTION_DDL = `CREATE TABLE IF NOT EXISTS task_projection(task_id TEXT PRIMARY KEY,
   stamp TEXT NOT NULL, json TEXT NOT NULL) WITHOUT ROWID;
@@ -169,6 +171,8 @@ export interface BoardUpdate {
 export interface BoardProjection {
   update(opts?: { force?: boolean }): BoardUpdate;
   projections(): ReadonlyMap<string, StatusProjection>;
+  /** The credit store and override text the last update read: a second derivation replays them. */
+  creditRead(): { credit: CreditStore; overrides: string };
   /** The fact rows the board derives from, in ledger order. */
   rows(): ReadonlyArray<Row>;
   /** Derives with no reuse, diffs it against the held board, and heals every mismatch. */
@@ -216,6 +220,13 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   const taskCount = new Map<string, number>();
   const taskSeq = new Map<string, number>();
   const lastRunStartMs = new Map<string, number>();
+  /** Per `task|run`: its newest fact row, the row standing for a newer non-fact one, and the activity seq read. */
+  const newestFactMs = new Map<string, number>();
+  const activityRows = new Map<string, { row: Row; tsMs: number }>();
+  const taskActivitySeq = new Map<string, number>();
+  let activitySeq = 0;
+  let activitySql: ReadModelStatement | undefined;
+  let lastCredit: { credit: CreditStore; overrides: string } = { credit: {}, overrides: "" };
   let latestTsMs = 0;
   const held = new Map<string, Held>();
   for (const r of db.prepare("SELECT task_id, stamp, json FROM task_projection").all()) {
@@ -228,6 +239,45 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   let lastClockAt: number | undefined;
   let lastOracleAt: number | undefined;
   let pending = false;
+
+  /** Takes out the row standing for a run's activity, if any. */
+  function dropActivity(key: string): void {
+    const held = activityRows.get(key);
+    if (!held) return;
+    activityRows.delete(key);
+    let at = rows.length - 1;
+    while (at > 0 && rows[at] !== held.row) at--;
+    if (at > 0) {
+      rows.splice(at, 1);
+      rowTsMs.splice(at, 1);
+    }
+  }
+
+  /** Each run whose newest row of any step is newer than its newest fact row gets one row at that time, in time order; true when one moved. */
+  function ingestActivity(): boolean {
+    if (!activitySql) {
+      if (db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'run_activity'").get() === undefined) return false;
+      activitySql = db.prepare("SELECT task_id, run_id, ts, ts_ms, seq FROM run_activity WHERE seq > ? ORDER BY seq");
+    }
+    let moved = false;
+    for (const r of activitySql.iterate(activitySeq)) {
+      const [taskId, runId, tsMs, seq] = [String(r.task_id), String(r.run_id), Number(r.ts_ms), Number(r.seq)];
+      activitySeq = Math.max(activitySeq, seq);
+      const key = `${taskId}|${runId}`;
+      dropActivity(key);
+      taskActivitySeq.set(taskId, Math.max(taskActivitySeq.get(taskId) ?? 0, seq));
+      moved = true;
+      if (tsMs <= (newestFactMs.get(key) ?? Number.NEGATIVE_INFINITY)) continue;
+      const row: Row = { ts: String(r.ts), step: BOARD_RUN_ACTIVITY_STEP, task_id: taskId, run_id: runId };
+      let at = rows.length;
+      while (rowTsMs[at - 1]! > tsMs) at--;
+      rows.splice(at, 0, row);
+      rowTsMs.splice(at, 0, tsMs);
+      activityRows.set(key, { row, tsMs });
+      latestTsMs = Math.max(latestTsMs, tsMs);
+    }
+    return moved;
+  }
 
   function ingest(): number {
     let fresh = 0;
@@ -264,6 +314,11 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       if (row.step === "run.start" && typeof row.task_id === "string") {
         lastRunStartMs.set(row.task_id, Math.max(lastRunStartMs.get(row.task_id) ?? 0, tsMs));
       }
+      if (typeof row.task_id === "string" && typeof row.run_id === "string") {
+        const key = `${row.task_id}|${row.run_id}`;
+        newestFactMs.set(key, Math.max(newestFactMs.get(key) ?? Number.NEGATIVE_INFINITY, tsMs));
+        if ((activityRows.get(key)?.tsMs ?? Number.POSITIVE_INFINITY) <= tsMs) dropActivity(key);
+      }
     }
     // Ledger order is time order, so a row is placed by its ts, not by when the projector read it.
     if (outOfOrder) {
@@ -271,7 +326,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       const [sortedRows, sortedTs] = [order.map((i) => rows[i]!), order.map((i) => rowTsMs[i]!)];
       sortedRows.forEach((row, i) => { rows[i] = row; rowTsMs[i] = sortedTs[i]!; });
     }
-    if (fresh > 0) pending = true;
+    if (ingestActivity() || fresh > 0) pending = true;
     return fresh;
   }
 
@@ -310,9 +365,10 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     const plan = opts.readPlan();
     const credit = readCredit();
     const overrides = readOverrides();
+    lastCredit = { credit, overrides };
     const global = sha1(JSON.stringify([BOARD_PROJECTION_VERSION, opts.codeVersion ?? "", crossCount, crossSeq, githubGeneration(), sha1(overrides)]));
     const stampOf = (id: string, task?: Task): string =>
-      `${global}|${task ? hashTask(task) : "-"}|${taskCount.get(id) ?? 0}:${taskSeq.get(id) ?? 0}|${credit[id] ? sha1(JSON.stringify(credit[id])) : "-"}`;
+      `${global}|${task ? hashTask(task) : "-"}|${taskCount.get(id) ?? 0}:${taskSeq.get(id) ?? 0}:${taskActivitySeq.get(id) ?? 0}|${credit[id] ? sha1(JSON.stringify(credit[id])) : "-"}`;
     return { plan, credit, overrides, stampOf };
   }
 
@@ -448,6 +504,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     },
     projections: () => new Map([...held].map(([id, h]) => [id, h.projection])),
     rows: () => rows,
+    creditRead: () => lastCredit,
     oracle(): BoardOracleResult {
       ingest();
       const { plan, credit, overrides, stampOf } = inputs();

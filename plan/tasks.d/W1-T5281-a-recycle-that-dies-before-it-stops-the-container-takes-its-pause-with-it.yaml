@@ -1,0 +1,39 @@
+- id: W1-T5281
+  title: "A RECYCLE THAT DIES BEFORE IT STOPS THE CONTAINER TAKES ITS PAUSE WITH IT — a recycle run over SSH died with its session mid-wait and left state/PAUSE behind, freezing reviews and dispatch for the whole fleet"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  origin: "operator session 2026-10-02: the 14:00Z core recycle"
+  files: [deploy/recycle-container.sh, test/a-recycle-that-dies-before-it-stops-the-container-takes-its-pause-with-it.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    On 2026-10-02 `deploy/recycle-container.sh --instance core` was started over SSH at 14:00:01Z,
+    wrote state/PAUSE at 14:00:56Z and began its bounded wait for in-flight workers. The SSH session
+    disconnected at 14:26:55Z ("disconnected by user"); the script died mid-wait. Its only trap is
+    `trap recycle_cleanup_tmp EXIT`, which cleans temp files, so the PAUSE it wrote stayed. The
+    daemon held every sweep (`daemon.sweep.retrigger_held`, `daemon.sweep_light.held`), so no review
+    started and nothing dispatched, until an operator re-ran the recycle detached at 14:29Z. The
+    host's automatic recycle could not help: it was backing off after a failed deploy. Green PRs sat
+    unreviewed throughout. The same leftover appeared on 2026-09-26 (state/PAUSE.aborted-recycle-1001828,
+    renamed aside by hand).
+  design: |
+    While the script is in its pause-and-wait phase (PAUSE written, old container not yet stopped), a
+    HUP, INT or TERM removes the PAUSE through the existing remove-only-if-ours helper (the W1-T4197
+    guard: only the exact body this run wrote) and exits non-zero with a line naming the signal.
+    Once the old container has been stopped, a signal leaves PAUSE engaged, as the script already does
+    for a failed stop, because no replacement is running yet. The EXIT trap keeps cleaning temp files.
+    The usage comment also says to run the script detached (nohup/setsid) when invoked over SSH.
+    deploy/ scripts run by the operator from the checkout ship on merge; no image rebuild is needed.
+  acceptance:
+    - claim: "a recycle signalled during its wait removes the PAUSE it wrote, and one signalled after stopping the container leaves PAUSE engaged"
+      proof: "unit test: test/a-recycle-that-dies-before-it-stops-the-container-takes-its-pause-with-it.test.ts"
+  falsifier: |
+    Run the script against a fixture state dir with a stubbed docker and an in-flight lock, send HUP
+    during the wait: state/PAUSE is gone (today it stays). Send HUP after the stub reports the
+    container stopped: state/PAUSE remains.

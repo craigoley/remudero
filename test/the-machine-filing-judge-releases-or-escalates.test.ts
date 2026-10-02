@@ -677,7 +677,7 @@ test("released work dispatches costliest first and unpriced work mid-queue", asy
   assert.equal(costPriority(15, pop), 4);
   assert.equal(costPriority(27), UNPRICED_PRIORITY, "a cost with no peers sits mid-band");
   const reviewer = { cause: { kind: "check", name: "reviewer-unmet" }, minutes: 465.7, rounds: 40, prs: 30 } as never;
-  const friction = ciFrictionShardYaml(reviewer, "W1-T9200", [reviewer, { minutes: 33.9 } as never]);
+  const friction = ciFrictionShardYaml({ price: reviewer, rung: 1, owner: { files: ["src/run-task.ts"], why: [] }, rounds: [] }, "W1-T9200", [reviewer, { minutes: 33.9 } as never]);
   assert.match(friction, new RegExp(`^ {2}priority: ${costPriority(465.7, [465.7, 33.9])}$`, "m"), "ci-friction prices its PR minutes");
   const lesson = ciLearningShardYaml({ findingId: "ci-learning:1:ci-gate", title: "t", gate: "ci-gate", pr: 1, prs: Array.from({ length: 36 }, (_, i) => i + 1), repairFiles: [], dominantRepairFiles: [], author_class: "machine", verify: "human", remedySurface: "learnings/*.yaml" }, "W1-T9201", [36, 10]);
   assert.match(lesson, new RegExp(`^ {2}priority: ${costPriority(36, [36, 10])}$`, "m"), "the CI-learning rung prices its occurrences");
