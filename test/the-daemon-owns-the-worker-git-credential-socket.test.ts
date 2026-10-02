@@ -23,6 +23,7 @@ import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/iso
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import {
   daemonGitCredentialSocketPath,
+  realScopedMint,
   secretBoundaryEnv,
   startDaemonGitCredentialSocket,
   type ScopedTokenMint,
@@ -157,15 +158,16 @@ type DaemonObservation = {
   taskOpts?: Record<string, unknown>;
   sweepArgs?: unknown[];
   mintedFor: string[];
+  cleanupErrors: string[];
 };
 
 /** Drive the real `daemonCommand` once. `armed` false is an App-unconfigured host. */
-async function driveDaemon(armed: boolean): Promise<DaemonObservation> {
+async function driveDaemon(armed: boolean, damageSocketOnStop = false): Promise<DaemonObservation> {
   const { home, root, planPath } = daemonHome();
   const oldHome = process.env.HOME;
   process.env.HOME = home;
   const socketPath = daemonGitCredentialSocketPath(join(root, "state"));
-  const observation: DaemonObservation = { code: -1, root, socketPath, mintedFor: [] };
+  const observation: DaemonObservation = { code: -1, root, socketPath, mintedFor: [], cleanupErrors: [] };
   let settle!: () => void;
   const ready = new Promise<void>((resolve) => (settle = resolve));
   const mint: ScopedTokenMint = async (repo) => {
@@ -184,6 +186,10 @@ async function driveDaemon(armed: boolean): Promise<DaemonObservation> {
       };
     }
     await deps.runOne("T-GIT-CRED");
+    if (damageSocketOnStop) {
+      rmSync(socketPath);
+      mkdirSync(socketPath);
+    }
     return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
   };
   try {
@@ -204,6 +210,10 @@ async function driveDaemon(armed: boolean): Promise<DaemonObservation> {
     observation.existedBeforeReady = existsSync(socketPath);
     settle();
     observation.code = await run;
+    const ledgerPath = join(root, "state", "ledger.ndjson");
+    if (existsSync(ledgerPath)) {
+      observation.cleanupErrors = readFileSync(ledgerPath, "utf8").split("\n").filter((line) => line.includes("git credential socket did not close"));
+    }
     return observation;
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
@@ -349,6 +359,30 @@ test("task and fix workers both receive the daemon git credential socket", async
   const again = await spawnWorker({ ...spawnArgs(scratch, cwd, {}), secretBoundary: { credentialHelperSocketPath: fixSocket } });
   assert.equal(again.credentialHelperUnwired, undefined, "a worktree already routed to this socket is not reported unwired");
   rmSync(scratch, { recursive: true, force: true });
+});
+
+test("the daemon sweep builds its fix effects with the active git socket", async () => {
+  const root = scratchDir("sweep-socket");
+  mkdirSync(join(root, "state"), { recursive: true });
+  const gh = ghShim([{ when: "", stdout: "[]" }], { kind: "sweep-socket" });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${gh.dir}:${previousPath}`;
+  const rows: string[] = [];
+  try {
+    const hook = buildSweepHook(
+      "acme", "widgets", { root, claudeBin: "/bin/true" } as Config,
+      join(root, "state", "ledger.ndjson"), "SOCKET-SWEEP", { tasks: [], byId: new Map() },
+      (step) => rows.push(step),
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, join(root, "state", "git-credential", "helper.sock"),
+    );
+    await hook();
+    assert.equal(rows.includes("sweep.error"), false, "the active-socket sweep reaches its normal completion path");
+  } finally {
+    process.env.PATH = previousPath;
+    rmSync(gh.dir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // ── (3) a scoped token, minted per request, held by no env and no file ──────────────────────────
@@ -530,6 +564,69 @@ test("a pathless or refused git credential request mints nothing broader", async
   }
 });
 
+test("the production socket mint adapter returns only the scoped exchange result", async () => {
+  const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  const mint = realScopedMint((step, fields) => rows.push({ step, fields }), async (repo, ttlMs, opts) => {
+    assert.equal(repo, "acme/widgets");
+    assert.equal(ttlMs, 10 * 60_000);
+    opts?.log?.("github_app.scoped_token_minted", { repo });
+    return { ok: true, token: "SCOPED-ONLY" };
+  });
+  assert.deepEqual(await mint("acme/widgets"), { ok: true, token: "SCOPED-ONLY" });
+  assert.deepEqual(rows, [{ step: "github_app.scoped_token_minted", fields: { repo: "acme/widgets" } }]);
+});
+
+test("a failed daemon socket ledger write stays visible and does not kill the socket", async () => {
+  const stateDir = scratchDir("ledger-failure");
+  const originalWrite = process.stderr.write;
+  const stderr: string[] = [];
+  process.stderr.write = ((chunk: string) => { stderr.push(String(chunk)); return true; }) as typeof process.stderr.write;
+  let socket: Awaited<ReturnType<typeof startDaemonGitCredentialSocket>>;
+  try {
+    socket = await startDaemonGitCredentialSocket({ ready: Promise.resolve(), stateDir, log: () => { throw new Error("ledger unavailable"); } });
+    assert.ok(socket);
+    assert.equal(await socketRoundTrip(socket.socketPath, "protocol=https\nhost=github.com\npath=acme/widgets.git\n\n"), "");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.ok(stderr.some((line) => line.includes("ledger write failed: Error: ledger unavailable")));
+  } finally {
+    await socket?.close();
+    process.stderr.write = originalWrite;
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("a thread that cannot bind reports startup failure and leaves no worker socket", async () => {
+  const stateDir = join(scratchDir("bind-failure"), "x".repeat(110));
+  const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  try {
+    const socket = await startDaemonGitCredentialSocket({
+      ready: Promise.resolve(), stateDir, log: (step, fields) => rows.push({ step, fields }),
+    });
+    assert.equal(socket, undefined);
+    assert.ok(rows.some((row) => row.step === "boundary.request" && String(row.fields.reason).includes("did not start")));
+    assert.equal(existsSync(daemonGitCredentialSocketPath(stateDir)), false);
+  } finally {
+    rmSync(join(stateDir, ".."), { recursive: true, force: true });
+  }
+});
+
+test("a startup failure also reports a failed socket cleanup", async () => {
+  const stateDir = scratchDir("close-failure");
+  const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  try {
+    const socket = await startDaemonGitCredentialSocket({
+      ready: Promise.resolve(), stateDir, log: (step, fields) => rows.push({ step, fields }),
+      mint: async () => ({ ok: false, reason: "unused" }),
+      socketStarter: async ({ socketPath }) => ({ socketPath, close: async () => { throw new Error("close unavailable"); } }),
+    });
+    assert.equal(socket, undefined);
+    assert.ok(rows.some((row) => String(row.fields.reason).includes("git credential socket did not start")));
+    assert.ok(rows.some((row) => String(row.fields.reason).includes("socket did not close: Error: close unavailable")));
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 // ── (7) normal shutdown closes the socket and removes its path ──────────────────────────────────
 
 test("the daemon git credential socket is removed on shutdown", async () => {
@@ -549,4 +646,10 @@ test("the daemon git credential socket is removed on shutdown", async () => {
   await socket.close();
   assert.equal(existsSync(stale), false);
   rmSync(stateDir, { recursive: true, force: true });
+});
+
+test("the daemon records socket cleanup failure on normal shutdown", async () => {
+  const seen = await driveDaemon(true, true);
+  assert.equal(seen.code, 0);
+  assert.ok(seen.cleanupErrors.some((line) => line.includes("git credential socket did not close")));
 });

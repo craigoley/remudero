@@ -368,9 +368,9 @@ function rowFields(row: BoundaryLedgerRow): Record<string, unknown> {
   return { host: row.host, decision: row.decision, status: row.status, reason: row.reason };
 }
 
-function realScopedMint(log: DaemonLog): ScopedTokenMint {
+export function realScopedMint(log: DaemonLog, mint: typeof mintScopedToken = mintScopedToken): ScopedTokenMint {
   return async (repo) => {
-    const minted = await mintScopedToken(repo, SCOPED_TOKEN_TTL_MS, { log: (step, extra) => log(step, extra ?? {}) });
+    const minted = await mint(repo, SCOPED_TOKEN_TTL_MS, { log: (step, extra) => log(step, extra ?? {}) });
     return minted.ok && minted.token
       ? { ok: true, token: minted.token }
       : { ok: false, reason: minted.reason ?? "mint returned no token" };
@@ -452,6 +452,7 @@ export async function startDaemonGitCredentialSocket(opts: {
   log: DaemonLog;
   mint?: ScopedTokenMint;
   threadUrl?: URL;
+  socketStarter?: typeof startCredentialHelperSocket;
 }): Promise<CredentialHelperSocketHandle | undefined> {
   if (!opts.ready) return undefined;
   await opts.ready;
@@ -466,7 +467,7 @@ export async function startDaemonGitCredentialSocket(opts: {
     mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 });
     chmodSync(dirname(socketPath), 0o700);
     handle = opts.mint
-      ? await startCredentialHelperSocket({ socketPath, mint: opts.mint, log: ledgerRow })
+      ? await (opts.socketStarter ?? startCredentialHelperSocket)({ socketPath, mint: opts.mint, log: ledgerRow })
       : await startSocketThread(socketPath, opts.log, opts.threadUrl ?? new URL(import.meta.url));
     chmodSync(socketPath, 0o600);
   } catch (err) {
