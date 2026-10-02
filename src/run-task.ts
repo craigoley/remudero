@@ -33570,7 +33570,7 @@ export async function daemonCommand(
   };
   const buildSweepHook: DaemonSweepHookBuilder = (...args) => withGoalRemeasurement(
     (deps.buildSweepHook ?? daemonDefaultBuildSweepHook)(...args),
-    () => remeasureSettledGoals({ repoRoot: targetCheckoutRoot, stateDir: join(config.root, "state"),
+    () => remeasureSettledGoals({ repoRoot: target.isSelf ? effectiveRepoRoot : targetCheckoutRoot, stateDir: join(config.root, "state"),
       tasks: activePlanRef.current.tasks, settled: (id) => lastProj?.get(id)?.indeterminate ? undefined : lastProj?.get(id)?.merged,
       log }), log);
   const buildSweepLightHook: DaemonSweepLightHookBuilder = deps.buildSweepLightHook ?? daemonDefaultBuildSweepLightHook;

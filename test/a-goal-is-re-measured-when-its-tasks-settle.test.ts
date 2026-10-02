@@ -1,15 +1,63 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "yaml";
 import { loadGoals, measureGoal, remeasureSettledGoals, withGoalRemeasurement, type GoalRecord } from "../src/lib/goals.js";
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock, systemClock } from "../src/lib/clock.js";
 import { buildGather, renderGather } from "../src/lib/retro.js";
 import { parseTasksFromYaml, type Task } from "../src/lib/plan.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
 import { deriveAnalyticsSnapshot, deriveAnalyticsSnapshotFromCheckpointedLedger, buildAnalyticsRoute } from "../src/lib/analytics-route.js";
+import { daemonCommand } from "../src/run-task.js";
+import { buildBatchedGithub } from "../src/lib/status.js";
+
+test("the daemon measures settled goals after its existing sweep and retains one durable observation", async () => {
+  const home = mkdtempSync(join(tmpdir(), "rmd-goal-daemon-wiring-"));
+  const root = join(home, "Remudero");
+  const previousHome = process.env.HOME;
+  const nowMs = systemClock.now();
+  const at = fixedClock(nowMs).iso();
+  const openedAt = fixedClock(nowMs - 300000).iso();
+  const order: string[] = [];
+  try {
+    mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+    writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+    mkdirSync(join(root, "plan", "goals.d"), { recursive: true });
+    writeFileSync(join(root, "plan", "goals.d", "G-flow.yaml"), stringify({ ...goal, tasks: ["W1-T1"] }));
+    const planPath = join(home, "tasks.yaml");
+    writeFileSync(planPath, stringify([{ id: "W1-T1", title: "goal fixture", repo: "remudero", depends_on: [], type: "implement",
+      verify: "auto", risk: "low", status: "queued", attempts: 0, files: ["src/a.ts"], acceptance: [{ claim: "fixture", proof: "unit test: fixture" }] }]));
+    writeLedger([{ step: "pr.opened", pr_url: "https://example.invalid/pull/1", ts: openedAt },
+      { step: "verdict.merged", pr_url: "https://example.invalid/pull/1", ts: at }], { dir: join(root, "state") });
+    process.env.HOME = home;
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      repoRoot: root,
+      githubFactory: (owner, repo) => buildBatchedGithub(owner, repo, { exec: args => args[1]?.includes("state=closed") && args[1]?.includes("page=1")
+        ? JSON.stringify([{ number: 1, state: "closed", merged: true, updated_at: at, head: { ref: "run-W1-T1-1", sha: "head" },
+          body: "Remudero-Task: W1-T1", title: "fixture", html_url: "https://github.com/craigoley/remudero/pull/1" }]) : "[]" }),
+      buildSweepHook: () => async () => { order.push("sweep"); },
+      buildSweepLightHook: () => async () => {},
+      wireSweepWake: () => ({ sleep: async () => "timeout" as const, acknowledge: () => {}, close: () => {} }),
+      runDaemon: async (_plan, wired) => {
+        await wired.refreshMerged?.();
+        await wired.sweep?.();
+        const first = JSON.parse(readFileSync(join(root, "state", "goal-remeasurements.json"), "utf8"));
+        assert.deepEqual(order, ["sweep"]);
+        assert.equal(first["G-flow"].step, "goal.moved");
+        assert.equal(first["G-flow"].value, 5);
+        await wired.sweep?.();
+        assert.deepEqual(JSON.parse(readFileSync(join(root, "state", "goal-remeasurements.json"), "utf8")), first);
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+    });
+    assert.equal(code, 0);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
 
 const clock = fixedClock(Date.parse("2026-10-02T12:00:00Z"));
 const goal: GoalRecord = { id: "G-flow", symptom: "PRs wait", measurement: "pr-flow-minutes", direction: "decrease",
