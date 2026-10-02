@@ -340,6 +340,8 @@ test("daemon pause: the heartbeat records that a pause has been seen while the b
 });
 
 test("W1-T4191: the in-flight light sweep admits no worker while a pause holds", async () => {
+  // W1-T5343 narrowed this: under PAUSE the ticker may run ONE review-only pass (a review needs no lane,
+  // worktree or lock), but never a pass that could admit a fix or requeue.
   const plan = fixturePlan();
   const merged = new Set<string>();
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}daemon-pause-light-sweep-`));
@@ -351,6 +353,7 @@ test("W1-T4191: the in-flight light sweep admits no worker while a pause holds",
   let paused = false;
   let lightBeforePause = 0;
   let lightWhilePaused = 0;
+  let reviewOnlyWhilePaused = 0;
   let sleeps = 0;
   const sleep: DaemonDeps["sleep"] = async () => {
     sleeps++;
@@ -371,9 +374,10 @@ test("W1-T4191: the in-flight light sweep admits no worker while a pause holds",
         merged.add(id);
         return okResult(id);
       },
-      sweepLight: async () => {
-        if (paused) lightWhilePaused++;
-        else lightBeforePause++;
+      sweepLight: async (scope) => {
+        if (!paused) lightBeforePause++;
+        else if (scope?.reviewOnly !== true) lightWhilePaused++;
+        else reviewOnlyWhilePaused++;
       },
       checkStop: () => stopDetail(root),
       checkPause: () => pauseDetail(root),
@@ -384,10 +388,11 @@ test("W1-T4191: the in-flight light sweep admits no worker while a pause holds",
   );
   assert.deepEqual(s.merged, ["A"], "the admitted batch still drains under the pause");
   assert.ok(lightBeforePause >= 1, `control: the ticker ran the light sweep before the pause (saw ${lightBeforePause})`);
-  assert.equal(lightWhilePaused, 0, "no light-sweep pass, and so no fix or review admission, ran while the pause held");
+  assert.equal(lightWhilePaused, 0, "no pass that could admit a fix or requeue ran while the pause held");
+  assert.ok(reviewOnlyWhilePaused >= 1, `the pause still judged finished work with a review-only pass (saw ${reviewOnlyWhilePaused})`);
   assert.ok(
-    lines.some((l) => l.step === "daemon.sweep_light.held" && l.extra.phase === "dispatch"),
-    "the withheld pass is named on the ledger, the same way the full-sweep retrigger names its hold",
+    lines.some((l) => l.step === "daemon.sweep_light.review_only" && l.extra.phase === "dispatch"),
+    "the review-only pass is named on the ledger",
   );
 });
 
