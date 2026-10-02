@@ -574,6 +574,8 @@ interface Shown {
   sortedBy: Map<string, string | undefined>;
   /** Each queued pull request's `sweep.disposed` row the body's disposition came from. */
   disposedAt: Map<number, string | undefined>;
+  /** The credit store and overrides the board projection read: files, so legacy replays them rather than reading later ones. */
+  credit: ReturnType<BoardProjection["creditRead"]>;
 }
 
 /** The day's cost rows `computeGlanceSpend` adds into `spendTodayUsd`. */
@@ -774,7 +776,7 @@ export function createNowView(opts: NowViewOptions): {
       const data = assembleNowView({ instance: instance.name, snapshot, rows, plan: b.plan!, recent: computeRecentActivity(depsOf(instance, b), h.recent, 20), health: h.probe!.health, decisions: b.decisions!, nowMs: now });
       Object.assign(h, { generation: state.generation, planKey: b.keys.plan, at: now, decisionsKey: b.keys.decisions });
       shown.set(data, { plan: b.plan!, planKey: b.keys.plan, gateway: b.gateway!, probe: h.probe!, builtMs: now, members: nowCountMembers(snapshot.tasks), spend: dayCostRows(rows, now),
-        sortedBy: new Map(snapshot.tasks.map((t) => [t.taskId, t.lastActivityAt])), disposedAt: new Map(snapshot.prQueue.rows.map((r) => [r.prNumber, r.observedAt])) });
+        sortedBy: new Map(snapshot.tasks.map((t) => [t.taskId, t.lastActivityAt])), disposedAt: new Map(snapshot.prQueue.rows.map((r) => [r.prNumber, r.observedAt])), credit: h.board.creditRead() });
       const sources: ViewSource[] = [
         ...(opts.ledgerSource ? [opts.ledgerSource(state, now)] : []),
         judgeSource({ name: `github:${instance.name}`, ...b.gateway!.source }, now),
@@ -864,7 +866,8 @@ export function createNowView(opts: NowViewOptions): {
       rowsPass.complete();
       costsPass.complete();
       const rows = board.rows;
-      const deps = { plan: built.plan, ledgerPath, github: built.gateway.github, readLedger: () => rows, now: () => now };
+      const deps = { plan: built.plan, ledgerPath, github: built.gateway.github, readLedger: () => rows, now: () => now,
+        readCreditStore: () => built.credit.credit, readCreditOverrideFile: () => built.credit.overrides };
       const snapshot = computeBoardSnapshot(deps);
       const decisions: NowDecisionsData = { decisions: mine.decisions, ...(mine.decisionsMore ? { decisionsMore: mine.decisionsMore } : {}), ...(mine.decisionsReasons ? { decisionsReasons: mine.decisionsReasons } : {}) };
       const legacy = assembleNowView({ instance: name, snapshot, rows, plan: built.plan, recent: [], health: mine.health, decisions, nowMs: now });
