@@ -24,7 +24,6 @@
  *    third failed rung goes to a person instead of a fourth task.
  */
 import { fixedClock } from "./clock.js";
-import { slug as kebabSlug } from "./feedback-docket.js";
 
 /** The fields of one priced round this module reads. */
 export interface RemedyRound {
@@ -295,13 +294,6 @@ export function ciFrictionEvidence(rounds: readonly RemedyRound[], causeKey: str
     .filter((r) => (seen.has(r.pr) ? false : (seen.add(r.pr), true)))
     .slice(0, limit)
     .map((r) => ({ pr: r.pr, at: r.at!, detail: (r.detail ?? "").slice(0, 200) }));
-}
-
-/** The test file a drafted remedy declares for its own regression test. */
-export function ciFrictionRemedyTestPath(taskId: string, key: string): string {
-  const bare = key.replace(/^(check|fix_refusal|main_merge|conflict):/, "");
-  const stem = bare ? kebabSlug(bare, 48).replace(/-+$/, "") : "friction";
-  return `test/${taskId.toLowerCase()}-${stem}-is-prevented.test.ts`;
 }
 
 /** The rationale a drafted remedy carries: the cause, its evidence, its owner and its history. */

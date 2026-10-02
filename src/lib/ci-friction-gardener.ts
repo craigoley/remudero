@@ -18,7 +18,6 @@ import {
   ciFrictionCauseState,
   ciFrictionEvidence,
   ciFrictionRemedyRationale,
-  ciFrictionRemedyTestPath,
   ciFrictionRungOrigin,
   locateCiFrictionOwner,
   parseCiFrictionOrigin,
@@ -537,9 +536,16 @@ export interface CiFrictionDraft {
   prior?: Extract<CiFrictionCauseState, { state: "draft" }>["prior"];
 }
 
-/** The `unit test:` title a drafted remedy's regression test must carry — literal, task-scoped. */
+/** The title a drafted remedy's regression test must carry — task-scoped, and never containing " in ",
+ *  which would split its `grep:` proof at the wrong place. */
 export function ciFrictionRemedyTestTitle(taskId: string, key: string): string {
-  return `${taskId}: ${key} is prevented, not retried`;
+  return `${taskId}: ${key.replace(/ in /g, " within ")} is prevented, not retried`;
+}
+
+/** The slug a drafted shard's filename and its regression test share. Equal names are what make the
+ *  test the shard's OWN falsifier to the sizing rule, so a remedy is one owner file plus its test. */
+export function ciFrictionShardStem(key: string): string {
+  return kebabSlug(key, CI_FRICTION_SLUG_MAX).replace(/-+$/, "");
 }
 
 /** Render ONE draft as a single-element YAML task list — the shard file's whole contents. It names the
@@ -548,17 +554,19 @@ export function ciFrictionShardYaml(draft: CiFrictionDraft, taskId: string, pric
   const { price, rung, owner } = draft;
   const key = ciFrictionCauseKey(price.cause);
   const origin = ciFrictionRungOrigin(key, rung);
-  const testPath = ciFrictionRemedyTestPath(taskId, key);
+  const testPath = `test/${ciFrictionShardStem(key)}.test.ts`;
   // The shared machine-filing path (operator ruling 2026-09-29): the header, verify and risk are its.
   return renderMachineShard({
     taskId,
     title: `THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — ${key} cost ${price.minutes} PR minute(s) across ${price.rounds} round(s) on ${price.prs} pull request(s)${rung > 1 ? `, and rung ${rung - 1}'s remedy did not move it` : ""}`,
     origin,
-    files: [...owner.files, testPath],
+    // One owner file: the most implicated. The rationale names every candidate the search found.
+    files: [owner.files[0]!, testPath],
     cost: price.minutes,
     costPopulation: priced.map((p) => p.minutes),
     acceptance: [
-      { claim: `the harness no longer spends a fix round on ${key}`, proof: `unit test: ${ciFrictionRemedyTestTitle(taskId, key)}` },
+      // A forward reference: the build writes this test, so the proof greps for its declaration.
+      { claim: `the harness no longer spends a fix round on ${key}`, proof: `grep: test("${ciFrictionRemedyTestTitle(taskId, key)}" in ${testPath}` },
     ],
     note: `Filed by the ci-friction gardener (W1-T4435) at rung ${rung}. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures ${key}'s share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung ${rung + 1}.`,
     rationale: ciFrictionRemedyRationale({
@@ -847,7 +855,7 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       );
       const verdict = ciFrictionRecordVerdict(contents, `ci-friction:${taskId}`);
       if (!verdict.ok) throw new Error(`ci-friction gardener: drafted record failed lint (${verdict.reason})`);
-      const stem = kebabSlug(ciFrictionCauseKey(action.price.cause), CI_FRICTION_SLUG_MAX).replace(/-+$/, "");
+      const stem = ciFrictionShardStem(ciFrictionCauseKey(action.price.cause));
       const shardDir = join(resolveRepoLayout(ws.root).planDir, "tasks.d");
       const shardPath = join(shardDir, `${taskId}${stem ? `-${stem}` : ""}.yaml`);
       const relPath = relative(ws.root, shardPath);
