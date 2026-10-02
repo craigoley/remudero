@@ -62,7 +62,7 @@ export function readCiFrictionHandFixes(
         if (!Number.isSafeInteger(row.number) || typeof row.updated_at !== "string" || !Number.isFinite(Date.parse(row.updated_at)))
           throw new Error("hand-fix PR list has an invalid identity or timestamp");
         if (!/^run-unfiled-/.test(row.head?.ref ?? "") || !/^fix(?:\([^)]*\))?!?:/.test(row.title ?? "") || !row.merged_at) continue;
-        const at = Date.parse(row.merged_at);
+        const at = Date.parse(row.merged_at); // expiring-fixture: exempt -- tests inject Clock and exercise both window boundaries
         if (!Number.isFinite(at) || at < since || at > clock.now()) continue;
         if (!/^[0-9a-f]{40}$/.test(row.merge_commit_sha ?? "")) throw new Error(`hand-fix PR #${row.number} has no merge commit`);
         const files = run("git", ["diff-tree", "--no-commit-id", "--name-only", "-r", row.merge_commit_sha])
