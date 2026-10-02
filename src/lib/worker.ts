@@ -1,5 +1,5 @@
 import { connect as connectTcp, createServer as createTcpServer, type Socket, type Server } from "node:net";
-import { Agent as HttpAgent, createServer as createHttpServer, request as httpRequest, type OutgoingHttpHeaders } from "node:http";
+import { Agent as HttpAgent, createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createRequire } from "node:module";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { fetchOriginRetryingRefLock, type GitRunner } from "./git-fetch-retry.js";
@@ -6380,8 +6380,15 @@ export async function startWorkerEgressProxy(
     if (target.protocol !== "http:" || target.username || target.password || !permits(target.hostname, port)) {
       res.writeHead(403).end("egress denied"); return;
     }
-    const headers: OutgoingHttpHeaders = { ...req.headers, host: target.host };
-    for (const name of ["proxy-authorization", "proxy-connection", "connection", "upgrade", ...(String(req.headers.connection ?? "").split(",").map(h => h.trim().toLowerCase()))]) delete headers[name];
+    // Hop-by-hop and proxy headers never travel upstream. Built as a flat name/value list from the raw
+    // headers, so no object property is ever written under a name the client chose.
+    const hop = new Set(["host", "proxy-authorization", "proxy-connection", "connection", "upgrade",
+      ...String(req.headers.connection ?? "").split(",").map(h => h.trim().toLowerCase())]);
+    const headers: string[] = [];
+    for (let i = 0; i + 1 < req.rawHeaders.length; i += 2) {
+      if (!hop.has(req.rawHeaders[i]!.toLowerCase())) headers.push(req.rawHeaders[i]!, req.rawHeaders[i + 1]!);
+    }
+    headers.push("Host", target.host);
     const agent = new HttpAgent();
     agent.createConnection = () => dial(target.hostname, port);
     const upstream = httpRequest({

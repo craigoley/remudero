@@ -2,8 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, relative, resolve } from "node:path";
 // `configPath()` resolves `<homedir()>/.config/remudero/config.json` through the same reader the
 // config file itself is read by. Called from the orchestrator's own process, before any worker's
 // HOME is redirected, so it reads the operator's REAL home, never a worker's scratch one.
