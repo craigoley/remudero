@@ -36,6 +36,7 @@ import { loadPlanFromYaml } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { mergeFeedbackRecord } from "./feedback-record-merge.js";
+import { PlanPrPreflightRefusedError, planPrPreflightAtCommit, refuseRedPlanPr, type PlanPrPreflightResult } from "./plan-pr-emitter.js";
 
 /**
  * Mirrors measurement-cadence.ts's `CiLearningShardDraft`/`CiLearningFiledShard`/
@@ -152,6 +153,11 @@ export interface LandFeedbackOpts {
   /** Test seam for preserving the self/core identity without reading the caller's cwd. */
   sourceRepository?: LandingRepository;
   requestReview?: LandingReviewRequest;
+  /** Ledger writer for the plan-PR preflight's `plan_pr.preflight_*` lines (W1-T5348). */
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+  /** W1-T5348: the plan-PR preflight over the commit about to be pushed. Real callers omit it and get
+   *  {@link planPrPreflightAtCommit} on this checkout; a test injects one. */
+  planPrPreflight?: (commitSha: string, pr: { title: string; body: string }) => PlanPrPreflightResult;
 }
 
 export interface LandFeedbackResult {
@@ -186,6 +192,10 @@ export interface LandFeedbackResult {
 }
 
 const ACKNOWLEDGEMENT_PATH_LIMIT = 50;
+
+/** W1-T5348: trees the plan-PR preflight refused, by tree sha — a poll over unchanged content is refused from here
+ *  instead of materializing and re-checking the same tree every pass. */
+const refusedPlanPrTrees = new Map<string, PlanPrPreflightResult>();
 
 function defaultGit(root: string): GitExec {
   return (args, opts) =>
@@ -784,8 +794,10 @@ function finishLanding(
   build: LandingTreeBuild,
   rebuild: () => LandingTreeBuild,
   env: NodeJS.ProcessEnv,
-  requestReview?: LandingReviewRequest,
+  root: string,
+  opts: LandFeedbackOpts,
 ): LandFeedbackResult {
+  const requestReview = opts.requestReview;
   // W1-T3561: fold a build's refusals onto a result — never onto the tree/files it names, so a
   // refused record can never ride into an armed auto-merge PR by construction (criterion 4).
   const withRefused = (result: LandFeedbackResult, refused: FeedbackRefusal[]): LandFeedbackResult =>
@@ -823,6 +835,12 @@ function finishLanding(
     // value the union above was read against. The #954 guard below must move WITH this call on
     // any future refactor — dropping it silently reopens the hole #954 closed.
     assertLiveWriteAllowed("git-push", `force-pushing the ${kind.branch} branch`);
+    // W1-T5348: preflight the commit about to be pushed on its OWN tree — this checkout's HEAD is not it, which is
+    // why the pre-push hook never could. A tree already refused is refused again without re-running the checks.
+    const preflight = opts.planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommit(root, sha, pr));
+    const verdict = refusedPlanPrTrees.get(b.treeSha) ?? preflight(commitSha, { title: kind.prTitle, body: kind.prBody(b.unlanded) });
+    if (!verdict.ok) refusedPlanPrTrees.set(b.treeSha, verdict);
+    refuseRedPlanPr(verdict, { lane: `${kind.family}-landing`, branch: kind.branch, log: opts.log });
     const lease = b.branchTipSha
       ? `--force-with-lease=refs/heads/${kind.branch}:${b.branchTipSha}`
       : `--force-with-lease=refs/heads/${kind.branch}:`;
@@ -832,6 +850,7 @@ function finishLanding(
   try {
     pushOnce(build);
   } catch (firstErr) {
+    if (firstErr instanceof PlanPrPreflightRefusedError) return withRefused({ landed: false, files: [], error: firstErr.message }, build.refused);
     // Lost the lease: some OTHER owner's tip moved since we read it. Re-derive the union ONCE
     // against the NEW tip rather than force-replacing a tip we never read — the defect this task
     // fixes (W1-T3560 design (i)).
@@ -848,6 +867,7 @@ function finishLanding(
     try {
       pushOnce(retried);
     } catch (secondErr) {
+      if (secondErr instanceof PlanPrPreflightRefusedError) return withRefused({ landed: false, files: [], error: secondErr.message }, retried.refused);
       // The ref moved again even under the retry (a third writer squeezed in) — refuse rather
       // than force-replacing a tip this call never actually read. Surfaced via `error`, never
       // swallowed, and `ensurePrOpen` is never reached — auto-merge is never armed on a refusal.
@@ -966,7 +986,7 @@ function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): La
       return buildTree(git(["rev-parse", "origin/main"]).trim());
     };
 
-    return withAcknowledgement(finishLanding(kind, git, gh, initialBuild, rebuild, env, opts.requestReview));
+    return withAcknowledgement(finishLanding(kind, git, gh, initialBuild, rebuild, env, root, opts));
   } catch (e) {
     return withAcknowledgement({ landed: false, files: [], error: String((e as Error)?.message ?? e) });
   } finally {
@@ -1009,6 +1029,7 @@ export function sweepFeedbackLanding(root: string, opts: SweepFeedbackLandingOpt
   const result = landPending(root, landingKind(FEEDBACK_LANDING_KIND, root, landOpts, git), {
     ...landOpts,
     git,
+    log,
     reportAcknowledgement: true,
   });
   if (log) {
@@ -1143,7 +1164,7 @@ function landContent(
       return buildTree(git(["rev-parse", "origin/main"]).trim());
     };
 
-    return finishLanding(kind, git, gh, initialBuild, rebuild, env, opts.requestReview);
+    return finishLanding(kind, git, gh, initialBuild, rebuild, env, root, opts);
   } catch (e) {
     return { landed: false, files: [], error: String((e as Error)?.message ?? e) };
   } finally {
