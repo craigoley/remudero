@@ -598,7 +598,7 @@ export function deriveReviewState(
  */
 // Why: the once-a-minute cache-thrash incident this exclusion fixes —
 // docs/forensics/board.md#board_irrelevant_steps
-export const BOARD_IRRELEVANT_STEPS: ReadonlySet<string> = new Set(["daemon.alive", "board_gateway.fetch_bytes"]);
+export const BOARD_IRRELEVANT_STEPS: ReadonlySet<string> = new Set(["daemon.alive", "daemon.pulse", "board_gateway.fetch_bytes"]);
 
 /** The `step` of one already-parsed ledger row, or `undefined` when it carries none (a torn
  *  write). A row whose step cannot be read is treated as decision-relevant — unknown stays
