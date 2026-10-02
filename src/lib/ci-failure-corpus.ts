@@ -23,6 +23,7 @@
 
 import { REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, dedupeRollupByLatestAttempt, type RollupCheckEntry } from "./sweep.js";
 import { checkRunsRestArgs, combinedStatusRestArgs, rollupFromRest } from "./open-prs-rest.js";
+import type { LedgerLine } from "./ledger.js";
 
 /** A gate's identity is its check-run NAME or its status CONTEXT — `remudero-review` is the latter,
  *  and a reader that knows only the former is blind to it (see {@link CorpusCommit.rollup}). */
@@ -302,4 +303,111 @@ export function rollupAtSha(
     // A failed read is UNREADABLE, never green — the distinction `CiFailureCorpus.status` exists for.
     return undefined;
   }
+}
+
+export interface WorkerFailurePair {
+  taskId: string;
+  failureClass: string;
+  subclass?: string;
+  redSha?: string;
+  failedAt?: string;
+  greenSha?: string;
+  repairedAt?: string;
+  state: CiFailurePairState;
+}
+
+export interface WorkerFailureRecovery {
+  failureClass: string;
+  subclass?: string;
+  failures: number;
+  repaired: number;
+  open: number;
+  recoveryRate: number;
+}
+
+export interface WorkerFailureCorpus {
+  rowsScanned: number;
+  pairs: WorkerFailurePair[];
+  classes: WorkerFailureRecovery[];
+}
+
+const WORKER_PROOF_OUTCOMES = new Set([
+  "executed_pass", "executed_fail", "not_executable", "exec_error", "cannot_evaluate",
+  "executed_stale", "base_unreadable", "not_yet_built", "stale_self_path",
+]);
+
+function unmetSubclass(row: LedgerLine): string {
+  // Legacy proof_exec covers the whole review; modern verdicts identify visible unmet proofs.
+  const verdict = row.decision_verdict as { criteria?: unknown } | undefined;
+  const outcomes = Array.isArray(verdict?.criteria)
+    ? verdict.criteria.filter((c) => c?.met === false && !c.holdout)
+      .map((c) => typeof c.proof_skip === "string" ? `${c.proof_exec}/${c.proof_skip}` : c.proof_exec)
+    : row.proof_exec;
+  if (!Array.isArray(outcomes)) return "unknown";
+  const classified = outcomes.map((o) =>
+    typeof o === "string" && WORKER_PROOF_OUTCOMES.has(o.split("/")[0]) ? o : "unknown");
+  return [...new Set(classified)].sort().join("+") || "unknown";
+}
+
+function workerRowTime(row: LedgerLine): number {
+  const time = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+  return Number.isFinite(time) ? time : Infinity;
+}
+
+function workerRowScope(row: LedgerLine): string {
+  return JSON.stringify([row.repo ?? null, row.task_id, row.pr_url ?? null]);
+}
+
+/** W1-T4015: one pair per classified review failure row; rates describe supplied rows only.
+ * Supply the ledger union. Missing dates or heads stay open; open never asserts no repair exists. */
+export function collectWorkerFailureCorpus(rows: readonly LedgerLine[]): WorkerFailureCorpus {
+  const pairs: WorkerFailurePair[] = [];
+  const pending = new Map<string, WorkerFailurePair[]>();
+  const reviews = rows.filter((r) => r.step === "review.posted")
+    .sort((a, b) => workerRowTime(a) - workerRowTime(b));
+  for (const row of reviews) {
+    const time = workerRowTime(row);
+    const head = typeof row.head_sha === "string" && row.head_sha.trim() ? row.head_sha : undefined;
+    const scope = workerRowScope(row);
+    if (row.state === "success" && head && Number.isFinite(time)) {
+      const open = pending.get(scope) ?? [];
+      const remaining: WorkerFailurePair[] = [];
+      for (const pair of open) {
+        if (pair.redSha && head !== pair.redSha && pair.failedAt && time > Date.parse(pair.failedAt)) {
+          pair.state = "repaired";
+          pair.greenSha = head;
+          pair.repairedAt = row.ts as string;
+        } else remaining.push(pair);
+      }
+      pending.set(scope, remaining);
+    } else if (row.state === "failure" && typeof row.failure_class === "string" && row.failure_class.trim()) {
+      const pair: WorkerFailurePair = {
+        taskId: row.task_id, failureClass: row.failure_class,
+        ...(row.failure_class === "unmet_criteria" ? { subclass: unmetSubclass(row) } : {}),
+        ...(head ? { redSha: head } : {}),
+        ...(Number.isFinite(time) ? { failedAt: row.ts as string } : {}),
+        state: "open",
+      };
+      pairs.push(pair);
+      const open = pending.get(scope) ?? [];
+      open.push(pair);
+      pending.set(scope, open);
+    }
+  }
+  const groups = new Map<string, WorkerFailureRecovery>();
+  for (const pair of pairs) {
+    const key = JSON.stringify([pair.failureClass, pair.subclass]);
+    const group = groups.get(key) ?? {
+      failureClass: pair.failureClass,
+      ...(pair.subclass === undefined ? {} : { subclass: pair.subclass }),
+      failures: 0, repaired: 0, open: 0, recoveryRate: 0,
+    };
+    group.failures += 1;
+    group[pair.state === "repaired" ? "repaired" : "open"] += 1;
+    group.recoveryRate = group.repaired / group.failures;
+    groups.set(key, group);
+  }
+  const classes = [...groups.values()].sort((a, b) =>
+    a.failureClass.localeCompare(b.failureClass) || (a.subclass ?? "").localeCompare(b.subclass ?? ""));
+  return { rowsScanned: rows.length, pairs, classes };
 }
