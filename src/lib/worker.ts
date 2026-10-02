@@ -956,7 +956,7 @@ export interface SpawnWorkerArgs {
   permissionMode: PermissionMode;
   /** Path to the worker settings file (permissions + hooks + sandbox). */
   settingsFile: string;
-  /** W1-T1289: the per-spawn egress broker. `mode` defaults to `RMD_WORKER_EGRESS` (observe|enforce|off), else observe:
+  /** W1-T1289: the per-spawn egress broker. `mode` defaults to the worker-egress env var (observe|enforce|off), else observe:
    *  observe runs the worker WITHOUT the broker when it cannot be established and reports why, enforce refuses the
    *  spawn, off skips it. The two hooks are test seams; production checks the CLI and starts a real broker. */
   egress?: {
