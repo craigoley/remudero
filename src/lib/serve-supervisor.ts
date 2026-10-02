@@ -71,10 +71,12 @@ export interface ServeSupervisorOptions {
   spawn?: (command: GenerationCommand, env: Record<string, string>) => GenerationProcess;
   /** One HTTP GET over a generation's private socket. */
   get?: (socketPath: string, path: string) => Promise<{ status: number; body: string }>;
-  /** Free bytes in this container's memory cgroup, or undefined when unbounded or unreadable. */
+  /** Bytes this container's memory cgroup can still hold once its clean page cache is reclaimed, or undefined when unbounded or unreadable. */
   freeMemory?: () => number | undefined;
-  /** A generation's resident bytes, or undefined when unreadable. */
+  /** A generation's resident bytes now (VmRSS), or undefined when unreadable. */
   rss?: (pid: number) => number | undefined;
+  /** A generation's resident high-water mark (VmHWM), or undefined when unreadable. */
+  peakRss?: (pid: number) => number | undefined;
   handoffEnabled?: () => boolean;
   socketPathFor?: (generation: number) => string;
   log: (step: string, extra?: Record<string, unknown>) => void;
@@ -98,6 +100,8 @@ interface Generation {
   isAlive: () => boolean;
   /** It asked for a handoff before it was active; the ask is replayed once it is promoted. */
   asked: boolean;
+  /** It dropped its caches for a handoff that has not yet replaced it. */
+  shed?: boolean;
 }
 
 export interface ServeSupervisor {
@@ -111,7 +115,8 @@ export interface ServeSupervisor {
 export function generationCommand(serveArgs: string[]): (slot: PreparedSlot) => GenerationCommand {
   return (slot) => ({
     exec: join(slot.dir, "src", "run-task.ts"),
-    execArgv: ["--import", pathToFileURL(join(slot.dir, "node_modules", "tsx", "dist", "loader.mjs")).href],
+    // --expose-gc: a shed request must be able to collect what it dropped (serve-generation.ts onShedRequest).
+    execArgv: ["--expose-gc", "--import", pathToFileURL(join(slot.dir, "node_modules", "tsx", "dist", "loader.mjs")).href],
     args: serveArgs,
     cwd: slot.dir,
   });
@@ -147,7 +152,11 @@ export function socketGet(socketPath: string, path: string, timeoutMs = 30_000):
   });
 }
 
-/** cgroup v2 `memory.max − memory.current`; undefined when the limit is `max` or the files are absent. */
+/**
+ * cgroup v2 `memory.max` minus the bytes the kernel cannot reclaim: `memory.current` less the clean,
+ * non-shmem page cache in `memory.stat` (ledger reads), which the kernel drops before it would OOM.
+ * Without a readable `memory.stat` all of `memory.current` counts. Undefined when unbounded or absent.
+ */
 export function cgroupFreeMemory(read: (path: string) => string = (path) => readFileSync(path, "utf8"), root = "/sys/fs/cgroup"): number | undefined {
   let max: number;
   let current: number;
@@ -157,12 +166,24 @@ export function cgroupFreeMemory(read: (path: string) => string = (path) => read
   } catch {
     return undefined; // no cgroup v2 here (macOS, or a host process): headroom is not measurable, so nothing defers
   }
-  return Number.isFinite(max) && Number.isFinite(current) ? max - current : undefined;
+  if (!Number.isFinite(max) || !Number.isFinite(current)) return undefined;
+  return max - (current - reclaimableFileBytes(read, root));
 }
 
-export function procRss(pid: number, read: (path: string) => string = (path) => readFileSync(path, "utf8")): number | undefined {
+function reclaimableFileBytes(read: (path: string) => string, root: string): number {
+  let stat: string;
   try {
-    const kb = /^VmRSS:\s+(\d+)\s+kB/m.exec(read(`/proc/${pid}/status`))?.[1];
+    stat = read(join(root, "memory.stat"));
+  } catch {
+    return 0; // no breakdown: count every charged byte as held, the conservative reading
+  }
+  const field = (name: string): number => Number(new RegExp(`^${name} (\\d+)$`, "m").exec(stat)?.[1] ?? 0);
+  return Math.max(0, field("file") - field("shmem") - field("file_dirty") - field("file_writeback"));
+}
+
+export function procRss(pid: number, read: (path: string) => string = (path) => readFileSync(path, "utf8"), field: "VmRSS" | "VmHWM" = "VmRSS"): number | undefined {
+  try {
+    const kb = new RegExp(`^${field}:\\s+(\\d+)\\s+kB`, "m").exec(read(`/proc/${pid}/status`))?.[1];
     return kb === undefined ? undefined : Number(kb) * 1024;
   } catch {
     return undefined; // no procfs (macOS) or the process is gone: this sample simply is not taken
@@ -183,6 +204,7 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   const get = opts.get ?? socketGet;
   const freeMemory = opts.freeMemory ?? (() => cgroupFreeMemory());
   const rss = opts.rss ?? ((pid: number) => procRss(pid));
+  const peakRss = opts.peakRss ?? ((pid: number) => procRss(pid, undefined, "VmHWM"));
   const handoffEnabled = opts.handoffEnabled ?? (() => true);
   const socketPathFor = opts.socketPathFor ?? ((n: number) => `/tmp/rmd-serve-gen-${process.pid}-${n}.sock`);
   const exit = opts.exit ?? ((code: number) => process.exit(code));
@@ -201,6 +223,7 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   let askedAgain = false;
   let stopping = false;
   let deferrals = 0;
+  let retryPending = false;
   let largestRss = 0;
   let crashes = 0;
   const failed = new Set<string>();
@@ -299,7 +322,9 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     });
     generation.process.send({ type: GENERATION_MESSAGES.promote });
     if (!(await promoted)) return false;
-    const sample = generation.process.pid === undefined ? undefined : rss(generation.process.pid);
+    // The standby's boot peak, not its RSS at this instant: both generations are resident until the drain ends.
+    const pid = generation.process.pid;
+    const sample = pid === undefined ? undefined : (peakRss(pid) ?? rss(pid));
     if (sample !== undefined) largestRss = Math.max(largestRss, sample);
     return true;
   };
@@ -357,11 +382,24 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
       void generation.exited.then(() => resolve(undefined));
       void sleep(shedBackstopMs).then(() => resolve(undefined));
     });
+    generation.shed = true;
     generation.process.send({ type: GENERATION_MESSAGES.shed });
     const done = await reply;
     const freeAfter = freeMemory();
-    opts.log("serve.handoff_shed", { generation: generation.id, answered: done !== undefined, beforeBytes: done?.beforeBytes, afterBytes: done?.afterBytes, freeBefore, freeAfter, needBytes: largestRss });
+    opts.log("serve.handoff_shed", {
+      generation: generation.id, answered: done !== undefined, gc: done?.gc, beforeBytes: done?.beforeBytes, afterBytes: done?.afterBytes,
+      heapBeforeBytes: done?.heapBeforeBytes, heapAfterBytes: done?.heapAfterBytes, freeBefore, freeAfter, needBytes: need(generation).needBytes,
+    });
     return freeAfter;
+  };
+
+  /**
+   * What a standby needs: its boot peak. The active's own distance to its high-water mark is ledgered, not
+   * added: GC swings its RSS over 1 GB in 10 s, yet the 07:33Z 2026-10-02 overlap passed with no memory.max event.
+   */
+  const need = (generation: Generation): { needBytes: number; activeRssBytes?: number; activePeakBytes?: number } => {
+    const pid = generation.process.pid;
+    return { needBytes: largestRss, activeRssBytes: pid === undefined ? undefined : rss(pid), activePeakBytes: pid === undefined ? undefined : peakRss(pid) };
   };
 
   const legacyExit = async (reason: string): Promise<void> => {
@@ -386,14 +424,18 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
       opts.log("serve.handoff_skipped", { sha: slot.sha, reason: slot.sha === from.slot.sha ? "already_serving" : "failed_before" });
       return;
     }
-    const short = (bytes: number | undefined): bytes is number => bytes !== undefined && largestRss > 0 && bytes < largestRss;
+    const short = (bytes: number | undefined): bytes is number => bytes !== undefined && largestRss > 0 && bytes < need(from).needBytes;
     let free = freeMemory();
     if (short(free)) free = await shedActive(from, free);
     if (short(free)) {
       deferrals += 1;
-      opts.log("serve.handoff_deferred", { reason: "memory", freeBytes: free, needBytes: largestRss, deferrals, sha: slot.sha });
+      opts.log("serve.handoff_deferred", { reason: "memory", freeBytes: free, ...need(from), deferrals, sha: slot.sha });
       if (deferrals >= 3) return legacyExit("memory");
-      void sleep(deferMs).then(() => supervisor.requestHandoff());
+      retryPending = true;
+      void sleep(deferMs).then(() => {
+        retryPending = false;
+        return supervisor.requestHandoff();
+      });
       return;
     }
     deferrals = 0;
@@ -431,6 +473,20 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     await legacyExit("restart_failed");
   };
 
+  /**
+   * A shed buys headroom for ONE standby fork. While a memory deferral will retry, re-warming would be
+   * shed again, so the generation stays cold; once the handoff replaced it there is nothing to restore.
+   * Only a handoff that ENDED with the shed generation still serving leaves it cold for no fork, and it
+   * re-warms now instead of on its 15-minute refresh schedule.
+   */
+  const restoreShed = (): void => {
+    const generation = active;
+    if (stopping || retryPending || generation === undefined || generation.shed !== true || !generation.isAlive()) return;
+    generation.shed = false;
+    opts.log("serve.shed_restore", { generation: generation.id, freeBytes: freeMemory(), needBytes: largestRss });
+    generation.process.send({ type: GENERATION_MESSAGES.restore, reason: "handoff_abandoned" });
+  };
+
   const supervisor: ServeSupervisor = {
     activeSha: () => active?.slot.sha,
     start: async () => {
@@ -456,7 +512,7 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
           if (askedAgain) {
             askedAgain = false;
             void supervisor.requestHandoff();
-          }
+          } else restoreShed();
         });
       return inFlight;
     },
