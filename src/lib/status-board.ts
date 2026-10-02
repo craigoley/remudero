@@ -88,6 +88,7 @@ import {
   type ReadinessContext,
 } from "./inbox.js";
 import { loadPlan, type MergedResolver, type Plan, type RetirementReason } from "./plan.js";
+import { readOperatorReleases } from "./machine-filing-judge.js";
 import { automergeHoldFromLedger, type AutomergeHold } from "./review.js";
 import {
   buildLedgerIndex,
@@ -500,6 +501,9 @@ export interface UncreditedBuildRow {
 /** NEEDS ME — the board's own escalation surface, distinct from `rmd serve`'s HTML "Needs me" panel, which is
  *  task-escalation-driven. A future sentinel is a new field here, not a new section. */
 export interface NeedsMeSection {
+  /** Queued machine filings still parked for a person or the ratified judge. Unknown when merge or
+   *  durable release state cannot be read; a missing gateway never becomes a reassuring zero. */
+  parkedProposals?: { count?: number; taskIds: string[]; unknownReason?: string };
   costAnomaly: CostAnomalyRow[];
   imageDrift?: ImageDriftRow;
   /** W1-T1000003: currently-standing operator merge holds — empty (never `undefined`) when none stand, so the quiet
@@ -1990,7 +1994,25 @@ function deriveNeedsMe(
   lines: ReadonlyArray<Record<string, unknown>>,
   projections: Map<string, StatusProjection> | undefined,
   plan?: Plan,
+  operatorReleasedIds: ReadonlySet<string> = new Set(),
+  releaseReadError?: string,
 ): NeedsMeSection {
+  const parkedProposals: NonNullable<NeedsMeSection["parkedProposals"]> =
+    !plan || !projections || releaseReadError
+      ? { taskIds: [], unknownReason: releaseReadError ?? (!plan ? "plan is unreadable" : "merge state is unavailable") }
+      : (() => {
+          const ledgerReleased = new Set(
+            lines.filter((line) => line.step === "ratify.approved" && typeof line.task_id === "string").map((line) => line.task_id as string),
+          );
+          const taskIds = plan.tasks
+            .filter((task) =>
+              task.author_class === "machine" && task.verify === "human" && task.status === "queued" &&
+              projections.get(task.id)?.merged === false && !operatorReleasedIds.has(task.id) && !ledgerReleased.has(task.id),
+            )
+            .map((task) => task.id)
+            .sort();
+          return { count: taskIds.length, taskIds };
+        })();
   // W1-T931: this board's read of `cost.anomaly` rows — never a re-derivation of the detector's math, which lives in
   // cost-anomaly.ts. DEDUPED BY `run_id`, LAST ONE WINS.
   // Why: the concurrent-write risk — docs/forensics/status-board.md
@@ -2066,6 +2088,7 @@ function deriveNeedsMe(
     plan && projections ? heldDependencyRoots(plan, (id) => projections.get(id)?.merged === true) : undefined;
 
   return {
+    parkedProposals,
     costAnomaly,
     imageDrift,
     mergeHeld,
@@ -2073,6 +2096,17 @@ function deriveNeedsMe(
     ...(tokenFallback ? { tokenFallback } : {}),
     ...(heldRoots ? { heldRoots } : {}),
   };
+}
+
+function readOperatorReleasesForBoard(root: string): { ids: ReadonlySet<string>; reason?: string } {
+  try {
+    return { ids: readOperatorReleases(join(root, "state")) };
+  } catch (error) {
+    return {
+      ids: new Set(),
+      reason: `operator release state is unreadable (${String((error as Error)?.message ?? error)})`,
+    };
+  }
 }
 
 /** Is `a` strictly newer than `b`, by PARSED timestamp? An absent or unparseable `b` — no successful read ever recorded
@@ -2268,7 +2302,8 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
 
   // ── W1-T931: NEEDS ME — same `lines` window every other section above already read, one
   // extra pure fold (deriveNeedsMe), no second ledger read. ──────────────────────────────────
-  const needsMe = deriveNeedsMe(lines, projections, plan);
+  const operatorReleases = readOperatorReleasesForBoard(root);
+  const needsMe = deriveNeedsMe(lines, projections, plan, operatorReleases.ids, operatorReleases.reason);
 
   return {
     generatedAt: new Date(nowMs).toISOString(),
@@ -2589,16 +2624,29 @@ function renderLearningsInjectionBlock(s: LearningsInjectionSection): string[] {
  *  W1-T1021 adds an image-drift row naming both shas. `nothing needs you` only when NEITHER has anything to report. */
 function renderNeedsMeBlock(n: NeedsMeSection): string[] {
   const out = [sectionRule("NEEDS ME", SECTION_RULE_WIDTH)];
-  if (
+  const parked = n.parkedProposals;
+  const otherSignalsQuiet =
     n.costAnomaly.length === 0 &&
     !n.imageDrift &&
     n.mergeHeld.length === 0 &&
     n.uncreditedBuilds.length === 0 &&
     !n.tokenFallback &&
-    (n.heldRoots ?? []).length === 0
-  ) {
+    (n.heldRoots ?? []).length === 0;
+  if (otherSignalsQuiet && (!parked || parked.count === 0) && parked?.unknownReason === undefined) {
     out.push("nothing needs you");
     return out;
+  }
+  if (parked?.unknownReason) {
+    if (otherSignalsQuiet) out.push("nothing needs you from the other observed signals; proposal count is unresolved");
+    out.push(`machine-authored proposals awaiting a ruling: unknown — ${parked.unknownReason}`);
+  } else if ((parked?.count ?? 0) > 0) {
+    const ids = parked!.taskIds.slice(0, 5);
+    const remaining = parked!.taskIds.length - ids.length;
+    out.push(
+      `${parked!.count} machine-authored proposals awaiting a ruling: ${ids.join(", ")}` +
+        (remaining > 0 ? ` (+${remaining} more in plan)` : "") +
+        ` — release one with \`rmd approve ${ids[0]}\` or let the ratified machine-filing judge rule`,
+    );
   }
   if (n.tokenFallback) {
     const since = n.tokenFallback.lastOkTs ? `last good refresh ${n.tokenFallback.lastOkTs}` : "no successful refresh on record";
