@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-gardener-verdict-recovery-1790828334498 -> plan-gardener-verdict-recovery-1790828334498"
   plan_refs: [W1-T4802, W1-T4938, W1-T4950]
   files: [src/lib/gardener.ts, src/lib/gardener-overseer.ts, test/gardener-overseer.test.ts, test/a-gardener-judges-its-own-actions.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T4938 fails closed on the gardener's own corrupt state, but the verdict handoff remains

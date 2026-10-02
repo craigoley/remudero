@@ -9,7 +9,7 @@
   risk: medium
   origin: "operator session 2026-10-02: #8558 failed task-id-existence (W1-T5209 HELD by a different holder) and was renumbered by hand to W1-T5268"
   files: [src/lib/task-id-reservation.ts, test/a-fresh-reservation-is-held-before-its-branch-is-pushed.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

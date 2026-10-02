@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-console-audit-core-1790887256000 -> plan-console-audit-core-1790887256000"
   plan_refs: [W1-T4102, W1-T4267, W1-T5055]
   files: [src/lib/serve.ts, src/lib/serve-memory.ts, test/serve-names-and-relieves-its-memory-pressure.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-01 (host kernel log, read-only): "Memory cgroup out of memory: Killed process 4166669 (node)

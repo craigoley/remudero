@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-02: research into today's circuit breaks (W1-T5016, W1-T5175)"
   plan_refs: ["W1-T2528", "W1-T1268", "W1-T4356"]
   files: [src/run-task.ts, test/a-worktree-being-added-is-alive-and-a-failed-add-frees-its-claim.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
