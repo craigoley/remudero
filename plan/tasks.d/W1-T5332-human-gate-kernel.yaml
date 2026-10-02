@@ -1,0 +1,44 @@
+- id: W1-T5332
+  title: "Turn the approved human-gate design into a shared, source-qualified decision projection"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  origin: "2026-10-02 operator approved all Inbox and decision-queue follow-ups"
+  plan_refs: [W1-T5021, W1-T3186]
+  files: [src/lib/human-gate.ts, src/lib/now-view.ts, test/human-gate.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at ffb0108e54e35400ca3e93ec1b58c4339bbb1555: W1-T5021 shipped a design,
+    not its implementation. now-view has open decisions, but no shared HumanGate projector.
+    The operator cannot rely on independently computed needs-you counts. This is slice 1 of
+    docs/recon/human-gate-projection.md, not a replacement design or another approval gate.
+  design: |
+    Implement HumanGate, HumanGateKind and projectHumanGates. Reuse the existing escalation,
+    manual-approval, task-question and feedback-grill decisions. Integrate the additive projection
+    in the now view before the decisions cap, preserving existing answer routes and old fields.
+    De-duplicate by instance and actual source condition, not display title. An escalation seen
+    on the board and in a thread is one decision; two instances remain distinct. Preserve source
+    timestamps, sort oldest first with deterministic null-time ordering, and expose exact counts
+    only for complete source coverage. Missing source evidence yields atLeast plus reasons,
+    never a verified zero. Change-management counts stay separate from Inbox decisions.
+    The seven-field gate carries one plain-language reason, an evidence link and one resolution
+    verb. Reuse source-owned action authority; this projection is read-only and introduces no
+    PR, routing, dispatch or merge hold. Later slices add kinds independently of each other.
+  acceptance:
+    - claim: "the now view consumes the shared projection rather than an unreferenced helper"
+      proof: 'grep: projectHumanGates( in src/lib/now-view.ts'
+    - claim: "duplicate observations yield one decision while separate instances remain separate"
+      proof: 'grep: human gates deduplicate source conditions without crossing instances in test/human-gate.test.ts'
+    - claim: "incomplete evidence produces an explicit lower bound rather than a verified zero"
+      proof: 'grep: human gate counts preserve unavailable source evidence in test/human-gate.test.ts'
+    - claim: "full uncapped counts and oldest-first ordering come from the same projection"
+      proof: 'grep: human gates count before display caps and retain source times in test/human-gate.test.ts'
+  falsifier: |
+    Count duplicate keys twice, remove the instance from identity, replace missing sources with
+    an empty success, or count only displayed rows: the corresponding tests fail.
