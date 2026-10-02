@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { gzipSync } from "node:zlib";
+import { writeLedger } from "./helpers/ledger-fixture.js";
 import {
   escalateRepeatingRules,
   promoteRecurringRules,
@@ -25,14 +24,14 @@ const fixtureRule = (signatureKind: "ACTIVITY" | "VIOLATION"): MeasurableRuleSig
   stepPatterns: [/^fixture\.fire$/],
 });
 
-function withLedger(steps: string[], run: (dir: string, registryPath: string) => void): void {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-signature-kind-"));
+// The first row lands in a gzipped rotation archive, the rest in the live file, so every
+// ledger-channel case reads across a rotation boundary. Built with the shared fixture.
+function withStepRows(steps: string[], run: (dir: string, registryPath: string) => void): void {
+  const rows = steps.map((step, i) => ({ ts: new Date(Date.UTC(2026, 7, 7 + i)).toISOString(), step }));
+  const { dir } = writeLedger(rows.slice(1), {
+    rotations: [{ at: "2026-08-07T00:00:00.000Z", rows: rows.slice(0, 1), gz: true }],
+  });
   try {
-    const rows = steps.map((step, i) => JSON.stringify({
-      ts: new Date(Date.UTC(2026, 7, 7 + i)).toISOString(), step,
-    }));
-    writeFileSync(join(dir, "ledger.2026-08-07T00-00-00-000Z.ndjson.gz"), gzipSync(rows.slice(0, 1).join("\n") + "\n"));
-    writeFileSync(join(dir, "ledger.ndjson"), rows.slice(1).join("\n") + "\n");
     run(dir, join(dir, "inbox-proposals.json"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -40,7 +39,7 @@ function withLedger(steps: string[], run: (dir: string, registryPath: string) =>
 }
 
 test("W1-T4271: an ACTIVITY-shaped signature reports UNPROVEN with its match count and drafts no proposal", () => {
-  withLedger(["fixture.fire", "fixture.fire"], (dir, registryPath) => {
+  withStepRows(["fixture.fire", "fixture.fire"], (dir, registryPath) => {
     const report = ruleEfficacyReport(dir, [fixtureRule("ACTIVITY")]);
     const rule = report.rules[0];
     assert.equal(rule.status, "UNPROVEN");
@@ -60,7 +59,7 @@ test("W1-T4271: an ACTIVITY-shaped signature reports UNPROVEN with its match cou
 });
 
 test("W1-T4271: a VIOLATION-shaped signature still reaches REPEATING and drafts exactly one idempotent proposal", () => {
-  withLedger(Array(RULE_EFFICACY_ESCALATION_THRESHOLD).fill("fixture.fire"), (dir, registryPath) => {
+  withStepRows(Array(RULE_EFFICACY_ESCALATION_THRESHOLD).fill("fixture.fire"), (dir, registryPath) => {
     const report = ruleEfficacyReport(dir, [fixtureRule("VIOLATION")]);
     const rule = report.rules[0];
     assert.equal(rule.status, "REPEATING");
@@ -85,7 +84,7 @@ test("W1-T4271: the shipped bound-fires-on-healthy entry is ACTIVITY-shaped and 
   assert.match(shipped.signatureReason ?? "", /src\/run-task\.ts.*waitForCiGreen/);
   assert.match(shipped.signatureReason ?? "", /src\/lib\/deployer\.ts/);
   const steps = Array.from({ length: 31 }, (_, i) => i % 2 === 0 ? "ci.stalled" : "deploy.idle_ceiling_forced");
-  withLedger(steps, (dir, registryPath) => {
+  withStepRows(steps, (dir, registryPath) => {
     const report = ruleEfficacyReport(dir);
     const rule = report.rules.find((r) => r.ruleId === shipped.ruleId);
     assert.ok(rule);
@@ -114,7 +113,7 @@ test("W1-T4271: a table entry declaring no kind is refused rather than defaultin
 });
 
 test("W1-T4271: zero activity matches remain UNPROVEN and do not dilute a violation rate", () => {
-  withLedger(["fixture.fire", "fixture.fire"], (dir) => {
+  withStepRows(["fixture.fire", "fixture.fire"], (dir) => {
     const activity = { ...fixtureRule("ACTIVITY"), ruleId: "test#idle", stepPatterns: [/^idle\.fire$/] };
     const report = ruleEfficacyReport(dir, [activity, fixtureRule("VIOLATION")]);
     assert.equal(report.rules[0].status, "UNPROVEN");
@@ -132,7 +131,7 @@ test("W1-T4271: the CI channel reads the declared kind and preserves the effecti
     { gate: "fixture.fire", at: "2026-08-08T00:00:00.000Z" },
     { gate: "unrelated", at: "2026-08-09T00:00:00.000Z" },
   ];
-  withLedger([], (dir, registryPath) => {
+  withStepRows([], (dir, registryPath) => {
     for (const kind of ["ACTIVITY", "VIOLATION"] as const) {
       const { stepPatterns, ...sig } = fixtureRule(kind);
       const report = ruleEfficacyReport(dir, [{ ...sig, ciGatePatterns: stepPatterns }], undefined, observations);
@@ -150,7 +149,7 @@ test("W1-T4271: the CI channel reads the declared kind and preserves the effecti
 });
 
 test("W1-T4271: declared violation zeroes are PREVENTING and unavailable corpora are refused", () => {
-  withLedger(["unrelated"], (dir) => {
+  withStepRows(["unrelated"], (dir) => {
     const report = ruleEfficacyReport(dir, [fixtureRule("VIOLATION")]);
     assert.equal(report.rules[0].status, "PREVENTING");
     assert.equal(report.repeatIncidentRate, 0);
@@ -167,7 +166,7 @@ test("W1-T4271: declared violation zeroes are PREVENTING and unavailable corpora
 });
 
 test("W1-T4271: activity cannot escalate or promote even in a stale REPEATING report", () => {
-  withLedger(["fixture.fire", "fixture.fire"], (dir, registryPath) => {
+  withStepRows(["fixture.fire", "fixture.fire"], (dir, registryPath) => {
     const previous = ruleEfficacyReport(dir, [fixtureRule("ACTIVITY")]);
     const current = ruleEfficacyReport(dir, [fixtureRule("ACTIVITY")]);
     previous.rules[0].status = "REPEATING";
