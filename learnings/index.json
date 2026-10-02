@@ -74,6 +74,7 @@
     "ci.yaml": {
       "entries": [
         "body-fetch-guards-on-http-not-size",
+        "comment-load-ratchet-lane",
         "commitlint-pr-title-lane",
         "diff-coverage-needs-cis-own-flags",
         "diff-coverage-ok-can-be-vacuous",
@@ -87,7 +88,10 @@
       "globs": [
         ".github/**",
         ".github/workflows/ci.yml",
+        "docs/comment-standard.md",
         "plan/tasks.d/**",
+        "scripts/comment-load-baseline.json",
+        "scripts/comment-load-ratchet.mjs",
         "scripts/diff-coverage.mjs",
         "scripts/lib/inherited-violation.mjs",
         "src/lib/git-push.ts",

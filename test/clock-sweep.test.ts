@@ -535,7 +535,11 @@ test("main emits per-suite progress as it goes, so a long sweep is distinguishab
   const d = deriveRecorder(["emissions", "learnings"]);
   main({ argv: [], derive: d.derive, run: r.run, log: () => {}, write: (m) => written.push(m) });
   assert.equal(written.length, 2, "one progress line per suite actually run");
-  assert.deepEqual(r.calls.map((c) => c.suite), ["emissions", "learnings"]);
+  assert.deepEqual(
+    r.calls.map((c) => c.suite).sort(),
+    ["emissions", "learnings"],
+    "progress must cover both derived suites regardless of newest-touched execution order",
+  );
   assert.equal(r.calls[0].days, SWEEP_SHIFT_DAYS, "the sweep runs at the full shift");
   assert.match(written[0], /\[\s*1\/2\]/);
 });

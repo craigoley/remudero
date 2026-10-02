@@ -20,7 +20,7 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { tryEscalate, type EscalateDeps, type Escalation } from "./escalate.js";
 import { appendLedger } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
-import { LEDGER_ROW_PROJECTIONS, isFactStep, ledgerLineIdentity, type LedgerRowProjection } from "./ledger-projector.js";
+import { LEDGER_ROW_PROJECTIONS, isFactRow, isFactStep, ledgerLineIdentity, type LedgerRowProjection } from "./ledger-projector.js";
 import { ledgerRotationEntries, realLedgerFs, rotationStampIso, type LedgerGrepFsDeps } from "./ledger-union.js";
 import { openScratchReadModel, withWriteTransaction, type ReadModelDb, type ReadModelLease } from "./read-model-db.js";
 
@@ -211,7 +211,7 @@ export function factColumns(line: string, factStep: (step: string) => boolean): 
     return undefined;
   }
   const r = row as Record<string, unknown> | null;
-  if (r === null || typeof r !== "object" || typeof r.step !== "string" || !factStep(r.step)) return undefined;
+  if (r === null || typeof r !== "object" || !isFactRow(r, factStep)) return undefined;
   const task = typeof r.task_id === "string" ? r.task_id : typeof r.task === "string" ? r.task : null;
   return { step: r.step, task, run: typeof r.run_id === "string" ? r.run_id : null };
 }

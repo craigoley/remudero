@@ -42,4 +42,4 @@
     - claim: "the note is emitted from the ratchet's single refusal exit rather than duplicated per reporter"
       proof: "grep: reportUncommitted( in scripts/comment-load-ratchet.mjs"
   files: [scripts/comment-load-ratchet.mjs, test/a-ratchet-measures-the-committed-diff.test.ts]
-  status: queued
+  status: merged

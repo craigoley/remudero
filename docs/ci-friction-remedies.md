@@ -4,6 +4,14 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
 
 ## Remedies
 
+- `ci-friction:check:ci-log:ci` — a pull request's CI pipeline logged failures but the
+  specific check that failed could not be determined from the logs. This is a catch-all cause
+  that fires when ci-log dispatches occur without a clear, parseable failure signature. To fix:
+  read the CI logs from the failed pull request to identify the actual check that failed and
+  the error message, then apply the remedy appropriate to that specific check (inspect the
+  coverage-ratchet, run commitlint, examine test output, etc.). If a check fires often this way,
+  consider improving its error message or logging to make the failure more parseable.
+
 - `ci-friction:check:ci-log:coverage-ratchet` — inspect the coverage-ratchet report for the
   uncovered changed lines, add focused tests for those behaviors, and rerun the coverage gate
   against the same committed tree before pushing.
@@ -16,3 +24,86 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   as the last line of your REPORT, exactly anchored at the line start, following Conventional
   Commits conventions (type is one of: build, chore, ci, docs, feat, fix, perf, refactor,
   revert, style, test; subject starts lower-case).
+
+- `ci-friction:fix_refusal:the-task-declares-no-files-so-there-is-no-surface-to-stage` — a
+  task filed with an empty `files:` list (such as a plan-only task or certain synthetic tasks)
+  cannot declare a surface for the worker to edit. The `commitWorkerEdits` function in
+  run-task.ts refuses outright with this reason when `declaredPaths.length === 0`, preventing
+  any commit even if the worker makes valid edits. To fix: if the task is a synthetic task
+  (plan-only, TRIAGE, PLAN, APPROVE, or RETRO lane), pass the PR's `changedPaths` (its
+  current diff) via the `fixRungTaskFor` function in sweep.ts as part of the task's surface,
+  giving workers an implicit surface to commit within; or, if filing a new plan task, declare
+  an explicit `files:` list matching the scope of intended changes.
+
+- `ci-friction:fix_refusal:the-worker-changed-nothing` — `git status` after the worker's run
+  showed no modified files in the repository, so the harness refused to create a commit. This
+  happens when a worker completes its task but does not edit any of the declared files, or
+  edits only files outside the task's declared scope. To fix: check whether the task's
+  acceptance criteria are already satisfied on the current HEAD; if so, end your REPORT with
+  `ALREADY_SATISFIED: <PR url or number>` naming the prior PR that already merged and carries
+  `Remudero-Task: <task-id>`. Otherwise, verify you edited files in the declared `files:`
+  scope and that your edits are syntactically valid (no parse errors or write failures from
+  your tools); use Read/Edit/Write on declared files, never undeclared ones.
+
+- `ci-friction:fix_refusal:every-change-the-worker-made-is-outside-its-declared-files` — the
+  worker made changes to the repository, but every changed file falls outside the task's
+  declared `files:` scope. The `commitWorkerEdits` function (src/run-task.ts) filters staged
+  changes by the declared surface and refuses to commit when the only edited files are
+  undeclared (outside `declaredPaths`), preventing progress even though changes exist. To fix:
+  verify that your edits target files listed in the task's `files:` field (read the task
+  record to see its declared scope); use Read/Edit/Write only on those declared paths. If the
+  task's scope is genuinely too narrow and should have named more files, escalate: the task's
+  `files:` declaration is the contract and cannot be unilaterally widened mid-run; file a
+  follow-up task to correct it.
+
+- `ci-friction:check:ci-log:proof-discrimination` — a pull request's acceptance proof is
+  non-discriminating: it matches both the PR head and the merge base, meaning it would have
+  passed before the work was done and therefore cannot prove the work was actually
+  implemented. This is detected by the `proof-discrimination` gate (W1-T273), which compares
+  each acceptance proof's execution at head versus the pre-work merge-base. To fix: verify
+  that your acceptance criterion's proof (typically a grep) matches only at the HEAD and not
+  at the merge base. Run `rmd check-proof --base` locally to test your proof against the
+  merge base; adjust the proof text to be more specific or distinctive, or reword the claim
+  to something your implementation genuinely changed, then verify the revised proof passes
+  head-only before pushing.
+
+- `ci-friction:check:ci-log:acceptance-author-gate` — a pull request's acceptance criteria
+  failed validation at author-time (before a full CI cycle). The `acceptance-author-gate`
+  required check validates the `## Acceptance` block in the PR body, any `Remudero-Task:`
+  trailer, and acceptance proofs against the declared task's criteria. To fix: check the
+  gate's error message for the specific defect (e.g., `proof-shape`, `trailer-body-proof-divergence`,
+  `grep-proof-target-missing`, `rule-15-split`, or `plan-only-implementation-trailer`). Common
+  fixes include: (1) ensure the `## Acceptance` block uses recognized proof syntax (`grep: <pattern> in <path>`
+  or `unit test: <name>`); (2) verify grep proof target files exist at the current HEAD;
+  (3) if a `Remudero-Task:` trailer is present, ensure its acceptance proofs match the task's
+  declared criteria in the plan, or remove the trailer and author the body's own `## Acceptance` block;
+  (4) if the PR is plan-only (no implementation files), remove any `Remudero-Task:` trailer
+  or implement the non-plan files declared in the task; (5) for multi-commit PRs, check that
+  follow-up commits do not add implementation trailers to plan-only diffs. Run `node --import tsx scripts/acceptance-author-gate.mjs --event-path <event.json>`
+  locally with a test event payload to validate before pushing.
+
+- `ci-friction:check:ci-log:comment-load-ratchet` — a pull request's added or changed code
+  carries more comment lines than are allowed. The comment-load-ratchet gate measures comment
+  density and enforces ceilings to manage the context burden that comment lines impose on every
+  agent session opening the file (see docs/comment-standard.md). A failure means either: (1)
+  a file's total comment count now exceeds its recorded baseline (check
+  `scripts/comment-load-baseline.json`), or (2) a single added comment block contains more
+  than 25 consecutive lines. To fix: review the added comments against the four principles in
+  docs/comment-standard.md (relevant, findable, understandable, usable); shorten or remove
+  comments that do not state an invariant, name a trap, point to a falsifier, or cite a record;
+  split large blocks into smaller focused comments; or, if the diff inherited growth from
+  the merge base (the file already carried more comments there), the baseline will be recorded
+  automatically. Run `npm run --silent comment-load-signal` locally to check your own changes
+  before pushing.
+
+- `ci-friction:conflict:merge-conflict` — a pull request cannot be merged automatically
+  because the branch has diverged from main and git cannot resolve the conflicts in the
+  files being changed. This commonly occurs when multiple PRs modify the same file (such as
+  `plan/tasks.d/*.yaml`, `package.json`, `MASTER-PLAN.md`, or similar shared files) and
+  merge in an order that creates overlapping changes. To fix: fetch the latest main branch
+  locally, rebase your PR's branch onto the current main (`git fetch origin && git rebase
+  origin/main`), resolve any conflicts manually by editing the conflicting files, run the
+  tests to verify the resolution is correct, then force-push the rebased branch (`git push
+  --force-with-lease` or `git push -f`). If the conflict is in a plan file, coordinate with
+  other in-flight PRs to sequence merges carefully, or consider splitting the plan changes
+  into separate PRs to minimize collision surface.

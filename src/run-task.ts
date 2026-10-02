@@ -2453,6 +2453,7 @@ import {
   refreshInstallationToken,
   startInstallationTokenRefresh,
 } from "./lib/github-app.js";
+import { LEDGER_REQUEST_STEP, startDaemonGitCredentialSocket, type ScopedTokenMint } from "./lib/secret-boundary.js";
 import {
   automaticBranchReapStateFileName,
   orphanRunBranchEvidenceReader,
@@ -14426,6 +14427,19 @@ export function dispatchFallbackObserver(
   };
 }
 
+/** W1-T5115: `args` carrying the daemon's git credential socket as a GIT-ONLY handle — a model half the caller already
+ *  set is kept, and with none the worker's model env stays exactly as `buildWorkerEnv` built it. */
+function withGitCredentialSocket(args: SpawnWorkerArgs, socketPath: string): SpawnWorkerArgs {
+  return { ...args, secretBoundary: { ...args.secretBoundary, credentialHelperSocketPath: socketPath } };
+}
+
+/** W1-T5115: the sweep fix rung's spawn — sweep.ts's own `benchmarkNonDispatchSpawn("sweep-fix")` default — with the
+ *  daemon's git credential socket on every fix worker it starts. */
+export function gitCredentialFixSpawn(socketPath: string, raw: typeof spawnWorker = spawnWorker): typeof spawnWorker {
+  const spawnFix = benchmarkNonDispatchSpawn("sweep-fix", raw);
+  return (args) => spawnFix(withGitCredentialSocket(args, socketPath));
+}
+
 async function runTask(
   taskId: string,
   opts: {
@@ -14624,6 +14638,9 @@ async function runTask(
     instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
     pairedTrial?: Partial<PairedTrialInput>;
     pairedTrialHost?: "daemon";
+    /** W1-T5115: the daemon's git credential socket, handed to every spawn below. Only the daemon passes it — a direct
+     *  `rmd run-task` keeps the ambient helper byte-for-byte. */
+    gitCredentialSocketPath?: string;
   } = {},
 ): Promise<RunResult> {
   const config = opts.config ?? loadConfig();
@@ -14675,7 +14692,11 @@ async function runTask(
   // adapter's structural boundary proof below.  Ordinary runs keep the existing per-spawn auction.
   const cashContainmentState = { contained: false };
   const cashContainmentBoundary = opts.cashContainmentBoundary ?? assertOpenWeightToolBoundary;
-  const spawn: typeof spawnWorker = (spawnArgs) => {
+  const spawn: typeof spawnWorker = (requestedSpawnArgs) => {
+    // W1-T5115: at the ONE wrapper every dispatch spawn passes, so no spawn added later can miss the socket.
+    const spawnArgs = opts.gitCredentialSocketPath
+      ? withGitCredentialSocket(requestedSpawnArgs, opts.gitCredentialSocketPath)
+      : requestedSpawnArgs;
     const effectiveSpawnArgs = cashContainmentState.contained ? forceCashContainedRunSpawn(spawnArgs, config) : spawnArgs;
     const stopPolling = workerStateSensor.startPolling();
     let selectionAssignment: Parameters<NonNullable<SpawnWorkerArgs["onSelectionAssignment"]>>[0] | undefined;
@@ -33373,6 +33394,11 @@ export async function daemonCommand(
      *  a real worker spawn. */
     escalationJudge?: (e: Escalation) => Promise<EscalationJudgeVerdict>;
     gardenPassesInProcess?: boolean;
+    /** W1-T5115 test seams: the App refresh whose `ready` gates the git credential socket, and an
+     *  in-process mint for that socket. Production omits both: the real refresh, and the socket on
+     *  its own thread minting through `mintScopedToken`. */
+    startGithubAppRefresh?: typeof startInstallationTokenRefresh;
+    gitCredentialMint?: ScopedTokenMint;
   } = {},
 ): Promise<number> {
   // W1-T2697: mark THIS process as the daemon BEFORE anything below can append a ledger row —
@@ -33525,7 +33551,7 @@ export async function daemonCommand(
   // when `armed` (a plain-`GH_TOKEN` host with no `GH_APP_*` names has nothing to wait for) and
   // NEVER rejects (github-app.ts's own doc on `ready`), so this await can only delay the first
   // sweep by the mint's own latency — it can never hang the daemon or surface a throw here.
-  const githubAppRefresh = startInstallationTokenRefresh({ log });
+  const githubAppRefresh = (deps.startGithubAppRefresh ?? startInstallationTokenRefresh)({ log });
   if (githubAppRefresh.ready) {
     await githubAppRefresh.ready;
   }
@@ -34089,6 +34115,15 @@ export async function daemonCommand(
   // target's. WITHOUT THIS LINE the hooks are undefined and the rung is dead code — what W1-T2959
   // shipped, after #1066 and #2952 each shipped it before that.
   const ciLearningHooks = target.isSelf ? buildCiLearningDaemonHooks({ config }) : undefined;
+  // W1-T5115: the daemon's ONE git credential socket, started only on an App-configured host and
+  // only once the first App mint above has settled. Its path reaches every task worker (`runOne`)
+  // and every sweep fix worker (`sweep:`) below; `undefined` leaves both on the ambient helper.
+  const gitCredentialSocket = await startDaemonGitCredentialSocket({
+    ready: githubAppRefresh.ready,
+    stateDir: join(config.root, "state"),
+    log,
+    mint: deps.gitCredentialMint,
+  });
   try {
     const summary = await runDaemonFn(
       plan,
@@ -34216,6 +34251,7 @@ export async function daemonCommand(
             // readings remain undefined and therefore cannot manufacture a restart.
             externalWaitFreshness: ciWaitFreshness(() => daemonFreshnessFromService(checkServiceFreshness(effectiveRepoRoot, process.env))),
             externalWaitRecycle: () => recyclePauseDetail(config.root),
+            ...(gitCredentialSocket ? { gitCredentialSocketPath: gitCredentialSocket.socketPath } : {}),
           }),
         readUsage: () => readUsageSnapshotPreferSdk(config),
         // THE LEDGER IS THE DEDUP (impl-FL): seed the once-per-string bound from what previous
@@ -34451,6 +34487,7 @@ export async function daemonCommand(
           () => activePlanRef.current,
           // W1-T4471: the one real wiring of the owner-reply reader.
           ghEscalationAnswerGateway(target.owner, target.repo),
+          gitCredentialSocket?.socketPath,
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -34645,6 +34682,10 @@ export async function daemonCommand(
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);
     githubEventWake.close(); // W1-T2568: never outlives the daemon's own normal-stop path either
+    // W1-T5115: closed and its path removed on normal stop; a failed close is ledgered, never thrown.
+    await gitCredentialSocket?.close().catch((e: unknown) => log(LEDGER_REQUEST_STEP, {
+      host: "github.com", decision: "refuse", status: "error", reason: `git credential socket did not close: ${String(e)}`,
+    }));
     consumeStop(config.root); // one-shot STOP: consumed on the daemon's terminal (see drainCommand)
     drainLock.release();
   }
@@ -41011,6 +41052,8 @@ export function buildSweepHook(
   // W1-T4471: the owner-reply reader's gateway. Omitted ⇒ that rung is skipped, so a fixture
   // never reaches GitHub; only the daemon's composition root passes the real one.
   escalationAnswerGateway?: EscalationAnswerGateway,
+  // W1-T5115: the daemon's git credential socket. Omitted ⇒ fix workers keep the ambient helper.
+  gitCredentialSocketPath?: string,
 ): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
@@ -41121,6 +41164,10 @@ export function buildSweepHook(
         log: log,
         policy: DEFAULT_SWEEP_POLICY,
         pacer,
+        // W1-T5115: the SAME spawn sweep.ts defaults to, carrying the socket as a git-only handle.
+        ...(gitCredentialSocketPath
+          ? { spawnImpl: gitCredentialFixSpawn(gitCredentialSocketPath) }
+          : {}),
       });
       // W1-T528: same in-flight lock directory every other dispatch-path reader consults —
       // see `sweepCommand`'s own comment on this exact line for the full rationale.

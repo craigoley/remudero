@@ -12,10 +12,12 @@ import {
   type BoardSnapshotIo,
 } from "../src/lib/board-snapshot-cache.js";
 import { fixedClock, type Clock } from "../src/lib/clock.js";
-import { createLedgerProjector, openProjectorReadModel, type LedgerProjector } from "../src/lib/ledger-projector.js";
+import { createLedgerProjector, isFactStep, openProjectorReadModel, type LedgerProjector } from "../src/lib/ledger-projector.js";
+import { factColumns } from "../src/lib/read-model-consistency.js";
 import {
   NOW_GITHUB_STALE_MS,
   NOW_HOST_PROBE_MS,
+  NOW_LEGACY_ROW_WINDOW_MS,
   NOW_QUEUED_ROWS,
   NOW_REFRESH_MS,
   createNowView,
@@ -38,7 +40,7 @@ import type { Plan, Task } from "../src/lib/plan.js";
 import { acquireLease, type ReadModelDb } from "../src/lib/read-model-db.js";
 import { createReadModelTicker, readModelSwitchesPath, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
 import { HOST_PROBE_BUDGET_MS, PLAN_BUDGET_MS } from "../src/lib/view-freshness.js";
-import { buildBatchedGithub, DEFAULT_LIVENESS_BOUND_MS, readLedgerLines, type GitHub } from "../src/lib/status.js";
+import { buildBatchedGithub, DEFAULT_LIVENESS_BOUND_MS, readLedgerLines, type BatchedPr, type GitHub } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { SHADOW_CLASSIFICATIONS, VIEW_SHADOW_DIFF_STEP, createViewShadow, readShadowEvidence } from "../src/lib/view-shadow.js";
 import { viewEtag, type ViewSwitchMode } from "../src/lib/views.js";
@@ -592,16 +594,23 @@ test("a sample taken before the read model ingests a claim is timing across coun
   const clock = stepped();
   const core = rig(t, root, "core", clock);
   const queued = Array.from({ length: NOW_QUEUED_ROWS + 5 }, (_, i) => task(`W1-T${100 + i}`));
-  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { readPlan: () => planOf([task("W1-T4810"), ...queued]), listGrilling: () => [] });
-  clock.set(T0);
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], {
+    readPlan: () => planOf([task("W1-T4810"), ...queued]), listGrilling: () => [],
+    ledgerSource: (state) => ({ name: "ledger:core", asOf: state.newestTs, state: "fresh" }),
+  });
+  clock.set(T0 - 60_000);
   core.append({ step: "daemon.tick" });
-  const [body] = view.materialize(ctxOf(clock, [core]));
-  assert.ok(body);
+  // Stamped before the build, but the projector has not ingested them: the body's ledger is as of the tick.
   const late = [
-    { ts: new Date(T0 + 60_000).toISOString(), host: "h1", step: "run.start", task_id: "W1-T4810", run_id: "W1-T4810-1790831583056" },
-    { ts: new Date(T0 + 61_000).toISOString(), host: "h1", step: "implement.done", task_id: "W1-T4810", run_id: "W1-T4810-1790831583056", cost_usd: 0.42 },
+    { ts: new Date(T0 - 30_000).toISOString(), host: "h1", step: "run.start", task_id: "W1-T4810", run_id: "W1-T4810-1790831583056" },
+    { ts: new Date(T0 - 29_000).toISOString(), host: "h1", step: "implement.done", task_id: "W1-T4810", run_id: "W1-T4810-1790831583056", cost_usd: 0.42 },
   ];
   appendFileSync(join(core.ledgerDir, "ledger.ndjson"), late.map((r) => `${JSON.stringify(r)}\n`).join(""));
+  clock.set(T0);
+  const ctx = ctxOf(clock, [core]);
+  ctx.instances[0]!.state.newestTs = new Date(T0 - 60_000).toISOString();
+  const [body] = view.materialize(ctx);
+  assert.ok(body);
   const diffs = compareNow(view, core, body, T0 + 90_000);
   const byPath = Object.fromEntries(diffs.map((d) => [d.path, d.classification]));
   assert.equal(byPath["board.counts.running"], "timing", JSON.stringify(diffs));
@@ -805,7 +814,8 @@ test("a rotation after the view's probe leaves the legacy probe on the rows that
   const text = readFileSync(live, "utf8");
   const rotation = `ledger.${new Date(T0 + 30_000).toISOString().replace(/[:.]/g, "-")}.ndjson.gz`;
   writeFileSync(join(core.ledgerDir, rotation), gzipSync(text));
-  writeFileSync(join(core.ledgerDir, `ledger.${new Date(T0 - 900_000).toISOString().replace(/[:.]/g, "-")}.ndjson`), "");
+  const plain = `ledger.${new Date(T0 - 900_000).toISOString().replace(/[:.]/g, "-")}.ndjson`;
+  writeFileSync(join(core.ledgerDir, plain), "");
   writeFileSync(live, `${text.split("\n").filter((l) => l.includes("daemon.boot")).join("\n")}\n`);
   const logged: Array<Record<string, unknown>> = [];
   const judge = (data: NowViewData) => {
@@ -819,5 +829,287 @@ test("a rotation after the view's probe leaves the legacy probe on the rows that
   body.data.health = { ...body.data.health, daemon: { state: "silent", at: new Date(T0 - 600_000).toISOString(), reason: "no daemon.* row for over 5 min" } };
   const wrong = judge(body.data);
   assert.equal(wrong.find((d) => d.path === "health.daemon.state")?.classification, "real", JSON.stringify(wrong));
-  assert.deepEqual(logged.at(-1)?.inputs, { plan: "none", probeAt: new Date(T0).toISOString(), rotationsSinceProbe: [rotation] }, "the diff row names what legacy read");
+  const read = (from: number, rotations: string[]) => ({ from: new Date(from).toISOString(), rotations, unread: [] });
+  assert.deepEqual(logged.at(-1)?.inputs, {
+    plan: "none", probeAt: new Date(T0).toISOString(), builtAt: new Date(T0).toISOString(),
+    windows: { board: read(T0 - NOW_LEGACY_ROW_WINDOW_MS, [plain, rotation]), probe: read(T0, [rotation]), spend: read(Date.parse("2026-09-30T00:00:00.000Z"), [plain, rotation]) },
+  }, "the diff row names what each window of legacy read");
+});
+
+test("a run priced first by a step outside the fact steps is in the view's day spend", (t) => {
+  // Captured 2026-10-01T21:10:40Z on core: board.spendTodayUsd legacy 11.6470238 vs view 11.528704, the residual exactly
+  // W1-T5115#W1-T5115-1790888555233@21:07:40.766Z, a containment.probe row carrying cost_usd. The fact store kept no
+  // containment.probe or isolation.probe row, so the view's spend lacked that run until its first fact-step cost.
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { listGrilling: () => [] });
+  const run = { task_id: "W1-T5", run_id: "W1-T5-1790888555233" };
+  clock.set(T0);
+  core.append({ step: "containment.probe", ...run, contained: true, cost_usd: 0.1183198 });
+  clock.set(T0 + 120_000);
+  core.append({ step: "isolation.probe", ...run, isolated: true, cost_usd: 0.05 });
+  clock.set(T0 + 180_000);
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  assert.equal(body.data.board.spendTodayUsd, 0.1183198, "the run's first costed row is the day's spend on the view side");
+  const costed = `${JSON.stringify({ ts: new Date(T0).toISOString(), step: "containment.probe", ...run, cost_usd: 0.1183198 })}`;
+  assert.equal(factColumns(costed, isFactStep)?.step, "containment.probe", "the consistency oracle keeps the same row the projector does");
+  assert.deepEqual(compareNow(view, core, body, T0 + 186_000).filter((d) => d.path === "board.spendTodayUsd"), []);
+  // Negative control: a spend no paired row gives stays real.
+  body.data.board.spendTodayUsd = 11.528704;
+  const spend = compareNow(view, core, body, T0 + 186_000).find((d) => d.path === "board.spendTodayUsd");
+  assert.equal(spend?.classification, "real", JSON.stringify(spend));
+});
+
+test("a rotation after the build leaves the legacy PR queue on the sweep rows the live file held then", (t) => {
+  // Captured 2026-10-01T21:30:00Z on core: prQueue.rows[prNumber=8485].disposition legacy post-review vs view wait, and its
+  // queueClass active vs waiting. The 21:29:08 rotation, after the 21:28:45 build, moved both wait rows out of the live file and
+  // the compaction kept the older acted post-review row in it, so legacy re-read the live file alone and took that row.
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const pr = { number: 8485, url: "https://github.com/o/r/pull/8485", state: "OPEN", title: "warm handoff", headRefName: "run-unfiled-1", headRefOid: "29b0b38e" };
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], {
+    listGrilling: () => [],
+    github: () => ({ github: stubGateway({ listOpenHeadBranches: () => [pr] }), generation: "g", source: { asOf: null, state: "fresh" } }),
+  });
+  const disposed = (disposition: string, acted: boolean) => ({ step: "sweep.disposed", pr_number: 8485, head_sha: "29b0b38e", disposition, acted, reason: disposition });
+  clock.set(T0 - 600_000);
+  core.append(disposed("post-review", true));
+  clock.set(T0 - 300_000);
+  core.append(disposed("wait", false));
+  clock.set(T0);
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  assert.deepEqual(body.data.prQueue.rows.map((r) => [r.prNumber, r.disposition, r.queueClass]), [[8485, "wait", "waiting"]]);
+  const live = join(core.ledgerDir, "ledger.ndjson");
+  const text = readFileSync(live, "utf8");
+  writeFileSync(join(core.ledgerDir, `ledger.${new Date(T0 + 23_000).toISOString().replace(/[:.]/g, "-")}.ndjson.gz`), gzipSync(text));
+  writeFileSync(live, `${text.split("\n").filter((l) => l.includes('"acted":true')).join("\n")}\n`);
+  const queue = () => compareNow(view, core, body, T0 + 75_000).filter((d) => d.path.startsWith("prQueue"));
+  assert.deepEqual(queue(), [], "legacy reads the PR's sweep rows as the live file held them when the body was built");
+  // Negative control: a disposition the paired rows do not give stays real.
+  body.data.prQueue.rows[0]!.disposition = "mergeable";
+  const wrong = queue();
+  assert.equal(wrong.find((d) => d.path === "prQueue.rows[prNumber=8485].disposition")?.classification, "real", JSON.stringify(wrong));
+});
+
+test("a disposition the live file decides from a row the view's newer one superseded is legacy_horizon", (t) => {
+  // Captured 2026-10-01T23:36:12Z on core: prQueue.rows[prNumber=8495].disposition legacy post-review vs view blocked-fixable
+  // (builtAt 23:35:23, no rotation since). The 23:31:58 rotation, BEFORE that build, kept the head's one acted row (post-review,
+  // 23:15:25) in the live file and archived its newer unacted blocked-fixable rows (23:20:22, 23:23:22); the fact store holds them.
+  // Legacy now reads that rotation (below); this one is cut before legacy's row window, so its rows stay unseen.
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const pr = { number: 8495, url: "https://github.com/o/r/pull/8495", state: "OPEN", title: "spend", headRefName: "run-W1-T5115-1", headRefOid: "b58cb560" };
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], {
+    listGrilling: () => [],
+    github: () => ({ github: stubGateway({ listOpenHeadBranches: () => [pr] }), generation: "g", source: { asOf: null, state: "fresh" } }),
+  });
+  const disposed = (disposition: string, acted: boolean) => ({ step: "sweep.disposed", pr_number: 8495, head_sha: "b58cb560", disposition, acted, reason: disposition });
+  clock.set(T0 - NOW_LEGACY_ROW_WINDOW_MS - 1_200_000);
+  core.append(disposed("post-review", true));
+  clock.set(T0 - NOW_LEGACY_ROW_WINDOW_MS - 780_000);
+  core.append(disposed("blocked-fixable", false));
+  const live = join(core.ledgerDir, "ledger.ndjson");
+  const text = readFileSync(live, "utf8");
+  const [acted, unacted] = text.trim().split("\n");
+  writeFileSync(join(core.ledgerDir, `ledger.${new Date(T0 - NOW_LEGACY_ROW_WINDOW_MS - 205_000).toISOString().replace(/[:.]/g, "-")}.ndjson.gz`), gzipSync(text));
+  writeFileSync(live, `${acted}\n`);
+  clock.set(T0);
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  assert.deepEqual(body.data.prQueue.rows.map((r) => [r.prNumber, r.disposition, r.queueClass]), [[8495, "blocked-fixable", "actionable"]]);
+  const queue = () => compareNow(view, core, body, T0 + 49_000).filter((d) => d.path.startsWith("prQueue"));
+  const got = queue();
+  assert.deepEqual(got.map((d) => [d.path, d.classification]), [
+    ["prQueue.rows[prNumber=8495].disposition", "legacy_horizon"],
+    ["prQueue.rows[prNumber=8495].queueClass", "legacy_horizon"],
+  ], JSON.stringify(got));
+  // Negative control: a live file holding the view's row and a body deciding otherwise from it is a real disagreement.
+  writeFileSync(live, `${unacted}\n${acted}\n`);
+  body.data.prQueue.rows[0]!.disposition = "mergeable";
+  const held = queue();
+  assert.equal(held.find((d) => d.path === "prQueue.rows[prNumber=8495].disposition")?.classification, "real", JSON.stringify(held));
+});
+
+test("legacy takes the gauges its body's probe captured and never probes GitHub again", (t) => {
+  // Captured 2026-10-01T22:35:05Z on core: health.rateLimitRemaining legacy undefined with reason "gh api rate_limit did not
+  // answer" vs view 15000. Legacy re-ran gh api rate_limit at sample time and that one call failed.
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  let rate: number | undefined = 15_000;
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { listGrilling: () => [], hostProbe: { rateLimit: () => rate, diskFree: () => 1 } });
+  clock.set(T0);
+  core.append({ step: "daemon.tick" });
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  assert.equal(body.data.health.rateLimitRemaining, 15_000);
+  rate = undefined;
+  assert.deepEqual(compareNow(view, core, body, T0 + 65_000).filter((d) => d.path.startsWith("health")), []);
+  // Negative control: a gauge the body's own probe did not read stays real.
+  body.data.health = { ...body.data.health, rateLimitRemaining: 9_900 };
+  const wrong = compareNow(view, core, body, T0 + 65_000).find((d) => d.path === "health.rateLimitRemaining");
+  assert.equal(wrong?.classification, "real", JSON.stringify(wrong));
+});
+
+test("the legacy side of a now sample makes no gh or exec call", (t) => {
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  let armed = false;
+  const calls: string[] = [];
+  const runner = (what: string) => {
+    if (!armed) return;
+    calls.push(what);
+    throw new Error(`the legacy side ran ${what}`);
+  };
+  const open: BatchedPr[] = [{ number: 7, url: "https://github.com/o/r/pull/7", state: "OPEN", headRefName: "run-W1-T1-1", headRefOid: "abc", body: "", autoMergeRequest: null, title: "seven" }];
+  const github = buildBatchedGithub("o", "r", {
+    ttlMs: Number.MAX_SAFE_INTEGER, pacer: { wait() {}, recordResult() {} }, fetchAll: () => open, fetchAllIssues: () => [],
+    exec: (args) => (runner(`gh ${args.join(" ")}`), JSON.stringify({ statuses: [] })),
+  });
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], {
+    listGrilling: () => [],
+    github: () => ({ github, generation: "g", source: { asOf: null, state: "fresh" } }),
+    hostProbe: { rateLimit: () => (runner("gh api rate_limit"), 4321), diskFree: () => (runner("statfs"), 1) },
+  });
+  clock.set(T0);
+  core.append({ step: "run.start", task_id: "W1-T1", run_id: "r1" }, { step: "pr.opened", task_id: "W1-T1", run_id: "r1", pr_url: open[0]!.url });
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  assert.deepEqual(body.data.prQueue.rows.map((r) => r.prNumber), [7], "positive control: the build did read the gateway");
+  armed = true;
+  assert.ok(view.legacy("instance=core", T0 + 60_000, body.data));
+  assert.deepEqual(calls, []);
+});
+
+/** A rotation file name for a cut at `ms`, in either form. */
+const cutName = (ms: number, form: "gzip" | "plain"): string => `ledger.${new Date(ms).toISOString().replace(/[:.]/g, "-")}.ndjson${form === "gzip" ? ".gz" : ""}`;
+
+/** Moves `lines` from the live file into a rotation cut at `ms`, as `rotateLedger` archives them. */
+function archive(r: Rig, ms: number, form: "gzip" | "plain", lines: string[]): string {
+  const name = cutName(ms, form);
+  const text = `${lines.join("\n")}\n`;
+  writeFileSync(join(r.ledgerDir, name), form === "gzip" ? gzipSync(text) : text);
+  return name;
+}
+
+function liveLines(r: Rig): string[] {
+  return readFileSync(join(r.ledgerDir, "ledger.ndjson"), "utf8").trim().split("\n");
+}
+
+test("legacy reads the newer sweep row a rotation before the build archived and matches the body", (t) => {
+  // (a) The #8511 shape inside legacy's window: the 23:31:58 rotation, before the 23:35:23 build, archived PR 8495's newer
+  // unacted blocked-fixable row and compaction kept its older acted post-review row live.
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const pr = { number: 8495, url: "https://github.com/o/r/pull/8495", state: "OPEN", title: "spend", headRefName: "run-W1-T5115-1", headRefOid: "b58cb560" };
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], {
+    listGrilling: () => [],
+    github: () => ({ github: stubGateway({ listOpenHeadBranches: () => [pr] }), generation: "g", source: { asOf: null, state: "fresh" } }),
+  });
+  const disposed = (disposition: string, acted: boolean) => ({ step: "sweep.disposed", pr_number: 8495, head_sha: "b58cb560", disposition, acted, reason: disposition });
+  clock.set(T0 - 1_200_000);
+  core.append(disposed("post-review", true));
+  clock.set(T0 - 780_000);
+  core.append(disposed("blocked-fixable", false));
+  const [acted, unacted] = liveLines(core);
+  const old = archive(core, T0 - NOW_LEGACY_ROW_WINDOW_MS - 60_000, "gzip", [acted!]);
+  const cut = archive(core, T0 - 205_000, "gzip", [unacted!]);
+  writeFileSync(join(core.ledgerDir, "ledger.ndjson"), `${acted}\n`);
+  clock.set(T0);
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  assert.deepEqual(body.data.prQueue.rows.map((r) => [r.prNumber, r.disposition]), [[8495, "blocked-fixable"]]);
+  assert.deepEqual(compareNow(view, core, body, T0 + 49_000).filter((d) => d.path.startsWith("prQueue")), [], "legacy decides from the row the body did");
+  const legacy = view.legacy("instance=core", T0 + 49_000, body.data);
+  assert.deepEqual(legacy?.inputs.windows.board.rotations, [cut], "a rotation cut before the window is never opened");
+  assert.notEqual(old, cut);
+  // Negative control: a body deciding otherwise from the same row stays real.
+  body.data.prQueue.rows[0]!.disposition = "mergeable";
+  const wrong = compareNow(view, core, body, T0 + 49_000).find((d) => d.path === "prQueue.rows[prNumber=8495].disposition");
+  assert.equal(wrong?.classification, "real", JSON.stringify(wrong));
+});
+
+test("legacy reads a task's newer row past an older one compaction kept live and matches the body", (t) => {
+  // (b) Compaction keeps a rare step's old row live while it archives a busier step's newer one: W1-T3's block stays in the
+  // live file and its later run.start sits only in a rotation cut before the build.
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { listGrilling: () => [] });
+  clock.set(T0 - 2_400_000);
+  core.append({ run_id: "run-W1-T3", task_id: "W1-T3", step: "dispatch.blocked_independent", verdict: "failed" });
+  clock.set(T0 - 1_200_000);
+  core.append({ step: "run.start", task_id: "W1-T3", run_id: "r3" });
+  const [blocked, started] = liveLines(core);
+  archive(core, T0 - 600_000, "gzip", [started!]);
+  writeFileSync(join(core.ledgerDir, "ledger.ndjson"), `${blocked}\n`);
+  clock.set(T0);
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  assert.ok(body.data.board.groups.running?.includes("W1-T3"), JSON.stringify(body.data.board.groups));
+  assert.deepEqual(compareNow(view, core, body, T0 + 30_000).filter((d) => d.path.startsWith("board")), [], "legacy's board is the body's");
+  // Negative control: a body grouping the task where no row puts it stays real.
+  body.data.board.groups.running = (body.data.board.groups.running ?? []).filter((id) => id !== "W1-T3");
+  body.data.board.groups.blocked = [...(body.data.board.groups.blocked ?? []), "W1-T3"];
+  const wrong = compareNow(view, core, body, T0 + 30_000).filter((d) => d.path.startsWith("board.groups"));
+  assert.ok(wrong.some((d) => d.classification === "real"), JSON.stringify(wrong));
+});
+
+test("legacy counts a row held in both rotation forms once and reads the day's spend from either", (t) => {
+  // (c) The same costed row sits in a gzip and a plain rotation, both cut today but before legacy's board window, and a
+  // second costed row sits in the plain one only: the day's spend reads both forms and each row once.
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { listGrilling: () => [] });
+  clock.set(T0 - 3 * 3_600_000);
+  core.append({ step: "implement.done", task_id: "W1-T1", run_id: "W1-T1-1", cost_usd: 0.5 });
+  clock.set(T0 - 3 * 3_600_000 + 60_000);
+  core.append({ step: "implement.done", task_id: "W1-T2", run_id: "W1-T2-1", cost_usd: 0.25 });
+  const [first, second] = liveLines(core);
+  archive(core, T0 - 2 * 3_600_000, "gzip", [first!]);
+  archive(core, T0 - 2 * 3_600_000 + 1_000, "plain", [first!, second!]);
+  writeFileSync(join(core.ledgerDir, "ledger.ndjson"), "");
+  clock.set(T0);
+  core.append({ step: "daemon.tick" });
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  assert.equal(body.data.board.spendTodayUsd, 0.75);
+  const legacy = view.legacy("instance=core", T0 + 30_000, body.data);
+  const at = (ms: number, step: string): string => `${ms}|${step}`;
+  assert.deepEqual(legacy?.rows["W1-T1"], [at(T0 - 3 * 3_600_000, "implement.done")], "the row in both forms is read once");
+  assert.deepEqual(legacy?.rows["W1-T2"], [at(T0 - 3 * 3_600_000 + 60_000, "implement.done")], "the plain form is read");
+  assert.deepEqual(legacy?.sums["board.spendTodayUsd"]?.legacy, [["W1-T1#W1-T1-1@2026-09-30T09:00:00.000Z", 0.5], ["W1-T2#W1-T2-1@2026-09-30T09:01:00.000Z", 0.25]], "each costed row once");
+  assert.deepEqual(compareNow(view, core, body, T0 + 30_000).filter((d) => d.path === "board.spendTodayUsd"), []);
+  // Negative control: a spend no paired row gives stays real.
+  body.data.board.spendTodayUsd = 1.25;
+  const wrong = compareNow(view, core, body, T0 + 30_000).find((d) => d.path === "board.spendTodayUsd");
+  assert.equal(wrong?.classification, "real", JSON.stringify(wrong));
+});
+
+test("a row stamped after the body's build is in neither side of a now sample", (t) => {
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { listGrilling: () => [] });
+  clock.set(T0);
+  core.append({ step: "daemon.tick" });
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  clock.set(T0 + 60_000);
+  core.append({ step: "run.start", task_id: "W1-T4", run_id: "r4" }, { step: "implement.done", task_id: "W1-T4", run_id: "r4", cost_usd: 0.42 });
+  assert.deepEqual(compareNow(view, core, body, T0 + 90_000), [], "legacy reads up to the build, as the body did");
+  // Positive control: the same rows stamped before the build are on legacy's side.
+  const legacy = view.legacy("instance=core", T0 + 90_000, body.data);
+  assert.equal(legacy?.rows["W1-T4"], undefined);
+  const late = liveLines(core).slice(-2).map((l) => l.replace(new Date(T0 + 60_000).toISOString(), new Date(T0 - 1_000).toISOString()));
+  writeFileSync(join(core.ledgerDir, "ledger.ndjson"), `${[...liveLines(core).slice(0, -2), ...late].join("\n")}\n`);
+  assert.deepEqual([...new Set(view.legacy("instance=core", T0 + 90_000, body.data)?.rows["W1-T4"])].map((k) => k.split("|")[1]).sort(), ["implement.done", "run.start"]);
 });

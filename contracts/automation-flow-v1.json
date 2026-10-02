@@ -1,0 +1,259 @@
+{
+  "manifest": "automation-flow",
+  "schemaVersion": "automation-flow-v1",
+  "status": "published",
+  "description": "The one cross-repository compatibility object for the automation flow: the action, receipt, freshness, refusal and external-effect states the daemon emits, the fields each record carries, the redaction rules every record obeys, and the policy a change to any of them must follow. The console pins this file and its fixture corpus; it never pins a floating branch or a live daemon.",
+  "sourceRevision": {
+    "repository": "craigoley/remudero",
+    "commit": "221bd2772bb10ddb6db448b3e48139b694dfc0e4",
+    "reviewedAt": "2026-10-02",
+    "note": "The core commit whose checked-in contract modules and openapi/daemon.yaml this vocabulary was reviewed against. A pinned 40-hex SHA; a branch name or a remote URL is refused."
+  },
+  "sources": [
+    { "contract": "automation-action-v1", "module": "src/lib/automation-action.ts", "task": "W1-T3855" },
+    { "contract": "intent-plan-v1", "module": "src/lib/intent-plan.ts", "task": "W1-T3898" },
+    { "contract": "external-effect-v1", "module": "src/lib/action-reconciliation.ts", "task": "W1-T3899" }
+  ],
+  "openapi": "openapi/daemon.yaml",
+  "fixtures": "contracts/automation-flow-v1-fixtures.json",
+  "states": {
+    "automation-preflight-outcome": {
+      "contract": "automation-action-v1",
+      "sourceSymbol": "AUTOMATION_PREFLIGHT_OUTCOMES",
+      "openapi": ["AutomationPreflightResult.outcome", "AutomationActionReceipt.preflight"],
+      "values": {
+        "ready": "Nothing blocks the action: not expired, no admission holds its idempotency key, approval is granted or not required, and every precondition was observed satisfied, from its declared source, within the freshness window. The only outcome that admits an execution.",
+        "refused": "A named rule refuses the action: approval pending or rejected, an outside eligibility refusal, an unsatisfied precondition, or an idempotency key that already executed.",
+        "stale": "A precondition was observed satisfied but longer ago than the action's freshness window allows. Never read as current.",
+        "unknown": "A precondition has no observation, its source was unavailable, it came from an unauthoritative or browser-owned source, or it is dated in the future. Never read as satisfied.",
+        "expired": "The action's expiresAt has passed. Outranks every other outcome.",
+        "in-progress": "An admission already claims this idempotency key and has no completion yet; a duplicate request answers with that admission."
+      }
+    },
+    "automation-approval-state": {
+      "contract": "automation-action-v1",
+      "openapi": ["AutomationPreflightResult.approval", "OperatorAgentActionHistory.approval"],
+      "values": {
+        "not-required": "The action's approval policy is none.",
+        "pending": "The action needs a human decision and none has been recorded; preflight refuses it with code approval-pending.",
+        "approved": "An operator approved the action.",
+        "rejected": "An operator rejected the action; preflight refuses it with code approval-rejected."
+      }
+    },
+    "automation-receipt-kind": {
+      "contract": "automation-action-v1",
+      "openapi": ["AutomationActionReceipt.kind"],
+      "values": {
+        "execution": "An admission, refusal or dry run answering an execution request.",
+        "completion": "The completion linked to an admission, naming its authoritative evidence.",
+        "rollback": "A rollback linked to a completion; a new receipt, never a mutation."
+      }
+    },
+    "automation-receipt-outcome": {
+      "contract": "automation-action-v1",
+      "openapi": ["AutomationActionReceipt.outcome"],
+      "values": {
+        "in-progress": "An admission: the idempotency key is claimed and the execution has not completed.",
+        "dry-run": "A dry run was evaluated; nothing executed and the key stays free.",
+        "refused": "The request was refused by name (its preflight outcome and code say why); the key stays free.",
+        "succeeded": "The completion names authoritative evidence that the action succeeded.",
+        "failed": "The completion records that the action failed.",
+        "rolled_back": "A rollback receipt records that a completed action was undone."
+      }
+    },
+    "automation-action-state": {
+      "contract": "automation-action-v1",
+      "openapi": ["OperatorAgentActionHistory.state"],
+      "values": {
+        "registered": "Recorded, not expired, with no approval decision and no admission.",
+        "approved": "An operator approved it and no admission exists yet.",
+        "rejected": "An operator rejected it and no admission exists.",
+        "in-progress": "Admitted with no completion yet.",
+        "succeeded": "Its completion succeeded and has not been rolled back.",
+        "failed": "Its completion failed.",
+        "rolled_back": "Its completion was rolled back by a linked rollback receipt.",
+        "expired": "Its expiresAt passed before any admission."
+      }
+    },
+    "automation-observation-state": {
+      "contract": "automation-action-v1",
+      "openapi": ["AutomationPreconditionObservation.state"],
+      "values": {
+        "satisfied": "The declared source answered and the precondition holds.",
+        "unsatisfied": "The declared source answered and the precondition does not hold; preflight refuses.",
+        "unavailable": "The source could not be read. Never read as satisfied; preflight answers unknown."
+      }
+    },
+    "intent-plan-execution-state": {
+      "contract": "intent-plan-v1",
+      "openapi": ["IntentPlanExecution.state"],
+      "values": {
+        "not-requested": "The plan has not requested any automation action.",
+        "awaiting-receipt": "A requested action is registered or approved and not admitted, or a catalogue step's success lacks the executor's own receipt; a caller's self-reported completion does not advance it.",
+        "in-progress": "At least one requested action is admitted and has no completion.",
+        "succeeded": "Every requested action succeeded with the evidence its capability's rule accepts.",
+        "failed": "A requested action failed.",
+        "refused": "An operator rejected a requested action.",
+        "expired": "Nothing is in progress, failed, rejected or awaiting a receipt, and a requested action expired before admission.",
+        "rolled-back": "Every requested action was rolled back.",
+        "partially-rolled-back": "Every requested action settled successfully and some, not all, were rolled back.",
+        "unknown": "A requested action has no record. Never read as success."
+      }
+    },
+    "intent-plan-preview-state": {
+      "contract": "intent-plan-v1",
+      "openapi": [],
+      "binding": "source-only",
+      "note": "openapi/daemon.yaml carries IntentPlanView.preview as an open object whose state is described only in prose; this manifest is the machine-readable vocabulary for it.",
+      "values": {
+        "ready": "No finding blocks the plan; the preview itself is never operative.",
+        "expired": "The plan's expiry has passed. First in precedence.",
+        "unavailable": "A source the plan relies on was unavailable, or no producer proposed a bounded step.",
+        "stale": "A fact the plan relies on is older than its freshness window.",
+        "ambiguous": "The goal names more than one repository and none was chosen.",
+        "refused": "A named rule refuses a step.",
+        "over-budget": "The plan's cost exceeds its ceiling.",
+        "clarification-exhausted": "The clarification rounds ran out with questions still open.",
+        "needs-clarification": "An open question must be answered before the plan can be confirmed."
+      }
+    },
+    "external-effect-state": {
+      "contract": "external-effect-v1",
+      "sourceSymbol": "EXTERNAL_EFFECT_STATES",
+      "openapi": ["ExternalActionResult.reconciliationState", "ExternalEffect.reconciliationState"],
+      "values": {
+        "applied": "The attempt reported applied and a fresh connector observation satisfies every expected postcondition. The only state that is safe to complete.",
+        "refused": "The attempt reported the connector refused the operation and a fresh observation contradicts no expected postcondition.",
+        "pending": "The attempt reported the operation pending and a fresh observation contradicts no expected postcondition. Not safe to complete.",
+        "partially-applied": "The attempt reported partial application; partialSuccess names which expected postconditions a fresh observation satisfies and which it does not.",
+        "drifted": "A fresh observation fails an expected postcondition the attempt did not report as partial. Not safe to complete.",
+        "stale": "The connector observation is older than the freshness window. Never read as applied.",
+        "unobservable": "The connector could not be observed, or its observation had no valid time. Never read as applied."
+      }
+    },
+    "external-effect-freshness": {
+      "contract": "external-effect-v1",
+      "openapi": ["ExternalActionResult.observation.status", "ExternalEffect.observation.status"],
+      "values": {
+        "fresh": "The observation is within maxAgeMs.",
+        "stale": "The observation is older than maxAgeMs.",
+        "unavailable": "No observation could be made; observedAt and ageMs are absent."
+      }
+    }
+  },
+  "fields": {
+    "AutomationPreflightResult": {
+      "contract": "automation-action-v1",
+      "openapi": "AutomationPreflightResult",
+      "required": ["version", "actionId", "outcome", "evaluatedAt", "approval", "findings"],
+      "optional": [],
+      "stateFields": {
+        "outcome": "automation-preflight-outcome",
+        "approval": "automation-approval-state",
+        "findings[].outcome": "automation-preflight-outcome"
+      }
+    },
+    "AutomationActionReceipt": {
+      "contract": "automation-action-v1",
+      "openapi": "AutomationActionReceipt",
+      "required": ["version", "receiptId", "actionId", "idempotencyKey", "kind", "outcome", "at", "receiptRef", "reason"],
+      "optional": ["linkedReceiptId", "preflight", "code", "evidenceRef"],
+      "stateFields": {
+        "kind": "automation-receipt-kind",
+        "outcome": "automation-receipt-outcome",
+        "preflight": "automation-preflight-outcome"
+      }
+    },
+    "ExternalActionResult": {
+      "contract": "external-effect-v1",
+      "openapi": "ExternalActionResult",
+      "required": [
+        "version",
+        "originatingActionId",
+        "originatingReceiptId",
+        "capabilityGrantId",
+        "connector",
+        "targetIdentity",
+        "requestedOperation",
+        "preconditionSnapshot",
+        "expectedPostconditions",
+        "observation",
+        "idempotencyKey",
+        "reconciliationState",
+        "retryPath",
+        "evidenceReference",
+        "safeToComplete"
+      ],
+      "optional": ["observedState", "partialSuccess", "reason"],
+      "stateFields": {
+        "reconciliationState": "external-effect-state",
+        "observation.status": "external-effect-freshness"
+      }
+    },
+    "IntentPlanExecution": {
+      "contract": "intent-plan-v1",
+      "openapi": "IntentPlanExecution",
+      "required": ["state", "actions"],
+      "optional": [],
+      "stateFields": {
+        "state": "intent-plan-execution-state"
+      }
+    }
+  },
+  "redaction": {
+    "rules": [
+      {
+        "id": "forbidden-field",
+        "appliesTo": ["automation-action-v1", "intent-plan-v1"],
+        "rule": "A raw prompt, transcript, credential, model prose, or browser-owned measurement KEY anywhere in a record refuses the whole record.",
+        "pattern": "^(?:raw_?)?(?:prompts?|transcripts?|messages|credentials?|passwords?|secrets?|tokens?|api_?keys?|authorization|cookies?|model_?(?:output|prose|response|text|reasoning)|completion|reasoning|chain_?of_?thought|browser_?[a-z_]*|web_?vitals|client_?metrics)$",
+        "flags": "i",
+        "sourceSymbol": "AUTOMATION_ACTION_FORBIDDEN_FIELD_RE"
+      },
+      {
+        "id": "secret-value",
+        "appliesTo": ["automation-action-v1", "intent-plan-v1"],
+        "rule": "A credential-shaped VALUE in any text field refuses the whole record.",
+        "pattern": "(?:\\bbearer\\s+[A-Za-z0-9._~+/-]{8,}|\\bgh[pousr]_[A-Za-z0-9]{16,}|\\bgithub_pat_|\\bsk-[A-Za-z0-9]{8,}|-----BEGIN [A-Z ]*PRIVATE KEY|\\b(?:password|secret|api[_-]?key)\\s*[:=])",
+        "flags": "i",
+        "sourceSymbol": "AUTOMATION_ACTION_SECRET_VALUE_RE"
+      },
+      {
+        "id": "connector-evidence",
+        "appliesTo": ["external-effect-v1"],
+        "rule": "Raw connector payloads never cross the daemon boundary; a sensitive key's value is replaced with [REDACTED] before a result is built.",
+        "sensitiveKeys": ["authorization", "api_key", "credential", "cookie", "password", "secret", "token", "private_key"],
+        "replacement": "[REDACTED]"
+      }
+    ],
+    "limits": {
+      "maxIdChars": 160,
+      "maxTextChars": 320
+    }
+  },
+  "semantics": {
+    "unavailable": "A source that could not be read is reported as unavailable, unknown or unobservable. It is never read as satisfied, applied, or healthy.",
+    "stale": "An observation older than its declared freshness window is reported as stale. It is never read as current.",
+    "unknown": "Missing or unauthoritative evidence is reported as unknown. A consumer renders it as unknown, never as success.",
+    "expired": "A record past its expiresAt is expired; expiry outranks every other preflight outcome."
+  },
+  "fixtureCoverage": [
+    { "outcome": "ready", "matches": [{ "family": "automation-preflight-outcome", "value": "ready" }] },
+    { "outcome": "refused", "matches": [{ "family": "automation-preflight-outcome", "value": "refused" }, { "family": "automation-receipt-outcome", "value": "refused" }] },
+    { "outcome": "stale", "matches": [{ "family": "automation-preflight-outcome", "value": "stale" }] },
+    { "outcome": "unknown", "matches": [{ "family": "automation-preflight-outcome", "value": "unknown" }] },
+    { "outcome": "expired", "matches": [{ "family": "automation-preflight-outcome", "value": "expired" }] },
+    { "outcome": "in-progress", "matches": [{ "family": "automation-preflight-outcome", "value": "in-progress" }, { "family": "automation-receipt-outcome", "value": "in-progress" }] },
+    { "outcome": "pending", "matches": [{ "family": "external-effect-state", "value": "pending" }, { "family": "automation-approval-state", "value": "pending" }] },
+    { "outcome": "partial", "matches": [{ "family": "external-effect-state", "value": "partially-applied" }] }
+  ],
+  "compatibility": {
+    "policy": "frozen-per-version",
+    "summary": "A published version's vocabulary (every state value and every required and optional field) is frozen. Any change to it publishes a new schemaVersion in a new contracts/<manifest>-v<N>.json that names what it supersedes; a breaking change must also link a migration note. Prose (descriptions, notes) may change in place.",
+    "breaking": ["state-added", "state-removed", "state-family-removed", "required-field-added", "required-field-removed", "optional-field-removed", "state-field-rebound", "shape-removed"],
+    "nonBreaking": ["optional-field-added", "state-field-added", "state-family-added", "shape-added", "description-changed"],
+    "supersedes": null,
+    "migrations": [],
+    "vocabularySha256": "e97ddb0c5b06c13bb4eae25ab10b7a0114735d42f537fa8849ef71942eb81c2e"
+  }
+}

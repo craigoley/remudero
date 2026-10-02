@@ -11,7 +11,7 @@
   origin: "oper#followups-research-2026-09-22"
   plan_refs: [W1-T4024, W1-T2383]
   files: [src/lib/spend-rows.ts, src/lib/analytics-route.ts, src/lib/analytics-timeseries.ts, src/run-task.ts, test/spend-is-counted-once-at-its-producer.test.ts, scripts/test-tier-manifest.json]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED on the 4-day union (346,646 rows, 2026-09-19..22).

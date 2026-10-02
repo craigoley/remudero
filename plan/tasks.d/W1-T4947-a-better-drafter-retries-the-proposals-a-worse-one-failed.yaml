@@ -12,7 +12,7 @@
   note: "reservation hand-off: plan-redraft-on-lead-change-1790788093000 -> plan-redraft-on-lead-change-1790788093000"
   plan_refs: [W1-T3570, W1-T4916, W1-T4907]
   files: [src/lib/inbox.ts, test/a-better-drafter-retries-the-proposals-a-worse-one-failed.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-30 (fleet state): inbox-proposals 942, inbox-drafts 320 cached (clean), inbox-draft-attempts 2,015
