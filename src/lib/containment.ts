@@ -1709,10 +1709,6 @@ export interface WorkerEgressProxy {
   close(): Promise<void>;
 }
 
-export interface WorkerEgressProxyDeps {
-  connect?: (host: string, port: number) => Socket;
-}
-
 export class WorkerEgressError extends Error {
   override name = "WorkerEgressError";
 }
@@ -1725,7 +1721,10 @@ const SOCKS_REPLY = (status: number) => Buffer.from([5, status, 0, 1, 0, 0, 0, 0
 
 type EgressSettings = { sandbox?: { network?: { allowedDomains?: unknown } } };
 
-export async function startWorkerEgressProxy(settings: unknown, deps: WorkerEgressProxyDeps = {}): Promise<WorkerEgressProxy> {
+export async function startWorkerEgressProxy(
+  settings: unknown,
+  connect: (host: string, port: number) => Socket = (h, p) => connectTcp(p, h),
+): Promise<WorkerEgressProxy> {
   const domains = (settings as EgressSettings | null)?.sandbox?.network?.allowedDomains;
   if (!Array.isArray(domains) || domains.length === 0 || domains.some(d => typeof d !== "string" || !/^[a-z0-9.-]+$/i.test(d))) {
     throw new WorkerEgressError("worker egress requires a non-empty exact-host allowlist");
@@ -1743,7 +1742,7 @@ export async function startWorkerEgressProxy(settings: unknown, deps: WorkerEgre
   };
   const dial = (host: string, port: number) => track(isControl(host, port)
     ? connectTcp(port, "127.0.0.1")
-    : (deps.connect ?? ((h, p) => connectTcp(p, h)))(host, port));
+    : connect(host, port));
   const http = createHttpServer((req, res) => {
     let target: URL;
     try { target = new URL(req.url ?? ""); } catch { res.writeHead(403).end("egress denied"); return; }
@@ -1904,19 +1903,14 @@ export async function verifyWorkerEgressProxy(proxy: WorkerEgressProxy): Promise
   if (socks[0] !== 5 || socks[1] !== 0 || socks[2] !== 5 || socks[3] !== 2) throw new WorkerEgressError("worker SOCKS egress refusal not established");
 }
 
-export interface WorkerEgressVersionDeps {
-  lockPath?: string;
-  sdkPackagePath?: string;
-}
-
 /** The SDK manifest names its bundled CLI explicitly. Verify that manifest belongs to the
  * locked package, then compare the selected executable's actual version, freshly at every spawn.
  * Never infer the CLI version from the SDK version or trust the settings template's comment. */
-export function assertWorkerEgressEnforcerVersion(bin: string, deps: WorkerEgressVersionDeps = {}): string {
+export function assertWorkerEgressEnforcerVersion(bin: string, lockPath?: string, sdkPackagePath?: string): string {
   let root = dirname(fileURLToPath(import.meta.url));
   while (!existsSync(join(root, "package-lock.json")) && dirname(root) !== root) root = dirname(root);
-  const lock = JSON.parse(readFileSync(deps.lockPath ?? join(root, "package-lock.json"), "utf8"));
-  const pkgPath = deps.sdkPackagePath ?? join(dirname(createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk")), "package.json");
+  const lock = JSON.parse(readFileSync(lockPath ?? join(root, "package-lock.json"), "utf8"));
+  const pkgPath = sdkPackagePath ?? join(dirname(createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk")), "package.json");
   const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
   const locked = lock.packages?.["node_modules/@anthropic-ai/claude-agent-sdk"]?.version;
   if (typeof locked !== "string" || pkg.version !== locked) throw new WorkerEgressError(`egress CLI metadata is not from the locked SDK: installed ${pkg.version}, locked ${locked}`);

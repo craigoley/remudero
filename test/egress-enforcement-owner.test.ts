@@ -52,8 +52,9 @@ test("egress owner permits each declared domain and console, refuses every other
   await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
   const upstreamPort = (upstream.address() as { port: number }).port;
   const contacted: string[] = [];
-  const proxy = await containment.startWorkerEgressProxy(settings, {
-    connect: (host, _port) => { contacted.push(host); return connect(upstreamPort, "127.0.0.1"); },
+  const proxy = await containment.startWorkerEgressProxy(settings, (host, _port) => {
+    contacted.push(host);
+    return connect(upstreamPort, "127.0.0.1");
   });
   try {
     await containment.verifyWorkerEgressProxy(proxy);
@@ -125,20 +126,19 @@ test("egress enforcer checks the actual CLI version against locked CLI metadata 
   const sdkPackagePath = join(root, "sdk-package.json");
   writeFileSync(lockPath, JSON.stringify({ packages: { "node_modules/@anthropic-ai/claude-agent-sdk": { version: "0.3.284" } } }));
   writeFileSync(sdkPackagePath, JSON.stringify({ version: "0.3.284", claudeCodeVersion: "2.1.284" }));
-  const deps = { lockPath, sdkPackagePath };
   try {
     writeFileSync(bin, '#!/bin/sh\n[ "$1" = "--version" ] || exit 1\nprintf "2.1.284 (Claude Code)\\n"\n');
     chmodSync(bin, 0o700);
-    assert.equal(containment.assertWorkerEgressEnforcerVersion(bin, deps), "2.1.284");
+    assert.equal(containment.assertWorkerEgressEnforcerVersion(bin, lockPath, sdkPackagePath), "2.1.284");
     writeFileSync(bin, '#!/bin/sh\nprintf "2.1.999 (Claude Code)\\n"\n');
-    assert.throws(() => containment.assertWorkerEgressEnforcerVersion(bin, deps), /2.1.999.*2.1.284/);
-    assert.throws(() => containment.assertWorkerEgressEnforcerVersion(join(root, "missing"), deps), /version/);
+    assert.throws(() => containment.assertWorkerEgressEnforcerVersion(bin, lockPath, sdkPackagePath), /2.1.999.*2.1.284/);
+    assert.throws(() => containment.assertWorkerEgressEnforcerVersion(join(root, "missing"), lockPath, sdkPackagePath), /version/);
     writeFileSync(bin, '#!/bin/sh\nprintf "unknown\\n"\n');
-    assert.throws(() => containment.assertWorkerEgressEnforcerVersion(bin, deps), /version/);
+    assert.throws(() => containment.assertWorkerEgressEnforcerVersion(bin, lockPath, sdkPackagePath), /version/);
     writeFileSync(sdkPackagePath, JSON.stringify({ version: "0.3.999", claudeCodeVersion: "2.1.284" }));
-    assert.throws(() => containment.assertWorkerEgressEnforcerVersion(bin, deps), /locked/);
+    assert.throws(() => containment.assertWorkerEgressEnforcerVersion(bin, lockPath, sdkPackagePath), /locked/);
     writeFileSync(sdkPackagePath, JSON.stringify({ version: "0.3.284" }));
-    assert.throws(() => containment.assertWorkerEgressEnforcerVersion(bin, deps), /CLI/);
+    assert.throws(() => containment.assertWorkerEgressEnforcerVersion(bin, lockPath, sdkPackagePath), /CLI/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -214,7 +214,7 @@ test("egress proxies are private to each spawn; closing one leaves the other ver
 
 test("egress owner refuses malformed CONNECT and SOCKS frames, including literal addresses and unsupported auth", async () => {
   let contacted = 0;
-  const proxy = await containment.startWorkerEgressProxy(settings, { connect: () => { contacted++; throw new Error("must not dial"); } });
+  const proxy = await containment.startWorkerEgressProxy(settings, () => { contacted++; throw new Error("must not dial"); });
   try {
     for (const authority of ["github.com", "http://github.com:443/", "user@github.com:443", "github.com:0", "github.com:65536", "github.com:443/path"]) {
       const reply = await exchange(proxy.httpProxyPort, `CONNECT ${authority} HTTP/1.1\r\n\r\n`, b => b.includes("\r\n\r\n"));
@@ -242,7 +242,7 @@ test("egress owner reports upstream failures for HTTP and SOCKS without opening 
   await new Promise<void>(resolve => unused.listen(0, "127.0.0.1", resolve));
   const port = (unused.address() as { port: number }).port;
   await new Promise<void>(resolve => unused.close(() => resolve()));
-  const proxy = await containment.startWorkerEgressProxy(settings, { connect: () => connect(port, "127.0.0.1") });
+  const proxy = await containment.startWorkerEgressProxy(settings, () => connect(port, "127.0.0.1"));
   try {
     assert.equal(await httpStatus(proxy.httpProxyPort, "http://github.com/"), 502);
     const socks = await exchange(proxy.socksProxyPort, socksRequest("github.com"), b => b.length >= 12);
@@ -268,7 +268,7 @@ test("HTTP forwarding preserves method, body and target Host while stripping pro
   });
   await new Promise<void>(resolve => upstream.listen(0, "127.0.0.1", resolve));
   const port = (upstream.address() as { port: number }).port;
-  const proxy = await containment.startWorkerEgressProxy(settings, { connect: () => connect(port, "127.0.0.1") });
+  const proxy = await containment.startWorkerEgressProxy(settings, () => connect(port, "127.0.0.1"));
   try {
     const status = await new Promise<number>((resolve, reject) => {
       const req = request({ host: "127.0.0.1", port: proxy.httpProxyPort, path: "http://registry.npmjs.org/publish?q=1", method: "POST", headers: { host: "evil.test", "proxy-authorization": "fake", connection: "x-hop", "x-hop": "secret" } }, res => { res.resume(); res.on("end", () => resolve(res.statusCode!)); });
