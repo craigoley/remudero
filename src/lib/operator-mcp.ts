@@ -8,21 +8,19 @@ import { runBoundedSuite } from "./ci-parity.js";
 const TASK = /^[A-Za-z][A-Za-z0-9]*-T[0-9]+[a-z]?$/;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
-export interface OperatorMcpDeps {
+export interface OperatorMcpConfig {
   url: string;
   readToken: string;
   writeToken?: string;
   repoRoot: string;
-  fetch?: typeof fetch;
-  run?: (verb: string, args: string[]) => string;
   timeoutMs?: number;
 }
 
-export function createOperatorMcpServer(deps: OperatorMcpDeps): Server {
+export function createOperatorMcpServer(deps: OperatorMcpConfig): Server {
   const base = new URL(deps.url);
   const timeoutMs = deps.timeoutMs ?? REQUEST_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > REQUEST_TIMEOUT_MS) throw new Error("invalid operator timeout");
-  if (!deps.readToken || !["http:", "https:"].includes(base.protocol) || base.username || base.password || base.search || base.hash)
+  if (typeof deps.readToken !== "string" || !deps.readToken || (deps.writeToken !== undefined && (typeof deps.writeToken !== "string" || !deps.writeToken)) || !["http:", "https:"].includes(base.protocol) || base.username || base.password || base.search || base.hash)
     throw new Error("operator MCP needs a configured HTTP origin and read-scope token");
   const tools = [
     { name: "inbox", description: "Read the current operator decision inbox, with its freshness and unavailable states.", inputSchema: { type: "object", properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true } },
@@ -34,7 +32,7 @@ export function createOperatorMcpServer(deps: OperatorMcpDeps): Server {
   const scrub = (text: string) => [deps.readToken, deps.writeToken].filter((s): s is string => !!s)
     .reduce((value, secret) => value.replaceAll(secret, "[redacted]"), text);
   const request = async (path: string, token: string, payload?: unknown) => {
-    const response = await (deps.fetch ?? fetch)(new URL(path, base), { method: payload === undefined ? "GET" : "POST",
+    const response = await fetch(new URL(path, base), { method: payload === undefined ? "GET" : "POST",
       headers: { Authorization: `Bearer ${token}`, ...(payload === undefined ? {} : { "Content-Type": "application/json" }) },
       ...(payload === undefined ? {} : { body: JSON.stringify(payload) }), redirect: "error", signal: AbortSignal.timeout(timeoutMs) });
     const reader = response.body?.getReader();
@@ -51,14 +49,14 @@ export function createOperatorMcpServer(deps: OperatorMcpDeps): Server {
     if (!response.ok) throw new Error(`operator route refused (${response.status}): ${body}`);
     return body;
   };
-  const run = deps.run ?? ((verb, args) => {
+  const run = (verb: string, args: string[]) => {
     const result = runBoundedSuite(process.execPath, ["--import", "tsx", join(deps.repoRoot, "src", "run-task.ts"), verb, ...args], {
       cwd: deps.repoRoot, env: { ...process.env, RMD_SELF_SYNC_DONE: "1" }, timeoutMs, label: `operator ${verb}` });
     if (result.timeout) throw new Error(`operator ${verb} timed out; its process group was stopped`);
     if (result.status !== 0) throw new Error(`operator ${verb} failed: ${result.error ?? result.stderr}`);
     if (Buffer.byteLength(result.stdout) > MAX_OUTPUT_BYTES) throw new Error("operator command exceeds the 1 MiB limit");
     return result.stdout;
-  });
+  };
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
   server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
     try {
@@ -81,7 +79,8 @@ export function createOperatorMcpServer(deps: OperatorMcpDeps): Server {
       } else throw new Error("unknown operator tool");
       return { content: [{ type: "text" as const, text: scrub(output) }] };
     } catch (error) {
-      return { isError: true, content: [{ type: "text" as const, text: scrub(String((error as Error)?.message ?? error)).slice(0, 2048) }] };
+      const reason = scrub(String((error as Error)?.message ?? error)).slice(0, 2048);
+      return { isError: true, content: [{ type: "text" as const, text: reason }] };
     }
   });
   return server;
