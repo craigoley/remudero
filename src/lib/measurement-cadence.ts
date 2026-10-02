@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, posix, relative } from "node:path";
 import { writeAtomic } from "./fs-race-safe.js";
-import { ruleEfficacyReport, escalateRepeatingRules, type RuleEfficacyReport } from "./rule-efficacy.js";
+import { ruleEfficacyReport, escalateRepeatingRules, type RuleEfficacyReport, type RuleSignature } from "./rule-efficacy.js";
 import {
   mineVerdictRows,
   verdictCalibrationReport,
@@ -1778,6 +1778,8 @@ export function defaultMeasurementCadenceGitLog(cwd: string): { dump: string; re
 export interface MeasurementCadenceReportOpts {
   /** `<root>/state`, the ledger union's root. */
   stateDir: string;
+  /** The rule table the efficacy report grades; absent is the shipped RULE_SIGNATURES. */
+  ruleSignatures?: readonly RuleSignature[];
   /** Repo working directory for the verdict-calibration/autonomy-rate git join. */
   cwd: string;
   /** Default off (production reads `policy.measurementCadence.escalate`). */
@@ -2329,7 +2331,7 @@ export function runMeasurementCadenceReport(opts: MeasurementCadenceReportOpts):
   const previousMetrics = previousMeasurementCadenceMetrics(opts.stateDir, ledgerUnion);
 
   // ── rule-efficacy: no git needed, escalation is the ONE write in this whole module ──────────
-  const efficacyReport: RuleEfficacyReport = ruleEfficacyReport(opts.stateDir);
+  const efficacyReport: RuleEfficacyReport = opts.ruleSignatures ? ruleEfficacyReport(opts.stateDir, opts.ruleSignatures) : ruleEfficacyReport(opts.stateDir);
   let escalatedProposalIds: string[] = [];
   if (opts.escalate) {
     const drafted = escalateRepeatingRules(efficacyReport, registryPath);

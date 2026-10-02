@@ -33,6 +33,7 @@ const ciRule = (over: Partial<RuleSignature> = {}): RuleSignature =>
     citation: "#768, #773, #777",
     description: "Run the diff-coverage gate LOCALLY before pushing any PR that adds source lines.",
     measurable: true,
+    signatureKind: "VIOLATION",
     effectiveDate: "2026-08-01",
     ciGatePatterns: [/^coverage-ratchet$/, /^diff-coverage$/],
     ...over,
@@ -113,6 +114,7 @@ test("W1-T2958 a LEDGER-channel entry is graded exactly as before this change", 
     citation: "W1-T312",
     description: "A bound that fires on a HEALTHY condition is this repo's recurring defect.",
     measurable: true,
+    signatureKind: "VIOLATION",
     effectiveDate: "2026-08-01",
     stepPatterns: [/ci\.stalled/],
   } as RuleSignature;
@@ -130,6 +132,7 @@ test("W1-T2958 an entry declaring BOTH channels, or NEITHER, is refused rather t
     citation: "c",
     description: "d",
     measurable: true,
+    signatureKind: "VIOLATION",
     effectiveDate: "2026-08-01",
   };
   const both = verdictFor(

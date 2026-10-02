@@ -1694,3 +1694,11 @@ export async function workerSmokeMain(
     return 1;
   }
 }
+
+export {
+  startWorkerEgressProxy,
+  verifyWorkerEgressProxy,
+  assertWorkerEgressEnforcerVersion,
+  WorkerEgressError,
+  type WorkerEgressProxy,
+} from "./worker.js";
