@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
+  priority: 2.5
   risk: low
   status: queued
   attempts: 0
@@ -14,3 +15,12 @@
   acceptance:
     - claim: "the narrow selector includes test/operator-sync.test.ts when this edge is exercised"
       proof: "grep: test/operator-sync\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.93
+    reasons:
+      - "The filed task proposes a narrow selector change in src/lib/affected-suites.ts, with acceptance tied to including test/operator-sync.test.ts."
+      - "The supplied gates state shows filingTime: true and no reported gate concern. No actual change view was supplied, so this verdict assesses the filed task, not unseen code."
+    judged_at: "2026-10-02T12:43:51.183Z"
+    pin: "4b695ac89ad5a54b1a6a4468b04941037fba9c586b1f83f9536b6f099a5a9335"

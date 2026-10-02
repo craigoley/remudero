@@ -3,7 +3,8 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
+  priority: 2.5
   risk: low
   status: queued
   attempts: 0
@@ -14,3 +15,13 @@
   acceptance:
     - claim: "the narrow selector includes test/report-commands-case-file.test.ts when this edge is exercised"
       proof: "grep: test/report-commands-case-file\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.85
+    reasons:
+      - "The plan record declares a single file, src/lib/affected-suites.ts. That is an internal test-selector helper, and the record doesn't mention secrets, auth, deletion, merge or deploy policy, or any irreversible action."
+      - "The acceptance criterion is a simple grep that checks whether the selector includes one test file. It can be verified automatically, and no operator decision is required."
+      - "The gates state is clean. Filing time is true, and the author is a machine with no concerning flags. The family has no track record yet (0 merged, 0 declined), which is neutral. The PR will still go through CI and review."
+    judged_at: "2026-10-02T12:45:10.812Z"
+    pin: "f4dd0f8ef35bb8ac863aa4e3b5844a8856c417171e95433d9d50a9ad4537856d"

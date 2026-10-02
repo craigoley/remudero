@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 4
   status: queued
@@ -16,3 +16,12 @@
   acceptance:
     - claim: "the narrow selector includes test/github-posture.test.ts when this edge is exercised"
       proof: "grep: test/github-posture\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.91
+    reasons:
+      - "The filed task targets a narrow test selector edge, and its acceptance criterion names the suite and selector file to verify."
+      - "The gates state reports filingTime: true; the declared scope names only src/lib/affected-suites.ts. No actual change view is supplied."
+    judged_at: "2026-10-02T12:42:11.075Z"
+    pin: "50d0434620dcffe5892628dc33ae84d6bf322e2e0f76f2c6778cb712a00f9467"

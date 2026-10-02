@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 4
   status: queued
@@ -16,3 +16,11 @@
   acceptance:
     - claim: "the narrow selector includes test/learnings-layers.test.ts when this edge is exercised"
       proof: "grep: test/learnings-layers\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.91
+    reasons:
+      - "The filed task targets one selector edge, declares only src/lib/affected-suites.ts, and gives a concrete grep acceptance check for test/learnings-layers.test.ts. The gates state reports filingTime: true and shows no concerning gate result."
+    judged_at: "2026-10-02T12:42:39.744Z"
+    pin: "bc418369b0278fc6ce9c3ac26255c794162353b1e6cd0dc9fa51b26acc5b586c"
