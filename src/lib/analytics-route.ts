@@ -2208,7 +2208,6 @@ export function coldAnalyticsSnapshot(): AnalyticsSnapshot {
   const snapshot: AnalyticsSnapshot = {
     asOf: null,
     measures: ANALYTICS_SCOPE_NOTE,
-    goalObservations: [],
     invocationsByVerb: {},
     invocationsUnmeasuredBefore: ANALYTICS_COLLECTION_STARTED_AT,
     workersByLaneModel: [],
