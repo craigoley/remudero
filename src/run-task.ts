@@ -1193,6 +1193,7 @@ import {
   buildDispatchValueContext,
   DISPATCH_VALUE_LEDGER_STEPS,
   DISPATCH_VALUE_WINDOW_MS,
+  planSeed,
   type DispatchValueContext,
 } from "./lib/dispatch-value.js";
 import {
@@ -31446,6 +31447,7 @@ function dispatchValueContextForSelection(
     new Set(plan.tasks.filter((task) => !isMerged(task.id)).map((task) => task.id)),
     nowMs,
     union.ok,
+    planSeed(plan.tasks),
   );
   if (calibrated.kind === "refused") {
     log("dispatch.value.refused", { reason: calibrated.reasons.join(",") });

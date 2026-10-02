@@ -953,6 +953,7 @@
     "test/dispatch-priority.test.ts": 530,
     "test/dispatch-repo-guard.test.ts": 447,
     "test/dispatch-settled-set.test.ts": 1000,
+    "test/dispatch-value-posterior.test.ts": 1500,
     "test/dispatch-value.test.ts": 1700,
     "test/docker-fixture-fence.test.ts": 362,
     "test/docs-awareness-does-not-read-a-ledger-as-a-surface.test.ts": 490,
