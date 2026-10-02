@@ -15,3 +15,8 @@ test("serviceTokensFileExists is not exported from serve", async () => {
   const module = await import("../src/lib/serve.js");
   assert.equal(Object.hasOwn(module, "serviceTokensFileExists"), false);
 });
+
+test("startCiFrictionGardener is not exported from ci-friction-gardener", async () => {
+  const module = await import("../src/lib/ci-friction-gardener.js");
+  assert.equal(Object.hasOwn(module, "startCiFrictionGardener"), false);
+});
