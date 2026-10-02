@@ -7,7 +7,8 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 15.00
-  risk: medium
+  risk: high
+  band_meaning: blast-radius
   origin: "2026-10-02 operator approved all Inbox and decision-queue follow-ups"
   plan_refs: [W1-T5021, W1-T3186]
   files: [src/lib/human-gate.ts, src/lib/now-view.ts, test/human-gate.test.ts]
