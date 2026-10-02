@@ -212,7 +212,7 @@ test("usage-v1 counts cash dollars per interval and per model", () => {
   assert.equal(window("today-utc").usd, 0.35);
   assert.equal(window("24h").usd, 0.75);
   assert.equal(window("24h").complete, true);
-  assert.deepEqual(usage.cash.byModel24h, [{ model: "gpt-oss-120b", usd: 0.4 }, { model: "gpt-5-nano", usd: 0.35 }, { model: "unreported", usd: 0 }]);
+  assert.deepEqual(usage.cash.byModel24h, [{ model: "gpt-oss-120b", usd: 0.4, unpricedRows: 0 }, { model: "gpt-5-nano", usd: 0.35, unpricedRows: 0 }, { model: "unreported", usd: 0, unpricedRows: 1 }]);
   assert.equal(usage.cash.series.length, 4);
   assert.equal(window("today-utc").complete, true);
 });

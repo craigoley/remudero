@@ -48,6 +48,7 @@ interface CashHour {
   hour: number;
   usd: number;
   rows: number;
+  unpricedRows?: number;
 }
 
 interface RoutingHour {
@@ -95,7 +96,7 @@ interface MarkedRun {
   provider: string;
   model: string;
   assignments: number;
-  outcome?: { success: boolean; costUsd: number; durationMs: number };
+  outcome?: { success: boolean; costUsd: number | null; durationMs: number };
 }
 
 export interface UsageExperimentArm {
@@ -111,16 +112,18 @@ export interface UsageExperimentArm {
   meanAssignmentsPerRun: number;
   meanDurationMs: number | null;
   costUsd: number;
+  unpricedTerminals: number;
   meanCostPerTerminalUsd: number | null;
 }
 
 /** Plain-JSON accumulator state; it is the checkpoint shape too. */
 export interface UsageTelemetryState {
+  costAccountingVersion?: 1;
   newestHour: number;
   series: Array<{ provider: string; window: string; hours: HourSample[] }>;
   cash: CashHour[];
   /** Individual cash rows of the last day as [ts, usd, model], so the 1h, 24h and today windows are exact. */
-  cashEvents?: Array<[number, number, string]>;
+  cashEvents?: Array<[number, number | null, string]>;
   routing: RoutingHour[];
   recent: UsageRoutingAssignment[];
   markedRuns?: MarkedRun[];
@@ -165,6 +168,7 @@ export interface UsageCashWindow {
   name: "1h" | "24h" | "today-utc" | "7d" | "30d";
   usd: number;
   rows: number;
+  unpricedRows?: number;
   complete: boolean;
   reason?: string;
 }
@@ -174,8 +178,8 @@ export interface UsageCashLane {
   state: "observed" | "not-collected";
   coverage: string;
   windows: UsageCashWindow[];
-  byModel24h: Array<{ model: string; usd: number }>;
-  series: Array<{ hour: string; usd: number; rows: number }>;
+  byModel24h: Array<{ model: string; usd: number; unpricedRows: number }>;
+  series: Array<{ hour: string; usd: number; rows: number; unpricedRows: number }>;
 }
 
 export interface UsageRoutingAggregate {
@@ -211,7 +215,7 @@ export interface UsageProjection {
 }
 
 export function usageTelemetryState(): UsageTelemetryState {
-  return { newestHour: 0, series: [], cash: [], cashEvents: [], routing: [], recent: [], markedRuns: [], assignmentsObserved: 0, decisionsObserved: 0 };
+  return { costAccountingVersion: 1, newestHour: 0, series: [], cash: [], cashEvents: [], routing: [], recent: [], markedRuns: [], assignmentsObserved: 0, decisionsObserved: 0 };
 }
 
 function text(value: unknown): string | undefined {
@@ -353,7 +357,7 @@ function addVerdict(state: UsageTelemetryState, line: Record<string, unknown>, t
   const cost = line.total_cost_usd;
   run.outcome = {
     success: line.success === true || SUCCESS_VERDICTS.has(text(line.verdict) ?? ""),
-    costUsd: typeof cost === "number" && Number.isFinite(cost) ? cost : 0,
+    costUsd: percent(cost) ?? null,
     durationMs: Math.max(0, ts - run.firstTs),
   };
 }
@@ -443,15 +447,16 @@ function addAssignment(state: UsageTelemetryState, line: Record<string, unknown>
 }
 
 function addCash(state: UsageTelemetryState, line: Record<string, unknown>, ts: number): void {
-  const usd = typeof line.total_cost_usd === "number" && Number.isFinite(line.total_cost_usd) ? line.total_cost_usd : 0;
+  const usd = percent(line.total_cost_usd) ?? null;
   const hour = Math.floor(ts / HOUR_MS);
   if (hour <= state.newestHour - RETAIN_HOURS) return;
   let bucket = state.cash.find((entry) => entry.hour === hour);
   if (!bucket) {
-    bucket = { hour, usd: 0, rows: 0 };
+    bucket = { hour, usd: 0, rows: 0, unpricedRows: 0 };
     state.cash.push(bucket);
   }
-  bucket.usd += usd;
+  if (usd === null) bucket.unpricedRows = (bucket.unpricedRows ?? 0) + 1;
+  else bucket.usd += usd;
   bucket.rows += 1;
   (state.cashEvents ??= []).push([ts, usd, text(line.model) ?? "unreported"]);
   noteHour(state, hour);
@@ -658,14 +663,15 @@ function experiments(state: UsageTelemetryState, asOfHour: number): UsageExperim
       const key = [marker, value, run.provider, run.model].join("\u0000");
       const arm = arms.get(key) ?? {
         marker, value, provider: run.provider, model: run.model, runs: 0, assignments: 0, terminals: 0, successes: 0,
-        successRatePercent: null, meanAssignmentsPerRun: 0, meanDurationMs: null, costUsd: 0, meanCostPerTerminalUsd: null, durationTotal: 0,
+        successRatePercent: null, meanAssignmentsPerRun: 0, meanDurationMs: null, costUsd: 0, unpricedTerminals: 0, meanCostPerTerminalUsd: null, durationTotal: 0,
       };
       arm.runs += 1;
       arm.assignments += run.assignments;
       if (run.outcome) {
         arm.terminals += 1;
         if (run.outcome.success) arm.successes += 1;
-        arm.costUsd += run.outcome.costUsd;
+        if (run.outcome.costUsd === null) arm.unpricedTerminals += 1;
+        else arm.costUsd += run.outcome.costUsd;
         arm.durationTotal += run.outcome.durationMs;
       }
       arms.set(key, arm);
@@ -678,7 +684,7 @@ function experiments(state: UsageTelemetryState, asOfHour: number): UsageExperim
       successRatePercent: arm.terminals > 0 ? round((arm.successes / arm.terminals) * 100, 1) : null,
       meanAssignmentsPerRun: round(arm.assignments / arm.runs),
       meanDurationMs: arm.terminals > 0 ? Math.round(durationTotal / arm.terminals) : null,
-      meanCostPerTerminalUsd: arm.terminals > 0 ? round(arm.costUsd / arm.terminals, 6) : null,
+      meanCostPerTerminalUsd: arm.terminals > 0 && arm.unpricedTerminals === 0 ? round(arm.costUsd / arm.terminals, 6) : null,
     }))
     .sort((left, right) => left.marker.localeCompare(right.marker) || left.value.localeCompare(right.value) || right.runs - left.runs);
 }
@@ -686,9 +692,11 @@ function experiments(state: UsageTelemetryState, asOfHour: number): UsageExperim
 function cashWindow(state: UsageTelemetryState, name: UsageCashWindow["name"], fromMs: number, toMs: number, oldestHour: number | undefined): UsageCashWindow {
   let usd = 0;
   let rows = 0;
+  let unpricedRows = 0;
   for (const [ts, amount] of state.cashEvents ?? []) {
     if (ts < fromMs || ts > toMs) continue;
-    usd += amount;
+    if (amount === null) unpricedRows += 1;
+    else usd += amount;
     rows += 1;
   }
   const complete = oldestHour !== undefined && fromMs >= oldestHour * HOUR_MS;
@@ -696,6 +704,7 @@ function cashWindow(state: UsageTelemetryState, name: UsageCashWindow["name"], f
     name,
     usd: round(usd, 6),
     rows,
+    unpricedRows,
     complete,
     ...(complete ? {} : { reason: oldestHour === undefined ? "no ledger history is retained" : `window starts before the oldest retained hour ${hourIso(oldestHour)}` }),
   };
@@ -705,7 +714,7 @@ function cashWindow(state: UsageTelemetryState, name: UsageCashWindow["name"], f
 export function buildUsageProjection(
   state: UsageTelemetryState,
   asOf: string | null,
-  longCash?: { state: "observed" | "not-collected"; windows: ReadonlyArray<{ name: string; usd: number; rows: number; complete: boolean; reason?: string }> },
+  longCash?: { state: "observed" | "not-collected"; windows: ReadonlyArray<{ name: string; usd: number; rows: number; unpricedRows?: number; complete: boolean; reason?: string }> },
 ): UsageProjection {
   const asOfMs = asOf === null ? NaN : Date.parse(asOf);
   const asOfHour = Number.isFinite(asOfMs) ? Math.floor(asOfMs / HOUR_MS) : state.newestHour;
@@ -727,9 +736,13 @@ export function buildUsageProjection(
   ];
   const oldestHour = retainedHours.length > 0 ? Math.min(...retainedHours) : undefined;
   const endMs = Number.isFinite(asOfMs) ? asOfMs : (state.newestHour + 1) * HOUR_MS;
-  const cashModels = new Map<string, number>();
+  const cashModels = new Map<string, { usd: number; unpricedRows: number }>();
   for (const [ts, usd, model] of state.cashEvents ?? []) {
-    if (ts >= endMs - 24 * HOUR_MS && ts <= endMs) cashModels.set(model, (cashModels.get(model) ?? 0) + usd);
+    if (ts >= endMs - 24 * HOUR_MS && ts <= endMs) {
+      const row = cashModels.get(model) ?? { usd: 0, unpricedRows: 0 };
+      if (usd === null) row.unpricedRows += 1; else row.usd += usd;
+      cashModels.set(model, row);
+    }
   }
   const cash: UsageCashLane = {
     unit: "usd",
@@ -741,13 +754,13 @@ export function buildUsageProjection(
       cashWindow(state, "today-utc", Math.floor(endMs / (24 * HOUR_MS)) * 24 * HOUR_MS, endMs, oldestHour),
       ...(longCash?.windows ?? [])
         .filter((window): window is typeof window & { name: "7d" | "30d" } => window.name === "7d" || window.name === "30d")
-        .map((window) => ({ name: window.name, usd: window.usd, rows: window.rows, complete: window.complete, ...(window.reason ? { reason: window.reason } : {}) })),
+        .map((window) => ({ name: window.name, usd: window.usd, rows: window.rows, unpricedRows: window.unpricedRows, complete: window.complete, ...(window.reason ? { reason: window.reason } : {}) })),
     ],
-    byModel24h: [...cashModels.entries()].map(([model, usd]) => ({ model, usd: round(usd, 6) })).sort((left, right) => right.usd - left.usd),
+    byModel24h: [...cashModels.entries()].map(([model, row]) => ({ model, usd: round(row.usd, 6), unpricedRows: row.unpricedRows })).sort((left, right) => right.usd - left.usd),
     series: state.cash
       .filter((bucket) => bucket.hour > asOfHour - SERIES_HOURS)
       .sort((left, right) => left.hour - right.hour)
-      .map((bucket) => ({ hour: hourIso(bucket.hour), usd: round(bucket.usd, 6), rows: bucket.rows })),
+      .map((bucket) => ({ hour: hourIso(bucket.hour), usd: round(bucket.usd, 6), rows: bucket.rows, unpricedRows: bucket.unpricedRows ?? 0 })),
   };
   return {
     version: USAGE_PROJECTION_VERSION,
