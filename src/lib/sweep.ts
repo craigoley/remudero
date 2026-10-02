@@ -12703,6 +12703,7 @@ export function windowCostRows(
 // Re-exported here unchanged for `deriveDayCostUsd`/`deriveWeekCostUsd` below and for `glance.ts`.
 export { utcDayWindowMs, utcWeekWindowMs } from "./time-window.js";
 import { utcDayWindowMs, utcWeekWindowMs } from "./time-window.js";
+import { spendRoleOf, spendAmountUsd } from "./spend-rows.js";
 
 /** The day's ledgered cost — `now`'s UTC calendar day, per-run (see {@link deriveWindowCostUsd}).
  *  BEHAVIOR UNCHANGED from this function's pre-W1-T159 form: same window, same verdict-preferred
@@ -12710,6 +12711,15 @@ import { utcDayWindowMs, utcWeekWindowMs } from "./time-window.js";
 export function deriveDayCostUsd(lines: ReadonlyArray<Record<string, unknown>>, now: number): number {
   const [start, end] = utcDayWindowMs(now);
   return deriveWindowCostUsd(lines, start, end);
+}
+
+export function deriveDayUnpricedRows(lines: ReadonlyArray<Record<string, unknown>>, now: number): number {
+  const [start, end] = utcDayWindowMs(now);
+  return lines.filter((row) => {
+    const timestamp = Date.parse(String(row.ts ?? ""));
+    const cost = spendAmountUsd(row);
+    return timestamp >= start && timestamp < end && spendRoleOf(row) === "produced" && (cost === undefined || cost < 0);
+  }).length;
 }
 
 /** The WEEK-TO-DATE ledgered cost (W1-T159): the current UTC ISO week, same per-run reduction as
@@ -12729,6 +12739,8 @@ export interface CostGovernorResult {
   observedDayCostUsd: number;
   /** The policy ceiling consulted (`policy.dailyCostCeilingUsd`, carried for the ledger line). */
   ceilingUsd: number;
+  unpricedRows?: number;
+  costState?: "uncertain";
 }
 
 /** The cost governor's pure predicate: at or over `policy.dailyCostCeilingUsd` ledgered dollars spent
@@ -12738,11 +12750,13 @@ export interface CostGovernorResult {
 export function checkCostGovernor(
   dayCostUsd: number,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+  unpricedRows = 0,
 ): CostGovernorResult {
   return {
     deferred: dayCostUsd >= policy.dailyCostCeilingUsd,
     observedDayCostUsd: dayCostUsd,
     ceilingUsd: policy.dailyCostCeilingUsd,
+    ...(unpricedRows > 0 ? { unpricedRows, costState: "uncertain" as const } : {}),
   };
 }
 
@@ -12761,6 +12775,7 @@ export function logCostGovernorDeferral(
     step: "dispatch_deferred_budget",
     observed_day_cost_usd: result.observedDayCostUsd,
     daily_cost_ceiling_usd: result.ceilingUsd,
+    ...(result.unpricedRows ? { unpriced_rows: result.unpricedRows, cost_state: result.costState } : {}),
   });
 }
 
