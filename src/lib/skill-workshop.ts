@@ -303,6 +303,22 @@ export function describeWorkerSkillReachability(settingSources: readonly string[
   };
 }
 
+/** Whether this draft opts in to the approved-skill prompt injection route. */
+export function describeSkillInjectionReachability(draft: SkillDraft): { reachable: boolean; reason: string } {
+  const { front } = splitFrontmatter(draft.markdown);
+  const match = SKILL_APPLIES_TO_RE.exec(front);
+  if (!match) return { reachable: false, reason: "no applies-to frontmatter line opts this skill into worker prompt injection" };
+  const taskTypes = match[1].split(",").map((value) => injectableSkillTaskType(value.trim().toLowerCase()))
+    .filter((value): value is Task["type"] => value !== undefined);
+  if (taskTypes.length === 0) {
+    return { reachable: false, reason: "applies-to names no injectable task type for worker prompt injection" };
+  }
+  return {
+    reachable: true,
+    reason: `applies-to: ${taskTypes.join(", ")} opts this skill into loadInjectableSkills/selectSkillsForTask after approval`,
+  };
+}
+
 // ── The lane (design clause iii) ────────────────────────────────────────────────────────────
 
 /** W1-T3385c — the PROCEDURE's identity: its shape and the task type it applies to, and NOT its
@@ -959,13 +975,12 @@ export function stageSkillDrafts(
   registryPath: string,
   drafts: readonly SkillDraft[],
   allowlist: WorkerAllowlist,
-  reachability: { reachable: boolean; reason: string },
   log: (step: string, extra?: Record<string, unknown>) => void,
   stageOne: typeof stageSkillDraft = stageSkillDraft,
 ): void {
   for (const draft of drafts) {
     try {
-      const r = stageOne(registryPath, draft, allowlist, reachability);
+      const r = stageOne(registryPath, draft, allowlist, describeSkillInjectionReachability(draft));
       log("skill.staged", { name: draft.name, staged: r.staged, already: r.alreadyStaged, backfilled: r.backfilled === true, refreshed: r.refreshed === true, refused: r.refused, reason: r.reason });
     } catch (e) {
       log("skill.stage_failed", { name: draft.name, error: String((e as Error)?.message ?? e) });

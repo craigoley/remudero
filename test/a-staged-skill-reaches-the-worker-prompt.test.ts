@@ -6,6 +6,7 @@ import { test } from "node:test";
 
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "../src/lib/learnings.js";
+import { loadProposalRegistry } from "../src/lib/inbox.js";
 import {
   buildSkillEffectivenessReport,
   observeSkillSelection,
@@ -255,7 +256,6 @@ test("W1-T3101: staging writes a PROPOSAL — approval, not staging, is what mak
 
 const injectable = (name: string): InjectableSkill => ({ name, appliesTo: ["implement"], body: name });
 const allowlist = workerAllowlistFromSettings(undefined);
-const reachable = describeWorkerSkillReachability([]);
 const draft = (name: string): SkillDraft => ({ name, candidateHash: `hash-${name}` }) as SkillDraft;
 
 const skillSelectionRow = (runId: string, selected: boolean): Record<string, unknown> => ({
@@ -634,7 +634,7 @@ test("W1-T3101: stageSkillDrafts logs one skill.staged per draft, carrying the s
     d.name === "one"
       ? { staged: true, alreadyStaged: false, refused: false }
       : { staged: false, alreadyStaged: false, refused: true, reason: "not allowlisted" };
-  stageSkillDrafts("/registry.json", [draft("one"), draft("two")], allowlist, reachable, (step, extra) => rows.push([step, extra]), stub as typeof stageSkillDraft);
+  stageSkillDrafts("/registry.json", [draft("one"), draft("two")], allowlist, (step, extra) => rows.push([step, extra]), stub as typeof stageSkillDraft);
   assert.deepEqual(rows.map(([step]) => step), ["skill.staged", "skill.staged"]);
   assert.equal(rows[0][1]?.staged, true);
   assert.equal(rows[1][1]?.refused, true);
@@ -647,7 +647,7 @@ test("W1-T3101: a THROW on one draft is logged and the loop continues — a bad 
     if (d.name === "explodes") throw new Error("registry unwritable");
     return { staged: true, alreadyStaged: false, refused: false };
   };
-  stageSkillDrafts("/registry.json", [draft("explodes"), draft("survives")], allowlist, reachable, (step, extra) => rows.push([step, extra]), stub as typeof stageSkillDraft);
+  stageSkillDrafts("/registry.json", [draft("explodes"), draft("survives")], allowlist, (step, extra) => rows.push([step, extra]), stub as typeof stageSkillDraft);
   // THE FALSIFIER: a loop that rethrew would never reach the second draft, and a loop that
   // swallowed silently would log nothing for the first.
   assert.deepEqual(rows.map(([step]) => step), ["skill.stage_failed", "skill.staged"]);
@@ -663,7 +663,28 @@ test("W1-T3101: no drafts means no staging call and no rows at all", () => {
     calls += 1;
     return { staged: true, alreadyStaged: false, refused: false };
   };
-  stageSkillDrafts("/registry.json", [], allowlist, reachable, (step) => rows.push(step), stub as typeof stageSkillDraft);
+  stageSkillDrafts("/registry.json", [], allowlist, (step) => rows.push(step), stub as typeof stageSkillDraft);
   assert.deepEqual(rows, []);
   assert.equal(calls, 0);
+});
+
+test("W1-T4341: drafts in one batch receive different reachability lines from their own applies-to content", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}reachability-`));
+  const registry = join(dir, "inbox-proposals.json");
+  const base = (name: string, appliesTo: string): SkillDraft => ({
+    name,
+    description: name,
+    candidateHash: `hash-${name}`,
+    procedureKey: `procedure-${name}`,
+    supportingRuns: 2,
+    markdown: `---\nname: ${name}\n${appliesTo}---\n\n## Procedure\n\n- Inspect the task's evidence.\n`,
+  });
+  const rows: string[] = [];
+  stageSkillDrafts(registry, [base("implement", "applies-to: implement\n"), base("absent", "")],
+    allowlist, (step) => rows.push(step));
+  assert.deepEqual(rows, ["skill.staged", "skill.staged"]);
+  const proposals = loadProposalRegistry(registry);
+  const summary = (name: string) => proposals.find((proposal) => proposal.skillFile?.name === name)!.summary;
+  assert.match(summary("implement"), /Reachable: .*loadInjectableSkills\/selectSkillsForTask/);
+  assert.match(summary("absent"), /NOT reachable by a worker today: no applies-to frontmatter line/);
 });

@@ -7,6 +7,7 @@ import { loadProposalRegistry } from "../src/lib/inbox.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { WORKER_SETTING_SOURCES } from "../src/lib/worker.js";
 import {
+  describeSkillInjectionReachability,
   describeWorkerSkillReachability,
   proceduralCandidateHash,
   READ_WRAPPER_RE,
@@ -202,7 +203,8 @@ test("stageSkillDraft: a scanned, passing draft is staged as one inbox proposal 
   const draft = renderSkillDraft(candidate(), MINED_GREP)!;
   const allowlist = workerAllowlistFromSettings(fixtureSettings());
 
-  const first = stageSkillDraft(registryPath, draft, allowlist, REACHABLE_NO);
+  const reachability = describeSkillInjectionReachability(draft);
+  const first = stageSkillDraft(registryPath, draft, allowlist, reachability);
   assert.equal(first.refused, false);
   assert.equal(first.staged, true);
   assert.equal(first.alreadyStaged, false);
@@ -212,12 +214,38 @@ test("stageSkillDraft: a scanned, passing draft is staged as one inbox proposal 
   const proposal = registered.find((p) => p.id === skillDraftProposalId(draft.procedureKey));
   assert.ok(proposal, "the staged proposal must be keyed by the PROCEDURE, not its run set (W1-T3385c)");
   assert.match(proposal!.summary, /\.claude\/skills\/.*\/SKILL\.md/);
-  assert.match(proposal!.summary, /NOT reachable by a worker today/);
+  assert.match(proposal!.summary, /Reachable: .*loadInjectableSkills\/selectSkillsForTask/);
 
-  const second = stageSkillDraft(registryPath, draft, allowlist, REACHABLE_NO);
+  const second = stageSkillDraft(registryPath, draft, allowlist, reachability);
   assert.equal(second.staged, false);
   assert.equal(second.alreadyStaged, true, "the same candidate must stage nothing twice (W1-T470)");
   assert.equal(loadProposalRegistry(registryPath).length, 1, "no duplicate proposal after the re-run");
+});
+
+test("a drafted skill whose markdown carries a valid applies-to implement line uses the injection route", () => {
+  const draft = renderSkillDraft(candidate())!;
+  const verdict = describeSkillInjectionReachability(draft);
+  assert.equal(verdict.reachable, true);
+  assert.match(verdict.reason, /applies-to: implement/);
+  assert.match(verdict.reason, /loadInjectableSkills\/selectSkillsForTask/);
+  assert.doesNotMatch(verdict.reason, /settingSources/);
+});
+
+test("a drafted skill with no applies-to frontmatter line is not reachable through injection", () => {
+  const draft = renderSkillDraft(candidate({ taskType: "unrecognised" }))!;
+  const verdict = describeSkillInjectionReachability(draft);
+  assert.equal(verdict.reachable, false);
+  assert.match(verdict.reason, /no applies-to frontmatter line/);
+  assert.doesNotMatch(verdict.reason, /settingSources/);
+  const bodyOnly = { ...draft, markdown: "---\nname: body-only\n---\n\napplies-to: implement\n" };
+  assert.equal(describeSkillInjectionReachability(bodyOnly).reachable, false);
+  const unknown = { ...draft, markdown: "---\nname: unknown\napplies-to: unrecognised\n---\n" };
+  assert.equal(describeSkillInjectionReachability(unknown).reachable, false);
+});
+
+test("describeWorkerSkillReachability s own existing contract false for an empty array and true for project", () => {
+  assert.equal(describeWorkerSkillReachability([]).reachable, false);
+  assert.equal(describeWorkerSkillReachability(["project"]).reachable, true);
 });
 
 test("stageSkillDraft: a refused draft is reported with the offending line and never staged", () => {
