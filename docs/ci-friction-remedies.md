@@ -4,6 +4,14 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
 
 ## Remedies
 
+- `ci-friction:check:ci-log:ci` — a pull request's CI pipeline logged failures but the
+  specific check that failed could not be determined from the logs. This is a catch-all cause
+  that fires when ci-log dispatches occur without a clear, parseable failure signature. To fix:
+  read the CI logs from the failed pull request to identify the actual check that failed and
+  the error message, then apply the remedy appropriate to that specific check (inspect the
+  coverage-ratchet, run commitlint, examine test output, etc.). If a check fires often this way,
+  consider improving its error message or logging to make the failure more parseable.
+
 - `ci-friction:check:ci-log:coverage-ratchet` — inspect the coverage-ratchet report for the
   uncovered changed lines, add focused tests for those behaviors, and rerun the coverage gate
   against the same committed tree before pushing.
