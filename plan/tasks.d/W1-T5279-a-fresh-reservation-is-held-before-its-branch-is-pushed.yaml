@@ -1,0 +1,40 @@
+- id: W1-T5279
+  title: "A FRESH RESERVATION IS HELD BEFORE ITS BRANCH IS PUSHED — `reclaim` reads a not-yet-pushed holder branch as abandoned, so a second filer took W1-T5209 21 seconds after the ci-friction gardener reserved it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  origin: "operator session 2026-10-02: #8558 failed task-id-existence (W1-T5209 HELD by a different holder) and was renumbered by hand to W1-T5268"
+  files: [src/lib/task-id-reservation.ts, test/a-fresh-reservation-is-held-before-its-branch-is-pushed.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    refs/rmd-id/W1-T5209 has two commits. At 07:44:15Z the ci-friction gardener reserved it
+    (`branch=ci-friction-garden-1790927008162 source=automatic`). At 07:44:36Z, 21 seconds later, a
+    triage run took it over (`source=reclaimed taken_over_from=ci-friction-garden-1790927008162`).
+    `reservationHolderDrift` in src/lib/task-id-reservation.ts returns `reclaimable` whenever the
+    holder's branch is `absent` on the remote. Every filer reserves its id before it pushes its
+    branch (it reserves, writes the shard, commits, then pushes), so for that whole window a live
+    reservation reads as abandoned. The gardener went on to file W1-T5209 anyway, and its PR #8558
+    failed task-id-existence ("HELD by a different reservation holder") until an operator renumbered
+    it. Both filers believed they held the id; whichever pushes second loses a CI round.
+  design: |
+    A reservation younger than a bounded grace period counts as `held` even when its holder branch is
+    absent; only after the grace period does an absent branch make it `reclaimable`. The age comes
+    from the holder line's `started_at` (already written by `formatReservationAnchorMessage`), read
+    against the injected clock. A holder line with no parseable `started_at` keeps today's behaviour,
+    so nothing that was reclaimable becomes permanently stuck. Size the grace from the observed
+    reserve-to-push gap of real filings (the ledger and reservation refs carry both times) and name
+    that population in a comment beside the constant; default to 30 minutes if no better number can
+    be measured.
+  acceptance:
+    - claim: "a reservation whose branch is not yet pushed is not reclaimed inside the grace period, and is reclaimed after it"
+      proof: "unit test: test/a-fresh-reservation-is-held-before-its-branch-is-pushed.test.ts"
+  falsifier: |
+    A holder line started 21 seconds ago naming an absent branch classifies `held` (today:
+    `reclaimable`); the same line started past the grace classifies `reclaimable`; a line with no
+    `started_at` and an absent branch is still `reclaimable`.
