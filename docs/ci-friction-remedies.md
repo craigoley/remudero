@@ -55,3 +55,14 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   task's scope is genuinely too narrow and should have named more files, escalate: the task's
   `files:` declaration is the contract and cannot be unilaterally widened mid-run; file a
   follow-up task to correct it.
+
+- `ci-friction:check:ci-log:proof-discrimination` — a pull request's acceptance proof is
+  non-discriminating: it matches both the PR head and the merge base, meaning it would have
+  passed before the work was done and therefore cannot prove the work was actually
+  implemented. This is detected by the `proof-discrimination` gate (W1-T273), which compares
+  each acceptance proof's execution at head versus the pre-work merge-base. To fix: verify
+  that your acceptance criterion's proof (typically a grep) matches only at the HEAD and not
+  at the merge base. Run `rmd check-proof --base` locally to test your proof against the
+  merge base; adjust the proof text to be more specific or distinctive, or reword the claim
+  to something your implementation genuinely changed, then verify the revised proof passes
+  head-only before pushing.
