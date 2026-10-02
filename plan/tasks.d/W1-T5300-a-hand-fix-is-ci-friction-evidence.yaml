@@ -1,0 +1,41 @@
+- id: W1-T5300
+  title: "A FIX THE OPERATOR MAKES BY HAND IS INVISIBLE TO THE CI-FRICTION LADDER — read merged run-unfiled PRs as evidence, attach them to the cause whose owning code they touched, and make a file repaired by hand more than once a draftable cause"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 10.00
+  risk: high
+  band_meaning: span
+  origin: "operator ask 2026-10-02: make the ci-friction gardener self-improve from PR fixes that slip through automation or require fixes (operator session 90be18e2)"
+  files: [src/lib/ci-friction-remedy.ts, src/lib/ci-friction-gardener.ts, src/run-task.ts, test/w1-t5300-a-hand-fix-is-ci-friction-evidence.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-02: the ci-friction gardener (#8657) prices only what the fleet's own fix lane spends
+    (fix.dispatch, fix.commit_refused, fix.base_refreshed). A defect the fleet shipped and the operator then
+    fixed by hand, on a run-unfiled-<epoch> branch with no task trailer, never enters the ledger as a round,
+    so the ladder cannot see it, cannot attach it to a cause, and cannot learn that a merged remedy failed.
+    In this one session the operator hand-built four such fixes (core #8645 #8657 #8689 and console #1913).
+  design: |
+    A hand fix is a merged PR whose head branch is run-unfiled-* and whose title type is fix. Read the last
+    14 days of them once per pass with one paginated REST list, cached in the state dir by PR number, never
+    one call per PR. For each, take its changed src/ and scripts/ files. A hand fix touching a file that is
+    an owner of a priced cause (locateCiFrictionOwner) is attached to that cause as evidence: it appears in
+    the cause's evidence pack and the scorecard ladder line, and a hand fix after a remedy merged is named in
+    the rationale of the next rung. A file touched by hand fixes in two or more distinct PRs with no priced
+    cause becomes the cause `hand_fix:<file>`, ranked by the same half-life weighting with each hand fix
+    priced at the median fix-round minutes of the pass, so it competes in minutes, never in counts. An
+    unreadable PR list leaves hand fixes unmeasured under a named ledger row; it never fails the pass.
+  acceptance:
+    - claim: "a hand fix touching a cause's owning code is attached to that cause as evidence"
+      proof: 'grep: test("W1-T5300: a hand fix touching a cause''s owning code is attached to that cause as evidence" in test/w1-t5300-a-hand-fix-is-ci-friction-evidence.test.ts'
+    - claim: "a file repaired by hand in two PRs with no priced cause becomes a hand_fix cause priced in minutes"
+      proof: 'grep: test("W1-T5300: a file repaired by hand in two PRs with no priced cause becomes a hand_fix cause" in test/w1-t5300-a-hand-fix-is-ci-friction-evidence.test.ts'
+    - claim: "an unreadable PR list leaves hand fixes unmeasured without failing the pass"
+      proof: 'grep: test("W1-T5300: an unreadable PR list leaves hand fixes unmeasured without failing the pass" in test/w1-t5300-a-hand-fix-is-ci-friction-evidence.test.ts'
+  falsifier: |
+    Drop the owner match and the first test sees no evidence on the cause; price hand fixes by count and the
+    second sees a cause outrank one that cost more minutes.
