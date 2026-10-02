@@ -17,6 +17,16 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   Commits conventions (type is one of: build, chore, ci, docs, feat, fix, perf, refactor,
   revert, style, test; subject starts lower-case).
 
+- `ci-friction:fix_refusal:the-task-declares-no-files-so-there-is-no-surface-to-stage` — a
+  task filed with an empty `files:` list (such as a plan-only task or certain synthetic tasks)
+  cannot declare a surface for the worker to edit. The `commitWorkerEdits` function in
+  run-task.ts refuses outright with this reason when `declaredPaths.length === 0`, preventing
+  any commit even if the worker makes valid edits. To fix: if the task is a synthetic task
+  (plan-only, TRIAGE, PLAN, APPROVE, or RETRO lane), pass the PR's `changedPaths` (its
+  current diff) via the `fixRungTaskFor` function in sweep.ts as part of the task's surface,
+  giving workers an implicit surface to commit within; or, if filing a new plan task, declare
+  an explicit `files:` list matching the scope of intended changes.
+
 - `ci-friction:fix_refusal:the-worker-changed-nothing` — `git status` after the worker's run
   showed no modified files in the repository, so the harness refused to create a commit. This
   happens when a worker completes its task but does not edit any of the declared files, or
