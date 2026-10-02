@@ -26,6 +26,7 @@ export const GENERATION_MESSAGES = {
   handoffRequest: "rmd.handoff_request",
   shed: "rmd.shed",
   shed_done: "rmd.shed_done",
+  restore: "rmd.restore",
 } as const;
 
 export interface GenerationMessage {
@@ -91,6 +92,13 @@ export function onShedRequest(channel: GenerationChannel, shed: () => void, rss:
     shed();
     gc?.();
     channel.send({ type: GENERATION_MESSAGES.shed_done, beforeBytes, afterBytes: rss(), gc: gc !== undefined });
+  });
+}
+
+/** The supervisor abandoned the handoff a shed was for: re-warm what {@link onShedRequest} dropped. */
+export function onRestoreRequest(channel: GenerationChannel, restore: (reason: string) => void): void {
+  channel.onMessage((message) => {
+    if (message.type === GENERATION_MESSAGES.restore) restore(message.reason ?? "restore");
   });
 }
 
