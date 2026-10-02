@@ -11,9 +11,9 @@
   origin: "oper#followups-research-2026-09-22"
   plan_refs: [W1-T4051, W1-T3109, W1-T4046, W1-T4041]
   files: [src/lib/read-plane.ts, src/lib/read-plane.worker.ts, src/run-task.ts, src/lib/daemon.ts, test/the-tick-reads-run-off-the-event-loop.test.ts, scripts/test-tier-manifest.json]
-  priority: 3
+  priority: 2
   status: queued
-  # backlog gardener: band=3 evidence=2fdf81d4fbee088b
+  # backlog gardener: band=2 evidence=3d2ed0fad9be4a78
   attempts: 0
   rationale: |
     MEASURED 2026-09-22 (loop-lag rows, 4-day union, and a replay of the live code in the daemon container with a spawn
