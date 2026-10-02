@@ -73,3 +73,12 @@ test("usage routes keep v1 compatible and v2 grouped, and legacy checkpoints are
     assert.equal(refreshed.snapshot.usage!.routing.experiments[0]!.reasonFull, reason);
   } finally { rmSync(fixture.dir, { recursive: true, force: true }); }
 });
+
+test("latest trial reason follows assignment time across reordered archives", () => {
+  const state = usageTelemetryState();
+  accumulateUsageLine(state, { ...assignment("new", "Newest reason"), ts: "2026-10-02T11:00:00Z" });
+  accumulateUsageLine(state, assignment("old", "Older reason"));
+  const arm = buildUsageProjection(state, now).routing.experiments[0]!;
+  assert.equal(arm.reasonFull, "Newest reason");
+  assert.equal(arm.runs, 2);
+});
