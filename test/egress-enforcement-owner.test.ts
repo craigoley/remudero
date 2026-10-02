@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import * as containment from "../src/lib/containment.js";
+import { GENERIC_EXIT_CODE, RmdError, exitCodeFor } from "../src/lib/errors.js";
 import { spawnWorker, workerEgressMode, workerLedgerFields, type SpawnWorkerArgs } from "../src/lib/worker.js";
 
 const settings = JSON.parse(readFileSync(new URL("../settings/worker.json", import.meta.url), "utf8"));
@@ -110,7 +111,15 @@ test("egress owner default connector reaches a real console fixture and teardown
 
 test("egress owner refuses absent or malformed allowlists and failed readiness", async () => {
   for (const allowedDomains of [undefined, [], ["*"], [42], ["https://github.com"]]) {
-    await assert.rejects(containment.startWorkerEgressProxy({ sandbox: { network: { allowedDomains } } }), /allowlist/);
+    await assert.rejects(containment.startWorkerEgressProxy({ sandbox: { network: { allowedDomains } } }), (error: unknown) => {
+      assert.ok(error instanceof containment.WorkerEgressError);
+      assert.ok(error instanceof RmdError);
+      assert.equal(error.name, "WorkerEgressError");
+      assert.equal(error.kind, "install");
+      assert.equal(exitCodeFor(error), GENERIC_EXIT_CODE);
+      assert.match(error.message, /allowlist/);
+      return true;
+    });
   }
   const proxy = await containment.startWorkerEgressProxy(settings);
   await proxy.close();

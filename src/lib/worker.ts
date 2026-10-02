@@ -6329,8 +6329,12 @@ export interface WorkerEgressProxy {
   close(): Promise<void>;
 }
 
-export class WorkerEgressError extends Error {
+export class WorkerEgressError extends RmdError {
   override name = "WorkerEgressError";
+
+  constructor(message: string) {
+    super("install", GENERIC_EXIT_CODE, message);
+  }
 }
 
 // Bounds idle proxy handshakes/connections, not total worker age or download duration.
