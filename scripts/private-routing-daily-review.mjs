@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileS
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { fixedClock, systemClock } from "../src/lib/clock.ts";
 import { ledgerRotationEntries, openLedgerUnion } from "../src/lib/ledger-union.ts";
 import { evaluateRoutingExperiment, ROUTING_EXPERIMENTS } from "../src/lib/routing-experiments.ts";
@@ -22,11 +22,21 @@ async function readSource(source, asOf) {
   if (rotations.length + forms.live === 0)
     return { ...source, state: "unavailable", reasons: ["ledger-source-missing"], forms, rowsRead: 0, rows: [] };
   const rows = [];
+  const findings = [];
+  let findingsOmitted = 0;
+  const finding = (value) => { if (findings.length < 200) findings.push(value); else findingsOmitted++; };
   let rowsRead = 0, malformedRows = 0, unreadSources = 0, futureRows = 0, newestTs = null;
   for await (const row of openLedgerUnion(source.stateDir, {
     since: `${since}T00:00:00Z`,
     onUnreadArchive: () => { unreadSources++; }, onUnreadLive: () => { unreadSources++; },
-    onMalformedRow: () => { malformedRows++; },
+    onMalformedRow: (item) => { malformedRows++; finding({ kind: item.kind, form: item.form, path: item.path, rowOrdinal: item.rowOrdinal, timestamp: item.timestamp }); },
+    onAcceptedRecord: (row, raw) => {
+      const timestamp = Date.parse(row.ts);
+      if (!Number.isFinite(timestamp) || timestamp > Date.parse(asOf) + 5 * 60_000) finding({
+        kind: Number.isFinite(timestamp) ? "future-timestamp" : "invalid-timestamp", rowHash: createHash("sha256").update(raw).digest("hex"),
+        timestamp: typeof row.ts === "string" ? row.ts.slice(0, 80) : null, step: typeof row.step === "string" ? row.step.slice(0, 80) : null,
+      });
+    },
   })) {
     const time = Date.parse(row.ts);
     if (!Number.isFinite(time) || time > Date.parse(asOf) + 5 * 60_000) { futureRows++; continue; }
@@ -42,7 +52,7 @@ async function readSource(source, asOf) {
   if (malformedRows) reasons.push("ledger-source-malformed");
   if (futureRows) reasons.push("ledger-source-future-or-invalid-timestamp");
   return { ...source, state: reasons.length ? "observed-partial" : "observed", reasons, forms,
-    rowsRead, malformedRows, unreadSources, futureRows, newestTs, rows };
+    rowsRead, malformedRows, unreadSources, futureRows, newestTs, findings, findingsOmitted, rows };
 }
 
 function privateWrite(path, value) {
@@ -106,6 +116,9 @@ export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.i
   privateWrite(join(outDir, `${today}.txt`), text);
   privateWrite(join(outDir, "latest.json"), json);
   privateWrite(join(outDir, "latest.txt"), text);
+  const quarantine = JSON.stringify({ version: "routing-source-quarantine-v1", asOf, rawReceiptsRetained: true,
+    sources: results.map(source => ({ label: source.label, findings: source.findings ?? [], omitted: source.findingsOmitted ?? 0 })) }, null, 2) + "\n";
+  privateWrite(join(outDir, `${today}.quarantine.json`), quarantine);
   return { snapshot, text };
 }
 

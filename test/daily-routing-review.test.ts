@@ -58,7 +58,7 @@ test("daily routing review reads all three ledger forms once and keeps repositor
     assert.equal(result.snapshot.nextScheduledReviewAt, "2026-10-03T04:17:00.000Z");
     assert.equal(result.snapshot.routingChanged, false); assert.equal(result.snapshot.comparativeClaims, "none");
     assert.equal(statSync(f.outDir).mode & 0o777, 0o700);
-    for (const file of ["2026-10-02.json", "2026-10-02.txt", "latest.json", "latest.txt"]) assert.equal(statSync(join(f.outDir, file)).mode & 0o777, 0o600);
+    for (const file of ["2026-10-02.json", "2026-10-02.txt", "latest.json", "latest.txt", "2026-10-02.quarantine.json"]) assert.equal(statSync(join(f.outDir, file)).mode & 0o777, 0o600);
     assert.deepEqual(JSON.parse(readFileSync(join(f.outDir, "latest.json"), "utf8")), result.snapshot);
     assert.match(result.text, /sol61-vs-sonnet55: provisional/);
   } finally { f.close(); }
@@ -82,13 +82,18 @@ test("daily routing review preserves missing and malformed sources instead of cl
   } finally { f.close(); }
 });
 
-test("daily routing review quarantines future timestamps and retains non-starters and cost missingness", async () => {
+test("daily routing review retains raw receipts and writes hashed findings to a private quarantine manifest", async () => {
   const f = fixture();
   try {
     writeFileSync(join(f.sources[0]!.stateDir, "ledger.ndjson"), ndjson([assignment("1"),
       { ...assignment("2"), ts: "2026-10-03T10:00:00.000Z" }, { ...assignment("3"), ts: "bad" }]));
     const result = await dailyRoutingReview({ ...f, asOf });
     const source = result.snapshot.sources[0];
+    const quarantine = JSON.parse(readFileSync(join(f.outDir, "2026-10-02.quarantine.json"), "utf8"));
+    assert.equal(quarantine.rawReceiptsRetained, true);
+    assert.equal(quarantine.sources[0].findings.length, 2);
+    assert.match(quarantine.sources[0].findings[0].rowHash, /^[a-f0-9]{64}$/);
+    assert.equal(readFileSync(join(f.sources[0]!.stateDir, "ledger.ndjson"), "utf8").split("\n").filter(Boolean).length, 3);
     assert.equal(source.futureRows, 2); assert.equal(source.newestTs, "2026-10-02T10:00:00.000Z");
     const arm = source.reports.find((item: { id: string }) => item.id === epoch.id).arms.find((item: { arm: string }) => item.arm === "sol61");
     assert.equal(arm.tasks, 1); assert.equal(arm.nonStarterAssignments, 1); assert.equal(arm.costMissingAssignments, 1);
@@ -175,5 +180,37 @@ exit 1
     assert.match(args, /--network none/); assert.match(args, /--workdir \/home\/node\/Remudero\/remudero/);
     assert.match(args, /scripts\/private-routing-daily-review.mjs/);
     assert.match(args, /dst=\/field-trials\/site,readonly/);
+  } finally { f.close(); }
+});
+
+
+test("scheduled field-trial collection uses current mounted source for every stage", () => {
+  const f = fixture();
+  try {
+    const registry = join(f.dir, "instances.yaml"), bin = join(f.dir, "bin"), log = join(f.dir, "docker-calls");
+    mkdirSync(bin);
+    for (const source of f.sources) {
+      mkdirSync(join(source.stateDir, "state"));
+      writeFileSync(join(source.stateDir, "state/ledger.ndjson"), ndjson([assignment("1")]));
+    }
+    writeFileSync(registry, f.sources.map(source => `  ${source.label}:\n    state_dir: ${source.stateDir}`).join("\n") + "\n");
+    writeFileSync(join(bin, "flock"), "#!/bin/sh\nexit 0\n"); chmodSync(join(bin, "flock"), 0o700);
+    writeFileSync(join(bin, "docker"), `#!/bin/sh
+if [ "$1" = inspect ]; then echo test-image; exit 0; fi
+if [ "$1" = exec ]; then echo test-credential; exit 0; fi
+printf '%s\\n' "$*" >> "$TEST_DOCKER_CALLS"
+exit 0
+`); chmodSync(join(bin, "docker"), 0o700);
+    const result = spawnSync("bash", [join(root, "deploy/field-trials-refresh.sh")], { cwd: root, encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, RMD_INSTANCE_REGISTRY: registry,
+        RMD_FIELD_TRIALS_CASE_FILES: "", TEST_DOCKER_CALLS: log } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, "");
+    const calls = readFileSync(log, "utf8").trim().split("\n");
+    assert.equal(calls.length, 3, JSON.stringify({ calls, stdout: result.stdout, stderr: result.stderr }));
+    for (const call of calls) assert.match(call, /--workdir \/home\/node\/Remudero\/remudero/);
+    assert.match(calls[1]!, /scripts\/private-field-trials-case-files.mjs/);
+    assert.match(calls[2]!, /\/home\/node\/Remudero\/remudero\/bin\/rmd field-trials/);
+    assert.doesNotMatch(calls.join("\n"), /--workdir \/app|\/app\/bin\/rmd/);
   } finally { f.close(); }
 });

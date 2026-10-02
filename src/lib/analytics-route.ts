@@ -1,3 +1,4 @@
+import { readRoutingDailyStatus } from "./routing-daily-status.js";
 /**
  * lib/analytics-route.ts — `GET /v1/analytics`: the per-instance aggregate answering the
  * operator's four analytics questions the ledger could not answer before W1-T477 (see
@@ -2400,6 +2401,7 @@ export function buildAnalyticsRoute(deps: {
   currentSnapshot: () => AnalyticsSnapshot;
   currentLiveMetrics?: () => LiveAnalyticsMetrics;
   mountsRoot?: string;
+  dailyReviewStateDir?: string;
   currentEvalCardInput?: (trialId: string | undefined) => { trial: EvalCardTrial; evidence: EvalCardEvidence } | undefined;
   currentRoutingPool?: () => RoutingPoolSnapshot;
   clock?: Clock;
@@ -2425,6 +2427,10 @@ export function buildAnalyticsRoute(deps: {
       // refresh; say so explicitly rather than let the field vanish from the payload.
       if (requestedVersion === CONSOLE_SIGNALS_PROJECTION_VERSION) {
         sendJson(res, 200, buildConsoleSignalsProjection(base, live));
+        return;
+      }
+      if (requestedVersion === "routing-daily-v1") {
+        sendJson(res, 200, readRoutingDailyStatus(deps.dailyReviewStateDir, deps.clock ?? systemClock));
         return;
       }
       if (requestedVersion === BENCHMARK_QUALITY_VERSION) {

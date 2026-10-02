@@ -2832,7 +2832,7 @@ function assembleServeRoutes(
     buildTaskCardRoute(deps.board),
     // W1-T3352: synchronous read of process-owned state. The server assembly owns refresh and
     // cancellation; this route receives no ledger path or reader capability.
-    buildAnalyticsRoute({ currentSnapshot: currentAnalyticsSnapshot, currentLiveMetrics: deps.liveMetrics, mountsRoot: deps.questionsRoot,
+    buildAnalyticsRoute({ dailyReviewStateDir: dirname(deps.ledgerPath), currentSnapshot: currentAnalyticsSnapshot, currentLiveMetrics: deps.liveMetrics, mountsRoot: deps.questionsRoot,
       currentEvalCardInput: (trialId) => readEvalCardInput(dirname(deps.ledgerPath), trialId) }),
     // W1-T4563: `/` no longer serves a console -- app.remudero.com is the console (DECISIONS
     // 2026-09-16 and 2026-09-26). It says what this surface is and where to go instead.
