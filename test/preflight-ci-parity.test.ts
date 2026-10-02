@@ -422,7 +422,7 @@ test("preflightCommand: --ci-parity ADDS the ci-parity steps after the three han
   };
   let code: number;
   try {
-    code = await preflightCommand(["--ci-parity"], { spawn });
+    code = await preflightCommand(["--ci-parity"], { spawn, coverageLockDiscriminator: randomUUID() });
   } finally {
     console.log = originalLog;
   }

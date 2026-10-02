@@ -287,7 +287,7 @@ test(
     // `coverage/lcov.info` at all, so it throws and the catch arm is the thing under test.
     // This is a second fake repository. Anchor it outside the parent gate's nested TMPDIR so
     // this fixture reaches the unreadable-lcov arm, not the unrelated scratch path-length guard.
-    const emptyRoot = mkdtempSync(join("/tmp", "preflight-coverage-no-lcov-"));
+    const emptyRoot = mkdtempSync(join("/tmp", "rmd-no-lcov-"));
     const previousTmp = process.env.TMPDIR;
     process.env.TMPDIR = "/tmp";
     try {
