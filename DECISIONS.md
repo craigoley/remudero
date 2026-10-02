@@ -3554,6 +3554,8 @@ Status: accepted
 
 ## 2026-10-02 — Sol 6.1 replaces Sol 6 as the router lead
 
+Operator-authored: Craig requested Sol 6.1 routing, switch data for Field Trials, and Azure cash deployment.
+
 Operator authorized the subscription switch, Field Trials capture and Azure cash deployment.
 `gpt-6.1-sol` leads balanced/frontier Codex rows; old Sol versions are availability fallbacks.
 Economy and Claude frontier preference are unchanged. Concrete-model epochs `sol61-vs-sonnet55`
