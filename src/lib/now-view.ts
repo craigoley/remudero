@@ -36,6 +36,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { deriveLastPoll, readDiskFreeBytes, readGhRateLimitRemaining } from "./daemon-health.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { feedbackDir, listFeedback, type FeedbackEntry } from "./feedback.js";
+import { projectHumanGates, type HumanGateObservation, type HumanGateProjection, type HumanGateSource } from "./human-gate.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { readTaskActivity } from "./ledger-projector.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsSync, rotationStampIso, type LedgerRotationMemo, type LedgerRotationMemoPass } from "./ledger-union.js";
@@ -63,8 +64,8 @@ import { legacyRowIndex, type LegacyRows, type ShadowLatest, type ShadowSum } fr
 import { effectiveViewMode, type ViewSource, type ViewSwitchMode } from "./views.js";
 
 export const NOW_VIEW_NAME = "now";
-/** 2: every clock stamp left `data`. 3: `decisions[]`, each with its answer route and tier, replaced `questions`' count (P4-T08). */
-export const NOW_VIEW_VERSION = 3;
+/** 4 adds source-qualified human gates; the original decision routes and fields remain unchanged. */
+export const NOW_VIEW_VERSION = 4;
 /** Re-materialize at least this often with no new row: `elapsedMs`, the liveness bound and the 6 h cooldown move with the clock. */
 export const NOW_REFRESH_MS = 30_000;
 /** The host probes' cadence (design §3.5), per instance. */
@@ -167,10 +168,23 @@ export interface NowViewData {
   decisionsMore?: number;
   /** Why a decision source was not read for this instance, by kind; its decisions are then absent, never zero. */
   decisionsReasons?: Partial<Record<"grill" | "task_question", string>>;
+  /** Additive decision projection; its counts precede the legacy decisions display cap. */
+  humanGates?: HumanGateProjection;
 }
 
 /** The `decisions` half of one instance's body. */
-export type NowDecisionsData = Pick<NowViewData, "decisions" | "decisionsMore" | "decisionsReasons">;
+export type NowDecisionsData = Pick<NowViewData, "decisions" | "decisionsMore" | "decisionsReasons" | "humanGates">;
+
+function decisionGate(decision: NowDecision): HumanGateObservation {
+  const kind = decision.kind === "grill" ? "feedback_grill" : decision.kind;
+  const subject = decision.kind === "task_question" ? decision.id : decision.taskId ?? decision.answer.fields.replyTo ?? decision.id;
+  return {
+    kind, subject, ownerSurface: "inbox", openedAt: decision.askedAt ?? null,
+    url: decision.answer.fields.issueUrl ?? null,
+    reason: decision.prompt.split("\n").find((line) => line.trim() !== "")?.trim() ?? decision.title,
+    resolutionVerb: decision.kind === "manual_approval" ? "approve" : decision.kind === "escalation" ? "mark_handled" : "answer",
+  };
+}
 
 const RUNNING_STATUSES = new Set(["running", "fixing", "review", "diagnosing"]);
 
@@ -731,7 +745,23 @@ export function createNowView(opts: NowViewOptions): {
       if ("reason" in store) reasons.task_question = store.reason;
       else all.push(...taskQuestionDecisions(instance.name, store.lines as QuestionStoreLine[], answeredByFact(db), snapshot.tasks));
     }
-    return { ...capDecisions(all), ...(Object.keys(reasons).length > 0 ? { decisionsReasons: reasons } : {}) };
+    const escalationUnknown = snapshot.github_unreachable || !snapshot.prQueue.complete || snapshot.tasks.some((task) => task.escalationUnverified);
+    const sources: HumanGateSource[] = [{
+      name: "escalations", instance: instance.name, state: escalationUnknown ? "partial" : "complete",
+      ...(escalationUnknown ? { reason: "GitHub escalation state could not be completely verified" } : {}),
+      gates: all.filter((decision) => decision.kind === "escalation" || decision.kind === "manual_approval").map(decisionGate),
+    }];
+    if (instance.name === core) {
+      sources.push({ name: "feedback-grills", instance: instance.name,
+        state: reasons.grill ? "unavailable" : "complete", ...(reasons.grill ? { reason: reasons.grill } : {}),
+        gates: all.filter((decision) => decision.kind === "grill").map(decisionGate) });
+      // The legacy question reader skips malformed lines without attesting complete coverage.
+      sources.push({ name: "task-questions", instance: instance.name, state: reasons.task_question ? "unavailable" : "partial",
+        reason: reasons.task_question ?? "the question reader does not report malformed-line completeness",
+        gates: all.filter((decision) => decision.kind === "task_question").map(decisionGate) });
+    }
+    const humanGates = projectHumanGates(sources);
+    return { ...capDecisions(all), humanGates, ...(Object.keys(reasons).length > 0 ? { decisionsReasons: reasons } : {}) };
   };
   const behindMemo = new Map<string, { heads?: string; result?: PlanBehind }>();
   const planBehind = opts.planBehind ?? ((instance: NowInstance): PlanBehind => {
@@ -910,7 +940,7 @@ export function createNowView(opts: NowViewOptions): {
       const deps = { plan: built.plan, ledgerPath, github: built.gateway.github, readLedger: () => rows, now: () => now,
         readCreditStore: () => built.credit.credit, readCreditOverrideFile: () => built.credit.overrides };
       const snapshot = computeBoardSnapshot(deps);
-      const decisions: NowDecisionsData = { decisions: mine.decisions, ...(mine.decisionsMore ? { decisionsMore: mine.decisionsMore } : {}), ...(mine.decisionsReasons ? { decisionsReasons: mine.decisionsReasons } : {}) };
+      const decisions: NowDecisionsData = { decisions: mine.decisions, ...(mine.decisionsMore ? { decisionsMore: mine.decisionsMore } : {}), ...(mine.decisionsReasons ? { decisionsReasons: mine.decisionsReasons } : {}), ...(mine.humanGates ? { humanGates: mine.humanGates } : {}) };
       const legacy = assembleNowView({ instance: name, snapshot, rows, plan: built.plan, recent: [], health: mine.health, decisions, nowMs: now });
       legacy.board.spendTodayUsd = deriveDayCostUsd(spent.rows, built.builtMs);
       const captured = built.probe.health;
