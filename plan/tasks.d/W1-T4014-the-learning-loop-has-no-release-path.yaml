@@ -11,7 +11,7 @@
   origin: oper#fleet-health-2026-09-22
   plan_refs: ["W1-T2959", "W1-T3542", "W1-T3754"]
   priority: 2
-  status: queued
+  status: merged
   # backlog gardener: band=2 evidence=d196fd3099db8925
   attempts: 0
   rationale: |

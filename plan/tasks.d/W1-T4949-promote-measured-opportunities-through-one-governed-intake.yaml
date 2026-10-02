@@ -12,7 +12,7 @@
   note: "reservation hand-off: plan-opportunity-intake-1790799000000 -> plan-opportunity-intake-1790799000000"
   plan_refs: [W1-T4110, W1-T4111, W1-T4941]
   files: [src/lib/opportunity-intake.ts, src/lib/retro.ts, src/lib/codeql-quality-intake.ts, src/lib/ci-friction-gardener.ts, src/lib/daemon.ts, test/one-opportunity-intake-promotes-standing-debt.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The standing-debt line in MASTER-PLAN.md reports open entries with growing cumulative
