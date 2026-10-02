@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 3.88
   status: queued
@@ -16,3 +16,14 @@
     - claim: "the check:ci-log:coverage-shard:test-sandbox-subject-generator-test-ts:flaky cause of PR friction has a recorded remedy"
       proof: "grep: ci-friction:check:ci-log:coverage-shard:test-sandbox-subject-generator-test-ts:flaky in docs/ci-friction-remedies.md"
   note: "Filed by the ci-friction gardener (W1-T4435) from a weekly pass over the ledger and gate-fire-rate.ts's own measurement. check:ci-log:coverage-shard:test-sandbox-subject-generator-test-ts:flaky priced at 0.7 PR minute(s) across 1 round(s) on 1 pull request(s) — the costliest cause with no open task. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person; its remedy is recorded in docs/ci-friction-remedies.md naming \"ci-friction:check:ci-log:coverage-shard:test-sandbox-subject-generator-test-ts:flaky\" once it lands."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.93
+    reasons:
+      - "The declared files list names only docs/ci-friction-remedies.md. The description says the task records a remedy for a flaky coverage-shard test cause, which is documentation."
+      - "The acceptance criterion is a grep for a ci-friction entry in that doc. This can be checked automatically (verify: auto)."
+      - "The description does not mention secrets, auth, deletion, merge, deploy or review policy changes. It also does not ask for an operator-only decision."
+      - "The ci-friction family has 2 merged and 0 declined tasks (Beta mean 0.88). The gates state shows nothing concerning, and the PR still passes CI and review."
+    judged_at: "2026-10-02T03:48:26.537Z"
+    pin: "8e5cec8983ee2a0e0faf8e50061c74c295ce042393eca1e0ac5fe297006f9545"
