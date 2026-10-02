@@ -1,0 +1,112 @@
+- id: W1-T5227
+  title: "A CONFLICT MARKER NEVER REACHES A COMMIT — the fix lane's harness commit staged a half-resolved merge and sealed it: commit 4c047d2bd on #8551 (run-unfiled-1790924730513, Remudero-Assignment f20bb7bc-f3fe-4a7e-8492-2fb779dbb833) is a two-parent merge whose src/lib/now-view.ts carries <<<<<<< HEAD / ======= / >>>>>>> origin/main in defaultProbeHost, every CI job then failed on esbuild 'Unexpected <<', and neither the harness, the pre-commit hook nor the push refused it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 15.00
+  risk: medium
+  origin: "operator session 2026-10-02: E34, fleet fix-lane commit 4c047d2bd on PR #8551"
+  plan_refs: [W1-T4458, W1-T3696, W1-T3727, W1-T4207, W1-T4797, W1-T137, W1-T2773, W1-T106]
+  files: [src/run-task.ts, hooks/pre-commit, test/a-conflict-marker-never-reaches-a-commit.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    EVIDENCE: `git show 4c047d2bd`. Author "Remudero Fleet", subject "fix(now-view): retain probe rows and
+    cadence bound", trailer Remudero-Assignment f20bb7bc-f3fe-4a7e-8492-2fb779dbb833. It has TWO parents
+    (256facb33 and 12b9eef81) and its src/lib/now-view.ts holds marker lines at 948, 951 and 954. The
+    branch was later repaired by hand (407bca177), so the PR is no longer the reproduction; the commit is.
+
+    THE CODE PATH (W1-T4458's shell-less merge-conflict round, src/run-task.ts):
+      1. The fix rung's strike, when `fixHarnessOwnsGit && currentMergeConflict !== undefined`, calls
+         `startShellLessMergeConflictMerge`, which runs `git merge --no-commit --no-ff origin/main` and
+         leaves MERGE_HEAD plus the markers for a Read/Write/Edit worker to resolve.
+      2. The worker's round ends. `harnessCommitForShellLessWorker` takes its COMMIT_MESSAGE line,
+         appends the assignment trailer (`withAssignmentTrailer`) and calls `commitWorkerEdits`.
+      3. `commitWorkerEdits` runs `git add -A -- <declared paths>` and then `git commit -m <message>`.
+         `git add` on a conflicted path MARKS IT RESOLVED whatever its contents, so git's own "you have
+         unmerged files" refusal never fires. With MERGE_HEAD live, the commit is a two-parent merge
+         carrying the worker's subject. That is exactly 4c047d2bd's shape: a merge commit with a
+         conventional fix subject and an assignment trailer. A worker that never finished resolving
+         now-view.ts had its markers sealed into history.
+      4. `pushFixRoundPrechecked` runs only the diff-coverage precheck, then `pushFixRound`. Nothing
+         reads the tree for markers.
+    REPRODUCED 2026-10-02 in a throwaway repo with the same git sequence (merge --no-commit --no-ff,
+    then add -A -- <file>, then commit -m): it committed with 2 parents and the markers in place.
+    `git diff --check HEAD^1 HEAD` on that commit printed "leftover conflict marker" three times and
+    exited 2. Git already has the detector; nothing on this path calls it.
+    (The fleet ledger rows for this round are on the fleet host, not on the operator Mac. The path is
+    named from the commit's shape and the code, not from a ledger row.)
+
+    WHY NO HOOK CAUGHT IT. `stampRunWorktreeAssignment` (src/lib/worker.ts) delegates every hook except
+    prepare-commit-msg to the worktree's prior hooks dir (`hooks/`), so hooks/pre-commit and
+    hooks/commit-msg DID run. hooks/pre-commit checks only mkdtempSync callsites (W1-T2773), and it
+    `exit 0`s early when no src/scripts/test .ts/.mjs file is staged. hooks/commit-msg (W1-T137) runs
+    commitlint on the message only, and skips a git-authored merge message. Neither hook looks at
+    content for markers.
+
+    NO TRACKED FILE ON MAIN TODAY (ddf203f21) HOLDS A LINE THAT BEGINS WITH A MARKER:
+    `git grep -E '^(<<<<<<<|>>>>>>>)( |$)'` and `git grep -E '^=======$'` both return nothing. The two
+    tests that build markers (test/a-merge-conflict-round-can-merge.test.ts and
+    test/inherited-growth-records-a-bucket.test.ts) do it inside string literals. So the gate can refuse
+    on any marker line and still not refuse anything legitimate in the repo.
+  design: |
+    (1) THE HARNESS COMMIT REFUSES. Before `commitWorkerEdits` stages anything, it reads the paths it is
+        about to stage for leftover conflict markers. The check MUST run before `git add`, because the
+        add is what erases the unmerged state. Use git's own detector over the declared changes, not a
+        hand-rolled regex: keep only the "leftover conflict marker" lines of a `--check` diff and ignore
+        whitespace findings. Also count any path still listed by `git diff --name-only --diff-filter=U`.
+        Put the predicate in one exported function, `leftoverConflictMarkerPaths(...)`, in src/run-task.ts.
+        On a hit, return `committed: false` with a reason naming the files and stage nothing. The live
+        MERGE_HEAD is left alone, so the next strike's `startShellLessMergeConflictMerge` sees the merge
+        still pending (it is idempotent) and the worker gets the same files back.
+    (2) THE FIX RUNG TREATS IT AS AN UNRESOLVED CONFLICT. The existing `fix.commit_refused` row carries
+        that reason plus a `conflict_marker_files` field. `currentMergeConflict` stays set, or is set from
+        those files when the round was not already in merge-conflict mode. The next strike is then a
+        merge-conflict round, and exhaustion reports the existing `merge_conflict_unresolved` reason. Do
+        not add a new outcome or escalation path.
+    (3) THE PUSH REFUSES. `pushFixRoundPrechecked` runs `leftoverConflictMarkerPaths` against the head's
+        diff from origin/main before its coverage precheck. A hit throws `FixRoundPushError` like the
+        coverage refusal does, so a commit a Bash-bearing worker made itself never leaves the worktree.
+    (4) EVERY COMMITTER IS REFUSED. hooks/pre-commit runs `git diff --cached --check`, keeps only the
+        "leftover conflict marker" findings, and exits non-zero naming each file:line. Put this BEFORE
+        the hook's existing early `exit 0` (the one for commits that stage no .ts/.mjs file), or a
+        marker in a .md, .yaml or .sh file goes through. A merge commit runs pre-commit when it is
+        concluded with `git commit`, so 4c047d2bd would have been refused here too. A real refusal must
+        not throw out of `commitWorkerEdits`'s `git commit`: (1) catches the marker first, and a
+        hook refusal that still happens is returned as a refusal, not thrown.
+    Do not loosen anything that exists: W1-T4458's resolved-merge path must still produce a two-parent
+    commit, and the mkdtemp check in hooks/pre-commit stays as it is.
+  acceptance:
+    - claim: "the harness commit refuses a tree with conflict markers and names the files"
+      proof: 'grep: test("W1-T5227: the harness commit refuses a tree with conflict markers and names the files" in test/a-conflict-marker-never-reaches-a-commit.test.ts'
+    - claim: "a refused marker commit leaves the merge pending and the fix rung keeps the conflict path"
+      proof: 'grep: test("W1-T5227: a refused marker commit leaves the merge pending for the conflict path" in test/a-conflict-marker-never-reaches-a-commit.test.ts'
+    - claim: "the fix round push refuses a head whose tree carries conflict markers"
+      proof: 'grep: test("W1-T5227: the fix round push refuses a head whose tree carries conflict markers" in test/a-conflict-marker-never-reaches-a-commit.test.ts'
+    - claim: "the pre-commit hook refuses a marker commit for every committer"
+      proof: 'grep: test("W1-T5227: the pre-commit hook refuses a marker commit for every committer" in test/a-conflict-marker-never-reaches-a-commit.test.ts'
+    - claim: "a fully resolved merge still commits as a two-parent merge"
+      proof: 'grep: test("W1-T5227: a fully resolved merge still commits as a two-parent merge" in test/a-conflict-marker-never-reaches-a-commit.test.ts'
+    - claim: "the predicate is wired into the harness commit and the fix push"
+      proof: 'grep: leftoverConflictMarkerPaths( in src/run-task.ts'
+    - claim: "the new suite passes"
+      proof: 'unit test: test/a-conflict-marker-never-reaches-a-commit.test.ts'
+  falsifier: |
+    CLOSE THIS TASK without implementation if, on the latest main, `commitWorkerEdits` already refuses
+    to stage a path that holds a leftover conflict marker, `pushFixRoundPrechecked` already refuses such
+    a head, and hooks/pre-commit already refuses such a commit when no .ts file is staged. Reproduce
+    first: take startShellLessMergeConflictMerge on a diverged fixture, skip the worker's edit, and call
+    commitWorkerEdits. If it still commits, the defect stands. Remove the new check and the first test
+    must see the commit land again.
+  notes: |
+    reservation hand-off: file/conflict-marker-gate-1790931471702 -> file/conflict-marker-gate-1790931471702
+    BUILDER TRAPS: the hook test makes a REAL commit in a gitRepo() fixture with core.hooksPath pointed
+    at this checkout's hooks dir. It needs a local user.email and user.name (the CI runner has none),
+    neutral helper names (fixture-copy census), and no raw `git init`. Prove each new assertion is
+    load-bearing by deleting the check and watching it go red.
+    SCOPE FENCE: this task covers markers only. It does not cover semantic merge skew with no marker
+    (W1-T4474), it does not change how the merge-conflict prompt is written, and it adds no new gate to
+    hooks/pre-push or CI.
