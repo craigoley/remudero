@@ -33,27 +33,11 @@ import { slug as kebabSlug } from "./feedback-docket.js";
 import type { LedgerRecord } from "./retro.js";
 
 /**
- * lib/ci-friction-gardener.ts (W1-T4435) — the fleet prices its own slowest gate.
- *
- * INVARIANT: every cause is ranked by PR MINUTES LOST, never fire count — a frequent one-minute
- * check must never outrank a rare 25-minute one (this module's own falsifier). gate-gardener
- * (W1-T4116) already counts how often each gate fires; it never prices a fire in PR time.
- *
- * FOUR CAUSE KINDS, priced from what the fleet already measures — no new GitHub calls: `check`
- * (a red gate's own minutes, from gate-fire-rate.ts's persisted report, W1-T4115); `main_merge`
- * (a `fix.base_refreshed` round — GitHub auto-merging main in, named by the shared file it
- * blames); `conflict` (a `fix.dispatch` round whose `mode` is `"merge-conflict"`); `fix_refusal`
- * (a round whose `fix.commit_refused` fired — the harness refused that round's commit, so it
- * bought no progress; design point (iv)). Each ledger round's minutes are the wall-clock gap
- * since the run's PREVIOUS round (or its `pr.opened`) — every row already carries `ts`.
- *
- * ONE class, `draft` (a `review` class, gardener.ts): the costliest cause with no queued task
- * already tracking it (`origin: ci-friction:<cause>`) is filed as a parked, `verify: human`,
- * `author_class: machine` task, same idempotency shape as measurement-cadence.ts's CI-learning
- * rung, judged by whether its PR merges. Every pass whose pricing moved appends a row to the
- * trend log in the STATE dir ({@link ciFrictionGardenLogPath}), so the trend reads as the total
- * moving (design point (iii)) — never in the filing PR, whose shard must travel alone (Rule 15
- * refused all eight 2026-09-25 filings that carried a docs/ log beside the shard).
+ * CI friction is ranked by recency-weighted PR minutes, never fire count.
+ * Ledger rounds measure checks, main merges, conflicts and refused commits; merged manual fixes
+ * add explicitly labeled median proxies. Gate reports supply measured check minutes.
+ * Remedies enter the governed plan through the existing ladder, not a direct code-writing path.
+ * Unreadable history refuses the pass; unreadable manual evidence is reported independently.
  */
 
 // ── Pricing: rounds → causes, never fire count ──────────────────────────────────────────────
