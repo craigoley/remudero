@@ -1190,3 +1190,35 @@ test("a durable credit written after the now build is no diff when legacy replay
   const credited = computeBoardSnapshot({ plan: PLAN, ledgerPath: join(core.ledgerDir, "ledger.ndjson"), github: stubGateway(), readLedger: () => readLedgerLines(join(core.ledgerDir, "ledger.ndjson")), now: () => T0 });
   assert.equal(credited.tasks.find((x) => x.taskId === "W1-T2")?.status, "merged");
 });
+
+test("a run escalated to another model mid-run shows the model its worker now asks for in the view as in legacy", (t) => {
+  // Captured 2026-10-02T15:46:54Z: board.tasks[taskId=W1-T1289].worker.requestedModel legacy "opus" vs view "sonnet".
+  // Its 15:20:50 worker.assignment escalated the run to opus and its worker.activity rows said so from 15:20:54, but
+  // those rows are not facts, so the view derived the run's model from its 14:38:02 run.start mount alone.
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { listGrilling: () => [] });
+  const run = { task_id: "W1-T1", run_id: "W1-T1-1" };
+  clock.set(T0);
+  core.append({ step: "run.start", ...run, mount: { model: "sonnet" } });
+  clock.set(T0 + 60_000);
+  core.append({ step: "worker.activity", ...run, event_kind: "message", provider: "codex", requested_model: "sonnet" });
+  clock.set(T0 + 120_000);
+  core.append({ step: "worker.assignment", ...run, worker_assignment: { requested: { model: "opus" } } });
+  clock.set(T0 + 125_000);
+  core.append({ step: "worker.activity", ...run, event_kind: "message", provider: "claude", requested_model: "opus" });
+  clock.set(T0 + 130_000);
+  core.append({ step: "worker.activity", ...run, event_kind: "working" });
+  clock.set(T0 + 180_000);
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  const shown = body.data.board.tasks.find((x) => x.taskId === "W1-T1");
+  assert.deepEqual(shown?.worker, { requestedModel: "opus" }, JSON.stringify(shown));
+  const diffs = compareNow(view, core, body, T0 + 210_000);
+  assert.deepEqual(diffs.filter((d) => d.classification === "real"), [], JSON.stringify(diffs));
+  // Negative control: a body still showing the run's first model where legacy's rows say it moved stays real.
+  shown!.worker = { requestedModel: "sonnet" };
+  const wrong = compareNow(view, core, body, T0 + 210_000).find((d) => d.path === "board.tasks[taskId=W1-T1].worker.requestedModel");
+  assert.equal(wrong?.classification, "real", JSON.stringify(wrong));
+});
