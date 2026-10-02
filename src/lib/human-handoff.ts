@@ -508,7 +508,7 @@ export function appendHumanHandoff(deps: HumanHandoffLedgerContext, handoff: Hum
 
 /** Fold the durable handoffs from every ledger rotation. `complete: false` names an unread rotation, so a partial queue is never read as a whole one. */
 export function readHumanHandoffs(ledgerPath: string): { handoffs: HumanHandoff[]; complete: boolean } {
-  const read = readLedgerUnionRecordsSync(dirname(ledgerPath), { step: [HUMAN_HANDOFF_LEDGER_STEP] });
+  const read = readLedgerUnionRecordsSync(dirname(ledgerPath), { step: [HUMAN_HANDOFF_LEDGER_STEP], refuseIncomplete: true });
   const latest = new Map<string, HumanHandoff>();
   for (const row of read.rows) {
     const handoff = row.handoff as HumanHandoff | undefined;

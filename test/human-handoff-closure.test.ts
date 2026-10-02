@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { HUMAN_HANDOFF_LEDGER_STEP } from "../src/lib/ledger.js";
 import {
   HANDOFF_CLOSURE_OUTCOMES,
   appendHumanHandoff,
@@ -133,6 +134,26 @@ test("the closure and its receipts survive a restart, and the newest snapshot wi
     assert.equal(back.closure?.decision, "do not pay");
     assert.equal(back.closure?.authoritativeOutcome, "receipt:payment-cancelled-1");
     assert.deepEqual(back.receipts.map((receipt) => receipt.kind), ["created", "delivered", "claimed", "closed"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a malformed snapshot is skipped and an unreadable rotation marks the queue incomplete, never whole", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-handoff-partial-"));
+  try {
+    const stateDir = join(root, "state");
+    const ledgerPath = join(stateDir, "ledger.ndjson");
+    mkdirSync(stateDir, { recursive: true });
+    const created = open();
+    appendHumanHandoff({ ledgerPath }, created, created.receipts[0]);
+    appendFileSync(ledgerPath, JSON.stringify({ ts: "2026-10-01T12:00:01.000Z", step: HUMAN_HANDOFF_LEDGER_STEP, handoff: { version: "human-handoff-v0", handoffId: "handoff:legacy" } }) + "\n");
+    const whole = readHumanHandoffs(ledgerPath);
+    assert.equal(whole.complete, true);
+    assert.deepEqual(whole.handoffs.map((item) => item.handoffId), ["handoff:close-1"]);
+    writeFileSync(join(stateDir, "ledger.2026-09-30T00-00-00-000Z.ndjson.gz"), "not a gzip archive");
+    const partial = readHumanHandoffs(ledgerPath);
+    assert.equal(partial.complete, false, "an unread rotation may hide an open handoff, so the fold says so");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
