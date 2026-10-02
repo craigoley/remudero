@@ -1,0 +1,34 @@
+- id: W1-T5386
+  title: "A TASK WHOSE ACCEPTANCE NAMES A UNIT TEST IT DOES NOT DECLARE CAN NEVER BE BUILT — the commit harness refuses the new test file as outside files:, and the fix lane spends its strikes on 'the worker changed nothing'; three fleet PRs stalled this way on 2026-10-02"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 8.00
+  risk: medium
+  origin: "operator session 90be18e2, 2026-10-02: #8684 #8713 #8779 each needed a hand fix and a plan amendment"
+  files: [src/run-task.ts, test/a-worker-may-add-the-test-its-proof-names.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-02, three times in one day: W1-T1289 (#8684), W1-T4271 (#8713) and W1-T4015 (#8779) each
+    carried unit-test acceptance criteria while files: declared no test file (or not the suites a change
+    reaches). commitWorkerEdits (src/run-task.ts) stages only declared paths plus REGISTERED REGENERABLE
+    artifacts, so a worker that wrote the test its own proof names had that file refused; with nothing
+    else to stage the round logged "the worker changed nothing", the sweep spent both fix strikes, and an
+    operator hand-wrote the test and filed a plan amendment each time. task-linter excuses an unresolvable
+    unit-test proof exactly when no test path is declared, so filing never catches it either.
+  design: |
+    The W1-T4450 regenerable-artifact exception, extended by one rule: a NEW file under test/ whose content
+    declares a test title that one of the task's own unit-test proofs names is staged although
+    undeclared, and reported as such on the commit row. Only a new test file, only one that carries a title
+    the task's proofs name, so the scope boundary still refuses everything else the worker touches.
+  acceptance:
+    - claim: "a new test file carrying a title the task's own proof names is staged though undeclared"
+      proof: 'grep: test("W1-T5386: a new test file carrying a title the task proof names is staged though undeclared" in test/a-worker-may-add-the-test-its-proof-names.test.ts'
+    - claim: "an undeclared test file that names no proof title, or edits an existing file, is still refused"
+      proof: 'grep: test("W1-T5386: an undeclared test file that names no proof title is still refused" in test/a-worker-may-add-the-test-its-proof-names.test.ts'
+  falsifier: |
+    Drop the exception and the first test sees the new test file refused as outside the declared files.
