@@ -23,6 +23,7 @@ import type { ServerResponse } from "node:http";
 import { systemClock, type Clock } from "./clock.js";
 import { ifNoneMatchHits } from "./console-snapshot-cache.js";
 import type { Route } from "./service.js";
+import { awaitViewDemand, DEMAND_VIEWS, TASK_VIEW_NAME, touchViewDemand } from "./view-demand.js";
 
 /** What a view source is (the `<kind>:<instance>` prefix of its name); its budget is in view-freshness.ts. */
 export type SourceKind =
@@ -144,6 +145,10 @@ export interface ViewBodySource {
   body(view: string, key?: string): ViewBodyEntry | undefined;
   judge(sources: readonly ViewSource[], now: number): ViewSource[];
   switches(): { views: Record<string, ViewSwitchMode> };
+  /** Posts `want{view, key}` to the worker (view-demand.ts); false when there is no worker to ask. */
+  want?(view: string, key: string): boolean;
+  /** Calls `listener` with each body the worker posts, after it is stored; returns the unsubscribe. */
+  onBody?(listener: (entry: ViewBodyEntry) => void): () => void;
 }
 
 /** `auto` serves exactly while the view's shadow readiness reads ready, and is `shadow` otherwise. */
@@ -184,6 +189,8 @@ export interface ReadModelViewRoutesOptions {
   readModel?: ViewBodySource;
   /** Query parameters a read-model view's key cannot omit, by view: a request without one answers 400. */
   requiredParams?: Record<string, readonly string[]>;
+  /** Views whose keys are built on demand (view-demand.ts); defaults to {@link DEMAND_VIEWS}. */
+  demandViews?: readonly string[];
   clock?: Clock;
   /** Told of each request to a view switched `shadow`, once its response has finished (view-shadow.ts). */
   shadow?: (view: string, key: string, params: URLSearchParams) => void;
@@ -213,7 +220,9 @@ export interface ReadModelViewRoutesOptions {
 export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Route[] {
   const clock = opts.clock ?? systemClock;
   const legacy = new Map(opts.legacy.map((view) => [view.name, view]));
-  const names = [...new Set([...legacy.keys(), ...(opts.readModelViews ?? [])])];
+  const demandViews = new Set(opts.demandViews ?? DEMAND_VIEWS);
+  const names = [...new Set([...legacy.keys(), ...(opts.readModelViews ?? []), ...demandViews])];
+  const requiredParams: Record<string, readonly string[]> = { [TASK_VIEW_NAME]: ["instance", "id"], ...opts.requiredParams };
   const flippedEtags = new WeakMap<ViewBodyEntry, string>();
   const judged = (readModel: ViewBodySource, entry: ViewBodyEntry): { body: ViewBody; etag: string } => {
     const sources = readModel.judge(entry.body.sources, clock.now());
@@ -231,7 +240,7 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
     scope: "read",
     handler: (req, res) => {
       const params = new URL(req.url ?? "/", "http://localhost").searchParams;
-      const missing = (opts.requiredParams?.[name] ?? []).find((param) => !params.get(param));
+      const missing = (requiredParams[name] ?? []).find((param) => !params.get(param));
       if (missing !== undefined) {
         res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
         res.end(JSON.stringify({ error: "invalid_request", detail: `the ${name} view needs ?${missing}=` }));
@@ -240,27 +249,45 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
       const mode = viewMode(opts.readModel, name) ?? (opts.servedByDefault?.includes(name) ? "serve" : "off");
       const shadow = opts.shadow;
       if (shadowSampled(opts.readModel?.switches().views[name]) && shadow) res.once("finish", () => shadow(name, viewKey(params), params));
-      const entry = mode === "serve" ? opts.readModel?.body(name, viewKey(params)) : undefined;
+      const key = viewKey(params);
+      const entry = mode === "serve" ? opts.readModel?.body(name, key) : undefined;
       const fallback = legacy.get(name);
-      const rendered = entry && opts.readModel ? judged(opts.readModel, entry) : fallback ? renderView(fallback, clock, params) : undefined;
-      if (rendered === undefined) {
-        res.writeHead(404, { "content-type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ error: NOT_SERVED[mode], view: name }));
-        return;
+      const answer = (served: ViewBodyEntry | undefined): void => {
+        const rendered = served && opts.readModel ? judged(opts.readModel, served) : fallback ? renderView(fallback, clock, params) : undefined;
+        if (rendered === undefined) {
+          res.writeHead(404, { "content-type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ error: NOT_SERVED[mode], view: name }));
+          return;
+        }
+        if ("error" in rendered) {
+          res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
+          res.end(JSON.stringify({ error: "invalid_request", detail: rendered.error }));
+          return;
+        }
+        const { body, etag } = rendered;
+        opts.onServed?.(name, body);
+        if (ifNoneMatchHits(req.headers["if-none-match"], etag)) {
+          res.writeHead(304, { etag, "cache-control": "no-cache" });
+          res.end();
+          return;
+        }
+        sendView(res, body, etag);
+      };
+      if (mode !== "serve" || !opts.readModel || !demandViews.has(name)) return answer(entry);
+      // An on-demand view: a key it holds is re-wanted now and then so it stays; a key it lacks is asked for and awaited, off the loop.
+      if (entry) {
+        touchViewDemand(opts.readModel, name, key, clock.now());
+        return answer(entry);
       }
-      if ("error" in rendered) {
-        res.writeHead(400, { "content-type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ error: "invalid_request", detail: rendered.error }));
-        return;
-      }
-      const { body, etag } = rendered;
-      opts.onServed?.(name, body);
-      if (ifNoneMatchHits(req.headers["if-none-match"], etag)) {
-        res.writeHead(304, { etag, "cache-control": "no-cache" });
-        res.end();
-        return;
-      }
-      sendView(res, body, etag);
+      void awaitViewDemand(opts.readModel, name, key).then((demanded) => {
+        if (demanded.ok) return answer(demanded.entry);
+        res.writeHead(404, { "content-type": "application/json; charset=utf-8", "retry-after": String(Math.max(1, Math.ceil(demanded.retryMs / 1000))) });
+        res.end(JSON.stringify({ error: "view_not_ready", view: name, reason: demanded.reason, retryMs: demanded.retryMs }));
+      }).catch((error: unknown) => {
+        if (res.headersSent) return void res.end();
+        res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify({ error: "internal_error", detail: String((error as Error)?.message ?? error) }));
+      });
     },
   }));
 }

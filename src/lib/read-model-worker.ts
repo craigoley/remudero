@@ -25,6 +25,8 @@ import { LEDGER_FILENAME } from "./ledger-path.js";
 import { FUTURE_ROW_TOLERANCE_MS, LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, type LedgerProjector, type ProjectorTickResult } from "./ledger-projector.js";
 import { createNavBadgeReadModelView } from "./nav-badge-view.js";
 import { createNowView } from "./now-view.js";
+import { createTaskView } from "./task-view.js";
+import { createDemandBook, type DemandBook } from "./view-demand.js";
 import {
   ORACLE_DEFAULT_WINDOW_MS,
   ORACLE_DRIFT_INTERVAL_MS,
@@ -242,6 +244,8 @@ export interface ReadModelView {
   legacy?(key: string, now: number, data: unknown): ShadowLegacy | undefined;
   /** Its bodies are per instance: each instance's is built, timed and paced as a unit of its own. */
   perInstance?: boolean;
+  /** Its keys are built on demand (view-demand.ts): `materialize` returns only the keys the ticker's demand book holds live. */
+  demand?: true;
 }
 
 /** Why a projector that is not fresh is not: the structured half of its `reason`. */
@@ -292,6 +296,8 @@ export const READ_MODEL_VIEWS: readonly ReadModelView[] = [createNavBadgeReadMod
 const LEDGER_SOURCE_PREFIX = "ledger:";
 
 export interface ReadModelTickerOptions {
+  /** The keys of the demand views that stay materialized; absent, `want` is refused and nothing is evicted. */
+  demand?: DemandBook;
   /** Core's state dir: every instance's DB lives under its `read-model/` (design §1.7). */
   stateDir: string;
   /** The first instance is home: its DB also stores the view bodies. */
@@ -531,6 +537,8 @@ export interface ReadModelTicker {
   accept(built: SlowLaneBodies): void;
   /** A views-only ticker's instance states, as the projector thread last posted them. */
   observe(instances: readonly ReadModelInstanceState[]): void;
+  /** Main asked for a key of a demand view. True when the key is new, and its view is due at once. */
+  want(view: string, key: string): boolean;
 }
 
 /** One view, or one instance's share of a per-instance view: the unit the pass budgets, times and paces. */
@@ -988,6 +996,26 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     opts.post({ type: "drop", view, key });
   }
 
+  const demandViews = views.filter((view) => view.demand === true).map((view) => view.name);
+  let demandSwept = false;
+
+  /**
+   * Evicts the demand keys unread for ten minutes. The first sweep after a start also drops the keys an
+   * earlier run persisted: this run's book has no read of them, so serve must not keep serving them stale.
+   */
+  function sweepDemand(): void {
+    const book = opts.demand;
+    if (!book || demandViews.length === 0) return;
+    try {
+      for (const { view, key } of book.expire()) drop(view, key);
+      if (demandSwept) return;
+      demandSwept = true;
+      for (const view of demandViews) for (const key of knownKeys(view)) if (!book.has(view, key)) drop(view, key);
+    } catch (error) {
+      log("read_model.demand_sweep_failed", { error: (error as Error).message });
+    }
+  }
+
   function build(unit: ViewUnit, now: number, ctx: ReadModelViewContext, generation: number, allowanceMs: number): void {
     const { view } = unit;
     const started = clock.now();
@@ -1017,6 +1045,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
    */
   function materialize(now: number, tickStart: number, only?: ViewUnit): void {
     if (units.length === 0) return;
+    sweepDemand();
     const home = slots[0]?.db;
     const shadow = home ? storedShadowReadiness(viewShadowPath(opts.stateDir), home, now) : undefined;
     const ctx: ReadModelViewContext = { now, switches, instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}), ...(slot.lease ? { lease: slot.lease } : {}) })), ...(shadow ? { shadow } : {}) };
@@ -1115,6 +1144,12 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         return false;
       }
     },
+    want(view: string, key: string): boolean {
+      if (!opts.demand || !demandViews.includes(view)) return false;
+      const fresh = opts.demand.want(view, key);
+      if (fresh) for (const unit of units) if (unit.view.name === view) unit.dueAt = 0;
+      return fresh;
+    },
     accept(built: SlowLaneBodies): void {
       // An auto view is built in either effective mode, so its readiness does not matter here.
       const mode = effectiveViewMode(switches.views[built.view], undefined);
@@ -1172,6 +1207,7 @@ export type ReadModelViewsInput =
   | { type: "state"; instances: ReadModelInstanceState[] }
   | { type: "shadow"; request: ShadowRequest }
   | { type: "bodies"; built: SlowLaneBodies }
+  | { type: "want"; view: string; key: string }
   | { type: "stop" };
 
 /**
@@ -1200,7 +1236,14 @@ export function runReadModelViewWorker(
     if (!ticker) return void early.push(msg);
     if (msg.type === "state") ticker.observe(msg.instances);
     else if (msg.type === "shadow") ticker.shadow(msg.request);
-    else ticker.accept(msg.built);
+    else if (msg.type === "want") {
+      // A new key is built in a pass of its own, now: main is waiting on it for 300 ms.
+      try {
+        if (ticker.want(msg.view, msg.key)) ticker.tick();
+      } catch (error) {
+        log("read_model.want_failed", { view: msg.view, error: (error as Error).message });
+      }
+    } else ticker.accept(msg.built);
   };
   port.on("message", handle);
   const loop = (): void => {
@@ -1219,9 +1262,11 @@ export function runReadModelViewWorker(
     if (stopped) return;
     const now = createNowView({ instances: data.instances, ledgerSource, clock, log });
     const instances = createInstancesView({ instances: data.instances, ...data.registry, ledgerSource });
+    const demand = createDemandBook({ clock });
+    const task = createTaskView({ instances: data.instances, ledgerSource, clock, demand, log });
     ticker = createReadModelTicker({
-      stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off",
-      views: [...READ_MODEL_VIEWS, now, instances, ...extra],
+      stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off", demand,
+      views: [...READ_MODEL_VIEWS, now, instances, task, ...extra],
     });
     ticker.start();
     for (const msg of early.splice(0)) handle(msg);
@@ -1234,6 +1279,8 @@ export interface ReadModelViewLane {
   state(instances: ReadModelInstanceState[]): void;
   shadow(request: ShadowRequest): void;
   accept(built: SlowLaneBodies): void;
+  /** Main asked for a key of a demand view. */
+  want(view: string, key: string): void;
   close(): void;
 }
 
@@ -1294,6 +1341,7 @@ export function threadViews(opts: {
     state: (instances) => send({ type: "state", instances }),
     shadow: (request) => send({ type: "shadow", request }),
     accept: (built) => send({ type: "bodies", built }),
+    want: (view, key) => send({ type: "want", view, key }),
     close: () => {
       closed = true;
       stopWatch();
@@ -1386,6 +1434,7 @@ export function runReadModelWorker(
   };
   port.on("message", (msg) => {
     if (msg.type === "shadow") return void views.shadow(msg as unknown as ShadowRequest);
+    if (msg.type === "want") return void views.want((msg as unknown as { view: string }).view, (msg as unknown as { key: string }).key);
     if (msg.type !== "stop") return;
     Atomics.store(signal, 0, 1);
     finish();
@@ -1461,6 +1510,8 @@ export interface ReadModelWorkerHandle {
   reload(): number;
   /** Hands one sampled shadow request to the worker, which diffs it off serve's main thread. */
   shadow(request: ShadowRequest): void;
+  /** Asks the worker to materialize a key of an on-demand view (view-demand.ts); false when no worker is running to ask. */
+  want?(view: string, key: string): boolean;
   /** While started, offers `sample` every key of each view switched `shadow` or `auto` on each switch recheck; its throttle keeps one per sample period. */
   driveShadow(sample: ShadowSample): void;
   /** Calls `listener` with each body the worker posts, after it is stored; returns the unsubscribe. */
@@ -1747,6 +1798,11 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     },
     switches: () => mainSwitches,
     shadow: (request) => worker?.postMessage({ type: "shadow", ...request }),
+    want: (view, key) => {
+      if (!worker) return false;
+      worker.postMessage({ type: "want", view, key });
+      return true;
+    },
     driveShadow: (sample) => void (driven = sample),
     onBody: (listener) => {
       bodyListeners.add(listener);
