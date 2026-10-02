@@ -1820,7 +1820,7 @@ export function spawnRmdReviewForFreshTree(
 }
 
 export function buildReviewerCodeFreshnessGate(
-  readFreshness: () => ReviewerCodeFreshness,
+  readFreshness: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>,
   log: (step: string, extra?: Record<string, unknown>) => void,
   next: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>,
   /** W1-T3723 — runs `rmd review` from a fresh worktree instead of skipping a stale-code PR; see
@@ -1842,11 +1842,11 @@ export function buildReviewerCodeFreshnessGate(
 } {
   let firstStale: { oldSha: string; newSha: string } | undefined;
   return {
-    call: (prArg, rest, reviewDeps) => {
+    call: async (prArg, rest, reviewDeps) => {
       // Read fresh for THIS PR, immediately before the spend it guards — never cached across the
       // pass (W1-T3697): a reading that changes between two PRs must be observed by the second PR
       // even though the first already ran under the earlier reading.
-      const freshness = readFreshness();
+      const freshness = await readFreshness();
       if (freshness.status === "stale") {
         firstStale ??= { oldSha: freshness.codeSha, newSha: freshness.originMainSha };
         const stale = { pr: prArg, code_sha: freshness.codeSha, origin_main_sha: freshness.originMainSha, changed_paths: freshness.changedPaths?.length };
@@ -1872,7 +1872,7 @@ export function buildReviewerCodeFreshnessGate(
           });
         }
         log("review.skipped_stale_reviewer_code", stale);
-        return Promise.resolve(0);
+        return 0;
       }
       return next(prArg, rest, reviewDeps);
     },
@@ -1900,11 +1900,11 @@ export function readyDraftViaGh(
 export function buildSweepEffects(
   deps: BuildSweepEffectsDeps & {
     /** W1-T3618 test seam: override the reviewer-code freshness read the review gate below uses.
-     *  Omitted ⇒ the real `checkReviewerCodeFreshness(repoRoot, process.env)`, exactly the
+     *  Omitted ⇒ the real `checkReviewerCodeFreshnessAsync(repoRoot, process.env)`, exactly the
      *  production wiring. Destructured out before the rest of `deps` reaches
      *  `buildSweepEffectsFromLib`, so `sweep.ts`'s own `BuildSweepEffectsDeps` never has to know
      *  this field exists. */
-    reviewerCodeFreshnessImpl?: () => ReviewerCodeFreshness;
+    reviewerCodeFreshnessImpl?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
     instanceRegistryTextImpl?: () => string | undefined;
   },
 ): Pick<
@@ -1994,7 +1994,7 @@ export function buildSweepEffects(
   // shipped-unwired shape this repo refuses, and the whole point is that a stale reviewer stops
   // needing a restart — which only happens if production actually gets one.
   const reviewerCodeGate = buildReviewerCodeFreshnessGate(
-    reviewerCodeFreshnessImpl ?? (() => checkReviewerCodeFreshness(repoRoot, process.env)),
+    reviewerCodeFreshnessImpl ?? (() => checkReviewerCodeFreshnessAsync(repoRoot, process.env)),
     deps.log,
     reviewCommand,
     buildFreshTreeReviewRunner(repoRoot, {
@@ -2402,7 +2402,7 @@ import { FIX_CASH_TOOLS, FIX_WORKER_TOOLS, FIX_WORKER_TOOLS_HARNESS_COMMITS } fr
 import { acquireDrainLock, defaultIsPidAlive, DrainLockError, readDrainLock, type DrainLockHandle } from "./lib/drain-lock.js";
 import {
   checkCliFreshness,
-  checkReviewerCodeFreshness,
+  checkReviewerCodeFreshnessAsync,
   checkServiceFreshness,
   daemonFreshnessFromService,
   type ReviewerCodeFreshness,
@@ -6584,7 +6584,7 @@ async function runReview(args: {
   /** Freshly observes the module graph that will publish this run's terminal verdict. Production
    * call sites supply it immediately before posting; test-only direct calls retain their existing
    * isolated status-poster contract. */
-  reviewerCodeFreshness?: () => ReviewerCodeFreshness;
+  reviewerCodeFreshness?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
 }): Promise<ReviewRunResult> {
   const { owner, repo, prUrl, task, report, log, say } = args;
   const headSha = readHeadShaRest(prUrl);
@@ -7050,7 +7050,7 @@ async function runReview(args: {
   }
   let reviewerCodeFreshness: ReviewerCodeFreshness | undefined;
   try {
-    reviewerCodeFreshness = args.reviewerCodeFreshness?.();
+    reviewerCodeFreshness = await args.reviewerCodeFreshness?.();
   } catch (error) {
     reviewerCodeFreshness = { status: "unreadable", reason: `could not assess reviewer code freshness: ${String(error)}` };
   }
@@ -9501,7 +9501,7 @@ export async function runFixRung(opts: {
   openTaskIds?: ReadonlySet<string>;
   /** Re-read immediately before each fix-rung terminal verdict; never reuse a boot-time code
    * observation after the worker has spent time changing or waiting on the PR. */
-  reviewerCodeFreshness?: () => ReviewerCodeFreshness;
+  reviewerCodeFreshness?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
   /**
    * W1-T78: an operator's answer to a clarification question, if this is a
    * RE-DISPATCH — carried verbatim on EVERY strike's prompt as an added
@@ -17432,7 +17432,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // that follows never mutates it). NEVER the operator's working checkout —
       // the deterministic floor observes THIS run's repo state, not report prose.
       headCheckoutDir: worktreePath,
-      reviewerCodeFreshness: () => checkReviewerCodeFreshness(repoRoot, process.env),
+      reviewerCodeFreshness: () => checkReviewerCodeFreshnessAsync(repoRoot, process.env),
       ledgerPath,
       runId,
       openTaskIds,
@@ -17480,7 +17480,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         reviewerClockBoundMs: workerAbandonMs,
         workerTelemetry: workerStateSensor,
         openTaskIds,
-        reviewerCodeFreshness: () => checkReviewerCodeFreshness(repoRoot, process.env),
+        reviewerCodeFreshness: () => checkReviewerCodeFreshnessAsync(repoRoot, process.env),
         deps: {
           // W1-T3718: the SAME repair-ladder tracking the sweep's fix spawn carries.
           spawn: trackRepairLadder(spawn, { config, log }),
@@ -18932,7 +18932,7 @@ interface ReviewCommandDeps {
   buildBaseProof?: typeof buildBaseProofDir;
   runReview?: typeof runReview;
   postStatus?: typeof postReviewStatusGuarded;
-  reviewerCodeFreshness?: () => ReviewerCodeFreshness;
+  reviewerCodeFreshness?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
   /** W1-T913: injectable so a test can observe the pending post without a real `gh` spawn — see
    *  `postReviewPending`'s call site below. Defaults to the real {@link postReviewPending}. */
   postReviewPending?: typeof postReviewPending;
@@ -19337,7 +19337,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     buildBaseProof: buildBaseProofDir,
     runReview,
     postStatus: postReviewStatusGuarded,
-    reviewerCodeFreshness: () => checkReviewerCodeFreshness(repoRoot, process.env),
+    reviewerCodeFreshness: () => checkReviewerCodeFreshnessAsync(repoRoot, process.env),
     postReviewPending,
     fetchHead: realDeps().reviewWorktree.fetch,
     executionMode: "deterministic" as const,
@@ -19676,7 +19676,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       ledgerPath, runId, prUrl: view.url, reviewInputDigest: inputDigest,
       reviewDecisionDigest: verdict.reviewDecisionDigest,
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
-      reviewerCodeFreshness: reviewerCodeFreshnessDep(),
+      reviewerCodeFreshness: await reviewerCodeFreshnessDep(),
       fetchLifecycle: () => fetchPrLifecycle(view.url),
       fetchCurrentStatus: (): "success" | "failure" | "pending" | undefined => {
         const raw = fetchView(combinedStatusRestArgs(owner, repo, view.headRefOid)) as {
@@ -33830,7 +33830,7 @@ export async function daemonCommand(
   // event observation followed immediately by the awakened full sweep spends one GitHub read,
   // not two. Serve still only writes the signed marker and never receives this callback.
   const mainHealthRung = buildMainHealthRung(target.owner, target.repo, {
-    fetch: ghJson,
+    fetch: (args) => ghJsonAsync(args),
     issues: ghIssueGateway(target.owner, target.repo),
     ledgerPath,
     runId,

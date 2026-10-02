@@ -460,7 +460,8 @@ test("W1-T3337: the implementation run records a blocked verdict when its inject
 
 test("W1-T3337 wiring: every production terminal-review path supplies a just-in-time code-freshness reader", () => {
   const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
-  const readers = source.match(/reviewerCodeFreshness: \(\) => checkReviewerCodeFreshness\(repoRoot, process\.env\)/g) ?? [];
+  // E36: the awaited reader — the sync one's git fetch held the daemon loop 49 s.
+  const readers = source.match(/reviewerCodeFreshness: \(\) => checkReviewerCodeFreshnessAsync\(repoRoot, process\.env\)/g) ?? [];
   assert.equal(readers.length, 3, "run-task, its fix-rung re-reviews, and rmd review must all use the same freshness reader");
   assert.match(source, /if \(review\.verdictWithheld\)/, "a withheld result must stand down before the primary fix rung");
   assert.match(source, /site: "rung\.reviewer_code_freshness"/, "a re-review inside the fix rung must also stand down");
