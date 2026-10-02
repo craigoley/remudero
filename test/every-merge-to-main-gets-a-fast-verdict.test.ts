@@ -26,6 +26,7 @@
  * the ref-keyed shape before asserting the shipped, sha-keyed shape never does that.
  */
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -63,6 +64,39 @@ type WorkflowDoc = {
 function loadWorkflow(): WorkflowDoc {
   return parseYaml(readFileSync(WORKFLOW_PATH, "utf8")) as WorkflowDoc;
 }
+
+test("W1-T4690: the budgeted pass runs in its own process group and the whole group ends at the budget", () => {
+  const body = loadWorkflow().jobs["main-tripwire"]!.steps!.find((step) => step.run?.includes("TRIPWIRE_REMAINING_S"))?.run ?? "";
+  const program = /node --import tsx --input-type=module <<'NODE'\n([\s\S]*?)\nNODE/.exec(body)?.[1];
+  assert.ok(program, "the actual workflow must use the process-group supervisor");
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}tripwire-group-`));
+  const pidFile = join(dir, "child.pid");
+  const grandchildFile = join(dir, "grandchild.pid");
+  let child: number | undefined;
+  let grandchild: number | undefined;
+  try {
+    const command = `sh -c 'echo $$ > "${pidFile}"; trap "" TERM; sleep 300 & echo $! > "${grandchildFile}"; wait'`;
+    const output = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", program], {
+      cwd: REPO_ROOT, encoding: "utf8", env: { ...process.env, TRIPWIRE_RUN_LIST: command, TRIPWIRE_REMAINING_S: "1" },
+    });
+    child = Number(readFileSync(pidFile, "utf8").trim());
+    assert.ok(Number.isSafeInteger(child) && child > 1);
+    assert.match(output, /entire test process group was stopped/);
+    grandchild = Number(readFileSync(grandchildFile, "utf8").trim());
+    for (const pid of [child, grandchild]) {
+      assert.ok(Number.isSafeInteger(pid) && pid > 1);
+      // Linux may briefly retain a dead orphan as a zombie until PID 1 reaps it.
+      const status = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" });
+      assert.ok(status.status === 1 || /^Z/.test(status.stdout.trim()), `process ${pid} is still running: ${status.stdout}`);
+    }
+    assert.throws(() => execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", program], {
+      cwd: REPO_ROOT, env: { ...process.env, TRIPWIRE_RUN_LIST: "exit 124", TRIPWIRE_REMAINING_S: "30" }, stdio: "pipe",
+    }), (error: unknown) => (error as { status?: number }).status === 124, "a command's own exit 124 must stay red");
+  } finally {
+    for (const pid of [child, grandchild]) if (pid !== undefined) { try { process.kill(pid, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; } }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 // ── GitHub's own queueing rule, minimally reproduced ────────────────────────────────────────────
 //
@@ -321,7 +355,7 @@ test("the tripwire runs the touched files first and reports an exhausted budget 
   assert.ok(runStep?.run, "expected the run step to bound the selected suites with timeout");
   const body = runStep!.run!;
   assert.ok(body.indexOf("run_list tripwire-touched.txt") < body.indexOf("run_list tripwire-suites.txt"), "touched files run before the rest");
-  assert.match(body, /"\$CODE" -eq 124[\s\S]*?exit 0/, "an exhausted budget exits 0 with a notice, never a job timeout");
+  assert.match(body, /if \(result.timeout\)[\s\S]*?process.exit\(0\)/, "only the supervisor timeout receipt makes an exhausted budget neutral");
   const budget = Number(runStep!.env?.TRIPWIRE_BUDGET_S);
   const jobTimeoutS = Number(doc.jobs["main-tripwire"]!["timeout-minutes"]) * 60;
   assert.ok(budget > 0 && budget < jobTimeoutS - 120, "the budget ends well inside the job timeout, leaving room for setup");
