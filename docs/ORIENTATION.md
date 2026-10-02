@@ -1,25 +1,19 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-10-02T14:04:21.297Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-10-02T18:42:11.207Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-22 run(s) since the last retro marker. Verdicts: {"blocked_ci":1,"blocked_git_fetch":1,"blocked_inflight":1,"failed":3,"handed_off":2,"incomplete":5,"merged":8,"no_pr":1}.
+11 run(s) since the last retro marker. Verdicts: {"blocked":1,"blocked_ci":2,"incomplete":5,"merged":3}.
 
 ### Shipped since marker
-- RETRO → https://github.com/craigoley/remudero/pull/8637 (gate-side merge; run ended incomplete)
-- W1-T3897 → https://github.com/craigoley/remudero/pull/8576
-- W1-T4006 → https://github.com/craigoley/remudero/pull/8584 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked)
-- W1-T4047 → https://github.com/craigoley/remudero/pull/8635 (gate-side merge; run ended blocked_ci)
-- W1-T4348 → https://github.com/craigoley/remudero/pull/8549 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
-- W1-T5048 → https://github.com/craigoley/remudero/pull/8617 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
-- W1-T5110 → https://github.com/craigoley/remudero/pull/8547
-- W1-T5111 → https://github.com/craigoley/remudero/pull/8548 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
-- W1-T5116 → https://github.com/craigoley/remudero/pull/8561
-- W1-T5121 → https://github.com/craigoley/remudero/pull/8571
+- RETRO → https://github.com/craigoley/remudero/pull/8663 (gate-side merge; run ended incomplete)
+- W1-T4928 → https://github.com/craigoley/remudero/pull/8664 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T4949 → https://github.com/craigoley/remudero/pull/8665 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
+- W1-T5049 → https://github.com/craigoley/remudero/pull/8693 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed handed_off)
 
 ## Next runnable task
 
