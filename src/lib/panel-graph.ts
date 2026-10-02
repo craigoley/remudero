@@ -2082,16 +2082,20 @@ function inboxThreadListSources(deps: PanelGraphDeps, readPlanSnapshot?: () => P
  *  anything else is an explicit 503 — an old client must not mistake stale rows for verified ones. */
 export function buildInboxThreadsRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan, opts: { waitMs?: number; warm?: boolean } = {}): Route {
   const view = createInboxThreadListView(inboxThreadListSources(deps, readPlanSnapshot), opts.waitMs === undefined ? {} : { waitMs: opts.waitMs });
-  if (opts.warm !== false) {
-    // Warm with no browser request: once at build, then on a cadence. A failed warm is the next read's problem, not a crash.
-    setImmediate(() => void warmInboxThreadListView(view));
-    setInterval(() => void warmInboxThreadListView(view), INBOX_THREAD_LIST_WARM_MS).unref();
-  }
+  // Building a route must stay inert: panel routes are constructed by every harness that wires the graph, and a
+  // fleet-wide classification started at build time ran (and hung a coverage shard) in processes that never
+  // serve a request. The cadence is armed by the first read instead, so only a process that serves the Inbox
+  // keeps its classification warm. A failed warm is the next read's problem, not a crash.
+  let warmArmed = opts.warm === false;
   return {
     method: "GET",
     path: "/v1/inbox/threads",
     scope: "read",
     handler: async (req, res) => {
+      if (!warmArmed) {
+        warmArmed = true;
+        setInterval(() => void warmInboxThreadListView(view), INBOX_THREAD_LIST_WARM_MS).unref();
+      }
       const read = await readInboxThreadListView(view);
       if (read.kind === "ok") {
         sendJson(res, 200, { threads: read.threads, source: read.source });
