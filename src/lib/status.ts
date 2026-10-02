@@ -2489,15 +2489,55 @@ function hasPlanOnlyReviewForPr(
   return ledgerLines.some((l) => l.step === "review.posted" && l.plan_only === true && l.pr_url === prUrl && typeof l.head_sha === "string");
 }
 
-/** SUBTRACT-ONLY: an uncredited projection returns untouched, so no row can manufacture credit. The
- *  refused projection keeps the PR it was credited by, so a reader sees WHICH pairing was
- *  corrected, and carries the ruling's reason. */
-function applyCreditOverride(taskId: string, p: StatusProjection, deps: DeriveDeps): StatusProjection {
-  if (!p.merged) return p; // nothing to subtract — the only direction this rung moves
-  const readFile =
-    deps.readCreditOverrideFile ??
-    (() => nodeReadFileSync(deps.creditOverridePath ?? defaultCreditOverridePath(deps.ledgerPath), "utf8"));
-  const row = creditOverrideFor(loadCreditOverrides(readFile).rows, taskId, p.prNumber);
+/** W1-T5353 — the override record as ONE derivation's per-PAIRING exclusion. The walk asks
+ *  {@link CreditOverrideExclusion.excludes} at every rung that would credit a PR, so an overridden pairing is
+ *  skipped where it sits and every LATER rung still answers. Applied to the walk's RESULT instead (the
+ *  W1-T2970 shape), the durable rung's overridden entry returned first and masked every later legitimate
+ *  merge of the same task, forever. */
+interface CreditOverrideExclusion {
+  /** Whether (task, prNumber) is overridden. Remembers the FIRST row that excluded a pairing. */
+  excludes(prNumber: number | undefined): boolean;
+  /** The row that excluded a pairing in this derivation, if any — the board's "why". */
+  excludedBy(): CreditOverrideRow | undefined;
+  /** The row naming this pairing, with no side effect. */
+  rowFor(prNumber: number | undefined): CreditOverrideRow | undefined;
+}
+
+/** Loads the override rows LAZILY and at most ONCE per derivation: a task no rung ever asks about pays no read. */
+function creditOverrideExclusion(taskId: string, deps: DeriveDeps): CreditOverrideExclusion {
+  let rows: readonly CreditOverrideRow[] | undefined;
+  let first: CreditOverrideRow | undefined;
+  const rowFor = (prNumber: number | undefined): CreditOverrideRow | undefined => {
+    if (prNumber === undefined) return undefined;
+    rows ??= loadCreditOverrides(
+      deps.readCreditOverrideFile ??
+        (() => nodeReadFileSync(deps.creditOverridePath ?? defaultCreditOverridePath(deps.ledgerPath), "utf8")),
+    ).rows;
+    return creditOverrideFor(rows, taskId, prNumber);
+  };
+  return {
+    rowFor,
+    excludes(prNumber) {
+      const row = rowFor(prNumber);
+      if (row && !first) first = row;
+      return row !== undefined;
+    },
+    excludedBy: () => first,
+  };
+}
+
+/** SUBTRACT-ONLY: an uncredited projection is never credited, so no row can manufacture credit. Two arms:
+ *  - an UNCREDITED projection whose walk excluded a pairing carries that ruling's reason, so the board still
+ *    says why a task that once read merged reads queued now;
+ *  - BACKSTOP: a merged projection whose own pairing is overridden (a credit carried forward unexamined, e.g.
+ *    the dark-cycle monotonic carry of a prior projection) is refused, keeping the PR it was credited by so a
+ *    reader sees WHICH pairing was corrected. */
+function applyCreditOverride(p: StatusProjection, overrides: CreditOverrideExclusion): StatusProjection {
+  if (!p.merged) {
+    const excluded = overrides.excludedBy();
+    return excluded ? { ...p, creditOverride: { reason: excluded.reason, pr: excluded.pr } } : p;
+  }
+  const row = overrides.rowFor(p.prNumber);
   if (!row) return p;
   return {
     ...p,
@@ -2512,7 +2552,12 @@ function applyCreditOverride(taskId: string, p: StatusProjection, deps: DeriveDe
 
 /** Derive one task's PR-precedence merge-state from GitHub, in the fixed precedence — the logic `deriveStatus`
  *  carried before W1-T155. Takes the ledger its caller already read once, rather than re-reading the file. */
-function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Record<string, unknown>>): StatusProjection {
+function derivePrPrecedence(
+  task: Task,
+  deps: DeriveDeps,
+  ledgerLines: Array<Record<string, unknown>>,
+  overrides: CreditOverrideExclusion,
+): StatusProjection {
   // SUPREMACY (MASTER-PLAN P9 / W1-T75): an operator correction is checked FIRST, above rungs (a)/(b)/(c). It
   // is DECLARED credit, not INFERRED evidence, so it is EXEMPT from the ownership-assert, which guards the
   // fuzzy search and not a human declaration. SUPREME OFFLINE (W1-T130): `applyCorrection` already resolved the
@@ -2520,7 +2565,8 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
   // result may demote it. Why: under quota exhaustion this rung re-dispatched a satisfied task
   const ledgerIndex = deps.ledgerIndex;
   const correctedUrl = latestActualPrUrl(ledgerLines, task.id, ledgerIndex);
-  if (correctedUrl) {
+  // W1-T5353: every crediting rung below skips an OVERRIDDEN (task, PR) pairing and lets the next rung answer.
+  if (correctedUrl && !overrides.excludes(prNumberFromRef(correctedUrl))) {
     return {
       taskId: task.id,
       source: "correction",
@@ -2541,8 +2587,11 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
   const durableCredit = creditStore[task.id];
   if (durableCredit) {
     // Trailer is the STURDIER of the two evidentially — an anchored body hit, not a ref GitHub deletes on merge
-    // — but either alone suffices: this is a tie-break for which url to report.
-    const entry = durableCredit.trailer ?? durableCredit["head-branch"];
+    // — but either alone suffices: this is a tie-break for which url to report. W1-T5353: an OVERRIDDEN
+    // entry is skipped for its sibling; both overridden, the rung falls through to the live rungs below.
+    const entry = [durableCredit.trailer, durableCredit["head-branch"]].find(
+      (e) => e !== undefined && !overrides.excludes(e.prNumber),
+    );
     if (entry) {
       // W1-T3996 DURABLE-CREDIT REVALIDATION — a HEAD-BRANCH entry gets ONE more look before this rung trusts
       // it, because the rung that WRITES one (`corroborateByBranch` below) only ever ran the LEDGER-based
@@ -2612,7 +2661,7 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
   // cannot express: a PR in ANOTHER repository, and a completion with NO PR. DECLARED credit, never re-verified
   // (there is no live read this rung COULD perform), checked BEFORE (a)/(b) and reversible by a correction.
   const manualCompletion = latestManualCompletion(ledgerLines, task.id, ledgerIndex);
-  if (manualCompletion) {
+  if (manualCompletion && !(manualCompletion.prUrl && overrides.excludes(prNumberFromRef(manualCompletion.prUrl)))) {
     return {
       taskId: task.id,
       source: "manual-completion",
@@ -2634,8 +2683,11 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
     const pr = deps.github.prByRef(openedUrl);
     if (pr) {
       const result: StatusProjection = { taskId: task.id, source: "ledger", ...fromPrState(pr.state), prNumber: pr.number, prUrl: pr.url, prState: pr.state };
-      if (result.merged) return result;
-      ownResult = result;
+      if (result.merged) {
+        if (!overrides.excludes(pr.number)) return result;
+      } else {
+        ownResult = result;
+      }
     }
   }
 
@@ -2647,8 +2699,11 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
     const pr = deps.github.prByRef(task.pr);
     if (pr) {
       const result: StatusProjection = { taskId: task.id, source: "pr-field", ...fromPrState(pr.state), prNumber: pr.number, prUrl: pr.url, prState: pr.state };
-      if (result.merged) return result;
-      if (!ownResult) ownResult = result;
+      if (result.merged) {
+        if (!overrides.excludes(pr.number)) return result;
+      } else if (!ownResult) {
+        ownResult = result;
+      }
     }
   }
 
@@ -2680,6 +2735,8 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
         ownsBranch(pr.headRefName, task.id) &&
         !debunked.has(pr.url) &&
         pr.url !== invalidatedUrl &&
+        // W1-T5353: an overridden pairing neither credits nor persists.
+        !overrides.excludes(pr.number) &&
         // W1-T1004: this rung had NO plan-only guard at all before — a filing PR dispatched from this task's
         // OWN worktree, which the retro, triage and plan flows reuse, would otherwise credit the task it just
         // filed unconditionally.
@@ -2719,7 +2776,14 @@ function derivePrPrecedence(task: Task, deps: DeriveDeps, ledgerLines: Array<Rec
   // lookup here keeps body-first/commit-fallback credit semantics while avoiding one full merged-body scan per
   // task. Standalone derivations and non-batched gateways have no captured lookup, so their established path
   // remains the direct query.
-  const trailerPr = deps.mergedTrailerLookup ? deps.mergedTrailerLookup(task.id) : deps.github.findMergedByTrailer(task.id);
+  const firstTrailerPr = deps.mergedTrailerLookup ? deps.mergedTrailerLookup(task.id) : deps.github.findMergedByTrailer(task.id);
+  // W1-T5353: an OVERRIDDEN trailer hit is not this task's answer, but a later merge carrying the same trailer may
+  // be — so widen to every trailered candidate (newest first) and take the first pairing the override leaves
+  // standing. Paid ONLY when an override actually names the first hit. None standing reads as no hit at all.
+  const trailerPr =
+    firstTrailerPr && overrides.excludes(firstTrailerPr.number)
+      ? (deps.github.findMergedByTrailerAll?.(task.id) ?? []).find((pr) => !overrides.excludes(pr.number)) ?? null
+      : firstTrailerPr;
   if (trailerPr && !debunkedTrailerUrls(ledgerLines, task.id, ledgerIndex).has(trailerPr.url)) {
     const head = deps.github.headRefName(trailerPr.url);
     const body = deps.github.prBody(trailerPr.url);
@@ -3364,12 +3428,14 @@ export function resolveEscalation(
 export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
   const readLedger = deps.readLedger ?? readLedgerLines;
   const ledgerLines = readLedger(deps.ledgerPath);
-  const credited = derivePrPrecedence(task, deps, ledgerLines);
-
-  // W1-T2970 — THE OVERRIDE RUNG. Consulted only on a GRANTED credit, and only ever to SUBTRACT it:
-  // there is no path here that can turn an uncredited task into a merged one. Applied ABOVE the
-  // merged-is-terminal return, because that return is exactly what an override exists to prevent.
-  const base = applyCreditOverride(task.id, credited, deps);
+  // W1-T2970 / W1-T5353 — THE OVERRIDE RULING, as a per-PAIRING exclusion INSIDE the walk: an overridden
+  // (task, PR) pairing is skipped at the rung that would credit it, so a later legitimate merge still answers.
+  // It only ever SUBTRACTS: there is no path here that can turn an uncredited task into a merged one. The
+  // backstop below runs ABOVE the merged-is-terminal return, because that return is exactly what an override
+  // exists to prevent.
+  const overrides = creditOverrideExclusion(task.id, deps);
+  const credited = derivePrPrecedence(task, deps, ledgerLines, overrides);
+  const base = applyCreditOverride(credited, overrides);
 
   // MERGED is terminal — nothing below can add anything more useful than "it landed".
   if (base.merged) return base;
