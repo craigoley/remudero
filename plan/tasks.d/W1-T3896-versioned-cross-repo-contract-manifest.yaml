@@ -18,9 +18,9 @@
     - test/contract-manifest-source.test.ts
     - test/contract-manifest-fixtures.test.ts
     - test/contract-manifest-breaking.test.ts
-  priority: 2
-  status: queued
-  # backlog gardener: band=2 evidence=4d2fcdacf2b36b51
+  status: blocked
+  retirement: withdrawn
+  # backlog gardener: retirement evidence=027d65ba25687d97
   attempts: 0
   rationale: |
     Core, console, and site now have several coordinated plan surfaces, but the plan format does not
