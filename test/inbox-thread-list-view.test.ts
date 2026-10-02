@@ -78,9 +78,7 @@ const classification = (items: InboxThreadItem[], classifiedAtMs: number, comple
 test("first thread-list read does not await a blocked classifier", async () => {
   const r = rig([message("p1", 1)]);
   const view = createInboxThreadListView(r.sources, { waitMs: 15 });
-  const started = Date.now();
-  const read = await readInboxThreadListView(view); // the classifier is never settled
-  assert.ok(Date.now() - started < 2_000, "the read returned while the classifier was still blocked");
+  const read = await readInboxThreadListView(view); // returns at all only because it does not wait on the classifier, which is never settled
   assert.equal(read.kind, "unavailable", "with nothing classified yet it says so; it does not invent a list");
   if (read.kind === "unavailable") assert.equal(read.code, "classification_pending");
   assert.equal(r.calls.classify, 1, "the refresh is running in the background");

@@ -19,6 +19,7 @@
 import { readPage, readPageRequest, type ReadPageRequest } from "./read-page.js";
 import { adoptionFindingGone, adoptionLatestPath, readAdoptionLatest } from "./measurement-cadence.js";
 import { createHash, randomUUID } from "node:crypto";
+import { systemClock } from "./clock.js";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { basename, dirname, join, relative } from "node:path";
@@ -1726,7 +1727,7 @@ export function classifyAllProposalsMemo(deps: PanelGraphDeps, readPlanSnapshot?
   if (reused !== undefined) return reused;
   const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.archiveReleases);
   const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(pass.classifyOne), ledgerLines: fp.ledgerLines, projection: fp.projection };
-  state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: Date.now() };
+  state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: systemClock.now() };
   return result;
 }
 
@@ -1773,7 +1774,7 @@ export async function classifyAllProposalsSliced(
       for (const proposal of pass.proposals.slice(i, i + INBOX_CLASSIFY_SLICE)) classifications.push(pass.classifyOne(proposal));
     }
     const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications, ledgerLines: fp.ledgerLines, projection: fp.projection };
-    state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: Date.now() };
+    state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: systemClock.now() };
     return result;
   };
   const promise = run().finally(() => {
@@ -2059,8 +2060,8 @@ function inboxThreadListSources(deps: PanelGraphDeps, readPlanSnapshot?: () => P
     };
   };
   return {
-    now: () => Date.now(),
-    classify: async () => stamped(await classifyAllProposalsSliced(deps, readPlanSnapshot), Date.now()),
+    now: () => systemClock.now(),
+    classify: async () => stamped(await classifyAllProposalsSliced(deps, readPlanSnapshot), systemClock.now()),
     peek: () => {
       const held = peekClassifiedInboxStamped(deps);
       return held === undefined ? undefined : stamped(held.result, held.classifiedAtMs);

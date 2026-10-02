@@ -16,6 +16,7 @@
  * rows are `unavailable`; none of them is ever returned as an empty list.
  */
 import { listThreadViews, type InboxThreadItem, type ReadMarks, type ThreadSummaryView } from "./inbox-responder.js";
+import { fixedClock } from "./clock.js";
 import type { ThreadMessage } from "./inbox-thread.js";
 
 /** How long a read waits for the shared refresh before answering from what it already holds. Under the console's 5 s. */
@@ -146,10 +147,10 @@ function sourceOf<C>(view: InboxThreadListView<C>, classification: ThreadListCla
   return {
     state,
     completeness: classification.complete ? "complete" : "partial",
-    classifiedAt: new Date(classification.classifiedAtMs).toISOString(),
-    verifiedAt: state === "fresh" ? new Date(now).toISOString() : null,
+    classifiedAt: fixedClock(classification.classifiedAtMs).iso(),
+    verifiedAt: state === "fresh" ? fixedClock(now).iso() : null,
     ageMs: Math.max(0, now - classification.classifiedAtMs),
-    builtAt: new Date(built.builtAtMs).toISOString(),
+    builtAt: fixedClock(built.builtAtMs).iso(),
     ...(refreshError === undefined ? {} : { refreshError }),
   };
 }
