@@ -106,3 +106,20 @@ test("W1-T4047: an absent proposals directory is not a violation", async () => {
     f.dispose();
   }
 });
+
+test("W1-T4047: a blank field, unparseable YAML, a non-mapping, or a bad rank is refused", () => {
+  const f = fixture();
+  const file = join(f.proposals, "P1.yaml");
+  try {
+    writeFileSync(file, record().replace("title: Example proposal", "title: '  '"));
+    assert.throws(() => loadProposalRecords(f.proposals), /title must be a non-empty string/);
+    writeFileSync(file, "id: [unclosed\n");
+    assert.throws(() => loadProposalRecords(f.proposals), /cannot read or parse proposal/);
+    writeFileSync(file, "- id: P1\n");
+    assert.throws(() => loadProposalRecords(f.proposals), /proposal must be a mapping/);
+    writeFileSync(file, record().replace("rank: 2", "rank: 0"));
+    assert.throws(() => loadProposalRecords(f.proposals), /rank must be a positive integer/);
+  } finally {
+    f.dispose();
+  }
+});
