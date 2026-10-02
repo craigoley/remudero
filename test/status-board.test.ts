@@ -694,6 +694,21 @@ test("W1-T2392: the warning MOVES NO DISPOSITION — every other board section i
   assert.deepEqual(restWith, restWithout, "every OTHER NEEDS ME row is unchanged too");
 });
 
+test("W1-T4014: an unreadable operator release file makes the parked-proposal count unknown, never a reassuring zero", () => {
+  const root = tmpRoot();
+  writeFileSync(join(root, "state", "operator-releases.json"), "{ not json");
+  const model = buildStatusBoard(
+    root,
+    writeLedger([ledgerLine({ step: "run.start" })]),
+    baseDeps({ plan: planWith(["W1-T2379"]), github: fakeGithub() }),
+  );
+  const parked = model.needsMe.parkedProposals;
+  assert.equal(parked?.count, undefined, "no count is claimed when releases cannot be read");
+  assert.deepEqual(parked?.taskIds, []);
+  assert.match(parked?.unknownReason ?? "", /^operator release state is unreadable \(.+\)$/);
+  assert.match(renderStatusBoardText(model), /machine-authored proposals awaiting a ruling: unknown — operator release state is unreadable/);
+});
+
 
 // ── ACCEPTANCE 1: BLOCKERS BY CLASS — circuit-broken (+ reset ETA) and dispatch.indeterminate
 // (+ gh-window note) render as DISTINCT classes off the EXISTING breaker/ledger signals, never
