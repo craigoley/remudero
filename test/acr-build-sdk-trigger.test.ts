@@ -13,11 +13,11 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { parse as parseYaml } from "yaml";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const SDK_KEY = "node_modules/@anthropic-ai/claude-agent-sdk";
@@ -63,17 +63,9 @@ const SDK_NEW: SdkEntry = { version: "0.3.285", integrity: "sha512-new" };
 
 /** Commit `before` then `after` as the root package-lock.json and run the real guard step. */
 function guardSays(before: string, after: string, extraChangedFile?: string): string {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-acr-sdk-trigger-"));
-  const env = {
-    ...process.env,
-    GIT_AUTHOR_NAME: "fixture",
-    GIT_AUTHOR_EMAIL: "fixture@example.invalid",
-    GIT_COMMITTER_NAME: "fixture",
-    GIT_COMMITTER_EMAIL: "fixture@example.invalid",
-  };
-  const git = (...args: string[]): string =>
-    execFileSync("git", ["-c", "commit.gpgsign=false", ...args], { cwd: dir, env, encoding: "utf8" }).trim();
-  git("init", "-q");
+  const repo = gitRepo({ seedCommit: false, kind: "acr-sdk-trigger" });
+  const dir = repo.dir;
+  const git = (...args: string[]): string => repo.git("-c", "commit.gpgsign=false", ...args);
   writeFileSync(join(dir, "package-lock.json"), before);
   git("add", "-A");
   git("commit", "-q", "-m", "before");
@@ -88,7 +80,7 @@ function guardSays(before: string, after: string, extraChangedFile?: string): st
   writeFileSync(outputFile, "");
   execFileSync("bash", ["-c", guardScript()], {
     cwd: dir,
-    env: { ...env, BEFORE_SHA: beforeSha, AFTER_SHA: afterSha, GITHUB_OUTPUT: outputFile },
+    env: { ...process.env, BEFORE_SHA: beforeSha, AFTER_SHA: afterSha, GITHUB_OUTPUT: outputFile },
     encoding: "utf8",
   });
   const line = readFileSync(outputFile, "utf8")
