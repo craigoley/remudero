@@ -77,7 +77,7 @@ import type { UsageSnapshot } from "./headroom.js";
 // Type-only, so no runtime edge is added to daemon-health.ts, which already imports a value from
 // here; a value import would close a real cycle. This module never shells GitHub itself (W1-T372).
 import type { GhRateLimitBuckets } from "./daemon-health.js";
-import type { CostGovernorResult, QueueGovernorResult } from "./sweep.js";
+import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
 // W1-T3691 — a value import (`trackStaleReviewerSkipRecurrence`, `renderHeldReviewQueueBlocker`)
 // alongside the type-only ones above: sweep.ts imports nothing from this module, so this closes
 // no cycle either, same as the value import just below.
@@ -854,6 +854,10 @@ export interface DaemonDeps {
    *  sweep hooks (W1-T321, the W1-T121 23-open-PR incident). Wrapped by the same governor seam,
    *  consulted again before dispatch, failing closed on a throw (W1-T342). Forensics: docs/forensics/daemon.md. */
   checkQueueGovernor?: () => QueueGovernorResult | undefined;
+  /** W1-T5347 (wiring W1-T1038's `memoryGovernorGateFor`): THE HOST MEMORY FLOOR, a fresh
+   *  `/proc/meminfo` reading per call. Consulted only through `checkDispatchGovernors`, so it holds
+   *  NEW dispatch per lane and a throw fails OPEN there. Never consulted from the sweep. Optional. */
+  checkMemoryGovernor?: () => MemoryGovernorResult | undefined;
   /** Quiet-hours preference: a defined return defers NEW dispatch only. Routed through the dispatch
    *  governor, never through `checkPause`, so sweep/drainage paths keep running and an unreadable
    *  read fails open in `checkDispatchGovernors` (W1-T2655). */

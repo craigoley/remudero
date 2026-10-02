@@ -832,8 +832,20 @@ sweep:
   # dailyCostCeilingUsd's/wipLimit's shared fail-closed unreadable arm — three-lane dispatch has
   # been 100% of draws since 2026-08-14 (51 sets, admitted mean 3.00, one failure in six days),
   # so a probe failure that refused would convert a once-in-six-days event into a 100% outage.
+  #
+  # W1-T5347 — RAISED 0 -> 3072 AND WIRED into both implement dispatch call sites (drainCommand,
+  # daemonCommand in src/run-task.ts): the operator's prerequisite for dispatchLanes 2 -> 3, which
+  # this row does NOT change. THE FIGURE: one more worker's peak plus the reserve — ~1.33 GiB
+  # (1,362 MiB, W1-T1049's per-Claude-worker peak, dispatchLanes' row above; the ledger carries no
+  # per-worker RSS field, only serve's own `serve.memory` rss 1,821-4,536 MiB) + the 1.5 GiB
+  # (1,536 MiB) reserve = 2,898 MiB, rounded up to 3072. THE POPULATION: 293 `review.capacity`
+  # rows carrying `mem_available_mib`, 2026-10-01T00:03Z..10-02T22:10Z, read across all three
+  # rotation forms (host 15,988 MB): min 2,080, p01 2,263, p05 3,394, p10 4,548, median 8,073,
+  # max 11,945 MiB. 3072 would have deferred 8 of 293 samples (2.7%) — the low tail only, below
+  # p05. An unreadable reading is retried (3 reads), ledgered as `dispatch_memory_unreadable`,
+  # then admitted (the fail-open direction above, decided in checkDispatchGovernors).
   memoryFloorMib:
-    value: 0
+    value: 3072
     origin: "net-new"
     min: 0
     max: 8192

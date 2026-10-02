@@ -31228,7 +31228,7 @@ export function createOpenPrCountObservation(): {
  * reads meminfo not the cgroup limit"). Throws when the file is unreadable OR carries no
  * `MemAvailable` line (e.g. a cgroup-shaped file, which has no such line at all) — a genuinely
  * malformed/absent reading must not silently parse as a number. `memoryGovernorGateFor` below
- * deliberately does NOT catch this throw itself; `dispatch-governor.ts`'s
+ * retries and ledgers this throw but RE-THROWS it, never converting it into a reading; `dispatch-governor.ts`'s
  * `checkDispatchGovernors` is the ONE place that decides what an unreadable memory observation
  * means (fail OPEN, unlike the shared cost/queue `unreadable` arm — see that function's own
  * comment), so this probe stays a plain, honestly-throwing read.
@@ -31247,8 +31247,8 @@ export function readAvailableMemoryMib(path = "/proc/meminfo"): number {
  * queueGovernorGateFor} immediately above in SHAPE — but deliberately NOT in fail direction; see
  * `checkMemoryGovernor`'s own doc (sweep.ts) and `checkDispatchGovernors`'s own comment
  * (dispatch-governor.ts) for why. `checkMemoryGovernor` is a pure predicate that was built,
- * tested, and never invoked from any dispatch path; this supplies the live reading it consults,
- * via {@link readAvailableMemoryMib} immediately above.
+ * tested, and never invoked from any dispatch path until W1-T5347 wired this; this supplies the
+ * live reading it consults, via {@link readAvailableMemoryMib} immediately above.
  *
  * THE OBSERVATION IS LEDGERED ON EVERY SUCCESSFUL READ (design (iv)) — unconditionally, never
  * gated on `result.deferred` — unlike {@link costGovernorGateFor}/{@link queueGovernorGateFor},
@@ -31256,16 +31256,20 @@ export function readAvailableMemoryMib(path = "/proc/meminfo"): number {
  * deferral-only row would sample exactly the population that never happens while the floor
  * ships disabled.
  *
- * A READ FAILURE IS DELIBERATELY LEFT UNCAUGHT HERE, exactly like `costGovernorGateFor`'s own
- * ledger read: this closure does not need its own try/catch to fail open, it only needs to NOT
- * catch, so `checkDispatchGovernors` — the ONE place cost/queue and memory diverge — is the only
- * place the direction is decided.
+ * A READ FAILURE IS RETRIED, LEDGERED, THEN RE-THROWN — never caught into a reading (W1-T5347).
+ * Three outcomes, each visible to a different reader:
+ *   - a READING (first try or a retry): ledgered as `dispatch_memory_observed`, compared to the floor;
+ *   - NO READING after {@link MEMORY_READ_ATTEMPTS} tries: ledgered as `dispatch_memory_unreadable`
+ *     (attempts, last error, floor) so an unknown is never mistaken for a reading of 0 or of
+ *     plenty, then re-thrown UNCHANGED, so `checkDispatchGovernors` — the ONE place cost/queue and
+ *     memory diverge — still decides the direction (fail OPEN: one held-back lane per probe hiccup
+ *     would wedge dispatch, and the next consultation re-reads anyway, so nothing is held forever).
+ * The bound keeps a dead `/proc/meminfo` from spinning; the retry keeps a single EIO from being the
+ * whole answer.
  *
- * NOT wired into `DaemonDeps`/`DrainDeps` by this task (`daemon.ts`/`drain.ts` are not among its
- * declared `files:`) — this factory exists, is exported, and is directly tested so it is not the
- * "dead mechanism" criterion (iv) forbids; threading it into the real dispatch loops is a
- * follow-up, mirroring how `costGovernorGateFor`/`queueGovernorGateFor` themselves were built and
- * tested (W1-T148/W1-T121) before W1-T317/W1-T321 wired them in.
+ * WIRED (W1-T5347) at both implement dispatch call sites — `drainCommand`'s `DrainDeps` and
+ * `daemonCommand`'s `DaemonDeps` — next to `costGovernorGateFor`/`queueGovernorGateFor`, so the
+ * drain, the daemon's tick-top check and its per-lane re-check all consult it.
  */
 export function memoryGovernorGateFor(
   ledgerPath: string,
@@ -31274,11 +31278,41 @@ export function memoryGovernorGateFor(
   readAvailableMib: () => number = readAvailableMemoryMib,
 ): () => MemoryGovernorResult | undefined {
   return () => {
-    const result = checkMemoryGovernor(readAvailableMib(), policy);
+    const result = checkMemoryGovernor(readAvailableMibBounded(readAvailableMib, ledgerPath, runId, policy), policy);
     // EVERY dispatch, including the ones it admits (design (iv)) — never gated on `result.deferred`.
     logMemoryObservation(result, appendLedger, ledgerPath, runId);
     return result.deferred ? result : undefined;
   };
+}
+
+/** W1-T5347: how many `MemAvailable` reads one consultation makes before it reports "unreadable". */
+export const MEMORY_READ_ATTEMPTS = 3;
+
+/** {@link memoryGovernorGateFor}'s bounded read: a number, or — after {@link MEMORY_READ_ATTEMPTS}
+ *  failures — one `dispatch_memory_unreadable` ledger row and the LAST error re-thrown. */
+function readAvailableMibBounded(
+  read: () => number,
+  ledgerPath: string,
+  runId: string,
+  policy: SweepPolicy,
+): number {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= MEMORY_READ_ATTEMPTS; attempt++) {
+    try {
+      return read();
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  appendLedger(ledgerPath, {
+    run_id: runId,
+    task_id: "GOVERNOR",
+    step: "dispatch_memory_unreadable",
+    attempts: MEMORY_READ_ATTEMPTS,
+    error: lastError instanceof Error ? lastError.message : String(lastError),
+    memory_floor_mib: policy.memoryFloorMib,
+  });
+  throw lastError;
 }
 
 /**
@@ -31531,6 +31565,9 @@ async function drainCommand(
     quotaCheck?: { readGhQuota?: () => GhRateLimitBuckets; escalate?: typeof escalateQuotaExhaustion };
     /** Injectable clock for the daily-cost consultation. Production keeps the real clock. */
     now?: () => number;
+    /** W1-T5347: injectable `MemAvailable` reading for the wired memory gate. Production omits it
+     *  and reads the real `/proc/meminfo` ({@link readAvailableMemoryMib}). */
+    readAvailableMemoryMib?: () => number;
   } = {},
 ): Promise<number> {
   // FAIL LOUD on junk args BEFORE touching config/locks/spawns (a malformed control command
@@ -31923,6 +31960,10 @@ async function drainCommand(
         // already reads (below), split by ownership (W1-T4465 design (i)) — never a second
         // GitHub read path — see queueGovernorGateFor's doc.
         checkQueueGovernor: queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now),
+        // HOST MEMORY FLOOR (W1-T5347 wires W1-T1038's memoryGovernorGateFor): a fresh
+        // /proc/meminfo reading per consultation, so the per-lane re-check sees each lane's cost.
+        // Holds NEW implement dispatch only — never a running worker or a review.
+        checkMemoryGovernor: memoryGovernorGateFor(ledgerPath, runId, undefined, deps.readAvailableMemoryMib),
         // W1-T2513: `planSnapshot` is the coalescer built above — every lane of a tick shares
         // ONE origin fetch + ONE plan parse instead of paying for it per lane.
         runOne: (taskId) => runTask(taskId, { planPath, config, allowStale, planSnapshot: planSyncCoalescer.sync }),
@@ -33466,6 +33507,9 @@ export async function daemonCommand(
     bootClaimReserver?: DispatchClaimReserver;
     /** Injectable clock for the daily-cost consultation. Production keeps the real clock. */
     now?: () => number;
+    /** W1-T5347: injectable `MemAvailable` reading for the wired memory gate — see drainCommand's
+     *  identical seam. Production omits it and reads the real `/proc/meminfo`. */
+    readAvailableMemoryMib?: () => number;
     /** W1-T3401: injectable residual escalation judge for `escalateBlock` below (the SAME seam
      *  shape `runFixRung`'s own `opts.escalationJudge` already uses — `opts.escalationJudge ??
      *  realEscalationJudge({...})`). Production omits it and gets the real, cheapest-mount,
@@ -34295,6 +34339,10 @@ export async function daemonCommand(
         // 23-open-PR incident): the SAME batch `openPrCount` reads just above, split by ownership
         // (W1-T4465 design (i)) — never a second GitHub read path — see queueGovernorGateFor's doc.
         checkQueueGovernor: queueGovernorGateFor(openPrOwnership, ledgerPath, runId, undefined, deps.now),
+        // HOST MEMORY FLOOR (W1-T5347 wires W1-T1038's memoryGovernorGateFor): a fresh
+        // /proc/meminfo reading per consultation, so the per-lane re-check sees each lane's cost.
+        // Holds NEW implement dispatch only — never a running worker or a review.
+        checkMemoryGovernor: memoryGovernorGateFor(ledgerPath, runId, undefined, deps.readAvailableMemoryMib),
         checkQuietHours: () =>
           isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" } : undefined,
         openPrCount, // W1-T343: laneDispatchBudget's other input on the multi-lane path, mirroring drainCommand.
