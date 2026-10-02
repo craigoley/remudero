@@ -10,7 +10,8 @@ import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
 import { BOARD_PROJECTION_DDL } from "../src/lib/board-projection.js";
 import { createReadModelTicker, ledgerSource, type ReadModelBodyEntry, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
 import type { GitHub } from "../src/lib/status.js";
-import { createTaskView, readRunTail, taskViewKey, type TaskViewData, type TaskViewOptions } from "../src/lib/task-view.js";
+import type { ReadModelDb } from "../src/lib/read-model-db.js";
+import { createTaskView, readRunTail, taskViewKey, type ReadModelInstanceState, type TaskViewData, type TaskViewOptions } from "../src/lib/task-view.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { TASK_VIEW_NAME, createDemandBook } from "../src/lib/view-demand.js";
 
@@ -176,4 +177,106 @@ test("W1-T5048: readRunTail refuses a run id that could leave the runs directory
   writeFileSync(join(f.ledgerDir, "runs", "long-1.tail"), `${"x".repeat(1_000)}\n`);
   assert.equal(readRunTail(instance, "long-1")![0]!.length, 301);
   assert.deepEqual(readRunTail(instance, RUN, 2), ["second line", "last line"]);
+});
+
+const STATE: ReadModelInstanceState = { instance: "core", tickedAt: T0, generation: 1, lease: "held", failures: 0, newestTs: null };
+const FACT_ROWS = [
+  { step: "run.start" },
+  { step: "pr.opened", pr_url: PR_URL },
+].map((extra, i) => ({ seq: i + 1, ts: new Date(T0 + i).toISOString(), step: extra.step, run_id: RUN, body: JSON.stringify({ ts: new Date(T0 + i).toISOString(), task_id: ID, run_id: RUN, ...extra }) }));
+
+/** A store whose fact rows are `facts` (or whose fact read fails); no task projection row. */
+function fakeDb(facts: typeof FACT_ROWS | Error): ReadModelDb {
+  return {
+    prepare: (sql: string) => ({
+      get: () => undefined,
+      all: () => {
+        assert.match(sql, /FROM fact WHERE task_id/);
+        if (facts instanceof Error) throw facts;
+        return [...facts].reverse();
+      },
+    }),
+  } as unknown as ReadModelDb;
+}
+
+/** Builds the wanted keys by calling the view's own materialize, with the store `db` (or none). */
+function direct(f: Fixture, overrides: Partial<TaskViewOptions>, db: ReadModelDb | undefined, ids: string[] = [ID]): { bodies: Map<string, { data: TaskViewData; sources: Array<{ name: string; state: string; reason?: string }> }>; logs: Array<[string, Record<string, unknown>]> } {
+  const clock = mutableClock();
+  const demand = createDemandBook({ clock });
+  for (const id of ids) demand.want(TASK_VIEW_NAME, taskViewKey("core", id));
+  const logs: Array<[string, Record<string, unknown>]> = [];
+  const view = createTaskView({
+    instances: [{ name: "core", ledgerDir: f.ledgerDir, repo: "o/r" }], ledgerSource, demand, clock, log: (step, extra) => void logs.push([step, extra]),
+    readTask: () => ({ source: { asOf: clock.iso(), state: "fresh" } }), ...overrides,
+  });
+  const built = view.materialize({ now: T0, instances: [{ state: STATE, ...(db ? { db } : {}) }] });
+  return { bodies: new Map(built.map((entry) => [new URLSearchParams(entry.key).get("id")!, { data: entry.data, sources: entry.sources }])), logs };
+}
+
+test("W1-T5048: a store that is not open yet, or whose fact read fails, says so in the body", (t) => {
+  const f = fixture(t);
+  const closed = direct(f, {}, undefined).bodies.get(ID)!;
+  assert.equal(closed.data.reason, "the read model store is not open yet");
+  assert.equal(closed.data.found, false);
+  assert.deepEqual(closed.sources.find((s) => s.name === "read-model:core")?.state, "unavailable");
+
+  const failing = direct(f, {}, fakeDb(new Error("no such table: fact")));
+  const body = failing.bodies.get(ID)!;
+  assert.equal(body.data.reason, "no fact rows: no such table: fact");
+  assert.deepEqual(body.data.runs, []);
+  assert.deepEqual(failing.logs, [["read_model.task_view_facts_failed", { instance: "core", id: ID, error: "no such table: fact" }]]);
+});
+
+test("W1-T5048: a gateway that cannot answer leaves each run's pr unknown with its reason", (t) => {
+  const f = fixture(t);
+  const down = direct(f, { github: () => { throw new Error("the snapshot is unreadable"); } }, fakeDb(FACT_ROWS)).bodies.get(ID)!;
+  assert.deepEqual(down.data.runs[0]!.pr, { url: PR_URL, state: "unknown", reason: "the snapshot is unreadable" });
+  const github = down.sources.find((s) => s.name === "github:core");
+  assert.equal(github?.state, "unavailable");
+  assert.equal(github?.reason, "the snapshot is unreadable");
+
+  const throwing = { prByRef: () => { throw new Error("the gateway lookup failed"); } } as unknown as GitHub;
+  const lookup = direct(f, { github: () => ({ github: throwing, source: { asOf: new Date(T0).toISOString(), state: "fresh" } }) }, fakeDb(FACT_ROWS)).bodies.get(ID)!;
+  assert.deepEqual(lookup.data.runs[0]!.pr, { url: PR_URL, state: "unknown", reason: "the gateway lookup failed" });
+  assert.equal(lookup.data.found, true, "the fact rows still name the task");
+});
+
+test("W1-T5048: one key that cannot be built answers unavailable and leaves the other keys built", (t) => {
+  const f = fixture(t);
+  const BAD = "W1-T9";
+  const readTask: TaskViewOptions["readTask"] = (_instance, id) => {
+    if (id === BAD) throw new Error("the plan record is corrupt");
+    return { task: PLANNED, source: { asOf: new Date(T0).toISOString(), state: "fresh" } };
+  };
+  const { bodies, logs } = direct(f, { readTask }, fakeDb([]), [ID, BAD]);
+  assert.equal(bodies.get(ID)?.data.task?.title, "the planned title", "the good key is built");
+  const bad = bodies.get(BAD)!;
+  assert.equal(bad.data.found, false);
+  assert.equal(bad.data.reason, "the plan record is corrupt");
+  assert.deepEqual(bad.sources.map((s) => [s.name, s.state]), [["ledger:core", "unavailable"]]);
+  assert.deepEqual(logs, [["read_model.task_view_failed", { instance: "core", id: BAD, error: "the plan record is corrupt" }]]);
+});
+
+test("W1-T5048: the default plan reader reads the instance's plan file and reports an absent one", (t) => {
+  const f = fixture(t);
+  const planPath = join(f.root, "plan", "tasks.yaml");
+  const instance = { name: "core", ledgerDir: f.ledgerDir, repo: "o/r", planPath };
+  const read = (): { data: TaskViewData; sources: Array<{ name: string; state: string; reason?: string }> } => {
+    const demand = createDemandBook({ clock: mutableClock() });
+    demand.want(TASK_VIEW_NAME, KEY);
+    const view = createTaskView({ instances: [instance], ledgerSource, demand, clock: mutableClock() });
+    return view.materialize({ now: T0, instances: [{ state: STATE, db: fakeDb([]) }] })[0]!;
+  };
+  const absent = read();
+  const plan = absent.sources.find((s) => s.name === "plan:core");
+  assert.equal(plan?.state, "unavailable");
+  assert.equal(plan?.reason, `the plan file ${planPath} is absent`);
+  assert.equal(absent.data.task, undefined);
+
+  mkdirSync(join(f.root, "plan"), { recursive: true });
+  writeFileSync(planPath, `- id: ${ID}\n  title: the plan file's title\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n`);
+  const present = read();
+  assert.equal(present.data.task?.title, "the plan file's title");
+  assert.equal(present.data.found, true);
+  assert.equal(present.sources.find((s) => s.name === "plan:core")?.state, "fresh");
 });

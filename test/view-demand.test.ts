@@ -6,10 +6,12 @@ import type { Clock } from "../src/lib/clock.js";
 import { openReadModel } from "../src/lib/read-model-db.js";
 import { LEDGER_PROJECTOR_SCHEMA_VERSION } from "../src/lib/ledger-projector.js";
 import { setTimeout as sleep } from "node:timers/promises";
-import { createReadModelTicker, runReadModelViewWorker, type ReadModelBodyEntry, type ReadModelView, type ReadModelViewsInput, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
+import { pathToFileURL } from "node:url";
+import { createReadModelTicker, createReadModelWorker, runReadModelViewWorker, type ReadModelBodyEntry, type ReadModelView, type ReadModelViewsInput, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import {
   VIEW_DEMAND_EVICT_MS,
+  VIEW_DEMAND_MAX_KEYS,
   VIEW_DEMAND_MAX_PENDING,
   VIEW_DEMAND_WAIT_MS,
   awaitViewDemand,
@@ -322,6 +324,99 @@ test("W1-T5048: touching a held key re-wants it at most once per interval", () =
   touchViewDemand(main, "task", KEY, T0 + 1_000);
   touchViewDemand(main, "task", KEY, T0 + 61_000);
   assert.equal(wants.length, 2);
+});
+
+test("W1-T5048: the touch record drops only stamps past the touch interval once it is full", () => {
+  const wants: string[] = [];
+  const main: ViewDemandSource = { body: () => undefined, want: (view, key) => (wants.push(`${view}|${key}`), true) };
+  const FULL = VIEW_DEMAND_MAX_KEYS * 2;
+  for (let i = 0; i < FULL - 1; i++) touchViewDemand(main, "task", `id=T${i}&instance=core`, T0);
+  const RECENT = "id=recent&instance=core";
+  touchViewDemand(main, "task", RECENT, T0 + 30_000);
+  assert.equal(wants.length, FULL);
+  // The record is full: this touch prunes the stamps older than the interval, and keeps RECENT's.
+  touchViewDemand(main, "task", "id=late&instance=core", T0 + 61_000);
+  touchViewDemand(main, "task", RECENT, T0 + 61_001);
+  assert.equal(wants.length, FULL + 1, "a key touched within the interval survives the prune and is not re-wanted");
+  touchViewDemand(main, "task", "id=T0&instance=core", T0 + 61_002);
+  assert.equal(wants.length, FULL + 2, "a pruned key is re-wanted on its next touch");
+});
+
+test("W1-T5048: past the key cap the least recently read key is evicted early", () => {
+  const clock = mutableClock();
+  const book = createDemandBook({ clock, maxKeys: 2 });
+  book.want("task", "a");
+  book.want("task", "b");
+  book.want("task", "a"); // read again: b is now the oldest
+  assert.equal(book.want("task", "c"), true);
+  assert.deepEqual(book.keys("task").sort(), ["a", "c"]);
+  assert.equal(book.has("task", "b"), false);
+  assert.deepEqual(book.expire(), [{ view: "task", key: "b" }], "the key pushed out is reported for dropping on the next sweep");
+  assert.deepEqual(book.expire(), [], "and only once");
+});
+
+test("W1-T5048: a demand sweep that fails is logged and the pass still builds the wanted keys", (t) => {
+  const clock = mutableClock();
+  const book = createDemandBook({ clock });
+  const broken = { ...book, expire: (): never => { throw new Error("the book is torn"); } };
+  const builds: string[][] = [];
+  const messages: ReadModelWorkerMessage[] = [];
+  const made = ticker(t, { clock, stateDir: scratch(t, "vdf-state"), ledgerDir: seeded(t, "vdf-ledger"), book: broken, builds, post: (m) => void messages.push(m) });
+  broken.want("task", KEY);
+  made.tick();
+  const failed = messages.flatMap((m) => (m.type === "log" && m.step === "read_model.demand_sweep_failed" ? [m.extra] : []));
+  assert.deepEqual(failed, [{ error: "the book is torn" }]);
+  assert.ok(messages.some((m) => m.type === "body" && m.entry.view === "task" && m.entry.key === KEY), "the key was still built");
+});
+
+test("W1-T5048: a demanded body that cannot be rendered answers 500, not a hung request", async () => {
+  const listeners = new Set<(entry: ReadModelBodyEntry) => void>();
+  const entry: ReadModelBodyEntry = {
+    view: "task", key: KEY, version: 1, generation: 1, etag: viewEtag("task", 1, false, {}),
+    body: { view: "task", version: 1, generatedAt: new Date(T0).toISOString(), asOf: null, stale: false, sources: [], data: {} },
+  };
+  const readModel: ViewBodySource = {
+    body: () => undefined,
+    judge: () => { throw new Error("the judge failed"); },
+    switches: () => ({ projector: "on", views: { task: "serve" } }),
+    want: () => (setImmediate(() => listeners.forEach((listener) => listener(entry))), true),
+    onBody: (listener) => (listeners.add(listener), () => listeners.delete(listener)),
+  };
+  const route = buildReadModelViewRoutes({ legacy: [], readModelViews: ["task"], readModel, clock: mutableClock() }).find((r) => r.path === "/v1/views/task")!;
+  const got = await new Promise<{ status: number; body: Record<string, unknown> }>((resolve) => {
+    let status = 0;
+    const res = { headersSent: false, once: () => res, writeHead: (code: number) => void (status = code), end: (text?: string) => resolve({ status, body: JSON.parse(text ?? "{}") as Record<string, unknown> }) };
+    void route.handler({ url: "/v1/views/task?instance=core&id=W1-T1", headers: {} } as never, res as never, {} as never);
+  });
+  assert.equal(got.status, 500);
+  assert.deepEqual(got.body, { error: "internal_error", detail: "the judge failed" });
+});
+
+test("W1-T5048: serve's worker handle posts a want to its running worker and refuses one with none", async (t) => {
+  const dir = scratch(t, "vdh");
+  const workerPath = join(dir, "want-echo-worker.mjs");
+  // A worker that answers each want with a body for that key, as the view thread does after its pass.
+  writeFileSync(workerPath, `import { parentPort } from "node:worker_threads";
+parentPort.on("message", (m) => {
+  if (m.type !== "want") return;
+  const body = { view: m.view, version: 1, generatedAt: "2026-10-02T12:00:00.000Z", asOf: null, stale: false, sources: [], data: { wanted: m.key } };
+  parentPort.postMessage({ type: "body", entry: { view: m.view, key: m.key, version: 1, generation: 1, etag: "e", body } });
+});
+setInterval(() => {}, 1000);
+`);
+  const handle = createReadModelWorker({ stateDir: dir, instances: [{ name: "core", ledgerDir: dir }], workerUrl: pathToFileURL(workerPath), stopWaitMs: 20, every: () => () => {} });
+  t.after(() => handle.stop());
+  assert.equal(handle.want?.("task", KEY), false, "before start there is no worker to ask");
+  handle.start();
+  const answer = await awaitViewDemand(handle, "task", KEY, {
+    after: (run) => {
+      const timer = setTimeout(run, 5_000);
+      return () => clearTimeout(timer);
+    },
+  });
+  assert.equal(answer.ok, true, "the running worker was asked and answered");
+  if (answer.ok) assert.deepEqual(answer.entry.body.data, { wanted: KEY });
+  assert.deepEqual(handle.body("task", KEY)?.body.data, { wanted: KEY }, "the answered body is held for the next read");
 });
 
 test("W1-T5048: the view thread builds a wanted task key in the pass its want message triggers", async (t) => {
