@@ -50,7 +50,7 @@ export async function runServeSupervisor(argv: readonly string[], opts: Supervis
   const sha = (opts.headSha ?? ((dir: string) => execFileSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()))(repoDir);
   const supervisor = (opts.create ?? createServeSupervisor)({
     coldSlot: { dir: repoDir, sha, deps: coldDeps },
-    prepare: createSlotPreparer({ repoDir, gensDir, run }),
+    prepare: createSlotPreparer({ repoDir, gensDir, run, log }),
     serveArgs: serveArgsOf(argv),
     handoffEnabled: handoffSwitch(env, gensDir),
     log,

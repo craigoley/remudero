@@ -200,7 +200,8 @@ test("preflightCommand: --fast ADDS the fast-mode steps after the three hand-rou
   assert.equal(code, 1, "a failing fast-mode step must fail the overall command even when the three hand-route steps are clean");
   assert.ok(lines.some((l) => l.includes("typecheck: PASS")), "the hand-route steps still print");
   assert.ok(lines.some((l) => l.includes("claims: FAIL")), "the fast-mode steps print too, under --fast");
-  assert.equal(lines.some((l) => l.includes("ci-parity")), false, "no --ci-parity output when only --fast was passed");
+  // A checkout path or changed filename can contain "ci-parity" without running the mode.
+  assert.equal(lines.some((l) => l.startsWith("ci-parity:")), false, "no --ci-parity step output when only --fast was passed");
 });
 
 test("preflightCommand (W1-T3737, reverses the --fast opt-in): the fast gate runs by DEFAULT, and only --no-fast declines it", async () => {

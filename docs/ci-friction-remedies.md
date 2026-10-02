@@ -16,6 +16,12 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   uncovered changed lines, add focused tests for those behaviors, and rerun the coverage gate
   against the same committed tree before pushing.
 
+- `ci-friction:check:ci-log:coverage-ratchet:diff-coverage-blocked-this-diff-adds-source-line-s-with-zero` —
+  the diff-coverage gate found added source lines with no coverage. Use the gate's uncovered-line
+  report to identify each behavior, add focused tests that execute those lines, then commit the
+  tested tree and rerun diff-coverage against that same commit. Confirm the lcov data instruments
+  every changed source file before treating a passing diff-coverage result as evidence.
+
 - `ci-friction:fix_refusal:no-anchored-commit-message-line-in-the-report` — the shell-less
   harness requires the worker's REPORT to end with an anchored `COMMIT_MESSAGE:` line that
   names the commit subject in Conventional Commits format (`type(scope): subject`, lower-case,
@@ -96,6 +102,27 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   automatically. Run `npm run --silent comment-load-signal` locally to check your own changes
   before pushing.
 
+- `ci-friction:check:ci-log:task-id-existence` — a pull request's diff cites a task id
+  (e.g., `W1-T1234`) in source code, documentation, or plan files, but that id is not
+  declared in any plan shard and has no reservation ref (`refs/rmd-id/W1-T<n>` on the
+  remote). This gate enforces that every cited id is either declared in the plan or
+  reserved before being shipped. To fix: (1) if the id is a legitimate task reference that
+  was filed and merged, add it to the baseline exemptions (scripts/task-id-existence-baseline.json)
+  with a written reason (e.g., "issued in W1-TNNNN, merged and folded away"); or (2) if
+  it is a new id being cited, reserve it with `rmd mint --reserve` and re-run the gate, or
+  remove the citation if it is not a real task; or (3) if the citation is an EXAMPLE (to
+  illustrate a placeholder), use the placeholder form instead (e.g., `W1-T<n>` or `W1-TNNNN`)
+  — these carry no digits and will not match the citation scan.
+
+- `ci-friction:check:ci-log:lint-plan` — the required `lint-plan` CI job refused a plan change.
+  Reproduce the diff-scoped check locally with `npm run --silent lint-plan:fast`, which runs the
+  offline linter against the merge base and `origin/main` scope used by CI. If it reports a
+  violation, fix the offending task shard's proof, metadata, or other reported field; lint-plan
+  violations are repaired in that shard, not in a shared baseline. If CI reports
+  `lint-plan:error` before the linter runs, inspect the `lint-plan:base-refresh` output and restore
+  a reachable, pinned `origin/main` ref, then rerun the linter. Keep the failure output with the
+  fix so the changed plan can be checked again before pushing.
+
 - `ci-friction:conflict:merge-conflict` — a pull request cannot be merged automatically
   because the branch has diverged from main and git cannot resolve the conflicts in the
   files being changed. This commonly occurs when multiple PRs modify the same file (such as
@@ -107,3 +134,33 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   --force-with-lease` or `git push -f`). If the conflict is in a plan file, coordinate with
   other in-flight PRs to sequence merges carefully, or consider splitting the plan changes
   into separate PRs to minimize collision surface.
+
+- `ci-friction:check:gate-fix` — a pull request failed review with no unmet acceptance
+  criteria, but the sweep identified one or more structured gate failures with a single,
+  unambiguous remedy for each (W1-T2236, W1-T923). The fix rung dispatches in `gate-fix` mode
+  carrying that specific remedy instead of the old behavior of "empty reviewer-unmet" dispatches.
+  To fix: read the dispatch prompt's `actionableGateFailures` section carefully; it names a
+  SINGLE remedy that the sweep has already verified is both structured and actionable (not a
+  choice). Implement that exact remedy — for example, if it names "fix a merge conflict in
+  CHANGELOG.md", resolve that conflict, test, and commit; if it names a specific lint-plan
+  violation, repair the plan shard and re-run the linter. The remedy text is VERBATIM from the
+  gate's own structured failure ledger, not a human interpretation — follow it precisely.
+  Do not attempt to guess additional remedies or solve for criteria; the sweep already
+  determined that applying this one remedy is the correct path forward.
+
+- `ci-friction:check:reviewer-unmet` — a pull request's acceptance proof for a criterion
+  is non-executable: typically, a `unit test:` proof whose title does not match any actual
+  test name in the test files. This includes titles that appear only in comments rather than
+  in actual `test(...)` invocations. When a worker writes an acceptance criterion with such a
+  proof, the PR enters reviewer-unmet mode and dispatches to a fix worker, only to have the
+  reviewer reject the criterion's proof at review time. The pre-push hook (see
+  `scripts/proof-resolve-precheck.mjs` and `certainHeadRefusals` in `src/lib/review.ts`)
+  catches certain proof failures before pushing. To fix: (1) when authoring acceptance
+  criteria, ensure your `unit test:` proofs match the exact test name or file path in the
+  codebase (run `npm run --silent source-text-census -- test/` to verify your test file
+  names); (2) if adding a new acceptance criterion with a test proof, write the test first
+  and verify the proof matches its actual name before opening the PR; (3) the pre-push hook
+  will warn you of certain mismatches (`no file under test/ contains the title` or `only in
+  comments`) — fix those before pushing. If the hook passes but the reviewer still rejects
+  the proof, re-read the test file to ensure the title is in a `test(...)` invocation, not
+  only in a comment header.

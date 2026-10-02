@@ -259,6 +259,26 @@ test("W1-T4951: a second parity gate cannot reuse the active scratch", () => {
   }
 });
 
+test("a fake nested parity fixture keeps the outer coverage lock while using its own lock", () => {
+  const root = mkdtempSync(join("/tmp", "rmd-coverage-lock-fixture-"));
+  const { calls, spawn, cleanup } = coverageSpawn(root);
+  const outerLock = coverageGateLockDir(root);
+  const fixtureLock = coverageGateLockDir(root, "fixture");
+  assert.notEqual(fixtureLock, outerLock);
+  mkdirSync(outerLock);
+  try {
+    const result = testWithCoverageLeaf(root, spawn, join(root, "coverage", "lcov.info"), () => Number.MAX_SAFE_INTEGER, "fixture");
+    assert.equal(result.ok, true, result.detail);
+    assert.ok(calls.some((call) => call.args.includes("--experimental-test-coverage")));
+    assert.equal(existsSync(outerLock), true, "nested cleanup must not remove the outer gate's lock");
+    assert.equal(existsSync(fixtureLock), false, "the fixture releases only its own lock");
+  } finally {
+    rmSync(outerLock, { recursive: true, force: true });
+    cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T4951: missing compact shard refuses the merged coverage gate", () => {
   const root = coverageFixtureRoot();
   const { calls, spawn, cleanup } = coverageSpawn(root, { missingCompactShard: 3 });

@@ -541,7 +541,6 @@ test/pr-create-rest-transport.test.ts	pr-create-rest-notarepo- # pre-existing at
 test/preexisting-proof-hits-wiring.test.ts	ge-emptybase- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/preexisting-proof-hits-wiring.test.ts	ge-norepo- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/preexisting-proof-hits-wiring.test.ts	ge-repo- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
-test/preflight-coverage-mode.test.ts	preflight-coverage-no-lcov- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/preflight-killed-child.test.ts	preflight-asym- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/proof-debt-becomes-a-proposal.test.ts	<unresolvable> # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending
 test/prune-liveness.test.ts	gh-reap-cmd- # pre-existing at W1-T2786 re-key — W1-T2775 tranche migration pending

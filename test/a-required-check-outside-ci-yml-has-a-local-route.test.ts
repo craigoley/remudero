@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -67,6 +68,7 @@ test("W1-T3361: every real standalone PR workflow job has a parity entry, mirror
 test("W1-T3361: a workflow that runs on pull_request and is absent from the parity table is named", () => {
   const result = runCiParity(REPO_ROOT, {
     spawn: cleanSpawn(),
+    coverageLockDiscriminator: randomUUID(),
     ciYamlText: MINIMAL_CI,
     workflowTexts: {
       "new-required-gate.yml": "on:\n  pull_request:\njobs:\n  new-required-gate:\n    runs-on: ubuntu-latest\n    steps: []\n",
@@ -81,6 +83,7 @@ test("W1-T3361: a workflow that runs on pull_request and is absent from the pari
 test("W1-T3361: a standalone PR workflow with no parity entry fails the drift step", () => {
   const result = runCiParity(REPO_ROOT, {
     spawn: cleanSpawn(),
+    coverageLockDiscriminator: randomUUID(),
     ciYamlText: MINIMAL_CI,
     workflowTexts: {
       "new-required-gate.yml": "on:\n  pull_request:\njobs:\n  new-required-gate:\n    runs-on: ubuntu-latest\n    steps: []\n",
@@ -101,6 +104,7 @@ test("W1-T3361: an unmirrored standalone entry without a reason is refused", () 
   ];
   const result = runCiParity(REPO_ROOT, {
     spawn: cleanSpawn(),
+    coverageLockDiscriminator: randomUUID(),
     ciYamlText: MINIMAL_CI,
     workflowTexts: {
       "new-required-gate.yml": "on:\n  pull_request:\njobs:\n  new-required-gate:\n    runs-on: ubuntu-latest\n    steps: []\n",
@@ -115,7 +119,7 @@ test("W1-T3361: an unmirrored standalone entry without a reason is refused", () 
 
 test("W1-T3361: the deterministic standalone workflows run their own CI commands locally", () => {
   const calls: string[] = [];
-  runCiParity(REPO_ROOT, { spawn: cleanSpawn(calls), workflowTexts: {} });
+  runCiParity(REPO_ROOT, { spawn: cleanSpawn(calls), workflowTexts: {}, coverageLockDiscriminator: randomUUID() });
   for (const script of [
     "coverage-session-blanking:check",
     "docs-index:check",

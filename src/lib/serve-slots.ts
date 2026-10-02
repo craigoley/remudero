@@ -16,10 +16,10 @@
  * hard-linked tree an in-place write would change the other slot's marker too.
  */
 import { execFile } from "node:child_process";
-import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
-import type { PreparedSlot } from "./serve-supervisor.js";
+import type { PreparedSlot, ServeSupervisorOptions } from "./serve-supervisor.js";
 
 export const SLOT_NAMES = ["a", "b"] as const;
 /** BACKSTOP on a hung install; a cold `npm ci` measured 20–30 s on the fleet host. */
@@ -95,14 +95,37 @@ export async function prepareSlotDeps(dir: string, activeDir: string, run: RunCo
   return "installed";
 }
 
-/** Prepares the slot that is not `activeDir` at origin's newest main. */
-export function createSlotPreparer(opts: { repoDir: string; gensDir: string; run?: RunCommand }): (activeDir: string) => Promise<PreparedSlot> {
+/**
+ * Why `dir` cannot be reused as a worktree of `repoDir`, or undefined when it can. A `.git` file is
+ * not proof: its admin dir can be pruned away (2026-10-02, every handoff aborted at checkout), or it
+ * can belong to a different clone than the one the supervisor fetches into.
+ */
+async function slotUnfit(dir: string, repoDir: string, run: RunCommand): Promise<{ reason: string; detail?: string } | undefined> {
+  if (!existsSync(join(dir, ".git"))) return { reason: "absent" };
+  try {
+    await run("git", ["-C", dir, "rev-parse", "--git-dir"], dir);
+  } catch (err) {
+    return { reason: "dangling_git_link", detail: err instanceof Error ? err.message : String(err) };
+  }
+  const listed = (await run("git", ["-C", repoDir, "worktree", "list", "--porcelain"], repoDir))
+    .split("\n")
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => line.slice("worktree ".length))
+    .map((path) => (existsSync(path) ? realpathSync(path) : path));
+  return listed.includes(realpathSync(dir)) ? undefined : { reason: "foreign_worktree", detail: `not in ${repoDir}'s worktree list` };
+}
+
+/** Prepares the slot that is not `activeDir` at origin's newest main; ledgers whether the slot was reused or (re)created, and why. */
+export function createSlotPreparer(opts: { repoDir: string; gensDir: string; run?: RunCommand; log?: ServeSupervisorOptions["log"] }): (activeDir: string) => Promise<PreparedSlot> {
   const run = opts.run ?? runCommand;
+  const log = opts.log ?? (() => undefined);
   return async (activeDir) => {
     await run("git", ["-C", opts.repoDir, "fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"], opts.repoDir);
     const sha = (await run("git", ["-C", opts.repoDir, "rev-parse", "refs/remotes/origin/main"], opts.repoDir)).trim();
     const dir = SLOT_NAMES.map((name) => join(opts.gensDir, name)).find((candidate) => resolve(candidate) !== resolve(activeDir)) as string;
-    if (existsSync(join(dir, ".git"))) {
+    const unfit = await slotUnfit(dir, opts.repoDir, run);
+    log("serve.slot_prepare", { slot: dir, sha, path: unfit === undefined ? "reused" : unfit.reason === "absent" ? "created" : "recreated", reason: unfit?.reason, detail: unfit?.detail });
+    if (unfit === undefined) {
       await run("git", ["-C", dir, "checkout", "--quiet", "--detach", "--force", sha], dir);
       await run("git", ["-C", dir, "reset", "--quiet", "--hard", sha], dir);
     } else {

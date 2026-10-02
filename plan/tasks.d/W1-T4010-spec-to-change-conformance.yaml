@@ -18,7 +18,9 @@
     - test/spec-conformance.test.ts
     - test/spec-conformance-wiring.test.ts
   priority: 4
-  status: queued
+  status: blocked
+  retirement: retired
+  # plan gardener: retire W1-T4010 — It depends on W1-T4007, which will never be built.
   # backlog gardener: band=4 evidence=16487ea7980fcf76
   attempts: 0
   rationale: |

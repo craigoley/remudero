@@ -21,6 +21,7 @@
  * These tests now assert the NEGATIVE: neither worker prompt carries that obligation anymore.
  */
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -132,7 +133,7 @@ test("CI_PARITY_TABLE: ci:cli-reference-check invokes `npm run --silent cli-refe
 
 test("CI_PARITY_TABLE: ci:cli-reference-check FAILS INDEPENDENTLY of ci:test — a stale docs/cli-reference.md is named as its own step, not buried inside ci:test's output", () => {
   const { spawn } = recordingSpawn({ "cli-reference:check": { status: 1, stderr: "Drifted command(s): check-acceptance" } });
-  const result = runCiParity(REPO_ROOT, { spawn });
+  const result = runCiParity(REPO_ROOT, { spawn, coverageLockDiscriminator: randomUUID() });
 
   const cliRefStep = result.steps.find((s) => s.name === "ci:cli-reference-check")!;
   assert.equal(cliRefStep.ok, false, "a stale committed cli-reference.md must fail its own named step");
@@ -146,7 +147,7 @@ test("CI_PARITY_TABLE: ci:cli-reference-check FAILS INDEPENDENTLY of ci:test —
 
 test("CI_PARITY_TABLE: adding ci:cli-reference-check does not turn the ci-parity:drift step red — 'ci' is still a real ci.yml job, only its step LIST grew", () => {
   const { spawn } = recordingSpawn();
-  const result = runCiParity(REPO_ROOT, { spawn });
+  const result = runCiParity(REPO_ROOT, { spawn, coverageLockDiscriminator: randomUUID() });
   const drift = result.steps.find((s) => s.name === "ci-parity:drift")!;
   assert.equal(drift.ok, true, "the drift step only checks for ci.yml jobs missing a table entry — the 'ci' entry still exists and is unchanged as a job");
 });

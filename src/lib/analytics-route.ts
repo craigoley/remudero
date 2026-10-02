@@ -115,6 +115,13 @@ import {
   type JudgeLabelStore,
 } from "./judge-calibration.js";
 import { isProducedSpendRow, spendAmountUsd } from "./spend-rows.js";
+import {
+  ROUTING_POOL_VERSION,
+  buildRoutingPoolProjection,
+  readRoutingPoolSnapshot,
+  unavailableRoutingPool,
+  type RoutingPoolSnapshot,
+} from "./model-pool.js";
 
 /** One (lane, model) bucket of question 2 — worker counts and cost by lane/model. */
 export interface WorkerLaneModelBucket {
@@ -2385,6 +2392,8 @@ export function buildAnalyticsRoute(deps: {
   currentLiveMetrics?: () => LiveAnalyticsMetrics;
   mountsRoot?: string;
   currentEvalCardInput?: (trialId: string | undefined) => { trial: EvalCardTrial; evidence: EvalCardEvidence } | undefined;
+  currentRoutingPool?: () => RoutingPoolSnapshot;
+  clock?: Clock;
 }): Route {
   return {
     method: "GET",
@@ -2411,6 +2420,12 @@ export function buildAnalyticsRoute(deps: {
       }
       if (requestedVersion === BENCHMARK_QUALITY_VERSION) {
         sendJson(res, 200, base.benchmarkEvidence ?? unavailableBenchmarkEvidence("quality-projection-refresh-pending"));
+        return;
+      }
+      if (requestedVersion === ROUTING_POOL_VERSION) {
+        const pool = deps.currentRoutingPool?.() ??
+          (deps.mountsRoot === undefined ? unavailableRoutingPool("routing-pool-not-configured") : readRoutingPoolSnapshot(deps.mountsRoot));
+        sendJson(res, 200, buildRoutingPoolProjection(pool, deps.clock ?? systemClock));
         return;
       }
       if (requestedVersion === ABILITY_MAP_VERSION) {

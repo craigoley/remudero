@@ -14,6 +14,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,7 +54,7 @@ function diffCoverageStep(diff: SpawnResult): { step: { name: string; ok: boolea
   const entry = CI_PARITY_TABLE.find((e) => e.job === "coverage-ratchet");
   assert.ok(entry?.run, "the coverage-ratchet entry must exist and be runnable");
   const { spawn, stdinSeen } = seam(diff);
-  const steps = entry.run(REPO_ROOT, spawn, () => Number.MAX_SAFE_INTEGER);
+  const steps = entry.run(REPO_ROOT, spawn, () => Number.MAX_SAFE_INTEGER, randomUUID());
   const step = steps.find((s) => s.name === "coverage-ratchet:diff-coverage");
   assert.ok(step, `the entry must emit a diff-coverage step; saw ${steps.map((s) => s.name).join(", ")}`);
   return { step, stdinSeen };

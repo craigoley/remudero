@@ -2155,6 +2155,59 @@ export interface components {
       noTerminal: number;
       notRecorded: number;
     };
+    RoutingPoolCorpus: {
+      id: string;
+      version: string;
+    };
+    /** The fixed reviewed route a task class falls back to. It is always named, never hidden. */
+    RoutingPoolBaseline: {
+      provider: string;
+      model: string;
+      effort: string;
+      reviewedBy: string;
+    };
+    /** One provider/model/effort candidate. Only a ready, promoted candidate with comparable, fresh, joined and complete evidence is admissible. An unmeasured aggregate is null and is never read as zero. */
+    RoutingPoolCandidate: {
+      id: string;
+      provider: string;
+      model: string;
+      effort: string;
+      adapter: string;
+      toolProfile: string;
+      corpus: (RoutingPoolCorpus) | (null);
+      lastProbeAt: string | null;
+      promotedBy: string | null;
+      capabilities: (string)[];
+      aggregates: {
+        samples: number;
+        joinedSamples: number;
+        successRate: number | null;
+        quality: number | null;
+        costUsdPerTask: number | null;
+        latencyMsP50: number | null;
+      };
+      readiness: "benchmarking" | "ready" | "failed" | "unavailable";
+      admissible: boolean;
+      reason?: "not-ready:benchmarking" | "not-ready:failed" | "not-ready:unavailable" | "not-promoted" | "corpus-incomparable" | "stale-evidence" | "unjoined-evidence" | "evidence-missing" | "over-budget" | "capability-missing";
+    };
+    /** routing-pool-v1 (W1-T3958). The reviewed pool per task class and capability tier. When no pool is configured or the file is invalid, state is unavailable, a reason is given, and pools is empty. A selection made from this pool picks a ready candidate, keeps a session's pinned route, falls back to the baseline, or refuses by name; its receipt (pool revision, candidate set, chosen model and effort, reason, fallback, terminal join key) rides on the Codex model decision. */
+    RoutingPoolProjection: {
+      version: "routing-pool-v1";
+      state: "observed" | "unavailable";
+      reason?: string;
+      revision: string | null;
+      generatedAt: string | null;
+      asOf: string;
+      stale: boolean;
+      pools: ({
+        taskClass: string;
+        capabilityTier: string;
+        corpus: RoutingPoolCorpus;
+        baseline: RoutingPoolBaseline;
+        readyCandidates: number;
+        candidates: (RoutingPoolCandidate)[];
+      })[];
+    };
     /** Internal evidence coverage, not a causal model score or public release. Local assignment and run identifiers are join keys only and never appear in this response. API request estimates and subscription notional amounts are separate; neither is an invoice. */
     BenchmarkQualityProjection: {
       version: "benchmark-quality-v1";
@@ -3872,7 +3925,7 @@ export interface paths {
   "/v1/analytics": {
     get: {
       responses: {
-          "200": BenchmarkQualityProjection;
+          "200": (BenchmarkQualityProjection) | (RoutingPoolProjection);
           "401": Error;
           "403": Error;
         };

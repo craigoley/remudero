@@ -36,7 +36,7 @@ import {
   type OperatorAgentSettings,
 } from "./operator-agent.js";
 import { READ_MODEL_DIRNAME, readModelSidecarDir, type ReadModelDb } from "./read-model-db.js";
-import type { ViewDefinition, ViewSource } from "./views.js";
+import type { SourcePhase, ViewDefinition, ViewSource } from "./views.js";
 
 export const NAV_BADGE_VIEW_VERSION = 1;
 
@@ -222,17 +222,22 @@ interface InstanceInputs {
   instanceId: string;
   repository?: string;
   analytics: NavBadgeAnalytics | null;
-  memory: () => { rows: readonly OperatorAgentMemoryLedgerRow[] } | { reason: string };
+  memory: () => { rows: readonly OperatorAgentMemoryLedgerRow[] } | { reason: string; phase?: SourcePhase };
 }
 
 function countInstance(input: InstanceInputs, nowMs: number, sources: ViewSource[]): CountedInstance {
   const analyticsState = sourceAge(input.analytics?.asOf ?? null, nowMs, ANALYTICS_STALE_AFTER_MS);
-  sources.push({ name: `analytics:${input.instanceId}`, asOf: input.analytics?.asOf ?? null, state: analyticsState, kind: "analytics", budgetMs: ANALYTICS_STALE_AFTER_MS });
+  // A cold cache (never refreshed, or dropped by serve.analytics_shed) leaves this instance out of the sum: a partial answer, so warming.
+  const cold = input.analytics === null || analyticsState === "unavailable";
+  sources.push({ name: `analytics:${input.instanceId}`, asOf: input.analytics?.asOf ?? null, state: analyticsState, kind: "analytics", budgetMs: ANALYTICS_STALE_AFTER_MS, ...(cold ? { phase: "warming" as const } : {}) });
   const base = { instanceId: input.instanceId, ...(input.repository ? { repository: input.repository } : {}) };
   if (input.repository === undefined) return { badge: { ...base, reason: "serve names no repository for this instance" }, ids: [] };
-  if (input.analytics === null || analyticsState === "unavailable") return { badge: { ...base, reason: "analytics has not completed its first refresh" }, ids: [] };
+  if (input.analytics === null || cold) return { badge: { ...base, reason: "analytics has not completed its first refresh" }, ids: [] };
   const memory = input.memory();
-  if ("reason" in memory) return { badge: { ...base, reason: memory.reason }, ids: [] };
+  if ("reason" in memory) {
+    if (memory.phase) sources.push({ name: `operator-agent-memory:${input.instanceId}`, asOf: null, state: "unavailable", kind: "analytics", phase: memory.phase });
+    return { badge: { ...base, reason: memory.reason }, ids: [] };
+  }
   const opDeps = { ledgerPath: "", now: () => nowMs, memory: { current: () => ({ state: "ready" as const, asOf: null, rows: memory.rows }), record: () => undefined } };
   const history = readOperatorAgentHistory(opDeps);
   const settings = readOperatorAgentSettings(opDeps, { kind: "repository", repository: input.repository }).settings;
@@ -248,7 +253,8 @@ function instanceBadge(scope: NavBadgeScope, nowMs: number, sources: ViewSource[
     analytics: snapshot,
     memory: () => {
       const current = scope.memory?.current();
-      return current?.state === "ready" ? { rows: current.rows } : { reason: "operator-agent memory has not completed its first refresh" };
+      if (current?.state === "ready") return { rows: current.rows };
+      return { reason: "operator-agent memory has not completed its first refresh", ...(current?.state === "cold" ? { phase: "warming" as const } : {}) };
     },
   }, nowMs, sources);
 }
