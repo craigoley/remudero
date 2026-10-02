@@ -3,9 +3,11 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=0140d95b35f086e4
   attempts: 0
   author_class: machine
   origin: "selector-shadow-miss:test/changed-tasks-raw-text.test.ts"
@@ -14,3 +16,13 @@
   acceptance:
     - claim: "the narrow selector includes test/changed-tasks-raw-text.test.ts when this edge is exercised"
       proof: "grep: test/changed-tasks-raw-text\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.85
+    reasons:
+      - "The declared scope is a single file, src/lib/affected-suites.ts. It adds one test path to the narrow test selector. That is a coverage-selection change, and the description doesn't touch secrets, auth, permissions, deletions, or merge, deploy or review policy."
+      - "The acceptance criterion is a grep that CI can verify mechanically, and the change is reversible. It asks for no operator decision."
+      - "The family has no track record (0 merged, 0 declined, Beta mean 0.50). That is a neutral prior and not a concerning signal. The PR still has to pass CI and review."
+    judged_at: "2026-10-02T11:00:33.247Z"
+    pin: "47522dd7d9339329ba12f543dcd675f042077ee3b127c06445299ca8d2975af0"
