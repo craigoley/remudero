@@ -129,3 +129,10 @@ test("W1-T2786: every migrated allowlist entry names a currently observed file a
   const source = readFileSync(SCRIPT, "utf8");
   assert.match(source, /formatRefusal[\s\S]*extractMkdtempPrefix/, "the refusal display calls the shared extractor");
 });
+
+test("nested coverage fixture prefix migration keeps the exemption census truthful", () => {
+  const fixture = readFileSync(join(REPO_ROOT, "test", "preflight-coverage-mode.test.ts"), "utf8");
+  assert.match(fixture, /mkdtempSync\(join\("\/tmp", "rmd-no-lcov-"\)\)/);
+  assert.equal(mod.loadAllowlist(REPO_ROOT).has("test/preflight-coverage-mode.test.ts\tpreflight-coverage-no-lcov-"), false);
+  assert.equal(mod.scanRepo(REPO_ROOT).refused.length, 0);
+});
