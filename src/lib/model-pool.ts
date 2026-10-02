@@ -19,7 +19,7 @@ export const ROUTING_POOL_VERSION = "routing-pool-v1" as const;
 export const ROUTING_POOL_READINESS_STATES = ["benchmarking", "ready", "failed", "unavailable"] as const;
 export type RoutingPoolReadiness = (typeof ROUTING_POOL_READINESS_STATES)[number];
 
-/** Evidence older than this is stale: visible, never admitted. */
+/** PRIMARY CONTROL: evidence older than this is stale. It stays visible and is never admitted. */
 export const ROUTING_POOL_MAX_EVIDENCE_AGE_MS = 7 * 24 * 60 * 60_000;
 
 export interface RoutingPoolCorpus {
@@ -162,13 +162,15 @@ export function readRoutingPoolSnapshot(root: string): RoutingPoolSnapshot {
     text = readFileSync(routingPoolPath(root), "utf8");
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    return unavailableRoutingPool(code === "ENOENT" ? "routing-pool-not-configured" : `routing-pool-unreadable:${code ?? "unknown"}`);
+    const reason = code === "ENOENT" ? "routing-pool-not-configured" : `routing-pool-unreadable:${code ?? "unknown"}`;
+    return unavailableRoutingPool(reason);
   }
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch (error) {
-    return unavailableRoutingPool(error instanceof SyntaxError ? "routing-pool-malformed" : "routing-pool-unparseable");
+    const reason = error instanceof SyntaxError ? "routing-pool-malformed" : "routing-pool-unparseable";
+    return unavailableRoutingPool(reason);
   }
   return parseRoutingPoolSnapshot(raw);
 }
@@ -379,7 +381,7 @@ export function selectFromRoutingPool(snapshot: RoutingPoolSnapshot, request: Ro
   }
   if (pinned) {
     const held = pinned.candidateId === undefined ? undefined : candidates.find((entry) => entry.id === pinned.candidateId);
-    if (pinned.candidateId !== undefined && !held?.eligible) return toBaseline(`pin-ineligible:${held?.reason ?? "candidate-removed"}`);
+    if (pinned.candidateId !== undefined && (held === undefined || !held.eligible)) return toBaseline(`pin-ineligible:${held?.reason ?? "candidate-removed"}`);
     const { poolRevision: _revision, ...route } = pinned;
     return { ...base, outcome: "pinned", reason: "session-pinned", candidates, chosen: route,
       fallback: { used: false, baseline: pool.baseline }, evidence: evidenceOf(held) };

@@ -132,3 +132,11 @@ test("W1-T3958 criterion 3: only a declared capacity or safety refusal moves a p
   assert.equal(exhausted.chosen, null);
   assert.deepEqual(exhausted.fallback, { used: true, baseline: BASELINE });
 });
+
+test("W1-T3958 criterion 3: a pin never keeps a candidate that has since failed or left the pool", () => {
+  const pin = { poolRevision: "pool-rev-0", candidateId: "r", provider: "codex", model: "model-r", effort: "high" };
+  const failed = selectFromRoutingPool(pool([candidate("r", "failed")]), request({ pinned: pin }));
+  assertBaseline(failed, "pin-ineligible:not-ready:failed");
+  const removed = selectFromRoutingPool(pool([candidate("other", "ready")]), request({ pinned: pin }));
+  assertBaseline(removed, "pin-ineligible:candidate-removed");
+});
