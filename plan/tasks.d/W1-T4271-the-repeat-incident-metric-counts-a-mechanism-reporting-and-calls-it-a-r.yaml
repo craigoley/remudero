@@ -87,7 +87,7 @@
   files: [src/lib/rule-efficacy.ts, test/rule-efficacy-signature-kind.test.ts]
   priority: 2
   status: queued
-  # backlog gardener: band=2 evidence=e76d88d9d9d6d83a
+  # backlog gardener: band=2 evidence=85fc03976cd9945c
   attempts: 0
   note: |
     RATIFIED AT THE CLASS, NOT THE INSTANCE. The proposal's literal ask — promote the prose rule to an
