@@ -5,7 +5,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { randomUUID } from "node:crypto";
-import { systemClock } from "../src/lib/clock.ts";
+import { fixedClock, systemClock } from "../src/lib/clock.ts";
 import { ledgerRotationEntries, openLedgerUnion } from "../src/lib/ledger-union.ts";
 import { evaluateRoutingExperiment, ROUTING_EXPERIMENTS } from "../src/lib/routing-experiments.ts";
 
@@ -29,7 +29,9 @@ async function readSource(source, asOf) {
     onMalformedRow: () => { malformedRows++; },
   })) {
     const time = Date.parse(row.ts);
-    if (!Number.isFinite(time) || time > Date.parse(asOf)) { futureRows++; continue; }
+    if (!Number.isFinite(time) || time > Date.parse(asOf) + 5 * 60_000) { futureRows++; continue; }
+    // Normal writes arriving during the scan belong to the next snapshot, not a clock warning.
+    if (time > Date.parse(asOf)) continue;
     rowsRead++;
     if (newestTs === null || row.ts > newestTs) newestTs = row.ts;
     if (["worker.assignment", "verdict.merged", "fix.dispatch"].includes(row.step)
@@ -51,13 +53,17 @@ function privateWrite(path, value) {
 
 export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.iso() }) {
   const today = asOf.slice(0, 10);
-  const yesterday = new Date(Date.parse(`${today}T00:00:00Z`) - DAY).toISOString().slice(0, 10);
+  const yesterday = fixedClock(Date.parse(`${today}T00:00:00Z`) - DAY).iso().slice(0, 10);
   const scheduled = Date.parse(`${today}T04:17:00Z`);
-  const nextScheduledReviewAt = new Date(scheduled > Date.parse(asOf) ? scheduled : scheduled + DAY).toISOString();
+  const nextScheduledReviewAt = fixedClock(scheduled > Date.parse(asOf) ? scheduled : scheduled + DAY).iso();
   let previous, previousReview;
   try {
     previous = JSON.parse(readFileSync(join(outDir, `${yesterday}.json`), "utf8"));
-    if (previous.version !== "routing-daily-review-v1" || previous.asOf?.slice(0, 10) !== yesterday || !Array.isArray(previous.sources))
+    if (previous.version !== "routing-daily-review-v1" || previous.asOf?.slice(0, 10) !== yesterday || !Array.isArray(previous.sources)
+      || !previous.sources.every((source) => typeof source.label === "string" && Array.isArray(source.reports)
+        && source.reports.every((report) => typeof report.id === "string" && Number.isSafeInteger(report.assignments)
+          && report.assignments >= 0 && Array.isArray(report.arms) && report.arms.every((arm) => typeof arm.arm === "string"
+            && Number.isSafeInteger(arm.tasks) && arm.tasks >= 0))))
       throw new Error("previous review schema invalid");
     previousReview = { state: "observed", asOf: previous.asOf };
   } catch (error) {
@@ -89,7 +95,7 @@ export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.i
   for (const source of results) {
     lines.push(`${source.label}: ${source.state}; ${source.rowsRead} rows; ${source.reasons.join(", ") || "no source warnings"}`);
     for (const report of source.reports) {
-      lines.push(`  ${report.id}: ${report.reviewState}; ${report.arms.map((arm) => `${arm.arm} ${arm.tasks}/${report.minTasksPerArm} tasks, ${arm.merged} merged, ${arm.nonStarterAssignments} no attempt, ${arm.costMissingAssignments} cost missing`).join("; ")}; ${report.crossoverTasks} crossovers; next action: ${report.nextAction}`);
+      lines.push(`  ${report.id}: ${report.reviewState}; ${report.arms.map((arm) => `${arm.arm} ${arm.tasks}/${report.minTasksPerArm} tasks, ${arm.merged} merged, ${arm.nonStarterAssignments} no attempt, ${arm.costMissingAssignments} cost missing`).join("; ")}; ${report.crossoverTasks} crossovers; assignment growth since prior day: ${report.changesSincePriorDay?.assignments ?? "unavailable"}; next action: ${report.nextAction}`);
     }
   }
   const text = lines.join("\n") + "\n";

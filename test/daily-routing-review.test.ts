@@ -96,6 +96,18 @@ test("daily routing review quarantines future timestamps and retains non-starter
   } finally { f.close(); }
 });
 
+test("normal writes arriving during a daily scan do not become false source warnings", async () => {
+  const f = fixture();
+  try {
+    writeFileSync(join(f.sources[0]!.stateDir, "ledger.ndjson"), ndjson([assignment("1"),
+      { ...assignment("2"), ts: "2026-10-02T14:00:01.000Z" }]));
+    const result = await dailyRoutingReview({ ...f, asOf });
+    assert.equal(result.snapshot.sources[0].state, "observed");
+    assert.equal(result.snapshot.sources[0].futureRows, 0);
+    assert.equal(result.snapshot.sources[0].rowsRead, 1);
+  } finally { f.close(); }
+});
+
 test("daily routing review shows prior-day growth and sample readiness without promoting a winner", async () => {
   const f = fixture();
   try {
@@ -107,6 +119,7 @@ test("daily routing review shows prior-day growth and sample readiness without p
     assert.equal(report.sufficient, true); assert.equal(report.reviewState, "sample-minimum-met");
     assert.equal(report.nextAction, "review-matched-cohorts");
     assert.equal(report.changesSincePriorDay.assignments, 39);
+    assert.match(result.text, /assignment growth since prior day: 39/);
     assert.deepEqual(report.changesSincePriorDay.tasks, [{ arm: "sonnet", added: 20 }, { arm: "sol61", added: 19 }]);
     assert.equal(result.snapshot.nextScheduledReviewAt, "2026-10-03T04:17:00.000Z");
     assert.equal(result.snapshot.routingChanged, false); assert.equal(result.snapshot.comparativeClaims, "none");
@@ -114,6 +127,8 @@ test("daily routing review shows prior-day growth and sample readiness without p
     const bad = await dailyRoutingReview({ ...f, asOf: "2026-10-03T03:00:00.000Z" });
     assert.equal(bad.snapshot.previousReview.reason, "prior-day-review-unreadable");
     writeFileSync(join(f.outDir, "2026-10-02.json"), "{}");
+    assert.equal((await dailyRoutingReview({ ...f, asOf: "2026-10-03T03:00:00.000Z" })).snapshot.previousReview.state, "unavailable");
+    writeFileSync(join(f.outDir, "2026-10-02.json"), JSON.stringify({ version: "routing-daily-review-v1", asOf, sources: [{ label: "core", reports: [{ id: epoch.id, assignments: 1 }] }] }));
     assert.equal((await dailyRoutingReview({ ...f, asOf: "2026-10-03T03:00:00.000Z" })).snapshot.previousReview.state, "unavailable");
   } finally { f.close(); }
 });

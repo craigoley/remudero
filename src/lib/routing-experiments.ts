@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { loadConfig, type WorkerProviderId } from "./config.js";
-import { systemClock } from "./clock.js";
+import { fixedClock, systemClock } from "./clock.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
 import { routingDrawValue, type RoutingDrawSeed } from "./worker-provider.js";
 
@@ -287,7 +287,7 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
     revisitDue: today >= experiment.revisitOn,
     reviewCadence: experiment.reviewCadence ?? "scheduled",
     nextReviewOn: experiment.reviewCadence === "daily" && today >= experiment.revisitOn
-      ? new Date(Date.parse(`${today}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10)
+      ? fixedClock(Date.parse(`${today}T00:00:00Z`) + 86_400_000).iso().slice(0, 10)
       : experiment.revisitOn,
     assignments: assignmentTask.size,
     excludedAssignments,
