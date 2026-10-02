@@ -2625,19 +2625,19 @@ function renderLearningsInjectionBlock(s: LearningsInjectionSection): string[] {
 function renderNeedsMeBlock(n: NeedsMeSection): string[] {
   const out = [sectionRule("NEEDS ME", SECTION_RULE_WIDTH)];
   const parked = n.parkedProposals;
-  if (
-    (!parked || parked.count === 0) && parked?.unknownReason === undefined &&
+  const otherSignalsQuiet =
     n.costAnomaly.length === 0 &&
     !n.imageDrift &&
     n.mergeHeld.length === 0 &&
     n.uncreditedBuilds.length === 0 &&
     !n.tokenFallback &&
-    (n.heldRoots ?? []).length === 0
-  ) {
+    (n.heldRoots ?? []).length === 0;
+  if (otherSignalsQuiet && (!parked || parked.count === 0) && parked?.unknownReason === undefined) {
     out.push("nothing needs you");
     return out;
   }
   if (parked?.unknownReason) {
+    if (otherSignalsQuiet) out.push("nothing needs you from the other observed signals; proposal count is unresolved");
     out.push(`machine-authored proposals awaiting a ruling: unknown — ${parked.unknownReason}`);
   } else if ((parked?.count ?? 0) > 0) {
     const ids = parked!.taskIds.slice(0, 5);
