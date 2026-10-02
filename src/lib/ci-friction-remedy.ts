@@ -257,6 +257,11 @@ export function ownerSearchTerms(key: string, details: readonly string[]): strin
  * nothing can be located — the cause then goes to a person, never to a docs-only record.
  */
 export function locateCiFrictionOwner(key: string, details: readonly string[], search: OwnerSearch): CiFrictionOwner | undefined {
+  if (key.startsWith("hand_fix:")) {
+    const file = key.slice("hand_fix:".length);
+    return /^(src|scripts)\/[\w./-]+$/.test(file) && !file.split("/").includes("..") && search.fileExists(file)
+      ? { files: [file], why: [`${file}: repaired by hand in multiple distinct merged PRs`] } : undefined;
+  }
   const testPath = key.startsWith("check:ci-log:")
     ? details.map((d) => /(test\/[\w./-]+\.test\.[mc]?[jt]s)/.exec(d)?.[1]).find((p): p is string => p !== undefined)
     : undefined;
