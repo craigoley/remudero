@@ -118,15 +118,15 @@ test("Sol 6.1 refuses a paid request before transport when the shared allowance 
   } finally { f.close(); }
 });
 
-for (const [label, envelope, expected] of [
-  ["incomplete output", reply({ status: "incomplete" }), /truncated/i],
-  ["failed response", reply({ status: "failed" }), /no assistant message/],
-  ["empty completed response", reply({ output: [] }), /no assistant message/],
-  ["undeclared function", reply({ output: [{ type: "function_call", call_id: "c", name: "shell", arguments: "{}" }] }), /undeclared tool/],
-  ["malformed arguments", reply({ output: [{ type: "function_call", call_id: "c", name: "read_file", arguments: "invalid" }] }), /tool read_file failed/],
-  ["failed real tool", reply({ output: [{ type: "function_call", call_id: "c", name: "read_file", arguments: '{"path":"missing.txt"}' }] }), /tool read_file failed/],
+for (const [title, envelope, expected] of [
+  ["Sol 6.1 reports incomplete output without claiming completion", reply({ status: "incomplete" }), /truncated/i],
+  ["Sol 6.1 reports failed response without claiming completion", reply({ status: "failed" }), /no assistant message/],
+  ["Sol 6.1 reports empty completed response without claiming completion", reply({ output: [] }), /no assistant message/],
+  ["Sol 6.1 reports undeclared function without claiming completion", reply({ output: [{ type: "function_call", call_id: "c", name: "shell", arguments: "{}" }] }), /undeclared tool/],
+  ["Sol 6.1 reports malformed arguments without claiming completion", reply({ output: [{ type: "function_call", call_id: "c", name: "read_file", arguments: "invalid" }] }), /tool read_file failed/],
+  ["Sol 6.1 reports failed real tool without claiming completion", reply({ output: [{ type: "function_call", call_id: "c", name: "read_file", arguments: '{"path":"missing.txt"}' }] }), /tool read_file failed/],
 ] as const) {
-  test(`Sol 6.1 reports ${label} without claiming completion`, async () => {
+  test(title, async () => {
     const f = fixture();
     try {
       const result = await spawnOpenWeightWorker({ cwd: f.cwd, workerHome: f.cwd, prompt: "work", tools: ["Read"], maxTurns: 2, env,
