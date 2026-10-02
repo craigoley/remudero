@@ -5,8 +5,8 @@ import { performance } from "node:perf_hooks";
 import { createBoardSnapshotCache, type BoardSnapshot, type BoardSnapshotCache, type BoardSnapshotSource, type BoardSnapshotState } from "./board.js";
 import { systemClock, type Clock } from "./clock.js";
 import { readInflightLock } from "./inflight-lock.js";
-import { loadPlan } from "./plan.js";
 import type { BoardDeps, GitHub } from "./status.js";
+import { threadStrictPlan } from "./thread-plan.js";
 
 const KIND = "remudero-board-projection";
 export const BOARD_PROJECTION_INTERVAL_MS = 3_000;
@@ -73,9 +73,23 @@ export function computeWorkerBoardSnapshot(deps: BoardDeps, cache: BoardSnapshot
   return cache.get(deps);
 }
 
+/** One worker pass: the plan comes from the thread's parse held per file identity, so a filed or retired task reaches the board without a restart. */
+export function boardWorkerPass(
+  input: { planPath: string; ledgerPath: string; inflightDir: string },
+  github: GitHub,
+  cache: BoardSnapshotCache,
+): BoardSnapshot {
+  const deps: BoardDeps = {
+    plan: threadStrictPlan(input.planPath),
+    ledgerPath: input.ledgerPath,
+    github,
+    inflightHolder: (taskId) => readInflightLock(input.inflightDir, taskId),
+  };
+  return computeWorkerBoardSnapshot(deps, cache);
+}
+
 function runBoardWorker(input: WorkerInput): void {
   const github = projectionGithub(input);
-  let plan: ReturnType<typeof loadPlan> | undefined;
   const cache = createBoardSnapshotCache();
   let busy = false;
   const tick = (): void => {
@@ -83,14 +97,7 @@ function runBoardWorker(input: WorkerInput): void {
     busy = true;
     try {
       if (input.delayMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, input.delayMs);
-      plan ??= loadPlan(input.planPath);
-      const deps: BoardDeps = {
-        plan,
-        ledgerPath: input.ledgerPath,
-        github,
-        inflightHolder: (taskId) => readInflightLock(input.inflightDir, taskId),
-      };
-      parentPort!.postMessage({ kind: "snapshot", snapshot: computeWorkerBoardSnapshot(deps, cache) } satisfies ProjectionMessage);
+      parentPort!.postMessage({ kind: "snapshot", snapshot: boardWorkerPass(input, github, cache) } satisfies ProjectionMessage);
     } catch (error) {
       parentPort!.postMessage({ kind: "failure", reason: String((error as Error)?.message ?? error) } satisfies ProjectionMessage);
     } finally {

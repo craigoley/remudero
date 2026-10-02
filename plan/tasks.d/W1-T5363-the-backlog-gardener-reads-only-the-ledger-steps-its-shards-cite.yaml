@@ -1,0 +1,43 @@
+- id: W1-T5363
+  title: "THE BACKLOG GARDENER READS ONLY THE LEDGER STEPS ITS SHARDS CITE — its pass loads every row of the 1.37 GB ledger union as JS objects, and on 2026-10-02 its child reached 1.75 GB RSS plus 2.0 GB swap in 3 minutes on a 15 GiB host already swapping with IO pressure at 84%"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  origin: "operator session 2026-10-02: daemon loop-stall diagnosis"
+  plan_refs: ["W1-T4710", "W1-T5114", "W1-T5364", "W1-T5365"]
+  files: [src/lib/backlog-gardener.ts, test/the-backlog-gardener-reads-only-the-ledger-steps-its-shards-cite.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    `backlogGardenSpec` (src/lib/backlog-gardener.ts) builds its ledger source as
+    `readLedgerUnionRecordsSync(deps.stateDir, { refuseIncomplete: true })`. That call has no `step`, no
+    `sinceTs`, and no `rotationWindowMs`, so the whole union is parsed and kept as rows. Yet `backlogEvidence`
+    only queries the explicit ledger step names a shard's rationale or title cites ("Only explicit ledger
+    step names in the shard's rationale/title are queried"). So nearly every row it holds is never read.
+    W1-T4710 made a union read honour its `step` filter, rotations included.
+    MEASURED 2026-10-02 (research/loop-stall.md §1a): the host had 15 GiB RAM, about 10 GiB of swap in use,
+    vmstat si/so of 10-100 MB/s, and PSI io some avg10=84. The largest memory users were the daemon's own
+    garden children: `garden run backlog` at 1.75 GB RSS plus 2.0 GB swap after 3 minutes, alongside
+    ci-friction (W1-T5364). They run two at a time (`boundedGardenPassSpawn(..., 2)`). That pressure put the
+    daemon's own pages on swap (VmSwap 0.48-0.55 GB, about 60 major faults/s), so the daemon's main thread
+    spent 38% of 1,226 samples in D state waiting on swap-in. `garden.pass` read 1,377-2,021 s.
+    A bounded read here reduces both that memory and the time the pass holds it.
+  design: |
+    Before reading the ledger, compute the set of ledger step names cited by the open shards the inventory
+    will examine. Use the same extraction `backlogEvidence` applies, factored out so both use one rule. Pass
+    that set as `readLedgerUnionRecordsSync`'s `step` filter, keeping `refuseIncomplete: true`. If no shard
+    cites a step, read no ledger at all. Also bound the read by the oldest window `backlogEvidence`
+    compares (its trailing-day and earlier windows), with `sinceTs` when that window is finite. A step
+    cited after the read is never silently counted as zero: the evidence for that shard is "no ledger step
+    cited", as today. Keep `BacklogSources.ledger` as the seam, so the `overrides` tests keep working.
+  acceptance:
+    - claim: "the backlog gardener's ledger read passes exactly the step names its open shards cite and still refuses an incomplete union, a plan citing no step reads no ledger, and the candidates it proposes over a fixture ledger are unchanged from the unfiltered read"
+      proof: "unit test: test/the-backlog-gardener-reads-only-the-ledger-steps-its-shards-cite.test.ts"
+  falsifier: |
+    Restore the unfiltered `readLedgerUnionRecordsSync(deps.stateDir, { refuseIncomplete: true })`. The suite's
+    recording read sees no `step` option and receives rows of steps no shard cites.

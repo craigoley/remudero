@@ -1,0 +1,44 @@
+- id: W1-T5365
+  title: "A GARDEN CHILD RUNS UNDER A HEAP CAP AT LOW CPU AND IO PRIORITY — childGardenPassSpawn starts each pass with the daemon's own node flags and no limit, so on 2026-10-02 two children together held about 7.4 GB RSS plus swap on a 15 GiB host and pushed the daemon's own pages to swap"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: low
+  origin: "operator session 2026-10-02: daemon loop-stall diagnosis"
+  plan_refs: ["W1-T5114", "W1-T5363", "W1-T5364"]
+  files: [src/lib/garden-registry.ts, test/a-garden-child-runs-under-a-heap-cap-at-low-priority.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    `childGardenPassSpawn` (src/lib/garden-registry.ts, W1-T5114) spawns
+    `process.execPath [...process.execArgv, entry, "garden", "run", name]` with the daemon's environment.
+    It sets no heap limit and no scheduling priority, so a garden pass competes with the daemon on equal
+    terms. `boundedGardenPassSpawn(..., 2)` lets two passes run at once. The repo already caps a background
+    node child's heap: src/lib/retro-subprocess.ts passes `--max-old-space-size=${AUTOMATED_RETRO_HEAP_LIMIT_MB}`.
+    MEASURED 2026-10-02 (research/loop-stall.md §1a): backlog reached 1.75 GB RSS + 2.0 GB swap and ci-friction
+    2.4 GB RSS + 1.25 GB swap, both inside 3 minutes. On the host that meant ~10 GiB swap used, PSI io some
+    avg10=84, memory some=25. The daemon itself had 0.48-0.55 GB swapped and spent 38% of its main-thread samples in
+    D state on swap-in. W1-T5363 and W1-T5364 shrink the two known readers. This task bounds the next one:
+    a garden that grows should fail its own pass, not slow the process that admits builds.
+  design: |
+    1. Give every garden child a heap cap: `--max-old-space-size=<N>` placed after the inherited
+       `execArgv`, so it wins over any inherited value. N is a named constant. Choose it from the measured
+       `garden.pass` rows and the children's observed peaks, and state the figure and its source in the
+       constant's comment. A child that runs out of heap exits non-zero, and that is already a failed pass,
+       logged as `garden.pass`.
+    2. Run the child at low priority: CPU niceness through `os.setPriority` on the spawned pid (best effort;
+       a refusal is logged once and never fails the pass). Use IO idle class too where the host exposes it.
+       If that needs an `ionice` binary, probe for it and degrade to CPU niceness alone, never to a spawn
+       failure.
+    3. Keep the seam injectable (execPath, execArgv, env), so tests assert the argv and priority calls
+       without spawning a real garden.
+  acceptance:
+    - claim: "a garden child is spawned with a heap cap that overrides any inherited one and is lowered in priority, a priority call that throws neither fails the spawn nor the pass, and a child that exits non-zero resolves with its exit code"
+      proof: "unit test: test/a-garden-child-runs-under-a-heap-cap-at-low-priority.test.ts"
+  falsifier: |
+    Remove the heap flag. The suite's recorded argv carries no `--max-old-space-size`. Remove the priority
+    call, and the fake `setPriority` records nothing for the child's pid.

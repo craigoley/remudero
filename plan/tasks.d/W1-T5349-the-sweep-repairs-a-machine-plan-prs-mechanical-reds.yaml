@@ -1,0 +1,54 @@
+- id: W1-T5349
+  title: "THE SWEEP REPAIRS A MACHINE PLAN PR'S MECHANICAL REDS — a red machine-lane plan-only PR gets only a refused-escalate question that 0 of 7,232 escalation answers ever accepted, though 18-19 of the 31 machine reds in 09-25..10-02 had a deterministic cure: re-mint a held id, refresh a stale or main-inherited base once main is green, or shorten a title"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-02: plan-only red PRs with no repair route research"
+  plan_refs: [W1-T4351, W1-T3390, W1-T5279, W1-T5348]
+  files: [src/lib/sweep.ts, test/the-sweep-repairs-a-machine-plan-prs-mechanical-reds.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    In `runSweep` (src/lib/sweep.ts), W1-T4351 rewrites `blocked-fixable && isBlockedCi(pr) &&
+    pr.isPlanFiling === true` to `refused-escalate`, with the reason "plan-only PR is red on <checks> ... needs a
+    plan repair". Nothing performs that repair. Delivery is one BLOCKED issue per (PR, head sha), so every new
+    head opens another (#7946: 7 issues, #8558: 6). `escalation_answer.*` shows 7,232 ignored and 0 accepted.
+    Every red ended only when a person or a lane pushed, merged main in, or closed the PR.
+    MEASURED 31 machine-lane reds, 09-25..10-02:
+    - ID-COLLISION, 10 PRs: 8 selector-shadow PRs on 09-28, #8449, #8558 (W1-T5209 HELD by another holder,
+      4.9 h; 4 bot merge-mains did nothing; an operator renumber merged it).
+    - STALE-BASE or MAIN-INHERITED, 8 PRs: #7104, #7551, #7741, #7882, #7922, #8697, #8703, #8715.
+    - Title-only commitlint: #8725, 105 characters.
+    So 18-19 had a mechanical cure. W1-T3390's `dispatchPlanOnlyRepair` covers a `mergeable` PR with capped
+    proof discrimination, not a red check.
+    CHECK-NAME TRAP: the `commitlint` check run reports the title lint AND rule-checks (W1-T4399). "success
+    failure" means the title passed and a census suite failed. Only a header-max-length failure in the title
+    step is a title red.
+  design: |
+    A plan-repair rung, tried before the W1-T4351 escalation, for a PR that is plan-only AND machine-lane. Its
+    head ref is a lane-owned branch (garden, landing, approve, triage, selector-shadow, retro) and its author
+    is the fleet App. Operator and session PRs are never touched and keep today's escalation. Three signatures,
+    each read from the failing check's own log line, never from the check name alone:
+    (a) task-id-existence "HELD by a different reservation holder" or a collision: mint a new id through the
+        allocator (`mintNextTaskId` / `reserveTaskIdRemote` against the PR's own branch, never a picked id).
+        Rename the shard, rewrite the id in the PR's own plan files and body, and push to that branch with a
+        lease.
+    (b) a red that main's own latest CI also shows at the PR's base, or a stale-base proof-discrimination red:
+        once main's head CI is green, call the existing update-branch path once per head. While main is red,
+        wait without escalating.
+    (c) the title step alone failing header-max-length: retitle by the same fit `gardenCheckout` uses
+        (`fitConventionalTitle`), then re-run or push per the ci.yml title-read rule.
+    Each rung acts at most once per (PR, head sha), ledgers `sweep.plan_repair { pr, signature, action }`, and
+    escalates exactly as today when it does not match or has already acted on this head.
+  acceptance:
+    - claim: "a machine-lane plan-only PR red on a held task id is renumbered through the allocator on its own branch, one red on a check main also fails is refreshed once main is green, one red only on title length is retitled, each at most once per head, and an operator-authored plan PR with the same reds is escalated untouched"
+      proof: "unit test: test/the-sweep-repairs-a-machine-plan-prs-mechanical-reds.test.ts"
+  falsifier: |
+    Remove the rung. The suite's held-id fixture (the #8558 log line) reaches `refused-escalate` with no
+    allocator call. Drop the author/branch guard, and the operator-authored fixture is pushed to.

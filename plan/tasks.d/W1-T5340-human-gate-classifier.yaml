@@ -1,0 +1,38 @@
+- id: W1-T5340
+  title: "Use one ASK versus RECORD classifier for the Inbox, decision projection and badge"
+  repo: remudero
+  depends_on: [W1-T5332]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "2026-10-02 approved human-gate implementation follow-ups"
+  plan_refs: [W1-T5021, W1-T3186]
+  files: [src/lib/ask-classification.ts, src/lib/panel-graph.ts, src/lib/nav-badge-view.ts, src/lib/needs-you-view.ts, src/lib/serve.ts, test/human-gate-classification.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED and re-verified at 009a9111cf38344f6ee79c96f8fd18219a0b3688: the approved W1-T5021
+    design identifies differing treatment of drafting, declined and deferred_with_trigger
+    between the classifier, Inbox and badge. This task implements design slice 2, not a new queue.
+  design: |
+    Add the typed gate input to classifyAskRecordItem and make the three existing production
+    paths consult it through the shared projection. Ready, not_ready and deferred_with_trigger
+    operator asks remain actionable; drafting, declined, resolved and fleet-owned work are records.
+    Preserve record visibility/history without adding it to the decision count. Show a deferred
+    ask's trigger and source-owned resolution route instead of silently omitting it.
+    Preserve unknown-source lower bounds, instance identity and the Inbox-only front door.
+    Do not add a PR, routing or merge hold. Every InboxState must have an exhaustive fixture.
+  acceptance:
+    - claim: "all existing surfaces agree on ASK versus RECORD for every proposal state"
+      proof: 'grep: every proposal state agrees across Inbox badge and classifier in test/human-gate-classification.test.ts'
+    - claim: "a deferred ask retains its trigger and a declined proposal remains a record"
+      proof: 'grep: deferred asks retain their trigger without reviving declined proposals in test/human-gate-classification.test.ts'
+    - claim: "unknown evidence and fleet-owned work cannot inflate the human decision count"
+      proof: 'grep: classifier preserves source coverage and machine ownership in test/human-gate-classification.test.ts'
+  falsifier: |
+    Count a declined or drafting proposal as a decision on any one surface, omit a deferred
+    ask, or replace unavailable evidence with zero: the corresponding agreement fixture fails.

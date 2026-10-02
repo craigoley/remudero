@@ -1,0 +1,16 @@
+- id: W1-T5327
+  title: Add usage of quietHoursFilePath in fleet control
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/fleet-control.ts
+  acceptance:
+    - claim: quietHoursFilePath is referenced by at least one function in fleet-control
+      proof: "grep: quietHoursFilePath referenced in src/lib/fleet-control.ts"
+  rationale: quietHoursFilePath is exported from src/lib/fleet-control.ts but has no caller, so the adoption census flags it as a symbol with no caller.
+  origin: architect

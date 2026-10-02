@@ -1,0 +1,44 @@
+- id: W1-T5373
+  title: "Make the Inbox badge, needs-you, now and status report one source-qualified decision count"
+  repo: remudero
+  depends_on: [W1-T5332]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "2026-10-02 operator approved the human-gate implementation follow-ups"
+  plan_refs: [W1-T5021, W1-T3186]
+  files: [src/lib/human-gate.ts, src/lib/now-view.ts, src/lib/nav-badge-view.ts, src/lib/needs-you-view.ts, src/lib/serve.ts, test/human-gate-surface-counts.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at 009a9111cf38344f6ee79c96f8fd18219a0b3688: the approved design
+    identifies six different needs-you quantities with different populations. Its shared
+    count slice has not shipped. A backlog count is not the number of decisions owed.
+  design: |
+    Add an additive needsYou summary to the existing status contract and route the nav
+    badge, needs-you composite and now view through the same shared gate projection.
+    Implement consumeHumanGateCounts for these production adapters, not another counter.
+    Distinct Inbox-owned source keys define count and byKind; change-management ownership
+    stays separately labelled. Count before display caps and expose more/paging explicitly.
+    Each instance retains source coverage and identity. Complete sources may report exact
+    zero; unavailable or partial ones report an explicit lower bound and named reasons.
+    Preserve old fields and existing read-model promotion switches. Do not require every
+    optional gate-kind adapter to ship first: show covered kinds and identify missing ones.
+    Never convert raw blocked or verify-human backlog into an approval count, hide unknown
+    evidence as zero, or add an approval, routing, dispatch or PR hold.
+  acceptance:
+    - claim: "the status route consumes the shared count rather than creating another counter"
+      proof: 'grep: consumeHumanGateCounts( in src/lib/serve.ts'
+    - claim: "the same complete fixture reports the same uncapped count everywhere"
+      proof: 'grep: every human decision surface reports the same uncapped source-qualified count in test/human-gate-surface-counts.test.ts'
+    - claim: "partial sources keep truthful uncertainty on every surface"
+      proof: 'grep: every human decision surface preserves lower bounds and unavailable sources in test/human-gate-surface-counts.test.ts'
+    - claim: "backlog, machine work and change-management remain distinct from Inbox decisions"
+      proof: 'grep: Inbox counts exclude machine work and separately label change management in test/human-gate-surface-counts.test.ts'
+  falsifier: |
+    Count only displayed rows, report an exact zero for an unreadable instance, or let one
+    surface count standing holds as Inbox asks: the cross-surface fixture fails.

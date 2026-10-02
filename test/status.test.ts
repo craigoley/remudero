@@ -2203,6 +2203,31 @@ test("W1-T179: LIVENESS BOUND -- activity OUTSIDE the (injected, short) bound or
   assert.equal(proj.orphaned, true);
 });
 
+test("W1-T5025: process-unevidenced run has no live worker telemetry", () => {
+  const url = "https://github.com/craigoley/remudero/pull/80";
+  const github = fakeGitHub({ byRef: { [url]: { number: 80, url, state: "OPEN" } } });
+  const eventAt = "2026-07-19T09:00:01.000Z";
+  for (const state of ["working", "tool-executing", "quiet"] as const) {
+    const ledgerPath = ledgerFile([
+      { ts: "2026-07-19T09:00:00.000Z", run_id: "r1", task_id: "W1-T1", step: "run.start" },
+      { ts: eventAt, run_id: "r1", task_id: "W1-T1", step: "worker.state", state },
+      { ts: eventAt, run_id: "r1", task_id: "W1-T1", step: "worker.activity", event_kind: state, tool_name: "Bash", tool_started_at: eventAt },
+      { run_id: "r1", task_id: "W1-T1", step: "pr.opened", pr_url: url },
+    ]);
+    const recent = deriveStatus(task({ id: "W1-T1" }), { ledgerPath, github, now: () => Date.parse(eventAt) });
+    assert.equal(recent.workerState, state, "control: the fixture exposes the activity before its evidence expires");
+    assert.ok(recent.workerTelemetry, "control: the fixture carries worker telemetry");
+    const stale = deriveStatus(task({ id: "W1-T1" }), { ledgerPath, github, now: () => Date.parse("2026-07-20T12:21:00.000Z") });
+    assert.equal(stale.status, "running", "the remote PR remains running");
+    assert.equal(stale.prUrl, url);
+    assert.equal(stale.phase, "review");
+    assert.equal(stale.processUnevidenced, true);
+    assert.equal(stale.workerState, undefined, state);
+    assert.equal(stale.workerStateSince, undefined, state);
+    assert.equal(stale.workerTelemetry, undefined, state);
+  }
+});
+
 test("W1-T179: LIVENESS BOUND -- an OPEN PR keeps a dispatch running regardless of ledger silence; the bound never applies to GitHub-backed evidence", () => {
   const url = "https://github.com/craigoley/remudero/pull/80";
   const github = fakeGitHub({ byRef: { [url]: { number: 80, url, state: "OPEN" } } });

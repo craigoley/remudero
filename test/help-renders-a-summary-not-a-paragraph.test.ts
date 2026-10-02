@@ -139,7 +139,7 @@ const BASELINE_COMMAND_NAMES = [
   "emissions", "escalate", "feedback", "feedback-reconcile", "field-trials", "fix", "hand-runs", "impossible-canary", "inbox", "inbox-bakeoff", "init", "install-checkout", "issues",
   "garden",
   "knowledge",
-  "learnings", "ledger-compact", "ledger-grep", "lint-plan", "memory-lint", "merge-hold", "next-task-id", "note", "notify", "onboard", "ops", "pause",
+  "learnings", "ledger-compact", "ledger-grep", "lint-plan", "memory-lint", "merge-hold", "mcp", "next-task-id", "note", "notify", "onboard", "ops", "pause",
   "peek", "plan", "plan-reconcile", "preflight", "project", "proof-queue-audit", "ratify", "reap-branches", "receipt",
   "pr-owner",
   "read-model",

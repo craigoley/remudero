@@ -1,0 +1,56 @@
+- id: W1-T5344
+  title: "ONE TASK'S DELIVERY FAILURE ENDS ITS LANE, NOT THE DAEMON — a pre-push refusal, a PR-create 422 or an openPullRequestChecked merge-base refusal in one lane reaches the settle loop's fatalError and exits the whole process: 47 exit-76 boots and 6 exit-1 crashes in 8 days, and W1-T3116 and W1-T4627 each ended the process 4 times in a row"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-02: core daemon restarts and PAUSE scope research"
+  plan_refs: [W1-T3319, W1-T4466, W1-T5083, W1-T2546]
+  files: [src/lib/daemon.ts, src/lib/drain.ts, test/one-tasks-delivery-failure-ends-its-lane-not-the-daemon.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    The dispatch settle loop in `runDaemon` (src/lib/daemon.ts) classifies each rejected lane. A
+    `TaskAdmissionError` stands down. A transient gh transport failure and a spawn-infra failure back off. A
+    GitHub READ failure on the check-runs/status endpoints is lane-only since W1-T4466 (`ghLaneReadFailure`,
+    `refillLaneLocalRejection`). Every other throw sets `fatalError` and returns `summary("error", ...)`.
+    W1-T3319 maps a detail matching `PER_TASK_FAILURE_RE` (`^W\d+-T...: Command failed: `) to
+    `DAEMON_EXIT_BLOCKED` (76), which the entrypoint loops after 60 s plus a tree sync. Any other detail exits 1.
+    That costs the 120 s restart throttle plus a docker on-failure restart, and spends crash budget.
+    MEASURED 2026-09-25..10-02, 189 boot transitions: 47 (25%) were exit 76. Of those, 22 were pre-push hook
+    refusals (census-precheck, clock-signature, test-tier-manifest, ci-control-plane-precheck), 14 were
+    `gh api POST pulls` 422s, 5 were commit-hook refusals (mkdtemp-callsite-check), 5 were `git rev-parse HEAD`
+    fatals and 1 was other. 7 were exit 1. Six of those were `openPullRequestChecked: ... proof did not pass
+    against merge base` (src/lib/pr-open.ts), a per-task refusal with no `Command failed:` prefix, and the
+    revival log shows the crash budget exhausted once (09-26 15:30Z, prev_restarts=5). A process-absent boot costs a
+    median 73 s (exit 76) or 135 s (exit 1), then a median 80 s loop freeze and a cold first sweep. The
+    failing task is re-dispatched on the next boot, so one bad task loops: W1-T3116 4 times on 09-27, W1-T4627
+    4 times on 09-27/28, W1-T4686 twice. These 53 boots are the fully avoidable 28% of all boots.
+  design: |
+    In the settle loop, after the existing transient, spawn-infra and gh-read arms and before `fatalError`, add
+    a delivery-failure arm:
+    - It matches a rejection whose message matches `PER_TASK_FAILURE_RE`'s per-task `Command failed: ` shape,
+      and the `openPullRequestChecked` merge-base proof refusal (match the refusal by an exported constant or
+      error class from pr-open.ts, not by retyping its prose).
+    - It logs `daemon.lane_failed` (task, class, the first line of the error), ends that lane only, and lets
+      the pass continue. It does not close sibling refill: it counts as lane-local, like
+      `refillLaneLocalRejection`.
+    - It parks the task with a per-task backoff so the next tick does not re-pick it. The backoff doubles per
+      consecutive delivery failure of the same task, from 30 min up to a 6 h ceiling, and is rebuilt on boot
+      from the `daemon.lane_failed` rows so a restart does not reset it. A merge or a new shard revision clears it.
+      The dispatch filter reads it the way it reads the existing breaker and terminal-refusal holds.
+    - Unprefixed throws (a `TypeError`, a spawn with no pid) stay on the fatal path with today's exit codes
+      (W1-T2546 criterion 3). `DAEMON_EXIT_BLOCKED` and the crash-budget semantics are unchanged for them.
+    Mirror the same arm in drain.ts's lane settle (`runDrainLanes`), so `rmd drain` and the daemon agree.
+  acceptance:
+    - claim: "a lane whose task fails delivery with a per-task Command failed error or a merge-base proof refusal is ledgered and parked with a growing backoff while its sibling lanes and the pass continue, and an unprefixed TypeError still ends the pass with the error summary"
+      proof: "unit test: test/one-tasks-delivery-failure-ends-its-lane-not-the-daemon.test.ts"
+  falsifier: |
+    Remove the delivery-failure arm. The suite's fake lane that rejects with `W9-T1: Command failed: git push`
+    makes `runDaemon` return `stopReason: error`, and the next tick re-admits the same task at once. The
+    TypeError fixture must still return `stopReason: error`.

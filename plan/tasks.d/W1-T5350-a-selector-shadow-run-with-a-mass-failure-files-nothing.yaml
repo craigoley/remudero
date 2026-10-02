@@ -1,0 +1,41 @@
+- id: W1-T5350
+  title: "A SELECTOR-SHADOW RUN WITH A MASS FAILURE FILES NOTHING — 44 of the 46 selector-shadow filings on 2026-10-02 came from just two CI runs while main was red, each a one-file PR draining a false 590-failure signal at about one PR every 3 minutes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: low
+  origin: "operator session 2026-10-02: selector-shadow gardener churn research"
+  plan_refs: [W1-T4439, W1-T4839, W1-T4406]
+  files: [src/lib/selector-shadow-gardener.ts, test/a-selector-shadow-run-with-a-mass-failure-files-nothing.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    `runSelectorShadowGardener` (src/lib/selector-shadow-gardener.ts) files one plan PR per unseen missed
+    test file, at most one per pass, and runs on every poll interval (`garden-registry.ts`, `minIntervalMs`
+    0). It has no notion of a run whose failures are not selector misses at all. MEASURED: 89 selector-shadow
+    PRs between 09-28 and 10-02, of which 47 were on 10-02. 44 of the 46 filings that day came from two CI
+    runs: 26 share the edge "src/lib/daemon-health.ts, now-view.ts, poll-interval.ts ... ->" and 18 share
+    head 4c047d2. The 08:2x `selector-shadow.report` read 590 missed failures (narrow missRate 0.66) over 24
+    runs, while main was itself red that morning. That is a mass or base failure, read as hundreds of
+    narrow-selector misses. Of the 118 cancelled main CI runs on 10-02, 45 (38%) were followed by a
+    selector-shadow push.
+  design: |
+    Before the filing loop, group the report's unseen misses by CI run (`ci_run_id`) and decide per run:
+    - MASS FAILURE: the run's distinct missed test files exceed `SELECTOR_SHADOW_MASS_FAILURE_FILES` = 5.
+    - BASE FAILURE: an injected reader of main's own CI at the run's base sha shows the same file failing
+      there. A run with no readable base result is judged by the mass test alone.
+    For a run that trips either test: file nothing for any of its misses, write ONE
+    `selector-shadow.mass_failure_skipped { ci_run_id, head_sha, files, reason, k }` row, and mark those miss
+    keys seen so the next pass does not re-read them as new. Runs below K, and not failing on main, file
+    exactly as today: one per pass, with structural escalation unchanged. The report itself and the W1-T4406
+    gate input are unchanged.
+  acceptance:
+    - claim: "a shadow run with more than five missed test files, or whose missed file also fails on main at its base, files no task and writes one skip row naming the run, while a run with two missed files absent from main still files one task per pass"
+      proof: "unit test: test/a-selector-shadow-run-with-a-mass-failure-files-nothing.test.ts"
+  falsifier: |
+    Remove the per-run grouping. The suite's run with 26 missed files lands a PR on the first pass, and the
+    skip row is absent.

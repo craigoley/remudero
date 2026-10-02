@@ -1,0 +1,44 @@
+- id: W1-T5371
+  title: "Show pin drift and genuinely unresolved reviewer freshness as source-owned decisions"
+  repo: remudero
+  depends_on: [W1-T5332]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "2026-10-02 operator approved the human-gate implementation follow-ups"
+  plan_refs: [W1-T5021, W1-T2694]
+  files: [src/lib/human-gate.ts, src/lib/now-view.ts, test/human-gate-pin-reviewer.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at 009a9111cf38344f6ee79c96f8fd18219a0b3688: ratificationPinCheck
+    distinguishes absent pins from actual drift, and daemon emits stale-reviewer
+    recurrence decisions. The approved design's slice 5 has no shared projector adapter.
+  design: |
+    Implement projectPinReviewerGates and consume it in now-view. Re-read current producers
+    and source freshness before projecting. A missing ratification row is deliberately
+    unopinionated, not a new ask. A mismatched operation hash yields one pin_drift gate
+    for its instance and rung, removed only by a matching source pin. Do not ratify anything.
+    Reviewer freshness is machine work while its existing recovery path remains active;
+    project stale_reviewer only from the recurrence producer's needs_human outcome.
+    A newer loaded code identity supersedes an old key and current reviewer source removes
+    a resolved gate. Unknown loaded-code or upstream evidence remains explicitly uncertain,
+    never a healthy zero or a permission to restart. Keep evidence links and one existing
+    source-owned resolution verb. Do not introduce a second restart timer, approval gate,
+    credential identity change, deployment action or merge hold.
+  acceptance:
+    - claim: "the production now view consumes the source adapters"
+      proof: 'grep: projectPinReviewerGates( in src/lib/now-view.ts'
+    - claim: "an absent pin is not mistaken for an operator decision"
+      proof: 'grep: an absent pin creates no human gate while a hash mismatch does in test/human-gate-pin-reviewer.test.ts'
+    - claim: "automatic reviewer recovery is not a human interruption"
+      proof: 'grep: reviewer recovery stays machine-owned until the source asks for a person in test/human-gate-pin-reviewer.test.ts'
+    - claim: "reviewer supersession and unreadable evidence retain their distinct meanings"
+      proof: 'grep: a newer reviewer identity supersedes an old gate without hiding unknown evidence in test/human-gate-pin-reviewer.test.ts'
+  falsifier: |
+    Invent a pin ask from an absent row, keep a resolved reviewer gate forever, or turn
+    an unreadable identity into healthy zero: the corresponding fixture fails.

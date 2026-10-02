@@ -1,0 +1,43 @@
+- id: W1-T5364
+  title: "THE CI-FRICTION GARDENER READS ONLY THE LEDGER STEPS IT PRICES — readCiFrictionLedgerRecords loads every row of the 1.37 GB union, and on 2026-10-02 its child reached 2.4 GB RSS plus 1.25 GB swap in 2 minutes while the backlog child ran beside it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  origin: "operator session 2026-10-02: daemon loop-stall diagnosis"
+  plan_refs: ["W1-T4710", "W1-T5114", "W1-T5363", "W1-T5365"]
+  files: [src/lib/ci-friction-gardener.ts, test/the-ci-friction-gardener-reads-only-the-ledger-steps-it-prices.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    `readCiFrictionLedgerRecords` (src/lib/ci-friction-gardener.ts) calls
+    `readLedgerUnionRecordsSync(stateDir, { requireArchives: true, refuseIncomplete: true })` with no step
+    filter and returns every row as a `LedgerRecord`. The gardener's projections then keep only a fixed
+    handful of steps, for example `pr.opened`, `sweep.disposed`, `test.flake_retry`, `fix.dispatch`,
+    `fix.commit_refused`, `fix.base_refreshed`, `ci-friction.remedy_escalated` and `ci-friction.scorecard`.
+    W1-T4710 made a union read honour its `step` filter.
+    MEASURED 2026-10-02 (research/loop-stall.md §1a): `garden run ci-friction` reached 2.4 GB RSS plus 1.25 GB
+    swap after 2 minutes. It ran next to the backlog child (W1-T5363) on a 15 GiB host with about 10 GiB of
+    swap in use and PSI io some avg10=84. That pushed the daemon's own pages to swap: 38% of main-thread
+    samples were in D state on swap-in, and `garden.pass` took 1,377-2,021 s.
+  design: |
+    Name the steps the gardener reads in one exported constant, derived from the projections that consume
+    them. Pass it as `readLedgerUnionRecordsSync`'s `step` filter in `readCiFrictionLedgerRecords`, keeping
+    `requireArchives` and `refuseIncomplete`, so every failure stays a failed pass and never reads as a
+    zero-friction corpus. Add a census assertion that every `r.step === "<x>"` / `row.step !== "<x>"`
+    comparison in the module names a step in the constant. A projection added later without its step then
+    fails a test instead of silently pricing nothing. The function has other callers: the garden and replay
+    wiring in src/run-task.ts, src/lib/gardener-overseer.ts and src/lib/opportunity-intake.ts. Each of them
+    passes the records only into this module's projections. Confirm that by `git grep`. If a caller reads
+    a step the projections never compare against, either add that step to the constant or name the caller
+    in the PR body.
+  acceptance:
+    - claim: "the ci-friction ledger read passes the gardener's step set and still refuses an archive-less or incomplete union, every step the module compares against is in that set, and the priced causes over a fixture ledger are unchanged from the unfiltered read"
+      proof: "unit test: test/the-ci-friction-gardener-reads-only-the-ledger-steps-it-prices.test.ts"
+  falsifier: |
+    Drop the `step` option. The suite's recording read sees no step filter. Then delete one step from the
+    constant, and the census assertion names the projection that still compares against it.

@@ -1,0 +1,56 @@
+- id: W1-T5366
+  title: "A DISPATCH PHASE'S TICKER NEVER WAITS ON A FULL SWEEP BEFORE ITS LIGHT PASS — the in-flight ticker awaits its retriggered runGatedSweep (bound 559 s) before its light pass and daemon.alive, so on 2026-10-02 a 90-minute dispatch phase (18:50-20:22Z) ran no sweep from 19:51 to 20:26 and wrote no daemon.alive after 19:37"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-02: daemon loop-stall diagnosis"
+  plan_refs: ["W1-T5343", "W1-T4998", "W1-T1272", "W1-T2582", "W1-T2656", "W1-T4191"]
+  files: [src/lib/daemon.ts, test/a-dispatch-phases-ticker-never-waits-on-a-full-sweep.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    In src/lib/daemon.ts, `startInFlightTicker` runs while a dispatch or retro phase awaits its lanes. On each
+    tick it may retrigger the full reconciliation (W1-T1272). It does that by AWAITING
+    `runGatedSweep(deps, pollIntervalMs, sweepRetrigger.sweepWallClockBoundMs, ...)` inline. Only after that
+    does it run `await deps.sweepLight!()` and sleep. The top-of-iteration sweep is different: since W1-T4998 it
+    is STARTED and never awaited (`backgroundSweep`), and an abandoned pass is declined by the gate's
+    liveness check. The ticker never got that change. Abandoning a pass at its bound does not stop the
+    pass's work (W1-T2582), so a retriggered sweep that overruns holds this ticker's light pass and its
+    liveness rows for the whole tail.
+    MEASURED 2026-10-02 (research/loop-stall.md §1c, §2): one dispatch phase ran 18:50:59-20:22:33
+    (`dispatch.concurrent_set` W1-T5308+W1-T3720). Only 2 `daemon.iteration` rows appeared in 1 h 45 min.
+    `daemon.alive` was written at 18:53, 19:00:53, 19:11:11, 19:31:37 and 19:37:46, then not again until
+    dispatch ended. The retrigger at 19:38:53 was abandoned at 19:49:12, after 619 s against the 559 s bound.
+    Its synchronous tail then held the loop until about 20:05, and no light-pass rows appeared from 20:05
+    to 20:22. The first `sweep.summary` afterwards was at 20:26:43, from the next iteration's background
+    sweep.
+    W1-T5343 (filed in #8744, not yet on main) changes the same light-pass block for PAUSE. It is cited here
+    rather than declared in depends_on only because lint refuses a dependency on an id main does not hold
+    yet. Build this task after W1-T5343 merges, so the two never edit one block concurrently.
+  design: |
+    In the ticker's retrigger arm, start the full sweep and do not await it, the way W1-T4998 starts
+    `backgroundSweep`:
+    1. ONE SWEEP AT A TIME. The ticker's pass and the iteration's `backgroundSweep` share one slot (the
+       existing `sweepRetrigger.liveness` / `sweepLiveness`). A retrigger never starts while any full pass is
+       in flight. It logs the existing held or declined row instead, and `lastRunAtMs` advances only when a
+       pass actually starts, so a wake is not consumed by a sweep that never ran (W1-T2656).
+    2. The light pass and `daemon.alive` run on the ticker's own cadence whether or not a full pass is
+       outstanding. The light pass keeps every hold it has today (STOP/PAUSE, and W1-T5343's review-only
+       rule once that lands).
+    3. A retriggered pass that settles after the phase ends is still awaited or handed to the main loop's
+       `backgroundSweep` slot, never orphaned. Its outcome feeds the same completed-pass bookkeeping the main
+       loop reads. When the phase stops, the ticker does not await it.
+    Nothing changes in `runGatedSweep`'s bound or in the main loop's own background sweep.
+  acceptance:
+    - claim: "while a dispatch phase's retriggered full sweep is still running, the ticker keeps writing daemon.alive and running its light pass on cadence, starts no second full sweep while one is in flight, and a retrigger it declines does not advance lastRunAtMs"
+      proof: "unit test: test/a-dispatch-phases-ticker-never-waits-on-a-full-sweep.test.ts"
+  falsifier: |
+    Restore `await runGatedSweep(...)` in the retrigger arm. With a fake sweep that never settles, the
+    suite sees no `daemon.alive` and no light-pass call after the retrigger. Drop the shared-slot check,
+    and a second tick starts a second concurrent full sweep.

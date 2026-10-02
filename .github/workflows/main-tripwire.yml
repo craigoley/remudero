@@ -160,13 +160,24 @@ jobs:
             echo "::notice::main-tripwire: budget spent on the touched files; the other selected suites were not run (neutral, not green)."
             exit 0
           fi
-          timeout --signal=TERM "$REMAINING" bash -c "$(declare -f run_list); run_list tripwire-suites.txt"
+          # Reuse preflight's detached process-group supervisor and durable timeout receipt.
+          # A natural exit 124 is a failure; only the supervisor's receipt makes this neutral.
+          export TRIPWIRE_RUN_LIST="$(declare -f run_list); run_list tripwire-suites.txt"
+          export TRIPWIRE_REMAINING_S="$REMAINING"
+          node --import tsx --input-type=module <<'NODE'
+          import { runBoundedSuite } from "./src/lib/ci-parity.ts";
+          const result = runBoundedSuite("bash", ["-c", process.env.TRIPWIRE_RUN_LIST], {
+            cwd: process.cwd(), timeoutMs: Number(process.env.TRIPWIRE_REMAINING_S) * 1000,
+            label: "main-tripwire selected suites", stream: true,
+          });
+          if (result.timeout) {
+            console.log("::notice::main-tripwire: budget expired; the entire test process group was stopped — partial, neutral.");
+            process.exit(0);
+          }
+          process.exit(result.error || result.signal || result.status === null ? 1 : result.status);
+          NODE
           CODE=$?
           set -e
-          if [ "$CODE" -eq 124 ]; then
-            echo "::notice::main-tripwire: the ${REMAINING}s budget ran out before the selected suites finished — partial, neutral (not green, not red)."
-            exit 0
-          fi
           if [ "$CODE" -ne 0 ] && ! grep -qE '^# tests [0-9]+' tripwire-output.log; then
             echo "::error::main-tripwire exited ${CODE} with NO node-test-runner summary — an unverified failure set (W1-T2597's own reasoning applies here too)."
           fi

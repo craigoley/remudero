@@ -1,0 +1,45 @@
+- id: W1-T5353
+  title: "A CREDIT OVERRIDE ERASES EVERY LATER CREDIT FOR THE SAME TASK — applyCreditOverride runs after derivePrPrecedence has returned its first rung, so when merge-credit.json holds the overridden PR the walk never reaches a later legitimate merge and the task re-dispatches forever"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-02: W1-T5017 credit audit (#8213 overridden, #8455 merged)"
+  plan_refs: [W1-T2970, W1-T3996, W1-T951, W1-T5017]
+  files: [src/lib/status.ts, test/an-override-refuses-one-pairing-not-the-task.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    `deriveStatus` (src/lib/status.ts) applies the plan/credit-overrides.yaml ruling to the RESULT of
+    `derivePrPrecedence`. That walk returns at its first credited rung, and the durable merge-credit.json rung
+    answers before the ledger and trailer rungs.
+    MEASURED in-process at 8c7b78ca: with the store holding `trailer: #100` (or an unquarantined
+    `head-branch: #100`) and an override on (task, 100), a later merged #200 carrying the task's anchored
+    trailer is never consulted. The projection reads queued with source none, and the task re-dispatches.
+    Each rebuild merges and still reads queued, because `recordCredit` never replaces an occupied source.
+    The override's own doc says "Per PAIRING and never per task: a task may legitimately be credited by a
+    different pull request". The implementation subtracts per task.
+    W1-T5017 (#8213 overridden, #8455 merged) escaped only because W1-T3996 had separately quarantined #8213
+    as plan-only. An override for any other reason, such as W1-T2970's "built the wrong thing", has no second
+    mark. 0 tasks are affected today, and the next ordinary override arms the bug.
+  design: |
+    Make the override a per-pairing exclusion INSIDE the walk instead of a flip afterwards:
+    - load the override rows once per derivation;
+    - the durable rung skips an entry whose (task, prNumber) is overridden, tries the sibling source, then
+      falls through;
+    - rungs (a) ledger, (b) pr field, (c) trailer (including `findMergedByTrailerAll` candidates) and (c2)
+      head branch skip any overridden pairing, the same way `debunked` / `invalidatedUrl` already filter (c2);
+    - no rung may persist an overridden pairing to the store.
+    Keep `creditOverride` on the projection when the override removed the only credit, so the board still says
+    why. Keep the subtract-only invariant: an override never grants, it only excludes one pairing.
+  acceptance:
+    - claim: "an override on one pull request leaves a later merged pull request carrying the task's trailer credited, whether the durable store holds the overridden pull request as trailer or head-branch, and a task whose only credit is overridden still reads queued with the override's reason"
+      proof: "unit test: test/an-override-refuses-one-pairing-not-the-task.test.ts"
+  falsifier: |
+    Revert to the post-hoc `applyCreditOverride`. The case with store `{trailer: #100}`, an override on
+    (task, 100) and a merged trailered #200 reads merged=false / prNumber 100 instead of merged / 200.

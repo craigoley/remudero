@@ -1,0 +1,55 @@
+- id: W1-T5343
+  title: "A PAUSED DISPATCH PHASE STILL REVIEWS — the in-flight phase ticker skips its light pass under any PAUSE, so 11 dispatch-phase PAUSE episodes held about 210 minutes over 8 days with 0 reviews started, while the main-loop PAUSE path already runs a review-only pass"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  origin: "operator session 2026-10-02: core daemon restarts and PAUSE scope research"
+  plan_refs: [W1-T4191, W1-T4429, W1-T4053, W1-T4732, W1-T5127]
+  files: [src/lib/daemon.ts, test/a-paused-dispatch-phase-still-reviews.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    src/lib/daemon.ts holds what PAUSE stops in three places. The main-loop PAUSE runs
+    `startInterphaseReviewClock(..., "pause")`, which is a review-only light pass
+    (`sweepLight({ reviewOnly: true })`, ledgered `daemon.pause.review_passes`), per W1-T4429's design (iii):
+    a pause stops new work, not the judging of finished work. The full sweep under PAUSE is held by
+    `continueReviewAdmissions` / `workerAdmissionHold` (`daemon.admission_held`). The in-flight phase
+    ticker, which runs while a dispatch or retro phase awaits its lanes, is different. It reads
+    `deps.checkPause` before its light pass, logs `daemon.sweep_light.held` and `continue`s. So no review
+    runs at all until every lane drains. W1-T4191 (#6716) added that hold because the light pass admitted FIX
+    workers (`dispatchFix` via `lightPassActionable`) and so kept a recycle from ever reaching quiet.
+    MEASURED 2026-09-25..10-02 (deduplicated ledger extract): 24 PAUSE episodes. The 11 held in a dispatch
+    phase total about 210 minutes, and 0 reviews started in any of them (10-01 11:05-12:21, 75.6 min, 115
+    `sweep_light.held` rows; 10-02 14:03-14:31, 28.6 min; 09-27 16:54-17:17, 23.9 min). The 09-29
+    13:36-14:07 recycle PAUSE held on the main-loop path instead: 5 reviews started, 3 posted, and the recycle
+    still completed at 14:09. Implement runs take a median of 19 min, p95 47 min and a maximum of 98 min,
+    so a recycle landing mid-phase freezes judging for that long. A review needs no dispatch lane, no
+    worktree and no state/inflight lock. A killed review is re-run on the next boot, because outcome and
+    retry key on the head+body digest. Holding reviews is not needed for correctness.
+  design: |
+    In the in-flight phase ticker's light-pass block (after the full-sweep retrigger, which stays held under
+    STOP or PAUSE exactly as today):
+    1. STOP still wins. Read `deps.checkStop` first; under STOP, run nothing and keep today's held row.
+    2. Under PAUSE, run `deps.sweepLight({ reviewOnly: true })` instead of `continue`. reviewOnly already closes
+       the fix rung, the requeue batch and update-branch, which is the scope W1-T4191 needed closed.
+    3. Bound the recycle tail. At most ONE review-only pass may be in flight under PAUSE (a single slot, the
+       W1-T4732 slot rule with one slot). Stop admitting new review-only passes once the phase has no lane
+       holding an inflight lock, the population recycle-container.sh waits on. A review admitted late
+       therefore cannot stretch a recycle wait past the moment the lanes drain.
+    4. Ledger the new behaviour as its own step, `daemon.sweep_light.review_only` with phase and detail.
+       `daemon.sweep_light.held` keeps meaning "nothing ran", and is still written when STOP holds, when the
+       slot is taken, or when no lane remains.
+    No change to the main-loop pause path, the full-sweep hold or recycle-container.sh.
+  acceptance:
+    - claim: "under PAUSE a dispatch phase's ticker runs one review-only light pass and never admits a fix or requeue, STOP still holds every pass, a second pass waits for the first, no pass starts once no lane is in flight, and the held row is written only when nothing ran"
+      proof: "unit test: test/a-paused-dispatch-phase-still-reviews.test.ts"
+  falsifier: |
+    Restore the unconditional `continue` after `daemon.sweep_light.held`. The suite's PAUSE-in-phase fixture
+    records zero `sweepLight({ reviewOnly: true })` calls and no `daemon.sweep_light.review_only` row. Drop
+    the single-slot guard, and a slow fake review lets a second pass start. Drop the empty-lane guard, and a
+    pass starts after the last lane settled.

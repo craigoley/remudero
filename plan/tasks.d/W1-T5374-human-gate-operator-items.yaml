@@ -1,0 +1,44 @@
+- id: W1-T5374
+  title: "Classify status-board operator items by actual actionability rather than alert presence"
+  repo: remudero
+  depends_on: [W1-T5332]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "2026-10-02 operator approved the human-gate implementation follow-ups"
+  plan_refs: [W1-T5021, W1-T3186]
+  files: [src/lib/human-gate.ts, src/lib/now-view.ts, src/lib/status-board.ts, test/human-gate-operator-items.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at 009a9111cf38344f6ee79c96f8fd18219a0b3688: NeedsMeSection has
+    costAnomaly, imageDrift, tokenFallback and uncreditedBuilds. Presence in this
+    mixed record surface does not prove an operator decision. This is design slice 8.
+  design: |
+    Add projectOperatorItemGates and consume it in now-view. Re-read each row producer,
+    its freshness and its actual action route before classifying it. Use an explicit
+    per-kind table with evidence-backed reasons: a diagnostic record or still-active
+    automated recovery stays RECORD; a source-owned unresolved choice with a real action
+    becomes one operator_item gate. An acknowledgement is a read operation, never a
+    permission to spend, release a hold or deploy. Stale evidence and unknown cost cannot
+    become a live anomaly, a verified zero, or a fresh decision without current evidence.
+    Preserve diagnostic visibility, instance identity, timestamp and evidence link even
+    for rows excluded from the Inbox count. A healthy board yields no gate; repeated
+    observations of the same source condition yield one. Introduce no new authority,
+    routing change, PR hold, restart, ratification or mandatory human approval.
+  acceptance:
+    - claim: "the production now view consumes the operator-item adapter"
+      proof: 'grep: projectOperatorItemGates( in src/lib/now-view.ts'
+    - claim: "each operator-item kind has an explicit, evidence-backed classification"
+      proof: 'grep: every operator item has a source-owned action or remains a record in test/human-gate-operator-items.test.ts'
+    - claim: "healthy and stale diagnostic records do not invent human decisions"
+      proof: 'grep: healthy boards have no gates and stale operator evidence stays explicit in test/human-gate-operator-items.test.ts'
+    - claim: "diagnostic visibility and instance separation survive classification"
+      proof: 'grep: operator records remain visible without multiplying the human decision count in test/human-gate-operator-items.test.ts'
+  falsifier: |
+    Count a diagnostic row as an approval, invent an action authority, or reuse a stale
+    anomaly as current: the corresponding operator-item fixture fails.
