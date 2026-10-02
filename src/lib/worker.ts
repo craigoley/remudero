@@ -99,7 +99,7 @@ import {
   assertWorkerCredentialFile,
   CLAUDE_CONFIG_REL,
   ensureWorkerKeychain,
-  materializeWorkerHome,
+  materializeSpawnWorkerHome,
   perRunWorkerHomeDir,
   reapWorkerHome,
   workerCredentialFilePath,
@@ -2330,7 +2330,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         // MATERIALIZE the redirected home before the spawn, through the SAME function the Claude path calls, which writes the
         // blank rc files that close the leak. Measured against pinned codex-cli 0.152.0: both Codex exclusions hold at the
         // process boundary while the worker's SHELL still read the operator's exported value from `$HOME/.bashrc`.
-        materializeWorkerHome({ workerHome, realHome });
+        materializeSpawnWorkerHome({ workerHome, realHome });
         measurement = await beginSelectedCapacityMeasurement(args, config, selection, capabilities);
         const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, selection.capacity);
         result.routedModel = selection.capacity.model ?? result.model;
@@ -2408,7 +2408,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       capability: requestedCapability,
     });
     try {
-      materializeWorkerHome({ workerHome, realHome });
+      materializeSpawnWorkerHome({ workerHome, realHome });
       const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config);
       result.selectionAssignmentId = selectionAssignmentId;
       result.routedModel ??= result.model;
@@ -2463,7 +2463,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     });
     let selectionAssignmentId = cashAssignment(openWeight.model, openWeight.alternatives);
     try {
-      materializeWorkerHome({ workerHome, realHome });
+      materializeSpawnWorkerHome({ workerHome, realHome });
       // WALK THE LADDER ON A CAPABILITY REFUSAL, NEVER ON ANYTHING ELSE (see `runOpenWeightWalkingLadder`).
       let firstRung = true;
       const result = await runOpenWeightWalkingLadder(
@@ -2560,7 +2560,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // Why: a real `.claude` DIRECTORY in the symlink slot left the usage probe logged out for days with nothing on disk
     //      saying so (W1-T417-adjacent).
     const lostGrants = lostWorkerHomeGrants(
-      materializeWorkerHome({ workerHome, realHome, workerKeychainPath }),
+      materializeSpawnWorkerHome({ workerHome, realHome, workerKeychainPath }),
     );
 
     // Shell isolation, resolved from config and never hardcoded, so a worker sources no operator rc. HOME is redirected
