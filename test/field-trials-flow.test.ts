@@ -47,6 +47,29 @@ function flowReadOf(rows: Record<string, unknown>[]): FieldTrialsLedgerRead {
     newestTs: null, rows: rows.map((value, index) => projectFlowRow(value, `fp-${index}-${JSON.stringify(value).length}`)) };
 }
 
+test("Field Trials keeps the Sol 6.1 switch separate from Sol 6 and cash separate from subscription", () => {
+  const assignment = (id: string, model: string) => ({ step: "worker.assignment", ts: T(30), task_id: `W1-T${id}`,
+    host: "azure-core", worker_assignment: { id, requested: { model: "sonnet" }, selected: { model } } });
+  const rows = [assignment("1", "gpt-6-sol"), assignment("2", "gpt-6.1-sol"), assignment("3", "gpt-6.1-sol"),
+    { step: "worker.attempt", ts: T(30, 1), host: "azure-core", selection_assignment_id: "1", task_id: "W1-T1",
+      served_model: "gpt-6-sol", total_cost_usd: 0.4, billing_mode: "subscription" },
+    { step: "worker.attempt", ts: T(30, 2), host: "azure-core", selection_assignment_id: "2", task_id: "W1-T2",
+      served_model: "gpt-6.1-sol-2026-09-29", total_cost_usd: 0.1, billing_mode: "api" }];
+  const snapshot = buildFieldTrialsFlowSnapshot({ asOf: T(31),
+    sources: [{ label: "core", repo: "acme/core", ledger: flowReadOf(rows) }],
+    github: { version: "field-trials-github-v1", repos: { "acme/core": emptyRepoStore() } } });
+  const old = snapshot.assignmentTelemetry.find((row) => row.selectedModel === "gpt-6-sol")!;
+  const next = snapshot.assignmentTelemetry.find((row) => row.selectedModel === "gpt-6.1-sol")!;
+  assert.equal(old.subscriptionNotionalUsd, 0.4);
+  assert.equal(old.apiCostEstimateUsd, 0);
+  assert.equal(next.apiCostEstimateUsd, 0.1);
+  assert.equal(next.subscriptionNotionalUsd, 0);
+  assert.equal(next.assignments, 2);
+  assert.equal(next.nonStarterAssignments, 1);
+  assert.equal(next.costMissingAssignments, 1);
+  assert.equal(snapshot.causalClaims, "none");
+});
+
 type RawPull = Record<string, unknown>;
 
 function rawPull(number: number, opts: { task?: string; branch?: string; created?: string; merged?: string | null; mergeSha?: string;

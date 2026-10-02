@@ -2,6 +2,37 @@
 
 ## Decision
 
+**2026-10-02 Sol 6.1 switch.** `gpt-6.1-sol` now leads every subscription balanced and frontier
+Sol seat. `gpt-6-sol` and `gpt-5.6-sol` trail for account availability and supported effort fallback.
+Claude keeps frontier preference; economy keeps Luna/Spark. No effort or subscription share changes.
+The old concrete-model experiments remain readable. New high-effort epochs `sol61-vs-sonnet55`
+and `sol61-vs-sonnet5` start on October 2 and revisit October 16, with 20 tasks per arm required.
+Retries keep their task assignment; a fallback to Sol 6 belongs to its original epoch. Assignment,
+served model, terminal receipt, non-starter, crossover, risk/class/lane and pinned stack remain
+separate evidence. Before/after adoption is observational; it does not establish a causal winner.
+
+Azure Foundry offers `gpt-6.1-sol`, version `2026-09-29`, in our East US 2 account (GlobalStandard).
+Cash balanced rows retain nano/OSS/Luna ahead of Sol 6.1; economy does not offer Sol. A squeezed
+Sonnet 5.5 deployment returning 404 can walk once to a ready, context-fitting Sol 6.1. Frontier
+cash remains the existing bounded Opus emergency. All paid Sol turns reserve against the same
+fleet allowance and $25/day operator cap, including retries; no cap is raised by this change.
+
+[Sol 6.1](https://developers.openai.com/api/docs/models/gpt-6.1-sol) uses Responses for tools and
+supports low/medium/high/xhigh/max API reasoning. The adapter preserves encrypted reasoning and
+function-call items, executes the same bounded tools, and reports failed or incomplete responses.
+A failed local tool ends the Sol chain. Missing usage leaves the conservative reservation charged;
+an unknown transport outcome does too, while a definite 404 settles to zero. Actual served identity
+comes from the response, never from the deployment name. Per-turn cache reads/writes, output,
+duration, cost estimate and assignment identity feed the existing worker-attempt/Field Trials path.
+
+[Azure's published Global Standard rates](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/provisioned-throughput-sizing)
+are $2 input, $0.10 cached input, $2.50 cache write and $10 output per million. Above 272K input,
+the entire request uses $4/$0.20/$5/$15. Reservations use the higher cache-write input rate and
+8K output ceiling; settlement uses each turn's receipt, rather than pricing the summed conversation
+as one long request. The Azure input bound is 922K, with room for output. Provisioning, source
+merge, runtime boot and first selected/served timestamps are separate switch evidence. Retain the
+private deployment/probe receipt and refresh `rmd field-trials` after runtime activation.
+
 **2026-09-24 balanced-lane guard.** Codex `balanced.low`, `.medium`, and `.high` now offer
 `gpt-6-sol`, then `gpt-5.6-sol`. They do not offer Luna or the retiring `gpt-5.5`. A Sonnet mount
 can execute a multi-turn worker chain at any effort, and its high-effort Sol fallback previously
@@ -233,8 +264,8 @@ The first 30 days after deployment are the comparison window. Compare like-for-l
 risk, routing rule, and provider before promoting or rolling back a model. A raw across-model total
 is not a quality or cost measurement because the task populations can differ.
 
-The [current OpenAI list prices](https://developers.openai.com/api/docs/models/gpt-6-sol) put Sol
-at $2 input, $0.20 cached input, and $10 output per million tokens; the corresponding
+The [current OpenAI list prices](https://developers.openai.com/api/docs/models/gpt-6.1-sol) put Sol 6.1
+at $2 input, $0.10 cached input, and $10 output per million tokens; the corresponding
 [Luna prices](https://developers.openai.com/api/docs/models/gpt-6-luna) are $0.10, $0.01, and
 $0.50. Both apply higher rates above 272K input tokens. Anthropic lists Opus 5.5 at $4 input,
 $0.20 cache reads, and $20 output per million tokens in its
