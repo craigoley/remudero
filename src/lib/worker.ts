@@ -289,6 +289,8 @@ export interface WorkerResult {
    * git fell back to the AMBIENT credential path and the boundary was not in force — the one
    * outcome on this boundary that used to leave no trace anywhere. */
   credentialHelperUnwired?: string;
+  /** W1-T1289: why the egress broker did NOT apply to this spawn in observe mode. Absent when it applied or is off. */
+  egressUnenforced?: string;
   /** `true` the moment ONE compaction fired (`compactionEvents.length > 0`, MASTER-PLAN 8B). This call's acceptance proofs
    * must then be re-verified against repo state (W1-T3F), never trusted from a possibly-lossy REPORT. */
   qualitySuspect: boolean;
@@ -509,6 +511,7 @@ export function workerLedgerFields(r: WorkerResult): {
   max_turns?: number;
   stderr_excerpt?: string;
   lost_grants?: string[];
+  egress_unenforced?: string;
   worker_duration_ms?: number;
   window_consumption?: {
     provider: WorkerProviderId;
@@ -539,6 +542,7 @@ export function workerLedgerFields(r: WorkerResult): {
       : {}),
     // Omitted whenever the boundary applied — present only when a worker ran on ambient credentials.
     ...(r.credentialHelperUnwired ? { credential_helper_unwired: r.credentialHelperUnwired } : {}),
+    ...(r.egressUnenforced ? { egress_unenforced: r.egressUnenforced } : {}),
     ...(r.provider ? { provider: r.provider } : {}),
     model: r.model,
     ...(r.routedModel ? { routed_model: r.routedModel } : {}),
@@ -937,11 +941,26 @@ export function captureWorkerUsageProjection(
   }
 }
 
+export type WorkerEgressMode = "observe" | "enforce" | "off";
+
+/** The operator's egress ruling (2026-10-02): observe until the broker has run clean, then enforce. */
+export function workerEgressMode(raw: string | undefined): WorkerEgressMode {
+  return raw === "enforce" || raw === "off" ? raw : "observe";
+}
+
 export interface SpawnWorkerArgs {
   cwd: string;
   permissionMode: PermissionMode;
   /** Path to the worker settings file (permissions + hooks + sandbox). */
   settingsFile: string;
+  /** W1-T1289: the per-spawn egress broker. `mode` defaults to `RMD_WORKER_EGRESS` (observe|enforce|off), else observe:
+   *  observe runs the worker WITHOUT the broker when it cannot be established and reports why, enforce refuses the
+   *  spawn, off skips it. The two hooks are test seams; production checks the CLI and starts a real broker. */
+  egress?: {
+    mode?: WorkerEgressMode;
+    checkVersion?: (bin: string) => string;
+    startProxy?: (policy: unknown) => Promise<{ httpProxyPort: number; socksProxyPort: number; verifyAllowed(): Promise<void>; close(): Promise<void> }>;
+  };
   /** Enables the implement lane's read-only rule lookup, with a ledger sink for every call. */
   ruleLookup?: {
     onPulled: (id: string, status: "found" | "missing" | "error") => void;
@@ -2726,7 +2745,28 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     });
 
     let unregisterRunningWorker: (() => void) | undefined;
+    let egressProxy: Awaited<ReturnType<NonNullable<NonNullable<SpawnWorkerArgs["egress"]>["startProxy"]>>> | undefined;
+    let egressUnenforced: string | undefined;
     try {
+      // W1-T1289: a private broker per spawn, started and verified BEFORE the query and closed on every exit path.
+      const egressMode = args.egress?.mode ?? workerEgressMode(process.env.RMD_WORKER_EGRESS);
+      if (egressMode !== "off") {
+        try {
+          const owner = await import("./containment.js");
+          (args.egress?.checkVersion ?? ((bin: string) => owner.assertWorkerEgressEnforcerVersion(bin)))(claudeBin);
+          const policy = JSON.parse(fs.readFileSync(args.settingsFile, "utf8")) as { sandbox?: { network?: Record<string, unknown> } };
+          egressProxy = await (args.egress?.startProxy ?? owner.startWorkerEgressProxy)(policy);
+          await owner.verifyWorkerEgressProxy(egressProxy);
+          const network = { ...policy.sandbox?.network, httpProxyPort: egressProxy.httpProxyPort, socksProxyPort: egressProxy.socksProxyPort };
+          options.settings = { ...policy, sandbox: { ...policy.sandbox, network } } as Options["settings"];
+        } catch (error) {
+          await egressProxy?.close();
+          egressProxy = undefined;
+          if (egressMode === "enforce") throw error;
+          // Observe: the worker runs as it did before the broker existed, and the result says why it was not in force.
+          egressUnenforced = error instanceof Error ? error.message : String(error);
+        }
+      }
       // A query factory can throw synchronously. Keep its creation inside this cleanup boundary
       // so a provider refusal cannot leave the watchdog running after the caller catches it.
       const liveQuery = runQuery({ prompt: args.prompt, options });
@@ -2763,6 +2803,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         teardownContained,
       );
       result.provider = "claude";
+      if (egressUnenforced) result.egressUnenforced = egressUnenforced;
       result.routedModel = routedClaudeModel;
       result.selectionAssignmentId = selectionAssignmentId;
       if (claudeHealthRoute) {
@@ -2784,6 +2825,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       stopWatchdog?.();
       // Unconditional: no exit path may leave a handle for a later answer to steer into a dead session (W1-T4673).
       unregisterRunningWorker?.();
+      await egressProxy?.close();
     }
   } finally {
     // Reap THIS spawn's per-spawn home on every exit path, including a thrown error or a transport failure — the withTempDir

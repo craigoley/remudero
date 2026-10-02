@@ -1745,7 +1745,13 @@ export async function startWorkerEgressProxy(
     : connect(host, port));
   const http = createHttpServer((req, res) => {
     let target: URL;
-    try { target = new URL(req.url ?? ""); } catch { res.writeHead(403).end("egress denied"); return; }
+    try {
+      target = new URL(req.url ?? "");
+    } catch {
+      // An unparseable target names no allowlisted host, so it is denied like any other.
+      res.writeHead(403).end("egress denied");
+      return;
+    }
     const port = Number(target.port || 80);
     if (target.protocol !== "http:" || target.username || target.password || !permits(target.hostname, port)) {
       res.writeHead(403).end("egress denied"); return;

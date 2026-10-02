@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import * as containment from "../src/lib/containment.js";
-import { spawnWorker, type SpawnWorkerArgs } from "../src/lib/worker.js";
+import { spawnWorker, workerEgressMode, workerLedgerFields, type SpawnWorkerArgs } from "../src/lib/worker.js";
 
 const settings = JSON.parse(readFileSync(new URL("../settings/worker.json", import.meta.url), "utf8"));
 const domains: string[] = settings.sandbox.network.allowedDomains;
@@ -167,6 +167,7 @@ test("spawn starts and verifies a private proxy before query, passes ports, and 
     let proxy: Awaited<ReturnType<typeof containment.startWorkerEgressProxy>> | undefined;
     const order: string[] = [];
     const egress = {
+      mode: "enforce" as const,
       checkVersion: (bin: string) => { assert.equal(bin, "/fake"); order.push("version"); return "2.1.284"; },
       startProxy: async (policy: unknown) => { order.push("start"); return proxy = await containment.startWorkerEgressProxy(policy); },
     };
@@ -191,9 +192,9 @@ test("spawn starts and verifies a private proxy before query, passes ports, and 
 test("spawn refuses version drift, proxy startup failure, and a dead proxy before querying", async () => {
   let queried = false;
   const run = async function* () { queried = true; };
-  await assert.rejects(fixtureSpawn(run, { checkVersion: () => { throw new Error("version drift"); } }), /version drift/);
-  await assert.rejects(fixtureSpawn(run, { checkVersion: () => "ok", startProxy: async () => { throw new Error("proxy startup failed"); } }), /proxy startup failed/);
-  await assert.rejects(fixtureSpawn(run, { checkVersion: () => "ok", startProxy: async () => {
+  await assert.rejects(fixtureSpawn(run, { mode: "enforce", checkVersion: () => { throw new Error("version drift"); } }), /version drift/);
+  await assert.rejects(fixtureSpawn(run, { mode: "enforce", checkVersion: () => "ok", startProxy: async () => { throw new Error("proxy startup failed"); } }), /proxy startup failed/);
+  await assert.rejects(fixtureSpawn(run, { mode: "enforce", checkVersion: () => "ok", startProxy: async () => {
     const proxy = await containment.startWorkerEgressProxy(settings);
     await proxy.close();
     return proxy;
@@ -321,4 +322,41 @@ test("egress version default readers use the lockfile and installed bundled CLI 
     chmodSync(bin, 0o700);
     assert.equal(containment.assertWorkerEgressEnforcerVersion(bin), pkg.claudeCodeVersion);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("observe mode runs the worker without the broker when it cannot start, and says why on the result", async () => {
+  const seen: Array<unknown> = [];
+  const run = async function* (options: Options) {
+    seen.push(options.settings);
+    yield { type: "result", subtype: "success", is_error: false, result: "ok", session_id: "fixture", num_turns: 1, total_cost_usd: 0, permission_denials: [] };
+  };
+  const result = await fixtureSpawn(run, { mode: "observe", checkVersion: () => "ok", startProxy: async () => { throw new Error("proxy startup failed: bind unavailable"); } });
+  assert.equal(result.egressUnenforced, "proxy startup failed: bind unavailable");
+  assert.equal(typeof seen[0], "string", "the worker got the settings file unchanged, exactly as before the broker");
+  const drift = await fixtureSpawn(run, { mode: "observe", checkVersion: () => { throw new Error("version drift"); } });
+  assert.equal(drift.egressUnenforced, "version drift");
+});
+
+test("off mode skips the broker entirely, and the mode comes from RMD_WORKER_EGRESS defaulting to observe", async () => {
+  let checked = false;
+  const run = async function* () {
+    yield { type: "result", subtype: "success", is_error: false, result: "ok", session_id: "fixture", num_turns: 1, total_cost_usd: 0, permission_denials: [] };
+  };
+  const result = await fixtureSpawn(run, { mode: "off", checkVersion: () => { checked = true; return "ok"; } });
+  assert.equal(checked, false);
+  assert.equal(result.egressUnenforced, undefined);
+  assert.equal(workerEgressMode(undefined), "observe");
+  assert.equal(workerEgressMode("enforce"), "enforce");
+  assert.equal(workerEgressMode("off"), "off");
+  assert.equal(workerEgressMode("ENFORCE"), "observe", "anything unrecognised is the safe default");
+});
+
+test("a successful broker leaves no egress_unenforced field on the ledger row", async () => {
+  const run = async function* () {
+    yield { type: "result", subtype: "success", is_error: false, result: "ok", session_id: "fixture", num_turns: 1, total_cost_usd: 0, permission_denials: [] };
+  };
+  const result = await fixtureSpawn(run, { checkVersion: () => "ok" });
+  assert.equal(result.egressUnenforced, undefined, "the default broker started and applied");
+  assert.equal("egress_unenforced" in workerLedgerFields({ ...result, egressUnenforced: undefined }), false);
+  assert.equal(workerLedgerFields({ ...result, egressUnenforced: "x" }).egress_unenforced, "x");
 });
