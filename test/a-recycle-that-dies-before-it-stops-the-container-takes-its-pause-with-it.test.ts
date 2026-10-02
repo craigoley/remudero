@@ -103,7 +103,6 @@ function startRecycle(t: { after: (fn: () => void) => void }, opts: { inflightLo
   writeStubs(stubs);
   const cashKeyPath = join(state, "openweight-api-key");
   writeFileSync(cashKeyPath, "fixture-durable-openweight-key\n", { mode: 0o600 });
-  chmodSync(cashKeyPath, 0o600);
   if (opts.inflightLock) {
     // A container-id-UNSHAPED host keeps the lock outside the dead-container reclaim path, so the wait
     // holds on it for as long as the test needs.
