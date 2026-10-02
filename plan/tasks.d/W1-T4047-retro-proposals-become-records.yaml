@@ -15,7 +15,7 @@
     - src/run-task.ts
     - test/proposals-are-records.test.ts
   priority: 2
-  status: queued
+  status: merged
   # backlog gardener: band=2 evidence=1d0f335823e0cea6
   attempts: 0
   rationale: |

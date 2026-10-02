@@ -10,7 +10,7 @@
   risk: high
   origin: "operator-approved Orca comparison, 2026-09-30"
   files: [hooks/deny-floor.sh, settings/worker.json, test/deny-floor.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at c94c2bf49: worker file tools use bypassPermissions. The deny-floor hook reads file_path and cwd

@@ -380,6 +380,20 @@ function validateRiskRulingShape(raw: unknown, sourceLabel: string, taskId: stri
   };
 }
 
+const V8_SLICED_STRING_MIN_LENGTH = 13;
+
+/** E37: a flat copy of each long string, in place. `yaml` joins a multi-line scalar into a rope pinning its source (144 -> 25 MB). */
+function detachStrings(node: unknown): unknown {
+  if (typeof node === "string") return node.length < V8_SLICED_STRING_MIN_LENGTH ? node : JSON.parse(JSON.stringify(node));
+  if (Array.isArray(node)) {
+    for (let i = 0; i < node.length; i++) node[i] = detachStrings(node[i]);
+  } else if (typeof node === "object" && node !== null) {
+    const record = node as Record<string, unknown>;
+    for (const key of Object.keys(record)) if (key !== "__proto__") record[key] = detachStrings(record[key]);
+  }
+  return node;
+}
+
 /**
  * Parse and field-validate a YAML task-list blob into {@link Task}s (schema v1), without checking
  * that every `depends_on` id resolves. Split out of {@link loadPlanFromYaml} so a caller validating
@@ -394,6 +408,7 @@ export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicat
     throw new PlanError(`plan is not valid YAML (${sourceLabel}): ${String(err)}`);
   }
   if (!Array.isArray(raw)) throw new PlanError("plan must be a YAML list of task entries (schema v1).");
+  detachStrings(raw);
 
   const byId = new Map<string, Task>();
   return raw.map((entry) => {
