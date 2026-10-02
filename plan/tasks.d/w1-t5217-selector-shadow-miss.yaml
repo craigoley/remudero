@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 4
   status: queued
@@ -16,3 +16,15 @@
   acceptance:
     - claim: "the narrow selector includes test/a-gates-own-remedy-is-reachable.test.ts when this edge is exercised"
       proof: "grep: test/a-gates-own-remedy-is-reachable\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.85
+    reasons:
+      - "The description and declared files show a single-file change to src/lib/affected-suites.ts. Its purpose is to add a test file to the narrow selector's affected-suites mapping."
+      - "Nothing in the description touches secrets, auth, permissions, data deletion, merge/deploy/review policy or other irreversible actions, and it asks for no operator decision."
+      - "The acceptance criterion is a grep that can be checked automatically (verify: auto), so the result is verifiable from what is shown."
+      - "The family has no track record (0 merged, 0 declined, Beta mean 0.50), which is neutral rather than concerning. The change would still go through CI and review."
+      - "No bounded change view was supplied, so this judgment rests only on the description and the declared file list."
+    judged_at: "2026-10-02T10:51:38.010Z"
+    pin: "0fd110ce5af2630bd3a7b0c637537b2580b95095ab26c908b0fdc5597552ae98"

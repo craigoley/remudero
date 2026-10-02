@@ -11,7 +11,7 @@
   origin: "operator-approved Orca comparison, 2026-09-30"
   plan_refs: [W1-T3186, W1-T507, W1-T3395]
   files: [docs/recon/human-gate-projection.md]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at c94c2bf49: status-board, now-view, inbox and ask-classification expose different partial
