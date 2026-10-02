@@ -16,6 +16,12 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   uncovered changed lines, add focused tests for those behaviors, and rerun the coverage gate
   against the same committed tree before pushing.
 
+- `ci-friction:check:ci-log:coverage-ratchet:diff-coverage-blocked-this-diff-adds-source-line-s-with-zero` —
+  the diff-coverage gate found added source lines with no coverage. Use the gate's uncovered-line
+  report to identify each behavior, add focused tests that execute those lines, then commit the
+  tested tree and rerun diff-coverage against that same commit. Confirm the lcov data instruments
+  every changed source file before treating a passing diff-coverage result as evidence.
+
 - `ci-friction:fix_refusal:no-anchored-commit-message-line-in-the-report` — the shell-less
   harness requires the worker's REPORT to end with an anchored `COMMIT_MESSAGE:` line that
   names the commit subject in Conventional Commits format (`type(scope): subject`, lower-case,
