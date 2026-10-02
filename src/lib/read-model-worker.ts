@@ -1445,6 +1445,8 @@ export interface ReadModelWorkerOptions {
   workerUrl?: URL;
   log?: (step: string, extra?: Record<string, unknown>) => void;
   escalationRepository?: string;
+  /** Where a recycle loop is escalated; absent, it is built from `escalationRepository`. */
+  escalation?: EscalateDeps;
   every?: (run: () => void, ms: number) => () => void;
   /** What the silent-worker watchdog measures against. */
   clock?: Clock;
@@ -1455,6 +1457,12 @@ export interface ReadModelWorkerOptions {
   observe?: (msg: ReadModelWorkerMessage) => void;
   /** Serve's keep-warm and its gateway walk: exactly one of it and the worker's own runs (switch `github`). */
   github?: { serve: GithubKeepWarm } & Parameters<typeof createGithubKeepWarm>[0];
+}
+
+/** A worker in its steady state: every instance it leases has completed a tick since `since` with no backlog left. */
+function workerSteadySince(instances: readonly ReadModelInstanceState[], since: number): boolean {
+  const held = instances.filter((state) => state.lease === "held");
+  return held.length > 0 && held.every((state) => state.tickedAt !== undefined && state.tickedAt >= since && !state.catchUp);
 }
 
 function everyUnref(run: () => void, ms: number): () => void {
@@ -1518,6 +1526,49 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   let heardAt = clock.now();
   let silenceLogged = false;
   let recycles = 0;
+  const [escalationOwner, escalationRepo] = opts.escalationRepository?.split("/") ?? [];
+  const escalation = opts.escalation ?? (escalationOwner && escalationRepo
+    ? { issues: ghIssueGateway(escalationOwner, escalationRepo), ledgerPath: join(opts.stateDir, LEDGER_FILENAME), runId: READ_MODEL_WORKER_KIND } : undefined);
+  type Recycle = { at: number; silentMs: number; boundMs: number; phase?: string; instance?: string };
+  /** The recycles since the worker last reached its steady state. A recycle while one is open is a loop. */
+  let loop: { since: number; count: number; last: Recycle[]; issueUrl?: string } | undefined;
+  const loopTaskId = `READ-MODEL-${home.toUpperCase()}`;
+  const noteRecycle = (recycle: Recycle): void => {
+    const episode = (loop ??= { since: recycle.at, count: 0, last: [] });
+    episode.count++;
+    episode.last = [...episode.last.slice(-4), recycle];
+    if (episode.count < 2 || episode.issueUrl) return;
+    const evidence = { recycles: episode.count, loopMs: recycle.at - episode.since, last: episode.last, state: instances.get(home)?.reason ?? null };
+    const reasons = episode.last.map((r) => `${fixedClock(r.at).iso()} silent ${Math.round(r.silentMs / 1000)} s (bound ${Math.round(r.boundMs / 1000)} s) in ${r.phase ?? "no reported phase"}`);
+    const issueUrl = escalation ? tryEscalate({
+      class: "MANUAL",
+      taskId: loopTaskId,
+      summary: `read-model worker keeps being recycled before it reaches a steady state`,
+      detail: `Serve's watchdog has recycled the read-model worker ${episode.count} times over ${Math.round(evidence.loopMs / 1000)} s, each time before it completed a tick with no backlog. Last state: ${evidence.state ?? "none reported"}.\n\nLast recycles:\n${reasons.map((r) => `- ${r}`).join("\n")}`,
+      options: [
+        { label: "rebuild the read model", detail: "Run `rmd read-model rebuild`; the views keep serving the old file until the new one passes its check.", kind: { type: "operator-only" } },
+        { label: "restart serve", detail: "Recycle the serve container; the projector resumes from its checkpoints.", kind: { type: "operator-only" } },
+      ],
+      recommendation: "rebuild the read model",
+      consequence: "Every view the worker builds stays stale, and each recycle repeats the work it lost. This issue closes itself once the worker is steady.",
+    }, escalation) : null;
+    if (issueUrl) episode.issueUrl = issueUrl;
+    opts.log?.("read_model.recycle_loop", { ...evidence, issueUrl });
+  };
+  const noteSteady = (states: readonly ReadModelInstanceState[]): void => {
+    const episode = loop;
+    if (!episode || !workerSteadySince(states, episode.last.at(-1)!.at)) return;
+    loop = undefined;
+    if (episode.count < 2) return;
+    const recovered = { recycles: episode.count, loopMs: clock.now() - episode.since, issueUrl: episode.issueUrl ?? null };
+    opts.log?.("read_model.recycle_loop_recovered", recovered);
+    if (!episode.issueUrl) return;
+    try {
+      escalation!.issues.closeWithComment?.(episode.issueUrl, `Resolved automatically: the read-model worker completed a tick with no backlog after ${episode.count} recycles.`);
+    } catch (error) {
+      opts.log?.("read_model.recycle_loop_close_failed", { ...recovered, error: String((error as Error)?.message ?? error) });
+    }
+  };
   /** What the worker last said it was doing, and the slowest store open it has reported. */
   let phase: { instance: string; phase: string } | undefined;
   let slowestOpenMs = 0;
@@ -1564,6 +1615,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     recycles++;
     opts.log?.("read_model.worker_recycled", { silentMs, recycles, boundMs, ...last });
     void running.terminate();
+    noteRecycle({ at: clock.now(), silentMs, boundMs, ...last });
   };
 
   const bodyListeners = new Set<(entry: ReadModelBodyEntry) => void>();
@@ -1587,6 +1639,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       switches = msg.switches;
       deaths = 0;
       for (const state of msg.instances) instances.set(state.instance, state);
+      noteSteady(msg.instances);
     }
     opts.observe?.(msg);
   };
