@@ -6,6 +6,7 @@ import { test } from "node:test";
 
 import type { Clock } from "../src/lib/clock.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { gitRepo } from "./helpers/git-repo.js";
 import type { Escalation } from "../src/lib/escalate.js";
 import { gardenEffectsPath, gardenStatePath, readGardenEffects, runGarden, type GardenSpec } from "../src/lib/gardener.js";
 import {
@@ -461,4 +462,31 @@ test("the overseer issues ci-friction verdicts under the v2 id and logs their re
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
   }
+});
+
+test("the production ports read the remedy's plan record and its fix rounds once, and name an unreadable ledger", () => {
+  const repo = gitRepo({ kind: "overseer-remedy-ports" });
+  mkdirSync(join(repo.dir, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(repo.dir, "plan", "tasks.d", "W1-T7200.yaml"),
+    '- id: W1-T7200\n  title: "t"\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: low\n  status: merged\n  attempts: 0\n' +
+    '  origin: "ci-friction:check:test"\n  files:\n    - src/run-task.ts\n  acceptance:\n    - claim: "c"\n      proof: "unit test: t"\n');
+  repo.git("add", ".");
+  repo.git("commit", "-q", "-m", "fix: the remedy\n\nRemudero-Task: W1-T7200");
+  repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  const stateDir = join(repo.dir, "state");
+  mkdirSync(stateDir, { recursive: true });
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const ports = productionGardenerOverseerPorts({ stateDir, repoRoot: repo.dir, owner: "o", repo: "r", fetch: () => ({}), log: (step, extra) => logs.push({ step, extra }) });
+  const rows = [row("ci-friction.scorecard", T0, { pr_url: "https://github.com/o/r/pull/3", untracked: "check:test" })];
+  const tracked = { gardener: "ci-friction", actionClass: "draft", url: "https://github.com/o/r/pull/3", openedAt: new Date(T0).toISOString(), mergedAt: new Date(T0 + HOUR).toISOString() };
+  // No ledger rotation yet: the rounds read fails, is named once, and no verdict is issued.
+  assert.equal(ports.effectReading?.(tracked, rows), undefined);
+  assert.equal(ports.effectReading?.(tracked, rows), undefined);
+  assert.equal(logs.filter((l) => l.step === "gardener_overseer.remedy_rounds_unreadable").length, 1);
+  assert.equal(logs.filter((l) => l.step === "gardener_overseer.remedy_plan_unreadable").length, 0, "the plan record was read");
+  // A readable, empty ledger: the remedy is found and measured, but no round precedes it, so nothing is decided.
+  writeFileSync(join(stateDir, "ledger.2026-01-01T00-00-00-000Z.ndjson"), "");
+  const fresh = productionGardenerOverseerPorts({ stateDir, repoRoot: repo.dir, owner: "o", repo: "r", fetch: () => ({}), log: (step, extra) => logs.push({ step, extra }) });
+  assert.equal(fresh.effectReading?.(tracked, rows), undefined);
+  assert.equal(logs.filter((l) => l.step === "gardener_overseer.remedy_rounds_unreadable").length, 1, "a readable ledger logs nothing");
 });
