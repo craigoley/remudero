@@ -2,7 +2,11 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+import { Agent as HttpAgent, createServer as createHttpServer, request as httpRequest, type OutgoingHttpHeaders } from "node:http";
+import { connect as connectTcp, createServer as createTcpServer, type Socket, type Server } from "node:net";
 // `configPath()` resolves `<homedir()>/.config/remudero/config.json` through the same reader the
 // config file itself is read by. Called from the orchestrator's own process, before any worker's
 // HOME is redirected, so it reads the operator's REAL home, never a worker's scratch one.
@@ -1693,4 +1697,234 @@ export async function workerSmokeMain(
     print(`${WORKER_SMOKE_PREFIX} FAIL ${reason}`);
     return 1;
   }
+}
+
+/** Per-spawn sandbox egress broker. The CLI confines sandbox sockets to these listeners;
+ * the broker owns the destination policy. CLI model transport and excludedCommands retain
+ * their existing boundary. The console is explicitly permitted by the W1-T1289 ruling. */
+export interface WorkerEgressProxy {
+  httpProxyPort: number;
+  socksProxyPort: number;
+  verifyAllowed(): Promise<void>;
+  close(): Promise<void>;
+}
+
+export interface WorkerEgressProxyDeps {
+  connect?: (host: string, port: number) => Socket;
+}
+
+export class WorkerEgressError extends Error {
+  override name = "WorkerEgressError";
+}
+
+// Bounds idle proxy handshakes/connections, not total worker age or download duration.
+const EGRESS_IDLE_MS = 30_000;
+// Bounds each local readiness exchange; a dead listener must refuse before query starts.
+const EGRESS_READY_MS = 5_000;
+const SOCKS_REPLY = (status: number) => Buffer.from([5, status, 0, 1, 0, 0, 0, 0, 0, 0]);
+
+type EgressSettings = { sandbox?: { network?: { allowedDomains?: unknown } } };
+
+export async function startWorkerEgressProxy(settings: unknown, deps: WorkerEgressProxyDeps = {}): Promise<WorkerEgressProxy> {
+  const domains = (settings as EgressSettings | null)?.sandbox?.network?.allowedDomains;
+  if (!Array.isArray(domains) || domains.length === 0 || domains.some(d => typeof d !== "string" || !/^[a-z0-9.-]+$/i.test(d))) {
+    throw new WorkerEgressError("worker egress requires a non-empty exact-host allowlist");
+  }
+  const allowed = new Set([...domains.map(d => d.toLowerCase()), "remudero-serve"]);
+  let control: { host: string; port: number } | undefined;
+  const isControl = (host: string, port: number) => control?.host === host && control.port === port;
+  const permits = (host: string, port: number) => (allowed.has(host.toLowerCase()) || isControl(host, port)) && Number.isInteger(port) && port > 0 && port <= 65535;
+  const sockets = new Set<Socket>();
+  const track = (socket: Socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+    socket.setTimeout(EGRESS_IDLE_MS, () => socket.destroy());
+    return socket;
+  };
+  const dial = (host: string, port: number) => track(isControl(host, port)
+    ? connectTcp(port, "127.0.0.1")
+    : (deps.connect ?? ((h, p) => connectTcp(p, h)))(host, port));
+  const http = createHttpServer((req, res) => {
+    let target: URL;
+    try { target = new URL(req.url ?? ""); } catch { res.writeHead(403).end("egress denied"); return; }
+    const port = Number(target.port || 80);
+    if (target.protocol !== "http:" || target.username || target.password || !permits(target.hostname, port)) {
+      res.writeHead(403).end("egress denied"); return;
+    }
+    const headers: OutgoingHttpHeaders = { ...req.headers, host: target.host };
+    for (const name of ["proxy-authorization", "proxy-connection", "connection", "upgrade", ...(String(req.headers.connection ?? "").split(",").map(h => h.trim().toLowerCase()))]) delete headers[name];
+    const agent = new HttpAgent();
+    agent.createConnection = () => dial(target.hostname, port);
+    const upstream = httpRequest({
+      hostname: target.hostname, port, method: req.method, path: target.pathname + target.search,
+      headers, agent,
+    }, (reply) => {
+      res.writeHead(reply.statusCode ?? 502, reply.headers);
+      reply.on("error", () => res.destroy());
+      reply.pipe(res);
+    });
+    upstream.on("error", () => {
+      if (!res.headersSent) res.writeHead(502).end("egress upstream unavailable"); else res.destroy();
+    });
+    res.once("close", () => { upstream.destroy(); agent.destroy(); });
+    req.pipe(upstream);
+  });
+  http.on("connection", track);
+  http.on("upgrade", (_req, socket) => socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"));
+  http.on("connect", (req, client, head) => {
+    const deny = () => client.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+    // CONNECT is an authority, never a URL, path, credentials, or an ambiguous default port.
+    const authority = /^([a-z0-9.-]+):([0-9]+)$/i.exec(req.url ?? "");
+    if (!authority || !permits(authority[1], Number(authority[2]))) { deny(); return; }
+    const upstream = dial(authority[1], Number(authority[2]));
+    upstream.once("error", () => client.destroy());
+    client.once("error", () => upstream.destroy());
+    client.once("close", () => upstream.destroy());
+    upstream.once("close", () => client.destroy());
+    upstream.once("connect", () => {
+      client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (head.length) upstream.write(head);
+      client.pipe(upstream).pipe(client);
+    });
+  });
+  const socks = createTcpServer((client) => {
+    track(client);
+    client.on("error", () => client.destroy());
+    let buffer = Buffer.alloc(0);
+    let greeted = false;
+    const receive = (data: Buffer) => {
+      buffer = Buffer.concat([buffer, data]);
+      if (buffer.length > 65536) { client.destroy(); return; }
+      if (!greeted) {
+        if (buffer.length < 2 || buffer.length < 2 + buffer[1]) return;
+        const length = 2 + buffer[1];
+        if (buffer[0] !== 5 || !buffer.subarray(2, length).includes(0)) { client.end(Buffer.from([5, 255])); return; }
+        buffer = buffer.subarray(length);
+        greeted = true;
+        client.write(Buffer.from([5, 0]));
+      }
+      if (buffer.length < 4) return;
+      // IP-literal requests cannot prove an approved hostname; SOCKS DNS must stay at the broker.
+      if (buffer[0] !== 5 || buffer[1] !== 1 || buffer[2] !== 0 || buffer[3] !== 3) { client.end(SOCKS_REPLY(2)); return; }
+      if (buffer.length < 5 || buffer.length < 7 + buffer[4]) return;
+      const end = 5 + buffer[4];
+      const host = buffer.subarray(5, end).toString("ascii");
+      const port = buffer.readUInt16BE(end);
+      if (!/^[a-z0-9.-]+$/i.test(host) || !permits(host, port)) { client.end(SOCKS_REPLY(2)); return; }
+      client.removeListener("data", receive);
+      client.pause();
+      const head = buffer.subarray(end + 2);
+      const upstream = dial(host, port);
+      upstream.once("error", () => client.end(SOCKS_REPLY(5)));
+      upstream.once("close", () => { if (!client.writableEnded) client.destroy(); });
+      client.once("close", () => upstream.destroy());
+      upstream.once("connect", () => {
+        client.write(SOCKS_REPLY(0));
+        if (head.length) upstream.write(head);
+        client.pipe(upstream).pipe(client);
+        client.resume();
+      });
+    };
+    client.on("data", receive);
+  });
+  // Keep listener errors from becoming process-level exceptions after startup. A listener that
+  // fails cannot forward traffic; the next spawn's readiness check still has to succeed.
+  http.on("error", () => { for (const socket of sockets) socket.destroy(); });
+  socks.on("error", () => { for (const socket of sockets) socket.destroy(); });
+  const listen = (server: Server) => new Promise<number>((resolvePort, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.removeListener("error", reject);
+      resolvePort((server.address() as { port: number }).port);
+    });
+  });
+  const close = async () => {
+    for (const socket of sockets) socket.destroy();
+    await Promise.all([http, socks].map(server => new Promise<void>(done => server.close(() => done()))));
+  };
+  try {
+    const httpProxyPort = await listen(http);
+    const socksProxyPort = await listen(socks);
+    const verifyAllowed = async () => {
+      const canarySockets = new Set<Socket>();
+      const canary = createTcpServer(socket => {
+        canarySockets.add(socket);
+        socket.on("error", () => socket.destroy());
+        socket.pipe(socket);
+      });
+      try {
+        const port = await listen(canary);
+        const host = `${randomUUID()}.egress-control.invalid`;
+        const marker = randomUUID();
+        control = { host, port };
+        const header = "HTTP/1.1 200 Connection Established\r\n\r\n";
+        const httpReply = await egressReadinessExchange(httpProxyPort, `CONNECT ${host}:${port} HTTP/1.1\r\n\r\n${marker}`, header.length + marker.length);
+        if (httpReply.toString() !== header + marker) throw new WorkerEgressError("worker HTTP egress positive control failed");
+        const name = Buffer.from(host);
+        const socksReply = await egressReadinessExchange(socksProxyPort, Buffer.concat([
+          Buffer.from([5, 1, 0, 5, 1, 0, 3, name.length]), name, Buffer.from([port >> 8, port & 255]), Buffer.from(marker),
+        ]), 12 + marker.length);
+        if (!socksReply.subarray(0, 12).equals(Buffer.concat([Buffer.from([5, 0]), SOCKS_REPLY(0)])) || socksReply.subarray(12).toString() !== marker) {
+          throw new WorkerEgressError("worker SOCKS egress positive control failed");
+        }
+      } finally {
+        // This nonce route exists only while verifying, before any worker is released. Never
+        // leave a localhost exception or the canary listener in a running worker's policy.
+        control = undefined;
+        for (const socket of canarySockets) socket.destroy();
+        await new Promise<void>(done => canary.close(() => done()));
+      }
+    };
+    return { httpProxyPort, socksProxyPort, verifyAllowed, close };
+  } catch (error) {
+    await close();
+    throw new WorkerEgressError(`worker egress proxy startup failed: ${String(error)}`);
+  }
+}
+
+/** Exchange bytes through a real local listener, bounded so failed readiness cannot hang spawn. */
+function egressReadinessExchange(port: number, bytes: Buffer | string, length: number): Promise<Buffer> {
+  return new Promise<Buffer>((resolveReply, reject) => {
+    const socket = connectTcp(port, "127.0.0.1", () => socket.write(bytes));
+    let received = Buffer.alloc(0);
+    socket.setTimeout(EGRESS_READY_MS, () => socket.destroy(new WorkerEgressError("worker egress readiness timed out")));
+    socket.on("error", reject);
+    socket.on("data", chunk => { received = Buffer.concat([received, chunk]); if (received.length >= length) { resolveReply(received); socket.destroy(); } });
+    socket.on("end", () => { resolveReply(received); socket.destroy(); });
+  });
+}
+
+/** Both forwarding controls and refusals must succeed before a worker is released. */
+export async function verifyWorkerEgressProxy(proxy: WorkerEgressProxy): Promise<void> {
+  await proxy.verifyAllowed();
+  const http = await egressReadinessExchange(proxy.httpProxyPort, "CONNECT egress-readiness.invalid:443 HTTP/1.1\r\n\r\n", 12);
+  if (!http.toString().startsWith("HTTP/1.1 403")) throw new WorkerEgressError("worker HTTP egress refusal not established");
+  const name = Buffer.from("egress-readiness.invalid");
+  const socks = await egressReadinessExchange(proxy.socksProxyPort, Buffer.concat([Buffer.from([5, 1, 0, 5, 1, 0, 3, name.length]), name, Buffer.from([1, 187])]), 12);
+  if (socks[0] !== 5 || socks[1] !== 0 || socks[2] !== 5 || socks[3] !== 2) throw new WorkerEgressError("worker SOCKS egress refusal not established");
+}
+
+export interface WorkerEgressVersionDeps {
+  lockPath?: string;
+  sdkPackagePath?: string;
+}
+
+/** The SDK manifest names its bundled CLI explicitly. Verify that manifest belongs to the
+ * locked package, then compare the selected executable's actual version, freshly at every spawn.
+ * Never infer the CLI version from the SDK version or trust the settings template's comment. */
+export function assertWorkerEgressEnforcerVersion(bin: string, deps: WorkerEgressVersionDeps = {}): string {
+  let root = dirname(fileURLToPath(import.meta.url));
+  while (!existsSync(join(root, "package-lock.json")) && dirname(root) !== root) root = dirname(root);
+  const lock = JSON.parse(readFileSync(deps.lockPath ?? join(root, "package-lock.json"), "utf8"));
+  const pkgPath = deps.sdkPackagePath ?? join(dirname(createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk")), "package.json");
+  const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+  const locked = lock.packages?.["node_modules/@anthropic-ai/claude-agent-sdk"]?.version;
+  if (typeof locked !== "string" || pkg.version !== locked) throw new WorkerEgressError(`egress CLI metadata is not from the locked SDK: installed ${pkg.version}, locked ${locked}`);
+  if (typeof pkg.claudeCodeVersion !== "string" || !/^\d+\.\d+\.\d+$/.test(pkg.claudeCodeVersion)) throw new WorkerEgressError("locked SDK metadata does not name its CLI version");
+  let output: string;
+  try { output = execFileSync(bin, ["--version"], { encoding: "utf8", timeout: EGRESS_READY_MS, maxBuffer: 4096, stdio: ["ignore", "pipe", "pipe"] }); }
+  catch { throw new WorkerEgressError("worker egress enforcer version could not be measured"); }
+  const actual = /^(\d+\.\d+\.\d+) \(Claude Code\)\s*$/.exec(output.trim())?.[1];
+  if (actual === undefined || actual !== pkg.claudeCodeVersion) throw new WorkerEgressError(`worker egress enforcer version ${actual ?? "unrecognized"} differs from locked CLI ${pkg.claudeCodeVersion}`);
+  return actual;
 }
