@@ -19,6 +19,20 @@ import { loadPolicy, policyPath } from "../src/lib/policy.js";
 import { daemonCommand, buildMeasurementCadenceDaemonHooks, buildSuccessorAlertHandler } from "../src/run-task.js";
 import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import type { Config } from "../src/lib/config.js";
+import type { RuleSignature } from "../src/lib/rule-efficacy.js";
+
+/** W1-T4271 made the shipped ci.stalled rule ACTIVITY-shaped, so it can no longer reach REPEATING. These
+ *  cases measure the cadence's own arithmetic over a recurrence, so they grade the same rows against a
+ *  VIOLATION-shaped twin of that rule, keeping its id and date. */
+const STALL_VIOLATION_RULES: readonly RuleSignature[] = [{
+  ruleId: "CLAUDE.md#investigation-discipline:bound-fires-on-healthy-condition",
+  citation: "W1-T312, W1-T380/#1392, W1-T382/#1401",
+  description: "A bound that fires on a HEALTHY condition is this repo's recurring defect.",
+  measurable: true,
+  signatureKind: "VIOLATION",
+  effectiveDate: "2026-08-06",
+  stepPatterns: [/^ci\.stalled$/],
+}];
 
 // ── W1-T1259: the three verbs that would answer "is this system getting better" —
 // rule-efficacy, verdict-calibration, autonomy-rate — were merged, host-side, and reachable only
@@ -215,7 +229,7 @@ test("DEFAULT CADENCE (escalate: false) drafts NOTHING even over data that would
     writeRepeatingRuleFixture(stateDir);
     const registryPath = join(stateDir, "inbox-proposals.json");
 
-    const result = runMeasurementCadenceReport({ stateDir, cwd: REPO_ROOT, escalate: false, gitLog: NO_GIT, registryPath });
+    const result = runMeasurementCadenceReport({ stateDir, ruleSignatures: STALL_VIOLATION_RULES, cwd: REPO_ROOT, escalate: false, gitLog: NO_GIT, registryPath });
 
     assert.equal(result.ruleEfficacy.status, "measured", "the fixture must actually be measurable, or this proves nothing");
     assert.equal(result.ruleEfficacy.repeatingCount, 1, "the fixture's one REPEATING rule must be seen");
@@ -234,7 +248,7 @@ test("THE ESCALATING FORM, WHEN OPTED IN, ONLY EVER DRAFTS A PROPOSAL — never 
     writeRepeatingRuleFixture(stateDir);
     const registryPath = join(stateDir, "inbox-proposals.json");
 
-    const result = runMeasurementCadenceReport({ stateDir, cwd: REPO_ROOT, escalate: true, gitLog: NO_GIT, registryPath });
+    const result = runMeasurementCadenceReport({ stateDir, ruleSignatures: STALL_VIOLATION_RULES, cwd: REPO_ROOT, escalate: true, gitLog: NO_GIT, registryPath });
 
     assert.equal(result.ruleEfficacy.escalated, true);
     assert.equal(result.ruleEfficacy.escalatedProposalIds.length, 1);
@@ -263,10 +277,10 @@ test("re-running the escalating form is IDEMPOTENT — a rerun never duplicates 
     writeRepeatingRuleFixture(stateDir);
     const registryPath = join(stateDir, "inbox-proposals.json");
 
-    const first = runMeasurementCadenceReport({ stateDir, cwd: REPO_ROOT, escalate: true, gitLog: NO_GIT, registryPath });
+    const first = runMeasurementCadenceReport({ stateDir, ruleSignatures: STALL_VIOLATION_RULES, cwd: REPO_ROOT, escalate: true, gitLog: NO_GIT, registryPath });
     assert.equal(first.ruleEfficacy.escalatedProposalIds.length, 1);
 
-    const second = runMeasurementCadenceReport({ stateDir, cwd: REPO_ROOT, escalate: true, gitLog: NO_GIT, registryPath });
+    const second = runMeasurementCadenceReport({ stateDir, ruleSignatures: STALL_VIOLATION_RULES, cwd: REPO_ROOT, escalate: true, gitLog: NO_GIT, registryPath });
     assert.equal(second.ruleEfficacy.escalated, false, "the second run finds nothing NEW to draft");
     assert.deepEqual(second.ruleEfficacy.escalatedProposalIds, []);
   } finally {
