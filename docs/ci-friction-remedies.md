@@ -66,3 +66,15 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   merge base; adjust the proof text to be more specific or distinctive, or reword the claim
   to something your implementation genuinely changed, then verify the revised proof passes
   head-only before pushing.
+
+- `ci-friction:conflict:merge-conflict` — a pull request cannot be merged automatically
+  because the branch has diverged from main and git cannot resolve the conflicts in the
+  files being changed. This commonly occurs when multiple PRs modify the same file (such as
+  `plan/tasks.d/*.yaml`, `package.json`, `MASTER-PLAN.md`, or similar shared files) and
+  merge in an order that creates overlapping changes. To fix: fetch the latest main branch
+  locally, rebase your PR's branch onto the current main (`git fetch origin && git rebase
+  origin/main`), resolve any conflicts manually by editing the conflicting files, run the
+  tests to verify the resolution is correct, then force-push the rebased branch (`git push
+  --force-with-lease` or `git push -f`). If the conflict is in a plan file, coordinate with
+  other in-flight PRs to sequence merges carefully, or consider splitting the plan changes
+  into separate PRs to minimize collision surface.
