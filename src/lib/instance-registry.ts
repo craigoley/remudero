@@ -45,6 +45,9 @@ export type InstanceRegistryErrorCode =
   | "invalid_project"
   | "invalid_retired"
   | "invalid_mode"
+  | "invalid_primary"
+  | "duplicate_primary"
+  | "no_primary"
   | "duplicate_live_repo";
 
 /** A registry the parser refuses. `code` is stable for callers; `message` names the line/instance. */
@@ -74,6 +77,11 @@ export interface RegistryInstance {
    * request, never a direct write).
    */
   mode?: "shadow" | "live";
+  /**
+   * W1-T4527 — true on the one live instance that decides a release. Present only when the live row
+   * declares `primary:`; a retired row's `primary` is ignored (never carried here).
+   */
+  primary?: boolean;
 }
 
 export interface InstanceRegistry {
@@ -173,6 +181,11 @@ export function parseInstanceRegistry(text: string): InstanceRegistry {
     if (mode !== undefined && mode !== "shadow" && mode !== "live") {
       throw new InstanceRegistryError("invalid_mode", `instance '${row.name}' mode '${mode}' is not "shadow" or "live"`);
     }
+    // W1-T4527: a retired row's `primary` is ignored, so it is validated but never carried.
+    const primary = row.fields.get("primary");
+    if (primary !== undefined && primary !== "true" && primary !== "false") {
+      throw new InstanceRegistryError("invalid_primary", `instance '${row.name}' primary must be true or false`);
+    }
     // Preserve the shape of pre-mode registry rows as well as their live behavior. Callers
     // resolve an absent mode to live at the decision boundary.
     return {
@@ -181,6 +194,7 @@ export function parseInstanceRegistry(text: string): InstanceRegistry {
       repo: declared,
       live: retired !== "true",
       ...(mode === undefined ? {} : { mode }),
+      ...(primary === undefined || retired === "true" ? {} : { primary: primary === "true" }),
     };
   });
   const liveRepos = new Map<string, string>();
@@ -196,7 +210,33 @@ export function parseInstanceRegistry(text: string): InstanceRegistry {
     }
     liveRepos.set(key, instance.name);
   }
+  // W1-T4527: two primaries is refused here, never resolved by picking one. ZERO is refused by
+  // {@link requirePrimaryInstance}, not here: a registry that has not grown the field yet (the host's
+  // copy, a fixture) must still parse exactly as it always has.
+  primaryOf(instances);
   return { instances };
+}
+
+/** The live instance carrying `primary: true`, `undefined` for none; two is a named refusal. */
+function primaryOf(instances: readonly RegistryInstance[]): RegistryInstance | undefined {
+  const primaries = instances.filter((i) => i.live && i.primary === true);
+  if (primaries.length > 1) {
+    throw new InstanceRegistryError(
+      "duplicate_primary",
+      `instances ${primaries.map((i) => `'${i.name}'`).join(" and ")} are both primary`,
+    );
+  }
+  return primaries[0];
+}
+
+/**
+ * W1-T4527 — the one live instance carrying `primary: true`. Zero is a named `no_primary` refusal
+ * and two a `duplicate_primary` one, never a silent pick; a retired row is not a candidate.
+ */
+export function requirePrimaryInstance(registry: InstanceRegistry): RegistryInstance {
+  const primary = primaryOf(registry.instances);
+  if (primary === undefined) throw new InstanceRegistryError("no_primary", "no live instance carries 'primary: true'");
+  return primary;
 }
 
 export interface RegistryProjection {
