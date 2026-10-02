@@ -50,7 +50,8 @@ import {
   type DeployWorthJudge,
   type RecordedDeployRestartThreshold,
 } from "./deploy-judge.js";
-import { mintReleaseTag, type ReleaseChange, type ReleaseTagIo } from "./release-tags.js";
+import { clockFromMillisFn } from "./clock.js";
+import { mintReleaseTag,type ReleaseChange, type ReleaseTagIo } from "./release-tags.js";
 
 // ── Pure decisions ─────────────────────────────────────────────────────────────
 
@@ -1210,7 +1211,7 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
         releaseDecision = {
           total: pressure.total,
           threshold: pressure.threshold,
-          decidedAt: new Date(pressureNow).toISOString(),
+          decidedAt: clockFromMillisFn(() => pressureNow).iso(),
           changes: pressure.scoreRows.map((r) => ({ sha: r.sha, score: r.score, reason: r.reason })),
         };
       }
