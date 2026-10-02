@@ -1,0 +1,45 @@
+- id: W1-T5368
+  title: "A RULE-CHECKS FAILURE IS TITLED BY ITS GATE, NOT COMMITLINT — W1-T3720 titles a bundled check run by the gate that refused, but ci.yml still posts the commitlint check as the bare AND of commitlint and rule-checks, so a failing census or ratchet suite still shows as a red commitlint"
+  repo: remudero
+  depends_on: [W1-T3720]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: low
+  origin: "operator session 2026-10-02: daemon loop-stall diagnosis"
+  plan_refs: ["W1-T4399", "W1-T4433", "W1-T5351"]
+  files: [.github/workflows/ci.yml, test/a-rule-checks-failure-is-titled-by-its-gate-not-commitlint.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    In .github/workflows/ci.yml, the commitlint job's reporting step (W1-T4399) posts each required check run
+    from `continue-on-error` step outcomes. The `commitlint` check is posted as
+    `report "commitlint" "${OUTCOME_COMMITLINT}" "${OUTCOME_RULE_CHECKS}"`, the AND of the PR-title lint and the
+    `rule-checks` step (`node --import tsx scripts/list-rule-suites.mjs --run`, W1-T4433, the tree-derived
+    census and ratchet suites). test/the-rule-checks-run-first.test.ts pins that exact line.
+    W1-T3720 (#8747) adds scripts/bundled-gate-report.mjs. It titles a failing bundled check by each gate whose own
+    report says `<gate>: BLOCKED`, falling back to the failing step's id. It converts the
+    learnings-budget-ratchet, depcruise and comment-load-ratchet bundles to `<step-id>=<outcome>`
+    constituents with teed reports, but leaves the commitlint+rule-checks bundle bare. A bare outcome's id is
+    the check's own name, so a red rule-checks suite is still titled `commitlint`. Of all the bundles, this
+    one is the most misleading, because its two halves are unrelated: a PR title and the census suites.
+  design: |
+    1. Tee the rule-checks step's report to `$RUNNER_TEMP/gate-reports/rule-checks.log` under
+       `set -o pipefail`, the way W1-T3720 tees the comment-load steps, so the step's outcome is unchanged.
+    2. Post `report "commitlint" "commitlint=${OUTCOME_COMMITLINT}" "rule-checks=${OUTCOME_RULE_CHECKS}"`. The check
+       NAME stays `commitlint`, the required context. A failing rule-checks step is titled `rule-checks`, or by
+       the gates its report names BLOCKED.
+    3. Update the line test/the-rule-checks-run-first.test.ts pins to the new constituent form, so it still
+       asserts that rule-checks feeds the commitlint check. That file is outside `files:` because Rule 19
+       counts a second test as a second concern. The one-line edit is a ratified scope widening: record it
+       in the PR body.
+    This edits a workflow file. See W1-T5351 for how such a task is routed.
+  acceptance:
+    - claim: "the commitlint check run is posted from named commitlint and rule-checks constituents, the rule-checks step tees its report under pipefail, and a failing rule-checks constituent with a passing commitlint is titled rule-checks while the check name stays commitlint"
+      proof: "unit test: test/a-rule-checks-failure-is-titled-by-its-gate-not-commitlint.test.ts"
+  falsifier: |
+    Restore `report "commitlint" "${OUTCOME_COMMITLINT}" "${OUTCOME_RULE_CHECKS}"`. The suite runs
+    bundled-gate-report.mjs over the workflow's own constituents with rule-checks failing, and reads the
+    title `commitlint`.

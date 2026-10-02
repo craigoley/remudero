@@ -1,0 +1,44 @@
+- id: W1-T5367
+  title: "THE IMAGE-DRIFT WATCHDOG WATCHES THE WORKER SDK — deployer.ts counts a root-lockfile change as image drift only when the playwright-core pin moves, while W1-T5018 makes acr-build build an image when the worker SDK moves, so an SDK-only bump builds an image the deployer never recycles onto"
+  repo: remudero
+  depends_on: [W1-T5018]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: low
+  origin: "operator session 2026-10-02: daemon loop-stall diagnosis"
+  plan_refs: ["W1-T4061", "W1-T3240", "W1-T496"]
+  files: [src/lib/deployer.ts, test/the-image-drift-watchdog-watches-the-worker-sdk.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    src/lib/deployer.ts reads image drift from two signals. One is `bakedPathCommitsBehind` over
+    `IMAGE_BAKED_PATHS`. The other (W1-T4061) is the root lockfile, counted ONLY through
+    `playwrightCoreVersionCommitsBehind` and `newestPlaywrightVersionChangeSha`, which read the
+    `node_modules/playwright-core` entry. `imageBakedCommitsBehind` sums the two, and `newestBakedSha`
+    picks the nearer of the two to name the image input whose tag `imagePublished` looks up.
+    W1-T5018 (#8748) widens acr-build.yml's "Decide whether this push needs a new image" guard. It also
+    builds when `packages['node_modules/@anthropic-ai/claude-agent-sdk']`'s version or integrity changes,
+    or that entry is added or removed, because the image's `/app` install bakes that SDK. Once that
+    lands, an SDK-only bump produces a tagged image while the deployer reads zero drift. So the fleet
+    keeps running the old SDK until some other baked change happens to recycle it, which is exactly the gap
+    W1-T5018 exists to close.
+  design: |
+    Mirror the workflow guard's field in the deployer, so the two never disagree about which lockfile
+    change is an image input:
+    1. Add an extractor for the worker SDK entry's version+integrity, with the same lockfile key the
+       workflow reads, and a `workerSdkChanged(old, new)` that counts an added or removed entry as a change.
+       It never throws. An unparseable side reads as unknown, keeping `playwrightCoreVersionChanged`'s
+       fail-closed rule.
+    2. Count it in `imageBakedCommitsBehind` beside the playwright signal, UNKNOWN only when every signal is.
+    3. Teach the newest-input walk (`newestPlaywrightVersionChangeSha`, or a generalised sibling) to
+       stop at a commit that moved EITHER field, so `newestBakedSha` names the sha acr-build.yml tagged.
+    Unrelated lockfile churn still counts as zero.
+  acceptance:
+    - claim: "a worker-SDK-only lockfile change between the image's build sha and origin/main counts as image drift and names that commit as the newest image input, unrelated lockfile churn counts as none, and an unreadable lockfile side stays unknown rather than zero"
+      proof: "unit test: test/the-image-drift-watchdog-watches-the-worker-sdk.test.ts"
+  falsifier: |
+    Remove the worker SDK signal. The suite's fixture history, whose last lockfile commit changes only the
+    SDK's version and integrity, then reads zero commits behind and names the older playwright commit.
