@@ -44,6 +44,11 @@ name: Build image (ACR)
 # IMAGE_BAKED_PATHS is watched would rebuild about a dozen times a month for nothing, so the
 # "Decide whether this push needs a new image" step below runs FIRST and skips the actual build
 # (success, no-op) unless it can prove THIS push moved the playwright-core pin.
+#
+# W1-T5018 — the same guard ALSO builds when THIS push moved the worker SDK
+# (`node_modules/@anthropic-ai/claude-agent-sdk`'s resolved version or integrity, or its entry
+# appearing/disappearing): the image's `/app` `npm ci` installs that SDK from the root lockfile,
+# so an SDK-only bump would otherwise leave the running fleet behind the tested code.
 
 on:
   push:
@@ -128,6 +133,10 @@ jobs:
       #     .version` differs between `before` and this push's head — the SAME field
       #     `deploy/Dockerfile` resolves PW_VERSION from (REQ 15). Either side failing to parse
       #     reads as "build": unknown must never silently skip a real drift.
+      #     W1-T5018: OR iff `packages['node_modules/@anthropic-ai/claude-agent-sdk']`'s
+      #     version+integrity differs (including the entry being added or removed) — the worker
+      #     SDK the image's `/app` install bakes from this same lockfile.
+      #     test/acr-build-sdk-trigger.test.ts executes this step's script against real commits.
       - name: Decide whether this push needs a new image
         id: image_guard
         if: github.event_name == 'push'
@@ -145,18 +154,27 @@ jobs:
             done
             if [ "${OTHER_BAKED}" = "false" ]; then
               if printf '%s\n' "${CHANGED}" | grep -qxF "package-lock.json"; then
-                git show "${BEFORE_SHA}:package-lock.json" > /tmp/old-lock.json 2>/dev/null || echo '{}' > /tmp/old-lock.json
-                git show "${AFTER_SHA}:package-lock.json" > /tmp/new-lock.json 2>/dev/null || echo '{}' > /tmp/new-lock.json
+                LOCK_DIR="$(mktemp -d)"
+                git show "${BEFORE_SHA}:package-lock.json" > "${LOCK_DIR}/old-lock.json" 2>/dev/null || echo '{}' > "${LOCK_DIR}/old-lock.json"
+                git show "${AFTER_SHA}:package-lock.json" > "${LOCK_DIR}/new-lock.json" 2>/dev/null || echo '{}' > "${LOCK_DIR}/new-lock.json"
                 BUILD="$(node -e '
                   const fs = require("fs");
                   const read = (p) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return {}; } };
                   const version = (doc) => doc.packages && doc.packages["node_modules/playwright-core"]
                     ? doc.packages["node_modules/playwright-core"].version
                     : undefined;
-                  const oldVersion = version(read("/tmp/old-lock.json"));
-                  const newVersion = version(read("/tmp/new-lock.json"));
-                  console.log(oldVersion === undefined || newVersion === undefined || oldVersion !== newVersion ? "true" : "false");
-                ')"
+                  const sdk = (doc) => doc.packages && doc.packages["node_modules/@anthropic-ai/claude-agent-sdk"]
+                    ? JSON.stringify([doc.packages["node_modules/@anthropic-ai/claude-agent-sdk"].version, doc.packages["node_modules/@anthropic-ai/claude-agent-sdk"].integrity])
+                    : undefined;
+                  const oldDoc = read(process.argv[1]);
+                  const newDoc = read(process.argv[2]);
+                  const oldVersion = version(oldDoc);
+                  const newVersion = version(newDoc);
+                  const playwrightMoved = oldVersion === undefined || newVersion === undefined || oldVersion !== newVersion;
+                  const sdkMoved = sdk(oldDoc) !== sdk(newDoc);
+                  console.log(playwrightMoved || sdkMoved ? "true" : "false");
+                ' "${LOCK_DIR}/old-lock.json" "${LOCK_DIR}/new-lock.json")"
+                rm -rf "${LOCK_DIR}"
               else
                 # The push filter fired but this push touched none of the watched paths at all —
                 # should not happen given the `paths:` filter above, but skip rather than guess.
@@ -252,14 +270,16 @@ jobs:
             echo "- **Deployed:** nothing. This workflow builds only."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # W1-T4061 — the mirror summary: this push touched only the root lockfile and the pinned
-      # playwright-core version did not move, so the guard above skipped the build on purpose.
+      # W1-T4061 — the mirror summary: this push touched only the root lockfile and neither the
+      # pinned playwright-core version nor (W1-T5018) the worker SDK moved, so the guard above
+      # skipped the build on purpose.
       - name: Write skip summary
         if: github.event_name == 'push' && steps.image_guard.outputs.build == 'false'
         run: |
           {
             echo "### Image build skipped"
             echo ""
-            echo "This push only changed \`package-lock.json\` and did not move the pinned"
-            echo "\`playwright-core\` version, so no image input changed (W1-T4061)."
+            echo "This push only changed \`package-lock.json\` and moved neither the pinned"
+            echo "\`playwright-core\` version (W1-T4061) nor the worker SDK"
+            echo "\`@anthropic-ai/claude-agent-sdk\` (W1-T5018), so no image input changed."
           } >> "$GITHUB_STEP_SUMMARY"
