@@ -536,7 +536,7 @@ export type ReservationHolderBranchPresence = "present" | "absent" | "unreadable
 /**
  * W1-T5279: every filer reserves BEFORE it pushes its branch, so an absent branch on a fresh
  * reservation is a filer mid-flight, not an abandoned one (W1-T5209 was taken over 21s after it
- * was reserved). Sized from refs/rmd-id/W1-T5000..W1-T5299 against each holder branch's first PR
+ * was reserved). Sized from the reservation refs numbered 5000-5299 against each holder branch's first PR
  * open (2026-10-02): of 171 reservations, 167 opened within 30 min and 168 within 2 h; p50 34s.
  */
 export const RESERVATION_PUSH_GRACE_MS = 2 * 60 * 60 * 1000;
