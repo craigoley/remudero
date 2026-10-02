@@ -67,6 +67,12 @@ test("hand-fix collector runs the real git and gh defaults and persists the merg
     const result = readCiFrictionHandFixes(repo, state, "owner", "repo", clock);
     assert.equal(result.state, "observed"); assert.deepEqual(result.fixes, [fix]);
     assert.equal(JSON.parse(readFileSync(join(state, "ci-friction-hand-fixes.json"), "utf8")).asOf, clock.iso());
+    const reused = readCiFrictionHandFixes(repo, state, "owner", "repo", clock, () => { throw new Error("fresh cache must not read GitHub"); });
+    assert.equal(reused.state, "observed");
+    assert.deepEqual(reused.fixes, [fix]);
+    const later = readCiFrictionHandFixes(repo, state, "owner", "repo", fixedClock(clock.now() + 600_001),
+      (command) => { if (command === "git") throw new Error("known merge must reuse its files"); return JSON.stringify([row]); });
+    assert.equal(later.state, "observed");
   } finally { process.env.PATH = priorPath; fixture.cleanup(); rmSync(root, { recursive: true, force: true }); if (shimDir) rmSync(shimDir, { recursive: true, force: true }); }
 });
 

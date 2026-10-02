@@ -7,6 +7,7 @@ import type { Escalation } from "./escalate.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
 import { gardenLedgerBucket } from "./gardener.js";
 import { writeAtomic } from "./fs-race-safe.js";
+import { ghExec } from "./github-transport.js";
 import { gateFireRatesPath, type GateFireRateReport } from "./gate-fire-rate.js";
 import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { loadPlanFromYaml } from "./plan.js";
@@ -45,16 +46,23 @@ import type { LedgerRecord } from "./retro.js";
 export type CiFrictionCauseKind = "check" | "main_merge" | "conflict" | "fix_refusal" | "hand_fix";
 
 export type CiFrictionHandFix = { pr: number; at: string; files: string[] };
-export type CiFrictionHandFixRead = { state: "observed"; fixes: CiFrictionHandFix[] } | { state: "unmeasured"; reason: string; fixes: CiFrictionHandFix[] };
+export type CiFrictionHandFixRead = { state: "observed"; fixes: CiFrictionHandFix[]; asOf?: string; source?: "cache" | "api" } | { state: "unmeasured"; reason: string; fixes: CiFrictionHandFix[] };
 
 /** Collect one paginated list per pass; source changes come from local merge commits, not N PR API reads. */
 export function readCiFrictionHandFixes(
   repoRoot: string, stateDir: string, owner: string, repo: string, clock: Clock = systemClock,
-  run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { cwd: repoRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }),
+  run: (command: string, args: string[]) => string = (command, args) => command === "gh" ? ghExec(args, { cwd: repoRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }) : execFileSync(command, args, { cwd: repoRoot, encoding: "utf8", timeout: 60_000, maxBuffer: 64 * 1024 * 1024 }),
 ): CiFrictionHandFixRead {
   const since = clock.now() - 14 * 86_400_000;
   const fixes = new Map<number, CiFrictionHandFix>();
   try {
+    const path = join(stateDir, "ci-friction-hand-fixes.json");
+    const cached = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : undefined;
+    if (cached?.repository === `${owner}/${repo}` && cached.state === "observed" && Array.isArray(cached.fixes) &&
+      cached.fixes.every((fix: CiFrictionHandFix) => Number.isSafeInteger(fix.pr) && Number.isFinite(Date.parse(fix.at)) && Array.isArray(fix.files) && fix.files.every((file) => /^(src|scripts)\/[\w./-]+$/.test(file) && !file.split("/").includes(".."))) &&
+      clock.now() >= Date.parse(cached.asOf) && clock.now() - Date.parse(cached.asOf) < 600_000)
+      return { state: "observed", fixes: cached.fixes.filter((fix: CiFrictionHandFix) => Date.parse(fix.at) >= since), asOf: cached.asOf, source: "cache" };
+    const byPr: Record<string, { sha: string; files: string[] }> = {};
     for (let page = 1; ; page++) {
       const rows = JSON.parse(run("gh", ["api", `repos/${owner}/${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=${page}`]));
       if (!Array.isArray(rows)) throw new Error("hand-fix PR list is not an array");
@@ -65,14 +73,17 @@ export function readCiFrictionHandFixes(
         const at = Date.parse(row.merged_at); // expiring-fixture: exempt -- tests inject Clock and exercise both window boundaries
         if (!Number.isFinite(at) || at < since || at > clock.now()) continue;
         if (!/^[0-9a-f]{40}$/.test(row.merge_commit_sha ?? "")) throw new Error(`hand-fix PR #${row.number} has no merge commit`);
-        const files = run("git", ["diff-tree", "--no-commit-id", "--name-only", "-r", row.merge_commit_sha])
-          .trim().split("\n").filter((file) => /^(src|scripts)\/[\w./-]+$/.test(file) && !file.split("/").includes(".."));
+        const prior = cached?.repository === `${owner}/${repo}` ? cached.byPr?.[row.number] : undefined;
+        const files: string[] = prior?.sha === row.merge_commit_sha && Array.isArray(prior.files) && prior.files.every((file: unknown) => typeof file === "string" && /^(src|scripts)\/[\w./-]+$/.test(file) && !file.split("/").includes("..")) ? prior.files :
+          run("git", ["diff-tree", "--no-commit-id", "--name-only", "-r", row.merge_commit_sha])
+            .trim().split("\n").filter((file) => /^(src|scripts)\/[\w./-]+$/.test(file) && !file.split("/").includes(".."));
+        byPr[row.number] = { sha: row.merge_commit_sha, files: [...new Set<string>(files)] };
         fixes.set(row.number, { pr: row.number, at: row.merged_at, files: [...new Set(files)] });
       }
       if (rows.length < 100 || Date.parse(rows.at(-1).updated_at) < since) break;
     }
-    const result: CiFrictionHandFixRead = { state: "observed", fixes: [...fixes.values()].sort((a, b) => a.pr - b.pr) };
-    writeAtomic(join(stateDir, "ci-friction-hand-fixes.json"), JSON.stringify({ ...result, asOf: clock.iso(), byPr: Object.fromEntries(fixes) }) + "\n");
+    const result: CiFrictionHandFixRead = { state: "observed", fixes: [...fixes.values()].sort((a, b) => a.pr - b.pr), asOf: clock.iso(), source: "api" };
+    writeAtomic(path, JSON.stringify({ ...result, repository: `${owner}/${repo}`, byPr }) + "\n");
     return result;
   } catch (error) {
     return { state: "unmeasured", reason: String((error as Error)?.message ?? error), fixes: [] };
