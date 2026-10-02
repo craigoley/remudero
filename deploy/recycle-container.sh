@@ -79,6 +79,12 @@
 #   RMD_RECYCLE_WAIT_S=300 ./deploy/recycle-container.sh      # widen the bounded wait for workers
 #   ./deploy/recycle-container.sh --first-boot                # RMD_STATE_DIR is a genuinely fresh
 #                                                               # host with no checkout yet (W1-T2555)
+#
+#   OVER SSH, RUN IT DETACHED (W1-T5281) — the wait can last up to RMD_RECYCLE_WAIT_S, longer than a
+#   session reliably survives, and a dropped session HUPs the script mid-recycle:
+#     setsid nohup ./deploy/recycle-container.sh --instance core > ~/recycle-$(date -u +%Y%m%dT%H%MZ).log 2>&1 < /dev/null &
+#   A signal before the old container is stopped removes this run's own PAUSE and exits non-zero; one
+#   after `docker stop` leaves PAUSE engaged, because no replacement is running yet.
 
 set -euo pipefail
 
@@ -1086,6 +1092,50 @@ echo "recycle-container: pulled image id ${PULLED_IMAGE_ID}"
 # crashed earlier recycle's leftover) is superseded, as before. The recycle's own pause is one JSON
 # line whose `reason` names deploy/recycle-container.sh: that is what marks it as the recycle's, and what
 # the drain's pause-reason reader (W1-T5127) keys on, so the reason text must not change.
+# Remove the PAUSE only if it is still the exact one this run wrote. $1 is the log line for a removal.
+clear_own_pause() {
+  if [ -n "${RECYCLE_PAUSE_BODY}" ] && [ -f "${PAUSE_FILE}" ] && [ "$(cat "${PAUSE_FILE}" 2>/dev/null)" = "${RECYCLE_PAUSE_BODY}" ]; then
+    rm -f "${PAUSE_FILE}"
+    echo "$1"
+  else
+    echo "recycle-container: PAUSE not removed — this recycle did not write the one on disk" >&2
+  fi
+}
+
+# W1-T5281: A RECYCLE THAT DIES BEFORE IT STOPS THE CONTAINER TAKES ITS PAUSE WITH IT. MEASURED
+# 2026-10-02: the 14:00Z core recycle, started over SSH, wrote this PAUSE at 14:00:56Z and was still in
+# the wait below when the session dropped at 14:26:55Z. The HUP killed it; the only trap was the EXIT
+# temp-file cleanup, so the PAUSE stayed and held every sweep — no review, no dispatch — until an
+# operator re-ran the recycle detached at 14:29Z. A refusal already takes the pause off on the way out
+# (section 5's timeout, the smoke's failure); a signal is one more way out of the same phase.
+#
+# SO WHILE NOTHING HAS BEEN STOPPED, HUP/INT/TERM REMOVE THE PAUSE through clear_own_pause — the
+# W1-T4197 guard, so only the exact body this run wrote ever goes, never an operator's hold — and exit
+# non-zero with a line naming the signal. ONCE `docker stop` HAS BEEN ISSUED (section 6 flips the phase
+# just before it), a signal leaves PAUSE engaged: the old container may already be down and no
+# replacement is running, the same reason a failed or timed-out stop leaves it (run_docker_control).
+# These are SEPARATE traps from the EXIT one, and the handler leaves through `exit`, so
+# recycle_cleanup_tmp still runs exactly as before. Installed BEFORE the PAUSE is written, so no
+# signal can land between the write and the guard; clear_own_pause is a no-op until a body exists.
+# `set +e` first: over a dropped SSH session the terminal is gone and an `echo` can fail, which must
+# never abort the handler before the removal or the exit status.
+RECYCLE_SIGNAL_PHASE="waiting"
+recycle_on_signal() {
+  local sig="$1" status="$2"
+  set +e
+  trap - HUP INT TERM
+  if [ "${RECYCLE_SIGNAL_PHASE}" = "waiting" ]; then
+    clear_own_pause "recycle-container: pause removed — a recycle that dies before stopping ${CONTAINER_NAME} must not leave the fleet paused"
+    echo "recycle-container: ABORTED by SIG${sig} before ${CONTAINER_NAME} was stopped — it is untouched and still running. Re-run detached (nohup/setsid) if this was an SSH session." >&2
+  else
+    echo "recycle-container: ABORTED by SIG${sig} after docker stop ${CONTAINER_NAME} — PAUSE (if still on disk) is left engaged because no replacement is confirmed running; re-run the recycle to finish." >&2
+  fi
+  exit "${status}"
+}
+trap 'recycle_on_signal HUP 129' HUP
+trap 'recycle_on_signal INT 130' INT
+trap 'recycle_on_signal TERM 143' TERM
+
 mkdir -p "$(dirname "${PAUSE_FILE}")"
 # A human reason may mention this script while investigating it. Only the exact reason field
 # emitted by a prior recycle identifies a stale recycle PAUSE; an unreadable or differently
@@ -1097,16 +1147,6 @@ else
   printf '%s\n' "${RECYCLE_PAUSE_BODY}" > "${PAUSE_FILE}"
   echo "recycle-container: PAUSE engaged — new dispatch halts, in-flight work is allowed to finish"
 fi
-
-# Remove the PAUSE only if it is still the exact one this run wrote. $1 is the log line for a removal.
-clear_own_pause() {
-  if [ -n "${RECYCLE_PAUSE_BODY}" ] && [ -f "${PAUSE_FILE}" ] && [ "$(cat "${PAUSE_FILE}" 2>/dev/null)" = "${RECYCLE_PAUSE_BODY}" ]; then
-    rm -f "${PAUSE_FILE}"
-    echo "$1"
-  else
-    echo "recycle-container: PAUSE not removed — this recycle did not write the one on disk" >&2
-  fi
-}
 
 # THE LOCK COUNT ALONE IS BLIND TO A WHOLE LANE, IN BOTH DIRECTIONS (W1-T1046).
 #
@@ -1475,6 +1515,8 @@ echo "recycle-container: worker smoke PASSED — ${SMOKE_LINE:-exit 0}"
 # mount, so a pause left in place would make it come up paused with no dispatch — this marker is a
 # file in shared state, not process state, and the new container has no memory of who set it.
 if [ "${CONTAINER_EXISTS}" -eq 1 ]; then
+  # W1-T5281: from here a signal leaves PAUSE engaged — the stop may land even if this script does not.
+  RECYCLE_SIGNAL_PHASE="stopping"
   echo "recycle-container: docker stop ${CONTAINER_NAME}"
   run_docker_control stop docker stop "${CONTAINER_NAME}"
   echo "recycle-container: docker rm ${CONTAINER_NAME}"
