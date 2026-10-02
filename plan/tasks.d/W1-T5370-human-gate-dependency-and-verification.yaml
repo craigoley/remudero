@@ -1,0 +1,42 @@
+- id: W1-T5370
+  title: "Project dependency and verification asks only when the source genuinely needs a person"
+  repo: remudero
+  depends_on: [W1-T5332]
+  priority: 2
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "2026-10-02 operator approved the human-gate implementation follow-ups"
+  plan_refs: [W1-T5021, W1-T3188]
+  files: [src/lib/human-gate.ts, src/lib/now-view.ts, src/lib/verify-human-judge.ts, test/human-gate-dependency-verification.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at aa981fe0c9bd37cb77246eec9609496826bcdf25: W1-T5021's shipped
+    design separates dependency escalations, held roots and judge-ruled verification
+    from ordinary machine work. A raw verifyHumanPending count is not that ruling.
+  design: |
+    Add dependency_review, held_root and verify_human source adapters to the shared
+    projector. Read the current producer contracts first. Open MANUAL dependency
+    escalations become an ask; MIGRATE and a still-repairable HOLD do not. Reuse the
+    existing bounded-age escalation producer rather than inventing a second hold timer.
+    A held dependency root has one gate only while it has live stalled dependents; expose
+    that impact in its reason and source link. Project verify-human only from the current
+    judge's genuine-human ruling. An automatable verdict stays fleet-owned. Missing or
+    unreadable judgment is an explicitly unclassified backlog/source gap, not 110 invented
+    approvals and not a verified zero. Carry repo and instance identity through deduplication.
+    Resolution uses existing approval, release, retirement or verification authority;
+    this read-only adapter grants none of it and adds no PR or dispatch gate.
+  acceptance:
+    - claim: "dependency migration and machine repair cannot create human decisions"
+      proof: 'grep: migration and repairable dependency holds create no human gate in test/human-gate-dependency-verification.test.ts'
+    - claim: "the verification judge distinguishes automation from a real human ask"
+      proof: 'grep: judge-cleared verification stays fleet-owned and unknown stays explicit in test/human-gate-dependency-verification.test.ts'
+    - claim: "a held root surfaces its real impact without multiplying decisions"
+      proof: 'grep: a held root has one gate only while live dependents remain stalled in test/human-gate-dependency-verification.test.ts'
+  falsifier: |
+    Turn a raw verifyHumanPending flag into an approval, hide an unreadable judge as zero,
+    or count a MIGRATE result as a human ask: the corresponding fixture fails.
