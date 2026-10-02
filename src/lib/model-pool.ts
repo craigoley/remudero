@@ -176,15 +176,24 @@ export function readRoutingPoolSnapshot(root: string): RoutingPoolSnapshot {
   return parseRoutingPoolSnapshot(raw);
 }
 
-class PoolShapeError extends Error {}
+const POOL_SHAPE_TAG = Symbol("routing-pool-shape-error");
+
+/** A shape violation: a plain tagged `Error`, so it needs no direct-`Error` subclass of its own. */
+function PoolShapeError(message: string): Error {
+  return Object.assign(new Error(message), { [POOL_SHAPE_TAG]: true });
+}
+
+function isPoolShapeError(error: unknown): error is Error {
+  return error instanceof Error && (error as unknown as Record<symbol, unknown>)[POOL_SHAPE_TAG] === true;
+}
 
 function record(value: unknown, where: string): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new PoolShapeError(`${where} is not an object`);
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw PoolShapeError(`${where} is not an object`);
   return value as Record<string, unknown>;
 }
 
 function label(value: unknown, where: string): string {
-  if (typeof value !== "string" || !/^[A-Za-z0-9._:#/@+-]{1,128}$/.test(value)) throw new PoolShapeError(`${where} is not a label`);
+  if (typeof value !== "string" || !/^[A-Za-z0-9._:#/@+-]{1,128}$/.test(value)) throw PoolShapeError(`${where} is not a label`);
   return value;
 }
 
@@ -194,18 +203,18 @@ function nullableLabel(value: unknown, where: string): string | null {
 
 function instant(value: unknown, where: string): string | null {
   if (value === null || value === undefined) return null;
-  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) throw new PoolShapeError(`${where} is not a timestamp`);
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) throw PoolShapeError(`${where} is not a timestamp`);
   return value;
 }
 
 function measured(value: unknown, where: string): number | null {
   if (value === null || value === undefined) return null;
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new PoolShapeError(`${where} is not a measurement`);
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw PoolShapeError(`${where} is not a measurement`);
   return value;
 }
 
 function count(value: unknown, where: string): number {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) throw new PoolShapeError(`${where} is not a count`);
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) throw PoolShapeError(`${where} is not a count`);
   return value;
 }
 
@@ -218,11 +227,11 @@ function parseCandidate(value: unknown, where: string): RoutingPoolCandidate {
   const raw = record(value, where);
   const readiness = raw.readiness;
   if (!ROUTING_POOL_READINESS_STATES.includes(readiness as RoutingPoolReadiness)) {
-    throw new PoolShapeError(`${where}.readiness is not one of ${ROUTING_POOL_READINESS_STATES.join("|")}`);
+    throw PoolShapeError(`${where}.readiness is not one of ${ROUTING_POOL_READINESS_STATES.join("|")}`);
   }
   const aggregates = record(raw.aggregates ?? {}, `${where}.aggregates`);
   const capabilities = raw.capabilities ?? [];
-  if (!Array.isArray(capabilities)) throw new PoolShapeError(`${where}.capabilities is not a list`);
+  if (!Array.isArray(capabilities)) throw PoolShapeError(`${where}.capabilities is not a list`);
   return {
     id: label(raw.id, `${where}.id`),
     provider: label(raw.provider, `${where}.provider`),
@@ -249,7 +258,7 @@ function parseCandidate(value: unknown, where: string): RoutingPoolCandidate {
 function parsePool(value: unknown, where: string): RoutingPoolRecord {
   const raw = record(value, where);
   const baseline = record(raw.baseline, `${where}.baseline`);
-  if (!Array.isArray(raw.candidates)) throw new PoolShapeError(`${where}.candidates is not a list`);
+  if (!Array.isArray(raw.candidates)) throw PoolShapeError(`${where}.candidates is not a list`);
   return {
     taskClass: label(raw.taskClass, `${where}.taskClass`),
     capabilityTier: label(raw.capabilityTier, `${where}.capabilityTier`),
@@ -269,7 +278,7 @@ export function parseRoutingPoolSnapshot(value: unknown): RoutingPoolSnapshot {
   try {
     const raw = record(value, "pool");
     if (raw.version !== ROUTING_POOL_VERSION) return unavailableRoutingPool(`routing-pool-version-unsupported:${String(raw.version)}`);
-    if (!Array.isArray(raw.pools)) throw new PoolShapeError("pool.pools is not a list");
+    if (!Array.isArray(raw.pools)) throw PoolShapeError("pool.pools is not a list");
     return {
       version: ROUTING_POOL_VERSION,
       state: "observed",
@@ -278,7 +287,7 @@ export function parseRoutingPoolSnapshot(value: unknown): RoutingPoolSnapshot {
       pools: raw.pools.map((entry, index) => parsePool(entry, `pool.pools[${index}]`)),
     };
   } catch (error) {
-    if (error instanceof PoolShapeError) return unavailableRoutingPool(`routing-pool-invalid: ${error.message}`);
+    if (isPoolShapeError(error)) return unavailableRoutingPool(`routing-pool-invalid: ${error.message}`);
     throw error;
   }
 }
