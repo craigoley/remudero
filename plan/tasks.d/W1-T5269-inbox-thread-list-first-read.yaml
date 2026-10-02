@@ -1,4 +1,4 @@
-- id: W1-T100001
+- id: W1-T5269
   title: "The Inbox cannot show conversations while its first list read waits for a fleet-wide classification pass — serve a source-qualified thread-list projection outside the request path"
   repo: remudero
   depends_on: []
@@ -7,7 +7,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 20.00
-  risk: medium
+  risk: high
   origin: "2026-10-02 operator Inbox usability report and live re-check"
   plan_refs: ["W1-T5049", "W1-T4261"]
   files:
@@ -40,6 +40,8 @@
     The existing five-second console timeout is a compatibility observation, not a new PR gate.
     Failure of this read projection must not block unrelated PR flow or mutate routing.
   acceptance:
+    - claim: "the production thread-list route consumes the maintained projection"
+      proof: 'grep: readInboxThreadListView( in src/lib/panel-graph.ts'
     - claim: "a first thread-list read does not await a deliberately blocked classifier"
       proof: 'grep: first thread-list read does not await a blocked classifier in test/inbox-thread-list-view.test.ts'
     - claim: "missing or incomplete source evidence cannot become a verified empty inbox"
@@ -53,7 +55,7 @@
     test cannot return. Return {threads: []} on source failure: the evidence test rejects it.
     Use build time as source time or omit reply/read invalidation: the remaining tests fail.
   note: |
-    Reserved on refs/rmd-id/W1-T100001 for codex/inbox-thread-list-budget-plan. No live run branch
+    Reserved on refs/rmd-id/W1-T5269 for codex/inbox-thread-list-budget-plan. No live run branch
     or exact merged task credit was found (99 merged PRs were the corpus control). Subject counts
     on main and six fetched open PR heads were zero for this list projection; W1-T5049 was present
     once on every tree as the positive control. This is a plan-only filing, not implementation credit.
