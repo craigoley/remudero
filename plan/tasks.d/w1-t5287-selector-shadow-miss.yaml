@@ -5,7 +5,9 @@
   type: implement
   verify: human
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=0140d95b35f086e4
   attempts: 0
   author_class: machine
   origin: "selector-shadow-miss:test/dependency-declarations-match-use.test.ts"
