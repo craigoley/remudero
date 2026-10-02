@@ -35,6 +35,7 @@ test("W1-T4684: a goal is re-measured when its last task settles", async () => {
     assert.equal(settled[0]!.baseline, 10);
     assert.equal(settled[0]!.pricedUsd, 1);
     assert.equal(settled[0]!.unpricedRows, 1);
+    assert.equal(settled[0]!.costComplete, false);
     assert.deepEqual(await remeasureSettledGoals({ ...input, settled: () => true }), [], "same task set is measured once");
     assert.equal(emitted.length, 1);
   } finally { rmSync(fixture.dir, { recursive: true, force: true }); }
@@ -142,5 +143,18 @@ test("goal projection and checkpoint resume retain only validated latest receipt
     assert.equal(JSON.parse(body).version, "goals-v1");
     const gather = buildGather({ ledgerNdjson: [{ ...emitted[0], step: "goal.unmoved" }, emitted[0]].map(r => JSON.stringify(r)).join("\n"), learningsMd: "" });
     assert.equal(gather.unmovedGoals!.length, 0, "a later moved receipt clears the retro candidate");
+  } finally { rmSync(fixture.dir, { recursive: true, force: true }); }
+});
+
+
+test("future goal receipts cannot establish movement or complete cost", async () => {
+  const fixture = writeLedger([...rows, { ...rows[1], ts: "2026-10-03T12:00:00Z" }]);
+  try {
+    const output = await remeasureSettledGoals({ repoRoot: fixture.dir, stateDir: fixture.dir, tasks, goals: [goal],
+      clock, settled: () => true, log: () => {} });
+    assert.equal(output[0]!.step, "goal.unmeasured");
+    assert.equal(output[0]!.value, null);
+    assert.match(output[0]!.reason!, /future-timestamp/);
+    assert.equal(output[0]!.costComplete, false);
   } finally { rmSync(fixture.dir, { recursive: true, force: true }); }
 });
