@@ -33,6 +33,7 @@ const mod = (await import(pathToFileURL(SCRIPT).href)) as {
   loadContractManifest: (root: string, manifestPath?: string) => { manifest: Manifest; fixtures: Corpus; openapi: Record<string, unknown> };
   contractVocabularyDigest: (manifest: unknown) => string;
   classifyContractChange: (previous: unknown, next: unknown) => { breaking: string[]; nonBreaking: string[] };
+  validateCheckedInContract: (root: string, manifestPath?: string) => Validation & { manifest: string };
 };
 
 const loaded = mod.loadContractManifest(ROOT, MANIFEST_PATH);
@@ -176,6 +177,59 @@ test("an additive optional field is non-breaking: allowed as a new version witho
   const sameVersion = clone(loaded.manifest);
   addOptional(sameVersion);
   assert.ok(codes(mod.validateContractManifest(sameVersion)).includes("breaking-change-without-version"), "a published vocabulary is frozen");
+});
+
+test("a manifest that is not a JSON object, or whose schemaVersion is not <manifest>-v<N>, is refused", () => {
+  const notObject = mod.validateContractManifest(null);
+  assert.equal(notObject.ok, false);
+  assert.deepEqual(codes(notObject), ["missing-required-field"]);
+  assert.match(notObject.errors[0]?.detail ?? "", /JSON object/);
+
+  const badVersion = clone(loaded.manifest);
+  badVersion.schemaVersion = "automation-flow-latest";
+  const result = mod.validateContractManifest(badVersion);
+  assert.ok(codes(result).includes("invalid-schema-version"));
+  assert.ok(result.errors.some((error) => error.detail.includes("automation-flow-latest")));
+});
+
+test("an openapi enum reached through a $ref is compared, and a $ref that resolves to nothing is drift", () => {
+  type Schemas = Record<string, { properties?: Record<string, unknown>; enum?: string[] }>;
+  const withRef = (ref: string, define: boolean): Validation => {
+    const openapi = clone(loaded.openapi) as { components: { schemas: Schemas } };
+    const kind = openapi.components.schemas.AutomationActionReceipt?.properties?.kind as { enum: string[] } | undefined;
+    assert.ok(kind);
+    if (define) openapi.components.schemas.ReceiptKind = { enum: [...kind.enum] };
+    const receipt = openapi.components.schemas.AutomationActionReceipt;
+    assert.ok(receipt?.properties);
+    receipt.properties.kind = { $ref: ref };
+    return mod.validateContractManifest(loaded.manifest, { openapi });
+  };
+  assert.deepEqual(withRef("#/components/schemas/ReceiptKind", true).errors, [], "the referenced enum equals the documented states");
+  const dangling = withRef("#/components/schemas/Missing", false);
+  assert.ok(dangling.errors.some((error) => error.code === "state-drift" && error.path === "states.automation-receipt-kind.openapi"),JSON.stringify(dangling.errors));
+  const foreign = withRef("https://example.invalid/schemas/Kind", false);
+  assert.ok(codes(foreign).includes("state-drift"), "a non-local $ref is never followed");
+});
+
+test("a manifest naming a superseded version that is not checked in is refused by the CLI check, and --print-digest prints the lock", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}contract-manifest-supersedes-`));
+  try {
+    mkdirSync(join(dir, "openapi"));
+    cpSync(join(ROOT, "contracts"), join(dir, "contracts"), { recursive: true });
+    cpSync(join(ROOT, "openapi", "daemon.yaml"), join(dir, "openapi", "daemon.yaml"));
+    const edited = JSON.parse(readFileSync(join(dir, MANIFEST_PATH), "utf8")) as Manifest;
+    edited.compatibility.supersedes = "automation-flow-v0";
+    writeFileSync(join(dir, MANIFEST_PATH), JSON.stringify(edited, null, 2));
+    const result = mod.validateCheckedInContract(dir, MANIFEST_PATH);
+    assert.equal(result.ok, false);
+    assert.ok(result.errors.some((error) => error.code === "version-not-superseding" && error.detail.includes("automation-flow-v0")));
+
+    const printed = spawnSync(process.execPath, [SCRIPT, "--root", dir, "--print-digest"], { encoding: "utf8" });
+    assert.equal(printed.status, 0, printed.stderr);
+    assert.equal(printed.stdout.trim(), loaded.manifest.compatibility.vocabularySha256);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("the CLI validates the checked-in files and exits non-zero naming the refusal when they break", () => {
