@@ -2392,7 +2392,6 @@ export function buildAnalyticsRoute(deps: {
   currentLiveMetrics?: () => LiveAnalyticsMetrics;
   mountsRoot?: string;
   currentEvalCardInput?: (trialId: string | undefined) => { trial: EvalCardTrial; evidence: EvalCardEvidence } | undefined;
-  /** W1-T3958: the reviewed routing pool. If no reader is given, the pool is read from `mountsRoot` or reported as not configured. */
   currentRoutingPool?: () => RoutingPoolSnapshot;
   now?: () => number;
 }): Route {

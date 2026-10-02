@@ -15,6 +15,7 @@ import {
   type RoutingPoolProjection,
 } from "../src/lib/model-pool.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { declaredBody, violations } from "./helpers/openapi-strict.js";
 
 const NOW = Date.parse("2026-10-02T12:00:00.000Z");
 
@@ -148,7 +149,9 @@ async function getProjection(deps: Parameters<typeof buildAnalyticsRoute>[0]) {
   const route = buildAnalyticsRoute(deps);
   await route.handler({ url: "/v1/analytics?projectionVersion=routing-pool-v1" } as never, res, { params: {} });
   assert.equal(route.scope, "read");
-  return { status, body: JSON.parse(body) as RoutingPoolProjection };
+  const parsed = JSON.parse(body) as RoutingPoolProjection;
+  assert.deepEqual(violations(parsed, declaredBody("/v1/analytics", "get", 200)), [], "the body is exactly what openapi/daemon.yaml declares");
+  return { status, body: parsed };
 }
 
 test("W1-T3958 criterion 1: the daemon serves routing-pool-v1 readiness with each candidate's provenance and admission reason", async () => {
