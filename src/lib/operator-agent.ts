@@ -2597,28 +2597,19 @@ export function evaluateOperatorAgentFollowUp(candidate: FollowUpCandidate, now?
   return evaluateFollowUpPolicy(candidate, { now });
 }
 
-/** Default response window for a follow-up handoff whose candidate names no future deadline. */
 export const FOLLOW_UP_HANDOFF_DEFAULT_RESPONSE_MS = 24 * 60 * 60 * 1000;
 
 export interface OperatorAgentFollowUpHandoffContext {
   now: number;
   scope: HandoffScope;
   escalationPolicy: HandoffEscalationPolicy;
-  /** The authority the original follow-up carried; defaults to advice-only, so a handoff never starts wider. */
   actionProfile?: HandoffActionProfile;
-  /** Passed straight to the follow-up policy, so a blocked dependency or exhausted history is seen. */
   dependencyAvailable?: boolean;
   existing?: readonly FollowUpHistory[];
   ledgerPath?: string;
   origin?: string;
 }
 
-/**
- * W1-T3897 — the follow-up path's human boundary. A follow-up that cannot proceed autonomously
- * (blocked, or eligible only to ASK a human) becomes a supervised human-handoff-v1 record with an
- * owner state, age, deadline, and closure rule, instead of one more reminder. Anything else yields
- * no handoff. A refusal from the handoff core is returned by name, never swallowed.
- */
 export function handOffOperatorAgentFollowUp(
   candidate: FollowUpCandidate,
   context: OperatorAgentFollowUpHandoffContext,

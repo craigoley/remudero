@@ -6,7 +6,12 @@
  * a response deadline, an escalation policy, quiet hours, its current freshness, and — once closed —
  * the human decision and authoritative outcome. Every mutation returns a linked receipt; a claim is
  * idempotent and leased, an escalation never widens the original action profile, and delivery never
- * closes an item.
+ * closes an item. HUMAN_HANDOFF_LEDGER_STEP sits in the decision-retention set: losing a snapshot on
+ * rotation would drop an owner, a lease, an escalation, or a closure after restart.
+ *
+ * The follow-up path (handOffOperatorAgentFollowUp in operator-agent.ts) mints one of these for a
+ * follow-up that cannot proceed autonomously — blocked, or eligible only to ASK a human — at advice-only
+ * authority unless its caller names the original profile, and returns a core refusal by name.
  */
 
 import { dirname } from "node:path";
