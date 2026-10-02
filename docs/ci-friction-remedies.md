@@ -96,6 +96,18 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   automatically. Run `npm run --silent comment-load-signal` locally to check your own changes
   before pushing.
 
+- `ci-friction:check:ci-log:task-id-existence` — a pull request's diff cites a task id
+  (e.g., `W1-T1234`) in source code, documentation, or plan files, but that id is not
+  declared in any plan shard and has no reservation ref (`refs/rmd-id/W1-T<n>` on the
+  remote). This gate enforces that every cited id is either declared in the plan or
+  reserved before being shipped. To fix: (1) if the id is a legitimate task reference that
+  was filed and merged, add it to the baseline exemptions (scripts/task-id-existence-baseline.json)
+  with a written reason (e.g., "issued in W1-TNNNN, merged and folded away"); or (2) if
+  it is a new id being cited, reserve it with `rmd mint --reserve` and re-run the gate, or
+  remove the citation if it is not a real task; or (3) if the citation is an EXAMPLE (to
+  illustrate a placeholder), use the placeholder form instead (e.g., `W1-T<n>` or `W1-TNNNN`)
+  — these carry no digits and will not match the citation scan.
+
 - `ci-friction:conflict:merge-conflict` — a pull request cannot be merged automatically
   because the branch has diverged from main and git cannot resolve the conflicts in the
   files being changed. This commonly occurs when multiple PRs modify the same file (such as
