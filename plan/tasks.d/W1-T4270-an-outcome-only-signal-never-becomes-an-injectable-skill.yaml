@@ -73,5 +73,5 @@
   plan_refs: ["W1-T87", "W1-T2766", "P13"]
   priority: 2
   status: queued
-  # backlog gardener: band=2 evidence=01fa123b45799738
+  # backlog gardener: band=2 evidence=7ec896ea593a6dbe
   attempts: 0
