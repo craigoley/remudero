@@ -17,6 +17,7 @@ import {
   githubAuthProbe,
   listenReadiness,
   onDrainRequest,
+  onRestoreRequest,
   onShedRequest,
   planLoadedProbe,
   processChannel,
@@ -164,4 +165,16 @@ test("a shed reports the heap its collection freed after the shed ran", () => {
   onShedRequest({ send: (m) => void real.push(m), onMessage: (l) => void own.push(l) }, () => {});
   for (const l of own) l({ type: GENERATION_MESSAGES.shed });
   assert.equal(typeof real[0]?.heapBeforeBytes, "number", "the default reads this process's V8 heap");
+});
+
+test("a restore request re-warms the generation after an abandoned handoff", () => {
+  const listeners: Array<(m: GenerationMessage) => void> = [];
+  const channel = { send: () => {}, onMessage: (l: (m: GenerationMessage) => void) => void listeners.push(l) };
+  const restored: string[] = [];
+  onRestoreRequest(channel, (reason) => restored.push(reason));
+  for (const l of listeners) l({ type: GENERATION_MESSAGES.shed });
+  assert.deepEqual(restored, [], "only a restore request restores");
+  for (const l of listeners) l({ type: GENERATION_MESSAGES.restore, reason: "handoff_abandoned" });
+  for (const l of listeners) l({ type: GENERATION_MESSAGES.restore });
+  assert.deepEqual(restored, ["handoff_abandoned", "restore"]);
 });

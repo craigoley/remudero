@@ -150,6 +150,9 @@ test("standby serve does not listen on the public port before promote", { timeou
   const shedReply = (sent as GenerationMessage[])[1];
   assert.equal(shedReply?.type, "rmd.shed_done", "a shed request is answered with the generation's resident bytes");
   assert.equal(typeof shedReply?.beforeBytes, "number");
+  for (const listener of listeners) listener({ type: "rmd.restore", reason: "handoff_abandoned" });
+  for (let deadline = Date.now() + 10_000; Date.now() < deadline && !readFileSync(join(root, "state", "ledger.ndjson"), "utf8").includes('"step":"serve.analytics_restore"'); ) await sleep(50);
+  assert.match(readFileSync(join(root, "state", "ledger.ndjson"), "utf8"), /"step":"serve\.analytics_restore",.*"reason":"handoff_abandoned"/, "a restore after the shed re-warms analytics and ledgers why");
 
   process.emit("SIGTERM");
   assert.equal(await running, 0);

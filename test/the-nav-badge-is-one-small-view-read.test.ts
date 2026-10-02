@@ -11,6 +11,7 @@ import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import { createService } from "../src/lib/service.js";
 import { fakeGitHub } from "./helpers/fake-github.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { createViewShadow, legacyViewSampler, type ShadowEvidence, type ShadowRequest } from "../src/lib/view-shadow.js";
 import { buildViewRoutes, renderView, type ViewBody, type ViewDefinition } from "../src/lib/views.js";
 
 // The console sidebar's agent badge cost ~12 upstream reads (~370 KB) per page view and re-derived
@@ -226,4 +227,56 @@ test("the assembled serve answers GET views nav-badge for its core instance and 
   } finally {
     server.close();
   }
+});
+
+// 2026-10-02 05:25:19 and 05:26:19Z: serve.handoff_shed at 05:25:04 and 05:26:04 dropped core's analytics cache
+// (serve.analytics_shed), so legacy answered agent.atLeast 6 with core uncounted while the worker's body
+// counted 10, and the comparator judged that partial answer as six real diffs.
+const NO_EVIDENCE: ShadowEvidence = { legacyAsOfMs: null, viewAsOfMs: null, named: new Set(), namedBeforeHorizon: new Set(), namedInGap: new Set(), rowsInGap: 0, duplicateIds: new Set(), duplicateRows: 0 };
+
+function shadowSample(legacy: ViewDefinition<NavBadgeData>, viewBody: ViewBody<NavBadgeData>, query = "") {
+  const posted: ShadowRequest[] = [];
+  legacyViewSampler({ legacy: [legacy], clock: fixedClock(NOW), defer: (run) => run(), post: (request) => posted.push(request) })("nav-badge", query, new URLSearchParams(query));
+  const shadow = createViewShadow({ clock: fixedClock(NOW), log: () => {}, evidence: () => NO_EVIDENCE });
+  const compared = shadow.compare({ view: "nav-badge", key: query, requests: 1, legacy: posted[0]!.legacy!, body: { data: viewBody.data, asOf: viewBody.asOf, sources: viewBody.sources } });
+  return { compared, readiness: shadow.readiness()[0]! };
+}
+
+test("a shed analytics cache makes legacy unready so the shadow skips the sample", () => {
+  const root = makeTempDir("nav-badge-shed");
+  let current = busySnapshot();
+  const live = { ...scope("core", busySnapshot(), root), analytics: () => current };
+  const views = (core: NavBadgeScope) => badgeView(root, [core, scope("site", busySnapshot(), root, readyMemory, "craigoley/remudero-site")]);
+  const viewBody = render(views(live));
+  assert.equal(viewBody.data.agent.count, 4, "the worker's body counted every instance");
+  current = coldAnalyticsSnapshot(); // what AnalyticsSnapshotCache.shed() leaves until the next refresh
+  const shed = render(views(live)).data.agent;
+  assert.deepEqual([shed.count, shed.atLeast], [undefined, 2], "the shed legacy is a partial floor");
+  for (const query of ["", "instances=core"]) {
+    const { compared, readiness } = shadowSample(views(live), viewBody, query);
+    assert.equal(compared.skipped, "legacy analytics:core warming", `key ${JSON.stringify(query)} is skipped`);
+    assert.deepEqual(compared.diffs, []);
+    assert.deepEqual([readiness.samples, readiness.diffs.real, readiness.skipped], [0, 0, 1]);
+  }
+});
+
+test("a cold operator-agent memory makes legacy unready so the shadow skips the sample", () => {
+  const root = makeTempDir("nav-badge-cold-memory");
+  const coldMemory: OperatorAgentMemorySource = { current: () => ({ state: "cold", asOf: null, rows: [] }), record: () => undefined };
+  const viewBody = render(badgeView(root, [scope("core", busySnapshot(), root)]));
+  const { compared } = shadowSample(badgeView(root, [scope("core", busySnapshot(), root, coldMemory)]), viewBody);
+  assert.equal(compared.skipped, "legacy operator-agent-memory:core warming");
+});
+
+test("a complete legacy answer that differs from the view stays a real shadow diff", () => {
+  const root = makeTempDir("nav-badge-complete-wrong");
+  const viewBody = render(badgeView(root, [scope("core", busySnapshot(), root)]));
+  const quiet = busySnapshot({ runs: 1, tokens: 1 });
+  quiet.routingTelemetry = { ...quiet.routingTelemetry, buckets: [] };
+  const { compared, readiness } = shadowSample(badgeView(root, [scope("core", quiet, root)]), viewBody);
+  assert.equal(compared.skipped, undefined, "a legacy that counted every instance is compared");
+  assert.ok(compared.diffs.some((d) => d.path === "agent.count" && d.classification === "real"));
+  assert.deepEqual([readiness.samples, readiness.skipped ?? 0], [1, 0]);
+  const structural = shadowSample(badgeView(root, [{ ...scope("core", busySnapshot(), root), repository: undefined }]), viewBody).compared;
+  assert.equal(structural.skipped, undefined, "an instance with no repository is structural, never warming");
 });

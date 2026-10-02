@@ -225,6 +225,60 @@ test("a standby needs its boot peak and not its resident bytes at promotion", as
   await supervisor.shutdown("test");
 });
 
+/** The cold generation answers every shed at once, as a real one does. */
+function answerSheds(cold: FakeGeneration): void {
+  const send = cold.send.bind(cold);
+  cold.send = (message) => {
+    send(message);
+    if (message.type === "rmd.shed") queueMicrotask(() => cold.emit({ type: "rmd.shed_done", beforeBytes: 5_000, afterBytes: 5_000 }));
+  };
+}
+
+test("a shed generation left serving by an abandoned handoff is asked to restore at once", async () => {
+  const fleet = fakeFleet((slot) => (slot.sha === "sha-2" ? { never: true } : {}));
+  const shedAsked = (): boolean => fleet.generations[0]?.sent.some((m) => m.type === "rmd.shed") ?? false;
+  let now = 0;
+  const { supervisor, logs } = decisionSupervisor(fleet, {
+    freeMemory: () => (shedAsked() ? 9_000 : 1_000),
+    rss: () => 5_000,
+    clock: { now: () => (now += 1_000), iso: () => "" } as never,
+    readyBoundMs: 5_000,
+  });
+  await supervisor.start();
+  const cold = fleet.generations[0];
+  answerSheds(cold);
+  await supervisor.requestHandoff();
+  assert.equal(logs.find((l) => l.step === "serve.handoff_aborted")?.extra?.criterion, "ready_bound", "positive control: the standby the shed made room for never became ready");
+  assert.deepEqual(cold.sent.map((m) => m.type), ["rmd.promote", "rmd.shed", "rmd.restore"], "the shed generation still serves, so it re-warms now rather than on its refresh schedule");
+  assert.deepEqual(logs.find((l) => l.step === "serve.shed_restore")?.extra, { generation: 1, freeBytes: 9_000, needBytes: 5_000 });
+  await supervisor.requestHandoff();
+  assert.equal(cold.sent.filter((m) => m.type === "rmd.restore").length, 1, "a handoff that sheds nothing restores nothing");
+});
+
+test("a shed generation waiting on a memory retry stays cold until the handoff ends", async () => {
+  const fleet = fakeFleet();
+  let releaseRetry: () => void = () => {};
+  const { supervisor, logs, exits } = decisionSupervisor(fleet, {
+    freeMemory: () => 1_000,
+    rss: () => 5_000,
+    deferMs: 50,
+    sleep: (ms) => (ms === 50 ? new Promise<void>((resolve) => (releaseRetry = resolve)) : Promise.resolve()),
+  });
+  await supervisor.start();
+  const cold = fleet.generations[0];
+  answerSheds(cold);
+  await supervisor.requestHandoff();
+  assert.equal(logs.filter((l) => l.step === "serve.handoff_deferred").length, 1, "positive control: the shed did not free enough and a retry is pending");
+  assert.equal(cold.sent.some((m) => m.type === "rmd.restore"), false, "re-warming now would only be shed again by the retry");
+  for (let i = 0; i < 20 && exits.length === 0; i += 1) {
+    releaseRetry();
+    await tick(1);
+  }
+  assert.deepEqual(exits, [0], "the third deferral replaces the process");
+  assert.equal(cold.sent.some((m) => m.type === "rmd.restore"), false, "a replaced generation has nothing to restore");
+  assert.equal(logs.some((l) => l.step === "serve.shed_restore"), false);
+});
+
 test("handoff requests coalesce, and only the active generation can ask", async () => {
   const fleet = fakeFleet();
   let releasePrepare: () => void = () => {};

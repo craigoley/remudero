@@ -100,6 +100,8 @@ interface Generation {
   isAlive: () => boolean;
   /** It asked for a handoff before it was active; the ask is replayed once it is promoted. */
   asked: boolean;
+  /** It dropped its caches for a handoff that has not yet replaced it. */
+  shed?: boolean;
 }
 
 export interface ServeSupervisor {
@@ -221,6 +223,7 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
   let askedAgain = false;
   let stopping = false;
   let deferrals = 0;
+  let retryPending = false;
   let largestRss = 0;
   let crashes = 0;
   const failed = new Set<string>();
@@ -379,6 +382,7 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
       void generation.exited.then(() => resolve(undefined));
       void sleep(shedBackstopMs).then(() => resolve(undefined));
     });
+    generation.shed = true;
     generation.process.send({ type: GENERATION_MESSAGES.shed });
     const done = await reply;
     const freeAfter = freeMemory();
@@ -427,7 +431,11 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
       deferrals += 1;
       opts.log("serve.handoff_deferred", { reason: "memory", freeBytes: free, ...need(from), deferrals, sha: slot.sha });
       if (deferrals >= 3) return legacyExit("memory");
-      void sleep(deferMs).then(() => supervisor.requestHandoff());
+      retryPending = true;
+      void sleep(deferMs).then(() => {
+        retryPending = false;
+        return supervisor.requestHandoff();
+      });
       return;
     }
     deferrals = 0;
@@ -465,6 +473,20 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     await legacyExit("restart_failed");
   };
 
+  /**
+   * A shed buys headroom for ONE standby fork. While a memory deferral will retry, re-warming would be
+   * shed again, so the generation stays cold; once the handoff replaced it there is nothing to restore.
+   * Only a handoff that ENDED with the shed generation still serving leaves it cold for no fork, and it
+   * re-warms now instead of on its 15-minute refresh schedule.
+   */
+  const restoreShed = (): void => {
+    const generation = active;
+    if (stopping || retryPending || generation === undefined || generation.shed !== true || !generation.isAlive()) return;
+    generation.shed = false;
+    opts.log("serve.shed_restore", { generation: generation.id, freeBytes: freeMemory(), needBytes: largestRss });
+    generation.process.send({ type: GENERATION_MESSAGES.restore, reason: "handoff_abandoned" });
+  };
+
   const supervisor: ServeSupervisor = {
     activeSha: () => active?.slot.sha,
     start: async () => {
@@ -490,7 +512,7 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
           if (askedAgain) {
             askedAgain = false;
             void supervisor.requestHandoff();
-          }
+          } else restoreShed();
         });
       return inFlight;
     },
