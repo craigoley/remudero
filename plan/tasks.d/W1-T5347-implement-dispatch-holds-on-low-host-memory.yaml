@@ -1,0 +1,48 @@
+- id: W1-T5347
+  title: "IMPLEMENT DISPATCH HOLDS ON LOW HOST MEMORY — memoryGovernorGateFor was built and tested by W1-T1038 but never wired into a dispatch path, and sweep.memoryFloorMib is 0, so nothing defers a new implement run while available memory falls to its observed 2.08 GB minimum; this is the operator's stated prerequisite for raising sweep.dispatchLanes from 2 to 3"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  origin: "operator session 2026-10-02: implement dispatch admission research (memory risk of a third lane)"
+  plan_refs: [W1-T1038, W1-T1049, W1-T317, W1-T321]
+  files: [src/run-task.ts, plan/policy.yaml, test/implement-dispatch-holds-on-low-host-memory.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    `checkDispatchGovernors` (src/lib/dispatch-governor.ts) consults cost, then queue, then
+    `deps.checkMemoryGovernor`, then quiet hours. Both dispatch call sites in src/run-task.ts wire
+    `checkCostGovernor: costGovernorGateFor(...)` and `checkQueueGovernor: queueGovernorGateFor(...)`. Neither
+    wires `checkMemoryGovernor`. `memoryGovernorGateFor` itself says it is "NOT wired into DaemonDeps/DrainDeps
+    by this task", and plan/policy.yaml ships `sweep.memoryFloorMib: 0`, so `checkMemoryGovernor` could never
+    defer even if it were wired. The ledger has 0 `daemon.memory_governor` rows in 09-25..10-02.
+    MEASURED: the host has 15,988 MB. `review.capacity.mem_available_mib` on 10-01/02 had a median of about
+    8.3 GB, p10 about 4.6 GB and a minimum of about 2.08 GB. `active_workers` reached 6. Availability barely
+    tracks active workers (medians 8.4-9.0 GB at 0-5 active), so the tail comes from in-worker test runs or
+    serve (rss 2.8-4.7 GB). The policy's own per-worker figure is about 1.33 GiB peak (W1-T1049), with a 1.5 GiB
+    reserve. A third implement lane at the observed minimum leaves under 1 GB. The operator set this wiring,
+    with a non-zero floor, as the prerequisite for raising `sweep.dispatchLanes` 2 -> 3. That raise is NOT
+    part of this task.
+  design: |
+    1. Wire `checkMemoryGovernor: memoryGovernorGateFor(ledgerPath, runId)` at both implement dispatch call
+       sites in src/run-task.ts, next to `checkCostGovernor` / `checkQueueGovernor`, so the drain and the
+       per-lane re-check both consult it. Keep its fail-OPEN direction on an unreadable /proc/meminfo, which is
+       decided in `checkDispatchGovernors` and not here.
+    2. Raise `sweep.memoryFloorMib` in plan/policy.yaml from 0 to one more worker's peak plus the reserve:
+       about 1.33 GiB + 1.5 GiB, or about 2,900 MiB, rounded to 3072. Re-derive it at build time from the
+       10-01..now `review.capacity.mem_available_mib` rows and state the figure, the source rows and the share
+       of samples it would have deferred in the field's own comment. On 10-01/02 that share sits below the
+       p10 of 4.6 GB, so it holds only the low tail. Keep min 0 / max 8192.
+    3. A deferral holds NEW implement dispatch only. It never stops a running worker or a review, and it logs
+       the existing memory-governor verdict row with observed and floor MiB.
+    Leave `sweep.dispatchLanes` at 2.
+  acceptance:
+    - claim: "with available memory below the policy floor the implement dispatch path defers a new run and ledgers the observed and floor MiB, at or above the floor it admits, an unreadable meminfo admits, and the shipped policy floor is non-zero"
+      proof: "unit test: test/implement-dispatch-holds-on-low-host-memory.test.ts"
+  falsifier: |
+    Drop the `checkMemoryGovernor` line from either dispatch call site. The suite's fake 1,000 MiB reading
+    then admits the run. Restore `memoryFloorMib: 0`, and the shipped-policy assertion fails.

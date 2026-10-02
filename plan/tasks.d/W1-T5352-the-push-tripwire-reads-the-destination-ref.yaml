@@ -1,0 +1,52 @@
+- id: W1-T5352
+  title: "THE PUSH TRIPWIRE READS A SUBSTRING, NOT THE DESTINATION — deny-floor rule 1 refuses `git push -f origin HEAD:refs/heads/run-fix-main-gate-1` because main appears in the branch name, and allows `git push origin +HEAD:main`, `--force-with-lease origin main`, `-fu origin HEAD:main`, `HEAD:refs/heads/master` and `origin :main`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  origin: "operator session 2026-10-02: an interactive push of a run-* branch was refused as a force-push to a default branch"
+  plan_refs: [W1-T4588]
+  files: [hooks/deny-floor.sh, test/the-push-tripwire-reads-the-destination-ref.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-02: an interactive session's `git push origin HEAD:refs/heads/run-W1-T5175-...`, chained
+    with a REST PR create, was refused as "git push --force to a default branch". That refusal came from the
+    operator checkout's stale pre-W1-T4588 hook. It was reported separately; the operator checkout must be on main.
+    Main's rule 1 splits per segment, but it is still two loose greps: a force flag anywhere in the segment,
+    AND the substring `main|master` anywhere in it. MEASURED against main's hook:
+    - `git push -f origin HEAD:refs/heads/run-fix-main-gate-1` is refused.
+    - These exit 0: `origin +HEAD:main`, `--force-with-lease origin main`,
+      `--force-with-lease=main:abc origin HEAD:main`, `-fu origin HEAD:main`,
+      `-C /x push -f origin HEAD:refs/heads/master`, `origin :main` and `origin --delete main`.
+    `--force-with-lease` escapes because the regex requires a space, `=` or end-of-string right after `--force`.
+    Plain `git push origin main` is allowed today, although every change here lands through a PR. Branch
+    protection stays the real boundary; this is a tripwire.
+  design: |
+    Replace rule 1's two greps with a tokenizer over the existing segment split.
+    1. Find `git` (skipping `-C x`, `-c k=v`, `--git-dir x`, `--work-tree x`), then `push`, then walk the words.
+    2. Classify the words:
+       - force = --force | --force-with-lease[=...] | --force-if-includes | a short-flag cluster containing
+         `f` | a refspec with a leading `+`;
+       - delete = --delete | -d | a refspec `:dst`;
+       - --mirror / --all = every branch, forced;
+       - skip the value of --repo / -o / --push-option, and stop at a word starting with `#`.
+    3. The first positional word is the remote, and every later one is a refspec. The destination is the text
+       after the last `:` (or the whole refspec), minus `+` and `refs/heads/`.
+    4. Refuse only when the destination is EXACTLY main or master:
+       - force: the existing message;
+       - delete: "deleting a default branch";
+       - plain: "a push to a default branch — open a PR".
+    5. A bare `HEAD` destination and a push with no refspec stay allowed, because the hook cannot know the
+       upstream.
+    Quoting and indirect refspecs stay out of scope, as the file header says. Keep every W1-T4588 case green.
+  acceptance:
+    - claim: "a push is refused or allowed by its destination ref: force, delete or plain pushes to main or master are refused in every refspec spelling, and a run branch whose name or path contains main is allowed"
+      proof: "unit test: test/the-push-tripwire-reads-the-destination-ref.test.ts"
+  falsifier: |
+    Restore the two-grep rule 1. The suite's `-f origin HEAD:refs/heads/run-fix-main-gate-1` case is refused
+    when it should pass, and its `+HEAD:main`, `--force-with-lease origin main`, `-fu` and `:main` cases exit 0.

@@ -1,0 +1,35 @@
+- id: W1-T5356
+  title: "EVERY LANE WRITES ITS RUN LOCK BEFORE ITS WORKTREE ADD — W1-T5280 moved the implement lane's lock ahead of its async add, but approve, approve-batch, addLaneWorktree and createDaemonLaneWorktree still add first, and approve runs in its own process, where another process's prune can reach an add slower than 120 s"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  origin: "operator session 2026-10-02: follow-up to W1-T5280 (#8682)"
+  plan_refs: [W1-T5280, W1-T208]
+  files: [src/run-task.ts, test/every-lane-locks-its-worktree-before-adding-it.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    `pruneStaleRuns` (src/lib/worker.ts) protects a lockless run-* worktree only for `pruneGraceMs` (120 s)
+    after its directory mtime. W1-T5280 writes the implement lane's lock before its async add. The other
+    run-* lanes still call the synchronous `worktreeAdd` and only then `writeRunLock`: `approveCommand` and
+    `approveBatchCommand`'s gateways, `addLaneWorktree` and `createDaemonLaneWorktree`. A sync add blocks its
+    own event loop, so a prune in the same process cannot interleave. APPROVE lanes run in their own pids,
+    though (231804, 234602 and 255125 on 2026-10-02), and so does a hand-run `rmd`, while other processes
+    prune on their own cadence.
+    MEASURED over 7 days: 26 APPROVE prunes. APPROVE add gaps have a median of 1.5 s and a maximum of 120.06 s,
+    with 2 of 23 at the grace boundary. 0 cross-process casualties observed. This is a cheap symmetry fix.
+  design: |
+    In each listed lane, write the run lock (pid, run_id, startedAt) before `worktreeAdd`, keyed by the
+    worktree path exactly as W1-T5280 does. On an add failure, remove the lock in every arm that does not hand
+    the worktree on. No change to `pruneStaleRuns` or the grace.
+  acceptance:
+    - claim: "a prune from another process during an approve or lane worktree add skips the path, and a failed add leaves no run lock behind"
+      proof: "unit test: test/every-lane-locks-its-worktree-before-adding-it.test.ts"
+  falsifier: |
+    Move `writeRunLock` back below `worktreeAdd` in the approve gateway. The suite's fake add, which ages the
+    directory past the grace and then calls `pruneStaleRuns`, sees the path removed.

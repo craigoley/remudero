@@ -1,0 +1,63 @@
+- id: W1-T5348
+  title: "A MACHINE LANE NEVER OPENS A PLAN PR THAT IS ALREADY RED — 31 machine-lane plan-only PRs went red in 09-25..10-02 for 67.2 red-hours, and the 8 generator template defects among them hold the three longest reds (#7946 9.8h, #7948 9h then closed, #7922 4.2h), every one detectable offline before the push"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-02: plan-only red PRs with no repair route research"
+  plan_refs: [W1-T4901, W1-T4351, W1-T4904, W1-T4921, W1-T5279]
+  files: [src/lib/plan-pr-emitter.ts, src/run-task.ts, src/lib/feedback-landing.ts, test/a-machine-lane-never-opens-a-plan-pr-that-is-already-red.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 09-25..10-02: the sweep's W1-T4351 rung wrote `refused-escalate` "plan-only PR is red" 2,276 times
+    over 56 PRs. 31 PRs came from machine lanes (2,128 rows, 67.2 red-hours, 6 closed unmerged). By root cause:
+    - 10 were reservation collisions (task-id-existence);
+    - 8 were stale base or inherited from main;
+    - 8 were GENERATOR TEMPLATE DEFECTS, where the same filer reproduces the red on every re-render;
+    - 3 needed judgement;
+    - 2 are unknown.
+    The 8 generator defects are #7946, #7948, #7379, #7482, #7608, #7861, #7865 and #8725:
+    - #7946: feedback-landing's accept path greps a record id that already exists at base. The proof does not
+      discriminate, and it was re-rendered 7 times over 9.8 h.
+    - #7922: a judge's pins already landed.
+    - #7861: a declared path did not exist.
+    - #7948 / #7379 / #7608: rule-checks census failures on approve shards.
+    - #8725: a 105-character title.
+    Each is a check that runs offline against origin/main.
+    W1-T4901 put `scripts/lint-plan-precheck.mjs` in hooks/pre-push. It reads the PUSHING checkout's
+    merge-base..HEAD. feedback-landing pushes a `commit-tree` commit as `<sha>:refs/heads/<branch>` from a
+    checkout whose HEAD is not that commit, so the precheck judges the wrong diff. It also runs only lint-plan:
+    not task-id-existence, not proof discrimination, not the title lint, not the census. Whether
+    `gardenCheckout`'s `land` (src/run-task.ts: gardeners, the machine-filing judge, selector-shadow) is
+    covered by the hook is to be verified, not assumed.
+  design: |
+    1. One shared `planPrPreflight` next to `createPlanPrRest` in src/lib/plan-pr-emitter.ts. Given the tree
+       about to be pushed (a worktree, or a commit sha plus origin/main), it runs:
+       - the plan lint on changed tasks, reusing `lintArgvFromPackage` / `lintPlanPrecheckVerdict` from
+         scripts/lint-plan-precheck.mjs (never a retyped argv);
+       - task-id-existence with `--require-open-prs`;
+       - proof discrimination: every acceptance proof of the PR body and of each changed shard through
+         `rmd check-proof --base origin/main`, where a proof that also passes at base is red;
+       - the PR-title lint (header-max-length and type);
+       - the `every-shard-on-main-is-lintable` census.
+       It returns `{ ok, failures: [{ check, firstLine }] }`.
+    2. Call it BEFORE the push at every machine plan-PR producer: `gardenCheckout`'s `land` (gardeners, the
+       machine-filing judge, selector-shadow, ci-friction, export, backlog), `rmd approve` /
+       approve-batch, and feedback-landing's push (landing and triage). On a red result, do not push and do not
+       open. Ledger `plan_pr.preflight_refused { lane, branch, failures }`, return the lane's existing
+       not-landed outcome, and dispose of the workspace. A GardenSpec gardener counts it as a refused pass.
+    3. An unreadable check (network down, script absent) is reported and does not refuse, the same as the hook
+       does with exit 2. Operator and session PRs are untouched.
+  acceptance:
+    - claim: "a machine plan-PR producer whose staged tree fails the plan lint, holds an unreserved id, carries a proof that already passes at origin/main, has an over-long title or breaks the shard census neither pushes nor opens a PR and ledgers which check refused, while a clean tree lands as today and an unreadable check does not refuse"
+      proof: "unit test: test/a-machine-lane-never-opens-a-plan-pr-that-is-already-red.test.ts"
+  falsifier: |
+    Remove the `planPrPreflight` call from `gardenCheckout`'s `land`. The suite's fixture shard whose only proof
+    greps a line already on origin/main is pushed and a PR is opened. Do the same at feedback-landing's push,
+    and the accept-path fixture (the #7946 shape) lands.
