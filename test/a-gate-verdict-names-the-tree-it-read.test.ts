@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -63,6 +64,7 @@ async function runCiParityPreflight(
     code = await preflightCommand(["--ci-parity", "--summary-file", out], {
       spawn: ciParitySpawn(behind),
       coverageFreeBytes: () => Number.MAX_SAFE_INTEGER,
+      coverageLockDiscriminator: randomUUID(),
       loadavg: () => [0.5, 0.5, 0.5],
       cpuCount: 4,
     });

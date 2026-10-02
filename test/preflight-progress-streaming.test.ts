@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { spawn as spawnAsync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -157,7 +158,7 @@ test("W1-T3299 (supersedes the two-step shape): the full suite streams, the cove
     if (coverage) return coverage;
     return { status: 0, stdout: "", stderr: "" };
   };
-  runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER });
+  runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER, coverageLockDiscriminator: randomUUID() });
 
   const suite = calls.find((c) => c.file === "npm" && c.args.join(" ") === "run test:ci");
   assert.ok(suite, "the ci job must still shell `npm run test:ci`");

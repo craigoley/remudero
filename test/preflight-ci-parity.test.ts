@@ -1,17 +1,24 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import type { PreflightSpawn } from "../src/lib/commit-message.js";
-import { CI_PARITY_TABLE, parseCiJobNames, runCiParity } from "../src/lib/ci-parity.js";
+import { CI_PARITY_TABLE, parseCiJobNames, runCiParity as runCiParityEngine, type CiParityDeps } from "../src/lib/ci-parity.js";
 import { preflightCommand } from "../src/run-task.js";
 import { skipInMutationSandbox } from "./helpers/mutation-sandbox.js";
 import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
+
+// These tests fake subprocesses while the outer full gate can own this checkout's real
+// coverage lock. Keep every fixture run isolated without changing production lock identity.
+function runCiParity(repoRoot: string, deps: CiParityDeps = {}) {
+  return runCiParityEngine(repoRoot, { ...deps, coverageLockDiscriminator: randomUUID() });
+}
 
 // ── W1-T294: `rmd preflight --ci-parity` — mirroring CI's own job set ───────────────────────
 //
@@ -415,7 +422,7 @@ test("preflightCommand: --ci-parity ADDS the ci-parity steps after the three han
   };
   let code: number;
   try {
-    code = await preflightCommand(["--ci-parity"], { spawn });
+    code = await preflightCommand(["--ci-parity"], { spawn, coverageLockDiscriminator: randomUUID() });
   } finally {
     console.log = originalLog;
   }

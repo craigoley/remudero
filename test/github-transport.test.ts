@@ -386,8 +386,9 @@ test("W1-T4446: a gh child that ignores SIGTERM receives SIGKILL after the timeo
   // spawn exercises it. The script traps SIGTERM and swallows it, mirroring `gh`'s own survival
   // of the signal Node's `timeout` option sends by default.
   const execFileAsyncForTest = promisify(execFile);
-  const timeoutMs = 100;
-  const graceMs = 150;
+  // Instrumented CI can take longer than 100 ms to start bash and install its TERM trap.
+  const timeoutMs = 2_000;
+  const graceMs = 250;
   const startedAt = Date.now();
   const execPromise = execFileAsyncForTest("bash", ["-c", "trap '' TERM; sleep 30"], {
     encoding: "utf8",

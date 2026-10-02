@@ -17,6 +17,7 @@
 // caller (W1-T316's note), and how this leak survived three weeks of green suites.
 
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -114,7 +115,7 @@ function recordingSpawn(map: Record<string, { status: number; stdout?: string; s
 
 test("ci-parity: the coverage-ratchet full-glob test run is spawned with the tmp-hygiene import — this step does NOT route through package.json's protected scripts", () => {
   const { spawn, calls } = recordingSpawn();
-  runCiParity(REPO_ROOT, { spawn });
+  runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER, coverageLockDiscriminator: randomUUID() });
   const coverage = calls.find((c) => c.args.includes("--experimental-test-coverage"));
   assert.ok(coverage, "expected the coverage-run invocation");
   assertHygienePair(coverage!.args, "coverage-ratchet:test-with-coverage");
@@ -124,7 +125,7 @@ test("ci-parity: the containment-probe test run (trigger REQUIRED) is spawned wi
   const { spawn, calls } = recordingSpawn({
     "containment-diff-trigger.ts": { status: 0, stdout: "containment-probe: REQUIRED — touches .claude/settings.json\n" },
   });
-  runCiParity(REPO_ROOT, { spawn });
+  runCiParity(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER, coverageLockDiscriminator: randomUUID() });
   const probe = calls.find((c) => c.args.some((a) => a.includes("containment.test.ts")));
   assert.ok(probe, "expected the containment probe invocation");
   assertHygienePair(probe!.args, "containment-probe:test");

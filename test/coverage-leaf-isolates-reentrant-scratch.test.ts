@@ -83,12 +83,15 @@ test("nested coverage runs isolate scratch without deleting the parent TMPDIR", 
 });
 
 test("a top-level coverage run keeps the stable sibling TMPDIR and does not confuse a prefixed neighbor", () => {
-  const repoRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t-`));
+  // The outer coverage runner sets TMPDIR inside its own scratch. This fixture tests a
+  // top-level sibling, so anchor both its checkout and stable scratch on the short volume root.
+  const previousTmp = process.env.TMPDIR;
+  process.env.TMPDIR = "/tmp";
+  const repoRoot = mkdtempSync(join("/tmp", `${RMD_TMP_PREFIX}t-`));
   const stableTmp = coverageScratchDir(repoRoot);
   const neighborTmp = `${stableTmp}-neighbor`;
   const stale = join(stableTmp, "stale-run");
   const neighbor = join(neighborTmp, "neighbor-fixture");
-  const previousTmp = process.env.TMPDIR;
   let shardTmp: string | undefined;
 
   try {

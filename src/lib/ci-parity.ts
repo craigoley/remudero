@@ -443,7 +443,7 @@ export interface CiParityEntry {
   workflow?: string;
   mirrored: boolean;
   reason?: string;
-  run?: (repoRoot: string, spawn: PreflightSpawn, coverageFreeBytes?: (path: string) => number) => CiParityStepResult[];
+  run?: (repoRoot: string, spawn: PreflightSpawn, coverageFreeBytes?: (path: string) => number, coverageLockDiscriminator?: string) => CiParityStepResult[];
 }
 
 /** Parse ci.yml's top-level job keys. Pure text-in/array-out, so a falsifier hands it a synthetic document. */
@@ -808,8 +808,10 @@ export function coverageScratchDir(repoRoot: string): string {
   return join(base, name);
 }
 
-export function coverageGateLockDir(repoRoot: string): string {
-  const name = createHash("sha256").update(realpathSync(repoRoot)).digest("hex").slice(0, 12);
+export function coverageGateLockDir(repoRoot: string, discriminator?: string): string {
+  const hash = createHash("sha256").update(realpathSync(repoRoot));
+  if (discriminator) hash.update(`\0${discriminator}`);
+  const name = hash.digest("hex").slice(0, 12);
   // The slot must remain the same even when two invocations choose different TMPDIR volumes.
   return join("/tmp", `rmd-c-${name}.lock`);
 }
@@ -987,6 +989,7 @@ export function testWithCoverageLeaf(
     const stats = statfsSync(path, { bigint: true });
     return Number(stats.bavail * stats.bsize);
   },
+  lockDiscriminator?: string,
 ): CiParityLeafResult {
   const stableScratch = coverageScratchDir(repoRoot);
   const activeTmp = process.env.TMPDIR;
@@ -997,7 +1000,7 @@ export function testWithCoverageLeaf(
   if (available < COVERAGE_FREE_RESERVE_BYTES) {
     return { ok: false, detail: `FAIL — coverage-ratchet: scratch volume has ${available} free bytes; need ${COVERAGE_FREE_RESERVE_BYTES} before starting coverage shards. Set TMPDIR to an isolated scratch volume with sufficient space.` };
   }
-  const lockDir = coverageGateLockDir(repoRoot);
+  const lockDir = coverageGateLockDir(repoRoot, lockDiscriminator);
   try {
     mkdirSync(lockDir);
   } catch (error) {
@@ -1728,10 +1731,10 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
   {
     job: "coverage-ratchet",
     mirrored: true,
-    run: (repoRoot, spawn, coverageFreeBytes = undefined) => {
+    run: (repoRoot, spawn, coverageFreeBytes = undefined, coverageLockDiscriminator = undefined) => {
       const lcovPath = join(repoRoot, "coverage", "lcov.info");
       const refresh = runStep("coverage-ratchet:base-refresh", () => refreshOriginMain(repoRoot, spawn));
-      const test = runStep("coverage-ratchet:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath, coverageFreeBytes));
+      const test = runStep("coverage-ratchet:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath, coverageFreeBytes, coverageLockDiscriminator));
       if (!test.ok) return [refresh, test];
       const ratchet = runStep("coverage-ratchet:ratchet", () =>
         shellOut(spawn, "coverage-ratchet.mjs", process.execPath, [join(repoRoot, "scripts", "coverage-ratchet.mjs"), "--lcov", lcovPath, "--baseline", join(repoRoot, "scripts", "coverage-baseline.json")], {
@@ -2020,6 +2023,8 @@ export interface CiParityDeps {
   spawn?: PreflightSpawn;
   /** Allows a fixture to provide its measured scratch capacity without changing the production floor. */
   coverageFreeBytes?: (path: string) => number;
+  /** Isolates a fake nested parity fixture from its parent's real coverage lock. Production omits this. */
+  coverageLockDiscriminator?: string;
   /** Test seam for ci.yml's half of the drift check — production reads it off disk. */
   ciYamlText?: string;
   /** Test seam for the standalone pull-request workflow half of the drift check. */
@@ -2074,7 +2079,7 @@ export function runCiParity(repoRoot: string, deps: CiParityDeps = {}): CiParity
   const jobSteps = [...CI_PARITY_TABLE, ...standaloneTable].flatMap((entry): CiParityStepResult[] => {
     if (!entry.mirrored) return [excludedStep(entry.job, entry.reason ?? "no reason recorded")];
     try {
-      return entry.run!(repoRoot, spawn, deps.coverageFreeBytes);
+      return entry.run!(repoRoot, spawn, deps.coverageFreeBytes, deps.coverageLockDiscriminator);
     } catch (e) {
       return [toolchainFailure(`${entry.job}:error`, e)];
     }
@@ -3563,6 +3568,8 @@ export function affectedSuitesStep(
 export interface PreflightCoverageDeps {
   spawn?: PreflightSpawn;
   coverageFreeBytes?: (path: string) => number;
+  /** Isolates fake coverage-mode fixtures from the parent full gate's real checkout lock. */
+  coverageLockDiscriminator?: string;
   /** Test seam — production reads the lcov this mode's own step just wrote. */
   lcovText?: string;
 }
@@ -3632,7 +3639,7 @@ export function runPreflightCoverage(repoRoot: string, deps: PreflightCoverageDe
   });
 
   const lcovPath = join(repoRoot, "coverage", "lcov.info");
-  const test = runStep("coverage-mode:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath, deps.coverageFreeBytes));
+  const test = runStep("coverage-mode:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath, deps.coverageFreeBytes, deps.coverageLockDiscriminator));
   steps.push(test);
   if (!test.ok) return { steps, ok: false };
 
