@@ -89,14 +89,14 @@ test("Spark and Luna stay in economy while balanced and frontier rows remain Sol
   // The balanced worker can run a multi-turn chain, so its Codex ladder must not fall to Luna.
   // The exact shape below guards the 2026-09-24 operator follow-up.
   assert.deepEqual(CAPABILITIES.codex.balanced, {
-    low: ["gpt-6-sol", "gpt-5.6-sol"],
-    medium: ["gpt-6-sol", "gpt-5.6-sol"],
-    high: ["gpt-6-sol", "gpt-5.6-sol"],
+    low: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"],
+    medium: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"],
+    high: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"],
   });
   assert.deepEqual(CAPABILITIES.codex.frontier, {
-    low: ["gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"],
-    medium: ["gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"],
-    high: ["gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"],
+    low: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"],
+    medium: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"],
+    high: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"],
   });
   // A decommissioning model must never LEAD a row, and no row may be single-candidate.
   for (const rows of [CAPABILITIES.codex.balanced, CAPABILITIES.codex.frontier]) {

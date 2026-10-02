@@ -132,6 +132,9 @@ import {
   type RoutingDrawSeed,
   type RoutingPropensity,
   selectOpenWeightModel,
+  openWeightDeploymentReady,
+  openWeightDeploymentHolds,
+  openWeightEstimatedTokens,
   spawnCodexWorker,
   spawnOpenWeightWorker,
   FOUNDRY_CLAUDE_API_KEY_ENV,
@@ -2438,7 +2441,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     const openWeight: OpenWeightModelSelection = args.cashOpusEmergency === true
       ? { model: "claude-opus-5-5", effort: args.effort ?? "medium", capability: "frontier", alternatives: [] }
       : args.cashSonnetEmergency === true
-      ? { model: "claude-sonnet-5-5", effort: args.effort ?? "medium", capability: "balanced", alternatives: [] }
+      ? { model: "claude-sonnet-5-5", effort: args.effort ?? "medium", capability: "balanced",
+        alternatives: openWeightDeploymentReady("gpt-6.1-sol") &&
+          openWeightDeploymentHolds("gpt-6.1-sol", openWeightEstimatedTokens(Buffer.byteLength(args.prompt, "utf8")))
+          ? ["gpt-6.1-sol"] : [] }
       : selectOpenWeightModel(
       capabilities,
       args.model,

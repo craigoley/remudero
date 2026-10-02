@@ -197,19 +197,21 @@ capabilities:
   # Luna remains on economy rows. This is a capability boundary,
   # not a claim that the anecdotal failure rates generalize to this fleet. The existing high-effort
   # A/B remains live; low/medium balanced work also remains a headroom auction, without an A/B tag.
+  # 2026-10-02: Sol 6.1 leads Sol seats; 6.0 trails for availability/effort rollback.
+  # New concrete-model experiment epochs keep Field Trials history separate (DECISIONS.md).
   codex:
     economy:
       low:    [gpt-5.3-codex-spark, gpt-6-luna, gpt-5.6-luna, gpt-5.4-mini]
       medium: [gpt-6-luna, gpt-5.3-codex-spark, gpt-5.6-luna, gpt-5.4-mini]
       high:   [gpt-5.3-codex-spark, gpt-6-luna, gpt-5.6-luna, gpt-5.4-mini]
     balanced:
-      low:    [gpt-6-sol, gpt-5.6-sol]
-      medium: [gpt-6-sol, gpt-5.6-sol]
-      high:   [gpt-6-sol, gpt-5.6-sol]
+      low:    [gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol]
+      medium: [gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol]
+      high:   [gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol]
     frontier:
-      low:    [gpt-6-sol, gpt-5.6-sol, gpt-5.5]
-      medium: [gpt-6-sol, gpt-5.6-sol, gpt-5.5]
-      high:   [gpt-6-sol, gpt-5.6-sol, gpt-5.5]
+      low:    [gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol, gpt-5.5]
+      medium: [gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol, gpt-5.5]
+      high:   [gpt-6.1-sol, gpt-6-sol, gpt-5.6-sol, gpt-5.5]
   # FRONTIER PREFERS CLAUDE. MEASURED over the retained ledger 2026-09-22: 84 of 127 Opus-requested
   # runs (retro, retro preflight repair, plan synthesis) were routed to Codex gpt-5.6-sol, because
   # the auction splits a capability by headroom alone. The operator's direction is Opus 5.5 first
@@ -269,15 +271,16 @@ capabilities:
       low:    [gpt-oss-120b, gpt-5-nano, gpt-6-luna, gpt-5.6-luna]
       medium: [gpt-oss-120b, gpt-5-nano, gpt-6-luna, gpt-5.6-luna]
       high:   [gpt-oss-120b, gpt-5-nano, gpt-6-luna, gpt-5.6-luna]
+    # Sol 6.1 trails balanced cheap candidates as a bounded Responses fallback; no economy promotion.
     # NORMAL CASH ORDER STAYS MEASURED: economy/balanced continue to lead with the per-task winners
     # from W1-T3614. Luna is nevertheless a real cash deployment, independently of subscription
     # Codex. It trails both normal candidates so cheap routine work does not move lanes, and
     # selectOpenWeightModel(..., { cashSqueezed: true }) promotes it only when the subscription
     # auction has already blocked and this cash request is the squeeze fallback.
     balanced:
-      low:    [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna]
-      medium: [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna]
-      high:   [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna]
+      low:    [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna, gpt-6.1-sol]
+      medium: [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna, gpt-6.1-sol]
+      high:   [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna, gpt-6.1-sol]
     # LUNA TAKES gpt-5-mini's PLACE; TERRA IS THE ESCALATION BEHIND IT. Luna is cheaper
     # than mini on both axes ($0.20/$1.20 vs $0.25/$2.00) and spent 0 reasoning tokens on an
     # identical trivial prompt where mini spent 64 of 76, so mini was REMOVED rather than demoted.
@@ -400,7 +403,7 @@ synthesis:
 # row is used ONLY for a task's last attempt after that tier has already failed it: the
 # diagnose-informed implement attempt (two implement strikes, then a diagnose) and the fix rung's
 # final fresh strike. `opus` resolves through the router like any frontier request -- Claude Opus
-# when Claude has headroom (`provider_preference`), Codex gpt-6-sol only when it does not. The
+# when Claude has headroom (`provider_preference`), Codex gpt-6.1-sol only when it does not. The
 # loader keeps it strictly below the Architect's tier, so plan authorship still outranks it.
 step_up:
   model: opus

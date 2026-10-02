@@ -68,8 +68,8 @@ test("the committed Codex ladder keeps Luna on economy work and out of every bal
   assert.ok(capabilities, "the committed provider-neutral capability ladder must load");
   for (const effort of ["low", "medium", "high"] as const) {
     assert.ok(capabilities.codex.economy[effort].includes("gpt-6-luna"), `economy/${effort} must retain Luna`);
-    assert.deepEqual(capabilities.codex.balanced[effort], ["gpt-6-sol", "gpt-5.6-sol"], `balanced/${effort} must have only Sol candidates`);
-    assert.equal(capabilities.codex.frontier[effort][0], "gpt-6-sol", `frontier/${effort} must not be silently demoted`);
+    assert.deepEqual(capabilities.codex.balanced[effort], ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"], `balanced/${effort} must have only Sol candidates`);
+    assert.equal(capabilities.codex.frontier[effort][0], "gpt-6.1-sol", `frontier/${effort} must not be silently demoted`);
   }
 });
 

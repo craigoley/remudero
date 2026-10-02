@@ -3550,3 +3550,23 @@ Status: accepted
 **Not ruled here:** the follow-up builds (W1-T5099 to W1-T5102) go to the fleet, not to this session.
 
 **Rollback:** every closed record reverts by setting its `status:` back to `queued` and deleting its `retirement:` line and `# CLOSED` comment. The cap reverts by one constant.
+
+
+## 2026-10-02 — Sol 6.1 replaces Sol 6 as the router lead
+
+Operator-authored: Craig requested Sol 6.1 routing, switch data for Field Trials, and Azure cash deployment.
+
+Operator authorized the subscription switch, Field Trials capture and Azure cash deployment.
+`gpt-6.1-sol` leads balanced/frontier Codex rows; old Sol versions are availability fallbacks.
+Economy and Claude frontier preference are unchanged. Concrete-model epochs `sol61-vs-sonnet55`
+and `sol61-vs-sonnet5` preserve the earlier comparisons and require 20 tasks per arm before review
+on 2026-10-16. This is a model-version rollout, not a measured quality promotion or public result.
+
+Azure account catalog and quota confirmed `gpt-6.1-sol` / `2026-09-29` in East US 2; deployment
+`synthwatch-foundry/gpt-6.1-sol` was provisioned GlobalStandard at capacity 100. Cash balanced
+keeps cheap models first, with Sol trailing; a missing squeezed Sonnet deployment can walk to Sol.
+The fleet $25/day cap, normal/squeeze Foundry Claude subcaps and frontier subscription boundary stay
+in force. Sol tools use Responses, preserve reasoning items, stop on local tool failure, reserve
+before every turn and account for cache writes and whole-request long-context pricing. See
+`docs/model-routing.md` for sources, cohort IDs and rollback: move the lead back to `gpt-6-sol`
+through a reviewed mounts change; never rewrite prior ledger records or experiment epochs.

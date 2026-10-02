@@ -80,7 +80,10 @@ test("the openweight ladder leads each row with the deployment measured cheaper 
       // the regression that turns a bad deployment day into a dead lane rather than a degraded one.
       assert.ok(row.includes(trail), `${capability}.${effort} must keep ${trail} reachable as a fallback`);
       assert.ok(row.indexOf(lead) < row.indexOf(trail), "the measured-cheaper deployment must be preferred, not merely present");
-      assert.equal(row.at(-1), LUNA, `${capability}.${effort} must keep Luna available to the cash squeeze selector`);
+      assert.ok(row.includes(LUNA), `${capability}.${effort} must keep Luna available to the cash squeeze selector`);
+      if (capability === "balanced") {
+        assert.ok(row.indexOf(LUNA) < row.indexOf("gpt-6.1-sol"), "cheap Luna must precede the Sol cash fallback");
+      }
     }
   }
 

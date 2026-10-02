@@ -1,3 +1,4 @@
+import { CashResponsesConversation } from "./cash-responses.js";
 import { randomUUID } from "node:crypto";
 import { execFile as execFileChild, execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { constants as fsConstants, accessSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -709,7 +710,7 @@ interface CodexModelListResult {
 const FALLBACK_CODEX_MODELS: Record<CodexModelTier, string[]> = {
   economy: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.3-codex-spark", "gpt-5.4-mini"],
   balanced: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.5"],
-  frontier: ["gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"],
+  frontier: ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"],
 };
 const SAFE_CODEX_MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,95}$/;
 // Same deployment-id grammar as Codex. The Azure deployment id reaches a URL path, so accepting
@@ -829,7 +830,7 @@ export function codexCandidatesForCapability(
 // judgement favours gpt-oss 2.40x, since nano spends ~5x the completion tokens on reasoning.
 const FALLBACK_OPENWEIGHT_MODELS: Record<CodexModelTier, string[]> = {
   economy: ["gpt-oss-120b", "gpt-5-nano", "gpt-5.6-luna"],
-  balanced: ["gpt-5-nano", "gpt-oss-120b", "gpt-5.6-luna"],
+  balanced: ["gpt-5-nano", "gpt-oss-120b", "gpt-5.6-luna", "gpt-6.1-sol"],
   frontier: ["gpt-6-luna", "gpt-5.6-luna", "gpt-5.6-terra"],
 };
 
@@ -898,6 +899,7 @@ export const OPENWEIGHT_CONTEXT_WINDOWS: Readonly<Record<string, OpenWeightConte
   "gpt-5.6-terra": { totalTokens: 128_000, readAt: "2026-09-16" },
   // Azure's 922K input limit is lower than the combined window; reserve 8K for output.
   "gpt-6-luna": { totalTokens: 922_000, readAt: "2026-09-24" },
+  "gpt-6.1-sol": { totalTokens: 922_000, readAt: "2026-10-02" },
 };
 
 /**
@@ -2480,7 +2482,10 @@ export interface OpenWeightPrice {
   /** Upper bound used before transport when a provider can bill cache writes above base input. */
   reservationInputUsdPerMillion?: number;
   /** Standard requests above this input size bill the whole request at the long-context rates. */
-  longContext?: { thresholdInputTokens: number; inputUsdPerMillion: number; outputUsdPerMillion: number };
+  cachedInputUsdPerMillion?: number;
+  cacheWriteUsdPerMillion?: number;
+  longContext?: { thresholdInputTokens: number; inputUsdPerMillion: number; outputUsdPerMillion: number;
+    cachedInputUsdPerMillion?: number; cacheWriteUsdPerMillion?: number; reservationInputUsdPerMillion?: number };
   /** ISO date the published figures were last read. Not decorative: it is what lets a later
    *  reader tell a stale row from a current one without diffing against the vendor's page. */
   readAt: string;
@@ -2512,6 +2517,14 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
     inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.5,
     longContext: { thresholdInputTokens: 272_000, inputUsdPerMillion: 0.2, outputUsdPerMillion: 0.75 },
     readAt: "2026-09-24",
+  },
+  // Azure Global Standard, verified 2026-10-02; long context bills the entire request.
+  "gpt-6.1-sol": {
+    inputUsdPerMillion: 2, outputUsdPerMillion: 10, cachedInputUsdPerMillion: 0.1, cacheWriteUsdPerMillion: 2.5,
+    reservationInputUsdPerMillion: 2.5,
+    longContext: { thresholdInputTokens: 272_000, inputUsdPerMillion: 4, outputUsdPerMillion: 15,
+      cachedInputUsdPerMillion: 0.2, cacheWriteUsdPerMillion: 5, reservationInputUsdPerMillion: 5 },
+    readAt: "2026-10-02",
   },
 };
 
@@ -2575,6 +2588,7 @@ export const FOUNDRY_CLAUDE_DAILY_CAP_USD = { normal: 5, squeezed: 10 } as const
  * gpt-oss-120b already demonstrated.
  */
 export const OPENWEIGHT_RESPONSE_FORMATS: Readonly<Record<string, readonly string[]>> = {
+  "gpt-6.1-sol": ["json_object"],
   "gpt-5.6-luna": ["json_object"],
   "gpt-5.6-terra": ["json_object"],
 };
@@ -2623,6 +2637,7 @@ export const OPENWEIGHT_TEMPERATURE: Readonly<Record<string, number | null>> = {
   "gpt-5.6-luna": null,
   "gpt-5.6-terra": null,
   "gpt-6-luna": null,
+  "gpt-6.1-sol": null,
 };
 
 /** Raised INSTEAD of guessing a request shape. Thrown before the transport, like its pricing
@@ -2728,10 +2743,15 @@ export function openWeightPriceFor(deployment: string): OpenWeightPrice {
 }
 
 /** Dollars for one request's measured usage, at that deployment's own rate. */
-export function openWeightUsageUsd(deployment: string, promptTokens: number, completionTokens: number): number {
+export function openWeightUsageUsd(deployment: string, promptTokens: number, completionTokens: number, cacheReadTokens = 0, cacheCreationTokens = 0): number {
   const price = openWeightPriceFor(deployment);
   const rate = price.longContext && promptTokens > price.longContext.thresholdInputTokens ? price.longContext : price;
-  return (promptTokens * rate.inputUsdPerMillion + completionTokens * rate.outputUsdPerMillion) / 1_000_000;
+  const cached = Math.min(promptTokens, Math.max(0, cacheReadTokens));
+  const written = Math.min(promptTokens - cached, Math.max(0, cacheCreationTokens));
+  return ((promptTokens - cached - written) * rate.inputUsdPerMillion +
+    cached * (rate.cachedInputUsdPerMillion ?? rate.inputUsdPerMillion) +
+    written * (rate.cacheWriteUsdPerMillion ?? rate.inputUsdPerMillion) +
+    completionTokens * rate.outputUsdPerMillion) / 1_000_000;
 }
 
 /** The allowance file. A fleet override must point at the same pre-migrated host mount in every cash instance. */
@@ -2810,7 +2830,7 @@ export function openWeightReservationUsd(
   // reservation silently stops being an upper bound. W1-T3558.
   const inputTokenCeiling = requestBodyBytes + Math.max(0, extraInputTokens);
   const rate = price.longContext && inputTokenCeiling > price.longContext.thresholdInputTokens ? price.longContext : price;
-  return (inputTokenCeiling * (price.reservationInputUsdPerMillion ?? rate.inputUsdPerMillion) + OPENWEIGHT_MAX_COMPLETION_TOKENS * rate.outputUsdPerMillion) / 1_000_000;
+  return (inputTokenCeiling * (rate.reservationInputUsdPerMillion ?? price.reservationInputUsdPerMillion ?? rate.inputUsdPerMillion) + OPENWEIGHT_MAX_COMPLETION_TOKENS * rate.outputUsdPerMillion) / 1_000_000;
 }
 
 /** Raised INSTEAD of sending a paid request. It is thrown before the transport, never after, so a
@@ -3609,6 +3629,7 @@ function openWeightEndpoint(config: Config, model: string): string {
   if (typeof raw !== "string" || raw.trim() === "") throw new Error("cash provider requires workerProviders.cashEndpoint");
   const endpoint = new URL(raw.endsWith("/") ? raw : `${raw}/`);
   if (endpoint.protocol !== "https:") throw new Error("cash endpoint must use https");
+  if (model === "gpt-6.1-sol") return new URL("openai/v1/responses", endpoint).toString();
   return new URL(`openai/deployments/${encodeURIComponent(model)}/chat/completions?api-version=2024-10-21`, endpoint).toString();
 }
 
@@ -3938,6 +3959,9 @@ export async function spawnOpenWeightWorker(
   const startedAt = clock.now();
   let promptTokens = 0;
   let completionTokens = 0;
+  let cacheReadTokens = 0;
+  let cacheCreationTokens = 0;
+  const usesResponses = selection.model === "gpt-6.1-sol";
   let turns = 0;
   let sessionId = "";
   let text = "";
@@ -3983,6 +4007,7 @@ export async function spawnOpenWeightWorker(
       { role: "system", content: OPENWEIGHT_OUTPUT_CONTRACT },
       { role: "user", content: args.prompt },
     ];
+    const responses = usesResponses ? new CashResponsesConversation(OPENWEIGHT_OUTPUT_CONTRACT, args.prompt) : undefined;
     const maxTurns = args.maxTurns ?? 1;
     if (!Number.isInteger(maxTurns) || maxTurns <= 0) throw new Error("openweight maxTurns must be a positive integer");
     // BOTH PER-DEPLOYMENT LOOKUPS ARE RESOLVED ONCE, HERE, AND PRICE GOES FIRST. They are
@@ -3998,7 +4023,7 @@ export async function spawnOpenWeightWorker(
     const responseFormatField = openWeightResponseFormatField(selection.model, args.responseFormat);
     for (;;) {
       turns += 1;
-      const body = JSON.stringify({
+      const body = responses ? responses.body(selection.model, selection.effort, OPENWEIGHT_MAX_COMPLETION_TOKENS, tools, args.responseFormat) : JSON.stringify({
         model: selection.model,
         messages,
         ...temperatureField,
@@ -4050,23 +4075,31 @@ export async function spawnOpenWeightWorker(
       }
       if (response.status === 404) throw new OpenWeightDeploymentNotFoundError(selection.model);
       if (!response.ok) throw new Error(`openweight request failed with HTTP ${response.status}`);
-      const payload = await response.json() as {
+      const envelope = await response.json();
+      const payload = (responses ? responses.read(envelope) : envelope) as {
         id?: unknown;
         model?: unknown;
-        usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
+        usage?: { prompt_tokens?: unknown; completion_tokens?: unknown; cached_tokens?: unknown; cache_creation_tokens?: unknown };
         choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown }; finish_reason?: unknown }>;
       };
       sessionId = typeof payload.id === "string" ? payload.id : sessionId;
       servedModels.push(cashResponseModel(payload.model));
       const turnPromptTokens = typeof payload.usage?.prompt_tokens === "number" ? payload.usage.prompt_tokens : 0;
       const turnCompletionTokens = typeof payload.usage?.completion_tokens === "number" ? payload.usage.completion_tokens : 0;
+      const turnCached = typeof payload.usage?.cached_tokens === "number" ? payload.usage.cached_tokens : 0;
+      const turnWritten = typeof payload.usage?.cache_creation_tokens === "number" ? payload.usage.cache_creation_tokens : 0;
+      cacheReadTokens += turnCached;
+      cacheCreationTokens += turnWritten;
       promptTokens += turnPromptTokens;
       completionTokens += turnCompletionTokens;
       // SETTLE DOWN ONLY FROM A RECEIPT WE COULD ACTUALLY READ. A response carrying no usage block
       // settles at 0 tokens, which would silently hand the allowance back for a request that really
       // was billed — so an absent receipt leaves the conservative reservation standing instead.
-      if (typeof payload.usage?.prompt_tokens === "number" || typeof payload.usage?.completion_tokens === "number") {
-        const actualUsd = openWeightUsageUsd(selection.model, turnPromptTokens, turnCompletionTokens);
+      if (usesResponses
+        ? typeof payload.usage?.prompt_tokens === "number" && typeof payload.usage?.completion_tokens === "number" &&
+          typeof payload.usage?.cache_creation_tokens === "number"
+        : typeof payload.usage?.prompt_tokens === "number" || typeof payload.usage?.completion_tokens === "number") {
+        const actualUsd = openWeightUsageUsd(selection.model, turnPromptTokens, turnCompletionTokens, turnCached, turnWritten);
         settleOpenWeightBudget(config, { requestId, actualUsd, atIso: clock.iso() });
         budgetSettledUsd += actualUsd;
       } else {
@@ -4094,7 +4127,7 @@ export async function spawnOpenWeightWorker(
       }
       if (calls.length === 0) {
         return reconcileBoundedProviderAttempt(
-          openWeightResult({ model: selection.model, effort: selection.effort, servedModels, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens, budgetReservedUsd, budgetSettledUsd, webSearchAttempted, webSearchAccepted, webSearchRefused, webSearchUsd }),
+          openWeightResult({ model: selection.model, effort: selection.effort, servedModels, startedAt, clock, text, sessionId, turns, promptTokens, completionTokens, cacheReadTokens, cacheCreationTokens, ...(usesResponses ? { actualCostUsd: budgetSettledUsd } : {}), budgetReservedUsd, budgetSettledUsd, webSearchAttempted, webSearchAccepted, webSearchRefused, webSearchUsd }),
           args.externalEffect,
         );
       }
@@ -4142,8 +4175,10 @@ export async function spawnOpenWeightWorker(
                 args.runCheck,
               ));
         } catch (error) {
+          if (usesResponses) throw new Error(`cash Sol 6.1 tool ${name} failed: ${error instanceof Error ? error.message : String(error)}`);
           content = JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
         }
+        responses?.toolOutput(id, content);
         messages.push({ role: "tool", tool_call_id: id, content });
       }
     }
@@ -4161,6 +4196,7 @@ export async function spawnOpenWeightWorker(
       // A 404 reached no model, so nothing was billed: settle it to zero, not to the input.
       const inputOnlyUsd = error instanceof OpenWeightDeploymentNotFoundError
         ? 0
+        : usesResponses ? openWeightReservationUsd(pendingReservation.deployment, pendingReservation.requestBodyBytes)
         : openWeightUsageUsd(pendingReservation.deployment, pendingReservation.requestBodyBytes, 0);
       settleOpenWeightBudget(config, {
         requestId: pendingReservation.requestId,
@@ -4184,6 +4220,8 @@ export async function spawnOpenWeightWorker(
         turns,
         promptTokens,
         completionTokens,
+        cacheReadTokens, cacheCreationTokens,
+        ...(usesResponses ? { actualCostUsd: budgetSettledUsd } : {}),
         error: error instanceof Error ? error.message : String(error),
         budgetReservedUsd,
         budgetSettledUsd,

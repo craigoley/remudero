@@ -60,9 +60,12 @@ async function replyWith(content: string, responseFormat?: string, model = "gpt-
         ...(responseFormat === undefined ? {} : { responseFormat }),
         env: { RMD_OPENWEIGHT_API_KEY: "k" },
         clock: clock(Date.parse("2026-09-16T12:00:00.000Z")),
-        fetchImpl: async () =>
+        fetchImpl: async (url: Parameters<typeof fetch>[0]) =>
           new Response(
-            JSON.stringify({ id: "t", usage: { prompt_tokens: 10, completion_tokens: 5 }, choices: [{ message: { content }, finish_reason: "stop" }] }),
+            JSON.stringify(String(url).endsWith("/responses")
+              ? { id: "t", model, status: "completed", usage: { input_tokens: 10, output_tokens: 5 },
+                output: [{ type: "message", content: [{ type: "output_text", text: content }] }] }
+              : { id: "t", usage: { prompt_tokens: 10, completion_tokens: 5 }, choices: [{ message: { content }, finish_reason: "stop" }] }),
             { status: 200, headers: { "content-type": "application/json" } },
           ),
       } as never,
@@ -83,7 +86,7 @@ test("a STRUCTURED request unwraps a fenced reply on the real spawn path", async
   const [deployment] = Object.keys(OPENWEIGHT_RESPONSE_FORMATS).filter((d) => d in OPENWEIGHT_PRICES);
   assert.ok(deployment, "no deployment is both priced and json_object-declaring — this test cannot run");
   const result = await replyWith('```json\n{"ok":true}\n```', "json_object", deployment);
-  assert.equal(result.isError, false);
+  assert.equal(result.isError, false, result.stderr);
   assert.equal(result.text, '{"ok":true}', "the caller asked for a document and must receive one");
 });
 

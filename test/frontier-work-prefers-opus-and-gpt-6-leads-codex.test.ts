@@ -57,10 +57,10 @@ function capacity(provider: "claude" | "codex", usedPercent: number, model?: str
   };
 }
 
-// The account's model/list as read from the fleet daemon on 2026-09-22 (ids and efforts only).
+// Sol seats refreshed from the fleet daemon on 2026-10-02 (ids and efforts only).
 const LIVE_MODELS: CodexModelInfo[] = [
   ["gpt-6-astra", ["low", "medium", "high", "xhigh", "max", "ultra"], true],
-  ["gpt-6-sol", ["low", "medium", "high", "xhigh", "max", "ultra"]],
+  ["gpt-6.1-sol", ["low", "medium", "high", "xhigh", "max", "ultra"]],
   ["gpt-6-luna", ["low", "medium", "high", "xhigh", "max"]],
   ["gpt-5.6-sol", ["low", "medium", "high", "xhigh", "max", "ultra"]],
   ["gpt-5.6-terra", ["low", "medium", "high", "xhigh", "max", "ultra"]],
@@ -94,22 +94,22 @@ test("GPT-6 Luna leads economy, Sol leads balanced and frontier, and Terra is in
     }
   }
   for (const effort of ["low", "medium", "high"]) {
-    assert.equal(codex.balanced[effort][0], "gpt-6-sol");
+    assert.equal(codex.balanced[effort][0], "gpt-6.1-sol");
     assert.equal(codex.balanced[effort].some((model) => model.includes("luna")), false, `no Luna in balanced/${effort}`);
   }
   // The high-effort Sol-vs-Sonnet A/B still runs. Lower efforts gain the same capability boundary.
-  assert.deepEqual(codex.balanced.high.slice(0, 2), ["gpt-6-sol", "gpt-5.6-sol"]);
-  for (const effort of ["low", "medium", "high"]) assert.equal(codex.frontier[effort][0], "gpt-6-sol");
+  assert.deepEqual(codex.balanced.high, ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"]);
+  for (const effort of ["low", "medium", "high"]) assert.equal(codex.frontier[effort][0], "gpt-6.1-sol");
 });
 
 test("replayed against the observed account model list, balanced and frontier pick Sol while economy picks Luna", () => {
   const table = ladder();
   for (const [model, effort, expected] of [
-    ["sonnet", "high", "gpt-6-sol"],
-    ["sonnet", "medium", "gpt-6-sol"],
+    ["sonnet", "high", "gpt-6.1-sol"],
+    ["sonnet", "medium", "gpt-6.1-sol"],
     ["haiku", "low", "gpt-6-luna"],
-    ["claude-opus-5-5", "high", "gpt-6-sol"],
-    ["opus", "high", "gpt-6-sol"],
+    ["claude-opus-5-5", "high", "gpt-6.1-sol"],
+    ["opus", "high", "gpt-6.1-sol"],
   ] as const) {
     const picked = selectCodexModel(LIVE_MODELS, LIVE_LIMITS, {} as never, model, effort, table);
     assert.equal(picked.model, expected, `${model}/${effort}`);
@@ -118,14 +118,14 @@ test("replayed against the observed account model list, balanced and frontier pi
 });
 
 test("without GPT-6 Sol on the account, balanced falls to older Sol and never to Luna", () => {
-  const withoutSix = LIVE_MODELS.filter((model) => model.id !== "gpt-6-sol");
+  const withoutSix = LIVE_MODELS.filter((model) => model.id !== "gpt-6.1-sol");
   const picked = selectCodexModel(withoutSix, LIVE_LIMITS, {} as never, "sonnet", "medium", ladder());
   assert.equal(picked.model, "gpt-5.6-sol");
   const lunaOnly = LIVE_MODELS.filter((model) => model.id === "gpt-6-luna" || model.id === "gpt-5.6-luna");
   const blocked = selectCodexModel(lunaOnly, LIVE_LIMITS, {} as never, "sonnet", "medium", ladder());
   assert.equal(blocked.readable, false, "a Luna-only account cannot authorize a balanced Codex worker");
   assert.equal(blocked.model, undefined, "no Luna is misreported as a selected balanced model");
-  assert.deepEqual(blocked.modelDecision?.mappedCandidates, ["gpt-6-sol", "gpt-5.6-sol"]);
+  assert.deepEqual(blocked.modelDecision?.mappedCandidates, ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"]);
 });
 
 test("an automatic policy takes the frontier preference and nothing else changes", () => {
@@ -151,7 +151,7 @@ test("an operator's explicit preference wins over the capability preference", ()
 
 test("frontier work takes Claude with headroom even when Codex has far more, and Sol 6 only when Claude is blocked", () => {
   const frontier = policyForCapability(policy(), "frontier", { frontier: "claude" }).policy;
-  const capacities = [capacity("claude", 80), capacity("codex", 5, "gpt-6-sol")];
+  const capacities = [capacity("claude", 80), capacity("codex", 5, "gpt-6.1-sol")];
   for (let tieBreaker = 0; tieBreaker < 20; tieBreaker += 1) {
     assert.equal(selectWorkerProviderForPolicy(capacities, frontier, tieBreaker).selection.provider, "claude");
   }
@@ -161,7 +161,7 @@ test("frontier work takes Claude with headroom even when Codex has far more, and
       .selection.provider);
   assert.ok(automaticPicks.filter((provider) => provider === "codex").length > 10);
 
-  const blocked = selectWorkerProviderForPolicy([capacity("claude", 97), capacity("codex", 5, "gpt-6-sol")], frontier);
+  const blocked = selectWorkerProviderForPolicy([capacity("claude", 97), capacity("codex", 5, "gpt-6.1-sol")], frontier);
   assert.equal(blocked.selection.provider, "codex");
   assert.deepEqual(blocked.preferenceBypass, { provider: "claude", reason: "below-reserve" });
 });
@@ -208,7 +208,7 @@ function codexResult(): WorkerResult {
     apiError: false,
     permissionDenials: [],
     childEnvKeys: [],
-    model: "gpt-6-sol",
+    model: "gpt-6.1-sol",
     effort: "high",
     tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
     modelUsage: {},
@@ -240,7 +240,7 @@ async function spawnFrontier(root: string, claudeUsed: number, model = "opus") {
     providerRouting: {
       readClaudeHealth: async () => ({ degradedModels: [], source: "fresh", observedAtMs: NOW }),
       readClaude: async () => capacity("claude", claudeUsed),
-      readCodex: async (_config, request) => capacity("codex", 5, request.selectedModel ?? "gpt-6-sol"),
+      readCodex: async (_config, request) => capacity("codex", 5, request.selectedModel ?? "gpt-6.1-sol"),
       spawnCodex: async () => { codexSpawned += 1; return codexResult(); },
       now: () => NOW,
     },
@@ -294,9 +294,9 @@ test("an opus lane with Claude below reserve runs on Sol 6 and records why", asy
     const run = await spawnFrontier(root, 97);
     assert.equal(run.codexSpawned, 1);
     assert.equal(run.result.provider, "codex");
-    assert.equal(run.result.routedModel, "gpt-6-sol");
+    assert.equal(run.result.routedModel, "gpt-6.1-sol");
     const assignment = run.assignments.at(-1);
-    assert.equal(assignment?.selected.model, "gpt-6-sol");
+    assert.equal(assignment?.selected.model, "gpt-6.1-sol");
     assert.deepEqual(assignment?.routing.preferenceBypass, { provider: "claude", reason: "below-reserve" });
     assert.deepEqual(assignment?.routing.capabilityPreference, { capability: "frontier", provider: "claude" });
   } finally {
