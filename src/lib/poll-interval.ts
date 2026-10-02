@@ -14,5 +14,11 @@
  *  on every real invocation, so this is provably dead for the operating path (W1-T253). */
 export const DEFAULT_POLL_INTERVAL_MS = 60_000;
 
+/** The quiet-mode row deploy/entrypoint.sh's `idle_starved_wait` writes in place of a Node tick. */
+export const IDLE_STARVED_PULSE_STEP = "daemon.idle_starved.pulse";
+/** That loop's cadence: it writes one pulse per `300`-second sleep budget, then runs its probe. The row
+ *  declares no `poll_interval_ms`, so readers take its cadence from here; entrypoint-boot pins the pair. */
+export const IDLE_STARVED_PULSE_MS = 300_000;
+
 /** Shared GitHub label for operator-facing escalation issues. */
 export const NEEDS_HUMAN_LABEL = "needs-human";
