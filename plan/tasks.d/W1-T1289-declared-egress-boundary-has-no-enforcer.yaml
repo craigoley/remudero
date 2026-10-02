@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: high
   budget_usd: 45.00
-  files: [src/lib/containment.ts, settings/worker.json, test/egress-enforcement-owner.test.ts]
+  files: [src/lib/containment.ts, src/lib/worker.ts, settings/worker.json, test/egress-enforcement-owner.test.ts]
   origin: oper#declared-egress-boundary-has-no-owner-2026-08-24
   plan_refs: ["W1-T1265", "W1-T11", "W1-T1", "#2668"]
   priority: 2
@@ -312,11 +312,12 @@
       proof: "unit test: test/egress-enforcement-owner.test.ts"
     - claim: "api.anthropic.com remains absent from the allowlist and the enforcement does not special-case it"
       proof: "unit test: test/egress-enforcement-owner.test.ts"
-    - claim: "an enforcement that cannot be established refuses rather than reporting success, so failIfUnavailable keeps its meaning"
+    - claim: "an enforcement that cannot be established refuses the spawn in enforce mode, and in the default observe mode the worker runs without it and the result names why, never reporting success"
       proof: "unit test: test/egress-enforcement-owner.test.ts"
     - claim: "the installed enforcer version is compared against the locked one, so a silent drift is detectable rather than documented"
       proof: "unit test: test/egress-enforcement-owner.test.ts"
   note: |
+    OPERATOR RULING 2026-10-02: wire the broker into spawnWorker in OBSERVE mode by default (RMD_WORKER_EGRESS=observe|enforce|off). A broker that cannot be established is reported on the worker result as egress_unenforced and does not block the spawn; enforce refuses it; flip to enforce once the broker has run clean. spawnWorker lives in src/lib/worker.ts, which the original files: list omitted, so the build could never wire it (#8684).
     UNBLOCKED 2026-09-30, carrying out the operator's 2026-09-22 W1-T3103 ruling (DECISIONS.md: "This ruling is therefore also a ruling to UNBLOCK W1-T1289"), which had not been applied.
     RISK BAND — BOTH READINGS, BECAUSE THE BAND EXEMPTS THE CHECK RATHER THAN CLEARING IT.
     `sizingViolation` (`src/lib/task-linter.ts`) returns `undefined` at `risk: high`, so the span
