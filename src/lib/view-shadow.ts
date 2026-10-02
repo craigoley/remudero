@@ -74,6 +74,8 @@ export interface ShadowFieldDiff {
   latest?: ShadowLatest;
   /** Per listed id, the row each side sorted it by, when the list is ordered by time. */
   sortKeys?: Readonly<Record<string, ShadowLatest>>;
+  /** The row each side took the value from, when one row decides it (a pull request's disposition). */
+  from?: ShadowLatest;
 }
 
 /** The rows each side added into one sum, `[identity, amount]`; `precision` is the rounding the value carries. */
@@ -409,6 +411,11 @@ export function classifyShadowDiff(diff: ShadowFieldDiff, ev: ShadowEvidence): {
   if (diff.members && typeof legacy === "number" && typeof view === "number") return classifyAggregate(legacy, view, diff.members, ev);
   if (diff.sum && typeof legacy === "number" && typeof view === "number") return classifySum(legacy, view, diff.sum, ev);
   if (diff.latest && typeof legacy === "string" && typeof view === "string") return classifyLatest(legacy, view, diff.latest, ev);
+  if (diff.from) {
+    const classification = explainOrder(diff.from, ev);
+    const rows = `view ${diff.from.view ?? "none"}, legacy ${diff.from.legacy ?? "none"}`;
+    return { classification, reason: classification === "real" ? `no measured row explains the rows it was read from (${rows})` : `read from ${rows}: the later row is ${classification}` };
+  }
   if (Array.isArray(legacy) && Array.isArray(view) && hasDuplicates(legacy) && canonical(uniqueInOrder(legacy)) === canonical(view)) {
     return { classification: "dedupe", reason: `legacy lists ${legacy.length - view.length} duplicate element(s)` };
   }
@@ -526,6 +533,8 @@ export interface ShadowLegacy {
   rows?: LegacyRows;
   /** Per time-ordered list path, each id's sort-key row on each side (`<id>#<ts>`). */
   sortKeys?: Readonly<Record<string, Readonly<Record<string, ShadowLatest>>>>;
+  /** Per path one row decides, the row (`<id>#<ts>`) each side took it from. */
+  from?: Readonly<Record<string, ShadowLatest>>;
   /** A value computed only from other paths (a rate from two counts): explained exactly when they are. */
   derived?: Readonly<Record<string, readonly string[]>>;
   /** What each side was computed from (a plan generation, a probe instant), carried onto the diff row as evidence. */
@@ -678,7 +687,8 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
         const sum = legacy.sums?.[d.path];
         const latest = legacy.latest?.[d.path];
         const sortKeys = legacy.sortKeys?.[d.path];
-        return { ...d, ...(members ? { members } : {}), ...(sum ? { sum } : {}), ...(latest ? { latest } : {}), ...(sortKeys ? { sortKeys } : {}) };
+        const from = legacy.from?.[d.path];
+        return { ...d, ...(members ? { members } : {}), ...(sum ? { sum } : {}), ...(latest ? { latest } : {}), ...(sortKeys ? { sortKeys } : {}), ...(from ? { from } : {}) };
       });
       const viewAsOf = body.asOf === null ? null : Date.parse(body.asOf);
       const ev = opts.evidence({

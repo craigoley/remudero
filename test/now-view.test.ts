@@ -883,6 +883,44 @@ test("a rotation after the build leaves the legacy PR queue on the sweep rows th
   assert.equal(wrong.find((d) => d.path === "prQueue.rows[prNumber=8485].disposition")?.classification, "real", JSON.stringify(wrong));
 });
 
+test("a disposition the live file decides from a row the view's newer one superseded is legacy_horizon", (t) => {
+  // Captured 2026-10-01T23:36:12Z on core: prQueue.rows[prNumber=8495].disposition legacy post-review vs view blocked-fixable
+  // (builtAt 23:35:23, no rotation since). The 23:31:58 rotation, BEFORE that build, kept the head's one acted row (post-review,
+  // 23:15:25) in the live file and archived its newer unacted blocked-fixable rows (23:20:22, 23:23:22); the fact store holds them.
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const pr = { number: 8495, url: "https://github.com/o/r/pull/8495", state: "OPEN", title: "spend", headRefName: "run-W1-T5115-1", headRefOid: "b58cb560" };
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], {
+    listGrilling: () => [],
+    github: () => ({ github: stubGateway({ listOpenHeadBranches: () => [pr] }), generation: "g", source: { asOf: null, state: "fresh" } }),
+  });
+  const disposed = (disposition: string, acted: boolean) => ({ step: "sweep.disposed", pr_number: 8495, head_sha: "b58cb560", disposition, acted, reason: disposition });
+  clock.set(T0 - 1_200_000);
+  core.append(disposed("post-review", true));
+  clock.set(T0 - 780_000);
+  core.append(disposed("blocked-fixable", false));
+  const live = join(core.ledgerDir, "ledger.ndjson");
+  const text = readFileSync(live, "utf8");
+  const [acted, unacted] = text.trim().split("\n");
+  writeFileSync(join(core.ledgerDir, `ledger.${new Date(T0 - 205_000).toISOString().replace(/[:.]/g, "-")}.ndjson.gz`), gzipSync(text));
+  writeFileSync(live, `${acted}\n`);
+  clock.set(T0);
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  assert.deepEqual(body.data.prQueue.rows.map((r) => [r.prNumber, r.disposition, r.queueClass]), [[8495, "blocked-fixable", "actionable"]]);
+  const queue = () => compareNow(view, core, body, T0 + 49_000).filter((d) => d.path.startsWith("prQueue"));
+  const got = queue();
+  assert.deepEqual(got.map((d) => [d.path, d.classification]), [
+    ["prQueue.rows[prNumber=8495].disposition", "legacy_horizon"],
+    ["prQueue.rows[prNumber=8495].queueClass", "legacy_horizon"],
+  ], JSON.stringify(got));
+  // Negative control: a live file holding the view's row and still deciding otherwise is a real disagreement.
+  writeFileSync(live, `${unacted}\n${acted}\n`);
+  const held = queue();
+  assert.equal(held.find((d) => d.path === "prQueue.rows[prNumber=8495].disposition")?.classification, "real", JSON.stringify(held));
+});
+
 test("legacy takes the gauges its body's probe captured and never probes GitHub again", (t) => {
   // Captured 2026-10-01T22:35:05Z on core: health.rateLimitRemaining legacy undefined with reason "gh api rate_limit did not
   // answer" vs view 15000. Legacy re-ran gh api rate_limit at sample time and that one call failed.
