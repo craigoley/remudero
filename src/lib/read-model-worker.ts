@@ -539,6 +539,8 @@ export interface ReadModelTicker {
   observe(instances: readonly ReadModelInstanceState[]): void;
   /** Main asked for a key of a demand view. True when the key is new, and its view is due at once. */
   want(view: string, key: string): boolean;
+  /** Builds `view` now, in a pass of its own ahead of whatever else is due: main is waiting on a wanted key for 300 ms. */
+  buildNow(view: string): void;
 }
 
 /** One view, or one instance's share of a per-instance view: the unit the pass budgets, times and paces. */
@@ -1144,6 +1146,15 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         return false;
       }
     },
+    buildNow(view: string): void {
+      const now = clock.now();
+      if (viewsOnly) {
+        if (observedAt === Number.NEGATIVE_INFINITY) return;
+        for (const slot of slots) attachViews(slot, now);
+      }
+      for (const unit of units) if (unit.view.name === view && switches.views[view] !== "off") materialize(now, now, unit);
+      postState(now);
+    },
     want(view: string, key: string): boolean {
       if (!opts.demand || !demandViews.includes(view)) return false;
       const fresh = opts.demand.want(view, key);
@@ -1239,7 +1250,7 @@ export function runReadModelViewWorker(
     else if (msg.type === "want") {
       // A new key is built in a pass of its own, now: main is waiting on it for 300 ms.
       try {
-        if (ticker.want(msg.view, msg.key)) ticker.tick();
+        if (ticker.want(msg.view, msg.key)) ticker.buildNow(msg.view);
       } catch (error) {
         log("read_model.want_failed", { view: msg.view, error: (error as Error).message });
       }

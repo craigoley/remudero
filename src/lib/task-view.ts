@@ -185,6 +185,7 @@ export function createTaskView(opts: TaskViewOptions): {
         const stored = db.prepare("SELECT json FROM task_projection WHERE task_id = ?").get(id);
         if (stored) projection = JSON.parse(String(stored.json)) as StatusProjection;
       } catch (error) {
+        // Reported, not erased: the reason rides the body and an unavailable read-model source, so the page says why it is thin.
         reason = `no task projection yet: ${(error as Error).message}`;
         sources.push(describeSource({ name: `read-model:${instance.name}`, asOf: null, state: "unavailable", reason }));
       }

@@ -270,7 +270,7 @@ test("W1-T5048: the view routes ask the worker for a missing key and answer from
     },
     onBody: (listener) => (listeners.add(listener), () => listeners.delete(listener)),
   };
-  const route = buildReadModelViewRoutes({ legacy: [], readModel, clock }).find((r) => r.path === "/v1/views/task")!;
+  const route = buildReadModelViewRoutes({ legacy: [], readModelViews: ["task"], readModel, clock }).find((r) => r.path === "/v1/views/task")!;
   const call = (url: string): Promise<{ status: number; body: Record<string, unknown> }> =>
     new Promise((resolve) => {
       let status = 0;
@@ -280,7 +280,7 @@ test("W1-T5048: the view routes ask the worker for a missing key and answer from
         writeHead: (code: number) => void (status = code),
         end: (text?: string) => resolve({ status, body: text ? (JSON.parse(text) as Record<string, unknown>) : {} }),
       };
-      void route.handler({ url, headers: {} } as never, res as never);
+      void route.handler({ url, headers: {} } as never, res as never, {} as never);
     });
 
   assert.equal((await call("/v1/views/task?instance=core")).status, 400, "the key needs both instance and id");
@@ -297,13 +297,13 @@ test("W1-T5048: the view routes ask the worker for a missing key and answer from
 
   bodies.clear();
   const never: ViewBodySource = { ...readModel, want: (view, key) => (wants.push(`${view}|${key}`), true) };
-  const silent = buildReadModelViewRoutes({ legacy: [], readModel: never, clock }).find((r) => r.path === "/v1/views/task")!;
+  const silent = buildReadModelViewRoutes({ legacy: [], readModelViews: ["task"], readModel: never, clock }).find((r) => r.path === "/v1/views/task")!;
   // The wait's own timer is unref'd (a socket keeps the loop alive in serve); this test has no socket.
   const keepAlive = setTimeout(() => {}, 5_000);
   const miss = await new Promise<{ status: number; body: Record<string, unknown> }>((resolve) => {
     let status = 0;
     const res = { headersSent: false, once: () => res, writeHead: (code: number) => void (status = code), end: (text?: string) => resolve({ status, body: JSON.parse(text ?? "{}") as Record<string, unknown> }) };
-    void silent.handler({ url: "/v1/views/task?instance=core&id=W1-T9", headers: {} } as never, res as never);
+    void silent.handler({ url: "/v1/views/task?instance=core&id=W1-T9", headers: {} } as never, res as never, {} as never);
   });
   clearTimeout(keepAlive);
   assert.equal(miss.status, 404);
@@ -341,7 +341,8 @@ test("W1-T5048: the view thread builds a wanted task key in the pass its want me
   const out: ReadModelWorkerMessage[] = [];
   runReadModelViewWorker(
     { on: (_event, run) => void handlers.push(run), postMessage: (m) => void out.push(m as ReadModelWorkerMessage), close: () => {} },
-    { stateDir, instances, tickMs: 25, holder: "vdw-projector" },
+    // A tick a minute: only the want message can have built the key within this test.
+    { stateDir, instances, tickMs: 60_000, holder: "vdw-projector" },
   );
   const send = (msg: ReadModelViewsInput): void => handlers.forEach((run) => run(msg));
   t.after(() => send({ type: "stop" }));
@@ -352,6 +353,7 @@ test("W1-T5048: the view thread builds a wanted task key in the pass its want me
   assert.deepEqual(taskBodies(), [], "no task key is built until one is wanted");
 
   send({ type: "want", view: "task", key: KEY });
-  assert.equal(taskBodies().filter((entry) => entry.key === KEY).length, 1, "the want message built the key in a pass of its own, before the next timer tick");
+  for (let waited = 0; waited < 5_000 && taskBodies().length === 0; waited += 20) await sleep(20);
+  assert.equal(taskBodies().filter((entry) => entry.key === KEY).length, 1, "the want message built the key in a pass of its own, long before the next timer tick");
   assert.equal((taskBodies()[0]!.body.data as { id: string; instance: string }).id, "W1-T1");
 });

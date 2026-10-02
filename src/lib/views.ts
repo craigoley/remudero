@@ -221,7 +221,7 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
   const clock = opts.clock ?? systemClock;
   const legacy = new Map(opts.legacy.map((view) => [view.name, view]));
   const demandViews = new Set(opts.demandViews ?? DEMAND_VIEWS);
-  const names = [...new Set([...legacy.keys(), ...(opts.readModelViews ?? []), ...demandViews])];
+  const names = [...new Set([...legacy.keys(), ...(opts.readModelViews ?? [])])];
   const requiredParams: Record<string, readonly string[]> = { [TASK_VIEW_NAME]: ["instance", "id"], ...opts.requiredParams };
   const flippedEtags = new WeakMap<ViewBodyEntry, string>();
   const judged = (readModel: ViewBodySource, entry: ViewBodyEntry): { body: ViewBody; etag: string } => {

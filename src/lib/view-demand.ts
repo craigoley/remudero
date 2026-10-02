@@ -27,7 +27,7 @@ export const DEMAND_VIEWS: readonly string[] = [TASK_VIEW_NAME];
 export const VIEW_DEMAND_WAIT_MS = 300;
 /** A key unread this long is evicted. */
 export const VIEW_DEMAND_EVICT_MS = 10 * 60_000;
-/** Wants in flight at once; a want past this is refused at once rather than queued. */
+/** PRIMARY CONTROL: wants in flight at once; a want past this is refused at once rather than queued. */
 export const VIEW_DEMAND_MAX_PENDING = 64;
 /** BACKSTOP: keys a worker keeps live at once; past this the least recently read is evicted early. */
 export const VIEW_DEMAND_MAX_KEYS = 512;
