@@ -20,11 +20,11 @@
 # cannot be read gets the CPU weights and no memory ceiling — a guessed ceiling could OOM a daemon
 # that was fine — and the note says so.
 
-RMD_SERVE_MEMORY_RESERVE_MIB="${RMD_SERVE_MEMORY_RESERVE_MIB:-3072}" # covers serve RSS 1.9-2.7 GiB (2026-10-01)
+RMD_SERVE_MEMORY_RESERVE_MIB="${RMD_SERVE_MEMORY_RESERVE_MIB:-5120}" # active gen peaks 4.95 GiB (2026-10-02)
 RMD_HOST_OVERHEAD_MIB="${RMD_HOST_OVERHEAD_MIB:-2048}"               # OS, cloudflared, the small daemons
 RMD_BUILD_SWAP_MIB="${RMD_BUILD_SWAP_MIB:-4096}"                     # a build container pages its OWN memory
 RMD_MIN_BUILD_CEILING_MIB="${RMD_MIN_BUILD_CEILING_MIB:-2048}"
-RMD_SERVE_MEMORY_LIMIT_MIB="${RMD_SERVE_MEMORY_LIMIT_MIB:-5120}"     # 0 = no hard limit; see resource_policy_serve_args
+RMD_SERVE_MEMORY_LIMIT_MIB="${RMD_SERVE_MEMORY_LIMIT_MIB:-7680}"     # 0 = no hard limit; see resource_policy_serve_args
 RMD_SERVE_SWAP_MIB="${RMD_SERVE_SWAP_MIB:-1024}"
 RMD_SERVE_CPUS="${RMD_SERVE_CPUS:-}"                                 # empty = no CPU quota, weight only
 RMD_SERVE_CPU_SHARES="${RMD_SERVE_CPU_SHARES:-4096}"

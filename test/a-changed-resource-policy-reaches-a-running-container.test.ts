@@ -49,7 +49,7 @@ const tick: TriggerInputs = {
 /** The incident's HostConfig: no ceiling, default weight. */
 const UNLIMITED = { Memory: 0, MemorySwap: 0, CpuShares: 0, MemoryReservation: 0, Privileged: false };
 const DRIFT: ResourcePolicyDrift[] = [
-  { field: "Memory", expected: 10505 * MIB, actual: 0 },
+  { field: "Memory", expected: 8457 * MIB, actual: 0 },
   { field: "CpuShares", expected: 512, actual: 0 },
 ];
 
@@ -168,40 +168,40 @@ test("the recycle reason names each drifted limit as expected and actual", () =>
   };
   try {
     // THE SHIPPED READER, on the incident's HostConfig: the build policy's real output (15625 MiB
-    // host - 3072 serve reserve - 2048 overhead = 10505 MiB, +4096 MiB swap, 512 shares).
+    // host - 5120 serve reserve - 2048 overhead = 8457 MiB, +4096 MiB swap, 512 shares).
     const drift = withEnv({ RMD_RESOURCE_POLICY_CONTAINER: undefined, RMD_RESOURCE_POLICY_ROLE: undefined }, () =>
       shippedReader(root, execFile)(),
     );
     assert.deepEqual(drift, [
-      { field: "Memory", expected: 10505 * MIB, actual: 0 },
-      { field: "MemorySwap", expected: 14601 * MIB, actual: 0 },
+      { field: "Memory", expected: 8457 * MIB, actual: 0 },
+      { field: "MemorySwap", expected: 12553 * MIB, actual: 0 },
       { field: "CpuShares", expected: 512, actual: 0 },
     ]);
     assert.deepEqual(inspected[0], ["inspect", IMAGE_SHA_CONTAINER, "--format", "{{json .HostConfig}}"]);
 
     const d = decideDeployTrigger({ ...tick, resourcePolicyDrift: drift });
     assert.equal(d.deploy, true);
-    assert.match(d.reason, new RegExp(`Memory expected=${10505 * MIB} actual=0`));
-    assert.match(d.reason, new RegExp(`MemorySwap expected=${14601 * MIB} actual=0`));
+    assert.match(d.reason, new RegExp(`Memory expected=${8457 * MIB} actual=0`));
+    assert.match(d.reason, new RegExp(`MemorySwap expected=${12553 * MIB} actual=0`));
     assert.match(d.reason, /CpuShares expected=512 actual=0/);
     assert.doesNotMatch(d.reason, /MemoryReservation/, "a field that matches is not named");
 
     // The launcher names its own container and role; serve's policy is a reservation and, since the
-    // 2026-09-30 architecture ruling, a 5 GiB ceiling with 1 GiB of swap.
+    // 2026-10-02 operator ruling, a 7.5 GiB ceiling (two generations during a handoff) with 1 GiB of swap.
     const serve = withEnv({ RMD_RESOURCE_POLICY_CONTAINER: "remudero-core-daemon", RMD_RESOURCE_POLICY_ROLE: "serve" }, () =>
       shippedReader(root, execFile)(),
     );
     assert.equal(inspected[1]![1], "remudero-core-daemon");
     assert.deepEqual(serve, [
-      { field: "Memory", expected: 5120 * MIB, actual: 0 },
-      { field: "MemorySwap", expected: 6144 * MIB, actual: 0 },
+      { field: "Memory", expected: 7680 * MIB, actual: 0 },
+      { field: "MemorySwap", expected: 8704 * MIB, actual: 0 },
       { field: "CpuShares", expected: 4096, actual: 0 },
-      { field: "MemoryReservation", expected: 3072 * MIB, actual: 0 },
+      { field: "MemoryReservation", expected: 5120 * MIB, actual: 0 },
     ]);
 
     // A container already on the policy reads NO drift (Docker's -1 swap is drift, not unknown).
-    const onPolicy = { Memory: 10505 * MIB, MemorySwap: 14601 * MIB, CpuShares: 512, MemoryReservation: 0 };
-    assert.deepEqual(resourcePolicyDriftFrom("--cpu-shares=512\n--memory=10505m\n--memory-swap=14601m\n", JSON.stringify(onPolicy)), []);
+    const onPolicy = { Memory: 8457 * MIB, MemorySwap: 12553 * MIB, CpuShares: 512, MemoryReservation: 0 };
+    assert.deepEqual(resourcePolicyDriftFrom("--cpu-shares=512\n--memory=8457m\n--memory-swap=12553m\n", JSON.stringify(onPolicy)), []);
     assert.deepEqual(resourcePolicyDriftFrom("--memory=1m\n--memory-swap=2m\n", JSON.stringify({ ...UNLIMITED, Memory: MIB, MemorySwap: -1 })), [
       { field: "MemorySwap", expected: 2 * MIB, actual: -1 },
     ]);
