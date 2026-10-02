@@ -642,3 +642,17 @@ test("W1-T3388: an unreadable base ref turns attribution off rather than refusin
   assert.match(output.join("\n"), /BLOCKED/);
   assert.doesNotMatch(output.join("\n"), /inherited from the base/, "no base ⇒ no ownership claim");
 });
+
+test("the freshness-restart fixture is exempt because runSweep judges it against the injected clock", () => {
+  const file = "test/a-freshness-restart-lets-a-running-review-finish.test.ts";
+  const r = censusExpiringFixtures({
+    files: [file],
+    readFile: (p: string) => readFileSync(joinPath(REPO_ROOT, p), "utf8"),
+    // Far past the fixture's date: only an exemption keeps it out of `reported`.
+    now: Date.parse("2027-01-01T00:00:00.000Z"),
+    thresholdDays: THRESHOLD,
+  });
+  assert.deepEqual(r.reported, [], "the pinned-clock fixture is never reported as expiring");
+  assert.equal(r.exempt.length, 1, "it is counted as exempt by its marker, not dropped from the census");
+  assert.equal((r.exempt[0] as { file: string }).file, file);
+});
