@@ -679,7 +679,7 @@ export function reasonPreview(reason: string, limit = 96): string {
 
 function experiments(state: UsageTelemetryState, asOfHour: number, version: UsageVersion): UsageExperimentArm[] {
   const arms = new Map<string, UsageExperimentArm & { durationTotal: number }>();
-  for (const run of state.markedRuns ?? []) {
+  for (const run of [...(state.markedRuns ?? [])].sort((a, b) => a.firstTs - b.firstTs)) {
     if (run.hour <= asOfHour - 7 * 24) continue;
     const entries = Object.entries(run.markers).filter(([marker]) => version === LEGACY_USAGE_PROJECTION_VERSION ||
       marker !== "trialReason" && (!run.trial || !["trial", "trialArm"].includes(marker)));
