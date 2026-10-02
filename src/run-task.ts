@@ -173,7 +173,7 @@ import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec, testManifestProposalPath, type TestProposalFeed } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
-import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionLedgerRecords, readGateFireRateReport, freshCiFrictionPlanOrigins, type CiFrictionGardenSources } from "./lib/ci-friction-gardener.js";
+import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, runSelectorShadowGardener, selectorShadowFlakeLedger } from "./lib/selector-shadow-gardener.js";
 import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, startMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
@@ -33230,7 +33230,8 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       const sources: CiFrictionGardenSources = {
         ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
         gateFireRates: () => readGateFireRateReport(stateDir),
-        planOrigins: () => freshCiFrictionPlanOrigins(repoRoot),
+        planState: () => readCiFrictionPlanState(repoRoot),
+        ownerSearch: gitCiFrictionOwnerSearch((args) => execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 })),
         mintTaskId: ciLearningTaskIdMinter(repoRoot),
       };
       return gardenPass(ciFrictionGardenSpec(d, sources), d);
@@ -33329,9 +33330,46 @@ export function runRegisteredGardenPass(name: RegisteredGardenName, args: readon
   return built instanceof Promise ? built.then((pass) => (signal.stopped ? 0 : run(pass))) : run(built);
 }
 
+/** `rmd garden replay ci-friction [--days <n>] [--step-hours <h>]` — the ci-friction ladder replayed
+ *  over the past window from the ledger union and main's plan history, read-only: nothing is filed. */
+export const GARDEN_REPLAY_DAYS_FLAG = "--days";
+export const GARDEN_REPLAY_STEP_FLAG = "--step-hours";
+
+export function gardenReplayCommand(rest: string[], deps: { say?: (line: string) => void; now?: () => number; stateDir?: string; repoRoot?: string } = {}): number {
+  const [name, ...flags] = rest;
+  const badArg = unknownArgError("garden", flags, [GARDEN_REPLAY_DAYS_FLAG, GARDEN_REPLAY_STEP_FLAG]);
+  const value = (flag: string, fallback: number): number => {
+    const i = flags.indexOf(flag);
+    const n = i >= 0 ? Number(flags[i + 1]) : fallback;
+    return Number.isFinite(n) && n > 0 ? n : NaN;
+  };
+  const days = value(GARDEN_REPLAY_DAYS_FLAG, 7);
+  const stepHours = value(GARDEN_REPLAY_STEP_FLAG, 6);
+  if (name !== "ci-friction" || badArg || Number.isNaN(days) || Number.isNaN(stepHours)) {
+    console.error(`${badArg ?? "rmd garden: usage: rmd garden replay ci-friction [--days <n>] [--step-hours <h>]"}\n` + USAGE);
+    return 2;
+  }
+  const say = deps.say ?? ((line: string) => console.log(line));
+  const root = deps.repoRoot ?? repoRoot;
+  const stateDir = deps.stateDir ?? join(loadConfig().root, "state");
+  const git: CiFrictionGit = (args) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  const toMs = (deps.now ?? Date.now)();
+  const lines = replayCiFriction({
+    records: readCiFrictionLedgerRecords(stateDir),
+    tasks: readCiFrictionPlanTimeline(git, relative(root, join(resolveRepoLayout(root).planDir, "tasks.d"))),
+    fromMs: toMs - days * 86_400_000,
+    toMs,
+    stepMs: stepHours * 3_600_000,
+    ownerSearch: gitCiFrictionOwnerSearch(git),
+  });
+  say(renderCiFrictionReplay(lines));
+  return 0;
+}
+
 /** `rmd garden run <name> [--hourly]` — one pass of one registered garden, the daemon's off-loop child (W1-T5114). */
-export async function gardenCommand(rest: string[]): Promise<number> {
+export async function gardenCommand(rest: string[], deps: { say?: (line: string) => void; now?: () => number } = {}): Promise<number> {
   const [sub, name] = rest;
+  if (sub === "replay") return gardenReplayCommand(rest.slice(1), deps);
   const badArg = unknownArgError("garden", rest.slice(2), [], [GARDEN_HOURLY_FLAG]);
   if (sub !== "run" || name === undefined || !isRegisteredGardenName(name) || badArg) {
     console.error(`${badArg ?? `rmd garden: usage: ${commandSyntax("garden")} — gardens: ${REGISTERED_GARDEN_NAMES.join(", ")}`}\n` + USAGE);
@@ -48590,9 +48628,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "garden",
-    syntax: "rmd garden run <name> [--hourly]",
+    syntax: "rmd garden run <name> [--hourly] | rmd garden replay ci-friction [--days <n>] [--step-hours <h>]",
     summary: "Run one pass of one registered gardener (the daemon's off-loop child).",
-    detail: "W1-T5114: builds the named garden from the shared registry (buildRegisteredGarden) and runs exactly one pass, appending to the same ledger the daemon does. The daemon spawns this per gardener pass so no pass runs on its event loop; --hourly also refreshes the test garden's hourly CI evidence.",
+    detail: "W1-T5114: builds the named garden from the shared registry (buildRegisteredGarden) and runs exactly one pass, appending to the same ledger the daemon does. The daemon spawns this per gardener pass so no pass runs on its event loop; --hourly also refreshes the test garden's hourly CI evidence. `replay ci-friction` replays the ci-friction remedy ladder over the past --days (default 7) at --step-hours (default 6) from the ledger union and main's plan history, read-only.",
   },
   {
     name: "escalate",

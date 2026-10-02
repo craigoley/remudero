@@ -7,7 +7,6 @@ import { test } from "node:test";
 import type { Clock } from "../src/lib/clock.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import type { Escalation } from "../src/lib/escalate.js";
-import { CI_FRICTION_REMEDIES_FILE } from "../src/lib/ci-friction-gardener.js";
 import { gardenEffectsPath, gardenStatePath, readGardenEffects, runGarden, type GardenSpec } from "../src/lib/gardener.js";
 import {
   GARDENER_OVERSEER_OFF,
@@ -254,19 +253,6 @@ test("W1-T4802: an effect inside one standard error waits", () => {
   }
 });
 
-test("W1-T4802: the ci-friction effect reading follows the priced cause once its remedy landed", () => {
-  const cause = { kind: "check", name: "test" };
-  const priced = (minutes: number) => [{ cause, minutes, rounds: 4 }];
-  const rows = [
-    row("ci-friction.scorecard", T0, { pr_url: "https://github.com/o/r/pull/3", untracked: "check:test", priced: priced(80) }),
-    row("ci-friction.scorecard", T0 + 5 * HOUR, { untracked: null, priced: priced(20) }),
-  ];
-  const pr = { gardener: "ci-friction", url: "https://github.com/o/r/pull/3", mergedAt: new Date(T0 + HOUR).toISOString() };
-  assert.deepEqual(ciFrictionEffectReading(pr, rows, () => true), { before: 80, after: 20, se: 40 });
-  assert.equal(ciFrictionEffectReading(pr, rows, () => false), undefined, "unmeasured until the filed task's remedy lands");
-  assert.equal(ciFrictionEffectReading({ ...pr, gardener: "test" }, rows, () => true), undefined);
-});
-
 test("W1-T4802: near-identical proposals debit the class as churn", () => {
   const T = T0 + 10 * HOUR;
   const merges: Record<string, number> = {
@@ -407,19 +393,14 @@ test("W1-T4802: the production ports read a PR from GitHub and the remedies file
     assert.equal(ports.prInfo?.("https://github.com/o/r/pull/4"), undefined);
     assert.equal(h.steps("gardener_overseer.pr_unreadable")[0]?.error, "HTTP 502");
 
-    const cause = { kind: "check", name: "test" };
-    const priced = (minutes: number) => [{ cause, minutes, rounds: 4 }];
-    const rows = [
-      row("ci-friction.scorecard", T0, { pr_url: "https://github.com/o/r/pull/3", untracked: "check:test", priced: priced(80) }),
-      row("ci-friction.scorecard", T0 + 5 * HOUR, { untracked: null, priced: priced(20) }),
-    ];
+    // Outside a git checkout with no ledger rotations: the plan and rounds reads are unreadable, which
+    // leaves the effect unmeasured under rows naming why — never a verdict and never a failed pass.
+    const rows = [row("ci-friction.scorecard", T0, { pr_url: "https://github.com/o/r/pull/3", untracked: "check:test" })];
     const tracked = { gardener: "ci-friction", actionClass: "draft", url: "https://github.com/o/r/pull/3", openedAt: new Date(T0).toISOString(), mergedAt: new Date(T0 + HOUR).toISOString() };
-    assert.equal(ports.effectReading?.(tracked, rows), undefined, "no remedies file: unmeasured");
-    mkdirSync(join(h.dir, "docs"), { recursive: true });
-    writeFileSync(join(h.dir, CI_FRICTION_REMEDIES_FILE), "unrelated\n");
-    assert.equal(ports.effectReading?.(tracked, rows), undefined, "a remedies file that does not name the cause: unmeasured");
-    writeFileSync(join(h.dir, CI_FRICTION_REMEDIES_FILE), "## ci-friction:check:test\n");
-    assert.deepEqual(ports.effectReading?.(tracked, rows), { before: 80, after: 20, se: 40 });
+    assert.equal(ports.effectReading?.(tracked, rows), undefined);
+    assert.equal(h.steps("gardener_overseer.remedy_plan_unreadable").length, 1);
+    assert.equal(ports.effectReading?.(tracked, rows), undefined, "the plan read is attempted once per pass");
+    assert.equal(h.steps("gardener_overseer.remedy_plan_unreadable").length, 1);
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
   }
@@ -433,6 +414,50 @@ test("W1-T4802: state/GARDENER_OVERSEER_OFF stops the pass", () => {
     h.rows.push(row("x.gardener_failed", T0, { error: "e" }));
     assert.equal(runGardenerOverseer(h.deps).ran, false);
     assert.equal(h.logs.length, 0);
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+test("a ci-friction effect is judged on the remedy's build, by its cause's share of fix rounds", () => {
+  const DAY = 24 * HOUR;
+  const merged = Date.parse("2026-09-20T00:00:00.000Z");
+  const filing = row("ci-friction.scorecard", merged - 3 * DAY, { pr_url: "https://github.com/o/r/pull/9", untracked: "fix_refusal:x#r2" });
+  const pr = { gardener: "ci-friction", url: "https://github.com/o/r/pull/9", mergedAt: new Date(merged - 2 * DAY).toISOString() };
+  const shareRounds = (from: number, n: number, every: number) => Array.from({ length: n }, (_, i) => ({ pr: i, causeKey: i % every === 0 ? "fix_refusal:x" : "other", at: new Date(from + i * HOUR).toISOString() }));
+  const task = (files: string[], mergedAt?: string) => ({ id: "W1-T7100", origin: "ci-friction:fix_refusal:x#r2", status: "merged", retired: false, files, ...(mergedAt ? { mergedAt } : {}) });
+  const rounds = [...shareRounds(merged - 4 * DAY, 90, 3), ...shareRounds(merged, 90, 30)];
+  const now = merged + 4 * DAY;
+
+  assert.equal(ciFrictionEffectReading({ ...pr, gardener: "plan" }, [filing], () => undefined, () => [], now), undefined, "another gardener is judged by its own metric");
+  assert.equal(ciFrictionEffectReading(pr, [], () => undefined, () => [], now), undefined, "no filing scorecard");
+  assert.equal(ciFrictionEffectReading(pr, [{ ...filing, untracked: "not a cause" }], () => undefined, () => [], now), undefined, "an unparseable receipt");
+  assert.equal(ciFrictionEffectReading(pr, [filing], () => undefined, () => rounds, now), undefined, "no remedy record yet");
+  assert.equal(ciFrictionEffectReading(pr, [filing], () => task(["src/a.ts"]), () => rounds, now), undefined, "its build has not merged");
+  assert.deepEqual(ciFrictionEffectReading(pr, [filing], () => task(["docs/ci-friction-remedies.md"], new Date(merged).toISOString()), () => rounds, now), {
+    before: 0, after: 0, se: 0, verdict: "debit", reason: "W1-T7100 was built as a docs-only record, which changes no code path",
+  });
+  const credit = ciFrictionEffectReading(pr, [filing], () => task(["src/a.ts"], new Date(merged).toISOString()), () => rounds, now);
+  assert.equal(credit?.verdict, "credit");
+  assert.match(credit?.reason ?? "", /^W1-T7100: fell: share of fix rounds/);
+  const pending = ciFrictionEffectReading(pr, [filing], () => task(["src/a.ts"], new Date(merged).toISOString()), () => rounds.slice(0, 95), now);
+  assert.equal(pending, undefined, "too little evidence after the build: no verdict yet");
+});
+
+test("the overseer issues ci-friction verdicts under the v2 id and logs their reason", () => {
+  const h = harness(T0 + 2 * HOUR);
+  try {
+    writeFileSync(join(h.dir, "gardener-overseer.json"), JSON.stringify({
+      episodes: {}, verdicts: [], churnEscalated: {},
+      prs: { "https://github.com/o/r/pull/9": { gardener: "ci-friction", actionClass: "draft", url: "https://github.com/o/r/pull/9", openedAt: new Date(T0).toISOString(), info: { state: "merged", title: "t", paths: [], mergedAt: new Date(T0 + HOUR).toISOString() } } },
+    }));
+    h.deps.effectReading = () => ({ before: 0.3, after: 0.3, se: 0, verdict: "debit", reason: "did not fall" });
+    runGardenerOverseer(h.deps);
+    const verdict = h.steps("gardener_overseer.effect_verdict")[0];
+    assert.equal(verdict?.verdict, "debit");
+    assert.equal(verdict?.reason, "did not fall");
+    const effects = readGardenEffects(gardenEffectsPath(h.dir, "ci-friction"));
+    assert.deepEqual(effects.map((e) => e.id), ["effect:v2:https://github.com/o/r/pull/9"]);
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
   }

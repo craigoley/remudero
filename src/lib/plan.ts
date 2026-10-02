@@ -238,7 +238,28 @@ export interface MachineFilingAdmissionContext {
   pathExistsAtBase?: (repoRelPath: string) => boolean;
 }
 
+/** A regression test a build writes: it cannot exist before the task that creates it is filed. */
+const NEW_TEST_FILE = /^test\/[\w./-]+\.test\.[mc]?[jt]s$/;
+
+/**
+ * 2026-10-02: a ci-friction remedy names the code that owns its cause (under `src/` or `scripts/`) and
+ * the regression test its build writes. Until then the only admissible ci-friction shape was a single
+ * docs file nothing reads, so every remedy the gardener filed was built as a paragraph and changed no
+ * code path (#8302 #8476 #8507 #8514 #8544 #8546).
+ */
+function isCiFrictionRemedyProposal(task: Task): boolean {
+  const files = task.files ?? [];
+  return (
+    task.origin?.startsWith("ci-friction:") === true &&
+    files.some((f) => /^(src|scripts)\//.test(f)) &&
+    files.every((f) => /^(src|scripts)\//.test(f) || NEW_TEST_FILE.test(f))
+  );
+}
+
 function isParkedMachineProposal(task: Task): boolean {
+  if (task.author_class === "machine" && task.verify === "human" && task.status !== "blocked" && (task.depends_on ?? []).length === 0 && isCiFrictionRemedyProposal(task)) {
+    return true;
+  }
   return (
     task.author_class === "machine" &&
     task.verify === "human" &&
@@ -957,7 +978,9 @@ export function machineFilingAdmissionViolations(
 
   const exists = context.pathExists ?? (() => false);
   const existsAtBase = context.pathExistsAtBase ?? (() => false);
-  const missing = (task.files ?? []).filter((path) => !exists(path) && !existsAtBase(path));
+  // A parked ci-friction remedy's own regression test is written by its build, so it may not exist yet.
+  const newTestAllowed = isCiFrictionRemedyProposal(task);
+  const missing = (task.files ?? []).filter((path) => !exists(path) && !existsAtBase(path) && !(newTestAllowed && NEW_TEST_FILE.test(path)));
   if (missing.length > 0) {
     reasons.push(
       `task ${task.id} declares file path(s) that exist in neither the checkout nor the base tree: ` +
