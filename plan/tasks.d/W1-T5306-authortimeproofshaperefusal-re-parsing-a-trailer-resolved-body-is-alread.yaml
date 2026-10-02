@@ -1,0 +1,83 @@
+- id: W1-T5306
+  title: "AUTHORTIMEPROOFSHAPEREFUSAL RE-PARSING A TRAILER-RESOLVED BODY IS ALREADY DECIDED — this follow-up (from W1-T3558 again) duplicates the precise fix already queued as W1-T3574 and MASTER-PLAN's own P63/DR-8 routing rule; retired unbuilt as a grep-able record so the NEXT rediscovery costs a grep, not a full CI cycle"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 1.00
+  files: [plan/tasks.d]
+  origin: "followup:DAEMON-1789395952439:2026-09-14T14:44:11.890Z:0"
+  plan_refs: ["W1-T3574", "W1-T3558"]
+  status: blocked
+  retirement: withdrawn
+  attempts: 0
+  rationale: |
+    VERIFIED FROM SOURCE, not inferred: `evaluateGate` (scripts/acceptance-author-gate.mjs:365-366)
+    calls `authorTimeProofShapeRefusal(body, result)` UNCONDITIONALLY whenever
+    `acceptanceAuthorTimeCheck` returns `ok: true` — including the trailer fast path
+    (src/lib/review.ts:5208-5210), which returns `ok: true` the moment a `Remudero-Task:` trailer
+    resolves, WITHOUT ever reading the body's own `## Acceptance` block. `authorTimeProofShapeRefusal`
+    then re-parses that block regardless, so a purely decorative narrative Acceptance section — written
+    only to satisfy the human-facing "substantiate every criterion" instruction — can trip a false
+    `proof-shape` refusal on work whose real criteria already resolve from the plan.
+
+    THIS IS NOT A NEW FINDING. MASTER-PLAN.md already documents it in detail, more than once, as one of
+    the two dominant repeats in the current retro cycle's harvest: "`authorTimeProofShapeRefusal`
+    (scripts/acceptance-author-gate.mjs) re-parses the PR body's own `## Acceptance` section for proof
+    shape EVEN WHEN a `Remudero-Task:` trailer has already resolved the criteria from the plan — named
+    independently by FOUR tasks (W1-T3558, W1-T3578, W1-T3579, W1-T3580), each having paid a full CI
+    cycle to rediscover it" and is explicitly folded into evidence for the standing **P63** proposal
+    ("a gate whose remedy the declared scope forbids is still a deadlock") — "**P63's deadlock, at repo
+    scale**. Counted ONCE each as operational causes (DR-8)." DR-8 is the retro's own documented rule for
+    exactly this shape: a repeat finding is ROUTED to the proposal it already evidences, never re-minted
+    as a fresh task. This follow-up (originating from W1-T3558 again, run DAEMON-1789395952439) is
+    another instance of the SAME already-counted finding.
+
+    THE FIX IS ALREADY DESIGNED AND QUEUED — plan/tasks.d/W1-T3574-reconcile-the-acceptance-header-trailer-shadow-report.yaml,
+    `status: queued`, `attempts: 0`, files scoped to `scripts/acceptance-author-gate.mjs` and
+    `test/acceptance-author-gate.test.ts` only. Its design is STRICTER, and correctly so, than this
+    proposal's own framing ("skip the check entirely once the trailer fast path returned ok: true"):
+    `acceptanceAuthorTimeCheck`'s trailer arm returns `ok: true` even when `trailerResolves` is
+    `undefined` (an unreadable plan) — `if (trailerId !== undefined && (opts.trailerResolves ===
+    undefined || opts.trailerResolves(trailerId)))` — so skipping on bare `ok: true` would also skip on a
+    body whose trailer resolves to NOTHING because the plan could not be read, which is exactly the
+    "empty-plan fallback" false-safety W1-T3574's own falsifier guards against ("Mutate the resolver to
+    use only declaredPlanTaskIds and the empty-acceptance control must become an unsafe success").
+    W1-T3574 instead adds a distinct, fail-closed resolver that checks the trailered task's NON-EMPTY
+    acceptance at the PR's EXACT head sha before bypassing the body parser — the same condition
+    `resolvePlanCriteriaAtHead` already uses on the reviewer side (src/run-task.ts). Filing a second task
+    against the naive framing would EITHER duplicate W1-T3574's work (P66's "two authoring lanes draw
+    from one task board" failure mode, already named live in this same MASTER-PLAN cycle at
+    W1-T3573/W1-T3574/W1-T3582) or, if built exactly as this proposal's own words suggest, ship a
+    WEAKER, less-safe rule than the one already queued.
+  design: |
+    NOT TO BE BUILT. Left in the plan as a RETIREMENT RECORD, not a work item, so this exact
+    `followup:` proposal has a durable, grep-able disposition instead of silently vanishing from the
+    inbox or costing a sixth full CI cycle to rediscover. `status: blocked` with `retirement: withdrawn`
+    is the established convention for a plan-bookkeeping record that must never be dispatched — enforced
+    at the SAME filter drain.ts already applies to every other task: `isDispatchEligible`
+    (src/lib/drain.ts:441-446) refuses `t.status === "blocked"` before any dependency or breaker check,
+    reporting it as `"retired"` once a legal `retirement:` value is present (W1-T2474,
+    `RETIREMENT_REASONS`, src/lib/plan.ts:46).
+
+    depends_on is left at `[]` and no other task, no source file, and no test is touched by this record.
+    The actual fix stays entirely W1-T3574's, unmodified by this filing.
+
+    IF A FUTURE READER FINDS W1-T3574 CLOSED WITHOUT SHIPPING THIS RULE — retired unbuilt, superseded
+    by a design that does NOT skip proof-shape on a resolving trailer, or its shard deleted outright —
+    that is new information this record does not have, and the correct response is to REOPEN this
+    question with a fresh task against `scripts/acceptance-author-gate.mjs`, not to un-block this one.
+  acceptance:
+    - claim: "this follow-up is withdrawn as a duplicate of the already-queued, already-precise W1-T3574, per MASTER-PLAN's own P63/DR-8 routing rule for repeat harvest findings — never dispatched"
+      proof: "grep: AUTHORTIMEPROOFSHAPEREFUSAL RE-DISCOVERY ROUTED TO W1-T3574 PER P63/DR-8 in plan/tasks.d"
+  note: |
+    AUTHORTIMEPROOFSHAPEREFUSAL RE-DISCOVERY ROUTED TO W1-T3574 PER P63/DR-8. Withdrawn at filing,
+    2026-09-14, from proposal followup:DAEMON-1789395952439:2026-09-14T14:44:11.890Z:0 (task W1-T3558,
+    run DAEMON-1789395952439, https://github.com/craigoley/remudero/pull/5545). Ground checked against
+    src/lib/review.ts:5181-5268 and scripts/acceptance-author-gate.mjs:349-392 (current sha at
+    ratification time) and against MASTER-PLAN.md's live proposal ranking (P63) and its most recent
+    retro harvest lines naming this exact defect independently found by W1-T3558/W1-T3578/W1-T3579/
+    W1-T3580. No src/, test/, or workflow file is touched by this filing — the remedy is entirely
+    W1-T3574's, already queued and unmodified.

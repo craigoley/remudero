@@ -3,9 +3,12 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
+  priority: 2.5
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=0140d95b35f086e4
   attempts: 0
   author_class: machine
   origin: "selector-shadow-miss:test/dependency-declarations-match-use.test.ts"
@@ -14,3 +17,13 @@
   acceptance:
     - claim: "the floor selector includes test/dependency-declarations-match-use.test.ts when this edge is exercised"
       proof: "grep: test/dependency-declarations-match-use\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.86
+    reasons:
+      - "The filed plan describes a selector-edge repair for one named test suite and declares only src/lib/affected-suites.ts, consistent with that scope."
+      - "The record specifies verify: auto and an explicit grep: acceptance proof; the supplied gates report no failure or operator-only decision."
+      - "The supplied description requests test inclusion and names no sensitive, destructive, irreversible, or policy-changing action. No implementation or actual-change view is supplied, so correctness remains unverified."
+    judged_at: "2026-10-02T16:56:46.634Z"
+    pin: "de44aba131c0876272290653129a01de1717acc3cf44614f2bc8389b1bbf9a53"
