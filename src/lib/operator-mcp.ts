@@ -20,7 +20,7 @@ export function createOperatorMcpServer(deps: OperatorMcpConfig): Server {
   const base = new URL(deps.url);
   const timeoutMs = deps.timeoutMs ?? REQUEST_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > REQUEST_TIMEOUT_MS) throw new Error("invalid operator timeout");
-  if (typeof deps.readToken !== "string" || !deps.readToken || (deps.writeToken !== undefined && (typeof deps.writeToken !== "string" || !deps.writeToken)) || !["http:", "https:"].includes(base.protocol) || base.username || base.password || base.search || base.hash)
+  if (typeof deps.readToken !== "string" || !deps.readToken || (deps.writeToken !== undefined && (typeof deps.writeToken !== "string" || !deps.writeToken)) || !["http:", "https:"].includes(base.protocol) || base.username || base.password || base.search || base.hash || base.pathname !== "/")
     throw new Error("operator MCP needs a configured HTTP origin and read-scope token");
   const tools = [
     { name: "inbox", description: "Read the current operator decision inbox, with its freshness and unavailable states.", inputSchema: { type: "object", properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true } },

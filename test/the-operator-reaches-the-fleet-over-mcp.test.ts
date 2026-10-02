@@ -75,7 +75,7 @@ test("operator tools refuse writes without capability, injection, surplus argume
     try { for (const answer of ["", " ", "x".repeat(16_385)]) assert.equal((await enabled.client.callTool({ name: "answer_question", arguments: { taskId: "W1-T1", answer } })).isError, true); }
     finally { await enabled.close(); }
   } finally { await pair.close(); await f.close(); }
-  for (const url of ["ftp://local/", "http://user:pass@local/", "http://local/?token=x", "http://local/#x"])
+  for (const url of ["ftp://local/", "http://user:pass@local/", "http://local/?token=x", "http://local/#x", "http://local/v1/i/site"])
     assert.throws(() => createOperatorMcpServer({ ...base, url }));
   assert.throws(() => createOperatorMcpServer({ ...base, timeoutMs: 0 }));
   assert.throws(() => createOperatorMcpServer({ ...base, readToken: "" }));
