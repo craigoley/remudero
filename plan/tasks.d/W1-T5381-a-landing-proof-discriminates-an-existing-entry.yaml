@@ -1,0 +1,30 @@
+- id: W1-T5381
+  title: "A FEEDBACK-LANDING PR FOR AN ENTRY ALREADY ON MAIN CARRIES A PROOF THAT PASSES AT BASE — #8731 grepped the entry's id in its own file, which main already held, so proof-discrimination refused it; the proof must name what this landing changes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 6.00
+  risk: low
+  origin: "operator session 90be18e2, 2026-10-02: #8731 red on proof-discrimination"
+  files: [src/lib/feedback-landing.ts, test/a-landing-proof-discriminates-an-existing-entry.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-02: the feedback-landing bridge (W1-T243) writes one Acceptance line per landed entry,
+    "grep: <id> in plan/feedback/<id>.yaml" (src/lib/feedback-landing.ts). That discriminates only for a NEW
+    entry. #8731 landed a status change (proposed -> accepted) on an entry main already held, so the id
+    matched at base and head, proof-discrimination failed, and an operator rewrote the body by hand.
+  design: |
+    For an entry that exists at the base, the proof greps the field the landing changes (its new status
+    line, or the first changed field), which is absent at base; a new entry keeps the id proof. The bridge
+    already knows which entries are new because it diffs against the base it lands onto.
+  acceptance:
+    - claim: "a landing that changes an existing entry's status proves the new status, which is absent at base"
+      proof: 'grep: test("W1-T5381: a landing that changes an existing entry proves the new status" in test/a-landing-proof-discriminates-an-existing-entry.test.ts'
+    - claim: "a landing that adds a new entry still proves it by id"
+      proof: 'grep: test("W1-T5381: a landing that adds a new entry still proves it by id" in test/a-landing-proof-discriminates-an-existing-entry.test.ts'
+  falsifier: |
+    Revert to the id-only proof and the first test sees a proof that matches at base.
