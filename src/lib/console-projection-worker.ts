@@ -10,7 +10,8 @@
  */
 import { isMainThread, parentPort, threadId, Worker, workerData } from "node:worker_threads";
 import { listFeedback, type FeedbackEntry } from "./feedback.js";
-import { loadPlan, type Plan } from "./plan.js";
+import type { Plan } from "./plan.js";
+import { threadStrictPlan } from "./thread-plan.js";
 import { feedbackOriginTag, type DischargeGithub } from "./trace.js";
 
 const CONSOLE_PROJECTION_WORKER_KIND = "remudero-console-projection" as const;
@@ -42,7 +43,7 @@ export function computeFeedbackProjectionSync(input: FeedbackProjectionInput): F
   const entries = listFeedback(input.root, {});
   try {
     const byOrigin = new Map<string, string[]>();
-    for (const [id, origin] of input.taskOrigins ?? taskOriginsOf(loadPlan(input.planPath))) {
+    for (const [id, origin] of input.taskOrigins ?? taskOriginsOf(threadStrictPlan(input.planPath))) {
       byOrigin.set(origin, [...(byOrigin.get(origin) ?? []), id]);
     }
     const filedTasks = entries.map((e): [string, string[]] => [e.id, byOrigin.get(feedbackOriginTag(e.id)) ?? []]);
