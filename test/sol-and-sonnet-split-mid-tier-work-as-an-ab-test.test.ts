@@ -22,7 +22,7 @@ import { workerSelectionAssignment, type SpawnWorkerArgs } from "../src/lib/work
 const REPO_ROOT = join(import.meta.dirname, "..");
 const SOL_VS_SONNET = ROUTING_EXPERIMENTS.find((experiment) => experiment.id === "sol-vs-sonnet")!;
 
-const MODELS: CodexModelInfo[] = ["gpt-6-sol", "gpt-6-luna", "gpt-5.6-luna"].map((id) => ({
+const MODELS: CodexModelInfo[] = ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-luna"].map((id) => ({
   id,
   model: id,
   supportedReasoningEfforts: ["low", "medium", "high"].map((reasoningEffort) => ({ reasoningEffort })),
@@ -31,9 +31,9 @@ const SHARED = { rateLimitsByLimitId: { codex: { limitId: "codex", primary: { us
 
 test("all sonnet efforts reach Sol on Codex while the high-effort A/B stays scoped", () => {
   const ladder = loadMounts(mountsPath(REPO_ROOT)).capabilities!;
-  assert.equal(ladder.codex.balanced.high[0], "gpt-6-sol");
+  assert.equal(ladder.codex.balanced.high[0], "gpt-6.1-sol");
   for (const effort of ["low", "medium", "high"] as const) {
-    assert.equal(selectCodexModel(MODELS, SHARED, {} as never, "sonnet", effort, ladder).model, "gpt-6-sol", `sonnet/${effort}`);
+    assert.equal(selectCodexModel(MODELS, SHARED, {} as never, "sonnet", effort, ladder).model, "gpt-6.1-sol", `sonnet/${effort}`);
   }
   assert.equal(selectCodexModel(MODELS, SHARED, {} as never, "haiku", "medium", ladder).model, "gpt-6-luna");
   const considered = [
