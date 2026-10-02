@@ -15,7 +15,8 @@ import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/work
 // A NAMESPACE import, read inside each test: at a base without this task's exports the file still
 // LOADS and every test fails on its own assertion, so the proof discriminates instead of erroring.
 import * as runTaskModule from "../src/run-task.js";
-import { ciGateState, runTask, waitForCiGreen, type PollDeps } from "../src/run-task.js";
+import { ciGateState, daemonCommand, runTask, waitForCiGreen, type PollDeps } from "../src/run-task.js";
+import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
@@ -291,4 +292,56 @@ test("W1-T5345: a run with no pull request never hands off", async (t) => {
   assert.equal(run.ciPolls, 0, "no PR, no CI wait");
   assert.equal(prOpenRows(run.ledger).length, 0);
   assert.ok(!run.ledger.some((line) => line.step === "run.awaiting_external"));
+});
+
+test("W1-T5345: the daemon's production runOne turns the PR-open handoff on", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}pr-open-handoff-daemon-root-`));
+  const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}pr-open-handoff-daemon-home-`));
+  const planPath = join(root, "tasks.yaml");
+  writeFileSync(planPath, ["- id: T-PR-OPEN-DAEMON", "  title: daemon wiring fixture", "  repo: remudero", "  type: implement", "  verify: auto", "  risk: medium", "  files: [src/run-task.ts]", "  origin: test", "  status: queued", ""].join("\n"));
+  const origin = gitRepo({ bare: true, kind: "pr-open-handoff-daemon-origin" });
+  const seed = gitRepo({ seedCommit: false, kind: "pr-open-handoff-daemon-seed" });
+  seed.addRemote("origin", origin.dir);
+  writeFileSync(join(seed.dir, "README.md"), "seed\n");
+  seed.git("add", "-A");
+  seed.git("commit", "-q", "-m", "seed");
+  seed.git("push", "-q", "-u", "origin", "main");
+  const repoRoot = join(root, "repos", "remudero");
+  mkdirSync(join(root, "repos"), { recursive: true });
+  execFileSync("git", ["clone", "-q", origin.dir, repoRoot]);
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  const previous = { HOME: process.env.HOME, CI: process.env.CI, GITHUB_ACTIONS: process.env.GITHUB_ACTIONS };
+  process.env.HOME = home;
+  delete process.env.CI;
+  delete process.env.GITHUB_ACTIONS;
+  try {
+    let captured: DaemonDeps | undefined;
+    let forwarded: Parameters<typeof runTask>[1] | undefined;
+    const code = await daemonCommand(["--repo", "acme/remudero", "--plan", planPath, "--max", "0"], {
+      repoRoot,
+      githubFactory: () => OFFLINE_GITHUB,
+      runDaemon: async (_plan, deps): Promise<DaemonSummary> => {
+        captured = deps;
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+      runTask: async (taskId, options) => {
+        forwarded = options;
+        return { taskId, runId: "pr-open-daemon", merged: false, costUsd: 0, verdict: "handed_off" };
+      },
+    });
+    assert.equal(code, 0);
+    assert.ok(captured, "the composition root supplies its real runOne closure");
+    await captured.runOne("T-PR-OPEN-DAEMON");
+    assert.equal(forwarded?.handOffAtPrOpen, true, "a daemon lane is given back at PR open");
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    origin.cleanup();
+    seed.cleanup();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
 });
