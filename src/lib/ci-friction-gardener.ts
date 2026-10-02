@@ -482,8 +482,11 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
       }
       return out.split("\n").flatMap((line) => {
         const m = /^[^:]+:(.+):(\d+)$/.exec(line.trim());
-        if (!m || /(^|\/)test\/|\.test\.[mc]?[jt]s$/.test(m[1]!)) return [];
-        return [{ file: m[1]!, hits: Number(m[2]) }];
+        if (!m) return [];
+        const file = m[1]!;
+        // A test file is evidence, never an owner — under a test/ directory or named *.test.*.
+        if (/(?:^|\/)test\//.test(file) || /\.test\.[mc]?[jt]s$/.test(file)) return [];
+        return [{ file, hits: Number(m[2]) }];
       });
     },
     fileExists: (file) => {
