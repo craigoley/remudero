@@ -20,7 +20,8 @@
     from ordinary machine work. A raw verifyHumanPending count is not that ruling.
   design: |
     Add dependency_review, held_root and verify_human source adapters to the shared
-    projector. Read the current producer contracts first. Open MANUAL dependency
+    projector through projectDependencyVerificationGates, consumed by now-view.
+    Read the current producer contracts first. Open MANUAL dependency
     escalations become an ask; MIGRATE and a still-repairable HOLD do not. Reuse the
     existing bounded-age escalation producer rather than inventing a second hold timer.
     A held dependency root has one gate only while it has live stalled dependents; expose
@@ -31,6 +32,8 @@
     Resolution uses existing approval, release, retirement or verification authority;
     this read-only adapter grants none of it and adds no PR or dispatch gate.
   acceptance:
+    - claim: "the production now view consumes the new dependency and verification adapter"
+      proof: 'grep: projectDependencyVerificationGates( in src/lib/now-view.ts'
     - claim: "dependency migration and machine repair cannot create human decisions"
       proof: 'grep: migration and repairable dependency holds create no human gate in test/human-gate-dependency-verification.test.ts'
     - claim: "the verification judge distinguishes automation from a real human ask"
