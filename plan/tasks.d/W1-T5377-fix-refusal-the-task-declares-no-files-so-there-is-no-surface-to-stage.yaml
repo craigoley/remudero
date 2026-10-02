@@ -1,0 +1,38 @@
+- id: W1-T5377
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — fix_refusal:the-task-declares-no-files-so-there-is-no-surface-to-stage cost 315 PR minute(s) across 68 round(s) on 48 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.15
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:fix_refusal:the-task-declares-no-files-so-there-is-no-surface-to-stage"
+  files:
+    - src/run-task.ts
+    - test/fix-refusal-the-task-declares-no-files-so-there-is-no-surface-to-stage.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on fix_refusal:the-task-declares-no-files-so-there-is-no-surface-to-stage"
+      proof: "grep: test(\"W1-T5377: fix_refusal:the-task-declares-no-files-so-there-is-no-surface-to-stage is prevented, not retried\" in test/fix-refusal-the-task-declares-no-files-so-there-is-no-surface-to-stage.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures fix_refusal:the-task-declares-no-files-so-there-is-no-surface-to-stage's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: fix_refusal:the-task-declares-no-files-so-there-is-no-surface-to-stage cost 315 PR minute(s) (seven-day half-life) across 68 fix round(s) on 48 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/run-task.ts: names "the task declares no files, so there is no surface to stage" (1 line(s))
+
+    RECENT ROUNDS (newest first):
+    - PR #7028 at 2026-09-24T16:41:25.280Z: the task declares no files, so there is no surface to stage
+    - PR #7005 at 2026-09-24T16:19:02.687Z: the task declares no files, so there is no surface to stage
+    - PR #7022 at 2026-09-24T15:20:31.863Z: the task declares no files, so there is no surface to stage
+    - PR #7003 at 2026-09-24T14:18:15.686Z: the task declares no files, so there is no surface to stage
+    - PR #7006 at 2026-09-24T13:57:45.524Z: the task declares no files, so there is no surface to stage
+
+    WHAT THE LAST RUNG TRIED: W1-T5085 (a docs-only record, which changed no code path; its advice is under ci-friction:fix_refusal:the-task-declares-no-files-so-there-is-no-surface-to-stage in docs/ci-friction-remedies.md).
+    Do something structurally different from it.
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
