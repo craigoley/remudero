@@ -35,6 +35,7 @@ import {
 } from "./operator-message.js";
 import type { GhApiFetcher } from "./open-prs-rest.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
+import { RmdError } from "./errors.js";
 
 const PLAN_TASK_SHARD_PREFIX = ["plan", "tasks.d"].join("/") + "/";
 
@@ -498,7 +499,7 @@ const TASK_ID_SCRIPT = "scripts/task-id-existence-check.mjs";
 const SHARD_CENSUS_TEST = "test/every-shard-on-main-is-lintable.test.ts";
 const RUN_TASK_ENTRY = "src/run-task.ts";
 /** `--require-open-prs` refuses an unreadable open-PR list or base; that is a check that could not run, not a red. */
-const TASK_ID_UNREADABLE_RE = /REQUIRED \(--require-open-prs\) but|could not read declared plan ids at base/;
+export const TASK_ID_UNREADABLE_RE = /REQUIRED \(--require-open-prs\) but|could not read declared plan ids at base/;
 /** check-proof exits that make a PR-body proof red (fail, refused, no match, passes at base too). */
 const RED_BODY_PROOF_EXIT: Record<number, string> = { 1: "fails on this tree", 2: "does not parse as a proof", 3: "matches no tests", 5: "passes at origin/main too" };
 const CHECK_PROOF_STALE_EXIT = 5;
@@ -643,9 +644,9 @@ export function planPrPreflightAllows(
   return false;
 }
 
-export class PlanPrPreflightRefusedError extends Error {
+export class PlanPrPreflightRefusedError extends RmdError {
   constructor(readonly lane: string, readonly failures: PlanPrPreflightFinding[]) {
-    super(`plan-PR preflight refused the ${lane} push: ${failures.map((f) => `[${f.check}] ${f.firstLine}`).join("; ")}`);
+    super("plan", 1, `plan-PR preflight refused the ${lane} push: ${failures.map((f) => `[${f.check}] ${f.firstLine}`).join("; ")}`, { lane, failures });
     this.name = "PlanPrPreflightRefusedError";
   }
 }

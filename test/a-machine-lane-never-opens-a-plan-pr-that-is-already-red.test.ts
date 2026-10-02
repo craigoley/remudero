@@ -21,6 +21,7 @@ import { LANDING_BRANCH, landFeedback } from "../src/lib/feedback-landing.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import {
   PlanPrPreflightRefusedError,
+  TASK_ID_UNREADABLE_RE,
   planPrPreflight,
   planPrPreflightAllows,
   planPrPreflightAtCommit,
@@ -31,6 +32,8 @@ import {
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gardenCheckout } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
+// @ts-expect-error -- test executes the untyped executable module directly.
+import { classifyUnreadableOpenPrSurface } from "../scripts/task-id-existence-check.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -171,6 +174,13 @@ test("the lane helpers ledger a refusal and an unreadable check, and the throwin
   assert.deepEqual(rows[1].extra, { lane: "plan", branch: "plan-garden-1", failures: red.failures });
   assert.throws(() => refuseRedPlanPr(red, { lane: "approve", branch: "run-x" }), (e: unknown) => e instanceof PlanPrPreflightRefusedError && /\[pr-title\]/.test(e.message));
   assert.doesNotThrow(() => refuseRedPlanPr({ ok: true, failures: [], unreadable: [] }, { lane: "approve", branch: "run-x" }));
+});
+
+test("TASK_ID_UNREADABLE_RE reads the script's own required-but-unreadable refusal as unreadable, never a collision", () => {
+  const required = classifyUnreadableOpenPrSurface("open-prs", { owner: "acme", repo: "remudero" }, true);
+  assert.equal(required.refuse, true);
+  assert.equal(TASK_ID_UNREADABLE_RE.test(required.message), true);
+  assert.equal(TASK_ID_UNREADABLE_RE.test("task-id-existence: FAILED -- W9-T1 is declared on origin/main"), false);
 });
 
 // ── the real checks, shelled out against the exact tree ─────────────────────────────────────
