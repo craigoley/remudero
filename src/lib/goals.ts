@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { parse } from "yaml";
 import { openLedgerUnion } from "./ledger-union.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { Task } from "./plan.js";
 import { RETRO_LEDGER_MAX_BYTES, RETRO_LEDGER_MAX_ROWS, type LedgerRecord } from "./retro.js";
 import { spendRoleOf, spendAmountUsd, SPEND_STEP_ROLES } from "./spend-rows.js";
@@ -104,7 +104,7 @@ export async function remeasureSettledGoals(input: {
     const loaded: LedgerRecord[] = [];
     const from = clock.now() - 7 * 86_400_000;
     let bytes = 0;
-    for await (const row of openLedgerUnion(input.stateDir, { since: new Date(from).toISOString(),
+    for await (const row of openLedgerUnion(input.stateDir, { since: fixedClock(from).iso(),
       step: ["pr.opened", "verdict.merged", "worker.assignment", "worker.attempt", "verdict", "ci-friction.scorecard", ...Object.keys(SPEND_STEP_ROLES)],
       dedupeWindowPerStep: 32_768,
       onUnreadArchive: () => { sourceProblems.add("unreadable-archive"); }, onUnreadLive: () => { sourceProblems.add("unreadable-live"); }, onMalformedRow: () => { sourceProblems.add("malformed-row"); } })) {
