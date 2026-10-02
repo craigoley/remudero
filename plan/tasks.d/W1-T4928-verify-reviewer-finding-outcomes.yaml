@@ -12,7 +12,7 @@
   origin: "operator-approved CodeRabbit and Field Trials follow-ups, 2026-09-30"
   plan_refs: [W1-T424, W1-T4575, W1-T4619, W1-T4628, W1-T4848, W1-T4849]
   files: [src/lib/review-finding-evidence.ts, src/lib/field-trials-flow.ts, test/review-finding-evidence.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-30: W1-T4848 emits exact-head review.finding receipts and
