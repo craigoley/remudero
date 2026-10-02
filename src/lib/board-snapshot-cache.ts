@@ -15,7 +15,7 @@ export const OPEN_SNAPSHOT_RESAVE_MS = 60_000;
 const defaultIo: BoardSnapshotIo = {
   stat(path) {
     const st = fs.statSync(path);
-    return { size: st.size, isFile: st.isFile() };
+    return { size: st.size, isFile: st.isFile(), mtimeMs: st.mtimeMs, ino: st.ino };
   },
   mkdir(path, mode) {
     fs.mkdirSync(path, { recursive: true, mode });
@@ -469,6 +469,7 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
 
   return {
     commitOpen,
+    rows: () => state,
     closedSeed() {
       return state.closed ? new Map([...state.closed].map(([number, row]) => [number, { ...row }])) : undefined;
     },
@@ -508,7 +509,7 @@ interface SnapshotReasons {
 }
 
 export interface BoardSnapshotIo {
-  stat(path: string): { size: number; isFile: boolean };
+  stat(path: string): { size: number; isFile: boolean; mtimeMs?: number; ino?: number };
   mkdir(path: string, mode: number): void;
   openRead(path: string): number;
   openWrite(path: string, mode: number): number;
@@ -526,6 +527,35 @@ export interface BoardSnapshotCache {
   commitClosed(rows: readonly BoardPrRest[]): boolean;
   commitIssues(rows: readonly BoardIssueRest[]): boolean;
   commitOpen?(rows: readonly BoardPrRest[], fetchedAtMs: number): boolean;
+  rows?(): SharedBoardSnapshotRows;
+}
+
+export interface SharedBoardSnapshotRows {
+  readonly closed?: ReadonlyMap<number, BoardPrRest>;
+  readonly issues?: ReadonlyMap<number, BoardIssueRest>;
+}
+
+/** One parse per file identity (inode, mtime, size; no mtime, no reuse), shared read-only by every caller in the thread (E33). */
+export function createBoardSnapshotReader(options: SnapshotOptions = {}): (root: string, owner: string, repo: string) => SharedBoardSnapshotRows {
+  const io = options.io ?? defaultIo;
+  const held = new Map<string, { identity: string; rows: SharedBoardSnapshotRows }>();
+  return (root, owner, repo) => {
+    const path = boardSnapshotPath(root, owner, repo);
+    let identity: string | undefined;
+    try {
+      const st = io.stat(path);
+      identity = st.mtimeMs === undefined ? undefined : `${st.ino ?? "-"}:${st.mtimeMs}:${st.size}`;
+    } catch {
+      // deliberate: an absent file is an identity of its own; the load below logs the refusal with its reason.
+      identity = "missing";
+    }
+    const hit = held.get(path);
+    if (hit && hit.identity === identity) return hit.rows;
+    const rows = createBoardSnapshotCache(root, owner, repo, options).rows!();
+    if (identity === undefined) held.delete(path);
+    else held.set(path, { identity, rows });
+    return rows;
+  };
 }
 
 interface SnapshotOptions {
