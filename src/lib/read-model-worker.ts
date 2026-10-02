@@ -19,7 +19,7 @@ import { isMainThread, parentPort, Worker, workerData } from "node:worker_thread
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { createGithubKeepWarm, type GithubKeepWarm } from "./github-refresh-pacer.js";
-import { ghIssueGateway, tryEscalate, type EscalateDeps } from "./escalate.js";
+import { ghIssueGateway, tryEscalate, type EscalateDeps, type Escalation, type IssueGateway } from "./escalate.js";
 import { createInstancesView } from "./instances-view.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { FUTURE_ROW_TOLERANCE_MS, LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, type LedgerProjector, type ProjectorTickResult } from "./ledger-projector.js";
@@ -104,6 +104,7 @@ export const READ_MODEL_STALL_MS = 60_000;
  */
 export const READ_MODEL_INTEGRITY_INTERVAL_MS = 24 * 3_600_000;
 const READ_MODEL_INTEGRITY_KIND = "remudero-read-model-integrity" as const;
+const READ_MODEL_ISSUE_KIND = "remudero-read-model-issue" as const;
 
 const VIEW_BODY_DDL = `CREATE TABLE IF NOT EXISTS view_body(view TEXT NOT NULL, key TEXT NOT NULL, version INTEGER NOT NULL,
   generation INTEGER NOT NULL, etag TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(view, key)) WITHOUT ROWID;`;
@@ -369,6 +370,35 @@ export function threadIntegrityCheck(workerUrl?: URL): NonNullable<ReadModelTick
       if (!settled) done({ ok: false, corrupt: false, error: `the integrity thread exited with code ${code}${failure}`, ms: 0 });
     });
   };
+}
+
+/** A recycle loop's issue to open (through {@link tryEscalate}, its dedup and its failure row) or to close. */
+export type ReadModelIssueRequest =
+  | { op: "escalate"; repository: string; ledgerPath: string; escalation: Escalation }
+  | { op: "close"; repository: string; url: string; comment: string };
+export type ReadModelIssueAnswer = { url: string | null } | { error: string };
+
+/** The issue thread's body. `gh` blocks, so it runs here and never on serve's event loop. */
+export function answerReadModelIssueRequest(request: ReadModelIssueRequest, issues: IssueGateway = ghIssueGateway(...(request.repository.split("/") as [string, string]))): ReadModelIssueAnswer {
+  try {
+    if (request.op === "escalate") return { url: tryEscalate(request.escalation, { issues, ledgerPath: request.ledgerPath, runId: READ_MODEL_WORKER_KIND }) };
+    issues.closeWithComment?.(request.url, request.comment);
+    return { url: request.url };
+  } catch (error) {
+    return { error: String((error as Error)?.message ?? error) };
+  }
+}
+
+/** One thread per issue request, which exits when done: a loop escalates once, and a thread that dies answers with why. */
+export function threadIssueRequest(workerUrl?: URL): (request: ReadModelIssueRequest) => Promise<ReadModelIssueAnswer> {
+  return (request) => new Promise((resolve) => {
+    let failure = "";
+    const thread = new Worker(workerUrl ?? new URL(import.meta.url), { workerData: { kind: READ_MODEL_ISSUE_KIND, request }, execArgv: process.execArgv });
+    thread.unref();
+    thread.on("message", (answer: ReadModelIssueAnswer) => resolve(answer));
+    thread.on("error", (error) => void (failure = `: ${error.message}`));
+    thread.on("exit", (code) => resolve({ error: `the issue thread exited with code ${code}${failure}` })); // a no-op once it answered
+  });
 }
 
 /** One oracle slice: everything a thread needs to attach to the store and check it. */
@@ -1375,6 +1405,9 @@ if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === RE
 if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === READ_MODEL_INTEGRITY_KIND && parentPort) {
   parentPort.postMessage(checkReadModelIntegrity((workerData as { request: IntegrityRequest }).request));
 }
+if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === READ_MODEL_ISSUE_KIND && parentPort) {
+  parentPort.postMessage(answerReadModelIssueRequest((workerData as { request: ReadModelIssueRequest }).request));
+}
 
 /** The last committed bodies, read once at construction through a read-only connection. */
 export function loadCommittedViewBodies(stateDir: string, home: string): { bodies: ReadModelBodyEntry[]; reason?: string } {
@@ -1445,6 +1478,8 @@ export interface ReadModelWorkerOptions {
   workerUrl?: URL;
   log?: (step: string, extra?: Record<string, unknown>) => void;
   escalationRepository?: string;
+  /** Opens or closes a recycle loop's issue off serve's event loop; absent, one thread per request on `escalationRepository`. */
+  issueRequest?: (request: ReadModelIssueRequest) => Promise<ReadModelIssueAnswer>;
   every?: (run: () => void, ms: number) => () => void;
   /** What the silent-worker watchdog measures against. */
   clock?: Clock;
@@ -1455,6 +1490,12 @@ export interface ReadModelWorkerOptions {
   observe?: (msg: ReadModelWorkerMessage) => void;
   /** Serve's keep-warm and its gateway walk: exactly one of it and the worker's own runs (switch `github`). */
   github?: { serve: GithubKeepWarm } & Parameters<typeof createGithubKeepWarm>[0];
+}
+
+/** A worker in its steady state: every instance it leases has completed a tick since `since` with no backlog left. */
+function workerSteadySince(instances: readonly ReadModelInstanceState[], since: number): boolean {
+  const held = instances.filter((state) => state.lease === "held");
+  return held.length > 0 && held.every((state) => state.tickedAt !== undefined && state.tickedAt >= since && !state.catchUp);
 }
 
 function everyUnref(run: () => void, ms: number): () => void {
@@ -1518,6 +1559,62 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   let heardAt = clock.now();
   let silenceLogged = false;
   let recycles = 0;
+  const repository = opts.escalationRepository;
+  const issueRequest = opts.issueRequest ?? (repository?.includes("/") ? threadIssueRequest() : undefined);
+  type Recycle = { at: number; silentMs: number; boundMs: number; phase?: string; instance?: string };
+  /** The recycles since the worker last reached its steady state. A recycle while one is open is a loop. */
+  type Episode = { since: number; count: number; last: Recycle[]; escalating?: true; issueUrl?: string };
+  let loop: Episode | undefined;
+  const loopTaskId = `READ-MODEL-${home.toUpperCase()}`;
+  /** Off serve's event loop: the request runs on its own thread, and its outcome is ledgered when it settles. */
+  const closeLoopIssue = (episode: Episode, url: string): void => {
+    void issueRequest!({ op: "close", url, comment: `Resolved automatically: the read-model worker completed a tick with no backlog after ${episode.count} recycles.`, repository: repository ?? "" }).then((answer) => {
+      opts.log?.("error" in answer ? "read_model.recycle_loop_close_failed" : "read_model.recycle_loop_closed", { recycles: episode.count, issueUrl: url, ...answer });
+    });
+  };
+  const noteRecycle = (recycle: Recycle): void => {
+    const episode = (loop ??= { since: recycle.at, count: 0, last: [] });
+    episode.count++;
+    episode.last = [...episode.last.slice(-4), recycle];
+    if (episode.count < 2 || episode.issueUrl || episode.escalating) return;
+    const evidence = { recycles: episode.count, loopMs: recycle.at - episode.since, last: episode.last, state: instances.get(home)?.reason ?? null };
+    opts.log?.("read_model.recycle_loop", { ...evidence, escalating: issueRequest !== undefined });
+    if (!issueRequest) return;
+    episode.escalating = true;
+    const reasons = episode.last.map((r) => `${fixedClock(r.at).iso()} silent ${Math.round(r.silentMs / 1000)} s (bound ${Math.round(r.boundMs / 1000)} s) in ${r.phase ?? "no reported phase"}`);
+    void issueRequest({
+      op: "escalate", repository: repository ?? "", ledgerPath: join(opts.stateDir, LEDGER_FILENAME),
+      escalation: {
+        class: "MANUAL",
+        taskId: loopTaskId,
+        summary: `read-model worker keeps being recycled before it reaches a steady state`,
+        detail: `Serve's watchdog has recycled the read-model worker ${episode.count} times over ${Math.round(evidence.loopMs / 1000)} s, each time before it completed a tick with no backlog. Last state: ${evidence.state ?? "none reported"}.\n\nLast recycles:\n${reasons.map((r) => `- ${r}`).join("\n")}`,
+        options: [
+          { label: "rebuild the read model", detail: "Run `rmd read-model rebuild`; the views keep serving the old file until the new one passes its check.", kind: { type: "operator-only" } },
+          { label: "restart serve", detail: "Recycle the serve container; the projector resumes from its checkpoints.", kind: { type: "operator-only" } },
+        ],
+        recommendation: "rebuild the read model",
+        consequence: "Every view the worker builds stays stale, and each recycle repeats the work it lost. This issue closes itself once the worker is steady.",
+      },
+    }).then((answer) => {
+      delete episode.escalating;
+      const issueUrl = "url" in answer ? answer.url : null;
+      opts.log?.("read_model.recycle_loop_escalated", { recycles: episode.count, ...answer, issueUrl });
+      if (!issueUrl) return;
+      episode.issueUrl = issueUrl;
+      if (loop !== episode) closeLoopIssue(episode, issueUrl); // it recovered while the issue was being opened
+    });
+  };
+  /** The steady state ends the episode, closes its issue, and returns the watchdog's bound to its base. */
+  const noteSteady = (states: readonly ReadModelInstanceState[]): void => {
+    const episode = loop;
+    if (!episode || !workerSteadySince(states, episode.last.at(-1)!.at)) return;
+    loop = undefined;
+    recycles = 0;
+    if (episode.count < 2) return;
+    opts.log?.("read_model.recycle_loop_recovered", { recycles: episode.count, loopMs: clock.now() - episode.since, issueUrl: episode.issueUrl ?? null });
+    if (episode.issueUrl) closeLoopIssue(episode, episode.issueUrl);
+  };
   /** What the worker last said it was doing, and the slowest store open it has reported. */
   let phase: { instance: string; phase: string } | undefined;
   let slowestOpenMs = 0;
@@ -1564,6 +1661,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     recycles++;
     opts.log?.("read_model.worker_recycled", { silentMs, recycles, boundMs, ...last });
     void running.terminate();
+    noteRecycle({ at: clock.now(), silentMs, boundMs, ...last });
   };
 
   const bodyListeners = new Set<(entry: ReadModelBodyEntry) => void>();
@@ -1587,6 +1685,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       switches = msg.switches;
       deaths = 0;
       for (const state of msg.instances) instances.set(state.instance, state);
+      noteSteady(msg.instances);
     }
     opts.observe?.(msg);
   };
