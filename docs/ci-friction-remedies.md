@@ -114,6 +114,15 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   illustrate a placeholder), use the placeholder form instead (e.g., `W1-T<n>` or `W1-TNNNN`)
   — these carry no digits and will not match the citation scan.
 
+- `ci-friction:check:ci-log:lint-plan` — the required `lint-plan` CI job refused a plan change.
+  Reproduce the diff-scoped check locally with `npm run --silent lint-plan:fast`, which runs the
+  offline linter against the merge base and `origin/main` scope used by CI. If it reports a
+  violation, fix the offending task shard's proof, metadata, or other reported field; lint-plan
+  violations are repaired in that shard, not in a shared baseline. If CI reports
+  `lint-plan:error` before the linter runs, inspect the `lint-plan:base-refresh` output and restore
+  a reachable, pinned `origin/main` ref, then rerun the linter. Keep the failure output with the
+  fix so the changed plan can be checked again before pushing.
+
 - `ci-friction:conflict:merge-conflict` — a pull request cannot be merged automatically
   because the branch has diverged from main and git cannot resolve the conflicts in the
   files being changed. This commonly occurs when multiple PRs modify the same file (such as
