@@ -3,10 +3,11 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human
   risk: low
-  priority: 3.55
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator ruling 2026-10-02: retire — a docs-only ci-friction record changes no code path (#8657); the remedy ladder re-drafts this cause against its owning code if it is still among the costliest.
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:ci-log:commitlint:test-error-subclass-census-test-ts"
