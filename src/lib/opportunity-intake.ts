@@ -50,6 +50,7 @@ export interface OpportunityWork {
 export interface OpportunityIntakePorts {
   repo: string;
   clock: Clock;
+  standingDebtAnchor: string;
   readStandingDebt: () => string;
   readCodeql: () => CodeScanningAlertsRead;
   readFriction: () => { records: LedgerRecord[]; gateFireRates?: GateFireRateReport };
@@ -81,10 +82,11 @@ export function collectOpportunityCandidates(ports: OpportunityIntakePorts, work
   try {
     const debt = readStandingRetroDebt(ports.readStandingDebt());
     for (const entry of debt.entries) {
-      add("standing-debt", `standing-debt:${entry.number}`, `MASTER-PLAN.md#standing-debt-${entry.number}`, 1, debt.openCount, "open debt entries", entry.ageCycles, "cycles of dwell", entry.text);
+      add("standing-debt", `standing-debt:${entry.number}`, `${ports.standingDebtAnchor}#standing-debt-${entry.number}`, 1, debt.openCount, "open debt entries", entry.ageCycles, "cycles of dwell", entry.text);
     }
   } catch (error) {
-    unavailable.push(`standing-debt unavailable: ${String(error)}`);
+    const reason = `standing-debt unavailable: ${String(error)}`;
+    unavailable.push(reason);
   }
   try {
     const source = ports.readCodeql();
@@ -97,7 +99,8 @@ export function collectOpportunityCandidates(ports: OpportunityIntakePorts, work
       add("codeql-quality", codeqlQualityProposalId(rule), alerts[0]!.url, alerts.length, partition.scannedTotal, "scanned alerts", alerts.length, "open quality alerts", `Repair CodeQL quality rule ${rule} in one bounded cleanup; verify all ${alerts.length} alert(s) without dismissing them.`);
     }
   } catch (error) {
-    unavailable.push(`codeql-quality unavailable: ${String(error)}`);
+    const reason = `codeql-quality unavailable: ${String(error)}`;
+    unavailable.push(reason);
   }
   try {
     const { records, gateFireRates } = ports.readFriction();
@@ -116,7 +119,8 @@ export function collectOpportunityCandidates(ports: OpportunityIntakePorts, work
       add("followup", followupProposalId(entry), `ledger#${entry.entryId}`, 1, harvest.candidates.length + harvest.deduped.length, "follow-up entries", 1, "reported follow-up", entry.text, { task: entry.taskId, pr: entry.prUrl }, entry.type === "action" ? "operator" : "machine");
     }
   } catch (error) {
-    unavailable.push(`ci-friction/followup unavailable: ${String(error)}`);
+    const reason = `ci-friction/followup unavailable: ${String(error)}`;
+    unavailable.push(reason);
   }
   return { candidates, unavailable };
 }
@@ -184,10 +188,7 @@ export async function runOpportunityIntake(ports: OpportunityIntakePorts): Promi
 }
 
 /** Use the daemon's existing checkout/landing ports and feedback-to-plan workflow, with no timer. */
-export function productionOpportunityIntakePorts(garden: GardenerDeps, deps: {
-  readCodeql?: OpportunityIntakePorts["readCodeql"];
-  readFriction?: OpportunityIntakePorts["readFriction"];
-  riskJudge?: OpportunityIntakePorts["riskJudge"];
+export function productionOpportunityIntakePorts(garden: GardenerDeps, deps: Partial<Pick<OpportunityIntakePorts, "readCodeql" | "readFriction" | "riskJudge">> & {
   readPulls?: (repo: string) => unknown;
 } = {}): OpportunityIntakePorts {
   const clock = garden.clock ?? systemClock;
@@ -203,6 +204,7 @@ export function productionOpportunityIntakePorts(garden: GardenerDeps, deps: {
     let judge = deps.riskJudge;
     return {
       repo, clock, dispose: () => ws.dispose(),
+      standingDebtAnchor: relative(ws.root, layout.masterPlan),
       readStandingDebt: () => readFileSync(layout.masterPlan, "utf8"),
       readCodeql: deps.readCodeql ?? (() => readCodeScanningAlerts(matched[1]!, matched[2]!)),
       readFriction: deps.readFriction ?? (() => {

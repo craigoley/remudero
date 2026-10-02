@@ -27,6 +27,7 @@ function fixture() {
   const judged: string[] = [];
   const ports: OpportunityIntakePorts = {
     repo: "acme/app", clock,
+    standingDebtAnchor: "MASTER-PLAN.md",
     readStandingDebt: () => debt,
     readCodeql: () => ({ ok: true, alerts: [] }),
     readFriction: () => ({ records: [] }),
@@ -259,6 +260,24 @@ test("production routing shells out for identity and lands durable feedback thro
     assert.equal(f.landings.length, 2);
     const second = parse(readFileSync(join(f.root, f.landings[1]!.paths[0]!), "utf8"));
     assert.equal(second.submission_key, "acme/app/standing-debt:3");
+  } finally { f.cleanup(); }
+});
+
+test("standing debt promotion anchors the source selected by the repository layout", async () => {
+  const f = productionFixture();
+  try {
+    mkdirSync(join(f.root, ".remudero"));
+    mkdirSync(join(f.root, "docs"));
+    writeFileSync(join(f.root, ".remudero", "layout.json"), JSON.stringify({ masterPlan: "docs/roadmap.md" }));
+    writeFileSync(join(f.root, "docs", "roadmap.md"), debt);
+    rmSync(join(f.root, "MASTER-PLAN.md"));
+    const result = await runOpportunityIntake(productionOpportunityIntakePorts(f.garden, f.deps));
+    assert.equal(result.status, "promoted");
+    assert.equal(result.candidate?.anchor, "docs/roadmap.md#standing-debt-1");
+    assert.equal(f.landings.length, 1);
+    const entry = parse(readFileSync(join(f.root, f.landings[0]!.paths[0]!), "utf8"));
+    assert.match(entry.raw, /docs\/roadmap\.md#standing-debt-1/);
+    assert.equal(f.disposed(), 1);
   } finally { f.cleanup(); }
 });
 
