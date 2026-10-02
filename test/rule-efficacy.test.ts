@@ -37,6 +37,7 @@ const FIXTURE_RULE: MeasurableRuleSignature = {
   citation: "#1",
   description: "a fixture rule for the falsifier",
   measurable: true,
+  signatureKind: "VIOLATION",
   effectiveDate: "2026-01-01T00:00:00.000Z",
   stepPatterns: [/^fixture\.failure$/],
 };
@@ -198,6 +199,7 @@ test("a REPEATING rule below the escalation threshold drafts nothing", () => {
           citation: FIXTURE_RULE.citation,
           description: FIXTURE_RULE.description,
           status: "REPEATING" as const,
+          signatureKind: "VIOLATION" as const,
           effectiveDate: FIXTURE_RULE.effectiveDate,
           recurrences: [{ ts: "2026-02-01T00:00:00.000Z", step: "fixture.failure" }],
         },
@@ -253,6 +255,7 @@ test("FALSIFIER: a rule at >= 2 post-rule recurrences drafts exactly ONE proposa
           citation: FIXTURE_RULE.citation,
           description: FIXTURE_RULE.description,
           status: "REPEATING" as const,
+          signatureKind: "VIOLATION" as const,
           effectiveDate: FIXTURE_RULE.effectiveDate,
           recurrences: [
             { ts: "2026-02-01T00:00:00.000Z", step: "fixture.failure" },
@@ -299,6 +302,7 @@ test("escalation appends alongside unrelated existing proposals, never clobberin
           citation: FIXTURE_RULE.citation,
           description: FIXTURE_RULE.description,
           status: "REPEATING" as const,
+          signatureKind: "VIOLATION" as const,
           effectiveDate: FIXTURE_RULE.effectiveDate,
           recurrences: [
             { ts: "2026-02-01T00:00:00.000Z", step: "fixture.failure" },
@@ -349,49 +353,69 @@ test("ruleEfficacyCommand prints the repeat-incident headline and every rule's v
   }
 });
 
-test("ruleEfficacyCommand escalates a REPEATING real rule through the registry, unless --no-escalate", () => {
+test("ruleEfficacyCommand escalates a REPEATING violation rule through the registry, unless --no-escalate", () => {
   const dir = tmpStateDir("rmd-rule-efficacy-cli-escalate-");
   const logs: string[] = [];
   const realLog = console.log;
   console.log = (...a: unknown[]) => void logs.push(a.map(String).join(" "));
   try {
-    // Two ci.stalled rows strictly after the real bound-fires-on-healthy-condition rule's
-    // effective date (2026-08-06) — the ONE measurable entry in RULE_SIGNATURES today.
+    // Two fixture failures strictly after the VIOLATION fixture rule's effective date. The shipped
+    // ledger-channel rule is ACTIVITY-shaped since W1-T4271, so it can no longer stand in here.
     writeGzArchive(dir, "ledger.2026-08-10T00-00-00-000Z.ndjson.gz", [
-      ledgerLine("2026-08-10T00:00:00.000Z", "ci.stalled"),
-      ledgerLine("2026-08-11T00:00:00.000Z", "ci.stalled"),
+      ledgerLine("2026-08-10T00:00:00.000Z", "fixture.failure"),
+      ledgerLine("2026-08-11T00:00:00.000Z", "fixture.failure"),
     ]);
 
-    const code = ruleEfficacyCommand([], { stateDir: dir });
+    const code = ruleEfficacyCommand([], { stateDir: dir, signatures: FIXTURE_TABLE });
     assert.equal(code, 0);
     const out = logs.join("\n");
-    assert.match(out, /REPEATING.*investigation-discipline:bound-fires-on-healthy-condition/s);
+    assert.match(out, /REPEATING.*test#fixture-rule/s);
     assert.match(out, /escalated: registry now carries 1 proposal/);
 
     const registryPath = join(dir, "inbox-proposals.json");
     const proposals = parseProposalRegistry(readFileSync(registryPath, "utf8"));
     assert.equal(proposals.length, 1);
-    assert.equal(proposals[0].id, "rule-efficacy:CLAUDE.md#investigation-discipline:bound-fires-on-healthy-condition");
+    assert.equal(proposals[0].id, "rule-efficacy:test#fixture-rule");
   } finally {
     console.log = realLog;
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("ruleEfficacyCommand prints PREVENTING for a real measurable rule with only pre-date rows, and escalates nothing", () => {
+test("ruleEfficacyCommand prints PREVENTING for a violation rule with only pre-date rows, and escalates nothing", () => {
   const dir = tmpStateDir("rmd-rule-efficacy-cli-preventing-");
   const logs: string[] = [];
   const realLog = console.log;
   console.log = (...a: unknown[]) => void logs.push(a.map(String).join(" "));
   try {
-    // Archives present (so the union reads OK), but the only ci.stalled row predates the real
-    // bound-fires-on-healthy-condition rule's effective date (2026-08-06) — PREVENTING.
-    writeGzArchive(dir, "ledger.2026-01-01T00-00-00-000Z.ndjson.gz", [ledgerLine("2026-01-01T00:00:00.000Z", "ci.stalled")]);
+    // Archives present (so the union reads OK), but the only fixture failure predates the rule's date.
+    writeGzArchive(dir, "ledger.2025-12-01T00-00-00-000Z.ndjson.gz", [ledgerLine("2025-12-01T00:00:00.000Z", "fixture.failure")]);
 
+    const code = ruleEfficacyCommand([], { stateDir: dir, signatures: FIXTURE_TABLE });
+    assert.equal(code, 0);
+    const out = logs.join("\n");
+    assert.match(out, /PREVENTING.*test#fixture-rule/s);
+    assert.match(out, /escalated: nothing new/);
+  } finally {
+    console.log = realLog;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ruleEfficacyCommand reports the shipped activity rule UNPROVEN over post-date ci.stalled rows, and escalates nothing", () => {
+  const dir = tmpStateDir("rmd-rule-efficacy-cli-unproven-");
+  const logs: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => void logs.push(a.map(String).join(" "));
+  try {
+    writeGzArchive(dir, "ledger.2026-08-10T00-00-00-000Z.ndjson.gz", [
+      ledgerLine("2026-08-10T00:00:00.000Z", "ci.stalled"),
+      ledgerLine("2026-08-11T00:00:00.000Z", "ci.stalled"),
+    ]);
     const code = ruleEfficacyCommand([], { stateDir: dir });
     assert.equal(code, 0);
     const out = logs.join("\n");
-    assert.match(out, /PREVENTING.*investigation-discipline:bound-fires-on-healthy-condition/s);
+    assert.match(out, /UNPROVEN.*investigation-discipline:bound-fires-on-healthy-condition/s);
     assert.match(out, /escalated: nothing new/);
   } finally {
     console.log = realLog;

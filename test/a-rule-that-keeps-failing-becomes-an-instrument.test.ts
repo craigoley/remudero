@@ -95,6 +95,7 @@ function reportWithRecurrenceCount(ruleId: string, count: number): RuleEfficacyR
         citation: "W1-T312, W1-T380/#1392, W1-T382/#1401",
         description: "A bound that fires on a HEALTHY condition is this repo's recurring defect.",
         status: "REPEATING",
+        signatureKind: "VIOLATION",
         effectiveDate: "2026-08-06",
         recurrences: Array.from({ length: count }, (_, i) => ({ ts: `2026-08-${String(7 + i).padStart(2, "0")}T00:00:00.000Z`, step: "ci.stalled" })),
       },

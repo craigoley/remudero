@@ -28,7 +28,7 @@
     - claim: "an unreadable plan-health projection retires nothing and does not write the registry"
       proof: "unit test: an unreadable plan-health projection retires nothing and does not"
     - claim: "the production caller derives merged and explicit-retirement referents from its one completed plan-health projection, never a per-follow-up GitHub read"
-      proof: "unit test: test/the-followup-retirement-arm-has-a-call-site.test.ts"
+      proof: "unit test: the production caller derives retirement referents from one plan-health projection"
   origin: architect
   plan_refs: ["§7", "P25"]
   files: [src/lib/retro.ts, src/run-task.ts, test/routed-followups-retire.test.ts, test/the-followup-retirement-arm-has-a-call-site.test.ts]

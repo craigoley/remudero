@@ -965,11 +965,8 @@ export interface DaemonDeps {
   clearPauseHold?: () => void | Promise<void>;
   onPauseNeedsHuman?: (info: { holdId: string; owner: PauseHoldOwner; expiresAt: string | null }) => void | Promise<void>;
   workerAdmissionHold?: () => FleetControlHold | undefined;
-  /** An optional check, consulted once per tick with the same between-iterations-only discipline as the
-   *  operator holds, so it can never interrupt work already in flight. A stale result stops the loop with a
-   *  deliberate non-zero exit and ledgers `daemon_selfrestart_for_freshness`, which is what a crash-loop
-   *  reader keys off rather than the exit code. Why: five manual pull-and-reload cycles in one weekend,
-   *  because merged fixes were invisible to the running daemon (W1-T126). Forensics: docs/forensics/daemon.md. */
+  /** Reads freshness between iterations and on the dispatch ticker's cadence. A restart-worthy advance
+   *  closes admission; admitted lanes settle before the existing drain and stale exit (W1-T5308). */
   checkFreshness?: () => DaemonFreshness;
   /** Consulted only when freshness reports an install is needed. Runs before the loop stops for
    *  restart, never after, so the relaunched process inherits a dependency tree matching `newSha`.
@@ -1573,6 +1570,7 @@ interface InFlightTickerOwner {
   headroomSampler?: { lastSampleMs: number; clock: Clock; policy: HeadroomPolicy; enforced: boolean };
   /** Read per tick, so a dispatch taking over a background sweep's runner also takes its retrigger (W1-T4998). */
   sweepRetrigger?: SweepRetrigger;
+  onTick?: () => void;
   /** W1-T4998: a background sweep still holding the runner a dispatch took over. Whichever of the two
    *  stops first leaves it to the other, so a pass that outlives the dispatch keeps its heartbeat. */
   sweepHold?: Pick<InFlightTickerOwner, "generation" | "headroomSampler" | "sweepRetrigger">;
@@ -1605,6 +1603,8 @@ function startInFlightTicker(
   // cannot double-read. Optional and trailing, so every existing call site is unchanged (W1-T2565).
   headroomSampler?: { lastSampleMs: number; clock: Clock; policy: HeadroomPolicy; enforced: boolean },
 ): { stop: () => Promise<void> } {
+  const onTick = phase === "dispatch" ? sweepRetrigger?.onDispatchTick : undefined;
+  if (!deps.sweepLight && !onTick) return { stop: async () => {} };
   // W1-T3181: dispatch takes over a same-tick retro's ONE runner. Incrementing the generation makes
   // the retro's eventual stop inert, so it cannot turn off the dispatch clock after the handoff.
   // W1-T4998: the same takeover applies to a background full sweep's runner.
@@ -1617,6 +1617,7 @@ function startInFlightTicker(
     inFlightTickerOwner.phase = "dispatch";
     inFlightTickerOwner.headroomSampler = headroomSampler;
     inFlightTickerOwner.sweepRetrigger = sweepRetrigger;
+    inFlightTickerOwner.onTick = onTick;
     const generation = (inFlightTickerOwner.generation = ++inFlightTickerGenerations);
     const owner = inFlightTickerOwner;
     return { stop: () => owner.stop(generation) };
@@ -1627,6 +1628,7 @@ function startInFlightTicker(
     phase,
     headroomSampler,
     sweepRetrigger,
+    onTick,
     stop: async (generation) => {
       if (inFlightTickerOwner !== owner) return;
       const hold = owner.sweepHold;
@@ -1642,6 +1644,7 @@ function startInFlightTicker(
         owner.generation = hold.generation;
         owner.headroomSampler = hold.headroomSampler;
         owner.sweepRetrigger = hold.sweepRetrigger;
+        owner.onTick = undefined;
         return;
       }
       owner.active = false;
@@ -1675,7 +1678,7 @@ function startInFlightTicker(
   // gate accepts a pass. Retain that intent across a hold or an older still-settling pass, and retry
   // once per ordinary cadence, never as a zero-delay loop.
   let eventWakePending = false;
-  owner.ticker = deps.sweepLight
+  owner.ticker = deps.sweepLight || onTick
     ? (async () => {
         while (owner.active) {
           // Dispatch and retro can hold the loop for tens of minutes, so let an event wake this wait only
@@ -1689,6 +1692,9 @@ function startInFlightTicker(
           );
           if (waitResult === "wake") eventWakePending = true;
           if (!owner.active) break;
+          if (owner.onTick) await new Promise<void>((resolve) => setImmediate(resolve));
+          if (!owner.active) break;
+          owner.onTick?.();
           // The acknowledgement gap (W1-T1065 part iv). The pause row is written only inside the branch that acts
           // on a hold, so a hold created mid-drain was invisible: no row distinguished "seen, draining to
           // completion" from "not seen at all", and the operator escalated to a container stop. A re-check here
@@ -1812,7 +1818,7 @@ function startInFlightTicker(
             continue;
           }
           try {
-            await deps.sweepLight!();
+            await deps.sweepLight?.();
           } catch (e) {
             log("daemon.sweep_light.failed", { error: String((e as Error)?.message ?? e) });
           }
@@ -1828,6 +1834,7 @@ function startInFlightTicker(
  *  `runDaemon` into every call site — never a fresh object per call, which would make each phase
  *  re-derive "elapsed since last pass" from its own private zero (W1-T1272). */
 interface SweepRetrigger {
+  onDispatchTick?: () => void;
   /** Mirrors `DaemonOpts.sweepWallClockBoundMs` — the SAME bound the top-of-iteration call uses. */
   sweepWallClockBoundMs: number;
   /** `DaemonOpts.sweepRetriggerIntervalMs` (resolved), the minimum gap between two retriggers. */
@@ -4556,7 +4563,6 @@ export async function runDaemon(
         // NEXT tick boundary. Every worker is cut a fresh worktree from origin/main HEAD anyway.
         const interphaseWakeSeen = await stopInterphaseReviewClock();
         if (interphaseWakeSeen) log("daemon.dispatch.wake_deferred", { tasks: admitted.map((t) => t.id) });
-    const stopTicker = startInFlightTicker(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch, sweepRetrigger, headroomSampler).stop;
     sampleIdleLane(admitted.length, true, dispatchSet.length);
 
     // Concurrent dispatch: settle-all, never fail-fast, so a sibling lane's rejection can never abort another lane
@@ -4566,6 +4572,7 @@ export async function runDaemon(
     const passIds = new Set(admitted.map((t) => t.id));
     const inFlightTasks = new Set<Task>(admitted);
     let refillClosed: string | undefined;
+    let inFlightFreshness: Extract<DaemonFreshness, { stale: true }> | undefined;
     const refillLane = (lane: number, finished: Task, outcome: PromiseSettledResult<RunResult>): Task | undefined => {
       inFlightTasks.delete(finished);
       if (outcome.status === "rejected") {
@@ -4623,6 +4630,17 @@ export async function runDaemon(
       attempted.push(next.id);
       return next;
     };
+    const onDispatchTick = deps.checkFreshness ? () => {
+      if (inFlightFreshness || inFlightTasks.size === 0 || deps.checkPause?.()) return;
+      const freshness = deps.checkFreshness!();
+      logNotStaleFreshness(freshness);
+      if (freshness.stale && decideFreshness(freshness, true) === "restart") {
+        inFlightFreshness = freshness;
+        refillClosed = "stale code";
+      }
+    } : undefined;
+    sweepRetrigger.onDispatchTick = onDispatchTick;
+    const stopTicker = startInFlightTicker(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch, sweepRetrigger, headroomSampler).stop;
     const settled = await runLanePool(admitted, (id) => deps.runOne(id), refillLane);
     // The settled counterpart to the concurrent-set row. Emitted BEFORE the ticker stop and the
     // classification loop, because that loop's fatal path returns and the stop is itself awaited work that
@@ -4753,6 +4771,11 @@ export async function runDaemon(
     if (blockedDetail !== undefined) {
       await stopInterphaseReviewClock();
       return summary("blocked", blockedDetail);
+    }
+
+    if (inFlightFreshness && !deps.checkStop?.() && !deps.checkPause?.()) {
+      await stopInterphaseReviewClock();
+      return stopForFreshness(inFlightFreshness);
     }
 
     if (apiWindowHoldMs > 0) {

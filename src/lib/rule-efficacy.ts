@@ -48,12 +48,8 @@ import {
 
 // ── The signature table ─────────────────────────────────────────────────────────────────────
 
-/** A rule whose recurrence IS visible in the ledger: a set of `step`-field patterns a
- *  same-class failure would log under, plus the date (parsed from the rule's own earning
- *  citation — see each entry below) after which a match counts as a RECURRENCE rather than
- *  pre-existing history the rule was never meant to have prevented. */
 /**
- * A rule whose recurrence IS observable, by exactly ONE of two channels — see
+ * A rule whose matches are observable, by exactly ONE of two channels — see
  * {@link declaredChannel}, which enforces that at RUNTIME because this table is DATA, editable
  * without a compile. Two OPTIONAL fields rather than a union, for compatibility: existing readers
  * access `stepPatterns` directly, and a union makes that a type error at every one.
@@ -66,10 +62,13 @@ export interface MeasurableRuleSignature {
   /** One-line restatement of the rule, for the report's headline text. */
   description: string;
   measurable: true;
+  /** VIOLATION matches prove failure; ACTIVITY matches leave subject health unobserved. */
+  signatureKind: "VIOLATION" | "ACTIVITY";
+  signatureReason?: string;
   /** ISO date the rule became citable — `git blame`'d from the CLAUDE.md line carrying the
    *  citation above; an event strictly AFTER this date is a POST-RULE recurrence. */
   effectiveDate: string;
-  /** THE LEDGER CHANNEL (unchanged): a ledger row recurs this rule when its `step` matches ANY. */
+  /** THE LEDGER CHANNEL: a ledger row matches this signature when its `step` matches ANY. */
   stepPatterns?: RegExp[];
   /** THE CI CHANNEL (W1-T2958): a red gate recurs this rule when its NAME matches ANY. The
    *  diff-coverage row below deferred exactly this, for want of the failing check's name;
@@ -117,8 +116,8 @@ export type RuleSignature = MeasurableRuleSignature | UnmeasurableRuleSignature;
  *  - bound-fires-on-healthy-condition (CLAUDE.md "Investigation discipline"): TWO of its three
  *    named instances are literal ledger step names logged at the exact call sites that fixed
  *    them — `ci.stalled` (src/run-task.ts `waitForCiGreen`, the W1-T382 check-wait bound) and
- *    `deploy.idle_ceiling_forced` (src/lib/deployer.ts, the W1-T380 deploy ceiling). A rule
- *    firing again post-fix logs the SAME step name, so this is genuinely ledger-visible.
+ *    `deploy.idle_ceiling_forced` (src/lib/deployer.ts, the W1-T380 deploy ceiling). The guarded
+ *    mechanism firing post-fix logs the SAME step name; subject health is unobserved (W1-T4271).
  *  - diff-coverage-gate (CLAUDE.md "Before you push"): a recurrence is "WHICH ci check failed"
  *    (coverage-ratchet specifically) — that name lives only in GitHub's check-run data; the
  *    ledger's own `blocked_ci` row carries no failing-check name (`reason: "ci <status> before
@@ -136,6 +135,10 @@ export const RULE_SIGNATURES: readonly RuleSignature[] = [
     description:
       "A bound that fires on a HEALTHY condition is this repo's recurring defect — before tuning the number, check the population it is meant to separate has ever been observed.",
     measurable: true,
+    signatureKind: "ACTIVITY",
+    signatureReason:
+      "ci.stalled (src/run-task.ts waitForCiGreen, W1-T382) and deploy.idle_ceiling_forced " +
+      "(src/lib/deployer.ts, W1-T380) report post-fix mechanism activity without observing subject health.",
     effectiveDate: "2026-08-06",
     stepPatterns: [/^ci\.stalled$/, /^deploy\.idle_ceiling_forced$/],
   },
@@ -148,6 +151,7 @@ export const RULE_SIGNATURES: readonly RuleSignature[] = [
     citation: "#768, #773, #777",
     description: "Run the diff-coverage gate LOCALLY before pushing any PR that adds source lines.",
     measurable: true,
+    signatureKind: "VIOLATION",
     // All three citing PRs merged 2026-07-25; a red strictly after that is a POST-RULE recurrence.
     effectiveDate: "2026-07-25",
     // ci.yml's `coverage-ratchet-required` job reports as `coverage-ratchet`; its matrix legs as
@@ -180,12 +184,13 @@ export interface RuleVerdict {
   ruleId: string;
   citation: string;
   description: string;
-  status: "PREVENTING" | "REPEATING" | "UNMEASURABLE";
+  status: "PREVENTING" | "REPEATING" | "UNPROVEN" | "UNMEASURABLE";
+  signatureKind?: MeasurableRuleSignature["signatureKind"];
   /** Present only when `status !== "UNMEASURABLE"`. */
   effectiveDate?: string;
-  /** Non-empty only when `status === "REPEATING"`. */
+  /** Post-date matches; UNPROVEN matches record activity, not demonstrated recurrences. */
   recurrences: RuleRecurrence[];
-  /** Present only when `status === "UNMEASURABLE"`. */
+  /** Present when `status` is UNMEASURABLE or UNPROVEN. */
   why?: string;
 }
 
@@ -195,7 +200,7 @@ export interface RuleEfficacyReport {
    *  all, so no ledger read was needed (never touches the fs in that case). */
   ledger?: LedgerUnionResult;
   rules: RuleVerdict[];
-  /** Rules whose verdict this run is PREVENTING or REPEATING (i.e. NOT UNMEASURABLE). */
+  /** Rules whose verdict this run is PREVENTING or REPEATING. */
   measurableCount: number;
   repeatingCount: number;
   /** `repeatingCount / measurableCount`, or `null` when `measurableCount === 0` — a rate over
@@ -214,6 +219,23 @@ function parseLedgerLine(raw: string): { ts: string; step: string } | null {
 
 function isMeasurable(sig: RuleSignature): sig is MeasurableRuleSignature {
   return sig.measurable;
+}
+
+function matchedVerdict(sig: MeasurableRuleSignature, recurrences: RuleRecurrence[]): RuleVerdict {
+  const activity = sig.signatureKind === "ACTIVITY";
+  return {
+    ruleId: sig.ruleId,
+    citation: sig.citation,
+    description: sig.description,
+    signatureKind: sig.signatureKind,
+    status: activity ? "UNPROVEN" : recurrences.length > 0 ? "REPEATING" : "PREVENTING",
+    effectiveDate: sig.effectiveDate,
+    recurrences,
+    why: activity
+      ? `${recurrences.length} activity match(es): a fire is not a violation until the subject's health is observed.` +
+        (sig.signatureReason ? ` ${sig.signatureReason}` : "")
+      : undefined,
+  };
 }
 
 /**
@@ -253,6 +275,11 @@ export function ruleEfficacyReport(
    *  NOT SUPPLIED, never "no red found": such a rule renders UNMEASURABLE, not PREVENTING. */
   ciObservations?: readonly CiFailureObservation[],
 ): RuleEfficacyReport {
+  for (const sig of signatures) {
+    if (sig.measurable && sig.signatureKind !== "VIOLATION" && sig.signatureKind !== "ACTIVITY") {
+      throw new TypeError(`${sig.ruleId}: signatureKind must explicitly declare VIOLATION or ACTIVITY`);
+    }
+  }
   const ledgerSignatures = signatures.filter(isMeasurable).filter((s) => declaredChannel(s) === "ledger");
 
   let ledger: LedgerUnionResult | undefined;
@@ -313,14 +340,7 @@ export function ruleEfficacyReport(
         .filter((o) => new Date(o.at).getTime() > ciEffectiveMs)
         .sort((a, b) => a.at.localeCompare(b.at))
         .map((o) => ({ ts: o.at, step: o.gate }));
-      return {
-        ruleId: sig.ruleId,
-        citation: sig.citation,
-        description: sig.description,
-        status: ciRecurrences.length > 0 ? "REPEATING" : "PREVENTING",
-        effectiveDate: sig.effectiveDate,
-        recurrences: ciRecurrences,
-      };
+      return matchedVerdict(sig, ciRecurrences);
     }
     if (!ledger || !ledger.ok) {
       return {
@@ -342,17 +362,10 @@ export function ruleEfficacyReport(
       .filter((l) => new Date(l.ts).getTime() > effectiveMs)
       .sort((a, b) => a.ts.localeCompare(b.ts))
       .map((l) => ({ ts: l.ts, step: l.step }));
-    return {
-      ruleId: sig.ruleId,
-      citation: sig.citation,
-      description: sig.description,
-      status: recurrences.length > 0 ? "REPEATING" : "PREVENTING",
-      effectiveDate: sig.effectiveDate,
-      recurrences,
-    };
+    return matchedVerdict(sig, recurrences);
   });
 
-  const measurableCount = rules.filter((r) => r.status !== "UNMEASURABLE").length;
+  const measurableCount = rules.filter((r) => r.status === "PREVENTING" || r.status === "REPEATING").length;
   const repeatingCount = rules.filter((r) => r.status === "REPEATING").length;
 
   return {
@@ -397,7 +410,7 @@ export function escalateRepeatingRules(
   registryPath: string,
   opts?: UpdateProposalRegistryOpts,
 ): Proposal[] | null {
-  const toEscalate = report.rules.filter((r) => r.status === "REPEATING" && r.recurrences.length >= RULE_EFFICACY_ESCALATION_THRESHOLD);
+  const toEscalate = report.rules.filter((r) => r.signatureKind === "VIOLATION" && r.status === "REPEATING" && r.recurrences.length >= RULE_EFFICACY_ESCALATION_THRESHOLD);
   if (toEscalate.length === 0) return null;
 
   return updateProposalRegistry(
@@ -432,7 +445,7 @@ export function escalateRepeatingRules(
  *  comparison a second way. */
 function repeatingSnapshots(report: RuleEfficacyReport): RuleRecurrenceSnapshot[] {
   return report.rules
-    .filter((r): r is RuleVerdict & { status: "REPEATING" } => r.status === "REPEATING")
+    .filter((r): r is RuleVerdict & { status: "REPEATING" } => r.signatureKind === "VIOLATION" && r.status === "REPEATING")
     .map((r) => ({ ruleId: r.ruleId, recurrenceCount: r.recurrences.length }));
 }
 

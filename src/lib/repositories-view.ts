@@ -18,7 +18,8 @@ import { fixedClock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { parseInstanceRegistry, type RegistryInstance } from "./instance-registry.js";
 import { readOnMtimeChange, startSourcePublisher } from "./nav-badge-view.js";
-import { loadPlan, type Plan } from "./plan.js";
+import type { Plan } from "./plan.js";
+import { threadStrictPlan } from "./thread-plan.js";
 import { READ_MODEL_DIRNAME, readModelSidecarDir, type ReadModelDb } from "./read-model-db.js";
 import {
   REPO_TELEMETRY_CACHE_TTL_MS,
@@ -132,11 +133,23 @@ function readSources(path: string): RepositoriesSources | undefined {
   }
 }
 
+/** Each read model's parsed `repo_row` bodies by key: a row is written once (`INSERT OR IGNORE`), so its parse holds. */
+const parsedRepoRows = new WeakMap<ReadModelDb, Map<string, Record<string, unknown>>>();
+
 /** One instance's `repo_row` rows inside twice the window, plus its newest heartbeat as a `daemon.*` row:
- *  the shape `computeRepoTelemetrySync`'s `readLedger` seam takes. */
-export function readRepoRows(db: ReadModelDb, nowMs: number): Array<Record<string, unknown>> {
-  const rows = db.prepare("SELECT body FROM repo_row WHERE ts_ms >= ? ORDER BY ts_ms, h").all(nowMs - 2 * REPO_TELEMETRY_WINDOW_MS)
-    .map((row) => JSON.parse(String(row.body)) as Record<string, unknown>);
+ *  the shape `computeRepoTelemetrySync`'s `readLedger` seam takes. Only rows not parsed by the last read are parsed (E37). */
+export function readRepoRows(db: ReadModelDb, nowMs: number, parse: (body: string) => Record<string, unknown> = JSON.parse): Array<Record<string, unknown>> {
+  const since = nowMs - 2 * REPO_TELEMETRY_WINDOW_MS;
+  const keyOf = (row: { ts_ms?: unknown; h?: unknown }): string => `${String(row.ts_ms)}:${String(row.h)}`;
+  const keys = db.prepare("SELECT ts_ms, h FROM repo_row WHERE ts_ms >= ? ORDER BY ts_ms, h", { bigInts: true }).all(since).map(keyOf);
+  const held = parsedRepoRows.get(db) ?? new Map<string, Record<string, unknown>>();
+  const kept = new Map<string, Record<string, unknown>>();
+  const listed = keys.every((key) => held.has(key))
+    ? keys.map((key) => [key, held.get(key)!] as const)
+    : db.prepare("SELECT ts_ms, h, body FROM repo_row WHERE ts_ms >= ? ORDER BY ts_ms, h", { bigInts: true }).all(since)
+      .map((row) => [keyOf(row), held.get(keyOf(row)) ?? parse(String(row.body))] as const);
+  const rows = listed.map(([key, row]) => (kept.set(key, row), row));
+  parsedRepoRows.set(db, kept);
   const beat = db.prepare("SELECT last_ms FROM instance_heartbeat WHERE k = 'daemon'").get();
   if (beat) rows.push({ ts: fixedClock(Number(beat.last_ms)).iso(), step: "daemon.heartbeat" });
   return rows;
@@ -265,7 +278,7 @@ function planReader(): { read: (path: string) => Plan; held: (path: string) => P
       const stamp = stampOf(path);
       const hit = memo.get(path);
       if (hit?.stamp === stamp) return hit.plan;
-      const plan = loadPlan(path);
+      const plan = threadStrictPlan(path);
       memo.set(path, { stamp, plan });
       return plan;
     },

@@ -52,10 +52,8 @@
   acceptance:
     - claim: "the lane fills only leftover budget, is byte-identical when off, and is seeded"
       proof: "unit test: test/a-task-no-glob-reaches-gets-a-lexical-second-chance.test.ts"
-    - claim: "the lexical ranker is exported"
-      proof: "grep: export function bm25Rank( in src/lib/learning-lexical.ts"
     - claim: "selection calls the ranker"
-      proof: "grep: bm25Rank( in src/lib/learnings.ts"
+      proof: "unit test: with the lexical lane on, selectLearnings fills leftover budget from bm25Rank-ranked facts"
     - claim: "the injected row carries the lane assignment"
       proof: "grep: lexical_lane in src/run-task.ts"
   falsifier: |
@@ -66,3 +64,4 @@
   note: |
     OPERATOR RULING 2026-09-30 (recorded in DECISIONS.md, "the verify-human queue, cleared"): RELEASED as a randomized arm with a small seeded propensity; the outcome fold (W1-T4241/W1-T4243), not hand labels, decides whether it stays.
     Human verification parks this live prompt-injection trial until W1-T4606's source-pinned candidate report has representative relevance and misleading-hit labels and an operator explicitly releases the trial. The lane remains a randomized arm the outcome fold judges, not a relevance claim. Filed after the turbopuffer/Cursor scan; the embedding alternative stays rejected by the three rulings named in (2).
+    PROOF REPAIR 2026-10-02: the criterion "the lexical ranker is exported" (grep: export function bm25Rank( in src/lib/learning-lexical.ts) was REMOVED because W1-T4606 (#7449) already exported bm25Rank with the k1/b constants design (i) names, so it passed at main and the PR-open base check refused it as stale. "selection calls the ranker" moved off grep: bm25Rank( in src/lib/learnings.ts, which the W1-T4606 shadow audit already matches, onto a titled test of the selectLearnings lane.
