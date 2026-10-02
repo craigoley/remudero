@@ -3415,10 +3415,8 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
           projection.startedAt = runState.startedAt;
           projection.elapsedMs = Math.max(0, now() - Date.parse(runState.startedAt));
         }
-        // W1-T944: `workerState` rides the SAME "this row is running" gate as `phase`/`startedAt`, so a finished
-        // or orphaned run cannot carry a lingering liveness word. Absent when the run has emitted no such row —
-        // the console renders "state unknown" rather than treating a blank as a healthy default.
-        if (runState.workerState) {
+        // A remote PR proves the work remains open, not that its last worker activity is current.
+        if (!projection.processUnevidenced && runState.workerState) {
           projection.workerState = runState.workerState;
           // workerStateSince backs the client's "quiet Nm" ageing tick (design note ii) — only meaningful while
           // the CURRENT state is quiet, so it stays sparse otherwise.
@@ -3426,7 +3424,7 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
             projection.workerStateSince = runState.workerStateSince;
           }
         }
-        if (runState.workerTelemetry) projection.workerTelemetry = runState.workerTelemetry;
+        if (!projection.processUnevidenced && runState.workerTelemetry) projection.workerTelemetry = runState.workerTelemetry;
       } else {
         // Dispatched, no terminal verdict, no open PR, no recent activity and no live lock: orphaned, never
         // running — the falsifier being an orphaned dispatch rendered as running. A lock held by a DEAD pid
