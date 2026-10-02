@@ -76,6 +76,8 @@ export const NOW_GITHUB_STALE_MS = 3 * OPEN_SNAPSHOT_RESAVE_MS;
 export const NOW_SLOW_STAGE_MS = 2_500;
 /** A daemon with no `daemon.*` row for this long reads silent: the console's own health-freshness bound. */
 export const NOW_DAEMON_SILENT_MS = 5 * 60_000;
+/** A row emitter's declared cadence widens that bound: one late pulse is jitter, two missed ones are silence. */
+export const NOW_DAEMON_SILENT_CADENCES = 2;
 
 /** One instance as the worker knows it; `repo`, `planPath` and `feedbackRoot` come from serve's registry resolution. */
 export interface NowInstance {
@@ -938,10 +940,11 @@ export function defaultProbeHost(instance: NowInstance, isCore: boolean, clock: 
   const diskFreeBytes = (deps.diskFree ?? readDiskFreeBytes)(instance.ledgerDir);
   if (diskFreeBytes === undefined) reasons.diskFreeBytes = `statfs of ${instance.ledgerDir} failed`;
   const poll = deriveLastPoll((deps.readLive ?? readLedgerLines)(join(instance.ledgerDir, LEDGER_FILENAME)));
+  const silentAfterMs = Math.max(NOW_DAEMON_SILENT_MS, NOW_DAEMON_SILENT_CADENCES * poll.pollIntervalMs);
   const daemon: NowDaemonPoll = !poll.lastPollTs
     ? { state: "silent", reason: "no daemon.* row in the instance's live ledger" }
-    : now - Date.parse(poll.lastPollTs) > NOW_DAEMON_SILENT_MS
-      ? { state: "silent", at: poll.lastPollTs, reason: `no daemon.* row for over ${NOW_DAEMON_SILENT_MS / 60_000} min` }
+    : now - Date.parse(poll.lastPollTs) > silentAfterMs
+      ? { state: "silent", at: poll.lastPollTs, reason: `no daemon.* row for over ${silentAfterMs / 60_000} min` }
       : { state: "polling" };
   const rateLimitRemaining = isCore ? (deps.rateLimit ?? readGhRateLimitRemaining)() : undefined;
   if (!isCore) reasons.rateLimitRemaining = "serve holds core's GitHub token only; this instance's daemon spends its own";
