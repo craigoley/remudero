@@ -1,7 +1,7 @@
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { readWholeFile } from "./plan.js";
+import { PlanError, readWholeFile } from "./plan.js";
 import { isDemonstrationProof, isDialectPrefixed, parseWhitelistedProof } from "./review.js";
 
 export const PROPOSAL_STATUSES = ["open", "adopted", "refuted", "superseded"] as const;
@@ -16,7 +16,7 @@ export interface ProposalRecord {
   source?: string;
 }
 
-export class ProposalRecordError extends Error {
+export class ProposalRecordError extends PlanError {
   constructor(message: string) {
     super(message);
     this.name = "ProposalRecordError";
