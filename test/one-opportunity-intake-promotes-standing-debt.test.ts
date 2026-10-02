@@ -263,6 +263,36 @@ test("production routing shells out for identity and lands durable feedback thro
   } finally { f.cleanup(); }
 });
 
+test("an open plan proposal naming a debt source dedupes that candidate in production", async () => {
+  const f = productionFixture();
+  try {
+    mkdirSync(join(f.root, "plan", "proposals.d"));
+    writeFileSync(join(f.root, "plan", "proposals.d", "P1.yaml"), "id: P1\ntitle: repair the mapping reader\nstatus: open\nfalsifier: \"unit test: the mapping reader repairs\"\nsource: standing-debt:1\n");
+    const result = await runOpportunityIntake(productionOpportunityIntakePorts(f.garden, f.deps));
+    assert.ok(result.deduped.includes("standing-debt:1"), JSON.stringify(result.deduped));
+    assert.equal(result.candidate?.key, "standing-debt:3");
+  } finally { f.cleanup(); }
+});
+
+test("a debt family's merged history lowers the bar its next candidate must clear", async () => {
+  const history = (merged: number) => {
+    const { ports, filed } = fixture();
+    ports.riskJudge = async () => ({ verdict: "low", confidence: 0.7, reasons: ["bounded reader repair"] });
+    const work = ports.readWork();
+    for (let i = 0; i < 4; i++) {
+      work.tasks.push({ id: `W1-T90${i}`, repo: "app", author_class: "machine", origin: `standing-debt:9${i}` } as Task);
+      if (i < merged) work.mergedKeys.push(`acme/app/standing-debt:9${i}`);
+    }
+    ports.readWork = () => work;
+    return { ports, filed };
+  };
+  const unproven = history(0);
+  assert.equal((await runOpportunityIntake(unproven.ports)).status, "held", "an unproven family needs more than 0.7");
+  const proven = history(4);
+  assert.equal((await runOpportunityIntake(proven.ports)).status, "promoted", "four merged siblings earn the lower bar");
+  assert.deepEqual(proven.filed, ["standing-debt:1"]);
+});
+
 test("standing debt promotion anchors the source selected by the repository layout", async () => {
   const f = productionFixture();
   try {
