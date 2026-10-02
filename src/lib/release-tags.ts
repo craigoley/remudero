@@ -21,7 +21,9 @@ export const RELEASE_TAG_PREFIX = "release/";
 export const RELEASE_MINTED_STEP = "release.minted";
 export const RELEASE_MINT_FAILED_STEP = "release.mint_failed";
 export const RELEASE_MINT_SKIPPED_STEP = "release.mint_skipped";
-/** How many consecutive collisions one mint tolerates before giving up (logged, never thrown). */
+/** BACKSTOP: how many consecutive collisions one mint tolerates before giving up (logged, never
+ *  thrown). The primary control is the fresh tag-name derivation each attempt; this only stops a
+ *  pathological collision loop. */
 export const RELEASE_MINT_MAX_ATTEMPTS = 5;
 
 const MANIFEST_TITLE = "remudero release";
