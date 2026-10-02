@@ -392,7 +392,8 @@ test("daemonCommand supplies the real REST and issue gateways to the one event-a
 
   assert.ok(observerStart > 0, "one observer is constructed before both production call sites");
   assert.match(call, /buildMainHealthRung\(target\.owner, target\.repo/);
-  assert.match(call, /fetch: ghJson/);
+  // E36: the awaited transport — a sync ghJson here held the daemon loop 144 s.
+  assert.match(call, /fetch: \(args\) => ghJsonAsync\(args\)/);
   assert.match(call, /issues: ghIssueGateway\(target\.owner, target\.repo\)/);
   assert.match(call, /readCiFailures:\s*\(rollup\)\s*=>\s*fetchCiFailures/);
   // W1-T3194: the endpoint literal moved into `requeueActionsJob` when it was extracted so its

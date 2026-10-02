@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { constants as osConstants } from "node:os";
 import { resolve } from "node:path";
 // Type-only: erased at runtime, so daemon.ts stays a one-way dependency and keeps its
@@ -45,7 +45,14 @@ export const SELF_SYNC_GUARD_ENV = "RMD_SELF_SYNC_DONE";
  * hand-rolled double that could drift from real git's behavior.
  */
 export { fetchOriginRetryingRefLock, type GitRunner } from "./git-fetch-retry.js";
-import { fetchOriginRetryingRefLock, type GitRunner } from "./git-fetch-retry.js";
+import { fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, type AsyncGitRunner, type GitRunner } from "./git-fetch-retry.js";
+
+function asyncGit(repoDir: string, options: { maxBuffer?: number } = {}): AsyncGitRunner {
+  return (args) =>
+    new Promise((resolve, reject) => {
+      execFile("git", ["-C", repoDir, ...args], { encoding: "utf8", ...options }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+    });
+}
 
 export interface SelfSyncDeps {
   /** Defaults to a real `git -C <repoDir> <args>` via `execFileSync`. */
@@ -61,6 +68,7 @@ export interface SelfSyncDeps {
    */
   reexec?: () => void;
   ignoreReentrancyGuard?: boolean;
+  gitAsync?: AsyncGitRunner;
   /**
    * W1-T486: one ledger-shaped line per distinct refusal reason per process, no-op by default.
    * Carries `reason` and the two shas already in `warn()`'s message, plus a dirty-path `count`
@@ -467,13 +475,36 @@ export function checkServiceFreshness(
   if (!deps.ignoreReentrancyGuard && alreadySelfSynced(env)) return { status: "guarded" };
   if (isCiEnv(env)) return { status: "guarded" };
 
-  const git =
-    deps.git ?? ((args) => execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8" }));
+  const git = serviceGit(repoDir, deps);
   try {
     fetchOriginRetryingRefLock(git);
   } catch (err) {
     return { status: "degraded", reason: `git fetch origin failed in ${repoDir}: ${String(err)}` };
   }
+  return assessFetchedService(repoDir, git);
+}
+
+/** The same check with the network fetch awaited: a sync one stalled the daemon loop 49 s (E36). */
+export async function checkServiceFreshnessAsync(
+  repoDir: string,
+  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
+  deps: SelfSyncDeps = {},
+): Promise<ServiceFreshness> {
+  if (!deps.ignoreReentrancyGuard && alreadySelfSynced(env)) return { status: "guarded" };
+  if (isCiEnv(env)) return { status: "guarded" };
+  try {
+    await fetchOriginRetryingRefLockAsync(deps.gitAsync ?? asyncGit(repoDir));
+  } catch (err) {
+    return { status: "degraded", reason: `git fetch origin failed in ${repoDir}: ${String(err)}` };
+  }
+  return assessFetchedService(repoDir, serviceGit(repoDir, deps));
+}
+
+function serviceGit(repoDir: string, deps: SelfSyncDeps): GitRunner {
+  return deps.git ?? ((args) => execFileSync("git", ["-C", repoDir, ...args], { encoding: "utf8" }));
+}
+
+function assessFetchedService(repoDir: string, git: GitRunner): ServiceFreshness {
   let headSha: string;
   let originSha: string;
   try {
@@ -571,12 +602,16 @@ export type ReviewerCodeFreshness =
 
 export interface ReviewerCodeFreshnessOptions {
   checkServiceFreshness?: typeof checkServiceFreshness;
+  checkServiceFreshnessAsync?: typeof checkServiceFreshnessAsync;
   resolveHeadSha?: () => string;
   git?: GitRunner;
+  gitAsync?: AsyncGitRunner;
 }
 
+const REVIEWER_GIT_MAX_BUFFER = 256 * 1024 * 1024; // run-task.ts > 1 MiB
+
 function reviewerGit(repoDir: string, deps: ReviewerCodeFreshnessOptions): GitRunner {
-  const options = { encoding: "utf8", stdio: "pipe", maxBuffer: 256 * 1024 * 1024 } as const; // run-task.ts > 1 MiB
+  const options = { encoding: "utf8", stdio: "pipe", maxBuffer: REVIEWER_GIT_MAX_BUFFER } as const;
   return deps.git ?? ((args) => execFileSync("git", ["-C", repoDir, ...args], options));
 }
 
@@ -620,6 +655,19 @@ function checkGuardedReviewerCodeFreshness(repoDir: string, deps: ReviewerCodeFr
   } catch (error) {
     return { status: "unreadable", reason: `git fetch origin failed in ${repoDir}: ${String(error)}` };
   }
+  return guardedReviewerAfterFetch(repoDir, git);
+}
+
+async function checkGuardedReviewerCodeFreshnessAsync(repoDir: string, deps: ReviewerCodeFreshnessOptions): Promise<ReviewerCodeFreshness> {
+  try {
+    await fetchOriginRetryingRefLockAsync(deps.gitAsync ?? asyncGit(repoDir, { maxBuffer: REVIEWER_GIT_MAX_BUFFER }));
+  } catch (error) {
+    return { status: "unreadable", reason: `git fetch origin failed in ${repoDir}: ${String(error)}` };
+  }
+  return guardedReviewerAfterFetch(repoDir, reviewerGit(repoDir, deps));
+}
+
+function guardedReviewerAfterFetch(repoDir: string, git: GitRunner): ReviewerCodeFreshness {
   let codeSha: string;
   let originMainSha: string;
   try {
@@ -869,11 +917,32 @@ export function checkReviewerCodeFreshness(
   deps: ReviewerCodeFreshnessOptions = {},
 ): ReviewerCodeFreshness {
   const service = (deps.checkServiceFreshness ?? checkServiceFreshness)(repoDir, env);
+  return reviewerFreshnessFromService(service, repoDir, env, deps, () => checkGuardedReviewerCodeFreshness(repoDir, deps));
+}
+
+export async function checkReviewerCodeFreshnessAsync(
+  repoDir: string,
+  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
+  deps: ReviewerCodeFreshnessOptions = {},
+): Promise<ReviewerCodeFreshness> {
+  const service = await (deps.checkServiceFreshnessAsync ?? checkServiceFreshnessAsync)(repoDir, env, {
+    ...(deps.gitAsync ? { gitAsync: deps.gitAsync } : {}),
+  });
+  return reviewerFreshnessFromService(service, repoDir, env, deps, () => checkGuardedReviewerCodeFreshnessAsync(repoDir, deps));
+}
+
+function reviewerFreshnessFromService<G extends ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>>(
+  service: ServiceFreshness,
+  repoDir: string,
+  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
+  deps: ReviewerCodeFreshnessOptions,
+  guarded: () => G,
+): ReviewerCodeFreshness | G {
   if (service.status === "degraded") return { status: "unreadable", reason: service.reason };
   if (service.status === "guarded" && isCiEnv(env)) {
     return { status: "unreadable", reason: "reviewer code freshness is guarded; no loaded-code provenance is available" };
   }
-  if (service.status === "guarded") return checkGuardedReviewerCodeFreshness(repoDir, deps);
+  if (service.status === "guarded") return guarded();
 
   if (service.behind) {
     const { oldSha, newSha, changedPaths, diffUnreadable } = service.behind;
