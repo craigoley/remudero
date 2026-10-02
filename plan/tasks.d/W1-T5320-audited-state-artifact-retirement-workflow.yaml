@@ -30,6 +30,8 @@
   origin: feedback#fb-1789303258903-a19164
   plan_refs: ["§7B"]
   files: [src/state-artifact-retirement.ts, src/run-task.ts, test/state-artifact-retirement-manifest.test.ts, test/state-artifact-retirement-census.test.ts, test/state-artifact-retirement-archive.test.ts, test/state-artifact-retirement-postcheck.test.ts]
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=57c7f42e0b4dd915
   attempts: 0
   note: "risk:high — touches host state roots, though phase 1 is read-only. Gated on the separate multi-repo supervisor task; no depends_on id is set because that task is not yet filed under a known id."
