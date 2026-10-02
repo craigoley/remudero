@@ -610,6 +610,27 @@ test("a thread that cannot bind reports startup failure and leaves no worker soc
   }
 });
 
+test("a daemon socket thread's failed message refuses startup and removes its socket path", async () => {
+  const stateDir = scratchDir("thread-failed-message");
+  const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  const threadUrl = new URL(`data:text/javascript,${encodeURIComponent(`
+    import { parentPort } from "node:worker_threads";
+    parentPort.postMessage({ type: "failed", reason: "fixture bind refused" });
+    setInterval(() => {}, 1000);
+  `)}`);
+  try {
+    const socket = await startDaemonGitCredentialSocket({
+      ready: Promise.resolve(), stateDir, threadUrl, log: (step, fields) => rows.push({ step, fields }),
+    });
+    assert.equal(socket, undefined);
+    assert.ok(rows.some((row) => row.step === "boundary.request" &&
+      String(row.fields.reason).includes("git credential socket did not start: Error: fixture bind refused")));
+    assert.equal(existsSync(daemonGitCredentialSocketPath(stateDir)), false);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("a startup failure also reports a failed socket cleanup", async () => {
   const stateDir = scratchDir("close-failure");
   const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
