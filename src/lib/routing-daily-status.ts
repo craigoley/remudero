@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 
@@ -9,9 +9,17 @@ export function readRoutingDailyStatus(stateDir: string | undefined, clock: Cloc
   if (!stateDir) return unavailable("daily-review-not-configured");
   try {
     const path = join(stateDir, "field-trials", "routing-daily", "latest.json");
-    const stat = statSync(path);
-    if (!stat.isFile() || stat.size > 256 * 1024) return unavailable("daily-review-size-or-type-invalid");
-    const report = JSON.parse(readFileSync(path, "utf8"));
+    // One handle for the check and the read, so the file judged is the file parsed.
+    const fd = openSync(path, "r");
+    let raw: string;
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile() || stat.size > 256 * 1024) return unavailable("daily-review-size-or-type-invalid");
+      raw = readFileSync(fd, "utf8");
+    } finally {
+      closeSync(fd);
+    }
+    const report = JSON.parse(raw);
     if (!report || typeof report !== "object") return unavailable("daily-review-metadata-invalid");
     const asOf = Date.parse(report.asOf), next = Date.parse(report.nextScheduledReviewAt);
     if (report.version !== "routing-daily-review-v1" || !Number.isFinite(asOf) || !Number.isFinite(next) ||
