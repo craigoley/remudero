@@ -1,0 +1,33 @@
+- id: W1-T5380
+  title: "THE CI-FRICTION OWNER SEARCH ACCEPTS A GENERIC TERM — W1-T5378 (#8780) was drafted against src/run-task.ts because the bare word 'ci' appears on 1868 of its lines, which names no code path; a term that matches nearly everywhere must locate no owner"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 6.00
+  risk: low
+  origin: "operator session 90be18e2, 2026-10-02: first live ci-friction ladder filing"
+  files: [src/lib/ci-friction-remedy.ts, test/a-generic-term-locates-no-owner.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-02: the ci-friction ladder's first live filing (#8780, W1-T5378) drafted the cause
+    check:ci-log:ci against src/run-task.ts because locateCiFrictionOwner searched the check family name "ci"
+    literally and ranked files by hit count: 1868 lines in run-task.ts, 484 in sweep.ts. The rounds carried no
+    failing-test signature (they predate ci_failures), so nothing more specific was available. A worker given
+    that owner has no code path to change.
+  design: |
+    A term's specificity is measured against the same search, not a fixed length or count: a term that
+    matches more files than the cause's other terms, or that matches as a substring of larger identifiers
+    rather than as a whole token (git grep -w), contributes no owner. When every term is generic, the cause
+    has no locatable owner and the ladder escalates it, as it already does for an unlocated cause. A
+    failing-test signature in the rounds, when present, outranks the family name.
+  acceptance:
+    - claim: "a check family named by a generic term locates no owner and escalates"
+      proof: 'grep: test("W1-T5380: a check family named by a generic term locates no owner and escalates" in test/a-generic-term-locates-no-owner.test.ts'
+    - claim: "a distinctive refusal reason still locates its owning file"
+      proof: 'grep: test("W1-T5380: a distinctive refusal reason still locates its owning file" in test/a-generic-term-locates-no-owner.test.ts'
+  falsifier: |
+    Restore ranking by raw hit count and the first test sees run-task.ts named as the owner of 'ci'.
