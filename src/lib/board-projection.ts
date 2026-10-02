@@ -24,6 +24,7 @@ import { readFileSync } from "node:fs";
 import { projectionAgesWithTheClock } from "./board.js";
 import { systemClock, type Clock } from "./clock.js";
 import { tryEscalate, type EscalateDeps, type Escalation } from "./escalate.js";
+import { runWorkerRow } from "./ledger-projector.js";
 import type { Plan, Task } from "./plan.js";
 import { withWriteTransaction, type ReadModelDb, type ReadModelLease, type ReadModelStatement } from "./read-model-db.js";
 import {
@@ -36,6 +37,7 @@ import {
   type DeriveDeps,
   type GitHub,
   type StatusProjection,
+  WORKER_ACTIVITY_STAND_IN_STEP,
 } from "./status.js";
 
 /** Bumped when this module's stamp or stored shape changes: every persisted projection then re-derives. */
@@ -226,6 +228,11 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   const taskActivitySeq = new Map<string, number>();
   let activitySeq = 0;
   let activitySql: ReadModelStatement | undefined;
+  /** Per `task|run`: the row standing for its `worker.activity` rows (`run_worker`), and the worker seq read. */
+  const workerRows = new Map<string, { row: Row; tsMs: number }>();
+  const taskWorkerSeq = new Map<string, number>();
+  let workerSeq = 0;
+  let workerSql: ReadModelStatement | undefined;
   let lastCredit: { credit: CreditStore; overrides: string } = { credit: {}, overrides: "" };
   let latestTsMs = 0;
   const held = new Map<string, Held>();
@@ -240,17 +247,46 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   let lastOracleAt: number | undefined;
   let pending = false;
 
-  /** Takes out the row standing for a run's activity, if any. */
-  function dropActivity(key: string): void {
-    const held = activityRows.get(key);
+  /** Takes out the row standing for a run's activity (or its worker rows), if any. */
+  function dropActivity(key: string, standing = activityRows): void {
+    const held = standing.get(key);
     if (!held) return;
-    activityRows.delete(key);
+    standing.delete(key);
     let at = rows.length - 1;
     while (at > 0 && rows[at] !== held.row) at--;
     if (at > 0) {
       rows.splice(at, 1);
       rowTsMs.splice(at, 1);
     }
+  }
+
+  /** Places a stand-in row by its time, after the rows of its instant. */
+  function standIn(standing: Map<string, { row: Row; tsMs: number }>, key: string, row: Row, tsMs: number): void {
+    let at = rows.length;
+    while (rowTsMs[at - 1]! > tsMs) at--;
+    rows.splice(at, 0, row);
+    rowTsMs.splice(at, 0, tsMs);
+    standing.set(key, { row, tsMs });
+    latestTsMs = Math.max(latestTsMs, tsMs);
+  }
+
+  /** Each run's `worker.activity` rows stand as one row at the newest's time, carrying each field's newest value; true when one moved. */
+  function ingestWorkers(): boolean {
+    if (!workerSql) {
+      if (db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'run_worker'").get() === undefined) return false;
+      workerSql = db.prepare("SELECT task_id, run_id, ts_ms, body, fields, seq FROM run_worker WHERE seq > ? ORDER BY seq");
+    }
+    let moved = false;
+    for (const r of workerSql.iterate(workerSeq)) {
+      const [taskId, seq] = [String(r.task_id), Number(r.seq)];
+      const key = `${taskId}|${String(r.run_id)}`;
+      workerSeq = Math.max(workerSeq, seq);
+      dropActivity(key, workerRows);
+      taskWorkerSeq.set(taskId, Math.max(taskWorkerSeq.get(taskId) ?? 0, seq));
+      standIn(workerRows, key, { ...runWorkerRow(String(r.body), String(r.fields)), step: WORKER_ACTIVITY_STAND_IN_STEP }, Number(r.ts_ms));
+      moved = true;
+    }
+    return moved;
   }
 
   /** Each run whose newest row of any step is newer than its newest fact row gets one row at that time, in time order; true when one moved. */
@@ -268,13 +304,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       taskActivitySeq.set(taskId, Math.max(taskActivitySeq.get(taskId) ?? 0, seq));
       moved = true;
       if (tsMs <= (newestFactMs.get(key) ?? Number.NEGATIVE_INFINITY)) continue;
-      const row: Row = { ts: String(r.ts), step: BOARD_RUN_ACTIVITY_STEP, task_id: taskId, run_id: runId };
-      let at = rows.length;
-      while (rowTsMs[at - 1]! > tsMs) at--;
-      rows.splice(at, 0, row);
-      rowTsMs.splice(at, 0, tsMs);
-      activityRows.set(key, { row, tsMs });
-      latestTsMs = Math.max(latestTsMs, tsMs);
+      standIn(activityRows, key, { ts: String(r.ts), step: BOARD_RUN_ACTIVITY_STEP, task_id: taskId, run_id: runId }, tsMs);
     }
     return moved;
   }
@@ -326,7 +356,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       const [sortedRows, sortedTs] = [order.map((i) => rows[i]!), order.map((i) => rowTsMs[i]!)];
       sortedRows.forEach((row, i) => { rows[i] = row; rowTsMs[i] = sortedTs[i]!; });
     }
-    if (ingestActivity() || fresh > 0) pending = true;
+    const workers = ingestWorkers();
+    if (ingestActivity() || workers || fresh > 0) pending = true;
     return fresh;
   }
 
@@ -368,7 +399,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     lastCredit = { credit, overrides };
     const global = sha1(JSON.stringify([BOARD_PROJECTION_VERSION, opts.codeVersion ?? "", crossCount, crossSeq, githubGeneration(), sha1(overrides)]));
     const stampOf = (id: string, task?: Task): string =>
-      `${global}|${task ? hashTask(task) : "-"}|${taskCount.get(id) ?? 0}:${taskSeq.get(id) ?? 0}:${taskActivitySeq.get(id) ?? 0}|${credit[id] ? sha1(JSON.stringify(credit[id])) : "-"}`;
+      `${global}|${task ? hashTask(task) : "-"}|${taskCount.get(id) ?? 0}:${taskSeq.get(id) ?? 0}:${taskActivitySeq.get(id) ?? 0}:${taskWorkerSeq.get(id) ?? 0}|${credit[id] ? sha1(JSON.stringify(credit[id])) : "-"}`;
     return { plan, credit, overrides, stampOf };
   }
 

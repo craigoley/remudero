@@ -2877,6 +2877,8 @@ interface RunState {
  *  rather than imported, because run-task.ts imports FROM this module and the reverse would be circular, the
  *  same way {@link LANE_START_STEPS} mirrors its other step literals. */
 const WORKER_STATE_STEP = "worker.state";
+/** A read model's one row per run standing for its `worker.activity` rows (`run_worker`): derived exactly as one of them. */
+export const WORKER_ACTIVITY_STAND_IN_STEP = "read_model.run_worker";
 
 /** Type guard for a `worker.state` ledger row's `state` field — a malformed value is simply ignored, so this
  *  run's `workerState` stays whatever it was rather than becoming a garbage fourth value. */
@@ -3026,7 +3028,7 @@ function deriveRunState(
       }
       continue;
     }
-    if (step === "worker.activity") {
+    if (step === "worker.activity" || step === WORKER_ACTIVITY_STAND_IN_STEP) {
       const eventAt = typeof line.event_at === "string" ? line.event_at : typeof line.ts === "string" ? line.ts : undefined;
       const eventKind = isWorkerActivityKind(line.event_kind) ? line.event_kind : undefined;
       if (eventAt && eventKind) {
