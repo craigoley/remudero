@@ -20,7 +20,7 @@ import { createHash } from "node:crypto";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { censusSatisfiedTasks } from "../scripts/satisfied-task-census.mjs";
-import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -16011,31 +16011,25 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
     throw e;
   }
-  // W1-T405: worktreeAdd itself asserts base currency and throws WorktreeBaseStaleError
-  // before this run touches recon/implement/commit -- catch it HERE, at dispatch, rather
-  // than let a stale base surface only after a full run as the out-of-scope scope guard's
-  // "forged merge-base" misdiagnosis (the cost/misattribution this task exists to avoid).
-  // Verdict stays "failed" -- the SAME terminal verdict the scope guard's own out-of-scope
-  // refusal already returns for this identical condition (see its `outOfScope.length > 0`
-  // branch below); this task moves WHEN that refusal fires and WHAT it says, not what verdict
-  // it carries, so drain.ts's existing halt/continue classification needs no new case.
+  // W1-T405: worktreeAdd itself asserts base currency and throws WorktreeBaseStaleError before
+  // recon/implement/commit spend anything, so a stale base is refused HERE rather than surfacing
+  // after a full run as the scope guard's "forged merge-base" misdiagnosis. Verdict stays
+  // "failed", the scope guard's own verdict for that condition, so drain.ts needs no new case.
   try {
-    // W1-T2621: `log` threaded through last so it always wins over any test-supplied
-    // `worktreeBaseDeps` override (`readRemoteHead`/`warn` for `test/dispatch-claim.test.ts`'s
-    // stale-base injection) — this run's real ledger is never something a currency-check test
-    // double should be able to silently swallow. `worktreeAdd` itself now emits the
-    // `worktree.add` line (three-way base reading + `behind`) and, on the fail-open branch,
-    // `worktree.base_uncheckable` — see both functions' own docs in lib/worker.ts.
+    // LIVENESS TOKEN: a SIBLING file (never committed), so a concurrent pruneStaleRuns skips this
+    // worktree instead of `--force`-removing it; dropped at terminal verdict (the finally below) or
+    // by the catch below, and a crashed run's dead pid lets prune reclaim it (docs/archive/DIAGNOSIS.md).
+    // W1-T5280: written BEFORE the 5-10 minute add, or a same-process DAEMON lane's prune removes the
+    // registered, lockless worktree mid-add (2026-10-01 17:28:16Z). The empty dir comes first because
+    // reapStaleWorktrees' widowed-lock pass deletes a `.lock` whose directory does not exist yet.
+    // W1-T4356: written BEFORE the checkout lock is released, so a peer's refresh sees this borrower.
+    mkdirSync(worktreePath, { recursive: true });
+    writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+    // W1-T2621: `log` goes last so a test's `worktreeBaseDeps` can never swallow this run's ledger.
     // W1-T4193: the implement lane, and only it, refuses a same-package lockfile mismatch (the arm below defers it).
     await worktreeAddAsync(repoDir, worktreePath, branch, "origin/main", { ...opts.worktreeBaseDeps, log, refuseSamePackageLockfileMismatch: true });
-    // LIVENESS TOKEN: mark this worktree ALIVE so a concurrent pruneStaleRuns (another
-    // drain, a manual run-task) skips it instead of `--force`-removing it mid-run. The
-    // lock is a SIBLING file (never inside the worktree ⇒ never committed into the PR),
-    // written now and removed on terminal verdict (the finally below). If the process
-    // crashes, the lock's pid goes dead and prune reclaims it. (docs/archive/DIAGNOSIS.md)
-    // W1-T4356: written BEFORE the checkout lock is released, so a peer's refresh sees this borrower.
-    writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
   } catch (caught) {
+    removeRunLock(worktreePath); // W1-T5280: no arm below hands this worktree on
     // W1-T4356: a refusal over a checkout the refresh had to leave behind names why it was left.
     const e = caught instanceof WorktreeNodeModulesRefusedError && checkoutRefresh.kind === "skipped"
       ? new ManagedCheckoutNotRefreshedError(caught, checkoutRefresh.reason)
@@ -16082,6 +16076,18 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // W1-T2528: any OTHER add failure — ledger it before rethrowing (same idiom as `addLaneWorktree`).
     log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
     endThrownRun(log, verdictWritten, "worktree.add", e, costUsd);
+    try {
+      rmdirSync(worktreePath); // only the EMPTY dir made above; a partly-built worktree stays for prune
+    } catch {
+      // not empty, or already gone — either way nothing of this run's is left to free
+    }
+    // W1-T5280: drop the claim AFTER the terminal row (W1-T4708), or the next dispatches read
+    // `blocked_inflight` until the breaker trips; a throwing release never replaces the add's error.
+    try {
+      releaseDispatchClaim(task.id, claimReserver, { anchor: claimAnchor });
+    } catch (releaseErr) {
+      log("dispatch.claim_release_error", { error: String((releaseErr as Error)?.message ?? releaseErr) });
+    }
     throw e;
   } finally {
     checkoutRefresh.release();
