@@ -14,7 +14,9 @@
   plan_refs: ["W1-T4527", "W1-T3240"]
   files: [src/lib/release-tags.ts, src/lib/deployer.ts, src/run-task.ts, test/a-release-decision-is-recorded-as-a-tag.test.ts]
   priority: 2
-  status: queued
+  status: blocked
+  retirement: retired
+  # plan gardener: retire W1-T4528 — It depends on W1-T4527, which will never be built.
   # backlog gardener: band=2 evidence=dce415d925f94f19
   attempts: 0
   rationale: |
