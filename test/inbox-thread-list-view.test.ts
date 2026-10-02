@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   createInboxThreadListView,
   readInboxThreadListView,
+  warmInboxThreadListView,
   type ThreadListClassification,
   type ThreadListSources,
   type ThreadStoreRead,
@@ -223,4 +224,16 @@ test("a failed refresh does not cache its failure", async () => {
   assert.equal(r.calls.classify, 2, "the next read starts a fresh attempt");
   r.settle(classification([item("p1")], r.clock.now));
   assert.equal((await second).kind, "ok");
+});
+
+test("warming a thread-list view with no request lands its classification, so the next read is fresh", async () => {
+  const r = rig([message("p1", 1)]);
+  const view = createInboxThreadListView(r.sources, { waitMs: 10 });
+  const warming = warmInboxThreadListView(view);
+  assert.equal(r.calls.classify, 1, "the warm starts the shared refresh");
+  r.settle(classification([item("p1")], r.clock.now));
+  await warming;
+  const read = await readInboxThreadListView(view);
+  assert.equal(read.kind, "ok", "a warmed view answers fresh");
+  if (read.kind === "ok") assert.deepEqual(read.threads.map((t) => t.proposalId), ["p1"]);
 });
