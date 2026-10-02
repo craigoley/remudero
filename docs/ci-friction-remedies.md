@@ -16,3 +16,13 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   as the last line of your REPORT, exactly anchored at the line start, following Conventional
   Commits conventions (type is one of: build, chore, ci, docs, feat, fix, perf, refactor,
   revert, style, test; subject starts lower-case).
+
+- `ci-friction:fix_refusal:the-worker-changed-nothing` — `git status` after the worker's run
+  showed no modified files in the repository, so the harness refused to create a commit. This
+  happens when a worker completes its task but does not edit any of the declared files, or
+  edits only files outside the task's declared scope. To fix: check whether the task's
+  acceptance criteria are already satisfied on the current HEAD; if so, end your REPORT with
+  `ALREADY_SATISFIED: <PR url or number>` naming the prior PR that already merged and carries
+  `Remudero-Task: <task-id>`. Otherwise, verify you edited files in the declared `files:`
+  scope and that your edits are syntactically valid (no parse errors or write failures from
+  your tools); use Read/Edit/Write on declared files, never undeclared ones.
