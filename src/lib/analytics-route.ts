@@ -998,7 +998,7 @@ function checkpointTimeSeries(state: CheckpointHistoryState, nowIso: string): Le
     if (bucket === undefined || !bucket.observed) return { t: `${day}T00:00:00.000Z`, value: null, gap: true, note: "missing" };
     if (id === "runs.completed") return { t: `${day}T00:00:00.000Z`, value: bucket.completedRuns, gap: false };
     if (id === "tokens.total") return { t: `${day}T00:00:00.000Z`, value: bucket.tokensTotal, gap: false };
-    if (id === "cost.modeled.usd") return { t: `${day}T00:00:00.000Z`, value: bucket.costUsd, gap: false };
+    if (id === "cost.modeled.usd") return { t: `${day}T00:00:00.000Z`, value: bucket.costUsd, gap: false, unpricedRows: bucket.unpricedCostRows ?? 0, ...((bucket.unpricedCostRows ?? 0) > 0 ? { note: "known spend plus unpriced receipts; total uncertain" } : {}) };
     if (id === "cache.reuse") {
       const denominator = bucket.cacheRead + bucket.inputTokens + bucket.cacheCreation;
       return denominator > 0
@@ -2297,7 +2297,7 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
   const schedule = deps.schedule ?? systemSchedule;
   const log = deps.log ?? (() => {});
   let checkpoint = readAnalyticsCheckpoint(deps.stateDir);
-  let value = checkpoint === undefined ? coldAnalyticsSnapshot() : freezeAnalyticsSnapshot(attachUsageProjection(checkpoint.snapshot, checkpoint.state.usage));
+  let value = checkpoint === undefined || checkpoint.state.usage?.costAccountingVersion !== 1 ? coldAnalyticsSnapshot() : freezeAnalyticsSnapshot(attachUsageProjection(checkpoint.snapshot, checkpoint.state.usage));
   let timer: AnalyticsTimer | undefined;
   let controller: AbortController | undefined;
   let inFlight: Promise<void> | undefined;

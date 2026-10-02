@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { accumulateUsageLine, buildUsageProjection, usageTelemetryState } from "../src/lib/usage-telemetry.js";
-import { deriveAnalyticsSnapshot, deriveAnalyticsSnapshotFromCheckpointedLedger } from "../src/lib/analytics-route.js";
+import { createAnalyticsSnapshotCache, writeAnalyticsCheckpoint, deriveAnalyticsSnapshot, deriveAnalyticsSnapshotFromCheckpointedLedger } from "../src/lib/analytics-route.js";
+import { deriveDayUnpricedRows, checkCostGovernor, DEFAULT_SWEEP_POLICY } from "../src/lib/sweep.js";
 import { fixedClock } from "../src/lib/clock.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
 
@@ -26,6 +27,14 @@ test("W1-T4687: a row with no recorded cost is counted as unpriced, never as zer
   assert.deepEqual(analytics.costAccounting, { pricedUsd: 2, unpricedRows: 3, state: "uncertain" });
   assert.equal(analytics.workersByLaneModel[0]!.unpricedCostRows, 3);
   assert.equal(analytics.spend.cash.windows[0]!.unpricedRows, 3);
+  const history = analytics.timeSeries.find(s => s.id === "cost.modeled.usd")!.points.at(-1)!;
+  assert.equal(history.value, 2);
+  assert.equal(history.unpricedRows, 3);
+  assert.match(history.note!, /uncertain/);
+  assert.equal(deriveDayUnpricedRows([...rows, { ...rows[0], step: "verdict" }], Date.parse(now)), 3);
+  const governor = checkCostGovernor(2, DEFAULT_SWEEP_POLICY, 3);
+  assert.equal(governor.costState, "uncertain");
+  assert.equal(governor.unpricedRows, 3);
 });
 
 test("a missing trial terminal cost leaves its cost comparison unmeasured and routing uncertainty visible", () => {
@@ -52,6 +61,10 @@ test("pre-accounting checkpoints are rescanned and new unpriced counts survive r
     const legacy = structuredClone(first.checkpoint);
     delete legacy.state.usage!.costAccountingVersion;
     legacy.state.unpricedSpendRows = 0;
+    writeAnalyticsCheckpoint(fixture.dir, legacy);
+    const cold = createAnalyticsSnapshotCache({ stateDir: fixture.dir, clock });
+    assert.equal(cold.current().asOf, null, "old totals are withheld until the uncertainty-aware rescan");
+    cold.stop();
     const repaired = await deriveAnalyticsSnapshotFromCheckpointedLedger(fixture.dir, clock, undefined, legacy);
     assert.equal(repaired.snapshot.costAccounting!.unpricedRows, 3);
     fixture.append([{ ...rows[0]!, run_id: "R-new" }]);
@@ -59,5 +72,6 @@ test("pre-accounting checkpoints are rescanned and new unpriced counts survive r
     assert.equal(resumed.snapshot.costAccounting!.unpricedRows, 4);
     assert.equal(resumed.snapshot.spend.cash.windows[0]!.unpricedRows, 4);
     assert.equal(resumed.snapshot.usage!.cash.windows[0]!.unpricedRows, 4);
+    assert.equal(resumed.snapshot.timeSeries.find(s => s.id === "cost.modeled.usd")!.points.at(-1)!.unpricedRows, 4);
   } finally { rmSync(fixture.dir, { recursive: true, force: true }); }
 });

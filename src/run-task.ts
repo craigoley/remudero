@@ -1464,6 +1464,7 @@ import {
   CI_GATE_CHECK_NAME,
   dedupeRollupByLatestAttempt,
   deriveDayCostUsd,
+  deriveDayUnpricedRows,
   deriveDisposition,
   diffCoverageReport,
   fixCeilingInForce,
@@ -31061,13 +31062,21 @@ export function costGovernorGateFor(
   runId: string,
   now: () => number = Date.now,
 ): (dailyCostCeilingUsd?: number) => CostGovernorResult | undefined {
+  let lastUncertainty: string | undefined;
   return (dailyCostCeilingUsd) => {
     // Capture one instant for the whole consultation: a re-read after midnight
     // would put the same ledger snapshot in a different UTC day window.
     const consultationNow = now();
-    const dayCostUsd = deriveDayCostUsd(readLedgerLines(ledgerPath), consultationNow);
+    const lines = readLedgerLines(ledgerPath);
+    const dayCostUsd = deriveDayCostUsd(lines, consultationNow);
+    const unpricedRows = deriveDayUnpricedRows(lines, consultationNow);
     const policy = dailyCostCeilingUsd === undefined ? DEFAULT_SWEEP_POLICY : { ...DEFAULT_SWEEP_POLICY, dailyCostCeilingUsd };
-    const result = checkCostGovernor(dayCostUsd, policy);
+    const result = checkCostGovernor(dayCostUsd, policy, unpricedRows);
+    const uncertainty = JSON.stringify([new Date(consultationNow).toISOString().slice(0, 10), dayCostUsd, unpricedRows]);
+    if (unpricedRows > 0 && uncertainty !== lastUncertainty) appendLedger(ledgerPath, { run_id: runId, task_id: "GOVERNOR",
+      step: "cost_governor.uncertain", known_day_cost_usd: dayCostUsd, unpriced_rows: unpricedRows,
+      cost_basis: "notional-ledger", cash_admission: "conservative-reservation" });
+    lastUncertainty = uncertainty;
     if (!result.deferred) return undefined;
     logCostGovernorDeferral(result, appendLedger, ledgerPath, runId);
     return result;
