@@ -31072,7 +31072,7 @@ export function costGovernorGateFor(
     const unpricedRows = deriveDayUnpricedRows(lines, consultationNow);
     const policy = dailyCostCeilingUsd === undefined ? DEFAULT_SWEEP_POLICY : { ...DEFAULT_SWEEP_POLICY, dailyCostCeilingUsd };
     const result = checkCostGovernor(dayCostUsd, policy, unpricedRows);
-    const uncertainty = JSON.stringify([new Date(consultationNow).toISOString().slice(0, 10), dayCostUsd, unpricedRows]);
+    const uncertainty = JSON.stringify([fixedClock(consultationNow).iso().slice(0, 10), dayCostUsd, unpricedRows]);
     if (unpricedRows > 0 && uncertainty !== lastUncertainty) appendLedger(ledgerPath, { run_id: runId, task_id: "GOVERNOR",
       step: "cost_governor.uncertain", known_day_cost_usd: dayCostUsd, unpriced_rows: unpricedRows,
       cost_basis: "notional-ledger", cash_admission: "conservative-reservation" });
