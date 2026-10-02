@@ -7,7 +7,8 @@
   principles: {tdd: strict}
   priority: 3
   budget_usd: 8.00
-  risk: medium
+  risk: high
+  band_meaning: span
   origin: "operator ask 2026-10-01: audit app.remudero.com and the core-console data plan; filed from the live audit (operator session 90be18e2)"
   note: "reservation hand-off: plan-console-audit-core-1790887256000 -> plan-console-audit-core-1790887256000"
   plan_refs: [W1-T4024, W1-T3623]
