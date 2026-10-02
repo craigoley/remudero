@@ -51,11 +51,12 @@ import {
   type QuestionStoreLine,
 } from "./now-decisions.js";
 import type { BoardIssueRest, BoardPrRest } from "./open-prs-rest.js";
-import { loadPlanQuarantiningDuplicates, type Plan } from "./plan.js";
+import type { Plan } from "./plan.js";
 import type { ReadModelDb, ReadModelLease } from "./read-model-db.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { buildBatchedGithub, readLedgerLines, type BatchedPr, type GitHub } from "./status.js";
 import { deriveDayCostUsd, windowCostRows } from "./sweep.js";
+import { threadPlan } from "./thread-plan.js";
 import { utcDayWindowMs } from "./time-window.js";
 import { judgeSource, PLAN_BUDGET_MS } from "./view-freshness.js";
 import { legacyRowIndex, type LegacyRows, type ShadowLatest, type ShadowSum } from "./view-shadow.js";
@@ -483,20 +484,6 @@ export function planStamp(path: string): string {
   return `${mtimeOf(path) ?? "-"}:${mtimeOf(join(dirname(path), "tasks.d")) ?? "-"}`;
 }
 
-const sharedPlans = new Map<string, { stamp: string; plan: Plan }>();
-
-/**
- * One parsed plan per file and stamp for every view in the thread: the `now` and `task` views each held their
- * own copy of core's, and a parsed plan retains ~144 MB (2,848 tasks, measured 2026-10-02). Read-only to callers.
- */
-export function sharedPlan(path: string, stamp: string, load: (path: string) => Plan = (p) => loadPlanQuarantiningDuplicates(p).plan): Plan {
-  const hit = sharedPlans.get(path);
-  if (hit?.stamp === stamp) return hit.plan;
-  const plan = load(path);
-  sharedPlans.set(path, { stamp, plan });
-  return plan;
-}
-
 /** The persisted snapshot's source, judged at `nowMs` from when its open half was last saved, or why it is unreadable. */
 export function snapshotSource(savedAt: string | null, reason: string | undefined, nowMs: number): Omit<ViewSource, "name"> {
   if (savedAt === null) return { asOf: null, state: "stale", reason };
@@ -709,7 +696,7 @@ export function createNowView(opts: NowViewOptions): {
   const readPlan = opts.readPlan ?? ((instance: NowInstance): Plan => {
     const path = nowPlanPath(instance);
     if (!path) throw new NowViewError(`instance ${instance.name} names no repository, so it has no plan`);
-    return sharedPlan(path, planStamp(path));
+    return threadPlan(path);
   });
   const planKey = (instance: NowInstance): string => {
     const path = nowPlanPath(instance);

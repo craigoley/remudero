@@ -977,7 +977,7 @@ import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-for
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
-import { escalateRepeatingRules, ruleEfficacyReport } from "./lib/rule-efficacy.js";
+import { escalateRepeatingRules, ruleEfficacyReport, type RuleSignature } from "./lib/rule-efficacy.js";
 import {
   buildAuthorityReport,
   authorityLedgerPattern,
@@ -22747,7 +22747,7 @@ export function ciLearningTaskIdMinter(root: string): (filingBranch?: string) =>
   };
 }
 
-export function ruleEfficacyCommand(rest: string[], opts: { stateDir?: string } = {}): number {
+export function ruleEfficacyCommand(rest: string[], opts: { stateDir?: string; signatures?: readonly RuleSignature[] } = {}): number {
   const badArg = unknownArgError("rule-efficacy", rest, [], ["--no-escalate"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -22768,7 +22768,7 @@ export function ruleEfficacyCommand(rest: string[], opts: { stateDir?: string } 
     return 1;
   }
 
-  const report = ruleEfficacyReport(stateDir);
+  const report = opts.signatures ? ruleEfficacyReport(stateDir, opts.signatures) : ruleEfficacyReport(stateDir);
   console.log(`rmd rule-efficacy — over the unioned ledger at ${stateDir}`);
   // `report.ledger` is only ever unset when the signature table has no measurable rule at all
   // (lib/rule-efficacy.ts's own module-level falsifier covers that shape) — RULE_SIGNATURES,
@@ -22783,6 +22783,10 @@ export function ruleEfficacyCommand(rest: string[], opts: { stateDir?: string } 
       console.log(`                why: ${r.why}`);
     } else if (r.status === "PREVENTING") {
       console.log(`  PREVENTING    ${r.ruleId}  (0 since ${r.effectiveDate})`);
+    } else if (r.status === "UNPROVEN") {
+      // W1-T4271: activity matches, never recurrences — the count is shown, the verdict is not REPEATING.
+      console.log(`  UNPROVEN      ${r.ruleId}  (${r.recurrences.length} activity match(es) since ${r.effectiveDate})`);
+      console.log(`                why: ${r.why}`);
     } else {
       const dates = r.recurrences.map((x) => x.ts).join(", ");
       console.log(`  REPEATING     ${r.ruleId}  (${r.recurrences.length} since ${r.effectiveDate}: ${dates})`);

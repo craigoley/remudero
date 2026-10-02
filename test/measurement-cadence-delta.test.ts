@@ -6,6 +6,20 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { buildMeasurementCadenceRow, runMeasurementCadenceReport } from "../src/lib/measurement-cadence.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import type { RuleSignature } from "../src/lib/rule-efficacy.js";
+
+/** W1-T4271 made the shipped ci.stalled rule ACTIVITY-shaped, so it can no longer reach REPEATING. These
+ *  cases measure the cadence's own arithmetic over a recurrence, so they grade the same rows against a
+ *  VIOLATION-shaped twin of that rule, keeping its id and date. */
+const STALL_VIOLATION_RULES: readonly RuleSignature[] = [{
+  ruleId: "CLAUDE.md#investigation-discipline:bound-fires-on-healthy-condition",
+  citation: "W1-T312, W1-T380/#1392, W1-T382/#1401",
+  description: "A bound that fires on a HEALTHY condition is this repo's recurring defect.",
+  measurable: true,
+  signatureKind: "VIOLATION",
+  effectiveDate: "2026-08-06",
+  stepPatterns: [/^ci\.stalled$/],
+}];
 
 // ── W1-T2925: the cadence reported the LATEST value of every metric and nothing else, so no
 // surface could say whether the loop was converging. `delta_vs_previous` is that direction, and
@@ -71,6 +85,7 @@ function fireOver(rows: readonly Record<string, unknown>[]): Record<string, unkn
     return buildMeasurementCadenceRow(
       runMeasurementCadenceReport({
         stateDir,
+        ruleSignatures: STALL_VIOLATION_RULES,
         cwd: REPO_ROOT,
         escalate: false,
         gitLog: () => ({ dump: trailerMergeDump(["T1", "T2"]), ref: "test" }),

@@ -36,6 +36,7 @@ import {
   type Task,
 } from "./plan.js";
 import { loadPlanIndex, type PlanIndex, type PlanIndexEntry } from "./plan-index.js";
+import { threadStrictPlan } from "./thread-plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import {
   buildLedgerIndex,
@@ -1697,7 +1698,7 @@ function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readP
   } else {
     planKey = planFilesStamp(deps.planPath, stat, deps.inboxListDir ?? listDirOrUndefined);
     const last = state.last;
-    plan = last?.planKey !== undefined && last.planKey === planKey ? last.plan : loadPlan(deps.planPath);
+    plan = last?.planKey !== undefined && last.planKey === planKey ? last.plan : threadStrictPlan(deps.planPath);
   }
   const projection = projectPlan(plan, { ledgerPath: deps.ledgerPath, github: deps.statusGithub, readLedger: () => ledgerLines, writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY });
   const archiveKey = archiveReleases?.size ? [...archiveReleases].sort(([a], [b]) => a.localeCompare(b)) : null;
