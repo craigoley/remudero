@@ -66,7 +66,17 @@ import {
   followUpReceipt,
   type FollowUpCandidate,
   type FollowUpControl,
+  type FollowUpEvaluation,
+  type FollowUpHistory,
 } from "./follow-up-policy.js";
+import {
+  appendHumanHandoff,
+  createHumanHandoff,
+  type HandoffActionProfile,
+  type HandoffEscalationPolicy,
+  type HandoffScope,
+  type HumanHandoff,
+} from "./human-handoff.js";
 import {
   classifyConsequenceAction,
   evaluateConsequencePolicy,
@@ -2585,6 +2595,54 @@ export function buildOperatorAgentConsequencesWriteRefusalRoutes(): Route[] {
 /** The operator-agent execution seam delegates policy decisions to the durable follow-up module. */
 export function evaluateOperatorAgentFollowUp(candidate: FollowUpCandidate, now?: number) {
   return evaluateFollowUpPolicy(candidate, { now });
+}
+
+export const FOLLOW_UP_HANDOFF_DEFAULT_RESPONSE_MS = 24 * 60 * 60 * 1000;
+
+export interface OperatorAgentFollowUpHandoffContext {
+  now: number;
+  scope: HandoffScope;
+  escalationPolicy: HandoffEscalationPolicy;
+  actionProfile?: HandoffActionProfile;
+  dependencyAvailable?: boolean;
+  existing?: readonly FollowUpHistory[];
+  ledgerPath?: string;
+  origin?: string;
+}
+
+export function handOffOperatorAgentFollowUp(
+  candidate: FollowUpCandidate,
+  context: OperatorAgentFollowUpHandoffContext,
+): { evaluation: FollowUpEvaluation; handoff: HumanHandoff | null; refusal?: string } {
+  const evaluation = evaluateFollowUpPolicy(candidate, {
+    now: context.now,
+    ...(context.dependencyAvailable === undefined ? {} : { dependencyAvailable: context.dependencyAvailable }),
+    ...(context.existing ? { existing: context.existing } : {}),
+  });
+  const needsHuman = evaluation.state === "blocked" || (evaluation.state === "eligible" && candidate.nextQuestion !== undefined);
+  if (!needsHuman) return { evaluation, handoff: null };
+  const deadline = candidate.deadline && Date.parse(candidate.deadline) > context.now ? Date.parse(candidate.deadline) : context.now + FOLLOW_UP_HANDOFF_DEFAULT_RESPONSE_MS;
+  const reason = evaluation.state === "blocked" ? `${candidate.reason} (${evaluation.reason})` : candidate.reason;
+  const created = createHumanHandoff(
+    {
+      handoffId: `handoff:${candidate.candidateId}`,
+      reason: reason.slice(0, 500),
+      sourceReceipt: candidate.sourceEvent.slice(0, 200),
+      requiredDecision: candidate.nextQuestion ?? `decide whether to proceed: ${candidate.nextAction}`.slice(0, 500),
+      scope: context.scope,
+      priority: evaluation.state === "blocked" ? "high" : "normal",
+      responseDeadline: fixedClock(deadline).iso(),
+      escalationPolicy: context.escalationPolicy,
+      ...(candidate.quietHours ? { quietHours: candidate.quietHours } : {}),
+      freshness: candidate.freshness,
+      actionProfile: context.actionProfile ?? { level: "advise", capabilities: [] },
+      createdBy: candidate.owner,
+    },
+    context.now,
+  );
+  if (!created.ok) return { evaluation, handoff: null, refusal: `${created.error}: ${created.detail}` };
+  if (context.ledgerPath) appendHumanHandoff({ ledgerPath: context.ledgerPath, ...(context.origin ? { origin: context.origin } : {}) }, created.handoff, created.receipt);
+  return { evaluation, handoff: created.handoff };
 }
 
 /** GET /v1/operator-agent/follow-ups — durable follow-up candidates and receipts. */
