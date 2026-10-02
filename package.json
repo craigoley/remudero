@@ -97,6 +97,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.284",
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "playwright": "^1.63.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
@@ -126,7 +127,7 @@
   },
   "_overridesRationale": {
     "qs": "Forces typed-rest-client's qs 6.15.1 pin and Express/body-parser qs ranges to 6.16.0, patched for GHSA-4mjr-xmp4-gh2g and GHSA-x5fp-wj9c-mxmx.",
-    "js-yaml": "Forces cosmiconfig's js-yaml 4.3.1, reached only through @commitlint/cli, to 4.3.2 \u2014 patched for GHSA-2883-xcg3-v3hh (maxTotalMergeKeys does not bound CPU on empty merge keys). Dev-scope, and no direct dependency declares js-yaml, so an override is the only lever short of waiting on cosmiconfig."
+    "js-yaml": "Forces cosmiconfig's js-yaml 4.3.1, reached only through @commitlint/cli, to 4.3.2 — patched for GHSA-2883-xcg3-v3hh (maxTotalMergeKeys does not bound CPU on empty merge keys). Dev-scope, and no direct dependency declares js-yaml, so an override is the only lever short of waiting on cosmiconfig."
   },
   "commit-and-tag-version": {
     "skip": {

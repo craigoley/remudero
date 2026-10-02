@@ -203,6 +203,7 @@ export const CLI_ONLY = {
     "environment (e.g. ANTHROPIC_API_KEY presence), which the console's remote client cannot read; " +
     "the ladder STATE itself already rides GET /v1/status and GET /v1/daemon-health (W1-T3718)",
   "triage-outcomes": "operator-shell-only: folds the local ledger union, which the console's remote client cannot read; read-only and routes nothing",
+  mcp: "local stdio transport for the existing console routes and read-only CLI evidence; no console route starts a local MCP transport",
   "verify-human-sweep": "judges the parked verify:human backlog against the local ledger; no console route surfaces it",
   plan:
     "creates, clarifies or expands plan tasks by writing the git-tracked plan; GET /v1/plan/view " +
