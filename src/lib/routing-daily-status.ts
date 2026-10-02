@@ -23,6 +23,7 @@ export function readRoutingDailyStatus(stateDir: string | undefined, clock: Cloc
     } finally { closeSync(fd); }
     const report = JSON.parse(body);
     if (!report || typeof report !== "object") return unavailable("daily-review-metadata-invalid");
+    // expiring-fixture: exempt -- valid freshness fixtures inject fixedClock; default-clock cases fail before ageing.
     const asOf = Date.parse(report.asOf), next = Date.parse(report.nextScheduledReviewAt);
     if (report.version !== "routing-daily-review-v1" || !Number.isFinite(asOf) || !Number.isFinite(next) ||
       next <= asOf || next > asOf + 26 * 3_600_000 || !["observed", "observed-partial"].includes(report.state) ||
