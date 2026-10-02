@@ -173,3 +173,33 @@ test("W1-T5049: a key with no store open or no inbox root says why", (t) => {
 test("W1-T5049: the thread store path matches the one the thread routes read", () => {
   assert.equal(inboxThreadStoreFile("/some/root"), inboxThreadStorePath("/some/root"));
 });
+
+test("a key whose build throws answers unavailable and is logged, and the other keys still build", (t) => {
+  const root = makeTempDir("inbox-thread-view-throw");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const stateDir = join(root, "read-model-state");
+  const inboxRoot = join(root, "inbox");
+  mkdirSync(join(inboxRoot, "state"), { recursive: true });
+  const db = openProjectorReadModel(stateDir, "core");
+  t.after(() => db.close());
+  db.exec(`CREATE TABLE IF NOT EXISTS view_body(view TEXT NOT NULL, key TEXT NOT NULL, version INTEGER NOT NULL,
+    generation INTEGER NOT NULL, etag TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(view, key)) WITHOUT ROWID;`);
+  // A page whose body is not JSON: reading the proposal's item off it throws inside the build.
+  db.prepare("INSERT INTO view_body(view, key, version, generation, etag, body) VALUES('inbox', ?, 1, 1, 'etag-bad', ?)").run(PAGE_KEY, "{not json");
+  const clock = mutableClock();
+  const demand = createDemandBook({ clock });
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const view = createInboxThreadView({ inboxRoot, demand, clock, log: (step, extra) => logged.push({ step, extra }) });
+  const notAThread = inboxThreadViewKey("not-a-thread");
+  demand.want(INBOX_THREAD_VIEW_NAME, KEY);
+  demand.want(INBOX_THREAD_VIEW_NAME, notAThread);
+  const built = view.materialize({ now: clock.now(), instances: [{ db: db as never }] });
+  const broken = built.find((b) => b.key === KEY)!;
+  assert.equal(broken.data.found, false);
+  assert.match(broken.data.found === false ? broken.data.reason : "", /JSON/);
+  assert.equal(broken.sources[0]!.state, "unavailable");
+  assert.equal(logged[0]?.step, "read_model.inbox_thread_view_failed");
+  assert.equal(logged[0]?.extra?.threadId, THREAD);
+  const other = built.find((b) => b.key === notAThread)!;
+  assert.match(other.data.found === false ? other.data.reason : "", /is not an inbox thread id/, "the other key still answers on its own");
+});
