@@ -78,9 +78,16 @@ test("coverage shards use canonical TMPDIR paths when the sibling scratch parent
 
 test("that scratch is a stable sibling namespace, never a child of the Git worktree", () => {
   const dir = coverageScratchDir(REPO_ROOT);
-  assert.equal(dirname(dir), realpathSync(tmpdir()));
   assert.match(basename(dir), /^rmd-c-[a-f0-9]{12}$/);
   assert.ok(!dir.startsWith(`${REPO_ROOT}/`), `must be outside the checkout; got ${dir}`);
+  const previousTmp = process.env.TMPDIR;
+  try {
+    process.env.TMPDIR = join(dir, "node-coverage-fixture");
+    assert.equal(coverageScratchDir(REPO_ROOT), dir, "an inherited nested TMPDIR must not compound the scratch path");
+  } finally {
+    if (previousTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTmp;
+  }
 });
 
 test("an injected env is MERGED over process.env, never replacing it", () => {

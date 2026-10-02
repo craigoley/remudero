@@ -3568,6 +3568,8 @@ export function affectedSuitesStep(
 export interface PreflightCoverageDeps {
   spawn?: PreflightSpawn;
   coverageFreeBytes?: (path: string) => number;
+  /** Isolates fake coverage-mode fixtures from the parent full gate's real checkout lock. */
+  coverageLockDiscriminator?: string;
   /** Test seam — production reads the lcov this mode's own step just wrote. */
   lcovText?: string;
 }
@@ -3637,7 +3639,7 @@ export function runPreflightCoverage(repoRoot: string, deps: PreflightCoverageDe
   });
 
   const lcovPath = join(repoRoot, "coverage", "lcov.info");
-  const test = runStep("coverage-mode:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath, deps.coverageFreeBytes));
+  const test = runStep("coverage-mode:test-with-coverage", () => testWithCoverageLeaf(repoRoot, spawn, lcovPath, deps.coverageFreeBytes, deps.coverageLockDiscriminator));
   steps.push(test);
   if (!test.ok) return { steps, ok: false };
 
