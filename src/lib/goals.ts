@@ -110,6 +110,7 @@ export async function remeasureSettledGoals(input: {
       onUnreadArchive: () => { sourceProblems.add("unreadable-archive"); }, onUnreadLive: () => { sourceProblems.add("unreadable-live"); }, onMalformedRow: () => { sourceProblems.add("malformed-row"); } })) {
       const timestamp = Date.parse(row.ts as string);
       if (!Number.isFinite(timestamp)) { sourceProblems.add("invalid-timestamp"); continue; }
+      if (timestamp > clock.now() + 5 * 60_000) { sourceProblems.add("future-timestamp"); continue; }
       if (timestamp < from || timestamp > clock.now()) continue;
       bytes += Buffer.byteLength(JSON.stringify(row));
       if (loaded.length >= maxRows || bytes > RETRO_LEDGER_MAX_BYTES) { sourceProblems.add("retention-budget"); break; }
@@ -129,7 +130,7 @@ export async function remeasureSettledGoals(input: {
     const observation: GoalObservation = { goal_id: goal.id, key, ts: clock.iso(), baseline: goal.baseline.value, value,
       step: value === null ? "goal.unmeasured" : moved ? "goal.moved" : "goal.unmoved", tasks: ids, pricedUsd, unpricedRows,
       ...(value === null ? { reason: sourceProblems.size ? [...sourceProblems].sort().join(",") : "no-valid-measurement-sample" } : {}), priorityAction: "governed-proposal", measurement: goal.measurement, windowDays: 7,
-      costBasis: "produced-ledger-receipts", costComplete: sourceProblems.size === 0 };
+      costBasis: "produced-ledger-receipts", costComplete: sourceProblems.size === 0 && unpricedRows === 0 };
     input.log(observation.step, { ...observation });
     prior[goal.id] = observation;
     output.push(observation);
