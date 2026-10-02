@@ -135,6 +135,19 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   other in-flight PRs to sequence merges carefully, or consider splitting the plan changes
   into separate PRs to minimize collision surface.
 
+- `ci-friction:check:gate-fix` — a pull request failed review with no unmet acceptance
+  criteria, but the sweep identified one or more structured gate failures with a single,
+  unambiguous remedy for each (W1-T2236, W1-T923). The fix rung dispatches in `gate-fix` mode
+  carrying that specific remedy instead of the old behavior of "empty reviewer-unmet" dispatches.
+  To fix: read the dispatch prompt's `actionableGateFailures` section carefully; it names a
+  SINGLE remedy that the sweep has already verified is both structured and actionable (not a
+  choice). Implement that exact remedy — for example, if it names "fix a merge conflict in
+  CHANGELOG.md", resolve that conflict, test, and commit; if it names a specific lint-plan
+  violation, repair the plan shard and re-run the linter. The remedy text is VERBATIM from the
+  gate's own structured failure ledger, not a human interpretation — follow it precisely.
+  Do not attempt to guess additional remedies or solve for criteria; the sweep already
+  determined that applying this one remedy is the correct path forward.
+
 - `ci-friction:check:reviewer-unmet` — a pull request's acceptance proof for a criterion
   is non-executable: typically, a `unit test:` proof whose title does not match any actual
   test name in the test files. This includes titles that appear only in comments rather than
