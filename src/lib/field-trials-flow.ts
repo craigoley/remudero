@@ -29,6 +29,7 @@ import { DEFAULT_MAX_PAGES, ghApiFetch, ingestFieldTrialsGithub, parseGithubStor
   type GithubPull, type GithubRepoStore } from "./field-trials-github.js";
 import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
 import { deriveReviewFindingOutcomes, type FindingOutcomeReport, type VerifiedFindingEvidence } from "./review-finding-outcomes.js";
+import { deriveVerifiedReviewFindingEvidence, readReviewFindingEvidence, type FindingEvidenceInput, type FindingEvidenceReport } from "./review-finding-evidence.js";
 import type { TaskCaseFile } from "./task-case-file.js";
 
 export const FIELD_TRIALS_FLOW_VERSION = "field-trials-flow-v1" as const;
@@ -407,6 +408,7 @@ export interface FieldTrialsFlowSnapshot {
     apiCostEstimateUsd: number; subscriptionNotionalUsd: number }[];
   /** Private finding-quality evidence. Never copied into the public release. No trusted labels are inferred from GitHub workflow state. */
   reviewFindingOutcomes: FindingOutcomeReport;
+  reviewFindingEvidence: FindingEvidenceReport;
   provenance: { sources: { label: string; repo: string; ledger: Omit<FieldTrialsLedgerRead, "rows"> & { rows: number };
     github: { pulls: GithubCursor | null; commits: GithubCursor | null; deployments: GithubCursor | null;
       prs: number; commitsKnown: number; deploymentsKnown: number } }[];
@@ -438,6 +440,7 @@ export interface FieldTrialsFlowInput {
   caseFiles?: readonly TaskCaseFile[];
   /** Only an independently authenticated caller may supply this; the default ledger/GitHub path supplies none. */
   verifiedFindingEvidence?: readonly VerifiedFindingEvidence[];
+  findingEvidence?: FindingEvidenceInput;
 }
 
 function stratum(value: string | null): string {
@@ -775,12 +778,18 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
   };
   const githubFresh = (input.githubPass?.pagesRead ?? 0) > 0;
   const anyObserved = githubFresh || provenance.some((source) => source.ledger.state !== "unavailable");
-  const reviewFindingOutcomes = deriveReviewFindingOutcomes(findingRows, input.verifiedFindingEvidence);
+  const { evidence: producedFindingEvidence, ...reviewFindingEvidence } = deriveVerifiedReviewFindingEvidence(
+    findingRows, input.findingEvidence, input.asOf);
+  const reviewFindingOutcomes = deriveReviewFindingOutcomes(findingRows,
+    [...producedFindingEvidence, ...(input.verifiedFindingEvidence ?? [])]);
   for (const finding of reviewFindingOutcomes.findings) privateKeys.add(finding.findingId);
+  for (const proof of reviewFindingEvidence.records) for (const key of [proof.receiptDigest, proof.findingDigest,
+    proof.authorityDigest, proof.sourceDigest, proof.beforeHead, proof.afterHead, proof.scorerRevision,
+    proof.caseDigest, proof.mechanismDigest]) if (key !== undefined) privateKeys.add(key);
   return { version: FIELD_TRIALS_FLOW_VERSION, asOf: input.asOf,
     state: !anyObserved ? "unavailable" : reasons.length > 0 ? "observed-partial" : "observed", reasons,
     observational: true, causalClaims: "none", followUpWindowDays: FOLLOW_UP_WINDOW_DAYS,
-    reviewFindingOutcomes,
+    reviewFindingOutcomes, reviewFindingEvidence,
     assignmentTelemetry: [...assignmentTelemetry.values()].sort((a, b) => a.source.localeCompare(b.source)
       || a.selectedModel.localeCompare(b.selectedModel)),
     provenance: { sources: provenance, githubPass: input.githubPass ?? null }, links, families,
@@ -1115,7 +1124,8 @@ export interface FieldTrialsCommandInput {
 }
 
 const USAGE = "usage: rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] "
-  + "[--consent <file>] [--case-files <file>] [--max-pages <n>] [--offline] [--revoke <release-id>] [--json]";
+  + "[--consent <file>] [--case-files <file>] [--finding-evidence <file>] [--finding-evidence-keys <file>] "
+  + "[--max-pages <n>] [--offline] [--revoke <release-id>] [--json]";
 
 function labelOf(repo: string): string {
   const name = repo.split("/").at(-1)!.toLowerCase();
@@ -1147,6 +1157,7 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
     values = parseArgs({ args: rest, strict: true, allowPositionals: false, options: {
       source: { type: "string", multiple: true }, ledger: { type: "string", multiple: true }, "out-dir": { type: "string" },
       consent: { type: "string" }, "case-files": { type: "string" }, "max-pages": { type: "string" },
+      "finding-evidence": { type: "string" }, "finding-evidence-keys": { type: "string" },
       offline: { type: "boolean" }, revoke: { type: "string" }, json: { type: "boolean" } } }).values;
   } catch {
     const reason = "arguments-invalid";
@@ -1206,7 +1217,10 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
   const snapshotPath = join(outDir, "field-trials-flow-v1.json");
   const priorValue = record(readJson(snapshotPath));
   const prior = priorValue?.version === FIELD_TRIALS_FLOW_VERSION ? priorValue as unknown as FieldTrialsFlowSnapshot : undefined;
-  const snapshot = build({ asOf: nowIso, sources, github, githubPass, ...(prior ? { prior } : {}), ...(caseFiles ? { caseFiles } : {}) });
+  const findingEvidence = readReviewFindingEvidence(values["finding-evidence"] as string | undefined,
+    values["finding-evidence-keys"] as string | undefined);
+  const snapshot = build({ asOf: nowIso, sources, github, githubPass, findingEvidence,
+    ...(prior ? { prior } : {}), ...(caseFiles ? { caseFiles } : {}) });
   if (snapshot.state !== "unavailable") writeJsonAtomically(snapshotPath, snapshot);
   const consent = typeof values.consent === "string" ? parseFieldTrialsConsent(readJson(values.consent)) : null;
   for (const file of revokeWithdrawnConsent(manifest, consent, nowIso)) rmSync(join(outDir, file), { force: true });
