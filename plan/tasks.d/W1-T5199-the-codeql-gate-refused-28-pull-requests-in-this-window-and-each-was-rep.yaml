@@ -1,0 +1,19 @@
+- id: W1-T5199
+  title: "THE CodeQL GATE REFUSED 28 PULL REQUESTS IN THIS WINDOW AND EACH WAS REPAIRED — carry the lesson to the lane that keeps hitting it, so the same gate stops refusing for the same reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-learning:8075:CodeQL"
+  ci_learning_prs: [8075, 8080, 8080, 8080, 8080, 8080, 8080, 8081, 8081, 8093, 8093, 8093, 8104, 8104, 8104, 8106, 8106, 8106, 8115, 8115, 8115, 8117, 8117, 8117, 8269, 8273, 8433, 8440]
+  files:
+    - learnings/ci.yaml
+  acceptance:
+    - claim: "the lane that trips the CodeQL gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
+      proof: "grep: ci-learning:8075:CodeQL in learnings/ci.yaml"
+  note: "Filed by the ci-learning rung from ci-learning:8075:CodeQL. The CodeQL gate went red on #8075 and was repaired; the repair touched src/lib/ledger-projector.ts, test/ledger-projector.test.ts, src/lib/read-model-worker.ts, test/read-model-worker.test.ts, src/lib/board-projection.ts, test/a-wall-clock-bound-declares-itself.test.ts, test/board-projection.test.ts, src/lib/read-model-db.ts, test/read-model-db.test.ts, scripts/census-precheck.mjs, src/lib/instances-view.ts, src/lib/now-decisions.ts, test/coverage-leaf-isolates-reentrant-scratch.test.ts, test/the-local-gate-writes-coverage-where-ci-does.test.ts. Recommended action: build. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
