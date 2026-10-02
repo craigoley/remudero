@@ -1053,7 +1053,11 @@ jobs:
         id: comment-load-ratchet
         if: steps.classify.outputs.class == 'SOURCE'
         continue-on-error: true
-        run: npm run --silent comment-load-signal
+        run: |
+          # W1-T3720: tee each bundled gate's report so the reporting step can name the refuser.
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/gate-reports"
+          npm run --silent comment-load-signal 2>&1 | tee "$RUNNER_TEMP/gate-reports/comment-load-ratchet.log"
 
       - name: Expiring-fixture census (no fixture crosses its threshold inside the margin)
         id: expiring-fixture-census
@@ -1061,13 +1065,19 @@ jobs:
         continue-on-error: true
         env:
           RMD_CI_REPORT: "1"
-        run: node scripts/expiring-fixture-census.mjs
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/gate-reports"
+          node scripts/expiring-fixture-census.mjs 2>&1 | tee "$RUNNER_TEMP/gate-reports/expiring-fixture-census.log"
 
       - name: Console-parity ratchet (every verb maps to a route or a stated cli-only reason)
         id: console-parity
         if: steps.classify.outputs.class == 'SOURCE'
         continue-on-error: true
-        run: npm run --silent console-parity
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/gate-reports"
+          npm run --silent console-parity 2>&1 | tee "$RUNNER_TEMP/gate-reports/console-parity.log"
 
       - name: baseline-monotonic (no SCORE_TABLE floor/ceiling regresses against origin/main without a reviewed bumpRationale)
         id: baseline-monotonic
@@ -1080,6 +1090,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           POSTING_JOB_ID: ${{ job.check_run_id }}
+          GATE_REPORT_DIR: ${{ runner.temp }}/gate-reports
           OUTCOME_RULE_CHECKS: ${{ steps.rule-checks.outcome }}
           OUTCOME_COMMITLINT: ${{ steps.commitlint.outcome }}
           OUTCOME_LEAK_GREP: ${{ steps.leak-grep.outcome }}
@@ -1109,16 +1120,21 @@ jobs:
           # comment-load-ratchet) still reports ONE check run: `report` takes every constituent
           # step's outcome and the check is success only when ALL of them are (the same AND the
           # native job conclusion computed before this task).
+          # W1-T3720: the NAME stays the required context; a failing check is TITLED by the gate(s)
+          # that refused (scripts/bundled-gate-report.mjs, `<step-id>=<outcome>` args).
           report() {
             local check_name="$1"
             shift
-            local conclusion="success"
+            local conclusion="success" title
             local attempt=1 error
-            for outcome in "$@"; do
+            for constituent in "$@"; do
+              outcome="${constituent##*=}"
               if [ "$outcome" != "success" ] && [ "$outcome" != "skipped" ]; then
                 conclusion="failure"
               fi
             done
+            title="$(node scripts/bundled-gate-report.mjs "$check_name" "$@")" || title="$check_name"
+            [ -n "$title" ] || title="$check_name"
             while true; do
               if error=$(gh api "repos/${GITHUB_REPOSITORY}/check-runs" \
                 -f "name=${check_name}" \
@@ -1126,7 +1142,7 @@ jobs:
                 -f "external_id=job:${POSTING_JOB_ID}" \
                 -f "status=completed" \
                 -f "conclusion=${conclusion}" \
-                -f "output[title]=${check_name}" \
+                -f "output[title]=${title}" \
                 -f "output[summary]=W1-T4399: reported by this job's ${check_name} step(s) (outcome(s): $*)" \
                 2>&1 >/dev/null); then
                 break
@@ -1139,23 +1155,23 @@ jobs:
               sleep "$((2 ** attempt))"
               attempt=$((attempt + 1))
             done
-            echo "W1-T4399: reported ${check_name} = ${conclusion} (step outcome(s): $*)"
+            echo "W1-T4399: reported ${check_name} = ${conclusion} (step outcome(s): $*); title: ${title}"
           }
           report "commitlint" "${OUTCOME_COMMITLINT}" "${OUTCOME_RULE_CHECKS}"
           report "leak-grep" "${OUTCOME_LEAK_GREP}"
-          report "learnings-budget-ratchet" "${OUTCOME_LEARNINGS_BUDGET_RATCHET}" "${OUTCOME_CLAUDE_MD_BUDGET_RATCHET}"
+          report "learnings-budget-ratchet" "learnings-budget-ratchet=${OUTCOME_LEARNINGS_BUDGET_RATCHET}" "claude-md-budget-ratchet=${OUTCOME_CLAUDE_MD_BUDGET_RATCHET}"
           report "jscpd-gate" "${OUTCOME_JSCPD_GATE}"
           report "claims" "${OUTCOME_CLAIMS}"
           report "assertion-discrimination" "${OUTCOME_ASSERTION_DISCRIMINATION}"
           report "lint-plan" "${OUTCOME_LINT_PLAN}"
-          report "depcruise" "${OUTCOME_DEPCRUISE}" "${OUTCOME_CYCLE_RATCHET}"
+          report "depcruise" "depcruise=${OUTCOME_DEPCRUISE}" "cycle-ratchet=${OUTCOME_CYCLE_RATCHET}"
           report "containment-probe" "${OUTCOME_CONTAINMENT_PROBE}"
           report "api-client-drift" "${OUTCOME_API_CLIENT_DRIFT}"
           report "no-hand-rolled-fetch" "${OUTCOME_NO_HAND_ROLLED_FETCH}"
           report "prompt-surface-gate" "${OUTCOME_PROMPT_SURFACE_GATE}"
           report "task-id-existence" "${OUTCOME_TASK_ID_EXISTENCE}"
           report "source-size" "${OUTCOME_SOURCE_SIZE}"
-          report "comment-load-ratchet" "${OUTCOME_COMMENT_LOAD_RATCHET}" "${OUTCOME_EXPIRING_FIXTURE_CENSUS}" "${OUTCOME_CONSOLE_PARITY}"
+          report "comment-load-ratchet" "comment-load-ratchet=${OUTCOME_COMMENT_LOAD_RATCHET}" "expiring-fixture-census=${OUTCOME_EXPIRING_FIXTURE_CENSUS}" "console-parity=${OUTCOME_CONSOLE_PARITY}"
           report "baseline-monotonic" "${OUTCOME_BASELINE_MONOTONIC}"
 
   leak-grep:

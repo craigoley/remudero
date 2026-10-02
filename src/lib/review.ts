@@ -7129,6 +7129,11 @@ export const INSTRUMENT_SURFACE_EXCLUSIONS: Readonly<Record<string, string>> = {
     "scripts/diff-coverage.mjs, which IS on INSTRUMENT_SURFACE, as the gate, reimplementing neither " +
     "lcov parsing nor line matching. A diff touching it cannot change what any gate MEASURES — the " +
     "same claim, for the same reason, as scripts/rule25-precheck.mjs.",
+  "scripts/bundled-gate-report.mjs":
+    "VERIFIED NON-INSTRUMENT (W1-T3720) — ci.yml's commitlint reporting step calls it only for a posted " +
+    "check run's output TITLE. The check-run NAME and CONCLUSION are computed in the workflow's own " +
+    "`report()` shell, and a failure of this script falls back to the check name, so no edit to it " +
+    "can change what any gate measures or refuses.",
   "scripts/lint-plan-offline.mjs":
     "VERIFIED NON-INSTRUMENT — a latency-path convenience for git hooks, exposed only as " +
     "the `lint-plan:offline` package.json script; no workflow `run:` step invokes it (only its own " +
