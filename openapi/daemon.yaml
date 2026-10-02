@@ -5739,6 +5739,102 @@ components:
         noTerminal: { type: integer }
         notRecorded: { type: integer }
 
+    RoutingPoolCorpus:
+      type: object
+      additionalProperties: false
+      required: [id, version]
+      properties:
+        id: { type: string }
+        version: { type: string }
+
+    RoutingPoolBaseline:
+      type: object
+      additionalProperties: false
+      description: The fixed reviewed route a task class falls back to. It is always named, never hidden.
+      required: [provider, model, effort, reviewedBy]
+      properties:
+        provider: { type: string }
+        model: { type: string }
+        effort: { type: string }
+        reviewedBy: { type: string }
+
+    RoutingPoolCandidate:
+      type: object
+      additionalProperties: false
+      description: >
+        One provider/model/effort candidate. Only a ready, promoted candidate with comparable,
+        fresh, joined and complete evidence is admissible. An unmeasured aggregate is null and is
+        never read as zero.
+      required: [id, provider, model, effort, adapter, toolProfile, corpus, lastProbeAt,
+        promotedBy, capabilities, aggregates, readiness, admissible]
+      properties:
+        id: { type: string }
+        provider: { type: string }
+        model: { type: string }
+        effort: { type: string }
+        adapter: { type: string }
+        toolProfile: { type: string }
+        corpus:
+          oneOf:
+            - $ref: "#/components/schemas/RoutingPoolCorpus"
+            - { type: "null" }
+        lastProbeAt: { type: [string, "null"] }
+        promotedBy: { type: [string, "null"] }
+        capabilities: { type: array, items: { type: string } }
+        aggregates:
+          type: object
+          additionalProperties: false
+          required: [samples, joinedSamples, successRate, quality, costUsdPerTask, latencyMsP50]
+          properties:
+            samples: { type: integer }
+            joinedSamples: { type: integer }
+            successRate: { type: [number, "null"] }
+            quality: { type: [number, "null"] }
+            costUsdPerTask: { type: [number, "null"] }
+            latencyMsP50: { type: [number, "null"] }
+        readiness: { type: string, enum: [benchmarking, ready, failed, unavailable] }
+        admissible: { type: boolean }
+        reason:
+          type: string
+          enum: [not-ready:benchmarking, not-ready:failed, not-ready:unavailable, not-promoted,
+            corpus-incomparable, stale-evidence, unjoined-evidence, evidence-missing, over-budget,
+            capability-missing]
+
+    RoutingPoolProjection:
+      type: object
+      additionalProperties: false
+      description: >
+        routing-pool-v1 (W1-T3958). The reviewed pool per task class and capability tier. When no
+        pool is configured or the file is invalid, state is unavailable, a reason is given, and
+        pools is empty. A selection made from this pool picks a ready candidate, keeps a
+        session's pinned route, falls back to the baseline, or refuses by name; its receipt
+        (pool revision, candidate set, chosen model and effort, reason, fallback, terminal join
+        key) rides on the Codex model decision.
+      required: [version, state, revision, generatedAt, asOf, stale, pools]
+      properties:
+        version: { type: string, enum: [routing-pool-v1] }
+        state: { type: string, enum: [observed, unavailable] }
+        reason: { type: string }
+        revision: { type: [string, "null"] }
+        generatedAt: { type: [string, "null"] }
+        asOf: { type: string }
+        stale: { type: boolean }
+        pools:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [taskClass, capabilityTier, corpus, baseline, readyCandidates, candidates]
+            properties:
+              taskClass: { type: string }
+              capabilityTier: { type: string }
+              corpus: { $ref: "#/components/schemas/RoutingPoolCorpus" }
+              baseline: { $ref: "#/components/schemas/RoutingPoolBaseline" }
+              readyCandidates: { type: integer }
+              candidates:
+                type: array
+                items: { $ref: "#/components/schemas/RoutingPoolCandidate" }
+
     BenchmarkQualityProjection:
       type: object
       additionalProperties: false
@@ -9969,25 +10065,31 @@ components:
 paths:
   /v1/analytics:
     get:
-      summary: Read the internal benchmark evidence-quality projection.
+      summary: Read the internal benchmark evidence-quality or routing-pool projection.
       description: >
-        This operation documents the benchmark-quality-v1 query only. The legacy full and
-        console analytics projections remain available on the same route. Missing evidence is
-        explicit; this endpoint performs no ledger scan, public upload, or routing change.
+        This operation documents the benchmark-quality-v1 and routing-pool-v1 queries only. The
+        legacy full and console analytics projections remain available on the same route.
+        Missing evidence is explicit; this endpoint performs no ledger scan, public upload, or
+        routing change. routing-pool-v1 (W1-T3958) returns the reviewed model routing pool: each
+        task class's candidates with their readiness state, corpus and probe provenance, and
+        whether each can be admitted, plus the fixed reviewed baseline that selection falls back
+        to.
       parameters:
         - name: projectionVersion
           in: query
           required: true
-          schema: { type: string, enum: [benchmark-quality-v1] }
+          schema: { type: string, enum: [benchmark-quality-v1, routing-pool-v1] }
       security:
         - bearerRead: []
       responses:
         "200":
-          description: A versioned aggregate of retained evidence quality.
+          description: A versioned aggregate of retained evidence quality, or the routing pool.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/BenchmarkQualityProjection"
+                oneOf:
+                  - $ref: "#/components/schemas/BenchmarkQualityProjection"
+                  - $ref: "#/components/schemas/RoutingPoolProjection"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":

@@ -25,6 +25,7 @@ import { withTempDir } from "./tmp.js";
 import { assertModelAllowed, modelAllowed } from "./model-gate.js";
 import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWindow } from "./version-switchback.js";
 import type { ModelApproval } from "./config-schema.js";
+import { selectFromRoutingPool, type RoutingPoolDecision, type RoutingPoolRequest, type RoutingPoolSnapshot } from "./model-pool.js";
 import {
   spawnDetachedGroup,
   teardownProcessGroup,
@@ -200,6 +201,8 @@ export interface CodexModelDecision {
    * (W1-T3097).
    */
   capabilityFallbackReason?: CodexCapabilityFallbackReason;
+  /** W1-T3958: the routing-pool-v1 receipt, present only when the read was given a pool. */
+  routingPool?: RoutingPoolDecision;
 }
 
 export interface ProviderSelection {
@@ -1320,6 +1323,13 @@ export interface CodexCapacityDeps {
    * `readCodexCapacity` loads `.remudero/mounts.yaml` itself via `config.root`.
    */
   capabilities?: CapabilityLadder;
+  /**
+   * W1-T3958: a routing-pool-v1 snapshot and the session's request. A Codex route chosen from
+   * the pool becomes the model-plus-effort preference unless the provider policy already set one.
+   * {@link selectCodexModel} still checks that preference against this read. The receipt is
+   * attached as `modelDecision.routingPool` whatever the outcome.
+   */
+  routingPool?: { snapshot: RoutingPoolSnapshot; request: RoutingPoolRequest };
 }
 
 /**
@@ -1716,13 +1726,26 @@ function selectCodexRuntime(
   deps: CodexCapacityDeps,
   capabilities: CapabilityLadder | undefined,
 ): ProviderCapacity {
-  const selected = deps.selectedModel
+  // An attribution re-read measures a route that is already chosen, so it never consults the pool.
+  const pooled = deps.routingPool && !deps.selectedModel
+    ? selectFromRoutingPool(deps.routingPool.snapshot, deps.routingPool.request)
+    : undefined;
+  const pooledRoute = !deps.preferredModel && pooled?.chosen?.provider === "codex" &&
+    (pooled.outcome === "pool" || pooled.outcome === "pinned" || pooled.outcome === "baseline")
+    ? pooled.chosen
+    : undefined;
+  const requestedEffort = pooledRoute?.effort ?? deps.requestedEffort;
+  const preferredModel = pooledRoute
+    ? { capability: resolveCodexCapability(capabilities, deps.requestedModel).tier, effort: pooledRoute.effort, model: pooledRoute.model }
+    : deps.preferredModel;
+  const read = deps.selectedModel
     ? selectCodexAttributionModel(value.models, value.rateLimits, deps.selectedModel)
-    : selectCodexModel(value.models, value.rateLimits, config, deps.requestedModel, deps.requestedEffort, capabilities, {
-      preferredModel: deps.preferredModel,
+    : selectCodexModel(value.models, value.rateLimits, config, deps.requestedModel, requestedEffort, capabilities, {
+      preferredModel,
       reservePercent: deps.reservePercent,
       switchback: deps.switchback,
     });
+  const selected = pooled && read.modelDecision ? { ...read, modelDecision: { ...read.modelDecision, routingPool: pooled } } : read;
   if (!value.retryDetail) return selected;
   return {
     ...selected,
