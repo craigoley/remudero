@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { test } from "node:test";
+import type { Config } from "../src/lib/config.js";
+import type { CapabilityLadder } from "../src/lib/mounts.js";
+import { clearCodexCapacityCache, readCodexCapacity, type CodexCapacityDeps } from "../src/lib/worker-provider.js";
 import {
   ROUTING_POOL_VERSION,
   parseRoutingPoolSnapshot,
@@ -135,4 +142,71 @@ test("W1-T3958 criterion 4: a pinned session keeps its route across a pool revis
   assert.equal(after.chosen?.candidateId, "first");
   assert.equal(after.poolRevision, "pool-rev-2");
   assert.equal(after.pinnedFromRevision, "pool-rev-1");
+});
+
+const CODEX_MODELS = [
+  { id: "gpt-terra", defaultReasoningEffort: "high", supportedReasoningEfforts: [{ reasoningEffort: "high" }] },
+  { id: "gpt-sol", defaultReasoningEffort: "high", supportedReasoningEfforts: [{ reasoningEffort: "high" }] },
+];
+const CODEX_LIMITS = {
+  rateLimitsByLimitId: {
+    terra: { limitId: "terra", limitName: "gpt-terra", primary: { usedPercent: 30, resetsAt: NOW / 1000 + 3600 } },
+    sol: { limitId: "sol", limitName: "gpt-sol", primary: { usedPercent: 20, resetsAt: NOW / 1000 + 3600 } },
+  },
+};
+const CODEX_LADDER: CapabilityLadder = {
+  ladder: { economy: 1, balanced: 2, frontier: 3 },
+  claude: { sonnet: "balanced" },
+  codex: { economy: {}, balanced: { high: ["gpt-terra", "gpt-sol"] }, frontier: {} },
+} as CapabilityLadder;
+
+function fakeAppServer() {
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const proc = Object.assign(new EventEmitter(), { stdin, stdout, stderr: new PassThrough(), kill: () => true });
+  stdin.on("data", (chunk: Buffer) => {
+    for (const line of chunk.toString("utf8").trim().split("\n")) {
+      if (!line) continue;
+      const { id } = JSON.parse(line) as { id?: number };
+      if (id === 1) stdout.write(`${JSON.stringify({ id: 1, result: {} })}\n`);
+      if (id === 2) stdout.write(`${JSON.stringify({ id: 2, result: CODEX_LIMITS })}\n`);
+      if (id === 3) stdout.write(`${JSON.stringify({ id: 3, result: { data: CODEX_MODELS, nextCursor: null } })}\n`);
+    }
+  });
+  return proc;
+}
+
+async function readWithPool(routingPool?: CodexCapacityDeps["routingPool"]) {
+  clearCodexCapacityCache();
+  const config = {
+    claudeBin: "/unused",
+    root: tmpdir(),
+    workerProviders: { enabled: ["claude", "codex"], reservePercent: 5, capacityCacheMs: 0, codexBin: "/bin/sh", codexHome: join(tmpdir(), "codex-home") },
+  } as Config;
+  return readCodexCapacity(config, {
+    requestedModel: "sonnet",
+    requestedEffort: "high",
+    capabilities: CODEX_LADDER,
+    spawn: () => fakeAppServer() as never,
+    ...(routingPool ? { routingPool } : {}),
+  });
+}
+
+test("W1-T3958 criterion 4: the Codex provider path routes through the pool and carries its receipt", async () => {
+  const unpooled = await readWithPool();
+  assert.equal(unpooled.model, "gpt-sol", "without a pool the most-headroom candidate wins");
+  assert.equal(unpooled.modelDecision?.routingPool, undefined);
+
+  const snapshot = pool([candidate("terra", "ready", 0.9, 1, { model: "gpt-terra" })]);
+  const pooled = await readWithPool({ snapshot, request: request({ terminalJoinKey: "assignment-live" }) });
+  assert.deepEqual([pooled.model, pooled.effort], ["gpt-terra", "high"], "the ready pool choice is the preference");
+  assert.equal(pooled.modelDecision?.preferredModel, "gpt-terra");
+  assert.equal(pooled.modelDecision?.routingPool?.outcome, "pool");
+  assert.equal(pooled.modelDecision?.routingPool?.poolRevision, "pool-rev-1");
+  assert.equal(pooled.modelDecision?.routingPool?.terminalJoinKey, "assignment-live");
+
+  const failed = await readWithPool({ snapshot: pool([candidate("terra", "failed", 0.9, 1, { model: "gpt-terra" })]), request: request() });
+  assert.equal(failed.model, "gpt-sol", "a failed candidate never becomes the preference");
+  assert.equal(failed.modelDecision?.routingPool?.outcome, "baseline");
+  assert.equal(failed.modelDecision?.routingPool?.fallback.used, true);
 });

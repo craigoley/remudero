@@ -3,6 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import type { ServerResponse } from "node:http";
+import { buildAnalyticsRoute, coldAnalyticsSnapshot } from "../src/lib/analytics-route.js";
 import {
   ROUTING_POOL_READINESS_STATES,
   ROUTING_POOL_VERSION,
@@ -10,6 +12,7 @@ import {
   parseRoutingPoolSnapshot,
   readRoutingPoolSnapshot,
   routingPoolPath,
+  type RoutingPoolProjection,
 } from "../src/lib/model-pool.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
@@ -136,4 +139,40 @@ test("W1-T3958 criterion 1: an absent pool file reads as an explicit unavailable
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+async function getProjection(deps: Parameters<typeof buildAnalyticsRoute>[0]) {
+  let status = 0;
+  let body = "";
+  const res = { setHeader() {}, writeHead(code: number) { status = code; }, end(chunk: string) { body = chunk; } } as unknown as ServerResponse;
+  const route = buildAnalyticsRoute(deps);
+  await route.handler({ url: "/v1/analytics?projectionVersion=routing-pool-v1" } as never, res, { params: {} });
+  assert.equal(route.scope, "read");
+  return { status, body: JSON.parse(body) as RoutingPoolProjection };
+}
+
+test("W1-T3958 criterion 1: the daemon serves routing-pool-v1 readiness with each candidate's provenance and admission reason", async () => {
+  const currentSnapshot = () => coldAnalyticsSnapshot();
+  const observed = await getProjection({
+    currentSnapshot,
+    now: () => NOW,
+    currentRoutingPool: () => parseRoutingPoolSnapshot(snapshot([candidate("b", "ready"), candidate("c", "failed")])),
+  });
+  assert.equal(observed.status, 200);
+  assert.equal(observed.body.version, "routing-pool-v1");
+  assert.equal(observed.body.state, "observed");
+  assert.equal(observed.body.stale, false);
+  const [pool] = observed.body.pools;
+  assert.equal(pool.readyCandidates, 1);
+  assert.deepEqual(pool.baseline, { provider: "claude", model: "claude-sonnet-5", effort: "medium", reviewedBy: "review#7" });
+  assert.deepEqual(pool.candidates.map((entry) => [entry.id, entry.readiness, entry.admissible, entry.reason ?? null]), [
+    ["b", "ready", true, null],
+    ["c", "failed", false, "not-ready:failed"],
+  ]);
+  assert.deepEqual(pool.candidates[0].corpus, { id: "rmd-implement", version: "2026-09" });
+
+  const absent = await getProjection({ currentSnapshot, now: () => NOW });
+  assert.equal(absent.body.state, "unavailable");
+  assert.equal(absent.body.reason, "routing-pool-not-configured");
+  assert.deepEqual(absent.body.pools, []);
 });

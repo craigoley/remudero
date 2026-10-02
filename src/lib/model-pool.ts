@@ -395,3 +395,35 @@ export function selectFromRoutingPool(snapshot: RoutingPoolSnapshot, request: Ro
   return { ...base, outcome: "pool", reason: "ready-candidate", candidates, chosen: routeOf(best),
     fallback: { used: false, baseline: pool.baseline }, evidence: evidenceOf(best) };
 }
+
+/** The read projection for a candidate: its record plus whether it can be admitted without a request-specific budget or capability gate. */
+export interface RoutingPoolProjectionCandidate extends RoutingPoolCandidate {
+  admissible: boolean;
+  reason?: RoutingPoolIneligibleReason;
+}
+
+export interface RoutingPoolProjection extends Omit<RoutingPoolSnapshot, "pools"> {
+  asOf: string;
+  stale: boolean;
+  pools: Array<Omit<RoutingPoolRecord, "candidates"> & { readyCandidates: number; candidates: RoutingPoolProjectionCandidate[] }>;
+}
+
+/** Shape a snapshot for the console. Every candidate is shown, including ones that cannot be admitted, and each carries its reason. */
+export function buildRoutingPoolProjection(snapshot: RoutingPoolSnapshot, nowMs: number): RoutingPoolProjection {
+  const { pools, ...head } = snapshot;
+  const gate = { budgetUsd: Number.POSITIVE_INFINITY, requiredCapabilities: [], nowMs };
+  return {
+    ...head,
+    asOf: new Date(nowMs).toISOString(),
+    stale: snapshot.state === "observed" && !fresh(snapshot.generatedAt, nowMs, ROUTING_POOL_MAX_EVIDENCE_AGE_MS),
+    pools: pools.map((pool) => {
+      const assessed = assessPoolCandidates(pool, gate);
+      const candidates = pool.candidates.map((candidate, index) => ({
+        ...candidate,
+        admissible: assessed[index].eligible,
+        ...(assessed[index].reason ? { reason: assessed[index].reason } : {}),
+      }));
+      return { ...pool, readyCandidates: candidates.filter((entry) => entry.admissible).length, candidates };
+    }),
+  };
+}
