@@ -17,7 +17,7 @@ const env = { RMD_OPENWEIGHT_API_KEY: "test-only-key" };
 const selection = { model: MODEL, effort: "high" };
 const reply = (over: Record<string, unknown> = {}) => ({ id: "resp-1", model: `${MODEL}-2026-09-29`, status: "completed",
   output: [{ type: "message", content: [{ type: "output_text", text: "ready" }] }],
-  usage: { input_tokens: 100, output_tokens: 20, input_tokens_details: { cached_tokens: 60, cache_creation_tokens: 10 } }, ...over });
+  usage: { input_tokens: 100, output_tokens: 20, input_tokens_details: { cached_tokens: 60, cache_write_tokens: 10 } }, ...over });
 function fixture() {
   const cwd = mkdtempSync(join(tmpdir(), "rmd-sol61-"));
   return { cwd, config: { root: cwd, dailyCapUsd: 25,
@@ -165,5 +165,18 @@ test("Sol 6.1 missing receipt and unnamed model remain honest while JSON output 
     const refused = await spawnOpenWeightWorker({ cwd: f.cwd, workerHome: f.cwd, prompt: "work", env, tools: [] }, f.config, { ...selection, effort: "none" });
     assert.match(refused.stderr, /does not support reasoning effort none/);
     assert.equal(refused.budgetReservedUsd, 0);
+  } finally { f.close(); }
+});
+
+test("Sol 6.1 missing cache write counter retains the reservation instead of undercharging", async () => {
+  const f = fixture();
+  try {
+    const result = await spawnOpenWeightWorker({ cwd: f.cwd, workerHome: f.cwd, prompt: "work", tools: [], env,
+      fetchImpl: async () => new Response(JSON.stringify(reply({ usage: { input_tokens: 100, output_tokens: 20,
+        input_tokens_details: { cached_tokens: 60 } } }))) }, f.config, selection);
+    assert.equal(result.isError, false);
+    assert.equal(result.tokens.input, 100);
+    assert.equal(result.budgetSettledUsd, result.budgetReservedUsd);
+    assert.equal(result.costUsd, result.budgetReservedUsd);
   } finally { f.close(); }
 });

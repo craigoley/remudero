@@ -4096,7 +4096,8 @@ export async function spawnOpenWeightWorker(
       // settles at 0 tokens, which would silently hand the allowance back for a request that really
       // was billed — so an absent receipt leaves the conservative reservation standing instead.
       if (usesResponses
-        ? typeof payload.usage?.prompt_tokens === "number" && typeof payload.usage?.completion_tokens === "number"
+        ? typeof payload.usage?.prompt_tokens === "number" && typeof payload.usage?.completion_tokens === "number" &&
+          typeof payload.usage?.cache_creation_tokens === "number"
         : typeof payload.usage?.prompt_tokens === "number" || typeof payload.usage?.completion_tokens === "number") {
         const actualUsd = openWeightUsageUsd(selection.model, turnPromptTokens, turnCompletionTokens, turnCached, turnWritten);
         settleOpenWeightBudget(config, { requestId, actualUsd, atIso: clock.iso() });

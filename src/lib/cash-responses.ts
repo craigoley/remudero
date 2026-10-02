@@ -22,7 +22,7 @@ export class CashResponsesConversation {
   read(payload: {
     id?: unknown; model?: unknown; status?: unknown; output?: Record<string, unknown>[];
     usage?: { input_tokens?: unknown; output_tokens?: unknown;
-      input_tokens_details?: { cached_tokens?: unknown; cache_creation_tokens?: unknown } };
+      input_tokens_details?: { cached_tokens?: unknown; cache_write_tokens?: unknown } };
   }) {
     const output = Array.isArray(payload.output) ? payload.output : [];
     this.input.push(...output);
@@ -36,7 +36,7 @@ export class CashResponsesConversation {
     return { id: payload.id, model: payload.model,
       usage: { prompt_tokens: payload.usage?.input_tokens, completion_tokens: payload.usage?.output_tokens,
         cached_tokens: payload.usage?.input_tokens_details?.cached_tokens,
-        cache_creation_tokens: payload.usage?.input_tokens_details?.cache_creation_tokens },
+        cache_creation_tokens: payload.usage?.input_tokens_details?.cache_write_tokens },
       choices: usable || payload.status === "incomplete" ? [{ message: { content: text, tool_calls: calls },
         finish_reason: payload.status === "incomplete" ? "length" : calls.length ? "tool_calls" : "stop" }] : [],
     };

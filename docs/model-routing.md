@@ -20,7 +20,8 @@ fleet allowance and $25/day operator cap, including retries; no cap is raised by
 [Sol 6.1](https://developers.openai.com/api/docs/models/gpt-6.1-sol) uses Responses for tools and
 supports low/medium/high/xhigh/max API reasoning. The adapter preserves encrypted reasoning and
 function-call items, executes the same bounded tools, and reports failed or incomplete responses.
-A failed local tool ends the Sol chain. Missing usage leaves the conservative reservation charged;
+A failed local tool ends the Sol chain. Missing usage or the Responses `cache_write_tokens`
+counter leaves the conservative reservation charged ([cache accounting](https://developers.openai.com/api/docs/guides/prompt-caching));
 an unknown transport outcome does too, while a definite 404 settles to zero. Actual served identity
 comes from the response, never from the deployment name. Per-turn cache reads/writes, output,
 duration, cost estimate and assignment identity feed the existing worker-attempt/Field Trials path.
