@@ -82,6 +82,20 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   follow-up commits do not add implementation trailers to plan-only diffs. Run `node --import tsx scripts/acceptance-author-gate.mjs --event-path <event.json>`
   locally with a test event payload to validate before pushing.
 
+- `ci-friction:check:ci-log:comment-load-ratchet` — a pull request's added or changed code
+  carries more comment lines than are allowed. The comment-load-ratchet gate measures comment
+  density and enforces ceilings to manage the context burden that comment lines impose on every
+  agent session opening the file (see docs/comment-standard.md). A failure means either: (1)
+  a file's total comment count now exceeds its recorded baseline (check
+  `scripts/comment-load-baseline.json`), or (2) a single added comment block contains more
+  than 25 consecutive lines. To fix: review the added comments against the four principles in
+  docs/comment-standard.md (relevant, findable, understandable, usable); shorten or remove
+  comments that do not state an invariant, name a trap, point to a falsifier, or cite a record;
+  split large blocks into smaller focused comments; or, if the diff inherited growth from
+  the merge base (the file already carried more comments there), the baseline will be recorded
+  automatically. Run `npm run --silent comment-load-signal` locally to check your own changes
+  before pushing.
+
 - `ci-friction:conflict:merge-conflict` — a pull request cannot be merged automatically
   because the branch has diverged from main and git cannot resolve the conflicts in the
   files being changed. This commonly occurs when multiple PRs modify the same file (such as
