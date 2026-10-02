@@ -379,6 +379,26 @@ test("W1-T5073: corrupt overseer state refuses and preserves issued verdicts", (
   } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
+test("W1-T5073: disordered verdict sequences refuse and preserve the record", () => {
+  const h = harness(T0 + 10 * HOUR);
+  try {
+    const path = join(h.dir, "gardener-overseer.json");
+    const verdict = (id: string, sequence?: number) => ({ id, gardener: "demo", actionClass: "draft", verdict: "credit", kind: "effect", at: h.clock.iso(), ...(sequence === undefined ? {} : { sequence }) });
+    const cases: [ReturnType<typeof verdict>[], number][] = [
+      [[verdict("a", 1), verdict("b")], 2],
+      [[verdict("a", 2), verdict("b", 1)], 2],
+      [[verdict("a", 1), verdict("b", 2)], 1],
+    ];
+    for (const [verdicts, next] of cases) {
+      const bytes = JSON.stringify({ episodes: {}, prs: {}, verdicts, churnEscalated: {}, nextVerdictSequence: next });
+      writeFileSync(path, bytes);
+      assert.throws(() => runGardenerOverseer(h.deps), /gardener-overseer\.json.*malformed.*verdict sequences are not ordered and complete/);
+      assert.equal(readFileSync(path, "utf8"), bytes);
+      assert.equal(h.steps("gardener_overseer.scorecard").length, 0);
+    }
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
 test("W1-T5073: corrupt effects stop the overseer before it overwrites a handoff", () => {
   const h = harness(T0 + 10 * HOUR);
   try {
