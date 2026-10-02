@@ -328,7 +328,9 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
       return plan;
     });
     const partial = slot?.state.catchUp !== undefined ? { partial: true as const } : {};
-    const warming = slot?.db !== undefined && slot.state.tickedAt === undefined ? { warming: true as const } : {};
+    // A slot is an instance the worker is configured to project, so one with no store open or no tick yet is warming;
+    // an instance with no slot at all is structurally unprojected and compared (2026-10-02 23:14Z, after a serve handoff).
+    const warming = slot !== undefined && (slot.db === undefined || slot.state.tickedAt === undefined) ? { warming: true as const } : {};
     computed.set(instanceId, next.summary
       ? { atMs: now, generation, sourcesMtimeMs, summary: next.summary, ...(next.shadow ? { shadow: next.shadow } : {}), ...(read ? { plan: read } : {}), ...(next.fileReads ? { fileReads: next.fileReads } : {}), ...partial }
       : { atMs: now, generation, sourcesMtimeMs, reason: next.reason, ...warming, ...(prior?.summary ? { summary: prior.summary, ...(prior.shadow ? { shadow: prior.shadow } : {}), ...(prior.plan ? { plan: prior.plan } : {}),
@@ -433,7 +435,8 @@ function summarize(
   now: number,
   readPlan: (path: string) => Plan,
 ): { summary?: RepoDashboardResult; reason?: string; shadow?: Record<string, RepoShadowFacts>; fileReads?: RepoSummaryFileReads } {
-  if (slot === undefined || slot.db === undefined) return { reason: "the read model does not project this instance" };
+  if (slot === undefined) return { reason: "the read model does not project this instance" };
+  if (slot.db === undefined) return { reason: "the read model has not opened this instance's store yet" };
   if (slot.state.tickedAt === undefined) return { reason: "the read model has not projected this instance's ledger yet" };
   const db = slot.db;
   let rows: Array<Record<string, unknown>>;
@@ -446,12 +449,12 @@ function summarize(
   return outcome.ok ? { summary: outcome.summary, ...(outcome.shadow ? { shadow: outcome.shadow } : {}), fileReads: outcome.fileReads } : { reason: outcome.reason };
 }
 
-/** Absent until the first summary, catching up while it was computed from a partial ledger, stale while the last recompute failed (#7928), else fresh. */
+/** Absent until the first summary, catching up while it was computed from a partial ledger, stale while the last recompute failed (#7928), else fresh; warming while a configured instance's store is unopened or unticked. */
 function summarySource(instanceId: string, current: InstanceSummary): ViewSource {
   const name = `repositories:${instanceId}`;
   const asOf = current.summary?.generated_at ?? null;
   if (current.summary === undefined) return { name, asOf, state: "unavailable", reason: current.reason, ...(current.warming ? { phase: "warming" as const } : {}) };
   if (current.partial) return { name, asOf, state: "stale", phase: "catching_up", reason: "computed while the ledger projector was catching up" };
-  if (current.reason) return { name, asOf, state: "stale", reason: current.reason };
+  if (current.reason) return { name, asOf, state: "stale", reason: current.reason, ...(current.warming ? { phase: "warming" as const } : {}) };
   return { name, asOf, state: "fresh" };
 }

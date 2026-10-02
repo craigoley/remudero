@@ -484,8 +484,10 @@ export function createNavBadgeReadModelView<S extends { instance: string; ticked
         ...scope,
         memory: () => {
           const slot = instances.find((candidate) => candidate.state.instance === scope.instanceId);
-          if (slot === undefined || slot.db === undefined) return { reason: "the read model does not project this instance" };
-          if (slot.state.tickedAt === undefined) return { reason: "the read model has not projected this instance's ledger yet" };
+          // A slot is an instance the worker is configured to project: until its store opens and ticks it is warming, not absent.
+          if (slot === undefined) return { reason: "the read model does not project this instance" };
+          if (slot.db === undefined) return { reason: "the read model has not opened this instance's store yet", phase: "warming" as const };
+          if (slot.state.tickedAt === undefined) return { reason: "the read model has not projected this instance's ledger yet", phase: "warming" as const };
           return { rows: operatorAgentFacts(folds, slot.db) };
         },
       }));
