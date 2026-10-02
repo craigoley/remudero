@@ -1,0 +1,39 @@
+- id: W1-T5308
+  title: "A LANE POOL THAT NEVER SETTLES STARVES THE DAEMON'S FRESHNESS CHECK — 2026-10-02 the daemon ran 09d7262ce for 97 minutes while main advanced past six fixes, because freshness is checked only between iterations and one iteration awaited its lanes the whole time"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 1
+  budget_usd: 10.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 90be18e2, 2026-10-02: board red, queue not clearing"
+  files: [src/lib/daemon.ts, test/w1-t5308-a-long-lane-pool-never-starves-the-freshness-check.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-02 on the fleet host: the core daemon booted at 16:44 on 09d7262ce and logged its last
+    daemon.iteration and daemon.freshness_not_stale at 16:48:56. Until an operator restart at 18:25 it never
+    reached another freshness check, so #8698 and the main-red fixes #8700 and #8714 never went live, and
+    the deploy supervisor logged deploy.skip every five minutes ("the recycle tick does not restart on
+    mount staleness, which is the daemon's own freshness check's job", W1-T3245).
+    The iteration awaits runLanePool (src/lib/daemon.ts) until every admitted lane settles. Its two lanes
+    (W1-T5269, W1-T4271) held their runs for over 80 minutes while polling CI. A run yields at the
+    external-wait boundary only when it sees the daemon's checkout has advanced, but that checkout
+    advances only at the freshness check, which only runs between iterations: each waits on the other.
+  design: |
+    While lanes are in flight, the daemon checks freshness on its own cadence, inside the in-flight ticker
+    that already runs every poll interval, never only between iterations. A detected advance closes
+    admission, signals the in-flight runs to yield at their next external-wait boundary (the existing
+    W1-T5037 yield), and lets the pool settle, then the existing freshness drain and restart run. No lane
+    is killed, and no new bound is added: the trigger is the advance, not a duration.
+  acceptance:
+    - claim: "a code advance seen while lanes are in flight is acted on without waiting for the pool to settle"
+      proof: 'grep: test("W1-T5308: a code advance seen while lanes are in flight is acted on without waiting for the pool" in test/w1-t5308-a-long-lane-pool-never-starves-the-freshness-check.test.ts'
+    - claim: "in-flight runs are asked to yield at their external-wait boundary and their lanes settle on their own"
+      proof: 'grep: test("W1-T5308: in-flight runs are asked to yield at their external-wait boundary and their lanes settle on their own" in test/w1-t5308-a-long-lane-pool-never-starves-the-freshness-check.test.ts'
+  falsifier: |
+    Revert to checking freshness only between iterations and the first test sees the advance go unacted
+    on until every lane settles.
