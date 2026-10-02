@@ -17,6 +17,7 @@ import {
   githubAuthProbe,
   listenReadiness,
   onDrainRequest,
+  onRestoreRequest,
   onShedRequest,
   planLoadedProbe,
   processChannel,
@@ -148,4 +149,16 @@ test("the active generation sheds its caches on request and reports resident byt
   for (const l of own) l({ type: GENERATION_MESSAGES.shed });
   assert.equal(plain[0]?.gc, false, "with no exposed collector the reply says so");
   assert.equal(typeof plain[0]?.beforeBytes, "number", "the default reads this process's resident bytes");
+});
+
+test("a restore request re-warms the generation after an abandoned handoff", () => {
+  const listeners: Array<(m: GenerationMessage) => void> = [];
+  const channel = { send: () => {}, onMessage: (l: (m: GenerationMessage) => void) => void listeners.push(l) };
+  const restored: string[] = [];
+  onRestoreRequest(channel, (reason) => restored.push(reason));
+  for (const l of listeners) l({ type: GENERATION_MESSAGES.shed });
+  assert.deepEqual(restored, [], "only a restore request restores");
+  for (const l of listeners) l({ type: GENERATION_MESSAGES.restore, reason: "handoff_abandoned" });
+  for (const l of listeners) l({ type: GENERATION_MESSAGES.restore });
+  assert.deepEqual(restored, ["handoff_abandoned", "restore"]);
 });
