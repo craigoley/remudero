@@ -166,6 +166,7 @@ const MAX_ID = 200;
 const MAX_LIST = 32;
 const MAX_RECEIPTS = 200;
 export const MIN_CLAIM_LEASE_MS = 60_000;
+/** PRIMARY CONTROL: every claim lease expires within one day, returning the handoff to the unclaimed queue. */
 export const MAX_CLAIM_LEASE_MS = 24 * 60 * 60 * 1000;
 
 const isoOf = (ms: number): string => fixedClock(ms).iso();
@@ -232,6 +233,7 @@ function actorInScope(actorScope: HandoffActorScope | undefined, scope: HandoffS
 }
 
 function liveClaim(handoff: HumanHandoff, now: number): HandoffClaim | null {
+  // expiring-fixture: exempt -- claim expiries are derived from injected now; fixtures fix no lease expiry date.
   return handoff.claim && Date.parse(handoff.claim.leaseExpiresAt) > now ? handoff.claim : null;
 }
 
@@ -269,6 +271,7 @@ export function createHumanHandoff(value: unknown, now: number): HandoffResult {
   const scope = input.scope as Record<string, unknown> | undefined;
   if (!scope || !bounded(scope.principal, MAX_ID) || !bounded(scope.repository, MAX_ID)) return refuse("invalid", "scope.principal and scope.repository are required");
   if (!HANDOFF_PRIORITIES.includes(input.priority as HandoffPriority)) return refuse("invalid", "priority must be low, normal, high, or urgent");
+  // expiring-fixture: exempt -- deadline fixtures also pass a fixed now, so their outcome cannot change with calendar time.
   if (!iso(input.responseDeadline) || Date.parse(input.responseDeadline) <= now) return refuse("invalid", "responseDeadline must be a future timestamp");
   const policy = input.escalationPolicy as Record<string, unknown> | undefined;
   if (!policy || !Number.isInteger(policy.afterMs) || Number(policy.afterMs) <= 0 || !boundedList(policy.chain) || policy.chain.length === 0) {
@@ -482,6 +485,7 @@ export function closeHumanHandoff(
   if ((outcome === "action_accepted" || outcome === "action_refused" || outcome === "unavailable") && !bounded(input.authoritativeOutcome, MAX_ID)) {
     return refuse("outcome_required", `${outcome} needs the authoritative outcome receipt`);
   }
+  // expiring-fixture: exempt -- closure tests supply fixed now alongside fixed deadlines, never the wall clock.
   if (outcome === "expired" && Date.parse(handoff.responseDeadline) > now) return refuse("not_expired", `deadline ${handoff.responseDeadline} has not passed`);
   if (outcome === "superseded" && !bounded(input.supersededBy, MAX_ID)) return refuse("receipt_required", "superseded needs the superseding receipt");
   const receiptId = `${handoff.handoffId}#${handoff.receipts.length + 1}:closed`;
