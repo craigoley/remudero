@@ -74,6 +74,7 @@
     "ci.yaml": {
       "entries": [
         "body-fetch-guards-on-http-not-size",
+        "comment-load-ratchet-lane",
         "commitlint-pr-title-lane",
         "diff-coverage-needs-cis-own-flags",
         "diff-coverage-ok-can-be-vacuous",
@@ -86,10 +87,16 @@
       ],
       "globs": [
         ".github/**",
+        ".github/workflows/**",
         ".github/workflows/ci.yml",
+        "bin/**",
+        "deploy/**",
+        "hooks/**",
         "plan/tasks.d/**",
+        "scripts/**",
         "scripts/diff-coverage.mjs",
         "scripts/lib/inherited-violation.mjs",
+        "src/**",
         "src/lib/git-push.ts",
         "src/lib/open-prs-rest.ts",
         "src/lib/plan-pr-emitter.ts",
