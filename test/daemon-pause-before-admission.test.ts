@@ -371,8 +371,10 @@ test("W1-T4191: the in-flight light sweep admits no worker while a pause holds",
         merged.add(id);
         return okResult(id);
       },
-      sweepLight: async () => {
-        if (paused) lightWhilePaused++;
+      // W1-T5343 widened this: a paused phase still runs a REVIEW-ONLY pass, which admits no fix,
+      // requeue or update-branch worker. Only the ordinary pass is the admission this test forbids.
+      sweepLight: async (scope) => {
+        if (paused) lightWhilePaused += scope?.reviewOnly ? 0 : 1;
         else lightBeforePause++;
       },
       checkStop: () => stopDetail(root),
@@ -384,10 +386,10 @@ test("W1-T4191: the in-flight light sweep admits no worker while a pause holds",
   );
   assert.deepEqual(s.merged, ["A"], "the admitted batch still drains under the pause");
   assert.ok(lightBeforePause >= 1, `control: the ticker ran the light sweep before the pause (saw ${lightBeforePause})`);
-  assert.equal(lightWhilePaused, 0, "no light-sweep pass, and so no fix or review admission, ran while the pause held");
+  assert.equal(lightWhilePaused, 0, "no ordinary light-sweep pass, and so no fix admission, ran while the pause held");
   assert.ok(
-    lines.some((l) => l.step === "daemon.sweep_light.held" && l.extra.phase === "dispatch"),
-    "the withheld pass is named on the ledger, the same way the full-sweep retrigger names its hold",
+    lines.some((l) => (l.step === "daemon.sweep_light.held" || l.step === "daemon.sweep_light.review_only") && l.extra.phase === "dispatch"),
+    "the withheld ordinary pass is named on the ledger, the same way the full-sweep retrigger names its hold",
   );
 });
 

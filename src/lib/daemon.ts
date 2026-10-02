@@ -1574,11 +1574,17 @@ interface InFlightTickerOwner {
   /** W1-T4998: a background sweep still holding the runner a dispatch took over. Whichever of the two
    *  stops first leaves it to the other, so a pass that outlives the dispatch keeps its heartbeat. */
   sweepHold?: Pick<InFlightTickerOwner, "generation" | "headroomSampler" | "sweepRetrigger">;
+  /** W1-T5343: how many dispatch lanes are still in flight. Absent (retro, sweep) reads as none, and so does
+   *  the reader a sweep hold keeps after its dispatch ended: that dispatch's pool had already drained to 0. */
+  lanesInFlight?: () => number;
   ticker?: Promise<void>;
   stop(generation: number): Promise<void>;
 }
 
 let inFlightTickerOwner: InFlightTickerOwner | undefined;
+/** W1-T5343: the ONE review-only pass a paused phase ticker may have running (the W1-T4732 slot
+ *  rule with one slot). Process-wide, so a ticker that stops and a later one cannot hold two. */
+let pausedReviewPass: Promise<void> | undefined;
 /** Process-wide, so a generation handed back to a sweep's hold is never issued to a later holder. */
 let inFlightTickerGenerations = 0;
 
@@ -1604,6 +1610,7 @@ function startInFlightTicker(
   headroomSampler?: { lastSampleMs: number; clock: Clock; policy: HeadroomPolicy; enforced: boolean },
 ): { stop: () => Promise<void> } {
   const onTick = phase === "dispatch" ? sweepRetrigger?.onDispatchTick : undefined;
+  const lanesInFlight = phase === "dispatch" ? sweepRetrigger?.lanesInFlight : undefined;
   if (!deps.sweepLight && !onTick) return { stop: async () => {} };
   // W1-T3181: dispatch takes over a same-tick retro's ONE runner. Incrementing the generation makes
   // the retro's eventual stop inert, so it cannot turn off the dispatch clock after the handoff.
@@ -1618,6 +1625,7 @@ function startInFlightTicker(
     inFlightTickerOwner.headroomSampler = headroomSampler;
     inFlightTickerOwner.sweepRetrigger = sweepRetrigger;
     inFlightTickerOwner.onTick = onTick;
+    inFlightTickerOwner.lanesInFlight = lanesInFlight;
     const generation = (inFlightTickerOwner.generation = ++inFlightTickerGenerations);
     const owner = inFlightTickerOwner;
     return { stop: () => owner.stop(generation) };
@@ -1629,6 +1637,7 @@ function startInFlightTicker(
     headroomSampler,
     sweepRetrigger,
     onTick,
+    lanesInFlight,
     stop: async (generation) => {
       if (inFlightTickerOwner !== owner) return;
       const hold = owner.sweepHold;
@@ -1809,12 +1818,42 @@ function startInFlightTicker(
               }
             }
           }
-          // W1-T4191: the light pass can admit fix and review workers, so an operator PAUSE withholds it
-          // while the batch drains. Withheld, never aborted: work already in flight finishes. STOP is not
-          // read here: it ends the daemon on its own, and fixtures bound this loop with it.
+          // W1-T4191: the light pass can admit fix and review workers, so an operator PAUSE withholds the
+          // ORDINARY pass while the batch drains. Withheld, never aborted: work already in flight finishes.
+          // STOP is read only under PAUSE: it ends the daemon on its own, and fixtures bound this loop with it.
           const lightHalt = deps.checkPause?.();
           if (lightHalt) {
-            log("daemon.sweep_light.held", { phase: owner.phase, detail: lightHalt });
+            // W1-T5343: a pause stops new work, never the judging of finished work (W1-T4429 design iii), and
+            // 11 dispatch-phase pauses once held ~210 min with 0 reviews. So run ONE review-only pass at a time,
+            // which closes the fix rung, requeue and update-branch W1-T4191 needed closed, and only while a
+            // lane is in flight: one admitted after the lanes drain could stretch a recycle's wait. STOP wins.
+            // `daemon.sweep_light.held` keeps meaning "nothing ran" and names which guard held it.
+            const stopped = deps.checkStop?.();
+            const heldBy = stopped
+              ? "stop"
+              : !deps.sweepLight
+                ? "no_light_pass"
+                : pausedReviewPass
+                  ? "review_in_flight"
+                  : (owner.lanesInFlight?.() ?? 0) === 0
+                    ? "no_lane"
+                    : undefined;
+            if (heldBy) {
+              log("daemon.sweep_light.held", { phase: owner.phase, detail: stopped ?? lightHalt, reason: heldBy });
+              continue;
+            }
+            log("daemon.sweep_light.review_only", { phase: owner.phase, detail: lightHalt });
+            const pass = (async () => {
+              try {
+                await deps.sweepLight!({ reviewOnly: true });
+              } catch (e) {
+                log("daemon.sweep_light.failed", { phase: owner.phase, review_only: true, error: String((e as Error)?.message ?? e) });
+              }
+            })();
+            pausedReviewPass = pass;
+            void pass.finally(() => {
+              if (pausedReviewPass === pass) pausedReviewPass = undefined;
+            });
             continue;
           }
           try {
@@ -1835,6 +1874,8 @@ function startInFlightTicker(
  *  re-derive "elapsed since last pass" from its own private zero (W1-T1272). */
 interface SweepRetrigger {
   onDispatchTick?: () => void;
+  /** W1-T5343: the dispatch phase's live lane count, set per dispatch like `onDispatchTick` and read only there. */
+  lanesInFlight?: () => number;
   /** Mirrors `DaemonOpts.sweepWallClockBoundMs` — the SAME bound the top-of-iteration call uses. */
   sweepWallClockBoundMs: number;
   /** `DaemonOpts.sweepRetriggerIntervalMs` (resolved), the minimum gap between two retriggers. */
@@ -2315,26 +2356,27 @@ export function runLanePool<T extends { id: string }, R>(
   tasks: T[],
   run: (id: string) => Promise<R>,
   refill: (lane: number, finished: T, outcome: PromiseSettledResult<R>) => T | undefined,
+  // W1-T5343: a live view of the count, read by the phase ticker. Optional and trailing.
+  lanes: { inFlight: number } = { inFlight: 0 },
 ): Promise<PromiseSettledResult<R>[]> {
   const settled: PromiseSettledResult<R>[] = [];
   const firstWave = tasks.map((t) => run(t.id));
-  let inFlight = 0;
   return new Promise((resolve) => {
     if (tasks.length === 0) resolve(settled);
     const start = (i: number, lane: number, p: Promise<R>): void => {
-      inFlight++;
+      lanes.inFlight++;
       p.then(
         (value): PromiseSettledResult<R> => ({ status: "fulfilled", value }),
         (reason: unknown): PromiseSettledResult<R> => ({ status: "rejected", reason }),
       ).then((outcome) => {
         settled[i] = outcome;
-        inFlight--;
-        const next = inFlight > 0 ? refill(lane, tasks[i], outcome) : undefined;
+        lanes.inFlight--;
+        const next = lanes.inFlight > 0 ? refill(lane, tasks[i], outcome) : undefined;
         if (next) {
           tasks.push(next);
           start(tasks.length - 1, lane, (async () => run(next.id))());
         }
-        if (inFlight === 0) resolve(settled);
+        if (lanes.inFlight === 0) resolve(settled);
       });
     };
     firstWave.forEach((p, i) => start(i, i, p));
@@ -4640,8 +4682,10 @@ export async function runDaemon(
       }
     } : undefined;
     sweepRetrigger.onDispatchTick = onDispatchTick;
+    const lanes = { inFlight: 0 };
+    sweepRetrigger.lanesInFlight = () => lanes.inFlight;
     const stopTicker = startInFlightTicker(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch, sweepRetrigger, headroomSampler).stop;
-    const settled = await runLanePool(admitted, (id) => deps.runOne(id), refillLane);
+    const settled = await runLanePool(admitted, (id) => deps.runOne(id), refillLane, lanes);
     // The settled counterpart to the concurrent-set row. Emitted BEFORE the ticker stop and the
     // classification loop, because that loop's fatal path returns and the stop is itself awaited work that
     // could throw, so anything later would be lost in exactly the failure cases this row reports.
