@@ -56,7 +56,7 @@ import type { ReadModelDb, ReadModelLease } from "./read-model-db.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { buildBatchedGithub, readLedgerLines, type BatchedPr, type GitHub } from "./status.js";
 import { deriveDayCostUsd, windowCostRows } from "./sweep.js";
-import { threadPlan } from "./thread-plan.js";
+import { threadPlan, threadPlanPin } from "./thread-plan.js";
 import { utcDayWindowMs } from "./time-window.js";
 import { judgeSource, PLAN_BUDGET_MS } from "./view-freshness.js";
 import { legacyRowIndex, type LegacyRows, type ShadowLatest, type ShadowSum } from "./view-shadow.js";
@@ -700,7 +700,7 @@ export function createNowView(opts: NowViewOptions): {
   });
   const planKey = (instance: NowInstance): string => {
     const path = nowPlanPath(instance);
-    return path ? planStamp(path) : "none";
+    return path ? planStamp(path) + threadPlanPin(path) : "none";
   };
   const github = opts.github ?? ((instance: NowInstance) => {
     const [owner, repo] = (instance.repo ?? "/").split("/");

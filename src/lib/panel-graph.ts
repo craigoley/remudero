@@ -36,7 +36,7 @@ import {
   type Task,
 } from "./plan.js";
 import { loadPlanIndex, type PlanIndex, type PlanIndexEntry } from "./plan-index.js";
-import { threadStrictPlan } from "./thread-plan.js";
+import { threadPlanPin, threadStrictPlan } from "./thread-plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import {
   buildLedgerIndex,
@@ -1696,7 +1696,7 @@ function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readP
   if (snapshot !== undefined) {
     plan = snapshot;
   } else {
-    planKey = planFilesStamp(deps.planPath, stat, deps.inboxListDir ?? listDirOrUndefined);
+    planKey = planFilesStamp(deps.planPath, stat, deps.inboxListDir ?? listDirOrUndefined) + threadPlanPin(deps.planPath);
     const last = state.last;
     plan = last?.planKey !== undefined && last.planKey === planKey ? last.plan : threadStrictPlan(deps.planPath);
   }
