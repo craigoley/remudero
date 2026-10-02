@@ -21,7 +21,7 @@ raw: "Create an audited Azure Remudero artifact-retirement workflow after the
   source/state mount nor control marker path changed."
 attachments: []
 origin: cli
-status: proposed
+status: accepted
 reply_to: null
 proposal_pr: https://github.com/craigoley/remudero/pull/8726
 summary: null
