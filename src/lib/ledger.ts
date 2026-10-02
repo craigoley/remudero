@@ -27,6 +27,7 @@ import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from 
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { assertLedgerPathNotLive } from "./live-write-guard.js";
 import { rotationStampIso } from "./ledger-union.js";
+import { pruneCarriedRows } from "./ledger-carry.js";
 import { resolveProducerIdentity, type ProducerIdentity } from "./producer-identity.js";
 import { WORKER_SCOPE_ENV } from "./worker-containment.js";
 
@@ -1702,6 +1703,10 @@ function rotateLedgerLocked(
     if (!withinWindow) archivedLineCount++;
     return withinWindow;
   });
+
+  const carried = pruneCarriedRows(candidates);
+  archivedLineCount += candidates.length - carried.length;
+  candidates = carried;
 
   // ── PASS 3: sweep.disposed dedup — keep the single acted:true line per `pr@head` if one exists,
   // else the most recent for that key. Every other duplicate is a same-outcome re-poll, and a
