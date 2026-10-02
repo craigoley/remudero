@@ -20,6 +20,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { createGithubKeepWarm, type GithubKeepWarm } from "./github-refresh-pacer.js";
 import { ghIssueGateway, tryEscalate, type EscalateDeps, type Escalation, type IssueGateway } from "./escalate.js";
+import { createInboxThreadView } from "./inbox-thread-view.js";
 import { createInstancesView } from "./instances-view.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { FUTURE_ROW_TOLERANCE_MS, LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, type LedgerProjector, type ProjectorTickResult } from "./ledger-projector.js";
@@ -1195,6 +1196,8 @@ export interface ReadModelViewsData {
   registry?: ReadModelWorkerData["registry"];
   /** A module URL whose default export lists views built beside the built-in ones. */
   viewsModule?: string;
+  /** The inbox root the `inbox-thread` view reads its thread store from; absent, that view reports why it has no body. */
+  inboxRoot?: string;
 }
 
 /** What the projector thread tells its view thread. */
@@ -1259,9 +1262,10 @@ export function runReadModelViewWorker(
     const instances = createInstancesView({ instances: data.instances, ...data.registry, ledgerSource });
     const demand = createDemandBook({ clock });
     const task = createTaskView({ instances: data.instances, ledgerSource, clock, demand, log });
+    const inboxThread = createInboxThreadView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), clock, demand, log });
     ticker = createReadModelTicker({
       stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off", demand,
-      views: [...READ_MODEL_VIEWS, now, instances, task, ...extra],
+      views: [...READ_MODEL_VIEWS, now, instances, task, inboxThread, ...extra],
     });
     ticker.start();
     for (const msg of early.splice(0)) handle(msg);
@@ -1380,7 +1384,7 @@ export function runReadModelWorker(
   const log = (step: string, extra: Record<string, unknown>): void => port.postMessage({ type: "log", step, extra } satisfies ReadModelWorkerMessage);
   const holder = randomUUID();
   const views = threadViews({
-    data: { stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}) },
+    data: { stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}) },
     relay: (m) => port.postMessage(m), log, clock,
   });
   const post = (m: ReadModelWorkerMessage): void => {

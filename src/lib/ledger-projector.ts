@@ -193,8 +193,72 @@ export const RUN_ACTIVITY_PROJECTION: LedgerRowProjection = {
   },
 };
 
+/** The `worker.activity` fields `deriveRunState` keeps the newest value of, whichever row carried it. */
+export const RUN_WORKER_FIELDS = ["requested_model", "served_model", "provider", "worker_role"] as const;
+const WORKER_EVENT_KINDS: ReadonlySet<unknown> = new Set(["working", "tool-executing", "message"]);
+type RunWorkerStamp = { ms: number; h: string; v?: string };
+const runWorkerStatements = new WeakMap<ReadModelDb, { get: ReadModelStatement; put: ReadModelStatement }>();
+
+/**
+ * Each run's newest `worker.activity` row, with each of {@link RUN_WORKER_FIELDS} from the newest row carrying
+ * it: the model a run asks for changes mid-run, and only those non-fact rows say so. Captured
+ * 2026-10-02T15:46:54Z: W1-T1289's 15:20:50 assignment escalated it to opus and its worker.activity rows
+ * said so from 15:20:54, while the view kept run.start's sonnet. Newest is by `(ts_ms, h)`, so any read order
+ * leaves the same row, and a line applied twice changes nothing.
+ */
+export const RUN_WORKER_PROJECTION: LedgerRowProjection = {
+  name: "run_worker",
+  version: 1,
+  tables: ["run_worker"],
+  ddl: `CREATE TABLE IF NOT EXISTS run_worker(task_id TEXT NOT NULL, run_id TEXT NOT NULL, ts_ms INTEGER NOT NULL, ts TEXT NOT NULL,
+    body TEXT NOT NULL, fields TEXT NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY(task_id, run_id)) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS run_worker_seq ON run_worker(seq);`,
+  markers: ['"step":"worker.activity"'],
+  apply(db, line, id, parse) {
+    const row = parse();
+    const ts = row?.ts;
+    const tsMs = typeof ts === "string" ? Date.parse(ts) : Number.NaN;
+    const step = row?.step;
+    if (step !== "worker.activity" || !row || typeof row.task_id !== "string" || typeof row.run_id !== "string" || !WORKER_EVENT_KINDS.has(row.event_kind) || !Number.isFinite(tsMs)) return;
+    let s = runWorkerStatements.get(db);
+    if (!s) {
+      runWorkerStatements.set(db, s = {
+        get: db.prepare("SELECT ts_ms, ts, body, fields FROM run_worker WHERE task_id = ? AND run_id = ?"),
+        put: db.prepare(`INSERT INTO run_worker(task_id, run_id, ts_ms, ts, body, fields, seq)
+          VALUES(?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM run_worker))
+          ON CONFLICT(task_id, run_id) DO UPDATE SET ts_ms = excluded.ts_ms, ts = excluded.ts, body = excluded.body, fields = excluded.fields, seq = excluded.seq`),
+      });
+    }
+    const held = s.get.get(row.task_id, row.run_id);
+    const was = (held ? JSON.parse(String(held.fields)) : {}) as Record<string, RunWorkerStamp>;
+    const me: RunWorkerStamp = { ms: tsMs, h: String(id.h) };
+    const after = (b: RunWorkerStamp | undefined): boolean => !b || me.ms > b.ms || (me.ms === b.ms && id.h > BigInt(b.h));
+    const newest = after(was["@"]);
+    const fields: Record<string, RunWorkerStamp> = { "@": newest ? me : was["@"]! };
+    let moved = newest;
+    for (const f of RUN_WORKER_FIELDS) {
+      const value = row[f];
+      if (typeof value === "string" && after(was[f])) {
+        fields[f] = { v: value, ...me };
+        moved = true;
+      } else if (was[f]) fields[f] = was[f];
+    }
+    if (!moved) return;
+    const [at, atText, body] = newest ? [tsMs, ts as string, line] : [Number(held!.ts_ms), String(held!.ts), String(held!.body)];
+    s.put.run(row.task_id, row.run_id, at, atText, body, JSON.stringify(fields));
+  },
+};
+
+/** Each run's newest worker fields, as one row of its newest `worker.activity` carrying them, from {@link RUN_WORKER_PROJECTION}. */
+export function runWorkerRow(body: string, fields: string): Record<string, unknown> {
+  const row = JSON.parse(body) as Record<string, unknown>;
+  const newest = JSON.parse(fields) as Record<string, RunWorkerStamp>;
+  for (const f of RUN_WORKER_FIELDS) if (newest[f]?.v !== undefined) row[f] = newest[f].v;
+  return row;
+}
+
 /** Every projection a store carries; a view that needs a table no projection keeps adds one here. */
-export const LEDGER_ROW_PROJECTIONS: readonly LedgerRowProjection[] = [REPO_ROW_PROJECTION, ACTIVITY_RING_PROJECTION, TASK_ACTIVITY_PROJECTION, RUN_ACTIVITY_PROJECTION];
+export const LEDGER_ROW_PROJECTIONS: readonly LedgerRowProjection[] = [REPO_ROW_PROJECTION, ACTIVITY_RING_PROJECTION, TASK_ACTIVITY_PROJECTION, RUN_ACTIVITY_PROJECTION, RUN_WORKER_PROJECTION];
 
 export interface LedgerProjectorOptions {
   /** The instance's state dir: the one holding its live ledger and rotation archives. */

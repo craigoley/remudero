@@ -59,6 +59,6 @@
     that edits its own criteria — a worker that can rewrite its own proof can pass anything.
   acceptance:
     - claim: "a PR with no derivable task id still spawns the semantic reviewer, under a default risk and budget"
-      proof: "grep: an untrailered / unfiled PR is still a PR the fleet chose to review in src/run-task.ts"
+      proof: 'grep: test("an untrailered PR with no derivable task id still spawns the semantic reviewer under a default risk and budget" in test/an-untasked-pr-silently-skips-the-semantic-reviewer.test.ts'
     - claim: "the skip survives only for an unresolvable reviewer mount or settings failure, under its own distinct ledger reason"
-      proof: "grep: that is a plan-resolution fault, not an untasked PR in src/run-task.ts"
+      proof: 'grep: test("a derived task id whose shard is missing still skips under its own distinct plan-resolution reason" in test/an-untasked-pr-silently-skips-the-semantic-reviewer.test.ts'
