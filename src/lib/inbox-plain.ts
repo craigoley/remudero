@@ -132,13 +132,13 @@ const fleetFinding = (what: string, headline: string): Template => () => ({
 
 const TEMPLATES: Record<string, Template> = {
   "verify-human": (summary) => ({
-    headline: "A planned task needs a person to check it",
+    headline: "The record requests a manual check",
     whatHappened: `The record asks for a manual check and reports a wait of ${daysWaiting(summary)}. This summary does not verify the task's current status.`,
     whatWeNeed: "Review the original question and current evidence before deciding.",
     ifNothingHappens: "No decision is made here. Check the current task for any blocked work.",
   }),
   ruling: () => ({
-    headline: "A decision is waiting for your ruling",
+    headline: "The record requests an operator ruling",
     whatHappened: "The record requests an operator ruling; this summary does not verify the question or its current status.",
     whatWeNeed: "Read the recorded question and confirm its scope before deciding.",
     ifNothingHappens: "No decision is recorded by viewing this summary.",
@@ -178,7 +178,7 @@ const TEMPLATES: Record<string, Template> = {
 };
 
 const UNKNOWN_TEMPLATE: Template = () => ({
-  headline: "The fleet has an item for you to look at",
+  headline: "Review the original record",
   whatHappened: "A record is available, but this summary does not verify its current facts or requested action.",
   whatWeNeed: "Read the original details before making a decision.",
   ifNothingHappens: "No decision or change is made by viewing this summary.",
@@ -271,7 +271,7 @@ export function readPlainStore(path: string): PlainStore {
 
 function currentStoredMessage(proposal: { id: string; summary: string }, store: PlainStore): PlainInboxMessage | undefined {
   const stored = store[proposal.id];
-  if (stored?.sourceFingerprint !== plainSourceFingerprint(proposal)) return undefined;
+  if (stored?.sourceFingerprint !== plainSourceFingerprint(proposal) || (stored.source !== "writer" && stored.source !== "template")) return undefined;
   try {
     return checkPlainMessage(stored).ok ? stored : undefined;
   } catch {
