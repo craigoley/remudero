@@ -1,0 +1,564 @@
+{
+  "manifest": "automation-flow",
+  "schemaVersion": "automation-flow-v1",
+  "description": "The automation-flow-v1 fixture corpus. Every record is the exact output the named core engine produces for the stated input, so a console can pin these records and test its adapter against them without a live daemon. test/contract-manifest-fixtures.test.ts re-derives every record from the engine on each run.",
+  "action": {
+    "version": "automation-action-v1",
+    "actionId": "act-fixture-merge-1",
+    "capability": "github:merge-pull-request",
+    "summary": "Merge a reviewed pull request once its required checks pass",
+    "scope": {
+      "flowId": "flow-fixture-merge",
+      "repo": "craigoley/remudero"
+    },
+    "risk": "low",
+    "preconditions": [
+      {
+        "id": "checks-green",
+        "source": "github:checks",
+        "description": "Every required check on the head commit passed"
+      }
+    ],
+    "freshness": {
+      "maxAgeSeconds": 600
+    },
+    "idempotencyKey": "idem-fixture-merge-1",
+    "createdAt": "2026-10-01T00:00:00.000Z",
+    "expiresAt": "2026-10-03T00:00:00.000Z",
+    "dryRun": true,
+    "approval": {
+      "policy": "none"
+    },
+    "rollback": {
+      "mode": "irreversible",
+      "refusal": "A merged pull request is undone by a new revert pull request, never by rewriting history"
+    },
+    "receiptRef": "github:craigoley/remudero/pulls"
+  },
+  "fixtures": [
+    {
+      "id": "preflight-ready",
+      "covers": [
+        "ready"
+      ],
+      "shape": "AutomationPreflightResult",
+      "engine": "preflightAutomationAction",
+      "input": {
+        "now": "2026-10-02T00:00:00.000Z",
+        "observations": [
+          {
+            "preconditionId": "checks-green",
+            "state": "satisfied",
+            "source": "github:checks",
+            "observedAt": "2026-10-01T23:55:00.000Z"
+          }
+        ],
+        "receipts": []
+      },
+      "record": {
+        "version": "automation-action-v1",
+        "actionId": "act-fixture-merge-1",
+        "outcome": "ready",
+        "evaluatedAt": "2026-10-02T00:00:00.000Z",
+        "approval": "not-required",
+        "findings": []
+      }
+    },
+    {
+      "id": "preflight-refused",
+      "covers": [
+        "refused"
+      ],
+      "shape": "AutomationPreflightResult",
+      "engine": "preflightAutomationAction",
+      "input": {
+        "now": "2026-10-02T00:00:00.000Z",
+        "observations": [
+          {
+            "preconditionId": "checks-green",
+            "state": "unsatisfied",
+            "source": "github:checks",
+            "observedAt": "2026-10-01T23:55:00.000Z",
+            "reason": "the required check build failed on the head commit"
+          }
+        ],
+        "receipts": []
+      },
+      "record": {
+        "version": "automation-action-v1",
+        "actionId": "act-fixture-merge-1",
+        "outcome": "refused",
+        "evaluatedAt": "2026-10-02T00:00:00.000Z",
+        "approval": "not-required",
+        "findings": [
+          {
+            "preconditionId": "checks-green",
+            "outcome": "refused",
+            "code": "precondition-unsatisfied",
+            "detail": "the required check build failed on the head commit"
+          }
+        ]
+      }
+    },
+    {
+      "id": "preflight-approval-pending",
+      "covers": [
+        "refused",
+        "pending"
+      ],
+      "shape": "AutomationPreflightResult",
+      "engine": "preflightAutomationAction",
+      "input": {
+        "now": "2026-10-02T00:00:00.000Z",
+        "actionOverrides": {
+          "risk": "production",
+          "approval": {
+            "policy": "human"
+          }
+        },
+        "observations": [
+          {
+            "preconditionId": "checks-green",
+            "state": "satisfied",
+            "source": "github:checks",
+            "observedAt": "2026-10-01T23:55:00.000Z"
+          }
+        ],
+        "receipts": []
+      },
+      "record": {
+        "version": "automation-action-v1",
+        "actionId": "act-fixture-merge-1",
+        "outcome": "refused",
+        "evaluatedAt": "2026-10-02T00:00:00.000Z",
+        "approval": "pending",
+        "findings": [
+          {
+            "outcome": "refused",
+            "code": "approval-pending",
+            "detail": "a production-risk action needs an operator approval"
+          }
+        ]
+      }
+    },
+    {
+      "id": "preflight-stale",
+      "covers": [
+        "stale"
+      ],
+      "shape": "AutomationPreflightResult",
+      "engine": "preflightAutomationAction",
+      "input": {
+        "now": "2026-10-02T00:00:00.000Z",
+        "observations": [
+          {
+            "preconditionId": "checks-green",
+            "state": "satisfied",
+            "source": "github:checks",
+            "observedAt": "2026-10-01T12:00:00.000Z"
+          }
+        ],
+        "receipts": []
+      },
+      "record": {
+        "version": "automation-action-v1",
+        "actionId": "act-fixture-merge-1",
+        "outcome": "stale",
+        "evaluatedAt": "2026-10-02T00:00:00.000Z",
+        "approval": "not-required",
+        "findings": [
+          {
+            "preconditionId": "checks-green",
+            "outcome": "stale",
+            "code": "observation-stale",
+            "detail": "observation of checks-green is older than 600s"
+          }
+        ]
+      }
+    },
+    {
+      "id": "preflight-unknown",
+      "covers": [
+        "unknown"
+      ],
+      "shape": "AutomationPreflightResult",
+      "engine": "preflightAutomationAction",
+      "input": {
+        "now": "2026-10-02T00:00:00.000Z",
+        "observations": [
+          {
+            "preconditionId": "checks-green",
+            "state": "unavailable",
+            "source": "github:checks",
+            "observedAt": "2026-10-01T23:55:00.000Z",
+            "reason": "the checks API answered 503"
+          }
+        ],
+        "receipts": []
+      },
+      "record": {
+        "version": "automation-action-v1",
+        "actionId": "act-fixture-merge-1",
+        "outcome": "unknown",
+        "evaluatedAt": "2026-10-02T00:00:00.000Z",
+        "approval": "not-required",
+        "findings": [
+          {
+            "preconditionId": "checks-green",
+            "outcome": "unknown",
+            "code": "source-unavailable",
+            "detail": "the checks API answered 503"
+          }
+        ]
+      }
+    },
+    {
+      "id": "preflight-expired",
+      "covers": [
+        "expired"
+      ],
+      "shape": "AutomationPreflightResult",
+      "engine": "preflightAutomationAction",
+      "input": {
+        "now": "2026-10-04T00:00:00.000Z",
+        "observations": [
+          {
+            "preconditionId": "checks-green",
+            "state": "satisfied",
+            "source": "github:checks",
+            "observedAt": "2026-10-03T23:55:00.000Z"
+          }
+        ],
+        "receipts": []
+      },
+      "record": {
+        "version": "automation-action-v1",
+        "actionId": "act-fixture-merge-1",
+        "outcome": "expired",
+        "evaluatedAt": "2026-10-04T00:00:00.000Z",
+        "approval": "not-required",
+        "findings": [
+          {
+            "outcome": "expired",
+            "code": "action-expired",
+            "detail": "action act-fixture-merge-1 expired at 2026-10-03T00:00:00.000Z"
+          }
+        ]
+      }
+    },
+    {
+      "id": "receipt-admission",
+      "covers": [
+        "ready",
+        "in-progress"
+      ],
+      "shape": "AutomationActionReceipt",
+      "engine": "executeAutomationAction",
+      "input": {
+        "now": "2026-10-02T00:00:00.000Z",
+        "observations": [
+          {
+            "preconditionId": "checks-green",
+            "state": "satisfied",
+            "source": "github:checks",
+            "observedAt": "2026-10-01T23:55:00.000Z"
+          }
+        ],
+        "receipts": []
+      },
+      "record": {
+        "version": "automation-action-v1",
+        "receiptId": "aar-f64c5d94a2c20dd198d8ab40",
+        "actionId": "act-fixture-merge-1",
+        "idempotencyKey": "idem-fixture-merge-1",
+        "at": "2026-10-02T00:00:00.000Z",
+        "receiptRef": "github:craigoley/remudero/pulls",
+        "kind": "execution",
+        "outcome": "in-progress",
+        "preflight": "ready",
+        "reason": "admitted: preflight ready, awaiting completion evidence"
+      }
+    },
+    {
+      "id": "receipt-refused",
+      "covers": [
+        "refused"
+      ],
+      "shape": "AutomationActionReceipt",
+      "engine": "executeAutomationAction",
+      "input": {
+        "now": "2026-10-02T00:00:00.000Z",
+        "observations": [
+          {
+            "preconditionId": "checks-green",
+            "state": "unsatisfied",
+            "source": "github:checks",
+            "observedAt": "2026-10-01T23:55:00.000Z",
+            "reason": "the required check build failed on the head commit"
+          }
+        ],
+        "receipts": []
+      },
+      "record": {
+        "version": "automation-action-v1",
+        "receiptId": "aar-f64c5d94a2c20dd198d8ab40",
+        "actionId": "act-fixture-merge-1",
+        "idempotencyKey": "idem-fixture-merge-1",
+        "at": "2026-10-02T00:00:00.000Z",
+        "receiptRef": "github:craigoley/remudero/pulls",
+        "kind": "execution",
+        "outcome": "refused",
+        "preflight": "refused",
+        "code": "precondition-unsatisfied",
+        "reason": "the required check build failed on the head commit"
+      }
+    },
+    {
+      "id": "preflight-in-progress",
+      "covers": [
+        "in-progress"
+      ],
+      "shape": "AutomationPreflightResult",
+      "engine": "preflightAutomationAction",
+      "input": {
+        "now": "2026-10-02T00:01:00.000Z",
+        "observations": [
+          {
+            "preconditionId": "checks-green",
+            "state": "satisfied",
+            "source": "github:checks",
+            "observedAt": "2026-10-01T23:55:00.000Z"
+          }
+        ],
+        "receiptsFrom": [
+          "receipt-admission"
+        ]
+      },
+      "record": {
+        "version": "automation-action-v1",
+        "actionId": "act-fixture-merge-1",
+        "outcome": "in-progress",
+        "evaluatedAt": "2026-10-02T00:01:00.000Z",
+        "approval": "not-required",
+        "findings": [
+          {
+            "outcome": "in-progress",
+            "code": "execution-in-progress",
+            "detail": "execution aar-f64c5d94a2c20dd198d8ab40 has not completed",
+            "receiptId": "aar-f64c5d94a2c20dd198d8ab40"
+          }
+        ]
+      }
+    },
+    {
+      "id": "external-pending",
+      "covers": [
+        "pending"
+      ],
+      "shape": "ExternalActionResult",
+      "engine": "reconcileExternalEffect",
+      "input": {
+        "now": "2026-10-02T00:02:00.000Z",
+        "request": {
+          "originatingActionId": "act-fixture-merge-1",
+          "originatingReceiptId": "aar-f64c5d94a2c20dd198d8ab40",
+          "capabilityGrantId": "grant-fixture-merge-1",
+          "connector": "github",
+          "targetIdentity": "craigoley/remudero#1",
+          "requestedOperation": "merge-pull-request",
+          "preconditionSnapshot": {
+            "checks": "green",
+            "head": "0123456789abcdef0123456789abcdef01234567"
+          },
+          "expectedPostconditions": [
+            {
+              "path": "mergeQueue.state",
+              "equals": "queued",
+              "description": "the pull request is in the merge queue"
+            }
+          ],
+          "idempotencyKey": "idem-fixture-merge-1",
+          "freshnessMs": 300000,
+          "authority": {
+            "capabilityGrantId": "grant-fixture-merge-1",
+            "expiresAt": "2026-10-03T00:00:00.000Z",
+            "budgetUsd": 1,
+            "spentUsd": 0,
+            "retryCostUsd": 0.1
+          },
+          "attempt": {
+            "outcome": "pending",
+            "attemptNumber": 1,
+            "maxAttempts": 3,
+            "idempotent": true
+          }
+        },
+        "observation": {
+          "observedState": {
+            "mergeQueue": {
+              "state": "queued"
+            },
+            "merged": false
+          },
+          "observedAt": "2026-10-02T00:01:30.000Z"
+        }
+      },
+      "record": {
+        "version": "external-effect-v1",
+        "originatingActionId": "act-fixture-merge-1",
+        "originatingReceiptId": "aar-f64c5d94a2c20dd198d8ab40",
+        "capabilityGrantId": "grant-fixture-merge-1",
+        "connector": "github",
+        "targetIdentity": "craigoley/remudero#1",
+        "requestedOperation": "merge-pull-request",
+        "preconditionSnapshot": {
+          "checks": "green",
+          "head": "0123456789abcdef0123456789abcdef01234567"
+        },
+        "expectedPostconditions": [
+          {
+            "path": "mergeQueue.state",
+            "equals": "queued",
+            "description": "the pull request is in the merge queue"
+          }
+        ],
+        "observation": {
+          "status": "fresh",
+          "observedAt": "2026-10-02T00:01:30.000Z",
+          "ageMs": 30000,
+          "maxAgeMs": 300000
+        },
+        "idempotencyKey": "idem-fixture-merge-1",
+        "reconciliationState": "pending",
+        "retryPath": {
+          "kind": "retry",
+          "allowed": true,
+          "reason": "retry remains within the original authority, idempotency key, and budget",
+          "attemptNumber": 2
+        },
+        "evidenceReference": "sha256:74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+        "safeToComplete": false,
+        "observedState": {
+          "mergeQueue": {
+            "state": "queued"
+          },
+          "merged": false
+        }
+      }
+    },
+    {
+      "id": "external-partial",
+      "covers": [
+        "partial"
+      ],
+      "shape": "ExternalActionResult",
+      "engine": "reconcileExternalEffect",
+      "input": {
+        "now": "2026-10-02T00:05:00.000Z",
+        "request": {
+          "originatingActionId": "act-fixture-merge-1",
+          "originatingReceiptId": "aar-f64c5d94a2c20dd198d8ab40",
+          "capabilityGrantId": "grant-fixture-merge-1",
+          "connector": "github",
+          "targetIdentity": "craigoley/remudero#1",
+          "requestedOperation": "merge-pull-request",
+          "preconditionSnapshot": {
+            "checks": "green",
+            "head": "0123456789abcdef0123456789abcdef01234567"
+          },
+          "expectedPostconditions": [
+            {
+              "path": "merged",
+              "equals": true,
+              "description": "the pull request merged"
+            },
+            {
+              "path": "branch.deleted",
+              "equals": true,
+              "description": "the head branch was deleted"
+            }
+          ],
+          "idempotencyKey": "idem-fixture-merge-1",
+          "freshnessMs": 300000,
+          "authority": {
+            "capabilityGrantId": "grant-fixture-merge-1",
+            "expiresAt": "2026-10-03T00:00:00.000Z",
+            "budgetUsd": 1,
+            "spentUsd": 0,
+            "retryCostUsd": 0.1
+          },
+          "attempt": {
+            "outcome": "partially-applied",
+            "attemptNumber": 1,
+            "maxAttempts": 3,
+            "idempotent": true
+          }
+        },
+        "observation": {
+          "observedState": {
+            "merged": true,
+            "branch": {
+              "deleted": false
+            }
+          },
+          "observedAt": "2026-10-02T00:04:30.000Z"
+        }
+      },
+      "record": {
+        "version": "external-effect-v1",
+        "originatingActionId": "act-fixture-merge-1",
+        "originatingReceiptId": "aar-f64c5d94a2c20dd198d8ab40",
+        "capabilityGrantId": "grant-fixture-merge-1",
+        "connector": "github",
+        "targetIdentity": "craigoley/remudero#1",
+        "requestedOperation": "merge-pull-request",
+        "preconditionSnapshot": {
+          "checks": "green",
+          "head": "0123456789abcdef0123456789abcdef01234567"
+        },
+        "expectedPostconditions": [
+          {
+            "path": "merged",
+            "equals": true,
+            "description": "the pull request merged"
+          },
+          {
+            "path": "branch.deleted",
+            "equals": true,
+            "description": "the head branch was deleted"
+          }
+        ],
+        "observation": {
+          "status": "fresh",
+          "observedAt": "2026-10-02T00:04:30.000Z",
+          "ageMs": 30000,
+          "maxAgeMs": 300000
+        },
+        "idempotencyKey": "idem-fixture-merge-1",
+        "reconciliationState": "partially-applied",
+        "retryPath": {
+          "kind": "retry",
+          "allowed": true,
+          "reason": "retry remains within the original authority, idempotency key, and budget",
+          "attemptNumber": 2
+        },
+        "evidenceReference": "sha256:74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+        "safeToComplete": false,
+        "observedState": {
+          "merged": true,
+          "branch": {
+            "deleted": false
+          }
+        },
+        "partialSuccess": {
+          "satisfied": [
+            "merged"
+          ],
+          "unsatisfied": [
+            "branch.deleted"
+          ]
+        }
+      }
+    }
+  ]
+}

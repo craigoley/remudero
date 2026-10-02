@@ -50,6 +50,17 @@ servers:
       tailnetHost:
         default: localhost:4317
 
+# W1-T3896: the versioned cross-repository contract manifests this surface publishes. Each names
+# the reviewed source revision, the state vocabulary and fields the schemas below serve, the
+# redaction rules, its fixture corpus and its compatibility policy.
+# scripts/validate-contract-manifest.mjs refuses a manifest whose states or required fields drift
+# from the enums and `required` lists here, and a manifest this list does not link.
+x-contract-manifests:
+  - schemaVersion: automation-flow-v1
+    manifest: contracts/automation-flow-v1.json
+    fixtures: contracts/automation-flow-v1-fixtures.json
+    validator: scripts/validate-contract-manifest.mjs
+
 components:
   securitySchemes:
     bearerRead:
