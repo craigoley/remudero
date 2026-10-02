@@ -44,3 +44,14 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   `Remudero-Task: <task-id>`. Otherwise, verify you edited files in the declared `files:`
   scope and that your edits are syntactically valid (no parse errors or write failures from
   your tools); use Read/Edit/Write on declared files, never undeclared ones.
+
+- `ci-friction:fix_refusal:every-change-the-worker-made-is-outside-its-declared-files` — the
+  worker made changes to the repository, but every changed file falls outside the task's
+  declared `files:` scope. The `commitWorkerEdits` function (src/run-task.ts) filters staged
+  changes by the declared surface and refuses to commit when the only edited files are
+  undeclared (outside `declaredPaths`), preventing progress even though changes exist. To fix:
+  verify that your edits target files listed in the task's `files:` field (read the task
+  record to see its declared scope); use Read/Edit/Write only on those declared paths. If the
+  task's scope is genuinely too narrow and should have named more files, escalate: the task's
+  `files:` declaration is the contract and cannot be unilaterally widened mid-run; file a
+  follow-up task to correct it.
