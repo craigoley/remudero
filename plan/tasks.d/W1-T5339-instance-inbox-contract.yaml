@@ -1,0 +1,47 @@
+- id: W1-T5339
+  title: "Restore selected-repository conversations through an advertised, identity-checked instance contract"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "2026-10-02 approved Inbox follow-ups; live selected core Inbox cannot advertise conversations"
+  plan_refs: [W1-T5049, W1-T5269]
+  files: [src/lib/instance-inbox-contract.ts, src/lib/instance-gateway.ts, src/lib/instances-view.ts, src/lib/panel-graph.ts, test/instance-inbox-contract.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at ffb0108e54e35400ca3e93ec1b58c4339bbb1555: instances-view advertises
+    no inbox/threads or inbox/thread capability. The console's merged adapter correctly refuses
+    core fallback. Live Chrome on 2026-10-02 shows selected core conversations unavailable because
+    its instance does not advertise inbox/threads. Issue #7911 has no filed implementation here.
+  design: |
+    Implement the first slice of issue #7911: list/detail plus reversible reply/read receipts,
+    not approval or automatic retirement. Mount only real, instance-rooted handlers; advertise
+    only what is wired and usable. Echo exact repository and instance identity in each envelope.
+    Reuse the maintained list projection and keyed detail view where available; never reclassify
+    the whole fleet in a request or substitute core data for another repository.
+    Reject forged scope, mismatched thread identity, unreadable sources and stale write evidence
+    before side effects. Bind one durable intent receipt to operator, instance, thread, action
+    and payload; exact replay returns the existing receipt across concurrent requests/restarts,
+    changed replay refuses, and unknown delivery stays unknown. Replies and read marks invalidate
+    only their instance's projections. An old daemon remains explicitly read-only, not blocked.
+    Existing confirmation tiers remain untouched; no irreversible or security decision is added.
+  acceptance:
+    - claim: "the instance gateway mounts the shared conversation contract"
+      proof: 'grep: mountInstanceInboxRoutes( in src/lib/instance-gateway.ts'
+    - claim: "served capabilities correspond to real instance-rooted conversation handlers"
+      proof: 'grep: instance inbox advertises only its mounted conversation routes in test/instance-inbox-contract.test.ts'
+    - claim: "a forged repository or mismatched thread cannot read or write another instance"
+      proof: 'grep: instance inbox refuses forged scope before side effects in test/instance-inbox-contract.test.ts'
+    - claim: "replies survive retry without duplicate side effects, including concurrent or restarted calls"
+      proof: 'grep: instance inbox reply receipts survive concurrent replay and restart in test/instance-inbox-contract.test.ts'
+    - claim: "stale or missing contracts stay read-only while ordinary PR work continues"
+      proof: 'grep: instance inbox unavailable contract never holds PR flow in test/instance-inbox-contract.test.ts'
+  falsifier: |
+    Advertise an unmounted route, return core evidence for site, accept a changed replay, or use
+    an in-memory receipt cache: the corresponding production-route fixtures must fail.

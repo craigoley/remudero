@@ -6,7 +6,7 @@
  * write to, and the daemon answers each reply in plain language.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,7 +30,7 @@ import {
 } from "../src/lib/inbox-responder.js";
 import { appendThreadMessage, inboxThreadId, inboxThreadIdentity, proposalIdOfThread, readAllThreads } from "../src/lib/inbox-thread.js";
 import { buildEscalationReplyRoute } from "../src/lib/panel-actions.js";
-import { buildPanelGraphRoutes, inboxThreadStorePath, type PanelGraphDeps } from "../src/lib/panel-graph.js";
+import { buildInboxThreadsRoute, buildPanelGraphRoutes, inboxThreadStorePath, type PanelGraphDeps } from "../src/lib/panel-graph.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { buildServeRoutes, type ServeDeps } from "../src/lib/serve.js";
 import { createService } from "../src/lib/service.js";
@@ -441,5 +441,44 @@ test("W1-T4088: serve gives the escalation reply route the thread store", async 
     assert.equal(res.status, 200, "before W1-T4088 serve refused every reply: no thread store configured");
   } finally {
     server.close();
+  }
+});
+
+test("W1-T5269: a read that outruns its classification answers from the held one, never an invented list", async () => {
+  const f = fixture();
+  // No wait at all, and no warm timer: every read outruns its refresh, so the route must fall back to
+  // the classification it already holds, through the production sources' peek.
+  let planUnreadable = false;
+  const readPlan = () => {
+    if (planUnreadable) throw new Error("plan snapshot unreadable");
+    return { tasks: [], byId: new Map() } as never;
+  };
+  const server = createService({ tokens: { read: READ, write: WRITE }, routes: [buildInboxThreadsRoute(f.deps, readPlan, { waitMs: 0, warm: false })] });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const get = async () => {
+    const res = await fetch(`${base}/v1/inbox/threads?qualified=1`, { headers: { authorization: `Bearer ${READ}` } });
+    return { status: res.status, json: (await res.json()) as { threads?: unknown[]; source?: { state?: string }; error?: string } };
+  };
+  try {
+    const first = await get();
+    assert.ok(first.status === 200 || first.status === 503, `a first read is a list or an explicit refusal, never an error: ${first.status}`);
+    let held = first;
+    for (let i = 0; i < 100 && held.status !== 200; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      held = await get();
+    }
+    assert.equal(held.status, 200, "once a classification is held, an outrun read answers from it");
+    assert.ok(Array.isArray(held.json.threads));
+    assert.ok(held.json.source?.state === "stale" || held.json.source?.state === "fresh", "the body names its source's state");
+    // A refresh that FAILS falls back to the held classification too, named stale rather than dropped.
+    planUnreadable = true;
+    writeFileSync(join(f.stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: [{ id: "ruling:changed", summary: "a changed input", evidenceAnchors: [] }] }));
+    const afterFailure = await get();
+    assert.equal(afterFailure.status, 200, "a failed refresh still answers from what is held");
+    assert.equal(afterFailure.json.source?.state, "stale");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(f.root, { recursive: true, force: true });
   }
 });
