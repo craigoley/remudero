@@ -272,11 +272,14 @@ export function readPlainStore(path: string): PlainStore {
 function currentStoredMessage(proposal: { id: string; summary: string }, store: PlainStore): PlainInboxMessage | undefined {
   const stored = store[proposal.id];
   if (stored?.sourceFingerprint !== plainSourceFingerprint(proposal) || (stored.source !== "writer" && stored.source !== "template")) return undefined;
-  try {
-    return checkPlainMessage(stored).ok ? stored : undefined;
-  } catch {
-    return undefined;
-  }
+  const shape = validateDecisionSummary({
+    headline: stored.headline,
+    what_happened: stored.whatHappened,
+    decision: stored.whatWeNeed,
+    options: stored.options,
+  });
+  if (!shape || typeof stored.ifNothingHappens !== "string") return undefined;
+  return checkPlainMessage(stored).ok ? stored : undefined;
 }
 
 /** Legacy or changed-source messages remain in the store but cannot be rendered as current. */

@@ -37,6 +37,16 @@ test("plain inbox cache requires the exact current proposal identity and summary
 test("malformed and machine-text cache entries fall back without changing proposal state", () => {
   const invalid = { ...current(), options: null } as unknown as PlainInboxMessage;
   assert.equal(plainInboxMessage(proposal, { [proposal.id]: invalid }).source, "template");
+  for (const bad of [
+    { ...current(), headline: null },
+    { ...current(), whatHappened: 17 },
+    { ...current(), whatWeNeed: {} },
+    { ...current(), ifNothingHappens: null },
+    { ...current(), options: [null, null] },
+    { ...current(), options: [{ label: 17 }, { label: "Leave undecided" }] },
+  ]) {
+    assert.equal(plainInboxMessage(proposal, { [proposal.id]: bad as unknown as PlainInboxMessage }).source, "template");
+  }
   assert.equal(plainInboxMessage(proposal, { [proposal.id]: { ...current(), source: "unrecognized" } as unknown as PlainInboxMessage }).source, "template");
   assert.equal(plainInboxMessage(proposal, { [proposal.id]: { ...current(), headline: "Run rmd approve" } }).source, "template");
   assert.equal(plainInboxMessage(proposal, {}).source, "template");
