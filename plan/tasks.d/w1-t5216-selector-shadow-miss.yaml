@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 4
   status: queued
@@ -16,3 +16,14 @@
   acceptance:
     - claim: "the narrow selector includes test/a-freshness-drain-keeps-reviewing.test.ts when this edge is exercised"
       proof: "grep: test/a-freshness-drain-keeps-reviewing\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The declared scope is a single file, src/lib/affected-suites.ts. The change adds one test path to the narrow selector, which is a small and reversible edit."
+      - "The description and acceptance criteria don't mention secrets, auth, permissions, deletion, merge, deploy or review policy changes. They also don't ask for an operator decision."
+      - "The acceptance criterion is a grep for the test path in the file, so it can be checked automatically (verify: auto)."
+      - "The family track record is empty (0 merged, 0 declined; Beta mean 0.50). That gives no evidence of danger. The change would still go through CI and review."
+    judged_at: "2026-10-02T10:51:17.205Z"
+    pin: "df90ea361ac32e4497b292e428a2dd4c5b0debf902fb107150bf30673d794a26"

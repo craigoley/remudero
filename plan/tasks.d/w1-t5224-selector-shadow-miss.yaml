@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 4
   status: queued
@@ -16,3 +16,14 @@
   acceptance:
     - claim: "the narrow selector includes test/a-stalled-repair-ladder-is-one-fleet-state.test.ts when this edge is exercised"
       proof: "grep: test/a-stalled-repair-ladder-is-one-fleet-state\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.8
+    reasons:
+      - "The description and declared files show a single-file change to src/lib/affected-suites.ts. Its purpose is to add one test path to the narrow selector, which is a coverage-selection tweak."
+      - "The description and files list don't show any contact with secrets, auth, permissions, deletion, merge/deploy/review policy, or irreversible actions. The acceptance criterion is a grep that can be checked automatically (verify: auto)."
+      - "The family has no track record (0 merged, 0 declined; Beta mean 0.50). That is neutral, not a sign of concern. The gates state shows nothing alarming, and the PR still has to pass CI and review."
+      - "No bounded change view was supplied, so I am relying only on the description and declared files."
+    judged_at: "2026-10-02T10:57:26.033Z"
+    pin: "752ee60c08bc64256e16a69dd8c234a5bc517990adfb28ba246e444fcbe14cb4"
