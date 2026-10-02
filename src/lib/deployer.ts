@@ -50,6 +50,7 @@ import {
   type DeployWorthJudge,
   type RecordedDeployRestartThreshold,
 } from "./deploy-judge.js";
+import { mintReleaseTag, type ReleaseChange, type ReleaseTagIo } from "./release-tags.js";
 
 // ── Pure decisions ─────────────────────────────────────────────────────────────
 
@@ -1076,6 +1077,15 @@ export interface DeployDeps {
    *  from {@link DeployDeps.alert}, which also poisons auto-retry. A console that fails to come
    *  back must never freeze the pipeline for a sha the DAEMON deployed healthily. */
   alertConsoleOnly: (message: string) => void;
+  /** W1-T4528: records a `restart` pressure decision as an annotated `release/<date>-<n>` tag.
+   *  OPTIONAL: omitted mints nothing, so every pre-existing caller is unchanged. */
+  releaseTags?: {
+    /** W1-T4527 {@link isPrimaryDeployment}; only `true` mints. */
+    isPrimary: () => boolean | undefined;
+    io: ReleaseTagIo;
+    /** The registry image built for the newest baked-path commit at or before `sourceSha`. */
+    imageRefFor: (sourceSha: string) => string | undefined;
+  };
 }
 
 export interface DeployOpts {
@@ -1156,6 +1166,9 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
   const lastFailedHead = deps.lastFailedHead();
   const runningHead = deps.runningHead();
   let autoRestartPressure: TriggerInputs["autoRestartPressure"];
+  // W1-T4528: the judgment behind a `restart` decision, held until the restart is verified healthy
+  // so one decision records ONE tag however many idle-deferred ticks it spans.
+  let releaseDecision: { total: number; threshold: number; decidedAt: string; changes: ReleaseChange[] } | undefined;
   const mountedStale = !sameCommit(fromHead, origin) || !sameCommit(runningHead, fromHead);
   const alreadyFailed = lastFailedHead !== undefined && origin === lastFailedHead;
   if (
@@ -1193,6 +1206,14 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
         scored_changes: pressure.scoreRows.length,
       });
       deps.setRestartPressureState(pressure.state);
+      if (pressure.decision === "restart") {
+        releaseDecision = {
+          total: pressure.total,
+          threshold: pressure.threshold,
+          decidedAt: new Date(pressureNow).toISOString(),
+          changes: pressure.scoreRows.map((r) => ({ sha: r.sha, score: r.score, reason: r.reason })),
+        };
+      }
       autoRestartPressure = {
         restart: pressure.wantRestart,
         reason: pressure.reason,
@@ -1430,6 +1451,24 @@ export function runDeployCycle(deps: DeployDeps, opts: DeployOpts = {}): DeployR
     deps.clearMarker();
     deps.clearFailure?.();
     deps.log("deploy.ok", { to: short(toHead), reason: health.reason });
+    if (releaseDecision && deps.releaseTags) {
+      // A failed mint is a `release.mint_failed` row, never a failed deploy: mintReleaseTag does not
+      // throw, and the two readers it is handed are guarded here for the same reason.
+      try {
+        mintReleaseTag(
+          {
+            sourceSha: toHead,
+            imageRef: deps.releaseTags.imageRefFor(toHead),
+            ...releaseDecision,
+            isPrimary: deps.releaseTags.isPrimary(),
+          },
+          deps.releaseTags.io,
+          deps.log,
+        );
+      } catch (err) {
+        deps.log("release.mint_failed", { reason: err instanceof Error ? err.message : String(err), source_sha: short(toHead) });
+      }
+    }
     deps.setRestartPressureState?.(
       resetDeployRestartPressure(deps.restartPressureState?.() ?? { total: 0, scoredShas: [] }, deps.now()),
     );
@@ -1970,6 +2009,57 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       const slug = githubSlugOf(git(["remote", "get-url", "origin"]));
       if (!slug) throw new Error("origin is not a github.com remote");
       exec("gh", ["workflow", "run", IMAGE_BUILD_WORKFLOW, "-R", slug, "--ref", "main"]);
+    },
+    // W1-T4528 — the release-tag mint. CREDENTIAL PATH: the GitHub CLI runs under `process.env.GH_TOKEN`,
+    // the fleet GitHub App's installation token that main() mints (refreshInstallationToken) before
+    // dispatching `deploy-run` — NOT a workflow GITHUB_TOKEN, whose pushes start no workflow run.
+    // Creating the tag object and ref through the API (never a forced tag or push) makes append-only
+    // structural: an existing name is a 422, which mintReleaseTag answers with n+1.
+    releaseTags: {
+      isPrimary: () => (registryText === undefined ? undefined : isPrimaryDeployment(registryText, o.stateRoot)),
+      imageRefFor: (sourceSha) => {
+        const image = registryText === undefined ? undefined : imageRefFor(registryText, o.stateRoot);
+        if (!image) return undefined;
+        try {
+          const baked = git(["log", "-1", "--format=%H", sourceSha, "--", ...IMAGE_BAKED_PATHS]).trim();
+          return /^[0-9a-f]{40}$/i.test(baked) ? `${image.replace(/:[^:/]+$/, "")}:${baked}` : undefined;
+        } catch (err) {
+          log("release.image_ref_unreadable", { source_sha: short(sourceSha), error: err instanceof Error ? err.message : String(err) });
+          return undefined;
+        }
+      },
+      io: (() => {
+        const slug = (): string => {
+          const s = githubSlugOf(git(["remote", "get-url", "origin"]));
+          if (!s) throw new Error("origin is not a github.com remote");
+          return s;
+        };
+        const requireAppToken = (): void => {
+          if (!process.env.GH_TOKEN) throw new Error("no fleet App installation token (GH_TOKEN unset)");
+        };
+        const errorText = (error: unknown): string => {
+          const e = error as { message?: unknown; stderr?: unknown } | null;
+          return `${String(e?.message ?? error)}\n${String(e?.stderr ?? "")}`;
+        };
+        return {
+          listTags: () => {
+            requireAppToken();
+            const out = exec("gh", ["api", "--paginate", `repos/${slug()}/git/matching-refs/tags/release/`, "--jq", ".[].ref"]);
+            return out.split("\n").map((l) => l.trim().replace(/^refs\/tags\//, "")).filter(Boolean);
+          },
+          createTag: (name, sourceSha, message) => {
+            requireAppToken();
+            const repo = slug();
+            const tagSha = exec("gh", [
+              "api", "-X", "POST", `repos/${repo}/git/tags`,
+              "-f", `tag=${name}`, "-f", `message=${message}`, "-f", `object=${sourceSha}`, "-f", "type=commit",
+              "--jq", ".sha",
+            ]).trim();
+            exec("gh", ["api", "-X", "POST", `repos/${repo}/git/refs`, "-f", `ref=refs/tags/${name}`, "-f", `sha=${tagSha}`]);
+          },
+          isCollision: (err) => /reference already exists|already exists/i.test(errorText(err)),
+        };
+      })(),
     },
     imageRecycleManual: () => existsSync(deployImageManualPath(o.stateRoot)),
     lastFailedAtMs: () => {
