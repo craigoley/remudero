@@ -7,6 +7,7 @@ import {
   BOARD_DERIVE_DEBOUNCE_MS,
   BOARD_ORACLE_INTERVAL_MS,
   BOARD_ORACLE_RECURRENCE_MS,
+  BOARD_RUN_ACTIVITY_STEP,
   boardDirtForRow,
   canonicalProjection,
   classifyBoardShadowDiffs,
@@ -446,4 +447,41 @@ test("a board drift that survives its heal escalates and a transient one does no
   assert.equal(unescalated.outcome, "escalated", "the tier is reached without an escalation path");
   assert.equal(unescalated.issueUrl, null, "and nothing is filed");
   assert.equal(issues.titles.length, 1);
+});
+
+test("a run's newest row of a skipped step stands in the board rows until a newer fact row of that run lands", (t) => {
+  // 2026-10-02T13:12:49Z: W1-T5073's worker.activity rows kept it running in legacy while the fact rows alone read it dead.
+  const r = rig(t);
+  const activity = (board: BoardProjection) => board.rows().filter((row) => row.step === BOARD_RUN_ACTIVITY_STEP).map((row) => `${row.task_id}|${row.run_id}@${row.ts}`);
+  r.append({ step: "run.start", task_id: "W1-T1", run_id: "r1" });
+  const board = r.board({ rules: { clock: false } });
+  board.update();
+  assert.deepEqual(activity(board), [], "a lone run.start stands for itself, so it can still read orphaned");
+  r.clock.set(T0 + 60_000);
+  r.append({ step: "worker.activity", task_id: "W1-T1", run_id: "r1" });
+  assert.deepEqual(board.update().rederived, ["W1-T1"], "the run's own activity moves its task");
+  assert.deepEqual(activity(board), [`W1-T1|r1@${new Date(T0 + 60_000).toISOString()}`]);
+  r.clock.set(T0 + 120_000);
+  r.append({ step: "worker.state", task_id: "W1-T1", run_id: "r1", state: "working" }, { step: "verdict", task_id: "W1-T3", run_id: "r3", verdict: "no_pr" });
+  board.update();
+  assert.deepEqual(activity(board), [`W1-T1|r1@${new Date(T0 + 120_000).toISOString()}`], "one row per run, moved to its newest time");
+  assert.deepEqual(board.rows().slice(-2).map((row) => row.step), ["verdict", BOARD_RUN_ACTIVITY_STEP], "in time order, after the fact rows of its instant");
+  r.clock.set(T0 + 180_000);
+  r.append({ step: "worker.assignment", task_id: "W1-T1", run_id: "r1" });
+  later(r);
+  board.update();
+  assert.deepEqual(activity(board), [], "a newer fact row of the run stands for it");
+  assert.deepEqual(board.creditRead(), { credit: {}, overrides: "" }, "the credit the update read");
+});
+
+test("a store without the run activity table derives from its fact rows alone", (t) => {
+  const r = rig(t);
+  r.append({ step: "run.start", task_id: "W1-T1", run_id: "r1" });
+  r.clock.set(T0 + 60_000);
+  r.append({ step: "worker.activity", task_id: "W1-T1", run_id: "r1" });
+  r.db.exec("DROP TABLE run_activity");
+  const board = r.board();
+  board.update();
+  assert.equal(board.rows().some((row) => row.step === BOARD_RUN_ACTIVITY_STEP), false);
+  assert.equal(board.projections().get("W1-T1")?.status, "running");
 });

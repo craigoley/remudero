@@ -1,0 +1,51 @@
+- id: W1-T5285
+  title: "THE BRANCH REAP, THE KNOWLEDGE GARDENER'S PR-STATE READ AND THE LANES' MERGE-RATE READ STILL BLOCK THE DAEMON LOOP — runAutomaticBranchReapRung drives reapBranchesCommand through an execFileSync adapter, gardenPrState reads through ghJson, and mergedInLastDay runs a sync git log"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  priority: 2
+  origin: "operator session 2026-10-02: core daemon CPU profile (E36) and #8674's follow-up audit"
+  plan_refs: [W1-T4476, W1-T5114, W1-T448]
+  files: [src/lib/branch-reaper.ts, src/lib/gardener.ts, src/lib/fleet-lane.ts, src/lib/daemon.ts, src/run-task.ts, test/the-reap-and-garden-reads-never-block-the-loop.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-02. The profile windows held these sync stacks: `fleet-lane mergedInLastDay` (git log)
+    23 to 51 s, `reapBranchesCommand` exec 6 + 4.4 s, and `gardenPrState` ghJson 5 to 6.5 s.
+    (a) runAutomaticBranchReapRung (src/run-task.ts) builds `exec = (cmd, args) => execFileSync(cmd, args, ...)`
+    and hands it to remoteBranchNames and reapBranchesCommand. W1-T4476 persisted the cadence and batched the
+    local git reads, but every remaining read, perHeadPrState gh read and delete push is still a blocking spawn
+    on the loop.
+    (b) daemonCommand wires the knowledge gardener with `prState: (prUrl) => gardenPrState(self.owner, self.repo, prUrl, ghJson)`.
+    runGarden in src/lib/gardener.ts calls `deps.prState?.(...)` synchronously. W1-T5114 moved the registered
+    gardens to a child process, but this in-process gardener was not moved.
+    (c) mergedInLastDay (src/lib/fleet-lane.ts) defaults to an execFileSync `git log origin/main --first-parent --since=24 hours ago`.
+    daemonCommand wires it as `mergedLastDay` for the fleet lane (triageFleetLane, started by startFleetLane in
+    src/lib/daemon.ts) and the SRE lane (daemonSreLaneInput).
+  design: |
+    No new bound, no new refusal. Facts, verdicts and ledger rows stay identical.
+    (i) Give reapBranchesCommand's daemon path an async exec port (a Promise-returning adapter over execFile)
+    and await it in runAutomaticBranchReapRung. A second reap must not start while one is
+    in flight (add an in-flight guard if the rung has none). The CLI `rmd reap-branches` may keep the sync adapter.
+    (ii) Let the gardener's prState port return a Promise and await it in runGarden's pending judgment, wired to
+    gardenPrState over ghJsonAsync. Alternatively, run the knowledge gardener through W1-T5114's off-loop child.
+    Either way, an unreadable PR is still "unknown" and is never judged.
+    (iii) Give mergedInLastDay an async form over execFile and have the fleet and SRE lanes await it. An
+    unanswerable merge rate is still 0.
+  acceptance:
+    - claim: "the automatic branch reap lets a timer fire while its git and gh calls are in flight"
+      proof: 'grep: test("W1-T5285: the automatic branch reap lets a timer fire while its execs are in flight" in test/the-reap-and-garden-reads-never-block-the-loop.test.ts'
+    - claim: "the knowledge gardener's PR-state read lets a timer fire while gh is in flight"
+      proof: 'grep: test("W1-T5285: the knowledge gardener pr state read lets a timer fire while gh is in flight" in test/the-reap-and-garden-reads-never-block-the-loop.test.ts'
+    - claim: "the merge-rate read lets a timer fire while git log is in flight and still reads zero when unanswerable"
+      proof: 'grep: test("W1-T5285: the merge rate read lets a timer fire while git log is in flight" in test/the-reap-and-garden-reads-never-block-the-loop.test.ts'
+    - claim: "the new suite runs and passes"
+      proof: "unit test: test/the-reap-and-garden-reads-never-block-the-loop.test.ts"
+  falsifier: |
+    Wire any one of the three back to its sync form and its timer-probe test sees the timer fire only after the
+    call settles.

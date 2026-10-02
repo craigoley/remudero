@@ -6,7 +6,14 @@
 Sol seat. `gpt-6-sol` and `gpt-5.6-sol` trail for account availability and supported effort fallback.
 Claude keeps frontier preference; economy keeps Luna/Spark. No effort or subscription share changes.
 The old concrete-model experiments remain readable. New high-effort epochs `sol61-vs-sonnet55`
-and `sol61-vs-sonnet5` start on October 2 and revisit October 16, with 20 tasks per arm required.
+and `sol61-vs-sonnet5` start on October 2 and are reviewed daily from that day. The minimum remains
+20 tasks per arm; daily observations are provisional, and reaching the minimum is not a winner.
+The daily fleet refresh at 04:17 UTC writes private dated JSON/text reviews and `latest.json` under
+`state/field-trials/routing-daily/`, before its GitHub collection. Each repository is reported
+separately with sample growth, missing receipts, crossovers and ledger quality. Remote collection
+failure cannot prevent this local review. A readable but incomplete ledger permits a provisional
+report; it cannot establish a comparison. Review matched task/risk/lane/stack cohorts before
+changing routing, and retain the existing Field Trials verified-outcome and release boundaries.
 Retries keep their task assignment; a fallback to Sol 6 belongs to its original epoch. Assignment,
 served model, terminal receipt, non-starter, crossover, risk/class/lane and pinned stack remain
 separate evidence. Before/after adoption is observational; it does not establish a causal winner.

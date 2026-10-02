@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { mkdtempSync, mkdirSync, symlinkSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 // W1-T203 acceptance criterion 4: "the deny-floor refuses a worker attempt to
 // POST a commit status, and that refusal is asserted against the floor script
@@ -270,5 +271,183 @@ test("W1-T2312: the refusal names the shared-tree mechanism and the remedy, not 
   } finally {
     rmSync(worktree, { recursive: true, force: true });
     rmSync(canonical, { recursive: true, force: true });
+  }
+});
+
+// W1-T5016 — WORKER FILE TOOLS STAY IN THE ASSIGNED WORKTREE. Workers run under bypassPermissions, so the
+// deny-floor is the only per-call check a Read/Write/Edit/MultiEdit/NotebookEdit reaches. Before this task
+// the hook read `file_path` and `cwd` and never compared them, and settings/worker.json's matcher omitted
+// Read entirely. These cases run the hook through the EXACT command settings/worker.json configures
+// (`${HOOKS_DIR}` rendered the way renderWorkerSettings renders it), with the env the CLI hands a hook:
+// CLAUDE_PROJECT_DIR is the session's launch directory, i.e. spawnWorker's cwd — the assigned worktree.
+
+const WORKER_SETTINGS_PATH = fileURLToPath(new URL("../settings/worker.json", import.meta.url));
+const HOOKS_DIR = fileURLToPath(new URL("../hooks", import.meta.url));
+
+interface WorkerHookEntry {
+  matcher: string;
+  hooks: Array<{ type: string; command: string }>;
+}
+
+function workerFloorEntry(): WorkerHookEntry {
+  const settings = JSON.parse(readFileSync(WORKER_SETTINGS_PATH, "utf8")) as {
+    hooks: { PreToolUse: WorkerHookEntry[] };
+  };
+  const entry = settings.hooks.PreToolUse.find((e) => e.hooks.some((h) => h.command.includes("deny-floor.sh")));
+  assert.ok(entry, "settings/worker.json must route PreToolUse through hooks/deny-floor.sh");
+  return entry;
+}
+
+function workerFloorCommand(): string {
+  const hook = workerFloorEntry().hooks.find((h) => h.command.includes("deny-floor.sh"));
+  assert.ok(hook);
+  return hook.command.split("${HOOKS_DIR}").join(HOOKS_DIR);
+}
+
+interface FileToolFixture {
+  root: string;
+  worktree: string;
+  sibling: string;
+  scratch: string;
+  home: string;
+}
+
+// Every path lives under one fixture root, and the hook's TMPDIR is a dedicated `scratch` child of it, so
+// the sibling checkout is NOT under the scratch root the floor legitimately allows.
+function fileToolFixture(): FileToolFixture {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t5016-`));
+  const worktree = join(root, "worktree");
+  const sibling = join(root, "sibling-checkout");
+  const scratch = join(root, "scratch");
+  const home = join(root, "worker-home-run1");
+  for (const dir of [join(worktree, "src"), join(sibling, "src"), scratch, home]) mkdirSync(dir, { recursive: true });
+  writeFileSync(join(worktree, "src", "a.ts"), "export const a = 1;\n");
+  writeFileSync(join(sibling, "src", "a.ts"), "export const a = 1;\n");
+  return { root, worktree, sibling, scratch, home };
+}
+
+function runWorkerFileTool(
+  fx: FileToolFixture,
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  opts: { cwd?: string; projectDir?: string | null; command?: string } = {},
+): { status: number | null; stderr: string } {
+  const payload: Record<string, unknown> = { tool_name: toolName, tool_input: toolInput };
+  if (opts.cwd !== "") payload.cwd = opts.cwd ?? fx.worktree;
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: fx.home,
+    TMPDIR: fx.scratch,
+    XDG_CACHE_HOME: join(fx.root, "cache"),
+    CLAUDE_PROJECT_DIR: opts.projectDir ?? fx.worktree,
+  };
+  if (opts.projectDir === null) delete env.CLAUDE_PROJECT_DIR;
+  const result = spawnSync("bash", ["-c", opts.command ?? workerFloorCommand()], {
+    input: JSON.stringify(payload),
+    encoding: "utf8",
+    env,
+  });
+  return { status: result.status, stderr: result.stderr };
+}
+
+test("W1-T5016: file tools refuse paths outside the assigned worktree", () => {
+  const fx = fileToolFixture();
+  try {
+    const matcher = workerFloorEntry().matcher.split("|");
+    for (const tool of ["Read", "Write", "Edit", "MultiEdit", "NotebookEdit"]) {
+      assert.ok(matcher.includes(tool), `the worker matcher must route ${tool} through the floor`);
+    }
+
+    const outside = join(fx.sibling, "src", "a.ts");
+    for (const tool of ["Read", "Write", "Edit", "MultiEdit"]) {
+      const { status, stderr } = runWorkerFileTool(fx, tool, { file_path: outside });
+      assert.equal(status, 2, `${tool} of a sibling checkout must be refused`);
+      assert.match(stderr, /outside the assigned worktree/);
+      assert.match(stderr, /W1-T5016/);
+    }
+    assert.equal(runWorkerFileTool(fx, "NotebookEdit", { notebook_path: join(fx.sibling, "n.ipynb") }).status, 2);
+    assert.equal(runWorkerFileTool(fx, "Read", { file_path: "../sibling-checkout/src/a.ts" }).status, 2);
+    assert.equal(
+      runWorkerFileTool(fx, "Edit", { file_path: `${fx.worktree}/../sibling-checkout/src/a.ts` }).status,
+      2,
+      "a `..` component never reaches outside the worktree",
+    );
+
+    // In-worktree work stays available, including a new file under directories that do not exist yet.
+    assert.equal(runWorkerFileTool(fx, "Read", { file_path: join(fx.worktree, "src", "a.ts") }).status, 0);
+    assert.equal(runWorkerFileTool(fx, "Edit", { file_path: join(fx.worktree, "src", "a.ts") }).status, 0);
+    assert.equal(runWorkerFileTool(fx, "MultiEdit", { file_path: join(fx.worktree, "src", "a.ts") }).status, 0);
+    assert.equal(runWorkerFileTool(fx, "Write", { file_path: join(fx.worktree, "src", "new", "deep.ts") }).status, 0);
+    assert.equal(runWorkerFileTool(fx, "NotebookEdit", { notebook_path: join(fx.worktree, "n.ipynb") }).status, 0);
+    assert.equal(runWorkerFileTool(fx, "Read", { file_path: "src/a.ts" }).status, 0, "a relative path resolves against cwd");
+
+    // The enumerated scratch and worker-home roots.
+    assert.equal(runWorkerFileTool(fx, "Write", { file_path: join(fx.scratch, "pr-body.md") }).status, 0);
+    assert.equal(runWorkerFileTool(fx, "Read", { file_path: join(fx.home, "notes.txt") }).status, 0);
+    // The CLI persists large tool output under $HOME/.claude/projects/<sanitized project dir>/; a worker home's
+    // `.claude` is a symlink to a shared credential tree, so only this session's own project dir is reachable.
+    const fleetClaude = join(fx.root, "fleet-claude");
+    const projectSlug = fx.worktree.replace(/[^A-Za-z0-9]/g, "-");
+    mkdirSync(join(fleetClaude, "projects", projectSlug, "session-1", "tool-results"), { recursive: true });
+    writeFileSync(join(fleetClaude, ".credentials.json"), "{}\n");
+    symlinkSync(fleetClaude, join(fx.home, ".claude"));
+    assert.equal(
+      runWorkerFileTool(fx, "Read", {
+        file_path: join(fx.home, ".claude", "projects", projectSlug, "session-1", "tool-results", "out.txt"),
+      }).status,
+      0,
+    );
+    assert.equal(runWorkerFileTool(fx, "Read", { file_path: join(fx.home, ".claude", ".credentials.json") }).status, 2);
+
+    // Fail closed: no path, or no assigned worktree to compare against.
+    assert.equal(runWorkerFileTool(fx, "Write", { content: "x" }).status, 2);
+    assert.equal(
+      runWorkerFileTool(fx, "Read", { file_path: join(fx.worktree, "src", "a.ts") }, { cwd: "", projectDir: null }).status,
+      2,
+    );
+
+    // The confinement is the WORKER lane's: the interactive lane's bare invocation is unchanged.
+    assert.equal(
+      runWorkerFileTool(fx, "Edit", { file_path: outside }, { command: `bash ${join(HOOKS_DIR, "deny-floor.sh")}` }).status,
+      0,
+    );
+  } finally {
+    rmSync(fx.root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T5016: file tool confinement resolves symlink parents", () => {
+  const fx = fileToolFixture();
+  try {
+    // A directory link inside the worktree that leads to a sibling checkout.
+    symlinkSync(fx.sibling, join(fx.worktree, "escape"));
+    assert.equal(runWorkerFileTool(fx, "Read", { file_path: join(fx.worktree, "escape", "src", "a.ts") }).status, 2);
+    assert.equal(runWorkerFileTool(fx, "Write", { file_path: join(fx.worktree, "escape", "new", "b.ts") }).status, 2);
+
+    // A dangling link: Write would create its target outside the worktree.
+    symlinkSync(join(fx.sibling, "created-by-write.ts"), join(fx.worktree, "src", "dangling.ts"));
+    const dangling = runWorkerFileTool(fx, "Write", { file_path: join(fx.worktree, "src", "dangling.ts") });
+    assert.equal(dangling.status, 2);
+    assert.match(dangling.stderr, /outside the assigned worktree/);
+
+    // The harness-linked node_modules: readable through the worktree's own link, never writable through it.
+    const sharedDeps = join(fx.root, "shared-deps", "node_modules");
+    mkdirSync(join(sharedDeps, "pkg"), { recursive: true });
+    writeFileSync(join(sharedDeps, "pkg", "index.d.ts"), "export {};\n");
+    symlinkSync(sharedDeps, join(fx.worktree, "node_modules"));
+    const dts = join(fx.worktree, "node_modules", "pkg", "index.d.ts");
+    assert.equal(runWorkerFileTool(fx, "Read", { file_path: dts }).status, 0);
+    assert.equal(runWorkerFileTool(fx, "Write", { file_path: dts }).status, 2);
+    assert.equal(runWorkerFileTool(fx, "Edit", { file_path: dts }).status, 2);
+
+    // The worktree itself named through a link: both sides are canonicalized before they are compared.
+    const worktreeLink = join(fx.root, "worktree-link");
+    symlinkSync(fx.worktree, worktreeLink);
+    const viaLink = { projectDir: worktreeLink, cwd: worktreeLink };
+    assert.equal(runWorkerFileTool(fx, "Edit", { file_path: join(fx.worktree, "src", "a.ts") }, viaLink).status, 0);
+    assert.equal(runWorkerFileTool(fx, "Edit", { file_path: join(worktreeLink, "src", "a.ts") }, viaLink).status, 0);
+    assert.equal(runWorkerFileTool(fx, "Edit", { file_path: join(fx.sibling, "src", "a.ts") }, viaLink).status, 2);
+  } finally {
+    rmSync(fx.root, { recursive: true, force: true });
   }
 });

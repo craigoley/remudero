@@ -184,6 +184,7 @@ function greenUnreviewedPr(): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
+    // expiring-fixture: exempt -- runSweep reads deps.now (pinned to 2026-09-24T14:40 below); no wall-clock read.
     lastActivityAt: "2026-09-24T14:30:00.000Z",
     headSha: "c".repeat(40),
     headRefName: "run-W1-T6993-1",

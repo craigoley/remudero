@@ -28,6 +28,7 @@ import {
   type RepoDashboardOptions,
   type RepoDashboardResult,
   type RepoShadowFacts,
+  type RepoSummaryFileReads,
 } from "./repo-dashboard-route.js";
 import type { ShadowLegacy } from "./view-shadow.js";
 import type { ViewSource } from "./views.js";
@@ -152,6 +153,8 @@ interface InstanceSummary {
   shadow?: Record<string, RepoShadowFacts>;
   /** The plan the summary read, with its file stamp: legacy evaluates that one, not one filed since. */
   plan?: PlanRead;
+  /** The registry, managed set, PAUSE/STOP markers and alerts the summary read: legacy replays them. */
+  fileReads?: RepoSummaryFileReads;
   /** The summary was computed while the instance's projector was still catching up, so from a partial ledger. */
   partial?: true;
   /** No summary yet because the instance's projector has not ticked: the read model is still warming. */
@@ -220,10 +223,12 @@ export function legacyRepositories(
   nowMs: number,
   at: (instanceId: string) => number = () => nowMs,
   planOf: (instanceId: string) => Plan | undefined = () => undefined,
+  /** The sources file, each instance's file reads and the portfolio's registry read the view's body was built from. */
+  paired: { sources?: RepositoriesSources; readsOf?: (instanceId: string) => RepoSummaryFileReads | undefined; registry?: { read: ReturnType<typeof readRegistry> | undefined } } = {},
 ): ShadowLegacy & { facts: ShadowFactsByInstance } | undefined {
   let published: RepositoriesSources;
   try {
-    published = JSON.parse(readFileSync(sourcesPath, "utf8")) as RepositoriesSources;
+    published = paired.sources ?? JSON.parse(readFileSync(sourcesPath, "utf8")) as RepositoriesSources;
   } catch {
     // deliberate: no published sources means no legacy side to compare; the sample is skipped, not a diff.
     return undefined;
@@ -233,12 +238,14 @@ export function legacyRepositories(
   const instances: RepositoriesData["instances"] = published.instances.map(({ instanceId, options }) => {
     instants.push(at(instanceId));
     const plan = planOf(instanceId);
-    const outcome = repoSummarySync({ ...options, shadowMembers: true, ...(plan ? { readPlan: () => plan } : {}) }, instants.at(-1)!);
+    const fileReads = paired.readsOf?.(instanceId);
+    const outcome = repoSummarySync({ ...options, shadowMembers: true, ...(plan ? { readPlan: () => plan } : {}), ...(fileReads ? { fileReads } : {}) }, instants.at(-1)!);
     if (!outcome.ok) return { instanceId, reason: outcome.reason };
     facts[instanceId] = outcome.shadow ?? {};
     return { instanceId, summary: unstampedSummary(outcome.summary) };
   });
-  const data: RepositoriesData = { instances, ...repositoriesPortfolio(published, { instances }) };
+  const registry = paired.registry;
+  const data: RepositoriesData = { instances, ...repositoriesPortfolio(published, { instances }, registry ? () => registry.read : undefined) };
   return { data, asOfMs: instants.length > 0 ? Math.max(...instants) : nowMs, facts };
 }
 
@@ -283,7 +290,10 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
   const computed = new Map<string, InstanceSummary>();
   const plans = planReader();
   /** Each published body's per-instance summary instant, shadow facts and plan, keyed by the very `data` it published. */
-  type Pair = { at: Record<string, number>; facts: ShadowFactsByInstance; plans: Record<string, PlanRead> };
+  type Pair = {
+    at: Record<string, number>; facts: ShadowFactsByInstance; plans: Record<string, PlanRead>;
+    sources: RepositoriesSources; reads: Record<string, RepoSummaryFileReads>; registry?: { read: ReturnType<typeof readRegistry> | undefined };
+  };
   const shown = new WeakMap<RepositoriesData, Pair>();
   let sourcesPath: string | undefined;
   type Slot = { state: S; db?: ReadModelDb } | undefined;
@@ -307,8 +317,9 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
     const partial = slot?.state.catchUp !== undefined ? { partial: true as const } : {};
     const warming = slot?.db !== undefined && slot.state.tickedAt === undefined ? { warming: true as const } : {};
     computed.set(instanceId, next.summary
-      ? { atMs: now, generation, sourcesMtimeMs, summary: next.summary, ...(next.shadow ? { shadow: next.shadow } : {}), ...(read ? { plan: read } : {}), ...partial }
-      : { atMs: now, generation, sourcesMtimeMs, reason: next.reason, ...warming, ...(prior?.summary ? { summary: prior.summary, ...(prior.shadow ? { shadow: prior.shadow } : {}), ...(prior.plan ? { plan: prior.plan } : {}), ...(prior.partial ? { partial: true as const } : {}) } : {}) });
+      ? { atMs: now, generation, sourcesMtimeMs, summary: next.summary, ...(next.shadow ? { shadow: next.shadow } : {}), ...(read ? { plan: read } : {}), ...(next.fileReads ? { fileReads: next.fileReads } : {}), ...partial }
+      : { atMs: now, generation, sourcesMtimeMs, reason: next.reason, ...warming, ...(prior?.summary ? { summary: prior.summary, ...(prior.shadow ? { shadow: prior.shadow } : {}), ...(prior.plan ? { plan: prior.plan } : {}),
+        ...(prior.fileReads ? { fileReads: prior.fileReads } : {}), ...(prior.partial ? { partial: true as const } : {}) } : {}) });
   };
   const published = (instances: ReadonlyArray<{ db?: ReadModelDb }>): { path: string; sources?: RepositoriesSources } | undefined => {
     const dbPath = instances.find((slot) => slot.db)?.db?.path;
@@ -324,9 +335,11 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
       const pair = shown.get(data as RepositoriesData);
       const legacy = sourcesPath === undefined || pair === undefined
         ? undefined
-        : legacyRepositories(sourcesPath, now, (instanceId) => pair.at[instanceId] ?? now, (instanceId) => pair.plans[instanceId]?.plan);
+        : legacyRepositories(sourcesPath, now, (instanceId) => pair.at[instanceId] ?? now, (instanceId) => pair.plans[instanceId]?.plan,
+          { sources: pair.sources, readsOf: (instanceId) => pair.reads[instanceId], ...(pair.registry ? { registry: pair.registry } : {}) });
       if (!legacy) return undefined;
-      const inputs = { plan: Object.fromEntries(Object.entries(pair!.plans).map(([instanceId, read]) => [instanceId, read.key])) };
+      const control = Object.entries(pair!.reads).flatMap(([instanceId, read]) => (read.control ? [[instanceId, read.control.stopped ? "stopped" : read.control.paused ? "paused" : "running"]] : []));
+      const inputs = { plan: Object.fromEntries(Object.entries(pair!.plans).map(([instanceId, read]) => [instanceId, read.key])), control: Object.fromEntries(control) };
       return { data: legacy.data, asOfMs: legacy.asOfMs, inputs, ...repositoriesShadowPairing(legacy.facts, pair!.facts, data as RepositoriesData) };
     },
     /** Each due instance's plan read and summary, one step each, so a cold build is never one unit. */
@@ -358,7 +371,7 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
       const sourcesMtimeMs = statSync(at.path).mtimeMs;
       const sources: ViewSource[] = [];
       const data: RepositoriesData = { instances: [], projects: [] };
-      const pair: Pair = { at: {}, facts: {}, plans: {} };
+      const pair: Pair = { at: {}, facts: {}, plans: {}, sources: at.sources, reads: {} };
       for (const { instanceId, options } of at.sources.instances) {
         const slot = instances.find((candidate) => candidate.state.instance === instanceId);
         if (slot) sources.push(ledgerSource(slot.state, now));
@@ -367,10 +380,11 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
         if (current.summary) pair.at[instanceId] = Date.parse(current.summary.generated_at);
         pair.facts[instanceId] = current.shadow ?? {};
         if (current.plan) pair.plans[instanceId] = current.plan;
+        if (current.fileReads) pair.reads[instanceId] = current.fileReads;
         sources.push(summarySource(instanceId, current));
         data.instances.push({ instanceId, ...(current.summary ? { summary: unstampedSummary(current.summary) } : {}), ...(current.reason ? { reason: current.reason } : {}) });
       }
-      Object.assign(data, repositoriesPortfolio(at.sources, data, registryFile));
+      Object.assign(data, repositoriesPortfolio(at.sources, data, (path) => (pair.registry = { read: registryFile(path) }).read));
       shown.set(data, pair);
       return [{ key: "", data, sources }];
     },
@@ -405,7 +419,7 @@ function summarize(
   options: RepositoriesInstanceOptions,
   now: number,
   readPlan: (path: string) => Plan,
-): { summary?: RepoDashboardResult; reason?: string; shadow?: Record<string, RepoShadowFacts> } {
+): { summary?: RepoDashboardResult; reason?: string; shadow?: Record<string, RepoShadowFacts>; fileReads?: RepoSummaryFileReads } {
   if (slot === undefined || slot.db === undefined) return { reason: "the read model does not project this instance" };
   if (slot.state.tickedAt === undefined) return { reason: "the read model has not projected this instance's ledger yet" };
   const db = slot.db;
@@ -416,7 +430,7 @@ function summarize(
     return { reason: `repository rows unreadable: ${(error as Error).message}` };
   }
   const outcome = repoSummarySync({ ...options, readLedger: () => rows, readPlan, shadowMembers: true }, now);
-  return outcome.ok ? { summary: outcome.summary, ...(outcome.shadow ? { shadow: outcome.shadow } : {}) } : { reason: outcome.reason };
+  return outcome.ok ? { summary: outcome.summary, ...(outcome.shadow ? { shadow: outcome.shadow } : {}), fileReads: outcome.fileReads } : { reason: outcome.reason };
 }
 
 /** Absent until the first summary, catching up while it was computed from a partial ledger, stale while the last recompute failed (#7928), else fresh. */
