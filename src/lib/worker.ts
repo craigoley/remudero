@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { fetchOriginRetryingRefLock, type GitRunner } from "./git-fetch-retry.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -1114,10 +1114,10 @@ export interface SpawnWorkerArgs {
     expectedRunMs: number | undefined,
     spawn: { runId?: string; taskId?: string },
   ) => void;
-  /** W1-T2699: the daemon-held secret boundary. Omitted, `secretBoundaryEnv` is a no-op — this
-   *  spawn's env stays byte-identical, opting in per call site rather than under every caller at
-   *  once. Set, `CLAUDE_CODE_OAUTH_TOKEN` is replaced by a sentinel and a loopback base URL, and
-   *  (with `credentialHelperSocketPath`) `args.cwd`'s local git config points at the socket helper. */
+  /** W1-T2699: the daemon-held secret boundary. Omitted, this spawn's env stays byte-identical. With
+   *  both model fields, `CLAUDE_CODE_OAUTH_TOKEN` is replaced by a sentinel and a loopback base URL;
+   *  with `credentialHelperSocketPath`, `args.cwd`'s worktree git config points at the socket helper.
+   *  The daemon (W1-T5115) passes the git half ALONE, leaving the model credential env untouched. */
   secretBoundary?: SecretBoundaryHandles;
 }
 
@@ -2577,15 +2577,14 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
       // configured. Otherwise ANTHROPIC_* is stripped as before (W1-T258).
       allowApiKey: config.overflow === "api_key" && frontierClaudeSpawn === false,
     });
-    // W1-T2699: every spawn's env routes through secretBoundaryEnv, a no-op absent `args.secretBoundary` (see its doc).
-    // Applied by MUTATING `childEnv` in place rather than rebinding it: W1-T2800's own structural falsifier
-    // (test/codex-worker-home-redirection.test.ts) greps this file's source for the literal `const childEnv =
-    // buildWorkerEnv(...)` assignment above, so `childEnv` stays that exact declaration and the substitution below is a
-    // second, visible step over the SAME object every downstream read (options.env, collectWorkerResult's
-    // childEnvKeys) already closes over.
+    // W1-T2699: every spawn's env routes through secretBoundaryEnv, a no-op absent a model boundary (see its doc).
+    // MUTATING `childEnv` in place, never rebinding it: W1-T2800's structural falsifier (test/codex-worker-home-
+    // redirection.test.ts) greps this file for the literal `const childEnv = buildWorkerEnv(...)` above, so the
+    // substitution is a second, visible step over the SAME object every downstream read (options.env,
+    // collectWorkerResult's childEnvKeys) closes over.
     if (args.secretBoundary) {
       const boundedEnv = secretBoundaryEnv(childEnv, args.secretBoundary);
-      delete childEnv.CLAUDE_CODE_OAUTH_TOKEN;
+      if (!("CLAUDE_CODE_OAUTH_TOKEN" in boundedEnv)) delete childEnv.CLAUDE_CODE_OAUTH_TOKEN;
       Object.assign(childEnv, boundedEnv);
     }
     // Attribution markers merged in AFTER the allowlist and extras above, so they are authoritative whatever `args.env`
@@ -2598,9 +2597,10 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // ledgered, so this one rides `lostGrants`' own channel: the result, rendered by
     // `workerLedgerFields`, absent when the wiring landed. Still never throws.
     let credentialHelperUnwired: string | undefined;
-    if (args.secretBoundary?.credentialHelperSocketPath) {
+    const credentialSocketPath = args.secretBoundary?.credentialHelperSocketPath;
+    if (credentialSocketPath && !credentialHelperSocketWired(args.cwd, credentialSocketPath)) {
       try {
-        wireCredentialHelperSocket(args.cwd, args.secretBoundary.credentialHelperSocketPath);
+        wireCredentialHelperSocket(args.cwd, credentialSocketPath);
       } catch (e) {
         // Not rethrown: a boundary that could not be wired must not fail the run, only be VISIBLE.
         // The reason leaves this block on the result and is rendered as `credential_helper_unwired`.
@@ -3781,6 +3781,14 @@ export function wireCredentialHelperSocket(
   // than widening if it ever arrives absent anyway.
   writeConfig(["credential.useHttpPath", "true"]);
   writeConfig(["--add", "credential.helper", `!node "${helperScript}" "${socketPath}"`]);
+}
+
+/** W1-T5115: `cwd` already routes git to THIS socket, so a second spawn there skips the reset git refuses (exit 5). */
+export function credentialHelperSocketWired(cwd: string, socketPath: string): boolean {
+  const read = (...args: string[]): string =>
+    spawnSync("git", ["-C", cwd, "config", "--worktree", ...args], { encoding: "utf8" }).stdout ?? "";
+  const helpers = read("--get-all", "credential.helper").split("\n");
+  return read("--get", "credential.useHttpPath").trim() === "true" && helpers[0] === "" && helpers.some((h) => h.includes(`"${socketPath}"`));
 }
 
 /** Which `node_modules` a fresh worktree resolves its dev CLIs from. Prefers the PARENT CLONE's own install, and falls back to
