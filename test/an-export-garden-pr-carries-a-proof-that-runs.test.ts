@@ -26,7 +26,7 @@ import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
 const TESTS = "test/export-gardener-removes-unreferenced-exports.test.ts";
 const SOURCE = "src/lib/dead-thing.ts";
 const DEAD_TEXT = `import { join } from "node:path";\n\nexport function used(): string {\n  return join("a", "b");\n}\n\n/** deadA: nothing calls this. */\nexport function deadA(): number {\n  return 1;\n}\n`;
-const SEEDED_TESTS = `import assert from "node:assert/strict";\nimport { test } from "node:test";\n\ntest("earlier is not exported from elsewhere", () => {\n  assert.ok(true);\n});\n`;
+const SEEDED_TESTS = `import assert from "node:assert/strict";\nimport { join } from "node:path";\nimport { test } from "node:test";\nimport { used } from "../src/lib/dead-thing.js";\n\ntest("used still joins its path components", () => {\n  assert.equal(used(), join("a", "b"));\n});\n`;
 const TITLE = "deadA is not exported from dead-thing";
 
 function fixture(files: Record<string, string>): { repo: GitRepo; stateDir: string } {
@@ -109,7 +109,7 @@ test("W1-T5278 criterion 1: an export-garden PR body carries one runnable unit t
 });
 
 test("W1-T5278: a deletion whose test title already exists is withdrawn, not shipped without a proof", () => {
-  const already = `${SEEDED_TESTS}\ntest("${TITLE}", () => {});\n`;
+  const already = `${SEEDED_TESTS}\ntest("${TITLE}", async () => {\n  const module = await import("../src/lib/dead-thing.js");\n  assert.equal(Object.hasOwn(module, "deadA"), false);\n});\n`;
   const { repo, stateDir } = fixture({ [SOURCE]: DEAD_TEXT });
   // Written after the seed commit: a TRACKED mention of the name is a reference, and the export
   // would never be a candidate; an untracked one is invisible to `git grep`, so only the title
@@ -133,6 +133,10 @@ test("W1-T5278: a missing test file is started with its imports, so the test it 
   assert.deepEqual(pr?.paths, [SOURCE, TESTS]);
   const head = runTitle(repo.dir);
   assert.match(head, /^# pass 1$/m, head);
+  assert.match(head, /^# fail 0$/m, head);
+  writeFileSync(join(repo.dir, SOURCE), DEAD_TEXT);
+  const base = runTitle(repo.dir);
+  assert.match(base, /^# fail 1$/m, base);
 });
 
 test("W1-T5278: a test append withdrawn by a concurrent edit restores the deleted export", () => {
