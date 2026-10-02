@@ -18,9 +18,8 @@
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
-import { gunzipSync } from "node:zlib";
 import {
   computeBoardSnapshot,
   computeRecentActivity,
@@ -39,7 +38,7 @@ import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { feedbackDir, listFeedback, type FeedbackEntry } from "./feedback.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { readTaskActivity } from "./ledger-projector.js";
-import { ledgerRotationEntries, rotationStampIso } from "./ledger-union.js";
+import { createLedgerRotationMemo, readLedgerUnionRecordsSync, rotationStampIso, type LedgerRotationMemo, type LedgerRotationMemoPass } from "./ledger-union.js";
 import {
   capDecisions,
   escalationClasses,
@@ -56,7 +55,7 @@ import { loadPlanQuarantiningDuplicates, type Plan } from "./plan.js";
 import type { ReadModelDb, ReadModelLease } from "./read-model-db.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { buildBatchedGithub, readLedgerLines, type BatchedPr, type GitHub } from "./status.js";
-import { windowCostRows } from "./sweep.js";
+import { deriveDayCostUsd, windowCostRows } from "./sweep.js";
 import { utcDayWindowMs } from "./time-window.js";
 import { judgeSource, PLAN_BUDGET_MS } from "./view-freshness.js";
 import { legacyRowIndex, type LegacyRows, type ShadowLatest, type ShadowSum } from "./view-shadow.js";
@@ -589,35 +588,45 @@ export interface NowShadowLegacy {
   rows: LegacyRows;
   sortKeys: Record<string, Record<string, ShadowLatest>>;
   from: Record<string, ShadowLatest>;
-  inputs: { plan: string; probeAt: string; rotationsSinceProbe: string[]; builtAt: string; rotationsSinceBuild: string[] };
+  inputs: { plan: string; probeAt: string; builtAt: string; windows: Record<"board" | "probe" | "spend", LegacyWindowRead> };
 }
 
 /**
- * Each rotation cut after `atMs`, with its rows: the live file still held them when a read at `atMs` took
- * it, so a later read of the live file alone misses them.
+ * How far before its build legacy's board and PR queue read rotations. A disposition is decided by each
+ * pull request's newest `sweep.disposed`, and rotation archives every unacted one while keeping an older
+ * acted one live (PR #8495, 23:36Z). MEASURED on core 2026-10-02: the gap between one PR's rows is p50
+ * 7.8 min and p90 47 min; an hour is 9 rotations, 2.7 MB, 3,055 rows. An older row is legacy_horizon.
  */
-function rotatedSince(ledgerDir: string, atMs: number): Array<{ name: string; cutMs: number; rows: Row[] }> {
-  const text = (path: string, gzip: boolean): string => (gzip ? gunzipSync(readFileSync(path)) : readFileSync(path)).toString("utf8");
-  return ledgerRotationEntries(readdirSync(ledgerDir), ledgerDir)
-    .map((e) => ({ e, cutMs: Date.parse(rotationStampIso(basename(e.path)) ?? "") }))
-    .filter(({ cutMs }) => cutMs > atMs)
-    .map(({ e, cutMs }) => ({ name: basename(e.path), cutMs, rows: readLedgerLines(e.path, { existsSync: () => true, readFileSync: (path) => text(path, e.form === "gzip") }) }));
+export const NOW_LEGACY_ROW_WINDOW_MS = 60 * 60_000;
+
+/** What one window of legacy's read covered: from when, the rotations it opened, and any it could not read. */
+export interface LegacyWindowRead {
+  from: string;
+  rotations: string[];
+  unread: string[];
 }
 
+const UNOPENED = { rows: [], torn: 0, tornLines: [] };
+
 /**
- * The live file as a build that began before `cut` was taken read it: the cut rows and the live rows, each
- * once, in time order. A rotation keeps an older row in the new live file and moves the newer ones out,
- * so file order would put that older row last (PR #8485's `post-review` after its `wait`, 21:30Z).
+ * Every row the live file held at some instant in `[fromMs, toMs]`, stamped no later than `toMs`, each once
+ * and in time order. A rotation holds only rows the live file held until its cut, so the live file and the
+ * rotations cut after `fromMs` are that set; an earlier one is not opened. Rows are deduped by their exact
+ * line, as the projector keys them, so a row in both rotation forms counts once.
  */
-function liveAsOfBuild(cut: ReadonlyArray<{ rows: Row[] }>, live: Row[]): Row[] {
-  if (cut.length === 0) return live;
-  const seen = new Set<string>();
-  const rows = [...cut.flatMap((c) => c.rows), ...live].filter((row) => {
-    const id = JSON.stringify(row);
-    return !seen.has(id) && Boolean(seen.add(id));
+function ledgerRowsOver(ledgerDir: string, window: { fromMs: number; toMs: number }, live: ReadonlyArray<Row>, memo: LedgerRotationMemoPass): { rows: Row[]; read: LegacyWindowRead } {
+  const rotations: string[] = [];
+  const union = readLedgerUnionRecordsSync(ledgerDir, {
+    readLiveRecords: () => live,
+    rotationRecords: (entry, parse) => {
+      if (Date.parse(rotationStampIso(basename(entry.path)) ?? "") <= window.fromMs) return UNOPENED;
+      rotations.push(basename(entry.path));
+      return memo.rotationRecords(entry, parse);
+    },
   });
   const at = (row: Row): string => (typeof row.ts === "string" ? row.ts : "");
-  return rows.sort((a, b) => (at(a) < at(b) ? -1 : at(a) > at(b) ? 1 : 0));
+  const rows = (union.rows as Row[]).filter((row) => !(Date.parse(at(row)) > window.toMs)).sort((a, b) => (at(a) < at(b) ? -1 : at(a) > at(b) ? 1 : 0));
+  return { rows, read: { from: fixedClock(window.fromMs).iso(), rotations, unread: union.unread.map((path) => basename(path)) } };
 }
 
 /** The `now` view as the read-model worker materializes it: one body per instance, keyed `instance=<name>`. */
@@ -636,6 +645,8 @@ export function createNowView(opts: NowViewOptions): {
   const held = new Map<string, Held>();
   /** Keyed by the very `data` object a body published: a build in flight advances `held`, never a published body's inputs. */
   const shown = new WeakMap<NowViewData, Shown>();
+  /** Per instance, the rotations legacy's windows read, each parsed once: a sample reads only the live file and any new cut. */
+  const legacyMemos = new Map<string, { rows: LedgerRotationMemo; costs: LedgerRotationMemo }>();
   const planCache = new Map<string, { key: string; plan: Plan }>();
   const readPlan = opts.readPlan ?? ((instance: NowInstance): Plan => {
     const path = nowPlanPath(instance);
@@ -820,13 +831,12 @@ export function createNowView(opts: NowViewOptions): {
     perInstance: true,
     /**
      * The shadow comparator's legacy side for one key, over the plan, GitHub snapshot and probe the compared
-     * body was built from: GET /v1/status's board and PR queue over the
-     * instance's LIVE FILE only, as it stood when the build began, plus a host probe of that instance AT THE
-     * VIEW'S PROBE TIME over the live rows up to it, so the daemon's poll state is compared at one instant.
-     * The gauges are the ones that probe captured: a comparison makes no `gh` or statfs call of its own.
-     * Actions, recent and decisions have
+     * body was built from: GET /v1/status's board and PR queue over the rows the instance's live file held in
+     * the hour before the build, its day's spend over the day's, and a host probe AT THE VIEW'S PROBE TIME over
+     * the rows the live file held then ({@link ledgerRowsOver}). The gauges are the ones that probe captured: a
+     * comparison makes no `gh` or statfs call of its own. Actions, recent and decisions have
      * no separate legacy computation and are carried from the view. The task window is derived from the
-     * groups, the day's spend is paired row by row, and the live rows read go along as evidence.
+     * groups, the day's spend is paired row by row, and the rows read go along as evidence.
      */
     legacy(key, now, view) {
       const name = decodeURIComponent(key.replace(/^instance=/, ""));
@@ -836,21 +846,23 @@ export function createNowView(opts: NowViewOptions): {
       if (!instance || !built || !key.startsWith("instance=")) return undefined;
       const ledgerPath = join(instance.ledgerDir, LEDGER_FILENAME);
       const probeMs = Date.parse(built.probe.sampledAt);
-      const cut = rotatedSince(instance.ledgerDir, Math.min(probeMs, built.builtMs));
-      const sinceBuild = cut.filter((c) => c.cutMs > built.builtMs);
-      const sinceProbe = cut.filter((c) => c.cutMs > probeMs);
-      const rows = liveAsOfBuild(sinceBuild, readLedgerLines(ledgerPath));
+      const memo = legacyMemos.get(name) ?? legacyMemos.set(name, { rows: createLedgerRotationMemo((r) => r), costs: createLedgerRotationMemo((r) => r.filter((row) => typeof row.cost_usd === "number")) }).get(name)!;
+      const [rowsPass, costsPass] = [memo.rows.pass({ parseMissing: true }), memo.costs.pass({ parseMissing: true })];
+      const live = readLedgerLines(ledgerPath);
+      // Each computation reads the rows the live file held over the window it evaluates, up to the body's build.
+      const board = ledgerRowsOver(instance.ledgerDir, { fromMs: built.builtMs - NOW_LEGACY_ROW_WINDOW_MS, toMs: built.builtMs }, live, rowsPass);
+      const probed = ledgerRowsOver(instance.ledgerDir, { fromMs: probeMs, toMs: probeMs }, opts.hostProbe?.readLive?.(ledgerPath) ?? live, rowsPass);
+      const spent = ledgerRowsOver(instance.ledgerDir, { fromMs: utcDayWindowMs(built.builtMs)[0], toMs: built.builtMs }, live, costsPass);
+      rowsPass.complete();
+      costsPass.complete();
+      const rows = board.rows;
       const deps = { plan: built.plan, ledgerPath, github: built.gateway.github, readLedger: () => rows, now: () => now };
       const snapshot = computeBoardSnapshot(deps);
       const decisions: NowDecisionsData = { decisions: mine.decisions, ...(mine.decisionsMore ? { decisionsMore: mine.decisionsMore } : {}), ...(mine.decisionsReasons ? { decisionsReasons: mine.decisionsReasons } : {}) };
       const legacy = assembleNowView({ instance: name, snapshot, rows, plan: built.plan, recent: [], health: mine.health, decisions, nowMs: now });
-      const readLive = opts.hostProbe?.readLive ?? readLedgerLines;
+      legacy.board.spendTodayUsd = deriveDayCostUsd(spent.rows, built.builtMs);
       const captured = built.probe.health;
-      const atProbe = {
-        readLive: (path: string) => [...sinceProbe.flatMap((c) => c.rows), ...readLive(path)].filter((row) => !(typeof row.ts === "string" && Date.parse(row.ts) > probeMs)),
-        rateLimit: () => captured.rateLimitRemaining,
-        diskFree: () => captured.diskFreeBytes,
-      };
+      const atProbe = { readLive: () => probed.rows, rateLimit: () => captured.rateLimitRemaining, diskFree: () => captured.diskFreeBytes };
       const health = defaultProbeHost(instance, name === core, fixedClock(probeMs), atProbe).health;
       const oldest = rows.map((row) => (typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN)).filter(Number.isFinite).sort((a, b) => a - b)[0];
       const theirs = nowCountMembers(snapshot.tasks);
@@ -868,19 +880,19 @@ export function createNowView(opts: NowViewOptions): {
         data: { ...mine, board: legacy.board, prQueue: legacy.prQueue, health },
         asOfMs: now,
         members: Object.fromEntries(Object.entries(theirs).map(([path, ids]) => [path, { legacy: ids, view: built.members[path] ?? [] }])),
-        sums: { "board.spendTodayUsd": { legacy: dayCostRows(rows, now), view: built.spend } },
+        sums: { "board.spendTodayUsd": { legacy: dayCostRows(spent.rows, built.builtMs), view: built.spend } },
         derived: {
           "board.taskProjection.returned": groups,
           "board.taskProjection.complete": [...groups, "board.taskProjection.total"],
           ...Object.fromEntries(windowed.map((id) => [`board.tasks[taskId=${id}]`, groups])),
           ...Object.fromEntries(prs.map(([, path]) => [`${path}.queueClass`, [`${path}.disposition`]])),
         },
-        rows: legacyRowIndex(rows),
+        rows: legacyRowIndex([...new Set([...rows, ...spent.rows])]),
         sortKeys: Object.fromEntries(groups.map((path) => [path, keys])),
         from,
         inputs: {
-          plan: built.planKey, probeAt: built.probe.sampledAt, rotationsSinceProbe: sinceProbe.map((c) => c.name),
-          builtAt: fixedClock(built.builtMs).iso(), rotationsSinceBuild: sinceBuild.map((c) => c.name),
+          plan: built.planKey, probeAt: built.probe.sampledAt, builtAt: fixedClock(built.builtMs).iso(),
+          windows: { board: board.read, probe: probed.read, spend: spent.read },
         },
         ...(oldest !== undefined ? { horizonMs: oldest } : {}),
       };
