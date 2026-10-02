@@ -11,9 +11,9 @@
   origin: "oper#followups-research-2026-09-22"
   plan_refs: [W1-T3696]
   files: [src/run-task.ts, src/lib/sweep.ts, test/a-fix-commit-cannot-land-on-a-moved-branch.test.ts, scripts/test-tier-manifest.json]
-  priority: 3
+  priority: 2
   status: queued
-  # backlog gardener: band=3 evidence=e9e9076067032c52
+  # backlog gardener: band=2 evidence=4499cf5ee4ee8e42
   attempts: 0
   rationale: |
     OBSERVED 2026-09-22 on run-W1-T4024-1790100143000.
