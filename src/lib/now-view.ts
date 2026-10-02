@@ -945,13 +945,9 @@ export function defaultProbeHost(instance: NowInstance, isCore: boolean, clock: 
   const reasons: Record<string, string> = {};
   const diskFreeBytes = (deps.diskFree ?? readDiskFreeBytes)(instance.ledgerDir);
   if (diskFreeBytes === undefined) reasons.diskFreeBytes = `statfs of ${instance.ledgerDir} failed`;
-<<<<<<< HEAD
-  const poll = deriveLastPoll((deps.readLive ?? readLedgerLines)(join(instance.ledgerDir, LEDGER_FILENAME)));
-  const silentAfterMs = Math.max(NOW_DAEMON_SILENT_MS, NOW_DAEMON_SILENT_CADENCES * poll.pollIntervalMs);
-=======
   const live = (deps.readLive ?? readLedgerLines)(join(instance.ledgerDir, LEDGER_FILENAME));
   const poll = deriveLastPoll(live);
->>>>>>> origin/main
+  const silentAfterMs = Math.max(NOW_DAEMON_SILENT_MS, NOW_DAEMON_SILENT_CADENCES * poll.pollIntervalMs);
   const daemon: NowDaemonPoll = !poll.lastPollTs
     ? { state: "silent", reason: "no daemon.* row in the instance's live ledger" }
     : now - Date.parse(poll.lastPollTs) > silentAfterMs
