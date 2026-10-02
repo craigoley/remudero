@@ -42,7 +42,7 @@ export function loadGoals(repoRoot: string): GoalRecord[] {
     const goal = parse(readFileSync(join(dir, name), "utf8")) as GoalRecord;
     if (!goal || !/^G-[\w-]+$/.test(goal.id) || goal.id + ".yaml" !== name || !goal.symptom ||
       !["pr-flow-minutes", "ci-friction-minutes", "terminal-missing-percent"].includes(goal.measurement) ||
-      !["increase", "decrease"].includes(goal.direction) || !Number.isFinite(goal.baseline?.value) ||
+      !["increase", "decrease"].includes(goal.direction) || !goal.baseline || !Number.isFinite(goal.baseline.value) ||
       !Number.isFinite(Date.parse(goal.baseline.observedAt)) || !goal.baseline.source || !Array.isArray(goal.tasks) ||
       !goal.tasks.every((id) => typeof id === "string" && id.length > 0)) throw new Error(`invalid goal record: ${name}`);
     return goal;
