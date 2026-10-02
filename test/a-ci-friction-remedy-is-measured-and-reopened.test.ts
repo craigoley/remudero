@@ -16,7 +16,6 @@ import {
   ciFrictionEvidence,
   ciFrictionRemedyEffect,
   ciFrictionRemedyRationale,
-  ciFrictionRemedyTestPath,
   ciFrictionRungOrigin,
   isDocOnlyRemedy,
   locateCiFrictionOwner,
@@ -205,9 +204,7 @@ test("the evidence pack is the newest rounds, one per pull request", () => {
   assert.equal(ciFrictionEvidence(rs, KEY, 1).length, 1);
 });
 
-test("a drafted remedy's test path and rationale name the cause, its evidence and the last rung's outcome", () => {
-  assert.equal(ciFrictionRemedyTestPath("W1-T7003", KEY), "test/w1-t7003-the-worker-changed-nothing-is-prevented.test.ts");
-  assert.equal(ciFrictionRemedyTestPath("W1-T7003", "check:"), "test/w1-t7003-friction-is-prevented.test.ts");
+test("a drafted remedy's rationale names the cause, its evidence and the last rung's outcome", () => {
   const effect = ciFrictionRemedyEffect([...rounds(MERGE - 4 * DAY, MERGE, 200, 4), ...rounds(MERGE, MERGE + 4 * DAY, 200, 4)], KEY, MERGE, MERGE + 4 * DAY);
   const lines = ciFrictionRemedyRationale({
     key: KEY, minutes: 453.6, rounds: 127, prs: 79,
