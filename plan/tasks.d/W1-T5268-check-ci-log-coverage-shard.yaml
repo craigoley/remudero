@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 3.39
   status: queued
@@ -16,3 +16,13 @@
     - claim: "the check:ci-log:coverage-shard cause of PR friction has a recorded remedy"
       proof: "grep: ci-friction:check:ci-log:coverage-shard in docs/ci-friction-remedies.md"
   note: "Filed by the ci-friction gardener (W1-T4435) from a weekly pass over the ledger and gate-fire-rate.ts's own measurement. check:ci-log:coverage-shard priced at 1.9 PR minute(s) across 1 round(s) on 1 pull request(s) — the costliest cause with no open task. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person; its remedy is recorded in docs/ci-friction-remedies.md naming \"ci-friction:check:ci-log:coverage-shard\" once it lands."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.91
+    reasons:
+      - "The filed task proposes recording a remedy for a measured CI friction cause, with only docs/ci-friction-remedies.md declared as touched."
+      - "The stated acceptance check is a grep for that cause in the remedy document; the gates state shows no concerning condition, and the ci-friction family has 17 merged and 0 declined machine tasks."
+      - "No actual change view is supplied, so this judgment is limited to the filed plan record and gates state."
+    judged_at: "2026-10-02T13:49:00.923Z"
+    pin: "2ee7cdcc21ef1da322a222557e7e2385ecf43d889f9d602426e21af86dff203f"
