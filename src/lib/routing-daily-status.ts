@@ -5,7 +5,7 @@ import { systemClock, type Clock } from "./clock.js";
 const text = (value: unknown, limit = 160) => typeof value === "string" ? value.slice(0, limit) : undefined;
 const count = (value: unknown) => Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : undefined;
 export function readRoutingDailyStatus(stateDir: string | undefined, clock: Clock = systemClock) {
-  const unavailable = (reason: string) => ({ version: "routing-daily-v1", state: "unavailable", asOf: null, alerts: [reason], sources: [] });
+  const unavailable = (reason: string) => ({ version: "routing-daily-v1", state: "unavailable", asOf: null, comparativeClaims: "none", alerts: [reason], sources: [] });
   if (!stateDir) return unavailable("daily-review-not-configured");
   try {
     const path = join(stateDir, "field-trials", "routing-daily", "latest.json");
