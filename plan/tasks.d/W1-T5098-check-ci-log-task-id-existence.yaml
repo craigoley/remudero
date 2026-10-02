@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 1.66
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:ci-log:task-id-existence"
