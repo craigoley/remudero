@@ -60,7 +60,7 @@ async function replyWith(content: string, responseFormat?: string, model = "gpt-
         ...(responseFormat === undefined ? {} : { responseFormat }),
         env: { RMD_OPENWEIGHT_API_KEY: "k" },
         clock: clock(Date.parse("2026-09-16T12:00:00.000Z")),
-        fetchImpl: async (url) =>
+        fetchImpl: async (url: Parameters<typeof fetch>[0]) =>
           new Response(
             JSON.stringify(String(url).endsWith("/responses")
               ? { id: "t", model, status: "completed", usage: { input_tokens: 10, output_tokens: 5 },
