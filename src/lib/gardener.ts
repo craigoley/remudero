@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { systemClock, type Clock } from "./clock.js";
@@ -49,6 +49,8 @@ export interface GardenState<C extends string> {
   filingFailures?: { count: number; lastAt: string; reason: string };
   /** Ids of overseer effect verdicts already folded into `classes` (newest last), so a replay credits once. */
   foldedEffects?: string[];
+  /** Highest overseer sequence durably folded; older receipts may leave the 200-ID replay cache. */
+  foldedEffectThrough?: number;
 }
 
 /** A verdict the gardener overseer (W1-T4802) reached about a class: what a merged change did to its
@@ -59,6 +61,7 @@ export interface GardenEffect {
   verdict: "credit" | "debit";
   kind: "effect" | "churn";
   at: string;
+  sequence?: number;
 }
 
 const GARDEN_FOLDED_EFFECTS_KEPT = 200;
@@ -67,18 +70,32 @@ export function gardenEffectsPath(stateDir: string, name: string): string {
   return join(stateDir, `${name}-gardener-effects.json`);
 }
 
-/** The pending overseer verdicts for one gardener; an absent or unreadable file holds none. */
-export function readGardenEffects(path: string): GardenEffect[] {
-  if (!existsSync(path)) return [];
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as { effects?: GardenEffect[] };
-    return Array.isArray(parsed?.effects) ? parsed.effects.filter((e) => typeof e?.id === "string" && typeof e.actionClass === "string") : [];
-  } catch (error) {
-    // deliberate: an unreadable effects file is dropped, not thrown into the pass; the overseer
-    // holds its own record of each verdict and writes the file afresh.
-    void error;
-    return [];
+export class GardenEffectsUnreadableError extends RmdError {
+  constructor(readonly path: string, readonly failureClass: GardenStateFailure, detail: string) {
+    super("gardener", GENERIC_EXIT_CODE, `gardener effects ${path} are ${failureClass}: ${detail}; repair or remove the file and the next pass retries`, { path, failureClass });
+    this.name = "GardenEffectsUnreadableError";
   }
+}
+
+/** Only a confirmed missing file is first boot; damaged verdict evidence stops the pass. */
+export function readGardenEffects(path: string): GardenEffect[] {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT" && lstatSync(path, { throwIfNoEntry: false }) === undefined) return [];
+    throw new GardenEffectsUnreadableError(path, "unparseable", String((e as Error)?.message ?? e));
+  }
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); }
+  catch (e) { throw new GardenEffectsUnreadableError(path, "unparseable", String((e as Error)?.message ?? e)); }
+  if (!isRecord(parsed) || !Array.isArray(parsed.effects) || parsed.effects.some((e: unknown) =>
+    !isRecord(e) || typeof e.id !== "string" || typeof e.actionClass !== "string" ||
+    (e.verdict !== "credit" && e.verdict !== "debit") || (e.kind !== "effect" && e.kind !== "churn") ||
+    typeof e.at !== "string" || !Number.isFinite(Date.parse(e.at)) ||
+    (e.sequence !== undefined && (!Number.isSafeInteger(e.sequence) || (e.sequence as number) < 1))
+  )) throw new GardenEffectsUnreadableError(path, "malformed", "`effects` is not a list of complete verdicts");
+  return parsed.effects as GardenEffect[];
 }
 
 /** Write the overseer's pending verdicts for one gardener. The overseer never touches the gardener's
@@ -101,7 +118,8 @@ export function foldGardenEffects<C extends string>(state: GardenState<C>, effec
     applied.push(e);
   }
   const foldedEffects = [...seen].slice(-GARDEN_FOLDED_EFFECTS_KEPT);
-  return { state: { ...state, classes, foldedEffects }, applied };
+  const foldedEffectThrough = effects.reduce((through, e) => Math.max(through, e.sequence ?? 0), state.foldedEffectThrough ?? 0);
+  return { state: { ...state, classes, foldedEffects, ...(foldedEffectThrough ? { foldedEffectThrough } : {}) }, applied };
 }
 
 export type PrState = "open" | "merged" | "closed" | "unknown";
@@ -204,7 +222,7 @@ function gardenStateFault(parsed: unknown): string | undefined {
   for (const [name, c] of Object.entries(parsed.classes)) {
     if (!isRecord(c) || !isCount(c.alpha) || !isCount(c.beta)) return `class \`${name}\` has no numeric alpha and beta`;
   }
-  const { pending, lastPass, lastCheap, filingFailures, foldedEffects } = parsed;
+  const { pending, lastPass, lastCheap, filingFailures, foldedEffects, foldedEffectThrough } = parsed;
   if (pending !== undefined) {
     if (!isRecord(pending) || typeof pending.prUrl !== "string") return "`pending` has no PR url";
     if (typeof pending.actionClass !== "string" || !(pending.actionClass in parsed.classes)) return "`pending` names a class the record does not hold";
@@ -214,6 +232,7 @@ function gardenStateFault(parsed: unknown): string | undefined {
   if (lastCheap !== undefined && typeof lastCheap !== "string") return "`lastCheap` is not a string";
   if (filingFailures !== undefined && (!isRecord(filingFailures) || !isCount(filingFailures.count) || typeof filingFailures.lastAt !== "string" || typeof filingFailures.reason !== "string")) return "`filingFailures` is malformed";
   if (foldedEffects !== undefined && (!Array.isArray(foldedEffects) || foldedEffects.some((id) => typeof id !== "string"))) return "`foldedEffects` is not a list of ids";
+  if (foldedEffectThrough !== undefined && (!Number.isSafeInteger(foldedEffectThrough) || (foldedEffectThrough as number) < 0)) return "`foldedEffectThrough` is not a sequence";
   return undefined;
 }
 
@@ -493,7 +512,7 @@ export function startGarden<C extends string, I, A extends GardenAction<C>, W ex
       runGarden(spec, deps);
     } catch (e) {
       // An unreadable state file also names its path and failure class, so the row says what to repair.
-      const unreadable = e instanceof GardenStateUnreadableError ? { path: e.path, failure_class: e.failureClass } : {};
+      const unreadable = e instanceof GardenStateUnreadableError || e instanceof GardenEffectsUnreadableError ? { path: e.path, failure_class: e.failureClass } : {};
       deps.log(`${spec.name}.gardener_failed`, { error: String((e as Error)?.message ?? e), ...unreadable });
     } finally {
       running = false;

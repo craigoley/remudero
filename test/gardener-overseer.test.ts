@@ -353,22 +353,166 @@ test("W1-T4802: the overseer's own rows are never mistaken for a gardener", () =
   assert.equal(classifyGardenerStep("sweep.escalation_reconcile.summary"), undefined);
 });
 
-test("W1-T4802: unreadable records degrade to empty instead of throwing", () => {
+test("W1-T4802: unreadable gardener state is reported by healing", () => {
   const h = harness(T0 + 10 * HOUR);
   try {
-    writeFileSync(join(h.dir, "gardener-overseer.json"), "{not json");
-    writeFileSync(gardenEffectsPath(h.dir, "junk"), "{not json");
     writeFileSync(gardenStatePath(h.dir, "junk"), "{not json");
-    assert.deepEqual(readGardenEffects(gardenEffectsPath(h.dir, "junk")), [], "an unreadable effects file holds no verdicts");
     const healed = healGardener(h.dir, "junk");
     assert.deepEqual(healed.cleared, []);
     assert.match(healed.unreadable ?? "", /JSON/);
     assert.deepEqual(healGardener(h.dir, "absent"), { cleared: [] });
-    assert.equal(runGardenerOverseer(h.deps).ran, true, "a corrupt overseer record restarts, it does not stop the pass");
-    assert.equal(h.steps("gardener_overseer.scorecard").length, 1);
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
   }
+});
+
+test("W1-T5073: corrupt overseer state refuses and preserves issued verdicts", () => {
+  const h = harness(T0 + 10 * HOUR);
+  try {
+    const path = join(h.dir, "gardener-overseer.json");
+    for (const bytes of ["{not json", JSON.stringify({ verdicts: "lost" })]) {
+      writeFileSync(path, bytes);
+      assert.throws(() => runGardenerOverseer(h.deps), /gardener-overseer\.json.*(unparseable|malformed)/);
+      assert.equal(readFileSync(path, "utf8"), bytes);
+      assert.equal(h.steps("gardener_overseer.scorecard").length, 0);
+    }
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("W1-T5073: disordered verdict sequences refuse and preserve the record", () => {
+  const h = harness(T0 + 10 * HOUR);
+  try {
+    const path = join(h.dir, "gardener-overseer.json");
+    const verdict = (id: string, sequence?: number) => ({ id, gardener: "demo", actionClass: "draft", verdict: "credit", kind: "effect", at: h.clock.iso(), ...(sequence === undefined ? {} : { sequence }) });
+    const cases: [ReturnType<typeof verdict>[], number][] = [
+      [[verdict("a", 1), verdict("b")], 2],
+      [[verdict("a", 2), verdict("b", 1)], 2],
+      [[verdict("a", 1), verdict("b", 2)], 1],
+    ];
+    for (const [verdicts, next] of cases) {
+      const bytes = JSON.stringify({ episodes: {}, prs: {}, verdicts, churnEscalated: {}, nextVerdictSequence: next });
+      writeFileSync(path, bytes);
+      assert.throws(() => runGardenerOverseer(h.deps), /gardener-overseer\.json.*malformed.*verdict sequences are not ordered and complete/);
+      assert.equal(readFileSync(path, "utf8"), bytes);
+      assert.equal(h.steps("gardener_overseer.scorecard").length, 0);
+    }
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("W1-T5073: corrupt effects stop the overseer before it overwrites a handoff", () => {
+  const h = harness(T0 + 10 * HOUR);
+  try {
+    const path = gardenEffectsPath(h.dir, "demo");
+    for (const bytes of ["{bad", JSON.stringify({ effects: [{ id: "incomplete" }] })]) {
+      writeFileSync(path, bytes);
+      assert.throws(() => runGardenerOverseer(h.deps), /demo-gardener-effects\.json.*(unparseable|malformed)/);
+      assert.equal(readFileSync(path, "utf8"), bytes);
+      assert.equal(existsSync(join(h.dir, "gardener-overseer.json")), false);
+    }
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("W1-T5073: interrupted verdict handoff replays once after repair", () => {
+  const T = T0 + 10 * HOUR;
+  const h = harness(T);
+  try {
+    const statePath = gardenStatePath(h.dir, "demo");
+    writeFileSync(statePath, JSON.stringify({ classes: { draft: { alpha: 3, beta: 1 }, other: { alpha: 3, beta: 1 } } }));
+    h.rows.push(row("demo.scorecard", T - HOUR, { pr_url: "https://github.com/o/r/pull/7", acting: ["draft"] }));
+    h.deps.prInfo = () => prInfo({ mergedAt: new Date(T - HOUR).toISOString() });
+    h.deps.effectReading = () => ({ before: 100, after: 10, se: 20 });
+    runGardenerOverseer(h.deps);
+    const effectsPath = gardenEffectsPath(h.dir, "demo");
+    const issued = readFileSync(effectsPath, "utf8");
+    rmSync(effectsPath);
+    runGardenerOverseer(h.deps);
+    assert.equal(readGardenEffects(effectsPath).length, 1, "persisted verdict is reconstructed");
+    const gardenDeps = { stateDir: h.dir, repoRoot: h.dir, openWorkspace: () => { throw new Error("no workspace"); }, log: () => {}, clock: h.clock };
+    runGarden(demoSpec, gardenDeps);
+    runGardenerOverseer(h.deps);
+    assert.equal(existsSync(effectsPath), false, "receipt prevents replay after fold");
+    writeFileSync(effectsPath, issued);
+    runGarden(demoSpec, gardenDeps);
+    assert.equal(JSON.parse(readFileSync(statePath, "utf8")).classes.draft.alpha, 4);
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("W1-T5073: the 201st verdict never re-credits an older ID", () => {
+  const h = harness(T0 + 10 * HOUR);
+  try {
+    const path = gardenStatePath(h.dir, "demo");
+    writeFileSync(path, JSON.stringify({ classes: { draft: { alpha: 3, beta: 1 }, other: { alpha: 3, beta: 1 } } }));
+    const verdicts = Array.from({ length: 201 }, (_, i) => ({ id: `effect:${i}`, gardener: "demo", actionClass: "draft", verdict: "credit", kind: "effect", at: h.clock.iso(), sequence: i + 1 }));
+    writeFileSync(join(h.dir, "gardener-overseer.json"), JSON.stringify({ episodes: {}, prs: {}, verdicts, churnEscalated: {}, nextVerdictSequence: 201 }));
+    runGardenerOverseer(h.deps);
+    const gardenDeps = { stateDir: h.dir, repoRoot: h.dir, openWorkspace: () => { throw new Error("no workspace"); }, log: () => {}, clock: h.clock };
+    runGarden(demoSpec, gardenDeps);
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).classes.draft.alpha, 204);
+    runGardenerOverseer(h.deps);
+    assert.equal(existsSync(gardenEffectsPath(h.dir, "demo")), false);
+    runGarden(demoSpec, gardenDeps);
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).classes.draft.alpha, 204);
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("W1-T5073: an unacknowledged verdict survives the history bound", () => {
+  const T = T0 + 40 * 24 * HOUR;
+  const h = harness(T);
+  try {
+    const old = new Date(T - 31 * 24 * HOUR).toISOString();
+    const verdicts = [{ id: "effect:old", gardener: "demo", actionClass: "draft", verdict: "credit", kind: "effect", at: old, sequence: 1 }];
+    writeFileSync(join(h.dir, "gardener-overseer.json"), JSON.stringify({ episodes: {}, prs: {}, verdicts, churnEscalated: {}, nextVerdictSequence: 1 }));
+    runGardenerOverseer(h.deps);
+    assert.deepEqual(readGardenEffects(gardenEffectsPath(h.dir, "demo")).map((v) => v.id), ["effect:old"]);
+    assert.equal(JSON.parse(readFileSync(join(h.dir, "gardener-overseer.json"), "utf8")).verdicts.length, 1);
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("W1-T5073: an aged-out legacy receipt is unavailable rather than zero", () => {
+  const h = harness(T0 + 10 * HOUR);
+  try {
+    const verdicts = [{ id: "effect:old", gardener: "demo", actionClass: "draft", verdict: "credit", kind: "effect", at: h.clock.iso() }];
+    const overseerPath = join(h.dir, "gardener-overseer.json");
+    const bytes = JSON.stringify({ episodes: {}, prs: {}, verdicts, churnEscalated: {} });
+    writeFileSync(overseerPath, bytes);
+    writeFileSync(gardenStatePath(h.dir, "demo"), JSON.stringify({ classes: { draft: { alpha: 3, beta: 1 } }, foldedEffects: Array.from({ length: 200 }, (_, i) => `effect:${i}`) }));
+    assert.throws(() => runGardenerOverseer(h.deps), /receipt .*unavailable beyond the retained 200 IDs/);
+    assert.equal(readFileSync(overseerPath, "utf8"), bytes);
+    assert.equal(existsSync(gardenEffectsPath(h.dir, "demo")), false);
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("W1-T5073: absent files initialize and healthy effects fold once", () => {
+  const h = harness(T0);
+  try {
+    assert.deepEqual(readGardenEffects(gardenEffectsPath(h.dir, "demo")), []);
+    assert.equal(runGardenerOverseer(h.deps).ran, true);
+    const path = gardenStatePath(h.dir, "demo");
+    writeFileSync(gardenEffectsPath(h.dir, "demo"), JSON.stringify({ effects: [{ id: "first", actionClass: "draft", verdict: "credit", kind: "effect", at: h.clock.iso() }] }));
+    const deps = { stateDir: h.dir, repoRoot: h.dir, openWorkspace: () => { throw new Error("no workspace"); }, log: () => {}, clock: h.clock };
+    runGarden(demoSpec, deps);
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).classes.draft.alpha, 4);
+    runGarden(demoSpec, deps);
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).classes.draft.alpha, 4);
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
+});
+
+test("W1-T5073: overseer timer reports corrupt persistence and retries", () => {
+  const h = harness(T0);
+  try {
+    const path = join(h.dir, "gardener-overseer.json");
+    writeFileSync(path, "{bad");
+    const timer = startGardenerOverseer(h.deps, 1000);
+    timer.stop();
+    assert.match(String(h.steps("gardener_overseer.overseer_failed")[0]?.error), /gardener-overseer\.json.*unparseable/);
+    assert.equal(h.steps("gardener_overseer.overseer_failed")[0]?.path, path);
+    assert.equal(h.steps("gardener_overseer.overseer_failed")[0]?.failure_class, "unparseable");
+    assert.equal(readFileSync(path, "utf8"), "{bad");
+    writeFileSync(path, JSON.stringify({ episodes: {}, prs: {}, verdicts: [], churnEscalated: {} }));
+    const retry = startGardenerOverseer(h.deps, 1000);
+    retry.stop();
+    assert.equal(h.steps("gardener_overseer.scorecard").length, 1);
+  } finally { rmSync(h.dir, { recursive: true, force: true }); }
 });
 
 test("W1-T4802: a throwing pass is ledgered by the timer and never escapes", () => {
