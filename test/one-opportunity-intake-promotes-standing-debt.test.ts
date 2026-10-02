@@ -150,6 +150,26 @@ test("daemon invokes shared intake on the existing admitted cadence", async () =
   assert.equal(legacyCalls, 0);
 });
 
+test("an intake pass that throws is ledgered as failed and the daemon keeps running", async () => {
+  const { ports, filed } = fixture();
+  Object.defineProperty(ports, "riskJudge", { get() { throw new Error("judge port unwired"); } });
+  const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  let ticks = 0;
+  await runDaemon(loadPlanFromYaml("[]", "fixture.yaml"), {
+    refreshMerged: () => () => false,
+    runOne: async () => { throw new Error("no task to dispatch"); },
+    sleep: async () => {},
+    checkStop: () => ++ticks > 1 ? "fixture complete" : undefined,
+    checkIntakeRungs: () => [{ rung: "codeqlQuality", fire: true, reason: "due" }],
+    runIntakeRung: async () => ({ rung: "codeqlQuality", status: "ok" }),
+    opportunityIntake: ports,
+    log: (step: string, extra?: Record<string, unknown>) => { logged.push({ step, extra }); },
+  });
+  const failed = logged.find((row) => row.step === "opportunity_intake.failed");
+  assert.match(String(failed?.extra?.reason), /judge port unwired/);
+  assert.deepEqual(filed, []);
+});
+
 test("source failures, complete dedupe and landing failures stay distinguishable", async () => {
   const { ports } = fixture();
   ports.readCodeql = () => ({ ok: false, error: "CodeQL denied" });
