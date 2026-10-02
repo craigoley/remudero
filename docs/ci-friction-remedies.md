@@ -16,6 +16,12 @@ This file is the ledger of remedies for the causes the ci-friction gardener (W1-
   uncovered changed lines, add focused tests for those behaviors, and rerun the coverage gate
   against the same committed tree before pushing.
 
+- `ci-friction:check:ci-log:commitlint` — the required commitlint check rejected the pull
+  request title. Read the check output, then rewrite the PR title as a Conventional Commit
+  header (`type(scope): lower-case subject`) using an allowed type, keeping it at 100
+  characters or fewer and without a final period. The check validates the PR title, so amend
+  that title and rerun commitlint; changing branch commit messages alone does not fix it.
+
 - `ci-friction:check:ci-log:coverage-ratchet:diff-coverage-blocked-this-diff-adds-source-line-s-with-zero` —
   the diff-coverage gate found added source lines with no coverage. Use the gate's uncovered-line
   report to identify each behavior, add focused tests that execute those lines, then commit the
