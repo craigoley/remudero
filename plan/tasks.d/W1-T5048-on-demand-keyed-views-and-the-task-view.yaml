@@ -18,7 +18,7 @@
     - test/task-view.test.ts
     - src/lib/read-model-worker.ts
     - src/lib/views.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-01 (Phase 4 gentle probe, host): the console's /task page performs 4 to 7 core reads per

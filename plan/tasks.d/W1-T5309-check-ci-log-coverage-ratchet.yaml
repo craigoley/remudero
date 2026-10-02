@@ -1,0 +1,39 @@
+- id: W1-T5309
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:ci-log:coverage-ratchet cost 1407.5 PR minute(s) across 458 round(s) on 292 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:ci-log:coverage-ratchet"
+  files:
+    - src/lib/ci-parity.ts
+    - test/check-ci-log-coverage-ratchet.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:ci-log:coverage-ratchet"
+      proof: "grep: test(\"W1-T5309: check:ci-log:coverage-ratchet is prevented, not retried\" in test/check-ci-log-coverage-ratchet.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:ci-log:coverage-ratchet's share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:ci-log:coverage-ratchet cost 1407.5 PR minute(s) (seven-day half-life) across 458 fix round(s) on 292 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/ci-parity.ts: names "coverage-ratchet" (23 line(s))
+    - src/run-task.ts: names "coverage-ratchet" (14 line(s))
+
+    RECENT ROUNDS (newest first):
+    - PR #8711 at 2026-10-02T18:23:44.920Z: ci-log round — coverage-ratchet; coverage-shard (1/8)
+    - PR #7857 at 2026-09-29T15:22:06.738Z: ci-log round
+    - PR #7855 at 2026-09-29T14:38:47.929Z: ci-log round
+    - PR #7851 at 2026-09-29T14:19:29.975Z: ci-log round
+    - PR #7816 at 2026-09-29T13:36:01.027Z: ci-log round
+
+    WHAT THE LAST RUNG TRIED: W1-T4810 (a docs-only record, which changed no code path; its advice is under ci-friction:check:ci-log:coverage-ratchet in docs/ci-friction-remedies.md).
+    Do something structurally different from it.
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

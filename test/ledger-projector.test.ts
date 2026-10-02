@@ -16,6 +16,8 @@ import {
   openProjectorReadModel,
   readModelDigest,
   readTaskActivity,
+  RUN_WORKER_PROJECTION,
+  runWorkerRow,
   type LedgerProjectorOptions,
 } from "../src/lib/ledger-projector.js";
 import { acquireLease, ReadModelError, type ReadModelDb } from "../src/lib/read-model-db.js";
@@ -471,4 +473,40 @@ test("the run activity projection keeps each run's newest row of any step and or
   const clean = store(t, ledgerDir, clock);
   clean.tick();
   assert.deepEqual(runs(clean.db).sort(), runs(s.db).sort(), "a clean rebuild keeps the same rows");
+});
+
+test("the run worker projection keeps each worker field's newest value per run in any read order", (t) => {
+  // 2026-10-02T15:46:54Z: W1-T1289's worker.activity rows moved it from sonnet to opus mid-run, and no fact row says so.
+  const run = { task_id: "W1-T1", run_id: "r1" };
+  const lines = [
+    line(T0 + 1_000, "worker.activity", { ...run, event_kind: "message", provider: "codex", requested_model: "sonnet", worker_role: "implementer" }),
+    line(T0 + 3_000, "worker.activity", { ...run, event_kind: "message", provider: "claude", requested_model: "opus" }),
+    line(T0 + 4_000, "worker.activity", { ...run, event_kind: "working", tool_name: "Edit" }),
+    line(T0 + 2_000, "worker.activity", { ...run, event_kind: "message", requested_model: "haiku", served_model: "claude-haiku" }),
+    line(T0 + 5_000, "worker.activity", { ...run, event_kind: "not-a-kind", requested_model: "ignored" }),
+    line(T0 + 6_000, "worker.state", { ...run, state: "working", requested_model: "ignored" }),
+    line(T0, "worker.activity", { task_id: "W1-T2", run_id: "r2", event_kind: "message", requested_model: "sonnet" }),
+  ];
+  const clock = fixedClock(T0 + 10_000);
+  const read = (db: ReadModelDb) => db.prepare("SELECT task_id, run_id, ts, body, fields FROM run_worker ORDER BY task_id").all()
+    .map((row) => [row.task_id, row.run_id, row.ts, runWorkerRow(String(row.body), String(row.fields))]);
+  const forward = scratch(t, "projector-ledger");
+  writeFileSync(join(forward, LIVE), body(lines));
+  const s = store(t, forward, clock);
+  s.tick();
+  const got = read(s.db);
+  const newest = JSON.parse(lines[2]!) as Record<string, unknown>;
+  assert.deepEqual(got[0], ["W1-T1", "r1", new Date(T0 + 4_000).toISOString(),
+    { ...newest, provider: "claude", requested_model: "opus", served_model: "claude-haiku", worker_role: "implementer" }],
+    "the newest row's time and body with each field's newest value; a bad kind or another step moves nothing");
+  assert.equal(got.length, 2);
+  const reversed = scratch(t, "projector-ledger");
+  writeFileSync(join(reversed, LIVE), body([...lines].reverse()));
+  const r = store(t, reversed, clock);
+  r.tick();
+  assert.deepEqual(read(r.db), got, "any read order leaves the same rows");
+  const seqs = () => s.db.prepare("SELECT seq FROM run_worker ORDER BY task_id").all().map((row) => row.seq);
+  const before = seqs();
+  for (const text of lines) RUN_WORKER_PROJECTION.apply(s.db, text, ledgerLineIdentity(text), () => JSON.parse(text) as Record<string, unknown>);
+  assert.deepEqual(seqs(), before, "a line applied twice changes nothing, so the consistency oracle reads no drift");
 });

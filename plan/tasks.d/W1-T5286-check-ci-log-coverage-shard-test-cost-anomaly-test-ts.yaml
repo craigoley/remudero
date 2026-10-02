@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.89
   status: queued
@@ -16,3 +16,13 @@
     - claim: "the check:ci-log:coverage-shard:test-cost-anomaly-test-ts cause of PR friction has a recorded remedy"
       proof: "grep: ci-friction:check:ci-log:coverage-shard:test-cost-anomaly-test-ts in docs/ci-friction-remedies.md"
   note: "Filed by the ci-friction gardener (W1-T4435) from a weekly pass over the ledger and gate-fire-rate.ts's own measurement. check:ci-log:coverage-shard:test-cost-anomaly-test-ts priced at 4.4 PR minute(s) across 1 round(s) on 1 pull request(s) — the costliest cause with no open task. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person; its remedy is recorded in docs/ci-friction-remedies.md naming \"ci-friction:check:ci-log:coverage-shard:test-cost-anomaly-test-ts\" once it lands."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.85
+    reasons:
+      - "The declared change touches only docs/ci-friction-remedies.md, a documentation file. Nothing in the description or files list points to secrets, auth, deletion, merge/deploy policy, or irreversible actions."
+      - "The acceptance criterion is a single grep for a ci-friction entry in that doc. It can be verified mechanically (verify: auto), and no operator-only decision is requested."
+      - "The family track record is weak (17 merged, 39 declined). That argues for ordinary CI and review scrutiny, but it doesn't make this docs-only change high risk. No bounded change view was supplied, so I'm relying on the declared file list."
+    judged_at: "2026-10-02T16:55:58.031Z"
+    pin: "183bbcc69c2a330731e09c35db4a10f1469d184e7db88f2f0c00a51db8249000"
