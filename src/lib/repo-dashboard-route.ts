@@ -33,7 +33,7 @@ import { readIncidentLifecycleStore } from "./incident-lifecycle.js";
 import { loadManagedRepos, type ManagedRepo } from "./managed-repos.js";
 import { InstanceRegistryError, parseInstanceRegistry } from "./instance-registry.js";
 import type { Plan } from "./plan.js";
-import { threadStrictPlan } from "./thread-plan.js";
+import { threadPlanPin, threadStrictPlan } from "./thread-plan.js";
 import { assignmentFacts, createRepoLedgerIndex, type RepoLedgerIndex } from "./repo-ledger-index.js";
 import { DEFAULT_LIVENESS_BOUND_MS, isMergeCreditLine } from "./status.js";
 
@@ -533,7 +533,7 @@ const workerIndexes = new Map<string, RepoLedgerIndex>();
 let planMemo: { key: string; plan: Plan } | undefined;
 
 function loadPlanMemoized(path: string, stamp: string | undefined): Plan {
-  const key = `${path}|${stamp}`;
+  const key = `${path}|${stamp}|${threadPlanPin(path)}`;
   if (stamp !== undefined && planMemo?.key === key) return planMemo.plan;
   const plan = threadStrictPlan(path);
   planMemo = { key, plan };

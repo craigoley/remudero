@@ -19,7 +19,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { parseInstanceRegistry, type RegistryInstance } from "./instance-registry.js";
 import { readOnMtimeChange, startSourcePublisher } from "./nav-badge-view.js";
 import type { Plan } from "./plan.js";
-import { threadStrictPlan } from "./thread-plan.js";
+import { threadPlanPin, threadStrictPlan } from "./thread-plan.js";
 import { READ_MODEL_DIRNAME, readModelSidecarDir, type ReadModelDb } from "./read-model-db.js";
 import {
   REPO_TELEMETRY_CACHE_TTL_MS,
@@ -265,7 +265,7 @@ export function legacyRepositories(
 /** The plan each summary reads, memoized on the plan file's and `tasks.d`'s mtimes; `fresh` says whether a read would hit the memo. */
 function planReader(): { read: (path: string) => Plan; held: (path: string) => PlanRead | undefined; fresh: (path: string) => boolean } {
   const memo = new Map<string, { stamp: string; plan: Plan }>();
-  const stampOf = (path: string): string => [path, join(dirname(path), "tasks.d")].map((p) => {
+  const stampOf = (path: string): string => threadPlanPin(path) + [path, join(dirname(path), "tasks.d")].map((p) => {
     try {
       return String(statSync(p).mtimeMs);
     } catch {

@@ -154,6 +154,7 @@ import {
 } from "./incident-invariants.js";
 import { checkServiceFreshness } from "./self-sync.js";
 import { reloadServePlan, touchesReloadablePlan } from "./serve-plan-reload.js";
+import { publishThreadPlan } from "./thread-plan.js";
 import { changedPathsSince, serveRestartRelevant, type ChangedPathsRead, type ChangedPathsReader } from "./serve-restart-relevance.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
 import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
@@ -3080,7 +3081,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       viewEventsHandover("recycle");
       return drained.then(() => {});
     },
-    reloadPlan: (ref) => reloadServePlan(deps.board, serveRepoDir(), ref, { log: deps.log }),
+    reloadPlan: (ref) => reloadServePlan(deps.board, serveRepoDir(), ref, { log: deps.log, onReloaded: (at, read) => publishThreadPlan({ path: deps.panelGraph.planPath, repoDir: serveRepoDir(), ref: at }, read, deps.log) }),
     ...(deps.generation ? { requestHandoff: (detail: Record<string, unknown>) => deps.generation?.requestHandoff(detail) } : {}),
     ...deps.staleExitSeams,
   });

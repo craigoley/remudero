@@ -21,7 +21,7 @@ import { dirname, join } from "node:path";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { snapshotGeneration, snapshotGithub, type NowInstance } from "./now-view.js";
 import type { AcceptanceCriterion, Plan, Task } from "./plan.js";
-import { threadPlan } from "./thread-plan.js";
+import { threadPlan, threadPlanPin } from "./thread-plan.js";
 import type { ReadModelDb } from "./read-model-db.js";
 import type { GitHub, StatusProjection } from "./status.js";
 import { taskCardRuns, type TaskCardRun } from "./task-card.js";
@@ -167,7 +167,7 @@ export function createTaskView(opts: TaskViewOptions): {
     if (!path) return { source: { asOf: null, state: "unavailable" as const, reason: `instance ${instance.name} names no plan file` } };
     const mtime = mtimeOf(path);
     if (mtime === undefined) return { source: { asOf: null, state: "unavailable" as const, reason: `the plan file ${path} is absent` } };
-    const stamp = `${mtime}:${mtimeOf(join(dirname(path), "tasks.d")) ?? "-"}`;
+    const stamp = `${mtime}:${mtimeOf(join(dirname(path), "tasks.d")) ?? "-"}:${threadPlanPin(path)}`;
     let held = plans.get(instance.name);
     if (held?.stamp !== stamp) plans.set(instance.name, (held = { stamp, plan: threadPlan(path) }));
     const task = held.plan.byId.get(id);
