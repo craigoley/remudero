@@ -22,12 +22,34 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { snapshotGeneration, snapshotGithub, type NowInstance } from "./now-view.js";
 import { loadPlanQuarantiningDuplicates, type AcceptanceCriterion, type Task } from "./plan.js";
 import type { ReadModelDb } from "./read-model-db.js";
-import type { ReadModelInstanceState } from "./read-model-worker.js";
 import type { GitHub, StatusProjection } from "./status.js";
 import { taskCardRuns, type TaskCardRun } from "./task-card.js";
 import { TASK_VIEW_NAME, type DemandBook } from "./view-demand.js";
 import { describeSource } from "./view-freshness.js";
 import type { ViewSource } from "./views.js";
+
+/**
+ * One instance's projector, as the worker last saw it. Posted to the main thread every tick. It is
+ * defined HERE, not in read-model-worker.ts, so this file need not import the worker that imports it
+ * (a cycle); the worker re-exports it as `ReadModelInstanceState`.
+ */
+export interface ReadModelInstanceState {
+  instance: string;
+  /** When the last tick completed; absent before the first. */
+  tickedAt?: number;
+  generation: number;
+  lease: "held" | "elsewhere" | "none";
+  heldBy?: string;
+  /** Why the last tick did not run or failed; absent after a good tick. */
+  reason?: string;
+  failures: number;
+  /** The `ts` of the newest applied (not quarantined) row. */
+  newestTs: string | null;
+  /** Present while one of its oracle slices is running. */
+  checking?: true;
+  /** Present while a backlog is being applied: how far behind, and the ETA measured at `at`. */
+  catchUp?: { rowsBehind: number; etaMs: number; at: number };
+}
 
 export const TASK_VIEW_VERSION = 1;
 /** The newest fact rows read per task; a task with more reports `factsTruncated`. */

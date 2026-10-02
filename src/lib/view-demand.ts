@@ -16,7 +16,15 @@
  *   and is then evicted: its body is dropped from the store and from serve's memory.
  */
 import { systemClock, type Clock } from "./clock.js";
-import type { ViewBodyEntry } from "./views.js";
+
+/**
+ * The two fields a demand wait matches a posted body on. views.ts's `ViewBodyEntry` satisfies it; the
+ * wait is generic over the entry so this file need not import views.ts (which imports this one).
+ */
+export interface DemandEntry {
+  view: string;
+  key: string;
+}
 
 /** The one on-demand keyed view so far: `task?instance=&id=` (task-view.ts). */
 export const TASK_VIEW_NAME = "task";
@@ -94,16 +102,16 @@ export function createDemandBook(opts: DemandBookOptions = {}): DemandBook {
 }
 
 /** What main needs from the read-model worker's handle to ask for a key (views.ts's `ViewBodySource`). */
-export interface ViewDemandSource {
-  body(view: string, key?: string): ViewBodyEntry | undefined;
+export interface ViewDemandSource<E extends DemandEntry = DemandEntry> {
+  body(view: string, key?: string): E | undefined;
   /** Posts `want{view, key}` to the worker; false when there is no worker to ask. */
   want?(view: string, key: string): boolean;
   /** Calls `listener` with each body the worker posts, after it is stored; returns the unsubscribe. */
-  onBody?(listener: (entry: ViewBodyEntry) => void): () => void;
+  onBody?(listener: (entry: E) => void): () => void;
 }
 
-export type ViewDemandAnswer =
-  | { ok: true; entry: ViewBodyEntry }
+export type ViewDemandAnswer<E extends DemandEntry = DemandEntry> =
+  | { ok: true; entry: E }
   | { ok: false; reason: "timeout" | "saturated" | "no_worker"; retryMs: number };
 
 export interface ViewDemandOptions {
@@ -117,7 +125,7 @@ export interface ViewDemandOptions {
 }
 
 interface DemandState {
-  pending: Map<string, Promise<ViewDemandAnswer>>;
+  pending: Map<string, Promise<ViewDemandAnswer>>; // entries are the source's own E; see awaitViewDemand
   touchedAt: Map<string, number>;
 }
 
@@ -139,22 +147,23 @@ function unrefTimer(run: () => void, ms: number): () => void {
  * Asks the worker for `view`'s `key` and waits for its body, at most {@link VIEW_DEMAND_WAIT_MS}. It
  * resolves, never rejects, and never blocks the loop: the wait is a timer and a listener.
  */
-export function awaitViewDemand(source: ViewDemandSource, view: string, key: string, opts: ViewDemandOptions = {}): Promise<ViewDemandAnswer> {
+export function awaitViewDemand<E extends DemandEntry>(source: ViewDemandSource<E>, view: string, key: string, opts: ViewDemandOptions = {}): Promise<ViewDemandAnswer<E>> {
   const retryMs = opts.retryMs ?? VIEW_DEMAND_RETRY_MS;
   const have = source.body(view, key);
   if (have) return Promise.resolve({ ok: true, entry: have });
   const state = stateOf(source);
   const id = `${view}\u0000${key}`;
-  const shared = state.pending.get(id);
+  // The pending map is keyed per source object, so every promise filed under it carries that source's E.
+  const shared = state.pending.get(id) as Promise<ViewDemandAnswer<E>> | undefined;
   if (shared) return shared;
   if (!source.want || !source.onBody) return Promise.resolve({ ok: false, reason: "no_worker", retryMs });
   if (state.pending.size >= (opts.maxPending ?? VIEW_DEMAND_MAX_PENDING)) return Promise.resolve({ ok: false, reason: "saturated", retryMs });
   const subscribe = source.onBody;
   let settled = false;
-  const waiting = new Promise<ViewDemandAnswer>((resolve) => {
+  const waiting = new Promise<ViewDemandAnswer<E>>((resolve) => {
     let unsubscribe: () => void = () => {};
     let cancel: () => void = () => {};
-    const settle = (answer: ViewDemandAnswer): void => {
+    const settle = (answer: ViewDemandAnswer<E>): void => {
       if (settled) return;
       settled = true;
       unsubscribe();
@@ -171,7 +180,7 @@ export function awaitViewDemand(source: ViewDemandSource, view: string, key: str
     else settle({ ok: false, reason: "no_worker", retryMs });
   });
   // A refusal settles inside the executor, before there is a promise to file.
-  if (!settled) state.pending.set(id, waiting);
+  if (!settled) state.pending.set(id, waiting as Promise<ViewDemandAnswer>);
   return waiting;
 }
 
@@ -179,7 +188,7 @@ export function awaitViewDemand(source: ViewDemandSource, view: string, key: str
  * A served key is read again: re-wants it, at most once per {@link VIEW_DEMAND_TOUCH_MS}, so the worker
  * keeps it materialized (and refreshed) for as long as someone keeps reading it.
  */
-export function touchViewDemand(source: ViewDemandSource, view: string, key: string, now: number): void {
+export function touchViewDemand<E extends DemandEntry>(source: ViewDemandSource<E>, view: string, key: string, now: number): void {
   if (!source.want) return;
   const state = stateOf(source);
   const id = `${view}\u0000${key}`;

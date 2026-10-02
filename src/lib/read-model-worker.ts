@@ -25,7 +25,7 @@ import { LEDGER_FILENAME } from "./ledger-path.js";
 import { FUTURE_ROW_TOLERANCE_MS, LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, type LedgerProjector, type ProjectorTickResult } from "./ledger-projector.js";
 import { createNavBadgeReadModelView } from "./nav-badge-view.js";
 import { createNowView } from "./now-view.js";
-import { createTaskView } from "./task-view.js";
+import { createTaskView, type ReadModelInstanceState as TaskViewInstanceState } from "./task-view.js";
 import { createDemandBook, type DemandBook } from "./view-demand.js";
 import {
   ORACLE_DEFAULT_WINDOW_MS,
@@ -192,23 +192,7 @@ export function readReadModelSwitches(path: string): { ok: true; switches: ReadM
 }
 
 /** One instance's projector, as the worker last saw it. Posted to the main thread every tick. */
-export interface ReadModelInstanceState {
-  instance: string;
-  /** When the last tick completed; absent before the first. */
-  tickedAt?: number;
-  generation: number;
-  lease: "held" | "elsewhere" | "none";
-  heldBy?: string;
-  /** Why the last tick did not run or failed; absent after a good tick. */
-  reason?: string;
-  failures: number;
-  /** The `ts` of the newest applied (not quarantined) row. */
-  newestTs: string | null;
-  /** Present while one of its oracle slices is running. */
-  checking?: true;
-  /** Present while a backlog is being applied: how far behind, and the ETA measured at `at`. */
-  catchUp?: { rowsBehind: number; etaMs: number; at: number };
-}
+export type ReadModelInstanceState = TaskViewInstanceState;
 
 export type ReadModelBodyEntry = ViewBodyEntry;
 
