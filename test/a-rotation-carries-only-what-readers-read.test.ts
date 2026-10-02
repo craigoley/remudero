@@ -4,7 +4,6 @@ import { readFileSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { rotateLedger } from "../src/lib/ledger.js";
-import { SWEEP_DEPARTED_PR_WINDOW_MS } from "../src/lib/ledger-carry.js";
 import { DEFAULT_SWEEP_POLICY, dueRepairFilings, mainLatestRunFromLedger } from "../src/lib/sweep.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
 
@@ -40,25 +39,27 @@ function rotate(rows: Array<Record<string, unknown>>): { live: Array<Record<stri
   return { live, archived, dir: fx.dir };
 }
 
-const departedAgo = SWEEP_DEPARTED_PR_WINDOW_MS + 3_600_000;
+const DAY = 86_400_000;
 
-test("a rotation stops carrying a departed PR's sweep rows but keeps the ones a reader still asks for", () => {
+function mergedFact(pr: number, msAgo: number): Record<string, unknown> {
+  return { ts: at(msAgo), run_id: "SWEEP-1", task_id: `W1-T${pr}`, step: "verdict.merged", verdict: "merged", pr_number: pr, pr_url: `${URL}${pr}` };
+}
+
+test("a rotation stops carrying a merged PR's sweep rows but keeps the ones a reader still asks for", () => {
   const rows = [
-    disposed(101, departedAgo + 5_000, { head_sha: "aaa", disposition: "post-review", acted: true }),
-    disposed(101, departedAgo + 4_000, { head_sha: "bbb", disposition: "blocked-fixable", acted: true, reason: "ci red" }),
-    disposed(101, departedAgo + 3_000, { head_sha: "ccc", disposition: "stale", acted: true, keep_head_branch: "run-x" }),
-    disposed(101, departedAgo, { head_sha: "ddd", disposition: "wait", acted: false }),
-    disposed(202, departedAgo + 9_000, { head_sha: "eee", disposition: "post-review", acted: true }),
-    disposed(202, 2_000, { head_sha: "eee", disposition: "wait", acted: false }),
+    disposed(101, 9_000, { head_sha: "aaa", disposition: "post-review", acted: true }),
+    disposed(101, 8_000, { head_sha: "bbb", disposition: "blocked-fixable", acted: true, reason: "ci red" }),
+    disposed(101, 7_000, { head_sha: "ccc", disposition: "stale", acted: true, keep_head_branch: "run-x" }),
+    disposed(101, 6_000, { head_sha: "ddd", disposition: "wait", acted: false }),
+    mergedFact(101, 5_000),
     disposed(303, 1_000, { head_sha: "fff", disposition: "wait", acted: false }),
   ];
   const { live, archived, dir } = rotate(rows);
   try {
     const swept = live.filter((r) => r.step === "sweep.disposed");
-    const departed = swept.filter((r) => r.pr_number === 101).map((r) => r.head_sha).sort();
-    assert.deepEqual(departed, ["bbb", "ccc"], "only the acted repair row and the reaper's keep_head_branch row of a departed PR are carried");
-    assert.ok(swept.some((r) => r.pr_number === 202 && r.head_sha === "eee"), "an open PR keeps its rows however old its acted row is");
-    assert.ok(swept.some((r) => r.pr_number === 303), "an open PR's fresh row is carried");
+    const merged = swept.filter((r) => r.pr_number === 101).map((r) => r.head_sha).sort();
+    assert.deepEqual(merged, ["bbb", "ccc"], "only the acted repair row and the reaper's keep_head_branch row of a merged PR are carried");
+    assert.ok(swept.some((r) => r.pr_number === 303), "a PR with no merge fact is carried");
     for (const head of ["aaa", "ddd"]) assert.ok(archived.includes(`"head_sha":"${head}"`), `the dropped ${head} row is still in the archive`);
 
     const policy = { ...DEFAULT_SWEEP_POLICY, repairFilingThreshold: 1 };
@@ -68,16 +69,18 @@ test("a rotation stops carrying a departed PR's sweep rows but keeps the ones a 
   }
 });
 
-test("a stalled sweep ages no PR out of the carry", () => {
-  // Every row is days old, but the anchor is the newest sweep row, never the clock.
+test("a long-waiting open PR keeps its carried sweep rows however far it trails the sweep", () => {
+  // #202 has waited five days behind #303's fresh rows; with no recorded merge nothing of it drops.
   const rows = [
-    disposed(404, 5 * 86_400_000 + 1_000, { head_sha: "g", disposition: "post-review", acted: true }),
-    disposed(505, 5 * 86_400_000, { head_sha: "h", disposition: "wait", acted: false }),
+    disposed(202, 5 * DAY, { head_sha: "eee", disposition: "post-review", acted: true }),
+    disposed(202, 5 * DAY - 1_000, { head_sha: "e2", disposition: "wait", acted: false }),
+    mergedFact(999, 2_000),
+    disposed(303, 1_000, { head_sha: "fff", disposition: "wait", acted: false }),
   ];
   const { live, dir } = rotate(rows);
   try {
-    const kept = live.filter((r) => r.step === "sweep.disposed").map((r) => r.pr_number).sort();
-    assert.deepEqual(kept, [404, 505]);
+    const heads = live.filter((r) => r.step === "sweep.disposed" && r.pr_number === 202).map((r) => r.head_sha).sort();
+    assert.deepEqual(heads, ["e2", "eee"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
