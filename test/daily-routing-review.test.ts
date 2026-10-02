@@ -40,7 +40,7 @@ test("Sol 6.1 review is due every day before October 16 without lowering the sam
     assert.equal(early.revisitDue, false); assert.equal(early.nextReviewOn, "2026-10-02");
   }
   const lines: string[] = [];
-  await routingAbCommand([], { readRows: async () => [], today: "2026-10-02", print: (line) => lines.push(line) });
+  await routingAbCommand([], { stateDir: "/unused/state", readRows: async () => [], today: "2026-10-02", print: (line) => lines.push(line) });
   assert.ok(lines.some((line) => line.includes("daily provisional review; next 2026-10-03")));
 });
 
