@@ -196,10 +196,10 @@ test("a key whose build throws answers unavailable and is logged, and the other 
   const built = view.materialize({ now: clock.now(), instances: [{ db: db as never }] });
   const broken = built.find((b) => b.key === KEY)!;
   assert.equal(broken.data.found, false);
-  assert.match(broken.data.found === false ? broken.data.reason : "", /JSON/);
+  assert.match(broken.data.found === false ? broken.data.reason ?? "" : "", /JSON/);
   assert.equal(broken.sources[0]!.state, "unavailable");
   assert.equal(logged[0]?.step, "read_model.inbox_thread_view_failed");
   assert.equal(logged[0]?.extra?.threadId, THREAD);
   const other = built.find((b) => b.key === notAThread)!;
-  assert.match(other.data.found === false ? other.data.reason : "", /is not an inbox thread id/, "the other key still answers on its own");
+  assert.match(other.data.found === false ? other.data.reason ?? "" : "", /is not an inbox thread id/, "the other key still answers on its own");
 });
