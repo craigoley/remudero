@@ -162,8 +162,39 @@ export function readTaskActivity(db: ReadModelDb): Map<string, string> {
   return new Map(rows.map((r) => [String(r.task_id), String(r.ts)]));
 }
 
+const runActivityUpserts = new WeakMap<ReadModelDb, ReadModelStatement>();
+
+/**
+ * Each run's newest row of ANY step, per task: `deriveRunState` keeps a run "running" while a row of its own
+ * landed inside the liveness bound, and most of those rows (`worker.activity`, `worker.state`) are not facts.
+ * Captured 2026-10-02T13:12:49Z: W1-T5073's newest fact row was 12:41:35 and its newest row 12:57:18, so the
+ * view read it queued from 13:11:35 while /v1/status read it running. `seq` orders the changes a reader has not seen.
+ */
+export const RUN_ACTIVITY_PROJECTION: LedgerRowProjection = {
+  name: "run_activity",
+  version: 1,
+  tables: ["run_activity"],
+  ddl: `CREATE TABLE IF NOT EXISTS run_activity(task_id TEXT NOT NULL, run_id TEXT NOT NULL, ts_ms INTEGER NOT NULL, ts TEXT NOT NULL,
+    seq INTEGER NOT NULL, PRIMARY KEY(task_id, run_id)) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS run_activity_seq ON run_activity(seq);`,
+  markers: ['"run_id":"'],
+  apply(db, _line, _id, parse) {
+    const row = parse();
+    const ts = row?.ts;
+    const tsMs = typeof ts === "string" ? Date.parse(ts) : Number.NaN;
+    if (typeof row?.task_id !== "string" || typeof row.run_id !== "string" || !Number.isFinite(tsMs)) return;
+    let upsert = runActivityUpserts.get(db);
+    if (!upsert) {
+      runActivityUpserts.set(db, upsert = db.prepare(`INSERT INTO run_activity(task_id, run_id, ts_ms, ts, seq)
+        VALUES(?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM run_activity))
+        ON CONFLICT(task_id, run_id) DO UPDATE SET ts_ms = excluded.ts_ms, ts = excluded.ts, seq = excluded.seq WHERE excluded.ts_ms > run_activity.ts_ms`));
+    }
+    upsert.run(row.task_id, row.run_id, tsMs, ts as string);
+  },
+};
+
 /** Every projection a store carries; a view that needs a table no projection keeps adds one here. */
-export const LEDGER_ROW_PROJECTIONS: readonly LedgerRowProjection[] = [REPO_ROW_PROJECTION, ACTIVITY_RING_PROJECTION, TASK_ACTIVITY_PROJECTION];
+export const LEDGER_ROW_PROJECTIONS: readonly LedgerRowProjection[] = [REPO_ROW_PROJECTION, ACTIVITY_RING_PROJECTION, TASK_ACTIVITY_PROJECTION, RUN_ACTIVITY_PROJECTION];
 
 export interface LedgerProjectorOptions {
   /** The instance's state dir: the one holding its live ledger and rotation archives. */

@@ -185,6 +185,19 @@ export interface RepoInstanceSignals {
   alertsReason?: string;
 }
 
+/**
+ * What one summary read from files beside its ledger and plan. Given back as `fileReads`, a second
+ * evaluation replays these instead of reading the files again: the PAUSE marker a recycle holds for
+ * seconds (2026-10-02T14:32:13Z) must not read paused on one side and running on the other.
+ */
+export interface RepoSummaryFileReads {
+  /** The instance registry's text, null when it was unreadable; absent when no registry was read. */
+  registry?: string | null;
+  managed?: ManagedRepo[];
+  /** The fleet-control markers and the incident store's alerts; the heartbeat stays the ledger's. */
+  control?: Omit<RepoInstanceSignals, "lastDaemonMs">;
+}
+
 const UNKNOWN: RepoTelemetry = {
   queuedtasks: null, queued: null, errorrate: null, runs7d: null, last_run: null,
   tokens7d: null, cache_read_tokens7d: null, cash_usd_7d: null, subscription: null, modelsused: null,
@@ -495,8 +508,9 @@ function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function readSignals(req: RepoTelemetryRequest, lastDaemonMs: number | null): RepoInstanceSignals | undefined {
+function readSignals(req: RepoTelemetryRequest, lastDaemonMs: number | null, control?: RepoSummaryFileReads["control"]): RepoInstanceSignals | undefined {
   if (req.own === undefined || req.controlRoot === undefined) return undefined;
+  if (control) return { ...control, lastDaemonMs };
   const signals: RepoInstanceSignals = {
     paused: existsSync(pauseFilePath(req.controlRoot)),
     stopped: existsSync(stopFilePath(req.controlRoot)),
@@ -530,7 +544,7 @@ function loadPlanMemoized(path: string, stamp: string | undefined): Plan {
  *  null field that reads as "no source". */
 export function computeRepoTelemetrySync(
   req: RepoTelemetryRequest,
-  readers: { readLedger?: LedgerReader; readPlan?: (path: string) => Plan } = {},
+  readers: { readLedger?: LedgerReader; readPlan?: (path: string) => Plan; control?: RepoSummaryFileReads["control"] } = {},
 ): RepoTelemetryOutcome {
   let ledger: readonly Row[] | undefined;
   let lastDaemonMs: number | null = null;
@@ -558,7 +572,7 @@ export function computeRepoTelemetrySync(
   } catch (err) {
     return { ok: false, reason: `plan read failed: ${messageOf(err)}` };
   }
-  const signals = readSignals(req, lastDaemonMs);
+  const signals = readSignals(req, lastDaemonMs, readers.control);
   return {
     ok: true,
     telemetry: req.repos.map((repo, i) => projectRepoTelemetry(repo, { ledger, plan, nowMs: req.nowMs, own: i === req.own, members: req.members === true })),
@@ -676,11 +690,13 @@ export interface RepoDashboardOptions {
   workerUrl?: URL;
   /** repoSummarySync also returns each own repository's {@link RepoShadowFacts}. */
   shadowMembers?: boolean;
+  /** An earlier summary's file reads, replayed instead of reading those files now. */
+  fileReads?: RepoSummaryFileReads;
 }
 
 type Identity = { repo: ManagedRepo; source: RepoDashboardEntry["source"]; own: boolean };
 type RegistryRead = { state: "verified"; repos: Array<{ repo: ManagedRepo; name: string }> } | { state: "unavailable"; reason: string };
-type Resolved = { identities: Identity[]; registry?: { state: "verified" } | { state: "unavailable"; reason: string } };
+type Resolved = { identities: Identity[]; registry?: { state: "verified" } | { state: "unavailable"; reason: string }; managed: ManagedRepo[] };
 
 /** An unreadable registry (`text` undefined) or a malformed one is unavailable with a reason. */
 function parseRegistryRepos(text: string | undefined): RegistryRead {
@@ -702,7 +718,7 @@ function parseRegistryRepos(text: string | undefined): RegistryRead {
 }
 
 function resolveIdentities(deps: RepoDashboardOptions, read: RegistryRead | undefined): Resolved {
-  const managed = deps.instanceRepository ? [] : loadManagedRepos(deps.root);
+  const managed = deps.instanceRepository ? [] : deps.fileReads?.managed ?? loadManagedRepos(deps.root);
   const registry: RegistryRead | undefined = deps.instanceRepository ? { state: "verified", repos: [{ repo: deps.instanceRepository, name: "" }] } : read;
   const byIdentity = new Map<string, Identity>();
   if (registry?.state === "verified") {
@@ -716,7 +732,7 @@ function resolveIdentities(deps: RepoDashboardOptions, read: RegistryRead | unde
     const key = `${repo.owner}/${repo.repo}`.toLowerCase();
     if (!byIdentity.has(key)) byIdentity.set(key, { repo, source: "managed-repos", own: false });
   }
-  return { identities: [...byIdentity.values()], ...(registry ? { registry: registry.state === "verified" ? { state: "verified" as const } : registry } : {}) };
+  return { identities: [...byIdentity.values()], ...(registry ? { registry: registry.state === "verified" ? { state: "verified" as const } : registry } : {}), managed };
 }
 
 function telemetryRequest(deps: RepoDashboardOptions, identities: Identity[], ledgerPath: string, planPath: string, planStamp: string, nowMs: number): RepoTelemetryRequest {
@@ -748,29 +764,40 @@ function dashboardResult(deps: RepoDashboardOptions, resolved: Resolved, outcome
  * telemetry and projection. The read-model worker calls it with `readLedger` over its `repo_row` table.
  * A failed telemetry pass is `{ ok: false, reason }`, where the route answers its read-cache error.
  */
-export function repoSummarySync(deps: RepoDashboardOptions, nowMs: number): { ok: true; summary: RepoDashboardResult; shadow?: Record<string, RepoShadowFacts> } | { ok: false; reason: string } {
+export function repoSummarySync(deps: RepoDashboardOptions, nowMs: number):
+  { ok: true; summary: RepoDashboardResult; shadow?: Record<string, RepoShadowFacts>; fileReads: RepoSummaryFileReads } | { ok: false; reason: string } {
   const planPath = deps.planPath ?? join(deps.root, "plan", "tasks.yaml");
+  const replay = deps.fileReads;
   let text: string | undefined;
   if (deps.repoRegistryPath !== undefined && !deps.instanceRepository) {
-    try {
-      text = readFileSync(deps.repoRegistryPath, "utf8");
-    } catch {
-      // deliberate: an unreadable registry is named `unreadable` by parseRegistryRepos, as the route names it.
-      text = undefined;
+    if (replay?.registry !== undefined) text = replay.registry ?? undefined;
+    else {
+      try {
+        text = readFileSync(deps.repoRegistryPath, "utf8");
+      } catch {
+        // deliberate: an unreadable registry is named `unreadable` by parseRegistryRepos, as the route names it.
+        text = undefined;
+      }
     }
   }
   const resolved = resolveIdentities(deps, deps.repoRegistryPath !== undefined ? parseRegistryRepos(text) : undefined);
-  if (resolved.identities.length === 0 || deps.ledgerPath === undefined) return { ok: true, summary: dashboardResult(deps, resolved, undefined, nowMs, true) };
+  const reads: RepoSummaryFileReads = { ...(deps.repoRegistryPath !== undefined && !deps.instanceRepository ? { registry: text ?? null } : {}), managed: resolved.managed };
+  if (resolved.identities.length === 0 || deps.ledgerPath === undefined) return { ok: true, summary: dashboardResult(deps, resolved, undefined, nowMs, true), fileReads: reads };
   const planStamp = `${statStampSync(planPath)}|${statStampSync(join(dirname(planPath), "tasks.d"))}`;
-  const outcome = computeRepoTelemetrySync(telemetryRequest(deps, resolved.identities, deps.ledgerPath, planPath, planStamp, nowMs), { readLedger: deps.readLedger, readPlan: deps.readPlan });
+  const request = telemetryRequest(deps, resolved.identities, deps.ledgerPath, planPath, planStamp, nowMs);
+  const outcome = computeRepoTelemetrySync(request, { readLedger: deps.readLedger, readPlan: deps.readPlan, ...(replay?.control ? { control: replay.control } : {}) });
   if (!outcome.ok) return outcome;
+  if (outcome.signals) {
+    const { lastDaemonMs: _ledger, ...control } = outcome.signals;
+    reads.control = control;
+  }
   const shadow = Object.fromEntries(resolved.identities.flatMap((identity, i) => {
     const t = outcome.telemetry[i]!;
     const facts = identity.own ? t.shadow : undefined;
     const condition = (runs7d: RepoRunOutcomes): { condition: RepoCondition; reasons: string[] } => deriveRepoCondition({ ...t, runs7d }, outcome.signals, nowMs);
     return facts ? [[`${identity.repo.owner}/${identity.repo.repo}`, { ...facts, condition }]] : [];
   }));
-  return { ok: true, summary: dashboardResult(deps, resolved, outcome, nowMs, true), ...(deps.shadowMembers ? { shadow } : {}) };
+  return { ok: true, summary: dashboardResult(deps, resolved, outcome, nowMs, true), ...(deps.shadowMembers ? { shadow } : {}), fileReads: reads };
 }
 
 /**

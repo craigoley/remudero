@@ -448,3 +448,27 @@ test("the task activity projection keeps each task's newest row of any step", (t
   clean.tick();
   assert.deepEqual([...readTaskActivity(clean.db)].sort(), want, "a clean rebuild keeps the same rows");
 });
+
+test("the run activity projection keeps each run's newest row of any step and orders its changes", (t) => {
+  const ledgerDir = scratch(t, "projector-ledger");
+  writeFileSync(join(ledgerDir, LIVE), body([
+    line(T0 + 1_000, "run.start", { task_id: "W1-T1", run_id: "r1" }),
+    line(T0 + 3_000, "worker.activity", { task_id: "W1-T1", run_id: "r1" }),
+    line(T0 + 2_000, "worker.state", { task_id: "W1-T1", run_id: "r1", state: "working" }),
+    line(T0, "worker.activity", { task_id: "W1-T2", run_id: "r2" }),
+    line(T0 + 4_000, "worker.activity", { run_id: "r9" }),
+    JSON.stringify({ ts: "not a time", host: "h1", step: "worker.activity", task_id: "W1-T3", run_id: "r3" }),
+  ]));
+  const clock = fixedClock(T0 + 10_000);
+  const s = store(t, ledgerDir, clock);
+  s.tick();
+  const runs = (db: ReadModelDb) => db.prepare("SELECT task_id, run_id, ts, seq FROM run_activity ORDER BY seq").all().map((row) => [row.task_id, row.run_id, row.ts]);
+  const want = [["W1-T1", "r1", new Date(T0 + 3_000).toISOString()], ["W1-T2", "r2", new Date(T0).toISOString()]];
+  assert.deepEqual(runs(s.db), want, "a step the fact store skips still dates its run, and an older row read later does not");
+  appendFileSync(join(ledgerDir, LIVE), body([line(T0 + 5_000, "worker.activity", { task_id: "W1-T2", run_id: "r2" })]));
+  s.tick();
+  assert.deepEqual(runs(s.db).at(-1), ["W1-T2", "r2", new Date(T0 + 5_000).toISOString()], "a moved run is the newest change");
+  const clean = store(t, ledgerDir, clock);
+  clean.tick();
+  assert.deepEqual(runs(clean.db).sort(), runs(s.db).sort(), "a clean rebuild keeps the same rows");
+});
