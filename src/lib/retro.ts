@@ -1692,6 +1692,7 @@ export const RETRO_MAX_RUNS_PER_PASS = 40;
 export interface RetroGather {
   sinceTs?: string;
   totalRuns: number;
+  unmovedGoals?: LedgerRecord[];
   consumedThroughTs?: string;
   runsDeferred: number;
   byType: TypeCalibration[];
@@ -1829,6 +1830,7 @@ export function buildGather(opts: {
     // `sinceTs` must not truncate a week in progress. Omitted entirely without a `mounts` table.
     ...(opts.mounts ? { weeklyBurnByModelClass: aggregateWeeklyBurnByModelClass(runs, opts.mounts, opts.now ?? Date.now()) } : {}),
     verdicts: verdictDistribution(scoped),
+    unmovedGoals: [...new Map(records.filter((r) => ["goal.unmoved", "goal.moved", "goal.unmeasured"].includes(r.step ?? "") && typeof r.goal_id === "string").map((r) => [r.goal_id, r])).values()].filter((r) => r.step !== "goal.moved"),
     mergedSince: merged,
     shipped,
     discrepancies,
@@ -1955,6 +1957,9 @@ export function renderGather(g: RetroGather): string {
     `Runs in scope: ${g.totalRuns}`,
     `Verdicts: ${JSON.stringify(g.verdicts)}`,
     `LEARNINGS entries: ${g.learningsNow} now (${g.learningsNow - g.learningsAtMarker} added since marker)`,
+    "",
+    "## Goals needing another remedy or measurement repair — propose changes through the governed plan",
+    ...(g.unmovedGoals ?? []).map((row) => `- ${row.goal_id}: ${row.baseline} -> ${row.value} (${row.measurement}, ${row.windowDays} days); ${row.pricedUsd} priced ledger USD + ${row.unpricedRows} unpriced rows; cost complete: ${row.costComplete}; tasks: ${JSON.stringify(row.tasks)}; receipt ${row.key}. Propose a lower priority or another remedy through plan review; this observation is not causal attribution.`),
     "",
     "## Calibration (BY TASK TYPE) — the numbers mounts.yaml (W1-T5) needs",
     calibrationTable(g.byType),

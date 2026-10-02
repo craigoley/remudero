@@ -1,0 +1,9 @@
+id: G-model-evidence
+symptom: Model assignments are missing attributable terminal receipts.
+measurement: terminal-missing-percent
+direction: decrease
+baseline:
+  value: 1.7848036715961244
+  observedAt: "2026-10-02T20:07:34.393Z"
+  source: "core seven-day three-form ledger query; 18199 selected rows; 0 malformed; operational observation, not causal attribution"
+tasks: [W1-T4687, W1-T5176]

@@ -1,0 +1,9 @@
+id: G-ci-redesign
+symptom: Repeat CI repairs consume PR time without removing the recurring cause.
+measurement: ci-friction-minutes
+direction: decrease
+baseline:
+  value: 4991.400000000003
+  observedAt: "2026-10-02T20:07:34.393Z"
+  source: "core seven-day three-form ledger query; 18199 selected rows; 0 malformed; operational observation, not causal attribution"
+tasks: [W1-T5300, W1-T4690]
