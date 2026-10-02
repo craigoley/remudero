@@ -175,6 +175,28 @@ test("a .github task gets the CI learning and NOT the containment ones", () => {
   assert.deepEqual(ids, ["skipped-check-deadlock"]);
 });
 
+test("W1-T3625: the comment-load lesson reaches every measured root and its policy sources", () => {
+  const learningsDir = join(REPO_ROOT, "learnings");
+  const measuredAndPolicyPaths = [
+    "src/lib/worker.ts",
+    "scripts/comment-load-ratchet.mjs",
+    "deploy/install-host-units.sh",
+    ".github/workflows/ci.yml",
+    "bin/rmd",
+    "hooks/pre-push",
+    "docs/comment-standard.md",
+    "scripts/comment-load-baseline.json",
+  ];
+
+  for (const file of measuredAndPolicyPaths) {
+    const selected = loadLearningsForTaskFiles(learningsDir, [file]);
+    assert.ok(
+      selected.some((entry) => entry.id === "comment-load-ratchet-lane"),
+      `${file} must select the comment-load-ratchet guidance`,
+    );
+  }
+});
+
 test("no task files with no symbol/error text → no matched entries", () => {
   const { selected } = selectLearnings(CORPUS, undefined);
   assert.equal(selected.length, 0);

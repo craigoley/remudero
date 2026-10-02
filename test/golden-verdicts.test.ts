@@ -217,6 +217,12 @@ test("GOLDEN — CI COMMITLINT LESSON: the cited incident executes and arms from
   assertGolden(verdict, golden);
 });
 
+test("GOLDEN — COMMENT-LOAD LESSON: the cited incident executes and the comment-load guidance arms", () => {
+  const { verdict, golden } = judgeCase("ci-comment-load-lesson");
+  assert.equal(golden.violation, "none");
+  assertGolden(verdict, golden);
+});
+
 test("GOLDEN — KNOWLEDGE RETIRE LEDGER: the observed ledger learning retirement keeps its text and arms with a golden replay", () => {
   const { verdict, golden } = judgeCase("knowledge-retire-ledger");
   assert.equal(golden.violation, "none");
