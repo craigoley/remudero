@@ -570,8 +570,3 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
     },
   };
 }
-
-/** Run ci-friction gardener passes on their own timer (gardener.ts's `startGarden`). */
-export function startCiFrictionGardener(deps: GardenerDeps, sources: CiFrictionGardenSources, intervalMs: number): { stop: () => void } {
-  return startGarden(ciFrictionGardenSpec(deps, sources), deps, intervalMs);
-}
