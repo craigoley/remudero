@@ -58,7 +58,80 @@ import type { LedgerRecord } from "./retro.js";
 
 // ── Pricing: rounds → causes, never fire count ──────────────────────────────────────────────
 
-export type CiFrictionCauseKind = "check" | "main_merge" | "conflict" | "fix_refusal";
+export type CiFrictionCauseKind = "check" | "main_merge" | "conflict" | "fix_refusal" | "hand_fix";
+
+export type CiFrictionHandFix = { pr: number; at: string; files: string[] };
+export type CiFrictionHandFixRead = { state: "observed"; fixes: CiFrictionHandFix[] } | { state: "unmeasured"; reason: string; fixes: CiFrictionHandFix[] };
+
+/** Collect one paginated list per pass; source changes come from local merge commits, not N PR API reads. */
+export function readCiFrictionHandFixes(
+  repoRoot: string, stateDir: string, owner: string, repo: string, clock: Clock = systemClock,
+  run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { cwd: repoRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }),
+): CiFrictionHandFixRead {
+  const since = clock.now() - 14 * 86_400_000;
+  const fixes = new Map<number, CiFrictionHandFix>();
+  try {
+    for (let page = 1; ; page++) {
+      const rows = JSON.parse(run("gh", ["api", `repos/${owner}/${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=${page}`]));
+      if (!Array.isArray(rows)) throw new Error("hand-fix PR list is not an array");
+      for (const row of rows) {
+        if (!Number.isSafeInteger(row.number) || typeof row.updated_at !== "string" || !Number.isFinite(Date.parse(row.updated_at)))
+          throw new Error("hand-fix PR list has an invalid identity or timestamp");
+        if (!/^run-unfiled-/.test(row.head?.ref ?? "") || !/^fix(?:\([^)]*\))?!?:/.test(row.title ?? "") || !row.merged_at) continue;
+        const at = Date.parse(row.merged_at);
+        if (!Number.isFinite(at) || at < since || at > clock.now()) continue;
+        if (!/^[0-9a-f]{40}$/.test(row.merge_commit_sha ?? "")) throw new Error(`hand-fix PR #${row.number} has no merge commit`);
+        const files = run("git", ["diff-tree", "--no-commit-id", "--name-only", "-r", row.merge_commit_sha])
+          .trim().split("\n").filter((file) => /^(src|scripts)\/[\w./-]+$/.test(file) && !file.split("/").includes(".."));
+        fixes.set(row.number, { pr: row.number, at: row.merged_at, files: [...new Set(files)] });
+      }
+      if (rows.length < 100 || Date.parse(rows.at(-1).updated_at) < since) break;
+    }
+    const result: CiFrictionHandFixRead = { state: "observed", fixes: [...fixes.values()].sort((a, b) => a.pr - b.pr) };
+    writeAtomic(join(stateDir, "ci-friction-hand-fixes.json"), JSON.stringify({ ...result, asOf: clock.iso(), byPr: Object.fromEntries(fixes) }) + "\n");
+    return result;
+  } catch (error) {
+    return { state: "unmeasured", reason: String((error as Error)?.message ?? error), fixes: [] };
+  }
+}
+
+/** A manual repair is one observation. Attribute it to its highest-priced owner match, never count it twice. */
+export function ciFrictionHandFixRounds(
+  fixes: readonly CiFrictionHandFix[], rounds: readonly CiFrictionRound[], priced: readonly CiFrictionCausePrice[], search: OwnerSearch,
+): CiFrictionRound[] {
+  const sorted = rounds.map((r) => r.minutes).filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b);
+  if (sorted.length === 0) return [];
+  const mid = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+  const owners = priced.map((price) => ({ price, files: locateCiFrictionOwner(ciFrictionCauseKey(price.cause),
+    rounds.filter((r) => ciFrictionCauseKey(r.cause) === ciFrictionCauseKey(price.cause)).flatMap((r) => r.detail ? [r.detail] : []), search)?.files ?? [] }));
+  const unique = [...new Map(fixes.map((fix) => [fix.pr, fix])).values()];
+  const unowned = new Map<string, CiFrictionHandFix[]>();
+  const result: CiFrictionRound[] = [];
+  for (const fix of unique) {
+    const matched = owners.find((owner) => owner.files.some((file) => fix.files.includes(file)));
+    if (matched) {
+      if (!rounds.some((round) => round.pr === fix.pr && ciFrictionCauseKey(round.cause) === ciFrictionCauseKey(matched.price.cause)))
+        result.push({ pr: fix.pr, at: fix.at, cause: matched.price.cause, minutes: median,
+          pricing: "median-proxy",
+          detail: `hand fix PR #${fix.pr}: ${fix.files.join(", ")}; minutes are the pass median proxy (${median}), not measured repair time` });
+    } else {
+      for (const file of fix.files) unowned.set(file, [...(unowned.get(file) ?? []), fix]);
+    }
+  }
+  const emitted = new Set<number>();
+  for (const [file, repairs] of [...unowned].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))) {
+    if (repairs.length < 2) continue;
+    for (const fix of repairs) {
+      if (emitted.has(fix.pr)) continue;
+      emitted.add(fix.pr);
+      result.push({ pr: fix.pr, at: fix.at, cause: { kind: "hand_fix", name: file }, minutes: median,
+        pricing: "median-proxy",
+        detail: `hand fix PR #${fix.pr}: ${file}; minutes are the pass median proxy (${median}), not measured repair time` });
+    }
+  }
+  return result;
+}
 
 /** A failed history read is a failed garden pass, never a measured zero-friction corpus. */
 export function readCiFrictionLedgerRecords(stateDir: string): LedgerRecord[] {
@@ -94,6 +167,7 @@ export interface CiFrictionRound {
   /** What the round met, verbatim enough to act on: a refusal's reason, a check and the failure it
    *  named, the files a main merge brought in. The evidence a drafted remedy carries. */
   detail?: string;
+  pricing?: "median-proxy";
 }
 
 /** A round this old counts half; one twice as old a quarter. A smooth fade, never a cutoff date,
@@ -136,7 +210,10 @@ export function priceCiFrictionCauses(
     for (const g of gateFireRates.gates) {
       if (g.minutes <= 0) continue;
       const cause: CiFrictionCause = { kind: "check", name: g.gate };
-      rows.set(ciFrictionCauseKey(cause), { cause, minutes: g.minutes, rounds: g.redRuns, prSet: new Set(), prs: g.prs });
+      const hand = ledgerRounds.filter((r) => r.pricing === "median-proxy" && ciFrictionCauseKey(r.cause) === ciFrictionCauseKey(cause));
+      const proxyMinutes = hand.reduce((sum, r) => sum + r.minutes * (nowMs === undefined ? 1 : ciFrictionRecencyWeight(r.at, nowMs)), 0);
+      rows.set(ciFrictionCauseKey(cause), { cause, minutes: g.minutes + proxyMinutes, rounds: g.redRuns + hand.length,
+        prSet: new Set(), prs: g.prs + new Set(hand.map((r) => r.pr)).size });
     }
   }
   return [...rows.values()]
@@ -647,6 +724,7 @@ export interface CiFrictionInventory {
   ladder: CiFrictionCauseLine[];
   rounds: CiFrictionRound[];
   degraded?: string;
+  handFixState?: { state: "observed" | "unmeasured"; count: number };
   /** Legacy field kept for the overseer's filing receipts: the cause (and rung) this pass acts on. */
   untracked?: CiFrictionCausePrice;
 }
@@ -654,6 +732,7 @@ export interface CiFrictionInventory {
 export interface CiFrictionGardenSources {
   /** The ledger union's own records — read once per pass, never parsed twice for one tick. */
   ledgerRecords: () => readonly LedgerRecord[];
+  handFixes?: () => CiFrictionHandFixRead;
   gateFireRates?: () => GateFireRateReport | undefined;
   /** Every ci-friction task on fetched main, with when its build merged ({@link readCiFrictionPlanState}). */
   planState: () => CiFrictionPlanState;
@@ -802,7 +881,11 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
     },
     inventory: () => {
       const records = sources.ledgerRecords();
-      const rounds = ciFrictionRoundsFromLedger(records);
+      const ledgerRounds = ciFrictionRoundsFromLedger(records);
+      const hand = sources.handFixes?.();
+      if (hand?.state === "unmeasured") deps.log("ci-friction.hand_fixes_unmeasured", { reason: hand.reason });
+      const rounds = [...ledgerRounds, ...ciFrictionHandFixRounds(hand?.fixes ?? [], ledgerRounds,
+        priceCiFrictionCauses(ledgerRounds, sources.gateFireRates?.(), clock.now()), sources.ownerSearch)];
       const priced = priceCiFrictionCauses(rounds, sources.gateFireRates?.(), clock.now());
       const plan = sources.planState();
       if (plan.degraded) deps.log("ci-friction.origins_degraded", { reason: plan.degraded });
@@ -816,7 +899,7 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
         ownerSearch: sources.ownerSearch,
         nowMs: clock.now(),
       });
-      return { priced, rounds, ladder, ...(next ? { next, untracked: next.price } : {}), ...(plan.degraded ? { degraded: plan.degraded } : {}) };
+      return { priced, rounds, ladder, ...(hand ? { handFixState: { state: hand.state, count: hand.fixes.length } } : {}), ...(next ? { next, untracked: next.price } : {}), ...(plan.degraded ? { degraded: plan.degraded } : {}) };
     },
     // The ladder decides whether work remains — never a recorded fingerprint alone, which a pass that
     // drew no action or failed to land could have left behind.
@@ -832,6 +915,7 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
         untracked: inv.next ? inv.next.origin.slice("ci-friction:".length) : null,
         next: inv.next ? { origin: inv.next.origin, rung: inv.next.rung, decision: inv.next.decision.kind } : null,
         ladder: inv.ladder,
+        hand_fixes: inv.handFixState ?? { state: "unmeasured", count: null },
         priced: inv.priced,
         ...(inv.degraded ? { degraded: inv.degraded } : {}),
       };
@@ -849,7 +933,10 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       const taskId = sources.mintTaskId(ws.branch);
       const records = sources.ledgerRecords();
       const contents = ciFrictionShardYaml(
-        { price: action.price, rung: action.rung, owner: action.decision.owner, rounds: remedyRoundsOf(ciFrictionRoundsFromLedger(records)), prior: action.decision.prior },
+        { price: action.price, rung: action.rung, owner: action.decision.owner, rounds: remedyRoundsOf([
+          ...ciFrictionRoundsFromLedger(records), ...ciFrictionHandFixRounds(sources.handFixes?.().fixes ?? [], ciFrictionRoundsFromLedger(records),
+            action.priced ?? [], sources.ownerSearch),
+        ]), prior: action.decision.prior },
         taskId,
         action.priced,
       );
@@ -949,4 +1036,3 @@ export function renderCiFrictionReplay(lines: readonly CiFrictionReplayLine[]): 
   for (const [k, at] of drafted) out.push(`  ${at.slice(0, 16)}Z  ${k}`);
   return out.join("\n");
 }
-

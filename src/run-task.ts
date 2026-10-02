@@ -173,7 +173,7 @@ import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
 import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec, testManifestProposalPath, type TestProposalFeed } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
-import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
+import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, runSelectorShadowGardener, selectorShadowFlakeLedger } from "./lib/selector-shadow-gardener.js";
 import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, startMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
@@ -33233,8 +33233,10 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     // drafted as one, parked for a person.
     case "ci-friction": {
       const d = deps("ci-friction", raiseDuplicate);
+      let handFixes: ReturnType<typeof readCiFrictionHandFixes> | undefined;
       const sources: CiFrictionGardenSources = {
         ledgerRecords: () => readCiFrictionLedgerRecords(stateDir),
+        handFixes: () => handFixes ??= readCiFrictionHandFixes(repoRoot, stateDir, owner, repo),
         gateFireRates: () => readGateFireRateReport(stateDir),
         planState: () => readCiFrictionPlanState(repoRoot),
         ownerSearch: gitCiFrictionOwnerSearch((args) => execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 })),
