@@ -21,7 +21,7 @@ import type { IssueGateway } from "../src/lib/escalate.js";
 import { createLedgerProjector, openProjectorReadModel, type LedgerProjector } from "../src/lib/ledger-projector.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 import { acquireLease, type ReadModelDb, type ReadModelLease } from "../src/lib/read-model-db.js";
-import { DEFAULT_LIVENESS_BOUND_MS, ENVIRONMENTAL_BLOCK_COOLDOWN_MS, projectPlan, type GitHub, type PrRef } from "../src/lib/status.js";
+import { DEFAULT_LIVENESS_BOUND_MS, ENVIRONMENTAL_BLOCK_COOLDOWN_MS, projectPlan, WORKER_ACTIVITY_STAND_IN_STEP, type GitHub, type PrRef } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
@@ -484,4 +484,40 @@ test("a store without the run activity table derives from its fact rows alone", 
   board.update();
   assert.equal(board.rows().some((row) => row.step === BOARD_RUN_ACTIVITY_STEP), false);
   assert.equal(board.projections().get("W1-T1")?.status, "running");
+});
+
+test("a run's worker rows stand as one row carrying the model it now asks for until its next run", (t) => {
+  // 2026-10-02T15:46:54Z: W1-T1289's run.start asked for sonnet and its later worker.activity rows for opus.
+  const r = rig(t);
+  const model = (board: BoardProjection) => board.projections().get("W1-T1")?.workerTelemetry?.requestedModel;
+  const standing = (board: BoardProjection) => board.rows().filter((row) => row.step === WORKER_ACTIVITY_STAND_IN_STEP).map((row) => `${row.run_id}:${row.requested_model}`);
+  r.append({ step: "run.start", task_id: "W1-T1", run_id: "r1", mount: { model: "sonnet" } });
+  const board = r.board({ rules: { clock: false } });
+  board.update();
+  assert.equal(model(board), "sonnet");
+  r.clock.set(T0 + 60_000);
+  r.append({ step: "worker.activity", task_id: "W1-T1", run_id: "r1", event_kind: "message", requested_model: "opus" });
+  assert.deepEqual(board.update().rederived, ["W1-T1"], "the run's worker rows move its task");
+  assert.equal(model(board), "opus");
+  r.clock.set(T0 + 120_000);
+  r.append({ step: "worker.activity", task_id: "W1-T1", run_id: "r1", event_kind: "working" }, { step: "worker.assignment", task_id: "W1-T1", run_id: "r1" });
+  later(r);
+  board.update();
+  assert.deepEqual(standing(board), ["r1:opus"], "one row per run, kept past a newer fact row, each field its newest value");
+  assert.equal(model(board), "opus");
+  r.clock.set(T0 + 180_000);
+  r.append({ step: "run.start", task_id: "W1-T1", run_id: "r2", mount: { model: "haiku" } });
+  later(r);
+  board.update();
+  assert.equal(model(board), "haiku", "a later run starts from its own model");
+});
+
+test("a store without the run worker table derives the model from its fact rows alone", (t) => {
+  const r = rig(t);
+  r.append({ step: "run.start", task_id: "W1-T1", run_id: "r1", mount: { model: "sonnet" } });
+  r.append({ step: "worker.activity", task_id: "W1-T1", run_id: "r1", event_kind: "message", requested_model: "opus" });
+  r.db.exec("DROP TABLE run_worker");
+  const board = r.board();
+  board.update();
+  assert.equal(board.projections().get("W1-T1")?.workerTelemetry?.requestedModel, "sonnet");
 });
