@@ -23,7 +23,7 @@ attachments: []
 origin: cli
 status: proposed
 reply_to: null
-proposal_pr: null
+proposal_pr: https://github.com/craigoley/remudero/pull/8726
 summary: null
 expansion: null
 submission_key: null
