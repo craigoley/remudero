@@ -183,7 +183,10 @@ export function ciFrictionCauseState(
   // Every rung that already has a record is spoken for; a reopened draft takes the next free one.
   const nextFree = (from: number): number => {
     let r = Math.max(1, from);
-    while (receipts.has(ciFrictionRungOrigin(key, r)) || mine.some((t) => parseCiFrictionOrigin(t.origin)?.rung === r && !isDocOnlyRemedy(t))) r += 1;
+    // A receipt holds a rung only until its record reaches main; from then the record decides, and a
+    // docs-only record holds no rung (2026-10-02: every reopened cause skipped to rung 2 on its receipt).
+    const held = (origin: string) => receipts.has(origin) && !mine.some((t) => t.origin === origin);
+    while (held(ciFrictionRungOrigin(key, r)) || mine.some((t) => parseCiFrictionOrigin(t.origin)?.rung === r && !isDocOnlyRemedy(t))) r += 1;
     return r;
   };
   if (top.retired && top.mergedAt === undefined) {

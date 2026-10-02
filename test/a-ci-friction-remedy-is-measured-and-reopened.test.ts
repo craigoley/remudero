@@ -242,3 +242,9 @@ test("the replay shows a docs-only remedy reopening its cause and a filed rung h
   assert.equal(steps[0]!.causes.find((c) => c.key === "check:ci-log:commitlint")!.state, "in_progress", "not retired until its retirement lands");
   assert.equal(steps[2]!.causes.find((c) => c.key === "check:ci-log:commitlint")!.state, "retired");
 });
+
+test("a docs-only record's own filing receipt does not push its reopened cause past rung 1", () => {
+  const doc = remedy({ id: "W1-T5076", files: [CI_FRICTION_REMEDIES_DOC] });
+  const s = ciFrictionCauseState(KEY, [doc], [], MERGE + DAY, new Set([`ci-friction:${KEY}`]));
+  assert.equal(s.state === "draft" && s.rung, 1, "the receipt is the docs record's own, which is on main and holds rung 0");
+});
