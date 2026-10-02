@@ -3564,7 +3564,7 @@ comparison. The operator's same-day correction below replaces the October 16 rev
 This is a model-version rollout, not a measured quality promotion or public result.
 
 Azure account catalog and quota confirmed `gpt-6.1-sol` / `2026-09-29` in East US 2; deployment
-`synthwatch-foundry/gpt-6.1-sol` was provisioned GlobalStandard at capacity 100. Cash balanced
+`synthwatch-foundry/gpt-6.1-sol` was initially recorded at capacity 100. An authenticated Azure deployment read on 2026-10-02 confirmed GlobalStandard capacity 1000 (version 2026-09-29, provisioningState Succeeded). Cash balanced
 keeps cheap models first, with Sol trailing; a missing squeezed Sonnet deployment can walk to Sol.
 The fleet $25/day cap, normal/squeeze Foundry Claude subcaps and frontier subscription boundary stay
 in force. Sol tools use Responses, preserve reasoning items, stop on local tool failure, reserve

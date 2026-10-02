@@ -58,7 +58,7 @@ test("daily routing review reads all three ledger forms once and keeps repositor
     assert.equal(result.snapshot.nextScheduledReviewAt, "2026-10-03T04:17:00.000Z");
     assert.equal(result.snapshot.routingChanged, false); assert.equal(result.snapshot.comparativeClaims, "none");
     assert.equal(statSync(f.outDir).mode & 0o777, 0o700);
-    for (const file of ["2026-10-02.json", "2026-10-02.txt", "latest.json", "latest.txt"]) assert.equal(statSync(join(f.outDir, file)).mode & 0o777, 0o600);
+    for (const file of ["2026-10-02.json", "2026-10-02.txt", "latest.json", "latest.txt", "2026-10-02.quarantine.json"]) assert.equal(statSync(join(f.outDir, file)).mode & 0o777, 0o600);
     assert.deepEqual(JSON.parse(readFileSync(join(f.outDir, "latest.json"), "utf8")), result.snapshot);
     assert.match(result.text, /sol61-vs-sonnet55: provisional/);
   } finally { f.close(); }
@@ -89,6 +89,11 @@ test("daily routing review quarantines future timestamps and retains non-starter
       { ...assignment("2"), ts: "2026-10-03T10:00:00.000Z" }, { ...assignment("3"), ts: "bad" }]));
     const result = await dailyRoutingReview({ ...f, asOf });
     const source = result.snapshot.sources[0];
+    const quarantine = JSON.parse(readFileSync(join(f.outDir, "2026-10-02.quarantine.json"), "utf8"));
+    assert.equal(quarantine.rawReceiptsRetained, true);
+    assert.equal(quarantine.sources[0].findings.length, 2);
+    assert.match(quarantine.sources[0].findings[0].rowHash, /^[a-f0-9]{64}$/);
+    assert.equal(readFileSync(join(f.sources[0]!.stateDir, "ledger.ndjson"), "utf8").split("\n").filter(Boolean).length, 3);
     assert.equal(source.futureRows, 2); assert.equal(source.newestTs, "2026-10-02T10:00:00.000Z");
     const arm = source.reports.find((item: { id: string }) => item.id === epoch.id).arms.find((item: { arm: string }) => item.arm === "sol61");
     assert.equal(arm.tasks, 1); assert.equal(arm.nonStarterAssignments, 1); assert.equal(arm.costMissingAssignments, 1);
