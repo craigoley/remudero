@@ -1,3 +1,5 @@
+// @source-text-subject: W1-T5364 requires a projection-step census; fixture pricing and
+// real-reader assertions independently prove that each counted step survives the filter.
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -48,7 +50,9 @@ test("every ci-friction projection step is covered by the retained step census",
   const source = readFileSync(new URL("../src/lib/ci-friction-gardener.ts", import.meta.url), "utf8");
   const compared = [...source.matchAll(/\b(?:r|row)\.step\s*(?:===|!==)\s*["']([^"']+)["']/g)].map(match => match[1]!);
   assert.ok(compared.length >= 8, "the census sees the current projections");
-  assert.deepEqual(compared.filter(step => !CI_FRICTION_LEDGER_STEPS.includes(step)), []);
+  const fixture = writeLedger(compared.map(step => ({ step })), { rotations: [{ at: "2026-09-20T12:00:00.000Z", rows: [] }] });
+  const retained = new Set(readCiFrictionLedgerRecords(fixture.dir).map(row => row.step));
+  assert.deepEqual(compared.filter(step => !retained.has(step)), [], "each projection's step survives the real reader");
 });
 
 test("a missing sweep association is recovered selectively without losing or duplicating priced rounds", () => {
