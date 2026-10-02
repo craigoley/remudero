@@ -1,0 +1,53 @@
+- id: W1-T5346
+  title: "CONTAINMENT AND ISOLATION PROBES RUN ONCE PER BOOT AND ON IMAGE CHANGE — every implement run spawns probeContainment and probeIsolation workers before its claim, about 6.7 minutes and 18.1% of all busy lane time on 2026-10-02, to re-prove a boundary that only changes when the image, the harness or the worker policy changes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-02: implement dispatch admission research (lane-time attribution); operator ruling that the probes run once per boot and on image or harness change"
+  plan_refs: [W1-T17, W1-T5345]
+  files: [src/run-task.ts, MASTER-PLAN.md, test/containment-and-isolation-probes-run-once-per-boot-and-image.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    The implement lane in src/run-task.ts runs `probeContainment` (src/lib/containment.ts: outside-cwd write
+    denial, egress, token reads) and then `probeIsolation` (src/lib/isolation.ts: inherited aliases and
+    functions) on every run, before `dispatch.claim`. Each spawns a worker. MEASURED 10-02 phase medians:
+    run.start -> containment.probe 3.6 min, then +1.7 min to isolation.probe. run.start -> dispatch.claim is
+    18.1% of the 1,780 busy lane-minutes, about 6.7 min per run, against 25.7% for the worker actually
+    implementing. A daemon's implement lanes run inside the daemon's own process, so the same image, harness
+    and rendered worker policy are re-proved dozens of times a day with an identical result.
+    MASTER-PLAN §12 rule 11 says isolation and containment are proven "PER RUN ... on THIS machine, THIS run".
+    The operator ruled on 2026-10-02 that they are proven once per boot and again whenever an input the probe
+    depends on changes, and that a failed probe still blocks all dispatch until a probe passes. This task
+    carries that amendment of rule 11's wording, so the code and the rule agree (§12.25: the code wins where
+    they disagree, so they must not).
+  design: |
+    1. A process-scoped probe verdict cache in src/run-task.ts, keyed by a digest of every input the probes
+       read:
+       - the image build sha (`IMAGE_BUILD_SHA_PATH`, absent off-container);
+       - the harness revision (the install head sha the process booted from);
+       - the rendered worker settings content, with per-run paths normalised out;
+       - the deny-floor hook's content digest;
+       - the binary pin's observed CLI version and the worker provider.
+       A run whose key matches a cached PASS skips both spawns and logs `containment.probe` /
+       `isolation.probe` with `cached: true`, the key and the age of the proving run. It costs nothing and
+       carries the same verdict fields.
+    2. Any key change re-probes before that run's claim. A FAIL is never cached as a pass. A failed probe sets
+       a process-wide hold, so every later run in the process re-probes and refuses, exactly as a failed probe
+       refuses its own run today, until a probe passes.
+    3. A process with no cache entry (a fresh boot, `rmd run-task` by hand) probes exactly as today.
+    4. Amend MASTER-PLAN §12 rule 11 to say proven per boot and on any change of the probe's inputs, still by
+       probe and never from configuration, and cite this task.
+  acceptance:
+    - claim: "a second run in the same process with an unchanged probe key reuses the passing verdict without spawning a probe, a changed image sha, harness revision or worker policy re-probes, and a failing probe is never cached and holds every later run until a probe passes"
+      proof: "unit test: test/containment-and-isolation-probes-run-once-per-boot-and-image.test.ts"
+  falsifier: |
+    Remove the cache lookup. The suite's two sequential runs with an identical key record two
+    `probeContainment` spawns instead of one. Cache a FAIL, and the third run in the failing fixture
+    proceeds to its claim without probing.
