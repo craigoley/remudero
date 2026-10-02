@@ -105,6 +105,10 @@ import {
   threadDetailView,
   type InboxThreadItem,
 } from "./inbox-responder.js";
+import {
+  createInboxThreadListView, readInboxThreadListView, warmInboxThreadListView,
+  type ThreadListClassification, type ThreadListSources,
+} from "./inbox-thread-list-view.js";
 import { appendThreadMessage, appendThreadReplyOnce, inboxThreadIdentity, proposalIdOfThread, readAllThreads, readThread } from "./inbox-thread.js";
 import {
   beginFragmentPass,
@@ -1509,7 +1513,7 @@ interface InboxClassifyState {
   fragments: FragmentMemo;
   /** The last ledger read, reused while the ledger's stamp is unchanged. */
   ledger?: { stamp: string | null; lines: LedgerLines; verdictDigest: string };
-  last?: { key: string; plan: Plan; planKey?: string; result: ClassifiedInbox };
+  last?: { key: string; plan: Plan; planKey?: string; result: ClassifiedInbox; /** Epoch millis the pass that made `result` completed. */ at: number };
   /** A sliced refresh in progress, so a second caller with the same inputs awaits it instead of starting another. */
   pending?: { key: string; plan: Plan; promise: Promise<ClassifiedInbox> };
 }
@@ -1722,13 +1726,19 @@ export function classifyAllProposalsMemo(deps: PanelGraphDeps, readPlanSnapshot?
   if (reused !== undefined) return reused;
   const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.archiveReleases);
   const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(pass.classifyOne), ledgerLines: fp.ledgerLines, projection: fp.projection };
-  state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result };
+  state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: Date.now() };
   return result;
 }
 
 /** The last classification this deps' memo holds, without computing one: what a cheap synchronous reader may show. */
 export function peekClassifiedInbox(deps: PanelGraphDeps): ClassifiedInbox | undefined {
   return inboxClassifyStates.get(deps)?.last?.result;
+}
+
+/** {@link peekClassifiedInbox} with the time that classification was made: what the thread list qualifies its rows by. */
+export function peekClassifiedInboxStamped(deps: PanelGraphDeps): { result: ClassifiedInbox; classifiedAtMs: number } | undefined {
+  const last = inboxClassifyStates.get(deps)?.last;
+  return last === undefined ? undefined : { result: last.result, classifiedAtMs: last.at };
 }
 
 /** PRIMARY CONTROL on how long one inbox recompute holds the event loop: proposals classified between yields. Each can
@@ -1763,7 +1773,7 @@ export async function classifyAllProposalsSliced(
       for (const proposal of pass.proposals.slice(i, i + INBOX_CLASSIFY_SLICE)) classifications.push(pass.classifyOne(proposal));
     }
     const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications, ledgerLines: fp.ledgerLines, projection: fp.projection };
-    state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result };
+    state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: Date.now() };
     return result;
   };
   const promise = run().finally(() => {
@@ -2033,19 +2043,68 @@ function readThreadsOr500(deps: PanelGraphDeps, res: ServerResponse) {
   return all.threads;
 }
 
+/** How often a built thread-list view re-warms its classification with no request in flight. */
+const INBOX_THREAD_LIST_WARM_MS = 60_000;
+
+/** The thread list's seams over this deps: the one coalescing classifier, the held classification, and the live stores. */
+function inboxThreadListSources(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): ThreadListSources<ClassifiedInbox> {
+  const stamped = (classified: ClassifiedInbox, fallbackMs: number): ThreadListClassification<ClassifiedInbox> => {
+    const held = peekClassifiedInboxStamped(deps);
+    // The memo may hand back a ledger-refreshed copy of the held result; the proposals array is the shared identity.
+    const classifiedAtMs = held !== undefined && held.result.proposals === classified.proposals ? held.classifiedAtMs : fallbackMs;
+    const partial = [...classified.projection.values()].some((value) => value.indeterminate) || classified.classifications.some((value) => value.referentUnverified);
+    return {
+      classified, classifiedAtMs, complete: !partial,
+      ...(partial ? { incompleteReason: "the GitHub projection or a proposal referent is indeterminate" } : {}),
+    };
+  };
+  return {
+    now: () => Date.now(),
+    classify: async () => stamped(await classifyAllProposalsSliced(deps, readPlanSnapshot), Date.now()),
+    peek: () => {
+      const held = peekClassifiedInboxStamped(deps);
+      return held === undefined ? undefined : stamped(held.result, held.classifiedAtMs);
+    },
+    readThreads: () => readAllThreads({ threadStorePath: inboxThreadStorePath(deps.inboxRoot) }),
+    readMarks: () => readReadMarks(readMarksPath(join(deps.inboxRoot, "state"))),
+    items: (classified) => operatorThreadItems(deps, readPlanSnapshot, classified),
+    inputsKey: () => statStamp(plainStorePath(join(deps.inboxRoot, "state"))) ?? "absent",
+  };
+}
+
 /** GET /v1/inbox/threads — the operator's threads: headline, first line of the latest message, who
- *  it is waiting on, last activity, message count and unread. Waiting-on-you first. */
-export function buildInboxThreadsRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
+ *  it is waiting on, last activity, message count and unread. Waiting-on-you first.
+ *
+ *  W1-T5269: answered from the maintained projection (inbox-thread-list-view.ts), never by awaiting a
+ *  fleet-wide classification. The legacy `{ threads }` body is sent only for rows whose classification
+ *  is source-verified fresh; a stale list needs `?qualified=1` (the body then names its source), and
+ *  anything else is an explicit 503 — an old client must not mistake stale rows for verified ones. */
+export function buildInboxThreadsRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan, opts: { waitMs?: number; warm?: boolean } = {}): Route {
+  const view = createInboxThreadListView(inboxThreadListSources(deps, readPlanSnapshot), opts.waitMs === undefined ? {} : { waitMs: opts.waitMs });
+  if (opts.warm !== false) {
+    // Warm with no browser request: once at build, then on a cadence. A failed warm is the next read's problem, not a crash.
+    setImmediate(() => void warmInboxThreadListView(view));
+    setInterval(() => void warmInboxThreadListView(view), INBOX_THREAD_LIST_WARM_MS).unref();
+  }
   return {
     method: "GET",
     path: "/v1/inbox/threads",
     scope: "read",
-    handler: async (_req, res) => {
-      const threads = readThreadsOr500(deps, res);
-      if (!threads) return;
-      const marks = readReadMarks(readMarksPath(join(deps.inboxRoot, "state")));
-      const classified = await classifyAllProposalsSliced(deps, readPlanSnapshot);
-      sendJson(res, 200, { threads: listThreadViews(operatorThreadItems(deps, readPlanSnapshot, classified), threads, marks) });
+    handler: async (req, res) => {
+      const read = await readInboxThreadListView(view);
+      if (read.kind === "ok") {
+        sendJson(res, 200, { threads: read.threads, source: read.source });
+      } else if (read.kind === "stale" && new URL(req.url ?? "/", "http://localhost").searchParams.get("qualified") === "1") {
+        sendJson(res, 200, { threads: read.threads, source: read.source });
+      } else if (read.kind === "stale") {
+        res.setHeader("retry-after", "1");
+        sendJson(res, 503, { error: "inbox_threads_stale", detail: "the thread list is being refreshed; its rows are not source-verified", source: read.source });
+      } else if (read.code === "thread_store_unreadable") {
+        sendJson(res, 500, { error: "thread_store_unreadable", detail: read.detail });
+      } else {
+        res.setHeader("retry-after", "1");
+        sendJson(res, 503, { error: `inbox_threads_${read.code}`, detail: read.detail });
+      }
     },
   };
 }
