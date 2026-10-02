@@ -92,6 +92,6 @@ test("W1-T4527: the tracked registry names core as the primary, and both shell r
   assert.equal(requirePrimaryInstance(parseInstanceRegistry(tracked)).name, "core");
   for (const script of ["install-host-units.sh", "recycle-container.sh"]) {
     const src = readFileSync(new URL(`../deploy/${script}`, import.meta.url), "utf8");
-    assert.match(src, /^\s*primary\) : ;;$/m, `${script} must list primary as a known field`);
+    assert.match(src, /project\|github_repo\|retired\|primary\) : ;;/, `${script} must list primary as a known field`);
   }
 });
