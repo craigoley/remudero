@@ -62,7 +62,7 @@ function demandView(book: ReturnType<typeof createDemandBook>, builds: string[][
 }
 
 /** Serve's side as the tests need it: the bodies a ticker posts, a listener list, and `want` handed to the ticker. */
-function fakeMain(wantTicker: () => { want(view: string, key: string): boolean }): ViewDemandSource & { messages: ReadModelWorkerMessage[]; post: (m: ReadModelWorkerMessage) => void; wants: string[] } {
+function fakeMain(wantTicker: () => { want(view: string, key: string): boolean }): ViewDemandSource<ReadModelBodyEntry> & { messages: ReadModelWorkerMessage[]; post: (m: ReadModelWorkerMessage) => void; wants: string[] } {
   const bodies = new Map<string, ReadModelBodyEntry>();
   const listeners = new Set<(entry: ReadModelBodyEntry) => void>();
   const messages: ReadModelWorkerMessage[] = [];
