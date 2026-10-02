@@ -46,7 +46,7 @@ import { ghExec } from "./github-transport.js";
 import type { ServerResponse } from "node:http";
 import { readLedgerLines, type LedgerReader } from "./status.js";
 import { systemClock, type Clock } from "./clock.js";
-import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
+import { DEFAULT_POLL_INTERVAL_MS, IDLE_STARVED_PULSE_MS, IDLE_STARVED_PULSE_STEP } from "./poll-interval.js";
 import type { Route } from "./service.js";
 import { parseGhRateLimitHeaders } from "./worker.js";
 
@@ -54,7 +54,7 @@ import { parseGhRateLimitHeaders } from "./worker.js";
 export interface DaemonPollInfo {
   /** ISO-8601 `ts` of the most recent `daemon.`-prefixed ledger line; absent if there is none. */
   lastPollTs?: string;
-  /** That line's own `poll_interval_ms`, or the injected default when it carries none. */
+  /** That line's own `poll_interval_ms`, the idle pulse's known cadence, or the injected default when it carries none. */
   pollIntervalMs: number;
 }
 
@@ -84,7 +84,8 @@ export function deriveLastPoll(
     if (!Number.isFinite(parsed) || parsed < bestParsed) continue;
     bestParsed = parsed;
     bestTs = ts;
-    bestPollIntervalMs = typeof line.poll_interval_ms === "number" ? line.poll_interval_ms : undefined;
+    bestPollIntervalMs = typeof line.poll_interval_ms === "number" ? line.poll_interval_ms
+      : step === IDLE_STARVED_PULSE_STEP ? IDLE_STARVED_PULSE_MS : undefined;
   }
   return { lastPollTs: bestTs, pollIntervalMs: bestPollIntervalMs ?? defaultPollIntervalMs };
 }
