@@ -5,7 +5,7 @@ import {
   type IssueGateway,
   type OpenIssue,
 } from "./escalate.js";
-import { rollupFor, type GhApiFetcher } from "./open-prs-rest.js";
+import { rollupForAsync, type GhApiFetcher } from "./open-prs-rest.js";
 import { appendLedger } from "./ledger.js";
 import { readLedgerLines } from "./status.js";
 import {
@@ -72,6 +72,8 @@ export function withTripwireOverride(
 }
 
 export interface MainHealthRungDeps {
+  /** Every read is awaited: production passes the async `gh` transport, because a sync `ghJson`
+   *  here held the core daemon's loop 144 s (E36, 2026-10-02). A sync fetcher still works. */
   fetch: GhApiFetcher;
   issues: IssueGateway;
   ledgerPath: string;
@@ -132,7 +134,10 @@ export function fetchMainPushRunHistory(
   branch: string,
   fetch: GhApiFetcher,
 ): MainHealthRunHistoryEntry[] {
-  const response = fetch(mainPushRunHistoryRestArgs(owner, repo, branch)) as WorkflowRunHistoryResponse;
+  return mainPushRunHistoryFromResponse(fetch(mainPushRunHistoryRestArgs(owner, repo, branch)) as WorkflowRunHistoryResponse);
+}
+
+function mainPushRunHistoryFromResponse(response: WorkflowRunHistoryResponse): MainHealthRunHistoryEntry[] {
   return (response.workflow_runs ?? [])
     .map((run): MainHealthRunHistoryEntry | undefined => {
       if (typeof run.head_sha !== "string" || run.head_sha.trim() === "") return undefined;
@@ -210,16 +215,16 @@ export function buildMainHealthRung(
   const observe = async (startedAtMs: number): Promise<void> => {
     try {
       if (!defaultBranch) {
-        const metadata = deps.fetch(["api", `repos/${owner}/${repo}`]) as RepoMetadata;
+        const metadata = (await deps.fetch(["api", `repos/${owner}/${repo}`])) as RepoMetadata;
         defaultBranch = requiredString(metadata?.default_branch, "default_branch");
       }
       const branch = defaultBranch;
-      const commit = deps.fetch([
+      const commit = (await deps.fetch([
         "api",
         `repos/${owner}/${repo}/commits/${encodeURIComponent(branch)}`,
-      ]) as CommitMetadata;
+      ])) as CommitMetadata;
       const sha = requiredString(commit?.sha, "default branch head sha");
-      const rollup = rollupFor(owner, repo, sha, deps.fetch);
+      const rollup = await rollupForAsync(owner, repo, sha, deps.fetch);
       const required = new Set(deps.readRequiredChecks?.() ?? []);
       let observation = mainHealthFromRollup(sha, rollup, required.size > 0 ? required : undefined);
       // W1-T4472 (ii): applied BEFORE `advisoryFailing` is derived below, so a red main-tripwire
@@ -277,7 +282,11 @@ export function buildMainHealthRung(
         let runHistoryUnavailable: string | undefined;
         try {
           const readMainRunHistory =
-            deps.readMainRunHistory ?? ((branchName: string) => fetchMainPushRunHistory(owner, repo, branchName, deps.fetch));
+            deps.readMainRunHistory ??
+            (async (branchName: string) =>
+              mainPushRunHistoryFromResponse(
+                (await deps.fetch(mainPushRunHistoryRestArgs(owner, repo, branchName))) as WorkflowRunHistoryResponse,
+              ));
           runHistory = await readMainRunHistory(branch);
           if (runHistory === undefined) runHistoryUnavailable = "the main push run-history reader returned no evidence";
         } catch (error) {

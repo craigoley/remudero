@@ -1,0 +1,57 @@
+- id: W1-T5284
+  title: "DAEMON LANE WORKTREES, RUN-BRANCH PUSHES AND AUTO-MERGE ARMS STILL BLOCK THE EVENT LOOP — addLaneWorktree and createDaemonLaneWorktree call the sync worktreeAdd (sync git fetch), createFixRungWorktree fetches with execFileSync, gitPushRunBranch pushes with execFileSync, and the arm path's ghExec and baseBranchRequiresMergeQueue are sync gh"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  priority: 2
+  origin: "operator session 2026-10-02: core daemon CPU profile (E36) and #8674's follow-up audit"
+  plan_refs: [W1-T4477, W1-T5074, W1-T2610, W1-T4693]
+  files: [src/lib/worker.ts, src/lib/git-push.ts, src/lib/arm-auto-merge.ts, src/run-task.ts, test/daemon-worktrees-pushes-and-arms-never-block-the-loop.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-02. In live CPU profiles of the core daemon, the 48 h loop-stall rows put 585 s in retro and
+    569 s in dispatch. The sync stacks in the profile windows included:
+    gitPushRunBranch 14.7 s; arm-auto-merge ghExec / baseBranchRequiresMergeQueue 10.4 + 3.5 s; and the worktree
+    fetch (fetchOriginRetryingRefLock with execFileSync, src/lib/worker.ts).
+    W1-T4477 gave runTaskBody and the alert-fix lane worktreeAddAsync. The other daemon-resident creators still
+    call the sync worktreeAdd, whose first step is a sync `git fetch`:
+    addLaneWorktree (used by retroCommand, triageCommandLocked and planCommand), createDaemonLaneWorktree
+    (draftProposalBatch and inboxBakeoffCommand), and gardenCheckout. The sweep fix rung's createFixRungWorktree
+    runs its own `execFileSync("git", [..."fetch", "origin", "--quiet"])` and `worktree add`.
+    gitPushRunBranch (src/lib/git-push.ts) pushes through defaultPushExec/defaultGitCapture, both execFileSync.
+    Its daemon-resident callers are runTaskBody, retroCommand, pushFixRound and repairCensusRefusedPush.
+    The arm path armAutoMergeAtOpen -> attemptArm (src/lib/arm-auto-merge.ts) runs realArmDeps' `ghExec(["pr", "merge", ...])`
+    and baseBranchRequiresMergeQueue's ghJson read synchronously inside runTaskBody.
+  design: |
+    No new bound, no new refusal. Each conversion keeps its ledger rows, refusal classes and reason strings
+    byte-identical. The sync forms stay for CLI callers.
+    (i) Worktrees: route addLaneWorktree, createDaemonLaneWorktree and gardenCheckout to worktreeAddAsync.
+    Give createFixRungWorktree an async fetch and `worktree add` (or route it through worktreeAddAsync's steps).
+    Keep every src/lib/worktree-sites.ts registration and every guard-order scan pointing at the real call.
+    (ii) Push: add gitPushRunBranchAsync with gitPushRunBranch's options, refusals (lease, discard and foreign
+    head) and empty-push detection, over an async exec. The daemon-resident callers await it.
+    (iii) Arm: give attemptArm an async form whose arm, disarm and merge calls and the merge-queue read go through
+    an async gh transport (ghJsonAsync for the read). armAutoMergeAtOpen in runTaskBody awaits it.
+    The arm outcome classes are unchanged.
+    Once the loop is free, another tick can run during these awaits. Any claim or lock that a sync call used to
+    cover by blocking must now be held explicitly, as W1-T4477 required.
+  acceptance:
+    - claim: "a daemon lane worktree add lets a timer fire while git fetch is in flight"
+      proof: 'grep: test("W1-T5284: a daemon lane worktree add lets a timer fire while git fetch is in flight" in test/daemon-worktrees-pushes-and-arms-never-block-the-loop.test.ts'
+    - claim: "the fix rung worktree lets a timer fire while git fetch is in flight"
+      proof: 'grep: test("W1-T5284: the fix rung worktree lets a timer fire while git fetch is in flight" in test/daemon-worktrees-pushes-and-arms-never-block-the-loop.test.ts'
+    - claim: "a run branch push lets a timer fire while git push is in flight and refuses what the sync push refuses"
+      proof: 'grep: test("W1-T5284: a run branch push lets a timer fire while git push is in flight" in test/daemon-worktrees-pushes-and-arms-never-block-the-loop.test.ts'
+    - claim: "arming auto-merge lets a timer fire while its gh calls are in flight and returns the same outcome"
+      proof: 'grep: test("W1-T5284: arming auto merge lets a timer fire while gh is in flight" in test/daemon-worktrees-pushes-and-arms-never-block-the-loop.test.ts'
+    - claim: "the new suite runs and passes"
+      proof: "unit test: test/daemon-worktrees-pushes-and-arms-never-block-the-loop.test.ts"
+  falsifier: |
+    Route any of the four back to its sync form and its timer-probe test sees the timer fire only after the call
+    settles.

@@ -1,0 +1,59 @@
+- id: W1-T5282
+  title: "THE DAEMON'S OWN FRESHNESS READS STILL RUN A SYNCHRONOUS git fetch ON THE EVENT LOOP — DaemonDeps.checkFreshness and externalWaitFreshness (ciWaitFreshness) both call checkServiceFreshness, and the async fetch that replaces it has no timeout, so a hung fetch would hold its phase forever"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  priority: 2
+  origin: "operator session 2026-10-02: core daemon CPU profile (E36) and #8674's follow-up audit"
+  plan_refs: [W1-T3793, W1-T5127, W1-T4229, W1-T4477]
+  files: [src/lib/daemon.ts, src/lib/self-sync.ts, src/lib/git-fetch-retry.ts, src/run-task.ts, test/the-daemon-freshness-reads-never-block-the-loop.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-02. A live CPU profile of the core daemon caught a 49 s loop stall whose stack was
+    spawnSync < execFileSync < fetchOriginRetryingRefLock < checkServiceFreshness. Over 48 h the daemon
+    logged 10 loop stalls over 30 s, including 561 s in freshness_drain. #8674 converted the reviewer-code
+    gate and added checkServiceFreshnessAsync and fetchOriginRetryingRefLockAsync in src/lib/self-sync.ts
+    and src/lib/git-fetch-retry.ts. It left two daemon readers on the sync fetch:
+    (a) daemonCommand in src/run-task.ts wires `checkFreshness: () => daemonFreshnessFromService(checkServiceFreshness(repoRoot, process.env))`.
+    src/lib/daemon.ts consults DaemonDeps.checkFreshness up to three times per tick: in reloadPlanBinding,
+    in the batch-admission freshness check, and in refillLane.
+    (b) The same wiring passes `externalWaitFreshness: ciWaitFreshness(() => daemonFreshnessFromService(checkServiceFreshness(effectiveRepoRoot, process.env)))`,
+    and runTask's CI wait calls `deps.externalWaitFreshness?.()` on every poll.
+    (c) NO TIMEOUT. asyncGit in self-sync.ts (from #8674) runs `git fetch` through execFile with no
+    timeout. The sync fetch had none either, but a sync hang froze the whole loop, which made it visible.
+    An async hang is quieter: the awaiting phase waits forever while every other timer keeps running.
+    PREREQUISITE: #8674 (unfiled, open when this was filed) introduces checkServiceFreshnessAsync. If it
+    is not on origin/main when this task is built, stop and report blocked. Do not re-implement it.
+  design: |
+    (i) Widen DaemonDeps.checkFreshness to `() => DaemonFreshness | Promise<DaemonFreshness>` and wire it to
+    checkServiceFreshnessAsync. Where a consumer in src/lib/daemon.ts is a synchronous closure (reloadPlanBinding,
+    refillLane), do not block on it. Await one reading at the tick's own async boundary and let those
+    closures read that settled reading. A tick must never act on a reading older than its own start.
+    (ii) Widen externalWaitFreshness and ciWaitFreshness the same way. The CI-wait poll awaits it, keeping
+    the W1-T5127 drain semantics and the stale-exit reason strings unchanged.
+    (iii) Give the async fetch a bound. Reuse GATEWAY_FETCH_TIMEOUT_MS (src/lib/serve.ts, 60 s), which is
+    serve's existing async freshness fetch (W1-T4229). Move the constant to a module both files can import,
+    rather than inventing a new number. A fetch past the bound is killed (SIGTERM, then SIGKILL) and surfaces
+    as a fetch failure, so the freshness read reports what the sync path reports for a failed fetch.
+    It must never report "fresh".
+    (iv) The sync checkServiceFreshness stays for serve's assessGatewayCheckout and the boot serviceFreshnessGate.
+  acceptance:
+    - claim: "the daemon tick's freshness read lets a timer fire while git fetch is in flight"
+      proof: 'grep: test("W1-T5282: the daemon freshness read lets a timer fire while git fetch is in flight" in test/the-daemon-freshness-reads-never-block-the-loop.test.ts'
+    - claim: "the CI wait's freshness read lets a timer fire while git fetch is in flight"
+      proof: 'grep: test("W1-T5282: the ci wait freshness read lets a timer fire while git fetch is in flight" in test/the-daemon-freshness-reads-never-block-the-loop.test.ts'
+    - claim: "a hung async fetch ends at its bound and reads as a failed fetch and never as fresh"
+      proof: 'grep: test("W1-T5282: a hung freshness fetch ends at its bound and never reads fresh" in test/the-daemon-freshness-reads-never-block-the-loop.test.ts'
+    - claim: "the daemon stops for a stale reading exactly as it did with the sync read"
+      proof: 'grep: test("W1-T5282: the daemon stops for an awaited stale reading exactly as for a sync one" in test/the-daemon-freshness-reads-never-block-the-loop.test.ts'
+    - claim: "the new suite runs and passes"
+      proof: "unit test: test/the-daemon-freshness-reads-never-block-the-loop.test.ts"
+  falsifier: |
+    Wire checkFreshness back to checkServiceFreshness and the timer-probe test sees its timer fire only after
+    the read settles. Remove the fetch bound and the hung-fetch test never settles inside its own deadline.

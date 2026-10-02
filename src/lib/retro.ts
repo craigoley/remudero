@@ -2623,6 +2623,44 @@ export function renderProceduralCandidates(candidates: ProceduralCandidate[]): s
 // entry as a `report.followups` event with provenance. This module mines that stream into
 // proposal candidates (W1-T2456: §12 rule 27 governs).
 
+export interface StandingRetroDebt {
+  entries: { number: number; text: string; ageCycles: number }[];
+  openCount: number;
+  dwellCycles: number;
+}
+
+/** Read the numbered standing corpus, including tombstones, and verify its declared totals. */
+export function readStandingRetroDebt(masterPlan: string): StandingRetroDebt {
+  const header = "**(j) THE STANDING DEBT LINE — EACH ENTRY WITH ITS AGE IN CYCLES";
+  const start = masterPlan.indexOf(header);
+  if (start < 0 || masterPlan.indexOf(header, start + header.length) >= 0) {
+    throw new Error("standing-debt section missing or ambiguous");
+  }
+  const section = masterPlan.slice(start);
+  const summary = /\*\*([A-Za-z]+|\d+) entr(?:y is|ies are) open, with a combined dwell of (\d+) cycles\*\*/.exec(section);
+  if (!summary) throw new Error("standing-debt count or format changed");
+  const words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"];
+  const declaredCount = /^\d+$/.test(summary[1]!) ? Number(summary[1]) : words.indexOf(summary[1]!.toLowerCase());
+  const body = section.slice(0, summary.index);
+  const markers = [...body.matchAll(/\*\*\((\d+)\)\*\*/g)];
+  if (markers.length === 0) throw new Error("standing-debt numbered corpus missing");
+  const entries: StandingRetroDebt["entries"] = [];
+  for (let i = 0; i < markers.length; i++) {
+    const marker = markers[i]!;
+    if (Number(marker[1]) !== i + 1) throw new Error("standing-debt numbered identity changed");
+    const text = body.slice(marker.index! + marker[0].length, markers[i + 1]?.index ?? body.length).trim();
+    if (/^struck by R\d+\b/.test(text)) continue;
+    const ages = [...text.matchAll(/\*\*AGE: (\d+) cycles?\b/g)];
+    if (ages.length !== 1) throw new Error(`standing-debt entry ${i + 1} age missing or ambiguous`);
+    entries.push({ number: i + 1, text, ageCycles: Number(ages[0]![1]) });
+  }
+  const dwellCycles = entries.reduce((total, entry) => total + entry.ageCycles, 0);
+  if (entries.length !== declaredCount || dwellCycles !== Number(summary[2])) {
+    throw new Error("standing-debt entries do not match declared count and dwell");
+  }
+  return { entries, openCount: entries.length, dwellCycles };
+}
+
 /** One followup entry off a `report.followups` event, with provenance and a stable `entryId`. */
 export interface FollowupCandidate {
   entryId: string;

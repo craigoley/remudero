@@ -292,6 +292,17 @@ export function rollupFor(owner: string, repo: string, sha: string, fetch: GhApi
   return rollupFromRest(runs?.check_runs ?? [], combined?.statuses ?? []);
 }
 
+export async function rollupForAsync(
+  owner: string,
+  repo: string,
+  sha: string,
+  fetch: (args: string[]) => unknown,
+): Promise<RestRollupEntry[]> {
+  const runs = (await fetch(checkRunsRestArgs(owner, repo, sha))) as { check_runs?: RestCheckRun[] };
+  const combined = (await fetch(combinedStatusRestArgs(owner, repo, sha))) as { statuses?: RestStatus[] };
+  return rollupFromRest(runs?.check_runs ?? [], combined?.statuses ?? []);
+}
+
 /** The sweep's open-PR enumeration, REST only — a drop-in for the `gh pr list --json …` call.
  *
  *  Invariant: the list call throws, exactly as the `ghJson` call it replaced threw, because
