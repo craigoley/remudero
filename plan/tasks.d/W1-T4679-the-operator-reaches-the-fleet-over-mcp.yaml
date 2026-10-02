@@ -12,7 +12,7 @@
   origin: "operator ask 2026-09-28: review Paperclip, Hindsight, NVIDIA Model-Optimizer, Block Buzz, Jev and trending agent OSS for innovation — file every recommendation"
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-operator-1790600000"
   plan_refs: [W1-T4607]
-  files: [src/lib/operator-mcp.ts, test/the-operator-reaches-the-fleet-over-mcp.test.ts, src/run-task.ts, scripts/console-parity-ratchet.mjs, package.json, package-lock.json, docs/cli-reference.md]
+  files: [src/lib/operator-mcp.ts, test/the-operator-reaches-the-fleet-over-mcp.test.ts, src/run-task.ts, scripts/console-parity-ratchet.mjs, package.json, package-lock.json, docs/cli-reference.md, docs/operator-guide.md, test/help-renders-a-summary-not-a-paragraph.test.ts, scripts/console-parity-baseline.json]
   status: queued
   attempts: 0
   rationale: |
