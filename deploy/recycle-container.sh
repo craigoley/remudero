@@ -211,7 +211,7 @@ if [ -n "$INSTANCE_NAME" ]; then
       gh_app_private_key_path) gh_app_private_key_path="$value" ;;
       service_user|service_name|watchdog_service_name|watchdog_timer_name|launcher_path|revival_log) : ;;
       # W1-T4227: the fleet registry's project layer, read by `rmd serve`'s GET /v1/registry.
-      project|github_repo|retired) : ;;
+      project|github_repo|retired|primary) : ;;
       *) echo "recycle-container: REFUSING -- unknown field '${key}' in instance '${INSTANCE_NAME}'." >&2; exit 2 ;;
     esac
   done <<EOF
