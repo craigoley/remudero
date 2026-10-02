@@ -20,15 +20,17 @@ function record(id = "P1", status = "open", falsifier = "grep: test in test/prop
 
 async function lint(root: string): Promise<{ code: number; errors: string }> {
   const errors: string[] = [];
-  const previous = console.error;
+  const previous = { error: console.error, log: console.log };
   console.error = (message: string) => errors.push(message);
+  console.log = () => {};
   try {
     return {
       code: await lintPlanCommand(["--plan", join(root, "plan", "tasks.yaml")], { repoRoot: root, offline: true }),
       errors: errors.join("\n"),
     };
   } finally {
-    console.error = previous;
+    console.error = previous.error;
+    console.log = previous.log;
   }
 }
 
@@ -50,6 +52,18 @@ test("W1-T4047: a prose falsifier is refused", () => {
   try {
     writeFileSync(join(f.proposals, "P1.yaml"), record("P1", "open", "the existing suite passes"));
     assert.throws(() => loadProposalRecords(f.proposals), ProposalRecordError);
+  } finally {
+    f.dispose();
+  }
+});
+
+test("W1-T4047: a dialect label still needs a parseable executable proof", () => {
+  const f = fixture();
+  try {
+    writeFileSync(join(f.proposals, "P1.yaml"), record("P1", "open", "grep: missing path"));
+    assert.throws(() => loadProposalRecords(f.proposals), /falsifier/);
+    writeFileSync(join(f.proposals, "P1.yaml"), record("P1", "open", "demonstration: inspect manually"));
+    assert.throws(() => loadProposalRecords(f.proposals), /falsifier/);
   } finally {
     f.dispose();
   }
