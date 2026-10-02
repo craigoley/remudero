@@ -1,0 +1,48 @@
+- id: W1-T5362
+  title: "A VIEW.SHADOW_DIFF ROW IS WRITTEN ONLY FOR A REAL DIFFERENCE — remudero-serve's shadow diffs were 51% of 2026-10-02's ledger bytes (38.1 of 75.0 MB, 3,453 rows at about 11 KB, up from 15.4 MB on 10-01), almost all timing or legacy_horizon noise, and they drove 164 rotations that day against 73 the day before"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: low
+  origin: "operator session 2026-10-02: daemon loop-stall diagnosis"
+  plan_refs: ["W1-T4393"]
+  files: [src/lib/view-shadow.ts, test/a-shadow-diff-row-is-written-only-for-a-real-difference.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    `createViewShadow` (src/lib/view-shadow.ts) writes one `VIEW_SHADOW_DIFF_STEP` row for EVERY sample with
+    a diff (`if (diffs.length > 0) opts.log(...)`). Each row carries every classified path, its reason, and the
+    legacy side's `inputs`. The classifier already decides what is noise: `timing`, `legacy_horizon` and
+    `dedupe` are explained, and only `real` is a bug. Cutover readiness (`shadowReadiness`) reads the
+    persisted per-view counters (`state.samples`, `state.diffs`, the streak fields), not these rows.
+    MEASURED 2026-10-02 (research/loop-stall.md §3): `view.shadow_diff` was 38.1 MB of the 75.0 MB written that
+    day (51%), in 3,453 rows of about 11 KB. On 10-01 it was 15.4 of 36.7 MB. Sampled rows are almost all
+    `timing`/`legacy_horizon` with `real: 0`. The live ledger rotates at `LEDGER_ROTATION_CEILING_BYTES`
+    (4 MiB) over a retained core of about 3.7 MB, so roughly every 0.45 MB of new writes archives a
+    rotation. That is W1-T4393's mechanism. Rotations went 8 (09-30), 73 (10-01), 164 (10-02), and the
+    decompressed union a full read pays for grows with every one of these bytes (about 7.5 s per 1.37 GB
+    read today).
+  design: |
+    1. Write the per-sample `view.shadow_diff` row only when at least one diff is classified `real`. Keep
+       that row's current shape, including the `real` paths' legacy/view excerpts and `inputs`.
+    2. Keep counting every class in the persisted state exactly as today, so `shadowReadiness` and the
+       read-model status view are unchanged.
+    3. Add a summary step, for example `view.shadow_summary`, written at most once per hour per view. It
+       carries the samples taken and the per-class diff counts since that view's last summary, plus the
+       readiness streak. The hour is read through the comparator's injected clock, never the wall clock. The
+       last-summary time persists with the view's state, so a serve restart neither repeats nor skips an hour.
+    4. Existing suites that read a non-real classification off a `view.shadow_diff` row (for example in
+       test/repositories-from-the-read-model.test.ts, test/now-view.test.ts, test/view-shadow.test.ts,
+       test/a-slow-view-build-never-stalls-projection.test.ts) read it from `compare`'s returned `diffs`
+       instead. That is a scope widening; record it in the PR body.
+  acceptance:
+    - claim: "a sample whose diffs are all timing, legacy_horizon or dedupe writes no view.shadow_diff row but still counts in the view's state, a sample with a real diff writes the row with its excerpts, and one summary row per view per hour carries the per-class counts since the last one"
+      proof: "unit test: test/a-shadow-diff-row-is-written-only-for-a-real-difference.test.ts"
+  falsifier: |
+    Restore `if (diffs.length > 0)` as the write condition. The suite's all-timing sample then writes a
+    `view.shadow_diff` row. Drop the summary, and two hours of fake-clock samples produce no
+    `view.shadow_summary` row.

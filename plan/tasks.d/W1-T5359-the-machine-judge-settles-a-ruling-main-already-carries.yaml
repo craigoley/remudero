@@ -1,0 +1,53 @@
+- id: W1-T5359
+  title: "THE MACHINE-FILING JUDGE SETTLES A RULING MAIN ALREADY CARRIES — from 19:09Z 2026-10-02 it re-landed W1-T5309's ruling, already merged as #8723, 38 times; every attempt failed on an empty commit and blocked the daemon loop for 85-241 s, and every loop_lag after 20:05 landed within 0.5-12 s of a machine_judge.failed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: low
+  origin: "operator session 2026-10-02: daemon loop-stall diagnosis"
+  plan_refs: ["W1-T5317", "W1-T4041"]
+  files: [src/lib/machine-filing-judge.ts, test/the-machine-judge-settles-a-ruling-main-already-carries.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    `runMachineFilingJudge` (src/lib/machine-filing-judge.ts) picks its due records from `ports.plan()`.
+    In the daemon that is `productionMachineFilingJudgePorts` (src/run-task.ts), which loads the plan from
+    the daemon's own checkout. That checkout can sit behind origin/main. The landing tree is different:
+    `openWorkspace` is a `gardenCheckout` cut from a freshly fetched origin/main.
+    So once a judge PR merges, the stale checkout still says the record `needsMachineJudgement`. The cached
+    ruling in `state.rulings` is reused (`machine_judge.reused`), and `renderRuledShard` renders the same
+    pinned ruling main already carries. The pass adds the path to `landed`, and `ws.land` runs
+    `git commit`. That commit has nothing staged, so it exits 1 with an empty stderr. The throw leaves
+    `runMachineFilingJudge` and is logged as `machine_judge.failed` by `startMachineFilingJudge`'s tick.
+    Nothing records the outcome, so the next pass repeats it.
+    MEASURED 2026-10-02 (research/loop-stall.md §1b): W1-T5309's ruling merged at 19:09Z (#8723). From then
+    on the daemon (run DAEMON-1790966831812) ran 38 reused-then-failed cycles, 1,164 s of synchronous
+    main-thread time. Durations grew from 2-66 s to 123/229/241/85 s at 20:06-20:21 as swap pressure rose.
+    Every `daemon.loop_lag` row after 20:05 lands 0.5-12 s after a `machine_judge.failed`: 20:08:31 (lag
+    95.9 s), 20:13:07 (222.7 s), 20:18:03 (229.9 s), 20:20:23 (90.0 s). Across the whole union that day:
+    310 failed and 1,586 reused.
+    W1-T5317 is adjacent but not the same. It re-checks pins main has INVALIDATED (a stale ruling
+    dropped before landing). This task handles a ruling main already HOLDS (an identical ruling is a
+    success, not a failure). The two compose: build either one first.
+  design: |
+    In `runMachineFilingJudge`'s landing loop, compare `out.contents` with the landing tree's `text`. If they
+    are byte-identical, main already carries this exact ruling. Then:
+    (i) leave the path out of `landed`, so `ws.land` is never called for it, and with nothing left to land
+    open no PR (the existing `landed.length > 0` guard);
+    (ii) log `machine_judge.already_landed` with the task id and pin;
+    (iii) drop the id from `state.rulings`, and record it as settled by its pin in the judge's state file,
+    so a pass whose plan still reads the stale record does not re-render it. The record is re-judged only
+    once its pin changes, just as `state.declined` behaves today.
+    Count it in the report as settled, not failed or refused. `ws.dispose()` still runs in the `finally`.
+    No change to `gardenCheckout` or any other garden's landing. That keeps the change in one file.
+  acceptance:
+    - claim: "a ruling whose rendered shard is identical to the landing tree's record lands nothing and opens no PR, is ledgered machine_judge.already_landed, and is not re-rendered by a later pass whose plan still reads the stale record, while a ruling that changes the record still lands"
+      proof: "unit test: test/the-machine-judge-settles-a-ruling-main-already-carries.test.ts"
+  falsifier: |
+    Remove the byte-identical comparison. In the suite's fixture the landing tree already holds the
+    rendered ruling, and the fake workspace's `land` is called with that path, matching today's
+    empty-commit throw. A second pass over the same stale plan then renders and lands it again.

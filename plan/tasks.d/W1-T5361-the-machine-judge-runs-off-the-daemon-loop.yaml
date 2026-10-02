@@ -1,0 +1,51 @@
+- id: W1-T5361
+  title: "THE MACHINE-FILING JUDGE RUNS OFF THE DAEMON LOOP — W1-T5114 moved every registered gardener into a child process, but startMachineFilingJudge is still wired in-process between the offLoopGarden slices, so its synchronous git fetch, worktree add and commit froze every daemon timer for 85-241 s at a time on 2026-10-02"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-02: daemon loop-stall diagnosis"
+  plan_refs: ["W1-T5114", "W1-T4477", "W1-T5359"]
+  files: [src/run-task.ts, src/lib/garden-registry.ts, test/the-machine-judge-runs-off-the-daemon-loop.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    W1-T5114 (src/lib/garden-registry.ts) runs each gardener pass as a child process (`rmd garden run
+    <name>`, `childGardenPassSpawn`), shared through `boundedGardenPassSpawn` and started by
+    `startGardenOffLoop`. The daemon's `gardens` list in src/run-task.ts maps `REGISTERED_GARDEN_NAMES` through
+    `offLoopGarden`, but it splices one in-process starter between the two slices:
+    `startMachineFilingJudge(productionMachineFilingJudgePorts(...), intervalMs)`. That pass's landing tree
+    is `gardenCheckout`, which calls the synchronous `worktreeAdd` (`execFileSync` git fetch and git worktree
+    add, the path W1-T4477 made async for implement lanes only). It then runs `ws.land`'s `execFileSync`
+    git commit and push, all on the thread that admits builds and fires the pulse timer.
+    MEASURED 2026-10-02 (research/loop-stall.md §1b): 38 judge passes after 19:09Z held the main thread for
+    1,164 s in total, with single passes of 123, 229, 241 and 85 s at 20:06-20:21. Each `daemon.loop_lag` row
+    after 20:05 follows one of them within 12 s. W1-T5359 removes the failing repeat that made those passes
+    so frequent. This task removes the cost class itself: any judge pass that lands, or that has to fetch,
+    still blocks the loop for as long as git takes on a host under memory pressure.
+  design: |
+    Register the judge as a garden like the others, so the daemon only awaits a child's exit:
+    1. Add a name such as "machine-judge" to `REGISTERED_GARDEN_NAMES` at the position the in-process starter
+       holds today, which is just before "hot-file", so wiring order is unchanged. Give it a `gardenSchedule`
+       that keeps today's interval and one-at-a-time rule.
+    2. In `buildRegisteredGarden` (src/run-task.ts), build its pass from `productionMachineFilingJudgePorts`
+       with the same repoRoot, stateDir, worktreesRoot, owner, repo and log. The child appends to the same
+       ledger, so every `machine_judge.*` row keeps its step name. Keep `machine_judge.failed` for a pass
+       that throws inside the child.
+    3. Replace the spliced `startMachineFilingJudge(...)` entry in the daemon's `gardens` list with the plain
+       `REGISTERED_GARDEN_NAMES.map(offLoopGarden)`. `startMachineFilingJudge` stays exported for any other
+       caller. Name any caller left in-process.
+    The pass then runs under `boundedGardenPassSpawn`'s shared width like every other garden, and logs
+    `garden.pass` with its duration.
+  acceptance:
+    - claim: "the daemon's gardens list starts no in-process machine-filing judge, the judge is a registered garden whose pass runs through the garden child spawn and ledgers garden.pass, and a child pass that throws still ledgers machine_judge.failed"
+      proof: "unit test: test/the-machine-judge-runs-off-the-daemon-loop.test.ts"
+  falsifier: |
+    Restore the spliced `startMachineFilingJudge(...)` starter. With a recording garden spawn, the suite
+    sees no "machine-judge" child pass, and it sees the in-process judge's fake `openWorkspace` called on
+    the daemon's own thread.
