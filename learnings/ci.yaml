@@ -137,7 +137,7 @@
 - id: comment-load-ratchet-lane
   subsystem: ci
   lifecycle: active
-  files: ["src/**", "scripts/**", "deploy/**", ".github/workflows/**", "bin/**", "hooks/**"]
+  files: [scripts/comment-load-baseline.json, docs/comment-standard.md]
   fact: >-
     Before pushing a change in a measured code path, run `npm run --silent comment-load-signal`.
     The gate refuses either per-file comment growth over its baseline or a newly added comment
