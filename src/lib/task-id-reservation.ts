@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isAllocatableTaskId } from "./task-id.js";
 import { assertClaimRefPushAllowed } from "./live-write-guard.js";
+import { systemClock, type Clock } from "./clock.js";
 
 /**
  * Atomic reservation of a minted task id — the piece {@link mintNextTaskIdWithHistory} skips. The
@@ -281,24 +282,15 @@ export function reserveTaskIdBlock(
 // `reapBranchesCommand`'s `refs/heads/`-only view.
 // Why: docs/forensics/task-id-reservation.md#remote-reservation-w1-t509.
 
-/** The ref a reserved id occupies. Suffix-aware by construction: the id is the whole token, so
- *  `W1-T1` and `W1-T1B` are different refs and neither folds onto the other. */
-/**
- * W1-T3640 follow-up: THE MODULE'S SINGLE WALL-CLOCK CALL SITE.
- *
- * This file has no Clock port, and four separate wall-clock constructions tripped the census
- * ratchet ("newDate 4 > baseline 3") when `recordFilingBranch` added the fourth. Consolidating
- * them here LOWERS the recorded row rather than buying the growth a baseline bump -- the
- * direction the census exists to enforce. It is also the one seam a future migration onto
- * src/lib/clock.ts needs to replace, instead of four.
- *
- * The wording above deliberately avoids the literal shape the census greps for: it counts TEXT,
- * so a comment naming the construction would be counted as another use of it (W1-T3376).
- */
+/** W1-T3640: THE MODULE'S SINGLE WALL-CLOCK CONSTRUCTION, consolidated so the clock census row
+ *  fell rather than grew; the one seam a full migration onto src/lib/clock.ts replaces. W1-T5279's
+ *  age read already goes through that port ({@link RemoteReserveDeps.clock}). */
 function reservationNowIso(): string {
   return new Date().toISOString();
 }
 
+/** The ref a reserved id occupies. Suffix-aware by construction: the id is the whole token, so
+ *  `W1-T1` and `W1-T1B` are different refs and neither folds onto the other. */
 export function taskIdReservationRef(taskId: string): string {
   return `refs/rmd-id/${taskId}`;
 }
@@ -359,7 +351,7 @@ export interface RemoteRefReserver {
   attempt(taskId: string, anchor: string): RemoteReserveOutcome;
   /**
    * Reclaims a taken reservation only when its parsed holder is provably unfileable or its named
-   * branch no longer exists. A successful repair advances the existing ref to a child commit;
+   * branch is absent past {@link RESERVATION_PUSH_GRACE_MS}. A successful repair advances the existing ref to a child commit;
    * it never deletes or replaces the original claim. An extant foreign branch stays `taken`.
    */
   reclaim?(taskId: string): RemoteReserveOutcome;
@@ -435,6 +427,8 @@ export interface RemoteReserveDeps {
   filingBranch?: string;
   /** W1-T3742: capture the takeover hand-off line; defaults to the real console. */
   say?: (line: string) => void;
+  /** W1-T5279: the clock a holder's age is read against; defaults to {@link systemClock}. */
+  clock?: Clock;
 }
 
 export interface ReservationHolderLine {
@@ -539,14 +533,28 @@ export type ReservationHolderDrift = "reclaimable" | "held" | "unattributable" |
 /** Whether the remote could prove the named holder branch is still present. */
 export type ReservationHolderBranchPresence = "present" | "absent" | "unreadable";
 
+/**
+ * W1-T5279: every filer reserves BEFORE it pushes its branch, so an absent branch on a fresh
+ * reservation is a filer mid-flight, not an abandoned one (W1-T5209 was taken over 21s after it
+ * was reserved). Sized from the reservation refs numbered 5000-5299 against each holder branch's first PR
+ * open (2026-10-02): of 171 reservations, 167 opened within 30 min and 168 within 2 h; p50 34s.
+ */
+export const RESERVATION_PUSH_GRACE_MS = 2 * 60 * 60 * 1000;
+
+function reservationIsFresh(startedAt: string | undefined, clock: Clock): boolean {
+  const started = startedAt === undefined ? Number.NaN : Date.parse(startedAt);
+  return Number.isFinite(started) && Math.abs(clock.now() - started) < RESERVATION_PUSH_GRACE_MS;
+}
+
 export function reservationHolderDrift(
   parsed: ParsedReservationHolderLine,
   branchPresence: ReservationHolderBranchPresence,
+  clock: Clock = systemClock,
 ): ReservationHolderDrift {
   if (parsed.status === "known") {
     if (parsed.holder.branch === "main") return "unattributable";
     if (branchPresence === "present") return "held";
-    if (branchPresence === "absent") return "reclaimable";
+    if (branchPresence === "absent") return reservationIsFresh(parsed.holder.startedAt, clock) ? "held" : "reclaimable";
     return "unreadable";
   }
   if (parsed.status === "unreadable" && parsed.reason === "missing branch") return "unattributable";
@@ -646,7 +654,7 @@ export function gitRemoteRefReserver(deps: RemoteReserveDeps): RemoteRefReserver
       const branchRead = parsed.status === "known"
         ? remoteHolderBranchPresence(parsed.holder.branch, deps.run)
         : { presence: "unreadable" as const };
-      const drift = reservationHolderDrift(parsed, branchRead.presence);
+      const drift = reservationHolderDrift(parsed, branchRead.presence, deps.clock);
       if (drift === "held") return "taken";
       if (drift === "unreadable") {
         lastStderr = branchRead.reason ?? "reservation holder is unreadable; refusing takeover";
