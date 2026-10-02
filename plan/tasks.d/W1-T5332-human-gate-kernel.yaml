@@ -11,7 +11,7 @@
   band_meaning: blast-radius
   origin: "2026-10-02 operator approved all Inbox and decision-queue follow-ups"
   plan_refs: [W1-T5021, W1-T3186]
-  files: [src/lib/human-gate.ts, src/lib/now-view.ts, test/human-gate.test.ts]
+  files: [src/lib/human-gate.ts, src/lib/now-view.ts, test/human-gate.test.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts]
   status: queued
   attempts: 0
   rationale: |
@@ -31,6 +31,8 @@
     The seven-field gate carries one plain-language reason, an evidence link and one resolution
     verb. Reuse source-owned action authority; this projection is read-only and introduces no
     PR, routing, dispatch or merge hold. Later slices add kinds independently of each other.
+    Declare the optional wire projection in the strict Now API schema and regenerate the client
+    types from that schema. Preserve the existing version-3 inputs and all current refusal tests.
   acceptance:
     - claim: "the now view consumes the shared projection rather than an unreferenced helper"
       proof: 'grep: projectHumanGates( in src/lib/now-view.ts'
