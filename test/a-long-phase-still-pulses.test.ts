@@ -16,7 +16,8 @@ import { loadPlan, type Plan } from "../src/lib/plan.js";
 import { daemonCommand, type RunResult } from "../src/run-task.js";
 import { runDaemon, type DaemonDeps, type DaemonSummary } from "../src/lib/daemon.js";
 import { deriveLastPoll } from "../src/lib/daemon-health.js";
-import { LIVENESS_PULSE_STEP, livenessPulseTick, noteDaemonRow, type LivenessPulseState } from "../src/lib/liveness-pulse.js";
+import { LIVENESS_PULSE_STEP, livenessPulseTick, noteDaemonRow, startLivenessPulse, type LivenessPulseState } from "../src/lib/liveness-pulse.js";
+import { systemClock } from "../src/lib/clock.js";
 
 const POLL_MS = 20;
 
@@ -120,6 +121,17 @@ test("a pulse tick writes nothing while a daemon.* work row is fresher than one 
   livenessPulseTick(state, 1_110, 60, (s, e) => written.push(`${s}:${String(e?.quiet_ms)}`), (x) => lags.push(x.observedAtMs - x.dueAtMs));
   assert.deepEqual(written, ["daemon.pulse:110"], "only daemon.* work rows move the quiet clock");
   assert.deepEqual(lags, [990, 0], "each tick reports its own lateness against the previous tick");
+});
+
+test("a throwing ledger write costs one pulse, never the timer", async () => {
+  let calls = 0;
+  const pulse = startLivenessPulse(5, systemClock, () => {
+    calls++;
+    throw new Error("ledger unwritable");
+  }, () => {});
+  await new Promise((r) => setTimeout(r, 60));
+  pulse.stop();
+  assert.ok(calls >= 2, `the pulse kept ticking after a write threw, calls=${calls}`);
 });
 
 test("daemonCommand wires the liveness pulse into the real daemon", async () => {
