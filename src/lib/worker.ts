@@ -99,7 +99,7 @@ import {
   assertWorkerCredentialFile,
   CLAUDE_CONFIG_REL,
   ensureWorkerKeychain,
-  materializeWorkerHome,
+  materializeSpawnWorkerHome as materializeWorkerHome,
   perRunWorkerHomeDir,
   reapWorkerHome,
   workerCredentialFilePath,
