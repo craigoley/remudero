@@ -654,5 +654,5 @@ test("the freshness-restart fixture is exempt because runSweep judges it against
   });
   assert.deepEqual(r.reported, [], "the pinned-clock fixture is never reported as expiring");
   assert.equal(r.exempt.length, 1, "it is counted as exempt by its marker, not dropped from the census");
-  assert.equal(r.exempt[0].file, file);
+  assert.equal((r.exempt[0] as { file: string }).file, file);
 });
