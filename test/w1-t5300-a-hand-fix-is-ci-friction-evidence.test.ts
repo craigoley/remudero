@@ -1,12 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fixedClock } from "../src/lib/clock.js";
-import { ciFrictionGardenSpec, ciFrictionHandFixRounds, readCiFrictionHandFixes, priceCiFrictionCauses } from "../src/lib/ci-friction-gardener.js";
+import { ciFrictionGardenSpec, ciFrictionHandFixRounds, readCiFrictionHandFixes, priceCiFrictionCauses, landedCiFrictionOrigins } from "../src/lib/ci-friction-gardener.js";
 import { ciFrictionEvidence, ciFrictionRemedyRationale, locateCiFrictionOwner } from "../src/lib/ci-friction-remedy.js";
+import { gitRepo } from "./helpers/git-repo.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 const clock = fixedClock(Date.parse("2026-10-02T12:00:00Z"));
 const rounds = [
@@ -51,23 +52,30 @@ test("W1-T5300: an unreadable PR list leaves hand fixes unmeasured without faili
 
 test("hand-fix collector runs the real git and gh defaults and persists the merge evidence", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-hand-fix-"));
+  const fixture = gitRepo({ kind: "hand-fix" });
   const priorPath = process.env.PATH;
+  let shimDir: string | undefined;
   try {
-    const repo = join(root, "repo"), bin = join(root, "bin"), state = join(root, "state");
-    mkdirSync(repo); mkdirSync(bin); mkdirSync(state);
-    const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
-    git("init", "--initial-branch=main"); git("config", "user.name", "Test"); git("config", "user.email", "test@example.invalid");
-    git("-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "base");
+    const repo = fixture.dir, git = fixture.git, state = join(root, "state");
+    mkdirSync(state);
     mkdirSync(join(repo, "src")); writeFileSync(join(repo, "src", "worker.ts"), "export const fixed = true;\n");
     git("add", "src/worker.ts"); git("-c", "commit.gpgsign=false", "commit", "-m", "fix(worker): remedy");
     const row = { number: 9, updated_at: clock.iso(), merged_at: fix.at, merge_commit_sha: git("rev-parse", "HEAD"), title: "fix(worker): remedy", head: { ref: "run-unfiled-1" } };
-    const file = join(root, "prs.json"); writeFileSync(file, JSON.stringify([row]));
-    writeFileSync(join(bin, "gh"), `#!/bin/sh\ncat '${file}'\n`, { mode: 0o755 });
-    process.env.PATH = `${bin}:${priorPath}`;
+    const shim = ghShim([{ when: "api repos/owner/repo/pulls", stdout: JSON.stringify([row]) }]);
+    shimDir = shim.dir;
+    process.env.PATH = `${shim.dir}:${priorPath}`;
     const result = readCiFrictionHandFixes(repo, state, "owner", "repo", clock);
     assert.equal(result.state, "observed"); assert.deepEqual(result.fixes, [fix]);
     assert.equal(JSON.parse(readFileSync(join(state, "ci-friction-hand-fixes.json"), "utf8")).asOf, clock.iso());
-  } finally { process.env.PATH = priorPath; rmSync(root, { recursive: true, force: true }); }
+  } finally { process.env.PATH = priorPath; fixture.cleanup(); rmSync(root, { recursive: true, force: true }); if (shimDir) rmSync(shimDir, { recursive: true, force: true }); }
+});
+
+test("manual check evidence survives measured gate pricing and hand-fix filings have durable receipts", () => {
+  const added = { ...rounds[1]!, pr: 9, minutes: 5, pricing: "median-proxy" as const };
+  const priced = priceCiFrictionCauses([...rounds, added], { status: "measured", prsScanned: 3,
+    neverFired: [], alwaysFired: [], gates: [{ gate: "coverage-ratchet", prs: 2, runs: 3, redRuns: 2, refusals: 1, repaired: 1, overridden: 0, minutes: 12 }] });
+  assert.deepEqual(priced.find((p) => p.cause.kind === "check"), { cause: rounds[1]!.cause, minutes: 17, rounds: 3, prs: 3 });
+  assert.deepEqual(landedCiFrictionOrigins([{ step: "ci-friction.scorecard", pr_url: "https://github.com/owner/repo/pull/10", untracked: "hand_fix:src/worker.ts" }]), ["ci-friction:hand_fix:src/worker.ts"]);
 });
 
 test("hand-fix source failures preserve an explicit unavailable reason", () => {

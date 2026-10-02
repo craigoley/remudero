@@ -589,7 +589,7 @@ export function landedCiFrictionOrigins(records: readonly LedgerRecord[]): strin
   const origins = new Set<string>();
   for (const row of records) {
     if (row.step !== "ci-friction.scorecard" || typeof row.pr_url !== "string" || !PR_URL_RE.test(row.pr_url) ||
-        typeof row.untracked !== "string" || !/^(check|main_merge|conflict|fix_refusal):.+$/.test(row.untracked)) continue;
+        typeof row.untracked !== "string" || !/^(check|main_merge|conflict|fix_refusal|hand_fix):.+$/.test(row.untracked)) continue;
     origins.add(`ci-friction:${row.untracked}`);
   }
   return [...origins];
