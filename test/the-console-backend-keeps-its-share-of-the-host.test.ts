@@ -145,6 +145,16 @@ function serveRunArgs(env: Record<string, string> = {}): { args: string[]; out: 
   return { args: (serve.out.split("\n").find((l) => l.includes("docker run -d --name remudero-serve")) ?? "").split(/\s+/), out: serve.out };
 }
 
+test("serve's memory ceiling fits an active generation and a booting standby during a handoff", () => {
+  // Measured 2026-10-02 (E31): the active generation peaks at 5.28 GB with swap, a booting standby at 1.55 GB, plus
+  // 0.15 GB supervisor overhead. Under a 5 GiB ceiling handoffs deferred for memory and fell back to legacy exits.
+  const { args } = serveRunArgs();
+  const mib = (flag: string): number => Number(args.find((a) => a.startsWith(`${flag}=`))?.slice(flag.length + 1).replace(/m$/, ""));
+  const needMib = (5.28 + 1.55 + 0.15) * 1e9 / 2 ** 20;
+  assert.ok(mib("--memory") >= needMib, `ceiling ${mib("--memory")} MiB holds two generations (${Math.round(needMib)} MiB)`);
+  assert.ok(mib("--memory-reservation") * 2 ** 20 >= 4.95e9, `the reservation covers the active generation's 4.95 GB peak`);
+});
+
 test("serve is launched with a memory ceiling that bounds a leak and leaves room to swap", () => {
   const { args, out } = serveRunArgs();
   assert.ok(args.includes("--memory=7680m"), `a 7.5 GiB ceiling: an active generation (5.28 GB with swap) plus a booting standby (1.55 GB) during a handoff: ${args.join(" ")}`);
