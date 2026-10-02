@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 1.12
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "ci-friction:fix_refusal:the-worker-changed-nothing"

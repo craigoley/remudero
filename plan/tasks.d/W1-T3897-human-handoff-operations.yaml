@@ -22,7 +22,7 @@
     - test/human-handoff-expiry.test.ts
     - test/human-handoff-closure.test.ts
   priority: 2
-  status: queued
+  status: merged
   # backlog gardener: band=2 evidence=2d27285fb66170c7
   attempts: 0
   rationale: |

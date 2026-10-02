@@ -17,7 +17,9 @@
   plan_refs: ["W1-T4527", "W1-T4528", "W1-T4529"]
   files: [src/lib/release-tags.ts, src/lib/deployer.ts, src/run-task.ts, test/every-instance-converges-to-the-fleet-release.test.ts]
   priority: 2
-  status: queued
+  status: blocked
+  retirement: retired
+  # plan gardener: retire W1-T4530 — It depends on W1-T4529, W1-T4532, which will never be built.
   # backlog gardener: band=2 evidence=0690a86ca33589dc
   attempts: 0
   rationale: |
