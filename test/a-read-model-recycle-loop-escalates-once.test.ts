@@ -256,3 +256,16 @@ test("the issue thread answers off the event loop and a dead one answers with wh
   assert.deepEqual(answerReadModelIssueRequest(close, { create: () => "", closeWithComment: (url) => void closed.push(url) }), { url: close.url });
   assert.deepEqual(closed, [close.url]);
 });
+
+test("the real issue thread runs the escalation through tryEscalate and answers", async (t) => {
+  const stateDir = makeTempDir("recycle-loop-thread");
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const alive = setInterval(() => undefined, 1_000);
+  t.after(() => clearInterval(alive));
+  const ledgerPath = join(stateDir, "ledger.ndjson");
+  // No options: escalate() refuses before any `gh` call, and tryEscalate ledgers the refusal.
+  const escalation = { class: "MANUAL", taskId: "READ-MODEL-CORE", summary: "s", detail: "d", options: [], recommendation: "r" } as const;
+  assert.deepEqual(await threadIssueRequest()({ op: "escalate", repository: "o/r", ledgerPath, escalation: { ...escalation, options: [] } }), { url: null });
+  const rows = readFileSync(ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(rows.map((r) => [r.step, r.task_id]), [["escalation.failed", "READ-MODEL-CORE"]]);
+});
