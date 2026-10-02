@@ -673,3 +673,31 @@ test("a later worker attempt read only by legacy does not drop the recon row ins
   assert.deepEqual(diffs.filter((d) => d.classification === "real"), [], JSON.stringify(diffs));
   assert.deepEqual(diffs.map((d) => d.path), [], "both sides evaluated the same rows at the build instant");
 });
+
+test("a PAUSE lifted after the repositories build is no diff when legacy replays the markers that build read", (t) => {
+  // Captured 2026-10-02T14:32:13Z: core's toggleonoff path legacy "control/pause" vs view "control/resume", with active,
+  // condition and reasons. A container recycle held state/PAUSE until the new daemon came up (daemon.boot 14:32:23 on a
+  // new host): the view's summary read the marker during the recycle and legacy read the file again after it was lifted.
+  const f = fixture(t);
+  createRepositoriesSourcePublisher({ stateDir: f.stateDir, instances: () => f.sources })();
+  writeFileSync(pauseFilePath(f.root), "container recycle (deploy/recycle-container.sh)");
+  const run = ticker(f);
+  t.after(() => run.release());
+  const body = repositories(run.tick());
+  const core = body.instances.find((i) => i.instanceId === "core")!.summary!.repos[0]!;
+  assert.equal(core.health.condition, "paused");
+  rmSync(pauseFilePath(f.root));
+  const sample = (): { diffs: Array<{ path: string; classification: string }>; inputs?: { control?: Record<string, string> } } => {
+    assert.equal(run.shadow({ view: "repositories", key: "", requests: 1 }), true, "the worker computed the legacy side and compared");
+    const row = run.logs.filter((l) => l.step === VIEW_SHADOW_DIFF_STEP).at(-1);
+    return { diffs: (row?.extra.diffs ?? []) as Array<{ path: string; classification: string }>, ...(row ? { inputs: row.extra.inputs as never } : {}) };
+  };
+  const base = "instances[instanceId=core].summary.repos[id=craigoley/remudero]";
+  const paired = sample();
+  assert.deepEqual(paired.diffs.filter((d) => d.path.startsWith(base)), [], JSON.stringify(paired.diffs));
+  // Negative control: a toggle the replayed markers do not give stays real, and the row names the marker each instance read.
+  core.actions.find((a) => a.id === "toggleonoff")!.path = "control/pause";
+  const wrong = sample();
+  assert.equal(wrong.diffs.find((d) => d.path === `${base}.actions[id=toggleonoff].path`)?.classification, "real", JSON.stringify(wrong.diffs));
+  assert.deepEqual(wrong.inputs?.control, { core: "paused", console: "paused" }, JSON.stringify(wrong.inputs));
+});

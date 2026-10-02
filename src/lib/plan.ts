@@ -238,7 +238,21 @@ export interface MachineFilingAdmissionContext {
   pathExistsAtBase?: (repoRelPath: string) => boolean;
 }
 
+const NEW_TEST_FILE = /^test\/[\w./-]+\.test\.[mc]?[jt]s$/;
+
+function isCiFrictionRemedyProposal(task: Task): boolean {
+  const files = task.files ?? [];
+  return (
+    task.origin?.startsWith("ci-friction:") === true &&
+    files.some((f) => /^(src|scripts)\//.test(f)) &&
+    files.every((f) => /^(src|scripts)\//.test(f) || NEW_TEST_FILE.test(f))
+  );
+}
+
 function isParkedMachineProposal(task: Task): boolean {
+  if (task.author_class === "machine" && task.verify === "human" && task.status !== "blocked" && (task.depends_on ?? []).length === 0 && isCiFrictionRemedyProposal(task)) {
+    return true;
+  }
   return (
     task.author_class === "machine" &&
     task.verify === "human" &&
@@ -957,7 +971,8 @@ export function machineFilingAdmissionViolations(
 
   const exists = context.pathExists ?? (() => false);
   const existsAtBase = context.pathExistsAtBase ?? (() => false);
-  const missing = (task.files ?? []).filter((path) => !exists(path) && !existsAtBase(path));
+  const newTestAllowed = isCiFrictionRemedyProposal(task);
+  const missing = (task.files ?? []).filter((path) => !exists(path) && !existsAtBase(path) && !(newTestAllowed && NEW_TEST_FILE.test(path)));
   if (missing.length > 0) {
     reasons.push(
       `task ${task.id} declares file path(s) that exist in neither the checkout nor the base tree: ` +

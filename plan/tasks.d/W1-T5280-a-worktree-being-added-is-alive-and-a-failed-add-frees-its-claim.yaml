@@ -1,0 +1,46 @@
+- id: W1-T5280
+  title: "A WORKTREE BEING ADDED IS ALIVE, AND A FAILED ADD FREES ITS CLAIM — a sibling prune deletes a run's worktree mid-add, and the generic add-failure arm keeps the dispatch claim, so the next four dispatches read blocked_inflight and trip the breaker with $0 spent"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  origin: "operator session 2026-10-02: research into today's circuit breaks (W1-T5016, W1-T5175)"
+  plan_refs: ["W1-T2528", "W1-T1268", "W1-T4356"]
+  files: [src/run-task.ts, test/a-worktree-being-added-is-alive-and-a-failed-add-frees-its-claim.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    The implement lane in src/run-task.ts takes the dispatch claim, then awaits `worktreeAddAsync`,
+    and only writes `writeRunLock` (the liveness token `pruneStaleRuns` honours) after the add
+    returns. On this host the add can take 5-10 minutes. `pruneStaleRuns` (src/lib/worker.ts)
+    protects a lockless worktree only while its directory mtime is younger than `pruneGraceMs`
+    (120000), so a DAEMON lane's prune in the same process force-removes a worktree that is still
+    being created. Example: at 17:28:16Z on 2026-10-01 DAEMON-1790873928507 removed
+    `run-W1-T5016-1790874544569`, and that run logged `worktree.add_failed` 11 seconds later.
+    The generic `worktree.add_failed` arm then calls `endThrownRun` and rethrows, but never calls
+    `releaseDispatchClaim`; the stale-base and node_modules arms both do. The claim strands, the
+    next four dispatches return `blocked_inflight`, and the breaker trips. That happened to every
+    task whose breaker tripped on 2026-10-02 (W1-T5016, W1-T5175, W1-T4617, W1-T4928): each had at
+    most one real attempt and $0 spent.
+  design: |
+    Two changes in the implement lane's add block, both in src/run-task.ts:
+    (i) write the run lock BEFORE awaiting `worktreeAddAsync` (the lock is a sibling file keyed by
+    the worktree path, so it can exist before the directory does), so a concurrent prune sees a live
+    pid and skips the path for the whole add; remove that lock in every failure arm that does not
+    hand the worktree on;
+    (ii) the generic add-failure arm releases the dispatch claim (holder arm, with the claim anchor,
+    after the terminal row is written — the W1-T4708 order the stale-base arm already uses), and a
+    throwing release is logged, never allowed to replace the original error.
+    Other lanes that call `worktreeAdd` and then `writeRunLock` (`addLaneWorktree` and the fix and
+    review lanes) get the same lock-first order if they share the race; name any left as they are.
+  acceptance:
+    - claim: "a prune running while a run's worktree is being added skips it, and a failed add releases the dispatch claim"
+      proof: "unit test: test/a-worktree-being-added-is-alive-and-a-failed-add-frees-its-claim.test.ts"
+  falsifier: |
+    With a fake `worktreeAddAsync` that blocks until released: a `pruneStaleRuns` call during the
+    block leaves the path alone (today it removes a lockless path older than the grace). A fake add
+    that throws a plain Error leaves no dispatch claim held (today the claim survives).

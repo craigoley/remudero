@@ -11,13 +11,20 @@ set -euo pipefail
 
 input="$(cat)"
 
+# W1-T5016: settings/worker.json passes `--confine-file-tools`; the interactive lane's
+# .claude/settings.json does not, so rule 14 below binds workers only.
+confine_file_tools=0
+case "${1:-}" in --confine-file-tools) confine_file_tools=1 ;; esac
+
 # Pull the fields we police out of the tool-call JSON. Bash carries `command`;
 # Write/Edit/Read carry `file_path`. Fall back to raw input if jq is absent.
 if command -v jq >/dev/null 2>&1; then
+  have_jq=1
   cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // ""')"
   path="$(printf '%s' "$input" | jq -r '.tool_input.file_path // ""')"
   hook_cwd="$(printf '%s' "$input" | jq -r '.cwd // ""')"
 else
+  have_jq=0
   cmd="$input"
   path="$input"
   hook_cwd=""
@@ -409,6 +416,84 @@ if [ "$cov_scan" -eq 1 ]; then
     [ "$cov_sm" -eq 1 ] && continue
     deny "a coverage run without --enable-source-maps (W1-T4915) — its \`DA:\` lines are located against the tsx-transpiled JS, so every changed line reads uncovered. Run \`npm run diff-coverage:local -- <test files>\`, which spawns CI's own invocation (flags read out of ci.yml)"
   done < <(printf '%s\n' "$cmd" | cov_segments)
+fi
+
+# 14) WORKER FILE TOOLS STAY IN THE ASSIGNED WORKTREE (W1-T5016). OBSERVED at c94c2bf49: workers run
+#    under bypassPermissions, this hook read `file_path` and `cwd` and never compared them, and the worker
+#    matcher omitted Read — a scratch-hook test allowed an Edit in a sibling checkout. Worker-lane only
+#    (`--confine-file-tools`, passed by settings/worker.json). The assigned worktree is CLAUDE_PROJECT_DIR
+#    (the CLI sets it on every hook to the session's launch dir, i.e. spawnWorker's cwd), else the payload
+#    cwd. Both sides are canonicalized physically — every symlink on the way, dangling ones included —
+#    before they are compared. Allowed: the worktree; READS through its own node_modules link (writes
+#    there would land in the shared tree, W1-T2312); the scratch root ${TMPDIR:-/tmp}; a `worker-home*`
+#    HOME; and this session's own ~/.claude/projects/<sanitized project dir>, where the CLI persists large
+#    tool output. FAIL CLOSED on no path, no worktree, a `..` component, an unresolvable path, or no jq.
+#    Bash is NOT confined here: the OS sandbox is that boundary.
+ft_canon() {  # absolute path -> physical path, resolving every symlink component (dangling included)
+  local rest="${1#/}" out="" comp link hops=0
+  while [ -n "$rest" ]; do
+    comp="${rest%%/*}"
+    if [ "$comp" = "$rest" ]; then rest=""; else rest="${rest#*/}"; fi
+    case "$comp" in ''|.) continue ;; ..) out="${out%/*}"; continue ;; esac
+    if [ -L "$out/$comp" ]; then
+      hops=$((hops + 1)); [ "$hops" -le 40 ] || return 1
+      link="$(readlink "$out/$comp")" || return 1
+      case "$link" in /*) out=""; rest="${link#/}${rest:+/$rest}" ;; *) rest="$link${rest:+/$rest}" ;; esac
+    else
+      out="$out/$comp"
+    fi
+  done
+  printf '%s\n' "${out:-/}"
+}
+ft_under() {  # is physical path $1 at or below physical root $2?
+  [ -n "$2" ] || return 1
+  [ "$2" = "/" ] && return 0
+  case "$1/" in "$2"/*) return 0 ;; esac
+  return 1
+}
+if [ "$confine_file_tools" -eq 1 ]; then
+  if [ "$have_jq" -eq 0 ]; then
+    if printf '%s' "$input" | grep -Eq '"tool_name"[[:space:]]*:[[:space:]]*"(Read|Write|Edit|MultiEdit|NotebookEdit)"'; then
+      deny "a file tool with no jq to read its target — confinement fails closed (W1-T5016)"
+    fi
+  else
+    ft_tool="$(printf '%s' "$input" | jq -r '.tool_name // ""')"
+    case "$ft_tool" in
+      Read|Write|Edit|MultiEdit|NotebookEdit)
+        ft_target="$path"
+        [ "$ft_tool" = NotebookEdit ] && ft_target="$(printf '%s' "$input" | jq -r '.tool_input.notebook_path // ""')"
+        [ -n "$ft_target" ] || deny "$ft_tool names no path, so it cannot be checked against the assigned worktree (W1-T5016)"
+        ft_anchor="${CLAUDE_PROJECT_DIR:-$hook_cwd}"
+        case "$ft_anchor" in /*) : ;; *) deny "$ft_tool with no absolute assigned worktree to compare against (W1-T5016)" ;; esac
+        case "$ft_target" in
+          /*) : ;;
+          *) case "$hook_cwd" in /*) ft_target="$hook_cwd/$ft_target" ;; *) deny "$ft_tool of a relative path with no cwd (W1-T5016)" ;; esac ;;
+        esac
+        case "/$ft_target/" in */../*) deny "$ft_tool of a path with a \`..\` component ($ft_target) — name the file by its absolute path inside the assigned worktree (W1-T5016)" ;; esac
+        ft_root="$(ft_canon "$ft_anchor")" || deny "the assigned worktree does not resolve (W1-T5016)"
+        [ -d "$ft_root" ] || deny "the assigned worktree ($ft_anchor) is not a directory (W1-T5016)"
+        ft_real="$(ft_canon "$ft_target")" || deny "$ft_tool target does not resolve ($ft_target, W1-T5016)"
+        ft_ok=0
+        ft_under "$ft_real" "$ft_root" && ft_ok=1
+        if [ "$ft_ok" -eq 0 ] && [ "$ft_tool" = Read ] && [ -L "$ft_root/node_modules" ]; then
+          ft_nm="$(ft_canon "$ft_root/node_modules")" && ft_under "$ft_real" "$ft_nm" && ft_ok=1
+        fi
+        if [ "$ft_ok" -eq 0 ]; then
+          ft_tmp="$(ft_canon "${TMPDIR:-/tmp}")" && ft_under "$ft_real" "$ft_tmp" && ft_ok=1
+        fi
+        if [ "$ft_ok" -eq 0 ] && [ -n "${HOME:-}" ]; then
+          case "${HOME%/}" in
+            */worker-home*) ft_home="$(ft_canon "$HOME")" && ft_under "$ft_real" "$ft_home" && ft_ok=1 ;;
+          esac
+          for ft_slug in "${ft_anchor//[^A-Za-z0-9]/-}" "${ft_root//[^A-Za-z0-9]/-}"; do
+            [ "$ft_ok" -eq 1 ] && break
+            ft_proj="$(ft_canon "$HOME/.claude/projects/$ft_slug")" && ft_under "$ft_real" "$ft_proj" && ft_ok=1
+          done
+        fi
+        [ "$ft_ok" -eq 1 ] || deny "$ft_tool outside the assigned worktree ($ft_target resolves to $ft_real; worktree $ft_root, W1-T5016) — file tools stay inside the worktree, and scratch goes under ${TMPDIR:-/tmp}"
+        ;;
+    esac
+  fi
 fi
 
 # 10) READ-SHAPED `gh` CALLS, TOO CLOSE TOGETHER (W1-T3275 — THE SECONDARY LIMIT COUNTS CADENCE).

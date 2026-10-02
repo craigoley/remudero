@@ -89,6 +89,8 @@ export interface MachineShardSpec {
   cost?: number;
   /** Every cost the filer priced in the same pass, which ranks `cost` ({@link costPriority}). */
   costPopulation?: readonly number[];
+  /** The evidence the worker builds from, one line each, rendered as a `rationale: |` block. */
+  rationale?: readonly string[];
 }
 
 /**
@@ -110,6 +112,7 @@ export function renderMachineShard(spec: MachineShardSpec): { text: string; refu
     "  acceptance:",
     ...spec.acceptance.flatMap((c) => [`    - claim: ${q(c.claim)}`, `      proof: ${q(c.proof)}`]),
     ...(spec.note === undefined ? [] : [`  note: ${q(spec.note)}`]),
+    ...(spec.rationale === undefined ? [] : ["  rationale: |", ...spec.rationale.map((line) => (line === "" ? "" : `    ${line}`))]),
     "",
   ].join("\n");
   try {

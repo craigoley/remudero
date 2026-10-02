@@ -206,6 +206,8 @@ import { loadConfig, type WorkerProviderId } from "./config.js";
 import type { Config, ModelApproval } from "./config-schema.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { createServeDrain, exitWithin } from "./serve-drain.js";
+import { createServeMemoryRegistry, droppableRouteCache, LEGACY_CACHE_VIEWS, sampleServeMemory, snapshotHolder, startServeMemoryMonitor, viewBodiesHolder, withoutRestore,
+  type CgroupHeadroom, type ServeMemoryMonitorOptions, type ServeMemoryRegistry } from "./serve-memory.js";
 import { githubAuthProbe, gatewayPrimedProbe, planLoadedProbe, readModelWarmProbe, type ReadinessProbe } from "./serve-generation.js";
 import type { ConsoleProjectionWorker, FeedbackProjectionInput } from "./console-projection-worker.js";
 import { createConsoleSnapshotStore } from "./console-snapshot-store.js";
@@ -578,6 +580,11 @@ export interface ServeDeps {
     setInterval?: typeof setInterval;
     clearInterval?: typeof clearInterval;
   };
+  /** W1-T5175: the memory sample/relief loop's seams (serve-memory.ts); absent, this process, its cgroup and an unref'd 3-minute timer. */
+  serveMemory?: Pick<ServeMemoryMonitorOptions, "intervalMs" | "setInterval" | "clearInterval" | "clock"> & {
+    usage?: () => NodeJS.MemoryUsage;
+    headroom?: () => CgroupHeadroom | undefined;
+  };
 }
 
 /**
@@ -908,18 +915,30 @@ export function boundConsoleReadRoute(
   deps: ServeDeps,
   budgetMs: number = CONSOLE_READ_ROUTE_BUDGET_MS,
   options: Omit<ConsoleSnapshotCacheOptions, "budgetMs" | "fallbackBody"> = {},
+  memory?: { registry: ServeMemoryRegistry; scope: string },
 ): Route {
   if (route.method !== "GET" || route.scope !== "read" || !CONSOLE_CACHED_READ_PATHS.has(route.path)) return route;
   const fallbackBody = (staleness: ConsoleResponseStaleness) => fallbackBodyForCachedRead(route.path, deps, staleness);
-  return { ...route, handler: createConsoleSnapshotCache(route, { ...options, budgetMs, fallbackBody }).handler };
+  // W1-T5175: a drop rebuilds the cache WITHOUT restoring from disk what the drop just shed.
+  const cache = (afterDrop: boolean) =>
+    createConsoleSnapshotCache(route, { ...options, ...(afterDrop ? { store: withoutRestore(options.store) } : {}), budgetMs, fallbackBody }).handler;
+  if (!memory) return { ...route, handler: cache(false) };
+  const droppable = droppableRouteCache(`legacy-cache:${memory.scope}:${route.path}`, LEGACY_CACHE_VIEWS[route.path], cache);
+  memory.registry.add(droppable.holder);
+  return { ...route, handler: droppable.handler };
 }
 
-export function boundConsoleReadRoutes(routes: readonly Route[], deps: ServeDeps, budgetMs: number = CONSOLE_READ_ROUTE_BUDGET_MS): Route[] {
+export function boundConsoleReadRoutes(
+  routes: readonly Route[],
+  deps: ServeDeps,
+  budgetMs: number = CONSOLE_READ_ROUTE_BUDGET_MS,
+  memory?: { registry: ServeMemoryRegistry; scope: string },
+): Route[] {
   const generation = createConsoleWriteGeneration();
   const snapshots = deps.consoleSnapshots;
   const store = snapshots && createConsoleSnapshotStore({ dir: snapshots.dir, codeRev: deps.consoleSha ?? CONSOLE_SHA_UNKNOWN, log: deps.log });
   if (snapshots?.prewarmPaths) void prewarmReadRoutes(routes, snapshots.prewarmPaths, deps.log);
-  return routes.map((route) => invalidateSnapshotsOnWrite(boundConsoleReadRoute(route, deps, budgetMs, { generation, store }), generation));
+  return routes.map((route) => invalidateSnapshotsOnWrite(boundConsoleReadRoute(route, deps, budgetMs, { generation, store }, memory), generation));
 }
 
 /**
@@ -2559,6 +2578,7 @@ function assembleServeRoutes(
   currentAnalyticsSnapshot: () => AnalyticsSnapshot = coldAnalyticsSnapshot,
   operatorAgentMemory?: OperatorAgentMemorySource,
   readModel?: ReadModelWorkerHandle,
+  memory?: ServeMemoryRegistry,
 ): ServeRoutesAssembly {
   const instanceAnalyticsCaches: AnalyticsSnapshotCache[] = [];
   const badgeScopes: NavBadgeScope[] = [];
@@ -2891,7 +2911,7 @@ function assembleServeRoutes(
       readStore: deps.incidents?.readStore,
     }),
   ];
-  const routes = boundConsoleReadRoutes(rawRoutes, deps);
+  const routes = boundConsoleReadRoutes(rawRoutes, deps, CONSOLE_READ_ROUTE_BUDGET_MS, memory && { registry: memory, scope: "core" });
   routes.push(
     ...buildInstanceGatewayRoutes(routes, {
       registryPath: daemonInstanceRegistryPath(deps.questionsRoot),
@@ -2901,7 +2921,7 @@ function assembleServeRoutes(
       log: deps.log,
       bound: (reads, board, instance) => boundConsoleReadRoutes(reads.map((r) => projectConsoleStatusRoute(r, modelApprovals)), {
         ...deps, board, consoleSnapshots: deps.consoleSnapshots && instance ? { dir: join(deps.consoleSnapshots.dir, "instances", instance) } : undefined,
-      }),
+      }, CONSOLE_READ_ROUTE_BUDGET_MS, memory && { registry: memory, scope: instance ?? "instance" }),
       ...deps.instances,
       assistantClaimRoot: deps.fleetControlRoot,
       assistantBootSha: consoleSha,
@@ -3077,6 +3097,12 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       prewarm.noteRead();
       readModel?.noteGithubRead?.();
     });
+  // W1-T5175: every holder serve can name, sized by its own memory loop (startLedgerWriters, below).
+  const memory = createServeMemoryRegistry();
+  memory.add(snapshotHolder("analytics", analyticsCache.current, () => analyticsCache.shed()));
+  memory.add(snapshotHolder("live-analytics", liveAnalyticsCache.current));
+  memory.add(snapshotHolder("board-snapshot", () => deps.boardSnapshotSource?.current()));
+  if (readModel) memory.add(viewBodiesHolder(() => readModel.bodies));
   const routeAssembly = assembleServeRoutes(
     {
       ...deps,
@@ -3091,6 +3117,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     analyticsCache.current,
     operatorAgentMemory,
     readModel,
+    memory,
   );
   const routes = routeAssembly.routes.map((route) =>
     // rationale (7): HIGH-tier IS the write-consequence set this task must respect — the same
@@ -3162,7 +3189,21 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
   server.on("close", liveAnalyticsCache.stop);
   const startLedgerWriters = (): void => {
     server.on("close", watchInstanceLiveness({ registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ledgerPath: deps.ledgerPath, log: deps.log, ...deps.instances }));
-    server.on("close", startIncidentInvariantsMonitor(deps.ledgerPath, { ...deps.incidentInvariants, log: deps.log }));
+    const stopInvariants = startIncidentInvariantsMonitor(deps.ledgerPath, { ...deps.incidentInvariants, log: deps.log });
+    // W1-T5175: serve samples its memory from its own loop, beside the invariants it ledgers. ONE close
+    // listener stops both: the server already sits at its listener ceiling.
+    const stopMemory = startServeMemoryMonitor({
+      ...deps.serveMemory,
+      holders: memory.holders,
+      sample: (holders) => sampleServeMemory(holders, { usage: deps.serveMemory?.usage, headroom: deps.serveMemory?.headroom }),
+      modeOf: (view) => viewMode(readModel, view),
+      log: deps.log,
+      incident: (line) => appendLedger(deps.ledgerPath, line),
+    });
+    server.on("close", () => {
+      stopInvariants();
+      stopMemory();
+    });
   };
   if (deps.generation) server.setMaxListeners(server.getMaxListeners() + 1).once("listening", startLedgerWriters);
   else startLedgerWriters();
