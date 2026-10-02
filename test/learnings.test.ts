@@ -175,24 +175,28 @@ test("a .github task gets the CI learning and NOT the containment ones", () => {
   assert.deepEqual(ids, ["skipped-check-deadlock"]);
 });
 
-test("W1-T3625: the comment-load lesson reaches every measured root and its policy sources", () => {
+test("W1-T3625: the comment-load lesson is scoped to its gate, workflow, baseline, and policy", () => {
   const learningsDir = join(REPO_ROOT, "learnings");
-  const measuredAndPolicyPaths = [
-    "src/lib/worker.ts",
-    "scripts/comment-load-ratchet.mjs",
-    "deploy/install-host-units.sh",
+  const gateAndPolicyPaths = [
     ".github/workflows/ci.yml",
-    "bin/rmd",
-    "hooks/pre-push",
     "docs/comment-standard.md",
     "scripts/comment-load-baseline.json",
+    "scripts/comment-load-ratchet.mjs",
   ];
 
-  for (const file of measuredAndPolicyPaths) {
+  for (const file of gateAndPolicyPaths) {
     const selected = loadLearningsForTaskFiles(learningsDir, [file]);
     assert.ok(
       selected.some((entry) => entry.id === "comment-load-ratchet-lane"),
       `${file} must select the comment-load-ratchet guidance`,
+    );
+  }
+
+  for (const file of ["src/lib/worker.ts", "deploy/install-host-units.sh", "bin/rmd", "hooks/pre-push"]) {
+    const selected = loadLearningsForTaskFiles(learningsDir, [file]);
+    assert.ok(
+      !selected.some((entry) => entry.id === "comment-load-ratchet-lane"),
+      `${file} must not pull gate-specific guidance into an unrelated shard selection`,
     );
   }
 });
