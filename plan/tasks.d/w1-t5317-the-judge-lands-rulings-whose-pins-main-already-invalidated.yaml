@@ -1,0 +1,53 @@
+- id: W1-T5317
+  title: "THE MACHINE-FILING JUDGE LANDS RULINGS WHOSE PINS MAIN HAS ALREADY INVALIDATED — 2026-10-02 it pinned W1-T5270 and W1-T5277 at 15:55:58Z, operator PR #8689 retired both, then judge PR #8687 merged the stale pins on top and every-shard-on-main-is-lintable went red on main for every PR until #8700"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  priority: 2
+  budget_usd: 10.00
+  risk: medium
+  band_meaning: span
+  origin: "operator session 5da5b764, 2026-10-02: arch-plan E39 (main red from #8687 after #8689)"
+  files: [src/lib/machine-filing-judge.ts, test/w1-t5317-the-judge-lands-rulings-whose-pins-main-already-invalidated.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-02: the machine-filing judge (runMachineFilingJudge in src/lib/machine-filing-judge.ts)
+    ruled on W1-T5270 and W1-T5277 at 15:55:58Z and opened #8687 with records pinned by taskRulingPin.
+    Operator PR #8689 then retired both records. The two PRs touched different hunks, so #8687 merged
+    cleanly on top, and the merged records carried pins that no longer matched them.
+    machineAuthorVerifyViolation (src/lib/task-linter.ts) refused the stale pins, so the census test
+    every-shard-on-main-is-lintable failed on main and reddened every PR's required checks until #8700
+    dropped the rulings.
+    The judge checks a pin once, when it renders the record in its landing tree (renderRuledShard, called
+    from runMachineFilingJudge). That tree is a gardenCheckout (src/run-task.ts) cut from origin/main when
+    the pass starts. The pin is never checked again before the push in gardenCheckout's land, or while the
+    PR waits. On later passes the state.pending branch of runMachineFilingJudge only logs
+    machine_judge.waiting while the PR is open. A plan PR that merges inside that window makes the judge PR
+    stale without any conflict to show it. W1-T2855 refreshes a direct-merge head onto current main, but
+    the judge PR can merge by auto-merge without that path.
+  design: |
+    Re-check each pin against the merge target at two points in runMachineFilingJudge:
+    (1) LANDING. Just before ws.land, fetch origin/main and read each landed record from it. A record whose
+    taskRulingPin on main no longer matches the pin the judge rendered, or that main has retired or removed,
+    is taken out of the landing set. Log it as machine_judge.pin_stale with the task id and both pins.
+    Leave it unjudged so the next pass rules on main's current record. If nothing is left to land, open no PR.
+    (2) WAITING. While state.pending is open, re-read each pending id's record from a freshly fetched
+    origin/main on every pass. If any pending pin is stale, withdraw the PR: close it with a comment naming
+    the stale ids and both pins, log machine_judge.withdrawn, and clear state.pending without recording the
+    ids in state.declined, so the judge can rule on the current records again. If every pin still holds,
+    keep waiting as today.
+    The re-check is the same pin comparison machineAuthorVerifyViolation makes, so the judge cannot land
+    anything lint-plan would refuse on main. Add no new time bound. Main's own advance is the trigger.
+  acceptance:
+    - claim: "a ruling whose pin main invalidated after the judge cut its landing tree is dropped before the judge pushes"
+      proof: 'grep: test("W1-T5317: a pin a concurrent plan PR invalidated is dropped before the judge pushes" in test/w1-t5317-the-judge-lands-rulings-whose-pins-main-already-invalidated.test.ts'
+    - claim: "an open judge PR whose pin main has since invalidated is withdrawn and its records are judged again rather than declined"
+      proof: 'grep: test("W1-T5317: an open judge PR whose pin main has since invalidated is withdrawn and re-judged" in test/w1-t5317-the-judge-lands-rulings-whose-pins-main-already-invalidated.test.ts'
+    - claim: "a judge PR whose pins all still hold on main is left open to merge as before"
+      proof: 'grep: test("W1-T5317: a judge PR whose pins all still hold on main is left to merge" in test/w1-t5317-the-judge-lands-rulings-whose-pins-main-already-invalidated.test.ts'
+  falsifier: |
+    Remove the landing re-check and the first test sees the stale ruling pushed in the judge PR. Remove the
+    waiting re-check and the second sees the pending PR left open with a pin main already invalidated.
