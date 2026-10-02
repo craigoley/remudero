@@ -5,7 +5,6 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  priority: 2
   budget_usd: 10.00
   risk: high
   band_meaning: span
@@ -13,7 +12,13 @@
   note: "reservation hand-off: plan-console-audit-core-1790887256000 -> plan-console-audit-core-1790887256000 When this merges, file ONE console shard pinned to the merged route and payload (the console's app/_components/console-web-vitals.tsx already computes route_group and the metric; it adds a first-party send beside the GA one)."
   plan_refs: [W1-T4611]
   files: [src/lib/console-vitals.ts, src/lib/serve.ts, test/console-vitals-are-ingested-by-route-group.test.ts]
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator ruling 2026-10-02: retire W1-T5179 — the console's existing GA4 path covers it. Its
+  #   console_web_vital events (route group only, consent-gated) are live; on 2026-10-02 the GA4 property
+  #   "Remudero Console" registered route_group / metric_name / metric_rating as event dimensions and
+  #   metric_value as a custom metric. Per route group, a share of "good" >= 75% is the same pass/fail as p75.
+  #   Not carried over, by decision: a core-side read to gate a change on vitals. File it if a gate needs it.
   attempts: 0
   rationale: |
     OBSERVED 2026-10-01: remudero-console app/_components/console-web-vitals.tsx sends LCP/INP/CLS/FCP/TTFB only via
