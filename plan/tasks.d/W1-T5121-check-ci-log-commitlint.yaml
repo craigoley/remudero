@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 1.96
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:ci-log:commitlint"

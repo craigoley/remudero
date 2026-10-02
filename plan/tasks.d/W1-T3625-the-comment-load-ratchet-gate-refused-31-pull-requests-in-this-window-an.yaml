@@ -6,7 +6,7 @@
   verify: auto
   priority: 1.6
   risk: low
-  status: queued
+  status: merged
   attempts: 0
   # machine-filing judge backlog 2026-09-29: retargeted from learnings/ci-gate-lessons.yaml, which loadLearningsCorpus never indexed (W1-T3906).
   author_class: machine
