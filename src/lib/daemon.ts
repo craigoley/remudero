@@ -24,6 +24,7 @@ import { daemonSreGovernorEnforcer, receiptFromLedgerRow, type SreGovernorEnforc
 import type { GardenerDeps } from "./gardener.js";
 import { startKnowledgeGardener, type GardenWorkspace } from "./knowledge-gardener.js";
 import { startInboxResponder, type InboxResponderDeps } from "./inbox-responder.js";
+import { startLivenessPulse } from "./liveness-pulse.js";
 import type {
   CiLearningCadenceRunResult,
   MeasurementCadenceDecision,
@@ -1007,6 +1008,9 @@ export interface DaemonDeps {
   gardens?: ReadonlyArray<(intervalMs: number) => { stop: () => void }>;
   /** W1-T4088: answers operator replies on inbox threads, on its own timer beside the main loop. */
   inboxResponder?: InboxResponderDeps;
+  /** E32: write `daemon.pulse` once per poll interval while no other `daemon.*` row has, for this
+   *  run's whole life ({@link startLivenessPulse}). Off in tests that count rows or sleeps. */
+  livenessPulse?: boolean;
   /** The CLI wiring binds this to the existing selected-repository `rmd fix` / `rmd review`
    * commands. It is injected so this scheduler module never grows a second repair implementation. */
   runPrAction?: (request: { action: "fix" | "review"; prNumber: number; origin: string; requestedAt: string; operator?: string }) => Promise<{ outcome: "completed" | "refused"; detail?: string }>;
@@ -2368,8 +2372,10 @@ export async function runDaemon(
   let idleLaneAccount = newIdleLaneAccount(idleLaneClock.now());
   let idleLaneTickCause: IdleLaneCause | undefined;
   let idleLaneDispatchable = 0;
+  let livenessPulse: ReturnType<typeof startLivenessPulse> | undefined;
   const log: typeof emitLog = (step, fields) => {
     idleLaneTickCause = idleLaneCauseForStep(step) ?? idleLaneTickCause;
+    livenessPulse?.note(step);
     emitLog(step, fields);
   };
   // One sample per tick outcome: what the lanes are doing and why they are not doing more. `dispatchable`
@@ -2614,10 +2620,12 @@ export async function runDaemon(
     fleetLane?.stop();
     inboxResponder?.stop();
     gardenerRef.stop();
+    livenessPulse?.stop();
     const s: DaemonSummary = { attempted, merged, stopReason, stopDetail, costUsd, ticks };
     log("daemon.summary", { ...s });
     return s;
   };
+  if (deps.livenessPulse) livenessPulse = startLivenessPulse(pollIntervalMs, idleLaneClock, log, (sample) => reportLoopLag(sample, log));
   const prActionPump = startPrActionPump(deps, pollIntervalMs, log);
   prActionPumpRef.stop = prActionPump.stop;
   prActionPumpRef.isBusy = prActionPump.isBusy;

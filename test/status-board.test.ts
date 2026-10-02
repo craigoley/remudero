@@ -694,6 +694,99 @@ test("W1-T2392: the warning MOVES NO DISPOSITION — every other board section i
   assert.deepEqual(restWith, restWithout, "every OTHER NEEDS ME row is unchanged too");
 });
 
+test("W1-T4014: an unreadable operator release file makes the parked-proposal count unknown, never a reassuring zero", () => {
+  const root = tmpRoot();
+  writeFileSync(join(root, "state", "operator-releases.json"), "{ not json");
+  const model = buildStatusBoard(
+    root,
+    writeLedger([ledgerLine({ step: "run.start" })]),
+    baseDeps({ plan: planWith(["W1-T2379"]), github: fakeGithub() }),
+  );
+  const parked = model.needsMe.parkedProposals;
+  assert.equal(parked?.count, undefined, "no count is claimed when releases cannot be read");
+  assert.deepEqual(parked?.taskIds, []);
+  assert.match(parked?.unknownReason ?? "", /^operator release state is unreadable \(.+\)$/);
+  assert.match(renderStatusBoardText(model), /machine-authored proposals awaiting a ruling: unknown — operator release state is unreadable/);
+});
+
+/** A plan mixing machine filings parked for a ruling with ordinary backlog. Only the first shape is a proposal. */
+const proposalPlan = (tasks: Array<{ id: string; author_class?: string; verify?: string; status?: string }>): Plan =>
+  ({
+    tasks: tasks.map((t) => ({ title: t.id, repo: "remudero", type: "implement", depends_on: [], status: "queued", ...t })),
+  }) as unknown as Plan;
+
+test("W1-T4014: parked proposals are counted for the operator", () => {
+  const model = buildStatusBoard(
+    tmpRoot(),
+    writeLedger([ledgerLine({ step: "run.start" })]),
+    baseDeps({
+      plan: proposalPlan([
+        { id: "W1-T9002", author_class: "machine", verify: "human" },
+        { id: "W1-T9001", author_class: "machine", verify: "human" },
+      ]),
+      github: fakeGithub(),
+    }),
+  );
+  assert.deepEqual(model.needsMe.parkedProposals, { count: 2, taskIds: ["W1-T9001", "W1-T9002"] });
+  const text = renderStatusBoardText(model);
+  assert.match(text, /2 machine-authored proposals awaiting a ruling: W1-T9001, W1-T9002/);
+  assert.match(text, /release one with `rmd approve W1-T9001`/);
+  assert.doesNotMatch(text, /nothing needs you/, "a parked proposal is something the operator must rule on");
+});
+
+test("W1-T4014: parked is not conflated with queued", () => {
+  const ledger = writeLedger([ledgerLine({ step: "run.start" })]);
+  const model = buildStatusBoard(
+    tmpRoot(),
+    ledger,
+    baseDeps({
+      plan: proposalPlan([
+        { id: "W1-T9010", author_class: "machine", verify: "human" },
+        { id: "W1-T9011" },
+        { id: "W1-T9012", verify: "human" },
+        { id: "W1-T9013", author_class: "machine", verify: "auto" },
+        { id: "W1-T9014", author_class: "machine", verify: "human", status: "blocked" },
+      ]),
+      github: fakeGithub(),
+    }),
+  );
+  assert.deepEqual(model.needsMe.parkedProposals, { count: 1, taskIds: ["W1-T9010"] }, "ordinary, released and blocked backlog is not awaiting a ruling");
+
+  const backlogOnly = buildStatusBoard(
+    tmpRoot(),
+    ledger,
+    baseDeps({ plan: proposalPlan([{ id: "W1-T9011" }, { id: "W1-T9013", author_class: "machine", verify: "auto" }]), github: fakeGithub() }),
+  );
+  assert.deepEqual(backlogOnly.needsMe.parkedProposals, { count: 0, taskIds: [] });
+  assert.match(renderStatusBoardText(backlogOnly), /nothing needs you/, "a queued backlog with no proposal is not a ruling to make");
+});
+
+test("W1-T4014: only a person or the ratified judge releases a proposal", () => {
+  const root = tmpRoot();
+  // `rmd approve` (a person, or the ratified machine-filing judge acting through it) leaves both records.
+  writeFileSync(join(root, "state", "operator-releases.json"), JSON.stringify({ releases: { "W1-T9021": NOW_ISO } }) + "\n");
+  const ledger = writeLedger([
+    ledgerLine({ step: "ratify.approved", task_id: "W1-T9020" }),
+    // Activity that is not a ruling: a run, a review and a gardener pass touching the proposal release nothing.
+    ledgerLine({ step: "run.start", task_id: "W1-T9022" }),
+    ledgerLine({ step: "review.posted", task_id: "W1-T9022" }),
+    ledgerLine({ step: "gardener.pass", task_id: "W1-T9022" }),
+  ]);
+  const model = buildStatusBoard(
+    root,
+    ledger,
+    baseDeps({
+      plan: proposalPlan([
+        { id: "W1-T9020", author_class: "machine", verify: "human" },
+        { id: "W1-T9021", author_class: "machine", verify: "human" },
+        { id: "W1-T9022", author_class: "machine", verify: "human" },
+      ]),
+      github: fakeGithub(),
+    }),
+  );
+  assert.deepEqual(model.needsMe.parkedProposals, { count: 1, taskIds: ["W1-T9022"] });
+});
+
 
 // ── ACCEPTANCE 1: BLOCKERS BY CLASS — circuit-broken (+ reset ETA) and dispatch.indeterminate
 // (+ gh-window note) render as DISTINCT classes off the EXISTING breaker/ledger signals, never

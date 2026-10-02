@@ -1,11 +1,12 @@
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { ciFrictionCauseKey, ciFrictionOrigin, CI_FRICTION_REMEDIES_FILE, type CiFrictionCause } from "./ci-friction-gardener.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { Escalation } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { gardenEffectsPath, gardenStatePath, readGardenEffects, writeGardenEffects, type GardenEffect, type PrState } from "./gardener.js";
+import { GardenEffectsUnreadableError, GardenStateUnreadableError, gardenEffectsPath, gardenStatePath, readGardenEffects, readGardenState, writeGardenEffects, type GardenEffect, type PrState } from "./gardener.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 
 /**
@@ -132,6 +133,7 @@ interface IssuedVerdict {
   verdict: "credit" | "debit";
   kind: "effect" | "churn";
   at: string;
+  sequence?: number;
 }
 
 export interface OverseerState {
@@ -140,6 +142,7 @@ export interface OverseerState {
   verdicts: IssuedVerdict[];
   churnEscalated: Record<string, string>;
   lastScorecardAt?: string;
+  nextVerdictSequence?: number;
 }
 
 export function overseerStatePath(stateDir: string): string {
@@ -150,16 +153,71 @@ function emptyState(): OverseerState {
   return { episodes: {}, prs: {}, verdicts: [], churnEscalated: {} };
 }
 
-function readOverseerState(path: string): OverseerState {
-  if (!existsSync(path)) return emptyState();
-  try {
-    return { ...emptyState(), ...(JSON.parse(readFileSync(path, "utf8")) as Partial<OverseerState>) };
-  } catch (error) {
-    // deliberate: an unreadable record restarts the overseer's episodes; the worst case is one
-    // repeated NOTICE, and the gardeners' own state is untouched.
-    void error;
-    return emptyState();
+class OverseerStateUnreadableError extends RmdError {
+  constructor(readonly path: string, readonly failureClass: "unparseable" | "malformed", detail: string) {
+    super("gardener", GENERIC_EXIT_CODE, `overseer state ${path} is ${failureClass}: ${detail}; repair or remove the file and the next pass retries`, { path, failureClass });
+    this.name = "OverseerStateUnreadableError";
   }
+}
+
+class OverseerReceiptUnavailableError extends RmdError {
+  constructor(readonly path: string) {
+    super("gardener", GENERIC_EXIT_CODE,
+      `gardener receipt ${path} is unavailable beyond the retained 200 IDs; repair the receipt before replay`,
+      { path, failureClass: "unavailable" });
+    this.name = "OverseerReceiptUnavailableError";
+  }
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+const isDate = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
+const isCount = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
+
+function readOverseerState(path: string): OverseerState {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT" && lstatSync(path, { throwIfNoEntry: false }) === undefined) return emptyState();
+    throw new OverseerStateUnreadableError(path, "unparseable", String((e as Error)?.message ?? e));
+  }
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); }
+  catch (e) { throw new OverseerStateUnreadableError(path, "unparseable", String((e as Error)?.message ?? e)); }
+  if (!isRecord(parsed) || !isRecord(parsed.episodes) || !isRecord(parsed.prs) ||
+    !Array.isArray(parsed.verdicts) || !isRecord(parsed.churnEscalated) ||
+    Object.values(parsed.episodes).some((e) => !isRecord(e) || (e.kind !== "failure" && e.kind !== "silence") ||
+      !isDate(e.since) || (e.healedAt !== undefined && !isDate(e.healedAt)) ||
+      (e.escalatedAt !== undefined && !isDate(e.escalatedAt)) ||
+      (e.failuresAtHeal !== undefined && !isCount(e.failuresAtHeal)) ||
+      (e.owned !== undefined && typeof e.owned !== "boolean")) ||
+    Object.values(parsed.churnEscalated).some((at) => !isDate(at)) ||
+    parsed.verdicts.some((v: unknown) => !isRecord(v) || typeof v.id !== "string" || typeof v.gardener !== "string" ||
+      typeof v.actionClass !== "string" || (v.verdict !== "credit" && v.verdict !== "debit") ||
+      (v.kind !== "effect" && v.kind !== "churn") || !isDate(v.at) ||
+      (v.sequence !== undefined && (!Number.isSafeInteger(v.sequence) || (v.sequence as number) < 1))) ||
+    (parsed.nextVerdictSequence !== undefined && (!Number.isSafeInteger(parsed.nextVerdictSequence) || (parsed.nextVerdictSequence as number) < 0)) ||
+    (parsed.lastScorecardAt !== undefined && !isDate(parsed.lastScorecardAt)) ||
+    Object.values(parsed.prs).some((p) => !isRecord(p) || typeof p.gardener !== "string" || typeof p.actionClass !== "string" ||
+      typeof p.url !== "string" || !isDate(p.openedAt) || (p.info !== undefined &&
+        (!isRecord(p.info) || !["open", "merged", "closed", "unknown"].includes(String(p.info.state)) ||
+          typeof p.info.title !== "string" || !Array.isArray(p.info.paths) || p.info.paths.some((v: unknown) => typeof v !== "string") ||
+          (p.info.mergedAt !== undefined && !isDate(p.info.mergedAt)))))
+  ) throw new OverseerStateUnreadableError(path, "malformed", "required history fields are missing or invalid");
+  const state = parsed as unknown as OverseerState;
+  const sequences = state.verdicts.map((v) => v.sequence);
+  if (sequences.some((n) => n !== undefined) && (sequences.some((n) => n === undefined) ||
+    sequences.some((n, i) => i > 0 && n! <= sequences[i - 1]!) ||
+    (state.nextVerdictSequence ?? 0) < (sequences.at(-1) ?? 0))) {
+    throw new OverseerStateUnreadableError(path, "malformed", "verdict sequences are not ordered and complete");
+  }
+  let sequence = state.nextVerdictSequence ?? 0;
+  for (const verdict of state.verdicts) {
+    if (verdict.sequence === undefined) verdict.sequence = ++sequence;
+    else sequence = Math.max(sequence, verdict.sequence);
+  }
+  state.nextVerdictSequence = sequence;
+  return state;
 }
 
 function median(xs: number[]): number {
@@ -358,6 +416,20 @@ export function runGardenerOverseer(deps: GardenerOverseerPorts): OverseerPass {
   const nowMs = clock.now();
   const statePath = overseerStatePath(deps.stateDir);
   const state = readOverseerState(statePath);
+  // Read every existing handoff before any pass activity can overwrite unreadable evidence.
+  for (const file of (existsSync(deps.stateDir) ? readdirSync(deps.stateDir) : []).filter((f) => f.endsWith("-gardener-effects.json"))) {
+    readGardenEffects(join(deps.stateDir, file));
+  }
+  const receipts = new Map<string, { through: number; folded: Set<string> }>();
+  for (const name of new Set(state.verdicts.map((v) => v.gardener))) {
+    const garden = readGardenState(gardenStatePath(deps.stateDir, name), []);
+    if ((garden.foldedEffectThrough ?? 0) > (state.nextVerdictSequence ?? 0) ||
+      (garden.foldedEffectThrough === undefined && (garden.foldedEffects?.length ?? 0) >= 200 &&
+      state.verdicts.some((v) => v.gardener === name && !garden.foldedEffects!.includes(v.id)))) {
+      throw new OverseerReceiptUnavailableError(gardenStatePath(deps.stateDir, name));
+    }
+    receipts.set(name, { through: garden.foldedEffectThrough ?? 0, folded: new Set(garden.foldedEffects ?? []) });
+  }
   const rows = deps.readRows();
   const events = groupEvents(rows);
   const diskNames = gardenerNamesOnDisk(deps.stateDir);
@@ -430,15 +502,17 @@ export function runGardenerOverseer(deps: GardenerOverseerPorts): OverseerPass {
     const info = deps.prInfo?.(url);
     if (info) pr.info = info;
   }
-  state.verdicts = state.verdicts.filter((v) => nowMs - Date.parse(v.at) <= KEEP_MS);
+  state.verdicts = state.verdicts.filter((v) => {
+    const receipt = receipts.get(v.gardener);
+    const acknowledged = (v.sequence ?? 0) <= (receipt?.through ?? 0) || receipt?.folded.has(v.id);
+    return !acknowledged || nowMs - Date.parse(v.at) <= KEEP_MS;
+  });
 
-  const issued = new Map<string, GardenEffect[]>();
   const issue = (v: Omit<IssuedVerdict, "at">): void => {
     const at = clock.iso();
-    state.verdicts.push({ ...v, at });
-    const list = issued.get(v.gardener) ?? [];
-    list.push({ id: v.id, actionClass: v.actionClass, verdict: v.verdict, kind: v.kind, at });
-    issued.set(v.gardener, list);
+    const sequence = (state.nextVerdictSequence ?? 0) + 1;
+    state.nextVerdictSequence = sequence;
+    state.verdicts.push({ ...v, at, sequence });
   };
   const hasVerdict = (id: string): IssuedVerdict | undefined => state.verdicts.find((v) => v.id === id);
 
@@ -489,9 +563,17 @@ export function runGardenerOverseer(deps: GardenerOverseerPorts): OverseerPass {
       }
     }
   }
-  for (const [name, list] of issued) {
+  for (const name of new Set(state.verdicts.map((v) => v.gardener))) {
     const path = gardenEffectsPath(deps.stateDir, name);
-    writeGardenEffects(path, [...readGardenEffects(path), ...list]);
+    const receipt = receipts.get(name) ?? { through: 0, folded: new Set<string>() };
+    const pending = state.verdicts.filter((v) => v.gardener === name && (v.sequence ?? 0) > receipt.through && !receipt.folded.has(v.id))
+      .map((v): GardenEffect => ({ id: v.id, actionClass: v.actionClass, verdict: v.verdict, kind: v.kind, at: v.at, sequence: v.sequence }));
+    const existing = readGardenEffects(path);
+    const wanted = new Map(pending.map((v) => [v.id, v]));
+    if (wanted.size > 0) {
+      const handoff = [...existing.filter((v) => wanted.has(v.id)).map((v) => wanted.get(v.id)!), ...pending.filter((v) => !existing.some((e) => e.id === v.id))];
+      if (JSON.stringify(existing) !== JSON.stringify(handoff)) writeGardenEffects(path, handoff);
+    } else if (existing.length > 0) rmSync(path);
   }
 
   // WEEKLY SCORECARD — every gardener seen in the ledger or on disk.
@@ -514,7 +596,10 @@ export function startGardenerOverseer(deps: GardenerOverseerPorts, intervalMs: n
     try {
       runGardenerOverseer(deps);
     } catch (e) {
-      deps.log(`${OVERSEER_NAME}.overseer_failed`, { error: String((e as Error)?.message ?? e) });
+      const unreadable = e instanceof OverseerStateUnreadableError || e instanceof GardenEffectsUnreadableError ||
+        e instanceof GardenStateUnreadableError || e instanceof OverseerReceiptUnavailableError
+        ? { path: e.path, failure_class: e instanceof OverseerReceiptUnavailableError ? "unavailable" : e.failureClass } : {};
+      deps.log(`${OVERSEER_NAME}.overseer_failed`, { error: String((e as Error)?.message ?? e), ...unreadable });
     } finally {
       running = false;
     }

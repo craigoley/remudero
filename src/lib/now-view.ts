@@ -31,7 +31,7 @@ import {
   type RecentActivityCache,
 } from "./board.js";
 import { createBoardProjection, rowsNamingTasksBefore, type BoardProjection, type Row } from "./board-projection.js";
-import { boardOpenSnapshotPath, boardSnapshotPath, createBoardSnapshotCache, OPEN_SNAPSHOT_RESAVE_MS, readOpenBoardSnapshot } from "./board-snapshot-cache.js";
+import { boardOpenSnapshotPath, boardSnapshotPath, createBoardSnapshotReader, OPEN_SNAPSHOT_RESAVE_MS, readOpenBoardSnapshot, type SharedBoardSnapshotRows } from "./board-snapshot-cache.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { deriveLastPoll, readDiskFreeBytes, readGhRateLimitRemaining } from "./daemon-health.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
@@ -50,7 +50,7 @@ import {
   type NowDecision,
   type QuestionStoreLine,
 } from "./now-decisions.js";
-import type { BoardPrRest } from "./open-prs-rest.js";
+import type { BoardIssueRest, BoardPrRest } from "./open-prs-rest.js";
 import { loadPlanQuarantiningDuplicates, type Plan } from "./plan.js";
 import type { ReadModelDb, ReadModelLease } from "./read-model-db.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -413,38 +413,88 @@ function answeredByFact(db: ReadModelDb): (taskId: string) => string | undefined
   };
 }
 
+const asBatched = (r: BoardPrRest): BatchedPr => ({ number: r.number, url: r.url, state: r.state, headRefName: r.headRefName, headRefOid: r.headRefOid, body: r.body, autoMergeRequest: r.autoMergeRequest, title: r.title });
+
+/** What one parse of the closed/issues snapshot yields for a gateway, and the newest gateway built over it. */
+interface ClosedHalf {
+  closed: BatchedPr[];
+  issues: BoardIssueRest[];
+  present: boolean;
+  digest: string;
+  gateway?: { key: string; github: GitHub };
+}
+
+const sharedBoardSnapshots = createBoardSnapshotReader();
+const closedHalves = new WeakMap<SharedBoardSnapshotRows, ClosedHalf>();
+
+function closedHalfOf(rows: SharedBoardSnapshotRows): ClosedHalf {
+  const hit = closedHalves.get(rows);
+  if (hit) return hit;
+  const closed = [...(rows.closed?.values() ?? [])].map(asBatched);
+  const issues = [...(rows.issues?.values() ?? [])];
+  const hash = createHash("sha1");
+  for (const row of closed) hash.update(`${JSON.stringify(row)}\n`);
+  hash.update("issues\n");
+  for (const row of issues) hash.update(`${JSON.stringify(row)}\n`);
+  const half: ClosedHalf = { closed, issues, present: rows.closed !== undefined, digest: hash.digest("hex") };
+  closedHalves.set(rows, half);
+  return half;
+}
+
 /**
  * A gateway over the legacy gateway's persisted snapshot (ruling Q3): open PRs, closed PRs and issues, no GitHub read.
  * `generation` is the files' mtimes, which move on every re-save; `content` moves only when what they hold does.
+ * The closed/issues file is parsed once per change and shared ({@link createBoardSnapshotReader}), and so is the
+ * gateway while `content` holds: the open half's 60 s re-save rebuilt both on every build (E33).
  */
 export function snapshotGithub(
-  root: string, owner: string, repo: string, clock: Clock = systemClock, opts: { refuseIncomplete?: boolean } = {},
+  root: string, owner: string, repo: string, clock: Clock = systemClock,
+  opts: { refuseIncomplete?: boolean; read?: (root: string, owner: string, repo: string) => SharedBoardSnapshotRows } = {},
 ): { github: GitHub; generation: string; content?: string; source: Omit<ViewSource, "name">; unavailable?: string } {
-  const closedCache = createBoardSnapshotCache(root, owner, repo);
-  const closedSeed = closedCache.closedSeed();
-  const closed = [...(closedSeed?.values() ?? [])];
-  const issues = [...(closedCache.issueSeed()?.values() ?? [])];
+  const half = closedHalfOf((opts.read ?? sharedBoardSnapshots)(root, owner, repo));
   const open = readOpenBoardSnapshot(root, owner, repo);
-  const openRows: BoardPrRest[] = open.ok ? open.snapshot.rows : [];
-  const asBatched = (r: BoardPrRest): BatchedPr => ({ number: r.number, url: r.url, state: r.state, headRefName: r.headRefName, headRefOid: r.headRefOid, body: r.body, autoMergeRequest: r.autoMergeRequest, title: r.title });
-  const openNumbers = new Set(openRows.map((r) => r.number));
-  const all = [...openRows.map(asBatched), ...closed.filter((r) => !openNumbers.has(r.number)).map(asBatched)];
+  const openRows = open.ok ? open.snapshot.rows.map(asBatched) : [];
   // An incomplete snapshot read as complete would say no PR ever merged; refused, the gateway reads failed instead.
-  const unavailable = !opts.refuseIncomplete ? undefined : !open.ok ? open.reason : closedSeed ? undefined : "the board snapshot holds no closed pull requests";
-  const github = buildBatchedGithub(owner, repo, {
-    ttlMs: Number.MAX_SAFE_INTEGER, pacer: NO_PACER,
-    fetchAll: () => {
-      if (unavailable !== undefined) throw new NowViewError(`github snapshot unavailable: ${unavailable}`);
-      return all;
-    },
-    fetchAllIssues: () => issues.map((i) => ({ number: i.number, url: i.url, state: i.state, ...(i.title ? { title: i.title } : {}) })),
-    exec: () => {
-      throw new NowViewError("a snapshot gateway reads GitHub from the persisted snapshot only");
-    },
-  });
+  const unavailable = !opts.refuseIncomplete ? undefined : !open.ok ? open.reason : half.present ? undefined : "the board snapshot holds no closed pull requests";
+  const content = createHash("sha1").update(`${JSON.stringify(openRows)}\n${half.digest}`).digest("hex").slice(0, 16);
+  const key = `${owner}/${repo}\n${content}\n${unavailable ?? ""}`;
+  if (half.gateway?.key !== key) {
+    const openNumbers = new Set(openRows.map((r) => r.number));
+    const all = [...openRows, ...half.closed.filter((r) => !openNumbers.has(r.number))];
+    const github = buildBatchedGithub(owner, repo, {
+      ttlMs: Number.MAX_SAFE_INTEGER, pacer: NO_PACER,
+      fetchAll: () => {
+        if (unavailable !== undefined) throw new NowViewError(`github snapshot unavailable: ${unavailable}`);
+        return all;
+      },
+      fetchAllIssues: () => half.issues.map((i) => ({ number: i.number, url: i.url, state: i.state, ...(i.title ? { title: i.title } : {}) })),
+      exec: () => {
+        throw new NowViewError("a snapshot gateway reads GitHub from the persisted snapshot only");
+      },
+    });
+    half.gateway = { key, github };
+  }
   const source = unavailable !== undefined ? { asOf: null, state: "unavailable" as const, reason: unavailable } : snapshotSource(open.ok ? open.snapshot.savedAt : null, open.ok ? undefined : open.reason, clock.now());
-  const content = createHash("sha1").update(JSON.stringify([all, issues])).digest("hex").slice(0, 16);
-  return { github, generation: snapshotGeneration(root, owner, repo), content, source, ...(unavailable !== undefined ? { unavailable } : {}) };
+  return { github: half.gateway.github, generation: snapshotGeneration(root, owner, repo), content, source, ...(unavailable !== undefined ? { unavailable } : {}) };
+}
+
+/** A plan file's identity: its own mtime and its `tasks.d`'s. */
+export function planStamp(path: string): string {
+  return `${mtimeOf(path) ?? "-"}:${mtimeOf(join(dirname(path), "tasks.d")) ?? "-"}`;
+}
+
+const sharedPlans = new Map<string, { stamp: string; plan: Plan }>();
+
+/**
+ * One parsed plan per file and stamp for every view in the thread: the `now` and `task` views each held their
+ * own copy of core's, and a parsed plan retains ~144 MB (2,848 tasks, measured 2026-10-02). Read-only to callers.
+ */
+export function sharedPlan(path: string, stamp: string, load: (path: string) => Plan = (p) => loadPlanQuarantiningDuplicates(p).plan): Plan {
+  const hit = sharedPlans.get(path);
+  if (hit?.stamp === stamp) return hit.plan;
+  const plan = load(path);
+  sharedPlans.set(path, { stamp, plan });
+  return plan;
 }
 
 /** The persisted snapshot's source, judged at `nowMs` from when its open half was last saved, or why it is unreadable. */
@@ -468,6 +518,8 @@ export interface NowViewOptions {
   log?: (step: string, extra: Record<string, unknown>) => void;
   readPlan?: (instance: NowInstance) => Plan;
   github?: (instance: NowInstance) => ReturnType<typeof snapshotGithub>;
+  /** Under the default `github`: the thread's shared, parse-once-per-change reader of the closed/issues snapshot. */
+  readBoardSnapshot?: (root: string, owner: string, repo: string) => SharedBoardSnapshotRows;
   /** Seams under {@link defaultProbeHost}; production reads statfs, the live ledger and `gh api rate_limit`. */
   hostProbe?: {
     readLive?: (path: string) => ReadonlyArray<Record<string, unknown>>;
@@ -655,15 +707,15 @@ export function createNowView(opts: NowViewOptions): {
   const readPlan = opts.readPlan ?? ((instance: NowInstance): Plan => {
     const path = nowPlanPath(instance);
     if (!path) throw new NowViewError(`instance ${instance.name} names no repository, so it has no plan`);
-    return loadPlanQuarantiningDuplicates(path).plan;
+    return sharedPlan(path, planStamp(path));
   });
   const planKey = (instance: NowInstance): string => {
     const path = nowPlanPath(instance);
-    return path ? `${mtimeOf(path) ?? "-"}:${mtimeOf(join(dirname(path), "tasks.d")) ?? "-"}` : "none";
+    return path ? planStamp(path) : "none";
   };
   const github = opts.github ?? ((instance: NowInstance) => {
     const [owner, repo] = (instance.repo ?? "/").split("/");
-    return snapshotGithub(dirname(instance.ledgerDir), owner!, repo!, clock);
+    return snapshotGithub(dirname(instance.ledgerDir), owner!, repo!, clock, opts.readBoardSnapshot ? { read: opts.readBoardSnapshot } : {});
   });
   const githubKey = (instance: NowInstance): string => {
     if (opts.github) return "injected";
@@ -740,8 +792,10 @@ export function createNowView(opts: NowViewOptions): {
       // change in what the snapshot holds restamps every task. Behind the lease it persists, so a restart reuses it.
       if (!h || h.db !== b.db) {
         const board = createBoardProjection({
-          db: b.db, ...(b.lease ? { lease: b.lease } : {}), ledgerPath: ledgerPathOf(instance), readPlan: () => planCache.get(name)!.plan, github: b.gateway!.github, clock, instance: name,
-          currentGithub: () => held.get(name)!.gateway.github, githubGeneration: () => { const g = held.get(name)!; return g.gateway.content ?? g.githubKey; },
+          db: b.db, ...(b.lease ? { lease: b.lease } : {}), ledgerPath: ledgerPathOf(instance), readPlan: () => planCache.get(name)!.plan, clock, instance: name,
+          // The held gateway, read per derive: a value here pinned the store's first gateway and its snapshot for the store's life (E33).
+          get github() { return held.get(name)!.gateway.github; },
+          githubGeneration: () => { const g = held.get(name)!; return g.gateway.content ?? g.githubKey; },
           log: (step, extra) => log(step, { instance: name, ...extra }),
         });
         h = { db: b.db, board, recent: createRecentActivityCache(), generation: -1, planKey: b.keys.plan, githubKey: b.keys.github, gateway: b.gateway!, at: b.now, healthAt: Number.NEGATIVE_INFINITY, decisionsKey: b.keys.decisions };

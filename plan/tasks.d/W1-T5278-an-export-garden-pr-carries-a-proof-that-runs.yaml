@@ -1,0 +1,41 @@
+- id: W1-T5278
+  title: "AN EXPORT-GARDEN PR CARRIES A PROOF THAT RUNS — the export gardener writes `proof: the required CI checks pass on this PR`, which has no dialect, so acceptance-author-gate refuses every PR it opens"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: low
+  origin: "operator session 2026-10-02: #8540 failed acceptance-author-gate (proof-shape) and was hand-fixed"
+  plan_refs: ["W1-T4117"]
+  files: [src/lib/export-gardener.ts, test/an-export-garden-pr-carries-a-proof-that-runs.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    `prBody` in src/lib/export-gardener.ts writes one criterion per deletion whose proof is the prose
+    line `the required CI checks pass on this PR`. It names no `grep:` or `unit test:` dialect, so
+    acceptance-author-gate refuses the PR as proof-shape ("1 of 1 proof(s) cannot execute"), and
+    review could only cap it at proof_exec 0/N. #8540 (2026-10-02, deleting `startCiFrictionGardener`)
+    failed that gate and merged only after an operator appended a test to
+    test/export-gardener-removes-unreferenced-exports.test.ts and rewrote the body. #7441 (2026-09-27)
+    needed the same hand repair. A deletion cannot be proven by `grep:` (a pattern matches presence,
+    and the deleted text matches only at base), so the proof has to be a test that fails at base.
+  design: |
+    When the gardener deletes an export, it also appends one test per deletion to
+    test/export-gardener-removes-unreferenced-exports.test.ts, titled
+    `<name> is not exported from <module basename>`, which imports the module and asserts
+    `Object.hasOwn(module, "<name>") === false` (the shape #7441 and #8540 used by hand). `prBody`
+    then emits, per deletion, `- claim: <name> is not exported from <basename>` with
+    `  proof: unit test: <name> is not exported from <basename>`. The test passes at head and fails at
+    base, so proof-discrimination sees it as discriminating. A deletion whose test cannot be written
+    (the test file is unreadable, or the title already exists) withdraws that deletion rather than
+    shipping it without a proof.
+  acceptance:
+    - claim: "an export-garden PR body parses with a runnable `unit test:` proof per deletion, and the matching test is written alongside the deletion"
+      proof: "unit test: test/an-export-garden-pr-carries-a-proof-that-runs.test.ts"
+  falsifier: |
+    Run the gardener's apply step over a fixture repo with one unreferenced export: the produced body
+    passes `parseAcceptanceBlock` with one criterion whose proof parses as `unit test:`, and the
+    appended test fails when the deleted export is restored.
