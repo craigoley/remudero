@@ -226,21 +226,28 @@ export function daemonInstanceStateDirs(text: string): Map<string, string> {
   return new Map([...daemonInstanceRows(text)].map(([name, row]) => [name, row.stateDir]));
 }
 
-/** W1-T3733 — the two fields the deploy path needs from one instance's registry row. */
+/** W1-T3733 — the fields the deploy path needs from one instance's registry row. */
 export interface DaemonInstanceRow {
   stateDir: string;
   /** The container that instance runs, as `docker inspect` reported it when the registry was written. */
   containerName?: string;
   /** The `registry/name:tag` image the instance is recycled onto. */
   image?: string;
+  /**
+   * W1-T4527 — present when the row declares `primary:`; true only for `primary: true` on a row that
+   * is not `retired: true` (a retired row's `primary` is ignored).
+   */
+  primary?: boolean;
 }
 
-/** W1-T3733 — every declared instance's `state_dir` AND `container_name`, from one pass. See
- *  {@link daemonInstanceStateDirs} for why this is not a YAML parser. */
+/** W1-T3733 — every declared instance's `state_dir`, `container_name`, `image` and `primary`, from one
+ *  pass. See {@link daemonInstanceStateDirs} for why this is not a YAML parser. */
 export function daemonInstanceRows(text: string): Map<string, DaemonInstanceRow> {
-  const out = new Map<string, DaemonInstanceRow>();
-  /** Fields seen before this instance's `state_dir`, folded in when that arrives. */
-  const partial = new Map<string, Omit<DaemonInstanceRow, "stateDir">>();
+  /** Every field seen per instance, ACCUMULATED REGARDLESS OF ORDER: the live registry writes
+   *  `container_name` BEFORE `state_dir`, and an earlier draft dropped the container whenever it
+   *  arrived first — a field-order dependency is exactly the silent widening a hand-rolled reader
+   *  invites. */
+  const seen = new Map<string, Partial<DaemonInstanceRow> & { retired?: boolean }>();
   let inInstances = false;
   let current: string | undefined;
   for (const raw of text.split(/\r?\n/)) {
@@ -256,29 +263,34 @@ export function daemonInstanceRows(text: string): Map<string, DaemonInstanceRow>
     const name = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(raw);
     if (name) {
       current = name[1];
+      if (!seen.has(current)) seen.set(current, {});
       continue;
     }
     if (current === undefined) continue;
-    // ACCUMULATE BOTH FIELDS REGARDLESS OF ORDER. The live registry writes `container_name` BEFORE
-    // `state_dir`, and an earlier draft dropped the container whenever it arrived first — a
-    // field-order dependency is exactly the silent widening a hand-rolled reader invites.
+    const row = seen.get(current)!;
     const stateDir = /^ {4}state_dir:\s*(\S+)\s*$/.exec(raw);
-    if (stateDir) out.set(current, { ...partial.get(current), ...out.get(current), stateDir: stateDir[1] });
+    if (stateDir) row.stateDir = stateDir[1];
     const container = /^ {4}container_name:\s*(\S+)\s*$/.exec(raw);
-    if (container) {
-      const row = out.get(current);
-      if (row) out.set(current, { ...row, containerName: container[1] });
-      else partial.set(current, { ...partial.get(current), containerName: container[1] });
-    }
+    if (container) row.containerName = container[1];
     const image = /^ {4}image:\s*(\S+)\s*$/.exec(raw);
-    if (image) {
-      const row = out.get(current);
-      if (row) out.set(current, { ...row, image: image[1] });
-      else partial.set(current, { ...partial.get(current), image: image[1] });
-    }
+    if (image) row.image = image[1];
+    const primary = /^ {4}primary:\s*(true|false)\s*$/.exec(raw);
+    if (primary) row.primary = primary[1] === "true";
+    const retired = /^ {4}retired:\s*(true|false)\s*$/.exec(raw);
+    if (retired) row.retired = retired[1] === "true";
   }
   // A row that never named a `state_dir` is an instance this deployment can never match, so it is
   // dropped rather than carried with an empty directory that could compare equal to something.
+  const out = new Map<string, DaemonInstanceRow>();
+  for (const [name, { stateDir, containerName, image, primary, retired }] of seen) {
+    if (stateDir === undefined) continue;
+    out.set(name, {
+      stateDir,
+      ...(containerName === undefined ? {} : { containerName }),
+      ...(image === undefined ? {} : { image }),
+      ...(primary === undefined ? {} : { primary: primary && retired !== true }),
+    });
+  }
   return out;
 }
 
@@ -323,6 +335,21 @@ export function instanceForStateRoot(registryText: string, stateRoot: string): s
   const want = normalisedDir(stateRoot);
   const matches = [...daemonInstanceStateDirs(registryText)].filter(([, dir]) => normalisedDir(dir) === want);
   return matches.length === 1 ? matches[0][0] : undefined;
+}
+
+/**
+ * W1-T4527 — whether THIS deployment's instance is the registry's primary (the one that decides a
+ * release), resolved through {@link instanceForStateRoot} — the same state-root match every other
+ * per-instance lookup uses.
+ *
+ * `undefined` for an unreadable registry, no match, or an ambiguous one: the caller treats that as
+ * "behave as today", never as "not primary". A matched instance that declares no `primary:` is `false`.
+ */
+export function isPrimaryDeployment(registryText: string, stateRoot: string): boolean | undefined {
+  const name = instanceForStateRoot(registryText, stateRoot);
+  if (name === undefined) return undefined;
+  const row = daemonInstanceRows(registryText).get(name);
+  return row === undefined ? undefined : row.primary === true;
 }
 
 /** Where the image writes its own build sha. The SAME file `scripts/fleet-heartbeat.sh` reads to

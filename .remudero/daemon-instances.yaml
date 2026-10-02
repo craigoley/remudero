@@ -33,11 +33,17 @@
 # (src/lib/instance-registry.ts) and serves GET /v1/registry. `repo:` keeps its meaning — the
 # bare name `rmd daemon --repo` is launched with. Both shell readers list `project`,
 # `github_repo` and `retired` as known-and-ignored, because they REFUSE any field they do not know.
+#
+# W1-T4527 — `primary: true` marks the ONE live instance that decides a release (operator ruling
+# 2026-09-24: core). Exactly one live row may carry it: `parseInstanceRegistry` refuses two
+# (duplicate_primary), `requirePrimaryInstance` refuses none (no_primary), and a retired row's
+# `primary` is ignored. Both shell readers list it as known-and-ignored. No deploy behavior reads it yet.
 instances:
   core:
     repo: remudero
     project: remudero
     github_repo: craigoley/remudero
+    primary: true
     container_name: remudero-daemon
     state_dir: /home/craigoleyagent/rmd-state2
     claude_dir: /home/craigoleyagent/.claude
