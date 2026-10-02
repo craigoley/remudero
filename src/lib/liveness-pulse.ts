@@ -14,6 +14,8 @@
  * phases that had no sampler — the 12 unattributable gaps.
  */
 
+import type { Clock } from "./clock.js";
+
 /** The pulse row. It keeps the `daemon.` prefix every liveness reader selects on. */
 export const LIVENESS_PULSE_STEP = "daemon.pulse";
 
@@ -53,23 +55,23 @@ export function livenessPulseTick(
 /** Start the pulse. `note` must see every row the daemon's own logger writes; `stop` is idempotent. */
 export function startLivenessPulse(
   intervalMs: number,
-  now: () => number,
+  clock: Clock,
   log: PulseLog,
   reportLag: PulseLagReport,
 ): { note: (step: string) => void; stop: () => void } {
-  const startedAtMs = now();
+  const startedAtMs = clock.now();
   const state: LivenessPulseState = { lastWorkRowAtMs: startedAtMs, lastTickAtMs: startedAtMs };
   const period = Math.max(1, intervalMs);
   const timer = setInterval(() => {
     try {
-      livenessPulseTick(state, now(), period, log, reportLag);
+      livenessPulseTick(state, clock.now(), period, log, reportLag);
     } catch {
       // Reason: a throwing logger must cost one pulse, never the daemon.
     }
   }, period);
   timer.unref?.();
   return {
-    note: (step) => noteDaemonRow(state, step, now()),
+    note: (step) => noteDaemonRow(state, step, clock.now()),
     stop: () => clearInterval(timer),
   };
 }

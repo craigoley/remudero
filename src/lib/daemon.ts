@@ -2623,7 +2623,7 @@ export async function runDaemon(
     log("daemon.summary", { ...s });
     return s;
   };
-  if (deps.livenessPulse) livenessPulse = startLivenessPulse(pollIntervalMs, () => idleLaneClock.now(), log, (sample) => reportLoopLag(sample, log));
+  if (deps.livenessPulse) livenessPulse = startLivenessPulse(pollIntervalMs, idleLaneClock, log, (sample) => reportLoopLag(sample, log));
   const prActionPump = startPrActionPump(deps, pollIntervalMs, log);
   prActionPumpRef.stop = prActionPump.stop;
   prActionPumpRef.isBusy = prActionPump.isBusy;
