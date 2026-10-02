@@ -17,6 +17,7 @@ import type { SpawnWorkerArgs, WorkerResult, spawnWorker } from "../src/lib/work
 import * as runTaskModule from "../src/run-task.js";
 import { ciGateState, runTask, waitForCiGreen, type PollDeps } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 /**
  * W1-T5345 — A LANE IS FREE ONCE ITS PULL REQUEST IS OPEN.
@@ -152,27 +153,7 @@ const holdingContainmentExec = (token: string): Promise<ProbeExecResult> =>
 const cleanIsolationExec = (): Promise<IsolationProbeExecResult> =>
   Promise.resolve({ transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -", aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0 });
 
-/** A `gh` whose `ci` check is queued on the first poll and RED on every later one — so a run that
- *  waits in-lane ends `blocked_ci` after exactly one poll interval, and one that hands off never
- *  sees the second answer. */
-function writeGh(dir: string, branch: string): void {
-  const pull = JSON.stringify({ number: 1, state: "open", merged: false, merged_at: null, head: { sha: HEAD_SHA } });
-  const queued = JSON.stringify({ check_runs: [{ name: "ci", status: "queued" }] });
-  const red = JSON.stringify({ check_runs: [{ name: "ci", status: "completed", conclusion: "failure" }] });
-  const script = [
-    "#!/bin/sh",
-    `printf '%s\\n' "$*" >> '${dir}/calls.log'`,
-    'case "$*" in',
-    `  *"pr view"*) echo '${JSON.stringify({ headRefName: branch, body: "" })}' ;;`,
-    `  *"/check-runs"*) n=$(cat '${dir}/ci-polls' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '${dir}/ci-polls'; if [ "$n" -ge 2 ]; then echo '${red}'; else echo '${queued}'; fi ;;`,
-    `  *"/status"*) echo '{"statuses":[]}' ;;`,
-    `  *"/pulls/"*) echo '${pull}' ;;`,
-    "  *) exit 0 ;;",
-    "esac",
-    "",
-  ].join("\n");
-  writeFileSync(join(dir, "gh"), script, { mode: 0o755 });
-}
+const RED_CI = JSON.stringify({ check_runs: [{ name: "ci", status: "completed", conclusion: "failure" }] });
 
 interface RunOutcome {
   verdict: string | undefined;
@@ -207,10 +188,21 @@ async function runFixture(
 
   const fixedTime = 1789842000000;
   const branch = `run-${taskId}-${fixedTime}`;
-  const ghDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}pr-open-handoff-gh-`));
-  writeGh(ghDir, branch);
+  // `ci` is queued until the run's per-poll recycle check (first reached AFTER poll 1's rollup read)
+  // turns it red — so a run that waits in-lane ends `blocked_ci` after exactly one poll interval,
+  // and one that hands off on poll 1 never reaches that check at all.
+  const gh = ghShim(
+    [
+      { when: "pr view", stdout: JSON.stringify({ headRefName: branch, body: "" }) },
+      { when: "/check-runs", stdout: JSON.stringify({ check_runs: [{ name: "ci", status: "queued" }] }) },
+      { when: "/status", stdout: JSON.stringify({ statuses: [] }) },
+      { when: "/pulls/", stdout: JSON.stringify({ number: 1, state: "open", merged: false, merged_at: null, head: { sha: HEAD_SHA } }) },
+    ],
+    { kind: "pr-open-handoff" },
+  );
+  let ciTurnedRed = false;
   const previousPath = process.env.PATH;
-  process.env.PATH = `${ghDir}:${previousPath}`;
+  process.env.PATH = `${gh.dir}:${previousPath}`;
   const now = t.mock.method(Date, "now", () => fixedTime);
   const calls: SpawnWorkerArgs[] = [];
   const spawn: typeof spawnWorker = async (args) => {
@@ -232,7 +224,11 @@ async function runFixture(
         containmentExec: holdingContainmentExec,
         isolationExec: cleanIsolationExec,
         externalWaitFreshness: () => undefined,
-        externalWaitRecycle: () => undefined,
+        externalWaitRecycle: () => {
+          if (!ciTurnedRed) gh.addRoute({ when: "/check-runs", stdout: RED_CI });
+          ciTurnedRed = true;
+          return undefined;
+        },
         ...(opts.handOffAtPrOpen !== undefined ? { handOffAtPrOpen: opts.handOffAtPrOpen } : {}),
         ...(opts.noMerge ? { noMerge: true } : {}),
       }),
@@ -241,17 +237,12 @@ async function runFixture(
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line) as Record<string, unknown>);
-    let ciPolls = 0;
-    try {
-      ciPolls = Number(readFileSync(join(ghDir, "ci-polls"), "utf8").trim());
-    } catch {
-      ciPolls = 0;
-    }
+    const ciPolls = gh.calls().filter((call) => call.includes("/check-runs")).length;
     return { verdict: result.verdict, prUrl: result.prUrl, ledger, ciPolls };
   } finally {
     now.mock.restore();
     process.env.PATH = previousPath;
-    rmSync(ghDir, { recursive: true, force: true });
+    rmSync(gh.dir, { recursive: true, force: true });
     origin.cleanup();
     seed.cleanup();
     rmSync(root, { recursive: true, force: true });
