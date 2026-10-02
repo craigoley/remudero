@@ -2393,7 +2393,7 @@ export function buildAnalyticsRoute(deps: {
   mountsRoot?: string;
   currentEvalCardInput?: (trialId: string | undefined) => { trial: EvalCardTrial; evidence: EvalCardEvidence } | undefined;
   currentRoutingPool?: () => RoutingPoolSnapshot;
-  now?: () => number;
+  clock?: Clock;
 }): Route {
   return {
     method: "GET",
@@ -2425,7 +2425,7 @@ export function buildAnalyticsRoute(deps: {
       if (requestedVersion === ROUTING_POOL_VERSION) {
         const pool = deps.currentRoutingPool?.() ??
           (deps.mountsRoot === undefined ? unavailableRoutingPool("routing-pool-not-configured") : readRoutingPoolSnapshot(deps.mountsRoot));
-        sendJson(res, 200, buildRoutingPoolProjection(pool, deps.now?.() ?? Date.now()));
+        sendJson(res, 200, buildRoutingPoolProjection(pool, deps.clock ?? systemClock));
         return;
       }
       if (requestedVersion === ABILITY_MAP_VERSION) {

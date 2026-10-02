@@ -14,6 +14,7 @@ import {
   routingPoolPath,
   type RoutingPoolProjection,
 } from "../src/lib/model-pool.js";
+import { fixedClock } from "../src/lib/clock.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { declaredBody, violations } from "./helpers/openapi-strict.js";
 
@@ -158,7 +159,7 @@ test("W1-T3958 criterion 1: the daemon serves routing-pool-v1 readiness with eac
   const currentSnapshot = () => coldAnalyticsSnapshot();
   const observed = await getProjection({
     currentSnapshot,
-    now: () => NOW,
+    clock: fixedClock(NOW),
     currentRoutingPool: () => parseRoutingPoolSnapshot(snapshot([candidate("b", "ready"), candidate("c", "failed")])),
   });
   assert.equal(observed.status, 200);
@@ -174,7 +175,7 @@ test("W1-T3958 criterion 1: the daemon serves routing-pool-v1 readiness with eac
   ]);
   assert.deepEqual(pool.candidates[0].corpus, { id: "rmd-implement", version: "2026-09" });
 
-  const absent = await getProjection({ currentSnapshot, now: () => NOW });
+  const absent = await getProjection({ currentSnapshot, clock: fixedClock(NOW) });
   assert.equal(absent.body.state, "unavailable");
   assert.equal(absent.body.reason, "routing-pool-not-configured");
   assert.deepEqual(absent.body.pools, []);

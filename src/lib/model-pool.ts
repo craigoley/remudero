@@ -13,6 +13,7 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { Clock } from "./clock.js";
 import { seedOf } from "./knowledge-value.js";
 
 export const ROUTING_POOL_VERSION = "routing-pool-v1" as const;
@@ -411,12 +412,13 @@ export interface RoutingPoolProjection extends Omit<RoutingPoolSnapshot, "pools"
 }
 
 /** Shape a snapshot for the console. Every candidate is shown, including ones that cannot be admitted, and each carries its reason. */
-export function buildRoutingPoolProjection(snapshot: RoutingPoolSnapshot, nowMs: number): RoutingPoolProjection {
+export function buildRoutingPoolProjection(snapshot: RoutingPoolSnapshot, clock: Clock): RoutingPoolProjection {
   const { pools, ...head } = snapshot;
+  const nowMs = clock.now();
   const gate = { budgetUsd: Number.POSITIVE_INFINITY, requiredCapabilities: [], nowMs };
   return {
     ...head,
-    asOf: new Date(nowMs).toISOString(),
+    asOf: clock.iso(),
     stale: snapshot.state === "observed" && !fresh(snapshot.generatedAt, nowMs, ROUTING_POOL_MAX_EVIDENCE_AGE_MS),
     pools: pools.map((pool) => {
       const assessed = assessPoolCandidates(pool, gate);
