@@ -15,7 +15,7 @@
     - src/lib/inbox-thread-list-view.ts
     - src/lib/read-model-worker.ts
     - test/inbox-thread-list-view.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at 747ec739781ce27f96c4558e65204576863b6a1f: buildInboxThreadsRoute in

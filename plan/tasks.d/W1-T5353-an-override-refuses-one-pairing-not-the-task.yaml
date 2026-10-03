@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-02: W1-T5017 credit audit (#8213 overridden, #8455 merged)"
   plan_refs: [W1-T2970, W1-T3996, W1-T951, W1-T5017]
   files: [src/lib/status.ts, test/an-override-refuses-one-pairing-not-the-task.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

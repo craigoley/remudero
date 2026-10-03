@@ -1,0 +1,39 @@
+- id: W1-T5473
+  title: "THE ESCALATION REPLY ROUTE SKIPS THE REQUEST-PATH PREFLIGHT — POST /v1/escalation/reply calls `captureFeedback` with no landing options, so it still runs the ~290 s plan-PR preflight inside the HTTP request"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low
+  origin: "operator session 2026-10-03: follow-up to PR #8891 (W1-T5348 / #8795 request-path skip)"
+  plan_refs: [W1-T5348, W1-T5460]
+  files: [src/lib/panel-actions.ts, test/the-escalation-reply-route-skips-the-request-path-preflight.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    W1-T5348 (#8795, merged 2026-10-03) runs `planPrPreflight` before a machine lane pushes a plan PR.
+    Measured on one feedback landing at host load ~45, that preflight takes about 290 s (see W1-T5460).
+    PR #8891 (open at filing) adds `requestPathLand` to src/lib/panel-actions.ts. It wraps the landing
+    options with `preflight: "skip-request-path"` and ledgers `plan_pr.preflight_skipped`. #8891 wires it
+    into the feedback decision, the submit route and skills/run, but not the escalation reply.
+    `buildEscalationReplyRoute` still calls
+    `captureFeedback(deps.root, { raw: input.text, origin: "ui", threadId })`, and `captureFeedback`
+    always calls `landFeedback(root, opts.land ?? {})`. So an operator's escalation reply holds its HTTP
+    request open for the full preflight.
+    Build this only after #8891 merges, because `requestPathLand` is not on origin/main until then.
+    #8891 is an unfiled PR, so it is named here, not in depends_on.
+  design: |
+    In `buildEscalationReplyRoute`, pass
+    `land: requestPathLand(deps.feedbackLand ?? {}, deps.ledgerPath, input.taskId, origin)` to
+    `captureFeedback`, the same shape #8891 uses at its other call sites. Read `origin`
+    (`bearerTokenId(req)`) before the capture. Nothing else in the route changes. When W1-T5460 moves
+    console landings onto the daemon sweep, this call moves with them.
+  acceptance:
+    - claim: "an escalation reply lands with the request-path preflight skip and ledgers plan_pr.preflight_skipped under the reply's task, never running the preflight in the request"
+      proof: "unit test: test/the-escalation-reply-route-skips-the-request-path-preflight.test.ts"
+  falsifier: |
+    Drop the `land` option from the route's `captureFeedback` call. The suite's fake landing sees no
+    `preflight: "skip-request-path"`, and no `plan_pr.preflight_skipped` row is written.

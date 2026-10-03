@@ -1,0 +1,50 @@
+- id: W1-T5448
+  title: "THE MODEL NEVER SEES THE CLOCK — every bound (workerAbandon, workerStall, maxTurns 400, the dollar cap) is enforced from outside, so a worker cut off at the 2h bound gets no chance to wrap up, though Opus 5.5 paces itself when shown 'elapsed Ns / Ms'"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  priority: 4
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-03: audit of the repo against Anthropic's 'Prompting Claude Opus 5.5' guide"
+  plan_refs: ["W1-T4673", "W1-T1045", "W1-T943"]
+  files:
+    - src/lib/worker.ts
+    - src/run-task.ts
+    - plan/policy.yaml
+    - src/lib/policy.ts
+    - test/a-worker-is-shown-its-elapsed-time.test.ts
+  rationale: |
+    WHY THIS EXISTS. Guide 'Time signals': Opus 5.5 pays close attention to elapsed time; have the harness add
+    a short line to messages back to the model, 'elapsed 340s / 1200s'; the budget is ADVISORY, so keep a hard
+    timeout; measure quality, because under time pressure the model may verify a little less. Here the model sees
+    no time at all (no elapsed, deadline or remaining text in worker.ts, worker-provider.ts or the prompt files)
+    and a run is killed from outside. This repo's own numbers: policy.yaml records 116 implement.done rows with
+    median 19.3 min, p90 36.0, p95 46.7, p99 55.2, max 98.5; turns p50 72, p90 135, p99 228. The worker already
+    has a mid-run injection channel: deliverOperatorAnswerToRunningWorker (worker.ts ~3744, Query.streamInput,
+    priority next, W1-T4673).
+
+  design: |
+    (i) New policy row workerTimeBudgetMs with min and max (start near p90 for implement, ~36 min), unset by
+    default. (ii) When set and the served model is Claude Opus 5.5, inject 'elapsed Ns / Ms' through the existing
+    streamInput channel about every five tool steps, and one wrap-up line past ~80% of the budget. (iii) The hard
+    bounds are unchanged and still fire. (iv) Unset budget means byte-identical behaviour. (v) A/B on the
+    existing benchmark harness before enabling: median worker_duration_ms must drop and merge rate must not.
+
+  acceptance:
+    - claim: "an injected elapsed line has the exact elapsed over budget format"
+      proof: 'grep: test("W1-T5448: the injected elapsed line has the exact elapsed over budget format" in test/a-worker-is-shown-its-elapsed-time.test.ts'
+    - claim: "with no budget set nothing is injected and the run is byte-identical"
+      proof: 'grep: test("W1-T5448: with no budget set nothing is injected" in test/a-worker-is-shown-its-elapsed-time.test.ts'
+    - claim: "the hard abort still fires at workerAbandon whatever the budget says"
+      proof: 'grep: test("W1-T5448: the hard abort still fires at workerAbandon whatever the budget says" in test/a-worker-is-shown-its-elapsed-time.test.ts'
+  falsifier: |
+    CLOSE THIS TASK without implementation if the injection channel cannot deliver a message mid-turn without
+    ending the turn (verify against the pinned SDK), or if a model-visible elapsed line already exists.
+
+  notes: |
+    Source: https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5 (audit 2026-10-03). One concern per task; do not widen. Unverified claims are marked INFERRED in the audit and must be re-checked at head before building.

@@ -5799,7 +5799,7 @@ export function buildReviewPrompt(input: ReviewPromptInput): string {
     `REVIEW_VERDICT lines (below) and the ORCHESTRATOR will post the`,
     `authoritative status on sha ${input.headSha} after folding them in.`,
     ``,
-    `End with a REPORT: the per-criterion verdicts and your reasoning for each.`,
+    `End with a REPORT: one line per criterion naming what you ran and observed.`,
   ].join("\n");
 }
 
