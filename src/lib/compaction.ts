@@ -377,6 +377,14 @@ export const WORKER_PR_AUTHORITY_LINES: readonly string[] = [
 export function outputContractLines(taskId: string, harnessCommits = false): string[] {
   return [
     "# OUTPUT CONTRACT",
+    // THE SCOPE-TIME CHECK, ordered up front: it used to live only in hand-written briefs, and its
+    // absence cost dispatches whose work had already shipped. Read and Grep only, so it rides the
+    // shell-less variant too (IMPLEMENT_CASH_TOOLS carries both). Exit names are the real ones.
+    "- BEFORE EDITING, open your task record and, using Read and Grep at this HEAD: (a) re-verify",
+    "  every file:line it cites — cited lines drift, and a record that names a symbol that no longer",
+    "  exists is premise-rotted (REFUSED, class `premise-rotted`); (b) check whether each acceptance",
+    "  proof already passes on origin/main — if every one does, the exit is ALREADY_SATISFIED (below).",
+    "  Then act on what you found.",
     "- Make ONLY the change described in TASK; one concern.",
     ...ratchetContractLines(),
     // W1-T502: THE CADENCE INSTRUCTION. Until this line, the contract taught exactly one
