@@ -15,11 +15,16 @@
  */
 
 import type { AcceptanceCriterion } from "./plan.js";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { acceptanceBlockDiagnostics, parseWhitelistedProof } from "./review.js";
+import { parse as parseYaml } from "yaml";
+import { acceptanceBlockDiagnostics, parseAcceptanceBlock, parseWhitelistedProof } from "./review.js";
 import { emDashSeparatedProof, refuseNonDiscriminatingCriteria } from "./body-repair.js";
 import {
+  checkCommitMessage,
   renderCommitNarrativeParagraphs,
   shapeCommitMessage,
 } from "./commit-message.js";
@@ -27,6 +32,8 @@ import {
   type OperatorMessageSlot,
 } from "./operator-message.js";
 import type { GhApiFetcher } from "./open-prs-rest.js";
+import { RMD_TMP_PREFIX } from "./tmp.js";
+import { RmdError } from "./errors.js";
 
 const PLAN_TASK_SHARD_PREFIX = ["plan", "tasks.d"].join("/") + "/";
 
@@ -459,6 +466,200 @@ export function probeExistingPlanPr(fetch: GhApiFetcher, owner: string, repo: st
   const row = rows?.[0];
   if (!row?.html_url || typeof row.number !== "number") return undefined;
   return { prUrl: row.html_url, prNumber: row.number };
+}
+
+// ── 7. Plan-PR preflight (W1-T5348) ──────────────────────────────────────────────────────────
+// MEASURED 09-25..10-02: 31 machine-lane plan-only PRs went red for 67.2 red-hours; the 8 generator template
+// defects among them (#7946 a proof grepping a record id already on base, #7861 a declared path that did not exist,
+// #8725 a 105-character title) were each detectable offline before the push. W1-T4901's pre-push hook does not
+// reach them: feedback-landing pushes a `commit-tree` sha from a checkout whose HEAD is not that commit, and the
+// hook runs only the plan lint. So every machine plan-PR producer asks {@link planPrPreflight} about the EXACT tree
+// it is about to push, and a red answer refuses the push. A check that cannot run is reported, never refusing —
+// the same rule the hook keeps with its exit 2. Operator and session PRs never pass through here.
+
+export type PlanPrPreflightCheck = "tree" | "lint-plan" | "task-id-existence" | "proof-discrimination" | "pr-title" | "shard-census";
+export interface PlanPrPreflightFinding {
+  check: PlanPrPreflightCheck;
+  firstLine: string;
+}
+export interface PlanPrPreflightResult {
+  ok: boolean;
+  failures: PlanPrPreflightFinding[];
+  unreadable: PlanPrPreflightFinding[];
+}
+/** One check's reading: 0 green, 1 red, anything else (null included) could not run. */
+export interface PlanPrPreflightReading {
+  status: number | null;
+  output: string;
+}
+
+const LINT_PLAN_SCRIPT = "scripts/lint-plan-precheck.mjs";
+const TASK_ID_SCRIPT = "scripts/task-id-existence-check.mjs";
+const SHARD_CENSUS_TEST = "test/every-shard-on-main-is-lintable.test.ts";
+const RUN_TASK_ENTRY = "src/run-task.ts";
+/** `--require-open-prs` refuses an unreadable open-PR list or base; that is a check that could not run, not a red. */
+export const TASK_ID_UNREADABLE_RE = /REQUIRED \(--require-open-prs\) but|could not read declared plan ids at base/;
+/** check-proof exits that make a PR-body proof red (fail, refused, no match, passes at base too). */
+const RED_BODY_PROOF_EXIT: Record<number, string> = { 1: "fails on this tree", 2: "does not parse as a proof", 3: "matches no tests", 5: "passes at origin/main too" };
+const CHECK_PROOF_STALE_EXIT = 5;
+
+/** Run a script the tree itself carries; a tree without it is a check that cannot run. */
+function runInTree(cwd: string, relPath: string, argv: string[]): PlanPrPreflightReading {
+  if (!existsSync(join(cwd, relPath))) return { status: null, output: `${relPath} is absent from the tree` };
+  const env: NodeJS.ProcessEnv = { ...process.env, RMD_SELF_SYNC_DONE: "1" };
+  delete env.NODE_TEST_CONTEXT; // a nested `node --test` under a test runner otherwise reports to the parent, not to stdout
+  const r = spawnSync(process.execPath, argv, { cwd, encoding: "utf8", maxBuffer: 1 << 26, env });
+  return { status: r.status, output: `${r.stdout ?? ""}\n${r.stderr ?? ""}` };
+}
+
+/** The four checks that shell out, each run inside `cwd`; `checkProof` answers `rmd check-proof`'s exit status. */
+const defaultPreflightChecks = {
+  lintPlan: (cwd: string): PlanPrPreflightReading => runInTree(cwd, LINT_PLAN_SCRIPT, [LINT_PLAN_SCRIPT]),
+  taskIdExistence: (cwd: string): PlanPrPreflightReading => {
+    const r = runInTree(cwd, TASK_ID_SCRIPT, [TASK_ID_SCRIPT, "--base", "origin/main", "--require-open-prs"]);
+    return r.status === 1 && TASK_ID_UNREADABLE_RE.test(r.output) ? { ...r, status: null } : r;
+  },
+  shardCensus: (cwd: string): PlanPrPreflightReading => {
+    const r = runInTree(cwd, SHARD_CENSUS_TEST, ["--import", "tsx", "--test", "--test-reporter=tap", SHARD_CENSUS_TEST]);
+    // A run with no failing-test count is not a result (a load error exits 1 too).
+    return r.status === 1 && !/^# fail [1-9]/m.test(r.output) ? { ...r, status: null } : r;
+  },
+  checkProof: (cwd: string, proof: string): number | null => runInTree(cwd, RUN_TASK_ENTRY, ["--import", "tsx", RUN_TASK_ENTRY, "check-proof", proof, "--base", "origin/main"]).status,
+};
+/** A test's stand-ins for any of {@link defaultPreflightChecks}. */
+export type PlanPrPreflightChecks = Partial<typeof defaultPreflightChecks>;
+
+function firstLineOf(output: string, status: number | null): string {
+  const lines = output.split("\n").map((l) => l.trim()).filter(Boolean);
+  const diagnosticLine = /^(?:not ok |REFUSES\b|FAILED\b|✗|task-id-existence: FAILED\b|lint-plan-precheck:[^\n]*\bREFUSES\b)/;
+  return lines.find((l) => diagnosticLine.test(l)) ?? lines[0] ?? `exited ${status}`;
+}
+
+function shardProofs(text: string): string[] {
+  let tasks: unknown;
+  try {
+    tasks = parseYaml(text);
+  } catch {
+    // An unparseable shard is the plan lint's to refuse, by name — this check has no proofs of it to read.
+    return [];
+  }
+  const proofs: string[] = [];
+  for (const task of Array.isArray(tasks) ? tasks : []) {
+    const acceptance = (task as { acceptance?: unknown } | null)?.acceptance;
+    for (const c of Array.isArray(acceptance) ? (acceptance as Array<{ proof?: unknown } | null>) : []) {
+      if (typeof c?.proof === "string") proofs.push(c.proof.trim());
+    }
+  }
+  return proofs;
+}
+
+/** Proofs this tree INTRODUCES in changed task shards (undefined when unreadable): a MERGED task's own proofs pass at
+ *  base by construction, so a status edit to its shard (plan-reconcile) is not this PR's to discriminate. */
+function changedShardProofs(cwd: string): string[] | undefined {
+  const diff = spawnSync("git", ["diff", "--name-only", "--diff-filter=AM", "origin/main...HEAD", "--", PLAN_TASK_SHARD_PREFIX], { cwd, encoding: "utf8" });
+  if (diff.status !== 0) return undefined;
+  const proofs: string[] = [];
+  for (const rel of diff.stdout.split("\n").filter(Boolean)) {
+    const base = spawnSync("git", ["show", `origin/main:${rel}`], { cwd, encoding: "utf8", maxBuffer: 1 << 26 });
+    const atBase = new Set(base.status === 0 ? shardProofs(base.stdout) : []);
+    proofs.push(...shardProofs(readFileSync(join(cwd, rel), "utf8")).filter((p) => !atBase.has(p)));
+  }
+  return proofs;
+}
+
+/** A PR-body proof is red on any non-pass; a changed shard's proof only when it already passes at origin/main —
+ *  a task filed before it is built fails its own proof at head by design. */
+function proofDiscrimination(cwd: string, body: string, checkProof: (cwd: string, proof: string) => number | null): PlanPrPreflightReading {
+  const red: string[] = [];
+  const unreadable: string[] = [];
+  for (const proof of new Set(parseAcceptanceBlock(body).map((c) => c.proof.trim()).filter(Boolean))) {
+    const status = checkProof(cwd, proof);
+    if (status === 0) continue;
+    if (status !== null && RED_BODY_PROOF_EXIT[status]) red.push(`PR-body proof ${JSON.stringify(proof)} ${RED_BODY_PROOF_EXIT[status]}`);
+    else unreadable.push(`PR-body proof ${JSON.stringify(proof)} could not be checked (check-proof exit ${status})`);
+  }
+  const shardProofs = changedShardProofs(cwd);
+  if (shardProofs === undefined) unreadable.push("the changed task shards could not be read against origin/main");
+  for (const proof of new Set(shardProofs ?? [])) {
+    if (checkProof(cwd, proof) === CHECK_PROOF_STALE_EXIT) red.push(`shard proof ${JSON.stringify(proof)} passes at origin/main too`);
+  }
+  if (red.length > 0) return { status: 1, output: red.join("\n") };
+  return unreadable.length > 0 ? { status: null, output: unreadable.join("\n") } : { status: 0, output: "" };
+}
+
+/**
+ * Would CI refuse this plan PR? Runs, inside `cwd` (a checkout whose HEAD is the commit about to be pushed and whose
+ * `origin/main` is current): the plan lint on changed tasks (W1-T4901's `runLintPlanPrecheck`, never a retyped argv),
+ * task-id-existence `--require-open-prs`, proof discrimination of the PR body and of each changed shard through
+ * `rmd check-proof --base origin/main`, the PR-title lint, and the `every-shard-on-main-is-lintable` census.
+ */
+export function planPrPreflight(input: { cwd: string; title: string; body: string }, checks: PlanPrPreflightChecks = {}): PlanPrPreflightResult {
+  const d = { ...defaultPreflightChecks, ...checks };
+  const failures: PlanPrPreflightFinding[] = [];
+  const unreadable: PlanPrPreflightFinding[] = [];
+  const read = (check: PlanPrPreflightCheck, run: () => PlanPrPreflightReading): void => {
+    let reading: PlanPrPreflightReading;
+    try {
+      reading = run();
+    } catch (e) {
+      reading = { status: null, output: String((e as Error)?.message ?? e) };
+    }
+    if (reading.status === 0) return;
+    (reading.status === 1 ? failures : unreadable).push({ check, firstLine: firstLineOf(reading.output, reading.status) });
+  };
+  read("lint-plan", () => d.lintPlan(input.cwd));
+  read("task-id-existence", () => d.taskIdExistence(input.cwd));
+  read("proof-discrimination", () => proofDiscrimination(input.cwd, input.body, d.checkProof));
+  read("pr-title", () => {
+    const v = checkCommitMessage(input.title)[0];
+    return v ? { status: 1, output: `${v.rule}: ${v.message}` } : { status: 0, output: "" };
+  });
+  read("shard-census", () => d.shardCensus(input.cwd));
+  return { ok: failures.length === 0, failures, unreadable };
+}
+
+/** {@link planPrPreflight} on a commit no checkout has at HEAD (feedback-landing's `commit-tree` sha): a detached
+ *  worktree of it is materialized beside `repoDir`, borrows its node_modules, and is removed after. */
+export function planPrPreflightAtCommit(repoDir: string, commitSha: string, pr: { title: string; body: string }, checks: PlanPrPreflightChecks = {}): PlanPrPreflightResult {
+  const parent = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-pr-preflight-`));
+  const tree = join(parent, "tree");
+  try {
+    execFileSync("git", ["-C", repoDir, "worktree", "add", "--detach", "--quiet", tree, commitSha], { stdio: "pipe" });
+  } catch (e) {
+    rmSync(parent, { recursive: true, force: true });
+    return { ok: true, failures: [], unreadable: [{ check: "tree", firstLine: `${commitSha} could not be materialized: ${firstLineOf(String((e as Error)?.message ?? e), null)}` }] };
+  }
+  try {
+    if (existsSync(join(repoDir, "node_modules"))) symlinkSync(join(repoDir, "node_modules"), join(tree, "node_modules"));
+    return planPrPreflight({ cwd: tree, ...pr }, checks);
+  } finally {
+    spawnSync("git", ["-C", repoDir, "worktree", "remove", "--force", tree], { stdio: "pipe" });
+    rmSync(parent, { recursive: true, force: true });
+  }
+}
+
+/** Ledger a preflight verdict for one lane — `plan_pr.preflight_unreadable` when a check could not run,
+ *  `plan_pr.preflight_refused { lane, branch, failures }` when one is red — and answer whether to push. */
+export function planPrPreflightAllows(
+  result: PlanPrPreflightResult,
+  ctx: { lane: string; branch: string; log?: (step: string, extra?: Record<string, unknown>) => void },
+): boolean {
+  if (result.unreadable.length > 0) ctx.log?.("plan_pr.preflight_unreadable", { lane: ctx.lane, branch: ctx.branch, unreadable: result.unreadable });
+  if (result.ok) return true;
+  ctx.log?.("plan_pr.preflight_refused", { lane: ctx.lane, branch: ctx.branch, failures: result.failures });
+  return false;
+}
+
+export class PlanPrPreflightRefusedError extends RmdError {
+  constructor(readonly lane: string, readonly failures: PlanPrPreflightFinding[]) {
+    super("plan", 1, `plan-PR preflight refused the ${lane} push: ${failures.map((f) => `[${f.check}] ${f.firstLine}`).join("; ")}`, { lane, failures });
+    this.name = "PlanPrPreflightRefusedError";
+  }
+}
+
+/** The throwing form of {@link planPrPreflightAllows}, for a lane whose not-landed outcome is a throw. */
+export function refuseRedPlanPr(result: PlanPrPreflightResult, ctx: Parameters<typeof planPrPreflightAllows>[1]): void {
+  if (!planPrPreflightAllows(result, ctx)) throw new PlanPrPreflightRefusedError(ctx.lane, result.failures);
 }
 
 // ── 8. Retro changeset-claim reconciliation (W1-T911) ───────────────────────────────────────

@@ -1,0 +1,40 @@
+- id: W1-T5405
+  title: "THE SWEEP'S OWN PLAN PRS RUN THE FILER PREFLIGHT — W1-T5348 (#8795) runs `planPrPreflight` before gardenCheckout land, rmd approve and feedback-landing open a plan PR, but the two `createPlanPrRest` sites in src/lib/sweep.ts (the refusal-amendment PR and the W1-T3390 stale-proof repair PR) still push and open with no preflight"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: medium
+  origin: "operator session 2026-10-03: follow-up to W1-T5348 (#8795)"
+  plan_refs: [W1-T5348, W1-T3390, W1-T4351]
+  files: [src/lib/sweep.ts, test/the-sweeps-own-plan-prs-run-the-filer-preflight.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    W1-T5348 (#8795) adds `planPrPreflight` / `planPrPreflightAtCommit` and `refuseRedPlanPr` to
+    src/lib/plan-pr-emitter.ts and wires them where a machine lane opens a plan PR: the gardenCheckout land
+    path and `rmd approve` in src/run-task.ts, and src/lib/feedback-landing.ts. It does not touch
+    src/lib/sweep.ts. On origin/main that file opens plan-only PRs through `createPlanPrRest` at two
+    sites. One is `openAmendmentPr`, which commits an amended shard on a `refusal-amendment-<task>` worktree
+    and opens "propose an amendment for <task>". The other is the W1-T3390 plan-repair rung, which commits a
+    flagged shard on a `plan-repair-<task>` worktree and opens "flag a stale proof in <task>'s shard for
+    architect repair". Both push and open with no lint-plan or task-id-existence check. So a red result
+    lands as an open red plan PR, the class W1-T5348 measured at 67.2 red-hours over 09-25..10-02.
+    #8795 is still OPEN at filing (2026-10-03), so W1-T5348 is cited in plan_refs, not depends_on. Build
+    this only after #8795 merges: `planPrPreflight` does not exist on origin/main until then.
+  design: |
+    At each of the two sites, after the commit and before `gitPushRunBranchForBuild`, run
+    `planPrPreflightAtCommit(worktreePath, headSha, { title, body })`. Pass the result through the same
+    `refuseRedPlanPr` / `planPrPreflightAllows` refusal W1-T5348 uses, with lane names `refusal_amendment`
+    and `plan_repair`. A red preflight pushes nothing, opens no PR, and ledgers the refusal with its failing
+    check. The worktree is still disposed in the existing `finally`. A green preflight changes nothing.
+    No change to plan-pr-emitter.ts or to the other lanes W1-T5348 wired.
+  acceptance:
+    - claim: "the sweep's refusal-amendment and plan-repair lanes run the plan-PR preflight on their committed tree, and a red preflight pushes nothing and opens no PR while a green one opens the PR as before"
+      proof: "unit test: test/the-sweeps-own-plan-prs-run-the-filer-preflight.test.ts"
+  falsifier: |
+    Remove the preflight call from either site. The suite's fixture with a red preflight result still
+    reaches the fake `createPlanPrRest` and opens the PR.

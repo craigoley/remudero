@@ -178,7 +178,7 @@ test("W1-T5114: the daemon wiring and the garden CLI build each garden from the 
   }
   assert.match(usage, new RegExp(`gardens: ${REGISTERED_GARDEN_NAMES.join(", ")}`));
 
-  // The daemon wires one starter per registered garden, plus the machine-filing judge it keeps in-process.
+  // The daemon wires one starter per registered garden (the machine-filing judge is one since W1-T5361).
   const oldHome = process.env.HOME;
   process.env.HOME = home;
   let captured: DaemonDeps | undefined;
@@ -194,7 +194,7 @@ test("W1-T5114: the daemon wiring and the garden CLI build each garden from the 
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
   }
-  assert.equal(captured?.gardens?.length, REGISTERED_GARDEN_NAMES.length + 1);
+  assert.equal(captured?.gardens?.length, REGISTERED_GARDEN_NAMES.length);
 
   // Every registered name builds through the one builder both paths use; nothing runs a pass here.
   const ctx: GardenBuildContext = {

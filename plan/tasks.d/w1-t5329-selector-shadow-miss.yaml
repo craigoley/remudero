@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 4
   status: queued
@@ -16,3 +16,13 @@
   acceptance:
     - claim: "the floor selector includes test/citation-anchor-census.test.ts when this edge is exercised"
       proof: "grep: test/citation-anchor-census\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.88
+    reasons:
+      - "The filed plan requests one selector edge repair, and the sole declared file, src/lib/affected-suites.ts, aligns with that scope."
+      - "The supplied scope describes adding test inclusion and identifies no operator-only decision, sensitive access, destructive action, or merge, deploy, infrastructure, or review policy change."
+      - "This is a filing-time assessment with verify: auto; no failing gate is reported. The family has no prior outcomes, which establishes neither repeated failure nor proven success."
+    judged_at: "2026-10-03T04:15:50.460Z"
+    pin: "4d09d5180787da6bd60966d0560b7d34b646119bf03d9c3031404bc8700ba277"
