@@ -1,0 +1,81 @@
+- id: W1-T5513
+  title: "THE HOST JANITOR REAPS THE SCRATCH DISK'S TOP LEVEL — `rmd-host-cleanup.sh` sweeps /tmp-style roots and /mnt/scratch/worktrees but never /mnt/scratch itself, where ~510 idle gate workspaces and leaked test dirs hold ~120 GB and the disk sits at 87-89%"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: /mnt/scratch at 89% with ~120 GB of idle top-level entries no sweep reaches"
+  plan_refs: [W1-T4770, W1-T3378, W1-T4804, W1-T5547, W1-T5548, W1-T5518, W1-T5550]
+  files: [deploy/rmd-host-cleanup.sh, deploy/rmd-tmp-sweep.sh, test/helpers/host-cleanup-fixture.ts, test/host-root-disk-janitor.test.ts, test/a-top-level-scratch-workspace-idle-for-12-hours-is-removed.test.ts, test/a-scratch-workspace-holding-unpushed-commits-is-bundled-before-removal.test.ts, test/a-workspace-parent-root-is-never-removed-and-its-children-are-judged.test.ts, test/two-janitor-passes-cannot-run-at-the-same-time.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-03 on origin/main 3e026b90. deploy/rmd-host-cleanup.sh (moved into deploy/ by W1-T4770)
+    sweeps three places. (1) The temp roots: `RMD_CLEANUP_TMP_ROOTS`, which the hourly root cron.d wrapper
+    deploy/rmd-tmp-sweep.sh (#8293) sets to /tmp, rmd-state2/tmp, /mnt/rmd/tmp and /mnt/scratch/tmp, with
+    globs `rmd-* node-coverage-*`. (2) The worktree roots: `RMD_CLEANUP_WORKTREE_ROOTS`, default
+    /mnt/scratch/worktrees, whose immediate children go through `sweep_worktree`. (3) Transcripts. Nothing
+    reads the TOP LEVEL of /mnt/scratch, and that is where sessions and test runs leave their work.
+    Operator measurement 2026-10-03, confirmed read-only by the filer (578 top-level entries): gate-run
+    workspaces /mnt/scratch/{g,h,i,j,k,l} (each holding repo/, home/, gate*.log, *.bundle); a workspace
+    PARENT /mnt/scratch/o whose children are many clones and bundles (≈140 GB, coverage/raw ~28 GB per
+    clone); t3224-wt-*, census-precheck-wt-* (12) and house-layout-wt-* (10) orphaned linked worktrees
+    (W1-T5550 stops the tests making them); and leaked test dirs rmd-test-gh-refuse-* (32+),
+    rmd-test-gh-config-* (28+) and rmd-containment-test-* (11+). In all, 79 + ~430 entries had been idle
+    more than 12 h and held about 120 GB. `df` shows /mnt/scratch at 87% (375G of 433G) at filing; the
+    operator saw 89%. The 24G swapfile lives on this filesystem. Operator ruling: this sweep is how the
+    existing backlog gets reaped, so it must be safe enough to run unattended.
+    W1-T3378 (merged) made crash-stranded review worktrees reapable, and its rule carries over: an
+    in-process `finally` is not cleanup on a fleet that is SIGKILLed routinely. Only a sweep is.
+    Split by Rule 19: this task is the removal pass. W1-T5547 prunes coverage/ and node_modules/ of an
+    idle unit this pass keeps. W1-T5548 adds the per-filesystem alarm. W1-T5518 retires the legacy user
+    janitor. This task alone is one concern (the scratch top level is reaped) across the janitor, its
+    hourly wrapper and the shared test fixture, so the band is high with band_meaning: span.
+  design: |
+    1. UNITS. Add a scratch pass to deploy/rmd-host-cleanup.sh over `RMD_CLEANUP_SCRATCH_ROOTS` (the
+       wrapper sets /mnt/scratch). It also runs in temp-only mode, so the hourly root cron.d entry runs it,
+       and lsof as root sees every user's processes. Each immediate child is one unit unless it is on the
+       never-list: `swapfile lost+found rmd worktrees tmp npm-cache node-compile-cache node-v*-linux-x64*
+       tsx-* .remudero-coverage state`, or it is a directory holding a `.rmd-scratch-keep` marker.
+       `RMD_CLEANUP_SCRATCH_PARENTS` (default /mnt/scratch/o) names PARENT roots: the parent itself is
+       never removed, and each of its children is judged as its own unit.
+    2. IDLE. A unit is idle when nothing under it was written within `RMD_CLEANUP_SCRATCH_IDLE_MINUTES`
+       (default 720 = 12 h), with .git excluded as `is_worktree_idle` already does. An incomplete walk
+       keeps the unit.
+    3. LIVE. Keep any unit a process holds: the existing one-snapshot `lsof -Fn` (cwd and open fds,
+       `snapshot_open`/`is_open`), and also any path that is a docker mount source of a running container.
+       A failed docker read keeps everything, failing closed like lsof.
+    4. NESTED REPOS (search to depth 3). An orphaned linked worktree (its gitdir and parent repo both
+       gone) is disposable. A linked worktree whose parent is live is removed only through `git worktree
+       remove`. A dirty repo keeps the whole unit. Local branches on no remote are bundled with
+       `git bundle create … --branches` (verified with `bundle verify` and `list-heads`) into
+       /mnt/rmd/host-cleanup-worktree-archive/scratch/, on a different filesystem, which
+       `archive_worktree_head`'s fsid check enforces. If that fails, keep the unit. Top-level `*.bundle`
+       files are archived there too, never deleted. Reuse `is_idle`, `snapshot_open`,
+       `is_protected_worktree`, `worktree_saved`, `archive_worktree_head` and `act()`.
+    5. ONE PASS AT A TIME. The janitor takes a `flock` on a lock file for the whole pass. A second pass
+       that cannot take it logs and exits 0, changing nothing.
+    6. `DRY_RUN=1` changes nothing and logs every decision (`KEEP <unit>: <reason>`, `REMOVE <unit>`,
+       `ARCHIVE <bundle>`) and the bytes it would reclaim.
+    7. Add the legacy user janitor's two coverage caches, /tmp/.remudero-coverage and /tmp/.rmd-coverage,
+       to deploy/rmd-tmp-sweep.sh's default `RMD_CLEANUP_COVERAGE_PATHS` (W1-T5518 retires that janitor).
+    8. Lift test/host-root-disk-janitor.test.ts's local fixture helpers (`fixture`, `age`, `scratchDir`,
+       `repos`) into test/helpers/host-cleanup-fixture.ts. The existing suite imports them unchanged.
+  acceptance:
+    - claim: "a top-level scratch workspace idle for 12 hours whose repos are all saved is removed, while a fresh one, a never-listed name, a .rmd-scratch-keep unit, a unit held as a cwd or open fd, a docker mount source and one with an unreadable activity walk are each kept with a logged reason"
+      proof: "unit test: test/a-top-level-scratch-workspace-idle-for-12-hours-is-removed.test.ts"
+    - claim: "a scratch workspace holding unpushed commits on any local branch is bundled and verified before removal, and kept when the bundle cannot be verified"
+      proof: "unit test: test/a-scratch-workspace-holding-unpushed-commits-is-bundled-before-removal.test.ts"
+    - claim: "a workspace parent root is never removed and its idle children are judged one by one"
+      proof: "unit test: test/a-workspace-parent-root-is-never-removed-and-its-children-are-judged.test.ts"
+    - claim: "two janitor passes cannot run at the same time"
+      proof: "unit test: test/two-janitor-passes-cannot-run-at-the-same-time.test.ts"
+  falsifier: |
+    Drop the scratch pass and the suite's idle top-level workspace survives. Remove the bundle step and
+    an unpushed local branch's commit is in no archive. Treat a parent root as a unit and the parent is
+    removed. Drop the flock and two concurrent fixture passes both act.

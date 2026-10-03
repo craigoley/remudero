@@ -1,0 +1,50 @@
+- id: W1-T5523
+  title: "THE HANDED-OFF-HEAD RISK JUDGE NEVER HOLDS THE FULL SWEEP — W1-T5403's `riskJudgeHandedOffHead` awaits a model call (up to the judge's retry count) inline in the sweep's mergeable arm, once per handed-off head, serially and with no wall-clock bound, after a synchronous `changeView` gh read"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: review of W1-T5403 (#8897) beside the loop-stall work"
+  plan_refs: [W1-T5403, W1-T5481, W1-T5361, W1-T5366, W1-T100]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/the-handed-off-head-risk-judge-never-holds-the-full-sweep.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-03 on origin/main 3e026b90. In `runSweep`'s `mergeable` disposition (src/lib/sweep.ts),
+    a PR whose run ended `handed_off` with no available `risk_judge.decision` row for its head
+    (`handedOffHeadAwaitingJudgment`) is passed to `holdHandedOffHeadForRiskJudgment`. That awaits
+    `deps.judgeHandedOffHead(pr)` before `deps.arm`. Production wires `handedOffHeadRiskJudge`
+    (src/run-task.ts) → `riskJudgeHandedOffHead` → `runRiskJudge` → `realRiskJudge`
+    (src/lib/risk-judge.ts). That spawns a model worker up to `RISK_JUDGE_MAX_ATTEMPTS` times, with no
+    timeout. Its `judge` first calls `changeView(pr.prUrl)`, which is a synchronous `ghJson` REST read.
+    The PR loop awaits each head in turn. So a sweep with N handed-off heads holds its pass for N model
+    calls, and blocks the loop once per head for the change-view read.
+    The hold-and-ask-again shape already exists. An `unavailable` judgment holds the arm and "the next
+    pass asks again", and a landed `risk_judge.decision` row (carrying `pr_number` and `head_sha`) is what
+    `handedOffHeadAwaitingJudgment` reads back.
+    W1-T100 (blocked_ci routing to the ci-log fix path) shares src/lib/sweep.ts and src/run-task.ts but
+    not this surface: it routes a CI-failed disposition, while this task changes only the handed-off-head
+    judgment inside the mergeable arm.
+    Rule 19: one concern (the judgment leaves the pass) across the sweep and its production wiring in
+    src/run-task.ts, so the band is high with band_meaning: span.
+  design: |
+    1. Start the judgment and do not await it in the pass. The sweep starts one background judgment per
+       head that has none in flight (keyed `pr@head`, deduped across passes) and holds the arm this pass
+       with a named reason ("risk judgment in flight"). The next pass reads the landed
+       `risk_judge.decision` row as today. Bound concurrent in-flight judgments with a declared constant,
+       and bound each one's wall clock: a judgment that outlives its bound is ledgered as unavailable.
+    2. Read the change view through the async gh transport (as W1-T5481 did with `ghJsonAsync`) inside
+       the background judgment, never on the pass.
+    3. A throw or rejection in the background judgment is ledgered as `sweep.risk_judge_unavailable`. It is
+       never swallowed and never read as proceed.
+  acceptance:
+    - claim: "a sweep pass over handed-off heads whose judge never resolves completes under a declared bound, holds each arm with an in-flight reason, starts at most the declared number of judgments, and arms a head on the first pass after its proceed decision lands"
+      proof: "unit test: test/the-handed-off-head-risk-judge-never-holds-the-full-sweep.test.ts"
+  falsifier: |
+    Await the judgment inline again. The suite's pass over a never-resolving judge does not complete
+    within its bound.

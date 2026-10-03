@@ -1,0 +1,46 @@
+- id: W1-T5550
+  title: "A KILLED TEST RUN LEAVES NO ORPHANED WORKTREE OR SETUP DIR — three suites add linked worktrees as SIBLINGS of their fixture dir (census-precheck-wt-*, house-layout-wt-*, t3224-wt-*), orphaned when the fixture is removed, and the test setup removes its rmd-test-gh-* dirs only in `process.on(\"exit\")`, so every SIGKILLed run leaks them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: /mnt/scratch research (the producers of the leaked top-level dirs)"
+  plan_refs: [W1-T5513, W1-T131, W1-T3378]
+  files: [test/a-census-this-branch-grows-is-refused-before-the-push.test.ts, test/census-precheck-counts-the-house-layout-ratchet.test.ts, test/a-hook-child-does-not-inherit-the-pushing-repo.test.ts, test/setup/no-live-remote.ts, test/setup/tmp-hygiene.ts, test/a-killed-test-run-leaves-no-orphaned-worktree-or-setup-dir.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-03 on origin/main 3e026b90. Each of these suites adds its worktree at
+    `join(dirname(parent.dir), "<prefix>-wt-<pid>-<n>")`, a sibling of the fixture repo, not a child:
+    test/a-census-this-branch-grows-is-refused-before-the-push.test.ts (`census-precheck-wt-`),
+    test/census-precheck-counts-the-house-layout-ratchet.test.ts (`house-layout-wt-`) and
+    test/a-hook-child-does-not-inherit-the-pushing-repo.test.ts (`t3224-wt-`). Removing the fixture dir
+    leaves the worktree behind with a dangling gitdir. 12 census-precheck-wt-* and 10 house-layout-wt-*
+    sat at /mnt/scratch's top level at filing.
+    test/setup/no-live-remote.ts makes `rmd-test-gh-config-*` and test/setup/tmp-hygiene.ts makes
+    `rmd-test-gh-refuse-*`. Both are removed only in a `process.on("exit")` handler. A SIGKILL skips that
+    handler (test/setup/reapable-prefix.ts says so), and the `rmd-` boot sweep (`sweepStaleTempDirs`)
+    reaps only the daemon's own `os.tmpdir()`. A test run with TMPDIR on /mnt/scratch is never swept,
+    and 32+ refuse and 28+ config dirs had accumulated there.
+    W1-T5513 reaps the backlog. This task stops making more.
+    Rule 19: one concern (a killed run leaks nothing) across three suites and two setup modules, so the
+    band is high with band_meaning: span.
+  design: |
+    1. The three suites put the repo and its worktrees under one fixture-owned temp root (the repo at
+       `<root>/repo`, worktrees at `<root>/wt-<n>`), so removing that root removes the worktree too.
+    2. The two setup modules embed the owning pid in each dir name (`rmd-test-gh-config-<pid>-…`). At
+       load, each removes same-prefix dirs under the current tmpdir whose pid is not alive and which are
+       older than a minute. The exit handler stays as the fast path.
+    3. A census in the new suite: no test under test/ passes `join(dirname(<fixture>.dir), …)` to
+       `addWorktree`.
+  acceptance:
+    - claim: "no suite adds a worktree outside its fixture dir, and a setup dir left by a SIGKILLed test process is removed when the next test process loads the setup, while a live process's dir is kept"
+      proof: "unit test: test/a-killed-test-run-leaves-no-orphaned-worktree-or-setup-dir.test.ts"
+  falsifier: |
+    Restore `join(dirname(parent.dir), …)` in one suite and the census names it. Drop the load-time reap
+    and the SIGKILLed child's config dir survives the next load.

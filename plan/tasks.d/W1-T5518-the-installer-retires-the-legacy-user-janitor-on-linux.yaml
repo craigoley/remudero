@@ -1,0 +1,40 @@
+- id: W1-T5518
+  title: "THE INSTALLER RETIRES THE LEGACY USER JANITOR ON LINUX — ~/bin/remudero-janitor.sh (not in any repo) runs every 30 min from the user timer azure-remudero-janitor, scans macOS roots, removes nothing on this host, and logs a 20 GiB-floor EMERGENCY against the 29 GB root disk; the installer reports its timer as drift"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low
+  origin: "operator session 2026-10-03: the janitor log's half-hourly EMERGENCY line"
+  plan_refs: [W1-T5513, W1-T5548, W1-T4770]
+  files: [deploy/install-host-units.sh, test/the-installer-retires-the-legacy-user-janitor-on-linux.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-03, read-only, on the Azure host. ~/bin/remudero-janitor.sh (771 lines, in no repo) is run
+    by the user unit azure-remudero-janitor.service (`--apply`, log ~/.local/state/remudero/janitor.log)
+    every 30 minutes. Its roots are macOS-shaped: `SCAN_ROOTS` is `$TMPDIR /tmp /private/tmp`,
+    `CHECKOUT_SCAN_ROOTS` is `~/Remudero`, and it removes only `node_modules` and `coverage` artifacts. Its
+    20:49Z pass logged `removed=0 reclaimed=0M planned=0`. `free_gib` measures `/` (or
+    /System/Volumes/Data on Darwin), which on this host is the 29 GB root disk, where a 20 GiB free floor
+    can never be met. The log holds 569 lines like "EMERGENCY: 7GiB free < 20GiB floor — age threshold
+    lowered to 3h", and none of them names the filesystem.
+    On Linux, deploy/rmd-host-cleanup.sh owns the temp roots and worktrees, and with W1-T5513 the scratch
+    top level too. W1-T5548 gives that janitor a per-filesystem alarm that names each filesystem it
+    measured, so the legacy alarm has nothing left to say here. deploy/mac/tmp-reclaim.sh (#6861) owns the
+    Mac. The only thing the legacy script covers on Linux that the repo janitor does not is its two coverage
+    caches, /tmp/.remudero-coverage and /tmp/.rmd-coverage. W1-T5513 adds them to the temp sweep.
+  design: |
+    deploy/install-host-units.sh, on Linux, checks the service user's
+       ~/.config/systemd/user/ for an `azure-remudero-janitor.timer` (unit file or a timers.target.wants
+       link). If it finds one, it reports it as drift (`install-host-units: LEGACY <path>`, with the exact
+       `systemctl --user disable --now azure-remudero-janitor.timer` command) and counts it in the drift
+       exit. It reports only and never edits a user unit, so the operator retires it.
+  acceptance:
+    - claim: "the installer reports a legacy azure-remudero-janitor timer as drift with its disable command and reports nothing when it is absent"
+      proof: "unit test: test/the-installer-retires-the-legacy-user-janitor-on-linux.test.ts"
+  falsifier: |
+    Drop the installer check. A fixture home holding the user timer reports no drift.
