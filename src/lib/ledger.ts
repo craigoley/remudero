@@ -642,9 +642,10 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "daemon.idle_reasons",
   "sweep.post_fix_redriven",
   "sweep.stale_red_redrive.released",
-  // W1-T970: sweep.ts's `priorActionsFromLedger` builds a sha-keyed `riskRefused` set off this
-  // step; losing it re-arms a head a risk judge explicitly refused.
+  // W1-T970: sweep.ts builds a sha-keyed `riskRefused` set off the escalated row, and (W1-T5403)
+  // `handedOffHeadAwaitingJudgment` reads the decision row; losing either re-arms or re-judges a head.
   "risk_judge.escalated",
+  "risk_judge.decision",
   // W1-T186: `priorActionsFromLedger` counts these to enforce ABSENT_REPUSH_CAP. The line IS the
   // bound — archived away, every rotation re-earns the PR another empty commit.
   "sweep.absent_repush",
