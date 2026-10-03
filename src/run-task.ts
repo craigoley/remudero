@@ -15931,6 +15931,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       root: config.root,
     }));
   } catch (error) {
+    // UNKEYED, not unproven: the `probe_cache.miss` row below records this error and the run probes.
     probeKeyError = String((error as Error)?.message ?? error).slice(0, 300);
   }
   const probeTicket = probeCache.open();
