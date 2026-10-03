@@ -11,7 +11,7 @@
   origin: oper#declared-egress-boundary-has-no-owner-2026-08-24
   plan_refs: ["W1-T1265", "W1-T11", "W1-T1", "#2668"]
   priority: 2
-  status: queued
+  status: merged
   # backlog gardener: band=2 evidence=f3aa267ea8878728
   attempts: 0
   rationale: |

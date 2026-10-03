@@ -17,20 +17,23 @@
  */
 import { statSync } from "node:fs";
 import { join } from "node:path";
-import { systemClock, type Clock } from "./clock.js";
+import type { Clock } from "./clock.js";
 import { readReadMarks, readMarksPath, threadDetailView, type InboxThreadItem, type ThreadDetailView } from "./inbox-responder.js";
 import { inboxThreadId, proposalIdOfThread, readThread } from "./inbox-thread.js";
 import type { ReadModelDb } from "./read-model-db.js";
 import { describeSource } from "./view-freshness.js";
 import type { ViewSource } from "./views.js";
 import type { DemandBook } from "./view-demand.js";
+import type { InboxViewBody } from "./inbox-view.js";
+import { viewKey } from "./views.js";
 
 export const INBOX_THREAD_VIEW_NAME = "inbox-thread";
 export const INBOX_THREAD_VIEW_VERSION = 1;
 /** The inbox is core's alone today; its source is named for the instance that classifies it (inbox-view.ts). */
 const INBOX_STORE_INSTANCE = "core";
 /** The `inbox` view's pages that hold the operator's items. Mirrors inbox-view.ts's `section=needsYou` keys. */
-const NEEDS_YOU_KEY_PATTERN = "section=needsYou%";
+const NEEDS_YOU_KEY = "section=needsYou";
+const NEEDS_YOU_CURSOR_PATTERN = "cursor=%&section=needsYou";
 
 /** The thread store every inbox thread route and the daemon's responder share (panel-graph.ts's `inboxThreadStorePath`). */
 export function inboxThreadStoreFile(inboxRoot: string): string {
@@ -73,32 +76,70 @@ export function fileFingerprint(path: string): string {
 }
 
 const LANE_STATES: Record<string, InboxThreadItem["state"]> = { ready: "ready", drafting: "drafting", notReady: "notReady", declined: "declined" };
+type ClassifiedItem = InboxViewBody["data"]["items"][number] & Pick<InboxThreadItem, "summary" | "plain">;
+type ClassifiedPage = Omit<InboxViewBody, "data"> & { data: Omit<InboxViewBody["data"], "items"> & { items: ClassifiedItem[] } };
 
 interface InboxPages {
   /** The pages' ETags, in key order: the proposal's classification moves one of them. */
   signature: string;
-  /** The newest `asOf` among the pages' sources, or null. */
+  /** The classification's actual source age, never the thread materialization time. */
   asOf: string | null;
   rows: number;
+  state: "fresh" | "stale";
+  reason?: string;
+  items: ClassifiedItem[];
+  extraSources: ViewSource[];
 }
 
 function inboxPages(db: ReadModelDb): InboxPages {
-  const rows = db.prepare("SELECT key, etag, json_extract(body, '$.sources[0].asOf') AS asOf FROM view_body WHERE view = 'inbox' AND key LIKE ? ORDER BY key").all(NEEDS_YOU_KEY_PATTERN);
-  let asOf: string | null = null;
-  for (const row of rows) if (typeof row.asOf === "string" && (asOf === null || row.asOf > asOf)) asOf = row.asOf;
-  return { signature: rows.map((row) => `${String(row.key)}=${String(row.etag)}`).join("|"), asOf, rows: rows.length };
+  const rows = db.prepare("SELECT key, etag, body FROM view_body WHERE view = 'inbox' AND (key = ? OR key LIKE ?) ORDER BY key").all(NEEDS_YOU_KEY, NEEDS_YOU_CURSOR_PATTERN);
+  if (rows.length === 0) return { signature: "", asOf: null, rows: 0, state: "fresh", items: [], extraSources: [] };
+  const pages = rows.map((row) => ({ key: String(row.key), etag: String(row.etag), body: JSON.parse(String(row.body)) as ClassifiedPage }));
+  for (const { body } of pages) {
+    if (!Array.isArray(body.sources) || body.sources.length === 0) throw new Error("the inbox classification has no source evidence");
+    if (body.sources.filter((evidence) => evidence.name === `inbox-store:${INBOX_STORE_INSTANCE}`).length !== 1) throw new Error("the inbox classification has no core inbox source");
+    for (const evidence of body.sources) {
+      if (evidence.state !== "fresh" && evidence.state !== "stale") {
+        throw new Error(`the inbox classification is unavailable: ${evidence.reason ?? "invalid source identity or state"}`);
+      }
+      if (typeof evidence.asOf !== "string" || !Number.isFinite(Date.parse(evidence.asOf))) throw new Error("the inbox classification has no known source age");
+    }
+    const page = body.data?.page;
+    if (body.data?.section !== "needsYou" || !Array.isArray(body.data.items) || !page || !Number.isInteger(page.index) || !Number.isInteger(page.of) || !Number.isInteger(page.total) || page.index < 0 || page.of < 1 || page.total < 0) {
+      throw new Error("the inbox classification has invalid page evidence");
+    }
+  }
+  pages.sort((a, b) => a.body.data.page.index - b.body.data.page.index);
+  const first = pages[0]!.body;
+  const inboxSource = first.sources.find((evidence) => evidence.name === `inbox-store:${INBOX_STORE_INSTANCE}`)!;
+  const asOf = inboxSource.asOf;
+  const sourceIdentity = (sources: ViewSource[]) => sources.map((evidence) => `${evidence.name}=${evidence.asOf}`).sort().join("|");
+  const { of, total } = first.data.page;
+  let offset = 0;
+  const items: InboxPages["items"] = [];
+  for (const [index, { key, body }] of pages.entries()) {
+    const params = new URLSearchParams(index === 0 ? { section: "needsYou" } : { section: "needsYou", cursor: String(offset) });
+    if (key !== viewKey(params) || body.data.page.index !== index || body.data.page.of !== of || body.data.page.total !== total || sourceIdentity(body.sources) !== sourceIdentity(first.sources)) {
+      throw new Error("the inbox classification pages do not form one complete snapshot");
+    }
+    offset += body.data.items.length;
+    if (body.data.page.next !== (index + 1 < of ? String(offset) : undefined)) throw new Error("the inbox classification has an incomplete cursor chain");
+    items.push(...body.data.items);
+  }
+  if (pages.length !== of || offset !== total) throw new Error("the inbox classification snapshot is incomplete");
+  const sources = pages.flatMap(({ body }) => body.sources);
+  const stale = sources.find((evidence) => evidence.name === inboxSource.name && evidence.state === "stale");
+  const extraSources = first.sources.filter((evidence) => evidence.name !== inboxSource.name).map((evidence) => describeSource(sources.find((candidate) => candidate.name === evidence.name && candidate.state === "stale") ?? evidence));
+  return { signature: pages.map(({ key, etag }) => `${key}=${etag}`).join("|"), asOf, rows: pages.length, state: stale ? "stale" : "fresh", ...(stale?.reason ? { reason: stale.reason } : {}), items, extraSources };
 }
 
 /** The proposal's item off the persisted `needsYou` pages: its lane is the thread's state. */
-function itemOf(db: ReadModelDb, proposalId: string): InboxThreadItem | undefined {
-  const rows = db.prepare("SELECT body FROM view_body WHERE view = 'inbox' AND key LIKE ? ORDER BY key").all(NEEDS_YOU_KEY_PATTERN);
-  for (const row of rows) {
-    const items = (JSON.parse(String(row.body)) as { data?: { items?: Array<{ proposalId: string; summary: string; plain: InboxThreadItem["plain"]; lane?: string }> } }).data?.items ?? [];
-    const item = items.find((candidate) => candidate.proposalId === proposalId);
-    const state = item?.lane ? LANE_STATES[item.lane] : undefined;
-    if (item && state) return { proposalId: item.proposalId, summary: item.summary, plain: item.plain, state };
-  }
-  return undefined;
+function itemOf(pages: InboxPages, proposalId: string): InboxThreadItem | undefined {
+  const item = pages.items.find((candidate) => candidate.proposalId === proposalId);
+  if (!item) return undefined;
+  const state = item.lane ? LANE_STATES[item.lane] : undefined;
+  if (!state) throw new Error("the inbox thread's classified lane is unavailable");
+  return { proposalId: item.proposalId, summary: item.summary, plain: item.plain, state };
 }
 
 export function createInboxThreadView(opts: InboxThreadViewOptions): {
@@ -107,13 +148,12 @@ export function createInboxThreadView(opts: InboxThreadViewOptions): {
   demand: true;
   materialize(ctx: { now: number; instances: ReadonlyArray<Slot> }): Array<{ key: string; data: InboxThreadViewData; sources: ViewSource[] }>;
 } {
-  const clock = opts.clock ?? systemClock;
   const log = opts.log ?? (() => {});
   /** The last body each key built, and the inputs it was built from: an unchanged signature is answered from here. */
-  const memo = new Map<string, { signature: string; data: InboxThreadViewData; state: "fresh" | "unavailable"; reason?: string }>();
+  const memo = new Map<string, { signature: string; data: InboxThreadViewData; state: ViewSource["state"]; reason?: string }>();
 
-  const source = (state: "fresh" | "unavailable", asOf: string | null, reason?: string): ViewSource =>
-    describeSource({ name: `inbox-store:${INBOX_STORE_INSTANCE}`, asOf: state === "fresh" ? asOf ?? clock.iso() : null, state, ...(reason ? { reason } : {}) });
+  const source = (state: ViewSource["state"], asOf: string | null, reason?: string): ViewSource =>
+    describeSource({ name: `inbox-store:${INBOX_STORE_INSTANCE}`, asOf: state === "unavailable" ? null : asOf, state, ...(reason ? { reason } : {}) });
 
   function build(key: string, db: ReadModelDb | undefined): { data: InboxThreadViewData; sources: ViewSource[] } {
     const threadId = new URLSearchParams(key).get("id") ?? "";
@@ -126,13 +166,13 @@ export function createInboxThreadView(opts: InboxThreadViewOptions): {
     if (pages.rows === 0) return unavailable("the inbox has not been classified yet");
     const storePath = inboxThreadStoreFile(opts.inboxRoot);
     const marksPath = readMarksPath(join(opts.inboxRoot, "state"));
-    const signature = `${pages.signature}#${fileFingerprint(storePath)}#${fileFingerprint(marksPath)}`;
+    const signature = `${pages.signature}#${pages.state}#${pages.asOf}#${pages.reason ?? ""}#${JSON.stringify(pages.extraSources)}#${fileFingerprint(storePath)}#${fileFingerprint(marksPath)}`;
     const held = memo.get(key);
-    if (held?.signature === signature) return { data: held.data, sources: [source(held.state, pages.asOf, held.reason)] };
+    if (held?.signature === signature) return { data: held.data, sources: [source(held.state, pages.asOf, held.reason), ...pages.extraSources] };
     let data: InboxThreadViewData;
-    let state: "fresh" | "unavailable" = "fresh";
-    let reason: string | undefined;
-    const item = itemOf(db, proposalId);
+    let state: ViewSource["state"] = pages.state;
+    let reason = pages.reason;
+    const item = itemOf(pages, proposalId);
     const stored = readThread(inboxThreadId(proposalId), { threadStorePath: storePath });
     if (stored.status === "unresolved") {
       state = "unavailable";
@@ -144,7 +184,7 @@ export function createInboxThreadView(opts: InboxThreadViewOptions): {
       data = { threadId, found: true, thread: threadDetailView(item, new Map([[threadId, stored.messages]]), readReadMarks(marksPath)) };
     }
     memo.set(key, { signature, data, state, ...(reason ? { reason } : {}) });
-    return { data, sources: [source(state, pages.asOf, reason)] };
+    return { data, sources: [source(state, pages.asOf, reason), ...pages.extraSources] };
   }
 
   return {

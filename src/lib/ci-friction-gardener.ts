@@ -129,17 +129,44 @@ export function ciFrictionHandFixRounds(
 }
 
 /** A failed history read is a failed garden pass, never a measured zero-friction corpus. */
-export function readCiFrictionLedgerRecords(stateDir: string): LedgerRecord[] {
-  const read = readLedgerUnionRecordsSync(stateDir, { requireArchives: true, refuseIncomplete: true });
-  if (!read.ok) {
-    const reason = read.archiveCount === 0
-      ? "no ledger rotations"
-      : read.unread.length > 0
-        ? `unread ledger file(s): ${read.unread.map((path) => basename(path)).join(", ")}`
-        : "incomplete ledger union";
-    throw new Error(`ci-friction ledger union unreadable: ${reason}`);
+export const CI_FRICTION_LEDGER_STEPS: readonly string[] = [
+  "pr.opened", "sweep.disposed", "test.flake_retry", "fix.dispatch", "fix.commit_refused",
+  "fix.base_refreshed", "ci-friction.remedy_escalated", "ci-friction.scorecard",
+];
+
+export function readCiFrictionLedgerRecords(stateDir: string, reader: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync): LedgerRecord[] {
+  const checked = (options: Parameters<typeof readLedgerUnionRecordsSync>[1]): LedgerRecord[] => {
+    const read = reader(stateDir, options);
+    if (!read.ok) {
+      const reason = read.archiveCount === 0
+        ? "no ledger rotations"
+        : read.unread.length > 0
+          ? `unread ledger file(s): ${read.unread.map((path) => basename(path)).join(", ")}`
+          : "incomplete ledger union";
+      throw new Error(`ci-friction ledger union unreadable: ${reason}`);
+    }
+    return read.rows as LedgerRecord[];
+  };
+  const rows = checked({ step: CI_FRICTION_LEDGER_STEPS, requireArchives: true, refuseIncomplete: true });
+  const byRun = runPrIndex(rows);
+  const byHead = headPrIndex(rows);
+  const missing = new Set<string>();
+  for (const row of rows) {
+    if (row.step === "fix.dispatch" && typeof row.head_sha === "string" && !byHead.has(row.head_sha) && !byRun.has(String(row.run_id))) missing.add(row.head_sha);
   }
-  return read.rows as LedgerRecord[];
+  if (missing.size === 0) return rows;
+  // headPrIndex also accepts association witnesses from review/verdict rows. Recover only heads
+  // the retained dispatches need, preserving that attribution without keeping every unrelated row.
+  const pattern = new RegExp([...missing].map(head => JSON.stringify(head).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"));
+  const recovered = new Set<string>();
+  for (const row of checked({ pattern, requireArchives: true, refuseIncomplete: true })) {
+    if (typeof row.head_sha !== "string" || !missing.has(row.head_sha) || recovered.has(row.head_sha)) continue;
+    const pr = typeof row.pr_number === "number" ? row.pr_number : prNumberFromUrl(row.pr_url);
+    if (pr === undefined) continue;
+    rows.push({ step: row.step, head_sha: row.head_sha, pr_number: pr });
+    recovered.add(row.head_sha);
+  }
+  return rows;
 }
 
 export interface CiFrictionCause {
@@ -496,7 +523,7 @@ export function readCiFrictionPlanTasks(git: CiFrictionGit, shardsDir: string, r
   let flips: Map<string, string> | undefined;
   const flipOf = (path: string): string | undefined => {
     // Only a merged task with no trailer needs this walk, so it runs at most once and only then.
-    flips ??= pathTimesFromLog(git(["log", refName, CI_FRICTION_HISTORY_SINCE, "-S", "status: merged", "--format=%x01%cI", "--name-only", "--", shardsDir]), "oldest");
+    flips ??= pathTimesFromLog(git(["log", refName, CI_FRICTION_HISTORY_SINCE, "-S", "status: merged", "--format=%x01%cI", "--name-only", "--", ...paths]), "oldest");
     return flips.get(path);
   };
   for (const path of paths) {

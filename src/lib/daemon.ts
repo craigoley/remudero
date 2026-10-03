@@ -60,6 +60,7 @@ import {
   tallyDispatchFilters,
   type IdleReasonBucket,
   IDLE_REASON_ID_CAP,
+  laneDeliveryFailure,
 } from "./drain.js";
 import { preDispatchContractRevision } from "./dispatch-repair.js";
 // Why: drain.ts already owns the overlap partition, so it is reused rather than re-derived (W1-T343).
@@ -77,7 +78,7 @@ import type { UsageSnapshot } from "./headroom.js";
 // Type-only, so no runtime edge is added to daemon-health.ts, which already imports a value from
 // here; a value import would close a real cycle. This module never shells GitHub itself (W1-T372).
 import type { GhRateLimitBuckets } from "./daemon-health.js";
-import type { CostGovernorResult, QueueGovernorResult } from "./sweep.js";
+import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
 // W1-T3691 — a value import (`trackStaleReviewerSkipRecurrence`, `renderHeldReviewQueueBlocker`)
 // alongside the type-only ones above: sweep.ts imports nothing from this module, so this closes
 // no cycle either, same as the value import just below.
@@ -436,6 +437,64 @@ export function priorStaleReviewerRecurrenceState(rawLedgerLines: readonly strin
     }
   }
   return requestedForSha === undefined ? undefined : { codeSha: requestedForSha, streak: 1, restartRequested: true };
+}
+
+/** W1-T5344 — the first park after one task's delivery failure. Policy (design): long enough that
+ *  the next tick does not re-pick a task whose push a gate just refused, short enough that a fix
+ *  merged meanwhile is picked up within the hour. Forensics: docs/forensics/daemon.md. */
+export const LANE_DELIVERY_BACKOFF_FLOOR_MS = 30 * 60_000;
+
+/** W1-T5344 — BACKSTOP: the ceiling the doubling park stops at. It binds only once a task has
+ *  already failed delivery five times running, so a task that fails every attempt is still
+ *  re-offered a few times a day rather than never. */
+export const LANE_DELIVERY_BACKOFF_CEILING_MS = 6 * 60 * 60_000;
+
+/** W1-T5344 — the park for the Nth consecutive delivery failure of one task: the floor, doubled per
+ *  repeat, held at the ceiling. A non-positive streak is floored to the first rung. */
+export function laneDeliveryBackoffMs(consecutive: number): number {
+  const rung = Math.max(1, Math.floor(consecutive));
+  return Math.min(LANE_DELIVERY_BACKOFF_FLOOR_MS * 2 ** (rung - 1), LANE_DELIVERY_BACKOFF_CEILING_MS);
+}
+
+/** W1-T5344 — one task's delivery-failure park: its consecutive streak, the instant it may be
+ *  offered again, and the shard revision it failed on (a new revision clears the park). */
+export interface LaneDeliveryPark {
+  consecutive: number;
+  parkedUntilMs: number;
+  revision: string | undefined;
+}
+
+/** W1-T5344 — rebuilds the per-task delivery parks across a restart from the `daemon.lane_failed`
+ *  rows this process family wrote, so a boot neither re-dispatches a parked task at once (the loop
+ *  that ended the process four times in a row for W1-T3116) nor resets its streak. A later
+ *  `dispatch.settled_set` that FULFILLED the task ends its streak. A torn line or a row missing a
+ *  numeric streak/instant is skipped, never guessed at. Same raw-line contract as
+ *  {@link priorStaleReviewerRecurrenceState}. */
+export function priorLaneDeliveryParks(rawLedgerLines: readonly string[]): Map<string, LaneDeliveryPark> {
+  const parks = new Map<string, LaneDeliveryPark>();
+  for (const raw of rawLedgerLines) {
+    let row: Record<string, unknown>;
+    try {
+      row = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      // torn/malformed line — skipped, exactly as priorStaleReviewerRecurrenceState above skips it
+      continue;
+    }
+    if (row.step === "dispatch.settled_set" && Array.isArray(row.tasks)) {
+      for (const lane of row.tasks as Array<{ id?: unknown; status?: unknown }>) {
+        if (typeof lane?.id === "string" && lane.status === "fulfilled") parks.delete(lane.id);
+      }
+      continue;
+    }
+    if (row.step !== "daemon.lane_failed" || typeof row.task !== "string") continue;
+    if (typeof row.consecutive !== "number" || typeof row.parked_until_ms !== "number") continue;
+    parks.set(row.task, {
+      consecutive: row.consecutive,
+      parkedUntilMs: row.parked_until_ms,
+      revision: typeof row.revision === "string" ? row.revision : undefined,
+    });
+  }
+  return parks;
 }
 
 export function parseResetInstant(raw: string, now: Date): Date | null {
@@ -854,6 +913,10 @@ export interface DaemonDeps {
    *  sweep hooks (W1-T321, the W1-T121 23-open-PR incident). Wrapped by the same governor seam,
    *  consulted again before dispatch, failing closed on a throw (W1-T342). Forensics: docs/forensics/daemon.md. */
   checkQueueGovernor?: () => QueueGovernorResult | undefined;
+  /** W1-T5347 (wiring W1-T1038's `memoryGovernorGateFor`): THE HOST MEMORY FLOOR, a fresh
+   *  `/proc/meminfo` reading per call. Consulted only through `checkDispatchGovernors`, so it holds
+   *  NEW dispatch per lane and a throw fails OPEN there. Never consulted from the sweep. Optional. */
+  checkMemoryGovernor?: () => MemoryGovernorResult | undefined;
   /** Quiet-hours preference: a defined return defers NEW dispatch only. Routed through the dispatch
    *  governor, never through `checkPause`, so sweep/drainage paths keep running and an unreadable
    *  read fails open in `checkDispatchGovernors` (W1-T2655). */
@@ -1214,7 +1277,9 @@ function transientGhDispatchFailure(err: unknown): { detail: string } | undefine
  */
 /** W1-T5083: a rejection the settle loop treats as lane-local (it logs and the pass continues). */
 function refillLaneLocalRejection(err: unknown): boolean {
-  return transientGhDispatchFailure(err) === undefined && !isSpawnInfraBlocked(err) && ghLaneReadFailure(err) !== undefined;
+  if (transientGhDispatchFailure(err) !== undefined || isSpawnInfraBlocked(err)) return false;
+  // W1-T5344: one task's delivery failure is lane-local too — it parks that task, never its siblings.
+  return ghLaneReadFailure(err) !== undefined || laneDeliveryFailure(err) !== undefined;
 }
 
 function ghLaneReadFailure(err: unknown): { detail: string } | undefined {
@@ -1574,11 +1639,17 @@ interface InFlightTickerOwner {
   /** W1-T4998: a background sweep still holding the runner a dispatch took over. Whichever of the two
    *  stops first leaves it to the other, so a pass that outlives the dispatch keeps its heartbeat. */
   sweepHold?: Pick<InFlightTickerOwner, "generation" | "headroomSampler" | "sweepRetrigger">;
+  /** W1-T5343: how many dispatch lanes are still in flight. Absent (retro, sweep) reads as none, and so does
+   *  the reader a sweep hold keeps after its dispatch ended: that dispatch's pool had already drained to 0. */
+  lanesInFlight?: () => number;
   ticker?: Promise<void>;
   stop(generation: number): Promise<void>;
 }
 
 let inFlightTickerOwner: InFlightTickerOwner | undefined;
+/** W1-T5343: the ONE review-only pass a paused phase ticker may have running (the W1-T4732 slot
+ *  rule with one slot). Process-wide, so a ticker that stops and a later one cannot hold two. */
+let pausedReviewPass: Promise<void> | undefined;
 /** Process-wide, so a generation handed back to a sweep's hold is never issued to a later holder. */
 let inFlightTickerGenerations = 0;
 
@@ -1604,6 +1675,7 @@ function startInFlightTicker(
   headroomSampler?: { lastSampleMs: number; clock: Clock; policy: HeadroomPolicy; enforced: boolean },
 ): { stop: () => Promise<void> } {
   const onTick = phase === "dispatch" ? sweepRetrigger?.onDispatchTick : undefined;
+  const lanesInFlight = phase === "dispatch" ? sweepRetrigger?.lanesInFlight : undefined;
   if (!deps.sweepLight && !onTick) return { stop: async () => {} };
   // W1-T3181: dispatch takes over a same-tick retro's ONE runner. Incrementing the generation makes
   // the retro's eventual stop inert, so it cannot turn off the dispatch clock after the handoff.
@@ -1618,6 +1690,7 @@ function startInFlightTicker(
     inFlightTickerOwner.headroomSampler = headroomSampler;
     inFlightTickerOwner.sweepRetrigger = sweepRetrigger;
     inFlightTickerOwner.onTick = onTick;
+    inFlightTickerOwner.lanesInFlight = lanesInFlight;
     const generation = (inFlightTickerOwner.generation = ++inFlightTickerGenerations);
     const owner = inFlightTickerOwner;
     return { stop: () => owner.stop(generation) };
@@ -1629,6 +1702,7 @@ function startInFlightTicker(
     headroomSampler,
     sweepRetrigger,
     onTick,
+    lanesInFlight,
     stop: async (generation) => {
       if (inFlightTickerOwner !== owner) return;
       const hold = owner.sweepHold;
@@ -1809,12 +1883,42 @@ function startInFlightTicker(
               }
             }
           }
-          // W1-T4191: the light pass can admit fix and review workers, so an operator PAUSE withholds it
-          // while the batch drains. Withheld, never aborted: work already in flight finishes. STOP is not
-          // read here: it ends the daemon on its own, and fixtures bound this loop with it.
+          // W1-T4191: the light pass can admit fix and review workers, so an operator PAUSE withholds the
+          // ORDINARY pass while the batch drains. Withheld, never aborted: work already in flight finishes.
+          // STOP is read only under PAUSE: it ends the daemon on its own, and fixtures bound this loop with it.
           const lightHalt = deps.checkPause?.();
           if (lightHalt) {
-            log("daemon.sweep_light.held", { phase: owner.phase, detail: lightHalt });
+            // W1-T5343: a pause stops new work, never the judging of finished work (W1-T4429 design iii), and
+            // 11 dispatch-phase pauses once held ~210 min with 0 reviews. So run ONE review-only pass at a time,
+            // which closes the fix rung, requeue and update-branch W1-T4191 needed closed, and only while a
+            // lane is in flight: one admitted after the lanes drain could stretch a recycle's wait. STOP wins.
+            // `daemon.sweep_light.held` keeps meaning "nothing ran" and names which guard held it.
+            const stopped = deps.checkStop?.();
+            const heldBy = stopped
+              ? "stop"
+              : !deps.sweepLight
+                ? "no_light_pass"
+                : pausedReviewPass
+                  ? "review_in_flight"
+                  : (owner.lanesInFlight?.() ?? 0) === 0
+                    ? "no_lane"
+                    : undefined;
+            if (heldBy) {
+              log("daemon.sweep_light.held", { phase: owner.phase, detail: stopped ?? lightHalt, reason: heldBy });
+              continue;
+            }
+            log("daemon.sweep_light.review_only", { phase: owner.phase, detail: lightHalt });
+            const pass = (async () => {
+              try {
+                await deps.sweepLight!({ reviewOnly: true });
+              } catch (e) {
+                log("daemon.sweep_light.failed", { phase: owner.phase, review_only: true, error: String((e as Error)?.message ?? e) });
+              }
+            })();
+            pausedReviewPass = pass;
+            void pass.finally(() => {
+              if (pausedReviewPass === pass) pausedReviewPass = undefined;
+            });
             continue;
           }
           try {
@@ -1835,6 +1939,8 @@ function startInFlightTicker(
  *  re-derive "elapsed since last pass" from its own private zero (W1-T1272). */
 interface SweepRetrigger {
   onDispatchTick?: () => void;
+  /** W1-T5343: the dispatch phase's live lane count, set per dispatch like `onDispatchTick` and read only there. */
+  lanesInFlight?: () => number;
   /** Mirrors `DaemonOpts.sweepWallClockBoundMs` — the SAME bound the top-of-iteration call uses. */
   sweepWallClockBoundMs: number;
   /** `DaemonOpts.sweepRetriggerIntervalMs` (resolved), the minimum gap between two retriggers. */
@@ -2315,26 +2421,27 @@ export function runLanePool<T extends { id: string }, R>(
   tasks: T[],
   run: (id: string) => Promise<R>,
   refill: (lane: number, finished: T, outcome: PromiseSettledResult<R>) => T | undefined,
+  // W1-T5343: a live view of the count, read by the phase ticker. Optional and trailing.
+  lanes: { inFlight: number } = { inFlight: 0 },
 ): Promise<PromiseSettledResult<R>[]> {
   const settled: PromiseSettledResult<R>[] = [];
   const firstWave = tasks.map((t) => run(t.id));
-  let inFlight = 0;
   return new Promise((resolve) => {
     if (tasks.length === 0) resolve(settled);
     const start = (i: number, lane: number, p: Promise<R>): void => {
-      inFlight++;
+      lanes.inFlight++;
       p.then(
         (value): PromiseSettledResult<R> => ({ status: "fulfilled", value }),
         (reason: unknown): PromiseSettledResult<R> => ({ status: "rejected", reason }),
       ).then((outcome) => {
         settled[i] = outcome;
-        inFlight--;
-        const next = inFlight > 0 ? refill(lane, tasks[i], outcome) : undefined;
+        lanes.inFlight--;
+        const next = lanes.inFlight > 0 ? refill(lane, tasks[i], outcome) : undefined;
         if (next) {
           tasks.push(next);
           start(tasks.length - 1, lane, (async () => run(next.id))());
         }
-        if (inFlight === 0) resolve(settled);
+        if (lanes.inFlight === 0) resolve(settled);
       });
     };
     firstWave.forEach((p, i) => start(i, i, p));
@@ -2565,9 +2672,11 @@ export async function runDaemon(
   // `priorStaleReviewerRecurrenceState`'s own doc) so a restart already requested for a sha
   // survives the very process replacement it caused (design v); updated once per tick below from
   // that tick's own `sweepCycleOutcome.reviewerCodeStale` reading.
-  let staleReviewerRecurrence: StaleReviewerRecurrenceState | undefined = priorStaleReviewerRecurrenceState(
-    deps.readLedgerLines?.() ?? [],
-  );
+  const bootLedgerLines = deps.readLedgerLines?.() ?? [];
+  let staleReviewerRecurrence: StaleReviewerRecurrenceState | undefined = priorStaleReviewerRecurrenceState(bootLedgerLines);
+  // W1-T5344: per-task delivery-failure parks, rebuilt from the ledger so a restart does not reset
+  // them; consulted by the dispatch filter's independent-failure hold below.
+  const laneDeliveryParks = priorLaneDeliveryParks(bootLedgerLines);
   // Needs-human escalation dedup for the same recurrence, keyed on sha so a sustained pin notifies
   // once rather than once per tick, mirroring `starvationEscalated`'s own discipline.
   let staleReviewerNeedsHumanSha: string | undefined;
@@ -2980,6 +3089,21 @@ export async function runDaemon(
     const reason = `fleet ${hold.control} hold: ${hold.detail}`;
     log("daemon.admission_held", { surface, control: hold.control, detail: hold.detail, reason });
     return { ...hold, reason };
+  };
+
+  // W1-T5344: is this task inside its delivery-failure park? A revised shard (a new pre-dispatch
+  // contract revision) clears the park — the operator's fix is the one thing worth retrying at once.
+  // A merge needs no arm here: the already-merged filter runs before this hold is ever consulted.
+  const laneDeliveryParked = (taskId: string): boolean => {
+    const park = laneDeliveryParks.get(taskId);
+    if (park === undefined) return false;
+    const current = plan.byId.get(taskId);
+    if (current !== undefined && park.revision !== undefined && preDispatchContractRevision(current) !== park.revision) {
+      laneDeliveryParks.delete(taskId);
+      log("daemon.lane_park_cleared", { task: taskId, reason: "shard revised", consecutive: park.consecutive });
+      return false;
+    }
+    return daemonClock.now() < park.parkedUntilMs;
   };
 
   // Shared by the top of tick and a lane refill (W1-T4416).
@@ -4137,7 +4261,7 @@ export async function runDaemon(
         const heldInProcess =
           independentFailureBlocksThisRun.has(taskId) ||
           (environmentalAt !== undefined && daemonClock.now() - environmentalAt < ENVIRONMENTAL_BLOCK_COOLDOWN_MS);
-        return heldInProcess || deps.isIndependentFailureBlocked?.(taskId) === true;
+        return heldInProcess || laneDeliveryParked(taskId) || deps.isIndependentFailureBlocked?.(taskId) === true;
       },
       isTerminalPreDispatchRefusalHeld: (task) =>
         terminalPreDispatchRefusalRevisions.get(task.id) === preDispatchContractRevision(task),
@@ -4640,8 +4764,10 @@ export async function runDaemon(
       }
     } : undefined;
     sweepRetrigger.onDispatchTick = onDispatchTick;
+    const lanes = { inFlight: 0 };
+    sweepRetrigger.lanesInFlight = () => lanes.inFlight;
     const stopTicker = startInFlightTicker(deps, pollIntervalMs, log, "dispatch", diskHeadroomLatch, sweepRetrigger, headroomSampler).stop;
-    const settled = await runLanePool(admitted, (id) => deps.runOne(id), refillLane);
+    const settled = await runLanePool(admitted, (id) => deps.runOne(id), refillLane, lanes);
     // The settled counterpart to the concurrent-set row. Emitted BEFORE the ticker stop and the
     // classification loop, because that loop's fatal path returns and the stop is itself awaited work that
     // could throw, so anything later would be lost in exactly the failure cases this row reports.
@@ -4686,6 +4812,32 @@ export async function runDaemon(
         // (test/daemon.test.ts "W1-T3165 ... remain fatal"). A WRITE failure — a create, a merge, a
         // comment — keeps today's fatal behaviour unchanged (design iii).
         const ghRead = !spawnInfra && transientTransport === undefined ? ghLaneReadFailure(err) : undefined;
+        // W1-T5344: ONE TASK'S DELIVERY FAILURE ENDS ITS LANE, NOT THE DAEMON. A spawned command's
+        // `Command failed: ` (a pre-push or commit-hook refusal, a PR-create 422 — the shape
+        // PER_TASK_FAILURE_RE already called per-task at exit) or a PrOpenRefusedError ended the whole
+        // process: 53 avoidable boots in 8 days, the same task re-dispatched by each next boot. Checked
+        // after the transient/spawn-infra/read arms so it never shadows their richer handling; an
+        // unprefixed throw (rmd's own TypeError) still reaches `fatalError` and still exits 1.
+        const delivery =
+          !spawnInfra && transientTransport === undefined && ghRead === undefined ? laneDeliveryFailure(err) : undefined;
+        if (delivery !== undefined) {
+          const prior = laneDeliveryParks.get(t.id);
+          const revision = preDispatchContractRevision(t);
+          const consecutive = prior !== undefined && prior.revision === revision ? prior.consecutive + 1 : 1;
+          const backoffMs = laneDeliveryBackoffMs(consecutive);
+          const parkedUntilMs = daemonClock.now() + backoffMs;
+          laneDeliveryParks.set(t.id, { consecutive, parkedUntilMs, revision });
+          log("daemon.lane_failed", {
+            task: t.id,
+            class: delivery.failureClass,
+            error: delivery.firstLine,
+            consecutive,
+            backoff_ms: backoffMs,
+            parked_until_ms: parkedUntilMs,
+            revision,
+          });
+          continue;
+        }
         if (!spawnInfra && transientTransport === undefined && ghRead === undefined) {
           // First observed wins the summary detail, mirroring `runDrainLanes`' identical choice. Every other
           // already-settled lane is still classified and processed before this tick returns.
@@ -4724,6 +4876,7 @@ export async function runDaemon(
       }
       const result = outcome.value;
       costUsd += result.costUsd;
+      laneDeliveryParks.delete(t.id); // W1-T5344: a settled run ends this task's delivery-failure streak
       toProcess.push({ task: t, result, snapshot: snapshots[i] });
     }
 

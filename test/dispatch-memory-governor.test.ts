@@ -70,15 +70,16 @@ test("W1-T1038: an unreadable memory probe permits dispatch", () => {
   assert.equal(verdict, undefined, "an unreadable memory probe must PERMIT this dispatch, never refuse it");
 });
 
-// ── acceptance: the floor ships disabled so no behaviour changes until an operator sets it ─────
+// ── acceptance: a floor of 0 is inert (W1-T5347 raised the SHIPPED floor — see
+// test/implement-dispatch-holds-on-low-host-memory.test.ts — so this pins the zero floor itself) ─
 
-test("W1-T1038: the memory floor is inert at its shipped default", () => {
-  assert.equal(DEFAULT_SWEEP_POLICY.memoryFloorMib, 0, "the shipped policy row must default to 0 — an inert floor");
+test("W1-T1038: the memory floor is inert at a floor of 0", () => {
+  const inert: SweepPolicy = { ...DEFAULT_SWEEP_POLICY, memoryFloorMib: 0 };
   // MemAvailable can never read below zero, so `< 0` never holds — every plausible reading,
-  // including the pathological "0 MiB available" one, must still admit at the shipped default.
+  // including the pathological "0 MiB available" one, must still admit at a zero floor.
   for (const availableMib of [0, 1, 512, 100_000]) {
-    const result = checkMemoryGovernor(availableMib, DEFAULT_SWEEP_POLICY);
-    assert.equal(result.deferred, false, `availableMib=${availableMib} must not defer at the shipped default`);
+    const result = checkMemoryGovernor(availableMib, inert);
+    assert.equal(result.deferred, false, `availableMib=${availableMib} must not defer at a zero floor`);
   }
 });
 

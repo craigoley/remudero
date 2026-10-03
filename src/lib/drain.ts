@@ -10,7 +10,7 @@
 import type { RunResult } from "./run-result.js";
 import { headroomExhausted, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
-import type { CostGovernorResult, QueueGovernorResult } from "./sweep.js";
+import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
 import { checkDispatchGovernors, governorDeferPayload } from "./dispatch-governor.js";
 import { releasedTaskIds, unmetDependencies, type Plan, type Task } from "./plan.js";
 import {
@@ -854,6 +854,62 @@ export function isWorktreeNodeModulesRefusal(err: unknown): err is { reasonClass
   );
 }
 
+/** W1-T5344 — which kind of per-task DELIVERY failure ended a lane. */
+export type LaneDeliveryFailureClass = "command_failed" | "pr_open_refused";
+
+/** W1-T5344 — a lane's rejection recognised as ONE TASK's delivery failure: its class and the
+ *  first line of its message (the ledger carries no multi-line stderr). */
+export interface LaneDeliveryFailure {
+  failureClass: LaneDeliveryFailureClass;
+  firstLine: string;
+}
+
+/** A SPAWNED command's failure — `execFileSync`'s own message prefix. The daemon's
+ *  `PER_TASK_FAILURE_RE` is this shape behind the `${taskId}: ` the summary adds; the W1-T5344
+ *  suite pins that the two agree. Anchored, case-sensitive and space-terminated on purpose. */
+export const SPAWNED_COMMAND_FAILED_RE = /^Command failed: /;
+
+/** A dead CREDENTIAL is the fleet's failure, not the task's: every lane would hit it next, so it
+ *  keeps today's fatal path (test/daemon.test.ts "W1-T3165 ... auth refusals ... remain fatal"). */
+export const CREDENTIAL_REFUSAL_RE = /Bad credentials|HTTP 401|Authentication failed|could not read Username|Permission denied \(publickey\)/i;
+
+/**
+ * W1-T5344 — ONE TASK'S DELIVERY FAILURE ENDS ITS LANE, NOT THE PROCESS. Measured 2026-09-25..10-02:
+ * 47 daemon boots were exit 76 (pre-push hook refusals, PR-create 422s, commit-hook refusals,
+ * `git rev-parse` fatals) and 6 were exit-1 crashes on `openPullRequestChecked`'s merge-base proof
+ * refusal, and the same task ended the process again on the next boot.
+ *
+ * Two shapes, both PER TASK by construction: a spawned command's failure (`Command failed: `),
+ * and pr-open.ts's `PrOpenRefusedError`, matched by its class name and `refusalClass` tag, never by
+ * its prose — duck-typed like {@link isWorktreeNodeModulesRefusal}, because importing pr-open.ts
+ * here closes a daemon → drain → pr-open → self-sync → daemon ring. NOT matched, so they
+ * stay crashes: an in-process throw (a TypeError is rmd's own defect and recurs on every task,
+ * W1-T2546 criterion 3), a non-Error value, and a credential refusal ({@link CREDENTIAL_REFUSAL_RE}).
+ * Callers check their transient / spawn-infra / read-failure arms FIRST, so this never shadows a
+ * backoff richer than a per-task park. Shared by `runDrainLanes` and the daemon's settle loop so
+ * `rmd drain` and the daemon classify the same rejection the same way.
+ */
+export function laneDeliveryFailure(err: unknown): LaneDeliveryFailure | undefined {
+  if (isPrOpenRefusal(err)) return { failureClass: "pr_open_refused", firstLine: firstLineOf(err.message) };
+  if (!(err instanceof Error) || !SPAWNED_COMMAND_FAILED_RE.test(err.message)) return undefined;
+  const stderr = (err as { stderr?: unknown }).stderr;
+  if (CREDENTIAL_REFUSAL_RE.test(`${err.message}\n${stderr == null ? "" : String(stderr)}`)) return undefined;
+  return { failureClass: "command_failed", firstLine: firstLineOf(err.message) };
+}
+
+function isPrOpenRefusal(err: unknown): err is Error {
+  return (
+    err instanceof Error &&
+    err.name === "PrOpenRefusedError" &&
+    typeof (err as { refusalClass?: unknown }).refusalClass === "string"
+  );
+}
+
+function firstLineOf(message: string): string {
+  const line = message.split("\n", 1)[0] ?? "";
+  return line.length <= 240 ? line : `${line.slice(0, 239)}…`;
+}
+
 /** Verdicts that are NOT `merged` and yet must NOT stop the drain. The header justifies
  *  stop-on-block as "a blocked task's DEPENDENTS would build on missing work", and each member is
  *  here because that justification does not apply to it:
@@ -1205,6 +1261,10 @@ export interface DrainDeps {
    *  and it STOPS the pass outright. Distinct from `openPrCount` below, which only SIZES a pass.
    *  INVARIANT: never consulted from `runSweep` or its deps — drainage must never be gated. Optional. */
   checkQueueGovernor?: () => QueueGovernorResult | undefined;
+  /** W1-T5347 (wiring W1-T1038's `memoryGovernorGateFor`): THE HOST MEMORY FLOOR, a fresh
+   *  `/proc/meminfo` reading per call. Consulted only through `checkDispatchGovernors`, so it holds
+   *  NEW dispatch per lane and a throw fails OPEN there. Never consulted from the sweep. Optional. */
+  checkMemoryGovernor?: () => MemoryGovernorResult | undefined;
   /** W1-T119: true when a task's own GitHub read is INDETERMINATE, re-derived from the SAME
    *  projection `refreshMerged` just built — the same freshness contract as `isOpenPr`. Optional. */
   isIndeterminate?: (taskId: string) => boolean;
@@ -1975,6 +2035,15 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
           continued.push({ taskId: t.id, verdict: outcome.reason.reasonClass });
           continuedIds.add(t.id);
           log("drain.continued", { task: t.id, verdict: outcome.reason.reasonClass, reason: message });
+          continue;
+        }
+        // W1-T5344: one task's delivery failure ends THIS lane only — continued, never re-offered this
+        // drain, never the whole drain's `error` — the same arm, through the same classifier, as the daemon.
+        const delivery = laneDeliveryFailure(outcome.reason);
+        if (delivery) {
+          continued.push({ taskId: t.id, verdict: "lane_failed" });
+          continuedIds.add(t.id);
+          log("drain.lane_failed", { task: t.id, class: delivery.failureClass, error: delivery.firstLine });
           continue;
         }
         log("drain.lane_error", { task: t.id, message });

@@ -7,7 +7,7 @@
   principles: {tdd: strict}
   risk: high
   budget_usd: 15.50
-  files: [src/lib/ci-failure-corpus.ts]
+  files: [src/lib/ci-failure-corpus.ts, test/the-review-failure-corpus-is-unmined.test.ts]
   origin: oper#fleet-health-2026-09-22
   plan_refs: ["W1-T2957", "W1-T4014"]
   priority: 2
@@ -83,11 +83,11 @@
 
   acceptance:
     - claim: "a pure fold reports each worker failure class with how often it was later repaired"
-      proof: "unit test: W1-T4015: the corpus reports recovery per failure class"
+      proof: 'grep: test("W1-T4015: the corpus reports recovery per failure class" in test/the-review-failure-corpus-is-unmined.test.ts'
     - claim: "a failure is paired only with a repair on a later, different head"
-      proof: "unit test: W1-T4015: a repair must land on a new head"
+      proof: 'grep: test("W1-T4015: a repair must land on a new head" in test/the-review-failure-corpus-is-unmined.test.ts'
     - claim: "the largest class is reported sub-classified, never as one undifferentiated rate"
-      proof: "unit test: W1-T4015: the dominant class is not reported undifferentiated"
+      proof: 'grep: test("W1-T4015: the dominant class is not reported undifferentiated" in test/the-review-failure-corpus-is-unmined.test.ts'
   note: |
     reservation hand-off: plan/file-improvement-loops-1790075116 -> plan/file-improvement-loops-1790075116
 

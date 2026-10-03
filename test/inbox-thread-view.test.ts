@@ -41,7 +41,7 @@ function seedInbox(f: Fixture, lane: string, etag = `etag-${lane}`): void {
   try {
     db.exec(`CREATE TABLE IF NOT EXISTS view_body(view TEXT NOT NULL, key TEXT NOT NULL, version INTEGER NOT NULL,
       generation INTEGER NOT NULL, etag TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(view, key)) WITHOUT ROWID;`);
-    const body = { data: { section: "needsYou", items: [{ proposalId: PROPOSAL, summary: "the raw summary", plain: PLAIN, lane }] }, sources: [{ name: "inbox-store:core", asOf: new Date(T0).toISOString(), state: "fresh" }] };
+    const body = { data: { section: "needsYou", items: [{ proposalId: PROPOSAL, summary: "the raw summary", plain: PLAIN, lane }], page: { index: 0, of: 1, total: 1 } }, sources: [{ name: "inbox-store:core", asOf: new Date(T0).toISOString(), state: "fresh" }] };
     db.prepare("INSERT OR REPLACE INTO view_body(view, key, version, generation, etag, body) VALUES('inbox', ?, 1, 1, ?, ?)").run(PAGE_KEY, etag, JSON.stringify(body));
   } finally {
     db.close();

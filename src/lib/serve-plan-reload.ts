@@ -145,6 +145,8 @@ export interface ServePlanReloadOptions {
   offLoop?: (repoDir: string, ref: string) => Promise<PlanRead>;
   clock?: Clock;
   log?: (step: string, extra?: Record<string, unknown>) => void;
+  /** Told of each installed plan, so serve's worker threads load the same commit (E43). */
+  onReloaded?: (ref: string, read: PlanRead) => void;
 }
 
 /**
@@ -173,6 +175,7 @@ export async function reloadServePlan(
     log("serve.plan_quarantined", { ref, ids: read.quarantined.map((q) => q.id), files: read.quarantined.flatMap((q) => q.files) });
   }
   board.plan = read.plan;
+  options.onReloaded?.(ref, read);
   log("serve.plan_reloaded", { ref, tasks: read.plan.tasks.length, elapsedMs: clock.now() - startedAt, gitMs: read.gitMs, parseMs: read.parseMs });
   return true;
 }

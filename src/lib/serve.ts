@@ -154,6 +154,7 @@ import {
 } from "./incident-invariants.js";
 import { checkServiceFreshness } from "./self-sync.js";
 import { reloadServePlan, touchesReloadablePlan } from "./serve-plan-reload.js";
+import { publishThreadPlan } from "./thread-plan.js";
 import { changedPathsSince, serveRestartRelevant, type ChangedPathsRead, type ChangedPathsReader } from "./serve-restart-relevance.js";
 import { buildAccountUsageRoute, type AccountUsageDeps } from "./account-usage.js";
 import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
@@ -2832,7 +2833,7 @@ function assembleServeRoutes(
     buildTaskCardRoute(deps.board),
     // W1-T3352: synchronous read of process-owned state. The server assembly owns refresh and
     // cancellation; this route receives no ledger path or reader capability.
-    buildAnalyticsRoute({ currentSnapshot: currentAnalyticsSnapshot, currentLiveMetrics: deps.liveMetrics, mountsRoot: deps.questionsRoot,
+    buildAnalyticsRoute({ dailyReviewStateDir: dirname(deps.ledgerPath), currentSnapshot: currentAnalyticsSnapshot, currentLiveMetrics: deps.liveMetrics, mountsRoot: deps.questionsRoot,
       currentEvalCardInput: (trialId) => readEvalCardInput(dirname(deps.ledgerPath), trialId) }),
     // W1-T4563: `/` no longer serves a console -- app.remudero.com is the console (DECISIONS
     // 2026-09-16 and 2026-09-26). It says what this surface is and where to go instead.
@@ -3080,7 +3081,7 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
       viewEventsHandover("recycle");
       return drained.then(() => {});
     },
-    reloadPlan: (ref) => reloadServePlan(deps.board, serveRepoDir(), ref, { log: deps.log }),
+    reloadPlan: (ref) => reloadServePlan(deps.board, serveRepoDir(), ref, { log: deps.log, onReloaded: (at, read) => publishThreadPlan({ path: deps.panelGraph.planPath, repoDir: serveRepoDir(), ref: at }, read, deps.log) }),
     ...(deps.generation ? { requestHandoff: (detail: Record<string, unknown>) => deps.generation?.requestHandoff(detail) } : {}),
     ...deps.staleExitSeams,
   });
