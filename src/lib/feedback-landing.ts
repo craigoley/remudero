@@ -155,6 +155,7 @@ export interface LandFeedbackOpts {
   requestReview?: LandingReviewRequest;
   log?: (step: string, extra?: Record<string, unknown>) => void;
   planPrPreflight?: (commitSha: string, pr: { title: string; body: string }) => PlanPrPreflightResult;
+  preflight?: "skip-request-path";
 }
 
 export interface LandFeedbackResult {
@@ -881,10 +882,15 @@ function finishLanding(
     // value the union above was read against. The #954 guard below must move WITH this call on
     // any future refactor — dropping it silently reopens the hole #954 closed.
     assertLiveWriteAllowed("git-push", `force-pushing the ${kind.branch} branch`);
-    const preflight = opts.planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommit(root, sha, pr));
-    const verdict = refusedPlanPrTrees.get(b.treeSha) ?? preflight(commitSha, { title: kind.prTitle, body: bodyOf(b) });
-    if (!verdict.ok) refusedPlanPrTrees.set(b.treeSha, verdict);
-    refuseRedPlanPr(verdict, { lane: `${kind.family}-landing`, branch: kind.branch, log: opts.log });
+    const lane = `${kind.family}-landing`;
+    if (opts.preflight === "skip-request-path") {
+      opts.log?.("plan_pr.preflight_skipped", { lane, branch: kind.branch, reason: "request-path" });
+    } else {
+      const preflight = opts.planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommit(root, sha, pr));
+      const verdict = refusedPlanPrTrees.get(b.treeSha) ?? preflight(commitSha, { title: kind.prTitle, body: bodyOf(b) });
+      if (!verdict.ok) refusedPlanPrTrees.set(b.treeSha, verdict);
+      refuseRedPlanPr(verdict, { lane, branch: kind.branch, log: opts.log });
+    }
     const lease = b.branchTipSha
       ? `--force-with-lease=refs/heads/${kind.branch}:${b.branchTipSha}`
       : `--force-with-lease=refs/heads/${kind.branch}:`;
