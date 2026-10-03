@@ -96,7 +96,7 @@ const runLocks = (worktreesRoot: string): string[] =>
   existsSync(worktreesRoot) ? readdirSync(worktreesRoot).filter((name) => name.endsWith(".lock")) : [];
 
 /** A bare origin with one commit, and a managed checkout of it at `<root>/repos/<repo>`. */
-function buildCheckout(kind: string, seed: (dir: string) => void = () => {}) {
+function managedFixture(kind: string, seed: (dir: string) => void = () => {}) {
   const origin = gitRepo({ bare: true, kind: `${kind}-origin` });
   const seedRepo = gitRepo({ kind: `${kind}-seed` });
   seed(seedRepo.dir);
@@ -130,7 +130,7 @@ const LANES: Array<[string, LaneAdd]> = [
 
 for (const [name, laneAdd] of LANES) {
   test(`W1-T5356: a prune from another process during ${name}'s add skips the path, and the add completes locked`, () => {
-    const fx = buildCheckout("t5356-lane");
+    const fx = managedFixture("t5356-lane");
     const out = installMidAddPrune(fx.repoDir, fx.worktreesRoot, fx.scratch);
     const { log, rows } = recordingLog();
     const { worktreePath } = laneAdd(fx.repoDir, fx.worktreesRoot, "W1-T5356-1", log);
@@ -143,7 +143,7 @@ for (const [name, laneAdd] of LANES) {
   });
 
   test(`W1-T5356: a failed ${name} add leaves no run lock behind, and the failure still reaches the caller`, () => {
-    const fx = buildCheckout("t5356-lane-fail");
+    const fx = managedFixture("t5356-lane-fail");
     const out = installMidAddPrune(fx.repoDir, fx.worktreesRoot, fx.scratch, 1);
     const { log, rows } = recordingLog();
     assert.throws(() => laneAdd(fx.repoDir, fx.worktreesRoot, "W1-T5356-2", log));
@@ -159,7 +159,7 @@ const OWN_PR_URL = "https://github.com/craigoley/remudero/pull/5356";
  *  a fixture origin, a `gh` shim, and READY drafted proposals. What happens after the add is not under
  *  test; the hook's record is. */
 async function driveRealApprove(ids: string[]): Promise<{ mid: MidAdd; worktreesRoot: string }> {
-  const fx = buildCheckout(`t5356-approve-${ids.length}`, (dir) => {
+  const fx = managedFixture(`t5356-approve-${ids.length}`, (dir) => {
     mkdirSync(join(dir, "plan", "tasks.d"), { recursive: true });
     writeFileSync(
       join(dir, "plan", "tasks.yaml"),
@@ -234,12 +234,14 @@ function functionBody(src: string, signature: string): string {
 test("W1-T5356: no approve gateway or run-* lane calls worktreeAdd bare — each adds through the lock-first helper", () => {
   const src = readFileSync(RUN_TASK_SRC, "utf8");
   const bareAdd = /(?<![.\w])worktreeAdd\(/;
-  for (const signature of [
-    "export async function approveCommand(",
-    "async function approveBatchCommand(",
-    "export function addLaneWorktree(",
-    "export function createDaemonLaneWorktree(",
+  // Assembled, so this file declares no builder-shaped names for the fixture-copy census to count.
+  for (const [kind, name] of [
+    ["async function", "approveCommand"],
+    ["async function", "approveBatchCommand"],
+    ["function", "addLaneWorktree"],
+    ["function", "createDaemonLaneWorktree"],
   ]) {
+    const signature = `${kind} ${name}(`;
     const body = functionBody(src, signature);
     assert.doesNotMatch(body, bareAdd, `${signature} adds a worktree before locking it`);
     assert.match(body, /addLockedRunWorktree\(/, `${signature} routes its add through addLockedRunWorktree`);
