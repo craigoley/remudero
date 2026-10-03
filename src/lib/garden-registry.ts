@@ -188,11 +188,11 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
  * at ~8 GB). On 2026-10-02 (research/loop-stall.md §1a) backlog reached 1.75 GB RSS + 2.0 GB swap and ci-friction
  * 2.4 GB RSS + 1.25 GB swap, both holding the 1.37 GB ledger union as objects, and the daemon spent 38% of its
  * main-thread samples on swap-in. The PRIMARY CONTROL is each garden reading only the steps it needs (W1-T5363,
- * W1-T5364); a garden that outgrows this fails its own pass. MEASURED 2026-10-03: config-gardener's unfiltered 60-day
- * union read peaks at 3,163 MB of heap (2.85M rows) and dies under a 1,536 MB cap, so this sits above it. Drop it to
- * 2048 once that read is filtered by step.
+ * W1-T5364, W1-T5474); a garden that outgrows this fails its own pass. W1-T5474 filtered the last unfiltered reader,
+ * config-gardener's 60-day union read (3,163 MB of heap over 2.85M rows, dead under a 1,536 MB cap), to the steps it
+ * prices: MEASURED 2026-10-03 on the live corpus, 79,826 rows at a 211 MB heap peak, so 2048 MB holds it with room.
  */
-export const GARDEN_CHILD_HEAP_LIMIT_MB = 4096;
+export const GARDEN_CHILD_HEAP_LIMIT_MB = 2048;
 
 /** A garden child's CPU niceness: a heavy pass yields the CPU to the daemon instead of competing on equal terms. */
 export const GARDEN_CHILD_NICENESS = 10;
