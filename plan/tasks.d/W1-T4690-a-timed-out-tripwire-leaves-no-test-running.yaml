@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-defects-1790600000"
   plan_refs: [W1-T4472]
   files: [.github/workflows/main-tripwire.yml, test/every-merge-to-main-gets-a-fast-verdict.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-28 (throwaway run on the Linux fleet host of the #7589 run step, fake node on PATH): at a 65 s budget

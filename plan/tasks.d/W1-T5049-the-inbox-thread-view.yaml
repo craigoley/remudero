@@ -15,7 +15,7 @@
     - src/lib/inbox-thread-view.ts
     - test/inbox-thread-view.test.ts
     - src/lib/read-model-worker.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-01 (Phase 4 gentle probe, host): /v1/inbox/threads answered in 15,209 ms cold, and the

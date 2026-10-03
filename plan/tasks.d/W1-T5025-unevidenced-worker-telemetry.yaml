@@ -10,7 +10,7 @@
   risk: low
   origin: "operator-approved Orca comparison, 2026-09-30"
   files: [src/lib/status.ts, test/status.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at c94c2bf49: status keeps the running status word for a run backed by an open PR, even when
