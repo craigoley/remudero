@@ -5,7 +5,9 @@
   type: implement
   verify: auto
   risk: medium
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=3c3c3e63206b3d07
   attempts: 0
   files:
     - scripts/diff-class.mjs
