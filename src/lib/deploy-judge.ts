@@ -386,6 +386,9 @@ export function decideFreshnessRestart(input: {
   state: DeployRestartPressureState;
   threshold?: RecordedDeployRestartThreshold;
   ageHorizonMs?: number;
+  /** W1-T5476 — terminal verdicts the reviewer withheld for stale reviewer code since the stale reading.
+   *  Above 0 the review lane is stalled on exactly this lag, so it adds a full threshold of pressure. */
+  withheldReviews?: number;
 }): FreshnessDecision {
   const threshold = input.threshold ?? DEPLOY_RESTART_SCORE_THRESHOLD;
   const horizonMs = input.ageHorizonMs ?? DEPLOY_RESTART_RATE_CEILING_MS;
@@ -397,10 +400,24 @@ export function decideFreshnessRestart(input: {
   });
   const weight = input.changes === undefined ? Math.max(scored.total, threshold.value) : scored.total;
   const agePressure = Math.floor((threshold.value * Math.max(0, input.nowMs - input.staleSinceMs)) / horizonMs);
-  const pressure = weight + agePressure;
+  const withheld = input.withheldReviews ?? 0;
+  const withheldPressure = withheld > 0 ? threshold.value : 0;
+  const pressure = weight + agePressure + withheldPressure;
   const state = { total: weight, scoredShas: scored.state.scoredShas };
   if (!input.busy) {
     return { action: "restart", reason: "idle: nothing in flight, so the restart costs only a boot", weight, agePressure, pressure, state };
+  }
+  if (withheldPressure > 0) {
+    return {
+      action: "restart",
+      reason:
+        `busy, but ${withheld} review(s) withheld for stale reviewer code: pressure ${pressure} ` +
+        `(change ${weight} + staleness ${agePressure} + withheld ${withheldPressure}) >= ${threshold.value}: drain and restart`,
+      weight,
+      agePressure,
+      pressure,
+      state,
+    };
   }
   if (pressure >= threshold.value) {
     return {
