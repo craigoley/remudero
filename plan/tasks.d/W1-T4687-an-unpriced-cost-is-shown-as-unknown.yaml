@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-defects-1790600000"
   plan_refs: [W1-T4066]
   files: [src/lib/usage-telemetry.ts, src/lib/analytics-route.ts, src/lib/analytics-timeseries.ts, src/lib/sweep.ts, src/run-task.ts, test/an-unpriced-cost-is-shown-as-unknown.test.ts, test/the-usage-projection-shows-burn-and-routing.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-28: missing total_cost_usd reads as 0 in src/lib/usage-telemetry.ts ~446 and
