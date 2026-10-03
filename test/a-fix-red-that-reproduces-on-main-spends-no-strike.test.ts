@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../src/lib/config.js";
+import { fixedClock } from "../src/lib/clock.js";
+import { gitRepo } from "./helpers/git-repo.js";
 import {
   baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey,
   strikesToRefund, type BaseProbeFile,
@@ -261,7 +262,7 @@ function probeHarness(t: TestContext, over: Parameters<typeof buildBaseReproduct
   const probe = buildBaseReproductionProbe({ root } as Config, join(root, "repo"), join(root, "ledger.ndjson"),
     (step, extra) => { logs.push({ step, ...extra }); }, {
       git: async (args) => { calls.push(args); }, link: () => "linked", readFile: async () => "test file",
-      readLedger: () => [], execute, timeout: () => 60_000, now: () => NOW, ...over,
+      readLedger: () => [], execute, timeout: () => 60_000, clock: fixedClock(NOW), ...over,
     });
   return { root, probe, calls, logs };
 }
@@ -358,7 +359,9 @@ test("W1-T5528: a failed queue read preserves its error and allows the next prob
 test("W1-T5528: default production probing executes real passing and failing tests at a detached tip", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "rmd-real-base-probe-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const repo = join(root, "repo");
+  const fixture = gitRepo({ kind: "real-base-probe", seedCommit: false });
+  t.after(() => fixture.cleanup());
+  const repo = fixture.dir;
   mkdirSync(join(repo, "test", "setup"), { recursive: true });
   for (const file of ["package.json", "package-lock.json"]) writeFileSync(join(repo, file), readFileSync(join(process.cwd(), file)));
   symlinkSync(join(process.cwd(), "node_modules"), join(repo, "node_modules"), "dir");
@@ -366,11 +369,9 @@ test("W1-T5528: default production probing executes real passing and failing tes
   writeFileSync(join(repo, "test/pass.test.ts"), 'import test from "node:test"; import assert from "node:assert/strict"; test("pass", () => assert.equal(1, 1));\n');
   writeFileSync(join(repo, "test/fail.test.ts"), 'import test from "node:test"; import assert from "node:assert/strict"; test("fail", () => assert.equal(1, 2));\n');
   writeFileSync(join(repo, "test/broken.test.ts"), 'import "./missing-module.js";\n');
-  const git = (args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: "pipe" }).trim();
-  git(["init"]);
-  git(["add", "package.json", "package-lock.json", "test"]);
-  git(["-c", "user.name=fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "fixture"]);
-  const sha = git(["log", "-1", "--format=%H"]);
+  fixture.git("add", "package.json", "package-lock.json", "test");
+  fixture.git("commit", "-m", "fixture");
+  const sha = fixture.git("log", "-1", "--format=%H");
   const probe = buildBaseReproductionProbe({ root } as Config, repo, join(root, "ledger.ndjson"), () => {});
   const result = await probe(redPr(), ["test/pass.test.ts", "test/fail.test.ts", "test/absent.test.ts", "test/broken.test.ts"], sha);
   assert.deepEqual(result.map((file) => file.outcome), ["passes", "fails", "absent", "unrunnable"]);

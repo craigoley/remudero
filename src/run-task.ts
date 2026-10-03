@@ -1919,14 +1919,13 @@ const baseReproductionHostCache = new Map<string, BaseProbeFile>();
 export function buildBaseReproductionProbe(
   config: Config, repoDir: string, ledgerPath: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  deps: {
+  deps: Pick<SweepDeps, "readLedger"> & {
     git?: (args: string[], timeoutMs: number) => Promise<void>;
     link?: typeof linkWorktreeNodeModules;
     readFile?: (path: string) => Promise<unknown>;
-    readLedger?: (path: string) => Array<Record<string, unknown>>;
     execute?: typeof execWhitelistedProofAsync;
     timeout?: () => number;
-    now?: () => number;
+    clock?: Clock;
   } = {},
 ): NonNullable<SweepDeps["reproduceFailingTestsOnMain"]> {
   return (_pr, files, mainSha) => {
@@ -1941,15 +1940,15 @@ export function buildBaseReproductionProbe(
       const missing = files.filter((file) => !results.has(file));
       if (missing.length === 0) return files.map((file) => results.get(file)!);
       const worktreePath = join(worktreesDir(config), `base-repro-${mainSha.slice(0, 12)}`);
-      const now = deps.now ?? Date.now;
-      const started = now();
+      const clock = deps.clock ?? systemClock;
+      const started = clock.now();
       let created = false;
       let timeoutMs: number | undefined;
       const git = deps.git ?? (async (args: string[], timeout: number) => {
         await baseReproductionExecFile("git", args, { timeout, killSignal: "SIGKILL", maxBuffer: 1 << 26 });
       });
       const unreadable = (file: string, detail: { reason: string }): BaseProbeFile =>
-        ({ file, outcome: "unrunnable", duration_ms: now() - started, cached: false, ...detail });
+        ({ file, outcome: "unrunnable", duration_ms: clock.now() - started, cached: false, ...detail });
       try {
         timeoutMs = checkProofTimeoutMs(deps.timeout);
         await mkdirAsync(worktreesDir(config), { recursive: true });
@@ -1962,12 +1961,12 @@ export function buildBaseReproductionProbe(
         const read = deps.readFile ?? readFileAsync;
         await read(join(worktreePath, "node_modules", "tsx", "package.json"));
         for (const file of missing) {
-          const fileStarted = now();
+          const fileStarted = clock.now();
           try {
             await read(join(worktreePath, file));
           } catch (error) {
             results.set(file, (error as NodeJS.ErrnoException)?.code === "ENOENT"
-              ? { file, outcome: "absent", duration_ms: now() - fileStarted, cached: false }
+              ? { file, outcome: "absent", duration_ms: clock.now() - fileStarted, cached: false }
               : unreadable(file, { reason: String(error) }));
             continue;
           }
@@ -1978,7 +1977,7 @@ export function buildBaseReproductionProbe(
               refreshToolchain: () => { throw new Error("base probe cannot load its toolchain; installing is prohibited"); },
             });
             results.set(file, { file, outcome: outcome === "fail" ? "fails" : outcome === "pass" ? "passes" : "unrunnable",
-              duration_ms: now() - fileStarted, cached: false,
+              duration_ms: clock.now() - fileStarted, cached: false,
               ...(outcome === "no-match" ? { reason: "proof executed no matching test" } : {}) });
           } catch (error) {
             results.set(file, unreadable(file, { reason: String(error) }));
