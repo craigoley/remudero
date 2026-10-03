@@ -19,6 +19,7 @@ import {
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { ghExec, ghJsonAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
+import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { censusSatisfiedTasks } from "../scripts/satisfied-task-census.mjs";
@@ -191,7 +192,7 @@ import { inboxThreadStorePath, ratifyCliGateway } from "./lib/panel-graph.js";
 import { realThreadDecider, registryThreadItems, type ThreadDecisionContext } from "./lib/inbox-responder.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
-import { renderAnchorBlock } from "./lib/compaction.js";
+import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
 import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
 import {
@@ -979,6 +980,7 @@ import { activateBenchmarkPaidPilot, benchmarkPaidPilotCommand } from "./lib/ben
 import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportView, runPairedTrial, sealedPairedAttemptDispatcher,
   type PairedTrialInput } from "./lib/paired-trial.js";
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
+import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
@@ -11202,6 +11204,7 @@ export async function runFixRung(opts: {
         report,
         worktreePath: opts.worktreePath,
         declaredPaths: [...(opts.task.files ?? []), ...offeredCensusBaselines()],
+        acceptance: opts.task.acceptance,
         ...options,
         assignmentId: fixResult.selectionAssignmentId,
         log: deps.log,
@@ -15625,6 +15628,7 @@ export async function repairCensusRefusedPush(input: {
       report: workerTranscript(result),
       worktreePath: cwd,
       declaredPaths: [...(task.files ?? []), ...refusal.offeredBaselines],
+      acceptance: task.acceptance,
       assignmentId: result.selectionAssignmentId,
       log,
       say: input.say,
@@ -17154,6 +17158,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       report: fullText(impl),
       worktreePath,
       declaredPaths: task.files ?? [],
+      acceptance: task.acceptance,
       assignmentId: impl.selectionAssignmentId,
       log,
       say,
@@ -17172,6 +17177,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       task: writerCannotResume(impl.provider ?? implementMount.provider, implementTools) ? task : undefined,
       worktreePath,
       declaredPaths: task.files ?? [],
+      acceptance: task.acceptance,
       assignmentId: impl.selectionAssignmentId,
       log,
       say,
@@ -39463,10 +39469,12 @@ export interface WorkerEditCommit {
   readonly committed: boolean;
   /** The new HEAD sha, present only when `committed`. */
   readonly sha?: string;
-  /** Paths the worker changed that its task did NOT declare. Reported, never staged. */
+  /** Paths outside the declared surface and its allowed exceptions. Reported, never staged. */
   readonly undeclared: readonly string[];
   /** W1-T4450: registered regenerable artifacts staged although undeclared (see commitWorkerEdits). */
   readonly regenerable?: readonly string[];
+  /** W1-T5386: new tests admitted by the task's own title proofs. */
+  readonly proofMatchedTests?: readonly string[];
   /** Why nothing was committed, when `committed` is false. */
   readonly reason?: string;
 }
@@ -39480,7 +39488,8 @@ export interface WorkerEditCommit {
  * being a per-provider exception.
  *
  * STAGES BY EXPLICIT DECLARED PATH, NEVER `git add -A` BARE. `declaredPaths` is the task's own
- * `files:` surface. Anything the worker changed outside it is REPORTED in `undeclared` and left
+ * `files:` surface, plus regenerable artifacts and new tests named by its own title proofs.
+ * Anything else the worker changed is REPORTED in `undeclared` and left
  * uncommitted -- so a worker cannot widen its own blast radius by writing somewhere it never
  * declared, and the caller can escalate loudly instead of discovering it in a diff later. This
  * mirrors plan-architect.ts's existing `add -A -- plan/ MASTER-PLAN.md`, which is already
@@ -39499,6 +39508,7 @@ export function commitWorkerEdits(
   // already declares. A second interface of the same shape is what the Deps-count ratchet
   // exists to prevent, and there is nothing this verb needs that the push verb did not.
   deps: PublishAbandonedFixOwnerAheadDeps = {},
+  acceptance: readonly AcceptanceCriterion[] = [],
 ): WorkerEditCommit {
   const runGit = deps.runGit ?? ((args: string[]) => execFileSync(
     "git",
@@ -39512,7 +39522,8 @@ export function commitWorkerEdits(
     return { committed: false, undeclared: [], reason: "the task declares no files, so there is no surface to stage" };
   }
 
-  const changed = workerChangedPaths(runGit(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]));
+  const status = runGit(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]);
+  const changed = workerChangedPaths(status);
   if (changed.length === 0) return { committed: false, undeclared: [], reason: "the worker changed nothing" };
 
   // W1-T4450: a REGISTERED REGENERABLE ARTIFACT (a gate's own baseline, whose failure message names
@@ -39522,7 +39533,20 @@ export function commitWorkerEdits(
   const regenerable = changed.filter(
     (path) => !pathIsUnderDeclaredSurface(path, declaredPaths) && Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path),
   );
-  const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths) || regenerable.includes(path));
+  const titles = acceptance.flatMap((criterion) => {
+    const proof = parseWhitelistedProof(criterion.proof);
+    return proof?.kind === "test" && proof.nameFiltered ? [proof.label] : [];
+  });
+  const proofMatchedTests = titles.length === 0 ? [] : status.split("\0").filter((entry) =>
+    entry.startsWith("?? ") || entry.startsWith("A  ") || entry.startsWith("AM "),
+  ).map((entry) => entry.slice(3)).filter((path) =>
+    !pathIsUnderDeclaredSurface(path, declaredPaths) && /^test\/.*\.[cm]?[jt]sx?$/.test(path) &&
+    !path.split("/").includes("..") && lstatSync(join(repoDir, path)).isFile() &&
+    runGit(["ls-tree", "--name-only", "HEAD", "--", path]).trim() === "" &&
+    declaresProofTitle(readFileSync(join(repoDir, path), "utf8"), titles),
+  );
+  const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths) ||
+    regenerable.includes(path) || proofMatchedTests.includes(path));
   const undeclared = changed.filter((path) => !declared.includes(path));
   if (declared.length === 0) {
     return { committed: false, undeclared, reason: "every change the worker made is outside its declared files" };
@@ -39535,7 +39559,33 @@ export function commitWorkerEdits(
     sha: runGit(["rev-parse", "HEAD"]).trim(),
     undeclared,
     ...(regenerable.length > 0 ? { regenerable } : {}),
+    ...(proofMatchedTests.length > 0 ? { proofMatchedTests } : {}),
   };
+}
+
+/** Inspect declarations rather than comments or string examples; never execute worker content. */
+function declaresProofTitle(content: string, titles: readonly string[]): boolean {
+  const scanner = createScanner(true, undefined, content);
+  let token = scanner.scan();
+  while (token !== SyntaxKind.EndOfFile) {
+    if (token === SyntaxKind.SlashToken) scanner.reScanSlashToken();
+    if (token === SyntaxKind.Identifier && ["test", "it"].includes(scanner.getTokenValue())) {
+      token = scanner.scan();
+      while (token === SyntaxKind.DotToken) {
+        scanner.scan();
+        if (!["only", "skip", "todo"].includes(scanner.getTokenValue())) break;
+        token = scanner.scan();
+      }
+      if (token === SyntaxKind.OpenParenToken) {
+        token = scanner.scan();
+        if ((token === SyntaxKind.StringLiteral || token === SyntaxKind.NoSubstitutionTemplateLiteral) &&
+            !scanner.isUnterminated() && titles.some((title) => scanner.getTokenValue().includes(title)) &&
+            scanner.scan() === SyntaxKind.CommaToken) return true;
+      }
+    }
+    token = scanner.scan();
+  }
+  return false;
 }
 
 /**
@@ -39558,10 +39608,11 @@ export function commitWorkerEditsWithCensusFix(
   declaredPaths: readonly string[],
   message: string,
   deps: PublishAbandonedFixOwnerAheadDeps & { censusFix?: typeof runCensusFix } = {},
+  acceptance: readonly AcceptanceCriterion[] = [],
 ): WorkerEditCommit & { censusFix: CensusFixResult } {
   const censusFix = deps.censusFix ? deps.censusFix(repoDir) : runCensusFix(repoDir);
   const { censusFix: _injectedCensusFix, ...gitDeps } = deps;
-  return { ...commitWorkerEdits(repoDir, declaredPaths, message, gitDeps), censusFix };
+  return { ...commitWorkerEdits(repoDir, declaredPaths, message, gitDeps, acceptance), censusFix };
 }
 
 /** True when the worktree `runGit` targets is mid-merge (MERGE_HEAD is set). */
@@ -39741,6 +39792,7 @@ export function harnessCommitForShellLessWorker(
     report: string;
     worktreePath: string;
     declaredPaths: readonly string[];
+    acceptance?: readonly AcceptanceCriterion[];
     subjectSource?: "worker-authored" | "re-asked" | "harness-derived";
     derivedCommit?: { subject: string; reason: string };
     /** W1-T4614: the selection assignment of the worker whose edits this commits; its trailer names it. */
@@ -39770,12 +39822,13 @@ export function harnessCommitForShellLessWorker(
     input.assignmentId,
   );
   const subjectSource = asked === undefined ? "harness-derived" : input.subjectSource ?? "worker-authored";
-  const committed = commit(input.worktreePath, input.declaredPaths, message);
+  const committed = commit(input.worktreePath, input.declaredPaths, message, {}, input.acceptance);
   const refusalReason = committed.reason ?? "harness commit refused";
   input.log(committed.committed ? "implement.harness_commit" : "implement.harness_commit_refused", {
     ...(committed.sha ? { sha: committed.sha } : {}),
     subject_source: subjectSource,
     ...(committed.regenerable && committed.regenerable.length > 0 ? { regenerable: committed.regenerable } : {}),
+    ...(committed.proofMatchedTests?.length ? { proofMatchedTests: committed.proofMatchedTests } : {}),
     ...(!committed.committed ? { reason: refusalReason } : {}),
     ...(committed.undeclared.length > 0 ? { undeclared: committed.undeclared } : {}),
   });
@@ -39849,6 +39902,7 @@ export async function resumeForMissingCommitLine(
     task?: Pick<Task, "id" | "title" | "type">;
     worktreePath: string;
     declaredPaths: readonly string[];
+    acceptance?: readonly AcceptanceCriterion[];
     /** W1-T4614: the ORIGINAL worker's assignment — it did the edits; the resume only supplies the line. */
     assignmentId?: string;
     log: (step: string, extra?: Record<string, unknown>) => void;
@@ -39908,6 +39962,7 @@ export async function resumeForMissingCommitLine(
       report: combinedReport,
       worktreePath: input.worktreePath,
       declaredPaths: input.declaredPaths,
+      acceptance: input.acceptance,
       subjectSource: derivedCommit ? "harness-derived" : "re-asked",
       derivedCommit,
       assignmentId: input.assignmentId,
@@ -47079,9 +47134,16 @@ function alertFixPrompt(alert: AlertLaneAlert, taskId: string): string {
     "medium or low, AND outside the gate/containment-critical path set. Make the minimal, correct fix.",
     "",
     "Then, from the working directory:",
-    "- git add the changed files && commit with a concise message;",
+    "- git add the changed files && commit;",
+    // The commit/PR contracts every other worker prompt carries: this lane's PR failed commitlint
+    // AFTER it existed, because the prompt said only "commit with a concise message".
+    ...commitMessageContractLines(),
     "- `git push origin HEAD` (NOT -u);",
-    "- open a PR: `gh pr create --fill --base main`. The PR body MUST include:",
+    "- open a PR with an EXPLICIT title: `gh pr create --title \"type(scope): subject\" --fill --base main`.",
+    "  PR TITLE: a conventional-commit subject of <= 100 characters, written by you — never the",
+    "  title `--fill` derives from the commit or the branch name.",
+    ...bodyVsDiffContractLines(),
+    "  The PR body MUST include:",
     "  - an `Acceptance:` block of `- <claim> | <proof>` bullets covering the fix;",
     `  - \`origin: alert#${alertOriginId(alert)}\` naming this alert's provenance;`,
     `  - as the LAST body line: \`Remudero-Task: ${taskId}\`.`,
@@ -48741,9 +48803,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "benchmark-aa",
-    syntax: "rmd benchmark-aa --trial <manifest.json> [--state-dir <dir>] [--case-files <snapshot.json>] [--out <report.json>] [--no-cohort] [--json] | prospective register --trial <manifest.json> | prospective report --trial-id <id> [--out <report.json>] [--json] | prospective pause --trial-id <id> [--note <text>]",
+    syntax: "rmd benchmark-aa --trial <manifest.json> [--state-dir <dir>] [--case-files <snapshot.json>] [--out <report.json>] [--no-cohort] [--json] | prospective register --trial <manifest.json> | prospective report --trial-id <id> [--out <report.json>] [--json] | prospective pause --trial-id <id> [--note <text>] | readiness --trial-id <id> [--trial <manifest.json>] [--instance-root <name>=<state-dir>]... [--max-pairs <n>] [--out <receipt.json>] [--json]",
     summary: "Report an A/A integrity trial: two labels, one pinned stack, and no winner.",
-    detail: "W1-T4575: reads a public-fixture or explicitly opted-in trial manifest (benchmark-aa-trial-v1) naming one pinned stack (provider, model, effort, harness, prompt, tool, scorer and environment revisions), a strata revision and its tasks. Each task takes one of two labels by a sha256 draw over the trial and task ids, so a retry or a new run never moves it; non-starters and retries stay in the original arm. Reads the three-form ledger union and, unless --no-cohort, the benchmark-cohort-v1 projection, and reports the sample-ratio test against 50/50 (chi-square and exact binomial), assignment-to-terminal-to-verified-outcome joins, per-arm served-model and resource missingness, fallbacks and crossovers, outcome maturity and censoring, and the observed difference with a 95% interval. API cash estimates, subscription notional cost, invoices and unknown cost stay separate; unknown is never zero. It never declares a winner. It writes one dated private report with a privacy-safe benchmark-aa-receipt-v1 to --out (default <state-dir>/benchmark-aa-v1.<trial>.json); a refresh that cannot read its sources keeps that report and marks it stale. It changes no routing, blocks no dispatch, review or merge, and spends nothing. W1-T4647: `prospective register` records a manifest as a prospective A/A under <state-dir>/benchmark-aa-prospective/<trial>/; when normal dispatch admits one of its tasks, the daemon runs two sealed side attempts through the paired-trial seam, labelled with both labels in a seeded order and both on the manifest's one pinned stack, graded by the task's own proofs, never pushed, reviewed or merged, one pair at a time under the per-attempt cap. It is subscription only: an attempt whose billing resolves to api is refused before spawn and recorded, and cash is reported as zero observed. `prospective report` writes the same benchmark-aa-v1 report and receipt from the trial's own ledger, with each attempt as one unit and its graded outcome in place of the case-file join; `prospective pause` stops new pairs. Nothing is read, logged or spawned without a registered trial, and it never activates, resumes or reads the paid pilot.",
+    detail: "W1-T4575: reads a public-fixture or explicitly opted-in trial manifest (benchmark-aa-trial-v1) naming one pinned stack (provider, model, effort, harness, prompt, tool, scorer and environment revisions), a strata revision and its tasks. Each task takes one of two labels by a sha256 draw over the trial and task ids, so a retry or a new run never moves it; non-starters and retries stay in the original arm. Reads the three-form ledger union and, unless --no-cohort, the benchmark-cohort-v1 projection, and reports the sample-ratio test against 50/50 (chi-square and exact binomial), assignment-to-terminal-to-verified-outcome joins, per-arm served-model and resource missingness, fallbacks and crossovers, outcome maturity and censoring, and the observed difference with a 95% interval. API cash estimates, subscription notional cost, invoices and unknown cost stay separate; unknown is never zero. It never declares a winner. It writes one dated private report with a privacy-safe benchmark-aa-receipt-v1 to --out (default <state-dir>/benchmark-aa-v1.<trial>.json); a refresh that cannot read its sources keeps that report and marks it stale. It changes no routing, blocks no dispatch, review or merge, and spends nothing. W1-T4647: `prospective register` records a manifest as a prospective A/A under <state-dir>/benchmark-aa-prospective/<trial>/; when normal dispatch admits one of its tasks, the daemon runs two sealed side attempts through the paired-trial seam, labelled with both labels in a seeded order and both on the manifest's one pinned stack, graded by the task's own proofs, never pushed, reviewed or merged, one pair at a time under the per-attempt cap. It is subscription only: an attempt whose billing resolves to api is refused before spawn and recorded, and cash is reported as zero observed. `prospective report` writes the same benchmark-aa-v1 report and receipt from the trial's own ledger, with each attempt as one unit and its graded outcome in place of the case-file join; `prospective pause` stops new pairs. Nothing is read, logged or spawned without a registered trial, and it never activates, resumes or reads the paid pilot. W1-T5341: `readiness` runs a fresh prospective calibration: it reconciles the trial's registration across every live instance root in the fleet registry (or each --instance-root), refusing an unreadable root or a duplicate trial, derives harness, prompt, tool, scorer and environment pins from this process and refuses any unknown or drifting pin before dispatch, freezes the eligible population once with its denominator and refusals, then runs pending pairs in a seeded order through the same paired seam, never replaying a completed pair. It reports untriggered exclusions, per-arm per-stage missingness, observed cash apart from notional usage (unknown counted, never zero) and source completeness, writes the calibration receipt only when its integrity predicates pass, and otherwise names the next machine-repairable gap and files it once to <state-dir>/benchmark-aa-readiness.follow-ups.ndjson. Subscription only; it holds no dispatch, PR or daemon and never activates the paid pilot.",
   },
   {
     name: "benchmark-paid-pilot",
@@ -49622,6 +49684,19 @@ export function installUnhandledRejectionGuard(deps: UnhandledRejectionGuardDeps
   return true;
 }
 
+/** W1-T5341: the production seams of the fresh calibration driver — the plan's own tasks, the sealed subscription
+ *  dispatcher on the per-attempt cap, the fleet registry's instance roots, and pins derived from this process. */
+export function benchmarkAaReadinessRuntime(stateDir: string, workerAbandonMs?: number) {
+  const config = loadConfig();
+  return { config,
+    runtimePins: () => deriveRuntimePins({ harnessRevision: workerBoundaryStack.harnessRevision, installRoot: resolveInstallRoot(config) }),
+    loadPlanTasks: () => loadPlan(join(repoRoot, "plan", "tasks.yaml")).tasks,
+    dispatcherFor: (task: Task) => sealedPairedAttemptDispatcher({ task, config, repoDir: join(config.root, "repos", task.repo),
+      spawn: benchmarkNonDispatchSpawn("aa-prospective", spawnWorker), maxBudgetUsd: PAIRED_ATTEMPT_MAX_BUDGET_USD,
+      clockBoundMs: workerAbandonMs ?? loadDefaultPolicy().values.workerAbandon }),
+    defaultInstanceRoots: () => registryInstanceRoots(stateDir) };
+}
+
 /**
  * W1-T2893 — every verb's handler, keyed by the same name its COMMANDS entry (above) carries.
  * This IS the dispatch table `main()` used to encode as a 300-line flat if-ladder (`if (cmd ===
@@ -49746,6 +49821,8 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["routing-ab", async (rest) => await routingAbCommand(rest)],
   ["impossible-canary", async (rest) => await impossibleCanaryCommand(rest, (input) => runImpossibleCanary(input))],
   ["benchmark-aa", async (rest) => rest[0] === "prospective" ? await prospectiveAaCommand(rest.slice(1), (input) => runProspectiveAa(input))
+    : rest[0] === "readiness" ? await benchmarkAaReadinessCommand(rest.slice(1),
+      (request) => runBenchmarkAaReadiness({ ...benchmarkAaReadinessRuntime(request.stateDir), ...request }))
     : await benchmarkAaCommand(rest, (input) => buildBenchmarkAaReport(input))],
   ["benchmark-paid-pilot", async (rest) => await benchmarkPaidPilotCommand(rest, (input) => activateBenchmarkPaidPilot(input),
     { pairedReport: pairedPilotReportView })],

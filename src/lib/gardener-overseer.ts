@@ -153,6 +153,7 @@ export interface OverseerState {
   churnEscalated: Record<string, string>;
   lastScorecardAt?: string;
   nextVerdictSequence?: number;
+  pendingTelemetry?: Array<{ step: string; extra: Record<string, unknown> }>;
 }
 
 export function overseerStatePath(stateDir: string): string {
@@ -208,6 +209,7 @@ function readOverseerState(path: string): OverseerState {
       (v.sequence !== undefined && (!Number.isSafeInteger(v.sequence) || (v.sequence as number) < 1))) ||
     (parsed.nextVerdictSequence !== undefined && (!Number.isSafeInteger(parsed.nextVerdictSequence) || (parsed.nextVerdictSequence as number) < 0)) ||
     (parsed.lastScorecardAt !== undefined && !isDate(parsed.lastScorecardAt)) ||
+    (parsed.pendingTelemetry !== undefined && (!Array.isArray(parsed.pendingTelemetry) || parsed.pendingTelemetry.some((t: unknown) => !isRecord(t) || typeof t.step !== "string" || !isRecord(t.extra)))) ||
     Object.values(parsed.prs).some((p) => !isRecord(p) || typeof p.gardener !== "string" || typeof p.actionClass !== "string" ||
       typeof p.url !== "string" || !isDate(p.openedAt) || (p.info !== undefined &&
         (!isRecord(p.info) || !["open", "merged", "closed", "unknown"].includes(String(p.info.state)) ||
@@ -215,6 +217,9 @@ function readOverseerState(path: string): OverseerState {
           (p.info.mergedAt !== undefined && !isDate(p.info.mergedAt)))))
   ) throw new OverseerStateUnreadableError(path, "malformed", "required history fields are missing or invalid");
   const state = parsed as unknown as OverseerState;
+  if (new Set(state.verdicts.map((v) => v.id)).size !== state.verdicts.length) {
+    throw new OverseerStateUnreadableError(path, "malformed", "verdict identities are not unique");
+  }
   const sequences = state.verdicts.map((v) => v.sequence);
   if (sequences.some((n) => n !== undefined) && (sequences.some((n) => n === undefined) ||
     sequences.some((n, i) => i > 0 && n! <= sequences[i - 1]!) ||
@@ -426,22 +431,40 @@ export function runGardenerOverseer(deps: GardenerOverseerPorts): OverseerPass {
   const nowMs = clock.now();
   const statePath = overseerStatePath(deps.stateDir);
   const state = readOverseerState(statePath);
+  const recordTelemetry = (step: string, extra: Record<string, unknown>): void => {
+    (state.pendingTelemetry ??= []).push({ step, extra });
+  };
   // Read every existing handoff before any pass activity can overwrite unreadable evidence.
+  const handoffs = new Map<string, GardenEffect[]>();
   for (const file of (existsSync(deps.stateDir) ? readdirSync(deps.stateDir) : []).filter((f) => f.endsWith("-gardener-effects.json"))) {
-    readGardenEffects(join(deps.stateDir, file));
+    handoffs.set(file.slice(0, -"-gardener-effects.json".length), readGardenEffects(join(deps.stateDir, file)));
   }
   const receipts = new Map<string, { through: number; folded: Set<string> }>();
-  for (const name of new Set(state.verdicts.map((v) => v.gardener))) {
+  const readReceipt = (name: string): void => {
     const garden = readGardenState(gardenStatePath(deps.stateDir, name), []);
     if ((garden.foldedEffectThrough ?? 0) > (state.nextVerdictSequence ?? 0) ||
-      (garden.foldedEffectThrough === undefined && (garden.foldedEffects?.length ?? 0) >= 200 &&
+      (garden.foldedLegacyEffects === undefined && garden.foldedEffectThrough === undefined && (garden.foldedEffects?.length ?? 0) >= 200 &&
       state.verdicts.some((v) => v.gardener === name && !garden.foldedEffects!.includes(v.id)))) {
       throw new OverseerReceiptUnavailableError(gardenStatePath(deps.stateDir, name));
     }
-    receipts.set(name, { through: garden.foldedEffectThrough ?? 0, folded: new Set(garden.foldedEffects ?? []) });
+    receipts.set(name, { through: garden.foldedEffectThrough ?? 0, folded: new Set([...(garden.foldedEffects ?? []), ...(garden.foldedLegacyEffects ?? [])]) });
+  };
+  for (const name of new Set([...state.verdicts.map((v) => v.gardener), ...handoffs.keys()])) {
+    readReceipt(name);
+  }
+  for (const [name, effects] of handoffs) {
+    const receipt = receipts.get(name)!;
+    if (effects.some((e) => !state.verdicts.some((v) => v.gardener === name && v.id === e.id) &&
+      !receipt.folded.has(e.id) && (e.sequence === undefined || e.sequence > receipt.through))) {
+      throw new OverseerReceiptUnavailableError(gardenStatePath(deps.stateDir, name));
+    }
   }
   const rows = deps.readRows();
   const events = groupEvents(rows);
+  for (const [name, list] of events) {
+    if (!receipts.has(name) && list.some((e) => e.kind === "pass" && typeof e.row.pr_url === "string" &&
+      Array.isArray(e.row.acting) && typeof e.row.acting[0] === "string")) readReceipt(name);
+  }
   const diskNames = gardenerNamesOnDisk(deps.stateDir);
   const names = new Set<string>([...events.keys(), ...diskNames]);
   const mtimeOf = deps.stateMtime ?? ((name: string) => {
@@ -538,7 +561,7 @@ export function runGardenerOverseer(deps: GardenerOverseerPorts): OverseerPass {
     const verdict = reading.verdict ?? (reading.before - reading.after > reading.se ? "credit" : reading.after - reading.before > reading.se ? "debit" : undefined);
     if (!verdict) continue;
     issue({ id, gardener: pr.gardener, actionClass: pr.actionClass, verdict, kind: "effect" });
-    deps.log(`${OVERSEER_NAME}.effect_verdict`, { gardener: pr.gardener, class: pr.actionClass, pr_url: pr.url, verdict, before: reading.before, after: reading.after, se: reading.se, ...(reading.reason ? { reason: reading.reason } : {}) });
+    recordTelemetry(`${OVERSEER_NAME}.effect_verdict`, { gardener: pr.gardener, class: pr.actionClass, pr_url: pr.url, verdict, before: reading.before, after: reading.after, se: reading.se, ...(reading.reason ? { reason: reading.reason } : {}) });
   }
 
   // CHURN — near-identical merges from one gardener and class, landing faster than its metric could move.
@@ -560,7 +583,7 @@ export function runGardenerOverseer(deps: GardenerOverseerPorts): OverseerPass {
       if (!hasVerdict(id)) {
         issue({ id, gardener: pr.gardener, actionClass: pr.actionClass, verdict: "debit", kind: "churn" });
         if (run.length === 2) churnEpisodes.set(pr.gardener, (churnEpisodes.get(pr.gardener) ?? 0) + 1);
-        deps.log(`${OVERSEER_NAME}.churn`, { gardener: pr.gardener, class: pr.actionClass, pr_url: pr.url, run: run.length, title: pr.info.title });
+        recordTelemetry(`${OVERSEER_NAME}.churn`, { gardener: pr.gardener, class: pr.actionClass, pr_url: pr.url, run: run.length, title: pr.info.title });
       }
       // The debits were already in effect when this repeat merged, and it landed anyway.
       const head = run[0]!.url;
@@ -571,28 +594,32 @@ export function runGardenerOverseer(deps: GardenerOverseerPorts): OverseerPass {
       if (slowed && !state.churnEscalated[head] && deps.escalate) {
         const issueUrl = deps.escalate(churnEscalation(pr.gardener, pr.actionClass, run));
         state.churnEscalated[head] = clock.iso();
-        deps.log(`${OVERSEER_NAME}.churn_escalated`, { gardener: pr.gardener, class: pr.actionClass, run: run.length, issue_url: issueUrl });
+        recordTelemetry(`${OVERSEER_NAME}.churn_escalated`, { gardener: pr.gardener, class: pr.actionClass, run: run.length, issue_url: issueUrl });
       }
     }
   }
+  if (state.lastScorecardAt === undefined || nowMs - Date.parse(state.lastScorecardAt) >= WEEK_MS) {
+    recordTelemetry(`${OVERSEER_NAME}.scorecard`, scorecardRow(rows, events, state, deps.stateDir, nowMs, churnEpisodes, diskNames));
+    state.lastScorecardAt = clock.iso();
+  }
   for (const name of new Set(state.verdicts.map((v) => v.gardener))) {
+    if (!receipts.has(name)) readReceipt(name);
+  }
+  // Commit identities and telemetry before delivery; a failed handoff retries this same outbox.
+  writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n");
+  for (const name of new Set([...state.verdicts.map((v) => v.gardener), ...handoffs.keys()])) {
     const path = gardenEffectsPath(deps.stateDir, name);
     const receipt = receipts.get(name) ?? { through: 0, folded: new Set<string>() };
     const pending = state.verdicts.filter((v) => v.gardener === name && (v.sequence ?? 0) > receipt.through && !receipt.folded.has(v.id))
-      .map((v): GardenEffect => ({ id: v.id, actionClass: v.actionClass, verdict: v.verdict, kind: v.kind, at: v.at, sequence: v.sequence }));
+      .slice(0, 200).map((v): GardenEffect => ({ id: v.id, actionClass: v.actionClass, verdict: v.verdict, kind: v.kind, at: v.at, sequence: v.sequence }));
     const existing = readGardenEffects(path);
-    const wanted = new Map(pending.map((v) => [v.id, v]));
-    if (wanted.size > 0) {
-      const handoff = [...existing.filter((v) => wanted.has(v.id)).map((v) => wanted.get(v.id)!), ...pending.filter((v) => !existing.some((e) => e.id === v.id))];
-      if (JSON.stringify(existing) !== JSON.stringify(handoff)) writeGardenEffects(path, handoff);
+    if (pending.length > 0) {
+      if (JSON.stringify(existing) !== JSON.stringify(pending)) writeGardenEffects(path, pending);
     } else if (existing.length > 0) rmSync(path);
   }
 
-  // WEEKLY SCORECARD — every gardener seen in the ledger or on disk.
-  if (state.lastScorecardAt === undefined || nowMs - Date.parse(state.lastScorecardAt) >= WEEK_MS) {
-    deps.log(`${OVERSEER_NAME}.scorecard`, scorecardRow(rows, events, state, deps.stateDir, nowMs, churnEpisodes, diskNames));
-    state.lastScorecardAt = clock.iso();
-  }
+  for (const telemetry of state.pendingTelemetry ?? []) deps.log(telemetry.step, telemetry.extra);
+  state.pendingTelemetry = [];
   writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n");
   return { ran: true, gardeners: [...names].sort() };
 }
