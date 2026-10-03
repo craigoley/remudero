@@ -6073,7 +6073,20 @@ function laneWorkKeepReason(config: Config, path: string, branch?: string): Work
   const taskId = [branch ?? "", basename(path)].map((name) => name.match(/^run-(W\d+-T\d+)-\d+$/)?.[1]).find(Boolean);
   if (taskId && present(join(config.root, "state", "inflight", `${taskId}.lock`))) return "inflight-lock";
   if (!present(join(path, ".git"))) return undefined;
-  const unpushed = execFileSync("git", ["-C", path, "rev-list", "--max-count=1", "HEAD", "--not", "--remotes"],
+  const exclusions = ["--remotes"];
+  const remoteRefs = execFileSync("git", ["-C", path, "for-each-ref", "--format=%(refname)", "refs/remotes/"],
+    { encoding: "utf8", stdio: "pipe" });
+  if (!remoteRefs.trim()) {
+    // A remote-less linked lane inherits the primary checkout's history; only lane-only commits protect it.
+    const dirs = execFileSync("git", ["-C", path, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+      { encoding: "utf8", stdio: "pipe" }).trim().split("\n");
+    if (dirs[0] !== dirs[1]) {
+      const parentHead = execFileSync("git", ["--git-dir", dirs[1], "rev-parse", "--verify", "HEAD"],
+        { encoding: "utf8", stdio: "pipe" }).trim();
+      exclusions.push(parentHead);
+    }
+  }
+  const unpushed = execFileSync("git", ["-C", path, "rev-list", "--max-count=1", "HEAD", "--not", ...exclusions],
     { encoding: "utf8", stdio: "pipe" });
   return unpushed.trim() ? "unpushed-commit" : undefined;
 }

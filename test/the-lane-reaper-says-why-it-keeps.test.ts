@@ -56,6 +56,76 @@ function recorder() {
 
 const fullDisk = () => ({ freeBytes: 0, totalBytes: 100 });
 
+test("W1-T4065: a remote-less linked lane reclaims shared history but keeps its own unpushed work", () => {
+  for (const enabled of [false, true]) {
+    const { lanes, config } = fixture();
+    const parent = gitRepo({ branch: "trunk" });
+    const shared = parent.addWorktree(join(lanes, "shared"), "shared");
+    const unpushed = parent.addWorktree(join(lanes, "unpushed"), "unpushed");
+    unpushed.git("commit", "--allow-empty", "-m", "lane-only work");
+    const rec = recorder();
+    const summary = runAdhocLaneReapRung(config, rec.log, {
+      enabled: () => enabled, diskHeadroom: fullDisk,
+      reap: (root, opts) => reapStaleWorktrees(root, {
+        ...opts, newestActivity: () => ({ mtimeMs: 0, complete: true }), branchIsLiveUpstream: () => false,
+      }),
+    });
+    assert.deepEqual(summary?.reaped, ["shared"]);
+    assert.deepEqual(summary?.keptReasons, [{ name: "unpushed", reason: "unpushed-commit" }]);
+    assert.equal(existsSync(shared.dir), !enabled);
+    assert.equal(existsSync(unpushed.dir), true);
+    const registration = parent.git("worktree", "list", "--porcelain");
+    assert.equal(registration.includes(shared.dir), !enabled);
+    assert.doesNotMatch(registration, /^prunable/m);
+    assert.equal(rec.census().reaped.count, 1);
+    assert.ok(rec.census().reaped.bytes > 0);
+    assert.equal(rec.census().kept_by_reason["unpushed-commit"]?.count, 1);
+  }
+});
+
+test("W1-T4065: remote refs keep unpublished shared commits and a primary checkout keeps its own history", () => {
+  for (const remoteRefs of [false, true]) {
+    const { lanes, config } = fixture();
+    const parent = gitRepo();
+    if (remoteRefs) {
+      parent.git("update-ref", "refs/remotes/origin/main", parent.git("rev-parse", "HEAD"));
+      parent.git("commit", "--allow-empty", "-m", "unpublished parent work");
+    }
+    const candidate = remoteRefs ? parent.addWorktree(join(lanes, "candidate"), "candidate") : parent;
+    const rec = recorder();
+    const summary = runAdhocLaneReapRung(config, rec.log, {
+      enabled: () => true, diskHeadroom: fullDisk,
+      reap: (root, opts) => reapStaleWorktrees(root, {
+        ...opts, candidatePaths: [candidate.dir], newestActivity: () => ({ mtimeMs: 0, complete: true }),
+        branchIsLiveUpstream: () => false,
+      }),
+    });
+    assert.deepEqual(summary?.reaped, []);
+    assert.deepEqual(summary?.keptReasons, [{ name: candidate.dir, reason: "unpushed-commit" }]);
+    assert.equal(existsSync(candidate.dir), true);
+    assert.equal(rec.census().kept_by_reason["unpushed-commit"]?.count, 1);
+  }
+});
+
+test("W1-T4065: an unreadable remote-less parent head keeps the lane as undecidable", () => {
+  const { lanes, config } = fixture();
+  const parent = gitRepo();
+  const candidate = parent.addWorktree(join(lanes, "candidate"), "candidate");
+  writeFileSync(join(parent.dir, ".git", "HEAD"), "ref: refs/heads/missing\n");
+  const rec = recorder();
+  const summary = runAdhocLaneReapRung(config, rec.log, {
+    enabled: () => true, diskHeadroom: fullDisk,
+    reap: (root, opts) => reapStaleWorktrees(root, {
+      ...opts, newestActivity: () => ({ mtimeMs: 0, complete: true }), branchIsLiveUpstream: () => false,
+    }),
+  });
+  assert.deepEqual(summary?.reaped, []);
+  assert.deepEqual(summary?.keptReasons, [{ name: "candidate", reason: "work-undecidable" }]);
+  assert.equal(existsSync(candidate.dir), true);
+  assert.equal(rec.census().kept_by_reason["work-undecidable"]?.count, 1);
+  assert.ok(rec.rows.some((row) => row.step === "adhoc_lane.reap.work_undecidable" && row.extra?.error));
+});
+
 test("W1-T4065: every pass census records kept lanes by reason and bytes", () => {
   const { lanes, config } = fixture();
   const alive = lane(lanes, "alive");
