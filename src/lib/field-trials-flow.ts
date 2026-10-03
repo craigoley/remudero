@@ -169,6 +169,8 @@ export interface FieldTrialsLedgerRead {
   malformedRows: number;
   duplicateRows: number;
   futureRows: number;
+  /** Absent in historical v1 snapshots; absence is not a measured zero. */
+  invalidTimestampRows?: number;
   unreadSources: number;
   newestTs: string | null;
   rows: FlowRow[];
@@ -176,7 +178,7 @@ export interface FieldTrialsLedgerRead {
 
 export function unavailableLedger(reason: string): FieldTrialsLedgerRead {
   return { state: "unavailable", reason, forms: { gzip: 0, plain: 0, live: 0 }, malformedRows: 0, duplicateRows: 0, futureRows: 0,
-    unreadSources: 0, newestTs: null, rows: [] };
+    invalidTimestampRows: 0, unreadSources: 0, newestTs: null, rows: [] };
 }
 
 /** The audited three-form union: every form counted, exact replayed lines counted as duplicates once. */
@@ -197,6 +199,7 @@ export async function readFieldTrialsLedger(stateDir: string, nowMs = systemCloc
   let malformedRows = 0;
   let duplicateRows = 0;
   let futureRows = 0;
+  let invalidTimestampRows = 0;
   let unreadSources = 0;
   let newestTs: string | null = null;
   for await (const row of openLedgerUnion(stateDir, {
@@ -209,6 +212,7 @@ export async function readFieldTrialsLedger(stateDir: string, nowMs = systemCloc
       if (seen.has(fingerprint)) { duplicateRows += 1; return; }
       seen.add(fingerprint);
       const ts = iso(accepted.ts);
+      if (ts === null) { invalidTimestampRows += 1; return; }
       // A stray clock-forward row cannot create a future cohort or advance the source watermark.
       if (ts !== null && Date.parse(ts) > nowMs + 5 * 60_000) { futureRows += 1; return; }
       if (ts !== null && (newestTs === null || ts > newestTs)) newestTs = ts;
@@ -216,9 +220,9 @@ export async function readFieldTrialsLedger(stateDir: string, nowMs = systemCloc
     },
   })) void row;
   const partial = unreadSources > 0 ? "ledger-source-unreadable" : malformedRows > 0 ? "ledger-source-malformed"
-    : futureRows > 0 ? "ledger-source-future-dated" : null;
+    : invalidTimestampRows > 0 ? "ledger-source-invalid-timestamp" : futureRows > 0 ? "ledger-source-future-dated" : null;
   return { state: partial ? "observed-partial" : "observed", reason: partial, forms, malformedRows, duplicateRows,
-    futureRows, unreadSources, newestTs, rows };
+    futureRows, invalidTimestampRows, unreadSources, newestTs, rows };
 }
 
 export interface FieldTrialsSource {
@@ -835,7 +839,7 @@ export interface FieldTrialsRelease {
   followUpWindowDays: number;
   sources: { source: string; rights: string; receiptHash: string; publicSourceUrl: string | null;
     ledger: { state: string; reason: string | null; forms: Record<string, number>; malformedRows: number;
-      futureRows: number; unreadSources: number };
+      futureRows: number; invalidTimestampRows?: number; unreadSources: number };
     github: Record<string, { state: string; reason: string | null; asOf: string | null; pagesRead: number } | null> }[];
   withheld: { reason: string; sources: number }[];
   links: { prs: number; matched: number; ambiguous: number; unmatched: number; ledgerPrNotInGithub: number } | null;
@@ -990,6 +994,7 @@ export function buildFieldTrialsRelease(snapshot: FieldTrialsFlowSnapshot, conse
     sources.push({ source: pseudonym(source.label), rights: grant.rights, receiptHash, publicSourceUrl: grant.publicSourceUrl ?? null,
       ledger: { state: source.ledger.state, reason: source.ledger.reason, forms: source.ledger.forms,
         malformedRows: source.ledger.malformedRows, futureRows: source.ledger.futureRows,
+        invalidTimestampRows: source.ledger.invalidTimestampRows,
         unreadSources: source.ledger.unreadSources },
       github: { pulls: cursor(source.github.pulls), commits: cursor(source.github.commits), deployments: cursor(source.github.deployments) } });
   }

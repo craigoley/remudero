@@ -101,12 +101,15 @@ export {
 } from "./github-transport.js";
 import {
   assertWorkerCredentialFile,
+  classifyWorkerCredentialFile,
+  DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS,
   CLAUDE_CONFIG_REL,
   ensureWorkerKeychain,
   materializeSpawnWorkerHome as materializeWorkerHome,
   perRunWorkerHomeDir,
   reapWorkerHome,
   workerCredentialFilePath,
+  workerClaudeCredentialDir,
   workerKeychainPaths,
   type SecurityRunner,
   lostWorkerHomeGrants,
@@ -2883,28 +2886,114 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
 /** The SDK session type a usage probe needs — narrowed to the control request and teardown, so neither this module nor its
  * callers depend on the experimental method's full shape. */
 export interface UsageProbeSession {
-  usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET?: () => Promise<unknown>;
+  initializationResult?: () => Promise<unknown>;
+  usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET?: (options?: { skipBehaviors?: boolean }) => Promise<unknown>;
   return?: (v?: unknown) => Promise<unknown>;
 }
 
 /** The injectable seam a test passes so no test ever reaches the real SDK — the same shape and the same purpose as {@link
  * SpawnWorkerArgs.queryFn}. */
-export type UsageProbeQueryFn = (params: { prompt: AsyncIterable<never> }) => UsageProbeSession;
+export type UsageProbeQueryFn = (params: {
+  prompt: AsyncIterable<never>;
+  options: Pick<Options, "env" | "settingSources">;
+}) => UsageProbeSession;
 
-/** A prompt that yields NOTHING. The control request is answered on session setup, so no user message is ever produced: no
- * prompt sent, no turn spent, no tokens billed. */
-async function* emptyUsagePrompt(): AsyncIterable<never> {}
+/** No user message is produced. Keep streaming stdin open until teardown: EOF tells the SDK to
+ * end input and can stop the CLI while its native OAuth initialization is still running. */
+async function* emptyUsagePrompt(untilClosed: Promise<void>): AsyncIterable<never> {
+  await untilClosed;
+}
+
+/** The bounded wait a usage probe gives the native CLI's credential renewal: the clock it reads, the
+ * sleep it polls with, and its upper bound. ONE shape, shared by {@link openUsageProbeSession}'s
+ * `context.refresh` and the waiter itself, rather than a second inline deps object literal
+ * (scripts/deps-interface-baseline.json holds that population to its ceiling). */
+export interface UsageCredentialRefreshWait {
+  clock?: Clock;
+  sleep?: (ms: number) => Promise<void>;
+  maxWaitMs?: number;
+}
+
+/** Keep a Linux file credential requiring native renewal alive long enough for the native CLI to refresh
+ * it. This observes the CLI's atomic replacement; it never refreshes, copies, or logs a token. */
+async function waitForUsageCredentialRefresh(path: string, wait: UsageCredentialRefreshWait = {}): Promise<void> {
+  const clock = wait.clock ?? systemClock;
+  const read = () => {
+    let raw = "";
+    const verdict = classifyWorkerCredentialFile(() => raw = readFileSync(path, "utf8"));
+    const token = verdict.kind === "usable" ? JSON.parse(raw).claudeAiOauth.refreshToken : undefined;
+    return { ...verdict, refreshable: typeof token === "string" && token.length > 0 };
+  };
+  const initial = read();
+  // Pinned CLI 2.1.284 refreshes at now + 300000 >= expiresAt. Observe that same window,
+  // only when this file has a refresh credential; a valid bare access token cannot rotate.
+  if (initial.kind !== "usable" || !initial.refreshable || initial.expiresAtMs === undefined ||
+      initial.expiresAtMs > clock.now() + DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS) return;
+  const maxWaitMs = wait.maxWaitMs ?? 15_000;
+  if (!Number.isFinite(maxWaitMs) || maxWaitMs < 0) throw new Error("invalid usage credential refresh wait bound");
+  const deadline = clock.now() + maxWaitMs;
+  const sleep = wait.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  for (;;) {
+    const remaining = deadline - clock.now();
+    if (remaining <= 0) throw new Error("usage credential refresh did not complete within its bounded wait");
+    await sleep(Math.min(100, remaining));
+    const current = read();
+    if (current.kind === "unusable") throw new Error(`usage credential refresh became unavailable: ${current.reasonClass}`);
+    if (current.expiresAtMs === undefined) throw new Error("usage credential refresh lost its recorded expiry");
+    if (!current.refreshable) throw new Error("usage credential refresh lost its refresh credential");
+    if (current.expiresAtMs > clock.now() + DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS) return;
+  }
+}
 
 /** Open a control-only SDK session for the usage probe. It lives HERE, in the spawn chokepoint, deliberately:
  * test/spawn-guard.test.ts pins that EXACTLY ONE file imports the SDK's runtime `query` and guards it. STREAMING INPUT IS
  * REQUIRED, NOT PREFERRED — the usage control request is documented "only supported when streaming input/output is used" — so
  * this passes an async generator; converting `spawnWorker` itself is a separate decision (W1-T2516-adjacent). */
-export function openUsageProbeSession(runQuery?: UsageProbeQueryFn): UsageProbeSession {
+export function openUsageProbeSession(
+  runQuery?: UsageProbeQueryFn,
+  context: { realHome?: string; platform?: NodeJS.Platform; refresh?: UsageCredentialRefreshWait } = {},
+): UsageProbeSession {
   // Guarded on the same condition spawnWorker uses: only a REAL session is refused under a test runner. An injected
   // `runQuery` creates no connection and is not what this stops.
   if (runQuery === undefined) assertLiveSpawnAllowed("openUsageProbeSession (SDK usage probe)");
-  const q = runQuery ?? ((p: { prompt: AsyncIterable<never> }) => query(p as never) as unknown as UsageProbeSession);
-  return q({ prompt: emptyUsagePrompt() });
+  const q = runQuery ?? ((p: Parameters<UsageProbeQueryFn>[0]) => query(p as never) as unknown as UsageProbeSession);
+  const options: Pick<Options, "env" | "settingSources"> = { settingSources: [] };
+  // Linux workers consume the narrowed credential grant; capacity must observe that same store.
+  // Darwin continues to use its existing keychain rather than selecting a different config store.
+  if ((context.platform ?? process.platform) !== "darwin") {
+    options.env = {
+      ...process.env,
+      CLAUDE_CONFIG_DIR: workerClaudeCredentialDir(context.realHome ?? homedir()),
+    };
+  }
+  let closeInput!: () => void;
+  const untilClosed = new Promise<void>((resolve) => { closeInput = resolve; });
+  let session: UsageProbeSession;
+  try {
+    session = q({ prompt: emptyUsagePrompt(untilClosed), options });
+  } catch (error) {
+    closeInput();
+    throw error;
+  }
+  let teardown: Promise<unknown> | undefined;
+  const method = session.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
+  return {
+    ...(typeof method === "function" ? {
+      usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => {
+        await session.initializationResult?.();
+        if (options.env && !options.env.CLAUDE_CODE_OAUTH_TOKEN && !options.env.ANTHROPIC_API_KEY) {
+          await waitForUsageCredentialRefresh(join(options.env.CLAUDE_CONFIG_DIR!, ".credentials.json"), context.refresh);
+        }
+        // Only account windows are consumed here. The default also scans seven days of local
+        // transcripts, which adds unrelated filesystem work to every headroom read.
+        return method.call(session, { skipBehaviors: true });
+      },
+    } : {}),
+    return: (value) => {
+      closeInput();
+      return teardown ??= Promise.resolve().then(() => session.return?.(value));
+    },
+  };
 }
 
 /** The 3-value worker activity vocabulary, and no more:

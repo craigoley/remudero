@@ -254,13 +254,20 @@ export function createServeSupervisor(opts: ServeSupervisorOptions): ServeSuperv
     for (;;) {
       if (!generation.isAlive()) return { ok: false, criterion: "exited", detail: last };
       const reply = await get(generation.socketPath, `${SERVE_READY_PATH}?bodies=${bodies}`).catch((err: unknown) => ({ status: 0, body: errorText(err) }));
-      if (reply.status === 200) break;
+      if (reply.status === 200) {
+        const smoke = await smokeFailure(generation);
+        if (!smoke) return { ok: true };
+        // Readiness and the real route are separate reads: a board can become unavailable
+        // between them. Wait within the SAME boot bound; never promote a 503 response.
+        if ((smoke.detail as { status?: number }).status !== 503 || clock.now() >= deadline) return { ok: false, ...smoke };
+        last = smoke;
+        await sleep(pollMs);
+        continue;
+      }
       last = reply.status === 0 ? reply.body : safeJson(reply.body);
       if (clock.now() >= deadline) return { ok: false, criterion: "ready_bound", detail: last };
       await sleep(pollMs);
     }
-    const smoke = await smokeFailure(generation);
-    return smoke ? { ok: false, ...smoke } : { ok: true };
   };
 
   const smokeFailure = async (generation: Generation): Promise<{ criterion: string; detail: unknown } | undefined> => {

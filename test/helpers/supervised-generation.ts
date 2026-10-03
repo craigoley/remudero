@@ -5,7 +5,8 @@
  *
  * argv: <port> <sha> <mode>. Modes: `ok`; `never-ready` (readiness stays 503); `wrong-sha` (ready,
  * but /v1/version reports another build); `crash-after-promote` (dies right after it binds); `status-503`
- * (ready, but /v1/status answers 503 as a warming board does).
+ * (ready, but /v1/status answers 503 as a warming board does); `status-warming`
+ * (the first two real status reads answer 503, then recover).
  */
 import { createServer } from "node:http";
 import { createServeDrain, exitWithin } from "../../src/lib/serve-drain.js";
@@ -17,11 +18,15 @@ const channel = processChannel();
 if (!role || !channel) throw new Error("supervised-generation must be forked by the supervisor");
 
 const serveDrain = createServeDrain({ boundMs: 10_000 });
+let statusReads = 0;
 const server = createServer((req, res) => {
   req.resume();
   req.on("end", () => {
     setTimeout(() => {
-      res.writeHead(mode === "status-503" && req.url === "/v1/status" ? 503 : 200, { "content-type": "application/json", "x-sha": sha });
+      const statusRead = req.url === "/v1/status";
+      if (statusRead) statusReads++;
+      const unavailable = statusRead && (mode === "status-503" || (mode === "status-warming" && statusReads <= 2));
+      res.writeHead(unavailable ? 503 : 200, { "content-type": "application/json", "x-sha": sha });
       res.end(JSON.stringify(req.url === "/v1/version" && mode !== "wrong-sha" ? { sha } : { sha: mode === "wrong-sha" ? "someone-else" : sha, url: req.url }));
     }, 2);
   });

@@ -19,7 +19,7 @@ test("W1-T4433: every census and ratchet suite runs in the rule-checks job", () 
   assert.match(workflow, /name: rule-checks population \(tree-derived census and ratchet suites, without coverage\)/);
   assert.match(workflow, /node --import tsx scripts\/list-rule-suites\.mjs --run/);
   assert.match(workflow, /OUTCOME_RULE_CHECKS: \$\{\{ steps\.rule-checks\.outcome \}\}/);
-  assert.match(workflow, /report "commitlint" "\$\{OUTCOME_COMMITLINT\}" "\$\{OUTCOME_RULE_CHECKS\}"/);
+  assert.match(workflow, /report "commitlint" "commitlint=\$\{OUTCOME_COMMITLINT\}" "rule-checks=\$\{OUTCOME_RULE_CHECKS\}"/);
 });
 
 test("W1-T4433: preflight runs the same rule-check population", () => {

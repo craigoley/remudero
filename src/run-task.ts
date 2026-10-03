@@ -168,7 +168,7 @@ import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { gardenPassDue, runGarden, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./lib/gardener.js";
-import { boundedGardenPassSpawn, childGardenPassSpawn, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { boundedGardenPassSpawn, childGardenPassSpawn, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
@@ -178,7 +178,6 @@ import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
-import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, runSelectorShadowGardener, selectorShadowFlakeLedger } from "./lib/selector-shadow-gardener.js";
 import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, openIncidentFeedbackOrigins, startSreLane } from "./lib/sre-lane.js";
@@ -10137,7 +10136,7 @@ export async function runFixRung(opts: {
     // whose base moved and flipped WHICH check is red, is never told "nothing changed".
     const gateKey =
       currentMergeConflict !== undefined
-        ? `merge-conflict:${(currentMergeConflict.files ?? []).slice().sort().join(",")}`
+        ? `merge-conflict:${JSON.stringify((conflictedFilePaths(currentMergeConflict) ?? []).sort())}`
         : noReviewYet
         ? `ci:${(currentCiFailures ?? []).map((f) => f.name).slice().sort().join(",")}`
         : `review:${visibleCriteria(review.criteria.filter((c) => !c.met))
@@ -29574,12 +29573,29 @@ export function addLaneWorktree(
   try {
     // W1-T2621: thread the caller's own ledger through — `worktreeAdd` now emits the
     // `worktree.add` three-way base reading itself; see its doc in lib/worker.ts.
-    worktreeAdd(repoDir, worktreePath, branch, "origin/main", { log });
+    addLockedRunWorktree(repoDir, worktreePath, branch, "origin/main", runId, log);
   } catch (e) {
     log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
     throw e;
   }
   return { branch, worktreePath };
+}
+
+/** W1-T5356: a `run-*` lane's sync add, LOCK FIRST — runTaskBody's W1-T5280 order for every other lane. A sync add blocks
+ *  only its own event loop; a prune in ANOTHER process (an approve pid, a hand-run `rmd`) still reaches a lockless path
+ *  once `pruneGraceMs` lapses. A failed add drops the lock: no caller hands a half-added worktree on. */
+export function addLockedRunWorktree(
+  repoDir: string, worktreePath: string, branch: string, base: string, runId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): void {
+  mkdirSync(worktreePath, { recursive: true }); // reapStaleWorktrees deletes a `.lock` whose directory is absent
+  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: systemClock.iso() });
+  try {
+    worktreeAdd(repoDir, worktreePath, branch, base, { log });
+  } catch (e) {
+    removeRunLock(worktreePath);
+    throw e;
+  }
 }
 
 /**
@@ -30049,8 +30065,6 @@ async function retroCommand(
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
   const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
-  // Liveness token so a concurrent drain's prune skips this retro worktree. (See runTask.)
-  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
   // W1-T39: the next-runnable task for docs/ORIENTATION.md, from the SAME DAG +
   // GitHub-derived-status projection `rmd drain` dispatches from — never a second,
@@ -33717,18 +33731,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         openWorkspace: () => gardenCheckout({ name: "selector-shadow", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log }),
         log,
       };
-      return async () => {
-        try {
-          const runs = await readSelectorShadowRunsAsync(owner, repo, undefined, {
-            cachePath: join(stateDir, "selector-shadow-log-cache.json"),
-            warn: (message) => log("selector-shadow.cache_failed", { message }),
-            onFlakes: selectorShadowFlakeLedger(log),
-          });
-          await runSelectorShadowGardener(d, () => runs, (miss) => readSelectorShadowChangedPaths(owner, repo, miss), ciLearningTaskIdMinter(repoRoot));
-        } catch (e) {
-          log("selector-shadow.gardener_failed", { error: String((e as Error)?.message ?? e) });
-        }
-      };
+      return selectorShadowGardenPass(d, owner, repo, ciLearningTaskIdMinter(repoRoot));
     }
     case "evidence-coverage":
       return () => {
@@ -33796,6 +33799,15 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       };
     }
   }
+}
+
+/** The daemon's garden pass spawn (W1-T5475): a child pass logs through the daemon's ledger `log`, not stderr. */
+export function daemonGardenPassSpawn(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  injected?: GardenPassSpawn,
+  childOpts: Parameters<typeof childGardenPassSpawn>[0] = {},
+): GardenPassSpawn {
+  return boundedGardenPassSpawn(injected ?? childGardenPassSpawn({ ...childOpts, log }), 2);
 }
 
 export function registeredGardenDueProbe(name: RegisteredGardenName, ctx: GardenBuildContext): () => boolean {
@@ -34113,7 +34125,7 @@ export async function daemonCommand(
   const gardenContext: GardenBuildContext = { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate };
   const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
     ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
-  const gardenPassSpawn: GardenPassSpawn = boundedGardenPassSpawn(injectedPassSpawn ?? childGardenPassSpawn(), 2);
+  const gardenPassSpawn = daemonGardenPassSpawn(log, injectedPassSpawn);
   const offLoopGarden = (name: RegisteredGardenName) => (intervalMs: number) =>
     startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) });
   if (!target.isSelf && !flagValue(rest, "--plan")) {
@@ -34469,6 +34481,8 @@ export async function daemonCommand(
           log,
           ledgerLines: () => readLedgerLines(ledgerPath),
           requestReview: requestLandingReview,
+          // W1-T5460: drain the console decisions `rmd serve` queued under the same state root.
+          stateRoot: config.root,
         })
     : undefined;
   // ANTHROPIC-clean-env boot assertion (W1-T12b): checked once, before the loop
@@ -43327,8 +43341,6 @@ async function triageCommandLocked(
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
   const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
-  // Liveness token so a concurrent drain's prune skips this triage worktree.
-  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
   // W1-T348: the decision-summary rung, resolved ONCE and reused at both sites this run may
   // reach a human/operator — the GRILL escalation below and the proposal write further down.
@@ -43958,8 +43970,6 @@ export async function planCommand(
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
   const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
-  // Liveness token so a concurrent drain's prune skips this plan worktree.
-  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
   let planIdBlock: TaskIdReservationBlock | undefined;
 
@@ -44380,12 +44390,11 @@ export function createDaemonLaneWorktree(
   try {
     // W1-T2621: see addLaneWorktree's identical note, above — worktreeAdd itself emits
     // worktree.add now, given a ledger to emit it through.
-    worktreeAdd(repoDir, worktreePath, branch, "origin/main", { log });
+    addLockedRunWorktree(repoDir, worktreePath, branch, "origin/main", runId, log);
   } catch (e) {
     log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
     throw e;
   }
-  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
   return { branch, worktreePath };
 }
 
@@ -46250,8 +46259,7 @@ export async function approveCommand(
     const branch = approveRunBranch(runId);
     // Set before worktreeAdd, so a failed add still leaves the path for the approve catch's cleanup.
     const path = (worktreePath = join(worktreesDir(config), branch));
-    worktreeAdd(dir, path, branch, "origin/main", { log });
-    writeRunLock(path, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+    addLockedRunWorktree(dir, path, branch, "origin/main", runId, log); // W1-T5356: lock before add
     return { branch, path };
   };
   // W1-T4437: the mint/write/commit steps `createRatificationBranch` and `joinRatificationBranch`
@@ -46401,8 +46409,7 @@ export async function approveCommand(
       worktreePath = join(worktreesDir(config), branch);
       // W1-T2621: thread this call's own ledger through — worktreeAdd now emits worktree.add
       // (and, on the currency check's fail-open, worktree.base_uncheckable) itself.
-      worktreeAdd(dir, worktreePath, branch, `origin/${branch}`, { log });
-      writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+      addLockedRunWorktree(dir, worktreePath, branch, `origin/${branch}`, runId, log); // W1-T5356: lock before add
       // The merge-base diff isolates ONLY what this branch added to plan/tasks.yaml, unaffected
       // by anything origin/main gained afterward (a plain two-dot diff would not be) — same
       // `- id: <id>` per-line shape the fresh-mint path below extracts, just over the diff's
@@ -46428,8 +46435,7 @@ export async function approveCommand(
       const branch = approveRunBranch(runId);
       worktreePath = join(worktreesDir(config), branch);
       // W1-T2621: see completeRatificationBranch's identical note, above.
-      worktreeAdd(dir, worktreePath, branch, "origin/main", { log });
-      writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+      addLockedRunWorktree(dir, worktreePath, branch, "origin/main", runId, log); // W1-T5356: lock before add
       materializeAndCommitApproveFragment(worktreePath, payload, `run ${runId}`);
       preflightApprovePush(worktreePath, branch, payload.proposalId);
       gitPushRunBranch(worktreePath);
@@ -46445,11 +46451,7 @@ export async function approveCommand(
       const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
       if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
       worktreePath = join(worktreesDir(config), branch);
-      worktreeAdd(dir, worktreePath, branch, `origin/${branch}`, { log });
-      // Reads through the shared Clock port (systemClock.iso()), never a bare `new Date()` —
-      // clock-signature-census.test.ts tracks every new legacy-shaped call site added to this
-      // file, and every OTHER `startedAt` in this function already predates that gate.
-      writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: systemClock.iso() });
+      addLockedRunWorktree(dir, worktreePath, branch, `origin/${branch}`, runId, log); // W1-T5356: lock before add
       materializeAndCommitApproveFragment(worktreePath, payload, `joined ${branch}`);
       preflightApprovePush(worktreePath, branch, payload.proposalId);
       gitPushRunBranch(worktreePath);
@@ -46764,8 +46766,7 @@ async function approveBatchCommand(
       worktreePath = join(worktreesDir(config), branch);
       // W1-T2621: see the single-approve gateway's identical note (createRatificationBranch,
       // above) — this ledger is the batch lane's own.
-      worktreeAdd(dir, worktreePath, branch, "origin/main", { log });
-      writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+      addLockedRunWorktree(dir, worktreePath, branch, "origin/main", runId, log); // W1-T5356: lock before add
 
       // Q3: ONE mint/reserve/write pass PER ACCEPTED PAYLOAD, sequentially, in the SAME
       // worktree — each iteration's shard write lands on disk before the NEXT payload's own

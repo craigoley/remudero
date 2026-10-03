@@ -439,6 +439,37 @@ export function priorStaleReviewerRecurrenceState(rawLedgerLines: readonly strin
   return requestedForSha === undefined ? undefined : { codeSha: requestedForSha, streak: 1, restartRequested: true };
 }
 
+/** W1-T5476 — the terminal verdicts `postReviewStatusGuarded` withheld for stale reviewer code at or after
+ *  `sinceMs`, read through `DaemonDeps.readLedgerLines`: review subprocesses write the refusals, so the ledger
+ *  is the only place this process sees them. A torn line is counted, and a failed read is its own outcome. */
+export function withheldReviewsSince(
+  readLedgerLines: () => readonly string[],
+  sinceMs: number,
+): { kind: "counted"; withheld: number; unparseable: number } | { kind: "unreadable"; error: string } {
+  let rawLedgerLines: readonly string[];
+  try {
+    rawLedgerLines = readLedgerLines();
+  } catch (error) {
+    return { kind: "unreadable", error: String((error as Error)?.message ?? error) };
+  }
+  let withheld = 0;
+  let unparseable = 0;
+  for (const raw of rawLedgerLines) {
+    if (!raw.includes('"review.post_refused"')) continue;
+    let row: Record<string, unknown>;
+    try {
+      row = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      // A torn refusal line is counted, so the decision row names it instead of reading it as none.
+      unparseable++;
+      continue;
+    }
+    if (row.step !== "review.post_refused" || row.reviewer_code_freshness !== "stale") continue;
+    if (typeof row.ts === "string" && Date.parse(row.ts) >= sinceMs) withheld++;
+  }
+  return { kind: "counted", withheld, unparseable };
+}
+
 /** W1-T5344 — the first park after one task's delivery failure. Policy (design): long enough that
  *  the next tick does not re-pick a task whose push a gate just refused, short enough that a fix
  *  merged meanwhile is picked up within the hour. Forensics: docs/forensics/daemon.md. */
@@ -2794,7 +2825,17 @@ export async function runDaemon(
     const busy =
       siblingInFlight ||
       backgroundSweep !== undefined || sweepLiveness.inFlight || detachedSweepActionCount() > 0 || inFlightReviewCount() > 0;
-    const decision = decideFreshnessRestart({ changes: freshness.changes, busy, staleSinceMs, nowMs, state: freshnessPressure });
+    // W1-T5476: a review withheld for stale reviewer code is the lag itself stalling the review lane. An
+    // unreadable ledger is named on the row and leaves the count absent: unknown, never a zero.
+    const withheld = deps.readLedgerLines ? withheldReviewsSince(deps.readLedgerLines, staleSinceMs) : undefined;
+    const withheldReviews = withheld?.kind === "counted" ? withheld.withheld : undefined;
+    const withheldEvidence =
+      withheld === undefined
+        ? {}
+        : withheld.kind === "unreadable"
+          ? { withheld_reviews_error: withheld.error }
+          : { withheld_reviews: withheld.withheld, ...(withheld.unparseable > 0 ? { withheld_reviews_unparseable: withheld.unparseable } : {}) };
+    const decision = decideFreshnessRestart({ changes: freshness.changes, busy, staleSinceMs, nowMs, state: freshnessPressure, withheldReviews });
     freshnessPressure = decision.state;
     log(FRESHNESS_DECISION_STEP, {
       action: decision.action,
@@ -2805,6 +2846,7 @@ export async function runDaemon(
       reason: decision.reason,
       old_sha: freshness.oldSha,
       new_sha: freshness.newSha,
+      ...withheldEvidence,
     });
     return decision.action;
   };

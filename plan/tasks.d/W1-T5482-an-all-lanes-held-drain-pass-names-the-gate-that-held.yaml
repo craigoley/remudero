@@ -1,0 +1,38 @@
+- id: W1-T5482
+  title: "AN ALL-LANES-HELD DRAIN PASS NAMES THE GATE THAT HELD — `runDrainLanes` ends a pass whose every lane was refused at admission with stop reason `cost_governor_deferred` even when the memory, queue or quiet-hours gate held every lane"
+  repo: remudero
+  depends_on: [W1-T5404]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low
+  origin: "operator session 2026-10-03: found building W1-T5404 (PR #8894)"
+  plan_refs: [W1-T5404, W1-T342, W1-T1038]
+  files: [src/lib/drain.ts, test/an-all-lanes-held-drain-pass-names-the-gate-that-held.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    In `runDrainLanes` (src/lib/drain.ts, origin/main 491cd7d0 and PR #8894's head 99120785), the per-lane
+    admission loop calls `checkDispatchGovernors(deps, undefined)` and stops admitting on the first verdict.
+    `DispatchGovernorVerdict` (src/lib/dispatch-governor.ts) has five kinds: cost, queue, memory,
+    quiet_hours and unreadable. The loop logs `dispatch.lane_governed` with `governorDeferPayload(verdict)`.
+    But when `admitted.length === 0` it returns `summary("cost_governor_deferred", "every lane deferred by a
+    governor re-checked at dispatch")` whatever the verdict was. The pass-level checks ahead of it cover cost
+    and queue only, so memory and quiet hours reach this branch and are always reported as a cost deferral.
+    W1-T5404 adds `memory_governor_deferred` to `StopReason` for the single-lane loop. The multi-lane loop
+    should report it as well, and report `queue_governor_deferred` for a queue verdict.
+  design: |
+    Keep the first refusing verdict from the admission loop. When no lane was admitted, map it: cost →
+    `cost_governor_deferred`, queue → `queue_governor_deferred`, memory → `memory_governor_deferred`,
+    quiet_hours → a named reason (add `quiet_hours_deferred` to `StopReason` if none fits), unreadable →
+    the deferral of its `source`, with the error in `stopDetail`. The detail names the gate's reading as
+    `governorDeferPayload` does. Existing cost-held suites (test/lane-governor-per-dispatch.test.ts,
+    test/cost-governor.test.ts) keep passing unchanged.
+  acceptance:
+    - claim: "a multi-lane drain pass whose every lane is refused at admission ends with the stop reason of the gate that refused it: memory_governor_deferred for the memory gate, queue_governor_deferred for the queue gate, and cost_governor_deferred only for the cost gate"
+      proof: "unit test: test/an-all-lanes-held-drain-pass-names-the-gate-that-held.test.ts"
+  falsifier: |
+    Restore the literal `summary("cost_governor_deferred", …)`. The suite's memory-held pass reports
+    cost_governor_deferred.
