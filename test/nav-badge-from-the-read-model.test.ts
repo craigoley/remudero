@@ -36,6 +36,7 @@ import { buildServeServer, type ServeDeps } from "../src/lib/serve.js";
 import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
 import { READ_MODEL_DB_DIR_ENV } from "../src/lib/read-model-db.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { unreadySources } from "../src/lib/view-shadow.js";
 import { buildReadModelViewRoutes, renderView, type ViewBody, type ViewSource } from "../src/lib/views.js";
 
 // P1-07: the nav badge materialized by the read-model worker must be the Phase 0 (#8042) answer,
@@ -253,6 +254,22 @@ test("an instance the read model has not projected is not counted", async (t) =>
   const unticked = view.materialize({ now: NOW, instances: [{ state: { instance: "core", generation: 0, lease: "none", failures: 0, newestTs: null }, db: { path: join(f.stateDir, "read-model", "core.v1.sqlite") } as never }] });
   assert.match((unticked[1].data as NavBadgeData).agent.instances[0].reason ?? "", /has not projected/);
   assert.deepEqual(view.materialize({ now: NOW, instances: [] }), [], "no read model open: nothing to materialize");
+});
+
+test("a configured instance whose store is not open yet is warming in the nav badge so its sample is skipped", async (t) => {
+  // The 2026-10-02T23:14Z serve-handoff shape: the projector reported console ticked, the views thread had not attached its store.
+  const f = await fixture(t);
+  createNavBadgeSourcePublisher({ stateDir: f.stateDir, inboxStateDir: join(f.inboxRoot, "state"), scopes: () => f.scopes })();
+  const view = createNavBadgeReadModelView(ledgerSource);
+  const core = { state: { instance: "core", generation: 0, lease: "none" as const, failures: 0, newestTs: null }, db: { path: join(f.stateDir, "read-model", "core.v1.sqlite") } as never };
+  const consoleBody = (instances: Parameters<typeof view.materialize>[0]["instances"]) => view.materialize({ now: NOW, instances }).find((b) => b.key === "instances=console")!;
+  const unopened = consoleBody([core, { state: { instance: "console", generation: 1, lease: "held", failures: 0, newestTs: null, tickedAt: NOW } }]);
+  assert.deepEqual(unopened.data.agent.instances, [{ instanceId: "console", repository: CONSOLE_REPO, reason: "the read model has not opened this instance's store yet" }]);
+  assert.equal(unreadySources(unopened.sources), "operator-agent-memory:console warming");
+  // The negative control: an instance the worker is not configured to project is structural, so its sample is compared.
+  const unconfigured = consoleBody([core]);
+  assert.equal(unconfigured.data.agent.instances[0].reason, "the read model does not project this instance");
+  assert.equal(unreadySources(unconfigured.sources), undefined);
 });
 
 test("the source publisher writes only on change and keeps running when a write fails", (t) => {

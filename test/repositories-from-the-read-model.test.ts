@@ -8,8 +8,8 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { fixedClock, systemClock } from "../src/lib/clock.js";
 import { daemonInstanceRegistryPath } from "../src/lib/deployer.js";
 import { pauseFilePath } from "../src/lib/fleet-control.js";
-import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { acquireLease, READ_MODEL_DB_DIR_ENV } from "../src/lib/read-model-db.js";
+import { createLedgerProjector, LEDGER_PROJECTOR_SCHEMA_VERSION, openProjectorReadModel } from "../src/lib/ledger-projector.js";
+import { acquireLease, openReadModel, READ_MODEL_DB_DIR_ENV } from "../src/lib/read-model-db.js";
 import {
   createReadModelTicker,
   ledgerSource,
@@ -32,7 +32,7 @@ import {
 } from "../src/lib/repositories-view.js";
 import { buildServeServer, repositoriesSources, type ServeDeps } from "../src/lib/serve.js";
 import { makeTempDir } from "../src/lib/tmp.js";
-import { VIEW_SHADOW_DIFF_STEP, createViewShadow, readShadowEvidence, type ShadowRequest } from "../src/lib/view-shadow.js";
+import { createViewShadow, readShadowEvidence, type ShadowComparison, type ShadowRequest } from "../src/lib/view-shadow.js";
 import type { ViewBody, ViewSource } from "../src/lib/views.js";
 
 // P1-08: the repositories view is #7926's repos summary for every instance, computed from each instance's
@@ -144,8 +144,11 @@ function fixture(t: TestCtx): Fixture {
   return { root, stateDir, consoleRoot, sources };
 }
 
-function ticker(f: Fixture, opts: { now?: number; holder?: string; view?: ReturnType<typeof createRepositoriesReadModelView<ReadModelInstanceState>> } = {}): { tick: () => ReadModelBodyEntry | undefined; release: () => void; shadow: (request: ShadowRequest) => boolean; logs: Array<{ step: string; extra: Record<string, unknown> }>; at: (ms: number) => void } {
+type Sampled = ShadowComparison & { inputs?: Readonly<Record<string, unknown>> };
+
+function ticker(f: Fixture, opts: { now?: number; holder?: string; view?: ReturnType<typeof createRepositoriesReadModelView<ReadModelInstanceState>> } = {}): { tick: () => ReadModelBodyEntry | undefined; release: () => void; shadow: (request: ShadowRequest) => boolean; sample: () => Sampled; logs: Array<{ step: string; extra: Record<string, unknown> }>; at: (ms: number) => void } {
   let last: ReadModelBodyEntry | undefined;
+  let built: ReadModelBodyEntry | undefined;
   const logs: Array<{ step: string; extra: Record<string, unknown> }> = [];
   let now = opts.now ?? NOW;
   const view = opts.view ?? createRepositoriesReadModelView(ledgerSource);
@@ -154,7 +157,7 @@ function ticker(f: Fixture, opts: { now?: number; holder?: string; view?: Return
     stateDir: f.stateDir,
     instances: [{ name: "core", ledgerDir: f.stateDir }, { name: "console", ledgerDir: join(f.consoleRoot, "state") }],
     views: [view], clock, holder: opts.holder ?? "serve-a",
-    post: (m) => void (m.type === "body" ? (last = m.entry) : m.type === "log" && logs.push({ step: m.step, extra: m.extra })),
+    post: (m) => void (m.type === "body" ? (last = built = m.entry) : m.type === "log" && logs.push({ step: m.step, extra: m.extra })),
   });
   return {
     tick: () => {
@@ -165,6 +168,21 @@ function ticker(f: Fixture, opts: { now?: number; holder?: string; view?: Return
     },
     release: () => void inner.release(),
     shadow: (request) => inner.shadow(request),
+    /**
+     * One sample through the worker, then the same comparison taken here: a sample with no real diff writes no
+     * `view.shadow_diff` row (W1-T5362), so its classifications are read from what `compare` returns.
+     */
+    sample: () => {
+      assert.equal(inner.shadow({ view: "repositories", key: "", requests: 1 }), true, "the worker computed the legacy side and compared");
+      const dbs = ["core", "console"].map((instance) => openReadModel({ stateDir: f.stateDir, instance, schemaVersion: LEDGER_PROJECTOR_SCHEMA_VERSION, readOnly: true }));
+      try {
+        const legacy = view.legacy("", now, built!.body.data)!;
+        const shadow = createViewShadow({ clock, log: () => {}, evidence: (input) => readShadowEvidence(dbs, input) });
+        return { ...shadow.compare({ view: "repositories", key: "", requests: 1, legacy, body: built!.body }), ...(legacy.inputs ? { inputs: legacy.inputs } : {}) };
+      } finally {
+        for (const db of dbs) db.close();
+      }
+    },
     logs,
     at: (ms) => void (now = ms),
   };
@@ -227,12 +245,7 @@ test("a repositories count diff is judged by the rows each id it counted", (t) =
   const live = join(f.stateDir, "ledger.ndjson");
   const failedRow = readFileSync(live, "utf8").split("\n").find((line) => line.includes('"blocked_ci"'))!;
   const base = "instances[instanceId=core].summary.repos[id=craigoley/remudero].health";
-  const sample = (): Array<{ path: string; classification: string; reason: string }> => {
-    assert.equal(run.shadow({ view: "repositories", key: "", requests: 1 }), true, "the worker computed the legacy side and compared");
-    const row = run.logs.filter((l) => l.step === VIEW_SHADOW_DIFF_STEP).at(-1);
-    assert.ok(row, "a view.shadow_diff row was written");
-    return row.extra.diffs as Array<{ path: string; classification: string; reason: string }>;
-  };
+  const sample = (): Array<{ path: string; classification: string; reason: string }> => run.sample().diffs;
   // Legacy's live file re-emits c-T2's failure under a retried run id; the view counted that failure once.
   writeFileSync(live, `${readFileSync(live, "utf8")}${failedRow.replace('"run_id":"c2"', '"run_id":"c2b"')}\n`);
   const dup = sample();
@@ -261,11 +274,7 @@ test("a console task filed after the repositories build is no diff when legacy r
   const filed = ["CONSOLE-T111", "CONSOLE-T112", "CONSOLE-T113"].map((id) => planYaml("craigoley/remudero-console", [id])).join("");
   writeFileSync(consolePlan, `${readFileSync(consolePlan, "utf8")}${filed}`);
   utimesSync(consolePlan, new Date(NOW + 60_000), new Date(NOW + 60_000));
-  const sample = (): { diffs: Array<{ path: string; classification: string }>; inputs?: { plan?: Record<string, string> } } => {
-    assert.equal(run.shadow({ view: "repositories", key: "", requests: 1 }), true, "the worker computed the legacy side and compared");
-    const row = run.logs.filter((l) => l.step === VIEW_SHADOW_DIFF_STEP).at(-1);
-    return { diffs: (row?.extra.diffs ?? []) as Array<{ path: string; classification: string }>, ...(row ? { inputs: row.extra.inputs as never } : {}) };
-  };
+  const sample = (): { diffs: Array<{ path: string; classification: string }>; inputs?: { plan?: Record<string, string> } } => run.sample() as never;
   const paired = sample();
   assert.deepEqual(paired.diffs.filter((d) => d.path.includes("queued")), [], JSON.stringify(paired.diffs));
   // Negative control: a queued count the paired plan does not give stays real, and its row names the plan each instance read.
@@ -293,8 +302,7 @@ test("a repositories sum and the condition it drives are judged by the rows each
     failure.replace('"run_id":"c2"', '"run_id":"c2c"'),
   ];
   writeFileSync(live, `${readFileSync(live, "utf8")}${again.join("\n")}\n`);
-  assert.equal(run.shadow({ view: "repositories", key: "", requests: 1 }), true);
-  const diffs = run.logs.filter((l) => l.step === VIEW_SHADOW_DIFF_STEP).at(-1)!.extra.diffs as Array<{ path: string; classification: string; reason: string }>;
+  const { diffs } = run.sample();
   const base = "instances[instanceId=core].summary.repos[id=craigoley/remudero].";
   assert.deepEqual(diffs.map((d) => [d.path.replace(base, ""), d.classification]), [
     ["health.condition", "dedupe"],
@@ -607,8 +615,7 @@ function sampleLater(t: TestCtx, f: Fixture, before: string[], after: string[], 
   repositories(run.tick());
   writeFileSync(live, `${readFileSync(live, "utf8")}${after.map((line) => `${line}\n`).join("")}`);
   run.at(NOW + laterMs);
-  assert.equal(run.shadow({ view: "repositories", key: "", requests: 1 }), true, "the worker computed the legacy side and compared");
-  return (run.logs.filter((l) => l.step === VIEW_SHADOW_DIFF_STEP).at(-1)?.extra.diffs ?? []) as Array<{ path: string; classification: string; reason: string }>;
+  return run.sample().diffs;
 }
 
 const WEEK_MS = 7 * 24 * 3_600_000;
@@ -659,6 +666,45 @@ test("a summary computed while the projector catches up says so until it is reco
   assert.deepEqual([source(NOW + 61_000, caughtUp).state, source(NOW + 61_000, caughtUp).phase], ["fresh", undefined], "recomputed once caught up");
 });
 
+test("a configured instance whose store is not open yet is warming and its sample is skipped", (t) => {
+  // 2026-10-02T23:14:01Z, minutes after a serve handoff: core's ledger source read fresh but the new views thread had not
+  // attached core's store, so core read "does not project this instance", unavailable, and was compared as real.
+  const f = fixture(t);
+  createRepositoriesSourcePublisher({ stateDir: f.stateDir, instances: () => f.sources })();
+  const built = ticker(f);
+  repositories(built.tick());
+  built.release();
+  const consoleDb = openProjectorReadModel(f.stateDir, "console");
+  t.after(() => consoleDb.close());
+  const held = (instance: string): ReadModelInstanceState => ({ instance, generation: 1, lease: "held", failures: 0, newestTs: null, tickedAt: NOW });
+  const sample = (instances: Array<{ state: ReadModelInstanceState; db?: never }>) => {
+    const view = createRepositoriesReadModelView<ReadModelInstanceState>(ledgerSource);
+    const body = view.materialize({ now: NOW, instances })[0]!;
+    const legacy = view.legacy("", NOW, body.data)!;
+    const shadow = createViewShadow({ clock: fixedClock(NOW), log: () => {}, evidence: (input) => readShadowEvidence([], input) });
+    return { body, got: shadow.compare({ view: "repositories", key: "", requests: 1, legacy, body: { data: body.data, asOf: null, sources: body.sources } }) };
+  };
+  const unopened = sample([{ state: held("core") }, { state: held("console"), db: consoleDb as never }]);
+  assert.deepEqual(unopened.body.data.instances[0], { instanceId: "core", reason: "the read model has not opened this instance's store yet" });
+  assert.equal(unopened.body.sources.find((s) => s.name === "ledger:core")?.phase, undefined, "core's ledger reads fresh: only its summary says why it is absent");
+  assert.equal(unopened.got.skipped, "view repositories:core warming", JSON.stringify(unopened.got.diffs));
+  // The negative control: an instance the worker is not configured to project is structural, so the sample is compared and real.
+  const unconfigured = sample([{ state: held("console"), db: consoleDb as never }]);
+  assert.equal(unconfigured.got.skipped, undefined);
+  assert.equal(unconfigured.got.diffs.find((d) => d.path === "instances[instanceId=core].reason")?.classification, "real", JSON.stringify(unconfigured.got.diffs));
+  // Once core's store is open the sample is compared again, so a difference there stays real.
+  const coreDb = openProjectorReadModel(f.stateDir, "core");
+  t.after(() => coreDb.close());
+  const opened = sample([{ state: held("core"), db: coreDb as never }, { state: held("console"), db: consoleDb as never }]);
+  assert.equal(opened.got.skipped, undefined);
+  assert.ok(opened.body.data.instances[0].summary, "core is summarized from its open store");
+  // A store closed for a reopen keeps its last summary, stale and still warming until it is attached again.
+  const view = createRepositoriesReadModelView<ReadModelInstanceState>(ledgerSource);
+  view.materialize({ now: NOW, instances: [{ state: held("core"), db: coreDb as never }, { state: held("console"), db: consoleDb as never }] });
+  const reopening = view.materialize({ now: NOW + 61_000, instances: [{ state: held("core") }, { state: held("console"), db: consoleDb as never }] })[0]!;
+  assert.deepEqual(reopening.sources.filter((s) => s.name === "repositories:core").map((s) => [s.state, s.phase]), [["stale", "warming"]]);
+});
+
 test("a later worker attempt read only by legacy does not drop the recon row inside both windows", (t) => {
   // Captured 2026-10-01T18:27:18Z: cache_read_tokens7d view 2780545074 > legacy 2780430258 by exactly
   // W1-T5017#recon.done@18:18:34.607 (114816). Legacy read the ledger at the sample, after the run's costed
@@ -687,11 +733,7 @@ test("a PAUSE lifted after the repositories build is no diff when legacy replays
   const core = body.instances.find((i) => i.instanceId === "core")!.summary!.repos[0]!;
   assert.equal(core.health.condition, "paused");
   rmSync(pauseFilePath(f.root));
-  const sample = (): { diffs: Array<{ path: string; classification: string }>; inputs?: { control?: Record<string, string> } } => {
-    assert.equal(run.shadow({ view: "repositories", key: "", requests: 1 }), true, "the worker computed the legacy side and compared");
-    const row = run.logs.filter((l) => l.step === VIEW_SHADOW_DIFF_STEP).at(-1);
-    return { diffs: (row?.extra.diffs ?? []) as Array<{ path: string; classification: string }>, ...(row ? { inputs: row.extra.inputs as never } : {}) };
-  };
+  const sample = (): { diffs: Array<{ path: string; classification: string }>; inputs?: { control?: Record<string, string> } } => run.sample() as never;
   const base = "instances[instanceId=core].summary.repos[id=craigoley/remudero]";
   const paired = sample();
   assert.deepEqual(paired.diffs.filter((d) => d.path.startsWith(base)), [], JSON.stringify(paired.diffs));

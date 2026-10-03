@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 4
   status: queued
@@ -16,3 +16,13 @@
   acceptance:
     - claim: "the narrow selector includes test/a-proposal-that-can-never-be-ready-is-never-drafted.test.ts when this edge is exercised"
       proof: "grep: test/a-proposal-that-can-never-be-ready-is-never-drafted\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.88
+    reasons:
+      - "The filed plan specifies a narrow selector repair for one named test, confined to src/lib/affected-suites.ts, with verify: auto and an explicit grep: acceptance proof."
+      - "The supplied scope describes no secrets, permissions, deletion, irreversible action, merge/deploy/review policy change, or operator-only decision; the filing-time gates report no adverse result."
+      - "The family has zero merged and zero declined tasks, providing no failure history; no diff or actual-change view is supplied, so implementation correctness remains unverified."
+    judged_at: "2026-10-03T04:36:21.203Z"
+    pin: "7a967b84d67112a71f5956e24d37314f43c2ad200f4c70642d8e245d606d4587"

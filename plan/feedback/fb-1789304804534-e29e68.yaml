@@ -13,10 +13,11 @@ raw: "Durability defect: PR #5382 merged feedback#fb-1789282068794-2f0b7d with
   and does not silently auto-merge."
 attachments: []
 origin: ui
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: feedback-landing-stale-regression-20260913
 thread_id: null
+answered_by: null

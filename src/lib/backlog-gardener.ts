@@ -40,7 +40,8 @@ export interface BacklogInventory {
 export interface BacklogSources {
   repoRoot: string;
   plan: () => PlanInventory;
-  ledger: () => readonly Record<string, unknown>[];
+  /** W1-T5363: called with exactly the steps the examined shards' evidence reads, never unfiltered. */
+  ledger: (steps: readonly string[]) => readonly Record<string, unknown>[];
   history: (sinceIso: string) => readonly MainCommit[];
   mergedLastDay: () => number;
   clock: Clock;
@@ -53,6 +54,21 @@ const STEP = /\b[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)+\b/g;
 const physicalFiles = (task: Task): string[] => (task.files ?? []).filter((p) => !/[?*\[\]{}]/.test(p));
 const filingNumber = (id: string): number => Number(/-T(\d+)/.exec(id)?.[1] ?? Number.MAX_SAFE_INTEGER);
 const evidenceHash = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
+/** The step `backlogEvidence` reads for every examined shard, cited or not: its class-value lookup. */
+export const BACKLOG_CLASS_VALUE_STEP = "dispatch.value.calibrated";
+
+/** The one citation rule: explicit ledger step names in the shard's title/rationale, file names excluded. */
+export function backlogCitedSteps(task: Task): string[] {
+  return [...new Set([...(task.title + "\n" + (task.rationale ?? "")).matchAll(STEP)].map((m) => m[0]!).filter((s) => !s.includes(".ts") && !s.includes(".md")))];
+}
+
+/** W1-T5363: the union read is bounded to the steps the evidence reads. No `sinceTs`: the `earlier`
+ * window and the latest class value both reach back without limit, so the oldest window is not finite. */
+export function readBacklogLedgerRecords(stateDir: string, steps: readonly string[], reader: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync): readonly Record<string, unknown>[] {
+  const result = reader(stateDir, { step: steps, refuseIncomplete: true });
+  if (!result.ok) throw new Error(`backlog gardener: incomplete ledger union: ${result.unread.join(", ")}`);
+  return result.rows;
+}
 
 /** A shared surface is a lead for review only when a recent merged PR covered at least two declared files. */
 function overtakenBy(task: Task, history: readonly MainCommit[]): BacklogEvidence["overtaken"] {
@@ -80,7 +96,7 @@ export function backlogEvidence(
 ): BacklogEvidence {
   const since = now.getTime() - 24 * 3_600_000;
   const previousSince = since - 24 * 3_600_000;
-  const mentioned = [...new Set([...(task.title + "\n" + (task.rationale ?? "")).matchAll(STEP)].map((m) => m[0]!).filter((s) => !s.includes(".ts") && !s.includes(".md")))];
+  const mentioned = backlogCitedSteps(task);
   const symptoms = mentioned.map((step) => {
     const hits = rows.filter((r) => r.step === step && typeof r.ts === "string" && Number.isFinite(Date.parse(r.ts)));
     return {
@@ -101,7 +117,7 @@ export function backlogEvidence(
   const presentSymbols = symbols.filter((s) => source.includes(s));
   const missingSymbols = symbols.filter((s) => !source.includes(s));
   const overtaken = overtakenBy(task, history);
-  const classValue = [...rows].reverse().find((r) => r.step === "dispatch.value.calibrated" && r.task_class === deriveTaskClass(task) && typeof r.mean === "number" && typeof r.attempts === "number");
+  const classValue = [...rows].reverse().find((r) => r.step === BACKLOG_CLASS_VALUE_STEP && r.task_class === deriveTaskClass(task) && typeof r.mean === "number" && typeof r.attempts === "number");
   const value = classValue ? { mean: classValue.mean as number, attempts: classValue.attempts as number } : undefined;
   const facts = { fanout: fanout.get(task.id) ?? 0, symptoms, missingFiles, presentFiles, missingSymbols, presentSymbols, overtaken, proofsHold, classValue: value };
   return { ...facts, signature: evidenceHash(facts) };
@@ -121,13 +137,7 @@ export function backlogInventory(sources: BacklogSources): BacklogInventory {
   const now = sources.clock.date();
   const mergeBudget = Math.max(0, Math.floor(sources.mergedLastDay()));
   if (mergeBudget === 0) return { plan, candidates: [], mergeBudget, examined: 0 };
-  const rows = sources.ledger();
-  const history = sources.history(clockFromMillisFn(() => now.getTime() - 7 * 24 * 3_600_000).iso());
-  const openIds = new Set(plan.open.map((t) => t.id));
-  const fanout = openDependentFanout(plan.all, openIds);
-  const proofsHolding = sources.proofsHolding(plan);
-  const candidates: BacklogAction[] = [];
-  let examined = 0;
+  const eligible: Array<{ task: Task; marker: RegExpExecArray | null }> = [];
   for (const task of [...plan.open].sort((a, b) => filingNumber(a.id) - filingNumber(b.id) || a.id.localeCompare(b.id))) {
     const rel = plan.shards.get(task.id);
     if (!rel) continue;
@@ -136,6 +146,18 @@ export function backlogInventory(sources: BacklogSources): BacklogInventory {
     // A marked priority is ours only while it still equals the band in our marker. Any other
     // priority, including an operator amendment of a previously banded task, is authoritative.
     if (task.priority !== undefined && (!marker || task.priority !== Number(marker[1]))) continue;
+    eligible.push({ task, marker });
+  }
+  // W1-T5363: read only what the evidence of a shard this pass may examine can query.
+  const steps = eligible.length === 0 ? [] : [...new Set([BACKLOG_CLASS_VALUE_STEP, ...eligible.flatMap(({ task }) => backlogCitedSteps(task))])].sort();
+  const rows = steps.length === 0 ? [] : sources.ledger(steps);
+  const history = sources.history(clockFromMillisFn(() => now.getTime() - 7 * 24 * 3_600_000).iso());
+  const openIds = new Set(plan.open.map((t) => t.id));
+  const fanout = openDependentFanout(plan.all, openIds);
+  const proofsHolding = sources.proofsHolding(plan);
+  const candidates: BacklogAction[] = [];
+  let examined = 0;
+  for (const { task, marker } of eligible) {
     if (examined >= mergeBudget) break;
     const evidence = backlogEvidence(task, sources.repoRoot, fanout, rows, history, now, sources.fileExists, proofsHolding.has(task.id));
     const judged = judgeBacklog(evidence);
@@ -181,17 +203,16 @@ export function applyBacklogActions(root: string, shards: ReadonlyMap<string, st
   return paths.sort();
 }
 
-export function backlogGardenSpec(deps: GardenerDeps, overrides: Partial<BacklogSources> = {}): GardenSpec<BacklogClass, BacklogInventory, BacklogAction, GardenCheckout> {
+export function backlogGardenSpec(
+  deps: GardenerDeps,
+  overrides: Partial<BacklogSources> = {},
+  reader: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync,
+): GardenSpec<BacklogClass, BacklogInventory, BacklogAction, GardenCheckout> {
   const clock = overrides.clock ?? deps.clock ?? systemClock;
-  const readLedger = (): readonly Record<string, unknown>[] => {
-    const result = readLedgerUnionRecordsSync(deps.stateDir, { refuseIncomplete: true });
-    if (!result.ok) throw new Error(`backlog gardener: incomplete ledger union: ${result.unread.join(", ")}`);
-    return result.rows;
-  };
   const sources: BacklogSources = {
     repoRoot: deps.repoRoot,
     plan: () => planInventory(deps.repoRoot, deps.stateDir),
-    ledger: readLedger,
+    ledger: (steps) => readBacklogLedgerRecords(deps.stateDir, steps, reader),
     history: (since) => readMainHistory(deps.repoRoot, since),
     mergedLastDay: () => readMainHistory(deps.repoRoot, clockFromMillisFn(() => clock.now() - 24 * 3_600_000).iso()).filter((c) => /\(#\d+\)$/.test(c.subject)).length,
     clock,

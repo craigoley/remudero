@@ -161,7 +161,9 @@ test("W1-T1049 — reviewLanes and dispatchLanes are INDEPENDENT rows, and the s
   // the rows here would assert values against themselves and guard nothing, so an UNINTENDED
   // change to either must still redden this.
   assert.equal(DEFAULT_SWEEP_POLICY.reviewLanes, 3, "review budget, plan/policy.yaml sweep.reviewLanes");
-  assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, 2, "build budget, its own row — unmoved by the review retune");
+  // 2026-10-03: dispatch restored 2 -> 3 by operator ruling once the memory gate (W1-T5347) was live and
+  // the lane-restore condition read burn per run DOWN (plan/policy.yaml sweep.dispatchLanes).
+  assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, 3, "build budget, its own row — restored by operator ruling, not by the review retune");
 });
 
 // ── every refusal arm of the policy row's validator, one test each ─────────────────────────
@@ -220,4 +222,9 @@ test("W1-T1049 — a well-formed 'sweep.reviewLanes' row returns its value, incl
   assert.equal(validateReviewLanesRow({ value: 3, min: 1, max: 8 }), 3);
   assert.equal(validateReviewLanesRow({ value: 1, min: 1, max: 8 }), 1);
   assert.equal(validateReviewLanesRow({ value: 8, min: 1, max: 8 }), 8);
+});
+
+test("dispatch lanes are restored to three by the 2026-10-03 operator ruling", () => {
+  // The ruling's precondition was the memory gate (W1-T5347); the restore condition read burn per run DOWN.
+  assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, 3, "plan/policy.yaml sweep.dispatchLanes");
 });

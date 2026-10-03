@@ -36,6 +36,7 @@ import { loadPlanFromYaml } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { mergeFeedbackRecord } from "./feedback-record-merge.js";
+import { PlanPrPreflightRefusedError, planPrPreflightAtCommit, refuseRedPlanPr, type PlanPrPreflightResult } from "./plan-pr-emitter.js";
 
 /**
  * Mirrors measurement-cadence.ts's `CiLearningShardDraft`/`CiLearningFiledShard`/
@@ -152,6 +153,8 @@ export interface LandFeedbackOpts {
   /** Test seam for preserving the self/core identity without reading the caller's cwd. */
   sourceRepository?: LandingRepository;
   requestReview?: LandingReviewRequest;
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+  planPrPreflight?: (commitSha: string, pr: { title: string; body: string }) => PlanPrPreflightResult;
 }
 
 export interface LandFeedbackResult {
@@ -186,6 +189,8 @@ export interface LandFeedbackResult {
 }
 
 const ACKNOWLEDGEMENT_PATH_LIMIT = 50;
+
+const refusedPlanPrTrees = new Map<string, PlanPrPreflightResult>();
 
 function defaultGit(root: string): GitExec {
   return (args, opts) =>
@@ -283,7 +288,7 @@ interface LandingKind {
   targetRepository?: LandingRepository;
   landingOwner?: string;
   commitMessage: (unlanded: string[]) => string;
-  prBody: (unlanded: string[]) => string;
+  prBody: (unlanded: string[], content?: LandingContent) => string;
 }
 
 const LANDING_BASES: Record<LandingFamily, { branch: string; ownedDir: string; prTitle: string }> = {
@@ -351,6 +356,32 @@ export function isLandingRef(ref: string): boolean {
   return LEGACY_LANDING_REFS.has(ref) || SCOPED_LANDING_REF.test(ref);
 }
 
+export interface LandingContent {
+  base: (path: string) => string | undefined;
+  head: (path: string) => string | undefined;
+}
+
+const LANDING_PROOF_LINE_MAX = 160;
+/** W1-T5348: `grep: ^<line>$`, a line only the pushed bytes hold, `[.]`-bracketed; undefined: new path or none. */
+export function discriminatingLandingProof(path: string, content: LandingContent): string | undefined {
+  const base = content.base(path);
+  const head = content.head(path);
+  if (base === undefined || head === undefined) return undefined;
+  const lifecycleLine = /^\s*(?:status|retirement):\s/;
+  const unportable = /[\\^[\]\t\x00-\x08\x0b-\x1f\x7f]/;
+  const baseLines = new Set(base.split("\n"));
+  const candidates = head
+    .split("\n")
+    .filter((l) => l.trim() !== "" && l === l.trimEnd() && l.length <= LANDING_PROOF_LINE_MAX && !unportable.test(l) && !baseLines.has(l));
+  const line = candidates.find((l) => lifecycleLine.test(l)) ?? candidates[0];
+  if (line === undefined) return undefined;
+  return `grep: ^${line.replace(/[.*$+?(){}|]/g, (c) => `[${c}]`)}$ in ${path}`;
+}
+
+function landingProof(path: string, template: string, content: LandingContent | undefined): string {
+  return (content && discriminatingLandingProof(path, content)) ?? template;
+}
+
 function feedbackCommitMessage(unlanded: string[]): string {
   return [
     LANDING_PR_TITLE,
@@ -363,10 +394,11 @@ function feedbackCommitMessage(unlanded: string[]): string {
   ].join("\n");
 }
 
-function feedbackPrBody(unlanded: string[]): string {
+function feedbackPrBody(unlanded: string[], content?: LandingContent): string {
   const ids = unlanded
     .filter((f) => f.startsWith(`${FEEDBACK_REL_DIR}/`) && f.endsWith(".yaml"))
     .map((f) => f.slice(FEEDBACK_REL_DIR.length + 1, -".yaml".length));
+  const record = (id: string): string => `${FEEDBACK_REL_DIR}/${id}.yaml`;
   return [
     `Lands ${unlanded.length} pending \`plan/feedback/**\` file(s) so they become`,
     "git-durable — the automated durable-inbox commit bridge (W1-T243).",
@@ -376,8 +408,8 @@ function feedbackPrBody(unlanded: string[]): string {
     "",
     "## Acceptance",
     ...(ids.length > 0
-      ? ids.map((id) => `- ${id} lands as a durable inbox entry | grep: ${id} in plan/feedback/${id}.yaml`)
-      : unlanded.map((f) => `- ${f} lands durably on origin/main | grep: . in ${f}`)),
+      ? ids.map((id) => `- ${id} lands as a durable inbox entry | ${landingProof(record(id), `grep: ${id} in ${record(id)}`, content)}`)
+      : unlanded.map((f) => `- ${f} lands durably on origin/main | ${landingProof(f, `grep: . in ${f}`, content)}`)),
   ].join("\n");
 }
 
@@ -394,7 +426,7 @@ function decisionsCommitMessage(unlanded: string[]): string {
   ].join("\n");
 }
 
-function decisionsPrBody(unlanded: string[]): string {
+function decisionsPrBody(unlanded: string[], content?: LandingContent): string {
   return [
     `Lands ${unlanded.length} pending \`plan/decisions.d/**\` record(s) so they become`,
     "git-durable — the automated decision-record commit bridge (W1-T191).",
@@ -403,7 +435,7 @@ function decisionsPrBody(unlanded: string[]): string {
     "decision.autochoose wrote at auto-choose time.",
     "",
     "## Acceptance",
-    ...unlanded.map((f) => `- ${f} lands as a durable decision record | grep: . in ${f}`),
+    ...unlanded.map((f) => `- ${f} lands as a durable decision record | ${landingProof(f, `grep: . in ${f}`, content)}`),
   ].join("\n");
 }
 
@@ -433,7 +465,7 @@ function ciLearningCommitMessage(unlanded: string[]): string {
   ].join("\n");
 }
 
-function ciLearningPrBody(unlanded: string[]): string {
+function ciLearningPrBody(unlanded: string[], content?: LandingContent): string {
   return [
     `Lands ${unlanded.length} pending CI-learning shard(s)`,
     "generated by the scheduled rung.",
@@ -442,7 +474,7 @@ function ciLearningPrBody(unlanded: string[]): string {
     "machine-filing judge releases each one or escalates it to the operator.",
     "",
     "## Acceptance",
-    ...unlanded.map((f) => `- ${f} lands as a durable CI-learning shard | grep: author_class: machine in ${f}`),
+    ...unlanded.map((f) => `- ${f} lands as a durable CI-learning shard | ${landingProof(f, `grep: author_class: machine in ${f}`, content)}`),
   ].join("\n");
 }
 
@@ -691,6 +723,18 @@ function stageBranchPending(git: GitExec, kind: LandingKind, files: string[], en
   }
 }
 
+function landingTreeContent(git: GitExec, b: Pick<LandingTreeBuild, "mainSha" | "treeSha">): LandingContent {
+  const at = (rev: string) => (path: string): string | undefined => {
+    try {
+      return git(["cat-file", "-p", `${rev}:${path}`]);
+    } catch {
+      // Absent or unreadable: the template proof stands, and the preflight judges it by name.
+      return undefined;
+    }
+  };
+  return { base: at(b.mainSha), head: at(b.treeSha) };
+}
+
 /**
  * Open (or reuse) the one shared PR for `kind.branch`'s current tip. Shared by both branches of
  * {@link finishLanding} — the fresh-push path and the already-landed short-circuit — so a push
@@ -707,11 +751,23 @@ function stageBranchPending(git: GitExec, kind: LandingKind, files: string[], en
 function ensurePrOpen(
   kind: LandingKind,
   gh: GhExec,
-  unlanded: string[],
+  body: string,
   requestReview?: LandingReviewRequest,
+  refreshBody = false,
 ): { prUrl?: string; error?: string } {
   const existing = findPendingLandingPr({ gh, identity: kind });
   if (existing) {
+    let refreshError: string | undefined;
+    if (refreshBody) {
+      try {
+        const target = /github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/.exec(existing);
+        if (!target) throw new Error(`cannot resolve owner/repo/number from ${existing}`);
+        assertLiveWriteAllowed("gh-pr-create", `refreshing the landing PR body of ${existing}`);
+        gh(["api", "-X", "PATCH", `repos/${target[1]}/${target[2]}/pulls/${target[3]}`, "-f", `body=${body}`]);
+      } catch (e) {
+        refreshError = `refreshing the body of ${existing} failed: ${String((e as Error)?.message ?? e)}`;
+      }
+    }
     try {
       const pending = requestReview?.(existing);
       if (pending) {
@@ -719,12 +775,11 @@ function ensurePrOpen(
       }
     } catch (e) {
       const reason = String((e as Error)?.message ?? e);
-      return { prUrl: existing, error: `review handoff failed for ${existing}: ${reason}` };
+      return { prUrl: existing, error: [refreshError, `review handoff failed for ${existing}: ${reason}`].filter(Boolean).join("; ") };
     }
-    return { prUrl: existing };
+    return refreshError ? { prUrl: existing, error: refreshError } : { prUrl: existing };
   }
 
-  const body = kind.prBody(unlanded);
   let prUrl: string | undefined;
   try {
     assertLiveWriteAllowed("gh-pr-create", `opening the landing PR for ${kind.branch}`);
@@ -784,8 +839,10 @@ function finishLanding(
   build: LandingTreeBuild,
   rebuild: () => LandingTreeBuild,
   env: NodeJS.ProcessEnv,
-  requestReview?: LandingReviewRequest,
+  root: string,
+  opts: LandFeedbackOpts,
 ): LandFeedbackResult {
+  const requestReview = opts.requestReview;
   // W1-T3561: fold a build's refusals onto a result — never onto the tree/files it names, so a
   // refused record can never ride into an armed auto-merge PR by construction (criterion 4).
   const withRefused = (result: LandFeedbackResult, refused: FeedbackRefusal[]): LandFeedbackResult =>
@@ -795,8 +852,9 @@ function finishLanding(
   // for unchanged content but `commit-tree` stamps the time, so comparing commits instead
   // force-pushed every call and once deadlocked a PR's CI (racing cancellations, no settled sha).
   // Why: docs/forensics/feedback-landing.md#finishlanding_shortcircuit.
+  const bodyOf = (b: LandingTreeBuild): string => kind.prBody(b.unlanded, landingTreeContent(git, b));
   if (remoteBranchTree(git, kind.branch) === build.treeSha) {
-    const { prUrl, error } = ensurePrOpen(kind, gh, build.unlanded, requestReview);
+    const { prUrl, error } = ensurePrOpen(kind, gh, bodyOf(build), requestReview);
     return withRefused({ landed: true, files: build.unlanded, prUrl, error, pushed: false }, build.refused);
   }
 
@@ -823,6 +881,10 @@ function finishLanding(
     // value the union above was read against. The #954 guard below must move WITH this call on
     // any future refactor — dropping it silently reopens the hole #954 closed.
     assertLiveWriteAllowed("git-push", `force-pushing the ${kind.branch} branch`);
+    const preflight = opts.planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommit(root, sha, pr));
+    const verdict = refusedPlanPrTrees.get(b.treeSha) ?? preflight(commitSha, { title: kind.prTitle, body: bodyOf(b) });
+    if (!verdict.ok) refusedPlanPrTrees.set(b.treeSha, verdict);
+    refuseRedPlanPr(verdict, { lane: `${kind.family}-landing`, branch: kind.branch, log: opts.log });
     const lease = b.branchTipSha
       ? `--force-with-lease=refs/heads/${kind.branch}:${b.branchTipSha}`
       : `--force-with-lease=refs/heads/${kind.branch}:`;
@@ -832,6 +894,7 @@ function finishLanding(
   try {
     pushOnce(build);
   } catch (firstErr) {
+    if (firstErr instanceof PlanPrPreflightRefusedError) return withRefused({ landed: false, files: [], error: firstErr.message }, build.refused);
     // Lost the lease: some OTHER owner's tip moved since we read it. Re-derive the union ONCE
     // against the NEW tip rather than force-replacing a tip we never read — the defect this task
     // fixes (W1-T3560 design (i)).
@@ -842,12 +905,13 @@ function finishLanding(
       return { landed: false, files: [], error: String((e as Error)?.message ?? e) };
     }
     if (remoteBranchTree(git, kind.branch) === retried.treeSha) {
-      const { prUrl, error } = ensurePrOpen(kind, gh, retried.unlanded, requestReview);
+      const { prUrl, error } = ensurePrOpen(kind, gh, bodyOf(retried), requestReview);
       return withRefused({ landed: true, files: retried.unlanded, prUrl, error, pushed: false }, retried.refused);
     }
     try {
       pushOnce(retried);
     } catch (secondErr) {
+      if (secondErr instanceof PlanPrPreflightRefusedError) return withRefused({ landed: false, files: [], error: secondErr.message }, retried.refused);
       // The ref moved again even under the retry (a third writer squeezed in) — refuse rather
       // than force-replacing a tip this call never actually read. Surfaced via `error`, never
       // swallowed, and `ensurePrOpen` is never reached — auto-merge is never armed on a refusal.
@@ -866,7 +930,7 @@ function finishLanding(
     build = retried;
   }
 
-  const { prUrl, error } = ensurePrOpen(kind, gh, build.unlanded, requestReview);
+  const { prUrl, error } = ensurePrOpen(kind, gh, bodyOf(build), requestReview, true);
   if (error) {
     // Pushed fine; only the PR failed to open — pushed: true because the branch content did move.
     return withRefused(
@@ -966,7 +1030,7 @@ function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): La
       return buildTree(git(["rev-parse", "origin/main"]).trim());
     };
 
-    return withAcknowledgement(finishLanding(kind, git, gh, initialBuild, rebuild, env, opts.requestReview));
+    return withAcknowledgement(finishLanding(kind, git, gh, initialBuild, rebuild, env, root, opts));
   } catch (e) {
     return withAcknowledgement({ landed: false, files: [], error: String((e as Error)?.message ?? e) });
   } finally {
@@ -1009,6 +1073,7 @@ export function sweepFeedbackLanding(root: string, opts: SweepFeedbackLandingOpt
   const result = landPending(root, landingKind(FEEDBACK_LANDING_KIND, root, landOpts, git), {
     ...landOpts,
     git,
+    log,
     reportAcknowledgement: true,
   });
   if (log) {
@@ -1143,7 +1208,7 @@ function landContent(
       return buildTree(git(["rev-parse", "origin/main"]).trim());
     };
 
-    return finishLanding(kind, git, gh, initialBuild, rebuild, env, opts.requestReview);
+    return finishLanding(kind, git, gh, initialBuild, rebuild, env, root, opts);
   } catch (e) {
     return { landed: false, files: [], error: String((e as Error)?.message ?? e) };
   } finally {
@@ -1166,7 +1231,7 @@ export function landPlanReconcileShards(
     {
       family: "plan-reconcile",
       commitMessage: (files) => [PLAN_RECONCILE_LANDING_PR_TITLE, "", "Automated plan-status reconciliation from the measurement cadence.", "", ...files.map((file) => `- ${file}`)].join("\n"),
-      prBody: (files) => ["Reconciles credited task shards whose decorative status is still queued.", "", "The change is derived from the existing credit projection and staged through the scratch-index landing bridge.", "", "## Acceptance", ...files.map((file) => `- ${file} is reconciled without a daemon checkout write | grep: ^  status: merged$ in ${file}`)].join("\n"),
+      prBody: (files, content) => ["Reconciles credited task shards whose decorative status is still queued.", "", "The change is derived from the existing credit projection and staged through the scratch-index landing bridge.", "", "## Acceptance", ...files.map((file) => `- ${file} is reconciled without a daemon checkout write | ${landingProof(file, `grep: ^  status: merged$ in ${file}`, content)}`)].join("\n"),
     },
     root,
     opts,

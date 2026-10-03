@@ -1,0 +1,37 @@
+- id: W1-T5404
+  title: "DRAIN'S SINGLE-LANE LOOP CHECKS THE MEMORY GATE TOO — W1-T5347 (#8786) wired `memoryGovernorGateFor` into the daemon and into drain's multi-lane admission, but `runDrain`'s single-lane loop calls the cost and queue gates directly and never asks the memory gate"
+  repo: remudero
+  depends_on: [W1-T5347]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low
+  origin: "operator session 2026-10-03: follow-up to W1-T5347 (#8786)"
+  plan_refs: [W1-T1038, W1-T342]
+  files: [src/lib/drain.ts, test/drains-single-lane-loop-checks-the-memory-gate-too.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    W1-T5347 (#8786, merged) added `DrainDeps.checkMemoryGovernor` and wired it at both drain call sites
+    in src/run-task.ts (`memoryGovernorGateFor(ledgerPath, runId, ...)`). The dep's own doc says it is
+    "consulted only through `checkDispatchGovernors`". That holds in `runDrainLanes`, whose per-lane
+    admission loop calls `checkDispatchGovernors(deps, undefined)`. It does not hold in `runDrain`'s
+    single-lane loop (src/lib/drain.ts). That loop calls `deps.checkCostGovernor?.()` and
+    `deps.checkQueueGovernor?.()` directly, writes `drain.cost_governor` / `drain.queue_governor`, and
+    never reads `deps.checkMemoryGovernor`. So a single-lane `rmd drain` dispatches on a host below the
+    memory floor that the daemon and the multi-lane path would hold on.
+  design: |
+    In `runDrain`'s loop, after the queue governor and before `nextRunnable`, consult the memory gate the
+    same way `checkDispatchGovernors` does: a throw fails OPEN (logged, never a hold), and a defined
+    result ends the pass with a `drain.memory_governor` row carrying the observed and floor MiB, and the
+    summary reason `memory_governor_deferred`. Keep the existing cost and queue checks byte-for-byte.
+    Do not route the whole block through `checkDispatchGovernors`: its cost read takes a ceiling argument
+    and its rows differ, and both stay out of scope.
+  acceptance:
+    - claim: "a single-lane drain pass whose memory gate reports below the floor dispatches nothing, writes a drain.memory_governor row and ends memory_governor_deferred, a memory gate that throws does not hold the pass, and a pass with no memory dep wired runs as before"
+      proof: "unit test: test/drains-single-lane-loop-checks-the-memory-gate-too.test.ts"
+  falsifier: |
+    Remove the memory check from `runDrain`'s loop. The suite's single-lane pass with a below-floor fake
+    gate calls `runOne` and ends with a dispatch, not `memory_governor_deferred`.
