@@ -1,3 +1,4 @@
+import { BAKED_RUNTIME_SOURCE_PATHS } from "./baked-runtime-inputs.js";
 import { isInPlanScope } from "./plan-scope.js";
 
 export type DeployImpactScore = 0 | 1 | 3 | 9 | 18;
@@ -13,6 +14,7 @@ export const IMAGE_BAKED_PATHS: readonly string[] = [
   "deploy/package.json",
   "deploy/package-lock.json",
   "deploy/codex-requirements.toml",
+  ...BAKED_RUNTIME_SOURCE_PATHS,
 ];
 
 function touchesImage(change: DeployWorthChange): boolean {
