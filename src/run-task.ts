@@ -979,6 +979,7 @@ import { activateBenchmarkPaidPilot, benchmarkPaidPilotCommand } from "./lib/ben
 import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportView, runPairedTrial, sealedPairedAttemptDispatcher,
   type PairedTrialInput } from "./lib/paired-trial.js";
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
+import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
@@ -49622,6 +49623,19 @@ export function installUnhandledRejectionGuard(deps: UnhandledRejectionGuardDeps
   return true;
 }
 
+/** W1-T5341: the production seams of the fresh calibration driver — the plan's own tasks, the sealed subscription
+ *  dispatcher on the per-attempt cap, the fleet registry's instance roots, and pins derived from this process. */
+function benchmarkAaReadinessRuntime(stateDir: string) {
+  const config = loadConfig();
+  return { config,
+    runtimePins: () => deriveRuntimePins({ harnessRevision: workerBoundaryStack.harnessRevision, installRoot: resolveInstallRoot(config) }),
+    loadPlanTasks: () => loadPlan(join(repoRoot, "plan", "tasks.yaml")).tasks,
+    dispatcherFor: (task: Task) => sealedPairedAttemptDispatcher({ task, config, repoDir: join(config.root, "repos", task.repo),
+      spawn: benchmarkNonDispatchSpawn("aa-prospective", spawnWorker), maxBudgetUsd: PAIRED_ATTEMPT_MAX_BUDGET_USD,
+      clockBoundMs: loadDefaultPolicy().values.workerAbandon }),
+    defaultInstanceRoots: () => registryInstanceRoots(stateDir) };
+}
+
 /**
  * W1-T2893 — every verb's handler, keyed by the same name its COMMANDS entry (above) carries.
  * This IS the dispatch table `main()` used to encode as a 300-line flat if-ladder (`if (cmd ===
@@ -49746,6 +49760,8 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["routing-ab", async (rest) => await routingAbCommand(rest)],
   ["impossible-canary", async (rest) => await impossibleCanaryCommand(rest, (input) => runImpossibleCanary(input))],
   ["benchmark-aa", async (rest) => rest[0] === "prospective" ? await prospectiveAaCommand(rest.slice(1), (input) => runProspectiveAa(input))
+    : rest[0] === "readiness" ? await benchmarkAaReadinessCommand(rest.slice(1),
+      (request) => runBenchmarkAaReadiness({ ...benchmarkAaReadinessRuntime(request.stateDir), ...request }))
     : await benchmarkAaCommand(rest, (input) => buildBenchmarkAaReport(input))],
   ["benchmark-paid-pilot", async (rest) => await benchmarkPaidPilotCommand(rest, (input) => activateBenchmarkPaidPilot(input),
     { pairedReport: pairedPilotReportView })],
