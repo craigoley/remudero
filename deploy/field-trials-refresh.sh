@@ -4,7 +4,9 @@ set -euo pipefail
 umask 077
 
 REGISTRY="${RMD_INSTANCE_REGISTRY:-/home/craigoleyagent/rmd-state2/daemon-install/.remudero/daemon-instances.yaml}"
-MAX_PAGES="${RMD_FIELD_TRIALS_MAX_PAGES:-12}"
+# Eight requests per repository cover recent lists, one historical page, a deployment status and
+# one three-read PR detail. The collector keeps the total bound and reports deferred evidence.
+MAX_PAGES="${RMD_FIELD_TRIALS_MAX_PAGES:-24}"
 case "$MAX_PAGES" in ''|*[!0-9]*) echo "field-trials-refresh: invalid page bound" >&2; exit 2;; esac
 if (( MAX_PAGES < 1 || MAX_PAGES > 24 )); then echo "field-trials-refresh: page bound must be 1..24" >&2; exit 2; fi
 test -r "$REGISTRY" || { echo "field-trials-refresh: instance registry unreadable" >&2; exit 2; }

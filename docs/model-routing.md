@@ -18,6 +18,14 @@ Retries keep their task assignment; a fallback to Sol 6 belongs to its original 
 served model, terminal receipt, non-starter, crossover, risk/class/lane and pinned stack remain
 separate evidence. Before/after adoption is observational; it does not establish a causal winner.
 
+Private GitHub collection refreshes recent PR, commit and deployment list heads during historical
+backfill. A dated head read does not advance the historical watermark or discard its resume page.
+Historical pages rotate across these resources; deployment statuses and recent missing PR detail
+retain room in the request budget. The daily default is 24 total requests across three repositories,
+within the existing 1..24 bound. Status and detail requests count toward that total, including failed
+reads. A smaller override can defer those joins; incomplete history and unreadable deployment
+permission remain explicit. This does not change the model cash allowance or publication consent.
+
 Azure Foundry offers `gpt-6.1-sol`, version `2026-09-29`, in our East US 2 account (GlobalStandard).
 Cash balanced rows retain nano/OSS/Luna ahead of Sol 6.1; economy does not offer Sol. A squeezed
 Sonnet 5.5 deployment returning 404 can walk once to a ready, context-fitting Sol 6.1. Frontier
@@ -282,6 +290,11 @@ while the Codex and Claude routing auction here spends subscriptions. The quoted
 personal-agent estimate does not establish Remudero savings.
 
 ## Paid pilot accounting
+
+Daily and full trial collection count invalid timestamps separately from future rows. Both are
+excluded before assignment cohorts and watermarks, while the raw receipts and private quarantine
+findings remain intact. An older snapshot without the invalid-timestamp count reports that count
+as unavailable. A current partial source remains partial; these diagnostics do not promote a model.
 
 The narrow `cash-simple` paid trial is a separate, task-stable allocation for low-risk, single-file
 docs or plan-lint implementation. Its pilot-only daily spend is the sum of distinct API-billed
