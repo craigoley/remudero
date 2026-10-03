@@ -5,6 +5,7 @@ import {
   ratchetContractLines,
   commitMessageContractLines,
   WORKER_PR_AUTHORITY_LINES,
+  GH_PR_EDIT_FALLBACK_LINES,
 } from "./compaction.js";
 import type { CapabilityReceipt } from "./capability-grant.js";
 import { GENERATED_LEDGER_CLASSES, isCompanionPath } from "./companion-paths.js";
@@ -539,6 +540,9 @@ export function renderFixPrompt(opts: {
     // `commitMessageContractLines` above is shared — and this rung needs it MOST: it amends an
     // existing PR, so its body is the one most likely to have been written against an earlier diff.
     `FULL criteria set.`,
+    // W1-T4268: the SAME fallback literal as the implement contract, spliced after the sentence the
+    // authority lines interrupt so that sentence still reads whole.
+    ...GH_PR_EDIT_FALLBACK_LINES,
     ...bodyVsDiffContractLines(),
     `Anything you discover here that is OUT OF SCOPE for THIS fix — a`,
     `research question, a follow-up task, or an action someone should take — goes in an`,

@@ -361,6 +361,20 @@ export const WORKER_PR_AUTHORITY_LINES: readonly string[] = [
   "  that decision after CI and semantic review; stop after reporting the PR URL.",
 ];
 
+/** W1-T4268 — shared by both PR-authoring worker prompts, spliced beside {@link WORKER_PR_AUTHORITY_LINES}.
+ * `gh pr edit` can fail on this repo/token with a Projects (classic) GraphQL error even for a body-only
+ * edit. That is a TRANSPORT defect, so a worker must neither assume the edit was rejected nor that it
+ * landed. The substitute is the REST PATCH `prBodyRestArgs` (run-task.ts, W1-T2948) already proved;
+ * `-f`, never `-F`, because `-F` reads a leading `@` value as a filename and expands `{owner}`/`{repo}`. */
+export const GH_PR_EDIT_FALLBACK_LINES: readonly string[] = [
+  "- If `gh pr edit` fails with \"Projects (classic) is being deprecated\" /",
+  "  `repository.pullRequest.projectCards`, that is a TRANSPORT failure of gh's GraphQL query, never",
+  "  evidence the edit was rejected or already applied. Use the REST substitute instead:",
+  "  `gh api -X PATCH repos/{owner}/{repo}/pulls/{number} -f body=<text>` (or `-f title=<text>`),",
+  "  with the real owner, repo and PR number. Use `-f`, NEVER `-F`: `-F` reads a value starting",
+  "  with `@` as a FILENAME and substitutes `{owner}`/`{repo}`/`{branch}` placeholders.",
+];
+
 /**
  * W1-T3696 step (2), per-provider: the contract a worker gets when the HARNESS owns git.
  *
@@ -466,6 +480,7 @@ export function outputContractLines(taskId: string, harnessCommits = false): str
     "  NAME, which is not a conventional subject. Pass it yourself, e.g. `gh pr create --title",
     "  \"type(scope): subject\" --fill --base main`.",
     ...WORKER_PR_AUTHORITY_LINES,
+    ...GH_PR_EDIT_FALLBACK_LINES,
     ...commitMessageContractLines(),
     `- Include this exact trailer as the LAST line of the PR body: Remudero-Task: ${taskId}`,
     // W1-T81/T82 class (PRs #677/#683): a correct, fully-tested PR still FAILED review because
