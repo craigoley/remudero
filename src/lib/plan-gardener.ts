@@ -220,7 +220,7 @@ export function applyPlanActions(repoRoot: string, shards: Map<string, string>, 
     const path = join(repoRoot, rel);
     const text = readFileSync(path, "utf8");
     if (/^ {2}retirement:/m.test(text) || !/^ {2}status: queued[ \t]*$/m.test(text)) continue;
-    const status = a.landingCommit ? "  status: done" : `  status: blocked\n  retirement: ${a.retirement}`;
+    const status = `  status: ${a.landingCommit ? "done" : "blocked"}\n  retirement: ${a.retirement}`;
     writeFileSync(path, text.replace(/^ {2}status: queued[ \t]*$/m, `${status}\n  # ${planGardenMarker(a)}${a.landingCommit ? ` commit ${a.landingCommit}` : ""} — ${a.reason}`));
     changed.push(rel);
   }

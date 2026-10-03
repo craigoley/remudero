@@ -75,7 +75,7 @@ test("W1-T4861: a queued task whose proofs now hold is proposed done with its co
   for (const proof of proofs) assert.equal(grepProofHolds(repo.dir, proof.slice("  proof: ".length)), true);
   const task = loadPlan(join(repo.dir, "plan/tasks.yaml")).byId.get("W1-T1")!;
   assert.equal(task.status, "done");
-  assert.equal(task.retirement, undefined);
+  assert.equal(task.retirement, "closed", "completion preserves the gardener's closed reason");
   assert.ok(readFileSync(join(repo.dir, shard), "utf8").includes(commit));
   assert.deepEqual(retirementCandidates(planInventory(repo.dir, deps.stateDir), repo.dir), []);
 });
