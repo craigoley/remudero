@@ -438,6 +438,7 @@ import { makeTempDir, sweepStaleTempDirs, withTempDir, type TempSweepOpts, type 
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { IMAGE_BUILD_SHA_PATH, requestDeploy, runDeployCycle } from "./lib/deployer.js";
+import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
 import { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 export { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 import { runOperatorSync, type OperatorSyncDeps } from "./lib/operator-sync.js";
@@ -35426,6 +35427,11 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     imageDriftOnly: rest.includes("--image-drift-only"),
   });
   console.log(`### rmd deploy-run — ${result.deployed ? "DEPLOYED" : "no-op"}: ${result.reason}`);
+  const serve = runServePolicyCycle({ ...deps, ...realServePolicyDeps({ installPath: assessment.installRoot, stateRoot: effectiveConfig.root }) }, {
+    dryRun: rest.includes("--dry-run"),
+    imageDriftOnly: rest.includes("--image-drift-only"),
+  });
+  console.log(`### rmd deploy-run — serve ${serve.replaced ? "REPLACED" : "no-op"}: ${serve.reason}`);
   if (result.blocker) {
     // W1-T3694 — legible without tailing a ledger: a stale-running daemon the tick declined to
     // act on names both shas right here, in the one place an operator or an alarm already reads.
