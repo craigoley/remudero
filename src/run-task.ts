@@ -900,6 +900,10 @@ import {
   buildPlanPrBody,
   bodyNeedsAcceptanceRepair,
   createPlanPrRest,
+  planPrPreflight,
+  planPrPreflightAllows,
+  refuseRedPlanPr,
+  type PlanPrPreflightResult,
   ensureJudgeableBody,
   filingAcceptanceCriteria,
   probeExistingPlanPr,
@@ -33373,6 +33377,8 @@ export function gardenCheckout(opts: {
   log: (step: string, extra?: Record<string, unknown>) => void;
   fetcher?: GhApiFetcher;
   clock?: Clock;
+  /** W1-T5348: the plan-PR preflight over the committed tree; injected only by a test. */
+  preflight?: (input: { cwd: string; title: string; body: string }) => PlanPrPreflightResult;
 }): GardenCheckout {
   const branch = `${opts.name}-garden-${(opts.clock ?? systemClock).now()}`;
   const root = join(opts.worktreesRoot, branch);
@@ -33399,6 +33405,9 @@ export function gardenCheckout(opts: {
       // branch with no PR — 103 test-run plan-garden-* heads on origin by 2026-09-29.
       assertLiveWriteAllowed("git-push", `pushing the ${opts.name} garden branch ${branch}`);
       assertLiveWriteAllowed("gh-pr-create", `opening a ${opts.name} garden PR against ${opts.owner}/${opts.repo}`);
+      // W1-T5348: a tree CI would refuse is never pushed — the lane's not-landed outcome instead of a red PR.
+      const verdict = (opts.preflight ?? planPrPreflight)({ cwd: root, title: fitted.header, body: fullTitle + body });
+      if (!planPrPreflightAllows(verdict, { lane: opts.name, branch, log: opts.log })) return undefined;
       git("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
       const fetcher = opts.fetcher ?? ghJson;
       try {
@@ -46146,6 +46155,10 @@ export async function approveCommand(
     execFileSync("git", ["-C", worktreePath, "add", "--", ...shardRelPaths], { stdio: "inherit" });
     execFileSync("git", ["-C", worktreePath, "commit", "-m", approveCommitMessage(payload)], { stdio: "inherit" });
   };
+  // W1-T5348: the committed shards and the title are preflighted before the push. The body is authored later by
+  // buildPlanPrBody, which already refuses a proof that does not discriminate, so it is not re-checked here.
+  const preflightApprovePush = (path: string, branch: string, id: string): void =>
+    refuseRedPlanPr(planPrPreflight({ cwd: path, title: `chore(plan): ratify ${id} via rmd approve`, body: "" }), { lane: "approve", branch, log });
   const branchFiledTaskIds = (path: string): string[] =>
     execFileSync("git", ["-C", path, "diff", "origin/main...HEAD", "--", "plan/tasks.yaml", "plan/tasks.d"], { encoding: "utf8" })
       .split("\n")
@@ -46227,6 +46240,7 @@ export async function approveCommand(
       worktreeAdd(dir, worktreePath, branch, "origin/main", { log });
       writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
       materializeAndCommitApproveFragment(worktreePath, payload, `run ${runId}`);
+      preflightApprovePush(worktreePath, branch, payload.proposalId);
       gitPushRunBranch(worktreePath);
       return branch;
     },
@@ -46246,6 +46260,7 @@ export async function approveCommand(
       // file, and every OTHER `startedAt` in this function already predates that gate.
       writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: systemClock.iso() });
       materializeAndCommitApproveFragment(worktreePath, payload, `joined ${branch}`);
+      preflightApprovePush(worktreePath, branch, payload.proposalId);
       gitPushRunBranch(worktreePath);
       log("approve.joined", { proposal_id: payload.proposalId, branch });
       // W1-T4706: the open PR's body is rebuilt over every proposal on the branch, never left as the first approve's.
