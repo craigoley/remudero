@@ -119,6 +119,8 @@ export interface ShadowEvidence {
   duplicateRows: number;
   /** Legacy's own rows, when it names them: a sort-key row they lack is one legacy could not see. */
   legacyRows?: LegacyRows;
+  /** The rows legacy's sort keys and decided rows were read from, when narrower than `legacyRows`. */
+  orderRows?: LegacyRows;
 }
 
 function canonical(value: unknown): string {
@@ -368,8 +370,9 @@ function explainOrder(key: ShadowLatest | undefined, ev: ShadowEvidence): Shadow
   const [lo, hi] = [Math.min(ev.legacyAsOfMs ?? 0, ev.viewAsOfMs ?? 0), Math.max(ev.legacyAsOfMs ?? 0, ev.viewAsOfMs ?? 0)];
   if (at > lo && at <= hi) return "timing";
   const id = entityOf((key.view ?? key.legacy)!);
-  const seen = (ev.legacyRows?.[id] ?? []).some((row) => Number(row.split("|")[0]) === at);
-  return viewLater && ev.legacyRows !== undefined && !seen && at <= (ev.legacyAsOfMs ?? Number.POSITIVE_INFINITY) ? "legacy_horizon" : "real";
+  const rows = ev.orderRows ?? ev.legacyRows;
+  const seen = (rows?.[id] ?? []).some((row) => Number(row.split("|")[0]) === at);
+  return viewLater && rows !== undefined && !seen && at <= (ev.legacyAsOfMs ?? Number.POSITIVE_INFINITY) ? "legacy_horizon" : "real";
 }
 
 function classifyList(legacy: readonly unknown[], view: readonly unknown[], ev: ShadowEvidence, sortKeys: Readonly<Record<string, ShadowLatest>> = {}): { classification: ShadowClassification; reason: string } {
@@ -488,7 +491,7 @@ function unseenBy(db: ReadModelDb, ids: readonly string[], rows: LegacyRows, fro
 /** The evidence the read model itself holds: which rows name the diff's ids, and when; `legacyRows` adds legacy's own read. */
 export function readShadowEvidence(
   dbs: readonly ReadModelDb[],
-  input: { ids: readonly string[]; legacyAsOfMs: number | null; viewAsOfMs: number | null; legacyHorizonMs?: number; duplicates?: { rows: number; ids: readonly string[] }; legacyRows?: LegacyRows },
+  input: { ids: readonly string[]; legacyAsOfMs: number | null; viewAsOfMs: number | null; legacyHorizonMs?: number; duplicates?: { rows: number; ids: readonly string[] }; legacyRows?: LegacyRows; orderRows?: LegacyRows },
 ): ShadowEvidence {
   const ids = [...new Set(input.ids)];
   const named = new Set<string>();
@@ -517,7 +520,7 @@ export function readShadowEvidence(
     ...(input.legacyHorizonMs !== undefined ? { legacyHorizonMs: input.legacyHorizonMs } : {}),
     named, namedBeforeHorizon: before, namedInGap: inGap, rowsInGap,
     duplicateIds: new Set(input.duplicates?.ids ?? []), duplicateRows: input.duplicates?.rows ?? 0,
-    ...(live ? { legacyRows: live } : {}),
+    ...(live ? { legacyRows: live } : {}), ...(input.orderRows ? { orderRows: input.orderRows } : {}),
   };
 }
 
@@ -536,6 +539,8 @@ export interface ShadowLegacy {
   latest?: Readonly<Record<string, ShadowLatest>>;
   /** The rows legacy's read held ({@link legacyRowIndex}): a row it lacks is one it could not see. */
   rows?: LegacyRows;
+  /** The rows its sort keys and `from` rows were read from, when narrower than `rows` (a day's spend reads more). */
+  orderRows?: LegacyRows;
   /** Per time-ordered list path, each id's sort-key row on each side (`<id>#<ts>`). */
   sortKeys?: Readonly<Record<string, Readonly<Record<string, ShadowLatest>>>>;
   /** Per path one row decides, the row (`<id>#<ts>`) each side took it from. */
@@ -716,7 +721,7 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
         view, ids: raw.flatMap((d) => [...d.ids, ...(d.members ? memberEntities(d.members) : []), ...(d.sum ? sumEntities(d.sum) : []),
           ...(d.latest ? [d.latest.legacy, d.latest.view].flatMap((row) => (row === null ? [] : [entityOf(row)])) : [])]), legacyAsOfMs: legacy.asOfMs, viewAsOfMs: Number.isFinite(viewAsOf) ? viewAsOf : null,
         ...(legacy.horizonMs !== undefined ? { legacyHorizonMs: legacy.horizonMs } : {}), ...(legacy.duplicates ? { duplicates: legacy.duplicates } : {}),
-        ...(legacy.rows ? { legacyRows: legacy.rows } : {}),
+        ...(legacy.rows ? { legacyRows: legacy.rows } : {}), ...(legacy.orderRows ? { orderRows: legacy.orderRows } : {}),
       });
       const judged = raw.filter((d) => !legacy.derived?.[d.path]).map((d) => ({ path: d.path, ...classifyShadowDiff(d, ev) }));
       const diffs = raw.map((d) => {

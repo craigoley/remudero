@@ -25,6 +25,9 @@
  */
 import { systemClock } from "./clock.js";
 import { execFileSync } from "node:child_process";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { parse as parseYaml } from "yaml";
 import { loadConfig, type Config } from "./config.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { readLedgerLines } from "./status.js";
@@ -37,6 +40,8 @@ import {
 import {
   mapRestPr,
   liveStateFromRest,
+  PLAN_FILING_FILE_RESPONSE_CAP,
+  prFilesRestArgs,
   singlePrRestArgs,
   type GhApiFetcher,
   type RestPullRow,
@@ -246,6 +251,56 @@ export function fixRebaseMergeFactsFromRest(
   }
 }
 
+/** W1-T5472 — whether a PR's changed files reach `plan/`. "unreadable" is its own value, never
+ *  "untouched": {@link directMergePreflight} sends it down the same update path as "touched". */
+export type PlanTouch = "touched" | "untouched" | "unreadable";
+
+/** W1-T5472 — classify one PR's changed files from the REST files page. A failed read, a
+ *  non-array payload, an empty list, or a full page (the list may be truncated past it) cannot
+ *  prove the plan is untouched, so each answers "unreadable". A rename counts its old path too. */
+export function planTouchFromRest(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  fetch: GhApiFetcher = ghJson,
+): PlanTouch {
+  let rows: unknown;
+  try {
+    rows = fetch(prFilesRestArgs(owner, repo, prNumber));
+  } catch {
+    // the failure keeps its own value: "unreadable" is updated like a plan PR, never merged as-is.
+    return "unreadable";
+  }
+  if (!Array.isArray(rows) || rows.length === 0) return "unreadable";
+  const paths = rows.flatMap((row) => {
+    const r = (row ?? {}) as { filename?: unknown; previous_filename?: unknown };
+    return [r.filename, r.previous_filename].filter((p): p is string => typeof p === "string");
+  });
+  if (paths.some((p) => p.startsWith("plan/"))) return "touched";
+  return rows.length >= PLAN_FILING_FILE_RESPONSE_CAP ? "unreadable" : "untouched";
+}
+
+/** W1-T5472 — every plan file under `planDir` (`tasks.yaml` and each `tasks.d/*.yaml`) that a
+ *  unique-keys YAML parse refuses, with its path and the parser's first message line. A file git
+ *  merged cleanly from two branches can still carry one key twice, and one such shard refuses the
+ *  whole plan. Every failure is collected, never just the first. */
+export function unloadablePlanShards(planDir: string): Array<{ path: string; error: string }> {
+  const shardDir = join(planDir, "tasks.d");
+  const paths = [
+    ...(existsSync(join(planDir, "tasks.yaml")) ? [join(planDir, "tasks.yaml")] : []),
+    ...(existsSync(shardDir) ? readdirSync(shardDir).filter((f) => f.endsWith(".yaml")).sort().map((f) => join(shardDir, f)) : []),
+  ];
+  const bad: Array<{ path: string; error: string }> = [];
+  for (const path of paths) {
+    try {
+      parseYaml(readFileSync(path, "utf8"), { uniqueKeys: true });
+    } catch (err) {
+      bad.push({ path, error: String((err as Error)?.message ?? err).split("\n")[0] });
+    }
+  }
+  return bad;
+}
+
 /** Private mirror of run-task.ts's `ghUpdateBranchArgv`. */
 function ghUpdateBranchArgv(owner: string, repo: string, prNumber: number): string[] {
   return ["api", "--method", "PUT", `repos/${owner}/${repo}/pulls/${prNumber}/update-branch`];
@@ -431,6 +486,9 @@ export interface ArmDeps {
    *  {@link attemptArm} requires fresh merge facts before every direct-merge fallback and uses
    *  this existing REST update-branch write once when the PR is behind. */
   updateBranch?: (prUrl: string) => { ok: boolean; error?: string };
+  /** W1-T5472 — OPTIONAL. Whether the PR's changed files reach `plan/`. Absent keeps W1-T3694's
+   *  behind-but-mergeable direct merge for every PR. */
+  readPlanTouch?: (prUrl: string) => PlanTouch;
   /** W1-T1280 — OPTIONAL. Blocks the calling thread for `ms` between the bounded re-reads
    *  {@link readMergeFacts} above drives. */
   sleepSync?: (ms: number) => void;
@@ -489,6 +547,10 @@ export function realArmDeps(
       const target = mergeTargetFromPrUrl(prUrl);
       if (!target) return { ok: false, error: `cannot resolve update-branch target from ${prUrl}` };
       return ghUpdateBranch(target.owner, target.repo, target.prNumber);
+    },
+    readPlanTouch: (prUrl) => {
+      const target = mergeTargetFromPrUrl(prUrl);
+      return target ? planTouchFromRest(target.owner, target.repo, target.prNumber) : "unreadable";
     },
     sleepSync: (ms) => {
       if (ms <= 0) return;
@@ -585,6 +647,10 @@ export interface DirectMergePreflightEvidence {
   mergeable?: string;
   remedy: "direct-merge" | "update-branch" | "retry-later";
   error?: string;
+  /** W1-T5472 — set only when the plan-touch read ran (a behind PR GitHub would merge as-is). */
+  planTouch?: PlanTouch;
+  /** W1-T5472 — why a PR GitHub would merge as-is was updated instead. */
+  reason?: "plan_pr_behind";
 }
 
 /**
@@ -664,7 +730,7 @@ export function armAutoMergeDetailed(
  * armAutoMergeAtOpen} share the EXACT same completion logic rather than duplicating it.
  */
 type DirectMergePreflightDeps = Pick<ArmDeps, "say"> &
-  Partial<Pick<ArmDeps, "headSha" | "readMergeFacts" | "updateBranch">>;
+  Partial<Pick<ArmDeps, "headSha" | "readMergeFacts" | "updateBranch" | "readPlanTouch">>;
 
 type DirectMergePreflightDecision =
   | { proceed: true; evidence?: DirectMergePreflightEvidence }
@@ -751,9 +817,21 @@ function directMergePreflight(
   // FALLS BACK TO THE OLD BEHAVIOUR WHEN THE STATE IS UNREADABLE: an absent `mergeableState`
   // still updates, so an unknown answer never newly SKIPS an update that was required.
   const behindBlocksThisMerge = facts.mergeableState === undefined || facts.mergeableState === "behind";
-  if (facts.behindBy === 0 || !behindBlocksThisMerge) {
+  if (facts.behindBy === 0) {
     return { proceed: true, evidence: { ...baseEvidence, remedy: "direct-merge" } };
   }
+  // W1-T5472: EXCEPT A PLAN PR. Its checks linted a plan that is not the one landing: on
+  // 2026-10-03 #8871 merged two commits behind, git joined its `priority:` line to #8872's in
+  // one shard, and the duplicate key refused the whole plan on main. An "unreadable" file list
+  // counts as plan-touching.
+  const planTouch = behindBlocksThisMerge ? undefined : readPlanTouchOrUnreadable(prUrl, deps);
+  if (!behindBlocksThisMerge && (planTouch === undefined || planTouch === "untouched")) {
+    return {
+      proceed: true,
+      evidence: { ...baseEvidence, ...(planTouch !== undefined ? { planTouch } : {}), remedy: "direct-merge" },
+    };
+  }
+  const planEvidence = planTouch !== undefined ? { planTouch, reason: "plan_pr_behind" as const } : {};
 
   let update: { ok: boolean; error?: string };
   try {
@@ -763,6 +841,7 @@ function directMergePreflight(
   }
   const directMergePreflight: DirectMergePreflightEvidence = {
     ...baseEvidence,
+    ...planEvidence,
     remedy: "update-branch",
     ...(update.error !== undefined ? { error: update.error } : {}),
   };
@@ -779,12 +858,25 @@ function directMergePreflight(
 
   deps.say(
     `automerge.direct_merge_updated (W1-T2855): prior_head=${observedHead ?? "unknown"} ` +
-      `behind_by=${facts.behindBy} — updated once; awaiting fresh checks and review: ${prUrl}`,
+      `behind_by=${facts.behindBy}${planTouch !== undefined ? ` reason=plan_pr_behind plan_touch=${planTouch}` : ""}` +
+      ` — updated once; awaiting fresh checks and review: ${prUrl}`,
   );
   return {
     proceed: false,
     result: { outcome: "direct-merge-updated", ...context, directMergePreflight },
   };
+}
+
+/** W1-T5472 — `undefined` only when no reader is wired; a reader that throws reads "unreadable". */
+function readPlanTouchOrUnreadable(prUrl: string, deps: DirectMergePreflightDeps): PlanTouch | undefined {
+  if (!deps.readPlanTouch) return undefined;
+  try {
+    return deps.readPlanTouch(prUrl);
+  } catch (e) {
+    // recorded via deps.say, and the value is "unreadable", which takes the update path.
+    deps.say(`automerge.plan_touch_unreadable (W1-T5472): ${String((e as Error)?.message ?? e)} — treated as plan-touching: ${prUrl}`);
+    return "unreadable";
+  }
 }
 
 /**
@@ -1128,6 +1220,7 @@ export function logArmAttribution(
         ...(directMergePreflight.mergeable !== undefined ? { mergeability: directMergePreflight.mergeable } : {}),
         remedy: directMergePreflight.remedy,
         ...(directMergePreflight.error !== undefined ? { remedy_error: directMergePreflight.error } : {}),
+        ...(directMergePreflight.planTouch !== undefined ? { plan_touch: directMergePreflight.planTouch } : {}),
       }
     : {};
   log(armOutcomeArmed(outcome) ? "automerge.armed" : armSkipStepName(outcome), {
@@ -1157,7 +1250,8 @@ export function logArmAttribution(
           ? "automerge.direct_merge_update_failed"
           : undefined;
   if (preflightStep) {
-    log(preflightStep, { task_id: taskId, pr_number: prNumber, pr_url: prUrl, lane, ...preflightFields });
+    const reason = directMergePreflight?.reason;
+    log(preflightStep, { task_id: taskId, pr_number: prNumber, pr_url: prUrl, lane, ...preflightFields, ...(reason ? { reason } : {}) });
   }
   if (rateLimit) {
     log("automerge.rate_limit_refused", { task_id: taskId, pr_number: prNumber, pr_url: prUrl, lane, ...ghFields });

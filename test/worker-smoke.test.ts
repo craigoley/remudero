@@ -254,6 +254,8 @@ function runRecycle(smokeMode: string, extraEnv: Record<string, string> = {}) {
       RMD_RECYCLE_POLL_S: "1",
       RMD_RECYCLE_FIRST_BOOT: "1",
       RMD_RECYCLE_SKIP_RECLAIM: "1",
+      // This smoke-order fixture models the two legacy mounts. Host scratch policy is a separate seam.
+      RMD_SCRATCH: "off",
       GH_TOKEN: "",
       GH_APP_ID: "",
       GH_APP_INSTALLATION_ID: "",
@@ -294,6 +296,25 @@ test("W1-T5017: recycle invokes exactly one real worker smoke, on the pulled ima
   assert.ok(run.calls[smokeAt].argv.includes("sha256:PULLEDID"), "the smoke runs the PULLED image");
   assert.match(run.stdout, /worker smoke PASSED/);
   assert.ok(run.calls.some((c) => verb(c) === "run"), "the replacement still starts after a passing smoke");
+});
+
+test("W1-T5017: the worker smoke fixture ignores an unrelated host scratch switch", (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}smoke-scratch-switch-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, "scratch");
+  const switchPath = join(root, "enabled");
+  const mounts = join(root, "mounts");
+  mkdirSync(scratch);
+  writeFileSync(switchPath, "on\n");
+  writeFileSync(mounts, `fixture ${scratch} ext4 rw 0 0\n`);
+  const run = runRecycle("pass", {
+    RMD_SCRATCH_SWITCH: switchPath,
+    RMD_SCRATCH_ROOT: scratch,
+    RMD_SCRATCH_MOUNTS_FILE: mounts,
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /scratch mounts off/);
+  assert.equal(existsSync(join(scratch, "rmd")), false, "the host policy cannot prepare scratch outside this fixture's contract");
 });
 
 test("W1-T5017: a smoke that hangs past its bound is a failure, not a wait", { skip: spawnSync("sh", ["-c", "command -v timeout"]).status !== 0 }, () => {

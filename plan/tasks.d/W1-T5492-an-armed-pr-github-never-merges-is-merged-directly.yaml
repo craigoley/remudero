@@ -1,0 +1,42 @@
+- id: W1-T5492
+  title: "AN ARMED PR GITHUB NEVER MERGES IS MERGED DIRECTLY — the W1-T2855 direct-merge fallback runs only inside `attemptArm`, at arm time. Once auto-merge is armed on a green, PASS-reviewed PR, nothing revisits it, so when GitHub's auto-merge silently never fires the PR sits forever. Three cases in two days: #8725 (2026-10-02), #8876 (armed 16:26Z, merged by hand 19:04Z) and #8825 on 2026-10-03, each merged at once by a direct REST call that branch protection accepted"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: medium
+  origin: "operator session 2026-10-03 19:04Z: #8876 and #8825 BLOCKED with auto-merge armed, review SUCCESS and every required check green; `PUT /pulls/N/merge` merged both"
+  plan_refs: [W1-T2855, W1-T4405, W1-T5472]
+  files: [src/lib/sweep.ts, test/an-armed-pr-github-never-merges-is-merged-directly.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED: #8876 got `automerge.armed` ("verdict is a full PASS") at 16:26Z on 2026-10-03, and the
+    live ledger has no later `sweep.disposed` row for it. At 19:03Z GitHub reported it BLOCKED/MERGEABLE
+    with auto-merge armed, review SUCCESS and no failing or pending check. A direct
+    `gh api -X PUT repos/craigoley/remudero/pulls/8876/merge` returned merged:true. #8825 (test-garden,
+    armed) behaved the same, and so did #8725 on 2026-10-02.
+    A fleet PR that is green, reviewed and armed is, to the sweep, finished work. The W1-T2855 direct
+    merge (with its fresh-facts preflight and one update-branch) only runs when arming itself fails.
+    So GitHub's own auto-merge is a single point of failure for every PR the fleet produces.
+  design: |
+    1. In the sweep, a PR whose auto-merge is armed, whose review is SUCCESS on the current head, and
+       whose required checks are all green is "armed-idle". Ledger `automerge.armed_idle` the first pass
+       it is seen so, keyed by `pr@head`.
+    2. On a LATER pass with the same `pr@head` still armed-idle (the head unchanged and still open), run
+       the existing W1-T2855 direct-merge path: the fresh-facts preflight, then the REST merge. Ledger
+       `automerge.armed_idle_merged` or the preflight's refusal. Under a merge queue (W1-T4405), enqueue
+       instead of merging. A plan-touching behind PR keeps W1-T5472's update-first rule.
+    3. A head change, a review that is no longer SUCCESS, or any non-green required check clears the
+       observation. Branch protection still refuses an unmergeable PR, so this never bypasses a gate.
+  acceptance:
+    - claim: "an armed, reviewed, green PR seen idle on two passes at the same head is merged through the direct-merge preflight, and a first sighting only records it"
+      proof: "grep: test(\"W1-T5492: a second idle sighting merges an armed pr directly in test/an-armed-pr-github-never-merges-is-merged-directly.test.ts"
+    - claim: "a new head, a non-success review or a red required check never reaches the direct merge"
+      proof: "grep: test(\"W1-T5492: a changed head clears the idle sighting in test/an-armed-pr-github-never-merges-is-merged-directly.test.ts"
+  falsifier: |
+    Remove the second-sighting arm: the suite's PR armed, green and reviewed across two passes is never
+    merged, and the fake REST merge records zero calls.

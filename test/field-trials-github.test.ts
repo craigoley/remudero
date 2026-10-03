@@ -119,7 +119,8 @@ test("field trials github resumes a failed page and advances the watermark only 
   failPage2 = false;
   fake.calls.length = 0;
   const second = await ingestFieldTrialsGithub(fake.fetch, ["o/r"], store, "2026-09-03T00:00:00.000Z", 1000);
-  assert.equal(fake.calls[0], "repos/o/r/pulls?state=all&sort=updated&direction=desc&per_page=100&page=2", "resumes at the stored page");
+  assert.equal(fake.calls[0], "repos/o/r/pulls?state=all&sort=updated&direction=desc&per_page=100&page=1", "recent updates are read while the history remains incomplete");
+  assert.ok(fake.calls.includes("repos/o/r/pulls?state=all&sort=updated&direction=desc&per_page=100&page=2"), "also resumes the stored historical page");
   assert.equal(second.state, "complete");
   assert.deepEqual([cursor.state, cursor.resumePage, cursor.watermark, cursor.asOf], ["complete", null, at(1000), "2026-09-03T00:00:00.000Z"]);
   assert.equal(Object.keys(store.repos["o/r"]!.pulls).length, 150);
@@ -197,4 +198,102 @@ test("field trials github default seam shells gh api and turns a failed read int
   assert.deepEqual(await refused("repos/o/r/pulls"), { ok: false, reason: "github-read-failed" }, "a refused read is a reason, not a crash");
   const injected = ghApiFetch(async (args) => JSON.stringify([{ args }]));
   assert.deepEqual(await injected("repos/o/r/pulls"), { ok: true, items: [{ args: ["api", "repos/o/r/pulls"] }] });
+});
+
+
+test("daily field trials read recent commits deployments and PR detail while a large history remains incomplete", async () => {
+  const pulls = Array.from({ length: 1000 }, (_, i) => pr(1000 - i, 1000 - i));
+  const fixture: Fixture = {
+    pulls,
+    commits: Array.from({ length: 1000 }, (_, i) => ({ sha: `c${1000 - i}`, commit: { committer: { date: at(1000 - i) } } })),
+    deployments: Array.from({ length: 1000 }, (_, i) => ({ id: 1000 - i, sha: `c${1000 - i}`, created_at: at(1000 - i) })),
+    statuses: { 1000: [{ state: "success", created_at: at(1001) }], 999: [{ state: "success", created_at: at(1001) }] },
+    prCommits: { 1000: [{ sha: "first1000" }], 9000: [{ sha: "first9000" }] },
+  };
+  const fake = githubFake({ "o/r": fixture });
+  const store: FieldTrialsGithubStore = { version: "field-trials-github-v1", repos: {} };
+  const first = await ingestFieldTrialsGithub(fake.fetch, ["o/r"], store, at(3000), 8);
+  const saved = store.repos["o/r"]!;
+  assert.equal(fake.calls.length, 8, "the transport remains inside the request bound");
+  assert.equal(first.pagesRead, fake.calls.length, "successful status and detail pages are counted too");
+  assert.equal(first.requestsMade, fake.calls.length, "the total includes every transport attempt");
+  assert.equal(first.state, "partial", "unfinished history is not called complete");
+  assert.equal(saved.commits.c1000, at(1000));
+  assert.equal(saved.deployments["1000"]!.status.state, "success");
+  assert.equal(saved.pulls.PR_1000!.detail.state, "observed");
+  assert.equal(saved.cursors.pulls.watermark, null);
+  assert.equal(saved.cursors.pulls.resumePage, 3);
+  for (const cursor of Object.values(saved.cursors)) assert.deepEqual(cursor.head, { state: "observed", asOf: at(3000), reason: null });
+  assert.ok((first.repos["o/r"]!.statusesPending ?? 0) > 0);
+
+  fixture.pulls = [pr(9000, 2000), ...pulls];
+  fake.calls.length = 0;
+  await ingestFieldTrialsGithub(fake.fetch, ["o/r"], store, at(4000), 8);
+  assert.ok(fake.calls.length <= 8);
+  assert.equal(saved.pulls.PR_9000!.detail.state, "observed", "new work does not wait for the old PR backfill");
+  assert.equal(saved.cursors.pulls.resumePage, 3, "refreshing page one does not discard a saved historical page");
+  assert.equal(saved.cursors.commits.resumePage, 3, "the next historical page rotates to commits");
+  assert.equal(saved.cursors.pulls.watermark, null, "a fresh head is not complete historical coverage");
+
+  fake.calls.length = 0;
+  await ingestFieldTrialsGithub(fake.fetch, ["o/r"], store, at(5000), 8);
+  assert.ok(fake.calls.includes("repos/o/r/deployments?per_page=100&page=2"), "deployment history also receives its turn");
+});
+
+test("a failed recent field-trial head read preserves its history and reports unavailable freshness", async () => {
+  const saved = emptyRepoStore();
+  saved.commits.kept = at(1);
+  saved.cursors.commits = { ...saved.cursors.commits, state: "partial", resumePage: 7, sweepHigh: at(4) };
+  const store: FieldTrialsGithubStore = { version: "field-trials-github-v1", repos: { "o/r": saved } };
+  const fake = githubFake({}, (path) => path.includes("/commits?"));
+  const pass = await ingestFieldTrialsGithub(fake.fetch, ["o/r"], store, at(5), 8);
+  assert.equal(pass.state, "partial");
+  assert.equal(pass.requestsMade, fake.calls.length);
+  assert.equal(pass.pagesRead, fake.calls.length - 1, "a failed read is an attempt rather than a page of evidence");
+  assert.deepEqual(saved.commits, { kept: at(1) });
+  assert.equal(saved.cursors.commits.resumePage, 7);
+  assert.deepEqual(saved.cursors.commits.head, { state: "unavailable", asOf: at(5), reason: "github-read-failed" });
+  assert.equal(fake.calls.filter((path) => path.includes("/commits?")).length, 1, "a failed resource is not polled again in the same pass");
+});
+
+test("a field-trial request bound smaller than the repository count is still a total bound", async () => {
+  const fake = githubFake({});
+  const store: FieldTrialsGithubStore = { version: "field-trials-github-v1", repos: {} };
+  const pass = await ingestFieldTrialsGithub(fake.fetch, ["o/a", "o/b", "o/c"], store, at(1), 1);
+  assert.equal(fake.calls.length, 1);
+  assert.equal(pass.pagesRead, 1);
+  assert.equal(pass.state, "partial");
+  assert.equal(pass.repos["o/b"]!.pulls.reason, "page-budget-exhausted");
+  assert.equal(pass.repos["o/c"]!.pulls.state, "partial");
+  for (const invalid of [NaN, Infinity, -1, 1.5]) {
+    await assert.rejects(ingestFieldTrialsGithub(fake.fetch, ["o/a"], store, at(1), invalid), RangeError);
+  }
+  assert.equal(fake.calls.length, 1, "invalid bounds issue no requests");
+});
+
+test("the daily field-trial budget observes every repository during backfill even with a damaged scheduler hint", async () => {
+  const fixture: Fixture = {
+    pulls: Array.from({ length: 1000 }, (_, i) => pr(1000 - i, 1000 - i)),
+    commits: [{ sha: "latest", commit: { committer: { date: at(1000) } } }],
+    deployments: [{ id: 1000, sha: "latest", created_at: at(1000) }],
+    statuses: { 1000: [{ state: "success", created_at: at(1001) }] },
+    prCommits: { 1000: [{ sha: "first" }] },
+  };
+  const repos = ["o/core", "o/site", "o/console"];
+  const fake = githubFake(Object.fromEntries(repos.map((repo) => [repo, fixture])));
+  const cached = { version: "field-trials-github-v1", repos: Object.fromEntries(repos.map((repo) =>
+    [repo, { ...emptyRepoStore(), backfillResourceIndex: -1 }])) };
+  const store = parseGithubStore(JSON.parse(JSON.stringify(cached)));
+  const pass = await ingestFieldTrialsGithub(fake.fetch, repos, store, at(2000), 24);
+  assert.ok(fake.calls.length <= 24);
+  assert.equal(pass.requestsMade, fake.calls.length);
+  for (const repo of repos) {
+    const saved = store.repos[repo]!;
+    assert.equal(saved.commits.latest, at(1000));
+    assert.equal(saved.deployments["1000"]!.status.state, "success");
+    assert.equal(saved.pulls.PR_1000!.detail.state, "observed");
+    assert.equal(saved.cursors.pulls.state, "partial");
+    assert.equal(saved.cursors.pulls.watermark, null);
+    assert.ok((saved.backfillResourceIndex ?? -1) >= 0);
+  }
 });

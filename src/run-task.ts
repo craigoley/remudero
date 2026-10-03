@@ -168,7 +168,7 @@ import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { gardenPassDue, runGarden, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./lib/gardener.js";
-import { boundedGardenPassSpawn, childGardenPassSpawn, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { boundedGardenPassSpawn, childGardenPassSpawn, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
@@ -178,7 +178,6 @@ import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
-import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, runSelectorShadowGardener, selectorShadowFlakeLedger } from "./lib/selector-shadow-gardener.js";
 import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, openIncidentFeedbackOrigins, startSreLane } from "./lib/sre-lane.js";
@@ -438,6 +437,7 @@ import { makeTempDir, sweepStaleTempDirs, withTempDir, type TempSweepOpts, type 
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { IMAGE_BUILD_SHA_PATH, requestDeploy, runDeployCycle } from "./lib/deployer.js";
+import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
 import { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 export { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 import { runOperatorSync, type OperatorSyncDeps } from "./lib/operator-sync.js";
@@ -511,6 +511,7 @@ import {
   paceGhEntry,
   prStateFromRest,
   rollupFor,
+  rollupForAsync,
   singlePrRestArgs,
   // review-reuse-producer: the ONE producer of the review-reuse pair, called from both sides of the comparison
   // — the review records it, a later sweep pass asks what is true now. See its own header doc for
@@ -10137,7 +10138,7 @@ export async function runFixRung(opts: {
     // whose base moved and flipped WHICH check is red, is never told "nothing changed".
     const gateKey =
       currentMergeConflict !== undefined
-        ? `merge-conflict:${(currentMergeConflict.files ?? []).slice().sort().join(",")}`
+        ? `merge-conflict:${JSON.stringify((conflictedFilePaths(currentMergeConflict) ?? []).sort())}`
         : noReviewYet
         ? `ci:${(currentCiFailures ?? []).map((f) => f.name).slice().sort().join(",")}`
         : `review:${visibleCriteria(review.criteria.filter((c) => !c.met))
@@ -11123,6 +11124,13 @@ export async function runFixRung(opts: {
     // W1-T3727: WHO HOLDS THIS ROUND'S GIT, read once by BOTH the prompt and the tool bound so
     // the contract and the surface cannot disagree. The caller already pushes; only the commit moves.
     const { harnessCommits: fixHarnessOwnsGit, cashTools: fixCashTools } = fixRoundGitOwnership(opts.config);
+    const fixDeclaredPaths = [...(opts.task.files ?? []), ...(baselineDiffFiles ?? []), ...offeredCensusBaselines()];
+    if (fixHarnessOwnsGit && fixDeclaredPaths.length === 0) {
+      const reason = "the fix has no surface to stage — declare task files or restore the PR diff before dispatch";
+      deps.log("fix.stood_down", { site: "rung.empty_commit_surface", strike: attempt, reason });
+      deps.say(`fix rung: ${reason} — standing down before spending a worker round`);
+      return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+    }
     const prompt = [
       renderFixPrompt({
         harnessCommits: fixHarnessOwnsGit,
@@ -11279,7 +11287,7 @@ export async function runFixRung(opts: {
         worktreePath: opts.worktreePath,
         // The prompt and pre-strike guard already permit repairs to the inherited PR diff.
         // Use that same captured baseline here; a worker's newly added paths never enter it.
-        declaredPaths: [...(opts.task.files ?? []), ...(baselineDiffFiles ?? []), ...offeredCensusBaselines()],
+        declaredPaths: fixDeclaredPaths,
         acceptance: opts.task.acceptance,
         ...options,
         assignmentId: fixResult.selectionAssignmentId,
@@ -11290,15 +11298,18 @@ export async function runFixRung(opts: {
           harnessCommitUndeclared = undeclared;
         },
       });
-    let harnessCommitCount = harnessCommit(workerTranscript(fixResult));
-    // W1-T4450: A MISSING COMMIT_MESSAGE LINE IS ASKED FOR ONCE HERE TOO, exactly as implement does
-    // (W1-T4052): same session, one ask, the same refusal if the line is still absent. 37 fix rounds in
-    // one day did their work and lost it to this one line. Only a round that left edits is asked.
-    if (
-      harnessCommitCount === 0 &&
-      harnessCommitRefusalReason === MISSING_COMMIT_MESSAGE_REASON &&
-      (deps.worktreeHasUncommittedChanges ?? worktreeHasUncommittedChanges)(opts.worktreePath)
-    ) {
+    const fixReport = workerTranscript(fixResult);
+    const fixLeftEdits = () => (deps.worktreeHasUncommittedChanges ?? worktreeHasUncommittedChanges)(opts.worktreePath);
+    // W1-T4450: a round that left edits but no COMMIT_MESSAGE line is not discarded. W1-T5325: a
+    // writer that cannot resume (codex/cash) gets the subject derived from the failing check on the
+    // FIRST commit attempt, so the missing line is never refused and never re-asked — that re-ask was
+    // a fresh session whose loss refused the whole round. A worker-authored line still wins inside
+    // the helper. A resumable writer is still asked once in its own session (W1-T4052).
+    const derivedFirst = fixHarnessOwnsGit && writerCannotResume(fixResult.provider ?? fixArgs.mountProvider, fixArgs.tools) && fixLeftEdits()
+      ? derivedFixCommit(priorCiFailures?.[0]?.name ?? unmet[0]?.claim ?? gateFailuresNow?.[0]?.reason, opts.prUrl)
+      : undefined;
+    let harnessCommitCount = harnessCommit(fixReport, { derivedCommit: derivedFirst });
+    if (harnessCommitCount === 0 && harnessCommitRefusalReason === MISSING_COMMIT_MESSAGE_REASON && fixLeftEdits()) {
       deps.log("fix.commit_line_requested", { strike: attempt, round });
       deps.say("fix rung: no COMMIT_MESSAGE line in the report — resuming the worker's session once to ask for it");
       const askReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}-ask`, systemClock.now()), fixLaneBenchmarkWork(opts.task, deps.ledgerPath));
@@ -11327,16 +11338,9 @@ export async function runFixRung(opts: {
       if (answer) {
         harnessCommitRefusalReason = undefined;
         harnessCommitUndeclared = [];
+        // A derivable subject never reaches this ask (above), so the answer is the only subject left.
         const answeredReport = `${workerTranscript(fixResult)}\n${workerTranscript(answer)}`;
-        const check = priorCiFailures?.[0]?.name ?? unmet[0]?.claim ?? gateFailuresNow?.[0]?.reason;
-        const derivedCommit = writerCannotResume(fixResult.provider ?? fixArgs.mountProvider, fixArgs.tools)
-          && parseReport(answeredReport)?.commitMessage === undefined
-          ? derivedFixCommit(check, opts.prUrl)
-          : undefined;
-        harnessCommitCount = harnessCommit(answeredReport, {
-          subjectSource: derivedCommit ? "harness-derived" : "re-asked",
-          derivedCommit,
-        });
+        harnessCommitCount = harnessCommit(answeredReport, { subjectSource: "re-asked" });
       }
     }
     const harnessCommitRefused = harnessCommitRefusalReason !== undefined && harnessCommitCount === 0;
@@ -16045,11 +16049,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   let containmentProven: string | undefined;
   let isolationProven: string | undefined;
 
-  // ── Post-spawn CONTAINMENT PREFLIGHT (W1-T2 #2 / WS-0 verdict 7 / Standing rule
-  // 11). Validation proves the file is WELL-FORMED; it does NOT prove the sandbox
-  // ENGAGED (`-p` silently runs unsandboxed on a file it can't apply — FF10a). Once
-  // per run, empirically confirm an outside-cwd write is OS-DENIED before any task
-  // worker runs. FAIL CLOSED: containment unproven ⇒ the run does not proceed.
+  // ── Post-spawn CONTAINMENT PREFLIGHT (W1-T2 #2 / WS-0 verdict 7 / Standing rule 11). Validation
+  // proves the file WELL-FORMED, not that the sandbox ENGAGED (`-p` silently runs unsandboxed — FF10a).
+  // Once per boot and on any change of its inputs (`probeVerdictKey`, W1-T5346), empirically confirm an
+  // outside-cwd write is OS-DENIED; otherwise `reuseProof` replays that verdict — never assumed from
+  // configuration. FAIL CLOSED: containment unproven ⇒ the run does not proceed.
   try {
     const probe = cachedProof !== undefined ? reuseProof("containment", cachedProof) : await probeContainment({
       settingsFile,
@@ -16110,13 +16114,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     }
   }
 
-  // ── Isolation PREFLIGHT (W1-T17 / Standing rule 11 / FIELD FINDING 11b): the
-  // current shell isolation (CLAUDE_CODE_SHELL routing the Bash-tool snapshot to
-  // an empty rc) works ONLY because THIS host's `~/.bashrc` happens to be absent
-  // — an accident of the machine, not construction (LEARNINGS.md). A populated
-  // `~/.bashrc` would silently isolate NOTHING. Once per run, empirically confirm
-  // a worker inherits ZERO operator aliases/functions before any task worker
-  // (recon/implement) runs. FAIL CLOSED: a nonzero count means isolation is not
+  // ── Isolation PREFLIGHT (W1-T17 / Standing rule 11 / FIELD FINDING 11b): the current shell
+  // isolation (CLAUDE_CODE_SHELL routing the Bash-tool snapshot to an empty rc) works ONLY because
+  // THIS host's `~/.bashrc` happens to be absent — an accident of the machine, not construction
+  // (LEARNINGS.md). A populated `~/.bashrc` would silently isolate NOTHING. Once per boot and on any
+  // change of its inputs (`probeVerdictKey`, W1-T5346), empirically confirm a worker inherits ZERO
+  // operator aliases/functions before any task worker runs; otherwise `reuseProof` replays that
+  // verdict — never assumed from configuration. FAIL CLOSED: a nonzero count means isolation is not
   // holding on this host — the run refuses to start.
   try {
     if (cashContainmentState.contained) {
@@ -28689,13 +28693,34 @@ export interface BoardReviewItemsIo {
   now?: () => Date;
 }
 
+/** W1-T5481: {@link fetchOpenPrsRest} over an async reader — the same list call, the same per-PR rollup
+ *  reads in the same order, and the same per-PR unreadable arm, so the loop is free between reads. */
+async function fetchOpenPrsRestAsync(owner: string, repo: string, read: (args: string[]) => Promise<unknown>): Promise<OpenPrRest[]> {
+  const rows = (await read(openPrsRestArgs(owner, repo))) as RestPullRow[];
+  const prs: OpenPrRest[] = [];
+  for (const row of rows) {
+    const pr = mapRestPr(row);
+    try {
+      prs.push({ ...pr, statusCheckRollup: await rollupForAsync(owner, repo, pr.headRefOid, read) });
+    } catch {
+      // Marked unreadable, never read as green: the same arm `fetchOpenPrsRest` takes per PR.
+      prs.push({ ...pr, rollupUnreadable: true as const });
+    }
+  }
+  return prs;
+}
+
+/** The synchronous open-PR read {@link defaultBoardReviewItems} defaults to. */
+const syncBoardReviewOpenPrs = (o: string, r: string): OpenPrRest[] => fetchOpenPrsRest(o, r, ghJson);
+
 /**
  * The board-review rung's ONE real read — the injected edge, exactly the role
  * {@link buildOpenPrViews} plays for the sweep.
  *
  * ONE LIST CALL PLUS THE ROLLUPS IT ALREADY CARRIES. `fetchOpenPrsRest` hydrates
  * `statusCheckRollup` per PR itself, so the red arm costs nothing this read was not already
- * paying, and the whole thing runs at most `boardReview.maxPerDay` times a day.
+ * paying. It runs on EVERY daemon tick's check, not only on a fire (W1-T5481 measured 30-98 s each,
+ * 1+2N synchronous `gh` calls), so the daemon prefetches it off the loop instead.
  *
  * NEVER THROWS, and that is a deliberate fail direction: a GitHub outage must degrade this rung
  * to "no items, therefore no fire", never take out the daemon tick that hosts it. An empty list
@@ -28706,7 +28731,7 @@ export interface BoardReviewItemsIo {
 export function defaultBoardReviewItems(config: Config, io: BoardReviewItemsIo = {}): BoardItem[] {
   try {
     const { owner, repo } = (io.resolveOwnerRepo ?? resolveOwnerRepo)();
-    const prs = (io.fetchOpenPrs ?? ((o: string, r: string) => fetchOpenPrsRest(o, r, ghJson)))(owner, repo);
+    const prs = (io.fetchOpenPrs ?? syncBoardReviewOpenPrs)(owner, repo);
     let escalations = new Map<number, BoardItemEscalationInfo>();
     let originByPrNumber = new Map<number, string>();
     try {
@@ -29160,9 +29185,15 @@ export function buildBoardReviewDaemonHooks(deps: {
   plan?: () => Plan;
   /** Injectable ONLY for tests — the remaining {@link BoardReviewItemsIo} seams (open-PR read, owner/repo). */
   itemsIo?: BoardReviewItemsIo;
+  /** W1-T5481: the async reader `prefetchBoardReview` reads the open board through. Production
+   *  takes {@link ghJsonAsync}; a test that pins `items` or a synchronous `itemsIo.fetchOpenPrs` and
+   *  names no reader gets no prefetch, so it never reaches the network. */
+  readJson?: (args: string[]) => Promise<unknown>;
 } = {}): {
   checkBoardReview: () => BoardReviewCadenceDecision & { retiredProposalIds: string[] };
   runBoardReview: () => Promise<BoardReviewReport>;
+  /** W1-T5481: reads the open board OFF the loop; the next items read takes it once. */
+  prefetchBoardReview: () => Promise<void>;
 } {
   const configFor = () => deps.config ?? loadConfig();
   const policyFor = () => deps.policy ?? loadPolicy(policyPath(repoRoot));
@@ -29178,10 +29209,34 @@ export function buildBoardReviewDaemonHooks(deps: {
         },
       }
     : {};
+  // W1-T5481. MEASURED 2026-10-03: the open-PR read below was 30-98 s of synchronous `gh` on every
+  // tick's check (22 open PRs, 1+2N calls) and 50 s more in a fired run — no timer fired in between.
+  // The daemon now awaits `prefetchBoardReview` first; the read consumes that answer, or its error.
+  const readAsync = deps.readJson ?? (deps.items || deps.itemsIo?.fetchOpenPrs ? undefined : ghJsonAsync);
+  let prefetched: { prs: OpenPrRest[] } | { error: unknown } | undefined;
+  const prefetch = async (): Promise<void> => {
+    if (!readAsync) return;
+    try {
+      const { owner, repo } = (deps.itemsIo?.resolveOwnerRepo ?? resolveOwnerRepo)();
+      prefetched = { prs: await fetchOpenPrsRestAsync(owner, repo, readAsync) };
+    } catch (error) {
+      // Carried, not erased: the consuming read rethrows it into `defaultBoardReviewItems`'s outage arm.
+      prefetched = { error };
+    }
+  };
+  const fetchOpenPrs = (owner: string, repo: string): OpenPrRest[] => {
+    const taken = prefetched;
+    prefetched = undefined;
+    // Not prefetched (a caller that never awaited it): the synchronous read, exactly as before W1-T5481.
+    if (taken === undefined) return (deps.itemsIo?.fetchOpenPrs ?? syncBoardReviewOpenPrs)(owner, repo);
+    if ("error" in taken) throw taken.error;
+    return taken.prs;
+  };
   const itemsIo: BoardReviewItemsIo = {
     ...deps.itemsIo,
     ...tickProvided,
     ...(deps.plan ? { loadPlan: () => deps.plan!() } : {}),
+    fetchOpenPrs,
   };
   const itemsFor = () => (deps.items ?? (() => defaultBoardReviewItems(configFor(), itemsIo)))();
   const reconcile = deps.reconcile ?? reconcileBoardReviewReferents;
@@ -29226,6 +29281,8 @@ export function buildBoardReviewDaemonHooks(deps: {
       const root = configFor().root;
       const now = deps.now?.() ?? new Date();
       recordBoardReviewFire(boardReviewMarkerPath(root), now, 24 * 60 * 60 * 1000);
+      // W1-T5481: the run's own items read (W1-T3109 owns dropping it) is prefetched off the loop too.
+      await prefetch();
       return (deps.build ?? buildBoardReview)({
         policy: policyFor().values.boardReview,
         // AN EMPTY MARKER, DELIBERATELY, AND IT IS NOT A LIE ABOUT DISK.
@@ -29252,7 +29309,7 @@ export function buildBoardReviewDaemonHooks(deps: {
         // no action at all, which is its own documented default.
       });
     });
-  return { checkBoardReview: check, runBoardReview: run };
+  return { checkBoardReview: check, runBoardReview: run, prefetchBoardReview: prefetch };
 }
 
 /** The risk every generated sandbox subject is written with (wipe-test.ts's
@@ -29574,12 +29631,29 @@ export function addLaneWorktree(
   try {
     // W1-T2621: thread the caller's own ledger through — `worktreeAdd` now emits the
     // `worktree.add` three-way base reading itself; see its doc in lib/worker.ts.
-    worktreeAdd(repoDir, worktreePath, branch, "origin/main", { log });
+    addLockedRunWorktree(repoDir, worktreePath, branch, "origin/main", runId, log);
   } catch (e) {
     log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
     throw e;
   }
   return { branch, worktreePath };
+}
+
+/** W1-T5356: a `run-*` lane's sync add, LOCK FIRST — runTaskBody's W1-T5280 order for every other lane. A sync add blocks
+ *  only its own event loop; a prune in ANOTHER process (an approve pid, a hand-run `rmd`) still reaches a lockless path
+ *  once `pruneGraceMs` lapses. A failed add drops the lock: no caller hands a half-added worktree on. */
+export function addLockedRunWorktree(
+  repoDir: string, worktreePath: string, branch: string, base: string, runId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): void {
+  mkdirSync(worktreePath, { recursive: true }); // reapStaleWorktrees deletes a `.lock` whose directory is absent
+  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: systemClock.iso() });
+  try {
+    worktreeAdd(repoDir, worktreePath, branch, base, { log });
+  } catch (e) {
+    removeRunLock(worktreePath);
+    throw e;
+  }
 }
 
 /**
@@ -30049,8 +30123,6 @@ async function retroCommand(
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
   const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
-  // Liveness token so a concurrent drain's prune skips this retro worktree. (See runTask.)
-  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
   // W1-T39: the next-runnable task for docs/ORIENTATION.md, from the SAME DAG +
   // GitHub-derived-status projection `rmd drain` dispatches from — never a second,
@@ -33717,18 +33789,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         openWorkspace: () => gardenCheckout({ name: "selector-shadow", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log }),
         log,
       };
-      return async () => {
-        try {
-          const runs = await readSelectorShadowRunsAsync(owner, repo, undefined, {
-            cachePath: join(stateDir, "selector-shadow-log-cache.json"),
-            warn: (message) => log("selector-shadow.cache_failed", { message }),
-            onFlakes: selectorShadowFlakeLedger(log),
-          });
-          await runSelectorShadowGardener(d, () => runs, (miss) => readSelectorShadowChangedPaths(owner, repo, miss), ciLearningTaskIdMinter(repoRoot));
-        } catch (e) {
-          log("selector-shadow.gardener_failed", { error: String((e as Error)?.message ?? e) });
-        }
-      };
+      return selectorShadowGardenPass(d, owner, repo, ciLearningTaskIdMinter(repoRoot));
     }
     case "evidence-coverage":
       return () => {
@@ -33796,6 +33857,15 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       };
     }
   }
+}
+
+/** The daemon's garden pass spawn (W1-T5475): a child pass logs through the daemon's ledger `log`, not stderr. */
+export function daemonGardenPassSpawn(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  injected?: GardenPassSpawn,
+  childOpts: Parameters<typeof childGardenPassSpawn>[0] = {},
+): GardenPassSpawn {
+  return boundedGardenPassSpawn(injected ?? childGardenPassSpawn({ ...childOpts, log }), 2);
 }
 
 export function registeredGardenDueProbe(name: RegisteredGardenName, ctx: GardenBuildContext): () => boolean {
@@ -34113,7 +34183,7 @@ export async function daemonCommand(
   const gardenContext: GardenBuildContext = { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate };
   const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
     ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
-  const gardenPassSpawn: GardenPassSpawn = boundedGardenPassSpawn(injectedPassSpawn ?? childGardenPassSpawn(), 2);
+  const gardenPassSpawn = daemonGardenPassSpawn(log, injectedPassSpawn);
   const offLoopGarden = (name: RegisteredGardenName) => (intervalMs: number) =>
     startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) });
   if (!target.isSelf && !flagValue(rest, "--plan")) {
@@ -34469,6 +34539,8 @@ export async function daemonCommand(
           log,
           ledgerLines: () => readLedgerLines(ledgerPath),
           requestReview: requestLandingReview,
+          // W1-T5460: drain the console decisions `rmd serve` queued under the same state root.
+          stateRoot: config.root,
         })
     : undefined;
   // ANTHROPIC-clean-env boot assertion (W1-T12b): checked once, before the loop
@@ -35118,6 +35190,7 @@ export async function daemonCommand(
             // cited "(Rule 15)" for a doctrine that rule does not carry; see §12 rule 27.
         checkBoardReview: boardReviewHooks?.checkBoardReview,
         runBoardReview: boardReviewHooks?.runBoardReview,
+        prefetchBoardReview: boardReviewHooks?.prefetchBoardReview,
         checkWipeTestCadence: wipeTestCadenceHooks?.checkWipeTestCadence,
         runWipeTestCadence: wipeTestCadenceHooks?.runWipeTestCadence,
         // CI-LEARNING RUNG (W1-T2972). Same shape as the three cadences above and gated the same
@@ -35411,6 +35484,11 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     imageDriftOnly: rest.includes("--image-drift-only"),
   });
   console.log(`### rmd deploy-run — ${result.deployed ? "DEPLOYED" : "no-op"}: ${result.reason}`);
+  const serve = runServePolicyCycle({ ...deps, ...realServePolicyDeps({ installPath: assessment.installRoot, stateRoot: effectiveConfig.root }) }, {
+    dryRun: rest.includes("--dry-run"),
+    imageDriftOnly: rest.includes("--image-drift-only"),
+  });
+  console.log(`### rmd deploy-run — serve ${serve.replaced ? "REPLACED" : "no-op"}: ${serve.reason}`);
   if (result.blocker) {
     // W1-T3694 — legible without tailing a ledger: a stale-running daemon the tick declined to
     // act on names both shas right here, in the one place an operator or an alarm already reads.
@@ -40161,7 +40239,7 @@ function derivedFixCommit(check: string | undefined, prUrl: string): { subject: 
   if (prefix.length + suffix.length >= 100) return undefined;
   const name = Array.from(check.trim().toLowerCase().replace(/\s+/g, " "))
     .slice(0, 100 - prefix.length - suffix.length).join("").trimEnd();
-  return { subject: `${prefix}${name}${suffix}`, reason: `no COMMIT_MESSAGE after one re-ask; failing check ${check} on #${pr}` };
+  return { subject: `${prefix}${name}${suffix}`, reason: `no COMMIT_MESSAGE; failing check ${check} on #${pr}` };
 }
 
 /** Build the re-ask from the implement lane's own spawn and account. The original mount and
@@ -43327,8 +43405,6 @@ async function triageCommandLocked(
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
   const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
-  // Liveness token so a concurrent drain's prune skips this triage worktree.
-  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
   // W1-T348: the decision-summary rung, resolved ONCE and reused at both sites this run may
   // reach a human/operator — the GRILL escalation below and the proposal write further down.
@@ -43958,8 +44034,6 @@ export async function planCommand(
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
   const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
-  // Liveness token so a concurrent drain's prune skips this plan worktree.
-  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
 
   let planIdBlock: TaskIdReservationBlock | undefined;
 
@@ -44380,12 +44454,11 @@ export function createDaemonLaneWorktree(
   try {
     // W1-T2621: see addLaneWorktree's identical note, above — worktreeAdd itself emits
     // worktree.add now, given a ledger to emit it through.
-    worktreeAdd(repoDir, worktreePath, branch, "origin/main", { log });
+    addLockedRunWorktree(repoDir, worktreePath, branch, "origin/main", runId, log);
   } catch (e) {
     log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
     throw e;
   }
-  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
   return { branch, worktreePath };
 }
 
@@ -46250,8 +46323,7 @@ export async function approveCommand(
     const branch = approveRunBranch(runId);
     // Set before worktreeAdd, so a failed add still leaves the path for the approve catch's cleanup.
     const path = (worktreePath = join(worktreesDir(config), branch));
-    worktreeAdd(dir, path, branch, "origin/main", { log });
-    writeRunLock(path, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+    addLockedRunWorktree(dir, path, branch, "origin/main", runId, log); // W1-T5356: lock before add
     return { branch, path };
   };
   // W1-T4437: the mint/write/commit steps `createRatificationBranch` and `joinRatificationBranch`
@@ -46401,8 +46473,7 @@ export async function approveCommand(
       worktreePath = join(worktreesDir(config), branch);
       // W1-T2621: thread this call's own ledger through — worktreeAdd now emits worktree.add
       // (and, on the currency check's fail-open, worktree.base_uncheckable) itself.
-      worktreeAdd(dir, worktreePath, branch, `origin/${branch}`, { log });
-      writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+      addLockedRunWorktree(dir, worktreePath, branch, `origin/${branch}`, runId, log); // W1-T5356: lock before add
       // The merge-base diff isolates ONLY what this branch added to plan/tasks.yaml, unaffected
       // by anything origin/main gained afterward (a plain two-dot diff would not be) — same
       // `- id: <id>` per-line shape the fresh-mint path below extracts, just over the diff's
@@ -46428,8 +46499,7 @@ export async function approveCommand(
       const branch = approveRunBranch(runId);
       worktreePath = join(worktreesDir(config), branch);
       // W1-T2621: see completeRatificationBranch's identical note, above.
-      worktreeAdd(dir, worktreePath, branch, "origin/main", { log });
-      writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+      addLockedRunWorktree(dir, worktreePath, branch, "origin/main", runId, log); // W1-T5356: lock before add
       materializeAndCommitApproveFragment(worktreePath, payload, `run ${runId}`);
       preflightApprovePush(worktreePath, branch, payload.proposalId);
       gitPushRunBranch(worktreePath);
@@ -46445,11 +46515,7 @@ export async function approveCommand(
       const pruned = pruneStaleRuns(dir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
       if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
       worktreePath = join(worktreesDir(config), branch);
-      worktreeAdd(dir, worktreePath, branch, `origin/${branch}`, { log });
-      // Reads through the shared Clock port (systemClock.iso()), never a bare `new Date()` —
-      // clock-signature-census.test.ts tracks every new legacy-shaped call site added to this
-      // file, and every OTHER `startedAt` in this function already predates that gate.
-      writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: systemClock.iso() });
+      addLockedRunWorktree(dir, worktreePath, branch, `origin/${branch}`, runId, log); // W1-T5356: lock before add
       materializeAndCommitApproveFragment(worktreePath, payload, `joined ${branch}`);
       preflightApprovePush(worktreePath, branch, payload.proposalId);
       gitPushRunBranch(worktreePath);
@@ -46764,8 +46830,7 @@ async function approveBatchCommand(
       worktreePath = join(worktreesDir(config), branch);
       // W1-T2621: see the single-approve gateway's identical note (createRatificationBranch,
       // above) — this ledger is the batch lane's own.
-      worktreeAdd(dir, worktreePath, branch, "origin/main", { log });
-      writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
+      addLockedRunWorktree(dir, worktreePath, branch, "origin/main", runId, log); // W1-T5356: lock before add
 
       // Q3: ONE mint/reserve/write pass PER ACCEPTED PAYLOAD, sequentially, in the SAME
       // worktree — each iteration's shard write lands on disk before the NEXT payload's own

@@ -60,6 +60,33 @@ on:
       - deploy/package.json
       - deploy/package-lock.json
       - deploy/codex-requirements.toml
+      - src/lib/baked-runtime-inputs.ts
+      - src/lib/clock.ts
+      - src/lib/config-schema.ts
+      - src/lib/config.ts
+      - src/lib/deploy-judge.ts
+      - src/lib/deployer.ts
+      - src/lib/drain-lock.ts
+      - src/lib/errors.ts
+      - src/lib/fleet-control.ts
+      - src/lib/fs-race-safe.ts
+      - src/lib/git-fetch-retry.ts
+      - src/lib/install-hash.ts
+      - src/lib/ledger-carry.ts
+      - src/lib/ledger-path.ts
+      - src/lib/ledger-union.ts
+      - src/lib/ledger.ts
+      - src/lib/live-write-guard.ts
+      - src/lib/log-rotation.ts
+      - src/lib/plan-scope.ts
+      - src/lib/producer-identity.ts
+      - src/lib/repo-layout.ts
+      - src/lib/self-sync.ts
+      - src/lib/serve-generation.ts
+      - src/lib/serve-slots.ts
+      - src/lib/serve-supervisor-main.ts
+      - src/lib/serve-supervisor.ts
+      - src/lib/worker-containment.ts
       - package-lock.json
   workflow_dispatch:
     inputs:
@@ -149,7 +176,7 @@ jobs:
           if [ -n "${BEFORE_SHA}" ] && [ "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]; then
             CHANGED="$(git diff --name-only "${BEFORE_SHA}" "${AFTER_SHA}")"
             OTHER_BAKED=false
-            for p in deploy/Dockerfile deploy/entrypoint.sh .dockerignore deploy/package.json deploy/package-lock.json deploy/codex-requirements.toml; do
+            for p in deploy/Dockerfile deploy/entrypoint.sh .dockerignore deploy/package.json deploy/package-lock.json deploy/codex-requirements.toml src/lib/baked-runtime-inputs.ts src/lib/clock.ts src/lib/config-schema.ts src/lib/config.ts src/lib/deploy-judge.ts src/lib/deployer.ts src/lib/drain-lock.ts src/lib/errors.ts src/lib/fleet-control.ts src/lib/fs-race-safe.ts src/lib/git-fetch-retry.ts src/lib/install-hash.ts src/lib/ledger-carry.ts src/lib/ledger-path.ts src/lib/ledger-union.ts src/lib/ledger.ts src/lib/live-write-guard.ts src/lib/log-rotation.ts src/lib/plan-scope.ts src/lib/producer-identity.ts src/lib/repo-layout.ts src/lib/self-sync.ts src/lib/serve-generation.ts src/lib/serve-slots.ts src/lib/serve-supervisor-main.ts src/lib/serve-supervisor.ts src/lib/worker-containment.ts; do
               if printf '%s\n' "${CHANGED}" | grep -qxF "${p}"; then OTHER_BAKED=true; fi
             done
             if [ "${OTHER_BAKED}" = "false" ]; then
@@ -166,13 +193,20 @@ jobs:
                   const sdk = (doc) => doc.packages && doc.packages["node_modules/@anthropic-ai/claude-agent-sdk"]
                     ? JSON.stringify([doc.packages["node_modules/@anthropic-ai/claude-agent-sdk"].version, doc.packages["node_modules/@anthropic-ai/claude-agent-sdk"].integrity])
                     : undefined;
+                  const loader = (doc) => JSON.stringify([
+                    "node_modules/tsx", "node_modules/esbuild", "node_modules/@esbuild/linux-x64",
+                  ].map((key) => doc.packages && doc.packages[key]
+                    ? [doc.packages[key].version, doc.packages[key].integrity,
+                      doc.packages[key].dependencies, doc.packages[key].optionalDependencies]
+                    : null));
                   const oldDoc = read(process.argv[1]);
                   const newDoc = read(process.argv[2]);
                   const oldVersion = version(oldDoc);
                   const newVersion = version(newDoc);
                   const playwrightMoved = oldVersion === undefined || newVersion === undefined || oldVersion !== newVersion;
                   const sdkMoved = sdk(oldDoc) !== sdk(newDoc);
-                  console.log(playwrightMoved || sdkMoved ? "true" : "false");
+                  const loaderMoved = loader(oldDoc) !== loader(newDoc);
+                  console.log(playwrightMoved || sdkMoved || loaderMoved ? "true" : "false");
                 ' "${LOCK_DIR}/old-lock.json" "${LOCK_DIR}/new-lock.json")"
                 rm -rf "${LOCK_DIR}"
               else

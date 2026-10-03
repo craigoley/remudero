@@ -24,6 +24,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   unlinkSync,
@@ -93,6 +94,7 @@ export const DECISIONS_LANDING_PR_TITLE = "chore(decisions): land pending decisi
 const PLAN_RECONCILE_LANDING_BRANCH = "plan-reconcile-landing";
 const PLAN_RECONCILE_LANDING_PR_TITLE = "chore(plan): reconcile credited task statuses";
 const CI_LEARNING_PENDING_REL_DIR = "state/ci-learning-pending";
+const FEEDBACK_PENDING_REL_DIR = "state/feedback-landing-pending";
 const CI_LEARNING_SLUG_MAX = 72;
 /** The one shared branch every automated CI-learning shard landing call force-pushes to. */
 export const CI_LEARNING_LANDING_BRANCH = "ci-learning-landing";
@@ -132,16 +134,10 @@ export interface LandingIdentity {
 export interface LandFeedbackOpts {
   /** Injectable `git` exec — real callers omit it; tests can force specific failure paths. */
   git?: GitExec;
-  /**
-   * Injectable `gh` exec (the `ghGateway` pattern, lib/status.ts) — real callers omit it; tests
-   * inject a fake so PR open/list/merge never hits real GitHub.
-   */
+  /** Injectable `gh` exec (the `ghGateway` pattern, lib/status.ts) — tests fake it; never real GitHub. */
   gh?: GhExec;
-  /**
-   * Legacy compatibility seam retained for callers that already pass the daemon ledger reader.
-   * Review and auto-merge are now owned by the shared post-review sweep; this bridge never uses
-   * the reader to arm a fresh PR before review.
-   */
+  /** Legacy seam for callers passing the daemon ledger reader. The shared post-review sweep owns
+   *  review and auto-merge; this bridge never uses the reader to arm a fresh PR before review. */
   ledgerLines?: () => Array<Record<string, unknown>>;
   /** Repository the landing PR is opened against. Omitted: resolved from this checkout's origin. */
   targetRepository?: LandingRepository;
@@ -156,6 +152,8 @@ export interface LandFeedbackOpts {
   log?: (step: string, extra?: Record<string, unknown>) => void;
   planPrPreflight?: (commitSha: string, pr: { title: string; body: string }) => PlanPrPreflightResult;
   preflight?: "skip-request-path";
+  /** W1-T5460: daemon state root. Set, a status write QUEUES there; {@link sweepFeedbackLanding} lands it. */
+  stateRoot?: string;
 }
 
 export interface LandFeedbackResult {
@@ -187,6 +185,8 @@ export interface LandFeedbackResult {
    *  silently dropped. A refused record is excluded from `files`/the pushed tree entirely, so it
    *  can never ride into an armed auto-merge PR by construction. */
   refused?: FeedbackRefusal[];
+  /** Paths staged under `stateRoot` for the daemon sweep this call — never pushed by it. */
+  queued?: string[];
 }
 
 const ACKNOWLEDGEMENT_PATH_LIMIT = 50;
@@ -951,6 +951,8 @@ function finishLanding(
 interface LandPendingOpts extends LandFeedbackOpts {
   /** Internal compatibility seam: only the named sweep publishes acknowledgement evidence. */
   reportAcknowledgement?: boolean;
+  /** Only the named sweep drains the `stateRoot` queue, into the SAME tree and preflight. */
+  drainQueue?: boolean;
 }
 
 function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): LandFeedbackResult {
@@ -961,9 +963,12 @@ function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): La
   const withAcknowledgement = (result: LandFeedbackResult): LandFeedbackResult =>
     acknowledgement && opts.reportAcknowledgement ? { ...result, acknowledgement } : result;
 
+  const queueRoot = opts.drainQueue ? opts.stateRoot : undefined;
+
   try {
     git(["fetch", "origin", "--quiet"]);
     acknowledgement = acknowledgeLandedQueueCopies(root, kind, git);
+    if (queueRoot) acknowledgeLandedFeedbackQueue(queueRoot, git);
 
     // W1-T3561: a byte inequality alone no longer decides a feedback record's fate. `new
     // remoteSha => local wins trivially (nothing upstream yet); identical bytes => nothing to
@@ -972,11 +977,16 @@ function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): La
     // local copy that sits at an earlier §7B lifecycle position — reported below, never dropped
     // in the caller's tree. Every other path (attachments, a stray non-yaml file, and every
     // `decisions`/`ci-learning` family) keeps the exact pre-fix inequality behaviour.
-    const scanLocalUnlanded = (): { files: string[]; refused: FeedbackRefusal[] } => {
+    const scanLocalUnlanded = (): { files: string[]; sources: Map<string, string>; refused: FeedbackRefusal[] } => {
       const files: string[] = [];
+      const sources = new Map<string, string>();
       const refused: FeedbackRefusal[] = [];
-      for (const rel of listDirtyRelFiles(root, kind.ownedDir, git)) {
-        const localSha = git(["hash-object", join(root, rel)]).trim();
+      const candidates: Array<[string, string]> = [
+        ...listDirtyRelFiles(root, kind.ownedDir, git).map((rel): [string, string] => [rel, join(root, rel)]),
+        ...queuedFeedbackSources(queueRoot),
+      ];
+      for (const [rel, abs] of candidates) {
+        const localSha = git(["hash-object", abs]).trim();
         let remoteSha: string | null;
         try {
           remoteSha = git(["rev-parse", `origin/main:${rel}`]).trim();
@@ -985,16 +995,17 @@ function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): La
         }
         if (remoteSha === localSha) continue;
         if (remoteSha !== null && isFeedbackRecordPath(kind, rel)) {
-          const decision = decideFeedbackStage(git, remoteSha, readFileSync(join(root, rel), "utf8"));
+          const decision = decideFeedbackStage(git, remoteSha, readFileSync(abs, "utf8"));
           if (decision.kind === "refuse") {
             refused.push({ path: rel, reason: decision.reason });
             continue;
           }
           if (decision.kind === "keep-upstream") continue;
         }
-        files.push(rel);
+        if (!sources.has(rel)) files.push(rel);
+        sources.set(rel, abs); // a queued decision, listed last, wins over a disk copy of its path
       }
-      return { files, refused };
+      return { files, sources, refused };
     };
     const initialScan = scanLocalUnlanded();
     if (initialScan.files.length === 0) {
@@ -1020,9 +1031,9 @@ function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): La
       if (!pending.ok) throw new Error(pending.reason);
       git(["read-tree", "origin/main"], { env });
       if (pending.tipSha) stageBranchPending(git, kind, pending.files, env);
-      const { files: unlanded, refused } = scanLocalUnlanded();
+      const { files: unlanded, sources, refused } = scanLocalUnlanded();
       for (const rel of unlanded) {
-        const blobSha = git(["hash-object", "-w", join(root, rel)], { env }).trim();
+        const blobSha = git(["hash-object", "-w", sources.get(rel) as string], { env }).trim();
         git(["update-index", "--add", "--cacheinfo", `100644,${blobSha},${rel}`], { env });
       }
       const treeSha = git(["write-tree"], { env }).trim();
@@ -1056,11 +1067,7 @@ export function landFeedback(root: string, opts: LandFeedbackOpts = {}): LandFee
 }
 
 export interface SweepFeedbackLandingOpts extends LandFeedbackOpts {
-  /**
-   * One ledger line per call — see this function's own doc for the acting/quiet split.
-   * Optional: omitted, no line is emitted (the caller can still inspect the returned
-   * {@link LandFeedbackResult} directly, e.g. a one-off `rmd feedback land`).
-   */
+  /** One ledger line per call (acting/quiet split: the function's doc); omitted, none is emitted. */
   log?: (step: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -1081,6 +1088,7 @@ export function sweepFeedbackLanding(root: string, opts: SweepFeedbackLandingOpt
     git,
     log,
     reportAcknowledgement: true,
+    drainQueue: true,
   });
   if (log) {
     const acknowledgement = result.acknowledgement;
@@ -1321,8 +1329,51 @@ export function landFeedbackStatusContent(
   content: string,
   opts: LandFeedbackOpts = {},
 ): LandFeedbackResult {
+  if (opts.stateRoot !== undefined) return queueFeedbackLanding(opts.stateRoot, relPath, content);
   const git = opts.git ?? defaultGit(root);
   return landContent(root, landingKind(FEEDBACK_LANDING_KIND, root, opts, git), [{ relPath, content }], { ...opts, git });
+}
+
+const QUEUED_FEEDBACK_RECORD = new RegExp(`^${FEEDBACK_REL_DIR}/[^/]+\\.yaml$`);
+
+function feedbackPendingRoot(stateRoot: string): string {
+  return join(stateRoot, FEEDBACK_PENDING_REL_DIR);
+}
+
+/** W1-T5460: the request path's landing — the bytes, staged atomically outside the checkout. */
+function queueFeedbackLanding(stateRoot: string, relPath: string, content: string): LandFeedbackResult {
+  if (!QUEUED_FEEDBACK_RECORD.test(relPath)) return { landed: false, files: [], error: `refusing to queue ${relPath}: not a ${FEEDBACK_REL_DIR}/<id>.yaml record` };
+  const abs = join(feedbackPendingRoot(stateRoot), relPath);
+  const staging = `${abs}.${process.pid}.tmp`;
+  try {
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(staging, content, "utf8");
+    renameSync(staging, abs);
+    return { landed: false, files: [], queued: [relPath] };
+  } catch (e) {
+    return { landed: false, files: [], error: `queueing ${relPath} under ${stateRoot} failed: ${String((e as Error)?.message ?? e)}` };
+  }
+}
+
+/** Every record queued under `stateRoot` and not yet acknowledged landed — what the board may show as queued. */
+export function queuedFeedbackLandings(stateRoot: string): string[] {
+  return listRelFiles(feedbackPendingRoot(stateRoot), FEEDBACK_REL_DIR).filter((rel) => QUEUED_FEEDBACK_RECORD.test(rel)).sort();
+}
+
+function queuedFeedbackSources(stateRoot: string | undefined): Array<[string, string]> {
+  return stateRoot === undefined ? [] : queuedFeedbackLandings(stateRoot).map((rel) => [rel, join(feedbackPendingRoot(stateRoot), rel)]);
+}
+
+/** Drop a queued record once fetched origin/main already carries it (`keep-upstream`); anything else stays queued. */
+function acknowledgeLandedFeedbackQueue(stateRoot: string, git: GitExec): void {
+  for (const [rel, abs] of queuedFeedbackSources(stateRoot)) {
+    try {
+      const remoteSha = git(["rev-parse", `origin/main:${rel}`]).trim();
+      if (decideFeedbackStage(git, remoteSha, readFileSync(abs, "utf8")).kind === "keep-upstream") unlinkSync(abs);
+    } catch {
+      // Not on origin/main yet (or unreadable): the queue is durable, so the record stays for the build.
+    }
+  }
 }
 
 function ciLearningPendingRoot(stateRoot: string): string {

@@ -13,7 +13,7 @@ import { reapWorkerScratch } from "./worker-scratch.js";
  * absent — an accident of the machine, not construction. A populated
  * `~/.bashrc` on some other host would silently isolate NOTHING (the config
  * "should" isolate, but that is a hypothesis, never a guarantee). Standing rule
- * 11: isolation is PROVEN PER RUN by probe, never assumed from configuration.
+ * 11: isolation is PROVEN BY PROBE, never assumed from configuration.
  *
  * This module is the empirical half: before any task worker runs, spawn a
  * READ-ONLY worker that counts the shell aliases/functions it inherited
@@ -23,10 +23,10 @@ import { reapWorkerScratch } from "./worker-scratch.js";
  * (Standing rule 11): a nonzero count aborts the run before any task work
  * begins, never a warning.
  *
- * GRANULARITY — once per run, mirroring containment.ts (W1-T2): the shell
- * config that determines contamination (CLAUDE_CODE_SHELL, ZDOTDIR, the host's
- * dotfiles) is constant across every spawn in a run, so the fact proven once
- * holds for all of them.
+ * GRANULARITY — once per boot and on any change of the probe's inputs, like
+ * containment.ts (W1-T5346, ruling 2026-10-02): run-task.ts reuses a PASS keyed
+ * by `probeVerdictKey` (image, harness, worker settings, hooks, CLI) and ledgers
+ * each reuse; a FAIL is never cached.
  *
  * READ-ONLY BY CONSTRUCTION, not just by prompt discipline: the probe spawn
  * restricts the model's tool set to `["Bash"]` ({@link isolationProbeSpawnArgs}),
