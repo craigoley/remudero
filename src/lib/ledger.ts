@@ -176,14 +176,10 @@ export function ledgerRowActor(line: { actor?: unknown }): LedgerRowActor {
   return line.actor === "daemon" || line.actor === "worker" || line.actor === "operator" ? line.actor : "unknown";
 }
 
-/** W1-T5407: how far a row's `ts` may run ahead of the ledger file's own mtime before
- *  {@link appendLedger} follows it with a {@link LEDGER_FUTURE_STAMP_STEP} row. */
 export const LEDGER_FUTURE_STAMP_TOLERANCE_MS = 10 * 60_000;
 export const LEDGER_FUTURE_STAMP_STEP = "ledger.future_stamp";
 
-/** The {@link LEDGER_FUTURE_STAMP_STEP} row for `record`, or `undefined` when its `ts` sits within
- *  tolerance of `mtimeMs` — the kernel's clock, which a skewed process clock cannot move (the
- *  same ceiling W1-T4100 holds archive NAMES to). The offending row itself stays: append-only. */
+/** W1-T5407: the flag for a row whose `ts` runs past `mtimeMs`, a kernel clock no skewed process clock moves. */
 function futureStampRow(record: Record<string, unknown>, mtimeMs: number): Record<string, unknown> | undefined {
   const skewMs = Date.parse(String(record.ts)) - mtimeMs;
   if (!(skewMs > LEDGER_FUTURE_STAMP_TOLERANCE_MS)) return undefined;
@@ -207,9 +203,8 @@ function futureStampRow(record: Record<string, unknown>, mtimeMs: number): Recor
  * Append one line. The record is issued as exactly ONE `writeSync` and the kernel's acceptance is
  * checked, so a writer's record is never split across two syscalls with another appender's line in
  * the gap. `O_APPEND` already makes concurrent appenders safe; this is NOT a lock (W1-T206). A
- * short write is LOUD, never retried. Falsifier: test/ledger-atomic.test.ts.
- * Why: the read-side torn-line contract, and why a lock was rejected (W1-T206;
- * docs/forensics/ledger.md#appendledger).
+ * short write is LOUD, never retried. Falsifier: test/ledger-atomic.test.ts. Why (the torn-line
+ * contract; a lock rejected): docs/forensics/ledger.md#appendledger.
  *
  * `identity` stamps the writing machine onto every row under the same `host` key this repo's
  * lock-holder records use. Appended LAST so no caller shifts; injectable only so one test can
