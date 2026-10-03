@@ -28,6 +28,7 @@ import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMerge
 import { acquireInflightLock, InflightLockError, type InflightLockHandle } from "./inflight-lock.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import { appendLedger } from "./ledger.js";
+import { runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import { resolveLedgerUnion } from "./ledger-union.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "./mounts.js";
@@ -8687,6 +8688,9 @@ export interface SweepDeps {
   arm: (
     pr: OpenPrView,
   ) => ArmOutcomeName | ArmAttemptOutcome | void | Promise<ArmOutcomeName | ArmAttemptOutcome | void>;
+  /** W1-T5403 — risk-judge a head whose run ended `handed_off`, once, before the `mergeable` arm.
+   *  Production wires {@link riskJudgeHandedOffHead}; omitted, such a head is held, never armed. */
+  judgeHandedOffHead?: (pr: OpenPrView) => Promise<HandedOffHeadJudgment>;
   /** W1-T1000002 — WITHDRAW AN ARM THIS LANE DID NOT PLACE, called only when an operator hold stands
    *  over a PR already reporting armed. A disarm alone is undone by the next pass, whose dedup reads
    *  GitHub's live armed bit, so this fires EVERY pass the hold stands and the PR reads armed, and
@@ -9261,6 +9265,106 @@ function reviewerCodeFreshnessBackoffReason(
     `${ancestryCheckFailure ? `ancestry check failed (${ancestryCheckFailure}); ` : ""}` +
     `this is a bounded reviewer-source freshness refusal, not a durable review verdict`
   );
+}
+
+/** W1-T5403 — what the sweep's risk judgment of a handed-off head decided. `unavailable` is its own
+ *  value, never folded into either action: it holds the arm this pass and is asked again next pass. */
+export type HandedOffHeadJudgment =
+  | { action: "proceed"; reason: string }
+  | { action: "escalate"; reason: string; issueUrl?: string }
+  | { action: "unavailable"; reason: string };
+
+/** W1-T5403 — one handed-off head's judgment: the input the judge is shown, and the orchestrator
+ *  (judge, escalation, ledger) the in-run call already uses. Built fresh per head, so a spend
+ *  collector inside it never spans two judgments. */
+export interface HandedOffHeadJudgmentPlan {
+  input: RiskJudgeInput;
+  orchestrator: RiskJudgeOrchestratorDeps;
+  config?: Omit<RiskJudgeConfig, "judgeUnavailableAction">;
+}
+
+/** W1-T5403 — wrap the REAL {@link runRiskJudge} as the sweep's {@link SweepDeps.judgeHandedOffHead}.
+ *  Every row it writes carries `pr_number`/`head_sha`, so the `risk_judge.decision` row is what
+ *  {@link handedOffHeadAwaitingJudgment} reads back and the escalated row feeds `riskRefused`. An
+ *  unavailable judge is reported as such rather than collapsed into proceed or escalate. */
+export function riskJudgeHandedOffHead(
+  planFor: (pr: OpenPrView) => HandedOffHeadJudgmentPlan,
+): NonNullable<SweepDeps["judgeHandedOffHead"]> {
+  return async (pr) => {
+    const { input, orchestrator, config } = planFor(pr);
+    const log = orchestrator.log ?? (() => {});
+    const result = await runRiskJudge(
+      { ...input, prNumber: pr.prNumber, headSha: pr.headSha },
+      { ...orchestrator, log: (step, extra) => log(step, { ...extra, pr_number: pr.prNumber, head_sha: pr.headSha }) },
+      { ...config, judgeUnavailableAction: "proceed" },
+    );
+    if (result.verdict.availability === "unavailable") {
+      return { action: "unavailable", reason: result.verdict.reasons.join("; ") || result.action.reason };
+    }
+    if (result.action.kind === "escalate") {
+      return { action: "escalate", reason: result.action.reason, issueUrl: result.escalationUrl };
+    }
+    return { action: "proceed", reason: result.action.reason };
+  };
+}
+
+/** W1-T5403 — the hand-off reason (`pr_open_yield`, `freshness_yield`, `recycle_yield`) when a run
+ *  that opened THIS PR ended `handed_off` and no available `risk_judge.decision` row exists for its
+ *  CURRENT head; `undefined` otherwise. A decision whose judge was unavailable is not a judgment. */
+export function handedOffHeadAwaitingJudgment(
+  pr: Pick<OpenPrView, "prNumber" | "prUrl" | "headSha">,
+  lines: ReadonlyArray<Record<string, unknown>>,
+): string | undefined {
+  let handoff: string | undefined;
+  for (const line of lines) {
+    if (
+      line.step === "risk_judge.decision" &&
+      line.pr_number === pr.prNumber &&
+      line.head_sha === pr.headSha &&
+      line.availability !== "unavailable"
+    ) {
+      return undefined;
+    }
+    if (line.step === "verdict" && line.verdict === "handed_off" && line.pr_url === pr.prUrl) {
+      handoff = typeof line.reason === "string" ? line.reason : "handed_off";
+    }
+  }
+  return handoff;
+}
+
+/** W1-T5403 — judge a handed-off head before the `mergeable` arm fires. Returns the stand-down
+ *  reason when the arm must hold, `undefined` when it may proceed. A missing dep, a throw and an
+ *  unavailable judge each hold and ledger `sweep.risk_judge_unavailable` naming why. */
+async function holdHandedOffHeadForRiskJudgment(
+  pr: OpenPrView,
+  handoff: string,
+  judge: SweepDeps["judgeHandedOffHead"],
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<string | undefined> {
+  const head = pr.headSha.slice(0, 7);
+  let judgment: HandedOffHeadJudgment;
+  if (judge === undefined) {
+    judgment = { action: "unavailable", reason: "no risk judge is wired into this sweep" };
+  } else {
+    try {
+      judgment = await judge(pr);
+    } catch (error) {
+      judgment = { action: "unavailable", reason: `risk judge threw: ${String((error as Error)?.message ?? error)}` };
+    }
+  }
+  if (judgment.action === "proceed") return undefined;
+  if (judgment.action === "escalate") {
+    return `risk judge escalated this handed-off head (${head}), no operator override recorded` +
+      (judgment.issueUrl ? ` — see ${judgment.issueUrl}` : "");
+  }
+  log("sweep.risk_judge_unavailable", {
+    pr_number: pr.prNumber,
+    head_sha: pr.headSha,
+    ...(pr.taskId === undefined ? {} : { task_id: pr.taskId }),
+    handoff,
+    reason: judgment.reason,
+  });
+  return `risk judge unavailable for handed-off head ${head} (${judgment.reason}) — holding the arm; the next pass asks again`;
 }
 
 function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorActions {
@@ -11136,6 +11240,16 @@ export async function runSweep(
                 acted = false;
                 standDownReason = armDecision.reason;
                 break;
+              }
+              // W1-T5403: a handed-off head never met the in-run risk judge — judge it once here.
+              const handoff = handedOffHeadAwaitingJudgment(pr, ledgerLines);
+              if (handoff !== undefined) {
+                const riskHold = await holdHandedOffHeadForRiskJudgment(pr, handoff, deps.judgeHandedOffHead, log);
+                if (riskHold !== undefined) {
+                  acted = false;
+                  standDownReason = riskHold;
+                  break;
+                }
               }
               // READ THE OUTCOME. `armAutoMerge` does not throw — it RETURNS which of its seven
               // branches it took, and five of them armed nothing. Discarding it is what let
