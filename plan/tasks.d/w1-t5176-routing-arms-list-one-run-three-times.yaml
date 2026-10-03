@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-console-audit-core-1790887256000 -> plan-console-audit-core-1790887256000"
   plan_refs: [W1-T4024, W1-T3623]
   files: [src/lib/usage-telemetry.ts, src/lib/analytics-route.ts, test/a-trial-run-is-one-routing-arm.test.ts, test/the-usage-projection-shows-burn-and-routing.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-01 on app.remudero.com/analytics, "Marked routing arms (7 days)": rows trial=inbox-bakeoff-...,

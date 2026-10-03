@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-02: plan-only red PRs with no repair route research"
   plan_refs: [W1-T4901, W1-T4351, W1-T4904, W1-T4921, W1-T5279]
   files: [src/lib/plan-pr-emitter.ts, src/run-task.ts, src/lib/feedback-landing.ts, test/a-machine-lane-never-opens-a-plan-pr-that-is-already-red.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

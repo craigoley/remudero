@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-02: daemon loop-stall diagnosis"
   plan_refs: ["W1-T4710", "W1-T5114", "W1-T5363", "W1-T5365"]
   files: [src/lib/ci-friction-gardener.ts, test/the-ci-friction-gardener-reads-only-the-ledger-steps-it-prices.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

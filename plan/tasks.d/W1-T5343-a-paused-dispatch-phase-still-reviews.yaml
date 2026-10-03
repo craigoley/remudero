@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-02: core daemon restarts and PAUSE scope research"
   plan_refs: [W1-T4191, W1-T4429, W1-T4053, W1-T4732, W1-T5127]
   files: [src/lib/daemon.ts, test/a-paused-dispatch-phase-still-reviews.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
