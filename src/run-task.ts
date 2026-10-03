@@ -49625,14 +49625,14 @@ export function installUnhandledRejectionGuard(deps: UnhandledRejectionGuardDeps
 
 /** W1-T5341: the production seams of the fresh calibration driver — the plan's own tasks, the sealed subscription
  *  dispatcher on the per-attempt cap, the fleet registry's instance roots, and pins derived from this process. */
-function benchmarkAaReadinessRuntime(stateDir: string) {
+function benchmarkAaReadinessRuntime(stateDir: string, workerAbandonMs?: number) {
   const config = loadConfig();
   return { config,
     runtimePins: () => deriveRuntimePins({ harnessRevision: workerBoundaryStack.harnessRevision, installRoot: resolveInstallRoot(config) }),
     loadPlanTasks: () => loadPlan(join(repoRoot, "plan", "tasks.yaml")).tasks,
     dispatcherFor: (task: Task) => sealedPairedAttemptDispatcher({ task, config, repoDir: join(config.root, "repos", task.repo),
       spawn: benchmarkNonDispatchSpawn("aa-prospective", spawnWorker), maxBudgetUsd: PAIRED_ATTEMPT_MAX_BUDGET_USD,
-      clockBoundMs: loadDefaultPolicy().values.workerAbandon }),
+      clockBoundMs: workerAbandonMs ?? loadDefaultPolicy().values.workerAbandon }),
     defaultInstanceRoots: () => registryInstanceRoots(stateDir) };
 }
 

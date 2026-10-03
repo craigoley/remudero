@@ -74,7 +74,10 @@ export function deriveRuntimePins(input: { harnessRevision: BenchmarkStackEviden
   if (head !== null) {
     const git = input.git ?? ((cwd, args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }));
     try { tool = git(input.installRoot, ["status", "--porcelain", "--", "settings", "hooks"]).trim() === "" ? fromHarness : unknown("executing-source-not-clean"); }
-    catch (error) { tool = unknown(`executing-module-revision-unavailable:${(error as Error).message.slice(0, 80)}`); }
+    catch (error) {
+      const reason = `executing-module-revision-unavailable:${(error as Error).message.slice(0, 80)}`;
+      tool = unknown(reason);
+    }
   }
   const stamp = (input.readStamp ?? (() => readOptional("/etc/rmd-build-sha")))()?.trim();
   return { harnessRevision: harness, revisions: { promptRevision: fromHarness, toolRevision: tool, scorerRevision: fromHarness,
@@ -374,7 +377,10 @@ export async function runBenchmarkAaReadiness<T extends ReadinessTask>(input: Be
   if (stack !== undefined) refusals.push(...runtimePinRefusals(input.runtimePins(), stack));
   let tasks: Map<string, T> | null = null;
   try { tasks = new Map(input.loadPlanTasks().map((task) => [task.id, task])); }
-  catch (error) { refusals.push(`plan-unreadable:${(error as Error).message.slice(0, 80)}`); }
+  catch (error) {
+    const reason = `plan-unreadable:${(error as Error).message.slice(0, 80)}`;
+    refusals.push(reason);
+  }
   const frozen = owner === null || refusals.length > 0 ? null
     : freezePopulation(owner.protocol, prospectiveAaDir(owner.stateDir, input.trialId), tasks, nowIso);
   if (frozen !== null && !frozen.ok) refusals.push(frozen.reason);
@@ -446,7 +452,8 @@ export async function benchmarkAaReadinessCommand(rest: string[], run: (request:
       "instance-root": { type: "string", multiple: true }, "max-pairs": { type: "string" }, out: { type: "string" },
       "state-dir": { type: "string" }, json: { type: "boolean" } } }).values;
   } catch (error) {
-    print(`${USAGE} (arguments-invalid: ${(error as Error).message})`);
+    const reason = `arguments-invalid: ${(error as Error).message}`;
+    print(`${USAGE} (${reason})`);
     return 2;
   }
   const roots = (values["instance-root"] ?? []).map((spec) => spec.split("="));
@@ -457,7 +464,11 @@ export async function benchmarkAaReadinessCommand(rest: string[], run: (request:
   let manifest: unknown;
   if (values.trial !== undefined) {
     try { manifest = JSON.parse(readFileSync(values.trial, "utf8")); }
-    catch (error) { print(`benchmark-aa readiness: refused (trial-manifest-unreadable: ${(error as Error).message})`); return 2; }
+    catch (error) {
+      const reason = `trial-manifest-unreadable: ${(error as Error).message}`;
+      print(`benchmark-aa readiness: refused (${reason})`);
+      return 2;
+    }
   }
   const result = await run({ stateDir, trialId: values["trial-id"], ...(roots.length > 0 ? { instanceRoots: roots.map(([instance, dir]) => ({ instance: instance!, stateDir: dir! })) } : {}),
     ...(manifest === undefined ? {} : { manifest }), ...(maxPairs === undefined ? {} : { maxPairs }),
