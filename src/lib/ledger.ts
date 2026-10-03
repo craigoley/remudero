@@ -2044,14 +2044,24 @@ function liveCopyOrder(entries: readonly string[]): string[] {
   return [...entries].sort((a, b) => rank(a) - rank(b) || (a < b ? -1 : a > b ? 1 : 0));
 }
 
-/** The live ledger cut at its last `\n`, re-read while size/mtime/inode move under the read. */
+/** The live ledger cut at its last `\n`, re-read while size/mtime/inode move; one fd checks AND reads. */
+function readLedgerThroughFd(src: string, attempt: number, afterRead?: (attempt: number) => void) {
+  const fd = openSync(src, "r");
+  try {
+    const before = fstatSync(fd);
+    const bytes = readFileSync(fd);
+    afterRead?.(attempt);
+    return { before, bytes, after: fstatSync(fd) };
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function captureLiveLedger(src: string, dst: string, attempts: number, afterRead?: (attempt: number) => void): number {
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    const before = statSync(src);
-    const bytes = readFileSync(src);
-    afterRead?.(attempt);
-    const after = statSync(src);
-    const raced = bytes.length !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ino !== before.ino;
+    const { before, bytes, after } = readLedgerThroughFd(src, attempt, afterRead);
+    const renamed = statSync(src).ino !== before.ino;
+    const raced = renamed || bytes.length !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs;
     if (raced) continue;
     const whole = bytes.lastIndexOf(0x0a) + 1;
     mkdirSync(dirname(dst), { recursive: true });
