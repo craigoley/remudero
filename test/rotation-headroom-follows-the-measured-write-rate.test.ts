@@ -158,8 +158,9 @@ test("W1-T4393: a first rotation with no measured rate keeps the fixed ceiling",
     assert.ok(liveRows(path).some((r) => r.includes("\"ledger.rotation_shed\"")), "the convergence shed ran against the fixed ceiling");
     assert.equal(liveRows(path).some((r) => r.includes("\"ledger.rotation_headroom\"")), false, "no rate was claimed");
     const after = sidecar(path);
-    assert.equal(after.rateBytesPerHour ?? 0, 0, "no measured rate is recorded");
-    assert.equal(after.effectiveCeilingBytes ?? CEILING, CEILING, "the recorded ceiling is the fixed one");
+    // The first rotation RECORDS its decision (W1-T4393), so the next one has a ceiling to compare.
+    assert.equal(after.rateBytesPerHour, 0, "the sidecar records a zero measured rate");
+    assert.equal(after.effectiveCeilingBytes, CEILING, "the sidecar records the fixed ceiling as effective");
     growTo(path, CEILING + 1, "pad", T0 + 120_000);
     assert.equal(ledgerExceedsRotationCeiling(path, CEILING), true, "the per-append check uses the fixed ceiling");
   });
