@@ -601,13 +601,26 @@ export function buildProposalDecisionRoute(deps: PanelGraphDeps): Route {
         return;
       }
       const status = input.decision === "accept" ? "accepted" : "rejected";
+      const origin = bearerTokenId(req);
+      // W1-T5348 ruling: no ~290 s plan-PR preflight on this synchronous request path; the skip is ledgered.
+      const land = deps.feedbackLand;
       const updated = setFeedbackStatus(
         deps.root,
         input.id,
         status,
-        deps.feedbackLand ? { land: deps.feedbackLand } : {},
+        land
+          ? {
+              land: {
+                ...land,
+                preflight: "skip-request-path",
+                log: (step, extra) => {
+                  if (step === "plan_pr.preflight_skipped") appendPanelLedger(deps.ledgerPath, step, input.id, origin, extra);
+                  land.log?.(step, extra);
+                },
+              },
+            }
+          : {},
       );
-      const origin = bearerTokenId(req);
       appendPanelLedger(deps.ledgerPath, input.decision === "accept" ? "panel.proposal_accepted" : "panel.proposal_rejected", input.id, origin, {
         proposal_pr: updated.proposal_pr,
       });
