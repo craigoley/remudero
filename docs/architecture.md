@@ -65,11 +65,17 @@ LLM decision. This shows up as three enforcement layers (§5):
 
 Two more structural guarantees worth knowing up front:
 
-- **Containment and isolation are PROVEN PER RUN, never assumed** —
+- **Containment and isolation are PROVEN by probe — once per boot and again
+  on any change of the probe's inputs — never assumed** —
   `src/lib/containment.ts` spawns a worker and confirms the sandbox actually
   denies an out-of-tree write; `src/lib/isolation.ts` confirms the worker
-  inherited no operator shell state. Both fail closed: unproven means the run
-  does not proceed (Standing rule 11).
+  inherited no operator shell state. A process reuses a passing proof only
+  while every input the probes read — image build sha, harness revision,
+  rendered worker settings, hook content, CLI version, provider — is
+  unchanged (`probeVerdictKey` in `src/run-task.ts`), and ledgers each reuse
+  with the proving run. Both fail closed: a failed probe is never cached and
+  holds every later run until a probe passes, and a run whose key cannot be
+  read probes rather than reuses (Standing rule 11, W1-T5346).
 - **Everything is ledgered** — `src/lib/ledger.ts` appends one NDJSON line per
   step (`{run_id, task_id, step, ...}`), so a run's provenance is inspectable
   after the fact without re-deriving it from logs. `rmd retro`
