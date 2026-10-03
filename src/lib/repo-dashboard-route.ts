@@ -34,7 +34,7 @@ import { loadManagedRepos, type ManagedRepo } from "./managed-repos.js";
 import { InstanceRegistryError, parseInstanceRegistry } from "./instance-registry.js";
 import type { Plan } from "./plan.js";
 import { threadPlanPin, threadStrictPlan } from "./thread-plan.js";
-import { assignmentFacts, createRepoLedgerIndex, type RepoLedgerIndex } from "./repo-ledger-index.js";
+import { assignmentFacts, createRepoLedgerIndex, type RepoLedgerIndex, type RepoLedgerWatermark } from "./repo-ledger-index.js";
 import { DEFAULT_LIVENESS_BOUND_MS, isMergeCreditLine } from "./status.js";
 
 export type RepoCondition = "healthy" | "degraded" | "down" | "paused" | "idle" | "unknown";
@@ -483,6 +483,8 @@ export interface RepoTelemetryRequest {
   incidentsDir?: string;
   /** Also name each count's members, for the shadow comparator. */
   members?: boolean;
+  /** Read only the rows a ledger projector at this watermark had read. */
+  through?: RepoLedgerWatermark;
 }
 
 export interface RepoLedgerIndexMeta {
@@ -558,7 +560,7 @@ export function computeRepoTelemetrySync(
     } else {
       let idx = workerIndexes.get(req.ledgerPath);
       if (!idx) workerIndexes.set(req.ledgerPath, (idx = createRepoLedgerIndex(REPO_TELEMETRY_WINDOW_MS)));
-      const pass = idx.refresh(req.ledgerPath, req.nowMs);
+      const pass = idx.refresh(req.ledgerPath, req.nowMs, req.through);
       ledger = pass.present ? pass.rows : undefined;
       lastDaemonMs = pass.lastDaemonMs ?? null;
       index = { filesRead: pass.filesRead, bytesRead: pass.bytesRead, rows: pass.rows.length };
@@ -693,6 +695,8 @@ export interface RepoDashboardOptions {
   shadowMembers?: boolean;
   /** An earlier summary's file reads, replayed instead of reading those files now. */
   fileReads?: RepoSummaryFileReads;
+  /** The read-model watermark an earlier summary's rows stood at: the ledger is read only through it. */
+  ledgerThrough?: RepoLedgerWatermark;
 }
 
 type Identity = { repo: ManagedRepo; source: RepoDashboardEntry["source"]; own: boolean };
@@ -744,6 +748,7 @@ function telemetryRequest(deps: RepoDashboardOptions, identities: Identity[], le
     ...(deps.controlRoot !== undefined ? { controlRoot: deps.controlRoot } : {}),
     ...(deps.incidentsDir !== undefined ? { incidentsDir: deps.incidentsDir } : {}),
     ...(deps.shadowMembers ? { members: true } : {}),
+    ...(deps.ledgerThrough ? { through: deps.ledgerThrough } : {}),
   };
 }
 

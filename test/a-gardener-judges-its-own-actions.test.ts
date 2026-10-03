@@ -10,6 +10,7 @@ import { test } from "node:test";
 
 import {
   GardenStateUnreadableError,
+  foldGardenEffects,
   gardenEffectsPath,
   gardenStatePath,
   initialGardenState,
@@ -20,6 +21,7 @@ import {
   type GardenCheckout,
   type GardenSpec,
   type GardenState,
+  type GardenEffect,
   type Outcome,
 } from "../src/lib/gardener.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -62,6 +64,70 @@ function checkout(landed: Array<{ title: string; body: string }>): () => GardenC
 function stateDir(): string {
   return mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t4110-`));
 }
+
+test("a replay older than the 200-ID cache cannot add another credit", () => {
+  const effects: GardenEffect[] = Array.from({ length: 201 }, (_, i) => ({
+    id: `effect:${i}`, actionClass: "a", verdict: "credit", kind: "effect",
+    at: "2026-10-02T00:00:00.000Z", sequence: i + 1,
+  }));
+  const first = foldGardenEffects(initialGardenState(["a", "b"]), effects);
+  assert.equal(first.applied.length, 201, "every novel verdict applies");
+  assert.equal(first.state.classes.a.alpha, 204);
+  assert.equal(first.state.foldedEffects?.length, 200);
+  const restarted = JSON.parse(JSON.stringify(first.state)) as GardenState<C>;
+  const replay = foldGardenEffects(restarted, [effects[0]!]);
+  assert.equal(replay.state.classes.a.alpha, 204);
+  assert.deepEqual(replay.applied, []);
+  assert.deepEqual(foldGardenEffects(replay.state, [effects[200]!]).applied, []);
+});
+
+test("a gardener watermark covers only an ordered consumed prefix", () => {
+  const effect = (id: string, sequence?: number, actionClass = "a"): GardenEffect => ({
+    id, sequence, actionClass, kind: "effect", verdict: "credit", at: "2026-10-02T00:00:00.000Z",
+  });
+  const original = initialGardenState(["a", "b"]);
+  for (const effects of [
+    [effect("later", 3), effect("earlier", 1)],
+    [effect("first", 1), effect("second", 1)],
+    [effect("same", 1), effect("same", 2)],
+    [effect("legacy"), effect("sequenced", 1)],
+  ]) {
+    assert.throws(() => foldGardenEffects(original, effects), /ordered, unique producer prefix/);
+    assert.equal(original.classes.a.alpha, 3);
+    assert.equal(original.foldedEffectThrough, undefined);
+  }
+  const effects = [effect("first", 1), effect("unknown", 3, "new-class"), effect("last", 5, "b")];
+  const prefix = foldGardenEffects(original, effects);
+  assert.equal(prefix.state.foldedEffectThrough, 1);
+  assert.equal(prefix.state.classes.a.alpha, 4);
+  assert.equal(prefix.state.classes.b.alpha, 3);
+  assert.deepEqual(prefix.remaining, effects.slice(1));
+  assert.ok(!prefix.state.foldedEffects?.includes("unknown"));
+  const restart = foldGardenEffects(prefix.state, effects);
+  assert.deepEqual(restart.applied, []);
+  assert.equal(restart.state.foldedEffectThrough, 1);
+  const upgraded = foldGardenEffects<C | "new-class">({ ...restart.state, classes: { ...restart.state.classes, "new-class": { alpha: 3, beta: 1 } } }, restart.remaining);
+  assert.equal(upgraded.applied.length, 2);
+  assert.equal(upgraded.state.foldedEffectThrough, 5, "global sequence gaps belong to other gardeners");
+  assert.equal(upgraded.state.classes.b.alpha, 4);
+});
+
+test("legacy gardener receipts remain idempotent beyond the recent cache and refuse missing history", () => {
+  const effects: GardenEffect[] = Array.from({ length: 201 }, (_, i) => ({
+    id: `legacy:${i}`, actionClass: "a", kind: "effect", verdict: "credit", at: "2026-10-02T00:00:00.000Z",
+  }));
+  const first = foldGardenEffects(initialGardenState(["a", "b"]), effects);
+  assert.equal(first.applied.length, 201);
+  assert.equal(first.state.foldedEffectThrough, undefined);
+  assert.equal(first.state.foldedLegacyEffects?.length, 201);
+  const replay = foldGardenEffects(JSON.parse(JSON.stringify(first.state)), [effects[0]!]);
+  assert.equal(replay.state.classes.a.alpha, 204);
+  assert.deepEqual(replay.applied, []);
+  const oldReceipt = { ...initialGardenState(["a", "b"]), foldedEffects: effects.slice(1).map((e) => e.id) };
+  assert.throws(() => foldGardenEffects(oldReceipt, [effects[0]!]), /receipt is unavailable/);
+  assert.throws(() => foldGardenEffects(oldReceipt, [{ ...effects[0]!, sequence: 202 }]), /receipt is unavailable/);
+  assert.deepEqual(foldGardenEffects(oldReceipt, [effects[200]!]).applied, []);
+});
 
 test("W1-T4110: a spec's class is judged by its own metric", () => {
   const dir = stateDir();
@@ -267,6 +333,7 @@ test("W1-T4938: corrupt existing gardener state refuses a duplicate PR", () => {
     ["pending class unknown", JSON.stringify({ classes: { a: { alpha: 3, beta: 1 } }, pending: { ...PENDING_PR, actionClass: "zzz" } }), "malformed"],
     ["pending without a PR url", JSON.stringify({ classes: { a: { alpha: 3, beta: 1 } }, pending: { ...PENDING_PR, prUrl: 7 } }), "malformed"],
     ["fingerprint not a string", JSON.stringify({ classes: { a: { alpha: 3, beta: 1 } }, lastPass: { fingerprint: 12 } }), "malformed"],
+    ["legacy receipt not ids", JSON.stringify({ classes: { a: { alpha: 3, beta: 1 } }, foldedLegacyEffects: [12] }), "malformed"],
   ];
   for (const [label, bytes, failureClass] of cases) {
     const dir = stateDir();

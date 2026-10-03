@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
   status: queued
@@ -17,3 +17,13 @@
     - claim: "the lane that trips the CodeQL gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
       proof: "grep: ci-learning:8075:CodeQL in learnings/ci.yaml"
   note: "Filed by the ci-learning rung from ci-learning:8075:CodeQL. The CodeQL gate went red on #8075 and was repaired; the repair touched src/lib/ledger-projector.ts, test/ledger-projector.test.ts, src/lib/read-model-worker.ts, test/read-model-worker.test.ts, src/lib/board-projection.ts, test/a-wall-clock-bound-declares-itself.test.ts, test/board-projection.test.ts, src/lib/read-model-db.ts, test/read-model-db.test.ts, scripts/census-precheck.mjs, src/lib/instances-view.ts, src/lib/now-decisions.ts, test/coverage-leaf-isolates-reentrant-scratch.test.ts, test/the-local-gate-writes-coverage-where-ci-does.test.ts. Recommended action: build. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.88
+    reasons:
+      - "The filed plan confines the remedy to a matched CodeQL learning entry in learnings/ci.yaml, consistent with the declared file scope."
+      - "The supplied scope describes worker guidance and names no change to permissions, merge or deploy policy, data deletion, or irreversible action."
+      - "The plan specifies automated grep acceptance, and the supplied family record reports 2 merged tasks and 0 declined; no adverse gate result is shown."
+    judged_at: "2026-10-03T07:01:54.889Z"
+    pin: "e156da77c479e3240763188c5d8c3f783b5dac34526e1e892742ea3468ddfb50"

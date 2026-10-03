@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-02: an interactive push of a run-* branch was refused as a force-push to a default branch"
   plan_refs: [W1-T4588]
   files: [hooks/deny-floor.sh, test/the-push-tripwire-reads-the-destination-ref.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

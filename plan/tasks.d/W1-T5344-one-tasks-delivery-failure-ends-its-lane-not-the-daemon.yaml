@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-02: core daemon restarts and PAUSE scope research"
   plan_refs: [W1-T3319, W1-T4466, W1-T5083, W1-T2546]
   files: [src/lib/daemon.ts, src/lib/drain.ts, test/one-tasks-delivery-failure-ends-its-lane-not-the-daemon.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
