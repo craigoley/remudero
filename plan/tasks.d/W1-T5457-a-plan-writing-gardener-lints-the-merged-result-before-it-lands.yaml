@@ -11,7 +11,7 @@
   status: queued
   attempts: 0
   origin: "operator session 2026-10-03: the Follow-up section of PR #8877 (a plan-validity check on the merged result in each gardener's landing step)"
-  plan_refs: ["W1-T5456", "W1-T4110", "W1-T4941", "W1-T5361", "W1-T4533"]
+  plan_refs: ["W1-T4110", "W1-T4941", "W1-T5361", "W1-T4533"]
   files:
     - src/lib/gardener.ts
     - test/a-plan-writing-gardener-lints-the-merged-result-before-it-lands.test.ts
@@ -55,5 +55,5 @@
     `git grep -n "landing_refused" src/` already shows such a check.
 
   notes: |
-    Pairs with the quarantine task: that one limits the damage when a bad shard reaches main, this one stops
-    the gardeners from producing it.
+    Pairs with the daemon-side quarantine (PR #8878): that limits the damage when a bad shard reaches main,
+    this one stops the gardeners from producing it.

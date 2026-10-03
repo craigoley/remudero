@@ -5,7 +5,8 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  risk: low
+  risk: high
+  band_meaning: span
   budget_usd: 45.00
   priority: 3
   status: queued
@@ -14,6 +15,8 @@
   plan_refs: ["W1-T5454", "W1-T4110", "W1-T4117", "W1-T5361", "W1-T3412"]
   files:
     - src/lib/scout-gardener.ts
+    - src/lib/scout-slice.ts
+    - src/run-task.ts
     - test/a-scout-proposes-from-a-rotating-slice-of-the-repo.test.ts
   rationale: |
     The ledger scout (W1-T5454) finds only what already misbehaves at run time. Measured by its own
@@ -27,7 +30,7 @@
     design, not hardening added after it.
 
   design: |
-    (i) `pickScoutSlice` in src/lib/scout-gardener.ts picks the slice: the next directory under src/lib, scripts, docs or test after
+    (i) `pickScoutSlice` in src/lib/scout-slice.ts, called from scout-gardener.ts, picks the slice: the next directory under src/lib, scripts, docs or test after
     a persisted cursor, capped at a fixed byte budget, with files changed since the last read of that slice
     first. Pure and cursor-driven so a test pins the rotation.
     (ii) A second class, `propose-from-slice`, on the same GardenSpec. The model seam is INJECTED
@@ -39,6 +42,9 @@
     a worker to run), and a finding whose subject matches an open or recently merged task's title or files
     (the duplicate-surface lint's own comparison) is dropped. A finding that fails any of the three is
     discarded with a ledgered reason, never repaired by asking the model again.
+    (iii-b) The model seam is supplied where the garden is built: the `scout` branch of `buildRegisteredGarden`
+    in src/run-task.ts passes the same model-call dependency the machine-filing judge's pass receives, so the
+    class runs in the daemon and not only in a test. This is why run-task.ts is in this task's files.
     (iv) FILED through `renderMachineShard` under origin `scout:slice:<dir>`. The machine-filing judge rules
     on risk; the deterministic backstop still sends a record touching secrets, permissions, irreversible
     changes or merge policy to a person. This class never sets `verify:` or `risk:`.
@@ -60,6 +66,10 @@
       proof: 'grep: test("W1-T5455: a surviving finding is filed through the machine filing renderer under the slice origin" in test/a-scout-proposes-from-a-rotating-slice-of-the-repo.test.ts'
     - claim: "a reverted change debits the class and filing respects the shared queue bound"
       proof: 'grep: test("W1-T5455: a reverted change debits the class and filing respects the shared queue bound" in test/a-scout-proposes-from-a-rotating-slice-of-the-repo.test.ts'
+    - claim: "the scout gardener calls the slice picker"
+      proof: 'grep: pickScoutSlice( in src/lib/scout-gardener.ts'
+    - claim: "the daemon's garden builder still constructs the scout spec this class extends"
+      proof: 'grep: scoutGardenSpec( in src/run-task.ts'
   falsifier: |
     File a finding whose cited line no longer holds the claimed text, file one that duplicates a queued task,
     or credit a change that was reverted inside the window. The affected proof must fail. CLOSE THIS TASK

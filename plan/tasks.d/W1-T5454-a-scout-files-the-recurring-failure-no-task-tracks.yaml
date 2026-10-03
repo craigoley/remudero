@@ -5,7 +5,8 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  risk: low
+  risk: high
+  band_meaning: span
   budget_usd: 35.00
   priority: 3
   status: queued
@@ -14,7 +15,10 @@
   plan_refs: ["W1-T4110", "W1-T4941", "W1-T4802", "W1-T5114", "W1-T5361"]
   files:
     - src/lib/scout-gardener.ts
+    - src/lib/garden-registry.ts
+    - src/run-task.ts
     - test/a-scout-files-the-recurring-failure-no-task-tracks.test.ts
+    - test/the-scout-runs-off-the-daemon-loop-and-the-overseer-sees-it.test.ts
   rationale: |
     READ 2026-10-03 over origin/main 231b7673b. The registered gardens (REGISTERED_GARDEN_NAMES in
     src/lib/garden-registry.ts) are plan, gate, test, config, export, ci-friction, selector-shadow,
@@ -29,8 +33,13 @@
 
   design: |
     (i) src/lib/scout-gardener.ts exports `scoutGardenSpec`, a GardenSpec (src/lib/gardener.ts) with ONE class,
-    `file-uncovered-symptom`. Registering it with the garden registry is the sibling wiring task, so this module
-    is pure and testable without a daemon.
+    `file-uncovered-symptom`. It is registered in the same task, so the module is reached by the daemon and not
+    only by its own tests: add `"scout"` to REGISTERED_GARDEN_NAMES in src/lib/garden-registry.ts (after
+    `"backlog"`, with its minimum pass interval beside the others) and a `scout` branch to
+    `buildRegisteredGarden` in src/run-task.ts over the same workspace and ledger writers the backlog garden
+    uses. The overseer discovers a gardener from ledger step suffixes, so it watches the scout from its first
+    scorecard row with no overseer edit. Declared risk:high with band_meaning span only because Rule 19 counts the
+    module, the registry and the builder as separate concerns; it is not a risky change.
     (ii) INVENTORY: read the ledger union (readLedgerUnionRecordsSync) over a trailing window for steps whose
     name carries a failure shape (`failed`, `refused`, `unavailable`, `escalated`, `unhealthy`) and count rows per
     step per half-window. A symptom is a step whose count grew or held across both halves.
@@ -59,6 +68,12 @@
       proof: 'grep: test("W1-T5454: filing stops while the queue is over its bound and is capped by the days merges" in test/a-scout-files-the-recurring-failure-no-task-tracks.test.ts'
     - claim: "the class is judged by whether the symptom stopped, not by the merge"
       proof: 'grep: test("W1-T5454: the class is judged by whether the symptom stopped not by the merge" in test/a-scout-files-the-recurring-failure-no-task-tracks.test.ts'
+    - claim: "the registry names the scout and its pass interval"
+      proof: 'grep: test("W1-T5454: the registry names the scout and its pass interval" in test/the-scout-runs-off-the-daemon-loop-and-the-overseer-sees-it.test.ts'
+    - claim: "the registered-garden builder constructs the scout spec"
+      proof: 'grep: test("W1-T5454: the registered garden builder constructs the scout spec" in test/the-scout-runs-off-the-daemon-loop-and-the-overseer-sees-it.test.ts'
+    - claim: "the run-task builder calls the scout spec"
+      proof: 'grep: scoutGardenSpec( in src/run-task.ts'
   falsifier: |
     Cover a symptom with a queued task that cites its step and the scout still files it; or file past the
     queue bound; or credit the class on a merge while the symptom's rows kept growing. The affected proof must
