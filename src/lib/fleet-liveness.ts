@@ -14,6 +14,7 @@ import { fixedClock } from "./clock.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import type { Escalation } from "./escalate.js";
 import { readLedgerUnionRecordsSync, realLedgerFs, type LedgerGrepFsDeps } from "./ledger-union.js";
+import { LEDGER_FUTURE_STAMP_STEP, LEDGER_FUTURE_STAMP_TOLERANCE_MS } from "./ledger.js";
 import { RmdError } from "./errors.js";
 
 /** One watched instance: its registry name, `owner/name` repo, and the state dir holding its ledger. */
@@ -79,7 +80,7 @@ const QUIET_STEPS = new Set(["daemon.idle_starved.enter", "daemon.idle_starved.p
 export const QUIET_PULSE_BOUND_MS = 2 * 30 * 60_000;
 /** The ledgered form of a boot failure. The 2026-09-23 PlanError reached stderr only. */
 const BOOT_ERROR_STEPS = new Set(["cli.unhandled_rejection"]);
-const LIVENESS_ROW = /"step":"(sweep\.summary|daemon\.(start|pause|stop|quota|idle_starved\.(enter|pulse))|cli\.(invoked|unhandled_rejection))"/;
+const LIVENESS_ROW = /"step":"(sweep\.summary|daemon\.(start|pause|stop|quota|idle_starved\.(enter|pulse))|cli\.(invoked|unhandled_rejection)|ledger\.future_stamp)"/;
 
 function tsOf(row: LivenessRow): number {
   return typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
@@ -115,12 +116,23 @@ function newest(rows: readonly LivenessRow[], match: (row: LivenessRow) => boole
   return best;
 }
 
+/**
+ * W1-T5484: drop every row a `ledger.future_stamp` names (by `run_id` and `claimed_ts`, so the rest of
+ * that run survives) and, as a backstop for rows written before W1-T5407's flag, every row stamped past
+ * `nowMs` by more than its tolerance. Such a row passes every trailing window and outranks every real one.
+ */
+function withoutFutureStamped(rows: readonly LivenessRow[], nowMs: number): LivenessRow[] {
+  const flagged = new Set(rows.filter((r) => r.step === LEDGER_FUTURE_STAMP_STEP).map((r) => `${String(r.run_id)}@${String(r.claimed_ts)}`));
+  return rows.filter((r) => !flagged.has(`${String(r.run_id)}@${String(r.ts)}`) && !(tsOf(r) - nowMs > LEDGER_FUTURE_STAMP_TOLERANCE_MS));
+}
+
 function minutes(ms: number): string {
   return `${Math.round(ms / 60_000)} min`;
 }
 
 /** Judge one instance from its rows in the window. Pure: the caller reads and supplies them. */
-export function judgeInstanceLiveness(instance: LivenessInstance, rows: readonly LivenessRow[], nowMs: number): InstanceLiveness {
+export function judgeInstanceLiveness(instance: LivenessInstance, allRows: readonly LivenessRow[], nowMs: number): InstanceLiveness {
+  const rows = withoutFutureStamped(allRows, nowMs);
   const polled = newest(rows, (r) => typeof r.poll_interval_ms === "number" && r.poll_interval_ms > 0);
   const pollIntervalMs = polled ? (polled.poll_interval_ms as number) : DEFAULT_POLL_INTERVAL_MS;
   const staleBoundMs = pollIntervalMs * STALE_HEARTBEAT_POLL_MULTIPLE;
