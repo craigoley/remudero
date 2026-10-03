@@ -164,6 +164,7 @@ import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { createChangedFilesCache } from "./lib/changed-files-cache.js";
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
+import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
 import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
@@ -33449,10 +33450,11 @@ export function reportQuarantined(
   quarantined: QuarantinedTask[],
   log: (step: string, extra?: Record<string, unknown>) => void,
   raise: (escalation: Escalation) => string,
+  requestRepair?: (q: QuarantinedTask) => void,
 ): void {
   for (const q of quarantined) {
     if (q.reason === "shard_invalid") {
-      reportInvalidShard(q, log, raise);
+      reportInvalidShard(q, log, raise, requestRepair);
       continue;
     }
     log("plan.duplicate_quarantined", { id: q.id, files: q.files, reason: q.reason });
@@ -33481,6 +33483,7 @@ function reportInvalidShard(
   q: QuarantinedTask,
   log: (step: string, extra?: Record<string, unknown>) => void,
   raise: (escalation: Escalation) => string,
+  requestRepair?: (q: QuarantinedTask) => void,
 ): void {
   const file = q.files[0] ?? q.id;
   log("plan.shard_quarantined", { id: q.id, file, error: q.error });
@@ -33500,6 +33503,12 @@ function reportInvalidShard(
   } catch (e) {
     log("plan.shard_escalation_failed", { id: q.id, file, reason: e instanceof Error ? e.message : String(e) });
   }
+  if (!requestRepair || !isDuplicateKeyError(q.error)) return;
+  try {
+    requestRepair(q);
+  } catch (e) {
+    log("plan.shard_repair_failed", { id: q.id, file, stage: "request", reason: e instanceof Error ? e.message : String(e) });
+  }
 }
 
 /** {@link reportQuarantined} for a daemon that re-reads its plan every tick: each quarantine is reported the first time
@@ -33507,6 +33516,7 @@ function reportInvalidShard(
 export function quarantineReporter(
   log: (step: string, extra?: Record<string, unknown>) => void,
   raise: (escalation: Escalation) => string,
+  requestRepair?: (q: QuarantinedTask) => void,
 ): (quarantined: QuarantinedTask[]) => void {
   const reported = new Set<string>();
   return (quarantined) => {
@@ -33516,7 +33526,7 @@ export function quarantineReporter(
       reported.add(key);
       return true;
     });
-    reportQuarantined(fresh, log, raise);
+    reportQuarantined(fresh, log, raise, requestRepair);
   };
 }
 
@@ -33530,10 +33540,153 @@ export function loadDaemonPlan(
   log: (step: string, extra?: Record<string, unknown>) => void,
   raise: (escalation: Escalation) => string,
   load: (path: string) => ReturnType<typeof loadPlanQuarantiningDuplicates> = (path) => loadPlanQuarantiningDuplicates(path),
+  requestRepair?: (q: QuarantinedTask) => void,
 ): Plan {
   const { plan, quarantined } = load(planPath);
-  reportQuarantined(quarantined, log, raise);
+  reportQuarantined(quarantined, log, raise, requestRepair);
   return plan;
+}
+
+const ORIGIN_MAIN_LABEL = "origin/main:";
+type ShardRepairLog = (step: string, extra?: Record<string, unknown>) => void;
+
+/** W1-T5519 — the duplicate-key repair lane's state: `requests/` the loop writes, `opened.json` the plan garden's child writes. */
+export function shardRepairDir(stateDir: string): string {
+  return join(stateDir, "plan-shard-repair");
+}
+
+/** On the daemon loop: a duplicate-key quarantine becomes one small request file — no git, no gh, no repair yet. */
+export function shardRepairRequester(stateDir: string, log: ShardRepairLog): (q: QuarantinedTask) => void {
+  return (q) => {
+    const file = q.files[0] ?? q.id;
+    if (!file.startsWith(ORIGIN_MAIN_LABEL)) {
+      log("plan.shard_repair_refused", { id: q.id, file, reason: "the shard was not read from origin/main, so there is no blob to repair" });
+      return;
+    }
+    const name = `${createHash("sha256").update(file).digest("hex").slice(0, 16)}.json`;
+    writeAtomic(join(shardRepairDir(stateDir), "requests", name), `${JSON.stringify({ id: q.id, file })}\n`);
+    log("plan.shard_repair_requested", { id: q.id, file });
+  };
+}
+
+function shardRepairRequests(stateDir: string): string[] {
+  const dir = join(shardRepairDir(stateDir), "requests");
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir).filter((n) => n.endsWith(".json")).sort().map((n) => join(dir, n));
+}
+
+/** Whether a repair request waits — the plan garden's due probe, on the loop, so one directory read. */
+export function shardRepairsPending(stateDir: string): boolean {
+  return shardRepairRequests(stateDir).length > 0;
+}
+
+/** The plan garden with the repair lane in front of it: due while a request waits, and a repair failure never skips the garden. */
+export function withShardRepairs(stateDir: string, repairs: () => void, garden: RegisteredGardenPass, log: ShardRepairLog): RegisteredGardenPass {
+  return Object.assign(() => {
+    try {
+      repairs();
+    } catch (e) {
+      log("plan.shard_repair_failed", { stage: "pass", reason: String((e as Error)?.message ?? e) });
+    }
+    return garden();
+  }, { due: () => shardRepairsPending(stateDir) || (garden.due?.() ?? true) });
+}
+
+function repairRequestedShard(
+  request: { id: string; file: string },
+  opts: { stateDir: string; log: ShardRepairLog; readOriginBlob: (rel: string) => string; land: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined },
+): void {
+  const at = { id: request.id, file: request.file };
+  const failed = (stage: string, e: unknown) => opts.log("plan.shard_repair_failed", { ...at, stage, reason: String((e as Error)?.message ?? e) });
+  const rel = request.file.slice(ORIGIN_MAIN_LABEL.length);
+  let text: string;
+  try {
+    text = opts.readOriginBlob(rel);
+  } catch (e) {
+    failed("read", e);
+    return;
+  }
+  const blob = gitBlobSha(text);
+  const openedPath = join(shardRepairDir(opts.stateDir), "opened.json");
+  let opened: Record<string, string>;
+  try {
+    opened = JSON.parse(readFileIfExists(openedPath) ?? "{}") as Record<string, string>;
+  } catch (e) {
+    // An unreadable record cannot say these bytes were never opened: refuse rather than risk a second PR.
+    failed("opened-record", e);
+    return;
+  }
+  if (opened[blob]) {
+    opts.log("plan.shard_repair_skipped", { ...at, blob, pr_url: opened[blob], reason: "a repair PR was already opened for these bytes" });
+    return;
+  }
+  const verdict = repairDuplicateKeyShard(text);
+  if ("refused" in verdict) {
+    opts.log("plan.shard_repair_refused", { ...at, blob, reason: verdict.reason });
+    return;
+  }
+  const keys = Object.keys(verdict.kept).join(", ");
+  const pr = {
+    title: `fix(plan): drop the duplicate ${keys} key from a quarantined shard`,
+    body:
+      `The daemon quarantined \`${rel}\` (blob ${blob}): it fails to parse on a duplicated \`${keys}\` key, the merge race ` +
+      `#8877 and #8922 repaired by hand. This keeps ${Object.entries(verdict.kept).map(([k, v]) => `\`${k}: ${v}\``).join(", ")}, the value ` +
+      `the record's risk_ruling pin covers, and drops the other line and any backlog-gardener marker it carried.\n\n` +
+      `Opened by the duplicate-key repair lane (W1-T5519).`,
+  };
+  let prUrl: string | undefined;
+  try {
+    prUrl = opts.land(rel, verdict.text, pr);
+  } catch (e) {
+    failed("land", e);
+    return;
+  }
+  if (prUrl === undefined) {
+    opts.log("plan.shard_repair_not_landed", { ...at, blob, reason: "the plan-PR preflight refused the repair; plan_pr.preflight_refused names why" });
+    return;
+  }
+  writeAtomic(openedPath, `${JSON.stringify({ ...opened, [blob]: prUrl }, null, 2)}\n`);
+  opts.log("plan.shard_repair_opened", { ...at, blob, pr_url: prUrl, kept: verdict.kept });
+}
+
+/**
+ * Off the loop, inside the plan garden's child: each waiting request is repaired from origin/main's blob
+ * with {@link repairDuplicateKeyShard} and opened as a plan-only PR through {@link gardenCheckout} (its
+ * W1-T5348 preflight, then `createPlanPrRest`) — once per shard blob, by `opened.json`. A request is
+ * consumed whatever its outcome; a daemon restart re-requests a shard that still does not load.
+ */
+export function runShardRepairPass(opts: {
+  stateDir: string;
+  repoDir: string;
+  worktreesRoot: string;
+  owner: string;
+  repo: string;
+  log: ShardRepairLog;
+  readOriginBlob?: (rel: string) => string;
+  land?: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined;
+}): void {
+  const readOriginBlob =
+    opts.readOriginBlob ?? ((rel: string) => execFileSync("git", ["-C", opts.repoDir, "show", `origin/main:${rel}`], { encoding: "utf8", maxBuffer: 1 << 26, stdio: ["ignore", "pipe", "pipe"] }));
+  const land =
+    opts.land ??
+    ((rel: string, text: string, pr: { title: string; body: string }) => {
+      const checkout = gardenCheckout({ name: "plan", repoDir: opts.repoDir, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log });
+      try {
+        writeFileSync(join(checkout.root, rel), text);
+        return checkout.land({ paths: [rel], ...pr });
+      } finally {
+        checkout.dispose();
+      }
+    });
+  for (const path of shardRepairRequests(opts.stateDir)) {
+    try {
+      repairRequestedShard(JSON.parse(readFileSync(path, "utf8")) as { id: string; file: string }, { stateDir: opts.stateDir, log: opts.log, readOriginBlob, land });
+    } catch (e) {
+      opts.log("plan.shard_repair_failed", { request: path, stage: "pass", reason: String((e as Error)?.message ?? e) });
+    } finally {
+      rmSync(path, { force: true });
+    }
+  }
 }
 
 /** A garden branch whose PR create threw is deleted from origin, unless a PR does sit on it (the
@@ -33683,7 +33836,8 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
   switch (name) {
     case "plan": {
       const d = deps("plan");
-      return gardenPass(planGardenSpec(d), d);
+      const repairs = { stateDir, repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log };
+      return withShardRepairs(stateDir, () => runShardRepairPass(repairs), gardenPass(planGardenSpec(d), d), log);
     }
     case "backlog": {
       const d = deps("backlog");
@@ -34179,7 +34333,8 @@ export async function daemonCommand(
   let plan: Plan;
   const raiseDuplicate = (e: Escalation): string =>
     escalate({ ...e, runId }, { issues: ghIssueGateway(target.owner, target.repo), ledgerPath, runId });
-  const reportPlanQuarantine = quarantineReporter(log, raiseDuplicate);
+  const requestShardRepair = shardRepairRequester(join(config.root, "state"), log);
+  const reportPlanQuarantine = quarantineReporter(log, raiseDuplicate, requestShardRepair);
   const gardenContext: GardenBuildContext = { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate };
   const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
     ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
@@ -34195,7 +34350,7 @@ export async function daemonCommand(
       execFileSync("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
       execFileSync("git", ["-C", repoDir, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" });
     }
-    plan = loadDaemonPlan(target.planPath, log, raiseDuplicate);
+    plan = loadDaemonPlan(target.planPath, log, raiseDuplicate, undefined, requestShardRepair);
   } else if (target.isSelf && !flagValue(rest, "--plan")) {
     // ── GIT SELF-SYNC (W1-T60): self-hosting must not read the daemon's own working tree
     // either — same fail-closed gate as run-task/drain (see syncPlanOrRefuse).
@@ -34209,7 +34364,7 @@ export async function daemonCommand(
     plan = synced.plan;
   } else {
     // An explicit --plan overrides the derived path — read it literally, no git sync.
-    plan = loadDaemonPlan(target.planPath, log, raiseDuplicate);
+    plan = loadDaemonPlan(target.planPath, log, raiseDuplicate, undefined, requestShardRepair);
   }
 
   // `lastProj` also backs `isOpenPr` (W1-T80, the in-flight dispatch-dedup
