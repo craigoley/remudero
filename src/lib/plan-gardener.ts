@@ -16,9 +16,9 @@ import { loadCreditStore } from "./status.js";
  * for a person to notice. Each pass proposes ONE class of change as ONE pull request:
  *   - MERGE: a queued task whose title matches an older queued task exactly (numbers and case
  *     aside) and that declares the same files is withdrawn in favour of the older one.
- *   - RETIRE: a queued task whose every acceptance proof already holds is closed; one that depends
- *     on a retired task is retired.
- * Both write `retirement:`, a judgement call, so both are `review` classes (gardener.ts): each is judged
+ *   - RETIRE: reconcile shipped work as done with its landing commit (W1-T4861), or retire work
+ *     that depends on an abandoned task.
+ * Both are judgement calls and `review` classes (gardener.ts): each is judged
  * by whether its PR merges. The PR opens ready for review — never a draft — and flows through the
  * fleet's review and auto-merge like every other PR; closing it is how a person declines it.
  *
@@ -33,6 +33,7 @@ export interface PlanGardenAction extends GardenAction<PlanGardenClass> {
   /** For a merge: the older task it is folded into. */
   into?: string;
   retirement: RetirementReason;
+  landingCommit?: string;
 }
 
 export interface PlanInventory {
@@ -152,10 +153,26 @@ export function filingRef(repoRoot: string, shardRel: string): string | undefine
   return sha === "" ? undefined : sha;
 }
 
+/** Walk backwards to the start of the current passing run on main, including a merge's own tree. */
+export function proofLandingCommit(repoRoot: string, filed: string, proofs: string[]): string | undefined {
+  if (proofs.length === 0) return undefined;
+  const r = spawnSync("git", ["-C", repoRoot, "rev-list", "--first-parent", `${filed}..HEAD`], { encoding: "utf8" });
+  if (r.status !== 0) return undefined;
+  let landing: string | undefined;
+  for (const ref of r.stdout.split("\n").filter(Boolean)) {
+    const held = proofs.map((p) => grepProofHeldAt(repoRoot, ref, p));
+    if (held.includes(undefined)) return undefined;
+    if (!held.every(Boolean)) break;
+    landing = ref;
+  }
+  return landing;
+}
+
 export function retirementCandidates(inv: PlanInventory, repoRoot: string): PlanGardenAction[] {
   const abandoned = new Set(inv.all.filter((t) => t.retirement && ABANDONED_RETIREMENTS.has(t.retirement)).map((t) => t.id));
   const out: PlanGardenAction[] = [];
   for (const t of inv.open) {
+    if (t.status !== "queued" || t.retirement) continue;
     const gone = t.depends_on.filter((d) => abandoned.has(d));
     if (gone.length > 0) {
       out.push({ class: "retire", target: t.id, retirement: "retired", reason: `It depends on ${gone.join(", ")}, which will never be built.` });
@@ -164,15 +181,18 @@ export function retirementCandidates(inv: PlanInventory, repoRoot: string): Plan
     // A proof that greps the task's OWN shard holds from the moment it is filed, so it is no evidence the
     // work happened; only proofs about other files count, and there must be at least one.
     const own = inv.shards.get(t.id);
-    const proofs = (t.acceptance ?? []).map((c) => c.proof).filter((p) => !own || !p.trim().endsWith(` in ${own}`));
-    if (proofs.length === 0 || !proofs.every((p) => grepProofHolds(repoRoot, p))) continue;
+    const allProofs = (t.acceptance ?? []).map((c) => c.proof);
+    const proofs = allProofs.filter((p) => !own || !p.trim().endsWith(` in ${own}`));
+    if (proofs.length === 0 || !allProofs.every((p) => grepProofHolds(repoRoot, p))) continue;
     // Nor is a proof that already held when the task was FILED: #6885 proposed closing W1-T3980 on
     // greps of symbols that predated it. Some proof must have failed at the filing commit, read there;
     // an unreadable filing commit or proof never closes a task.
     const filed = own ? filingRef(repoRoot, own) : undefined;
     const atFiling = filed ? proofs.map((p) => grepProofHeldAt(repoRoot, filed, p)) : [undefined];
     if (atFiling.includes(undefined) || atFiling.every((held) => held)) continue;
-    out.push({ class: "retire", target: t.id, retirement: "closed", reason: "Every acceptance proof now holds on main, and did not when it was filed." });
+    const landingCommit = proofLandingCommit(repoRoot, filed!, allProofs);
+    if (!landingCommit) continue;
+    out.push({ class: "retire", target: t.id, retirement: "closed", landingCommit, reason: "Every acceptance proof now holds on main, and did not when it was filed." });
   }
   return out;
 }
@@ -191,8 +211,7 @@ export function planGardenMarker(a: PlanGardenAction): string {
   return `plan gardener: ${a.class} ${a.target}${a.into ? ` into ${a.into}` : ""}`;
 }
 
-/** Retire each target in its own shard by editing its `status:` line, so the diff is exactly the
- *  retirement. A shard already retired, or with no `status:` line, is left alone. */
+/** Reconcile each queued target in its own shard; record a completion's landing commit in its marker. */
 export function applyPlanActions(repoRoot: string, shards: Map<string, string>, actions: PlanGardenAction[]): string[] {
   const changed: string[] = [];
   for (const a of actions) {
@@ -200,8 +219,9 @@ export function applyPlanActions(repoRoot: string, shards: Map<string, string>, 
     if (!rel) continue;
     const path = join(repoRoot, rel);
     const text = readFileSync(path, "utf8");
-    if (/^ {2}retirement:/m.test(text) || !/^ {2}status: \w+[ \t]*$/m.test(text)) continue;
-    writeFileSync(path, text.replace(/^ {2}status: \w+[ \t]*$/m, `  status: blocked\n  retirement: ${a.retirement}\n  # ${planGardenMarker(a)} — ${a.reason}`));
+    if (/^ {2}retirement:/m.test(text) || !/^ {2}status: queued[ \t]*$/m.test(text)) continue;
+    const status = `  status: ${a.landingCommit ? "done" : "blocked"}\n  retirement: ${a.retirement}`;
+    writeFileSync(path, text.replace(/^ {2}status: queued[ \t]*$/m, `${status}\n  # ${planGardenMarker(a)}${a.landingCommit ? ` commit ${a.landingCommit}` : ""} — ${a.reason}`));
     changed.push(rel);
   }
   return changed.sort();
@@ -209,12 +229,16 @@ export function applyPlanActions(repoRoot: string, shards: Map<string, string>, 
 
 function prBody(actions: PlanGardenAction[], shards: Map<string, string>): string {
   const lines = [
-    "The plan gardener (W1-T4111) proposes retiring queued tasks. This PR is reviewed and auto-merges like every fleet PR; close it to decline a retirement — the gardener learns from whether it merges.",
+    "The plan gardener (W1-T4111) proposes reconciling queued tasks. This PR is reviewed and auto-merges like every fleet PR; close it to decline a proposal — the gardener learns from whether it merges.",
     "",
-    ...actions.map((a) => `- **${a.class}** \`${a.target}\`${a.into ? ` into \`${a.into}\`` : ""} (\`retirement: ${a.retirement}\`): ${a.reason}`),
+    ...actions.map((a) => `- **${a.class}** \`${a.target}\`${a.into ? ` into \`${a.into}\`` : ""} (${a.landingCommit ? `\`status: done\`, commit \`${a.landingCommit}\`` : `\`retirement: ${a.retirement}\``}): ${a.reason}`),
     "",
     "## Acceptance",
-    ...actions.flatMap((a) => [`- claim: the gardener's ${a.class} of ${a.target} is marked in its shard`, `  proof: grep: ${planGardenMarker(a)} in ${shards.get(a.target)}`]),
+    ...actions.flatMap((a) => [
+      `- claim: the gardener's ${a.class} of ${a.target} is marked in its shard${a.landingCommit ? ` with landing commit ${a.landingCommit}` : ""}`,
+      `  proof: grep: ${planGardenMarker(a)}${a.landingCommit ? ` commit ${a.landingCommit}` : ""} in ${shards.get(a.target)}`,
+      ...(a.landingCommit ? [`- claim: ${a.target} is done`, `  proof: grep: ^  status: done$ in ${shards.get(a.target)}`] : []),
+    ]),
   ];
   return lines.join("\n");
 }
@@ -233,7 +257,7 @@ export function planGardenSpec(deps: GardenerDeps): GardenSpec<PlanGardenClass, 
     classes: PLAN_GARDEN_CLASSES,
     review: {
       merge: "folding a duplicate writes `retirement:`, a judgement call.",
-      retire: "a retirement is a judgement call.",
+      retire: "reconciling completed or abandoned work is a judgement call.",
     },
     cheapFingerprint: () => planCheapFingerprint(deps.repoRoot, deps.stateDir),
     inventory: () => planInventory(deps.repoRoot, deps.stateDir),
