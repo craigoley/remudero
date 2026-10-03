@@ -531,7 +531,8 @@ export type PlanPrPreflightChecks = Partial<typeof defaultPreflightChecks>;
 
 function firstLineOf(output: string, status: number | null): string {
   const lines = output.split("\n").map((l) => l.trim()).filter(Boolean);
-  return lines.find((l) => /^not ok |REFUSES|FAILED|✗/.test(l)) ?? lines[0] ?? `exited ${status}`;
+  const diagnosticLine = /^(?:not ok |REFUSES\b|FAILED\b|✗|task-id-existence: FAILED\b|lint-plan-precheck:[^\n]*\bREFUSES\b)/;
+  return lines.find((l) => diagnosticLine.test(l)) ?? lines[0] ?? `exited ${status}`;
 }
 
 /** The acceptance proofs of every task shard this tree adds or changes against origin/main; undefined when unreadable. */

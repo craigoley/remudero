@@ -139,6 +139,18 @@ test("each red check refuses by name: plan lint, unreserved id, over-long or unt
   assert.deepEqual(untyped.failures.map((x) => x.check), ["pr-title"]);
 });
 
+test("failure summaries prefer a real marker line over incidental marker text", () => {
+  const f = originWith({ "README.md": "seed\n" }, "w5348-summary");
+  const result = planPrPreflight(
+    { cwd: f.clone.dir, title: "chore(plan): file a task", body: "" },
+    {
+      ...offlineChecks,
+      lintPlan: () => ({ status: 1, output: "download FAILED from cache\n✗ W9-T1 [proof-dialect] invalid proof\n" }),
+    },
+  );
+  assert.equal(result.failures[0]?.firstLine, "✗ W9-T1 [proof-dialect] invalid proof");
+});
+
 test("a PR-body proof that already passes at origin/main is red; a shard proof that fails at head is not", () => {
   const f = originWith({ "README.md": "seed\n", "plan/feedback/fb-acc.yaml": "id: fb-acc\nstatus: new\n" }, "w5348-proof");
   mkdirSync(join(f.clone.dir, "plan", "tasks.d"), { recursive: true });
