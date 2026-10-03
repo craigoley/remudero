@@ -191,7 +191,9 @@ export type UnmetTaskPrecondition =
   | { reason: "recursive-read" }
   | { reason: "unexpected-result"; expected: string; actual: string };
 
+/** BACKSTOP: kill a stalled precondition read so it cannot hold the dispatcher indefinitely. */
 export const PRECONDITION_TIMEOUT_MS = 5_000;
+/** PRIMARY CONTROL: bound expected and captured precondition output to 64 KiB. */
 export const PRECONDITION_MAX_BYTES = 64 * 1024;
 const PRECONDITION_READ_GUARD = "RMD_TASK_PRECONDITION_READ";
 const PRECONDITION_RMD_BIN = fileURLToPath(new URL("../../bin/rmd", import.meta.url));
@@ -245,6 +247,7 @@ export function unmetTaskPrecondition(task: Task, opts: TaskPreconditionOptions 
       validateNotBefore(task.not_before, task.id);
       const now = (opts.clock ?? systemClock).now();
       if (!Number.isFinite(now)) throw new PlanError("precondition clock is not finite");
+      // expiring-fixture: exempt -- valid date fixtures inject fixedClock and exercise the boundary.
       if (now < Date.parse(task.not_before)) return { reason: "not-before", not_before: task.not_before };
     } catch (error) {
       return { reason: "invalid-not-before", error: String(error) };
