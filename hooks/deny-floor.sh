@@ -57,15 +57,135 @@ invokes_gh() {
     | grep -Eq '(^|[^A-Za-z0-9_/.-])gh[[:space:]]'
 }
 
-# 1) force-push to the default branch (main/master), judged per command SEGMENT (W1-T4588): the
-#    force flag and the default-branch refspec must sit in the SAME `git push` segment. Read across
-#    the whole line, gh's `-f base=main` field beside a plain push satisfied both greps.
-while IFS= read -r seg; do
-  if printf '%s' "$seg" | grep -Eq 'git[[:space:]]+push[[:space:]].*(--force|-f)([[:space:]]|=|$)' &&
-    printf '%s' "$seg" | grep -Eq '(origin[[:space:]]+)?(main|master|HEAD:main|HEAD:master)'; then
-    deny "git push --force to a default branch"
-  fi
-done < <(printf '%s\n' "$cmd" | sed -E 's/(&&|[|][|]|;|[|])/\n/g')
+# 1) a push whose DESTINATION is a default branch (main/master), judged per command SEGMENT (W1-T4588)
+#    by its PARSED refspecs (W1-T5352), never by substrings. Two loose greps -- a force flag anywhere
+#    in the segment AND `main` anywhere in it -- refused a forced push of `run-fix-main-gate-1` and let
+#    `+HEAD:main`, `--force-with-lease origin main`, `-fu`, `:main` and `--delete main` through.
+#    `push_refusal` finds `git [-C x|-c k=v|--git-dir x|--work-tree x]* push`, then walks its words:
+#    force = --force | --force-with-lease[=..] | --force-if-includes | a short cluster holding `f` | a
+#    `+refspec`; delete = --delete | a cluster holding `d` | a `:dst` refspec; --mirror/--all/--branches
+#    = every branch, forced. The first positional word is the remote, every later one a refspec, and its
+#    destination is the text after the last `:` minus `+` and `refs/heads/`. Only a destination of
+#    EXACTLY main or master is refused -- a run branch merely NAMED like main passes. A bare `HEAD` and a
+#    push with no refspec stay allowed: the hook cannot know the upstream. Quoted text holding a space
+#    or separator is blanked first (a commit message that says "git push origin main" is not a push);
+#    a quoted single word is unquoted. Still a tripwire: a refspec assembled indirectly (`"$ref"`)
+#    escapes it, as the file header says. It FAILS CLOSED: if the split or the parse errors, the push
+#    is refused as unparseable rather than waved through.
+push_refusal() {
+  local words n i w k c sub rest dst force=0 del=0 every=0 hit=0 hit_del=0 remote_seen=0 endopts=0
+  IFS=$' \t' read -r -a words <<< "$1"
+  n=${#words[@]}
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    w="${words[$i]}"
+    i=$((i + 1))
+    case "$w" in git|*/git|*'('git|*'`'git) ;; *) continue ;; esac
+    sub=""
+    while [ "$i" -lt "$n" ]; do
+      w="${words[$i]}"
+      i=$((i + 1))
+      case "$w" in
+        -C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix) i=$((i + 1)) ;;
+        -*) ;;
+        *) sub="$w"; break ;;
+      esac
+    done
+    [ "$sub" = push ] || continue
+    force=0 del=0 every=0 hit=0 hit_del=0 remote_seen=0 endopts=0
+    while [ "$i" -lt "$n" ]; do
+      w="${words[$i]}"
+      i=$((i + 1))
+      case "$w" in '#'*|'&') break ;; esac
+      if [ "$endopts" -eq 0 ]; then
+        case "$w" in
+          --) endopts=1; continue ;;
+          --force|--force-with-lease|--force-with-lease=*|--force-if-includes) force=1; continue ;;
+          --delete) del=1; continue ;;
+          --mirror|--all|--branches) every=1; continue ;;
+          --repo|--push-option|--receive-pack|--exec|--recurse-submodules) i=$((i + 1)); continue ;;
+          --*) continue ;;
+          -?*)
+            k=1
+            while [ "$k" -lt "${#w}" ]; do
+              c="${w:$k:1}"
+              k=$((k + 1))
+              case "$c" in
+                f) force=1 ;;
+                d) del=1 ;;
+                o) [ "$k" -ge "${#w}" ] && i=$((i + 1)); break ;;
+              esac
+            done
+            continue ;;
+        esac
+      fi
+      case "$w" in
+        '>'|'>>'|'<'|[0-9]'>'|[0-9]'>>'|[0-9]'<'|'&>'|'&>>') i=$((i + 1)); continue ;;
+        '>'*|'<'*|[0-9]'>'*|[0-9]'<'*|'&>'*) continue ;;
+      esac
+      while :; do
+        case "$w" in *')'|*'`'|*'&') w="${w%?}" ;; *) break ;; esac
+      done
+      if [ "$remote_seen" -eq 0 ]; then
+        remote_seen=1
+        continue
+      fi
+      case "$w" in '+'*) force=1; w="${w#+}" ;; esac
+      if [ "$w" = ":" ]; then
+        every=1
+        continue
+      fi
+      dst="${w##*:}"
+      dst="${dst#refs/heads/}"
+      case "$dst" in
+        main|master)
+          hit=1
+          case "$w" in :*) hit_del=1 ;; esac ;;
+      esac
+    done
+    if [ "$every" -eq 1 ]; then
+      printf '%s\n' "git push --force to a default branch"
+      return 0
+    fi
+    if [ "$hit" -eq 1 ]; then
+      if [ "$del" -eq 1 ] || [ "$hit_del" -eq 1 ]; then
+        printf '%s\n' "deleting a default branch"
+      elif [ "$force" -eq 1 ]; then
+        printf '%s\n' "git push --force to a default branch"
+      else
+        printf '%s\n' "a push to a default branch — open a PR"
+      fi
+      return 0
+    fi
+  done
+  return 0
+}
+case "$cmd" in
+  *push*)
+    r1_text="$(printf '%s\n' "$cmd" | awk '
+      BEGIN { RS = "\001"; qre = "[\"\047]" }
+      {
+        rest = $0; out = ""
+        while ((p = match(rest, qre)) > 0) {
+          out = out substr(rest, 1, p - 1); qc = substr(rest, p, 1); rest = substr(rest, p + 1)
+          e = index(rest, qc)
+          if (e == 0) { out = out "QSTR"; rest = ""; break }
+          inner = substr(rest, 1, e - 1); rest = substr(rest, e + 1)
+          if (inner ~ /[ \t\n;&|]/) out = out "QSTR"; else out = out inner
+        }
+        out = out rest
+        gsub(/&&|\|\||;|\|/, "\n", out)
+        printf "%s\n", out
+      }')" || deny "an unparseable git push — rule 1 fails closed"
+    while IFS= read -r seg; do
+      case "$seg" in *git*push*) ;; *) continue ;; esac
+      r1_reason="$(push_refusal "$seg")" || deny "an unparseable git push — rule 1 fails closed"
+      if [ -n "$r1_reason" ]; then
+        deny "$r1_reason"
+      fi
+    done <<< "$r1_text"
+    ;;
+esac
 
 # 2) gh auth mutation (login/logout/refresh/token/setup-git).
 if printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+auth[[:space:]]+(login|logout|refresh|token|setup-git)'; then
