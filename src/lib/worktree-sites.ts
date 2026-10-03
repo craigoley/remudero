@@ -137,6 +137,18 @@ export const WORKTREE_SITE_REGISTRY: WorktreeSiteRow[] = [
 
   // ── EXEMPT: a raw `git worktree add`, deliberately not routed through worktreeAdd ──────────
   {
+    file: "src/lib/plan-pr-emitter.ts",
+    site: "planPrPreflightAtCommit",
+    creates: "a throwaway DETACHED worktree at a landing's `commit-tree` sha, removed once the plan-PR preflight has read it",
+    disposition: {
+      kind: "exempt",
+      because:
+        "origin/main currency is not this site's question: it materializes the EXACT commit feedback-landing is about " +
+        "to push (W1-T5348), so the preflight judges that tree and no other. `worktreeAdd` cuts a fresh BRANCH off " +
+        "origin/main instead, which is not the tree being pushed — the same shape as rebaseDirtyFleetBranchViaGit below.",
+    },
+  },
+  {
     file: "src/lib/sweep.ts",
     site: "rebaseDirtyFleetBranchViaGit",
     creates: "a DETACHED worktree at the PR's own head sha, so that head can be rebased onto origin/main",

@@ -1869,8 +1869,10 @@ function startInFlightTicker(
               const halt = deps.checkStop?.() ?? deps.checkPause?.();
               if (halt) {
                 log("daemon.sweep.retrigger_held", { phase: owner.phase, detail: halt, trigger });
+              } else if (sweepRetrigger.slot.busy()) {
+                // W1-T5366: one full pass at a time; a decline leaves `lastRunAtMs` and the wake pending.
+                log("daemon.sweep.skipped_concurrent", { phase: owner.phase, trigger, reason: "a full pass is already in flight" });
               } else {
-                const accepted = sweepRetrigger.liveness?.inFlight !== true;
                 sweepRetrigger.state.lastRunAtMs = nowMs;
                 log("daemon.sweep.retriggered", {
                   phase: owner.phase,
@@ -1878,8 +1880,9 @@ function startInFlightTicker(
                   poll_interval_ms: pollIntervalMs,
                   interval_ms: sweepRetrigger.intervalMs,
                 });
-                await runGatedSweep(deps, pollIntervalMs, sweepRetrigger.sweepWallClockBoundMs, log, diskHeadroomLatch, undefined, sweepRetrigger.liveness);
-                if (accepted) eventWakePending = false;
+                // W1-T5366: started, never awaited, so a pass that overruns cannot hold this tick's light pass.
+                sweepRetrigger.slot.adopt(runGatedSweep(deps, pollIntervalMs, sweepRetrigger.sweepWallClockBoundMs, log, diskHeadroomLatch, undefined, sweepRetrigger.liveness));
+                eventWakePending = false;
               }
             }
           }
@@ -1952,6 +1955,9 @@ interface SweepRetrigger {
    *  measured, the last two pre-fix draft batches were 20m27s apart, this interval rather than the
    *  bound. Optional, so a caller that predates it is unchanged. */
   liveness?: SweepLiveness;
+  /** W1-T5366: the main loop's ONE `backgroundSweep` slot. A retrigger starts only when `busy()` is false
+   *  and hands its unawaited pass to `adopt`, which feeds the completed-pass queue the loop reads. */
+  slot: { busy: () => boolean; adopt: (pass: Promise<SweepCycleOutcome | undefined>) => void };
 }
 
 /** The gate itself, extracted so the bound and the light-pass ticker apply identically at every call
@@ -2478,6 +2484,17 @@ export async function runDaemon(
     intervalMs: opts.sweepRetriggerIntervalMs ?? DEFAULT_SWEEP_RETRIGGER_INTERVAL_MS,
     state: sweepRetriggerState,
     liveness: sweepLiveness,
+    slot: {
+      busy: () => backgroundSweep !== undefined || sweepLiveness.inFlight,
+      adopt: (started) => {
+        const startedAtMs = daemonClock.now();
+        const pass = started.then((outcome) => {
+          completedSweeps.push({ outcome, durationMs: Math.max(0, daemonClock.now() - startedAtMs) });
+          if (backgroundSweep === pass) backgroundSweep = undefined;
+        });
+        backgroundSweep = pass;
+      },
+    },
   };
   const emitLog = deps.log ?? (() => {});
   // W1-T4837: idle build-lane minute accounting. The daemon's own log stream is observed rather than a flag
@@ -3313,13 +3330,7 @@ export async function runDaemon(
     if (deps.sweep) await new Promise<void>((resolve) => setImmediate(resolve));
     if (deps.sweep && !backgroundSweep) {
       sweepRetriggerState.lastRunAtMs = daemonClock.now();
-      const passStartedAtMs = daemonClock.now();
-      const pass = runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness)
-        .then((outcome) => {
-          completedSweeps.push({ outcome, durationMs: Math.max(0, daemonClock.now() - passStartedAtMs) });
-          if (backgroundSweep === pass) backgroundSweep = undefined;
-        });
-      backgroundSweep = pass;
+      sweepRetrigger.slot.adopt(runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness));
     }
     // One scheduler turn, so a pass that settles at once is read by the tick that started it.
     if (deps.sweep) await new Promise<void>((resolve) => setImmediate(resolve));

@@ -178,7 +178,7 @@ import { exportGardenSpec } from "./lib/export-gardener.js";
 import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, runSelectorShadowGardener, selectorShadowFlakeLedger } from "./lib/selector-shadow-gardener.js";
-import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, startMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
+import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, openIncidentFeedbackOrigins, startSreLane } from "./lib/sre-lane.js";
 import { fileConsumerVia, gitHeartbeatSource, HOST_RESOURCE, runHostResourcePass } from "./lib/host-resource-gardener.js";
@@ -436,7 +436,7 @@ import {
 import { makeTempDir, sweepStaleTempDirs, withTempDir, type TempSweepOpts, type TempSweepSummary } from "./lib/tmp.js";
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
-import { requestDeploy, runDeployCycle } from "./lib/deployer.js";
+import { IMAGE_BUILD_SHA_PATH, requestDeploy, runDeployCycle } from "./lib/deployer.js";
 import { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 export { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 import { runOperatorSync, type OperatorSyncDeps } from "./lib/operator-sync.js";
@@ -900,6 +900,10 @@ import {
   buildPlanPrBody,
   bodyNeedsAcceptanceRepair,
   createPlanPrRest,
+  planPrPreflight,
+  planPrPreflightAllows,
+  refuseRedPlanPr,
+  type PlanPrPreflightResult,
   ensureJudgeableBody,
   filingAcceptanceCriteria,
   probeExistingPlanPr,
@@ -13765,7 +13769,123 @@ export function resolveRunMounts(
   };
 }
 
-interface RunTaskBodyOptions {
+// ── W1-T5346: CONTAINMENT AND ISOLATION ARE PROVEN ONCE PER BOOT AND ON ANY CHANGE OF THEIR INPUTS ──
+// Operator ruling 2026-10-02 (MASTER-PLAN §12 rule 11). Every implement run spawned both probes before
+// its claim — about 6.7 minutes and 18% of busy lane time on 2026-10-02 — to re-prove a boundary that
+// only moves when the image, the harness or the rendered worker policy moves. A process now keeps the
+// last PASS per key, where the key digests every input the probes read. Still proven by PROBE, never
+// from configuration: a key only says "nothing the last probe read has changed".
+//
+// FAIL CLOSED, in three ways. A FAIL is never stored. Any preflight outcome other than a clean shell
+// pass of BOTH probes HOLDS the process: every stored pass is dropped and every later run re-probes,
+// refusing exactly as today, until a probe passes again. And a run whose key cannot be read is UNKEYED
+// and probes, never reuses. Each reuse is ledgered on the probe's own step with `cached: true`, the
+// key and the proving run's id, so an audit can name the probe any run relied on.
+
+/** The fields {@link probeVerdictKey} digests, in a fixed order — every one must be present. */
+const PROBE_KEY_FIELDS = ["imageBuildSha", "harnessRevision", "workerSettings", "hooks", "cliVersion", "provider", "claudeBin", "root"] as const;
+
+/** Everything a containment/isolation verdict could depend on, each reduced to a string. */
+export type ProbeKeyInputs = Record<(typeof PROBE_KEY_FIELDS)[number], string>;
+
+/** The cache key: a sha256 over every {@link PROBE_KEY_FIELDS} value. Throws on a missing field
+ *  rather than keying without it — an input silently left out is an input that cannot re-probe. */
+export function probeVerdictKey(inputs: ProbeKeyInputs): string {
+  const hash = createHash("sha256");
+  for (const field of PROBE_KEY_FIELDS) {
+    const value = inputs[field];
+    if (typeof value !== "string") throw new Error(`probe key input ${field} is missing`);
+    hash.update(`${field}\0${value}\0`);
+  }
+  return hash.digest("hex");
+}
+
+/** Read the probe key's inputs from disk. The worker settings and every file in the hooks dir are
+ *  read by CONTENT; the run's own id is normalised out of the settings so a per-run path is not a
+ *  policy change. An absent image stamp (off-container) is the literal `absent`; any other read
+ *  failure THROWS, and the caller probes unkeyed. */
+export function readProbeKeyInputs(src: {
+  settingsFile: string;
+  runId: string;
+  hooksDir: string;
+  imageBuildShaPath: string;
+  harnessRevision: string;
+  cliVersion: string | undefined;
+  provider: string;
+  claudeBin: string;
+  root: string;
+}): ProbeKeyInputs {
+  const digest = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
+  return {
+    imageBuildSha: existsSync(src.imageBuildShaPath) ? readFileSync(src.imageBuildShaPath, "utf8").trim() : "absent",
+    harnessRevision: src.harnessRevision,
+    workerSettings: digest(readFileSync(src.settingsFile, "utf8").split(src.runId).join("<run>")),
+    hooks: readdirSync(src.hooksDir).sort().map((name) => `${name}:${digest(readFileSync(join(src.hooksDir, name)))}`).join(","),
+    cliVersion: src.cliVersion ?? "unobserved",
+    provider: src.provider,
+    claudeBin: src.claudeBin,
+    root: src.root,
+  };
+}
+
+/** The passing proof a later run with the same key may rely on. */
+export interface ProbeProof {
+  runId: string;
+  provedAtMs: number;
+  provedAt: string;
+  containmentReason: string;
+  isolationReason: string;
+}
+
+export interface ProbeVerdictCache {
+  /** The stored pass for `key` — never while the process is held. */
+  lookup(key: string): ProbeProof | undefined;
+  /** A ticket taken before probing; {@link ProbeVerdictCache.recordPass} refuses it if a hold landed since. */
+  open(): number;
+  /** Store a clean pass and lift the hold — unless a failure was observed after `ticket` was taken. */
+  recordPass(key: string, proof: ProbeProof, ticket: number): boolean;
+  /** A probe did not cleanly pass: drop every stored pass and hold until one does. */
+  hold(reason: string): void;
+  readonly heldReason: string | undefined;
+}
+
+export function createProbeVerdictCache(): ProbeVerdictCache {
+  const passes = new Map<string, ProbeProof>();
+  let generation = 0;
+  let heldReason: string | undefined;
+  return {
+    lookup: (key) => (heldReason === undefined ? passes.get(key) : undefined),
+    open: () => generation,
+    recordPass: (key, proof, ticket) => {
+      if (ticket !== generation) return false;
+      passes.set(key, proof);
+      heldReason = undefined;
+      return true;
+    },
+    hold: (reason) => {
+      passes.clear();
+      heldReason = reason;
+      generation += 1;
+    },
+    get heldReason() {
+      return heldReason;
+    },
+  };
+}
+
+/** The one cache a daemon's implement lanes share — they run inside the daemon's own process. */
+const PROCESS_PROBE_VERDICTS = createProbeVerdictCache();
+
+interface ProbeAdmissionOptions {
+  /** W1-T5346: the probe-verdict cache. Default: the process-wide one — EXCEPT when a probe executor
+   *  is injected, where a fresh per-run cache keeps a test executor's verdict out of the process. */
+  probeVerdictCache?: ProbeVerdictCache;
+  /** W1-T5346 test seam for two key inputs. Default: {@link IMAGE_BUILD_SHA_PATH} and the harness
+   *  revision this module was loaded from. */
+  probeKeySources?: { imageBuildShaPath?: string; harnessRevision?: string };
+}
+
+interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   instanceRegistryTextImpl?: (repoRoot: string) => string | undefined;
   armAdhocLaneReap?: boolean;
   binaryPinDeps?: Parameters<typeof readBinaryPin>[0];
@@ -14515,7 +14635,7 @@ export function gitCredentialFixSpawn(socketPath: string, raw: typeof spawnWorke
 
 async function runTask(
   taskId: string,
-  opts: {
+  opts: ProbeAdmissionOptions & {
     planPath?: string;
     config?: Config;
     /** Frozen at the executing module boundary by default; trial runners may supply pinned artifacts. */
@@ -15796,13 +15916,62 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   });
   if (binaryPin.status !== "match") say(`binary pin ${binaryPin.status.toUpperCase()} — ${binaryPin.reason}`);
 
+  // ── PROBE ADMISSION (W1-T5346): reuse this process's last passing proof only while every input the
+  // probes read is unchanged. See `probeVerdictKey`'s section above for the fail-closed contract.
+  const probeCache = opts.probeVerdictCache
+    ?? (opts.containmentExec !== undefined || opts.isolationExec !== undefined ? createProbeVerdictCache() : PROCESS_PROBE_VERDICTS);
+  let probeKey: string | undefined;
+  let probeKeyError = "";
+  try {
+    probeKey = probeVerdictKey(readProbeKeyInputs({
+      settingsFile,
+      runId,
+      hooksDir: join(resolveInstallRoot(config), "hooks"),
+      imageBuildShaPath: opts.probeKeySources?.imageBuildShaPath ?? IMAGE_BUILD_SHA_PATH,
+      harnessRevision: opts.probeKeySources?.harnessRevision ?? JSON.stringify(workerBoundaryStack.harnessRevision),
+      cliVersion: binaryPin.observedVersion,
+      provider: implementMount.provider ?? "claude",
+      claudeBin: config.claudeBin,
+      root: config.root,
+    }));
+  } catch (error) {
+    // UNKEYED, not unproven: the `probe_cache.miss` row below records this error and the run probes.
+    probeKeyError = String((error as Error)?.message ?? error).slice(0, 300);
+  }
+  const probeTicket = probeCache.open();
+  const cachedProof = probeKey === undefined ? undefined : probeCache.lookup(probeKey);
+  if (cachedProof === undefined) {
+    const heldReason = probeCache.heldReason;
+    log("probe_cache.miss", {
+      probe_key: probeKey ?? null,
+      reason: probeKey === undefined ? `unkeyed: ${probeKeyError}` : heldReason !== undefined ? `held: ${heldReason}` : "no-entry",
+    });
+  }
+  /** A cached pass, ledgered on the probe's OWN step so every reader of probe history sees it. */
+  const reuseProof = (preflight: "containment" | "isolation", proof: ProbeProof) => {
+    const reason = preflight === "containment" ? proof.containmentReason : proof.isolationReason;
+    log(`${preflight}.probe`, {
+      [preflight === "containment" ? "contained" : "isolated"]: true,
+      reason,
+      cost_usd: 0,
+      cached: true,
+      probe_key: probeKey,
+      proved_by_run: proof.runId,
+      proved_at: proof.provedAt,
+      age_ms: systemClock.now() - proof.provedAtMs,
+    });
+    return { reason: `${reason} (reused from run ${proof.runId})`, costUsd: 0 };
+  };
+  let containmentProven: string | undefined;
+  let isolationProven: string | undefined;
+
   // ── Post-spawn CONTAINMENT PREFLIGHT (W1-T2 #2 / WS-0 verdict 7 / Standing rule
   // 11). Validation proves the file is WELL-FORMED; it does NOT prove the sandbox
   // ENGAGED (`-p` silently runs unsandboxed on a file it can't apply — FF10a). Once
   // per run, empirically confirm an outside-cwd write is OS-DENIED before any task
   // worker runs. FAIL CLOSED: containment unproven ⇒ the run does not proceed.
   try {
-    const probe = await probeContainment({
+    const probe = cachedProof !== undefined ? reuseProof("containment", cachedProof) : await probeContainment({
       settingsFile,
       config,
       budgetUsd,
@@ -15811,7 +15980,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     });
     costUsd += probe.costUsd; // meter the probe spawn (notional; the ledger has it)
     say(`containment preflight PASSED — ${probe.reason}`);
+    containmentProven = probe.reason;
   } catch (caught) {
+    probeCache.hold(`containment: ${String((caught as Error)?.message ?? caught).slice(0, 300)}`);
     let e: unknown = caught;
     // A capacity block says the shell-backed probe cannot run, not that containment failed.  The
     // cash adapter has no shell to probe; establish its separate boundary and pin this run to it.
@@ -15874,7 +16045,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // as a successful one.
       establishCashContainedRun("isolation");
     } else {
-      const isoProbe = await probeIsolation({
+      const isoProbe = cachedProof !== undefined ? reuseProof("isolation", cachedProof) : await probeIsolation({
         settingsFile,
         config,
         budgetUsd,
@@ -15883,8 +16054,10 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       });
       costUsd += isoProbe.costUsd; // meter the probe spawn (notional; the ledger has it)
       say(`isolation preflight PASSED — ${isoProbe.reason}`);
+      isolationProven = isoProbe.reason;
     }
   } catch (caught) {
+    probeCache.hold(`isolation: ${String((caught as Error)?.message ?? caught).slice(0, 300)}`);
     let e: unknown = caught;
     if (e instanceof ProviderCapacityBlockedError && cashContainedRunRefusal(config, implementCashTools) === undefined) {
       try {
@@ -15925,6 +16098,12 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       endThrownRun(log, verdictWritten, "preflight.isolation", e, costUsd);
       throw e;
     }
+  }
+  // W1-T5346: store only a FRESH, clean shell pass of BOTH probes. A cash-routed run proved a
+  // different boundary, so it is never stored (its capacity-blocked probe already held the cache).
+  if (cachedProof === undefined && probeKey !== undefined && containmentProven !== undefined && isolationProven !== undefined) {
+    const recorded = probeCache.recordPass(probeKey, { runId, provedAtMs: systemClock.now(), provedAt: systemClock.iso(), containmentReason: containmentProven, isolationReason: isolationProven }, probeTicket);
+    log("probe_cache.recorded", { probe_key: probeKey, recorded });
   }
 
   // ── Clone + worktree.
@@ -33198,6 +33377,8 @@ export function gardenCheckout(opts: {
   log: (step: string, extra?: Record<string, unknown>) => void;
   fetcher?: GhApiFetcher;
   clock?: Clock;
+  /** W1-T5348: the plan-PR preflight over the committed tree; injected only by a test. */
+  preflight?: (input: { cwd: string; title: string; body: string }) => PlanPrPreflightResult;
 }): GardenCheckout {
   const branch = `${opts.name}-garden-${(opts.clock ?? systemClock).now()}`;
   const root = join(opts.worktreesRoot, branch);
@@ -33224,6 +33405,9 @@ export function gardenCheckout(opts: {
       // branch with no PR — 103 test-run plan-garden-* heads on origin by 2026-09-29.
       assertLiveWriteAllowed("git-push", `pushing the ${opts.name} garden branch ${branch}`);
       assertLiveWriteAllowed("gh-pr-create", `opening a ${opts.name} garden PR against ${opts.owner}/${opts.repo}`);
+      // W1-T5348: a tree CI would refuse is never pushed — the lane's not-landed outcome instead of a red PR.
+      const verdict = (opts.preflight ?? planPrPreflight)({ cwd: root, title: fitted.header, body: fullTitle + body });
+      if (!planPrPreflightAllows(verdict, { lane: opts.name, branch, log: opts.log })) return undefined;
       git("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
       const fetcher = opts.fetcher ?? ghJson;
       try {
@@ -33446,6 +33630,18 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       };
       return gardenPass(hotFileGardenSpec(d, sources), d);
     }
+    // Operator ruling 2026-09-29: the LLM judge in the middle of machine-filed work. W1-T5361 moved it off
+    // the daemon loop; a pass that throws is still ledgered as machine_judge.failed.
+    case "machine-judge": {
+      const ports = productionMachineFilingJudgePorts({ repoRoot, stateDir, worktreesRoot: worktreesDir(config), owner, repo, log });
+      return async () => {
+        try {
+          await runMachineFilingJudge(ports);
+        } catch (error) {
+          log("machine_judge.failed", { error: String((error as Error)?.message ?? error) });
+        }
+      };
+    }
     // W1-T4804: host disk, swap and inodes are projected to full from the heartbeat history and
     // answered in tiers against each host's own janitor cadence. Off: state/HOST_RESOURCE_OFF.
     case "host-resource": {
@@ -33608,6 +33804,8 @@ export async function daemonCommand(
      *  a real worker spawn. */
     escalationJudge?: (e: Escalation) => Promise<EscalationJudgeVerdict>;
     gardenPassesInProcess?: boolean;
+    /** W1-T5361 test seam: the garden pass spawn every registered garden runs through, instead of the child. */
+    gardenPassSpawn?: GardenPassSpawn;
     /** W1-T5115 test seams: the App refresh whose `ready` gates the git credential socket, and an
      *  in-process mint for that socket. Production omits both: the real refresh, and the socket on
      *  its own thread minting through `mintScopedToken`. */
@@ -33781,12 +33979,11 @@ export async function daemonCommand(
   const raiseDuplicate = (e: Escalation): string =>
     escalate({ ...e, runId }, { issues: ghIssueGateway(target.owner, target.repo), ledgerPath, runId });
   const gardenContext: GardenBuildContext = { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate };
-  const gardenPassSpawn: GardenPassSpawn = boundedGardenPassSpawn(
-    deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : childGardenPassSpawn(),
-    2,
-  );
+  const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
+    ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
+  const gardenPassSpawn: GardenPassSpawn = boundedGardenPassSpawn(injectedPassSpawn ?? childGardenPassSpawn(), 2);
   const offLoopGarden = (name: RegisteredGardenName) => (intervalMs: number) =>
-    startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, ...(deps.gardenPassesInProcess ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) });
+    startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) });
   if (!target.isSelf && !flagValue(rest, "--plan")) {
     const repoDir = join(reposDir, target.repo);
     if (!existsSync(repoDir)) {
@@ -34590,13 +34787,8 @@ export async function daemonCommand(
               },
               // W1-T4111: the plan queue proposes its own duplicates and dead tasks for operator review.
               gardens: [
-                ...REGISTERED_GARDEN_NAMES.slice(0, REGISTERED_GARDEN_NAMES.indexOf("hot-file")).map(offLoopGarden),
-                // Operator ruling 2026-09-29: the LLM judge in the middle of machine-filed work.
-                (intervalMs: number) => startMachineFilingJudge(
-                  productionMachineFilingJudgePorts({ repoRoot, stateDir: join(config.root, "state"), worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
-                  intervalMs,
-                ),
-                ...REGISTERED_GARDEN_NAMES.slice(REGISTERED_GARDEN_NAMES.indexOf("hot-file")).map(offLoopGarden),
+                // W1-T5361: the machine-filing judge is one of them, so its git work runs in a child too.
+                ...REGISTERED_GARDEN_NAMES.map(offLoopGarden),
                 // W1-T4385: the SRE lane, in its OWN lane rather than sharing the core dispatch
                 // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). "Only on the SRE
                 // registry instance" has no selector yet -- `RegistryInstance` carries no role or
@@ -45971,6 +46163,10 @@ export async function approveCommand(
     execFileSync("git", ["-C", worktreePath, "add", "--", ...shardRelPaths], { stdio: "inherit" });
     execFileSync("git", ["-C", worktreePath, "commit", "-m", approveCommitMessage(payload)], { stdio: "inherit" });
   };
+  // W1-T5348: the committed shards and the title are preflighted before the push. The body is authored later by
+  // buildPlanPrBody, which already refuses a proof that does not discriminate, so it is not re-checked here.
+  const preflightApprovePush = (path: string, branch: string, id: string): void =>
+    refuseRedPlanPr(planPrPreflight({ cwd: path, title: `chore(plan): ratify ${id} via rmd approve`, body: "" }), { lane: "approve", branch, log });
   const branchFiledTaskIds = (path: string): string[] =>
     execFileSync("git", ["-C", path, "diff", "origin/main...HEAD", "--", "plan/tasks.yaml", "plan/tasks.d"], { encoding: "utf8" })
       .split("\n")
@@ -46052,6 +46248,7 @@ export async function approveCommand(
       worktreeAdd(dir, worktreePath, branch, "origin/main", { log });
       writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: new Date().toISOString() });
       materializeAndCommitApproveFragment(worktreePath, payload, `run ${runId}`);
+      preflightApprovePush(worktreePath, branch, payload.proposalId);
       gitPushRunBranch(worktreePath);
       return branch;
     },
@@ -46071,6 +46268,7 @@ export async function approveCommand(
       // file, and every OTHER `startedAt` in this function already predates that gate.
       writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: systemClock.iso() });
       materializeAndCommitApproveFragment(worktreePath, payload, `joined ${branch}`);
+      preflightApprovePush(worktreePath, branch, payload.proposalId);
       gitPushRunBranch(worktreePath);
       log("approve.joined", { proposal_id: payload.proposalId, branch });
       // W1-T4706: the open PR's body is rebuilt over every proposal on the branch, never left as the first approve's.

@@ -511,6 +511,14 @@ sweep:
   # opus-tier synthesis rungs ($827 across 219 invocations). Restore to 3 once burn per run is
   # down, and record the measurement that justifies it rather than restoring on optimism.
   #
+  # 2026-10-03 — RESTORED 2 -> 3 BY OPERATOR RULING, ON THE MEASUREMENT THE CONDITION ABOVE NAMES.
+  # `node --import tsx scripts/mount-headroom-sweep.mjs --state-dir <state-dir>` over the full ledger
+  # union (401 archives + live) reads: src cost p50 2.99 vs LANE_RESTORE_BASELINE 4.94 (p50, src) —
+  # "burn per run reads DOWN (-1.95)". The operator's precondition was a memory gate first: W1-T5347
+  # (#8786) wired memoryGovernorGateFor into implement dispatch with a 3072 MiB floor, live since the
+  # 2026-10-03T00:57Z daemon boot. Watch the 5-hour session window (`daemon.headroom`) after this
+  # merges; if it fills faster than the window sustains, move this back to 2 by the same route.
+  #
   # W1-T2708 — THE CONDITION NOW HAS A COMPARABLE LEFT-HAND SIDE, AND IT IS READ OFF THE TOOL.
   # As written above, "burn per run is down" had no baseline beside it. The only per-run figures in
   # this table sat one block over, in `reviewLanes` prose ("$0.63/run measured, against implement
@@ -535,7 +543,7 @@ sweep:
   # is an operator ruling with its own evidence (the 2026-09-02 memory ceiling bears on it too),
   # and W1-T2708 deliberately did not reopen it.
   dispatchLanes:
-    value: 2
+    value: 3
     origin: "lifted:src/lib/sweep.ts:359 (DEFAULT_SWEEP_POLICY.dispatchLanes)"
     min: 1
     max: 4

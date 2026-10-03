@@ -1,0 +1,34 @@
+- id: W1-T5409
+  title: "THE SELECTOR-SHADOW GUARD READS MAIN'S FAILURES IN PRODUCTION — W1-T5350 added a mainFailures(baseSha) reader seam to the mass-failure guard, but nothing in production passes one, so only the K=5 limit is live"
+  repo: remudero
+  depends_on: ["W1-T5350"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: low
+  origin: "operator session 2026-10-03: follow-up named by W1-T5350's build (PR #8823)"
+  plan_refs: ["W1-T5350"]
+  files: [src/lib/garden-registry.ts, test/the-selector-shadow-guard-reads-main-failures-in-production.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    W1-T5350 (#8823) skips a selector-shadow CI run whose missed failures exceed K=5 test files, or
+    whose missed files also fail on main at the run's base sha. The second check reads a new optional
+    `mainFailures(baseSha)` parameter of the gardener, and nothing in production passes one, so it
+    never fires. On 2026-10-02 the false burst (44 of 46 filings from two runs) happened while main
+    itself was red; a reader of main's failing test files at the base sha catches a smaller burst of
+    that kind that stays under K.
+  design: |
+    Where the daemon builds the selector-shadow gardener (src/lib/garden-registry.ts), pass a
+    `mainFailures(baseSha)` reader that returns the set of test files failing on main's CI run for
+    that sha, read from the same CI-log source the gardener already uses for PR runs. A read that
+    cannot complete returns undefined (the guard then judges by K alone, as W1-T5350 already does).
+  acceptance:
+    - claim: "the production selector-shadow gardener is given a reader of main's failing test files, so a run whose misses also fail on main files nothing"
+      proof: "unit test: test/the-selector-shadow-guard-reads-main-failures-in-production.test.ts"
+  falsifier: |
+    Build the production gardener spec with a stubbed CI-log source where main's run at the base sha
+    fails the same two files a PR run missed: the guard skips that run (today: the reader is absent
+    and two misses under K are filed).

@@ -13,8 +13,10 @@
  * one entry per counted row. Each id the two sides count differently is judged on its own measured rows,
  * and one id nothing explains makes the whole count `real`. A count with no members is `real`.
  *
- * Every sample with a diff writes one `view.shadow_diff` ledger row naming each path and its class. Each
- * view keeps a persisted counter and a cutover-readiness summary, shown by the `read-model` status view.
+ * A sample with a `real` diff writes one `view.shadow_diff` ledger row naming each path and its class; the
+ * explained classes are noise, so a sample with none writes nothing (W1-T5362: they were 51% of a day's
+ * ledger bytes). Every class counts in each view's persisted counters and cutover-readiness summary,
+ * shown by the `read-model` status view, and one `view.shadow_summary` row per view per hour carries them.
  *
  * The request path never pays for this: the route only notes the request after its response finished,
  * the legacy side is computed on a deferred turn, and the diff and its evidence run in the worker.
@@ -26,6 +28,9 @@ import { READ_MODEL_DIRNAME, withWriteTransaction, type ReadModelDb, type ReadMo
 import { renderView, type ReadModelViewRoutesOptions, type SourcePhase, type ViewDefinition, type ViewSource } from "./views.js";
 
 export const VIEW_SHADOW_DIFF_STEP = "view.shadow_diff";
+export const VIEW_SHADOW_SUMMARY_STEP = "view.shadow_summary";
+/** At most one summary row per view per this long, read on the comparator's clock. */
+export const VIEW_SHADOW_SUMMARY_MS = 60 * 60_000;
 /** Design §5: a sampled comparator, one comparison per minute per view key. */
 export const VIEW_SHADOW_SAMPLE_MS = 60_000;
 const DAY_MS = 24 * 60 * 60_000;
@@ -568,9 +573,11 @@ export interface ViewShadowState {
   skipped?: number;
   lastSkippedMs?: number;
   lastSkipReason?: string;
+  /** What the next summary row reports: counts since `sinceMs`, the last one (or the first sample). */
+  summary?: { sinceMs: number; samples: number; skipped: number; diffs: Record<ShadowClassification, number> };
 }
 
-export interface ShadowReadiness extends Omit<ViewShadowState, "streakKeys"> {
+export interface ShadowReadiness extends Omit<ViewShadowState, "streakKeys" | "summary"> {
   view: string;
   /** How many keys the streak sampled: each owes the cadence's full day of samples. */
   keys: number;
@@ -615,8 +622,10 @@ export function storedShadowReadiness(path: string, db: ReadModelDb, nowMs: numb
   return Object.entries(storedShadowStates(path, db)).sort(([a], [b]) => a.localeCompare(b)).map(([view, s]) => shadowReadiness(view, s, nowMs));
 }
 
+const noDiffs = (): Record<ShadowClassification, number> => ({ legacy_horizon: 0, timing: 0, dedupe: 0, real: 0 });
+
 function emptyState(): ViewShadowState {
-  return { requests: 0, firstRequestMs: null, samples: 0, diffs: { legacy_horizon: 0, timing: 0, dedupe: 0, real: 0 }, streakSamples: 0, streakSinceMs: null, lastRealMs: null, streakKeys: [] };
+  return { requests: 0, firstRequestMs: null, samples: 0, diffs: noDiffs(), streakSamples: 0, streakSinceMs: null, lastRealMs: null, streakKeys: [] };
 }
 
 /**
@@ -627,7 +636,7 @@ function emptyState(): ViewShadowState {
  * (the rule of three), so a busy view needs more evidence than the cadence gives it.
  */
 export function shadowReadiness(view: string, state: ViewShadowState, nowMs: number): ShadowReadiness {
-  const { streakKeys, ...s } = state;
+  const { streakKeys, summary: _summary, ...s } = state;
   const keys = Math.max(1, streakKeys?.length ?? 0);
   const spanMs = s.firstRequestMs === null ? 0 : nowMs - s.firstRequestMs;
   const requestsPerDay = spanMs >= DAY_MS ? (s.requests * DAY_MS) / spanMs : null;
@@ -667,6 +676,17 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
   const clock = opts.clock ?? systemClock;
   const states = new Map<string, ViewShadowState>(Object.entries(opts.store?.load() ?? {}));
   const stateOf = (view: string): ViewShadowState => states.get(view) ?? states.set(view, emptyState()).get(view)!;
+  /** Adds one sample to the view's summary window, and writes the window's row once it spans an hour. */
+  const summarize = (view: string, state: ViewShadowState, now: number, sample: { skipped?: boolean; diffs?: ReadonlyArray<{ classification: ShadowClassification }> }): void => {
+    const w = state.summary ??= { sinceMs: now, samples: 0, skipped: 0, diffs: noDiffs() };
+    if (sample.skipped) w.skipped++;
+    else w.samples++;
+    for (const d of sample.diffs ?? []) w.diffs[d.classification]++;
+    if (now - w.sinceMs < VIEW_SHADOW_SUMMARY_MS) return;
+    const { streakSamples, streakSinceMs, lastRealMs, ready } = shadowReadiness(view, state, now);
+    opts.log(VIEW_SHADOW_SUMMARY_STEP, { view, ...w, streakSamples, streakSinceMs, lastRealMs, ready });
+    state.summary = { sinceMs: now, samples: 0, skipped: 0, diffs: noDiffs() };
+  };
   return {
     compare({ view, key, requests, legacy, body }) {
       const now = clock.now();
@@ -677,6 +697,7 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
       const unready = legacy.unready !== undefined ? `legacy ${legacy.unready}` : viewUnready === undefined ? undefined : `view ${viewUnready}`;
       if (unready !== undefined) {
         Object.assign(state, { skipped: (state.skipped ?? 0) + 1, lastSkippedMs: now, lastSkipReason: unready });
+        summarize(view, state, now, { skipped: true });
         opts.store?.save(view, state);
         return { view, key, diffs: [], skipped: unready };
       }
@@ -705,7 +726,7 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
       for (const d of diffs) state.diffs[d.classification]++;
       if (diffs.some((d) => d.classification === "real")) Object.assign(state, { streakSamples: 0, streakSinceMs: now, lastRealMs: now, streakKeys: [] });
       else Object.assign(state, { streakSamples: state.streakSamples + 1, streakKeys: [...new Set([...state.streakKeys ?? [], key])] });
-      if (diffs.length > 0) {
+      if (diffs.some((d) => d.classification === "real")) {
         const classes = Object.fromEntries(SHADOW_CLASSIFICATIONS.map((c) => [c, diffs.filter((d) => d.classification === c).length]));
         const sides = (path: string): { legacy: string; view: string } => {
           const d = raw.find((r) => r.path === path)!;
@@ -713,6 +734,7 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
         };
         opts.log(VIEW_SHADOW_DIFF_STEP, { view, key, classes, ...(legacy.inputs ? { inputs: legacy.inputs } : {}), diffs: diffs.map((d) => (d.classification === "real" ? { ...d, ...sides(d.path) } : d)) });
       }
+      summarize(view, state, now, { diffs });
       opts.store?.save(view, state);
       return { view, key, diffs };
     },

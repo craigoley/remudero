@@ -1,0 +1,48 @@
+- id: W1-T5407
+  title: "THE LEDGER FLAGS A ROW STAMPED IN THE FUTURE — the full ledger union's newest row is stamped 2027-10-14T21:24:52Z, five `cli.invoked` rows from a test process whose clock ran 13 months ahead, and `appendLedger` writes whatever `new Date()` says, so one skewed writer poisons every newest-row freshness reading"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: low
+  origin: "operator session 2026-10-03: found by scripts/mount-headroom-sweep.mjs"
+  plan_refs: [W1-T4100, W1-T4923]
+  files: [src/lib/ledger.ts, test/the-ledger-flags-a-row-stamped-in-the-future.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-03, union of `state/ledger.*.ndjson.gz`, `state/ledger.*.ndjson` and `state/ledger.ndjson`:
+    exactly 5 rows carry a 2027 ts. All are in `ledger.2026-10-01T23-58-30-689Z.ndjson.gz`, a 313-byte
+    rotation that holds only them. All have step `cli.invoked`, task_id `CLI`, and host `8f3e86a35d09`,
+    seen on no other row. In order: `onboard`, `alert-fix --bogus`, `daemon --not-a-real-flag` (actor
+    daemon; the others are operator), `wipe-test <arg> --factor <arg> --repo <arg>`, and `peek` at
+    2027-10-14T21:24:52.494Z, the newest row in the union. The `run_id`s (CLI-1823549014063...) match that
+    clock.
+    THE WRITER is `logCliInvocation` (src/run-task.ts), which `main()` calls on every verb. It writes
+    through `appendLedger` (src/lib/ledger.ts), and that stamps `ts: new Date().toISOString()`. The argv
+    are test fixtures: test/run-task.test.ts drives `main()` with `alert-fix --bogus` and
+    `daemon --not-a-real-flag`, and pid 479471 wrote three of the rows. So a test process with a clock 13
+    months fast ran `main()` against the operator's real ledger. W1-T4923 (#8090, merged 2026-09-30) already
+    closed that route (`withCliFixtureHome`; test ledger appends stay out of operator state). The writer
+    is fixed. What is left is that the ledger takes any clock on trust.
+    W1-T4100 already guards archive NAMES against the same 2027-10-14 stamp by checking against the file's
+    own mtime, and `compactRotations` caps a future row's day bucket to now. Neither looks at a ROW's ts, so
+    each "newest row" reader still sees 2027.
+  design: |
+    In `appendLedger`, after the write, `fstatSync(fd).mtimeMs` gives the kernel's clock. That is the same
+    "a clock that cannot lie" ceiling W1-T4100 uses for names, and a faked process clock cannot move it.
+    If the record's ts is more than `LEDGER_FUTURE_STAMP_TOLERANCE_MS` (10 minutes) ahead of it, append one
+    `ledger.future_stamp` row stamped from that mtime. It carries `claimed_ts`, `skew_ms`, and the offending
+    row's `step`, `actor`, `host` and `run_id`. The offending row stays: the ledger is append-only. A
+    stat failure is swallowed (telemetry, never a throw).
+    Readers that pick a newest row are out of scope here; each can exclude a run_id named by a
+    `ledger.future_stamp` row in a later task.
+  acceptance:
+    - claim: "an append whose ts runs more than the tolerance ahead of the ledger file's own mtime is followed by a ledger.future_stamp row stamped from that mtime and naming the offending step, actor, host, run_id and skew, while an append within tolerance writes no flag and a failing stat never throws"
+      proof: "unit test: test/the-ledger-flags-a-row-stamped-in-the-future.test.ts"
+  falsifier: |
+    Remove the mtime comparison from `appendLedger`. The suite's append under a clock 13 months fast
+    writes its row and no `ledger.future_stamp` row follows it.

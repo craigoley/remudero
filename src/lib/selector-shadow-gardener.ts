@@ -564,6 +564,17 @@ export function selectorShadowStructuralTask(file: string, taskId: string, edges
   ].join("\n");
 }
 
+/** W1-T5350 PRIMARY CONTROL: a CI run whose unseen misses span MORE than this many distinct test
+ *  files is a mass (or base) failure, not a set of selector misses, and files nothing. Evidence: on
+ *  2026-10-02, 44 of the 46 selector-shadow filings came from two CI runs read while main was itself
+ *  red (~590 "missed" failures, narrow missRate 0.66 over 24 runs), one one-file PR at a time; 45 of
+ *  that day's 118 cancelled main CI runs (38%) followed a selector-shadow push. A genuine missing
+ *  selector edge has missed one or two suites per run. Operator decision 2026-10-02: K = 5. */
+export const SELECTOR_SHADOW_MASS_FAILURE_FILES = 5;
+
+/** Test files failing in main's own CI at a base sha, or `undefined` when no result is readable. */
+export type SelectorShadowMainFailures = (baseSha: string) => readonly string[] | undefined | Promise<readonly string[] | undefined>;
+
 type SelectorShadowPlanTask = { id: string; origin?: string; retirement?: string; status?: string };
 
 /** A home task counts as repaired once its plan status reads merged or done. */
@@ -587,10 +598,50 @@ export function selectorShadowFlakeLedger(log: GardenerDeps["log"]): (runId: num
   };
 }
 
+/** W1-T5350: group the unseen misses by CI run. A run whose distinct missed files exceed K, or whose
+ *  missed file also fails in main's own CI at the run's base sha, files nothing: one
+ *  `selector-shadow.mass_failure_skipped` row names it, and its miss keys are marked seen so the next
+ *  pass does not read them as new. A run with no readable base result is judged by K alone. */
+async function withoutMassFailures(
+  deps: GardenerDeps,
+  unseen: readonly SelectorShadowMiss[],
+  seen: Set<string>,
+  mainFailures: SelectorShadowMainFailures | undefined,
+): Promise<SelectorShadowMiss[]> {
+  const byRun = new Map<number, SelectorShadowMiss[]>();
+  for (const miss of unseen) byRun.set(miss.runId, [...(byRun.get(miss.runId) ?? []), miss]);
+  const kept: SelectorShadowMiss[] = [];
+  for (const [runId, misses] of byRun) {
+    const files = [...new Set(misses.map((m) => m.file))];
+    const { headSha, baseSha } = misses[0]!;
+    let failingOnMain: string[] = [];
+    if (files.length <= SELECTOR_SHADOW_MASS_FAILURE_FILES && mainFailures && baseSha !== undefined) {
+      try {
+        const red = new Set((await mainFailures(baseSha)) ?? []);
+        failingOnMain = files.filter((file) => red.has(file));
+      } catch (error) {
+        deps.log("selector-shadow.base_unread", { ci_run_id: runId, base_sha: baseSha, error: String((error as Error)?.message ?? error) });
+      }
+    }
+    const reason = files.length > SELECTOR_SHADOW_MASS_FAILURE_FILES ? "mass" : failingOnMain.length > 0 ? "base" : undefined;
+    if (reason === undefined) {
+      kept.push(...misses);
+      continue;
+    }
+    for (const miss of misses) seen.add(selectorShadowMissKey(miss));
+    deps.log("selector-shadow.mass_failure_skipped", {
+      ci_run_id: runId, head_sha: headSha, files: files.length, reason, k: SELECTOR_SHADOW_MASS_FAILURE_FILES,
+      ...(reason === "base" ? { failing_on_main: failingOnMain } : {}),
+    });
+  }
+  return kept;
+}
+
 /** Report every pass. A missed TEST is the unit (W1-T4839): a miss whose suite already has a task is
  *  ledgered as evidence for it, whatever edge it names. A suite missed again AFTER its narrow task
  *  merged is filed once more as a structural task naming every edge seen, and never again. At most
- *  one new task files per pass, so the daemon cannot flood the plan. The shared gardener seam carries
+ *  one new task files per pass, so the daemon cannot flood the plan, and a mass- or base-failure run files
+ *  nothing (W1-T5350; `mainFailures` reads main's CI at a run's base sha). The shared gardener seam carries
  *  state, checkout, workspace and log; the reads are this gardener's own inputs, passed beside it
  *  rather than declared as another seam shape. `isRepaired` overrides the default repair test (the
  *  home task's plan status is merged/done, or src/lib/affected-suites.ts already names the suite). */
@@ -601,6 +652,7 @@ export async function runSelectorShadowGardener(
   mintTaskId: (filingBranch: string) => string,
   planTasks: () => SelectorShadowPlanTask[] = () => selectorShadowPlanTasks(deps.repoRoot),
   isRepaired?: (homeTaskId: string, file: string) => boolean,
+  mainFailures?: SelectorShadowMainFailures,
 ): Promise<SelectorShadowReport> {
   const path = join(deps.stateDir, "selector-shadow-gardener.json");
   const stored = readFileIfExists(path);
@@ -618,7 +670,7 @@ export async function runSelectorShadowGardener(
   };
   const report = selectorShadowReport(readRuns(), selectorShadowFullSuiteSize(deps.repoRoot));
   deps.log("selector-shadow.report", { ...report, misses: report.misses.slice(0, 20) });
-  const unseen = report.misses.filter((m) => !seen.has(selectorShadowMissKey(m)));
+  const unseen = await withoutMassFailures(deps, report.misses.filter((m) => !seen.has(selectorShadowMissKey(m))), seen, mainFailures);
   // The plan is read only when there is something new to place, never on an idle pass.
   const planned = new Map<string, { id: string; retired: boolean; structural: boolean }>();
   const statusOf = new Map<string, string | undefined>();

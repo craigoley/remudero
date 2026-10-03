@@ -12,7 +12,7 @@ import {
   type BoardSnapshotIo,
 } from "../src/lib/board-snapshot-cache.js";
 import { fixedClock, type Clock } from "../src/lib/clock.js";
-import { createLedgerProjector, isFactStep, openProjectorReadModel, type LedgerProjector } from "../src/lib/ledger-projector.js";
+import { createLedgerProjector, isFactStep, LEDGER_PROJECTOR_SCHEMA_VERSION, openProjectorReadModel, type LedgerProjector } from "../src/lib/ledger-projector.js";
 import { factColumns } from "../src/lib/read-model-consistency.js";
 import {
   NOW_GITHUB_STALE_MS,
@@ -37,7 +37,7 @@ import {
 } from "../src/lib/now-view.js";
 import type { BoardPrRest } from "../src/lib/open-prs-rest.js";
 import type { Plan, Task } from "../src/lib/plan.js";
-import { acquireLease, type ReadModelDb } from "../src/lib/read-model-db.js";
+import { acquireLease, openReadModel, type ReadModelDb } from "../src/lib/read-model-db.js";
 import { createReadModelTicker, readModelSwitchesPath, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
 import { HOST_PROBE_BUDGET_MS, PLAN_BUDGET_MS } from "../src/lib/view-freshness.js";
 import { buildBatchedGithub, DEFAULT_LIVENESS_BOUND_MS, defaultCreditStorePath, readLedgerLines, saveCreditStore, type BatchedPr, type CreditStore, type GitHub } from "../src/lib/status.js";
@@ -528,9 +528,12 @@ test("a now shadow sample is diffed against the legacy live-file board and each 
   assert.equal(view.legacy("instance=elsewhere", T0, body.entry.body.data), undefined, "an instance the view never held has no legacy side");
 
   assert.equal(ticker.shadow({ view: "now", key: "instance=core", requests: 1 }), true, "the worker computed the legacy side and compared");
-  const row = posted.find((m) => m.type === "log" && m.step === VIEW_SHADOW_DIFF_STEP);
-  assert.ok(row && row.type === "log", "a view.shadow_diff row was written");
-  const diffs = row.extra.diffs as Array<{ path: string; classification: string }>;
+  assert.equal(posted.some((m) => m.type === "log" && m.step === VIEW_SHADOW_DIFF_STEP), false, "no real diff, so no view.shadow_diff row (W1-T5362)");
+  // The same comparison taken here: its classifications are what `compare` returns, since no row carries them.
+  const db = openReadModel({ stateDir: ledgerDir, instance: "core", schemaVersion: LEDGER_PROJECTOR_SCHEMA_VERSION, readOnly: true });
+  t.after(() => db.close());
+  const shadow = createViewShadow({ clock, log: () => {}, evidence: (input) => readShadowEvidence([db], input) });
+  const { diffs } = shadow.compare({ view: "now", key: "instance=core", requests: 1, legacy: view.legacy("instance=core", clock.now(), body.entry.body.data)!, body: body.entry.body });
   const merged = diffs.find((d) => d.path.startsWith("board.tasks[taskId=W1-T1]"));
   assert.equal(merged?.classification, "legacy_horizon", JSON.stringify(diffs));
   assert.ok(diffs.every((d) => (SHADOW_CLASSIFICATIONS as readonly string[]).includes(d.classification)));

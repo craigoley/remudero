@@ -57,15 +57,135 @@ invokes_gh() {
     | grep -Eq '(^|[^A-Za-z0-9_/.-])gh[[:space:]]'
 }
 
-# 1) force-push to the default branch (main/master), judged per command SEGMENT (W1-T4588): the
-#    force flag and the default-branch refspec must sit in the SAME `git push` segment. Read across
-#    the whole line, gh's `-f base=main` field beside a plain push satisfied both greps.
-while IFS= read -r seg; do
-  if printf '%s' "$seg" | grep -Eq 'git[[:space:]]+push[[:space:]].*(--force|-f)([[:space:]]|=|$)' &&
-    printf '%s' "$seg" | grep -Eq '(origin[[:space:]]+)?(main|master|HEAD:main|HEAD:master)'; then
-    deny "git push --force to a default branch"
-  fi
-done < <(printf '%s\n' "$cmd" | sed -E 's/(&&|[|][|]|;|[|])/\n/g')
+# 1) a push whose DESTINATION is a default branch (main/master), judged per command SEGMENT (W1-T4588)
+#    by its PARSED refspecs (W1-T5352), never by substrings. Two loose greps -- a force flag anywhere
+#    in the segment AND `main` anywhere in it -- refused a forced push of `run-fix-main-gate-1` and let
+#    `+HEAD:main`, `--force-with-lease origin main`, `-fu`, `:main` and `--delete main` through.
+#    `push_refusal` finds `git [-C x|-c k=v|--git-dir x|--work-tree x]* push`, then walks its words:
+#    force = --force | --force-with-lease[=..] | --force-if-includes | a short cluster holding `f` | a
+#    `+refspec`; delete = --delete | a cluster holding `d` | a `:dst` refspec; --mirror/--all/--branches
+#    = every branch, forced. The first positional word is the remote, every later one a refspec, and its
+#    destination is the text after the last `:` minus `+` and `refs/heads/`. Only a destination of
+#    EXACTLY main or master is refused -- a run branch merely NAMED like main passes. A bare `HEAD` and a
+#    push with no refspec stay allowed: the hook cannot know the upstream. Quoted text holding a space
+#    or separator is blanked first (a commit message that says "git push origin main" is not a push);
+#    a quoted single word is unquoted. Still a tripwire: a refspec assembled indirectly (`"$ref"`)
+#    escapes it, as the file header says. It FAILS CLOSED: if the split or the parse errors, the push
+#    is refused as unparseable rather than waved through.
+push_refusal() {
+  local words n i w k c sub rest dst force=0 del=0 every=0 hit=0 hit_del=0 remote_seen=0 endopts=0
+  IFS=$' \t' read -r -a words <<< "$1"
+  n=${#words[@]}
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    w="${words[$i]}"
+    i=$((i + 1))
+    case "$w" in git|*/git|*'('git|*'`'git) ;; *) continue ;; esac
+    sub=""
+    while [ "$i" -lt "$n" ]; do
+      w="${words[$i]}"
+      i=$((i + 1))
+      case "$w" in
+        -C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix) i=$((i + 1)) ;;
+        -*) ;;
+        *) sub="$w"; break ;;
+      esac
+    done
+    [ "$sub" = push ] || continue
+    force=0 del=0 every=0 hit=0 hit_del=0 remote_seen=0 endopts=0
+    while [ "$i" -lt "$n" ]; do
+      w="${words[$i]}"
+      i=$((i + 1))
+      case "$w" in '#'*|'&') break ;; esac
+      if [ "$endopts" -eq 0 ]; then
+        case "$w" in
+          --) endopts=1; continue ;;
+          --force|--force-with-lease|--force-with-lease=*|--force-if-includes) force=1; continue ;;
+          --delete) del=1; continue ;;
+          --mirror|--all|--branches) every=1; continue ;;
+          --repo|--push-option|--receive-pack|--exec|--recurse-submodules) i=$((i + 1)); continue ;;
+          --*) continue ;;
+          -?*)
+            k=1
+            while [ "$k" -lt "${#w}" ]; do
+              c="${w:$k:1}"
+              k=$((k + 1))
+              case "$c" in
+                f) force=1 ;;
+                d) del=1 ;;
+                o) [ "$k" -ge "${#w}" ] && i=$((i + 1)); break ;;
+              esac
+            done
+            continue ;;
+        esac
+      fi
+      case "$w" in
+        '>'|'>>'|'<'|[0-9]'>'|[0-9]'>>'|[0-9]'<'|'&>'|'&>>') i=$((i + 1)); continue ;;
+        '>'*|'<'*|[0-9]'>'*|[0-9]'<'*|'&>'*) continue ;;
+      esac
+      while :; do
+        case "$w" in *')'|*'`'|*'&') w="${w%?}" ;; *) break ;; esac
+      done
+      if [ "$remote_seen" -eq 0 ]; then
+        remote_seen=1
+        continue
+      fi
+      case "$w" in '+'*) force=1; w="${w#+}" ;; esac
+      if [ "$w" = ":" ]; then
+        every=1
+        continue
+      fi
+      dst="${w##*:}"
+      dst="${dst#refs/heads/}"
+      case "$dst" in
+        main|master)
+          hit=1
+          case "$w" in :*) hit_del=1 ;; esac ;;
+      esac
+    done
+    if [ "$every" -eq 1 ]; then
+      printf '%s\n' "git push --force to a default branch"
+      return 0
+    fi
+    if [ "$hit" -eq 1 ]; then
+      if [ "$del" -eq 1 ] || [ "$hit_del" -eq 1 ]; then
+        printf '%s\n' "deleting a default branch"
+      elif [ "$force" -eq 1 ]; then
+        printf '%s\n' "git push --force to a default branch"
+      else
+        printf '%s\n' "a push to a default branch — open a PR"
+      fi
+      return 0
+    fi
+  done
+  return 0
+}
+case "$cmd" in
+  *push*)
+    r1_text="$(printf '%s\n' "$cmd" | awk '
+      BEGIN { RS = "\001"; qre = "[\"\047]" }
+      {
+        rest = $0; out = ""
+        while ((p = match(rest, qre)) > 0) {
+          out = out substr(rest, 1, p - 1); qc = substr(rest, p, 1); rest = substr(rest, p + 1)
+          e = index(rest, qc)
+          if (e == 0) { out = out "QSTR"; rest = ""; break }
+          inner = substr(rest, 1, e - 1); rest = substr(rest, e + 1)
+          if (inner ~ /[ \t\n;&|]/) out = out "QSTR"; else out = out inner
+        }
+        out = out rest
+        gsub(/&&|\|\||;|\|/, "\n", out)
+        printf "%s\n", out
+      }')" || deny "an unparseable git push — rule 1 fails closed"
+    while IFS= read -r seg; do
+      case "$seg" in *git*push*) ;; *) continue ;; esac
+      r1_reason="$(push_refusal "$seg")" || deny "an unparseable git push — rule 1 fails closed"
+      if [ -n "$r1_reason" ]; then
+        deny "$r1_reason"
+      fi
+    done <<< "$r1_text"
+    ;;
+esac
 
 # 2) gh auth mutation (login/logout/refresh/token/setup-git).
 if printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+auth[[:space:]]+(login|logout|refresh|token|setup-git)'; then
@@ -429,6 +549,12 @@ fi
 #    HOME; and this session's own ~/.claude/projects/<sanitized project dir>, where the CLI persists large
 #    tool output. FAIL CLOSED on no path, no worktree, a `..` component, an unresolvable path, or no jq.
 #    Bash is NOT confined here: the OS sandbox is that boundary.
+#    W1-T5354: Grep (content mode returns file bodies) and Glob are judged the same way, with the node_modules
+#    read allowance. Their `path` is the target; ABSENT means the session cwd, never a refusal. An absolute Glob
+#    `pattern` is judged by its literal prefix up to the last `/` before its first metacharacter, and a `..`
+#    anywhere in a pattern is refused. Codex's own edit tool reaches this hook as `apply_patch` (captured from
+#    codex-cli 0.159.0, routed by the `Edit`/`Write` aliases too), with the patch in `command`: every
+#    Add/Update/Delete File and Move to header is a write target, and a patch naming none fails closed.
 ft_canon() {  # absolute path -> physical path, resolving every symlink component (dangling included)
   local rest="${1#/}" out="" comp link hops=0
   while [ -n "$rest" ]; do
@@ -451,46 +577,84 @@ ft_under() {  # is physical path $1 at or below physical root $2?
   case "$1/" in "$2"/*) return 0 ;; esac
   return 1
 }
+ft_check() {  # deny unless tool $1's target $2 is inside the worktree or an allowed root
+  local tool="$1" target="$2" real ok=0 nm tmp home proj slug
+  case "$target" in '~'*) deny "$tool of a \`~\` path ($target) — name it by its absolute path inside the assigned worktree (W1-T5016, W1-T5354)" ;; esac
+  case "$target" in
+    /*) : ;;
+    *) case "$hook_cwd" in /*) target="$hook_cwd/$target" ;; *) deny "$tool of a relative path with no cwd (W1-T5016)" ;; esac ;;
+  esac
+  case "/$target/" in */../*) deny "$tool of a path with a \`..\` component ($target) — name the file by its absolute path inside the assigned worktree (W1-T5016)" ;; esac
+  real="$(ft_canon "$target")" || deny "$tool target does not resolve ($target, W1-T5016)"
+  ft_under "$real" "$ft_root" && ok=1
+  if [ "$ok" -eq 0 ] && [ -L "$ft_root/node_modules" ]; then
+    case "$tool" in Read|Grep|Glob) nm="$(ft_canon "$ft_root/node_modules")" && ft_under "$real" "$nm" && ok=1 ;; esac
+  fi
+  if [ "$ok" -eq 0 ]; then
+    tmp="$(ft_canon "${TMPDIR:-/tmp}")" && ft_under "$real" "$tmp" && ok=1
+  fi
+  if [ "$ok" -eq 0 ] && [ -n "${HOME:-}" ]; then
+    case "${HOME%/}" in
+      */worker-home*) home="$(ft_canon "$HOME")" && ft_under "$real" "$home" && ok=1 ;;
+    esac
+    for slug in "${ft_anchor//[^A-Za-z0-9]/-}" "${ft_root//[^A-Za-z0-9]/-}"; do
+      [ "$ok" -eq 1 ] && break
+      proj="$(ft_canon "$HOME/.claude/projects/$slug")" && ft_under "$real" "$proj" && ok=1
+    done
+  fi
+  [ "$ok" -eq 1 ] || deny "$tool outside the assigned worktree ($target resolves to $real; worktree $ft_root, W1-T5016, W1-T5354) — file tools stay inside the worktree, and scratch goes under ${TMPDIR:-/tmp}"
+}
 if [ "$confine_file_tools" -eq 1 ]; then
   if [ "$have_jq" -eq 0 ]; then
-    if printf '%s' "$input" | grep -Eq '"tool_name"[[:space:]]*:[[:space:]]*"(Read|Write|Edit|MultiEdit|NotebookEdit)"'; then
+    if printf '%s' "$input" | grep -Eq '"tool_name"[[:space:]]*:[[:space:]]*"(Read|Write|Edit|MultiEdit|NotebookEdit|Grep|Glob|apply_patch)"'; then
       deny "a file tool with no jq to read its target — confinement fails closed (W1-T5016)"
     fi
   else
     ft_tool="$(printf '%s' "$input" | jq -r '.tool_name // ""')"
     case "$ft_tool" in
-      Read|Write|Edit|MultiEdit|NotebookEdit)
+      Read|Write|Edit|MultiEdit|NotebookEdit|Grep|Glob|apply_patch)
         ft_target="$path"
         [ "$ft_tool" = NotebookEdit ] && ft_target="$(printf '%s' "$input" | jq -r '.tool_input.notebook_path // ""')"
-        [ -n "$ft_target" ] || deny "$ft_tool names no path, so it cannot be checked against the assigned worktree (W1-T5016)"
+        case "$ft_tool" in
+          Grep|Glob|apply_patch) : ;;
+          *) [ -n "$ft_target" ] || deny "$ft_tool names no path, so it cannot be checked against the assigned worktree (W1-T5016)" ;;
+        esac
         ft_anchor="${CLAUDE_PROJECT_DIR:-$hook_cwd}"
         case "$ft_anchor" in /*) : ;; *) deny "$ft_tool with no absolute assigned worktree to compare against (W1-T5016)" ;; esac
-        case "$ft_target" in
-          /*) : ;;
-          *) case "$hook_cwd" in /*) ft_target="$hook_cwd/$ft_target" ;; *) deny "$ft_tool of a relative path with no cwd (W1-T5016)" ;; esac ;;
-        esac
-        case "/$ft_target/" in */../*) deny "$ft_tool of a path with a \`..\` component ($ft_target) — name the file by its absolute path inside the assigned worktree (W1-T5016)" ;; esac
         ft_root="$(ft_canon "$ft_anchor")" || deny "the assigned worktree does not resolve (W1-T5016)"
         [ -d "$ft_root" ] || deny "the assigned worktree ($ft_anchor) is not a directory (W1-T5016)"
-        ft_real="$(ft_canon "$ft_target")" || deny "$ft_tool target does not resolve ($ft_target, W1-T5016)"
-        ft_ok=0
-        ft_under "$ft_real" "$ft_root" && ft_ok=1
-        if [ "$ft_ok" -eq 0 ] && [ "$ft_tool" = Read ] && [ -L "$ft_root/node_modules" ]; then
-          ft_nm="$(ft_canon "$ft_root/node_modules")" && ft_under "$ft_real" "$ft_nm" && ft_ok=1
-        fi
-        if [ "$ft_ok" -eq 0 ]; then
-          ft_tmp="$(ft_canon "${TMPDIR:-/tmp}")" && ft_under "$ft_real" "$ft_tmp" && ft_ok=1
-        fi
-        if [ "$ft_ok" -eq 0 ] && [ -n "${HOME:-}" ]; then
-          case "${HOME%/}" in
-            */worker-home*) ft_home="$(ft_canon "$HOME")" && ft_under "$ft_real" "$ft_home" && ft_ok=1 ;;
-          esac
-          for ft_slug in "${ft_anchor//[^A-Za-z0-9]/-}" "${ft_root//[^A-Za-z0-9]/-}"; do
-            [ "$ft_ok" -eq 1 ] && break
-            ft_proj="$(ft_canon "$HOME/.claude/projects/$ft_slug")" && ft_under "$ft_real" "$ft_proj" && ft_ok=1
-          done
-        fi
-        [ "$ft_ok" -eq 1 ] || deny "$ft_tool outside the assigned worktree ($ft_target resolves to $ft_real; worktree $ft_root, W1-T5016) — file tools stay inside the worktree, and scratch goes under ${TMPDIR:-/tmp}"
+        case "$ft_tool" in
+          Grep|Glob)
+            ft_target="$(printf '%s' "$input" | jq -r '.tool_input.path // ""')"
+            [ -n "$ft_target" ] || ft_target="${hook_cwd:-$ft_anchor}"
+            ft_check "$ft_tool" "$ft_target"
+            if [ "$ft_tool" = Glob ]; then
+              ft_pat="$(printf '%s' "$input" | jq -r '.tool_input.pattern // ""')"
+              case "/$ft_pat/" in */../*) deny "Glob pattern with a \`..\` component ($ft_pat) climbs out of its path (W1-T5354)" ;; esac
+              case "$ft_pat" in
+                /*) ft_pre="${ft_pat%%[*?[{]*}"; ft_pre="${ft_pre%/*}"; ft_check Glob "${ft_pre:-/}" ;;
+              esac
+            fi
+            ;;
+          apply_patch)
+            ft_n=0
+            while IFS= read -r ft_line; do
+              ft_line="${ft_line#"${ft_line%%[![:space:]]*}"}"
+              ft_line="${ft_line%"${ft_line##*[![:space:]]}"}"
+              case "$ft_line" in
+                '*** Add File: '* | '*** Update File: '* | '*** Delete File: '*) ft_target="${ft_line#*File: }" ;;
+                '*** Move to: '*) ft_target="${ft_line#*Move to: }" ;;
+                *) continue ;;
+              esac
+              ft_target="${ft_target#"${ft_target%%[![:space:]]*}"}"
+              [ -n "$ft_target" ] || deny "apply_patch with an empty file header (W1-T5354)"
+              ft_check apply_patch "$ft_target"
+              ft_n=$((ft_n + 1))
+            done < <(printf '%s\n' "$cmd")
+            [ "$ft_n" -gt 0 ] || deny "apply_patch names no file, so it cannot be checked against the assigned worktree (W1-T5354)"
+            ;;
+          *) ft_check "$ft_tool" "$ft_target" ;;
+        esac
         ;;
     esac
   fi
