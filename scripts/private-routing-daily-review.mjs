@@ -25,7 +25,7 @@ async function readSource(source, asOf) {
   const findings = [];
   let findingsOmitted = 0;
   const finding = (value) => { if (findings.length < 200) findings.push(value); else findingsOmitted++; };
-  let rowsRead = 0, malformedRows = 0, unreadSources = 0, futureRows = 0, newestTs = null;
+  let rowsRead = 0, malformedRows = 0, unreadSources = 0, futureRows = 0, invalidTimestampRows = 0, newestTs = null;
   for await (const row of openLedgerUnion(source.stateDir, {
     since: `${since}T00:00:00Z`,
     onUnreadArchive: () => { unreadSources++; }, onUnreadLive: () => { unreadSources++; },
@@ -39,7 +39,8 @@ async function readSource(source, asOf) {
     },
   })) {
     const time = Date.parse(row.ts);
-    if (!Number.isFinite(time) || time > Date.parse(asOf) + 5 * 60_000) { futureRows++; continue; }
+    if (!Number.isFinite(time)) { invalidTimestampRows++; continue; }
+    if (time > Date.parse(asOf) + 5 * 60_000) { futureRows++; continue; }
     // Normal writes arriving during the scan belong to the next snapshot, not a clock warning.
     if (time > Date.parse(asOf)) continue;
     rowsRead++;
@@ -50,9 +51,10 @@ async function readSource(source, asOf) {
   const reasons = [];
   if (unreadSources) reasons.push("ledger-source-unreadable");
   if (malformedRows) reasons.push("ledger-source-malformed");
-  if (futureRows) reasons.push("ledger-source-future-or-invalid-timestamp");
+  if (invalidTimestampRows) reasons.push("ledger-source-invalid-timestamp");
+  if (futureRows) reasons.push("ledger-source-future-dated");
   return { ...source, state: reasons.length ? "observed-partial" : "observed", reasons, forms,
-    rowsRead, malformedRows, unreadSources, futureRows, newestTs, findings, findingsOmitted, rows };
+    rowsRead, malformedRows, unreadSources, futureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows };
 }
 
 function privateWrite(path, value) {

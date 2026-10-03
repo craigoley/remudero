@@ -49,6 +49,21 @@ test("missing, malformed, oversized and future daily reviews stay explicitly una
     rmSync(f.path); mkdirSync(f.path); assert.equal(readRoutingDailyStatus(f.dir).state, "unavailable");
   } finally { f.close(); }
 });
+
+test("daily status distinguishes measured invalid timestamps from an unmeasured legacy count", () => {
+  const f = fixture();
+  try {
+    f.put(report());
+    assert.equal(readRoutingDailyStatus(f.dir, now).sources[0]!.invalidTimestampRows, undefined);
+    const next = report();
+    f.put({ ...next, sources: next.sources.map((source) => ({ ...source, invalidTimestampRows: 3 })) });
+    const result = readRoutingDailyStatus(f.dir, now);
+    assert.equal(result.sources[0]!.invalidTimestampRows, 3);
+    assert.equal(result.sources[0]!.futureRows, 5);
+    assert.equal(result.reviewState, "observed-partial");
+    assert.doesNotMatch(JSON.stringify(result), /secret|\/private\/ledger/);
+  } finally { f.close(); }
+});
 test("analytics serves bounded daily freshness through the configured state directory", async () => {
   const f = fixture();
   try {

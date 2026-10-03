@@ -94,7 +94,9 @@ test("daily routing review retains raw receipts and writes hashed findings to a 
     assert.equal(quarantine.sources[0].findings.length, 2);
     assert.match(quarantine.sources[0].findings[0].rowHash, /^[a-f0-9]{64}$/);
     assert.equal(readFileSync(join(f.sources[0]!.stateDir, "ledger.ndjson"), "utf8").split("\n").filter(Boolean).length, 3);
-    assert.equal(source.futureRows, 2); assert.equal(source.newestTs, "2026-10-02T10:00:00.000Z");
+    assert.equal(source.futureRows, 1); assert.equal(source.invalidTimestampRows, 1);
+    assert.deepEqual(source.reasons, ["ledger-source-invalid-timestamp", "ledger-source-future-dated"]);
+    assert.equal(source.newestTs, "2026-10-02T10:00:00.000Z");
     const arm = source.reports.find((item: { id: string }) => item.id === epoch.id).arms.find((item: { arm: string }) => item.arm === "sol61");
     assert.equal(arm.tasks, 1); assert.equal(arm.nonStarterAssignments, 1); assert.equal(arm.costMissingAssignments, 1);
     assert.equal(arm.meanCashCostUsd, null);

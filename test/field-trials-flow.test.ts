@@ -595,6 +595,38 @@ test("field trials ledger reader counts every form and never calls an unreadable
   }
 });
 
+test("field trial timestamp quarantine excludes invalid assignments across all ledger forms", async () => {
+  const root = tempDir("invalid-clock"), dir = join(root, "state");
+  try {
+    const good = assign("T-valid-1", "r1", "a1", T(2));
+    const invalid = assign("T-invalid-1", "r2", "a2", "not-a-timestamp");
+    writeLedger([good, invalid], { dir });
+    const plain = join(dir, "ledger.2026-09-02T00-00-00-000Z.ndjson");
+    const gzip = join(dir, "ledger.2026-09-04T00-00-00-000Z.ndjson.gz");
+    writeFileSync(plain, [good, invalid, assign("T-invalid-2", "r3", "a3", "also-invalid")].map((row) => JSON.stringify(row)).join("\n") + "\n");
+    writeFileSync(gzip, gzipSync([assign("T-valid-2", "r4", "a4", T(4)), assign("T-future", "r5", "a5", T(8))].map((row) => JSON.stringify(row)).join("\n") + "\n"));
+    const files = [join(dir, "ledger.ndjson"), plain, gzip];
+    const before = files.map((file) => readFileSync(file));
+    const read = await readFieldTrialsLedger(dir, Date.parse(T(4)));
+    assert.deepEqual(read.forms, { gzip: 1, plain: 1, live: 1 });
+    assert.deepEqual([read.state, read.reason], ["observed-partial", "ledger-source-invalid-timestamp"]);
+    assert.equal(read.invalidTimestampRows, 2);
+    assert.equal(read.futureRows, 1);
+    assert.equal(read.malformedRows, 0);
+    assert.equal(read.newestTs, T(4));
+    assert.ok(read.duplicateRows >= 2, "replayed invalid rows are counted once after deduplication");
+    assert.deepEqual(read.rows.map((row) => row.taskId).sort(), ["T-valid-1", "T-valid-2"]);
+    const snapshot = buildFieldTrialsFlowSnapshot({ asOf: T(4), sources: [{ label: "core", repo: "acme/core", ledger: read }],
+      github: { version: "field-trials-github-v1", repos: { "acme/core": emptyRepoStore() } } });
+    assert.equal(snapshot.provenance.sources[0]!.ledger.invalidTimestampRows, 2);
+    assert.equal(snapshot.assignmentTelemetry.reduce((sum, item) => sum + item.assignments, 0), 2);
+    const release = buildFieldTrialsRelease(snapshot, CONSENT, "synthetic-salt");
+    assert.equal(release.state, "candidate");
+    if (release.state === "candidate") assert.equal(release.release.sources[0]!.ledger.invalidTimestampRows, 2);
+    files.forEach((file, index) => assert.deepEqual(readFileSync(file), before[index], "the immutable raw corpus is preserved"));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("field trials learning loop counts proposals to outcomes and never zeroes human effort", () => {
   const card = (step: string, prNumber: number, day: number) => row(step, null, null, T(day), { pr_url: `https://github.com/acme/core/pull/${prNumber}` });
   const rows = [

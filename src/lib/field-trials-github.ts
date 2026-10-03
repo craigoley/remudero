@@ -189,6 +189,8 @@ export interface GithubCursor {
   resumePage: number | null;
   pagesRead: number;
   asOf: string | null;
+  /** A recent head read is separate from completion of the historical sweep. */
+  head?: { state: "observed" | "unavailable"; asOf: string; reason: string | null };
 }
 
 function blankCursor(): GithubCursor {
@@ -200,6 +202,8 @@ export interface GithubRepoStore {
   commits: Record<string, string>;
   deployments: Record<string, GithubDeployment>;
   cursors: { pulls: GithubCursor; commits: GithubCursor; deployments: GithubCursor };
+  /** Rotate historical pages so a large resource cannot starve its siblings. */
+  backfillResourceIndex?: number;
 }
 
 export function emptyRepoStore(): GithubRepoStore {
@@ -229,37 +233,37 @@ function laterIso(a: string | null, b: string | null): string | null {
   return a === null ? b : b === null || a >= b ? a : b;
 }
 
-/** Sweep one newest-first list. The watermark moves only when a sweep completes; a stop records its page. */
-async function sweepList(fetch: GithubPageFetch, path: string, cursor: GithubCursor, budget: Budget, asOf: string,
+/** Read one newest-first page. Only completion advances the historical watermark. */
+async function sweepListPage(fetch: GithubPageFetch, path: string, cursor: GithubCursor, budget: Budget, asOf: string,
   timeOf: (item: unknown) => string | null, upsert: (item: unknown) => void): Promise<void> {
-  let page = cursor.resumePage ?? 1;
-  for (;;) {
-    if (budget.left <= 0) {
-      Object.assign(cursor, { resumePage: page, state: "partial", reason: "page-budget-exhausted" });
-      return;
-    }
-    budget.left -= 1;
-    const result = await fetch(`${path}${path.includes("?") ? "&" : "?"}per_page=${GITHUB_PAGE_SIZE}&page=${page}`);
-    if (!result.ok) {
-      Object.assign(cursor, { resumePage: page, reason: result.reason,
-        state: cursor.watermark === null && page === 1 ? "unavailable" : "partial" });
-      return;
-    }
-    cursor.pagesRead += 1;
-    let reachedWatermark = false;
-    for (const item of result.items) {
-      const at = timeOf(item);
-      cursor.sweepHigh = laterIso(cursor.sweepHigh, at);
-      if (at !== null && cursor.watermark !== null && at <= cursor.watermark) reachedWatermark = true;
-      upsert(item);
-    }
-    if (result.items.length < GITHUB_PAGE_SIZE || reachedWatermark) {
-      Object.assign(cursor, { watermark: laterIso(cursor.watermark, cursor.sweepHigh), sweepHigh: null,
-        resumePage: null, state: "complete", reason: null, asOf });
-      return;
-    }
-    page += 1;
+  const page = cursor.resumePage ?? 1;
+  if (budget.left <= 0) {
+    Object.assign(cursor, { resumePage: page, state: "partial", reason: "page-budget-exhausted" });
+    return;
   }
+  budget.left -= 1;
+  const result = await fetch(`${path}${path.includes("?") ? "&" : "?"}per_page=${GITHUB_PAGE_SIZE}&page=${page}`);
+  if (!result.ok) {
+    if (page === 1) cursor.head = { state: "unavailable", asOf, reason: result.reason };
+    Object.assign(cursor, { resumePage: page, reason: result.reason,
+      state: cursor.watermark === null && page === 1 ? "unavailable" : "partial" });
+    return;
+  }
+  cursor.pagesRead += 1;
+  if (page === 1) cursor.head = { state: "observed", asOf, reason: null };
+  let reachedWatermark = false;
+  for (const item of result.items) {
+    const at = timeOf(item);
+    cursor.sweepHigh = laterIso(cursor.sweepHigh, at);
+    if (at !== null && cursor.watermark !== null && at <= cursor.watermark) reachedWatermark = true;
+    upsert(item);
+  }
+  if (result.items.length < GITHUB_PAGE_SIZE || reachedWatermark) {
+    Object.assign(cursor, { watermark: laterIso(cursor.watermark, cursor.sweepHigh), sweepHigh: null,
+      resumePage: null, state: "complete", reason: null, asOf });
+    return;
+  }
+  Object.assign(cursor, { resumePage: page + 1, state: "partial", reason: "page-budget-exhausted" });
 }
 
 async function readDetail(fetch: GithubPageFetch, repo: string, pull: GithubPull, budget: Budget,
@@ -297,54 +301,104 @@ export interface FieldTrialsGithubRepoPass {
   deployments: GithubCursor;
   detailsPending: number;
   detailsUnavailable: number;
+  /** Counts over stored deployments; an unreadable deployment list is still unknown. */
+  statusesPending?: number;
+  statusesUnavailable?: number;
 }
 
 async function ingestRepo(fetch: GithubPageFetch, repo: string, store: GithubRepoStore, budget: Budget,
   asOf: string): Promise<FieldTrialsGithubRepoPass> {
-  await sweepList(fetch, `repos/${repo}/pulls?state=all&sort=updated&direction=desc`, store.cursors.pulls, budget, asOf,
-    (item) => iso(record(item)?.updated_at), (item) => {
-      const pull = pullOf(item);
-      if (pull === null) return;
-      const prior = store.pulls[pull.nodeId];
-      // An unchanged PR keeps its detail; an edit, rerun or late event bumps updated_at and re-reads it.
-      store.pulls[pull.nodeId] = prior && prior.updatedAt === pull.updatedAt ? { ...pull, detail: prior.detail } : pull;
-    });
-  await sweepList(fetch, `repos/${repo}/commits`, store.cursors.commits, budget, asOf,
-    (item) => iso(record(record(record(item)?.commit)?.committer)?.date), (item) => {
-      const sha = text(record(item)?.sha);
-      const at = iso(record(record(record(item)?.commit)?.committer)?.date);
-      if (sha !== null && at !== null) store.commits[sha] = at;
-    });
-  await sweepList(fetch, `repos/${repo}/deployments`, store.cursors.deployments, budget, asOf,
-    (item) => iso(record(item)?.created_at), (item) => {
-      const deployment = record(item);
-      if (deployment === undefined || !Number.isSafeInteger(deployment.id)) return;
-      const id = deployment.id as number;
-      store.deployments[String(id)] = store.deployments[String(id)]
-        ?? { id, sha: text(deployment.sha), createdAt: iso(deployment.created_at), status: { state: "pending-read" } };
-    });
-  for (const deployment of Object.values(store.deployments)) {
-    if (TERMINAL_DEPLOYMENT_STATES.has(deployment.status.state) || budget.left <= 0) continue;
+  const resources: Array<{ key: keyof GithubRepoStore["cursors"]; path: string;
+    timeOf: (item: unknown) => string | null; upsert: (item: unknown) => void }> = [
+    { key: "pulls", path: `repos/${repo}/pulls?state=all&sort=updated&direction=desc`,
+      timeOf: (item) => iso(record(item)?.updated_at), upsert: (item) => {
+        const pull = pullOf(item);
+        if (pull === null) return;
+        const prior = store.pulls[pull.nodeId];
+        // An unchanged PR keeps its detail; an edit, rerun or late event bumps updated_at and re-reads it.
+        store.pulls[pull.nodeId] = prior && prior.updatedAt === pull.updatedAt ? { ...pull, detail: prior.detail } : pull;
+    } },
+    { key: "commits", path: `repos/${repo}/commits`,
+      timeOf: (item) => iso(record(record(record(item)?.commit)?.committer)?.date), upsert: (item) => {
+        const sha = text(record(item)?.sha);
+        const at = iso(record(record(record(item)?.commit)?.committer)?.date);
+        if (sha !== null && at !== null) store.commits[sha] = at;
+    } },
+    { key: "deployments", path: `repos/${repo}/deployments`,
+      timeOf: (item) => iso(record(item)?.created_at), upsert: (item) => {
+        const deployment = record(item);
+        if (deployment === undefined || !Number.isSafeInteger(deployment.id)) return;
+        const id = deployment.id as number;
+        store.deployments[String(id)] = store.deployments[String(id)]
+          ?? { id, sha: text(deployment.sha), createdAt: iso(deployment.created_at), status: { state: "pending-read" } };
+    } },
+  ];
+  const blocked = new Set<string>();
+  // Refresh page one without discarding a historical resume page or advancing its watermark.
+  for (const resource of resources) {
+    const cursor = store.cursors[resource.key];
+    const resuming = (cursor.resumePage ?? 1) > 1;
+    const head = resuming ? blankCursor() : cursor;
+    await sweepListPage(fetch, resource.path, head, budget, asOf, resource.timeOf, resource.upsert);
+    if (resuming) {
+      cursor.pagesRead += head.pagesRead;
+      cursor.sweepHigh = laterIso(cursor.sweepHigh, head.sweepHigh ?? head.watermark);
+      if (head.head !== undefined) cursor.head = head.head;
+      if (head.state === "unavailable") Object.assign(cursor, { state: "partial", reason: head.reason });
+    }
+    if (head.head?.state === "unavailable" && head.head.asOf === asOf) blocked.add(resource.key);
+  }
+  const detailCandidates = () => Object.values(store.pulls).filter(needsDetail)
+    .sort((a, b) => Number(a.detail.state === "observed") - Number(b.detail.state === "observed")
+      || (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "") || b.number - a.number);
+  const detailReserve = detailCandidates().length > 0 && budget.left >= 3 ? 3 : 0;
+  const statusCandidates = () => Object.values(store.deployments).filter((deployment) => !TERMINAL_DEPLOYMENT_STATES.has(deployment.status.state))
+    .sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? "") || b.id - a.id);
+  const pendingStatuses = statusCandidates();
+  const statusReserve = pendingStatuses.length > 0 && budget.left > detailReserve ? 1 : 0;
+  let next = Number.isInteger(store.backfillResourceIndex) ? (store.backfillResourceIndex ?? 0) % resources.length : 0;
+  if (next < 0) next = 0;
+  while (budget.left > detailReserve + statusReserve) {
+    let chosen = -1;
+    for (let offset = 0; offset < resources.length; offset++) {
+      const index = (next + offset) % resources.length;
+      const resource = resources[index]!;
+      if (!blocked.has(resource.key) && (store.cursors[resource.key].resumePage ?? 1) > 1) { chosen = index; break; }
+    }
+    if (chosen < 0) break;
+    const resource = resources[chosen]!;
+    const cursor = store.cursors[resource.key];
+    await sweepListPage(fetch, resource.path, cursor, budget, asOf, resource.timeOf, resource.upsert);
+    if (cursor.reason !== null && cursor.reason !== "page-budget-exhausted") blocked.add(resource.key);
+    next = (chosen + 1) % resources.length;
+    store.backfillResourceIndex = next;
+  }
+  for (const deployment of statusCandidates()) {
+    if (budget.left <= detailReserve) break;
     budget.left -= 1;
     const statuses = await fetch(`repos/${repo}/deployments/${deployment.id}/statuses?per_page=${GITHUB_PAGE_SIZE}`);
     const newest = statuses.ok ? record(statuses.items[0]) : undefined;
     deployment.status = !statuses.ok ? { state: "unavailable", reason: statuses.reason }
       : newest === undefined ? { state: "no-status", at: null } : { state: String(newest.state), at: iso(newest.created_at) };
   }
-  for (const pull of Object.values(store.pulls).filter(needsDetail).sort((a, b) => a.number - b.number)) {
+  for (const pull of detailCandidates()) {
     const detail = await readDetail(fetch, repo, pull, budget, asOf);
     if (detail !== null) pull.detail = detail;
   }
   const pulls = Object.values(store.pulls);
   return { pulls: { ...store.cursors.pulls }, commits: { ...store.cursors.commits }, deployments: { ...store.cursors.deployments },
     detailsPending: pulls.filter((pull) => pull.detail.state === "pending").length,
-    detailsUnavailable: pulls.filter((pull) => pull.detail.state === "unavailable").length };
+    detailsUnavailable: pulls.filter((pull) => pull.detail.state === "unavailable").length,
+    statusesPending: Object.values(store.deployments).filter((item) => item.status.state === "pending-read").length,
+    statusesUnavailable: Object.values(store.deployments).filter((item) => item.status.state === "unavailable").length };
 }
 
 export interface FieldTrialsGithubPass {
   state: "complete" | "partial" | "unavailable" | "skipped";
   asOf: string;
   pagesRead: number;
+  /** Actual transport attempts, including failures; pagesRead counts successful pages only. */
+  requestsMade?: number;
   repos: Record<string, FieldTrialsGithubRepoPass>;
 }
 
@@ -354,17 +408,26 @@ export interface FieldTrialsGithubPass {
  */
 export async function ingestFieldTrialsGithub(fetch: GithubPageFetch, repos: readonly string[],
   store: FieldTrialsGithubStore, asOf: string, maxPages: number = DEFAULT_MAX_PAGES): Promise<FieldTrialsGithubPass> {
-  const pass: FieldTrialsGithubPass = { state: "complete", asOf, pagesRead: 0, repos: {} };
-  const share = Math.max(1, Math.floor(maxPages / Math.max(1, repos.length)));
-  for (const repo of repos) {
+  if (!Number.isSafeInteger(maxPages) || maxPages < 0) throw new RangeError("field-trials page budget must be a nonnegative safe integer");
+  const pass: FieldTrialsGithubPass = { state: "complete", asOf, pagesRead: 0, requestsMade: 0, repos: {} };
+  const share = Math.floor(maxPages / Math.max(1, repos.length));
+  for (const [index, repo] of repos.entries()) {
     const repoStore = store.repos[repo] ??= emptyRepoStore();
-    const budget = { left: share };
-    const before = ["pulls", "commits", "deployments"].reduce((sum, key) =>
-      sum + repoStore.cursors[key as keyof GithubRepoStore["cursors"]].pagesRead, 0);
-    pass.repos[repo] = await ingestRepo(fetch, repo, repoStore, budget, asOf);
+    const budget = { left: share + (index < maxPages % Math.max(1, repos.length) ? 1 : 0) };
+    let requests = 0;
+    let pages = 0;
+    const countedFetch: GithubPageFetch = async (path) => {
+      requests += 1;
+      const result = await fetch(path);
+      if (result.ok) pages += 1;
+      return result;
+    };
+    pass.repos[repo] = await ingestRepo(countedFetch, repo, repoStore, budget, asOf);
     const cursors = Object.values(repoStore.cursors);
-    pass.pagesRead += cursors.reduce((sum, cursor) => sum + cursor.pagesRead, 0) - before;
-    if (cursors.some((cursor) => cursor.state !== "complete") || pass.repos[repo].detailsPending > 0) pass.state = "partial";
+    pass.pagesRead += pages;
+    pass.requestsMade = (pass.requestsMade ?? 0) + requests;
+    if (cursors.some((cursor) => cursor.state !== "complete") || pass.repos[repo].detailsPending > 0
+      || (pass.repos[repo].statusesPending ?? 0) > 0) pass.state = "partial";
   }
   if (repos.length > 0 && Object.values(pass.repos).every((repo) => repo.pulls.state === "unavailable")) pass.state = "unavailable";
   return pass;

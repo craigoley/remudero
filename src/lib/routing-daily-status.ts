@@ -39,6 +39,7 @@ export function readRoutingDailyStatus(stateDir: string | undefined, clock: Cloc
       sources: report.sources.map((source: Record<string, unknown>) => ({ label: source.label, state: text(source.state),
         reasons: (source.reasons as unknown[]).map(reason => text(reason)).filter(Boolean).slice(0, 10),
         futureRows: count(source.futureRows), malformedRows: count(source.malformedRows),
+        invalidTimestampRows: count(source.invalidTimestampRows),
         reports: Array.isArray(source.reports) ? source.reports.slice(0, 20).flatMap((item: Record<string, unknown> | null) => item && text(item.id) ? [{
           id: text(item.id), reviewState: text(item.reviewState), nextAction: text(item.nextAction), minTasksPerArm: count(item.minTasksPerArm),
           assignments: count(item.assignments), crossoverTasks: count(item.crossoverTasks),
