@@ -49625,7 +49625,7 @@ export function installUnhandledRejectionGuard(deps: UnhandledRejectionGuardDeps
 
 /** W1-T5341: the production seams of the fresh calibration driver — the plan's own tasks, the sealed subscription
  *  dispatcher on the per-attempt cap, the fleet registry's instance roots, and pins derived from this process. */
-function benchmarkAaReadinessRuntime(stateDir: string, workerAbandonMs?: number) {
+export function benchmarkAaReadinessRuntime(stateDir: string, workerAbandonMs?: number) {
   const config = loadConfig();
   return { config,
     runtimePins: () => deriveRuntimePins({ harnessRevision: workerBoundaryStack.harnessRevision, installRoot: resolveInstallRoot(config) }),

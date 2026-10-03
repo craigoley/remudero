@@ -8,16 +8,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  API_BILLING_REFUSAL, prospectiveAaDir, prospectiveAaLedgerRows, runProspectiveAa, runProspectiveAaPair,
+  API_BILLING_REFUSAL, listProspectiveAaRegistrations, prospectiveAaDir, prospectiveAaLedgerRows, runProspectiveAa, runProspectiveAaPair,
 } from "../src/lib/benchmark-aa-prospective.js";
 import {
-  benchmarkAaReadinessCommand, deriveRuntimePins, READINESS_FOLLOW_UPS_FILE, runBenchmarkAaReadiness,
+  benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, READINESS_FOLLOW_UPS_FILE, runBenchmarkAaReadiness,
   type BenchmarkAaReadinessInput, type ReadinessTask, type RuntimePins,
 } from "../src/lib/benchmark-aa-readiness.js";
 import { clockFromMillisFn, fixedClock } from "../src/lib/clock.js";
+import { DEFAULT_INSTANCE_STATE_BASE } from "../src/lib/instance-gateway.js";
 import type { PairedAttemptRequest, PairedAttemptResult, PairedGrade } from "../src/lib/paired-trial.js";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
-import { HANDLERS } from "../src/run-task.js";
+import type { AcceptanceCriterion, Task } from "../src/lib/plan.js";
+import { benchmarkAaReadinessRuntime, HANDLERS } from "../src/run-task.js";
 
 const SHA = "a".repeat(40);
 const OTHER_SHA = "b".repeat(40);
@@ -237,6 +238,118 @@ test("calibration refuses API billing without blocking PR flow", async () => {
   assert.ok(calls.every((call) => call.pin.billing === "subscription"));
 });
 
+test("calibration names unavailable runtime and registry evidence", async () => {
+  const failed = deriveRuntimePins({ harnessRevision: pins().harnessRevision, installRoot: root(),
+    git: () => { throw new Error("tool status unavailable"); } });
+  assert.deepEqual(failed.revisions.toolRevision,
+    { state: "unavailable", reason: "executing-module-revision-unavailable:tool status unavailable" });
+  const local = root();
+  const registry = "instances:\n  core:\n    repo: owner/core\n  beta:\n    repo: owner/beta\n  retired:\n    repo: owner/old\n    retired: true\n";
+  assert.deepEqual(registryInstanceRoots(local, () => registry), { roots: [
+    { instance: "core", stateDir: local }, { instance: "beta", stateDir: join(DEFAULT_INSTANCE_STATE_BASE, "beta", "state") },
+  ] });
+  const missing = registryInstanceRoots(local, () => { throw new Error("registry missing"); });
+  assert.deepEqual(missing, { reason: "instance-registry-unreadable:registry missing" });
+  assert.match((registryInstanceRoots(local, () => "invalid") as { reason: string }).reason, /^instance-registry-unreadable:/);
+  const calls: PairedAttemptRequest<string>[] = [];
+  const result = await runBenchmarkAaReadiness(input(local, calls, { defaultInstanceRoots: () => missing }));
+  assert.equal(result.state, "refused");
+  assert.equal(result.sources.complete, false);
+  assert.ok(result.refusals.includes("instance-registry-unreadable:registry missing"));
+  assert.equal(calls.length, 0);
+});
+
+test("calibration refuses an unreadable protocol root and preserves its reason", async () => {
+  const stateDir = root();
+  writeFileSync(join(stateDir, "benchmark-aa-prospective"), "not a directory");
+  assert.deepEqual(listProspectiveAaRegistrations(stateDir),
+    { state: "unreadable", reason: "protocol-root-unreadable:ENOTDIR" });
+  const calls: PairedAttemptRequest<string>[] = [];
+  const result = await runBenchmarkAaReadiness(input(stateDir, calls));
+  assert.equal(result.state, "refused");
+  assert.equal(result.sources.complete, false);
+  assert.equal(result.sources.roots[0]?.reason, "protocol-root-unreadable:ENOTDIR");
+  assert.deepEqual(result.refusals, ["instance-root-unreadable:local"]);
+  assert.equal(calls.length, 0);
+});
+
+test("calibration registers a fresh manifest and refuses invalid registration", async () => {
+  const stateDir = root();
+  const calls: PairedAttemptRequest<string>[] = [];
+  const result = await runBenchmarkAaReadiness(input(stateDir, calls, { manifest: manifest(), maxPairs: 1 }));
+  assert.equal(result.run.dispatchedPairs, 1);
+  assert.equal(result.population?.denominator, TASKS.length);
+  assert.match(result.identity ?? "", /^local\/aa-readiness-1@/);
+  assert.equal(listProspectiveAaRegistrations(stateDir).state, "read");
+  assert.equal(calls.length, 2);
+  const invalid = await runBenchmarkAaReadiness(input(root(), calls, { manifest: {} }));
+  assert.equal(invalid.state, "refused");
+  assert.match(invalid.refusals[0] ?? "", /^registration-refused:/);
+  assert.equal(calls.length, 2);
+});
+
+test("calibration refuses unreadable plans and frozen populations before dispatch", async () => {
+  const stateDir = root();
+  await register(stateDir);
+  const calls: PairedAttemptRequest<string>[] = [];
+  const plan = await runBenchmarkAaReadiness(input(stateDir, calls, {
+    loadPlanTasks: () => { throw new Error("plan missing"); },
+  }));
+  assert.equal(plan.state, "refused");
+  assert.deepEqual(plan.refusals, ["plan-unreadable:plan missing"]);
+  assert.equal(existsSync(join(prospectiveAaDir(stateDir, TRIAL), "population.json")), false);
+  writeFileSync(join(prospectiveAaDir(stateDir, TRIAL), "population.json"), "{");
+  const population = await runBenchmarkAaReadiness(input(stateDir, calls));
+  assert.equal(population.state, "refused");
+  assert.match(population.refusals[0] ?? "", /^population-unreadable:/);
+  assert.equal(population.receipt.state, "withheld");
+  assert.equal(calls.length, 0);
+});
+
+test("readiness CLI rejects invalid arguments and unreadable manifests without running", async () => {
+  const lines: string[] = [];
+  let runs = 0;
+  const run = async () => { runs++; throw new Error("driver must not run"); };
+  const deps = { print: (line: string) => lines.push(line), resolveStateDir: root };
+  assert.equal(await benchmarkAaReadinessCommand(["--unknown"], run, deps), 2);
+  assert.match(lines.pop()!, /arguments-invalid:/);
+  const directory = root();
+  const path = join(directory, "manifest.json");
+  for (const contents of [undefined, "{"]) {
+    if (contents !== undefined) writeFileSync(path, contents);
+    assert.equal(await benchmarkAaReadinessCommand(["--trial-id", TRIAL, "--trial", path], run, deps), 2);
+    assert.match(lines.pop()!, /trial-manifest-unreadable:/);
+  }
+  assert.equal(runs, 0);
+});
+
+test("readiness CLI prints refused, withheld and emitted calibration outcomes", async () => {
+  const stateDir = root();
+  const path = join(stateDir, "manifest.json");
+  writeFileSync(path, JSON.stringify(manifest()));
+  const calls: PairedAttemptRequest<string>[] = [];
+  const lines: string[] = [];
+  const deps = { print: (line: string) => lines.push(line), resolveStateDir: () => stateDir };
+  const run = (request: Parameters<Parameters<typeof benchmarkAaReadinessCommand>[1]>[0]) =>
+    runBenchmarkAaReadiness(input(request.stateDir, calls, request));
+  assert.equal(await benchmarkAaReadinessCommand(["--trial-id", TRIAL], run, deps), 1);
+  assert.ok(lines.some((line) => line.includes("refused: trial-not-registered")));
+  lines.length = 0;
+  assert.equal(await benchmarkAaReadinessCommand(["--trial-id", TRIAL, "--trial", path, "--max-pairs", "1"], run, deps), 1);
+  assert.ok(lines.some((line) => line.includes(`population ${TASKS.length}: ${TASKS.length} eligible, 0 refused`)));
+  assert.ok(lines.some((line) => line.includes("stopped: max-pairs-reached")));
+  assert.ok(lines.some((line) => line.includes("next gap: untriggered-eligible-tasks:")));
+  lines.length = 0;
+  const receipt = join(stateDir, "receipt.json");
+  assert.equal(await benchmarkAaReadinessCommand(["--trial-id", TRIAL, "--out", receipt], run, deps), 0);
+  assert.ok(lines.some((line) => line.includes("receipt-emitted")));
+  assert.ok(lines.some((line) => line.endsWith(`written to ${receipt}`)));
+  const emitted = JSON.parse(readFileSync(receipt, "utf8")) as { receipt: { state: string; verdict: string } };
+  assert.equal(emitted.receipt.state, "observed");
+  assert.equal(emitted.receipt.verdict, "no-integrity-concern-detected");
+  assert.equal(calls.length, TASKS.length * 2);
+});
+
 test("rmd benchmark-aa readiness reaches the readiness driver", async () => {
   const home = mkdtempSync(join(tmpdir(), "rmd-aa-readiness-cli-"));
   const savedHome = process.env.HOME;
@@ -248,6 +361,8 @@ test("rmd benchmark-aa readiness reaches the readiness driver", async () => {
     const stateDir = join(home, "state");
     mkdirSync(stateDir, { recursive: true });
     process.env.HOME = home;
+    const runtime = benchmarkAaReadinessRuntime(stateDir, 1000);
+    assert.equal(typeof runtime.dispatcherFor({ ...planTasks()[0], repo: "fixture" } as Task), "function");
     console.log = (line: string) => { printed.push(line); };
     const code = await HANDLERS.get("benchmark-aa")!(["readiness", "--trial-id", "aa-missing", "--state-dir", stateDir,
       "--instance-root", `core=${stateDir}`, "--json"]);
