@@ -177,7 +177,7 @@ exit 1
     const snapshot = JSON.parse(readFileSync(join(f.sources[0]!.stateDir, "state/field-trials/routing-daily/latest.json"), "utf8"));
     assert.equal(snapshot.sources.length, 3); assert.equal(snapshot.cadence, "daily");
     const args = readFileSync(argsPath, "utf8");
-    assert.match(args, /--network none/); assert.match(args, /--workdir \/home\/node\/Remudero\/remudero/);
+    assert.match(args, /--network none/); assert.match(args, /--workdir \/home\/node\/Remudero\/daemon-install/);
     assert.match(args, /scripts\/private-routing-daily-review.mjs/);
     assert.match(args, /dst=\/field-trials\/site,readonly/);
   } finally { f.close(); }
@@ -208,9 +208,11 @@ exit 0
     assert.equal(result.stderr, "");
     const calls = readFileSync(log, "utf8").trim().split("\n");
     assert.equal(calls.length, 3, JSON.stringify({ calls, stdout: result.stdout, stderr: result.stderr }));
-    for (const call of calls) assert.match(call, /--workdir \/home\/node\/Remudero\/remudero/);
+    for (const call of calls) assert.match(call, /--workdir \/home\/node\/Remudero\/daemon-install/);
     assert.match(calls[1]!, /scripts\/private-field-trials-case-files.mjs/);
-    assert.match(calls[2]!, /\/home\/node\/Remudero\/remudero\/bin\/rmd field-trials/);
+    assert.match(calls[1]!, /--env RMD_FIELD_TRIALS_REPO_ROOT=\/home\/node\/Remudero\/daemon-install(?: |$)/,
+      "case-file plan lookup must use the mounted source, independently of the process workdir");
+    assert.match(calls[2]!, /\/home\/node\/Remudero\/daemon-install\/bin\/rmd field-trials/);
     assert.doesNotMatch(calls.join("\n"), /--workdir \/app|\/app\/bin\/rmd/);
   } finally { f.close(); }
 });
