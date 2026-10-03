@@ -1,0 +1,77 @@
+- id: W1-T5390
+  title: "Report native login expiry accurately instead of a generic containment failure"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "2026-10-02 approved fleet follow-ups; two production probe refusals"
+  plan_refs: [W1-T292, W1-T293, W1-T2250, W1-T5005, W1-T5346]
+  files: [src/lib/containment.ts, test/containment-native-credential-failure.test.ts]
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED at 82665916fa4e48446361c5043dd66a7e19dafc1f, rechecked at the filing
+    prepared filing base 545073118b47cca09fcec2f7dd750f8c938f31a8: the expiry predicate requires
+    isError and both failed-to-authenticate and access-token-expired fragments.
+    defaultExecutor combines final text, assistant blocks and child stderr into one transcript.
+    Production runs W1-T5339-1790979521852 and W1-T5332-1790979349191 refused at
+    22:22 and 22:26 UTC on October 2. Both actual containment.probe rows report no inside
+    write, no outside attempt and credential_expired false; their captured excerpt begins
+    Failed to authenticate: OAuth session expired and could not be refreshed.
+    This signature cannot match the current access-token-expired predicate. Its stream origin
+    and isError value cannot be reconstructed from that combined excerpt; do not invent them.
+    The production archive-union read found the actual rows with run-start controls, but three
+    unclassified backup/metadata paths prevent a complete-corpus absence or failure-rate claim.
+    The upstream error reference still documents this signature and authentication_failed for
+    native saved-login renewal failure. It distinguishes that from API token rejection and a
+    temporary refresh lock. INFERRED: these excerpts are consistent with a native authentication
+    failure, not evidence that the sandbox itself broke. No credential recovery was attempted.
+    W1-T292 and W1-T293 are legitimately retired after prior implementations; W1-T2250 shipped
+    a later message-shape correction in PR #2833. This is a provenance and compatibility
+    regression follow-up, not a reopening or duplicate credit. W1-T5346's pass cache does not
+    fix a failed first-boot probe. W1-T5005 deliberately excludes probe-never-ran from retries.
+  design: |
+    Keep this one concern: accurate, source-qualified classification of an already-refusing
+    probe. Carry native child stderr separately through defaultExecutor and ProbeExecResult,
+    retaining the current transcript for existing denial evidence. Prefer a structured native
+    failure when that result is already available; do not invent a new worker-result field.
+    Recognize the documented complete saved-login-expiry signature from native diagnostic
+    evidence even when an error envelope is absent. Preserve the existing isError-qualified
+    access-token-expired and not-logged-in signatures. Do not infer native origin from merged
+    task prose, assistant blocks, a bare expired word or a generic authentication_failed alone.
+    Expose a bounded non-secret diagnostic shape or provenance, not raw credentials or backups.
+    The named expiry verdict and ledger boolean must agree; authentication, temporary refresh
+    lock, transport failure and genuine unproven containment remain distinguishable.
+    Exercise the defaultExecutor seam with captured child stderr, not only a fake combined
+    transcript. Require seeded old/new signatures, absent or false error envelope, prose-only
+    impersonation, refresh-lock/server-error text, generic failures and genuinely contained
+    controls. All credential-dead cases still refuse; no manufactured containment pass, extra
+    blind retry, new fleet-wide hold, credential mutation, paid fallback or routing change.
+    Recovery, if separately justified by current runtime evidence, is a separate follow-up.
+  acceptance:
+    - claim: "the production executor preserves native diagnostic provenance separately from task text"
+      proof: 'grep: containment native diagnostics preserve child stderr provenance in test/containment-native-credential-failure.test.ts'
+    - claim: "both documented expiry signatures yield a named refusal without depending on a missing error envelope"
+      proof: 'grep: containment native login expiry stays named across envelope shapes in test/containment-native-credential-failure.test.ts'
+    - claim: "task prose and refresh-lock failures cannot impersonate native login expiry"
+      proof: 'grep: containment native login expiry rejects prose and refresh lock impostors in test/containment-native-credential-failure.test.ts'
+    - claim: "credential failures remain fail-closed and do not add a retry or a routing change"
+      proof: 'grep: containment native credential refusal never becomes a pass or retry in test/containment-native-credential-failure.test.ts'
+  falsifier: |
+    Remove native stderr propagation: the production-executor fixture fails. Match only the
+    newer access-token phrase: the saved-login fixture fails. Match combined assistant text:
+    the impersonation control fails. Convert any auth-dead probe into a pass or retry: the
+    existing refusal and bounded-attempt controls fail.
+  note: |
+    Reserved atomically from /home/craigoleyagent/rmd-mint on
+    codex/native-auth-regression-plan-1790986562399; refs/rmd-id/W1-T5390 is held.
+    Scope-time checks read prior run heads and 7,078 closed PRs; #1174, #1169 and #2833
+    carry the prior implementation credit. Seventeen actual open heads were compared with
+    current main, with a changed-head control, and no new native-expiry repair was found.
+    Primary reference: https://code.claude.com/docs/en/errors#login-expired
+    This filing contains one plan shard only and does not change runtime behavior.
