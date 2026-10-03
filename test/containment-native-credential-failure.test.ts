@@ -3,13 +3,26 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { assessWorkerSmoke, ContainmentError, defaultExecutor, probeContainment, runWorkerSmoke, type ProbeExecResult } from "../src/lib/containment.js";
+import { assessWorkerSmoke, ContainmentError, defaultExecutor, NATIVE_LOGIN_EXPIRED_RE, NATIVE_TOKEN_EXPIRED_RE, probeContainment, runWorkerSmoke, type ProbeExecResult } from "../src/lib/containment.js";
 import type { Config } from "../src/lib/config.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 
 const LOGIN = "Failed to authenticate: OAuth session expired and could not be refreshed";
 const TOKEN = "Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue";
 const CONTROL = "touch: ../native-probe.txt: Operation not permitted";
+
+test("native saved-login validator admits complete diagnostics and refuses partial or narrated copies", () => {
+  assert.equal(NATIVE_LOGIN_EXPIRED_RE.test(LOGIN), true);
+  assert.equal(NATIVE_LOGIN_EXPIRED_RE.test(`Example: ${LOGIN}`), false);
+  assert.equal(NATIVE_LOGIN_EXPIRED_RE.test("OAuth session expired"), false);
+});
+
+test("native token validator admits both complete token diagnostics and refuses other status codes", () => {
+  assert.equal(NATIVE_TOKEN_EXPIRED_RE.test(TOKEN), true);
+  assert.equal(NATIVE_TOKEN_EXPIRED_RE.test(TOKEN.replace("access token", "token")), true);
+  assert.equal(NATIVE_TOKEN_EXPIRED_RE.test(TOKEN.replace("401", "529")), false);
+  assert.equal(NATIVE_TOKEN_EXPIRED_RE.test(`Example: ${TOKEN}`), false);
+});
 
 function settings(root: string): string {
   const path = join(root, "worker.json");

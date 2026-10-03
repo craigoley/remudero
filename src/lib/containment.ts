@@ -862,8 +862,8 @@ const CREDENTIAL_EXPIRED_RE = /failed to authenticate/i;
 const CREDENTIAL_TOKEN_EXPIRED_RE = /oauth access token has expired/i;
 
 // Complete diagnostic lines only: quoted task prose and a transient shared refresh lock are not expiry.
-const NATIVE_LOGIN_EXPIRED_RE = /^Failed to authenticate: OAuth session expired and could not be refreshed[ \t]*\r?$/im;
-const NATIVE_TOKEN_EXPIRED_RE = /^Failed to authenticate\. API Error: 401 OAuth (?:access )?token has expired(?:\.[^\r\n]*)?[ \t]*\r?$/im;
+export const NATIVE_LOGIN_EXPIRED_RE = /^Failed to authenticate: OAuth session expired and could not be refreshed[ \t]*\r?$/im;
+export const NATIVE_TOKEN_EXPIRED_RE = /^Failed to authenticate\. API Error: 401 OAuth (?:access )?token has expired(?:\.[^\r\n]*)?[ \t]*\r?$/im;
 
 function credentialExpiry(r: ProbeExecResult): { source: "native-stderr" | "error-envelope"; kind: "saved-login" | "access-token" } | undefined {
   if (NATIVE_LOGIN_EXPIRED_RE.test(r.nativeStderr ?? "")) return { source: "native-stderr", kind: "saved-login" };
