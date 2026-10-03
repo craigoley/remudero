@@ -980,6 +980,7 @@ import { activateBenchmarkPaidPilot, benchmarkPaidPilotCommand } from "./lib/ben
 import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportView, runPairedTrial, sealedPairedAttemptDispatcher,
   type PairedTrialInput } from "./lib/paired-trial.js";
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
+import { benchmarkAaReadinessCommand, deriveRuntimePins, registryInstanceRoots, runBenchmarkAaReadiness } from "./lib/benchmark-aa-readiness.js";
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "./lib/self-forecast.js";
 import { auditLedgerUnion, readLedgerUnionRecordsSync } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
@@ -48795,9 +48796,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "benchmark-aa",
-    syntax: "rmd benchmark-aa --trial <manifest.json> [--state-dir <dir>] [--case-files <snapshot.json>] [--out <report.json>] [--no-cohort] [--json] | prospective register --trial <manifest.json> | prospective report --trial-id <id> [--out <report.json>] [--json] | prospective pause --trial-id <id> [--note <text>]",
+    syntax: "rmd benchmark-aa --trial <manifest.json> [--state-dir <dir>] [--case-files <snapshot.json>] [--out <report.json>] [--no-cohort] [--json] | prospective register --trial <manifest.json> | prospective report --trial-id <id> [--out <report.json>] [--json] | prospective pause --trial-id <id> [--note <text>] | readiness --trial-id <id> [--trial <manifest.json>] [--instance-root <name>=<state-dir>]... [--max-pairs <n>] [--out <receipt.json>] [--json]",
     summary: "Report an A/A integrity trial: two labels, one pinned stack, and no winner.",
-    detail: "W1-T4575: reads a public-fixture or explicitly opted-in trial manifest (benchmark-aa-trial-v1) naming one pinned stack (provider, model, effort, harness, prompt, tool, scorer and environment revisions), a strata revision and its tasks. Each task takes one of two labels by a sha256 draw over the trial and task ids, so a retry or a new run never moves it; non-starters and retries stay in the original arm. Reads the three-form ledger union and, unless --no-cohort, the benchmark-cohort-v1 projection, and reports the sample-ratio test against 50/50 (chi-square and exact binomial), assignment-to-terminal-to-verified-outcome joins, per-arm served-model and resource missingness, fallbacks and crossovers, outcome maturity and censoring, and the observed difference with a 95% interval. API cash estimates, subscription notional cost, invoices and unknown cost stay separate; unknown is never zero. It never declares a winner. It writes one dated private report with a privacy-safe benchmark-aa-receipt-v1 to --out (default <state-dir>/benchmark-aa-v1.<trial>.json); a refresh that cannot read its sources keeps that report and marks it stale. It changes no routing, blocks no dispatch, review or merge, and spends nothing. W1-T4647: `prospective register` records a manifest as a prospective A/A under <state-dir>/benchmark-aa-prospective/<trial>/; when normal dispatch admits one of its tasks, the daemon runs two sealed side attempts through the paired-trial seam, labelled with both labels in a seeded order and both on the manifest's one pinned stack, graded by the task's own proofs, never pushed, reviewed or merged, one pair at a time under the per-attempt cap. It is subscription only: an attempt whose billing resolves to api is refused before spawn and recorded, and cash is reported as zero observed. `prospective report` writes the same benchmark-aa-v1 report and receipt from the trial's own ledger, with each attempt as one unit and its graded outcome in place of the case-file join; `prospective pause` stops new pairs. Nothing is read, logged or spawned without a registered trial, and it never activates, resumes or reads the paid pilot.",
+    detail: "W1-T4575: reads a public-fixture or explicitly opted-in trial manifest (benchmark-aa-trial-v1) naming one pinned stack (provider, model, effort, harness, prompt, tool, scorer and environment revisions), a strata revision and its tasks. Each task takes one of two labels by a sha256 draw over the trial and task ids, so a retry or a new run never moves it; non-starters and retries stay in the original arm. Reads the three-form ledger union and, unless --no-cohort, the benchmark-cohort-v1 projection, and reports the sample-ratio test against 50/50 (chi-square and exact binomial), assignment-to-terminal-to-verified-outcome joins, per-arm served-model and resource missingness, fallbacks and crossovers, outcome maturity and censoring, and the observed difference with a 95% interval. API cash estimates, subscription notional cost, invoices and unknown cost stay separate; unknown is never zero. It never declares a winner. It writes one dated private report with a privacy-safe benchmark-aa-receipt-v1 to --out (default <state-dir>/benchmark-aa-v1.<trial>.json); a refresh that cannot read its sources keeps that report and marks it stale. It changes no routing, blocks no dispatch, review or merge, and spends nothing. W1-T4647: `prospective register` records a manifest as a prospective A/A under <state-dir>/benchmark-aa-prospective/<trial>/; when normal dispatch admits one of its tasks, the daemon runs two sealed side attempts through the paired-trial seam, labelled with both labels in a seeded order and both on the manifest's one pinned stack, graded by the task's own proofs, never pushed, reviewed or merged, one pair at a time under the per-attempt cap. It is subscription only: an attempt whose billing resolves to api is refused before spawn and recorded, and cash is reported as zero observed. `prospective report` writes the same benchmark-aa-v1 report and receipt from the trial's own ledger, with each attempt as one unit and its graded outcome in place of the case-file join; `prospective pause` stops new pairs. Nothing is read, logged or spawned without a registered trial, and it never activates, resumes or reads the paid pilot. W1-T5341: `readiness` runs a fresh prospective calibration: it reconciles the trial's registration across every live instance root in the fleet registry (or each --instance-root), refusing an unreadable root or a duplicate trial, derives harness, prompt, tool, scorer and environment pins from this process and refuses any unknown or drifting pin before dispatch, freezes the eligible population once with its denominator and refusals, then runs pending pairs in a seeded order through the same paired seam, never replaying a completed pair. It reports untriggered exclusions, per-arm per-stage missingness, observed cash apart from notional usage (unknown counted, never zero) and source completeness, writes the calibration receipt only when its integrity predicates pass, and otherwise names the next machine-repairable gap and files it once to <state-dir>/benchmark-aa-readiness.follow-ups.ndjson. Subscription only; it holds no dispatch, PR or daemon and never activates the paid pilot.",
   },
   {
     name: "benchmark-paid-pilot",
@@ -49676,6 +49677,19 @@ export function installUnhandledRejectionGuard(deps: UnhandledRejectionGuardDeps
   return true;
 }
 
+/** W1-T5341: the production seams of the fresh calibration driver — the plan's own tasks, the sealed subscription
+ *  dispatcher on the per-attempt cap, the fleet registry's instance roots, and pins derived from this process. */
+export function benchmarkAaReadinessRuntime(stateDir: string, workerAbandonMs?: number) {
+  const config = loadConfig();
+  return { config,
+    runtimePins: () => deriveRuntimePins({ harnessRevision: workerBoundaryStack.harnessRevision, installRoot: resolveInstallRoot(config) }),
+    loadPlanTasks: () => loadPlan(join(repoRoot, "plan", "tasks.yaml")).tasks,
+    dispatcherFor: (task: Task) => sealedPairedAttemptDispatcher({ task, config, repoDir: join(config.root, "repos", task.repo),
+      spawn: benchmarkNonDispatchSpawn("aa-prospective", spawnWorker), maxBudgetUsd: PAIRED_ATTEMPT_MAX_BUDGET_USD,
+      clockBoundMs: workerAbandonMs ?? loadDefaultPolicy().values.workerAbandon }),
+    defaultInstanceRoots: () => registryInstanceRoots(stateDir) };
+}
+
 /**
  * W1-T2893 — every verb's handler, keyed by the same name its COMMANDS entry (above) carries.
  * This IS the dispatch table `main()` used to encode as a 300-line flat if-ladder (`if (cmd ===
@@ -49800,6 +49814,8 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["routing-ab", async (rest) => await routingAbCommand(rest)],
   ["impossible-canary", async (rest) => await impossibleCanaryCommand(rest, (input) => runImpossibleCanary(input))],
   ["benchmark-aa", async (rest) => rest[0] === "prospective" ? await prospectiveAaCommand(rest.slice(1), (input) => runProspectiveAa(input))
+    : rest[0] === "readiness" ? await benchmarkAaReadinessCommand(rest.slice(1),
+      (request) => runBenchmarkAaReadiness({ ...benchmarkAaReadinessRuntime(request.stateDir), ...request }))
     : await benchmarkAaCommand(rest, (input) => buildBenchmarkAaReport(input))],
   ["benchmark-paid-pilot", async (rest) => await benchmarkPaidPilotCommand(rest, (input) => activateBenchmarkPaidPilot(input),
     { pairedReport: pairedPilotReportView })],
