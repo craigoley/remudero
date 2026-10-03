@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { RmdError } from "./errors.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { RepoLayout } from "./repo-layout.js";
 
 /** The plan/tasks.yaml loader and validator (schema v1, MASTER-PLAN §2), read-only — the control
@@ -180,7 +181,7 @@ export interface TaskPrecondition {
 }
 
 export interface TaskPreconditionOptions {
-  now?: () => number;
+  clock?: Clock;
   readPrecondition?: (args: string[]) => string;
 }
 
@@ -200,7 +201,7 @@ function validateNotBefore(value: unknown, id: string): string | undefined {
   if (typeof value !== "string" ||
       !/^\d{4}-\d{2}-\d{2}(?:T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,3})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d))?$/.test(value) ||
       !Number.isFinite(Date.parse(value)) ||
-      new Date(Date.parse(`${value.slice(0, 10)}T00:00:00Z`)).toISOString().slice(0, 10) !== value.slice(0, 10)) {
+      fixedClock(Date.parse(`${value.slice(0, 10)}T00:00:00Z`)).iso().slice(0, 10) !== value.slice(0, 10)) {
     throw new PlanError(`task ${id}: not_before must be a valid ISO date or timestamp with a timezone`);
   }
   return value;
@@ -242,7 +243,7 @@ export function unmetTaskPrecondition(task: Task, opts: TaskPreconditionOptions 
   if (task.not_before !== undefined) {
     try {
       validateNotBefore(task.not_before, task.id);
-      const now = (opts.now ?? Date.now)();
+      const now = (opts.clock ?? systemClock).now();
       if (!Number.isFinite(now)) throw new PlanError("precondition clock is not finite");
       if (now < Date.parse(task.not_before)) return { reason: "not-before", not_before: task.not_before };
     } catch (error) {

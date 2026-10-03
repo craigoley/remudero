@@ -1563,7 +1563,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     const currentPlanOnlyReceipts = planOnlyReceipts;
     const currentOrphanEvidence = orphanEvidence;
     const skipOpts: NextRunnableOpts = {
-      now: deps.now,
+      clock: deps.clock,
       readPrecondition: deps.readPrecondition,
       onPreconditionUnmet: (task, unmet) => log("dispatch.precondition_unmet", { task: task.id, ...unmet }),
       dispatchValueContext: deps.buildDispatchValueContext?.(plan, isMerged),
@@ -1966,7 +1966,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     const currentPlanOnlyReceipts = planOnlyReceipts;
     const currentOrphanEvidence = orphanEvidence;
     const skipOpts: NextRunnableOpts = {
-      now: deps.now,
+      clock: deps.clock,
       readPrecondition: deps.readPrecondition,
       onPreconditionUnmet: (task, unmet) => log("dispatch.precondition_unmet", { task: task.id, ...unmet }),
       dispatchValueContext: deps.buildDispatchValueContext?.(plan, isMerged),

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
+import { fixedClock } from "../src/lib/clock.js";
 import { loadPlanFromYaml, readTaskPrecondition, unmetTaskPrecondition, PRECONDITION_MAX_BYTES, PRECONDITION_TIMEOUT_MS, PlanError, type Plan } from "../src/lib/plan.js";
 import { nextRunnable, runnableCandidates, runDrain, type DrainDeps } from "../src/lib/drain.js";
 
@@ -28,13 +29,15 @@ function deps(events: Array<{ step: string; detail?: Record<string, unknown> }>,
 }
 
 test("W1-T4843: a task before its not_before date is skipped without a dispatch", async () => {
-  const future = new Date(Date.now() + 86_400_000).toISOString();
+  const clock = fixedClock(Date.parse("2026-10-01T00:00:00Z"));
+  const future = fixedClock(clock.now() + 86_400_000).iso();
   const subject = plan(`  not_before: ${future}`);
   assert.equal(subject.tasks[0].not_before, future);
   for (const options of [{}, { laneCount: 2 }, { curated: ["A"] }]) {
     const events: Array<{ step: string; detail?: Record<string, unknown> }> = [];
     const dispatched: string[] = [];
     const ports = deps(events, dispatched);
+    ports.clock = clock;
     ports.isCircuitTripped = () => { assert.fail("the breaker must not be consulted while waiting"); };
     const summary = await runDrain(subject, ports, { ...options, max: 1, headroomEnabled: false });
     assert.deepEqual(dispatched, []);
@@ -76,15 +79,15 @@ test("W1-T4843: the date boundary opens both selectors and does not read state e
   for (const date of ["2026-10-01", "2026-10-01T00:00:00Z", "2026-10-01T02:00:00+02:00"]) {
     const subject = plan(`  not_before: ${date}\n  precondition: { read: [status], expect: ready }`);
     let reads = 0;
-    const opts = { now: () => instant - 1, readPrecondition: () => { reads++; return "ready"; } };
+    const opts = { clock: fixedClock(instant - 1), readPrecondition: () => { reads++; return "ready"; } };
     assert.equal(nextRunnable(subject, () => false, opts), undefined);
     assert.deepEqual(runnableCandidates(subject, () => false, 2, opts), []);
     assert.equal(reads, 0);
-    opts.now = () => instant;
+    opts.clock = fixedClock(instant);
     assert.equal(nextRunnable(subject, () => false, opts)?.id, "A");
     assert.deepEqual(runnableCandidates(subject, () => false, 2, opts).map((t) => t.id), ["A"]);
     assert.equal(reads, 2);
-    opts.now = () => instant + 1;
+    opts.clock = fixedClock(instant + 1);
     assert.equal(nextRunnable(subject, () => false, opts)?.id, "A");
   }
 });
@@ -110,13 +113,13 @@ test("W1-T4843: a waiting task cannot starve another runnable task or be release
   const other = { ...subject.tasks[0], id: "B", files: ["src/b.ts"], not_before: undefined };
   subject.tasks.push(other);
   subject.byId.set("B", other);
-  assert.equal(nextRunnable(subject, () => false, { now: () => 0, releasedIds: new Set(["A"]) })?.id, "B");
-  assert.deepEqual(runnableCandidates(subject, () => false, 2, { now: () => 0 }).map((t) => t.id), ["B"]);
+  assert.equal(nextRunnable(subject, () => false, { clock: fixedClock(0), releasedIds: new Set(["A"]) })?.id, "B");
+  assert.deepEqual(runnableCandidates(subject, () => false, 2, { clock: fixedClock(0) }).map((t) => t.id), ["B"]);
   for (const laneCount of [1, 2]) {
     const events: Array<{ step: string; detail?: Record<string, unknown> }> = [];
     const dispatched: string[] = [];
     const ports = deps(events, dispatched);
-    ports.now = () => 0;
+    ports.clock = fixedClock(0);
     await runDrain(subject, ports, { laneCount, max: 1, headroomEnabled: false });
     assert.deepEqual(dispatched, ["B"]);
   }
@@ -124,7 +127,7 @@ test("W1-T4843: a waiting task cannot starve another runnable task or be release
 
 test("W1-T4843: fieldless tasks retain eligibility without a reader or clock call", () => {
   const subject = plan();
-  const opts = { now: () => { assert.fail("unused clock"); }, readPrecondition: () => { assert.fail("unused reader"); } };
+  const opts = { clock: { ...fixedClock(0), now: () => { assert.fail("unused clock"); } }, readPrecondition: () => { assert.fail("unused reader"); } };
   assert.equal(nextRunnable(subject, () => false, opts)?.id, "A");
   assert.deepEqual(runnableCandidates(subject, () => false, 1, opts).map((t) => t.id), ["A"]);
 });
@@ -164,7 +167,7 @@ test("W1-T4843: argument and expected-output bounds are enforced", () => {
 test("W1-T4843: invalid in-memory fields and unavailable reads have distinct outcomes", () => {
   const subject = plan().tasks[0];
   assert.equal(unmetTaskPrecondition({ ...subject, not_before: "tomorrow" })?.reason, "invalid-not-before");
-  assert.equal(unmetTaskPrecondition({ ...subject, not_before: "2026-10-01" }, { now: () => NaN })?.reason, "invalid-not-before");
+  assert.equal(unmetTaskPrecondition({ ...subject, not_before: "2026-10-01" }, { clock: fixedClock(NaN) })?.reason, "invalid-not-before");
   assert.equal(unmetTaskPrecondition({ ...subject, precondition: { read: ["drain"], expect: "ready" } })?.reason, "invalid-precondition");
   const readyTask = plan('  precondition: {read: [status], expect: ready}').tasks[0];
   for (const error of [new Error("command failed"), Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }), new Error("maxBuffer exceeded")]) {
