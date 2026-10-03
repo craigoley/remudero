@@ -7,8 +7,8 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 15.00
-  risk: medium
-  band_meaning: blast-radius
+  risk: high
+  band_meaning: span
   origin: "2026-10-03 approved follow-up; read-only core startup investigation"
   plan_refs: [W1-T5114, W1-T5361, W1-T5285]
   files: [src/lib/garden-registry.ts, src/run-task.ts, test/a-gardener-pass-never-runs-on-the-daemon-loop.test.ts, test/knowledge-garden-off-loop.test.ts]
@@ -69,5 +69,9 @@
     #8791 as an independent credit control. Fourteen actual open heads were compared with
     current main using changed-file controls. #8833 overlaps registry/wiring/test paths but
     excludes knowledge; #8829 changes daemon ticking, not knowledge construction.
+    Sizing was measured at medium first: lint-plan counted five concern stems including
+    the daemon call-site surface. The band records that shared production-wiring span;
+    splitting one missing registry lane into disconnected fixes would lose its falsifier.
+    This regrade adds no authority or approval requirement and weakens no runtime gate.
     This is one plan shard only, not an implementation or a claim of deployed improvement.
     Primary reference: https://nodejs.org/download/release/v22.22.3/docs/api/child_process.html
