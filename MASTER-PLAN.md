@@ -5923,11 +5923,17 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
 8B. The loop never waits on a human unless the plan says so. Idle = groom.
 9. OSS defaults must be defensible on a stranger's machine; yolo is a documented opt-in.
 10. This document is truth. Every session syncs it before acting and after shipping.
-11. **Isolation and containment are PROVEN PER RUN by probe, never assumed from configuration.** A
+11. **Isolation and containment are PROVEN by probe — once per boot and again on any change of the
+   probe's inputs — never assumed from configuration.** A
    setting that "should" isolate (ZDOTDIR, a sandbox block, a stripped env) is a hypothesis until a
-   preflight probe confirms it on THIS machine, THIS run — config that happens to work by accident of
+   preflight probe confirms it on THIS machine, for THIS image, harness and worker policy — config that
+   happens to work by accident of
    the host (PR #8: isolation held only because `~/.bashrc` was absent) must fail closed the moment the
-   accident ends. See FIELD FINDING 11, W1-T17.
+   accident ends. See FIELD FINDING 11, W1-T17. [operator ruling 2026-10-02, W1-T5346: a process
+   reuses a passing proof only while every input the probes read — image build sha, harness revision,
+   rendered worker settings, hook content, CLI version, provider — is unchanged (`probeVerdictKey`),
+   and ledgers each reuse with the proving run; a failed probe is never cached and holds every later
+   run until a probe passes.]
 12. **Supervision is deterministic; judgment is advisory. An LLM may RECOMMEND a halt; only code may
    ENFORCE one.** The flight judge and specialist panels (§4B) return verdicts a deterministic
    controller acts on; no LLM sits in the merge decision, and none edits code. See §4B, W1-T20/21/22,
