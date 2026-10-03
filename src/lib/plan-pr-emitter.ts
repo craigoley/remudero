@@ -518,9 +518,8 @@ function inTreeEnv(): NodeJS.ProcessEnv {
 const absentFromTree = (relPath: string): PlanPrPreflightReading => ({ status: null, output: `${relPath} is absent from the tree` });
 const taskIdReading = (r: PlanPrPreflightReading): PlanPrPreflightReading =>
   r.status === 1 && TASK_ID_UNREADABLE_RE.test(r.output) ? { ...r, status: null } : r;
-// A census run with no failing-test count is not a result (a load error exits 1 too).
 const shardCensusReading = (r: PlanPrPreflightReading): PlanPrPreflightReading =>
-  r.status === 1 && !/^# fail [1-9]/m.test(r.output) ? { ...r, status: null } : r;
+  r.status === 1 && !/^# fail [1-9]/m.test(r.output) ? { ...r, status: null } : r; // no `# fail N`: a load error, not a result
 
 /** Run a script the tree itself carries; a tree without it is a check that cannot run. */
 function runInTree(cwd: string, relPath: string, argv: string[]): PlanPrPreflightReading {
@@ -536,8 +535,7 @@ async function runChildAsync(file: string, args: string[], cwd: string, env?: No
     const r = await execFileAsync(file, args, { cwd, encoding: "utf8", maxBuffer: 1 << 26, env });
     return { status: 0, output: `${r.stdout}\n${r.stderr}` };
   } catch (e) {
-    // execFile rejects only on a non-zero exit (a numeric code) or a child that never exited cleanly
-    // (a signal, a spawn error, the buffer cap): the latter is spawnSync's null status, a check that could not run.
+    // A numeric code is a non-zero exit; a signal, spawn error or buffer cap is spawnSync's null (could not run).
     const err = e as { code?: unknown; stdout?: string; stderr?: string };
     return { status: typeof err.code === "number" ? err.code : null, output: `${err.stdout ?? ""}\n${err.stderr ?? ""}` };
   }
@@ -547,7 +545,7 @@ async function runInTreeAsync(cwd: string, relPath: string, argv: string[]): Pro
   return runChildAsync(process.execPath, argv, cwd, inTreeEnv());
 }
 
-/** The four checks that shell out, each run inside `cwd`; `checkProof` answers `rmd check-proof`'s exit status. */
+/** The four checks that shell out inside `cwd` (`checkProof` answers check-proof's exit), sync and awaited. */
 const defaultPreflightChecks = {
   lintPlan: (cwd: string): PlanPrPreflightReading => runInTree(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV),
   taskIdExistence: (cwd: string): PlanPrPreflightReading => taskIdReading(runInTree(cwd, TASK_ID_SCRIPT, TASK_ID_ARGV)),
@@ -556,14 +554,12 @@ const defaultPreflightChecks = {
 };
 /** A test's stand-ins for any of {@link defaultPreflightChecks}. */
 export type PlanPrPreflightChecks = Partial<typeof defaultPreflightChecks>;
-/** The same four checks as awaited child processes, so the daemon loop keeps turning while they run. */
 const defaultPreflightChecksAsync = {
   lintPlan: (cwd: string): Promise<PlanPrPreflightReading> => runInTreeAsync(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV),
   taskIdExistence: async (cwd: string): Promise<PlanPrPreflightReading> => taskIdReading(await runInTreeAsync(cwd, TASK_ID_SCRIPT, TASK_ID_ARGV)),
   shardCensus: async (cwd: string): Promise<PlanPrPreflightReading> => shardCensusReading(await runInTreeAsync(cwd, SHARD_CENSUS_TEST, SHARD_CENSUS_ARGV)),
   checkProof: async (cwd: string, proof: string): Promise<number | null> => (await runInTreeAsync(cwd, RUN_TASK_ENTRY, checkProofArgv(proof))).status,
 };
-/** A test's stand-ins for any of {@link defaultPreflightChecksAsync}. */
 export type PlanPrPreflightAsyncChecks = Partial<typeof defaultPreflightChecksAsync>;
 
 function firstLineOf(output: string, status: number | null): string {
@@ -590,7 +586,6 @@ function shardProofs(text: string): string[] {
   return proofs;
 }
 
-/** The proofs `headText` declares that `baseText` (the shard at origin/main, if it exists there) does not. */
 function introducedProofs(headText: string, baseText: string | undefined): string[] {
   const atBase = new Set(baseText === undefined ? [] : shardProofs(baseText));
   return shardProofs(headText).filter((p) => !atBase.has(p));
@@ -638,8 +633,7 @@ function discriminationReading(red: string[], unreadable: string[], shardProofLi
   return unreadable.length > 0 ? { status: null, output: unreadable.join("\n") } : { status: 0, output: "" };
 }
 
-/** A PR-body proof is red on any non-pass; a changed shard's proof only when it already passes at origin/main —
- *  a task filed before it is built fails its own proof at head by design. */
+/** A PR-body proof is red on any non-pass; a shard's only when it passes at origin/main (a filed task fails at head). */
 function proofDiscrimination(cwd: string, body: string, checkProof: (cwd: string, proof: string) => number | null): PlanPrPreflightReading {
   const red: string[] = [];
   const unreadable: string[] = [];
@@ -661,7 +655,6 @@ async function proofDiscriminationAsync(
   return discriminationReading(red, unreadable, shardProofList);
 }
 
-/** Sorts each check's reading into the verdict: 0 is green, 1 a failure, anything else a check that could not run. */
 function preflightTally() {
   const failures: PlanPrPreflightFinding[] = [];
   const unreadable: PlanPrPreflightFinding[] = [];
@@ -705,8 +698,7 @@ export function planPrPreflight(input: { cwd: string; title: string; body: strin
   return tally.result();
 }
 
-/** {@link planPrPreflight} with every check an awaited child process (W1-T5521): the same checks in the same
- *  order, the same verdict, and a daemon loop that keeps turning for the minutes they take. */
+/** {@link planPrPreflight} as awaited child processes (W1-T5521): the same checks, order and verdict, off the loop. */
 export async function planPrPreflightAsync(
   input: { cwd: string; title: string; body: string },
   checks: PlanPrPreflightAsyncChecks = {},
@@ -759,8 +751,7 @@ export function planPrPreflightAtCommit(repoDir: string, commitSha: string, pr: 
   }
 }
 
-/** {@link planPrPreflightAtCommit} for a daemon lane (the sweep's plan-PR rungs, W1-T5521): the worktree add, every
- *  check and the removal are awaited child processes, so a ~290 s preflight no longer freezes every daemon timer. */
+/** {@link planPrPreflightAtCommit} for a daemon lane (W1-T5521): the tree's add and removal are awaited too. */
 export async function planPrPreflightAtCommitAsync(
   repoDir: string,
   commitSha: string,
@@ -779,7 +770,6 @@ export async function planPrPreflightAtCommitAsync(
     borrowNodeModules(repoDir, tree);
     return await planPrPreflightAsync({ cwd: tree, ...pr }, checks);
   } finally {
-    // A failed removal is the sync form's ignored spawnSync status too: `rm` below still clears the tree.
     await runChildAsync("git", ["-C", repoDir, "worktree", "remove", "--force", tree], repoDir);
     await rm(parent, { recursive: true, force: true });
   }
