@@ -3,13 +3,10 @@ import { test } from "node:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  runSweep,
-  riskJudgeHandedOffHead,
-  type HandedOffHeadJudgment,
-  type OpenPrView,
-  type SweepDeps,
-} from "../src/lib/sweep.js";
+import { runSweep, type HandedOffHeadJudgment, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+// Read off the module namespace, never a named import: at a base without this task the suite must
+// still LOAD and fail subtest by subtest, which is what makes the proof discriminate.
+import * as sweepModule from "../src/lib/sweep.js";
 import type { RiskJudgeVerdict } from "../src/lib/risk-judge.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import type { Plan, Task } from "../src/lib/plan.js";
@@ -95,7 +92,7 @@ function harness(
       now: () => NOW,
       readLedger: () => lines,
       log,
-      judgeHandedOffHead: riskJudgeHandedOffHead((pr) => ({
+      judgeHandedOffHead: sweepModule.riskJudgeHandedOffHead((pr) => ({
         input: { change: { description: `${TASK} — ${pr.prUrl}` }, gatesState: {}, planContext: { taskId: pr.taskId } },
         orchestrator: {
           judge: async () => {
