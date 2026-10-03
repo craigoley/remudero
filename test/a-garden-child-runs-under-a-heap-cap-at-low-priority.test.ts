@@ -42,7 +42,7 @@ test("a garden child is spawned with a heap cap that overrides any inherited one
   const { out, log } = rows();
   const spawnPass = registry.childGardenPassSpawn({
     execPath: process.execPath,
-    execArgv: ["--max-old-space-size=4096"],
+    execArgv: ["--max-old-space-size=8192"],
     entry,
     env: { ...process.env, GARDEN_PROBE_OUT: probe },
     setPriority: (pid, priority) => void priorities.push([pid, priority]),
@@ -53,7 +53,8 @@ test("a garden child is spawned with a heap cap that overrides any inherited one
   const seen = JSON.parse(readFileSync(probe, "utf8")) as { pid: number; execArgv: string[]; args: string[]; heapLimit: number };
   const capFlag = `--max-old-space-size=${registry.GARDEN_CHILD_HEAP_LIMIT_MB}`;
   assert.equal(seen.execArgv.at(-1), capFlag, "the cap comes after the inherited flags, so it wins");
-  assert.ok(seen.heapLimit / 1048576 < 4096, `the child's own heap limit is the cap, not the inherited 4096 MB (${seen.heapLimit})`);
+  assert.ok(seen.heapLimit / 1048576 < 8192, `the child's own heap limit is the cap, not the inherited 8192 MB (${seen.heapLimit})`);
+  assert.ok(registry.GARDEN_CHILD_HEAP_LIMIT_MB < 8192, "the inherited value in this test must sit above the cap to discriminate");
   assert.deepEqual(seen.args, ["garden", "run", "plan"]);
   assert.deepEqual(priorities, [[seen.pid, registry.GARDEN_CHILD_NICENESS]], "the child's own pid is niced");
   assert.ok(registry.GARDEN_CHILD_NICENESS > 0, "niceness lowers priority");
