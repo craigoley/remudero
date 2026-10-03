@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 // @ts-expect-error The exercised script is a plain .mjs without a declaration file.
 import * as local from "../scripts/diff-coverage-local.mjs";
+import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const FIXTURES = join(REPO_ROOT, "test", "fixtures", "diff-coverage");
@@ -39,7 +40,7 @@ function lcovDestinationIn(nodeArgs: string[]): string | undefined {
 
 /** A fresh directory OUTSIDE the repo, removed after `fn`. */
 function withOutsideDir(fn: (dir: string) => void) {
-  const dir = mkdtempSync(join(tmpdir(), "w1-t5485-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t5485-`));
   try {
     fn(dir);
   } finally {
