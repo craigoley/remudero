@@ -5014,6 +5014,8 @@ export interface MainHealthPullRequestRef {
 
 export interface MainHealthRunHistoryEntry {
   readonly headSha: string;
+  readonly workflowName?: string;
+  readonly runId?: number;
   readonly conclusion?: string;
   readonly url?: string;
   readonly pullRequests?: readonly MainHealthPullRequestRef[];
@@ -6086,6 +6088,8 @@ export interface MainLatestRun {
   sha: string;
   state: string;
   failingChecks: readonly string[];
+  /** Absent on legacy rows: absence of a name is evidence only when the observer supplied its census. */
+  observedChecks?: readonly string[];
 }
 
 export function mainLatestRunFromLedger(lines: readonly Record<string, unknown>[]): MainLatestRun | undefined {
@@ -6093,7 +6097,12 @@ export function mainLatestRunFromLedger(lines: readonly Record<string, unknown>[
   for (const line of lines) {
     if (line.step !== "main.health.observed" || typeof line.sha !== "string" || typeof line.state !== "string") continue;
     const failing = Array.isArray(line.failing_checks) ? line.failing_checks.filter((n): n is string => typeof n === "string") : [];
-    latest = { sha: line.sha, state: line.state, failingChecks: failing };
+    latest = {
+      sha: line.sha, state: line.state, failingChecks: failing,
+      ...(Array.isArray(line.observed_checks)
+        ? { observedChecks: line.observed_checks.filter((n): n is string => typeof n === "string") }
+        : {}),
+    };
   }
   return latest;
 }
@@ -6130,6 +6139,12 @@ export function decideBaseRed(
 ): BaseRedDecision {
   if (!isBlockedCi(pr)) return { kind: "own" };
   const names = (pr.ciFailures ?? []).map((failure) => failure.name);
+  if (main?.state === "red" && main.observedChecks !== undefined) {
+    // A known passing check is this diff's red, even beside an inherited failure.
+    if (names.some((name) => main.observedChecks!.includes(name) && !main.failingChecks.includes(name))) return { kind: "own" };
+    const absent = names.find((name) => !main.observedChecks!.includes(name));
+    if (absent !== undefined) return { kind: "wait", check: absent };
+  }
   const shared = main?.state === "red" ? names.find((name) => main.failingChecks.includes(name)) : undefined;
   if (shared !== undefined) return { kind: "wait", check: shared };
   const key = `${pr.prNumber}@${pr.headSha}`;
@@ -11480,13 +11495,15 @@ export async function runSweep(
                     outcome = `error: ${String((e as Error)?.message ?? e)}`;
                   }
                   appendLine(deps.ledgerPath, { ...row, step: BASE_RED_REFRESH_STEP, outcome });
-                  standDownReason = `base red: ${baseRed.check} failed on main too; main is green at ${mainSha}, so the branch refresh was requested (${outcome}) — no fix dispatched`;
+                  standDownReason = `base red: ${baseRed.check} was held while main was red; main is green at ${mainSha}, so the branch refresh was requested (${outcome}) — no fix dispatched`;
                   break;
                 }
                 if (!baseRedHistory.stoodDown.has(`${pr.prNumber}@${pr.headSha}`)) appendLine(deps.ledgerPath, { ...row, step: BASE_RED_STOOD_DOWN_STEP });
                 standDownReason = baseRed.kind === "refresh"
-                  ? `base red: ${baseRed.check} failed on main too; main is green, but this pass's one branch refresh is spent or unwired — no fix dispatched`
-                  : `base red: ${baseRed.check} also fails on main's latest run (${mainSha}) — not this diff's; no fix dispatched, the branch refreshes once main is green`;
+                  ? `base red: ${baseRed.check} was held while main was red; main is green, but this pass's one branch refresh is spent or unwired — no fix dispatched`
+                  : mainLatestRun?.state === "red" && mainLatestRun.observedChecks !== undefined && !mainLatestRun.observedChecks.includes(baseRed.check)
+                    ? `base red: ${baseRed.check} is absent from main's latest run (${mainSha}), and main is red — no fix dispatched, the branch refreshes once main is green`
+                    : `base red: ${baseRed.check} also fails on main's latest run (${mainSha}) — not this diff's; no fix dispatched, the branch refreshes once main is green`;
                 break;
               }
               // W1-T4586 — A LIVE RUN FOR THIS HEAD SUPERSEDES ITS RED. Runs on one head share the
