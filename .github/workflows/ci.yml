@@ -936,7 +936,11 @@ jobs:
       - name: rule-checks population (tree-derived census and ratchet suites, without coverage)
         id: rule-checks
         continue-on-error: true
-        run: node --import tsx scripts/list-rule-suites.mjs --run
+        run: |
+          # W1-T5368: tee the report so a red census suite titles the commitlint check by its own gate.
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/gate-reports"
+          node --import tsx scripts/list-rule-suites.mjs --run 2>&1 | tee "$RUNNER_TEMP/gate-reports/rule-checks.log"
 
       - name: commitlint (the PR title — read LIVE via `gh pr view`, not the opened-event payload snapshot)
         id: commitlint
@@ -1157,7 +1161,7 @@ jobs:
             done
             echo "W1-T4399: reported ${check_name} = ${conclusion} (step outcome(s): $*); title: ${title}"
           }
-          report "commitlint" "${OUTCOME_COMMITLINT}" "${OUTCOME_RULE_CHECKS}"
+          report "commitlint" "commitlint=${OUTCOME_COMMITLINT}" "rule-checks=${OUTCOME_RULE_CHECKS}"
           report "leak-grep" "${OUTCOME_LEAK_GREP}"
           report "learnings-budget-ratchet" "learnings-budget-ratchet=${OUTCOME_LEARNINGS_BUDGET_RATCHET}" "claude-md-budget-ratchet=${OUTCOME_CLAUDE_MD_BUDGET_RATCHET}"
           report "jscpd-gate" "${OUTCOME_JSCPD_GATE}"
