@@ -372,12 +372,12 @@ function recordReceipt(path: string, receipt: IntentReceipt): IntentReceipt {
 }
 
 /** Drop a claim whose write was refused before any side effect; the reason is returned when it cannot be dropped. */
-function releaseReceipt(path: string): string | undefined {
+function releaseReceipt(path: string): { released: true } | { reason: string } {
   try {
     unlinkSync(path);
-    return undefined;
+    return { released: true };
   } catch (error) {
-    return `the refused intent stays claimed: ${String((error as NodeJS.ErrnoException).code ?? error)}`;
+    return { reason: `the refused intent stays claimed: ${String((error as NodeJS.ErrnoException).code ?? error)}` };
   }
 }
 
@@ -411,7 +411,7 @@ async function deliver(
   if (!ok && !unknownDelivery) {
     // Refused before any side effect (not found, ahead of the thread, invalid): nothing to replay.
     const released = releaseReceipt(path);
-    return { status: captured.status, body: released === undefined ? body : { ...body, receiptError: released } };
+    return { status: captured.status, body: "reason" in released ? { ...body, receiptError: released.reason } : body };
   }
   const settled: IntentReceipt = ok ? { ...pending, status: "settled", httpStatus: captured.status, body } : { ...pending, status: "unknown" };
   return { status: captured.status, body: { ...body, receipt: receiptView(recordReceipt(path, settled)) } };
