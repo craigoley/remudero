@@ -12,6 +12,8 @@ marker="${6:?entry marker required}"
 engine="${7:?engine checkout required}"
 mode="${8:-full}"
 engine_base_sha="${9:-}"
+# Runtime helpers still use arg 7; the host supervisor advances this separate checkout.
+engine_observer="${10-$engine}"
 [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || exit 2
 [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]] || exit 2
 [[ "$since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.000Z$ ]] || exit 2
@@ -32,14 +34,15 @@ engine_wake() {
 }
 
 # The recycler waits for fresh running code. Quiet mode must therefore observe its
-# own engine, even when the target repo is unchanged. Legacy callers without a
+# installed engine, even when the runtime and target checkouts are unchanged.
+# Legacy callers without a
 # captured launch revision wake once to regain the ordinary freshness path.
 if ! [[ "$engine_base_sha" =~ ^[0-9a-f]{40}$ ]]; then
   engine_wake engine_baseline_unavailable
   exit 2
 fi
 engine_head=""
-if ! engine_head="$(run_bounded git -C "$engine" rev-parse --verify HEAD 2>/dev/null)" || ! [[ "$engine_head" =~ ^[0-9a-f]{40}$ ]]; then
+if [ -z "$engine_observer" ] || ! engine_head="$(run_bounded git -C "$engine_observer" rev-parse --verify HEAD 2>/dev/null)" || ! [[ "$engine_head" =~ ^[0-9a-f]{40}$ ]]; then
   engine_wake engine_head_unavailable
   exit 2
 fi

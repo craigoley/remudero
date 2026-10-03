@@ -586,7 +586,7 @@ idle_starved_wait() {
       probe_mode=pr-board
       if [ "$i" -eq 6 ]; then probe_mode=full; fi
       probe_rc=0
-      bash "$TREE/deploy/idle-starved-probe.sh" "$slug" "$checkout" "$base_sha" "$CONFIG_ROOT/state" "$since" "$marker" "$TREE" "$probe_mode" "$daemon_engine_sha" &
+      bash "$TREE/deploy/idle-starved-probe.sh" "$slug" "$checkout" "$base_sha" "$CONFIG_ROOT/state" "$since" "$marker" "$TREE" "$probe_mode" "$daemon_engine_sha" "$daemon_engine_observer" &
       child_pid=$!
       wait "$child_pid" || probe_rc=$?
       child_pid=""
@@ -621,6 +621,12 @@ while :; do
     # Capture before the daemon loads code, not after it exits into quiet mode:
     # a mounted checkout can advance during that run without refreshing the process.
     daemon_engine_sha="$(git -C "$TREE" rev-parse --verify HEAD 2>/dev/null)" || daemon_engine_sha=""
+    daemon_engine_observer="$TREE"
+    # The host supervisor installs into daemon-install; Node runs the separate TREE.
+    # A declared but broken installation must remain an unreadable observation.
+    if [ -e "$CONFIG_ROOT/daemon-install" ] || [ -L "$CONFIG_ROOT/daemon-install" ]; then
+      daemon_engine_observer="$CONFIG_ROOT/daemon-install"
+    fi
   fi
   "$@" &
   child_pid=$!
