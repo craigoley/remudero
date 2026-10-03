@@ -154,7 +154,6 @@ export interface LandFeedbackOpts {
   sourceRepository?: LandingRepository;
   requestReview?: LandingReviewRequest;
   log?: (step: string, extra?: Record<string, unknown>) => void;
-  /** W1-T5348: the plan-PR preflight over the commit about to be pushed; omitted, {@link planPrPreflightAtCommit}. */
   planPrPreflight?: (commitSha: string, pr: { title: string; body: string }) => PlanPrPreflightResult;
 }
 
@@ -289,7 +288,6 @@ interface LandingKind {
   targetRepository?: LandingRepository;
   landingOwner?: string;
   commitMessage: (unlanded: string[]) => string;
-  /** `content` is the base/head bytes {@link landingProof} reads; omitted, every proof is the template's own. */
   prBody: (unlanded: string[], content?: LandingContent) => string;
 }
 
@@ -358,33 +356,17 @@ export function isLandingRef(ref: string): boolean {
   return LEGACY_LANDING_REFS.has(ref) || SCOPED_LANDING_REF.test(ref);
 }
 
-/** The bytes a landing PR's proofs are judged against: `base` at the commit the landing is parented on (the PR's
- *  merge-base), `head` in the tree being pushed. `undefined` means the path is not in that tree. */
 export interface LandingContent {
   base: (path: string) => string | undefined;
   head: (path: string) => string | undefined;
 }
 
-/** Longest line a {@link discriminatingLandingProof} anchors on — a record's wrapped `raw:` prose is not a proof. */
 const LANDING_PROOF_LINE_MAX = 160;
-/**
- * W1-T5348: a `grep:` proof naming one physical line the PUSHED bytes of `path` hold and its BASE bytes do not, so it
- * passes at head and misses the merge-base — the discrimination CI's proof gate and {@link planPrPreflight} require.
- * Every metacharacter is a one-character bracket (`[.]`), which basic and extended engines both read as the literal,
- * and the line is anchored whole (`^…$`) so a longer base line holding it cannot match. A lifecycle line
- * (`status:`/`retirement:`) is preferred; otherwise the first such line in file order. `undefined` when the path is new
- * (absent at base: the template's own proof already misses there) or when no line of the change qualifies — a pure
- * deletion, or every changed line also present elsewhere at base — and the caller keeps the template proof, which the
- * preflight then judges by name rather than this function guessing.
- */
+/** W1-T5348: `grep: ^<line>$`, a line only the pushed bytes hold, `[.]`-bracketed; undefined: new path or none. */
 export function discriminatingLandingProof(path: string, content: LandingContent): string | undefined {
   const base = content.base(path);
   const head = content.head(path);
   if (base === undefined || head === undefined) return undefined;
-  // A lifecycle line is the change a status landing exists to make, so it is named first. A line holding a character
-  // a basic and an extended regex read differently, or the proof grammar could misparse, is never a candidate: `\`
-  // and `^` cannot be bracketed portably, and a bracket of a bracket is unreadable. Both arms are driven by
-  // test/a-machine-lane-never-opens-a-plan-pr-that-is-already-red.test.ts through this function.
   const lifecycleLine = /^\s*(?:status|retirement):\s/;
   const unportable = /[\\^[\]\t\x00-\x08\x0b-\x1f\x7f]/;
   const baseLines = new Set(base.split("\n"));
@@ -396,8 +378,6 @@ export function discriminatingLandingProof(path: string, content: LandingContent
   return `grep: ^${line.replace(/[.*$+?(){}|]/g, (c) => `[${c}]`)}$ in ${path}`;
 }
 
-/** A landing criterion's proof: {@link discriminatingLandingProof} for a path this landing CHANGES, else `template` —
- *  a NEW path's template proof already misses at base, which every family's template was written for. */
 function landingProof(path: string, template: string, content: LandingContent | undefined): string {
   return (content && discriminatingLandingProof(path, content)) ?? template;
 }
@@ -743,15 +723,12 @@ function stageBranchPending(git: GitExec, kind: LandingKind, files: string[], en
   }
 }
 
-/** {@link LandingContent} over one build: `base` reads the commit the landing is parented on, `head` the tree it pushes.
- *  A path a tree does not hold reads `undefined`, and so does an unreadable object — either way the criterion keeps its
- *  template proof, which the preflight judges by name, so an unreadable read can only refuse, never pass silently. */
 function landingTreeContent(git: GitExec, b: Pick<LandingTreeBuild, "mainSha" | "treeSha">): LandingContent {
   const at = (rev: string) => (path: string): string | undefined => {
     try {
       return git(["cat-file", "-p", `${rev}:${path}`]);
     } catch {
-      // Absent and unreadable both keep the template proof, which the preflight judges by name — see the doc above.
+      // Absent or unreadable: the template proof stands, and the preflight judges it by name.
       return undefined;
     }
   };
@@ -780,10 +757,6 @@ function ensurePrOpen(
 ): { prUrl?: string; error?: string } {
   const existing = findPendingLandingPr({ gh, identity: kind });
   if (existing) {
-    // W1-T5348: a push onto an open PR rewrites its body to the one the preflight just judged — a body naming the
-    // record's previous line would otherwise fail at the new head once that record moves again. REST PATCH, never
-    // `gh pr edit`, whose GraphQL query fails before the edit lands (W1-T2948's `prBodyRestArgs`).
-    // A failed refresh is surfaced on `error`, and the review handoff below still runs: the push already landed.
     let refreshError: string | undefined;
     if (refreshBody) {
       try {
@@ -879,8 +852,6 @@ function finishLanding(
   // for unchanged content but `commit-tree` stamps the time, so comparing commits instead
   // force-pushed every call and once deadlocked a PR's CI (racing cancellations, no settled sha).
   // Why: docs/forensics/feedback-landing.md#finishlanding_shortcircuit.
-  // W1-T5348: the body's proofs read this build's own base and pushed bytes, so a CHANGED record names a line only
-  // its new state holds; the same text is what the preflight judges and what the PR carries.
   const bodyOf = (b: LandingTreeBuild): string => kind.prBody(b.unlanded, landingTreeContent(git, b));
   if (remoteBranchTree(git, kind.branch) === build.treeSha) {
     const { prUrl, error } = ensurePrOpen(kind, gh, bodyOf(build), requestReview);
@@ -910,7 +881,6 @@ function finishLanding(
     // value the union above was read against. The #954 guard below must move WITH this call on
     // any future refactor — dropping it silently reopens the hole #954 closed.
     assertLiveWriteAllowed("git-push", `force-pushing the ${kind.branch} branch`);
-    // W1-T5348: preflight this commit's own tree (HEAD is not it); a tree refused once is not re-checked each poll.
     const preflight = opts.planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommit(root, sha, pr));
     const verdict = refusedPlanPrTrees.get(b.treeSha) ?? preflight(commitSha, { title: kind.prTitle, body: bodyOf(b) });
     if (!verdict.ok) refusedPlanPrTrees.set(b.treeSha, verdict);

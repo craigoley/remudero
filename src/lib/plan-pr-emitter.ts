@@ -535,8 +535,6 @@ function firstLineOf(output: string, status: number | null): string {
   return lines.find((l) => diagnosticLine.test(l)) ?? lines[0] ?? `exited ${status}`;
 }
 
-/** Every acceptance proof one shard's YAML text declares; an unparseable shard declares none here — the plan lint
- *  refuses it by name. */
 function shardProofs(text: string): string[] {
   let tasks: unknown;
   try {
@@ -555,9 +553,8 @@ function shardProofs(text: string): string[] {
   return proofs;
 }
 
-/** The acceptance proofs this tree INTRODUCES in the task shards it adds or changes against origin/main; undefined when
- *  unreadable. A proof the base shard already declares is not this PR's to discriminate: a status edit to a MERGED
- *  task (plan-reconcile, a gardener's field fix) leaves proofs that pass at base by construction — the task shipped. */
+/** Proofs this tree INTRODUCES in changed task shards (undefined when unreadable): a MERGED task's own proofs pass at
+ *  base by construction, so a status edit to its shard (plan-reconcile) is not this PR's to discriminate. */
 function changedShardProofs(cwd: string): string[] | undefined {
   const diff = spawnSync("git", ["diff", "--name-only", "--diff-filter=AM", "origin/main...HEAD", "--", PLAN_TASK_SHARD_PREFIX], { cwd, encoding: "utf8" });
   if (diff.status !== 0) return undefined;
