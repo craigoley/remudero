@@ -1695,7 +1695,6 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     fixRungCheckoutRefusedErrorImpl: FixRungCheckoutRefusedError = requiredSweepRuntimeCtor("fixRungCheckoutRefusedErrorImpl"),
     defaultBudgetUsd = 100,
     buildPlanPrBodyImpl = buildPlanPrBody,
-    planRepairReserveIdImpl = reservePlanRepairTaskId,
     updatePrBodyImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["updatePrBodyImpl"]>>("updatePrBodyImpl"),
   } = deps;
 
@@ -3555,17 +3554,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         if (decision.jobId) ghJsonForBuild(["api", "-X", "POST", `repos/${owner}/${repo}/actions/jobs/${decision.jobId}/rerun`]);
         return { outcome: "retitled" };
       }
-      return renumberPlanPrIds(pr, decision.heldIds, decision.title, {
-        repoDir,
-        worktreePath: join(worktreesDir(config), `plan-renumber-${pr.prNumber}-${nowMsImpl()}`),
-        git: (cwd, args) => planRepairGit("git", ["-C", cwd, ...args]),
-        worktreeAdd: (dir, path, branch, base) => worktreeAddForBuild(dir, path, branch, base, { log }),
-        worktreeRemove: worktreeRemoveForBuild,
-        reserveId: planRepairReserveIdImpl,
-        updatePr: (_n, patch) => {
-          ghJsonForBuild(["api", "-X", "PATCH", pulls, ...Object.entries(patch).flatMap(([k, v]) => ["-f", `${k}=${v}`])]);
-        },
-      });
+      // The renumber runs through this build's own deps — the seams the shard-repair rung above uses.
+      const worktreePath = join(worktreesDir(config), `plan-renumber-${pr.prNumber}-${nowMsImpl()}`);
+      return renumberPlanPrIds(pr, decision.heldIds, decision.title, repoDir, worktreePath, deps);
     },
   };
 }
@@ -6139,8 +6130,9 @@ export const PLAN_REPAIR_STEP = "sweep.plan_repair";
 
 /** The heads machine lanes file plan PRs from: gardeners (`<name>-garden-<epochMs>`, the names
  *  run-task.ts's GARDEN_NAMES registers), the landing branches, and the TRIAGE/APPROVE/RETRO runs.
- *  A session's head (`run-unfiled-*`, `run-W1-T*`, `codex/*`) never matches, whoever pushed it. */
-const MACHINE_LANE_HEAD_RE = new RegExp(
+ *  A session's head (`run-unfiled-*`, `run-W1-T*`, `codex/*`) never matches, whoever pushed it.
+ *  Exported so a fixture drives its refusing arm directly (W1-T2317's negative-reachability ratchet). */
+export const MACHINE_LANE_HEAD_RE = new RegExp(
   "^(?:(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource)-garden-\\d+" +
     "|(?:feedback|decisions|plan-reconcile|ci-learning)-landing(?:-[a-z0-9-]+)?" +
     "|run-(?:TRIAGE|APPROVE)-.+|run-RETRO(?:-.+)?)$",
@@ -6172,7 +6164,8 @@ export interface PlanRepairOutcome {
   newHeadSha?: string;
 }
 
-const HELD_ID_HEADER_RE =
+/** A task-id-existence header naming held ids; exported so a fixture drives both arms (W1-T2317). */
+export const HELD_ID_HEADER_RE =
   /task-id-existence: FAILED -- the following (?:added )?id\(s\) are (?:HELD by a different reservation holder|ALREADY DECLARED|ALREADY CLAIMED by another OPEN PR)/;
 
 /** The ids task-id-existence's held, collision and open-PR sections list, read from any failing
@@ -6267,17 +6260,6 @@ export function decidePlanRepair(
   return staleBase ? { signature: "base-red", action: "refresh", check, cause: "stale-base" } : undefined;
 }
 
-export interface PlanRenumberDeps {
-  repoDir: string;
-  worktreePath: string;
-  git: (cwd: string, args: readonly string[]) => string;
-  worktreeAdd: (repoDir: string, worktreePath: string, branch: string, base: string) => void;
-  worktreeRemove: (repoDir: string, worktreePath: string) => void;
-  /** Mints through the allocator and reserves with `filingBranch` as holder — never a picked id. */
-  reserveId: (worktreePath: string, filingBranch: string) => string;
-  updatePr: (prNumber: number, patch: { title?: string; body?: string }) => void | Promise<void>;
-}
-
 /** Signature (a)'s cure on the lane's OWN branch: each held id the PR's ADDED plan files declare
  *  exactly once is re-minted, the shard renamed, every self-reference in those files, the title
  *  and the body rewritten, and the commit pushed with a lease on the head the sweep observed. */
@@ -6285,47 +6267,67 @@ export async function renumberPlanPrIds(
   pr: OpenPrView,
   heldIds: readonly string[],
   title: string | undefined,
-  deps: PlanRenumberDeps,
+  repoDir: string,
+  wt: string,
+  deps: Pick<
+    BuildSweepEffectsDeps,
+    "owner" | "repo" | "log" | "planRepairGitImpl" | "worktreeAddImpl" | "worktreeRemoveImpl" | "planRepairReserveIdImpl" | "ghJsonImpl"
+  >,
 ): Promise<PlanRepairOutcome> {
+  // The build's OWN plan-repair seams (W1-T3390's shard-repair rung cuts its worktree and runs its
+  // git through the same members), defaulting as `buildSweepEffects` does — no seam shape of its own.
+  const {
+    owner,
+    repo,
+    log,
+    planRepairGitImpl: run = defaultPlanRepairGit,
+    worktreeAddImpl: add = worktreeAdd,
+    worktreeRemoveImpl: remove = worktreeRemove,
+    planRepairReserveIdImpl: reserveId = reservePlanRepairTaskId,
+    ghJsonImpl: ghApi = ghJson,
+  } = deps;
+  const git = (cwd: string, args: readonly string[]): string => run("git", ["-C", cwd, ...args]);
   const branch = pr.headRefName;
   if (!branch) return { outcome: "error", reason: "the PR has no head ref" };
-  const wt = deps.worktreePath;
   let cut = false;
   try {
-    deps.worktreeAdd(deps.repoDir, wt, `plan-renumber-${pr.prNumber}-${pr.headSha.slice(0, 12)}`, `origin/${branch}`);
+    add(repoDir, wt, `plan-renumber-${pr.prNumber}-${pr.headSha.slice(0, 12)}`, `origin/${branch}`, { log });
     cut = true;
-    const observed = deps.git(wt, ["rev-parse", "HEAD"]).trim();
+    const observed = git(wt, ["rev-parse", "HEAD"]).trim();
     if (observed !== pr.headSha) return { outcome: "lease-mismatch", reason: `origin/${branch} is ${observed}, not ${pr.headSha}` };
-    const added = deps.git(wt, ["diff", "--name-only", "--diff-filter=A", "origin/main...HEAD", "--", "plan/"]).split("\n").filter(Boolean);
+    const added = git(wt, ["diff", "--name-only", "--diff-filter=A", "origin/main...HEAD", "--", "plan/"]).split("\n").filter(Boolean);
     const texts = new Map(added.map((rel) => [rel, readFileSync(join(wt, rel), "utf8")]));
     for (const id of heldIds) {
       const declaring = [...texts.values()].filter((t) => new RegExp(`^\\s*-?\\s*id:\\s*${id}\\s*$`, "m").test(t));
       if (declaring.length !== 1) return { outcome: "not-declared", reason: `${id} is not declared by exactly one plan file this PR adds` };
     }
-    const renames = new Map(heldIds.map((id) => [id, deps.reserveId(wt, branch)]));
+    const renames = new Map(heldIds.map((id) => [id, reserveId(wt, branch)]));
     for (const [rel, text] of texts) {
       writeFileSync(join(wt, rel), rewriteTaskIds(text, renames));
       const renamed = rewriteTaskIds(rel, renames);
-      if (renamed !== rel) deps.git(wt, ["mv", rel, renamed]);
+      if (renamed !== rel) git(wt, ["mv", rel, renamed]);
     }
     const summary = [...renames].map(([from, to]) => `${from} to ${to}`).join(", ");
-    deps.git(wt, ["add", "-A", "--", "plan/"]);
-    deps.git(wt, ["commit", "-m", `chore(plan): renumber ${summary}, held by another reservation\n\nW1-T5349 sweep plan repair.`]);
-    const newHeadSha = deps.git(wt, ["rev-parse", "HEAD"]).trim();
+    git(wt, ["add", "-A", "--", "plan/"]);
+    git(wt, ["commit", "-m", `chore(plan): renumber ${summary}, held by another reservation\n\nW1-T5349 sweep plan repair.`]);
+    const newHeadSha = git(wt, ["rev-parse", "HEAD"]).trim();
     assertLiveWriteAllowed("git-push", `renumbering ${summary} on ${branch} for PR #${pr.prNumber}`);
-    deps.git(wt, ["push", `--force-with-lease=refs/heads/${branch}:${pr.headSha}`, "origin", `HEAD:refs/heads/${branch}`]);
+    git(wt, ["push", `--force-with-lease=refs/heads/${branch}:${pr.headSha}`, "origin", `HEAD:refs/heads/${branch}`]);
     const patch = {
       ...(title !== undefined ? { title: rewriteTaskIds(title, renames) } : {}),
       ...(pr.body !== undefined ? { body: rewriteTaskIds(pr.body, renames) } : {}),
     };
-    if (Object.keys(patch).length > 0) await deps.updatePr(pr.prNumber, patch);
+    if (Object.keys(patch).length > 0) {
+      const fields = Object.entries(patch).flatMap(([k, v]) => ["-f", `${k}=${v}`]);
+      ghApi(["api", "-X", "PATCH", `repos/${owner}/${repo}/pulls/${pr.prNumber}`, ...fields]);
+    }
     return { outcome: "renumbered", renames: Object.fromEntries(renames), newHeadSha };
   } catch (error) {
     return { outcome: "error", reason: capStderrExcerpt(spawnFailureText(error), STDERR_EXCERPT_CAP) };
   } finally {
     if (cut) {
       try {
-        deps.worktreeRemove(deps.repoDir, wt);
+        remove(repoDir, wt);
       } catch {
         /* best-effort cleanup */
       }

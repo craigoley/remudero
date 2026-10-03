@@ -206,6 +206,9 @@ test("W1-T5349: a held id the rung cannot cure, or a repair that fails, still es
     ].join("\n"),
   );
   assert.deepEqual(sweep.heldTaskIdsFromCiFailures([collisions, failure("lint-plan", "")]), ["W1-T7001", "W1-T7002"]);
+  // The header regex itself: a held/collision header opens a section, a passing one does not.
+  assert.equal(sweep.HELD_ID_HEADER_RE.test("task-id-existence: FAILED -- the following id(s) are ALREADY DECLARED:"), true);
+  assert.equal(sweep.HELD_ID_HEADER_RE.test("task-id-existence: OK -- nothing else"), false);
 
   // The effect reports a non-repair: the PR is escalated with the reason, and the head is spent.
   const ledger: Record<string, unknown>[] = [];
@@ -358,6 +361,8 @@ test("W1-T5349: lane heads, the fleet author, the title fit and the id rewrite",
   for (const head of ["codex/x", "run-unfiled-1", "run-W1-T5209-1", "fix/stale-ruling-pins-1", "my-garden-1", "plan-garden-x", undefined]) {
     assert.equal(sweep.isMachineLanePlanHead(head), false, String(head));
   }
+  assert.equal(sweep.MACHINE_LANE_HEAD_RE.test("ci-friction-garden-1790988846926"), true);
+  assert.equal(sweep.MACHINE_LANE_HEAD_RE.test("run-W1-T5209-1"), false);
   assert.equal(sweep.isFleetAppAuthor("remudero-fleet[bot]"), true);
   assert.equal(sweep.isFleetAppAuthor("app/remudero-fleet"), true);
   assert.equal(sweep.isFleetAppAuthor("cao825"), false);
@@ -376,13 +381,18 @@ test("W1-T5349: lane heads, the fleet author, the title fit and the id rewrite",
 
 // ── the production effects ─────────────────────────────────────────────────────────────────────
 
-function fakeWorktree(files: Record<string, string>) {
+/** One renumber case: the build's seam members with recorders, and a plain temp dir the fake
+ *  `worktreeAddImpl` seeds with `files`. No repository is built — every git call is a recorded fake. */
+function renumberCase(files: Record<string, string>) {
   const root = mkdtempSync(join(tmpdir(), "rmd-w1-t5349-"));
   const wt = join(root, "wt");
+  const repoDir = join(root, "repo");
   const calls: string[][] = [];
   const added: string[] = [];
   const removed: string[] = [];
+  const patches: Array<{ title?: string; body?: string }> = [];
   let head = HEAD;
+  // `calls` records `[cwd, ...gitArgs]`; the seam itself receives `git -C <cwd> ...`, as the build's does.
   const git = (cwd: string, args: readonly string[]): string => {
     calls.push([cwd, ...args]);
     if (args[0] === "rev-parse") return `${head}\n`;
@@ -395,40 +405,54 @@ function fakeWorktree(files: Record<string, string>) {
     }
     return "";
   };
-  const deps = {
-    repoDir: join(root, "repo"),
-    worktreePath: wt,
-    git,
-    worktreeAdd: (_repo: string, path: string, _branch: string, _base: string) => {
-      added.push(_base);
+  // The members of the build's own deps (`BuildSweepEffectsDeps`) the renumber runs through.
+  const deps: Parameters<typeof sweep.renumberPlanPrIds>[5] = {
+    owner: "acme",
+    repo: "remudero",
+    log: () => {},
+    planRepairGitImpl: (file, args) => {
+      assert.equal(file, "git");
+      assert.equal(args[0], "-C");
+      return git(args[1]!, args.slice(2));
+    },
+    worktreeAddImpl: (_repo, path, _branch, base) => {
+      added.push(base!);
       for (const [rel, text] of Object.entries(files)) {
         mkdirSync(dirname(join(path, rel)), { recursive: true });
         writeFileSync(join(path, rel), text);
       }
     },
-    worktreeRemove: (_repo: string, path: string) => {
+    worktreeRemoveImpl: (_repo, path) => {
       removed.push(path);
     },
-    reserveId: (_wt: string, branch: string) => {
+    planRepairReserveIdImpl: (_wt, branch) => {
       assert.equal(branch, LANE_HEAD, "the reservation names the lane's own branch as its filer");
       return "W1-T5400";
     },
-    updatePr: async (_n: number, patch: { title?: string; body?: string }) => {
+    ghJsonImpl: (args) => {
+      assert.deepEqual(args.slice(0, 4), ["api", "-X", "PATCH", "repos/acme/remudero/pulls/8558"]);
+      const patch: Record<string, string> = {};
+      for (let i = 4; i < args.length; i += 2) {
+        const field = args[i + 1]!;
+        patch[field.slice(0, field.indexOf("="))] = field.slice(field.indexOf("=") + 1);
+      }
       patches.push(patch);
+      return {};
     },
   };
-  const patches: Array<{ title?: string; body?: string }> = [];
-  return { root, wt, deps, calls, added, removed, patches, setHead: (h: string) => (head = h) };
+  const renumber = (pr: OpenPrView, heldIds: string[], title: string | undefined) =>
+    sweep.renumberPlanPrIds(pr, heldIds, title, repoDir, wt, deps);
+  return { root, wt, deps, renumber, calls, added, removed, patches, setHead: (h: string) => (head = h) };
 }
 
 test("W1-T5349: the renumber effect re-mints, renames the shard, rewrites self-references and pushes with a lease", async () => {
-  const f = fakeWorktree({
+  const f = renumberCase({
     "plan/tasks.d/W1-T5209-ci-friction-fix.yaml": "- id: W1-T5209\n  title: x\n",
     "plan/tasks.d/w1-t5210-selector-shadow-miss.yaml": "- id: W1-T5210\n  depends_on: [W1-T5209]\n",
   });
   try {
     const out = await withLiveWritesAllowed(() =>
-      sweep.renumberPlanPrIds(planPr(), ["W1-T5209"], "chore(plan): file W1-T5209", f.deps),
+      f.renumber(planPr(), ["W1-T5209"], "chore(plan): file W1-T5209"),
     );
     assert.equal(out.outcome, "renumbered");
     assert.deepEqual(out.renames, { "W1-T5209": "W1-T5400" });
@@ -449,44 +473,44 @@ test("W1-T5349: the renumber effect re-mints, renames the shard, rewrites self-r
 });
 
 test("W1-T5349: the renumber effect refuses a moved head, an id it does not declare, and an id declared twice", async () => {
-  const moved = fakeWorktree({ "plan/tasks.d/W1-T5209-a.yaml": "- id: W1-T5209\n" });
+  const moved = renumberCase({ "plan/tasks.d/W1-T5209-a.yaml": "- id: W1-T5209\n" });
   moved.setHead("8".repeat(40));
   try {
-    const out = await sweep.renumberPlanPrIds(planPr(), ["W1-T5209"], undefined, moved.deps);
+    const out = await moved.renumber(planPr(), ["W1-T5209"], undefined);
     assert.equal(out.outcome, "lease-mismatch");
     assert.equal(moved.calls.some((c) => c[1] === "push"), false);
   } finally {
     rmSync(moved.root, { recursive: true, force: true });
   }
-  const foreign = fakeWorktree({ "plan/tasks.d/W1-T5300-a.yaml": "- id: W1-T5300\n  depends_on: [W1-T5209]\n" });
+  const foreign = renumberCase({ "plan/tasks.d/W1-T5300-a.yaml": "- id: W1-T5300\n  depends_on: [W1-T5209]\n" });
   try {
-    const out = await sweep.renumberPlanPrIds(planPr(), ["W1-T5209"], undefined, foreign.deps);
+    const out = await foreign.renumber(planPr(), ["W1-T5209"], undefined);
     assert.equal(out.outcome, "not-declared");
     assert.equal(foreign.calls.some((c) => c[1] === "push"), false);
   } finally {
     rmSync(foreign.root, { recursive: true, force: true });
   }
-  const twice = fakeWorktree({ "plan/tasks.d/W1-T5209-a.yaml": "- id: W1-T5209\n", "plan/tasks.d/W1-T5209-b.yaml": "- id: W1-T5209\n" });
+  const twice = renumberCase({ "plan/tasks.d/W1-T5209-a.yaml": "- id: W1-T5209\n", "plan/tasks.d/W1-T5209-b.yaml": "- id: W1-T5209\n" });
   try {
-    assert.equal((await sweep.renumberPlanPrIds(planPr(), ["W1-T5209"], undefined, twice.deps)).outcome, "not-declared");
+    assert.equal((await twice.renumber(planPr(), ["W1-T5209"], undefined)).outcome, "not-declared");
   } finally {
     rmSync(twice.root, { recursive: true, force: true });
   }
-  const noHead = fakeWorktree({});
+  const noHead = renumberCase({});
   try {
-    assert.equal((await sweep.renumberPlanPrIds(planPr({ headRefName: undefined }), ["W1-T5209"], undefined, noHead.deps)).outcome, "error");
+    assert.equal((await noHead.renumber(planPr({ headRefName: undefined }), ["W1-T5209"], undefined)).outcome, "error");
   } finally {
     rmSync(noHead.root, { recursive: true, force: true });
   }
   // A failing git call is an error outcome with the worktree still removed.
-  const broken = fakeWorktree({ "plan/tasks.d/W1-T5209-a.yaml": "- id: W1-T5209\n" });
-  const realGit = broken.deps.git;
-  broken.deps.git = (cwd, args) => {
-    if (args[0] === "commit") throw Object.assign(new Error("hook failed"), { stderr: "pre-commit: lint failed" });
-    return realGit(cwd, args);
+  const broken = renumberCase({ "plan/tasks.d/W1-T5209-a.yaml": "- id: W1-T5209\n" });
+  const realGit = broken.deps.planRepairGitImpl!;
+  broken.deps.planRepairGitImpl = (file, args) => {
+    if (args[2] === "commit") throw Object.assign(new Error("hook failed"), { stderr: "pre-commit: lint failed" });
+    return realGit(file, args);
   };
   try {
-    const out = await sweep.renumberPlanPrIds(planPr(), ["W1-T5209"], "t", broken.deps);
+    const out = await broken.renumber(planPr(), ["W1-T5209"], "t");
     assert.equal(out.outcome, "error");
     assert.match(String(out.reason), /pre-commit: lint failed/);
     assert.deepEqual(broken.removed, [broken.wt]);
@@ -494,24 +518,24 @@ test("W1-T5349: the renumber effect refuses a moved head, an id it does not decl
     rmSync(broken.root, { recursive: true, force: true });
   }
   // A worktree that could not be cut has nothing to remove, and a failed removal is swallowed.
-  const uncut = fakeWorktree({});
-  uncut.deps.worktreeAdd = () => {
+  const uncut = renumberCase({});
+  uncut.deps.worktreeAddImpl = () => {
     throw new Error("fetch failed");
   };
-  uncut.deps.worktreeRemove = () => {
+  uncut.deps.worktreeRemoveImpl = () => {
     throw new Error("must not be called");
   };
   try {
-    assert.equal((await sweep.renumberPlanPrIds(planPr(), ["W1-T5209"], "t", uncut.deps)).outcome, "error");
+    assert.equal((await uncut.renumber(planPr(), ["W1-T5209"], "t")).outcome, "error");
   } finally {
     rmSync(uncut.root, { recursive: true, force: true });
   }
-  const sticky = fakeWorktree({ "plan/tasks.d/W1-T5209-a.yaml": "- id: W1-T5209\n" });
-  sticky.deps.worktreeRemove = () => {
+  const sticky = renumberCase({ "plan/tasks.d/W1-T5209-a.yaml": "- id: W1-T5209\n" });
+  sticky.deps.worktreeRemoveImpl = () => {
     throw new Error("busy");
   };
   try {
-    const out = await withLiveWritesAllowed(() => sweep.renumberPlanPrIds(planPr({ body: undefined }), ["W1-T5209"], undefined, sticky.deps));
+    const out = await withLiveWritesAllowed(() => sticky.renumber(planPr({ body: undefined }), ["W1-T5209"], undefined));
     assert.equal(out.outcome, "renumbered");
     assert.deepEqual(sticky.patches, [], "nothing to patch when neither title nor body was read");
   } finally {
