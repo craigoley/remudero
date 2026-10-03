@@ -28,12 +28,21 @@ import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMerge
 import { acquireInflightLock, InflightLockError, type InflightLockHandle } from "./inflight-lock.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import { appendLedger } from "./ledger.js";
+import { runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import { resolveLedgerUnion } from "./ledger-union.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "./mounts.js";
 import { planParallelAttempts, type ShapeGain, type TaskShape } from "./parallel-attempts.js";
 import { strikeScheduleFor, type StrikePassRate } from "./strike-schedule.js";
-import { buildPlanPrBody, buildPlanPrCommitMessage, createPlanPrRest, probeExistingPlanPr } from "./plan-pr-emitter.js";
+import {
+  buildPlanPrBody,
+  buildPlanPrCommitMessage,
+  createPlanPrRest,
+  PlanPrPreflightRefusedError,
+  planPrPreflightAllows,
+  planPrPreflightAtCommit,
+  probeExistingPlanPr,
+} from "./plan-pr-emitter.js";
 import {
   DEFAULT_RISK,
   RETIREMENT_REASONS,
@@ -1315,6 +1324,8 @@ export interface BuildSweepEffectsDeps {
   buildPlanPrBodyImpl?: typeof buildPlanPrBody;
   /** W1-T5349 — the plan-repair renumber's reservation; defaults to {@link reservePlanRepairTaskId}. */
   planRepairReserveIdImpl?: (worktreePath: string, filingBranch: string) => string;
+  /** W1-T5405 — the filer preflight both plan-PR rungs here run on their commit before the push. */
+  planPrPreflightImpl?: typeof planPrPreflightAtCommit;
 }
 
 export type ReviewDispatchMode =
@@ -1695,6 +1706,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     fixRungCheckoutRefusedErrorImpl: FixRungCheckoutRefusedError = requiredSweepRuntimeCtor("fixRungCheckoutRefusedErrorImpl"),
     defaultBudgetUsd = 100,
     buildPlanPrBodyImpl = buildPlanPrBody,
+    planPrPreflightImpl = planPrPreflightAtCommit,
     updatePrBodyImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["updatePrBodyImpl"]>>("updatePrBodyImpl"),
   } = deps;
 
@@ -3272,19 +3284,21 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                   buildPlanPrCommitMessage({ scope: "plan", subject: `propose an amendment for ${c.taskId}`, extraBody: input.commitBody }),
                 ]);
                 const headSha = planRepairGit("git", ["-C", worktreePath, "rev-parse", "HEAD"]).trim();
+                const body = buildPlanPrBodyImpl({
+                  intro: input.prIntro,
+                  criteria: [{ claim: input.claim, proof: input.proof }],
+                  changedFiles: [input.shardRelPath],
+                  proofCwd: worktreePath,
+                });
+                // W1-T5405: a red preflight is ledgered as this source run's outcome, so the next pass does not re-pay it.
+                const verdict = planPrPreflightImpl(worktreePath, headSha, { title: input.title, body });
+                if (!planPrPreflightAllows(verdict, { lane: "refusal_amendment", branch: input.branch, log })) {
+                  log(REFUSAL_AMENDMENT_STEP, { task_id: c.taskId, source_run_id: c.runId, outcome: "preflight_refused", failures: verdict.failures });
+                  throw new PlanPrPreflightRefusedError("refusal_amendment", verdict.failures);
+                }
                 gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
                 assertLiveWriteAllowed("gh-pr-create", `opening the refusal-amendment PR for ${c.taskId}'s shard`);
-                return createPlanPrRest(ghJsonForBuild, owner, repo, {
-                  title: input.title,
-                  body: buildPlanPrBodyImpl({
-                    intro: input.prIntro,
-                    criteria: [{ claim: input.claim, proof: input.proof }],
-                    changedFiles: [input.shardRelPath],
-                    proofCwd: worktreePath,
-                  }),
-                  head: input.branch,
-                  base: "main",
-                });
+                return createPlanPrRest(ghJsonForBuild, owner, repo, { title: input.title, body, head: input.branch, base: "main" });
               } finally {
                 try {
                   worktreeRemoveForBuild(repoDir, worktreePath);
@@ -3504,30 +3518,34 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         });
         planRepairGit("git", ["-C", worktreePath, "commit", "-m", commitMessage]);
         const headSha = planRepairGit("git", ["-C", worktreePath, "rev-parse", "HEAD"]).trim();
+        const title = `chore(plan): flag a stale proof in ${taskId}'s shard for architect repair`;
+        const body = buildPlanPrBodyImpl({
+          intro:
+            `AUTOMATED PLAN REPAIR (W1-T3390): ${pr.prUrl} cannot clear its proof check and no fix worker ` +
+            `is dispatched. Its criterion "${proof0.claim}" declares proof \`${proof0.proof}\`, which review ` +
+            `found \`${proof0.proofExec}\` — that text cannot be corrected from inside a non-plan-only ` +
+            `PR (Standing rule 15). This plan-only PR flags the line for an Architect; it does not ` +
+            `rewrite it.`,
+          criteria: [
+            {
+              claim: `the shard flags ${taskId}'s stale proof for architect repair`,
+              proof: `grep: sweep-flagged proof in ${shardRelPath}`,
+            },
+          ],
+          changedFiles: [shardRelPath],
+          proofCwd: worktreePath,
+        });
+        // W1-T5405: the verdict rides this rung's ONE dispatch row, so a refusal spends a MAX_PLAN_REPAIR_STRIKES strike.
+        const verdict = planPrPreflightImpl(worktreePath, headSha, { title, body });
+        const preflightRow = verdict.unreadable.length > 0 ? { preflight_unreadable: verdict.unreadable } : {};
+        if (!planPrPreflightAllows(verdict, { lane: "plan_repair", branch })) {
+          planRepairLog("preflight_refused", { shard_path: shardRelPath, failures: verdict.failures, ...preflightRow });
+          return true;
+        }
         gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
         assertLiveWriteAllowed("gh-pr-create", `opening the plan-only repair PR for ${taskId}'s shard`);
-        const created = createPlanPrRest(ghJsonForBuild, owner, repo, {
-          title: `chore(plan): flag a stale proof in ${taskId}'s shard for architect repair`,
-          body: buildPlanPrBodyImpl({
-            intro:
-              `AUTOMATED PLAN REPAIR (W1-T3390): ${pr.prUrl} cannot clear its proof check and no fix worker ` +
-              `is dispatched. Its criterion "${proof0.claim}" declares proof \`${proof0.proof}\`, which review ` +
-              `found \`${proof0.proofExec}\` — that text cannot be corrected from inside a non-plan-only ` +
-              `PR (Standing rule 15). This plan-only PR flags the line for an Architect; it does not ` +
-              `rewrite it.`,
-            criteria: [
-              {
-                claim: `the shard flags ${taskId}'s stale proof for architect repair`,
-                proof: `grep: sweep-flagged proof in ${shardRelPath}`,
-              },
-            ],
-            changedFiles: [shardRelPath],
-            proofCwd: worktreePath,
-          }),
-          head: branch,
-          base: "main",
-        });
-        planRepairLog("dispatched", { plan_repair_pr: created.prUrl, shard_path: shardRelPath });
+        const created = createPlanPrRest(ghJsonForBuild, owner, repo, { title, body, head: branch, base: "main" });
+        planRepairLog("dispatched", { plan_repair_pr: created.prUrl, shard_path: shardRelPath, ...preflightRow });
         return true;
       } catch (e) {
         planRepairLog("error", { error: String((e as Error)?.message ?? e) });
@@ -8687,6 +8705,9 @@ export interface SweepDeps {
   arm: (
     pr: OpenPrView,
   ) => ArmOutcomeName | ArmAttemptOutcome | void | Promise<ArmOutcomeName | ArmAttemptOutcome | void>;
+  /** W1-T5403 — risk-judge a head whose run ended `handed_off`, once, before the `mergeable` arm.
+   *  Production wires {@link riskJudgeHandedOffHead}; omitted, such a head is held, never armed. */
+  judgeHandedOffHead?: (pr: OpenPrView) => Promise<HandedOffHeadJudgment>;
   /** W1-T1000002 — WITHDRAW AN ARM THIS LANE DID NOT PLACE, called only when an operator hold stands
    *  over a PR already reporting armed. A disarm alone is undone by the next pass, whose dedup reads
    *  GitHub's live armed bit, so this fires EVERY pass the hold stands and the PR reads armed, and
@@ -9261,6 +9282,106 @@ function reviewerCodeFreshnessBackoffReason(
     `${ancestryCheckFailure ? `ancestry check failed (${ancestryCheckFailure}); ` : ""}` +
     `this is a bounded reviewer-source freshness refusal, not a durable review verdict`
   );
+}
+
+/** W1-T5403 — what the sweep's risk judgment of a handed-off head decided. `unavailable` is its own
+ *  value, never folded into either action: it holds the arm this pass and is asked again next pass. */
+export type HandedOffHeadJudgment =
+  | { action: "proceed"; reason: string }
+  | { action: "escalate"; reason: string; issueUrl?: string }
+  | { action: "unavailable"; reason: string };
+
+/** W1-T5403 — one handed-off head's judgment: the input the judge is shown, and the orchestrator
+ *  (judge, escalation, ledger) the in-run call already uses. Built fresh per head, so a spend
+ *  collector inside it never spans two judgments. */
+export interface HandedOffHeadJudgmentPlan {
+  input: RiskJudgeInput;
+  orchestrator: RiskJudgeOrchestratorDeps;
+  config?: Omit<RiskJudgeConfig, "judgeUnavailableAction">;
+}
+
+/** W1-T5403 — wrap the REAL {@link runRiskJudge} as the sweep's {@link SweepDeps.judgeHandedOffHead}.
+ *  Every row it writes carries `pr_number`/`head_sha`, so the `risk_judge.decision` row is what
+ *  {@link handedOffHeadAwaitingJudgment} reads back and the escalated row feeds `riskRefused`. An
+ *  unavailable judge is reported as such rather than collapsed into proceed or escalate. */
+export function riskJudgeHandedOffHead(
+  planFor: (pr: OpenPrView) => HandedOffHeadJudgmentPlan,
+): NonNullable<SweepDeps["judgeHandedOffHead"]> {
+  return async (pr) => {
+    const { input, orchestrator, config } = planFor(pr);
+    const log = orchestrator.log ?? (() => {});
+    const result = await runRiskJudge(
+      { ...input, prNumber: pr.prNumber, headSha: pr.headSha },
+      { ...orchestrator, log: (step, extra) => log(step, { ...extra, pr_number: pr.prNumber, head_sha: pr.headSha }) },
+      { ...config, judgeUnavailableAction: "proceed" },
+    );
+    if (result.verdict.availability === "unavailable") {
+      return { action: "unavailable", reason: result.verdict.reasons.join("; ") || result.action.reason };
+    }
+    if (result.action.kind === "escalate") {
+      return { action: "escalate", reason: result.action.reason, issueUrl: result.escalationUrl };
+    }
+    return { action: "proceed", reason: result.action.reason };
+  };
+}
+
+/** W1-T5403 — the hand-off reason (`pr_open_yield`, `freshness_yield`, `recycle_yield`) when a run
+ *  that opened THIS PR ended `handed_off` and no available `risk_judge.decision` row exists for its
+ *  CURRENT head; `undefined` otherwise. A decision whose judge was unavailable is not a judgment. */
+export function handedOffHeadAwaitingJudgment(
+  pr: Pick<OpenPrView, "prNumber" | "prUrl" | "headSha">,
+  lines: ReadonlyArray<Record<string, unknown>>,
+): string | undefined {
+  let handoff: string | undefined;
+  for (const line of lines) {
+    if (
+      line.step === "risk_judge.decision" &&
+      line.pr_number === pr.prNumber &&
+      line.head_sha === pr.headSha &&
+      line.availability !== "unavailable"
+    ) {
+      return undefined;
+    }
+    if (line.step === "verdict" && line.verdict === "handed_off" && line.pr_url === pr.prUrl) {
+      handoff = typeof line.reason === "string" ? line.reason : "handed_off";
+    }
+  }
+  return handoff;
+}
+
+/** W1-T5403 — judge a handed-off head before the `mergeable` arm fires. Returns the stand-down
+ *  reason when the arm must hold, `undefined` when it may proceed. A missing dep, a throw and an
+ *  unavailable judge each hold and ledger `sweep.risk_judge_unavailable` naming why. */
+async function holdHandedOffHeadForRiskJudgment(
+  pr: OpenPrView,
+  handoff: string,
+  judge: SweepDeps["judgeHandedOffHead"],
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<string | undefined> {
+  const head = pr.headSha.slice(0, 7);
+  let judgment: HandedOffHeadJudgment;
+  if (judge === undefined) {
+    judgment = { action: "unavailable", reason: "no risk judge is wired into this sweep" };
+  } else {
+    try {
+      judgment = await judge(pr);
+    } catch (error) {
+      judgment = { action: "unavailable", reason: `risk judge threw: ${String((error as Error)?.message ?? error)}` };
+    }
+  }
+  if (judgment.action === "proceed") return undefined;
+  if (judgment.action === "escalate") {
+    return `risk judge escalated this handed-off head (${head}), no operator override recorded` +
+      (judgment.issueUrl ? ` — see ${judgment.issueUrl}` : "");
+  }
+  log("sweep.risk_judge_unavailable", {
+    pr_number: pr.prNumber,
+    head_sha: pr.headSha,
+    ...(pr.taskId === undefined ? {} : { task_id: pr.taskId }),
+    handoff,
+    reason: judgment.reason,
+  });
+  return `risk judge unavailable for handed-off head ${head} (${judgment.reason}) — holding the arm; the next pass asks again`;
 }
 
 function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorActions {
@@ -11136,6 +11257,16 @@ export async function runSweep(
                 acted = false;
                 standDownReason = armDecision.reason;
                 break;
+              }
+              // W1-T5403: a handed-off head never met the in-run risk judge — judge it once here.
+              const handoff = handedOffHeadAwaitingJudgment(pr, ledgerLines);
+              if (handoff !== undefined) {
+                const riskHold = await holdHandedOffHeadForRiskJudgment(pr, handoff, deps.judgeHandedOffHead, log);
+                if (riskHold !== undefined) {
+                  acted = false;
+                  standDownReason = riskHold;
+                  break;
+                }
               }
               // READ THE OUTCOME. `armAutoMerge` does not throw — it RETURNS which of its seven
               // branches it took, and five of them armed nothing. Discarding it is what let
