@@ -63,6 +63,7 @@ import {
   type ServiceTokens,
   type SseRoute,
   type WriteTier,
+  verifiedActor,
 } from "./service.js";
 import {
   buildIncidentEventsRoute,
@@ -95,7 +96,7 @@ import { startRepositoriesSourcePublisher, type RepositoriesSources } from "./re
 import { withViewShadow } from "./view-shadow.js";
 import { buildRecentRoute, buildStatusRoute, buildStatusStream, createBoardSnapshotCache, DEFAULT_POLL_MS, type BoardDeps, type BoardSnapshotSource } from "./board.js";
 import { buildBatchedGithub, type GhFailureReason, type GitHub } from "./status.js";
-import { buildInstanceGatewayRoutes, CORE_INSTANCE, instanceStateRoot, livenessInstances, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
+import { buildInstanceGatewayRoutes, CORE_INSTANCE, DEFAULT_INSTANCE_STATE_BASE, instanceStateRoot, livenessInstances, watchInstanceLiveness, type InstanceGatewayOptions } from "./instance-gateway.js";
 import { createReadModelWorker, READ_MODEL_VIEWS, readModelStatusView, type ReadModelInstance, type ReadModelWorkerHandle, type ReadModelWorkerOptions } from "./read-model-worker.js";
 import { CONSOLE_CACHED_READ_PATHS, ROUTE_READS_STEP, buildRouteReadsRoute, createRouteReadRollup, type RouteReadRollup } from "./route-read-rollup.js";
 import { buildOperatorAgentAnswer, buildOperatorAgentAnswerRoute, readInboxAnswerEvidence } from "./operator-agent-answer.js";
@@ -223,7 +224,8 @@ import {
   type ConsoleSnapshotCacheOptions,
 } from "./console-snapshot-cache.js";
 import { operatorIdentityFromFile, type OperatorIdentityFileIo } from "./operator-identity-file.js";
-import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, InstanceRegistryError, parseInstanceRegistry } from "./instance-registry.js";
+import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, InstanceRegistryError, parseInstanceRegistry, requirePrimaryInstance } from "./instance-registry.js";
+import { GoLiveError, readShadowEvidence, requestGoLive, type GoLiveWiring } from "./onboarding-golive.js";
 import {
   INSTANCES_VIEW_NAME,
   legacyRegistryBody,
@@ -522,6 +524,8 @@ export interface ServeDeps {
   };
   /** Read-only, paginated GitHub-token inventory for the console onboarding candidate list. */
   onboardingRepositoryInventory?: OnboardingInventoryRouteOptions;
+  /** Shadow history uses the gateway's instance state roots; writes target the fleet registry. */
+  onboardingGoLive?: GoLiveWiring;
   instances?: InstanceGatewayOptions;
   /**
    * W1-T2269: the console's OWN installation-token refresh loop — the SAME mechanism
@@ -1973,8 +1977,58 @@ function accessConfig(): { accessTeamDomain?: string; accessAudience?: string } 
   }
 }
 
-/** W1-T4244 — `serve.operatorIdentity` off `loadConfig()`, tolerantly, {@link accessConfig}'s
- *  precedent: an unreadable config composes no operator provider rather than failing the boot. */
+/** W1-T4266: exact instance routes share the gateway's registry and state-root conventions. */
+export function buildOnboardingGoLiveRoutes(deps: ServeDeps): Route[] {
+  const registryPath = deps.registry?.repoRegistryPath ?? deps.instances?.registryPath ?? daemonInstanceRegistryPath(deps.questionsRoot);
+  let registry;
+  try {
+    registry = parseInstanceRegistry((deps.instances?.readText ?? ((path) => readFileSync(path, "utf8")))(registryPath));
+  } catch (error) {
+    deps.log?.("serve.onboarding_registry_unavailable", { reason: String(error) });
+    return [];
+  }
+  const goLiveErrorResponse = (error: unknown) => {
+    if (!(error instanceof GoLiveError)) throw error;
+    return { status: error.status, body: { error: error.code, ...(error.receipt ? { receipt: error.receipt } : {}) } };
+  };
+  return registry.instances.filter((instance) => instance.live).flatMap((instance): Route[] => {
+    const stateDir = instance.name === (deps.instances?.coreInstance ?? CORE_INSTANCE)
+      ? dirname(deps.ledgerPath)
+      : dirname(instanceStateRoot(instance, deps.instances?.stateBase ?? DEFAULT_INSTANCE_STATE_BASE).ledgerPath);
+    const prefix = `/v1/i/${instance.name}`;
+    return [
+      {
+        method: "GET", path: `${prefix}/shadow-evidence`, scope: "read",
+        handler: async (_req, res) => {
+          try { sendJson(res, 200, await readShadowEvidence(stateDir, instance.name, deps.onboardingGoLive?.readRows)); }
+          catch (cause) {
+            const error = goLiveErrorResponse(cause);
+            sendJson(res, error.status, error.body);
+          }
+        },
+      },
+      {
+        method: "POST", path: `${prefix}/go-live`, scope: "write", tier: "high",
+        handler: jsonAction(() => ({}), async (_body, req, res) => {
+          const actor = verifiedActor(req);
+          if (!actor) return sendJson(res, 403, { error: "verified_operator_required" });
+          try {
+            const registryRepository = deps.onboardingGoLive?.registryRepository ?? deps.assistantRepository ?? requirePrimaryInstance(registry).repo;
+            const receipt = await requestGoLive({ instance: instance.name, actor }, {
+              ...deps.onboardingGoLive, registryRepository, stateDir, ledgerPath: deps.ledgerPath,
+            });
+            sendJson(res, 202, receipt);
+          } catch (cause) {
+            const error = goLiveErrorResponse(cause);
+            sendJson(res, error.status, error.body);
+          }
+        }),
+      },
+    ];
+  });
+}
+
+/** W1-T4244 — unreadable config composes no operator provider rather than failing the boot. */
 export function operatorIdentityConfig(
   read: () => Pick<Config, "serve"> = loadConfig,
   file: OperatorIdentityFileIo = {},
@@ -2918,6 +2972,7 @@ function assembleServeRoutes(
     }),
   ];
   const routes = boundConsoleReadRoutes(rawRoutes, deps, CONSOLE_READ_ROUTE_BUDGET_MS, memory && { registry: memory, scope: "core" });
+  routes.push(...buildOnboardingGoLiveRoutes(deps));
   routes.push(
     ...buildInstanceGatewayRoutes(routes, {
       registryPath: daemonInstanceRegistryPath(deps.questionsRoot),
