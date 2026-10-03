@@ -1,0 +1,37 @@
+- id: W1-T5460
+  title: "A CONSOLE FEEDBACK DECISION LANDS THROUGH THE DAEMON SWEEP, WHERE THE FILER PREFLIGHT RUNS — POST /v1/feedback/decision pushes its landing synchronously, so W1-T5348's ~290 s preflight had to be skipped on that path"
+  repo: remudero
+  depends_on: ["W1-T5348"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator ruling 2026-10-03 on PR #8795: skip the preflight on the request path now, queue decisions for the daemon landing sweep, then enable it there"
+  plan_refs: ["W1-T5348"]
+  files: [src/lib/feedback-landing.ts, test/a-console-feedback-decision-lands-through-the-daemon-sweep.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    W1-T5348 (#8795) adds `planPrPreflight` before every machine-lane plan PR push. Measured on one
+    feedback status-change landing at host load ~45: lint-plan 53 s, task-id-existence 33 s,
+    check-proof 6.4 s per proof, shard census 191 s, worktree add/remove 5 s — about 290 s, all
+    synchronous. The console's `POST /v1/feedback/decision` (src/lib/serve.ts, via `feedbackLand`)
+    runs the landing push on the request path, so the operator ruled to skip the preflight there
+    (logged as `plan_pr.preflight_skipped`) and to move decisions onto the daemon's landing sweep,
+    which can afford the checks. Until then, console-originated landings ship unchecked.
+  design: |
+    The decision route records the decision's landing bytes under the state root (the pattern the
+    ci-learning landing already uses) and returns at once; the daemon's feedback landing sweep
+    (`sweepFeedbackLanding`) picks queued decisions up, runs the preflight, and pushes. Remove the
+    request-path skip once the queue is the only route. The decision's response tells the console the
+    landing is queued, and the queued state is visible on the board until it lands.
+  acceptance:
+    - claim: "a console feedback decision is queued and landed by the daemon sweep with the filer preflight, never pushed on the request path"
+      proof: "unit test: test/a-console-feedback-decision-lands-through-the-daemon-sweep.test.ts"
+  falsifier: |
+    A decision posted to the route returns before any landing push and runs no preflight check; the
+    next landing sweep runs the preflight and pushes it (today the route pushes inline with the
+    preflight skipped).

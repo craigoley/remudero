@@ -1,0 +1,42 @@
+- id: W1-T5451
+  title: "THE FOUNDRY CLAUDE EMERGENCY PATH CAPS OUTPUT AT 8,000 TOKENS WHILE SENDING A HIGH EFFORT — thinking counts toward max_tokens, so a long turn truncates and throws after the money is already spent"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 20.00
+  priority: 4
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-03: audit of the repo against Anthropic's 'Prompting Claude Opus 5.5' guide"
+  files:
+    - src/lib/worker-provider.ts
+    - test/the-foundry-claude-cap-covers-its-thinking.test.ts
+  rationale: |
+    WHY THIS EXISTS. Guide 'Calibrate effort': set max_tokens high enough for thinking plus the reply, because
+    thinking counts toward max_tokens even when not returned; 128,000 worked for long agentic turns. The raw-API
+    Foundry Claude worker (spawnFoundryClaudeWorker, worker-provider.ts ~3778-3950; the cash emergency path when
+    both subscriptions are blocked) sends max_tokens OPENWEIGHT_MAX_COMPLETION_TOKENS = 8000 (~2351, ~3827)
+    together with output_config.effort (~3828). A stop_reason max_tokens turn is thrown as
+    OpenWeightTruncatedReplyError (~3884) and the run fails after the spend is retained. Rare (both
+    subscriptions must be blocked), but costly when it fires.
+
+  design: |
+    (i) Give the Foundry Claude path its own output cap sized for thinking plus reply (start at 32,000 for the
+    Opus and Sonnet deployments only), leaving the open-weight models' cap alone. (ii) Update the reservation
+    math (worker-provider.ts ~966) so the budget reservation covers the new cap. (iii) The cap constant is a
+    BACKSTOP and its comment must say so (bound-kind census).
+
+  acceptance:
+    - claim: "a foundry claude turn of nine thousand output tokens succeeds under the new cap"
+      proof: 'grep: test("W1-T5451: a foundry claude turn of nine thousand output tokens succeeds" in test/the-foundry-claude-cap-covers-its-thinking.test.ts'
+    - claim: "the budget reservation covers the new output cap"
+      proof: 'grep: test("W1-T5451: the budget reservation covers the new output cap" in test/the-foundry-claude-cap-covers-its-thinking.test.ts'
+  falsifier: |
+    CLOSE THIS TASK without implementation if the Foundry Claude body no longer sends a fixed small max_tokens, or
+    the path has been removed.
+
+  notes: |
+    Source: https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5 (audit 2026-10-03). One concern per task; do not widen. Unverified claims are marked INFERRED in the audit and must be re-checked at head before building.

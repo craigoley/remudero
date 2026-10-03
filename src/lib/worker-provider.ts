@@ -3851,7 +3851,8 @@ export async function spawnFoundryClaudeWorker(
       if (response.status === 404) throw new OpenWeightDeploymentNotFoundError(selection.model);
       if (!response.ok) throw new Error(`cash ${label} request failed with HTTP ${response.status}`);
       const payload = await response.json() as {
-        id?: unknown; model?: unknown; stop_reason?: unknown; content?: Array<Record<string, unknown>>;
+        id?: unknown; model?: unknown; stop_reason?: unknown; stop_details?: { category?: unknown } | null;
+        content?: Array<Record<string, unknown>>;
         usage?: { input_tokens?: unknown; output_tokens?: unknown; cache_read_input_tokens?: unknown; cache_creation_input_tokens?: unknown };
       };
       sessionId = typeof payload.id === "string" ? payload.id : sessionId;
@@ -3882,7 +3883,11 @@ export async function spawnFoundryClaudeWorker(
       pending = undefined;
       if (!Array.isArray(payload.content)) throw new Error(`cash ${label} response has no content blocks`);
       if (payload.stop_reason === "max_tokens") throw new OpenWeightTruncatedReplyError("max_tokens", completionTokens);
-      if (payload.stop_reason === "refusal") throw new Error(`cash ${label} refused the request`);
+      if (payload.stop_reason === "refusal") {
+        // `stop_details.category` names the safeguard that fired; `explanation` is display-only prose and is never copied.
+        const category = payload.stop_details?.category;
+        throw new Error(`cash ${label} refused the request${typeof category === "string" && category ? ` (category: ${category})` : ""}`);
+      }
       text = payload.content.filter((block) => block.type === "text" && typeof block.text === "string")
         .map((block) => block.text as string).join("\n");
       const calls = payload.content.filter((block) => block.type === "tool_use");
