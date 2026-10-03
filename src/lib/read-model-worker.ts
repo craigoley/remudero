@@ -62,6 +62,7 @@ import {
 import { threadSlowLane, type SlowLane, type SlowLaneBodies, type SlowLaneConfig } from "./read-model-slow-lane.js";
 import { readModelCommand } from "./read-model-cli.js";
 import { createRepositoriesReadModelView } from "./repositories-view.js";
+import { answerThreadHeaps, askNestedThreadHeaps, workerThreads, type ThreadHeapsAnswer } from "./serve-memory.js";
 import { createViewShadow, fileShadowStore, readShadowEvidence, storedShadowReadiness, viewShadowPath, type ShadowLegacy, type ShadowReadiness, type ShadowRequest, type ShadowSample, type ViewShadow } from "./view-shadow.js";
 import { effectiveViewMode, oldestAsOf, READ_MODEL_STATUS_VIEW, shadowSampled, shownReadiness, viewEtag, type EffectiveViewMode, type ViewBody, type ViewBodyEntry, type ViewSource, type ViewSwitchMode } from "./views.js";
 import { describeSource, judgeSource, type SourcePhase } from "./view-freshness.js";
@@ -208,7 +209,9 @@ export type ReadModelWorkerMessage =
   /** The heartbeat inside a long tick: `open` before a store's open (its quick_check), `opened` with what it took, `commit` per applied transaction. */
   | { type: "progress"; instance: string; phase: "open" | "opened" | "commit"; ms?: number; rows?: number }
   /** The view thread's own heartbeat, read by the projector thread's view lane and never relayed to serve. */
-  | { type: "view_unit"; view: string; instance?: string; phase: "start" | "end" };
+  | { type: "view_unit"; view: string; instance?: string; phase: "start" | "end" }
+  /** W1-T5480: the heaps of the threads this worker spawned, answering serve's memory sample. */
+  | ThreadHeapsAnswer;
 
 export interface ReadModelViewContext {
   now: number;
@@ -347,7 +350,8 @@ export function checkReadModelIntegrity(
 
 /** One thread per check, which exits when done: a check is rare, and one that dies is reported, never hung on. */
 export function threadIntegrityCheck(workerUrl?: URL): NonNullable<ReadModelTickerOptions["integrityCheck"]> {
-  return (request, done) => {
+  // Named: serve's memory sample names each thread by the function that spawned it (serve-memory.ts).
+  const spawnIntegrityCheck: NonNullable<ReadModelTickerOptions["integrityCheck"]> = (request, done) => {
     let settled = false;
     let failure = "";
     const thread = new Worker(workerUrl ?? new URL(import.meta.url), { workerData: { kind: READ_MODEL_INTEGRITY_KIND, request }, execArgv: process.execArgv });
@@ -361,6 +365,7 @@ export function threadIntegrityCheck(workerUrl?: URL): NonNullable<ReadModelTick
       if (!settled) done({ ok: false, corrupt: false, error: `the integrity thread exited with code ${code}${failure}`, ms: 0 });
     });
   };
+  return spawnIntegrityCheck;
 }
 
 /** A recycle loop's issue to open (through {@link tryEscalate}, its dedup and its failure row) or to close. */
@@ -451,7 +456,7 @@ export function threadOracle(opts: { workerUrl?: URL; escalationRepository?: str
     pending = undefined;
     waiting?.done(result);
   };
-  const spawn = (): Worker => {
+  const spawnOracle = (): Worker => {
     const data: ReadModelOracleData = { kind: READ_MODEL_ORACLE_KIND, ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}) };
     const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv, resourceLimits: { maxOldGenerationSizeMb: READ_MODEL_ORACLE_HEAP_MB } });
     spawned.unref();
@@ -468,7 +473,7 @@ export function threadOracle(opts: { workerUrl?: URL; escalationRepository?: str
   };
   return {
     run: (request, done) => {
-      worker ??= spawn();
+      worker ??= spawnOracle();
       pending = { id: ++seq, done };
       worker.postMessage({ type: "check", id: pending.id, request });
     },
@@ -1302,7 +1307,7 @@ export function threadViews(opts: {
   let closed = false;
   let respawn: NodeJS.Timeout | undefined;
   let building: { view: string; instance?: string; since: number; reported: boolean } | undefined;
-  const spawn = (): void => {
+  const spawnViews = (): void => {
     const data: ReadModelViewsData = { ...opts.data, kind: READ_MODEL_VIEWS_KIND };
     const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv });
     worker = spawned;
@@ -1322,7 +1327,7 @@ export function threadViews(opts: {
       opts.log("read_model.views_exited", { code, deaths, respawnInMs: delayMs, ...(building ? { view: building.view } : {}) });
       respawn = setTimeout(() => {
         respawn = undefined;
-        if (!closed) spawn();
+        if (!closed) spawnViews();
       }, delayMs);
       respawn.unref();
     });
@@ -1335,7 +1340,7 @@ export function threadViews(opts: {
     opts.log("read_model.view_build_long", { view: building.view, ...(building.instance ? { instance: building.instance } : {}), ms });
   }, READ_MODEL_SWITCH_RECHECK_MS);
   const send = (msg: ReadModelViewsInput): void => worker?.postMessage(msg);
-  spawn();
+  spawnViews();
   return {
     state: (instances) => send({ type: "state", instances }),
     shadow: (request) => send({ type: "shadow", request }),
@@ -1376,6 +1381,8 @@ export function runReadModelWorker(
   data: ReadModelWorkerData,
   clock: Clock = systemClock,
 ): void {
+  // W1-T5480: booked before the first spawn below, so serve's memory sample can ask for each heap.
+  const threads = workerThreads();
   const signal = new Int32Array(data.signal);
   const stopRequested = (): boolean => Atomics.load(signal, 0) === 1;
   const [owner, repo] = data.escalationRepository?.split("/") ?? [];
@@ -1432,6 +1439,7 @@ export function runReadModelWorker(
     timer = setTimeout(loop, data.tickMs);
   };
   port.on("message", (msg) => {
+    if (answerThreadHeaps(port, msg, threads)) return;
     if (msg.type === "shadow") return void views.shadow(msg as unknown as ShadowRequest);
     if (msg.type === "want") return void views.want((msg as unknown as { view: string }).view, (msg as unknown as { key: string }).key);
     if (msg.type !== "stop") return;
@@ -1754,7 +1762,9 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     heardAt = clock.now();
     phase = undefined;
     spawned.unref();
-    spawned.on("message", onMessage);
+    // A heap answer is not a sign of progress: the watchdog never hears it, so a loop that died still recycles.
+    const heapAnswer = askNestedThreadHeaps(spawned);
+    spawned.on("message", (msg: ReadModelWorkerMessage) => void (heapAnswer(msg) || onMessage(msg)));
     spawned.on("error", (error) => opts.log?.("read_model.worker_failed", { error: String(error?.message ?? error) }));
     spawned.on("exit", (code) => {
       if (worker !== spawned || stopping) return;
