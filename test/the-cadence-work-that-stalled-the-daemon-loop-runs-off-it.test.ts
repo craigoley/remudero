@@ -14,12 +14,13 @@
 // synchronous read is never reached once the board was prefetched.
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import * as runTask from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
+import type { DaemonDeps, DaemonSummary } from "../src/lib/daemon.js";
 import type { OpenPrRest } from "../src/lib/open-prs-rest.js";
 import type { Plan } from "../src/lib/plan.js";
 import type { Policy } from "../src/lib/policy.js";
@@ -172,4 +173,36 @@ void test("W1-T5481: a test that pins its own board and names no reader gets no 
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+void test("W1-T5481: daemonCommand hands the daemon the prefetch beside the check it feeds", async (t) => {
+  // The capture shape test/the-machine-judge-runs-off-the-daemon-loop.test.ts uses: the real
+  // `daemonCommand`, with `runDaemon` replaced by a recorder, so what is asserted is what the daemon gets.
+  const home = mkdtempSync(join(tmpdir(), "rmd-w1t5481-wiring-"));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+  const oldHome = process.env.HOME;
+  const oldSre = process.env.RMD_SRE_LANE;
+  process.env.HOME = home;
+  delete process.env.RMD_SRE_LANE;
+  t.after(() => {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    if (oldSre !== undefined) process.env.RMD_SRE_LANE = oldSre;
+    rmSync(home, { recursive: true, force: true });
+  });
+  let captured: (DaemonDeps & { prefetchBoardReview?: unknown }) | undefined;
+  await runTask.daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+    gardenPassSpawn: async () => 0,
+    runDaemon: async (_plan, d): Promise<DaemonSummary> => {
+      captured = d;
+      return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+    },
+  } as Parameters<typeof runTask.daemonCommand>[1]);
+  assert.equal(typeof captured?.checkBoardReview, "function", "precondition: a self-target daemon wires the board-review check");
+  assert.equal(typeof captured?.prefetchBoardReview, "function", "and the off-loop read the check consumes");
 });
