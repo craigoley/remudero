@@ -3,10 +3,12 @@ import { randomUUID } from "node:crypto";
 import { access } from "node:fs/promises";
 import { join } from "node:path";
 import { parseInstanceRegistry } from "./instance-registry.js";
-import { appendLedger, type LedgerLine } from "./ledger.js";
+import { appendLedger, type LedgerWriterDeps } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
 import { LIVE_WRITE_SENTINEL_TOKEN, LiveWriteBlockedError } from "./live-write-guard.js";
+import { resolveRepoLayout, type RepoLayout } from "./repo-layout.js";
+import type { ServeDeps } from "./serve.js";
 
 export class GoLiveError extends Error {
   constructor(readonly code: string, readonly status: number, readonly receipt?: GoLiveReceipt) {
@@ -17,16 +19,10 @@ export class GoLiveError extends Error {
 
 export type GoLiveApi = (method: "GET" | "POST" | "PUT", path: string, body?: Record<string, unknown>) => Promise<unknown>;
 export type ShadowRowReader = (stateDir: string) => Promise<Array<Record<string, unknown>>>;
-export interface GoLiveDeps {
-  /** The repository owning the fleet registry, rather than the instance's managed repository. */
-  registryRepository: string;
-  stateDir: string;
-  ledgerPath: string;
-  minShadowRuns?: number;
-  api?: GoLiveApi;
-  readRows?: ShadowRowReader;
-  writeLedger?: (path: string, line: LedgerLine) => void;
-}
+/** Reuse serve's composition-root wiring and the shared ledger port for request inputs. */
+type GoLiveRequestOptions = NonNullable<ServeDeps["onboardingGoLive"]> & LedgerWriterDeps &
+  Pick<RepoLayout, "stateDir"> & { registryRepository: string };
+export type { GoLiveRequestOptions as GoLiveDeps };
 export interface GoLiveReceipt {
   status: "review_pending";
   instance: string;
@@ -150,7 +146,7 @@ function liveRegistry(text: string, instance: string): string {
 }
 
 /** No registry write on disk and no auto-merge: the operator receives the reviewable PR. */
-export async function requestGoLive(input: { instance: string; actor: string }, deps: GoLiveDeps): Promise<GoLiveReceipt> {
+export async function requestGoLive(input: { instance: string; actor: string }, deps: GoLiveRequestOptions): Promise<GoLiveReceipt> {
   if (!input.actor.trim()) throw new GoLiveError("verified_operator_required", 403);
   const minimum = deps.minShadowRuns ?? 3;
   // Safety policy: at least one actual run, even when the install configures its own threshold.
@@ -160,7 +156,8 @@ export async function requestGoLive(input: { instance: string; actor: string }, 
   const repo = `repos/${deps.registryRepository}`;
   const base = stringField(record(await api("GET", repo)).default_branch);
   const baseSha = stringField(record(record(await api("GET", `${repo}/git/ref/heads/${encodeURIComponent(base)}`)).object).sha);
-  const path = `${repo}/contents/.remudero/daemon-instances.yaml`;
+  const registryPath = join(resolveRepoLayout("", () => undefined).stateDir, "daemon-instances.yaml");
+  const path = `${repo}/contents/${registryPath}`;
   const file = record(await api("GET", `${path}?ref=${encodeURIComponent(baseSha)}`));
   if (file.encoding !== "base64") throw new GoLiveError("registry_response_invalid", 502);
   const sha = stringField(file.sha);

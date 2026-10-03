@@ -167,7 +167,7 @@ import {
   writeProviderRoutingPolicyOverride,
   type ProviderRoutingPolicyOverrideInput,
 } from "./provider-routing-policy.js";
-import { appendLedger } from "./ledger.js";
+import { appendLedger, type LedgerWriterDeps } from "./ledger.js";
 import {
   buildAnalyticsRoute,
   coldAnalyticsSnapshot,
@@ -225,7 +225,7 @@ import {
 } from "./console-snapshot-cache.js";
 import { operatorIdentityFromFile, type OperatorIdentityFileIo } from "./operator-identity-file.js";
 import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, InstanceRegistryError, parseInstanceRegistry, requirePrimaryInstance } from "./instance-registry.js";
-import { GoLiveError, readShadowEvidence, requestGoLive, type GoLiveDeps } from "./onboarding-golive.js";
+import { GoLiveError, readShadowEvidence, requestGoLive, type GoLiveApi, type ShadowRowReader } from "./onboarding-golive.js";
 import {
   INSTANCES_VIEW_NAME,
   legacyRegistryBody,
@@ -525,7 +525,13 @@ export interface ServeDeps {
   /** Read-only, paginated GitHub-token inventory for the console onboarding candidate list. */
   onboardingRepositoryInventory?: OnboardingInventoryRouteOptions;
   /** Shadow history uses the gateway's instance state roots; writes target the fleet registry. */
-  onboardingGoLive?: Pick<GoLiveDeps, "minShadowRuns" | "api" | "readRows" | "writeLedger"> & { registryRepository?: string };
+  onboardingGoLive?: Pick<LedgerWriterDeps, "writeLedger"> & {
+    /** The repository owning the fleet registry, rather than the instance's managed repository. */
+    registryRepository?: string;
+    minShadowRuns?: number;
+    api?: GoLiveApi;
+    readRows?: ShadowRowReader;
+  };
   instances?: InstanceGatewayOptions;
   /**
    * W1-T2269: the console's OWN installation-token refresh loop — the SAME mechanism
@@ -1985,9 +1991,9 @@ export function buildOnboardingGoLiveRoutes(deps: ServeDeps): Route[] {
     deps.log?.("serve.onboarding_registry_unavailable", { reason: String(error) });
     return [];
   }
-  const answerError = (res: Parameters<typeof sendJson>[0], error: unknown): void => {
+  const goLiveErrorResponse = (error: unknown) => {
     if (!(error instanceof GoLiveError)) throw error;
-    sendJson(res, error.status, { error: error.code, ...(error.receipt ? { receipt: error.receipt } : {}) });
+    return { status: error.status, body: { error: error.code, ...(error.receipt ? { receipt: error.receipt } : {}) } };
   };
   return registry.instances.filter((instance) => instance.live).flatMap((instance): Route[] => {
     const stateDir = instance.name === (deps.instances?.coreInstance ?? CORE_INSTANCE)
@@ -1999,7 +2005,10 @@ export function buildOnboardingGoLiveRoutes(deps: ServeDeps): Route[] {
         method: "GET", path: `${prefix}/shadow-evidence`, scope: "read",
         handler: async (_req, res) => {
           try { sendJson(res, 200, await readShadowEvidence(stateDir, instance.name, deps.onboardingGoLive?.readRows)); }
-          catch (error) { answerError(res, error); }
+          catch (cause) {
+            const error = goLiveErrorResponse(cause);
+            sendJson(res, error.status, error.body);
+          }
         },
       },
       {
@@ -2013,7 +2022,10 @@ export function buildOnboardingGoLiveRoutes(deps: ServeDeps): Route[] {
               ...deps.onboardingGoLive, registryRepository, stateDir, ledgerPath: deps.ledgerPath,
             });
             sendJson(res, 202, receipt);
-          } catch (error) { answerError(res, error); }
+          } catch (cause) {
+            const error = goLiveErrorResponse(cause);
+            sendJson(res, error.status, error.body);
+          }
         }),
       },
     ];
