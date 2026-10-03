@@ -1,0 +1,47 @@
+- id: W1-T5521
+  title: "THE SWEEP'S PLAN-PR PREFLIGHT RUNS OFF THE DAEMON LOOP — W1-T5405's `planPrPreflightAtCommit` shells five checks through `spawnSync` (lint-plan, task-id-existence --require-open-prs, check-proof per proof, the shard census) inside the in-flight sweep, holding the daemon loop ~290 s per run about twice a day"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: daemon loop stalls traced to the sweep's refusal-amendment and plan-repair preflights"
+  plan_refs: [W1-T5405, W1-T5481, W1-T5284, W1-T5348, W1-T5361, W1-T5366]
+  files: [src/lib/plan-pr-emitter.ts, src/lib/sweep.ts, test/the-sweeps-plan-pr-preflight-runs-off-the-daemon-loop.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-03 on origin/main 3e026b90. W1-T5405 (#8898) makes the sweep's refusal-amendment rung
+    (`openAmendmentPr` in src/lib/sweep.ts) and its W1-T3390 plan-repair rung call
+    `planPrPreflightImpl(worktreePath, headSha, …)` before they push, with the default
+    `planPrPreflightAtCommit` (src/lib/plan-pr-emitter.ts). That function runs `git worktree add`
+    through `execFileSync` and then `planPrPreflight`. Every check there goes through `runInTree`, which is
+    `spawnSync(process.execPath, …)`: the plan lint, task-id-existence, `rmd check-proof` once per PR-body
+    and shard proof, and a `node --test` shard census. `changedShardProofs` adds `spawnSync` git reads.
+    The full sweep runs in the daemon process and shares its loop. W1-T5366 keeps the dispatch ticker from
+    waiting on it, but a synchronous stretch still freezes every timer. The operator measured about 290 s
+    per preflight, about twice a day.
+    W1-T5481 (#8950, merged) moved the board-review open-PR read off the loop with an async `ghJsonAsync`
+    prefetch, and this task is the same move for the preflight. W1-T5284 (queued) owns the sync worktree
+    adds, pushes and arms in daemon lanes. It does not cover this preflight.
+    Known sibling, NOT in scope: `sweepFeedbackLanding` also calls `planPrPreflightAtCommit` (via
+    src/lib/feedback-landing.ts). It can adopt the async form after this lands.
+    Rule 19: one concern (the preflight leaves the loop) across the emitter that runs it and the sweep
+    that awaits it, so the band is high with band_meaning: span.
+  design: |
+    1. Add an async `planPrPreflightAtCommitAsync` (and an async `planPrPreflight` core) to
+       src/lib/plan-pr-emitter.ts. Each check runs as an awaited child process (`spawn`/`execFile`
+       promisified), and the worktree add and remove are async too. Findings, refusal semantics and
+       `planPrPreflightAllows` stay byte-identical. The sync export stays for its CLI callers (`rmd approve`).
+    2. The sweep's `planPrPreflightImpl` seam becomes the async form, and both rungs `await` it. The rung
+       callbacks are already reached from async code (`draftRefusalAmendments` is async).
+  acceptance:
+    - claim: "the sweep's refusal-amendment and plan-repair preflight runs as awaited child processes: a timer scheduled before a slow preflight check fires while that check is still running, and a red verdict still pushes nothing and opens no PR"
+      proof: "unit test: test/the-sweeps-plan-pr-preflight-runs-off-the-daemon-loop.test.ts"
+  falsifier: |
+    Wire the sync `planPrPreflightAtCommit` back into the sweep. The suite's timer, scheduled before the
+    slow fake check starts, does not fire until the check returns.

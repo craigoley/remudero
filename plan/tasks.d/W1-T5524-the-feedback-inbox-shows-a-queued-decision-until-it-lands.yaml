@@ -1,0 +1,39 @@
+- id: W1-T5524
+  title: "THE FEEDBACK INBOX SHOWS A QUEUED DECISION UNTIL IT LANDS — since W1-T5460 a console accept or reject is staged for the daemon's landing sweep and answered `landing: \"queued\"` once, but GET /v1/feedback never says so, so the board shows the decision as if nothing were pending"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: follow-up to W1-T5460 (#8929), whose `queuedFeedbackLandings` was exported for this"
+  plan_refs: [W1-T5460, W1-T5525]
+  files: [src/lib/panel-graph.ts, openapi/daemon.yaml, test/the-feedback-inbox-shows-a-queued-decision-until-it-lands.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-03 on origin/main 3e026b90. W1-T5460 (#8929) changed POST /v1/feedback/decision
+    (src/lib/panel-graph.ts) to stage the decision under the state root and answer at once. The route
+    computes `queued` from `queuedFeedbackLandings(deps.inboxRoot)` (src/lib/feedback-landing.ts, "what
+    the board may show as queued") and returns `landing: "queued"` in that one response. GET /v1/feedback
+    (`buildFeedbackInboxRoute`) decorates entries with `discharged` and `dischargeUndecidable` but never
+    reads the queue. A board that reloads, or a second viewer, cannot tell that a decision is staged and not
+    yet on main. The pending record stays queued until `sweepFeedbackLanding` sees fetched origin/main
+    carry it, which can be minutes on a busy daemon.
+    Rule 19: one concern (the inbox read shows the queue) across the route and its openapi contract, so
+    the band is high with band_meaning: span.
+  design: |
+    In `buildFeedbackInboxRoute`, read `queuedFeedbackLandings(deps.inboxRoot)` once per request when
+    `deps.feedbackLand` is wired, and set `landing: "queued"` on each entry whose repo path
+    (`feedbackEntryRepoPath`) is queued. Never write anything. If the queue read fails, set
+    `landingUnknown: true` on every entry; never treat a failed read as "nothing queued". Document both
+    fields on the feedback entry schema in openapi/daemon.yaml, next to `discharged`.
+  acceptance:
+    - claim: "GET /v1/feedback marks an entry whose decision is staged for the landing sweep with landing: queued until the queue drops it, marks every entry landingUnknown when the queue cannot be read, and the openapi entry schema documents both fields"
+      proof: "unit test: test/the-feedback-inbox-shows-a-queued-decision-until-it-lands.test.ts"
+  falsifier: |
+    Drop the queue read from the GET route. The suite's entry with a staged decision reads back with no
+    `landing` field.

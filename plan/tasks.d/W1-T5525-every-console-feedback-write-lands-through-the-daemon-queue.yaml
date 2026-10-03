@@ -1,0 +1,43 @@
+- id: W1-T5525
+  title: "EVERY CONSOLE FEEDBACK WRITE LANDS THROUGH THE DAEMON QUEUE — POST /v1/feedback, POST /v1/skills/run and the escalation reply route still land on the request path through `requestPathLand` with `preflight: \"skip-request-path\"`; move them onto W1-T5460's queue and delete both"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: the remaining half of W1-T5460 (#8929), after #8891 and #8928 added the request-path skip"
+  plan_refs: [W1-T5460, W1-T5473, W1-T5348, W1-T5524]
+  files: [src/lib/panel-graph.ts, src/lib/panel-skill-run.ts, src/lib/panel-actions.ts, src/lib/feedback-landing.ts, test/every-console-feedback-write-lands-through-the-daemon-queue.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-03 on origin/main 3e026b90. `requestPathLand` (src/lib/panel-actions.ts) wraps landing
+    options with `preflight: "skip-request-path"`, and `landFeedback` (src/lib/feedback-landing.ts)
+    honours it by skipping the W1-T5348 filer preflight. #8891 added it for the console's request paths
+    and #8928 (W1-T5473) for the escalation reply route, so a request does not wait minutes on the
+    preflight. The cost is that these writes land with no preflight at all. W1-T5460 (#8929) built the
+    right shape for POST /v1/feedback/decision: pass `stateRoot` so the record is staged under the state
+    root, and let the daemon's `sweepFeedbackLanding` land it with the preflight run once per pass. Its
+    remaining callers on main:
+    - `buildSubmitFeedbackRoute` (POST /v1/feedback, src/lib/panel-graph.ts), for both the capture and
+      the replyTo status change;
+    - the grill capture in POST /v1/skills/run (src/lib/panel-skill-run.ts);
+    - the escalation reply route in src/lib/panel-actions.ts.
+    Rule 19: one concern (console writes land through the queue) across the three route modules and the
+    landing module whose skip option it deletes, so the band is high with band_meaning: span.
+  design: |
+    1. Each caller above passes `{ ...deps.feedbackLand, stateRoot: deps.inboxRoot }` the way the
+       decision route does, and answers `landing: "queued"` when the record was staged.
+    2. Delete `requestPathLand` and the `preflight?: "skip-request-path"` option with its branch in
+       `landFeedback`, so no code path can land without the preflight.
+    3. Rewrite the suites that pinned the request-path skip so they pin the queued answer instead.
+  acceptance:
+    - claim: "POST /v1/feedback (capture and replyTo), POST /v1/skills/run's grill capture and the escalation reply route each stage their record for the daemon landing sweep and answer landing: queued, and no code path can land feedback without the filer preflight"
+      proof: "unit test: test/every-console-feedback-write-lands-through-the-daemon-queue.test.ts"
+  falsifier: |
+    Restore `requestPathLand` on POST /v1/feedback. The suite's capture lands on the request path with
+    the preflight skipped and nothing is staged.

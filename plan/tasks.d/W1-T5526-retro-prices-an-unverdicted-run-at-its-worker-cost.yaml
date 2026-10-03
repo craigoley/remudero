@@ -1,0 +1,39 @@
+- id: W1-T5526
+  title: "RETRO PRICES AN UNVERDICTED RUN AT ITS WORKER COST — `gatherRuns` prices a run with no verdict line at its FIRST `cost_usd` row of any step, which on settled runs is a probe or `cost.anomaly` row, so budget recalibration reads skewed samples"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low
+  origin: "operator session 2026-10-03: found building W1-T5474 (#8933)"
+  plan_refs: [W1-T5474, W1-T5527]
+  files: [src/lib/retro.ts, test/retro-prices-an-unverdicted-run-at-its-worker-cost.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-03 on origin/main 3e026b90. `gatherRuns` (src/lib/retro.ts) sets
+    `costLine = verdictLine ?? lines.find((l) => typeof l.cost_usd === "number")`. A run credited through
+    the ledger (`ledgerCreditFor`) can settle with no verdict line. Its cost is then whichever row first
+    carries `cost_usd`. W1-T5474's `CONFIG_GARDEN_LEDGER_STEPS` (src/lib/config-gardener.ts) lists those
+    rows under "gatherRuns' cost fallback": `cost.anomaly`, `containment.probe`, `isolation.probe`,
+    `risk_judge.decision`, `budget.warning`. Building W1-T5474 found that on 120 live settled runs the first
+    such row was a probe or a `cost.anomaly` row, not the worker's own cost. `gatherRuns` feeds the config
+    gardener's budget recalibration and `detectCostAnomalies` (src/lib/cost-anomaly.ts), so those samples
+    are priced wrong.
+    The function already scopes `numTurns` and `outputTokens` to `DONE_STEPS` (`recon.done`,
+    `implement.done`, `implement.resumed`): "the worker calls that spend this run's own output tokens".
+  design: |
+    With no verdict line, price the run from its `DONE_STEPS` rows' `cost_usd` (summed, with
+    `total_cost_usd` as the fallback, the precedence `rowCostUsd` already uses). Probe, anomaly, judge and
+    warning rows never set a run's cost. A run with no worker cost row and no verdict line reports
+    `costUsd: 0` with a `costSource: "none"` marker, so it is not read as a free run. Where a verdict line
+    exists, keep the current behaviour.
+  acceptance:
+    - claim: "a run with no verdict line is priced from its worker rows' cost, never from an earlier probe, cost.anomaly, risk_judge.decision or budget.warning row, and a run with no worker cost row is marked costSource none"
+      proof: "unit test: test/retro-prices-an-unverdicted-run-at-its-worker-cost.test.ts"
+  falsifier: |
+    Restore `lines.find((l) => typeof l.cost_usd === "number")`. The suite's run, whose first cost row is
+    a `containment.probe`, is priced at the probe's cost.

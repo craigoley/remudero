@@ -1,0 +1,63 @@
+- id: W1-T5514
+  title: "A LEDGER ROTATION NEVER LOSES A CONCURRENT APPEND — `rotateLedgerLocked` does its catch-up read, then the convergence shed and a ~4 MB staged write plus fsync, and only then renames over the live path; a row another process appends in that window goes to the unlinked inode and is in neither the archive nor the new live file"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-03: PR #8887's review.posted row, appended at 17:33:53Z during serve's 17:33:45Z rotation, exists in no ledger file"
+  plan_refs: [W1-T244, W1-T230, W1-T4393, W1-T5516, W1-T5517]
+  files: [src/lib/ledger.ts, src/run-task.ts, test/rows-a-second-process-appends-throughout-a-rotation-all-survive.test.ts, test/an-append-inside-the-rotation-rename-window-survives.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-03 on origin/main 3e026b90. `rotateLedgerLocked` (src/lib/ledger.ts) works in this order:
+    1. it snapshots the live file through `readSnapshotWithIdentity`;
+    2. it runs the retention passes;
+    3. it does the catch-up read: `statSync(path).size` as `sizeNow`, then
+       `readSyncRange(path, size0, sizeNow)`;
+    4. it runs the W1-T244 convergence shed;
+    5. it builds `newLiveContent` and calls `writeFileAtomic(path, newLiveContent, beforeRename)`, which
+       writes about 4 MB to a `.rotate-tmp-*` stage, fsyncs it, and only then renames it over the live path.
+    `appendLedger` opens the path by name for each row. Any append from another process after step 3 lands
+    on the old inode, and the rename unlinks that inode. The archive was written from the step-1 snapshot,
+    so the row is in neither file. The `rotateLedger` doc comment calls this "the one residual sliver, the
+    same one `logrotate` has". It is not a sliver: it spans a multi-megabyte write and an fsync.
+    Operator evidence 2026-10-03: serve (container 52cdda082fda, pid 125217) rotated at 17:33:45Z and its
+    loop was blocked about 10 s (`runtime.loop_lag` maxMs 10276 at 17:33:56Z). The daemon posted PR #8887's
+    remudero-review status at 17:33:53Z and appended `review.posted`. That row is nowhere: all 388 `.gz`
+    rotations and the live file were searched, and the control found the other 148 of 149 `review.posted`
+    rows. The consequence was `automerge.arm_skipped` (the W1-T230 ledger gate fails closed), a second
+    full LLM review, and the merge 43 minutes late.
+    test/ledger-rotation-is-locked.test.ts runs its hook through the injected `now()`, which fires before
+    the catch-up read. That is why it never tested this window.
+    The comment above the `armIfVerdictPermits` call in `runReview` (src/run-task.ts) says "Rotation
+    cannot lose it either". That is false today, and it is corrected here.
+  design: |
+    1. Close the window in `rotateLedgerLocked`. Keep an fd open on the snapshotted inode across the rename.
+       After the rename, read [sizeNow, EOF) from that fd and append it to the new live file under the same
+       lock, repeating until EOF is stable. An alternative that is also acceptable: stage the new content
+       first (the sharable prefix), then do the catch-up read and the rename back to back with no
+       multi-megabyte write between them. That alternative still leaves a syscall-sized gap, so it must
+       also do the post-rename drain.
+    2. Correct the `rotateLedger` doc comment ("residual sliver") and the `runReview` comment above the arm
+       call ("Rotation cannot lose it") to state the guarantee the code now gives.
+    3. The concurrency suite spawns a child `node` process that appends K numbered rows in a tight loop
+       while the parent rotates an oversized fixture several times with `ceilingBytes` 1 MiB and
+       `smoothingWindowMs` 0. The union of the live file, every `.gz` and every plain archive must hold
+       every sequence number exactly once or more.
+    4. The deterministic suite adds a test-only seam that fires between the staged write and the rename
+       (e.g. through `writeFileAtomic`'s `beforeRename`, or a named hook in the rotation's fs deps). It
+       appends one row there and asserts the row survives.
+  acceptance:
+    - claim: "rows a second process appends throughout a rotation all survive in the live ledger or an archive"
+      proof: "unit test: test/rows-a-second-process-appends-throughout-a-rotation-all-survive.test.ts"
+    - claim: "a row appended between the rotation's staged write and its rename survives in the live ledger"
+      proof: "unit test: test/an-append-inside-the-rotation-rename-window-survives.test.ts"
+  falsifier: |
+    Remove the post-rename drain. The deterministic suite's in-window row is in no file, and the
+    concurrency suite reports missing sequence numbers on a rotation that overlaps the child's appends.
