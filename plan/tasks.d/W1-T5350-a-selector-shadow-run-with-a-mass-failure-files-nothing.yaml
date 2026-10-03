@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-02: selector-shadow gardener churn research"
   plan_refs: [W1-T4439, W1-T4839, W1-T4406]
   files: [src/lib/selector-shadow-gardener.ts, test/a-selector-shadow-run-with-a-mass-failure-files-nothing.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

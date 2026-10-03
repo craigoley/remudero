@@ -1,0 +1,46 @@
+- id: W1-T5474
+  title: "THE CONFIG GARDENER READS ONLY THE LEDGER STEPS IT PRICES, AND THE GARDEN HEAP CAP DROPS TO 2048 MB — its unfiltered 60-day ledger union read peaks at 3,163 MB of heap (2.85M rows) and dies under a 1,536 MB cap"
+  repo: remudero
+  depends_on: [W1-T5365]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: the backstop comment W1-T5365 (PR #8887) left on GARDEN_CHILD_HEAP_LIMIT_MB"
+  plan_refs: [W1-T5363, W1-T5364, W1-T5365]
+  files: [src/lib/config-gardener.ts, src/lib/garden-registry.ts, test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    W1-T5365 (PR #8887, open at filing) runs each garden child under `--max-old-space-size` equal to
+    `GARDEN_CHILD_HEAP_LIMIT_MB` (src/lib/garden-registry.ts). It sets the cap to 4096 with a BACKSTOP
+    comment: "MEASURED 2026-10-03: config-gardener's unfiltered 60-day union read peaks at 3,163 MB of
+    heap (2.85M rows) and dies under a 1,536 MB cap, so this sits above it. Drop it to 2048 once that
+    read is filtered by step."
+    `configInventory` (src/lib/config-gardener.ts) calls
+    `readLedgerUnionRecordsSync(deps.stateDir, { rotationWindowMs: 60 days, minRotations: 4 })` with no
+    `step` filter. It then passes every row to `gatherRuns`, `capDerivation` and
+    `aggregateCacheHitTotals` / `measureKnowledgeBudgetPressure`. W1-T5363 and W1-T5364 (both merged)
+    made the backlog and ci-friction gardeners pass a step filter. The config gardener is the last
+    unfiltered reader, and it is what holds the cap at twice the size the other gardens need.
+    Rule 19: one concern (the config garden's memory bound) across two production files, so the band
+    is high with band_meaning: span. The cap can only come down once the read is filtered, so the two
+    changes ship together and are not split.
+  design: |
+    1. Export one constant set, `CONFIG_GARDEN_LEDGER_STEPS`, holding every step the inventory's consumers
+       read (`gatherRuns`, `capDerivation` including `learnings.injected`, and the cache-hit totals). Pass
+       it as `readLedgerUnionRecordsSync`'s `step` filter with `refuseIncomplete: true`, the way W1-T5363
+       did. Keep `ConfigGardenSources.ledgerRows` as the seam.
+    2. Build an inventory from a fixture whose rows include steps outside the set, and assert it equals the
+       inventory from the unfiltered rows. This proves the filter drops nothing a consumer reads.
+    3. Lower `GARDEN_CHILD_HEAP_LIMIT_MB` to 2048 and rewrite its BACKSTOP comment to cite this task.
+  acceptance:
+    - claim: "the config gardener reads the ledger union filtered to CONFIG_GARDEN_LEDGER_STEPS, its inventory is unchanged by rows outside that set, and the garden child heap cap is 2048 MB"
+      proof: "unit test: test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts"
+  falsifier: |
+    Drop the `step` option from `configInventory`'s ledger read. The suite's recording reader sees an
+    unfiltered call. Drop a step the cap derivation reads from the set, and the filtered and unfiltered
+    inventories differ.

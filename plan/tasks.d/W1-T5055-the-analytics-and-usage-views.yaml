@@ -15,6 +15,12 @@
     - test/analytics-view.test.ts
     - src/lib/read-model-worker.ts
     - src/lib/nav-badge-view.ts
+    - src/lib/read-model-db.ts
+    - test/read-model-db.test.ts
+    - src/lib/read-model-slow-lane.ts
+    - test/a-slow-view-build-never-stalls-projection.test.ts
+    - test/read-model-worker.test.ts
+    - test/nav-badge-from-the-read-model.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -27,6 +33,13 @@
     instance's snapshot in core; usage carries the usage-v1 numbers /fleet needs. Both answer from the
     persisted rows after a restart. nav-badge-view.ts reads the worker's own row and nav-badge-sources.json is
     retired. Sources: analytics:<i>. Register both in read-model-worker.ts.
+    Use the existing SQLite adapter and fenced writer transaction for the source_snapshot schema;
+    publish a complete producer snapshot and its original source timestamp together. A failed refresh
+    retains the last committed snapshot with visible stale/unavailable source evidence, not fresh zeros.
+    Keep refresh work off serve's event loop and prove worker restart, lost writer lease, interrupted
+    commit, and mixed-instance incomplete-source behavior. Merge ratios from matching numerators and
+    denominators; never average instance quantiles. Do not activate console consumers until the merged
+    serve generation advertises and serves the contract.
   acceptance:
     - claim: "the analytics view merges every instance snapshot"
       proof: 'grep: test("W1-T5055: the analytics view merges every instance snapshot" in test/analytics-view.test.ts'
@@ -39,9 +52,10 @@
     fails. Serve core's snapshot alone: the merge proof misses the second instance.
   note: |
     HOLD RELEASED 2026-10-01 (dispatch_hold deleted): P4-T04, the read-model slow-lane worker thread, merged as #8264 (1647850ad, src/lib/read-model-slow-lane.ts).
-    DISPATCH HOLD: waits for P4-T04 (the read-model slow-lane worker thread). A Phase 4 critical-path task is hand-built on a run-unfiled
-    branch with no plan id, so depends_on cannot name it. RELEASE: one plan amendment deleting
-    dispatch_hold once that merges (tracked in arch-plan.md, Phase 4).
+    SCOPE CORRECTION 2026-10-02: declare the SQLite persistence adapter, slow-lane scheduler and their
+    actual test seams; the previous files list could not implement its own restart-persistence design.
+    This amendment files scope only, not implementation or deployment credit. Existing released hold
+    remains released. Refresh both scope-time checks and the actual runnableCandidates frontier before build.
     Design: ~/Remudero/.session-scratch/arch-phase4-design.md §1.1, D10 and §10.
     Scope-time checks 2026-10-01: no run-W1-T5048..5066 branch on origin; no origin/main commit names
     these ids; no plan record on origin/main or an open PR head covers this change. Reserved from the

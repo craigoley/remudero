@@ -9,7 +9,7 @@
   risk: medium
   origin: "operator session 2026-10-02: the 14:00Z core recycle"
   files: [deploy/recycle-container.sh, test/a-recycle-that-dies-before-it-stops-the-container-takes-its-pause-with-it.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
