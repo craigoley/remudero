@@ -10,6 +10,11 @@
   files:
     - scripts/diff-class.mjs
     - test/diff-class.test.ts
+  rationale: |
+    Doctrine bodies and the root CLAUDE.md and AGENTS.md files contain repository
+    guidance. Treating those paths as documentation lets prose changes skip the
+    instrumented coverage suite while mixed doctrine and source diffs still run
+    it. Lookalike paths outside those documentation locations must remain source.
   acceptance:
     - claim: isDocsPath returns true for any path under doctrine/ and for the root files CLAUDE.md and AGENTS.md, in addition to the existing docs/ prefix
       proof: "unit test: isDocsPath returns true for doctrine/, CLAUDE.md and AGENTS.md paths"
