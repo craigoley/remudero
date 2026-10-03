@@ -11291,23 +11291,17 @@ export async function runFixRung(opts: {
         },
       });
     const fixReport = workerTranscript(fixResult);
-    let harnessCommitCount = harnessCommit(fixReport);
+    const fixLeftEdits = () => (deps.worktreeHasUncommittedChanges ?? worktreeHasUncommittedChanges)(opts.worktreePath);
     // W1-T4450: a round that left edits but no COMMIT_MESSAGE line is not discarded. W1-T5325: a
-    // writer that cannot resume (codex/cash) gets the subject derived from the failing check HERE,
-    // with no second dispatch — that re-ask was a fresh session whose loss refused the whole round.
-    // A resumable writer is still asked once in its own session (W1-T4052).
-    const derivedFirst = harnessCommitCount === 0 &&
-      harnessCommitRefusalReason === MISSING_COMMIT_MESSAGE_REASON &&
-      (deps.worktreeHasUncommittedChanges ?? worktreeHasUncommittedChanges)(opts.worktreePath)
-      ? writerCannotResume(fixResult.provider ?? fixArgs.mountProvider, fixArgs.tools)
-        ? derivedFixCommit(priorCiFailures?.[0]?.name ?? unmet[0]?.claim ?? gateFailuresNow?.[0]?.reason, opts.prUrl) ?? "ask"
-        : "ask"
+    // writer that cannot resume (codex/cash) gets the subject derived from the failing check on the
+    // FIRST commit attempt, so the missing line is never refused and never re-asked — that re-ask was
+    // a fresh session whose loss refused the whole round. A worker-authored line still wins inside
+    // the helper. A resumable writer is still asked once in its own session (W1-T4052).
+    const derivedFirst = fixHarnessOwnsGit && writerCannotResume(fixResult.provider ?? fixArgs.mountProvider, fixArgs.tools) && fixLeftEdits()
+      ? derivedFixCommit(priorCiFailures?.[0]?.name ?? unmet[0]?.claim ?? gateFailuresNow?.[0]?.reason, opts.prUrl)
       : undefined;
-    if (typeof derivedFirst === "object") {
-      harnessCommitRefusalReason = undefined;
-      harnessCommitCount = harnessCommit(fixReport, { subjectSource: "harness-derived", derivedCommit: derivedFirst });
-    }
-    if (derivedFirst === "ask") {
+    let harnessCommitCount = harnessCommit(fixReport, { derivedCommit: derivedFirst });
+    if (harnessCommitCount === 0 && harnessCommitRefusalReason === MISSING_COMMIT_MESSAGE_REASON && fixLeftEdits()) {
       deps.log("fix.commit_line_requested", { strike: attempt, round });
       deps.say("fix rung: no COMMIT_MESSAGE line in the report — resuming the worker's session once to ask for it");
       const askReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}-ask`, systemClock.now()), fixLaneBenchmarkWork(opts.task, deps.ledgerPath));

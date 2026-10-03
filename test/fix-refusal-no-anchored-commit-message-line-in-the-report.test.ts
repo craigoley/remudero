@@ -14,6 +14,7 @@ import type { ReviewVerdict } from "../src/lib/review.js";
 
 async function fixRound(t: TestContext, options: {
   report?: string; edits?: boolean; ahead?: number; refusal?: string; ci?: boolean;
+  provider?: WorkerResult["provider"]; answer?: string;
 } = {}) {
   t.mock.method(childProcess, "execFileSync", (_command: string, args: string[]) => {
     if (args.includes("rev-parse")) return "head-a";
@@ -32,9 +33,9 @@ async function fixRound(t: TestContext, options: {
     testTheater: false, summary: "still failing", floorDegraded: false, capped: false,
     keywordOnly: false, planOnly: false, headSha: "head-a", reviewerOutcome: "failure",
   };
-  const worker = (): WorkerResult => ({
-    provider: "codex", sessionId: "writer-session", costUsd: 0, numTurns: 1,
-    text: options.report ?? "REPORT\nI repaired the check but omitted the commit line.", blocks: [], stderr: "",
+  const worker = (text: string): WorkerResult => ({
+    provider: options.provider ?? "codex", sessionId: "writer-session", costUsd: 0, numTurns: 1,
+    text, blocks: [], stderr: "",
     subtype: "success", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [],
     model: "codex", effort: "medium", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
     modelUsage: {}, compactionEvents: [], qualitySuspect: false,
@@ -48,7 +49,12 @@ async function fixRound(t: TestContext, options: {
     ciFailures: options.ci === false ? undefined : [{ name: "ci-gate", logTail: "the check failed" }],
     reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: root, reviewerMount: mount },
     deps: {
-      spawn: async (args) => { prompts.push(args); return worker(); },
+      spawn: async (args) => {
+        prompts.push(args);
+        return worker(prompts.length > 1 && options.answer !== undefined
+          ? options.answer
+          : options.report ?? "REPORT\nI repaired the check but omitted the commit line.");
+      },
       waitForCiGreen: async () => "green", runReview: async () => ({ ...review, state: "success", summary: "fixed" }),
       fetchPrBody: async () => "REPORT", push: () => {},
       issues: { create: () => "https://github.com/acme/remudero/issues/1", listOpen: () => [], comment: () => {} } as IssueGateway,
@@ -116,4 +122,16 @@ test("a review fix derives its subject from the unmet claim", async (t) => {
   assert.equal(outcome.outcome, "fixed");
   assert.equal(prompts.length, 1);
   assert.match(messages[0]!, /^fix: repair repair the check on #5325/);
+});
+
+test("a resumable writer is still asked once in its own session, and its answer is the subject", async (t) => {
+  const { outcome, rows, prompts, messages } = await fixRound(t, {
+    provider: "claude", answer: "REPORT\nCOMMIT_MESSAGE: fix(src): repair the check as asked",
+  });
+  assert.equal(outcome.outcome, "fixed");
+  assert.equal(prompts.length, 2, "a resumable writer gets the one in-session ask");
+  assert.equal(prompts[1]!.resumeSessionId, "writer-session");
+  assert.equal(rows.filter((row) => row.step === "fix.commit_line_requested").length, 1);
+  assert.deepEqual(messages, ["fix(src): repair the check as asked"]);
+  assert.equal(rows.find((row) => row.step === "implement.harness_commit")?.subject_source, "re-asked");
 });
