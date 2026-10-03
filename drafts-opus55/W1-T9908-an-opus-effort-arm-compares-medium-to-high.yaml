@@ -1,0 +1,46 @@
+- id: W1-T9908
+  title: "EVERY OPUS SEAT IS PINNED AT HIGH EFFORT FROM THE OPUS 5 ERA AND NO ARM COMPARES IT TO MEDIUM — the guide says 5.5 medium matches or beats Opus 5 high, and the routing experiments only ever vary the model"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 25.00
+  priority: 4
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-03: audit of the repo against Anthropic's 'Prompting Claude Opus 5.5' guide"
+  plan_refs: ["W1-T3958", "W1-T4670", "W1-T3158"]
+  files:
+    - src/lib/routing-experiments.ts
+    - test/an-opus-effort-arm-compares-medium-to-high.test.ts
+  rationale: |
+    WHY THIS EXISTS. Guide 'Calibrate effort': effort names do not mean the same thinking across models; at
+    Opus 5.5 `medium` matches or exceeds Opus 5 `high` on coding and knowledge-work evals, `low` comes close on
+    several, and 5.5 tends to think MORE per turn at a given level; set it explicitly and test levels against
+    YOUR evals, reserving xhigh and max for measured gains. Here effort is explicit everywhere (good), but
+    .remudero/mounts.yaml pins architect, retro, judge, step_up and design implement at opus/high, a level
+    carried from the Opus 5 era (the file's own comment says opus -> Opus 5). The mount-recommender's arms are
+    provider/model/effort, yet routing-experiments.ts (~34, 46, 56) only has effort high, and the recommender
+    'filed ZERO recommendations across 959 sweeps'. Opus seats are low-volume, so savings are modest: this is a
+    MEASUREMENT task, not a flip.
+
+  design: |
+    (i) Add an experiment arm, opus/medium versus opus/high, for the seats that run on Opus 5.5 (retro, design
+    implement, judge, step_up), reusing the existing experiment and rmd routing-ab machinery. (ii) No mount
+    changes in this task; the output is a cell with n at or above DEFAULT_MIN_SAMPLE_N. (iii) Record effort in
+    the arm so the comparison is auditable.
+
+  acceptance:
+    - claim: "an experiment arm compares opus medium to opus high for the Opus seats"
+      proof: 'grep: test("W1-T9908: an experiment arm compares opus medium to opus high for the Opus seats" in test/an-opus-effort-arm-compares-medium-to-high.test.ts'
+    - claim: "routing-ab reports the effort arm with its sample size"
+      proof: 'grep: test("W1-T9908: routing-ab reports the effort arm with its sample size" in test/an-opus-effort-arm-compares-medium-to-high.test.ts'
+  falsifier: |
+    CLOSE THIS TASK without implementation if routing-experiments already contains an effort arm for an Opus
+    mount, or if Opus seats fall below the minimum sample size the recommender needs for a year of traffic
+    (then record that and close).
+
+  notes: |
+    Source: https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5 (audit 2026-10-03). One concern per task; do not widen. Unverified claims are marked INFERRED in the audit and must be re-checked at head before building.

@@ -1,0 +1,56 @@
+- id: W1-T9902
+  title: "A WORKER TURN THAT ENDS IN TEXT WITH ACCEPTANCE STILL OPEN ENDS THE RUN — the harness has no general continuation, only three one-shot resumes keyed to a decision request, a missing commit line and fix strikes, so a text-only end_turn becomes a no_pr verdict or a partial fallback PR"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  priority: 4
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-03: audit of the repo against Anthropic's 'Prompting Claude Opus 5.5' guide"
+  plan_refs: ["W1-T465", "W1-T4052", "W1-T4450", "W1-T1269"]
+  files:
+    - src/run-task.ts
+    - src/lib/worker.ts
+    - test/a-text-only-end-of-turn-is-continued-twice-at-most.test.ts
+  rationale: |
+    WHY THIS EXISTS. Guide 'Unattended agentic runs': treat a text-only end of turn as a report; if items are
+    still open and no blocker is stated, send a short user message naming them; stop after two or three
+    automatic continuations so a genuinely stuck run ends and can be reviewed. This harness: a Claude worker
+    that ends a turn with text and no tool call exits `claude -p`, the harness sees subtype success, and the
+    result is no_pr (drain-halting) at zero commits, or, after a `wip:` checkpoint, a fallback PR of partial
+    work repaired later at review and fix cost. W1-T465 left remedy (c), refusing at commits_ahead 0, as an
+    open decision and cautions that commits_ahead 0 alone is NOT a safe discriminator (honest no-ops exist).
+    Existing resumes (run-task.ts ~17013 DECISION_REQUEST, ~17173 resumeForMissingCommitLine, fix strikes) are
+    one-shot and each hard-coded to one trigger.
+
+  design: |
+    (i) Reuse the resumeForMissingCommitLine seam. When a Claude implement or fix turn ends with subtype
+    success, finalStopReason not a tool call, the required PR or report line absent or commit count zero, AND no
+    ALREADY_SATISFIED, DECISION_REQUEST or REFUSED claim in the report, resume the SAME session once with a short
+    message naming the open acceptance claims: 'Your acceptance list still has open items: <claims>. Continue.
+    If one is blocked, say what is blocking it.'
+    (ii) Cap at TWO continuations per run, ledgered as implement.continued with the reason and the count; the
+    cap is a BACKSTOP that makes a stuck run end, so its comment must say so.
+    (iii) Gate by provider: Claude only. Codex and cash lanes keep today's behaviour. maxBudgetUsd and occupancy
+    still apply to the extra spawn.
+    (iv) NEVER fire on an honest no-op: ALREADY_SATISFIED and a premise-rotted REFUSED are the wanted stops.
+    (v) Do not weaken the W1-T465 no-background-job wording.
+
+  acceptance:
+    - claim: "a text-only end of turn with open acceptance is continued once with the open claims named"
+      proof: 'grep: test("W1-T9902: a text-only end of turn with open acceptance is continued once and names the open claims" in test/a-text-only-end-of-turn-is-continued-twice-at-most.test.ts'
+    - claim: "a run that never makes progress is continued at most twice and then ends"
+      proof: 'grep: test("W1-T9902: a run that never makes progress is continued at most twice" in test/a-text-only-end-of-turn-is-continued-twice-at-most.test.ts'
+    - claim: "ALREADY_SATISFIED and DECISION_REQUEST and REFUSED are never continued"
+      proof: 'grep: test("W1-T9902: an ALREADY_SATISFIED or DECISION_REQUEST or REFUSED turn is never continued" in test/a-text-only-end-of-turn-is-continued-twice-at-most.test.ts'
+  falsifier: |
+    CLOSE THIS TASK without implementation if the measure task in this pack (final stop reason by model) shows
+    the Claude text-only early-stop rate on implement is negligible, or if `git grep -n "implement.continued"`
+    shows a generic continuation already exists.
+
+  notes: |
+    Source: https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5 (audit 2026-10-03). One concern per task; do not widen. Unverified claims are marked INFERRED in the audit and must be re-checked at head before building.

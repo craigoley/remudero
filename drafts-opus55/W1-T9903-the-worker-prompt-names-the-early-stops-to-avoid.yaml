@@ -1,0 +1,53 @@
+- id: W1-T9903
+  title: "THE WORKER PROMPT NEVER NAMES THE WAYS A TURN ENDS EARLY — it ends on 'End with a REPORT', then a SELF_FORECAST line is appended AFTER the PR_URL-is-last rule, and nothing names the four stops the Opus 5.5 guide says to forbid"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 40.00
+  priority: 4
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-03: audit of the repo against Anthropic's 'Prompting Claude Opus 5.5' guide"
+  plan_refs: ["W1-T465", "W1-T4636"]
+  files:
+    - src/lib/compaction.ts
+    - src/lib/prompt-render.ts
+    - src/run-task.ts
+    - test/the-worker-prompt-names-the-early-stops-to-avoid.test.ts
+  rationale: |
+    WHY THIS EXISTS. The guide gives a paragraph for fully unattended agents that names four early stops (a
+    summary that announces the next step with no tool call; an offer to carry on that waits for an answer nobody
+    will give; a list of decisions that, by the model's own account, block nothing; deciding this is a good place
+    to report) and the stops that ARE wanted (nothing can move without the user, or the blocker is deliberately
+    protected). The implement and fix prompts (compaction.ts outputContractLines ~348-503; prompt-render.ts
+    ~502-545) say 'End with a REPORT whose LAST line is exactly PR_URL' and sanction two stops (DECISION_REQUEST
+    and ALREADY_SATISFIED), but never say how turns end, never tell the worker nobody is there to answer, and
+    the run-task.ts spawn appends SELF_FORECAST AFTER the 'LAST line' rule (parsers are anchored so it works,
+    but the tail is contradictory). Applicability: the guide is about Opus 5.5 and only ~12% of implement shards
+    start on Opus, so GATE the paragraph by served model and measure before widening.
+
+  design: |
+    (i) Add the guide's early-stop paragraph, reworded for repo semantics (the wanted stops are
+    DECISION_REQUEST, ALREADY_SATISFIED, REFUSED and blocked), as the LAST block of outputContractLines so the
+    compaction ANCHOR re-injects it byte-identically. It is a prompt surface: satisfy scripts/prompt-surface-
+    gate.mjs. (ii) Tidy the tail ordering: SELF_FORECAST before the final turn-ending instruction, PR_URL last.
+    (iii) Apply to Claude Opus 5.5 lanes first; Sonnet, Codex and cash lanes keep today's text until measured.
+    (iv) Keep the existing no-background-job clause verbatim. (v) The paragraph also says the confirmation step
+    for risky actions still applies; keep that sentence.
+
+  acceptance:
+    - claim: "the implement contract names the early stops to avoid and the stops that are wanted"
+      proof: 'grep: test("W1-T9903: the implement contract names the early stops to avoid and the stops that are wanted" in test/the-worker-prompt-names-the-early-stops-to-avoid.test.ts'
+    - claim: "the final line of the implement prompt is the PR_URL rule with the self forecast ahead of it"
+      proof: 'grep: test("W1-T9903: the PR_URL rule is the last line with the self forecast ahead of it" in test/the-worker-prompt-names-the-early-stops-to-avoid.test.ts'
+    - claim: "the paragraph is absent for any model it is not gated to"
+      proof: 'grep: test("W1-T9903: the early-stop paragraph is absent for any model it is not gated to" in test/the-worker-prompt-names-the-early-stops-to-avoid.test.ts'
+  falsifier: |
+    CLOSE THIS TASK without implementation if the measure task in this pack shows Opus 5.5 implement runs do not
+    end early, or if the contract already names these stops.
+
+  notes: |
+    Source: https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5 (audit 2026-10-03). One concern per task; do not widen. Unverified claims are marked INFERRED in the audit and must be re-checked at head before building.

@@ -1,0 +1,48 @@
+- id: W1-T9900
+  title: "NOBODY CAN SAY HOW OFTEN A CLAUDE WORKER STOPS EARLY OR IS REFUSED — the worker result records neither its final stop reason nor a safeguard refusal in any aggregate, so every premature-stop remedy is argued without a baseline"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 25.00
+  priority: 4
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-03: audit of the repo against Anthropic's 'Prompting Claude Opus 5.5' guide"
+  files:
+    - src/lib/digest.ts
+    - test/early-stop-and-refusal-rates-are-digested.test.ts
+  rationale: |
+    WHY THIS EXISTS. The Opus 5.5 guide (section 'Unattended agentic runs') says a text-only end_turn is a
+    REPORT, not proof the task is done, and an unattended loop that treats it as the end stops there. This
+    repo's own record shows the class is real and expensive: W1-T465 priced wait-shaped no_pr rows at $29.85
+    and $45.13 and left its remedy (c) undecided; the 107 no_pr rows overall cost $370.85 and 99 of them are
+    unexplained. What the repo cannot say is how often a CLAUDE worker's final turn is text-only while
+    acceptance items remain open, split by model, because the final stop_reason is never ledgered.
+
+    WHAT IS ALREADY TRUE ON MAIN. An unfiled PR (opened with this pack) adds `finalStopReason` and
+    `safeguardRefusal` to the worker result and their additive ledger fields. This task is the READ side:
+    an aggregate the operator and the other tasks in this pack can use as a before/after baseline.
+
+  design: |
+    (i) Add to the existing per-run and per-class digest (src/lib/digest.ts, next to `cacheHitRatio`, W1-T929)
+    three measures from the ledger union: the share of worker runs whose final stop reason was not a tool call
+    while the verdict was no_pr or a fallback PR, the count of safeguard refusals by category, and both split by
+    served model and provider.
+    (ii) Read the ledger through the repo's union reader (rotations in BOTH forms, see CLAUDE.md), never a
+    single file. Rows that predate the capture fields count as UNKNOWN, never as zero.
+    (iii) Print the measures in the existing digest surface; do not add a new verb.
+
+  acceptance:
+    - claim: "the digest reports early stops and safeguard refusals split by served model"
+      proof: 'grep: test("W1-T9900: the digest splits early stops and safeguard refusals by served model" in test/early-stop-and-refusal-rates-are-digested.test.ts'
+    - claim: "a ledger row that predates the capture fields counts as unknown, never as zero"
+      proof: 'grep: test("W1-T9900: a row that predates the capture fields counts as unknown, not zero" in test/early-stop-and-refusal-rates-are-digested.test.ts'
+  falsifier: |
+    CLOSE THIS TASK without implementation if `git grep -n "final_stop_reason" -- src` shows no ledger field
+    (the capture PR did not land), or if the digest already reports a stop-reason split by model.
+
+  notes: |
+    Source: https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5 (audit 2026-10-03). One concern per task; do not widen. Unverified claims are marked INFERRED in the audit and must be re-checked at head before building.

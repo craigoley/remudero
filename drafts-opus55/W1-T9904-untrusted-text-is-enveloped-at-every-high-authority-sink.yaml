@@ -1,0 +1,58 @@
+- id: W1-T9904
+  title: "FOUR HIGH-AUTHORITY PROMPTS INTERPOLATE THIRD-PARTY TEXT UNWRAPPED — the alert-fix prompt, the fix prompt's reviewer output, the diagnose prompt's failure evidence and the onboarding synthesis findings sit outside the untrusted envelope, and nothing fails when a new sink is added bare"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  priority: 4
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-03: audit of the repo against Anthropic's 'Prompting Claude Opus 5.5' guide"
+  plan_refs: ["W1-T2700", "W1-T3980", "W1-T2297"]
+  files:
+    - src/lib/untrusted-envelope.ts
+    - src/run-task.ts
+    - src/lib/prompt-render.ts
+    - src/lib/review.ts
+    - test/untrusted-text-is-enveloped-at-every-high-authority-sink.test.ts
+  rationale: |
+    WHY THIS EXISTS. Guide 'Mark pasted text': wrap each untrusted block in opening and closing tags that carry
+    the SAME random id, each tag on its own line, and tell the model what the tags mean; it is one layer, not a
+    wall. This repo already has the right shape: `envelope()` in src/lib/untrusted-envelope.ts (W1-T2700), with
+    a random per-call boundary id. It is wired at only three sites (prompt-render.ts ~634 and ~677 CI logs,
+    triage.ts feedback). The classes github-issue-body, github-pr-comment and webhook-payload have zero
+    production uses, and the census only names those three sites, so a new bare sink is not caught.
+    Measured sinks left bare, by author trust times action authority: (1) alertFixPrompt, src/run-task.ts
+    ~47123, alert.summary/url/path from scanners, with bash, push and PR creation; (2) the fix prompt's reviewer
+    FAIL clauses and summary, prompt-render.ts ~809 and ~822, second-order text derived from PR-author text;
+    (3) renderDiagnosePrompt failureEvidence, prompt-render.ts ~903-911; (4) onboarding synthesis, run-task.ts
+    ~47920-47979, findings drawn from TARGET repo files and issues. Consequence is bounded: the LLM reviewer is
+    downgrade-only, so injection mostly causes false FAILs, not false passes; the exposure is the fix and alert
+    workers, which edit and push.
+
+  design: |
+    (i) Wrap those four sinks with the existing `envelope()` using NEW source classes (scanner-alert,
+    reviewer-output, failure-evidence, target-repo-text) added to EXTERNAL_SOURCE_CLASSES. Keep the existing tag
+    format (it already matches the guide).
+    (ii) Ratchet: a source-grep census fails when a function under src/ that builds a model prompt interpolates
+    a template expression named body, summary, log, comment, reason, findings or evidence without calling the
+    envelope; unwrapped parts must also appear in prompt-manifest unwrappedExternalParts.
+    (iii) Do not change tool bounds, and do not add a system-prompt note here (that is a separate task, with its
+    own measurement).
+
+  acceptance:
+    - claim: "the alert-fix prompt carries scanner text only inside the untrusted envelope"
+      proof: 'grep: test("W1-T9904: the alert-fix prompt carries scanner text only inside the untrusted envelope" in test/untrusted-text-is-enveloped-at-every-high-authority-sink.test.ts'
+    - claim: "the fix and diagnose prompts carry reviewer output and failure evidence only inside the envelope"
+      proof: 'grep: test("W1-T9904: the fix and diagnose prompts carry reviewer output and failure evidence only inside the envelope" in test/untrusted-text-is-enveloped-at-every-high-authority-sink.test.ts'
+    - claim: "a prompt builder that interpolates third-party text without the envelope fails the census"
+      proof: 'grep: test("W1-T9904: a prompt builder that interpolates third-party text without the envelope fails the census" in test/untrusted-text-is-enveloped-at-every-high-authority-sink.test.ts'
+  falsifier: |
+    CLOSE THIS TASK without implementation if, at the latest main, each of the four sinks already passes its text
+    through `envelope(` and a census already fails on a bare interpolation of those names.
+
+  notes: |
+    Source: https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5 (audit 2026-10-03). One concern per task; do not widen. Unverified claims are marked INFERRED in the audit and must be re-checked at head before building.
