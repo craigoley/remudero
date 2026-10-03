@@ -1,0 +1,52 @@
+- id: W1-T5517
+  title: "THE LEDGER'S RETAINED CORE LEAVES ROTATION HEADROOM — the carried core is 4,016,449 B, 95.8% of the 4 MiB ceiling, so the core ledger rotates about 11 times an hour and each rotation blocks its process ~10 s; `review.posted` (200 rows of ~4.5 KB) and `sweep.disposed` (1,255 rows) are 42% of it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: root cause of the rotation rate behind W1-T5514's lost row"
+  plan_refs: [W1-T4393, W1-T5514, W1-T244, W1-T230]
+  files: [src/lib/ledger.ts, src/run-task.ts, test/the-ledgers-retained-core-leaves-rotation-headroom.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-03, read-only, ~21:06Z. The live `ledger.ndjson.carried.json` says the carried core
+    is 4,016,449 bytes against `LEDGER_ROTATION_CEILING_BYTES` 4,194,304, which is 95.8%. The operator's
+    earlier read was 4,007,222 B. Split by step: `review.posted` 907,746 B (22.6%, 200 rows of about 4.5 KB
+    each, which carry the full `decision_verdict`); `sweep.disposed` 789,276 B (19.7%, 1,255 rows);
+    `verdict` 4.8%; `run.start` 4.5%. The state dir holds 33 rotations between 18:00Z and 20:59Z, which is
+    11 an hour. Each rotation re-reads and rewrites the whole ~4 MB file synchronously, and serve's loop
+    lagged 10,276 ms on its 17:33:45Z rotation. W1-T5514 shows what the length of that window costs.
+    W1-T4393 (queued) is the same symptom from 2026-09-23, with the opposite design: keep the core whole and
+    raise the ceiling above it by the measured rate. This task shrinks the core instead. Whichever lands
+    first, the other re-measures against its own falsifier before it is built.
+    `decision_verdict` readers on main: the arm gate (`priorReviewVerdictFromLedger` →
+    `decideArmFromLedgerVerdict`, src/lib/review.ts, reads state, capped, planOnly and partiallyExecuted);
+    src/lib/sweep.ts; src/lib/work-integrity.ts (`VERDICT_FIELDS`); src/lib/golden-corpus.ts,
+    src/lib/ci-failure-corpus.ts and src/lib/eval-card.ts, which read `decision_verdict.criteria`; and
+    eleven sites in src/run-task.ts.
+    Rule 19: one concern (the retained core's weight) across the rotation in src/lib/ledger.ts and the
+    `review.posted` writer in src/run-task.ts, so the band is high with band_meaning: span.
+  design: |
+    1. Classify every `decision_verdict` reader above as live-only or union (archive) reader, and record
+       the result in the PR body.
+    2. Shrink `review.posted`'s retained weight while keeping every field a live-only reader needs, and at
+       least what the arm gate reads. Acceptable shapes: write a decision digest plus a pointer in
+       `review.posted` and the full verdict in its own step that rotation does not retain; or have rotation
+       carry a slim projection while the archive keeps the full row. Either way, no union reader loses a
+       field.
+    3. Bound `sweep.disposed` retention, by count per `pr@head` or by age, beyond PASS 3's dedup in
+       `rotateLedgerLocked`. Nothing that reads it live may lose a row it needs; list those readers in the
+       PR body too.
+    4. Ledger the carried-core share on each rotation so the next measurement is a ledger read.
+  acceptance:
+    - claim: "a rotation over a fixture shaped like the 2026-10-03 core (200 review.posted rows at ~4.5 KB, 1,255 sweep.disposed rows, the rest) leaves a carried core under a declared share of the ceiling, the arm gate's verdict read is unchanged on the rotated ledger, and the union of live and archive still holds every review.posted criterion"
+      proof: "unit test: test/the-ledgers-retained-core-leaves-rotation-headroom.test.ts"
+  falsifier: |
+    Restore full `decision_verdict` retention and unbounded `sweep.disposed` retention. The suite's
+    carried core is back above the declared share.

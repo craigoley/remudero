@@ -1,0 +1,125 @@
+- id: W1-T5532
+  title: "A FIX ROUND ENDS WITH A TYPED OUTCOME, AND TESTS ARE IN SCOPE — 103 of 226 fix rounds (2026-09-26..10-03) were refused by the commit harness: 61 'the worker changed nothing', 33 'no anchored COMMIT_MESSAGE line', 9 'outside its declared files' (6 of them only existing test files). The worker has no way to say 'this red is main's', 'this was a flake' or 'this needs scope', so every such round burns a strike as nothing"
+  repo: remudero
+  depends_on: [W1-T5528]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: week ledger read 2026-09-26..10-03; operator ruling R1 (fix rounds may add and edit test files outside files:)"
+  plan_refs: [W1-T5386, W1-T5325, W1-T4450, W1-T4207, W1-T4052, W1-T3434, W1-T2403, W1-T1223]
+  files: [src/lib/fix-outcome.ts, src/lib/prompt-render.ts, src/run-task.ts, test/a-fix-round-ends-with-a-typed-outcome.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED on the extracted week ledger (2026-09-26..10-03), joining `fix.commit_refused` to `fix.done` on
+    (run_id, task_id, strike, round):
+    - "the worker changed nothing": 61 refusals (codex 35, claude 13, unattributed 13).
+    - "no anchored COMMIT_MESSAGE line in the report": 33 (claude 25, codex 3, unattributed 5).
+    - "every change the worker made is outside its declared files": 9. Six touched only an EXISTING test file:
+      test/board-github-off-loop.test.ts x4 (W1-T4771) and test/expiring-fixture-census.test.ts x2 (W1-T4820).
+      The other three were a plan/feedback file, two plan/tasks.d shards, and one mixed src+test set.
+    WHERE THE CONTRACT AND HARNESS ARE TODAY (head 3e026b902):
+    - src/lib/prompt-render.ts:397 `renderFixPrompt`. The harness-commit footer (:526-533) asks only for
+      `COMMIT_MESSAGE: <type>(<scope>): <subject>`. The prompt gives no typed way to report that the red is
+      not this diff's, and the only scope escape is free prose in '## Follow-ups' (:455).
+    - src/lib/worker.ts:3641 `anchoredCommitMessage` is the anchored, last-line-wins parser that `parseReport`
+      uses. src/run-task.ts:39990 `harnessCommitForShellLessWorker` refuses with MISSING_COMMIT_MESSAGE_REASON
+      (:39985) when no line and no derived subject exist.
+    - src/run-task.ts:39707 `commitWorkerEdits` stages declared paths, registered regenerable artifacts
+      (W1-T4450) and, since #8859, NEW test files that declare a title the task's own proof names
+      (`proofMatchedTests`, :39744). It refuses "changed nothing" at :39731 and "outside its declared files"
+      at :39756.
+    - src/run-task.ts:11282 is the fix rung's `harnessCommit` closure over `fixDeclaredPaths` (:11127).
+      :11308 is W1-T5325's `derivedFirst`.
+    - src/run-task.ts:39932 `scopeAmendmentFromFixReport` scrapes prose for `[outside-declared-files]`, and
+      src/lib/sweep.ts:11415-11427 escalates it as a clarification issue.
+    IS A MISSING LINE RECOVERABLE TODAY? Partly. W1-T5325 (#8864, merged 2026-10-03T19:53Z, squash 857a3feb2)
+    derives the subject on the FIRST attempt only for a writer that cannot resume (codex or cash,
+    `writerCannotResume`, run-task.ts:40192). A resumable writer (claude) is re-asked once in its own session
+    and refused if the answer still lacks the line, and #8864 removed the derived fallback after that re-ask.
+    25 of the 33 missing-line refusals were claude, so most of them are untouched by #8864. A typed
+    `FIX_OUTCOME: FIXED` is the worker's explicit statement that its edits are the fix. That answers the
+    worker.ts:3637 objection ("an invented subject would attribute work to a run that never asked for it"),
+    so a stated FIXED with edits and no subject can commit under `derivedFixCommit` (:40234) for any provider.
+    RECONCILING W1-T5386: its shard still reads `status: queued`, but its code merged as #8859 (ab0fcc9b0). It
+    admits only a NEW test file carrying a title the task's proof names, in every lane. This task adds a
+    fix-round-only admission (R1) of ANY add or edit under test/, which covers the six existing-suite refusals
+    W1-T5386 cannot reach. Implement rounds keep W1-T5386's narrower rule. No depends_on is needed because it
+    has already merged.
+    SPLIT: the non-test half of NEEDS_SCOPE (an automatic `files:` plan-amendment PR built on the W1-T3434
+    machinery in src/lib/proof-amendment.ts) is a separate concern with its own Rule-15 boundary. It is drafted
+    as W1-T5534. Until that lands, this task feeds non-test NEEDS_SCOPE paths into the EXISTING
+    scope-amendment escalation (sweep.ts:11415), so nothing is lost.
+    Rule 19: the outcome parser and decision table (new module), the prompt contract, and the harness routing
+    are three production files for one concern, so the band is high with band_meaning: span.
+  design: |
+    1. NEW src/lib/fix-outcome.ts (pure):
+       - `anchoredFixOutcome(report)` uses the closed grammar `FIX_OUTCOME: FIXED | BASE_RED | FLAKE |
+         NEEDS_SCOPE <path>[,<path>...] | NEEDS_DESIGN <reason>`. It is anchored at line start, the last line
+         wins, and it uses the same discipline as `anchoredCommitMessage` (worker.ts:3641). Paths must be
+         repo-relative with no `..` and no absolute path. The reason is capped at 500 characters. A missing or
+         malformed line returns `undefined` (unstated).
+       - `decideFixOutcomeAction(outcome, facts)` maps each outcome to one action:
+         FIXED -> commit; BASE_RED -> verify-base; FLAKE -> rerun-once; NEEDS_SCOPE -> split the paths into
+         `test/**` (admitted, commit) and others (scope-needed); NEEDS_DESIGN -> hand-off; unstated -> today's
+         path, byte for byte.
+    2. src/lib/prompt-render.ts `renderFixPrompt`: both the harness-commit and the git-owning footers require
+       exactly one anchored `FIX_OUTCOME:` line before `COMMIT_MESSAGE`/`PR_URL`. The footer gives one sentence
+       per outcome, and states R1: files under test/ may be added or edited although undeclared, and weakened
+       assertions are judged by the reviewer's test-theater and assertion-discrimination gates. Plan-only tasks
+       do not get the test/ sentence, because a test in a plan-only PR is a Rule-15 mixture (see W1-T5118).
+    3. src/run-task.ts `commitWorkerEdits` (:39707) gains an options flag `admitTests` (default false). When it
+       is set, every changed path under `test/` (add, edit or delete) is staged although undeclared, and is
+       reported as `admitted_tests` on the commit row. Only the fix rung's `harnessCommit` (:11282) sets it, and
+       only for a task that is not plan-only. Implement and other lanes keep today's staging, including
+       W1-T5386's `proofMatchedTests`.
+    4. src/run-task.ts `runFixRung`, after the worker returns (:11301):
+       - FIXED with edits and no COMMIT_MESSAGE: derive the subject (`derivedFixCommit`) on the first attempt
+         for every provider, with `subject_source: "harness-derived"` and `fix_outcome: "FIXED"`. FIXED with no
+         edits is the "changed nothing" refusal as today, plus `fix_outcome_contradiction: true`.
+       - BASE_RED: run W1-T5528's probe for this PR's failing test files at origin/main's tip. On
+         `reproduced`, append `fix.strike_refunded` (reason "worker-base-red-verified") and return `stood_down`
+         with no further round on this head. Otherwise the strike stands and the row records
+         `base_red_claim: "refuted"`.
+       - FLAKE: requeue each failing check's job once per head (`requeueActionsJob`, run-task.ts:33263). The
+         `CHECK_REQUEUE_STEP` row (sweep.ts:4948) is written before the call, the same bound as W1-T1223 and
+         W1-T3194. Then await the existing `deps.waitForCiGreen`. Green appends `fix.strike_refunded` (reason
+         "flake-confirmed"). Not green keeps the strike and records `flake_claim: "refuted"`. A second FLAKE on
+         the same head never requeues again.
+       - NEEDS_SCOPE: test paths are already staged by (3). Non-test paths are written to the existing
+         `scope_amendment_detail` field of `fix.commit_refused`, which sweep.ts:11415 already escalates, and to a
+         `fix.scope_needed` {paths} row that W1-T5534 consumes.
+       - NEEDS_DESIGN: append `fix.needs_design` {reason, head_sha} and return outcome `needs_design`. The
+         strike counts and no second fix round is dispatched on this head. The strike-exhaustion ladder task
+         consumes the row.
+       - Every `fix.done` row gains `fix_outcome` (the parsed value or "unstated").
+    5. The one-time commit-line re-ask (`missingCommitLinePrompt`, :40198) asks for both lines, so a resumed
+       claude writer can state FIXED and be committed under a derived subject.
+  acceptance:
+    - claim: "the fix prompt requires one anchored FIX_OUTCOME line with the five outcomes, and tells a non-plan-only task's worker that test files are in scope"
+      proof: "grep: test(\"W1-T5532: the fix prompt asks for one anchored FIX_OUTCOME line in test/a-fix-round-ends-with-a-typed-outcome.test.ts"
+    - claim: "a fix round's edit to an existing, undeclared test file is committed and reported as admitted_tests"
+      proof: "grep: test(\"W1-T5532: an undeclared test file edit is committed by a fix round in test/a-fix-round-ends-with-a-typed-outcome.test.ts"
+    - claim: "an implement round, or a fix round on a plan-only task, still refuses the same undeclared test edit"
+      proof: "grep: test(\"W1-T5532: an implement round still refuses an undeclared test edit in test/a-fix-round-ends-with-a-typed-outcome.test.ts"
+    - claim: "a resumable writer that states FIXED with edits but no COMMIT_MESSAGE line is committed under a derived subject, not refused"
+      proof: "grep: test(\"W1-T5532: a stated FIXED with edits commits under a derived subject in test/a-fix-round-ends-with-a-typed-outcome.test.ts"
+    - claim: "a BASE_RED claim that reproduces at main refunds the strike, and one that does not reproduce keeps it"
+      proof: "grep: test(\"W1-T5532: a BASE_RED claim is verified against main before any refund in test/a-fix-round-ends-with-a-typed-outcome.test.ts"
+    - claim: "a FLAKE claim re-runs the failing jobs once and refunds the strike only on green"
+      proof: "grep: test(\"W1-T5532: a FLAKE re-runs the failing jobs once and refunds on green in test/a-fix-round-ends-with-a-typed-outcome.test.ts"
+    - claim: "NEEDS_DESIGN ledgers fix.needs_design and dispatches no second round on the head; non-test NEEDS_SCOPE paths reach scope_amendment_detail"
+      proof: "grep: test(\"W1-T5532: NEEDS_DESIGN and non-test NEEDS_SCOPE leave the round with a named row in test/a-fix-round-ends-with-a-typed-outcome.test.ts"
+    - claim: "a report with no FIX_OUTCOME line behaves exactly as today"
+      proof: "grep: test(\"W1-T5532: a missing FIX_OUTCOME line behaves exactly as today in test/a-fix-round-ends-with-a-typed-outcome.test.ts"
+    - claim: "the fix rung parses the typed outcome through the new module"
+      proof: "grep: anchoredFixOutcome( in src/run-task.ts"
+  falsifier: |
+    Drop the `admitTests` flag from the fix rung's `harnessCommit`. The second test's edit to an existing
+    test/ suite is refused as "outside its declared files". Drop the FIXED-derives branch. The fourth test's
+    claude-provider round is refused with "no anchored COMMIT_MESSAGE line in the report" after its one
+    re-ask.

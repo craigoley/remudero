@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: follow-up to W1-T5346 (#8820)"
   plan_refs: [W1-T5346, W1-T17]
   files: [docs/architecture.md, test/the-docs-stop-saying-containment-is-proven-per-run.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

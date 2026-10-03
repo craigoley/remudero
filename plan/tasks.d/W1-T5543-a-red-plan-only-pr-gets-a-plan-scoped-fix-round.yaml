@@ -1,0 +1,126 @@
+- id: W1-T5543
+  title: "A RED PLAN-ONLY PR GETS A PLAN-SCOPED FIX ROUND — 71 needs-human issues (49 PRs, about 100 issue-hours, 2026-09-26..2026-10-03) read 'plan-only PR is red on <checks> — the code-fix lane cannot stage outside a plan filing, so no fix is dispatched'. W1-T5349's three mechanical cures (merged 2026-10-03 06:33Z) cover held ids, title length and base red. Lint, census, proof and self-credit reds on a machine lane's own plan files still reach a person"
+  repo: remudero
+  depends_on: [W1-T5542]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03 (coordinator follow-up): plan-only reds dominate the escalation stream; #8956/#8957 (APPROVE ratifications) reddened on shards with no rationale, ratifier fix filed separately as W1-T5541"
+  plan_refs: [W1-T5349, W1-T4351, W1-T4460, W1-T5118, W1-T5405, W1-T3390, W1-T5541, W1-T5544, W1-T5536]
+  files: [src/lib/sweep.ts, src/run-task.ts, src/lib/prompt-render.ts, test/a-red-plan-only-pr-gets-a-plan-scoped-fix-round.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    TODAY'S PATH (verified at main 71fbcc6fe).
+    - In runSweep, `disposition === "blocked-fixable" && isBlockedCi(pr) && pr.isPlanFiling === true` first
+      calls W1-T5349's `tryPlanRepair` (src/lib/sweep.ts:10274; `decidePlanRepair` from :6247). Otherwise it
+      becomes `refused-escalate` with the reason above (sweep.ts:10917-10925).
+    - `tryPlanRepair` returns early unless the head matches `MACHINE_LANE_HEAD_RE` (sweep.ts:6153: gardens,
+      landings, `run-TRIAGE-*`, `run-APPROVE-*`, `run-RETRO*`) and the author is the fleet App
+      (`isFleetAppAuthor`, :6164).
+    - It cures exactly three signatures: re-mint a held task id; shorten a title-only commitlint red; and
+      wait for, or refresh onto, main for a base red.
+    - The original refusal (W1-T4351) was "the task declares no files". W1-T4460 has since given a synthetic
+      fix task the PR's own changed paths (`fixRungTaskFor`, sweep.ts:419). So a plan filing now HAS a
+      stageable surface: exactly its plan files.
+
+    MEASURED, the 71 issues opened 2026-09-26..2026-10-03.
+    - Fleet App authored 55 (49 issues on machine-lane heads: gardens 24, landings 16, APPROVE 7, TRIAGE 3,
+      RETRO 2). The operator authored 16 (plan/* session branches).
+    - 62 of the PRs merged and 9 closed, every one after a hand push, a hand merge of main, or a close.
+    - Issue-hours by lane: landing 29.9, APPROVE 24.2, garden 21.0, operator 11.1+, RETRO 4.6, TRIAGE 3.9.
+    - Red checks named, over 90 check entries excluding ci-shard and remudero-review:
+      - ci 18; commitlint 17; task-id-existence 14; lint-plan 13; claims 3;
+      - proof-discrimination 13, every one `pass at both PR head and merge base` (stale body proofs on a
+        filing);
+      - acceptance-author-gate 12: `files-and-credits-the-same-task` 6, `no-header` 3, `proof-shape` 2,
+        `follow-up-implementation-trailer` 1.
+    - The task-id-existence and title-only commitlint shapes are W1-T5349's. Its own rationale measured
+      18-19 of 31 machine reds as mechanical.
+    - Even after it merged, 3 more plan-only issues opened on 2026-10-03.
+    - The checks reported from a bundled job (lint-plan, claims, commitlint, task-id-existence) have empty
+      per-check logs when read through the check-run API. So their diagnostic must come from re-running the
+      same gate locally, not from the check log.
+
+    THE GATE STACK ALREADY RUNS LOCALLY. `planPrPreflight` (src/lib/plan-pr-emitter.ts:596, W1-T5405) runs,
+    in a checkout at the head about to be pushed:
+    - the plan lint on changed tasks;
+    - task-id-existence `--require-open-prs`;
+    - proof discrimination of the PR body and of each changed shard through `rmd check-proof --base`;
+    - the PR-title lint;
+    - the `every-shard-on-main-is-lintable` census.
+
+    `planPrPreflightAllows` (:643) ledgers the refusal. W1-T3390's plan-repair lane already gates its push on
+    it (sweep.ts:3539). That is both the diagnosis a worker needs and the proof its repair took.
+
+    APPROVE RATIFICATIONS: #8956/#8957 reddened ci-shard on test/citation-anchor-census.test.ts because
+    `rmd approve` wrote shards with no rationale. W1-T5541 fixes the ratifier. This round is the repair for
+    whatever such a lane still emits.
+
+    OVERLAPS, kept disjoint.
+    - W1-T5118 (queued) makes the CODE fix rung preserve a plan filing's role. This task never dispatches the
+      code fix rung at a plan filing; it adds a separate plan-scoped mode.
+    - W1-T5544 owns body cures for metadata-only reds on implementation PRs. This task reuses F3's
+      deterministic body cures for a filing's body; it adds no second body writer.
+    - Operator-authored plan PRs stay on today's escalation: the operator's own branch, not the fleet's to
+      rewrite. This is a deliberate scope choice.
+
+    Rule 19: the route (sweep.ts), the round and its preflight-verified push (run-task.ts), and the new
+    fix-mode prompt (prompt-render.ts, `FIX_MODE_RULES` at :307) are three production files for one concern.
+    So the band is high, with band_meaning: span.
+  design: |
+    1. LADDER ORDER for a red plan filing on a machine-lane head authored by the fleet App:
+       (a) W1-T5349's `tryPlanRepair`, unchanged.
+       (b) The deterministic body cures: `acceptanceGateBodyRepair` for `no-header`/`empty-proofs`, plus
+           W1-T5544's wrapped-pattern unwrap, plus a new `files-and-credits-the-same-task` cure that removes
+           the body's `Remudero-Task:` trailer naming a task the filing itself introduces. The cure is
+           validated by re-running `acceptanceAuthorTimeCheck` on the new body.
+       (c) The PLAN-SCOPED ROUND (below).
+       (d) The exhausted state, which W1-T5536's ladder handles. A lane PR is not requeueable, so it goes
+           to the per-cause digest.
+
+       A base red named by main's latest run (W1-T5349's `wait`) or by W1-T5490 still waits and never
+       dispatches. Operator-authored plan PRs keep today's `refused-escalate`.
+    2. PLAN-SCOPED ROUND (run-task.ts).
+       - Before dispatch, run `planPrPreflight` at the PR head (a detached tree, as
+         `planPrPreflightAtCommit` does). Feed its findings to the worker, plus the `ci` test failures from
+         the existing `fetchCiFailures` tails, which W1-T4461 renders as failing tests.
+       - The stageable set is EXACTLY the PR's changed paths that satisfy `isInPlanScope`
+         (src/lib/plan-scope.ts:45); the synthetic task's `files` comes from `fixRungTaskFor`'s
+         `changedPaths`, filtered to plan scope. Any other path refuses the commit.
+       - No `src/` or `test/` file is ever staged, which is what keeps Rule 15 intact.
+       - For a shard whose task already exists on main, the commit is also refused if it changes a
+         `claim:`/`proof:`/`satisfied_by:` line the PR had not already changed (reuse `criterionFieldTampered`
+         over the round's own diff against the PR's prior head).
+       - The worker may also return a structured `PR_TITLE:` / `PR_ACCEPTANCE:` block. The parent applies
+         these only through the REST metadata write, and only when the new title/body pass the same
+         preflight.
+       - The parent pushes only if `planPrPreflight` on the round's commit and metadata returns ok. Otherwise
+         the round is a refusal (W1-T5542), with the preflight's first failing line as its reason.
+    3. NEW FIX MODE `plan-gate` in `FIX_MODE_RULES` (prompt-render.ts:307), ahead of `ci-log`, chosen when the
+       evidence carries `planGateFindings`. Its prompt names the stageable plan paths, the preflight findings
+       verbatim, the self-credit rule (W1-T3231), and that a proof must discriminate head from base.
+    4. LEDGER. `sweep.plan_round.dispatched`, `.pushed` (with the preflight verdict), and `.refused`. All carry
+       pr_number, head_sha, the lane head class, and the checks. A pushed round's new head re-enters the
+       ordinary flow.
+  acceptance:
+    - claim: "a red machine-lane plan filing whose red no W1-T5349 cure matches gets one plan-scoped round instead of a refused-escalate, while an operator-authored plan PR keeps the escalation"
+      proof: "grep: test(\"W1-T5543: an uncured machine plan red gets a plan-scoped round in test/a-red-plan-only-pr-gets-a-plan-scoped-fix-round.test.ts"
+    - claim: "the round stages only the PR's own plan-scope paths and refuses a src, test or untouched-criterion edit"
+      proof: "grep: test(\"W1-T5543: the plan round stages only the PR's own plan paths in test/a-red-plan-only-pr-gets-a-plan-scoped-fix-round.test.ts"
+    - claim: "the round's worker is fed the planPrPreflight findings and its push happens only when the preflight on the new commit and metadata is ok"
+      proof: "grep: test(\"W1-T5543: the plan round pushes only a preflight-clean commit in test/a-red-plan-only-pr-gets-a-plan-scoped-fix-round.test.ts"
+    - claim: "a filing that credits a task it introduces has its body trailer removed deterministically, with no worker"
+      proof: "grep: test(\"W1-T5543: a self-crediting filing body is cured without a worker in test/a-red-plan-only-pr-gets-a-plan-scoped-fix-round.test.ts"
+  falsifier: |
+    Four reverts, each turning a named case red:
+    - Restore the `refused-escalate` rewrite after a failed `tryPlanRepair`: the first case sees `deps.escalate`
+      and no plan round.
+    - Widen the stageable set to the synthetic task's full `changedPaths`: a fixture PR whose round touches
+      `test/x.test.ts` commits it.
+    - Skip the post-round preflight: a round whose commit still fails lint-plan is pushed.
+    - Drop the self-credit cure: the files-and-credits fixture dispatches a worker.

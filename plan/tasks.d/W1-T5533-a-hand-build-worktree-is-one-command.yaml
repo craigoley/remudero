@@ -1,0 +1,48 @@
+- id: W1-T5533
+  title: "A HAND-BUILD WORKTREE IS ONE COMMAND — `rmd hand-worktree <taskId>` adds a `run-<taskId>-<epochMs>` worktree at an absolute path with `--no-track` from fresh origin/main and hard-links node_modules from a worktree whose lockfile is identical, instead of each builder retyping it and paying a ~850 MB install on a 29 GB root disk"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: hand builders lost time to worktree-add upstream errors, relative paths landing under core/, and per-build installs that filled the root disk"
+  plan_refs: [W1-T2777, W1-T137, W1-T221]
+  files: [src/lib/hand-worktree.ts, src/run-task.ts, docs/cli-reference.md, test/a-hand-build-worktree-is-one-command.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-03 on origin/main 3e026b90. The HAND route's own commands live in src/run-task.ts's
+    command table, for example `rmd next-task-id --branch` (W1-T4414) and `rmd preflight` (W1-T221). There
+    is no command that makes the worktree a hand build works in. Today's builders typed it by hand. The
+    failures they hit: `git worktree add -b` set an upstream and refused; a relative path resolved under the
+    canonical checkout (core/); and `npm ci` in each worktree cost about 850 MB on a 29 GB root disk that
+    reached 74% at filing.
+    `linkWorktreeNodeModules` (src/lib/worker.ts) gives worker worktrees a SYMLINKED node_modules. That is
+    wrong for a hand build: `ensureInstallFresh` refuses `npm ci` through a symlink (`SymlinkInstallRefusal`)
+    because an install's clear phase empties the shared tree through the link (the 2026-07-29 outage). A
+    hard-linked copy (`cp -al`) costs no extra space and is safe to `npm ci` over: unlinking a hard link
+    leaves the source intact.
+    The doctrine rule "NAME A SESSION BRANCH `run-<taskId>-<epochMs>`" is prose today. This command makes
+    the name the default.
+    Rule 19: one concern (making a hand-build worktree) across a new lib module, the command table and the
+    generated CLI reference, so the band is high with band_meaning: span.
+  design: |
+    1. src/lib/hand-worktree.ts exports `createHandWorktree({ repoDir, taskId, parent, deps })`. It fetches
+       origin main and resolves an ABSOLUTE path under `parent` (refusing a relative one). It runs `git
+       worktree add --no-track -b run-<taskId>-<epochMs> <abs> origin/main` (taskId `unfiled` allowed). It
+       finds a sibling worktree whose `package-lock.json` is byte-identical and whose `node_modules` is a
+       real directory, and hard-links it (`cp -al`). If none matches, it reports `npm ci` as the next step
+       instead of running it, and states the free space on the target filesystem.
+    2. Register `rmd hand-worktree <taskId> [--parent <abs dir>]` in the command table with syntax and
+       detail, and regenerate docs/cli-reference.md (`npm run cli-reference`).
+  acceptance:
+    - claim: "rmd hand-worktree creates a run-<taskId>-<epochMs> worktree at an absolute path with no upstream from origin/main, hard-links node_modules from a worktree with an identical lockfile (same inode, never a symlink), refuses a relative parent, and reports npm ci with the free space when no lockfile matches"
+      proof: "unit test: test/a-hand-build-worktree-is-one-command.test.ts"
+    - claim: "the hand-worktree command calls the lib function"
+      proof: "grep: createHandWorktree( in src/run-task.ts"
+  falsifier: |
+    Symlink node_modules instead of hard-linking. The suite's lstat sees a symbolic link.

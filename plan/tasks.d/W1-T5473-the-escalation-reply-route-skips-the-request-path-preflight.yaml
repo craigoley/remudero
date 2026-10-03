@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: follow-up to PR #8891 (W1-T5348 / #8795 request-path skip)"
   plan_refs: [W1-T5348, W1-T5460]
   files: [src/lib/panel-actions.ts, test/the-escalation-reply-route-skips-the-request-path-preflight.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
