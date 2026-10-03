@@ -447,6 +447,7 @@
     "test/a-sweep-disposition-is-ledgered-once.test.ts": 1000,
     "test/a-sweep-pass-caps-its-stale-proof-supersession-closes.test.ts": 1300,
     "test/a-sweep-stack-check-reads-the-listed-body.test.ts": 2100,
+    "test/a-synthetic-fix-task-declares-its-pr-surface.test.ts": 884,
     "test/a-synthetic-fix-task-has-a-surface.test.ts": 1700,
     "test/a-task-already-merged-is-done-not-transient.test.ts": 1000,
     "test/a-task-credited-first-by-a-refused-pr-reconciles-from-its-later-merge.test.ts": 1700,
