@@ -36,6 +36,8 @@ import {
   seedClaudeFleetCredentials,
   sweepClaudeConfigBackups,
   workerHomePlan,
+  workerCredentialFilePath,
+  assertWorkerCredentialFile,
   workerKeychainPaths,
 } from "../src/lib/worker-home.js";
 
@@ -962,4 +964,58 @@ test("gitWorkTreeAncestor: a linked worktree's .git FILE still disqualifies — 
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+
+test("Linux credential preflight reads the same narrowed store the real worker HOME grants", () => {
+  const root = tmp();
+  try {
+    const realHome = join(root, "operator");
+    const workerHome = join(root, "worker");
+    mkdirSync(join(realHome, ".claude"), { recursive: true });
+    mkdirSync(join(realHome, ".claude-fleet"), { recursive: true });
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), "broken parent", { mode: 0o600 });
+    const narrowed = join(realHome, ".claude-fleet", ".credentials.json");
+    writeFileSync(narrowed, JSON.stringify({ claudeAiOauth: { accessToken: "fixture-access", refreshToken: "fixture-refresh", expiresAt: 123 } }), { mode: 0o600 });
+    materializeWorkerHome({ realHome, workerHome });
+    assert.equal(realpathSync(join(workerHome, ".claude", ".credentials.json")), narrowed);
+    assert.equal(workerCredentialFilePath(realHome), narrowed);
+    assert.equal(assertWorkerCredentialFile(workerCredentialFilePath(realHome), undefined, undefined), 123);
+    writeFileSync(narrowed, "broken worker credential");
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "parent-access", refreshToken: "parent-refresh" } }));
+    assert.throws(() => assertWorkerCredentialFile(workerCredentialFilePath(realHome), undefined, undefined), /credential-file-malformed|not valid JSON/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+
+test("an explicitly shared Claude child owns every worker grant and preserves old credential forks", () => {
+  const root = mkdtempSync(join(tmpdir(), "shared-claude-authority-"));
+  const realHome = join(root, "operator");
+  const shared = join(realHome, ".claude", "fleet-auth", "claude");
+  const old = join(realHome, ".claude-fleet");
+  mkdirSync(shared, { recursive: true });
+  mkdirSync(old);
+  const sharedRaw = JSON.stringify({ claudeAiOauth: { refreshToken: "shared-fixture", expiresAt: 123 } });
+  const oldRaw = JSON.stringify({ claudeAiOauth: { refreshToken: "old-fixture", expiresAt: 456 } });
+  writeFileSync(join(shared, ".credentials.json"), sharedRaw, { mode: 0o600 });
+  writeFileSync(join(old, ".credentials.json"), oldRaw, { mode: 0o600 });
+  writeFileSync(join(realHome, ".claude", "rmd-app.pem"), "operator-key-fixture", { mode: 0o600 });
+  try {
+    assert.equal(workerCredentialFilePath(realHome), join(shared, ".credentials.json"));
+    const workerHome = join(root, "worker");
+    const plan = materializeWorkerHome({ workerHome, realHome });
+    assert.equal(realpathSync(join(workerHome, ".claude")), realpathSync(shared));
+    assert.equal(readFileSync(join(old, ".credentials.json"), "utf8"), oldRaw);
+    assert.equal(readFileSync(join(shared, ".credentials.json"), "utf8"), sharedRaw);
+    assert.equal(plan.symlinks.find((grant) => grant.from === join(workerHome, ".claude"))?.to, shared);
+    assert.equal(existsSync(join(workerHome, ".claude", "rmd-app.pem")), false, "the grant contains no surrounding App key");
+    rmSync(old, { recursive: true });
+    materializeWorkerHome({ workerHome: join(root, "second-worker"), realHome });
+    assert.equal(existsSync(old), false, "shared authority never seeds another private token copy");
+    writeFileSync(join(shared, ".credentials.json"), "malformed fixture");
+    assert.throws(() => assertWorkerCredentialFile(workerCredentialFilePath(realHome), undefined, undefined), /credential-file-malformed|not valid JSON/);
+    assert.equal(existsSync(old), false, "a broken declared shared store cannot silently create a fallback authority");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
