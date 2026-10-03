@@ -786,7 +786,9 @@ export type StopReason =
   | "cost_governor_deferred"
   /** W1-T321 (the W1-T121 23-open-PR incident): the open-PR count is at/over `policy.wipLimit`.
    *  Distinct from `laneDispatchBudget`, which only SIZES a still-open pass rather than stopping it. */
-  | "queue_governor_deferred";
+  | "queue_governor_deferred"
+  /** W1-T5404: host `MemAvailable` is below `policy.memoryFloorMib`. Only the single-lane loop returns it. */
+  | "memory_governor_deferred";
 
 export interface DrainOpts {
   until?: string;
@@ -1277,8 +1279,9 @@ export interface DrainDeps {
    *  INVARIANT: never consulted from `runSweep` or its deps — drainage must never be gated. Optional. */
   checkQueueGovernor?: () => QueueGovernorResult | undefined;
   /** W1-T5347 (wiring W1-T1038's `memoryGovernorGateFor`): THE HOST MEMORY FLOOR, a fresh
-   *  `/proc/meminfo` reading per call. Consulted only through `checkDispatchGovernors`, so it holds
-   *  NEW dispatch per lane and a throw fails OPEN there. Never consulted from the sweep. Optional. */
+   *  `/proc/meminfo` reading per call. Consulted per lane through `checkDispatchGovernors` and, since
+   *  W1-T5404, once per single-lane pass in `runDrain`; a throw fails OPEN at both. Never consulted
+   *  from the sweep. Optional. */
   checkMemoryGovernor?: () => MemoryGovernorResult | undefined;
   /** W1-T119: true when a task's own GitHub read is INDETERMINATE, re-derived from the SAME
    *  projection `refreshMerged` just built — the same freshness contract as `isOpenPr`. Optional. */
@@ -1518,6 +1521,25 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       return summary(
         "queue_governor_deferred",
         `${queueGoverned.observedOpenCount} open PRs at/over the ${queueGoverned.wipLimit} WIP limit — new dispatch deferred`,
+      );
+    }
+
+    // HOST MEMORY FLOOR (W1-T5404): ordered after queue as `checkDispatchGovernors` orders it. A
+    // throw FAILS OPEN, as it does there — logged, then this pass dispatches as if admitted.
+    let memoryGoverned: MemoryGovernorResult | undefined;
+    try {
+      memoryGoverned = deps.checkMemoryGovernor?.();
+    } catch (e) {
+      log("drain.memory_governor.unreadable", { error: e instanceof Error ? e.message : String(e) });
+    }
+    if (memoryGoverned) {
+      log("drain.memory_governor", {
+        observed_available_mib: memoryGoverned.observedAvailableMib,
+        memory_floor_mib: memoryGoverned.floorMib,
+      });
+      return summary(
+        "memory_governor_deferred",
+        `${memoryGoverned.observedAvailableMib} MiB available below the ${memoryGoverned.floorMib} MiB memory floor — new dispatch deferred`,
       );
     }
 
