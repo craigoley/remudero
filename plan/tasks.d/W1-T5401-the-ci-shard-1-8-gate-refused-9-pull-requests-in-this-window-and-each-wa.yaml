@@ -1,0 +1,29 @@
+- id: W1-T5401
+  title: "THE ci-shard (1/8) GATE REFUSED 9 PULL REQUESTS IN THIS WINDOW AND EACH WAS REPAIRED — carry the lesson to the lane that keeps hitting it, so the same gate stops refusing for the same reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-learning:8551:ci-shard (1/8)"
+  ci_learning_prs: [8551, 8558, 8617, 8650, 8673, 8684, 8713, 8715, 8726]
+  files:
+    - learnings/ci.yaml
+  acceptance:
+    - claim: "the lane that trips the ci-shard (1/8) gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
+      proof: "grep: ci-learning:8551:ci-shard (1/8) in learnings/ci.yaml"
+  note: "Filed by the ci-learning rung from ci-learning:8551:ci-shard (1/8). The ci-shard (1/8) gate went red on #8551 and was repaired; the repair touched plan/feedback/fb-1789303258903-a19164.yaml, plan/tasks.d/W1-T5268-check-ci-log-coverage-shard.yaml, plan/tasks.d/w1-t5287-selector-shadow-miss.yaml, src/lib/containment.ts, src/lib/inbox-thread-view.ts, src/lib/measurement-cadence.ts, src/lib/now-view.ts, src/lib/read-model-worker.ts, src/lib/worker.ts, src/run-task.ts, test/a-fenced-structured-reply-is-unwrapped-not-rejected.test.ts, test/a-rule-about-a-gate-cannot-be-measured-by-the-ledger.test.ts, test/a-rule-that-keeps-failing-becomes-an-instrument.test.ts, test/egress-enforcement-owner.test.ts, test/expiring-fixture-census.test.ts, test/inbox-thread-view.test.ts, test/measurement-cadence-delta.test.ts, test/measurement-cadence.test.ts, test/now-view.test.ts, test/rule-efficacy.test.ts, test/view-demand.test.ts. Recommended action: unclear. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.88
+    reasons:
+      - "The filed plan proposes a matched CI learning entry and declares only learnings/ci.yaml, consistent with carrying repaired gate failures to the affected lane."
+      - "The supplied scope names no sensitive access, deletion, irreversible action, policy change, or operator-only decision."
+      - "The family track record reports 2 merged and 0 declined tasks; no adverse gate result is supplied. This filing-time assessment has no diff or actual-change view."
+    judged_at: "2026-10-03T07:02:34.408Z"
+    pin: "035390af9807648cca4cf29c4b7e25c7d768d20dd173cffd5e04b92024d131a7"

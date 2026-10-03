@@ -1,6 +1,9 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { CONVENTIONAL_LIMITS, fitConventionalTitle } from "./commit-message.js";
+import { mintNextTaskId } from "./task-id.js";
+import { gitRemoteRefReserver, reserveTaskIdRemote, type RemoteReserveDeps } from "./task-id-reservation.js";
 import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
@@ -1310,6 +1313,8 @@ export interface BuildSweepEffectsDeps {
   defaultBudgetUsd?: number;
   /** W1-T3721 — isolates the author-time body proof gate in sweep tests that use synthetic worktrees. */
   buildPlanPrBodyImpl?: typeof buildPlanPrBody;
+  /** W1-T5349 — the plan-repair renumber's reservation; defaults to {@link reservePlanRepairTaskId}. */
+  planRepairReserveIdImpl?: (worktreePath: string, filingBranch: string) => string;
 }
 
 export type ReviewDispatchMode =
@@ -1560,6 +1565,9 @@ export const SWEEP_EFFECT_SURFACE = [
   "readyDraft",
   // W1-T4838: a worker's categorized refusal is held and drafted as a plan amendment, not retried.
   "draftRefusalAmendments",
+  // W1-T5349: the plan-repair rung's fact read and its renumber/retitle effect.
+  "readPlanRepairFacts",
+  "repairPlanPr",
 ] as const;
 
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
@@ -1601,6 +1609,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "repairRecordableRatchet"
   | "repairMissingTaskTrailer"
   | "repairMetadata"
+  | "readPlanRepairFacts"
+  | "repairPlanPr"
 > & {
   /** W1-T3618 — see `reviewerCodeStaleThisPassImpl`. Not a `SweepDeps` member: it is a read-back on
    *  this builder's own return, not an effect the sweep invokes. */
@@ -3531,6 +3541,22 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           }
         }
       }
+    },
+    readPlanRepairFacts: (pr) => {
+      const row = ghJsonForBuild(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as { user?: { login?: string }; title?: string };
+      return { authorLogin: row?.user?.login, title: row?.title };
+    },
+    repairPlanPr: async (pr, decision) => {
+      const pulls = `repos/${owner}/${repo}/pulls/${pr.prNumber}`;
+      if (decision.action === "retitle") {
+        // ci.yml reads the title LIVE, so the re-run of the job that failed observes the new one.
+        ghJsonForBuild(["api", "-X", "PATCH", pulls, "-f", `title=${decision.title}`]);
+        if (decision.jobId) ghJsonForBuild(["api", "-X", "POST", `repos/${owner}/${repo}/actions/jobs/${decision.jobId}/rerun`]);
+        return { outcome: "retitled" };
+      }
+      // The renumber runs through this build's own deps — the seams the shard-repair rung above uses.
+      const worktreePath = join(worktreesDir(config), `plan-renumber-${pr.prNumber}-${nowMsImpl()}`);
+      return renumberPlanPrIds(pr, decision.heldIds, decision.title, repoDir, worktreePath, deps);
     },
   };
 }
@@ -6094,6 +6120,240 @@ export function decideBaseRed(
   return { kind: main?.state === "green" ? "refresh" : "wait", check: recorded };
 }
 
+// ── W1-T5349 — the plan-repair rung ─────────────────────────────────────────────────────────────
+// A red machine-lane plan-only PR used to reach only W1-T4351's `refused-escalate`: an issue per
+// head, 0 of 7,232 escalation answers accepted. 18-19 of 31 machine reds (09-25..10-02) had a
+// mechanical cure: re-mint a held id, refresh onto a green main, or shorten a title. Each signature
+// is read from the failing check's OWN log, acts at most once per (PR, head sha), and is ledgered.
+
+export const PLAN_REPAIR_STEP = "sweep.plan_repair";
+
+/** The heads machine lanes file plan PRs from: gardeners (`<name>-garden-<epochMs>`, the names
+ *  run-task.ts's GARDEN_NAMES registers), the landing branches, and the TRIAGE/APPROVE/RETRO runs.
+ *  A session's head (`run-unfiled-*`, `run-W1-T*`, `codex/*`) never matches, whoever pushed it.
+ *  Exported so a fixture drives its refusing arm directly (W1-T2317's negative-reachability ratchet). */
+export const MACHINE_LANE_HEAD_RE = new RegExp(
+  "^(?:(?:knowledge|plan|backlog|gate|test|config|export|ci-friction|selector-shadow|hot-file|machine-judge|host-resource)-garden-\\d+" +
+    "|(?:feedback|decisions|plan-reconcile|ci-learning)-landing(?:-[a-z0-9-]+)?" +
+    "|run-(?:TRIAGE|APPROVE)-.+|run-RETRO(?:-.+)?)$",
+);
+
+export function isMachineLanePlanHead(head: string | undefined): boolean {
+  return head !== undefined && MACHINE_LANE_HEAD_RE.test(head);
+}
+
+/** The fleet App, as REST (`remudero-fleet[bot]`) and `gh` (`app/remudero-fleet`) spell it. */
+export function isFleetAppAuthor(login: string | undefined): boolean {
+  return login === "remudero-fleet[bot]" || login === "app/remudero-fleet";
+}
+
+export interface PlanRepairFacts {
+  authorLogin?: string;
+  title?: string;
+}
+
+export type PlanRepairDecision =
+  | { signature: "held-task-id"; action: "renumber"; check: string; heldIds: string[]; title?: string }
+  | { signature: "title-length"; action: "retitle"; check: string; title: string; jobId?: string }
+  | { signature: "base-red"; action: "wait" | "refresh"; check: string; cause: "main-red" | "stale-base" };
+
+export interface PlanRepairOutcome {
+  outcome: string;
+  reason?: string;
+  renames?: Record<string, string>;
+  newHeadSha?: string;
+}
+
+/** A task-id-existence header naming held ids; exported so a fixture drives both arms (W1-T2317). */
+export const HELD_ID_HEADER_RE =
+  /task-id-existence: FAILED -- the following (?:added )?id\(s\) are (?:HELD by a different reservation holder|ALREADY DECLARED|ALREADY CLAIMED by another OPEN PR)/;
+
+/** The ids task-id-existence's held, collision and open-PR sections list, read from any failing
+ *  check's log (the gate reports from a bundled job, so the name alone proves nothing). */
+export function heldTaskIdsFromCiFailures(failures: readonly CiFailure[]): string[] {
+  const ids = new Set<string>();
+  for (const failure of failures) {
+    let inSection = false;
+    for (const line of failure.logTail.split("\n")) {
+      if (line.includes("task-id-existence:")) inSection = HELD_ID_HEADER_RE.test(line);
+      const m = inSection ? /^\s+(W\d+-T\d+) -- /.exec(line) : null;
+      if (m) ids.add(m[1]!);
+    }
+  }
+  return [...ids];
+}
+
+/** CHECK-NAME TRAP (W1-T4399): the `commitlint` check reports the title step AND rule-checks. Only
+ *  a header-max-length failure with no failed census step is a title red. */
+export function titleOnlyCommitlintRed(failures: readonly CiFailure[]): CiFailure | undefined {
+  return failures.find((f) => {
+    if (f.name !== "commitlint" || !f.logTail.includes("[header-max-length]")) return false;
+    const steps = /reported commitlint = failure \(step outcome\(s\): (\S+) (\S+)\)/.exec(f.logTail);
+    return steps === null || steps[2] === "success" || steps[2] === "skipped";
+  });
+}
+
+/** `gardenCheckout`'s fit (`fitConventionalTitle`), keeping a trailing ` (W1-T<n>)` credit suffix. */
+export function fitPlanPrTitle(title: string): string {
+  const max = CONVENTIONAL_LIMITS.headerMaxLength;
+  const suffix = / \(W\d+-T\d+\)$/.exec(title)?.[0] ?? "";
+  if (title.length <= max || suffix === "") return fitConventionalTitle(title, max).header;
+  return `${fitConventionalTitle(title.slice(0, -suffix.length), max - suffix.length).header}${suffix}`;
+}
+
+/** Rewrites each old id (and its lowercase file-name form) to its new one, never a longer id. */
+export function rewriteTaskIds(text: string, renames: ReadonlyMap<string, string>): string {
+  let out = text;
+  for (const [from, to] of renames) {
+    for (const [a, b] of [[from, to], [from.toLowerCase(), to.toLowerCase()]] as const) {
+      out = out.replace(new RegExp(`(?<![\\w-])${a}(?!\\d)`, "g"), b);
+    }
+  }
+  return out;
+}
+
+/** `pr@head@signature` for every acted repair, `pr@head@base-red-wait` for a recorded base red,
+ *  and `pr@stale-base` once a stale-base refresh is spent (a per-PR bound: the refresh mints a new
+ *  head, and a proof that still matches base after it is a generator defect, not a stale base). */
+export function planRepairHistoryFromLedger(lines: readonly Record<string, unknown>[]): Set<string> {
+  const keys = new Set<string>();
+  for (const line of lines) {
+    if (line.step !== PLAN_REPAIR_STEP || typeof line.pr_number !== "number" || typeof line.head_sha !== "string") continue;
+    const head = `${line.pr_number}@${line.head_sha}`;
+    keys.add(line.action === "wait" ? `${head}@base-red-wait` : `${head}@${String(line.signature)}`);
+    if (line.cause === "stale-base") keys.add(`${line.pr_number}@stale-base`);
+  }
+  return keys;
+}
+
+export function decidePlanRepair(
+  pr: OpenPrView,
+  facts: PlanRepairFacts,
+  main: MainLatestRun | undefined,
+  history: ReadonlySet<string>,
+): PlanRepairDecision | undefined {
+  if (!isMachineLanePlanHead(pr.headRefName) || !isFleetAppAuthor(facts.authorLogin)) return undefined;
+  const failures = pr.ciFailures ?? [];
+  const head = `${pr.prNumber}@${pr.headSha}`;
+  const heldIds = heldTaskIdsFromCiFailures(failures);
+  if (heldIds.length > 0 && !history.has(`${head}@held-task-id`)) {
+    return { signature: "held-task-id", action: "renumber", check: "task-id-existence", heldIds, title: facts.title };
+  }
+  const titleRed = titleOnlyCommitlintRed(failures);
+  const title = facts.title ?? "";
+  if (titleRed && title.length > CONVENTIONAL_LIMITS.headerMaxLength && !history.has(`${head}@title-length`)) {
+    return { signature: "title-length", action: "retitle", check: titleRed.name, title: fitPlanPrTitle(title), jobId: titleRed.jobId };
+  }
+  const names = failures.map((f) => f.name);
+  if (names.length === 0 || history.has(`${head}@base-red`)) return undefined;
+  const check = names.join(", ");
+  if (main?.state === "red" && names.every((n) => main.failingChecks.includes(n))) {
+    return { signature: "base-red", action: "wait", check, cause: "main-red" };
+  }
+  if (main?.state !== "green") return undefined;
+  if (history.has(`${head}@base-red-wait`)) return { signature: "base-red", action: "refresh", check, cause: "main-red" };
+  const staleBase =
+    names.every((n) => n === "proof-discrimination") &&
+    pr.currentMergeBaseSha !== undefined &&
+    pr.currentMergeBaseSha !== main.sha &&
+    !history.has(`${pr.prNumber}@stale-base`);
+  return staleBase ? { signature: "base-red", action: "refresh", check, cause: "stale-base" } : undefined;
+}
+
+/** Signature (a)'s cure on the lane's OWN branch: each held id the PR's ADDED plan files declare
+ *  exactly once is re-minted, the shard renamed, every self-reference in those files, the title
+ *  and the body rewritten, and the commit pushed with a lease on the head the sweep observed. */
+export async function renumberPlanPrIds(
+  pr: OpenPrView,
+  heldIds: readonly string[],
+  title: string | undefined,
+  repoDir: string,
+  wt: string,
+  deps: Pick<
+    BuildSweepEffectsDeps,
+    "owner" | "repo" | "log" | "planRepairGitImpl" | "worktreeAddImpl" | "worktreeRemoveImpl" | "planRepairReserveIdImpl" | "ghJsonImpl"
+  >,
+): Promise<PlanRepairOutcome> {
+  // The build's OWN plan-repair seams (W1-T3390's shard-repair rung cuts its worktree and runs its
+  // git through the same members), defaulting as `buildSweepEffects` does — no seam shape of its own.
+  const {
+    owner,
+    repo,
+    log,
+    planRepairGitImpl: run = defaultPlanRepairGit,
+    worktreeAddImpl: add = worktreeAdd,
+    worktreeRemoveImpl: remove = worktreeRemove,
+    planRepairReserveIdImpl: reserveId = reservePlanRepairTaskId,
+    ghJsonImpl: ghApi = ghJson,
+  } = deps;
+  const git = (cwd: string, args: readonly string[]): string => run("git", ["-C", cwd, ...args]);
+  const branch = pr.headRefName;
+  if (!branch) return { outcome: "error", reason: "the PR has no head ref" };
+  let cut = false;
+  try {
+    add(repoDir, wt, `plan-renumber-${pr.prNumber}-${pr.headSha.slice(0, 12)}`, `origin/${branch}`, { log });
+    cut = true;
+    const observed = git(wt, ["rev-parse", "HEAD"]).trim();
+    if (observed !== pr.headSha) return { outcome: "lease-mismatch", reason: `origin/${branch} is ${observed}, not ${pr.headSha}` };
+    const added = git(wt, ["diff", "--name-only", "--diff-filter=A", "origin/main...HEAD", "--", "plan/"]).split("\n").filter(Boolean);
+    const texts = new Map(added.map((rel) => [rel, readFileSync(join(wt, rel), "utf8")]));
+    for (const id of heldIds) {
+      const declaring = [...texts.values()].filter((t) => new RegExp(`^\\s*-?\\s*id:\\s*${id}\\s*$`, "m").test(t));
+      if (declaring.length !== 1) return { outcome: "not-declared", reason: `${id} is not declared by exactly one plan file this PR adds` };
+    }
+    const renames = new Map(heldIds.map((id) => [id, reserveId(wt, branch)]));
+    for (const [rel, text] of texts) {
+      writeFileSync(join(wt, rel), rewriteTaskIds(text, renames));
+      const renamed = rewriteTaskIds(rel, renames);
+      if (renamed !== rel) git(wt, ["mv", rel, renamed]);
+    }
+    const summary = [...renames].map(([from, to]) => `${from} to ${to}`).join(", ");
+    git(wt, ["add", "-A", "--", "plan/"]);
+    git(wt, ["commit", "-m", `chore(plan): renumber ${summary}, held by another reservation\n\nW1-T5349 sweep plan repair.`]);
+    const newHeadSha = git(wt, ["rev-parse", "HEAD"]).trim();
+    assertLiveWriteAllowed("git-push", `renumbering ${summary} on ${branch} for PR #${pr.prNumber}`);
+    git(wt, ["push", `--force-with-lease=refs/heads/${branch}:${pr.headSha}`, "origin", `HEAD:refs/heads/${branch}`]);
+    const patch = {
+      ...(title !== undefined ? { title: rewriteTaskIds(title, renames) } : {}),
+      ...(pr.body !== undefined ? { body: rewriteTaskIds(pr.body, renames) } : {}),
+    };
+    if (Object.keys(patch).length > 0) {
+      const fields = Object.entries(patch).flatMap(([k, v]) => ["-f", `${k}=${v}`]);
+      ghApi(["api", "-X", "PATCH", `repos/${owner}/${repo}/pulls/${pr.prNumber}`, ...fields]);
+    }
+    return { outcome: "renumbered", renames: Object.fromEntries(renames), newHeadSha };
+  } catch (error) {
+    return { outcome: "error", reason: capStderrExcerpt(spawnFailureText(error), STDERR_EXCERPT_CAP) };
+  } finally {
+    if (cut) {
+      try {
+        remove(repoDir, wt);
+      } catch {
+        /* best-effort cleanup */
+      }
+    }
+  }
+}
+
+/** A git runner in `cwd`, the shape {@link gitRemoteRefReserver} takes. */
+export function planRepairGitRun(cwd: string): RemoteReserveDeps["run"] {
+  return (args) => {
+    const r = spawnSync("git", args, { cwd, encoding: "utf8" });
+    return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  };
+}
+
+/** The allocator (`mintNextTaskId` over the worktree's plan) plus the remote reservation, holder
+ *  `filingBranch` — the lane's own head, so task-id-existence's holder check reads it as the filer. */
+export function reservePlanRepairTaskId(
+  worktreePath: string,
+  filingBranch: string,
+  run: RemoteReserveDeps["run"] = planRepairGitRun(worktreePath),
+): string {
+  const mint = mintNextTaskId({ planPath: join(worktreePath, "plan", "tasks.yaml") });
+  return reserveTaskIdRemote(mint.n, gitRemoteRefReserver({ run, filingBranch })).taskId;
+}
+
 export interface StaleBaseReleaseTarget {
   pr: OpenPrView;
   decision: RedBaseRefreshDecision;
@@ -8500,6 +8760,13 @@ export interface SweepDeps {
     pr: OpenPrView,
     evidence: ProofDiscriminationEvidence,
   ) => boolean | void | Promise<boolean | void>;
+  /** W1-T5349 — the PR's author and live title, read only for a red plan-only PR on a machine-lane head. */
+  readPlanRepairFacts?: (pr: OpenPrView) => PlanRepairFacts | Promise<PlanRepairFacts>;
+  /** W1-T5349 — renumber a held id or retitle, on the lane's own branch; refresh uses `updateBranch`. */
+  repairPlanPr?: (
+    pr: OpenPrView,
+    decision: Extract<PlanRepairDecision, { action: "renumber" | "retitle" }>,
+  ) => PlanRepairOutcome | Promise<PlanRepairOutcome>;
   /** W1-T2931 — claim one slot from the light pass's shared host budget immediately before a
    *  fix worker is dispatched. The claim is synchronous, so concurrent per-PR reconciliation
    *  cannot all observe the same free slot. Omitted by every non-light caller, preserving the
@@ -9881,6 +10148,51 @@ export async function runSweep(
   const mainLatestRun = mainLatestRunFromLedger(ledgerLines);
   const baseRedHistory = baseRedHistoryFromLedger(ledgerLines);
   let baseRedRefreshPr: number | undefined;
+  // W1-T5349 — the plan-repair rung's once-per-head record, folded once per pass.
+  const planRepairHistory = planRepairHistoryFromLedger(ledgerLines);
+  const tryPlanRepair = async (pr: OpenPrView): Promise<{ repaired: boolean; reason: string }> => {
+    const notRepaired = { repaired: false, reason: "" };
+    if (!isMachineLanePlanHead(pr.headRefName) || !deps.readPlanRepairFacts || !deps.repairPlanPr) return notRepaired;
+    const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha };
+    let facts: PlanRepairFacts;
+    try {
+      facts = await deps.readPlanRepairFacts(pr);
+    } catch (e) {
+      appendLine(deps.ledgerPath, { ...row, step: `${PLAN_REPAIR_STEP}.read_error`, error: String((e as Error)?.message ?? e) });
+      return notRepaired;
+    }
+    const decision = decidePlanRepair(pr, facts, mainLatestRun, planRepairHistory);
+    if (decision === undefined) return notRepaired;
+    const ledgered = { ...row, step: PLAN_REPAIR_STEP, signature: decision.signature, action: decision.action, check_name: decision.check };
+    if (decision.action === "wait") {
+      const key = `${pr.prNumber}@${pr.headSha}@base-red-wait`;
+      if (!planRepairHistory.has(key)) appendLine(deps.ledgerPath, { ...ledgered, cause: decision.cause, main_sha: mainLatestRun?.sha });
+      planRepairHistory.add(key);
+      return { repaired: true, reason: `plan repair (base-red): ${decision.check} also fails on main's latest run — waiting for main, no escalation` };
+    }
+    let result: PlanRepairOutcome;
+    try {
+      result =
+        decision.signature === "base-red"
+          ? { outcome: deps.updateBranch ? await deps.updateBranch(pr) : "unwired" }
+          : await deps.repairPlanPr(pr, decision);
+    } catch (e) {
+      result = { outcome: "error", reason: String((e as Error)?.message ?? e) };
+    }
+    if (decision.signature === "base-red" && result.reason !== undefined) result = { outcome: `error: ${result.reason}` };
+    appendLine(deps.ledgerPath, {
+      ...ledgered,
+      ...(decision.signature === "base-red" ? { cause: decision.cause } : {}),
+      ...(decision.action === "renumber" ? { held_ids: decision.heldIds } : {}),
+      ...(decision.action === "retitle" ? { title: decision.title } : {}),
+      ...result,
+    });
+    planRepairHistory.add(`${pr.prNumber}@${pr.headSha}@${decision.signature}`);
+    if (["renumbered", "retitled", "updated"].includes(result.outcome)) {
+      return { repaired: true, reason: `plan repair (${decision.signature}): ${decision.action} on ${decision.check} — ${result.outcome}` };
+    }
+    return { repaired: false, reason: `; plan repair (${decision.signature}) did not take: ${result.outcome}${result.reason ? ` — ${result.reason}` : ""}` };
+  };
   // W1-T2789 — unlike W1-T2620's cohort-wide release above, this is exact-path evidence for the
   // exhausted red population the disposition table would otherwise escalate before runFixRung
   // reaches its W1-T2671 pre-strike check. The write still rechecks live state and head below.
@@ -10481,11 +10793,14 @@ export async function runSweep(
     // fix was refused "the task declares no files". Escalate naming the red instead (deduped per
     // head like every escalation), never a worker strike that cannot produce a commit.
     if (disposition === "blocked-fixable" && isBlockedCi(pr) && pr.isPlanFiling === true) {
-      disposition = "refused-escalate";
+      // W1-T5349 — a machine lane's mechanical red is repaired first; anything else escalates as before.
+      const repair = await tryPlanRepair(pr);
+      disposition = repair.repaired ? "wait" : "refused-escalate";
       const red = (pr.ciFailures ?? []).map((failure) => failure.name).join(", ") || "a required check";
-      reason =
-        `plan-only PR is red on ${red} — the code-fix lane cannot stage outside a plan filing, so no ` +
-        `fix is dispatched; the plan violation needs a plan repair`;
+      reason = repair.repaired
+        ? repair.reason
+        : `plan-only PR is red on ${red} — the code-fix lane cannot stage outside a plan filing, so no ` +
+          `fix is dispatched; the plan violation needs a plan repair${repair.reason}`;
     }
     // W1-T3306: `deriveDisposition` has no ledger input, while capped proof grades live only on
     // `review.posted`. Route the exact capped-green arm refusal through the EXISTING fix rung;

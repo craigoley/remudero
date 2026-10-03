@@ -20,10 +20,10 @@
   risk_ruling:
     verdict: "low"
     action: proceed
-    confidence: 0.9
+    confidence: 0.88
     reasons:
-      - "The declared scope is a single file, learnings/ci.yaml. It adds a learnings entry that points a lane at a CodeQL lesson. The description doesn't mention secrets, auth, permissions, deletions, or any change to merge, deploy, or review policy."
-      - "The acceptance criterion is a grep check (ci-learning:8075:CodeQL in learnings/ci.yaml), so a machine can verify the result. It also doesn't ask for an operator decision."
-      - "The change is documentation-like guidance for workers, and its PR still goes through CI and review. The ci-learning family has 1 merged and 0 declined task, so its track record shows no failures."
-    judged_at: "2026-10-02T03:42:27.655Z"
+      - "The filed plan confines the remedy to a matched CodeQL learning entry in learnings/ci.yaml, consistent with the declared file scope."
+      - "The supplied scope describes worker guidance and names no change to permissions, merge or deploy policy, data deletion, or irreversible action."
+      - "The plan specifies automated grep acceptance, and the supplied family record reports 2 merged tasks and 0 declined; no adverse gate result is shown."
+    judged_at: "2026-10-03T07:01:54.889Z"
     pin: "e156da77c479e3240763188c5d8c3f783b5dac34526e1e892742ea3468ddfb50"

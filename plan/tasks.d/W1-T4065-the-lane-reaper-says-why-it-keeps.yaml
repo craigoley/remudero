@@ -11,9 +11,9 @@
   origin: "oper#followups-research-2026-09-22"
   plan_refs: [W1-T4021, W1-T2847, W1-T3528]
   files: [src/lib/worker.ts, test/the-lane-reaper-says-why-it-keeps.test.ts, scripts/test-tier-manifest.json]
-  priority: 2
+  priority: 3
   status: queued
-  # backlog gardener: band=2 evidence=e672d39264bea760
+  # backlog gardener: band=3 evidence=b87e8b14614ec9d2
   attempts: 0
   rationale: |
     SUPERSEDES W1-T4021, WHOSE PREMISE IS FALSE. W1-T4021 says the reaper's only candidate source is git's worktree

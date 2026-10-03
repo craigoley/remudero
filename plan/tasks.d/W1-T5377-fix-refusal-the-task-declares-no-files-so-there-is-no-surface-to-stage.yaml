@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.15
   status: queued
@@ -36,3 +36,13 @@
     WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
     without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
     share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.78
+    reasons:
+      - "The filed plan targets preventing one named fix refusal, with declared scope limited to src/run-task.ts and a dedicated test; this is coherent with the stated remedy."
+      - "The supplied scope identifies no secrets, permissions, deletion, irreversible action, or merge, deploy, infrastructure, or review-policy change."
+      - "This is a filing-time assessment with no diff or actual-change view; the acceptance grep specifies test-text presence, so behavioral correctness remains for CI and review."
+    judged_at: "2026-10-03T03:58:40.902Z"
+    pin: "5723839f8222b9889839812fc6a8463104de78d13c8306540fc3be1f919f5856"
