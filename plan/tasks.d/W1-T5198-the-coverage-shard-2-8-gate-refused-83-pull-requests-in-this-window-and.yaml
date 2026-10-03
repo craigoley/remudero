@@ -22,9 +22,10 @@
   risk_ruling:
     verdict: "low"
     action: proceed
-    confidence: 0.91
+    confidence: 0.88
     reasons:
-      - "The filed task proposes a matched CI learning entry in learnings/ci.yaml, and its acceptance criterion specifies a grep check for that entry."
-      - "The declared scope is one learning file; the supplied gates state reports filingTime true and identifies no concerning gate result."
-    judged_at: "2026-10-02T03:37:00.739Z"
+      - "The filed plan proposes a matched coverage-shard learning entry, with learnings/ci.yaml as the sole declared file and a grep-prefixed acceptance proof."
+      - "The supplied scope describes carrying a lesson to workers; it specifies no sensitive access, deletion, irreversible action, policy change, or operator-only decision."
+      - "The supplied family history reports 2 merged and 0 declined tasks. This is a filing-time assessment; no diff, bounded actual-change view, or CI results are supplied."
+    judged_at: "2026-10-03T07:01:35.223Z"
     pin: "a135184609f5e6764ba1e13e8593e4254c33bc1fba84562ecf7a78ccefde63d5"

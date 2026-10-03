@@ -1,0 +1,31 @@
+- id: W1-T5402
+  title: "THE ci-shard (2/8) GATE REFUSED 7 PULL REQUESTS IN THIS WINDOW AND EACH WAS REPAIRED — carry the lesson to the lane that keeps hitting it, so the same gate stops refusing for the same reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 2.5
+  status: blocked
+  retirement: withdrawn
+  # plan gardener: merge W1-T5402 into W1-T5401 — Its title and files repeat an older queued task.
+  attempts: 0
+  author_class: machine
+  origin: "ci-learning:8558:ci-shard (2/8)"
+  ci_learning_prs: [8558, 8701, 8703, 8708, 8715, 8726, 8749]
+  files:
+    - learnings/ci.yaml
+  acceptance:
+    - claim: "the lane that trips the ci-shard (2/8) gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
+      proof: "grep: ci-learning:8558:ci-shard (2/8) in learnings/ci.yaml"
+  note: "Filed by the ci-learning rung from ci-learning:8558:ci-shard (2/8). The ci-shard (2/8) gate went red on #8558 and was repaired; the repair touched plan/tasks.d/W1-T5270-check-ci-log-comment-load-ratchet-test-bound-kind-declared-test-ts.yaml, plan/tasks.d/W1-T5277-check-ci-log-coverage-shard-test-status-board-test-ts.yaml, plan/feedback/fb-1789303258903-a19164.yaml, plan/tasks.d/w1-t5176-routing-arms-list-one-run-three-times.yaml, plan/tasks.d/W1-T5268-check-ci-log-coverage-shard.yaml, plan/tasks.d/w1-t5287-selector-shadow-miss.yaml, src/lib/inbox-thread-view.ts, src/lib/read-model-worker.ts, test/inbox-thread-view.test.ts. Recommended action: build. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.88
+    reasons:
+      - "The filed remedy is a matched CI learnings entry, and the sole declared file is learnings/ci.yaml, consistent with that scope."
+      - "The acceptance names a grep-prefixed proof for the entry; the supplied gates state reports no failure or operator-only decision."
+      - "The supplied family record shows 2 merged and 0 declined tasks. No described action changes review policy, touches credentials, deletes data, or requires an irreversible operation."
+    judged_at: "2026-10-03T07:02:52.643Z"
+    pin: "15b7cd2f59a629c60ad5fd76c79c71b46a65032ff6a2825dcd388a67dc16692a"

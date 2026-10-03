@@ -13,7 +13,7 @@
   files: [src/lib/drain.ts, src/lib/dispatch-value.ts, src/run-task.ts, test/new-work-is-ordered-by-cost-of-delay.test.ts, scripts/test-tier-manifest.json]
   priority: 2
   status: queued
-  # backlog gardener: band=2 evidence=c1a3667e8e3b8f14
+  # backlog gardener: band=2 evidence=b0549b8f9a9632f0
   attempts: 0
   rationale: |
     MEASURED 2026-09-22 (4-day ledger union, 346,646 rows; 242 run.start and 337 selection passes as controls).

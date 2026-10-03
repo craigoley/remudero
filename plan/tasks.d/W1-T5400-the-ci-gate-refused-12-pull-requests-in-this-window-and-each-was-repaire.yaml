@@ -1,0 +1,29 @@
+- id: W1-T5400
+  title: "THE ci GATE REFUSED 12 PULL REQUESTS IN THIS WINDOW AND EACH WAS REPAIRED — carry the lesson to the lane that keeps hitting it, so the same gate stops refusing for the same reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  priority: 2.5
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-learning:8551:ci"
+  ci_learning_prs: [8551, 8617, 8650, 8673, 8684, 8701, 8703, 8708, 8713, 8715, 8725, 8749]
+  files:
+    - learnings/ci.yaml
+  acceptance:
+    - claim: "the lane that trips the ci gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
+      proof: "grep: ci-learning:8551:ci in learnings/ci.yaml"
+  note: "Filed by the ci-learning rung from ci-learning:8551:ci. The ci gate went red on #8551 and was repaired; the repair touched plan/tasks.d/W1-T5270-check-ci-log-comment-load-ratchet-test-bound-kind-declared-test-ts.yaml, plan/tasks.d/W1-T5277-check-ci-log-coverage-shard-test-status-board-test-ts.yaml, plan/tasks.d/w1-t5176-routing-arms-list-one-run-three-times.yaml, plan/tasks.d/w1-t5287-selector-shadow-miss.yaml, plan/tasks.d/W1-T5327-add-usage-of-quiethoursfilepath-in-fleet-control.yaml, src/lib/containment.ts, src/lib/inbox-thread-view.ts, src/lib/measurement-cadence.ts, src/lib/now-view.ts, src/lib/read-model-worker.ts, src/lib/worker.ts, src/run-task.ts, test/a-fenced-structured-reply-is-unwrapped-not-rejected.test.ts, test/a-rule-about-a-gate-cannot-be-measured-by-the-ledger.test.ts, test/a-rule-that-keeps-failing-becomes-an-instrument.test.ts, test/egress-enforcement-owner.test.ts, test/expiring-fixture-census.test.ts, test/inbox-thread-view.test.ts, test/measurement-cadence-delta.test.ts, test/measurement-cadence.test.ts, test/now-view.test.ts, test/rule-efficacy.test.ts, test/view-demand.test.ts. Recommended action: build. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.88
+    reasons:
+      - "The filed remedy targets a matched CI learning entry and declares only learnings/ci.yaml, consistent with its stated acceptance criterion."
+      - "The supplied scope describes carrying lessons to workers; it does not propose changing merge, deploy, infrastructure, or review policy or taking destructive actions."
+      - "The family record reports 2 merged and 0 declined tasks. Filing-time gates report no adverse result; implementation and CI results are not yet supplied."
+    judged_at: "2026-10-03T07:02:16.275Z"
+    pin: "e3eb4cf72f6f8bfafaa620342b692405a414afc484fb5d5d76065223bda055e0"
