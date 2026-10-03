@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -12,6 +11,7 @@ import { CI_PARITY_TABLE, parseCiJobNames, runCiParityAdmitted, runCiParity as r
 import { preflightCommand } from "../src/run-task.js";
 import { skipInMutationSandbox } from "./helpers/mutation-sandbox.js";
 import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -522,7 +522,8 @@ test("full preflight admission: a later full-suite failure remains failed with i
 });
 
 test("full preflight admission: actual npm cleanup rejects an unreapable tracked fixture before full validation", () => {
-  const fixture = mkdtempSync(join(tmpdir(), "rmd-preflight-admission-"));
+  const repository = gitRepo({ kind: "preflight-admission", seedCommit: false });
+  const fixture = repository.dir;
   try {
     mkdirSync(join(fixture, "scripts", "lib"), { recursive: true });
     mkdirSync(join(fixture, "test"));
@@ -535,8 +536,7 @@ test("full preflight admission: actual npm cleanup rejects an unreapable tracked
       "unwired-gate:check": "node --eval \"process.exit(0)\"",
     } }));
     writeFileSync(join(fixture, "test", "example.test.ts"), "import { mkdtempSync } from 'node:fs';\nmkdtempSync(join(tmpdir(), 'unreapable-example-'));\n");
-    execFileSync("git", ["init", "--quiet", fixture]);
-    execFileSync("git", ["-C", fixture, "add", "--all"]);
+    repository.git("add", "--all");
     const refused = runCiParityAdmitted(fixture);
     assert.equal(refused.execution, "not-run");
     assert.match(refused.steps[0].detail, /example\.test\.ts/);
@@ -554,7 +554,7 @@ test("full preflight admission: actual npm cleanup rejects an unreapable tracked
     assert.equal(admitted.steps.filter((step) => step.name === "ci:typecheck").length, 1);
     assert.equal(fallback.calls.filter((call) => call.args.includes("test:ci")).length, 1);
   } finally {
-    rmSync(fixture, { recursive: true, force: true });
+    repository.cleanup();
   }
 });
 
