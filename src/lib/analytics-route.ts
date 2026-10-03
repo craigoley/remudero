@@ -1,4 +1,5 @@
 import { readRoutingDailyStatus } from "./routing-daily-status.js";
+import { goalObservationFromRow, type GoalObservation } from "./goals.js";
 /**
  * lib/analytics-route.ts — `GET /v1/analytics`: the per-instance aggregate answering the
  * operator's four analytics questions the ledger could not answer before W1-T477 (see
@@ -333,6 +334,7 @@ export interface AnalyticsSnapshot {
    *  module's header, design note iv. */
   measures: string;
   /** Question 1: invocation counts per verb, from `cli.invoked` rows. */
+  goalObservations?: GoalObservation[];
   invocationsByVerb: Record<string, number>;
   /** Present iff no `cli.invoked` row exists anywhere in the corpus — this signal predates
    *  collection (W1-T477); an empty `invocationsByVerb` here would misread as "zero calls". */
@@ -599,6 +601,7 @@ export function resolveConsoleV1Projection(
 }
 
 interface AnalyticsAccumulator {
+  goalObservations?: GoalObservation[];
   invocationsByVerb: Record<string, number>;
   invocationsMeasured: boolean;
   workersByKey: Map<string, WorkerLaneModelBucket>;
@@ -677,6 +680,8 @@ type AnalyticsCheckpointSource = {
 };
 
 type AnalyticsCheckpointState = {
+  goalObservations?: GoalObservation[];
+  goalAccountingVersion?: 1;
   invocationsByVerb: Record<string, number>;
   invocationsMeasured: boolean;
   workersByLaneModel: WorkerLaneModelBucket[];
@@ -849,6 +854,7 @@ function routingTelemetryAccumulator(): RoutingTelemetryAccumulator {
 
 function analyticsAccumulator(): AnalyticsAccumulator {
   return {
+    goalObservations: [],
     invocationsByVerb: {},
     invocationsMeasured: false,
     workersByKey: new Map(),
@@ -1547,6 +1553,12 @@ function accumulateAnalyticsLine(acc: AnalyticsAccumulator, line: Record<string,
   const judgeLine = judgeCalibrationRow(line);
   if (judgeLine) acc.judgeCalibrationRows.push(judgeLine);
 
+  const goal = goalObservationFromRow(line);
+  if (goal) {
+    const existing = acc.goalObservations?.find((row) => row.goal_id === goal.goal_id);
+    if (!existing || Date.parse(goal.ts) >= Date.parse(existing.ts)) acc.goalObservations =
+      [...(acc.goalObservations ?? []).filter((row) => row.goal_id !== goal.goal_id), goal].slice(-1000);
+  }
   if (line.step === "cli.invoked") {
     acc.invocationsMeasured = true;
     const verb = str(line.verb) ?? "(unknown)";
@@ -1641,6 +1653,7 @@ function snapshotFromAccumulator(
   const out: AnalyticsSnapshot = {
     asOf: nowIso,
     measures: ANALYTICS_SCOPE_NOTE,
+    goalObservations: acc.goalObservations,
     invocationsByVerb: acc.invocationsByVerb,
     workersByLaneModel,
     costAccounting: { pricedUsd: costModeledUsd, unpricedRows: acc.unpricedSpendRows ?? 0, state: (acc.unpricedSpendRows ?? 0) > 0 ? "uncertain" : "complete" },
@@ -1817,6 +1830,8 @@ function checkpointSourceCanResume(previous: AnalyticsCheckpointSource, current:
 
 function serializeCheckpointState(acc: AnalyticsAccumulator): AnalyticsCheckpointState {
   return {
+    goalObservations: acc.goalObservations,
+    goalAccountingVersion: 1,
     invocationsByVerb: { ...acc.invocationsByVerb },
     invocationsMeasured: acc.invocationsMeasured,
     workersByLaneModel: [...acc.workersByKey.values()].map((bucket) => ({ ...bucket })),
@@ -1874,6 +1889,7 @@ function hydrateCheckpointState(state: AnalyticsCheckpointState): AnalyticsAccum
   acc.invocationsByVerb = { ...state.invocationsByVerb };
   acc.invocationsMeasured = state.invocationsMeasured;
   for (const bucket of state.workersByLaneModel) acc.workersByKey.set(`${bucket.lane}\0${bucket.model}`, { ...bucket });
+  acc.goalObservations = state.goalObservations;
   acc.producedSpendUsd = state.producedSpendUsd;
   acc.unpricedSpendRows = state.unpricedSpendRows;
   for (const [key, value] of state.startsByRun) acc.startsByRun.set(key, { ...value });
@@ -1980,7 +1996,8 @@ export async function deriveAnalyticsSnapshotFromCheckpointedLedger(
 ): Promise<AnalyticsSnapshotReadResult> {
   const currentSource = checkpointSource(stateDir);
   const priorLiveMalformed = priorCheckpoint?.state.routingTelemetry?.malformedSources?.some(([, finding]) => finding.form === "live") ?? false;
-  const canResume = priorCheckpoint !== undefined && priorCheckpoint.state.usage?.costAccountingVersion === 1 &&
+  const canResume = priorCheckpoint !== undefined && priorCheckpoint.state.goalAccountingVersion === 1 &&
+    priorCheckpoint.state.usage?.costAccountingVersion === 1 &&
     priorCheckpoint.state.routingTelemetry?.benchmarkVersion === BENCHMARK_QUALITY_VERSION &&
     priorCheckpoint.state.routingTelemetry?.benchmarkCounters !== undefined &&
     Array.isArray(priorCheckpoint.state.routingTelemetry?.malformedSources) &&
@@ -2489,6 +2506,10 @@ export function buildAnalyticsRoute(deps: {
       if (requestedVersion === EVAL_CARD_VERSION) {
         const input = deps.currentEvalCardInput?.(params.get("trial") ?? undefined);
         sendJson(res, 200, buildEvalCard(input?.trial ?? null, input?.evidence ?? emptyEvalCardEvidence()));
+        return;
+      }
+      if (requestedVersion === "goals-v1") {
+        sendJson(res, 200, { version: "goals-v1", asOf: base.asOf, state: base.goalObservations?.length ? "observed" : "not-collected", goals: base.goalObservations ?? [] });
         return;
       }
       if (requestedVersion === USAGE_PROJECTION_VERSION) {
