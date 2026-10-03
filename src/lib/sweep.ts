@@ -9857,7 +9857,7 @@ export function fixLedgerRowsForHead(
   return selected;
 }
 
-/** W1-T5542: count completed outcomes, pairing legacy receipts with their preceding dispatch. */
+/** W1-T5542: count outcomes; legacy dispatches without receipts retain the historical cap. */
 export function fixRoundTally(
   lines: Array<Record<string, unknown>>,
   taskId: string | undefined,
@@ -9906,6 +9906,12 @@ export function fixRoundTally(
       continue;
     }
     if (regime === "executed" && round.dispatch.verdict_regime !== "executed") continue;
+    // Older histories can omit receipts, and body repairs record a completed write at dispatch.
+    // An explicit receipt takes precedence; identified worker rounds always require an outcome.
+    if (round.dispatch.round_id === undefined && round.done === undefined) {
+      tally.strikes++;
+      continue;
+    }
     const pushedHead = round.done?.pushed_head_sha;
     if (isRealStrike({
       workerRan: round.done !== undefined,
@@ -11467,6 +11473,11 @@ export async function runSweep(
                 extraDisposedFields = { ...extraDisposedFields, scope_amendment_red_checks: redCheckNames(pr) };
                 acted = false;
                 standDownReason = reason;
+                break;
+              }
+              if (refusedSameRed && fixRoundTally(ledgerLines, pr.taskId, pr.headSha).refusals.length === 0) {
+                acted = false;
+                standDownReason = `fix commit refused at this head and red set (${refusedSameRed.reason}) — incomplete round history; awaiting a changed head or red set`;
                 break;
               }
               // W1-T527 — CLASSIFY BEFORE SELECTING, because the strike is spent at dispatch and

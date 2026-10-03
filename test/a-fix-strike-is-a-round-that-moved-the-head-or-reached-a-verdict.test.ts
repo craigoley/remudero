@@ -66,6 +66,24 @@ test("W1-T5542: refused rounds are never strikes and both readers agree", async 
   assert.equal(single.dispatched, 1, "one refusal earns one retry");
 });
 
+test("W1-T5542: incomplete legacy history preserves the cap while identified rounds need outcomes", async () => {
+  const legacy = [1, 2].map((strike) => ({ task_id: TASK, step: "fix.dispatch", strike, head_sha: HEAD, verdict_regime: "executed" }));
+  assert.equal(priorStrikesFor(legacy, TASK, "executed", HEAD), 2);
+  assert.equal((await underClaim(legacy)).dispatched, 0, "missing historical receipts cannot re-open an exhausted cap");
+  assert.equal(sweep.fixRoundTally(legacy, TASK, "other-head").strikes, 0);
+  assert.equal(sweep.fixRoundTally(legacy.map((row) => ({ ...row, verdict_regime: "keyword_only" })), TASK, HEAD, "executed").strikes, 0);
+  assert.equal(sweep.fixRoundTally(legacy.map((row) => ({ ...row, kind: "proof_amendment" })), TASK, HEAD).strikes, 0);
+  const identified = legacy.map((row) => ({ ...row, round_id: `r${row.strike}` }));
+  assert.equal(priorStrikesFor(identified, TASK, "executed", HEAD), 0, "new dispatches alone do not prove completed work");
+  assert.equal((await underClaim(identified)).dispatched, 1);
+  const bodyRepair = { ...legacy[0], mode: "body-repair" };
+  assert.equal(sweep.fixRoundTally([bodyRepair], TASK, HEAD, "executed").strikes, 1, "a completed body write retains its own bounded repair budget");
+  const orphan = { task_id: TASK, step: "fix.commit_refused", head_sha: HEAD, reason: REASON };
+  const held = await underClaim([orphan], true);
+  assert.equal(held.dispatched, 0, "an unpaired refusal cannot establish the one-retry allowance");
+  assert.match(String(held.disposed?.stand_down_reason), /the worker changed nothing/);
+});
+
 test("W1-T5542: a round that moved the head or reached a verdict is one strike", async () => {
   for (const id of [undefined, "r1"]) {
     const pushed = round(id);
@@ -75,7 +93,7 @@ test("W1-T5542: a round that moved the head or reached a verdict is one strike",
     assert.equal(sweep.fixRoundTally(reviewed, TASK, HEAD).strikes, 1);
     assert.equal(priorStrikesFor(reviewed, TASK, "executed", HEAD), 1);
     assert.equal(sweep.fixRoundTally(round(id), TASK, HEAD).strikes, 0, "a done row alone has no judgment");
-    assert.equal(sweep.fixRoundTally([reviewed[0], reviewed[2]], TASK, HEAD).strikes, 0, "a review alone has no worker receipt");
+    assert.equal(sweep.fixRoundTally([reviewed[0], reviewed[2]], TASK, HEAD).strikes, id === undefined ? 1 : 0, "legacy dispatch evidence fails closed; identified rounds require a worker receipt");
   }
   const first = round("r1");
   first[1].pushed_head_sha = "new-head";
