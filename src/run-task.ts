@@ -19,6 +19,7 @@ import {
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { ghExec, ghJsonAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
+import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { censusSatisfiedTasks } from "../scripts/satisfied-task-census.mjs";
@@ -11202,6 +11203,7 @@ export async function runFixRung(opts: {
         report,
         worktreePath: opts.worktreePath,
         declaredPaths: [...(opts.task.files ?? []), ...offeredCensusBaselines()],
+        acceptance: opts.task.acceptance,
         ...options,
         assignmentId: fixResult.selectionAssignmentId,
         log: deps.log,
@@ -15625,6 +15627,7 @@ export async function repairCensusRefusedPush(input: {
       report: workerTranscript(result),
       worktreePath: cwd,
       declaredPaths: [...(task.files ?? []), ...refusal.offeredBaselines],
+      acceptance: task.acceptance,
       assignmentId: result.selectionAssignmentId,
       log,
       say: input.say,
@@ -17154,6 +17157,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       report: fullText(impl),
       worktreePath,
       declaredPaths: task.files ?? [],
+      acceptance: task.acceptance,
       assignmentId: impl.selectionAssignmentId,
       log,
       say,
@@ -17172,6 +17176,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       task: writerCannotResume(impl.provider ?? implementMount.provider, implementTools) ? task : undefined,
       worktreePath,
       declaredPaths: task.files ?? [],
+      acceptance: task.acceptance,
       assignmentId: impl.selectionAssignmentId,
       log,
       say,
@@ -39463,10 +39468,12 @@ export interface WorkerEditCommit {
   readonly committed: boolean;
   /** The new HEAD sha, present only when `committed`. */
   readonly sha?: string;
-  /** Paths the worker changed that its task did NOT declare. Reported, never staged. */
+  /** Paths outside the declared surface and its allowed exceptions. Reported, never staged. */
   readonly undeclared: readonly string[];
   /** W1-T4450: registered regenerable artifacts staged although undeclared (see commitWorkerEdits). */
   readonly regenerable?: readonly string[];
+  /** W1-T5386: new tests admitted by the task's own title proofs. */
+  readonly proofMatchedTests?: readonly string[];
   /** Why nothing was committed, when `committed` is false. */
   readonly reason?: string;
 }
@@ -39480,7 +39487,8 @@ export interface WorkerEditCommit {
  * being a per-provider exception.
  *
  * STAGES BY EXPLICIT DECLARED PATH, NEVER `git add -A` BARE. `declaredPaths` is the task's own
- * `files:` surface. Anything the worker changed outside it is REPORTED in `undeclared` and left
+ * `files:` surface, plus regenerable artifacts and new tests named by its own title proofs.
+ * Anything else the worker changed is REPORTED in `undeclared` and left
  * uncommitted -- so a worker cannot widen its own blast radius by writing somewhere it never
  * declared, and the caller can escalate loudly instead of discovering it in a diff later. This
  * mirrors plan-architect.ts's existing `add -A -- plan/ MASTER-PLAN.md`, which is already
@@ -39499,6 +39507,7 @@ export function commitWorkerEdits(
   // already declares. A second interface of the same shape is what the Deps-count ratchet
   // exists to prevent, and there is nothing this verb needs that the push verb did not.
   deps: PublishAbandonedFixOwnerAheadDeps = {},
+  acceptance: readonly AcceptanceCriterion[] = [],
 ): WorkerEditCommit {
   const runGit = deps.runGit ?? ((args: string[]) => execFileSync(
     "git",
@@ -39512,7 +39521,8 @@ export function commitWorkerEdits(
     return { committed: false, undeclared: [], reason: "the task declares no files, so there is no surface to stage" };
   }
 
-  const changed = workerChangedPaths(runGit(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]));
+  const status = runGit(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]);
+  const changed = workerChangedPaths(status);
   if (changed.length === 0) return { committed: false, undeclared: [], reason: "the worker changed nothing" };
 
   // W1-T4450: a REGISTERED REGENERABLE ARTIFACT (a gate's own baseline, whose failure message names
@@ -39522,7 +39532,20 @@ export function commitWorkerEdits(
   const regenerable = changed.filter(
     (path) => !pathIsUnderDeclaredSurface(path, declaredPaths) && Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, path),
   );
-  const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths) || regenerable.includes(path));
+  const titles = acceptance.flatMap((criterion) => {
+    const proof = parseWhitelistedProof(criterion.proof);
+    return proof?.kind === "test" && proof.nameFiltered ? [proof.label] : [];
+  });
+  const proofMatchedTests = titles.length === 0 ? [] : status.split("\0").filter((entry) =>
+    entry.startsWith("?? ") || entry.startsWith("A  ") || entry.startsWith("AM "),
+  ).map((entry) => entry.slice(3)).filter((path) =>
+    !pathIsUnderDeclaredSurface(path, declaredPaths) && /^test\/.*\.[cm]?[jt]sx?$/.test(path) &&
+    !path.split("/").includes("..") && lstatSync(join(repoDir, path)).isFile() &&
+    runGit(["ls-tree", "--name-only", "HEAD", "--", path]).trim() === "" &&
+    declaresProofTitle(readFileSync(join(repoDir, path), "utf8"), titles),
+  );
+  const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths) ||
+    regenerable.includes(path) || proofMatchedTests.includes(path));
   const undeclared = changed.filter((path) => !declared.includes(path));
   if (declared.length === 0) {
     return { committed: false, undeclared, reason: "every change the worker made is outside its declared files" };
@@ -39535,7 +39558,33 @@ export function commitWorkerEdits(
     sha: runGit(["rev-parse", "HEAD"]).trim(),
     undeclared,
     ...(regenerable.length > 0 ? { regenerable } : {}),
+    ...(proofMatchedTests.length > 0 ? { proofMatchedTests } : {}),
   };
+}
+
+/** Inspect declarations rather than comments or string examples; never execute worker content. */
+function declaresProofTitle(content: string, titles: readonly string[]): boolean {
+  const scanner = createScanner(true, undefined, content);
+  let token = scanner.scan();
+  while (token !== SyntaxKind.EndOfFile) {
+    if (token === SyntaxKind.SlashToken) scanner.reScanSlashToken();
+    if (token === SyntaxKind.Identifier && ["test", "it"].includes(scanner.getTokenValue())) {
+      token = scanner.scan();
+      while (token === SyntaxKind.DotToken) {
+        scanner.scan();
+        if (!["only", "skip", "todo"].includes(scanner.getTokenValue())) break;
+        token = scanner.scan();
+      }
+      if (token === SyntaxKind.OpenParenToken) {
+        token = scanner.scan();
+        if ((token === SyntaxKind.StringLiteral || token === SyntaxKind.NoSubstitutionTemplateLiteral) &&
+            !scanner.isUnterminated() && titles.some((title) => scanner.getTokenValue().includes(title)) &&
+            scanner.scan() === SyntaxKind.CommaToken) return true;
+      }
+    }
+    token = scanner.scan();
+  }
+  return false;
 }
 
 /**
@@ -39558,10 +39607,11 @@ export function commitWorkerEditsWithCensusFix(
   declaredPaths: readonly string[],
   message: string,
   deps: PublishAbandonedFixOwnerAheadDeps & { censusFix?: typeof runCensusFix } = {},
+  acceptance: readonly AcceptanceCriterion[] = [],
 ): WorkerEditCommit & { censusFix: CensusFixResult } {
   const censusFix = deps.censusFix ? deps.censusFix(repoDir) : runCensusFix(repoDir);
   const { censusFix: _injectedCensusFix, ...gitDeps } = deps;
-  return { ...commitWorkerEdits(repoDir, declaredPaths, message, gitDeps), censusFix };
+  return { ...commitWorkerEdits(repoDir, declaredPaths, message, gitDeps, acceptance), censusFix };
 }
 
 /** True when the worktree `runGit` targets is mid-merge (MERGE_HEAD is set). */
@@ -39741,6 +39791,7 @@ export function harnessCommitForShellLessWorker(
     report: string;
     worktreePath: string;
     declaredPaths: readonly string[];
+    acceptance?: readonly AcceptanceCriterion[];
     subjectSource?: "worker-authored" | "re-asked" | "harness-derived";
     derivedCommit?: { subject: string; reason: string };
     /** W1-T4614: the selection assignment of the worker whose edits this commits; its trailer names it. */
@@ -39770,12 +39821,13 @@ export function harnessCommitForShellLessWorker(
     input.assignmentId,
   );
   const subjectSource = asked === undefined ? "harness-derived" : input.subjectSource ?? "worker-authored";
-  const committed = commit(input.worktreePath, input.declaredPaths, message);
+  const committed = commit(input.worktreePath, input.declaredPaths, message, {}, input.acceptance);
   const refusalReason = committed.reason ?? "harness commit refused";
   input.log(committed.committed ? "implement.harness_commit" : "implement.harness_commit_refused", {
     ...(committed.sha ? { sha: committed.sha } : {}),
     subject_source: subjectSource,
     ...(committed.regenerable && committed.regenerable.length > 0 ? { regenerable: committed.regenerable } : {}),
+    ...(committed.proofMatchedTests?.length ? { proofMatchedTests: committed.proofMatchedTests } : {}),
     ...(!committed.committed ? { reason: refusalReason } : {}),
     ...(committed.undeclared.length > 0 ? { undeclared: committed.undeclared } : {}),
   });
@@ -39849,6 +39901,7 @@ export async function resumeForMissingCommitLine(
     task?: Pick<Task, "id" | "title" | "type">;
     worktreePath: string;
     declaredPaths: readonly string[];
+    acceptance?: readonly AcceptanceCriterion[];
     /** W1-T4614: the ORIGINAL worker's assignment — it did the edits; the resume only supplies the line. */
     assignmentId?: string;
     log: (step: string, extra?: Record<string, unknown>) => void;
@@ -39908,6 +39961,7 @@ export async function resumeForMissingCommitLine(
       report: combinedReport,
       worktreePath: input.worktreePath,
       declaredPaths: input.declaredPaths,
+      acceptance: input.acceptance,
       subjectSource: derivedCommit ? "harness-derived" : "re-asked",
       derivedCommit,
       assignmentId: input.assignmentId,
