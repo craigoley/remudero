@@ -73,6 +73,8 @@ export interface PanelActionDeps {
   interpretReplyDeps?: InterpretReplyDeps;
   /** Stamps the question-store answer {@link buildEscalationReplyRoute} records; unset ⇒ `systemClock`. */
   clock?: Clock;
+  /** The landing options {@link buildEscalationReplyRoute}'s capture lands with, wrapped by {@link requestPathLand}. */
+  feedbackLand?: LandFeedbackOpts;
 }
 
 /** Shared with lib/panel-graph.ts (W3-T6, the plan->task->PR graph + feedback/decision routes) -- one JSON-envelope writer for every panel route, never a second copy. */
@@ -855,10 +857,10 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
         appendThreadMessage(identity, "escalation", followUp, { threadStorePath: deps.threadStorePath });
       }
 
-      const entry = captureFeedback(deps.root, { raw: input.text, origin: "ui", threadId });
       const origin = bearerTokenId(req);
-      // W1-T4471: the store `operatorVerdictEvidence` (lib/sweep.ts) reads; `input.taskId` is
-      // required above, so the answer always names its task.
+      const land = requestPathLand(deps.feedbackLand ?? {}, deps.ledgerPath, input.taskId, origin);
+      const entry = captureFeedback(deps.root, { raw: input.text, origin: "ui", threadId, land });
+      // W1-T4471: the store `operatorVerdictEvidence` (lib/sweep.ts) reads; `input.taskId` is required above.
       const recordedToQuestionStore = appendQuestionAnswer(deps.root, {
         ts: (deps.clock ?? systemClock).iso(),
         task: input.taskId,

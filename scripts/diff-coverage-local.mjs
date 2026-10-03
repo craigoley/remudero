@@ -15,7 +15,7 @@
 //
 // Usage: npm run diff-coverage:local -- <test files...>
 //   --base <ref>   merge-base this against instead of origin/main (default origin/main)
-//   --lcov <path>  where to write/read the lcov report (default coverage/lcov.info)
+//   --lcov <path>  where the run writes the lcov and the gate reads it (default coverage/lcov.info)
 //   --dry-run      print the node invocation and diff base this WOULD use, run nothing
 //
 // The caller supplies the test files to run under coverage, so a run that never exercised a
@@ -23,11 +23,14 @@
 // file needs a test, rather than passing vacuously.
 //
 // Falsifier: test/local-diff-coverage-matches-ci.test.ts.
+//
+// W1-T5485: `--lcov` resolves ONCE to an absolute path the run writes, the lcov check stats and
+// the gate reads. Falsifier: test/diff-coverage-local-honours-the-lcov-path-it-is-given.test.ts.
 
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { parse as parseYaml } from "yaml";
 import { isMainModule } from "./lib/argv.mjs";
@@ -39,6 +42,8 @@ export const COVERAGE_JOB_NAME = "coverage-ratchet";
 export const COVERAGE_STEP_NAME_PREFIX = "Test with coverage";
 const NODE_INVOCATION_MARKER = "node --enable-source-maps";
 const TEST_FILES_PLACEHOLDER = '"${COVERAGE_TEST_FILES[@]}"';
+const LCOV_REPORTER_FLAG = "--test-reporter=lcov";
+const REPORTER_DESTINATION_PREFIX = "--test-reporter-destination=";
 
 /**
  * The `coverage-ratchet` job's "Test with coverage" step's `run:` script, straight out of a
@@ -148,6 +153,33 @@ export function mergeBaseDiff({ cwd = REPO_ROOT, base = "origin/main", head = "H
   return result.length > 0 ? `${result}\n` : result;
 }
 
+/** `resolve`, never `join`: join nests an absolute path under the root (W1-T5485 (a)). */
+export function resolveLcovPath(lcov, root = REPO_ROOT) {
+  return resolve(root, lcov);
+}
+
+/** ci.yml's flags with the lcov reporter's destination set to `lcovPath` (W1-T5485 (b)); one that
+ *  already resolves there (the default) is left as ci.yml spells it. No lcov reporter: throws. */
+export function withLcovDestination(flags, lcovPath, root = REPO_ROOT) {
+  const reporterAt = flags.indexOf(LCOV_REPORTER_FLAG);
+  const destinationAt =
+    reporterAt === -1
+      ? -1
+      : flags.findIndex((f, i) => i > reporterAt && f.startsWith(REPORTER_DESTINATION_PREFIX));
+  if (destinationAt === -1) {
+    throw new Error(
+      `diff-coverage-local: ${CI_YAML_RELATIVE_PATH}'s "${COVERAGE_STEP_NAME_PREFIX}" step has no ` +
+        `"${LCOV_REPORTER_FLAG}" followed by a "${REPORTER_DESTINATION_PREFIX}<path>" -- cannot point ` +
+        "the run at --lcov; its shape has changed; update this script",
+    );
+  }
+  const current = flags[destinationAt].slice(REPORTER_DESTINATION_PREFIX.length);
+  if (resolve(root, current) === lcovPath) return [...flags];
+  const rewritten = [...flags];
+  rewritten[destinationAt] = `${REPORTER_DESTINATION_PREFIX}${lcovPath}`;
+  return rewritten;
+}
+
 const HELP_TEXT = `Usage: npm run diff-coverage:local -- <test files...>
 
 Runs exactly the coverage flags ci.yml's "${COVERAGE_STEP_NAME_PREFIX}" step uses (read from
@@ -156,13 +188,12 @@ scripts/diff-coverage.mjs against a merge-base (<base>...HEAD) diff -- the same 
 runs, on the same inputs CI would produce.
 
   --base <ref>   diff base (default origin/main)
-  --lcov <path>  lcov report path (default coverage/lcov.info)
+  --lcov <path>  where the run writes the lcov report and the gate reads it
+                 (default coverage/lcov.info; relative paths resolve against the repo root)
   --dry-run      print the node invocation and diff base this would use; run nothing
 `;
 
-// ── The real implementation behind each injectable seam, each its OWN named export so a test can
-// exercise it directly and cheaply (a trivial spawn, a real temp dir) rather than only through
-// main()'s wiring. {@link defaultMainDeps} just names them; nothing here is inlined.
+// ── The real implementation behind each injectable seam, each its OWN export a test calls directly.
 
 export function readCiYaml() {
   return readFileSync(join(REPO_ROOT, CI_YAML_RELATIVE_PATH), "utf8");
@@ -172,8 +203,13 @@ export function ensureRawCoverageDir() {
   mkdirSync(join(REPO_ROOT, "coverage", "raw"), { recursive: true });
 }
 
-/** @param {string[]} nodeArgs */
-export function runInstrumentedTests(nodeArgs) {
+/** Removes a stale lcov at `lcovPath` first -- inside the seam every `main` test fakes, so none can
+ *  delete the lcov an enclosing coverage run is writing (W1-T5485). */
+export function runInstrumentedTests(nodeArgs, lcovPath) {
+  if (lcovPath !== undefined) {
+    rmSync(lcovPath, { force: true });
+    mkdirSync(dirname(lcovPath), { recursive: true });
+  }
   return spawnSync(process.execPath, nodeArgs, {
     stdio: "inherit",
     cwd: REPO_ROOT,
@@ -181,9 +217,9 @@ export function runInstrumentedTests(nodeArgs) {
   });
 }
 
-/** @param {string} lcovPath repo-root-relative */
+/** @param {string} lcovPath absolute, or relative to the repo root */
 export function statLcov(lcovPath) {
-  return statSync(join(REPO_ROOT, lcovPath));
+  return statSync(resolveLcovPath(lcovPath));
 }
 
 /** @param {string} base @param {string} head */
@@ -191,7 +227,7 @@ export function computeMergeBaseDiff(base, head) {
   return mergeBaseDiff({ cwd: REPO_ROOT, base, head });
 }
 
-/** @param {string} lcovPath repo-root-relative @param {string} diffPath absolute */
+/** @param {string} lcovPath absolute (main passes {@link resolveLcovPath}'s) @param {string} diffPath absolute */
 export function runDiffCoverageGate(lcovPath, diffPath) {
   return spawnSync(
     process.execPath,
@@ -214,12 +250,7 @@ export function removeTempDiffDir(path) {
   rmSync(path, { recursive: true, force: true });
 }
 
-/**
- * Every I/O `main` performs, as one injectable seam -- so a test can drive every branch (test
- * failure, missing/empty lcov, a blocking gate, an empty diff) without actually spawning an
- * instrumented suite or a real git process. Defaults reproduce the real CLI byte for byte; only
- * a test overrides them.
- */
+/** Every I/O `main` performs, as one injectable seam; the defaults are the real CLI. */
 export function defaultMainDeps() {
   return {
     readCiYaml,
@@ -273,9 +304,10 @@ export function main(argv, deps = {}) {
     return 1;
   }
 
+  const lcovPath = resolveLcovPath(values.lcov);
   let flags;
   try {
-    flags = extractCoverageFlags(readCi());
+    flags = withLcovDestination(extractCoverageFlags(readCi()), lcovPath);
   } catch (err) {
     error(err instanceof Error ? err.message : String(err));
     return 1;
@@ -284,6 +316,7 @@ export function main(argv, deps = {}) {
 
   if (values["dry-run"]) {
     log(`diff-coverage-local: would run: NODE_V8_COVERAGE=coverage/raw node ${nodeArgs.join(" ")}`);
+    log(`diff-coverage-local: would then read the lcov at: ${lcovPath}`);
     log(`diff-coverage-local: would then check: git diff ${mergeBaseDiffArgs(values.base, "HEAD")[1]}`);
     return 0;
   }
@@ -293,16 +326,19 @@ export function main(argv, deps = {}) {
     `diff-coverage-local: running the instrumented suite exactly as ci.yml's "${COVERAGE_STEP_NAME_PREFIX}" ` +
       `step does, over ${testFiles.length} file(s)...`,
   );
-  const testResult = runInstrumentedTests(nodeArgs);
+  const testResult = runInstrumentedTests(nodeArgs, lcovPath);
 
   // THE ONE THING CHECKED BEFORE THE TEST EXIT CODE, mirroring ci.yml's own step: no lcov means
   // the gate below has nothing to read, which is the vacuous pass this whole script exists to
   // prevent.
   let lcovStat;
   try {
-    lcovStat = statLcov(values.lcov);
-  } catch {
-    error("diff-coverage-local: no lcov produced -- the coverage gate below would have nothing to read. FAILING.");
+    lcovStat = statLcov(lcovPath);
+  } catch (err) {
+    error(
+      `diff-coverage-local: no lcov produced at ${lcovPath} (${err instanceof Error ? err.message : String(err)}) ` +
+        "-- the coverage gate below would have nothing to read. FAILING.",
+    );
     return 1;
   }
   if (lcovStat.size === 0) {
@@ -333,7 +369,7 @@ export function main(argv, deps = {}) {
   const diffPath = join(tmpDir, "pr.diff");
   try {
     writeDiffFile(diffPath, diffText);
-    const gateResult = runDiffCoverageGate(values.lcov, diffPath);
+    const gateResult = runDiffCoverageGate(lcovPath, diffPath);
     if (gateResult.status !== 0) {
       error(
         "diff-coverage-local: see the gate output above -- for a missing SF record, add a test file " +

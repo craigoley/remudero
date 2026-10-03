@@ -1178,6 +1178,9 @@ export interface DaemonDeps {
    * #2952 merged 385 tested lines and the rung never fired once, because nothing called it. It also carries retired
    * proposal ids, reconciled on every call (W1-T2304, W1-T2464). */
   checkBoardReview?: () => BoardReviewCadenceDecision & { retiredProposalIds?: string[] };
+  /** W1-T5481: awaited before {@link checkBoardReview}, so the open-board read it decides over is
+   *  done off the loop. MEASURED 2026-10-03: that read, synchronous, held the loop 30-98 s per tick. */
+  prefetchBoardReview?: () => Promise<void>;
   /** Runs one board-review tick. Read-only by construction: it writes one report artifact and drafts
    *  registry proposals, and nothing else — it does not push, merge, mint or file, and Rule 15
    *  stands. Best-effort, and a fired review never gates dispatch or changes a verdict. */
@@ -3733,6 +3736,7 @@ export async function runDaemon(
     if (deps.checkBoardReview) {
       let boardDecision: (BoardReviewCadenceDecision & { retiredProposalIds?: string[] }) | undefined;
       try {
+        await deps.prefetchBoardReview?.();
         boardDecision = deps.checkBoardReview();
       } catch (e) {
         log("board_review.check_failed", { error: String((e as Error)?.message ?? e) });
