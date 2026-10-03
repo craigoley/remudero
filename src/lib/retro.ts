@@ -2760,6 +2760,7 @@ function remeasureFixes(harvest: FollowupHarvest, deps: Parameters<typeof record
       if (receipt?.state !== "MERGED" || typeof receipt.mergedAt !== "string" ||
         !(receipt.body?.split("\n").some((line) => line.trim() === `Remudero-Task: ${task.id}`) ||
           receipt.headRefName?.startsWith(`run-${task.id}-`))) throw new Error("PR merge identity is not confirmed");
+      // expiring-fixture: exempt -- merge fixtures age against the injected retro clock, fixed in tests.
       const merged = Date.parse(receipt.mergedAt);
       if (!Number.isFinite(merged)) throw new Error("PR merge timestamp is invalid");
       const age = context.now - merged;
