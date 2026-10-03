@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import type { PreflightSpawn } from "../src/lib/commit-message.js";
-import { CI_PARITY_TABLE, parseCiJobNames, runCiParity as runCiParityEngine, type CiParityDeps } from "../src/lib/ci-parity.js";
+import { defaultPreflightSpawn, type PreflightSpawn } from "../src/lib/commit-message.js";
+import { CI_PARITY_TABLE, parseCiJobNames, runCiParityAdmitted, runCiParity as runCiParityEngine, type CiParityDeps } from "../src/lib/ci-parity.js";
 import { preflightCommand } from "../src/run-task.js";
 import { skipInMutationSandbox } from "./helpers/mutation-sandbox.js";
 import { coverageParitySpawnResult } from "./helpers/coverage-parity-spawn.js";
@@ -459,4 +461,122 @@ test("preflightCommand: WITHOUT --ci-parity, none of the ci-parity steps run or 
     3,
     "exactly the three shipped hand-route steps",
   );
+});
+
+test("full preflight admission: a cleanup refusal starts no full-suite child and still reports wiring", () => {
+  const { spawn, calls } = recordingSpawn({ "mkdtemp-callsite-check": { status: 1, stderr: "test/example.test.ts: forbidden temporary prefix" } });
+  const result = runCiParityAdmitted(REPO_ROOT, { spawn });
+  assert.equal(result.ok, false);
+  assert.equal(result.execution, "not-run");
+  assert.deepEqual(calls.map((call) => call.args), [
+    ["run", "--silent", "mkdtemp-callsite-check"],
+    ["run", "--silent", "unwired-gate:check"],
+  ]);
+  assert.match(result.steps[0].detail, /forbidden temporary prefix/);
+  assert.ok(result.steps.some((step) => step.name.endsWith("unwired-gate:check") && step.ok));
+  assert.match(result.steps.find((step) => step.name === "ci-parity:not-run")!.detail, /full CI parity was NOT RUN/);
+});
+
+test("full preflight admission: unreadable cleanup retains toolchain failure and starts no full suite", () => {
+  const calls: string[] = [];
+  const spawn: PreflightSpawn = (_file, args) => {
+    calls.push(args.join(" "));
+    if (args.includes("mkdtemp-callsite-check")) throw new Error("EACCES: cleanup scanner unavailable");
+    return { status: 0, stdout: "", stderr: "" };
+  };
+  const result = runCiParityAdmitted(REPO_ROOT, { spawn });
+  assert.equal(result.execution, "not-run");
+  assert.equal(calls.length, 2);
+  assert.match(result.steps[0].detail, /toolchain unavailable.*EACCES/);
+  assert.ok(result.steps[1].ok, "the independent wiring result remains present");
+});
+
+test("full preflight admission: a child without an exit remains an unavailable spawn result", () => {
+  const spawn: PreflightSpawn = (_file, args) => args.includes("mkdtemp-callsite-check")
+    ? { status: null, stdout: "", stderr: "", error: "ENOENT: npm unavailable" }
+    : { status: 0, stdout: "", stderr: "" };
+  const result = runCiParityAdmitted(REPO_ROOT, { spawn });
+  assert.equal(result.execution, "not-run");
+  assert.match(result.steps[0].detail, /SPAWN FAILURE.*ENOENT/);
+});
+
+test("full preflight admission: passing controls invoke the existing full engine once", () => {
+  const { spawn, calls } = recordingSpawn();
+  const result = runCiParityAdmitted(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER, coverageLockDiscriminator: randomUUID() });
+  assert.equal(result.execution, "completed");
+  assert.equal(result.steps.filter((step) => step.name === "ci-parity:drift").length, 1);
+  assert.equal(result.steps.filter((step) => step.name === "ci:typecheck").length, 1);
+  assert.ok(result.steps.some((step) => step.name.startsWith("ci:test")));
+  assert.equal(result.steps.some((step) => step.name === "ci-parity:not-run"), false);
+  assert.equal(calls.filter((call) => call.args.includes("test:ci")).length, 1, "the unchanged full-suite fallback launches exactly once");
+  assert.equal(calls.filter((call) => call.args.includes("mkdtemp-callsite-check")).length, 2, "admission and the unchanged full engine both retain the real guard");
+});
+
+test("full preflight admission: a later full-suite failure remains failed with independent later jobs", () => {
+  const { spawn } = recordingSpawn({ "test:ci": { status: 1, stderr: "fixture full-suite refusal" } });
+  const result = runCiParityAdmitted(REPO_ROOT, { spawn, coverageFreeBytes: () => Number.MAX_SAFE_INTEGER, coverageLockDiscriminator: randomUUID() });
+  assert.equal(result.execution, "completed");
+  assert.equal(result.ok, false);
+  assert.match(result.steps.find((step) => step.name === "ci:test")!.detail, /FAIL/);
+  assert.ok(result.steps.some((step) => step.name === "claims" && step.ok));
+});
+
+test("full preflight admission: actual npm cleanup rejects an unreapable tracked fixture before full validation", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "rmd-preflight-admission-"));
+  try {
+    mkdirSync(join(fixture, "scripts", "lib"), { recursive: true });
+    mkdirSync(join(fixture, "test"));
+    for (const name of ["mkdtemp-callsite-check.mjs", "lib/argv.mjs", "lib/repo-root.mjs"]) {
+      cpSync(join(REPO_ROOT, "scripts", name), join(fixture, "scripts", name));
+    }
+    writeFileSync(join(fixture, "package.json"), JSON.stringify({ type: "module", scripts: {
+      "mkdtemp-callsite-check": "node scripts/mkdtemp-callsite-check.mjs",
+      // This fixture isolates the real cleanup control; it does not claim wiring coverage.
+      "unwired-gate:check": "node --eval \"process.exit(0)\"",
+    } }));
+    writeFileSync(join(fixture, "test", "example.test.ts"), "import { mkdtempSync } from 'node:fs';\nmkdtempSync(join(tmpdir(), 'unreapable-example-'));\n");
+    execFileSync("git", ["init", "--quiet", fixture]);
+    execFileSync("git", ["-C", fixture, "add", "--all"]);
+    const refused = runCiParityAdmitted(fixture);
+    assert.equal(refused.execution, "not-run");
+    assert.match(refused.steps[0].detail, /example\.test\.ts/);
+    assert.match(refused.steps[0].detail, /unreapable-example-/);
+    assert.equal(refused.steps.some((step) => step.name === "ci:typecheck"), false);
+
+    writeFileSync(join(fixture, "test", "example.test.ts"), "import { mkdtempSync } from 'node:fs';\nmkdtempSync(join(tmpdir(), 'rmd-example-'));\n");
+    const fallback = recordingSpawn();
+    const spawn: PreflightSpawn = (file, args, opts) => args.includes("mkdtemp-callsite-check") || args.includes("unwired-gate:check")
+      ? defaultPreflightSpawn(file, args, opts)
+      : fallback.spawn(file, args, opts);
+    const admitted = runCiParityAdmitted(fixture, { spawn, ciYamlText: "jobs: {}", workflowTexts: {}, prWorkflowParityTable: [], coverageFreeBytes: () => Number.MAX_SAFE_INTEGER, coverageLockDiscriminator: randomUUID() });
+    assert.equal(admitted.execution, "completed");
+    assert.ok(admitted.steps[0].ok && admitted.steps[1].ok, "the corrected prefix really passes both admission children");
+    assert.equal(admitted.steps.filter((step) => step.name === "ci:typecheck").length, 1);
+    assert.equal(fallback.calls.filter((call) => call.args.includes("test:ci")).length, 1);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("full preflight admission: the command persists failure and names full parity as unrun", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "rmd-preflight-admission-summary-"));
+  const summary = join(fixture, "summary.json");
+  const { spawn, calls } = recordingSpawn({ "mkdtemp-callsite-check": { status: 1, stderr: "fixture forbidden prefix" } });
+  const originalLog = console.log;
+  const lines: string[] = [];
+  console.log = (...args: unknown[]) => { lines.push(args.join(" ")); };
+  try {
+    const code = await preflightCommand(["--ci-parity", "--no-fast", "--summary-file", summary], { spawn });
+    assert.equal(code, 1);
+    const durable = JSON.parse(readFileSync(summary, "utf8"));
+    assert.equal(durable.ok, false);
+    assert.ok(durable.steps.some((step: { name: string; ok: boolean }) => step.name === "ci-parity:not-run" && !step.ok));
+    assert.equal(durable.steps.some((step: { name: string }) => step.name.startsWith("ci:test")), false);
+    assert.ok(lines.some((line) => /full CI parity was NOT RUN/.test(line)));
+    assert.ok(lines.some((line) => /^\n?### rmd preflight: FAIL/.test(line)), "the command never renders unrun full parity as a passing preflight");
+    assert.equal(calls.some((call) => call.args.includes("test:ci")), false);
+  } finally {
+    console.log = originalLog;
+    rmSync(fixture, { recursive: true, force: true });
+  }
 });

@@ -603,7 +603,7 @@ import {
   preflightFailureNotice,
   preflightSummaryPath,
   remedyFilesForFailingChecks,
-  runCiParity,
+  runCiParityAdmitted,
   runPreflightCoverage,
   runPreflightFast,
   runTreeAdvisoryLine,
@@ -27167,7 +27167,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   const scopedCoverage = rest.includes("--no-fast")
     ? undefined
     : preflightCheckResult("fast-coverage:invocation", () => runPreflightScopedDiffCoverage(repoRoot, { spawn: deps.spawn }));
-  const ciParity = rest.includes("--ci-parity") ? runCiParity(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator }) : undefined;
+  const ciParity = rest.includes("--ci-parity") ? runCiParityAdmitted(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator }) : undefined;
   const coverage = rest.includes("--coverage") ? runPreflightCoverage(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator }) : undefined;
   // W1-T3738: opt-in, because each proof spawns a real base worktree and a real test — the
   // 29-second default tier cannot absorb that. Named in the coverage line below either way.
@@ -27255,7 +27255,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
     { name: "the fast gate", enableWith: "drop --no-fast", ran: fast !== undefined },
     { name: "console-parity + census suites (W1-T4108)", enableWith: "drop --no-fast", ran: ciChecks !== undefined },
     { name: "scoped diff-coverage, source-mapped (W1-T4108)", enableWith: "drop --no-fast", ran: scopedCoverage !== undefined },
-    { name: "ci-parity", enableWith: "--ci-parity", ran: ciParity !== undefined },
+    { name: "ci-parity", enableWith: "--ci-parity", ran: ciParity?.execution === "completed" },
     { name: "coverage", enableWith: "--coverage", ran: coverage !== undefined },
     { name: "proof discrimination", enableWith: "--proofs", ran: proofs !== undefined },
   ];
