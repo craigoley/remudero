@@ -1993,6 +1993,7 @@ export interface SnapshotStateOptions {
   maxRaceAttempts?: number;
 }
 
+// KIND: BACKSTOP — a healthy ledger settles on the first or second read (a few MB, read in ms).
 export const STATE_BACKUP_MAX_RACE_ATTEMPTS = 5;
 
 /** A rotation archive (`ledger.<ISO stamp>.ndjson[.gz]`): renamed in once, never modified. */
@@ -2107,14 +2108,7 @@ function newestStateBackup(backupsRoot: string): string | undefined {
 function assertStagedLedgerParses(stagedLedger: string, stateDir: string): void {
   const lines = readFileSync(stagedLedger, "utf8").split("\n");
   const tail = lines.pop();
-  const bad = lines.findIndex((line) => {
-    try {
-      JSON.parse(line);
-      return false;
-    } catch {
-      return true;
-    }
-  });
+  const bad = lines.findIndex((line) => parseLedgerLine(line).json === undefined);
   if (bad >= 0 || tail !== "") {
     const where = bad >= 0 ? `line ${bad + 1} does not parse as JSON` : "its last line has no newline";
     throw new StateBackupError(`state backup: the ledger copied from ${stateDir}: ${where} — refusing to publish it`);
