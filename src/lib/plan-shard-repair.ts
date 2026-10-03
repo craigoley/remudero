@@ -79,6 +79,7 @@ function pinVerdict(text: string): PinVerdict {
     parseYaml(text, { uniqueKeys: true });
     task = parseTasksFromYaml(text, "plan-shard-repair")[0]!;
   } catch (e) {
+    // Not the record the judge pinned; the error rides out so an all-unloadable refusal can name it.
     return { unloadable: String((e as Error)?.message ?? e).split("\n")[0]! };
   }
   const pin = task.risk_ruling?.pin;
@@ -96,6 +97,7 @@ export function repairDuplicateKeyShard(text: string): ShardRepair {
     parseYaml(text, { uniqueKeys: true });
     return refuse("the shard has no duplicate key — it parses");
   } catch (e) {
+    // The parse failure is the case this repairs; any other error is refused by name below.
     const message = String((e as Error)?.message ?? e);
     if (!DUPLICATE_KEY_ERROR_RE.test(message)) return refuse(`not a duplicate key: ${message.split("\n")[0]}`);
   }

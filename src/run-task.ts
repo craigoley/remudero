@@ -33597,13 +33597,13 @@ function repairRequestedShard(
   opts: { stateDir: string; log: ShardRepairLog; readOriginBlob: (rel: string) => string; land: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined },
 ): void {
   const at = { id: request.id, file: request.file };
-  const failed = (stage: string, e: unknown) => opts.log("plan.shard_repair_failed", { ...at, stage, reason: String((e as Error)?.message ?? e) });
+  const failure = (stage: string, e: unknown) => ({ ...at, stage, reason: String((e as Error)?.message ?? e) });
   const rel = request.file.slice(ORIGIN_MAIN_LABEL.length);
   let text: string;
   try {
     text = opts.readOriginBlob(rel);
   } catch (e) {
-    failed("read", e);
+    opts.log("plan.shard_repair_failed", failure("read", e));
     return;
   }
   const blob = gitBlobSha(text);
@@ -33613,7 +33613,7 @@ function repairRequestedShard(
     opened = JSON.parse(readFileIfExists(openedPath) ?? "{}") as Record<string, string>;
   } catch (e) {
     // An unreadable record cannot say these bytes were never opened: refuse rather than risk a second PR.
-    failed("opened-record", e);
+    opts.log("plan.shard_repair_failed", failure("opened-record", e));
     return;
   }
   if (opened[blob]) {
@@ -33638,7 +33638,7 @@ function repairRequestedShard(
   try {
     prUrl = opts.land(rel, verdict.text, pr);
   } catch (e) {
-    failed("land", e);
+    opts.log("plan.shard_repair_failed", failure("land", e));
     return;
   }
   if (prUrl === undefined) {
