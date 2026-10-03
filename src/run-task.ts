@@ -168,7 +168,7 @@ import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
 import { gardenPassDue, runGarden, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./lib/gardener.js";
-import { boundedGardenPassSpawn, childGardenPassSpawn, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
+import { boundedGardenPassSpawn, childGardenPassSpawn, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
@@ -178,7 +178,6 @@ import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
-import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, runSelectorShadowGardener, selectorShadowFlakeLedger } from "./lib/selector-shadow-gardener.js";
 import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, openIncidentFeedbackOrigins, startSreLane } from "./lib/sre-lane.js";
@@ -33648,18 +33647,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         openWorkspace: () => gardenCheckout({ name: "selector-shadow", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log }),
         log,
       };
-      return async () => {
-        try {
-          const runs = await readSelectorShadowRunsAsync(owner, repo, undefined, {
-            cachePath: join(stateDir, "selector-shadow-log-cache.json"),
-            warn: (message) => log("selector-shadow.cache_failed", { message }),
-            onFlakes: selectorShadowFlakeLedger(log),
-          });
-          await runSelectorShadowGardener(d, () => runs, (miss) => readSelectorShadowChangedPaths(owner, repo, miss), ciLearningTaskIdMinter(repoRoot));
-        } catch (e) {
-          log("selector-shadow.gardener_failed", { error: String((e as Error)?.message ?? e) });
-        }
-      };
+      return selectorShadowGardenPass(d, owner, repo, ciLearningTaskIdMinter(repoRoot));
     }
     case "evidence-coverage":
       return () => {
