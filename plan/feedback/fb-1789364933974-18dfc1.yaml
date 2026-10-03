@@ -12,10 +12,11 @@ raw: Strengthen the marketing site Playwright suite without inventing unreleased
   endpoint exists. Retain failure traces and reports.
 attachments: []
 origin: cli
-status: new
+status: rejected
 reply_to: null
 proposal_pr: null
 summary: null
 expansion: null
 submission_key: null
 thread_id: null
+answered_by: null

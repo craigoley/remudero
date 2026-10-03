@@ -207,8 +207,8 @@ import { loadConfig, type WorkerProviderId } from "./config.js";
 import type { Config, ModelApproval } from "./config-schema.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { createServeDrain, exitWithin } from "./serve-drain.js";
-import { createServeMemoryRegistry, droppableRouteCache, LEGACY_CACHE_VIEWS, sampleServeMemory, snapshotHolder, startServeMemoryMonitor, viewBodiesHolder, withoutRestore,
-  type CgroupHeadroom, type ServeMemoryMonitorOptions, type ServeMemoryRegistry } from "./serve-memory.js";
+import { createServeMemoryRegistry, droppableRouteCache, LEGACY_CACHE_VIEWS, readWorkerHeaps, sampleServeMemory, snapshotHolder, startServeMemoryMonitor, viewBodiesHolder,
+  withoutRestore, workerThreads, type CgroupHeadroom, type ServeMemoryMonitorOptions, type ServeMemoryRegistry, type TrackedWorker } from "./serve-memory.js";
 import { githubAuthProbe, gatewayPrimedProbe, planLoadedProbe, readModelWarmProbe, type ReadinessProbe } from "./serve-generation.js";
 import type { ConsoleProjectionWorker, FeedbackProjectionInput } from "./console-projection-worker.js";
 import { createConsoleSnapshotStore } from "./console-snapshot-store.js";
@@ -585,6 +585,8 @@ export interface ServeDeps {
   serveMemory?: Pick<ServeMemoryMonitorOptions, "intervalMs" | "setInterval" | "clearInterval" | "clock"> & {
     usage?: () => NodeJS.MemoryUsage;
     headroom?: () => CgroupHeadroom | undefined;
+    /** W1-T5355: the threads whose heaps the sample reads; absent, every thread this one spawns after serve is built. */
+    workers?: () => readonly TrackedWorker[];
   };
 }
 
@@ -2671,6 +2673,9 @@ function assembleServeRoutes(
   // inventory is metadata-only; raw private content is consumed through the ledger-backed
   // preflight reader, never serialized by the browser-facing console route.
   const goalBoardCache = createBoardSnapshotCache();
+  // W1-T5355: the cache exposes only `get`, which builds; the holder sizes the snapshot it last returned.
+  let goalBoard: BoardSnapshot | undefined;
+  memory?.add(snapshotHolder("goal-board", () => goalBoard));
   const operatorAgentRoutes = buildOperatorAgentRoutes({
     ledgerPath: deps.ledgerPath,
     root: deps.fleetControlRoot,
@@ -2678,7 +2683,7 @@ function assembleServeRoutes(
     goalBoard: () => {
       const state = deps.boardSnapshotSource?.current();
       if (state?.state === "unavailable") return undefined;
-      return { plan: deps.board.plan, snapshot: state?.snapshot ?? goalBoardCache.get(deps.board) };
+      return { plan: deps.board.plan, snapshot: state?.snapshot ?? (goalBoard = goalBoardCache.get(deps.board)) };
     },
   });
   prewarmOperatorAgentReads(deps.ledgerPath).catch((e) => deps.log?.("serve.operator_agent_prewarm_failed", { reason: String((e as Error)?.message ?? e) }));
@@ -2928,6 +2933,7 @@ function assembleServeRoutes(
       assistantBootSha: consoleSha,
       onAnalyticsCache: (cache, instance) => {
         instanceAnalyticsCaches.push(cache);
+        memory?.add(snapshotHolder(`analytics:${instance.name}`, cache.current, () => cache.shed()));
         badgeScopes.push({ instanceId: instance.name, repository: instance.repo, analytics: cache.current, ledgerPath: instance.ledgerPath,
           memory: createOperatorAgentMemorySource(() => cache.current().operatorAgentMemory) });
       },
@@ -3016,6 +3022,8 @@ export function startIncidentInvariantsMonitor(
  * returned server `close`s, so no timer outlives it.
  */
 function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
+  // W1-T5355: subscribed before anything below can spawn a thread, so each one's heap is sampled.
+  const liveThreads = deps.serveMemory?.workers ?? workerThreads().live;
   const github = deps.board.github;
   github.serveOffLoop?.();
   const statusStream = buildStatusStream(deps.board, deps.pollMs ?? DEFAULT_POLL_MS);
@@ -3196,7 +3204,9 @@ function assembleServeServer(deps: ServeDeps): ServeServerAssembly {
     const stopMemory = startServeMemoryMonitor({
       ...deps.serveMemory,
       holders: memory.holders,
-      sample: (holders) => sampleServeMemory(holders, { usage: deps.serveMemory?.usage, headroom: deps.serveMemory?.headroom }),
+      sample: async (holders) => sampleServeMemory(holders, {
+        usage: deps.serveMemory?.usage, headroom: deps.serveMemory?.headroom, workerHeaps: await readWorkerHeaps(liveThreads()),
+      }),
       modeOf: (view) => viewMode(readModel, view),
       log: deps.log,
       incident: (line) => appendLedger(deps.ledgerPath, line),

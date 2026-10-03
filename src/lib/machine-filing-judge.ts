@@ -226,6 +226,20 @@ function withoutRulingBlock(lines: string[]): string[] {
   return out;
 }
 
+/** A shard's text without its `risk_ruling` block's `judged_at:` line: an operator release is stamped
+ *  afresh every pass, so only this line may differ from the ruling main carries (W1-T5406). */
+function withoutJudgedAt(text: string): string {
+  let inBlock = false;
+  return text
+    .split("\n")
+    .filter((line) => {
+      if (/^ {2}risk_ruling:\s*$/.test(line)) return (inBlock = true);
+      if (line.trim() !== "" && !/^ {4}/.test(line)) inBlock = false;
+      return !(inBlock && /^ {4}judged_at:/.test(line));
+    })
+    .join("\n");
+}
+
 /** ONE shard's record. A lone shard cannot resolve its `depends_on`, so the caller checks them against
  *  the whole plan (2026-09-30: validating in isolation threw on every dependency and killed each pass). */
 const shardRecord = (text: string, relPath: string): Task => parseTasksFromYaml(text, relPath)[0]!;
@@ -476,9 +490,9 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
           continue;
         }
         const pin = shardRecord(out.contents, relPath).risk_ruling!.pin;
-        if (out.contents === text) {
-          // Main already carries this exact ruling: the daemon's plan lags the landing tree, so
-          // landing it again commits nothing and throws. Settled by its pin instead (W1-T5359).
+        if (out.contents === text || (r.byOperator && withoutJudgedAt(out.contents) === withoutJudgedAt(text!))) {
+          // Main already carries this ruling: the daemon's plan lags the landing tree, so landing it
+          // again commits nothing or only a timestamp. Settled by its pin instead (W1-T5359, W1-T5406).
           delete state.rulings[r.task.id];
           state.settled[r.task.id] = taskRulingPin(r.task);
           report.settled.push(r.task.id);
