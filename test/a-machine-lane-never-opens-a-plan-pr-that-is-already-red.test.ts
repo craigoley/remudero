@@ -17,23 +17,21 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { fixedClock } from "../src/lib/clock.js";
-import { LANDING_BRANCH, landFeedback } from "../src/lib/feedback-landing.js";
+import * as landing from "../src/lib/feedback-landing.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
-import {
-  PlanPrPreflightRefusedError,
-  TASK_ID_UNREADABLE_RE,
-  planPrPreflight,
-  planPrPreflightAllows,
-  planPrPreflightAtCommit,
-  refuseRedPlanPr,
-  type PlanPrPreflightChecks,
-  type PlanPrPreflightResult,
-} from "../src/lib/plan-pr-emitter.js";
+import * as emitter from "../src/lib/plan-pr-emitter.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gardenCheckout } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
 // @ts-expect-error -- test executes the untyped executable module directly.
 import { classifyUnreadableOpenPrSurface } from "../scripts/task-id-existence-check.mjs";
+
+// Namespace imports, so this file LOADS at a base that lacks these symbols and each test fails there by name — the
+// proof then discriminates instead of reading "discrimination unknown" off a module-load error.
+const { LANDING_BRANCH, landFeedback } = landing;
+const { PlanPrPreflightRefusedError, TASK_ID_UNREADABLE_RE, planPrPreflight, planPrPreflightAllows, planPrPreflightAtCommit, refuseRedPlanPr } = emitter;
+type PlanPrPreflightChecks = emitter.PlanPrPreflightChecks;
+type PlanPrPreflightResult = emitter.PlanPrPreflightResult;
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -358,9 +356,12 @@ function fakeGh() {
   return { gh, calls };
 }
 
-test("feedback-landing's accept path never pushes a landing whose record id is already on origin/main (#7946)", () => {
-  const f = originWith({ "README.md": "seed\n", "plan/feedback/fb-acc.yaml": "id: fb-acc\nstatus: new\nraw: a note\n" }, "w5348-landing");
-  writeFileSync(join(f.clone.dir, "plan", "feedback", "fb-acc.yaml"), "id: fb-acc\nstatus: accepted\nraw: a note\n");
+test("feedback-landing's accept path never pushes a landing whose proof already passes at origin/main (#7946)", () => {
+  // An attachment's template proof is `grep: . in <path>`, and a change that only DELETES a line leaves no line the
+  // pushed bytes hold that base lacks — so no discriminating proof exists and the template proof stands, red.
+  const rel = "plan/feedback/attachments/fb-acc.txt";
+  const f = originWith({ "README.md": "seed\n", [rel]: "kept\ndropped\n" }, "w5348-landing");
+  writeFileSync(join(f.clone.dir, rel), "kept\n");
   const rows: LogRow[] = [];
   const { gh, calls } = fakeGh();
   let preflights = 0;
@@ -379,6 +380,170 @@ test("feedback-landing's accept path never pushes a landing whose record id is a
   const again = withLiveWritesAllowed(() => landFeedback(f.clone.dir, opts));
   assert.equal(again.landed, false);
   assert.equal(preflights, 1, "an unchanged refused tree is not re-checked on the next poll");
+});
+
+// ── a status-change landing's proof discriminates ─────────────────────────────────────────────
+
+/** Real `grep -arn` hits — the executor's own invocation — of a `grep:` proof against `text`. */
+function realGrepHits(proof: string, text: string): number {
+  const m = /^grep: (.+) in (\S+)$/.exec(proof);
+  assert.ok(m, `not a grep proof: ${proof}`);
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w5348-grep-`));
+  try {
+    writeFileSync(join(dir, "f"), text);
+    const r = spawnSync("grep", ["-arn", "--", m[1], join(dir, "f")], { encoding: "utf8" });
+    assert.ok(r.status === 0 || r.status === 1, `grep could not run the pattern ${m[1]}: ${r.stderr}`);
+    return r.stdout.split("\n").filter(Boolean).length;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("a changed record's landing proof names one line only its new state holds, and real grep misses it at base", () => {
+  const rel = "plan/feedback/fb-acc.yaml";
+  const at = (base: string | undefined, head: string) => ({ base: () => base, head: () => head });
+  const statusFlip = landing.discriminatingLandingProof(rel, at("id: fb-acc\nstatus: proposed\nraw: a note\n", "id: fb-acc\nstatus: accepted\nraw: a note\nproposal_pr: 12\n"));
+  assert.equal(statusFlip, `grep: ^status: accepted$ in ${rel}`, "the lifecycle line is preferred over any other added line");
+
+  // Every metacharacter is a one-character bracket; a line holding `\`, `^` or a bracket is never chosen.
+  const base = "summary: a.b\n";
+  const head = "summary: a.b\nweird: back\\slash ^caret [x]\nnote: a.b*(c)+{d}|$e?\n";
+  const escaped = landing.discriminatingLandingProof(rel, at(base, head));
+  assert.equal(escaped, `grep: ^note: a[.]b[*][(]c[)][+][{]d[}][|][$]e[?]$ in ${rel}`);
+  assert.equal(realGrepHits(escaped!, head), 1, "the pushed bytes match");
+  assert.equal(realGrepHits(escaped!, base), 0, "the merge-base misses");
+  assert.equal(realGrepHits(escaped!, "note: aXb*(c)+{d}|$e?\n"), 0, "a bracketed dot is a literal dot");
+  assert.equal(realGrepHits(statusFlip!, "status: accepted\n"), 1);
+  assert.equal(realGrepHits(statusFlip!, "status: accepted_later\n"), 0, "the line is anchored whole");
+
+  assert.equal(landing.discriminatingLandingProof(rel, at(undefined, "id: fb-new\n")), undefined, "a NEW path keeps its template proof");
+  assert.equal(landing.discriminatingLandingProof(rel, at("a\nb\n", "a\n")), undefined, "a pure deletion has no line to name");
+  assert.equal(landing.discriminatingLandingProof(rel, at("a\nb\n", "b\na\n")), undefined, "a reorder has no line to name");
+  assert.equal(landing.discriminatingLandingProof(rel, at("a\n", "a\n" + "x".repeat(200) + "\n")), undefined, "wrapped prose is not a proof");
+});
+
+test("a feedback status-change landing pushes, opens its PR with a discriminating proof, and refreshes it on the next push", () => {
+  const rel = "plan/feedback/fb-acc.yaml";
+  const f = originWith({ "README.md": "seed\n", [rel]: "id: fb-acc\nstatus: new\nraw: a note\n" }, "w5348-status-change");
+  // THE REPRODUCTION: the template every feedback landing used to render already passes at origin/main.
+  writeFileSync(join(f.clone.dir, rel), "id: fb-acc\nstatus: grilling\nraw: a note\n");
+  assert.equal(grepAtHeadAndBase(f.clone.dir, `grep: fb-acc in ${rel}`), 5, "the old template proof passes at base too");
+
+  const bodies: string[] = [];
+  const rows: LogRow[] = [];
+  const { gh, calls } = fakeGh();
+  const opts = {
+    gh,
+    log: (step: string, extra?: Record<string, unknown>) => rows.push({ step, extra }),
+    planPrPreflight: (sha: string, pr: { title: string; body: string }) => (bodies.push(pr.body), planPrPreflightAtCommit(f.clone.dir, sha, pr, offlineChecks)),
+  };
+  const r = withLiveWritesAllowed(() => landFeedback(f.clone.dir, opts));
+  assert.equal(r.landed, true, JSON.stringify(r));
+  assert.equal(r.pushed, true);
+  assert.deepEqual(f.heads(), [LANDING_BRANCH, "main"]);
+  assert.equal(rows.some((row) => row.step === "plan_pr.preflight_refused"), false);
+  const create = calls.find((c) => c[1] === "create")!;
+  const body = create[create.indexOf("--body") + 1];
+  assert.equal(body, bodies[0], "the PR carries exactly the body the preflight judged");
+  assert.match(body, /^- fb-acc lands as a durable inbox entry \| grep: \^status: grilling\$ in plan\/feedback\/fb-acc\.yaml$/m);
+
+  // The record moves again while its PR is open: the push rewrites the open PR's body over REST to the new line.
+  writeFileSync(join(f.clone.dir, rel), "id: fb-acc\nstatus: proposed\nraw: a note\n");
+  const patches: string[][] = [];
+  const openGh = (args: string[]): string => {
+    if (args[0] === "pr" && args[1] === "list") return JSON.stringify([{ url: "https://github.com/o/r/pull/77" }]);
+    if (args[0] === "api" && args[2] === "PATCH") return (patches.push(args), "{}");
+    throw new Error(`unexpected gh call: ${JSON.stringify(args)}`);
+  };
+  const second = withLiveWritesAllowed(() => landFeedback(f.clone.dir, { ...opts, gh: openGh }));
+  assert.equal(second.landed, true, JSON.stringify(second));
+  assert.equal(second.error, undefined);
+  assert.equal(patches.length, 1);
+  assert.equal(patches[0][3], "repos/o/r/pulls/77");
+  assert.match(patches[0][5], /grep: \^status: proposed\$ in plan\/feedback\/fb-acc\.yaml/);
+
+  const failing = (args: string[]): string => {
+    if (args[0] === "api") throw new Error("HTTP 502");
+    return openGh(args);
+  };
+  writeFileSync(join(f.clone.dir, rel), "id: fb-acc\nstatus: accepted\nraw: a note\n");
+  const third = withLiveWritesAllowed(() => landFeedback(f.clone.dir, { ...opts, gh: failing }));
+  assert.equal(third.landed, true, "the push landed; only the body refresh failed");
+  assert.match(third.error ?? "", /refreshing the body of https:\/\/github\.com\/o\/r\/pull\/77 failed: HTTP 502/);
+});
+
+test("the plan-reconcile, decisions and ci-learning landings each render a proof that misses their merge-base", () => {
+  const f = originWith(
+    {
+      "README.md": "seed\n",
+      "plan/tasks.d/W9-T7-done.yaml": "- id: W9-T7\n  status: queued\n  acceptance:\n    - claim: c\n      proof: \"grep: seed in README.md\"\n",
+      "plan/tasks.d/W9-T8-lesson.yaml": "- id: W9-T8\n  author_class: machine\n  title: first wording\n",
+      "plan/decisions.d/W9-T9-r1.md": "an earlier record\n",
+    },
+    "w5348-families",
+  );
+  const bodies: Array<{ title: string; body: string }> = [];
+  const capture = (sha: string, pr: { title: string; body: string }) => (bodies.push(pr), planPrPreflightAtCommit(f.clone.dir, sha, pr, offlineChecks));
+  const run = <T>(fn: () => T): T => withLiveWritesAllowed(fn);
+
+  const reconciled = run(() =>
+    landing.landPlanReconcileShards(
+      f.clone.dir,
+      [{ relPath: "plan/tasks.d/W9-T7-done.yaml", content: "- id: W9-T7\n  status: merged\n  acceptance:\n    - claim: c\n      proof: \"grep: seed in README.md\"\n" }],
+      { gh: fakeGh().gh, planPrPreflight: capture },
+    ),
+  );
+  assert.equal(reconciled.landed, true, JSON.stringify(reconciled));
+  assert.match(bodies.at(-1)!.body, /\| grep: \^  status: merged\$ in plan\/tasks\.d\/W9-T7-done\.yaml$/m);
+
+  const decided = run(() =>
+    landing.recordDecision(
+      f.clone.dir,
+      { taskId: "W9-T9", runId: "r1", options: ["a", "b"], chosen: "a", band: "low", reason: "measured", ts: "2026-10-03T00:00:00.000Z" },
+      { gh: fakeGh().gh, planPrPreflight: capture },
+    ),
+  );
+  assert.equal(decided.landed, true, JSON.stringify(decided));
+  const decisionProof = /\| (grep: .+ in plan\/decisions\.d\/W9-T9-r1\.md)$/m.exec(bodies.at(-1)!.body)?.[1];
+  assert.ok(decisionProof && decisionProof !== "grep: . in plan/decisions.d/W9-T9-r1.md", bodies.at(-1)!.body);
+
+  const stateRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w5348-ci-learning-`));
+  try {
+    const pending = join(stateRoot, "state", "ci-learning-pending", "plan", "tasks.d", "W9-T8-lesson.yaml");
+    mkdirSync(dirname(pending), { recursive: true });
+    writeFileSync(pending, "- id: W9-T8\n  author_class: machine\n  title: second wording\n");
+    const filed = run(() =>
+      landing.landCiLearningShards([], f.clone.dir, {
+        stateRoot,
+        mintTaskId: () => "W9-T99",
+        planOrigins: [],
+        renderShard: () => "",
+        recordVerdict: () => ({ ok: true, reason: "" }),
+        gh: fakeGh().gh,
+        planPrPreflight: capture,
+      }),
+    );
+    assert.equal(bodies.at(-1)!.title, "chore(ci-learning): land pending lessons", JSON.stringify(filed));
+    assert.match(bodies.at(-1)!.body, /\| grep: \^  title: second wording\$ in plan\/tasks\.d\/W9-T8-lesson\.yaml$/m);
+  } finally {
+    rmSync(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("a changed shard's proofs that origin/main already declares are not this PR's to discriminate; a new one is", () => {
+  const rel = "plan/tasks.d/W9-T7-done.yaml";
+  const before = shard("W9-T7", "grep: seed in README.md");
+  const f = originWith({ "README.md": "seed\n", [rel]: before }, "w5348-shard-proofs");
+  writeFileSync(join(f.clone.dir, rel), before.replace("  repo: remudero\n", "  repo: remudero\n  status: merged\n"));
+  f.clone.git("commit", "-q", "-am", "chore(plan): reconcile W9-T7");
+  const statusOnly = planPrPreflight({ cwd: f.clone.dir, title: "chore(plan): reconcile credited task statuses", body: "" }, offlineChecks);
+  assert.deepEqual(statusOnly, { ok: true, failures: [], unreadable: [] }, "a merged task's own proof passing at base is not a red");
+
+  writeFileSync(join(f.clone.dir, rel), `${before}    - claim: "a second claim"\n      proof: "grep: se in README.md"\n`);
+  f.clone.git("commit", "-q", "-am", "chore(plan): add a proof to W9-T7");
+  const added = planPrPreflight({ cwd: f.clone.dir, title: "chore(plan): add a proof", body: "" }, offlineChecks);
+  assert.equal(added.ok, false, JSON.stringify(added));
+  assert.match(added.failures[0].firstLine, /grep: se in README\.md/);
 });
 
 test("a clean feedback landing still pushes and opens its PR", () => {

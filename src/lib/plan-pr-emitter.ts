@@ -535,24 +535,36 @@ function firstLineOf(output: string, status: number | null): string {
   return lines.find((l) => diagnosticLine.test(l)) ?? lines[0] ?? `exited ${status}`;
 }
 
-/** The acceptance proofs of every task shard this tree adds or changes against origin/main; undefined when unreadable. */
+/** Every acceptance proof one shard's YAML text declares; an unparseable shard declares none here — the plan lint
+ *  refuses it by name. */
+function shardProofs(text: string): string[] {
+  let tasks: unknown;
+  try {
+    tasks = parseYaml(text);
+  } catch {
+    return [];
+  }
+  const proofs: string[] = [];
+  for (const task of Array.isArray(tasks) ? tasks : []) {
+    const acceptance = (task as { acceptance?: unknown } | null)?.acceptance;
+    for (const c of Array.isArray(acceptance) ? (acceptance as Array<{ proof?: unknown } | null>) : []) {
+      if (typeof c?.proof === "string") proofs.push(c.proof.trim());
+    }
+  }
+  return proofs;
+}
+
+/** The acceptance proofs this tree INTRODUCES in the task shards it adds or changes against origin/main; undefined when
+ *  unreadable. A proof the base shard already declares is not this PR's to discriminate: a status edit to a MERGED
+ *  task (plan-reconcile, a gardener's field fix) leaves proofs that pass at base by construction — the task shipped. */
 function changedShardProofs(cwd: string): string[] | undefined {
   const diff = spawnSync("git", ["diff", "--name-only", "--diff-filter=AM", "origin/main...HEAD", "--", PLAN_TASK_SHARD_PREFIX], { cwd, encoding: "utf8" });
   if (diff.status !== 0) return undefined;
   const proofs: string[] = [];
   for (const rel of diff.stdout.split("\n").filter(Boolean)) {
-    let tasks: unknown;
-    try {
-      tasks = parseYaml(readFileSync(join(cwd, rel), "utf8"));
-    } catch {
-      continue; // an unparseable shard is the plan lint's to refuse, by name
-    }
-    for (const task of Array.isArray(tasks) ? tasks : []) {
-      const acceptance = (task as { acceptance?: unknown } | null)?.acceptance;
-      for (const c of Array.isArray(acceptance) ? (acceptance as Array<{ proof?: unknown } | null>) : []) {
-        if (typeof c?.proof === "string") proofs.push(c.proof.trim());
-      }
-    }
+    const base = spawnSync("git", ["show", `origin/main:${rel}`], { cwd, encoding: "utf8", maxBuffer: 1 << 26 });
+    const atBase = new Set(base.status === 0 ? shardProofs(base.stdout) : []);
+    proofs.push(...shardProofs(readFileSync(join(cwd, rel), "utf8")).filter((p) => !atBase.has(p)));
   }
   return proofs;
 }
