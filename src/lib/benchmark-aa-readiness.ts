@@ -25,7 +25,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { IMMUTABLE_REVISION_RE, type AaTrialManifest, type BenchmarkAaReport } from "./benchmark-aa.js";
+import { IMMUTABLE_REVISION_RE, type AaTrialManifest, type BenchmarkAaCommandInput, type BenchmarkAaReport } from "./benchmark-aa.js";
 import { API_BILLING_REFUSAL, listProspectiveAaRegistrations, prospectiveAaDir, prospectiveAaLedgerRows, resolveAttemptBilling,
   runProspectiveAa, runProspectiveAaPair, type ProspectiveAaPairInput, type ProspectiveAaPairResult,
   type ProspectiveAaProtocol } from "./benchmark-aa-prospective.js";
@@ -444,7 +444,7 @@ const USAGE = "usage: rmd benchmark-aa readiness --trial-id <id> [--trial <manif
 
 /** `rmd benchmark-aa readiness ...`: parses the operator's words and hands one request to `run`. Exit 0 only on a receipt. */
 export async function benchmarkAaReadinessCommand(rest: string[], run: (request: BenchmarkAaReadinessRequest) => Promise<BenchmarkAaReadinessResult>,
-  deps: { print?: (line: string) => void; clock?: Clock; resolveStateDir?: () => string } = {}): Promise<number> {
+  deps: Pick<BenchmarkAaCommandInput, "print" | "clock" | "resolveStateDir"> = {}): Promise<number> {
   const print = deps.print ?? ((line: string) => console.log(line));
   let values: { "trial-id"?: string; trial?: string; "instance-root"?: string[]; "max-pairs"?: string; out?: string; "state-dir"?: string; json?: boolean };
   try {
