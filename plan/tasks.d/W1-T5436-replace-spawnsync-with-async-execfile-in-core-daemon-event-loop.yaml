@@ -9,6 +9,10 @@
   attempts: 0
   files:
     - src/lib/daemon.ts
+  rationale: |
+    Synchronous subprocess work for proof execution, dependency installation, and
+    file searches can delay the daemon event loop. Async execFile lets the daemon
+    continue handling events while those child processes run.
   acceptance:
     - claim: Core daemon uses async execFile for execWhitelistedProof, ensureDeps, and grepFilesContaining, reducing event loop time
       proof: "grep: execFile in src/lib/daemon.ts"
