@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: follow-up to W1-T5407 (PR #8902), five 2027-10-14 cli.invoked rows in the core ledger"
   plan_refs: [W1-T5407, W1-T4601]
   files: [src/lib/fleet-liveness.ts, test/fleet-liveness-skips-a-future-stamped-boot-row.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |
