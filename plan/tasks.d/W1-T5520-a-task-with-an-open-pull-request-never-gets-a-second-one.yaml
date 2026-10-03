@@ -1,0 +1,103 @@
+- id: W1-T5520
+  title: "A TASK WITH AN OPEN PULL REQUEST NEVER GETS A SECOND ONE — on 2026-10-02 the fleet opened #8797 (run-W1-T5343-1790980010581) at 23:28Z while a hand-built #8782 (run-W1-T5343-1790978745655, opened 22:32Z) was still open for the same task; the implement path's PR open looks only for a PR on its OWN head, so it never saw the sibling, and #8797's CI and fix round were wasted until the sweep closed it as a leftover at 00:10Z"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: root-cause program for the 28-PR backlog; live ledger read of run W1-T5343-1790980010581 on the Azure host"
+  plan_refs: [W1-T534, W1-T1268, W1-T4466, W1-T2794, W1-T3979]
+  files: [src/run-task.ts, src/lib/pr-open.ts, test/a-task-with-an-open-pull-request-never-gets-a-second-one.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED on the live ledger (Azure host ~/rmd-state2/state/ledger.ndjson) and on GitHub, 2026-10-02/03:
+    - Fleet run W1-T5343-1790980010581: `run.start` 22:27:00Z; `implement.done` 23:25:39Z; `pr.opened` #8797
+      23:28:25.894Z (head 8de97655); `verdict` handed_off 23:29:44Z. #8797's timeline shows the trailer-amend
+      commit at 23:27:04Z, the PR created at 23:28:24Z, then a second commit 644ecd6b at 23:51:53Z (a fix
+      round). The sweep wrote `sweep.disposed` stale "task W1-T5343 already merged by #8782 — closing the
+      leftover implementation PR" at 00:10:06Z.
+    - Hand PR #8782: commit f815c21b 22:20:58Z, opened 22:32:31Z, merged 23:42:56Z. It was open for the whole
+      56 minutes before #8797 was created.
+    WHERE THE OPEN HAPPENS (src/run-task.ts at origin/main 3e026b902, `runTaskBody`): the worker's own
+    reported URL is read at :17203. Both push paths have run, and the trailer amend force-pushes at :17579.
+    Then `if (!prUrl)` at :17582 builds the REST create (`ghPrCreateFillCommand`, :17585) and runs it
+    (`runGhPrCreate`, :17610). `checkPrOwnership` follows at :17631 and `log("pr.opened", ...)` at :17652.
+    The only existing-PR read on this path is W1-T4466's `adoptExistingPrForHead` (:4065), which fires only
+    on a 422 and queries `pulls?head=<owner>:<THIS branch>&state=open` (:4075). A sibling on a different
+    `run-<id>-<epoch>` branch is invisible to it by construction.
+    ADMISSION ALREADY GUARDS THE DISPATCH, so this task does not add a second admission check:
+    `isDispatchEligible` (src/lib/drain.ts:673) skips a task whose projection shows an open PR (daemon ledgers
+    `dispatch.skipped reason open-pr`, src/lib/daemon.ts:4261). drain.ts:697 skips a task with a pushed run
+    branch (W1-T534/W1-T916). The cross-host claim ref `refs/rmd-dispatch/<id>` (src/lib/dispatch-claim.ts,
+    W1-T1268) and the per-task inflight lock (`blocked_inflight`, run-task.ts:15267) close fleet-vs-fleet
+    races. None of these can see a sibling that appears AFTER dispatch: this fleet run was admitted at
+    ~22:26:50Z (its branch epoch), 11 minutes BEFORE #8782 opened. The run takes about an hour, so the open
+    is the last moment that can see it, and the only one that would have stopped #8797.
+    Rule 19: the lookup and its pure decision (src/lib/pr-open.ts, which already owns PR-open policy:
+    `filedTaskIdFromRunBranch`, `openPullRequestChecked`) and the one call site (src/run-task.ts) are two
+    production files for one concern, so the band is high with band_meaning: span.
+  design: |
+    1. src/lib/pr-open.ts: add `findOtherOpenPrForTask(rows, taskId, ownBranch)`. It is PURE: rows are REST
+       `/pulls` rows (`RestPullRow`, src/lib/open-prs-rest.ts). It returns the LOWEST-numbered open row
+       other than `ownBranch` that belongs to `taskId`, or undefined. A row belongs when
+       `taskIdFromRunBranch(head.ref) === taskId` (src/lib/status.ts:1984), or when its body's last
+       `Remudero-Task:` trailer names `taskId` (`extractTaskTrailerId`, src/lib/review.ts:6083). Mark the
+       second case `matched_by: "trailer"`. The id must pass `filedTaskIdFromRunBranch`'s TASK_ID_SHAPE, so
+       the `unfiled` sentinel can never match (W1-T3535). Add an async reader `readOtherOpenPrForTask(owner,
+       repo, taskId, ownBranch, read)`. It makes ONE `openPrsRestArgs` list call through an injected async
+       reader (the daemon passes `ghJsonAsync`, src/lib/github-transport.ts:253, keeping a sync gh call off the
+       loop). It reads `pulls/<n>/files` ONLY for a trailer-only match, and keeps that match only if the PR
+       changes at least one path outside `plan/`, so a plan amendment carrying the trailer never blocks a
+       build. It returns `{ state: "none" } | { state: "found", number, url, head_ref, matched_by } |
+       { state: "unreadable", error }`.
+    2. src/run-task.ts `runTaskBody`: inside `if (!prUrl)`, BEFORE `ghPrCreateFillCommand` (:17585), call the
+       reader with this run's `branch`. On `found`:
+       - do not create;
+       - ledger `pr.open_deferred_to_existing` with `existing_pr_number`, `existing_pr_url`,
+         `existing_head_ref`, `matched_by`, this run's `branch` and `head_sha`, and `cost_usd`;
+       - reclaim the worktree the way the `pr_open.refused` arm does (:17592);
+       - settle with `verdict: "blocked_inflight"` and a reason naming the existing PR.
+       NEVER put the other PR's URL in a `pr_url` field or write `pr.opened` for it. Ownership and credit
+       derive from those fields, and this run does not own that PR.
+    3. Why `blocked_inflight`: its consumers already treat it as a live scheduling DEFERRAL, not a failure or
+       strike. daemon.ts:3057 continues with no `dispatch.blocked_independent` row (W1-T3979). status.ts's
+       LIFETIME_ONLY_REFUSAL_VERDICTS consumes no lifetime attempt. And next tick, `isOpenPr` sees the
+       existing PR and skips the task. `handed_off` is NOT used: its W1-T4662 contract means "the next sweep
+       owns THIS run's PR".
+    4. The worker's commits: KEEP the branch pushed, and do not comment on the existing PR. The branch is
+       already on origin when this check runs (:17579 force-pushes it). It is the only evidence of the
+       finished build, which is W1-T434's ruling ("the branch is the only evidence"). The orphan run-branch
+       release (`orphanRunBranchReleased`, drain.ts:167) and the branch reaper already retire it. A comment
+       would be a side effect on a PR this run does not own, which the W1-T62 ownership guard (:17631)
+       forbids. It may be a human's hand PR, and body-reading gates and reviewers read that thread. The
+       ledger row names branch and head sha for anyone who wants to compare.
+    5. On `unreadable`, ledger `pr.open_existing_check_unreadable` and OPEN AS TODAY. Refusing on a failed
+       read would strand a finished build to prevent a duplicate the sweep's leftover row (sweep.ts:6962)
+       already cleans up. With `none`, the path is byte-identical to today.
+    6. Out of scope, stated rather than silently dropped: (a) a URL the WORKER reported (`prUrl` set at
+       :17203, shell-carrying workers told to `gh pr create` at :17166) is already open. This task only stops
+       the orchestrator's own create. Closing a worker-opened duplicate is a new close site that needs
+       src/lib/authority.ts registration, so it is a separate task. (b) Two hand sessions opening run-unfiled
+       PRs for the same main fix (#8922/#8936) carry no task id, so no task-keyed guard can see them.
+  acceptance:
+    - claim: "with another open PR on run-<taskId>-<other epoch>, the implement path never calls the REST create, ledgers pr.open_deferred_to_existing naming that PR, writes no pr.opened and no pr_url for it, and settles blocked_inflight"
+      proof: "grep: test(\"W1-T5520: an open run branch for the task defers the open in test/a-task-with-an-open-pull-request-never-gets-a-second-one.test.ts"
+    - claim: "a PR on any branch whose body trailer names the task defers the open only when it changes a path outside plan/; a plan-only amendment carrying the trailer does not"
+      proof: "grep: test(\"W1-T5520: a trailer-only match outside plan/ defers the open in test/a-task-with-an-open-pull-request-never-gets-a-second-one.test.ts"
+    - claim: "the run's own branch, another task's PR, a run-unfiled PR, and a phantom run-W1-T1-build-<epoch> id never defer, and the create proceeds exactly as before"
+      proof: "grep: test(\"W1-T5520: its own branch and other tasks never defer in test/a-task-with-an-open-pull-request-never-gets-a-second-one.test.ts"
+    - claim: "an unreadable open-PR list ledgers pr.open_existing_check_unreadable and opens the PR as today"
+      proof: "grep: test(\"W1-T5520: an unreadable list opens as before in test/a-task-with-an-open-pull-request-never-gets-a-second-one.test.ts"
+    - claim: "the implement path calls the lookup before its REST create"
+      proof: "grep: readOtherOpenPrForTask( in src/run-task.ts"
+  falsifier: |
+    Remove the call from `runTaskBody`. The first test's fixture, with #8782's shape (an open
+    run-W1-T5343-1790978745655) beside this run's run-W1-T5343-1790980010581, reaches the REST create shim
+    and writes `pr.opened`. That is the #8797 duplicate. Drop the trailer arm, and a sibling opened on a
+    non-run branch with `Remudero-Task: <id>` is missed. Drop the plan/ filter, and a shard amendment PR
+    blocks the build it describes.

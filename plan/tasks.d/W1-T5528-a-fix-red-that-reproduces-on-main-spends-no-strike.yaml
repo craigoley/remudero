@@ -1,0 +1,121 @@
+- id: W1-T5528
+  title: "A FIX RED THAT REPRODUCES ON MAIN SPENDS NO STRIKE — over 2026-09-26..10-03 the fix lane dispatched 226 rounds and 167 of them (74%) went out while main health read `undetermined`, so the W1-T4351 base-red guard, which only compares check NAMES against main's last run, fired twice all week; nothing ever ran the PR's failing test files against main's tip before a strike was spent on them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: week ledger read 2026-09-26..10-03 (226 fix.dispatch, 103 fix.commit_refused, 5815 main.health.observed); complements W1-T5490"
+  plan_refs: [W1-T5490, W1-T4351, W1-T2671, W1-T2789, W1-T527]
+  files: [src/lib/base-reproduction.ts, src/lib/sweep.ts, src/run-task.ts, test/a-fix-red-that-reproduces-on-main-spends-no-strike.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED on the extracted week ledger (2026-09-26T00Z..2026-10-03T19Z, head 3e026b902):
+    - 226 `fix.dispatch` rounds. Main health at dispatch time (the latest `main.health.observed` row):
+      undetermined 167, green 36, red 23. Over all 5815 `main.health.observed` rows: undetermined 4217
+      (73%), red 1007, green 591. 103 rounds ended `fix.commit_refused`, and 78 of those ran while main
+      read undetermined.
+    - `sweep.base_red.stood_down` fired 2 times and `sweep.base_red.refresh` 2 times in the window.
+    - 134 ci-log rounds carried failures, and 77 of them named a test file as their `ci_failures[].signature`.
+      41 of those 77 were refused. The same census files recur across unrelated PRs within hours, for example
+      test/the-census-roster-is-named-not-numbered.test.ts (5 tasks), test/source-size-baseline-is-enforced.test.ts
+      (4 tasks), test/error-subclass-census.test.ts (5 tasks), and test/every-shard-on-main-is-lintable.test.ts
+      (4 PRs during the 10-03 plan-load outage). The ledger alone cannot say which of these were base reds.
+      That gap is what this task closes: today no code path runs the file on main to find out.
+    WHERE THE DECISION IS MADE TODAY:
+    - src/lib/sweep.ts:6126 `decideBaseRed` returns `wait` only when a PR failure's check NAME is in
+      `main.failingChecks` and main reads `red`. With main `undetermined` it always returns `own`.
+      W1-T5490 widens the name match and the undetermined fallback. This task does not touch that function.
+    - src/lib/sweep.ts:11469 is the call site. The blocked-fixable arm continues through the infrastructure
+      requeue and the cancelled-check stand-down (sweep.ts:11651 `genuineFailures`) to the dispatch claim
+      (sweep.ts:11720 `workerHold`).
+    - src/lib/sweep.ts:5963 `classifyRedCause`/`baseCausedCheckName` stands down only when a check fails on
+      every open PR in the same pass. That is a cross-PR heuristic, not a run against main.
+    - src/run-task.ts:10279 (W1-T2671 site, inside `runFixRung` at :9614) refreshes the branch only when the
+      head is behind and base CHANGED the failing file (`decideRedBaseRefresh`, sweep.ts:3750). A red that
+      main carries without having changed that file falls through to a strike.
+    REUSABLE PARTS THAT ALREADY EXIST:
+    - Test-file extraction: `failingTestFilesFromCiFailures` (sweep.ts:3721), already used by W1-T2671/W1-T2789.
+      Correction to the brief: W1-T4467's `derivedFixCommit` (run-task.ts:40234) reads only the first failing
+      CHECK name, not test names. `ciFailureSignature` (ci-friction-gardener.ts:290) records only the first
+      test file on `fix.dispatch`.
+    - Running a test file in a detached checkout under the policy timeout: the reviewer's base checkout
+      `buildBaseProofDir` (run-task.ts:18569, `git worktree add --detach`) plus `execWhitelistedProofAsync`
+      (review.ts:2565) with `proofTimeoutMs` (plan/policy.yaml:49, value 180000, min 60000).
+    - Flake retry is CI-side only: W1-T4398 (scripts/test-with-retry.mjs) retries a failed file once inside the
+      coverage lane. A red reaching the fix lane has therefore already failed twice on the PR, which makes
+      "fails on main too" the remaining cheap discriminator. `fixRungRepeatsIdenticalFailure`
+      (sweep.ts:5840) compares unmet-claim sets and runs no tests.
+    - Strike accounting: `priorStrikesFor` (run-task.ts:37835) counts `fix.dispatch` rows selected by
+      `fixLedgerRowsForHead` (sweep.ts:9807), per head. Nothing can un-count a strike today.
+    COST, MEASURED: scripts/test-tier-manifest.json holds per-file durations for 2391 test files. Median
+    1.4 s, p90 5.3 s, max 459 s. This week's recurring red files: every-shard-on-main-is-lintable 5.1 s,
+    source-size-baseline-is-enforced 5.2 s, the-census-roster-is-named-not-numbered 22 s,
+    error-subclass-census 0.5 s, citation-anchor-census 6.8 s. A probe is a worktree add with a node_modules
+    symlink (no install) plus seconds per file. A fix round costs minutes of worker time and a strike.
+    Rule 19: the pure decision module, the sweep call site with its refund filter, and the production probe
+    wiring in run-task.ts are three production files for one concern, so the band is high with
+    band_meaning: span. sweep.ts is also in W1-T5490's files, so expect a rebase.
+  design: |
+    1. NEW src/lib/base-reproduction.ts (pure):
+       - `baseReproductionFiles(failures)`: `failingTestFilesFromCiFailures` (sweep.ts:3721) normalised to
+         repo-relative `test/...` paths, deduped. An empty result means no test evidence, and the PR falls
+         through to today's path unchanged.
+       - `decideBaseReproduction(files, outcomes)` takes per-file outcomes `fails | passes | absent | unrunnable`
+         at a given main sha. The verdict is `reproduced` when every file is `fails`; `partial` when some fail
+         and others pass or are absent; `clear` when none fail; `unrunnable` when any probe could not reach a
+         verdict and none failed. `absent` means the file does not exist at main (the PR added it), and it
+         counts as the PR's own, never as base. Only `reproduced` stands down. Every other verdict falls
+         through to today's dispatch, so an unreadable probe never blocks a fix.
+       - `probeCacheFromLedger(lines)`: per-(main_sha, file) outcomes read back from earlier
+         `sweep.base_reproduction` rows, so one main tip runs each file at most once across every PR and pass.
+       - `strikesToRefund(lines, taskId, headSha, reproducedChecks)`: the `fix.dispatch` rows on this
+         (task, head) whose `ci_failures[].check` are all among the checks whose test files reproduced.
+    2. src/lib/sweep.ts: in the blocked-fixable arm, after the cancelled-check stand-down (:11651) and before
+       the stale-proof and terminal checks (:11662), when `ciFailuresForFix` names test files, call a new
+       optional `SweepDeps.reproduceFailingTestsOnMain(pr, files, mainTipSha)`. The trigger is independent of
+       `main.health.observed`, so it fires with main `undetermined`. Each call appends
+       `sweep.base_reproduction` {pr_number, head_sha, main_sha, files:[{file, outcome, duration_ms, cached}],
+       verdict}.
+       On `reproduced`: `acted = false`, the stand-down reason names the files and main sha, no claim is taken
+       and no strike is spent. The PR is re-probed when main's tip moves. When a head that stood down as
+       `reproduced` reads `clear` at a newer tip, the arm spends that head's one branch refresh through the
+       existing `deps.updateBranch` and `BASE_RED_REFRESH_STEP` row (sweep.ts:6102) instead of dispatching,
+       because the head still carries the old base.
+    3. Refund: on `reproduced`, append one `fix.strike_refunded` {task_id, pr_number, head_sha, strike,
+       main_sha, reason: "base-red-reproduced", test_files} per row from `strikesToRefund`.
+       `fixLedgerRowsForHead` (sweep.ts:9807) skips a `fix.dispatch` row matched by a refund on the same
+       (task, head, strike). `priorStrikesFor` and `deriveStrikeHistory` both read through it, so the cap and
+       the clarification history agree. The refund is ledgered and never edits a past row.
+    4. src/run-task.ts: wire the production `reproduceFailingTestsOnMain`. It runs
+       `git worktree add --detach <worktreesDir>/base-repro-<sha12> <origin/main sha>` (worker.ts:3936, never
+       /tmp) and `linkWorktreeNodeModules` (worker.ts:4118, a symlink with no npm ci). Each file runs through
+       `execWhitelistedProofAsync` with `unit test: <file>` and the policy `proofTimeoutMs`. All of it is
+       async and nothing runs synchronously on the daemon loop. One probe worktree is in flight per host
+       (a promise chain), and it is removed in `finally`. A worktree-add failure returns `unrunnable` for
+       every file.
+    5. W1-T5490 owns the name match and main-health fallback. This task owns running the files. Together a
+       base red is caught by name when main's run speaks to it and by execution when it does not.
+  acceptance:
+    - claim: "a PR whose failing test files all fail at main's tip stands down with no strike and a sweep.base_reproduction row, even while main health reads undetermined"
+      proof: "grep: test(\"W1-T5528: a failing test file that also fails at main tip stands down with no strike in test/a-fix-red-that-reproduces-on-main-spends-no-strike.test.ts"
+    - claim: "a failing test file that passes, or is absent, at main's tip still dispatches the fix exactly as today"
+      proof: "grep: test(\"W1-T5528: a failing test file that passes at main tip still dispatches the fix in test/a-fix-red-that-reproduces-on-main-spends-no-strike.test.ts"
+    - claim: "a strike already spent on a head whose red later reproduces at main is refunded and no longer counts toward the cap"
+      proof: "grep: test(\"W1-T5528: a strike spent on a head whose red later reproduces at main is refunded in test/a-fix-red-that-reproduces-on-main-spends-no-strike.test.ts"
+    - claim: "one main tip runs each failing test file once, whichever PRs name it"
+      proof: "grep: test(\"W1-T5528: the probe runs once per main tip and file across pull requests in test/a-fix-red-that-reproduces-on-main-spends-no-strike.test.ts"
+    - claim: "a head that stood down as reproduced and reads clear at a newer main tip gets its one branch refresh, not a fix worker"
+      proof: "grep: test(\"W1-T5528: a reproduced head that clears at a newer tip is refreshed once in test/a-fix-red-that-reproduces-on-main-spends-no-strike.test.ts"
+    - claim: "the sweep decides a base reproduction through the new module, not a private copy"
+      proof: "grep: decideBaseReproduction( in src/lib/sweep.ts"
+  falsifier: |
+    Remove the sweep call to `reproduceFailingTestsOnMain`. The first test's PR, whose only failing file the
+    injected probe reports as `fails` at main with main health `undetermined`, is dispatched a fix and spends
+    strike 1. Remove the refund filter from `fixLedgerRowsForHead`. The third test's `priorStrikesFor` reads 1,
+    not 0.

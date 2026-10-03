@@ -1,0 +1,112 @@
+- id: W1-T5535
+  title: "FIX-LANE ROUTING LEARNS FROM COMMIT ACCEPTANCE — over 2026-09-26..10-03 the fix lane's harness refused 62% of codex/gpt-6.1-sol rounds, 44% of gpt-6-sol and 39% of claude-sonnet-5-5, against 22% for claude-sonnet-5 and 1 of 8 for claude-opus-5-5, yet the auction weighs only subscription headroom and never reads whether an arm's fix rounds commit"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: week ledger read 2026-09-26..10-03; operator ruling R2 (fix-lane routing may learn continuously from commit acceptance with a small exploration share; fix lane only)"
+  plan_refs: [W1-T4613, W1-T4617, W1-T2577, W1-T4067, W1-T5112]
+  files: [src/lib/fix-routing-learner.ts, src/lib/worker-provider.ts, src/lib/worker.ts, src/run-task.ts, test/fix-lane-routing-learns-from-commit-acceptance.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED on the extracted week ledger (2026-09-26..10-03): 226 `fix.done` rows, and `subtype ==
+    "commit_refused"` on 103. Keyed by (provider, selected_model), the concrete model:
+      claude/claude-opus-5-5    8 rounds,  1 refused (12%)
+      claude/claude-sonnet-5   27 rounds,  6 refused (22%)
+      claude/claude-sonnet-5-5 92 rounds, 36 refused (39%)
+      codex/gpt-6-sol          41 rounds, 18 refused (44%)
+      codex/gpt-6.1-sol        37 rounds, 23 refused (62%)
+      no provider recorded     21 rounds, 19 refused (90%)
+    Refusal reason by provider: "changed nothing" codex 35 / claude 13; "no COMMIT_MESSAGE" claude 25 / codex 3.
+    THE ARM KEY MUST BE `selected_model`. `routed_model: "sonnet"` is an alias that served BOTH claude-sonnet-5
+    (22 rows) and claude-sonnet-5-5 (31 rows). Codex's `served_model` is null on every row ("codex exec --json
+    names no model").
+    THE "subscription/?" ROWS are not a live attribution gap. All 21 predate W1-T4613 ("a fix worker is
+    attributed to its model", bdd4460d5 / #7454, merged 2026-09-27T15:33Z). The last unattributed `fix.done`
+    is 2026-09-27T15:07:54Z and the first attributed one is 17:44:14Z on a restarted container. All 205 rows
+    since carry provider, routed_model and selected_model, through `fixReceipt.ledgerFields` spread first into
+    `fix.done` (src/run-task.ts:11452). Four of the 21 were openweight-lane rounds that errored
+    (`worker_subtype: openweight_error`, empty session). No attribution fix is needed. The learner must
+    EXCLUDE these rows and count them, never pool them into an "unknown" arm.
+    HOW THE FIX LANE ROUTES TODAY (head 3e026b902):
+    - src/run-task.ts:11177 `fixArgs` passes `mountProvider: strikeMount.provider` (usually undefined) into
+      `spawnWorker`. The auction runs at src/lib/worker.ts:2213 `selectWorkerProviderForPolicy`
+      (provider-routing-policy.ts:471), which calls `selectWorkerProvider` (worker-provider.ts:497) with weight
+      `(headroom - reserve)^2` (:510) and nothing else. The codex model comes from `readCodex` with an optional
+      `preferredModel` (worker.ts:2176).
+    - src/lib/worker.ts:1671 `auctionDrawSeed`: a task in a live routing experiment (routing-experiments.ts:30,
+      e.g. sol61-vs-sonnet55 with daily review) draws a TASK-keyed value (W1-T4617). Its fix rounds follow the
+      same arm as its implement round, and `evaluateRoutingExperiment` (routing-experiments.ts:198) counts
+      every assignment row tagged `decision.ab`.
+    - Arm outcomes are already ledgered. `worker.assignment` carries the selection propensity (W1-T4617).
+      `fix.done` carries provider, selected_model, `selection_assignment_id` and subtype. A pushed round's later
+      fate is `fix.review` (CI went green) or `fix.ci_not_green`. Nothing folds these back into routing.
+      `routing-objective.ts` judges window share per settled task (W1-T2577) and has no success term.
+    - Reusable estimation: src/lib/dispatch-value.ts `betaDraw` (:106), a seeded Beta draw, and its pooled-prior
+      pattern (`DISPATCH_VALUE_PRIOR_WEIGHT = 2`, :19). W1-T4067 (queued) builds a learned router for the draft
+      lane on worker.ts and worker-provider.ts too, so expect a rebase and keep the two learners separate.
+    Rule 19: the pure learner, the weighted auction, the spawn pass-through and the fix-rung producer are four
+    production files for one concern, so the band is high with band_meaning: span.
+  design: |
+    1. NEW src/lib/fix-routing-learner.ts (pure):
+       - `fixArmEvidence(rows, nowMs)` folds `fix.done` rows that carry `provider` and `selected_model` into arms
+         keyed (provider, selected_model). Each round's reward r is 0 when `subtype == "commit_refused"`, 0.5 when
+         it committed but a later `fix.ci_not_green` row for the same task carries the pushed head as its `sha` (src/run-task.ts:11550), and 1 otherwise. Each round
+         is weighted by exponential decay on its age (half-life constant `FIX_ROUTING_HALF_LIFE_MS`, 72h), so
+         there is no window edge and old failures fade. Rows lacking provider or selected_model are counted as
+         `unattributed_excluded`.
+       - The posterior per arm is `Beta(alpha0 + sum(w*r), beta0 + sum(w*(1-r)))`. alpha0 and beta0 are a
+         pooled fix-lane prior of weight 2 (the dispatch-value.ts pattern), so an arm with no evidence sits at
+         the fleet mean rather than at zero or at one.
+       - `fixRoutingWeights(evidence, candidates, seed)` makes one seeded Thompson draw per arm (`betaDraw`).
+         The provider multiplier is the draw of the arm that provider would serve. For codex the learner also
+         picks `preferredModel` among its eligible codex arms by the same draws.
+       - The exploration share stays positive and scales with evidence alone, with no fixed floor (operator
+         ruling: no hard thresholds): `epsilon = k/(k + n_eff_min)`, with k = the prior weight. It never
+         reaches zero, because refusals decay on the half-life and so n_eff stays bounded. The final
+         probability is `(1-epsilon)*p_learned + epsilon*p_headroom`, where `p_headroom` is today's pure-headroom
+         auction probability. No eligible arm is ever cut off, a recovered model regains share as its old
+         refusals decay, and capacity and reserve still decide eligibility exactly as now.
+    2. src/lib/worker-provider.ts `selectWorkerProvider` (:497) takes an optional per-provider mixing input. When
+       it is absent, weights, draw and recorded probabilities are byte-identical. When it is present, the
+       recorded `draw.probabilities` are the mixed ones, so `selectionPropensity` stays an honest propensity.
+    3. src/lib/worker.ts: `SpawnWorkerArgs.providerRouting` gains optional `learnedArms`, threaded into the
+       auction at :2213 and, for codex, into `preferredModel` at :2176. When `learnedArms` is present,
+       A task enrolled in a LIVE routing experiment (routing-experiments.ts:30) keeps its experiment arm for
+       its fix rounds and the learner is NOT applied (operator decision 2026-10-03: experiments stay valid).
+       Every other fix spawn uses the spawn-unit draw, and its assignment row records
+       `learner: "fix-acceptance/v1"` and no `decision.ab`, so `evaluateRoutingExperiment` never reads a learned
+       assignment as a crossover.
+    4. src/run-task.ts `runFixRung`: before building `fixArgs` (:11177), compute `learnedArms` from the ledger
+       union's fix rows (async, cached per daemon process with a short TTL, and never a sync read on the loop),
+       then append `fix.routing_decision` {strike, round, epsilon, unattributed_excluded, half_life_ms,
+       arms:[{provider, model, rounds, accepted_weight, refused_weight, n_eff, alpha, beta, draw,
+       p_headroom, p_final}], selected_provider, selected_model}. runFixRung is the ONLY producer of
+       `learnedArms`, so implement, review, inbox and every other lane route exactly as before.
+  acceptance:
+    - claim: "an arm whose fix rounds were refused more often draws a smaller selection probability than one that committed, with headroom equal"
+      proof: "grep: test(\"W1-T5535: an arm with more refused fix rounds draws a smaller selection share in test/fix-lane-routing-learns-from-commit-acceptance.test.ts"
+    - claim: "every eligible arm keeps a positive selection probability that shrinks only as evidence accumulates"
+      proof: "grep: test(\"W1-T5535: every eligible arm keeps a positive exploration share in test/fix-lane-routing-learns-from-commit-acceptance.test.ts"
+    - claim: "refusals older than a few half-lives stop suppressing an arm, so a recovered arm regains share"
+      proof: "grep: test(\"W1-T5535: old refusals decay so a recovered arm regains share in test/fix-lane-routing-learns-from-commit-acceptance.test.ts"
+    - claim: "fix.done rows with no provider or selected_model are excluded from every arm and counted on the decision row"
+      proof: "grep: test(\"W1-T5535: rows with no provider are excluded and counted in test/fix-lane-routing-learns-from-commit-acceptance.test.ts"
+    - claim: "a spawn without learnedArms (any non-fix lane) selects with byte-identical weights, draw and recorded probabilities"
+      proof: "grep: test(\"W1-T5535: a spawn outside the fix lane routes exactly as before in test/fix-lane-routing-learns-from-commit-acceptance.test.ts"
+    - claim: "each fix spawn ledgers fix.routing_decision naming every arm's acceptance weight, denominator and final probability"
+      proof: "grep: test(\"W1-T5535: the fix routing decision row names each arm acceptance and denominator in test/fix-lane-routing-learns-from-commit-acceptance.test.ts"
+    - claim: "a fix round on a task enrolled in a live routing experiment keeps the experiment's arm and records no learner"
+      proof: "grep: test(\"W1-T5535: an experiment task keeps its arm for fix rounds in test/fix-lane-routing-learns-from-commit-acceptance.test.ts"
+    - claim: "the fix rung draws its learned arm weights through the new module"
+      proof: "grep: fixRoutingWeights( in src/run-task.ts"
+  falsifier: |
+    Make the provider multiplier a constant 1. The first test's arm with 23 of 37 refused rounds and the arm
+    with 1 of 8 refused get equal shares at equal headroom. Set epsilon to 0 and feed one arm only refusals.
+    The second test sees that arm's probability fall to 0.

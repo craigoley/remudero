@@ -1,0 +1,51 @@
+- id: W1-T5541
+  title: "A RATIFIED FOLLOW-UP CARRIES ITS OWN WORDS — on 2026-10-03 `rmd approve` filed W1-T5506 (#8956) and W1-T5507 (#8957) from 2026-09-16 follow-ups as shards with NO rationale, a directory in `files:` and an unsatisfiable proof (`grep: \"adhoc-prs.yaml\" in plan/tasks.d/`). Both reddened ci-shard 8/8 (`loadCorpus ... expects at least one prose unit per shard`), and a worker building them would see a one-line title instead of the follow-up that motivated it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: medium
+  origin: "operator session 2026-10-03: #8956/#8957 red on test/citation-anchor-census.test.ts; #8956 closed as settled, #8957 repaired by hand (8cad24892)"
+  plan_refs: [W1-T111, W1-T4700, W1-T5348]
+  files: [src/lib/inbox.ts, test/a-ratified-follow-up-carries-its-own-words.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-03 ~20:30Z. Two `run-APPROVE-followup-DAEMON-1789548928143-*` PRs ratified
+    follow-ups harvested from PR-5737's 2026-09-16 report (`report.followups`, ledger archive
+    2026-09-16). Each shard the inbox draft produced has title, files and acceptance but no
+    `rationale:`. The follow-up text, which says WHY the task exists, survives only in the
+    proposal (`Proposal.summary`, src/lib/inbox.ts:72) and never reaches the shard.
+    `test/citation-anchor-census.test.ts:273` ("loadCorpus reads the REAL repo's monolith and every
+    plan/tasks.d/ shard without throwing", asserting `units.length > shardCount`) went red on both
+    PRs. W1-T5506's proof greps a file that cannot exist, and its `files:` lists the directory
+    `plan/tasks.d/`. That follow-up was also already settled, since hand PRs use `run-unfiled-*`
+    branches with no trailer, and nothing checked.
+    The repair point exists. `fileRatificationDraft` (src/lib/inbox.ts:3132) runs
+    `assertRatificationDraftFileable` (relint plus `lintDraftedFragment`) and `writeRatificationShards`
+    (:3091), which already repairs fragments mechanically. Neither carries the proposal's text, and
+    the linter accepts a shard with no prose. The inbox lane's drafting model is fixed by operator
+    hold (gpt-oss-120b until W1-T4916), so the fix must be deterministic, not a prompt tweak.
+  design: |
+    1. Pass the proposal's own text (`summary`, plus the originating item or PR when present) into
+       `fileRatificationDraft`. When a drafted task has no `rationale:`, or only whitespace,
+       `writeRatificationShards` writes one: a provenance line ("From the <date> follow-up on
+       <PR/run>, ratified via rmd approve:") then the follow-up text verbatim, wrapped at 100 columns.
+       A drafted rationale is kept and the provenance line is prepended.
+    2. `assertRatificationDraftFileable` refuses, with a named violation, a drafted task whose
+       `files:` entry is a directory (ends in `/`, or is an existing directory in the worktree), or
+       whose `grep:` proof names a path that is a directory. The refusal reaches the existing
+       `RatificationDraftRefusedError` path, so the proposal is re-drafted, never filed broken.
+    3. No change for a fragment that already carries a rationale and file-only paths, beyond the
+       provenance line.
+  acceptance:
+    - claim: "a drafted task with no rationale is written with the follow-up's own text as its rationale, under a provenance line"
+      proof: "grep: test(\"W1-T5541: a rationale-less draft is written with the follow-up text in test/a-ratified-follow-up-carries-its-own-words.test.ts"
+    - claim: "a drafted task listing a directory in files, or grepping a directory, is refused before any write"
+      proof: "grep: test(\"W1-T5541: a directory in files or a grep proof is refused in test/a-ratified-follow-up-carries-its-own-words.test.ts"
+  falsifier: |
+    Remove the rationale injection: the suite's fragment (title/files/acceptance only) is written with
+    no rationale, and the corpus-style assertion (one prose unit per shard) fails on the written shard.
