@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-02: daemon loop-stall diagnosis"
   plan_refs: ["W1-T4399", "W1-T4433", "W1-T5351"]
   files: [.github/workflows/ci.yml, test/a-rule-checks-failure-is-titled-by-its-gate-not-commitlint.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: gap review of W1-T5355 (PR #8895) against serve's live thread count"
   plan_refs: [W1-T5355, W1-T5175]
   files: [src/lib/read-model-worker.ts, src/lib/serve-memory.ts, test/serve-memory-sizes-the-threads-the-read-model-worker-spawns.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
