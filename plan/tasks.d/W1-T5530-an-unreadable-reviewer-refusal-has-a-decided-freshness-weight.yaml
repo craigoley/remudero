@@ -1,0 +1,36 @@
+- id: W1-T5530
+  title: "AN UNREADABLE REVIEWER REFUSAL HAS A DECIDED FRESHNESS WEIGHT — a verdict withheld because reviewer-code freshness is unprovable (`reviewer_code_freshness: \"unreadable\"`) adds no restart pressure, because W1-T5476 counts only \"stale\" refusals; decide whether it should, and pin the decision"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: low
+  origin: "operator session 2026-10-03: found reviewing W1-T5476 (#8915)"
+  plan_refs: [W1-T5476]
+  files: [src/lib/daemon.ts, test/an-unreadable-reviewer-refusal-has-a-decided-freshness-weight.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-03 on origin/main 3e026b90. `postReviewStatusGuarded` (src/lib/review.ts) withholds a
+    terminal verdict for two freshness states. It ledgers `review.post_refused` with
+    `reviewer_code_freshness: "stale"` (reviewer code materially behind origin/main), or with
+    `"unreadable"` plus `reviewer_code_reason` ("reviewer code freshness is unprovable"). W1-T5476 (#8915)
+    made `withheldReviewsSince` (src/lib/daemon.ts) count withheld verdicts toward
+    `decideFreshnessRestart`, but it `continue`s past every row whose freshness is not "stale". An
+    unreadable refusal withholds a verdict just as a stale one does and adds no pressure. Nobody has
+    decided whether a restart cures it: a restart re-resolves the reviewer code, but the reason may be a
+    git read that fails just the same afterwards.
+  design: |
+    Decide, and state the decision in `withheldReviewsSince`'s doc with the evidence. Either unreadable
+    refusals count, perhaps with their own weight and a separate `withheld_unreadable` field on
+    `daemon.freshness_decision`, or they do not and that field still reports them so the decision row
+    never hides them. Pin whichever is chosen with a test that also covers the stale count, which is
+    unchanged.
+  acceptance:
+    - claim: "withheld reviews whose reviewer_code_freshness is unreadable are counted on daemon.freshness_decision as their own field and weigh on the restart decision exactly as the documented decision states, and the stale count is unchanged"
+      proof: "unit test: test/an-unreadable-reviewer-refusal-has-a-decided-freshness-weight.test.ts"
+  falsifier: |
+    Drop the unreadable branch. The suite's decision row carries no unreadable count.

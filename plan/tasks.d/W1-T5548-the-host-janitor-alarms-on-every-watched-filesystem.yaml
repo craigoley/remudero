@@ -1,0 +1,35 @@
+- id: W1-T5548
+  title: "THE HOST JANITOR ALARMS ON EVERY WATCHED FILESYSTEM — `rmd-host-cleanup.sh` fails a pass only when `/` is at HIGH_WATER, so /mnt/scratch at 87-89% (holding the 24 GB swapfile) and /mnt/rmd at 78% are never judged; each watched filesystem gets its own mark, reported once per device"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low
+  origin: "operator session 2026-10-03: /mnt/scratch research (per-filesystem free-space alarm)"
+  plan_refs: [W1-T5513, W1-T2767, W1-T5518, W1-T5549]
+  files: [deploy/rmd-host-cleanup.sh, test/the-host-janitor-alarms-on-every-watched-filesystem.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-03 on origin/main 3e026b90. deploy/rmd-host-cleanup.sh measures one filesystem,
+    `RMD_CLEANUP_ROOT_FS` (default /), via `df_field`. It prints "/ X% -> Y%" and exits 1 only when / is
+    at or above `HIGH_WATER` (85). At filing, `df` reads / 74%, /mnt/rmd 78% (every state root) and
+    /mnt/scratch 87% (375G of 433G, holding the swapfile), and the janitor judges only the first. The
+    legacy user janitor W1-T5518 retires had the mirror-image fault: one alarm, on a filesystem it never
+    named. W1-T2767 (merged) found the same blind spot in the heartbeat and fixed it there by deduping
+    filesystems by device.
+  design: |
+    `RMD_CLEANUP_WATCH_FS` is a space-separated list of `<path>:<pct>[/<min free>]` marks, defaulting in
+    the janitor itself to `/:85 /mnt/rmd:85 /mnt/scratch:90/40G` (a path that does not exist is skipped). Each pass resolves each path to its device
+    (`df -Pk` column 1), dedupes by device (keeping the strictest mark), and prints one line per device:
+    `rmd-host-cleanup: fs <mount> (<device>) <pct>% used, <free> free, mark <pct>%[/<free>]`. The pass
+    exits non-zero when ANY device is past its mark, naming each one. An unreadable filesystem is reported
+    as `unknown`, never as full or empty. `HIGH_WATER` stays the mark for `/` when the list omits it.
+  acceptance:
+    - claim: "a pass reports every watched filesystem once per device and fails when any is past its mark, naming it, while an unreadable one reads unknown"
+      proof: "unit test: test/the-host-janitor-alarms-on-every-watched-filesystem.test.ts"
+  falsifier: |
+    Judge only `RMD_CLEANUP_ROOT_FS`. The suite's fixture with a full second device exits 0.

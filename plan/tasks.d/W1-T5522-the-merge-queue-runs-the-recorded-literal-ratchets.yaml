@@ -1,0 +1,131 @@
+- id: W1-T5522
+  title: "THE MERGE QUEUE RUNS THE RECORDED-LITERAL RATCHETS — the gates whose failure mode is two PRs bumping one recorded literal from one base (comment-load, the learnings and CLAUDE.md caps, the cycle and duplication ceilings, claims, lint-plan, task-id collisions, baseline-monotonic) all run as steps of ci.yml's `commitlint` job, which is guarded `pull_request`-only; on a merge-group commit they never run, so the queue cannot catch the 2026-09-24 comment-load race that motivated it"
+  repo: remudero
+  depends_on: [W1-T5515]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: root-cause program for the 28-PR backlog; follow-up to W1-T5515 so the merge queue catches the races in the 2026-09-29 merge-queue plan"
+  plan_refs: [W1-T4406, W1-T4399, W1-T3512, W1-T3655, W1-T4431, W1-T1014]
+  files: [.github/workflows/ci.yml, .github/workflows/ci-gate.yml, test/the-ci-gate-reports-on-the-merge-group-commit.test.ts, test/the-light-gates-share-one-runner.test.ts, test/the-census-watches-its-own-base.test.ts, test/fast-lane-classifier.test.ts, test/push-ci-on-main.test.ts, test/the-merge-queue-runs-the-recorded-literal-ratchets.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    VERIFIED at origin/main 3e026b902 (2026-10-03):
+    - Since W1-T4399, ~16 light gates run as STEPS of ci.yml's `commitlint` job (:872-1178). A final
+      `always()` step posts each gate's own check run through the checks API (:1090-1178). The job is
+      `if: github.event_name == 'pull_request'` (:907), so on merge_group none of those steps run. The
+      `if: false` stubs (:1798-1936) register as skipped, which counts as passing.
+    - Before W1-T4399 the main push lane already knew these ceilings can be crossed by a MERGE after every PR
+      passed. ci.yml:356-395 (W1-T3068 `run_main_ceiling_gate`, defined at :360) re-runs learnings-budget-ratchet,
+      claude-md-budget-ratchet, `comment-load-signal --base HEAD^` and expiring-fixture-census on main. That
+      arm is guarded `GITHUB_EVENT_NAME = push`, so it detects the red only AFTER it lands on main and never
+      on a group commit.
+    - THE RACE THE QUEUE WAS FOR (merge-queue-plan.md section 5). On 2026-09-24, #6974 (W1-T4431) made a
+      comment-load baseline row at the default bucket an error, while #7001 and an SRE-lane change each added
+      such a row from the same base. Each PR was green, but main and every open PR went red until
+      c6e80f740 (#7007) dropped both rows from scripts/comment-load-baseline.json.
+    - THE COMMAND-COUNT LITERAL is already covered. It was a TEST literal ("the reviewed command inventory
+      counts 87 verbs", c758a4259 #7041), removed by 43a4e8d49 (#7044), with a census added in 30b35c9ac
+      (#7131). Test suites run in the `ci` shards on merge_group (the SOURCE branch runs
+      `test-tier-manifest.mjs --run fast` at ci.yml:348 for any non-pull_request event). The rule-checks population
+      (src/lib/ci-parity.ts:2636 `listRuleSuites`, census/ratchet/baseline suites) is in that tree too, so
+      W1-T5515's `ci` entry already catches test-literal races. This task covers only the gates that are
+      NOT tests.
+    WHICH GATE IS PR-ONLY, AND WHY (each step of the commitlint job):
+    - Truly PR-scoped, so it stays skipped on a group commit:
+      - `commitlint` title step (:944-958) reads `PR_NUMBER` and `gh pr view`; a group has no PR title.
+      - `prompt-surface-gate` (:1035-1040) needs `GITHUB_BASE_REF` and judges the PR's own golden evidence,
+        which was already proven on the PR head.
+    - Tree-versus-recorded-literal, so the race class applies:
+      - comment-load-ratchet, together with expiring-fixture-census and console-parity (:1055-1084);
+      - learnings-budget-ratchet and claude-md-budget-ratchet (:963-974);
+      - jscpd-gate (duplication ceiling, :976);
+      - depcruise with cycle-ratchet (:997-1007). Two PRs can each close half a cycle.
+      - claims (plan/claims.yaml, :982);
+      - assertion-discrimination (:987);
+      - lint-plan (:992-994). This is the plan-validity class of the 2026-10-03 #8911/#8914 duplicate-key outage.
+      - api-client-drift and no-hand-rolled-fetch (:1024-1033). One PR edits openapi and another the
+        client.
+      - task-id-existence (:1042-1047). Two PRs mint one id.
+      - baseline-monotonic (:1086-1088). SCORE_TABLE floors are compared with origin/main.
+      - leak-grep, containment-probe and source-size. These are tree or diff checks. source-size is
+        signal-only on growth (scripts/source-size-ratchet.mjs:3-11) and refuses only on a measurement
+        failure, exactly as on a PR.
+    - Their BASES on a PR:
+      - `HEAD^1` (the PR merge commit's first parent): classify (:924), containment-probe (:1013),
+        claude-md `BASE_SHA` (:972) and lint-plan `--base HEAD^1` (:994).
+      - `origin/main` by default: comment-load-ratchet.mjs:457, baseline-monotonic-check.mjs:27/138,
+        task-id-existence (package.json:58 `--base origin/main`), source-size-ratchet.mjs:395 (and it runs
+        `git fetch origin main`, :344), and expiring-fixture-census.mjs:528 (no CLI flag).
+    - On a group commit under SQUASH, `HEAD^1` is the PREVIOUS queue entry's squash, so a diff against it
+      sees only this PR. `origin/main` is main's tip, which is behind the base whenever groups are stacked
+      (a second group's base is the first group's head). The base the queue lands on is
+      `github.event.merge_group.base_sha`, the same value scripts/merge-queue-review-attest.mjs:66-70 already
+      reads.
+    - task-id-existence's `--require-open-prs` would collide a queued PR with ITSELF. The PR stays open
+      while it is queued, and `ownHeadRef` (task-id-existence-check.mjs:817) falls back to
+      `GITHUB_HEAD_REF`, which is empty on merge_group.
+    - The reporter posts to `HEAD_SHA: github.event.pull_request.head.sha` (:1094), which is empty on
+      merge_group.
+    Rule 19: one concern, "the light gates run on the group commit and the gate requires them", across two
+    production files: ci.yml and ci-gate.yml's `MERGE_GROUP_REQUIRED` (introduced by W1-T5515). The band is
+    high with band_meaning: span. Six of the files are existing tests that pin the old guard or A1's census.
+    They are declared because the harness stages only declared files.
+  design: |
+    1. commitlint job `if:` becomes `github.event_name == 'pull_request' || github.event_name == 'merge_group'`.
+       No class- or path-based job `if:` (INVARIANT 2).
+    2. Add job env `GATE_BASE: ${{ github.event.merge_group.base_sha }}`, empty on pull_request. Every
+       merge_group arm below is `[ "${GITHUB_EVENT_NAME}" = "merge_group" ]`-guarded in shell or a step
+       `if:`. On pull_request, every step's command, argv and environment VALUE stays what it is today.
+       - classify and containment-probe diff `"$GATE_BASE"...HEAD` on merge_group, `HEAD^1...HEAD` otherwise.
+       - claude-md `BASE_SHA`: `${{ github.event.merge_group.base_sha || 'HEAD^1' }}`.
+       - lint-plan: `--base "$GATE_BASE"` on merge_group.
+       - comment-load-signal, baseline-monotonic and source-size: append `--base "$GATE_BASE"` on
+         merge_group.
+       - task-id-existence on merge_group: `node scripts/task-id-existence-check.mjs --base "$GATE_BASE"`
+         WITHOUT `--require-open-prs`. The open-PR collision is a PR-time question, already answered on the
+         PR head, and here the queued PR would match itself.
+       - expiring-fixture-census has no base flag, so on merge_group point `refs/remotes/origin/main` at
+         `$GATE_BASE` (`git update-ref`) immediately before it. This must come AFTER source-size, whose
+         `git fetch origin main` moves the ref.
+    3. The `commitlint` title step and `prompt-surface-gate` gain a step `if: github.event_name ==
+       'pull_request'`. Their skipped outcome already reports success (:1120-1121), and the `commitlint`
+       check on a group commit then carries the rule-checks outcome.
+    4. Reporter: `HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}`.
+    5. ci-gate.yml `MERGE_GROUP_REQUIRED` (from W1-T5515) gains every REQUIRED name this job now posts with
+       a real constituent on merge_group: commitlint, leak-grep, learnings-budget-ratchet, jscpd-gate, claims,
+       assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift,
+       no-hand-rolled-fetch, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic. That is
+       15 names plus A1's ci, coverage-ratchet and test-slow, 18 in all.
+       - `prompt-surface-gate` stays out, because its only constituent is skipped there and requiring it
+         would be vacuous.
+       - `mutation-ratchet` stays out: its own job is a per-PR diff mutation score, PR-only at :1718.
+       - The 7 names from pull_request-only workflows stay out (see W1-T5515).
+       Update A1's census test so the derivation reads names from the commitlint reporter's `report "<name>"`
+       lines as well as job `name:`s, and excludes a name whose every constituent step is PR-guarded.
+    6. Update the PR-only pins on the commitlint job guard: test/the-light-gates-share-one-runner.test.ts:101,
+       test/the-census-watches-its-own-base.test.ts:216-217, test/fast-lane-classifier.test.ts:796 (and the
+       else-branch regex at :383), and test/push-ci-on-main.test.ts:240-247. Keep each assertion that NO
+       class- or path-based job `if:` exists, and that push still never reaches the job.
+    7. New suite test/the-merge-queue-runs-the-recorded-literal-ratchets.test.ts. It parses ci.yml and runs
+       the relevant step bodies through the shell-step harness the-full-suite-runs-in-the-merge-queue.test.ts
+       uses (`runStep` with an env), with GITHUB_EVENT_NAME=merge_group and pull_request, and asserts the
+       argv each one reaches.
+  acceptance:
+    - claim: "on merge_group the commitlint job runs, comment-load-ratchet, baseline-monotonic, lint-plan, task-id-existence and source-size are invoked against github.event.merge_group.base_sha (never HEAD^1 or a live origin/main), and every gate posts its check run on github.sha"
+      proof: "grep: test(\"W1-T5522: a group commit runs the ratchets against the queue base in test/the-merge-queue-runs-the-recorded-literal-ratchets.test.ts"
+    - claim: "the PR title lint and prompt-surface-gate are skipped on merge_group and task-id-existence drops --require-open-prs there, so a queued PR never collides with itself; on pull_request every step reaches the exact argv it reaches today"
+      proof: "grep: test(\"W1-T5522: the pull_request steps are unchanged and the PR-only steps skip in test/the-merge-queue-runs-the-recorded-literal-ratchets.test.ts"
+    - claim: "MERGE_GROUP_REQUIRED equals the 18 names the merge_group run posts with a real constituent, at least 18, and the merge-group gate fails when comment-load-ratchet alone is red"
+      proof: "grep: test(\"W1-T5522: a red comment-load ratchet on the group commit fails the gate in test/the-merge-queue-runs-the-recorded-literal-ratchets.test.ts"
+  falsifier: |
+    Revert the commitlint job's guard to pull_request-only: the first test's merge_group arm finds the job
+    skipped and no comment-load invocation. That is the state in which #7001-style default-bucket rows from
+    one base merge together. Drop `--base "$GATE_BASE"` from comment-load-signal: the merge_group argv reads
+    origin/main and the assertion reds. Remove comment-load-ratchet from MERGE_GROUP_REQUIRED: the gate run
+    with only comment-load-ratchet failing exits 0.

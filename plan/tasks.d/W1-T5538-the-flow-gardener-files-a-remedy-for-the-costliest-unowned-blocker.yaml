@@ -1,0 +1,123 @@
+- id: W1-T5538
+  title: "THE FLOW GARDENER FILES A REMEDY FOR THE COSTLIEST UNOWNED BLOCKER — once each open PR names its blocker (W1-T5537), nothing prices them. From 2026-09-26 to 2026-10-03 the two largest ownerless waits were metadata-only body reds (76 needs-human issues, 121 issue-hours) and plan-only reds (71, 100 issue-hours). Each was closed by hand, one issue at a time, and no remedy task was ever filed for either class"
+  repo: remudero
+  depends_on: [W1-T5537]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: a self-improving board doctor modelled on the ci-friction gardener (W1-T4435), ranking blockers by PR-hours lost and filing the top unowned one"
+  plan_refs: [W1-T5537, W1-T4435, W1-T5536]
+  files: [src/lib/flow-gardener.ts, src/lib/garden-registry.ts, src/run-task.ts, test/the-flow-gardener-files-a-remedy-for-the-costliest-unowned-blocker.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    THE PATTERN EXISTS FOR CI ROUNDS; THIS APPLIES IT TO PR WAITS. The ci-friction gardener
+    (src/lib/ci-friction-gardener.ts):
+    - reads the ledger union, archives included (`readCiFrictionLedgerRecords`, :137, over
+      `readLedgerUnionRecordsSync`), so the live ledger's rotation does not shorten its window;
+    - prices causes in PR minutes with a 7-day recency half-life (`CI_FRICTION_HALF_LIFE_MS`, :197;
+      `priceCiFrictionCauses`, :217);
+    - walks the top causes through a ladder (`ciFrictionLadder`, :782; `LADDER_DEPTH = 8`, :769);
+    - files one plan-only shard per pass (`apply`, :945-990);
+    - measures each landed remedy by the cause's before/after share in equal windows
+      (`ciFrictionRemedyEffect`, ci-friction-remedy.ts:114). A debit reopens the cause one rung up
+      (`ciFrictionCauseState`, :165; origin `ci-friction:<key>#r<N>`, `ciFrictionRungOrigin`, :63), and rung 3
+      escalates (`CI_FRICTION_ESCALATE_RUNG`, :40).
+
+    It prices only extra CI rounds. A PR that waits with no round at all is invisible to it: an escalated
+    PR parked on a metadata-only red, an armed PR GitHub never merged, or a reviewer withholding verdicts.
+
+    FILING ADMISSION, AS IT IS.
+    - ci-friction admits a drafted record through `ciFrictionRecordVerdict` (:685), which is
+      `loadPlanFromYaml` plus `lintTask`. It does NOT run `lint-plan --base`; no gardener does.
+    - This gardener reuses that same admission. Upgrading both to `lint-plan --base` is a separate item and
+      is out of scope here.
+
+    WEEK ESTIMATE, PR-hours by blocker, 2026-09-26..2026-10-03. Method and caveats are in W1-T5537's
+    rationale; the escalated rows are issue-open hours.
+
+    | blocker | PR-hours |
+    |---|---|
+    | escalated: metadata-only body red | 121.1 |
+    | escalated: plan-only red | 100.2 |
+    | own/base-red fix loop | 65.3 |
+    | strikes-exhausted | 55.5 |
+    | awaiting-ci/review, never needed a fix | 43.6 |
+    | armed-to-merged | 26.9 |
+    | awaiting-ci before the first fix | 20.3 |
+    | stale-reviewer-withheld | 17.4 |
+    | review-failed | 4.9 |
+
+    Ranked over owner-NONE blockers, or blockers whose owner did not clear them, the first two filings this
+    week would have been the metadata-only and plan-only escalation classes. Strike exhaustion is now
+    owned by W1-T5536, and armed-idle by W1-T5492, so both drop off the unowned list once those land.
+    That shift is the self-improving loop working.
+
+    REGISTRATION, as verified on main (71fbcc6fe):
+    - `GARDEN_NAMES` (src/run-task.ts:269) feeds `GARDEN_BRANCH_RE` (:272).
+    - `REGISTERED_GARDEN_NAMES` (src/lib/garden-registry.ts:30) is the daemon's off-loop list.
+    - `buildRegisteredGarden` (run-task.ts:33663) needs one `case` (ci-friction's is :33770).
+    - Cadence comes from `gardenSchedule` (garden-registry.ts:114).
+    - The censuses in test/a-gardener-pass-never-runs-on-the-daemon-loop.test.ts derive from the list, so
+      they cover the new name without edits.
+
+    Rule 19: the gardener (src/lib/flow-gardener.ts, new), its registry entry (garden-registry.ts), and its
+    branch name plus builder case (run-task.ts) are three production files for one concern. So the band is
+    high, with band_meaning: span.
+  design: |
+    1. EPISODES (src/lib/flow-gardener.ts).
+       - Read `sweep.disposed` rows carrying `blocker` through `readLedgerUnionRecordsSync`, as
+         `readCiFrictionLedgerRecords` does.
+       - Per PR, order the observations. The time between two consecutive passes that observed the PR is
+         charged to the earlier observation's blocker. The PR's last observation charges nothing.
+       - Cause key = `<blocker>:<reason class>`. The reason class is the disposition reason with shas,
+         numbers and PR refs normalised, cut at its first ` — `, so `escalated` splits into its real classes.
+       - Weight each charge by `ciFrictionRecencyWeight` with `CI_FRICTION_HALF_LIFE_MS`. There is no hard
+         window.
+    2. WHICH CAUSES ARE CANDIDATES.
+       - Owner `NONE`, or an owner that did not clear it: an episode that ended with the PR closed unmerged
+         or merged by a non-fleet actor, or an episode still open longer than the 90th percentile of that
+         same cause's own cleared episodes.
+       - The bar is self-calibrating per cause, never a fixed number.
+       - Rank by weighted PR-hours, tie-broken by distinct PRs.
+    3. LADDER AND EFFECT.
+       - Origin `flow-blocker:<key>`, then `#r<N>` above rung 1, on the same grammar as
+         `ciFrictionRungOrigin`.
+       - Effect = that cause's share of total PR-hours in equal windows before and after the remedy's merge,
+         using the same one-sided comparison and pending/unmeasurable states as `ciFrictionRemedyEffect`.
+       - A debit reopens the cause at the next rung. Rung `CI_FRICTION_ESCALATE_RUNG` escalates through the
+         owner-assigned issue path (`sreOperatorEscalation`, src/lib/sre-runbooks.ts:306) and files nothing.
+    4. FILING.
+       - The `GardenSpec` shape ci-friction uses (inventory, candidates, scorecard, apply).
+       - `apply` mints an id through the shared minter, drafts ONE shard naming the cause, its PR-hours, its
+         top five PRs with their blocker reasons, and the owner it lacks or that failed.
+       - Admit it through `ciFrictionRecordVerdict`, and open a plan-only PR (rule 15's filing exemption).
+       - One filing per pass. The scorecard row is the generic `flow.scorecard` (causes, total PR-hours,
+         next, ladder).
+    5. REGISTER.
+       - Add `flow` to `GARDEN_NAMES` (run-task.ts:269) and `REGISTERED_GARDEN_NAMES`
+         (garden-registry.ts:30), with default cadence.
+       - Add a `case "flow"` to `buildRegisteredGarden` modelled on the ci-friction case; it builds the
+         garden from `flowGardenSpec(deps)`, the module's one exported spec builder.
+  acceptance:
+    - claim: "episodes charge the time between consecutive passes to the earlier pass's blocker, and the last observation charges nothing"
+      proof: "grep: test(\"W1-T5538: pass gaps are charged to the blocker the PR was waiting on in test/the-flow-gardener-files-a-remedy-for-the-costliest-unowned-blocker.test.ts"
+    - claim: "an owned blocker that its owner clears is not a candidate, while an owner-NONE cause and an owned cause past its own cleared-episode 90th percentile are, ranked by weighted PR-hours"
+      proof: "grep: test(\"W1-T5538: the costliest unowned or uncleared blocker ranks first in test/the-flow-gardener-files-a-remedy-for-the-costliest-unowned-blocker.test.ts"
+    - claim: "apply drafts one shard for the top cause with origin flow-blocker:<key>, admitted by ciFrictionRecordVerdict, and a debited remedy reopens at the next rung"
+      proof: "grep: test(\"W1-T5538: the top cause is filed once and a debited remedy reopens one rung up in test/the-flow-gardener-files-a-remedy-for-the-costliest-unowned-blocker.test.ts"
+    - claim: "flow is a registered garden whose branch matches GARDEN_BRANCH_RE and which buildRegisteredGarden builds"
+      proof: "grep: test(\"W1-T5538: the flow gardener is registered and builds in test/the-flow-gardener-files-a-remedy-for-the-costliest-unowned-blocker.test.ts"
+    - claim: "the registered garden builder constructs the flow gardener from its exported spec"
+      proof: "grep: flowGardenSpec( in src/run-task.ts"
+  falsifier: |
+    Four reverts, each turning a named case red:
+    - Charge the gap to the later observation: a PR that waited on review for an hour and was then armed
+      charges that hour to armed-idle.
+    - Drop the owner filter: the fix lane's own-red ranks first and is filed although its owner clears it.
+    - Skip `ciFrictionRecordVerdict`: a drafted record with an unparseable proof is filed.
+    - Remove `flow` from `REGISTERED_GARDEN_NAMES`: the registry case fails.

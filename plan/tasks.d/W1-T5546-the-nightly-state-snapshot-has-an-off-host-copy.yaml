@@ -1,0 +1,38 @@
+- id: W1-T5546
+  title: "THE NIGHTLY STATE SNAPSHOT HAS AN OFF-HOST COPY — every state root and every archive W1-T5545 writes sit on one Azure managed disk (remudero-data); a lost disk loses the ledger and all its backups together"
+  repo: remudero
+  depends_on: [W1-T5545]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: medium
+  origin: "operator session 2026-10-03: ledger-backup research"
+  plan_refs: [W1-T5545, W1-T3677, W1-T234]
+  files: [deploy/host-update.sh, test/the-nightly-state-snapshot-has-an-off-host-copy.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-03, read-only, on the host. ~/rmd-state2, ~/rmd-site-state and
+    /mnt/rmd/remudero-console-state all resolve to /dev/nvme0n1p1 (/mnt/rmd). That is the Azure managed
+    disk `remudero-data` in resource group SYNTHWATCH-RG, and `az` is logged in on the host (subscription
+    state Enabled). W1-T5545 writes each snapshot to `<root>/state-backups` on the same disk. A snapshot on
+    the disk it protects does not survive the failure that matters most.
+    OPERATOR COST DECISION REQUIRED before enabling: an Azure incremental snapshot of the managed disk, or
+    a blob upload of the latest archive, has a recurring storage cost. This task ships the mechanism
+    disabled until the operator sets the target (`RMD_STATE_OFFHOST`), and says so in the rung's output.
+  design: |
+    After W1-T5545's verified local snapshots, when `RMD_STATE_OFFHOST` names a target, ship the newest
+    archive off the VM. The target is either `azure-disk-snapshot:<resource-group>/<disk>` (an incremental
+    snapshot via `az snapshot create --incremental`, keeping the newest N) or `azure-blob:<account>/<container>`
+    (upload the archive as a tarball). Verify the copy exists afterwards (`az snapshot show` / blob
+    properties), never trusting an exit code. Any failure sets `state_snapshot_failed`, so the rung exits
+    non-zero. With no target set, the rung prints one line saying no off-host copy is configured and that
+    enabling it needs a cost decision. That is not a failure. The `az` command is injectable
+    (`RMD_STATE_OFFHOST_AZ`) so a test drives a fake.
+  acceptance:
+    - claim: "an off-host copy failure fails the nightly rung, a verified copy passes it, and an unconfigured target is reported without failing"
+      proof: "unit test: test/the-nightly-state-snapshot-has-an-off-host-copy.test.ts"
+  falsifier: |
+    Ignore the fake `az`'s non-zero exit. The suite's rung exits 0 with no off-host copy.
