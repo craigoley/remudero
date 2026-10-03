@@ -3711,6 +3711,14 @@ export function syncPlanOrRefuse(
   }
 }
 
+/** The daemon's per-lane plan sync: {@link syncPlanFromOrigin} with its quarantine, so a bad shard or duplicate id that
+ *  boot survived does not refuse every lane afterwards. run-task and drain keep the strict default. */
+export function quarantiningPlanSync(
+  quarantine: (quarantined: QuarantinedTask[]) => void,
+): (repoDir: string, relPath: string, opts: { allowStale?: boolean }) => SyncedPlan {
+  return (repoDir, relPath, opts) => syncPlanFromOrigin(repoDir, relPath, { ...opts, quarantine });
+}
+
 /**
  * W1-T2513 — SHARE ONE ORIGIN FETCH + ONE PLAN PARSE ACROSS EVERY LANE OF A TICK, rather than
  * letting each lane pay for its own. `drainCommand`/`daemonCommand` build exactly ONE of these
@@ -33302,6 +33310,10 @@ export function reportQuarantined(
   raise: (escalation: Escalation) => string,
 ): void {
   for (const q of quarantined) {
+    if (q.reason === "shard_invalid") {
+      reportInvalidShard(q, log, raise);
+      continue;
+    }
     log("plan.duplicate_quarantined", { id: q.id, files: q.files, reason: q.reason });
     if (q.reason !== "duplicate_id") continue;
     const escalation: Escalation = {
@@ -33321,6 +33333,50 @@ export function reportQuarantined(
       log("plan.duplicate_escalation_failed", { id: q.id, reason: e instanceof Error ? e.message : String(e) });
     }
   }
+}
+
+/** A tasks.d shard that does not parse or validate: one ledger row naming the file and the error, one escalation. */
+function reportInvalidShard(
+  q: QuarantinedTask,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  raise: (escalation: Escalation) => string,
+): void {
+  const file = q.files[0] ?? q.id;
+  log("plan.shard_quarantined", { id: q.id, file, error: q.error });
+  const escalation: Escalation = {
+    class: "BLOCKED",
+    taskId: q.id,
+    summary: `plan shard ${file} does not load — the daemon quarantined it and keeps running`,
+    detail:
+      `The daemon held ${q.id} (and every task depending on it) out of its plan instead of refusing the whole plan.\n\n` +
+      `File: ${file}\nError: ${q.error ?? "(none recorded)"}\n\nNothing can dispatch ${q.id} until the shard loads again.`,
+    options: [{ label: "repair-shard", detail: "fix the shard in a plan-only PR so it parses and validates" }],
+    recommendation: "repair-shard",
+    headDedup: "independent",
+  };
+  try {
+    log("plan.shard_escalated", { id: q.id, file, issue_url: raise(escalation) });
+  } catch (e) {
+    log("plan.shard_escalation_failed", { id: q.id, file, reason: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+/** {@link reportQuarantined} for a daemon that re-reads its plan every tick: each quarantine is reported the first time
+ *  this process sees it, so a bad shard is ledgered and escalated once rather than on every load. */
+export function quarantineReporter(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  raise: (escalation: Escalation) => string,
+): (quarantined: QuarantinedTask[]) => void {
+  const reported = new Set<string>();
+  return (quarantined) => {
+    const fresh = quarantined.filter((q) => {
+      const key = JSON.stringify([q.reason, q.id, q.files, q.error]);
+      if (reported.has(key)) return false;
+      reported.add(key);
+      return true;
+    });
+    reportQuarantined(fresh, log, raise);
+  };
 }
 
 /**
@@ -33984,6 +34040,7 @@ export async function daemonCommand(
   let plan: Plan;
   const raiseDuplicate = (e: Escalation): string =>
     escalate({ ...e, runId }, { issues: ghIssueGateway(target.owner, target.repo), ledgerPath, runId });
+  const reportPlanQuarantine = quarantineReporter(log, raiseDuplicate);
   const gardenContext: GardenBuildContext = { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate };
   const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
     ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
@@ -34007,7 +34064,7 @@ export async function daemonCommand(
       allowStale,
       log,
       say: (msg) => writeSyncLine(2, `### rmd daemon — ${msg}`),
-      quarantine: (quarantined) => reportQuarantined(quarantined, log, raiseDuplicate),
+      quarantine: reportPlanQuarantine,
     });
     if ("error" in synced) return 1;
     plan = synced.plan;
@@ -34050,7 +34107,7 @@ export async function daemonCommand(
   // mirroring `drainCommand`'s identical construction immediately above `laneGithubFor` there —
   // every dispatch lane's `runTask` call below shares ONE origin fetch + ONE plan parse per
   // tick instead of paying for it per lane. See `createPlanSyncCoalescer`'s own doc.
-  const planSyncCoalescer = createPlanSyncCoalescer(target.planPath);
+  const planSyncCoalescer = createPlanSyncCoalescer(target.planPath, quarantiningPlanSync(reportPlanQuarantine));
   // R-24 (docs/audits/recon-2026-09-05.md) — ONE PROJECTION GATEWAY FOR THE WHOLE DAEMON
   // LIFETIME, built HERE rather than inside `refreshMerged` below. `target.owner`/`target.repo`
   // are resolved ONCE, before this line (`resolveDaemonTarget`, `const target`), and no path
