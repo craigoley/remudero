@@ -1,0 +1,27 @@
+- id: W1-T5395
+  title: diff-class recognizes doctrine/, CLAUDE.md and AGENTS.md as docs paths, so a pure-doctrine PR classifies DOCS_ONLY and skips the full coverage-ratchet instrumented suite
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: medium
+  status: queued
+  attempts: 0
+  files:
+    - scripts/diff-class.mjs
+    - test/diff-class.test.ts
+  rationale: |
+    Doctrine bodies and the root CLAUDE.md and AGENTS.md files contain repository
+    guidance. Treating those paths as documentation lets prose changes skip the
+    instrumented coverage suite while mixed doctrine and source diffs still run
+    it. Lookalike paths outside those documentation locations must remain source.
+  acceptance:
+    - claim: isDocsPath returns true for any path under doctrine/ and for the root files CLAUDE.md and AGENTS.md, in addition to the existing docs/ prefix
+      proof: "unit test: isDocsPath returns true for doctrine/, CLAUDE.md and AGENTS.md paths"
+    - claim: a diff consisting only of doctrine/, CLAUDE.md and AGENTS.md files classifies DOCS_ONLY
+      proof: "unit test: a pure doctrine plus CLAUDE.md plus AGENTS.md diff classifies DOCS_ONLY"
+    - claim: a diff mixing a doctrine/ file with any source file still classifies SOURCE, so the full coverage-ratchet suite still runs for real code changes
+      proof: "unit test: a mixed doctrine and src diff classifies SOURCE"
+    - claim: lookalike paths (for example doctrine-notes.ts, src/doctrine/x.ts, or nested CLAUDE.md under src/) are not treated as docs paths
+      proof: "unit test: lookalike doctrine and CLAUDE.md paths outside the root are not docs paths"
+  origin: followup:DAEMON-1790086566017:2026-09-22T15:04:25.385Z:0
