@@ -12,7 +12,7 @@
   plan_refs: [W1-T4021, W1-T2847, W1-T3528]
   files: [src/lib/worker.ts, test/the-lane-reaper-says-why-it-keeps.test.ts, scripts/test-tier-manifest.json]
   priority: 3
-  status: queued
+  status: merged
   # backlog gardener: band=3 evidence=b87e8b14614ec9d2
   attempts: 0
   rationale: |

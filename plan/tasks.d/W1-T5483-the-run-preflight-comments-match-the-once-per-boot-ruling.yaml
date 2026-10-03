@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: found building W1-T5411 (PR #8913)"
   plan_refs: [W1-T5346, W1-T5411]
   files: [src/run-task.ts, test/the-run-preflight-comments-match-the-once-per-boot-ruling.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |
