@@ -11212,17 +11212,23 @@ export async function runFixRung(opts: {
         },
       });
     const fixReport = workerTranscript(fixResult);
-    // The missing line is asked for once first (W1-T4450); the derived subject is only the
-    // fallback after that re-ask (below), never a replacement for it.
     let harnessCommitCount = harnessCommit(fixReport);
-    // W1-T4450: A MISSING COMMIT_MESSAGE LINE IS ASKED FOR ONCE HERE TOO, exactly as implement does
-    // (W1-T4052): same session, one ask, the same refusal if the line is still absent. 37 fix rounds in
-    // one day did their work and lost it to this one line. Only a round that left edits is asked.
-    if (
-      harnessCommitCount === 0 &&
+    // W1-T4450: a round that left edits but no COMMIT_MESSAGE line is not discarded. W1-T5325: a
+    // writer that cannot resume (codex/cash) gets the subject derived from the failing check HERE,
+    // with no second dispatch — that re-ask was a fresh session whose loss refused the whole round.
+    // A resumable writer is still asked once in its own session (W1-T4052).
+    const derivedFirst = harnessCommitCount === 0 &&
       harnessCommitRefusalReason === MISSING_COMMIT_MESSAGE_REASON &&
       (deps.worktreeHasUncommittedChanges ?? worktreeHasUncommittedChanges)(opts.worktreePath)
-    ) {
+      ? writerCannotResume(fixResult.provider ?? fixArgs.mountProvider, fixArgs.tools)
+        ? derivedFixCommit(priorCiFailures?.[0]?.name ?? unmet[0]?.claim ?? gateFailuresNow?.[0]?.reason, opts.prUrl) ?? "ask"
+        : "ask"
+      : undefined;
+    if (typeof derivedFirst === "object") {
+      harnessCommitRefusalReason = undefined;
+      harnessCommitCount = harnessCommit(fixReport, { subjectSource: "harness-derived", derivedCommit: derivedFirst });
+    }
+    if (derivedFirst === "ask") {
       deps.log("fix.commit_line_requested", { strike: attempt, round });
       deps.say("fix rung: no COMMIT_MESSAGE line in the report — resuming the worker's session once to ask for it");
       const askReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}-ask`, systemClock.now()), fixLaneBenchmarkWork(opts.task, deps.ledgerPath));
@@ -11251,16 +11257,9 @@ export async function runFixRung(opts: {
       if (answer) {
         harnessCommitRefusalReason = undefined;
         harnessCommitUndeclared = [];
+        // A derivable subject never reaches this ask (above), so the answer is the only subject left.
         const answeredReport = `${workerTranscript(fixResult)}\n${workerTranscript(answer)}`;
-        const check = priorCiFailures?.[0]?.name ?? unmet[0]?.claim ?? gateFailuresNow?.[0]?.reason;
-        const derivedCommit = writerCannotResume(fixResult.provider ?? fixArgs.mountProvider, fixArgs.tools)
-          && parseReport(answeredReport)?.commitMessage === undefined
-          ? derivedFixCommit(check, opts.prUrl)
-          : undefined;
-        harnessCommitCount = harnessCommit(answeredReport, {
-          subjectSource: derivedCommit ? "harness-derived" : "re-asked",
-          derivedCommit,
-        });
+        harnessCommitCount = harnessCommit(answeredReport, { subjectSource: "re-asked" });
       }
     }
     const harnessCommitRefused = harnessCommitRefusalReason !== undefined && harnessCommitCount === 0;
