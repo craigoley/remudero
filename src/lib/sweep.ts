@@ -5,6 +5,11 @@ import { CONVENTIONAL_LIMITS, fitConventionalTitle } from "./commit-message.js";
 import { mintNextTaskId } from "./task-id.js";
 import { gitRemoteRefReserver, reserveTaskIdRemote, type RemoteReserveDeps } from "./task-id-reservation.js";
 import { dirname, join } from "node:path";
+import {
+  baseReproductionFiles, decideBaseReproduction, failingTestFilesFromCiFailures,
+  probeCacheFromLedger, probeCacheKey, refundedStrikeKeys, strikesToRefund, type BaseProbeFile,
+} from "./base-reproduction.js";
+export { failingTestFilesFromCiFailures } from "./base-reproduction.js";
 import { parse as parseYaml } from "yaml";
 import {
   armAutoMergeDetailed,
@@ -1180,6 +1185,7 @@ export function renderHeldReviewQueueBlocker(blocker: HeldReviewQueueBlocker): s
 }
 
 export interface BuildSweepEffectsDeps {
+  reproduceFailingTestsOnMainImpl?: SweepDeps["reproduceFailingTestsOnMain"];
   /** W1-T4415 — marks one draft PR ready for review; the entrypoint adapter supplies the write. */
   readyDraftImpl?: (pr: OpenPrView) => void | Promise<void>;
   owner: string;
@@ -1527,6 +1533,7 @@ const settledMutationVerdictArtifacts = new Set<number>();
  * inserted in some canonical position.
  */
 export const SWEEP_EFFECT_SURFACE = [
+  "reproduceFailingTestsOnMain",
   "arm",
   "close",
   "dispatchFix",
@@ -1583,6 +1590,7 @@ export const SWEEP_EFFECT_SURFACE = [
 
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
+  | "reproduceFailingTestsOnMain"
   | "arm"
   | "close"
   | "dispatchFix"
@@ -3206,6 +3214,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T2789 — the sweep-level consumer of the SAME reversed-compare reader and exact-path
     // decision runFixRung already uses. This is deliberately not exposed through Serve.
     readRedBaseRefreshFacts: (pr) => redBaseRefreshFactsFromRest(owner, repo, pr.prNumber),
+    reproduceFailingTestsOnMain: deps.reproduceFailingTestsOnMainImpl,
 
     // W1-T3422/W1-T3577 — reached only after `selectStaleRedRelease` admits the cheap candidate; it shares the daemon REST pacer and has no retry/wait loop.
     readStaleRedWorkflowRuns: (pr) =>
@@ -3710,27 +3719,6 @@ export interface RedBaseRefreshDecision {
   failingTestFiles: string[];
   failingSourceFiles: string[];
   matchingBaseFiles: string[];
-}
-
-// Locate the distinctive suffix first, then walk left for its ordinary path prefix: keeping prefix
-// discovery out of the regexp keeps runtime linear on a corrupted log full of path delimiters.
-const CI_TEST_PATH_SUFFIX = /\b(?:test|tests|__tests__)[\\/][A-Za-z0-9._@%+~\\/-]+\.(?:[cm]?[jt]sx?)/gi;
-const CI_PATH_PREFIX_CHAR = /[A-Za-z0-9._:@%+~\\/-]/;
-
-/** Extract only test-file paths from the CI evidence the fix rung receives. */
-export function failingTestFilesFromCiFailures(failures: readonly CiFailure[]): string[] {
-  const paths = new Set<string>();
-  for (const failure of failures) {
-    for (const text of [failure.name, failure.logTail]) {
-      for (const match of text.matchAll(CI_TEST_PATH_SUFFIX)) {
-        let start = match.index;
-        while (start > 0 && CI_PATH_PREFIX_CHAR.test(text[start - 1])) start--;
-        const end = match.index + match[0].length;
-        paths.add(text.slice(start, end).replace(/^file:\/\//, "").replaceAll("\\", "/"));
-      }
-    }
-  }
-  return [...paths];
 }
 
 /** Extract source paths only from the existing, distinctive diff-coverage report. */
@@ -8698,6 +8686,9 @@ export function dispatchFixSpent(outcome: boolean | void): boolean {
 
 /** Injected effects — the real command wires arm/close/fix/escalate; tests fake them. */
 export interface SweepDeps {
+  reproduceFailingTestsOnMain?: (
+    pr: OpenPrView, files: readonly string[], mainTipSha: string,
+  ) => Promise<readonly BaseProbeFile[]>;
   /** Arm GitHub auto-merge; idempotent at the GitHub level. RETURNS ITS OUTCOME: `armAutoMerge` does
    *  not throw, and most outcomes mean it armed NOTHING. The effect used to discard that value while
    *  the sweep recorded `acted: true` regardless, which hid the refusal and made it PERMANENT,
@@ -9810,6 +9801,9 @@ export function fixLedgerRowsForHead(
   currentHeadSha?: string,
 ): Array<Record<string, unknown>> {
   if (!taskId) return [];
+  const refunds = refundedStrikeKeys(lines);
+  lines = lines.filter((line) => line.step !== "fix.dispatch" ||
+    !refunds.has(`${line.task_id}@${line.head_sha}@${line.strike}`));
   if (!currentHeadSha) {
     return lines.filter(
       (line) => line.task_id === taskId && (line.step === "fix.dispatch" || line.step === "fix.review") && !isProofAmendmentIdentityRow(line),
@@ -10268,6 +10262,8 @@ export async function runSweep(
   // W1-T4351 — both folds read once per pass; `baseRedRefreshPr` holds this pass's ONE refresh.
   const mainLatestRun = mainLatestRunFromLedger(ledgerLines);
   const baseRedHistory = baseRedHistoryFromLedger(ledgerLines);
+  const reproductionHistory = [...ledgerLines];
+  const reproductionCache = probeCacheFromLedger(ledgerLines);
   let baseRedRefreshPr: number | undefined;
   // W1-T5349 — the plan-repair rung's once-per-head record, folded once per pass.
   const planRepairHistory = planRepairHistoryFromLedger(ledgerLines);
@@ -11426,9 +11422,8 @@ export async function runSweep(
                 standDownReason = reason;
                 break;
               }
-              // W1-T527 — CLASSIFY BEFORE SELECTING, because the strike is spent at dispatch and
-              // cannot be refunded. `classifyRedCause` is a pure fold over evidence already in
-              // hand. Only base-caused and environment stand down.
+              // W1-T527 — classify the evidence in hand before selecting a worker.
+              // Only base-caused and environment stand down here.
               const redCause = classifyRedCause(pr, openPrs);
               if (redCauseStandsDown(redCause)) {
                 acted = false;
@@ -11652,6 +11647,56 @@ export async function runSweep(
                 if (genuineFailures.length === 0) {
                   acted = false;
                   standDownReason = `cancelled required check(s): ${outcomes.join("; ")}`;
+                  break;
+                }
+              }
+              const reproductionFiles = baseReproductionFiles(ciFailuresForFix);
+              if (reproductionFiles.length > 0 && mainTipSha !== undefined && deps.reproduceFailingTestsOnMain) {
+                const missing = reproductionFiles.filter((file) => !reproductionCache.has(probeCacheKey(mainTipSha, file)));
+                let probed: readonly BaseProbeFile[] = [];
+                try {
+                  if (missing.length > 0) probed = await deps.reproduceFailingTestsOnMain(pr, missing, mainTipSha);
+                } catch (error) {
+                  probed = missing.map((file) => ({ file, outcome: "unrunnable", duration_ms: 0, cached: false, reason: String(error) }));
+                }
+                const files = reproductionFiles.map((file): BaseProbeFile => {
+                  const cached = reproductionCache.get(probeCacheKey(mainTipSha, file));
+                  return cached ? { ...cached, cached: true } : probed.find((probe) => probe.file === file) ??
+                    { file, outcome: "unrunnable", duration_ms: 0, cached: false, reason: "probe returned no outcome" };
+                });
+                const verdict = decideBaseReproduction(reproductionFiles, files);
+                const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainTipSha, files, verdict };
+                appendLine(deps.ledgerPath, { ...row, step: "sweep.base_reproduction" });
+                for (const file of files) reproductionCache.set(probeCacheKey(mainTipSha, file.file), file);
+                if (verdict === "reproduced") {
+                  const checks = ciFailuresForFix.filter((failure) => baseReproductionFiles([failure]).length > 0).map((failure) => failure.name);
+                  for (const strike of strikesToRefund(reproductionHistory, pr.taskId, pr.headSha, checks)) {
+                    const refund = { run_id: deps.runId, task_id: pr.taskId!, step: "fix.strike_refunded", pr_number: pr.prNumber, head_sha: pr.headSha,
+                      strike: strike.strike, main_sha: mainTipSha, reason: "base-red-reproduced", test_files: reproductionFiles };
+                    appendLine(deps.ledgerPath, refund);
+                    reproductionHistory.push(refund);
+                  }
+                  reproductionHistory.push({ ...row, step: "sweep.base_reproduction" });
+                  acted = false;
+                  standDownReason = `base red reproduced: ${reproductionFiles.join(", ")} fail at main ${mainTipSha} — no fix dispatched or strike spent`;
+                  break;
+                }
+                const key = `${pr.prNumber}@${pr.headSha}`;
+                const previouslyReproduced = reproductionHistory.some((line) => line.step === "sweep.base_reproduction" &&
+                  line.pr_number === pr.prNumber && line.head_sha === pr.headSha && line.verdict === "reproduced" && line.main_sha !== mainTipSha);
+                if (verdict === "clear" && previouslyReproduced && !baseRedHistory.refreshed.has(key)) {
+                  acted = false;
+                  if (deps.updateBranch && baseRedRefreshPr === undefined) {
+                    baseRedRefreshPr = pr.prNumber;
+                    let outcome: string;
+                    try { outcome = await deps.updateBranch(pr); }
+                    catch (error) { outcome = `error: ${String(error)}`; }
+                    appendLine(deps.ledgerPath, { ...row, step: BASE_RED_REFRESH_STEP, outcome });
+                    baseRedHistory.refreshed.add(key);
+                    standDownReason = `base reproduction clear at main ${mainTipSha}; branch refresh requested (${outcome}) — no fix dispatched`;
+                  } else {
+                    standDownReason = `base reproduction clear at main ${mainTipSha}; this pass's branch refresh is spent or unwired — no fix dispatched`;
+                  }
                   break;
                 }
               }
