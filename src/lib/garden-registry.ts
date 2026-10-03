@@ -30,6 +30,8 @@ export const REGISTERED_GARDEN_NAMES = [
   "selector-shadow",
   "evidence-coverage",
   "overseer",
+  // W1-T5361: the machine-filing judge, in the slot its in-process starter held (its git work froze the loop).
+  "machine-judge",
   "hot-file",
   "host-resource",
   "backlog",
