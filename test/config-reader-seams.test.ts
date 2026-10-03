@@ -362,7 +362,12 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // ALLOWED would fail test 3's STALE-ENTRY LOCK and test 5. The file set is UNCHANGED
   // (`src/run-task.ts` already carried the other reads above), so the `files` assertion below
   // needed no edit.
-  assert.equal(readers.length, 32, `expected 32 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // THIRTY-THREE since the fresh calibration driver's production runtime (run-task.ts, W1-T5341)
+  // started bounding each sealed side attempt by `workerAbandon`, the same quiet-stream bound the
+  // daemon's prospective pair passes. It is SEAMED from the moment it was written
+  // (`workerAbandonMs ?? loadDefaultPolicy().values.workerAbandon`), so it is NOT allowlisted, and
+  // the file set is UNCHANGED (`src/run-task.ts` already carried the other reads above).
+  assert.equal(readers.length, 33, `expected 33 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —
