@@ -223,3 +223,8 @@ test("W1-T1049 — a well-formed 'sweep.reviewLanes' row returns its value, incl
   assert.equal(validateReviewLanesRow({ value: 1, min: 1, max: 8 }), 1);
   assert.equal(validateReviewLanesRow({ value: 8, min: 1, max: 8 }), 8);
 });
+
+test("dispatch lanes are restored to three by the 2026-10-03 operator ruling", () => {
+  // The ruling's precondition was the memory gate (W1-T5347); the restore condition read burn per run DOWN.
+  assert.equal(DEFAULT_SWEEP_POLICY.dispatchLanes, 3, "plan/policy.yaml sweep.dispatchLanes");
+});
