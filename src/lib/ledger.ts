@@ -16,7 +16,7 @@ import {
   statSync,
   writeSync,
 } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
@@ -245,7 +245,9 @@ export function appendLedger(
     ...line,
   };
   const buf = Buffer.from(JSON.stringify(record) + "\n", "utf8");
-  const fd = openSync(path, "a");
+  const rows = [buf];
+  let behind: Buffer[];
+  const fd = openSync(path, "a+");
   try {
     const written = writeSync(fd, buf, 0, buf.length);
     if (written !== buf.length) {
@@ -260,10 +262,15 @@ export function appendLedger(
     } catch (err) {
       console.error(`ledger: could not stat ${path} to check the row's ts for future skew: ${String(err)}`);
     }
-    if (flag) writeSync(fd, JSON.stringify(flag) + "\n");
+    if (flag) {
+      rows.push(Buffer.from(JSON.stringify(flag) + "\n", "utf8"));
+      writeSync(fd, rows[1]!, 0, rows[1]!.length);
+    }
+    behind = rowsBehindRotationSeal(fd, rows);
   } finally {
     closeSync(fd);
   }
+  if (behind.length > 0) reappendBehindSeal(path, behind);
   // W1-T209: opportunistic, lazy rotation — the only place the ledger grows, so the only place
   // that needs to notice it has grown past the ceiling. A stat and small sidecar read on each
   // call; the full read-and-rewrite cost only on the call that crosses the effective ceiling.
@@ -1021,14 +1028,56 @@ function parseLedgerLine(raw: string): ParsedLedgerLine {
   }
 }
 
-function readSyncRange(path: string, start: number, end: number): string {
+function readSyncRange(path: string, start: number, end: number): Buffer {
   const fd = openSync(path, "r");
   try {
     const buf = Buffer.alloc(end - start);
     readSync(fd, buf, 0, end - start, start);
-    return buf.toString("utf8");
+    return buf;
   } finally {
     closeSync(fd);
+  }
+}
+
+const ROTATION_SEAL_STEP = "ledger.rotation_sealed";
+const ROTATION_SEAL_MARK = Buffer.from(`"step":"${ROTATION_SEAL_STEP}"`, "utf8");
+
+/** W1-T5514: seal the replaced inode (`fd`, O_APPEND), then copy every row before the seal from
+ *  `from` on into the NEW live `path`, a torn tail newline-terminated (see {@link rotateLedger}). */
+function drainReplacedInode(fd: number, from: number, path: string, nowIso: string): void {
+  const seal = Buffer.from(rotationRow(ROTATION_SEAL_STEP, { nonce: randomUUID() }, nowIso), "utf8");
+  writeSync(fd, seal, 0, seal.length);
+  const buf = Buffer.alloc(fstatSync(fd).size - from);
+  const view = buf.subarray(0, readSync(fd, buf, 0, buf.length, from));
+  const sealAt = view.indexOf(seal);
+  let rows = view.subarray(0, sealAt < 0 ? view.length : sealAt);
+  if (rows.length > 0 && rows[rows.length - 1] !== 0x0a) {
+    console.error(`ledger: rotation drained a torn ${rows.length}-byte tail into ${path}; kept, newline-terminated`);
+    rows = Buffer.concat([rows, Buffer.from("\n")]);
+  }
+  if (rows.length > 0) appendFileSync(path, rows);
+}
+
+/** W1-T5514: `rows` this appender wrote AFTER a rotation's seal on an inode it already replaced
+ *  (`nlink` 0), so its drain never copied them. Before the seal, or no seal yet: the drain has them. */
+function rowsBehindRotationSeal(fd: number, rows: Buffer[]): Buffer[] {
+  const st = fstatSync(fd);
+  if (st.nlink > 0) return [];
+  const all = Buffer.alloc(st.size);
+  readSync(fd, all, 0, st.size, 0);
+  const sealAt = all.indexOf(ROTATION_SEAL_MARK);
+  return sealAt < 0 ? [] : rows.filter((row) => all.lastIndexOf(row) > sealAt);
+}
+
+function reappendBehindSeal(path: string, rows: Buffer[]): void {
+  for (let behind: Buffer[] = [Buffer.concat(rows)]; behind.length > 0; ) {
+    const fd = openSync(path, "a+");
+    try {
+      writeSync(fd, behind[0]!, 0, behind[0]!.length);
+      behind = rowsBehindRotationSeal(fd, behind);
+    } finally {
+      closeSync(fd);
+    }
   }
 }
 
@@ -1414,9 +1463,9 @@ export interface LedgerRotationResult {
  *   4. The rename is withdrawn when a `dev`+`ino` compare shows the live path is no longer the
  *      snapshotted inode, leaving the archive already written on disk.
  *
- * One appender: appendLedger holds no long-lived descriptor, so a delta read immediately before the
- * rename folds any line appended since the snapshot into the live file. What lands between that
- * read and the rename syscall is the one residual sliver, the same one `logrotate` has.
+ * Concurrent appenders (W1-T5514): rows landing after the catch-up read hit the old inode. An fd held
+ * across the rename seals it and drains every row before the seal into the new live file; an appender
+ * that finds its row AFTER the seal on an unlinked inode re-appends it. No row is lost or doubled.
  * Why: without the lock the second rotator's catch-up saw the first's smaller live file, took an
  * empty tail and renamed over it (R-1; docs/forensics/ledger.md#rotateledger).
  */
@@ -1585,6 +1634,8 @@ export function rotateLedger(
     /** Cadence window, default {@link LEDGER_ROTATION_SMOOTHING_WINDOW_MS}; 0 rotates on every crossing. */
     smoothingWindowMs?: number;
     retainedSteps?: ReadonlySet<string>;
+    /** Test seam (W1-T5514): runs with the new live file staged, immediately before the rename. */
+    beforeRename?: () => void;
   } = {},
 ): LedgerRotationResult {
   const ceilingBytes = opts.ceilingBytes ?? LEDGER_ROTATION_CEILING_BYTES;
@@ -1617,7 +1668,7 @@ export function rotateLedger(
       current: missing.length === 0,
       record,
       unreadable: shared.status === "unreadable",
-    });
+    }, opts.beforeRename);
     if (result.rotated) {
       const steps = [...new Set([...own, ...(record?.steps ?? [])])].sort();
       const lastFullRotationMs = missing.length === 0 ? systemClock.now() : record?.lastFullRotationMs;
@@ -1652,6 +1703,7 @@ function rotateLedgerLocked(
   archiveFsDeps: ArchiveNamingFs,
   now: (() => Date) | undefined,
   retention: RotationRetention,
+  beforeRename?: () => void,
 ): LedgerRotationResult {
   const { size: size0, content: snapshot, bytes: snapshotBytes, identity: snapshotIdentity } = readSnapshotWithIdentity(path);
   const lastFull = retention.current ? retention.record?.lastFullRotationMs : undefined;
@@ -1834,11 +1886,12 @@ function rotateLedgerLocked(
   const survivors = new Set(capped);
   let keptCandidates = originalOrder.filter((p) => survivors.has(p));
 
-  // Catch-up: fold in anything appended to the live path since the snapshot above, so a
-  // concurrent appendLedger call landing in that window is never silently dropped.
+  // Catch-up to the last newline; the post-rename drain copies everything from `drainFrom` on.
   const sizeNow = statSync(path).size;
-  const tail = sizeNow > size0 ? readSyncRange(path, size0, sizeNow) : "";
-  const tailBytes = Buffer.byteLength(tail, "utf8");
+  const rawTail = sizeNow > size0 ? readSyncRange(path, size0, sizeNow) : Buffer.alloc(0);
+  const tailBytes = rawTail.lastIndexOf(0x0a) + 1;
+  const tail = rawTail.subarray(0, tailBytes).toString("utf8");
+  const drainFrom = size0 + tailBytes;
 
   let keptLines = keptCandidates.map((p) => p.raw);
   let keptBytes = keptLines.length > 0 ? Buffer.byteLength(keptLines.join("\n") + "\n", "utf8") : 0;
@@ -1909,19 +1962,24 @@ function rotateLedgerLocked(
       ? rotationRow("ledger.rotation_headroom", { rate_bytes_per_hour: rateBytesPerHour, ceiling_bytes: ceilingBytes }, nowIso)
       : "");
   const newLiveContent = coreContent + noteContent + pointerContent + tail;
-  const swapped = writeFileAtomic(path, newLiveContent, () => {
-    // Immediately before the rename: is the live path STILL the inode this rotation snapshotted?
-    // If not, something replaced it and renaming would clobber it. (A ledger REMOVED mid-rotation
-    // already throws out of the catch-up stat above; this guard decides only same file or other.)
-    const st = statSync(path);
-    return st.dev === snapshotIdentity.dev && st.ino === snapshotIdentity.ino;
-  });
-  if (!swapped) {
-    console.error(
-      `ledger: rotation of ${path} withdrawn — the live file changed identity since the snapshot ` +
-        `(another rotator replaced it); its lines are untouched and the snapshot archive ${archivePath} is kept`,
-    );
-    return { rotated: false };
+  let replaced: number | undefined;
+  try {
+    const swapped = writeFileAtomic(path, newLiveContent, () => {
+      beforeRename?.();
+      replaced = openSync(path, "a+");
+      const st = fstatSync(replaced);
+      return st.dev === snapshotIdentity.dev && st.ino === snapshotIdentity.ino;
+    });
+    if (!swapped) {
+      console.error(
+        `ledger: rotation of ${path} withdrawn — the live file changed identity since the snapshot ` +
+          `(another rotator replaced it); its lines are untouched and the snapshot archive ${archivePath} is kept`,
+      );
+      return { rotated: false };
+    }
+    drainReplacedInode(replaced!, drainFrom, path, nowIso);
+  } finally {
+    if (replaced !== undefined) closeSync(replaced);
   }
   const coreBytes = Buffer.from(coreContent, "utf8");
   writeFileAtomic(ledgerCarriedPrefixPath(path), JSON.stringify({
