@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 4
   status: queued
@@ -16,3 +16,13 @@
   acceptance:
     - claim: "the narrow selector includes test/a-declined-proposal-is-never-approved-from-the-terminal.test.ts when this edge is exercised"
       proof: "grep: test/a-declined-proposal-is-never-approved-from-the-terminal\\.test\\.ts in src/lib/affected-suites.ts"
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The filed plan specifies a narrow selector repair for one named test, with only src/lib/affected-suites.ts declared for modification and a matching grep acceptance proof."
+      - "The supplied scope describes no sensitive access, deletion, irreversible action, merge/deploy/review policy change, or operator-only decision."
+      - "This is a filing-time assessment without a diff or actual-change view; the family has no recorded merged or declined tasks, so its history supplies no failure signal."
+    judged_at: "2026-10-03T04:22:23.204Z"
+    pin: "bacf17b08c9b4eec84f01ab52d039819fc7b13984a10ad48a75c5b7d6e347a49"

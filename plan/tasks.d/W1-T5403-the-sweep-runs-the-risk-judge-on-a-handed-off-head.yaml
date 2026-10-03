@@ -1,0 +1,56 @@
+- id: W1-T5403
+  title: "THE SWEEP RUNS THE RISK JUDGE ON A HANDED-OFF HEAD BEFORE ARMING AUTO-MERGE — since W1-T5345 (#8787) a daemon run hands its PR to the sweep at PR open, but `runRiskJudge` runs only inside the run and the sweep's arm path only honours an earlier `risk_judge.escalated` row, so a handed-off head is armed with no risk judgment of its own"
+  repo: remudero
+  depends_on: [W1-T5345]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator ruling 2026-10-03: a handed-off PR must not reach auto-merge unjudged"
+  plan_refs: [W1-T970, W1-T975, W1-T1116, W1-T4662, W1-T100]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/the-sweep-runs-the-risk-judge-on-a-handed-off-head.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    W1-T5345 (#8787, merged) gives the daemon's runOne a `handOffAtPrOpen` CI wait: the run yields on its
+    first CI poll and ends `handed_off`, and the sweep then owns the review, the fix rung and the auto-merge
+    arm. Its own owner table, `PR_OPEN_HANDOFF_STEP_OWNERS` (src/run-task.ts), lists `risk_judge` as
+    `in_run_only`: "runRiskJudge in runTaskBody; the sweep honours only a prior risk_judge.escalated row
+    (riskRefused)". The skip is named on the hand-off row, never silent, but nothing makes up for it.
+    In src/lib/sweep.ts the `mergeable` disposition refuses to arm only when `prior.riskRefused` holds
+    `<pr>@<head>`, and `riskRefused` is folded only from `risk_judge.escalated` rows. A head no run ever
+    judged has no such row, so the sweep arms it. The same gap covers the older hand-offs:
+    `run.freshness_handoff` from `externalWaitFreshness` / `externalWaitRecycle` also leaves the run before
+    the in-run judge call in runTaskBody.
+    MEASURED 2026-10-03 over the full ledger union (rotations, both forms, plus the live file): the judge
+    wrote 20 `risk_judge.decision` rows from 2026-09-20 to 2026-10-02, all action proceed and verdict low.
+    There were 0 `risk_judge.escalated` rows in that window; the last of 43 was on 2026-09-12. So no
+    escalation has fired lately, and the judge is not being asked about handed-off heads at all.
+    Rule 19: two files carry production change (the sweep's arm path and the daemon's sweep wiring) and
+    the change sits in front of auto-merge, so the band is high for blast radius.
+    It shares src/lib/sweep.ts and src/run-task.ts with W1-T100, which routes blocked_ci to the ci-log fix
+    path. This task adds a risk judgment before the `mergeable` arm and touches neither the fix ladder nor
+    blocked_ci routing.
+  design: |
+    1. Add an optional sweep dep, `judgeHandedOffHead(pr) -> Promise<{ action: "proceed" | "escalate"; ... }>`.
+       The daemon wires it to the existing `runRiskJudge` (src/lib/risk-judge.ts) with the same judge, spend
+       and escalation shape the in-run call uses. The escalation keeps writing the sha-keyed
+       `risk_judge.escalated` row the `riskRefused` fold already reads.
+    2. In the `mergeable` disposition, before arming: if the head belongs to a run that ended `handed_off`
+       (pr_open, freshness or recycle trigger) and the ledger has no `risk_judge.decision` row for
+       `<pr>@<head>`, run the judge ONCE for that head. On proceed, arm as today. On escalate, hold the arm:
+       `alreadyDone` is true and `dedupStandDownReason` names the escalation, the same shape W1-T970/W1-T1116
+       already use. A new head sha earns a new judgment; the same head is never judged twice.
+    3. A judge that is unavailable or throws holds the arm for this pass and is ledgered
+       `sweep.risk_judge_unavailable` with the head; it never arms unjudged and never escalates by default.
+    4. Then change `PR_OPEN_HANDOFF_STEP_OWNERS`'s `risk_judge` row to owner kind `sweep`.
+    Not in scope: heads the in-run judge already decided (they keep today's path), and the specialist panel.
+  acceptance:
+    - claim: "for a handed-off head with no prior risk_judge.decision row the sweep runs the risk judge once before arming, arms on proceed, holds the arm and writes risk_judge.escalated on escalate, holds without arming when the judge is unavailable, and never re-judges the same head"
+      proof: "unit test: test/the-sweep-runs-the-risk-judge-on-a-handed-off-head.test.ts"
+  falsifier: |
+    Remove the judge call from the `mergeable` disposition. The suite's handed-off head whose fake judge
+    escalates is armed anyway, because no `risk_judge.escalated` row exists for it.

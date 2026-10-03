@@ -1,0 +1,38 @@
+- id: W1-T5406
+  title: "THE MACHINE JUDGE SETTLES AN OPERATOR-RELEASED RULING MAIN ALREADY CARRIES — W1-T5359 (#8789) settles a ruling by byte-comparing the rendered shard with the landing tree, but an operator-released ruling is stamped a fresh `judgedAt` every pass, so it is never byte-identical and still re-lands"
+  repo: remudero
+  depends_on: [W1-T5359]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low
+  origin: "operator session 2026-10-03: follow-up to W1-T5359 (#8789)"
+  plan_refs: [W1-T5317]
+  files: [src/lib/machine-filing-judge.ts, test/the-machine-judge-settles-an-operator-released-ruling.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    W1-T5359 (#8789, merged) added the `out.contents === text` check to `runMachineFilingJudge`'s landing
+    loop (src/lib/machine-filing-judge.ts). A match ledgers `machine_judge.already_landed` and records the
+    id in `state.settled` by its pin. That works for a cached machine ruling, because its `judgedAt` is
+    reused from `state.rulings`. It does not work for an operator release. For an id in
+    `ports.operatorReleases()`, the loop builds a new ruling each pass,
+    `{ verdict: "operator", action: "proceed", ..., judgedAt: ports.clock.iso() }`, and never caches it
+    (`if (!judged.byOperator)`). `renderRuledShard` writes that value as `judged_at:`. Once main carries
+    the released ruling, a daemon checkout that lags still sees the record as due. The next render differs
+    from main only in `judged_at`, so the byte comparison fails, the path is landed again, and a PR that
+    only bumps a timestamp opens. That is the repeat W1-T5359 was filed to stop.
+  design: |
+    Compare the rendered shard with the landing tree's text with the `judged_at:` line of the
+    `risk_ruling` block removed from both sides, for operator-released rulings only. If they match, take
+    the existing already-landed branch: `machine_judge.already_landed`, `state.settled[id] = pin`, nothing
+    landed. Machine rulings keep the exact byte comparison. Any other difference (verdict, action, reasons,
+    pin, verify, priority) still lands.
+  acceptance:
+    - claim: "an operator-released ruling whose rendered shard differs from the landing tree's only in judged_at lands nothing and is ledgered machine_judge.already_landed and settled, while one that differs in any other field still lands and a machine ruling keeps the exact byte comparison"
+      proof: "unit test: test/the-machine-judge-settles-an-operator-released-ruling.test.ts"
+  falsifier: |
+    Revert to the plain byte comparison. The suite's released record, already on the landing tree with
+    an earlier `judged_at`, is written and pushed to the fake workspace's `land` on every pass.

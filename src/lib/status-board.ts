@@ -2484,7 +2484,8 @@ function renderBlockersBlock(b: BlockersSection): string[] {
   // rebuilt. The entry follows the comma directly, because the exhaustiveness test matches a key only after a brace or
   // a comma.
   "credit-indeterminate": () => "merge credit could not be read — held rather than rebuilt",
-  "held-pre-dispatch-refusal": () => "same pre-dispatch refusal was already escalated — awaiting a changed task contract" };
+  "held-pre-dispatch-refusal": () => "same pre-dispatch refusal was already escalated — awaiting a changed task contract",
+  "operator-build": () => "edits a .github/workflows/ file the fleet App cannot push — needs an operator build" };
 
 /** EXPORTED for test only, the visibility `deriveCircuitBrokenBlockers` already carries, so a test can assert what an
  *  operator actually READS. `enabled` defaults to `false`, so colour is opt-in and only `renderStatusBoardText` passes
