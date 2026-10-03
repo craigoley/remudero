@@ -52,7 +52,7 @@ import { captureFeedback, setFeedbackStatus, type FeedbackEntry } from "./feedba
 import type { LandFeedbackOpts } from "./feedback-landing.js";
 import { loadSkill, loadSkillRegistry, searchGroundingSources, skillsDir, type GroundingNote, type Skill } from "./skill.js";
 import type { Route } from "./service.js";
-import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
+import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, requestPathLand, sendJson } from "./panel-actions.js";
 
 export interface PanelSkillRunDeps {
   /** Repo root — `.remudero/skills/`, `plan/tasks.yaml`, and `plan/feedback/` all live under here. */
@@ -248,17 +248,17 @@ export function buildRunSkillRoute(deps: PanelSkillRunDeps): Route {
       const grounding = groundClarifyRequest(deps.root, task, task.id, "plan");
       const lint = lintTask(task);
       const grillText = buildClarifyGrill(task, lint, grounding);
-      const captured = captureFeedback(deps.root, { raw: grillText, origin: "ui" });
+      const origin = bearerTokenId(req);
+      const captured = captureFeedback(deps.root, { raw: grillText, origin: "ui", land: requestPathLand(deps.feedbackLand ?? {}, deps.ledgerPath, input.taskId, origin) });
       // impl-EP: previously unreported twin of the reconcile-path defect — the same raw write into
       // the daemon's checkout, on the `grilling` flip. Bridged the same way, and absent ⇒ unchanged.
       const entry: FeedbackEntry = setFeedbackStatus(
         deps.root,
         captured.id,
         "grilling",
-        deps.feedbackLand ? { land: deps.feedbackLand } : {},
+        deps.feedbackLand ? { land: requestPathLand(deps.feedbackLand, deps.ledgerPath, input.taskId, origin) } : {},
       );
 
-      const origin = bearerTokenId(req);
       appendPanelLedger(deps.ledgerPath, "panel.skill_invoked", input.taskId, origin, {
         skill: input.skill,
         mode: input.mode,
