@@ -34400,6 +34400,8 @@ export async function daemonCommand(
           log,
           ledgerLines: () => readLedgerLines(ledgerPath),
           requestReview: requestLandingReview,
+          // W1-T5460: drain the console decisions `rmd serve` queued under the same state root.
+          stateRoot: config.root,
         })
     : undefined;
   // ANTHROPIC-clean-env boot assertion (W1-T12b): checked once, before the loop
