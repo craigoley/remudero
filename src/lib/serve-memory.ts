@@ -315,18 +315,18 @@ export function workerThreads(): ReturnType<typeof trackWorkerThreads> {
 }
 
 async function threadHeap(thread: WorkerThread, timeoutMs: number): Promise<{ bytes: number } | { error: string }> {
-  const unsized = (why: string): { error: string } => ({ error: `thread ${thread.threadId} unsized: ${why}` });
-  if (typeof thread.getHeapStatistics !== "function") return unsized("this runtime has no worker.getHeapStatistics()");
+  const unsized = (why: string): string => `thread ${thread.threadId} unsized: ${why}`;
+  if (typeof thread.getHeapStatistics !== "function") return { error: unsized("this runtime has no worker.getHeapStatistics()") };
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<{ error: string }>((resolve) => {
-    timer = setTimeout(() => resolve(unsized(`no heap statistics within ${timeoutMs}ms`)), timeoutMs);
+    timer = setTimeout(() => resolve({ error: unsized(`no heap statistics within ${timeoutMs}ms`) }), timeoutMs);
     timer.unref?.();
   });
   try {
     const read = thread.getHeapStatistics().then((heap) => ({ bytes: heap.total_heap_size + heap.external_memory }));
     return await Promise.race([read, late]);
   } catch (e) {
-    return unsized(String((e as Error)?.message ?? e));
+    return { error: unsized(String((e as Error)?.message ?? e)) };
   } finally {
     clearTimeout(timer);
   }
@@ -499,19 +499,18 @@ export function startServeMemoryMonitor(opts: ServeMemoryMonitorOptions): () => 
     }
   };
 
-  const failed = (e: unknown): void => log(SERVE_MEMORY_SAMPLE_FAILED_STEP, { reason: String((e as Error)?.message ?? e) });
-
   const tick = (): void => {
     const holders = opts.holders();
     let sampled: ServeMemorySample | Promise<ServeMemorySample>;
     try {
       sampled = opts.sample(holders);
     } catch (e) {
-      failed(e);
+      log(SERVE_MEMORY_SAMPLE_FAILED_STEP, { reason: String((e as Error)?.message ?? e) });
       return;
     }
-    if (sampled instanceof Promise) void sampled.then((sample) => afterSample(sample, holders)).catch(failed);
-    else afterSample(sampled, holders);
+    if (sampled instanceof Promise) {
+      void sampled.then((sample) => afterSample(sample, holders)).catch((e) => log(SERVE_MEMORY_SAMPLE_FAILED_STEP, { reason: String((e as Error)?.message ?? e) }));
+    } else afterSample(sampled, holders);
   };
 
   const afterSample = (sample: ServeMemorySample, holders: readonly MemoryHolder[]): void => {
