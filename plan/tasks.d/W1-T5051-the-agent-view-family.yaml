@@ -1,7 +1,7 @@
 - id: W1-T5051
   title: "THE AGENT PAGES FOLD PANEL FACTS PER REQUEST AND THE CONSOLE RUNS A SECOND PROPOSAL ENGINE — add the agent view family (?part= proposals, history, settings, experiments, delegations, capabilities, follow-ups, promotions, actions, consequences, intent-plans) over panel.* facts with a persisted incremental fold per instance, so core is the only engine"
   repo: remudero
-  depends_on: []
+  depends_on: [W1-T5055]
   priority: 3
   type: implement
   verify: auto
@@ -15,6 +15,11 @@
     - src/lib/agent-view.ts
     - test/agent-view.test.ts
     - src/lib/read-model-worker.ts
+    - src/lib/read-model-db.ts
+    - test/read-model-db.test.ts
+    - src/lib/nav-badge-view.ts
+    - test/nav-badge-from-the-read-model.test.ts
+    - test/read-model-worker.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -30,6 +35,12 @@
     fact rows with seq > last_seq are folded, in chunks bounded by the pass budget, so a large delta spreads
     across passes. The nav-badge fold reuses it. Register it in read-model-worker.ts. /context stays a direct
     keyed GET.
+    Commit agent_fold state and its consumed fact position atomically through the existing fenced
+    SQLite adapter. A last observed sequence is not a consumed watermark; gaps, duplicates, interrupted
+    commits and lost writer leases must not discard earlier facts. Reuse the fold in the nav badge so
+    its count cannot claim newer decisions than the agent page. Persisted analytics/settings input
+    comes from W1-T5055; unknown source windows remain explicit and never become confident proposals.
+    Preserve repository/instance identity and current-account authorization at each serving boundary.
   acceptance:
     - claim: "each agent view part equals its operator agent route over the same ledger"
       proof: 'grep: test("W1-T5051: each agent view part equals its operator agent route over the same ledger" in test/agent-view.test.ts'
@@ -42,9 +53,10 @@
     fails. Drop a part: its parity check fails against the route.
   note: |
     HOLD RELEASED 2026-10-01 (dispatch_hold deleted): P4-T02, structured view freshness (ViewSource kind, phase, lagMs, etaMs, budgetMs), merged as #8271 (d6ff36c5f).
-    DISPATCH HOLD: waits for P4-T02 (structured view freshness: ViewSource kind, phase, lagMs, etaMs, budgetMs). A Phase 4 critical-path task is hand-built on a run-unfiled
-    branch with no plan id, so depends_on cannot name it. RELEASE: one plan amendment deleting
-    dispatch_hold once that merges (tracked in arch-plan.md, Phase 4).
+    SCOPE CORRECTION 2026-10-02: declare the persisted agent_fold adapter and nav-badge consumer/test
+    seams. W1-T5055 must ship first because this design consumes its persisted source snapshots.
+    This amendment files scope and build order only, not runtime credit. Existing released hold remains
+    released. Refresh both scope-time checks and the actual runnableCandidates frontier before build.
     Design: ~/Remudero/.session-scratch/arch-phase4-design.md §1.1, §7.1 and §10.
     Scope-time checks 2026-10-01: no run-W1-T5048..5066 branch on origin; no origin/main commit names
     these ids; no plan record on origin/main or an open PR head covers this change. Reserved from the

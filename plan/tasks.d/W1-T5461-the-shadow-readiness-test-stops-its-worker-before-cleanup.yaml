@@ -1,0 +1,33 @@
+- id: W1-T5461
+  title: "THE SHADOW-READINESS TEST STOPS ITS READ-MODEL WORKER BEFORE CLEANUP — its after-hook removes the scratch dir while the worker still writes, failing ENOTEMPTY and leaving a worker that hangs the whole coverage shard"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: PR #8823's coverage-shard (1/8) hung to its 2340 s bound"
+  files: [test/shadow-readiness-accrues-without-console-traffic.test.ts, test/the-shadow-readiness-test-stops-its-worker-before-cleanup.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    On 2026-10-03 PR #8823's coverage-shard (1/8) failed "a shadowed view is compared on the driver
+    cadence with no console request at all" in test/shadow-readiness-accrues-without-console-traffic.test.ts
+    with `ENOTEMPTY: directory not empty, rmdir '/tmp/rmd-shadow-drive-*/read-model'` from the test's
+    `scratch()` after-hook (`rmSync` while the read-model worker was still writing), then sat until the
+    shard was cancelled at the 2340 s bound — a SHARD HANG that names no test and turns a one-test
+    failure into a whole re-run. Main's CI passed the same test three times in the same hour, so it is a
+    race, not a deterministic failure.
+  design: |
+    Stop (await) the read-model worker and any driver timers the test starts before its scratch
+    directory is removed, and make the after-hook order explicit. The new test asserts the worker is
+    stopped before cleanup runs (e.g. a recorded lifecycle), so the race cannot recur silently.
+  acceptance:
+    - claim: "the shadow-readiness test stops its read-model worker before removing its scratch directory"
+      proof: "unit test: test/the-shadow-readiness-test-stops-its-worker-before-cleanup.test.ts"
+  falsifier: |
+    With the worker stop removed from the test's cleanup order, the new test fails (cleanup observed
+    before the worker stopped).

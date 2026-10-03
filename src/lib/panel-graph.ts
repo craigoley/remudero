@@ -52,7 +52,7 @@ import {
   type LedgerLines,
   type StatusProjection,
 } from "./status.js";
-import { buildDrainPreview, dispatchOrder, runnableCandidateIds, type DrainOpts, type DispatchFilterReason, type MergedSet } from "./drain.js";
+import { buildDrainPreview, dispatchOrder, runnableCandidateIds, workflowPaths, type DrainOpts, type DispatchFilterReason, type MergedSet } from "./drain.js";
 import {
   captureFeedback,
   expandFeedbackDraft,
@@ -81,7 +81,7 @@ import {
 } from "./trace.js";
 import { computeFeedbackProjectionSync, indexedDischargeGithub, taskOriginsOf, type FeedbackProjectionInput, type FeedbackProjectionOutcome } from "./console-projection-worker.js";
 import type { Route } from "./service.js";
-import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
+import { PANEL_TASK_ID, appendPanelLedger, bearerTokenId, isRecord, jsonAction, requestPathLand, sendJson } from "./panel-actions.js";
 import { appendDailyCostCeilingOverrideAudit } from "./ledger.js";
 import {
   clearDailyCostCeilingOverride,
@@ -428,6 +428,7 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
         }
       }
       const raw = input.replyTo !== undefined ? `[answer to feedback#${input.replyTo}] ${input.text}` : input.text;
+      const origin = bearerTokenId(req);
       const entry = captureFeedback(deps.root, {
         raw,
         attachments: input.attachments,
@@ -435,14 +436,14 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
         expansion: input.expansion,
         replyTo: input.replyTo,
         submissionKey: input.submissionKey,
+        land: requestPathLand(deps.feedbackLand ?? {}, deps.ledgerPath, input.replyTo ?? PANEL_TASK_ID, origin),
       });
       if (input.replyTo !== undefined) {
         setFeedbackStatus(deps.root, input.replyTo, "answered", {
           answeredBy: entry.id,
-          ...(deps.feedbackLand ? { land: deps.feedbackLand } : {}),
+          ...(deps.feedbackLand ? { land: requestPathLand(deps.feedbackLand, deps.ledgerPath, input.replyTo, origin) } : {}),
         });
       }
-      const origin = bearerTokenId(req);
       appendPanelLedger(deps.ledgerPath, "panel.feedback_submitted", entry.id, origin, {
         origin_field: entry.origin,
         reply_to: input.replyTo ?? null,
@@ -601,13 +602,13 @@ export function buildProposalDecisionRoute(deps: PanelGraphDeps): Route {
         return;
       }
       const status = input.decision === "accept" ? "accepted" : "rejected";
+      const origin = bearerTokenId(req);
       const updated = setFeedbackStatus(
         deps.root,
         input.id,
         status,
-        deps.feedbackLand ? { land: deps.feedbackLand } : {},
+        deps.feedbackLand ? { land: requestPathLand(deps.feedbackLand, deps.ledgerPath, input.id, origin) } : {},
       );
-      const origin = bearerTokenId(req);
       appendPanelLedger(deps.ledgerPath, input.decision === "accept" ? "panel.proposal_accepted" : "panel.proposal_rejected", input.id, origin, {
         proposal_pr: updated.proposal_pr,
       });
@@ -760,31 +761,49 @@ export interface FrontierRow {
 
 /**
  * Reason text for a task {@link runnableCandidates} declined via a {@link DispatchFilterReason}.
- * `"already-merged"` and `"verify-not-auto"` both return `undefined` — a done task is
- * `PlanProgress.done`, and a `verify:human` task is permanently parked, already rendered
- * elsewhere. `unmetDependencies` is re-consulted (a pure DAG walk) only to name which id(s).
+ * `"already-merged"`, `"verify-not-auto"` and `"credit-indeterminate"` return `undefined` — done,
+ * permanently parked, or unread (W1-T2675): no row. W1-T5410: every other reason names ITSELF, and
+ * the switch is exhaustive, so a new union arm fails the build here instead of inheriting the
+ * unmet-dependency sentence. `unmetDependencies` is re-consulted (a pure DAG walk) only to name ids.
  */
-function frontierFilterReason(
+export function frontierFilterReason(
   plan: Plan,
   task: Task,
   reason: DispatchFilterReason,
   isMerged: MergedSet,
 ): { kind: FrontierReasonKind; reason: string } | undefined {
-  if (reason === "already-merged") return undefined;
-  if (reason === "verify-not-auto") return undefined;
-  // Skipped, not guessed at (W1-T2675) — the caller's own doc names this Now-tab territory.
-  // Falling through to unmet-deps below would render a false "(none resolved)" sentence.
-  if (reason === "credit-indeterminate") return undefined;
-  if (reason === "blocked") {
-    return { kind: "blocked", reason: task.note ? `blocked — ${task.note}` : `${task.id}'s own status is blocked` };
+  const held = (text: string) => ({ kind: "blocked" as const, reason: text });
+  switch (reason) {
+    case "already-merged":
+    case "verify-not-auto":
+    case "credit-indeterminate":
+      return undefined;
+    case "blocked":
+      return held(task.note ? `blocked — ${task.note}` : `${task.id}'s own status is blocked`);
+    case "retired":
+      return held(`retired (${task.retirement ?? "retired"}) — a retirement record; it will never be built and does not clear on its own`);
+    case "foreign-repo":
+      return held(`targets repo ${task.repo}, not the repo this daemon builds — another daemon's to dispatch`);
+    case "operator-build":
+      return held(`edits ${workflowPaths(task).join(", ")}, which the fleet App cannot push — needs an operator build`);
+    case "held-pre-dispatch-refusal":
+      return held("the same pre-dispatch refusal was already escalated — held until the task contract changes");
+    case "continued-this-pass":
+      return held("continued earlier this drain pass — not re-offered until the next pass");
+    case "run-branch-already-pushed":
+      return held(`a run branch for ${task.id} is already pushed to origin — not re-dispatched while it stands`);
+    case "unmet-deps": {
+      const ids = unmetDependencies(plan, task, (t) => isMerged(t.id));
+      return {
+        kind: "unmet-dependency",
+        reason: `blocked on unmet dependenc${ids.length === 1 ? "y" : "ies"}: ${ids.join(", ") || "(none resolved)"}`,
+      };
+    }
+    default: {
+      const unhandled: never = reason;
+      throw new Error(`frontierFilterReason: unhandled dispatch filter reason ${String(unhandled)}`);
+    }
   }
-  // "unmet-deps"
-  const merged: MergedResolver = (t) => isMerged(t.id);
-  const ids = unmetDependencies(plan, task, merged);
-  return {
-    kind: "unmet-dependency",
-    reason: `blocked on unmet dependenc${ids.length === 1 ? "y" : "ies"}: ${ids.join(", ") || "(none resolved)"}`,
-  };
 }
 
 /** How many frontier rows GET /v1/plan/view renders absent an explicit `?frontier=<n>`. */
