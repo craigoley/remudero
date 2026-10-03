@@ -2863,6 +2863,11 @@ export interface components {
             writes: (string)[];
             /** Routes only core answers */
             coreOnly?: (string)[];
+            /** Whether the instance conversation writes (`inbox/thread/reply`, `inbox/thread/read`) are usable; `read-only` names why in `reason` (an old daemon without the contract). */
+            inbox?: {
+              mode: "read-write" | "read-only";
+              reason?: string;
+            };
           };
         })[];
         hostRegistry: "in_sync" | "drifted" | "unreadable" | "malformed";

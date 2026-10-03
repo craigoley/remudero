@@ -7230,6 +7230,15 @@ components:
                       views: {type: array, items: {type: string}}
                       writes: {type: array, items: {type: string}, description: "Under `prefix`, e.g. `control/pause`."}
                       coreOnly: {type: array, items: {type: string}, description: Routes only core answers, for every instance.}
+                      inbox:
+                        type: object
+                        description: >
+                          Whether the instance conversation writes (`inbox/thread/reply`, `inbox/thread/read`) are
+                          usable; `read-only` names why in `reason` (an old daemon without the contract).
+                        required: [mode]
+                        properties:
+                          mode: {type: string, enum: [read-write, read-only]}
+                          reason: {type: string}
             hostRegistry: {type: string, enum: [in_sync, drifted, unreadable, malformed]}
             drift:
               type: object
