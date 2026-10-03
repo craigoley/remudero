@@ -52,7 +52,7 @@ async function codeOf(promise: Promise<unknown>): Promise<{ code: string; status
 
 // ── readShadowEvidence ──────────────────────────────────────────────────────────────────────────
 
-test("shadow evidence counts each run once, splits merge/block, and prices only from terminal verdict rows", async (t) => {
+test("W1-T4266: shadow evidence counts would-merge and would-block runs for an instance, each run once, priced only from terminal verdict rows", async (t) => {
   const dir = stateDirWith(t, [
     shadow("run-1", "would_merge", { reason: "clean" }),
     shadow("run-1", "would_merge"), // a repeat of the same run replaces, never double counts
@@ -184,7 +184,7 @@ function goLiveDeps(api: GoLiveApi, extra: Partial<GoLiveDeps> = {}): GoLiveDeps
   };
 }
 
-test("go-live opens a reviewable registry PR flipping only the target's mode, and audits the request", async () => {
+test("W1-T4266: go-live opens a registry pull request and returns it as the receipt, flipping only the target's mode and auditing the request", async () => {
   const { api, calls } = fakeApi();
   const deps = goLiveDeps(api);
   const receipt = await requestGoLive({ instance: "widgets", actor: "craig" }, deps);
@@ -230,7 +230,7 @@ test("go-live refuses its preconditions before touching GitHub", async () => {
   assert.equal(calls.length, 0);
 });
 
-test("go-live refuses an unknown, already-live, or under-proven instance without writing", async () => {
+test("W1-T4266: go-live refuses an instance that is not in shadow mode, an unknown one, or an under-proven one, without writing", async () => {
   for (const [instance, readRows, expected] of [
     ["ghost", threeRuns, { code: "instance_not_found", status: 404 }],
     ["core", threeRuns, { code: "instance_not_shadow", status: 409 }],
