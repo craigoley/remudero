@@ -22,16 +22,17 @@
  * W1-T5355: the first 50 rows named 2.6 MB of a 3-4 GB rss. Each worker thread this thread spawned
  * is a heap of its own ({@link readWorkerHeaps}), and the row's `unattributed_bytes` is what is
  * left; sustained low headroom with nothing to relieve fires incident-invariants.ts's own rule.
+ * W1-T5480: a thread that spawns threads of its own answers for their heaps over its port
+ * ({@link askNestedThreadHeaps}, {@link answerThreadHeaps}): the read-model worker's four.
  *
  * FALSIFIERS: test/serve-names-and-relieves-its-memory-pressure.test.ts,
- * test/serve-memory-names-where-rss-lives.test.ts.
+ * test/serve-memory-names-where-rss-lives.test.ts,
+ * test/serve-memory-sizes-the-threads-the-read-model-worker-spawns.test.ts.
  */
 
-import diagnosticsChannel from "node:diagnostics_channel";
 import { readFileSync } from "node:fs";
 import type { ServerResponse } from "node:http";
-import { basename, join } from "node:path";
-import type { Worker } from "node:worker_threads";
+import { join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { normalizedReadUrl } from "./console-snapshot-cache.js";
 import type { ConsoleSnapshotStore } from "./console-snapshot-store.js";
@@ -262,96 +263,16 @@ export interface HolderReading extends MemoryHolderSize {
   error?: string;
 }
 
-/** Node's own channel: published synchronously inside `new Worker(...)`, on the spawning thread. */
-export const WORKER_THREADS_CHANNEL = "worker_threads";
-export const WORKER_HEAP_PREFIX = "worker-heap:";
-/** BACKSTOP: a thread that has not answered its heap read by now is named unsized, so a busy thread never stalls the sample. */
-export const WORKER_HEAP_TIMEOUT_MS = 5_000;
-
-/** The slice of a `node:worker_threads` Worker a heap read needs. */
-export type WorkerThread = Pick<Worker, "threadId" | "getHeapStatistics" | "once">;
-/** A live thread, and where it was spawned: `<module>:<function>` of the frame that called `new Worker`. */
-export interface TrackedWorker {
-  kind: string;
-  thread: WorkerThread;
-}
-
-const SELF_MODULE = "serve-memory";
-/** `<module>:<function>` of the first frame outside node and this module: the call that spawned the thread. */
-export function spawnSite(stack: string | undefined): string {
-  for (const line of (stack ?? "").split("\n").slice(1)) {
-    const frame = /^\s*at (?:(.+?) \()?(.+?):\d+:\d+\)?$/.exec(line);
-    const module = frame ? basename(frame[2]).replace(/\.[cm]?[jt]s$/, "") : "";
-    // A source-mapped frame and import.meta.url can disagree on path and extension; the module name cannot.
-    if (!frame || frame[2].startsWith("node:") || module === SELF_MODULE) continue;
-    return `${module}:${frame[1] ?? "<module>"}`;
-  }
-  return "unknown";
-}
 
 /**
- * Every worker thread THIS thread spawns from now on, from Node's `worker_threads` channel. A thread
- * spawned inside another thread publishes on that thread's channel, so its heap is never sized here.
+ * W1-T5480: the worker-thread heap reads live in worker-heaps.ts, a leaf the read-model worker can
+ * import without pulling serve's modules into a cycle; re-exported here for serve and its tests.
  */
-export function trackWorkerThreads(channel = diagnosticsChannel.channel(WORKER_THREADS_CHANNEL)): { live(): TrackedWorker[]; stop(): void } {
-  const live = new Map<number, TrackedWorker>();
-  const onSpawn = (message: unknown): void => {
-    const thread = (message as { worker?: WorkerThread }).worker;
-    if (!thread) return;
-    const site: { stack?: string } = {};
-    Error.captureStackTrace(site);
-    const id = thread.threadId; // an exited Worker reads threadId -1, so the key is taken now
-    live.set(id, { kind: spawnSite(site.stack), thread });
-    thread.once("exit", () => void live.delete(id));
-  };
-  channel.subscribe(onSpawn);
-  return { live: () => [...live.values()], stop: () => void channel.unsubscribe(onSpawn) };
-}
-
-let processWorkerThreads: ReturnType<typeof trackWorkerThreads> | undefined;
-/** The one book for this thread, subscribed on first call: serve calls it before it spawns anything. */
-export function workerThreads(): ReturnType<typeof trackWorkerThreads> {
-  return (processWorkerThreads ??= trackWorkerThreads());
-}
-
-async function threadHeap(thread: WorkerThread, timeoutMs: number): Promise<{ bytes: number } | { error: string }> {
-  const unsized = (why: string): string => `thread ${thread.threadId} unsized: ${why}`;
-  if (typeof thread.getHeapStatistics !== "function") return { error: unsized("this runtime has no worker.getHeapStatistics()") };
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const late = new Promise<{ error: string }>((resolve) => {
-    timer = setTimeout(() => resolve({ error: unsized(`no heap statistics within ${timeoutMs}ms`) }), timeoutMs);
-    timer.unref?.();
-  });
-  try {
-    const read = thread.getHeapStatistics().then((heap) => ({ bytes: heap.total_heap_size + heap.external_memory }));
-    return await Promise.race([read, late]);
-  } catch (e) {
-    return { error: unsized(String((e as Error)?.message ?? e)) };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/**
- * Each live thread's committed heap plus its external memory, grouped as one `worker-heap:<kind>`
- * reading per spawn site with a part per thread. A thread that cannot be read is named in `error`
- * and counts 0 bytes, so its heap stays in `unattributed_bytes` rather than vanishing.
- */
-export async function readWorkerHeaps(workers: readonly TrackedWorker[], timeoutMs = WORKER_HEAP_TIMEOUT_MS): Promise<HolderReading[]> {
-  const heaps = await Promise.all(workers.map(async ({ kind, thread }) => ({ kind, threadId: thread.threadId, ...(await threadHeap(thread, timeoutMs)) })));
-  const readings = new Map<string, HolderReading & { parts: Record<string, { entries: number; bytes: number }> }>();
-  for (const heap of heaps) {
-    const name = `${WORKER_HEAP_PREFIX}${heap.kind}`;
-    const reading = readings.get(name) ?? { name, kind: "worker-heap" as const, entries: 0, bytes: 0, parts: {} };
-    const bytes = "bytes" in heap ? heap.bytes : 0;
-    reading.entries += 1;
-    reading.bytes += bytes;
-    reading.parts[`thread-${heap.threadId}`] = { entries: 1, bytes };
-    if ("error" in heap) reading.error = reading.error ? `${reading.error}; ${heap.error}` : heap.error;
-    readings.set(name, reading);
-  }
-  return [...readings.values()];
-}
+export {
+  answerThreadHeaps, askNestedThreadHeaps, readWorkerHeaps, spawnSite, THREAD_HEAPS_ANSWER, THREAD_HEAPS_REQUEST, trackWorkerThreads,
+  WORKER_HEAP_PREFIX, WORKER_HEAP_TIMEOUT_MS, WORKER_THREADS_CHANNEL, workerThreads,
+  type ThreadHeapsAnswer, type TrackedWorker, type WorkerHeapReading, type WorkerThread,
+} from "./worker-heaps.js";
 
 /** The `serve.memory` row's fields. A null limit/free/headroom means the cgroup was unreadable. */
 export interface ServeMemorySample {
