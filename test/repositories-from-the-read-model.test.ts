@@ -8,7 +8,7 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { fixedClock, systemClock } from "../src/lib/clock.js";
 import { daemonInstanceRegistryPath } from "../src/lib/deployer.js";
 import { pauseFilePath } from "../src/lib/fleet-control.js";
-import { createLedgerProjector, LEDGER_PROJECTOR_SCHEMA_VERSION, openProjectorReadModel } from "../src/lib/ledger-projector.js";
+import { createLedgerProjector, LEDGER_PROJECTOR_SCHEMA_VERSION, ledgerLineIdentity, openProjectorReadModel } from "../src/lib/ledger-projector.js";
 import { acquireLease, openReadModel, READ_MODEL_DB_DIR_ENV } from "../src/lib/read-model-db.js";
 import {
   createReadModelTicker,
@@ -18,6 +18,7 @@ import {
   type ReadModelInstanceState,
 } from "../src/lib/read-model-worker.js";
 import { buildRepoDashboardRoutes, type RepoDashboardResult } from "../src/lib/repo-dashboard-route.js";
+import { createRepoLedgerIndex } from "../src/lib/repo-ledger-index.js";
 import {
   createRepositoriesReadModelView,
   createRepositoriesSourcePublisher,
@@ -251,7 +252,8 @@ test("a repositories count diff is judged by the rows each id it counted", (t) =
   const dup = sample();
   assert.deepEqual(dup.map((d) => [d.path, d.classification]), [[`${base}.errorrate`, "dedupe"], [`${base}.runs7d.failed`, "dedupe"]], JSON.stringify(dup));
   // A failure no read-model row names: its count is real, though c-T2's duplicate is still explained.
-  const unnamed = JSON.stringify({ ts: iso(3_600_000), step: "verdict", run_id: "c9", task_id: "c-T9", verdict: "no_pr", repo: "craigoley/remudero" });
+  // A millisecond older than the newest row the projector read, so it sits inside its watermark whatever its hash.
+  const unnamed = JSON.stringify({ ts: iso(3_600_001), step: "verdict", run_id: "c9", task_id: "c-T9", verdict: "no_pr", repo: "craigoley/remudero" });
   writeFileSync(live, `${readFileSync(live, "utf8")}${unnamed}\n`);
   const failed = sample().find((d) => d.path === `${base}.runs7d.failed`)!;
   assert.equal(failed.classification, "real");
@@ -643,7 +645,7 @@ test("a cost row written seconds after the repositories build is no diff when le
 test("a cost row inside both windows that the view lacks is still a real repositories diff", (t) => {
   // The negative control: a row older than the view's own summary instant, missing from the view, is a wrong value.
   const f = fixture(t);
-  const missed = costRow(NOW - 3_600_000, "c-T7", "implement.done", 1_234);
+  const missed = costRow(NOW - 3_600_001, "c-T7", "implement.done", 1_234);
   const diffs = sampleLater(t, f, [], [missed], 20_000);
   const tokens = diffs.find((d) => d.path === "instances[instanceId=core].summary.repos[id=craigoley/remudero].telemetry.tokens7d");
   assert.equal(tokens?.classification, "real", JSON.stringify(diffs));
@@ -742,4 +744,58 @@ test("a PAUSE lifted after the repositories build is no diff when legacy replays
   const wrong = sample();
   assert.equal(wrong.diffs.find((d) => d.path === `${base}.actions[id=toggleonoff].path`)?.classification, "real", JSON.stringify(wrong.diffs));
   assert.deepEqual(wrong.inputs?.control, { core: "paused", console: "paused" }, JSON.stringify(wrong.inputs));
+});
+
+/** The core instance's projector watermark as a sample's `inputs.through` names it: the newest `repo_row` the fixture holds. */
+function fixtureWatermark(): RegExp {
+  return new RegExp(`^${iso(3_600_000).replace(/[.]/g, "[.]")}#-?\\d+$`);
+}
+
+test("a cost row stamped before the build but not yet read by the projector is no repositories diff", (t) => {
+  // Captured 2026-10-03T04:53:46Z: cache_read_tokens7d legacy 1889795718 vs view 1889581702, the residual 214016 exactly
+  // W1-T5350#review.reviewer@04:53:24.598, 22 s before the sample. The row was stamped before the summary's generated_at
+  // but the projector had not read it when the summary read its rows, so legacy at generated_at counted it alone.
+  const f = fixture(t);
+  createRepositoriesSourcePublisher({ stateDir: f.stateDir, instances: () => f.sources })();
+  const run = ticker(f);
+  t.after(() => run.release());
+  repositories(run.tick());
+  const live = join(f.stateDir, "ledger.ndjson");
+  writeFileSync(live, `${readFileSync(live, "utf8")}${costRow(NOW - 2_000, "W1-T5350", "review.reviewer", 214_016)}\n`);
+  run.at(NOW + 22_000);
+  const sampled = run.sample() as Sampled & { inputs?: { through?: Record<string, string> } };
+  assert.deepEqual(sampled.diffs.map((d) => [d.path, d.classification]), [], JSON.stringify(sampled.diffs));
+  assert.match(sampled.inputs?.through?.core ?? "", fixtureWatermark(), JSON.stringify(sampled.inputs));
+});
+
+test("a cost row inside the projector watermark that the view lacks is still a real repositories diff", (t) => {
+  // The negative control: stamped before the newest row the projector had read, so the projector had passed it; missing from the view is wrong.
+  const f = fixture(t);
+  createRepositoriesSourcePublisher({ stateDir: f.stateDir, instances: () => f.sources })();
+  const run = ticker(f);
+  t.after(() => run.release());
+  repositories(run.tick());
+  const live = join(f.stateDir, "ledger.ndjson");
+  writeFileSync(live, `${readFileSync(live, "utf8")}${costRow(NOW - 7_200_000, "c-T8", "review.reviewer", 214_016)}\n`);
+  run.at(NOW + 22_000);
+  const sampled = run.sample() as Sampled & { inputs?: { through?: Record<string, string> } };
+  const cache = sampled.diffs.find((d) => d.path === "instances[instanceId=core].summary.repos[id=craigoley/remudero].telemetry.cache_read_tokens7d");
+  assert.equal(cache?.classification, "real", JSON.stringify(sampled.diffs));
+  assert.match(cache!.reason, /a residual of 214016 no measured row explains \(c-T8#review\.reviewer@/);
+  assert.match(sampled.inputs?.through?.core ?? "", fixtureWatermark(), "the diff row names the watermark the row sat inside");
+});
+
+test("the repo ledger index reads only the rows through a projector watermark in its identity order", (t) => {
+  const dir = scratch(t, "repo-ledger-through");
+  const live = join(dir, "ledger.ndjson");
+  const at = NOW - 60_000;
+  const [older, a, b, newer] = [at - 1, at, at, at + 1].map((ms, i) => costRow(ms, `T-${i}`, "implement.done", 10 + i));
+  writeFileSync(live, [older, a, b, newer].map((line) => `${line}\n`).join(""));
+  const [low, high] = [a, b].sort((x, y) => (ledgerLineIdentity(x).h < ledgerLineIdentity(y).h ? -1 : 1));
+  const through = ledgerLineIdentity(low!);
+  const pass = createRepoLedgerIndex(WEEK_MS).refresh(live, NOW, { tsMs: through.tsMs, h: String(through.h) });
+  const names = (lines: string[]): unknown[] => lines.map((line) => (JSON.parse(line) as { task_id: string }).task_id).sort();
+  assert.deepEqual(pass.rows.map((row) => row.task_id).sort(), names([older, low!]), "a row sharing the watermark's millisecond is read only when its hash sorts at or before it");
+  assert.notEqual(high, low);
+  assert.equal(createRepoLedgerIndex(WEEK_MS).refresh(live, NOW).rows.length, 4, "no watermark reads every row");
 });
