@@ -2698,19 +2698,11 @@ export interface FollowupHarvest {
   fixRemeasurement?: { tasks: Task[]; github: ShippedGithub; now: number };
 }
 
-interface FixRemeasurementDeps {
-  readMergedPr?: (url: string) => unknown;
-  reportFix?: (message: string) => void;
-  symptomFs?: LedgerGrepFsDeps;
-  maxFixRows?: number;
-  maxFixBytes?: number;
-}
-
 // Equal windows around merge compare event counts; 1–7 days is the task's observation window.
 const FIX_REMEASURE_DAY_MS = 86_400_000;
 
 function readFixCorpus(stateDir: string, query: SymptomQuery, from: number, merged: number, now: number,
-  deps: FixRemeasurementDeps): { rows: Array<{ row: LedgerRecord; matched: boolean }>; reason?: string } {
+  deps: Parameters<typeof recordFollowupHarvest>[1]): { rows: Array<{ row: LedgerRecord; matched: boolean }>; reason?: string } {
   const fs = deps.symptomFs ?? realLedgerFs;
   const problems = new Set<string>();
   const pattern = new RegExp(query.pattern);
@@ -2748,7 +2740,7 @@ function readFixCorpus(stateDir: string, query: SymptomQuery, from: number, merg
     ...(problems.size > 0 ? { reason: [...problems].sort().join("; ") } : {}) };
 }
 
-function remeasureFixes(harvest: FollowupHarvest, deps: LedgerWriterDeps & FixRemeasurementDeps): void {
+function remeasureFixes(harvest: FollowupHarvest, deps: Parameters<typeof recordFollowupHarvest>[1]): void {
   const context = harvest.fixRemeasurement;
   if (context === undefined) return;
   const write = deps.writeLedger ?? appendLedger;
@@ -2952,7 +2944,13 @@ export function mineFollowups(records: LedgerRecord[], openTitles: string[] = []
 
 /** Append every {@link FollowupHarvest.harvestLines} entry so a later {@link mineFollowups} pass
  *  mints neither the candidate nor the dedup match again. Invoked ONLY on a real retro. */
-export function recordFollowupHarvest(harvest: FollowupHarvest, deps: LedgerWriterDeps & FixRemeasurementDeps): void {
+export function recordFollowupHarvest(harvest: FollowupHarvest, deps: LedgerWriterDeps & {
+  readMergedPr?: (url: string) => unknown;
+  reportFix?: (message: string) => void;
+  symptomFs?: LedgerGrepFsDeps;
+  maxFixRows?: number;
+  maxFixBytes?: number;
+}): void {
   const writeLedger = deps.writeLedger ?? appendLedger;
   for (const line of harvest.harvestLines) writeLedger(deps.ledgerPath, line);
   remeasureFixes(harvest, deps);
