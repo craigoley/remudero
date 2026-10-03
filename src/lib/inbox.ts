@@ -324,13 +324,14 @@ function deriveLegacyReferent(proposalId: string): string | undefined {
  * credited merged. Every one proposed repairing a proof on finished work, and each one cost an
  * operator decision to clear by hand.
  *
- * ONLY THE TWO ID SHAPES THAT CARRY A TASK ID. `proof-debt:<taskId>:<criterionIndex>` and
- * `verify-human:<taskId>` name theirs structurally. `followup:`/`adoption:`/`skill-draft:` ids are
+ * ONLY THE ID SHAPES THAT CARRY A TASK ID. `proof-debt:<taskId>:<criterionIndex>`,
+ * `verify-human:<taskId>` and `machine-judge:<taskId>` name theirs structurally. Other ids are
  * keyed on a run, a symbol or a content hash, so there is nothing to read and they are left alone
  * rather than guessed at.
  */
 export function deriveTaskReferent(proposalId: string): string | undefined {
-  return /^(?:proof-debt|verify-human):([A-Za-z0-9][A-Za-z0-9-]*?)(?::\d+)?$/.exec(proposalId)?.[1];
+  const match = /^(?:verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$|^proof-debt:([A-Za-z0-9][A-Za-z0-9-]*?)(?::\d+)?$/.exec(proposalId);
+  return match?.[1] ?? match?.[2];
 }
 
 /**
@@ -1207,16 +1208,20 @@ export function classifyProposal(
         `operator actually decides in; this row stays in the registry as a record, never deleted`,
     };
   }
-  const humanTaskId = /^verify-human:([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
-  const humanTask = humanTaskId ? ctx.plan.byId.get(humanTaskId) : undefined;
-  if (humanTask?.status === "blocked" && humanTask.retirement) {
+  const taskAskId = /^(?:verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
+  const taskAsk = taskAskId ? ctx.plan.byId.get(taskAskId) : undefined;
+  if (taskAsk?.status === "blocked" && taskAsk.retirement) {
     return {
       proposalId: proposal.id,
       state: "retired",
       reasons: [],
-      retiredReason: `${proposal.id}'s task ${humanTaskId} was explicitly ${humanTask.retirement} in the plan; its prior operator ask remains in history`,
+      retiredReason: `${proposal.id}'s task ${taskAskId} was explicitly ${taskAsk.retirement} in the plan; its prior operator ask remains in history`,
     };
   }
+  // A risk-judge escalation is not cleared by verify: auto alone: only the exact
+  // task's explicit retirement or authoritative merge credit resolves that ask.
+  const humanTaskId = /^verify-human:([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
+  const humanTask = humanTaskId ? ctx.plan.byId.get(humanTaskId) : undefined;
   // A current plan task that no longer requires human verification makes its old
   // verify-human proposal obsolete. Derive this only from a present, unheld task:
   // missing plan evidence or an explicit hold must leave the ask visible.

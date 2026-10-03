@@ -18,6 +18,7 @@ import {
   checkPlainMessage,
   machineTokens,
   plainInboxMessage,
+  plainSourceFingerprint,
   plainStorePath,
   plainTemplate,
   readPlainStore,
@@ -107,7 +108,7 @@ test("W1-T4087: every inbox item carries a plain message with the four parts", a
   const root = tmpRoot();
   seed(root, LIVE);
   // One item has a stored writer message; the rest fall back to their templates.
-  writeFileSync(plainStorePath(join(root, "state")), JSON.stringify({ "verify-human:W1-T235": CLEAN }));
+  writeFileSync(plainStorePath(join(root, "state")), JSON.stringify({ "verify-human:W1-T235": { ...CLEAN, sourceFingerprint: plainSourceFingerprint(LIVE[8]!) } }));
   const body = await getInbox(root);
   const items = (["ready", "drafting", "notReady", "declined"] as const).flatMap((lane) => body[lane] as Item[]);
   assert.equal(items.length, LIVE.length, "control: every live item is on the route");
