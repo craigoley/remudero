@@ -308,6 +308,9 @@ export interface NextRunnableOpts {
   /** W1-T4818: called for a `verify: auto` task whose every proof greps its own shard — a record
    *  with nothing for a worker to build. Observation only; the decline itself is the chain's. */
   onRecordTaskRouted?: (task: Task) => void;
+  /** W1-T5351: called for a task whose `files:` names a `.github/workflows/` path — the fleet App has
+   *  no `workflows` permission, so only an operator can build it. Observation only, like the above. */
+  onOperatorBuildRouted?: (task: Task) => void;
   /** Called once per task declined by one of the formerly-silent conditions, with the first-match
    *  reason (see {@link tallyDispatchFilters}). Observation only: it changes no task's eligibility. */
   onFiltered?: (task: Task, reason: DispatchFilterReason) => void;
@@ -484,7 +487,9 @@ export type DispatchFilterReason =
   // evidence of absence. TRAP: never write a semicolon inside this union — see the doc above.
   | "credit-indeterminate"
   | "held-pre-dispatch-refusal"
-  | "run-branch-already-pushed";
+  | "run-branch-already-pushed"
+  // W1-T5351: the task edits a workflow file, which the fleet App cannot push. Built by an operator.
+  | "operator-build";
 
 /** How many ids each bucket names before truncating — a count tells the operator something is
  *  wrong, ids tell him WHICH, and 8 keeps the line readable against today's largest bucket (18). */
@@ -522,6 +527,7 @@ export function tallyDispatchFilters(): {
     "credit-indeterminate": [],
     "held-pre-dispatch-refusal": [],
     "run-branch-already-pushed": [],
+    "operator-build": [],
   };
   const snapshot = (): IdleReasonTally =>
     (Object.keys(seen) as DispatchFilterReason[]).reduce((acc, r) => {
@@ -608,6 +614,15 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
   if (t.verify === "auto" && isRecordTask(t)) {
     opts.onRecordTaskRouted?.(t);
     opts.onFiltered?.(t, "verify-not-auto");
+    return false;
+  }
+  // W1-T5351: a task whose `files:` touches .github/workflows/ cannot be pushed by the fleet App
+  // (no `workflows` permission, by operator decision). Not lifted by `releasedIds` — release
+  // waives `verify: human`, not the missing permission. LIMIT: detection reads `files:` only, so a
+  // task naming its workflow in prose alone (W1-T3720) is still offered until its `files:` says so.
+  if (workflowPaths(t).length > 0) {
+    opts.onOperatorBuildRouted?.(t);
+    opts.onFiltered?.(t, "operator-build");
     return false;
   }
   if (t.status === "blocked") {
@@ -1328,6 +1343,24 @@ export function recordTaskRoutedLogger(
   };
 }
 
+/** W1-T5351: the `files:` entries under `.github/workflows/` — what the fleet App cannot push. */
+export function workflowPaths(t: Task): string[] {
+  return (t.files ?? []).filter((f) => f.trim().replace(/^\.\//, "").startsWith(".github/workflows/"));
+}
+
+/** W1-T5351: `recordTaskRoutedLogger`'s twin — one `dispatch.operator_build_routed` row per task id
+ *  per drain run, naming the workflow paths so an operator sees what to hand-build. */
+export function operatorBuildRoutedLogger(
+  seen: Set<string>,
+  log: (event: string, detail: Record<string, unknown>) => void,
+): (task: Task) => void {
+  return (t) => {
+    if (seen.has(t.id)) return;
+    seen.add(t.id);
+    log("dispatch.operator_build_routed", { task: t.id, paths: workflowPaths(t) });
+  };
+}
+
 export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}): Promise<DrainSummary> {
   if ((opts.laneCount ?? 1) >= 2) return runDrainLanes(plan, deps, opts);
 
@@ -1357,6 +1390,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
   const circuitEscalated = new Set<string>();
   // W1-T4818: one `dispatch.record_task_routed` line per record task per run, not one per pass.
   const routedRecordTasks = new Set<string>();
+  const routedOperatorBuilds = new Set<string>(); // W1-T5351: same once-per-run discipline.
   // W1-T4025: repeated attributable work is observed once per selection and handed to the
   // asynchronous judge after the current task settles. It never blocks the selected task.
   const lifetimePressureTasks = new Map<string, Task>();
@@ -1586,6 +1620,7 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
         }
       },
       onRecordTaskRouted: recordTaskRoutedLogger(routedRecordTasks, log),
+      onOperatorBuildRouted: operatorBuildRoutedLogger(routedOperatorBuilds, log),
       isLifetimeCapExceeded: deps.isLifetimeCapExceeded,
       // LIFETIME DISPATCH CAP (W1-T316/W1-T271): a legible ledger line every tick, with the
       // caller's legacy observation hook fired at most once per task id per drain run.
@@ -1708,6 +1743,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
   const circuitEscalated = new Set<string>();
   // W1-T4818: one `dispatch.record_task_routed` line per record task per run, not one per pass.
   const routedRecordTasks = new Set<string>();
+  const routedOperatorBuilds = new Set<string>(); // W1-T5351: same once-per-run discipline.
   // Lifetime pressure is a sensor, not a terminal refusal. Keep one task per pass and hand the
   // bounded set to the adaptive router after the pass so a judge/proposal failure cannot block a
   // healthy sibling or leave a half-written escalation behind.
@@ -1939,6 +1975,7 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
         }
       },
       onRecordTaskRouted: recordTaskRoutedLogger(routedRecordTasks, log),
+      onOperatorBuildRouted: operatorBuildRoutedLogger(routedOperatorBuilds, log),
       isLifetimeCapExceeded: deps.isLifetimeCapExceeded,
       onLifetimeCapExceeded: (t) => {
         log("dispatch.lifetime_pressure", { task: t.id });

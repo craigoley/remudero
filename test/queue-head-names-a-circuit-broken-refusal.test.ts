@@ -157,7 +157,7 @@ test("W1-T2415: the DispatchFilterReason union gains no CIRCUIT-BREAKER arm (W1-
     arms,
     // W1-T988 appends `foreign-repo`, in declaration order. The claim this test defends — that no
     // CIRCUIT-BREAKER arm was smuggled into the union — is unchanged and still asserted below.
-    ["already-merged", "verify-not-auto", "blocked", "retired", "unmet-deps", "continued-this-pass", "foreign-repo", "credit-indeterminate", "held-pre-dispatch-refusal", "run-branch-already-pushed"],
+    ["already-merged", "verify-not-auto", "blocked", "retired", "unmet-deps", "continued-this-pass", "foreign-repo", "credit-indeterminate", "held-pre-dispatch-refusal", "run-branch-already-pushed", "operator-build"],
     "the union also gains W1-T3959's 'held-pre-dispatch-refusal' (a terminal deterministic linter refusal held until its contract changes) — the breaker is still named through its own callback, not an arm here",
   );
   assert.equal(body.includes("circuit"), false, "and no circuit arm was smuggled in");
