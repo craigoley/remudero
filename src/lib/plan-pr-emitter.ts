@@ -15,8 +15,10 @@
  */
 
 import type { AcceptanceCriterion } from "./plan.js";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -503,31 +505,66 @@ export const TASK_ID_UNREADABLE_RE = /REQUIRED \(--require-open-prs\) but|could 
 const RED_BODY_PROOF_EXIT: Record<number, string> = { 1: "fails on this tree", 2: "does not parse as a proof", 3: "matches no tests", 5: "passes at origin/main too" };
 const CHECK_PROOF_STALE_EXIT = 5;
 
-/** Run a script the tree itself carries; a tree without it is a check that cannot run. */
-function runInTree(cwd: string, relPath: string, argv: string[]): PlanPrPreflightReading {
-  if (!existsSync(join(cwd, relPath))) return { status: null, output: `${relPath} is absent from the tree` };
+const LINT_PLAN_ARGV = [LINT_PLAN_SCRIPT];
+const TASK_ID_ARGV = [TASK_ID_SCRIPT, "--base", "origin/main", "--require-open-prs"];
+const SHARD_CENSUS_ARGV = ["--import", "tsx", "--test", "--test-reporter=tap", SHARD_CENSUS_TEST];
+const checkProofArgv = (proof: string): string[] => ["--import", "tsx", RUN_TASK_ENTRY, "check-proof", proof, "--base", "origin/main"];
+
+function inTreeEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, RMD_SELF_SYNC_DONE: "1" };
   delete env.NODE_TEST_CONTEXT; // a nested `node --test` under a test runner otherwise reports to the parent, not to stdout
-  const r = spawnSync(process.execPath, argv, { cwd, encoding: "utf8", maxBuffer: 1 << 26, env });
+  return env;
+}
+const absentFromTree = (relPath: string): PlanPrPreflightReading => ({ status: null, output: `${relPath} is absent from the tree` });
+const taskIdReading = (r: PlanPrPreflightReading): PlanPrPreflightReading =>
+  r.status === 1 && TASK_ID_UNREADABLE_RE.test(r.output) ? { ...r, status: null } : r;
+// A census run with no failing-test count is not a result (a load error exits 1 too).
+const shardCensusReading = (r: PlanPrPreflightReading): PlanPrPreflightReading =>
+  r.status === 1 && !/^# fail [1-9]/m.test(r.output) ? { ...r, status: null } : r;
+
+/** Run a script the tree itself carries; a tree without it is a check that cannot run. */
+function runInTree(cwd: string, relPath: string, argv: string[]): PlanPrPreflightReading {
+  if (!existsSync(join(cwd, relPath))) return absentFromTree(relPath);
+  const r = spawnSync(process.execPath, argv, { cwd, encoding: "utf8", maxBuffer: 1 << 26, env: inTreeEnv() });
   return { status: r.status, output: `${r.stdout ?? ""}\n${r.stderr ?? ""}` };
+}
+
+const execFileAsync = promisify(execFile);
+/** One awaited child process, read as a {@link PlanPrPreflightReading}: `spawnSync`'s status, never its stall (W1-T5521). */
+async function runChildAsync(file: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv): Promise<PlanPrPreflightReading> {
+  try {
+    const r = await execFileAsync(file, args, { cwd, encoding: "utf8", maxBuffer: 1 << 26, env });
+    return { status: 0, output: `${r.stdout}\n${r.stderr}` };
+  } catch (e) {
+    // execFile rejects only on a non-zero exit (a numeric code) or a child that never exited cleanly
+    // (a signal, a spawn error, the buffer cap): the latter is spawnSync's null status, a check that could not run.
+    const err = e as { code?: unknown; stdout?: string; stderr?: string };
+    return { status: typeof err.code === "number" ? err.code : null, output: `${err.stdout ?? ""}\n${err.stderr ?? ""}` };
+  }
+}
+async function runInTreeAsync(cwd: string, relPath: string, argv: string[]): Promise<PlanPrPreflightReading> {
+  if (!existsSync(join(cwd, relPath))) return absentFromTree(relPath);
+  return runChildAsync(process.execPath, argv, cwd, inTreeEnv());
 }
 
 /** The four checks that shell out, each run inside `cwd`; `checkProof` answers `rmd check-proof`'s exit status. */
 const defaultPreflightChecks = {
-  lintPlan: (cwd: string): PlanPrPreflightReading => runInTree(cwd, LINT_PLAN_SCRIPT, [LINT_PLAN_SCRIPT]),
-  taskIdExistence: (cwd: string): PlanPrPreflightReading => {
-    const r = runInTree(cwd, TASK_ID_SCRIPT, [TASK_ID_SCRIPT, "--base", "origin/main", "--require-open-prs"]);
-    return r.status === 1 && TASK_ID_UNREADABLE_RE.test(r.output) ? { ...r, status: null } : r;
-  },
-  shardCensus: (cwd: string): PlanPrPreflightReading => {
-    const r = runInTree(cwd, SHARD_CENSUS_TEST, ["--import", "tsx", "--test", "--test-reporter=tap", SHARD_CENSUS_TEST]);
-    // A run with no failing-test count is not a result (a load error exits 1 too).
-    return r.status === 1 && !/^# fail [1-9]/m.test(r.output) ? { ...r, status: null } : r;
-  },
-  checkProof: (cwd: string, proof: string): number | null => runInTree(cwd, RUN_TASK_ENTRY, ["--import", "tsx", RUN_TASK_ENTRY, "check-proof", proof, "--base", "origin/main"]).status,
+  lintPlan: (cwd: string): PlanPrPreflightReading => runInTree(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV),
+  taskIdExistence: (cwd: string): PlanPrPreflightReading => taskIdReading(runInTree(cwd, TASK_ID_SCRIPT, TASK_ID_ARGV)),
+  shardCensus: (cwd: string): PlanPrPreflightReading => shardCensusReading(runInTree(cwd, SHARD_CENSUS_TEST, SHARD_CENSUS_ARGV)),
+  checkProof: (cwd: string, proof: string): number | null => runInTree(cwd, RUN_TASK_ENTRY, checkProofArgv(proof)).status,
 };
 /** A test's stand-ins for any of {@link defaultPreflightChecks}. */
 export type PlanPrPreflightChecks = Partial<typeof defaultPreflightChecks>;
+/** The same four checks as awaited child processes, so the daemon loop keeps turning while they run. */
+const defaultPreflightChecksAsync = {
+  lintPlan: (cwd: string): Promise<PlanPrPreflightReading> => runInTreeAsync(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV),
+  taskIdExistence: async (cwd: string): Promise<PlanPrPreflightReading> => taskIdReading(await runInTreeAsync(cwd, TASK_ID_SCRIPT, TASK_ID_ARGV)),
+  shardCensus: async (cwd: string): Promise<PlanPrPreflightReading> => shardCensusReading(await runInTreeAsync(cwd, SHARD_CENSUS_TEST, SHARD_CENSUS_ARGV)),
+  checkProof: async (cwd: string, proof: string): Promise<number | null> => (await runInTreeAsync(cwd, RUN_TASK_ENTRY, checkProofArgv(proof))).status,
+};
+/** A test's stand-ins for any of {@link defaultPreflightChecksAsync}. */
+export type PlanPrPreflightAsyncChecks = Partial<typeof defaultPreflightChecksAsync>;
 
 function firstLineOf(output: string, status: number | null): string {
   const lines = output.split("\n").map((l) => l.trim()).filter(Boolean);
@@ -553,18 +590,52 @@ function shardProofs(text: string): string[] {
   return proofs;
 }
 
+/** The proofs `headText` declares that `baseText` (the shard at origin/main, if it exists there) does not. */
+function introducedProofs(headText: string, baseText: string | undefined): string[] {
+  const atBase = new Set(baseText === undefined ? [] : shardProofs(baseText));
+  return shardProofs(headText).filter((p) => !atBase.has(p));
+}
+const CHANGED_SHARDS_ARGS = ["diff", "--name-only", "--diff-filter=AM", "origin/main...HEAD", "--", PLAN_TASK_SHARD_PREFIX];
+
 /** Proofs this tree INTRODUCES in changed task shards (undefined when unreadable): a MERGED task's own proofs pass at
  *  base by construction, so a status edit to its shard (plan-reconcile) is not this PR's to discriminate. */
 function changedShardProofs(cwd: string): string[] | undefined {
-  const diff = spawnSync("git", ["diff", "--name-only", "--diff-filter=AM", "origin/main...HEAD", "--", PLAN_TASK_SHARD_PREFIX], { cwd, encoding: "utf8" });
+  const diff = spawnSync("git", CHANGED_SHARDS_ARGS, { cwd, encoding: "utf8" });
   if (diff.status !== 0) return undefined;
   const proofs: string[] = [];
   for (const rel of diff.stdout.split("\n").filter(Boolean)) {
     const base = spawnSync("git", ["show", `origin/main:${rel}`], { cwd, encoding: "utf8", maxBuffer: 1 << 26 });
-    const atBase = new Set(base.status === 0 ? shardProofs(base.stdout) : []);
-    proofs.push(...shardProofs(readFileSync(join(cwd, rel), "utf8")).filter((p) => !atBase.has(p)));
+    proofs.push(...introducedProofs(readFileSync(join(cwd, rel), "utf8"), base.status === 0 ? base.stdout : undefined));
   }
   return proofs;
+}
+async function changedShardProofsAsync(cwd: string): Promise<string[] | undefined> {
+  const diff = await runChildAsync("git", CHANGED_SHARDS_ARGS, cwd);
+  if (diff.status !== 0) return undefined;
+  const proofs: string[] = [];
+  for (const rel of diff.output.split("\n").filter(Boolean)) {
+    const base = await execFileAsync("git", ["show", `origin/main:${rel}`], { cwd, encoding: "utf8", maxBuffer: 1 << 26 }).then(
+      (r) => r.stdout,
+      () => undefined, // a failed `git show` (the shard is new on this tree) reads as no base, as the sync form's does
+    );
+    proofs.push(...introducedProofs(await readFile(join(cwd, rel), "utf8"), base));
+  }
+  return proofs;
+}
+
+const bodyProofsOf = (body: string): Set<string> => new Set(parseAcceptanceBlock(body).map((c) => c.proof.trim()).filter(Boolean));
+function sortBodyProof(proof: string, status: number | null, red: string[], unreadable: string[]): void {
+  if (status === 0) return;
+  if (status !== null && RED_BODY_PROOF_EXIT[status]) red.push(`PR-body proof ${JSON.stringify(proof)} ${RED_BODY_PROOF_EXIT[status]}`);
+  else unreadable.push(`PR-body proof ${JSON.stringify(proof)} could not be checked (check-proof exit ${status})`);
+}
+function sortShardProof(proof: string, status: number | null, red: string[]): void {
+  if (status === CHECK_PROOF_STALE_EXIT) red.push(`shard proof ${JSON.stringify(proof)} passes at origin/main too`);
+}
+function discriminationReading(red: string[], unreadable: string[], shardProofList: string[] | undefined): PlanPrPreflightReading {
+  if (shardProofList === undefined) unreadable.push("the changed task shards could not be read against origin/main");
+  if (red.length > 0) return { status: 1, output: red.join("\n") };
+  return unreadable.length > 0 ? { status: null, output: unreadable.join("\n") } : { status: 0, output: "" };
 }
 
 /** A PR-body proof is red on any non-pass; a changed shard's proof only when it already passes at origin/main —
@@ -572,19 +643,40 @@ function changedShardProofs(cwd: string): string[] | undefined {
 function proofDiscrimination(cwd: string, body: string, checkProof: (cwd: string, proof: string) => number | null): PlanPrPreflightReading {
   const red: string[] = [];
   const unreadable: string[] = [];
-  for (const proof of new Set(parseAcceptanceBlock(body).map((c) => c.proof.trim()).filter(Boolean))) {
-    const status = checkProof(cwd, proof);
-    if (status === 0) continue;
-    if (status !== null && RED_BODY_PROOF_EXIT[status]) red.push(`PR-body proof ${JSON.stringify(proof)} ${RED_BODY_PROOF_EXIT[status]}`);
-    else unreadable.push(`PR-body proof ${JSON.stringify(proof)} could not be checked (check-proof exit ${status})`);
-  }
-  const shardProofs = changedShardProofs(cwd);
-  if (shardProofs === undefined) unreadable.push("the changed task shards could not be read against origin/main");
-  for (const proof of new Set(shardProofs ?? [])) {
-    if (checkProof(cwd, proof) === CHECK_PROOF_STALE_EXIT) red.push(`shard proof ${JSON.stringify(proof)} passes at origin/main too`);
-  }
-  if (red.length > 0) return { status: 1, output: red.join("\n") };
-  return unreadable.length > 0 ? { status: null, output: unreadable.join("\n") } : { status: 0, output: "" };
+  for (const proof of bodyProofsOf(body)) sortBodyProof(proof, checkProof(cwd, proof), red, unreadable);
+  const shardProofList = changedShardProofs(cwd);
+  for (const proof of new Set(shardProofList ?? [])) sortShardProof(proof, checkProof(cwd, proof), red);
+  return discriminationReading(red, unreadable, shardProofList);
+}
+async function proofDiscriminationAsync(
+  cwd: string,
+  body: string,
+  checkProof: (cwd: string, proof: string) => Promise<number | null>,
+): Promise<PlanPrPreflightReading> {
+  const red: string[] = [];
+  const unreadable: string[] = [];
+  for (const proof of bodyProofsOf(body)) sortBodyProof(proof, await checkProof(cwd, proof), red, unreadable);
+  const shardProofList = await changedShardProofsAsync(cwd);
+  for (const proof of new Set(shardProofList ?? [])) sortShardProof(proof, await checkProof(cwd, proof), red);
+  return discriminationReading(red, unreadable, shardProofList);
+}
+
+/** Sorts each check's reading into the verdict: 0 is green, 1 a failure, anything else a check that could not run. */
+function preflightTally() {
+  const failures: PlanPrPreflightFinding[] = [];
+  const unreadable: PlanPrPreflightFinding[] = [];
+  return {
+    record(check: PlanPrPreflightCheck, reading: PlanPrPreflightReading): void {
+      if (reading.status === 0) return;
+      (reading.status === 1 ? failures : unreadable).push({ check, firstLine: firstLineOf(reading.output, reading.status) });
+    },
+    result: (): PlanPrPreflightResult => ({ ok: failures.length === 0, failures, unreadable }),
+  };
+}
+const threwReading = (e: unknown): PlanPrPreflightReading => ({ status: null, output: String((e as Error)?.message ?? e) });
+function prTitleReading(title: string): PlanPrPreflightReading {
+  const v = checkCommitMessage(title)[0];
+  return v ? { status: 1, output: `${v.rule}: ${v.message}` } : { status: 0, output: "" };
 }
 
 /**
@@ -595,27 +687,56 @@ function proofDiscrimination(cwd: string, body: string, checkProof: (cwd: string
  */
 export function planPrPreflight(input: { cwd: string; title: string; body: string }, checks: PlanPrPreflightChecks = {}): PlanPrPreflightResult {
   const d = { ...defaultPreflightChecks, ...checks };
-  const failures: PlanPrPreflightFinding[] = [];
-  const unreadable: PlanPrPreflightFinding[] = [];
+  const tally = preflightTally();
   const read = (check: PlanPrPreflightCheck, run: () => PlanPrPreflightReading): void => {
     let reading: PlanPrPreflightReading;
     try {
       reading = run();
     } catch (e) {
-      reading = { status: null, output: String((e as Error)?.message ?? e) };
+      reading = threwReading(e);
     }
-    if (reading.status === 0) return;
-    (reading.status === 1 ? failures : unreadable).push({ check, firstLine: firstLineOf(reading.output, reading.status) });
+    tally.record(check, reading);
   };
   read("lint-plan", () => d.lintPlan(input.cwd));
   read("task-id-existence", () => d.taskIdExistence(input.cwd));
   read("proof-discrimination", () => proofDiscrimination(input.cwd, input.body, d.checkProof));
-  read("pr-title", () => {
-    const v = checkCommitMessage(input.title)[0];
-    return v ? { status: 1, output: `${v.rule}: ${v.message}` } : { status: 0, output: "" };
-  });
+  read("pr-title", () => prTitleReading(input.title));
   read("shard-census", () => d.shardCensus(input.cwd));
-  return { ok: failures.length === 0, failures, unreadable };
+  return tally.result();
+}
+
+/** {@link planPrPreflight} with every check an awaited child process (W1-T5521): the same checks in the same
+ *  order, the same verdict, and a daemon loop that keeps turning for the minutes they take. */
+export async function planPrPreflightAsync(
+  input: { cwd: string; title: string; body: string },
+  checks: PlanPrPreflightAsyncChecks = {},
+): Promise<PlanPrPreflightResult> {
+  const d = { ...defaultPreflightChecksAsync, ...checks };
+  const tally = preflightTally();
+  const read = async (check: PlanPrPreflightCheck, run: () => PlanPrPreflightReading | Promise<PlanPrPreflightReading>): Promise<void> => {
+    let reading: PlanPrPreflightReading;
+    try {
+      reading = await run();
+    } catch (e) {
+      reading = threwReading(e);
+    }
+    tally.record(check, reading);
+  };
+  await read("lint-plan", () => d.lintPlan(input.cwd));
+  await read("task-id-existence", () => d.taskIdExistence(input.cwd));
+  await read("proof-discrimination", () => proofDiscriminationAsync(input.cwd, input.body, d.checkProof));
+  await read("pr-title", () => prTitleReading(input.title));
+  await read("shard-census", () => d.shardCensus(input.cwd));
+  return tally.result();
+}
+
+const unmaterialized = (commitSha: string, e: unknown): PlanPrPreflightResult => ({
+  ok: true,
+  failures: [],
+  unreadable: [{ check: "tree", firstLine: `${commitSha} could not be materialized: ${firstLineOf(String((e as Error)?.message ?? e), null)}` }],
+});
+function borrowNodeModules(repoDir: string, tree: string): void {
+  if (existsSync(join(repoDir, "node_modules"))) symlinkSync(join(repoDir, "node_modules"), join(tree, "node_modules"));
 }
 
 /** {@link planPrPreflight} on a commit no checkout has at HEAD (feedback-landing's `commit-tree` sha): a detached
@@ -627,14 +748,40 @@ export function planPrPreflightAtCommit(repoDir: string, commitSha: string, pr: 
     execFileSync("git", ["-C", repoDir, "worktree", "add", "--detach", "--quiet", tree, commitSha], { stdio: "pipe" });
   } catch (e) {
     rmSync(parent, { recursive: true, force: true });
-    return { ok: true, failures: [], unreadable: [{ check: "tree", firstLine: `${commitSha} could not be materialized: ${firstLineOf(String((e as Error)?.message ?? e), null)}` }] };
+    return unmaterialized(commitSha, e);
   }
   try {
-    if (existsSync(join(repoDir, "node_modules"))) symlinkSync(join(repoDir, "node_modules"), join(tree, "node_modules"));
+    borrowNodeModules(repoDir, tree);
     return planPrPreflight({ cwd: tree, ...pr }, checks);
   } finally {
     spawnSync("git", ["-C", repoDir, "worktree", "remove", "--force", tree], { stdio: "pipe" });
     rmSync(parent, { recursive: true, force: true });
+  }
+}
+
+/** {@link planPrPreflightAtCommit} for a daemon lane (the sweep's plan-PR rungs, W1-T5521): the worktree add, every
+ *  check and the removal are awaited child processes, so a ~290 s preflight no longer freezes every daemon timer. */
+export async function planPrPreflightAtCommitAsync(
+  repoDir: string,
+  commitSha: string,
+  pr: { title: string; body: string },
+  checks: PlanPrPreflightAsyncChecks = {},
+): Promise<PlanPrPreflightResult> {
+  const parent = await mkdtemp(join(tmpdir(), `${RMD_TMP_PREFIX}plan-pr-preflight-`));
+  const tree = join(parent, "tree");
+  try {
+    await execFileAsync("git", ["-C", repoDir, "worktree", "add", "--detach", "--quiet", tree, commitSha]);
+  } catch (e) {
+    await rm(parent, { recursive: true, force: true });
+    return unmaterialized(commitSha, e);
+  }
+  try {
+    borrowNodeModules(repoDir, tree);
+    return await planPrPreflightAsync({ cwd: tree, ...pr }, checks);
+  } finally {
+    // A failed removal is the sync form's ignored spawnSync status too: `rm` below still clears the tree.
+    await runChildAsync("git", ["-C", repoDir, "worktree", "remove", "--force", tree], repoDir);
+    await rm(parent, { recursive: true, force: true });
   }
 }
 

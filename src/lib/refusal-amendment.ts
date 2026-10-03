@@ -228,7 +228,7 @@ export interface RefusalAmendmentIo {
     prIntro: string;
     claim: string;
     proof: string;
-  }) => { prUrl: string };
+  }) => { prUrl: string } | Promise<{ prUrl: string }>;
   readonly nowIso: () => string;
 }
 
@@ -277,7 +277,7 @@ export async function draftRefusalAmendment(
     );
     if (amendedText === undefined) return { ...base, outcome: "text_drift" };
     const summary = refusals.map((r) => `criterion ${r.criterion} [${r.refusalClass}]: ${r.detail}`).join("\n");
-    const created = io.openAmendmentPr({
+    const created = await io.openAmendmentPr({
       branch,
       shardRelPath: shard.relPath,
       amendedText,
