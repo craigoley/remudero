@@ -74,9 +74,9 @@ export interface WorkerHomeSymlink {
 }
 
 /** W1-T505: the credential-only sibling of the operator's real `.claude` that a worker's `.claude`
- *  grant prefers. INVARIANT: {@link workerHomePlan} resolves the grant to `<realHome>/.claude-fleet`
- *  when it exists and to the wholesale `.claude` when it does not, so upgrading before the sibling is
- *  populated breaks no host. // Why: docs/forensics/worker-home.md#the-claude-grant. */
+ *  grant prefers when no explicitly provisioned shared child exists. {@link workerHomePlan}
+ *  uses the shared child first, then `<realHome>/.claude-fleet`, then the legacy `.claude`, so
+ *  upgrading before shared authority is provisioned preserves the existing grant. // Why: docs/forensics/worker-home.md#the-claude-grant. */
 export const WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH = ".claude-fleet";
 
 const claudeFleetSeedFsOps = { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, rmSync, chmodSync };
@@ -91,7 +91,9 @@ export function seedClaudeFleetCredentials(opts: {
 }): void {
   const f = { ...claudeFleetSeedFsOps, ...opts.fsImpl };
   const targetDir = join(opts.realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
-  if (f.existsSync(targetDir)) return;
+  // An explicitly provisioned shared child is the authority. Preserve existing private forks
+  // for recovery, but never create a new fork when this common store is available.
+  if (f.existsSync(sharedClaudeCredentialDir(opts.realHome)) || f.existsSync(targetDir)) return;
 
   let credential: Buffer;
   try {
@@ -265,8 +267,7 @@ export function workerHomePlan(opts: {
   const exists = opts.exists ?? existsSync;
   // W1-T505: the `.claude` grant prefers `<realHome>/.claude-fleet` over the wholesale `.claude`,
   // falling back to it when that sibling is absent.
-  const claudeCredentialDir = join(opts.realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
-  const narrowedClaudeTarget = exists(claudeCredentialDir) ? claudeCredentialDir : join(opts.realHome, CLAUDE_REL);
+  const narrowedClaudeTarget = workerClaudeCredentialDir(opts.realHome, exists);
 
   return {
     workerHome: opts.workerHome,
@@ -973,8 +974,25 @@ export function classifyCredentialSidecar(
 /** Where the non-darwin credential store lives — the path the CLI documents, and the SAME directory
  *  `WORKER_HOME_SYMLINKS` already grants into every per-run worker HOME (measured at spawn time: the
  *  grant materialises and the file is readable from inside the worker). */
+function sharedClaudeCredentialDir(realHome: string): string {
+  return join(realHome, CLAUDE_REL, "fleet-auth", "claude");
+}
+
+export function workerClaudeCredentialDir(
+  realHome: string,
+  exists: (path: string) => boolean = existsSync,
+): string {
+  // The parent .claude mount is already shared by the fleet containers. This optional private
+  // child shares both the credential and native primary/legacy refresh locks without granting
+  // the operator's surrounding history or App key into a worker HOME.
+  const shared = sharedClaudeCredentialDir(realHome);
+  if (exists(shared)) return shared;
+  const narrowed = join(realHome, WORKER_CLAUDE_CREDENTIAL_DIR_RELPATH);
+  return exists(narrowed) ? narrowed : join(realHome, CLAUDE_REL);
+}
+
 export function workerCredentialFilePath(realHome: string): string {
-  return join(realHome, ".claude", ".credentials.json");
+  return join(workerClaudeCredentialDir(realHome), ".credentials.json");
 }
 
 /** {@link classifyWorkerCredentialFile}'s verdict. `usable` carries the expiry when the file states

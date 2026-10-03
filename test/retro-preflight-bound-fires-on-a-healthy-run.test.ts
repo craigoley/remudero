@@ -11,7 +11,8 @@
 // any number, and never a real 20-minute wall clock.
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -26,8 +27,11 @@ import {
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-function options(timeout: number, totalBackstopMs?: number): Parameters<RetroPrepublishRunner>[2] {
-  return { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 1024 * 1024, timeout, env: { ...process.env },
+function options(timeout: number, totalBackstopMs?: number, env: NodeJS.ProcessEnv = process.env): Parameters<RetroPrepublishRunner>[2] {
+  // Only these synthetic -e scripts are excluded. The importing test process still covers the
+  // real runner and its watchdog. Coverage startup is not output from a talkative fixture.
+  return { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 1024 * 1024, timeout,
+           env: { ...env, NODE_V8_COVERAGE: "" },
            ...(totalBackstopMs === undefined ? {} : { totalBackstopMs }) };
 }
 
@@ -47,6 +51,23 @@ test("W1-T2803: a long but talkative run is NOT killed — the bound is on silen
   assert.equal(result.error, undefined, `a talkative run must not be terminated: ${result.error?.message ?? ""}`);
   assert.equal(result.status, 0);
   assert.match(result.stdout, /tick/);
+});
+
+test("retro timing fixtures exclude synthetic child coverage while preserving the parent runner coverage", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "rmd-test-retro-child-coverage-"));
+  const parentCoverage = process.env.NODE_V8_COVERAGE;
+  const inputEnv = { ...process.env, NODE_V8_COVERAGE: directory };
+  const result = await runRetroPrepublishCommand(
+    process.execPath,
+    ["-e", 'process.stdout.write(JSON.stringify({ coverage: process.env.NODE_V8_COVERAGE ?? null }))'],
+    options(5_000, undefined, inputEnv),
+  );
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0);
+  assert.deepEqual(JSON.parse(result.stdout), { coverage: "" });
+  assert.deepEqual(readdirSync(directory), [], "the real synthetic child must not emit coverage artifacts");
+  assert.equal(inputEnv.NODE_V8_COVERAGE, directory, "the supplied environment is not mutated");
+  assert.equal(process.env.NODE_V8_COVERAGE, parentCoverage, "the parent runner retains its coverage environment");
 });
 
 test("W1-T2803: a genuinely hung run is still terminated — the bound is re-shaped, never removed", async () => {

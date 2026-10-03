@@ -396,13 +396,51 @@ test("a cold generation that asked for a handoff while standby gets it once prom
 
 test("a handoff whose standby smoke read answers 503 is still aborted and the old generation keeps serving", async () => {
   const fleet = fakeFleet((slot) => ({ smoke503: slot.sha === "sha-2" }));
-  const { supervisor, logs } = decisionSupervisor(fleet);
+  let now = 0;
+  const { supervisor, logs } = decisionSupervisor(fleet, { clock: { now: () => (now += 1_000), iso: () => "" } as never, readyBoundMs: 5_000 });
   await supervisor.start();
   await supervisor.requestHandoff();
   assert.equal(logs.find((l) => l.step === "serve.handoff_aborted")?.extra?.criterion, "smoke /v1/status");
   assert.deepEqual(fleet.generations[1].killed, ["SIGKILL"], "the standby never served");
   assert.equal(supervisor.activeSha(), "sha-1");
   assert.deepEqual(fleet.generations[0].sent.map((m) => m.type), ["rmd.promote"], "the serving generation was never drained");
+});
+
+test("a recovering smoke read rechecks readiness and every route before promotion", async () => {
+  const fleet = fakeFleet();
+  let statusReads = 0;
+  const checked: string[] = [];
+  const { supervisor } = decisionSupervisor(fleet, {
+    get: async (socket, path) => {
+      if (socket !== "/sock/2") return fleet.get!(socket, path);
+      checked.push(path.split("?")[0]);
+      if (path === "/v1/status" && statusReads++ === 0) {
+        assert.equal(supervisor.activeSha(), "sha-1", "the old generation still owns the port");
+        return { status: 503, body: "warming" };
+      }
+      if (path.startsWith("/v1/ready") && statusReads === 1 && checked.filter((p) => p === "/v1/ready").length === 2)
+        return { status: 503, body: "readiness regressed" };
+      return fleet.get!(socket, path);
+    },
+  });
+  await supervisor.start();
+  await supervisor.requestHandoff();
+  assert.equal(supervisor.activeSha(), "sha-2");
+  assert.deepEqual(checked, ["/v1/ready", "/v1/version", "/v1/status", "/v1/ready", "/v1/ready", "/v1/version", "/v1/status", "/v1/views/versions"]);
+});
+
+test("a non-503 smoke failure is refused immediately", async () => {
+  const fleet = fakeFleet();
+  let refused = 0;
+  const { supervisor, logs } = decisionSupervisor(fleet, {
+    get: async (socket, path) => socket === "/sock/2" && path === "/v1/status"
+      ? (refused++, { status: 401, body: "unauthorized" }) : fleet.get!(socket, path),
+  });
+  await supervisor.start();
+  await supervisor.requestHandoff();
+  assert.equal(refused, 1);
+  assert.equal(supervisor.activeSha(), "sha-1");
+  assert.deepEqual(logs.find((l) => l.step === "serve.handoff_aborted")?.extra?.detail, { status: 401 });
 });
 
 test("a rollback to the previous slot is promoted even while its smoke read answers 503", async () => {
@@ -531,6 +569,27 @@ function realSupervisor(port: number, modes: Record<string, string>) {
   });
   return { supervisor, logs, exits };
 }
+
+test("a real standby that briefly answers 503 becomes ready before it replaces the active generation", { timeout: 120_000 }, async () => {
+  const port = await freePort();
+  const { supervisor, logs } = realSupervisor(port, { "sha-2": "status-warming" });
+  try {
+    await supervisor.start();
+    assert.equal((await hit(port, false, "GET")).sha, "sha-1");
+    const handoff = supervisor.requestHandoff();
+    while (supervisor.activeSha() === "sha-1" && !logs.some((l) => l.step === "serve.handoff_aborted")) {
+      const reply = await hit(port, false, "GET");
+      assert.equal(reply.status, 200, "the active generation serves throughout the standby wait");
+      await tick(10);
+    }
+    await handoff;
+    assert.equal(supervisor.activeSha(), "sha-2");
+    assert.equal(logs.some((l) => l.step === "serve.handoff_aborted"), false);
+    assert.equal((await hit(port, false, "GET")).sha, "sha-2");
+  } finally {
+    await supervisor.shutdown("test");
+  }
+});
 
 test("zero connection errors across three supervised swaps under load", { timeout: 120_000 }, async () => {
   const port = await freePort();
