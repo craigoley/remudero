@@ -2904,14 +2904,20 @@ async function* emptyUsagePrompt(untilClosed: Promise<void>): AsyncIterable<neve
   await untilClosed;
 }
 
-/** Keep a Linux file credential requiring native renewal alive long enough for the native CLI to refresh
- * it. This observes the CLI's atomic replacement; it never refreshes, copies, or logs a token. */
-async function waitForUsageCredentialRefresh(path: string, deps: {
+/** The bounded wait a usage probe gives the native CLI's credential renewal: the clock it reads, the
+ * sleep it polls with, and its upper bound. ONE shape, shared by {@link openUsageProbeSession}'s
+ * `context.refresh` and the waiter itself, rather than a second inline deps object literal
+ * (scripts/deps-interface-baseline.json holds that population to its ceiling). */
+export interface UsageCredentialRefreshWait {
   clock?: Clock;
   sleep?: (ms: number) => Promise<void>;
   maxWaitMs?: number;
-} = {}): Promise<void> {
-  const clock = deps.clock ?? systemClock;
+}
+
+/** Keep a Linux file credential requiring native renewal alive long enough for the native CLI to refresh
+ * it. This observes the CLI's atomic replacement; it never refreshes, copies, or logs a token. */
+async function waitForUsageCredentialRefresh(path: string, wait: UsageCredentialRefreshWait = {}): Promise<void> {
+  const clock = wait.clock ?? systemClock;
   const read = () => {
     let raw = "";
     const verdict = classifyWorkerCredentialFile(() => raw = readFileSync(path, "utf8"));
@@ -2923,10 +2929,10 @@ async function waitForUsageCredentialRefresh(path: string, deps: {
   // only when this file has a refresh credential; a valid bare access token cannot rotate.
   if (initial.kind !== "usable" || !initial.refreshable || initial.expiresAtMs === undefined ||
       initial.expiresAtMs > clock.now() + DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS) return;
-  const maxWaitMs = deps.maxWaitMs ?? 15_000;
+  const maxWaitMs = wait.maxWaitMs ?? 15_000;
   if (!Number.isFinite(maxWaitMs) || maxWaitMs < 0) throw new Error("invalid usage credential refresh wait bound");
   const deadline = clock.now() + maxWaitMs;
-  const sleep = deps.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const sleep = wait.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   for (;;) {
     const remaining = deadline - clock.now();
     if (remaining <= 0) throw new Error("usage credential refresh did not complete within its bounded wait");
@@ -2945,7 +2951,7 @@ async function waitForUsageCredentialRefresh(path: string, deps: {
  * this passes an async generator; converting `spawnWorker` itself is a separate decision (W1-T2516-adjacent). */
 export function openUsageProbeSession(
   runQuery?: UsageProbeQueryFn,
-  context: { realHome?: string; platform?: NodeJS.Platform; refresh?: Parameters<typeof waitForUsageCredentialRefresh>[1] } = {},
+  context: { realHome?: string; platform?: NodeJS.Platform; refresh?: UsageCredentialRefreshWait } = {},
 ): UsageProbeSession {
   // Guarded on the same condition spawnWorker uses: only a REAL session is refused under a test runner. An injected
   // `runQuery` creates no connection and is not what this stops.
