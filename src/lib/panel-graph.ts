@@ -52,7 +52,7 @@ import {
   type LedgerLines,
   type StatusProjection,
 } from "./status.js";
-import { buildDrainPreview, dispatchOrder, runnableCandidateIds, type DrainOpts, type DispatchFilterReason, type MergedSet } from "./drain.js";
+import { buildDrainPreview, dispatchOrder, runnableCandidateIds, workflowPaths, type DrainOpts, type DispatchFilterReason, type MergedSet } from "./drain.js";
 import {
   captureFeedback,
   expandFeedbackDraft,
@@ -760,31 +760,49 @@ export interface FrontierRow {
 
 /**
  * Reason text for a task {@link runnableCandidates} declined via a {@link DispatchFilterReason}.
- * `"already-merged"` and `"verify-not-auto"` both return `undefined` — a done task is
- * `PlanProgress.done`, and a `verify:human` task is permanently parked, already rendered
- * elsewhere. `unmetDependencies` is re-consulted (a pure DAG walk) only to name which id(s).
+ * `"already-merged"`, `"verify-not-auto"` and `"credit-indeterminate"` return `undefined` — done,
+ * permanently parked, or unread (W1-T2675): no row. W1-T5410: every other reason names ITSELF, and
+ * the switch is exhaustive, so a new union arm fails the build here instead of inheriting the
+ * unmet-dependency sentence. `unmetDependencies` is re-consulted (a pure DAG walk) only to name ids.
  */
-function frontierFilterReason(
+export function frontierFilterReason(
   plan: Plan,
   task: Task,
   reason: DispatchFilterReason,
   isMerged: MergedSet,
 ): { kind: FrontierReasonKind; reason: string } | undefined {
-  if (reason === "already-merged") return undefined;
-  if (reason === "verify-not-auto") return undefined;
-  // Skipped, not guessed at (W1-T2675) — the caller's own doc names this Now-tab territory.
-  // Falling through to unmet-deps below would render a false "(none resolved)" sentence.
-  if (reason === "credit-indeterminate") return undefined;
-  if (reason === "blocked") {
-    return { kind: "blocked", reason: task.note ? `blocked — ${task.note}` : `${task.id}'s own status is blocked` };
+  const held = (text: string) => ({ kind: "blocked" as const, reason: text });
+  switch (reason) {
+    case "already-merged":
+    case "verify-not-auto":
+    case "credit-indeterminate":
+      return undefined;
+    case "blocked":
+      return held(task.note ? `blocked — ${task.note}` : `${task.id}'s own status is blocked`);
+    case "retired":
+      return held(`retired (${task.retirement ?? "retired"}) — a retirement record; it will never be built and does not clear on its own`);
+    case "foreign-repo":
+      return held(`targets repo ${task.repo}, not the repo this daemon builds — another daemon's to dispatch`);
+    case "operator-build":
+      return held(`edits ${workflowPaths(task).join(", ")}, which the fleet App cannot push — needs an operator build`);
+    case "held-pre-dispatch-refusal":
+      return held("the same pre-dispatch refusal was already escalated — held until the task contract changes");
+    case "continued-this-pass":
+      return held("continued earlier this drain pass — not re-offered until the next pass");
+    case "run-branch-already-pushed":
+      return held(`a run branch for ${task.id} is already pushed to origin — not re-dispatched while it stands`);
+    case "unmet-deps": {
+      const ids = unmetDependencies(plan, task, (t) => isMerged(t.id));
+      return {
+        kind: "unmet-dependency",
+        reason: `blocked on unmet dependenc${ids.length === 1 ? "y" : "ies"}: ${ids.join(", ") || "(none resolved)"}`,
+      };
+    }
+    default: {
+      const unhandled: never = reason;
+      throw new Error(`frontierFilterReason: unhandled dispatch filter reason ${String(unhandled)}`);
+    }
   }
-  // "unmet-deps"
-  const merged: MergedResolver = (t) => isMerged(t.id);
-  const ids = unmetDependencies(plan, task, merged);
-  return {
-    kind: "unmet-dependency",
-    reason: `blocked on unmet dependenc${ids.length === 1 ? "y" : "ies"}: ${ids.join(", ") || "(none resolved)"}`,
-  };
 }
 
 /** How many frontier rows GET /v1/plan/view renders absent an explicit `?frontier=<n>`. */
