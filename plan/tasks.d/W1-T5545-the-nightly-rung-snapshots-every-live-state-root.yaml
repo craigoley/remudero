@@ -1,0 +1,61 @@
+- id: W1-T5545
+  title: "THE NIGHTLY RUNG SNAPSHOTS EVERY LIVE STATE ROOT — W1-T3677's state snapshot has never succeeded: it refuses whenever a fleet container runs (always), and its cron sets no RMD_STATE_DIR, so it reads ~/rmd-state, an empty decoy, while the real 1.4 GB ledger in ~/rmd-state2 has no backup"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: ledger-backup research (every nightly rung since 2026-09-27 logged STATE SNAPSHOT MISSED)"
+  plan_refs: [W1-T3677, W1-T234, W1-T5546, W1-T5514]
+  files: [deploy/host-update.sh, src/lib/ledger.ts, test/the-state-snapshot-actually-runs-on-this-host.test.ts, test/the-nightly-rung-snapshots-the-state-root-each-running-daemon-mounts.test.ts, test/a-derived-state-dir-with-no-ledger-beside-a-sibling-that-has-one-fails-the-rung.test.ts, test/a-snapshot-taken-with-the-fleet-live-trims-a-torn-ledger-tail.test.ts, test/a-ledger-that-grows-during-the-copy-is-re-copied.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-03 on origin/main 3e026b90, and read-only on the host. deploy/host-update.sh section 3a
+    (W1-T3677, #7437) runs `snapshotState(STATE_DIR/state, STATE_DIR/state-backups)` (src/lib/ledger.ts)
+    inside the fleet image on the nightly `--reclaim-only` rung (crontab `17 4 * * *`). It has three defects.
+    (1) It refuses while any fleet container is LIVE ("a live daemon may be mid-append"). The fleet runs
+        24/7, so ~/reclaim.log shows six runs, each "REFUSING state snapshot — a fleet container is RUNNING"
+        then "STATE SNAPSHOT MISSED — nothing under /home/craigoleyagent/rmd-state/state-backups is newer
+        than 48h".
+    (2) The cron line sets no RMD_STATE_DIR, so `STATE_DIR` falls back to `~/rmd-state`. That directory
+        has an EMPTY state/ and an empty state-backups/. The running containers mount
+        /home/node/Remudero from ~/rmd-state2 (remudero-daemon and remudero-serve; state/ is 1.4 GB with
+        392 `.gz` rotations at filing), ~/rmd-site-state (remudero-site-daemon) and /mnt/rmd/remudero-console-state
+        (remudero-console-daemon). The drift check (`find_sibling_with_marker`) runs only when state/ does
+        not exist. Here it exists and is empty, so the decoy passes.
+    (3) It covers one instance, and archives land beside the source, on the same disk (/dev/nvme0n1p1,
+        Azure disk remudero-data). W1-T5546 adds the off-host copy.
+    A live-safe copy is possible because rotations are immutable `.gz` files and the live ledger is
+    append-only. Only its tail can be torn, and W1-T5514 makes a rotation not lose rows.
+  design: |
+    1. Derive the state roots from the running containers' `/home/node/Remudero` mount sources (`docker
+       inspect`, the same data `--check-state-roots` parses), plus RMD_STATE_DIR when set. Snapshot every
+       instance into its own `<root>/state-backups`. A derived root whose state/ holds no ledger while a
+       sibling root's does fails the rung, naming both. That replaces the exists-only check.
+    2. Make `snapshotState` live-safe and drop the LIVE refusal. Copy the immutable `.gz` rotations first
+       and the live ledger last, trimmed to its final `\n`. Verify that every copied ledger line parses as
+       JSON. If the ledger's size or mtime changed during the copy, re-copy it (bounded attempts). Refuse
+       only on a detected race that outlasts the bound, never merely because a container runs.
+    3. Hard-link each rotation unchanged since the previous archive (same name, size and mtime) against
+       that archive, so keep-7 costs about one copy plus deltas, not 7 × 1.4 GB.
+    4. Update test/the-state-snapshot-actually-runs-on-this-host.test.ts. Its "drop the LIVE refusal and a
+       snapshot is taken beside a live container" falsifier inverts: a live container no longer refuses.
+  acceptance:
+    - claim: "the nightly rung snapshots the state root each running daemon mounts"
+      proof: "unit test: test/the-nightly-rung-snapshots-the-state-root-each-running-daemon-mounts.test.ts"
+    - claim: "a derived state dir whose state holds no ledger beside a sibling that does fails the rung"
+      proof: "unit test: test/a-derived-state-dir-with-no-ledger-beside-a-sibling-that-has-one-fails-the-rung.test.ts"
+    - claim: "a snapshot taken with the fleet live trims a torn ledger tail and every copied line parses"
+      proof: "unit test: test/a-snapshot-taken-with-the-fleet-live-trims-a-torn-ledger-tail.test.ts"
+    - claim: "a ledger that grows during the copy is re-copied, never published torn"
+      proof: "unit test: test/a-ledger-that-grows-during-the-copy-is-re-copied.test.ts"
+  falsifier: |
+    Restore the LIVE refusal and the rung over a fixture with a running container snapshots nothing.
+    Restore the `${HOME}/rmd-state` fallback with no mount derivation and the fixture's mounted root is
+    not snapshotted. Copy the live ledger without trimming and the torn-tail suite finds an unparseable
+    line.

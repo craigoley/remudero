@@ -12,7 +12,7 @@
   origin: "2026-10-02 approved Inbox follow-ups; live selected core Inbox cannot advertise conversations"
   plan_refs: [W1-T5049, W1-T5269]
   files: [src/lib/instance-inbox-contract.ts, src/lib/instance-gateway.ts, src/lib/instances-view.ts, src/lib/panel-graph.ts, test/instance-inbox-contract.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at ffb0108e54e35400ca3e93ec1b58c4339bbb1555: instances-view advertises

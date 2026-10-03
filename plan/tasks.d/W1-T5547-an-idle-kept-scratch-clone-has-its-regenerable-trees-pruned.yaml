@@ -1,0 +1,33 @@
+- id: W1-T5547
+  title: "AN IDLE KEPT SCRATCH CLONE HAS ITS REGENERABLE TREES PRUNED — a scratch unit W1-T5513 must keep (dirty, unbundleable) still holds coverage/ and node_modules/; /mnt/scratch/o's clones carry about 140 GB, ~28 GB of coverage/raw each"
+  repo: remudero
+  depends_on: [W1-T5513]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low
+  origin: "operator session 2026-10-03: /mnt/scratch research (PRUNE-ONLY fallback)"
+  plan_refs: [W1-T5513, W1-T4770]
+  files: [deploy/rmd-host-cleanup.sh, test/an-idle-kept-scratch-clone-has-its-regenerable-trees-pruned.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    W1-T5513's scratch pass keeps a unit it cannot prove saved: a dirty repo, an unreadable repo, or a
+    bundle that fails to verify. The operator research measured about 140 GB in /mnt/scratch/o's clones,
+    and the bulk is regenerable: each clone's coverage/raw is ~28 GB, plus a full node_modules. The
+    janitor's rule 3 already treats exactly node_modules and coverage as disposable
+    (`worktree_ignored_safe` in deploy/rmd-host-cleanup.sh). A unit kept for its source should not keep its
+    caches.
+  design: |
+    When the scratch pass KEEPS an idle unit for a repo reason (dirty, unbundleable or unreadable), but
+    never when it keeps it for a live process or a docker mount, it deletes each repo's top-level
+    `coverage/` and `node_modules/` directories through `act()`. A symlinked one is never followed, and
+    only the exact names are touched. It logs `PRUNE <path>: <bytes>`. `DRY_RUN=1` logs and changes
+    nothing. A unit kept as fresh or live is never pruned.
+  acceptance:
+    - claim: "an idle kept clone still has its coverage and node_modules pruned, while a live or fresh unit is not pruned, a symlinked node_modules is never followed, and source files are untouched"
+      proof: "unit test: test/an-idle-kept-scratch-clone-has-its-regenerable-trees-pruned.test.ts"
+  falsifier: |
+    Skip the prune branch. The suite's dirty idle clone keeps its coverage/ tree.

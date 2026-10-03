@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator session 2026-10-03: PR #8823's coverage-shard (1/8) hung to its 2340 s bound"
   files: [test/shadow-readiness-accrues-without-console-traffic.test.ts, test/the-shadow-readiness-test-stops-its-worker-before-cleanup.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

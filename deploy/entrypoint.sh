@@ -586,7 +586,7 @@ idle_starved_wait() {
       probe_mode=pr-board
       if [ "$i" -eq 6 ]; then probe_mode=full; fi
       probe_rc=0
-      bash "$TREE/deploy/idle-starved-probe.sh" "$slug" "$checkout" "$base_sha" "$CONFIG_ROOT/state" "$since" "$marker" "$TREE" "$probe_mode" &
+      bash "$TREE/deploy/idle-starved-probe.sh" "$slug" "$checkout" "$base_sha" "$CONFIG_ROOT/state" "$since" "$marker" "$TREE" "$probe_mode" "$daemon_engine_sha" &
       child_pid=$!
       wait "$child_pid" || probe_rc=$?
       child_pid=""
@@ -618,6 +618,9 @@ while :; do
   if [ "${RMD_IDLE_STARVED_SUPERVISED:-}" = "1" ]; then
     mkdir -p "$CONFIG_ROOT/state" || die "cannot prepare idle_starved state directory"
     date -u +%Y-%m-%dT%H:%M:%S.000Z > "$CONFIG_ROOT/state/idle-starved.marker" || die "cannot prepare idle_starved marker"
+    # Capture before the daemon loads code, not after it exits into quiet mode:
+    # a mounted checkout can advance during that run without refreshing the process.
+    daemon_engine_sha="$(git -C "$TREE" rev-parse --verify HEAD 2>/dev/null)" || daemon_engine_sha=""
   fi
   "$@" &
   child_pid=$!

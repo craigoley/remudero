@@ -1,0 +1,144 @@
+- id: W1-T5544
+  title: "A METADATA-ONLY BODY RED GETS ITS PROOF REPAIRED, NOT A QUESTION — 76 needs-human issues (51 PRs, about 121 issue-hours, 2026-09-26..2026-10-03) read 'the body red has no deterministic acceptance repair; scope or proof amendment is required'. Their gate logs show 32 proofs that pass at base and 29 trailer/body proof divergences. The second has a deterministic cure; the first is a test edit the fix lane may already make. And the metadata arm escalates BEFORE W1-T4943's stale-proof route can run"
+  repo: remudero
+  depends_on: [W1-T5542]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03 (coordinator follow-up): #8866 (a proof that passed at base; the operator made the test assert the new recorded state) and #8861 (unit-test proofs whose titles did not match; the operator renamed three tests to carry the claim text), both repaired by hand; operator ruling R1 (a repair round may edit the PR's test files)"
+  plan_refs: [W1-T4943, W1-T3434, W1-T3390, W1-T2272, W1-T4459, W1-T5032, W1-T5532, W1-T5534, W1-T5536]
+  files: [src/lib/sweep.ts, src/run-task.ts, src/lib/proof-amendment.ts, test/a-metadata-only-body-red-gets-its-proof-repaired-not-a-question.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    TODAY'S PATH. In runSweep's `case "blocked-fixable"` (src/lib/sweep.ts:11298):
+    - `metadataOnlyRed` (sweep.ts:9592) fires when every red required check is in `METADATA_RED_CHECKS`
+      (`commitlint`, `acceptance-author-gate`, `proof-discrimination`; sweep.ts:9579).
+    - It calls `repairMetadata`, which is `repairPrMetadata` (src/run-task.ts:4901). Its only body cure is
+      `acceptanceGateBodyRepair` (run-task.ts:5171), and that handles just two defects, `no-header` and
+      `empty-proofs`.
+    - Anything else returns "the body red has no deterministic acceptance repair; scope or proof amendment is
+      required" (run-task.ts:4938). The sweep then escalates and `break`s (sweep.ts:11384-11411).
+
+    THAT BREAK SHADOWS W1-T4943.
+    - W1-T4943's stale-proof arm (merged 2026-10-01, #8209) sits later in the same case (sweep.ts:11662): it
+      reads `proofDiscriminationEvidenceFromCheckLog`, sweep.ts:8389, then `dispatchPlanOnlyRepair`.
+    - A PR red ONLY on `proof-discrimination` is metadata-only, so it escalates at :11406 and never reaches
+      that arm.
+
+    MEASURED: the gate's own job log for every metadata red, read via the check-run → job-log API at the
+    escalated head. 79 check failures across the 76 issues:
+    - 32 `proof-discrimination: FAIL — N proof(s) pass at both PR head and merge base` (executed_stale). #8866 is
+      one: "1 proof(s) pass at both PR head and merge base … Remedy: replace each stale proof with one that
+      names behavior this PR changes".
+    - 29 `acceptance-author-gate: REFUSED (trailer-body-proof-divergence)`.
+      `trailerBodyProofDivergenceRefusal` (scripts/acceptance-author-gate.mjs:400) refuses a trailered PR
+      whose body `## Acceptance` names different proofs from the plan. The plan is authoritative: review
+      resolves a trailered PR's criteria from the plan at head (`criteriaForReview`,
+      scripts/proof-discrimination-gate.mjs:36-40; memory note run-branch-pr-review-reads-plan-not-body).
+      So the cure is deterministic: make the body's block equal the plan's criteria.
+    - 10 `acceptance-author-gate: REFUSED (proof-shape)`: a body proof that cannot execute, or a grep pattern
+      wrapped in quotes or backticks (`authorTimeProofShapeRefusal`, acceptance-author-gate.mjs:666;
+      `wrappedGrepPattern`, src/lib/review.ts:1440). A wrapped pattern has a deterministic unwrap.
+    - 7 `rule-15-split` and 1 `follow-up-implementation-trailer`. These are not proof repairs and stay out of
+      scope here (see design 6).
+
+    By lane: 45 issues were on `run-W1-T*` heads, 14 `run-unfiled`, 13 gardens. By author: 43 fleet App, 33
+    operator. The 45 run-task issues held 77.1 issue-hours.
+
+    THE BODY-EDIT EVENT. acceptance-author-gate.yml triggers on `pull_request` types
+    [opened, synchronize, reopened, edited]. So a body PATCH re-runs it, and the sweep already waits for that
+    ("awaiting a fresh edited-event verdict", sweep.ts:11394). A job RE-RUN would replay the old payload
+    (memory note acceptance-gate-reads-the-event-payload). proof-discrimination on a trailered PR reads the
+    PLAN at head, so a body edit cannot move it; only a new head or a plan amendment can.
+
+    THE WRITER W1-T3434 BUILT, AND WHY IT IS UNREACHABLE HERE.
+    - `requestProofAmendment` (src/lib/proof-amendment.ts:398) validates a worker's
+      `PROOF_AMENDMENT:` proposal (parser :42): byte-identical claim, the reviewer's grammar, discriminates
+      head from base, names evidence in the implementation diff. It then opens a plan-only, proof-only PR.
+    - But `proofAmendmentIneligibleReason` (:87) requires `reviewState === "success"` and `capped`, which a
+      gate-red PR never has (W1-T4943 rationale (2)).
+    - W1-T4943 rationale (3) is fixed by `claimForProof` (sweep.ts:8584).
+    - W1-T4943 rationale (4), the identity row debiting a strike, is fixed by W1-T5032.
+
+    THE OPERATOR'S TWO HAND FIXES ARE TEST-FILE EDITS INSIDE THE PR'S OWN SCOPE.
+    - #8866: assert the newly recorded state, so the named proof fails at base.
+    - #8861: rename tests so their titles carry the claim text, so a `unit test:` proof names a test that
+      exists.
+    - Neither touches `src/` beyond the diff, the plan, or `files:`. Operator ruling R1 allows a repair round
+      to edit the PR's test files.
+
+    NON-OVERLAP WITH W1-T5534 (a fix round that needs non-test scope files a `files:` amendment):
+    - F3 never edits `files:` and never stages a path outside the PR's current test files plus the task's
+      declared test paths. A worker that needs more reports W1-T5532's typed NEEDS_SCOPE, and B2b owns that.
+    - F3's plan writes are `proof:` scalars only, through W1-T3434's writer. B2b's are `files:` entries only.
+    - Both reuse proof-amendment.ts's write ports and never share a branch name: `proof-amendment/*` vs
+      `scope-amendment/*`.
+
+    depends_on W1-T5542 because the repair round's refusals must not count as strikes.
+
+    Rule 19: the arm ordering and routing (sweep.ts), the deterministic body cures and the repair mode
+    (run-task.ts), and the evidence-source eligibility (proof-amendment.ts) are three production files for
+    one concern. So the band is high, with band_meaning: span.
+  design: |
+    1. DETERMINISTIC BODY CURES FIRST, with no worker and no strike. `acceptanceGateBodyRepair`
+       (run-task.ts:5171) gains two defects:
+       - `trailer-body-proof-divergence`: for a trailered PR, replace the body's `## Acceptance` block with
+         the plan's criteria for that task, read at the PR head (the same resolver the gate uses), verbatim
+         claim and proof. A body with no task in the plan at head returns undefined.
+       - `proof-shape` caused ONLY by wrapped grep patterns: rewrite each to `wrappedGrepPattern(...).bare`.
+         Any other unparseable proof returns undefined.
+
+       `repairPrMetadata` writes the body through the existing REST path. The `edited` event re-runs the gate.
+       The disposed row records `metadata_repair_outcome: repaired`, with the existing per-head dedup.
+    2. ROUTE, DON'T ESCALATE. In sweep.ts's metadata arm, a body red that has no deterministic cure but
+       carries stale-proof evidence (`proofDiscriminationEvidenceFromCheckLog` non-empty and
+       `carriesTaskTrailer`) no longer escalates. It falls through to a new `proof-repair` route ahead of
+       W1-T4943's arm. Every other uncured metadata red keeps today's escalation, byte-identical.
+    3. PROOF-REPAIR ROUND (run-task.ts; a new FixMode `proof-repair` in prompt-render.ts's
+       `FIX_MODE_RULES`, src/lib/prompt-render.ts:307, alongside `proof-discrimination`).
+       - Inputs: the stale proofs with their claims (`claimForProof`), the gate's own log lines, and, for a
+         review-shaped red, the reviewer's "proof names no matching test" text.
+       - Stageable set: EXACTLY the PR's current changed paths under `test/` plus the task's declared `test/`
+         paths. Enforced by the harness commit's declared surface, and refused otherwise.
+       - Goal: each named plan proof exists and discriminates. The worker may rename a test so its title
+         carries the claim's distinctive words (#8861), or make a test assert the state this PR records so it
+         fails at base (#8866).
+       - Before push, the parent runs `rmd check-proof <proof> --base <merge-base>` for every named proof in
+         the round's worktree. It pushes only if each now passes at head and fails at base. Otherwise the
+         round is refused, as a refusal and not a strike (W1-T5542).
+    4. WHEN THE PLAN PROOF ITSELF IS WRONG. The round's report may instead carry a `PROOF_AMENDMENT:` block.
+       - `proofAmendmentIneligibleReason` gains an evidence-source path: with `evidence.source ===
+         "gate-log"`, the review-state and capped gates are replaced by "the gate log names these exact
+         proofs at this head".
+       - All other validation in `validateProofAmendmentProposal` (proof-amendment.ts:149) is unchanged.
+       - A valid proposal opens the existing proof-only plan-only PR. The implementation PR stands down
+         without a strike until it merges, then gets the existing guarded update-branch.
+       - Automation still never writes `satisfied_by`, a dropped criterion, or `kind:` (W1-T4943 (v)).
+    5. LADDER. Order: a proof-repair round refused twice at a head, or a refused amendment → W1-T4943's
+       `dispatchPlanOnlyRepair` flag (within MAX_PLAN_REPAIR_STRIKES) → the exhausted state, which
+       W1-T5536's ladder handles. No per-PR question is opened at any step.
+    6. OUT OF SCOPE, stated: `rule-15-split` (needs a split; W1-T2436's worker), `follow-up-implementation-trailer`,
+       `files:` amendments (W1-T5534), and operator-authored PRs' bodies beyond the two deterministic cures
+       in (1). The round runs only on fleet-authored heads (`isFleetAppAuthor`, sweep.ts:6164); an operator's
+       PR gets (1) and otherwise today's escalation.
+  acceptance:
+    - claim: "a trailered PR whose body proofs diverge from its plan gets its Acceptance block rewritten to the plan's criteria with no worker and no strike, and a wrapped grep pattern is unwrapped"
+      proof: "grep: test(\"W1-T5544: a diverged or wrapped body is cured deterministically in test/a-metadata-only-body-red-gets-its-proof-repaired-not-a-question.test.ts"
+    - claim: "a proof-discrimination-only red with stale-proof evidence reaches the proof-repair route instead of the metadata escalation"
+      proof: "grep: test(\"W1-T5544: a stale-proof metadata red is routed past the escalation in test/a-metadata-only-body-red-gets-its-proof-repaired-not-a-question.test.ts"
+    - claim: "the proof-repair round stages only the PR's test files and the task's declared test paths, and pushes only when every named proof passes at head and fails at base"
+      proof: "grep: test(\"W1-T5544: the repair round stages only test files and pushes only discriminating proofs in test/a-metadata-only-body-red-gets-its-proof-repaired-not-a-question.test.ts"
+    - claim: "a PROOF_AMENDMENT on gate-log evidence is eligible without a success review and opens one proof-only plan PR, while any other field edit is refused"
+      proof: "grep: test(\"W1-T5544: gate-log evidence makes a proof-only amendment eligible in test/a-metadata-only-body-red-gets-its-proof-repaired-not-a-question.test.ts"
+  falsifier: |
+    Four reverts, each turning a named case red:
+    - Restore the escalate-and-break for a proof-discrimination-only red: the routing case sees `deps.escalate`
+      called and no proof-repair dispatch.
+    - Drop the divergence cure: a trailer/body divergence fixture escalates "no deterministic acceptance repair".
+    - Widen the stageable set to the task's src files: the staging case commits a src path.
+    - Remove the evidence-source path: the amendment returns `ineligible: review-not-success`.
