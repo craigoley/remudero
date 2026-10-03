@@ -622,8 +622,7 @@ while :; do
     # a mounted checkout can advance during that run without refreshing the process.
     daemon_engine_sha="$(git -C "$TREE" rev-parse --verify HEAD 2>/dev/null)" || daemon_engine_sha=""
     daemon_engine_observer="$TREE"
-    # The host supervisor installs into daemon-install; Node runs the separate TREE.
-    # A declared but broken installation must remain an unreadable observation.
+    # Observe the separate host installation; a broken declaration must stay unreadable.
     if [ -e "$CONFIG_ROOT/daemon-install" ] || [ -L "$CONFIG_ROOT/daemon-install" ]; then
       daemon_engine_observer="$CONFIG_ROOT/daemon-install"
     fi
