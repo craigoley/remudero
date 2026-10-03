@@ -11203,7 +11203,9 @@ export async function runFixRung(opts: {
         commitCount: roundStartSha === undefined ? 0 : (deps.commitsAhead ?? commitsAhead)(opts.worktreePath, roundStartSha),
         report,
         worktreePath: opts.worktreePath,
-        declaredPaths: [...(opts.task.files ?? []), ...offeredCensusBaselines()],
+        // The prompt and pre-strike guard already permit repairs to the inherited PR diff.
+        // Use that same captured baseline here; a worker's newly added paths never enter it.
+        declaredPaths: [...(opts.task.files ?? []), ...(baselineDiffFiles ?? []), ...offeredCensusBaselines()],
         acceptance: opts.task.acceptance,
         ...options,
         assignmentId: fixResult.selectionAssignmentId,
