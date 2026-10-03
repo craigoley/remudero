@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Clock } from "../src/lib/clock.js";
 import { createReadModelWorker, READ_MODEL_SWITCH_RECHECK_MS, readModelStatusView, readModelSwitchesPath, type ReadModelBodyEntry } from "../src/lib/read-model-worker.js";
@@ -10,12 +10,27 @@ import { createShadowSampler, VIEW_SHADOW_DIFF_STEP, VIEW_SHADOW_SAMPLE_MS, with
 import type { ViewDefinition } from "../src/lib/views.js";
 
 const T0 = Date.parse("2026-10-01T03:00:00.000Z");
-type TestCtx = { after: (fn: () => void) => void };
+/** The prefix test/the-shadow-readiness-test-stops-its-worker-before-cleanup.test.ts reads the cleanup order by. */
+const SHADOW_CLEANUP_NOTE = "shadow-readiness cleanup:";
 
-function scratch(t: TestCtx, kind: string): string {
+/**
+ * W1-T5461: ONE after-hook owns the order. node:test runs `t.after` hooks first-registered-first and
+ * skips the rest once one throws, so a separate `rmSync` hook ran while the restarted worker still
+ * wrote (ENOTEMPTY) and the stop hook behind it never ran; the live thread held the shard open.
+ * The retries outlast the view thread's READ_MODEL_STOP_WAIT_MS terminate, which `stop()` does not await.
+ */
+function scratch(t: TestContext, kind: string): { dir: string; stopsFirst: (worker: { stop(): boolean }) => void } {
   const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  return dir;
+  const workers: Array<{ stop(): boolean }> = [];
+  t.after(() => {
+    for (const worker of workers) {
+      worker.stop();
+      t.diagnostic(`${SHADOW_CLEANUP_NOTE} worker stopped`);
+    }
+    rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
+    t.diagnostic(`${SHADOW_CLEANUP_NOTE} scratch removed`);
+  });
+  return { dir, stopsFirst: (worker) => void workers.push(worker) };
 }
 
 async function until(done: () => boolean, what: string): Promise<void> {
@@ -27,7 +42,7 @@ type Readiness = { view: string; requests: number; samples: number };
 const shownShadow = (entry: ReadModelBodyEntry | undefined): Readiness[] | undefined => (entry?.body.data as { shadow?: Readiness[] } | undefined)?.shadow;
 
 test("a shadowed view is compared on the driver cadence with no console request at all", async (t) => {
-  const stateDir = scratch(t, "shadow-drive");
+  const { dir: stateDir, stopsFirst } = scratch(t, "shadow-drive");
   writeFileSync(join(stateDir, "ledger.ndjson"), `${JSON.stringify({ ts: new Date(T0).toISOString(), step: "run.start", task_id: "W1-T1" })}\n`);
   mkdirSync(dirname(readModelSwitchesPath(stateDir)), { recursive: true });
   writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ projector: "on", views: { "read-model": "shadow", repositories: "serve" } }));
@@ -38,7 +53,7 @@ test("a shadowed view is compared on the driver cadence with no console request 
   };
   const logs: Array<[string, Record<string, unknown> | undefined]> = [];
   const handle = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], tickMs: 20, every, log: (step, extra) => void logs.push([step, extra]) });
-  t.after(() => handle.stop());
+  stopsFirst(handle);
   const legacy: ViewDefinition = { name: readModelStatusView.name, version: 1, compute: () => ({ data: { instances: [] }, sources: [] }) };
   const served: ViewDefinition = { name: "repositories", version: 1, compute: () => ({ data: { instances: ["differs"] }, sources: [] }) };
   const opts = withViewShadow(handle, { legacy: [legacy, served], readModel: handle, servedByDefault: [readModelStatusView.name] });
@@ -59,7 +74,7 @@ test("a shadowed view is compared on the driver cadence with no console request 
   assert.equal(timers.has(READ_MODEL_SWITCH_RECHECK_MS), false, "stopping the handle stops the driver");
 
   const again = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], tickMs: 20, every: () => () => {} });
-  t.after(() => again.stop());
+  stopsFirst(again);
   const posted: ReadModelBodyEntry[] = [];
   again.onBody((entry) => void (entry.view === "read-model" && posted.push(entry)));
   again.start();
