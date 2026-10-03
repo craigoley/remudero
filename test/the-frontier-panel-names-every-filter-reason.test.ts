@@ -11,11 +11,10 @@
  * it, and each test fails on its own there rather than the whole file failing to import.
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import * as panelGraph from "../src/lib/panel-graph.js";
-import type { DispatchFilterReason, MergedSet } from "../src/lib/drain.js";
+import { tallyDispatchFilters, type DispatchFilterReason, type MergedSet } from "../src/lib/drain.js";
 import type { Plan, Task } from "../src/lib/plan.js";
 
 type FrontierFilterReason = (
@@ -31,12 +30,10 @@ function frontierFilterReason(): FrontierFilterReason {
   return fn as FrontierFilterReason;
 }
 
-/** The union's arms read from source, the technique test/status-board.test.ts uses for this union. */
+/** The union's arms, read off `tallyDispatchFilters`'s snapshot — a `Record<DispatchFilterReason, …>`
+ *  the type-checker holds exhaustive, so a new arm lands here without this file being edited. */
 function dispatchFilterReasonArms(): DispatchFilterReason[] {
-  const drain = readFileSync(new URL("../src/lib/drain.ts", import.meta.url), "utf8");
-  const decl = drain.slice(drain.indexOf("export type DispatchFilterReason ="));
-  const body = decl.slice(0, decl.indexOf(";"));
-  return [...body.matchAll(/\|\s*"([a-z-]+)"/g)].map((m) => m[1]! as DispatchFilterReason);
+  return Object.keys(tallyDispatchFilters().snapshot()) as DispatchFilterReason[];
 }
 
 function task(id: string, extra: Partial<Task> = {}): Task {
