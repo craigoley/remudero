@@ -14,10 +14,16 @@
  */
 import { execFile, spawn } from "node:child_process";
 import { setPriority as osSetPriority } from "node:os";
+import { join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
-import { gardenLedgerBucket } from "./gardener.js";
+import { gardenLedgerBucket, type GardenerDeps } from "./gardener.js";
+import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { HOST_RESOURCE_MIN_INTERVAL_MS } from "./host-resource-gardener.js";
 import { OVERSEER_MIN_INTERVAL_MS } from "./gardener-overseer.js";
+import {
+  readCoverageShardLogsAsync, readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, runSelectorShadowGardener,
+  selectorShadowFlakeLedger,
+} from "./selector-shadow-gardener.js";
 import { SELF_SYNC_GUARD_ENV } from "./self-sync.js";
 
 /** The gardens the daemon runs off its loop, in the order its `gardens` list has always wired them. */
@@ -269,4 +275,72 @@ export function childGardenPassSpawn(
         });
       });
     });
+}
+
+/** The GitHub reads a selector-shadow pass makes; each absent one goes through the gh transport. */
+type SelectorShadowGhReads = NonNullable<Parameters<typeof readCoverageShardLogsAsync>[3]>;
+
+/** test-with-retry.mjs names a shard's first-pass failing files on this line (GitHub prefixes a timestamp). */
+const MAIN_FAILED_FILES = /^(?:\S+Z )?FLAKE-RETRY-FILES: retrying \d+ failed file\(s\)(?: uninstrumented)? — (.+)$/;
+
+/**
+ * W1-T5409: test files failing in main's own CI at a sha. On main the coverage shards skip their run
+ * (W1-T1033), so the failures are read from the eight `ci-shard (k/8)` jobs of the newest completed
+ * main run at that sha, through the same jobs/logs API the PR-run reader uses. No completed run is
+ * no result (`undefined`); a malformed or incomplete read throws, which the guard ledgers as
+ * `selector-shadow.base_unread`. A green run is `[]` without reading any job log.
+ */
+export function selectorShadowMainFailures(
+  owner: string, repo: string, io: SelectorShadowGhReads = {},
+): (baseSha: string) => Promise<readonly string[] | undefined> {
+  const readJson = io.readJson ?? ghJsonAsync;
+  const readText = io.readText ?? ((args: string[]) => ghTextAsync(args, { maxBuffer: 16 * 1024 * 1024 }));
+  return async (baseSha) => {
+    const listed = await readJson(["api", `repos/${owner}/${repo}/actions/workflows/ci.yml/runs?branch=main&head_sha=${baseSha}&per_page=20`,
+      "--jq", "{workflow_runs: [.workflow_runs[] | {id, status, conclusion}]}"]) as { workflow_runs?: Array<{ id?: number; status?: string; conclusion?: string | null }> } | null;
+    if (!listed || !Array.isArray(listed.workflow_runs) || listed.workflow_runs.some((r) => !Number.isInteger(r.id))) {
+      throw new Error(`selector shadow: GitHub returned no main CI runs for ${baseSha}`);
+    }
+    const run = listed.workflow_runs.find((r) => r.status === "completed" && r.conclusion !== "cancelled" && r.conclusion !== "skipped");
+    if (run === undefined) return undefined;
+    if (run.conclusion === "success") return [];
+    const body = await readJson(["api", `repos/${owner}/${repo}/actions/runs/${run.id}/jobs?per_page=100`]) as
+      { total_count?: number; jobs?: Array<{ id?: number; name?: string; status?: string; conclusion?: string | null }> } | null;
+    if (!body || !Array.isArray(body.jobs) || typeof body.total_count !== "number" || body.total_count > body.jobs.length) {
+      throw new Error(`selector shadow: incomplete job list for main run ${run.id}`);
+    }
+    const shards = body.jobs.filter((job) => /^ci-shard \([1-8]\/8\)$/.test(job.name ?? ""));
+    if (shards.length !== 8 || shards.some((job) => job.status !== "completed" || !Number.isInteger(job.id))) {
+      throw new Error(`selector shadow: main run ${run.id} lacks eight completed test shards`);
+    }
+    const files = new Set<string>();
+    for (const job of shards.filter((j) => j.conclusion === "failure")) {
+      for (const line of (await readText(["api", `repos/${owner}/${repo}/actions/jobs/${job.id}/logs`])).split(/\r?\n/)) {
+        const named = MAIN_FAILED_FILES.exec(line);
+        if (named) for (const file of named[1]!.split(", ")) if (file.trim()) files.add(file.trim());
+      }
+    }
+    return [...files].sort();
+  };
+}
+
+/** W1-T4439/W1-T5409: one selector-shadow pass as the daemon builds it — the PR runs, their changed
+ *  paths, and main's failures at each run's base sha, all read through `io` (absent: the gh transport). */
+export function selectorShadowGardenPass(
+  d: GardenerDeps, owner: string, repo: string, mintTaskId: (filingBranch: string) => string, io: SelectorShadowGhReads = {},
+): () => Promise<void> {
+  return async () => {
+    try {
+      const runs = await readSelectorShadowRunsAsync(owner, repo, undefined, {
+        readJson: io.readJson,
+        cachePath: join(d.stateDir, "selector-shadow-log-cache.json"),
+        warn: (message) => d.log("selector-shadow.cache_failed", { message }),
+        onFlakes: selectorShadowFlakeLedger(d.log),
+      });
+      await runSelectorShadowGardener(d, () => runs, (miss) => readSelectorShadowChangedPaths(owner, repo, miss, io.readJson), mintTaskId,
+        undefined, undefined, selectorShadowMainFailures(owner, repo, io));
+    } catch (e) {
+      d.log("selector-shadow.gardener_failed", { error: String((e as Error)?.message ?? e) });
+    }
+  };
 }
