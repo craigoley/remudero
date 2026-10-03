@@ -7,7 +7,7 @@
  * and a fake `gh`, posts one reply, and reads the ledger the route writes.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -18,6 +18,7 @@ import { appendThreadMessage, type ThreadIdentity } from "../src/lib/inbox-threa
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import * as panel from "../src/lib/panel-actions.js";
 import { createService } from "../src/lib/service.js";
+import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
@@ -66,9 +67,7 @@ function replyFixture(kind: string) {
     log: (step: string) => landLog.push(step),
   };
   const deps = { root: f.clone.dir, ledgerPath, issues: { close: () => undefined }, threadStorePath, feedbackLand };
-  const ledgerRows = () =>
-    readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
-  return { f, deps, counter, ghCalls, landLog, ledgerRows };
+  return { f, deps, counter, ghCalls, landLog };
 }
 
 async function postReply(deps: Parameters<typeof panel.buildEscalationReplyRoute>[0]): Promise<void> {
@@ -99,7 +98,8 @@ test("the console's POST /v1/escalation/reply lands its capture without running 
 test("an escalation reply ledgers plan_pr.preflight_skipped under the reply's task and the caller's origin", async () => {
   const fx = replyFixture("reply-ledgers");
   await postReply(fx.deps);
-  const rows = fx.ledgerRows();
+  // ledger-read-intent: live
+  const rows = readLedgerLines(fx.deps.ledgerPath);
   const skipped = rows.filter((r) => r.step === "plan_pr.preflight_skipped");
   assert.equal(skipped.length, 1, JSON.stringify(rows));
   assert.equal(skipped[0].task_id, TASK_ID);
