@@ -707,8 +707,22 @@ test("W1-T3611: a live pid in the live container still refuses the recycle — t
 const HOST_UPDATE_SCRIPT = join(REPO_ROOT, "deploy", "host-update.sh");
 const SHARED_RUNTIME_VARS_FILE = join(REPO_ROOT, "deploy", "runtime-env-vars.sh");
 
-function printDaemonRunEnvNames(scriptPath: string = HOST_UPDATE_SCRIPT): string[] {
-  const r = spawnSync("bash", [scriptPath, "--print-daemon-run"], { encoding: "utf8", cwd: REPO_ROOT });
+function printDaemonRunEnvNames(scriptPath: string = HOST_UPDATE_SCRIPT, extraEnv: Record<string, string> = {}): string[] {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}print-daemon-env-`));
+  const r = spawnSync("bash", [scriptPath, "--print-daemon-run"], {
+    encoding: "utf8",
+    cwd: REPO_ROOT,
+    env: {
+      ...process.env,
+      RMD_STATE_DIR: join(dir, "state-root"),
+      RMD_OP_DIR: join(dir, "op"),
+      RMD_CLAUDE_DIR: join(dir, "claude"),
+      RMD_CODEX_DIR: join(dir, "codex"),
+      RMD_CONTAINER_CONFIG_DIR: join(dir, "config"),
+      RMD_SCRATCH: "off",
+      ...extraEnv,
+    },
+  });
   assert.equal(r.status, 0, `--print-daemon-run failed: ${r.stderr}`);
   const out = r.stdout ?? "";
   const block = out.slice(out.indexOf("docker run -d --name remudero-daemon"), out.indexOf("./bin/rmd daemon"));
@@ -855,10 +869,31 @@ test("W1-T1069: both scripts read the same declared name list", () => {
   assert.deepEqual([...recycleFallback].sort(), [...sharedNames].sort(), "recycle-container.sh's fallback array must match deploy/runtime-env-vars.sh");
   assert.deepEqual([...hostUpdateFallback].sort(), [...sharedNames].sort(), "host-update.sh's fallback array must match deploy/runtime-env-vars.sh");
 
-  // And the static `-e` passthrough block host-update.sh prints must name every declared variable —
-  // exactly, so a name added to the list without a matching passthrough line is caught here too.
-  const printedNames = printDaemonRunEnvNames();
-  assert.deepEqual([...printedNames].sort(), [...sharedNames].sort(), "the printed passthrough names must match the declared list exactly");
+  assert.deepEqual(printDaemonRunEnvNames().sort(), [...sharedNames].sort(), "the default scratch-off launch must carry exactly the retained names");
+});
+
+test("The printed daemon launch includes derived names only with usable scratch mounts", () => {
+  const sharedSrc = readFileSync(SHARED_RUNTIME_VARS_FILE, "utf8");
+  const sharedNames = extractBashArray(sharedSrc, "RMD_DAEMON_RUNTIME_ENV_VARS");
+
+  // With scratch mounted and enabled, the launch prints retained and mount-derived variables.
+  // Compare both lists exactly, without widening the retained-variable contract checked above.
+  const scratch = scratchFixture();
+  const printedNames = printDaemonRunEnvNames(HOST_UPDATE_SCRIPT, scratch.env);
+  const derivedNames = extractBashArray(sharedSrc, "RMD_DERIVED_RUNTIME_ENV_VARS");
+  const expectedPrintedNames = [...sharedNames, ...derivedNames];
+  assert.equal(new Set(expectedPrintedNames).size, expectedPrintedNames.length, "retained and derived names must be distinct");
+  assert.deepEqual([...printedNames].sort(), expectedPrintedNames.sort(), "the printed launch names must match both declared lists exactly");
+  for (const extraEnv of [
+    { ...scratch.env, RMD_SCRATCH: "off" },
+    { ...scratch.env, RMD_SCRATCH_MOUNTS_FILE: join(scratch.root, "no-mounts-table") },
+  ]) {
+    assert.deepEqual(
+      printDaemonRunEnvNames(HOST_UPDATE_SCRIPT, extraEnv).sort(),
+      [...sharedNames].sort(),
+      "without usable scratch mounts the printed launch must carry exactly the retained names",
+    );
+  }
 });
 
 test("Git author names stay declared across every recycle surface", () => {
