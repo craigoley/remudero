@@ -62,3 +62,9 @@ export function spendRoleOf(row: Record<string, unknown>): SpendRole | undefined
 export function isProducedSpendRow(row: Record<string, unknown>): boolean {
   return spendAmountUsd(row) !== undefined && spendRoleOf(row) === "produced";
 }
+
+/** A cash-attributed producer receipt, including an unpriced one. Never infer billing from a
+ * model name or credit a restated verdict. Missing provider attribution stays outside this sum. */
+export function isCashSpendProducer(row: Record<string, unknown>): boolean {
+  return row.provider === "cash" && spendRoleOf(row) === "produced";
+}
