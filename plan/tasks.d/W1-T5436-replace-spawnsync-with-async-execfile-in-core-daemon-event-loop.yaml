@@ -1,0 +1,15 @@
+- id: W1-T5436
+  title: Replace spawnSync with async execFile in core daemon event loop
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/daemon.ts
+  acceptance:
+    - claim: Core daemon uses async execFile for execWhitelistedProof, ensureDeps, and grepFilesContaining, reducing event loop time
+      proof: "grep: execFile in src/lib/daemon.ts"
+  origin: architect
