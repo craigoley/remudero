@@ -139,8 +139,11 @@ test("W1-T4467: a fix round derives its subject from the first failing check and
       }),
     },
   });
-  assert.equal(prompts.length, 2);
-  assert.match(prompts[1]!.prompt, /Task: repair the check/);
+  // W1-T5325: the subject is derived on the first commit attempt, so no second (re-ask) dispatch runs
+  // and no missing-line refusal is logged; the re-ask prompt's content is covered by commitLineResume above.
+  assert.equal(prompts.length, 1);
+  assert.equal(rows.some((row) => row.step === "fix.commit_line_requested"), false);
+  assert.equal(rows.some((row) => row.step === "implement.harness_commit_refused"), false);
   assert.equal(messages.length, 1);
   assert.match(messages[0]!, /^fix: repair ci-gate on #4467\n\nHarness-derived subject:/);
   assert.equal(rows.find((row) => row.step === "implement.harness_commit")?.subject_source, "harness-derived");

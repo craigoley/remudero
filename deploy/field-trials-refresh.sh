@@ -4,7 +4,9 @@ set -euo pipefail
 umask 077
 
 REGISTRY="${RMD_INSTANCE_REGISTRY:-/home/craigoleyagent/rmd-state2/daemon-install/.remudero/daemon-instances.yaml}"
-MAX_PAGES="${RMD_FIELD_TRIALS_MAX_PAGES:-12}"
+# Eight requests per repository cover recent lists, one historical page, a deployment status and
+# one three-read PR detail. The collector keeps the total bound and reports deferred evidence.
+MAX_PAGES="${RMD_FIELD_TRIALS_MAX_PAGES:-24}"
 case "$MAX_PAGES" in ''|*[!0-9]*) echo "field-trials-refresh: invalid page bound" >&2; exit 2;; esac
 if (( MAX_PAGES < 1 || MAX_PAGES > 24 )); then echo "field-trials-refresh: page bound must be 1..24" >&2; exit 2; fi
 test -r "$REGISTRY" || { echo "field-trials-refresh: instance registry unreadable" >&2; exit 2; }
@@ -44,11 +46,12 @@ if ! flock -n 9; then echo "field-trials-refresh: another pass is active"; exit 
 IMAGE="$(docker inspect remudero-daemon --format '{{.Image}}')"
 test -n "$IMAGE" || { echo "field-trials-refresh: core image unavailable" >&2; exit 2; }
 # Review local evidence BEFORE GitHub collection: a remote outage cannot suppress the daily
-# routing review. Use the mounted runtime checkout, not the image's older /app experiment table.
+# routing review. Use the mounted installation checkout, whose main branch can satisfy the normal
+# freshness guard; serving generations are deliberately detached.
 docker run --rm --network none --volumes-from remudero-daemon \
   --mount "type=bind,src=$SITE/state,dst=/field-trials/site,readonly" \
   --mount "type=bind,src=$CONSOLE/state,dst=/field-trials/console,readonly" \
-  --workdir /home/node/Remudero/remudero --entrypoint /bin/sh "$IMAGE" \
+  --workdir /home/node/Remudero/daemon-install --entrypoint /bin/sh "$IMAGE" \
   -c 'umask 077; exec "$@"' routing-daily-review /usr/local/bin/node \
   --import tsx scripts/private-routing-daily-review.mjs \
   --source core=/home/node/Remudero/state --source site=/field-trials/site --source console=/field-trials/console \
@@ -70,7 +73,8 @@ else
   docker run --rm --network host --volumes-from remudero-daemon \
     --env "GH_APP_ID=$APP_ID" --env "GH_APP_INSTALLATION_ID=$INSTALLATION_ID" \
     --env "GH_APP_PRIVATE_KEY_PATH=$KEY_PATH" \
-    --workdir /home/node/Remudero/remudero --entrypoint /bin/sh "$IMAGE" \
+    --env RMD_FIELD_TRIALS_REPO_ROOT=/home/node/Remudero/daemon-install \
+    --workdir /home/node/Remudero/daemon-install --entrypoint /bin/sh "$IMAGE" \
     -c 'umask 077; exec "$@"' field-trials-refresh /usr/local/bin/node \
     --import tsx scripts/private-field-trials-case-files.mjs
 fi
@@ -81,8 +85,8 @@ docker run --rm --network host --volumes-from remudero-daemon \
   ${CASE_MOUNT[@]+"${CASE_MOUNT[@]}"} \
   --env "GH_APP_ID=$APP_ID" --env "GH_APP_INSTALLATION_ID=$INSTALLATION_ID" \
   --env "GH_APP_PRIVATE_KEY_PATH=$KEY_PATH" \
-  --workdir /home/node/Remudero/remudero --entrypoint /bin/sh "$IMAGE" \
-  -c 'umask 077; exec "$@"' field-trials-refresh /home/node/Remudero/remudero/bin/rmd field-trials \
+  --workdir /home/node/Remudero/daemon-install --entrypoint /bin/sh "$IMAGE" \
+  -c 'umask 077; exec "$@"' field-trials-refresh /home/node/Remudero/daemon-install/bin/rmd field-trials \
   --source core=craigoley/remudero --source site=craigoley/remudero-site --source console=craigoley/remudero-console \
   --ledger core=/home/node/Remudero/state --ledger site=/field-trials/site --ledger console=/field-trials/console \
   --out-dir /home/node/Remudero/state/field-trials --max-pages "$MAX_PAGES" \

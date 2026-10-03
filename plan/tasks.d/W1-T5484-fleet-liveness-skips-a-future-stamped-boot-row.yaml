@@ -1,0 +1,42 @@
+- id: W1-T5484
+  title: "FLEET LIVENESS SKIPS A FUTURE-STAMPED BOOT ROW — W1-T5407 flags a row stamped ahead of the ledger file's mtime with `ledger.future_stamp` but keeps it, and `judgeInstanceLiveness` still counts a 2027-10-14 `cli.invoked` daemon row as a boot inside every trailing window"
+  repo: remudero
+  depends_on: [W1-T5407]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low
+  origin: "operator session 2026-10-03: follow-up to W1-T5407 (PR #8902), five 2027-10-14 cli.invoked rows in the core ledger"
+  plan_refs: [W1-T5407, W1-T4601]
+  files: [src/lib/fleet-liveness.ts, test/fleet-liveness-skips-a-future-stamped-boot-row.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    W1-T5407 (PR #8902, open at d8a12865) makes `appendLedger` write a `ledger.future_stamp` row naming the
+    `run_id`, `claimed_ts` and `skew_ms` of any row stamped more than `LEDGER_FUTURE_STAMP_TOLERANCE_MS`
+    past the file's mtime. It keeps the flagged row. Readers that pick the newest row by `ts` still trust it.
+    The core ledger holds five such rows today, in rotation ledger.2026-10-03T16-39-41-924Z.ndjson.gz, all
+    `cli.invoked` from host 8f3e86a35d09 and stamped 2027-10-14T21:23-21:24Z. They are the verbs onboard,
+    alert-fix, daemon (run_id CLI-1823549018323), wipe-test and peek.
+    Grepping for newest-row readers that consume these rows leads to src/lib/fleet-liveness.ts.
+    `readLivenessRows` reads with `sinceTs`, which a future row always passes. `isBoot` counts a
+    `cli.invoked` row with `verb: daemon` as a boot. `judgeInstanceLiveness` then counts it in
+    `bootsLastHour` (`ms >= nowMs - LIVENESS_WINDOW_MS`) and in `bootsSinceHeartbeat` (`ms > heartbeatMs`),
+    because no real heartbeat can be newer than 2027. That pushes the instance toward
+    `MAX_BOOTS_WITHOUT_HEARTBEAT` (5) for as long as the row stays in the read. Its `newest()` helper would
+    likewise let a future-stamped heartbeat hide a dead instance. Other ts-ordered readers, such as
+    hand-run-census.ts session ordering and analytics-route.ts counts, aggregate rather than pick a newest
+    row, so they are out of scope here.
+  design: |
+    Add `ledger.future_stamp` to the `LIVENESS_ROW` pattern. In `judgeInstanceLiveness`, collect the
+    `run_id`s those rows name and drop every row carrying one before `newest`, `bootTimes` and the heartbeat
+    are computed. As a backstop, also drop any row whose `ts` is later than `nowMs` plus
+    `LEDGER_FUTURE_STAMP_TOLERANCE_MS`, so a row written before W1-T5407's flag existed is ignored too.
+  acceptance:
+    - claim: "a cli.invoked boot row whose run_id a ledger.future_stamp row names is not counted as a boot or used as a newest row by judgeInstanceLiveness, an unflagged row stamped beyond nowMs plus the tolerance is skipped as well, and real boots and heartbeats are counted as before"
+      proof: "unit test: test/fleet-liveness-skips-a-future-stamped-boot-row.test.ts"
+  falsifier: |
+    Remove the skip. The suite's instance, with one heartbeat at now minus 1 min and a flagged 2027 daemon
+    `cli.invoked` row, reports `bootsSinceHeartbeat` 1 and `bootsLastHour` 1 instead of 0.

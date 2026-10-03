@@ -1,0 +1,51 @@
+- id: W1-T5491
+  title: "A FINISHED REVIEW FREES ITS LANE AT ONCE — the review lane admits up to three reviews per light pass, but `startInFlightTicker` awaits `deps.sweepLight()` and `runSweepLightPass` awaits `Promise.all` over every admitted review, so no new review starts until the SLOWEST of the three posts. On 2026-10-03 the 18:28Z group's first review posted at 18:29Z and its lane sat idle until 18:44Z; the board reached 28 open PRs at about 6.5 reviews per hour"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03 19:00Z: 28 open PRs; ledger read of review.pending_posted / review.posted timing"
+  plan_refs: [W1-T2379, W1-T4732, W1-T2853]
+  files: [src/lib/sweep.ts, src/lib/daemon.ts, test/a-finished-review-frees-its-lane-at-once.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED on the live ledger, 2026-10-03 (review.pending_posted = start, review.posted = end):
+      group 17:57:34-17:57:58 -> posts 18:16:18, 18:16:29, 18:16:40
+      group 18:28:08-18:28:26 -> posts 18:29:23, 18:36:21, 18:39:46; next start 18:44:51
+      group 18:44:51-18:45:09 -> posts 18:49:24, 18:49:45, 18:50:46; next start 18:53:00
+    Starts are always synchronised in groups of at most `reviewLanes` (3) and the next group never
+    starts before the previous group's LAST post. A lane freed at 18:29:23 idled 15.5 min. From
+    17:00Z to 18:50Z about 13 reviews posted (~6.5/h) against roughly 6 new PRs/h plus a re-review on
+    every push and branch refresh, so any disruption leaves a backlog that never drains (28 open PRs at
+    18:46Z, green PRs from 16:18Z still unreviewed at 18:46Z).
+    W1-T4732 already lets overlapping light passes share admissions through
+    `lightPassSpawningReservations`, and W1-T2379 already detaches the fix rung's CI wait
+    (`detachFixWait`). The review itself is still awaited by the pass that admitted it, and the ticker
+    awaits the pass, so the overlap W1-T4732 provisions never happens in production.
+    Rule 19: the pass (sweep.ts) and the ticker that awaits it (daemon.ts) are two production files for
+    one concern, so the band is high with band_meaning: span.
+  design: |
+    1. In `runSweepLightPass`, an admitted spawning review runs detached: the pass returns once every
+       PR's disposition is recorded, and the review's own promise releases its reservation
+       (`lightPassSpawningReservations`, `lightPassReservedHeads`) in its `finally`. Throw containment and
+       the `sweep.post_review.*` rows are unchanged.
+    2. The in-flight ticker's next light pass therefore admits into any lane freed since the last pass,
+       bounded by the same adaptive width (W1-T2853) minus live reservations. Never more than
+       `reviewLanes` reviews in flight across passes.
+    3. Shutdown/STOP: the daemon's existing drain awaits the detached review set before exiting, so a
+       restart never abandons a half-posted review.
+  acceptance:
+    - claim: "with three admitted reviews where one finishes early, the next light pass admits a fourth review before the slowest of the three posts, and never more than the review width are in flight"
+      proof: "grep: test(\"W1-T5491: a freed review lane is refilled before the slowest review posts in test/a-finished-review-frees-its-lane-at-once.test.ts"
+    - claim: "the daemon's drain waits for detached reviews before a freshness or STOP exit"
+      proof: "grep: test(\"W1-T5491: a stop drains detached reviews before exiting in test/a-finished-review-frees-its-lane-at-once.test.ts"
+  falsifier: |
+    Restore the pass's await on its admitted reviews: the suite's fast review finishes, but the second
+    pass cannot start until the slow fake review resolves, so the fourth review starts after the slowest
+    post and the refill assertion fails.

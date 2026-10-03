@@ -644,6 +644,7 @@ export interface NowShadowLegacy {
   /** The task window's paths, computed only from the board groups. */
   derived: Record<string, string[]>;
   rows: LegacyRows;
+  orderRows: LegacyRows;
   sortKeys: Record<string, Record<string, ShadowLatest>>;
   from: Record<string, ShadowLatest>;
   inputs: { plan: string; probeAt: string; builtAt: string; windows: Record<"board" | "probe" | "spend", LegacyWindowRead> };
@@ -969,6 +970,7 @@ export function createNowView(opts: NowViewOptions): {
           ...Object.fromEntries(prs.map(([, path]) => [`${path}.queueClass`, [`${path}.disposition`]])),
         },
         rows: legacyRowIndex([...new Set([...rows, ...spent.rows])]),
+        orderRows: legacyRowIndex(rows),
         sortKeys: Object.fromEntries(groups.map((path) => [path, keys])),
         from,
         inputs: {

@@ -42,6 +42,7 @@ import type { IssueGateway, OpenIssue } from "../src/lib/escalate.js";
 import type { Mount } from "../src/lib/mounts.js";
 import type { Config } from "../src/lib/config.js";
 import type { SpawnWorkerArgs, WorkerResult } from "../src/lib/worker.js";
+import type { MergeConflictEvidence } from "../src/lib/merge-state.js";
 
 const GIT_ENV = {
   ...process.env,
@@ -290,6 +291,65 @@ test("runFixRung (criterion 1): a strike is REFUSED when the worktree content is
   assert.equal(stoodDown[0].extra?.strike, 2, "named as the strike that was about to be spent");
   assert.equal(stoodDown[0].extra?.reason, outcome.standDownReason);
 });
+
+for (const scenario of [
+  {
+    title: "a different conflict file set admits another repair on an unchanged real Git tree",
+    before: ["first.ts"], after: ["second.ts"], expectedSpawns: 2,
+  },
+  {
+    title: "comma-bearing conflict paths cannot alias a different repair gate",
+    before: ["first.ts,second.ts", "third.ts"], after: ["first.ts", "second.ts,third.ts"], expectedSpawns: 2,
+  },
+  {
+    title: "reordering the same conflict files preserves the unchanged-tree stand-down",
+    before: ["first.ts", "second.ts"], after: ["second.ts", "first.ts"], expectedSpawns: 1,
+  },
+]) {
+  test(`runFixRung: ${scenario.title}`, async () => {
+    const dir = initWorktree();
+    try {
+      const conflictFiles = (paths: string[]) => paths.map((path) => ({ path, oursDeleted: 1, theirsDeleted: 1 }));
+      const conflict: MergeConflictEvidence = { files: conflictFiles(scenario.before), oursLog: "ours", theirsLog: "theirs" };
+      const failedReview = fakeReview("failure", []);
+      let spawns = 0;
+      const outcome = await runFixRung({
+        ...fixRungBaseOpts(),
+        worktreePath: dir,
+        strikeCap: 2,
+        initialReview: failedReview,
+        mergeConflict: conflict,
+        deps: {
+          spawn: async () => {
+            spawns += 1;
+            // The next observation names a new gate while the actual local content is unchanged.
+            conflict.files = conflictFiles(scenario.after);
+            return result({ provider: "claude", sessionId: `s-${spawns}` });
+          },
+          waitForCiGreen: async () => "red",
+          runReview: async () => failedReview,
+          push: () => {},
+          issues: fakeIssueStore(),
+          ledgerPath: tmpLedgerPath(),
+          log: () => {},
+          say: () => {},
+          account: (r) => r,
+          readLiveState: async () => ({ ok: true, state: "OPEN" }),
+          captureWorktreeSnapshot: async () => captureWorktreeSnapshotViaGit(dir),
+        },
+      });
+      assert.equal(spawns, scenario.expectedSpawns);
+      assert.equal(outcome.strikes, scenario.expectedSpawns);
+      assert.equal(outcome.outcome, scenario.expectedSpawns === 1 ? "stood_down" : "escalated");
+      if (scenario.expectedSpawns === 1) {
+        assert.match(outcome.standDownReason ?? "", /first\.ts/);
+        assert.doesNotMatch(outcome.standDownReason ?? "", /\[object Object\]/);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
 
 test("runFixRung (criterion 2, tracked content): a strike whose worker changed TRACKED content still spends exactly as before", async () => {
   const spawnCalls: SpawnWorkerArgs[] = [];

@@ -3,7 +3,7 @@ import { createServer, get, type IncomingMessage, type Server } from "node:http"
 import type { AddressInfo } from "node:net";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fixedClock, type Clock } from "../src/lib/clock.js";
 import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
@@ -38,12 +38,47 @@ import { buildReadModelViewRoutes, type ViewBodyEntry, type ViewDefinition } fro
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
-type TestCtx = { after: (fn: () => void) => void };
+type TestCtx = Pick<TestContext, "after" | "diagnostic">;
+/** The prefix test/view-shadow-stops-its-workers-before-cleanup.test.ts reads the cleanup order by. */
+const VIEW_SHADOW_CLEANUP_NOTE = "view-shadow cleanup:";
+interface Cleanup {
+  closers: Array<[string, () => unknown]>;
+  dirs: string[];
+}
+const cleanups = new WeakMap<TestCtx, Cleanup>();
+
+/**
+ * ONE after-hook per test owns the order. node:test runs `t.after` hooks first-registered-first and
+ * skips the rest once one throws, so the `rmSync` hook `scratch` registered ran while a live
+ * read-model thread still wrote (ENOTEMPTY on `.../read-model`) and the stop registered behind it
+ * never ran; the live thread held coverage-shard (3/8) open to its bound, twice. Everything holding a
+ * scratch dir closes first, and the retries outlast the view thread's READ_MODEL_STOP_WAIT_MS terminate.
+ */
+function cleanupOf(t: TestCtx): Cleanup {
+  const known = cleanups.get(t);
+  if (known) return known;
+  const cleanup: Cleanup = { closers: [], dirs: [] };
+  cleanups.set(t, cleanup);
+  t.after(() => {
+    for (const [what, close] of cleanup.closers) {
+      close();
+      t.diagnostic(`${VIEW_SHADOW_CLEANUP_NOTE} ${what}`);
+    }
+    for (const dir of cleanup.dirs) rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
+    t.diagnostic(`${VIEW_SHADOW_CLEANUP_NOTE} scratch removed`);
+  });
+  return cleanup;
+}
 
 function scratch(t: TestCtx, kind: string): string {
   const dir = makeTempDir(kind);
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  cleanupOf(t).dirs.push(dir);
   return dir;
+}
+
+/** Runs `close` in the test's one cleanup hook, before any scratch dir is removed. */
+function closesFirst(t: TestCtx, what: string, close: () => unknown): void {
+  cleanupOf(t).closers.push([what, close]);
 }
 
 function steppedClock(start = T0): Clock & { advance(ms: number): void } {
@@ -67,7 +102,7 @@ function evidenceDb(t: TestCtx): ReadModelDb {
   writeFileSync(join(dir, "ledger.ndjson"), `${lines.join("\n")}\n`);
   const clock = fixedClock(T0);
   const db = openProjectorReadModel(scratch(t, "shadow-state"), "core", clock);
-  t.after(() => db.close());
+  closesFirst(t, "db closed", () => db.close());
   const got = acquireLease(db, { clock });
   if (!got.ok) throw new Error("lease");
   createLedgerProjector({ ledgerDir: dir, db, lease: got.lease, clock }).tick();
@@ -401,7 +436,7 @@ test("counters persist in the state dir file across a restart", (t) => {
   const clock = fixedClock(T0);
   const stateDir = scratch(t, "shadow-store");
   const db = openProjectorReadModel(stateDir, "core", clock);
-  t.after(() => db.close());
+  closesFirst(t, "db closed", () => db.close());
   const got = acquireLease(db, { clock });
   if (!got.ok) throw new Error("lease");
   const path = viewShadowPath(stateDir);
@@ -417,7 +452,7 @@ test("counters an older build kept in the view_shadow table migrate to the state
   const clock = fixedClock(T0);
   const stateDir = scratch(t, "shadow-migrate");
   const db = openProjectorReadModel(stateDir, "core", clock);
-  t.after(() => db.close());
+  closesFirst(t, "db closed", () => db.close());
   const got = acquireLease(db, { clock });
   if (!got.ok) throw new Error("lease");
   const old = { requests: 7, firstRequestMs: T0 - 2 * DAY, samples: 5, diffs: { legacy_horizon: 0, timing: 0, dedupe: 0, real: 0 }, streakSamples: 5, streakSinceMs: T0 - 2 * DAY, lastRealMs: null, streakKeys: [""] };
@@ -463,7 +498,7 @@ test("the worker compares a shadow sample off the main thread and the status vie
   const broken: ReadModelView = { name: "broken", version: 1, materialize: () => [{ key: "", data: 1, sources: [] }] };
   const status = (): Record<string, unknown> | undefined => posted.flatMap((m) => (m.type === "body" && m.entry.view === "read-model" ? [m.entry.body.data as Record<string, unknown>] : [])).at(-1);
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock, post: (m) => posted.push(m), views: [badge, broken, readModelStatusView] });
-  t.after(() => ticker.release());
+  closesFirst(t, "ticker released", () => ticker.release());
   assert.equal(ticker.shadow({ view: "nav-badge", key: "", requests: 1, legacy: { data: { count: 1 }, asOfMs: T0 } }), false, "no body before the first tick");
   ticker.tick();
   assert.equal(ticker.shadow({ view: "nav-badge", key: "", requests: 3, legacy: { data: { count: 1 }, asOfMs: T0 } }), true);
@@ -480,8 +515,16 @@ test("the worker compares a shadow sample off the main thread and the status vie
   assert.ok(posted.some((m) => m.type === "log" && m.step === "view.shadow_failed"));
 });
 
+/**
+ * BACKSTOP: 6,000 polls of 10 ms, at least 60 s. A real read-model thread's first view pass compiles
+ * its modules under tsx; under coverage beside a parallel suite the status body took 8.4 s locally
+ * (nav-badge alone 5.2 s on the views thread) and once 22.4 s, past the old 2,000-poll bound, on a
+ * healthy worker. A thread that never answers still fails here, by name.
+ */
+const UNTIL_POLLS = 6_000;
+
 async function until(done: () => boolean, what: string): Promise<void> {
-  for (let i = 0; i < 2_000 && !done(); i++) await sleep(10);
+  for (let i = 0; i < UNTIL_POLLS && !done(); i++) await sleep(10);
   assert.ok(done(), what);
 }
 
@@ -494,7 +537,7 @@ test("the worker branch hands a shadow message to its comparator", async (t) => 
   const signal = new SharedArrayBuffer(8);
   const port = { on: (_event: "message", run: (msg: { type?: string }) => void) => void (onMessage = run), postMessage: (m: unknown) => void posted.push(m as ReadModelWorkerMessage), close: () => {} };
   runReadModelWorker(port, { kind: "remudero-read-model", stateDir, instances: [{ name: "core", ledgerDir }], tickMs: 5, signal });
-  t.after(() => onMessage?.({ type: "stop" }));
+  closesFirst(t, "worker branch stopped", () => onMessage?.({ type: "stop" }));
   await until(() => posted.some((m) => m.type === "body" && m.entry.view === "read-model"), "the status view materialized");
   onMessage?.({ type: "shadow", view: "read-model", key: "", requests: 2, legacy: { data: { instances: [] }, asOfMs: T0 } } as { type: string });
   // The comparator lives on the view thread, so the diff row arrives a message later.
@@ -507,7 +550,7 @@ test("serve posts a shadow sample to a real worker thread which writes the diff 
   writeFileSync(join(ledgerDir, "ledger.ndjson"), `${row(T0, "run.start", { task_id: "W1-T1" })}\n`);
   const logs: Array<[string, Record<string, unknown> | undefined]> = [];
   const handle = createReadModelWorker({ stateDir, instances: [{ name: "core", ledgerDir }], tickMs: 20, log: (step, extra) => void logs.push([step, extra]) });
-  t.after(() => handle.stop());
+  closesFirst(t, "worker handle stopped", () => handle.stop());
   handle.shadow({ view: "read-model", key: "", requests: 1 });
   handle.start();
   await until(() => handle.body("read-model") !== undefined, "the worker posted its status body");
@@ -618,7 +661,7 @@ test("a member named only by a row compaction pruned after legacy's horizon is l
   writeFileSync(join(dir, "ledger.ndjson"), [...kept, pruned].map((r) => JSON.stringify(r)).join("\n") + "\n");
   const clock = fixedClock(Date.parse("2026-10-01T06:36:51.199Z"));
   const db = openProjectorReadModel(scratch(t, "shadow-pruned-state"), "core", clock);
-  t.after(() => db.close());
+  closesFirst(t, "db closed", () => db.close());
   const got = acquireLease(db, { clock });
   if (!got.ok) throw new Error("lease");
   createLedgerProjector({ ledgerDir: dir, db, lease: got.lease, clock }).tick();

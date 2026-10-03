@@ -520,12 +520,6 @@ export function readCiFrictionPlanTasks(git: CiFrictionGit, shardsDir: string, r
     }
   }
   const tasks: CiFrictionRemedyTask[] = [];
-  let flips: Map<string, string> | undefined;
-  const flipOf = (path: string): string | undefined => {
-    // Only a merged task with no trailer needs this walk, so it runs at most once and only then.
-    flips ??= pathTimesFromLog(git(["log", refName, CI_FRICTION_HISTORY_SINCE, "-S", "status: merged", "--format=%x01%cI", "--name-only", "--", ...paths]), "oldest");
-    return flips.get(path);
-  };
   for (const path of paths) {
     let parsed: ReturnType<typeof loadPlanFromYaml>;
     try {
@@ -538,9 +532,15 @@ export function readCiFrictionPlanTasks(git: CiFrictionGit, shardsDir: string, r
     for (const task of parsed.tasks) {
       if (typeof task.origin !== "string" || parseCiFrictionOrigin(task.origin) === undefined) continue;
       const retired = (task as { retirement?: unknown }).retirement !== undefined;
-      let mergedAt = merges.get(task.id);
-      if (!mergedAt && task.status === "merged") mergedAt = flipOf(path);
+      const mergedAt = merges.get(task.id);
       tasks.push({ id: task.id, origin: task.origin, status: String(task.status ?? "queued"), retired, files: [...(task.files ?? [])], path, ...(mergedAt ? { mergedAt } : {}) });
+    }
+  }
+  const fallbackPaths = [...new Set(tasks.filter(task => task.status === "merged" && !task.mergedAt && task.path).map(task => task.path!))];
+  if (fallbackPaths.length > 0) {
+    const flips = pathTimesFromLog(git(["log", refName, CI_FRICTION_HISTORY_SINCE, "-S", "status: merged", "--format=%x01%cI", "--name-only", "--", ...fallbackPaths]), "oldest");
+    for (const task of tasks) {
+      if (task.status === "merged" && !task.mergedAt && task.path) task.mergedAt = flips.get(task.path);
     }
   }
   return tasks;

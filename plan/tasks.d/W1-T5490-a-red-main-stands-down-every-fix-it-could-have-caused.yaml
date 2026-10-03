@@ -1,0 +1,49 @@
+- id: W1-T5490
+  title: "A RED MAIN STANDS DOWN EVERY FIX IT COULD HAVE CAUSED — on 2026-10-03 main carried an unloadable plan from 17:19Z to 19:00Z, every PR went red on lint-plan/claims, and the base-red guard (W1-T4351) never fired once: main health read `undetermined` because each CI push run was cancelled by the next, and `decideBaseRed` only matches a failing check BY NAME against main's run, which never runs the PR-only checks. The fix lane spent strikes on reds no diff could cure"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  origin: "operator session 2026-10-03 19:00Z: 28 open PRs; ledger read of fix.commit_refused and main.health.observed during the w1-t5469 duplicate-key outage (#8922)"
+  plan_refs: [W1-T4351, W1-T5472]
+  files: [src/lib/sweep.ts, test/a-red-main-stands-down-every-fix-it-could-have-caused.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED on the live ledger, 2026-10-03 15:00Z-18:59Z: 16 `fix.dispatch` rows, of which 13 ended in
+    `fix.commit_refused` (10 "the worker changed nothing", 3 "no anchored COMMIT_MESSAGE line"), and zero
+    `sweep.base_red.stood_down` / `sweep.base_red.refresh` rows. Over the 17:19Z-19:00Z outage (#8911 and
+    #8914 merged a duplicate `priority:` key into w1-t5469; fixed by #8922), PRs #8844 #8861 #8864 #8866
+    #8868 #8920 reached "fix strikes exhausted" or strike 2/2, and #8919/#8921/#8869 were disposed as
+    their own plan-only red.
+    Two holes, both in src/lib/sweep.ts:
+    (a) `mainHealthFromRollup` returns `undetermined` when main's head has no completed required run.
+        Main's CI push runs share a concurrency group, so under steady merging every run is cancelled by
+        the next push. Both surviving `main.health.observed` rows in the window read `undetermined`, and
+        main-plan-guard's failure on every head from 17:19Z was never consulted.
+    (b) `decideBaseRed` returns `wait` only when a PR failure's NAME is in `main.failingChecks`. lint-plan,
+        claims and the coverage shards are pull_request-only (main's push run has no lint-plan/claims job,
+        and its coverage shards were green), so an inherited plan-load red can never match.
+  design: |
+    1. Main health: when the head's required runs are cancelled or pending, fall back to the most recent
+       COMPLETED main run (any head) for `state` and `failingChecks`. Also count a failed run of a
+       workflow named in a new `MAIN_GUARD_WORKFLOWS` set (initially `main-plan-guard`) as red. Record
+       which run decided it (`decided_by_sha`) on the `main.health.observed` row.
+    2. `decideBaseRed`: while main is red, a failing check that main's run cannot speak to (a name absent
+       from main's run entirely) is `wait`, not `own`. A check that main ran GREEN still returns `own`, so
+       a real diff red is never masked. Once main is green, the existing one-refresh rule applies
+       unchanged.
+    3. With main green or undetermined-with-no-completed-history, behaviour is byte-identical to today.
+  acceptance:
+    - claim: "with main red, a PR whose only failures are checks main's run never executes is stood down (wait), never dispatched a fix; a failure in a check main ran green is still the PR's own"
+      proof: "grep: test(\"W1-T5490: a pull-request-only red waits while main is red in test/a-red-main-stands-down-every-fix-it-could-have-caused.test.ts"
+    - claim: "main health reads red from the latest completed run when the head's runs were cancelled, and from a failed main-plan-guard run"
+      proof: "grep: test(\"W1-T5490: a cancelled head falls back to the last completed main run in test/a-red-main-stands-down-every-fix-it-could-have-caused.test.ts"
+  falsifier: |
+    Revert decideBaseRed's absent-name arm: the suite's PR failing only `lint-plan` against a red main
+    whose run has no lint-plan job decides `own`. Revert the fallback: a head whose CI run is cancelled
+    reads `undetermined` and the stand-down never engages.
