@@ -62,7 +62,7 @@ function rootDir(): string {
   return d;
 }
 
-function hooksFor(root: string, extra: Partial<Parameters<typeof runTask.buildBoardReviewDaemonHooks>[0]>, seen: { items?: readonly BoardItem[]; syncReads: number }): Hooks {
+function hooksFor(root: string, extra: Partial<NonNullable<Parameters<typeof runTask.buildBoardReviewDaemonHooks>[0]>>, seen: { items?: readonly BoardItem[]; syncReads: number }): Hooks {
   return runTask.buildBoardReviewDaemonHooks({
     config: { root } as unknown as Config,
     policy: POLICY,
