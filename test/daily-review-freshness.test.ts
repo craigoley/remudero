@@ -60,7 +60,7 @@ test("daily status distinguishes measured invalid timestamps from an unmeasured 
     const result = readRoutingDailyStatus(f.dir, now);
     assert.equal(result.sources[0]!.invalidTimestampRows, 3);
     assert.equal(result.sources[0]!.futureRows, 5);
-    assert.equal(result.reviewState, "observed-partial");
+    assert.equal("reviewState" in result ? result.reviewState : undefined, "observed-partial");
     assert.doesNotMatch(JSON.stringify(result), /secret|\/private\/ledger/);
   } finally { f.close(); }
 });
