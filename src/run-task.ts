@@ -11211,7 +11211,15 @@ export async function runFixRung(opts: {
           harnessCommitUndeclared = undeclared;
         },
       });
-    let harnessCommitCount = harnessCommit(workerTranscript(fixResult));
+    const fixReport = workerTranscript(fixResult);
+    const failingCheck = priorCiFailures?.[0]?.name ?? unmet[0]?.claim ?? gateFailuresNow?.[0]?.reason;
+    // Derive before asking again: the completed round already names the failure and PR.
+    // The commit helper still owns validation, declared scope, and the existing-commit guard.
+    const initialDerivedCommit = fixHarnessOwnsGit && parseReport(fixReport)?.commitMessage === undefined
+      && (deps.worktreeHasUncommittedChanges ?? worktreeHasUncommittedChanges)(opts.worktreePath)
+      ? derivedFixCommit(failingCheck, opts.prUrl)
+      : undefined;
+    let harnessCommitCount = harnessCommit(fixReport, { derivedCommit: initialDerivedCommit });
     // W1-T4450: A MISSING COMMIT_MESSAGE LINE IS ASKED FOR ONCE HERE TOO, exactly as implement does
     // (W1-T4052): same session, one ask, the same refusal if the line is still absent. 37 fix rounds in
     // one day did their work and lost it to this one line. Only a round that left edits is asked.
@@ -39980,7 +39988,7 @@ function derivedFixCommit(check: string | undefined, prUrl: string): { subject: 
   if (prefix.length + suffix.length >= 100) return undefined;
   const name = Array.from(check.trim().toLowerCase().replace(/\s+/g, " "))
     .slice(0, 100 - prefix.length - suffix.length).join("").trimEnd();
-  return { subject: `${prefix}${name}${suffix}`, reason: `no COMMIT_MESSAGE after one re-ask; failing check ${check} on #${pr}` };
+  return { subject: `${prefix}${name}${suffix}`, reason: `no COMMIT_MESSAGE; failing check ${check} on #${pr}` };
 }
 
 /** Build the re-ask from the implement lane's own spawn and account. The original mount and
