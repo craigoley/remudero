@@ -230,6 +230,35 @@ test("buildWorkerStateSensor appends bounded structured activity with tool timin
   assert.equal(activity[2]?.event_kind, "message");
 });
 
+test("E5: a same-millisecond burst of SDK heartbeats ledgers exactly one worker.activity row", async () => {
+  const root = tmpRoot("worker-activity-burst");
+  const ledgerPath = ledgerPathFor(fakeConfig(root));
+  const sensor = buildWorkerStateSensor({ ledgerPath, runId: "run-burst", taskId: "task-burst", root });
+  async function* stream(): AsyncGenerator<unknown> {
+    yield { type: "system", subtype: "status" };
+    yield { type: "system", subtype: "status" };
+    yield { type: "result", subtype: "success", is_error: false, result: "done", session_id: "s", total_cost_usd: 0, num_turns: 0, permission_denials: [] };
+  }
+  await collectWorkerResult(stream(), { childEnvKeys: [], streamObserver: sensor.observer, now: () => 5_000 });
+  const activity = readLedgerLines(ledgerPath).filter((line) => line.step === WORKER_ACTIVITY_LEDGER_STEP);
+  assert.equal(activity.length, 1, `one heartbeat burst in one millisecond must ledger one row: ${JSON.stringify(activity)}`);
+  assert.equal(activity[0]?.event_kind, "message");
+  assert.equal(activity[0]?.event_at, new Date(5_000).toISOString());
+});
+
+test("E5: two distinct activity events in the same millisecond each ledger their own worker.activity row", () => {
+  const root = tmpRoot("worker-activity-distinct");
+  const ledgerPath = ledgerPathFor(fakeConfig(root));
+  const sensor = buildWorkerStateSensor({ ledgerPath, runId: "run-distinct", taskId: "task-distinct", root });
+  sensor.observer({ kind: "working", tsMs: 7_000, text: "reading the file" });
+  sensor.observer({ kind: "tool-executing", tsMs: 7_000, toolName: "Read", text: "[tool_use: Read]" });
+  sensor.observer({ kind: "message", tsMs: 7_000 });
+  sensor.observer({ kind: "message", tsMs: 7_001 });
+  const activity = readLedgerLines(ledgerPath).filter((line) => line.step === WORKER_ACTIVITY_LEDGER_STEP);
+  assert.deepEqual(activity.map((line) => line.event_kind), ["working", "tool-executing", "message", "message"]);
+  assert.equal(activity[2]?.tool_name, "Read", "the first heartbeat closes the tool and differs from the bare one after it");
+});
+
 // ── acceptance 3: no row / observer never fired ⇒ UNKNOWN, never `working` (W1-T130) ────────
 
 test("a fresh WorkerStateTracker with no observed event ever reads UNKNOWN (undefined) — never defaulted to working, and check() never fires quiet before anything was observed", () => {

@@ -2899,6 +2899,7 @@ export function buildWorkerStateSensor(args: {
   let runawaySignaled = false;
   let lastWorkerText: string | undefined;
   let activeTool: { name: string; startedAtMs: number; reason?: string } | undefined;
+  let lastActivityKey: string | undefined;
 
   const recordTransition = (next: WorkerState): void => {
     try {
@@ -2949,7 +2950,7 @@ export function buildWorkerStateSensor(args: {
     const eventAt = new Date(event.tsMs).toISOString();
     const toolName = event.toolName ?? (event.kind === "tool-executing" ? boundedWorkerTelemetryText(event.text) : undefined);
     try {
-      appendLedger(args.ledgerPath, {
+      const activityRow = {
         run_id: args.runId,
         task_id: args.taskId,
         step: WORKER_ACTIVITY_LEDGER_STEP,
@@ -2981,7 +2982,13 @@ export function buildWorkerStateSensor(args: {
               ...(event.toolOutcome ? { tool_outcome: event.toolOutcome } : {}),
             }
           : {}),
-      });
+      };
+      // E5: a same-millisecond burst of bare heartbeats renders byte-identical rows; ledger one.
+      const activityKey = JSON.stringify(activityRow);
+      if (activityKey !== lastActivityKey) {
+        appendLedger(args.ledgerPath, activityRow);
+        lastActivityKey = activityKey;
+      }
     } catch {
       // Best-effort: telemetry must never be able to take down the worker it observes.
     }
