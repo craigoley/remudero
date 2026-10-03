@@ -192,7 +192,7 @@ import { inboxThreadStorePath, ratifyCliGateway } from "./lib/panel-graph.js";
 import { realThreadDecider, registryThreadItems, type ThreadDecisionContext } from "./lib/inbox-responder.js";
 import { buildPromptManifest } from "./lib/prompt-manifest.js";
 import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type BinaryPinReading } from "./lib/env.js";
-import { renderAnchorBlock } from "./lib/compaction.js";
+import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
 import { composeRealDeps, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
 import {
@@ -47134,9 +47134,16 @@ function alertFixPrompt(alert: AlertLaneAlert, taskId: string): string {
     "medium or low, AND outside the gate/containment-critical path set. Make the minimal, correct fix.",
     "",
     "Then, from the working directory:",
-    "- git add the changed files && commit with a concise message;",
+    "- git add the changed files && commit;",
+    // The commit/PR contracts every other worker prompt carries: this lane's PR failed commitlint
+    // AFTER it existed, because the prompt said only "commit with a concise message".
+    ...commitMessageContractLines(),
     "- `git push origin HEAD` (NOT -u);",
-    "- open a PR: `gh pr create --fill --base main`. The PR body MUST include:",
+    "- open a PR with an EXPLICIT title: `gh pr create --title \"type(scope): subject\" --fill --base main`.",
+    "  PR TITLE: a conventional-commit subject of <= 100 characters, written by you — never the",
+    "  title `--fill` derives from the commit or the branch name.",
+    ...bodyVsDiffContractLines(),
+    "  The PR body MUST include:",
     "  - an `Acceptance:` block of `- <claim> | <proof>` bullets covering the fix;",
     `  - \`origin: alert#${alertOriginId(alert)}\` naming this alert's provenance;`,
     `  - as the LAST body line: \`Remudero-Task: ${taskId}\`.`,
