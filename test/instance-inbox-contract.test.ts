@@ -37,13 +37,18 @@ const OTHER_THREAD = inboxThreadId("W1-T2");
 type Body = Record<string, unknown>;
 
 /** One instance's conversation sources: real Route objects at the unprefixed paths, counting every write. */
-function sources(label: string, opts: { answerThreadId?: string; answerInstance?: string; replyDelayMs?: number; failIntent?: string; refuseIntent?: string } = {}) {
+function sources(label: string, opts: { answerThreadId?: string; answerInstance?: string; replyDelayMs?: number; failIntent?: string; refuseIntent?: string; garbleIntent?: string; listText?: string } = {}) {
   const calls = { list: 0, detail: 0, reply: 0, read: 0 };
   const readBody = (req: Parameters<Route["handler"]>[0]): Body => JSON.parse(String((req as unknown as Record<symbol, unknown>)[RAW_BODY_CACHE] ?? "{}")) as Body;
   const routes: Route[] = [
     { method: "GET", path: "/v1/inbox/threads", scope: "read", handler: (_req, res) => {
       calls.list++;
       res.setHeader("x-source", label);
+      if (opts.listText !== undefined) {
+        res.writeHead(200);
+        res.end(opts.listText);
+        return;
+      }
       sendJson(res, 200, { threads: [{ threadId: THREAD, headline: `${label} ask` }], ...(opts.answerInstance ? { instance: opts.answerInstance } : {}) });
     } },
     { method: "GET", path: "/v1/inbox/thread", scope: "read", handler: (req, res) => {
@@ -59,6 +64,12 @@ function sources(label: string, opts: { answerThreadId?: string; answerInstance?
       }
       if (opts.replyDelayMs) await new Promise((resolve) => setTimeout(resolve, opts.replyDelayMs));
       if (body.intentId === opts.failIntent) throw new Error("store went away mid-write");
+      if (body.intentId === opts.garbleIntent) {
+        calls.reply++;
+        res.writeHead(200);
+        res.end("delivered?");
+        return;
+      }
       calls.reply++;
       sendJson(res, 200, { ok: true, delivery: "delivered", threadId: body.threadId, text: body.text, seen: label });
     } },
@@ -225,6 +236,13 @@ test("instance inbox refuses forged scope before side effects", async (t) => {
   const leakedThread = await leakyCall("GET", `/v1/i/site/inbox/thread?id=${encodeURIComponent(THREAD)}`);
   assert.equal(leakedThread.status, 502);
   assert.equal(leakedThread.body.error, "inbox_thread_identity_mismatch");
+  for (const listText of ["not json", "[1]"]) {
+    const garbled = { core: sources("core"), site: sources("site", { listText }), console: sources("console") };
+    const answer = await (await serve(t, gatewayRoutes(t, f, garbled)))("GET", "/v1/i/site/inbox/threads");
+    assert.equal(answer.status, 502, listText);
+    assert.equal(answer.body.error, "inbox_source_unreadable");
+    assert.equal(answer.body.instance, "site");
+  }
   const detail = await call("GET", `/v1/i/site/inbox/thread?id=${encodeURIComponent(THREAD)}`);
   assert.equal(detail.status, 200, "positive control: a matching thread is relayed");
   assert.equal(detail.body.threadId, THREAD);
@@ -246,7 +264,7 @@ async function serveBase(t: { after: (fn: () => Promise<void>) => void }, routes
 
 test("instance inbox reply receipts survive concurrent replay and restart", async (t) => {
   const f = fixture(t);
-  const set = { core: sources("core"), site: sources("site", { replyDelayMs: 30, failIntent: "intent-crashes", refuseIntent: "intent-refused" }), console: sources("console") };
+  const set = { core: sources("core"), site: sources("site", { replyDelayMs: 30, failIntent: "intent-crashes", refuseIntent: "intent-refused", garbleIntent: "intent-garbled" }), console: sources("console") };
   const call = await serve(t, gatewayRoutes(t, f, set));
 
   const [first, second] = await Promise.all([
@@ -303,6 +321,21 @@ test("instance inbox reply receipts survive concurrent replay and restart", asyn
   assert.equal(orphan.body.delivery, "unknown");
   assert.equal(set.site.calls.reply, 2);
 
+  // A source whose answer cannot be read delivered SOMETHING: unknown, kept, never retried.
+  const garbled = await restarted("POST", "/v1/i/site/inbox/thread/reply", siteReply("hm", "intent-garbled"));
+  assert.equal(garbled.body.delivery, "unknown");
+  assert.equal(garbled.body.error, "inbox_source_unreadable");
+  assert.equal((await restarted("POST", "/v1/i/site/inbox/thread/reply", siteReply("hm", "intent-garbled"))).body.error, "inbox_intent_unknown");
+  // A corrupt receipt proves nothing: unknown, with its reason, and no delivery.
+  for (const name of receiptFiles(f.siteState)) {
+    const path = join(f.siteState, INBOX_RECEIPT_DIR, name);
+    if (readFileSync(path, "utf8").includes("intent-garbled")) writeFileSync(path, "{torn");
+  }
+  const torn = await restarted("POST", "/v1/i/site/inbox/thread/reply", siteReply("hm", "intent-garbled"));
+  assert.equal(torn.body.error, "inbox_intent_unknown");
+  assert.match(String(torn.body.detail), /receipt is unreadable/);
+  const garbledCalls = set.site.calls.reply;
+
   // A source refusal before any side effect releases the claim; nothing is stored to replay.
   const refused = await restarted("POST", "/v1/i/site/inbox/thread/reply", siteReply("orphan", "intent-refused"));
   assert.equal(refused.status, 404);
@@ -313,6 +346,7 @@ test("instance inbox reply receipts survive concurrent replay and restart", asyn
   assert.equal((await restarted("POST", "/v1/i/site/inbox/thread/read", mark)).status, 200);
   assert.equal((await restarted("POST", "/v1/i/site/inbox/thread/read", mark)).body.replayed, true);
   assert.equal(set.site.calls.read, 1);
+  assert.equal(set.site.calls.reply, garbledCalls, "no replay re-delivered an unknown intent");
   assert.deepEqual(receiptFiles(f.consoleState), [], "site's writes touch only site's state");
   assert.deepEqual(receiptFiles(join(f.coreRoot, "state")), []);
 });
@@ -353,6 +387,23 @@ test("instance inbox unavailable contract never holds PR flow", async (t) => {
     throw Object.assign(new Error("denied"), { code: "EACCES" });
   });
   assert.deepEqual(unreadable.mode === "read-only" && unreadable.code, "inbox_contract_unreadable");
+
+  // A receipt store that cannot be written refuses before the source runs.
+  const blocked = join(f.base, "not-a-dir");
+  writeFileSync(blocked, "");
+  const direct = sources("direct");
+  const [, , reply] = mountInstanceInboxRoutes({ instance: "site", repository: "craigoley/remudero-site", stateDir: blocked, routes: direct.routes, contract: () => ({ mode: "read-write" }) });
+  let directStatus = 0;
+  let text = "";
+  const res = { statusCode: 200, setHeader() {}, writeHead(code: number) { directStatus = code; return res; }, end(chunk?: string) { text = chunk ?? ""; } };
+  const req = { url: "/", headers: {}, [RAW_BODY_CACHE]: JSON.stringify(siteReply("hi", "intent-no-store")) };
+  await reply.handler(req as never, res as never, { params: {} });
+  assert.equal(directStatus, 503);
+  assert.equal((JSON.parse(text) as Body).error, "inbox_receipt_store_unavailable");
+  assert.equal(direct.calls.reply, 0);
+  const [, , unrooted] = mountInstanceInboxRoutes({ instance: "site", repository: "craigoley/remudero-site", stateDir: undefined, routes: direct.routes, contract: () => ({ mode: "read-write" }) });
+  await unrooted.handler(req as never, res as never, { params: {} });
+  assert.equal((JSON.parse(text) as Body).error, "inbox_read_only", "no state root means nowhere to keep a receipt: read-only");
 
   // The gateway's default sources (the real panel routes) build for an instance without any request.
   const defaults = buildInstanceGatewayRoutes([], { registryPath: f.registryPath, stateBase: f.stateBase, onAnalyticsCache: (cache) => t.after(() => cache.stop()) });

@@ -132,14 +132,14 @@ function captureResponse(): { res: ServerResponse; done: () => Captured } {
 
 type Body = Record<string, unknown>;
 
-function parseBody(captured: Captured): Body | undefined {
-  if (!captured.ended) return undefined;
+/** The source's JSON object, or why it cannot be enveloped (the caller answers 502 naming the reason). */
+function parseBody(captured: Captured): { body: Body } | { reason: string } {
+  if (!captured.ended) return { reason: "the source never finished its answer" };
   try {
     const parsed: unknown = JSON.parse(captured.text);
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? (parsed as Body) : undefined;
-  } catch {
-    // deliberate: a source that answered non-JSON cannot be enveloped; the caller answers 502 naming it.
-    return undefined;
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? { body: parsed as Body } : { reason: "the source answered JSON that is not an object" };
+  } catch (error) {
+    return { reason: `the source answered non-JSON: ${(error as Error).message}` };
   }
 }
 
@@ -190,11 +190,12 @@ function viewRoute(spec: ContractRoute, source: Route, binding: InstanceInboxBin
       const capture = captureResponse();
       await source.handler(req, capture.res, ctx);
       const captured = capture.done();
-      const body = parseBody(captured);
-      if (body === undefined) {
-        refuse(res, binding, 502, { error: "inbox_source_unreadable", detail: `the ${spec.capability} source gave no JSON object` });
+      const parsed = parseBody(captured);
+      if ("reason" in parsed) {
+        refuse(res, binding, 502, { error: "inbox_source_unreadable", detail: `${spec.capability}: ${parsed.reason}` });
         return;
       }
+      const body = parsed.body;
       const foreign = foreignIdentity(body, binding);
       if (foreign) {
         refuse(res, binding, 502, { error: "inbox_identity_mismatch", detail: `the source answered for ${foreign}` });
@@ -269,12 +270,12 @@ function replayAnswer(stored: IntentReceipt, binding: IntentBinding): { status: 
   return { status: 409, body: { error: "inbox_intent_unknown", delivery: "unknown", detail: "this intent's delivery was never confirmed; it is not retried", receipt: receiptView(stored) } };
 }
 
-function readReceipt(path: string): IntentReceipt | undefined {
+/** A stored receipt, or why it cannot be read: an unreadable receipt proves nothing, so the caller answers `unknown`. */
+function readReceipt(path: string): { receipt: IntentReceipt } | { reason: string } {
   try {
-    return JSON.parse(readFileSync(path, "utf8")) as IntentReceipt;
-  } catch {
-    // deliberate: an unreadable receipt cannot prove what happened; the caller answers `unknown`.
-    return undefined;
+    return { receipt: JSON.parse(readFileSync(path, "utf8")) as IntentReceipt };
+  } catch (error) {
+    return { reason: `this intent's receipt is unreadable: ${(error as NodeJS.ErrnoException).code ?? (error as Error).message}` };
   }
 }
 
@@ -338,17 +339,17 @@ function writeRoute(spec: ContractRoute & { action: string }, source: Route, bin
           refuse(res, binding, 503, { error: "inbox_receipt_store_unavailable", delivery: "not_delivered", detail: String((error as NodeJS.ErrnoException).code ?? error) });
           return;
         }
-        const stored = readReceipt(path);
-        const answer = stored === undefined
-          ? { status: 409, body: { error: "inbox_intent_unknown", delivery: "unknown", detail: "this intent's receipt is unreadable" } }
-          : replayAnswer(stored, intent);
+        const read = readReceipt(path);
+        const answer = "reason" in read
+          ? { status: 409, body: { error: "inbox_intent_unknown", delivery: "unknown", detail: read.reason } }
+          : replayAnswer(read.receipt, intent);
         if (answer !== "join") {
           refuse(res, binding, answer.status, answer.body);
           return;
         }
         const running = inflight.get(path);
         if (running === undefined) {
-          refuse(res, binding, 409, { error: "inbox_intent_unknown", delivery: "unknown", detail: "this intent was claimed but its outcome was never recorded; it is not retried", receipt: receiptView(stored!) });
+          refuse(res, binding, 409, { error: "inbox_intent_unknown", delivery: "unknown", detail: "this intent was claimed but its outcome was never recorded; it is not retried", receipt: receiptView((read as { receipt: IntentReceipt }).receipt) });
           return;
         }
         const joined = await running;
@@ -410,9 +411,10 @@ async function deliver(
     return { status: 500, body: { error: "inbox_delivery_unknown", delivery: "unknown", detail: String((error as Error).message ?? error), receipt: receiptView(recorded) } };
   }
   const answered = parseBody(captured);
-  const body: Body = { ...(answered ?? { error: "inbox_source_unreadable", delivery: "unknown" }), ...identity(binding) };
-  const ok = answered !== undefined && captured.status >= 200 && captured.status < 300;
-  const unknownDelivery = answered === undefined || captured.status >= 500 || body.delivery === "unverified" || body.delivery === "unknown";
+  const unreadable = "reason" in answered;
+  const body: Body = { ...(unreadable ? { error: "inbox_source_unreadable", delivery: "unknown", detail: answered.reason } : answered.body), ...identity(binding) };
+  const ok = !unreadable && captured.status >= 200 && captured.status < 300;
+  const unknownDelivery = unreadable || captured.status >= 500 || body.delivery === "unverified" || body.delivery === "unknown";
   if (!ok && !unknownDelivery) {
     // Refused before any side effect (not found, ahead of the thread, invalid): nothing to replay.
     const released = releaseReceipt(path);
