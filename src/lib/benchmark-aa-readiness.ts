@@ -22,7 +22,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { IMMUTABLE_REVISION_RE, type AaTrialManifest, type BenchmarkAaCommandInput, type BenchmarkAaReport } from "./benchmark-aa.js";
@@ -85,7 +85,11 @@ export function deriveRuntimePins(input: { harnessRevision: BenchmarkStackEviden
 }
 
 function readOptional(path: string): string | undefined {
-  return existsSync(path) ? readFileSync(path, "utf8") : undefined;
+  try { return readFileSync(path, "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
 }
 
 /** Every pin compared with the registered stack: unknown and drifting pins are refused by field, never guessed. */
@@ -183,10 +187,12 @@ function eligibilityReason(task: ReadinessTask | undefined): string | null {
 function freezePopulation(protocol: ProspectiveAaProtocol, trialDir: string, tasks: ReadonlyMap<string, ReadinessTask> | null,
   nowIso: string): { ok: true; population: FrozenPopulation } | { ok: false; reason: string } {
   const path = join(trialDir, "population.json");
-  if (existsSync(path)) {
-    let stored: FrozenPopulation;
-    try { stored = JSON.parse(readFileSync(path, "utf8")) as FrozenPopulation; }
-    catch (error) { return { ok: false, reason: `population-unreadable:${(error as Error).message.slice(0, 80)}` }; }
+  let stored: FrozenPopulation | undefined;
+  try {
+    const text = readOptional(path);
+    if (text !== undefined) stored = JSON.parse(text) as FrozenPopulation;
+  } catch (error) { return { ok: false, reason: `population-unreadable:${(error as Error).message.slice(0, 80)}` }; }
+  if (stored !== undefined) {
     const { digest, ...body } = stored;
     if (stored.version !== READINESS_POPULATION_VERSION || digest !== sha256(JSON.stringify(body))
       || stored.allocationReceiptHash !== protocol.allocationReceiptHash) return { ok: false, reason: "population-changed-since-freeze" };
@@ -319,10 +325,13 @@ function gapOf(reason: string): ReadinessGap {
 function fileFollowUp(stateDir: string, trialId: string, gap: ReadinessGap, nowIso: string): BenchmarkAaReadinessResult["followUp"] {
   const path = join(stateDir, READINESS_FOLLOW_UPS_FILE);
   const key = `${trialId}:${gap.kind}`;
-  const filed = (existsSync(path) ? readFileSync(path, "utf8") : "").split("\n").some((line) => line.includes(`"key":${JSON.stringify(key)}`));
-  if (filed) return { key, state: "already-filed" };
-  appendFileSync(path, `${JSON.stringify({ ts: nowIso, key, trialId, gap })}\n`);
-  return { key, state: "filed" };
+  const fd = openSync(path, "a+");
+  try {
+    const filed = readFileSync(fd, "utf8").split("\n").some((line) => line.includes(`"key":${JSON.stringify(key)}`));
+    if (filed) return { key, state: "already-filed" };
+    appendFileSync(fd, `${JSON.stringify({ ts: nowIso, key, trialId, gap })}\n`);
+    return { key, state: "filed" };
+  } finally { closeSync(fd); }
 }
 
 /** The receipt's own predicates, the ones pilot activation re-checks; anything short of them withholds the receipt. */

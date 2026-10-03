@@ -3,7 +3,8 @@
 // replay and reports missingness instead of zeros. Every case runs in rmd- temp state roots with a fake attempt
 // dispatcher, a fake grader, injected runtime pins and a fixed clock: nothing spawns a worker, reads a real ledger or spends.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import fs, { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -303,6 +304,54 @@ test("calibration refuses unreadable plans and frozen populations before dispatc
   assert.equal(population.state, "refused");
   assert.match(population.refusals[0] ?? "", /^population-unreadable:/);
   assert.equal(population.receipt.state, "withheld");
+  assert.equal(calls.length, 0);
+});
+
+test("calibration preserves the opened follow-up file when its path is replaced", async (t) => {
+  const stateDir = root();
+  const path = join(stateDir, READINESS_FOLLOW_UPS_FILE);
+  const moved = join(stateDir, "original-follow-ups.ndjson");
+  const prior = `${JSON.stringify({ key: "another-trial:trial-not-registered" })}\n`;
+  writeFileSync(path, prior);
+  const read = fs.readFileSync;
+  let replaced = false;
+  t.mock.method(fs, "readFileSync", (...args: Parameters<typeof read>) => {
+    const text = read(...args);
+    if (!replaced && text === prior) {
+      replaced = true;
+      renameSync(path, moved);
+      writeFileSync(path, "replacement\n");
+    }
+    return text;
+  });
+  syncBuiltinESMExports();
+  try {
+    const result = await runBenchmarkAaReadiness(input(stateDir, []));
+    assert.equal(result.followUp?.state, "filed");
+    assert.equal(replaced, true, "the path was replaced between reading and appending");
+    assert.equal(readFileSync(path, "utf8"), "replacement\n", "the replacement file is untouched");
+    const rows = readFileSync(moved, "utf8").trim().split("\n").map((line) => JSON.parse(line) as { key: string });
+    assert.deepEqual(rows.map((row) => row.key), ["another-trial:trial-not-registered", `${TRIAL}:trial-not-registered`]);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+});
+
+test("calibration distinguishes unreadable population and follow-up files from absence", async () => {
+  const stateDir = root();
+  await register(stateDir);
+  const population = join(prospectiveAaDir(stateDir, TRIAL), "population.json");
+  mkdirSync(population);
+  const calls: PairedAttemptRequest<string>[] = [];
+  const result = await runBenchmarkAaReadiness(input(stateDir, calls));
+  assert.equal(result.state, "refused");
+  assert.match(result.refusals[0] ?? "", /^population-unreadable:.*EISDIR/);
+  assert.equal(calls.length, 0);
+  assert.deepEqual(readdirSync(population), []);
+  const unreadable = root();
+  mkdirSync(join(unreadable, READINESS_FOLLOW_UPS_FILE));
+  await assert.rejects(runBenchmarkAaReadiness(input(unreadable, calls)), { code: "EISDIR" });
   assert.equal(calls.length, 0);
 });
 
