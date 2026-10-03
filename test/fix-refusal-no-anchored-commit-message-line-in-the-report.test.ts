@@ -17,7 +17,6 @@ async function fixRound(t: TestContext, options: {
 } = {}) {
   t.mock.method(childProcess, "execFileSync", (_command: string, args: string[]) => {
     if (args.includes("rev-parse")) return "head-a";
-    if (args.includes("diff") || args.includes("ls-files")) return "";
     throw new Error("test: subprocess reads unavailable");
   });
   syncBuiltinESMExports();
