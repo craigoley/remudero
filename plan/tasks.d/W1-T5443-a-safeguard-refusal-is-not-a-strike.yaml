@@ -1,0 +1,53 @@
+- id: W1-T5443
+  title: "A SAFEGUARD REFUSAL IS TREATED AS AN ORDINARY FAILED RUN — it can burn a fix strike and be retried with the same prompt, and a reasoning_extraction decline is never retried by the platform's own fallback"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  budget_usd: 45.00
+  priority: 4
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-03: audit of the repo against Anthropic's 'Prompting Claude Opus 5.5' guide"
+  plan_refs: ["W1-T2564", "W1-T4650"]
+  files:
+    - src/lib/worker.ts
+    - src/lib/classify.ts
+    - src/run-task.ts
+    - test/a-safeguard-refusal-is-not-a-strike.test.ts
+  rationale: |
+    WHY THIS EXISTS. Guide section 'Safeguard refusals': Opus 5.5 runs classifiers (biology, cybersecurity,
+    reasoning extraction); a decline is a NORMAL response with stop_reason refusal and stop_details naming the
+    category, and server-side fallback does NOT retry a reasoning_extraction decline. The installed Agent SDK
+    emits `model_refusal_no_fallback` (this repo configures no fallback model) and `model_refusal_fallback`
+    (sdk.d.ts ~5090-5140). Until the capture PR, nothing read either, so a refusal looked like an ordinary
+    empty or failed run. This repo's work is cyber-adjacent (CodeQL and alert repair, security rule text), so
+    refusals are plausible, and a strike spent on work that CANNOT succeed is pure cost.
+
+    WHAT IS ALREADY TRUE ON MAIN. W1-T2564 handles USAGE-limit refusals (classify.ts detectUsageLimitRefusal,
+    a text regex); it does not see safeguard refusals. `safeguardRefusal` on the worker result comes from the
+    capture PR; this task consumes it.
+
+  design: |
+    (i) Classify a result carrying `safeguardRefusal` as its own outcome class, distinct from usage-limit and
+    from an ordinary failure. (ii) It must not consume a fix strike and must not be retried with the same
+    prompt. (iii) For categories reasoning_extraction, cyber and bio, route to the existing escalation path
+    for a human (an issue naming the category and the task) instead of the strike ladder. (iv) A retried-on-
+    fallback refusal (direction retry) is recorded but is not a failure of the run. (v) Observability first:
+    one ledger row per classification. Do not add a fallback model in this task.
+
+  acceptance:
+    - claim: "a safeguard refusal does not consume a fix strike"
+      proof: 'grep: test("W1-T5443: a safeguard refusal does not consume a fix strike" in test/a-safeguard-refusal-is-not-a-strike.test.ts'
+    - claim: "a safeguard refusal is not retried with the same prompt"
+      proof: 'grep: test("W1-T5443: a safeguard refusal is not retried with the same prompt" in test/a-safeguard-refusal-is-not-a-strike.test.ts'
+    - claim: "a reasoning_extraction or cyber refusal escalates to a human naming the category"
+      proof: 'grep: test("W1-T5443: a reasoning_extraction or cyber refusal escalates to a human naming its category" in test/a-safeguard-refusal-is-not-a-strike.test.ts'
+  falsifier: |
+    CLOSE THIS TASK without implementation if `git grep -n "safeguardRefusal" -- src ':!test/**'` shows no
+    such field (capture not landed; do that first), or if a production caller already branches on it.
+
+  notes: |
+    Source: https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5 (audit 2026-10-03). One concern per task; do not widen. Unverified claims are marked INFERRED in the audit and must be re-checked at head before building.
