@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFileSync, readdirSync, rmSync } from "node:fs";
+import { appendFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { rotateLedger } from "../src/lib/ledger.js";
 import { DEFAULT_SWEEP_POLICY, dueRepairFilings, mainLatestRunFromLedger } from "../src/lib/sweep.js";
+import { buildLedgerIndex, deriveStatus, recordCredit, type CreditStore, type GitHub } from "../src/lib/status.js";
+import type { Task } from "../src/lib/plan.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
 
 // E6 (2026-10-02): the carried core was 91% of the ceiling, so the live file rotated every ~5 min.
@@ -26,8 +28,13 @@ function noise(n: number): Array<Record<string, unknown>> {
   return Array.from({ length: n }, (_, i) => ({ ts: at(60_000), run_id: "n", task_id: "n", step: "cli.invoked", pad: "x".repeat(200), i }));
 }
 
-function rotate(rows: Array<Record<string, unknown>>): { live: Array<Record<string, unknown>>; archived: string; dir: string } {
+function rotate(rows: Array<Record<string, unknown>>): { live: Array<Record<string, unknown>>; archived: string; dir: string; path: string } {
   const fx = writeLedger([...rows, ...noise(200)]);
+  return rotateAt(fx.path, fx.dir);
+}
+
+function rotateAt(path: string, dir: string): { live: Array<Record<string, unknown>>; archived: string; dir: string; path: string } {
+  const fx = { path, dir };
   const result = rotateLedger(fx.path, { ceilingBytes: 30_000, smoothingWindowMs: 0, now: () => new Date(NOW) });
   assert.equal(result.rotated, true, "the fixture crosses the ceiling");
   const live = readFileSync(fx.path, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
@@ -36,7 +43,7 @@ function rotate(rows: Array<Record<string, unknown>>): { live: Array<Record<stri
     .filter((n) => n.endsWith(".ndjson.gz"))
     .map((n) => gunzipSync(readFileSync(join(fx.dir, n))).toString("utf8"))
     .join("");
-  return { live, archived, dir: fx.dir };
+  return { live, archived, dir: fx.dir, path: fx.path };
 }
 
 const DAY = 86_400_000;
@@ -99,6 +106,82 @@ test("a rotation carries only the newest main health row and the newest dep-revi
     assert.deepEqual(mainLatestRunFromLedger(live), mainLatestRunFromLedger(rows), "the sweep's main-health reader reads the same");
     const decided = live.filter((r) => r.step === "dep-review.decided").map((r) => `${String(r.task_id)}=${String(r.decision)}`).sort();
     assert.deepEqual(decided, ["dep-review-PR0=d28", "dep-review-PR1=d29"], "the depReview seam's at(-1) per task survives");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function review(pr: number, msAgo: number, head: string, planOnly: boolean): Record<string, unknown> {
+  return {
+    ts: at(msAgo), run_id: `PR-${pr}`, task_id: `PR-${pr}`, step: "review.posted", pr_url: `${URL}${pr}`, head_sha: head,
+    state: "success", plan_only: planOnly, decision_verdict: { state: "success", criteria: [], summary: "y".repeat(400) },
+  };
+}
+
+/** A durable head-branch credit for `pr`, revalidated by the real deriveStatus against `ledger`, scanned and indexed alike. */
+function creditAfterRotation(pr: number, head: string, ledger: Array<Record<string, unknown>>): { merged: boolean; invalidated: boolean } {
+  const scanned = creditVia(pr, head, ledger, false);
+  assert.deepEqual(creditVia(pr, head, ledger, true), scanned, "the ledger index answers as the scan does");
+  return scanned;
+}
+
+function creditVia(pr: number, head: string, ledger: Array<Record<string, unknown>>, indexed: boolean): { merged: boolean; invalidated: boolean } {
+  const taskId = `W9-T${pr}`;
+  let store: CreditStore = recordCredit({}, taskId, { source: "head-branch", prUrl: `${URL}${pr}`, prNumber: pr, prState: "MERGED" });
+  const merged = { number: pr, url: `${URL}${pr}`, state: "MERGED", headRefName: `run-${taskId}-1`, headRefOid: head };
+  const github = {
+    prByRef: () => merged,
+    findMergedByTrailer: () => null,
+    findMergedByHeadBranch: () => [merged],
+    headRefName: () => undefined,
+    prBody: () => undefined,
+  } as unknown as GitHub;
+  const task = { id: taskId, title: "t", repo: "remudero", depends_on: [], type: "implement", verify: "auto", risk: "high", status: "queued", attempts: 0 } as unknown as Task;
+  const projection = deriveStatus(task, {
+    ledgerPath: "/tmp/does-not-exist/ledger.ndjson",
+    github,
+    readLedger: () => ledger,
+    readCreditStore: () => store,
+    writeCreditStore: (next) => { store = next; },
+    ...(indexed ? { ledgerIndex: buildLedgerIndex(ledger) } : {}),
+  });
+  return { merged: projection.merged, invalidated: store[taskId]?.invalidated?.["head-branch"] !== undefined };
+}
+
+test("a rotation stops carrying a merged PR's review rows and the plan-only credit refusal still reads its marker", () => {
+  const rows = [
+    review(401, 9_000, "plan-head", true),
+    review(402, 8_500, "impl-head", false),
+    mergedFact(401, 8_000),
+    mergedFact(402, 7_500),
+    review(303, 1_000, "open-head", false),
+  ];
+  const { live, archived, dir } = rotate(rows);
+  try {
+    const reviewed = live.filter((r) => r.step === "review.posted").map((r) => r.pr_url);
+    assert.deepEqual(reviewed, [`${URL}303`], "only the PR with no recorded merge keeps its review row");
+    assert.ok(archived.includes('"head_sha":"plan-head"') && archived.includes('"head_sha":"impl-head"'), "the dropped review rows are in the archive");
+    const markers = live.filter((r) => r.step === "review.plan_only_reviewed");
+    assert.deepEqual(markers.map((r) => [r.pr_url, r.head_sha, r.plan_only]), [[`${URL}401`, "plan-head", true]], "one marker for the plan-only review and none for the implementation");
+    assert.deepEqual(creditAfterRotation(401, "plan-head", live), { merged: false, invalidated: true }, "the plan-only refusal reads the same after rotation");
+    assert.deepEqual(creditAfterRotation(401, "plan-head", rows), { merged: false, invalidated: true }, "and the same before it");
+    assert.deepEqual(creditAfterRotation(402, "impl-head", live), { merged: true, invalidated: false }, "an implementation PR keeps its credit");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a second rotation carries the plan-only review marker without writing a duplicate", () => {
+  // Two postings for one head make one marker; the row seen again later (as a recarry would bring it) makes none.
+  const { dir, path } = rotate([review(501, 9_000, "plan-head", true), review(501, 8_500, "plan-head", true), mergedFact(501, 8_000)]);
+  try {
+    assert.equal(readFileSync(path, "utf8").split("review.plan_only_reviewed").length - 1, 1, "one marker per PR head");
+    appendFileSync(path, [review(501, 7_000, "plan-head", true), ...noise(200)].map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const { live } = rotateAt(path, dir);
+    const markers = live.filter((r) => r.step === "review.plan_only_reviewed");
+    assert.equal(markers.length, 1, "the carried marker is the only one");
+    assert.equal(markers[0].pr_url, `${URL}501`);
+    assert.deepEqual(creditAfterRotation(501, "plan-head", live), { merged: false, invalidated: true });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
