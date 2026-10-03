@@ -855,10 +855,13 @@ test("W1-T1069: both scripts read the same declared name list", () => {
   assert.deepEqual([...recycleFallback].sort(), [...sharedNames].sort(), "recycle-container.sh's fallback array must match deploy/runtime-env-vars.sh");
   assert.deepEqual([...hostUpdateFallback].sort(), [...sharedNames].sort(), "host-update.sh's fallback array must match deploy/runtime-env-vars.sh");
 
-  // And the static `-e` passthrough block host-update.sh prints must name every declared variable —
-  // exactly, so a name added to the list without a matching passthrough line is caught here too.
+  // The launch prints both retained variables and mount-derived variables. Compare both declared
+  // lists exactly, without widening the retained-variable contract checked above.
   const printedNames = printDaemonRunEnvNames();
-  assert.deepEqual([...printedNames].sort(), [...sharedNames].sort(), "the printed passthrough names must match the declared list exactly");
+  const derivedNames = extractBashArray(sharedSrc, "RMD_DERIVED_RUNTIME_ENV_VARS");
+  const expectedPrintedNames = [...sharedNames, ...derivedNames];
+  assert.equal(new Set(expectedPrintedNames).size, expectedPrintedNames.length, "retained and derived names must be distinct");
+  assert.deepEqual([...printedNames].sort(), expectedPrintedNames.sort(), "the printed launch names must match both declared lists exactly");
 });
 
 test("Git author names stay declared across every recycle surface", () => {
