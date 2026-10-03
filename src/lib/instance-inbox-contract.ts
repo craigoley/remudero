@@ -147,7 +147,7 @@ function identity(binding: InstanceInboxBinding): { repository: string; instance
   return { repository: binding.repository, instance: binding.instance };
 }
 
-function refuse(res: ServerResponse, binding: InstanceInboxBinding, status: number, body: Body): void {
+function sendScoped(res: ServerResponse, binding: InstanceInboxBinding, status: number, body: Body): void {
   sendJson(res, status, { ...body, ...identity(binding) });
 }
 
@@ -177,7 +177,7 @@ function viewRoute(spec: ContractRoute, source: Route, binding: InstanceInboxBin
       const params = new URL(req.url ?? "/", "http://localhost").searchParams;
       const mismatch = scopeMismatch(binding, { repository: params.get("repository") ?? undefined, instance: params.get("instance") ?? undefined }, false);
       if (mismatch) {
-        refuse(res, binding, 409, { error: "inbox_scope_mismatch", detail: mismatch });
+        sendScoped(res, binding, 409, { error: "inbox_scope_mismatch", detail: mismatch });
         return;
       }
       const capture = captureResponse();
@@ -185,18 +185,18 @@ function viewRoute(spec: ContractRoute, source: Route, binding: InstanceInboxBin
       const captured = capture.done();
       const parsed = parseBody(captured);
       if ("reason" in parsed) {
-        refuse(res, binding, 502, { error: "inbox_source_unreadable", detail: `${spec.capability}: ${parsed.reason}` });
+        sendScoped(res, binding, 502, { error: "inbox_source_unreadable", detail: `${spec.capability}: ${parsed.reason}` });
         return;
       }
       const body = parsed.body;
       const foreign = foreignIdentity(body, binding);
       if (foreign) {
-        refuse(res, binding, 502, { error: "inbox_identity_mismatch", detail: `the source answered for ${foreign}` });
+        sendScoped(res, binding, 502, { error: "inbox_identity_mismatch", detail: `the source answered for ${foreign}` });
         return;
       }
       const requested = params.get("id");
       if (spec.capability === "inbox/thread" && captured.status === 200 && body.threadId !== requested) {
-        refuse(res, binding, 502, { error: "inbox_thread_identity_mismatch", detail: `asked for ${String(requested)}, the source answered ${String(body.threadId)}` });
+        sendScoped(res, binding, 502, { error: "inbox_thread_identity_mismatch", detail: `asked for ${String(requested)}, the source answered ${String(body.threadId)}` });
         return;
       }
       const mode = (binding.contract ?? (() => instanceInboxContractState(binding.stateDir)))().mode;
@@ -286,33 +286,33 @@ function writeRoute(spec: ContractRoute & { action: string }, source: Route, bin
         if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("body must be a JSON object");
         body = parsed as Body;
       } catch (error) {
-        refuse(res, binding, 400, { error: "invalid_request", detail: (error as Error).message });
+        sendScoped(res, binding, 400, { error: "invalid_request", detail: (error as Error).message });
         return;
       }
       // Scope first: a forged repository or instance is refused whatever state the instance is in.
       const mismatch = scopeMismatch(binding, { repository: params.get("repository") ?? undefined, instance: params.get("instance") ?? undefined }, false)
         ?? scopeMismatch(binding, body, true);
       if (mismatch) {
-        refuse(res, binding, 409, { error: "inbox_scope_mismatch", delivery: "not_delivered", detail: mismatch });
+        sendScoped(res, binding, 409, { error: "inbox_scope_mismatch", delivery: "not_delivered", detail: mismatch });
         return;
       }
       const contract = (binding.contract ?? (() => instanceInboxContractState(binding.stateDir)))();
       if (contract.mode === "read-only" || binding.stateDir === undefined) {
         const reason = contract.mode === "read-only" ? contract.reason : "no inbox state root is configured";
-        refuse(res, binding, 409, { error: "inbox_read_only", delivery: "not_delivered", contract: "read-only", detail: reason });
+        sendScoped(res, binding, 409, { error: "inbox_read_only", delivery: "not_delivered", contract: "read-only", detail: reason });
         return;
       }
       if (typeof body.threadId !== "string" || !proposalIdOfThread(body.threadId)) {
-        refuse(res, binding, 400, { error: "invalid_request", detail: "threadId must name an inbox thread" });
+        sendScoped(res, binding, 400, { error: "invalid_request", detail: "threadId must name an inbox thread" });
         return;
       }
       if (typeof body.intentId !== "string" || !INTENT_ID.test(body.intentId)) {
-        refuse(res, binding, 400, { error: "invalid_request", detail: "intentId is required: 8-128 ASCII identifier characters" });
+        sendScoped(res, binding, 400, { error: "invalid_request", detail: "intentId is required: 8-128 ASCII identifier characters" });
         return;
       }
       const payload = canonicalPayload(spec.action, body);
       if ("error" in payload) {
-        refuse(res, binding, 400, { error: "invalid_request", detail: payload.error });
+        sendScoped(res, binding, 400, { error: "invalid_request", detail: payload.error });
         return;
       }
       const operator = bearerTokenId(req);
@@ -329,7 +329,7 @@ function writeRoute(spec: ContractRoute & { action: string }, source: Route, bin
         writeFileSync(path, `${JSON.stringify(pending)}\n`, { flag: "wx" });
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-          refuse(res, binding, 503, { error: "inbox_receipt_store_unavailable", delivery: "not_delivered", detail: String((error as NodeJS.ErrnoException).code ?? error) });
+          sendScoped(res, binding, 503, { error: "inbox_receipt_store_unavailable", delivery: "not_delivered", detail: String((error as NodeJS.ErrnoException).code ?? error) });
           return;
         }
         const read = readReceipt(path);
@@ -337,23 +337,23 @@ function writeRoute(spec: ContractRoute & { action: string }, source: Route, bin
           ? { status: 409, body: { error: "inbox_intent_unknown", delivery: "unknown", detail: read.reason } }
           : replayAnswer(read.receipt, intent);
         if (answer !== "join") {
-          refuse(res, binding, answer.status, answer.body);
+          sendScoped(res, binding, answer.status, answer.body);
           return;
         }
         const running = inflight.get(path);
         if (running === undefined) {
-          refuse(res, binding, 409, { error: "inbox_intent_unknown", delivery: "unknown", detail: "this intent was claimed but its outcome was never recorded; it is not retried", receipt: receiptView((read as { receipt: IntentReceipt }).receipt) });
+          sendScoped(res, binding, 409, { error: "inbox_intent_unknown", delivery: "unknown", detail: "this intent was claimed but its outcome was never recorded; it is not retried", receipt: receiptView((read as { receipt: IntentReceipt }).receipt) });
           return;
         }
         const joined = await running;
-        refuse(res, binding, joined.status, { ...joined.body, replayed: true });
+        sendScoped(res, binding, joined.status, { ...joined.body, replayed: true });
         return;
       }
       const run = deliver(spec, source, binding, req, ctx, raw, pending, path);
       inflight.set(path, run);
       try {
         const outcome = await run;
-        refuse(res, binding, outcome.status, { ...outcome.body, replayed: false });
+        sendScoped(res, binding, outcome.status, { ...outcome.body, replayed: false });
       } finally {
         inflight.delete(path);
       }
