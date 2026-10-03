@@ -7603,6 +7603,9 @@ components:
             decisionsMore:
               type: integer
               description: How many open decisions past the cap `decisions` leaves out.
+            humanGates:
+              description: Optional, uncapped source-qualified decision projection; preserves version-3 consumers.
+              $ref: "#/components/schemas/HumanGateProjection"
             decisionsReasons:
               type: object
               description: >
@@ -7611,6 +7614,96 @@ components:
               properties:
                 grill: {type: string}
                 task_question: {type: string}
+
+    HumanGate:
+      type: object
+      additionalProperties: false
+      required: [kind, key, ownerSurface, openedAt, url, reason, resolutionVerb]
+      properties:
+        kind:
+          type: string
+          enum: [escalation, manual_approval, task_question, feedback_grill, feedback_proposal, feedback_new, proposal, dependency_review, held_root, verify_human, pin_drift, stale_reviewer, blocked_pr, merge_held, operator_item]
+        key: {type: string}
+        ownerSurface:
+          type: string
+          enum: [inbox, change-management]
+        openedAt:
+          type: [string, "null"]
+          description: Original source timestamp, or null when absent; never a refresh timestamp.
+        url:
+          type: [string, "null"]
+          description: Source-owned evidence URL; absent evidence remains null.
+        reason: {type: string}
+        resolutionVerb:
+          type: string
+          enum: [approve, mark_handled, answer, ratify, reframe, triage, release_hold, release, retire, restart, rework, close, reratify, verify, acknowledge]
+
+    HumanGateCount:
+      description: Exact only for complete coverage; otherwise an observed lower bound, never both.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [count]
+          properties:
+            count: {type: integer, minimum: 0}
+        - type: object
+          additionalProperties: false
+          required: [atLeast]
+          properties:
+            atLeast: {type: integer, minimum: 0}
+
+    HumanGateProjection:
+      type: object
+      additionalProperties: false
+      required: [gates, count, sources]
+      properties:
+        gates:
+          type: array
+          description: Deduplicated before display limits, oldest source time first.
+          items:
+            $ref: "#/components/schemas/HumanGate"
+        count:
+          type: object
+          additionalProperties: false
+          required: [inbox, changeManagement, byKind]
+          properties:
+            inbox:
+              $ref: "#/components/schemas/HumanGateCount"
+            changeManagement:
+              $ref: "#/components/schemas/HumanGateCount"
+            byKind:
+              type: object
+              additionalProperties: false
+              description: Observed Inbox kinds; the enclosing count supplies completeness.
+              properties:
+                escalation: {type: integer, minimum: 0}
+                manual_approval: {type: integer, minimum: 0}
+                task_question: {type: integer, minimum: 0}
+                feedback_grill: {type: integer, minimum: 0}
+                feedback_proposal: {type: integer, minimum: 0}
+                feedback_new: {type: integer, minimum: 0}
+                proposal: {type: integer, minimum: 0}
+                dependency_review: {type: integer, minimum: 0}
+                held_root: {type: integer, minimum: 0}
+                verify_human: {type: integer, minimum: 0}
+                pin_drift: {type: integer, minimum: 0}
+                stale_reviewer: {type: integer, minimum: 0}
+                blocked_pr: {type: integer, minimum: 0}
+                merge_held: {type: integer, minimum: 0}
+                operator_item: {type: integer, minimum: 0}
+        sources:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, instance, state]
+            properties:
+              name: {type: string}
+              instance: {type: [string, "null"]}
+              state:
+                type: string
+                enum: [complete, partial, unavailable]
+              reason: {type: string}
 
     NowDecision:
       type: object

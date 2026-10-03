@@ -3056,12 +3056,63 @@ export interface components {
         decisions: (NowDecision)[];
         /** How many open decisions past the cap `decisions` leaves out. */
         decisionsMore?: number;
+        /** Optional, uncapped source-qualified decision projection; preserves version-3 consumers. */
+        humanGates?: HumanGateProjection;
         /** Why a decision source was not read for this instance, by kind (`grill`, `task_question`): both live in core, so another instance names why. Its decisions are absent, never zero. */
         decisionsReasons?: {
           grill?: string;
           task_question?: string;
         };
       };
+    };
+    HumanGate: {
+      kind: "escalation" | "manual_approval" | "task_question" | "feedback_grill" | "feedback_proposal" | "feedback_new" | "proposal" | "dependency_review" | "held_root" | "verify_human" | "pin_drift" | "stale_reviewer" | "blocked_pr" | "merge_held" | "operator_item";
+      key: string;
+      ownerSurface: "inbox" | "change-management";
+      /** Original source timestamp, or null when absent; never a refresh timestamp. */
+      openedAt: string | null;
+      /** Source-owned evidence URL; absent evidence remains null. */
+      url: string | null;
+      reason: string;
+      resolutionVerb: "approve" | "mark_handled" | "answer" | "ratify" | "reframe" | "triage" | "release_hold" | "release" | "retire" | "restart" | "rework" | "close" | "reratify" | "verify" | "acknowledge";
+    };
+    /** Exact only for complete coverage; otherwise an observed lower bound, never both. */
+    HumanGateCount: ({
+      count: number;
+    }) | ({
+      atLeast: number;
+    });
+    HumanGateProjection: {
+      /** Deduplicated before display limits, oldest source time first. */
+      gates: (HumanGate)[];
+      count: {
+        inbox: HumanGateCount;
+        changeManagement: HumanGateCount;
+        /** Observed Inbox kinds; the enclosing count supplies completeness. */
+        byKind: {
+          escalation?: number;
+          manual_approval?: number;
+          task_question?: number;
+          feedback_grill?: number;
+          feedback_proposal?: number;
+          feedback_new?: number;
+          proposal?: number;
+          dependency_review?: number;
+          held_root?: number;
+          verify_human?: number;
+          pin_drift?: number;
+          stale_reviewer?: number;
+          blocked_pr?: number;
+          merge_held?: number;
+          operator_item?: number;
+        };
+      };
+      sources: ({
+        name: string;
+        instance: string | null;
+        state: "complete" | "partial" | "unavailable";
+        reason?: string;
+      })[];
     };
     /** One open thing the operator answers, with the ONE route that steers the answer. `answer.tier` is that route's write tier: a `high` one still needs the console's /v1/confirm nonce. `fields` are sent as given; the operator's own input goes in the route's text field (`text` for /v1/feedback, `answer` for /v1/questions/answer) or, for `choice`, the `disposition` picked from `options`. */
     NowDecision: {
