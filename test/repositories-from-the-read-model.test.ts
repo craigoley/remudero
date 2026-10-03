@@ -666,6 +666,45 @@ test("a summary computed while the projector catches up says so until it is reco
   assert.deepEqual([source(NOW + 61_000, caughtUp).state, source(NOW + 61_000, caughtUp).phase], ["fresh", undefined], "recomputed once caught up");
 });
 
+test("a configured instance whose store is not open yet is warming and its sample is skipped", (t) => {
+  // 2026-10-02T23:14:01Z, minutes after a serve handoff: core's ledger source read fresh but the new views thread had not
+  // attached core's store, so core read "does not project this instance", unavailable, and was compared as real.
+  const f = fixture(t);
+  createRepositoriesSourcePublisher({ stateDir: f.stateDir, instances: () => f.sources })();
+  const built = ticker(f);
+  repositories(built.tick());
+  built.release();
+  const consoleDb = openProjectorReadModel(f.stateDir, "console");
+  t.after(() => consoleDb.close());
+  const held = (instance: string): ReadModelInstanceState => ({ instance, generation: 1, lease: "held", failures: 0, newestTs: null, tickedAt: NOW });
+  const sample = (instances: Array<{ state: ReadModelInstanceState; db?: never }>) => {
+    const view = createRepositoriesReadModelView<ReadModelInstanceState>(ledgerSource);
+    const body = view.materialize({ now: NOW, instances })[0]!;
+    const legacy = view.legacy("", NOW, body.data)!;
+    const shadow = createViewShadow({ clock: fixedClock(NOW), log: () => {}, evidence: (input) => readShadowEvidence([], input) });
+    return { body, got: shadow.compare({ view: "repositories", key: "", requests: 1, legacy, body: { data: body.data, asOf: null, sources: body.sources } }) };
+  };
+  const unopened = sample([{ state: held("core") }, { state: held("console"), db: consoleDb as never }]);
+  assert.deepEqual(unopened.body.data.instances[0], { instanceId: "core", reason: "the read model has not opened this instance's store yet" });
+  assert.equal(unopened.body.sources.find((s) => s.name === "ledger:core")?.phase, undefined, "core's ledger reads fresh: only its summary says why it is absent");
+  assert.equal(unopened.got.skipped, "view repositories:core warming", JSON.stringify(unopened.got.diffs));
+  // The negative control: an instance the worker is not configured to project is structural, so the sample is compared and real.
+  const unconfigured = sample([{ state: held("console"), db: consoleDb as never }]);
+  assert.equal(unconfigured.got.skipped, undefined);
+  assert.equal(unconfigured.got.diffs.find((d) => d.path === "instances[instanceId=core].reason")?.classification, "real", JSON.stringify(unconfigured.got.diffs));
+  // Once core's store is open the sample is compared again, so a difference there stays real.
+  const coreDb = openProjectorReadModel(f.stateDir, "core");
+  t.after(() => coreDb.close());
+  const opened = sample([{ state: held("core"), db: coreDb as never }, { state: held("console"), db: consoleDb as never }]);
+  assert.equal(opened.got.skipped, undefined);
+  assert.ok(opened.body.data.instances[0].summary, "core is summarized from its open store");
+  // A store closed for a reopen keeps its last summary, stale and still warming until it is attached again.
+  const view = createRepositoriesReadModelView<ReadModelInstanceState>(ledgerSource);
+  view.materialize({ now: NOW, instances: [{ state: held("core"), db: coreDb as never }, { state: held("console"), db: consoleDb as never }] });
+  const reopening = view.materialize({ now: NOW + 61_000, instances: [{ state: held("core") }, { state: held("console"), db: consoleDb as never }] })[0]!;
+  assert.deepEqual(reopening.sources.filter((s) => s.name === "repositories:core").map((s) => [s.state, s.phase]), [["stale", "warming"]]);
+});
+
 test("a later worker attempt read only by legacy does not drop the recon row inside both windows", (t) => {
   // Captured 2026-10-01T18:27:18Z: cache_read_tokens7d view 2780545074 > legacy 2780430258 by exactly
   // W1-T5017#recon.done@18:18:34.607 (114816). Legacy read the ledger at the sample, after the run's costed

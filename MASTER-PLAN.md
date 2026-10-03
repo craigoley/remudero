@@ -182,7 +182,7 @@ mold (W1-T48) applied here (W1-T383). Intent, rationale and history stay hand-wr
 this block — a generator has no authority over WHY.
 
 <!-- CAPABILITY SNAPSHOT:BEGIN -->
-- **Daemon dispatch lanes**: 2 — source: `sweep.dispatchLanes` via `loadPolicy(policyPath(root))` (src/lib/policy.ts, plan/policy.yaml)
+- **Daemon dispatch lanes**: 3 — source: `sweep.dispatchLanes` via `loadPolicy(policyPath(root))` (src/lib/policy.ts, plan/policy.yaml)
 - **Daily cost ceiling**: $500 (committed default, no state/ override) — source: `resolveDailyCostCeiling(root, policy)` (src/lib/policy.ts)
 - **Recon turn cap**: 40 — source: `RECON_MAX_TURNS` (src/run-task.ts)
 - **ci-gate REQUIRED checks**: 27 — ci, lint-plan, depcruise, containment-probe, coverage-ratchet, mutation-ratchet, jscpd-gate, claims, learnings-budget-ratchet, commitlint, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, scan-pr / osv-scan, License Review, leak-grep, assertion-discrimination, task-id-existence, acceptance-author-gate, head-identity-gate, proof-discrimination, unwired-gate, comment-load-ratchet, source-size, coverage-session-blanking, baseline-monotonic, test-slow — source: `REQUIRED` (.github/workflows/ci-gate.yml, job `ci-gate`)
@@ -5923,11 +5923,17 @@ a second project on the harness; **WS-12 (site) is independent — separate repo
 8B. The loop never waits on a human unless the plan says so. Idle = groom.
 9. OSS defaults must be defensible on a stranger's machine; yolo is a documented opt-in.
 10. This document is truth. Every session syncs it before acting and after shipping.
-11. **Isolation and containment are PROVEN PER RUN by probe, never assumed from configuration.** A
+11. **Isolation and containment are PROVEN by probe — once per boot and again on any change of the
+   probe's inputs — never assumed from configuration.** A
    setting that "should" isolate (ZDOTDIR, a sandbox block, a stripped env) is a hypothesis until a
-   preflight probe confirms it on THIS machine, THIS run — config that happens to work by accident of
+   preflight probe confirms it on THIS machine, for THIS image, harness and worker policy — config that
+   happens to work by accident of
    the host (PR #8: isolation held only because `~/.bashrc` was absent) must fail closed the moment the
-   accident ends. See FIELD FINDING 11, W1-T17.
+   accident ends. See FIELD FINDING 11, W1-T17. [operator ruling 2026-10-02, W1-T5346: a process
+   reuses a passing proof only while every input the probes read — image build sha, harness revision,
+   rendered worker settings, hook content, CLI version, provider — is unchanged (`probeVerdictKey`),
+   and ledgers each reuse with the proving run; a failed probe is never cached and holds every later
+   run until a probe passes.]
 12. **Supervision is deterministic; judgment is advisory. An LLM may RECOMMEND a halt; only code may
    ENFORCE one.** The flight judge and specialist panels (§4B) return verdicts a deterministic
    controller acts on; no LLM sits in the merge decision, and none edits code. See §4B, W1-T20/21/22,
