@@ -1225,3 +1225,40 @@ test("a run escalated to another model mid-run shows the model its worker now as
   const wrong = compareNow(view, core, body, T0 + 210_000).find((d) => d.path === "board.tasks[taskId=W1-T1].worker.requestedModel");
   assert.equal(wrong?.classification, "real", JSON.stringify(wrong));
 });
+
+test("a queued order set by a costed row only the day's spend read is legacy_horizon", (t) => {
+  // Captured 2026-10-03T17:09Z on core: board.groups.queued read real for 8 merged tasks whose newest row was a
+  // cost.anomaly (it carries cost_usd) in a rotation cut today before legacy's board window. Compaction then
+  // dropped it from the live file, so legacy sorted by an older row; the day's spend read it, and that read was
+  // taken as the board's.
+  const root = scratch(t);
+  const clock = stepped();
+  const core = rig(t, root, "core", clock);
+  const view = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }], { readPlan: () => planOf([task("W1-T1"), task("W1-T2"), task("W1-T3")]), listGrilling: () => [] });
+  clock.set(T0 - 6 * 3_600_000);
+  core.append({ step: "verdict.merged", task_id: "W1-T3", run_id: "r3", pr_number: 3 });
+  clock.set(T0 - 5 * 3_600_000);
+  core.append({ step: "verdict.merged", task_id: "W1-T1", run_id: "r1", pr_number: 1 });
+  clock.set(T0 - 4 * 3_600_000);
+  core.append({ step: "verdict.merged", task_id: "W1-T2", run_id: "r2", pr_number: 2 });
+  clock.set(T0 - 3 * 3_600_000);
+  core.append({ step: "cost.anomaly", task_id: "W1-T1", run_id: "r1", cost_usd: 4.12 });
+  const lines = liveLines(core);
+  archive(core, T0 - 2 * 3_600_000, "gzip", [lines[3]!]);
+  writeFileSync(join(core.ledgerDir, "ledger.ndjson"), `${lines.slice(0, 3).join("\n")}\n`);
+  clock.set(T0);
+  const [body] = view.materialize(ctxOf(clock, [core]));
+  assert.ok(body);
+  assert.deepEqual(body.data.board.groups.queued, ["W1-T1", "W1-T2", "W1-T3"], "the view sorts by the task's newest row");
+  const legacy = view.legacy("instance=core", T0 + 30_000, body.data);
+  assert.deepEqual(legacy?.data.board.groups.queued, ["W1-T2", "W1-T1", "W1-T3"], "legacy's board window cannot see the archived row");
+  const queued = compareNow(view, core, body, T0 + 30_000).find((d) => d.path === "board.groups.queued");
+  assert.equal(queued?.classification, "legacy_horizon", JSON.stringify(queued));
+  // Negative controls: an order and a membership no row explains stay real.
+  body.data.board.groups.queued = ["W1-T3", "W1-T1", "W1-T2"];
+  const order = compareNow(view, core, body, T0 + 30_000).find((d) => d.path === "board.groups.queued");
+  assert.equal(order?.classification, "real", JSON.stringify(order));
+  body.data.board.groups.queued = ["W1-T1", "W1-T9", "W1-T2", "W1-T3"];
+  const member = compareNow(view, core, body, T0 + 30_000).find((d) => d.path === "board.groups.queued");
+  assert.equal(member?.classification, "real", JSON.stringify(member));
+});
