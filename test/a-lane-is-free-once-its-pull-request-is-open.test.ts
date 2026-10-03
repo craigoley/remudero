@@ -103,7 +103,7 @@ test("W1-T5345: every step the in-run path does after CI green has a named owner
   assert.equal(byStep.get("fix_rung"), "sweep", "the fix rung still applies — the sweep's");
   assert.equal(byStep.get("follow_up_harvest"), "before_yield");
   assert.equal(byStep.get("task_credit_trailer"), "before_yield");
-  assert.equal(byStep.get("risk_judge"), "in_run_only", "the per-head risk judgment has no sweep-side owner, and says so");
+  assert.equal(byStep.get("risk_judge"), "sweep", "W1-T5403: the sweep judges a handed-off head before arming it");
 });
 
 test("W1-T5345: a run whose post-CI gate has no sweep-side owner declines the hand-off by name", () => {
