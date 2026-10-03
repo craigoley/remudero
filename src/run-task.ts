@@ -437,6 +437,7 @@ import { makeTempDir, sweepStaleTempDirs, withTempDir, type TempSweepOpts, type 
 import { reapWorkerScratch, sweepStaleWorkerScratch } from "./lib/worker-scratch.js";
 import { DAEMON_LABEL, DIGEST_LABEL, generateDigestLaunchdPlist, generateLaunchdPlist, generateServeLaunchdPlist, generateSupervisorLaunchdPlist, launchctlGuiTarget, launchdPlistPath, parseSupervisorStartInterval, SERVE_LABEL, serveLogPaths, SUPERVISOR_LABEL } from "./lib/launchd.js";
 import { IMAGE_BUILD_SHA_PATH, requestDeploy, runDeployCycle } from "./lib/deployer.js";
+import { realServePolicyDeps, runServePolicyCycle } from "./lib/serve-policy-convergence.js";
 import { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 export { instanceMode, readInstanceRegistryText } from "./lib/instance-mode.js";
 import { runOperatorSync, type OperatorSyncDeps } from "./lib/operator-sync.js";
@@ -16040,11 +16041,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
   let containmentProven: string | undefined;
   let isolationProven: string | undefined;
 
-  // ── Post-spawn CONTAINMENT PREFLIGHT (W1-T2 #2 / WS-0 verdict 7 / Standing rule
-  // 11). Validation proves the file is WELL-FORMED; it does NOT prove the sandbox
-  // ENGAGED (`-p` silently runs unsandboxed on a file it can't apply — FF10a). Once
-  // per run, empirically confirm an outside-cwd write is OS-DENIED before any task
-  // worker runs. FAIL CLOSED: containment unproven ⇒ the run does not proceed.
+  // ── Post-spawn CONTAINMENT PREFLIGHT (W1-T2 #2 / WS-0 verdict 7 / Standing rule 11). Validation
+  // proves the file WELL-FORMED, not that the sandbox ENGAGED (`-p` silently runs unsandboxed — FF10a).
+  // Once per boot and on any change of its inputs (`probeVerdictKey`, W1-T5346), empirically confirm an
+  // outside-cwd write is OS-DENIED; otherwise `reuseProof` replays that verdict — never assumed from
+  // configuration. FAIL CLOSED: containment unproven ⇒ the run does not proceed.
   try {
     const probe = cachedProof !== undefined ? reuseProof("containment", cachedProof) : await probeContainment({
       settingsFile,
@@ -16105,13 +16106,13 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     }
   }
 
-  // ── Isolation PREFLIGHT (W1-T17 / Standing rule 11 / FIELD FINDING 11b): the
-  // current shell isolation (CLAUDE_CODE_SHELL routing the Bash-tool snapshot to
-  // an empty rc) works ONLY because THIS host's `~/.bashrc` happens to be absent
-  // — an accident of the machine, not construction (LEARNINGS.md). A populated
-  // `~/.bashrc` would silently isolate NOTHING. Once per run, empirically confirm
-  // a worker inherits ZERO operator aliases/functions before any task worker
-  // (recon/implement) runs. FAIL CLOSED: a nonzero count means isolation is not
+  // ── Isolation PREFLIGHT (W1-T17 / Standing rule 11 / FIELD FINDING 11b): the current shell
+  // isolation (CLAUDE_CODE_SHELL routing the Bash-tool snapshot to an empty rc) works ONLY because
+  // THIS host's `~/.bashrc` happens to be absent — an accident of the machine, not construction
+  // (LEARNINGS.md). A populated `~/.bashrc` would silently isolate NOTHING. Once per boot and on any
+  // change of its inputs (`probeVerdictKey`, W1-T5346), empirically confirm a worker inherits ZERO
+  // operator aliases/functions before any task worker runs; otherwise `reuseProof` replays that
+  // verdict — never assumed from configuration. FAIL CLOSED: a nonzero count means isolation is not
   // holding on this host — the run refuses to start.
   try {
     if (cashContainmentState.contained) {
@@ -35421,6 +35422,11 @@ async function deployRunCommand(rest: string[]): Promise<number> {
     imageDriftOnly: rest.includes("--image-drift-only"),
   });
   console.log(`### rmd deploy-run — ${result.deployed ? "DEPLOYED" : "no-op"}: ${result.reason}`);
+  const serve = runServePolicyCycle({ ...deps, ...realServePolicyDeps({ installPath: assessment.installRoot, stateRoot: effectiveConfig.root }) }, {
+    dryRun: rest.includes("--dry-run"),
+    imageDriftOnly: rest.includes("--image-drift-only"),
+  });
+  console.log(`### rmd deploy-run — serve ${serve.replaced ? "REPLACED" : "no-op"}: ${serve.reason}`);
   if (result.blocker) {
     // W1-T3694 — legible without tailing a ledger: a stale-running daemon the tick declined to
     // act on names both shas right here, in the one place an operator or an alarm already reads.

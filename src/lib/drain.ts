@@ -11,7 +11,7 @@ import type { RunResult } from "./run-result.js";
 import { headroomExhausted, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
-import { checkDispatchGovernors, governorDeferPayload } from "./dispatch-governor.js";
+import { checkDispatchGovernors, governorDeferPayload, type DispatchGovernorVerdict } from "./dispatch-governor.js";
 import { releasedTaskIds, unmetDependencies, type Plan, type Task } from "./plan.js";
 import {
   NO_OBSERVED_SCOPE,
@@ -787,8 +787,11 @@ export type StopReason =
   /** W1-T321 (the W1-T121 23-open-PR incident): the open-PR count is at/over `policy.wipLimit`.
    *  Distinct from `laneDispatchBudget`, which only SIZES a still-open pass rather than stopping it. */
   | "queue_governor_deferred"
-  /** W1-T5404: host `MemAvailable` is below `policy.memoryFloorMib`. Only the single-lane loop returns it. */
-  | "memory_governor_deferred";
+  /** W1-T5404: host `MemAvailable` is below `policy.memoryFloorMib`. The single-lane loop returns it
+   *  from its pass-level read; {@link runDrainLanes} when the memory gate held every lane (W1-T5482). */
+  | "memory_governor_deferred"
+  /** W1-T5482: a quiet-hours hold refused every lane at admission. Only {@link runDrainLanes}. */
+  | "quiet_hours_deferred";
 
 export interface DrainOpts {
   until?: string;
@@ -1732,6 +1735,40 @@ export function laneDispatchBudget(input: LaneBudgetInput): number {
   return Math.min(lanes, headroom);
 }
 
+/** W1-T5482 — the stop of a lane pass whose EVERY lane `verdict` refused at admission: the gate that
+ *  held, its reading worded as the pass-level checks word it. An unreadable reading is the deferral
+ *  of the gate it came from, with the error kept in the detail. */
+function allLanesHeldStop(verdict: DispatchGovernorVerdict): { stopReason: StopReason; stopDetail: string } {
+  const tail = "every lane deferred by a governor re-checked at dispatch";
+  switch (verdict.kind) {
+    case "cost":
+      return {
+        stopReason: "cost_governor_deferred",
+        stopDetail: `$${verdict.result.observedDayCostUsd.toFixed(2)} spent today at/over the $${verdict.result.ceilingUsd.toFixed(2)} daily ceiling — ${tail}`,
+      };
+    case "queue":
+      return {
+        stopReason: "queue_governor_deferred",
+        stopDetail: `${verdict.result.observedOpenCount} open PRs at/over the ${verdict.result.wipLimit} WIP limit — ${tail}`,
+      };
+    case "memory":
+      return {
+        stopReason: "memory_governor_deferred",
+        stopDetail: `${verdict.result.observedAvailableMib} MiB available below the ${verdict.result.floorMib} MiB memory floor — ${tail}`,
+      };
+    case "quiet_hours":
+      return {
+        stopReason: "quiet_hours_deferred",
+        stopDetail: `quiet hours hold${verdict.result.detail ? `: ${verdict.result.detail}` : ""} — ${tail}`,
+      };
+    case "unreadable":
+      return {
+        stopReason: verdict.source === "cost" ? "cost_governor_deferred" : "queue_governor_deferred",
+        stopDetail: `${verdict.source} governor reading unreadable (${verdict.error}) — failing closed, ${tail}`,
+      };
+  }
+}
+
 /** The concurrent-lane pass loop (W1-T172), entered only via {@link runDrain} when
  *  `opts.laneCount >= 2`. Each pass: the same per-tick checks as the single-lane loop → this pass's
  *  lane BUDGET ({@link laneDispatchBudget}) → up to `budget` candidates from {@link
@@ -2043,9 +2080,11 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     // INVARIANT: a mid-pass refusal must not abort the pass. `break` stops ADMITTING and never
     // touches lanes already admitted — refusing lane 2 is a deferral of lane 2, not a failure of 1.
     const admitted: Task[] = [];
+    let refusal: DispatchGovernorVerdict | undefined;
     for (const t of dispatchSet) {
       const verdict = checkDispatchGovernors(deps, undefined);
       if (verdict) {
+        refusal = verdict;
         // A DISTINCT step from the pass-level `drain.cost_governor`/`drain.queue_governor`: "the pass
         // never started" and "lane 3 of 4 was refused" are different events, and collapsing them hides
         // a partial batch.
@@ -2061,10 +2100,12 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
       admitted.push(t);
     }
     // Every lane refused ⇒ nothing dispatches, and the pass says so rather than reporting
-    // "no_runnable" (there WERE runnable tasks; a governor deferred them).
-    if (admitted.length === 0) {
+    // "no_runnable" (there WERE runnable tasks; a governor deferred them). W1-T5482: it names the
+    // gate that refused — a memory or quiet-hours hold is never reported as a cost deferral.
+    if (admitted.length === 0 && refusal) {
       await flushLifetimePressure();
-      return summary("cost_governor_deferred", "every lane deferred by a governor re-checked at dispatch");
+      const held = allLanesHeldStop(refusal);
+      return summary(held.stopReason, held.stopDetail);
     }
 
     for (const t of admitted) {

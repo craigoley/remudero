@@ -148,6 +148,29 @@ export function resourcePolicyDriftFrom(expectedArgs: string, hostConfigJson: st
   return drift;
 }
 
+/** W1-T4267: evaluate `role`'s policy through the sourced deploy/resource-policy.sh the launchers
+ *  apply, and compare it with `container`'s live HostConfig. Any failure is UNKNOWN (`undefined`). */
+export function readResourcePolicyDrift(
+  exec: (cmd: string, args: string[]) => string,
+  installPath: string,
+  role: "serve" | "build",
+  container: string,
+): ResourcePolicyDrift[] | undefined {
+  try {
+    const expectedArgs = exec("bash", [
+      "-c",
+      'source "$1" || exit 2; if [ "$2" = serve ]; then resource_policy_serve_args; a=("${RESOURCE_POLICY_SERVE_ARGS[@]}"); ' +
+        'else resource_policy_build_args; a=("${RESOURCE_POLICY_BUILD_ARGS[@]}"); fi; printf "%s\\n" "${a[@]}"',
+      "resource-policy",
+      join(installPath, "deploy", "resource-policy.sh"),
+      role,
+    ]);
+    return resourcePolicyDriftFrom(expectedArgs, exec("docker", ["inspect", container, "--format", "{{json .HostConfig}}"]));
+  } catch {
+    return undefined; // no policy file, no bash, or no such container — never a recycle trigger
+  }
+}
+
 /** An automatic image recycle does not follow a recorded deploy failure sooner than this. */
 export const IMAGE_RECYCLE_FAILURE_BACKOFF_MS = 60 * 60_000;
 
@@ -1076,6 +1099,20 @@ export interface DeployDeps {
   imageBakedCommitsBehind?: () => number | undefined;
   /** W1-T4267: compare policy arguments with Docker HostConfig. Undefined means UNKNOWN. */
   resourcePolicyDrift?: () => ResourcePolicyDrift[] | undefined;
+  // ── SERVE POLICY CONVERGENCE (serve-policy-convergence.ts) ── wired for the primary instance only.
+  /** remudero-serve's live HostConfig against the serve role's policy; undefined is UNKNOWN. */
+  servePolicyDrift?: () => ResourcePolicyDrift[] | undefined;
+  /** Is a PAUSE marker set? Omitted or undefined reads as set. */
+  pausePresent?: () => boolean | undefined;
+  /** Has the supervisor an unfinished handoff (ledger)? undefined reads as in progress. */
+  serveHandoffInProgress?: () => boolean | undefined;
+  /** Is remudero-serve running and not restarting? */
+  serveHealthy?: () => boolean | undefined;
+  /** `deploy/serve-container.sh --replace`; throws when the launcher refuses or fails. */
+  replaceServe?: () => void;
+  servePolicyLastFailedAtMs?: () => number | undefined;
+  recordServePolicyFailure?: (message: string, atMs: number) => void;
+  clearServePolicyFailure?: () => void;
   /** The newest origin/main commit touching {@link IMAGE_BAKED_PATHS}. */
   newestBakedSha?: () => string | undefined;
   /** Is an image CONTAINING that commit published (W1-T4809: tagged with it, or built from a
@@ -1922,25 +1959,15 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       if (baked === undefined && playwright === undefined && workerSdk === undefined) return undefined;
       return (baked ?? 0) + (playwright ?? 0) + (workerSdk ?? 0);
     },
-    resourcePolicyDrift: () => {
+    resourcePolicyDrift: () =>
       // W1-T4267: the launcher names the container and role it owns; the policy is evaluated by the
       // SAME sourced shell file recycle-container.sh applies. Either side unreadable ⇒ UNKNOWN.
-      const container = process.env.RMD_RESOURCE_POLICY_CONTAINER || imageShaContainer;
-      const role = process.env.RMD_RESOURCE_POLICY_ROLE === "serve" ? "serve" : "build";
-      try {
-        const expectedArgs = exec("bash", [
-          "-c",
-          'source "$1" || exit 2; if [ "$2" = serve ]; then resource_policy_serve_args; a=("${RESOURCE_POLICY_SERVE_ARGS[@]}"); ' +
-            'else resource_policy_build_args; a=("${RESOURCE_POLICY_BUILD_ARGS[@]}"); fi; printf "%s\\n" "${a[@]}"',
-          "resource-policy",
-          join(o.installPath, "deploy", "resource-policy.sh"),
-          role,
-        ]);
-        return resourcePolicyDriftFrom(expectedArgs, exec("docker", ["inspect", container, "--format", "{{json .HostConfig}}"]));
-      } catch {
-        return undefined; // no policy file, no bash, or no such container — never a recycle trigger
-      }
-    },
+      readResourcePolicyDrift(
+        exec,
+        o.installPath,
+        process.env.RMD_RESOURCE_POLICY_ROLE === "serve" ? "serve" : "build",
+        process.env.RMD_RESOURCE_POLICY_CONTAINER || imageShaContainer,
+      ),
     newestBakedSha: () => {
       let newestBaked: string | undefined;
       try {
