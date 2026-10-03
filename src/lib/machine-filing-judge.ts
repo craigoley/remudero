@@ -291,6 +291,10 @@ interface MachineJudgeState {
   /** The judge's answer for a record not yet landed, by the pin it judged: reused with no model call
    *  while the record is unchanged (2026-09-30: 1,152 calls re-ruled the same 19 records). */
   rulings?: Record<string, { pin: string; ruling: FilingRiskRuling; bar: number }>;
+  /** A record whose rendered ruling main already carries byte for byte, by the pin it was judged at:
+   *  not re-rendered while the daemon's lagging checkout still reads it as due (W1-T5359, 2026-10-02:
+   *  W1-T5309's merged ruling was re-landed 38 times, each an empty commit that stalled the loop). */
+  settled?: Record<string, string>;
 }
 
 function readState(path: string): MachineJudgeState {
@@ -329,6 +333,8 @@ export interface MachineJudgeReport {
   refused: string[];
   /** Records whose landing threw: ledgered and skipped, never aborting the rest of the pass. */
   failed: string[];
+  /** Records whose ruling the landing tree already carries: nothing to land, and not a failure. */
+  settled: string[];
   prUrl?: string;
 }
 
@@ -363,7 +369,7 @@ export function machineJudgeProposal(ruled: Extract<MachineJudgement, { kind: "r
 export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<MachineJudgeReport> {
   const statePath = join(ports.stateDir, MACHINE_JUDGE_STATE_FILE);
   const state = readState(statePath);
-  const report: MachineJudgeReport = { proceeded: [], escalated: [], unavailable: [], refused: [], failed: [] };
+  const report: MachineJudgeReport = { proceeded: [], escalated: [], unavailable: [], refused: [], failed: [], settled: [] };
   if (state.pending) {
     const pr = ports.prState?.(state.pending.prUrl) ?? "unknown";
     if (pr === "open" || pr === "unknown") {
@@ -388,12 +394,20 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   const due = plan.tasks.filter(
     (t) =>
       needsMachineJudgement(t, released) &&
+      state.settled?.[t.id] !== taskRulingPin(t) &&
       (released.has(t.id) || (!excluded.has(judgementFamily(t)) && state.declined?.[t.id] !== taskRulingPin(t))),
   );
   const policy = ports.riskPolicy?.() ?? DEFAULT_RISK_POLICY;
   const dueIds = new Set(due.map((t) => t.id));
   state.rulings = Object.fromEntries(
     Object.entries(state.rulings ?? {}).filter(([id, c]) => dueIds.has(id) && c.pin === taskRulingPin(plan.byId.get(id)!)),
+  );
+  // Kept only while the plan still reads the record at the pin it was settled at.
+  state.settled = Object.fromEntries(
+    Object.entries(state.settled ?? {}).filter(([id, pin]) => {
+      const t = plan.byId.get(id);
+      return t !== undefined && pin === taskRulingPin(t);
+    }),
   );
   const records = new Map<string, FamilyTrackRecord>();
   const ruled: Extract<MachineJudgement, { kind: "ruled" }>[] = [];
@@ -461,8 +475,17 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
           ports.log("machine_judge.refused", { task_id: r.task.id, reason: out.refused });
           continue;
         }
-        writeAtomic(join(root, relPath), out.contents);
         const pin = shardRecord(out.contents, relPath).risk_ruling!.pin;
+        if (out.contents === text) {
+          // Main already carries this exact ruling: the daemon's plan lags the landing tree, so
+          // landing it again commits nothing and throws. Settled by its pin instead (W1-T5359).
+          delete state.rulings[r.task.id];
+          state.settled[r.task.id] = taskRulingPin(r.task);
+          report.settled.push(r.task.id);
+          ports.log("machine_judge.already_landed", { task_id: r.task.id, pin });
+          continue;
+        }
+        writeAtomic(join(root, relPath), out.contents);
         landed.push({ id: r.task.id, relPath, pin, action: r.ruling.action });
         if (r.ruling.action === "proceed") report.proceeded.push(r.task.id);
         else {
