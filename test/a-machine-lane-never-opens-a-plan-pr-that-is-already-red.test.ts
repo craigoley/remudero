@@ -9,8 +9,8 @@
  * Every git fixture comes from test/helpers/git-repo.ts; GitHub is a recording fetcher / fake `gh`, never the network.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -185,9 +185,43 @@ test("TASK_ID_UNREADABLE_RE reads the script's own required-but-unreadable refus
 
 // ── the real checks, shelled out against the exact tree ─────────────────────────────────────
 
+function lintPrecheckFiles(): Record<string, string> {
+  return Object.fromEntries(["scripts/lint-plan-precheck.mjs", "scripts/lib/argv.mjs", "scripts/lib/git.mjs"]
+    .map((path) => [path, readFileSync(join(REPO_ROOT, path), "utf8")]));
+}
+
+test("the emitter loads in a source-only sandbox and reports the absent lint script as unreadable", () => {
+  const sandbox = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w5348-source-only-`));
+  try {
+    for (const dir of ["src", "plan"]) cpSync(join(REPO_ROOT, dir), join(sandbox, dir), { recursive: true });
+    for (const file of ["package.json", "tsconfig.json"]) copyFileSync(join(REPO_ROOT, file), join(sandbox, file));
+    symlinkSync(join(REPO_ROOT, "node_modules"), join(sandbox, "node_modules"));
+    const env: NodeJS.ProcessEnv = { ...process.env, NODE_V8_COVERAGE: undefined };
+    delete env.NODE_TEST_CONTEXT;
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", `
+      import { planPrPreflight, renderAcceptanceBlock } from './src/lib/plan-pr-emitter.ts';
+      console.log(JSON.stringify({
+        block: renderAcceptanceBlock([{ claim: 'filed', proof: 'grep: id in shard.yaml' }]),
+        result: planPrPreflight({ cwd: process.cwd(), title: 'chore(plan): file a task', body: '' })
+      }));
+    `], { cwd: sandbox, encoding: "utf8", env });
+    assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`);
+    const { block, result } = JSON.parse(child.stdout);
+    assert.equal(block, "Acceptance:\n- filed | grep: id in shard.yaml");
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.failures, []);
+    assert.deepEqual(result.unreadable.find((u: { check: string }) => u.check === "lint-plan"), {
+      check: "lint-plan", firstLine: "scripts/lint-plan-precheck.mjs is absent from the tree",
+    });
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
 test("the default checks really run on a materialized commit: an unreserved id and a stale shard proof refuse", () => {
   const f = originWith(
     {
+      ...lintPrecheckFiles(),
       "README.md": "seed\n",
       "base.txt": "already-on-main\n",
       "package.json": JSON.stringify({ scripts: { "lint-plan:fast": "node fake-lint.mjs --base origin/main" } }),
@@ -220,6 +254,32 @@ test("the default checks really run on a materialized commit: an unreserved id a
   const absent = planPrPreflight({ cwd: bare.dir, title: "chore(plan): x", body: "## Acceptance\n- c | grep: x in README.md" });
   assert.equal(absent.ok, true, "no script in the tree is unreadable, never red");
   assert.deepEqual(absent.unreadable.map((u) => u.check), ["lint-plan", "task-id-existence", "proof-discrimination", "shard-census"]);
+});
+
+test("the default lint precheck refuses a named violation and reports an execution error as unreadable", () => {
+  const f = originWith({
+    ...lintPrecheckFiles(),
+    "package.json": JSON.stringify({ scripts: { "lint-plan:fast": "node fake-lint.mjs --base origin/main" } }),
+    "fake-lint.mjs": "console.error('✗ W9-T1\\n    [proof-dialect] invalid proof'); process.exit(1);\n",
+  }, "w5348-real-lint");
+  mkdirSync(join(f.clone.dir, "plan"));
+  writeFileSync(join(f.clone.dir, "plan", "new.yaml"), "id: W9-T1\n");
+  f.clone.git("add", "-A");
+  f.clone.git("commit", "-q", "-m", "chore(plan): file a task");
+  const input = { cwd: f.clone.dir, title: "chore(plan): file a task", body: "" };
+  const { lintPlan: _unused, ...checks } = offlineChecks;
+  const red = planPrPreflight(input, checks);
+  assert.equal(red.ok, false);
+  assert.deepEqual(red.failures.map((x) => x.check), ["lint-plan"]);
+  assert.match(red.failures[0].firstLine, /REFUSES.*proof-dialect/);
+  assert.deepEqual(red.unreadable, []);
+
+  writeFileSync(join(f.clone.dir, "fake-lint.mjs"), "console.error('lint unavailable'); process.exit(2);\n");
+  const unreadable = planPrPreflight(input, checks);
+  assert.equal(unreadable.ok, true);
+  assert.deepEqual(unreadable.failures, []);
+  assert.deepEqual(unreadable.unreadable.map((x) => x.check), ["lint-plan"]);
+  assert.match(unreadable.unreadable[0].firstLine, /exited 2.*not blocking/);
 });
 
 // ── the lanes ───────────────────────────────────────────────────────────────────────────────

@@ -21,8 +21,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-// @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
-import { runLintPlanPrecheck } from "../../scripts/lint-plan-precheck.mjs";
 import { acceptanceBlockDiagnostics, parseAcceptanceBlock, parseWhitelistedProof } from "./review.js";
 import { emDashSeparatedProof, refuseNonDiscriminatingCriteria } from "./body-repair.js";
 import {
@@ -495,6 +493,7 @@ export interface PlanPrPreflightReading {
   output: string;
 }
 
+const LINT_PLAN_SCRIPT = "scripts/lint-plan-precheck.mjs";
 const TASK_ID_SCRIPT = "scripts/task-id-existence-check.mjs";
 const SHARD_CENSUS_TEST = "test/every-shard-on-main-is-lintable.test.ts";
 const RUN_TASK_ENTRY = "src/run-task.ts";
@@ -515,11 +514,7 @@ function runInTree(cwd: string, relPath: string, argv: string[]): PlanPrPrefligh
 
 /** The four checks that shell out, each run inside `cwd`; `checkProof` answers `rmd check-proof`'s exit status. */
 const defaultPreflightChecks = {
-  lintPlan: (cwd: string): PlanPrPreflightReading => {
-    const lines: string[] = [];
-    const status = runLintPlanPrecheck({ cwd, log: (l: string) => lines.push(l), warn: (l: string) => lines.push(l) }) as number;
-    return { status, output: lines.join("\n") };
-  },
+  lintPlan: (cwd: string): PlanPrPreflightReading => runInTree(cwd, LINT_PLAN_SCRIPT, [LINT_PLAN_SCRIPT]),
   taskIdExistence: (cwd: string): PlanPrPreflightReading => {
     const r = runInTree(cwd, TASK_ID_SCRIPT, [TASK_ID_SCRIPT, "--base", "origin/main", "--require-open-prs"]);
     return r.status === 1 && TASK_ID_UNREADABLE_RE.test(r.output) ? { ...r, status: null } : r;
