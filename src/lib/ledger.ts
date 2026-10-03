@@ -176,6 +176,33 @@ export function ledgerRowActor(line: { actor?: unknown }): LedgerRowActor {
   return line.actor === "daemon" || line.actor === "worker" || line.actor === "operator" ? line.actor : "unknown";
 }
 
+/** W1-T5407: how far a row's `ts` may run ahead of the ledger file's own mtime before
+ *  {@link appendLedger} follows it with a {@link LEDGER_FUTURE_STAMP_STEP} row. */
+export const LEDGER_FUTURE_STAMP_TOLERANCE_MS = 10 * 60_000;
+export const LEDGER_FUTURE_STAMP_STEP = "ledger.future_stamp";
+
+/** The {@link LEDGER_FUTURE_STAMP_STEP} row for `record`, or `undefined` when its `ts` sits within
+ *  tolerance of `mtimeMs` — the kernel's clock, which a skewed process clock cannot move (the
+ *  same ceiling W1-T4100 holds archive NAMES to). The offending row itself stays: append-only. */
+function futureStampRow(record: Record<string, unknown>, mtimeMs: number): Record<string, unknown> | undefined {
+  const skewMs = Date.parse(String(record.ts)) - mtimeMs;
+  if (!(skewMs > LEDGER_FUTURE_STAMP_TOLERANCE_MS)) return undefined;
+  return {
+    ts: fixedClock(mtimeMs).iso(),
+    host: record.host,
+    actor: record.actor,
+    actor_pid: record.actor_pid,
+    run_id: record.run_id,
+    task_id: record.task_id,
+    step: LEDGER_FUTURE_STAMP_STEP,
+    claimed_ts: record.ts,
+    skew_ms: skewMs,
+    flagged_step: record.step,
+    flagged_actor: record.actor,
+    flagged_host: record.host,
+  };
+}
+
 /**
  * Append one line. The record is issued as exactly ONE `writeSync` and the kernel's acceptance is
  * checked, so a writer's record is never split across two syscalls with another appender's line in
@@ -205,12 +232,18 @@ export interface LedgerWriterDeps {
 export function appendLedger(
   path: string,
   line: LedgerLine,
-  opts: { ceilingBytes?: number; identity?: () => string; actor?: () => LedgerActor } = {},
+  opts: {
+    ceilingBytes?: number;
+    identity?: () => string;
+    actor?: () => LedgerActor;
+    clock?: Clock;
+    fstat?: (fd: number) => { mtimeMs: number };
+  } = {},
 ): void {
   assertLedgerPathNotLive(path);
   mkdirSync(dirname(path), { recursive: true });
   const record = {
-    ts: new Date().toISOString(),
+    ts: (opts.clock ?? systemClock).iso(),
     host: (opts.identity ?? hostname)(),
     actor: (opts.actor ?? deriveLedgerActor)(),
     actor_pid: process.pid,
@@ -226,6 +259,13 @@ export function appendLedger(
           `the record may be torn; see readLedgerLines' torn-line handling`,
       );
     }
+    let flag: Record<string, unknown> | undefined;
+    try {
+      flag = futureStampRow(record, (opts.fstat ?? fstatSync)(fd).mtimeMs);
+    } catch (err) {
+      console.error(`ledger: could not stat ${path} to check the row's ts for future skew: ${String(err)}`);
+    }
+    if (flag) writeSync(fd, JSON.stringify(flag) + "\n");
   } finally {
     closeSync(fd);
   }
