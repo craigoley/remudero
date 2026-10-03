@@ -12,7 +12,8 @@
  * Pacing that used to live in each starter's closure (a minimum interval, the test garden's hourly evidence
  * refresh) stays in the parent, because a child starts fresh every pass.
  */
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { setPriority as osSetPriority } from "node:os";
 import { systemClock, type Clock } from "./clock.js";
 import { gardenLedgerBucket } from "./gardener.js";
 import { HOST_RESOURCE_MIN_INTERVAL_MS } from "./host-resource-gardener.js";
@@ -176,24 +177,95 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
 }
 
 /**
+ * BACKSTOP (W1-T5365): the V8 heap a garden child may hold. Without it a child inherited node's default, measured at
+ * 8,240 MB in the daemon container on 2026-10-03, and two may run at once. On 2026-10-02 (research/loop-stall.md §1a)
+ * backlog reached 1.75 GB RSS + 2.0 GB swap and ci-friction 2.4 GB RSS + 1.25 GB swap, both holding the 1.37 GB ledger
+ * union as objects, and the daemon spent 38% of its main-thread samples on swap-in. Two passes at this cap leave the
+ * 15 GiB host its daemon. The PRIMARY CONTROL is each garden reading only the steps it needs (W1-T5363, W1-T5364); a
+ * garden that outgrows this fails its own pass. MEASURED 2026-10-03: config-gardener's 60-day union read peaks at
+ * 3,163 MB of heap (2.85M rows) and dies under a 1,536 MB cap, so it is the next garden this names.
+ */
+export const GARDEN_CHILD_HEAP_LIMIT_MB = 2048;
+
+/** A garden child's CPU niceness: a heavy pass yields the CPU to the daemon instead of competing on equal terms. */
+export const GARDEN_CHILD_NICENESS = 10;
+
+/** Noted once per refusal kind ("nice" | "ionice") when the host will not lower a garden child's priority. */
+export const GARDEN_PRIORITY_DEGRADED_STEP = "garden.priority_degraded";
+
+/** The `garden.pass` error prefix for a child that died of its heap cap, so it never reads as an ordinary failure. */
+export const GARDEN_HEAP_EXHAUSTED = "heap_exhausted";
+
+const HEAP_EXHAUSTED_STDERR = /heap out of memory/;
+const STDERR_TAIL_CHARS = 8 * 1024;
+
+/**
  * The production pass: `rmd garden run <name>` as a child of THIS process's own node and loader, so the
  * child runs the same source tree and inherits the same config root, state and ledger actor. Self-sync is
- * skipped in the child: the parent already decided which code it runs.
+ * skipped in the child: the parent already decided which code it runs. The child runs under
+ * {@link GARDEN_CHILD_HEAP_LIMIT_MB}, niced, and in the idle IO class where an `ionice` binary exists.
  */
 export function childGardenPassSpawn(
-  opts: { execPath?: string; execArgv?: readonly string[]; entry?: string; cwd?: string; env?: NodeJS.ProcessEnv } = {},
+  opts: {
+    execPath?: string;
+    execArgv?: readonly string[];
+    entry?: string;
+    cwd?: string;
+    env?: NodeJS.ProcessEnv;
+    heapLimitMb?: number;
+    setPriority?: (pid: number, priority: number) => void;
+    ionice?: string;
+    log?: (step: string, extra?: Record<string, unknown>) => void;
+  } = {},
 ): GardenPassSpawn {
   const execPath = opts.execPath ?? process.execPath;
   const execArgv = opts.execArgv ?? process.execArgv;
   const entry = opts.entry ?? process.argv[1] ?? "";
+  const heapLimitMb = opts.heapLimitMb ?? GARDEN_CHILD_HEAP_LIMIT_MB;
+  const setPriority = opts.setPriority ?? osSetPriority;
+  const log = opts.log ?? ((step, extra) => void process.stderr.write(`${JSON.stringify({ step, ...extra })}\n`));
+  const noted = new Set<string>();
+  const firstRefusal = (how: "nice" | "ionice"): boolean => !noted.has(how) && noted.add(how).has(how);
+  const refusal = (how: "nice" | "ionice", e: unknown) => ({ how, error: String((e as Error)?.message ?? e) });
   return (name, args) =>
     new Promise((resolve, reject) => {
-      const child = spawn(execPath, [...execArgv, entry, "garden", "run", name, ...args], {
+      // The cap follows the inherited flags: V8 takes the last `--max-old-space-size` it is given.
+      const child = spawn(execPath, [...execArgv, `--max-old-space-size=${heapLimitMb}`, entry, "garden", "run", name, ...args], {
         cwd: opts.cwd,
         env: { ...(opts.env ?? process.env), [SELF_SYNC_GUARD_ENV]: "1" },
-        stdio: "ignore",
+        stdio: ["ignore", "ignore", "pipe"],
       });
+      let stderr = "";
+      child.stderr?.on("data", (chunk: Buffer | string) => {
+        stderr = `${stderr}${String(chunk)}`.slice(-STDERR_TAIL_CHARS);
+      });
+      let lowered: Promise<void> = Promise.resolve();
+      const pid = child.pid;
+      if (pid !== undefined) {
+        try {
+          setPriority(pid, GARDEN_CHILD_NICENESS);
+        } catch (e) {
+          if (firstRefusal("nice")) log(GARDEN_PRIORITY_DEGRADED_STEP, refusal("nice", e));
+        }
+        lowered = new Promise((done) => {
+          execFile(opts.ionice ?? "ionice", ["-c", "3", "-p", String(pid)], { timeout: 5_000 }, (e) => {
+            // A child that already exited cannot be re-classed; that is not the host refusing.
+            if (e && child.exitCode === null && child.signalCode === null && firstRefusal("ionice")) {
+              log(GARDEN_PRIORITY_DEGRADED_STEP, refusal("ionice", e));
+            }
+            done();
+          });
+        });
+      }
       child.once("error", reject);
-      child.once("exit", (code) => resolve(code));
+      child.once("close", (code, signal) => {
+        void lowered.then(() => {
+          if (signal !== null && HEAP_EXHAUSTED_STDERR.test(stderr)) {
+            reject(new Error(`${GARDEN_HEAP_EXHAUSTED}: garden ${name} exceeded its ${heapLimitMb} MB heap cap (${signal})`));
+          } else {
+            resolve(code);
+          }
+        });
+      });
     });
 }
