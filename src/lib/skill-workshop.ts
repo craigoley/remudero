@@ -483,6 +483,21 @@ function splitFrontmatter(text: string): { front: string; body: string } {
   return m ? { front: m[1], body: text.slice(m[0].length) } : { front: "", body: text };
 }
 
+export function describeSkillInjectionReachability(draft: SkillDraft): { reachable: boolean; reason: string } {
+  const { front } = splitFrontmatter(draft.markdown);
+  const match = SKILL_APPLIES_TO_RE.exec(front);
+  const appliesTo = match
+    ? match[1].split(",").map((s) => s.trim().toLowerCase()).filter((s) => s.length > 0)
+    : [];
+  if (appliesTo.length === 0) {
+    return { reachable: false, reason: "no non-empty applies-to frontmatter line, so the draft does not opt in to prompt injection" };
+  }
+  return {
+    reachable: true,
+    reason: `applies-to: ${appliesTo.join(", ")} opts in to prompt injection after approval via loadInjectableSkills/selectSkillsForTask`,
+  };
+}
+
 /**
  * Every APPROVED skill under `dir` (`.claude/skills/<name>/SKILL.md`) that opted in to injection.
  *
@@ -968,13 +983,13 @@ export function stageSkillDrafts(
   registryPath: string,
   drafts: readonly SkillDraft[],
   allowlist: WorkerAllowlist,
-  reachability: { reachable: boolean; reason: string },
+  reachability: (draft: SkillDraft) => { reachable: boolean; reason: string },
   log: (step: string, extra?: Record<string, unknown>) => void,
   stageOne: typeof stageSkillDraft = stageSkillDraft,
 ): void {
   for (const draft of drafts) {
     try {
-      const r = stageOne(registryPath, draft, allowlist, reachability);
+      const r = stageOne(registryPath, draft, allowlist, reachability(draft));
       log("skill.staged", { name: draft.name, staged: r.staged, already: r.alreadyStaged, backfilled: r.backfilled === true, refreshed: r.refreshed === true, refused: r.refused, reason: r.reason });
     } catch (e) {
       log("skill.stage_failed", { name: draft.name, error: String((e as Error)?.message ?? e) });

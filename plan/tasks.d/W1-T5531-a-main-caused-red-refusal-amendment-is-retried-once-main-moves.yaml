@@ -1,0 +1,39 @@
+- id: W1-T5531
+  title: "A MAIN-CAUSED RED REFUSAL AMENDMENT IS RETRIED ONCE MAIN MOVES — W1-T5405 records a red preflight as the source run's `refusal_amendment.drafted` outcome, and `noPrVerdictRowsFromLedger` then treats that run as handled forever, even when origin/main itself was red and the amendment was fine"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: found reviewing W1-T5405 (#8898)"
+  plan_refs: [W1-T5405, W1-T5521]
+  files: [src/lib/refusal-amendment.ts, src/lib/sweep.ts, test/a-main-caused-red-refusal-amendment-is-retried-once-main-moves.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-03 on origin/main 3e026b90. When the sweep's refusal-amendment preflight is red,
+    `openAmendmentPr` (src/lib/sweep.ts) logs `REFUSAL_AMENDMENT_STEP` with `outcome: "preflight_refused"`
+    and throws `PlanPrPreflightRefusedError`. `noPrVerdictRowsFromLedger` (src/lib/refusal-amendment.ts)
+    adds every `refusal_amendment.drafted` row's `task_id` + `source_run_id` to `handled`, whatever its
+    outcome. So a refusal is never re-drafted for that run. That suits a red caused by the amendment.
+    On 2026-10-03 main itself went red twice (two duplicate-key merges, #8877 and #8922), and an amendment
+    preflighted on such a main fails checks it did not cause. It is then given up for good.
+    Rule 19: one concern (a main-caused refusal is retried) across the sweep that records it and the
+    reader that decides, so the band is high with band_meaning: span.
+  design: |
+    The sweep's preflight_refused row adds `origin_main_sha` (the base the preflight ran on) and
+    `main_red: true` when every failing check also fails on that origin/main alone (shard census and
+    lint-plan on the base tree). `noPrVerdictRowsFromLedger` treats a `main_red` refusal as handled only
+    while origin/main is still that sha (passed in from the sweep's fetched main) and retries at most once.
+    A second preflight_refused row for the same source run is final. An amendment-caused red stays final
+    on the first refusal.
+  acceptance:
+    - claim: "a refusal amendment refused only because origin/main was red is offered again once origin/main moves past the recorded sha, at most once, while an amendment-caused red refusal and a second refusal stay final"
+      proof: "unit test: test/a-main-caused-red-refusal-amendment-is-retried-once-main-moves.test.ts"
+  falsifier: |
+    Treat every `refusal_amendment.drafted` row as handled again. The suite's main-red refusal is never
+    offered after main moves.

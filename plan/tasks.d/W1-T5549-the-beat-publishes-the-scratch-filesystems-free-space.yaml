@@ -1,0 +1,33 @@
+- id: W1-T5549
+  title: "THE BEAT PUBLISHES THE SCRATCH FILESYSTEM'S FREE SPACE — W1-T2767 folded `/` and the state disk into `disk_min_free_kb` but not /mnt/scratch, where worktrees, gate workspaces and the 24 GB swapfile live and which sat at 87-89% on 2026-10-03"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: low
+  origin: "operator session 2026-10-03: /mnt/scratch research (W1-T2767's remaining blind spot)"
+  plan_refs: [W1-T2767, W1-T5548, W1-T5513]
+  files: [scripts/fleet-heartbeat.sh, test/the-beat-publishes-the-scratch-filesystems-free-space.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-03 on origin/main 3e026b90. scripts/fleet-heartbeat.sh (W1-T2767) publishes
+    `root_fs_free_kb`, the state device, and `disk_min_free_kb`, which is the minimum over `DISK_FREE_KB`
+    (`df -Pk $RMD_ROOT`) and `ROOT_FS_FREE_KB` (`df -Pk /`), deduped by device. /mnt/scratch is a third
+    device (/dev/nvme1n1, 433G). It holds /mnt/scratch/worktrees, every gate workspace and the swapfile,
+    and it is not measured. A full scratch disk halts builds and swap, and the beat would read green.
+  design: |
+    Read the scratch filesystem from `RMD_SCRATCH_ROOT` (default /mnt/scratch, skipped when absent).
+    Publish `scratch_fs_free_kb` and `scratch_fs_device`, and fold it into `disk_min_free_kb` with the
+    existing device dedup, so a scratch path on / or the state disk is not counted twice. An unreadable
+    scratch filesystem is `unknown` and never drags the minimum to `unknown` or to 0, matching the existing
+    discipline.
+  acceptance:
+    - claim: "the beat publishes scratch_fs_free_kb and folds it into disk_min_free_kb once per device, and an unreadable scratch filesystem reads unknown without changing a readable minimum"
+      proof: "unit test: test/the-beat-publishes-the-scratch-filesystems-free-space.test.ts"
+  falsifier: |
+    Leave the scratch reading out of the minimum. The suite's fixture whose scratch device is fullest
+    reports the larger state-disk number as `disk_min_free_kb`.
