@@ -1,0 +1,81 @@
+- id: W1-T5481
+  title: "THE DAEMON LOOP STAYS RESPONSIVE THROUGH ITS CADENCE PHASE — after W1-T5361 and W1-T5366 merged, the core daemon still stalled 209 s, 290 s and 215 s between 17:00Z and 17:04Z on 2026-10-03 with ms_in_cadences 210391, and no review posted from 16:30:50Z to past 17:16Z; find the synchronous cadence work and move it off the loop"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: live ledger read (read-only) of DAEMON-1791045529831, 16:38Z-17:16Z"
+  plan_refs: [W1-T147, W1-T5361, W1-T5366, W1-T4041, W1-T4051, W1-T3109, W1-T4075, W1-T4970]
+  files: [src/run-task.ts, src/lib/daemon.ts, test/the-cadence-work-that-stalled-the-daemon-loop-runs-off-it.test.ts, test/the-daemon-loop-lag-stays-bounded-through-a-cadence-phase.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-03, read-only, from the live ledger plus its 16:00Z-17:13Z rotations (the archive
+    union returned 3,341 rows for 16:00-17:59Z and 25 `daemon.loop_lag` rows, so the read could see its
+    corpus). Daemon run DAEMON-1791045529831, container pid 102, booted about 16:38Z, on code that carries
+    W1-T5361 (#8833, machine judge off the loop) and W1-T5366 (#8829, the dispatch ticker never waits on a
+    full sweep).
+    - `daemon.loop_lag` (phase pulse, 60 s interval): 16:41:43Z 90.7 s, 16:44:25Z 102.0 s, 16:48:42Z 197.0 s,
+      16:52:17Z 155.1 s, 16:56:36Z 113.8 s, 17:00:07Z 209.5 s, 17:02:26Z 290.4 s, 17:03:52Z 214.9 s,
+      17:12:48Z 162.5 s. The previous run (DAEMON-1791039063857) logged 429.0 s at 16:13:36Z and 244.3 s at
+      16:37:27Z, so this predates the 16:38Z boot.
+    - `daemon.tick_phases` at 17:03:53Z: ms_to_admission 599334, ms_in_cadences 210391,
+      sweep_in_flight true (16:53:29Z: 314937 / 71643 / true).
+    - Row timeline of the cadence phase in `runDaemon` (src/lib/daemon.ts, between `cadencesStartedAtMs`
+      and the `daemon.tick_phases` log). `daemon.orphan_sweep` 16:56:36.8Z, then `daemon.feedback_landing_sweep`
+      16:58:21.7Z (105 s in `deps.sweepFeedbackLanding`). The github-posture, measurement, digest, compaction,
+      benchmark and ci-learning checks finish by 16:58:22.2Z. `board_review.fired` lands at 16:59:17.5Z, so the
+      synchronous `checkBoardReview` (`buildBoardReviewDaemonHooks` in src/run-task.ts: `itemsFor()` →
+      `defaultBoardReviewItems` → `fetchOpenPrsRest(…, ghJson)`, then the reconciler) took 55 s. Then
+      `board_review.ran` 17:00:07.0Z (50 s in `runBoardReview`, which calls `itemsFor()` a second time), and
+      `daemon.loop_lag` 209456 ms follows 65 ms later. No timer fired anywhere in that 210 s.
+    - The next two stalls end on rows from other paths: `sweep.plan_filing_classified` 17:01:37Z, then
+      `review.capacity` 17:02:25Z, then loop_lag 290 s at 17:02:26Z. `triage.synthesized` 17:02:27.7Z, then
+      `pr.opened` 17:03:52.2Z, then loop_lag 215 s at 17:03:52.4Z. The in-flight sweep shares the loop, so
+      its synchronous stretches count too.
+    - `garden.pass` rows (logged by the parent when a child exits) report 1,051,958-1,621,624 ms for gate,
+      backlog, test, overseer, machine-judge and host-resource, and they land in clusters right as each stall
+      clears (17:03:53Z, 17:04:39Z, 17:06:14Z, 17:08:06Z). The operator observed one garden child at 3.8 GB RSS.
+    - No `review.posted` row from 16:30:50Z through the end of the live file (17:16:43Z); six landed
+      16:26-16:30Z, so the query sees them.
+    - Host at about 17:20Z (/proc, read-only). Swap used 5.2 GB of 28 GB, vmstat si up to 5,604 and so up to
+      2,538 pages/s, IO PSI some avg60 45% and full avg60 38%. The daemon process (host pid 3690164) had
+      VmRSS 1.19 GB and VmSwap 2.38 GB. Its main thread sat in `futex_do_wait` in 29 of 40 samples
+      (V8 GC joins and `Atomics.wait` sleeps both wait on a futex).
+    Garden passes run in child processes, so a child alone does not block the loop. But the 2026-10-02
+    diagnosis (research/loop-stall.md §1a) found that swap pressure from garden children turns every
+    synchronous stretch in the daemon into minutes. W1-T4051 (merged) made the board-review check reuse the
+    tick's projection, but `fetchOpenPrsRest` through the synchronous `ghJson` is still paid twice per fired
+    review. W1-T3109 (queued) owns that duplicate read. W1-T4075 (queued) owns the tick's gh reads in general.
+    W1-T147 (the overnight chaos drill) also lists src/lib/daemon.ts and src/run-task.ts, but it injects
+    faults and checks recovery rows. It does not touch the cadence phase's synchronous work.
+  design: |
+    1. INVESTIGATE FIRST and record the answer in the PR body. For the ledger window above, attribute
+       each stall over 60 s to the synchronous call it sat in. Candidates, in order of the evidence:
+       `checkBoardReview` / `runBoardReview` (sync `ghJson` pages and the reconciler), `sweepFeedbackLanding`,
+       the in-flight sweep's synchronous stretches before `sweep.plan_filing_classified` and `review.capacity`,
+       the triage path before `pr.opened`, a `spawnSync`/`execFileSync`/`Atomics.wait` sleep in any of them
+       (src/lib/github-transport.ts, git-fetch-retry.ts and worker-home.ts all sleep with `Atomics.wait`),
+       and GC on a main-process heap that is mostly on swap. Use a local reproduction with
+       `perf_hooks.monitorEventLoopDelay` around each cadence dep, or `--cpu-prof` on a replayed cadence.
+       Name the symbol(s) found.
+    2. FIX the dominant one: move it off the daemon loop the way W1-T5361 moved the machine judge (a child or
+       worker pass, or an async read in place of the synchronous one). If it is the board-review item read,
+       coordinate with W1-T3109 rather than duplicate it. Reuse the sweep's open-PR rows, or make the read
+       async; either way the cadence must not hold the loop.
+    3. If the evidence says the stall is host swap and GC rather than one call, the fix is bounding the main
+       process's resident set (or the garden children's), and the PR says so with the measurement.
+  acceptance:
+    - claim: "the cadence work identified as stalling the daemon loop (named in the test) no longer runs synchronously on the daemon loop: a timer scheduled before it fires while it is still in progress"
+      proof: "unit test: test/the-cadence-work-that-stalled-the-daemon-loop-runs-off-it.test.ts"
+    - claim: "a daemon cadence phase whose deps include a slow version of the identified work completes with the loop's measured lag under a declared bound, using the repo's loop-lag and wall-clock-bound test patterns (test/the-daemon-loop-reports-its-own-lag.test.ts, test/the-machine-judge-runs-off-the-daemon-loop.test.ts, test/a-wall-clock-bound-declares-itself.test.ts)"
+      proof: "unit test: test/the-daemon-loop-lag-stays-bounded-through-a-cadence-phase.test.ts"
+  falsifier: |
+    Put the identified work back on the loop (call it synchronously from the cadence phase). The first
+    suite's timer, scheduled before the work starts, does not fire until it returns, and the second suite's
+    measured loop lag exceeds its bound.
