@@ -30,7 +30,8 @@ test("the shadow-readiness test stops its read-model worker before removing its 
     env: { ...process.env, NODE_TEST_CONTEXT: undefined },
   });
   const output = `${child.stdout ?? ""}\n${child.stderr ?? ""}`;
-  assert.equal(child.signal, null, `the subject did not exit on its own within ${CHILD_TIMEOUT_MS} ms — a live worker held it open:\n${output}`);
+  // node --test traps the timeout's SIGTERM and exits by code, so the timeout reads only as ETIMEDOUT.
+  assert.equal(child.error?.message, undefined, `the subject did not exit on its own within ${CHILD_TIMEOUT_MS} ms — a live worker held it open:\n${output}`);
   assert.match(output, /^# fail 0$/m, `the subject must pass:\n${output}`);
   assert.match(output, /^# pass [1-9]/m, `the subject must actually run:\n${output}`);
   assert.equal(child.status, 0, output);
