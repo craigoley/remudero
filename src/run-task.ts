@@ -7390,9 +7390,12 @@ async function runReview(args: {
   //
   // WHY BELOW IS SAFE, not merely later: `appendLedger` is fully synchronous (openSync/writeSync/
   // closeSync) and `readLedgerLines` is `readFileSync`, so the read-after-write is ordered within
-  // this process. Rotation cannot lose it either — `review.posted` is in
-  // DECISION_RELEVANT_LEDGER_STEPS and rotation's per-step cap keeps the NEWEST
-  // MAX_RETAINED_LINES_PER_STEP, of which this line is one.
+  // this process. Retention keeps it — `review.posted` is in DECISION_RELEVANT_LEDGER_STEPS and the
+  // per-step cap keeps the NEWEST MAX_RETAINED_LINES_PER_STEP. A CONCURRENT rotation by another
+  // process (serve and the daemon share the volume) used to lose it outright: PR #8887's row,
+  // appended inside serve's catch-up-to-rename window, is in no file (W1-T5514). `rotateLedger` now
+  // drains that window into the new live file after its rename, so the row survives; a read in the
+  // instant between that rename and the drain can still miss it, which fails CLOSED (arm skipped).
   //
   // The gate still does real work here — it is NOT tautological now that its evidence exists.
   // `armAutoMerge` re-reads the PR's CURRENT head (`deps.headSha(prUrl)`, a live `gh pr view`) and

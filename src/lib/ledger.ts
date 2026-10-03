@@ -1021,15 +1021,42 @@ function parseLedgerLine(raw: string): ParsedLedgerLine {
   }
 }
 
-function readSyncRange(path: string, start: number, end: number): string {
+function readSyncRange(path: string, start: number, end: number): Buffer {
   const fd = openSync(path, "r");
   try {
     const buf = Buffer.alloc(end - start);
     readSync(fd, buf, 0, end - start, start);
-    return buf.toString("utf8");
+    return buf;
   } finally {
     closeSync(fd);
   }
+}
+
+const DRAIN_PARTIAL_ROW_RETRIES = 10_000;
+
+/** W1-T5514: append to the NEW live `path` every row another process wrote to the replaced inode
+ *  (`fd`) from `from` on, until EOF holds still. Whole rows only; a row still half-visible after
+ *  DRAIN_PARTIAL_ROW_RETRIES reads (~1µs each) is torn, and is kept newline-terminated. */
+function drainReplacedInode(fd: number, from: number, path: string): void {
+  const buf = Buffer.alloc(64 * 1024);
+  let offset = from;
+  let pending = Buffer.alloc(0);
+  for (let idle = 0; ; ) {
+    const n = readSync(fd, buf, 0, buf.length, offset);
+    if (n === 0) {
+      if (pending.length === 0 || ++idle > DRAIN_PARTIAL_ROW_RETRIES) break;
+      continue;
+    }
+    idle = 0;
+    offset += n;
+    const chunk = Buffer.concat([pending, buf.subarray(0, n)]);
+    const end = chunk.lastIndexOf(0x0a) + 1;
+    if (end > 0) appendFileSync(path, chunk.subarray(0, end));
+    pending = chunk.subarray(end);
+  }
+  if (pending.length === 0) return;
+  console.error(`ledger: rotation drained a torn ${pending.length}-byte row tail into ${path}; kept, newline-terminated`);
+  appendFileSync(path, Buffer.concat([pending, Buffer.from("\n")]));
 }
 
 /** The rotation's atomic write — the shared primitive since W1-T2899. `content` accepts a
@@ -1414,9 +1441,9 @@ export interface LedgerRotationResult {
  *   4. The rename is withdrawn when a `dev`+`ino` compare shows the live path is no longer the
  *      snapshotted inode, leaving the archive already written on disk.
  *
- * One appender: appendLedger holds no long-lived descriptor, so a delta read immediately before the
- * rename folds any line appended since the snapshot into the live file. What lands between that
- * read and the rename syscall is the one residual sliver, the same one `logrotate` has.
+ * Concurrent appenders (W1-T5514): rows landing after the catch-up read hit the old inode; an fd held
+ * across the rename drains them into the new live file until EOF holds still. Still lost: only a row
+ * whose writer opened the old inode before the rename and writes after the drain's last read.
  * Why: without the lock the second rotator's catch-up saw the first's smaller live file, took an
  * empty tail and renamed over it (R-1; docs/forensics/ledger.md#rotateledger).
  */
@@ -1585,6 +1612,8 @@ export function rotateLedger(
     /** Cadence window, default {@link LEDGER_ROTATION_SMOOTHING_WINDOW_MS}; 0 rotates on every crossing. */
     smoothingWindowMs?: number;
     retainedSteps?: ReadonlySet<string>;
+    /** Test seam (W1-T5514): runs with the new live file staged, immediately before the rename. */
+    beforeRename?: () => void;
   } = {},
 ): LedgerRotationResult {
   const ceilingBytes = opts.ceilingBytes ?? LEDGER_ROTATION_CEILING_BYTES;
@@ -1617,7 +1646,7 @@ export function rotateLedger(
       current: missing.length === 0,
       record,
       unreadable: shared.status === "unreadable",
-    });
+    }, opts.beforeRename);
     if (result.rotated) {
       const steps = [...new Set([...own, ...(record?.steps ?? [])])].sort();
       const lastFullRotationMs = missing.length === 0 ? systemClock.now() : record?.lastFullRotationMs;
@@ -1652,6 +1681,7 @@ function rotateLedgerLocked(
   archiveFsDeps: ArchiveNamingFs,
   now: (() => Date) | undefined,
   retention: RotationRetention,
+  beforeRename?: () => void,
 ): LedgerRotationResult {
   const { size: size0, content: snapshot, bytes: snapshotBytes, identity: snapshotIdentity } = readSnapshotWithIdentity(path);
   const lastFull = retention.current ? retention.record?.lastFullRotationMs : undefined;
@@ -1834,11 +1864,12 @@ function rotateLedgerLocked(
   const survivors = new Set(capped);
   let keptCandidates = originalOrder.filter((p) => survivors.has(p));
 
-  // Catch-up: fold in anything appended to the live path since the snapshot above, so a
-  // concurrent appendLedger call landing in that window is never silently dropped.
+  // Catch-up to the last newline; the post-rename drain copies everything from `drainFrom` on.
   const sizeNow = statSync(path).size;
-  const tail = sizeNow > size0 ? readSyncRange(path, size0, sizeNow) : "";
-  const tailBytes = Buffer.byteLength(tail, "utf8");
+  const rawTail = sizeNow > size0 ? readSyncRange(path, size0, sizeNow) : Buffer.alloc(0);
+  const tailBytes = rawTail.lastIndexOf(0x0a) + 1;
+  const tail = rawTail.subarray(0, tailBytes).toString("utf8");
+  const drainFrom = size0 + tailBytes;
 
   let keptLines = keptCandidates.map((p) => p.raw);
   let keptBytes = keptLines.length > 0 ? Buffer.byteLength(keptLines.join("\n") + "\n", "utf8") : 0;
@@ -1909,19 +1940,25 @@ function rotateLedgerLocked(
       ? rotationRow("ledger.rotation_headroom", { rate_bytes_per_hour: rateBytesPerHour, ceiling_bytes: ceilingBytes }, nowIso)
       : "");
   const newLiveContent = coreContent + noteContent + pointerContent + tail;
-  const swapped = writeFileAtomic(path, newLiveContent, () => {
-    // Immediately before the rename: is the live path STILL the inode this rotation snapshotted?
-    // If not, something replaced it and renaming would clobber it. (A ledger REMOVED mid-rotation
-    // already throws out of the catch-up stat above; this guard decides only same file or other.)
-    const st = statSync(path);
-    return st.dev === snapshotIdentity.dev && st.ino === snapshotIdentity.ino;
-  });
-  if (!swapped) {
-    console.error(
-      `ledger: rotation of ${path} withdrawn — the live file changed identity since the snapshot ` +
-        `(another rotator replaced it); its lines are untouched and the snapshot archive ${archivePath} is kept`,
-    );
-    return { rotated: false };
+  let replaced: number | undefined;
+  try {
+    const swapped = writeFileAtomic(path, newLiveContent, () => {
+      beforeRename?.();
+      // Still the snapshotted inode (else another rotator's)? The fd stays open for the drain.
+      replaced = openSync(path, "r");
+      const st = fstatSync(replaced);
+      return st.dev === snapshotIdentity.dev && st.ino === snapshotIdentity.ino;
+    });
+    if (!swapped) {
+      console.error(
+        `ledger: rotation of ${path} withdrawn — the live file changed identity since the snapshot ` +
+          `(another rotator replaced it); its lines are untouched and the snapshot archive ${archivePath} is kept`,
+      );
+      return { rotated: false };
+    }
+    drainReplacedInode(replaced!, drainFrom, path);
+  } finally {
+    if (replaced !== undefined) closeSync(replaced);
   }
   const coreBytes = Buffer.from(coreContent, "utf8");
   writeFileAtomic(ledgerCarriedPrefixPath(path), JSON.stringify({
