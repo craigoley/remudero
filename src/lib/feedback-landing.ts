@@ -367,12 +367,6 @@ export interface LandingContent {
 
 /** Longest line a {@link discriminatingLandingProof} anchors on — a record's wrapped `raw:` prose is not a proof. */
 const LANDING_PROOF_LINE_MAX = 160;
-/** A lifecycle line is the change a status landing exists to make, so it is the line a proof names first. */
-const LIFECYCLE_LINE_RE = /^\s*(?:status|retirement):\s/;
-/** Characters a basic and an extended regex read differently, or the proof grammar could misparse: a line holding one
- *  is never a candidate (`\` and `^` cannot be bracketed portably; a bracket of a bracket is unreadable). */
-const UNPORTABLE_LINE_RE = /[\\^[\]\t\x00-\x08\x0b-\x1f\x7f]/;
-
 /**
  * W1-T5348: a `grep:` proof naming one physical line the PUSHED bytes of `path` hold and its BASE bytes do not, so it
  * passes at head and misses the merge-base — the discrimination CI's proof gate and {@link planPrPreflight} require.
@@ -387,11 +381,17 @@ export function discriminatingLandingProof(path: string, content: LandingContent
   const base = content.base(path);
   const head = content.head(path);
   if (base === undefined || head === undefined) return undefined;
+  // A lifecycle line is the change a status landing exists to make, so it is named first. A line holding a character
+  // a basic and an extended regex read differently, or the proof grammar could misparse, is never a candidate: `\`
+  // and `^` cannot be bracketed portably, and a bracket of a bracket is unreadable. Both arms are driven by
+  // test/a-machine-lane-never-opens-a-plan-pr-that-is-already-red.test.ts through this function.
+  const lifecycleLine = /^\s*(?:status|retirement):\s/;
+  const unportable = /[\\^[\]\t\x00-\x08\x0b-\x1f\x7f]/;
   const baseLines = new Set(base.split("\n"));
   const candidates = head
     .split("\n")
-    .filter((l) => l.trim() !== "" && l === l.trimEnd() && l.length <= LANDING_PROOF_LINE_MAX && !UNPORTABLE_LINE_RE.test(l) && !baseLines.has(l));
-  const line = candidates.find((l) => LIFECYCLE_LINE_RE.test(l)) ?? candidates[0];
+    .filter((l) => l.trim() !== "" && l === l.trimEnd() && l.length <= LANDING_PROOF_LINE_MAX && !unportable.test(l) && !baseLines.has(l));
+  const line = candidates.find((l) => lifecycleLine.test(l)) ?? candidates[0];
   if (line === undefined) return undefined;
   return `grep: ^${line.replace(/[.*$+?(){}|]/g, (c) => `[${c}]`)}$ in ${path}`;
 }
@@ -751,6 +751,7 @@ function landingTreeContent(git: GitExec, b: Pick<LandingTreeBuild, "mainSha" | 
     try {
       return git(["cat-file", "-p", `${rev}:${path}`]);
     } catch {
+      // Absent and unreadable both keep the template proof, which the preflight judges by name — see the doc above.
       return undefined;
     }
   };
@@ -782,6 +783,8 @@ function ensurePrOpen(
     // W1-T5348: a push onto an open PR rewrites its body to the one the preflight just judged — a body naming the
     // record's previous line would otherwise fail at the new head once that record moves again. REST PATCH, never
     // `gh pr edit`, whose GraphQL query fails before the edit lands (W1-T2948's `prBodyRestArgs`).
+    // A failed refresh is surfaced on `error`, and the review handoff below still runs: the push already landed.
+    let refreshError: string | undefined;
     if (refreshBody) {
       try {
         const target = /github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/.exec(existing);
@@ -789,7 +792,7 @@ function ensurePrOpen(
         assertLiveWriteAllowed("gh-pr-create", `refreshing the landing PR body of ${existing}`);
         gh(["api", "-X", "PATCH", `repos/${target[1]}/${target[2]}/pulls/${target[3]}`, "-f", `body=${body}`]);
       } catch (e) {
-        return { prUrl: existing, error: `refreshing the body of ${existing} failed: ${String((e as Error)?.message ?? e)}` };
+        refreshError = `refreshing the body of ${existing} failed: ${String((e as Error)?.message ?? e)}`;
       }
     }
     try {
@@ -799,9 +802,9 @@ function ensurePrOpen(
       }
     } catch (e) {
       const reason = String((e as Error)?.message ?? e);
-      return { prUrl: existing, error: `review handoff failed for ${existing}: ${reason}` };
+      return { prUrl: existing, error: [refreshError, `review handoff failed for ${existing}: ${reason}`].filter(Boolean).join("; ") };
     }
-    return { prUrl: existing };
+    return refreshError ? { prUrl: existing, error: refreshError } : { prUrl: existing };
   }
 
   let prUrl: string | undefined;

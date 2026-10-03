@@ -542,6 +542,7 @@ function shardProofs(text: string): string[] {
   try {
     tasks = parseYaml(text);
   } catch {
+    // An unparseable shard is the plan lint's to refuse, by name — this check has no proofs of it to read.
     return [];
   }
   const proofs: string[] = [];
