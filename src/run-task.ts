@@ -33801,6 +33801,15 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
   }
 }
 
+/** The daemon's garden pass spawn (W1-T5475): a child pass logs through the daemon's ledger `log`, not stderr. */
+export function daemonGardenPassSpawn(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  injected?: GardenPassSpawn,
+  childOpts: Parameters<typeof childGardenPassSpawn>[0] = {},
+): GardenPassSpawn {
+  return boundedGardenPassSpawn(injected ?? childGardenPassSpawn({ ...childOpts, log }), 2);
+}
+
 export function registeredGardenDueProbe(name: RegisteredGardenName, ctx: GardenBuildContext): () => boolean {
   let probe: (() => boolean) | undefined;
   Promise.resolve(buildRegisteredGarden(name, ctx)).then(
@@ -34116,7 +34125,7 @@ export async function daemonCommand(
   const gardenContext: GardenBuildContext = { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate };
   const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
     ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
-  const gardenPassSpawn: GardenPassSpawn = boundedGardenPassSpawn(injectedPassSpawn ?? childGardenPassSpawn(), 2);
+  const gardenPassSpawn = daemonGardenPassSpawn(log, injectedPassSpawn);
   const offLoopGarden = (name: RegisteredGardenName) => (intervalMs: number) =>
     startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) });
   if (!target.isSelf && !flagValue(rest, "--plan")) {
