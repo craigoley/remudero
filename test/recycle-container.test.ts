@@ -869,6 +869,13 @@ test("W1-T1069: both scripts read the same declared name list", () => {
   assert.deepEqual([...recycleFallback].sort(), [...sharedNames].sort(), "recycle-container.sh's fallback array must match deploy/runtime-env-vars.sh");
   assert.deepEqual([...hostUpdateFallback].sort(), [...sharedNames].sort(), "host-update.sh's fallback array must match deploy/runtime-env-vars.sh");
 
+  assert.deepEqual(printDaemonRunEnvNames().sort(), [...sharedNames].sort(), "the default scratch-off launch must carry exactly the retained names");
+});
+
+test("The printed daemon launch includes derived names only with usable scratch mounts", () => {
+  const sharedSrc = readFileSync(SHARED_RUNTIME_VARS_FILE, "utf8");
+  const sharedNames = extractBashArray(sharedSrc, "RMD_DAEMON_RUNTIME_ENV_VARS");
+
   // With scratch mounted and enabled, the launch prints retained and mount-derived variables.
   // Compare both lists exactly, without widening the retained-variable contract checked above.
   const scratch = scratchFixture();
