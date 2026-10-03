@@ -1,18 +1,19 @@
 # ORIENTATION
 
-_MAINTAINED BY `rmd retro` — regenerated 2026-10-03T00:02:41.332Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
+_MAINTAINED BY `rmd retro` — regenerated 2026-10-03T06:00:48.123Z. Hand edits are overwritten on the next retro; change MASTER-PLAN.md or plan/tasks.yaml instead, never this file directly._
 
 A fresh Architect session should be able to orient from THIS doc alone plus the plan index —
 not by re-deriving state from the full plan and ledger.
 
 ## Current state
 
-15 run(s) since the last retro marker. Verdicts: {"blocked_containment":2,"failed":5,"handed_off":2,"incomplete":5,"merged":1}.
+12 run(s) since the last retro marker. Verdicts: {"failed":5,"handed_off":1,"incomplete":6}.
 
 ### Shipped since marker
-- RETRO → https://github.com/craigoley/remudero/pull/8721 (gate-side merge; run ended incomplete)
-- TRIAGE-fb-1789303258903-a19164 → https://github.com/craigoley/remudero/pull/8726 (gate-side merge; run ended incomplete)
-- W1-T5308 → https://github.com/craigoley/remudero/pull/8738 (ledger-credited gate-side merge (verdictSource=ledger-credit, matched by pr_url); run observed blocked_ci)
+- RETRO → https://github.com/craigoley/remudero/pull/8808 (gate-side merge; run ended incomplete)
+- TRIAGE-fb-1789304800826-670f46 → https://github.com/craigoley/remudero/pull/8810 (gate-side merge; run ended incomplete)
+- TRIAGE-fb-1789304804534-e29e68 → https://github.com/craigoley/remudero/pull/8816 (gate-side merge; run ended incomplete)
+- TRIAGE-fb-1789328786213-ba9741 → https://github.com/craigoley/remudero/pull/8834 (gate-side merge; run ended incomplete)
 
 ## Next runnable task
 
@@ -45,11 +46,17 @@ not by re-deriving state from the full plan and ledger.
 - 8B. The loop never waits on a human unless the plan says so. Idle = groom.
 - 9. OSS defaults must be defensible on a stranger's machine; yolo is a documented opt-in.
 - 10. This document is truth. Every session syncs it before acting and after shipping.
-- 11. Isolation and containment are PROVEN PER RUN by probe, never assumed from configuration. A
+- 11. Isolation and containment are PROVEN by probe — once per boot and again on any change of the
+  probe's inputs — never assumed from configuration. A
   setting that "should" isolate (ZDOTDIR, a sandbox block, a stripped env) is a hypothesis until a
-  preflight probe confirms it on THIS machine, THIS run — config that happens to work by accident of
+  preflight probe confirms it on THIS machine, for THIS image, harness and worker policy — config that
+  happens to work by accident of
   the host (PR #8: isolation held only because `~/.bashrc` was absent) must fail closed the moment the
-  accident ends. See FIELD FINDING 11, W1-T17.
+  accident ends. See FIELD FINDING 11, W1-T17. [operator ruling 2026-10-02, W1-T5346: a process
+  reuses a passing proof only while every input the probes read — image build sha, harness revision,
+  rendered worker settings, hook content, CLI version, provider — is unchanged (`probeVerdictKey`),
+  and ledgers each reuse with the proving run; a failed probe is never cached and holds every later
+  run until a probe passes.]
 - 12. Supervision is deterministic; judgment is advisory. An LLM may RECOMMEND a halt; only code may
   ENFORCE one. The flight judge and specialist panels (§4B) return verdicts a deterministic
   controller acts on; no LLM sits in the merge decision, and none edits code. See §4B, W1-T20/21/22,
