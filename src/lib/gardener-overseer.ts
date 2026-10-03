@@ -51,7 +51,7 @@ export const OVERSEER_LEDGER_WINDOW_MS = 14 * DAY_MS;
 export const OVERSEER_MIN_INTERVAL_MS = HOUR_MS;
 
 /** The ledger lines the overseer reads — a raw-line prefilter, so the union is not parsed whole. */
-export const OVERSEER_STEP_PATTERN = /"step":"[^"]*(\.(scorecard|gardener_failed|garden_filing_failed|garden_filing_escalated|gardener_judged)|evidence_coverage\.pass)"/;
+export const OVERSEER_STEP_PATTERN = /"step":"[^"]*(\.(scorecard|gardener_failed|garden_filing_failed|garden_filing_escalated|gardener_judged)|evidence_coverage\.pass|selector-shadow\.report)"/;
 
 type EventKind = "pass" | "failed" | "filing_failed" | "filing_escalated" | "judged";
 const KIND_BY_SUFFIX: Record<string, EventKind> = {
@@ -73,6 +73,8 @@ export function classifyGardenerStep(step: unknown): { name: string; kind: Event
   if (typeof step !== "string") return undefined;
   // evidence-coverage names its pass row `.pass`, not `.scorecard`.
   if (step === "evidence_coverage.pass") return { name: "evidence_coverage", kind: "pass" };
+  // This producer reports collection success even while selector calibration remains insufficient.
+  if (step === "selector-shadow.report") return { name: "selector-shadow", kind: "pass" };
   const dot = step.lastIndexOf(".");
   const name = step.slice(0, dot);
   const suffix = step.slice(dot + 1);

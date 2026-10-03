@@ -9,6 +9,7 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo } from "./helpers/git-repo.js";
 import type { Escalation } from "../src/lib/escalate.js";
 import { gardenEffectsPath, gardenStatePath, readGardenEffects, runGarden, type GardenSpec } from "../src/lib/gardener.js";
+import { runSelectorShadowGardener } from "../src/lib/selector-shadow-gardener.js";
 import {
   GARDENER_OVERSEER_OFF,
   ciFrictionEffectReading,
@@ -338,6 +339,44 @@ test("W1-T4802: the overseer's own rows are never mistaken for a gardener", () =
   assert.deepEqual(classifyGardenerStep("ci-friction.garden_filing_failed"), { name: "ci-friction", kind: "filing_failed" });
   assert.deepEqual(classifyGardenerStep("evidence_coverage.pass"), { name: "evidence_coverage", kind: "pass" });
   assert.equal(classifyGardenerStep("sweep.escalation_reconcile.summary"), undefined);
+});
+
+test("a real selector report clears a prior failure through the production overseer reader", async () => {
+  const now = Date.now();
+  const h = harness(now);
+  mkdirSync(join(h.dir, "test"));
+  const ledger = join(h.dir, "ledger.ndjson");
+  const flush = () => writeFileSync(ledger, h.rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  const ports = productionGardenerOverseerPorts({ stateDir: h.dir, repoRoot: h.dir, owner: "o", repo: "r", fetch: () => ({}), log: h.deps.log });
+  const deps = { ...h.deps, readRows: ports.readRows };
+  const episodes = () => JSON.parse(readFileSync(join(h.dir, "gardener-overseer.json"), "utf8")).episodes;
+  try {
+    h.rows.push(row("selector-shadow.gardener_failed", now - HOUR, { error: "Bad credentials" }));
+    flush();
+    runGardenerOverseer(deps);
+    assert.equal(episodes()["selector-shadow"].kind, "failure", "positive failure control");
+    const report = await runSelectorShadowGardener({
+      stateDir: h.dir, repoRoot: h.dir,
+      openWorkspace: () => { throw new Error("the empty report must open no workspace"); },
+      log: (step, fields) => h.rows.push(row(step, now, fields)),
+    }, () => [], () => [], () => { throw new Error("the empty report must file no task"); });
+    assert.equal(report.verdict, "insufficient", "successful collection is not evidence to promote the selector");
+    flush();
+    assert.ok(ports.readRows().some((r) => r.step === "selector-shadow.report"), "the real raw-line filter must retain the producer's report");
+    runGardenerOverseer(deps);
+    assert.equal(episodes()["selector-shadow"], undefined, "the old failure episode recovers");
+    assert.equal(h.steps("gardener_overseer.healed").length, 0);
+    assert.equal(h.escalations.length, 0);
+    assert.equal(classifyGardenerStep("unrelated.report"), undefined, "arbitrary reports cannot clear a failure");
+
+    h.clock.set(now + 1);
+    h.rows.push(row("selector-shadow.gardener_failed", now + 1, { error: "filing failed after reporting" }));
+    flush();
+    runGardenerOverseer(deps);
+    assert.equal(episodes()["selector-shadow"].kind, "failure", "a later failure remains visible");
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true });
+  }
 });
 
 test("W1-T4802: unreadable gardener state is reported by healing", () => {
