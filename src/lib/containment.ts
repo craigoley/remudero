@@ -265,6 +265,8 @@ export function classifyUnprovenState(e: ContainmentEvidence): UnprovenState {
  */
 export interface ProbeExecResult {
   transcript: string;
+  /** Worker stderr kept separate from result text and assistant blocks; never inferred from transcript. */
+  nativeStderr?: string;
   outsideWriteCreated: boolean;
   insideWriteCreated: boolean;
   /** Notional cost of the probe spawn (subscription) — surfaced so the run meters it. */
@@ -272,7 +274,7 @@ export interface ProbeExecResult {
   /** `WorkerResult.isError` from the probe spawn's envelope: already in hand, but the preflight
    *  tested only the transcript for denial text. Also carried so a failed spawn's stderr — folded
    *  into `transcript` — reaches the ledger, capped, instead of dying with the process. Absent ⇒
-   *  `false`, so no credential verdict fires without an explicit error signal. (W1-T237, W1-T238) */
+   *  `false`; legacy transcript-only credential matches require this signal. (W1-T237, W1-T238) */
   isError?: boolean;
   /** `WorkerResult.childEnvKeys`, carried so the caller DERIVES this probe's `billing_mode`
    *  (`billingMode`, env.ts) rather than assuming subscription. Absent ⇒ an empty key set, which
@@ -852,13 +854,25 @@ const CREDENTIAL_LOGIN_HINT_RE = /run \/login/i;
 /**
  * The SDK's OTHER credential-dead text: a copied OAuth token that has EXPIRED, as opposed to never
  * being logged in. The observed excerpt reads "Failed to authenticate. API Error: 401 OAuth access
- * token has expired. Re-authenticate to continue" at $0 before any turn. TRAP: W1-T292's original
- * phrasing ("OAuth session expired and could not be refreshed") is no longer what the SDK emits, so
- * this text matched neither pair and fell through to the generic "unproven" verdict W1-T237 and
- * W1-T292 exist to prevent. // Why: docs/forensics/containment.md#credential_expired_re (W1-T2250).
+ * token has expired. Re-authenticate to continue" at $0 before any turn. This API-token rejection
+ * is distinct from a saved login that could not be renewed. Legacy transcript matches still need
+ * an error envelope. // Why: docs/forensics/containment.md#credential_expired_re (W1-T2250).
  */
 const CREDENTIAL_EXPIRED_RE = /failed to authenticate/i;
 const CREDENTIAL_TOKEN_EXPIRED_RE = /oauth access token has expired/i;
+
+// Complete diagnostic lines only: quoted task prose and a transient shared refresh lock are not expiry.
+const NATIVE_LOGIN_EXPIRED_RE = /^Failed to authenticate: OAuth session expired and could not be refreshed[ \t]*\r?$/im;
+const NATIVE_TOKEN_EXPIRED_RE = /^Failed to authenticate\. API Error: 401 OAuth (?:access )?token has expired(?:\.[^\r\n]*)?[ \t]*\r?$/im;
+
+function credentialExpiry(r: ProbeExecResult): { source: "native-stderr" | "error-envelope"; kind: "saved-login" | "access-token" } | undefined {
+  if (NATIVE_LOGIN_EXPIRED_RE.test(r.nativeStderr ?? "")) return { source: "native-stderr", kind: "saved-login" };
+  if (NATIVE_TOKEN_EXPIRED_RE.test(r.nativeStderr ?? "")) return { source: "native-stderr", kind: "access-token" };
+  if (r.isError === true && CREDENTIAL_EXPIRED_RE.test(r.transcript) && CREDENTIAL_TOKEN_EXPIRED_RE.test(r.transcript)) {
+    return { source: "error-envelope", kind: "access-token" };
+  }
+  return undefined;
+}
 
 /**
  * The arm neither credential regex above covers: the Anthropic API's own transport or server-side
@@ -960,6 +974,7 @@ export function defaultExecutor(
       const transcript = [probe.text, probe.blocks.join("\n"), probe.stderr].join("\n");
       return {
         transcript,
+        nativeStderr: probe.stderr,
         outsideWriteCreated: existsSync(outsidePath),
         insideWriteCreated: existsSync(insidePath),
         // The SDK's own `error_max_turns` subtype, carried through so a turn-exhausted run is
@@ -1045,6 +1060,7 @@ export async function probeContainment(opts: {
   for (let attempt = 0; attempt < 2; attempt++) {
   const token = attempt === 0 ? opts.token ?? `${Date.now()}` : randomUUID();
   const r = await exec(token);
+  const expiry = credentialExpiry(r);
   // INVARIANT for this literal: every optional field is carried through VERBATIM, `undefined`
   // included, so an executor that reported no attempt stays UNOBSERVED rather than defaulting to
   // "engaged", "blocked" or "denied"; and every "was it denied" field is derived from an OBSERVED
@@ -1070,10 +1086,7 @@ export async function probeContainment(opts: {
       CREDENTIAL_LOGIN_HINT_RE.test(r.transcript),
     // A SECOND, DISTINCT credential-dead signature, kept out of `credentialFailure` so the two never
     // collapse into one reason (W1-T292, phrases re-derived by W1-T2250).
-    credentialExpired:
-      r.isError === true &&
-      CREDENTIAL_EXPIRED_RE.test(r.transcript) &&
-      CREDENTIAL_TOKEN_EXPIRED_RE.test(r.transcript),
+    credentialExpired: expiry !== undefined,
     // A THIRD spawn-death shape: an API-side 5xx rather than an auth problem (W1-T2249).
     spawnTransportFailure: r.isError === true && TRANSPORT_FAILURE_RE.test(r.transcript),
     denyFloorProbeCreated: r.denyFloorProbeCreated,
@@ -1122,6 +1135,7 @@ export async function probeContainment(opts: {
     reason: verdict.reason,
     credential_failure: evidence.credentialFailure,
     credential_expired: evidence.credentialExpired,
+    ...(expiry ? { credential_expiry_source: expiry.source, credential_expiry_kind: expiry.kind } : {}),
     spawn_transport_failure: evidence.spawnTransportFailure,
     outside_write_created: evidence.outsideWriteCreated,
     os_denial_seen: evidence.osDenialSeen,
@@ -1573,8 +1587,7 @@ export function assessWorkerSmoke(
     insideWriteCreated: o.insideWriteCreated,
     credentialFailure:
       o.isError === true && CREDENTIAL_FAILURE_RE.test(o.transcript) && CREDENTIAL_LOGIN_HINT_RE.test(o.transcript),
-    credentialExpired:
-      o.isError === true && CREDENTIAL_EXPIRED_RE.test(o.transcript) && CREDENTIAL_TOKEN_EXPIRED_RE.test(o.transcript),
+    credentialExpired: credentialExpiry(o) !== undefined,
     spawnTransportFailure: o.isError === true && TRANSPORT_FAILURE_RE.test(o.transcript),
     turnsExhausted: o.turnsExhausted,
   });
@@ -1624,6 +1637,7 @@ export async function runWorkerSmoke(opts: {
     const transcript = [r.text, r.blocks.join("\n"), r.stderr].join("\n");
     const verdict = assessWorkerSmoke(token, {
       transcript,
+      nativeStderr: r.stderr,
       outsideWriteCreated: existsSync(join(base, `${token}.txt`)),
       insideWriteCreated: existsSync(join(cwd, "probe-ok.txt")),
       isError: r.isError,
