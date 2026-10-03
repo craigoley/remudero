@@ -8,7 +8,6 @@ import { LEDGER_FILENAME } from "./ledger-path.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
 import { LIVE_WRITE_SENTINEL_TOKEN, LiveWriteBlockedError } from "./live-write-guard.js";
 import { resolveRepoLayout, type RepoLayout } from "./repo-layout.js";
-import type { ServeDeps } from "./serve.js";
 
 export class GoLiveError extends Error {
   constructor(readonly code: string, readonly status: number, readonly receipt?: GoLiveReceipt) {
@@ -19,9 +18,13 @@ export class GoLiveError extends Error {
 
 export type GoLiveApi = (method: "GET" | "POST" | "PUT", path: string, body?: Record<string, unknown>) => Promise<unknown>;
 export type ShadowRowReader = (stateDir: string) => Promise<Array<Record<string, unknown>>>;
-/** Reuse serve's composition-root wiring and the shared ledger port for request inputs. */
-type GoLiveRequestOptions = NonNullable<ServeDeps["onboardingGoLive"]> & LedgerWriterDeps &
-  Pick<RepoLayout, "stateDir"> & { registryRepository: string };
+/** Serve composes these request inputs with the instance state and shared ledger port. */
+type GoLiveRequestOptions = LedgerWriterDeps & Pick<RepoLayout, "stateDir"> & {
+  registryRepository: string;
+  minShadowRuns?: number;
+  api?: GoLiveApi;
+  readRows?: ShadowRowReader;
+};
 export type { GoLiveRequestOptions as GoLiveDeps };
 export interface GoLiveReceipt {
   status: "review_pending";
