@@ -81,7 +81,7 @@ import {
 } from "./trace.js";
 import { computeFeedbackProjectionSync, indexedDischargeGithub, taskOriginsOf, type FeedbackProjectionInput, type FeedbackProjectionOutcome } from "./console-projection-worker.js";
 import type { Route } from "./service.js";
-import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
+import { PANEL_TASK_ID, appendPanelLedger, bearerTokenId, isRecord, jsonAction, requestPathLand, sendJson } from "./panel-actions.js";
 import { appendDailyCostCeilingOverrideAudit } from "./ledger.js";
 import {
   clearDailyCostCeilingOverride,
@@ -428,6 +428,7 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
         }
       }
       const raw = input.replyTo !== undefined ? `[answer to feedback#${input.replyTo}] ${input.text}` : input.text;
+      const origin = bearerTokenId(req);
       const entry = captureFeedback(deps.root, {
         raw,
         attachments: input.attachments,
@@ -435,14 +436,14 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
         expansion: input.expansion,
         replyTo: input.replyTo,
         submissionKey: input.submissionKey,
+        land: requestPathLand(deps.feedbackLand ?? {}, deps.ledgerPath, input.replyTo ?? PANEL_TASK_ID, origin),
       });
       if (input.replyTo !== undefined) {
         setFeedbackStatus(deps.root, input.replyTo, "answered", {
           answeredBy: entry.id,
-          ...(deps.feedbackLand ? { land: deps.feedbackLand } : {}),
+          ...(deps.feedbackLand ? { land: requestPathLand(deps.feedbackLand, deps.ledgerPath, input.replyTo, origin) } : {}),
         });
       }
-      const origin = bearerTokenId(req);
       appendPanelLedger(deps.ledgerPath, "panel.feedback_submitted", entry.id, origin, {
         origin_field: entry.origin,
         reply_to: input.replyTo ?? null,
@@ -601,13 +602,13 @@ export function buildProposalDecisionRoute(deps: PanelGraphDeps): Route {
         return;
       }
       const status = input.decision === "accept" ? "accepted" : "rejected";
+      const origin = bearerTokenId(req);
       const updated = setFeedbackStatus(
         deps.root,
         input.id,
         status,
-        deps.feedbackLand ? { land: deps.feedbackLand } : {},
+        deps.feedbackLand ? { land: requestPathLand(deps.feedbackLand, deps.ledgerPath, input.id, origin) } : {},
       );
-      const origin = bearerTokenId(req);
       appendPanelLedger(deps.ledgerPath, input.decision === "accept" ? "panel.proposal_accepted" : "panel.proposal_rejected", input.id, origin, {
         proposal_pr: updated.proposal_pr,
       });

@@ -619,33 +619,59 @@ export function loadPlan(
 export interface QuarantinedTask {
   id: string;
   files: string[];
-  reason: "duplicate_id" | "depends_on_quarantined";
+  reason: "duplicate_id" | "depends_on_quarantined" | "shard_invalid";
+  error?: string;
 }
 
-/** W1-T4409 — {@link loadPlan} for a long-running daemon: a duplicated id and its dependents are held out and
- *  reported, never thrown, so one bad filing cannot take the daemon down. Every other rule still throws. */
+/** W1-T4409 — {@link loadPlan} for a long-running daemon: a duplicated id, an unloadable shard and their dependents
+ *  are held out and reported, never thrown, so one bad filing cannot take the daemon down. Everything else throws. */
 export function loadPlanQuarantiningDuplicates(
   path: string,
   io: FileIntegrityIO = defaultIntegrityIO,
   shardDir: string = join(dirname(path), "tasks.d"),
 ): { plan: Plan; quarantined: QuarantinedTask[] } {
   const duplicateFiles = new Map<string, string[]>();
-  const merged = readMergedPlan(path, io, shardDir, (id, earlierPath, laterPath) => {
-    recordDuplicate(duplicateFiles, id, earlierPath ?? path, laterPath);
-  });
-  return quarantineDuplicates(merged.tasks, duplicateFiles, path);
+  const invalid: QuarantinedTask[] = [];
+  const merged = readMergedPlan(
+    path,
+    io,
+    shardDir,
+    (id, earlierPath, laterPath) => recordDuplicate(duplicateFiles, id, earlierPath ?? path, laterPath),
+    (file, err, text) => invalid.push(...invalidShard(file, err, text)),
+  );
+  return quarantineDuplicates(merged.tasks, duplicateFiles, path, invalid);
 }
 
-/** W1-T4421 — {@link mergePlanBlobs} with {@link loadPlanQuarantiningDuplicates}'s quarantine, for the core daemon. */
+/** W1-T4421 — {@link mergePlanBlobs} with {@link loadPlanQuarantiningDuplicates}'s quarantine; `blobs[0]`, the monolith, stays fatal. */
 export function mergePlanBlobsQuarantiningDuplicates(blobs: Array<{ label: string; text: string }>): {
   plan: Plan;
   quarantined: QuarantinedTask[];
 } {
   const duplicateFiles = new Map<string, string[]>();
-  const tasks = mergeBlobTasks(blobs, (id, earlierLabel, laterLabel) =>
-    recordDuplicate(duplicateFiles, id, earlierLabel, laterLabel),
+  const invalid: QuarantinedTask[] = [];
+  const tasks = mergeBlobTasks(
+    blobs,
+    (id, earlierLabel, laterLabel) => recordDuplicate(duplicateFiles, id, earlierLabel, laterLabel),
+    (label, err, text) => invalid.push(...invalidShard(label, err, text)),
   );
-  return quarantineDuplicates(tasks, duplicateFiles, blobs[0]?.label ?? "plan");
+  return quarantineDuplicates(tasks, duplicateFiles, blobs[0]?.label ?? "plan", invalid);
+}
+
+type OnInvalidShard = (file: string, err: PlanError, text: string) => void;
+
+function invalidShard(file: string, err: PlanError, text: string): QuarantinedTask[] {
+  const ids = [...new Set([...text.matchAll(/^- +id: *["']?([^\s"'#]+)/gm)].map((m) => m[1]!))];
+  return (ids.length > 0 ? ids : [file]).map((id) => ({ id, files: [file], reason: "shard_invalid", error: err.message }));
+}
+
+function parseShard(text: string, file: string, onDuplicate: ((id: string) => void) | undefined, onInvalid: OnInvalidShard | undefined): Task[] {
+  try {
+    return parseTasksFromYaml(text, file, onDuplicate);
+  } catch (err) {
+    if (!onInvalid || !(err instanceof PlanError)) throw err;
+    onInvalid(file, err, text);
+    return [];
+  }
 }
 
 function recordDuplicate(into: Map<string, string[]>, id: string, earlier: string, later: string): void {
@@ -658,10 +684,14 @@ function quarantineDuplicates(
   all: Task[],
   duplicateFiles: Map<string, string[]>,
   fallbackPath: string,
+  invalid: QuarantinedTask[],
 ): { plan: Plan; quarantined: QuarantinedTask[] } {
-  if (duplicateFiles.size === 0) return { plan: validatedPlan(all), quarantined: [] };
-  const quarantined: QuarantinedTask[] = [...duplicateFiles].map(([id, files]) => ({ id, files, reason: "duplicate_id" }));
-  const held = new Set(duplicateFiles.keys());
+  if (duplicateFiles.size === 0 && invalid.length === 0) return { plan: validatedPlan(all), quarantined: [] };
+  const quarantined: QuarantinedTask[] = [
+    ...[...duplicateFiles].map(([id, files]): QuarantinedTask => ({ id, files, reason: "duplicate_id" })),
+    ...invalid,
+  ];
+  const held = new Set([...duplicateFiles.keys(), ...invalid.map((q) => q.id)]);
   for (let grew = true; grew; ) {
     grew = false;
     for (const t of all) {
@@ -679,6 +709,7 @@ function readMergedPlan(
   io: FileIntegrityIO,
   shardDir: string,
   onDuplicate?: (id: string, earlierPath: string | undefined, laterPath: string) => void,
+  onInvalidShard?: OnInvalidShard,
 ): Plan {
   let text: string;
   try {
@@ -701,7 +732,7 @@ function readMergedPlan(
       if ((err as NodeJS.ErrnoException)?.code === "ENOENT") continue;
       throw new PlanError(`cannot read plan shard (${shardPath}): ${String(err)}`);
     }
-    for (const t of parseTasksFromYaml(shardText, shardPath, onDuplicate && ((id) => onDuplicate(id, shardPath, shardPath)))) {
+    for (const t of parseShard(shardText, shardPath, onDuplicate && ((id) => onDuplicate(id, shardPath, shardPath)), onInvalidShard)) {
       const earlier = byId.get(t.id);
       if (earlier) {
         if (!onDuplicate) {
@@ -861,11 +892,13 @@ export function mergePlanBlobs(blobs: Array<{ label: string; text: string }>): P
 function mergeBlobTasks(
   blobs: Array<{ label: string; text: string }>,
   onDuplicate?: (id: string, earlierLabel: string, laterLabel: string) => void,
+  onInvalidShard?: OnInvalidShard,
 ): Task[] {
   const tasks: Task[] = [];
   const labelOf = new Map<string, string>();
-  for (const { label, text } of blobs) {
-    for (const t of parseTasksFromYaml(text, label, onDuplicate && ((id) => onDuplicate(id, label, label)))) {
+  for (const [i, { label, text }] of blobs.entries()) {
+    const sameFile = onDuplicate && ((id: string) => onDuplicate(id, label, label));
+    for (const t of parseShard(text, label, sameFile, i === 0 ? undefined : onInvalidShard)) {
       const earlier = labelOf.get(t.id);
       if (earlier !== undefined) {
         if (!onDuplicate) throw new PlanError(`duplicate task id '${t.id}' (${label} collides with an earlier plan entry)`);

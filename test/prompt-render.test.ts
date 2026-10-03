@@ -102,7 +102,9 @@ test("prompt renderers: lib exports stay byte-identical to the pre-move dispatch
   // (test/a-decision-request-names-its-falsifier.test.ts pins the new text itself).
   // W1-T4114 re-baselined implement: its contract now asks for a SKILLS_USED line
   // (test/the-knowledge-gardener-tends-rules-and-skills.test.ts pins the new text itself).
-  assert.equal(sha256(implement), "b5b4ebe92e52d9d88656ec53473f950d9ac293c509242ac8a822884ee1e1dfe7");
+  // Re-baselined implement: its contract now opens with a scope-time check before the first edit
+  // (test/implement-contract-orders-a-scope-time-check.test.ts pins the new text itself).
+  assert.equal(sha256(implement), "8826f30e9104dd6391310fb657a92bf930c2ce61c6f69f77a293a6eb178352d2");
 });
 
 test("prompt renderers: run-task keeps compatibility re-exports of the lib templates", () => {

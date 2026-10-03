@@ -117,7 +117,7 @@ import {
   type JudgeLabelsInput,
   type JudgeLabelStore,
 } from "./judge-calibration.js";
-import { isProducedSpendRow, spendAmountUsd, spendRoleOf } from "./spend-rows.js";
+import { isCashSpendProducer, isProducedSpendRow, spendAmountUsd, spendRoleOf } from "./spend-rows.js";
 import {
   ROUTING_POOL_VERSION,
   buildRoutingPoolProjection,
@@ -243,7 +243,7 @@ const CASH_SPEND_WINDOWS: ReadonlyArray<{ name: CashSpendWindow["name"]; days: n
 ];
 
 const CASH_SPEND_COVERAGE =
-  "implement workers only: fix-rung workers record no provider, so their cash spend cannot be attributed";
+  "cash-attributed producer receipts, including Inbox drafting, recon and review; excludes missing provider attribution and subscription costs; not an invoice";
 
 export function notCollectedCashSpend(reason: string): CashSpendSnapshot {
   return { state: "not-collected", unit: "usd", asOf: null, coverage: CASH_SPEND_COVERAGE, windows: [], reason };
@@ -954,14 +954,12 @@ function captureCheckpointLine(acc: AnalyticsAccumulator, line: Record<string, u
     else bucket.costUsd += cost;
   }
 
-  // W1-T4024 — cash-lane money comes from WORKER rows that name their provider, never from
-  // `verdict` or `cost.anomaly`. Measured 2026-09-22: 168 `cost.anomaly` rows restate worker costs,
-  // and 38 of 68 `verdict` rows exactly restate their run's worker total (the rest are unexplained).
-  // Neither carries `provider`, so selecting on it excludes both by construction. `routingTelemetry`
-  // is NOT the source: its terminals are joined from `verdict` rows alone (66 of 602 assignments).
-  if (day !== undefined && step === "implement.done" && str(line.provider) === "cash") {
+  // Count every explicitly cash-attributed producer, not just implementation. The original
+  // selector excluded thousands of paid Inbox drafts; canonical spend roles still reject
+  // restated verdict/anomaly costs even if a future producer gives them a provider label.
+  if (day !== undefined && isCashSpendProducer(line)) {
     const bucket = checkpointHistoryBucket(acc.checkpointHistory, day);
-    const cost = num(line.total_cost_usd);
+    const cost = spendAmountUsd(line);
     if (cost === undefined || cost < 0) bucket.cashUnpricedRows = (bucket.cashUnpricedRows ?? 0) + 1;
     else bucket.cashUsd = (bucket.cashUsd ?? 0) + cost;
     bucket.cashRows = (bucket.cashRows ?? 0) + 1;
@@ -2000,7 +1998,7 @@ export async function deriveAnalyticsSnapshotFromCheckpointedLedger(
   const currentSource = checkpointSource(stateDir);
   const priorLiveMalformed = priorCheckpoint?.state.routingTelemetry?.malformedSources?.some(([, finding]) => finding.form === "live") ?? false;
   const canResume = priorCheckpoint !== undefined && priorCheckpoint.state.goalAccountingVersion === 1 &&
-    priorCheckpoint.state.usage?.costAccountingVersion === 1 && priorCheckpoint.state.usage?.trialAccountingVersion === 1 &&
+    priorCheckpoint.state.usage?.costAccountingVersion === 1 && priorCheckpoint.state.usage?.cashAccountingVersion === 1 && priorCheckpoint.state.usage?.trialAccountingVersion === 1 &&
     priorCheckpoint.state.routingTelemetry?.benchmarkVersion === BENCHMARK_QUALITY_VERSION &&
     priorCheckpoint.state.routingTelemetry?.benchmarkCounters !== undefined &&
     Array.isArray(priorCheckpoint.state.routingTelemetry?.malformedSources) &&
@@ -2318,7 +2316,7 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
   const schedule = deps.schedule ?? systemSchedule;
   const log = deps.log ?? (() => {});
   let checkpoint = readAnalyticsCheckpoint(deps.stateDir);
-  let value = checkpoint === undefined || checkpoint.state.usage?.costAccountingVersion !== 1 || checkpoint.state.usage?.trialAccountingVersion !== 1 ? coldAnalyticsSnapshot() : freezeAnalyticsSnapshot(attachUsageProjection(checkpoint.snapshot, checkpoint.state.usage));
+  let value = checkpoint === undefined || checkpoint.state.usage?.costAccountingVersion !== 1 || checkpoint.state.usage?.cashAccountingVersion !== 1 || checkpoint.state.usage?.trialAccountingVersion !== 1 ? coldAnalyticsSnapshot() : freezeAnalyticsSnapshot(attachUsageProjection(checkpoint.snapshot, checkpoint.state.usage));
   let timer: AnalyticsTimer | undefined;
   let controller: AbortController | undefined;
   let inFlight: Promise<void> | undefined;

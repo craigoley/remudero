@@ -1,0 +1,71 @@
+- id: W1-T5472
+  title: "TWO PLAN PRS FROM ONE BASE CANNOT MERGE INTO AN INVALID PLAN — on 2026-10-03 #8872 and #8871 each added a `priority:` line to the same shard from base a92ce446, git merged both cleanly, and main carried a duplicate key that refused the whole plan and crash-looped the daemon for ~5.6 h"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: the duplicate-priority outage fixed by #8877; guard test drafted in #8883 (closed, superseded)"
+  plan_refs: [W1-T491, W1-T2855, W1-T5431, W1-T5348]
+  files: [src/lib/arm-auto-merge.ts, test/every-plan-shard-parses-with-unique-keys.test.ts, test/two-plan-prs-from-one-base-cannot-merge-into-an-invalid-plan.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    Two machine plan PRs were opened from the same base, a92ce446. #8872 (backlog gardener) added
+    `priority: 4` to plan/tasks.d/w1-t5431-selector-shadow-miss.yaml. #8871 (machine-filing judge) added
+    `priority: 2.5` two lines away in the same entry. Each shard was valid YAML on its own branch. The
+    review lane's arm (`attemptArm`, src/lib/arm-auto-merge.ts) merged #8872 at
+    09:13:36Z and #8871 at 09:14:04Z (ledger `automerge.armed` rows, review-PR8872 / review-PR8871).
+    #8871 was two commits behind main then, #8872 being one of them. The text merge was clean, so main
+    at 231b7673 carried both keys. `parseTasksFromYaml` (src/lib/plan.ts) parses with the yaml
+    library's default unique-keys check, so it refused the whole plan. remudero-daemon crash-looped from
+    about 09:14Z until #8877 dropped the key at 14:50:41Z, and serve's now view failed in that window.
+    The gap is in `directMergePreflight`. Since W1-T3694 it updates a behind head only when GitHub
+    reports `mergeable_state: behind`, which it does only when branch protection requires up-to-date
+    branches. Here it does not, so a MERGEABLE behind head is merged as-is, and the plan in the merged
+    tree is never linted. Every check ran on a tree that never reached main.
+    #8883 held the guard test as a draft and was closed in favour of #8877's one-line fix, so the guard
+    was never filed.
+    W1-T491's .github/workflows/main-plan-guard.yml already DETECTS this class after the fact (`loadPlan`
+    on every push to main), and its header names the prevention layer as `strict: true` branch
+    protection. That protection is not on here (the W1-T3694 comment in `directMergePreflight` relies on
+    behind PRs merging as-is), so detection is all there is. Part 2 is the missing prevention, scoped to
+    plan-touching PRs so it does not bring back W1-T3694's update churn for every PR.
+    #8878 (merged 2026-10-03, after this incident) makes the daemon quarantine one unloadable shard
+    (`plan.shard_quarantined`) instead of crash-looping. That bounds the blast radius, but the
+    quarantined task and its dependents still drop out of dispatch, and loadPlan, lint-plan and drain
+    stay strict. An invalid tree still reaches main, so the prevention here is still needed.
+    Rule 19: one production file (the merge preflight) plus a standalone guard suite, which the sizing
+    check counts as a second concern. Both answer one incident, so the band is high with
+    band_meaning: span rather than two tasks. The production change is small (one more update-branch
+    case in front of the direct merge).
+  design: |
+    1. Guard test, test/every-plan-shard-parses-with-unique-keys.test.ts. Iterate plan/tasks.yaml and every
+       plan/tasks.d/*.yaml, `yaml.parse(src, { uniqueKeys: true })` each, collect every failure with its
+       path, and assert the list is empty (one assertion naming all failures, not a throw on the first).
+       The scan is a helper over a directory argument. A second case runs it over a temp-dir fixture holding
+       one shard with a duplicate `priority:` key and asserts the shard is reported by path, so the proof
+       discriminates while main is clean. Test titles, verbatim: "every plan shard parses with unique keys"
+       and "the unique-keys scan reports a shard with a duplicate key by path".
+    2. Merge path. In `directMergePreflight`, when the PR's changed files include any `plan/` path and
+       `behindBy > 0`, take the update-branch remedy whatever `mergeableState` says. CI then re-runs
+       lint-plan on the tree that will actually land, and the merge waits for those fresh checks and the
+       review, as the W1-T2855 update path already does. The plan-touching fact is read with the merge
+       facts (the PR files REST read). An unreadable file list counts as plan-touching, never as clean.
+       Ledger the case on the existing `automerge.direct_merge_updated` line with `reason: plan_pr_behind`.
+       (Alternative if cheaper: lint the plan in GitHub's `refs/pull/<n>/merge` tree and refuse on a parse
+       failure. Either way, no plan PR merges onto a main its checks never saw.)
+       Non-plan PRs keep W1-T3694's behaviour unchanged.
+  acceptance:
+    - claim: "every plan shard parses with unique keys, and the scan reports a fixture shard with a duplicate key by path"
+      proof: "unit test: test/every-plan-shard-parses-with-unique-keys.test.ts"
+    - claim: "a plan-touching PR that is behind main is updated rather than direct-merged even when mergeable_state is clean, an unreadable file list is treated as plan-touching, and a behind PR touching no plan path still merges as-is"
+      proof: "unit test: test/two-plan-prs-from-one-base-cannot-merge-into-an-invalid-plan.test.ts"
+  falsifier: |
+    Remove the plan-path case from `directMergePreflight`. The suite's PR touching plan/tasks.d, behind by
+    two with `mergeable_state: clean`, reaches the fake `mergeDirect` instead of `updateBranch`. Remove
+    the duplicate-key fixture's second `priority:` line and the scan's fixture case fails.
