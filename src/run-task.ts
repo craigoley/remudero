@@ -1569,6 +1569,7 @@ import {
   trackRepairLadder,
   isPostReviewDiffCeilingRefusal,
   isRetryableReviewThrow,
+  riskJudgeHandedOffHead,
 } from "./lib/sweep.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
@@ -2287,6 +2288,71 @@ export function buildSweepEffects(
   // above rather than bolted on here: returning the lib's object unchanged makes that identity
   // structural instead of something a future edit has to remember to mirror.
   return effects;
+}
+
+/**
+ * W1-T5403 — the sweep's risk judge for a head whose run ended `handed_off`: the SAME judge mount,
+ * live risk policy, spend collector and BLOCKED escalation the in-run call in runTaskBody uses, with
+ * the change view read at judgment time. A settings or change-view failure surfaces as an
+ * unavailable judge through `assessRisk`, never as a proceed. Wired by both sweep entrypoints.
+ */
+export function handedOffHeadRiskJudge(
+  owner: string,
+  repo: string,
+  config: Config,
+  plan: Plan,
+  ledgerPath: string,
+  runId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  spawn?: typeof spawnWorker,
+  escalateImpl: typeof escalate = escalate,
+  readChangeView: (prUrl: string) => RiskJudgeChangeView = changeView,
+): NonNullable<SweepDeps["judgeHandedOffHead"]> {
+  return riskJudgeHandedOffHead((pr) => {
+    const task = pr.taskId === undefined ? undefined : plan.byId.get(pr.taskId);
+    const spend = riskJudgeSpendCollector();
+    return {
+      input: {
+        change: { description: `${task?.title ?? `PR #${pr.prNumber}`} — ${pr.prUrl}`, files: task?.files },
+        gatesState: { review_state: pr.reviewState, checks_state: pr.checksState, owner: "sweep (handed-off head)" },
+        planContext: { taskId: pr.taskId, taskType: task?.type },
+      },
+      config: { confidenceThreshold: readRiskPolicy(policyPath(repoRoot)).confidenceThreshold },
+      orchestrator: {
+        spend,
+        log,
+        judge: async (input) => {
+          const settingsFile = renderWorkerSettings({
+            templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+            hooksDir: join(resolveInstallRoot(config), "hooks"),
+            outPath: join(config.root, "tmp", `risk-judge-settings-${runId}.json`),
+          });
+          const mount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
+          const judged = { ...input, change: { ...input.change, changeView: readChangeView(pr.prUrl) } };
+          return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend })(judged);
+        },
+        escalate: (verdict, action) =>
+          escalateImpl(
+            {
+              class: "BLOCKED",
+              taskId: pr.taskId ?? `PR-${pr.prNumber}`,
+              runId,
+              headSha: pr.headSha,
+              summary: `risk judge ESCALATED a handed-off head (${verdict.verdict}, confidence ${verdict.confidence.toFixed(2)}) — ${pr.prUrl}`,
+              detail: `${action.reason}\n\nThe sweep held auto-merge for head ${pr.headSha}; it was NOT armed unattended.`,
+              options: [
+                {
+                  label: "review-manually",
+                  detail: "read the diff and either merge it by hand or push a follow-up fix; a new head is judged again.",
+                },
+              ],
+              recommendation: "review-manually",
+            },
+            { issues: ghIssueGateway(owner, repo), ledgerPath, runId },
+          ),
+      },
+    };
+  });
 }
 import { readCiGateRequiredChecks } from "./lib/ci-gate-required.js";
 import { applyCorrection } from "./lib/correct.js";
@@ -5827,7 +5893,7 @@ export const PR_OPEN_HANDOFF_STEP_OWNERS: readonly { step: string; owner: PrOpen
   { step: "capped_arm_refusal", owner: { kind: "sweep", by: "runReview -> armIfVerdictPermits -> decideArmFromLedgerVerdict" } },
   { step: "automerge_arm", owner: { kind: "sweep", by: "sweep mergeable disposition arms auto-merge on checks green + review success" } },
   { step: "merge_and_terminal_row", owner: { kind: "sweep", by: "GitHub auto-merge the sweep armed; this run's own terminal row is the handed_off verdict" } },
-  { step: "risk_judge", owner: { kind: "in_run_only", by: "runRiskJudge in runTaskBody; the sweep honours only a prior risk_judge.escalated row (riskRefused)" } },
+  { step: "risk_judge", owner: { kind: "sweep", by: "sweep mergeable disposition -> judgeHandedOffHead (handedOffHeadRiskJudge -> runRiskJudge), once per handed-off head before arming" } },
   { step: "specialist_panel", owner: { kind: "in_run_only", by: "routeSpecialists in runTaskBody; a specialist.panel log row that gates nothing" } },
   { step: "irreversible_arm_refusal", owner: { kind: "declined", reason: "irreversible_diff" } },
   { step: "no_merge_boundary", owner: { kind: "declined", reason: "no_merge_boundary" } },
@@ -18167,7 +18233,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           { issues: ghIssueGateway(owner, task.repo), ledgerPath, runId },
         );
       },
-      log: (s, extra) => log(s, extra),
+      // W1-T5403: key every judge row to the PR head, so the sweep never re-judges a head decided here.
+      log: (s, extra) => log(s, { ...extra, pr_number: riskJudgeInput.prNumber, head_sha: riskJudgeInput.headSha }),
     }, {
       // Judge unavailability is recorded, while the deterministic gates remain authoritative.
       judgeUnavailableAction: "proceed",
@@ -40440,6 +40507,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
       staleGateWorkflowsByPr,
       updatedForWorkflow,
       behindMainByPr,
+      judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
     }),
     DEFAULT_SWEEP_POLICY,
   );
@@ -41669,6 +41737,7 @@ export function buildSweepHook(
           updatedForWorkflow,
           behindMainByPr,
           reviewerCodeRecovery,
+          judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
           // W1-T2584: closes review admission on the wall-clock timeout; W1-T3491 threads the
           // independent STOP/PAUSE worker-admission check. Direct/tests calls omit both and
           // receive the true defaults above.
