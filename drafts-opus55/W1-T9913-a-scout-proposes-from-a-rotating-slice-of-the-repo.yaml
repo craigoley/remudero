@@ -1,0 +1,70 @@
+- id: W1-T9913
+  title: "A SCOUT THAT ONLY READS THE LEDGER NEVER SEES A WEAK SPOT THE LEDGER CANNOT MEASURE — dead branches of logic, a missing test beside a risky function, a stale comment, a doc that no longer matches the code, a needless duplicate; a second scout class reads one rotating slice of the repository per pass and files each finding that survives a premise check"
+  repo: remudero
+  depends_on: ["W1-T9912"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 45.00
+  priority: 3
+  status: queued
+  attempts: 0
+  origin: "operator ask 2026-10-03: proactivity — a gardener that improves the plan, task list and repository, flowing through the system with no human review"
+  plan_refs: ["W1-T9912", "W1-T4110", "W1-T4117", "W1-T5361", "W1-T3412"]
+  files:
+    - src/lib/scout-gardener.ts
+    - test/a-scout-proposes-from-a-rotating-slice-of-the-repo.test.ts
+  rationale: |
+    The ledger scout (W1-T9912) finds only what already misbehaves at run time. Measured by its own
+    nature, it cannot see a risky function with no test, an export the adoption scan misses because a string
+    registry names it (the export gardener refuses exactly that case), a comment that contradicts the code
+    beside it, or a doc that points at a symbol that no longer exists. A model reading the code can. The
+    cost of reading everything every pass is the reason this class reads ONE slice per pass, rotating, with a
+    cursor in the gardener's state file so every directory is read in turn.
+    The proposals are the dangerous part of a proactive system: a model asked for improvements will always
+    produce some, so the class's value depends entirely on what it is refused. The refusals below are the
+    design, not hardening added after it.
+
+  design: |
+    (i) `pickScoutSlice` in src/lib/scout-gardener.ts picks the slice: the next directory under src/lib, scripts, docs or test after
+    a persisted cursor, capped at a fixed byte budget, with files changed since the last read of that slice
+    first. Pure and cursor-driven so a test pins the rotation.
+    (ii) A second class, `propose-from-slice`, on the same GardenSpec. The model seam is INJECTED
+    (deps), never imported, so a test supplies the answer and no test spends cash. The model is shown the slice
+    and the plan's open task titles and answers with at most three findings, each carrying `file`, `line`, a
+    one-sentence `claim`, and the one concrete check that would show it true.
+    (iii) EVERY FINDING IS RE-VERIFIED BEFORE IT IS FILED, deterministically: the cited file exists at HEAD,
+    the cited line holds the symbol or text the claim names (the same check the implement contract now orders
+    a worker to run), and a finding whose subject matches an open or recently merged task's title or files
+    (the duplicate-surface lint's own comparison) is dropped. A finding that fails any of the three is
+    discarded with a ledgered reason, never repaired by asking the model again.
+    (iv) FILED through `renderMachineShard` under origin `scout:slice:<dir>`. The machine-filing judge rules
+    on risk; the deterministic backstop still sends a record touching secrets, permissions, irreversible
+    changes or merge policy to a person. This class never sets `verify:` or `risk:`.
+    (v) SAME ADMISSION BOUND AS THE LEDGER CLASS (W1-T9912 (v)): the shared function, not a copy. A finding
+    never files while the queue is over its bound.
+    (vi) JUDGED BY SURVIVAL: a merged scout task counts for the class only if the change is still in main after
+    the survival window (the export gardener's revert window, EXPORT_GARDEN_WINDOW_DAYS) and the finding's own
+    check still passes; a revert or a closed PR debits. A class that keeps debiting needs a higher machine-judge
+    bar through the family track record that already exists, with no new switch.
+
+  acceptance:
+    - claim: "the slice rotates from a persisted cursor and reads changed files first"
+      proof: 'grep: test("W1-T9913: the slice rotates from a persisted cursor and reads changed files first" in test/a-scout-proposes-from-a-rotating-slice-of-the-repo.test.ts'
+    - claim: "a finding whose cited line does not hold what its claim names is discarded and never filed"
+      proof: 'grep: test("W1-T9913: a finding whose cited line does not hold what its claim names is discarded and never filed" in test/a-scout-proposes-from-a-rotating-slice-of-the-repo.test.ts'
+    - claim: "a finding that duplicates an open or recently merged task is discarded"
+      proof: 'grep: test("W1-T9913: a finding that duplicates an open or recently merged task is discarded" in test/a-scout-proposes-from-a-rotating-slice-of-the-repo.test.ts'
+    - claim: "a surviving finding is filed through the machine-filing renderer under the slice origin"
+      proof: 'grep: test("W1-T9913: a surviving finding is filed through the machine filing renderer under the slice origin" in test/a-scout-proposes-from-a-rotating-slice-of-the-repo.test.ts'
+    - claim: "a reverted change debits the class and filing respects the shared queue bound"
+      proof: 'grep: test("W1-T9913: a reverted change debits the class and filing respects the shared queue bound" in test/a-scout-proposes-from-a-rotating-slice-of-the-repo.test.ts'
+  falsifier: |
+    File a finding whose cited line no longer holds the claimed text, file one that duplicates a queued task,
+    or credit a change that was reverted inside the window. The affected proof must fail. CLOSE THIS TASK
+    without implementation if the sibling ledger-scout task has not merged: this class reuses its admission
+    bound and survival metric and must not carry a copy.
+
+  notes: |
+    Depends on W1-T9912 for the shared admission bound. If that task is retired, retire this one with it.

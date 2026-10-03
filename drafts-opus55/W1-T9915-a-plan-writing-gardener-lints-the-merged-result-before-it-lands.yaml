@@ -1,0 +1,59 @@
+- id: W1-T9915
+  title: "TWO PLAN WRITERS CAN EACH PRODUCE A VALID SHARD AND MERGE INTO AN INVALID ONE — the 2026-10-03 outage was two gardener PRs editing the same record 28 s apart; each linted clean against its own base, git merged both without a textual conflict, and nothing checked the result. A plan-writing gardener re-reads fresh origin/main and lints its change on top of it immediately before it lands"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 35.00
+  priority: 2
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-03: the Follow-up section of PR #8877 (a plan-validity check on the merged result in each gardener's landing step)"
+  plan_refs: ["W1-T9914", "W1-T4110", "W1-T4941", "W1-T5361", "W1-T4533"]
+  files:
+    - src/lib/gardener.ts
+    - test/a-plan-writing-gardener-lints-the-merged-result-before-it-lands.test.ts
+  rationale: |
+    READ 2026-10-03. The cause chain from PR #8877: the backlog gardener (#8872, 09:13:35Z) added a
+    `priority:` key and the machine-filing judge (#8871, 09:14:03Z) added another to the same shard. Each PR
+    passed `lint-plan` against its own merge base. The shard on main then held a duplicate key and the daemon
+    could not boot. Every gardener that writes a plan shard lands through `GardenCheckout.land`
+    (src/lib/gardener.ts), so one check there covers the plan, backlog, machine-judge, ci-friction,
+    selector-shadow, host-resource and opportunity-intake writers at once.
+    INFERRED, NOT VERIFIED: that the PR's CI runs on GitHub's merge ref rather than the PR head. Even if it
+    does, it cannot see a second PR that merges after CI finished, so the window this closes is the gap
+    between the PR's last check and its merge.
+
+  design: |
+    (i) src/lib/gardener.ts exports a pure `lintMergedPlanChange({ base, changes })`: given the
+    fresh origin/main plan blobs and the shard bytes a gardener is about to land, it applies the change on top
+    of the CURRENT blobs and runs the plan parser and field validation over the result, returning the first
+    parse or duplicate-key error with its file.
+    (ii) `land` in the gardener checkout fetches origin/main immediately before it commits, calls the check
+    with the paths it is about to land, and when the result would not parse REFUSES to land: it ledgers
+    `<name>.landing_refused` with the file and message and leaves the next pass to rebuild its change on
+    fresh main, which the existing skip-if-unchanged logic already does because the inventory fingerprint
+    changed.
+    (iii) A refused landing is not a failure streak: it is the check working, and it must not count toward
+    GARDEN_FILING_ESCALATE_AT.
+    (iv) Paths outside plan/ are not checked, so a source-only gardener pays nothing.
+
+  acceptance:
+    - claim: "a change that parses alone but duplicates a key against fresh main is refused"
+      proof: 'grep: test("W1-T9915: a change that parses alone but duplicates a key against fresh main is refused" in test/a-plan-writing-gardener-lints-the-merged-result-before-it-lands.test.ts'
+    - claim: "a clean change lands unchanged"
+      proof: 'grep: test("W1-T9915: a clean change lands unchanged" in test/a-plan-writing-gardener-lints-the-merged-result-before-it-lands.test.ts'
+    - claim: "a refused landing is ledgered and is not a filing failure"
+      proof: 'grep: test("W1-T9915: a refused landing is ledgered and is not a filing failure" in test/a-plan-writing-gardener-lints-the-merged-result-before-it-lands.test.ts'
+    - claim: "a path outside the plan is not checked"
+      proof: 'grep: test("W1-T9915: a path outside the plan is not checked" in test/a-plan-writing-gardener-lints-the-merged-result-before-it-lands.test.ts'
+  falsifier: |
+    Land a shard that duplicates a key against fresh main, or count a refused landing as a filing failure so a
+    healthy check escalates. The affected proof must fail. CLOSE THIS TASK without implementation if
+    `git grep -n "landing_refused" src/` already shows such a check.
+
+  notes: |
+    Pairs with the quarantine task: that one limits the damage when a bad shard reaches main, this one stops
+    the gardeners from producing it.

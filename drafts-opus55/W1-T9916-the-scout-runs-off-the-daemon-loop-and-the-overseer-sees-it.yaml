@@ -1,0 +1,46 @@
+- id: W1-T9916
+  title: "A SCOUT NOBODY STARTS FINDS NOTHING — the scout gardener spec (W1-T9912) is pure and tested but reached only by its own tests until the garden registry names it and the registered-garden builder constructs it, so it runs as a child process off the daemon loop like the other thirteen"
+  repo: remudero
+  depends_on: ["W1-T9912"]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high
+  band_meaning: span
+  budget_usd: 25.00
+  priority: 3
+  status: queued
+  attempts: 0
+  origin: "operator ask 2026-10-03: proactivity — a gardener that improves the plan, task list and repository, flowing through the system with no human review"
+  plan_refs: ["W1-T9912", "W1-T5114", "W1-T4802", "W1-T4941"]
+  files:
+    - src/lib/garden-registry.ts
+    - src/run-task.ts
+    - test/the-scout-runs-off-the-daemon-loop-and-the-overseer-sees-it.test.ts
+  rationale: |
+    READ 2026-10-03. REGISTERED_GARDEN_NAMES in src/lib/garden-registry.ts lists the gardens the daemon runs as
+    child processes (`rmd garden run <name>`), and `buildRegisteredGarden` in src/run-task.ts builds each from
+    the same registry. The backlog garden is the closest model: a name in the list, a branch in the builder,
+    a minimum interval. The overseer (src/lib/gardener-overseer.ts) discovers gardeners from ledger step
+    suffixes and `state/*-gardener.json`, so a registered scout is watched from its first scorecard row with
+    no overseer edit. Declared risk:high with band_meaning span only because Rule 19 counts the registry and the
+    builder as two concerns: this is two small edits, not a risky change.
+
+  design: |
+    (i) Add `"scout"` to REGISTERED_GARDEN_NAMES, after `"backlog"`, with its minimum pass interval beside the
+    other intervals the registry exports.
+    (ii) Add the `scout` branch to `buildRegisteredGarden`, over `scoutGardenSpec` and the same workspace and
+    ledger writers the backlog garden uses.
+    (iii) A `state/SCOUT_OFF-<class>` switch already comes from the framework; do not add another.
+
+  acceptance:
+    - claim: "the registry names the scout and its pass interval"
+      proof: 'grep: test("W1-T9916: the registry names the scout and its pass interval" in test/the-scout-runs-off-the-daemon-loop-and-the-overseer-sees-it.test.ts'
+    - claim: "the registered-garden builder constructs the scout spec"
+      proof: 'grep: test("W1-T9916: the registered garden builder constructs the scout spec" in test/the-scout-runs-off-the-daemon-loop-and-the-overseer-sees-it.test.ts'
+    - claim: "the run-task builder calls the scout spec"
+      proof: 'grep: scoutGardenSpec( in src/run-task.ts'
+  falsifier: |
+    Register the name without a builder branch, or a builder branch for a name the registry does not list. The
+    affected proof must fail. CLOSE THIS TASK without implementation if `git grep -n "scoutGardenSpec" src/`
+    already shows the builder wired.

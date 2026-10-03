@@ -1,0 +1,70 @@
+- id: W1-T9912
+  title: "NOTHING LOOKS FOR WORK NOBODY HAS ASKED FOR — fourteen gardeners tend what already exists (merge, retire, band, prune, tier, tune) and each reacts to one narrow signal; a step that keeps failing or refusing in the ledger with no queued or recently merged task citing it waits for a person to notice. A scout gardener files that finding through the machine-filing path"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 35.00
+  priority: 3
+  status: queued
+  attempts: 0
+  origin: "operator ask 2026-10-03: proactivity — a gardener that improves the plan, task list and repository, flowing through the system with no human review"
+  plan_refs: ["W1-T4110", "W1-T4941", "W1-T4802", "W1-T5114", "W1-T5361"]
+  files:
+    - src/lib/scout-gardener.ts
+    - test/a-scout-files-the-recurring-failure-no-task-tracks.test.ts
+  rationale: |
+    READ 2026-10-03 over origin/main 231b7673b. The registered gardens (REGISTERED_GARDEN_NAMES in
+    src/lib/garden-registry.ts) are plan, gate, test, config, export, ci-friction, selector-shadow,
+    evidence-coverage, overseer, machine-judge, hot-file, host-resource and backlog. Each starts from one
+    measured signal in its own domain. The plan gardener only merges duplicates and retires done tasks
+    (PLAN_GARDEN_CLASSES); the backlog gardener only places or retires an EXISTING task. Nothing starts
+    from the ledger as a whole and asks which recurring failure no task covers. A person finds those today.
+    The machinery to land one already exists: `renderMachineShard` (src/lib/machine-filing.ts) renders and
+    lints a record with the shared header, the machine-filing judge rules on its risk and releases a
+    `proceed` to `verify: auto`, and `backlogCitedSteps` (src/lib/backlog-gardener.ts) already says which
+    ledger steps a task cites. This task adds the producer only.
+
+  design: |
+    (i) src/lib/scout-gardener.ts exports `scoutGardenSpec`, a GardenSpec (src/lib/gardener.ts) with ONE class,
+    `file-uncovered-symptom`. Registering it with the garden registry is the sibling wiring task, so this module
+    is pure and testable without a daemon.
+    (ii) INVENTORY: read the ledger union (readLedgerUnionRecordsSync) over a trailing window for steps whose
+    name carries a failure shape (`failed`, `refused`, `unavailable`, `escalated`, `unhealthy`) and count rows per
+    step per half-window. A symptom is a step whose count grew or held across both halves.
+    (iii) UNCOVERED means NO queued task and NO task merged in the trailing window cites the step
+    (`backlogCitedSteps` over every plan task) AND no gardener's own scorecard already prices it. A covered
+    symptom is never filed. A step the ci-friction gardener prices is covered by definition.
+    (iv) FILE through `renderMachineShard`: the family origin is `scout:<step>`, files are read from the
+    ledger rows' own `file` or `module` fields when present and otherwise left to the worker's recon, cost is the
+    row count priced with `costPriority`, and a record the linter refuses is never written. Filers do not choose
+    `verify:` or `risk:`; the machine-filing judge rules, and its deterministic backstop still sends a risky
+    record to a person.
+    (v) ADMISSION IS BOUNDED BY THE QUEUE. The queue grew 225 to 266 in a day while 32 tasks merged
+    (W1-T4941). The scout files at most as many records per pass as the fleet merged in the trailing day, and
+    NONE while the unprioritized share of the queue exceeds the backlog gardener's own band target. This bound
+    is a backstop; its comment must say so.
+    (vi) JUDGED BY SURVIVAL, NOT BY MERGE: after a scout-filed task merges, the symptom's row count over the
+    next window is the metric (a symptom that stopped is a credit; one that kept growing is a debit), so the
+    class's Beta record cannot be earned by churn.
+
+  acceptance:
+    - claim: "a failing step that no task cites is filed once through the machine-filing renderer"
+      proof: 'grep: test("W1-T9912: a failing step that no task cites is filed once through the machine filing renderer" in test/a-scout-files-the-recurring-failure-no-task-tracks.test.ts'
+    - claim: "a step a queued or recently merged task cites is never filed"
+      proof: 'grep: test("W1-T9912: a step a queued or recently merged task cites is never filed" in test/a-scout-files-the-recurring-failure-no-task-tracks.test.ts'
+    - claim: "filing stops while the queue is over its bound and is capped by the day's merges"
+      proof: 'grep: test("W1-T9912: filing stops while the queue is over its bound and is capped by the days merges" in test/a-scout-files-the-recurring-failure-no-task-tracks.test.ts'
+    - claim: "the class is judged by whether the symptom stopped, not by the merge"
+      proof: 'grep: test("W1-T9912: the class is judged by whether the symptom stopped not by the merge" in test/a-scout-files-the-recurring-failure-no-task-tracks.test.ts'
+  falsifier: |
+    Cover a symptom with a queued task that cites its step and the scout still files it; or file past the
+    queue bound; or credit the class on a merge while the symptom's rows kept growing. The affected proof must
+    fail. CLOSE THIS TASK without implementation if `git grep -n "scoutGardenSpec" src/` shows a
+    scout already exists.
+
+  notes: |
+    One class only. The repo-reading class is its own task (a sibling draft) and depends on this one's
+    admission bound and survival metric. Do not widen.
