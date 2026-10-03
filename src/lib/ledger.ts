@@ -436,6 +436,10 @@ export const LEDGER_ROTATION_SMOOTHING_WINDOW_MS = 5 * 60_000;
  *  rotation fired — the one case where the window itself would be the defect. */
 export const LEDGER_ROTATION_BACKSTOP_MULTIPLIER = 4;
 
+/** Shortest real time since the previous archive over which an append rate is measured (W1-T4393).
+ *  Shorter than this the "rate" is a burst, and extrapolating it to an hour is noise. */
+export const LEDGER_ROTATION_MIN_RATE_SAMPLE_MS = 60_000;
+
 /** W1-T2244: the one row an operator produces when they act on a risk-judge escalation instead of
  *  taking its "merge it by hand" escape hatch in silence. Written by `recordRiskOverride`, read
  *  back head-bound by {@link riskOverrideFromLedger} so a record never outlives the diff it judged
@@ -1629,7 +1633,9 @@ function rotateLedgerLocked(
   const prefixBytes = archivedPrefixBytes(previous, snapshotBytes);
   const mtimes = archiveMtimes(dir, archiveFsDeps).map((a) => a.mtimeMs);
   const elapsedMs = mtimes.length > 0 ? systemClock.now() - mtimes.reduce((a, b) => Math.max(a, b)) : 0;
-  const sample = prefixBytes !== undefined && elapsedMs > 0
+  // A burst between two near-simultaneous rotations extrapolates to an absurd hourly rate that would
+  // pin the effective ceiling at the backstop; only a window long enough to be a rate is measured.
+  const sample = prefixBytes !== undefined && elapsedMs >= LEDGER_ROTATION_MIN_RATE_SAMPLE_MS
     ? (size0 - prefixBytes) * 3_600_000 / elapsedMs : 0;
   const priorRate = previous?.rateBytesPerHour;
   const rateBytesPerHour = sample > 0 && Number.isFinite(sample)
