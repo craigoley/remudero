@@ -11212,14 +11212,9 @@ export async function runFixRung(opts: {
         },
       });
     const fixReport = workerTranscript(fixResult);
-    const failingCheck = priorCiFailures?.[0]?.name ?? unmet[0]?.claim ?? gateFailuresNow?.[0]?.reason;
-    // Derive before asking again: the completed round already names the failure and PR.
-    // The commit helper still owns validation, declared scope, and the existing-commit guard.
-    const initialDerivedCommit = fixHarnessOwnsGit && parseReport(fixReport)?.commitMessage === undefined
-      && (deps.worktreeHasUncommittedChanges ?? worktreeHasUncommittedChanges)(opts.worktreePath)
-      ? derivedFixCommit(failingCheck, opts.prUrl)
-      : undefined;
-    let harnessCommitCount = harnessCommit(fixReport, { derivedCommit: initialDerivedCommit });
+    // The missing line is asked for once first (W1-T4450); the derived subject is only the
+    // fallback after that re-ask (below), never a replacement for it.
+    let harnessCommitCount = harnessCommit(fixReport);
     // W1-T4450: A MISSING COMMIT_MESSAGE LINE IS ASKED FOR ONCE HERE TOO, exactly as implement does
     // (W1-T4052): same session, one ask, the same refusal if the line is still absent. 37 fix rounds in
     // one day did their work and lost it to this one line. Only a round that left edits is asked.
