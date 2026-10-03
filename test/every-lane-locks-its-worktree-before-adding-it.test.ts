@@ -65,11 +65,12 @@ function installMidAddPrune(repoDir: string, worktreesRoot: string, scratch: str
   mkdirSync(hooks, { recursive: true });
   const tsx = import.meta.resolve("tsx");
   const worker = new URL("../src/lib/worker.ts", import.meta.url).href;
+  // NODE_V8_COVERAGE is dropped: a child's profile of the tmp script outlives the dir and empties the suite's lcov.
   writeFileSync(
     join(hooks, "post-checkout"),
     [
       "#!/bin/sh",
-      `env -u NODE_TEST_CONTEXT -u NODE_OPTIONS node --import ${sq(tsx)} ${sq(script)} ${sq(repoDir)} ${sq(worktreesRoot)} ${sq(worker)} ${sq(out)} >> ${sq(join(scratch, "hook.log"))} 2>&1`,
+      `env -u NODE_TEST_CONTEXT -u NODE_OPTIONS -u NODE_V8_COVERAGE node --import ${sq(tsx)} ${sq(script)} ${sq(repoDir)} ${sq(worktreesRoot)} ${sq(worker)} ${sq(out)} >> ${sq(join(scratch, "hook.log"))} 2>&1`,
       `exit ${exit}`,
       "",
     ].join("\n"),
