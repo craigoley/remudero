@@ -1,0 +1,31 @@
+- id: W1-T5410
+  title: "THE FRONTIER PANEL NAMES EVERY FILTER REASON — frontierFilterReason renders any reason it does not list as \"blocked on unmet dependencies: (none resolved)\", so operator-build, retired and foreign-repo tasks read as dependency-blocked"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: low
+  origin: "operator session 2026-10-03: found by W1-T5351's build (PR #8826)"
+  plan_refs: ["W1-T5351", "W1-T2675"]
+  files: [src/lib/panel-graph.ts, test/the-frontier-panel-names-every-filter-reason.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    `frontierFilterReason` in src/lib/panel-graph.ts returns early for already-merged,
+    verify-not-auto, credit-indeterminate and blocked, then treats EVERY other `DispatchFilterReason`
+    as unmet dependencies. A retired, foreign-repo, or (with W1-T5351, #8826) operator-build task
+    therefore renders "blocked on unmet dependencies: (none resolved)" — the false sentence W1-T2675
+    already called out for credit-indeterminate. A new reason added to the union silently inherits
+    the wrong text.
+  design: |
+    Map each `DispatchFilterReason` explicitly (an exhaustive switch the compiler checks), with its
+    own reason text, and fall through to unmet-dependencies only for the unmet-deps reason itself.
+  acceptance:
+    - claim: "every dispatch filter reason renders its own frontier text, and only unmet-deps renders the dependency sentence"
+      proof: "unit test: test/the-frontier-panel-names-every-filter-reason.test.ts"
+  falsifier: |
+    A retired task and a foreign-repo task in the frontier render their own reason (today both read
+    "blocked on unmet dependencies: (none resolved)").
