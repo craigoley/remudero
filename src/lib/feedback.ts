@@ -703,8 +703,8 @@ export interface CaptureFeedbackOptions {
    *  passes a deterministic id so a re-run's `existsSync` check is the whole dedup mechanism. */
   id?: string;
   /** W1-T243 test seam only — passed through verbatim to {@link landFeedback} after the write.
-   *  Real callers never set this; a test injects a fake `gh` to exercise the bridge without
-   *  hitting real GitHub. */
+   *  A console route sets it to skip the request-path preflight (W1-T5348); a test injects a fake
+   *  `gh` to exercise the bridge without hitting real GitHub. */
   land?: LandFeedbackOpts;
   /** W1-T350: the four-section expansion of `raw`, already produced by the caller's own
    * preview→arm→confirm round trip before this capture ever runs. `undefined`/`null` leaves

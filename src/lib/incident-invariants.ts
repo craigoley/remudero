@@ -88,6 +88,16 @@ export const DISPATCH_STALL_RULE_ID = "dispatch-stall";
 export const REPEATED_REFUSAL_RULE_ID = "repeated-refusal";
 export const LOOP_LAG_RULE_ID = "loop-lag";
 export const NO_MERGES_WITH_GREEN_QUEUE_RULE_ID = "no-merges-with-green-queue";
+export const SERVE_MEMORY_HEADROOM_RULE_ID = "serve-memory-headroom";
+
+// W1-T5355: serve's memory sample (serve-memory.ts, which re-exports these) is defined HERE so the
+// rule that reads it needs no import back into the module that imports this one.
+export const SERVE_MEMORY_STEP = "serve.memory";
+export const SERVE_MEMORY_RELIEVED_STEP = "serve.memory_relieved";
+/** "Every few minutes": often enough to see a climb to the limit, rare enough that sizing every holder costs nothing. */
+export const SERVE_MEMORY_SAMPLE_MS = 3 * 60_000;
+/** Fractions of the container's own limit, so the same line holds at 2 GiB or 8 GiB. */
+export const LEGACY_RELIEF_HEADROOM = 0.25;
 
 /** The `dispatch.settled_set` step (dispatch-overlap.ts's `settledSetPayload`) already reports a
  *  `fulfilled` count per pass; this rule sums it across the window rather than re-deriving it. */
@@ -105,6 +115,13 @@ export const LOOP_LAG_P99_BOUND_MS = 500;
 
 const MERGE_READY_STEP = "queue.merge_ready";
 const MERGE_STEP = "pr.merged";
+
+/** The serve.memory rows in `window` that read a headroom: a null one (no cgroup) is no evidence. */
+function headroomReadings(window: readonly IncidentInvariantRow[]): number[] {
+  return window
+    .filter((row) => row.step === SERVE_MEMORY_STEP && typeof row.headroom === "number" && Number.isFinite(row.headroom))
+    .map((row) => row.headroom as number);
+}
 
 const RULES: readonly InvariantRule[] = [
   {
@@ -179,6 +196,23 @@ const RULES: readonly InvariantRule[] = [
       return {
         bad: greenQueued > 0 && merges === 0,
         message: `green-queued=${greenQueued}, merges=${merges}`,
+      };
+    },
+  },
+  {
+    id: SERVE_MEMORY_HEADROOM_RULE_ID,
+    // Short window = 1.5 sample periods, so it holds the latest sample even when the timer drifts.
+    // It reads headroom alone: a relief with nothing to drop is exactly the case that must still fire.
+    longMs: 18 * SERVE_MEMORY_SAMPLE_MS,
+    bad: (window) => {
+      const readings = headroomReadings(window);
+      const best = readings.length > 0 ? Math.max(...readings) : 1;
+      const reliefs = window.filter((row) => row.step === SERVE_MEMORY_RELIEVED_STEP).length;
+      const last = window.filter((row) => row.step === SERVE_MEMORY_STEP).at(-1) ?? {};
+      return {
+        bad: readings.length > 0 && best < LEGACY_RELIEF_HEADROOM,
+        message: `headroom at most ${Math.round(best * 100)}% over ${readings.length} sample(s), below ${LEGACY_RELIEF_HEADROOM * 100}%; ` +
+          `reliefs=${reliefs}; last rss=${numberField(last, "rss_bytes")} unattributed=${numberField(last, "unattributed_bytes")}`,
       };
     },
   },

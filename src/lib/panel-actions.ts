@@ -37,6 +37,7 @@ import { readLedgerLines, DEFAULT_LIVENESS_BOUND_MS, type LedgerReader } from ".
 import { deriveLastPoll } from "./daemon-health.js";
 import { deriveThreadId, readThread, appendThreadMessage, type ThreadIdentity } from "./inbox-thread.js";
 import { captureFeedback } from "./feedback.js";
+import type { LandFeedbackOpts } from "./feedback-landing.js";
 import { applyOperatorMergeHold, type OperatorMergeHoldAction } from "./operator-merge-hold.js";
 import {
   interpretReply,
@@ -153,6 +154,17 @@ export function appendPanelLedger(ledgerPath: string, step: string, taskId: stri
   const row: PanelLedgerRow = { step, ts: fixedClock(ms).iso(), run_id: `PANEL-${ms}` };
   appendLedger(ledgerPath, { ts: row.ts, run_id: row.run_id, task_id: taskId, step, origin, ...extra });
   return row;
+}
+
+export function requestPathLand(land: LandFeedbackOpts, ledgerPath: string, taskId: string, origin: string): LandFeedbackOpts {
+  return {
+    ...land,
+    preflight: "skip-request-path",
+    log: (step, extra) => {
+      if (step === "plan_pr.preflight_skipped") appendPanelLedger(ledgerPath, step, taskId, origin, extra);
+      land.log?.(step, extra);
+    },
+  };
 }
 
 /** The identity of one appended panel ledger row: the system-of-record reference an executor cites. */

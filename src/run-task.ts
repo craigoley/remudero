@@ -1569,6 +1569,7 @@ import {
   trackRepairLadder,
   isPostReviewDiffCeilingRefusal,
   isRetryableReviewThrow,
+  riskJudgeHandedOffHead,
 } from "./lib/sweep.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
@@ -2287,6 +2288,71 @@ export function buildSweepEffects(
   // above rather than bolted on here: returning the lib's object unchanged makes that identity
   // structural instead of something a future edit has to remember to mirror.
   return effects;
+}
+
+/**
+ * W1-T5403 — the sweep's risk judge for a head whose run ended `handed_off`: the SAME judge mount,
+ * live risk policy, spend collector and BLOCKED escalation the in-run call in runTaskBody uses, with
+ * the change view read at judgment time. A settings or change-view failure surfaces as an
+ * unavailable judge through `assessRisk`, never as a proceed. Wired by both sweep entrypoints.
+ */
+export function handedOffHeadRiskJudge(
+  owner: string,
+  repo: string,
+  config: Config,
+  plan: Plan,
+  ledgerPath: string,
+  runId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  spawn?: typeof spawnWorker,
+  escalateImpl: typeof escalate = escalate,
+  readChangeView: (prUrl: string) => RiskJudgeChangeView = changeView,
+): NonNullable<SweepDeps["judgeHandedOffHead"]> {
+  return riskJudgeHandedOffHead((pr) => {
+    const task = pr.taskId === undefined ? undefined : plan.byId.get(pr.taskId);
+    const spend = riskJudgeSpendCollector();
+    return {
+      input: {
+        change: { description: `${task?.title ?? `PR #${pr.prNumber}`} — ${pr.prUrl}`, files: task?.files },
+        gatesState: { review_state: pr.reviewState, checks_state: pr.checksState, owner: "sweep (handed-off head)" },
+        planContext: { taskId: pr.taskId, taskType: task?.type },
+      },
+      config: { confidenceThreshold: readRiskPolicy(policyPath(repoRoot)).confidenceThreshold },
+      orchestrator: {
+        spend,
+        log,
+        judge: async (input) => {
+          const settingsFile = renderWorkerSettings({
+            templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
+            hooksDir: join(resolveInstallRoot(config), "hooks"),
+            outPath: join(config.root, "tmp", `risk-judge-settings-${runId}.json`),
+          });
+          const mount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
+          const judged = { ...input, change: { ...input.change, changeView: readChangeView(pr.prUrl) } };
+          return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend })(judged);
+        },
+        escalate: (verdict, action) =>
+          escalateImpl(
+            {
+              class: "BLOCKED",
+              taskId: pr.taskId ?? `PR-${pr.prNumber}`,
+              runId,
+              headSha: pr.headSha,
+              summary: `risk judge ESCALATED a handed-off head (${verdict.verdict}, confidence ${verdict.confidence.toFixed(2)}) — ${pr.prUrl}`,
+              detail: `${action.reason}\n\nThe sweep held auto-merge for head ${pr.headSha}; it was NOT armed unattended.`,
+              options: [
+                {
+                  label: "review-manually",
+                  detail: "read the diff and either merge it by hand or push a follow-up fix; a new head is judged again.",
+                },
+              ],
+              recommendation: "review-manually",
+            },
+            { issues: ghIssueGateway(owner, repo), ledgerPath, runId },
+          ),
+      },
+    };
+  });
 }
 import { readCiGateRequiredChecks } from "./lib/ci-gate-required.js";
 import { applyCorrection } from "./lib/correct.js";
@@ -3709,6 +3775,14 @@ export function syncPlanOrRefuse(
     }
     throw e;
   }
+}
+
+/** The daemon's per-lane plan sync: {@link syncPlanFromOrigin} with its quarantine, so a bad shard or duplicate id that
+ *  boot survived does not refuse every lane afterwards. run-task and drain keep the strict default. */
+export function quarantiningPlanSync(
+  quarantine: (quarantined: QuarantinedTask[]) => void,
+): (repoDir: string, relPath: string, opts: { allowStale?: boolean }) => SyncedPlan {
+  return (repoDir, relPath, opts) => syncPlanFromOrigin(repoDir, relPath, { ...opts, quarantine });
 }
 
 /**
@@ -5827,7 +5901,7 @@ export const PR_OPEN_HANDOFF_STEP_OWNERS: readonly { step: string; owner: PrOpen
   { step: "capped_arm_refusal", owner: { kind: "sweep", by: "runReview -> armIfVerdictPermits -> decideArmFromLedgerVerdict" } },
   { step: "automerge_arm", owner: { kind: "sweep", by: "sweep mergeable disposition arms auto-merge on checks green + review success" } },
   { step: "merge_and_terminal_row", owner: { kind: "sweep", by: "GitHub auto-merge the sweep armed; this run's own terminal row is the handed_off verdict" } },
-  { step: "risk_judge", owner: { kind: "in_run_only", by: "runRiskJudge in runTaskBody; the sweep honours only a prior risk_judge.escalated row (riskRefused)" } },
+  { step: "risk_judge", owner: { kind: "sweep", by: "sweep mergeable disposition -> judgeHandedOffHead (handedOffHeadRiskJudge -> runRiskJudge), once per handed-off head before arming" } },
   { step: "specialist_panel", owner: { kind: "in_run_only", by: "routeSpecialists in runTaskBody; a specialist.panel log row that gates nothing" } },
   { step: "irreversible_arm_refusal", owner: { kind: "declined", reason: "irreversible_diff" } },
   { step: "no_merge_boundary", owner: { kind: "declined", reason: "no_merge_boundary" } },
@@ -11203,7 +11277,9 @@ export async function runFixRung(opts: {
         commitCount: roundStartSha === undefined ? 0 : (deps.commitsAhead ?? commitsAhead)(opts.worktreePath, roundStartSha),
         report,
         worktreePath: opts.worktreePath,
-        declaredPaths: [...(opts.task.files ?? []), ...offeredCensusBaselines()],
+        // The prompt and pre-strike guard already permit repairs to the inherited PR diff.
+        // Use that same captured baseline here; a worker's newly added paths never enter it.
+        declaredPaths: [...(opts.task.files ?? []), ...(baselineDiffFiles ?? []), ...offeredCensusBaselines()],
         acceptance: opts.task.acceptance,
         ...options,
         assignmentId: fixResult.selectionAssignmentId,
@@ -18167,7 +18243,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           { issues: ghIssueGateway(owner, task.repo), ledgerPath, runId },
         );
       },
-      log: (s, extra) => log(s, extra),
+      // W1-T5403: key every judge row to the PR head, so the sweep never re-judges a head decided here.
+      log: (s, extra) => log(s, { ...extra, pr_number: riskJudgeInput.prNumber, head_sha: riskJudgeInput.headSha }),
     }, {
       // Judge unavailability is recorded, while the deterministic gates remain authoritative.
       judgeUnavailableAction: "proceed",
@@ -33302,6 +33379,10 @@ export function reportQuarantined(
   raise: (escalation: Escalation) => string,
 ): void {
   for (const q of quarantined) {
+    if (q.reason === "shard_invalid") {
+      reportInvalidShard(q, log, raise);
+      continue;
+    }
     log("plan.duplicate_quarantined", { id: q.id, files: q.files, reason: q.reason });
     if (q.reason !== "duplicate_id") continue;
     const escalation: Escalation = {
@@ -33321,6 +33402,50 @@ export function reportQuarantined(
       log("plan.duplicate_escalation_failed", { id: q.id, reason: e instanceof Error ? e.message : String(e) });
     }
   }
+}
+
+/** A tasks.d shard that does not parse or validate: one ledger row naming the file and the error, one escalation. */
+function reportInvalidShard(
+  q: QuarantinedTask,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  raise: (escalation: Escalation) => string,
+): void {
+  const file = q.files[0] ?? q.id;
+  log("plan.shard_quarantined", { id: q.id, file, error: q.error });
+  const escalation: Escalation = {
+    class: "BLOCKED",
+    taskId: q.id,
+    summary: `plan shard ${file} does not load — the daemon quarantined it and keeps running`,
+    detail:
+      `The daemon held ${q.id} (and every task depending on it) out of its plan instead of refusing the whole plan.\n\n` +
+      `File: ${file}\nError: ${q.error ?? "(none recorded)"}\n\nNothing can dispatch ${q.id} until the shard loads again.`,
+    options: [{ label: "repair-shard", detail: "fix the shard in a plan-only PR so it parses and validates" }],
+    recommendation: "repair-shard",
+    headDedup: "independent",
+  };
+  try {
+    log("plan.shard_escalated", { id: q.id, file, issue_url: raise(escalation) });
+  } catch (e) {
+    log("plan.shard_escalation_failed", { id: q.id, file, reason: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+/** {@link reportQuarantined} for a daemon that re-reads its plan every tick: each quarantine is reported the first time
+ *  this process sees it, so a bad shard is ledgered and escalated once rather than on every load. */
+export function quarantineReporter(
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  raise: (escalation: Escalation) => string,
+): (quarantined: QuarantinedTask[]) => void {
+  const reported = new Set<string>();
+  return (quarantined) => {
+    const fresh = quarantined.filter((q) => {
+      const key = JSON.stringify([q.reason, q.id, q.files, q.error]);
+      if (reported.has(key)) return false;
+      reported.add(key);
+      return true;
+    });
+    reportQuarantined(fresh, log, raise);
+  };
 }
 
 /**
@@ -33984,6 +34109,7 @@ export async function daemonCommand(
   let plan: Plan;
   const raiseDuplicate = (e: Escalation): string =>
     escalate({ ...e, runId }, { issues: ghIssueGateway(target.owner, target.repo), ledgerPath, runId });
+  const reportPlanQuarantine = quarantineReporter(log, raiseDuplicate);
   const gardenContext: GardenBuildContext = { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate };
   const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
     ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
@@ -34007,7 +34133,7 @@ export async function daemonCommand(
       allowStale,
       log,
       say: (msg) => writeSyncLine(2, `### rmd daemon — ${msg}`),
-      quarantine: (quarantined) => reportQuarantined(quarantined, log, raiseDuplicate),
+      quarantine: reportPlanQuarantine,
     });
     if ("error" in synced) return 1;
     plan = synced.plan;
@@ -34050,7 +34176,7 @@ export async function daemonCommand(
   // mirroring `drainCommand`'s identical construction immediately above `laneGithubFor` there —
   // every dispatch lane's `runTask` call below shares ONE origin fetch + ONE plan parse per
   // tick instead of paying for it per lane. See `createPlanSyncCoalescer`'s own doc.
-  const planSyncCoalescer = createPlanSyncCoalescer(target.planPath);
+  const planSyncCoalescer = createPlanSyncCoalescer(target.planPath, quarantiningPlanSync(reportPlanQuarantine));
   // R-24 (docs/audits/recon-2026-09-05.md) — ONE PROJECTION GATEWAY FOR THE WHOLE DAEMON
   // LIFETIME, built HERE rather than inside `refreshMerged` below. `target.owner`/`target.repo`
   // are resolved ONCE, before this line (`resolveDaemonTarget`, `const target`), and no path
@@ -40440,6 +40566,7 @@ export async function sweepCommand(rest: string[]): Promise<number> {
       staleGateWorkflowsByPr,
       updatedForWorkflow,
       behindMainByPr,
+      judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
     }),
     DEFAULT_SWEEP_POLICY,
   );
@@ -41669,6 +41796,7 @@ export function buildSweepHook(
           updatedForWorkflow,
           behindMainByPr,
           reviewerCodeRecovery,
+          judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
           // W1-T2584: closes review admission on the wall-clock timeout; W1-T3491 threads the
           // independent STOP/PAUSE worker-admission check. Direct/tests calls omit both and
           // receive the true defaults above.

@@ -1,0 +1,38 @@
+- id: W1-T5452
+  title: "THE WORKER PROMPT NEVER SAYS A UNIT-TEST PROOF IS MATCHED AS A LITERAL TITLE SUBSTRING — the proof grammar reaches the filing lanes verbatim but the implement worker is only told to NAME the test, a dead-proof class rediscovered by a CI round trip"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: low
+  budget_usd: 20.00
+  priority: 4
+  status: queued
+  attempts: 0
+  origin: "operator session 2026-10-03: audit of the repo against Anthropic's 'Prompting Claude Opus 5.5' guide"
+  plan_refs: ["W1-T3077"]
+  files:
+    - src/lib/compaction.ts
+    - test/the-worker-prompt-names-the-dead-proof-trap.test.ts
+  rationale: |
+    WHY THIS EXISTS. The guide (frontend section, and its general style) says to name SPECIFIC patterns to avoid
+    rather than a generic 'avoid X'; this repo's prompts mostly do that (the ratchet and commit contracts are
+    exact). One gap remains: the filing lanes receive the proof grammar verbatim (ACCEPTANCE_PROOF_GRAMMAR) but
+    the implement worker gets only 'NAME the test or grep'; nothing tells it a `unit test:` proof is matched as a
+    literal substring of a real test title (CLAUDE.md names this; the 'dead-proof' golden exists), a class
+    otherwise rediscovered by a CI round trip. It edits a gated prompt surface (outputContractLines).
+  design: |
+    (i) One sentence in the implement contract naming the literal-substring rule and the instruction to confirm
+    with a `grep -rlF` hit before finishing. (ii) Satisfy scripts/prompt-surface-gate.mjs with evidence and add
+    a text-pinning test. (iii) Measure before and after: dead-proof findings per merged task.
+
+  acceptance:
+    - claim: "the implement contract names the literal substring rule for unit test proofs"
+      proof: 'grep: test("W1-T5452: the implement contract names the literal substring rule for unit test proofs" in test/the-worker-prompt-names-the-dead-proof-trap.test.ts'
+  falsifier: |
+    CLOSE THIS TASK without implementation if the implement contract already names the literal-substring rule
+    and renderReconPrompt already asks for citation verification.
+
+  notes: |
+    Source: https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5 (audit 2026-10-03). One concern per task; do not widen. Unverified claims are marked INFERRED in the audit and must be re-checked at head before building.
