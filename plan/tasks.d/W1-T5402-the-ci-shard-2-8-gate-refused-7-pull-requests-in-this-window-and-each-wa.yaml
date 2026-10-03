@@ -6,7 +6,9 @@
   verify: human
   risk: low
   priority: 2.5
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # plan gardener: merge W1-T5402 into W1-T5401 — Its title and files repeat an older queued task.
   attempts: 0
   author_class: machine
   origin: "ci-learning:8558:ci-shard (2/8)"
