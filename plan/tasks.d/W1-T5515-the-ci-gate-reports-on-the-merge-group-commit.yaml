@@ -1,0 +1,109 @@
+- id: W1-T5515
+  title: "THE CI GATE REPORTS ON THE MERGE-GROUP COMMIT — branch protection requires `ci-gate`, but ci.yml's `ci-gate` job is guarded `github.event_name == 'pull_request'`, so on a merge-queue group commit it is a SKIPPED check run that GitHub counts as passing; in the 2026-09-29 sandbox rehearsal a group with `ci=failure`, `ci-gate=skipped` was MERGED by the queue under main's exact protection shape, so the required gate says nothing about the tree that lands"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: root-cause program for the 28-PR backlog; operator ruling: turn the merge queue on for main once this lands"
+  plan_refs: [W1-T4406, W1-T4405, W1-T4400, W1-T4604, W1-T4399, W1-T4784, W1-T1014]
+  files: [.github/workflows/ci.yml, .github/workflows/ci-gate.yml, scripts/ci-gate-from-contract.mjs, test/the-ci-gate-does-not-hold-a-runner.test.ts, test/push-ci-on-main.test.ts, test/fast-lane-classifier.test.ts, test/the-ci-gate-reports-on-the-merge-group-commit.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    VERIFIED at origin/main 3e026b902 (2026-10-03):
+    - Branch protection on main requires the contexts `remudero-review` and `ci-gate`, `strict: false`;
+      `GET repos/craigoley/remudero/rulesets` returns 0 rulesets.
+    - .github/workflows/ci.yml:43 declares `merge_group:` (W1-T4406). On a group commit these jobs do real
+      work: `ci-required` (name `ci`, :541-545, `if: always()`), `test-slow` (:763-769, `always()`),
+      `coverage-ratchet-required` (name `coverage-ratchet`, :1453-1457, `always()`), plus their shard matrices
+      and `flake-retry-aggregate` (:476-480). These are PR-only and SKIP there: `squash-trailer-gate` (:78),
+      `commitlint` (:907, which posts the ~16 light gates lint-plan, claims, jscpd-gate, comment-load-ratchet,
+      source-size, baseline-monotonic ... as steps, W1-T4399) and `mutation-ratchet` (:1718). The 16 stubs at
+      :1798-1936 are `if: false`.
+    - The `ci-gate` job (ci.yml:1938-1988) is `if: ${{ always() && !cancelled() && github.event_name ==
+      'pull_request' }}` (:1965) with `SHA: ${{ github.event.pull_request.head.sha }}` (:1977), which is EMPTY
+      on merge_group. Its comment (:1950-1957) says it stays PR-only because ci-gate.yml's REQUIRED list names
+      checks a group commit never produces, and that "the merge queue's own ruleset is expected to require
+      the underlying check NAMES" `ci`, `coverage-ratchet`, `test-slow`.
+    - scripts/ci-gate-from-contract.mjs:30-39 (`contractRun`) lifts every literal env value of ci-gate.yml's
+      `ci-gate` job, including REQUIRED (ci-gate.yml:74, 27 names), and runs the contract's step. :48 merges
+      `{ ...env, ...process.env }`, so the caller's values win. The step's wait loop (ci-gate.yml:239 reads
+      `commits/${SHA}/check-runs`) waits for EVERY REQUIRED name to be `completed`. On a group commit, ci.yml's
+      skipped PR-only jobs and `if: false` stubs still register as completed/skipped check runs, which
+      `evaluate_fails` (ci-gate.yml:309) reads as a pass. But 7 REQUIRED names come from workflows that trigger
+      on `pull_request` only, and they never register there: `scan-pr / osv-scan`, `License Review`
+      (dependency-review.yml), `acceptance-author-gate`, `head-identity-gate`, `proof-discrimination`,
+      `unwired-gate` and `coverage-session-blanking`. Only ci.yml, ci-gate.yml and
+      merge-queue-review-attest.yml declare merge_group. So the full list on a group commit would wait out
+      WAIT_CAP_SECONDS (900 s in ci.yml) and fail "TIMED OUT".
+    - .github/workflows/merge-queue-review-attest.yml posts `remudero-review` on merge_group (#7816).
+    MEASURED by the operator's 2026-09-29 sandbox rehearsal (~/Remudero/.session-scratch/merge-queue-plan.md
+    section U1/U3): sandbox PR #11 carried a change that fails `ci` on merge_group only. With a merge_queue-only
+    ruleset and protection requiring `ci-gate` + `remudero-review` (main's shape), the group run concluded
+    `ci=failure, ci-gate=skipped, remudero-review=success` and the queue MERGED it (sandbox main 7af5208).
+    The same break was ejected only after a ruleset `required_status_checks` rule named `ci` (#12,
+    RemovedFromMergeQueueEvent reason=failed_checks).
+    SO THE GAP IS VACUITY, NOT A STALL: today the `ci-gate` job is SKIPPED on a group commit, and GitHub counts
+    a skipped required check as passing, so a queue enabled now would check almost nothing through the context
+    protection actually requires: it reads green on every group commit whatever happened there. The queue's
+    only real check would be a second required-check list kept in a ruleset JSON outside the repo. This task makes `ci-gate` itself aggregate, on the group
+    commit, exactly the REQUIRED checks a group commit produces. The PR-only gates already passed on the PR
+    head, which is the precondition for entering the queue.
+    Rule 19: two workflow files and one script implement one concern (the three edited tests only follow the pinned string) (the gate's merge-group mode), so the band
+    is high with band_meaning: span. No src/ file is touched, so Standing rule 25 is not engaged.
+    OPERATOR FOLLOW-UP AFTER THIS MERGES (NOT part of this task): prove it on craigoley/remudero-sandbox, then
+    create the main ruleset from ~/Remudero/.session-scratch/merge-queue-ruleset.json (merge_queue: SQUASH,
+    ALLGREEN, max_entries_to_build 4, min/max_entries_to_merge 1-4, min_entries_to_merge_wait_minutes 1,
+    check_response_timeout_minutes 60, bypass_actors []). That JSON ALSO carries a required_status_checks rule
+    for ci/coverage-ratchet/test-slow; with this task merged it becomes belt-and-braces rather than the only
+    thing that makes the queue fail closed.
+  design: |
+    1. Contract (ci-gate.yml): add a literal env key `MERGE_GROUP_REQUIRED` beside REQUIRED in the `ci-gate`
+       job, one name per line like REQUIRED: ["ci", "coverage-ratchet", "test-slow"]. It is the subset of
+       REQUIRED whose producing ci.yml job runs on merge_group. Do not change REQUIRED, IGNORE, ADVISORY or the
+       step script by a single byte. Rewrite the W1-T4406 comment (ci-gate.yml:20-28) to say what the key means.
+    2. Runner (scripts/ci-gate-from-contract.mjs): accept `--event <name>`. With `--event merge_group`, set
+       REQUIRED to MERGE_GROUP_REQUIRED for the child, applied AFTER the `process.env` merge so nothing ambient
+       can override it. Refuse with a named error and a non-zero exit, never a pass, when MERGE_GROUP_REQUIRED
+       is absent, not a JSON array of strings, EMPTY, or names anything not in REQUIRED. An empty list would
+       make the wait loop compare nothing and pass. With no `--event`, or any other value, behaviour is
+       byte-identical to today. Select ONLY from the flag, never from ambient GITHUB_EVENT_NAME: the test
+       suites call this runner with `...process.env`, and when CI itself runs on a merge_group commit an
+       ambient read would silently switch their fixtures to the subset.
+    3. Job (ci.yml ci-gate): change `if:` to `${{ always() && !cancelled() && (github.event_name ==
+       'pull_request' || github.event_name == 'merge_group') }}`. Keep `always()`, so a failed `needs` job still
+       aggregates; skipped PR-only needs are fine. Keep `!cancelled()` (W1-T4604). Set `SHA: ${{
+       github.event.pull_request.head.sha || github.sha }}` (on merge_group, github.sha is the group head
+       commit). Change the step to `node scripts/ci-gate-from-contract.mjs --event "${{ github.event_name }}"`.
+       Keep the `needs:` list, timeout, env key set and name unchanged. Rewrite the W1-T4406 comment
+       (:1950-1957) to describe the merge-group mode.
+    4. Update the existing exact pins on the old `if:` string in the same PR. They would otherwise go red, and
+       the implement harness stages only declared files, so all three are in `files:`. There are four pins in
+       three files: test/the-ci-gate-does-not-hold-a-runner.test.ts:71 and :121-122 (two pins),
+       test/push-ci-on-main.test.ts:240, and test/fast-lane-classifier.test.ts:381. Each keeps asserting `always()` and `!cancelled()`. None of them
+       may be weakened to a regex that would also accept `push` or `workflow_dispatch`.
+    5. New suite test/the-ci-gate-reports-on-the-merge-group-commit.test.ts drives the REAL runner against the
+       REAL contract with the shared gh shim (test/helpers/gh-shim.ts, as the-ci-gate-does-not-hold-a-runner does)
+       and a no-op sleep. It also derives the merge-group census from ci.yml itself: the REQUIRED names whose
+       producing job's `if` is neither the PR-only guard nor `false` must equal MERGE_GROUP_REQUIRED exactly,
+       with at least 3 names.
+  acceptance:
+    - claim: "on merge_group the ci-gate job runs (always() and !cancelled() kept), reads github.sha, and the real runner given --event merge_group passes with one read when ci, coverage-ratchet and test-slow are green and every pull_request-only gate is absent; the merge-group list equals the REQUIRED names ci.yml's merge_group jobs produce, at least 3"
+      proof: "grep: test(\"W1-T5515: a merge group commit is gated on exactly ci, coverage-ratchet and test-slow in test/the-ci-gate-reports-on-the-merge-group-commit.test.ts"
+    - claim: "with --event merge_group a failed or cancelled ci (or coverage-ratchet, or test-slow) fails the gate and names the check, and a missing one times out rather than passing"
+      proof: "grep: test(\"W1-T5515: a red ci on the group commit fails the gate in test/the-ci-gate-reports-on-the-merge-group-commit.test.ts"
+    - claim: "a contract whose MERGE_GROUP_REQUIRED is absent, unparsable, empty, or names a check outside REQUIRED is refused non-zero with a named error before any check-runs read"
+      proof: "grep: test(\"W1-T5515: a missing or empty merge-group list fails closed in test/the-ci-gate-reports-on-the-merge-group-commit.test.ts"
+    - claim: "with --event pull_request, with no --event, and with ambient GITHUB_EVENT_NAME=merge_group but no flag, the runner waits on the full REQUIRED list exactly as before: a lone claims failure still fails the gate"
+      proof: "grep: test(\"W1-T5515: the pull_request gate keeps the full REQUIRED list in test/the-ci-gate-reports-on-the-merge-group-commit.test.ts"
+  falsifier: |
+    Revert ci.yml's `if:` to the pull_request-only guard: the first test's job-condition assertion reds, which is
+    exactly the state where the group commit's `ci-gate` is skipped and counts as passing. Delete the `--event`
+    handling from the runner: the green merge-group fixture, which posts only ci/coverage-ratchet/test-slow,
+    waits on the 24 other REQUIRED names and fails "TIMED OUT". Let an empty MERGE_GROUP_REQUIRED through: the empty-list
+    fixture exits 0 having compared nothing, and the fail-closed test reds.

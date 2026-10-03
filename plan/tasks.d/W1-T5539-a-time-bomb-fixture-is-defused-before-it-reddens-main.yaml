@@ -1,0 +1,60 @@
+- id: W1-T5539
+  title: "A TIME-BOMB FIXTURE IS DEFUSED BEFORE IT REDDENS MAIN — from 2026-10-01T17:11Z to 2026-10-02T16:13Z main's push CI failed 70 runs in a row (23.0 h) on `expiring-fixture-census: BLOCKED -- 1 fixture(s) CROSS their threshold within 7 day(s)` with no code change; the census names the fixture a week ahead, but nothing acts on it until a session hand-writes the exemption (#8673). The gate gardener files the fix while the crossing is still weeks away"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  origin: "operator session 2026-10-03: root-cause program for the 28-PR backlog (week of main CI conclusions 09-26..10-03)"
+  plan_refs: [W1-T3272, W1-T3655, W1-T4116, W1-T3270]
+  files: [src/lib/gate-gardener.ts, test/a-time-bomb-fixture-is-defused-before-it-reddens-main.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED, `gh run list --branch main --workflow CI` (09-26..10-03): of 400 main CI runs, 77
+    concluded failure. 70 of them fall in one window, 2026-10-01T17:11Z to 2026-10-02T16:13Z: one
+    success, 129 cancelled, 70 failure. Every sampled failure (17:11Z, 23:00Z, 10-02T10-12Z) carries
+    the same error: "expiring-fixture-census: BLOCKED -- 1 fixture(s) CROSS their threshold within 7
+    day(s)". It ended only when #8673 (0786d61a7) hand-added an `expiring-fixture: exempt` marker to
+    test/a-freshness-restart-lets-a-running-review-finish.test.ts, which is one line plus a census
+    test. The same class took main red on 2026-09-09 (W1-T3270, the reason the census exists).
+    The census works as designed. scripts/expiring-fixture-census.mjs:317 `censusExpiringFixtures`
+    reports each stamp that crosses its threshold within `MARGIN_DAYS` (:33, 7 days), and W1-T3655
+    deliberately reddens main's own push lane so a crossing cannot excuse itself as inherited. But
+    a report is not a remedy. A week of warning is spent waiting for someone to read a red main, and
+    while main reads red, main health and every red PR's attribution degrade with it.
+    The gate gardener (src/lib/gate-gardener.ts:217 `gateGardenSpec`, W1-T4116 "the gates tend
+    themselves") already turns a gate's own measurement into one PR per class (TIGHTEN, REFRESH,
+    DEMOTE). Choosing between an injected-clock exemption and re-dating a fixture to a relative
+    time is a judgment, so the remedy is a filed fleet task, not a codemod. That is the same
+    filing path the selector-shadow and ci-friction gardeners use
+    (src/lib/machine-filing.ts `renderMachineShard`).
+  design: |
+    1. Add a DEFUSE class to the gate gardener. Each pass runs `censusExpiringFixtures` over the
+       tree with a LEAD horizon several times wider than the CI margin (default 21 days, kept as a
+       named constant beside MARGIN_DAYS and ledgered with each finding), so the fleet gets about
+       two weeks to build the fix before CI's 7-day margin could ever fire.
+    2. For each reported fixture FILE (one finding per file, dedup key
+       `expiring-fixture:<file>` against open plan PRs and queued shards), render ONE machine shard
+       through `renderMachineShard`. Its files are that test file plus, where needed, the census's
+       own test. Its rationale names the stamp, line, threshold field and crossing date, and the two
+       legitimate remedies: an exemption ONLY when the case is judged against an injected clock
+       (proved the way #8673 proved it), or a stamp made relative to the test's clock.
+       Acceptance: the census, run with `now` past the crossing, reports nothing for that file.
+    3. The rendered shard passes `lint-plan --base`. The suite proves it by writing a rendered draft
+       into a temp plan and running the base linter, per the ci-friction lesson that plain
+       `lintTask` misses base-only refusals.
+    4. Ledger `gate_garden.defuse_filed` with file, line, crossing date and lead days, or
+       `gate_garden.defuse_deferred` when an open filing already covers the file. A crossing already
+       inside the CI margin is still filed, with priority 1.
+  acceptance:
+    - claim: "a fixture crossing inside the lead horizon but outside the CI margin is filed as one lint-clean machine shard naming the fixture, line and crossing date"
+      proof: "grep: test(\"W1-T5539: a crossing inside the lead horizon files one defuse shard in test/a-time-bomb-fixture-is-defused-before-it-reddens-main.test.ts"
+    - claim: "a fixture already covered by an open filing is deferred, never filed twice"
+      proof: "grep: test(\"W1-T5539: a covered fixture is deferred, not refiled in test/a-time-bomb-fixture-is-defused-before-it-reddens-main.test.ts"
+  falsifier: |
+    Remove the DEFUSE class: the suite's fixture, stamped to cross in 14 days (inside the 21-day lead,
+    outside the 7-day margin), produces no filing, and the census stays silent until CI's margin.

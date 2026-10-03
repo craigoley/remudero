@@ -1,0 +1,188 @@
+- id: W1-T5536
+  title: "STRIKE EXHAUSTION IS A LADDER, NOT A DEAD END — 16 PRs reached `fix strikes exhausted` from 2026-09-26 to 2026-10-03, each opened its own unassigned needs-human issue, and all 16 merged only after an operator refreshed or hand-fixed the branch: 55.5 PR-hours parked between the first exhausted pass and the merge. 0 of the 273 needs-human issues opened in that window were assigned to anyone"
+  repo: remudero
+  depends_on: [W1-T5542]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 30.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03, ruling R3 (strike exhaustion: refresh if the base moved, else close and requeue with a failure digest at most twice, then one assigned digest issue per cause); week-rows extract 2026-09-26..2026-10-03"
+  plan_refs: [W1-T2789, W1-T2788, W1-T3390, W1-T164, W1-T5490]
+  files: [src/lib/strike-ladder.ts, src/lib/sweep.ts, src/lib/ledger.ts, test/strike-exhaustion-climbs-a-ladder-before-it-reaches-a-human.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED, week-rows extract 2026-09-26..2026-10-03 (11,646 rows) plus `gh` reads of the PRs and issues it names.
+
+    TODAY'S PATH ENDS AT A HUMAN WHO IS NEVER PAGED.
+    - The exhaustion row is `DISPOSITION_RULES` in src/lib/sweep.ts:7121-7138. Its predicate is
+      `(pr.reviewState === "failure" || isBlockedCi(pr)) && pr.priorStrikes >= policy.strikeCap`, with
+      disposition `blocked-ambiguous` and the reason `fix strikes exhausted (N/ceiling) — <checks> — escalating`.
+    - runSweep's `case "blocked-ambiguous"` (sweep.ts:11940) tries three releases first:
+      `applyDirtyFleetRebase`, the W1-T3422 stale-red release, and the W1-T2789 stale-base release
+      (`selectStaleBaseRelease`, sweep.ts:6398). The stale-base release refreshes only when a failing
+      TEST or diff-coverage path equals a path main changed (`decideRedBaseRefresh`, sweep.ts:3750). Then
+      it calls `deps.escalate` (sweep.ts:12196).
+    - The `escalate` effect (buildSweepEffects, sweep.ts:2433) appends a question to the question store
+      and opens a BLOCKED needs-human issue through `escalate()` (src/lib/escalate.ts:1319).
+    - Neither `ghIssueGateway` (escalate.ts:1440) nor `escalate()` assigns anyone. Only
+      `sreOperatorEscalation` (src/lib/sre-runbooks.ts:306) adds `--add-assignee <owner>`.
+    - The only automated way off the exhaustion row is an operator answer (the W1-T78 clarify row,
+      sweep.ts:7058-7076, ceiling from `fixCeilingInForce`, sweep.ts:8257). Answers reach only the question
+      store, and none has ever been accepted. Escalation is effectively terminal.
+
+    THE WEEK:
+    - 16 distinct PRs wrote exhausted `sweep.disposed` rows: 679 rows in all, 17 with `acted: true`
+      (#8868 escalated twice, on two heads).
+    - All 16 later MERGED: #7313 #7335 #7451 #7561 #7830 #7844 #7983 #7998 #8029 #8053 #8613 #8684 #8713
+      #8868 #8886 #8920.
+    - Every one needed an operator push or merge after exhaustion (cao825 / an operator-session commit),
+      or a later fleet `Merge branch 'main'` refresh.
+    - Time from the first exhausted pass to the merge: median ~2.6 h, max 10.2 h (#8868), 55.5 PR-hours in total.
+    - Issue side: of 273 needs-human issues opened in the window, 16 are this sweep exhaustion shape. 4 more
+      are run-task's own `blocked_ci fix rung exhausted`, and 2 are the pre-cap `fix strike repeated the
+      identical unmet criteria`. All 273 have 0 assignees.
+
+    STRIKES ARE PER (TASK, HEAD), NOT PER PR, AND THE LADDER MUST NOT INHERIT THAT.
+    - `priorStrikesFor` (src/run-task.ts:37835) counts `fix.dispatch` rows selected by
+      `fixLedgerRowsForHead` (sweep.ts:9807, W1-T2788). Rows tagged with a head count only for that exact head.
+    - It counts ROWS, not distinct strike numbers. #8868 reached 2/2 at 9a359d7 from two `fix.dispatch`
+      rows both numbered strike 1, each ending `fix.commit_refused: the worker changed nothing`. Then 3/2
+      at 73dd194.
+    - So any new head (a refresh) re-earns the whole cap. A rung-1 refresh would therefore buy two more
+      strikes, not the ONE free CI run R3 grants, unless the ladder carries its state per PR across heads.
+
+    "BASE CHANGED SINCE THE LAST ATTEMPT" IS CHEAPLY DECIDABLE.
+    - Inputs: `OpenPrView.currentMergeBaseSha` (sweep.ts:4305), runSweep's main tip, and
+      `MainRepairEvidence {sha, committedAt}` (sweep.ts:6430, `readMainRepair` at sweep.ts:1843).
+    - Rule: the base moved iff main's tip commit time is later than the PR's last attempt (its last
+      `fix.dispatch` or ladder refresh) AND the PR's merge base is not main's tip.
+    - Measured with main.health.observed shas as the main-tip timeline: at the FIRST exhausted pass, main had
+      moved since the last strike for 5 of 16 (#7313 #7830 #7844 #8684 #8713), and had not for 11.
+
+    REQUEUE ALREADY WORKS BY CLOSING.
+    - The task stays `status: queued` in the plan.
+    - A closed-unmerged PR maps to projection status `blocked` (src/lib/status.ts:1129), but the dispatcher
+      re-offered such tasks this week. W1-T4265's PRs #7129 and #7163 were closed, and the task was
+      re-dispatched as #7178/#7193/#7204. W1-T4818's #8009 was closed, then rebuilt as #8057.
+    - Re-dispatch stays bounded by the streak breaker (`isDispatchBreakerTripped`, status.ts:1574) and the
+      lifetime cap of 10 starts (`DEFAULT_MAX_TASK_LIFETIME_DISPATCHES`, status.ts:1692).
+    - The plan's `attempts:` field is NOT a usable counter: all 2,631 shards in plan/tasks.d read
+      `attempts: 0`, and changing it needs a plan PR (rule 15).
+    - The live ledger rotates (MAX_RETAINED_LINES_PER_STEP = 200, ledger.ts:965), so it is not a durable
+      counter either.
+
+    A DURABLE PER-TASK CARRIER INTO THE NEXT WORKER ALREADY EXISTS.
+    - `plan/operator-notes.ndjson` (src/lib/operator-notes.ts, W1-T164) is append-only, gitignored,
+      scoped exactly by taskId and never rotated (`appendOperatorNote` :75, `loadOperatorNotesForTask` :94).
+    - run-task.ts:16461-16462 already loads it and renders it into BOTH the recon and implement prompts.
+    - buildSweepEffects already holds the same `repoRoot` (it passes it to `appendQuestion`, sweep.ts:2434).
+    - So the failure digest can ride a note, and the count of ladder notes for a task IS the durable
+      rebuild counter. The implement prompt has no other prior-attempt input today: it renders recon,
+      learnings, operator notes, rule headlines and skills (`renderImplementPromptWithParts`,
+      run-task.ts:16805).
+
+    Rule 19: the pure ladder (src/lib/strike-ladder.ts, new), its wiring at the exhaustion site and in the
+    effects (sweep.ts), and the retention of its read-back rows (ledger.ts `DECISION_RELEVANT_LEDGER_STEPS`,
+    :520, whose census test re-derives the set from consumers) are three production files for one concern.
+    So the band is high, with band_meaning: span.
+  design: |
+    1. PURE LADDER (src/lib/strike-ladder.ts, new). `decideStrikeLadderRung(input)` returns exactly one of
+       `refresh | rebuild | digest | hold`, plus a reason. Inputs:
+       - the exhausted PR view;
+       - `lastAttemptAt` (the latest `fix.dispatch` for the task at ANY head, or this PR's latest
+         `sweep.strike_ladder.refreshed` row);
+       - main tip `{sha, committedAt}`;
+       - `currentMergeBaseSha`;
+       - `rebuildsSoFar`;
+       - `requeueable` (a taskId resolved, not `isPlanFiling`, the head passes `fixHeadAcceptable`
+         (sweep.ts:695), and the PR author is the fleet App per `isFleetAppAuthor`, sweep.ts:6164);
+       - whether this PR already took a refresh at this main tip.
+
+       Order:
+       (a) `refresh` when the base moved since the last attempt and no refresh is recorded for this
+           (PR, main tip). Rung 1 is re-checked on EVERY pass, including after a digest was opened, so a
+           later main repair still self-heals a parked PR.
+       (b) else `rebuild` when `requeueable` and `rebuildsSoFar < 2`.
+       (c) else `digest`.
+       (d) `hold` (no action, named reason) on any unreadable input. Never guess.
+
+       The exhaustion predicate is exported once as `isFixStrikeExhausted(pr, policy)` and the table row
+       at sweep.ts:7125 calls it, so the ladder and the row cannot drift.
+    2. CAUSE KEY. `strikeCauseKey(pr)`:
+       - checks-red: `check:<first failing required check, with any shard suffix like " (3/8)" stripped>`,
+         plus `#<first failing test title>` from the CI log tail (a `not ok N - <title>` line), else
+         `#<first failing test file>` from `failingTestFilesFromCiFailures` (sweep.ts:3721). The
+         `kind:name` prefix matches `ciFrictionCauseKey` (src/lib/ci-friction-gardener.ts:178), so a
+         digest and a ci-friction cause name the same thing.
+       - review-shaped: `review:<unmet-claim class>`, from a closed pattern table over the unmet criterion's
+         verdict text (not-executed, non-discriminating, keyword-floor, non-responsive), else `review:unmet`.
+       - Normalised: lower-case, whitespace collapsed, at most 160 chars.
+    3. RUNG 1, refresh, no strike.
+       - Call the existing `deps.updateBranch` (the W1-T2789 write path), gated by the same live
+         `readLiveState` head recheck. Ledger `sweep.strike_ladder.refreshed {pr_number, task_id, old_head,
+         main_sha, last_attempt_at}`.
+       - In runSweep, a PR with such a row and no later `fix.dispatch` row gets its view overlaid with
+         `priorStrikes = ceiling` before `deriveDisposition`, on the precedent of the redrive overlay at
+         sweep.ts:14352.
+       - So the refreshed head gets ONE CI run. Green proceeds normally. Red lands back on the exhaustion
+         row and climbs (it never re-earns two strikes by changing head).
+    4. RUNG 2, close and requeue with a digest.
+       - Order: (i) re-read live state; (ii) `deps.close(pr, <reason naming the rung, rebuild n/2 and the
+         cause key>)`; (iii) confirm CLOSED on a fresh live read; (iv) only then append ONE operator note
+         `{taskId, author: "strike-ladder", ts, note}`.
+       - The note carries: the closed PR and head, the cause key, the failing checks with the first
+         failing test titles, the unmet claims, and the strike history from `deriveStrikeHistory`
+         (run-task.ts:37863), including each `fix.commit_refused` reason. The note is capped at 2,000
+         chars, and truncation is stated in the note itself.
+       - Ledger `sweep.strike_ladder.requeued {pr_number, task_id, head_sha, rebuild, cause_key}`.
+       - `rebuildsSoFar` = count of the task's notes with author `strike-ladder`. This is durable across
+         ledger rotation and restarts.
+       - A close that does not take writes no note and no requeue row. The next pass retries.
+    5. RUNG 3, one digest issue per cause, assigned.
+       - Search OPEN issues labelled `strike-ladder-digest` (REST `listOpen`, escalate.ts:1440) for the body
+         marker `**Cause-Key:** <key>`.
+       - Found: comment with this PR's line (PR, task, rebuilds spent, failing check/test, a link to its
+         notes), and ledger `sweep.strike_ladder.digest_appended`. A PR already listed in that issue is not
+         re-appended.
+       - Not found: create it with labels `needs-human` and `strike-ladder-digest`, then
+         `--add-assignee <repo owner>` exactly as `sreOperatorEscalation` does (sre-runbooks.ts:306-334).
+         An assign failure is logged (`sweep.strike_ladder.assign_failed`) and the issue still stands.
+         Ledger `sweep.strike_ladder.digest_opened {cause_key, issue_url, assignee}`.
+       - An unreadable `listOpen` creates nothing this pass (the W1-T2912 rule).
+    6. NO PER-PR ESCALATION ON THE LADDER. In `case "blocked-ambiguous"`, when the disposition came from
+       the exhaustion row (`isFixStrikeExhausted`) and there is no `pendingAnswer`, the ladder replaces the
+       `deps.escalate` call at sweep.ts:12196: no per-PR needs-human issue and no question-store entry.
+       Every other blocked-ambiguous shape (plan-only red, metadata-only, conflict without evidence,
+       contradictory review, the pre-cap repeat row) keeps today's path byte-identical. The existing
+       W1-T2789/W1-T3422 releases still run first and still win when selected.
+    7. Add the four `sweep.strike_ladder.*` read-back steps to `DECISION_RELEVANT_LEDGER_STEPS`
+       (ledger.ts:520). The rebuild counter itself never depends on them (see 4).
+  acceptance:
+    - claim: "an exhausted PR whose base moved since its last strike is refreshed once with no strike spent, and is not refreshed again at the same main tip"
+      proof: "grep: test(\"W1-T5536: a moved base refreshes an exhausted branch once without a strike in test/strike-exhaustion-climbs-a-ladder-before-it-reaches-a-human.test.ts"
+    - claim: "a head produced by a ladder refresh that goes red inherits the exhausted count and climbs to the next rung instead of re-earning two strikes"
+      proof: "grep: test(\"W1-T5536: a ladder-refreshed head that goes red climbs, never earning fresh strikes in test/strike-exhaustion-climbs-a-ladder-before-it-reaches-a-human.test.ts"
+    - claim: "with the base unmoved, a requeueable fleet PR is closed and, only after the close is confirmed, its task receives one strike-ladder operator note carrying the cause key, failing checks and strike history, which loadOperatorNotesForTask returns for that task"
+      proof: "grep: test(\"W1-T5536: an unmoved base closes the PR and requeues its task with a failure digest in test/strike-exhaustion-climbs-a-ladder-before-it-reaches-a-human.test.ts"
+    - claim: "after two strike-ladder notes, or for an unfiled, plan-filing, foreign-branch or hand-authored PR, the ladder opens one digest issue assigned to the repo owner instead of closing anything"
+      proof: "grep: test(\"W1-T5536: a spent rebuild budget or an unrequeueable PR opens one assigned digest per cause in test/strike-exhaustion-climbs-a-ladder-before-it-reaches-a-human.test.ts"
+    - claim: "a second PR with the same cause key is appended to the open digest issue, not given a new one, and an unreadable issue list creates nothing"
+      proof: "grep: test(\"W1-T5536: a second PR with the same cause key joins the open digest in test/strike-exhaustion-climbs-a-ladder-before-it-reaches-a-human.test.ts"
+    - claim: "a PR on the ladder never calls the per-PR escalate effect, while every other blocked-ambiguous shape still does"
+      proof: "grep: test(\"W1-T5536: a laddered PR never opens a per-PR escalation issue in test/strike-exhaustion-climbs-a-ladder-before-it-reaches-a-human.test.ts"
+    - claim: "the sweep decides every exhausted PR's rung through the new ladder module"
+      proof: "grep: decideStrikeLadderRung( in src/lib/sweep.ts"
+  falsifier: |
+    Five reverts, each turning a named case red:
+    - Restore the `deps.escalate` call for the exhaustion row: the suite's laddered PR records a per-PR
+      escalate call.
+    - Drop the `priorStrikes = ceiling` overlay: the refreshed head decides `blocked-fixable` (`ci-log fix,
+      strike 1/2`) instead of climbing.
+    - Count rebuilds from ledger rows instead of operator notes: a rotated-ledger fixture with two notes
+      and no `sweep.strike_ladder.requeued` rows rebuilds a third time.
+    - Remove the cause-key search: two PRs with the same key open two issues.
+    - Remove the assign call: the digest's create args carry no `--add-assignee`.

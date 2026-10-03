@@ -1,0 +1,35 @@
+- id: W1-T5553
+  title: "A TASK WHOSE DELIVERABLE IS PLAN TEXT CAN BE CREDITED — the plan-only diff refusal cannot tell a filing PR from a task whose declared `files:` are themselves plan shards (W1-T3941/#6371, W1-T3981/#6461), so W1-T4942 §(iv) left those deliverables refused and operator PR #8962 credited them by hand"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low
+  origin: "operator session 2026-10-03: credit research; operator PR #8962 credited W1-T3941, W1-T3981 and W1-T3989 by `pr:`"
+  plan_refs: [W1-T4942, W1-T3067, W1-T413, W1-T3941, W1-T3981, W1-T5552]
+  files: [src/lib/status.ts, test/a-task-whose-deliverable-is-plan-text-can-be-credited.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-03 on origin/main 3e026b90. `deriveStatus`'s `planOnlyDiffRefusal` (src/lib/status.ts)
+    refuses a trailer credit when `isPlanOnlyChangeset` holds for the PR's merged paths. That is right for
+    a filing PR, which only adds a task's shard. It is wrong for a task whose deliverable IS plan text.
+    W1-T3941 declares `files:` that are three plan shards (W1-T3371's, W1-T3696's and its own) and was
+    delivered by #6371. W1-T3981 declares only W1-T3973's shard and was delivered by #6461. Both are plan-only
+    by construction and both are refused. W1-T4942 §(iv) put "the 6 plan-only deliverables" out of scope.
+    Operator PR #8962 (merged 2026-10-03) credits W1-T3941, W1-T3981 and W1-T3989 through the `pr:` field
+    by hand. W1-T3067 (blocked) is the refusal's origin.
+  design: |
+    The refusal stands, except for a task whose every declared `files:` path is in plan scope
+    (`isInPlanScope`), where the PR's changeset is a subset of those declared files and touches at least
+    one declared path that is not the task's own shard. A filing PR adds only its task's own shard, so it is
+    still refused. Apply the same exemption in W1-T5552's revalidation.
+  acceptance:
+    - claim: "a task whose declared files are all plan shards is credited by a plan-only PR that changes those declared files, while a filing PR that only adds the task's own shard, and a plan-only PR for a task declaring code files, are still refused"
+      proof: "unit test: test/a-task-whose-deliverable-is-plan-text-can-be-credited.test.ts"
+  falsifier: |
+    Drop the exemption. The suite's W1-T3981-shaped task, whose PR changes only the shard it declares,
+    is refused.
