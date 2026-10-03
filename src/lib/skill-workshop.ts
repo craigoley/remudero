@@ -36,15 +36,28 @@ export interface ProceduralCandidateLike {
   runIds: string[];
   taskIds: string[];
   supportingRuns: number;
+  /** Outcome descriptions for caller-supplied signals, keyed by signal. */
+  outcomeDescriptions?: Readonly<Record<string, string>>;
 }
 
-/** Canonical step text per {@link import("./retro.js").PROCEDURAL_SUCCESS_SIGNALS} key. A signal
- *  key absent here (a caller-supplied signal, Rule 2 — the signal set is DATA) still renders: the
- *  raw key stands in for its own step rather than being silently dropped. */
-export const PROCEDURAL_STEP_TEXT: Readonly<Record<string, string>> = {
-  clean_single_strike: "Resolve the task on the first attempt — land a fix that needs no `fix.dispatch` rung.",
-  fully_executed_proof: "Execute every acceptance criterion as a real, observed proof — never let the keyword floor stand in for a run.",
+/** Each signal's rendered instruction and the outcome it measures. Adding a signal's row also
+ *  gives the scanner its comparison vocabulary; no signal-key classification is needed. */
+const PROCEDURAL_STEPS: Readonly<Record<string, { text: string; description: string }>> = {
+  clean_single_strike: {
+    text: "Resolve the task on the first attempt — land a fix that needs no `fix.dispatch` rung.",
+    description: "The task resolves on the first attempt: a landed fix needs no fix.dispatch rung.",
+  },
+  fully_executed_proof: {
+    text: "Execute every acceptance criterion as a real, observed proof — never let the keyword floor stand in for a run.",
+    description: "Every acceptance criterion has an observed executed proof, without keyword-floor degradation.",
+  },
 };
+
+/** Canonical rendered text, kept as strings for existing callers. An unmapped signal still
+ *  renders its raw key; the scanner compares that fallback to the same key and refuses it. */
+export const PROCEDURAL_STEP_TEXT: Readonly<Record<string, string>> = Object.fromEntries(
+  Object.entries(PROCEDURAL_STEPS).map(([key, step]) => [key, step.text]),
+);
 
 /** Task classes the plan schema can assign to a mined procedural candidate. Keeping this as a
  *  total record over {@link Task.type} makes a future task class a compile-time decision here,
@@ -75,6 +88,9 @@ export interface SkillDraft {
   /** How many merged runs backed this draft when it was rendered — carried so a stager can tell a
    *  better-evidenced draft of the SAME procedure from a weaker one. */
   supportingRuns: number;
+  /** The mined outcomes, separate from the generated shape/provenance summary above. Older or
+   *  hand-authored drafts can instead supply their outcome as `description`. */
+  outcomeDescriptions?: readonly string[];
 }
 
 /** Deterministic id for a candidate's draft, over its shape AND its run set — two candidates that
@@ -121,6 +137,9 @@ export function renderSkillDraft(candidate: ProceduralCandidateLike, transcripts
   const description = `A procedure shape proven across ${candidate.supportingRuns} merged ${candidate.taskType} run(s): ${candidate.signals.join(" + ")}.`;
   const appliesTo = injectableSkillTaskType(candidate.taskType);
   const steps = candidate.signals.map((key) => `- ${PROCEDURAL_STEP_TEXT[key] ?? key}`);
+  const outcomeDescriptions = candidate.signals.map((key) =>
+    candidate.outcomeDescriptions?.[key] ?? PROCEDURAL_STEPS[key]?.description ?? key,
+  );
   const workflow = transcripts
     ? mineTranscriptWorkflows(transcripts.runs, transcripts.records).find((w) => w.taskType === candidate.taskType)
     : undefined;
@@ -149,7 +168,7 @@ export function renderSkillDraft(candidate: ProceduralCandidateLike, transcripts
     "",
     ...evidence,
   ].join("\n");
-  return { name, description, markdown, candidateHash: hash, procedureKey, supportingRuns: candidate.supportingRuns };
+  return { name, description, markdown, candidateHash: hash, procedureKey, supportingRuns: candidate.supportingRuns, outcomeDescriptions };
 }
 
 /** Render the drafted skills (markdown) beside `renderProceduralCandidates`'s own output — the
@@ -244,14 +263,28 @@ export interface SkillDraftScanResult {
   reason?: string;
 }
 
+const STEP_FILLER_WORDS = new Set("a an the and or are as at be been being by for from has have had in is it of on that to was were with".split(" "));
+
+/** A lexical check, not a semantic judgement: case, punctuation, filler and common inflections
+ *  cannot supply the distinct content a step must add to its own mined outcome. */
+function stepContentTokens(text: string): string[] {
+  return (text.normalize("NFKC").toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [])
+    .filter((word) => !STEP_FILLER_WORDS.has(word))
+    .map((word) => word.replace(/(?:ing|ed|s)$/, "").replace(/e$/, "").replace(/([b-df-hj-np-tv-z])\1$/, "$1"));
+}
+
 /**
  * Refuse a draft that names a host, path or tool outside `allowlist`, or a line the untrusted
- * envelope would fence as an instruction rather than a procedure step. Scans `draft.markdown`
- * line by line and returns on the FIRST offence, named, so a refusal is always attributable.
+ * envelope would fence, or a Procedure step that only restates a mined outcome. Scans
+ * `draft.markdown` line by line and returns on the FIRST offence, named.
  */
 export function scanSkillDraft(draft: SkillDraft, allowlist: WorkerAllowlist): SkillDraftScanResult {
   const deniedPatterns = allowlist.deniedPathPatterns.map(globToRegExp);
+  const descriptions = draft.outcomeDescriptions?.length ? draft.outcomeDescriptions : [draft.description];
+  const outcomeTokens = descriptions.map((description) => new Set(stepContentTokens(description)));
+  let inProcedure = false;
   for (const line of draft.markdown.split("\n")) {
+    if (line.startsWith("## ")) inProcedure = line === "## Procedure";
     const hostMatch = line.match(/https?:\/\/([a-zA-Z0-9.-]+)/);
     if (hostMatch && !allowlist.allowedHosts.includes(hostMatch[1])) {
       return { ok: false, offendingLine: line, reason: `names host '${hostMatch[1]}' outside the worker allowlist` };
@@ -272,6 +305,12 @@ export function scanSkillDraft(draft: SkillDraft, allowlist: WorkerAllowlist): S
           offendingLine: line,
           reason: "reads as an instruction aimed at the runtime — the untrusted envelope (W1-T2700) would fence a line shaped like this",
         };
+      }
+    }
+    if (inProcedure && line.startsWith("- ")) {
+      const tokens = stepContentTokens(line);
+      if (outcomeTokens.some((outcome) => tokens.every((token) => outcome.has(token)))) {
+        return { ok: false, offendingLine: line, reason: "outcome-only: step restates its mined outcome without adding behavioral content" };
       }
     }
   }
@@ -350,22 +389,6 @@ export interface StageSkillDraftResult {
   reason?: string;
 }
 
-/**
- * Why a draft whose every Procedure step restates its mining signal is refused. MEASURED
- * 2026-09-29: all 18 staged skill-draft proposals were this shape ("Resolve the task on the first
- * attempt"), and the one approved (#7090) is injected into every implement prompt. Merged share of
- * implement runs read 36% in the three days before it and 37% in the three days after.
- */
-const OUTCOME_ONLY_REFUSAL =
-  "outcome-only: every Procedure step restates the signal the runs were mined on, so the draft names no step a worker could take";
-
-/** True when a draft has Procedure steps and every one is a {@link PROCEDURAL_STEP_TEXT} outcome line. */
-function isOutcomeOnlyProcedure(markdown: string): boolean {
-  const outcomes = new Set(Object.values(PROCEDURAL_STEP_TEXT).map((text) => `- ${text}`));
-  const steps = skillProcedureSteps(markdown);
-  return steps.length > 0 && steps.every((line) => outcomes.has(line));
-}
-
 /** The step lines of a SKILL.md's `## Procedure` section, in order. */
 function skillProcedureSteps(markdown: string): string[] {
   const section = /^## Procedure\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(markdown)?.[1] ?? "";
@@ -389,9 +412,6 @@ export function stageSkillDraft(
   const scan = scanSkillDraft(draft, allowlist);
   if (!scan.ok) {
     return { refused: true, staged: false, alreadyStaged: false, reason: `${scan.reason} (offending line: "${scan.offendingLine}")` };
-  }
-  if (isOutcomeOnlyProcedure(draft.markdown)) {
-    return { refused: true, staged: false, alreadyStaged: false, reason: OUTCOME_ONLY_REFUSAL };
   }
   const id = skillDraftProposalId(draft.procedureKey);
   let staged = false;
