@@ -178,7 +178,7 @@ import { exportGardenSpec } from "./lib/export-gardener.js";
 import { ciFailureSignature, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import { readSelectorShadowChangedPaths, readSelectorShadowRunsAsync, runSelectorShadowGardener, selectorShadowFlakeLedger } from "./lib/selector-shadow-gardener.js";
-import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, startMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
+import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, openIncidentFeedbackOrigins, startSreLane } from "./lib/sre-lane.js";
 import { fileConsumerVia, gitHeartbeatSource, HOST_RESOURCE, runHostResourcePass } from "./lib/host-resource-gardener.js";
@@ -33621,6 +33621,18 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       };
       return gardenPass(hotFileGardenSpec(d, sources), d);
     }
+    // Operator ruling 2026-09-29: the LLM judge in the middle of machine-filed work. W1-T5361 moved it off
+    // the daemon loop; a pass that throws is still ledgered as machine_judge.failed.
+    case "machine-judge": {
+      const ports = productionMachineFilingJudgePorts({ repoRoot, stateDir, worktreesRoot: worktreesDir(config), owner, repo, log });
+      return async () => {
+        try {
+          await runMachineFilingJudge(ports);
+        } catch (error) {
+          log("machine_judge.failed", { error: String((error as Error)?.message ?? error) });
+        }
+      };
+    }
     // W1-T4804: host disk, swap and inodes are projected to full from the heartbeat history and
     // answered in tiers against each host's own janitor cadence. Off: state/HOST_RESOURCE_OFF.
     case "host-resource": {
@@ -33783,6 +33795,8 @@ export async function daemonCommand(
      *  a real worker spawn. */
     escalationJudge?: (e: Escalation) => Promise<EscalationJudgeVerdict>;
     gardenPassesInProcess?: boolean;
+    /** W1-T5361 test seam: the garden pass spawn every registered garden runs through, instead of the child. */
+    gardenPassSpawn?: GardenPassSpawn;
     /** W1-T5115 test seams: the App refresh whose `ready` gates the git credential socket, and an
      *  in-process mint for that socket. Production omits both: the real refresh, and the socket on
      *  its own thread minting through `mintScopedToken`. */
@@ -33956,12 +33970,11 @@ export async function daemonCommand(
   const raiseDuplicate = (e: Escalation): string =>
     escalate({ ...e, runId }, { issues: ghIssueGateway(target.owner, target.repo), ledgerPath, runId });
   const gardenContext: GardenBuildContext = { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate };
-  const gardenPassSpawn: GardenPassSpawn = boundedGardenPassSpawn(
-    deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : childGardenPassSpawn(),
-    2,
-  );
+  const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
+    ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
+  const gardenPassSpawn: GardenPassSpawn = boundedGardenPassSpawn(injectedPassSpawn ?? childGardenPassSpawn(), 2);
   const offLoopGarden = (name: RegisteredGardenName) => (intervalMs: number) =>
-    startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, ...(deps.gardenPassesInProcess ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) });
+    startGardenOffLoop(name, intervalMs, { spawnPass: gardenPassSpawn, log, ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContext) }) });
   if (!target.isSelf && !flagValue(rest, "--plan")) {
     const repoDir = join(reposDir, target.repo);
     if (!existsSync(repoDir)) {
@@ -34765,13 +34778,8 @@ export async function daemonCommand(
               },
               // W1-T4111: the plan queue proposes its own duplicates and dead tasks for operator review.
               gardens: [
-                ...REGISTERED_GARDEN_NAMES.slice(0, REGISTERED_GARDEN_NAMES.indexOf("hot-file")).map(offLoopGarden),
-                // Operator ruling 2026-09-29: the LLM judge in the middle of machine-filed work.
-                (intervalMs: number) => startMachineFilingJudge(
-                  productionMachineFilingJudgePorts({ repoRoot, stateDir: join(config.root, "state"), worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
-                  intervalMs,
-                ),
-                ...REGISTERED_GARDEN_NAMES.slice(REGISTERED_GARDEN_NAMES.indexOf("hot-file")).map(offLoopGarden),
+                // W1-T5361: the machine-filing judge is one of them, so its git work runs in a child too.
+                ...REGISTERED_GARDEN_NAMES.map(offLoopGarden),
                 // W1-T4385: the SRE lane, in its OWN lane rather than sharing the core dispatch
                 // thread (operator ruling 2026-09-23, sre-lane.ts's own doc). "Only on the SRE
                 // registry instance" has no selector yet -- `RegistryInstance` carries no role or
