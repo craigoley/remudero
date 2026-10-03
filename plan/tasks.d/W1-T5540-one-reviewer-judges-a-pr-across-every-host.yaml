@@ -1,0 +1,55 @@
+- id: W1-T5540
+  title: "ONE REVIEWER JUDGES A PR ACROSS EVERY HOST — 102 daemon reviews in a week (09-26..10-03) ran to completion and were then refused with \"PR is already merged\": an operator session on another host had reviewed and merged the same PR minutes earlier. `postReviewPending` honours a pending claim only from its OWN host's ledger, so the shared `remudero-review: review in progress (owned by run …)` commit status never stops a second host, and the merged check runs only at post time"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: medium
+  origin: "operator session 2026-10-03: root-cause program for the 28-PR backlog; review.post_refused rows 09-26..10-03"
+  plan_refs: [W1-T913, W1-T3647, W1-T228, W1-T5491]
+  files: [src/lib/review.ts, test/one-reviewer-judges-a-pr-across-every-host.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED over the Azure ledger archives 09-26..10-03: 192 `review.post_refused` rows, 102 of
+    them "PR is already merged — refusing to post remudero-review against a closed lifecycle (W1-T228
+    lifecycle rule)". 82 come from the daemon's review lane (run_id review-PR<n>-*), 19 from run-task
+    lanes and 1 from dep-review. For a sample of 12 (#7272 #7277 #7278 #7281 #7297 #7421 #7424 #7431
+    #7484 #7536 #7825, plus #7317), the PR merged 12 s to 10 min before the refusal, 11 of them
+    merged by the operator identity, i.e. a session on another host that ran `rmd review` and
+    merged. At about 6 min per review that is roughly 10 review-lane-hours a week, in a lane that
+    admits three at a time (W1-T5491).
+    Two code facts make the collision possible:
+    (a) src/lib/review.ts:9484 `postReviewPending` reads only `readLiveLedgerRecords(opts.ledgerPath)`
+        for a prior same-input pending claim (W1-T913/W1-T3647, TTL `REVIEW_LOCK_TTL_MS` = 42 min,
+        :9438). The ledger is per host: the Azure daemon and a session on the operator's Mac never
+        see each other's claim, though both post the same GitHub commit status.
+    (b) The lifecycle check `decideReviewStatusPost` (:8947) runs at POST time, after the worktree
+        is materialized and every proof executed. A PR merged while the review ran is discovered
+        only at the end.
+  design: |
+    1. `postReviewPending` also reads the CURRENT `remudero-review` status on the exact sha from
+       GitHub. If it is a `pending` posted by a different run (parsed from "owned by run <id>") and
+       younger than REVIEW_LOCK_TTL_MS by the status's own `created_at`, it is a live foreign claim:
+       return `posted: false` with a reason naming the foreign run and host-independence, and the
+       caller stands down exactly as for a same-host claim. An unreadable status fails toward
+       holding, matching the existing design (c). A stale foreign claim is taken over as today
+       (W1-T3647).
+    2. Read the PR lifecycle (the same REST row `prLifecycle`-style reader at :8791 already fetches)
+       once BEFORE materializing the review checkout. A merged or closed PR returns at once with
+       `review.skipped_closed_lifecycle`, spending no proof execution.
+    3. Between proof executions, re-read the lifecycle at most once per phase. A merge observed
+       mid-review aborts with the same step. Never post a terminal status after a merge.
+    4. Byte-identical behaviour when no foreign pending status exists and the PR stays open.
+  acceptance:
+    - claim: "a live pending remudero-review owned by another host's run makes postReviewPending stand down; a stale one is taken over"
+      proof: "grep: test(\"W1-T5540: a foreign host's live pending claim stands this review down in test/one-reviewer-judges-a-pr-across-every-host.test.ts"
+    - claim: "a PR already merged before materialization is skipped without executing any proof"
+      proof: "grep: test(\"W1-T5540: a merged pr is skipped before any proof runs in test/one-reviewer-judges-a-pr-across-every-host.test.ts"
+  falsifier: |
+    Drop the GitHub status read: the suite's empty local ledger plus a fresh foreign pending status
+    posts a second pending claim and runs the review. Drop the pre-materialization lifecycle read:
+    the fake proof runner records an execution for an already-merged PR.

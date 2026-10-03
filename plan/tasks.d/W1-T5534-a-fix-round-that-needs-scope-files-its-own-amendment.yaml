@@ -1,0 +1,49 @@
+- id: W1-T5534
+  title: "A FIX ROUND THAT NEEDS SCOPE FILES ITS OWN AMENDMENT — a fix worker that needs a non-test path outside files: can only write prose today, which sweep.ts turns into a clarification issue an operator must answer and then hand-amend; W1-T3434 already opens a validated plan-only amendment PR for a stale proof, but nothing does the same for a files: entry"
+  repo: remudero
+  depends_on: [W1-T5532]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: split out of W1-T5532 (typed fix outcomes); NEEDS_SCOPE for non-test paths"
+  plan_refs: [W1-T3434, W1-T3830, W1-T5118, W1-T4207]
+  files: [src/lib/proof-amendment.ts, src/run-task.ts, test/a-fix-round-that-needs-scope-files-its-own-amendment.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    PROPOSED SPLIT of W1-T5532: a separate concern with its own Rule-15 boundary (a plan-only PR, never mixed
+    into the implementation PR).
+    MEASURED 2026-09-26..10-03: three "outside its declared files" refusals had non-test paths (a
+    plan/feedback file, two plan/tasks.d shards, and one src+test set of five paths for an unfiled PR). Today
+    `scopeAmendmentFromFixReport` (src/run-task.ts:39932) scrapes prose, and src/lib/sweep.ts:11415-11427
+    escalates it as a clarification issue with no automatic route.
+    EXISTING MACHINERY TO REUSE: src/lib/proof-amendment.ts (W1-T3434) `requestProofAmendment` (:398). It
+    validates against observed state, writes ONE field type on a plan-only branch
+    (`proofAmendmentBranchName`, :256), dedupes by `proofAmendmentIdempotencyKey` (:247), opens the PR through
+    `ProofAmendmentWritePorts.createPr` (:316), and after merge requests a guarded update-branch. The effect is
+    wired at src/run-task.ts:12267. W1-T3830 (queued) covers how a capped PR reaches a corrected contract after
+    such an amendment merges.
+  design: |
+    1. src/lib/proof-amendment.ts: add `requestScopeAmendment`, a sibling of `requestProofAmendment` that shares
+       the write ports and idempotency discipline. It appends each requested path to the shard's `files:` list
+       (line-scoped, touching nothing else), on branch `scope-amendment/<task>-<pr>`. It is refused, with no
+       write, when a path is under `plan/` (Rule 15), on the Rule-25 instrument surface (`.github/workflows/`,
+       `*-ratchet.mjs`, `*-baseline.json`), absent from the worker's worktree diff, under `test/` (W1-T5532
+       admits those directly), or when the PR carries no task trailer. A second request for the same
+       (task, PR, path set) resumes the first.
+    2. src/run-task.ts: when W1-T5532's `fix.scope_needed` names non-test paths, call it through the same
+       parent-owned effect wiring as :12267. Ledger `fix.scope_amendment` {outcome, amendment_url, paths}. The
+       implementation PR stands down without a strike until the amendment merges, then gets the existing
+       guarded branch update. The prose escalation at sweep.ts:11415 remains the fallback for a refused request.
+  acceptance:
+    - claim: "a typed NEEDS_SCOPE naming a non-test src path opens one plan-only amendment PR that appends only that path to files:"
+      proof: "grep: test(\"W1-T5534: a non-test NEEDS_SCOPE path opens one plan-only files amendment in test/a-fix-round-that-needs-scope-files-its-own-amendment.test.ts"
+    - claim: "a plan/ path, an instrument path, or a path the worker never changed is refused with no write"
+      proof: "grep: test(\"W1-T5534: a plan or instrument scope request is refused with no write in test/a-fix-round-that-needs-scope-files-its-own-amendment.test.ts"
+  falsifier: |
+    Route `fix.scope_needed` back to the escalation only. The first test sees no amendment PR created and a
+    clarification issue instead.

@@ -1,0 +1,46 @@
+- id: W1-T5551
+  title: "AN OPERATOR CORRECTION CREDIT SURVIVES ROTATION — `rmd correct` writes `correction.provenance`, a retained step, yet the live ledger (which begins 2026-09-28) holds none of them; 7 survive only in archives, `deriveStatus` reads the live file only, and W1-T3990 (corrected to #6492 on 09-23) reads queued again"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: credit research (0 of 2,979 projections carry source correction)"
+  plan_refs: [W1-T3990, W1-T5514, W1-T5517, W1-T4393]
+  files: [src/lib/status.ts, src/lib/ledger.ts, test/an-operator-correction-credit-survives-rotation.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-03 on origin/main 3e026b90, and read-only on the host. `correction.provenance` is in
+    rotation's retained-step list (src/lib/ledger.ts, beside `verdict` and `verdict.merged`), so
+    `rotateLedger` should carry the newest 200. The live ~/rmd-state2/state/ledger.ndjson starts at
+    2026-09-28T19:33Z and holds 0 `correction.provenance` rows. The `.gz` rotations hold them: 3 per
+    archive through 2026-09-26, 1 on 2026-09-27. `deriveStatus` and `projectPlan` (src/lib/status.ts)
+    take their ledger from `readLedgerLines` (the live file), and the daemon and retro pass no union
+    reader. So the DECLARED, SUPREME rung ("Precedence, highest first: `correction.provenance`") never
+    fires. Operator measurement: 0 of 2,979 projections have `source: "correction"`, and W1-T3990, which
+    an operator corrected to #6492 on 2026-09-23, reads queued again.
+    The cause of the row loss is NOT known. The live file starting on 09-28 means the retained core did not
+    carry these rows across whatever replaced it then (state/ledger-superseded/ holds earlier
+    whole-ledger archives). W1-T5514 (rotation losing appends) is one candidate, not a proven one.
+    Rule 19: one concern (a correction credit is durable) across the status projection and the ledger's
+    retention, so the band is high with band_meaning: span.
+  design: |
+    1. INVESTIGATE FIRST and put the answer in the PR body. Find the rotation, compaction or supersede that
+       dropped the carried `correction.provenance` rows between the last archive holding them and the
+       2026-09-28 live file. Bisect the archives' carried cores, and the ledger-superseded/ set.
+    2. Make a correction credit durable whatever the live file holds. Either `rmd correct` also writes the
+       credit to the durable credit store `deriveStatus` reads first (merge-credit.json, as
+       `persistVerifiedCredit` does for verified credits), or the correction rung reads
+       `correction.provenance` from the ledger union. Choose one and state why.
+    3. Fix the root cause found in 1 if it is not W1-T5514's.
+  acceptance:
+    - claim: "a correction.provenance credit still projects source correction after the rows carrying it have rotated out of the live ledger, and the step the investigation found dropping it no longer does"
+      proof: "unit test: test/an-operator-correction-credit-survives-rotation.test.ts"
+  falsifier: |
+    Remove the durable path. The suite's corrected task, whose correction row exists only in an
+    archive, projects queued.

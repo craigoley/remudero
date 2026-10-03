@@ -1,0 +1,52 @@
+- id: W1-T5519
+  title: "A DUPLICATE-KEY SHARD QUARANTINE OPENS ITS OWN REPAIR PR — twice on 2026-10-03 a machine-judge PR and a backlog-gardener PR from one base left two `priority:` keys in one shard (repaired by hand in #8877 and #8922); the daemon now quarantines such a shard (#8878) and main-plan-guard turns main red, but nothing opens the repair"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: #8877 and #8922, each a hand repair of the same merge race"
+  plan_refs: [W1-T5472, W1-T5457, W1-T4409, W1-T4421]
+  files: [src/lib/plan-shard-repair.ts, src/run-task.ts, test/a-duplicate-key-shard-quarantine-opens-its-own-repair-pr.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-03 on origin/main 3e026b90. #8877 (W1-T5431's shard) and #8922 (W1-T5469's shard) each
+    deleted the backlog gardener's `priority: 4` line and its `# backlog gardener: band=4 evidence=…`
+    marker, and kept the machine-filing judge's `priority: 2.5`. #8878 made the daemon's quarantining
+    loaders (`mergePlanBlobsQuarantiningDuplicates`, `loadPlanQuarantiningDuplicates`, src/lib/plan.ts)
+    hold out a shard that fails to parse. `reportQuarantined` → `reportInvalidShard` (src/run-task.ts)
+    ledgers `plan.shard_quarantined` and raises one BLOCKED escalation whose only option is "repair-shard"
+    by hand. W1-T5472 (merged, #8910) updates a behind plan PR before merging it. W1-T5457 (queued) has a
+    gardener lint its change against fresh main before it lands. Both narrow the race. Neither repairs a
+    shard that has already merged bad.
+    The keep-the-judge rule is deterministic, not a judgement. The judge pins its ruling as
+    `risk_ruling.pin` = `taskRulingPin(task)` (src/lib/task-linter.ts), and the pin hashes `priority`.
+    Checked by the filer on both repaired shards: with priority 2.5 the pin matches `risk_ruling.pin`; with
+    priority 4 it does not.
+    Rule 19: one concern (a duplicate-key shard is repaired) across a new pure module and its daemon
+    wiring in src/run-task.ts, so the band is high with band_meaning: span.
+  design: |
+    1. src/lib/plan-shard-repair.ts exports a pure `repairDuplicateKeyShard(text)`. For a shard that fails
+       `parse(…, { uniqueKeys: true })` on a duplicated top-level task key, it builds each candidate (one
+       value per duplicated key) and keeps the candidate whose `taskRulingPin` equals the record's
+       `risk_ruling.pin`. It removes the other line and any `# backlog gardener:` marker that belonged to it.
+       It returns `{ repaired, text }`, or `{ refused, reason }` when no candidate (or more than one) matches
+       the pin, when the record has no pin, or when the error is not a duplicate key.
+    2. When the daemon ledgers `plan.shard_quarantined` for a duplicate key, a repair lane runs the function
+       on origin/main's blob. On `repaired` it opens a plan-only PR through the existing plan-PR path
+       (`planPrPreflightAtCommit` then `createPlanPrRest`) and ledgers `plan.shard_repair_opened`. On
+       `refused` it ledgers `plan.shard_repair_refused` with the reason and leaves the escalation standing.
+       One PR per shard blob: a second quarantine of the same bytes opens nothing.
+  acceptance:
+    - claim: "a shard carrying the judge's priority and the gardener's priority is repaired to the value the judge's risk_ruling pin covers, with the gardener's marker removed; a shard whose pin matches neither or both is refused with its reason; and a duplicate-key quarantine opens exactly one repair PR per shard blob"
+      proof: "unit test: test/a-duplicate-key-shard-quarantine-opens-its-own-repair-pr.test.ts"
+    - claim: "the daemon's quarantine reporting calls the repair function"
+      proof: "grep: repairDuplicateKeyShard( in src/run-task.ts"
+  falsifier: |
+    Keep the first duplicate value instead of the pinned one, and the suite's #8877-shaped shard keeps the
+    gardener's priority. Drop the per-blob dedup, and a second quarantine of the same bytes opens a second PR.
