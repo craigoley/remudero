@@ -612,16 +612,16 @@ async function postRoute(routes: Parameters<typeof createService>[0]["routes"], 
   }
 }
 
-test("the console's POST /v1/feedback/decision lands without running the plan-PR preflight and ledgers the skip", async () => {
+test("the console's POST /v1/feedback/decision queues for the daemon sweep instead of landing with the preflight skipped", async () => {
+  // W1-T5460 superseded this route's request-path skip: the decision now waits for the sweep's preflight.
   const fx = requestPathFixture("w5348-decision-route", "proposed");
-  await postRoute([buildProposalDecisionRoute(fx.panel)], "/v1/feedback/decision", { id: fx.entry.id, decision: "accept" });
+  const stateRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w5348-decision-state-`));
+  await postRoute([buildProposalDecisionRoute({ ...fx.panel, inboxRoot: stateRoot })], "/v1/feedback/decision", { id: fx.entry.id, decision: "accept" });
   assert.equal(fx.counter.preflights, 0, "the request path never runs the preflight checks");
-  assert.deepEqual(fx.f.heads(), [LANDING_BRANCH, "main"], "the decision still landed");
-  assert.equal(fx.calls.filter((c) => c[1] === "create").length, 1);
-  const skipped = fx.skipRows()[0];
-  assert.equal(skipped?.lane, "feedback-landing");
-  assert.equal(skipped?.reason, "request-path");
-  assert.equal(skipped?.task_id, fx.entry.id);
+  assert.deepEqual(fx.f.heads(), ["main"], "the request path pushes nothing");
+  assert.deepEqual(fx.skipRows(), [], "no landing ran on the request path, so none was skipped");
+  assert.deepEqual(landing.queuedFeedbackLandings(stateRoot), [`plan/feedback/${fx.entry.id}.yaml`]);
+  rmSync(stateRoot, { recursive: true, force: true });
   fx.cleanup();
 });
 

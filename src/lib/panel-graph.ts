@@ -69,7 +69,7 @@ import {
   type FeedbackExpansion,
   type FeedbackStatus,
 } from "./feedback.js";
-import type { LandFeedbackOpts } from "./feedback-landing.js";
+import { queuedFeedbackLandings, type LandFeedbackOpts } from "./feedback-landing.js";
 import {
   feedbackDischargeStateForTasks,
   feedbackOriginTag,
@@ -578,6 +578,7 @@ function validateProposalDecision(body: unknown): { error: string } | ProposalDe
  * PR lib/triage.ts already opened. Only a `proposed` entry can be decided (400 otherwise — this
  * caller has a precondition `setFeedbackStatus` itself does not enforce). Ledgers
  * `panel.proposal_accepted`/`panel.proposal_rejected` with the panel's bearer as `origin`.
+ * W1-T5460: the flip QUEUES under `inboxRoot` (the state root); the daemon's landing sweep pushes it.
  */
 export function buildProposalDecisionRoute(deps: PanelGraphDeps): Route {
   return {
@@ -607,12 +608,14 @@ export function buildProposalDecisionRoute(deps: PanelGraphDeps): Route {
         deps.root,
         input.id,
         status,
-        deps.feedbackLand ? { land: requestPathLand(deps.feedbackLand, deps.ledgerPath, input.id, origin) } : {},
+        deps.feedbackLand ? { land: { ...deps.feedbackLand, stateRoot: deps.inboxRoot } } : {},
       );
+      const queued = deps.feedbackLand !== undefined && queuedFeedbackLandings(deps.inboxRoot).includes(feedbackEntryRepoPath(input.id));
       appendPanelLedger(deps.ledgerPath, input.decision === "accept" ? "panel.proposal_accepted" : "panel.proposal_rejected", input.id, origin, {
         proposal_pr: updated.proposal_pr,
+        ...(queued ? { landing: "queued" } : {}),
       });
-      sendJson(res, 200, { ok: true, id: input.id, status: updated.status, proposalPr: updated.proposal_pr });
+      sendJson(res, 200, { ok: true, id: input.id, status: updated.status, proposalPr: updated.proposal_pr, ...(queued ? { landing: "queued" } : {}) });
     }),
   };
 }
