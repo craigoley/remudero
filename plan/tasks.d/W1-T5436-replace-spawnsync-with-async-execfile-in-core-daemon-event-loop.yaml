@@ -5,7 +5,9 @@
   type: implement
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=7e0e3d000f704b2a
   attempts: 0
   files:
     - src/lib/daemon.ts
