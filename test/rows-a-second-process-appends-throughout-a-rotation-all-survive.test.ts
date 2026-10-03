@@ -8,10 +8,10 @@ import { gunzipSync } from "node:zlib";
 import { rotateLedger } from "../src/lib/ledger.js";
 
 // W1-T5514 — the concurrency half. A real second OS process appends numbered rows in a tight
-// loop, with `appendLedger`'s exact syscall shape (open by NAME with O_APPEND, one writeSync,
-// close), while this process rotates an oversized ledger again and again. The child appends until
-// told to stop, so EVERY rotation overlaps it, and then reports how many rows (K) it wrote. serve
-// and the daemon share the state volume exactly like this. The union of the live file and every
+// loop through the real `appendLedger` (open by NAME with O_APPEND, one writeSync, close), while
+// this process rotates an oversized ledger again and again. The child appends until told to stop,
+// so EVERY rotation overlaps it, then reports how many rows (K) it wrote. serve and the daemon
+// share the state volume exactly like this. The union of the live file and every
 // archive (both forms) must hold every sequence number at least once. Before the fix, a rotation
 // overlapping the child lost every row appended between its catch-up read and its rename (they
 // land on the inode the rename replaces): measured at base, 51,448 of 171,712 rows in 6 rotations.
@@ -23,16 +23,19 @@ const CEILING = 1024 * 1024;
 const ROTATIONS = 6;
 const BUDGET_NS = 60_000_000_000n;
 
+const REPO = new URL("..", import.meta.url);
+const LEDGER_MODULE = new URL("src/lib/ledger.ts", REPO).href;
+
+// The child loads the REAL `appendLedger` through tsx, so the appender half of the protocol
+// (re-append a row that landed behind a rotation's seal) is what is under test, not a mimic.
 const CHILD = `
-const { openSync, writeSync, closeSync, writeFileSync } = require("node:fs");
-const { existsSync } = require("node:fs");
-const [path, startedPath, stopPath, donePath] = process.argv.slice(1);
+import { existsSync, writeFileSync } from "node:fs";
+const [ledgerModule, path, startedPath, stopPath, donePath] = process.argv.slice(1);
+const { appendLedger } = await import(ledgerModule);
 writeFileSync(startedPath, "");
 let seq = 0;
 for (; seq % 64 !== 0 || !existsSync(stopPath); seq++) {
-  const buf = Buffer.from(JSON.stringify({ step: "ci.polling", run_id: "child", task_id: "W1-T5514", seq }) + "\\n");
-  const fd = openSync(path, "a");
-  try { writeSync(fd, buf, 0, buf.length); } finally { closeSync(fd); }
+  appendLedger(path, { step: "ci.polling", run_id: "child", task_id: "W1-T5514", seq }, { ceilingBytes: Number.MAX_SAFE_INTEGER });
 }
 writeFileSync(donePath, String(seq));
 `;
@@ -83,8 +86,8 @@ test("rows a second process appends throughout a rotation all survive in the liv
     appendFileSync(ledgerPath, noise(CEILING * 2, 0));
     const child = spawn(
       "env",
-      ["-u", "NODE_V8_COVERAGE", "-u", "NODE_OPTIONS", "-u", "NODE_TEST_CONTEXT", process.execPath, "-e", CHILD, ledgerPath, startedPath, stopPath, donePath],
-      { stdio: ["ignore", "ignore", "pipe"] },
+      ["-u", "NODE_V8_COVERAGE", "-u", "NODE_OPTIONS", "-u", "NODE_TEST_CONTEXT", process.execPath, "--import", "tsx", "--input-type=module", "-e", CHILD, LEDGER_MODULE, ledgerPath, startedPath, stopPath, donePath],
+      { stdio: ["ignore", "ignore", "pipe"], cwd: REPO },
     );
     let stderr = "";
     child.stderr!.on("data", (d) => (stderr += String(d)));
@@ -112,13 +115,17 @@ test("rows a second process appends throughout a rotation all survive in the liv
     assert.ok(K > 0, `the child reports the rows it wrote (got ${K})`);
 
     const seen = new Set<number>();
+    const twice: number[] = [];
     for (const line of unionText(dir).split("\n")) {
       if (!line.includes(`"run_id":"child"`)) continue;
-      seen.add((JSON.parse(line) as { seq: number }).seq);
+      const { seq } = JSON.parse(line) as { seq: number };
+      if (seen.has(seq)) twice.push(seq);
+      seen.add(seq);
     }
     const missing: number[] = [];
     for (let seq = 0; seq < K; seq++) if (!seen.has(seq)) missing.push(seq);
     assert.deepEqual(missing.slice(0, 20), [], `${missing.length} of ${K} child rows are in no ledger file after ${rotations} rotations`);
+    assert.deepEqual(twice.slice(0, 20), [], `${twice.length} child rows were copied twice — the drain and a re-append overlapped`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -15,7 +15,8 @@ import * as ledger from "../src/lib/ledger.js";
 // read, so it never reached this window. This suite injects through `beforeRename`, which fires
 // with the stage fully written, immediately before the rename. `beforeRename` is read off the
 // options bag, so at a base without the seam the hook never fires and the "hook fired" assertion
-// is the red, rather than a link error.
+// is the red, rather than a link error. The last test covers the appender half: a row written to
+// the replaced inode after the rotation's seal, which only its own appender can re-append.
 
 const CEILING = 4096;
 
@@ -168,6 +169,37 @@ test("a torn row left on the replaced inode is kept and newline-terminated, so t
     const lines = readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean);
     assert.ok(lines.includes(torn), "the torn bytes are kept as their own line");
     assert.equal(JSON.parse(lines[lines.length - 1]!).run_id, "run-after", "the next append is a whole row of its own");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an appender that opened the replaced inode before the rename and writes after the rotation sealed it re-appends that row itself — once, and only that row", () => {
+  const dir = tmpDir();
+  try {
+    const ledgerPath = join(dir, "ledger.ndjson");
+    writeOversizedLedger(ledgerPath);
+    let rotated: ReturnType<typeof ledger.rotateLedger> | undefined;
+    // `appendLedger` writes its row, then fstats its OWN descriptor, then writes the future-stamp
+    // flag when the kernel mtime lags the row's ts. Rotating inside that fstat puts the row BEFORE
+    // the seal (the drain copies it) and the flag AFTER it (only the appender can save it).
+    ledger.appendLedger(
+      ledgerPath,
+      { step: "review.posted", run_id: "run-straddle", task_id: "W1-T5514", pr_number: 8887 },
+      {
+        ceilingBytes: 1e12,
+        fstat: () => {
+          rotated = ledger.rotateLedger(ledgerPath, { ceilingBytes: CEILING, smoothingWindowMs: 0 });
+          return { mtimeMs: 0 };
+        },
+      },
+    );
+    assert.equal(rotated?.rotated, true, "the rotation ran between the appender's open and its last write");
+    const live = readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
+    const flags = live.filter((r) => r.step === ledger.LEDGER_FUTURE_STAMP_STEP && r.run_id === "run-straddle");
+    assert.equal(flags.length, 1, "the row written after the seal is re-appended to the new live ledger exactly once");
+    const rows = live.filter((r) => r.step === "review.posted" && r.run_id === "run-straddle");
+    assert.equal(rows.length, 1, "the row written before the seal is live once — the drain copied it and the appender did not");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -16,7 +16,7 @@ import {
   statSync,
   writeSync,
 } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
@@ -245,7 +245,9 @@ export function appendLedger(
     ...line,
   };
   const buf = Buffer.from(JSON.stringify(record) + "\n", "utf8");
-  const fd = openSync(path, "a");
+  const rows = [buf];
+  let behind: Buffer[];
+  const fd = openSync(path, "a+");
   try {
     const written = writeSync(fd, buf, 0, buf.length);
     if (written !== buf.length) {
@@ -260,10 +262,15 @@ export function appendLedger(
     } catch (err) {
       console.error(`ledger: could not stat ${path} to check the row's ts for future skew: ${String(err)}`);
     }
-    if (flag) writeSync(fd, JSON.stringify(flag) + "\n");
+    if (flag) {
+      rows.push(Buffer.from(JSON.stringify(flag) + "\n", "utf8"));
+      writeSync(fd, rows[1]!, 0, rows[1]!.length);
+    }
+    behind = rowsBehindRotationSeal(fd, rows);
   } finally {
     closeSync(fd);
   }
+  if (behind.length > 0) reappendBehindSeal(path, behind);
   // W1-T209: opportunistic, lazy rotation — the only place the ledger grows, so the only place
   // that needs to notice it has grown past the ceiling. A stat and small sidecar read on each
   // call; the full read-and-rewrite cost only on the call that crosses the effective ceiling.
@@ -1032,31 +1039,46 @@ function readSyncRange(path: string, start: number, end: number): Buffer {
   }
 }
 
-const DRAIN_PARTIAL_ROW_RETRIES = 10_000;
+const ROTATION_SEAL_STEP = "ledger.rotation_sealed";
+const ROTATION_SEAL_MARK = Buffer.from(`"step":"${ROTATION_SEAL_STEP}"`, "utf8");
 
-/** W1-T5514: append to the NEW live `path` every row another process wrote to the replaced inode
- *  (`fd`) from `from` on, until EOF holds still. Whole rows only; a row still half-visible after
- *  DRAIN_PARTIAL_ROW_RETRIES reads (~1µs each) is torn, and is kept newline-terminated. */
-function drainReplacedInode(fd: number, from: number, path: string): void {
-  const buf = Buffer.alloc(64 * 1024);
-  let offset = from;
-  let pending = Buffer.alloc(0);
-  for (let idle = 0; ; ) {
-    const n = readSync(fd, buf, 0, buf.length, offset);
-    if (n === 0) {
-      if (pending.length === 0 || ++idle > DRAIN_PARTIAL_ROW_RETRIES) break;
-      continue;
-    }
-    idle = 0;
-    offset += n;
-    const chunk = Buffer.concat([pending, buf.subarray(0, n)]);
-    const end = chunk.lastIndexOf(0x0a) + 1;
-    if (end > 0) appendFileSync(path, chunk.subarray(0, end));
-    pending = chunk.subarray(end);
+/** W1-T5514: seal the replaced inode (`fd`, O_APPEND), then copy every row before the seal from
+ *  `from` on into the NEW live `path`, a torn tail newline-terminated (see {@link rotateLedger}). */
+function drainReplacedInode(fd: number, from: number, path: string, nowIso: string): void {
+  const seal = Buffer.from(rotationRow(ROTATION_SEAL_STEP, { nonce: randomUUID() }, nowIso), "utf8");
+  writeSync(fd, seal, 0, seal.length);
+  const buf = Buffer.alloc(fstatSync(fd).size - from);
+  const view = buf.subarray(0, readSync(fd, buf, 0, buf.length, from));
+  const sealAt = view.indexOf(seal);
+  let rows = view.subarray(0, sealAt < 0 ? view.length : sealAt);
+  if (rows.length > 0 && rows[rows.length - 1] !== 0x0a) {
+    console.error(`ledger: rotation drained a torn ${rows.length}-byte tail into ${path}; kept, newline-terminated`);
+    rows = Buffer.concat([rows, Buffer.from("\n")]);
   }
-  if (pending.length === 0) return;
-  console.error(`ledger: rotation drained a torn ${pending.length}-byte row tail into ${path}; kept, newline-terminated`);
-  appendFileSync(path, Buffer.concat([pending, Buffer.from("\n")]));
+  if (rows.length > 0) appendFileSync(path, rows);
+}
+
+/** W1-T5514: `rows` this appender wrote AFTER a rotation's seal on an inode it already replaced
+ *  (`nlink` 0), so its drain never copied them. Before the seal, or no seal yet: the drain has them. */
+function rowsBehindRotationSeal(fd: number, rows: Buffer[]): Buffer[] {
+  const st = fstatSync(fd);
+  if (st.nlink > 0) return [];
+  const all = Buffer.alloc(st.size);
+  readSync(fd, all, 0, st.size, 0);
+  const sealAt = all.indexOf(ROTATION_SEAL_MARK);
+  return sealAt < 0 ? [] : rows.filter((row) => all.lastIndexOf(row) > sealAt);
+}
+
+function reappendBehindSeal(path: string, rows: Buffer[]): void {
+  for (let behind: Buffer[] = [Buffer.concat(rows)]; behind.length > 0; ) {
+    const fd = openSync(path, "a+");
+    try {
+      writeSync(fd, behind[0]!, 0, behind[0]!.length);
+      behind = rowsBehindRotationSeal(fd, behind);
+    } finally {
+      closeSync(fd);
+    }
+  }
 }
 
 /** The rotation's atomic write — the shared primitive since W1-T2899. `content` accepts a
@@ -1441,9 +1463,9 @@ export interface LedgerRotationResult {
  *   4. The rename is withdrawn when a `dev`+`ino` compare shows the live path is no longer the
  *      snapshotted inode, leaving the archive already written on disk.
  *
- * Concurrent appenders (W1-T5514): rows landing after the catch-up read hit the old inode; an fd held
- * across the rename drains them into the new live file until EOF holds still. Still lost: only a row
- * whose writer opened the old inode before the rename and writes after the drain's last read.
+ * Concurrent appenders (W1-T5514): rows landing after the catch-up read hit the old inode. An fd held
+ * across the rename seals it and drains every row before the seal into the new live file; an appender
+ * that finds its row AFTER the seal on an unlinked inode re-appends it. No row is lost or doubled.
  * Why: without the lock the second rotator's catch-up saw the first's smaller live file, took an
  * empty tail and renamed over it (R-1; docs/forensics/ledger.md#rotateledger).
  */
@@ -1944,8 +1966,7 @@ function rotateLedgerLocked(
   try {
     const swapped = writeFileAtomic(path, newLiveContent, () => {
       beforeRename?.();
-      // Still the snapshotted inode (else another rotator's)? The fd stays open for the drain.
-      replaced = openSync(path, "r");
+      replaced = openSync(path, "a+");
       const st = fstatSync(replaced);
       return st.dev === snapshotIdentity.dev && st.ino === snapshotIdentity.ino;
     });
@@ -1956,7 +1977,7 @@ function rotateLedgerLocked(
       );
       return { rotated: false };
     }
-    drainReplacedInode(replaced!, drainFrom, path);
+    drainReplacedInode(replaced!, drainFrom, path, nowIso);
   } finally {
     if (replaced !== undefined) closeSync(replaced);
   }
