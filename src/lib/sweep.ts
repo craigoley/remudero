@@ -33,7 +33,15 @@ import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "./mounts.js";
 import { planParallelAttempts, type ShapeGain, type TaskShape } from "./parallel-attempts.js";
 import { strikeScheduleFor, type StrikePassRate } from "./strike-schedule.js";
-import { buildPlanPrBody, buildPlanPrCommitMessage, createPlanPrRest, probeExistingPlanPr } from "./plan-pr-emitter.js";
+import {
+  buildPlanPrBody,
+  buildPlanPrCommitMessage,
+  createPlanPrRest,
+  PlanPrPreflightRefusedError,
+  planPrPreflightAllows,
+  planPrPreflightAtCommit,
+  probeExistingPlanPr,
+} from "./plan-pr-emitter.js";
 import {
   DEFAULT_RISK,
   RETIREMENT_REASONS,
@@ -1315,6 +1323,8 @@ export interface BuildSweepEffectsDeps {
   buildPlanPrBodyImpl?: typeof buildPlanPrBody;
   /** W1-T5349 — the plan-repair renumber's reservation; defaults to {@link reservePlanRepairTaskId}. */
   planRepairReserveIdImpl?: (worktreePath: string, filingBranch: string) => string;
+  /** W1-T5405 — the filer preflight both plan-PR rungs here run on their commit before the push. */
+  planPrPreflightImpl?: typeof planPrPreflightAtCommit;
 }
 
 export type ReviewDispatchMode =
@@ -1695,6 +1705,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     fixRungCheckoutRefusedErrorImpl: FixRungCheckoutRefusedError = requiredSweepRuntimeCtor("fixRungCheckoutRefusedErrorImpl"),
     defaultBudgetUsd = 100,
     buildPlanPrBodyImpl = buildPlanPrBody,
+    planPrPreflightImpl = planPrPreflightAtCommit,
     updatePrBodyImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["updatePrBodyImpl"]>>("updatePrBodyImpl"),
   } = deps;
 
@@ -3272,19 +3283,21 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                   buildPlanPrCommitMessage({ scope: "plan", subject: `propose an amendment for ${c.taskId}`, extraBody: input.commitBody }),
                 ]);
                 const headSha = planRepairGit("git", ["-C", worktreePath, "rev-parse", "HEAD"]).trim();
+                const body = buildPlanPrBodyImpl({
+                  intro: input.prIntro,
+                  criteria: [{ claim: input.claim, proof: input.proof }],
+                  changedFiles: [input.shardRelPath],
+                  proofCwd: worktreePath,
+                });
+                // W1-T5405: a red preflight is ledgered as this source run's outcome, so the next pass does not re-pay it.
+                const verdict = planPrPreflightImpl(worktreePath, headSha, { title: input.title, body });
+                if (!planPrPreflightAllows(verdict, { lane: "refusal_amendment", branch: input.branch, log })) {
+                  log(REFUSAL_AMENDMENT_STEP, { task_id: c.taskId, source_run_id: c.runId, outcome: "preflight_refused", failures: verdict.failures });
+                  throw new PlanPrPreflightRefusedError("refusal_amendment", verdict.failures);
+                }
                 gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
                 assertLiveWriteAllowed("gh-pr-create", `opening the refusal-amendment PR for ${c.taskId}'s shard`);
-                return createPlanPrRest(ghJsonForBuild, owner, repo, {
-                  title: input.title,
-                  body: buildPlanPrBodyImpl({
-                    intro: input.prIntro,
-                    criteria: [{ claim: input.claim, proof: input.proof }],
-                    changedFiles: [input.shardRelPath],
-                    proofCwd: worktreePath,
-                  }),
-                  head: input.branch,
-                  base: "main",
-                });
+                return createPlanPrRest(ghJsonForBuild, owner, repo, { title: input.title, body, head: input.branch, base: "main" });
               } finally {
                 try {
                   worktreeRemoveForBuild(repoDir, worktreePath);
@@ -3504,30 +3517,34 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         });
         planRepairGit("git", ["-C", worktreePath, "commit", "-m", commitMessage]);
         const headSha = planRepairGit("git", ["-C", worktreePath, "rev-parse", "HEAD"]).trim();
+        const title = `chore(plan): flag a stale proof in ${taskId}'s shard for architect repair`;
+        const body = buildPlanPrBodyImpl({
+          intro:
+            `AUTOMATED PLAN REPAIR (W1-T3390): ${pr.prUrl} cannot clear its proof check and no fix worker ` +
+            `is dispatched. Its criterion "${proof0.claim}" declares proof \`${proof0.proof}\`, which review ` +
+            `found \`${proof0.proofExec}\` — that text cannot be corrected from inside a non-plan-only ` +
+            `PR (Standing rule 15). This plan-only PR flags the line for an Architect; it does not ` +
+            `rewrite it.`,
+          criteria: [
+            {
+              claim: `the shard flags ${taskId}'s stale proof for architect repair`,
+              proof: `grep: sweep-flagged proof in ${shardRelPath}`,
+            },
+          ],
+          changedFiles: [shardRelPath],
+          proofCwd: worktreePath,
+        });
+        // W1-T5405: the verdict rides this rung's ONE dispatch row, so a refusal spends a MAX_PLAN_REPAIR_STRIKES strike.
+        const verdict = planPrPreflightImpl(worktreePath, headSha, { title, body });
+        const preflightRow = verdict.unreadable.length > 0 ? { preflight_unreadable: verdict.unreadable } : {};
+        if (!planPrPreflightAllows(verdict, { lane: "plan_repair", branch })) {
+          planRepairLog("preflight_refused", { shard_path: shardRelPath, failures: verdict.failures, ...preflightRow });
+          return true;
+        }
         gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
         assertLiveWriteAllowed("gh-pr-create", `opening the plan-only repair PR for ${taskId}'s shard`);
-        const created = createPlanPrRest(ghJsonForBuild, owner, repo, {
-          title: `chore(plan): flag a stale proof in ${taskId}'s shard for architect repair`,
-          body: buildPlanPrBodyImpl({
-            intro:
-              `AUTOMATED PLAN REPAIR (W1-T3390): ${pr.prUrl} cannot clear its proof check and no fix worker ` +
-              `is dispatched. Its criterion "${proof0.claim}" declares proof \`${proof0.proof}\`, which review ` +
-              `found \`${proof0.proofExec}\` — that text cannot be corrected from inside a non-plan-only ` +
-              `PR (Standing rule 15). This plan-only PR flags the line for an Architect; it does not ` +
-              `rewrite it.`,
-            criteria: [
-              {
-                claim: `the shard flags ${taskId}'s stale proof for architect repair`,
-                proof: `grep: sweep-flagged proof in ${shardRelPath}`,
-              },
-            ],
-            changedFiles: [shardRelPath],
-            proofCwd: worktreePath,
-          }),
-          head: branch,
-          base: "main",
-        });
-        planRepairLog("dispatched", { plan_repair_pr: created.prUrl, shard_path: shardRelPath });
+        const created = createPlanPrRest(ghJsonForBuild, owner, repo, { title, body, head: branch, base: "main" });
+        planRepairLog("dispatched", { plan_repair_pr: created.prUrl, shard_path: shardRelPath, ...preflightRow });
         return true;
       } catch (e) {
         planRepairLog("error", { error: String((e as Error)?.message ?? e) });
