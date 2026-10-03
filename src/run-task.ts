@@ -5792,6 +5792,52 @@ export interface PollDeps {
   requiredContexts?: (owner: string, repo: string) => string[] | undefined;
   externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
   externalWaitRecycle?: () => string | undefined;
+  /**
+   * W1-T5345: yield the CI wait on its FIRST poll, after `run.awaiting_external` is written, so
+   * the daemon lane that opened the PR is free at PR open. Only the daemon's `runOne` sets it;
+   * `rmd run-task` by hand, `rmd drain` and `rmd approve` leave it off and wait in-lane.
+   */
+  handOffAtPrOpen?: boolean;
+}
+
+/**
+ * W1-T5345 (design 2) — WHO OWNS EACH STEP THE IN-RUN PATH WOULD DO AFTER CI GREEN, once a run
+ * hands its PR off at PR open. `sweep`: the sweep already does it for every open PR.
+ * `before_yield`: the run did it before the CI wait began. `declined`: nothing outside this run
+ * does it, so the run does NOT hand off and ledgers `run.handoff_declined` with that reason
+ * (decided per run by {@link prOpenHandoffDecline}). `in_run_only`: nothing outside this run does
+ * it and declining for it would decline EVERY run — named on the `pr_open` hand-off row
+ * (`in_run_only_skipped`) so the skip is never silent.
+ */
+export type PrOpenHandoffDeclineReason = "irreversible_diff" | "no_merge_boundary" | "shadow_instance";
+export type PrOpenHandoffStepOwner =
+  | { kind: "sweep" | "before_yield" | "in_run_only"; by: string }
+  | { kind: "declined"; reason: PrOpenHandoffDeclineReason };
+export const PR_OPEN_HANDOFF_STEP_OWNERS: readonly { step: string; owner: PrOpenHandoffStepOwner }[] = [
+  { step: "follow_up_harvest", owner: { kind: "before_yield", by: "harvestFollowupsFromReport, called before waitForCiGreen" } },
+  { step: "task_credit_trailer", owner: { kind: "before_yield", by: "ensureTaskTrailer stamps Remudero-Task before the wait; merged credit reads that trailer" } },
+  { step: "review_post", owner: { kind: "sweep", by: "sweep postReview -> runReview, which posts remudero-review at the head" } },
+  { step: "fix_rung", owner: { kind: "sweep", by: "sweep blocked-fixable disposition -> runFixRung under hostWorkerBudget" } },
+  { step: "capped_arm_refusal", owner: { kind: "sweep", by: "runReview -> armIfVerdictPermits -> decideArmFromLedgerVerdict" } },
+  { step: "automerge_arm", owner: { kind: "sweep", by: "sweep mergeable disposition arms auto-merge on checks green + review success" } },
+  { step: "merge_and_terminal_row", owner: { kind: "sweep", by: "GitHub auto-merge the sweep armed; this run's own terminal row is the handed_off verdict" } },
+  { step: "risk_judge", owner: { kind: "in_run_only", by: "runRiskJudge in runTaskBody; the sweep honours only a prior risk_judge.escalated row (riskRefused)" } },
+  { step: "specialist_panel", owner: { kind: "in_run_only", by: "routeSpecialists in runTaskBody; a specialist.panel log row that gates nothing" } },
+  { step: "irreversible_arm_refusal", owner: { kind: "declined", reason: "irreversible_diff" } },
+  { step: "no_merge_boundary", owner: { kind: "declined", reason: "no_merge_boundary" } },
+  { step: "shadow_instance_arm_refusal", owner: { kind: "declined", reason: "shadow_instance" } },
+];
+const PR_OPEN_HANDOFF_IN_RUN_ONLY = PR_OPEN_HANDOFF_STEP_OWNERS.filter((s) => s.owner.kind === "in_run_only").map((s) => s.step);
+
+/** W1-T5345: the per-run gate that keeps a run in-lane — a post-CI refusal the sweep's re-arm path cannot see. */
+export function prOpenHandoffDecline(run: { irreversible: boolean; noMerge: boolean; shadowInstance: boolean }): PrOpenHandoffDeclineReason | undefined {
+  // The sweep's re-arm path is never handed the irreversible signal (W1-T947's named residual).
+  if (run.irreversible) return "irreversible_diff";
+  // The wipe-test no-merge boundary lives only in this run (`resolveWipeTestArmPermission`).
+  if (run.noMerge) return "no_merge_boundary";
+  // The shadow-instance arm refusal lives only in this run (`resolveShadowInstanceArmPermission`).
+  if (run.shadowInstance) return "shadow_instance";
+  return undefined;
 }
 
 export function ciWaitFreshness(
@@ -5983,6 +6029,7 @@ export type CiGateOutcome =
       oldSha: string;
       newSha: string;
       recycle?: never;
+      trigger?: never;
       checks?: never;
       checkCount?: never;
     }
@@ -5990,6 +6037,18 @@ export type CiGateOutcome =
       state: "freshness_handoff";
       sha: string;
       recycle: string;
+      oldSha?: never;
+      newSha?: never;
+      trigger?: never;
+      checks?: never;
+      checkCount?: never;
+    }
+  | {
+      // W1-T5345: the daemon lane's hand-off at PR open.
+      state: "freshness_handoff";
+      sha: string;
+      trigger: "pr_open";
+      recycle?: never;
       oldSha?: never;
       newSha?: never;
       checks?: never;
@@ -6246,6 +6305,11 @@ async function waitForCiGreen(
           oldSha: freshness.oldSha,
           newSha: freshness.newSha,
         };
+      }
+      // W1-T5345: same boundary, same order — the wait is recorded above, then the lane is given back.
+      if (deps.handOffAtPrOpen) {
+        log("run.freshness_handoff", { waiting_on: "ci", head_sha: sha, trigger: "pr_open", in_run_only_skipped: PR_OPEN_HANDOFF_IN_RUN_ONLY });
+        return { state: "freshness_handoff", sha, trigger: "pr_open" };
       }
     }
     const recycle = deps.externalWaitRecycle?.();
@@ -13709,6 +13773,7 @@ interface RunTaskBodyOptions {
   containmentExec?: ProbeExecutor;
   externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
   externalWaitRecycle?: () => string | undefined;
+  handOffAtPrOpen?: boolean;
   isolationExec?: IsolationProbeExecutor;
   managedCheckoutInstall?: (repoDir: string) => void;
   maskLearnings?: boolean;
@@ -14534,6 +14599,8 @@ async function runTask(
     containmentExec?: ProbeExecutor;
     externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
     externalWaitRecycle?: () => string | undefined;
+    /** W1-T5345: hand the PR to the sweep at the first CI poll ({@link PollDeps.handOffAtPrOpen}). Daemon only. */
+    handOffAtPrOpen?: boolean;
     /** Injectable isolation-probe executor (W1-T91) — the isolation sibling of
      *  `containmentExec` above, driving the REAL blocked_isolation catch branch. Default: the
      *  real spawn-backed executor. */
@@ -17339,9 +17406,16 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // lives here, before arming. A ci that never greens is blocked_ci (no review
     // over unproven code); a review=failure is blocked_review (the required check
     // is red and GitHub will not merge). Pending is never treated as pass.
+    // W1-T5345: the daemon lane hands its PR to the sweep at PR open unless a post-CI gate only
+    // this run can apply stands over it (PR_OPEN_HANDOFF_STEP_OWNERS) — that decline is ledgered.
+    const handoffDeclined = opts.handOffAtPrOpen
+      ? prOpenHandoffDecline({ irreversible, noMerge: !!opts.noMerge, shadowInstance })
+      : undefined;
+    if (handoffDeclined) log("run.handoff_declined", { trigger: "pr_open", reason: handoffDeclined, pr_url: prUrl });
     const ci = await waitForCiGreen(prUrl, (s, extra) => log(s, extra), 6, {
       externalWaitFreshness: opts.externalWaitFreshness,
       externalWaitRecycle: opts.externalWaitRecycle,
+      handOffAtPrOpen: opts.handOffAtPrOpen === true && handoffDeclined === undefined,
     });
     if (ci.state === "freshness_handoff") {
       // W1-T4662: this is a HAND-OFF, never a failure — a healthy run that reached the CI-wait
@@ -17349,8 +17423,12 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // to share `blocked_transient` with a genuine, repeated Anthropic-side API error, which made
       // the daemon's cross-task API-window hold and lane refill back dispatch off a signal that
       // named nothing wrong. The shared RunResult union names this outcome directly.
-      const reason = ci.recycle === undefined ? "freshness_yield" : "recycle_yield";
-      say(`daemon ${ci.recycle === undefined ? "freshness" : "recycle"} handoff: CI is pending; leaving PR open for the refreshed daemon`);
+      const reason = ci.trigger === "pr_open" ? "pr_open_yield" : ci.recycle === undefined ? "freshness_yield" : "recycle_yield";
+      say(
+        ci.trigger === "pr_open"
+          ? "PR-open handoff: CI is pending; the sweep owns this PR's CI wait, review and merge"
+          : `daemon ${ci.recycle === undefined ? "freshness" : "recycle"} handoff: CI is pending; leaving PR open for the refreshed daemon`,
+      );
       log("verdict", {
         verdict: "handed_off",
         pr_url: prUrl,
@@ -34395,6 +34473,8 @@ export async function daemonCommand(
             // readings remain undefined and therefore cannot manufacture a restart.
             externalWaitFreshness: ciWaitFreshness(() => daemonFreshnessFromService(checkServiceFreshness(effectiveRepoRoot, process.env))),
             externalWaitRecycle: () => recyclePauseDetail(config.root),
+            // W1-T5345: a daemon lane is free once its PR is open — the sweep owns CI wait and review.
+            handOffAtPrOpen: true,
             ...(gitCredentialSocket ? { gitCredentialSocketPath: gitCredentialSocket.socketPath } : {}),
           }),
         readUsage: () => readUsageSnapshotPreferSdk(config),
