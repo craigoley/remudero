@@ -16,7 +16,10 @@ import {
   readDiskFreeBytes,
   type CaptureSurfaceFireRecord,
 } from "./lib/doctor.js";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
+import { promisify } from "node:util";
+import { mkdir as mkdirAsync, readFile as readFileAsync } from "node:fs/promises";
+import { probeCacheFromLedger, probeCacheKey, type BaseProbeFile } from "./lib/base-reproduction.js";
 import { ghExec, ghJsonAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
@@ -1338,6 +1341,7 @@ import {
   resolveNameFilteredCandidates,
   narrowNameFilteredArgs,
   execWhitelistedProof,
+  execWhitelistedProofAsync,
   defaultProofSpawner,
   isCriterionRefusal,
   type ProofSpawner,
@@ -1908,6 +1912,94 @@ export function readyDraftViaGh(
     });
 }
 
+const baseReproductionExecFile = promisify(execFile);
+let baseReproductionQueue: Promise<void> = Promise.resolve();
+const baseReproductionHostCache = new Map<string, BaseProbeFile>();
+
+export function buildBaseReproductionProbe(
+  config: Config, repoDir: string, ledgerPath: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: Pick<SweepDeps, "readLedger"> & {
+    git?: (args: string[], timeoutMs: number) => Promise<void>;
+    link?: typeof linkWorktreeNodeModules;
+    readFile?: (path: string) => Promise<unknown>;
+    execute?: typeof execWhitelistedProofAsync;
+    timeout?: () => number;
+    clock?: Clock;
+  } = {},
+): NonNullable<SweepDeps["reproduceFailingTestsOnMain"]> {
+  return (_pr, files, mainSha) => {
+    const pending = baseReproductionQueue.then(async () => {
+      const results = new Map<string, BaseProbeFile>();
+      const key = (file: string) => `${repoDir}:${probeCacheKey(mainSha, file)}`;
+      const cache = probeCacheFromLedger((deps.readLedger ?? readLedgerLines)(ledgerPath));
+      for (const file of files) {
+        const cached = baseReproductionHostCache.get(key(file)) ?? cache.get(probeCacheKey(mainSha, file));
+        if (cached) results.set(file, { ...cached, cached: true });
+      }
+      const missing = files.filter((file) => !results.has(file));
+      if (missing.length === 0) return files.map((file) => results.get(file)!);
+      const worktreePath = join(worktreesDir(config), `base-repro-${mainSha.slice(0, 12)}`);
+      const clock = deps.clock ?? systemClock;
+      const started = clock.now();
+      let created = false;
+      let timeoutMs: number | undefined;
+      const git = deps.git ?? (async (args: string[], timeout: number) => {
+        await baseReproductionExecFile("git", args, { timeout, killSignal: "SIGKILL", maxBuffer: 1 << 26 });
+      });
+      const unreadable = (file: string, detail: { reason: string }): BaseProbeFile =>
+        ({ file, outcome: "unrunnable", duration_ms: clock.now() - started, cached: false, ...detail });
+      try {
+        timeoutMs = checkProofTimeoutMs(deps.timeout);
+        await mkdirAsync(worktreesDir(config), { recursive: true });
+        await buildBaseProofDir([], repoDir, {
+          detachedAsync: { path: worktreePath, revision: mainSha, run: (args) => git(args, timeoutMs!) },
+        }).pendingCheckout;
+        created = true;
+        const linked = (deps.link ?? linkWorktreeNodeModules)(repoDir, worktreePath);
+        if (linked !== "linked" && linked !== "already-present") throw new Error(`probe node_modules: ${linked}`);
+        const read = deps.readFile ?? readFileAsync;
+        await read(join(worktreePath, "node_modules", "tsx", "package.json"));
+        for (const file of missing) {
+          const fileStarted = clock.now();
+          try {
+            await read(join(worktreePath, file));
+          } catch (error) {
+            results.set(file, (error as NodeJS.ErrnoException)?.code === "ENOENT"
+              ? { file, outcome: "absent", duration_ms: clock.now() - fileStarted, cached: false }
+              : unreadable(file, { reason: String(error) }));
+            continue;
+          }
+          try {
+            const proof = parseWhitelistedProof(`unit test: ${file}`);
+            if (!proof || proof.kind !== "test" || proof.nameFiltered) throw new Error(`unexecutable test path: ${file}`);
+            const outcome = await (deps.execute ?? execWhitelistedProofAsync)(proof, worktreePath, timeoutMs, undefined, {
+              refreshToolchain: () => { throw new Error("base probe cannot load its toolchain; installing is prohibited"); },
+            });
+            results.set(file, { file, outcome: outcome === "fail" ? "fails" : outcome === "pass" ? "passes" : "unrunnable",
+              duration_ms: clock.now() - fileStarted, cached: false,
+              ...(outcome === "no-match" ? { reason: "proof executed no matching test" } : {}) });
+          } catch (error) {
+            results.set(file, unreadable(file, { reason: String(error) }));
+          }
+        }
+      } catch (error) {
+        for (const file of missing) if (!results.has(file)) results.set(file, unreadable(file, { reason: String(error) }));
+      } finally {
+        if (created) {
+          try { await git(["-C", repoDir, "worktree", "remove", "--force", worktreePath], timeoutMs!); }
+          catch (error) { log("sweep.base_reproduction.cleanup_failed", { main_sha: mainSha, path: worktreePath, reason: String(error) }); }
+        }
+      }
+      for (const file of missing) baseReproductionHostCache.set(key(file), results.get(file)!);
+      return files.map((file) => results.get(file)!);
+    });
+    // The caller receives a rejection; settling the queue lets the next probe run (W1-T5528).
+    baseReproductionQueue = pending.then(() => {}, (error) => { log("sweep.base_reproduction.queue_failed", { reason: String(error) }); });
+    return pending;
+  };
+}
+
 export function buildSweepEffects(
   deps: BuildSweepEffectsDeps & {
     /** W1-T3618 test seam: override the reviewer-code freshness read the review gate below uses.
@@ -1920,6 +2012,7 @@ export function buildSweepEffects(
   },
 ): Pick<
   SweepDeps,
+  | "reproduceFailingTestsOnMain"
   | "arm"
   | "close"
   | "dispatchFix"
@@ -2219,6 +2312,7 @@ export function buildSweepEffects(
     return 0;
   };
   const effects = buildSweepEffectsFromLib({
+    reproduceFailingTestsOnMainImpl: buildBaseReproductionProbe(deps.config, reviewRepoDir, deps.ledgerPath, deps.log),
     repoRoot,
     localRepoName: resolveOwnerRepo().repo,
     nowMsImpl: Date.now,
@@ -18517,6 +18611,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
  * (or absent), and `baseWorktreeFailure` names why the worktree could not be created.
  */
 export interface BaseProofDir {
+  pendingCheckout?: Promise<void>;
   baseCheckoutDir: string | undefined;
   baseUnreadablePaths: ReadonlySet<string>;
   baseIsCheckout: boolean;
@@ -18570,6 +18665,7 @@ export function buildBaseProofDir(
   criteria: ReadonlyArray<{ proof?: string }>,
   headCheckoutDir: string,
   deps: {
+    detachedAsync?: { path: string; revision: string; run: (args: string[]) => Promise<void> };
     mergeBase?: (cwd: string) => string;
     showBlob?: (cwd: string, rev: string, repoRelPath: string) => string;
     makeDir?: () => string;
@@ -18587,6 +18683,15 @@ export function buildBaseProofDir(
     copyFile?: (src: string, dest: string) => void;
   } = {},
 ): BaseProofDir {
+  const detachedArgs = (repoDir: string, path: string, revision: string) =>
+    ["-C", repoDir, "worktree", "add", "--detach", path, revision];
+  if (deps.detachedAsync) {
+    const { path, revision, run } = deps.detachedAsync;
+    return {
+      baseCheckoutDir: path, baseUnreadablePaths: new Set(), addedTestFiles: new Set(), baseIsCheckout: false,
+      pendingCheckout: run(detachedArgs(headCheckoutDir, path, revision)),
+    };
+  }
   const mergeBase =
     deps.mergeBase ??
     ((cwd: string) =>
@@ -18615,7 +18720,7 @@ export function buildBaseProofDir(
       // stderr PIPED for the same reason `showBlob` pipes it: a base the repo cannot check out is
       // a degrade this function REPORTS (`baseWorktreeFailure`), never a `fatal:` line through a
       // passing review. `--detach`: no branch name is ever wanted here (W1-T232's lesson at the head).
-      execFileSync("git", ["-C", repoDir, "worktree", "add", "--detach", worktreePath, revision], {
+      execFileSync("git", detachedArgs(repoDir, worktreePath, revision), {
         stdio: ["ignore", "pipe", "pipe"],
       }));
   const makeDir = deps.makeDir ?? (() => mkdtempSync(join(tmpdir(), "rmd-proof-base-")));
