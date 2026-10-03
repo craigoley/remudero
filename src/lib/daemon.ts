@@ -1453,7 +1453,7 @@ export function startInterphaseReviewClock(
           const halt = deps.checkStop?.() ?? (scope === "pause" ? undefined : deps.checkPause?.());
           if (halt) continue;
 
-          const reviewOnly = scope !== undefined || activePasses.size > 0;
+          const reviewOnly = scope !== undefined || activePasses.size > 0 || inFlightReviewCount() > 0;
           const trigger = eventWakePending ? "github-event" : "interval";
           eventWakePending = false;
           elapsedMs = 0;
@@ -1922,8 +1922,8 @@ function startInFlightTicker(
           }
           // W1-T4191: the light pass can admit fix and review workers, so an operator PAUSE withholds the
           // ORDINARY pass while the batch drains. Withheld, never aborted: work already in flight finishes.
-          // STOP is read only under PAUSE: it ends the daemon on its own, and fixtures bound this loop with it.
-          const lightHalt = deps.checkPause?.();
+          // STOP closes review admission while the already admitted work drains.
+          const lightHalt = deps.checkStop?.() ?? deps.checkPause?.();
           if (lightHalt) {
             // W1-T5343: a pause stops new work, never the judging of finished work (W1-T4429 design iii), and
             // 11 dispatch-phase pauses once held ~210 min with 0 reviews. So run ONE review-only pass at a time,
@@ -2781,13 +2781,20 @@ export async function runDaemon(
   // W1-T4088: the same pattern — an operator's reply is answered within a poll interval.
   const inboxResponder = deps.inboxResponder ? startInboxResponder(deps.inboxResponder, pollIntervalMs, log) : undefined;
   const gardenerRef: { stop: () => void } = { stop: () => {} };
-  const summary = (stopReason: DaemonStopReason, stopDetail?: string): DaemonSummary => {
+  const summary = async (stopReason: DaemonStopReason, stopDetail?: string): Promise<DaemonSummary> => {
     prActionPumpRef.stop();
     plainBackfill?.stop();
     fleetLane?.stop();
     inboxResponder?.stop();
     gardenerRef.stop();
     livenessPulse?.stop();
+    if (stopReason === "stopped") {
+      if (backgroundSweep) await backgroundSweep;
+      const abandonedReviews = await drainInFlightReviews({ boundMs: sweepWallClockBoundMs });
+      if (abandonedReviews > 0) log("daemon.stop_drain.completed", {
+        abandoned_in_flight_reviews: abandonedReviews, bound_ms: sweepWallClockBoundMs,
+      });
+    }
     const s: DaemonSummary = { attempted, merged, stopReason, stopDetail, costUsd, ticks };
     log("daemon.summary", { ...s });
     return s;
@@ -2903,6 +2910,9 @@ export async function runDaemon(
       } finally {
         reviewPasses = drainReviewClock ? (await drainReviewClock.stop()).passes : 0;
       }
+      if (drainReviewClock) abandonedReviews = await drainInFlightReviews({
+        boundMs: Math.max(0, sweepWallClockBoundMs - Math.max(0, daemonClock.now() - drainStartedAtMs)),
+      });
       for (const action of abandoned) {
         log("daemon.detached_action_abandoned", {
           action_kind: action.actionKind,
