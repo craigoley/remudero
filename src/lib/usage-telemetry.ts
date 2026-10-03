@@ -16,7 +16,9 @@ import type { LiveProviderAccounts } from "./analytics-live-metrics.js";
 import { fixedClock } from "./clock.js";
 import { loadMounts, mountsPath, resolveClaudeModelAlias, type Mounts } from "./mounts.js";
 
-export const USAGE_PROJECTION_VERSION = "usage-v1";
+export const USAGE_PROJECTION_VERSION = "usage-v2";
+export const LEGACY_USAGE_PROJECTION_VERSION = "usage-v1";
+type UsageVersion = typeof USAGE_PROJECTION_VERSION | typeof LEGACY_USAGE_PROJECTION_VERSION;
 
 const HOUR_MS = 3_600_000;
 const RETAIN_HOURS = 8 * 24;
@@ -96,10 +98,17 @@ interface MarkedRun {
   provider: string;
   model: string;
   assignments: number;
+  trial?: { id: string; arm: string; reasonFull?: string; reasonState: "observed" | "not-collected" | "too-large" };
   outcome?: { success: boolean; costUsd: number | null; durationMs: number };
 }
 
 export interface UsageExperimentArm {
+  trialId?: string;
+  trialArm?: string;
+  reason?: string;
+  reasonFull?: string;
+  reasonState?: "observed" | "not-collected" | "too-large";
+  reasonAsOf?: string;
   marker: string;
   value: string;
   provider: string;
@@ -119,6 +128,7 @@ export interface UsageExperimentArm {
 /** Plain-JSON accumulator state; it is the checkpoint shape too. */
 export interface UsageTelemetryState {
   costAccountingVersion?: 1;
+  trialAccountingVersion?: 1;
   newestHour: number;
   series: Array<{ provider: string; window: string; hours: HourSample[] }>;
   cash: CashHour[];
@@ -206,7 +216,7 @@ export interface UsageRoutingProjection {
 }
 
 export interface UsageProjection {
-  version: typeof USAGE_PROJECTION_VERSION;
+  version: UsageVersion;
   asOf: string | null;
   coverage: { from: string | null; to: string | null; note: string };
   subscriptions: UsageSubscription[];
@@ -215,7 +225,7 @@ export interface UsageProjection {
 }
 
 export function usageTelemetryState(): UsageTelemetryState {
-  return { costAccountingVersion: 1, newestHour: 0, series: [], cash: [], cashEvents: [], routing: [], recent: [], markedRuns: [], assignmentsObserved: 0, decisionsObserved: 0 };
+  return { trialAccountingVersion: 1, costAccountingVersion: 1, newestHour: 0, series: [], cash: [], cashEvents: [], routing: [], recent: [], markedRuns: [], assignmentsObserved: 0, decisionsObserved: 0 };
 }
 
 function text(value: unknown): string | undefined {
@@ -337,7 +347,7 @@ function markersFrom(decision: Record<string, unknown> | undefined): Record<stri
   return out;
 }
 
-function noteMarkedRun(state: UsageTelemetryState, runId: string | null, ts: number, markers: Record<string, string>, provider: string, model: string): void {
+function noteMarkedRun(state: UsageTelemetryState, runId: string | null, ts: number, markers: Record<string, string>, provider: string, model: string, decision?: Record<string, unknown>): void {
   if (!runId) return;
   const runs = (state.markedRuns ??= []);
   const existing = runs.find((entry) => entry.runId === runId);
@@ -346,7 +356,12 @@ function noteMarkedRun(state: UsageTelemetryState, runId: string | null, ts: num
     return;
   }
   if (Object.keys(markers).length === 0) return;
-  runs.push({ runId, hour: Math.floor(ts / HOUR_MS), firstTs: ts, markers, provider, model, assignments: 1 });
+  const trialId = text(decision?.trial), trialArm = text(decision?.trialArm) ?? "unreported";
+  const rawReason = text(decision?.trialReason);
+  const trial = trialId && trialId.length <= 256 && trialArm.length <= 128 ? { id: trialId, arm: trialArm,
+    ...(rawReason && Buffer.byteLength(rawReason) <= 4096 ? { reasonFull: rawReason } : {}),
+    reasonState: (!rawReason ? "not-collected" : Buffer.byteLength(rawReason) <= 4096 ? "observed" : "too-large") as "observed" | "not-collected" | "too-large" } : undefined;
+  runs.push({ runId, hour: Math.floor(ts / HOUR_MS), firstTs: ts, markers, provider, model, assignments: 1, ...(trial ? { trial } : {}) });
   if (runs.length > MARKED_RUNS_MAX) runs.splice(0, runs.length - MARKED_RUNS_MAX);
 }
 
@@ -416,7 +431,7 @@ function addAssignment(state: UsageTelemetryState, line: Record<string, unknown>
   }
 
   const runId = text(line.run_id) ?? null;
-  noteMarkedRun(state, runId, ts, markers, provider, model);
+  noteMarkedRun(state, runId, ts, markers, provider, model, decision);
   const prior = runId ? state.recent.find((entry) => entry.runId === runId) : undefined;
   if (prior && Date.parse(prior.ts) > ts) {
     prior.assignmentsInRun += 1;
@@ -655,16 +670,34 @@ function aggregate(state: UsageTelemetryState, hours: number, asOfHour: number):
   };
 }
 
-function experiments(state: UsageTelemetryState, asOfHour: number): UsageExperimentArm[] {
+export function reasonPreview(reason: string, limit = 96): string {
+  if (reason.length <= limit) return reason;
+  const prefix = reason.slice(0, limit - 1);
+  const boundary = prefix.search(/\s+\S*$/);
+  return (boundary > 0 ? prefix.slice(0, boundary) : "Reason available in full details") + "…";
+}
+
+function experiments(state: UsageTelemetryState, asOfHour: number, version: UsageVersion): UsageExperimentArm[] {
   const arms = new Map<string, UsageExperimentArm & { durationTotal: number }>();
-  for (const run of state.markedRuns ?? []) {
+  for (const run of [...(state.markedRuns ?? [])].sort((a, b) => a.firstTs - b.firstTs)) {
     if (run.hour <= asOfHour - 7 * 24) continue;
-    for (const [marker, value] of Object.entries(run.markers)) {
+    const entries = Object.entries(run.markers).filter(([marker]) => version === LEGACY_USAGE_PROJECTION_VERSION ||
+      marker !== "trialReason" && (!run.trial || !["trial", "trialArm"].includes(marker)));
+    if (version === USAGE_PROJECTION_VERSION && run.trial) entries.push(["trial", `${run.trial.id} / ${run.trial.arm}`]);
+    for (const [marker, value] of entries) {
       const key = [marker, value, run.provider, run.model].join("\u0000");
       const arm = arms.get(key) ?? {
         marker, value, provider: run.provider, model: run.model, runs: 0, assignments: 0, terminals: 0, successes: 0,
         successRatePercent: null, meanAssignmentsPerRun: 0, meanDurationMs: null, costUsd: 0, unpricedTerminals: 0, meanCostPerTerminalUsd: null, durationTotal: 0,
       };
+      if (version === USAGE_PROJECTION_VERSION && marker === "trial" && run.trial) {
+        arm.trialId = run.trial.id;
+        arm.trialArm = run.trial.arm;
+        arm.reasonFull = run.trial.reasonFull;
+        arm.reason = run.trial.reasonFull ? reasonPreview(run.trial.reasonFull) : undefined;
+        arm.reasonState = run.trial.reasonState;
+        arm.reasonAsOf = isoAt(run.firstTs);
+      }
       arm.runs += 1;
       arm.assignments += run.assignments;
       if (run.outcome) {
@@ -715,6 +748,7 @@ export function buildUsageProjection(
   state: UsageTelemetryState,
   asOf: string | null,
   longCash?: { state: "observed" | "not-collected"; windows: ReadonlyArray<{ name: string; usd: number; rows: number; unpricedRows?: number; complete: boolean; reason?: string }> },
+  version: UsageVersion = USAGE_PROJECTION_VERSION,
 ): UsageProjection {
   const asOfMs = asOf === null ? NaN : Date.parse(asOf);
   const asOfHour = Number.isFinite(asOfMs) ? Math.floor(asOfMs / HOUR_MS) : state.newestHour;
@@ -763,7 +797,7 @@ export function buildUsageProjection(
       .map((bucket) => ({ hour: hourIso(bucket.hour), usd: round(bucket.usd, 6), rows: bucket.rows, unpricedRows: bucket.unpricedRows ?? 0 })),
   };
   return {
-    version: USAGE_PROJECTION_VERSION,
+    version,
     asOf,
     coverage: {
       from: oldestHour === undefined ? null : hourIso(oldestHour),
@@ -778,7 +812,7 @@ export function buildUsageProjection(
       decisionsObserved: state.decisionsObserved,
       recent: state.recent.map((entry) => ({ ...entry })),
       aggregates: { last24h: aggregate(state, 24, asOfHour), last7d: aggregate(state, 7 * 24, asOfHour) },
-      experiments: experiments(state, asOfHour),
+      experiments: experiments(state, asOfHour, version),
     },
   };
 }

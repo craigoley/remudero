@@ -86,6 +86,7 @@ import {
   accumulateUsageLine,
   buildUsageProjection,
   USAGE_PROJECTION_VERSION,
+  LEGACY_USAGE_PROJECTION_VERSION,
   usageTelemetryState,
   claudeModelAliasesAt,
   withCanonicalModels,
@@ -368,6 +369,7 @@ export interface AnalyticsSnapshot {
   /** W1-T4024 — money, in dollars, never mixed with subscription utilisation. */
   spend: { cash: CashSpendSnapshot };
   usage?: UsageProjection;
+  legacyUsage?: UsageProjection;
   abilityMap?: AbilityMap;
   workIntegrity?: WorkIntegrity;
   judgeCalibration?: JudgeCalibration;
@@ -1721,6 +1723,7 @@ function attachUsageProjection(snapshot: AnalyticsSnapshot, state: UsageTelemetr
   if (state === undefined) return snapshot;
   const usage = buildUsageProjection(state, snapshot.asOf, snapshot.spend?.cash);
   Object.defineProperty(snapshot, "usage", { value: usage, enumerable: false, writable: false });
+  Object.defineProperty(snapshot, "legacyUsage", { value: buildUsageProjection(state, snapshot.asOf, snapshot.spend?.cash, LEGACY_USAGE_PROJECTION_VERSION), enumerable: false, writable: false });
   return snapshot;
 }
 
@@ -1997,7 +2000,7 @@ export async function deriveAnalyticsSnapshotFromCheckpointedLedger(
   const currentSource = checkpointSource(stateDir);
   const priorLiveMalformed = priorCheckpoint?.state.routingTelemetry?.malformedSources?.some(([, finding]) => finding.form === "live") ?? false;
   const canResume = priorCheckpoint !== undefined && priorCheckpoint.state.goalAccountingVersion === 1 &&
-    priorCheckpoint.state.usage?.costAccountingVersion === 1 &&
+    priorCheckpoint.state.usage?.costAccountingVersion === 1 && priorCheckpoint.state.usage?.trialAccountingVersion === 1 &&
     priorCheckpoint.state.routingTelemetry?.benchmarkVersion === BENCHMARK_QUALITY_VERSION &&
     priorCheckpoint.state.routingTelemetry?.benchmarkCounters !== undefined &&
     Array.isArray(priorCheckpoint.state.routingTelemetry?.malformedSources) &&
@@ -2315,7 +2318,7 @@ export function createAnalyticsSnapshotCache(deps: AnalyticsSnapshotCacheDeps): 
   const schedule = deps.schedule ?? systemSchedule;
   const log = deps.log ?? (() => {});
   let checkpoint = readAnalyticsCheckpoint(deps.stateDir);
-  let value = checkpoint === undefined || checkpoint.state.usage?.costAccountingVersion !== 1 ? coldAnalyticsSnapshot() : freezeAnalyticsSnapshot(attachUsageProjection(checkpoint.snapshot, checkpoint.state.usage));
+  let value = checkpoint === undefined || checkpoint.state.usage?.costAccountingVersion !== 1 || checkpoint.state.usage?.trialAccountingVersion !== 1 ? coldAnalyticsSnapshot() : freezeAnalyticsSnapshot(attachUsageProjection(checkpoint.snapshot, checkpoint.state.usage));
   let timer: AnalyticsTimer | undefined;
   let controller: AbortController | undefined;
   let inFlight: Promise<void> | undefined;
@@ -2512,8 +2515,9 @@ export function buildAnalyticsRoute(deps: {
         sendJson(res, 200, { version: "goals-v1", asOf: base.asOf, state: base.goalObservations?.length ? "observed" : "not-collected", goals: base.goalObservations ?? [] });
         return;
       }
-      if (requestedVersion === USAGE_PROJECTION_VERSION) {
-        const usage = withLiveProviderWindows(base.usage ?? buildUsageProjection(usageTelemetryState(), null), live.provider.accounts);
+      if (requestedVersion === USAGE_PROJECTION_VERSION || requestedVersion === LEGACY_USAGE_PROJECTION_VERSION) {
+        const projected = requestedVersion === LEGACY_USAGE_PROJECTION_VERSION && base.legacyUsage ? base.legacyUsage : base.usage ?? buildUsageProjection(usageTelemetryState(), null, undefined, requestedVersion);
+        const usage = withLiveProviderWindows(projected, live.provider.accounts);
         sendJson(res, 200, deps.mountsRoot === undefined ? usage : withCanonicalModels(usage, claudeModelAliasesAt(deps.mountsRoot)));
         return;
       }
