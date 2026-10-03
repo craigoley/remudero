@@ -2,25 +2,33 @@
 import { randomUUID } from "node:crypto";
 import { access } from "node:fs/promises";
 import { join } from "node:path";
+import { RmdError } from "./errors.js";
 import { parseInstanceRegistry } from "./instance-registry.js";
 import { appendLedger, type LedgerWriterDeps } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
 import { LIVE_WRITE_SENTINEL_TOKEN, LiveWriteBlockedError } from "./live-write-guard.js";
 import { resolveRepoLayout, type RepoLayout } from "./repo-layout.js";
-import type { ServeDeps } from "./serve.js";
 
-export class GoLiveError extends Error {
+export class GoLiveError extends RmdError {
   constructor(readonly code: string, readonly status: number, readonly receipt?: GoLiveReceipt) {
-    super(code);
+    super("registry", 1, code, { code, status });
     this.name = "GoLiveError";
   }
 }
 
 export type GoLiveApi = (method: "GET" | "POST" | "PUT", path: string, body?: Record<string, unknown>) => Promise<unknown>;
 export type ShadowRowReader = (stateDir: string) => Promise<Array<Record<string, unknown>>>;
+/** Serve's composition-root wiring (`ServeDeps.onboardingGoLive`); defined here so serve depends on this module, not the reverse. */
+export type GoLiveWiring = Pick<LedgerWriterDeps, "writeLedger"> & {
+  /** The repository owning the fleet registry, rather than the instance's managed repository. */
+  registryRepository?: string;
+  minShadowRuns?: number;
+  api?: GoLiveApi;
+  readRows?: ShadowRowReader;
+};
 /** Reuse serve's composition-root wiring and the shared ledger port for request inputs. */
-type GoLiveRequestOptions = NonNullable<ServeDeps["onboardingGoLive"]> & LedgerWriterDeps &
+type GoLiveRequestOptions = GoLiveWiring & LedgerWriterDeps &
   Pick<RepoLayout, "stateDir"> & { registryRepository: string };
 export type { GoLiveRequestOptions as GoLiveDeps };
 export interface GoLiveReceipt {

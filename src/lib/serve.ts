@@ -167,7 +167,7 @@ import {
   writeProviderRoutingPolicyOverride,
   type ProviderRoutingPolicyOverrideInput,
 } from "./provider-routing-policy.js";
-import { appendLedger, type LedgerWriterDeps } from "./ledger.js";
+import { appendLedger } from "./ledger.js";
 import {
   buildAnalyticsRoute,
   coldAnalyticsSnapshot,
@@ -225,7 +225,7 @@ import {
 } from "./console-snapshot-cache.js";
 import { operatorIdentityFromFile, type OperatorIdentityFileIo } from "./operator-identity-file.js";
 import { DEFAULT_HOST_INSTANCE_REGISTRY_PATH, InstanceRegistryError, parseInstanceRegistry, requirePrimaryInstance } from "./instance-registry.js";
-import { GoLiveError, readShadowEvidence, requestGoLive, type GoLiveApi, type ShadowRowReader } from "./onboarding-golive.js";
+import { GoLiveError, readShadowEvidence, requestGoLive, type GoLiveWiring } from "./onboarding-golive.js";
 import {
   INSTANCES_VIEW_NAME,
   legacyRegistryBody,
@@ -525,13 +525,7 @@ export interface ServeDeps {
   /** Read-only, paginated GitHub-token inventory for the console onboarding candidate list. */
   onboardingRepositoryInventory?: OnboardingInventoryRouteOptions;
   /** Shadow history uses the gateway's instance state roots; writes target the fleet registry. */
-  onboardingGoLive?: Pick<LedgerWriterDeps, "writeLedger"> & {
-    /** The repository owning the fleet registry, rather than the instance's managed repository. */
-    registryRepository?: string;
-    minShadowRuns?: number;
-    api?: GoLiveApi;
-    readRows?: ShadowRowReader;
-  };
+  onboardingGoLive?: GoLiveWiring;
   instances?: InstanceGatewayOptions;
   /**
    * W1-T2269: the console's OWN installation-token refresh loop — the SAME mechanism
