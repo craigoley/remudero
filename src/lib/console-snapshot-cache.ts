@@ -300,7 +300,8 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
 
   const persist = (entry: SnapshotEntry): void => {
     const cached = entry.cached;
-    if (!options.store || !cached || cached.body === entry.persistedBody) return;
+    // A recent error is a response receipt, not a measured snapshot to replay after recovery.
+    if (!options.store || !cached || cached.status !== 200 || cached.body === entry.persistedBody) return;
     if (entry.persistedAtMs !== undefined && clock.now() - entry.persistedAtMs < CONSOLE_SNAPSHOT_PERSIST_MIN_MS) return;
     entry.persistedBody = cached.body;
     entry.persistedAtMs = clock.now();
@@ -309,6 +310,9 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
 
   const restored = options.store?.restore(route.path).then((snapshots) => {
     for (const { key, cached, codeRev } of snapshots) {
+      // Older versions persisted cold/outage responses. Verify the live route within its normal
+      // budget instead of letting yesterday's 503 fail a recovered generation's first smoke read.
+      if (cached.status !== 200) continue;
       if (entries.has(key)) continue;
       entries.set(key, { key, cached, generation: generation.current(), lastReadAtMs: 0, computeMs: 0, warmArmed: false, restoredFrom: codeRev, persistedBody: cached.body });
     }
@@ -352,6 +356,7 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
   /** Fresh means within the period this entry refreshes on; a failed last refresh is never fresh. */
   const stalenessOf = (entry: SnapshotEntry, cached: BufferedRouteResponse | undefined): ConsoleResponseStaleness => {
     const staleness = responseStaleness(clock.now(), cached?.generatedAtMs, entry.refreshPromise !== undefined, budgetMs, freshForOf(entry), entry.lastError);
+    if (cached && cached.status !== 200) return { ...staleness, status: "unavailable", stale: true };
     if (entry.lastError !== undefined && cached) return { ...staleness, status: "stale", stale: true };
     if (entry.restoredFrom !== undefined) return { ...staleness, status: "stale", stale: true, reason: `restored from before a serve restart (code ${entry.restoredFrom})` };
     const staleSource = cached?.headers[STALE_SOURCE_HEADER];
