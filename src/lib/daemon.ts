@@ -60,6 +60,7 @@ import {
   tallyDispatchFilters,
   type IdleReasonBucket,
   IDLE_REASON_ID_CAP,
+  laneDeliveryFailure,
 } from "./drain.js";
 import { preDispatchContractRevision } from "./dispatch-repair.js";
 // Why: drain.ts already owns the overlap partition, so it is reused rather than re-derived (W1-T343).
@@ -436,6 +437,64 @@ export function priorStaleReviewerRecurrenceState(rawLedgerLines: readonly strin
     }
   }
   return requestedForSha === undefined ? undefined : { codeSha: requestedForSha, streak: 1, restartRequested: true };
+}
+
+/** W1-T5344 — the first park after one task's delivery failure. Policy (design): long enough that
+ *  the next tick does not re-pick a task whose push a gate just refused, short enough that a fix
+ *  merged meanwhile is picked up within the hour. Forensics: docs/forensics/daemon.md. */
+export const LANE_DELIVERY_BACKOFF_FLOOR_MS = 30 * 60_000;
+
+/** W1-T5344 — BACKSTOP: the ceiling the doubling park stops at. It binds only once a task has
+ *  already failed delivery five times running, so a task that fails every attempt is still
+ *  re-offered a few times a day rather than never. */
+export const LANE_DELIVERY_BACKOFF_CEILING_MS = 6 * 60 * 60_000;
+
+/** W1-T5344 — the park for the Nth consecutive delivery failure of one task: the floor, doubled per
+ *  repeat, held at the ceiling. A non-positive streak is floored to the first rung. */
+export function laneDeliveryBackoffMs(consecutive: number): number {
+  const rung = Math.max(1, Math.floor(consecutive));
+  return Math.min(LANE_DELIVERY_BACKOFF_FLOOR_MS * 2 ** (rung - 1), LANE_DELIVERY_BACKOFF_CEILING_MS);
+}
+
+/** W1-T5344 — one task's delivery-failure park: its consecutive streak, the instant it may be
+ *  offered again, and the shard revision it failed on (a new revision clears the park). */
+export interface LaneDeliveryPark {
+  consecutive: number;
+  parkedUntilMs: number;
+  revision: string | undefined;
+}
+
+/** W1-T5344 — rebuilds the per-task delivery parks across a restart from the `daemon.lane_failed`
+ *  rows this process family wrote, so a boot neither re-dispatches a parked task at once (the loop
+ *  that ended the process four times in a row for W1-T3116) nor resets its streak. A later
+ *  `dispatch.settled_set` that FULFILLED the task ends its streak. A torn line or a row missing a
+ *  numeric streak/instant is skipped, never guessed at. Same raw-line contract as
+ *  {@link priorStaleReviewerRecurrenceState}. */
+export function priorLaneDeliveryParks(rawLedgerLines: readonly string[]): Map<string, LaneDeliveryPark> {
+  const parks = new Map<string, LaneDeliveryPark>();
+  for (const raw of rawLedgerLines) {
+    let row: Record<string, unknown>;
+    try {
+      row = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      // torn/malformed line — skipped, exactly as priorStaleReviewerRecurrenceState above skips it
+      continue;
+    }
+    if (row.step === "dispatch.settled_set" && Array.isArray(row.tasks)) {
+      for (const lane of row.tasks as Array<{ id?: unknown; status?: unknown }>) {
+        if (typeof lane?.id === "string" && lane.status === "fulfilled") parks.delete(lane.id);
+      }
+      continue;
+    }
+    if (row.step !== "daemon.lane_failed" || typeof row.task !== "string") continue;
+    if (typeof row.consecutive !== "number" || typeof row.parked_until_ms !== "number") continue;
+    parks.set(row.task, {
+      consecutive: row.consecutive,
+      parkedUntilMs: row.parked_until_ms,
+      revision: typeof row.revision === "string" ? row.revision : undefined,
+    });
+  }
+  return parks;
 }
 
 export function parseResetInstant(raw: string, now: Date): Date | null {
@@ -1214,7 +1273,9 @@ function transientGhDispatchFailure(err: unknown): { detail: string } | undefine
  */
 /** W1-T5083: a rejection the settle loop treats as lane-local (it logs and the pass continues). */
 function refillLaneLocalRejection(err: unknown): boolean {
-  return transientGhDispatchFailure(err) === undefined && !isSpawnInfraBlocked(err) && ghLaneReadFailure(err) !== undefined;
+  if (transientGhDispatchFailure(err) !== undefined || isSpawnInfraBlocked(err)) return false;
+  // W1-T5344: one task's delivery failure is lane-local too — it parks that task, never its siblings.
+  return ghLaneReadFailure(err) !== undefined || laneDeliveryFailure(err) !== undefined;
 }
 
 function ghLaneReadFailure(err: unknown): { detail: string } | undefined {
@@ -2607,9 +2668,11 @@ export async function runDaemon(
   // `priorStaleReviewerRecurrenceState`'s own doc) so a restart already requested for a sha
   // survives the very process replacement it caused (design v); updated once per tick below from
   // that tick's own `sweepCycleOutcome.reviewerCodeStale` reading.
-  let staleReviewerRecurrence: StaleReviewerRecurrenceState | undefined = priorStaleReviewerRecurrenceState(
-    deps.readLedgerLines?.() ?? [],
-  );
+  const bootLedgerLines = deps.readLedgerLines?.() ?? [];
+  let staleReviewerRecurrence: StaleReviewerRecurrenceState | undefined = priorStaleReviewerRecurrenceState(bootLedgerLines);
+  // W1-T5344: per-task delivery-failure parks, rebuilt from the ledger so a restart does not reset
+  // them; consulted by the dispatch filter's independent-failure hold below.
+  const laneDeliveryParks = priorLaneDeliveryParks(bootLedgerLines);
   // Needs-human escalation dedup for the same recurrence, keyed on sha so a sustained pin notifies
   // once rather than once per tick, mirroring `starvationEscalated`'s own discipline.
   let staleReviewerNeedsHumanSha: string | undefined;
@@ -3022,6 +3085,21 @@ export async function runDaemon(
     const reason = `fleet ${hold.control} hold: ${hold.detail}`;
     log("daemon.admission_held", { surface, control: hold.control, detail: hold.detail, reason });
     return { ...hold, reason };
+  };
+
+  // W1-T5344: is this task inside its delivery-failure park? A revised shard (a new pre-dispatch
+  // contract revision) clears the park — the operator's fix is the one thing worth retrying at once.
+  // A merge needs no arm here: the already-merged filter runs before this hold is ever consulted.
+  const laneDeliveryParked = (taskId: string): boolean => {
+    const park = laneDeliveryParks.get(taskId);
+    if (park === undefined) return false;
+    const current = plan.byId.get(taskId);
+    if (current !== undefined && park.revision !== undefined && preDispatchContractRevision(current) !== park.revision) {
+      laneDeliveryParks.delete(taskId);
+      log("daemon.lane_park_cleared", { task: taskId, reason: "shard revised", consecutive: park.consecutive });
+      return false;
+    }
+    return daemonClock.now() < park.parkedUntilMs;
   };
 
   // Shared by the top of tick and a lane refill (W1-T4416).
@@ -4179,7 +4257,7 @@ export async function runDaemon(
         const heldInProcess =
           independentFailureBlocksThisRun.has(taskId) ||
           (environmentalAt !== undefined && daemonClock.now() - environmentalAt < ENVIRONMENTAL_BLOCK_COOLDOWN_MS);
-        return heldInProcess || deps.isIndependentFailureBlocked?.(taskId) === true;
+        return heldInProcess || laneDeliveryParked(taskId) || deps.isIndependentFailureBlocked?.(taskId) === true;
       },
       isTerminalPreDispatchRefusalHeld: (task) =>
         terminalPreDispatchRefusalRevisions.get(task.id) === preDispatchContractRevision(task),
@@ -4730,6 +4808,32 @@ export async function runDaemon(
         // (test/daemon.test.ts "W1-T3165 ... remain fatal"). A WRITE failure — a create, a merge, a
         // comment — keeps today's fatal behaviour unchanged (design iii).
         const ghRead = !spawnInfra && transientTransport === undefined ? ghLaneReadFailure(err) : undefined;
+        // W1-T5344: ONE TASK'S DELIVERY FAILURE ENDS ITS LANE, NOT THE DAEMON. A spawned command's
+        // `Command failed: ` (a pre-push or commit-hook refusal, a PR-create 422 — the shape
+        // PER_TASK_FAILURE_RE already called per-task at exit) or a PrOpenRefusedError ended the whole
+        // process: 53 avoidable boots in 8 days, the same task re-dispatched by each next boot. Checked
+        // after the transient/spawn-infra/read arms so it never shadows their richer handling; an
+        // unprefixed throw (rmd's own TypeError) still reaches `fatalError` and still exits 1.
+        const delivery =
+          !spawnInfra && transientTransport === undefined && ghRead === undefined ? laneDeliveryFailure(err) : undefined;
+        if (delivery !== undefined) {
+          const prior = laneDeliveryParks.get(t.id);
+          const revision = preDispatchContractRevision(t);
+          const consecutive = prior !== undefined && prior.revision === revision ? prior.consecutive + 1 : 1;
+          const backoffMs = laneDeliveryBackoffMs(consecutive);
+          const parkedUntilMs = daemonClock.now() + backoffMs;
+          laneDeliveryParks.set(t.id, { consecutive, parkedUntilMs, revision });
+          log("daemon.lane_failed", {
+            task: t.id,
+            class: delivery.failureClass,
+            error: delivery.firstLine,
+            consecutive,
+            backoff_ms: backoffMs,
+            parked_until_ms: parkedUntilMs,
+            revision,
+          });
+          continue;
+        }
         if (!spawnInfra && transientTransport === undefined && ghRead === undefined) {
           // First observed wins the summary detail, mirroring `runDrainLanes`' identical choice. Every other
           // already-settled lane is still classified and processed before this tick returns.
@@ -4768,6 +4872,7 @@ export async function runDaemon(
       }
       const result = outcome.value;
       costUsd += result.costUsd;
+      laneDeliveryParks.delete(t.id); // W1-T5344: a settled run ends this task's delivery-failure streak
       toProcess.push({ task: t, result, snapshot: snapshots[i] });
     }
 
