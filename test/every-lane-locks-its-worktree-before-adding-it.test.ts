@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { approveRunBranch } from "../src/lib/inbox.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import * as runTaskModule from "../src/run-task.js";
@@ -159,7 +160,7 @@ const OWN_PR_URL = "https://github.com/craigoley/remudero/pull/5356";
 /** `rmd approve <ids>` through the REAL gateway (one id: the single lane; two: the batch lane), offline:
  *  a fixture origin, a `gh` shim, and READY drafted proposals. What happens after the add is not under
  *  test; the hook's record is. */
-async function driveRealApprove(ids: string[]): Promise<{ mid: MidAdd; worktreesRoot: string }> {
+async function driveRealApprove(ids: string[], resumeRunId?: string): Promise<{ mid: MidAdd; worktreesRoot: string }> {
   const fx = managedFixture(`t5356-approve-${ids.length}`, (dir) => {
     mkdirSync(join(dir, "plan", "tasks.d"), { recursive: true });
     writeFileSync(
@@ -174,6 +175,11 @@ async function driveRealApprove(ids: string[]): Promise<{ mid: MidAdd; worktrees
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify(config));
   mkdirSync(join(fx.root, "state"), { recursive: true });
+  if (resumeRunId) {
+    // A prior run of this proposal pushed its branch and died before its PR: the resume lane completes it.
+    execFileSync("git", ["-C", fx.repoDir, "push", "--quiet", "origin", `HEAD:refs/heads/${approveRunBranch(resumeRunId)}`]);
+    writeFileSync(join(fx.root, "state", "ledger.ndjson"), JSON.stringify({ run_id: resumeRunId, task_id: ids[0], step: "approve.start" }) + "\n");
+  }
   writeFileSync(
     join(fx.root, "state", "inbox-proposals.json"),
     JSON.stringify({ proposals: ids.map((id) => ({ id, summary: `ratify ${id}`, evidenceAnchors: [] })) }),
@@ -216,6 +222,13 @@ test("W1-T5356: a prune from another process during an approve gateway's add ski
   assertSkippedMidAdd(mid);
   assert.match(mid.registered[0]!, /\/run-APPROVE-P-T5356-ONE-/, "the add the prune met is the approve lane's own");
   assert.deepEqual(runLocks(worktreesRoot), [], "the approve run drops its lock on the way out");
+});
+
+test("W1-T5356: a prune from another process during an approve resume's add skips the path", async () => {
+  const runId = "APPROVE-P-T5356-RESUME-1790000000000";
+  const { mid } = await driveRealApprove(["P-T5356-RESUME"], runId);
+  assertSkippedMidAdd(mid);
+  assert.ok(mid.registered[0]!.endsWith(`/${approveRunBranch(runId)}`), "the add the prune met completes the prior run's own branch");
 });
 
 test("W1-T5356: a prune from another process during an approve-batch gateway's add skips the path", async () => {
