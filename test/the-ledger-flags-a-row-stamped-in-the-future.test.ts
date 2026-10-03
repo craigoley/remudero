@@ -10,9 +10,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync, rmSync } from "node:fs";
 import { fixedClock, systemClock } from "../src/lib/clock.js";
 import {
   LEDGER_FUTURE_STAMP_STEP,
@@ -20,15 +18,17 @@ import {
   appendLedger,
 } from "../src/lib/ledger.js";
 import { captureConsoleError } from "./helpers/captured-console.js";
+import { writeLedger } from "./helpers/ledger-fixture.js";
 
 const THIRTEEN_MONTHS_MS = 13 * 30 * 24 * 60 * 60_000;
 
-function withLedger(body: (path: string) => void): void {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-ledger-future-stamp-"));
+/** Run `body` against an empty throwaway ledger from the shared fixture, then remove it. */
+function inTempState(body: (path: string) => void): void {
+  const fixture = writeLedger();
   try {
-    body(join(dir, "ledger.ndjson"));
+    body(fixture.path);
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(fixture.dir, { recursive: true, force: true });
   }
 }
 
@@ -42,7 +42,7 @@ function readRows(path: string): Record<string, unknown>[] {
 const CLI_ROW = { run_id: "CLI-skewed-1", task_id: "CLI", step: "cli.invoked", argv: ["peek"] };
 
 test("an append under a clock 13 months fast is followed by a ledger.future_stamp row stamped from the file's mtime", () => {
-  withLedger((path) => {
+  inTempState((path) => {
     const skewedClock = fixedClock(systemClock.now() + THIRTEEN_MONTHS_MS);
     const mtimeMs = systemClock.now();
     appendLedger(path, CLI_ROW, {
@@ -71,7 +71,7 @@ test("an append under a clock 13 months fast is followed by a ledger.future_stam
 });
 
 test("the real fstat default reads the kernel mtime, so a 13-month-fast clock is flagged with no stat injected", () => {
-  withLedger((path) => {
+  inTempState((path) => {
     const skewedClock = fixedClock(systemClock.now() + THIRTEEN_MONTHS_MS);
     appendLedger(path, CLI_ROW, { clock: skewedClock });
 
@@ -81,7 +81,7 @@ test("the real fstat default reads the kernel mtime, so a 13-month-fast clock is
 });
 
 test("an append within the tolerance of the file's mtime writes no ledger.future_stamp row", () => {
-  withLedger((path) => {
+  inTempState((path) => {
     const mtimeMs = systemClock.now();
     appendLedger(path, CLI_ROW, {
       clock: fixedClock(mtimeMs + LEDGER_FUTURE_STAMP_TOLERANCE_MS),
@@ -95,7 +95,7 @@ test("an append within the tolerance of the file's mtime writes no ledger.future
 });
 
 test("a failing stat never throws: the row is written, no flag follows, and the failure is recorded on stderr", () => {
-  withLedger((path) => {
+  inTempState((path) => {
     const captured = captureConsoleError();
     try {
       appendLedger(path, CLI_ROW, {
