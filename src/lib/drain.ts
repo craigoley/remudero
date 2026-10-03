@@ -10,7 +10,7 @@
 import type { RunResult } from "./run-result.js";
 import { headroomExhausted, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
-import type { CostGovernorResult, QueueGovernorResult } from "./sweep.js";
+import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
 import { checkDispatchGovernors, governorDeferPayload } from "./dispatch-governor.js";
 import { releasedTaskIds, unmetDependencies, type Plan, type Task } from "./plan.js";
 import {
@@ -1261,6 +1261,10 @@ export interface DrainDeps {
    *  and it STOPS the pass outright. Distinct from `openPrCount` below, which only SIZES a pass.
    *  INVARIANT: never consulted from `runSweep` or its deps — drainage must never be gated. Optional. */
   checkQueueGovernor?: () => QueueGovernorResult | undefined;
+  /** W1-T5347 (wiring W1-T1038's `memoryGovernorGateFor`): THE HOST MEMORY FLOOR, a fresh
+   *  `/proc/meminfo` reading per call. Consulted only through `checkDispatchGovernors`, so it holds
+   *  NEW dispatch per lane and a throw fails OPEN there. Never consulted from the sweep. Optional. */
+  checkMemoryGovernor?: () => MemoryGovernorResult | undefined;
   /** W1-T119: true when a task's own GitHub read is INDETERMINATE, re-derived from the SAME
    *  projection `refreshMerged` just built — the same freshness contract as `isOpenPr`. Optional. */
   isIndeterminate?: (taskId: string) => boolean;
