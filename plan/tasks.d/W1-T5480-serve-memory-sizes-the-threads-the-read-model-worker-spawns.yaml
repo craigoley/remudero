@@ -1,0 +1,50 @@
+- id: W1-T5480
+  title: "SERVE MEMORY SIZES THE THREADS THE READ-MODEL WORKER SPAWNS — W1-T5355 reads each worker thread's heap from serve's own `worker_threads` channel, so the views, slow-lane, oracle and integrity threads spawned INSIDE the read-model worker stay in `unattributed_bytes`"
+  repo: remudero
+  depends_on: [W1-T5355]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: gap review of W1-T5355 (PR #8895) against serve's live thread count"
+  plan_refs: [W1-T5355, W1-T5175]
+  files: [src/lib/read-model-worker.ts, src/lib/serve-memory.ts, test/serve-memory-sizes-the-threads-the-read-model-worker-spawns.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    W1-T5355 (PR #8895, open at a7465f89) sizes worker-thread heaps with `trackWorkerThreads`, which
+    subscribes to Node's `worker_threads` diagnostics channel on serve's main thread, and `readWorkerHeaps`,
+    which calls `worker.getHeapStatistics()` on each tracked Worker. Its own doc on `trackWorkerThreads` says
+    the limit: "A thread spawned inside another thread publishes on that thread's channel, so its heap is
+    never sized here." On origin/main 491cd7d0, serve's main thread spawns the read-model worker
+    (`createReadModelWorker`), and that worker's `runReadModelWorker` spawns four more: `threadViews`,
+    `threadSlowLane`, `threadOracle` and `threadIntegrityCheck` (all in src/lib/read-model-worker.ts, the
+    slow lane in src/lib/read-model-slow-lane.ts). Each is a separate V8 heap that counts toward serve's rss
+    and toward none of the `worker-heap:<kind>` readings, so it lands in `unattributed_bytes`.
+    Serve ran at VmRSS about 2.7 GB with 16 threads on 2026-10-03; these nested heaps are the likeliest
+    owner of most of the GBs W1-T5355 still leaves unnamed.
+    `process.report.getReport()` would list every thread's heap, but it was rejected: it blocks the event
+    loop for about 120 ms per call.
+    Rule 19: the report from inside the worker (read-model-worker.ts) and the fold into the sample
+    (serve-memory.ts) are two production files for one reading, so the band is high with
+    band_meaning: span rather than two tasks.
+  design: |
+    1. In `runReadModelWorker`, size the threads it spawns: subscribe `trackWorkerThreads` (or an
+       equivalent channel book) inside the worker, read `readWorkerHeaps` on request, and post the readings
+       to serve over the worker's existing message port (a new `ReadModelWorkerMessage` variant, e.g.
+       `{ type: "thread-heaps", readings }`), answering a request serve sends from its memory sample.
+    2. Serve folds those readings into the `serve.memory` row as `worker-heap:<kind>` holders, kind named by
+       the nested spawn site (e.g. `read-model-worker:threadViews`), and subtracts them in
+       `unattributed_bytes`. A worker that does not answer within `WORKER_HEAP_TIMEOUT_MS` is named
+       unsized in the reading's `error`, never counted as 0 silently.
+    3. No `process.report` call anywhere on this path.
+  acceptance:
+    - claim: "a thread spawned inside the read-model worker is reported to serve over the worker's message port and appears as a worker-heap reading on the serve.memory sample, its bytes subtracted from unattributed_bytes, and a worker that never answers is named unsized"
+      proof: "unit test: test/serve-memory-sizes-the-threads-the-read-model-worker-spawns.test.ts"
+  falsifier: |
+    Remove the nested-thread report from `runReadModelWorker`. The suite's sample, taken while a real
+    read-model worker holds a nested thread, carries no `worker-heap:` reading for it and its
+    `unattributed_bytes` is unchanged.

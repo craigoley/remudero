@@ -1,0 +1,45 @@
+- id: W1-T5485
+  title: "DIFF-COVERAGE-LOCAL HONOURS THE LCOV PATH IT IS GIVEN — `npm run diff-coverage:local -- --lcov <absolute path>` FAILS \"no lcov produced\" because `statLcov` joins the absolute path under the repo root, and `--lcov` never reaches the instrumented run, which always writes ci.yml's coverage/lcov.info"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low
+  origin: "operator session 2026-10-03: hit by three builders on 2026-10-03; reproduced at origin/main 491cd7d0"
+  plan_refs: [W1-T4915, W1-T4084]
+  files: [scripts/diff-coverage-local.mjs, test/diff-coverage-local-honours-the-lcov-path-it-is-given.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    REPRODUCED 2026-10-03 at origin/main 491cd7d0 by calling scripts/diff-coverage-local.mjs's `main` with
+    the real `defaultMainDeps()`. Only `runInstrumentedTests` and `ensureRawCoverageDir` were faked, and
+    `computeMergeBaseDiff` threw a marker if reached. With `--lcov` set to an absolute path of an existing,
+    non-empty lcov outside the worktree, main printed "diff-coverage-local: no lcov produced -- the coverage
+    gate below would have nothing to read. FAILING." and returned 1. Control: the same file reached by a
+    repo-relative path got past the lcov check to the diff step.
+    Two defects:
+    (a) `statLcov(lcovPath)` is `statSync(join(REPO_ROOT, lcovPath))`, and `path.join` with an absolute
+        second argument nests it under REPO_ROOT, so it stats a path that does not exist.
+        `runDiffCoverageGate` passes the raw value through relative to `cwd: REPO_ROOT`, which would resolve
+        it differently from the stat.
+    (b) `--lcov` never reaches the instrumented run. `nodeArgs` are `extractCoverageFlags(readCi())` plus the
+        test files, and ci.yml's flags carry `--test-reporter=lcov --test-reporter-destination=coverage/lcov.info`.
+        A non-default `--lcov` therefore points at a file this run never wrote: absent, or a stale lcov from an
+        earlier run. A stale file is the vacuous pass the script's own header says it exists to prevent.
+    The help text says `--lcov <path>` is "where to write/read the lcov report", but the script only reads it.
+  design: |
+    Resolve `--lcov` once with `path.resolve(REPO_ROOT, value)` and use that one absolute path for the stat
+    and for `runDiffCoverageGate`. Rewrite the destination that follows `--test-reporter=lcov` in the
+    extracted flags to the same path, so the run writes the file the gate reads. Remove a pre-existing file
+    at that path before the run, so a stale lcov cannot pass. `--dry-run` prints the rewritten destination.
+    The default (coverage/lcov.info) behaves as it does today.
+  acceptance:
+    - claim: "an absolute --lcov path outside the repo is the path the instrumented run is told to write and the path the lcov check and the gate read, a stale file at that path is removed before the run, and the default path is unchanged"
+      proof: "unit test: test/diff-coverage-local-honours-the-lcov-path-it-is-given.test.ts"
+  falsifier: |
+    Restore `statSync(join(REPO_ROOT, lcovPath))`. The suite's absolute-path case reports "no lcov produced"
+    for an lcov that exists. Drop the destination rewrite and the suite's captured `nodeArgs` still name
+    coverage/lcov.info.
