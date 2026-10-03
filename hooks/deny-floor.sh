@@ -429,6 +429,12 @@ fi
 #    HOME; and this session's own ~/.claude/projects/<sanitized project dir>, where the CLI persists large
 #    tool output. FAIL CLOSED on no path, no worktree, a `..` component, an unresolvable path, or no jq.
 #    Bash is NOT confined here: the OS sandbox is that boundary.
+#    W1-T5354: Grep (content mode returns file bodies) and Glob are judged the same way, with the node_modules
+#    read allowance. Their `path` is the target; ABSENT means the session cwd, never a refusal. An absolute Glob
+#    `pattern` is judged by its literal prefix up to the last `/` before its first metacharacter, and a `..`
+#    anywhere in a pattern is refused. Codex's own edit tool reaches this hook as `apply_patch` (captured from
+#    codex-cli 0.159.0, routed by the `Edit`/`Write` aliases too), with the patch in `command`: every
+#    Add/Update/Delete File and Move to header is a write target, and a patch naming none fails closed.
 ft_canon() {  # absolute path -> physical path, resolving every symlink component (dangling included)
   local rest="${1#/}" out="" comp link hops=0
   while [ -n "$rest" ]; do
@@ -451,46 +457,84 @@ ft_under() {  # is physical path $1 at or below physical root $2?
   case "$1/" in "$2"/*) return 0 ;; esac
   return 1
 }
+ft_check() {  # deny unless tool $1's target $2 is inside the worktree or an allowed root
+  local tool="$1" target="$2" real ok=0 nm tmp home proj slug
+  case "$target" in '~'*) deny "$tool of a \`~\` path ($target) — name it by its absolute path inside the assigned worktree (W1-T5016, W1-T5354)" ;; esac
+  case "$target" in
+    /*) : ;;
+    *) case "$hook_cwd" in /*) target="$hook_cwd/$target" ;; *) deny "$tool of a relative path with no cwd (W1-T5016)" ;; esac ;;
+  esac
+  case "/$target/" in */../*) deny "$tool of a path with a \`..\` component ($target) — name the file by its absolute path inside the assigned worktree (W1-T5016)" ;; esac
+  real="$(ft_canon "$target")" || deny "$tool target does not resolve ($target, W1-T5016)"
+  ft_under "$real" "$ft_root" && ok=1
+  if [ "$ok" -eq 0 ] && [ -L "$ft_root/node_modules" ]; then
+    case "$tool" in Read|Grep|Glob) nm="$(ft_canon "$ft_root/node_modules")" && ft_under "$real" "$nm" && ok=1 ;; esac
+  fi
+  if [ "$ok" -eq 0 ]; then
+    tmp="$(ft_canon "${TMPDIR:-/tmp}")" && ft_under "$real" "$tmp" && ok=1
+  fi
+  if [ "$ok" -eq 0 ] && [ -n "${HOME:-}" ]; then
+    case "${HOME%/}" in
+      */worker-home*) home="$(ft_canon "$HOME")" && ft_under "$real" "$home" && ok=1 ;;
+    esac
+    for slug in "${ft_anchor//[^A-Za-z0-9]/-}" "${ft_root//[^A-Za-z0-9]/-}"; do
+      [ "$ok" -eq 1 ] && break
+      proj="$(ft_canon "$HOME/.claude/projects/$slug")" && ft_under "$real" "$proj" && ok=1
+    done
+  fi
+  [ "$ok" -eq 1 ] || deny "$tool outside the assigned worktree ($target resolves to $real; worktree $ft_root, W1-T5016, W1-T5354) — file tools stay inside the worktree, and scratch goes under ${TMPDIR:-/tmp}"
+}
 if [ "$confine_file_tools" -eq 1 ]; then
   if [ "$have_jq" -eq 0 ]; then
-    if printf '%s' "$input" | grep -Eq '"tool_name"[[:space:]]*:[[:space:]]*"(Read|Write|Edit|MultiEdit|NotebookEdit)"'; then
+    if printf '%s' "$input" | grep -Eq '"tool_name"[[:space:]]*:[[:space:]]*"(Read|Write|Edit|MultiEdit|NotebookEdit|Grep|Glob|apply_patch)"'; then
       deny "a file tool with no jq to read its target — confinement fails closed (W1-T5016)"
     fi
   else
     ft_tool="$(printf '%s' "$input" | jq -r '.tool_name // ""')"
     case "$ft_tool" in
-      Read|Write|Edit|MultiEdit|NotebookEdit)
+      Read|Write|Edit|MultiEdit|NotebookEdit|Grep|Glob|apply_patch)
         ft_target="$path"
         [ "$ft_tool" = NotebookEdit ] && ft_target="$(printf '%s' "$input" | jq -r '.tool_input.notebook_path // ""')"
-        [ -n "$ft_target" ] || deny "$ft_tool names no path, so it cannot be checked against the assigned worktree (W1-T5016)"
+        case "$ft_tool" in
+          Grep|Glob|apply_patch) : ;;
+          *) [ -n "$ft_target" ] || deny "$ft_tool names no path, so it cannot be checked against the assigned worktree (W1-T5016)" ;;
+        esac
         ft_anchor="${CLAUDE_PROJECT_DIR:-$hook_cwd}"
         case "$ft_anchor" in /*) : ;; *) deny "$ft_tool with no absolute assigned worktree to compare against (W1-T5016)" ;; esac
-        case "$ft_target" in
-          /*) : ;;
-          *) case "$hook_cwd" in /*) ft_target="$hook_cwd/$ft_target" ;; *) deny "$ft_tool of a relative path with no cwd (W1-T5016)" ;; esac ;;
-        esac
-        case "/$ft_target/" in */../*) deny "$ft_tool of a path with a \`..\` component ($ft_target) — name the file by its absolute path inside the assigned worktree (W1-T5016)" ;; esac
         ft_root="$(ft_canon "$ft_anchor")" || deny "the assigned worktree does not resolve (W1-T5016)"
         [ -d "$ft_root" ] || deny "the assigned worktree ($ft_anchor) is not a directory (W1-T5016)"
-        ft_real="$(ft_canon "$ft_target")" || deny "$ft_tool target does not resolve ($ft_target, W1-T5016)"
-        ft_ok=0
-        ft_under "$ft_real" "$ft_root" && ft_ok=1
-        if [ "$ft_ok" -eq 0 ] && [ "$ft_tool" = Read ] && [ -L "$ft_root/node_modules" ]; then
-          ft_nm="$(ft_canon "$ft_root/node_modules")" && ft_under "$ft_real" "$ft_nm" && ft_ok=1
-        fi
-        if [ "$ft_ok" -eq 0 ]; then
-          ft_tmp="$(ft_canon "${TMPDIR:-/tmp}")" && ft_under "$ft_real" "$ft_tmp" && ft_ok=1
-        fi
-        if [ "$ft_ok" -eq 0 ] && [ -n "${HOME:-}" ]; then
-          case "${HOME%/}" in
-            */worker-home*) ft_home="$(ft_canon "$HOME")" && ft_under "$ft_real" "$ft_home" && ft_ok=1 ;;
-          esac
-          for ft_slug in "${ft_anchor//[^A-Za-z0-9]/-}" "${ft_root//[^A-Za-z0-9]/-}"; do
-            [ "$ft_ok" -eq 1 ] && break
-            ft_proj="$(ft_canon "$HOME/.claude/projects/$ft_slug")" && ft_under "$ft_real" "$ft_proj" && ft_ok=1
-          done
-        fi
-        [ "$ft_ok" -eq 1 ] || deny "$ft_tool outside the assigned worktree ($ft_target resolves to $ft_real; worktree $ft_root, W1-T5016) — file tools stay inside the worktree, and scratch goes under ${TMPDIR:-/tmp}"
+        case "$ft_tool" in
+          Grep|Glob)
+            ft_target="$(printf '%s' "$input" | jq -r '.tool_input.path // ""')"
+            [ -n "$ft_target" ] || ft_target="${hook_cwd:-$ft_anchor}"
+            ft_check "$ft_tool" "$ft_target"
+            if [ "$ft_tool" = Glob ]; then
+              ft_pat="$(printf '%s' "$input" | jq -r '.tool_input.pattern // ""')"
+              case "/$ft_pat/" in */../*) deny "Glob pattern with a \`..\` component ($ft_pat) climbs out of its path (W1-T5354)" ;; esac
+              case "$ft_pat" in
+                /*) ft_pre="${ft_pat%%[*?[{]*}"; ft_pre="${ft_pre%/*}"; ft_check Glob "${ft_pre:-/}" ;;
+              esac
+            fi
+            ;;
+          apply_patch)
+            ft_n=0
+            while IFS= read -r ft_line; do
+              ft_line="${ft_line#"${ft_line%%[![:space:]]*}"}"
+              ft_line="${ft_line%"${ft_line##*[![:space:]]}"}"
+              case "$ft_line" in
+                '*** Add File: '* | '*** Update File: '* | '*** Delete File: '*) ft_target="${ft_line#*File: }" ;;
+                '*** Move to: '*) ft_target="${ft_line#*Move to: }" ;;
+                *) continue ;;
+              esac
+              ft_target="${ft_target#"${ft_target%%[![:space:]]*}"}"
+              [ -n "$ft_target" ] || deny "apply_patch with an empty file header (W1-T5354)"
+              ft_check apply_patch "$ft_target"
+              ft_n=$((ft_n + 1))
+            done < <(printf '%s\n' "$cmd")
+            [ "$ft_n" -gt 0 ] || deny "apply_patch names no file, so it cannot be checked against the assigned worktree (W1-T5354)"
+            ;;
+          *) ft_check "$ft_tool" "$ft_target" ;;
+        esac
         ;;
     esac
   fi
