@@ -308,7 +308,7 @@ test("cold and failed refreshes never manufacture analytics evidence", async () 
         state: "not-collected",
         unit: "usd",
         asOf: null,
-        coverage: "implement workers only: fix-rung workers record no provider, so their cash spend cannot be attributed",
+        coverage: "cash-attributed producer receipts, including Inbox drafting, recon and review; excludes missing provider attribution and subscription costs; not an invoice",
         windows: [],
         reason: "no ledger-union refresh has completed yet",
       },
