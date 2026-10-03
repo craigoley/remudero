@@ -11124,6 +11124,13 @@ export async function runFixRung(opts: {
     // W1-T3727: WHO HOLDS THIS ROUND'S GIT, read once by BOTH the prompt and the tool bound so
     // the contract and the surface cannot disagree. The caller already pushes; only the commit moves.
     const { harnessCommits: fixHarnessOwnsGit, cashTools: fixCashTools } = fixRoundGitOwnership(opts.config);
+    const fixDeclaredPaths = [...(opts.task.files ?? []), ...(baselineDiffFiles ?? []), ...offeredCensusBaselines()];
+    if (fixHarnessOwnsGit && fixDeclaredPaths.length === 0) {
+      const reason = "the fix has no surface to stage — declare task files or restore the PR diff before dispatch";
+      deps.log("fix.stood_down", { site: "rung.empty_commit_surface", strike: attempt, reason });
+      deps.say(`fix rung: ${reason} — standing down before spending a worker round`);
+      return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
+    }
     const prompt = [
       renderFixPrompt({
         harnessCommits: fixHarnessOwnsGit,
@@ -11280,7 +11287,7 @@ export async function runFixRung(opts: {
         worktreePath: opts.worktreePath,
         // The prompt and pre-strike guard already permit repairs to the inherited PR diff.
         // Use that same captured baseline here; a worker's newly added paths never enter it.
-        declaredPaths: [...(opts.task.files ?? []), ...(baselineDiffFiles ?? []), ...offeredCensusBaselines()],
+        declaredPaths: fixDeclaredPaths,
         acceptance: opts.task.acceptance,
         ...options,
         assignmentId: fixResult.selectionAssignmentId,
