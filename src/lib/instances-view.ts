@@ -10,7 +10,8 @@
  * - `served` is "this serve projects it and its state dir is mounted";
  * - `liveness` is a band over the instance's newest projected `daemon.*` row;
  * - `readModel.lease` comes from the worker's projector state;
- * - `capabilities` names the views and writes serve answers for it.
+ * - `capabilities` names the views and writes serve answers for it, including the conversation contract
+ *   (instance-inbox-contract.ts): its views always, its writes only when the instance can take them.
  * `drift` names every disagreement: host-only and repo-only names, registered but unmounted, and
  * mounted but unregistered.
  *
@@ -31,6 +32,7 @@ import {
   type RegistryDrift,
   type RegistryProjection,
 } from "./instance-registry.js";
+import { instanceInboxCapabilities } from "./instance-inbox-contract.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import type { ReadModelDb } from "./read-model-db.js";
 import type { ShadowLegacy } from "./view-shadow.js";
@@ -62,7 +64,8 @@ export interface InstanceEntry {
   /** `unknown` until its projector has read a `daemon.*` row; `since` is the newest one's time while down. */
   liveness: { state: "up" | "down" | "unknown"; since?: string };
   readModel: { lease: "held" | "elsewhere" | "none" };
-  capabilities: { views: string[]; writes: string[]; coreOnly?: string[] };
+  /** `inbox` says whether the conversation writes are usable; read-only names why (an old daemon). */
+  capabilities: { views: string[]; writes: string[]; coreOnly?: string[]; inbox?: { mode: "read-write" | "read-only"; reason?: string } };
 }
 
 export interface InstancesData {
@@ -169,6 +172,15 @@ export interface InstancesViewOptions<S extends ProjectedState> {
   mounted?: (dir: string) => boolean;
 }
 
+/** What serve answers for one served instance: its fixed views and writes, plus the conversation routes it can use. */
+function servedCapabilities(stateDir: string, core: boolean): InstanceEntry["capabilities"] {
+  const inbox = instanceInboxCapabilities(stateDir);
+  return {
+    views: [...INSTANCE_VIEWS, ...inbox.views], writes: [...INSTANCE_WRITES, ...inbox.writes],
+    ...(core ? { coreOnly: [...CORE_ONLY_ROUTES] } : {}), inbox: inbox.inbox,
+  };
+}
+
 /** `instances`, materialized by the read-model worker; `ledgerSource` is the worker's own, passed in. */
 export function createInstancesView<S extends ProjectedState>(opts: InstancesViewOptions<S>): {
   name: string;
@@ -206,7 +218,7 @@ export function createInstancesView<S extends ProjectedState>(opts: InstancesVie
           prefix: `/v1/i/${id}`, served,
           liveness: served ? instanceLiveness(slot.db, now) : { state: "unknown" },
           readModel: { lease: slot?.state.lease ?? "none" },
-          capabilities: served ? { views: [...INSTANCE_VIEWS], writes: [...INSTANCE_WRITES], ...(id === core ? { coreOnly: [...CORE_ONLY_ROUTES] } : {}) } : { views: [], writes: [] },
+          capabilities: served ? servedCapabilities(dir, id === core) : { views: [], writes: [] },
         };
       };
       const entries = live.map((i) => entry(i.name, i));

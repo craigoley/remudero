@@ -31,7 +31,16 @@ import { appendLedger } from "./ledger.js";
 import { parseInstanceRegistry, type RegistryInstance } from "./instance-registry.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { buildOperatorAgentAnswerRoute, readInboxAnswerEvidence } from "./operator-agent-answer.js";
-import { inboxThreadStorePath } from "./panel-graph.js";
+import { INSTANCE_INBOX_SOURCE_PATHS, mountInstanceInboxRoutes } from "./instance-inbox-contract.js";
+import {
+  buildInboxThreadReadRoute,
+  buildInboxThreadReplyRoute,
+  buildInboxThreadRoute,
+  buildInboxThreadsRoute,
+  inboxThreadStorePath,
+  type PanelGraphDeps,
+  type RatifyCliGateway,
+} from "./panel-graph.js";
 import {
   buildApproveManualRoute,
   buildControlStatusRoute,
@@ -92,6 +101,10 @@ export interface InstanceGatewayOptions {
   gh?: (args: string[]) => string;
   clock?: Clock;
   every?: (run: () => void, ms: number) => () => void;
+  /** Core's inbox root (serve's `fleetControlRoot`); defaults to `assistantClaimRoot`, the same root in serve. */
+  coreInboxRoot?: string;
+  /** W1-T5339: one non-core instance's conversation source routes; defaults to the panel routes over its own state. */
+  inboxSources?: (root: InstanceStateRoot, repository: string, github: GitHub) => Route[];
   /** The serve lifecycle starts and stops each independent, instance-rooted projection. */
   onAnalyticsCache?: (cache: AnalyticsSnapshotCache, instance: { name: string; repo: string; ledgerPath: string }) => void;
 }
@@ -151,6 +164,25 @@ export function guardInstanceRoute(route: Route, instance: string, availability:
   };
 }
 
+/** Approval is not part of the instance conversation contract; a source route that reached for it is refused. */
+const NO_INSTANCE_RATIFY: RatifyCliGateway = {
+  approve() {
+    throw new Error("approval is not served on an instance conversation route");
+  },
+  reframe() {
+    throw new Error("reframing is not served on an instance conversation route");
+  },
+};
+
+/** W1-T5339: the panel's four conversation routes over ONE instance's own plan, ledger, checkout and inbox root. */
+export function defaultInstanceInboxSources(root: InstanceStateRoot, repository: string, github: GitHub): Route[] {
+  const deps: PanelGraphDeps = {
+    root: join(root.root, "repos", repository.split("/")[1] ?? repository), planPath: root.planPath, ledgerPath: root.ledgerPath,
+    inboxRoot: root.root, github: { prView: () => null }, statusGithub: github, ratify: NO_INSTANCE_RATIFY,
+  };
+  return [buildInboxThreadsRoute(deps), buildInboxThreadRoute(deps), buildInboxThreadReplyRoute(deps), buildInboxThreadReadRoute(deps)];
+}
+
 /** The route set one non-core instance answers, rooted entirely in its own state and plan. */
 export function instanceRouteSet(
   root: InstanceStateRoot,
@@ -190,6 +222,16 @@ export function instanceRouteSet(
   ];
 }
 
+/** Core's routes under its prefix, its conversation routes replaced by the identity-checked contract over the SAME handlers. */
+function coreInstanceRoutes(coreRoutes: readonly Route[], core: string, repository: string, opts: InstanceGatewayOptions): Route[] {
+  const isInbox = (route: Route) => INSTANCE_INBOX_SOURCE_PATHS.has(route.path);
+  const inboxRoot = opts.coreInboxRoot ?? opts.assistantClaimRoot;
+  return [
+    ...mountUnderInstance(coreRoutes.filter((route) => !isInbox(route)), core),
+    ...mountInstanceInboxRoutes({ instance: core, repository, stateDir: inboxRoot === undefined ? undefined : join(inboxRoot, "state"), routes: coreRoutes.filter(isInbox) }),
+  ];
+}
+
 function registryInstances(opts: InstanceGatewayOptions): RegistryInstance[] {
   if (opts.registryPath === undefined) return [];
   let text: string;
@@ -218,7 +260,7 @@ export function buildInstanceGatewayRoutes(coreRoutes: readonly Route[], opts: I
   const out: Route[] = [];
   for (const instance of registryInstances(opts)) {
     if (instance.name === core) {
-      out.push(...mountUnderInstance(coreRoutes, core));
+      out.push(...coreInstanceRoutes(coreRoutes, core, instance.repo, opts));
       continue;
     }
     const root = instanceStateRoot(instance, stateBase);
@@ -252,7 +294,14 @@ export function buildInstanceGatewayRoutes(coreRoutes: readonly Route[], opts: I
     const probe = opts.probe ?? probeInstanceState;
     const availability = (): Promise<InstanceAvailability> =>
       startupReason === undefined ? probe(root) : Promise.resolve({ ok: false, reason: startupReason });
-    const routes = mountUnderInstance(instanceRouteSet(root, board, opts, instance.repo, currentAnalyticsSnapshot), instance.name);
+    const routes = [
+      ...mountUnderInstance(instanceRouteSet(root, board, opts, instance.repo, currentAnalyticsSnapshot), instance.name),
+      // W1-T5339: built from this instance's own state; never core's handlers or core's data.
+      ...mountInstanceInboxRoutes({
+        instance: instance.name, repository: instance.repo, stateDir: join(root.root, "state"),
+        routes: (opts.inboxSources ?? defaultInstanceInboxSources)(root, instance.repo, github),
+      }),
+    ];
     out.push(...routes.map((route) => guardInstanceRoute(route, instance.name, availability)));
   }
   return out;
