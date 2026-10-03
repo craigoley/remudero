@@ -24,6 +24,11 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { openUsageProbeSession } from "../src/lib/worker.js";
+import { materializeWorkerHome } from "../src/lib/worker-home.js";
 import {
   usageSnapshotFromSdk,
   WEEKLY_ALL_MODELS_LABEL,
@@ -217,4 +222,246 @@ test("but the LIVE-SPAWN GUARD is re-thrown, never swallowed into a silent fallb
     }),
     /openUsageProbeSession/,
   );
+});
+
+
+test("the usage control session observes the actual narrowed Linux worker credential grant", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-probe-grant-"));
+  try {
+    const realHome = join(root, "operator");
+    const workerHome = join(root, "worker");
+    mkdirSync(join(realHome, ".claude"), { recursive: true });
+    mkdirSync(join(realHome, ".claude-fleet"), { recursive: true });
+    materializeWorkerHome({ workerHome, realHome });
+    const q = fakeQuery({ omitMethod: true });
+    let params: Parameters<import("../src/lib/worker.js").UsageProbeQueryFn>[0] | undefined;
+    const session = openUsageProbeSession((p) => { params = p; return (q.fn as () => ReturnType<typeof openUsageProbeSession>)(); }, { realHome, platform: "linux" });
+    assert.equal(realpathSync(params!.options.env!.CLAUDE_CONFIG_DIR!), realpathSync(join(workerHome, ".claude")));
+    assert.deepEqual(params!.options.settingSources, []);
+    const next = params!.prompt[Symbol.asyncIterator]().next();
+    let inputEnded = false;
+    void next.then(() => { inputEnded = true; });
+    await Promise.resolve();
+    assert.equal(inputEnded, false, "the control session must retain streaming stdin until teardown");
+    await session.return?.();
+    assert.equal((await next).done, true);
+    rmSync(join(realHome, ".claude-fleet"), { recursive: true });
+    openUsageProbeSession((p) => { params = p; return (q.fn as () => ReturnType<typeof openUsageProbeSession>)(); }, { realHome, platform: "linux" });
+    assert.equal(params!.options.env!.CLAUDE_CONFIG_DIR, join(realHome, ".claude"));
+    openUsageProbeSession((p) => { params = p; return (q.fn as () => ReturnType<typeof openUsageProbeSession>)(); }, { realHome, platform: "darwin" });
+    assert.equal(params!.options.env, undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the usage probe waits for initialization without ending input and skips transcript scans", async () => {
+  let initialize!: () => void;
+  const initialized = new Promise<void>((resolve) => { initialize = resolve; });
+  let called = 0;
+  let closed = 0;
+  let iterator: AsyncIterator<never> | undefined;
+  const raw = {
+    initializationResult: () => initialized,
+    usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async function(options?: { skipBehaviors?: boolean }) {
+      assert.equal(this, raw, "the SDK method retains its receiver");
+      assert.deepEqual(options, { skipBehaviors: true });
+      called++;
+      return READING;
+    },
+    return: async () => { closed++; },
+  };
+  const session = openUsageProbeSession((params) => { iterator = params.prompt[Symbol.asyncIterator](); return raw; });
+  let inputEnded = false;
+  const input = iterator!.next().then((result) => { inputEnded = true; return result; });
+  const answer = session.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET!();
+  await Promise.resolve();
+  assert.equal(called, 0);
+  assert.equal(inputEnded, false);
+  initialize();
+  assert.equal(await answer, READING);
+  assert.equal(called, 1);
+  assert.equal(inputEnded, false);
+  await Promise.all([session.return?.(), session.return?.()]);
+  assert.equal(closed, 1, "teardown releases stdin and closes the SDK once");
+  assert.equal((await input).done, true);
+});
+
+test("an initialization failure stays unreadable and the usage probe still releases its input", async () => {
+  let input: Promise<IteratorResult<never>> | undefined;
+  let called = 0;
+  let closed = 0;
+  const seen = sink();
+  const result = await readUsageSnapshotViaSdk((params) => {
+    input = params.prompt[Symbol.asyncIterator]().next();
+    return {
+      initializationResult: async () => { throw new Error("native initialization refused"); },
+      usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => { called++; return READING; },
+      return: async () => { closed++; },
+    };
+  }, seen.fn);
+  assert.equal(result, undefined);
+  assert.match(seen.seen[0].reason, /native initialization refused/);
+  assert.equal(called, 0);
+  assert.equal(closed, 1);
+  assert.equal((await input!).done, true);
+});
+
+test("a usage probe whose injected transport has no teardown still releases streaming input", async () => {
+  let input: Promise<IteratorResult<never>> | undefined;
+  const session = openUsageProbeSession((params) => {
+    input = params.prompt[Symbol.asyncIterator]().next();
+    return {};
+  });
+  assert.equal(session.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET, undefined);
+  await session.return?.();
+  assert.equal((await input!).done, true);
+});
+
+test("a synchronous usage transport refusal releases its retained input and preserves the error", async () => {
+  let input: Promise<IteratorResult<never>> | undefined;
+  assert.throws(() => openUsageProbeSession((params) => {
+    input = params.prompt[Symbol.asyncIterator]().next();
+    throw new Error("transport opening refused");
+  }), /transport opening refused/);
+  assert.equal((await input!).done, true);
+});
+
+
+test("an ordinary usage caller waits for native credential rotation before immediately tearing down", async () => {
+  const root = mkdtempSync(join(tmpdir(), "usage-refresh-lifetime-"));
+  const dir = join(root, ".claude-fleet");
+  mkdirSync(dir);
+  const path = join(dir, ".credentials.json");
+  let nowMs = 1_000;
+  const clock = { now: () => nowMs, date: () => new Date(nowMs), iso: () => new Date(nowMs).toISOString() };
+  const expired = () => writeFileSync(path, JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-refresh", expiresAt: nowMs - 1 } }), { mode: 0o600 });
+  const healthy = () => writeFileSync(path, JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-next", expiresAt: nowMs + 60 * 60 * 1_000 } }), { mode: 0o600 });
+  let polls = 0;
+  let calls = 0;
+  let closed = 0;
+  let input: Promise<IteratorResult<never>> | undefined;
+  expired();
+  const session = openUsageProbeSession((params) => {
+    input = params.prompt[Symbol.asyncIterator]().next();
+    return { initializationResult: async () => {},
+      usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => { calls++; assert.equal(polls, 3); return READING; },
+      return: async () => { closed++; },
+    };
+  }, { realHome: root, platform: "linux", refresh: { clock, sleep: async (ms) => { nowMs += ms; if (++polls === 3) healthy(); } } });
+  try {
+    assert.equal(await session.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET!(), READING);
+    await session.return?.();
+    assert.equal(calls, 1);
+    assert.equal(closed, 1);
+    assert.equal((await input!).done, true);
+  } finally { await session.return?.(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a native credential refresh timeout or lost store is unreadable and never reaches usage", async () => {
+  const root = mkdtempSync(join(tmpdir(), "usage-refresh-refusal-"));
+  const dir = join(root, ".claude-fleet"); mkdirSync(dir);
+  const path = join(dir, ".credentials.json");
+  try {
+    for (const mode of ["timeout", "missing", "malformed", "no-expiry", "cleared", "invalid-bound"] as const) {
+      let nowMs = 1_000; let called = 0; let closed = 0;
+      writeFileSync(path, JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-refresh", expiresAt: 999 } }));
+      const clock = { now: () => nowMs, date: () => new Date(nowMs), iso: () => new Date(nowMs).toISOString() };
+      const session = openUsageProbeSession(() => ({
+        usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => { called++; return READING; },
+        return: async () => { closed++; },
+      }), { realHome: root, platform: "linux", refresh: { clock, maxWaitMs: mode === "invalid-bound" ? NaN : 200, sleep: async (ms) => {
+        nowMs += ms;
+        if (mode === "missing") rmSync(path);
+        if (mode === "malformed") writeFileSync(path, "not json");
+        if (mode === "no-expiry") writeFileSync(path, JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-refresh" } }));
+        if (mode === "cleared") writeFileSync(path, JSON.stringify({ claudeAiOauth: { expiresAt: 0 } }));
+      } } });
+      const expected = mode === "timeout" ? /bounded wait/ : mode === "invalid-bound" ? /invalid.*bound/ : mode === "no-expiry" ? /lost.*expiry/ : mode === "cleared" ? /lost.*refresh credential/ : /became unavailable/;
+      await assert.rejects(session.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET!(), expected);
+      await session.return?.();
+      assert.equal(called, 0, mode);
+      assert.equal(closed, 1, mode);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a healthy or unknown-expiry usage credential does not wait for a rotation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "usage-refresh-control-"));
+  const dir = join(root, ".claude-fleet"); mkdirSync(dir);
+  const path = join(dir, ".credentials.json");
+  try {
+    for (const raw of [JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-refresh", expiresAt: 3_601_000 } }), JSON.stringify({ claudeAiOauth: { expiresAt: 1_001 } }), JSON.stringify({ claudeAiOauth: {} }), "not json", undefined]) {
+      if (raw === undefined) rmSync(path, { force: true }); else writeFileSync(path, raw);
+      const session = openUsageProbeSession(() => ({ usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => READING }), {
+        realHome: root, platform: "linux", refresh: { clock: { now: () => 1_000, date: () => new Date(1_000), iso: () => new Date(1_000).toISOString() }, sleep: async () => { assert.fail("no observed expired credential"); } },
+      });
+      assert.equal(await session.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET!(), READING);
+      await session.return?.();
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test("the default usage refresh wait observes a real file replacement without sending a prompt", async () => {
+  const root = mkdtempSync(join(tmpdir(), "usage-refresh-default-"));
+  const dir = join(root, ".claude-fleet"); mkdirSync(dir);
+  const path = join(dir, ".credentials.json");
+  writeFileSync(path, JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-refresh", expiresAt: Date.now() - 1 } }), { mode: 0o600 });
+  let rotated = false; let closed = false;
+  const session = openUsageProbeSession(() => ({
+    usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => { assert.equal(rotated, true); return READING; },
+    return: async () => { closed = true; },
+  }), { realHome: root, platform: "linux" });
+  const timer = setTimeout(() => {
+    writeFileSync(path, JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-next", expiresAt: Date.now() + 60 * 60 * 1_000 } }), { mode: 0o600 });
+    rotated = true;
+  }, 0);
+  try {
+    assert.equal(await session.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET!(), READING);
+    await session.return?.();
+    assert.equal(closed, true);
+  } finally { clearTimeout(timer); await session.return?.(); rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test("the usage probe waits inside the pinned native CLI refresh margin while the token is still valid", async () => {
+  const root = mkdtempSync(join(tmpdir(), "usage-refresh-margin-"));
+  const dir = join(root, ".claude-fleet"); mkdirSync(dir);
+  const path = join(dir, ".credentials.json");
+  let nowMs = 1_000; let polls = 0;
+  writeFileSync(path, JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-refresh", expiresAt: nowMs + 60_000 } }));
+  const clock = { now: () => nowMs, date: () => new Date(nowMs), iso: () => new Date(nowMs).toISOString() };
+  const session = openUsageProbeSession(() => ({ usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => { assert.equal(polls, 1); return READING; } }), {
+    realHome: root, platform: "linux", refresh: { clock, sleep: async (ms) => {
+      nowMs += ms; polls++;
+      writeFileSync(path, JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-next", expiresAt: nowMs + 60 * 60 * 1_000 } }));
+    } },
+  });
+  try { assert.equal(await session.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET!(), READING); }
+  finally { await session.return?.(); rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test("the usage control and real worker HOME grant use an explicitly provisioned common Claude authority", async () => {
+  const root = mkdtempSync(join(tmpdir(), "usage-shared-authority-"));
+  const realHome = join(root, "operator");
+  const shared = join(realHome, ".claude", "fleet-auth", "claude");
+  mkdirSync(shared, { recursive: true });
+  mkdirSync(join(realHome, ".claude-fleet"));
+  writeFileSync(join(shared, ".credentials.json"), JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-refresh", expiresAt: Date.now() + 60 * 60 * 1_000 } }), { mode: 0o600 });
+  const workerHome = join(root, "worker");
+  try {
+    materializeWorkerHome({ realHome, workerHome });
+    for (const home of [realHome, workerHome]) {
+      let selected: string | undefined;
+      const session = openUsageProbeSession((params) => {
+        selected = params.options.env?.CLAUDE_CONFIG_DIR;
+        return { usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => READING };
+      }, { realHome: home, platform: "linux" });
+      assert.equal(realpathSync(selected!), realpathSync(shared));
+      assert.equal(await session.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET!(), READING);
+      await session.return?.();
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
