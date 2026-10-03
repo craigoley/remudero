@@ -1225,7 +1225,7 @@ import { evaluateRiskJudgeDisposition } from "./lib/risk-judge-eval.js";
 import { loadSkillRegistry, renderSkillList, skillsDir, SkillError } from "./lib/skill.js";
 import {
   buildSkillEffectivenessReport,
-  describeWorkerSkillReachability,
+  describeSkillInjectionReachability,
   loadInjectableSkills,
   observeSkillSelection,
   renderSkillEffectivenessReport,
@@ -30058,7 +30058,7 @@ async function retroCommand(
     followupRegistryPath,
     gather.skillDrafts,
     workerAllowlistFromSettings(undefined),
-    describeWorkerSkillReachability([]),
+    describeSkillInjectionReachability,
     log,
   );
   const say = (msg: string) => console.log(`\n### [retro] ${msg}`);
