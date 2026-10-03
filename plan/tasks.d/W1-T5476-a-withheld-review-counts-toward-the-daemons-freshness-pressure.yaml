@@ -1,0 +1,54 @@
+- id: W1-T5476
+  title: "A WITHHELD REVIEW COUNTS TOWARD THE DAEMON'S FRESHNESS PRESSURE — the reviewer withholds every terminal verdict while its code is materially behind origin/main, but `decideFreshnessRestart` scores that same lag as low pressure and defers the restart, so the review lane stalls until an idle moment"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: live ledger read at 15:29Z, the freshness scorer deferring while the reviewer withheld verdicts on #8880/#8882/#8883"
+  plan_refs: [W1-T4945]
+  files: [src/lib/deploy-judge.ts, src/lib/daemon.ts, test/a-withheld-review-counts-toward-the-daemons-freshness-pressure.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    Two thresholds disagree about the same lag. Per the operator's live ledger read on 2026-10-03, at
+    15:29:13Z the daemon wrote `daemon.freshness_decision` with action=defer, busy=true and reason
+    "busy, and pressure 2 (change 2 + staleness 0) < 18: wait for an idle moment", old_sha f267479f.
+    In the same window, `postReviewStatusGuarded` (src/lib/review.ts, the W1-T228 reviewer-code
+    freshness gate) withheld terminal verdicts: "reviewer code f267479ffc28 is materially behind
+    origin/main 786dfeedc1b2; withholding a terminal verdict".
+    MEASURED over the live ledger file (2026-09-29T12:15Z to 2026-10-03T15:27Z): 133 `review.post_refused`
+    rows. 28 of them carry `reviewer_code_freshness: stale` (26 success, 2 failure). The rest are replay
+    withholds. The stale ones include success verdicts on #8882 (15:25:27Z), #8883 (15:25:44Z) and #8880
+    (15:27:52Z).
+    The review gate treats any material lag as disqualifying. `decideFreshnessRestart`
+    (src/lib/deploy-judge.ts, W1-T4945) treats the same lag as change weight 2 against a threshold of 18.
+    And because `decideFreshness` in src/lib/daemon.ts counts `inFlightReviewCount() > 0` as busy, the
+    reviews being withheld are themselves what keeps the daemon from restarting. The review lane
+    produces no verdicts until an idle moment or the staleness horizon.
+    Rule 19: the pressure arithmetic (deploy-judge.ts) and the daemon's call site that supplies the
+    refusal count (daemon.ts) are two production files for one concern, so the band is high with
+    band_meaning: span.
+  design: |
+    1. Add an optional input to `decideFreshnessRestart`: `withheldReviews` (count of
+       `review.post_refused` rows with `reviewer_code_freshness: stale` since this daemon process booted,
+       or since `staleSinceMs`). When it is above 0, the busy branch restarts. The pressure gains a
+       withheld-review term that reaches the threshold, and the reason names it, e.g. "busy, but N
+       review(s) withheld for stale reviewer code: drain and restart". With 0 or absent, weight,
+       agePressure, pressure and reason are byte-identical to today.
+    2. In `decideFreshness` (src/lib/daemon.ts), count those rows from the live ledger tail (or from an
+       in-process counter fed where the refusal is ledgered) and pass the count. Log it on the
+       `daemon.freshness_decision` row as `withheld_reviews`.
+    3. Honour the operator's restart ruling: the restart ends only the restarting lane, and reviews may
+       continue during the pause. This task changes WHEN the restart fires, not the drain.
+  acceptance:
+    - claim: "a pending stale-reviewer refusal turns a busy defer into a restart decision whose reason names the withheld reviews, and with no refusal the pressure arithmetic and reason are unchanged"
+      proof: "unit test: test/a-withheld-review-counts-toward-the-daemons-freshness-pressure.test.ts"
+  falsifier: |
+    Drop the withheld-review term from `decideFreshnessRestart`. The suite's busy case with change weight
+    2, staleness 0 and one stale refusal decides `defer` ("wait for an idle moment") instead of
+    `restart`.
