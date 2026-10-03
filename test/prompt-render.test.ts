@@ -83,7 +83,9 @@ test("prompt renderers: lib exports stay byte-identical to the pre-move dispatch
 
   // W1-T4432: the plan index is no longer a regenerable artifact, so the fix prompt's generated
   // registry exception list intentionally no longer includes plan/plan-index.json.
-  assert.equal(sha256(fix), "4fec79a7d4bb5e7b22f9a4f5d3069b34cf9e339e7cfafd4071565c7aace02c75");
+  // W1-T4268 re-baselined fix: it now carries GH_PR_EDIT_FALLBACK_LINES
+  // (test/gh-pr-edit-fallback-contract.test.ts pins the new text itself).
+  assert.equal(sha256(fix), "522578a8df13739501edc39093e404e5e74a84855fae3f36605e6bc582bd4a02");
   assert.equal(sha256(prerequisite), "5c52a37d141fdb3048e692885a6c8b3ae1f9481dd0f4c2f845cde736bcffa239");
   // W1-T3656 DELIBERATELY diverged this ONE template. renderReconPrompt no longer names shell
   // binaries ("git remote -v, git log --oneline -5, ls"), because a worker holding the allowlisted
@@ -104,7 +106,8 @@ test("prompt renderers: lib exports stay byte-identical to the pre-move dispatch
   // (test/the-knowledge-gardener-tends-rules-and-skills.test.ts pins the new text itself).
   // Re-baselined implement: its contract now opens with a scope-time check before the first edit
   // (test/implement-contract-orders-a-scope-time-check.test.ts pins the new text itself).
-  assert.equal(sha256(implement), "8826f30e9104dd6391310fb657a92bf930c2ce61c6f69f77a293a6eb178352d2");
+  // W1-T4268 re-baselined implement: outputContractLines now splices GH_PR_EDIT_FALLBACK_LINES.
+  assert.equal(sha256(implement), "8b8d0b88b9c8126df909c182edb7da9855fac054a923840c3bdbd08057ba41a2");
 });
 
 test("prompt renderers: run-task keeps compatibility re-exports of the lib templates", () => {
