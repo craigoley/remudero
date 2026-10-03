@@ -13,6 +13,7 @@
   origin: "operator-session#needs-me-review-2026-09-21"
   plan_refs: [W1-T3371, W1-T2392, W1-T3939]
   status: done
+  pr: 6371  # operator credit ruling 2026-10-03: merged PR #6371 delivered this task
   attempts: 0
   note: |
     DONE 2026-09-30 (operator ruling) — ALREADY BUILT AND MERGED; ONLY THE STATUS FIELD WAS STALE. Delivered by #6371
