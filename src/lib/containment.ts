@@ -21,8 +21,8 @@ import { WORKER_HOME_SYMLINKS } from "./worker-home.js";
  * Post-spawn containment probe (WS-0 verdict 7; W1-T2 acceptance #2). Spawns a worker under the
  * sandbox and confirms that an attempted write OUTSIDE its working directory is denied by the OS.
  *
- * INVARIANT: containment unproven means fail closed (Standing rule 11 — isolation is proven per run
- * by probe, never assumed from configuration).
+ * INVARIANT: containment unproven means fail closed (Standing rule 11 — proven by probe, never
+ * assumed from configuration; once per boot and on any change of its inputs, W1-T5346).
  *
  * TRAP: `claude -p` silently ignores a settings file it cannot apply and runs unsandboxed (FF10a,
  * LEARNINGS). The validate-before-spawn guard in settings.ts proves the file is well formed, which
@@ -36,8 +36,8 @@ import { WORKER_HOME_SYMLINKS } from "./worker-home.js";
  * the installed CLI is UNMEASURED, and this repo has already paid for bounds that fire on healthy
  * conditions, so `probeContainment` records the verdict and does not throw on it.
  *
- * Called once per run; an unproven first attempt may use one more spawn with a fresh token. The
- * settings file, host and CLI version are constant across the run's spawns.
+ * run-task.ts reuses a PASS keyed by `probeVerdictKey` and ledgers each reuse (ruling 2026-10-02).
+ * An unproven first attempt may use one more spawn with a fresh token.
  *
  * FALSIFIER: test/containment.test.ts. // Why: docs/forensics/containment.md#module-header.
  */
