@@ -5,7 +5,9 @@
   type: implement
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=1571f5b32d2395f9
   attempts: 0
   files:
     - src/lib/review.ts
