@@ -230,8 +230,8 @@ export function appendLedger(
     closeSync(fd);
   }
   // W1-T209: opportunistic, lazy rotation — the only place the ledger grows, so the only place
-  // that needs to notice it has grown past the ceiling. One extra statSync on every under-ceiling
-  // call; the full read-and-rewrite cost only on the call that crosses it.
+  // that needs to notice it has grown past the ceiling. A stat and small sidecar read on each
+  // call; the full read-and-rewrite cost only on the call that crosses the effective ceiling.
   if (ledgerExceedsRotationCeiling(path, opts.ceilingBytes)) {
     rotateLedger(path, { ceilingBytes: opts.ceilingBytes });
   }
@@ -940,7 +940,7 @@ const realRotationFs: LedgerRotationFsDeps = {
   statSize: (path) => statSync(path).size,
 };
 
-/** True iff `path` exists and is larger than `ceilingBytes` (default {@link
+/** True iff `path` exceeds its carried effective ceiling, with base `ceilingBytes` (default {@link
  *  LEDGER_ROTATION_CEILING_BYTES}) — an absent ledger never "exceeds" anything (nothing to
  *  rotate, same absence-is-not-proof-of-anything doctrine status.ts's readers already use). */
 export function ledgerExceedsRotationCeiling(
@@ -949,7 +949,14 @@ export function ledgerExceedsRotationCeiling(
   fsDeps: LedgerRotationFsDeps = realRotationFs,
 ): boolean {
   if (!fsDeps.existsSync(path)) return false;
-  return fsDeps.statSize(path) > ceilingBytes;
+  const carried = readCarriedPrefix(path);
+  const effective = carried?.effectiveCeilingBytes;
+  const rate = carried?.rateBytesPerHour;
+  const limit = typeof effective === "number" && Number.isSafeInteger(effective) &&
+    typeof rate === "number" && Number.isFinite(rate) && rate > 0
+    ? Math.min(ceilingBytes * LEDGER_ROTATION_BACKSTOP_MULTIPLIER, Math.max(ceilingBytes, effective))
+    : ceilingBytes;
+  return fsDeps.statSize(path) > limit;
 }
 
 /** One snapshot line, parsed ONCE and carried by reference through `rotateLedger`'s whole
@@ -1022,7 +1029,7 @@ export function ledgerRotationLockPath(ledgerPath: string): string {
 }
 
 /** Sidecar naming the retained core the last rotation wrote back as the live file's prefix, as
- *  `{bytes, sha256}`. Every row in that prefix was archived when it first arrived, so the next
+ *  `{bytes, sha256, rateBytesPerHour, effectiveCeilingBytes}`. Every prefix row is already archived, so the next
  *  rotation archives only the bytes after it. Ends in `.json`, so no reader lists it as an archive. */
 export function ledgerCarriedPrefixPath(ledgerPath: string): string {
   return `${ledgerPath}.carried.json`;
@@ -1096,20 +1103,29 @@ function sha256Hex(buf: Buffer): string {
   return createHash("sha256").update(buf).digest("hex");
 }
 
-/** Leading bytes of `snapshot` already archived: the recorded length when the snapshot still starts
- *  with exactly those bytes, else 0 — a missing, corrupt or mismatched sidecar archives the whole
- *  snapshot. Content-addressed, so a stale sidecar can cost duplication and never a row. */
-function archivedPrefixBytes(ledgerPath: string, snapshot: Buffer): number {
-  let carried: { bytes?: unknown; sha256?: unknown } | null;
+interface CarriedPrefix {
+  bytes?: unknown;
+  sha256?: unknown;
+  rateBytesPerHour?: unknown;
+  effectiveCeilingBytes?: unknown;
+}
+
+function readCarriedPrefix(ledgerPath: string): CarriedPrefix | null {
   try {
-    carried = JSON.parse(readFileSync(ledgerCarriedPrefixPath(ledgerPath), "utf8")) as typeof carried;
-  } catch {
-    // deliberate: no readable sidecar means nothing is known to be archived — archive it all.
-    return 0;
+    return JSON.parse(readFileSync(ledgerCarriedPrefixPath(ledgerPath), "utf8")) as CarriedPrefix | null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.error(`ledger: unreadable carried prefix ${ledgerCarriedPrefixPath(ledgerPath)}: ${String(error)}`);
+    }
+    return null;
   }
+}
+
+/** Leading bytes already archived; an unknown prefix duplicates the snapshot and never loses a row. */
+function archivedPrefixBytes(carried: CarriedPrefix | null, snapshot: Buffer): number | undefined {
   const bytes = carried?.bytes;
-  if (typeof bytes !== "number" || !Number.isSafeInteger(bytes) || bytes < 0 || bytes > snapshot.length) return 0;
-  return sha256Hex(snapshot.subarray(0, bytes)) === carried?.sha256 ? bytes : 0;
+  if (typeof bytes !== "number" || !Number.isSafeInteger(bytes) || bytes < 0 || bytes > snapshot.length) return undefined;
+  return sha256Hex(snapshot.subarray(0, bytes)) === carried?.sha256 ? bytes : undefined;
 }
 
 /** What the rotation lock records about its holder — the SAME `{pid, host, startedAt}` shape
@@ -1594,7 +1610,7 @@ interface RotationRetention {
 /** The rotation proper — runs ONLY with the rotation lock held (see {@link rotateLedger}). */
 function rotateLedgerLocked(
   path: string,
-  ceilingBytes: number,
+  fixedCeilingBytes: number,
   archiveFsDeps: ArchiveNamingFs,
   now: (() => Date) | undefined,
   retention: RotationRetention,
@@ -1609,13 +1625,24 @@ function rotateLedgerLocked(
   // W1-T4100: heal on-disk names that ran ahead of their write time; the newest safe stamp is the
   // floor this rotation's own name must clear.
   const dir = dirname(path);
+  const previous = readCarriedPrefix(path);
+  const prefixBytes = archivedPrefixBytes(previous, snapshotBytes);
+  const mtimes = archiveMtimes(dir, archiveFsDeps).map((a) => a.mtimeMs);
+  const elapsedMs = mtimes.length > 0 ? systemClock.now() - mtimes.reduce((a, b) => Math.max(a, b)) : 0;
+  const sample = prefixBytes !== undefined && elapsedMs > 0
+    ? (size0 - prefixBytes) * 3_600_000 / elapsedMs : 0;
+  const priorRate = previous?.rateBytesPerHour;
+  const rateBytesPerHour = sample > 0 && Number.isFinite(sample)
+    ? typeof priorRate === "number" && Number.isFinite(priorRate) && priorRate > 0
+      ? priorRate / 2 + sample / 2 : sample
+    : 0;
   const lastArchiveMs = reconcileArchiveStamps(dir, archiveFsDeps);
   let requestedMs = now ? now().getTime() : systemClock.now();
   if (lastArchiveMs !== undefined && requestedMs <= lastArchiveMs) requestedMs = lastArchiveMs + 1;
   // DELTA ARCHIVING: the carried prefix is the core the previous rotation wrote back, already
   // archived, so only what follows it goes to a new archive. Re-copying it made adjacent archives
   // share 99.3% of rows (fleet host, 2026-09-23). An empty delta writes no archive at all.
-  const delta = snapshotBytes.subarray(archivedPrefixBytes(path, snapshotBytes));
+  const delta = snapshotBytes.subarray(prefixBytes ?? 0);
   const plainArchivePath = datedArchivePath(path, new Date(requestedMs));
   // The landed archive's own mtime is the clock `now` cannot corrupt (see healIfAheadOfOwnMtime).
   const archivePath =
@@ -1776,6 +1803,10 @@ function rotateLedgerLocked(
 
   let keptLines = keptCandidates.map((p) => p.raw);
   let keptBytes = keptLines.length > 0 ? Buffer.byteLength(keptLines.join("\n") + "\n", "utf8") : 0;
+  // W1-T4393: preserve passes 1-4's core and add an hour of smoothed appends, within the backstop.
+  const ceilingBytes = rateBytesPerHour > 0
+    ? Math.min(fixedCeilingBytes * LEDGER_ROTATION_BACKSTOP_MULTIPLIER, Math.max(fixedCeilingBytes, Math.ceil(keptBytes + rateBytesPerHour)))
+    : fixedCeilingBytes;
 
   // ── THE CONVERGENCE INVARIANT (W1-T244). Even after every bound above the retained core can
   // still exceed the ceiling. Post-rotation the live ledger MUST be strictly below it, or rotation
@@ -1834,7 +1865,10 @@ function rotateLedgerLocked(
     (recarriedCount > 0 || recarry.torn.length > 0
       ? rotationRow("ledger.recarried", { count: recarriedCount, archives: recarry.archives, unreadable_archives: recarry.torn }, nowIso)
       : "") +
-    (retention.unreadable ? rotationRow("ledger.retained_steps_unreadable", { path: ledgerRetainedStepsPath(path) }, nowIso) : "");
+    (retention.unreadable ? rotationRow("ledger.retained_steps_unreadable", { path: ledgerRetainedStepsPath(path) }, nowIso) : "") +
+    (rateBytesPerHour > 0
+      ? rotationRow("ledger.rotation_headroom", { rate_bytes_per_hour: rateBytesPerHour, ceiling_bytes: ceilingBytes }, nowIso)
+      : "");
   const newLiveContent = coreContent + noteContent + pointerContent + tail;
   const swapped = writeFileAtomic(path, newLiveContent, () => {
     // Immediately before the rename: is the live path STILL the inode this rotation snapshotted?
@@ -1851,13 +1885,15 @@ function rotateLedgerLocked(
     return { rotated: false };
   }
   const coreBytes = Buffer.from(coreContent, "utf8");
-  writeFileAtomic(ledgerCarriedPrefixPath(path), JSON.stringify({ bytes: coreBytes.length, sha256: sha256Hex(coreBytes) }));
+  writeFileAtomic(ledgerCarriedPrefixPath(path), JSON.stringify({
+    bytes: coreBytes.length, sha256: sha256Hex(coreBytes), rateBytesPerHour, effectiveCeilingBytes: ceilingBytes,
+  }));
 
   return {
     rotated: true,
     archivePath,
     archivedLineCount,
-    retainedLineCount: keptLines.length + (pointerContent ? 1 : 0),
+    retainedLineCount: keptLines.length + noteContent.split("\n").filter(Boolean).length + (pointerContent ? 1 : 0),
     recarriedLineCount: recarriedCount,
   };
 }
