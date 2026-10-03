@@ -257,6 +257,7 @@ test("drain.ts: tallyDispatchFilters's DispatchFilterReason-keyed record has eve
     "credit-indeterminate",
     "foreign-repo",
     "held-pre-dispatch-refusal",
+    "operator-build",
     "retired",
     "run-branch-already-pushed",
     "unmet-deps",
