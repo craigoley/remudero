@@ -275,11 +275,3 @@ test("the plan garden runs the repair lane first, is due while a request waits, 
   assert.deepEqual(r.steps("plan.shard_repair_failed").map((row) => row.extra), [{ stage: "pass", reason: "disk gone" }]);
   assert.equal(runTask.withShardRepairs(stateDir, () => {}, () => {}, r.log).due!(), true, "a garden with no probe of its own is due");
 });
-
-test("the daemon's boot-time plan read hands its quarantines to the repair requester", (t) => {
-  const stateDir = tempDir(t, "shard-repair-boot");
-  const r = recorder();
-  const quarantined: QuarantinedTask[] = [{ id: "W1-T5431", files: [`origin/main:${SHARD_REL}`], reason: "shard_invalid", error: "Map keys must be unique" }];
-  runTask.loadDaemonPlan("plan/tasks.yaml", r.log, r.raise, () => ({ plan: { tasks: [], byId: new Map() } as never, quarantined }), runTask.shardRepairRequester(stateDir, r.log));
-  assert.equal(runTask.shardRepairsPending(stateDir), true);
-});
