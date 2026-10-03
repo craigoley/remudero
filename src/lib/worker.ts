@@ -220,6 +220,18 @@ export interface WorkerResult {
    * rewrites `subtype`. Do not derive a refusal from cost either: seven measured refusals carried a non-zero cost (W1-T2564;
    * docs/forensics/worker.md). */
   usageRefusal?: { matched: string; resetsAtText?: string; resetsAtMs?: number };
+  /** The model declined this run under a SAFEGUARD classifier (`stop_reason: "refusal"`), read off the SDK's own
+   * `model_refusal_no_fallback` (`retried: false`) or `model_refusal_fallback` direction `retry` (`retried: true`,
+   * `fallbackModel` set) system message — the last one seen wins. `category` is `stop_details.category` verbatim, `null` when
+   * the API named none. `api_refusal_explanation` is display-only prose the SDK says never to parse, so it is never read.
+   * OBSERVATIONAL: nothing classifies on this, burns a strike on it or retries on it. Absent when no such message arrived —
+   * never a fabricated value, and never derived from `text` or `subtype`. Distinct from {@link usageRefusal}, an account limit. */
+  safeguardRefusal?: { category: string | null; retried: boolean; originalModel: string; fallbackModel?: string };
+  /** The final `stop_reason` the API reported for this run: the result envelope's `stop_reason` when it carries a string
+   * (`SDKResultSuccess` and `SDKResultError` both declare `string | null`), else the LAST assistant message that carried a
+   * non-null one (a streamed block's `stop_reason` is null; the real value arrives on the envelope). Absent when neither did,
+   * so an early stop (`end_turn` with work owed) and a refusal are measurable instead of unreadable. OBSERVATIONAL only. */
+  finalStopReason?: string;
   /** Permission denials the SDK surfaced (hook/permission blocks). */
   permissionDenials: unknown[];
   /** The exact env the child was spawned with (billing-boundary proof). */
@@ -517,6 +529,11 @@ export function workerLedgerFields(r: WorkerResult): {
   lost_grants?: string[];
   egress_unenforced?: string;
   worker_duration_ms?: number;
+  safeguard_refusal_category?: string | null;
+  safeguard_refusal_retried?: boolean;
+  safeguard_refusal_original_model?: string;
+  safeguard_refusal_fallback_model?: string;
+  final_stop_reason?: string;
   window_consumption?: {
     provider: WorkerProviderId;
     percent_consumed: number | null;
@@ -593,6 +610,17 @@ export function workerLedgerFields(r: WorkerResult): {
     // fixture that never spawned; JSON.stringify then drops the key entirely — the same "absent, never guessed" discipline
     // `max_turns` keeps (W1-T477).
     worker_duration_ms: r.workerDurationMs,
+    // Additive and observational: a row with no safeguard refusal and no observed stop reason carries none of these keys, so
+    // it stays byte-identical to before. `safeguard_refusal_category` is `null` (key present) when a refusal named none.
+    ...(r.safeguardRefusal
+      ? {
+          safeguard_refusal_category: r.safeguardRefusal.category,
+          safeguard_refusal_retried: r.safeguardRefusal.retried,
+          safeguard_refusal_original_model: r.safeguardRefusal.originalModel,
+          ...(r.safeguardRefusal.fallbackModel === undefined ? {} : { safeguard_refusal_fallback_model: r.safeguardRefusal.fallbackModel }),
+        }
+      : {}),
+    ...(r.finalStopReason === undefined ? {} : { final_stop_reason: r.finalStopReason }),
     ...(r.windowConsumption
       ? {
           window_consumption: {
@@ -3080,6 +3108,30 @@ export function createWorkerClockBoundWatchdog(opts: {
   return { observer, start };
 }
 
+/** Read the SDK's safeguard-refusal system message (`model_refusal_no_fallback`, or `model_refusal_fallback` with direction
+ * `retry`) off one raw stream message. `undefined` for every other message — including a `revert`/`sticky` fallback, legacy
+ * swaps that are not a refusal — and for one whose required `original_model` is not a string, so a malformed notice yields no
+ * record rather than an invented model. `api_refusal_explanation` is display-only and deliberately never read. */
+function detectSafeguardRefusal(raw: unknown): WorkerResult["safeguardRefusal"] {
+  const m = raw as {
+    subtype?: unknown;
+    direction?: unknown;
+    original_model?: unknown;
+    fallback_model?: unknown;
+    api_refusal_category?: unknown;
+  };
+  const isFallback = m.subtype === "model_refusal_fallback" && m.direction === "retry";
+  if (!isFallback && m.subtype !== "model_refusal_no_fallback") return undefined;
+  if (typeof m.original_model !== "string" || m.original_model.length === 0) return undefined;
+  const category = typeof m.api_refusal_category === "string" && m.api_refusal_category.length > 0 ? m.api_refusal_category : null;
+  return {
+    category,
+    retried: isFallback,
+    originalModel: m.original_model,
+    ...(isFallback && typeof m.fallback_model === "string" && m.fallback_model.length > 0 ? { fallbackModel: m.fallback_model } : {}),
+  };
+}
+
 /** Reduce the SDK message stream into a {@link WorkerResult}. Split out of spawnWorker so the error-envelope behaviour is
  * unit-testable without a real worker. TRAP (SDK 0.3.209, the WS-1 root cause): the SDK YIELDS the `type:"result"` envelope
  * for an error subtype — carrying `num_turns` and `total_cost_usd` — and only THEN throws, so letting that throw escape loses
@@ -3133,6 +3185,10 @@ export async function collectWorkerResult(
   let isError = false;
   let apiError = false;
   let usageRefusal: WorkerResult["usageRefusal"];
+  let safeguardRefusal: WorkerResult["safeguardRefusal"];
+  // Envelope value outranks the last assistant message's; both stay `undefined` until a real string is observed.
+  let envelopeStopReason: string | undefined;
+  let assistantStopReason: string | undefined;
   let permissionDenials: unknown[] = [];
   let sawResult = false;
   let tokens: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
@@ -3157,6 +3213,8 @@ export async function collectWorkerResult(
         // compact_result:"failed"}` — which the boundary detector above never matches, so a FAILED attempt used to leave no
         // trace. No new SDK call and no second stream (W1-T2245).
         compactionFailures.push(...detectCompactionFailures([raw]));
+        // The SDK's two safeguard-refusal notices, read off the SAME raw message. Observational: no strike or retry reads it.
+        safeguardRefusal = detectSafeguardRefusal(raw) ?? safeguardRefusal;
         // A heartbeat: no worker-authored text, but still proof of life for the quiet floor.
         opts.streamObserver?.({ kind: "message", tsMs: nowFn(), turnsSoFar });
       } else if (msg.type === "assistant") {
@@ -3169,6 +3227,9 @@ export async function collectWorkerResult(
         // this turn. Never `modelUsage`, a post-hoc cost breakdown, and never `<synthetic>`, an error placeholder. Last real
         // value wins (W1-T2572).
         if (typeof model === "string" && model.length > 0 && model !== "<synthetic>") servedModel = model;
+        // A streamed block carries `stop_reason: null`, so only a real string replaces an earlier one.
+        const messageStopReason = (msg.message as { stop_reason?: unknown })?.stop_reason;
+        if (typeof messageStopReason === "string" && messageStopReason.length > 0) assistantStopReason = messageStopReason;
         const content = (msg.message as { content?: unknown }).content;
         // ONE assistant SDK message is ONE observed "turn", incremented once here before the block loop, so a message
         // carrying BOTH a text and a tool_use block reports the SAME `turnsSoFar` on both emitted events rather than
@@ -3225,6 +3286,7 @@ export async function collectWorkerResult(
           session_id: string;
           total_cost_usd: number;
           num_turns?: number;
+          stop_reason?: string | null;
           permission_denials?: unknown[];
           // `usage`/`modelUsage` are on BOTH SDKResultSuccess and SDKResultError (sdk.d.ts ground truth) — optional here only
           // to tolerate a synthetic test stream that omits them; a real envelope always carries both.
@@ -3246,6 +3308,7 @@ export async function collectWorkerResult(
         sessionId = r.session_id;
         costUsd = r.total_cost_usd;
         numTurns = typeof r.num_turns === "number" ? r.num_turns : 0;
+        if (typeof r.stop_reason === "string" && r.stop_reason.length > 0) envelopeStopReason = r.stop_reason;
         permissionDenials = r.permission_denials ?? [];
         tokens = {
           input: r.usage?.input_tokens ?? 0,
@@ -3290,6 +3353,7 @@ export async function collectWorkerResult(
     }
   }
 
+  const finalStopReason = envelopeStopReason ?? assistantStopReason;
   return {
     ...(opts.lostGrants?.length ? { lostGrants: opts.lostGrants } : {}),
     ...(opts.credentialHelperUnwired ? { credentialHelperUnwired: opts.credentialHelperUnwired } : {}),
@@ -3304,6 +3368,8 @@ export async function collectWorkerResult(
     isError,
     apiError,
     ...(usageRefusal ? { usageRefusal } : {}),
+    ...(safeguardRefusal ? { safeguardRefusal } : {}),
+    ...(finalStopReason === undefined ? {} : { finalStopReason }),
     permissionDenials,
     childEnvKeys: opts.childEnvKeys,
     accountLabel: opts.accountLabel,
