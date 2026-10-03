@@ -1,0 +1,38 @@
+- id: W1-T5516
+  title: "A LOST `review.posted` ROW IS RE-APPENDED BEFORE THE ARM GATE READS — `runReview` posts the status, logs `review.posted`, then arms through a ledger-only gate; when the row is lost, the gate fails closed, so a correct review pays for a second LLM review and a 43-minute merge delay"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low
+  origin: "operator session 2026-10-03: PR #8887's lost review.posted row (W1-T5514's evidence)"
+  plan_refs: [W1-T5514, W1-T230]
+  files: [src/run-task.ts, test/a-lost-review-posted-row-is-reappended-before-the-arm-gate-reads.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-03 on origin/main 3e026b90. In `runReview` (src/run-task.ts), `log("review.posted", …)`
+    follows `postReviewStatusGuarded`. Then `armIfVerdictPermits` (src/lib/arm-auto-merge.ts) reads the
+    ledger through `priorReviewVerdictFromLedger`. `decideArmFromLedgerVerdict` (src/lib/review.ts)
+    refuses when no `review.posted` line matches the task and head ("no ledgered review.posted verdict
+    found for this task — arming withheld (W1-T230, fail closed)").
+    W1-T5514 closes the rotation window that lost PR #8887's row on 2026-10-03. This task is the
+    independent second guard, so a row lost by any cause costs one ledger re-read, not a second review.
+    The arm gate must keep reading the ledger. W1-T230 (and #449) refuse GitHub's commit status as
+    evidence because that surface is mutable. This task therefore re-establishes the ledger row and never
+    falls back to the status.
+  design: |
+    After the `review.posted` log and before `armIfVerdictPermits`, re-read the ledger for a
+    `review.posted` row with this run_id and head_sha. If none is found, append the same row again plus a
+    `review.posted_reappended` row naming the run, the head and the PR, then let the arm gate read. If the
+    re-read itself fails, append nothing extra and let the gate decide as today (fail closed). Leave
+    `decideArmFromLedgerVerdict` and the W1-T230 gate unchanged.
+  acceptance:
+    - claim: "a review.posted row lost after the status posts is re-appended before the arm gate reads, the re-append is ledgered as review.posted_reappended, and the arm gate never reads GitHub's status"
+      proof: "unit test: test/a-lost-review-posted-row-is-reappended-before-the-arm-gate-reads.test.ts"
+  falsifier: |
+    Remove the re-read. The suite's ledger, which drops the first `review.posted` write, leaves the arm
+    gate with no row, and the arm is skipped.

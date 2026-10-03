@@ -1,0 +1,36 @@
+- id: W1-T5552
+  title: "A DURABLE TRAILER CREDIT SAVED BEFORE THE DIFF REFUSAL IS REVALIDATED — W1-T3996 re-checks only head-branch entries on the premise that \"a TRAILER entry needs no second look\", which is false for trailer entries persisted before W1-T413/W1-T3067's plan-only diff refusal existed (W1-T380 stayed credited by plan-only #1437 until operator PR #8962)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low
+  origin: "operator session 2026-10-03: credit research; operator PR #8962 un-credited (W1-T380, #1437) by hand"
+  plan_refs: [W1-T3996, W1-T413, W1-T3067, W1-T380, W1-T5553]
+  files: [src/lib/status.ts, test/a-durable-trailer-credit-saved-before-the-diff-refusal-is-revalidated.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-03 on origin/main 3e026b90. In `deriveStatus` (src/lib/status.ts), the durable-credit
+    rung trusts a `merge-credit.json` entry. The W1-T3996 DURABLE-CREDIT REVALIDATION gives a HEAD-BRANCH
+    entry one more look (`isPlanOnlyChangeset` over `mergedPathsByPr`, and `isPlanOnlyFilingPr`) and says:
+    "A TRAILER entry needs no second look: line ~2449 below only ever persists one AFTER
+    `planOnlyRefusal` already cleared". That holds only for entries written after the diff refusal
+    (`planOnlyDiffRefusal`, W1-T413/W1-T3067) shipped. A trailer entry persisted earlier was never checked.
+    The operator found W1-T380 credited by #1437, a plan-only PR, and merged PR #8962 (2026-10-03) to
+    un-credit it by hand. That fixes the instance, not the class.
+  design: |
+    Revalidate TRAILER entries with the same once-per-entry check the head-branch arm uses (a
+    plan-only changeset from free local `mergedPathsByPr` evidence), quarantining through the existing
+    subtract-only `invalidated` marks so it is paid once. No new GitHub read: with no local evidence the
+    entry is trusted as today. Correct the "needs no second look" comment to say which entries were
+    never checked. W1-T5553's plan-text-deliverable exemption applies to this check as well.
+  acceptance:
+    - claim: "a durable trailer credit whose merged PR changed only plan files is revalidated and quarantined once from local evidence, a trailer credit with code changes stays merged, and no GitHub read is added"
+      proof: "unit test: test/a-durable-trailer-credit-saved-before-the-diff-refusal-is-revalidated.test.ts"
+  falsifier: |
+    Restrict the revalidation to `entry.source === "head-branch"` again. The suite's plan-only trailer
+    entry still projects merged.

@@ -7,6 +7,7 @@ import { loadProposalRegistry } from "../src/lib/inbox.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { WORKER_SETTING_SOURCES } from "../src/lib/worker.js";
 import {
+  describeSkillInjectionReachability,
   describeWorkerSkillReachability,
   proceduralCandidateHash,
   READ_WRAPPER_RE,
@@ -253,6 +254,47 @@ test("describeWorkerSkillReachability: settingSources including 'project' makes 
   const result = describeWorkerSkillReachability(["project"]);
   assert.equal(result.reachable, true);
   assert.match(result.reason, /discoverable/);
+});
+
+test("a drafted skill whose markdown carries a valid applies-to is reachable through prompt injection after approval", () => {
+  const draft = renderSkillDraft(candidate())!;
+  const result = describeSkillInjectionReachability(draft);
+  assert.equal(result.reachable, true);
+  assert.match(result.reason, /implement/);
+  assert.match(result.reason, /loadInjectableSkills/);
+  assert.match(result.reason, /selectSkillsForTask/);
+  assert.match(result.reason, /after approval/);
+  assert.doesNotMatch(result.reason, /settingSources/);
+});
+
+test("a drafted skill with no applies-to frontmatter line is not reachable through prompt injection", () => {
+  const draft = renderSkillDraft(candidate({ taskType: "unsupported" }))!;
+  const result = describeSkillInjectionReachability(draft);
+  assert.equal(result.reachable, false);
+  assert.match(result.reason, /no non-empty applies-to/);
+  assert.doesNotMatch(result.reason, /settingSources/);
+});
+
+test("describeWorkerSkillReachability s own existing contract false for an empty array and true for project is unchanged", () => {
+  assert.equal(describeWorkerSkillReachability([]).reachable, false);
+  assert.equal(describeWorkerSkillReachability(["project"]).reachable, true);
+});
+
+test("draft injection reachability reads only frontmatter and normalizes comma-separated task types", () => {
+  const draft = renderSkillDraft(candidate())!;
+  for (const markdown of [
+    "## Procedure\n\napplies-to: implement\n",
+    "---\nname: empty\napplies-to: , ,\n---\n\nprocedure\n",
+    "---\nname: empty\napplies-to: \n---\n\nprocedure\n",
+  ]) {
+    assert.equal(describeSkillInjectionReachability({ ...draft, markdown }).reachable, false);
+  }
+  const result = describeSkillInjectionReachability({
+    ...draft,
+    markdown: "---\napplies-to: IMPLEMENT, diagnose\n---\n\nprocedure\n",
+  });
+  assert.equal(result.reachable, true);
+  assert.match(result.reason, /implement, diagnose/);
 });
 
 // ── (5) the retro's gather renders skill drafts beside the fact-line candidates ────────────────

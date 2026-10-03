@@ -59,6 +59,7 @@
     Stub the fix/review command rather than invoking the established injected seam and the command
     wiring proof must fail. A request that advances past a strike cap is a regression, not success.
   status: merged
+  pr: 6474  # operator credit ruling 2026-10-03: merged PR #6474 delivered this task
   attempts: 0
   note: |
     reservation hand-off: unknown -> run-W1-T3989-1790030000001

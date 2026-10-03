@@ -1,0 +1,41 @@
+- id: W1-T5529
+  title: "DRAIN HONOURS QUIET HOURS AND SURVIVES A GOVERNOR THROW — `DrainDeps` has no `checkQuietHours`, so W1-T5482's `quiet_hours_deferred` is unreachable from drain callers, and both drain loops' pass-level cost and queue governor reads are unguarded, so a throw escapes `runDrain`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low
+  origin: "operator session 2026-10-03: found reviewing W1-T5482 (#8941)"
+  plan_refs: [W1-T5482, W1-T5404, W1-T317, W1-T321, W1-T1038]
+  files: [src/lib/drain.ts, test/drain-honours-quiet-hours-and-survives-a-governor-throw.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-03 on origin/main 3e026b90.
+    (a) `checkDispatchGovernors` (src/lib/dispatch-governor.ts) reads `deps.checkQuietHours`, which is
+    declared on `DispatchGovernorDeps`. `runDrainLanes` (src/lib/drain.ts) calls it with the drain's own
+    deps. `DrainDeps` declares `checkCostGovernor`, `checkQueueGovernor` and `checkMemoryGovernor`, but not
+    `checkQuietHours`, so no drain caller can supply one. W1-T5482 (#8941) added `quiet_hours_deferred` to
+    `StopReason` and maps a quiet-hours verdict to it in `allLanesHeldStop`, and no drain pass can produce
+    that verdict. Only the daemon (src/lib/daemon.ts) wires `checkQuietHours`.
+    (b) `runDrain` and `runDrainLanes` each read `deps.checkCostGovernor?.()` and
+    `deps.checkQueueGovernor?.()` at pass level with no try/catch. The memory read beside them is guarded
+    (W1-T5404: "a throw FAILS OPEN"). A throwing cost or queue reader propagates out of `runDrain`. The
+    per-lane path in `checkDispatchGovernors` already turns that throw into an `unreadable` verdict that
+    fails closed.
+  design: |
+    (a) Add `checkQuietHours?: () => QuietHoursHoldResult | undefined` to `DrainDeps`, so drain callers
+    can pass it through to `checkDispatchGovernors`. Its fail-open handling there is unchanged.
+    (b) Wrap both pass-level reads in both loops. A throw is logged (`drain.cost_governor.unreadable` /
+    `drain.queue_governor.unreadable`, with the error) and ends the pass with the matching
+    `*_governor_deferred` stop reason and the error in `stopDetail`. This fails closed, as the per-lane
+    `unreadable` verdict does. It is never swallowed into "admitted".
+  acceptance:
+    - claim: "a multi-lane drain pass whose quiet-hours dep holds every lane ends quiet_hours_deferred, and a throwing pass-level cost or queue governor in either drain loop ends the pass with its deferral and the error in stopDetail, logged, instead of throwing out of runDrain"
+      proof: "unit test: test/drain-honours-quiet-hours-and-survives-a-governor-throw.test.ts"
+  falsifier: |
+    Remove the try/catch around the single-lane loop's cost read. The suite's throwing governor rejects
+    `runDrain`.
