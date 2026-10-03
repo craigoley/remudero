@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-innovation-1790600000 -> plan-innovation-memory-1790600000"
   plan_refs: []
   files: [src/lib/goals.ts, test/a-goal-is-re-measured-when-its-tasks-settle.test.ts, src/run-task.ts, src/lib/plan.ts, src/lib/retro.ts, src/lib/analytics-route.ts, plan/goals.d/G-pr-flow.yaml, plan/goals.d/G-ci-redesign.yaml, plan/goals.d/G-model-evidence.yaml, scripts/console-parity-ratchet.mjs]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED: origin: is free text (12 shards share 'operator ask 2026-09-24: get PRs through the process quicker');
