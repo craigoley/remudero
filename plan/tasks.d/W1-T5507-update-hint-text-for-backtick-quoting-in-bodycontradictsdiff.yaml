@@ -1,0 +1,15 @@
+- id: W1-T5507
+  title: Update hint text for backtick quoting in bodyContradictsDiff
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - src/lib/review.ts
+  acceptance:
+    - claim: "The FAIL message hint in bodyContradictsDiff now correctly describes that only fenced blocks, blockquotes, or HTML comments suppress the match for arm (b)"
+      proof: "grep: blockquotes, or HTML comments in src/lib/review.ts"
+  origin: architect
