@@ -329,7 +329,7 @@ test("a synchronous usage transport refusal releases its retained input and pres
 
 
 test("an ordinary usage caller waits for native credential rotation before immediately tearing down", async () => {
-  const root = mkdtempSync(join(tmpdir(), "usage-refresh-lifetime-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-usage-refresh-lifetime-"));
   const dir = join(root, ".claude-fleet");
   mkdirSync(dir);
   const path = join(dir, ".credentials.json");
@@ -359,7 +359,7 @@ test("an ordinary usage caller waits for native credential rotation before immed
 });
 
 test("a native credential refresh timeout or lost store is unreadable and never reaches usage", async () => {
-  const root = mkdtempSync(join(tmpdir(), "usage-refresh-refusal-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-usage-refresh-refusal-"));
   const dir = join(root, ".claude-fleet"); mkdirSync(dir);
   const path = join(dir, ".credentials.json");
   try {
@@ -387,7 +387,7 @@ test("a native credential refresh timeout or lost store is unreadable and never 
 });
 
 test("a healthy or unknown-expiry usage credential does not wait for a rotation", async () => {
-  const root = mkdtempSync(join(tmpdir(), "usage-refresh-control-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-usage-refresh-control-"));
   const dir = join(root, ".claude-fleet"); mkdirSync(dir);
   const path = join(dir, ".credentials.json");
   try {
@@ -404,7 +404,7 @@ test("a healthy or unknown-expiry usage credential does not wait for a rotation"
 
 
 test("the default usage refresh wait observes a real file replacement without sending a prompt", async () => {
-  const root = mkdtempSync(join(tmpdir(), "usage-refresh-default-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-usage-refresh-default-"));
   const dir = join(root, ".claude-fleet"); mkdirSync(dir);
   const path = join(dir, ".credentials.json");
   writeFileSync(path, JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-refresh", expiresAt: Date.now() - 1 } }), { mode: 0o600 });
@@ -426,7 +426,7 @@ test("the default usage refresh wait observes a real file replacement without se
 
 
 test("the usage probe waits inside the pinned native CLI refresh margin while the token is still valid", async () => {
-  const root = mkdtempSync(join(tmpdir(), "usage-refresh-margin-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-usage-refresh-margin-"));
   const dir = join(root, ".claude-fleet"); mkdirSync(dir);
   const path = join(dir, ".credentials.json");
   let nowMs = 1_000; let polls = 0;
@@ -444,7 +444,7 @@ test("the usage probe waits inside the pinned native CLI refresh margin while th
 
 
 test("the usage control and real worker HOME grant use an explicitly provisioned common Claude authority", async () => {
-  const root = mkdtempSync(join(tmpdir(), "usage-shared-authority-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-usage-shared-authority-"));
   const realHome = join(root, "operator");
   const shared = join(realHome, ".claude", "fleet-auth", "claude");
   mkdirSync(shared, { recursive: true });

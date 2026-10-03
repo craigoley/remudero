@@ -991,7 +991,7 @@ test("Linux credential preflight reads the same narrowed store the real worker H
 
 
 test("an explicitly shared Claude child owns every worker grant and preserves old credential forks", () => {
-  const root = mkdtempSync(join(tmpdir(), "shared-claude-authority-"));
+  const root = mkdtempSync(join(tmpdir(), "rmd-shared-claude-authority-"));
   const realHome = join(root, "operator");
   const shared = join(realHome, ".claude", "fleet-auth", "claude");
   const old = join(realHome, ".claude-fleet");
