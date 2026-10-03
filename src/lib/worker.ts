@@ -14,6 +14,7 @@ import {
   realpathSync,
   renameSync,
   statSync,
+  statfsSync,
   symlinkSync,
   unlinkSync,
   rmSync,
@@ -25,7 +26,7 @@ import {
 // (W1-T208).
 import fs from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { createSdkMcpServer, query, tool, type Options, type PermissionMode, type SDKUserMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
@@ -3798,7 +3799,7 @@ export function adhocLaneRoot(config: Config): string {
  * weekend, about 84 hours, so fourteen days is roughly four times that while still bounding a directory growing at 15-88
  * entries a day. AGE IS THE BACKSTOP, NOT THE PREDICATE: {@link reapStaleWorktrees} fails closed on a live pid, a live
  * upstream branch and an incomplete probe, so against the measured population this reclaims ZERO today — the value delivered
- * is the bound (W1-T2847; docs/forensics/worker.md). */
+ * is the bound (W1-T2847; docs/forensics/worker.md). W1-T4065 scales this ceiling by the free-space fraction. */
 export const ADHOC_LANE_REAP_GRACE_MS = 14 * 24 * 60 * 60 * 1000;
 
 /** This rmd install's own root — the same derivation `src/lib/policy.ts` uses from a `src/lib/` module. Its `node_modules` is
@@ -5578,7 +5579,10 @@ export type WorktreeKeepReason =
   | "git-unreadable"
   /** W1-T2950: the candidate's or a registered worktree's canonical path could not be resolved, so registration could
    *  not be decided. Unknowable never destroys. */
-  | "registration-undecidable";
+  | "registration-undecidable"
+  | "unpushed-commit"
+  | "inflight-lock"
+  | "work-undecidable";
 
 /** The newest mtime anywhere under `dir`, and whether the walk could be trusted. TRAP: a DIRECTORY's mtime advances only when
  * an entry is added to or removed from THAT directory, never when a nested file is modified, so age-gating on the root's own
@@ -5676,6 +5680,11 @@ export interface WorktreeReapOpts {
    * candidates such as {@link unmanagedWorktreeLanes}: the removal and keep predicates stay here, but no directory walk over
    * the candidates' common parent is introduced. */
   candidatePaths?: readonly string[];
+  /** Lane-only safety gates, applied before age can permit removal (W1-T4065). */
+  keepReason?: (path: string, branch?: string) => WorktreeKeepReason | undefined;
+  /** Observe a directory before any removal, so census bytes survive an armed pass. */
+  onCandidate?: (path: string) => void;
+  onEnumerationError?: (error: unknown) => void;
 }
 
 /** A {@link WorktreeReapOpts.isPidAlive}-shaped predicate for the one-shot container boot rung: it answers "is THIS the
@@ -5892,7 +5901,8 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
       rootEntries = fs.readdirSync(root);
       entries = rootEntries.map((name) => ({ name, path: join(root, name) }));
     }
-  } catch {
+  } catch (e) {
+    opts.onEnumerationError?.(e);
     return { reaped, reapedLocks, kept, keptReasons }; // unreadable root — best-effort, never throws
   }
 
@@ -5905,6 +5915,7 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
       continue; // vanished between readdir and stat — someone else's cleanup won the race
     }
     if (!isDir) continue;
+    opts.onCandidate?.(entryPath);
 
     const lockRead = readRunLock(entryPath);
     if (lockRead.kind === "live" && isPidAlive(lockRead.info.pid, lockRead.info)) {
@@ -5929,6 +5940,11 @@ export function reapStaleWorktrees(root: string, opts: WorktreeReapOpts = {}): W
     const registration = lookup.kind === "registered" ? { repoDir: lookup.repoDir, branch: lookup.branch } : null;
     if (registration?.branch && branchIsLiveUpstream(registration.branch, registration.repoDir)) {
       keep(name, "live-branch");
+      continue;
+    }
+    const additionalReason = opts.keepReason?.(entryPath, registration?.branch);
+    if (additionalReason !== undefined) {
+      keep(name, additionalReason);
       continue;
     }
 
@@ -6034,12 +6050,49 @@ function mergeWorktreeReapSummaries(summaries: readonly WorktreeReapSummary[]): 
   };
 }
 
-/** THE AD-HOC LANE RUNG: the same reaper, pointed at {@link adhocLaneRoot}, shipping SURVEY-FIRST. NO SECOND REMOVAL, BY
- * CONSTRUCTION — it delegates to {@link reapStaleWorktrees} and makes no filesystem call at all, so the 2026-07-31 defect
- * cannot be reinstated here, and the liveness doctrine is inherited whole. It adds roots/candidates only: the ad-hoc root,
- * the registered unmanaged paths, and the lane age ceiling. SURVEY-FIRST IS THE DEFAULT AND THE DEFAULT IS OFF: `enabled`
- * defaults to `false`, so the pass ledgers what it WOULD reclaim while removing nothing. Arming is a separate operator decision (W1-T2847;
- * docs/forensics/worker.md). */
+function laneSizeBytes(path: string): number {
+  const out = execFileSync("du", ["-sk", path], { encoding: "utf8", stdio: "pipe" });
+  const kilobytes = out.trim().split(/\s+/)[0];
+  const bytes = Number(kilobytes) * 1024;
+  if (!kilobytes || !Number.isFinite(bytes) || bytes < 0) throw new Error(`invalid disk usage for ${path}: ${out}`);
+  return bytes;
+}
+
+function laneWorkKeepReason(config: Config, path: string, branch?: string): WorktreeKeepReason | undefined {
+  // Missing is the only lock/stat failure that proves absence; every other failure keeps.
+  const present = (p: string): boolean => {
+    try {
+      lstatSync(p);
+      return true;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw e;
+    }
+  };
+  if (present(runLockPath(path)) && readRunLock(path).kind !== "live") return "work-undecidable";
+  const taskId = [branch ?? "", basename(path)].map((name) => name.match(/^run-(W\d+-T\d+)-\d+$/)?.[1]).find(Boolean);
+  if (taskId && present(join(config.root, "state", "inflight", `${taskId}.lock`))) return "inflight-lock";
+  if (!present(join(path, ".git"))) return undefined;
+  const exclusions = ["--remotes"];
+  const remoteRefs = execFileSync("git", ["-C", path, "for-each-ref", "--format=%(refname)", "refs/remotes/"],
+    { encoding: "utf8", stdio: "pipe" });
+  if (!remoteRefs.trim()) {
+    // A remote-less linked lane inherits the primary checkout's history; only lane-only commits protect it.
+    const dirs = execFileSync("git", ["-C", path, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+      { encoding: "utf8", stdio: "pipe" }).trim().split("\n");
+    if (dirs[0] !== dirs[1]) {
+      const parentHead = execFileSync("git", ["--git-dir", dirs[1], "rev-parse", "--verify", "HEAD"],
+        { encoding: "utf8", stdio: "pipe" }).trim();
+      exclusions.push(parentHead);
+    }
+  }
+  const unpushed = execFileSync("git", ["-C", path, "rev-list", "--max-count=1", "HEAD", "--not", ...exclusions],
+    { encoding: "utf8", stdio: "pipe" });
+  return unpushed.trim() ? "unpushed-commit" : undefined;
+}
+
+/** Survey-first lane reap with one census per pass (W1-T4065). Removal stays in reapStaleWorktrees;
+ * disk pressure changes only the age gate, never the live-work or undecidable gates. */
 export function runAdhocLaneReapRung(
   config: Config,
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -6054,18 +6107,62 @@ export function runAdhocLaneReapRung(
      * BOTH managed roots — see {@link unmanagedWorktreeLanes}. Omitted ⇒ that report is skipped entirely. */
     repoDir?: string;
     listUnmanaged?: typeof unmanagedWorktreeLanes;
+    diskHeadroom?: (path: string) => { freeBytes?: number; totalBytes?: number };
+    sizeBytes?: (path: string) => number | undefined;
   } = {},
 ): WorktreeReapSummary | null {
+  const summaries: WorktreeReapSummary[] = [];
+  const sizes = new Map<string, number | undefined>();
+  let root = "";
+  let enabled = false;
+  let graceMs = deps.maxAgeMs ?? ADHOC_LANE_REAP_GRACE_MS;
+  let fraction: number | null = null;
+  let error: string | undefined;
   try {
-    const enabled = (deps.enabled ?? (() => false))();
+    enabled = (deps.enabled ?? (() => false))();
     const reap = deps.reap ?? reapStaleWorktrees;
-    const root = (deps.root ?? (() => adhocLaneRoot(config)))();
+    root = (deps.root ?? (() => adhocLaneRoot(config)))();
+    try {
+      const disk = (deps.diskHeadroom ?? ((path: string) => {
+        const stat = statfsSync(path);
+        return { freeBytes: stat.bavail * stat.bsize, totalBytes: stat.blocks * stat.bsize };
+      }))(root);
+      if (Number.isFinite(disk.freeBytes) && disk.freeBytes! >= 0 &&
+          Number.isFinite(disk.totalBytes) && disk.totalBytes! > 0) {
+        fraction = Math.min(1, disk.freeBytes! / disk.totalBytes!);
+        graceMs *= fraction;
+      }
+    } catch (e) {
+      log("adhoc_lane.reap.headroom_error", { error: String(e) });
+    }
     const baseOpts = {
       dryRun: !enabled,
-      maxAgeMs: deps.maxAgeMs ?? ADHOC_LANE_REAP_GRACE_MS,
+      maxAgeMs: graceMs,
       isPidAlive: deps.isPidAlive ?? worktreeLockIsPidAlive,
+      onEnumerationError: (e: unknown): void => {
+        error = String(e);
+        log("adhoc_lane.reap.enumeration_error", { root, error });
+      },
+      onCandidate: (path: string): void => {
+        try {
+          const bytes = (deps.sizeBytes ?? laneSizeBytes)(path);
+          sizes.set(path, bytes !== undefined && Number.isFinite(bytes) && bytes >= 0 ? bytes : undefined);
+        } catch (e) {
+          sizes.set(path, undefined);
+          log("adhoc_lane.reap.measurement_error", { path, error: String(e) });
+        }
+      },
+      keepReason: (path: string, branch?: string): WorktreeKeepReason | undefined => {
+        try {
+          return laneWorkKeepReason(config, path, branch);
+        } catch (e) {
+          log("adhoc_lane.reap.work_undecidable", { path, error: String(e) });
+          return "work-undecidable";
+        }
+      },
     };
     const rootSummary = reap(root, baseOpts);
+    summaries.push(rootSummary);
     // LEDGER THE SURVEY EVEN THOUGH NOTHING WAS REMOVED — that IS the deliverable while disarmed. `reapStaleWorktrees`
     // populates `reaped`/`reapedLocks` under `dryRun` precisely so a caller can record what it would have reclaimed
     // (W1-T406's own shape).
@@ -6077,7 +6174,6 @@ export function runAdhocLaneReapRung(
         reaped_locks: rootSummary.reapedLocks.length,
       });
     }
-    const summaries = [rootSummary];
     // NAME AND SWEEP the lanes no cadence can reach: the source is still git's own registration, but the keep/remove
     // decisions stay inside reapStaleWorktrees. Supplying `candidatePaths` is the safety boundary — no parent directory is
     // walked to find unmanaged lanes.
@@ -6103,8 +6199,30 @@ export function runAdhocLaneReapRung(
     return summary;
   } catch (e) {
     // Best-effort, exactly like the sibling boot sweeps — a reclaim rung never blocks a dispatch.
-    log("adhoc_lane.reap.error", { error: String((e as Error)?.message ?? e) });
+    error = String((e as Error)?.message ?? e);
+    log("adhoc_lane.reap.error", { error });
     return null;
+  } finally {
+    const summary = mergeWorktreeReapSummaries(summaries);
+    const bucket = () => ({ count: 0, bytes: 0, bytes_unknown: 0 });
+    const reaped = bucket();
+    const keptByReason: Record<string, ReturnType<typeof bucket>> = {};
+    const count = (target: ReturnType<typeof bucket>, name: string): void => {
+      target.count++;
+      const bytes = sizes.get(isAbsolute(name) ? name : join(root, name));
+      if (bytes === undefined) target.bytes_unknown++;
+      else target.bytes += bytes;
+    };
+    for (const name of summary.reaped) count(reaped, name);
+    const reasons = new Map((summary.keptReasons ?? []).map((k) => [k.name, k.reason]));
+    for (const name of summary.kept) {
+      const reason = reasons.get(name) ?? "work-undecidable";
+      count(keptByReason[reason] ??= bucket(), name);
+    }
+    log("adhoc_lane.reap.census", {
+      root, dry_run: !enabled, grace_ms: graceMs, free_fraction: fraction,
+      kept_by_reason: keptByReason, reaped, ...(error !== undefined ? { error } : {}),
+    });
   }
 }
 

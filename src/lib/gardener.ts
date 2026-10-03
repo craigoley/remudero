@@ -49,7 +49,9 @@ export interface GardenState<C extends string> {
   filingFailures?: { count: number; lastAt: string; reason: string };
   /** Ids of overseer effect verdicts already folded into `classes` (newest last), so a replay credits once. */
   foldedEffects?: string[];
-  /** Highest overseer sequence durably folded; older receipts may leave the 200-ID replay cache. */
+  /** Legacy verdicts have no ordered watermark, so their receipts must not age out. */
+  foldedLegacyEffects?: string[];
+  /** Complete delivered prefix for this gardener; sequence gaps belong to other gardeners. */
   foldedEffectThrough?: number;
 }
 
@@ -65,6 +67,13 @@ export interface GardenEffect {
 }
 
 const GARDEN_FOLDED_EFFECTS_KEPT = 200;
+
+class GardenEffectProtocolError extends RmdError {
+  constructor(detail: string) {
+    super("gardener", GENERIC_EXIT_CODE, detail);
+    this.name = "GardenEffectProtocolError";
+  }
+}
 
 export function gardenEffectsPath(stateDir: string, name: string): string {
   return join(stateDir, `${name}-gardener-effects.json`);
@@ -104,22 +113,45 @@ export function writeGardenEffects(path: string, effects: readonly GardenEffect[
   writeAtomic(path, JSON.stringify({ effects }, null, 2) + "\n");
 }
 
-/** Credit or debit each class named by a verdict not folded before. Unknown classes are skipped. */
-export function foldGardenEffects<C extends string>(state: GardenState<C>, effects: readonly GardenEffect[]): { state: GardenState<C>; applied: GardenEffect[] } {
+/** Fold an ordered producer prefix, stopping before a class this consumer cannot acknowledge. */
+export function foldGardenEffects<C extends string>(state: GardenState<C>, effects: readonly GardenEffect[]): { state: GardenState<C>; applied: GardenEffect[]; remaining: GardenEffect[] } {
   const seen = new Set(state.foldedEffects ?? []);
-  const applied: GardenEffect[] = [];
-  const classes = { ...state.classes };
+  const legacy = new Set(state.foldedLegacyEffects ?? ((state.foldedEffectThrough ?? 0) === 0 ? state.foldedEffects ?? [] : []));
+  let foldedEffectThrough = state.foldedEffectThrough ?? 0;
+  let previous = 0;
+  const ids = new Set<string>();
+  const sequenced = effects.some((e) => e.sequence !== undefined);
   for (const e of effects) {
-    if (seen.has(e.id)) continue;
-    seen.add(e.id);
+    if (sequenced && (e.sequence === undefined || !Number.isSafeInteger(e.sequence) || e.sequence <= previous || ids.has(e.id))) {
+      throw new GardenEffectProtocolError("gardener effects are not an ordered, unique producer prefix");
+    }
+    previous = e.sequence ?? 0;
+    ids.add(e.id);
+  }
+  if (state.foldedLegacyEffects === undefined && (state.foldedEffects?.length ?? 0) >= GARDEN_FOLDED_EFFECTS_KEPT &&
+    effects.some((e) => !seen.has(e.id) && (e.sequence === undefined || state.foldedEffectThrough === undefined))) {
+    throw new GardenEffectProtocolError("legacy gardener receipt is unavailable beyond the retained 200 IDs");
+  }
+  const applied: GardenEffect[] = [];
+  let remaining: GardenEffect[] = [];
+  const classes = { ...state.classes };
+  for (const [i, e] of effects.entries()) {
+    if (e.sequence !== undefined && e.sequence <= foldedEffectThrough) continue;
+    if (legacy.has(e.id) || seen.has(e.id)) {
+      if (e.sequence !== undefined) foldedEffectThrough = e.sequence;
+      else legacy.add(e.id);
+      continue;
+    }
     const c = classes[e.actionClass as C];
-    if (!c) continue;
+    if (!Object.hasOwn(classes, e.actionClass)) { remaining = effects.slice(i); break; }
     classes[e.actionClass as C] = e.verdict === "credit" ? { ...c, alpha: c.alpha + 1 } : { ...c, beta: c.beta + 1 };
     applied.push(e);
+    seen.add(e.id);
+    if (e.sequence === undefined) legacy.add(e.id);
+    else foldedEffectThrough = e.sequence;
   }
   const foldedEffects = [...seen].slice(-GARDEN_FOLDED_EFFECTS_KEPT);
-  const foldedEffectThrough = effects.reduce((through, e) => Math.max(through, e.sequence ?? 0), state.foldedEffectThrough ?? 0);
-  return { state: { ...state, classes, foldedEffects, ...(foldedEffectThrough ? { foldedEffectThrough } : {}) }, applied };
+  return { state: { ...state, classes, foldedEffects, ...(legacy.size ? { foldedLegacyEffects: [...legacy] } : {}), ...(foldedEffectThrough ? { foldedEffectThrough } : {}) }, applied, remaining };
 }
 
 export type PrState = "open" | "merged" | "closed" | "unknown";
@@ -222,7 +254,7 @@ function gardenStateFault(parsed: unknown): string | undefined {
   for (const [name, c] of Object.entries(parsed.classes)) {
     if (!isRecord(c) || !isCount(c.alpha) || !isCount(c.beta)) return `class \`${name}\` has no numeric alpha and beta`;
   }
-  const { pending, lastPass, lastCheap, filingFailures, foldedEffects, foldedEffectThrough } = parsed;
+  const { pending, lastPass, lastCheap, filingFailures, foldedEffects, foldedLegacyEffects, foldedEffectThrough } = parsed;
   if (pending !== undefined) {
     if (!isRecord(pending) || typeof pending.prUrl !== "string") return "`pending` has no PR url";
     if (typeof pending.actionClass !== "string" || !(pending.actionClass in parsed.classes)) return "`pending` names a class the record does not hold";
@@ -232,6 +264,7 @@ function gardenStateFault(parsed: unknown): string | undefined {
   if (lastCheap !== undefined && typeof lastCheap !== "string") return "`lastCheap` is not a string";
   if (filingFailures !== undefined && (!isRecord(filingFailures) || !isCount(filingFailures.count) || typeof filingFailures.lastAt !== "string" || typeof filingFailures.reason !== "string")) return "`filingFailures` is malformed";
   if (foldedEffects !== undefined && (!Array.isArray(foldedEffects) || foldedEffects.some((id) => typeof id !== "string"))) return "`foldedEffects` is not a list of ids";
+  if (foldedLegacyEffects !== undefined && (!Array.isArray(foldedLegacyEffects) || foldedLegacyEffects.some((id) => typeof id !== "string"))) return "`foldedLegacyEffects` is not a list of ids";
   if (foldedEffectThrough !== undefined && (!Number.isSafeInteger(foldedEffectThrough) || (foldedEffectThrough as number) < 0)) return "`foldedEffectThrough` is not a sequence";
   return undefined;
 }
@@ -410,7 +443,8 @@ export function runGarden<C extends string, I, A extends GardenAction<C>, W exte
     const folded = foldGardenEffects(state, pendingEffects);
     state = folded.state;
     writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n");
-    rmSync(effectsPath, { force: true });
+    if (folded.remaining.length > 0) writeGardenEffects(effectsPath, folded.remaining);
+    else rmSync(effectsPath, { force: true });
     if (folded.applied.length > 0) deps.log(`${spec.name}.gardener_effects_folded`, { verdicts: folded.applied.map((e) => `${e.kind}:${e.verdict}:${e.actionClass}`), classes: state.classes });
   }
   if ((gardenFilingRetryAt(state.filingFailures) ?? 0) > (deps.clock ?? systemClock).now()) return { ran: false };

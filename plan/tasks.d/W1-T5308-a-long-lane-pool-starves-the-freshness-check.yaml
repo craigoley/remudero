@@ -11,7 +11,7 @@
   band_meaning: span
   origin: "operator session 90be18e2, 2026-10-02: board red, queue not clearing"
   files: [src/lib/daemon.ts, test/w1-t5308-a-long-lane-pool-never-starves-the-freshness-check.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-02 on the fleet host: the core daemon booted at 16:44 on 09d7262ce and logged its last
