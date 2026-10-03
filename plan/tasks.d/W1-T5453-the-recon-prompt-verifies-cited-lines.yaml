@@ -1,4 +1,4 @@
-- id: W1-T9911
+- id: W1-T5453
   title: "THE RECON PROMPT NEVER VERIFIES A CITED LINE — it asks only for the remote, the history and the tree shape, so a record whose file:line citations have drifted is discovered by the implement worker, or by CI"
   repo: remudero
   depends_on: []
@@ -31,7 +31,7 @@
     not claim an improvement).
   acceptance:
     - claim: "the recon prompt asks for every cited file and line to be verified at head"
-      proof: 'grep: test("W1-T9911: the recon prompt asks for every cited file and line to be verified at head" in test/the-recon-prompt-verifies-cited-lines.test.ts'
+      proof: 'grep: test("W1-T5453: the recon prompt asks for every cited file and line to be verified at head" in test/the-recon-prompt-verifies-cited-lines.test.ts'
   falsifier: |
     CLOSE THIS TASK without implementation if renderReconPrompt already asks for citation verification at HEAD.
   notes: |

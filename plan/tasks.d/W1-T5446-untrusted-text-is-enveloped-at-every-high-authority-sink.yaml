@@ -1,4 +1,4 @@
-- id: W1-T9904
+- id: W1-T5446
   title: "FOUR HIGH-AUTHORITY PROMPTS INTERPOLATE THIRD-PARTY TEXT UNWRAPPED — the alert-fix prompt, the fix prompt's reviewer output, the diagnose prompt's failure evidence and the onboarding synthesis findings sit outside the untrusted envelope, and nothing fails when a new sink is added bare"
   repo: remudero
   depends_on: []
@@ -45,11 +45,11 @@
 
   acceptance:
     - claim: "the alert-fix prompt carries scanner text only inside the untrusted envelope"
-      proof: 'grep: test("W1-T9904: the alert-fix prompt carries scanner text only inside the untrusted envelope" in test/untrusted-text-is-enveloped-at-every-high-authority-sink.test.ts'
+      proof: 'grep: test("W1-T5446: the alert-fix prompt carries scanner text only inside the untrusted envelope" in test/untrusted-text-is-enveloped-at-every-high-authority-sink.test.ts'
     - claim: "the fix and diagnose prompts carry reviewer output and failure evidence only inside the envelope"
-      proof: 'grep: test("W1-T9904: the fix and diagnose prompts carry reviewer output and failure evidence only inside the envelope" in test/untrusted-text-is-enveloped-at-every-high-authority-sink.test.ts'
+      proof: 'grep: test("W1-T5446: the fix and diagnose prompts carry reviewer output and failure evidence only inside the envelope" in test/untrusted-text-is-enveloped-at-every-high-authority-sink.test.ts'
     - claim: "a prompt builder that interpolates third-party text without the envelope fails the census"
-      proof: 'grep: test("W1-T9904: a prompt builder that interpolates third-party text without the envelope fails the census" in test/untrusted-text-is-enveloped-at-every-high-authority-sink.test.ts'
+      proof: 'grep: test("W1-T5446: a prompt builder that interpolates third-party text without the envelope fails the census" in test/untrusted-text-is-enveloped-at-every-high-authority-sink.test.ts'
   falsifier: |
     CLOSE THIS TASK without implementation if, at the latest main, each of the four sinks already passes its text
     through `envelope(` and a census already fails on a bare interpolation of those names.

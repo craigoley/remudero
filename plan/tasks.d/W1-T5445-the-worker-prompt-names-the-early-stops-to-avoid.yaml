@@ -1,4 +1,4 @@
-- id: W1-T9903
+- id: W1-T5445
   title: "THE WORKER PROMPT NEVER NAMES THE WAYS A TURN ENDS EARLY — it ends on 'End with a REPORT', then a SELF_FORECAST line is appended AFTER the PR_URL-is-last rule, and nothing names the four stops the Opus 5.5 guide says to forbid"
   repo: remudero
   depends_on: []
@@ -40,11 +40,11 @@
 
   acceptance:
     - claim: "the implement contract names the early stops to avoid and the stops that are wanted"
-      proof: 'grep: test("W1-T9903: the implement contract names the early stops to avoid and the stops that are wanted" in test/the-worker-prompt-names-the-early-stops-to-avoid.test.ts'
+      proof: 'grep: test("W1-T5445: the implement contract names the early stops to avoid and the stops that are wanted" in test/the-worker-prompt-names-the-early-stops-to-avoid.test.ts'
     - claim: "the final line of the implement prompt is the PR_URL rule with the self forecast ahead of it"
-      proof: 'grep: test("W1-T9903: the PR_URL rule is the last line with the self forecast ahead of it" in test/the-worker-prompt-names-the-early-stops-to-avoid.test.ts'
+      proof: 'grep: test("W1-T5445: the PR_URL rule is the last line with the self forecast ahead of it" in test/the-worker-prompt-names-the-early-stops-to-avoid.test.ts'
     - claim: "the paragraph is absent for any model it is not gated to"
-      proof: 'grep: test("W1-T9903: the early-stop paragraph is absent for any model it is not gated to" in test/the-worker-prompt-names-the-early-stops-to-avoid.test.ts'
+      proof: 'grep: test("W1-T5445: the early-stop paragraph is absent for any model it is not gated to" in test/the-worker-prompt-names-the-early-stops-to-avoid.test.ts'
   falsifier: |
     CLOSE THIS TASK without implementation if the measure task in this pack shows Opus 5.5 implement runs do not
     end early, or if the contract already names these stops.

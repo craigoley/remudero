@@ -1,4 +1,4 @@
-- id: W1-T9914
+- id: W1-T5456
   title: "ONE UNPARSEABLE PLAN SHARD STOPS THE WHOLE FLEET — on 2026-10-03 a duplicate `priority:` key in plan/tasks.d/w1-t5431-selector-shadow-miss.yaml made the core daemon crash-loop at boot (PlanError: plan is not valid YAML, Map keys must be unique); W1-T4421 already quarantines a duplicate task ID and keeps running, but a shard that fails to parse still throws out of the plan read"
   repo: remudero
   depends_on: []
@@ -42,15 +42,15 @@
 
   acceptance:
     - claim: "a shard that is not valid YAML is quarantined and the rest of the plan loads"
-      proof: 'grep: test("W1-T9914: a shard that is not valid YAML is quarantined and the rest of the plan loads" in test/a-malformed-shard-is-quarantined-not-fatal.test.ts'
+      proof: 'grep: test("W1-T5456: a shard that is not valid YAML is quarantined and the rest of the plan loads" in test/a-malformed-shard-is-quarantined-not-fatal.test.ts'
     - claim: "a task depending only on a quarantined shard is quarantined too and named"
-      proof: 'grep: test("W1-T9914: a task depending only on a quarantined shard is quarantined too and named" in test/a-malformed-shard-is-quarantined-not-fatal.test.ts'
+      proof: 'grep: test("W1-T5456: a task depending only on a quarantined shard is quarantined too and named" in test/a-malformed-shard-is-quarantined-not-fatal.test.ts'
     - claim: "a monolith that does not parse is still fatal"
-      proof: 'grep: test("W1-T9914: a monolith that does not parse is still fatal" in test/a-malformed-shard-is-quarantined-not-fatal.test.ts'
+      proof: 'grep: test("W1-T5456: a monolith that does not parse is still fatal" in test/a-malformed-shard-is-quarantined-not-fatal.test.ts'
     - claim: "the lint and CI path still fails loud on the same shard"
-      proof: 'grep: test("W1-T9914: the lint path still fails loud on the same shard" in test/a-malformed-shard-is-quarantined-not-fatal.test.ts'
+      proof: 'grep: test("W1-T5456: the lint path still fails loud on the same shard" in test/a-malformed-shard-is-quarantined-not-fatal.test.ts'
     - claim: "a quarantined entry carries its reason and the parse message"
-      proof: 'grep: test("W1-T9914: a quarantined entry carries its reason and the parse message" in test/a-malformed-shard-is-quarantined-not-fatal.test.ts'
+      proof: 'grep: test("W1-T5456: a quarantined entry carries its reason and the parse message" in test/a-malformed-shard-is-quarantined-not-fatal.test.ts'
   falsifier: |
     Let a malformed shard throw out of the daemon's plan read, or let the lint path swallow it. The affected
     proof must fail. CLOSE THIS TASK without implementation if `git grep -n "unparseable" src/lib/plan.ts`

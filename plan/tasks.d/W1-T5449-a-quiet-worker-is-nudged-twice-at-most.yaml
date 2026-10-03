@@ -1,4 +1,4 @@
-- id: W1-T9907
+- id: W1-T5449
   title: "THE OPERATOR CANNOT TELL A SILENT WORKER FROM A BUSY ONE — the state sensor counts any message as a heartbeat, thinking blocks are ignored, and a worker that makes twenty tool calls with no readable text shows a stale reason and tail"
   repo: remudero
   depends_on: []
@@ -40,11 +40,11 @@
 
   acceptance:
     - claim: "six tool-only messages cause exactly one reminder"
-      proof: 'grep: test("W1-T9907: six tool-only messages cause exactly one reminder" in test/a-quiet-worker-is-nudged-twice-at-most.test.ts'
+      proof: 'grep: test("W1-T5449: six tool-only messages cause exactly one reminder" in test/a-quiet-worker-is-nudged-twice-at-most.test.ts'
     - claim: "a third reminder is never sent and text resets the counter"
-      proof: 'grep: test("W1-T9907: a third reminder is never sent and text resets the counter" in test/a-quiet-worker-is-nudged-twice-at-most.test.ts'
+      proof: 'grep: test("W1-T5449: a third reminder is never sent and text resets the counter" in test/a-quiet-worker-is-nudged-twice-at-most.test.ts'
     - claim: "with the flag off the ledger output is byte-identical"
-      proof: 'grep: test("W1-T9907: with the flag off the ledger output is byte-identical" in test/a-quiet-worker-is-nudged-twice-at-most.test.ts'
+      proof: 'grep: test("W1-T5449: with the flag off the ledger output is byte-identical" in test/a-quiet-worker-is-nudged-twice-at-most.test.ts'
   falsifier: |
     CLOSE THIS TASK without implementation if a quiet-step reminder already exists, or if a mid-turn message
     is observed to disturb a running turn in a way that breaks the one-shot DECISION_REQUEST flow.

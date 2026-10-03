@@ -1,4 +1,4 @@
-- id: W1-T9915
+- id: W1-T5457
   title: "TWO PLAN WRITERS CAN EACH PRODUCE A VALID SHARD AND MERGE INTO AN INVALID ONE — the 2026-10-03 outage was two gardener PRs editing the same record 28 s apart; each linted clean against its own base, git merged both without a textual conflict, and nothing checked the result. A plan-writing gardener re-reads fresh origin/main and lints its change on top of it immediately before it lands"
   repo: remudero
   depends_on: []
@@ -11,7 +11,7 @@
   status: queued
   attempts: 0
   origin: "operator session 2026-10-03: the Follow-up section of PR #8877 (a plan-validity check on the merged result in each gardener's landing step)"
-  plan_refs: ["W1-T9914", "W1-T4110", "W1-T4941", "W1-T5361", "W1-T4533"]
+  plan_refs: ["W1-T5456", "W1-T4110", "W1-T4941", "W1-T5361", "W1-T4533"]
   files:
     - src/lib/gardener.ts
     - test/a-plan-writing-gardener-lints-the-merged-result-before-it-lands.test.ts
@@ -42,13 +42,13 @@
 
   acceptance:
     - claim: "a change that parses alone but duplicates a key against fresh main is refused"
-      proof: 'grep: test("W1-T9915: a change that parses alone but duplicates a key against fresh main is refused" in test/a-plan-writing-gardener-lints-the-merged-result-before-it-lands.test.ts'
+      proof: 'grep: test("W1-T5457: a change that parses alone but duplicates a key against fresh main is refused" in test/a-plan-writing-gardener-lints-the-merged-result-before-it-lands.test.ts'
     - claim: "a clean change lands unchanged"
-      proof: 'grep: test("W1-T9915: a clean change lands unchanged" in test/a-plan-writing-gardener-lints-the-merged-result-before-it-lands.test.ts'
+      proof: 'grep: test("W1-T5457: a clean change lands unchanged" in test/a-plan-writing-gardener-lints-the-merged-result-before-it-lands.test.ts'
     - claim: "a refused landing is ledgered and is not a filing failure"
-      proof: 'grep: test("W1-T9915: a refused landing is ledgered and is not a filing failure" in test/a-plan-writing-gardener-lints-the-merged-result-before-it-lands.test.ts'
+      proof: 'grep: test("W1-T5457: a refused landing is ledgered and is not a filing failure" in test/a-plan-writing-gardener-lints-the-merged-result-before-it-lands.test.ts'
     - claim: "a path outside the plan is not checked"
-      proof: 'grep: test("W1-T9915: a path outside the plan is not checked" in test/a-plan-writing-gardener-lints-the-merged-result-before-it-lands.test.ts'
+      proof: 'grep: test("W1-T5457: a path outside the plan is not checked" in test/a-plan-writing-gardener-lints-the-merged-result-before-it-lands.test.ts'
   falsifier: |
     Land a shard that duplicates a key against fresh main, or count a refused landing as a filing failure so a
     healthy check escalates. The affected proof must fail. CLOSE THIS TASK without implementation if

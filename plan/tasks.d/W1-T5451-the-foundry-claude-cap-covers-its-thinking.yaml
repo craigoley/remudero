@@ -1,4 +1,4 @@
-- id: W1-T9909
+- id: W1-T5451
   title: "THE FOUNDRY CLAUDE EMERGENCY PATH CAPS OUTPUT AT 8,000 TOKENS WHILE SENDING A HIGH EFFORT — thinking counts toward max_tokens, so a long turn truncates and throws after the money is already spent"
   repo: remudero
   depends_on: []
@@ -31,9 +31,9 @@
 
   acceptance:
     - claim: "a foundry claude turn of nine thousand output tokens succeeds under the new cap"
-      proof: 'grep: test("W1-T9909: a foundry claude turn of nine thousand output tokens succeeds" in test/the-foundry-claude-cap-covers-its-thinking.test.ts'
+      proof: 'grep: test("W1-T5451: a foundry claude turn of nine thousand output tokens succeeds" in test/the-foundry-claude-cap-covers-its-thinking.test.ts'
     - claim: "the budget reservation covers the new output cap"
-      proof: 'grep: test("W1-T9909: the budget reservation covers the new output cap" in test/the-foundry-claude-cap-covers-its-thinking.test.ts'
+      proof: 'grep: test("W1-T5451: the budget reservation covers the new output cap" in test/the-foundry-claude-cap-covers-its-thinking.test.ts'
   falsifier: |
     CLOSE THIS TASK without implementation if the Foundry Claude body no longer sends a fixed small max_tokens, or
     the path has been removed.

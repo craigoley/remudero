@@ -1,4 +1,4 @@
-- id: W1-T9908
+- id: W1-T5450
   title: "EVERY OPUS SEAT IS PINNED AT HIGH EFFORT FROM THE OPUS 5 ERA AND NO ARM COMPARES IT TO MEDIUM — the guide says 5.5 medium matches or beats Opus 5 high, and the routing experiments only ever vary the model"
   repo: remudero
   depends_on: []
@@ -34,9 +34,9 @@
 
   acceptance:
     - claim: "an experiment arm compares opus medium to opus high for the Opus seats"
-      proof: 'grep: test("W1-T9908: an experiment arm compares opus medium to opus high for the Opus seats" in test/an-opus-effort-arm-compares-medium-to-high.test.ts'
+      proof: 'grep: test("W1-T5450: an experiment arm compares opus medium to opus high for the Opus seats" in test/an-opus-effort-arm-compares-medium-to-high.test.ts'
     - claim: "routing-ab reports the effort arm with its sample size"
-      proof: 'grep: test("W1-T9908: routing-ab reports the effort arm with its sample size" in test/an-opus-effort-arm-compares-medium-to-high.test.ts'
+      proof: 'grep: test("W1-T5450: routing-ab reports the effort arm with its sample size" in test/an-opus-effort-arm-compares-medium-to-high.test.ts'
   falsifier: |
     CLOSE THIS TASK without implementation if routing-experiments already contains an effort arm for an Opus
     mount, or if Opus seats fall below the minimum sample size the recommender needs for a year of traffic

@@ -1,4 +1,4 @@
-- id: W1-T9910
+- id: W1-T5452
   title: "THE WORKER PROMPT NEVER SAYS A UNIT-TEST PROOF IS MATCHED AS A LITERAL TITLE SUBSTRING — the proof grammar reaches the filing lanes verbatim but the implement worker is only told to NAME the test, a dead-proof class rediscovered by a CI round trip"
   repo: remudero
   depends_on: []
@@ -29,7 +29,7 @@
 
   acceptance:
     - claim: "the implement contract names the literal substring rule for unit test proofs"
-      proof: 'grep: test("W1-T9910: the implement contract names the literal substring rule for unit test proofs" in test/the-worker-prompt-names-the-dead-proof-trap.test.ts'
+      proof: 'grep: test("W1-T5452: the implement contract names the literal substring rule for unit test proofs" in test/the-worker-prompt-names-the-dead-proof-trap.test.ts'
   falsifier: |
     CLOSE THIS TASK without implementation if the implement contract already names the literal-substring rule
     and renderReconPrompt already asks for citation verification.

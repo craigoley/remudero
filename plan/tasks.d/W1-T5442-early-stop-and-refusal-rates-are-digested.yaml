@@ -1,4 +1,4 @@
-- id: W1-T9900
+- id: W1-T5442
   title: "NOBODY CAN SAY HOW OFTEN A CLAUDE WORKER STOPS EARLY OR IS REFUSED — the worker result records neither its final stop reason nor a safeguard refusal in any aggregate, so every premature-stop remedy is argued without a baseline"
   repo: remudero
   depends_on: []
@@ -37,9 +37,9 @@
 
   acceptance:
     - claim: "the digest reports early stops and safeguard refusals split by served model"
-      proof: 'grep: test("W1-T9900: the digest splits early stops and safeguard refusals by served model" in test/early-stop-and-refusal-rates-are-digested.test.ts'
+      proof: 'grep: test("W1-T5442: the digest splits early stops and safeguard refusals by served model" in test/early-stop-and-refusal-rates-are-digested.test.ts'
     - claim: "a ledger row that predates the capture fields counts as unknown, never as zero"
-      proof: 'grep: test("W1-T9900: a row that predates the capture fields counts as unknown, not zero" in test/early-stop-and-refusal-rates-are-digested.test.ts'
+      proof: 'grep: test("W1-T5442: a row that predates the capture fields counts as unknown, not zero" in test/early-stop-and-refusal-rates-are-digested.test.ts'
   falsifier: |
     CLOSE THIS TASK without implementation if `git grep -n "final_stop_reason" -- src` shows no ledger field
     (the capture PR did not land), or if the digest already reports a stop-reason split by model.

@@ -1,4 +1,4 @@
-- id: W1-T9905
+- id: W1-T5447
   title: "THE MODEL IS NEVER TOLD WHAT THE UNTRUSTED TAGS MEAN — no spawn sets a system prompt, so the envelope's meaning rides only on a per-block inline notice and the guide's system-prompt companion note is absent"
   repo: remudero
   depends_on: []
@@ -37,9 +37,9 @@
 
   acceptance:
     - claim: "every Claude spawn appends the untrusted text note from the first request"
-      proof: 'grep: test("W1-T9905: every Claude spawn appends the untrusted text note from the first request" in test/every-spawn-carries-the-untrusted-text-note.test.ts'
+      proof: 'grep: test("W1-T5447: every Claude spawn appends the untrusted text note from the first request" in test/every-spawn-carries-the-untrusted-text-note.test.ts'
     - claim: "turning the note off restores byte-identical spawn options"
-      proof: 'grep: test("W1-T9905: turning the note off restores byte-identical spawn options" in test/every-spawn-carries-the-untrusted-text-note.test.ts'
+      proof: 'grep: test("W1-T5447: turning the note off restores byte-identical spawn options" in test/every-spawn-carries-the-untrusted-text-note.test.ts'
   falsifier: |
     CLOSE THIS TASK without implementation if the Agent SDK in use cannot append to the preset system prompt, or
     if any lane's behaviour is pinned by the absence of a system prompt and cannot be preserved.

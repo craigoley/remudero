@@ -1,4 +1,4 @@
-- id: W1-T9902
+- id: W1-T5444
   title: "A WORKER TURN THAT ENDS IN TEXT WITH ACCEPTANCE STILL OPEN ENDS THE RUN — the harness has no general continuation, only three one-shot resumes keyed to a decision request, a missing commit line and fix strikes, so a text-only end_turn becomes a no_pr verdict or a partial fallback PR"
   repo: remudero
   depends_on: []
@@ -42,11 +42,11 @@
 
   acceptance:
     - claim: "a text-only end of turn with open acceptance is continued once with the open claims named"
-      proof: 'grep: test("W1-T9902: a text-only end of turn with open acceptance is continued once and names the open claims" in test/a-text-only-end-of-turn-is-continued-twice-at-most.test.ts'
+      proof: 'grep: test("W1-T5444: a text-only end of turn with open acceptance is continued once and names the open claims" in test/a-text-only-end-of-turn-is-continued-twice-at-most.test.ts'
     - claim: "a run that never makes progress is continued at most twice and then ends"
-      proof: 'grep: test("W1-T9902: a run that never makes progress is continued at most twice" in test/a-text-only-end-of-turn-is-continued-twice-at-most.test.ts'
+      proof: 'grep: test("W1-T5444: a run that never makes progress is continued at most twice" in test/a-text-only-end-of-turn-is-continued-twice-at-most.test.ts'
     - claim: "ALREADY_SATISFIED and DECISION_REQUEST and REFUSED are never continued"
-      proof: 'grep: test("W1-T9902: an ALREADY_SATISFIED or DECISION_REQUEST or REFUSED turn is never continued" in test/a-text-only-end-of-turn-is-continued-twice-at-most.test.ts'
+      proof: 'grep: test("W1-T5444: an ALREADY_SATISFIED or DECISION_REQUEST or REFUSED turn is never continued" in test/a-text-only-end-of-turn-is-continued-twice-at-most.test.ts'
   falsifier: |
     CLOSE THIS TASK without implementation if the measure task in this pack (final stop reason by model) shows
     the Claude text-only early-stop rate on implement is negligible, or if `git grep -n "implement.continued"`

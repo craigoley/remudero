@@ -1,7 +1,7 @@
-- id: W1-T9917
-  title: "A QUARANTINED SHARD MUST NAME ITSELF — `reportQuarantined` ledgers plan.duplicate_quarantined and escalates \"task id X is declared more than once\" for every entry; once an unparseable shard is quarantined (W1-T9914) that wording would send a person looking for a duplicate that does not exist"
+- id: W1-T5459
+  title: "A QUARANTINED SHARD MUST NAME ITSELF — `reportQuarantined` ledgers plan.duplicate_quarantined and escalates \"task id X is declared more than once\" for every entry; once an unparseable shard is quarantined (W1-T5456) that wording would send a person looking for a duplicate that does not exist"
   repo: remudero
-  depends_on: ["W1-T9914"]
+  depends_on: ["W1-T5456"]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -11,7 +11,7 @@
   status: queued
   attempts: 0
   origin: "operator session 2026-10-03: the outage that blocked the fleet for hours; the reporting half of the quarantine fix"
-  plan_refs: ["W1-T9914", "W1-T4421", "W1-T4409"]
+  plan_refs: ["W1-T5456", "W1-T4421", "W1-T4409"]
   files:
     - src/run-task.ts
     - test/a-quarantined-shard-escalates-once-per-file-with-its-parse-message.test.ts
@@ -19,7 +19,7 @@
     READ 2026-10-03. `reportQuarantined` (src/run-task.ts, near the daemon boot's plan read) logs every
     quarantined entry as `plan.duplicate_quarantined` and raises one escalation per id whose summary reads
     "task id <id> is declared more than once (<n> file(s)) — the daemon quarantined it and keeps running".
-    That is true only for `reason: "duplicate_id"`. The unparseable-shard entry W1-T9914 adds carries a
+    That is true only for `reason: "duplicate_id"`. The unparseable-shard entry W1-T5456 adds carries a
     different reason and the file label as its id.
 
   design: |
@@ -31,11 +31,11 @@
 
   acceptance:
     - claim: "an unparseable shard escalates once per file naming the file and the parse message"
-      proof: 'grep: test("W1-T9917: an unparseable shard escalates once per file naming the file and the parse message" in test/a-quarantined-shard-escalates-once-per-file-with-its-parse-message.test.ts'
+      proof: 'grep: test("W1-T5459: an unparseable shard escalates once per file naming the file and the parse message" in test/a-quarantined-shard-escalates-once-per-file-with-its-parse-message.test.ts'
     - claim: "a duplicate id keeps its existing step and wording"
-      proof: 'grep: test("W1-T9917: a duplicate id keeps its existing step and wording" in test/a-quarantined-shard-escalates-once-per-file-with-its-parse-message.test.ts'
+      proof: 'grep: test("W1-T5459: a duplicate id keeps its existing step and wording" in test/a-quarantined-shard-escalates-once-per-file-with-its-parse-message.test.ts'
     - claim: "a dependent of a quarantined shard is listed and never escalated on its own"
-      proof: 'grep: test("W1-T9917: a dependent of a quarantined shard is listed and never escalated on its own" in test/a-quarantined-shard-escalates-once-per-file-with-its-parse-message.test.ts'
+      proof: 'grep: test("W1-T5459: a dependent of a quarantined shard is listed and never escalated on its own" in test/a-quarantined-shard-escalates-once-per-file-with-its-parse-message.test.ts'
   falsifier: |
     Report an unparseable shard as a duplicate id, or escalate it again on every tick. The affected proof must
     fail. CLOSE THIS TASK without implementation if the sibling quarantine task has not merged: there is no

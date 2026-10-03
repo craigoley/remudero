@@ -1,7 +1,7 @@
-- id: W1-T9916
-  title: "A SCOUT NOBODY STARTS FINDS NOTHING — the scout gardener spec (W1-T9912) is pure and tested but reached only by its own tests until the garden registry names it and the registered-garden builder constructs it, so it runs as a child process off the daemon loop like the other thirteen"
+- id: W1-T5458
+  title: "A SCOUT NOBODY STARTS FINDS NOTHING — the scout gardener spec (W1-T5454) is pure and tested but reached only by its own tests until the garden registry names it and the registered-garden builder constructs it, so it runs as a child process off the daemon loop like the other thirteen"
   repo: remudero
-  depends_on: ["W1-T9912"]
+  depends_on: ["W1-T5454"]
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -12,7 +12,7 @@
   status: queued
   attempts: 0
   origin: "operator ask 2026-10-03: proactivity — a gardener that improves the plan, task list and repository, flowing through the system with no human review"
-  plan_refs: ["W1-T9912", "W1-T5114", "W1-T4802", "W1-T4941"]
+  plan_refs: ["W1-T5454", "W1-T5114", "W1-T4802", "W1-T4941"]
   files:
     - src/lib/garden-registry.ts
     - src/run-task.ts
@@ -35,9 +35,9 @@
 
   acceptance:
     - claim: "the registry names the scout and its pass interval"
-      proof: 'grep: test("W1-T9916: the registry names the scout and its pass interval" in test/the-scout-runs-off-the-daemon-loop-and-the-overseer-sees-it.test.ts'
+      proof: 'grep: test("W1-T5458: the registry names the scout and its pass interval" in test/the-scout-runs-off-the-daemon-loop-and-the-overseer-sees-it.test.ts'
     - claim: "the registered-garden builder constructs the scout spec"
-      proof: 'grep: test("W1-T9916: the registered garden builder constructs the scout spec" in test/the-scout-runs-off-the-daemon-loop-and-the-overseer-sees-it.test.ts'
+      proof: 'grep: test("W1-T5458: the registered garden builder constructs the scout spec" in test/the-scout-runs-off-the-daemon-loop-and-the-overseer-sees-it.test.ts'
     - claim: "the run-task builder calls the scout spec"
       proof: 'grep: scoutGardenSpec( in src/run-task.ts'
   falsifier: |

@@ -1,4 +1,4 @@
-- id: W1-T9901
+- id: W1-T5443
   title: "A SAFEGUARD REFUSAL IS TREATED AS AN ORDINARY FAILED RUN — it can burn a fix strike and be retried with the same prompt, and a reasoning_extraction decline is never retried by the platform's own fallback"
   repo: remudero
   depends_on: []
@@ -40,11 +40,11 @@
 
   acceptance:
     - claim: "a safeguard refusal does not consume a fix strike"
-      proof: 'grep: test("W1-T9901: a safeguard refusal does not consume a fix strike" in test/a-safeguard-refusal-is-not-a-strike.test.ts'
+      proof: 'grep: test("W1-T5443: a safeguard refusal does not consume a fix strike" in test/a-safeguard-refusal-is-not-a-strike.test.ts'
     - claim: "a safeguard refusal is not retried with the same prompt"
-      proof: 'grep: test("W1-T9901: a safeguard refusal is not retried with the same prompt" in test/a-safeguard-refusal-is-not-a-strike.test.ts'
+      proof: 'grep: test("W1-T5443: a safeguard refusal is not retried with the same prompt" in test/a-safeguard-refusal-is-not-a-strike.test.ts'
     - claim: "a reasoning_extraction or cyber refusal escalates to a human naming the category"
-      proof: 'grep: test("W1-T9901: a reasoning_extraction or cyber refusal escalates to a human naming its category" in test/a-safeguard-refusal-is-not-a-strike.test.ts'
+      proof: 'grep: test("W1-T5443: a reasoning_extraction or cyber refusal escalates to a human naming its category" in test/a-safeguard-refusal-is-not-a-strike.test.ts'
   falsifier: |
     CLOSE THIS TASK without implementation if `git grep -n "safeguardRefusal" -- src ':!test/**'` shows no
     such field (capture not landed; do that first), or if a production caller already branches on it.

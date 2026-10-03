@@ -1,4 +1,4 @@
-- id: W1-T9912
+- id: W1-T5454
   title: "NOTHING LOOKS FOR WORK NOBODY HAS ASKED FOR — fourteen gardeners tend what already exists (merge, retire, band, prune, tier, tune) and each reacts to one narrow signal; a step that keeps failing or refusing in the ledger with no queued or recently merged task citing it waits for a person to notice. A scout gardener files that finding through the machine-filing path"
   repo: remudero
   depends_on: []
@@ -52,13 +52,13 @@
 
   acceptance:
     - claim: "a failing step that no task cites is filed once through the machine-filing renderer"
-      proof: 'grep: test("W1-T9912: a failing step that no task cites is filed once through the machine filing renderer" in test/a-scout-files-the-recurring-failure-no-task-tracks.test.ts'
+      proof: 'grep: test("W1-T5454: a failing step that no task cites is filed once through the machine filing renderer" in test/a-scout-files-the-recurring-failure-no-task-tracks.test.ts'
     - claim: "a step a queued or recently merged task cites is never filed"
-      proof: 'grep: test("W1-T9912: a step a queued or recently merged task cites is never filed" in test/a-scout-files-the-recurring-failure-no-task-tracks.test.ts'
+      proof: 'grep: test("W1-T5454: a step a queued or recently merged task cites is never filed" in test/a-scout-files-the-recurring-failure-no-task-tracks.test.ts'
     - claim: "filing stops while the queue is over its bound and is capped by the day's merges"
-      proof: 'grep: test("W1-T9912: filing stops while the queue is over its bound and is capped by the days merges" in test/a-scout-files-the-recurring-failure-no-task-tracks.test.ts'
+      proof: 'grep: test("W1-T5454: filing stops while the queue is over its bound and is capped by the days merges" in test/a-scout-files-the-recurring-failure-no-task-tracks.test.ts'
     - claim: "the class is judged by whether the symptom stopped, not by the merge"
-      proof: 'grep: test("W1-T9912: the class is judged by whether the symptom stopped not by the merge" in test/a-scout-files-the-recurring-failure-no-task-tracks.test.ts'
+      proof: 'grep: test("W1-T5454: the class is judged by whether the symptom stopped not by the merge" in test/a-scout-files-the-recurring-failure-no-task-tracks.test.ts'
   falsifier: |
     Cover a symptom with a queued task that cites its step and the scout still files it; or file past the
     queue bound; or credit the class on a merge while the symptom's rows kept growing. The affected proof must
