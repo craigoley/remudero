@@ -165,7 +165,7 @@ export function guardInstanceRoute(route: Route, instance: string, availability:
 }
 
 /** Approval is not part of the instance conversation contract; a source route that reached for it is refused. */
-const NO_INSTANCE_RATIFY: RatifyCliGateway = {
+export const NO_INSTANCE_RATIFY: RatifyCliGateway = {
   approve() {
     throw new Error("approval is not served on an instance conversation route");
   },

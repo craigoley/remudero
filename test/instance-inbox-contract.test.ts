@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import type { AnalyticsSnapshotCache } from "../src/lib/analytics-route.js";
-import { buildInstanceGatewayRoutes, type InstanceStateRoot } from "../src/lib/instance-gateway.js";
+import { buildInstanceGatewayRoutes, NO_INSTANCE_RATIFY, type InstanceStateRoot } from "../src/lib/instance-gateway.js";
 import {
   INBOX_RECEIPT_DIR,
   INSTANCE_INBOX_ROUTES,
@@ -404,6 +404,29 @@ test("instance inbox unavailable contract never holds PR flow", async (t) => {
   const [, , unrooted] = mountInstanceInboxRoutes({ instance: "site", repository: "craigoley/remudero-site", stateDir: undefined, routes: direct.routes, contract: () => ({ mode: "read-write" }) });
   await unrooted.handler(req as never, res as never, { params: {} });
   assert.equal((JSON.parse(text) as Body).error, "inbox_read_only", "no state root means nowhere to keep a receipt: read-only");
+
+  // A receipt that cannot be recorded or released says so instead of claiming a clean outcome.
+  const sabotageDir = join(f.base, "sabotage-state");
+  mkdirSync(sabotageDir);
+  const receipts = join(sabotageDir, INBOX_RECEIPT_DIR);
+  for (const [code, check] of [
+    [200, (body: Body) => assert.equal((body.receipt as Body).status, "pending", "an unrecorded outcome stays pending, so a replay answers unknown")],
+    [404, (body: Body) => assert.match(String(body.receiptError), /stays claimed/)],
+  ] as const) {
+    const saboteur: Route = { method: "POST", path: "/v1/inbox/thread/reply", scope: "write", tier: "low", handler: (_req, out) => {
+      rmSync(receipts, { recursive: true, force: true });
+      if (code === 200) writeFileSync(receipts, "");
+      sendJson(out, code, code === 200 ? { ok: true, delivery: "delivered" } : { error: "not_found" });
+    } };
+    const [route] = mountInstanceInboxRoutes({ instance: "site", repository: "craigoley/remudero-site", stateDir: sabotageDir, routes: [saboteur], contract: () => ({ mode: "read-write" }) });
+    const sabotaged = { url: "/", headers: {}, [RAW_BODY_CACHE]: JSON.stringify(siteReply("hi", `intent-sabotage-${code}`)) };
+    await route.handler(sabotaged as never, res as never, { params: {} });
+    assert.equal(directStatus, code);
+    check(JSON.parse(text) as Body);
+    rmSync(receipts, { recursive: true, force: true });
+  }
+  assert.throws(() => NO_INSTANCE_RATIFY.approve("W1-T1"), /approval is not served/);
+  assert.throws(() => NO_INSTANCE_RATIFY.reframe("W1-T1", "x"), /reframing is not served/);
 
   // The gateway's default sources (the real panel routes) build for an instance without any request.
   const defaults = buildInstanceGatewayRoutes([], { registryPath: f.registryPath, stateBase: f.stateBase, onAnalyticsCache: (cache) => t.after(() => cache.stop()) });

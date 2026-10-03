@@ -108,18 +108,11 @@ function captureResponse(): { res: ServerResponse; done: () => Captured } {
       out.headers[name.toLowerCase()] = String(value);
       return res;
     },
-    getHeader(name: string) {
-      return out.headers[name.toLowerCase()];
-    },
     writeHead(code: number, headers?: Record<string, unknown>) {
       out.status = code;
       res.statusCode = code;
       for (const [k, v] of Object.entries(headers ?? {})) out.headers[k.toLowerCase()] = String(v);
       return res;
-    },
-    write(chunk: unknown) {
-      out.text += String(chunk);
-      return true;
     },
     end(chunk?: unknown) {
       if (chunk !== undefined) out.text += String(chunk);
