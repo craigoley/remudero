@@ -1,0 +1,105 @@
+- id: W1-T5542
+  title: "A FIX STRIKE IS A ROUND THAT MOVED THE HEAD OR REACHED A VERDICT — all 16 PRs that hit `fix strikes exhausted` from 2026-09-26 to 2026-10-03 got there on two refused rounds that changed nothing, both numbered strike 1, at the exhausting head. The disposition counted rows (2/2) while the claim gate counted distinct strike numbers (1/2), so #8868 was dispatched a third time and showed 3/2"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03 (coordinator follow-up to W1-T5536): one definition of a fix strike; week-rows extract 2026-09-26..2026-10-03"
+  plan_refs: [W1-T2520, W1-T2452, W1-T2788, W1-T127, W1-T4207, W1-T5032, W1-T5334, W1-T5536]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/a-fix-strike-is-a-round-that-moved-the-head-or-reached-a-verdict.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    THREE DEFINITIONS OF A STRIKE, AND THE FIX RUNG USES NONE OF THEM CONSISTENTLY. Verified at main 71fbcc6fe.
+    (a) `priorStrikesFor` (src/run-task.ts:37835) counts every `fix.dispatch` ROW that `fixLedgerRowsForHead`
+        (src/lib/sweep.ts:9807) selects for the head. It feeds `OpenPrView.priorStrikes` (run-task.ts:38323,
+        :42468), and through that the exhaustion row (sweep.ts:7125) and `fixDispatchBudget` (sweep.ts:8273).
+    (b) `freshFixDispatchCount` (sweep.ts:9858) counts DISTINCT `strike` numbers. It is the under-claim gate
+        (sweep.ts:10612).
+    (c) `isRealStrike` (src/lib/ledger.ts:125) is "a worker ran AND a judgment was posted" (W1-T127). It is
+        exported and referenced in a comment at run-task.ts:11075, but nothing calls it.
+
+    WHY THEY DIVERGE.
+    - `runFixRung` numbers strikes locally from 0 on every call (`attempt = strikes + 1`, run-task.ts:11078),
+      and the sweep calls it once per pass with the REMAINING budget (W1-T2452).
+    - A round whose harness commit is refused still logs `fix.dispatch` with `strike: 1`, then
+      `fix.commit_refused` (run-task.ts:11440), then returns `stood_down` without pushing (run-task.ts:11509).
+    - So two refused passes at one head leave two rows that both say strike 1. Reader (a) says 2/2,
+      exhausted. Reader (b) says 1/2 and admits a third dispatch.
+
+    MEASURED, week-rows extract 2026-09-26..2026-10-03.
+    - 226 `fix.dispatch` rows and 103 `fix.commit_refused` rows (46%). Refusal reasons: "the worker changed
+      nothing" 61, "no anchored COMMIT_MESSAGE line" 33, "outside its declared files" 9.
+    - All 16 exhausted PRs (#7313 #7335 #7451 #7561 #7830 #7844 #7983 #7998 #8029 #8053 #8613 #8684 #8713
+      #8868 #8886 #8920) reached "2/2" from exactly two `fix.dispatch` rows at the exhausting head.
+      Every row was numbered strike 1, every row was followed by a `fix.commit_refused`, and none moved the
+      head or reached a verdict.
+    - Under "a strike is a round that changed the head or reached a verdict", all 16 exhaustions were
+      premature, with 0 counted strikes at the head.
+    - #8868 at 73dd194: three refused rows. The disposition read 3/2 while the claim gate read 1/2.
+    - The refusals themselves are real signal, but a different signal from a failed fix. The refusal that
+      repeats is the one to act on, and W1-T5334 (queued) prices "the worker changed nothing" as the
+      ci-friction gardener's top cause (470.9 PR-minutes, 133 rounds).
+
+    NOT A LONGER LEASH.
+    - Refused rounds stay bounded. They just stop masquerading as strikes.
+    - A refusal at a head is re-tried once, with the refusal named (W1-T4207's `lastCommitRefusalPromptLines`,
+      run-task.ts:39955, already feeds it to the next worker).
+    - The same refusal reason twice at the same head is "no further round can add information". That
+      routes to the same exhausted state the cap does, with its own reason, so W1-T5536's ladder picks it
+      up, rather than spending a third round.
+    - This mirrors the existing earlier-stop row for identical unmet criteria (`fixRungRepeatsIdenticalFailure`,
+      sweep.ts:5840; DISPOSITION_RULES sweep.ts:7172-7183).
+
+    Rule 19: the single tally and both readers in sweep.ts, plus `priorStrikesFor` and the round identity on
+    the three fix.* rows in run-task.ts, are two production files for one concern. So the band is high, with
+    band_meaning: span.
+  design: |
+    1. ONE TALLY (src/lib/sweep.ts, beside `fixLedgerRowsForHead`). `fixRoundTally(lines, taskId, headSha,
+       regime)` returns `{ strikes, refusals: {reason, round_id}[], repeatedRefusal?: string }`.
+       - Pair each `fix.dispatch` with its outcome by a new `round_id` field. For legacy rows with no
+         `round_id`, pair by the next `fix.commit_refused` / `fix.done` row for the same task, head and strike.
+       - A round is a STRIKE iff `isRealStrike({workerRan, judgmentPosted})` holds, where:
+         - `workerRan` = it has a `fix.done` that is not `commit_refused`;
+         - `judgmentPosted` = it pushed a new head, or a `fix.review` row exists for its strike.
+         This puts ledger.ts:125's dormant conjunction to work.
+       - A refused round is a REFUSAL, never a strike.
+       - A retrigger is neither (it already logs `fix.retrigger`, not `fix.dispatch`).
+       - A proof-amendment identity row stays excluded (W1-T5032).
+       - `repeatedRefusal` = a reason that occurs twice at this head.
+    2. BOTH READERS USE IT.
+       - `priorStrikesFor` (run-task.ts:37835) returns `fixRoundTally(...).strikes`.
+       - `freshFixDispatchCount` (sweep.ts:9858) is deleted, and the claim gate (sweep.ts:10612) reads
+         `fixRoundTally(freshLines, …).strikes` under the claim.
+       - The regime amnesty (keyword_only under executed) applies inside the tally, unchanged.
+    3. ROUND IDENTITY (run-task.ts). `runFixRung` mints `round_id = <runId>:<attempt>:<spawn start ms>` once
+       per round, and stamps it on that round's `fix.dispatch`, `fix.commit_refused`, `fix.done`, and
+       `fix.review` rows.
+    4. EARLIER STOP ON A REPEATED REFUSAL. `OpenPrView` gains `repeatedFixRefusal?: string`, from the tally.
+       The exhaustion predicate becomes `priorStrikes >= cap || repeatedFixRefusal !== undefined`, and the
+       reason reads `fix rounds refused twice at this head (<reason>) — no strike spent — no further round can
+       add information`. `describeCiFailures` is kept, so W1-T186's named-check reason survives. When
+       W1-T5536 lands, its ladder consumes this same predicate.
+    5. RENDERED RATIOS. Every `strike N/ceiling` string reads the tally's `strikes`. A refused round is
+       rendered as `refused (N at this head)` and never as a strike number, so "3/2" cannot recur.
+  acceptance:
+    - claim: "two refused rounds at one head count zero strikes and both readers agree, and a third dispatch is refused by the claim gate exactly when the disposition calls the PR exhausted"
+      proof: "grep: test(\"W1-T5542: refused rounds are never strikes and both readers agree in test/a-fix-strike-is-a-round-that-moved-the-head-or-reached-a-verdict.test.ts"
+    - claim: "a round that pushed a head or reached a fix.review counts as one strike, paired by round_id and, for legacy rows, by adjacency"
+      proof: "grep: test(\"W1-T5542: a round that moved the head or reached a verdict is one strike in test/a-fix-strike-is-a-round-that-moved-the-head-or-reached-a-verdict.test.ts"
+    - claim: "the same refusal reason twice at one head reaches the exhausted state with a refusal reason and no strike ratio, while two different reasons allow one more round"
+      proof: "grep: test(\"W1-T5542: a repeated identical refusal stops the rung without a strike in test/a-fix-strike-is-a-round-that-moved-the-head-or-reached-a-verdict.test.ts"
+    - claim: "the #8868 ledger shape (three strike-1 rows, each followed by commit_refused, at one head) never renders 3/2"
+      proof: "grep: test(\"W1-T5542: the 8868 ledger shape never renders an overshoot in test/a-fix-strike-is-a-round-that-moved-the-head-or-reached-a-verdict.test.ts"
+  falsifier: |
+    Three reverts, each turning a named case red:
+    - Make `priorStrikesFor` count rows again: the first case reads 2 strikes from two refusals.
+    - Restore `freshFixDispatchCount`'s distinct-number count at the claim gate: the readers disagree on
+      the #8868 fixture (1 vs 2), and a third dispatch is admitted.
+    - Drop the repeated-refusal arm: two identical refusals leave the PR blocked-fixable, and a third round
+      dispatches.
