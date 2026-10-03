@@ -459,6 +459,64 @@ export function playwrightCoreVersionCommitsBehind(
   return playwrightCoreVersionChanged(oldLockfile, newLockfile) ? 1 : 0;
 }
 
+/** W1-T5367 — the npm-lockfile key acr-build.yml's image guard reads (W1-T5018) for the worker
+ *  SDK the image's `/app` install bakes, so the guard and this drift check name the same field. */
+const WORKER_SDK_LOCKFILE_KEY = "node_modules/@anthropic-ai/claude-agent-sdk";
+
+/**
+ * W1-T5367 — the worker SDK's resolved pin out of a `package-lock.json`'s TEXT, as the workflow
+ * guard serialises it: `JSON.stringify([version, integrity])`. THREE outcomes, because a removed
+ * entry is a change and an unreadable file is not: the pin string when the entry is present,
+ * `null` when the lockfile parses but carries no such entry, and `undefined` when it does not
+ * parse (UNKNOWN). Never throws.
+ */
+export function extractWorkerSdkPin(lockfileText: string): string | null | undefined {
+  try {
+    const parsed = JSON.parse(lockfileText) as { packages?: Record<string, { version?: string; integrity?: string }> };
+    const entry = parsed.packages?.[WORKER_SDK_LOCKFILE_KEY];
+    return entry ? JSON.stringify([entry.version, entry.integrity]) : null;
+  } catch {
+    return undefined; // not parseable JSON — UNKNOWN, never a false "entry removed"
+  }
+}
+
+/**
+ * W1-T5367 — true IFF the worker SDK's version+integrity differs between two `package-lock.json`
+ * texts, counting an added or removed entry as a change exactly as acr-build.yml's guard does. An
+ * unparseable or missing side answers false: the same fail-closed rule as
+ * {@link playwrightCoreVersionChanged}.
+ */
+export function workerSdkChanged(oldLockfileText: string | undefined, newLockfileText: string | undefined): boolean {
+  const oldPin = oldLockfileText === undefined ? undefined : extractWorkerSdkPin(oldLockfileText);
+  const newPin = newLockfileText === undefined ? undefined : extractWorkerSdkPin(newLockfileText);
+  if (oldPin === undefined || newPin === undefined) return false;
+  return oldPin !== newPin;
+}
+
+/**
+ * W1-T5367 — how many worker-SDK pin commits the image is behind, the sibling of
+ * {@link playwrightCoreVersionCommitsBehind}: 1 when the pin at the image's build sha differs
+ * from `origin/main`'s, 0 for unrelated lockfile churn, and UNKNOWN (undefined) when either side
+ * cannot be read or parsed — never coerced to zero.
+ */
+export function workerSdkCommitsBehind(
+  imageBuildSha: string | undefined,
+  runGit: (args: readonly string[]) => string,
+): number | undefined {
+  const sha = imageBuildSha?.trim();
+  if (!sha) return undefined;
+  let oldPin: string | null | undefined;
+  let newPin: string | null | undefined;
+  try {
+    oldPin = extractWorkerSdkPin(runGit(["show", `${sha}:${ROOT_LOCKFILE_PATH}`]));
+    newPin = extractWorkerSdkPin(runGit(["show", `origin/main:${ROOT_LOCKFILE_PATH}`]));
+  } catch {
+    return undefined; // an unknown sha, a shallow clone, no git — UNKNOWN, never zero
+  }
+  if (oldPin === undefined || newPin === undefined) return undefined; // unparseable — UNKNOWN
+  return oldPin !== newPin ? 1 : 0;
+}
+
 /**
  * W1-T4061 — the newest `origin/main` commit that actually MOVED the pinned playwright-core
  * version, walking {@link ROOT_LOCKFILE_PATH}'s own history newest-first rather than reading the
@@ -469,6 +527,34 @@ export function playwrightCoreVersionCommitsBehind(
  */
 export function newestPlaywrightVersionChangeSha(
   runGit: (args: readonly string[]) => string,
+): string | undefined {
+  return newestLockfileChangeSha(runGit, (before, after) =>
+    before === undefined ? extractPlaywrightCoreVersion(after) !== undefined : playwrightCoreVersionChanged(before, after),
+  );
+}
+
+/**
+ * W1-T5367 — the newest `origin/main` commit that moved EITHER lockfile image input acr-build.yml's
+ * guard builds on: the playwright-core pin (W1-T4061) or the worker SDK's version+integrity
+ * (W1-T5018). The generalised sibling of {@link newestPlaywrightVersionChangeSha}, so the sha
+ * `newestBakedSha` names is the sha that workflow tagged when an SDK-only bump built an image.
+ */
+export function newestLockfileImageInputSha(
+  runGit: (args: readonly string[]) => string,
+): string | undefined {
+  return newestLockfileChangeSha(runGit, (before, after) =>
+    before === undefined
+      ? extractPlaywrightCoreVersion(after) !== undefined || typeof extractWorkerSdkPin(after) === "string"
+      : playwrightCoreVersionChanged(before, after) || workerSdkChanged(before, after),
+  );
+}
+
+/** The newest-first walk over {@link ROOT_LOCKFILE_PATH}'s history both readings above share:
+ *  returns the first commit whose (parent, own) lockfile pair `moved` accepts. `before` is
+ *  undefined for the commit that first added the file. */
+function newestLockfileChangeSha(
+  runGit: (args: readonly string[]) => string,
+  moved: (before: string | undefined, after: string) => boolean,
 ): string | undefined {
   let touchingShas: string[];
   try {
@@ -492,8 +578,7 @@ export function newestPlaywrightVersionChangeSha(
     } catch {
       before = undefined; // the commit that first added the file
     }
-    const addedWithVersion = before === undefined && extractPlaywrightCoreVersion(after) !== undefined;
-    if (addedWithVersion || playwrightCoreVersionChanged(before, after)) return sha;
+    if (moved(before, after)) return sha;
   }
   return undefined;
 }
@@ -1832,8 +1917,10 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       // in the root lockfile (never in IMAGE_BAKED_PATHS). UNKNOWN only when BOTH readings are:
       // one known signal must never be swallowed by the other going unreadable.
       const playwright = playwrightCoreVersionCommitsBehind(sha, (args) => git([...args]));
-      if (baked === undefined && playwright === undefined) return undefined;
-      return (baked ?? 0) + (playwright ?? 0);
+      // W1-T5367 — and so is a worker SDK move (acr-build.yml builds on it since W1-T5018).
+      const workerSdk = workerSdkCommitsBehind(sha, (args) => git([...args]));
+      if (baked === undefined && playwright === undefined && workerSdk === undefined) return undefined;
+      return (baked ?? 0) + (playwright ?? 0) + (workerSdk ?? 0);
     },
     resourcePolicyDrift: () => {
       // W1-T4267: the launcher names the container and role it owns; the policy is evaluated by the
@@ -1865,7 +1952,8 @@ export function realDeployDeps(o: RealDeployOpts): DeployDeps {
       // newest commit that touched the root lockfile (an unrelated bump landing after it would
       // otherwise misname itself as "the" image input, and imagePublished would look up a tag
       // acr-build.yml's own guard never created for that commit).
-      const newestPlaywright = newestPlaywrightVersionChangeSha((args) => git([...args]));
+      // W1-T5367 — or the worker SDK pin, whichever lockfile image input moved last.
+      const newestPlaywright = newestLockfileImageInputSha((args) => git([...args]));
       if (!newestPlaywright) return newestBaked;
       if (!newestBaked) return newestPlaywright;
       try {
