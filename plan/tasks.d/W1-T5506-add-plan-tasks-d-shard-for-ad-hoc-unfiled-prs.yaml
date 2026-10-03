@@ -1,0 +1,16 @@
+- id: W1-T5506
+  title: Add plan/tasks.d shard for ad-hoc/unfiled PRs
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/tasks.d/
+    - plan/tasks.d/adhoc-prs.yaml
+  acceptance:
+    - claim: Shard file exists and is referenced by plan loader
+      proof: "grep: \"adhoc-prs.yaml\" in plan/tasks.d/"
+  origin: architect
