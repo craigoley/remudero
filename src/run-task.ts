@@ -10071,7 +10071,7 @@ export async function runFixRung(opts: {
     // whose base moved and flipped WHICH check is red, is never told "nothing changed".
     const gateKey =
       currentMergeConflict !== undefined
-        ? `merge-conflict:${(currentMergeConflict.files ?? []).slice().sort().join(",")}`
+        ? `merge-conflict:${JSON.stringify((conflictedFilePaths(currentMergeConflict) ?? []).sort())}`
         : noReviewYet
         ? `ci:${(currentCiFailures ?? []).map((f) => f.name).slice().sort().join(",")}`
         : `review:${visibleCriteria(review.criteria.filter((c) => !c.met))
