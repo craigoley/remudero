@@ -1479,6 +1479,7 @@ import {
   fixCeilingInForce,
   fixDispatchBudget,
   fixLedgerRowsForHead,
+  fixRoundTally,
   isBlockedCi,
   listRetirableEscalationIssues,
   logCostGovernorDeferral,
@@ -11219,6 +11220,7 @@ export async function runFixRung(opts: {
       // Unreadable HEAD: commitCount falls back to 0, as before this task — never a throw mid-dispatch.
     }
     const fixRoundStartedAtMs = systemClock.now();
+    const roundId = `${opts.runId}:${attempt}:${fixRoundStartedAtMs}`;
     const fixReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs), fixLaneBenchmarkWork(opts.task, deps.ledgerPath));
     let fixResult: WorkerResult;
     // W1-T1219: the spawn's elapsed ms on the SUCCESS path, the field `fix.spawn_abandoned` carries
@@ -11408,9 +11410,10 @@ export async function runFixRung(opts: {
           `spending strike ${attempt}/${opts.strikeCap}: ${opts.prUrl}`,
       );
     } else {
-      strikes = attempt;
+      if (!harnessCommitRefused) strikes = attempt;
       deps.log("fix.dispatch", {
-        strike: strikes,
+        round_id: roundId,
+        strike: attempt,
         strike_cap: opts.strikeCap,
         unmet_count: unmet.length,
         unmet_claims: unmet.map((criterion) => criterion.claim),
@@ -11425,7 +11428,7 @@ export async function runFixRung(opts: {
         // W1-T4803: which files conflicted, so the hot-file gardener can rank them by PR minutes.
         conflicted_files: conflictedFilePaths(currentMergeConflict),
       });
-      deps.say(
+      if (!harnessCommitRefused) deps.say(
         currentMergeConflict !== undefined
           ? `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE merge-conflict fix worker for ` +
             `${(currentMergeConflict.files ?? []).length} conflicting file(s)`
@@ -11440,7 +11443,8 @@ export async function runFixRung(opts: {
     if (harnessCommitRefused) {
       const scopeAmendment = scopeAmendmentFromFixReport(workerTranscript(fixResult));
       deps.log("fix.commit_refused", {
-        strike: strikes,
+        round_id: roundId,
+        strike: attempt,
         round,
         mode: fixMode,
         head_sha: priorHeadSha,
@@ -11449,9 +11453,12 @@ export async function runFixRung(opts: {
         ...undeclaredPathsLedgerFields(harnessCommitUndeclared),
       });
     }
-    deps.log("fix.done", {
+    const logFixDone = (pushedHeadSha?: string) => deps.log("fix.done", {
       ...fixReceipt.ledgerFields(fixResult), // W1-T4613: FIRST, so every field this row already carried keeps its value
-      strike: strikes,
+      round_id: roundId,
+      head_sha: priorHeadSha,
+      pushed_head_sha: pushedHeadSha,
+      strike: attempt,
       round,
       session_id: fixResult.sessionId,
       subtype: harnessCommitRefused ? "commit_refused" : fixResult.subtype,
@@ -11504,11 +11511,13 @@ export async function runFixRung(opts: {
 
     // A shell-less worker that omitted or failed its harness commit produced no new head. The
     // refusal row is the positive release signal sweep.ts reads on the next pass; do not push an
-    // unchanged worktree or wait for CI against the old head, and let the cumulative ledger strike
-    // budget decide whether a later pass may try again or must escalate.
+    // unchanged worktree or wait for CI against the old head. The tally stops a repeated refusal
+    // separately from completed worker strikes (W1-T5542).
     if (harnessCommitRefused) {
+      logFixDone();
+      const refusedAtHead = fixRoundTally((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), opts.taskId, priorHeadSha).refusals.length;
       deps.say(
-        `fix rung: strike ${strikes}/${opts.strikeCap} refused by the harness — no commit was produced: ` +
+        `fix rung: refused (${Math.max(1, refusedAtHead)} at this head) by the harness — no commit was produced: ` +
           `${harnessCommitRefusalReason}`,
       );
       return {
@@ -11521,7 +11530,14 @@ export async function runFixRung(opts: {
       };
     }
 
-    const roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush), expectedHeadShaForPush, "rung.strike");
+    let roundPush: FixRungOutcome | "refused" | undefined;
+    let pushedHeadSha: string | undefined;
+    try {
+      roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush), expectedHeadShaForPush, "rung.strike");
+      if (roundPush === undefined) pushedHeadSha = expectedHeadShaForPush;
+    } finally {
+      logFixDone(pushedHeadSha);
+    }
     if (roundPush === "refused") continue;
     if (roundPush) return roundPush;
 
@@ -11847,6 +11863,7 @@ export async function runFixRung(opts: {
     // authorship check compares the live head against (sha lineage).
     rungOwnHeadSha = review.headSha;
     deps.log("fix.review", {
+      round_id: roundId,
       strike: strikes,
       state: review.state,
       unmet: review.criteria.filter((c) => !c.met).length,
@@ -37838,16 +37855,7 @@ export function priorStrikesFor(
   currentRegime: StrikeRegime = "keyword_only",
   currentHeadSha?: string,
 ): number {
-  if (!taskId) return 0;
-  let n = 0;
-  for (const line of fixLedgerRowsForHead(lines, taskId, currentHeadSha)) {
-    if (line.step !== "fix.dispatch") continue;
-    // Under the executed regime a keyword-era strike is amnestied; every other
-    // combination counts, so the cap keeps binding on same-regime failures.
-    if (currentRegime === "executed" && strikeRegimeOf(line) === "keyword_only") continue;
-    n++;
-  }
-  return n;
+  return fixRoundTally(lines, taskId, currentHeadSha, currentRegime).strikes;
 }
 
 /**
@@ -38321,6 +38329,8 @@ export function buildOpenPrViews(
       instrumentEntanglementPaths: instrumentEntanglement,
       previousInstrumentEntanglementPaths: previousInstrumentEntanglement,
       priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId), pr.headRefOid),
+      repeatedFixRefusal: fixRoundTally(ledger, taskId, pr.headRefOid).repeatedRefusal,
+      fixRefusalsAtHead: fixRoundTally(ledger, taskId, pr.headRefOid).refusals.length,
       strikeHistory: deriveStrikeHistory(ledger, taskId, pr.headRefOid),
       supersededBy,
       // W1-T2794 — DECLARED HERE, STAMPED LATER, and the two are not the same thing. The real
@@ -39968,12 +39978,13 @@ function lastCommitRefusalPromptLines(
     }
   }
   const paths = Array.isArray(last?.undeclared) ? last.undeclared.map(String) : [];
-  if (paths.length === 0) return [];
+  if (!last) return [];
   const omitted = typeof last?.undeclared_omitted === "number" ? ` (and ${last.undeclared_omitted} more)` : "";
   return [
     "",
-    `LAST STRIKE'S COMMIT WAS REFUSED (W1-T4207): the harness could not commit it — ${String(last?.reason)}. ` +
-      `Paths it could not commit: ${paths.join(", ")}${omitted}. Declared files: ${declaredFiles.join(", ")}. ` +
+    `LAST ROUND'S COMMIT WAS REFUSED (W1-T4207): the harness could not commit it — ${String(last.reason)}. ` +
+      (paths.length > 0 ? `Paths it could not commit: ${paths.join(", ")}${omitted}. ` : "") +
+      `Declared files: ${declaredFiles.join(", ")}. ` +
       `Keep this strike's change inside \`files:\`; if the fix genuinely needs a path outside it, change ` +
       `nothing there and say in your REPORT that the task needs amending.`,
   ];
@@ -42466,6 +42477,8 @@ export async function fixCommand(
     // reads it via the SAME sweep.ts row 7.
     criteriaRecoverable: taskId !== undefined,
     priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId), raw.headRefOid),
+    repeatedFixRefusal: fixRoundTally(ledger, taskId, raw.headRefOid).repeatedRefusal,
+    fixRefusalsAtHead: fixRoundTally(ledger, taskId, raw.headRefOid).refusals.length,
     strikeHistory: deriveStrikeHistory(ledger, taskId, raw.headRefOid),
     // superseded-by is a cross-PR sweep concern (which OTHER open PR credits the
     // same task) — out of scope for a single explicitly-named PR lookup.

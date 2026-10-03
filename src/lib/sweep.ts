@@ -27,7 +27,7 @@ import { ghJson, ghJsonAsync } from "./github-transport.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
 import { acquireInflightLock, InflightLockError, type InflightLockHandle } from "./inflight-lock.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
-import { appendLedger } from "./ledger.js";
+import { appendLedger, isRealStrike } from "./ledger.js";
 import { runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import { resolveLedgerUnion } from "./ledger-union.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
@@ -4378,8 +4378,10 @@ export interface OpenPrView {
    *  It is not head-keyed: a new head with the SAME refusal is the recurrence this stop exists to
    *  catch. Absent or malformed ledger evidence fails closed. */
   previousInstrumentEntanglementPaths?: InstrumentEntanglementPaths;
-  /** Fix-rung strikes ALREADY attempted for this PR (from the ledger). */
+  /** Completed worker rounds that moved the head or reached a verdict (from the ledger). */
   priorStrikes: number;
+  repeatedFixRefusal?: string;
+  fixRefusalsAtHead?: number;
   /** W1-T2794 — the MERGED PR that already completed this PR's task, from the ownership-asserted
    *  credit projection ({@link CreditCandidate} with `merged: true`). STRICTLY STRONGER EVIDENCE
    *  than {@link supersededBy}, which means only that a higher-numbered OPEN peer shares the
@@ -7070,7 +7072,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       // `strikeCapForAnswer` returns the ADDITIONAL strikes an answer grants, so the cumulative
       // ceiling is the ORIGINAL cap plus that allowance — never an unconditional bypass of the
       // ledger's running count.
-      return pr.priorStrikes < policy.strikeCap + strikeCapForAnswer(policy.strikeCap, clarify);
+      return pr.repeatedFixRefusal === undefined && pr.priorStrikes < policy.strikeCap + strikeCapForAnswer(policy.strikeCap, clarify);
     },
     reason: (pr) =>
       `operator answered the clarification question — re-dispatching the fix rung with the added constraint (strike ${pr.priorStrikes + 1})`,
@@ -7122,7 +7124,8 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // review AND a blocked_ci PR (checks red) — off the SAME strike counter/cap
     // (design note iv: one ladder, one exhaustion route).
     disposition: "blocked-ambiguous",
-    when: (pr, policy) => (pr.reviewState === "failure" || isBlockedCi(pr)) && pr.priorStrikes >= policy.strikeCap,
+    when: (pr, policy) => (pr.reviewState === "failure" || isBlockedCi(pr)) &&
+      (pr.priorStrikes >= policy.strikeCap || pr.repeatedFixRefusal !== undefined),
     // W1-T186: once checks are the reason strikes exhausted, NAME the check and sha here too, so
     // the ledgered reason never reads as the generic, uninvestigable "fix strikes exhausted".
     //
@@ -7130,6 +7133,8 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // an answered PR renders against its EXTENDED ceiling, so reaching it reads as exactly that
     // rather than an impossible overshoot of the base cap.
     reason: (pr, policy) => {
+      if (pr.repeatedFixRefusal !== undefined) return repeatedFixRefusalReason(pr.repeatedFixRefusal) +
+        (isBlockedCi(pr) ? ` — ${describeCiFailures(pr)}` : "");
       const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
       return isBlockedCi(pr)
         ? `fix strikes exhausted (${pr.priorStrikes}/${ceiling}) — ${describeCiFailures(pr)} — escalating`
@@ -7149,6 +7154,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // (`dispatchFix`, run-task.ts) actually budgets against.
     reason: (pr, policy) => {
       const base = `${pr.checksState === "red" ? "required checks red" : describeCiFailures(pr)}`;
+      if ((pr.fixRefusalsAtHead ?? 0) > 0) return `${base} — refused (${pr.fixRefusalsAtHead} at this head) — retrying the fix round`;
       // W1-T2998 — NAME THE DETERMINISTIC REMEDY WHENEVER ONE EXISTS, INDEPENDENTLY OF WHETHER IT
       // MAY BE TAKEN. With `recordableRatchetRepairEnabled` false this sentence is the ONLY effect
       // of the classifier, and it is not decoration: it tells the operator reading the ledger, and
@@ -9788,14 +9794,14 @@ const ZERO_COUNTS = (): Record<Disposition, number> => ({
 const inFlightReviewKeys = new Set<string>();
 
 /** W1-T2520 — THE FIX-DISPATCH MUTEX, {@link inFlightReviewKeys}'s SIBLING for the other lane.
- *  `priorStrikes` is derived by COUNTING dispatch rows at view-build time, with no exclusion between
+ *  `priorStrikes` is derived from round outcomes at view-build time, with no exclusion between
  *  that count and the dispatch it gates, so A CLAIM ALONE IS NOT ENOUGH and
  *  {@link claimFixDispatch} RE-READS the ledger the instant the claim is taken. A SEPARATE Set from
  *  the review mutex. // Why: 13 dispatches across two PRs against a cap of 2. */
 const inFlightFixKeys = new Set<string>();
 
 /** W1-T5032 — a proof amendment's `fix.dispatch` identity row is an idempotency record, never a strike;
- *  hidden from `priorStrikesFor` and `freshFixDispatchCount` here, while `lookupIdentity` still reads it. */
+ *  hidden from the strike tally here, while `lookupIdentity` still reads it. */
 export function isProofAmendmentIdentityRow(line: Record<string, unknown>): boolean {
   return line.step === "fix.dispatch" && line.kind === "proof_amendment";
 }
@@ -9803,7 +9809,7 @@ export function isProofAmendmentIdentityRow(line: Record<string, unknown>): bool
 /** W1-T2788 — select the fix-rung ledger generation attributable to `currentHeadSha`. New rows name
  *  the head they targeted and require exact equality; legacy rows carry no head and reset only at a
  *  trustworthy observation for this task at the current head, so an incomplete history fails closed
- *  rather than manufacturing strike budget. `fix.review` also carries no head. */
+ *  rather than manufacturing strike budget. Legacy `fix.review` rows may carry no head. */
 export function fixLedgerRowsForHead(
   lines: Array<Record<string, unknown>>,
   taskId: string | undefined,
@@ -9851,27 +9857,72 @@ export function fixLedgerRowsForHead(
   return selected;
 }
 
-/** W1-T2520 — the fresh under-claim counterpart to `priorStrikesFor`. What it adds is FRESHNESS: it
- *  reads the ledger AFTER taking the claim, so two callers cannot act on the same stale count.
- *  COUNTS DISTINCT `strike` NUMBERS, NOT RAW ROWS — two GENUINE strikes can never share a number,
- *  so a duplicate value is always the SAME attempt re-described. */
-function freshFixDispatchCount(
+/** W1-T5542: count outcomes; legacy dispatches without receipts retain the historical cap. */
+export function fixRoundTally(
   lines: Array<Record<string, unknown>>,
   taskId: string | undefined,
-  currentHeadSha: string,
-): number {
-  if (!taskId) return 0;
-  const strikeNumbers = new Set<number>();
-  let unnumbered = 0;
-  for (const line of fixLedgerRowsForHead(lines, taskId, currentHeadSha)) {
-    if (line.step !== "fix.dispatch") continue;
-    if (typeof line.strike === "number") {
-      strikeNumbers.add(line.strike);
-    } else {
-      unnumbered++;
-    }
+  currentHeadSha?: string,
+  regime?: "executed" | "keyword_only",
+): { strikes: number; refusals: { reason: string; round_id: string }[]; repeatedRefusal?: string } {
+  const tally: ReturnType<typeof fixRoundTally> = { strikes: 0, refusals: [] };
+  if (!taskId) return tally;
+  if (regime === undefined) {
+    const proofExec = lines.findLast((line) => line.task_id === taskId && line.step === "review.posted")?.proof_exec;
+    regime = Array.isArray(proofExec) && proofExec.some((proof) => proof !== "not_executable") ? "executed" : "keyword_only";
   }
-  return strikeNumbers.size + unnumbered;
+  const selected = new Set(fixLedgerRowsForHead(lines, taskId, currentHeadSha).filter((line) => line.step === "fix.dispatch"));
+  type Round = { dispatch: Record<string, unknown>; id: string; done?: Record<string, unknown>; refusal?: Record<string, unknown>; reviewed?: boolean };
+  const rounds: Round[] = [];
+  const identified = new Map<string, Round>();
+  for (const [index, line] of lines.entries()) {
+    if (line.task_id !== taskId) continue;
+    const id = typeof line.round_id === "string" ? line.round_id : undefined;
+    if (line.step === "fix.dispatch") {
+      if (id !== undefined && identified.has(id)) continue;
+      const round: Round = { dispatch: line, id: id ?? `legacy:${index}` };
+      rounds.push(round);
+      if (id !== undefined) identified.set(id, round);
+      continue;
+    }
+    if (line.step !== "fix.commit_refused" && line.step !== "fix.done" && line.step !== "fix.review") continue;
+    const round = id !== undefined ? identified.get(id) : rounds.findLast((candidate) =>
+      candidate.dispatch.round_id === undefined && candidate.dispatch.strike === line.strike &&
+      (line.head_sha === undefined || candidate.dispatch.head_sha === undefined || line.head_sha === candidate.dispatch.head_sha) &&
+      (line.step === "fix.commit_refused" ? !candidate.refusal && !candidate.done : line.step === "fix.done" ? !candidate.done : !candidate.reviewed));
+    if (!round || (line.head_sha !== undefined && round.dispatch.head_sha !== undefined && line.head_sha !== round.dispatch.head_sha)) continue;
+    if (line.step === "fix.commit_refused") round.refusal = line;
+    if (line.step === "fix.done") round.done = line;
+    if (line.step === "fix.review") round.reviewed = true;
+  }
+  const reasons = new Map<string, number>();
+  for (const round of rounds) {
+    if (!selected.has(round.dispatch)) continue;
+    if (round.refusal || round.done?.subtype === "commit_refused") {
+      const reason = typeof round.refusal?.reason === "string" ? round.refusal.reason : "fix commit refused";
+      tally.refusals.push({ reason, round_id: round.id });
+      const count = (reasons.get(reason) ?? 0) + 1;
+      reasons.set(reason, count);
+      if (count === 2 && tally.repeatedRefusal === undefined) tally.repeatedRefusal = reason;
+      continue;
+    }
+    if (regime === "executed" && round.dispatch.verdict_regime !== "executed") continue;
+    // Older histories can omit receipts, and body repairs record a completed write at dispatch.
+    // An explicit receipt takes precedence; identified worker rounds always require an outcome.
+    if (round.dispatch.round_id === undefined && round.done === undefined) {
+      tally.strikes++;
+      continue;
+    }
+    const pushedHead = round.done?.pushed_head_sha;
+    if (isRealStrike({
+      workerRan: round.done !== undefined,
+      judgmentPosted: round.reviewed === true || (typeof pushedHead === "string" && pushedHead !== round.dispatch.head_sha),
+    })) tally.strikes++;
+  }
+  return tally;
+}
+
+function repeatedFixRefusalReason(reason: string): string {
+  return `fix rounds refused twice at this head (${reason}) — no strike spent — no further round can add information`;
 }
 
 /** W1-T2379 — THE DETACHED-WAIT REGISTRY, module-scoped for the reason {@link inFlightReviewKeys}
@@ -10609,14 +10660,18 @@ export async function runSweep(
     // read before any claim existed, predates it.
     const freshLines = readLedger(deps.ledgerPath);
     const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
-    const freshStrikes = freshFixDispatchCount(freshLines, pr.taskId, pr.headSha);
-    if (freshStrikes >= ceiling) {
+    const freshTally = fixRoundTally(freshLines, pr.taskId, pr.headSha);
+    if (freshTally.strikes >= ceiling || freshTally.repeatedRefusal !== undefined) {
       inFlightFixKeys.delete(fixKey);
       return {
         ok: false,
-        reason: `fix strikes exhausted under the claim (${freshStrikes}/${ceiling}) — refused before dispatch, never spending a strike a concurrent sweep already spent`,
+        reason: freshTally.repeatedRefusal !== undefined
+          ? repeatedFixRefusalReason(freshTally.repeatedRefusal)
+          : `fix strikes exhausted under the claim (${freshTally.strikes}/${ceiling}) — refused before dispatch, never spending a strike a concurrent sweep already spent`,
       };
     }
+    pr.priorStrikes = freshTally.strikes;
+    pr.fixRefusalsAtHead = freshTally.refusals.length;
     let released = false;
     const release = () => {
       if (released) return;
@@ -11077,19 +11132,13 @@ export async function runSweep(
         // head nothing will move again. A dispatch that RESOLVED is never read as stalled.
         const metadataRed = disposition === "blocked-fixable" && metadataOnlyRed(pr) !== undefined &&
           !metadataRedRuledOut(ledgerLines, pr);
-        const refusal = disposition === "blocked-fixable" && !metadataRed ? sameHeadRedFixRefusal(ledgerLines, pr) : undefined;
         alreadyDone = metadataRed
           ? false
-          : refusal !== undefined && !refusal.scopeAmendment
-            ? true
-            : dispatchedThisHead && !fixRungStalledWithoutNewHead(ledgerLines, pr.taskId);
+          : dispatchedThisHead && !fixRungStalledWithoutNewHead(ledgerLines, pr.taskId);
         if (alreadyDone) {
-          // W1-T4459: the refusal reason rides this pass's own `sweep.disposed` stand_down_reason.
           dedupStandDownReason =
-            refusal
-              ? `fix refused at head ${pr.headSha.slice(0, 7)} with unchanged red checks: ${refusal.reason}`
-              : `fix already dispatched for this head (${pr.headSha.slice(0, 7)}) — awaiting its outcome ` +
-                `before spending another strike`;
+            `fix already dispatched for this head (${pr.headSha.slice(0, 7)}) — awaiting its outcome ` +
+            `before spending another strike`;
         }
         break;
       }
@@ -11424,6 +11473,11 @@ export async function runSweep(
                 extraDisposedFields = { ...extraDisposedFields, scope_amendment_red_checks: redCheckNames(pr) };
                 acted = false;
                 standDownReason = reason;
+                break;
+              }
+              if (refusedSameRed && fixRoundTally(ledgerLines, pr.taskId, pr.headSha).refusals.length === 0) {
+                acted = false;
+                standDownReason = `fix commit refused at this head and red set (${refusedSameRed.reason}) — incomplete round history; awaiting a changed head or red set`;
                 break;
               }
               // W1-T527 — CLASSIFY BEFORE SELECTING, because the strike is spent at dispatch and
