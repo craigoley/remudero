@@ -305,9 +305,13 @@ test('legacy compact coverage and bounded corpora remain readable together in se
     const raw = join(root, 'raw'); mkdirSync(raw);
     writeFileSync(join(raw, 'coverage-1-0000000000000-0.json'), JSON.stringify(profile));
     const compact = join(root, 'compact'); runCompactor(compact, raw);
-    const [bundle] = compactBundles(compact);
     const legacy = join(root, 'legacy'); mkdirSync(legacy);
-    writeFileSync(join(legacy, 'coverage-bundle-1-0000000000000-0.json'), JSON.stringify({ format: 'rmd-v8-coverage-bundle-v1', ...bundle }));
+    execFileSync(process.execPath, ['--expose-internals', '--input-type=module', '-e', `
+      import { compactRawCoverageDirectories } from './scripts/coverage-merge-ratchet.mjs';
+      import { writeFileSync } from 'node:fs';
+      const { bundle } = compactRawCoverageDirectories([process.argv[1]]);
+      writeFileSync(process.argv[2], JSON.stringify(bundle));
+    `, raw, join(legacy, 'coverage-bundle-1-0000000000000-0.json')], { cwd: process.cwd(), encoding: 'utf8', stdio: 'pipe' });
     const direct = join(root, 'direct.info'), mixed = join(root, 'mixed.info');
     runMerger(direct, raw, raw); runMerger(mixed, legacy, compact);
     assert.equal(readFileSync(mixed, 'utf8'), readFileSync(direct, 'utf8'));
