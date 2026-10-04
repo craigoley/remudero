@@ -60,9 +60,11 @@ esac
 case "$1" in
   ps) echo healthy-container;;
   top)
+    # Real Docker refuses a ps format without a PID column: "Couldn't find PID field in ps output".
+    case " $* " in *" -eo "*) case "$*" in *pid*) : ;; *) echo "Error response from daemon: Couldn't find PID field in ps output" >&2; exit 1;; esac;; esac
     [ "\${FAULT:-}" != sensor ] || exit 1
     [ "\${FAULT:-}" != empty-sensor ] || exit 0
-    echo COMMAND
+    echo "PID COMMAND"
     case "\${FAULT:-}" in
       claude) echo 'node /tools/claude --output-format stream-json';;
       codex) echo 'node /tools/codex exec --json';;
