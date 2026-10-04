@@ -86,32 +86,37 @@ test("automatic branch cadence: the full rung prunes through the existing manife
   const log = (step: string, extra: Record<string, unknown> = {}) => logs.push([step, extra]);
   const exec = fakeExec(() => names, calls);
   const config = { root: REPO_ROOT, claudeBin: "/bin/true" } as Config;
+  const scratch = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}reap-cadence-`));
+  const ledgerPath = join(scratch, "ledger.ndjson");
+  try {
+    runAutomaticBranchReapRung("other-owner", "target-repo", config, ledgerPath, "SWEEP-1", log, state, {
+      exec,
+      root: REPO_ROOT,
+      clock: { now: () => 1000 },
+    });
+    assert.equal(calls.filter((call) => call.includes("--delete")).length, 1, "the first pass reaches the existing guarded deleter");
+    assert.ok(calls.some((call) => call.some((arg) => arg.includes("repos/other-owner/target-repo"))), "the automatic rung uses the supplied target owner/repo");
+    assert.ok(logs.some(([step]) => step === "branch_reap.sweep.started"));
+    assert.ok(logs.some(([step]) => step === "branch_reap.sweep.completed"));
 
-  runAutomaticBranchReapRung("other-owner", "target-repo", config, join(REPO_ROOT, "state", "test-ledger.ndjson"), "SWEEP-1", log, state, {
-    exec,
-    root: REPO_ROOT,
-    clock: { now: () => 1000 },
-  });
-  assert.equal(calls.filter((call) => call.includes("--delete")).length, 1, "the first pass reaches the existing guarded deleter");
-  assert.ok(calls.some((call) => call.some((arg) => arg.includes("repos/other-owner/target-repo"))), "the automatic rung uses the supplied target owner/repo");
-  assert.ok(logs.some(([step]) => step === "branch_reap.sweep.started"));
-  assert.ok(logs.some(([step]) => step === "branch_reap.sweep.completed"));
+    calls.length = 0;
+    runAutomaticBranchReapRung("other-owner", "target-repo", config, ledgerPath, "SWEEP-2", log, state, {
+      exec,
+      root: REPO_ROOT,
+      clock: { now: () => 1001 },
+    });
+    assert.deepEqual(calls.filter((call) => call.includes("--delete")), [], "an unchanged corpus is throttled");
 
-  calls.length = 0;
-  runAutomaticBranchReapRung("other-owner", "target-repo", config, join(REPO_ROOT, "state", "test-ledger.ndjson"), "SWEEP-2", log, state, {
-    exec,
-    root: REPO_ROOT,
-    clock: { now: () => 1001 },
-  });
-  assert.deepEqual(calls.filter((call) => call.includes("--delete")), [], "an unchanged corpus is throttled");
-
-  names = ["main", "old", "new"];
-  runAutomaticBranchReapRung("other-owner", "target-repo", config, join(REPO_ROOT, "state", "test-ledger.ndjson"), "SWEEP-3", log, state, {
-    exec,
-    root: REPO_ROOT,
-    clock: { now: () => 1002 },
-  });
-  assert.equal(calls.filter((call) => call.includes("--delete")).length, 1, "a changed branch set re-arms the classifier");
+    names = ["main", "old", "new"];
+    runAutomaticBranchReapRung("other-owner", "target-repo", config, ledgerPath, "SWEEP-3", log, state, {
+      exec,
+      root: REPO_ROOT,
+      clock: { now: () => 1002 },
+    });
+    assert.equal(calls.filter((call) => call.includes("--delete")).length, 1, "a changed branch set re-arms the classifier");
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 });
 
 test("automatic branch cadence contains a classifier exception and records the failed pass", () => {
