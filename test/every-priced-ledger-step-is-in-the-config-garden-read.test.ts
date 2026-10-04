@@ -47,7 +47,7 @@ const KNOWN_GAP =
 
 /** Each step the scan finds that the gardener deliberately does not read, and why. */
 const EXEMPT: Readonly<Record<string, string>> = {
-  // The five W1-T5526 removed from the read, and the two other cost-only rows.
+  // The five W1-T5526 removed from the read, and the three other cost-only rows.
   "cost.anomaly": DONE_STEPS_PRICE_THE_RUN,
   "containment.probe": DONE_STEPS_PRICE_THE_RUN,
   "isolation.probe": DONE_STEPS_PRICE_THE_RUN,
@@ -55,6 +55,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "budget.warning": DONE_STEPS_PRICE_THE_RUN,
   "fix.spawn_infra_blocked": DONE_STEPS_PRICE_THE_RUN,
   worker_smoke: DONE_STEPS_PRICE_THE_RUN,
+  "sweep.plan_round.worker": DONE_STEPS_PRICE_THE_RUN,
   // The sweep.
   "sweep.absent_repush": A_LANE_RUN_ID,
   "sweep.action_failed": A_LANE_RUN_ID,
@@ -169,7 +170,7 @@ function enclosingObject(text: string, at: number): string {
 
 /** Every step a source tree writes to the ledger with `pr_url` or `cost_usd` in the same payload, mapped
  *  to the files that write it. `sources` maps a path to its text. */
-export function pricedLedgerSteps(sources: ReadonlyMap<string, string>): Map<string, Set<string>> {
+export function stepsWrittenWithAPrice(sources: ReadonlyMap<string, string>): Map<string, Set<string>> {
   const constants = new Map<string, Set<string>>();
   for (const text of sources.values()) {
     for (const m of text.matchAll(new RegExp(`\\bconst (${CONST_NAME})\\s*(?::\\s*string\\s*)?=\\s*(["'])(${STEP_NAME})\\2`, "g"))) {
@@ -205,7 +206,7 @@ function srcTree(dir: string, out = new Map<string, string>()): Map<string, stri
 }
 
 let scanned: Map<string, Set<string>> | undefined;
-const srcPricedSteps = (): Map<string, Set<string>> => (scanned ??= pricedLedgerSteps(srcTree("src")));
+const srcPricedSteps = (): Map<string, Set<string>> => (scanned ??= stepsWrittenWithAPrice(srcTree("src")));
 
 test("test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption", () => {
   const found = srcPricedSteps();
@@ -234,7 +235,7 @@ test("every exemption names a step the census still finds and the gardener does 
 });
 
 test("the census reads each write idiom and ignores an unpriced or total-only row", () => {
-  const found = pricedLedgerSteps(new Map([
+  const found = stepsWrittenWithAPrice(new Map([
     ["a.ts", [
       `log("a.literal_log", { pr_url: url, n: f(1, (2)) });`,
       `deps.log("a.unpriced", { reason: "x" });`,
