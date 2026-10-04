@@ -4,12 +4,12 @@
   depends_on: []
   type: implement
   verify: auto
-  risk: medium
+  risk: high
   priority: 2
   status: queued
   attempts: 0
   origin: "oper#core-daemon-loop-profile-2026-09-30"
-  files: [src/lib/config-gardener.ts, test/config-gardener-inventory-reads-the-ledger-off-the-loop.test.ts]
+  files: [src/lib/config-gardener.ts, src/run-task.ts, test/config-gardener-inventory-reads-the-ledger-off-the-loop.test.ts, test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts, test/worker-config-tends-itself.test.ts]
   rationale: |
     A live CPU profile of remudero-daemon on 2026-09-30 (SIGUSR1 + CDP, 1370 s over two daemon
     processes, 815 s busy once the profiler's own exit hold is excluded) put the config gardener at
@@ -31,6 +31,8 @@
       proof: 'grep: test("W1-T4969: a timer keeps firing while the config inventory reads the ledger" in test/config-gardener-inventory-reads-the-ledger-off-the-loop.test.ts'
     - claim: "an unchanged ledger reuses the mount headroom sweep"
       proof: 'grep: test("W1-T4969: an unchanged ledger reuses the mount headroom sweep" in test/config-gardener-inventory-reads-the-ledger-off-the-loop.test.ts'
+    - claim: "the registered config pass awaits its inventory and records asynchronous failures"
+      proof: 'grep: await runConfigGarden( in src/run-task.ts'
   falsifier: |
     Restore the synchronous readLedgerUnionRecordsSync call in configInventory and the timer-probe
     test reads zero ticks during the inventory.

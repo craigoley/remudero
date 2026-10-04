@@ -383,33 +383,33 @@ export interface NextRunnableOpts extends TaskPreconditionOptions {
   onSkipRunBranch?: (task: Task) => void;
 }
 
-/** The plan's tasks in DISPATCH ORDER (impl-DQ): `priority` first, then declared scope, then a
- *  workstream-aware id order, so file placement no longer sets priority. INVARIANT: determinism is
- *  absolute — the comparator reads only committed content (`priority` and `id`), never file order,
- *  mtime or enumeration order, and the id tiebreak makes it a TOTAL order. Absent `priority` sorts
- *  last. COST: this discards positional signal; `priority:` (W1-T422) succeeds it. */
+/** Dispatch priority first, then measured stride passes (W1-T4064). Without readable evidence,
+ * the historic scope/id order remains deterministic; the comparator performs no reads. */
 // Why: the shard-starvation defect this replaces and what sorting by id costs — docs/forensics/drain.md.
 export function dispatchOrder(tasks: readonly Task[], context?: DispatchValueContext): Task[] {
   return [...tasks].sort((a, b) => compareDispatch(a, b, context));
 }
 
-/** Total order: `priority` ascending first (absent sorts last), then {@link undeclaredScopeLast}
- *  (W1-T476), then {@link idOrdinal}'s workstream-aware order as the deterministic tiebreak. */
+/** Total order: priority, stride, then scope/id. Unscored tasks follow the scored population. */
 export function compareDispatch(a: Task, b: Task, context?: DispatchValueContext): number {
   const pa = a.priority ?? Number.POSITIVE_INFINITY;
   const pb = b.priority ?? Number.POSITIVE_INFINITY;
   if (pa !== pb) return pa - pb;
+  const sa = context?.stridePassByTaskId?.get(a.id);
+  const sb = context?.stridePassByTaskId?.get(b.id);
+  if (context?.stridePassByTaskId && (sa === undefined) !== (sb === undefined)) return sa === undefined ? 1 : -1;
+  if (sa !== undefined && sb !== undefined && sa !== sb) return sa - sb;
   const ua = undeclaredScopeLast(a);
   const ub = undeclaredScopeLast(b);
   if (ua !== ub) return ua - ub;
   // W1-T3412: value is a tie-break only after explicit operator priority and declared scope. A
   // score missing on either side cannot be treated as zero or as evidence that one class is bad.
-  const va = measuredDispatchValue(a, context);
-  const vb = measuredDispatchValue(b, context);
+  const va = context?.costOfDelayFallback ? undefined : measuredDispatchValue(a, context);
+  const vb = context?.costOfDelayFallback ? undefined : measuredDispatchValue(b, context);
   if (va !== undefined && vb !== undefined && va !== vb) return vb - va;
   // The fanout term is meaningful only when a complete calibration produced a context. An empty
   // context is the fail-closed fallback: it preserves the former id order byte for byte.
-  if (context) {
+  if (context && !context.costOfDelayFallback) {
     const fa = context.openDependentFanoutByTaskId.get(a.id) ?? 0;
     const fb = context.openDependentFanoutByTaskId.get(b.id) ?? 0;
     if (fa !== fb) return fb - fa;
