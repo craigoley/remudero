@@ -41,6 +41,32 @@ test("W1-T4283: the clean_single_strike step is refused as restating its own out
   assert.equal(scanSkillDraft(draft, ALLOWLIST).ok, false);
 });
 
+test("W1-T4283: mined transcript steps replace the outcome-only step, so the draft scans clean", () => {
+  const tool = (runId: string, taskId: string, name: string) => ({ run_id: runId, task_id: taskId, step: "worker.activity", event_kind: "tool-executing", tool_name: name });
+  const runs = [
+    { runId: "P1", taskId: "W1-T300", type: "implement", verdict: "merged" },
+    { runId: "P2", taskId: "W1-T301", type: "implement", verdict: "merged" },
+    { runId: "D1", taskId: "W1-T302", type: "implement", verdict: "merged" },
+  ];
+  const records = [
+    tool("P1", "W1-T300", "Grep"), tool("P1", "W1-T300", "Edit"),
+    tool("P2", "W1-T301", "Grep"), tool("P2", "W1-T301", "Edit"),
+    tool("D1", "W1-T302", "Edit"),
+    { ts: "2026-05-01T00:00:01.000Z", run_id: "D1", task_id: "W1-T302", step: "fix.dispatch" },
+  ];
+  const draft = renderSkillDraft({
+    shapeKey: "implement:clean_single_strike",
+    taskType: "implement",
+    signals: ["clean_single_strike"],
+    runIds: ["P1", "P2"],
+    taskIds: ["W1-T300", "W1-T301"],
+    supportingRuns: 2,
+  }, { runs, records })!;
+  assert.ok(!draft.markdown.includes(PROCEDURAL_STEP_TEXT.clean_single_strike));
+  assert.match(draft.markdown, /Call `Grep`/);
+  assert.deepEqual(scanSkillDraft(draft, ALLOWLIST), { ok: true });
+});
+
 test("W1-T4283: the fully_executed_proof step passes unchanged", () => {
   const draft = rendered("fully_executed_proof");
   assert.ok(draft.markdown.includes(`- ${PROCEDURAL_STEP_TEXT.fully_executed_proof}`));

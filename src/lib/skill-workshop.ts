@@ -136,7 +136,6 @@ export function renderSkillDraft(candidate: ProceduralCandidateLike, transcripts
   const name = `${kebabSlug(candidate.shapeKey)}-${procedureKey.slice(0, 8)}`;
   const description = `A procedure shape proven across ${candidate.supportingRuns} merged ${candidate.taskType} run(s): ${candidate.signals.join(" + ")}.`;
   const appliesTo = injectableSkillTaskType(candidate.taskType);
-  const steps = candidate.signals.map((key) => `- ${PROCEDURAL_STEP_TEXT[key] ?? key}`);
   const outcomeDescriptions = candidate.signals.map((key) =>
     candidate.outcomeDescriptions?.[key] ?? PROCEDURAL_STEPS[key]?.description ?? key,
   );
@@ -144,6 +143,13 @@ export function renderSkillDraft(candidate: ProceduralCandidateLike, transcripts
     ? mineTranscriptWorkflows(transcripts.runs, transcripts.records).find((w) => w.taskType === candidate.taskType)
     : undefined;
   const workflowSteps = workflow ? renderTranscriptWorkflowSteps(workflow) : [];
+  // Once transcript-mined steps name what a worker DID, a signal step that only restates its own
+  // mined outcome (W1-T4283) is dropped rather than left to make the scanner refuse the whole
+  // draft; with no mined steps it stays, so the scanner still refuses an outcome-only procedure.
+  const steps = candidate.signals
+    .map((key, index) => ({ line: `- ${PROCEDURAL_STEP_TEXT[key] ?? key}`, outcome: outcomeDescriptions[index] }))
+    .filter(({ line, outcome }) => workflowSteps.length === 0 || !restatesOutcome(line, outcome))
+    .map(({ line }) => line);
   const evidence = [
     ...candidate.runIds.map((runId) => `- [src: run#${runId}]`),
     `- Filed under: ${candidate.taskIds.join(", ")}`,
@@ -271,6 +277,12 @@ function stepContentTokens(text: string): string[] {
   return (text.normalize("NFKC").toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [])
     .filter((word) => !STEP_FILLER_WORDS.has(word))
     .map((word) => word.replace(/(?:ing|ed|s)$/, "").replace(/e$/, "").replace(/([b-df-hj-np-tv-z])\1$/, "$1"));
+}
+
+/** Whether every content token of a step line already appears in one mined outcome description. */
+function restatesOutcome(line: string, description: string): boolean {
+  const outcome = new Set(stepContentTokens(description));
+  return stepContentTokens(line).every((token) => outcome.has(token));
 }
 
 /**
