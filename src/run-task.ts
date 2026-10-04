@@ -10035,6 +10035,8 @@ export function readPackageScriptsFor(worktreePath: string): Readonly<Record<str
  * `spawnWorker`/`waitForCiGreen`/`runReview` plus a small git-push wrapper.
  */
 export async function runFixRung(opts: {
+  /** W1-T4072: production pins harness commits and pushes to the dispatch head. */
+  guardRoundHead?: boolean;
   taskId: string;
   runId: string;
   /** `files` (W1-T322) — see runReview's own `task` doc; every real caller already passes the
@@ -10284,7 +10286,7 @@ export async function runFixRung(opts: {
      * rewound between the commit and this call raises `LanePushForeignHeadError` instead of
      * silently no-op'ing. Optional and additive — every existing test double that ignores its
      * third argument keeps working unchanged. */
-    push: (worktreePath: string, branch: string, expectedHeadSha?: string) => unknown;
+    push: (worktreePath: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => unknown;
     /** Fresh REST head read used only after the push to bind this worker to its exact output. */
     readHeadShaForProvenance?: (prUrl: string) => string;
     issues: IssueGateway;
@@ -11741,10 +11743,12 @@ export async function runFixRung(opts: {
     // so a commit the worker made itself is pushed, not re-read as "the worker changed nothing".
     let harnessCommitRefusalReason: string | undefined;
     let harnessCommitUndeclared: readonly string[] = [];
+    let harnessCommittedSha: string | undefined;
     const harnessCommit = (report: string, options: Pick<Parameters<typeof harnessCommitForShellLessWorker>[0], "subjectSource" | "derivedCommit" | "fixOutcome"> = {}) =>
       (deps.harnessCommitForShellLessWorker ?? harnessCommitForShellLessWorker)({
         harnessOwnsGit: fixHarnessOwnsGit,
-        commitCount: roundStartSha === undefined ? 0 : (deps.commitsAhead ?? commitsAhead)(opts.worktreePath, roundStartSha),
+        commitCount: opts.guardRoundHead && fixHarnessOwnsGit ? 0 : roundStartSha === undefined ? 0 : (deps.commitsAhead ?? commitsAhead)(opts.worktreePath, roundStartSha),
+        ...(opts.guardRoundHead ? { priorHeadSha: censusRefusalIsCurrent() ? roundStartSha ?? priorHeadSha : priorHeadSha, branch: opts.branch } : {}),
         report,
         worktreePath: opts.worktreePath,
         // The prompt and pre-strike guard already permit repairs to the inherited PR diff.
@@ -11760,6 +11764,7 @@ export async function runFixRung(opts: {
           harnessCommitRefusalReason = reason;
           harnessCommitUndeclared = undeclared;
         },
+        onCommit: (sha) => { harnessCommittedSha = sha; },
       });
     const fixReport = workerTranscript(fixResult);
     let fixOutcome = anchoredFixOutcome(fixReport);
@@ -11850,9 +11855,9 @@ export async function runFixRung(opts: {
     // if it no longer matches this snapshot, instead of silently pushing zero refs. Best-effort:
     // an unreadable HEAD here just means this round's push runs without the guard — the same
     // fail-open discipline every other optional read in this rung already takes.
-    let expectedHeadShaForPush: string | undefined;
+    let expectedHeadShaForPush = harnessCommittedSha;
     try {
-      expectedHeadShaForPush = execFileSync("git", ["-C", opts.worktreePath, "rev-parse", "HEAD"], {
+      expectedHeadShaForPush ??= execFileSync("git", ["-C", opts.worktreePath, "rev-parse", "HEAD"], {
         encoding: "utf8",
       }).trim();
     } catch {
@@ -12080,7 +12085,7 @@ export async function runFixRung(opts: {
       if (harnessCommitCount > 0) {
         let pushedHead: string | undefined;
         try {
-          const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush), expectedHeadShaForPush, "rung.strike");
+          const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? priorHeadSha : undefined), expectedHeadShaForPush, "rung.strike");
           if (pushed === undefined) pushedHead = expectedHeadShaForPush;
           if (pushed && pushed !== "refused") return pushed;
         } finally { logFixDone(pushedHead); }
@@ -12129,7 +12134,7 @@ export async function runFixRung(opts: {
     let roundPush: FixRungOutcome | "refused" | undefined;
     let pushedHeadSha: string | undefined;
     try {
-      roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush), expectedHeadShaForPush, "rung.strike");
+      roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? priorHeadSha : undefined), expectedHeadShaForPush, "rung.strike");
       if (roundPush === undefined) pushedHeadSha = expectedHeadShaForPush;
     } finally {
       logFixDone(pushedHeadSha);
@@ -16188,11 +16193,25 @@ export class FixRoundPushError extends RmdError {
 
 /** W1-T4693: the one push both fix-rung sites run. Stderr is piped so a refusal is readable; a foreign head
  *  still raises; the only silent failure is a remote that already holds this exact head. */
-export function pushFixRound(wt: string, branch: string, expectedHeadSha?: string): void {
+export function pushFixRound(
+  wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string,
+  deps: Pick<NonNullable<Parameters<typeof gitPushRunBranch>[1]>, "capture" | "exec"> = {},
+): void {
+  const capture = deps.capture ?? defaultGitCapture;
+  const push = deps.exec ?? ((file, args) => void execFileSync(file, args, { stdio: ["ignore", "ignore", "pipe"] }));
   try {
-    gitPushRunBranch(wt, { expectedHeadSha, exec: (file, args) => void execFileSync(file, args, { stdio: ["ignore", "ignore", "pipe"] }) });
+    if (priorHeadSha !== undefined && expectedHeadSha === undefined) throw new Error("refusing a leased fix push without the committed head sha");
+    gitPushRunBranch(wt, { expectedHeadSha, capture, exec: (file, args) => {
+      const pushArgs = priorHeadSha === undefined ? args : ["-C", wt, "push",
+        `--force-with-lease=refs/heads/${branch}:${priorHeadSha}`, "origin", `${expectedHeadSha}:refs/heads/${branch}`];
+      push(file, pushArgs, { stdio: "ignore" });
+      if (priorHeadSha !== undefined) {
+        const observed = capture("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`]).split(/\s/)[0];
+        if (observed !== expectedHeadSha) throw new Error(`leased push of ${branch} expected ${expectedHeadSha}, observed ${observed || "<absent>"}`);
+      }
+    } });
   } catch (err) {
-    if (err instanceof LanePushForeignHeadError) throw err;
+    if (err instanceof LanePushForeignHeadError && priorHeadSha === undefined) throw err;
     // spawnSync, not a try: an unreadable remote simply is not the expected head.
     const remote = spawnSync("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`], { encoding: "utf8" }).stdout?.split(/\s/)[0];
     if (expectedHeadSha !== undefined && remote === expectedHeadSha) return;
@@ -16364,11 +16383,12 @@ export async function pushFixRoundPrechecked(
   branch: string,
   expectedHeadSha?: string,
   ports: CoveragePrecheckPorts = {},
-  push: (wt: string, branch: string, expectedHeadSha?: string) => void = pushFixRound,
+  push: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => void = pushFixRound,
+  priorHeadSha?: string,
 ): Promise<void> {
   const refusal = coveragePushRefusal(await coveragePrecheck(wt, ports), log, "rung.fix_push");
   if (refusal) throw new FixRoundPushError("run-error", refusal, refusal.text);
-  push(wt, branch, expectedHeadSha);
+  push(wt, branch, expectedHeadSha, priorHeadSha);
 }
 
 export type CensusPushRungOutcome =
@@ -18567,6 +18587,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // get the rung for free (no duplicated fix-dispatch logic).
     if (review.state !== "success") {
       const rung = await runFixRung({
+        guardRoundHead: true,
         taskId,
         runId,
         task,
@@ -18629,7 +18650,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           execAcceptanceGateRepairProof: execGrepProofInWorktree(worktreePath),
           // W1-T2610 + W1-T4693: `expectedHeadSha` still raises `LanePushForeignHeadError` on a rewound ref;
           // a refusal or failure now throws `FixRoundPushError`, which `runFixRung` turns into a named round.
-          push: (wt, br, sha) => pushFixRoundPrechecked((step, extra) => log(step, extra), wt, br, sha),
+          push: (wt, br, sha, prior) => pushFixRoundPrechecked((step, extra) => log(step, extra), wt, br, sha, {}, pushFixRound, prior),
           readHeadShaForProvenance: readHeadShaRest,
           issues: ghIssueGateway(owner, task.repo),
           ledgerPath,
@@ -40632,7 +40653,7 @@ function preserveFixHead(repoDir: string, branch: string, localSha: string): str
 
 /** W1-T3696 A1. What {@link commitWorkerEdits} did, and what it refused to touch. */
 export interface WorkerEditCommit {
-  /** True only when a commit object was actually created. */
+  /** True only when the worker's edits were committed onto the branch. */
   readonly committed: boolean;
   /** The new HEAD sha, present only when `committed`. */
   readonly sha?: string;
@@ -40645,6 +40666,7 @@ export interface WorkerEditCommit {
   readonly admittedTests?: readonly string[];
   /** Why nothing was committed, when `committed` is false. */
   readonly reason?: string;
+  readonly headMoved?: { prior_head_sha: string; observed_head_sha: string; other_worktrees: string[] };
 }
 
 /**
@@ -40677,18 +40699,39 @@ export function commitWorkerEdits(
   // exists to prevent, and there is nothing this verb needs that the push verb did not.
   deps: PublishAbandonedFixOwnerAheadDeps = {},
   acceptance: readonly AcceptanceCriterion[] = [],
-  options: { admitTests?: boolean } = {},
+  options: { admitTests?: boolean; priorHeadSha?: string; branch?: string } = {},
 ): WorkerEditCommit {
   const runGit = deps.runGit ?? ((args: string[]) => execFileSync(
     "git",
     ["-C", repoDir, ...args],
-    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+      ...(options.priorHeadSha === undefined ? {} : { env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } }) },
   ));
   if (message.trim().length === 0) {
     return { committed: false, undeclared: [], reason: "refusing to commit with an empty message" };
   }
   if (declaredPaths.length === 0) {
     return { committed: false, undeclared: [], reason: "the task declares no files, so there is no surface to stage" };
+  }
+
+  const roundRef = options.priorHeadSha === undefined ? undefined : options.branch === undefined
+    ? runGit(["symbolic-ref", "HEAD"]).trim() : `refs/heads/${options.branch}`;
+  const movedHead = (undeclared: readonly string[], error?: unknown): WorkerEditCommit | undefined => {
+    const row = runGit(["for-each-ref", "--format=%(refname) %(objectname)", roundRef!]).split("\n")
+      .find((line) => line.startsWith(`${roundRef} `));
+    const observed = row?.slice(roundRef!.length + 1) ?? "<absent>";
+    if (observed === options.priorHeadSha) return undefined;
+    const otherWorktrees = runGit(["worktree", "list", "--porcelain"]).split("\n\n").filter((block) =>
+      block.split("\n").includes(`branch ${roundRef}`),
+    ).map((block) => block.split("\n").find((line) => line.startsWith("worktree "))!.slice(9))
+      .filter((path) => resolve(path) !== resolve(repoDir));
+    return { committed: false, undeclared,
+      reason: `branch moved during fix round: expected ${options.priorHeadSha}, observed ${observed}${error === undefined ? "" : `: ${String(error)}`}`,
+      headMoved: { prior_head_sha: options.priorHeadSha!, observed_head_sha: observed, other_worktrees: otherWorktrees } };
+  };
+  if (roundRef !== undefined) {
+    const refusal = movedHead([]);
+    if (refusal) return refusal;
   }
 
   const status = runGit(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]);
@@ -40722,11 +40765,30 @@ export function commitWorkerEdits(
     return { committed: false, undeclared, reason: "every change the worker made is outside its declared files" };
   }
 
-  runGit(["add", "-A", "--", ...declared]);
-  runGit(["commit", "-m", message]);
+  let sha: string;
+  if (roundRef === undefined) {
+    runGit(["add", "-A", "--", ...declared]);
+    runGit(["commit", "-m", message]);
+    sha = runGit(["rev-parse", "HEAD"]).trim();
+  } else {
+    const tree = temporaryIndexTree(repoDir, options.priorHeadSha!, (env) => {
+      execFileSync("git", ["-C", repoDir, "add", "-A", "--", ...declared], { env, stdio: ["ignore", "pipe", "pipe"] });
+    });
+    if (tree === runGit(["rev-parse", `${options.priorHeadSha}^{tree}`]).trim()) {
+      return { committed: false, undeclared, reason: "the worker changed nothing" };
+    }
+    sha = runGit(["commit-tree", tree, "-p", options.priorHeadSha!, "-m", message]).trim();
+    try {
+      runGit(["update-ref", roundRef, sha, options.priorHeadSha!]);
+    } catch (error) {
+      const refusal = movedHead(undeclared, error);
+      if (refusal) return refusal;
+      throw error;
+    }
+  }
   return {
     committed: true,
-    sha: runGit(["rev-parse", "HEAD"]).trim(),
+    sha,
     undeclared,
     ...(regenerable.length > 0 ? { regenerable } : {}),
     ...(proofMatchedTests.length > 0 ? { proofMatchedTests } : {}),
@@ -40966,6 +41028,8 @@ export function harnessCommitForShellLessWorker(
     declaredPaths: readonly string[];
     acceptance?: readonly AcceptanceCriterion[];
     admitTests?: boolean;
+    priorHeadSha?: string;
+    branch?: string;
     fixOutcome?: TypedFixOutcome["kind"];
     subjectSource?: "worker-authored" | "re-asked" | "harness-derived";
     derivedCommit?: { subject: string; reason: string };
@@ -40976,6 +41040,7 @@ export function harnessCommitForShellLessWorker(
     /** Receives the helper's exact refusal reason so a fix lane can record its own outcome row,
      *  with the undeclared paths it refused to stage (W1-T4207; empty when none were computed). */
     onRefusal?: (reason: string, undeclared?: readonly string[]) => void;
+    onCommit?: (sha: string) => void;
   },
   deps: { commit?: typeof commitWorkerEdits; ahead?: (worktreePath: string, base: string) => number } = {},
 ): number {
@@ -40996,7 +41061,10 @@ export function harnessCommitForShellLessWorker(
     input.assignmentId,
   );
   const subjectSource = asked === undefined ? "harness-derived" : input.subjectSource ?? "worker-authored";
-  const committed = commit(input.worktreePath, input.declaredPaths, message, {}, input.acceptance, { admitTests: input.admitTests });
+  const committed = commit(input.worktreePath, input.declaredPaths, message, {}, input.acceptance, {
+    admitTests: input.admitTests, priorHeadSha: input.priorHeadSha, branch: input.branch,
+  });
+  if (committed.headMoved) input.log("fix.head_moved_under_round", { ...committed.headMoved, reason: committed.reason });
   const refusalReason = committed.reason ?? "harness commit refused";
   input.log(committed.committed ? "implement.harness_commit" : "implement.harness_commit_refused", {
     ...(committed.sha ? { sha: committed.sha } : {}),
@@ -41012,6 +41080,7 @@ export function harnessCommitForShellLessWorker(
     input.onRefusal?.(refusalReason, committed.undeclared);
     return input.commitCount;
   }
+  if (committed.sha) input.onCommit?.(committed.sha);
   input.say(`harness committed the worker's edits (${committed.sha?.slice(0, 8)}) — it had no shell of its own`);
   return ahead(input.worktreePath, "origin/main");
 }

@@ -3214,6 +3214,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
         const fixWorktree = worktreePath;
         const rung = await runFixRung({
+          guardRoundHead: true,
           ...buildFixRungDispatchArgs({
             task,
             runId,
