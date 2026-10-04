@@ -100,20 +100,21 @@ test("GET /v1/feedback marks a decision staged for the landing sweep landing: qu
     const decided = await postDecision(base, fx.staged.id);
     assert.equal(decided.landing, "queued", "the POST stages the decision (W1-T5460)");
 
-    // A reload — or a second viewer that never saw the POST's answer — still sees it pending.
+    // A reload — or a second viewer that never saw the POST's answer — still sees it pending. The queued
+    // bytes are not in the checkout yet, so `status` still reads `proposed`; `landing` is what says otherwise.
     const reloaded = await getEntries(base);
-    assert.equal(reloaded.get(fx.staged.id)?.status, "accepted");
+    assert.equal(reloaded.get(fx.staged.id)?.status, "proposed");
     assert.equal(reloaded.get(fx.staged.id)?.landing, "queued", "the staged decision reads back as queued");
     assert.equal(reloaded.get(fx.other.id)?.landing, undefined, "an entry with nothing staged carries no landing field");
     assert.equal(reloaded.get(fx.staged.id)?.landingUnknown, undefined, "a readable queue is never landingUnknown");
-    const filtered = await getEntries(base, "?status=accepted");
+    const filtered = await getEntries(base, "?status=proposed");
     assert.equal(filtered.get(fx.staged.id)?.landing, "queued", "the status filter keeps the decoration");
 
     // The sweep acknowledges a landed record by dropping it from the queue; the inbox follows on the next read.
     rmSync(join(fx.stateRoot, QUEUE_DIR, `${fx.staged.id}.yaml`));
     const landed = await getEntries(base);
     assert.equal(landed.get(fx.staged.id)?.landing, undefined, "a record the queue dropped is no longer queued");
-    assert.equal(landed.get(fx.staged.id)?.status, "accepted");
+    assert.equal(landed.get(fx.staged.id)?.landingUnknown, undefined);
   });
 });
 
