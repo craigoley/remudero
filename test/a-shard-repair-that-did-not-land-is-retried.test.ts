@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
+import type { Clock } from "../src/lib/clock.js";
 import { GARDEN_FILING_RETRY_BASE_MS } from "../src/lib/gardener.js";
 import { gitBlobSha } from "../src/lib/plan-shard-repair.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -70,7 +71,8 @@ function lane(t: TestContext) {
   const stateDir = tempDir(t);
   const rows: Row[] = [];
   const log = (step: string, extra: Record<string, unknown> = {}) => void rows.push({ step, extra });
-  const clock = { now: T0 };
+  const time = { at: T0 };
+  const clock: Clock = { now: () => time.at, date: () => new Date(time.at), iso: () => new Date(time.at).toISOString() };
   const landed: Array<{ rel: string; text: string; body: string }> = [];
   const prStateReads: string[] = [];
   let blob = () => BROKEN_SHARD;
@@ -78,7 +80,7 @@ function lane(t: TestContext) {
   return {
     stateDir,
     rows,
-    clock,
+    time,
     landed,
     prStateReads,
     steps: (step: string) => rows.filter((r) => r.step === step),
@@ -89,7 +91,7 @@ function lane(t: TestContext) {
       const dir = join(runTask.shardRepairDir(stateDir), "requests");
       return existsSync(dir) ? readdirSync(dir).map((n) => JSON.parse(readFileSync(join(dir, n), "utf8")) as Record<string, unknown>) : [];
     },
-    pending: () => runTask.shardRepairsPending(stateDir, clock.now),
+    pending: () => runTask.shardRepairsPending(stateDir, clock),
     pass: (prState?: (url: string) => "open" | "merged" | "closed" | "unknown") =>
       runTask.runShardRepairPass({
         stateDir,
@@ -98,7 +100,7 @@ function lane(t: TestContext) {
         owner: "o",
         repo: "r",
         log,
-        now: () => clock.now,
+        clock,
         readOriginBlob: (rel) => {
           assert.equal(rel, SHARD_REL);
           return blob();
@@ -133,7 +135,7 @@ test("a not-landed shard repair keeps its request and is retried on a later pass
   l.pass();
   assert.equal(l.landed.length, 1, "a pass before next_at leaves the request alone");
 
-  l.clock.now = T0 + GARDEN_FILING_RETRY_BASE_MS;
+  l.time.at = T0 + GARDEN_FILING_RETRY_BASE_MS;
   assert.equal(l.pending(), true, "the request is due again at next_at, with no restart");
   l.setLand(() => FIRST_PR);
   l.pass();
@@ -151,13 +153,13 @@ test("a failed shard repair backs off, doubling, and abandons after its attempt 
     throw new Error("gh api: 502");
   });
   l.pass();
-  l.clock.now += GARDEN_FILING_RETRY_BASE_MS;
+  l.time.at += GARDEN_FILING_RETRY_BASE_MS;
   l.pass();
   assert.deepEqual(l.steps("plan.shard_repair_retry_scheduled").map((r) => [r.extra.attempt, r.extra.next_at]), [
     [1, new Date(T0 + GARDEN_FILING_RETRY_BASE_MS).toISOString()],
     [2, new Date(T0 + 3 * GARDEN_FILING_RETRY_BASE_MS).toISOString()],
   ]);
-  l.clock.now = T0 + 3 * GARDEN_FILING_RETRY_BASE_MS;
+  l.time.at = T0 + 3 * GARDEN_FILING_RETRY_BASE_MS;
   l.pass();
   assert.equal(l.landed.length, 3);
   assert.deepEqual(l.steps("plan.shard_repair_failed").map((r) => r.extra.stage), ["land", "land", "land"]);
@@ -184,7 +186,7 @@ test("a read that throws, an unreadable opened record and a torn request are eac
 
   l.setBlob(() => BROKEN_SHARD);
   writeFileSync(join(runTask.shardRepairDir(l.stateDir), "opened.json"), "{ torn");
-  l.clock.now += GARDEN_FILING_RETRY_BASE_MS;
+  l.time.at += GARDEN_FILING_RETRY_BASE_MS;
   l.pass();
   assert.equal(l.steps("plan.shard_repair_failed").at(-1)?.extra.stage, "opened-record");
   assert.equal(l.landed.length, 0, "an unreadable record never risks a second PR");
@@ -220,12 +222,12 @@ test("bytes main changed since the last attempt start their own attempt count", 
   l.request();
   l.setLand(() => undefined);
   l.pass();
-  l.clock.now += GARDEN_FILING_RETRY_BASE_MS;
+  l.time.at += GARDEN_FILING_RETRY_BASE_MS;
   l.pass();
   assert.equal(l.requests()[0]?.attempts, 2);
   const changed = BROKEN_SHARD.replace("  attempts: 0\n", "  attempts: 1\n");
   l.setBlob(() => changed);
-  l.clock.now += 2 * GARDEN_FILING_RETRY_BASE_MS;
+  l.time.at += 2 * GARDEN_FILING_RETRY_BASE_MS;
   l.pass();
   assert.deepEqual(l.steps("plan.shard_repair_abandoned"), [], "the old bytes' failures are not charged to new ones");
   assert.deepEqual(

@@ -34479,7 +34479,8 @@ function shardRepairRequestDue(path: string, now: number): boolean {
 }
 
 /** Whether a repair request is due — the plan garden's due probe, on the loop. A backing-off request is not, so the garden never spins. */
-export function shardRepairsPending(stateDir: string, now: number = Date.now()): boolean {
+export function shardRepairsPending(stateDir: string, clock: Clock = systemClock): boolean {
+  const now = clock.now();
   return shardRepairRequests(stateDir).some((path) => shardRepairRequestDue(path, now));
 }
 
@@ -34609,7 +34610,7 @@ export function runShardRepairPass(opts: {
   readOriginBlob?: (rel: string) => string;
   land?: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined;
   prState?: (prUrl: string) => PrState;
-  now?: () => number;
+  clock?: Clock;
 }): void {
   const readOriginBlob =
     opts.readOriginBlob ?? ((rel: string) => execFileSync("git", ["-C", opts.repoDir, "show", `origin/main:${rel}`], { encoding: "utf8", maxBuffer: 1 << 26, stdio: ["ignore", "pipe", "pipe"] }));
@@ -34625,7 +34626,7 @@ export function runShardRepairPass(opts: {
       }
     });
   const prState = opts.prState ?? ((prUrl: string) => gardenPrState(opts.owner, opts.repo, prUrl, ghJson));
-  const now = (opts.now ?? Date.now)();
+  const now = (opts.clock ?? systemClock).now();
   for (const path of shardRepairRequests(opts.stateDir)) {
     if (!shardRepairRequestDue(path, now)) continue;
     let request: ShardRepairRequest;
