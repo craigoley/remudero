@@ -9,6 +9,7 @@ import { WORKER_SETTING_SOURCES } from "../src/lib/worker.js";
 import {
   describeSkillInjectionReachability,
   describeWorkerSkillReachability,
+  PROCEDURAL_STEP_TEXT,
   proceduralCandidateHash,
   READ_WRAPPER_RE,
   renderSkillDraft,
@@ -97,7 +98,9 @@ test("renderSkillDrafts renders 'none' when nothing cleared the floor, and names
 // ── (2) scanSkillDraft: a tool, host or path outside the allowlist is refused, naming the line ─
 
 test("scanSkillDraft: a well-formed draft against the shipped worker.json shape passes clean", () => {
-  const draft = renderSkillDraft(candidate())!;
+  // Well-formed = no Procedure step that only restates its mined outcome (W1-T4283 refuses the
+  // clean_single_strike step), so the allowlist check is exercised on an actionable-only draft.
+  const draft = renderSkillDraft(candidate({ shapeKey: "implement:fully_executed_proof", signals: ["fully_executed_proof"] }))!;
   const allowlist = workerAllowlistFromSettings(fixtureSettings());
   assert.deepEqual(scanSkillDraft(draft, allowlist), { ok: true });
 });
@@ -359,7 +362,10 @@ test("scanSkillDraft: a single-star deny glob stays inside ONE path segment, whe
 
 test("stageSkillDraft refuses a draft whose every Procedure step only restates its mining signal", () => {
   const registryPath = join(tmpDir("skill-workshop-outcome-only-"), "inbox-proposals.json");
-  const draft = renderSkillDraft(candidate())!;
+  // W1-T4270: the renderer drops the outcome label's step, so the outcome-only shape (as staged
+  // before it) is rebuilt by swapping the eligible step back out.
+  const mixed = renderSkillDraft(candidate())!;
+  const draft = { ...mixed, markdown: mixed.markdown.replace(`- ${PROCEDURAL_STEP_TEXT.fully_executed_proof}`, `- ${PROCEDURAL_STEP_TEXT.clean_single_strike}`) };
   const result = stageSkillDraft(registryPath, draft, workerAllowlistFromSettings(fixtureSettings()), REACHABLE_NO);
   assert.equal(result.refused, true);
   assert.equal(result.staged, false);

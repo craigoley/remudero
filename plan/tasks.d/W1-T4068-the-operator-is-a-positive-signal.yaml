@@ -13,7 +13,7 @@
   files: [src/lib/ledger.ts, src/run-task.ts, src/lib/hand-run-census.ts, test/setup/tmp-hygiene.ts, test/the-operator-is-a-positive-signal.test.ts, scripts/test-tier-manifest.json]
   priority: 2
   status: queued
-  # backlog gardener: band=2 evidence=426d30dfe35a4c80
+  # backlog gardener: band=2 evidence=5451a619f4bd40e5
   attempts: 0
   rationale: |
     MEASURED (ledger union).

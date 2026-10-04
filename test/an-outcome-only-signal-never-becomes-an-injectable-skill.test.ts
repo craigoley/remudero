@@ -49,6 +49,7 @@ test("W1-T4270: a candidate carrying fully_executed_proof still drafts a skill e
     candidateHash: "21436526dae1fe2c",
     procedureKey: "84a7cc07e1ad07c6",
     supportingRuns: 2,
+    outcomeDescriptions: ["Every acceptance criterion has an observed executed proof, without keyword-floor degradation."],
   });
   assert.equal(renderSkillDraft({ ...candidate(["fully_executed_proof"]), supportingRuns: 1 }), undefined);
 });

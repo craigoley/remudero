@@ -1,8 +1,10 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { RmdError } from "./errors.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { RepoLayout } from "./repo-layout.js";
 
 /** The plan/tasks.yaml loader and validator (schema v1, MASTER-PLAN §2), read-only — the control
@@ -148,6 +150,8 @@ export interface Task {
    *  lib/status.ts) and never written back here; see CLAUDE.md on why this is not a completion signal. */
   status: TaskStatus;
   dispatch_hold?: boolean;
+  not_before?: string;
+  precondition?: TaskPrecondition;
   attempts: number;
   /** Explicit PR number for a task executed by hand before it had a ledger entry (precedence
    *  source (b) in `deriveStatus`). Never written by the machine. */
@@ -188,6 +192,104 @@ export interface Task {
    *  {@link Plan} instead of re-reading and re-parsing every shard to find it. Optional because a
    *  `Task` built by hand (fixtures, tests) never went through a parse and has no file to name. */
   sourcePath?: string;
+}
+
+export interface TaskPrecondition {
+  read: string[];
+  expect: string;
+}
+
+export interface TaskPreconditionOptions {
+  clock?: Clock;
+  readPrecondition?: (args: string[]) => string;
+}
+
+export type UnmetTaskPrecondition =
+  | { reason: "not-before"; not_before: string }
+  | { reason: "invalid-not-before" | "invalid-precondition" | "read-failed"; error: string }
+  | { reason: "recursive-read" }
+  | { reason: "unexpected-result"; expected: string; actual: string };
+
+/** BACKSTOP: kill a stalled precondition read so it cannot hold the dispatcher indefinitely. */
+export const PRECONDITION_TIMEOUT_MS = 5_000;
+/** PRIMARY CONTROL: bound expected and captured precondition output to 64 KiB. */
+export const PRECONDITION_MAX_BYTES = 64 * 1024;
+const PRECONDITION_READ_GUARD = "RMD_TASK_PRECONDITION_READ";
+const PRECONDITION_RMD_BIN = fileURLToPath(new URL("../../bin/rmd", import.meta.url));
+
+function validateNotBefore(value: unknown, id: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}(?:T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,3})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d))?$/.test(value) ||
+      !Number.isFinite(Date.parse(value)) ||
+      fixedClock(Date.parse(`${value.slice(0, 10)}T00:00:00Z`)).iso().slice(0, 10) !== value.slice(0, 10)) {
+    throw new PlanError(`task ${id}: not_before must be a valid ISO date or timestamp with a timezone`);
+  }
+  return value;
+}
+
+function validatePrecondition(value: unknown, id: string): TaskPrecondition | undefined {
+  if (value === undefined) return undefined;
+  const p = value as TaskPrecondition | null;
+  if (!p || !Array.isArray(p.read) || p.read.length < 1 || p.read.length > 32 ||
+      !p.read.every((arg) => typeof arg === "string" && arg.length > 0 && arg.length <= 1024 && !arg.includes("\0")) ||
+      typeof p.expect !== "string" || p.expect.trim().length === 0 || Buffer.byteLength(p.expect) > PRECONDITION_MAX_BYTES) {
+    throw new PlanError(`task ${id}: precondition must be {read: [rmd read arguments], expect: nonempty string} within the reader bounds`);
+  }
+  const [verb, ...args] = p.read;
+  const allowed = (verb === "--help" && args.length === 0) ||
+    ((verb === "status" || verb === "doctor") && (args.length === 0 || (args.length === 1 && args[0] === "--json"))) ||
+    (verb === "ledger-grep" && args.length === 1) ||
+    ((verb === "trace" || verb === "pr-owner") && args.length === 1 && !args[0].startsWith("-"));
+  if (!allowed) throw new PlanError(`task ${id}: precondition.read must name an allowed rmd read (--help, status, doctor, ledger-grep, trace, pr-owner)`);
+  return { read: [...p.read], expect: p.expect };
+}
+
+export type PreconditionCommandRunner = (file: string, args: string[], options: ExecFileSyncOptionsWithStringEncoding) => string;
+
+export function readTaskPrecondition(args: string[], run: PreconditionCommandRunner = execFileSync): string {
+  validatePrecondition({ read: args, expect: "validation" }, "precondition-reader");
+  return run(PRECONDITION_RMD_BIN, args, {
+    encoding: "utf8",
+    timeout: PRECONDITION_TIMEOUT_MS,
+    maxBuffer: PRECONDITION_MAX_BYTES,
+    killSignal: "SIGKILL",
+    shell: false,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, RMD_SELF_SYNC_DONE: "1", [PRECONDITION_READ_GUARD]: "1" },
+  });
+}
+
+export function unmetTaskPrecondition(task: Task, opts: TaskPreconditionOptions = {}): UnmetTaskPrecondition | undefined {
+  if (task.not_before !== undefined) {
+    try {
+      validateNotBefore(task.not_before, task.id);
+      const now = (opts.clock ?? systemClock).now();
+      if (!Number.isFinite(now)) throw new PlanError("precondition clock is not finite");
+      // expiring-fixture: exempt -- valid date fixtures inject fixedClock and exercise the boundary.
+      if (now < Date.parse(task.not_before)) return { reason: "not-before", not_before: task.not_before };
+    } catch (error) {
+      return { reason: "invalid-not-before", error: String(error) };
+    }
+  }
+  if (task.precondition === undefined) return undefined;
+  let precondition: TaskPrecondition;
+  try {
+    precondition = validatePrecondition(task.precondition, task.id)!;
+  } catch (error) {
+    return { reason: "invalid-precondition", error: String(error) };
+  }
+  if (process.env[PRECONDITION_READ_GUARD] === "1") return { reason: "recursive-read" };
+  try {
+    const output = (opts.readPrecondition ?? readTaskPrecondition)([...precondition.read]);
+    if (Buffer.byteLength(output) > PRECONDITION_MAX_BYTES) throw new PlanError("precondition output exceeds the reader bound");
+    const actual = output.trim();
+    const expected = precondition.expect.trim();
+    if (actual !== expected) return { reason: "unexpected-result", expected: expected.slice(0, 1024), actual: actual.slice(0, 1024) };
+  } catch (error) {
+    return { reason: "read-failed", error: String(error).slice(0, 1024) };
+  }
+  return undefined;
 }
 
 /**
@@ -480,6 +582,8 @@ export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicat
       priority: typeof e.priority === "number" ? e.priority : undefined,
       status,
       dispatch_hold: e.dispatch_hold as boolean | undefined,
+      not_before: validateNotBefore(e.not_before, id),
+      precondition: validatePrecondition(e.precondition, id),
       attempts: typeof e.attempts === "number" ? e.attempts : 0,
       principles: e.principles as Record<string, unknown> | undefined,
       budget_usd: e.budget_usd as number | undefined,
