@@ -13,6 +13,8 @@ export IDLE_MINUTES="${IDLE_MINUTES:-360}"
 export RMD_CLEANUP_ONLY_TMP=1
 export RMD_CLEANUP_TMP_ROOTS="${RMD_CLEANUP_TMP_ROOTS:-/tmp:/home/craigoleyagent/rmd-state2/tmp:/mnt/rmd/tmp:/mnt/scratch/tmp}"
 export RMD_CLEANUP_TMP_GLOBS="${RMD_CLEANUP_TMP_GLOBS:-rmd-* node-coverage-*}"
-export RMD_CLEANUP_COVERAGE_PATHS="${RMD_CLEANUP_COVERAGE_PATHS:-/home/craigoleyagent/.remudero-coverage}"
+# Scratch roots are NOT exported here: the janitor defaults them to /mnt/scratch only for a root
+# pass, so running this wrapper as a user cannot opt a blind (non-root lsof) pass into them.
+export RMD_CLEANUP_COVERAGE_PATHS="${RMD_CLEANUP_COVERAGE_PATHS:-/home/craigoleyagent/.remudero-coverage:/tmp/.remudero-coverage:/tmp/.rmd-coverage}"
 
 exec "$CLEANUP_SCRIPT"

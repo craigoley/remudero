@@ -53,7 +53,21 @@
 #   RMD_CLEANUP_CONTAINER_MAP   host_prefix:container_prefix — a held container-side name also counts
 #   RMD_CLEANUP_NO_FETCH=1      do not `git fetch` before judging a worktree saved
 #   RMD_CLEANUP_WATCH_ROOTS     roots scanned for WATCH: lines (files >= WATCH_MB, never removed)
-#   RMD_CLEANUP_ONLY_TMP=1      run only the guarded temporary-root sweep
+#   RMD_CLEANUP_ONLY_TMP=1      run the guarded temporary-root and scratch sweeps
+#   RMD_CLEANUP_SCRATCH_ROOTS   colon-separated roots whose immediate scratch units are swept;
+#                               setting it is the explicit opt-in for a non-root pass
+#   RMD_CLEANUP_SCRATCH_PARENTS colon-separated parents kept while judging each child separately
+#   RMD_CLEANUP_ROOT_SCRATCH_ROOTS / RMD_CLEANUP_ROOT_SCRATCH_PARENTS  the defaults of the two
+#                               above for a ROOT pass (/mnt/scratch, /mnt/scratch/o). A non-root
+#                               pass defaults to NO scratch roots: judging a scratch unit idle
+#                               needs root's lsof view of every user's open files.
+#   RMD_CLEANUP_UID             the identity the pass decides as (default `id -u`)
+#   RMD_CLEANUP_RUNUSER         runs the one repo-writing Git call (fetch) as the repo's owner
+#   RMD_CLEANUP_SCRATCH_IDLE_MINUTES  minimum payload inactivity (default 720)
+#   RMD_CLEANUP_DOCKER          command for the running-container mount snapshot
+#   RMD_CLEANUP_LOCK_FILE       shared whole-pass flock file (default: beside this script, which
+#                               both the root and the user cron run, so one path serves both)
+#   RMD_CLEANUP_FLOCK           flock command (tests may simulate an unavailable lock)
 set -uo pipefail
 
 IDLE_MINUTES="${IDLE_MINUTES:-360}"      # 6 h, as requested by the operator
@@ -78,8 +92,28 @@ CONTAINER_MAP="${RMD_CLEANUP_CONTAINER_MAP:-}"
 WATCH_ROOTS="${RMD_CLEANUP_WATCH_ROOTS-$CLEAN_HOME/.codex $CLEAN_HOME/.claude}"
 WATCH_MB="${RMD_CLEANUP_WATCH_MB:-500}"
 ONLY_TMP="${RMD_CLEANUP_ONLY_TMP:-0}"
+RUN_UID="${RMD_CLEANUP_UID:-$(id -u)}"
+if [ "$RUN_UID" = 0 ]; then
+  SCRATCH_ROOTS="${RMD_CLEANUP_SCRATCH_ROOTS-${RMD_CLEANUP_ROOT_SCRATCH_ROOTS-/mnt/scratch}}"
+  SCRATCH_PARENTS="${RMD_CLEANUP_SCRATCH_PARENTS-${RMD_CLEANUP_ROOT_SCRATCH_PARENTS-/mnt/scratch/o}}"
+else
+  # A non-root lsof cannot see another user's (or a container's root) open files, so it cannot
+  # prove a scratch unit is unheld. Only an explicit RMD_CLEANUP_SCRATCH_ROOTS opts a user pass in.
+  SCRATCH_ROOTS="${RMD_CLEANUP_SCRATCH_ROOTS-}"
+  SCRATCH_PARENTS="${RMD_CLEANUP_SCRATCH_PARENTS-}"
+fi
+RUNUSER_CMD="${RMD_CLEANUP_RUNUSER:-runuser}"
+SCRATCH_IDLE_MINUTES="${RMD_CLEANUP_SCRATCH_IDLE_MINUTES:-720}"
+DOCKER_CMD="${RMD_CLEANUP_DOCKER:-docker}"
+# Not /tmp: a root-created 0644 lock there could not be opened for write by the user cron, and
+# with fs.protected_regular=2 root cannot O_CREAT-open a user's file in a sticky directory either.
+if ! SCRIPT_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"; then
+  echo "rmd-host-cleanup: FATAL cannot resolve the script directory for the lock" >&2; exit 2
+fi
+LOCK_FILE="${RMD_CLEANUP_LOCK_FILE:-$SCRIPT_DIR/rmd-host-cleanup.lock}"
+FLOCK_CMD="${RMD_CLEANUP_FLOCK:-flock}"
 
-case "$IDLE_MINUTES$HIGH_WATER$ARCHIVE_DAYS$BIG_MB" in
+case "$IDLE_MINUTES$HIGH_WATER$ARCHIVE_DAYS$BIG_MB$SCRATCH_IDLE_MINUTES" in
   ""|*[!0-9]*) echo "rmd-host-cleanup: FATAL thresholds must be non-negative integers" >&2; exit 2 ;;
 esac
 case "$ONLY_TMP" in
@@ -88,6 +122,21 @@ case "$ONLY_TMP" in
 esac
 
 log() { printf '%s\n' "$*"; }
+
+# The lock is created once (O_EXCL, so never through a symlink) and then opened READ-ONLY: flock
+# needs no write access, so whichever identity created it, any mode the other can read works, and
+# an open without O_CREAT is outside fs.protected_regular entirely.
+( set -C; umask 022; : > "$LOCK_FILE" ) 2>/dev/null
+if [ -L "$LOCK_FILE" ] || ! exec 9<"$LOCK_FILE"; then
+  log "REFUSE: cannot acquire janitor lock $LOCK_FILE"; exit 2
+fi
+$FLOCK_CMD -n -E 73 9
+lock_status=$?
+case "$lock_status" in
+  0) ;;
+  73) log "KEEP pass: another janitor pass holds the lock"; exit 0 ;;
+  *) log "REFUSE: cannot acquire janitor lock $LOCK_FILE"; exit 2 ;;
+esac
 
 # Every mutation goes through here, so DRY_RUN=1 has exactly one place to hold.
 act() {
@@ -167,14 +216,36 @@ sweep_path() {
 }
 
 # ── rule 3 ──
+# Every Git call against a swept repository. The root pass reads repos the operator owns, and Git
+# refuses those ("detected dubious ownership") unless safe.directory names them; it is scoped to
+# THIS repo's physical top (what Git compares against), never '*'. These calls only read the repo
+# (status runs with GIT_OPTIONAL_LOCKS=0) or remove it, so root creates no files inside it.
+rgit() {
+  local repo="$1" top
+  shift
+  top="$(cd -P -- "$repo" 2>/dev/null && pwd -P)" || return 128
+  git -c safe.directory="$top" -C "$repo" "$@"
+}
+# The one call that WRITES into a repo is fetch (objects, refs, FETCH_HEAD). Run as root it would
+# leave root-owned files in the operator's .git that break their next fetch, so a root pass runs it
+# as the repo's owner, whose Git needs no exception.
+repo_fetch() {
+  local repo="$1" uid owner
+  shift
+  uid="$(stat -c %u -- "$repo" 2>/dev/null || stat -f %u -- "$repo" 2>/dev/null)" || return 1
+  if [ "$RUN_UID" != 0 ] || [ "$uid" = "$RUN_UID" ]; then rgit "$repo" fetch "$@"; return; fi
+  owner="$(stat -c %U -- "$repo" 2>/dev/null || stat -f %Su -- "$repo" 2>/dev/null)" || return 1
+  case "$owner" in ""|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  (cd -- "$repo" && $RUNUSER_CMD -u "$owner" -- git -C "$repo" fetch "$@")
+}
 worktree_clean() {
   local status
-  status="$(GIT_OPTIONAL_LOCKS=0 git -C "$1" status --porcelain 2>/dev/null)" || return 2
+  status="$(GIT_OPTIONAL_LOCKS=0 rgit "$1" status --porcelain 2>/dev/null)" || return 2
   [ -z "$status" ]
 }
 worktree_ignored_safe() {
   local status unknown
-  status="$(GIT_OPTIONAL_LOCKS=0 git -C "$1" status --porcelain --ignored=matching 2>/dev/null)" || return 2
+  status="$(GIT_OPTIONAL_LOCKS=0 rgit "$1" status --porcelain --ignored=matching 2>/dev/null)" || return 2
   unknown="$(printf '%s\n' "$status" | awk '
     substr($0, 1, 2) == "!!" {
       path=substr($0, 4); sub(/\/$/, "", path)
@@ -185,24 +256,37 @@ worktree_ignored_safe() {
 }
 worktree_saved() {
   local wt="$1" head br id
-  head="$(git -C "$wt" rev-parse HEAD 2>/dev/null)" || return 1
-  [ -n "$(git -C "$wt" branch -r --contains "$head" 2>/dev/null)" ] && return 0
-  br="$(git -C "$wt" symbolic-ref --short -q HEAD 2>/dev/null)" || return 1
+  head="$(rgit "$wt" rev-parse HEAD 2>/dev/null)" || return 1
+  [ -n "$(rgit "$wt" branch -r --contains "$head" 2>/dev/null)" ] && return 0
+  br="$(rgit "$wt" symbolic-ref --short -q HEAD 2>/dev/null)" || return 1
   case "$br" in
     run-*-[0-9]*)
       id="${br#run-}"; id="${id%-*}"
       case "$id" in ""|*[!A-Za-z0-9._-]*) return 1 ;; esac
-      git -C "$wt" log origin/main --fixed-strings --grep="Remudero-Task: $id" -n 1 --format=%H 2>/dev/null | grep -q . && return 0
+      rgit "$wt" log origin/main --fixed-strings --grep="Remudero-Task: $id" -n 1 --format=%H 2>/dev/null | grep -q . && return 0
       ;;
   esac
   return 1
 }
 archive_worktree_head() {
   local wt="$1" head="$2" archive="$WORKTREE_ARCHIVE_ROOT" name bundle tmp probe archive_fsid root_fsid
+  local mode="${3:-head}" refs="$head HEAD" tag="" source="$ROOT_FS"
+  if [ "$mode" = branches ]; then
+    refs="$(rgit "$wt" for-each-ref --format='%(objectname) %(refname)' refs/heads)" || return 1
+    refs="$(printf '%s\n%s\n' "$head HEAD" "$refs")"
+    tag="-$(printf '%s\n' "$refs" | cksum | awk '{print $1}')"
+    source="$wt"
+  fi
   case "$archive" in "$wt"|"$wt"/*) return 1 ;; esac
   name="$(basename "$wt" | tr -c 'A-Za-z0-9._-' '-')"
   name="${name%-}"
-  bundle="$archive/${name}-${head}.bundle"
+  bundle="$archive/${name}-${head}${tag}.bundle"
+  if [ "$mode" = branches ]; then
+    probe="$archive"
+    while [ ! -e "$probe" ] && [ "$probe" != / ]; do probe="$(dirname "$probe")"; done
+    archive_fsid="$(fs_id "$probe")"; root_fsid="$(fs_id "$source")"
+    [ -n "$archive_fsid" ] && [ -n "$root_fsid" ] && [ "$archive_fsid" != "$root_fsid" ] || return 1
+  fi
   if [ "$DRY_RUN" = 1 ]; then
     log "ARCHIVE-WORKTREE $wt HEAD=$head -> $bundle"
     return 0
@@ -210,21 +294,21 @@ archive_worktree_head() {
   mkdir -p "$archive" || return 1
   [ -d "$archive" ] && [ ! -L "$archive" ] || return 1
   if [ -e "$bundle" ]; then
-    git -C "$wt" bundle verify "$bundle" >/dev/null 2>&1 || return 1
-    git -C "$wt" bundle list-heads "$bundle" 2>/dev/null | grep -Fq "$head " || return 1
+    verify_worktree_bundle "$wt" "$bundle" "$refs" || return 1
     log "ARCHIVE-WORKTREE existing verified bundle $bundle"
     return 0
   fi
   probe="$archive"
   while [ ! -e "$probe" ] && [ "$probe" != "/" ] && [ "$probe" != "." ]; do probe="$(dirname "$probe")"; done
   archive_fsid="$(fs_id "$probe")"
-  root_fsid="$(fs_id "$ROOT_FS")"
+  root_fsid="$(fs_id "$source")"
   [ -n "$archive_fsid" ] && [ -n "$root_fsid" ] && [ "$archive_fsid" != "$root_fsid" ] || return 1
   tmp="${bundle}.tmp.$$"
   [ ! -e "$tmp" ] || return 1
-  if ! git -C "$wt" bundle create "$tmp" HEAD >/dev/null 2>&1 || \
-     ! git -C "$wt" bundle verify "$tmp" >/dev/null 2>&1 || \
-     ! git -C "$wt" bundle list-heads "$tmp" 2>/dev/null | grep -Fq "$head HEAD"; then
+  local -a bundle_refs=(HEAD)
+  [ "$mode" = branches ] && bundle_refs+=(--branches)
+  if ! rgit "$wt" bundle create "$tmp" "${bundle_refs[@]}" >/dev/null 2>&1 || \
+     ! verify_worktree_bundle "$wt" "$tmp" "$refs"; then
     rm -f -- "$tmp"
     return 1
   fi
@@ -234,6 +318,14 @@ archive_worktree_head() {
   fi
   log "ARCHIVE-WORKTREE $wt HEAD=$head -> $bundle"
 }
+verify_worktree_bundle() {
+  local wt="$1" bundle="$2" refs="$3" heads ref
+  rgit "$wt" bundle verify "$bundle" >/dev/null 2>&1 || return 1
+  heads="$(rgit "$wt" bundle list-heads "$bundle" 2>/dev/null)" || return 1
+  while IFS= read -r ref; do
+    [ -z "$ref" ] || printf '%s\n' "$heads" | grep -Fxq -- "$ref" || return 1
+  done <<< "$refs"
+}
 sweep_worktree() {
   local wt="$1" gitdir idle_status kind head
   [ -d "$wt" ] && [ ! -L "$wt" ] || { log "KEEP $wt: not a regular directory"; return; }
@@ -241,7 +333,7 @@ sweep_worktree() {
   elif [ -f "$wt/.git" ] && [ ! -L "$wt/.git" ]; then kind="linked worktree"
   else log "KEEP $wt: Git metadata is missing or has an unexpected type"; return
   fi
-  if ! gitdir="$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)" || [ ! -d "$gitdir" ]; then
+  if ! gitdir="$(rgit "$wt" rev-parse --absolute-git-dir 2>/dev/null)" || [ ! -d "$gitdir" ]; then
     log "KEEP $wt: Git metadata is unreadable or missing"; return
   fi
   if [ -f "$gitdir/locked" ]; then log "KEEP $wt: Git worktree is locked"; return; fi
@@ -265,9 +357,9 @@ sweep_worktree() {
     *) log "KEEP $wt: ignored-data scan failed (unknown)"; return ;;
   esac
   if [ "$DRY_RUN" != 1 ] && [ "${RMD_CLEANUP_NO_FETCH:-0}" != 1 ]; then
-    git -C "$wt" fetch --quiet origin 2>/dev/null || true
+    repo_fetch "$wt" --quiet origin 2>/dev/null || true
   fi
-  head="$(git -C "$wt" rev-parse HEAD 2>/dev/null)" || { log "KEEP $wt: HEAD is unreadable"; return; }
+  head="$(rgit "$wt" rev-parse HEAD 2>/dev/null)" || { log "KEEP $wt: HEAD is unreadable"; return; }
   if ! worktree_saved "$wt" && ! archive_worktree_head "$wt" "$head"; then
     log "KEEP $wt: unpublished HEAD could not be archived safely"; return
   fi
@@ -279,7 +371,7 @@ sweep_worktree() {
   fi
   if [ "$kind" = "standalone clone" ]; then
     if ! rm -rf -- "$wt"; then log "KEEP $wt: standalone clone removal failed"; fi
-  elif ! git -C "$wt" worktree remove -- "$wt" 2>/dev/null; then
+  elif ! rgit "$wt" worktree remove -- "$wt" 2>/dev/null; then
     log "KEEP $wt: git worktree remove failed; no recursive filesystem fallback"
   fi
 }
@@ -288,6 +380,182 @@ sweep_worktree() {
 fs_id() {
   if [ -n "$FSID_CMD" ]; then $FSID_CMD "$1"
   else stat -c %d "$1" 2>/dev/null || stat -f %d "$1" 2>/dev/null; fi
+}
+
+DOCKER_OK=1
+DOCKER_MOUNTS=""
+snapshot_docker() {
+  local ids id mounts
+  if ! ids="$($DOCKER_CMD ps -q 2>/dev/null)"; then DOCKER_OK=0; return; fi
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    if ! mounts="$($DOCKER_CMD inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$id" 2>/dev/null)"; then
+      DOCKER_OK=0; return
+    fi
+    DOCKER_MOUNTS="$(printf '%s\n%s' "$DOCKER_MOUNTS" "$mounts")"
+  done <<< "$ids"
+}
+is_docker_mount() {
+  local p="$1" mount
+  while IFS= read -r mount; do
+    [ -n "$mount" ] || continue
+    case "$mount" in "$p"|"$p"/*) return 0 ;; esac
+    case "$p" in "$mount"|"${mount%/}"/*) return 0 ;; esac
+  done <<< "$DOCKER_MOUNTS"
+  return 1
+}
+# A parent directly under a scratch root is met twice (as a unit, then as a parent): log it once.
+PARENTS_LOGGED=":"
+keep_parent() {
+  case "$PARENTS_LOGGED" in *":$1:"*) return ;; esac
+  PARENTS_LOGGED="$PARENTS_LOGGED$1:"
+  log "KEEP $1: workspace parent root"
+}
+scratch_guard() {
+  local p="$1" protected parent
+  case "${p##*/}" in
+    swapfile|lost+found|rmd|worktrees|tmp|npm-cache|node-compile-cache|node-v*-linux-x64*|tsx-*|.remudero-coverage|state)
+      log "KEEP $p: protected scratch name"; return 1 ;;
+  esac
+  if [ -L "$p" ]; then log "KEEP $p: symbolic link"; return 1; fi
+  if [ -e "$p/.rmd-scratch-keep" ] || [ -L "$p/.rmd-scratch-keep" ]; then
+    log "KEEP $p: scratch keep marker"; return 1
+  fi
+  while IFS= read -r parent; do
+    [ -n "$parent" ] || continue
+    parent="${parent%/}"
+    case "$parent" in "$p"|"$p"/*) keep_parent "$p"; return 1 ;; esac
+  done < <(printf '%s\n' "$SCRATCH_PARENTS" | tr ':' '\n')
+  if is_protected_worktree "$p"; then log "KEEP $p: protected by janitor configuration"; return 1; fi
+  while IFS= read -r protected; do
+    [ -n "$protected" ] || continue
+    case "$protected" in "$p"/*) log "KEEP $p: protected by janitor configuration"; return 1 ;; esac
+    case "$p" in "$protected"/*) log "KEEP $p: protected by janitor configuration"; return 1 ;; esac
+  done < <(printf '%s\n' "$PROTECTED_WORKTREE_ROOTS" | tr ':' '\n')
+  return 0
+}
+scratch_repo_check() {
+  local repo="$1" gitdir raw parent status
+  if [ -L "$repo/.git" ]; then SCRATCH_REASON="Git metadata has an unexpected type"; return 1; fi
+  if ! gitdir="$(rgit "$repo" rev-parse --absolute-git-dir 2>/dev/null)" || [ ! -d "$gitdir" ]; then
+    if [ -f "$repo/.git" ]; then
+      raw="$(sed -n 's/^gitdir: //p' "$repo/.git")"
+      case "$raw" in /*) ;; *) raw="$repo/$raw" ;; esac
+      case "$raw" in
+        */.git/worktrees/*)
+          parent="${raw%/.git/worktrees/*}"
+          if [ ! -e "$raw" ] && [ ! -e "$parent" ]; then return 0; fi ;;
+      esac
+    fi
+    SCRATCH_REASON="Git metadata is unreadable or missing"; return 1
+  fi
+  if [ -f "$gitdir/locked" ]; then SCRATCH_REASON="Git worktree is locked"; return 1; fi
+  worktree_clean "$repo"; status=$?
+  if [ "$status" != 0 ]; then
+    if [ "$status" = 1 ]; then SCRATCH_REASON="uncommitted changes"
+    else SCRATCH_REASON="Git status failed (unknown)"; fi
+    return 1
+  fi
+  worktree_ignored_safe "$repo"; status=$?
+  if [ "$status" != 0 ]; then
+    SCRATCH_REASON="ignored data includes paths beyond node_modules/coverage, or scan failed"; return 1
+  fi
+  SCRATCH_LIVE_REPOS+=("$repo")
+}
+scratch_repo_saved() {
+  local repo="$1" refs head
+  worktree_saved "$repo" || return 1
+  refs="$(rgit "$repo" for-each-ref --format='%(objectname)' refs/heads)" || return 1
+  while IFS= read -r head; do
+    [ -n "$head" ] || continue
+    [ -n "$(rgit "$repo" branch -r --contains "$head" 2>/dev/null)" ] || return 1
+  done <<< "$refs"
+}
+archive_scratch_bundle() {
+  local f="$1" archive="$WORKTREE_ARCHIVE_ROOT/scratch" probe dest a b digest
+  case "$archive" in "$f"|"$f"/*) return 1 ;; esac
+  probe="$archive"
+  while [ ! -e "$probe" ] && [ "$probe" != / ]; do probe="$(dirname "$probe")"; done
+  a="$(fs_id "$probe")"; b="$(fs_id "$f")"
+  [ -n "$a" ] && [ -n "$b" ] && [ "$a" != "$b" ] || return 1
+  digest="$(cksum < "$f")" || return 1
+  digest="${digest%% *}"
+  dest="$archive/${f##*/}-$digest.bundle"
+  log "ARCHIVE $f -> $dest"
+  [ "$DRY_RUN" = 1 ] && return 0
+  act mkdir -p -- "$archive" || return 1
+  [ ! -L "$archive" ] || return 1
+  if [ -e "$dest" ]; then cmp -s -- "$f" "$dest" || return 1
+  else
+    act cp -p -- "$f" "$dest" || return 1
+    cmp -s -- "$f" "$dest" || return 1
+  fi
+  act rm -f -- "$f"
+}
+sweep_scratch_unit() {
+  local p="$1" status entries entry repo head bundles bytes
+  local IDLE_MINUTES="$SCRATCH_IDLE_MINUTES" SCRATCH_REASON=""
+  local -a SCRATCH_LIVE_REPOS=()
+  scratch_guard "$p" || return
+  is_worktree_idle "$p"; status=$?
+  case "$status" in
+    0) ;;
+    1) log "KEEP $p: written within ${IDLE_MINUTES} min"; return ;;
+    *) log "KEEP $p: activity probe failed (unknown)"; return ;;
+  esac
+  if is_open "$p"; then log "KEEP $p: held open by a process"; return; fi
+  if [ "$DOCKER_OK" != 1 ]; then log "KEEP $p: docker probe failed (unknown)"; return; fi
+  if is_docker_mount "$p"; then log "KEEP $p: running container mount"; return; fi
+  if ! entries="$(find "$p" -maxdepth 4 -name .git -prune -print 2>/dev/null)"; then
+    log "KEEP $p: repository scan failed (unknown)"; return
+  fi
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    case "$entry" in */.git) repo="${entry%/.git}" ;; *) log "KEEP $p: unreadable repository path"; return ;; esac
+    if ! scratch_repo_check "$repo"; then log "KEEP $p: $SCRATCH_REASON ($repo)"; return; fi
+  done <<< "$entries"
+  # Validate the whole unit before archiving or removing any of its repositories (W1-T5513).
+  for repo in "${SCRATCH_LIVE_REPOS[@]}"; do
+    if [ "$DRY_RUN" != 1 ] && [ "${RMD_CLEANUP_NO_FETCH:-0}" != 1 ]; then
+      if ! repo_fetch "$repo" --quiet --all 2>/dev/null; then
+        log "KEEP $p: Git fetch failed (unknown)"; return
+      fi
+    fi
+    head="$(rgit "$repo" rev-parse HEAD 2>/dev/null)" || { log "KEEP $p: HEAD is unreadable"; return; }
+    if ! scratch_repo_saved "$repo"; then
+      if ! WORKTREE_ARCHIVE_ROOT="$WORKTREE_ARCHIVE_ROOT/scratch" archive_worktree_head "$repo" "$head" branches; then
+        log "KEEP $p: local branches could not be archived safely"; return
+      fi
+    fi
+  done
+  if ! bundles="$(find "$p" -name .git -prune -o -type f -name '*.bundle' -print 2>/dev/null)"; then
+    log "KEEP $p: bundle scan failed (unknown)"; return
+  fi
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    if ! archive_scratch_bundle "$entry"; then log "KEEP $p: bundle could not be archived safely"; return; fi
+  done <<< "$bundles"
+  for repo in "${SCRATCH_LIVE_REPOS[@]}"; do
+    if [ -f "$repo/.git" ]; then
+      log "REMOVE $repo (linked worktree)"
+      if ! act rgit "$repo" worktree remove -- "$repo"; then
+        log "KEEP $p: git worktree remove failed; no recursive filesystem fallback"; return
+      fi
+    fi
+  done
+  bytes="$(du -sk -- "$p" 2>/dev/null | awk '{print $1 * 1024}')"
+  log "REMOVE $p"
+  [ "$DRY_RUN" = 1 ] && log "DRYRUN would reclaim ${bytes:-unknown} bytes from $p"
+  act rm -rf -- "$p"
+}
+sweep_scratch_root() {
+  local root="$1" unit
+  root="${root%/}"
+  [ -d "$root" ] && [ ! -L "$root" ] || return
+  for unit in "$root"/* "$root"/.[!.]* "$root"/..?*; do
+    [ -e "$unit" ] || [ -L "$unit" ] || continue
+    sweep_scratch_unit "$unit"
+  done
 }
 ARCHIVE_OK=0
 check_archive_root() {
@@ -323,6 +591,20 @@ before_pct="$(df_field pct)"; before_avail="$(df_field avail)"
 before_pct="${before_pct:-0}"; before_avail="${before_avail:-0}"
 snapshot_open
 [ "$OPEN_OK" = 1 ] || log "REFUSE sweeps: lsof failed — keeping everything (fail closed)"
+
+if [ -n "$SCRATCH_ROOTS$SCRATCH_PARENTS" ]; then snapshot_docker; fi
+while IFS= read -r root; do
+  [ -n "$root" ] && sweep_scratch_root "$root"
+done < <(printf '%s\n' "$SCRATCH_ROOTS" | tr ':' '\n')
+while IFS= read -r parent; do
+  [ -n "$parent" ] && [ -d "$parent" ] || continue
+  parent="${parent%/}"
+  keep_parent "$parent"
+  if [ -e "$parent/.rmd-scratch-keep" ] || [ -L "$parent" ]; then
+    log "KEEP $parent: scratch keep marker or symbolic link"; continue
+  fi
+  sweep_scratch_root "$parent"
+done < <(printf '%s\n' "$SCRATCH_PARENTS" | tr ':' '\n')
 
 for root in $(printf '%s' "$TMP_ROOTS" | tr ':' ' '); do
   [ -d "$root" ] || continue

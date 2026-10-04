@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: live ledger read (read-only) of DAEMON-1791045529831, 16:38Z-17:16Z"
   plan_refs: [W1-T147, W1-T5361, W1-T5366, W1-T4041, W1-T4051, W1-T3109, W1-T4075, W1-T4970]
   files: [src/run-task.ts, src/lib/daemon.ts, test/the-cadence-work-that-stalled-the-daemon-loop-runs-off-it.test.ts, test/the-daemon-loop-lag-stays-bounded-through-a-cadence-phase.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

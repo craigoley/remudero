@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: follow-up to W1-T5347 (#8786)"
   plan_refs: [W1-T1038, W1-T342]
   files: [src/lib/drain.ts, test/drains-single-lane-loop-checks-the-memory-gate-too.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

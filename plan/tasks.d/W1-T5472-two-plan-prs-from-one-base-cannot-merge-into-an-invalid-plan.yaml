@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: the duplicate-priority outage fixed by #8877; guard test drafted in #8883 (closed, superseded)"
   plan_refs: [W1-T491, W1-T2855, W1-T5431, W1-T5348]
   files: [src/lib/arm-auto-merge.ts, test/every-plan-shard-parses-with-unique-keys.test.ts, test/two-plan-prs-from-one-base-cannot-merge-into-an-invalid-plan.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
