@@ -24,6 +24,7 @@ import { gardenPassDue, gardenStatePath, judgeGardenDecision, readGardenState, r
 import { buildEntryWeightIndex, DEFAULT_KNOWLEDGE_BUDGET_CHARS, loadLearningsCorpus } from "./learnings.js";
 import type { LedgerLine } from "./ledger.js";
 import { ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
 import type { BillingMode } from "./env.js";
 import { recommendMounts, type MountHeadroomCell, type MountRecommendation } from "./mount-recommender.js";
 import { loadMounts, mountsPath } from "./mounts.js";
@@ -380,7 +381,7 @@ function buildConfigInventory(input: InventoryMeasurement): ConfigInventory {
  *  the first rotation, live metadata prevents a first-boot sweep from being cached forever. */
 function mountSweepKey(stateDir: string, sweepScript: string): string {
   const rotations = ledgerRotationEntries(readdirSync(stateDir), stateDir).map((entry) => entry.path);
-  const paths = [sweepScript, ...(rotations.length ? rotations : [join(stateDir, "ledger.ndjson")])];
+  const paths = [sweepScript, ...(rotations.length ? rotations : [join(stateDir, LEDGER_FILENAME)])];
   return JSON.stringify(paths.map((path) => {
     const stat = existsSync(path) ? statSync(path) : undefined;
     return [path, stat?.size, stat?.mtimeMs, stat?.ctimeMs];
@@ -402,7 +403,8 @@ export async function cachedMountHeadroomSweep(stateDir: string, sweepScript: st
       c && typeof c.cellKey === "string" && Array.isArray(c.arms) && Array.isArray(c.comparisons))) return { cells: cached.cells };
   }
   const sweep = await build(stateDir);
-  if (!sweep.corpus?.unread.length && mountSweepKey(stateDir, sweepScript) === key) {
+  const corpusIsReadable = sweep.corpus === undefined || sweep.corpus.unread.length === 0;
+  if (corpusIsReadable && mountSweepKey(stateDir, sweepScript) === key) {
     writeAtomic(path, JSON.stringify({ version: 1, key, cells: sweep.cells }) + "\n");
   }
   return { cells: sweep.cells };
