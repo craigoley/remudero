@@ -1,3 +1,5 @@
+import { fixedClock } from "./clock.js";
+
 export const PR_BLOCKERS = [
   "awaiting-ci", "own-red", "base-red", "awaiting-review", "review-failed", "awaiting-arm",
   "armed-idle", "conflict", "strikes-exhausted", "escalated", "stale-reviewer-withheld",
@@ -61,7 +63,7 @@ export function priorBlockersFromLedger(lines: readonly Record<string, unknown>[
 export function blockerFields(blocker: PrBlocker, prior: PriorBlocker | undefined, now: number,
   planRepairCapable = false) {
   const continues = prior?.blocker === blocker && prior.since !== undefined;
-  const since = continues ? prior.since! : new Date(now).toISOString();
+  const since = continues ? prior.since! : fixedClock(now).iso();
   const source = continues ? prior.sinceSource : prior?.since === undefined ? "first-seen" : undefined;
   return {
     blocker,
