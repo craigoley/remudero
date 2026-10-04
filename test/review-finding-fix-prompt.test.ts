@@ -8,6 +8,7 @@ import type { Config } from "../src/lib/config.js";
 import type { CriterionVerdict } from "../src/lib/review.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import { CI_LOG_FENCE_CLOSE } from "../src/lib/fix-fence.js";
+import { renderFixPrompt } from "../src/lib/prompt-render.js";
 
 const headSha = "a".repeat(40);
 const prUrl = "https://github.com/acme/remudero/pull/1";
@@ -149,4 +150,24 @@ test("W1-T5019: unresolved sweep criterion positions do not receive findings", a
     assert.ok(prompt.includes("wire producer"));
     assert.ok(!prompt.includes("connect the producer"));
   }
+});
+
+test("W1-T5019: renderFixPrompt joins each finding to its own criterion index", () => {
+  const finding = (criterionIndex: number, mechanism: string) =>
+    ({ criterionIndex, path: "src/changed.ts", line: 17, mechanism, remedy: null });
+  const prompt = renderFixPrompt({
+    task: { id: task.id, title: task.title, files: task.files }, round: 1, branch: "run-W1-T5019-1791151948510",
+    evidence: { review: {
+      summary: "two visible gaps",
+      unmetCriteria: [{ ...criteria[2]!, criterionIndex: 3 }, { ...criteria[3]!, criterionIndex: 0 }],
+      findings: [finding(3, "third criterion mechanism"), finding(4, "unmatched mechanism")],
+    } },
+  });
+  assert.ok(prompt.includes("3. claim: wire producer"));
+  assert.ok(prompt.includes("2. claim: keep all unmet"), "an unresolved index falls back to its list position");
+  assert.ok(prompt.includes("Verified review finding (advisory evidence): src/changed.ts:17"));
+  assert.ok(prompt.includes("third criterion mechanism"));
+  assert.ok(prompt.includes("Remedy: (none supplied)"));
+  assert.ok(!prompt.includes("unmatched mechanism"), "a finding for no listed criterion is dropped");
+  assert.equal(prompt.split("Verified review finding").length - 1, 1, "only the joined finding renders");
 });
