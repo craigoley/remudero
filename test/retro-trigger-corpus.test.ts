@@ -124,9 +124,7 @@ test("a gate-side merge (shippedSince's own github-credited path) is still count
     ].join("\n") + "\n",
   );
   const github: ShippedGithub = {
-    findMergedByTrailer: (id) => (id === taskId ? {
-      number: 9, url: "https://github.com/o/r/pull/9", mergedAt: "2026-07-25T00:30:00.000Z",
-    } : null),
+    findMergedByTrailer: (id) => (id === taskId ? { number: 9, url: "https://github.com/o/r/pull/9" } : null),
     headRefName: (prUrl) => (prUrl === "https://github.com/o/r/pull/9" ? ownBranch : undefined),
     unavailable: () => undefined,
     // The SAME task's PR also shows up verbatim in git log (it did land, after all) — this must
@@ -254,3 +252,4 @@ test("retroTriggerCheck touches only state/ — no plan/ or learnings/ directory
   assert.ok(!after.includes("plan"), "no plan/ directory — nothing files a task");
   assert.ok(!after.includes("learnings"), "no learnings/ directory — nothing ratifies a learning");
 });
+
