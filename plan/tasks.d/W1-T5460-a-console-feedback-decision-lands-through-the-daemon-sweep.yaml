@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-03 on PR #8795: skip the preflight on the request path now, queue decisions for the daemon landing sweep, then enable it there"
   plan_refs: ["W1-T5348"]
   files: [src/lib/feedback-landing.ts, test/a-console-feedback-decision-lands-through-the-daemon-sweep.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
