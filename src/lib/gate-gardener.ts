@@ -1,13 +1,16 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { systemClock } from "./clock.js";
+import { fixedClock, systemClock } from "./clock.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec, Outcome } from "./gardener.js";
 import { gateFireRatesPath, type GateFireRate, type GateFireRateReport } from "./gate-fire-rate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { resolveRepoLayout } from "./repo-layout.js";
+import { renderMachineShard } from "./machine-filing.js";
+import { loadPlan, loadPlanFromYaml, machineFilingAdmissionViolations } from "./plan.js";
+import { loadPolicy } from "./policy.js";
 
 /**
  * lib/gate-gardener.ts (W1-T4116) — the gates tend themselves.
@@ -25,12 +28,28 @@ import { resolveRepoLayout } from "./repo-layout.js";
  * TIGHTEN and REFRESH are judged by refusals repaired against refusals overridden across all gates.
  */
 
-export type GateGardenClass = "tighten" | "refresh" | "demote";
-export const GATE_GARDEN_CLASSES: readonly GateGardenClass[] = ["tighten", "refresh", "demote"];
+export type GateGardenClass = "tighten" | "refresh" | "demote" | "defuse";
+export const GATE_GARDEN_CLASSES: readonly GateGardenClass[] = ["tighten", "refresh", "demote", "defuse"];
+export const DEFUSE_LEAD_DAYS = 21;
+
+interface ExpiringFixture {
+  file: string; line: number; stamp: string; field: string; threshold: string;
+  expiresAt: number; daysLeft: number;
+}
+
+export interface GateDefuseSources {
+  thresholdDays?: number;
+  leadDays?: number;
+  openOrigins?: () => string[];
+  mintTaskId?: (branch: string) => string;
+  admissionViolations?: typeof machineFilingAdmissionViolations;
+  execFile?: (command: string, args: string[], options: { cwd: string; encoding: "utf8" }) => string;
+}
 
 export type GateEdit =
   | { kind: "row"; key: string; to: number | null }
-  | { kind: "demote"; gate: string; rationale: string };
+  | { kind: "demote"; gate: string; rationale: string }
+  | { kind: "defuse"; finding: ExpiringFixture; leadDays: number; urgent: boolean };
 
 export interface GateGardenAction extends GardenAction<GateGardenClass> {
   /** Repo-relative file the edit lands in. */
@@ -62,6 +81,7 @@ export interface GateProbes {
   cl: { listMeasuredFiles: (r: string) => string[]; countCommentLines: (t: string, p: string) => { comments: number }; evaluateCommentLoadRatchet: (c: Json, b: Json) => LedgerVerdict };
   lb: { loadCorpus: (d: string) => unknown[]; computeActiveChars: (e: unknown[]) => { chars: number; activeCount: number } };
   gm: { readGateLists: (t: string) => { required: Set<string> }; evaluateGateMonotonic: (b: unknown, h: unknown) => { ok: boolean; detail: string } };
+  ef?: { MARGIN_DAYS: number; censusExpiringFixtures: (opts: { files: string[]; readFile: (path: string) => string; now: number; thresholdDays: number; marginDays: number }) => { reported: ExpiringFixture[] } };
 }
 
 export async function loadGateProbes(root: string): Promise<GateProbes> {
@@ -71,7 +91,106 @@ export async function loadGateProbes(root: string): Promise<GateProbes> {
     cl: await load("scripts/comment-load-ratchet.mjs"),
     lb: await load("scripts/learnings-budget-ratchet.mjs"),
     gm: await load("scripts/gate-monotonic-check.mjs"),
+    ef: await load("scripts/expiring-fixture-census.mjs"),
   };
+}
+
+function defuseCandidates(deps: GardenerDeps, probes: GateProbes, sources: GateDefuseSources): GateGardenAction[] {
+  if (!probes.ef) throw new Error("gate gardener: expiring-fixture census probe is missing");
+  const run = (cmd: string, args: string[]): string => sources.execFile
+    ? sources.execFile(cmd, args, { cwd: deps.repoRoot, encoding: "utf8" })
+    : execFileSync(cmd, args, { cwd: deps.repoRoot, encoding: "utf8" });
+  const leadDays = sources.leadDays ?? DEFUSE_LEAD_DAYS;
+  const files = run("git", ["ls-files", "test/*.test.ts"]).trim().split("\n").filter(Boolean);
+  if (files.length === 0) return [];
+  const layout = resolveRepoLayout(deps.repoRoot);
+  const { reported } = probes.ef.censusExpiringFixtures({
+    files, readFile: (path) => readFileSync(join(deps.repoRoot, path), "utf8"),
+    now: (deps.clock ?? systemClock).now(), thresholdDays: sources.thresholdDays ?? loadPolicy(join(layout.planDir, "policy.yaml")).values.sweep.staleDays,
+    marginDays: leadDays,
+  });
+  const byFile = new Map<string, ExpiringFixture>();
+  for (const f of reported) {
+    const prior = byFile.get(f.file);
+    if (!prior || f.expiresAt < prior.expiresAt) byFile.set(f.file, f);
+  }
+  if (byFile.size === 0) return [];
+  const queued = existsSync(layout.planMonolith) ? loadPlan(layout.planMonolith).tasks.filter((t) => t.status === "queued" && !t.retirement).map((t) => t.origin) : [];
+  const open = sources.openOrigins ? sources.openOrigins() : (JSON.parse(run("gh", ["pr", "list", "--state", "open", "--limit", "1000", "--json", "body"])) as Array<{ body: string }>).flatMap((pr) => [...pr.body.matchAll(/expiring-fixture:test\/[^\s"'`]+\.test\.ts/g)].map((m) => m[0]));
+  const covered = new Set([...queued, ...open]);
+  return [...byFile.values()].flatMap((finding): GateGardenAction[] => {
+    const target = `expiring-fixture:${finding.file}`;
+    if (covered.has(target)) {
+      deps.log("gate_garden.defuse_deferred", defuseEvidence(finding, leadDays));
+      return [];
+    }
+    return [{ class: "defuse", target, file: finding.file,
+      edit: { kind: "defuse", finding, leadDays, urgent: finding.daysLeft <= probes.ef!.MARGIN_DAYS },
+      reason: `${finding.file}:${finding.line} crosses ${finding.threshold} on ${fixedClock(finding.expiresAt).iso()} (${leadDays}-day lead).` }];
+  });
+}
+
+function defuseEvidence(f: ExpiringFixture, leadDays: number): Record<string, unknown> {
+  return { file: f.file, line: f.line, crossingDate: fixedClock(f.expiresAt).iso(), leadDays };
+}
+
+export function renderDefuseShard(action: GateGardenAction, taskId: string) {
+  if (action.edit.kind !== "defuse") throw new Error("gate gardener: mixed defuse plan");
+  const { finding: f, leadDays, urgent } = action.edit;
+  const crossing = fixedClock(f.expiresAt).iso();
+  const title = `${taskId}: ${f.file} stays defused across ${crossing}`;
+  return renderMachineShard({
+    taskId, title: `Defuse the expiring fixture in ${f.file} before ${crossing}`, origin: action.target,
+    files: [f.file], cost: 1, costPopulation: urgent ? [0, 1] : [1],
+    acceptance: [{ claim: `The census reports no crossing for ${f.file} with now past ${crossing}, and the test remains green across the crossing.`,
+      proof: `grep: test("${title.replace(/\./g, "\\.")}" in ${f.file}` }],
+    rationale: [
+      `${f.file}:${f.line}: ${f.field} is stamped ${f.stamp}; ${f.threshold} crosses on ${crossing}.`,
+      `Found ${f.daysLeft} days before crossing using a ${leadDays}-day lead horizon.`,
+      "Use an exemption only when this case is judged against an injected clock; prove it by ageing the fixture across the threshold and rerunning the test, as #8673 did.",
+      "Otherwise make the stamp relative to the test's clock. Moving a fixed date only re-arms the fixture.",
+      "Add the task's regression to this fixture file: run the census immediately before and after crossing, and run the affected case at both clocks.",
+    ],
+  });
+}
+
+function applyDefuseActions(ws: GardenCheckout, actions: GateGardenAction[], deps: GardenerDeps, sources: GateDefuseSources) {
+  if (!ws.branch) throw new Error("gate gardener: filing workspace has no branch for task-id reservation");
+  const paths: string[] = [];
+  for (const action of actions) {
+    const draft = renderDefuseShard(action, "NEW-1");
+    if (draft.refused) throw new Error(`gate gardener: defuse shard refused (${draft.refused})`);
+    const plan = loadPlanFromYaml(draft.text, "defuse-admission");
+    const reasons = (sources.admissionViolations ?? machineFilingAdmissionViolations)(plan.tasks[0]!, {
+      plan, releasedIds: new Set(), pathExists: (path) => existsSync(join(deps.repoRoot, path)),
+    });
+    if (reasons.length) throw new Error(`gate gardener: defuse shard refused (machine-filing-admission: ${reasons.join("; ")})`);
+    const args = ["--import", "tsx", join(deps.repoRoot, "src/run-task.ts"), "next-task-id", "--reserve", "--branch", ws.branch];
+    const output = sources.mintTaskId ? undefined : sources.execFile
+      ? sources.execFile(process.execPath, args, { cwd: deps.repoRoot, encoding: "utf8" })
+      : execFileSync(process.execPath, args, { cwd: deps.repoRoot, encoding: "utf8" });
+    const taskId = sources.mintTaskId ? sources.mintTaskId(ws.branch) : /^RESERVED (W1-T\d+) on origin/m.exec(output!)?.[1];
+    if (!taskId) throw new Error("gate gardener: task-id reservation returned no held id");
+    const rendered = renderDefuseShard(action, taskId);
+    if (rendered.refused) throw new Error(`gate gardener: defuse shard refused (${rendered.refused})`);
+    const stem = action.file.replace(/^test\//, "").replace(/\.test\.ts$/, "").replace(/[^a-zA-Z0-9-]/g, "-");
+    const path = join(resolveRepoLayout(ws.root).planDir, "tasks.d", `${taskId}-defuse-${stem}.yaml`);
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, rendered.text);
+    paths.push(relative(ws.root, path));
+  }
+  const land = ws.land.bind(ws);
+  ws.land = (opts) => {
+    const url = land(opts);
+    if (url) for (const a of actions) {
+      if (a.edit.kind === "defuse") deps.log("gate_garden.defuse_filed", defuseEvidence(a.edit.finding, a.edit.leadDays));
+    }
+    return url;
+  };
+  return { paths, title: `chore(plan): file ${actions.length} expiring fixture remedy task(s)`, body: [
+    "The gate gardener files expiring fixture remedies before the CI margin.", "", "## Acceptance",
+    ...actions.flatMap((a, i) => [`- claim: ${a.target} has a machine-filed remedy`, `  proof: grep: ${a.target} in ${paths[i]}`]),
+  ].join("\n") };
 }
 
 /** TIGHTEN and REFRESH rows for the two per-file ledgers, from each ratchet's own evaluation. */
@@ -179,7 +298,10 @@ export function applyGateActions(root: string, actions: GateGardenAction[], head
   for (const a of actions) byFile.set(a.file, [...(byFile.get(a.file) ?? []), a]);
   for (const [file, list] of byFile) {
     let text = readFileSync(join(root, file), "utf8");
-    for (const a of list) text = a.edit.kind === "row" ? editBaselineRow(text, a.edit.key, a.edit.to) : demoteInCiGate(text, a.edit.gate, a.edit.rationale);
+    for (const a of list) {
+      if (a.edit.kind === "defuse") throw new Error("defuse actions require machine filing");
+      text = a.edit.kind === "row" ? editBaselineRow(text, a.edit.key, a.edit.to) : demoteInCiGate(text, a.edit.gate, a.edit.rationale);
+    }
     if (file === CI_GATE_YML) {
       // The gate-monotonic check itself must read the result as a REVIEWED demotion.
       const verdict = gm.evaluateGateMonotonic(gm.readGateLists(readFileSync(join(root, file), "utf8")), gm.readGateLists(text));
@@ -194,7 +316,7 @@ export function applyGateActions(root: string, actions: GateGardenAction[], head
 }
 
 function prBody(actions: GateGardenAction[], heading: string): string {
-  const proofs = actions.flatMap((a) =>
+  const proofs = actions.flatMap((a) => a.edit.kind === "defuse" ? [] :
     a.edit.kind === "demote"
       ? [`- claim: ${a.edit.gate} is moved to ADVISORY with a reviewed rationale`, `  proof: grep: GATE_RATIONALE: "W1-T4116 gate gardener: ${a.edit.gate} refused 0 in ${CI_GATE_YML}`]
       : a.edit.to === null
@@ -214,7 +336,7 @@ function prBody(actions: GateGardenAction[], heading: string): string {
 }
 
 /** The repo's gates as a gardener spec, over probes loaded by {@link loadGateProbes}. */
-export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes): GardenSpec<GateGardenClass, GateInventory, GateGardenAction, GardenCheckout> {
+export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes, sources: GateDefuseSources = {}): GardenSpec<GateGardenClass, GateInventory, GateGardenAction, GardenCheckout> {
   const clock = deps.clock ?? systemClock;
   return {
     name: "gate",
@@ -223,14 +345,19 @@ export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes): GardenSp
     cheapFingerprint: () => {
       const head = execFileSync("git", ["-C", deps.repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
       const report = gateFireRatesPath(deps.stateDir);
-      return `${head}:${existsSync(report) ? readFileSync(report, "utf8").length : 0}`;
+      return `${head}:${existsSync(report) ? readFileSync(report, "utf8").length : 0}:${clock.iso().slice(0, 10)}`;
     },
-    inventory: () => gateInventory(deps.repoRoot, deps.stateDir, probes),
+    inventory: () => {
+      const inv = gateInventory(deps.repoRoot, deps.stateDir, probes);
+      if (!existsSync(join(deps.stateDir, "GATE_OFF-defuse"))) inv.candidates.push(...defuseCandidates(deps, probes, sources));
+      return inv;
+    },
     fingerprint: (inv) => inv.candidates.map((a) => a.target).join(","),
     metric: (inv) => inv.tally,
     candidates: (inv) => inv.candidates,
     scorecard: (inv, plan) => ({ candidates: inv.candidates.length, tally: inv.tally, proposed: plan.actions.length }),
     apply: (ws, plan) => {
+      if (plan.acting[0] === "defuse") return applyDefuseActions(ws, plan.actions, deps, sources);
       const heading = `## Pass ${clock.iso()}`;
       const paths = applyGateActions(ws.root, plan.actions, heading, probes);
       return { paths, title: `chore(gates): the gate gardener proposes to ${plan.acting[0]} ${plan.actions.length} gate row(s)`, body: prBody(plan.actions, heading) };
