@@ -4,17 +4,19 @@ import { Worker, MessageChannel } from "node:worker_threads";
 import { once } from "node:events";
 import { execFileSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import { writeFileSync, existsSync, readFileSync } from "node:fs";
+import { writeFileSync, existsSync, readFileSync, mkdirSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { startReadPlane, startReadPlaneTelemetry, freezeReadGeneration } from "../src/lib/read-plane.js";
-import { createTickReadProducer, buildBoardReviewDaemonHooks, applyTickCreditUpdates, buildDaemonReadRefresher } from "../src/run-task.js";
+import { createTickReadProducer, buildBoardReviewDaemonHooks, applyTickCreditUpdates, buildDaemonReadRefresher,
+  daemonCommand, projectionReadinessAccessors, tickReadReverificationDeps } from "../src/run-task.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { loadPlan } from "../src/lib/plan.js";
-import { runDaemon } from "../src/lib/daemon.js";
-import { defaultCreditStorePath, loadCreditStore } from "../src/lib/status.js";
+import { runDaemon, type DaemonDeps, type DaemonSummary } from "../src/lib/daemon.js";
+import { defaultCreditStorePath, loadCreditStore, type StatusProjection } from "../src/lib/status.js";
 import { runSweep, type OpenPrView } from "../src/lib/sweep.js";
-import { runReadPlaneWorker, readPlaneWorkerInput } from "../src/lib/read-plane.worker.js";
+import { runReadPlaneWorker, readPlaneWorkerInput, readPlaneWorkerLog } from "../src/lib/read-plane.worker.js";
 import { boardOpenSnapshotPath } from "../src/lib/board-snapshot-cache.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 function fixture() {
   const root = makeTempDir("read-plane");
@@ -295,4 +297,130 @@ test("W1-T4075: an unavailable worker falls back with its reason and inline fail
   assert.deepEqual(reasons, ["Error: worker unavailable"]);
   await plane.stop();
   await assert.rejects(plane.read({ prs: [2] }), /read plane stopped/);
+});
+
+test("W1-T4075: a failed open-PR read is carried in the generation, never a silent empty board", async () => {
+  const fixture = fixtureReader();
+  const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const read = fixture.io.fetch!;
+  const facts = await createTickReadProducer(fixture.options, { ...fixture.io,
+    log: (step, extra) => rows.push({ step, extra }),
+    fetch: (args, budget) => {
+      if (args.some((arg) => arg.includes("/pulls?") && arg.includes("state=open"))) throw new Error("open list unavailable");
+      return read(args, budget);
+    } })({ plan: fixture.plan });
+  assert.match(String(facts.openPrError), /open list unavailable/);
+  assert.equal(facts.openPrRows, undefined);
+  assert.deepEqual(facts.openPrViews, []);
+  assert.deepEqual(facts.boardItems, []);
+  assert.deepEqual(rows.filter((row) => row.step === "read_plane.open_failed").map((row) => row.extra?.reason), [facts.openPrError]);
+});
+
+test("W1-T4075: a first generation seeds its previous projection from the stored status file", async () => {
+  const fixture = fixtureReader();
+  const rows: string[] = [];
+  const io = { ...fixture.io, log: (step: string) => rows.push(step) };
+  const statusPath = join(fixture.options.config.root, "state", "status.json");
+  mkdirSync(join(fixture.options.config.root, "state"), { recursive: true });
+  writeFileSync(statusPath, JSON.stringify({ tasks: { A: { merged: false } } }));
+  const seeded = await createTickReadProducer(fixture.options, io)({ plan: fixture.plan });
+  assert.equal(new Map(seeded.projection).get("B")?.merged, true, "a readable status file still derives");
+  assert.equal(rows.includes("read_plane.previous_unreadable"), false);
+  writeFileSync(statusPath, "{ not json");
+  const unreadable = await createTickReadProducer(fixture.options, io)({ plan: fixture.plan });
+  assert.equal(rows.filter((step) => step === "read_plane.previous_unreadable").length, 1, "a torn status file is named, not swallowed");
+  assert.equal(new Map(unreadable.projection).get("B")?.merged, true, "and the derivation proceeds without it");
+});
+
+test("W1-T4075: a pending PR's CI failure evidence is read once in the generation for the re-verification rung", async () => {
+  const fixture = fixtureReader();
+  const read = fixture.io.fetch!;
+  const evidence = [{ name: "coverage-shard", logTail: "not ok 1", conclusion: "FAILURE" }];
+  const rollups: unknown[] = [];
+  const facts = await createTickReadProducer(fixture.options, { ...fixture.io,
+    fetch: (args, budget) => {
+      if (args.some((arg) => arg.endsWith("/status"))) return { statuses: [{ context: "ci-gate", state: "pending" }] };
+      return read(args, budget);
+    },
+    viewsDeps: { ...fixture.io.viewsDeps, fetchCiFailureEvidence: (_owner, _repo, rollup) => { rollups.push(rollup); return evidence; } },
+  })({ plan: fixture.plan });
+  const pending = facts.openPrViews.filter((pr) => pr.checksState === "pending").map((pr) => pr.prNumber);
+  assert.ok(pending.length > 0, "the fixture's PRs are CI-pending");
+  for (const number of pending) assert.deepEqual(facts.postFixCiFailuresByPr.get(number), evidence);
+  assert.ok(rollups.length >= pending.length);
+  const deps = tickReadReverificationDeps({ mergedFixPrNumbers: [7], postFixCiFailuresByPr: facts.postFixCiFailuresByPr });
+  assert.equal(deps.isMergedByNumber(7), true);
+  assert.equal(deps.isMergedByNumber(8), false);
+  assert.deepEqual(deps.readCiFailures(facts.openPrViews.find((pr) => pr.prNumber === pending[0])!), evidence);
+});
+
+test("W1-T4075: the draft rung's readiness from a generation answers exactly as the deriving accessor", () => {
+  const row = (merged: boolean, indeterminate = false, unavailableReason?: string) =>
+    ({ merged, indeterminate, ...(unavailableReason ? { unavailableReason } : {}) }) as unknown as StatusProjection;
+  const { plan } = fixture();
+  const accessors = projectionReadinessAccessors(new Map([
+    ["A", row(true)], ["B", row(false, true, "rate_limited")], ["C", row(false, true)],
+  ]));
+  assert.equal(accessors.isMerged(plan.byId.get("A")!), true);
+  assert.equal(accessors.isMerged(plan.byId.get("B")!), false);
+  assert.equal(accessors.depsUnobservable("A"), undefined);
+  assert.equal(accessors.depsUnobservable("B"), "rate_limited");
+  assert.equal(accessors.depsUnobservable("C"), "unknown");
+  assert.equal(accessors.depsUnobservable("NOT-IN-PLAN"), undefined, "a missing dependency is unmetDependencies' own case");
+});
+
+test("W1-T4075: a worker's log rows reach the daemon ledger and the main thread's logger is inert", async () => {
+  assert.doesNotThrow(() => readPlaneWorkerLog("read_plane.main_thread", { inert: true }));
+  const entry = new URL("../src/lib/read-plane.worker.ts", import.meta.url).href;
+  const source = `const { runReadPlaneWorker, readPlaneWorkerLog } = await import(${JSON.stringify(entry)});
+    runReadPlaneWorker((input) => { readPlaneWorkerLog("read_plane.worker_row", { prs: input.prs }); return input; }); // .ts`;
+  const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const plane = startReadPlane({ workerUrl: new URL(`data:text/javascript,${encodeURIComponent(source)}`),
+    workerInput: {}, inline: (): { prs: number[] } => { throw new Error("unexpected fallback"); },
+    log: (step, extra) => rows.push({ step, extra }) });
+  try {
+    assert.equal((await plane.read({ prs: [5] })).source, "worker");
+    assert.deepEqual(rows, [{ step: "read_plane.worker_row", extra: { prs: [5] } }]);
+  } finally { await plane.stop(); }
+});
+
+test("W1-T4075: the real daemon wiring publishes a worker generation that the tick's merged reads then use", async () => {
+  const home = makeTempDir("read-plane-daemon");
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+  const now = new Date();
+  utimesSync(home, now, now);
+  const gh = ghShim([{ when: "", stdout: "[]" }], { kind: "read-plane-daemon" });
+  const previous = { HOME: process.env.HOME, PATH: process.env.PATH };
+  process.env.HOME = home;
+  process.env.PATH = `${gh.dir}:${previous.PATH}`;
+  let observed: { merged: boolean; again: boolean; status: unknown } | undefined;
+  try {
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      startGithubAppRefresh: () => ({ armed: false }),
+      runDaemon: (async (_plan: unknown, deps: DaemonDeps): Promise<DaemonSummary> => {
+        assert.ok(deps.refreshMergedAsync, "the real wiring owns a read plane");
+        const merged = await deps.refreshMergedAsync();
+        observed = { merged: merged("ANY"), again: deps.refreshMerged()("ANY"),
+          status: JSON.parse(readFileSync(join(root, "state", "status.json"), "utf8")).tasks };
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      }) as never,
+    });
+    assert.equal(code, 0);
+    assert.deepEqual(observed, { merged: false, again: false, status: {} });
+    const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
+    assert.ok(ledger.includes("daemon.target"), "positive control: this is the daemon's own ledger");
+    assert.equal(ledger.includes("read_plane.inline"), false, "the generation came from the worker thread, not the fallback");
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(gh.dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
 });

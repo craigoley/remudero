@@ -35066,9 +35066,9 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     // A logical tick clock expires each half once per generation, independent of read duration.
     // Only cache age uses it; the persisted open snapshot above retains the real clock.
     now: () => generationClock, ttlMs: 1, mergedTtlMs: 1,
-    exec: (args) => args.includes("--jq")
-      ? ghExec(args, { encoding: "utf8", stdio: "pipe" })
-      : JSON.stringify(fetch(args)),
+    // Every read goes through the generation-memoised JSON fetch: the gateway's one `--jq` read
+    // (changed files) is answered by the changed-files cache above and never reaches `exec`.
+    exec: (args) => JSON.stringify(fetch(args)),
     commitTrailerIndex: io.commitTrailerIndex ?? (() => buildCommitTrailerIndex({ slug: `${owner}/${repo}`, cwd: checkoutRoot })()),
   });
   return async (request: { plan: Plan; previousProjection?: Array<[string, StatusProjection]> }) => {
@@ -35172,6 +35172,17 @@ export function applyTickCreditUpdates(facts: Pick<TickReadFacts, "creditUpdates
     changed = true;
   }
   if (changed) saveCreditStore(path, current);
+}
+
+/** W1-T4075: the post-fix re-verification rung's two reads, answered from one tick-read generation. */
+export function tickReadReverificationDeps(tickRead: Pick<TickReadFacts, "mergedFixPrNumbers" | "postFixCiFailuresByPr">): {
+  isMergedByNumber: (prNumber: number) => boolean;
+  readCiFailures: (pr: OpenPrView) => CiFailure[] | undefined;
+} {
+  return {
+    isMergedByNumber: (number) => tickRead.mergedFixPrNumbers.includes(number),
+    readCiFailures: (pr) => tickRead.postFixCiFailuresByPr.get(pr.prNumber),
+  };
 }
 
 export function buildDaemonReadRefresher(options: {
@@ -43181,10 +43192,8 @@ export function buildSweepHook(
       // W1-T474 — the post-fix re-verification rung, on the daemon's own poll cadence and, same
       // as `sweepCommand`, run BEFORE `runSweep` so the fix rung never spends a strike on a PR
       // this pass just redrove (rationale (10) — see `sweepPostFixReverification`'s own doc).
-      const reverifySummary = await sweepPostFixReverification(owner, repo, openPrs, ledgerPath, runId, log, tickRead ? {
-        isMergedByNumber: (number) => tickRead.mergedFixPrNumbers.includes(number),
-        readCiFailures: (pr) => tickRead.postFixCiFailuresByPr.get(pr.prNumber),
-      } : {});
+      const reverifySummary = await sweepPostFixReverification(owner, repo, openPrs, ledgerPath, runId, log,
+        tickRead ? tickReadReverificationDeps(tickRead) : {});
       const redrivenThisPass = new Set(
         reverifySummary.results.filter((r) => r.outcome === "redriven").map((r) => r.prNumber),
       );
@@ -46095,14 +46104,9 @@ export function buildInboxDraftHook(
       try {
         const plan = tickRead?.plan ?? loadPlan(join(repoRoot, "plan", "tasks.yaml"));
         const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
-        const projection = tickRead ? new Map(tickRead.projection) : undefined;
-        const { isMerged, depsUnobservable } = projection ? {
-          isMerged: (task: Task) => projection.get(task.id)?.merged ?? false,
-          depsUnobservable: (id: string): GhFailureReason | undefined => {
-            const row = projection.get(id);
-            return !row || row.indeterminate ? row?.unavailableReason ?? "unknown" : undefined;
-          },
-        } : buildDepsReadinessAccessors(plan, deriveDeps);
+        const { isMerged, depsUnobservable } = tickRead
+          ? projectionReadinessAccessors(new Map(tickRead.projection))
+          : buildDepsReadinessAccessors(plan, deriveDeps);
         const ledgerLines = readLedgerLines(ledgerPath);
         const sha = mainSha();
         draftReadiness = {
@@ -46326,6 +46330,19 @@ export function buildDepsReadinessAccessors(plan: Plan, deriveDeps: DeriveDeps):
     return projection.indeterminate ? (projection.unavailableReason ?? "unknown") : undefined;
   };
   return { isMerged, depsUnobservable };
+}
+
+/** W1-T4075: {@link buildDepsReadinessAccessors}' two answers, read from a tick-read generation's
+ *  projection of the same plan instead of re-deriving each task. A task absent from it is absent
+ *  from the plan, so it answers `undefined` exactly as the deriving accessor does. */
+export function projectionReadinessAccessors(projection: ReadonlyMap<string, StatusProjection>): ReturnType<typeof buildDepsReadinessAccessors> {
+  return {
+    isMerged: (t) => projection.get(t.id)?.merged ?? false,
+    depsUnobservable: (taskId) => {
+      const row = projection.get(taskId);
+      return row?.indeterminate ? (row.unavailableReason ?? "unknown") : undefined;
+    },
+  };
 }
 
 /**
