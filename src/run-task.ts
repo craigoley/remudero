@@ -6555,6 +6555,53 @@ function assertReviewerSnapshotIntegrity(cwd: string, expectedHeadSha: string): 
   }
 }
 
+/** What {@link reappendLostReviewPosted} found: THIS run's `review.posted` row in the ledger the arm
+ *  gate reads, a row it had to re-append, or a ledger it could not re-read (nothing appended). */
+export type ReviewPostedRecheck = "present" | "reappended" | "unreadable";
+
+/** W1-T5516 — re-read the ledger for THIS run's `review.posted` (run, head, decision digest) and
+ *  re-append `row` plus a `review.posted_reappended` row when it is gone, so a row lost by any cause
+ *  costs one re-read, not a second review. It never consults GitHub's status (W1-T230). */
+export function reappendLostReviewPosted(
+  ctx: {
+    ledgerPath: string;
+    runId: string;
+    headSha: string;
+    decisionDigest: string;
+    prUrl: string;
+    row: Record<string, unknown>;
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    say: (msg: string) => void;
+  },
+  readLines: (path: string) => ReadonlyArray<Record<string, unknown>> = readLedgerLines,
+): ReviewPostedRecheck {
+  let lines: ReadonlyArray<Record<string, unknown>>;
+  try {
+    lines = readLines(ctx.ledgerPath);
+  } catch (e) {
+    const reason = `review.posted re-read failed for ${ctx.headSha.slice(0, 7)}: ${String((e as Error)?.message ?? e)}`;
+    ctx.say(`${reason} — nothing re-appended; the arm gate decides as written (W1-T5516)`);
+    return "unreadable";
+  }
+  const present = lines.some(
+    (l) =>
+      l.step === "review.posted" &&
+      l.run_id === ctx.runId &&
+      l.head_sha === ctx.headSha &&
+      l.review_decision_digest === ctx.decisionDigest,
+  );
+  if (present) return "present";
+  ctx.log("review.posted", ctx.row);
+  ctx.log("review.posted_reappended", {
+    head_sha: ctx.headSha,
+    pr_url: ctx.prUrl,
+    review_decision_digest: ctx.decisionDigest,
+    reason: "this run's review.posted row was not in the ledger the arm gate reads",
+  });
+  ctx.say(`remudero-review: review.posted for ${ctx.headSha.slice(0, 7)} was missing from the ledger — re-appended (W1-T5516)`);
+  return "reappended";
+}
+
 /**
  * THE REVIEW GATE CALL SITE (W1-T1D — the piece W1-T1C built the reviewer for but
  * nothing ever called; the split left the call site unowned). After the PR is open
@@ -7280,7 +7327,7 @@ async function runReview(args: {
   const proofExec = verdict.criteria.map((c) => c.proof_exec);
   // The gate TEACHES: the FULL list of unmet criteria goes to the ledger (and the
   // PR comment below) — the status description names only the first (length-capped).
-  log("review.posted", {
+  const reviewPostedRow = {
     context: REVIEW_CONTEXT,
     state: verdict.state,
     head_sha: headSha,
@@ -7352,7 +7399,8 @@ async function runReview(args: {
     // open fence, silently starving the count above — named rather than left to read as a mundane
     // zero.
     changeset_fence_unbalanced_at_eof: verdict.changesetFenceUnbalancedAtEof ?? null,
-  });
+  };
+  log("review.posted", reviewPostedRow);
   // W1-T322 (SHIPS-UNWIRED advisory floor): ADVISORY ONLY — ledgered here, never consulted by the
   // verdict/arm decision above or below. One `review.unwired_advisory` line per reason code (see
   // {@link "./lib/review.js".UnwiredAdvisory}'s doc), naming the PR (taskId + headSha + prUrl), the
@@ -7377,33 +7425,22 @@ async function runReview(args: {
     });
   }
   // impl-BL — THE MIRROR OF THE WITHDRAWAL ABOVE, AND IT MUST STAY BELOW THE `log("review.posted")`
-  // CALL DIRECTLY ABOVE THIS ONE. That line is the evidence W1-T230's gate requires: `armAutoMerge`
-  // → `priorReviewVerdictFromLedger` → `decideArmFromLedgerVerdict` looks for a `review.posted`
-  // ledger line matching this taskId AND this headSha, and fails CLOSED when it finds none.
+  // CALL ABOVE. That line is the evidence W1-T230's gate requires: `armAutoMerge` →
+  // `priorReviewVerdictFromLedger` → `decideArmFromLedgerVerdict` looks for a `review.posted` line
+  // matching this taskId AND headSha, and fails CLOSED when it finds none. It once sat right after
+  // `postReviewStatusGuarded`, which writes no `review.posted`, so every gated arm was refused
+  // (PR-977: the refusal at 00:57:06.808, its row at .809).
   //
-  // THIS CALL USED TO SIT 35 LINES HIGHER, immediately after `postReviewStatusGuarded`, under a
-  // comment asserting that function "just wrote" the `review.posted` line. IT DOES NOT — its only
-  // ledger writes are `review.post_refused` and `review.post_failed` (lib/review.ts, the two
-  // appendLedger calls in its body). The line it was reading for did not exist yet, so the gate
-  // fail-closed to `ledger-refused` on EVERY invocation this code path has ever had. The ledger
-  // shows each refused arm preceding its own `review.posted` by 0–1ms (PR-977: 00:57:06.808 vs
-  // .809; same-millisecond for PR-981/982/984, W1-T226, W1-T221). The only arms that have ever
-  // succeeded carry `at: "open"` — the ungated arm-at-open path.
+  // A ROW CAN STILL GO MISSING: a concurrent rotation (serve and the daemon share the volume) lost
+  // PR #8887's row. W1-T5514 drains that window, but a read between its rename and drain can still
+  // miss it. So THIS run's row is re-read and re-appended, ledgering `review.posted_reappended`,
+  // before the gate reads (W1-T5516). The gate never falls back to GitHub's status: that surface is
+  // mutable (W1-T230, #449). A failed re-read appends nothing and the gate fails closed as before.
   //
-  // WHY BELOW IS SAFE, not merely later: `appendLedger` is fully synchronous (openSync/writeSync/
-  // closeSync) and `readLedgerLines` is `readFileSync`, so the read-after-write is ordered within
-  // this process. Retention keeps it — `review.posted` is in DECISION_RELEVANT_LEDGER_STEPS and the
-  // per-step cap keeps the NEWEST MAX_RETAINED_LINES_PER_STEP. A CONCURRENT rotation by another
-  // process (serve and the daemon share the volume) used to lose it outright: PR #8887's row,
-  // appended inside serve's catch-up-to-rename window, is in no file (W1-T5514). `rotateLedger` now
-  // drains that window into the new live file after its rename, so the row survives; a read in the
-  // instant between that rename and the drain can still miss it, which fails CLOSED (arm skipped).
-  //
-  // The gate still does real work here — it is NOT tautological now that its evidence exists.
-  // `armAutoMerge` re-reads the PR's CURRENT head (`deps.headSha(prUrl)`, a live `gh pr view`) and
-  // compares it to the head this verdict was written against, so a push landing between the
-  // verdict and this call is still refused. No `posted.posted` guard is needed: the `if
-  // (!posted.posted)` branch above already returned.
+  // The gate still does real work: `armAutoMerge` re-reads the PR's CURRENT head and refuses a push
+  // that landed after this verdict. No `posted.posted` guard is needed: that branch already returned.
+  reappendLostReviewPosted({ ledgerPath: args.ledgerPath, runId: args.runId, headSha, decisionDigest, prUrl,
+    row: reviewPostedRow, log, say });
   const armCtx = { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log };
   armIfVerdictPermits(verdict, armCtx, { arm: args.arm });
   // Record after both authoritative posting and auto-merge eligibility. The recorder
