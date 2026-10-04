@@ -143,6 +143,18 @@ fs.mkdtempSync = ((...args: Parameters<typeof fs.mkdtempSync>) => {
 // libraries (e.g. mock-fs) rely on.
 syncBuiltinESMExports();
 
+// W1-T4068: config and state are scratch data even for suites invoking main() in-process.
+process.env.RMD_TEST_LIVE_DENY_ROOT ??= join(process.env.HOME ?? tmpdir(), "Remudero");
+const testHome = fs.mkdtempSync(join(tmpdir(), `rmd-test-home-${process.pid}-`));
+process.env.HOME = testHome;
+process.env.NODE_TEST_CONTEXT ??= "test-setup";
+const testConfigDir = join(testHome, ".config", "remudero");
+fs.mkdirSync(testConfigDir, { recursive: true });
+fs.writeFileSync(join(testConfigDir, "config.json"), JSON.stringify({
+  claudeBin: process.execPath,
+  root: join(testHome, "Remudero"),
+}));
+
 /**
  * SHADOW `gh` ON PATH WITH A REFUSING STUB, FOR EVERY TEST PROCESS (W1-T4119).
  *

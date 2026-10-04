@@ -936,6 +936,7 @@ import {
   LEDGER_COST_TAG_INFRA,
   DECISION_RELEVANT_LEDGER_STEPS,
   markDaemonProcessActor,
+  markLedgerProcessActor,
   matchesRepoScopedTask,
   MAX_RETAINED_LINES_PER_STEP,
 } from "./lib/ledger.js";
@@ -29118,6 +29119,8 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
   successorWatch?: (opts: SuccessorWatchOptions) => Promise<SuccessorWatchReading>;
   /** Keep the production escalation path injectable so cadence fixtures never create GitHub issues. */
   successorEscalate?: typeof tryEscalate;
+  handRunCensus?: MeasurementCadenceReportOpts["handRunCensus"];
+  measurementReport?: typeof runMeasurementCadenceReportAsync;
 } = {}): {
   checkMeasurementCadence: () => MeasurementCadenceDecision;
   runMeasurementCadence: () => Promise<MeasurementCadenceRunResult>;
@@ -29197,7 +29200,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       });
       const planReconcileOption =
         planReconcile === undefined ? {} : { planReconcile: { ...planReconcile } };
-      const report = await runMeasurementCadenceReportAsync({
+      const report = await (deps.measurementReport ?? runMeasurementCadenceReportAsync)({
         stateDir: join(root, "state"),
         cwd: repoRoot,
         escalate: policyFor().values.measurementCadence.escalate,
@@ -29213,6 +29216,12 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         // on a tick this function's own caller (daemon.ts) already decided `fire: true` for.
         proofDebt: deps.proofDebtInput ? deps.proofDebtInput() : defaultProofDebtCadenceInput(repoRoot),
         ...planReconcileOption,
+        handRunCensus: {
+          ...deps.handRunCensus,
+          root: repoRoot,
+          ledgerPath: ledgerPathFor(configFor()),
+          runId: coverageRunId,
+        },
         coverageImprovement: {
           root: repoRoot,
           ledgerPath: ledgerPathFor(configFor()),
@@ -36201,6 +36210,7 @@ async function deployCommand(rest: string[]): Promise<number> {
  * Provisioning the install root is exclusively `rmd install-checkout`'s job, not this one's.
  */
 async function deployRunCommand(rest: string[]): Promise<number> {
+  markLedgerProcessActor("host_automation");
   const badArg = unknownArgError("deploy-run", rest, ["--state-root"], ["--dry-run", "--image-drift-only"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -37141,6 +37151,7 @@ export async function serveCommand(
     generation?: GenerationChannel;
   } = {},
 ): Promise<number> {
+  markLedgerProcessActor("service");
   // `--host` was documented in USAGE and read by resolveServeHosts, but was NOT in this
   // validator's value-flag list — so `rmd serve --host <addr>` exited 2 on its own documented
   // flag and the tailnet bind was reachable only via RMD_SERVE_HOST (W1-T152).
@@ -51022,6 +51033,9 @@ export async function main(
     /* best-effort by contract — never let housekeeping fail the verb the operator asked for */
   }
   const [cmd, ...rest] = stripRepoRootFlag(process.argv.slice(2));
+  if (cmd === "serve") markLedgerProcessActor("service");
+  else if (cmd === "deploy-run") markLedgerProcessActor("host_automation");
+  else if (cmd === "daemon") markDaemonProcessActor();
   // W1-T2893: `arg` (== rest[0]) is no longer read here — each HANDLERS entry that needs it
   // (registry.ts's REGISTRY, built above) derives its own from `rest`, since the old flat
   // if-ladder this replaced is gone and this was its only remaining reader in main() itself.
