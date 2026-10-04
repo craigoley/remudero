@@ -557,7 +557,7 @@ export interface components {
       discharged?: boolean;
       /** GET /v1/feedback only (W1-T1257): true when `discharged` could not be determined because the merged-set read failed or was truncated -- a partial read, never mistaken for "not discharged". Mutually exclusive with `discharged`; a read-time decoration only, exactly like `unverified`. */
       dischargeUndecidable?: boolean;
-      /** GET /v1/feedback only (W1-T5524): `queued` while this entry's decision is staged under the state root for the daemon's landing sweep (W1-T5460) and not yet on origin/main; absent once the sweep drops the record. Read fresh from the queue on every request; never written to plan/feedback/<id>.yaml. */
+      /** GET /v1/feedback only (W1-T5524): `queued` while this entry's decision is staged under the state root for the daemon's landing sweep (W1-T5460) and not yet on origin/main; absent once the sweep drops the record. Read fresh from the queue on every request; never written to plan/feedback/<id>.yaml. While `queued`, `status` and `answered_by` are the queued record's, not the checkout's (W1-T5627), and `?status=` filters on them, so a decided entry no longer reads `proposed`. */
       landing?: "queued";
       /** GET /v1/feedback only (W1-T5524): true on every entry when the landing queue could not be read -- a failed read, never mistaken for "nothing queued". Mutually exclusive with `landing`; a read-time decoration only, exactly like `dischargeUndecidable`. */
       landingUnknown?: boolean;
@@ -4257,6 +4257,7 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+          "503": Error;
         };
     };
   };
