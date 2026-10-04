@@ -12,7 +12,7 @@ import { headroomExhausted, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
 import { checkDispatchGovernors, governorDeferPayload, type DispatchGovernorVerdict } from "./dispatch-governor.js";
-import { releasedTaskIds, unmetDependencies, type Plan, type Task } from "./plan.js";
+import { releasedTaskIds, unmetDependencies, unmetTaskPrecondition, type Plan, type Task, type TaskPreconditionOptions, type UnmetTaskPrecondition } from "./plan.js";
 import {
   NO_OBSERVED_SCOPE,
   partitionByFileOverlap,
@@ -242,7 +242,8 @@ export function closedUnmergedRunBranchTaskIds(closedPrRows: string): ReadonlySe
 }
 
 /** Optional in-flight-skip controls for {@link nextRunnable} (W1-T80). */
-export interface NextRunnableOpts {
+export interface NextRunnableOpts extends TaskPreconditionOptions {
+  onPreconditionUnmet?: (task: Task, unmet: UnmetTaskPrecondition) => void;
   /** W1-T3412: already-proved, pure ranking evidence. Omitted means historic priority/scope/id
    * ordering exactly; neither the selector nor {@link compareDispatch} may read history itself. */
   dispatchValueContext?: DispatchValueContext;
@@ -646,6 +647,7 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
     opts.onFiltered?.(t, "unmet-deps");
     return false;
   }
+  if (!taskPreconditionHolds(t, opts)) return false;
   if (opts.isTerminalPreDispatchRefusalHeld?.(t)) {
     opts.onFiltered?.(t, "held-pre-dispatch-refusal");
     return false;
@@ -702,6 +704,14 @@ function isDispatchEligible(plan: Plan, t: Task, isMerged: MergedSet, opts: Next
     return false; // A run branch for this id is already on origin — never a duplicate fresh build.
   }
   return true;
+}
+
+function taskPreconditionHolds(task: Task, opts: NextRunnableOpts): boolean {
+  const unmet = unmetTaskPrecondition(task, opts);
+  if (!unmet) return true;
+  opts.onPreconditionUnmet?.(task, unmet);
+  opts.onFiltered?.(task, "blocked");
+  return false;
 }
 
 /** Up to `limit` runnable tasks, packed disjointness-first ({@link packDisjointFirst}, W1-T476) over
@@ -1079,6 +1089,7 @@ function nextCurated(
     if (isMerged(id)) continue;
     const t = plan.byId.get(id);
     if (!t) continue;
+    if (!taskPreconditionHolds(t, opts)) continue;
     // Same indeterminate-read semantics as the natural path (W1-T119): a curation-panel selection
     // is still dispatch, and must not re-run work whose own GitHub read failed.
     if (opts.isIndeterminate?.(id)) {
@@ -1194,7 +1205,7 @@ export function renderRundown(lines: RundownLine[]): string {
 }
 
 /** Injectable dependencies — the real command wires GitHub/run-task/usage defaults. */
-export interface DrainDeps {
+export interface DrainDeps extends TaskPreconditionOptions {
   /** W1-T3412: command-built calibration once per pass. Undefined is the safe historic order. */
   buildDispatchValueContext?: (plan: Plan, isMerged: MergedSet) => DispatchValueContext | undefined;
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
@@ -1552,6 +1563,9 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     const currentPlanOnlyReceipts = planOnlyReceipts;
     const currentOrphanEvidence = orphanEvidence;
     const skipOpts: NextRunnableOpts = {
+      clock: deps.clock,
+      readPrecondition: deps.readPrecondition,
+      onPreconditionUnmet: (task, unmet) => log("dispatch.precondition_unmet", { task: task.id, ...unmet }),
       dispatchValueContext: deps.buildDispatchValueContext?.(plan, isMerged),
       // W1-T3216: the released set, resolved once per pass above — forwarded at BOTH skipOpts
       // sites so the single-lane and multi-lane passes cannot answer the same task differently.
@@ -1952,6 +1966,9 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     const currentPlanOnlyReceipts = planOnlyReceipts;
     const currentOrphanEvidence = orphanEvidence;
     const skipOpts: NextRunnableOpts = {
+      clock: deps.clock,
+      readPrecondition: deps.readPrecondition,
+      onPreconditionUnmet: (task, unmet) => log("dispatch.precondition_unmet", { task: task.id, ...unmet }),
       dispatchValueContext: deps.buildDispatchValueContext?.(plan, isMerged),
       // W1-T3216: the released set, resolved once per pass above — forwarded at BOTH skipOpts
       // sites so the single-lane and multi-lane passes cannot answer the same task differently.
