@@ -9842,7 +9842,7 @@ function startHandedOffHeadJudgment(
   try {
     judge(pr).then(settle, threw);
   } catch (error) {
-    threw(error);
+    threw(error); // a synchronous throw is ledgered unavailable exactly as a rejection is
   }
   return flight;
 }
