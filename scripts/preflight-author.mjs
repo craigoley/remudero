@@ -21,7 +21,7 @@ export function verifiedSuites(root, suites) {
 export function completeTestResult(result) {
   const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
   return result.status === 0 && !result.signal && !result.error &&
-    /^# tests [1-9][0-9]*$/m.test(output) && /^# fail 0$/m.test(output);
+    /^# tests [1-9][0-9]*$/m.test(output) && /^# pass [1-9][0-9]*$/m.test(output) && /^# fail 0$/m.test(output);
 }
 
 export function main(argv, { root = REPO_ROOT, spawn = spawnSync,

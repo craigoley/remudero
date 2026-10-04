@@ -135,10 +135,12 @@ test('author preflight dry run never claims tests passed and empty selection fal
 });
 
 test('author preflight rejects green exit without a positive complete test summary', () => {
-  assert.equal(mod.completeTestResult({ status: 0, stdout: '# tests 1\n# fail 0\n' }), true);
+  assert.equal(mod.completeTestResult({ status: 0, stdout: '# tests 1\n# pass 1\n# fail 0\n' }), true);
   for (const result of [
     { status: 0, stdout: 'ok 1 - test/ghost.test.ts' },
     { status: 0, stdout: '# tests 0\n# fail 0\n' },
+    { status: 0, stdout: '# tests 1\n# pass 0\n# fail 0\n# skipped 1\n' },
+    { status: 0, stdout: '# tests 1\n# fail 0\n' },
     { status: 0, stdout: '# tests 1\n# fail 1\n' },
     { status: null, signal: 'SIGTERM', stdout: '# tests 1\n# fail 0\n' },
     { status: 1, stdout: '# tests 1\n# fail 0\n' },
@@ -147,4 +149,20 @@ test('author preflight rejects green exit without a positive complete test summa
   const f = fixture();
   assert.deepEqual(mod.verifiedSuites(f.root, ['test/leaf.test.ts', 'test/leaf.test.ts']), ['test/leaf.test.ts']);
   assert.throws(() => mod.verifiedSuites(f.root, ['../outside.test.ts']), /unverified/);
+});
+
+test('author preflight rejects skipped-only verification and accepts a real pass beside a skip', () => {
+  const f = fixture();
+  const selection = () => ({ fullRun: false, suites: ['test/leaf.test.ts'], reasons: [] });
+  writeFileSync(join(f.root, 'test/leaf.test.ts'), "import { test } from 'node:test'; test.skip('unsupported fixture', () => { throw Error('must not execute'); });\n");
+  f.git('add', '.'); f.git('commit', '-m', 'test: skip the only affected test');
+  assert.equal(mod.main([], { root: f.root, select: selection }), 1);
+  assert.equal(f.receipt().verdict, 'failed');
+  assert.equal(f.receipt().steps[2].exitCode, 0, 'a clean process exit is not an executed test');
+  assert.equal(f.receipt().steps[2].ok, false);
+  writeFileSync(join(f.root, 'test/leaf.test.ts'), "import { test } from 'node:test'; test('executed fixture', () => {}); test.skip('unsupported fixture', () => {});\n");
+  f.git('add', '.'); f.git('commit', '-m', 'test: execute a pass beside a skip');
+  assert.equal(mod.main([], { root: f.root, select: selection }), 0);
+  assert.equal(f.receipt().verdict, 'passed');
+  assert.equal(f.receipt().steps[2].ok, true);
 });
