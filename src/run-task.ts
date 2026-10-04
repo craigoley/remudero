@@ -787,6 +787,8 @@ import {
   renderRatifyTelemetry,
   INBOX_DRAFT_DISALLOWED_TOOLS,
   runDraftRung,
+  parseDraftedCandidate,
+  lintDraftedFragment,
   stageBundleProposals,
   summarizeInboxPoll,
   updateProposalRegistry,
@@ -812,6 +814,7 @@ import {
   writeApprovedSkillFile,
 } from "./lib/inbox.js";
 import { renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "./lib/inbox-bakeoff.js";
+import { createDraftStatsSession, type DraftStats } from "./lib/draft-routing.js";
 import {
   buildFeedbackDocket,
   feedbackDocketDue,
@@ -45148,6 +45151,9 @@ export function buildInboxDraftSpawnArgs(args: {
   mount: Mount;
   config: Config;
   disallowedTools: readonly string[];
+  proposalId?: string;
+  draftRoutingLog?: (step: string, extra?: Record<string, unknown>) => void;
+  draftRoutingReadStats?: () => DraftStats;
 }): SpawnWorkerArgs {
   return {
     cwd: args.cwd,
@@ -45165,6 +45171,17 @@ export function buildInboxDraftSpawnArgs(args: {
     prompt: args.prompt,
     tools: INBOX_DRAFT_WORKER_TOOLS,
     onSelectionAssignment: (assignment) => ledgerNonDispatchAssignment("inbox-draft", assignment, args.config),
+    ...(args.draftRoutingLog && args.proposalId ? { draftRouting: {
+      lane: "inbox-draft",
+      proposalId: args.proposalId,
+      log: args.draftRoutingLog,
+      readStats: args.draftRoutingReadStats,
+      evaluate: (worker: WorkerResult) => {
+        const parsed = parseDraftedCandidate([worker.text, worker.blocks.join("\n")].join("\n"));
+        return { contractFailed: parsed === null,
+          clean: parsed !== null && lintDraftedFragment(parsed.fragmentYaml, args.proposalId!, parsed.stampLine).length === 0 };
+      },
+    } } : {}),
   };
 }
 
@@ -45261,6 +45278,7 @@ export async function draftProposalBatch(
   // called here any more — see the identical note at the retro call site.
   const mountsTable = loadMounts(mountsPath(repoRoot));
   const inboxDraftMount = mountsTable.synthesis.inbox_draft;
+  const routingStats = createDraftStatsSession(join(config.root, "state"), "inbox-draft", log);
 
   const settingsFile = renderWorkerSettings({
     templatePath: join(resolveInstallRoot(config), "settings", "worker.json"),
@@ -45282,13 +45300,16 @@ export async function draftProposalBatch(
       toDraft,
       planText,
       {
-        spawn: (_proposal, prompt) =>
+        spawn: (proposal, prompt) =>
           benchmarkNonDispatchSpawn("inbox-draft", rawSpawn)({ ...buildInboxDraftSpawnArgs({
             cwd: worktreePath,
             settingsFile,
             mount: inboxDraftMount,
             config,
             prompt,
+            proposalId: proposal.id,
+            draftRoutingLog: routingStats.log,
+            draftRoutingReadStats: routingStats.readStats,
             // Keep the enforced list at the shared-worktree spawn site. The companion invariant
             // test reads this body so a later extraction cannot silently turn the guarantee into
             // a helper-level convention.
