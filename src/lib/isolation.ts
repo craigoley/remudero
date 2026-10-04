@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, type Config } from "./config.js";
-import { capStderrExcerpt, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
+import { capStderrExcerpt, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import { reapWorkerScratch } from "./worker-scratch.js";
 
@@ -351,7 +351,7 @@ export function isolationProbeSpawnArgs(opts: {
 
 /**
  * Default executor: spawn a real worker in a scratch cwd under the workspace.
- * `spawn` is injectable (defaults to the real {@link spawnWorker}) SOLELY so a unit
+ * `spawn` is injectable (defaults through {@link benchmarkNonDispatchSpawn}) SOLELY so a unit
  * test can drive the `isError` propagation below without paying for a real SDK
  * spawn (W1-T238: this is the exact branch that discarded stderr on a failed probe
  * — it must stay under direct coverage, not only via the `exec` fake).

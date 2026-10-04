@@ -56,7 +56,8 @@ import {
   latestStrikeLadderAttempt, strikeCauseKey,
 } from "./strike-ladder.js";
 import { runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
-import { readLedgerUnionRawLinesSync, resolveLedgerUnion } from "./ledger-union.js";
+import { readLedgerUnionRawLinesSync, readLedgerUnionRecordsSync, resolveLedgerUnion } from "./ledger-union.js";
+import { PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
 import { checkReaderAgreement, type ReaderAgreementOptions } from "./reader-agreement.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { isInPlanScope } from "./plan-scope.js";
@@ -14853,6 +14854,128 @@ export async function runCreditBackfill(
     durable_receipt_suppressions: summary.durableReceiptSuppressions,
   });
   return summary;
+}
+
+// ── W1-T5318: ONE TERMINAL ROW PER CLOSED PR, FROM ITS OWN CLOSED STATE ─────────────────────
+// `verdict.merged` is per PLAN TASK, so a PR with no task (a filing, a fleet fix, a dependency bump)
+// and every PR closed unmerged had no terminal fact, and `pruneCarriedRows` carried its sweep rows
+// through every rotation. Measured 2026-10-04: 1,374 of 1,378 live `sweep.disposed` rows and all 150
+// live `review.posted` rows named PRs no longer open. `verdict.merged` keeps its per-task meaning.
+
+/** One PR GitHub reports closed, from a read the sweep already made. `at` is its merged_at or closed_at. */
+export interface ClosedPrFact {
+  prUrl: string;
+  prNumber: number;
+  state: "merged" | "closed";
+  at?: string;
+}
+
+/** The gateway's closed-half rows as facts. An open row is not terminal, nor is a stale closed row for a
+ *  number the open read lists (a reopened PR the closed half has not re-read). */
+export function closedPrFacts(
+  rows: Iterable<{ number: number; url: string; state: string }>,
+  at: ReadonlyMap<number, string>,
+  open: ReadonlySet<number>,
+): ClosedPrFact[] {
+  const facts: ClosedPrFact[] = [];
+  for (const row of rows) {
+    if ((row.state !== "MERGED" && row.state !== "CLOSED") || open.has(row.number)) continue;
+    const time = at.get(row.number);
+    facts.push({ prUrl: row.url, prNumber: row.number, state: row.state === "MERGED" ? "merged" : "closed", ...(time ? { at: time } : {}) });
+  }
+  return facts;
+}
+
+/** {@link closedPrFacts} for one gateway answer, e.g. `prByRef`; null or open is no fact. */
+export function closedPrFromRef(ref: { number: number; url: string; state: string } | null): ClosedPrFact | undefined {
+  return ref ? closedPrFacts([ref], new Map(), new Set())[0] : undefined;
+}
+
+/** A url lookup over a closed set, keyed like every PR-keyed ledger read ({@link prUrlKey}). */
+export function closedPrLookup(facts: Iterable<ClosedPrFact>): (prUrl: string) => ClosedPrFact | undefined {
+  const byKey = new Map<string, ClosedPrFact>();
+  for (const fact of facts) byKey.set(prUrlKey(fact.prUrl) ?? fact.prUrl, fact);
+  return (prUrl) => byKey.get(prUrlKey(prUrl) ?? prUrl);
+}
+
+export interface PrTerminalReconcileSummary {
+  /** Distinct PRs the live file names. */
+  named: number;
+  appended: number;
+  /** Whether any candidate needed the archive half of the dedup. */
+  unionRead: boolean;
+}
+
+/** Per state dir: the rotations already scanned for terminal rows, and the PR keys found. A rotation is
+ *  written once, so each is read once per process; only an archive that failed to open is re-read. */
+const terminalUnionScans = new Map<string, { scanned: Set<string>; keys: Set<string> }>();
+
+function terminalKeysInArchives(ledgerPath: string): { keys: ReadonlySet<string>; unread: number } {
+  const dir = dirname(ledgerPath);
+  const memo = terminalUnionScans.get(dir) ?? { scanned: new Set<string>(), keys: new Set<string>() };
+  terminalUnionScans.set(dir, memo);
+  const read = readLedgerUnionRecordsSync(dir, {
+    pattern: /"step":"pr\.terminal"/,
+    dedupe: false,
+    readLiveRecords: () => [],
+    rotationRecords: (entry, parse) => {
+      if (memo.scanned.has(entry.path)) return { rows: [], torn: 0, tornLines: [] };
+      const records = parse();
+      memo.scanned.add(entry.path);
+      return records;
+    },
+    onRecord: (row) => {
+      const key = row.step === PR_TERMINAL_STEP ? prUrlKey(row.pr_url) : undefined;
+      if (key) memo.keys.add(key);
+    },
+  });
+  return { keys: memo.keys, unread: read.unread.length };
+}
+
+/**
+ * THE TERMINAL-ROW RUNG. For each PR the live file names (any row carrying its `pr_url`) that `lookup`
+ * reports closed and that has no `pr.terminal` row yet, append exactly one. Dedup reads the live file, then
+ * the archives, so a rotation that moved the row out of the live file cannot cause a second one. A fact
+ * naming another PR than the one asked about is ignored. An archive the dedup could not open is counted on
+ * the row as `union_unread`, so a duplicate it allowed is attributable.
+ */
+export function runPrTerminalReconcile(
+  lookup: (prUrl: string) => ClosedPrFact | undefined,
+  deps: Pick<SweepDeps, "ledgerPath" | "runId" | "readLedger" | "appendLine" | "dryRun">,
+): PrTerminalReconcileSummary {
+  // ledger-read-intent: live — the archive half is terminalKeysInArchives, read only for unresolved PRs.
+  const live = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath);
+  const named = new Map<string, string>();
+  const terminal = new Set<string>();
+  for (const row of live) {
+    const key = prUrlKey(row.pr_url);
+    if (key === undefined) continue;
+    if (row.step === PR_TERMINAL_STEP) terminal.add(key);
+    else if (!named.has(key)) named.set(key, row.pr_url as string);
+  }
+  const pending: ClosedPrFact[] = [];
+  for (const [key, prUrl] of named) {
+    const fact = terminal.has(key) ? undefined : lookup(prUrl);
+    if (fact && prUrlKey(fact.prUrl) === key) pending.push(fact);
+  }
+  const archived = pending.length > 0 ? terminalKeysInArchives(deps.ledgerPath) : undefined;
+  let appended = 0;
+  for (const fact of pending) {
+    if (archived?.keys.has(prUrlKey(fact.prUrl)!) || deps.dryRun) continue;
+    (deps.appendLine ?? appendLedger)(deps.ledgerPath, {
+      run_id: deps.runId,
+      task_id: "SWEEP",
+      step: PR_TERMINAL_STEP,
+      pr_url: fact.prUrl,
+      pr_number: fact.prNumber,
+      state: fact.state,
+      ...(fact.at ? { [fact.state === "merged" ? "merged_at" : "closed_at"]: fact.at } : {}),
+      source: "sweep.pr_terminal",
+      ...(archived?.unread ? { union_unread: archived.unread } : {}),
+    });
+    appended++;
+  }
+  return { named: named.size, appended, unionRead: archived !== undefined };
 }
 
 // ── ESCALATION-LIFECYCLE RECONCILER (fb-1784756088300-6a481e) ────────────────────────────────
