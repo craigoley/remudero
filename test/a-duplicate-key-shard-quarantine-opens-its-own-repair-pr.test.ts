@@ -137,7 +137,7 @@ test("an uncovered conflict is refused with its reason instead of a guess", asyn
 });
 
 test("a shard this repair cannot reason about is refused by name", async () => {
-  const { repairDuplicateKeyShard, isDuplicateKeyError } = await repairModule();
+  const { repairDuplicateKeyShard, isDuplicateKeyError, DUPLICATE_KEY_ERROR_RE } = await repairModule();
   const refusal = (text: string) => {
     const v = repairDuplicateKeyShard(text);
     assert.ok("refused" in v, `refused: ${text}`);
@@ -151,6 +151,8 @@ test("a shard this repair cannot reason about is refused by name", async () => {
   const many = ["repo", "type", "verify", "risk", "status"].reduce((text, key) => text.replace(new RegExp(`^(  ${key}: .*)$`, "m"), "$1\n$1"), REPAIRED_BY_HAND);
   assert.equal(refusal(many), "32 candidates exceed the 16 this repair weighs");
   assert.match(refusal(REPAIRED_BY_HAND.replace("  type: implement\n", "  type: bogus\n  type: worse\n")), /^no candidate value of `type` loads: task W1-T5431: invalid type 'bogus'/);
+  assert.equal(DUPLICATE_KEY_ERROR_RE.test("YAMLParseError: Map keys must be unique at line 9, column 3"), true);
+  assert.equal(DUPLICATE_KEY_ERROR_RE.test("YAMLParseError: Unexpected flow-seq-end at line 1"), false);
   assert.equal(isDuplicateKeyError("YAMLParseError: Map keys must be unique at line 9"), true);
   assert.equal(isDuplicateKeyError(undefined), false);
 });
