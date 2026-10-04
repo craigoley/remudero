@@ -1,5 +1,4 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -10652,9 +10651,10 @@ const READER_AGREEMENT_INTERVAL_MS = 15 * 60_000;
 const CONTRADICTORY_REASON = "review failing with no actionable unmet criteria (contradictory) — escalating";
 const CONTRADICTORY_BACKOFF_CAP_MS = 4 * 60 * 60_000;
 type ContradictoryMemory = {
-  key: string; first: number; passes: number; interval: number; next: number;
+  key: string; first: number; passes: number; interval: number; next: number; legacy?: true;
 };
 const contradictoryMemory = new Map<string, ContradictoryMemory>();
+const ESCALATING_DISPOSITIONS = new Set(["blocked-ambiguous", "refused-escalate"]);
 
 function contradictoryKey(pr: OpenPrView, lines: readonly Record<string, unknown>[]): string {
   const review = lines.findLast(row => row.step === "review.posted" && row.pr_url === pr.prUrl &&
@@ -10667,7 +10667,7 @@ function contradictoryKey(pr: OpenPrView, lines: readonly Record<string, unknown
 }
 
 function contradictoryPrior(
-  key: string, pr: OpenPrView, deps: SweepDeps, lines: readonly Record<string, unknown>[],
+  key: string, pr: OpenPrView, deps: SweepDeps, lines: readonly Record<string, unknown>[], now: number,
 ): ContradictoryMemory | undefined {
   const cacheKey = `${deps.ledgerPath}@${key}`;
   let prior = contradictoryMemory.get(cacheKey);
@@ -10676,7 +10676,14 @@ function contradictoryPrior(
     ? [...parseLedger(resolveLedgerUnion(dirname(deps.ledgerPath), `"pr_number":${pr.prNumber}[,}]`,
         undefined, { step: "sweep.disposed" }).matches.join("\n")), ...lines]
     : lines;
+  // A head escalated before this key existed carries no checkpoint; W1-T514's head dedup holds it.
+  let legacy: Record<string, unknown> | undefined;
+  let keyedHead = false;
   for (const row of rows) {
+    if (row.step === "sweep.disposed" && row.pr_number === pr.prNumber && row.head_sha === pr.headSha) {
+      if (row.contradictory_key !== undefined) keyedHead = true;
+      else if (row.acted === true && ESCALATING_DISPOSITIONS.has(String(row.disposition))) legacy ??= row;
+    }
     if (row.contradictory_key !== key || typeof row.contradictory_first_escalation_at !== "number" ||
         typeof row.contradictory_pass_count !== "number" || typeof row.contradictory_interval_ms !== "number" ||
         typeof row.contradictory_next_row_at !== "number") continue;
@@ -10685,7 +10692,10 @@ function contradictoryPrior(
       interval: row.contradictory_interval_ms, next: row.contradictory_next_row_at,
     };
   }
-  return prior;
+  if (prior || !legacy || keyedHead) return prior;
+  const at = typeof legacy.ts === "string" ? Date.parse(legacy.ts) : Number.NaN;
+  return { key, first: Number.isFinite(at) ? at : now, passes: 1, interval: DEFAULT_POLL_INTERVAL_MS,
+    next: now, legacy: true };
 }
 
 export async function runSweep(
@@ -11684,7 +11694,7 @@ export async function runSweep(
     const isContradictory = disposition === "blocked-ambiguous" && reason === CONTRADICTORY_REASON && !strikeLadderDue;
     const contradictionKey = isContradictory ? contradictoryKey(pr, ledgerLines) : undefined;
     const priorContradiction = contradictionKey !== undefined
-      ? contradictoryPrior(contradictionKey, pr, deps, ledgerLines) : undefined;
+      ? contradictoryPrior(contradictionKey, pr, deps, ledgerLines, now) : undefined;
 
     // W1-T2345 — computed for EVERY disposition, never only blocked-ambiguous, and BEFORE the
     // per-disposition dedup below: this bounds the DERIVATION itself, orthogonal to whatever
@@ -13148,9 +13158,11 @@ export async function runSweep(
           state.interval = Math.min(state.interval * 2, CONTRADICTORY_BACKOFF_CAP_MS);
           state.next = now + state.interval;
         }
-        standDownReason = `contradictory review unchanged — pass ${state.passes}; first escalation ` +
+        standDownReason = (state.legacy ? `${standDownReason}; ` : "") +
+          `contradictory review unchanged — pass ${state.passes}; first escalation ` +
           `${clockFromMillisFn(() => state.first).iso()}; next backoff row ` +
           `${clockFromMillisFn(() => state.next).iso()}`;
+        delete state.legacy;
       }
       extraDisposedFields = { ...extraDisposedFields, contradictory_key: state.key,
         contradictory_first_escalation_at: state.first, contradictory_pass_count: state.passes,

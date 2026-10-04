@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fixedClock } from "../src/lib/clock.js";
 import { appendLedger, rotateLedger } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
@@ -159,4 +160,27 @@ test("contradictory backoff separates PRs and legacy review decisions", async (t
   await f.pass(NOW + 2, { ...f.pr, reviewSummary: "a different contradictory decision" });
   await f.pass(NOW + 3, { ...f.pr, prNumber: 1867, prUrl: "https://github.com/o/r/pull/1867" });
   assert.equal(f.escalations.length, 3);
+});
+
+test("a head escalated before the contradictory key existed stays deduped and backs off", async (t) => {
+  const f = fixture(t);
+  f.review("decision-a");
+  const filed = NOW - 3_600_000;
+  appendLedger(f.ledgerPath, {
+    run_id: "pre-key", task_id: f.pr.taskId!, step: "sweep.disposed", pr_number: f.pr.prNumber,
+    pr_url: f.pr.prUrl, head_sha: f.pr.headSha, disposition: "blocked-ambiguous", acted: true,
+  }, { clock: fixedClock(filed) });
+  const first = await f.pass(NOW);
+  assert.equal(first.actions[0].acted, false, "W1-T514's head dedup still holds a pre-key escalation");
+  assert.equal(f.escalations.length, 0);
+  const seeded = dispositions(f.ledgerPath).at(-1)!;
+  assert.match(String(seeded.stand_down_reason), /an escalation was already filed for this head \(head-a\)/);
+  assert.match(String(seeded.stand_down_reason), /contradictory review unchanged — pass 2/);
+  assert.equal(seeded.contradictory_first_escalation_at, filed);
+  const before = dispositions(f.ledgerPath).length;
+  await f.pass(NOW + 1);
+  assert.equal(dispositions(f.ledgerPath).length, before, "the seeded checkpoint backs off like any other");
+  f.review("decision-b");
+  await f.pass(NOW + 2);
+  assert.equal(f.escalations.length, 1, "once keyed, a changed decision at the same head re-arms");
 });
