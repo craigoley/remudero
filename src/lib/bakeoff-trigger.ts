@@ -11,6 +11,10 @@ export interface DeployedModel {
   billing: BakeoffCandidate["billing"];
   efforts: readonly string[];
 }
+export interface DeploymentBakeoffCandidate extends BakeoffCandidate {
+  /** The deployment's pinned thinking level; the incumbent may omit it for legacy mounts. */
+  effort?: string;
+}
 const key = (model: DeployedModel): string => `${model.billing}:${model.model}`;
 
 export function findUntrialedModels(deployed: readonly DeployedModel[], trialed: readonly string[]): DeployedModel[] {
@@ -23,7 +27,7 @@ export function findUntrialedModels(deployed: readonly DeployedModel[], trialed:
   });
 }
 
-export function deploymentCandidates(models: readonly DeployedModel[], incumbent: BakeoffCandidate): BakeoffCandidate[] {
+export function deploymentCandidates(models: readonly DeployedModel[], incumbent: DeploymentBakeoffCandidate): DeploymentBakeoffCandidate[] {
   return [incumbent, ...models.flatMap((model) => model.efforts.map((effort) => ({
     id: `${key(model)}:${effort}`, label: `${model.billing} ${model.model} (${effort})`,
     model: model.model, billing: model.billing, effort, tools: true,
@@ -52,8 +56,8 @@ export function readBakeoffTrialState(stateDir: string): TrialState {
 export interface DeploymentBakeoffInput {
   stateDir: string;
   deployed: readonly DeployedModel[];
-  incumbent: BakeoffCandidate;
-  replay: (candidates: readonly BakeoffCandidate[]) => Promise<BakeoffRow[]>;
+  incumbent: DeploymentBakeoffCandidate;
+  replay: (candidates: readonly DeploymentBakeoffCandidate[]) => Promise<BakeoffRow[]>;
 }
 
 /** Claim before spending: an abandoned sweep or a restart cannot buy a second trial. */
@@ -61,6 +65,7 @@ export async function runDeploymentBakeoff(input: DeploymentBakeoffInput): Promi
   let lock;
   try { lock = acquireDrainLock(join(input.stateDir, "bakeoff-trialed.lock")); }
   catch (error) {
+    // A named lock-contention result means another sweep owns this trial; skip without spending.
     if (error instanceof DrainLockError) return [];
     throw error;
   }
@@ -93,6 +98,7 @@ export async function runDeploymentBakeoff(input: DeploymentBakeoffInput): Promi
       const rows = await input.replay(deploymentCandidates(models, input.incumbent));
       summary = `Deployment bake-off for ${ids.join(", ")}. Compare the new models and thinking levels with the incumbent; the operator picks. Routing is unchanged.\n\n${renderBakeoff(rows)}`;
     } catch (error) {
+      // Preserve the provider or replay failure verbatim in the operator-facing proposal.
       summary = `Deployment bake-off failed for ${ids.join(", ")}: ${String(error)}. No completed table is available. Re-run manually to measure it; routing is unchanged.`;
     }
     state.pending.proposal = { id, summary, evidenceAnchors: [] };
