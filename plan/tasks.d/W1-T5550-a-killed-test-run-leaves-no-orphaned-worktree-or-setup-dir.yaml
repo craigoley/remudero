@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: /mnt/scratch research (the producers of the leaked top-level dirs)"
   plan_refs: [W1-T5513, W1-T131, W1-T3378]
   files: [test/a-census-this-branch-grows-is-refused-before-the-push.test.ts, test/census-precheck-counts-the-house-layout-ratchet.test.ts, test/a-hook-child-does-not-inherit-the-pushing-repo.test.ts, test/setup/no-live-remote.ts, test/setup/tmp-hygiene.ts, test/a-killed-test-run-leaves-no-orphaned-worktree-or-setup-dir.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: /mnt/scratch research (PRUNE-ONLY fallback)"
   plan_refs: [W1-T5513, W1-T4770]
   files: [deploy/rmd-host-cleanup.sh, test/an-idle-kept-scratch-clone-has-its-regenerable-trees-pruned.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

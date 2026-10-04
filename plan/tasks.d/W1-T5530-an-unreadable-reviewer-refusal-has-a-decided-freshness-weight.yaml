@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: found reviewing W1-T5476 (#8915)"
   plan_refs: [W1-T5476]
   files: [src/lib/daemon.ts, test/an-unreadable-reviewer-refusal-has-a-decided-freshness-weight.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

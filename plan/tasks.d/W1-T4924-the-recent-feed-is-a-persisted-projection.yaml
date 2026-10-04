@@ -16,7 +16,7 @@
     - test/recent-projection.test.ts
     - src/lib/board.ts
     - src/lib/ledger-projector.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 (P0-CORE, Phase 0): `/v1/recent`'s history is live-file only. Its entries

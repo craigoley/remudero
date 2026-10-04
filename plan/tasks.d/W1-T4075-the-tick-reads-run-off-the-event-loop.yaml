@@ -12,7 +12,7 @@
   plan_refs: [W1-T4051, W1-T3109, W1-T4046, W1-T4041]
   files: [src/lib/read-plane.ts, src/lib/read-plane.worker.ts, src/run-task.ts, src/lib/daemon.ts, test/the-tick-reads-run-off-the-event-loop.test.ts, scripts/test-tier-manifest.json]
   priority: 2
-  status: queued
+  status: merged
   # backlog gardener: band=2 evidence=ee5de9db0b9a5585
   attempts: 0
   rationale: |

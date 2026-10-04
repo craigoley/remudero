@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: root-cause program for the 28-PR backlog (week of main CI conclusions 09-26..10-03)"
   plan_refs: [W1-T3272, W1-T3655, W1-T4116, W1-T3270]
   files: [src/lib/gate-gardener.ts, test/a-time-bomb-fixture-is-defused-before-it-reddens-main.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -138,21 +138,21 @@ test("W1-T4072: a ref lock failure is preserved when the branch did not move", (
   assert.equal(repo.git("rev-parse", "HEAD"), priorHeadSha);
 });
 
-test("W1-T4072: an elided lease is refused when the remote postcondition disagrees", () => {
+test("W1-T4072: an elided lease is refused when the remote postcondition disagrees", async () => {
   const { repo, priorHeadSha } = fixture();
   const observed = "f".repeat(40);
   const calls: string[][] = [];
-  assert.throws(() => withLiveWritesAllowed(() => pushFixRound(repo.dir, branch, priorHeadSha, priorHeadSha, {
+  await assert.rejects(() => withLiveWritesAllowed(() => pushFixRound(repo.dir, branch, priorHeadSha, priorHeadSha, {
     exec: (_file, args) => { calls.push(args); },
     capture: (_file, args) => args.includes("ls-remote") ? `${observed}\t${ref}\n` : priorHeadSha,
   })), (error) => error instanceof FixRoundPushError && error.detail.includes(observed));
   assert.deepEqual(calls, [["-C", repo.dir, "push", `--force-with-lease=${ref}:${priorHeadSha}`, "origin", `${priorHeadSha}:${ref}`]]);
 });
 
-test("W1-T4072: a lease without the committed sha refuses before pushing", () => {
+test("W1-T4072: a lease without the committed sha refuses before pushing", async () => {
   const { repo, priorHeadSha } = fixture();
   let pushes = 0;
-  assert.throws(() => pushFixRound(repo.dir, branch, undefined, priorHeadSha, {
+  await assert.rejects(() => pushFixRound(repo.dir, branch, undefined, priorHeadSha, {
     exec: () => { pushes++; },
   }), (error) => error instanceof FixRoundPushError && error.detail.includes("without the committed head sha"));
   assert.equal(pushes, 0);
@@ -186,9 +186,9 @@ function fixFixture() {
       spawn: async () => { writeFileSync(join(repo.dir, "declared.txt"), "fixed\n"); return worker; },
       waitForCiGreen: async () => { waits++; return "green"; },
       runReview: async () => ({ ...review, state: "success" }), fetchPrBody: async () => "REPORT",
-      push: (wt, br, sha, prior) => {
+      push: async (wt, br, sha, prior) => {
         pushes++;
-        withLiveWritesAllowed(() => pushFixRound(wt, br, sha, prior));
+        await withLiveWritesAllowed(() => pushFixRound(wt, br, sha, prior));
       },
       issues: { create: () => "https://github.com/acme/remudero/issues/1", listOpen: () => [], comment: () => {} },
       ledgerPath: join(repo.dir, "ledger.ndjson"), log: (step, extra) => rows.push({ step, ...extra }),
@@ -202,11 +202,11 @@ test("W1-T4072: a refused push is ledgered not swallowed", async () => {
   const f = fixFixture();
   const { repo, priorHeadSha, origin, rows } = f;
   let pushedPrior: string | undefined;
-  f.run.deps.push = (wt, br, sha, prior) => {
+  f.run.deps.push = async (wt, br, sha, prior) => {
     pushedPrior = prior;
     const moved = repo.git("commit-tree", repo.git("rev-parse", `${priorHeadSha}^{tree}`), "-p", priorHeadSha, "-m", "remote advanced");
     repo.git("push", "-q", "origin", `${moved}:${ref}`);
-    withLiveWritesAllowed(() => pushFixRound(wt, br, sha, prior));
+    await withLiveWritesAllowed(() => pushFixRound(wt, br, sha, prior));
   };
   const result = await runFixRung(f.run);
   assert.equal(pushedPrior, priorHeadSha);

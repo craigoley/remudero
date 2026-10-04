@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03 (coordinator follow-up): #8866 (a proof that passed at base; the operator made the test assert the new recorded state) and #8861 (unit-test proofs whose titles did not match; the operator renamed three tests to carry the claim text), both repaired by hand; operator ruling R1 (a repair round may edit the PR's test files)"
   plan_refs: [W1-T4943, W1-T3434, W1-T3390, W1-T2272, W1-T4459, W1-T5032, W1-T5532, W1-T5534, W1-T5536]
   files: [src/lib/sweep.ts, src/run-task.ts, src/lib/proof-amendment.ts, test/a-metadata-only-body-red-gets-its-proof-repaired-not-a-question.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

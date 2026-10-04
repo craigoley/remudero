@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-flow-improve-1790732974000 -> plan-flow-improve-1790732974000"
   plan_refs: [W1-T4809, W1-T4817, W1-T4839]
   files: [src/lib/state-reconciler.ts, src/lib/sweep.ts, test/a-reconciler-repairs-what-a-lost-event-skipped.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-29, four stalls with one shape: a push event GitHub never fired (30f3c7b58, 9b694d664) so CI and

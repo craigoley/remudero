@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: ledger-backup research (every nightly rung since 2026-09-27 logged STATE SNAPSHOT MISSED)"
   plan_refs: [W1-T3677, W1-T234, W1-T5546, W1-T5514]
   files: [deploy/host-update.sh, src/lib/ledger.ts, test/the-state-snapshot-actually-runs-on-this-host.test.ts, test/the-nightly-rung-snapshots-the-state-root-each-running-daemon-mounts.test.ts, test/a-derived-state-dir-with-no-ledger-beside-a-sibling-that-has-one-fails-the-rung.test.ts, test/a-snapshot-taken-with-the-fleet-live-trims-a-torn-ledger-tail.test.ts, test/a-ledger-that-grows-during-the-copy-is-re-copied.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

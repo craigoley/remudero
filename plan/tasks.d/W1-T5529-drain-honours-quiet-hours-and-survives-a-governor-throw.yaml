@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: found reviewing W1-T5482 (#8941)"
   plan_refs: [W1-T5482, W1-T5404, W1-T317, W1-T321, W1-T1038]
   files: [src/lib/drain.ts, test/drain-honours-quiet-hours-and-survives-a-governor-throw.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

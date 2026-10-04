@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: found reviewing W1-T5405 (#8898)"
   plan_refs: [W1-T5405, W1-T5521]
   files: [src/lib/refusal-amendment.ts, src/lib/sweep.ts, test/a-main-caused-red-refusal-amendment-is-retried-once-main-moves.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

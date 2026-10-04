@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: the janitor log's half-hourly EMERGENCY line"
   plan_refs: [W1-T5513, W1-T5548, W1-T4770]
   files: [deploy/install-host-units.sh, test/the-installer-retires-the-legacy-user-janitor-on-linux.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
