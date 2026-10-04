@@ -277,13 +277,12 @@ export function capDerivation(rows: Array<Record<string, unknown>>, weights: Rec
 /** W1-T5474: every step the inventory's consumers read. MEASURED 2026-10-03 on the live corpus: unfiltered, the
  *  60-day read held 2.85M rows at a 3,163 MB heap peak; filtered, 79,826 rows at 211 MB, and the runs and cap
  *  derivation over the 60-day rotations were identical either way. With no verdict line (a ledger credit can
- *  still settle the run) `gatherRuns` takes a run's FIRST `cost_usd` and FIRST `pr_url` row of any step, so
- *  each step carrying either inside a run is listed; `aggregateCacheHitTotals` folds every tokened call row. */
+ *  still settle the run) `gatherRuns` takes a run's FIRST `pr_url` row of any step, so each step carrying one
+ *  inside a run is listed, and (W1-T5526) prices it from its worker rows only; `aggregateCacheHitTotals`
+ *  folds every tokened call row. */
 export const CONFIG_GARDEN_LEDGER_STEPS: readonly string[] = [
   // gatherRuns, by name.
   "run.start", "verdict", "verdict.merged", "recon.done", "implement.done", "implement.resumed", "pr.opened", "correction.provenance",
-  // gatherRuns' cost fallback.
-  "cost.anomaly", "containment.probe", "isolation.probe", "risk_judge.decision", "budget.warning",
   // gatherRuns' pr_url fallback.
   "report.followups", "pr.head_provider", "dispatch.blocked_independent", "automerge.armed", "automerge.arm_skipped",
   "automerge.arm_failed", "automerge.clean_status_direct_merge", "review.posted", "review.pending_posted",
