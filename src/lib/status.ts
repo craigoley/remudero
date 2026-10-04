@@ -2397,6 +2397,16 @@ export function isPlanOnlyChangeset(files: readonly string[]): boolean {
   return files.length > 0 && files.every((f) => isInPlanScope(f));
 }
 
+/** W1-T5553's exemption predicate: `files` DELIVERS `task`, whose declared `files:` are all plan scope — the
+ *  changeset is a non-empty subset of them touching one that is not the task's own shard. A filing adds only
+ *  its own shard, so it stays refused. Used by W1-T5552's durable revalidation; W1-T5553 wires rung (c). */
+export function isPlanTextDeliverable(task: Pick<Task, "id" | "files">, files: readonly string[]): boolean {
+  const declared = new Set(task.files ?? []);
+  if (declared.size === 0 || ![...declared].every((f) => isInPlanScope(f))) return false;
+  const ownShard = new RegExp(`^plan/tasks\\.d/${escapeRegExp(task.id)}(-|\\.ya?ml$)`);
+  return files.length > 0 && files.every((f) => declared.has(f)) && files.some((f) => !ownShard.test(f));
+}
+
 /**
  * Persist a VERIFIED already_satisfied credit where deriveStatus reads first (the durable store's
  * `trailer` entry), applying rung (c)'s plan-only refusal first. Without it the worker's verified
@@ -2622,7 +2632,8 @@ function derivePrPrecedence(
       const reviewedPr = entry.source === "head-branch" &&
         hasPlanOnlyReviewForPr(ledgerLines, entry.prUrl, ledgerIndex)
         ? deps.github.prByRef(entry.prUrl) : null;
-      const isRevalidatedPlanOnly = isPlanOnlyChangeset(planOnlyPaths ?? []) ||
+      const isRevalidatedPlanOnly =
+        (isPlanOnlyChangeset(planOnlyPaths ?? []) && !isPlanTextDeliverable(task, planOnlyPaths ?? [])) ||
         (reviewedPr?.headRefOid !== undefined &&
           isPlanOnlyFilingPr(ledgerLines, entry.prUrl, ledgerIndex, reviewedPr.headRefOid));
       if (isRevalidatedPlanOnly) {

@@ -18,15 +18,17 @@ import type { Task } from "../src/lib/plan.js";
 import {
   deriveStatus,
   invalidateDurableCredit,
+  isPlanTextDeliverable,
   recordCredit,
   type CreditStore,
   type GitHub,
   type PrRef,
 } from "../src/lib/status.js";
 
-function task(id: string): Task {
+function task(id: string, files?: string[]): Task {
   return {
     id,
+    ...(files ? { files } : {}),
     title: "t",
     repo: "remudero",
     depends_on: [],
@@ -258,4 +260,54 @@ test("W1-T5552: a head-branch rung hit on the quarantined trailer PR is not re-p
   });
   assert.equal(proj.merged, false);
   assert.equal(writes, 0);
+});
+
+// W1-T5553's exemption, applied HERE so this revalidation cannot quarantine a task whose deliverable
+// IS plan text before W1-T5553 itself lands. W1-T2648 declared only W1-T2481's shard, and its PR
+// #3896 changed exactly that shard.
+const W1_T2481_SHARD = "plan/tasks.d/W1-T2481-a-scope-rule-fires-on-records-dispatch-can-never-reach.yaml";
+
+test("W1-T5552: a W1-T2648-shaped plan-text deliverable keeps its durable credit under either source", () => {
+  for (const source of ["trailer", "head-branch"] as const) {
+    const taskId = `W9-T5552-9-${source}`;
+    const store = recordCredit({}, taskId, { source, prUrl: "u/3896", prNumber: 3896, prState: "MERGED" });
+    const proj = deriveStatus(task(taskId, [W1_T2481_SHARD]), {
+      ledgerPath: LEDGER,
+      github: countingGateway().github,
+      readLedger: () => [],
+      readCreditStore: () => store,
+      writeCreditStore: () => assert.fail("a plan-text deliverable must not be quarantined"),
+      mergedPathsByPr: new Map([[3896, [W1_T2481_SHARD]]]),
+    });
+    assert.equal(proj.merged, true, source);
+    assert.equal(proj.prNumber, 3896);
+  }
+});
+
+test("W1-T5552: a filing PR that only adds the task's own shard is still quarantined for a plan-text task", () => {
+  const taskId = "W9-T5552-10";
+  const ownShard = `plan/tasks.d/${taskId}-file-me.yaml`;
+  let store = trailerStore(taskId, 3880);
+  const proj = deriveStatus(task(taskId, [ownShard, W1_T2481_SHARD]), {
+    ledgerPath: LEDGER,
+    github: countingGateway().github,
+    readLedger: () => [],
+    readCreditStore: () => store,
+    writeCreditStore: (s: CreditStore) => { store = s; },
+    mergedPathsByPr: new Map([[3880, [ownShard]]]),
+  });
+  assert.equal(proj.merged, false);
+  assert.equal(store[taskId]?.invalidated?.trailer?.prNumber, 3880);
+});
+
+test("W1-T5552: isPlanTextDeliverable refuses every shape that is not a declared plan-text delivery", () => {
+  const id = "W9-T1";
+  const own = `plan/tasks.d/${id}.yaml`;
+  assert.equal(isPlanTextDeliverable({ id, files: [W1_T2481_SHARD] }, [W1_T2481_SHARD]), true);
+  assert.equal(isPlanTextDeliverable({ id, files: [own, W1_T2481_SHARD] }, [own, W1_T2481_SHARD]), true);
+  assert.equal(isPlanTextDeliverable({ id, files: [own, W1_T2481_SHARD] }, [own]), false, "own shard only: a filing");
+  assert.equal(isPlanTextDeliverable({ id }, [W1_T2481_SHARD]), false, "no declared files");
+  assert.equal(isPlanTextDeliverable({ id, files: [W1_T2481_SHARD, "src/x.ts"] }, [W1_T2481_SHARD]), false, "declares code");
+  assert.equal(isPlanTextDeliverable({ id, files: [W1_T2481_SHARD] }, [W1_T2481_SHARD, "plan/other.yaml"]), false, "not a subset");
+  assert.equal(isPlanTextDeliverable({ id, files: [W1_T2481_SHARD] }, []), false, "empty is unreadable");
 });
