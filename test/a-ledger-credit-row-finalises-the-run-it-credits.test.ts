@@ -229,6 +229,6 @@ test("with a gateway, the ledger-credited run is shipped as ledger, named once i
 
 test("the marker window scopes the discrepancy line exactly as it scopes shippedSince", () => {
   const runs = gatherRuns(parseLedger(CREDITED_LEDGER));
-  assert.equal(ledgerCreditDiscrepancies(runs, "2026-09-07T19:00:00.000Z").length, 1);
-  assert.equal(ledgerCreditDiscrepancies(runs, "2026-09-07T20:00:00.000Z").length, 0, "strictly after, like shippedSince");
+  assert.equal(ledgerCreditDiscrepancies(runs, "2026-09-08T00:59:59.999Z").length, 1);
+  assert.equal(ledgerCreditDiscrepancies(runs, "2026-09-08T01:00:00.000Z").length, 0, "strictly after, like shippedSince");
 });
