@@ -5072,11 +5072,13 @@ export async function repairPrMetadata(
 }
 
 /**
- * W1-T5544: the production `planCriteriaAtHead` for {@link repairPrMetadata} — `resolvePlanCriteriaAtHead`, the SAME
- * resolver the gate and the reviewer read, against the checkout this process runs in. The head commit is fetched
+ * W1-T5544: the production `planCriteriaAtHead` for {@link repairPrMetadata} reuses the fix rung's head-bound
+ * task contract, pinned to the supplied PR head without a REST read. The head commit is fetched
  * once if it is not local; a head that cannot be read yields `[]` (no divergence cure), never a guessed plan.
  */
 export function planCriteriaAtHeadForRepair(body: string, headSha: string, cwd: string = process.cwd()): readonly AcceptanceCriterion[] {
+  const taskId = extractTaskTrailerId(body);
+  if (taskId === undefined) return [];
   try {
     execFileSync("git", ["-C", cwd, "cat-file", "-e", `${headSha}^{commit}`], { stdio: "pipe" });
   } catch {
@@ -5088,7 +5090,7 @@ export function planCriteriaAtHeadForRepair(body: string, headSha: string, cwd: 
       return [];
     }
   }
-  return resolvePlanCriteriaAtHead(body, cwd, "plan/tasks.yaml", headSha).criteria;
+  return resolveFixRungTaskContractAtHead("", taskId, cwd, () => headSha)!.criteria;
 }
 
 /**

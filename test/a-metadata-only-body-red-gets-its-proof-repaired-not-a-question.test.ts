@@ -577,3 +577,32 @@ test("W1-T5544: the worktree gate runs check-proof against the merge base, and t
     rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test("W1-T5544: the body repair uses the last anchored trailer and the supplied head contract", () => {
+  const fixture = gitRepo({ kind: "metadata-repair-contract" });
+  const planPath = join(fixture.dir, "plan", "tasks.yaml");
+  const writePlan = (acceptance: AcceptanceCriterion[]) => writeFileSync(planPath, JSON.stringify([
+    { id: TASK, title: "fixture", repo: "remudero", type: "implement", acceptance },
+  ]));
+  try {
+    mkdirSync(join(fixture.dir, "plan", "tasks.d"), { recursive: true });
+    writePlan(PLAN);
+    fixture.git("add", "plan/tasks.yaml");
+    fixture.git("commit", "-q", "-m", "original contract");
+    const originalHead = fixture.git("rev-parse", "HEAD");
+    const currentPlan = [{ claim: "the current contract", proof: "unit test: current contract" }];
+    writePlan(currentPlan);
+    fixture.git("add", "plan/tasks.yaml");
+    fixture.git("commit", "-q", "-m", "current contract");
+    const currentHead = fixture.git("rev-parse", "HEAD");
+    writePlan([{ claim: "uncommitted contract", proof: "unit test: uncommitted contract" }]);
+
+    const body = `Remudero-Task: W1-MISSING\n\n${DIVERGED_BODY}`;
+    assert.deepEqual(planCriteriaAtHeadForRepair(body, originalHead, fixture.dir), PLAN);
+    assert.deepEqual(planCriteriaAtHeadForRepair(body, currentHead, fixture.dir), currentPlan);
+    assert.deepEqual(planCriteriaAtHeadForRepair(`${body}\nRemudero-Task: W1-MISSING`, currentHead, fixture.dir), []);
+    assert.deepEqual(planCriteriaAtHeadForRepair(`prose Remudero-Task: ${TASK}`, currentHead, fixture.dir), []);
+  } finally {
+    fixture.cleanup();
+  }
+});
