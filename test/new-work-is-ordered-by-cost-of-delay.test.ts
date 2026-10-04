@@ -3,8 +3,9 @@ import test from "node:test";
 import { buildDispatchValueContext } from "../src/lib/dispatch-value.js";
 import { dispatchOrder, nextRunnable, runnableCandidates } from "../src/lib/drain.js";
 import type { Plan, Task } from "../src/lib/plan.js";
-import { dispatchValueContextForSelection, readDispatchFilingSnapshot } from "../src/run-task.js";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { daemonCommand, dispatchValueContextForSelection, readDispatchFilingSnapshot } from "../src/run-task.js";
+import type { DaemonSummary } from "../src/lib/daemon.js";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { gitRepo } from "./helpers/git-repo.js";
 
@@ -238,4 +239,40 @@ test("W1-T4064: command snapshot is clock-free and unreadable inputs log once pe
   corpus.ok = false;
   select("snapshot-unreadable");
   assert.equal(logs.filter(row => row.step === "dispatch.cost_of_delay.fallback").length, 4, "a new failure after recovery is a new transition");
+});
+
+test("W1-T4064: the daemon reads filing dates from the plan path it was given", async () => {
+  const repo = gitRepo({ kind: "cost-of-delay-daemon" });
+  const home = join(repo.dir, "home");
+  const root = join(home, "Remudero");
+  const oldHome = process.env.HOME;
+  try {
+    mkdirSync(join(root, "state"), { recursive: true });
+    mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+    writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+    writeFileSync(join(root, "state", "ledger.ndjson"), history.map(row => JSON.stringify(row)).join("\n") + "\n");
+    mkdirSync(join(repo.dir, "plan"));
+    const planPath = join(repo.dir, "plan/tasks.yaml");
+    const entry = (id: string) =>
+      `- id: ${id}\n  title: ${id}\n  repo: remudero\n  type: implement\n  depends_on: []\n  files: [src/a.ts]\n  status: queued\n`;
+    writeFileSync(planPath, entry(old.id) + entry(fresh.id));
+    repo.git("add", "plan");
+    repo.git("commit", "-m", "file both tasks");
+    process.env.HOME = home;
+    let context: ReturnType<typeof dispatchValueContextForSelection>;
+    const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+      runDaemon: async (daemonPlan, deps): Promise<DaemonSummary> => {
+        context = deps.buildDispatchValueContext?.(daemonPlan, () => false);
+        return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+      },
+    });
+    assert.equal(code, 0);
+    const rows = readFileSync(join(root, "state", "ledger.ndjson"), "utf8");
+    assert.equal(context?.costOfDelayFallback, undefined, `a readable plan history is not a fallback: ${rows.split("\n").filter(l => l.includes("cost_of_delay")).join("\n")}`);
+    assert.deepEqual([...context!.stridePassByTaskId!.keys()].sort(), [old.id, fresh.id].sort());
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    repo.cleanup();
+  }
 });
