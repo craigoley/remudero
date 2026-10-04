@@ -14,9 +14,7 @@ import { GARDEN_FILING_RETRY_BASE_MS } from "../src/lib/gardener.js";
 import { gitBlobSha } from "../src/lib/plan-shard-repair.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import * as runTask from "../src/run-task.js";
-import { allowGhRefusals } from "./setup/tmp-hygiene.js";
-
-allowGhRefusals("the unreadable-PR-state test proves the default prState seam really reads gh, which the sentinel token refuses");
+import { ghShim } from "./helpers/gh-shim.js";
 
 /** W1-T5431's shard as main carried it before #8877: the judge's priority 2.5, the gardener's 4 and its marker. */
 const BROKEN_SHARD = [
@@ -273,11 +271,35 @@ test("a blob whose recorded repair PR is open or merged is still skipped", (t) =
   }
 });
 
-test("an unreadable repair PR state opens nothing and is retried, through the real gh read", (t) => {
+/** Runs `body` with a PATH-shimmed `gh` answering each pull read, so the default prState seam really shells out. */
+function withGh(t: TestContext, routes: Parameters<typeof ghShim>[0], body: () => void): string[] {
+  const gh = ghShim(routes, { kind: "shard-repair-gh" });
+  const previous = process.env.PATH;
+  process.env.PATH = `${gh.dir}:${previous}`;
+  try {
+    body();
+  } finally {
+    process.env.PATH = previous;
+  }
+  t.diagnostic(`gh calls: ${gh.calls().join(" | ")}`);
+  return gh.calls();
+}
+
+const pullRow = (row: Record<string, unknown>) => `HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(row)}\n`;
+
+test("the default PR-state read shells gh: a closed unmerged PR reopens, and an unreadable one opens nothing and is retried", (t) => {
+  const closed = lane(t);
+  seedOpened(closed.stateDir, { [BLOB]: FIRST_PR });
+  closed.request();
+  closed.setLand(() => FRESH_PR);
+  const calls = withGh(t, [{ when: "repos/o/r/pulls/9001", stdout: pullRow({ number: 9001, state: "closed", merged: false }) }], () => closed.pass());
+  assert.equal(calls.filter((c) => c.includes("repos/o/r/pulls/9001")).length, 1, "the default seam read the recorded PR");
+  assert.deepEqual(closed.steps("plan.shard_repair_opened").map((r) => r.extra.reopened_from), [FIRST_PR]);
+
   const l = lane(t);
   seedOpened(l.stateDir, { [BLOB]: FIRST_PR });
   l.request();
-  l.pass(); // no prState seam: the default reads GitHub, which the test runner's sentinel token refuses
+  withGh(t, [{ when: "repos/o/r/pulls/9001", stderr: "HTTP 502: Bad Gateway", exit: 1 }], () => l.pass());
   assert.equal(l.landed.length, 0, "a duplicate PR is never opened on a guess");
   assert.deepEqual(l.steps("plan.shard_repair_skipped").map((r) => [r.extra.pr_state, r.extra.reason]), [
     ["unknown", "the recorded repair PR's state could not be read; retried rather than risk a duplicate PR"],
