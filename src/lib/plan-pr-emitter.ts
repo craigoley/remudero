@@ -566,7 +566,7 @@ function parsedShardProofs(text: string, opts?: { uniqueKeys: false }): string[]
   try {
     tasks = parseYaml(text, opts);
   } catch {
-    // An unparseable head shard is the plan lint's to refuse, by name; an unparseable base falls back to its bytes.
+    // A head is the plan lint's to refuse, by name; a base (duplicate keys allowed: a W1-T5519 repair's) falls back to its bytes.
     return undefined;
   }
   const proofs: string[] = [];
@@ -579,7 +579,6 @@ function parsedShardProofs(text: string, opts?: { uniqueKeys: false }): string[]
   return proofs;
 }
 
-/** A W1-T5519 repair's base IS a duplicate-key shard, so the base is read with duplicate keys allowed (W1-T5619). */
 function introducedProofs(headText: string, baseText: string | undefined): string[] {
   const head = parsedShardProofs(headText) ?? [];
   if (baseText === undefined) return head;
