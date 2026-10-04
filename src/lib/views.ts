@@ -149,6 +149,8 @@ export interface ViewBodySource {
   want?(view: string, key: string): boolean;
   /** Calls `listener` with each body the worker posts, after it is stored; returns the unsubscribe. */
   onBody?(listener: (entry: ViewBodyEntry) => void): () => void;
+  /** Each `auto` view's effective mode as the main thread last resolved it; unknown readiness holds it. */
+  autoMode?(view: string): EffectiveViewMode | undefined;
 }
 
 /** `auto` serves exactly while the view's shadow readiness reads ready, and is `shadow` otherwise. */
@@ -159,21 +161,24 @@ export const READ_MODEL_STATUS_VIEW = "read-model";
 /** The fields of view-shadow.ts's `ShadowReadiness` an `auto` switch reads (a type import of it would be a cycle). */
 export type ShownReadiness = { ready: boolean; reason: string; samples: number | null; lastRealMs: number | null };
 
-/** `view`'s readiness as the status body last showed it; with none shown it is unknown, so not ready, and says so. */
-export function shownReadiness(readModel: Pick<ViewBodySource, "body"> | undefined, view: string): ShownReadiness {
-  const shown = (readModel?.body(READ_MODEL_STATUS_VIEW)?.body.data as { shadow?: Array<ShownReadiness & { view: string }> } | undefined)?.shadow?.find((r) => r.view === view);
-  return shown ?? { ready: false, reason: "shadow readiness unknown: the read model's status body shows none for this view", samples: null, lastRealMs: null };
+/** `view`'s readiness as the status body last showed it; `undefined` when it shows none, which is UNKNOWN, not not-ready. */
+export function shownReadiness(readModel: Pick<ViewBodySource, "body"> | undefined, view: string): ShownReadiness | undefined {
+  return (readModel?.body(READ_MODEL_STATUS_VIEW)?.body.data as { shadow?: Array<ShownReadiness & { view: string }> } | undefined)?.shadow?.find((r) => r.view === view);
 }
 
-/** The mode a switch acts as now. Every switch reader resolves through this, so `auto` means one thing everywhere. */
-export function effectiveViewMode(mode: ViewSwitchMode | undefined, readiness: Pick<ShownReadiness, "ready"> | undefined): EffectiveViewMode | undefined {
-  return mode === "auto" ? (readiness?.ready === true ? "serve" : "shadow") : mode;
+/**
+ * The mode a switch acts as now. Every switch reader resolves through this, so `auto` means one thing everywhere.
+ * `auto` with unknown readiness keeps `was`, its last effective mode (`shadow` with none): only an explicit not-ready demotes.
+ */
+export function effectiveViewMode(mode: ViewSwitchMode | undefined, readiness: Pick<ShownReadiness, "ready"> | undefined, was?: EffectiveViewMode): EffectiveViewMode | undefined {
+  if (mode !== "auto") return mode;
+  return readiness === undefined ? (was ?? "shadow") : readiness.ready ? "serve" : "shadow";
 }
 
 /** A view's effective mode as serve's main thread sees it: its switch, and for `auto` the readiness its status body shows. */
-export function viewMode(readModel: Pick<ViewBodySource, "body" | "switches"> | undefined, view: string): EffectiveViewMode | undefined {
+export function viewMode(readModel: Pick<ViewBodySource, "body" | "switches" | "autoMode"> | undefined, view: string): EffectiveViewMode | undefined {
   const mode = readModel?.switches().views[view];
-  return effectiveViewMode(mode, mode === "auto" ? shownReadiness(readModel, view) : undefined);
+  return mode === "auto" ? effectiveViewMode(mode, shownReadiness(readModel, view), readModel?.autoMode?.(view)) : mode;
 }
 
 /** `auto` keeps the comparator sampling while it serves: a served view is demoted only by a diff it is still looked for. */

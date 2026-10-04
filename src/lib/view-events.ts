@@ -61,7 +61,7 @@ export interface ViewEventsOptions {
   names: readonly string[];
   /** Views that serve their body with no switch entry (the read model's own status). */
   servedByDefault?: readonly string[];
-  readModel?: Pick<ReadModelWorkerHandle, "bodies" | "body" | "judge" | "switches" | "onBody">;
+  readModel?: Pick<ReadModelWorkerHandle, "bodies" | "body" | "judge" | "switches" | "onBody" | "autoMode">;
   clock?: Clock;
   bootId?: string;
   every?: (run: () => void, ms: number) => () => void;
