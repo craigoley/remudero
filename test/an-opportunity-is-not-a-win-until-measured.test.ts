@@ -114,6 +114,28 @@ test("W1-T4950: missing outcome evidence is unavailable not zero", () => {
   }
 });
 
+test("CodeQL outcomes require filing scanner and alerts while retaining only a matching task", () => {
+  const snapshot = { proposalId: source.proposalId, ruleId: "js/unused-local-variable", scannerSha: "filing-scan", alertNumbers: ["17"] };
+  const complete = ports(); complete.readSources = () => [{ ...structuredClone(source), codeql: snapshot }];
+  assert.equal(reconcileOpportunityOutcomes(complete)[0]!.state, "measured-helped");
+  for (const codeql of [{ ...snapshot, scannerSha: undefined }, { ...snapshot, alertNumbers: [] }]) {
+    for (const task of [evidence().task, undefined,
+      { ...evidence().task!, repo: "other/app" }, { ...evidence().task!, key: "unrelated" }]) {
+      const p = ports({ ...evidence(), task });
+      p.readSources = () => [{ ...structuredClone(source), codeql }];
+      const result = reconcileOpportunityOutcomes(p)[0]!;
+      assert.equal(result.state, "unavailable");
+      assert.equal(result.reason, "CodeQL filing scanner SHA or alert numbers unavailable");
+      assert.deepEqual(result.task, task?.repo === repo && task.key === source.candidate.key ? task : undefined);
+      assert.equal(result.pr, undefined);
+      assert.equal(result.deployment, undefined);
+      assert.equal(result.measurement, undefined);
+      assert.equal(result.leadTimeMs, null);
+      assert.equal(result.failureRework, null);
+    }
+  }
+});
+
 test("outcome reconciliation distinguishes pending filed deployed and expired", () => {
   assert.equal(reconcileOpportunityOutcomes(ports({}))[0]!.state, "pending");
   assert.equal(reconcileOpportunityOutcomes(ports({ task: evidence().task }))[0]!.state, "filed");
