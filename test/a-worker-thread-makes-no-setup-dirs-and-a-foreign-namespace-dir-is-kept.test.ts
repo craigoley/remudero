@@ -130,3 +130,14 @@ test("W1-T5624: a dead-pid setup dir from another pid namespace is kept as forei
   assert.deepEqual(old.removed, [foreignName], "past 24 h a foreign dir goes whatever its pid reads as here");
   assert.deepEqual(readdirSync(root), []);
 });
+
+test("a worker thread's setup keeps the parent's deny root and git config, so a test's HOME never moves them", () => {
+  // Under SHARE_ENV a worker's env IS the parent's; a deny root re-derived from a test's own HOME
+  // refused the parent's ledger append at serve shutdown, and the shard hung (#9160).
+  const env: NodeJS.ProcessEnv = { NODE_TEST_CONTEXT: "child-v8", PATH: "/usr/bin", HOME: join(tmpdir(), "a-test-instance-home"),
+    RMD_TEST_LIVE_DENY_ROOT: "/the-parents/Remudero", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "gc.auto", GIT_CONFIG_VALUE_0: "0" };
+  assert.deepEqual(noLiveRemote.installNoLiveRemote(env, false), {});
+  assert.equal(env.RMD_TEST_LIVE_DENY_ROOT, "/the-parents/Remudero");
+  assert.equal(env.GIT_CONFIG_COUNT, "1");
+  assert.equal(env.GH_TOKEN, LIVE_WRITE_SENTINEL_TOKEN, "control: the worker still applied the containment");
+});
