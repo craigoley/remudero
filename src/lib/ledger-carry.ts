@@ -54,7 +54,17 @@ function sweepPrKey(row: Record<string, unknown>): string | undefined {
   return match ? `${match[1]}#${match[2]}` : undefined;
 }
 
-/** Rows the next live file need not carry: merged PRs' sweep rows and superseded latest-only rows. */
+/**
+ * The compact stand-in for a merged PR's plan-only `review.posted` row (E6b, 2026-10-03). Measured on the
+ * fleet host's live file: review.posted was 947 KB of the 4.14 MB carried core, 89 of its 200 rows belonged
+ * to PRs with a recorded merge, and 71 rows were plan-only reviews averaging 4.9 KB. The one live-file
+ * reader that needs a MERGED PR's review is status.ts's plan-only credit refusal, and it reads only
+ * `pr_url`, `head_sha` and `plan_only`; every other live reader keys on an open PR, and the history
+ * readers (retro, calibration, analytics, field trials) read the archive union.
+ */
+export const PLAN_ONLY_REVIEW_MARKER_STEP = "review.plan_only_reviewed";
+
+/** Rows the next live file need not carry: merged PRs' sweep and review rows, and superseded latest-only rows. */
 export function pruneCarriedRows<T extends CarriedRow>(rows: readonly T[]): T[] {
   const merged = new Set<string>();
   const latestByKey = new Map<string, T>();
@@ -70,8 +80,29 @@ export function pruneCarriedRows<T extends CarriedRow>(rows: readonly T[]): T[] 
     if (!row.json || row.step === undefined) return true;
     const keyOf = LATEST_ROW_LEDGER_STEPS.get(row.step);
     if (keyOf) return latestByKey.get(`${row.step}\u0000${keyOf(row.json)}`) === row;
-    if (row.step !== "sweep.disposed") return true;
+    if (row.step !== "sweep.disposed" && row.step !== "review.posted") return true;
     const key = sweepPrKey(row.json);
-    return key === undefined || !merged.has(key) || keptAfterMerge(row.json);
+    if (key === undefined || !merged.has(key)) return true;
+    return row.step === "sweep.disposed" && keptAfterMerge(row.json);
   });
+}
+
+/** One marker per (PR, head) whose plan-only review is in `rows` but not `carried`, unless a carried marker has it. */
+export function planOnlyReviewMarkers<T extends CarriedRow>(rows: readonly T[], carried: readonly T[]): Array<Record<string, unknown>> {
+  const kept = new Set(carried);
+  const seen = new Set<string>();
+  for (const row of carried) {
+    if (row.step === PLAN_ONLY_REVIEW_MARKER_STEP && row.json) seen.add(`${String(row.json.pr_url)}\u0000${String(row.json.head_sha)}`);
+  }
+  const markers: Array<Record<string, unknown>> = [];
+  for (const row of rows) {
+    const json = row.json;
+    if (kept.has(row) || row.step !== "review.posted" || json?.plan_only !== true) continue;
+    if (typeof json.pr_url !== "string" || typeof json.head_sha !== "string") continue;
+    const key = `${json.pr_url}\u0000${json.head_sha}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    markers.push({ pr_url: json.pr_url, head_sha: json.head_sha, plan_only: true, review_task_id: json.task_id, reviewed_at: json.ts });
+  }
+  return markers;
 }
