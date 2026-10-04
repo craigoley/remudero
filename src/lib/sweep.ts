@@ -5173,6 +5173,56 @@ function mainHealthOperatorDetail(observation: MainHealthObservation): string {
   return lines.length > 0 ? ` ${lines.join(". ")}.` : "";
 }
 
+/** W1-T5490 — workflows whose latest real (non-cancelled) failed run on main reads main red even
+ *  when every required check is green: main-plan-guard is the only push-time witness that the plan
+ *  still loads, and lint-plan/claims never run on main's push. */
+export const MAIN_GUARD_WORKFLOWS: ReadonlySet<string> = new Set(["main-plan-guard"]);
+
+/** Completed main runs whose jobs the observer may read, at most, before giving up on fallback
+ *  evidence: a push also completes main-tripwire, CodeQL and other runs that carry no required
+ *  check, and each candidate costs one jobs read. */
+export const MAIN_HEALTH_FALLBACK_RUN_LIMIT = 5;
+
+/** A superseded, skipped or stale run concluded nothing about the tree. */
+const MAIN_RUN_NON_VERDICT: ReadonlySet<string> = new Set(["CANCELLED", "SKIPPED", "STALE"]);
+
+function mainRunIsVerdict(run: MainHealthRunHistoryEntry): boolean {
+  const conclusion = (run.conclusion ?? "").toUpperCase();
+  return conclusion !== "" && !MAIN_RUN_NON_VERDICT.has(conclusion);
+}
+
+function isMainGuardRun(run: MainHealthRunHistoryEntry): boolean {
+  return run.workflowName !== undefined && MAIN_GUARD_WORKFLOWS.has(run.workflowName);
+}
+
+/** The latest real verdict of each {@link MAIN_GUARD_WORKFLOWS} member, newest-first history in,
+ *  only the failed ones out. A newer success supersedes an older failure; a cancelled run never does. */
+export function failedMainGuardRuns(history: readonly MainHealthRunHistoryEntry[]): MainHealthRunHistoryEntry[] {
+  const decided = new Set<string>();
+  const failed: MainHealthRunHistoryEntry[] = [];
+  for (const run of history) {
+    if (!isMainGuardRun(run) || decided.has(run.workflowName!) || !mainRunIsVerdict(run)) continue;
+    decided.add(run.workflowName!);
+    if (mainHealthFailureConclusion(run.conclusion)) failed.push(run);
+  }
+  return failed;
+}
+
+/** Completed, non-guard main runs (newest first) whose jobs may stand in for a head whose own
+ *  required runs were cancelled or are still pending. */
+export function mainHealthFallbackRuns(
+  history: readonly MainHealthRunHistoryEntry[],
+  limit: number = MAIN_HEALTH_FALLBACK_RUN_LIMIT,
+): MainHealthRunHistoryEntry[] {
+  return history.filter((run) => run.runId !== undefined && !isMainGuardRun(run) && mainRunIsVerdict(run)).slice(0, limit);
+}
+
+/** True when the head's own rollup concluded nothing: no required check yet, or one still pending
+ *  (a cancelled one included). An all-skipped/vacuous head DID complete, and is not replaced. */
+export function mainHealthHeadInconclusive(observation: MainHealthObservation): boolean {
+  return observation.state === "undetermined" && (observation.pendingChecks.length > 0 || observation.nonEvidenceChecks.length === 0);
+}
+
 /** Read main's rollup into a {@link MainHealthObservation}, reusing the exact dedupe and
  *  required-contexts filter {@link checksStateFromRollup} applies so the two can never disagree
  *  about which entries are in play — but judging them against a STRICTER question: skipped and
@@ -5182,6 +5232,7 @@ export function mainHealthFromRollup(
   rollup: readonly RollupCheckEntry[] | undefined,
   requiredContexts: Iterable<string> | undefined,
   vacuousSuccessNames: ReadonlySet<string> = PUSH_VACUOUS_SUCCESS_CHECK_NAMES,
+  options: { readonly cancelledIsPending?: boolean } = {},
 ): MainHealthObservation {
   const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
   const required = new Set(requiredContexts ?? []);
@@ -5210,7 +5261,9 @@ export function mainHealthFromRollup(
   for (const c of gate) {
     const name = c.name ?? c.context ?? "unknown";
     const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
-    if (REQUIRED_CHECK_FAIL.has(s)) {
+    // W1-T5490: main's push runs share one concurrency group, so a CANCELLED check there is a
+    // superseded run, not a verdict; the main-health observer reads it as outstanding.
+    if (REQUIRED_CHECK_FAIL.has(s) && !(options.cancelledIsPending && s === "CANCELLED")) {
       failingChecks.push(name);
     } else if (s === "SKIPPED" || vacuousSuccessNames.has(name)) {
       nonEvidenceChecks.push(name);

@@ -71,7 +71,8 @@ test("W1-T5490: green, unknown and legacy observations retain their previous dec
 
 type Run = { id: number; name: string; head_sha: string; conclusion: string };
 async function observe(headChecks = [check("ci", "cancelled")], runs: Run[] = [], options: {
-  jobs?: ReturnType<typeof check>[]; historyError?: boolean; jobsError?: boolean; infra?: boolean;
+  jobs?: ReturnType<typeof check>[]; jobsFor?: (path: string) => ReturnType<typeof check>[] | undefined;
+  historyError?: boolean; jobsError?: boolean; infra?: boolean;
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "rmd-t5490-"));
   const rows: Record<string, unknown>[] = [];
@@ -94,7 +95,7 @@ async function observe(headChecks = [check("ci", "cancelled")], runs: Run[] = []
         }
         if (path.includes("/jobs?")) {
           if (options.jobsError) throw new Error("jobs unavailable");
-          return { jobs: options.jobs ?? [{ ...check("ci", "failure"), id: 42, html_url: "https://github.com/o/r/actions/runs/1/job/42" }, check("build", "success")] };
+          return { jobs: options.jobsFor?.(path) ?? options.jobs ?? [{ ...check("ci", "failure"), id: 42, html_url: "https://github.com/o/r/actions/runs/1/job/42" }, check("build", "success")] };
         }
         throw new Error(`unrouted: ${path}`);
       },
@@ -132,6 +133,14 @@ test("W1-T5490: a cancelled head falls back to the last completed main run", asy
   assert.deepEqual(r.evidence, [["ci", "build"]], "enrichment uses the deciding run's jobs");
   assert.ok(r.calls.includes("repos/o/r/actions/runs/1/jobs?per_page=100"));
   assert.equal(r.calls.filter((p) => p.includes("/actions/runs?")).length, 1, "history is shared with escalation");
+});
+
+test("W1-T5490: a completed run carrying no required check is passed over for one that does", async () => {
+  const tripwireOnly = (path: string) => (path.includes("/runs/3/") ? [check("main-tripwire", "success")] : undefined);
+  const r = await observe(undefined, [completed("success", "main-tripwire", HEAD, 3), completed()], { jobsFor: tripwireOnly });
+  assert.equal(r.observed.state, "red");
+  assert.equal(r.observed.decided_by_sha, LAST);
+  assert.deepEqual(r.calls.filter((p) => p.includes("/jobs?")), ["repos/o/r/actions/runs/3/jobs?per_page=100", "repos/o/r/actions/runs/1/jobs?per_page=100"]);
 });
 
 test("W1-T5490: pending and absent heads use completed evidence, and a completed green run can recover", async () => {
