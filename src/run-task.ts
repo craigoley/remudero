@@ -2402,8 +2402,9 @@ export function buildSweepEffects(
 /**
  * W1-T5403 — the sweep's risk judge for a head whose run ended `handed_off`: the SAME judge mount,
  * live risk policy, spend collector and BLOCKED escalation the in-run call in runTaskBody uses, with
- * the change view read at judgment time. A settings or change-view failure surfaces as an
- * unavailable judge through `assessRisk`, never as a proceed. Wired by both sweep entrypoints.
+ * the change view read at judgment time over the async transport (W1-T5523: off the sweep pass). A
+ * settings or change-view failure surfaces as an unavailable judge through `assessRisk`, never as a
+ * proceed. Wired by both sweep entrypoints.
  */
 export function handedOffHeadRiskJudge(
   owner: string,
@@ -2415,7 +2416,7 @@ export function handedOffHeadRiskJudge(
   log: (step: string, extra?: Record<string, unknown>) => void,
   spawn?: typeof spawnWorker,
   escalateImpl: typeof escalate = escalate,
-  readChangeView: (prUrl: string) => RiskJudgeChangeView = changeView,
+  readChangeView: (prUrl: string) => RiskJudgeChangeView | Promise<RiskJudgeChangeView> = changeViewAsync,
 ): NonNullable<SweepDeps["judgeHandedOffHead"]> {
   return riskJudgeHandedOffHead((pr) => {
     const task = pr.taskId === undefined ? undefined : plan.byId.get(pr.taskId);
@@ -2437,7 +2438,7 @@ export function handedOffHeadRiskJudge(
             outPath: join(config.root, "tmp", `risk-judge-settings-${runId}.json`),
           });
           const mount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
-          const judged = { ...input, change: { ...input.change, changeView: readChangeView(pr.prUrl) } };
+          const judged = { ...input, change: { ...input.change, changeView: await readChangeView(pr.prUrl) } };
           return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend })(judged);
         },
         escalate: (verdict, action) =>
@@ -2689,6 +2690,7 @@ function realDeps(): ComposedRealGraph {
 // reason (see lib/cli-args.ts's own header) — src/lib/report-commands.ts's moved report verbs
 // need it too.
 import { flagValue, unknownArgError } from "./lib/cli-args.js";
+import { createHandWorktree, renderHandWorktree } from "./lib/hand-worktree.js";
 export { unknownArgError };
 
 // ── W1-T2888: the read-and-print report verbs, moved to src/lib/report-commands.ts ────────────
@@ -4932,11 +4934,27 @@ export async function fetchPrDiffFilesViaGh(prUrl: string, gh: (args: string[]) 
  * declared file list, which would just reproduce this task's own defect under a different name.
  */
 export function changeView(prUrl: string, fetch: (args: string[]) => unknown = ghJson): RiskJudgeChangeView {
+  return changeViewFromRows(fetch(changeViewArgs(prUrl)));
+}
+
+/** W1-T5523 — {@link changeView} over the async gh transport, for the sweep's background judgment. */
+export async function changeViewAsync(
+  prUrl: string,
+  fetch: (args: string[]) => Promise<unknown> = ghJsonAsync,
+): Promise<RiskJudgeChangeView> {
+  return changeViewFromRows(await fetch(changeViewArgs(prUrl)));
+}
+
+function changeViewArgs(prUrl: string): string[] {
   const target = prUrlTarget(prUrl);
   if (!target) {
     throw new Error(`change view: cannot resolve owner/repo/number from ${JSON.stringify(prUrl)} — refusing to guess`);
   }
-  const rows = fetch(["api", `repos/${target.owner}/${target.repo}/pulls/${target.number}/files?per_page=100`]) as Array<{
+  return ["api", `repos/${target.owner}/${target.repo}/pulls/${target.number}/files?per_page=100`];
+}
+
+function changeViewFromRows(response: unknown): RiskJudgeChangeView {
+  const rows = response as Array<{
     filename?: string;
     additions?: number;
     deletions?: number;
@@ -6285,7 +6303,7 @@ export const PR_OPEN_HANDOFF_STEP_OWNERS: readonly { step: string; owner: PrOpen
   { step: "capped_arm_refusal", owner: { kind: "sweep", by: "runReview -> armIfVerdictPermits -> decideArmFromLedgerVerdict" } },
   { step: "automerge_arm", owner: { kind: "sweep", by: "sweep mergeable disposition arms auto-merge on checks green + review success" } },
   { step: "merge_and_terminal_row", owner: { kind: "sweep", by: "GitHub auto-merge the sweep armed; this run's own terminal row is the handed_off verdict" } },
-  { step: "risk_judge", owner: { kind: "sweep", by: "sweep mergeable disposition -> judgeHandedOffHead (handedOffHeadRiskJudge -> runRiskJudge), once per handed-off head before arming" } },
+  { step: "risk_judge", owner: { kind: "sweep", by: "sweep mergeable disposition -> judgeHandedOffHead (handedOffHeadRiskJudge -> runRiskJudge), once per handed-off head before arming, off the pass (W1-T5523)" } },
   { step: "specialist_panel", owner: { kind: "in_run_only", by: "routeSpecialists in runTaskBody; a specialist.panel log row that gates nothing" } },
   { step: "irreversible_arm_refusal", owner: { kind: "declined", reason: "irreversible_diff" } },
   { step: "no_merge_boundary", owner: { kind: "declined", reason: "no_merge_boundary" } },
@@ -23117,6 +23135,30 @@ export function reapBranchesCommand(
     opts.onExitReason?.(`guard-list drift: ${Object.entries(counts).filter(([, v]) => v.length > 0).map(([k, v]) => `${k}=${v.length}`).join(" ")}`);
   }
   return drift ? 1 : 0;
+}
+
+/**
+ * `rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]` (W1-T5533) — the worktree a hand build
+ * works in, cut from fresh origin/main by `createHandWorktree` (src/lib/hand-worktree.ts). The
+ * parent defaults to the directory holding this checkout, so the worktree lands beside it.
+ */
+export function handWorktreeCommand(rest: string[], opts: { repoDir?: string; clock?: Clock; minFreeBytes?: number } = {}): number {
+  const taskId = rest[0];
+  const badArg = taskId === undefined || taskId.startsWith("--") ? "rmd hand-worktree: <taskId> (or `unfiled`) must come first"
+    : rest.at(-1) === "--parent" ? "rmd hand-worktree: --parent needs a directory" : unknownArgError("hand-worktree", rest.slice(1), ["--parent"]);
+  if (badArg) {
+    console.error(`${badArg}\nusage: ${commandSyntax("hand-worktree")}`);
+    return 2;
+  }
+  const repoDir = opts.repoDir ?? repoRoot;
+  const parent = flagValue(rest, "--parent") ?? dirname(resolve(repoDir));
+  const result = createHandWorktree({ repoDir, taskId, parent, clock: opts.clock, minFreeBytes: opts.minFreeBytes });
+  if (result.status === "refused") {
+    console.error(`rmd hand-worktree: refused — ${result.reason}`);
+    return 1;
+  }
+  console.log(renderHandWorktree(result));
+  return 0;
 }
 
 // ledgerGrepCommand / stepFromRawLedgerLine moved to src/lib/report-commands.ts (W1-T2888) —
@@ -49917,6 +49959,12 @@ const COMMANDS: readonly CommandSpec[] = [
       " — none of them shells the full test:ci suite, though the four census:* entries above each spawn `node --test` on their own one named file; that spawn is timed, and an outlier is refused as RUNAWAY — not by a fixed millisecond ceiling, but by a bound derived from THIS SAME run's own cheapest census entry (W1-T2478 admitted the class under a measured bound, W1-T2545 made that bound relative so a growing corpus cannot outgrow it) — the one failure mode unique to --fast; W1-T2734's source-size signal is the one networked member, refreshing origin/main before a PR-relative measurement, and every other member stays network-free; --coverage (W1-T1074) ADDS runPreflightCoverage's diff-coverage gate alone, at author-time on its own freshly self-derived origin/main...HEAD base — never a caller-supplied diff — opt-in and slow by construction (minutes, not seconds: it shells the same full instrumented suite --ci-parity's coverage-ratchet job runs, because a coverage lcov needs the full suite and --fast can never carry one, by design), and REFUSES rather than reports on an empty diff, a tree left dirty in a diffed file, or a changed file with no lcov SF: instrumentation record (reported as UNPROVEN, naming the file); any subset of --ci-parity/--fast/--coverage may be passed; exits non-zero if any step fails, after every step has run and reported. EVERY run also writes a machine-readable verdict to `<repoRoot>/coverage/preflight-summary.json` (override with --summary-file <path>) — ok, the head sha, duration, pass/fail counts and every step — so an eight-minute result survives the container that produced it; written on FAIL as well as PASS, and a write failure never changes the exit code",
   },
   {
+    name: "hand-worktree",
+    syntax: "rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]",
+    summary: "Create a hand build's run-<taskId>-<epochMs> worktree from origin/main with linked node_modules.",
+    detail: "W1-T5533: the worktree a HAND build works in, made by one command instead of retyped. Refuses before writing anything when the task id is malformed, --parent is relative or missing, the target filesystem has under 2 GiB free, origin is unreachable, origin already has a run-<taskId>-* branch, or origin/main already carries a `Remudero-Task: <taskId>` trailer (`unfiled` skips the two duplicate checks). Then runs `git worktree add --no-track -b run-<taskId>-<epochMs> <parent>/<branch> origin/main` — no upstream, an ABSOLUTE path (--parent defaults to the directory holding this checkout) — and HARD-LINKS (`cp -al`, never a symlink, so a later `npm ci` cannot empty the donor) node_modules from the first sibling worktree on the same filesystem whose package-lock.json is byte-identical, whose node_modules/.bin is non-empty and whose top-level `npm ls` passes. When none qualifies it prints `npm ci` as the next step with each candidate's reason and the free space, and does not run it. Prints the path and branch; exits 0 created, 1 refused, 2 bad usage.",
+  },
+  {
     name: "next-task-id",
     syntax: "rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>] [--branch <name>]",
     summary: "Atomically CLAIM the next free W1-T<n> task id. `--no-reserve` prints one without claiming it.",
@@ -51038,6 +51086,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["replay-goldens", async (rest) => await replayGoldensCommand(rest)],
   ["check-acceptance", (rest) => checkAcceptanceCommand(rest)],
   ["next-task-id", async (rest) => await nextTaskIdCommand(rest)],
+  ["hand-worktree", (rest) => handWorktreeCommand(rest)],
   [
     "retro",
     async (rest) => {

@@ -44,3 +44,11 @@
   falsifier: |
     Delete the `REQUIRED_WHEN_PRESENT` evaluation; a stubbed failing `CodeQL` row passes the step
     (exit 0) and the test fails.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/ci-gate.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-04T14:03:52.002Z"
+    pin: "7bd953feb6323c25e055e13c599ae147f9ed6a2f5ed125a44eed8b7f655881f3"

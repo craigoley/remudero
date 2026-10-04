@@ -12,7 +12,7 @@
   origin: "operator ask 2026-10-01: go ahead with every follow-up, research deeply (calibration research)"
   note: "reservation hand-off: plan-dispatch-value-calibration-1790852354000 -> plan-dispatch-value-calibration-1790852354000"
   plan_refs: [W1-T51, W1-T3412, W1-T5112]
-  files: [src/lib/retro-closure.ts, src/lib/retro.ts, test/retro-closure-rates-merges-per-attempt.test.ts]
+  files: [src/lib/retro-closure.ts, src/lib/retro.ts, test/retro-closure-rates-merges-per-attempt.test.ts, test/the-retro-emits-closure-by-class-and-guard-fire-counts.test.ts, test/retro-shipped-wiring.test.ts, test/retro-trigger-corpus.test.ts, test/a-ledger-credit-row-finalises-the-run-it-credits.test.ts]
   status: queued
   attempts: 0
   rationale: |

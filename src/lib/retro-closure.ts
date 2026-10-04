@@ -43,6 +43,7 @@ export interface ClosureRun {
 export interface ClosureShipped {
   runId: string;
   taskId: string;
+  mergeTs?: string;
 }
 
 /** One filing, supplied only by a caller that has filing dates; without them `filed` reads
@@ -58,8 +59,7 @@ export type MergeRate =
   | { kind: "rate"; value: number; merged: number; denominator: number }
   | { kind: "refused"; merged: number; denominator: number; floor: number };
 
-/** One row of the closure table. `lastMergeTs` is the `startTs` of the newest run credited as
- *  merged, because a credit record carries no timestamp of its own. */
+/** One row of the closure table, with the newest credited merge's timestamp. */
 export interface ClassClosure {
   taskClass: string;
   filed: number | "not supplied";
@@ -86,7 +86,7 @@ function inWindow<T extends { startTs: string }>(runs: readonly T[], sinceTs: st
  *
  * `merged` counts `shipped` credits joined to a class by run id, so a class is never credited
  * from the ledger verdict alone. The denominator is `filed` when filings are supplied, else
- * `merged + open`; a rate over a denominator below {@link CLOSURE_POPULATION_FLOOR} is refused.
+ * dispatched attempts; a rate below {@link CLOSURE_POPULATION_FLOOR} is refused.
  * `costPerMerge` divides every in-window run's cost, refused runs included, by `merged`, so
  * refusing more can never lower it; it is `null` at zero merges rather than a false 0.
  */
@@ -99,23 +99,30 @@ export function closureByClass(
 ): ClassClosure[] {
   const windowed = inWindow(runs, sinceTs);
   const classOfRun = new Map<string, string>();
+  const classOfTask = new Map<string, string>();
   const startOfRun = new Map<string, string>();
   for (const r of runs) {
     classOfRun.set(r.runId, r.taskClass ?? UNKNOWN_CLASS);
+    classOfTask.set(r.taskId, r.taskClass ?? UNKNOWN_CLASS);
     startOfRun.set(r.runId, r.startTs);
   }
   const classes = new Set<string>();
   const mergedRunIds = new Map<string, string[]>();
+  const mergeTsByRun = new Map<string, string>();
   for (const s of shipped) {
-    const c = classOfRun.get(s.runId) ?? UNKNOWN_CLASS;
+    if (sinceTs && s.mergeTs !== undefined && !(Date.parse(s.mergeTs) > Date.parse(sinceTs))) continue;
+    const c = classOfRun.get(s.runId) ?? classOfTask.get(s.taskId) ?? UNKNOWN_CLASS;
     classes.add(c);
     mergedRunIds.set(c, [...(mergedRunIds.get(c) ?? []), s.runId]);
+    if (s.mergeTs !== undefined) mergeTsByRun.set(s.runId, s.mergeTs);
   }
   const costByClass = new Map<string, number>();
+  const attemptsByClass = new Map<string, number>();
   for (const r of windowed) {
     const c = r.taskClass ?? UNKNOWN_CLASS;
     classes.add(c);
     costByClass.set(c, (costByClass.get(c) ?? 0) + r.costUsd);
+    attemptsByClass.set(c, (attemptsByClass.get(c) ?? 0) + 1);
   }
   const openByClass = new Map<string, number>();
   for (const c of openTaskClasses) {
@@ -136,16 +143,16 @@ export function closureByClass(
     const merged = mergedIds.length;
     const open = openByClass.get(taskClass) ?? 0;
     const filed: number | "not supplied" = filedByClass ? (filedByClass.get(taskClass) ?? 0) : "not supplied";
-    const denominator = typeof filed === "number" ? filed : merged + open;
+    const denominator = typeof filed === "number" ? filed : (attemptsByClass.get(taskClass) ?? 0);
     const mergeRate: MergeRate =
       denominator < CLOSURE_POPULATION_FLOOR
         ? { kind: "refused", merged, denominator, floor: CLOSURE_POPULATION_FLOOR }
         : { kind: "rate", value: round(merged / denominator), merged, denominator };
     const cost = costByClass.get(taskClass) ?? 0;
     const lastMergeTs = mergedIds
-      .map((id) => startOfRun.get(id))
+      .map((id) => mergeTsByRun.get(id) ?? startOfRun.get(id))
       .filter((ts): ts is string => typeof ts === "string")
-      .sort()
+      .sort((a, b) => Date.parse(a) - Date.parse(b))
       .at(-1);
     out.push({
       taskClass,
@@ -161,10 +168,10 @@ export function closureByClass(
 }
 
 /** The merge-rate cell as prose: the rate with its denominator, or the refusal with the floor. */
-export function mergeRateCell(rate: MergeRate): string {
+export function mergeRateCell(rate: MergeRate, population: "attempts" | "filings" = "attempts"): string {
   return rate.kind === "rate"
-    ? `${rate.value} (${rate.merged} of ${rate.denominator})`
-    : `REFUSED (population ${rate.denominator} below floor ${rate.floor}, P48)`;
+    ? `${rate.value} (${rate.merged} of ${rate.denominator} ${population})`
+    : `REFUSED (population ${rate.denominator} below floor ${rate.floor}, P48; ${rate.merged} of ${rate.denominator} ${population})`;
 }
 
 /** The `## Closure by task class` section, a markdown table with one row per class. */
@@ -177,7 +184,7 @@ export function renderClosureByClass(rows: readonly ClassClosure[]): string {
     "|---|---|---|---|---|---|---|",
     ...rows.map(
       (r) =>
-        `| ${r.taskClass} | ${r.filed} | ${r.merged} | ${r.open} | ${mergeRateCell(r.mergeRate)} | ` +
+        `| ${r.taskClass} | ${r.filed} | ${r.merged} | ${r.open} | ${mergeRateCell(r.mergeRate, typeof r.filed === "number" ? "filings" : "attempts")} | ` +
         `${r.costPerMerge === null ? "n/a (0 merged)" : `$${r.costPerMerge.toFixed(3)}`} | ${r.lastMergeTs ?? "(none)"} |`,
     ),
   ].join("\n");
