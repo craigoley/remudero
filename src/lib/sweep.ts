@@ -210,12 +210,14 @@ import {
 } from "./main-run-gaps.js";
 import { mutationVerdictRunIdsFromLedger, pullMutationVerdicts, readMutationVerdictZip } from "./mutation-verdict-pull.js";
 import {
+  REFUSAL_AMENDMENT_MAX_AGE_MS,
   REFUSAL_AMENDMENT_STEP,
   draftRefusalAmendment,
   extractRefusal,
   holdTaskForRefusal,
   noPrVerdictRowsFromLedger,
   readTaskShard,
+  refusalIsMainCaused,
   taskAwaitsAmendment,
   type RefusalAmendmentResult,
   type RefusalCandidate,
@@ -3500,7 +3502,18 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                 // W1-T5405: a red preflight is ledgered as this source run's outcome, so the next pass does not re-pay it.
                 const verdict = await planPrPreflightImpl(worktreePath, headSha, { title: input.title, body });
                 if (!planPrPreflightAllows(verdict, { lane: "refusal_amendment", branch: input.branch, log })) {
-                  log(REFUSAL_AMENDMENT_STEP, { task_id: c.taskId, source_run_id: c.runId, outcome: "preflight_refused", failures: verdict.failures });
+                  // W1-T5531: preflight the base alone, so a red main's refusal is retried once main moves.
+                  // A probe that cannot run records why and leaves the refusal final, as before W1-T5531.
+                  const base: { origin_main_sha?: string; main_red: boolean; main_red_probe_error?: string } = { main_red: false };
+                  try {
+                    base.origin_main_sha = planRepairGit("git", ["-C", worktreePath, "rev-parse", "HEAD^"]).trim();
+                    const onBase = await planPrPreflightImpl(repoDir, base.origin_main_sha, { title: input.title, body });
+                    base.main_red = refusalIsMainCaused(verdict.failures, onBase.failures);
+                  } catch (e) {
+                    const reason = String((e as Error)?.message ?? e);
+                    base.main_red_probe_error = reason;
+                  }
+                  log(REFUSAL_AMENDMENT_STEP, { task_id: c.taskId, source_run_id: c.runId, outcome: "preflight_refused", failures: verdict.failures, ...base });
                   throw new PlanPrPreflightRefusedError("refusal_amendment", verdict.failures);
                 }
                 gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
@@ -11179,7 +11192,7 @@ export async function runSweep(
   if (deps.draftRefusalAmendments && deps.repairAdmissionSurface !== "light") {
     try {
       const candidates: RefusalCandidate[] = [];
-      for (const row of noPrVerdictRowsFromLedger(ledgerLines, now)) {
+      for (const row of noPrVerdictRowsFromLedger(ledgerLines, now, REFUSAL_AMENDMENT_MAX_AGE_MS, mainTipSha)) {
         const refusals = extractRefusal(row.reportExcerpt);
         if (refusals.length > 0) candidates.push({ ...row, refusals });
       }

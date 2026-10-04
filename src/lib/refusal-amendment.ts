@@ -32,6 +32,7 @@ import {
   writePriorRefusal,
 } from "./dispatch-repair.js";
 import type { Task } from "./plan.js";
+import type { PlanPrPreflightCheck, PlanPrPreflightFinding } from "./plan-pr-emitter.js";
 import { parseCriterionRefusals, type CriterionRefusalClass } from "./review.js";
 
 /** The ledger step {@link runSweep}'s call site writes once per handled refusal, and the ONLY thing
@@ -108,23 +109,52 @@ export interface RefusalCandidate extends NoPrVerdictRow {
   readonly refusals: readonly WorkerRefusal[];
 }
 
+/** W1-T5531: the preflight checks that read the plan TREE, so the same red on the amendment's base
+ *  alone is main's — the title and the proof belong to the amendment. */
+const MAIN_ATTRIBUTABLE_PREFLIGHT_CHECKS: ReadonlySet<PlanPrPreflightCheck> = new Set(["lint-plan", "shard-census"]);
+
+/** True when every check that refused the amendment is a tree check that ALSO fails on its base
+ *  (origin/main) alone — the amendment did not cause the red, so it is worth one retry. */
+export function refusalIsMainCaused(
+  amendmentFailures: readonly PlanPrPreflightFinding[],
+  baseFailures: readonly PlanPrPreflightFinding[],
+): boolean {
+  return (
+    amendmentFailures.length > 0 &&
+    amendmentFailures.every((f) => MAIN_ATTRIBUTABLE_PREFLIGHT_CHECKS.has(f.check) && baseFailures.some((b) => b.check === f.check))
+  );
+}
+
+/** W1-T5531: a source run's recorded amendment rows settle it unless its ONLY row is a main-red
+ *  `preflight_refused` and `mainSha` (this pass's origin/main) has moved past the sha it ran on.
+ *  An unread `mainSha` settles it too — never re-pay a preflight on a guess. */
+function amendmentSettled(recorded: readonly Record<string, unknown>[], mainSha: string | undefined): boolean {
+  if (recorded.length !== 1) return true;
+  const [only] = recorded;
+  if (only!.outcome !== "preflight_refused" || only!.main_red !== true) return true;
+  return typeof only!.origin_main_sha !== "string" || mainSha === undefined || mainSha === only!.origin_main_sha;
+}
+
 /**
  * The LATEST verdict row per task, kept only when it is a recent `no_pr` carrying an excerpt and no
- * amendment has already been recorded for that same source run. A later verdict of any kind
+ * amendment has already been recorded for that same source run (W1-T5531: a main-red refusal is
+ * re-offered once, when `mainSha` has moved). A later verdict of any kind
  * (a merged PR, a failure) supersedes the refusal, so a task that moved on is never held for it.
  */
 export function noPrVerdictRowsFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
   nowMs: number,
   maxAgeMs: number = REFUSAL_AMENDMENT_MAX_AGE_MS,
+  mainSha?: string,
 ): NoPrVerdictRow[] {
   const latest = new Map<string, Record<string, unknown>>();
-  const handled = new Set<string>();
+  const handled = new Map<string, Record<string, unknown>[]>();
   for (const line of lines) {
     const taskId = line.task_id;
     if (typeof taskId !== "string") continue;
     if (line.step === REFUSAL_AMENDMENT_STEP && typeof line.source_run_id === "string") {
-      handled.add(`${taskId}\u0000${line.source_run_id}`);
+      const key = `${taskId}\u0000${line.source_run_id}`;
+      handled.set(key, [...(handled.get(key) ?? []), line]);
     } else if (line.step === "verdict") {
       latest.set(taskId, line);
     }
@@ -138,7 +168,8 @@ export function noPrVerdictRowsFromLedger(
     const at = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
     // An undated or stale row is history — never a live block to hold a task for.
     if (!Number.isFinite(at) || nowMs - at > maxAgeMs) continue;
-    if (handled.has(`${taskId}\u0000${runId}`)) continue;
+    const recorded = handled.get(`${taskId}\u0000${runId}`);
+    if (recorded && amendmentSettled(recorded, mainSha)) continue;
     out.push({ taskId, runId, reportExcerpt: excerpt });
   }
   return out;
