@@ -213,6 +213,35 @@ test("W1-T5544: a diverged or wrapped body is cured deterministically", async ()
   assert.equal(writes.length, 1, "no write for a red the body cannot cure");
 });
 
+test("W1-T5544: metadata repair unwraps grep when the plan proofs already match", async () => {
+  for (const proof of ['grep: "export function cure" in src/run-task.ts', "grep: `export function cure` in src/run-task.ts"]) {
+    const body = `## Acceptance\n\n- claim: the pattern is bare\n  proof: ${proof}\n\nRemudero-Task: ${TASK}\n`;
+    const expectedBody = body.replace(proof, "grep: export function cure in src/run-task.ts");
+    const planCriteria = [{ claim: "the pattern is bare", proof }];
+    assert.equal(authorGate.trailerBodyProofDivergenceRefusal({ body, taskAcceptanceForId: () => planCriteria }), undefined);
+    for (const cures of [{}, { planCriteria }]) {
+      assert.deepEqual(acceptanceGateBodyRepair(body, undefined, cures), {
+        defect: "proof-shape",
+        repairedBody: expectedBody,
+      });
+    }
+
+    const writes: Array<{ title?: string; body?: string }> = [];
+    const repaired = await repairPrMetadata(
+      { prUrl: PR_URL, headSha: HEAD },
+      ["acceptance-author-gate"],
+      (_url, fields) => { writes.push(fields); },
+      () => ({ title: "fix(views): record the new state", body }),
+      (_body, headSha) => {
+        assert.equal(headSha, HEAD);
+        return planCriteria;
+      },
+    );
+    assert.equal(repaired.repaired, true);
+    assert.deepEqual(writes, [{ body: expectedBody }]);
+  }
+});
+
 test("W1-T5544: a stale-proof metadata red is routed past the escalation", async () => {
   // Today's path: a proof-discrimination-only red with no deterministic cure escalates and breaks. Now it dispatches a
   // proof-repair round carrying the gate-log evidence, with no ci-log shape and no escalation.
