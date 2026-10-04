@@ -19,7 +19,9 @@ import {
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdir as mkdirAsync, readFile as readFileAsync } from "node:fs/promises";
-import { probeCacheFromLedger, probeCacheKey, type BaseProbeFile } from "./lib/base-reproduction.js";
+import { baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile } from "./lib/base-reproduction.js";
+import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
+import { CHECK_REQUEUE_STEP, requeuedCheckKeysFromLedger } from "./lib/sweep.js";
 import { ghExec, ghJsonAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
@@ -8361,7 +8363,7 @@ export function fixRungTerminationVerdict(
 }
 
 export interface FixRungOutcome {
-  outcome: "fixed" | "escalated" | "stood_down" | "spawn_abandoned" | "parked" | "rebased" | "base_refreshed";
+  outcome: "fixed" | "escalated" | "stood_down" | "spawn_abandoned" | "parked" | "rebased" | "base_refreshed" | "needs_design";
   /** The last review computed — passing when `outcome === "fixed"`. Unchanged from the PRIOR
    *  round's own verdict when `outcome === "spawn_abandoned"` (W1-T1044): the strike that
    *  abandoned never produced a new head to re-review. */
@@ -10127,6 +10129,9 @@ export async function runFixRung(opts: {
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
     /** W1-T3868: test seam for the harness-owned commit decision; production uses the shared helper. */
     harnessCommitForShellLessWorker?: typeof harnessCommitForShellLessWorker;
+    readMainTip?: () => string | Promise<string>;
+    reproduceFailingTestsOnMain?: NonNullable<SweepDeps["reproduceFailingTestsOnMain"]>;
+    requeueCheck?: (failure: CiFailure) => boolean | Promise<boolean>;
     /** W1-T5544: test seam for the proof-repair gate; production reads the round's git diff and runs `check-proof --base`. */
     proofRepairRoundRefusal?: typeof proofRepairRoundRefusalInWorktree;
     /** W1-T4450: test seam for "did the round leave uncommitted edits"; production reads git status. */
@@ -10403,6 +10408,7 @@ export async function runFixRung(opts: {
   // into both the pre-strike probe's key and the false-block producer below, so the two can never
   // disagree about "current".
   const currentContractRevision = taskContractRevision(opts.task);
+  const admitFixTests = !(opts.task.files?.length && opts.task.files.every(isInPlanScope));
   // W1-T3166 — THE CALL W1-T349's judge never had: zero production callers, an empty fleet-notice
   // queue, no ledger step. The ten fix-rung sites below are the NEEDS ME board's largest class.
   // Built here, not per callsite, so a construction failure surfaces once at rung entry.
@@ -11077,7 +11083,7 @@ export async function runFixRung(opts: {
           ? fixRungScopeStandDownReason(
               currentDiffFiles,
               baselineDiffFiles,
-              opts.task.files,
+              admitFixTests && opts.task.files ? [...opts.task.files, "test/"] : opts.task.files,
               reachableRemedyFiles,
               currentCiFailures ?? [],
             )
@@ -11519,6 +11525,13 @@ export async function runFixRung(opts: {
     // byte-identical re-block apart from real progress. Keyed on the SAME
     // worker-visible unmet set the fix rung actually dispatches (W1-T166).
     const priorHeadSha = review.headSha;
+    const priorDesign = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))().find((row) =>
+      row.step === "fix.needs_design" && row.task_id === opts.taskId && row.head_sha === priorHeadSha);
+    if (priorDesign) {
+      const reason = String(priorDesign.reason);
+      deps.log("fix.stood_down", { head_sha: priorHeadSha, reason, site: "rung.needs_design" });
+      return { outcome: "needs_design", review, strikes, retriggers, reason };
+    }
     const priorUnmetClaims = new Set(unmet.map((c) => c.claim));
     // W1-T2328: the ci-log evidence THIS round's dispatch (below) is about to target, snapshotted
     // BEFORE the strike runs — mirrors `priorHeadSha`/`priorUnmetClaims` immediately above, for
@@ -11728,7 +11741,7 @@ export async function runFixRung(opts: {
     // so a commit the worker made itself is pushed, not re-read as "the worker changed nothing".
     let harnessCommitRefusalReason: string | undefined;
     let harnessCommitUndeclared: readonly string[] = [];
-    const harnessCommit = (report: string, options: Pick<Parameters<typeof harnessCommitForShellLessWorker>[0], "subjectSource" | "derivedCommit"> = {}) =>
+    const harnessCommit = (report: string, options: Pick<Parameters<typeof harnessCommitForShellLessWorker>[0], "subjectSource" | "derivedCommit" | "fixOutcome"> = {}) =>
       (deps.harnessCommitForShellLessWorker ?? harnessCommitForShellLessWorker)({
         harnessOwnsGit: fixHarnessOwnsGit,
         commitCount: roundStartSha === undefined ? 0 : (deps.commitsAhead ?? commitsAhead)(opts.worktreePath, roundStartSha),
@@ -11738,6 +11751,7 @@ export async function runFixRung(opts: {
         // Use that same captured baseline here; a worker's newly added paths never enter it.
         declaredPaths: fixDeclaredPaths,
         acceptance: opts.task.acceptance,
+        admitTests: admitFixTests,
         ...options,
         assignmentId: fixResult.selectionAssignmentId,
         log: deps.log,
@@ -11748,13 +11762,29 @@ export async function runFixRung(opts: {
         },
       });
     const fixReport = workerTranscript(fixResult);
+    let fixOutcome = anchoredFixOutcome(fixReport);
+    let fixAction = decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests });
     const fixLeftEdits = () => (deps.worktreeHasUncommittedChanges ?? worktreeHasUncommittedChanges)(opts.worktreePath);
+    const outcomeCommitOptions = () => ({ fixOutcome: fixOutcome?.kind,
+      derivedCommit: fixOutcome?.kind === "FIXED"
+        ? derivedFixCommit(priorCiFailures?.[0]?.name ?? unmet[0]?.claim ?? gateFailuresNow?.[0]?.reason ?? opts.task.title, opts.prUrl)
+        : undefined });
+    // W1-T4450: a round that left edits but no COMMIT_MESSAGE line is not discarded. W1-T5325: a
+    // writer that cannot resume (codex/cash) gets the subject derived from the failing check on the
+    // FIRST commit attempt, so the missing line is never refused and never re-asked — that re-ask was
+    // a fresh session whose loss refused the whole round. A worker-authored line still wins inside
+    // the helper. A resumable writer is still asked once in its own session (W1-T4052).
     // W1-T5565: identified shell-less writers derive from the known failure. Legacy results
     // without a provider retain their session re-ask; a worker-authored subject still wins.
     const derivedFirst = fixHarnessOwnsGit && (fixResult.provider ?? fixArgs.mountProvider) !== undefined && fixLeftEdits()
       ? derivedFixCommit(priorCiFailures?.[0]?.name ?? unmet[0]?.claim ?? gateFailuresNow?.[0]?.reason, opts.prUrl)
       : undefined;
-    let harnessCommitCount = harnessCommit(fixReport, { derivedCommit: derivedFirst });
+    const requiresCommit = fixAction.kind === "legacy" || fixAction.kind === "commit" ||
+      (fixAction.kind === "scope-needed" && fixAction.testPaths.length > 0);
+    const firstOptions = outcomeCommitOptions();
+    let harnessCommitCount = requiresCommit ? harnessCommit(fixReport, {
+      ...firstOptions, derivedCommit: firstOptions.derivedCommit ?? derivedFirst,
+    }) : 0;
     if (harnessCommitCount === 0 && harnessCommitRefusalReason === MISSING_COMMIT_MESSAGE_REASON && fixLeftEdits()) {
       deps.log("fix.commit_line_requested", { strike: attempt, round });
       deps.say("fix rung: no COMMIT_MESSAGE line in the report — resuming the worker's session once to ask for it");
@@ -11784,9 +11814,13 @@ export async function runFixRung(opts: {
       if (answer) {
         harnessCommitRefusalReason = undefined;
         harnessCommitUndeclared = [];
-        // A derivable subject never reaches this ask (above), so the answer is the only subject left.
+        // The last outcome in the resumed report can explicitly authorize a derived subject.
         const answeredReport = `${workerTranscript(fixResult)}\n${workerTranscript(answer)}`;
-        harnessCommitCount = harnessCommit(answeredReport, { subjectSource: "re-asked" });
+        fixOutcome = anchoredFixOutcome(answeredReport);
+        fixAction = decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests });
+        if (["legacy", "commit"].includes(fixAction.kind) || (fixAction.kind === "scope-needed" && fixAction.testPaths.length > 0)) {
+          harnessCommitCount = harnessCommit(answeredReport, { subjectSource: "re-asked", ...outcomeCommitOptions() });
+        }
       }
     }
     // W1-T5544: THE PROOF-REPAIR GATE, between the commit and the push. A round that committed nothing, staged a path
@@ -11846,7 +11880,8 @@ export async function runFixRung(opts: {
         deps.log("fix.round_commits_read_error", { attempt, error: String((e as Error)?.message ?? e) });
       }
     }
-    const roundIsRetrigger = roundCommits.length > 0 && roundCommits.every(isRetriggerShapedCommit);
+    const roundIsRetrigger = (fixAction.kind === "legacy" || fixAction.kind === "commit") &&
+      roundCommits.length > 0 && roundCommits.every(isRetriggerShapedCommit);
 
     if (roundIsRetrigger) {
       // Spends the SEPARATE, capped `retriggers` count instead of a strike — never a
@@ -11901,7 +11936,8 @@ export async function runFixRung(opts: {
     }
     sessionToResume = fixResult.sessionId;
     if (harnessCommitRefused) {
-      const scopeAmendment = scopeAmendmentFromFixReport(workerTranscript(fixResult));
+      const scopeAmendment = fixAction.kind === "scope-needed"
+        ? `NEEDS_SCOPE ${fixAction.paths.join(",")}` : scopeAmendmentFromFixReport(workerTranscript(fixResult));
       deps.log("fix.commit_refused", {
         round_id: roundId,
         strike: attempt,
@@ -11909,20 +11945,25 @@ export async function runFixRung(opts: {
         mode: fixMode,
         head_sha: priorHeadSha,
         reason: harnessCommitRefusalReason,
+        fix_outcome: fixOutcome?.kind ?? "unstated",
+        ...(fixOutcome?.kind === "FIXED" && harnessCommitRefusalReason === "the worker changed nothing" ? { fix_outcome_contradiction: true } : {}),
         ...(scopeAmendment ? { scope_amendment_detail: scopeAmendment } : {}),
         ...undeclaredPathsLedgerFields(harnessCommitUndeclared),
       });
     }
+    const fixClaimFields: Record<string, unknown> = {};
     const logFixDone = (pushedHeadSha?: string) => deps.log("fix.done", {
       ...fixReceipt.ledgerFields(fixResult), // W1-T4613: FIRST, so every field this row already carried keeps its value
       round_id: roundId,
+      fix_outcome: fixOutcome?.kind ?? "unstated",
+      ...fixClaimFields,
       head_sha: priorHeadSha,
       pushed_head_sha: pushedHeadSha,
       strike: attempt,
       round,
       session_id: fixResult.sessionId,
-      subtype: harnessCommitRefused ? "commit_refused" : fixResult.subtype,
-      ...(harnessCommitRefused ? { worker_subtype: fixResult.subtype } : {}),
+      subtype: harnessCommitRefused || fixAction.kind === "scope-needed" ? "commit_refused" : fixResult.subtype,
+      ...(harnessCommitRefused || fixAction.kind === "scope-needed" ? { worker_subtype: fixResult.subtype } : {}),
       cost_usd: fixResult.costUsd,
       billing_mode: billingMode(fixResult.childEnvKeys),
       account_label: fixResult.accountLabel,
@@ -11968,6 +12009,84 @@ export async function runFixRung(opts: {
       log: deps.log,
       say: deps.say,
     });
+
+    if (fixAction.kind === "verify-base") {
+      const files = baseReproductionFiles(priorCiFailures ?? []);
+      let verified = false;
+      try {
+        const mainSha = await (deps.readMainTip ?? (() => {
+          execFileSync("git", ["-C", opts.worktreePath, "fetch", "--no-tags", "origin", "main"], { stdio: "pipe" });
+          return execFileSync("git", ["-C", opts.worktreePath, "rev-parse", "origin/main"], { encoding: "utf8" }).trim();
+        }))();
+        const probes = files.length > 0 ? await (deps.reproduceFailingTestsOnMain ??
+          buildBaseReproductionProbe(opts.config, opts.worktreePath, deps.ledgerPath, deps.log))(
+          { prNumber: prNumber!, headSha: priorHeadSha } as OpenPrView, files, mainSha,
+        ) : [];
+        verified = decideBaseReproduction(files, probes) === "reproduced";
+        deps.log("sweep.base_reproduction", { head_sha: priorHeadSha, main_sha: mainSha, files: probes,
+          verdict: decideBaseReproduction(files, probes) });
+        if (verified) deps.log("fix.strike_refunded", { strike: attempt, head_sha: priorHeadSha,
+          main_sha: mainSha, reason: "worker-base-red-verified", test_files: files });
+      } catch (error) {
+        deps.log("fix.base_red_verification_failed", { head_sha: priorHeadSha, reason: String(error) });
+      }
+      fixClaimFields.base_red_claim = verified ? "verified" : "refuted";
+      logFixDone();
+      return { outcome: "stood_down", review, strikes: verified ? strikes - 1 : strikes, retriggers,
+        reason: verified ? "worker-base-red-verified" : "base-red claim refuted" };
+    }
+    if (fixAction.kind === "rerun-once") {
+      const spent = requeuedCheckKeysFromLedger((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))());
+      const failures = priorCiFailures ?? [];
+      let requeued = failures.length > 0 && !!priorHeadSha;
+      for (const failure of failures) {
+        const key = `${priorHeadSha}@${failure.name}`;
+        if (!priorHeadSha || !failure.jobId || spent.has(key)) { requeued = false; continue; }
+        spent.add(key);
+        deps.log(CHECK_REQUEUE_STEP, { head_sha: priorHeadSha, check_name: failure.name, job_id: failure.jobId });
+        try {
+          const queued = await (deps.requeueCheck ?? ((f) => requeueActionsJob(opts.reviewBase.owner, opts.reviewBase.repo, f, deps.log)))(failure);
+          requeued = queued && requeued;
+        } catch (error) {
+          requeued = false;
+          deps.log("fix.flake_requeue_failed", { head_sha: priorHeadSha, check_name: failure.name, reason: String(error) });
+        }
+      }
+      let green = false;
+      if (requeued) {
+        try {
+          const ci = await deps.waitForCiGreen(opts.prUrl, deps.log);
+          green = ciGateState(ci) === "green" && (!ciGateSha(ci) || ciGateSha(ci) === priorHeadSha);
+        } catch (error) {
+          deps.log("fix.flake_verification_failed", { head_sha: priorHeadSha, reason: String(error) });
+        }
+      }
+      if (green) deps.log("fix.strike_refunded", { strike: attempt, head_sha: priorHeadSha, reason: "flake-confirmed" });
+      fixClaimFields.flake_claim = green ? "confirmed" : "refuted";
+      logFixDone();
+      return { outcome: "stood_down", review, strikes: green ? strikes - 1 : strikes, retriggers,
+        reason: green ? "flake-confirmed" : "flake claim refuted" };
+    }
+    if (fixAction.kind === "hand-off") {
+      deps.log("fix.needs_design", { reason: fixAction.reason, head_sha: priorHeadSha });
+      logFixDone();
+      return { outcome: "needs_design", review, strikes, retriggers, reason: fixAction.reason };
+    }
+    if (fixAction.kind === "scope-needed") {
+      deps.log("fix.scope_needed", { paths: fixAction.paths, head_sha: priorHeadSha });
+      if (!harnessCommitRefused) deps.log("fix.commit_refused", { strike: attempt, round, head_sha: priorHeadSha,
+        reason: "non-test paths need scope", scope_amendment_detail: `NEEDS_SCOPE ${fixAction.paths.join(",")}`,
+        fix_outcome: fixOutcome?.kind });
+      if (harnessCommitCount > 0) {
+        let pushedHead: string | undefined;
+        try {
+          const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush), expectedHeadShaForPush, "rung.strike");
+          if (pushed === undefined) pushedHead = expectedHeadShaForPush;
+          if (pushed && pushed !== "refused") return pushed;
+        } finally { logFixDone(pushedHead); }
+      } else logFixDone();
+      return { outcome: "stood_down", review, strikes, retriggers, reason: "non-test paths need scope" };
+    }
 
     // A shell-less worker that omitted or failed its harness commit produced no new head. The
     // refusal row is the positive release signal sweep.ts reads on the next pass; do not push an
@@ -40523,6 +40642,7 @@ export interface WorkerEditCommit {
   readonly regenerable?: readonly string[];
   /** W1-T5386: new tests admitted by the task's own title proofs. */
   readonly proofMatchedTests?: readonly string[];
+  readonly admittedTests?: readonly string[];
   /** Why nothing was committed, when `committed` is false. */
   readonly reason?: string;
 }
@@ -40557,6 +40677,7 @@ export function commitWorkerEdits(
   // exists to prevent, and there is nothing this verb needs that the push verb did not.
   deps: PublishAbandonedFixOwnerAheadDeps = {},
   acceptance: readonly AcceptanceCriterion[] = [],
+  options: { admitTests?: boolean } = {},
 ): WorkerEditCommit {
   const runGit = deps.runGit ?? ((args: string[]) => execFileSync(
     "git",
@@ -40593,8 +40714,9 @@ export function commitWorkerEdits(
     runGit(["ls-tree", "--name-only", "HEAD", "--", path]).trim() === "" &&
     declaresProofTitle(readFileSync(join(repoDir, path), "utf8"), titles),
   );
+  const admittedTests = options.admitTests ? changed.filter((path) => path.startsWith("test/") && !path.split("/").includes("..")) : [];
   const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths) ||
-    regenerable.includes(path) || proofMatchedTests.includes(path));
+    regenerable.includes(path) || proofMatchedTests.includes(path) || admittedTests.includes(path));
   const undeclared = changed.filter((path) => !declared.includes(path));
   if (declared.length === 0) {
     return { committed: false, undeclared, reason: "every change the worker made is outside its declared files" };
@@ -40608,6 +40730,7 @@ export function commitWorkerEdits(
     undeclared,
     ...(regenerable.length > 0 ? { regenerable } : {}),
     ...(proofMatchedTests.length > 0 ? { proofMatchedTests } : {}),
+    ...(admittedTests.length > 0 ? { admittedTests } : {}),
   };
 }
 
@@ -40842,6 +40965,8 @@ export function harnessCommitForShellLessWorker(
     worktreePath: string;
     declaredPaths: readonly string[];
     acceptance?: readonly AcceptanceCriterion[];
+    admitTests?: boolean;
+    fixOutcome?: TypedFixOutcome["kind"];
     subjectSource?: "worker-authored" | "re-asked" | "harness-derived";
     derivedCommit?: { subject: string; reason: string };
     /** W1-T4614: the selection assignment of the worker whose edits this commits; its trailer names it. */
@@ -40871,11 +40996,13 @@ export function harnessCommitForShellLessWorker(
     input.assignmentId,
   );
   const subjectSource = asked === undefined ? "harness-derived" : input.subjectSource ?? "worker-authored";
-  const committed = commit(input.worktreePath, input.declaredPaths, message, {}, input.acceptance);
+  const committed = commit(input.worktreePath, input.declaredPaths, message, {}, input.acceptance, { admitTests: input.admitTests });
   const refusalReason = committed.reason ?? "harness commit refused";
   input.log(committed.committed ? "implement.harness_commit" : "implement.harness_commit_refused", {
     ...(committed.sha ? { sha: committed.sha } : {}),
     subject_source: subjectSource,
+    ...(input.fixOutcome ? { fix_outcome: input.fixOutcome } : {}),
+    ...(committed.admittedTests?.length ? { admitted_tests: committed.admittedTests } : {}),
     ...(committed.regenerable && committed.regenerable.length > 0 ? { regenerable: committed.regenerable } : {}),
     ...(committed.proofMatchedTests?.length ? { proofMatchedTests: committed.proofMatchedTests } : {}),
     ...(!committed.committed ? { reason: refusalReason } : {}),
@@ -41028,7 +41155,9 @@ export async function resumeForMissingCommitLine(
 export const COMMIT_LINE_RESUME_PROMPT =
   "Your last REPORT carried no anchored COMMIT_MESSAGE line, so the harness could not " +
   "commit your edits — they are still saved in the worktree. Make NO further edits and " +
-  "run NO git or gh commands. Reply with ONLY a REPORT whose last line is exactly " +
+  "run NO git or gh commands. Reply with ONLY a REPORT with exactly one anchored " +
+  "FIX_OUTCOME line (FIXED, BASE_RED, FLAKE, NEEDS_SCOPE <paths>, or NEEDS_DESIGN <reason>) " +
+  "before its last line, which is exactly " +
   "`COMMIT_MESSAGE: <type>(<scope>): <subject>` (Conventional Commits, lower-case " +
   "subject, at most 100 characters).";
 
