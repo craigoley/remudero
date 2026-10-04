@@ -5082,6 +5082,8 @@ export interface MainHealthPullRequestRef {
 
 export interface MainHealthRunHistoryEntry {
   readonly headSha: string;
+  readonly workflowName?: string;
+  readonly runId?: number;
   readonly conclusion?: string;
   readonly url?: string;
   readonly pullRequests?: readonly MainHealthPullRequestRef[];
@@ -5236,6 +5238,57 @@ function mainHealthOperatorDetail(observation: MainHealthObservation): string {
   return lines.length > 0 ? ` ${lines.join(". ")}.` : "";
 }
 
+/** W1-T5490 — workflows whose latest real (non-cancelled) failed run on main reads main red even
+ *  when every required check is green: main-plan-guard is the only push-time witness that the plan
+ *  still loads, and lint-plan/claims never run on main's push. */
+export const MAIN_GUARD_WORKFLOWS: ReadonlySet<string> = new Set(["main-plan-guard"]);
+
+/** BACKSTOP (W1-T1266): completed main runs whose jobs the observer may read, at most, before
+ *  giving up on fallback evidence. The primary control is the first run that carries a required
+ *  check, which ends the search; this fires only when main-tripwire, CodeQL and other runs with no
+ *  required check crowd the newest completed history, and each candidate costs one jobs read. */
+export const MAIN_HEALTH_FALLBACK_RUN_LIMIT = 5;
+
+/** A superseded, skipped or stale run concluded nothing about the tree. */
+const MAIN_RUN_NON_VERDICT: ReadonlySet<string> = new Set(["CANCELLED", "SKIPPED", "STALE"]);
+
+function mainRunIsVerdict(run: MainHealthRunHistoryEntry): boolean {
+  const conclusion = (run.conclusion ?? "").toUpperCase();
+  return conclusion !== "" && !MAIN_RUN_NON_VERDICT.has(conclusion);
+}
+
+function isMainGuardRun(run: MainHealthRunHistoryEntry): boolean {
+  return run.workflowName !== undefined && MAIN_GUARD_WORKFLOWS.has(run.workflowName);
+}
+
+/** The latest real verdict of each {@link MAIN_GUARD_WORKFLOWS} member, newest-first history in,
+ *  only the failed ones out. A newer success supersedes an older failure; a cancelled run never does. */
+export function failedMainGuardRuns(history: readonly MainHealthRunHistoryEntry[]): MainHealthRunHistoryEntry[] {
+  const decided = new Set<string>();
+  const failed: MainHealthRunHistoryEntry[] = [];
+  for (const run of history) {
+    if (!isMainGuardRun(run) || decided.has(run.workflowName!) || !mainRunIsVerdict(run)) continue;
+    decided.add(run.workflowName!);
+    if (mainHealthFailureConclusion(run.conclusion)) failed.push(run);
+  }
+  return failed;
+}
+
+/** Completed, non-guard main runs (newest first) whose jobs may stand in for a head whose own
+ *  required runs were cancelled or are still pending. */
+export function mainHealthFallbackRuns(
+  history: readonly MainHealthRunHistoryEntry[],
+  limit: number = MAIN_HEALTH_FALLBACK_RUN_LIMIT,
+): MainHealthRunHistoryEntry[] {
+  return history.filter((run) => run.runId !== undefined && !isMainGuardRun(run) && mainRunIsVerdict(run)).slice(0, limit);
+}
+
+/** True when the head's own rollup concluded nothing: no required check yet, or one still pending
+ *  (a cancelled one included). An all-skipped/vacuous head DID complete, and is not replaced. */
+export function mainHealthHeadInconclusive(observation: MainHealthObservation): boolean {
+  return observation.state === "undetermined" && (observation.pendingChecks.length > 0 || observation.nonEvidenceChecks.length === 0);
+}
+
 /** Read main's rollup into a {@link MainHealthObservation}, reusing the exact dedupe and
  *  required-contexts filter {@link checksStateFromRollup} applies so the two can never disagree
  *  about which entries are in play — but judging them against a STRICTER question: skipped and
@@ -5245,6 +5298,7 @@ export function mainHealthFromRollup(
   rollup: readonly RollupCheckEntry[] | undefined,
   requiredContexts: Iterable<string> | undefined,
   vacuousSuccessNames: ReadonlySet<string> = PUSH_VACUOUS_SUCCESS_CHECK_NAMES,
+  options: { readonly cancelledIsPending?: boolean } = {},
 ): MainHealthObservation {
   const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
   const required = new Set(requiredContexts ?? []);
@@ -5273,7 +5327,9 @@ export function mainHealthFromRollup(
   for (const c of gate) {
     const name = c.name ?? c.context ?? "unknown";
     const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
-    if (REQUIRED_CHECK_FAIL.has(s)) {
+    // W1-T5490: main's push runs share one concurrency group, so a CANCELLED check there is a
+    // superseded run, not a verdict; the main-health observer reads it as outstanding.
+    if (REQUIRED_CHECK_FAIL.has(s) && !(options.cancelledIsPending && s === "CANCELLED")) {
       failingChecks.push(name);
     } else if (s === "SKIPPED" || vacuousSuccessNames.has(name)) {
       nonEvidenceChecks.push(name);
@@ -6154,6 +6210,8 @@ export interface MainLatestRun {
   sha: string;
   state: string;
   failingChecks: readonly string[];
+  /** Absent on legacy rows: absence of a name is evidence only when the observer supplied its census. */
+  observedChecks?: readonly string[];
 }
 
 export function mainLatestRunFromLedger(lines: readonly Record<string, unknown>[]): MainLatestRun | undefined {
@@ -6161,7 +6219,12 @@ export function mainLatestRunFromLedger(lines: readonly Record<string, unknown>[
   for (const line of lines) {
     if (line.step !== "main.health.observed" || typeof line.sha !== "string" || typeof line.state !== "string") continue;
     const failing = Array.isArray(line.failing_checks) ? line.failing_checks.filter((n): n is string => typeof n === "string") : [];
-    latest = { sha: line.sha, state: line.state, failingChecks: failing };
+    latest = {
+      sha: line.sha, state: line.state, failingChecks: failing,
+      ...(Array.isArray(line.observed_checks)
+        ? { observedChecks: line.observed_checks.filter((n): n is string => typeof n === "string") }
+        : {}),
+    };
   }
   return latest;
 }
@@ -6198,6 +6261,12 @@ export function decideBaseRed(
 ): BaseRedDecision {
   if (!isBlockedCi(pr)) return { kind: "own" };
   const names = (pr.ciFailures ?? []).map((failure) => failure.name);
+  if (main?.state === "red" && main.observedChecks !== undefined) {
+    // A known passing check is this diff's red, even beside an inherited failure.
+    if (names.some((name) => main.observedChecks!.includes(name) && !main.failingChecks.includes(name))) return { kind: "own" };
+    const absent = names.find((name) => !main.observedChecks!.includes(name));
+    if (absent !== undefined) return { kind: "wait", check: absent };
+  }
   const shared = main?.state === "red" ? names.find((name) => main.failingChecks.includes(name)) : undefined;
   if (shared !== undefined) return { kind: "wait", check: shared };
   const key = `${pr.prNumber}@${pr.headSha}`;
@@ -11716,13 +11785,15 @@ export async function runSweep(
                     outcome = `error: ${String((e as Error)?.message ?? e)}`;
                   }
                   appendLine(deps.ledgerPath, { ...row, step: BASE_RED_REFRESH_STEP, outcome });
-                  standDownReason = `base red: ${baseRed.check} failed on main too; main is green at ${mainSha}, so the branch refresh was requested (${outcome}) — no fix dispatched`;
+                  standDownReason = `base red: ${baseRed.check} was held while main was red; main is green at ${mainSha}, so the branch refresh was requested (${outcome}) — no fix dispatched`;
                   break;
                 }
                 if (!baseRedHistory.stoodDown.has(`${pr.prNumber}@${pr.headSha}`)) appendLine(deps.ledgerPath, { ...row, step: BASE_RED_STOOD_DOWN_STEP });
                 standDownReason = baseRed.kind === "refresh"
-                  ? `base red: ${baseRed.check} failed on main too; main is green, but this pass's one branch refresh is spent or unwired — no fix dispatched`
-                  : `base red: ${baseRed.check} also fails on main's latest run (${mainSha}) — not this diff's; no fix dispatched, the branch refreshes once main is green`;
+                  ? `base red: ${baseRed.check} was held while main was red; main is green, but this pass's one branch refresh is spent or unwired — no fix dispatched`
+                  : mainLatestRun?.state === "red" && mainLatestRun.observedChecks !== undefined && !mainLatestRun.observedChecks.includes(baseRed.check)
+                    ? `base red: ${baseRed.check} is absent from main's latest run (${mainSha}), and main is red — no fix dispatched, the branch refreshes once main is green`
+                    : `base red: ${baseRed.check} also fails on main's latest run (${mainSha}) — not this diff's; no fix dispatched, the branch refreshes once main is green`;
                 break;
               }
               // W1-T4586 — A LIVE RUN FOR THIS HEAD SUPERSEDES ITS RED. Runs on one head share the
