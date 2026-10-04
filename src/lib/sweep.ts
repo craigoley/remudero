@@ -8490,8 +8490,8 @@ export function carriesTaskTrailer(pr: Pick<OpenPrView, "taskId" | "body">): boo
   return pr.body === undefined || extractTaskTrailerId(pr.body) !== undefined;
 }
 
-/** W1-T5544: a proof-repair round refused this many times at ONE head hands the PR to W1-T4943's plan-shard
- *  flag (`dispatchPlanOnlyRepair`) instead — the ladder's second rung. */
+/** PRIMARY CONTROL on how many refused proof-repair rounds one head may spend (W1-T5544); at this many the PR is handed to
+ *  W1-T4943's plan-shard flag (`dispatchPlanOnlyRepair`) instead — the ladder's second rung. */
 export const MAX_PROOF_REPAIR_REFUSALS_PER_HEAD = 2;
 
 /** W1-T5544: the stale-proof evidence a metadata-only red carries, marked `gate-log` — undefined unless the PR is trailered

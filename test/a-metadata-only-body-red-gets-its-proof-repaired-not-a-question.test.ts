@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -31,11 +31,13 @@ import {
   acceptanceGateBodyRepair,
   buildFixRungDispatchArgs,
   PROOF_REPAIR_FIX_MODE_RULES,
+  planCriteriaAtHeadForRepair,
   proofRepairPromptLines,
   proofRepairRefusal,
   proofRepairRoundRefusalInWorktree,
   proofRepairStageablePaths,
   repairPrMetadata,
+  runFixRung,
   trailerBodyDivergenceRepair,
   wrappedGrepBodyRepair,
 } from "../src/run-task.js";
@@ -430,4 +432,147 @@ test("W1-T5544: gate-log evidence makes a proof-only amendment eligible", () => 
   assert.equal(nonDiscriminating.kind === "refused" ? nonDiscriminating.reason : undefined, "not-discriminating");
   assert.equal(created.length, 1, "no refused proposal opened a second PR");
 
+});
+
+// ── the repair round through runFixRung itself ──────────────────────────────────────────────────────────────────
+
+function realWorktree(): string {
+  const repo = mkdtempSync(join(tmpdir(), "rmd-proof-repair-rung-"));
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim();
+  git("init", "-q", "-b", "main");
+  mkdirSync(join(repo, "test"));
+  writeFileSync(join(repo, "test", "views.test.ts"), "// base\n");
+  git("add", "-A");
+  git("-c", "commit.gpgsign=false", "commit", "-q", "-m", "base");
+  git("update-ref", "refs/remotes/origin/main", git("rev-parse", "HEAD"));
+  return repo;
+}
+
+async function proofRepairRung(refusal: { reason: string; undeclared: string[] } | undefined) {
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const prompts: string[] = [];
+  const pushes: string[] = [];
+  const worktreePath = realWorktree();
+  const outcome = await runFixRung({
+    taskId: TASK,
+    runId: `${TASK}-1791090003045`,
+    task: { id: TASK, title: "stale proof fixture", acceptance: PLAN, files: ["src/lib/views.ts", "test/views.test.ts"] },
+    prUrl: PR_URL,
+    branch: `run-${TASK}-1791090003045`,
+    worktreePath,
+    initialSessionId: "",
+    mount: MOUNT,
+    settingsFile: "/tmp/rmd-proof-repair-rung-settings.json",
+    config: {} as Config,
+    budgetUsd: 5,
+    strikeCap: 1,
+    initialReview: {
+      state: "failure",
+      criteria: [{ claim: PLAN[1]!.claim, proof: STALE_PROOF, met: true, reason: "capped proof requires base discrimination", proof_exec: "executed_stale" }],
+      testTheater: false,
+      summary: "sweep-reconstructed capped review (1 proof(s) need discrimination)",
+      floorDegraded: false,
+      capped: true,
+      keywordOnly: false,
+      planOnly: false,
+      headSha: HEAD,
+      reviewerOutcome: "sweep-reconstructed",
+    },
+    proofDiscrimination: {
+      source: "gate-log",
+      proofs: [{ claim: PLAN[1]!.claim, proof: STALE_PROOF, proofExec: "executed_stale" }],
+    },
+    reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: worktreePath, reviewerMount: MOUNT },
+    deps: {
+      spawn: async (args) => {
+        prompts.push(args.prompt);
+        return {
+          sessionId: "fix-session",
+          costUsd: 0,
+          numTurns: 1,
+          text: "Renamed the test.\n\nCOMMIT_MESSAGE: test(views): name the claim\n",
+          blocks: [],
+          stderr: "",
+          subtype: "success",
+          isError: false,
+          apiError: false,
+          permissionDenials: [],
+          childEnvKeys: [],
+          model: "default",
+          effort: "default",
+          tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+          modelUsage: {},
+          compactionEvents: [],
+          qualitySuspect: false,
+        };
+      },
+      proofRepairRoundRefusal: () => refusal,
+      waitForCiGreen: async () => "red",
+      fetchPrBody: async () => `Remudero-Task: ${TASK}`,
+      runReview: async () => {
+        throw new Error("no review is reachable while CI is red");
+      },
+      push: (_wt, branch) => {
+        pushes.push(branch);
+      },
+      issues: { create: () => "https://github.com/acme/remudero/issues/1", listOpen: () => [], comment: () => {} },
+      ledgerPath: join(mkdtempSync(join(tmpdir(), "rmd-proof-repair-rung-ledger-")), "ledger.ndjson"),
+      log: (step, extra) => logs.push({ step, extra }),
+      say: () => {},
+      account: (r) => r,
+    },
+  });
+  return { outcome, logs, prompts, pushes };
+}
+
+test("W1-T5544: the repair round stages only test files and pushes only discriminating proofs — through runFixRung", async () => {
+  const refused = await proofRepairRung({ reason: "proof-repair round pushed nothing: proof `x` still passes at the merge base", undeclared: [] });
+  assert.equal(refused.pushes.length, 0, "a refused proof-repair round never pushes");
+  assert.equal(refused.outcome.outcome, "stood_down");
+  assert.match(refused.prompts[0]!, /PROOF-REPAIR ROUND \(W1-T5544\)/);
+  assert.match(refused.prompts[0]!, /You MAY edit ONLY these test paths: test\/views\.test\.ts\./, "src/lib/views.ts is declared but is not stageable");
+  assert.equal(refused.logs.find((l) => l.step === "fix.dispatch")?.extra?.mode, "proof-repair");
+  const row = refused.logs.find((l) => l.step === "fix.commit_refused");
+  assert.match(String(row?.extra?.reason), /still passes at the merge base/, "the refusal is a ledgered commit refusal, which is never a strike");
+  assert.equal(refused.logs.find((l) => l.step === "fix.dispatch")?.extra?.strike, 1);
+
+  const accepted = await proofRepairRung(undefined);
+  assert.equal(accepted.pushes.length, 1, "a round whose proofs pass at head and fail at base is pushed");
+  assert.equal(accepted.logs.some((l) => l.step === "fix.commit_refused"), false);
+});
+
+test("W1-T5544: the worktree gate runs check-proof against the merge base, and the body cure reads the plan at head", () => {
+  // A real child process per proof: the stub run-task answers 5 (stale at base) for a proof named `stale`, 0 otherwise. The
+  // scratch repo lives under the checkout so `--import tsx` resolves the same loader the real child uses.
+  const repo = mkdtempSync(join(process.cwd(), ".rmd-t5544-gate-"));
+  try {
+    const git = (...args: string[]) =>
+      execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim();
+    git("init", "-q", "-b", "main");
+    mkdirSync(join(repo, "src"));
+    mkdirSync(join(repo, "test"));
+    writeFileSync(join(repo, "src", "run-task.ts"), "process.exit(String(process.argv[3]).includes('stale') ? 5 : 0);\n");
+    writeFileSync(join(repo, "test", "views.test.ts"), "// base\n");
+    git("add", "-A");
+    git("-c", "commit.gpgsign=false", "commit", "-q", "-m", "base");
+    const start = git("rev-parse", "HEAD");
+    git("update-ref", "refs/remotes/origin/main", start);
+    writeFileSync(join(repo, "test", "views.test.ts"), "// renamed\n");
+    git("add", "-A");
+    git("-c", "commit.gpgsign=false", "commit", "-q", "-m", "rename");
+    const input = { worktreePath: repo, roundStartSha: start, stageable: ["test/views.test.ts"] };
+    assert.equal(proofRepairRoundRefusalInWorktree({ ...input, proofs: ["unit test: discriminates"] }), undefined);
+    const stale = proofRepairRoundRefusalInWorktree({ ...input, proofs: ["unit test: discriminates", "unit test: stale one"] });
+    assert.match(stale!.reason, /unit test: stale one` still passes at the merge base/);
+
+    // The body cure's plan read: an unreadable head is no cure (never a guessed plan); a readable head resolves the
+    // task's real criteria through the same resolver the gate uses.
+    assert.deepEqual(planCriteriaAtHeadForRepair(`Remudero-Task: ${TASK}`, "0123456789abcdef0123456789abcdef01234567", repo), []);
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const real = planCriteriaAtHeadForRepair("Remudero-Task: W1-T5544", head);
+    assert.ok(real.length > 0 && real.every((c) => c.proof.length > 0), "W1-T5544's own criteria resolve at this checkout's head");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
 });

@@ -4976,8 +4976,7 @@ export async function repairPrMetadata(
  * resolver the gate and the reviewer read, against the checkout this process runs in. The head commit is fetched
  * once if it is not local; a head that cannot be read yields `[]` (no divergence cure), never a guessed plan.
  */
-function planCriteriaAtHeadForRepair(body: string, headSha: string): readonly AcceptanceCriterion[] {
-  const cwd = process.cwd();
+export function planCriteriaAtHeadForRepair(body: string, headSha: string, cwd: string = process.cwd()): readonly AcceptanceCriterion[] {
   try {
     execFileSync("git", ["-C", cwd, "cat-file", "-e", `${headSha}^{commit}`], { stdio: "pipe" });
   } catch {
