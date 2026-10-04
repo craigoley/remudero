@@ -18,6 +18,7 @@ export async function reconcileFleetState(
   rows: readonly FleetStateRow[],
   history: readonly Record<string, unknown>[],
   record: (event: Record<string, unknown> & { step: string }) => void,
+  onEscalated?: (gap: Pick<FleetStateRow, "pipeline" | "target" | "desired"> & { gap_id: string; reason: string }) => void,
 ): Promise<void> {
   const attempted = new Set(history.filter((e) => e.step === "reconcile.repaired" || e.step === "reconcile.repair_failed").map((e) => e.gap_id));
   const escalated = new Set(history.filter((e) => e.step === "reconcile.escalated").map((e) => e.gap_id));
@@ -33,8 +34,10 @@ export async function reconcileFleetState(
       if (row.inFlight && await row.inFlight() !== false) continue;
       if (attempted.has(gap_id)) {
         if (!escalated.has(gap_id)) {
-          record({ ...fields, step: "reconcile.escalated", observed, reason: "gap persists after its repair attempt" });
+          const event = { ...fields, step: "reconcile.escalated", observed, reason: "gap persists after its repair attempt" };
+          record(event);
           escalated.add(gap_id);
+          onEscalated?.(event);
         }
         continue;
       }

@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
+import { createHash } from "node:crypto";
 import {
   deployStateRows, mainWorkflowStateRows, reconcileFleetState,
   type DeployStateReader, type FleetStateRow, type MainWorkflowStateReader,
@@ -21,7 +22,7 @@ test("W1-T4840: a gap between desired and observed state is repaired once and re
     observe: () => observed,
     repair: () => { repairs++; observed = true; },
   };
-  const pass = () => reconcileFleetState([row], ledger, (record) => ledger.push(record));
+  const pass = () => reconcileFleetState([row], ledger, (record) => ledger.push(record), () => assert.fail("closed gaps do not escalate"));
   await pass();
   await pass();
   assert.equal(observed, true, "removing the repair leaves the gap open");
@@ -36,6 +37,7 @@ test("W1-T4840: a gap between desired and observed state is repaired once and re
 
 test("W1-T4840: a gap its repair did not close escalates once", async () => {
   const ledger: Record<string, unknown>[] = [];
+  const escalations: Record<string, unknown>[] = [];
   let repairs = 0;
   const row: FleetStateRow = {
     pipeline: "ci", target: "main-sha", desired: "workflow run",
@@ -43,12 +45,16 @@ test("W1-T4840: a gap its repair did not close escalates once", async () => {
     repair: () => { repairs++; },
   };
   for (let cycle = 0; cycle < 4; cycle++) {
-    await reconcileFleetState([row], [...ledger], (record) => ledger.push(record));
+    await reconcileFleetState([row], [...ledger], (record) => ledger.push(record), (gap) => {
+      assert.equal(ledger.at(-1)?.step, "reconcile.escalated", "the decision is recorded before notifying its owner");
+      escalations.push(gap);
+    });
   }
   assert.equal(repairs, 1);
   assert.deepEqual(ledger.map((r) => r.step), ["reconcile.repaired", "reconcile.escalated"]);
   assert.equal(ledger[1]?.target, "main-sha");
   assert.match(String(ledger[1]?.reason), /persist/);
+  assert.deepEqual(escalations, [ledger[1]], "the owner receives exactly the newly recorded escalation");
 });
 
 test("W1-T4840: healthy, unknown and active states authorize no repair or escalation", async () => {
@@ -304,6 +310,12 @@ test("W1-T4840: sweep owns reconciliation, skips light and dry passes, and emits
   assert.equal(ledger.filter((e) => e.step === "reconcile.escalated").length, 1);
   assert.equal(ledger.filter((e) => e.step === "incident.event").length, 1);
   assert.equal(ledger.find((e) => e.step === "incident.event")?.kind, "invariant");
+  const escalation = ledger.findIndex((e) => e.step === "reconcile.escalated");
+  const incident = ledger.findIndex((e) => e.step === "incident.event");
+  assert.ok(incident > escalation, "the incident follows its recorded escalation");
+  assert.equal(ledger[incident]?.name, "reconcile.ci");
+  assert.equal(ledger[incident]?.message, "run: gap persists after its repair attempt (gap)");
+  assert.equal(ledger[incident]?.fingerprint, createHash("sha256").update(JSON.stringify(["ci", "gap"])).digest("hex"));
 });
 
 test("W1-T4840: an unreadable fleet snapshot does not fail the sweep", async () => {
@@ -383,6 +395,11 @@ test("W1-T4840: repairs survive plain and gzip rotations and incomplete history 
     await reconcileFleetState(snapshot.rows, snapshot.history, (e) => events.push(e));
     assert.equal(reader.builds, 1);
     assert.equal(events[1]?.step, "reconcile.escalated");
+    writeFileSync(plain, events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+    const afterEscalation = await effects.readFleetState!([]);
+    await reconcileFleetState(afterEscalation.rows, afterEscalation.history, (e) => events.push(e), () => assert.fail("archived escalation must not notify twice"));
+    assert.equal(reader.builds, 1);
+    assert.equal(events.length, 2, "archived escalation suppresses duplicate records");
     writeFileSync(gzip, "not gzip");
     await assert.rejects(effects.readFleetState!([]), /history unreadable/);
     rmSync(gzip);

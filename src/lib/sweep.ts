@@ -10826,13 +10826,12 @@ export async function runSweep(
       await reconcileFleetState(rows, history, (event) => {
         appendLine(deps.ledgerPath, { ...event, run_id: deps.runId, task_id: "SWEEP" });
         log(event.step, event);
-        if (event.step === "reconcile.escalated") {
-          appendLine(deps.ledgerPath, {
-            run_id: deps.runId, task_id: "INCIDENT", step: "incident.event", source: "daemon", kind: "invariant",
-            name: `reconcile.${event.pipeline}`, message: `${event.desired}: ${event.reason} (${event.target})`,
-            fingerprint: createHash("sha256").update(String(event.gap_id)).digest("hex"),
-          });
-        }
+      }, (gap) => {
+        appendLine(deps.ledgerPath, {
+          run_id: deps.runId, task_id: "INCIDENT", step: "incident.event", source: "daemon", kind: "invariant",
+          name: `reconcile.${gap.pipeline}`, message: `${gap.desired}: ${gap.reason} (${gap.target})`,
+          fingerprint: createHash("sha256").update(gap.gap_id).digest("hex"),
+        });
       });
     } catch (error) {
       log("reconcile.unreadable", { reason: String((error as Error)?.message ?? error) });
