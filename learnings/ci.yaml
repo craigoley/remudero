@@ -155,3 +155,49 @@
     blocks; its CLI signal prints the proposed baseline row when a file exceeds its ceiling.
   src: "ci-learning:5505:comment-load-ratchet"
   cited: "2026-09-29"
+
+- id: a-board-wide-plan-red-is-main
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**", .github/workflows/ci.yml, src/lib/sweep.ts]
+  fact: >-
+    When lint-plan, claims and every coverage shard go red together on many unrelated PRs, main's
+    plan does not load. This happened three times: #8714 on 2026-10-02, #8877 on 2026-10-03, and
+    #8922 later that day, each after two machine plan PRs merged duplicate `priority:` keys seconds
+    apart. #8936 was a duplicate fix attempt for the #8922 incident, not another occurrence. Check
+    main-plan-guard on main and search
+    the open PRs for an existing fix first. Once main is green, run `gh api -X PUT
+    repos/<o>/<r>/pulls/<n>/update-branch` on each inherited-red PR: a job re-run replays the OLD
+    merge ref and stays red.
+  assertion: 'test -f test/no-plan-shard-carries-a-duplicate-key.test.ts'
+  src: PRs #8714, #8877, #8922 (incidents); #8936 (duplicate fix attempt for #8922)
+  cited: "2026-10-03"
+
+- id: hand-review-collides-with-the-daemon
+  subsystem: ci
+  lifecycle: active
+  files: [src/lib/review.ts]
+  fact: >-
+    The remudero-review pending claim is read from the LOCAL ledger only, so `rmd review` on one
+    host cannot see a daemon review already in flight, and vice versa. From 09-26 to 10-03, 102
+    reviews reached post time after the PR had merged and were refused; 82 were from the daemon
+    review lane (19 run-task, 1 dep-review). In a sample of 12, the PR had merged 12 seconds to 10
+    minutes earlier, and 11 merges were by the operator identity, consistent with cross-host
+    duplicate work. Until W1-T5540 lands, check the PR's remudero-review status for "review in
+    progress (owned by run ...)" before reviewing by hand.
+  src: "review.post_refused rows 09-26..10-03 (102 total: 82 daemon, 19 run-task, 1 dep-review); W1-T5540"
+  cited: "2026-10-03"
+
+- id: strikes-exhausted-counts-rows
+  subsystem: ci
+  lifecycle: active
+  files: [src/lib/sweep.ts, src/run-task.ts]
+  fact: >-
+    Historical "fix strikes exhausted (2/2)" rows can overstate real strikes. Before W1-T5542,
+    `priorStrikesFor` counted `fix.dispatch` rows and each `runFixRung` pass restarted numbering at
+    strike 1, so two refused rounds could exhaust the display without moving the head or reaching a
+    verdict. That was all 16 exhaustions from 09-26 to 10-03; #8868 later read 3/2. For historical
+    cases, inspect `fix.commit_refused` rows. W1-T5542 has since changed the tally to count round
+    outcomes, not refusals.
+  src: ledger 09-26..10-03; W1-T5542
+  cited: "2026-10-03"
