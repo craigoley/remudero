@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: retro and triage lanes priced at $0"
   plan_refs: [W1-T4066, W1-T2239, W1-T5526, W1-T2572]
   files: [src/lib/worker-provider.ts, src/lib/worker.ts, src/lib/spend-rows.ts, src/lib/retro.ts, test/a-codex-row-carries-its-notional-price.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

@@ -14,7 +14,7 @@
   files:
     - src/lib/sweep.ts
     - test/the-contradictory-disposition-escalates-once-per-head.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-09-30 by the coordinator. While console PR #1866's review FAILed on proofs its

@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: reviewing buildMainHealthRung (W1-T5490, #8961)"
   plan_refs: [W1-T5490, W1-T5283, W1-T2787, W1-T4472]
   files: [src/lib/main-health-rung.ts, test/the-main-health-rung-reads-run-history-once-per-head.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

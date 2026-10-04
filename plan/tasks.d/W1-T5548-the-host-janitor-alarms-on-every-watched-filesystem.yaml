@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: /mnt/scratch research (per-filesystem free-space alarm)"
   plan_refs: [W1-T5513, W1-T2767, W1-T5518, W1-T5549]
   files: [deploy/rmd-host-cleanup.sh, test/the-host-janitor-alarms-on-every-watched-filesystem.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

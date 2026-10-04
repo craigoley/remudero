@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: review of W1-T5403 (#8897) beside the loop-stall work"
   plan_refs: [W1-T5403, W1-T5481, W1-T5361, W1-T5366, W1-T100]
   files: [src/lib/sweep.ts, src/run-task.ts, test/the-handed-off-head-risk-judge-never-holds-the-full-sweep.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

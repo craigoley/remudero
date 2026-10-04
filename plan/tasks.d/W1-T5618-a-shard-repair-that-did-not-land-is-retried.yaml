@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: reviewing the W1-T5519 plan self-repair lane (#8991, #9046)"
   plan_refs: [W1-T5519, W1-T5472, W1-T5348, W1-T4409]
   files: [src/run-task.ts, test/a-shard-repair-that-did-not-land-is-retried.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

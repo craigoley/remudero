@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03, ruling R3 (strike exhaustion: refresh if the base moved, else close and requeue with a failure digest at most twice, then one assigned digest issue per cause); week-rows extract 2026-09-26..2026-10-03"
   plan_refs: [W1-T2789, W1-T2788, W1-T3390, W1-T164, W1-T5490]
   files: [src/lib/strike-ladder.ts, src/lib/sweep.ts, src/lib/ledger.ts, test/strike-exhaustion-climbs-a-ladder-before-it-reaches-a-human.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: credit research; operator PR #8962 un-credited (W1-T380, #1437) by hand"
   plan_refs: [W1-T3996, W1-T413, W1-T3067, W1-T380, W1-T5553]
   files: [src/lib/status.ts, test/a-durable-trailer-credit-saved-before-the-diff-refusal-is-revalidated.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

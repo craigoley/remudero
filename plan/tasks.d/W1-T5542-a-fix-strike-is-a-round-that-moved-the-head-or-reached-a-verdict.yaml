@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03 (coordinator follow-up to W1-T5536): one definition of a fix strike; week-rows extract 2026-09-26..2026-10-03"
   plan_refs: [W1-T2520, W1-T2452, W1-T2788, W1-T127, W1-T4207, W1-T5032, W1-T5334, W1-T5536]
   files: [src/lib/sweep.ts, src/run-task.ts, test/a-fix-strike-is-a-round-that-moved-the-head-or-reached-a-verdict.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
