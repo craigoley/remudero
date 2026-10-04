@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import fs, { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -389,10 +389,11 @@ test("the sealed reviewer refuses an entry swapped for a symlink or a FIFO durin
       const decoy = join(args.workerHome, "value.ts");
       mkdirSync(args.workerHome, { recursive: true });
       writeFileSync(decoy, readFileSync(join(args.cwd, "value.ts")), { mode: 0o444 });
+      const sealedMode = statSync(args.cwd).mode;
       chmodSync(args.cwd, 0o755);
       rmSync(join(args.cwd, "value.ts"));
       plant(join(args.cwd, "value.ts"));
-      chmodSync(args.cwd, 0o555);
+      chmodSync(args.cwd, sealedMode);
       return { isError: false, apiError: false, text: JSON.stringify({ verdict: "pass", findings: [] }),
         sessionId: "provider-session", servedModel: selection.model, effort: selection.effort,
         workerDurationMs: 5, costUsd: 0.01, tokens: { input: 10, output: 2 } };
