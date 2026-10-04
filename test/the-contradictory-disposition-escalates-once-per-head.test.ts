@@ -129,6 +129,9 @@ test("contradictory backoff doubles its interval and caps it at four hours", asy
     assert.equal(rows.length, before + 1);
     interval = Math.min(interval * 2, 4 * 60 * INTERVAL);
     assert.equal(rows.at(-1)?.contradictory_next_row_at, at + interval);
+    assert.equal(rows.at(-1)?.stand_down_reason,
+      `contradictory review unchanged — pass ${3 + i * 2}; first escalation ` +
+      `${new Date(NOW).toISOString()}; next backoff row ${new Date(at + interval).toISOString()}`);
   }
   assert.equal(f.escalations.length, 1);
 });

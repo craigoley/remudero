@@ -13042,7 +13042,8 @@ export async function runSweep(
           state.next = now + state.interval;
         }
         standDownReason = `contradictory review unchanged — pass ${state.passes}; first escalation ` +
-          `${new Date(state.first).toISOString()}; next backoff row ${new Date(state.next).toISOString()}`;
+          `${clockFromMillisFn(() => state.first).iso()}; next backoff row ` +
+          `${clockFromMillisFn(() => state.next).iso()}`;
       }
       extraDisposedFields = { ...extraDisposedFields, contradictory_key: state.key,
         contradictory_first_escalation_at: state.first, contradictory_pass_count: state.passes,
