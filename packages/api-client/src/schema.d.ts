@@ -614,6 +614,8 @@ export interface components {
     SubmitFeedbackResult: {
       ok: boolean;
       entry: FeedbackEntry;
+      /** W1-T5626: `queued` when this write's feedback record was staged under the state root for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when the record was not staged. */
+      landing?: "queued";
     };
     /** One bounded activity, workstream, or authoritative artifact row. */
     OperatorActivityItem: {
@@ -739,6 +741,8 @@ export interface components {
       id: string;
       status: string;
       proposalPr: string | null;
+      /** W1-T5626: `queued` when this write's feedback record was staged under the state root for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when the record was not staged. */
+      landing?: "queued";
     };
     OperatorAgentEvidence: {
       label: string;
@@ -2095,6 +2099,8 @@ export interface components {
       mode?: string;
       taskId: string;
       feedback: FeedbackEntry;
+      /** W1-T5626: `queued` when this write's feedback record was staged under the state root for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when the record was not staged. */
+      landing?: "queued";
     };
     ExternalEffectPostcondition: {
       path: string;
@@ -3696,6 +3702,8 @@ export interface components {
       threadId: string;
       feedback: FeedbackEntry;
       interpretation: ReplyInterpretation;
+      /** W1-T5626: `queued` when this write's feedback record was staged under the state root for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when the record was not staged. */
+      landing?: "queued";
     };
     /** The closed set of routes a signed escalation answer link may name, each at the write tier serve.ts registers for it (src/lib/escalate.ts's `ESCALATION_OPTION_ROUTES`). */
     EscalationOptionRoute: "/v1/manual/approve" | "/v1/drain/kick" | "/v1/drain/run" | "/v1/inbox/approve" | "/v1/skills/run" | "/v1/control/pause" | "/v1/control/resume" | "/v1/control/stop" | "/v1/escalation/mark-handled" | "/v1/questions/answer" | "/v1/drain/feedback" | "/v1/auth/scope";
