@@ -24,6 +24,7 @@ function fixture(options: FixtureOptions = {}) {
   const runMarker = join(root, "container-started");
   const dockerPath = join(binDir, "docker");
   mkdirSync(binDir, { recursive: true });
+  writeFileSync(join(binDir, "az"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   mkdirSync(stateDir, { recursive: true });
   mkdirSync(serveRepoDir, { recursive: true });
   writeFileSync(callsPath, "");

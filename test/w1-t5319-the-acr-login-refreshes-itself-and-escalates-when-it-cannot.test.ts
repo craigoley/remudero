@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -110,10 +110,28 @@ test("W1-T5319: a host without az publishes unavailable even with an old failed 
   const f = fixture(t);
   f.run("deploy/acr-login.sh", ["--refresh"], { AZ_RESULT: "1" });
   rmSync(join(f.bin, "az"));
+  const ambient = join(f.root, "ambient-bin");
+  mkdirSync(ambient);
+  writeFileSync(join(ambient, "az"), "#!/bin/sh\nexit 99\n", { mode: 0o755 });
+  f.env.PATH = `${f.bin}:${ambient}:${process.env.PATH}`;
+  const inherited = spawnSync("bash", ["-c", "command -v az"], { env: f.env, encoding: "utf8" });
+  assert.equal(inherited.status, 0);
+  assert.equal(inherited.stdout.trim(), join(ambient, "az"), "removing the local stub exposes an ambient az");
+  // Keep the real shell utilities while excluding every ambient Azure CLI installation.
+  for (const tool of ["bash", "cat", "date", "dirname", "mkdir", "mktemp", "mv", "rm",
+    "grep", "head", "sed", "ls", "wc", "tr", "awk", "df", "du", "uname", "hostname", "git"]) {
+    const resolved = spawnSync("bash", ["-c", 'command -v "$1"', "fixture", tool], { encoding: "utf8" });
+    assert.equal(resolved.status, 0, `${tool} must be available to the isolated fixture`);
+    symlinkSync(resolved.stdout.trim(), join(f.bin, tool));
+  }
+  f.env.PATH = f.bin;
+  const absent = spawnSync("bash", ["-c", "command -v az"], { env: f.env, encoding: "utf8" });
+  assert.equal(absent.status, 1, "the fixture must exclude az even when the runner has it installed");
   const refresh = f.run("deploy/acr-login.sh", ["--refresh"]);
   assert.equal(refresh.status, 0, refresh.stderr);
   const record = JSON.parse(readFileSync(join(f.state, "acr-login.json"), "utf8"));
   assert.equal(record.result, "unavailable");
+  assert.match(record.reason, /Azure CLI is not installed/);
   writeFileSync(join(f.state, "acr-login.json"), JSON.stringify({ ...record, result: "failed" }));
   const beat = f.run("scripts/fleet-heartbeat.sh");
   assert.equal(parseHeartbeatPayload(beat.stdout).acr_login_result, "unavailable");

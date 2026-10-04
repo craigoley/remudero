@@ -70,7 +70,7 @@ test("W1-T2877: check mode reports missing units and changes nothing", () => {
 
     const install = run(["--install"], {}, root);
     assert.equal(install.status, 0, `install failed: ${install.stderr}`);
-    assert.equal(countFiles(root), 8, "install must render all seven units and the scratch-mount library");
+    assert.equal(countFiles(root), 11, "install must also render the registry helper, service, and timer");
 
     const after = run([], {}, root);
     assert.equal(after.status, 0, "check after install must be clean");
@@ -491,7 +491,10 @@ test("W1-T3245: the watchdog tick evaluates a recycle and no second timer exists
       [],
       "no separate deploy service or timer may be rendered",
     );
-    assert.equal(units.length, 5, "the five existing units, and no more");
+    assert.deepEqual(units.sort(), [
+      "rmd-acr-login.service", "rmd-acr-login.timer", "rmd-fleet-watchdog.service",
+      "rmd-fleet-watchdog.timer", "rmd-fleet.service", "rmd-reap-stray.service", "rmd-reap-stray.timer",
+    ], "registry refresh adds only its service and timer to the existing units");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
