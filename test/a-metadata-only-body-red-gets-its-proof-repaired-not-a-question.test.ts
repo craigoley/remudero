@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 
+import { gitRepo } from "./helpers/git-repo.js";
 import type { AcceptanceCriterion } from "../src/lib/plan.js";
 import {
   proofAmendmentIneligibleReason,
@@ -303,9 +304,9 @@ test("W1-T5544: the repair round stages only test files and pushes only discrimi
 
   // The same gate over a REAL worktree: a round that staged a src path, and a round that staged nothing, are refused
   // from git alone — before any proof is run.
-  const repo = mkdtempSync(join(tmpdir(), "rmd-proof-repair-git-"));
-  const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim();
-  git("init", "-q", "-b", "main");
+  const fixture = gitRepo({ seedCommit: false, kind: "proof-repair-git" });
+  const repo = fixture.dir;
+  const git = fixture.git;
   mkdirSync(join(repo, "src"));
   mkdirSync(join(repo, "test"));
   writeFileSync(join(repo, "src", "a.ts"), "export const a = 1;\n");
@@ -436,11 +437,10 @@ test("W1-T5544: gate-log evidence makes a proof-only amendment eligible", () => 
 
 // ── the repair round through runFixRung itself ──────────────────────────────────────────────────────────────────
 
-function realWorktree(): string {
-  const repo = mkdtempSync(join(tmpdir(), "rmd-proof-repair-rung-"));
-  const git = (...args: string[]) =>
-    execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim();
-  git("init", "-q", "-b", "main");
+function seedProofRepairTree(): string {
+  const fixture = gitRepo({ seedCommit: false, kind: "proof-repair-rung" });
+  const repo = fixture.dir;
+  const git = fixture.git;
   mkdirSync(join(repo, "test"));
   writeFileSync(join(repo, "test", "views.test.ts"), "// base\n");
   git("add", "-A");
@@ -453,7 +453,7 @@ async function proofRepairRung(refusal: { reason: string; undeclared: string[] }
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const prompts: string[] = [];
   const pushes: string[] = [];
-  const worktreePath = realWorktree();
+  const worktreePath = seedProofRepairTree();
   const outcome = await runFixRung({
     taskId: TASK,
     runId: `${TASK}-1791090003045`,
@@ -544,12 +544,12 @@ test("W1-T5544: the repair round stages only test files and pushes only discrimi
 
 test("W1-T5544: the worktree gate runs check-proof against the merge base, and the body cure reads the plan at head", () => {
   // A real child process per proof: the stub run-task answers 5 (stale at base) for a proof named `stale`, 0 otherwise. The
-  // scratch repo lives under the checkout so `--import tsx` resolves the same loader the real child uses.
-  const repo = mkdtempSync(join(process.cwd(), ".rmd-t5544-gate-"));
+  // scratch repo gets this checkout's node_modules linked in AFTER its commits, so `--import tsx` resolves the loader the
+  // real child uses without the link ever entering a commit.
+  const fixture = gitRepo({ seedCommit: false, kind: "proof-repair-gate" });
+  const repo = fixture.dir;
   try {
-    const git = (...args: string[]) =>
-      execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim();
-    git("init", "-q", "-b", "main");
+    const git = fixture.git;
     mkdirSync(join(repo, "src"));
     mkdirSync(join(repo, "test"));
     writeFileSync(join(repo, "src", "run-task.ts"), "process.exit(String(process.argv[3]).includes('stale') ? 5 : 0);\n");
@@ -561,6 +561,7 @@ test("W1-T5544: the worktree gate runs check-proof against the merge base, and t
     writeFileSync(join(repo, "test", "views.test.ts"), "// renamed\n");
     git("add", "-A");
     git("-c", "commit.gpgsign=false", "commit", "-q", "-m", "rename");
+    symlinkSync(join(process.cwd(), "node_modules"), join(repo, "node_modules"));
     const input = { worktreePath: repo, roundStartSha: start, stageable: ["test/views.test.ts"] };
     assert.equal(proofRepairRoundRefusalInWorktree({ ...input, proofs: ["unit test: discriminates"] }), undefined);
     const stale = proofRepairRoundRefusalInWorktree({ ...input, proofs: ["unit test: discriminates", "unit test: stale one"] });
