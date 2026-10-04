@@ -36,4 +36,6 @@
     Any one of the five learning ids is absent from its active shard, or the golden verdict's
     corresponding grep does not execute and pass against its fixture checkout.
   origin: "operator-directed review of PR #9133, 2026-10-04"
-  note: "Human review is required before merge: these entries change injected worker and review guidance."
+  note: |
+    HUMAN REVIEW REQUIRED before merge: these entries change active worker and review prompts,
+    so verify every incident citation against its source before accepting the guidance.
