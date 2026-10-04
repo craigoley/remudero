@@ -31,6 +31,9 @@
     known members `pr.opened` and `implement.done`, so a scanner that finds nothing fails.
   acceptance:
     - claim: "every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS or a reasoned exemption, and the census finds pr.opened and implement.done as its positive control"
+      kind: guard
       proof: "unit test: test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts"
+    - claim: "the census is a new test file that checks every priced ledger step against CONFIG_GARDEN_LEDGER_STEPS"
+      proof: "grep: every ledger step written with pr_url or cost_usd is in CONFIG_GARDEN_LEDGER_STEPS in test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts"
   falsifier: |
     Remove `pr.head_provider` from `CONFIG_GARDEN_LEDGER_STEPS`. The census names it.
