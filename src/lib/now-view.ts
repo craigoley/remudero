@@ -36,7 +36,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { deriveLastPoll, readDiskFreeBytes, readGhRateLimitRemaining } from "./daemon-health.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { feedbackDir, listFeedback, type FeedbackEntry } from "./feedback.js";
-import { projectChangeManagementGates, projectHumanGates, type HumanGateObservation, type HumanGateProjection, type HumanGateSource } from "./human-gate.js";
+import { measureFeedbackAge, projectChangeManagementGates, projectFeedbackGates, projectHumanGates, type FeedbackAgeRoot, type FeedbackAgeEvidence, type HumanGateObservation, type HumanGateProjection, type HumanGateSource } from "./human-gate.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { readTaskActivity } from "./ledger-projector.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsSync, rotationStampIso, type LedgerRotationMemo, type LedgerRotationMemoPass } from "./ledger-union.js";
@@ -52,6 +52,7 @@ import {
   type QuestionStoreLine,
 } from "./now-decisions.js";
 import type { BoardIssueRest, BoardPrRest } from "./open-prs-rest.js";
+import { projectReconciledFeedback } from "./panel-graph.js";
 import type { Plan } from "./plan.js";
 import type { ReadModelDb, ReadModelLease } from "./read-model-db.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -526,8 +527,9 @@ export interface NowViewOptions {
     rateLimit?: () => number | undefined;
     diskFree?: (path: string) => number | undefined;
   };
-  /** Core's feedback entries parked `grilling`; `listFeedback` over its `feedbackRoot` by default. */
+  /** Legacy grill-only injection seam; production reads all statuses so durable answers remain visible. */
   listGrilling?: (instance: NowInstance) => FeedbackEntry[];
+  feedbackAgeObservation?: { roots: readonly FeedbackAgeRoot[]; window: FeedbackAgeEvidence["window"] };
   /** How far each instance's checkout is behind origin/main's plan; production reads git ({@link gitPlanBehind}). */
   planBehind?: (instance: NowInstance) => PlanBehind;
 }
@@ -726,21 +728,28 @@ export function createNowView(opts: NowViewOptions): {
     return snapshotGeneration(dirname(instance.ledgerDir), owner!, repo!);
   };
   const probeHost = (instance: NowInstance, isCore: boolean): NowHostProbe => defaultProbeHost(instance, isCore, clock, opts.hostProbe);
-  const listGrilling = opts.listGrilling ?? ((instance: NowInstance) => listFeedback(instance.feedbackRoot!, { status: "grilling" }));
+  const listGrilling = opts.listGrilling ?? ((instance: NowInstance) => listFeedback(instance.feedbackRoot!));
+  const feedbackAge = opts.feedbackAgeObservation ? measureFeedbackAge(opts.feedbackAgeObservation.roots, opts.feedbackAgeObservation.window) : undefined;
   /** Core's feedback dir and question store, so an answer landing in either re-materializes at once. */
   const decisionsKey = (instance: NowInstance): string =>
     instance.name === core && instance.feedbackRoot ? `${mtimeOf(feedbackDir(instance.feedbackRoot)) ?? "-"}:${mtimeOf(questionStorePath(instance.feedbackRoot)) ?? "-"}` : "none";
   /** One instance's open decisions: grill and task questions from core's stores, escalations from its own board. */
-  const decisionsOf = (instance: NowInstance, db: ReadModelDb, snapshot: BoardSnapshot, rows: ReadonlyArray<Row>): NowDecisionsData => {
+  const decisionsOf = (instance: NowInstance, db: ReadModelDb, snapshot: BoardSnapshot, rows: ReadonlyArray<Row>, now: number, statusGithub: GitHub): NowDecisionsData => {
     const reasons: NonNullable<NowViewData["decisionsReasons"]> = {};
     const all = escalationDecisions(instance.name, snapshot.tasks, escalationClasses(rows), instance.name === core);
+    let feedbackEntries: FeedbackEntry[] = [];
     if (instance.name !== core) {
       reasons.grill = "feedback questions live in core only";
       reasons.task_question = "the question store core answers is core's own";
     } else if (!instance.feedbackRoot) {
       reasons.grill = reasons.task_question = "no feedback root is configured";
     } else {
-      all.push(...grillDecisions(instance.name, listGrilling(instance)));
+      try {
+        feedbackEntries = projectReconciledFeedback(listGrilling(instance), statusGithub);
+        all.push(...grillDecisions(instance.name, feedbackEntries));
+      } catch (error) {
+        reasons.grill = `the feedback store is unreadable: ${(error as Error).message}`;
+      }
       const store = readQuestionStore(instance.feedbackRoot);
       if ("reason" in store) reasons.task_question = store.reason;
       else all.push(...taskQuestionDecisions(instance.name, store.lines as QuestionStoreLine[], answeredByFact(db), snapshot.tasks));
@@ -752,9 +761,8 @@ export function createNowView(opts: NowViewOptions): {
       gates: all.filter((decision) => decision.kind === "escalation" || decision.kind === "manual_approval").map(decisionGate),
     }];
     if (instance.name === core) {
-      sources.push({ name: "feedback-grills", instance: instance.name,
-        state: reasons.grill ? "unavailable" : "complete", ...(reasons.grill ? { reason: reasons.grill } : {}),
-        gates: all.filter((decision) => decision.kind === "grill").map(decisionGate) });
+      const feedback = projectFeedbackGates({ instance: instance.name, entries: feedbackEntries, now, rows, age: feedbackAge, unavailableReason: reasons.grill });
+      sources.push(feedback);
       // The legacy question reader skips malformed lines without attesting complete coverage.
       sources.push({ name: "task-questions", instance: instance.name, state: reasons.task_question ? "unavailable" : "partial",
         reason: reasons.task_question ?? "the question reader does not report malformed-line completeness",
@@ -847,7 +855,7 @@ export function createNowView(opts: NowViewOptions): {
       h.probe = probeHost(instance, instance.name === core);
       h.healthAt = b.now;
     }],
-    ["decisions", (instance, b) => void (b.decisions = decisionsOf(instance, b.db, b.snapshot!, b.rows!))],
+    ["decisions", (instance, b) => void (b.decisions = decisionsOf(instance, b.db, b.snapshot!, b.rows!, b.now, b.h!.gateway.github))],
     ["assemble", (instance, b) => {
       const { h, snapshot, rows, now, state } = b as Required<NowBuild>;
       const data = assembleNowView({ instance: instance.name, snapshot, rows, plan: b.plan!, recent: computeRecentActivity(depsOf(instance, b), h.recent, 20), health: h.probe!.health, decisions: b.decisions!, nowMs: now });
