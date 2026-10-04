@@ -23,13 +23,15 @@
 #                  are removed through Git; standalone scratch clones only at their exact approved
 #                  child path. Any unpublished clean HEAD is bundled to a separate archive first.
 #                  Unknown ignored data is kept; only node_modules and coverage are disposable.
+#                  A scratch unit kept for a repository reason still loses those two trees
+#                  (prune_scratch_caches) once it is idle, unheld and unmounted.
 #                  Git metadata itself is excluded from recency checks because Git refreshes it.
 #   4. archive   — transcripts are moved, never deleted; refused when the archive root shares a
 #                  filesystem with /; only the archive itself ages out, after ARCHIVE_DAYS
 #   5. DRY_RUN=1 changes nothing; a pass that leaves / at or above HIGH_WATER exits non-zero
 
 # Every decision is logged: `KEEP <path>: <reason>` / `REMOVE <path>` / `ARCHIVE <path>` /
-# `REFUSE <what>: <reason>`, then a summary `rmd-host-cleanup: / 57% -> 57% (-4 MB reclaimed this
+# `PRUNE <path>: <bytes> bytes, ...` / `REFUSE <what>: <reason>`, then a summary `rmd-host-cleanup: / 57% -> 57% (-4 MB reclaimed this
 # pass)` that scripts/fleet-heartbeat.sh-style readers parse.
 
 # CRON. The schedule and log path live in ONE place: deploy/install-host-units.sh
@@ -492,6 +494,42 @@ archive_scratch_bundle() {
   fi
   act rm -f -- "$f"
 }
+# W1-T5547. A unit kept for a REPOSITORY reason (dirty, an ignored path beyond the disposable two,
+# unreadable metadata, an unsaved branch or bundle with nowhere safe to go) has already passed the
+# idle, lsof and docker-mount checks, so its regenerable trees go even though the unit stays: each
+# repository's top-level node_modules/ and coverage/, by exact name, never through a symlink, only
+# while Git confirms the tree is ignored and tracks nothing in it, and never one holding a *.bundle
+# or a nested .git (the bundle rescue above reads coverage/). A locked worktree is an explicit hold.
+PRUNED_COUNT=0
+PRUNED_BYTES=0
+keep_scratch_for_repo() {
+  local p="$1" reason="$2" entries="$3" entry repo name tree found tracked bytes
+  log "KEEP $p: $reason"
+  case "$reason" in "Git worktree is locked"*) return ;; esac
+  while IFS= read -r entry; do
+    case "$entry" in */.git) repo="${entry%/.git}" ;; *) continue ;; esac
+    case "${repo#"$p"}/" in */node_modules/*|*/coverage/*) continue ;; esac
+    [ -d "$repo" ] && [ ! -L "$repo" ] && [ ! -L "$entry" ] || continue
+    for name in node_modules coverage; do
+      tree="$repo/$name"
+      [ -e "$tree" ] || [ -L "$tree" ] || continue
+      if [ -L "$tree" ] || [ ! -d "$tree" ]; then log "KEEP $tree: not a regular directory"; continue; fi
+      if ! rgit "$repo" check-ignore -q -- "$name" 2>/dev/null || \
+         ! tracked="$(rgit "$repo" ls-files -- "$name" 2>/dev/null)" || [ -n "$tracked" ]; then
+        log "KEEP $tree: Git does not confirm it is ignored and untracked"; continue
+      fi
+      if ! found="$(find "$tree" \( -name .git -o -name '*.bundle' \) -print -quit 2>/dev/null)"; then
+        log "KEEP $tree: content scan failed (unknown)"; continue
+      fi
+      if [ -n "$found" ]; then log "KEEP $tree: holds a bundle or repository ($found)"; continue; fi
+      bytes="$(du -sk -- "$tree" 2>/dev/null | awk '{print $1 * 1024}')"
+      log "PRUNE $tree: ${bytes:-unknown} bytes, unit kept for $reason"
+      if act rm -rf -- "$tree"; then
+        PRUNED_COUNT=$((PRUNED_COUNT + 1)); PRUNED_BYTES=$((PRUNED_BYTES + ${bytes:-0}))
+      fi
+    done
+  done <<< "$entries"
+}
 sweep_scratch_unit() {
   local p="$1" status entries entry repo head bundles bytes
   local IDLE_MINUTES="$SCRATCH_IDLE_MINUTES" SCRATCH_REASON=""
@@ -512,19 +550,19 @@ sweep_scratch_unit() {
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     case "$entry" in */.git) repo="${entry%/.git}" ;; *) log "KEEP $p: unreadable repository path"; return ;; esac
-    if ! scratch_repo_check "$repo"; then log "KEEP $p: $SCRATCH_REASON ($repo)"; return; fi
+    if ! scratch_repo_check "$repo"; then keep_scratch_for_repo "$p" "$SCRATCH_REASON ($repo)" "$entries"; return; fi
   done <<< "$entries"
   # Validate the whole unit before archiving or removing any of its repositories (W1-T5513).
   for repo in "${SCRATCH_LIVE_REPOS[@]}"; do
     if [ "$DRY_RUN" != 1 ] && [ "${RMD_CLEANUP_NO_FETCH:-0}" != 1 ]; then
       if ! repo_fetch "$repo" --quiet --all 2>/dev/null; then
-        log "KEEP $p: Git fetch failed (unknown)"; return
+        keep_scratch_for_repo "$p" "Git fetch failed (unknown)" "$entries"; return
       fi
     fi
-    head="$(rgit "$repo" rev-parse HEAD 2>/dev/null)" || { log "KEEP $p: HEAD is unreadable"; return; }
+    head="$(rgit "$repo" rev-parse HEAD 2>/dev/null)" || { keep_scratch_for_repo "$p" "HEAD is unreadable" "$entries"; return; }
     if ! scratch_repo_saved "$repo"; then
       if ! WORKTREE_ARCHIVE_ROOT="$WORKTREE_ARCHIVE_ROOT/scratch" archive_worktree_head "$repo" "$head" branches; then
-        log "KEEP $p: local branches could not be archived safely"; return
+        keep_scratch_for_repo "$p" "local branches could not be archived safely" "$entries"; return
       fi
     fi
   done
@@ -533,7 +571,7 @@ sweep_scratch_unit() {
   fi
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
-    if ! archive_scratch_bundle "$entry"; then log "KEEP $p: bundle could not be archived safely"; return; fi
+    if ! archive_scratch_bundle "$entry"; then keep_scratch_for_repo "$p" "bundle could not be archived safely" "$entries"; return; fi
   done <<< "$bundles"
   for repo in "${SCRATCH_LIVE_REPOS[@]}"; do
     if [ -f "$repo/.git" ]; then
@@ -660,6 +698,9 @@ else
   log "rmd-host-cleanup: temporary-roots-only mode"
 fi
 
+if [ "$PRUNED_COUNT" -gt 0 ]; then
+  log "rmd-host-cleanup: pruned $PRUNED_COUNT regenerable trees from kept scratch units ($PRUNED_BYTES bytes)"
+fi
 after_pct="$(df_field pct)"; after_avail="$(df_field avail)"
 after_pct="${after_pct:-0}"; after_avail="${after_avail:-0}"
 log "rmd-host-cleanup: / ${before_pct}% -> ${after_pct}% ($(( (after_avail - before_avail) / 1024 )) MB reclaimed this pass)"
