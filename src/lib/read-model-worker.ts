@@ -1511,6 +1511,8 @@ export interface ReadModelWorkerHandle {
   judge(sources: readonly ViewSource[], now: number): ViewSource[];
   /** The switch file as the main thread last read it. */
   switches(): ReadModelSwitches;
+  /** Each `auto` view's effective mode as the switch recheck last resolved it (views.ts's `ViewBodySource.autoMode`). */
+  autoMode?(view: string): EffectiveViewMode | undefined;
   start(): void;
   /** Asks the worker to release its leases and waits, bounded, for it. True when it confirmed. */
   stop(): boolean;
@@ -1594,17 +1596,17 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
   refreshSwitches();
   let stopSwitchWatch: () => void = () => {};
   let driven: ShadowSample | undefined;
-  /** Each `auto` view's effective mode as last ledgered; one entering auto starts as legacy (`shadow`). */
+  /** Each `auto` view's effective mode as last ledgered; one entering auto starts as legacy (`shadow`). Routes read it via `autoMode`. */
   const autoModes = new Map<string, EffectiveViewMode>();
   const noteAutoModes = (): void => {
     for (const view of autoModes.keys()) if (mainSwitches.views[view] !== "auto") autoModes.delete(view);
     for (const [view, mode] of Object.entries(mainSwitches.views)) {
       if (mode !== "auto") continue;
       const readiness = shownReadiness({ body: (name) => bodies.get(readModelBodyKey(name)) }, view);
-      const effective = effectiveViewMode(mode, readiness)!;
       const was = autoModes.get(view) ?? "shadow";
+      const effective = effectiveViewMode(mode, readiness, was)!;
       autoModes.set(view, effective);
-      if (effective !== was) opts.log?.(effective === "serve" ? VIEW_AUTO_PROMOTED_STEP : VIEW_AUTO_DEMOTED_STEP, { view, reason: readiness.reason, samples: readiness.samples, lastRealMs: readiness.lastRealMs });
+      if (readiness && effective !== was) opts.log?.(effective === "serve" ? VIEW_AUTO_PROMOTED_STEP : VIEW_AUTO_DEMOTED_STEP, { view, reason: readiness.reason, samples: readiness.samples, lastRealMs: readiness.lastRealMs });
     }
   };
 
@@ -1807,6 +1809,7 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       return replaced;
     },
     switches: () => mainSwitches,
+    autoMode: (view) => autoModes.get(view),
     shadow: (request) => worker?.postMessage({ type: "shadow", ...request }),
     want: (view, key) => {
       if (!worker) return false;

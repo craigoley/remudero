@@ -1847,7 +1847,7 @@ export type HostRegistryState = InstancesHostRegistryState;
  * repo registry answered and the host copy is only the thing being checked against it.
  * W1-T5056: while the `instances` view serves, the answer is that body's projection and reads no file.
  */
-export type RegistryRouteInput = NonNullable<ServeDeps["registry"]> & { repoRegistryPath: string; readModel?: Pick<ViewBodySource, "body" | "switches"> };
+export type RegistryRouteInput = NonNullable<ServeDeps["registry"]> & { repoRegistryPath: string; readModel?: Pick<ViewBodySource, "body" | "switches" | "autoMode"> };
 
 export function buildRegistryRoute(deps: RegistryRouteInput): Route {
   const readText = deps.readText ?? ((path: string) => fsPromises.readFile(path, "utf8"));

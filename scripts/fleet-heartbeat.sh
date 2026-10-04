@@ -503,6 +503,39 @@ for _kb in "$DISK_FREE_KB" "$ROOT_FS_FREE_KB"; do
   esac
 done
 
+# W1-T5549: THE SCRATCH FILESYSTEM, W1-T2767's REMAINING BLIND SPOT. /mnt/scratch is a third device
+# holding every fleet worktree, gate workspace, the read-model, tmp and the 24 GB swapfile; it sat
+# at 87-89% on 2026-10-03 while the two readings above stayed green. A full scratch disk halts
+# builds AND swap, so it is folded into the minimum like the others.
+#
+# `RMD_SCRATCH_ROOT` names it (default /mnt/scratch). A host without one publishes `absent` — a
+# known state, not a failed read — and folds nothing. A scratch path that exists but cannot be read
+# (or answers junk) is `unknown`, which never drags a readable minimum to `unknown` or to 0.
+# DEDUPED BY DEVICE: a scratch path on `/` or on the state disk is free space ALREADY counted, so
+# its reading is published but not folded a second time. An `unknown` device matches nothing, so a
+# numeric reading behind one is still folded — a minimum stays safe either way.
+SCRATCH_ROOT="${RMD_SCRATCH_ROOT:-/mnt/scratch}"
+if [ -d "$SCRATCH_ROOT" ]; then
+  SCRATCH_FS_FREE_KB="$(df_field "$SCRATCH_ROOT" 4)"
+  case "$SCRATCH_FS_FREE_KB" in ''|*[!0-9]*) SCRATCH_FS_FREE_KB="unknown" ;; esac
+  SCRATCH_FS_DEVICE="$(df_field "$SCRATCH_ROOT" 1)"; [ -n "$SCRATCH_FS_DEVICE" ] || SCRATCH_FS_DEVICE="unknown"
+else
+  SCRATCH_FS_FREE_KB="absent"; SCRATCH_FS_DEVICE="absent"
+fi
+SCRATCH_FS_SHARED="no"
+if [ "$SCRATCH_FS_DEVICE" != "unknown" ] && { [ "$SCRATCH_FS_DEVICE" = "$ROOT_FS_DEVICE" ] || [ "$SCRATCH_FS_DEVICE" = "$STATE_FS_DEVICE" ]; }; then
+  SCRATCH_FS_SHARED="yes"
+fi
+if [ "$SCRATCH_FS_SHARED" = "no" ]; then
+  case "$SCRATCH_FS_FREE_KB" in
+    ''|*[!0-9]*) ;;
+    *) case "$DISK_MIN_FREE_KB" in
+         unknown) DISK_MIN_FREE_KB="$SCRATCH_FS_FREE_KB" ;;
+         *) [ "$SCRATCH_FS_FREE_KB" -lt "$DISK_MIN_FREE_KB" ] && DISK_MIN_FREE_KB="$SCRATCH_FS_FREE_KB" ;;
+       esac ;;
+  esac
+fi
+
 # ── probe: swap, inodes, total size, the janitor's last result, consumer sizes (W1-T4804) ──────
 # WHY: every host resource this fleet loses (disk, swap, inodes) was seen only AFTER it ran out.
 # The gardener (src/lib/host-resource-gardener.ts) fits a trend over these beats, so each value is
@@ -820,6 +853,8 @@ state_fs_device=${STATE_FS_DEVICE}
 state_fs_free_kb=${DISK_FREE_KB}
 root_fs_device=${ROOT_FS_DEVICE}
 root_fs_free_kb=${ROOT_FS_FREE_KB}
+scratch_fs_device=${SCRATCH_FS_DEVICE}
+scratch_fs_free_kb=${SCRATCH_FS_FREE_KB}
 disk_min_free_kb=${DISK_MIN_FREE_KB}
 root_fs_total_kb=${ROOT_FS_TOTAL_KB}
 root_fs_inodes_free=${ROOT_FS_INODES_FREE}
