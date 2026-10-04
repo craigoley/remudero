@@ -42,6 +42,7 @@ test("review eligibility is durable for waiting exact inputs before the light ad
       assert.equal(admitted.length, 1);
       assert.equal(admitted[0]!.head_sha, p.headSha);
       assert.equal(admitted[0]!.review_input_digest, p.reviewInputDigest);
+      assert.equal(admitted[0]!.observation_version, 1);
       posted.push(p.prNumber);
     };
     const policy = { ...DEFAULT_SWEEP_POLICY, reviewLanes: 1, reviewLaneMin: 1, reviewLaneMax: 1 };
@@ -50,7 +51,7 @@ test("review eligibility is durable for waiting exact inputs before the light ad
     assert.equal(posted.length, 1, "telemetry spends no additional review lane");
     const eligible = fx.rows().filter(row => row.step === "sweep.review_eligible");
     assert.deepEqual(eligible.map(row => row.pr_number), [1, 2]);
-    assert.ok(eligible.every(row => row.surface === "light" && typeof row.review_key === "string"));
+    assert.ok(eligible.every(row => row.surface === "light" && row.observation_version === 1 && typeof row.review_key === "string"));
     const waiting = fx.rows().find(row => row.step === "sweep.disposed" && row.pr_number !== posted[0] && row.pr_number !== 3);
     assert.match(String(waiting?.stand_down_reason), /not admitted/);
   } finally { fx.cleanup(); }
@@ -121,5 +122,7 @@ test("the production review attempt retains the same exact input identity as eli
     const attempted = fx.rows().find(row => row.step === "sweep.post_review.attempt")!;
     assert.equal(attempted.review_key, eligible.review_key);
     assert.equal(attempted.review_input_digest, candidate.reviewInputDigest);
+    assert.equal(attempted.pr_url, eligible.pr_url);
+    assert.equal(attempted.head_sha, eligible.head_sha);
   } finally { fx.cleanup(); }
 });

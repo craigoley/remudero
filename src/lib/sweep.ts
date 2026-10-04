@@ -2307,6 +2307,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     postReview: async (pr, mode = { kind: "full-review" }) => {
       log("sweep.post_review.attempt", {
         pr_number: pr.prNumber,
+        pr_url: pr.prUrl,
         head_sha: pr.headSha,
         review_key: reviewOutcomeKeyForPr(pr),
         review_input_digest: pr.reviewInputDigest,
@@ -13630,6 +13631,7 @@ export async function runSweep(
       review_input_digest: job.pr.reviewInputDigest,
       review_mode: job.mode.kind,
       surface: deps.repairAdmissionSurface ?? "full",
+      observation_version: 1,
     });
     if (deps.detachReviewWait) {
       finalizeDisposition(job.index, job.pr, jobDisposition, job.reason, job.question,
