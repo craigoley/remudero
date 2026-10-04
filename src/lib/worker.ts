@@ -46,6 +46,7 @@ import {
   type WorkerProviderId,
 } from "./config.js";
 import { assertModelAllowed } from "./model-gate.js";
+import { chooseDraftDeployment, readDraftStats, recordDraftRouting, type DraftStats, type DraftChoice } from "./draft-routing.js";
 import { usageSnapshotFromSdk } from "./headroom.js";
 import {
   detectCompactionEvents,
@@ -139,6 +140,8 @@ import {
   type RoutingDrawSeed,
   type RoutingPropensity,
   selectOpenWeightModel,
+  openWeightUsageUsd,
+  OPENWEIGHT_MAX_COMPLETION_TOKENS,
   openWeightDeploymentReady,
   openWeightDeploymentHolds,
   openWeightEstimatedTokens,
@@ -1119,12 +1122,20 @@ export interface SpawnWorkerArgs {
    * catches a sink failure and does not start attributing terminal rows to an event it could not
    * write; routing and billing behavior stay unchanged when telemetry is unavailable. */
   onSelectionAssignment?: (assignment: WorkerSelectionAssignment) => void;
+  draftRouting?: {
+    lane: string;
+    proposalId: string;
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    evaluate: (result: WorkerResult) => { clean: boolean; contractFailed: boolean };
+    readStats?: () => DraftStats;
+    random?: () => number;
+  };
   /** One failed cash-ladder rung that was actually called, before trying its successor. The
    * final rung remains the caller's ordinary worker result; a sink failure never changes flow. */
   onModelFallbackAttempt?: (attempt: {
     selectionAssignmentId?: string;
     model: string;
-    reason: "deployment-absent" | "unsupported-response-format";
+    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract";
     result?: WorkerResult;
   }) => void;
   /** Injectable seam: override the process-group spawn and teardown. Omitted means the real
@@ -1997,7 +2008,7 @@ export const WORKER_SETTING_SOURCES: SettingSource[] = WORKER_SPAWN_ISOLATION.se
  * and were never tried. `selectOpenWeightModel` already walks the ladder for CONTEXT FIT; nothing
  * walked it for FAILURE, so a single unusable deployment took the whole run.
  *
- * ONE TRIGGER — the only failure that cannot succeed on a retry of the SAME deployment.
+ * Draft callers additionally walk on a failed output contract (W1-T4067).
  * `OpenWeightUnsupportedResponseFormatError` names the deployment and what it could not honour,
  * and its own message prescribes this remedy. Everything else is deliberately NOT walked: a
  * timeout or truncated reply may be transient and walking turns a blip into a second charge
@@ -2011,9 +2022,10 @@ export async function runOpenWeightWalkingLadder(
   run: (selection: OpenWeightModelSelection) => Promise<WorkerResult>,
   selection: OpenWeightModelSelection,
   onFallbackAttempt?: (attempt: { selection: OpenWeightModelSelection;
-    reason: "deployment-absent" | "unsupported-response-format"; result?: WorkerResult }) => void,
+    reason: "deployment-absent" | "unsupported-response-format" | "draft-contract"; result?: WorkerResult }) => void,
+  contractFailed?: (result: WorkerResult) => boolean,
 ): Promise<WorkerResult> {
-  const rungs = [selection.model, ...selection.alternatives];
+  const rungs = [...new Set([selection.model, ...selection.alternatives])];
   let lastRefusal: unknown;
   for (const [index, model] of rungs.entries()) {
     try {
@@ -2030,6 +2042,11 @@ export async function runOpenWeightWalkingLadder(
         continue;
       }
       if (result.openWeightDeploymentAbsent) markOpenWeightDeploymentAbsent(result.openWeightDeploymentAbsent);
+      if (!result.isError && contractFailed?.(result) && next) {
+        try { onFallbackAttempt?.({ selection: { ...selection, model }, reason: "draft-contract", result }); }
+        catch (error) { console.error(JSON.stringify({ event: "worker.openweight.rung_telemetry_unavailable", reason: String(error) })); }
+        continue;
+      }
       return result;
     } catch (err) {
       if (!(err instanceof OpenWeightUnsupportedResponseFormatError)) throw err;
@@ -2492,7 +2509,7 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     // body -- the tool schemas and the output contract add a bounded preamble -- and the estimate
     // deliberately OVER-states tokens, so using it rather than the fully serialized body can only
     // make the gate stricter.
-    const openWeight: OpenWeightModelSelection = args.cashOpusEmergency === true
+    let openWeight: OpenWeightModelSelection = args.cashOpusEmergency === true
       ? { model: "claude-opus-5-5", effort: args.effort ?? "medium", capability: "frontier", alternatives: [] }
       : args.cashSonnetEmergency === true
       ? { model: "claude-sonnet-5-5", effort: args.effort ?? "medium", capability: "balanced",
@@ -2510,6 +2527,25 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
         ...(args.routingTrial?.arm === "cash" && args.routingTrial.models ? { only: args.routingTrial.models } : {}),
       },
     );
+    let draftChoice: DraftChoice | undefined;
+    let draftReadError: string | undefined;
+    if (args.draftRouting) {
+      let stats: DraftStats | undefined;
+      try {
+        stats = (args.draftRouting.readStats ?? (() => readDraftStats(join(config.root, "state"), args.draftRouting!.lane)))();
+      } catch (error) {
+        draftReadError = String(error);
+        recordDraftRouting(args.draftRouting.log, "draft.routing.error", { lane: args.draftRouting.lane, proposal_id: args.draftRouting.proposalId,
+          error: draftReadError, reason: "stats-read-failed-row-order" });
+      }
+      if (stats) {
+        draftChoice = chooseDraftDeployment(stats, [openWeight.model, ...openWeight.alternatives].map((deployment) => ({
+          deployment, estimatedCostUsd: openWeightUsageUsd(deployment, openWeight.estimatedTokens ?? 1, OPENWEIGHT_MAX_COMPLETION_TOKENS),
+        })), args.draftRouting.random);
+        openWeight = { ...openWeight, model: draftChoice.deployment,
+          alternatives: [openWeight.model, ...openWeight.alternatives].filter((model) => model !== draftChoice!.deployment) };
+      }
+    }
     assertModelAllowed(openWeight.model, config);
     const cashAssignment = (model: string, alternatives: readonly string[]) => emitWorkerSelectionAssignment(args, {
       provider: "cash",
@@ -2524,24 +2560,52 @@ export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> 
     let selectionAssignmentId = cashAssignment(openWeight.model, openWeight.alternatives);
     try {
       materializeWorkerHome({ workerHome, realHome });
-      // WALK THE LADDER ON A CAPABILITY REFUSAL, NEVER ON ANYTHING ELSE (see `runOpenWeightWalkingLadder`).
+      // Cash drafts also walk on a broken fragment contract; each rung retains the adapter's cap gate.
       let firstRung = true;
+      let draftContractFailed = false;
+      let draftFallback: { reason: string; model: string } | undefined;
       const result = await runOpenWeightWalkingLadder(
         async (selection) => {
           if (firstRung) firstRung = false;
           else selectionAssignmentId = cashAssignment(selection.model,
             openWeight.alternatives.slice(openWeight.alternatives.indexOf(selection.model) + 1));
-          const rung = await runOpenWeight({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
+          if (args.draftRouting) recordDraftRouting(args.draftRouting.log, "draft.routing.choice", {
+            lane: args.draftRouting.lane, proposal_id: args.draftRouting.proposalId, deployment: selection.model,
+            reason: draftFallback?.reason ?? (draftReadError ? "stats-read-failed-row-order" : draftChoice?.reason),
+            ...(draftFallback ? { previous_deployment: draftFallback.model } : {}),
+            posterior: draftChoice?.arms.find((arm) => arm.deployment === selection.model) ?? {
+              alpha: 1, beta: 1 + [openWeight.model, ...openWeight.alternatives].indexOf(selection.model),
+            },
+          });
+          const rung: WorkerResult = await runOpenWeight({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
           rung.selectionAssignmentId = selectionAssignmentId;
           rung.routedModel ??= selection.model;
+          if (args.draftRouting) {
+            let outcome = { clean: false, contractFailed: false };
+            if (!rung.isError && !rung.usageRefusal && !rung.budgetRefused) {
+              try { outcome = args.draftRouting.evaluate(rung); }
+              catch (error) {
+                outcome.contractFailed = true;
+                recordDraftRouting(args.draftRouting.log, "draft.routing.error", { lane: args.draftRouting.lane,
+                  proposal_id: args.draftRouting.proposalId, deployment: selection.model, error: String(error), reason: "output-contract" });
+              }
+            }
+            draftContractFailed = outcome.contractFailed;
+            recordDraftRouting(args.draftRouting.log, "draft.routing.outcome", { lane: args.draftRouting.lane,
+              proposal_id: args.draftRouting.proposalId, deployment: selection.model, session_id: rung.sessionId,
+              selection_assignment_id: selectionAssignmentId,
+              draft_cost_usd: rung.costUsd, clean: outcome.clean, contract_failed: outcome.contractFailed });
+          }
           return rung;
         },
         openWeight,
         (attempt) => {
+          draftFallback = { reason: attempt.reason, model: attempt.selection.model };
           try { args.onModelFallbackAttempt?.({ selectionAssignmentId, model: attempt.selection.model,
             reason: attempt.reason, ...(attempt.result ? { result: attempt.result } : {}) }); }
           catch { console.error(JSON.stringify({ event: "worker.openweight.rung_telemetry_unavailable", reason: "sink-failed" })); }
         },
+        args.draftRouting ? () => draftContractFailed : undefined,
       );
       result.selectionAssignmentId = selectionAssignmentId;
       // W1-T4785: a Sonnet attempt refused before any money moved re-enters as plain cash-fallback so

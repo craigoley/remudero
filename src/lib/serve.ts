@@ -690,8 +690,15 @@ export const CONSOLE_BLOCKING_REQUEST_PATH_BASELINE = 0;
 /** PRIMARY CONTROL (W1-T4576): GET read routes that still re-open rotated ledger archives on a warm request, measured
  *  by REACH in test/every-get-read-route-is-bounded-by-reach.test.ts. A set that may only SHRINK:
  *  a new route that scans the union per request is refused, and a route bounded later leaves it. */
-export const CONSOLE_UNBOUNDED_LEDGER_READ_BASELINE: readonly string[] = [
-];
+const CONSOLE_UNBOUNDED_LEDGER_READ_REASONS = {
+  "GET /v1/replay": "since/until requests synchronously read the full archive union; the Phase 1 read model retires this reader",
+  "GET /v1/self-measurement": "detail requests synchronously scan the archive union until the newest matching verb; the Phase 1 read model retires this reader",
+};
+export const CONSOLE_UNBOUNDED_LEDGER_READ_BASELINE: readonly string[] & {
+  readonly reasons: Readonly<Record<string, string>>;
+} = Object.assign(Object.keys(CONSOLE_UNBOUNDED_LEDGER_READ_REASONS), {
+  reasons: CONSOLE_UNBOUNDED_LEDGER_READ_REASONS,
+});
 export const CONSOLE_STATUS_FULL_TASK_THRESHOLD = 500; // PRIMARY CONTROL
 export const CONSOLE_STATUS_RENDERED_TASK_LIMIT = 120; // BACKSTOP
 export const CONSOLE_STATUS_RESPONSE_SIZE_RATCHET_BYTES = 96_000;

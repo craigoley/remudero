@@ -11,9 +11,9 @@
   origin: "oper#followups-research-2026-09-22"
   plan_refs: [W1-T4006, W1-T3704]
   files: [src/lib/drain.ts, src/lib/dispatch-value.ts, src/run-task.ts, test/new-work-is-ordered-by-cost-of-delay.test.ts, scripts/test-tier-manifest.json]
-  priority: 2
+  priority: 3
   status: queued
-  # backlog gardener: band=2 evidence=d88ac2568293eb46
+  # backlog gardener: band=3 evidence=344328b638ba3d5c
   attempts: 0
   rationale: |
     MEASURED 2026-09-22 (4-day ledger union, 346,646 rows; 242 run.start and 337 selection passes as controls).
