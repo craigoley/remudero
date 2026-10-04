@@ -606,11 +606,11 @@ function validateProposalDecision(body: unknown): { error: string } | ProposalDe
 }
 
 /**
- * POST /v1/feedback/decision — write-scoped. Accept or reject a `proposed` entry over a proposal
- * PR lib/triage.ts already opened. Only a `proposed` entry can be decided (400 otherwise — this
- * caller has a precondition `setFeedbackStatus` itself does not enforce). Ledgers
- * `panel.proposal_accepted`/`panel.proposal_rejected` with the panel's bearer as `origin`.
- * W1-T5460: the flip QUEUES under `inboxRoot` (the state root); the daemon's landing sweep pushes it.
+ * POST /v1/feedback/decision — write-scoped. Accept or reject a `proposed` entry over a proposal PR
+ * lib/triage.ts already opened. Only a `proposed` entry can be decided (400 otherwise — a precondition
+ * `setFeedbackStatus` does not enforce). Ledgers `panel.proposal_accepted`/`panel.proposal_rejected`
+ * with the panel's bearer as `origin`. W1-T5460: the flip QUEUES under `inboxRoot` for the landing sweep;
+ * W1-T5627: a queued decision is the entry's status, and an unreadable queue refuses (503).
  */
 export function buildProposalDecisionRoute(deps: PanelGraphDeps): Route {
   return {
@@ -627,7 +627,6 @@ export function buildProposalDecisionRoute(deps: PanelGraphDeps): Route {
         sendJson(res, 404, { error: "not_found", detail: `no feedback entry "${input.id}"` });
         return;
       }
-      // W1-T5627: a queued decision is this entry's status; an unreadable queue refuses rather than decide blind.
       if (deps.feedbackLand) {
         try {
           entry = overlayQueuedFeedback(entry, readQueuedFeedbackRecords(deps.inboxRoot));
