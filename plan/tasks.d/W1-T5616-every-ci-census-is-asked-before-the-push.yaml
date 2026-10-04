@@ -1,0 +1,44 @@
+- id: W1-T5616
+  title: "CI'S RULE-CHECK CENSUSES HAVE A PRECHECK VERDICT — `listRuleSuites` hands CI 102 census/ratchet suites, `evaluateCensusPrecheck` asks 4 of them, and nothing records which of the other 98 a push is blind to, so negative-reachability, bound-kind, catch-erasure and ENV_REGISTRY each reddened fleet PRs that census-precheck called OK"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one census and the baseline it reads
+  origin: "operator session 2026-10-04: fleet PRs red in CI on censuses census-precheck passed (#8961 #8970 #8972 #8988 #8994 #9041 #9066 #9077 #9079)"
+  plan_refs: [W1-T4899, W1-T4900, W1-T5101, W1-T3225, W1-T2595, W1-T5522]
+  files: [scripts/census-precheck.mjs, scripts/census-precheck-parity-baseline.json, test/every-ci-census-is-asked-before-the-push.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main d13d797c.
+    ci.yml's commitlint job runs `scripts/list-rule-suites.mjs --run`, i.e. every suite that
+    `listRuleSuites` (src/lib/ci-parity.ts) selects: 102 tracked tests named census/ratchet/baseline
+    or on `CENSUS_POPULATION`. `evaluateCensusPrecheck` (scripts/census-precheck.mjs) models only
+    clock-signature-census, comment-load-ratchet, fixture-copy-census and deps-interface-census
+    from that set (plus repo-layout and instrument-surface-completeness from outside it). Nothing
+    records the other 98. Fleet PRs went red in CI on the gap this round: negative-reachability
+    (#9079, #9077, #9066), DECISION_RELEVANT_LEDGER_STEPS / SPEND_STEP_ROLES (#8988, #9041),
+    ENV_REGISTRY (#8972), bound-kind-declared (#8961), host-capability-fixtures (#8994),
+    catch-erasure (#8970). The SPEND_STEP_ROLES, DECISION_RELEVANT_LEDGER_STEPS and host-capability
+    suites (spend-is-counted-once-at-its-producer, ledger-rotation,
+    a-union-read-of-an-unretained-step-is-refused, host-capability-fixtures) are not even in the
+    102: none carries a census name, so they run only in the ci/coverage shards.
+  design: |
+    1. Export `PRECHECK_PARITY` from census-precheck.mjs, mapping a suite path to
+       {modeled: <check fn>} | {run: <npm script>}, for every suite precheck asks.
+    2. Add scripts/census-precheck-parity-baseline.json, the FROZEN list of suites that are CI-only
+       today. It may only shrink.
+    3. The census enumerates listRuleSuites(root) plus PRECHECK_EXTRA_CI_CENSUSES (the four unnamed
+       suites above, each with its incident PR) and fails on any member in neither
+       PRECHECK_PARITY nor the baseline, so a new CI census gets a verdict at birth.
+    W1-T5617 then moves the admitted suites from the baseline into PRECHECK_PARITY.
+  acceptance:
+    - claim: "every suite CI's rule-check step runs, plus the named unnamed censuses, is either asked by census-precheck or listed in a shrink-only baseline, and a new unclassified suite fails the census"
+      proof: "unit test: test/every-ci-census-is-asked-before-the-push.test.ts"
+  falsifier: |
+    Delete one row from the baseline (or one PRECHECK_PARITY entry) and the census names that
+    suite. Add a fixture suite named `x-census.test.ts` and it is named too.

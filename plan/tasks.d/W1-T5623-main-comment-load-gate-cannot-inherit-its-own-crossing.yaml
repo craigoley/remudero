@@ -1,0 +1,44 @@
+- id: W1-T5623
+  title: "MAIN'S COMMENT-LOAD CEILING GATE EXCUSES ITS OWN CROSSING — `run_main_ceiling_gate` runs `comment-load-signal -- --base HEAD^`, so a crossing commit whose push run is superseded is never measured and every later run reads it as inherited; src/lib/ledger.ts sits at 755 over a recorded 753 since #8987/#8989, and every comment added to it now trips census-precheck"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one gate — the ratchet flag and its ci.yml call
+  origin: "operator session 2026-10-04: census-precheck refusing any comment added to src/lib/ledger.ts (755 vs 753)"
+  plan_refs: [W1-T3068, W1-T3655, W1-T3180, W1-T5522, W1-T3719]
+  files: [scripts/comment-load-ratchet.mjs, .github/workflows/ci.yml, scripts/comment-load-baseline.json, test/main-can-cross-a-ceiling-no-pr-ever-broke.test.ts, test/main-comment-load-gate-cannot-inherit-its-own-crossing.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main d13d797c. MEASURED with the repo's `countCommentLines`:
+    src/lib/ledger.ts has 755 comment lines against scripts/comment-load-baseline.json's 753, the
+    only one of 610 files over its ceiling. First-parent history: 752 at acf8ebb3, 753 at 506acfed
+    (#8985), 754 at 4a117566 (#8987), 755 at 2f81c550 (#8989), within 27 minutes — three PRs each
+    adding a line from an older base, each green. The PR-side `comment-load-signal` is
+    pull_request-only (the merge_group half is W1-T5522). Neither crossing commit has a ci.yml
+    push run among its check runs: the `ci-refs/heads/main` concurrency group superseded them.
+    ci.yml's main lane (`run_main_ceiling_gate`, W1-T3068) runs `comment-load-signal -- --base
+    HEAD^`, and `splitBaseInheritedViolations` calls a count already present at HEAD^ inherited,
+    so every later main run says OK. Reproduced: `node scripts/comment-load-ratchet.mjs
+    --no-record --base HEAD^` prints "already carried 755 at the merge base -- inherited", then
+    OK. On PRs, `caused(756, 753, 755, 753)` holds in census-precheck's `commentLoadViolations`,
+    so any comment added to ledger.ts is refused. expiring-fixture-census closed the same hole with
+    `CENSUS_MAIN_BRANCH_RUN` (W1-T3655); comment-load never did.
+  design: |
+    1. Give comment-load-ratchet.mjs a `--strict` flag that skips `splitBaseInheritedViolations`:
+       every file over its recorded ceiling is a violation.
+    2. `run_main_ceiling_gate` calls `comment-load-signal -- --strict`; update the `--base HEAD^`
+       assertion in test/main-can-cross-a-ceiling-no-pr-ever-broke.test.ts.
+    3. In the same PR, trim src/lib/ledger.ts back to 753 comment lines (preferred) or record 755
+       with the reason, so main is green under the strict reading.
+    W1-T5522 also edits ci.yml, in the commitlint/merge_group region, not the main lane.
+  acceptance:
+    - claim: "on the main lane a file over its recorded comment ceiling fails even when the previous main commit already carried that count"
+      proof: "unit test: test/main-comment-load-gate-cannot-inherit-its-own-crossing.test.ts"
+  falsifier: |
+    Drop `--strict` (restore inheritance) and a fixture whose HEAD^ already holds the over-ceiling
+    count exits 0.

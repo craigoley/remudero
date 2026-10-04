@@ -1,0 +1,44 @@
+- id: W1-T5631
+  title: "A TEST PROCESS NEVER READS THE HOST'S SCRATCH SWITCH — deploy/scratch-mounts.sh `scratch_enabled` falls back to the real /etc/remudero/scratch-mounts.on, so on the Azure host every recycle fixture that spreads process.env plans seven scratch binds its fake docker never reports (FAILED RUNTIME CONTRACT ... missing) and mkdirs fixture dirs into the real /mnt/scratch/rmd, where ~570 have leaked"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: low
+  origin: "operator session 2026-10-04: recycle-container tests fail on the Azure host with FAILED RUNTIME CONTRACT ... missing"
+  plan_refs: [W1-T3087, W1-T5513, W1-T5550, W1-T4805]
+  files: [test/setup/no-live-remote.ts, test/a-test-process-never-reads-the-hosts-scratch-switch.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main d13d797c. `scratch_enabled` (deploy/scratch-mounts.sh) treats
+    RMD_SCRATCH unset as auto and tests `${RMD_SCRATCH_SWITCH:-/etc/remudero/scratch-mounts.on}`.
+    On the fleet host that file exists and /mnt/scratch is mounted, so `scratch_plan` succeeds and
+    recycle-container.sh adds 7 `--expect` binds that the fixture's stub `docker inspect` fails.
+    MEASURED on test/container-config-mount.test.ts: 2/4 fail by default ("FAILED RUNTIME CONTRACT
+    ... /home/node/Remudero/worktrees missing"), 4/4 pass with RMD_SCRATCH=off. The same shape
+    hits a-lock-whose-container-is-gone*, a-recycle-refuses-a-state-dir*,
+    recycle-container-bash3-portability and recycle-container: none sets RMD_SCRATCH and all spread
+    process.env (about 50 test files spawn recycle/serve scripts; 3 set RMD_SCRATCH). CI has no
+    switch file, so this is a host-only red. `scratch_prepare` also mkdirs
+    `/mnt/scratch/rmd/<state-dir basename>/...` on the REAL disk: /mnt/scratch/rmd holds ~578
+    entries, ~570 of them fixture keys (rmd-reclaim-state-*, rmd-test-recycle-state-*,
+    rmd-appauth-state-*), which the janitor's `scratch_guard` protects by the name `rmd`.
+  design: |
+    In `installNoLiveRemote` (which already strips App keys at process level), set
+    env.RMD_SCRATCH_SWITCH to a dead path whose name says why
+    (/nonexistent/W1-T5631-scratch-switch-blocked-by-the-test-suite) and delete env.RMD_SCRATCH, so
+    auto mode reads "off" in every child that spreads process.env. Suites that test the scratch
+    path (scratch-mounts, recycle-container's `scratchFixture`) pass their own
+    RMD_SCRATCH/RMD_SCRATCH_SWITCH and are unaffected. The new test asserts both env facts, then
+    sources deploy/scratch-mounts.sh in a child under process.env and asserts `scratch_enabled`
+    returns 1. The /mnt/scratch/rmd backlog is an operator cleanup, out of scope.
+  acceptance:
+    - claim: "under the test setup scratch_enabled is false on any host, including one with a real scratch switch file, so no recycle fixture plans or creates scratch binds"
+      proof: "unit test: test/a-test-process-never-reads-the-hosts-scratch-switch.test.ts"
+  falsifier: |
+    Delete the RMD_SCRATCH_SWITCH assignment: the env assertion fails on every host, and on the
+    fleet host container-config-mount returns to 2 failures.

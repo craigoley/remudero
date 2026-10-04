@@ -1,0 +1,43 @@
+- id: W1-T5634
+  title: "THE SCRATCH JANITOR KEEPS A UNIT THAT LENDS GIT OBJECTS — `sweep_scratch_unit` removes an idle, saved /mnt/scratch unit without asking whether another unit's objects/info/alternates points into it; /mnt/scratch/m/repo lends to o/repo today, and g/repo and h/repo already show the result (HEAD unreadable since their lender remudero-preflight-W1-T4884-* vanished)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: medium
+  origin: "operator session 2026-10-04: g/repo and h/repo alternates point at a deleted remudero-preflight-W1-T4884 dir (seen 10-03, still broken 10-04)"
+  plan_refs: [W1-T5513, W1-T5547]
+  files: [deploy/rmd-host-cleanup.sh, test/a-scratch-unit-that-lends-git-objects-is-kept.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main d13d797c; host read-only.
+    STILL BROKEN: /mnt/scratch/g/repo and /mnt/scratch/h/repo have objects/info/alternates pointing
+    at /mnt/scratch/remudero-preflight-W1-T4884-D4zci5z3/repo/.git/objects, which is missing;
+    `git cat-file -t HEAD` exits 128 in both. Also broken: p/repo (lender rmd-gate-safety-*
+    missing; HEAD readable from its own pack) and rmd-qa-namespace.*/skill-repo. 20 alternates
+    files exist under /mnt/scratch. The W1-T4884 lender was not fleet code nor the janitor: no
+    src/scripts/deploy file creates `remudero-preflight-*`, and host-cleanup.log never names it.
+    The fleet's own --shared clones (`runIsolatedLocalMergeRoute` in src/lib/ci-parity.ts, the
+    synthetic-tasks candidate clone, the reviewer snapshot clone in src/run-task.ts) clone FROM the
+    live repo INTO a mkdtemp dir and delete the borrower, which is safe.
+    The latent defect is the W1-T5513 janitor: `sweep_scratch_unit` (deploy/rmd-host-cleanup.sh)
+    runs `scratch_guard`, idle, lsof, docker-mount, `scratch_repo_check`, `scratch_repo_saved` and
+    the bundle checks, then `rm -rf`; nothing reads objects/info/alternates. m/repo lends to o/repo
+    and survives only because it was "written within 720 min". For g it logs "Git status failed
+    (unknown)" every run, never naming the cause. g/h repair is an operator decision.
+  design: |
+    Before removing unit p, scan every other unit under the same root (find -maxdepth 6 -path
+    '*/objects/info/alternates') for a line resolving under p/; on a hit, log
+    "KEEP p: lends objects to <borrower>" and return. When a unit's own alternates target is
+    missing, log "KEEP p: borrows from missing <target>". Fixture roots are injected via
+    RMD_CLEANUP_SCRATCH_ROOTS, as the existing scratch suites do.
+  acceptance:
+    - claim: "an idle, saved scratch unit whose object store another unit borrows via alternates is kept and named, and a unit borrowing from a missing store is reported as such"
+      proof: "unit test: test/a-scratch-unit-that-lends-git-objects-is-kept.test.ts"
+  falsifier: |
+    Remove the alternates scan; the lender fixture is reported REMOVE, leaving the borrower with an
+    unreadable HEAD.
