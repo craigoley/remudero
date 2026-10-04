@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
-import { closeSync, constants, copyFileSync, fstatSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { basename, join, relative, resolve } from 'node:path';
+import { closeSync, constants, copyFileSync, fsyncSync, fstatSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, relative, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { parseArgs } from 'node:util';
 import { isMainModule } from "./lib/argv.mjs";
@@ -9,6 +10,12 @@ import { isMainModule } from "./lib/argv.mjs";
 const RAW_COVERAGE_FILE = /^coverage-\d+-\d{13}-\d+\.json$/;
 const COMPACT_COVERAGE_FILE = /^coverage-bundle-\d+-\d{13}-\d+\.json$/;
 const COMPACT_FORMAT = 'rmd-v8-coverage-bundle-v1';
+const CORPUS_FILE = /^coverage-corpus-(\d+)-(\d{13})\.json$/;
+const CORPUS_PIECE = /^coverage-(?:corpus|maps|reports)-/;
+const CORPUS_FORMAT = 'rmd-v8-coverage-corpus-v2';
+const CHUNK_BYTES = 64 * 1024 ** 2;
+const CORPUS_LOCK = '.coverage-corpus-write.lock';
+const digest = source => createHash('sha256').update(source).digest('hex');
 
 function fileBytes(file) {
   const descriptor = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -29,12 +36,19 @@ function coverageFilesUnder(directory, includeBundles = false) {
     } catch (error) {
       throw new Error(`cannot read raw coverage directory ${directory}: ${error.message}`);
     }
+    if (includeBundles && entries.some(entry => CORPUS_PIECE.test(entry.name) || entry.name === CORPUS_LOCK)) {
+      const manifests = entries.filter(entry => entry.isFile() && CORPUS_FILE.test(entry.name));
+      if (manifests.length !== 1 || entries.some(entry => entry.name === CORPUS_LOCK || entry.name.endsWith('.part') ||
+          RAW_COVERAGE_FILE.test(entry.name) || COMPACT_COVERAGE_FILE.test(entry.name))) {
+        throw new Error(`${path} contains incomplete or mixed chunked coverage`);
+      }
+    }
     for (const entry of entries) {
       const child = join(path, entry.name);
       if (entry.isDirectory()) walk(child);
       else if (
         entry.isFile() &&
-        (RAW_COVERAGE_FILE.test(entry.name) || (includeBundles && COMPACT_COVERAGE_FILE.test(entry.name)))
+        (RAW_COVERAGE_FILE.test(entry.name) || (includeBundles && (COMPACT_COVERAGE_FILE.test(entry.name) || CORPUS_FILE.test(entry.name))))
       ) files.push(child);
     }
   }
@@ -98,13 +112,80 @@ export function renderCoverageSummary(summary) {
   return `${output.join('\n')}\n`;
 }
 
-function readCoverageSource(file) {
+function readCoverageSource(file, limit = Infinity) {
   const descriptor = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
+    const stat = fstatSync(descriptor);
+    if (!stat.isFile() || stat.size > limit) throw new Error(`${file} exceeds its coverage file byte bound or is not regular`);
     return readFileSync(descriptor, 'utf8');
   } finally {
     closeSync(descriptor);
   }
+}
+
+function restoreReport(report, sourceMaps, file) {
+  if (!Array.isArray(report?.result) || typeof report.sourceMapRefs !== 'object' || report.sourceMapRefs === null || Array.isArray(report.sourceMapRefs)) {
+    throw new Error(`${file} contains an invalid compact process report`);
+  }
+  const cache = Object.create(null);
+  for (const [url, index] of Object.entries(report.sourceMapRefs)) {
+    if (!Number.isSafeInteger(index) || index < 0 || index >= sourceMaps.length) {
+      throw new Error(`${file} contains an invalid source-map reference for ${url}`);
+    }
+    cache[url] = sourceMaps[index];
+  }
+  if (report.result.length === 0) throw new Error(`${file} contains an invalid compact process report`);
+  return { result: report.result, 'source-map-cache': cache };
+}
+
+function* corpusReports(file, manifest, bytes) {
+  const stem = CORPUS_FILE.exec(basename(file));
+  if (manifest?.format !== CORPUS_FORMAT || !Number.isSafeInteger(manifest.maxChunkBytes) ||
+      manifest.maxChunkBytes < 1024 || manifest.maxChunkBytes > CHUNK_BYTES ||
+      !Number.isSafeInteger(manifest.reportCount) || manifest.reportCount < 1 ||
+      !Number.isSafeInteger(manifest.sourceMapCount) || manifest.sourceMapCount < 0 ||
+      !Number.isSafeInteger(manifest.rawFileCount) || manifest.rawFileCount < manifest.reportCount ||
+      !Array.isArray(manifest.mapChunks) || !Array.isArray(manifest.reportChunks)) {
+    throw new Error(`${file} has an invalid chunked coverage manifest`);
+  }
+  const expected = new Set([basename(file)]);
+  const groups = [['maps', 'sourceMaps', manifest.mapChunks], ['reports', 'reports', manifest.reportChunks]];
+  for (const [kind, , chunks] of groups) for (const [index, chunk] of chunks.entries()) {
+    const name = `coverage-${kind}-${stem[1]}-${stem[2]}-${String(index).padStart(8, '0')}.json`;
+    if (chunk?.file !== name || !Number.isSafeInteger(chunk.bytes) || chunk.bytes < 1 || chunk.bytes > manifest.maxChunkBytes ||
+        !Number.isSafeInteger(chunk.entries) || chunk.entries < 1 || !/^[a-f0-9]{64}$/.test(chunk.sha256)) {
+      throw new Error(`${file} has unsafe or invalid chunk metadata`);
+    }
+    expected.add(name);
+  }
+  const actual = readdirSync(dirname(file)).filter(name => CORPUS_PIECE.test(name));
+  if (actual.length !== expected.size || actual.some(name => !expected.has(name))) throw new Error(`${file} has incomplete or extra coverage chunks`);
+  const readChunk = (chunk, key) => {
+    const path = join(dirname(file), chunk.file);
+    if (fileBytes(path) !== chunk.bytes) throw new Error(`${path} has a coverage chunk size mismatch`);
+    const source = readCoverageSource(path, manifest.maxChunkBytes);
+    const size = Buffer.byteLength(source);
+    if (size !== chunk.bytes || digest(source) !== chunk.sha256) throw new Error(`${path} has a coverage chunk checksum mismatch`);
+    const parsed = JSON.parse(source);
+    if (parsed?.format !== CORPUS_FORMAT || !Array.isArray(parsed[key]) || parsed[key].length !== chunk.entries) {
+      throw new Error(`${path} has invalid coverage chunk contents`);
+    }
+    bytes.inputBytes += size;
+    return parsed[key];
+  };
+  const sourceMaps = [];
+  for (const chunk of manifest.mapChunks) for (const map of readChunk(chunk, 'sourceMaps')) {
+    if (typeof map !== 'object' || map === null || Array.isArray(map)) throw new Error(`${file} contains an invalid compact source map`);
+    sourceMaps.push(map);
+  }
+  if (sourceMaps.length !== manifest.sourceMapCount) throw new Error(`${file} has a source-map count mismatch`);
+  let count = 0;
+  for (const chunk of manifest.reportChunks) for (const report of readChunk(chunk, 'reports')) {
+    count++;
+    bytes.rawFileCount++;
+    yield restoreReport(report, sourceMaps, file);
+  }
+  if (count !== manifest.reportCount) throw new Error(`${file} has a process-report count mismatch`);
 }
 
 function* coverageReports(directories, bytes) {
@@ -112,30 +193,24 @@ function* coverageReports(directories, bytes) {
     const files = coverageFilesUnder(directory, true);
     if (files.length === 0) throw new Error(`${directory} contains no V8 coverage files`);
     for (const file of files) {
-      const source = readCoverageSource(file);
+      const source = readCoverageSource(file, CORPUS_FILE.test(basename(file)) ? CHUNK_BYTES : Infinity);
       bytes.inputBytes += Buffer.byteLength(source);
       const parsed = JSON.parse(source);
+      if (CORPUS_FILE.test(basename(file))) {
+        yield* corpusReports(file, parsed, bytes);
+        continue;
+      }
       if (!COMPACT_COVERAGE_FILE.test(basename(file))) {
         bytes.rawFileCount += 1;
         yield parsed;
         continue;
       }
-      if (parsed.format !== COMPACT_FORMAT || !Array.isArray(parsed.sourceMaps) || !Array.isArray(parsed.reports)) {
+      if (parsed?.format !== COMPACT_FORMAT || !Array.isArray(parsed.sourceMaps) || !Array.isArray(parsed.reports)) {
         throw new Error(`${file} is not a valid ${COMPACT_FORMAT} report`);
       }
       for (const report of parsed.reports) {
-        if (!Array.isArray(report.result) || typeof report.sourceMapRefs !== 'object' || report.sourceMapRefs === null) {
-          throw new Error(`${file} contains an invalid compact process report`);
-        }
-        const sourceMapCache = Object.create(null);
-        for (const [url, sourceMapIndex] of Object.entries(report.sourceMapRefs)) {
-          if (!Number.isSafeInteger(sourceMapIndex) || sourceMapIndex < 0 || sourceMapIndex >= parsed.sourceMaps.length) {
-            throw new Error(`${file} contains an invalid source-map reference for ${url}`);
-          }
-          sourceMapCache[url] = parsed.sourceMaps[sourceMapIndex];
-        }
         bytes.rawFileCount += 1;
-        yield { result: report.result, 'source-map-cache': sourceMapCache };
+        yield restoreReport(report, parsed.sourceMaps, file);
       }
     }
   }
@@ -147,7 +222,7 @@ function* coverageReports(directories, bytes) {
  * change LCOV totals: the final pass rebuilds the retained reports unchanged, then pinned Node maps
  * and merges them exactly once.
  */
-export function compactRawCoverageDirectories(directories) {
+function collectCompactReports(directories, onMap, onReport) {
   if (directories.length === 0) throw new Error('at least one raw coverage directory is required');
   assertPinnedNodeVersion();
   const TestCoverage = loadTestCoverage();
@@ -160,38 +235,94 @@ export function compactRawCoverageDirectories(directories) {
     false,
     { line: 0, branch: 0, function: 0 },
   );
-  const sourceMaps = [];
   const sourceMapIndexes = new Map();
-  const reports = [];
   let rawFileCount = 0;
+  let reportCount = 0;
 
   for (const directory of directories) {
     const files = coverageFilesUnder(directory);
     if (files.length === 0) throw new Error(`${directory} contains no V8 coverage files`);
     for (const file of files) {
-      const raw = JSON.parse(readFileSync(file, 'utf8'));
+      const raw = JSON.parse(readCoverageSource(file));
       rawFileCount += 1;
-      const result = (raw.result ?? []).filter((script) => !collector.shouldSkipFileCoverage(script.url));
+      if (!Array.isArray(raw?.result)) throw new Error(`${file} has invalid raw coverage results`);
+      const result = raw.result.filter((script) => !collector.shouldSkipFileCoverage(script.url));
       if (result.length === 0) continue;
       const sourceMapRefs = Object.create(null);
       for (const script of result) {
         const sourceMap = raw['source-map-cache']?.[script.url];
         if (sourceMap === undefined || sourceMap === null) continue;
+        if (typeof sourceMap !== 'object' || Array.isArray(sourceMap)) throw new Error(`${file} contains an invalid raw source map`);
         const serializedSourceMap = JSON.stringify(sourceMap);
         let sourceMapIndex = sourceMapIndexes.get(serializedSourceMap);
         if (sourceMapIndex === undefined) {
-          sourceMapIndex = sourceMaps.length;
+          sourceMapIndex = sourceMapIndexes.size;
           sourceMapIndexes.set(serializedSourceMap, sourceMapIndex);
-          sourceMaps.push(sourceMap);
+          onMap(serializedSourceMap, sourceMap);
         }
         sourceMapRefs[script.url] = sourceMapIndex;
       }
-      reports.push({ result, sourceMapRefs });
+      onReport({ result, sourceMapRefs });
+      reportCount++;
     }
   }
 
-  if (reports.length === 0) throw new Error('raw coverage compaction produced no source records');
+  if (reportCount === 0) throw new Error('raw coverage compaction produced no source records');
+  return { rawFileCount, reportCount, sourceMapCount: sourceMapIndexes.size };
+}
+
+export function compactRawCoverageDirectories(directories) {
+  const sourceMaps = [];
+  const reports = [];
+  const { rawFileCount } = collectCompactReports(directories, (_source, map) => sourceMaps.push(map), report => reports.push(report));
   return { rawFileCount, bundle: { format: COMPACT_FORMAT, sourceMaps, reports } };
+}
+
+function atomicCoverageFile(path, source) {
+  const temporary = `${path}.part`;
+  const fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try { writeFileSync(fd, source); fsyncSync(fd); } finally { closeSync(fd); }
+  renameSync(temporary, path);
+}
+
+export function writeCompactCoverageDirectories(directories, outputDirectory, { maxChunkBytes = CHUNK_BYTES } = {}) {
+  if (!Number.isSafeInteger(maxChunkBytes) || maxChunkBytes < 1024 || maxChunkBytes > CHUNK_BYTES) throw new Error('invalid coverage chunk byte bound');
+  mkdirSync(outputDirectory, { recursive: true });
+  const lock = join(outputDirectory, CORPUS_LOCK);
+  const fd = openSync(lock, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try {
+    if (readdirSync(outputDirectory).some(name => name !== CORPUS_LOCK)) throw new Error(`${outputDirectory} already contains compact coverage files`);
+    const stem = `${process.pid}-${Date.now()}`;
+    const writer = (kind, key) => {
+      const header = `{"format":${JSON.stringify(CORPUS_FORMAT)},"${key}":[`;
+      const chunks = [];
+      let pending = [], size = Buffer.byteLength(header) + 2;
+      const flush = () => {
+        if (!pending.length) return;
+        const source = `${header}${pending.join(',')}]}`;
+        const file = `coverage-${kind}-${stem}-${String(chunks.length).padStart(8, '0')}.json`;
+        atomicCoverageFile(join(outputDirectory, file), source);
+        chunks.push({ file, bytes: Buffer.byteLength(source), sha256: digest(source), entries: pending.length });
+        pending = []; size = Buffer.byteLength(header) + 2;
+      };
+      return { chunks, flush, add: source => {
+        const bytes = Buffer.byteLength(source);
+        if (Buffer.byteLength(header) + bytes + 2 > maxChunkBytes) throw new Error(`single coverage ${key} entry exceeds ${maxChunkBytes} byte bound`);
+        if (size + bytes + (pending.length ? 1 : 0) > maxChunkBytes) flush();
+        size += bytes + (pending.length ? 1 : 0); pending.push(source);
+      } };
+    };
+    const maps = writer('maps', 'sourceMaps'), reports = writer('reports', 'reports');
+    const counts = collectCompactReports(directories, source => maps.add(source), report => reports.add(JSON.stringify(report)));
+    maps.flush(); reports.flush();
+    const manifest = { format: CORPUS_FORMAT, maxChunkBytes, ...counts, mapChunks: maps.chunks, reportChunks: reports.chunks };
+    const source = JSON.stringify(manifest);
+    if (Buffer.byteLength(source) > maxChunkBytes) throw new Error('coverage manifest exceeds its byte bound');
+    const output = join(outputDirectory, `coverage-corpus-${stem}.json`);
+    atomicCoverageFile(output, source);
+    const compactBytes = Buffer.byteLength(source) + [...maps.chunks, ...reports.chunks].reduce((sum, chunk) => sum + chunk.bytes, 0);
+    return { ...counts, compactBytes, output };
+  } finally { closeSync(fd); unlinkSync(lock); }
 }
 
 /**
@@ -249,20 +380,11 @@ function main(argv) {
   assertExpectedShardCount(positionals, values['shard-count']);
   if (values['compact-output']) {
     const outputDirectory = values['compact-output'];
-    mkdirSync(outputDirectory, { recursive: true });
-    const existing = readdirSync(outputDirectory)
-      .filter((name) => RAW_COVERAGE_FILE.test(name) || COMPACT_COVERAGE_FILE.test(name));
-    if (existing.length > 0) throw new Error(`${outputDirectory} already contains compact coverage files`);
     const rawBytes = positionals.flatMap((directory) => coverageFilesUnder(directory)).reduce((sum, file) => sum + fileBytes(file), 0);
-    const { rawFileCount, bundle } = compactRawCoverageDirectories(positionals);
-    const timestamp = Date.now();
-    const output = join(outputDirectory, `coverage-bundle-${process.pid}-${timestamp}-0.json`);
-    const compactSource = JSON.stringify(bundle);
-    writeFileSync(output, compactSource);
-    const compactBytes = Buffer.byteLength(compactSource);
+    const { rawFileCount, reportCount, sourceMapCount, output, compactBytes } = writeCompactCoverageDirectories(positionals, outputDirectory);
     console.log(
       `coverage-merge-ratchet: bundled ${positionals.length} raw shard(s), ${rawFileCount} V8 file(s), ` +
-        `${bundle.reports.length} retained process report(s), ${bundle.sourceMaps.length} unique source map(s), ` +
+        `${reportCount} retained process report(s), ${sourceMapCount} unique source map(s), ` +
         `rawBytes=${rawBytes} compactBytes=${compactBytes} peakBytes=${rawBytes + compactBytes} -> ${output}`,
     );
   } else {
