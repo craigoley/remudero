@@ -1,5 +1,7 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
+import { pathToFileURL } from "node:url";
+import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
 
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { aggregateCacheHitTotals, deriveKnowledgeBudgetCap, measureKnowledgeBudgetPressure, TRIVIAL_DROPPED_WEIGHT_CHARS, type CacheHitTokens, type KnowledgeBudgetDerivation } from "./digest.js";
@@ -18,10 +20,11 @@ import {
   type PromotionRecord,
 } from "./experiment-promotion.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
-import { gardenStatePath, judgeGardenDecision, readGardenState, runGarden, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec, type PrState } from "./gardener.js";
+import { gardenPassDue, gardenStatePath, judgeGardenDecision, readGardenState, runGarden, type GardenAction, type GardenCheckout, type GardenSpec, type GardenerDeps, type PrState } from "./gardener.js";
 import { buildEntryWeightIndex, DEFAULT_KNOWLEDGE_BUDGET_CHARS, loadLearningsCorpus } from "./learnings.js";
 import type { LedgerLine } from "./ledger.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
 import type { BillingMode } from "./env.js";
 import { recommendMounts, type MountHeadroomCell, type MountRecommendation } from "./mount-recommender.js";
 import { loadMounts, mountsPath } from "./mounts.js";
@@ -122,9 +125,9 @@ export interface ConfigInventory {
 
 /** Where the gardener reads. Every field has a production default; a test supplies its own. */
 export interface ConfigGardenSources {
-  ledgerRows?: () => Array<Record<string, unknown>>;
-  mountRecommendations?: () => MountRecommendation[];
-  entryWeights?: () => Record<string, number>;
+  ledgerRows?: () => Array<Record<string, unknown>> | Promise<Array<Record<string, unknown>>>;
+  mountRecommendations?: () => MountRecommendation[] | Promise<MountRecommendation[]>;
+  entryWeights?: () => Record<string, number> | Promise<Record<string, number>>;
 }
 
 export const CONFIG_GARDEN_NAME = "config";
@@ -300,35 +303,130 @@ export function readConfigGardenLedgerRows(stateDir: string, reader: typeof read
   return read.rows;
 }
 
-export function configInventory(deps: GardenerDeps, sources: ConfigGardenSources = {}, reader: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync): ConfigInventory {
-  const rows = (sources.ledgerRows ?? (() => readConfigGardenLedgerRows(deps.stateDir, reader)))();
-  const weights = (sources.entryWeights ?? (() => buildEntryWeightIndex(loadLearningsCorpus(resolveRepoLayout(deps.repoRoot).learningsDir))))();
-  const nowMs = (deps.clock ?? systemClock).now();
-  const canaries = readConfigCanaries(deps.stateDir);
+/** Ledger reads, plan loading and derivation run on a one-shot worker, including injected snapshots. */
+export async function configInventory(deps: GardenerDeps, sources: ConfigGardenSources = {}, reader?: typeof readLedgerUnionRecordsSync): Promise<ConfigInventory> {
+  const [rows, weights, recommendations] = await Promise.all([
+    sources.ledgerRows?.() ?? (reader ? readConfigGardenLedgerRows(deps.stateDir, reader) : undefined),
+    sources.entryWeights?.(),
+    sources.mountRecommendations?.() ?? [],
+  ]);
+  return configMeasurementOffLoop<ConfigInventory>({
+    kind: "inventory", stateDir: deps.stateDir, repoRoot: deps.repoRoot,
+    nowMs: (deps.clock ?? systemClock).now(), rows, weights, recommendations,
+  });
+}
+
+interface InventoryMeasurement {
+  kind: "inventory";
+  stateDir: string;
+  repoRoot: string;
+  nowMs: number;
+  rows?: Array<Record<string, unknown>>;
+  weights?: Record<string, number>;
+  recommendations: MountRecommendation[];
+}
+
+type ConfigMeasurement = InventoryMeasurement | { kind: "mount"; stateDir: string; sweepScript: string };
+type MeasurementReply = { ok: true; value: ConfigInventory | MountSweep } | { ok: false; reason: string };
+type MountSweep = { cells: MountHeadroomCell[]; corpus?: { unread: string[] } };
+const CONFIG_MEASUREMENT_WORKER_KIND = "remudero-config-measurement";
+
+/** A worker failure refuses this measurement; it never falls back to reading on the event loop. */
+export function configMeasurementOffLoop<T>(input: ConfigMeasurement, workerUrl: URL = new URL(import.meta.url)): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(workerUrl, { workerData: { kind: CONFIG_MEASUREMENT_WORKER_KIND, input }, execArgv: process.execArgv });
+    worker.once("message", (reply: MeasurementReply) => {
+      void worker.terminate();
+      if (reply.ok) resolve(reply.value as T);
+      else reject(new Error(reply.reason));
+    });
+    worker.once("error", reject);
+    worker.once("exit", (code) => reject(new Error(`config gardener: measurement worker exited before answering (code ${code})`)));
+  });
+}
+
+/** Named worker body so tests can also exercise the read and error replies in the instrumented thread. */
+export async function serveConfigMeasurement(input: ConfigMeasurement, port: { postMessage(reply: MeasurementReply): void }): Promise<void> {
+  try {
+    let value: ConfigInventory | MountSweep;
+    if (input.kind === "inventory") value = buildConfigInventory(input);
+    else {
+      const m = await import(pathToFileURL(input.sweepScript).href) as { buildMountHeadroomSweep: (stateDir: string) => MountSweep };
+      value = await cachedMountHeadroomSweep(input.stateDir, input.sweepScript, m.buildMountHeadroomSweep);
+    }
+    port.postMessage({ ok: true, value });
+  } catch (e) {
+    port.postMessage({ ok: false, reason: String((e as Error)?.message ?? e) });
+  }
+}
+
+if (!isMainThread && workerData?.kind === CONFIG_MEASUREMENT_WORKER_KIND) void serveConfigMeasurement(workerData.input, parentPort!);
+
+function buildConfigInventory(input: InventoryMeasurement): ConfigInventory {
+  const rows = input.rows ?? readConfigGardenLedgerRows(input.stateDir);
+  const weights = input.weights ?? buildEntryWeightIndex(loadLearningsCorpus(resolveRepoLayout(input.repoRoot).learningsDir));
+  const canaries = readConfigCanaries(input.stateDir);
   return {
-    nowIso: fixedClock(nowMs).iso(),
+    nowIso: fixedClock(input.nowMs).iso(),
     runs: gatherRuns(rows as LedgerRecord[]),
-    queued: queuedBudgets(deps.repoRoot, deps.stateDir),
-    recommendations: sources.mountRecommendations?.() ?? [],
+    queued: queuedBudgets(input.repoRoot, input.stateDir),
+    recommendations: input.recommendations,
     cap: { current: DEFAULT_KNOWLEDGE_BUDGET_CHARS, derivation: capDerivation(rows, weights, DEFAULT_KNOWLEDGE_BUDGET_CHARS) },
     active: canaries.filter((c) => isPromotionActive(c.promotion.state)),
-    cooling: canaries.filter((c) => c.promotion.state === "rolled_back" && nowMs - Date.parse(c.promotion.createdAt) < CANARY_TTL_MS).map((c) => c.promotion.scope.policyScope),
+    cooling: canaries.filter((c) => c.promotion.state === "rolled_back" && input.nowMs - Date.parse(c.promotion.createdAt) < CANARY_TTL_MS).map((c) => c.promotion.scope.policyScope),
   };
+}
+
+/** Archive metadata, covering both rotation forms. Live appends wait for the next rotation; before
+ *  the first rotation, live metadata prevents a first-boot sweep from being cached forever. */
+function mountSweepKey(stateDir: string, sweepScript: string): string {
+  const rotations = ledgerRotationEntries(readdirSync(stateDir), stateDir).map((entry) => entry.path);
+  const paths = [sweepScript, ...(rotations.length ? rotations : [join(stateDir, LEDGER_FILENAME)])];
+  return JSON.stringify(paths.map((path) => {
+    const stat = existsSync(path) ? statSync(path) : undefined;
+    return [path, stat?.size, stat?.mtimeMs, stat?.ctimeMs];
+  }));
+}
+
+export const configMountSweepCachePath = (stateDir: string): string => join(stateDir, "config-mount-headroom-sweep.json");
+
+/** Persist cells, not recommendations: mounts and billing mode are re-evaluated on every pass. A
+ *  missing, malformed or obsolete disposable cache is rebuilt, and incomplete sweeps are never saved. */
+export async function cachedMountHeadroomSweep(stateDir: string, sweepScript: string, build: (stateDir: string) => MountSweep | Promise<MountSweep>): Promise<MountSweep> {
+  const key = mountSweepKey(stateDir, sweepScript);
+  const path = configMountSweepCachePath(stateDir);
+  const raw = readFileIfExists(path);
+  if (raw !== undefined) {
+    let cached: { version?: number; key?: string; cells?: MountHeadroomCell[] } | undefined;
+    try { cached = JSON.parse(raw); } catch { /* Disposable JSON corruption requires a new sweep. */ }
+    if (cached?.version === 1 && cached.key === key && Array.isArray(cached.cells) && cached.cells.every((c) =>
+      c && typeof c.cellKey === "string" && Array.isArray(c.arms) && Array.isArray(c.comparisons))) return { cells: cached.cells };
+  }
+  const sweep = await build(stateDir);
+  const corpusIsReadable = sweep.corpus === undefined || sweep.corpus.unread.length === 0;
+  if (corpusIsReadable && mountSweepKey(stateDir, sweepScript) === key) {
+    writeAtomic(path, JSON.stringify({ version: 1, key, cells: sweep.cells }) + "\n");
+  }
+  return { cells: sweep.cells };
 }
 
 /** Mount recommendations as the gardener reads them: the recommender's own gates over the headroom
  *  sweep, kept to the recommendations. A sweep that cannot be built (no runs yet) is logged and reads as
  *  none, so the other classes still act. */
 export function mountRecommendationSource(opts: {
-  build: (stateDir: string) => { cells: MountHeadroomCell[] };
+  build?: (stateDir: string) => { cells: MountHeadroomCell[] } | Promise<{ cells: MountHeadroomCell[] }>;
+  sweepScript: string;
   stateDir: string;
   mountsFile: string;
   billingMode: BillingMode;
   log: GardenerDeps["log"];
-}): () => MountRecommendation[] {
-  return () => {
+}): () => Promise<MountRecommendation[]> {
+  return async () => {
     try {
-      const outcomes = recommendMounts(opts.build(opts.stateDir).cells, loadMounts(opts.mountsFile), { billingMode: opts.billingMode });
+      const sweep = opts.build
+        ? await cachedMountHeadroomSweep(opts.stateDir, opts.sweepScript, opts.build)
+        : await configMeasurementOffLoop<{ cells: MountHeadroomCell[] }>({ kind: "mount", stateDir: opts.stateDir, sweepScript: opts.sweepScript });
+      const outcomes = recommendMounts(sweep.cells, loadMounts(opts.mountsFile), { billingMode: opts.billingMode });
       return outcomes.filter((o): o is MountRecommendation => o.kind === "recommendation");
     } catch (e) {
       opts.log(`${CONFIG_GARDEN_NAME}.mount_recommendations_unread`, { error: String((e as Error)?.message ?? e) });
@@ -649,7 +747,7 @@ export function configCanariesDue(stateDir: string, clock: Clock = systemClock):
   return file.lastTendMs === undefined || clock.now() - file.lastTendMs >= CONFIG_TEND_INTERVAL_MS;
 }
 
-export function tendConfigCanaries(deps: GardenerDeps, runs: () => RunSummary[]): TendResult[] {
+export async function tendConfigCanaries(deps: GardenerDeps, runs: () => Promise<RunSummary[]>): Promise<TendResult[]> {
   const nowMs = (deps.clock ?? systemClock).now();
   const file = readConfigCanaryFile(deps.stateDir);
   const canaries = file.canaries;
@@ -682,7 +780,7 @@ export function tendConfigCanaries(deps: GardenerDeps, runs: () => RunSummary[])
         }
       }
     } else {
-      measured ??= runs();
+      measured ??= await runs();
       const split = splitCohort(c.cohort, measured, c.exposedAt ?? c.promotion.observationWindow.start, nowIso);
       excludedCount = split.excludedCount;
       step = stepCanary(c.promotion, cohortGuardObservations(cohortOutcome(split.canary), cohortOutcome(split.rest), c.promotion.comparisonPopulation, nowIso), nowIso);
@@ -720,13 +818,17 @@ function rollBack(deps: GardenerDeps, c: ConfigCanary): string | undefined {
   }
 }
 
-type ConfigGardenSpec = GardenSpec<ConfigGardenClass, ConfigInventory, ConfigGardenAction, GardenCheckout>;
+type ConfigGardenSpec = Omit<GardenSpec<ConfigGardenClass, ConfigInventory, ConfigGardenAction, GardenCheckout>, "inventory"> & {
+  inventory: () => Promise<ConfigInventory>;
+};
 
 /** One pass: judge the open canaries, then let the garden act, recording any change it lands as a new
  *  canary that waits in shadow for its merge. */
-export function runConfigGarden(spec: ConfigGardenSpec, deps: GardenerDeps, sources: ConfigGardenSources = {}): ReturnType<typeof runGarden<ConfigGardenClass, ConfigInventory, ConfigGardenAction, GardenCheckout>> {
-  tendConfigCanaries(deps, () => configInventory(deps, sources).runs);
-  const pass = runGarden(spec, deps);
+export async function runConfigGarden(spec: ConfigGardenSpec, deps: GardenerDeps, sources: ConfigGardenSources = {}): Promise<ReturnType<typeof runGarden<ConfigGardenClass, ConfigInventory, ConfigGardenAction, GardenCheckout>>> {
+  await tendConfigCanaries(deps, async () => (await configInventory(deps, sources)).runs);
+  if (!gardenPassDue(spec, deps)) return { ran: false };
+  const inventory = await spec.inventory();
+  const pass = runGarden({ ...spec, inventory: () => inventory }, deps);
   const action = pass.plan?.actions[0];
   if (pass.prUrl && action) {
     // The action's shadow evidence was measured by the inventory. Starting the window from a
@@ -753,18 +855,18 @@ export function runConfigGarden(spec: ConfigGardenSpec, deps: GardenerDeps, sour
 /** Run passes on their own timer beside the main loop, never two at once. */
 export function startConfigGarden(spec: ConfigGardenSpec, deps: GardenerDeps, sources: ConfigGardenSources, intervalMs: number): { stop: () => void } {
   let running = false;
-  const tick = () => {
+  const tick = async () => {
     if (running) return;
     running = true;
     try {
-      runConfigGarden(spec, deps, sources);
+      await runConfigGarden(spec, deps, sources);
     } catch (e) {
       deps.log(`${CONFIG_GARDEN_NAME}.gardener_failed`, { error: String((e as Error)?.message ?? e) });
     } finally {
       running = false;
     }
   };
-  tick();
+  void tick();
   const timer = setInterval(tick, intervalMs);
   timer.unref?.();
   return { stop: () => clearInterval(timer) };

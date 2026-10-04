@@ -1,0 +1,40 @@
+- id: W1-T5622
+  title: "THE OPERATOR-GATED REACHABILITY CENSUS PINS ITS WITNESSES BY TEST TITLE, NOT LINE NUMBER — `expectedKeys` and `REACHABILITY_EXCLUSIONS` key call sites as `name:file:line`, so test/run-task.test.ts:6167/6228 has been re-derived in 16 commits (#8970 bumped 6165->6167, 6226->6228) by PRs that never touched arming"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one census re-keyed by title; the helper is that census's own key function
+  origin: "operator session 2026-10-04: #8970 had to re-pin run-task.test.ts arm call sites"
+  plan_refs: [W1-T2346, W1-T2347, W1-T2887]
+  files: [test/helpers/test-call-site-key.ts, test/operator-gated-default-reachability.test.ts, test/a-reachability-witness-survives-a-line-shift.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main d13d797c. In test/operator-gated-default-reachability.test.ts,
+    `findTestCallSites` returns a `line` and both real-tree tests build `${name}:${file}:${line}`.
+    `expectedKeys` (the "armIfVerdictPermits/withdrawArmIfVerdictRefuses call sites that omit a
+    field are REPORTED" test) pins armIfVerdictPermits at run-task.test.ts:6167 and :6228 plus
+    arm-ordering.test.ts:63, and `REACHABILITY_EXCLUSIONS` pins nine
+    arm-seam-default-is-opt-in.test.ts lines. Any line added above a witness reddens the census
+    with no change in reachability. `git log -G 'armIfVerdictPermits:test/run-task.test.ts:[0-9]+'`
+    finds 16 commits re-deriving those numbers, the latest #8970 (5488a403). The two run-task
+    witnesses are still the same call sites, inside the W1-T449 tests "armAndLogOutcome (sweep
+    lane) vs armIfVerdictPermits (review lane)..." and "...a refused arm still logs
+    automerge.arm_skipped...", whose titles are stable.
+  design: |
+    1. Add test/helpers/test-call-site-key.ts exporting `enclosingTestTitle(text, offset)` (the
+       nearest preceding `test("...")` literal) and `callSiteKey({name, file, title, ordinal})`
+       -> `name:file:<title>#<n>`.
+    2. `findTestCallSites` rows carry `title` and `ordinal`.
+    3. Re-key `expectedKeys` and `REACHABILITY_EXCLUSIONS` by title. Failure text still prints
+       `file:line` for humans.
+  acceptance:
+    - claim: "the reachability census identifies each witness and exclusion by its enclosing test title, so inserting lines above a call site leaves its key unchanged"
+      proof: "unit test: test/a-reachability-witness-survives-a-line-shift.test.ts"
+  falsifier: |
+    Make `callSiteKey` include the line number again and the new test fails, because the key of a
+    fixture shifted by N lines changes.

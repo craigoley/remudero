@@ -53,8 +53,9 @@ const PROCEDURAL_STEPS: Readonly<Record<string, { text: string; description: str
   },
 };
 
-/** Canonical rendered text, kept as strings for existing callers. An unmapped signal still
- *  renders its raw key; the scanner compares that fallback to the same key and refuses it. */
+/** Canonical rendered text, kept as strings for existing callers. {@link renderSkillDraft} never
+ *  drafts an unmapped signal (W1-T4270's {@link skillEligibleSignal}); a draft built elsewhere that
+ *  carries a raw key as its step is still refused by the scanner, which compares it to that key. */
 export const PROCEDURAL_STEP_TEXT: Readonly<Record<string, string>> = Object.fromEntries(
   Object.entries(PROCEDURAL_STEPS).map(([key, step]) => [key, step.text]),
 );
@@ -72,6 +73,15 @@ const INJECTABLE_SKILL_TASK_TYPES = {
 
 function injectableSkillTaskType(taskType: string): Task["type"] | undefined {
   return Object.hasOwn(INJECTABLE_SKILL_TASK_TYPES, taskType) ? taskType as Task["type"] : undefined;
+}
+
+const SKILL_ELIGIBLE_SIGNALS: Readonly<Record<string, boolean>> = {
+  clean_single_strike: false,
+  fully_executed_proof: true,
+};
+
+function skillEligibleSignal(key: string): boolean {
+  return Object.hasOwn(SKILL_ELIGIBLE_SIGNALS, key) && SKILL_ELIGIBLE_SIGNALS[key];
 }
 
 /** One drafted skill: the rendered SKILL.md text plus the fields a scanner/stager needs without
@@ -114,8 +124,8 @@ export interface TranscriptContext {
 
 /**
  * Render one procedural candidate as a Claude Code skill draft (design clause i). `undefined` for
- * a candidate under the two-run floor: {@link import("./retro.js").mineProceduralCandidates}
- * already enforces this threshold, but a caller handing this function a single-run candidate
+ * a candidate with no eligible signal or under the two-run floor. Mining already enforces this
+ * threshold, but a caller handing this function a single-run candidate
  * directly (a test, or a future caller that skips mining) must get NOTHING rather than an
  * anecdote dressed as a proven procedure.
  *
@@ -129,6 +139,8 @@ export interface TranscriptContext {
  */
 export function renderSkillDraft(candidate: ProceduralCandidateLike, transcripts?: TranscriptContext): SkillDraft | undefined {
   if (candidate.supportingRuns < 2) return undefined;
+  const eligibleSignals = candidate.signals.filter(skillEligibleSignal);
+  if (eligibleSignals.length === 0) return undefined;
   const hash = proceduralCandidateHash(candidate);
   const procedureKey = procedureKeyFor(candidate);
   // The NAME follows the procedure too, so the written .claude/skills/<name>/ path is stable as
@@ -136,9 +148,10 @@ export function renderSkillDraft(candidate: ProceduralCandidateLike, transcripts
   const name = `${kebabSlug(candidate.shapeKey)}-${procedureKey.slice(0, 8)}`;
   const description = `A procedure shape proven across ${candidate.supportingRuns} merged ${candidate.taskType} run(s): ${candidate.signals.join(" + ")}.`;
   const appliesTo = injectableSkillTaskType(candidate.taskType);
-  const outcomeDescriptions = candidate.signals.map((key) =>
-    candidate.outcomeDescriptions?.[key] ?? PROCEDURAL_STEPS[key]?.description ?? key,
-  );
+  const outcomeFor = (key: string): string =>
+    candidate.outcomeDescriptions?.[key] ?? PROCEDURAL_STEPS[key]?.description ?? key;
+  // Every mined outcome reaches the scanner's vocabulary, eligible or not (W1-T4283).
+  const outcomeDescriptions = candidate.signals.map(outcomeFor);
   const workflow = transcripts
     ? mineTranscriptWorkflows(transcripts.runs, transcripts.records).find((w) => w.taskType === candidate.taskType)
     : undefined;
@@ -146,8 +159,9 @@ export function renderSkillDraft(candidate: ProceduralCandidateLike, transcripts
   // Once transcript-mined steps name what a worker DID, a signal step that only restates its own
   // mined outcome (W1-T4283) is dropped rather than left to make the scanner refuse the whole
   // draft; with no mined steps it stays, so the scanner still refuses an outcome-only procedure.
-  const steps = candidate.signals
-    .map((key, index) => ({ line: `- ${PROCEDURAL_STEP_TEXT[key] ?? key}`, outcome: outcomeDescriptions[index] }))
+  // Only skill-eligible signals render a step (W1-T4270): an outcome label is never a procedure.
+  const steps = eligibleSignals
+    .map((key) => ({ line: `- ${PROCEDURAL_STEP_TEXT[key] ?? key}`, outcome: outcomeFor(key) }))
     .filter(({ line, outcome }) => workflowSteps.length === 0 || !restatesOutcome(line, outcome))
     .map(({ line }) => line);
   const evidence = [

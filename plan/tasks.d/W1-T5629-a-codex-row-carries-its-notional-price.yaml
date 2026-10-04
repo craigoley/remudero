@@ -1,0 +1,46 @@
+- id: W1-T5629
+  title: "A CODEX ROW CARRIES ITS NOTIONAL PRICE, NOT A HARD-CODED $0 — the codex worker returns `costUsd: 0`, so every codex retro/triage/implement/fix row reads $0 in the architect-lane table beside Claude's notional dollars, and the table names the row's requested model, not the one that ran"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one defect — codex price, producer to reader
+  origin: "operator session 2026-10-04: retro and triage lanes priced at $0"
+  plan_refs: [W1-T4066, W1-T2239, W1-T5526, W1-T2572]
+  files: [src/lib/worker-provider.ts, src/lib/worker.ts, src/lib/spend-rows.ts, src/lib/retro.ts, test/a-codex-row-carries-its-notional-price.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main d13d797c. The rows are neither missing nor unattributed:
+    `retro.synthesized`, `triage.synthesized` and `retro.preflight_repair` are `produced` in
+    `SPEND_STEP_ROLES`, and `gatherRuns` skips RETRO-*/TRIAGE-* runs by design (they open with
+    `retro.start`/`triage.start`); their reader is `architectLaneShare` -> `laneSpendOf`
+    (src/lib/retro.ts, `ARCHITECT_LANE_STEPS`). The $0 is the codex worker's: the codex path in
+    src/lib/worker-provider.ts returns `costUsd: 0` unconditionally and `workerLedgerFields`
+    (src/lib/worker.ts) writes it as `total_cost_usd`, where a Claude subscription row carries the
+    SDK's notional price. Live union (09-2x/10-0x rotations + ledger.ndjson): Claude
+    retro.synthesized 75 rows $188.22, triage.synthesized 41 rows $9.01; codex rows, all $0:
+    retro.synthesized 12, triage.synthesized 49, retro.preflight_repair 5, implement.done 750,
+    fix.done 301. So codex triage, about half the lane, prices at $0 (base-rate notional ~$9.6).
+    `ownModelOf` reads `model`, which on a codex row holds the requested alias; the model that ran
+    is `routed_model` (gpt-6.1-sol). `openWeightUsageUsd`/`OPENWEIGHT_PRICES` already price
+    gpt-6.1-sol; gpt-6-sol and gpt-5.6-sol are unpriced.
+  design: |
+    (i) The codex result adds `notionalCostUsd` = the routed model's price at BASE rate (token
+    counts are a session sum, so the per-request long-context tier cannot apply); undefined when
+    `openWeightPriceFor` throws — unpriced means absent, never 0.
+    (ii) `workerLedgerFields` emits `notional_cost_usd` when defined; `cost_usd`/`total_cost_usd`
+    stay 0, so budgets and spend series are unchanged.
+    (iii) spend-rows.ts exports `notionalSpendUsd(row)`: `notional_cost_usd` for a codex row,
+    `spendAmountUsd` otherwise.
+    (iv) `laneSpendOf` uses `notionalSpendUsd` and attributes a codex row to its `routed_model`.
+    NOT THIS TASK: counting codex rows toward budgets or the goals/analytics spend series.
+  acceptance:
+    - claim: "a codex retro row with gpt-6.1-sol tokens prices at its base-rate notional in architectLaneShare and is attributed to gpt-6.1-sol, while a row from an unpriced routed model stays absent rather than $0"
+      proof: "unit test: test/a-codex-row-carries-its-notional-price.test.ts"
+  falsifier: |
+    Delete the `notionalSpendUsd` read in `laneSpendOf`; the lane reads $0.00 again and the test
+    fails.

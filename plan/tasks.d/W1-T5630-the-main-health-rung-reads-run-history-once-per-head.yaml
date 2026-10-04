@@ -1,0 +1,40 @@
+- id: W1-T5630
+  title: "THE MAIN-HEALTH RUNG READS MAIN'S RUN HISTORY ONCE PER HEAD, NOT ONCE PER OBSERVATION — `buildMainHealthRung` refetches the 100-run `actions/runs?...status=completed` page on every observation past a 10 s freshness window: 72 observations over 7 heads in 88 minutes"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low
+  origin: "operator session 2026-10-04: reviewing buildMainHealthRung (W1-T5490, #8961)"
+  plan_refs: [W1-T5490, W1-T5283, W1-T2787, W1-T4472]
+  files: [src/lib/main-health-rung.ts, test/the-main-health-rung-reads-run-history-once-per-head.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main d13d797c. `observe` in `buildMainHealthRung`
+    (src/lib/main-health-rung.ts) calls `readMainRunHistory` on every run that clears `freshMs`; by
+    default that is `mainPushRunHistoryRestArgs` (per_page=100), added by #8961/W1-T5490.
+    daemonCommand wires `freshMs` to `DEFAULT_GITHUB_EVENT_WAKE_CHECK_SETTLE_MS` = 10_000, and the
+    rung runs on every full sweep and on every settled check burst (`onCheckBurstSettled`).
+    Live ledger 10:28..11:57Z 10-04: 72 `main.health.observed` rows over 7 distinct heads, so each
+    head's history page was refetched about 10 times; 28 of those were `undetermined` and 14 were
+    decided by a fallback run, each fallback also reading up to `MAIN_HEALTH_FALLBACK_RUN_LIMIT`
+    (5) `/actions/runs/<id>/jobs` pages — and a completed run's jobs do not change unless re-run.
+    W1-T5283 moves the remaining sync gh calls off the loop; it does not bound this read.
+  design: |
+    Keep a closure cache in `buildMainHealthRung`: { key, readAtMs, history, jobsByRunId }, where
+    key = head sha plus the sorted name:conclusion of the head rollup's COMPLETED entries (a guard
+    workflow finishing on the head changes it). Reuse while the key matches and age <
+    `MAIN_HEALTH_RUN_HISTORY_TTL_MS` (5 min, a named export); refetch on a key change, TTL expiry,
+    or after an unreadable read. Cache `rollupFromJobs` results per runId under the same key.
+    Stamp `run_history_source: "cache" | "fetched"` on the existing `main.health.observed` row; no
+    new ledger step.
+  acceptance:
+    - claim: "two observations of one head with an unchanged rollup, past freshMs, fetch the run history once, and a new head, a newly completed check, or TTL expiry each refetch it"
+      proof: "unit test: test/the-main-health-rung-reads-run-history-once-per-head.test.ts"
+  falsifier: |
+    Delete the cache lookup; the second observation fetches again and the call-count assertion goes
+    from 1 to 2.
