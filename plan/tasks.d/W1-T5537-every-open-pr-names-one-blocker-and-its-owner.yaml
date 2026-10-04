@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator session 2026-10-03: board peaked at 30 open PRs against a ~4 median; operator asked for one named blocker per open PR with an automated owner (the board doctor)"
   plan_refs: [W1-T5490, W1-T5476, W1-T5492, W1-T4415]
-  files: [src/lib/pr-blocker.ts, src/lib/sweep.ts, test/every-open-pr-names-one-blocker-and-its-owner.test.ts]
+  files: [src/lib/pr-blocker.ts, src/lib/sweep.ts, test/every-open-pr-names-one-blocker-and-its-owner.test.ts, test/entanglement-split-sweep-reachability.test.ts]
   status: queued
   priority: 2
   attempts: 0
