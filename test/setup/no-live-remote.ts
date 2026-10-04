@@ -23,9 +23,10 @@
  *
  * Imported FIRST by test/setup/tmp-hygiene.ts, which every runner invocation already `--import`s.
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { lstatSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { type Clock, systemClock } from "../../src/lib/clock.js";
 import { discoverLiveLedgerRoot, isTestRunner, LIVE_LEDGER_DENY_ROOT_ENV, LIVE_WRITE_OVERRIDE_ENV,
   LIVE_WRITE_SENTINEL_TOKEN } from "../../src/lib/live-write-guard.js";
 
@@ -57,15 +58,111 @@ export function installNoLiveRemote(env: NodeJS.ProcessEnv = process.env): { ghC
   env.GIT_TERMINAL_PROMPT = "0";
   env.GH_TOKEN = LIVE_WRITE_SENTINEL_TOKEN;
   env.GITHUB_TOKEN = LIVE_WRITE_SENTINEL_TOKEN;
-  const ghConfigDir = mkdtempSync(join(tmpdir(), "rmd-test-gh-config-"));
+  // W1-T5550: the owning pid is in the name, so a later process can tell this dir's owner is gone.
+  const ghConfigDir = mkdtempSync(join(tmpdir(), `rmd-test-gh-config-${process.pid}-`));
   env.GH_CONFIG_DIR = ghConfigDir;
   for (const name of APP_KEY_ENV) delete env[name];
   return { ghConfigDir };
 }
 
+/**
+ * W1-T5550 — A SIGKILLED TEST PROCESS LEAVES ITS SETUP DIRS BEHIND, SO THE NEXT ONE REMOVES THEM.
+ *
+ * The `process.on("exit")` handlers below and in ./tmp-hygiene.ts are the fast path. A SIGKILL skips
+ * them, and the `rmd-` boot sweep (`sweepStaleTempDirs`) only scans the daemon's own `os.tmpdir()`,
+ * so a test run whose TMPDIR is elsewhere (/mnt/scratch) was never swept: 32+ refuse and 28+ config
+ * dirs sat there at filing. Each setup dir now carries its owner's pid (`<prefix><pid>-<random>`),
+ * and every test process that loads the setup removes the same-prefix dirs under its own tmpdir
+ * whose owner is not alive and which are older than {@link DEAD_OWNER_MIN_AGE_MS}.
+ */
+export const GH_CONFIG_DIR_PREFIX = "rmd-test-gh-config-";
+
+/** A dead owner's dir younger than this is kept. The age is a second guard beside the pid: a pid
+ *  that reads dead from here can belong to a live process in another pid namespace sharing tmp. */
+export const DEAD_OWNER_MIN_AGE_MS = 60_000;
+
+/** Why {@link reapDeadOwnerDirs} kept a dir it matched. */
+export type DeadOwnerKeepReason = "alive" | "fresh" | "not-removable";
+
+export interface DeadOwnerReap {
+  removed: string[];
+  kept: Array<{ name: string; reason: DeadOwnerKeepReason }>;
+}
+
+export interface DeadOwnerReapDeps {
+  /** The directory scanned; default `os.tmpdir()`. */
+  root?: string;
+  clock?: Clock;
+  isAlive?: (pid: number) => boolean;
+  minAgeMs?: number;
+}
+
+/** `process.kill(pid, 0)` sends nothing; it only asks whether the pid exists. ESRCH is the one
+ *  answer that means "gone"; EPERM means the process exists under another user, so it is alive. */
+export function pidIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return false;
+    if (code === "EPERM") return true;
+    throw error;
+  }
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Remove every `<prefix><pid>-*` directory under `root` whose owning pid is not alive and whose
+ *  mtime is at least `minAgeMs` old. A name without a pid (made before W1-T5550) is not matched. */
+export function reapDeadOwnerDirs(prefix: string, deps: DeadOwnerReapDeps = {}): DeadOwnerReap {
+  const root = deps.root ?? tmpdir();
+  const clock = deps.clock ?? systemClock;
+  const isAlive = deps.isAlive ?? pidIsAlive;
+  const minAgeMs = deps.minAgeMs ?? DEAD_OWNER_MIN_AGE_MS;
+  const owned = new RegExp(`^${escapeRegExp(prefix)}(\\d+)-`);
+  const result: DeadOwnerReap = { removed: [], kept: [] };
+  for (const name of readdirSync(root)) {
+    const match = owned.exec(name);
+    if (match === null) continue;
+    const pid = Number(match[1]);
+    if (pid === process.pid || isAlive(pid)) {
+      result.kept.push({ name, reason: "alive" });
+      continue;
+    }
+    const full = join(root, name);
+    let stat;
+    try {
+      stat = lstatSync(full);
+    } catch (error) {
+      // Another loader's reap removed it between readdir and here: nothing left to judge.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    if (!stat.isDirectory()) continue;
+    if (clock.now() - stat.mtimeMs < minAgeMs) {
+      result.kept.push({ name, reason: "fresh" });
+      continue;
+    }
+    try {
+      rmSync(full, { recursive: true, force: true });
+      result.removed.push(name);
+    } catch (error) {
+      // A sticky shared tmp refuses another user's dir; that dir is theirs to reap, not ours.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EACCES" && code !== "EPERM") throw error;
+      result.kept.push({ name, reason: "not-removable" });
+    }
+  }
+  return result;
+}
+
 const installed = installNoLiveRemote();
 if (installed.ghConfigDir !== undefined) {
   const dir = installed.ghConfigDir;
+  reapDeadOwnerDirs(GH_CONFIG_DIR_PREFIX);
   process.on("exit", () => {
     try {
       rmSync(dir, { recursive: true, force: true });
