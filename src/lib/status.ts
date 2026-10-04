@@ -2397,14 +2397,18 @@ export function isPlanOnlyChangeset(files: readonly string[]): boolean {
   return files.length > 0 && files.every((f) => isInPlanScope(f));
 }
 
-/** W1-T5553's exemption predicate: `files` DELIVERS `task`, whose declared `files:` are all plan scope — the
- *  changeset is a non-empty subset of them touching one that is not the task's own shard. A filing adds only
- *  its own shard, so it stays refused. Used by W1-T5552's durable revalidation; W1-T5553 wires rung (c). */
+/** W1-T5553: `files` DELIVERS `task`, whose `files:` are all plan scope — every path declared or its own shard
+ *  (#6461), one declared and not its own shard. A filing adds only its own shard, so it stays refused. */
 export function isPlanTextDeliverable(task: Pick<Task, "id" | "files">, files: readonly string[]): boolean {
   const declared = new Set(task.files ?? []);
   if (declared.size === 0 || ![...declared].every((f) => isInPlanScope(f))) return false;
   const ownShard = new RegExp(`^plan/tasks\\.d/${escapeRegExp(task.id)}(-|\\.ya?ml$)`);
-  return files.length > 0 && files.every((f) => declared.has(f)) && files.some((f) => !ownShard.test(f));
+  return files.every((f) => declared.has(f) || ownShard.test(f)) && files.some((f) => declared.has(f) && !ownShard.test(f));
+}
+
+// The plan-only DIFF refusal every credit rung applies (W1-T413), minus isPlanTextDeliverable.
+export function refusesAsPlanOnly(task: Pick<Task, "id" | "files">, files: readonly string[]): boolean {
+  return isPlanOnlyChangeset(files) && !isPlanTextDeliverable(task, files);
 }
 
 /**
@@ -2482,8 +2486,8 @@ export function runBranchClaimGap(pr: PrRef, taskId: string): RunBranchClaimGap 
 
 /** PLAN-ONLY-FILING REFUSAL (W1-T1004) — was `prUrl` opened by a plan-only FILING run, per THAT run's own
  *  positive ledger record, never inferred from the diff? A SEPARATE COPY, NOT A SHARED IMPORT (design note v):
- *  the run-task.ts twin stays private there, and W1-T471 serialises every task naming that file. A task whose
- *  own deliverable is genuinely plan text still reads false, an ordinary implement run writing no marker. */
+ *  the run-task.ts twin stays private there, and W1-T471 serialises every task naming that file. A plan-only
+ *  REVIEW row is diff evidence, so callers pass no `headSha` for a proven plan-text delivery (W1-T5553). */
 function isPlanOnlyFilingPr(
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
   prUrl: string,
@@ -2628,12 +2632,12 @@ function derivePrPrecedence(
       // row is no opinion. HEAD-BRANCH: its writer once skipped the diff check (W1-T3990/#6468). TRAILER
       // (W1-T5552): an entry saved before the diff refusal (W1-T413/W1-T3067) was never checked — W1-T380
       // stayed credited by plan-only #1437 until #8962. The `prByRef` review arm stays head-branch only.
-      const planOnlyPaths = deps.mergedPathsByPr?.get(entry.prNumber);
-      const reviewedPr = entry.source === "head-branch" &&
+      const planOnlyPaths = deps.mergedPathsByPr?.get(entry.prNumber) ?? [];
+      const reviewedPr = entry.source === "head-branch" && !isPlanTextDeliverable(task, planOnlyPaths) &&
         hasPlanOnlyReviewForPr(ledgerLines, entry.prUrl, ledgerIndex)
         ? deps.github.prByRef(entry.prUrl) : null;
       const isRevalidatedPlanOnly =
-        (isPlanOnlyChangeset(planOnlyPaths ?? []) && !isPlanTextDeliverable(task, planOnlyPaths ?? [])) ||
+        refusesAsPlanOnly(task, planOnlyPaths) ||
         (reviewedPr?.headRefOid !== undefined &&
           isPlanOnlyFilingPr(ledgerLines, entry.prUrl, ledgerIndex, reviewedPr.headRefOid));
       if (isRevalidatedPlanOnly) {
@@ -2738,6 +2742,8 @@ function derivePrPrecedence(
   // exit-0 EMPTY result is INDETERMINATE rather than "not merged", so corroborate deterministically by head
   // branch and RE-ASSERT ownership. null on FAILURE and [] on a genuine miss keep the two apart.
   // Why: one body-index miss caused four spurious 07-24 re-dispatches
+  const reviewHead = (pr: PrRef): string | undefined =>
+    isPlanTextDeliverable(task, deps.mergedPathsByPr?.get(pr.number) ?? []) ? undefined : pr.headRefOid;
   const corroborateByBranch = (): StatusProjection | undefined => {
     // BATCHED first (W1-T257): the one-fetch-per-projection index, returning null ONLY when the batch FAILED —
     // then, and only then, the per-task fetch runs; on both failing, W1-T119 defers rather than a false none.
@@ -2750,7 +2756,7 @@ function derivePrPrecedence(
     // refused it, undoing the revalidation before this function even returns. W1-T5552: under EITHER source.
     const planOnlyByDiff = (pr: PrRef): boolean => {
       const files = deps.mergedPathsByPr?.get(pr.number) ?? deps.github.changedFiles?.(pr.url);
-      return files !== undefined && isPlanOnlyChangeset(files);
+      return files !== undefined && refusesAsPlanOnly(task, files);
     };
     const hit = cands.find(
       (pr) =>
@@ -2763,7 +2769,7 @@ function derivePrPrecedence(
         // W1-T1004: this rung had NO plan-only guard at all before — a filing PR dispatched from this task's
         // OWN worktree, which the retro, triage and plan flows reuse, would otherwise credit the task it just
         // filed unconditionally.
-        !isPlanOnlyFilingPr(ledgerLines, pr.url, ledgerIndex, pr.headRefOid) &&
+        !isPlanOnlyFilingPr(ledgerLines, pr.url, ledgerIndex, reviewHead(pr)) &&
         !planOnlyByDiff(pr),
     );
     if (!hit) return undefined;
@@ -2820,7 +2826,7 @@ function derivePrPrecedence(
     // W1-T1004: the ledger-backed plan-only-FILING refusal, checked BEFORE and INDEPENDENTLY of
     // `ownsOwnRunBranch`, unlike the diff-based refusal below — a filing PR dispatched from this task's OWN run
     // branch sits on that branch too, so that test would wave it through by construction.
-    const planOnlyFilingRefusal = wouldCredit && isPlanOnlyFilingPr(ledgerLines, trailerPr.url, ledgerIndex, trailerPr.headRefOid);
+    const planOnlyFilingRefusal = wouldCredit && isPlanOnlyFilingPr(ledgerLines, trailerPr.url, ledgerIndex, reviewHead(trailerPr));
     // W1-T413: the DIFF-BASED plan-only refusal, for any hit that would otherwise credit and that the ledger
     // check did not refuse.
     //
@@ -2845,7 +2851,7 @@ function derivePrPrecedence(
             // LOCAL EVIDENCE FIRST, AND IT IS FREE. A merged PR's merge commit is on origin/main by
             // definition, so the one-git-log map answers for exactly the population that matters.
             const local = deps.mergedPathsByPr?.get(trailerPr.number);
-            if (local && local.length > 0) return isPlanOnlyChangeset(local);
+            if (local && local.length > 0) return refusesAsPlanOnly(task, local);
             // ⚠ NO LOCAL ANSWER: FALL BACK TO EXACTLY THE PRE-W1-T3067 BEHAVIOUR, INCLUDING THE
             // SHORTCUT. That shortcut is a TESTED COST GUARANTEE, not an oversight — "a worker's own
             // run- branch credits without ever reading the changed-file list" is an existing test,
@@ -2854,7 +2860,7 @@ function derivePrPrecedence(
             // no longer decides when free local evidence exists, and is untouched when it does not.
             if (ownsOwnRunBranch(head, task.id)) return false;
             const files = deps.github.changedFiles?.(trailerPr.url);
-            return files !== undefined && isPlanOnlyChangeset(files);
+            return files !== undefined && refusesAsPlanOnly(task, files);
           })()
         : false;
     const planOnlyRefusal = planOnlyFilingRefusal || planOnlyDiffRefusal;
