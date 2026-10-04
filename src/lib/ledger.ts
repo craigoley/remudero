@@ -10,6 +10,7 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  realpathSync,
   readSync,
   readdirSync,
   renameSync,
@@ -19,8 +20,8 @@ import {
   writeSync,
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { hostname } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { hostname, tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { ExternalEffectResult } from "./action-reconciliation.js";
@@ -136,7 +137,12 @@ export function isRealStrike(evidence: { workerRan: boolean; judgmentPosted: boo
 // never asked of the caller (design note i, plan/tasks.d — "the operator teaches by doing").
 
 /** Who wrote a ledger row, as {@link deriveLedgerActor} derives it. */
-export type LedgerActor = "daemon" | "worker" | "operator";
+export type LedgerActor = "daemon" | "worker" | "service" | "host_automation" | "test" |
+  "operator_human" | "operator_ai" | "unknown" | "operator";
+
+export function markLedgerProcessActor(actor: "daemon" | "service" | "host_automation"): void {
+  process.env.REMUDERO_PROCESS_ACTOR = actor;
+}
 
 /** In-process signal the daemon's OWN command sets on itself once, at boot — see
  *  {@link markDaemonProcessActor}. Nothing else ever sets this. */
@@ -148,34 +154,39 @@ const DAEMON_PROCESS_ACTOR_ENV = "REMUDERO_DAEMON_PROCESS";
  *  that same write also carries a worker's own markers, which win first (see
  *  {@link deriveLedgerActor}'s ordering). */
 export function markDaemonProcessActor(): void {
+  markLedgerProcessActor("daemon");
   process.env[DAEMON_PROCESS_ACTOR_ENV] = "1";
 }
 
 /**
- * Derive the actor for a ledger row from process context alone (design note i). ORDER MATTERS: a
- * worker subprocess's own marker ({@link WORKER_SCOPE_ENV}, worker-containment.ts's
- * `workerMarkerEnv`) is checked FIRST, so a worker spawned BY the daemon — which inherits the
- * daemon's `DAEMON_PROCESS_ACTOR_ENV` via plain env inheritance, plus its own fresh worker
- * markers layered on top by `spawnWorker`/`worker-provider.ts` — is still reported `"worker"`,
- * never `"daemon"`. Neither marker present is the operator's own shell: nothing marks that today,
- * and nothing should — the ABSENCE of both markers is what identifies it, never a positive signal
- * of its own.
+ * W1-T4068: tests win over inherited markers; workers win over their spawning service's kind.
+ * An operator requires a Claude session marker or a terminal; absence is unknown.
  */
-export function deriveLedgerActor(env: NodeJS.ProcessEnv = process.env): LedgerActor {
+export function deriveLedgerActor(
+  env: NodeJS.ProcessEnv = process.env,
+  isTTY: boolean = env === process.env && process.stdin.isTTY === true,
+): LedgerActor {
+  if (env.NODE_TEST_CONTEXT) return "test";
   if (env[WORKER_SCOPE_ENV]) return "worker";
+  const kind = env.REMUDERO_PROCESS_ACTOR;
+  if (kind === "service" || kind === "host_automation" || kind === "daemon") return kind;
   if (env[DAEMON_PROCESS_ACTOR_ENV]) return "daemon";
-  return "operator";
+  if (env.CLAUDECODE === "1" || env.CLAUDE_CODE_SESSION_ID) return "operator_ai";
+  return isTTY ? "operator_human" : "unknown";
 }
 
-/** {@link LedgerActor} widened with `"unknown"` — a row written before this task stamped
- *  nothing, reported as unknown rather than guessed (design note i, last sentence). */
-export type LedgerRowActor = LedgerActor | "unknown";
+/** Historical `operator` rows remain readable but cannot establish positive operator evidence. */
+export type LedgerRowActor = LedgerActor;
 
 /** Read a parsed ledger line's actor. A missing or malformed `actor` field reports `"unknown"`,
  *  NEVER inferred from any other field on the row — the one read-side rule this task adds.
  *  Falsifier: test/hand-run-census.test.ts. */
 export function ledgerRowActor(line: { actor?: unknown }): LedgerRowActor {
-  return line.actor === "daemon" || line.actor === "worker" || line.actor === "operator" ? line.actor : "unknown";
+  switch (line.actor) {
+    case "daemon": case "worker": case "service": case "host_automation": case "test":
+    case "operator_human": case "operator_ai": case "operator": return line.actor;
+    default: return "unknown";
+  }
 }
 
 export const LEDGER_FUTURE_STAMP_TOLERANCE_MS = 10 * 60_000;
@@ -237,14 +248,29 @@ export function appendLedger(
     fstat?: (fd: number) => { mtimeMs: number };
   } = {},
 ): void {
-  assertLedgerPathNotLive(path);
+  const actor = (opts.actor ?? deriveLedgerActor)();
+  if (deriveLedgerActor() === "test" || actor === "test") {
+    const outside = (rel: string) => rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
+    if (outside(relative(resolve(tmpdir()), resolve(path)))) {
+      throw new Error(`ledger: REFUSED test append outside the temporary root: ${path}`);
+    }
+    let ancestor = resolve(path);
+    while (!existsSync(ancestor) && dirname(ancestor) !== ancestor) ancestor = dirname(ancestor);
+    const rel = relative(realpathSync(tmpdir()), realpathSync(ancestor));
+    if (outside(rel)) {
+      throw new Error(`ledger: REFUSED test append outside the temporary root: ${path}`);
+    }
+    assertLedgerPathNotLive(path, { ...process.env, NODE_TEST_CONTEXT: "test", RMD_ALLOW_LIVE_WRITES: undefined });
+  } else {
+    assertLedgerPathNotLive(path);
+  }
   mkdirSync(dirname(path), { recursive: true });
   const record = {
     ts: (opts.clock ?? systemClock).iso(),
     host: (opts.identity ?? hostname)(),
-    actor: (opts.actor ?? deriveLedgerActor)(),
     actor_pid: process.pid,
     ...line,
+    actor,
   };
   const buf = Buffer.from(JSON.stringify(record) + "\n", "utf8");
   const rows = [buf];
@@ -701,6 +727,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.strike_ladder.requeued",
   "sweep.strike_ladder.digest_opened",
   "sweep.strike_ladder.digest_appended",
+  "sweep.strike_ladder.held", // W1-T5635: a conflict hold at this main tip counts as already refreshed
   "sweep.plan_round.pushed",
   "sweep.plan_round.refused",
   // W1-T970: sweep.ts builds a sha-keyed `riskRefused` set off the escalated row, and (W1-T5403)
@@ -990,6 +1017,12 @@ export function appendDailyCostCeilingOverrideAudit(ledgerPath: string, audit: D
  *  bursts of 12 rotations a second, observed live (docs/forensics/ledger.md#max_retained_lines_per_step). */
 export const MAX_RETAINED_LINES_PER_STEP = 200;
 
+export const REVIEW_POSTED_RETAINED_ROWS = 140; // W1-T5517 PRIMARY CONTROL: 200 x the 70% of rows newest for their task
+export const SWEEP_DISPOSED_RECENT_WINDOW_MS = 24 * 3_600_000; // W1-T5517: every sweep.disposed row inside it carries
+export const SWEEP_DISPOSED_STANDING_WINDOW_MS = 7 * 24 * 3_600_000; // W1-T5517: dueRepairFilings' default window
+export const LEDGER_CORE_TARGET_SHARE = 0.9; // W1-T5517: the carried core's declared share of the fixed ceiling
+const SWEEP_REPAIR_DISPOSITIONS: ReadonlySet<unknown> = new Set(["blocked-fixable", "blocked-ambiguous", "stale", "conflicted"]);
+
 /** Minimal fs surface {@link ledgerExceedsRotationCeiling} and {@link rotateLedger} need,
  *  injectable so a test proves the ceiling check without ever touching a real file. */
 export interface LedgerRotationFsDeps {
@@ -1162,6 +1195,42 @@ function readRetainedSteps(ledgerPath: string): RetainedStepsRead {
   } catch {
     return { status: "unreadable" };
   }
+}
+
+function lastByKey(rows: readonly ParsedLedgerLine[], keyOf: (p: ParsedLedgerLine) => string | undefined): Map<string, ParsedLedgerLine> {
+  const last = new Map<string, ParsedLedgerLine>();
+  for (const p of rows) {
+    const key = keyOf(p);
+    if (key !== undefined) last.set(key, p);
+  }
+  return last;
+}
+
+function dropSupersededReviews<T extends ParsedLedgerLine>(rows: T[]): T[] { // W1-T5517: superseded for every live reader
+  const newest = lastByKey(rows, (p) => (p.step === "review.posted" && typeof p.json?.task_id === "string" ? p.json.task_id : undefined));
+  const input = (j: Record<string, unknown>): string => JSON.stringify([j.pr_url, j.head_sha, j.review_input_digest]);
+  return rows.filter((p) => {
+    const n = p.step === "review.posted" && typeof p.json?.task_id === "string" ? newest.get(p.json.task_id) : undefined;
+    if (n === undefined || n === p || !p.json || !n.json) return true;
+    return input(p.json) === input(n.json) // reviewAttemptsForInput counts every row of the newest input
+      || p.json.failure_class === "instrument_entangled" // previousInstrumentEntanglementFromLedger reads any head
+      || (n.json.state !== "success" && !Array.isArray(n.json.unmet_criteria)); // unmetFromLedger carries claims past it
+  });
+}
+
+function boundSweepRows(rows: readonly ParsedLedgerLine[], nowMs: number): ParsedLedgerLine[] { // W1-T5517: while a reader reads it
+  const newestWhere = (has: (j: Record<string, unknown>) => boolean): Map<string, ParsedLedgerLine> =>
+    lastByKey(rows, (p) => (p.step === "sweep.disposed" && p.json && has(p.json) ? String(p.json.pr_number) : undefined));
+  const newest = [newestWhere(() => true), newestWhere((j) => typeof j.main_tip_sha === "string"), newestWhere((j) => typeof j.blocker === "string")];
+  return rows.filter((p) => {
+    const j = p.json;
+    const ageMs = p.tsMs === undefined ? undefined : nowMs - p.tsMs;
+    if (p.step !== "sweep.disposed" || !j || ageMs === undefined || ageMs <= SWEEP_DISPOSED_RECENT_WINDOW_MS) return true;
+    if (typeof j.keep_head_branch === "string") return true; // keepReversiblyClosedHeads, at any age
+    if (ageMs > SWEEP_DISPOSED_STANDING_WINDOW_MS) return false;
+    return (j.acted === true && SWEEP_REPAIR_DISPOSITIONS.has(j.disposition)) // dueRepairFilings and the stale close
+      || newest.some((byPr) => byPr.get(String(j.pr_number)) === p); // streaks, merge state, base-caused tip, blocker clock
+  });
 }
 
 function rotationRow(step: string, fields: Record<string, unknown>, nowIso: string): string {
@@ -1838,14 +1907,13 @@ function rotateLedgerLocked(
     return withinWindow;
   });
 
-  const carried = pruneCarriedRows(candidates);
+  const carried = dropSupersededReviews(pruneCarriedRows(candidates));
   const reviewMarkers = planOnlyReviewMarkers(candidates, carried);
   archivedLineCount += candidates.length - carried.length;
   candidates = carried;
 
-  // ── PASS 3: sweep.disposed dedup — keep the single acted:true line per `pr@head` if one exists,
-  // else the most recent for that key. Every other duplicate is a same-outcome re-poll, and a
-  // still-open PR re-logging its disposition every pass is the loudest source of bloat (W1-T244). ─
+  // ── PASS 3: sweep.disposed dedup — one line per `pr@head` (its newest acted:true, else its newest);
+  // every other is a same-outcome re-poll (W1-T244). Then W1-T5517's age bound, boundSweepRows. ─
   const sweepGroups = new Map<string, ParsedLedgerLine[]>();
   const nonSweepCandidates: ParsedLedgerLine[] = [];
   for (const p of candidates) {
@@ -1869,11 +1937,14 @@ function rotateLedgerLocked(
     archivedLineCount += group.length - 1;
   }
   candidates = [...nonSweepCandidates, ...dedupedSweep];
+  const passed = new Set(candidates);
+  const bounded = new Set(boundSweepRows(originalOrder.filter((p) => passed.has(p)), nowMs));
+  archivedLineCount += candidates.length - bounded.size;
+  candidates = candidates.filter((p) => bounded.has(p));
 
-  // ── PASS 4: per-step count cap — bounds every OTHER decision/model-attribution step to the
-  // newest MAX_RETAINED_LINES_PER_STEP lines, because those sets are otherwise unbounded.
-  // sweep.disposed and the health, deploy and render steps carry their own bound and are excluded
-  // here. ─────────────────────────────────────────────────────────────────────────────────────
+  // ── PASS 4: per-step count cap — the newest MAX_RETAINED_LINES_PER_STEP lines of every OTHER
+  // decision/model-attribution step (review.posted: REVIEW_POSTED_RETAINED_ROWS), else unbounded.
+  // sweep.disposed and the health, deploy and render steps carry their own bound. ──────────────
   const byStep = new Map<string, ParsedLedgerLine[]>();
   for (const p of candidates) {
     const key = p.step ?? "";
@@ -1887,13 +1958,13 @@ function rotateLedgerLocked(
       step === "sweep.disposed" ||
       isHealthOrDeployStep(step) ||
       (!isModelAttributionStep(step) && isRenderRelevantStep(step)) ||
-      group.length <= MAX_RETAINED_LINES_PER_STEP
+      group.length <= (step === "review.posted" ? REVIEW_POSTED_RETAINED_ROWS : MAX_RETAINED_LINES_PER_STEP)
     ) {
       capped.push(...group);
       continue;
     }
     // group is in file order (chronological); drop the oldest excess, keep the newest cap.
-    const excess = group.length - MAX_RETAINED_LINES_PER_STEP;
+    const excess = group.length - (step === "review.posted" ? REVIEW_POSTED_RETAINED_ROWS : MAX_RETAINED_LINES_PER_STEP);
     archivedLineCount += excess;
     capped.push(...group.slice(excess));
   }
@@ -1970,6 +2041,12 @@ function rotateLedgerLocked(
       }) + "\n";
   }
 
+  const coreBytes = Buffer.from(coreContent, "utf8");
+  const stepBytes = new Map<string, number>();
+  for (const p of keptCandidates) stepBytes.set(p.step ?? "", (stepBytes.get(p.step ?? "") ?? 0) + Buffer.byteLength(p.raw, "utf8") + 1);
+  const coreShare = Number((coreBytes.length / fixedCeilingBytes).toFixed(4));
+  const coreRecord = { core_bytes: coreBytes.length, ceiling_bytes: fixedCeilingBytes, core_share: coreShare, target_share: LEDGER_CORE_TARGET_SHARE,
+    heaviest_steps: [...stepBytes].sort((a, b) => b[1] - a[1]).slice(0, 5) };
   const recarriedCount = recarry.rows.filter((p) => keptCandidates.includes(p)).length;
   const noteContent =
     (recarriedCount > 0 || recarry.torn.length > 0
@@ -1979,7 +2056,8 @@ function rotateLedgerLocked(
     (retention.unreadable ? rotationRow("ledger.retained_steps_unreadable", { path: ledgerRetainedStepsPath(path) }, nowIso) : "") +
     (rateBytesPerHour > 0
       ? rotationRow("ledger.rotation_headroom", { rate_bytes_per_hour: rateBytesPerHour, ceiling_bytes: ceilingBytes }, nowIso)
-      : "");
+      : "") +
+    (coreShare > LEDGER_CORE_TARGET_SHARE ? rotationRow("ledger.rotation_core_over_target", coreRecord, nowIso) : "");
   const newLiveContent = coreContent + noteContent + pointerContent + tail;
   let replaced: number | undefined;
   try {
@@ -2000,9 +2078,8 @@ function rotateLedgerLocked(
   } finally {
     if (replaced !== undefined) closeSync(replaced);
   }
-  const coreBytes = Buffer.from(coreContent, "utf8");
   writeFileAtomic(ledgerCarriedPrefixPath(path), JSON.stringify({
-    bytes: coreBytes.length, sha256: sha256Hex(coreBytes), rateBytesPerHour, effectiveCeilingBytes: ceilingBytes,
+    bytes: coreBytes.length, sha256: sha256Hex(coreBytes), rateBytesPerHour, effectiveCeilingBytes: ceilingBytes, core: coreRecord,
   }));
 
   return {
