@@ -205,6 +205,46 @@ test("W1-T5536: a laddered PR never opens a per-PR escalation issue", async (t) 
   }
 });
 
+test("W1-T5536: callers without ladder effects keep head-bound escalation and visible questions", async (t) => {
+  const f = fixture(t);
+  f.deps.strikeLadder = undefined;
+  const first = await f.sweep();
+  assert.equal(first.actionsTaken, 1);
+  assert.equal(f.calls.filter(c => c === "escalate").length, 1);
+  assert.ok(f.rows.findLast(r => r.step === "sweep.disposed")?.question);
+  const repeated = await f.sweep();
+  assert.equal(repeated.actionsTaken, 0);
+  assert.equal(f.calls.filter(c => c === "escalate").length, 1);
+  assert.ok(f.rows.findLast(r => r.step === "sweep.disposed")?.question);
+  await f.sweep([pr({ headSha: "new-head" })]);
+  assert.equal(f.calls.filter(c => c === "escalate").length, 2);
+  assert.equal(f.calls.some(c => c.startsWith("close:")), false);
+  assert.equal(f.open.length, 0);
+  assert.deepEqual(loadOperatorNotesForTask(f.root, "W1-T5536"), []);
+});
+
+test("W1-T5536: missing-trailer repair precedes the configured exhaustion ladder", async (t) => {
+  const f = fixture(t);
+  const repairedBodies: string[] = [];
+  f.deps.repairMissingTaskTrailer = (_pr, repair) => { repairedBodies.push(repair.repairedBody); };
+  const missingTrailer = pr({
+    taskId: undefined, body: "Implementation details only.\n", taskExistsOnMain: true,
+    introducedTaskIds: [], changedFiles: ["src/lib/sweep.ts"], taskDeclaredFiles: ["src/lib/sweep.ts"],
+    ciFailures: [{ name: "acceptance-author-gate", logTail: "REFUSED (no-header)" }],
+  });
+  const first = await f.sweep([missingTrailer]);
+  assert.equal(repairedBodies.length, 1);
+  assert.match(repairedBodies[0], /Remudero-Task: W1-T5536\n$/);
+  assert.equal(first.actions[0].acted, false);
+  assert.match(String(f.rows.findLast(r => r.step === "sweep.disposed")?.stand_down_reason), /missing trailer repaired/);
+  await f.sweep([missingTrailer]);
+  assert.equal(repairedBodies.length, 1, "the unchanged head waits for the edited-body gate result");
+  assert.equal(f.calls.includes("escalate"), false);
+  assert.equal(f.calls.some(c => c.startsWith("close:")), false);
+  assert.equal(f.open.length, 0);
+  assert.deepEqual(loadOperatorNotesForTask(f.root, "W1-T5536"), []);
+});
+
 test("W1-T5536: pure decisions preserve unreadable inputs, attempt history and cause identity", () => {
   const input = { mainTip: MAIN, lastAttemptAt: stamp(-2000), currentMergeBaseSha: "old-main", rebuildsSoFar: 0, requeueable: true, refreshedAtMainTip: false };
   assert.equal(decideStrikeLadderRung(input).rung, "refresh");
@@ -304,7 +344,6 @@ test("W1-T5536: unavailable digest effects and write failures remain visible wit
       f.open.push({ number: 1, url: "existing", title: "same cause", body: "**Cause-Key:** check:ci#a broken invariant" });
       f.issues.comment = undefined;
     },
-    (f: ReturnType<typeof fixture>) => { f.deps.strikeLadder = undefined; },
   ]) {
     const f = fixture(t);
     f.spend(2);

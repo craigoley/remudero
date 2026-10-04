@@ -11139,7 +11139,7 @@ export async function runSweep(
       freshnessRefusal.attemptedAt >= pendingSince;
     const dispositionView = refusedCurrentPending ? { ...pr, reviewPendingOwnerDead: true } : pr;
     let { disposition, reason } = postReviewFailureHistoryDisposition(dispositionView, prior, policy, now) ?? deriveDisposition(dispositionView, policy, now);
-    const strikeLadderDue = disposition === "blocked-ambiguous" && !pr.pendingAnswer &&
+    const strikeLadderDue = deps.strikeLadder !== undefined && disposition === "blocked-ambiguous" && !pr.pendingAnswer &&
       selectDispositionRule(dispositionView, policy, now).rule?.when === isFixStrikeExhausted;
     if (inheritedMergeState) {
       reason =
@@ -12368,12 +12368,6 @@ export async function runSweep(
                 // successful release row exists, so the next pass may retry under the existing
                 // GitHub pacer. Preserve today's escalation for this pass below.
               }
-              if (strikeLadderDue) {
-                standDownReason = await applyStrikeLadder(pr);
-                acted = ladderActedPrs.has(pr.prNumber);
-                reason = standDownReason;
-                break;
-              }
               // W1-T196: stand down instead of escalating `task: UNKNOWN` — see
               // `unattributableFiling` above. No escalate call and no issue, but NEVER silent: the
               // stand-down reason names both the PR and the unresolved attribution on this pass's
@@ -12382,6 +12376,12 @@ export async function runSweep(
               if (missingTrailerRepair.handled) {
                 acted = false;
                 standDownReason = missingTrailerRepair.standDownReason;
+                break;
+              }
+              if (strikeLadderDue) {
+                standDownReason = await applyStrikeLadder(pr);
+                acted = ladderActedPrs.has(pr.prNumber);
+                reason = standDownReason;
                 break;
               }
               const absentDecision = absentChecksRepushDecision(
