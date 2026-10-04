@@ -6578,7 +6578,8 @@ export function reappendLostReviewPosted(
   try {
     lines = readLines(ctx.ledgerPath);
   } catch (e) {
-    ctx.say(`review.posted re-read failed for ${ctx.headSha.slice(0, 7)}: ${String((e as Error)?.message ?? e)} — nothing re-appended (W1-T5516)`);
+    const reason = `review.posted re-read failed for ${ctx.headSha.slice(0, 7)}: ${String((e as Error)?.message ?? e)}`;
+    ctx.say(`${reason} — nothing re-appended; the arm gate decides as written (W1-T5516)`);
     return "unreadable";
   }
   const present = lines.some(

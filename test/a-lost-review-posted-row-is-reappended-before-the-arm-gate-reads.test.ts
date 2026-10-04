@@ -46,7 +46,7 @@ interface Run {
 /** Drives the real `runReview` against a real ledger file. `dropFirstPosted` loses the first
  *  `review.posted` write the way the rotation race did; the injected arm is the REAL W1-T230 gate
  *  (`armAutoMergeDetailed`), reading that same ledger file, with only the GitHub effectors faked. */
-async function reviewWithLedger(opts: { dropFirstPosted: boolean; runId: string }): Promise<Run> {
+async function driveReview(opts: { dropFirstPosted: boolean; runId: string }): Promise<Run> {
   const root = mkdtempSync(join(tmpdir(), "rmd-t5516-"));
   mkdirSync(join(root, "state"), { recursive: true });
   const ledgerPath = join(root, "state", "ledger.ndjson");
@@ -117,7 +117,7 @@ async function reviewWithLedger(opts: { dropFirstPosted: boolean; runId: string 
 }
 
 test("a review.posted row lost after the status posts is re-appended before the arm gate reads", async () => {
-  const run = await reviewWithLedger({ dropFirstPosted: true, runId: "RUN-T5516-LOST" });
+  const run = await driveReview({ dropFirstPosted: true, runId: "RUN-T5516-LOST" });
 
   const posted = run.ledger.filter((l) => l.step === "review.posted");
   assert.equal(posted.length, 1, `exactly the re-appended row reached the ledger; ledger: ${JSON.stringify(run.ledger)}`);
@@ -142,7 +142,7 @@ test("a review.posted row lost after the status posts is re-appended before the 
 });
 
 test("the arm gate never reads GitHub's status — it reads the ledger and nothing else", async () => {
-  const run = await reviewWithLedger({ dropFirstPosted: true, runId: "RUN-T5516-NOSTATUS" });
+  const run = await driveReview({ dropFirstPosted: true, runId: "RUN-T5516-NOSTATUS" });
   assert.deepEqual(run.ghCallsDuringGate, [], "the gate made no gh call at all, so it cannot have read a commit status");
 
   // And GitHub's SUCCESS status is no substitute for the ledger row: the same gate over a ledger
@@ -161,7 +161,7 @@ test("the arm gate never reads GitHub's status — it reads the ledger and nothi
 });
 
 test("a review.posted row that is present is not re-appended", async () => {
-  const run = await reviewWithLedger({ dropFirstPosted: false, runId: "RUN-T5516-PRESENT" });
+  const run = await driveReview({ dropFirstPosted: false, runId: "RUN-T5516-PRESENT" });
   assert.equal(run.ledger.filter((l) => l.step === "review.posted").length, 1, "no duplicate row");
   assert.equal(run.ledger.filter((l) => l.step === "review.posted_reappended").length, 0);
   assert.deepEqual(run.gateOutcomes, ["armed"]);
