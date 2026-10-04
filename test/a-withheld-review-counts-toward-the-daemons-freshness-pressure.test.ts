@@ -30,7 +30,7 @@ const TWO_RUNTIME_CHANGES: readonly DeployWorthChange[] = [
   { sha: "c2".repeat(20), subject: "fix: b", files: ["src/lib/inbox.ts"] },
 ];
 
-type WithheldCount = { kind: "counted"; withheld: number; unparseable: number } | { kind: "unreadable"; error: string };
+type WithheldCount = { kind: "counted"; withheld: number; unreadable: number; unparseable: number } | { kind: "unreadable"; error: string };
 const withheldReviewsSince = (
   daemonModule as unknown as { withheldReviewsSince: (read: () => readonly string[], sinceMs: number) => WithheldCount }
 ).withheldReviewsSince;
@@ -99,8 +99,8 @@ test("W1-T5476: only stale-reviewer refusals since the stale reading count, and 
     ],
     AT_MS,
   );
-  assert.deepEqual(counted, { kind: "counted", withheld: 2, unparseable: 1 });
-  assert.deepEqual(withheldReviewsSince(() => [], AT_MS), { kind: "counted", withheld: 0, unparseable: 0 });
+  assert.deepEqual(counted, { kind: "counted", withheld: 2, unreadable: 1, unparseable: 1 });
+  assert.deepEqual(withheldReviewsSince(() => [], AT_MS), { kind: "counted", withheld: 0, unreadable: 0, unparseable: 0 });
   const unreadable = withheldReviewsSince(() => {
     throw new Error("ENOENT: no ledger");
   }, AT_MS);

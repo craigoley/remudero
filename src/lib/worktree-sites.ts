@@ -249,6 +249,20 @@ export const WORKTREE_SITE_REGISTRY: WorktreeSiteRow[] = [
         "instant it is cut, and the readiness probe's /v1/version smoke read refuses a slot at any other sha.",
     },
   },
+  {
+    file: "src/lib/hand-worktree.ts",
+    site: "createHandWorktree",
+    creates: "a HAND build's run-<taskId>-<epochMs> worktree off fresh origin/main, under an operator-named parent",
+    disposition: {
+      kind: "exempt",
+      because:
+        "worktreeAdd SYMLINKS node_modules (linkWorktreeNodeModules), and a hand build must be able to " +
+        "`npm ci` in its worktree: ensureInstallFresh refuses that through a symlink (SymlinkInstallRefusal) " +
+        "because an install's clear phase empties the shared tree. This site hard-links (`cp -al`) instead. " +
+        "It cuts the same `--no-track` branch off origin/main right after its own fetch, so the currency " +
+        "question is answered by that fetch, and no dispatched worker ever runs in the tree (W1-T5533).",
+    },
+  },
 ];
 
 /** Files under `dir`, recursively, `.ts` only. Read with `readFileSync`, never grepped: two files

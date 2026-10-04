@@ -19,7 +19,9 @@ import {
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdir as mkdirAsync, readFile as readFileAsync } from "node:fs/promises";
-import { probeCacheFromLedger, probeCacheKey, type BaseProbeFile } from "./lib/base-reproduction.js";
+import { baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile } from "./lib/base-reproduction.js";
+import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
+import { CHECK_REQUEUE_STEP, requeuedCheckKeysFromLedger } from "./lib/sweep.js";
 import { ghExec, ghJsonAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
@@ -1209,9 +1211,9 @@ import { guardZeroStreakRecord } from "./lib/retro-closure.js";
 import {
   buildDispatchValueContext,
   DISPATCH_VALUE_LEDGER_STEPS,
-  DISPATCH_VALUE_WINDOW_MS,
   planSeed,
   type DispatchValueContext,
+  type CostOfDelaySnapshot,
 } from "./lib/dispatch-value.js";
 import {
   boundRiskJudgeChangeView,
@@ -2687,6 +2689,7 @@ function realDeps(): ComposedRealGraph {
 // reason (see lib/cli-args.ts's own header) — src/lib/report-commands.ts's moved report verbs
 // need it too.
 import { flagValue, unknownArgError } from "./lib/cli-args.js";
+import { createHandWorktree, renderHandWorktree } from "./lib/hand-worktree.js";
 export { unknownArgError };
 
 // ── W1-T2888: the read-and-print report verbs, moved to src/lib/report-commands.ts ────────────
@@ -8361,7 +8364,7 @@ export function fixRungTerminationVerdict(
 }
 
 export interface FixRungOutcome {
-  outcome: "fixed" | "escalated" | "stood_down" | "spawn_abandoned" | "parked" | "rebased" | "base_refreshed";
+  outcome: "fixed" | "escalated" | "stood_down" | "spawn_abandoned" | "parked" | "rebased" | "base_refreshed" | "needs_design";
   /** The last review computed — passing when `outcome === "fixed"`. Unchanged from the PRIOR
    *  round's own verdict when `outcome === "spawn_abandoned"` (W1-T1044): the strike that
    *  abandoned never produced a new head to re-review. */
@@ -10127,6 +10130,9 @@ export async function runFixRung(opts: {
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
     /** W1-T3868: test seam for the harness-owned commit decision; production uses the shared helper. */
     harnessCommitForShellLessWorker?: typeof harnessCommitForShellLessWorker;
+    readMainTip?: () => string | Promise<string>;
+    reproduceFailingTestsOnMain?: NonNullable<SweepDeps["reproduceFailingTestsOnMain"]>;
+    requeueCheck?: (failure: CiFailure) => boolean | Promise<boolean>;
     /** W1-T5544: test seam for the proof-repair gate; production reads the round's git diff and runs `check-proof --base`. */
     proofRepairRoundRefusal?: typeof proofRepairRoundRefusalInWorktree;
     /** W1-T4450: test seam for "did the round leave uncommitted edits"; production reads git status. */
@@ -10403,6 +10409,7 @@ export async function runFixRung(opts: {
   // into both the pre-strike probe's key and the false-block producer below, so the two can never
   // disagree about "current".
   const currentContractRevision = taskContractRevision(opts.task);
+  const admitFixTests = !(opts.task.files?.length && opts.task.files.every(isInPlanScope));
   // W1-T3166 — THE CALL W1-T349's judge never had: zero production callers, an empty fleet-notice
   // queue, no ledger step. The ten fix-rung sites below are the NEEDS ME board's largest class.
   // Built here, not per callsite, so a construction failure surfaces once at rung entry.
@@ -11077,7 +11084,7 @@ export async function runFixRung(opts: {
           ? fixRungScopeStandDownReason(
               currentDiffFiles,
               baselineDiffFiles,
-              opts.task.files,
+              admitFixTests && opts.task.files ? [...opts.task.files, "test/"] : opts.task.files,
               reachableRemedyFiles,
               currentCiFailures ?? [],
             )
@@ -11519,6 +11526,13 @@ export async function runFixRung(opts: {
     // byte-identical re-block apart from real progress. Keyed on the SAME
     // worker-visible unmet set the fix rung actually dispatches (W1-T166).
     const priorHeadSha = review.headSha;
+    const priorDesign = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))().find((row) =>
+      row.step === "fix.needs_design" && row.task_id === opts.taskId && row.head_sha === priorHeadSha);
+    if (priorDesign) {
+      const reason = String(priorDesign.reason);
+      deps.log("fix.stood_down", { head_sha: priorHeadSha, reason, site: "rung.needs_design" });
+      return { outcome: "needs_design", review, strikes, retriggers, reason };
+    }
     const priorUnmetClaims = new Set(unmet.map((c) => c.claim));
     // W1-T2328: the ci-log evidence THIS round's dispatch (below) is about to target, snapshotted
     // BEFORE the strike runs — mirrors `priorHeadSha`/`priorUnmetClaims` immediately above, for
@@ -11728,7 +11742,7 @@ export async function runFixRung(opts: {
     // so a commit the worker made itself is pushed, not re-read as "the worker changed nothing".
     let harnessCommitRefusalReason: string | undefined;
     let harnessCommitUndeclared: readonly string[] = [];
-    const harnessCommit = (report: string, options: Pick<Parameters<typeof harnessCommitForShellLessWorker>[0], "subjectSource" | "derivedCommit"> = {}) =>
+    const harnessCommit = (report: string, options: Pick<Parameters<typeof harnessCommitForShellLessWorker>[0], "subjectSource" | "derivedCommit" | "fixOutcome"> = {}) =>
       (deps.harnessCommitForShellLessWorker ?? harnessCommitForShellLessWorker)({
         harnessOwnsGit: fixHarnessOwnsGit,
         commitCount: roundStartSha === undefined ? 0 : (deps.commitsAhead ?? commitsAhead)(opts.worktreePath, roundStartSha),
@@ -11738,6 +11752,7 @@ export async function runFixRung(opts: {
         // Use that same captured baseline here; a worker's newly added paths never enter it.
         declaredPaths: fixDeclaredPaths,
         acceptance: opts.task.acceptance,
+        admitTests: admitFixTests,
         ...options,
         assignmentId: fixResult.selectionAssignmentId,
         log: deps.log,
@@ -11748,13 +11763,29 @@ export async function runFixRung(opts: {
         },
       });
     const fixReport = workerTranscript(fixResult);
+    let fixOutcome = anchoredFixOutcome(fixReport);
+    let fixAction = decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests });
     const fixLeftEdits = () => (deps.worktreeHasUncommittedChanges ?? worktreeHasUncommittedChanges)(opts.worktreePath);
+    const outcomeCommitOptions = () => ({ fixOutcome: fixOutcome?.kind,
+      derivedCommit: fixOutcome?.kind === "FIXED"
+        ? derivedFixCommit(priorCiFailures?.[0]?.name ?? unmet[0]?.claim ?? gateFailuresNow?.[0]?.reason ?? opts.task.title, opts.prUrl)
+        : undefined });
+    // W1-T4450: a round that left edits but no COMMIT_MESSAGE line is not discarded. W1-T5325: a
+    // writer that cannot resume (codex/cash) gets the subject derived from the failing check on the
+    // FIRST commit attempt, so the missing line is never refused and never re-asked — that re-ask was
+    // a fresh session whose loss refused the whole round. A worker-authored line still wins inside
+    // the helper. A resumable writer is still asked once in its own session (W1-T4052).
     // W1-T5565: identified shell-less writers derive from the known failure. Legacy results
     // without a provider retain their session re-ask; a worker-authored subject still wins.
     const derivedFirst = fixHarnessOwnsGit && (fixResult.provider ?? fixArgs.mountProvider) !== undefined && fixLeftEdits()
       ? derivedFixCommit(priorCiFailures?.[0]?.name ?? unmet[0]?.claim ?? gateFailuresNow?.[0]?.reason, opts.prUrl)
       : undefined;
-    let harnessCommitCount = harnessCommit(fixReport, { derivedCommit: derivedFirst });
+    const requiresCommit = fixAction.kind === "legacy" || fixAction.kind === "commit" ||
+      (fixAction.kind === "scope-needed" && fixAction.testPaths.length > 0);
+    const firstOptions = outcomeCommitOptions();
+    let harnessCommitCount = requiresCommit ? harnessCommit(fixReport, {
+      ...firstOptions, derivedCommit: firstOptions.derivedCommit ?? derivedFirst,
+    }) : 0;
     if (harnessCommitCount === 0 && harnessCommitRefusalReason === MISSING_COMMIT_MESSAGE_REASON && fixLeftEdits()) {
       deps.log("fix.commit_line_requested", { strike: attempt, round });
       deps.say("fix rung: no COMMIT_MESSAGE line in the report — resuming the worker's session once to ask for it");
@@ -11784,9 +11815,13 @@ export async function runFixRung(opts: {
       if (answer) {
         harnessCommitRefusalReason = undefined;
         harnessCommitUndeclared = [];
-        // A derivable subject never reaches this ask (above), so the answer is the only subject left.
+        // The last outcome in the resumed report can explicitly authorize a derived subject.
         const answeredReport = `${workerTranscript(fixResult)}\n${workerTranscript(answer)}`;
-        harnessCommitCount = harnessCommit(answeredReport, { subjectSource: "re-asked" });
+        fixOutcome = anchoredFixOutcome(answeredReport);
+        fixAction = decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests });
+        if (["legacy", "commit"].includes(fixAction.kind) || (fixAction.kind === "scope-needed" && fixAction.testPaths.length > 0)) {
+          harnessCommitCount = harnessCommit(answeredReport, { subjectSource: "re-asked", ...outcomeCommitOptions() });
+        }
       }
     }
     // W1-T5544: THE PROOF-REPAIR GATE, between the commit and the push. A round that committed nothing, staged a path
@@ -11846,7 +11881,8 @@ export async function runFixRung(opts: {
         deps.log("fix.round_commits_read_error", { attempt, error: String((e as Error)?.message ?? e) });
       }
     }
-    const roundIsRetrigger = roundCommits.length > 0 && roundCommits.every(isRetriggerShapedCommit);
+    const roundIsRetrigger = (fixAction.kind === "legacy" || fixAction.kind === "commit") &&
+      roundCommits.length > 0 && roundCommits.every(isRetriggerShapedCommit);
 
     if (roundIsRetrigger) {
       // Spends the SEPARATE, capped `retriggers` count instead of a strike — never a
@@ -11901,7 +11937,8 @@ export async function runFixRung(opts: {
     }
     sessionToResume = fixResult.sessionId;
     if (harnessCommitRefused) {
-      const scopeAmendment = scopeAmendmentFromFixReport(workerTranscript(fixResult));
+      const scopeAmendment = fixAction.kind === "scope-needed"
+        ? `NEEDS_SCOPE ${fixAction.paths.join(",")}` : scopeAmendmentFromFixReport(workerTranscript(fixResult));
       deps.log("fix.commit_refused", {
         round_id: roundId,
         strike: attempt,
@@ -11909,20 +11946,25 @@ export async function runFixRung(opts: {
         mode: fixMode,
         head_sha: priorHeadSha,
         reason: harnessCommitRefusalReason,
+        fix_outcome: fixOutcome?.kind ?? "unstated",
+        ...(fixOutcome?.kind === "FIXED" && harnessCommitRefusalReason === "the worker changed nothing" ? { fix_outcome_contradiction: true } : {}),
         ...(scopeAmendment ? { scope_amendment_detail: scopeAmendment } : {}),
         ...undeclaredPathsLedgerFields(harnessCommitUndeclared),
       });
     }
+    const fixClaimFields: Record<string, unknown> = {};
     const logFixDone = (pushedHeadSha?: string) => deps.log("fix.done", {
       ...fixReceipt.ledgerFields(fixResult), // W1-T4613: FIRST, so every field this row already carried keeps its value
       round_id: roundId,
+      fix_outcome: fixOutcome?.kind ?? "unstated",
+      ...fixClaimFields,
       head_sha: priorHeadSha,
       pushed_head_sha: pushedHeadSha,
       strike: attempt,
       round,
       session_id: fixResult.sessionId,
-      subtype: harnessCommitRefused ? "commit_refused" : fixResult.subtype,
-      ...(harnessCommitRefused ? { worker_subtype: fixResult.subtype } : {}),
+      subtype: harnessCommitRefused || fixAction.kind === "scope-needed" ? "commit_refused" : fixResult.subtype,
+      ...(harnessCommitRefused || fixAction.kind === "scope-needed" ? { worker_subtype: fixResult.subtype } : {}),
       cost_usd: fixResult.costUsd,
       billing_mode: billingMode(fixResult.childEnvKeys),
       account_label: fixResult.accountLabel,
@@ -11968,6 +12010,84 @@ export async function runFixRung(opts: {
       log: deps.log,
       say: deps.say,
     });
+
+    if (fixAction.kind === "verify-base") {
+      const files = baseReproductionFiles(priorCiFailures ?? []);
+      let verified = false;
+      try {
+        const mainSha = await (deps.readMainTip ?? (() => {
+          execFileSync("git", ["-C", opts.worktreePath, "fetch", "--no-tags", "origin", "main"], { stdio: "pipe" });
+          return execFileSync("git", ["-C", opts.worktreePath, "rev-parse", "origin/main"], { encoding: "utf8" }).trim();
+        }))();
+        const probes = files.length > 0 ? await (deps.reproduceFailingTestsOnMain ??
+          buildBaseReproductionProbe(opts.config, opts.worktreePath, deps.ledgerPath, deps.log))(
+          { prNumber: prNumber!, headSha: priorHeadSha } as OpenPrView, files, mainSha,
+        ) : [];
+        verified = decideBaseReproduction(files, probes) === "reproduced";
+        deps.log("sweep.base_reproduction", { head_sha: priorHeadSha, main_sha: mainSha, files: probes,
+          verdict: decideBaseReproduction(files, probes) });
+        if (verified) deps.log("fix.strike_refunded", { strike: attempt, head_sha: priorHeadSha,
+          main_sha: mainSha, reason: "worker-base-red-verified", test_files: files });
+      } catch (error) {
+        deps.log("fix.base_red_verification_failed", { head_sha: priorHeadSha, reason: String(error) });
+      }
+      fixClaimFields.base_red_claim = verified ? "verified" : "refuted";
+      logFixDone();
+      return { outcome: "stood_down", review, strikes: verified ? strikes - 1 : strikes, retriggers,
+        reason: verified ? "worker-base-red-verified" : "base-red claim refuted" };
+    }
+    if (fixAction.kind === "rerun-once") {
+      const spent = requeuedCheckKeysFromLedger((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))());
+      const failures = priorCiFailures ?? [];
+      let requeued = failures.length > 0 && !!priorHeadSha;
+      for (const failure of failures) {
+        const key = `${priorHeadSha}@${failure.name}`;
+        if (!priorHeadSha || !failure.jobId || spent.has(key)) { requeued = false; continue; }
+        spent.add(key);
+        deps.log(CHECK_REQUEUE_STEP, { head_sha: priorHeadSha, check_name: failure.name, job_id: failure.jobId });
+        try {
+          const queued = await (deps.requeueCheck ?? ((f) => requeueActionsJob(opts.reviewBase.owner, opts.reviewBase.repo, f, deps.log)))(failure);
+          requeued = queued && requeued;
+        } catch (error) {
+          requeued = false;
+          deps.log("fix.flake_requeue_failed", { head_sha: priorHeadSha, check_name: failure.name, reason: String(error) });
+        }
+      }
+      let green = false;
+      if (requeued) {
+        try {
+          const ci = await deps.waitForCiGreen(opts.prUrl, deps.log);
+          green = ciGateState(ci) === "green" && (!ciGateSha(ci) || ciGateSha(ci) === priorHeadSha);
+        } catch (error) {
+          deps.log("fix.flake_verification_failed", { head_sha: priorHeadSha, reason: String(error) });
+        }
+      }
+      if (green) deps.log("fix.strike_refunded", { strike: attempt, head_sha: priorHeadSha, reason: "flake-confirmed" });
+      fixClaimFields.flake_claim = green ? "confirmed" : "refuted";
+      logFixDone();
+      return { outcome: "stood_down", review, strikes: green ? strikes - 1 : strikes, retriggers,
+        reason: green ? "flake-confirmed" : "flake claim refuted" };
+    }
+    if (fixAction.kind === "hand-off") {
+      deps.log("fix.needs_design", { reason: fixAction.reason, head_sha: priorHeadSha });
+      logFixDone();
+      return { outcome: "needs_design", review, strikes, retriggers, reason: fixAction.reason };
+    }
+    if (fixAction.kind === "scope-needed") {
+      deps.log("fix.scope_needed", { paths: fixAction.paths, head_sha: priorHeadSha });
+      if (!harnessCommitRefused) deps.log("fix.commit_refused", { strike: attempt, round, head_sha: priorHeadSha,
+        reason: "non-test paths need scope", scope_amendment_detail: `NEEDS_SCOPE ${fixAction.paths.join(",")}`,
+        fix_outcome: fixOutcome?.kind });
+      if (harnessCommitCount > 0) {
+        let pushedHead: string | undefined;
+        try {
+          const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush), expectedHeadShaForPush, "rung.strike");
+          if (pushed === undefined) pushedHead = expectedHeadShaForPush;
+          if (pushed && pushed !== "refused") return pushed;
+        } finally { logFixDone(pushedHead); }
+      } else logFixDone();
+      return { outcome: "stood_down", review, strikes, retriggers, reason: "non-test paths need scope" };
+    }
 
     // A shell-less worker that omitted or failed its harness commit produced no new head. The
     // refusal row is the positive release signal sweep.ts reads on the next pass; do not push an
@@ -23000,6 +23120,30 @@ export function reapBranchesCommand(
   return drift ? 1 : 0;
 }
 
+/**
+ * `rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]` (W1-T5533) — the worktree a hand build
+ * works in, cut from fresh origin/main by `createHandWorktree` (src/lib/hand-worktree.ts). The
+ * parent defaults to the directory holding this checkout, so the worktree lands beside it.
+ */
+export function handWorktreeCommand(rest: string[], opts: { repoDir?: string; clock?: Clock; minFreeBytes?: number } = {}): number {
+  const taskId = rest[0];
+  const badArg = taskId === undefined || taskId.startsWith("--") ? "rmd hand-worktree: <taskId> (or `unfiled`) must come first"
+    : rest.at(-1) === "--parent" ? "rmd hand-worktree: --parent needs a directory" : unknownArgError("hand-worktree", rest.slice(1), ["--parent"]);
+  if (badArg) {
+    console.error(`${badArg}\nusage: ${commandSyntax("hand-worktree")}`);
+    return 2;
+  }
+  const repoDir = opts.repoDir ?? repoRoot;
+  const parent = flagValue(rest, "--parent") ?? dirname(resolve(repoDir));
+  const result = createHandWorktree({ repoDir, taskId, parent, clock: opts.clock, minFreeBytes: opts.minFreeBytes });
+  if (result.status === "refused") {
+    console.error(`rmd hand-worktree: refused — ${result.reason}`);
+    return 1;
+  }
+  console.log(renderHandWorktree(result));
+  return 0;
+}
+
 // ledgerGrepCommand / stepFromRawLedgerLine moved to src/lib/report-commands.ts (W1-T2888) —
 // imported/re-exported below.
 
@@ -32541,34 +32685,89 @@ export function openSiblingObservation(
   };
 }
 
-/**
- * Build one selection cycle's pure value context from the rotated ledger union's dispatched attempts
- * (W1-T5112). The selector itself gets no reader: only an unreadable corpus refuses, and becomes
- * the exact former priority/scope/id order; every class is otherwise scored, thin ones near the mean.
- */
-function dispatchValueContextForSelection(
+const dispatchFilingCache = new Map<string, CostOfDelaySnapshot>();
+const dispatchFallbackKeys = new Map<string, string>();
+
+export function readDispatchFilingSnapshot(
+  planPath: string,
+  readGit?: (cwd: string, args: string[]) => string,
+): { kind: "ready"; snapshot: CostOfDelaySnapshot } | { kind: "refused"; reasons: readonly string[] } {
+  try {
+    const read = readGit ?? ((cwd: string, args: string[]) =>
+      execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", maxBuffer: 1 << 27 }));
+    // macOS exposes /var through /private/var; canonicalize only real filesystem reads so the
+    // injected reader seam remains usable with virtual fixture paths.
+    const canonicalPlanPath = readGit ? planPath : realpathSync(planPath);
+    const rootResult = read(dirname(canonicalPlanPath), ["rev-parse", "--show-toplevel"]).trim();
+    const root = readGit ? rootResult : realpathSync(rootResult);
+    if (read(root, ["rev-parse", "--is-shallow-repository"]).trim() !== "false") return { kind: "refused", reasons: ["incomplete-filing-history"] };
+    const planDir = relative(root, dirname(canonicalPlanPath)).split(sep).join("/") || ".";
+    const planTreeSha = read(root, ["rev-parse", `HEAD:${planDir}`]).trim();
+    if (!/^[a-f0-9]{40,64}$/.test(planTreeSha)) return { kind: "refused", reasons: ["unreadable-plan-tree"] };
+    const key = `${root}:${planPath}`;
+    const cached = dispatchFilingCache.get(key);
+    if (cached?.planTreeSha === planTreeSha) return { kind: "ready", snapshot: cached };
+    const relativePlanPath = relative(root, canonicalPlanPath);
+    const history = read(root, ["log", "--first-parent", "--reverse", "--format=filing:%ct", "--no-renames", "-p", "--unified=0", "HEAD", "--", relativePlanPath, `${planDir}/tasks.d`]);
+    const filedAtByTaskId = new Map<string, number>();
+    let at = NaN;
+    for (const line of history.split("\n")) {
+      const timestamp = /^filing:(\d+)$/.exec(line);
+      if (timestamp) at = Number(timestamp[1]) * 1000;
+      const id = /^\+\s*(?:-\s*)?id:\s*["']?([A-Z][A-Z0-9]*-T\d+)\b/.exec(line)?.[1];
+      if (id && Number.isFinite(at) && !filedAtByTaskId.has(id)) filedAtByTaskId.set(id, at);
+    }
+    if (filedAtByTaskId.size === 0) return { kind: "refused", reasons: ["missing-filing-history"] };
+    const snapshot = Object.freeze({ planTreeSha, filedAtByTaskId });
+    dispatchFilingCache.set(key, snapshot);
+    return { kind: "ready", snapshot };
+  } catch (error) {
+    return { kind: "refused", reasons: [`filing-history-unreadable:${String(error)}`] };
+  }
+}
+
+/** W1-T4064: the ledger snapshot supplies time and consumed slots; committed history supplies age.
+ * Fallbacks are keyed by the unreadable input, persisted in the ledger and deduplicated in-process. */
+export function dispatchValueContextForSelection(
   plan: Plan,
   isMerged: MergedSet,
   stateDir: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
+  planPath: string,
+  readLedger: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync,
+  readFiling: typeof readDispatchFilingSnapshot = readDispatchFilingSnapshot,
 ): DispatchValueContext | undefined {
-  const nowMs = systemClock.now();
-  const union = readLedgerUnionRecordsSync(stateDir, {
-    step: [...DISPATCH_VALUE_LEDGER_STEPS],
-    since: fixedClock(nowMs - DISPATCH_VALUE_WINDOW_MS).iso(),
+  const union = readLedger(stateDir, {
+    step: [...DISPATCH_VALUE_LEDGER_STEPS, "dispatch.cost_of_delay.fallback", "dispatch.cost_of_delay.ready", "dispatch.refused_already_merged"],
     refuseIncomplete: true,
   });
+  const fallback = (reasons: readonly string[], treeSha = planSeed(plan.tasks)) => {
+    const key = createHash("sha256").update(JSON.stringify([treeSha, reasons])).digest("hex");
+    const previous = union.rows.filter(row => row.step === "dispatch.cost_of_delay.fallback" || row.step === "dispatch.cost_of_delay.ready")
+      .sort((a, b) => String(a.ts).localeCompare(String(b.ts))).at(-1)?.key;
+    const changed = (dispatchFallbackKeys.get(stateDir) ?? previous) !== key;
+    if (changed) {
+      log("dispatch.cost_of_delay.fallback", { key, reasons, plan_tree_sha: treeSha });
+    }
+    dispatchFallbackKeys.set(stateDir, key);
+    return changed;
+  };
   if (!union.ok) {
-    log("dispatch.value.refused", { reason: "incomplete-union", unread_rotations: union.unread.length });
+    if (fallback(["incomplete-union", ...union.unread.slice().sort()])) {
+      log("dispatch.value.refused", { reason: "incomplete-union", unread_rotations: union.unread.length });
+    }
     return undefined;
   }
+  const filing = readFiling(planPath);
+  const evidence = union.rows.filter(row => row.step !== "dispatch.cost_of_delay.fallback" && row.step !== "dispatch.cost_of_delay.ready")
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const times = evidence.map(row => typeof row.ts === "string" ? Date.parse(row.ts) : NaN).filter(Number.isFinite);
+  const filingTimes = filing.kind === "ready" ? [...filing.snapshot.filedAtByTaskId.values()] : [];
+  const nowMs = [...times, ...filingTimes].reduce((latest, at) => Math.max(latest, at), 0);
+  const openIds = new Set(plan.tasks.filter(task => !isMerged(task.id)).map(task => task.id));
+  const seed = filing.kind === "ready" ? filing.snapshot.planTreeSha : planSeed(plan.tasks);
   const calibrated = buildDispatchValueContext(
-    plan.tasks,
-    union.rows,
-    new Set(plan.tasks.filter((task) => !isMerged(task.id)).map((task) => task.id)),
-    nowMs,
-    union.ok,
-    planSeed(plan.tasks),
+    plan.tasks, evidence, openIds, nowMs, true, seed,
   );
   if (calibrated.kind === "refused") {
     log("dispatch.value.refused", { reason: calibrated.reasons.join(",") });
@@ -32579,7 +32778,15 @@ function dispatchValueContextForSelection(
     fleet: { mean: calibrated.fleet.mean, attempts: calibrated.fleet.attempts, merges: calibrated.fleet.merges },
     refused_classes: calibrated.refusals,
   });
-  return calibrated.context;
+  const scheduled = filing.kind === "ready"
+    ? buildDispatchValueContext(plan.tasks, evidence, openIds, nowMs, true, seed, filing.snapshot) : filing;
+  if (scheduled.kind === "refused") {
+    fallback(scheduled.reasons, seed);
+    return Object.freeze({ ...calibrated.context, costOfDelayFallback: true });
+  }
+  if (dispatchFallbackKeys.get(stateDir) !== "ready") log("dispatch.cost_of_delay.ready", { key: "ready", plan_tree_sha: seed });
+  dispatchFallbackKeys.set(stateDir, "ready");
+  return scheduled.context;
 }
 
 async function drainCommand(
@@ -32947,7 +33154,7 @@ async function drainCommand(
         // W1-T3412: the full-union read stays in this command layer and runs once for each
         // selection pass. `drain.ts` receives only this immutable context and remains pure.
         buildDispatchValueContext: (dispatchPlan, merged) =>
-          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log),
+          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log, planPath),
         isOpenPr,
         isCreditIndeterminate,
         // W1-T3216: THE PRODUCER. `resolveReleasedIds` (drain.ts) turns these lines into the
@@ -34527,10 +34734,10 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       return import(pathToFileURL(join(repoRoot, "scripts", "mount-headroom-sweep.mjs")).href).then(
         (m: { buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] } }): RegisteredGardenPass => {
           const workerEnv = buildWorkerEnv({}, process.env, { allowApiKey: config.overflow === "api_key" });
-          const mountRecommendations = mountRecommendationSource({ build: m.buildMountHeadroomSweep, stateDir, mountsFile: mountsPath(repoRoot), billingMode: billingMode(Object.keys(workerEnv)), log });
-          return withDue(() => {
+          const mountRecommendations = mountRecommendationSource({ build: m.buildMountHeadroomSweep, sweepScript: join(repoRoot, "scripts", "mount-headroom-sweep.mjs"), stateDir, mountsFile: mountsPath(repoRoot), billingMode: billingMode(Object.keys(workerEnv)), log });
+          return withDue(async () => {
             try {
-              runConfigGarden(configGardenSpec(d, { mountRecommendations }), d, { mountRecommendations });
+              await runConfigGarden(configGardenSpec(d, { mountRecommendations }), d, { mountRecommendations });
             } catch (e) {
               log(`${CONFIG_GARDEN_NAME}.gardener_failed`, { error: String((e as Error)?.message ?? e) });
             }
@@ -35543,7 +35750,7 @@ export async function daemonCommand(
         // W1-T3412: daemon selection uses the same complete-union calibration as the bounded
         // drain. A refused calibration returns undefined, preserving historic ordering.
         buildDispatchValueContext: (dispatchPlan, merged) =>
-          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log),
+          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log, target.planPath),
         isOpenPr,
         isCreditIndeterminate,
         // W1-T3216: THE PRODUCER, on the lane that actually dispatches — the same omission
@@ -40460,6 +40667,7 @@ export interface WorkerEditCommit {
   readonly regenerable?: readonly string[];
   /** W1-T5386: new tests admitted by the task's own title proofs. */
   readonly proofMatchedTests?: readonly string[];
+  readonly admittedTests?: readonly string[];
   /** Why nothing was committed, when `committed` is false. */
   readonly reason?: string;
 }
@@ -40494,6 +40702,7 @@ export function commitWorkerEdits(
   // exists to prevent, and there is nothing this verb needs that the push verb did not.
   deps: PublishAbandonedFixOwnerAheadDeps = {},
   acceptance: readonly AcceptanceCriterion[] = [],
+  options: { admitTests?: boolean } = {},
 ): WorkerEditCommit {
   const runGit = deps.runGit ?? ((args: string[]) => execFileSync(
     "git",
@@ -40530,8 +40739,9 @@ export function commitWorkerEdits(
     runGit(["ls-tree", "--name-only", "HEAD", "--", path]).trim() === "" &&
     declaresProofTitle(readFileSync(join(repoDir, path), "utf8"), titles),
   );
+  const admittedTests = options.admitTests ? changed.filter((path) => path.startsWith("test/") && !path.split("/").includes("..")) : [];
   const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths) ||
-    regenerable.includes(path) || proofMatchedTests.includes(path));
+    regenerable.includes(path) || proofMatchedTests.includes(path) || admittedTests.includes(path));
   const undeclared = changed.filter((path) => !declared.includes(path));
   if (declared.length === 0) {
     return { committed: false, undeclared, reason: "every change the worker made is outside its declared files" };
@@ -40545,6 +40755,7 @@ export function commitWorkerEdits(
     undeclared,
     ...(regenerable.length > 0 ? { regenerable } : {}),
     ...(proofMatchedTests.length > 0 ? { proofMatchedTests } : {}),
+    ...(admittedTests.length > 0 ? { admittedTests } : {}),
   };
 }
 
@@ -40779,6 +40990,8 @@ export function harnessCommitForShellLessWorker(
     worktreePath: string;
     declaredPaths: readonly string[];
     acceptance?: readonly AcceptanceCriterion[];
+    admitTests?: boolean;
+    fixOutcome?: TypedFixOutcome["kind"];
     subjectSource?: "worker-authored" | "re-asked" | "harness-derived";
     derivedCommit?: { subject: string; reason: string };
     /** W1-T4614: the selection assignment of the worker whose edits this commits; its trailer names it. */
@@ -40808,11 +41021,13 @@ export function harnessCommitForShellLessWorker(
     input.assignmentId,
   );
   const subjectSource = asked === undefined ? "harness-derived" : input.subjectSource ?? "worker-authored";
-  const committed = commit(input.worktreePath, input.declaredPaths, message, {}, input.acceptance);
+  const committed = commit(input.worktreePath, input.declaredPaths, message, {}, input.acceptance, { admitTests: input.admitTests });
   const refusalReason = committed.reason ?? "harness commit refused";
   input.log(committed.committed ? "implement.harness_commit" : "implement.harness_commit_refused", {
     ...(committed.sha ? { sha: committed.sha } : {}),
     subject_source: subjectSource,
+    ...(input.fixOutcome ? { fix_outcome: input.fixOutcome } : {}),
+    ...(committed.admittedTests?.length ? { admitted_tests: committed.admittedTests } : {}),
     ...(committed.regenerable && committed.regenerable.length > 0 ? { regenerable: committed.regenerable } : {}),
     ...(committed.proofMatchedTests?.length ? { proofMatchedTests: committed.proofMatchedTests } : {}),
     ...(!committed.committed ? { reason: refusalReason } : {}),
@@ -40965,7 +41180,9 @@ export async function resumeForMissingCommitLine(
 export const COMMIT_LINE_RESUME_PROMPT =
   "Your last REPORT carried no anchored COMMIT_MESSAGE line, so the harness could not " +
   "commit your edits — they are still saved in the worktree. Make NO further edits and " +
-  "run NO git or gh commands. Reply with ONLY a REPORT whose last line is exactly " +
+  "run NO git or gh commands. Reply with ONLY a REPORT with exactly one anchored " +
+  "FIX_OUTCOME line (FIXED, BASE_RED, FLAKE, NEEDS_SCOPE <paths>, or NEEDS_DESIGN <reason>) " +
+  "before its last line, which is exactly " +
   "`COMMIT_MESSAGE: <type>(<scope>): <subject>` (Conventional Commits, lower-case " +
   "subject, at most 100 characters).";
 
@@ -49725,6 +49942,12 @@ const COMMANDS: readonly CommandSpec[] = [
       " — none of them shells the full test:ci suite, though the four census:* entries above each spawn `node --test` on their own one named file; that spawn is timed, and an outlier is refused as RUNAWAY — not by a fixed millisecond ceiling, but by a bound derived from THIS SAME run's own cheapest census entry (W1-T2478 admitted the class under a measured bound, W1-T2545 made that bound relative so a growing corpus cannot outgrow it) — the one failure mode unique to --fast; W1-T2734's source-size signal is the one networked member, refreshing origin/main before a PR-relative measurement, and every other member stays network-free; --coverage (W1-T1074) ADDS runPreflightCoverage's diff-coverage gate alone, at author-time on its own freshly self-derived origin/main...HEAD base — never a caller-supplied diff — opt-in and slow by construction (minutes, not seconds: it shells the same full instrumented suite --ci-parity's coverage-ratchet job runs, because a coverage lcov needs the full suite and --fast can never carry one, by design), and REFUSES rather than reports on an empty diff, a tree left dirty in a diffed file, or a changed file with no lcov SF: instrumentation record (reported as UNPROVEN, naming the file); any subset of --ci-parity/--fast/--coverage may be passed; exits non-zero if any step fails, after every step has run and reported. EVERY run also writes a machine-readable verdict to `<repoRoot>/coverage/preflight-summary.json` (override with --summary-file <path>) — ok, the head sha, duration, pass/fail counts and every step — so an eight-minute result survives the container that produced it; written on FAIL as well as PASS, and a write failure never changes the exit code",
   },
   {
+    name: "hand-worktree",
+    syntax: "rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]",
+    summary: "Create a hand build's run-<taskId>-<epochMs> worktree from origin/main with linked node_modules.",
+    detail: "W1-T5533: the worktree a HAND build works in, made by one command instead of retyped. Refuses before writing anything when the task id is malformed, --parent is relative or missing, the target filesystem has under 2 GiB free, origin is unreachable, origin already has a run-<taskId>-* branch, or origin/main already carries a `Remudero-Task: <taskId>` trailer (`unfiled` skips the two duplicate checks). Then runs `git worktree add --no-track -b run-<taskId>-<epochMs> <parent>/<branch> origin/main` — no upstream, an ABSOLUTE path (--parent defaults to the directory holding this checkout) — and HARD-LINKS (`cp -al`, never a symlink, so a later `npm ci` cannot empty the donor) node_modules from the first sibling worktree on the same filesystem whose package-lock.json is byte-identical, whose node_modules/.bin is non-empty and whose top-level `npm ls` passes. When none qualifies it prints `npm ci` as the next step with each candidate's reason and the free space, and does not run it. Prints the path and branch; exits 0 created, 1 refused, 2 bad usage.",
+  },
+  {
     name: "next-task-id",
     syntax: "rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>] [--branch <name>]",
     summary: "Atomically CLAIM the next free W1-T<n> task id. `--no-reserve` prints one without claiming it.",
@@ -50846,6 +51069,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["replay-goldens", async (rest) => await replayGoldensCommand(rest)],
   ["check-acceptance", (rest) => checkAcceptanceCommand(rest)],
   ["next-task-id", async (rest) => await nextTaskIdCommand(rest)],
+  ["hand-worktree", (rest) => handWorktreeCommand(rest)],
   [
     "retro",
     async (rest) => {

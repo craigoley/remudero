@@ -226,8 +226,10 @@ test("the real registry declares EXACTLY the five exempt raw sites — the two t
   // W1-T5348 moves it 6 -> 7: the plan-PR preflight reads feedback-landing's `commit-tree` sha DETACHED,
   // because that commit — not a fresh branch off origin/main — is the tree about to be pushed.
   // W1-T5521 moves it 7 -> 8: the same preflight's async form, cut off the daemon loop for the sweep's rungs.
+  // W1-T5533 moves it 8 -> 9: a hand build's worktree hard-links node_modules, which worktreeAdd's symlink forbids.
   assert.deepEqual(exempt, [
     "src/lib/composition-root.ts::addWorktree",
+    "src/lib/hand-worktree.ts::createHandWorktree",
     "src/lib/paired-trial.ts::cutSealedAttemptTree",
     "src/lib/plan-pr-emitter.ts::planPrPreflightAtCommit",
     "src/lib/plan-pr-emitter.ts::planPrPreflightAtCommitAsync",
@@ -305,6 +307,7 @@ test("findRawWorktreeAddSites finds every real raw site, including both canonica
     sites.sort(),
     [
       "src/lib/composition-root.ts::addWorktree",
+      "src/lib/hand-worktree.ts::createHandWorktree",
       "src/lib/paired-trial.ts::cutSealedAttemptTree",
       "src/lib/plan-pr-emitter.ts::planPrPreflightAtCommit",
       "src/lib/plan-pr-emitter.ts::planPrPreflightAtCommitAsync",

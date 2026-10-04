@@ -1,0 +1,54 @@
+- id: W1-T5633
+  title: "A NEW HIGH CODEQL ALERT HOLDS CI-GATE — GitHub's `CodeQL` results check failed on #9034 ('1 new alert including 1 high severity') and the PR merged 31 min later, because ci-gate never waits on or fails for that check and branch protection requires only ci-gate + remudero-review"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one gate — the ci-gate step and the forensics line that documents it
+  origin: "operator session 2026-10-04: #9034 merged with open alert #311 js/incomplete-sanitization, fixed by #9045"
+  plan_refs: [W1-T3980, W1-T1131, W1-T4400, W1-T5199, W1-T3725]
+  files: [.github/workflows/ci-gate.yml, docs/forensics/ci-gate-yml.md, test/a-new-codeql-alert-holds-the-ci-gate.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main d13d797c. #9034 head 3e7dc896: check-run `CodeQL` (app
+    github-advanced-security) concluded failure at 04:00Z, summary "New alerts in code changed by
+    this pull request: 1 high" — alert #311, js/incomplete-sanitization in src/lib/gate-gardener.ts.
+    #9034 merged at 04:31Z by squash auto-merge; #9045 fixed the alert after the merge.
+    Branch protection requires [remudero-review, ci-gate] (strict false) and main has no rulesets.
+    ci-gate.yml's `REQUIRED` omits CodeQL, "Analyze (javascript-typescript)" and "Analyze (actions)"
+    are `ADVISORY`, and the `CodeQL` results check is in neither list; W1-T1131 makes a
+    non-REQUIRED check unable to hold the merge. judgeReview (src/lib/review.ts) and the arm path
+    (src/lib/arm-auto-merge.ts) read no code-scanning data. `CodeQL` cannot simply join REQUIRED:
+    codeql.yml's `paths-ignore` (W1-T3725) skips plan/docs-only PRs, and a path-filtered required
+    check deadlocks the wait. The results check already scopes itself to alerts on changed lines at
+    GitHub's threshold. Distinct from existing readers: ops.ts `normalizeCodeScanningAlert` polls
+    repo-wide alerts AFTER merge (writing plan/feedback/fb-alert-*), and open-prs-rest.ts
+    `hydrateScannerBlockerObservations` (W1-T3980) reads only armed, green, blocked PRs.
+    docs/forensics/ci-gate-yml.md calls CodeQL "advisory-only SARIF uploads by design"; this task
+    supersedes that line, so verify: human.
+  design: |
+    Add a `REQUIRED_WHEN_PRESENT` env list to ci-gate.yml: {"CodeQL": "Analyze
+    (javascript-typescript)"}. When the trigger check is registered on the head, the aggregation
+    step waits for `CodeQL` under the same WAIT_CAP and fails when its latest attempt concluded
+    failure, naming that run's output title in the ::error::. When the trigger is absent (a
+    paths-ignored PR), nothing waits and nothing fails. ci-gate-from-contract.mjs picks the list up
+    unchanged. Rewrite the forensics line. NOT THIS TASK: a GitHub `code_scanning` ruleset (an
+    operator settings change) and W1-T3980.
+  acceptance:
+    - claim: "the shipped ci-gate aggregation step fails when Analyze ran and the CodeQL results check concluded failure, and passes a PR on which Analyze never registered"
+      proof: "unit test: test/a-new-codeql-alert-holds-the-ci-gate.test.ts"
+  falsifier: |
+    Delete the `REQUIRED_WHEN_PRESENT` evaluation; a stubbed failing `CodeQL` row passes the step
+    (exit 0) and the test fails.
+  risk_ruling:
+    verdict: "high"
+    action: escalate
+    confidence: 1
+    reasons:
+      - "deterministic backstop: it declares .github/workflows/ci-gate.yml, a secrets, auth, CI, deploy, merge-policy or ruling path — irreversible or privileged work goes to a person"
+    judged_at: "2026-10-04T14:03:52.002Z"
+    pin: "7bd953feb6323c25e055e13c599ae147f9ed6a2f5ed125a44eed8b7f655881f3"

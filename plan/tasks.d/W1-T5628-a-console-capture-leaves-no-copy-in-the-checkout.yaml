@@ -1,0 +1,50 @@
+- id: W1-T5628
+  title: "A CONSOLE CAPTURE LEAVES NO COPY IN THE CHECKOUT — since #9049 the four console routes `captureFeedback` into serve's checkout (or, for the escalation reply, the state root) and `queueFeedbackRecord` copies it; nothing removes that untracked file once the sweep lands it, two comments still describe the deleted request-path landing, and serve drops `feedback_landing_queue_unreadable` when no projection worker runs"
+  repo: remudero
+  depends_on: [W1-T5627]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one defect — staging moves the capture
+  origin: "operator session 2026-10-04: reviewing W1-T5525 (#9049) request-path land removal"
+  plan_refs: [W1-T5525, W1-T2749, W1-T1054, W1-T3562, W1-T5524]
+  files: [src/lib/feedback-landing.ts, src/lib/feedback.ts, src/lib/panel-graph.ts, src/lib/serve.ts, test/a-console-capture-leaves-no-copy-in-the-checkout.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main d13d797c. `queueFeedbackRecord` reads `join(root, relPath)` and
+    stages a copy; the checkout file stays. `acknowledgeLandedQueueCopies` removes landed copies
+    only under the daemon's own repoRoot (`sweepFeedbackLanding(repoRoot, ...)`); serve's root is a
+    different checkout (deploy/serve-container.sh mounts RMD_SERVE_REPO_DIR and refuses it being
+    the daemon's), and `buildEscalationReplyRoute` captures under config.root, no checkout at all.
+    At serve's next boot `clear_redundant_untracked` (deploy/entrypoint.sh) clears only
+    byte-identical copies; a record main has since advanced is left and `checkout_target` dies
+    (git refuses the ff even over identical untracked bytes, checked in scratch). Not yet seen
+    live (rmd-serve-repo: 0 untracked plan/feedback files).
+    Stale comments: CaptureFeedbackOptions.land (src/lib/feedback.ts) says a console route
+    "skip[s] the request-path preflight (W1-T5348)", an option #9049 deleted; serve.ts above
+    `buildPanelSkillRunRoutes` says the grill uses `feedbackLand` and "lands on the bot branch",
+    but panel-skill-run.ts no longer reads feedbackLand.
+    serve.ts wires `logProjection: deps.log` only inside the `projectionWorker ? {...} : {}` spread,
+    so `serve.feedback_landing_queue_unreadable` is dropped without a worker (production always
+    passes one, so it bites tests and alternate assemblies).
+    Not filed: invalidating the console read cache when the sweep lands a record —
+    console-snapshot-cache.ts is stale-while-revalidate by contract, /v1/feedback refreshes within
+    `CONSOLE_SNAPSHOT_MIN_REFRESH_MS` (10 s) with staleness labelled, and the sweep runs in another
+    container.
+  design: |
+    1. `queueFeedbackRecord` MOVES: after the staged rename succeeds, unlink the root copy; a
+       failed stage keeps it.
+    2. Readers that relied on that copy also read the queue (W1-T5627's reader): GET /v1/feedback
+       lists queue-only entries with landing: queued, `findFeedbackBySubmissionKey` dedups across
+       the queue, and `replyRefusal`'s answering scan sees a queued answer.
+    3. Rewrite the CaptureFeedbackOptions.land doc and the serve.ts comment to describe staging.
+    4. Wire `logProjection: deps.log` in serve.ts whether or not a worker is passed.
+  acceptance:
+    - claim: "after POST /v1/feedback, /v1/skills/run or /v1/escalation/reply stages a capture, no copy remains under the route's root, the entry still lists with landing queued, a repeated submissionKey returns it, and an unreadable queue is logged with no projection worker"
+      proof: "unit test: test/a-console-capture-leaves-no-copy-in-the-checkout.test.ts"
+  falsifier: |
+    Remove the unlink from queueFeedbackRecord. The suite finds plan/feedback/<id>.yaml still under
+    the route's root.
