@@ -4,6 +4,7 @@ import { rmSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createReadModelWorker, threadOracle, threadViews } from "../src/lib/read-model-worker.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { LIVE_WRITE_SENTINEL_TOKEN } from "../src/lib/live-write-guard.js";
 
 // 2026-10-04: a worker thread gets a COPY of process.env unless it is spawned with SHARE_ENV, so it
 // keeps the GH_TOKEN it was born with while serve refreshes its own hourly (github-app.ts). The
@@ -78,4 +79,23 @@ test("the read-model view thread reads its spawner's refreshed GH_TOKEN, not the
   lane.want("x", "");
   await until(() => seen.length === 2);
   assert.equal(seen[1], REFRESHED);
+});
+
+// SHARE_ENV makes a thread's env the parent's, and each thread re-runs the runner's setup: a thread
+// that minted its own HOME or appended GIT_CONFIG_* entries would write them into the parent test.
+test("a read-model thread re-running the test setup leaves the parent's HOME and GIT_CONFIG_COUNT alone", async (t) => {
+  restoreToken(t);
+  const home = process.env.HOME;
+  const count = process.env.GIT_CONFIG_COUNT;
+  process.env.GH_TOKEN = "set-by-the-parent";
+  const oracle = threadOracle({
+    workerUrl: thread(`parentPort.on("message", (m) => parentPort.postMessage({ type: "done", id: m.id, result: { ok: true, rows: 0, elapsedMs: 0 } }));`),
+    log: () => {},
+  });
+  t.after(() => oracle.close());
+  await new Promise<void>((resolve) => oracle.run({} as never, () => resolve()));
+  // Positive control: the thread ran the setup, and its writes reached this env.
+  assert.equal(process.env.GH_TOKEN, LIVE_WRITE_SENTINEL_TOKEN);
+  assert.equal(process.env.HOME, home);
+  assert.equal(process.env.GIT_CONFIG_COUNT, count);
 });

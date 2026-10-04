@@ -79,7 +79,8 @@ export function installNoLiveRemote(env: NodeJS.ProcessEnv = process.env, mainTh
   if (!isTestRunner(env)) return {};
   if (env[LIVE_WRITE_OVERRIDE_ENV] === "1") return {};
   env[LIVE_LEDGER_DENY_ROOT_ENV] = discoverLiveLedgerRoot(env);
-  for (const prefix of GITHUB_PUSH_PREFIXES) appendGitConfigEnv(`url.${DEAD_PUSH_ROOT}.pushInsteadOf`, prefix, env);
+  // A worker thread's env already holds the parent's entries; under SHARE_ENV it IS the parent's env.
+  if (mainThread) for (const prefix of GITHUB_PUSH_PREFIXES) appendGitConfigEnv(`url.${DEAD_PUSH_ROOT}.pushInsteadOf`, prefix, env);
   env.RMD_SCRATCH_SWITCH = DEAD_SCRATCH_SWITCH;
   delete env.RMD_SCRATCH;
   env.GIT_TERMINAL_PROMPT = "0";

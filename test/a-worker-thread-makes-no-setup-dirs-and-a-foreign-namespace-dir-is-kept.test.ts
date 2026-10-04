@@ -25,6 +25,7 @@ import { Worker } from "node:worker_threads";
 import * as noLiveRemote from "./setup/no-live-remote.js";
 import * as tmpHygiene from "./setup/tmp-hygiene.js";
 import { fixedClock } from "../src/lib/clock.js";
+import { LIVE_WRITE_SENTINEL_TOKEN } from "../src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -50,27 +51,28 @@ test("W1-T5624: a worker thread loading the test setup creates no rmd-test-gh-* 
   writeFileSync(script, [
     "import { parentPort } from 'node:worker_threads';",
     "const head = (process.env.PATH ?? '').split(':')[0];",
-    "parentPort.postMessage({ config: process.env.GH_CONFIG_DIR, refuse: head, home: process.env.HOME });",
+    "parentPort.postMessage({ config: process.env.GH_CONFIG_DIR, refuse: head, home: process.env.HOME, token: process.env.GH_TOKEN });",
     "setInterval(() => {}, 1000);",
     "",
   ].join("\n"));
-  const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: root };
+  const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: root, GH_TOKEN: "set-before-the-worker-setup" };
   delete env.RMD_ALLOW_LIVE_WRITES;
   delete env.RMD_SELF_SYNC_DONE;
   // The runner's own two `--import`s, spelled out rather than read from process.execArgv, so the
   // worker loads the setup however this file was launched.
   const worker = new Worker(script, { execArgv: ["--import", "tsx", "--import", SETUP], env });
   try {
-    const seen = await new Promise<{ config?: string; refuse: string; home?: string }>((resolve, reject) => {
+    const seen = await new Promise<{ config?: string; refuse: string; home?: string; token?: string }>((resolve, reject) => {
       worker.once("message", resolve);
       worker.once("error", reject);
       worker.once("exit", (code) => reject(new Error(`worker exited (${code}) before reporting`)));
     });
-    // Positive control: the worker DID load the setup under `root` — its HOME is the setup's own
-    // `rmd-test-home-` dir, minted there. Without this, a worker that skipped the `--import`s would
-    // pass the assertion below by never running the code under test.
-    assert.equal(dirname(seen.home ?? ""), root, `the worker loaded the setup with TMPDIR=${root}`);
-    assert.ok(basename(seen.home ?? "").startsWith("rmd-test-home-"), String(seen.home));
+    // Positive control: the worker DID load the setup — it rewrote the token it was handed to the
+    // sentinel. Without this, a worker that skipped the `--import`s would pass the assertion below by
+    // never running the code under test. (It no longer mints a HOME: under SHARE_ENV that write
+    // would move the parent's HOME, so it keeps the parent's.)
+    assert.equal(seen.token, LIVE_WRITE_SENTINEL_TOKEN, "the worker loaded the setup");
+    assert.equal(seen.home, process.env.HOME, "it keeps the parent's test HOME");
 
     assert.deepEqual(ghSetupDirs(root), [], "a worker thread mints no gh config or refusal-stub dir");
     assert.equal(seen.config, process.env.GH_CONFIG_DIR, "it keeps the parent's GH_CONFIG_DIR");
