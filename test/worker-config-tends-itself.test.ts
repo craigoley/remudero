@@ -124,9 +124,9 @@ function harness() {
 }
 
 /** Open a budget canary and merge it, returning the harness with the canary exposed. */
-function exposedBudgetCanary() {
+async function exposedBudgetCanary() {
   const h = harness();
-  const first = h.pass();
+  const first = await h.pass();
   assert.deepEqual(first.plan?.acting, ["recalibrate-budget"], "the budget class acts: it is the only class with work");
   assert.equal(h.landed.length, 1);
   const [canary] = readConfigCanaries(h.deps.stateDir);
@@ -137,31 +137,31 @@ function exposedBudgetCanary() {
   for (const id of h.ids) assert.equal(h.budgetOf(id), cohort.includes(id) ? "9.00" : "30.00", `${id} is ${cohort.includes(id) ? "in" : "outside"} the cohort`);
   h.setPr("merged");
   h.advance(2 * HOUR);
-  h.pass();
+  await h.pass();
   const exposed = readConfigCanaries(h.deps.stateDir)[0]!;
   assert.equal(exposed.promotion.state, "canary", "the merge exposes it, on its shadow evidence");
   assert.equal(exposed.exposedAt, new Date(h.now()).toISOString());
   return { h, cohort, exposedAt: h.now() };
 }
 
-test("W1-T4786: shadow snapshot survives clock advancement before landing", () => {
+test("W1-T4786: shadow snapshot survives clock advancement before landing", async () => {
   const h = harness();
   const originalClock = h.deps.clock;
   h.deps.clock = { ...originalClock, iso: () => new Date(h.now() + 1000).toISOString() };
-  h.pass();
+  await h.pass();
   const canary = readConfigCanaries(h.deps.stateDir)[0]!;
   assert.equal(canary.promotion.state, "shadow");
   assert.equal(canary.promotion.observationWindow.start, canary.shadowObservations[0]?.observedAt);
 });
 
-test("W1-T4786: merged unmeasurable shadow rolls back and releases pending", () => {
+test("W1-T4786: merged unmeasurable shadow rolls back and releases pending", async () => {
   const h = harness();
-  h.pass();
+  await h.pass();
   const c = readConfigCanaries(h.deps.stateDir)[0]!;
   writeConfigCanaries(h.deps.stateDir, [{ ...c, promotion: { ...c.promotion, state: "unmeasurable" } }]);
   h.setPr("merged");
   h.advance(2 * HOUR);
-  h.pass();
+  await h.pass();
   assert.equal(readConfigCanaries(h.deps.stateDir)[0]?.promotion.state, "rolled_back");
   assert.equal(h.landed.length, 2, "the merged edits receive an exact rollback PR");
   for (const id of h.ids) assert.equal(h.budgetOf(id), "30.00");
@@ -171,27 +171,27 @@ test("W1-T4786: merged unmeasurable shadow rolls back and releases pending", () 
   assert.ok(h.logs.some((l) => l.step === "config.canary_rolled_back" && String(l.extra?.reason).includes("pre-exposure unmeasurable")));
 });
 
-test("W1-T4786: unknown pre-exposure PR waits without rollback", () => {
+test("W1-T4786: unknown pre-exposure PR waits without rollback", async () => {
   const h = harness();
-  h.pass();
+  await h.pass();
   const c = readConfigCanaries(h.deps.stateDir)[0]!;
   writeConfigCanaries(h.deps.stateDir, [{ ...c, promotion: { ...c.promotion, state: "unmeasurable" } }]);
   h.setPr("unknown");
   h.advance(2 * HOUR);
-  h.pass();
+  await h.pass();
   assert.equal(h.landed.length, 1);
   assert.equal(readConfigCanaries(h.deps.stateDir)[0]?.promotion.state, "unmeasurable");
   assert.ok(readGardenState(gardenStatePath(h.deps.stateDir, "config"), CONFIG_GARDEN_CLASSES).pending);
 });
 
-test("W1-T4786: closed pre-exposure PR debits without a rollback PR", () => {
+test("W1-T4786: closed pre-exposure PR debits without a rollback PR", async () => {
   const h = harness();
-  h.pass();
+  await h.pass();
   const c = readConfigCanaries(h.deps.stateDir)[0]!;
   writeConfigCanaries(h.deps.stateDir, [{ ...c, promotion: { ...c.promotion, state: "unmeasurable" } }]);
   h.setPr("closed");
   h.advance(2 * HOUR);
-  h.pass();
+  await h.pass();
   assert.equal(h.landed.length, 1);
   assert.equal(readConfigCanaries(h.deps.stateDir)[0]?.promotion.state, "rolled_back");
   const state = readGardenState(gardenStatePath(h.deps.stateDir, "config"), CONFIG_GARDEN_CLASSES);
@@ -199,9 +199,9 @@ test("W1-T4786: closed pre-exposure PR debits without a rollback PR", () => {
   assert.deepEqual(state.classes["recalibrate-budget"], { alpha: 3, beta: 2 });
 });
 
-test("W1-T4786: partial rollback refuses before any file changes", () => {
+test("W1-T4786: partial rollback refuses before any file changes", async () => {
   const h = harness();
-  h.pass();
+  await h.pass();
   const c = readConfigCanaries(h.deps.stateDir)[0]!;
   writeConfigCanaries(h.deps.stateDir, [{ ...c, promotion: { ...c.promotion, state: "unmeasurable" } }]);
   const before = new Map(h.ids.map((id) => [id, readFileSync(join(h.root, "plan", "tasks.d", `${id}-x.yaml`), "utf8")]));
@@ -212,15 +212,15 @@ test("W1-T4786: partial rollback refuses before any file changes", () => {
   before.set(changedId, readFileSync(changedPath, "utf8"));
   h.setPr("merged");
   h.advance(2 * HOUR);
-  assert.throws(() => h.pass(), /rollback line changed or ambiguous/);
+  await assert.rejects(() => h.pass(), /rollback line changed or ambiguous/);
   for (const id of h.ids) assert.equal(readFileSync(join(h.root, "plan", "tasks.d", `${id}-x.yaml`), "utf8"), before.get(id));
   assert.equal(h.landed.length, 1, "an incomplete rollback is never published");
   assert.ok(readGardenState(gardenStatePath(h.deps.stateDir, "config"), CONFIG_GARDEN_CLASSES).pending);
 });
 
-test("W1-T4786: missing rollback PR receipt keeps the canary pending", () => {
+test("W1-T4786: missing rollback PR receipt keeps the canary pending", async () => {
   const h = harness();
-  h.pass();
+  await h.pass();
   const c = readConfigCanaries(h.deps.stateDir)[0]!;
   writeConfigCanaries(h.deps.stateDir, [{ ...c, promotion: { ...c.promotion, state: "unmeasurable" } }]);
   const openWorkspace = h.deps.openWorkspace;
@@ -230,23 +230,23 @@ test("W1-T4786: missing rollback PR receipt keeps the canary pending", () => {
   };
   h.setPr("merged");
   h.advance(2 * HOUR);
-  assert.throws(() => h.pass(), /rollback PR was not opened/);
+  await assert.rejects(() => h.pass(), /rollback PR was not opened/);
   assert.equal(readConfigCanaries(h.deps.stateDir)[0]?.promotion.state, "unmeasurable");
   assert.ok(readGardenState(gardenStatePath(h.deps.stateDir, "config"), CONFIG_GARDEN_CLASSES).pending);
 });
 
-test("W1-T4113: a budget recalibration runs as a canary and rolls back on a guardrail breach", () => {
-  const { h, cohort } = exposedBudgetCanary();
+test("W1-T4113: a budget recalibration runs as a canary and rolls back on a guardrail breach", async () => {
+  const { h, cohort } = await exposedBudgetCanary();
   const rest = h.ids.filter((id) => !cohort.includes(id));
   // After exposure the cohort blocks at its new budget while the rest merges.
   cohort.forEach((id, i) => h.rows.push(...run(`c${i}`, id, h.now() + HOUR, "blocked", 9.4)));
   rest.forEach((id, i) => h.rows.push(...run(`r${i}`, id, h.now() + HOUR, "merged", 5)));
   // Within the tend interval the canary is not judged again.
   h.advance(10 * 60 * 1000);
-  h.pass();
+  await h.pass();
   assert.equal(readConfigCanaries(h.deps.stateDir)[0]!.promotion.state, "canary");
   h.advance(2 * HOUR);
-  h.pass();
+  await h.pass();
 
   const judged = readConfigCanaries(h.deps.stateDir)[0]!;
   assert.equal(judged.promotion.state, "rolled_back", "a guardrail breach rolls the canary back");
@@ -264,16 +264,16 @@ test("W1-T4113: a budget recalibration runs as a canary and rolls back on a guar
   assert.ok(h.logs.some((l) => l.step === "config.canary_rolled_back" && l.extra?.rollback_pr_url === judged.rollbackPrUrl));
 });
 
-test("W1-T4113: a canary that holds its guardrails is promoted one step at a time and credits the class", () => {
-  const { h, cohort } = exposedBudgetCanary();
+test("W1-T4113: a canary that holds its guardrails is promoted one step at a time and credits the class", async () => {
+  const { h, cohort } = await exposedBudgetCanary();
   const rest = h.ids.filter((id) => !cohort.includes(id));
   cohort.forEach((id, i) => h.rows.push(...run(`c${i}`, id, h.now() + HOUR, "merged", 4)));
   rest.forEach((id, i) => h.rows.push(...run(`r${i}`, id, h.now() + HOUR, "merged", 5)));
   h.advance(2 * HOUR);
-  h.pass();
+  await h.pass();
   assert.equal(readConfigCanaries(h.deps.stateDir)[0]!.promotion.state, "observing");
   h.advance(2 * HOUR);
-  h.pass();
+  await h.pass();
   assert.equal(readConfigCanaries(h.deps.stateDir)[0]!.promotion.state, "promoted");
   assert.equal(h.landed.length >= 1 && h.landed.every((l) => !l.title.startsWith("revert")), true, "a promotion reverts nothing");
   for (const id of cohort) assert.equal(h.budgetOf(id), "9.00", `${id} keeps its recalibrated budget`);
@@ -281,14 +281,14 @@ test("W1-T4113: a canary that holds its guardrails is promoted one step at a tim
   assert.equal(state.classes["recalibrate-budget"].alpha, 4, "the promotion credits the class");
 });
 
-test("W1-T4113: a thin cohort waits rather than being judged, and a closed PR exposes nothing", () => {
-  const { h, cohort } = exposedBudgetCanary();
+test("W1-T4113: a thin cohort waits rather than being judged, and a closed PR exposes nothing", async () => {
+  const { h, cohort } = await exposedBudgetCanary();
   h.rows.push(...run("c0", cohort[0]!, h.now() + HOUR, "blocked", 9));
   h.advance(2 * HOUR);
-  h.pass();
+  await h.pass();
   assert.equal(readConfigCanaries(h.deps.stateDir)[0]!.promotion.state, "canary", "one task is below the floor: it waits");
   h.advance(22 * 24 * HOUR);
-  h.pass();
+  await h.pass();
   assert.equal(readConfigCanaries(h.deps.stateDir)[0]!.promotion.state, "expired", "never measured, it expires rather than being promoted");
   const released = readGardenState(gardenStatePath(h.deps.stateDir, "config"), CONFIG_GARDEN_CLASSES);
   assert.deepEqual(released.classes["recalibrate-budget"], { alpha: 3, beta: 1 }, "an expiry is released unjudged");
@@ -296,10 +296,10 @@ test("W1-T4113: a thin cohort waits rather than being judged, and a closed PR ex
   assert.ok(h.logs.some((l) => l.step === "config.canary_expired"));
 
   const closed = harness();
-  closed.pass();
+  await closed.pass();
   closed.setPr("closed");
   closed.advance(2 * HOUR);
-  closed.pass();
+  await closed.pass();
   const c = readConfigCanaries(closed.deps.stateDir)[0]!;
   assert.equal(c.promotion.state, "rolled_back");
   assert.equal(c.rollbackPrUrl, undefined, "nothing merged, so there is nothing to revert");
@@ -440,7 +440,7 @@ test("W1-T4113: a mount recommendation is adopted on its route line, on the same
   assert.equal(readFileSync(join(root, ".remudero", "mounts.yaml"), "utf8"), text);
 });
 
-test("W1-T4113: unreadable canary state stops the pass and the timer reports why", () => {
+test("W1-T4113: unreadable canary state stops the pass and the timer reports why", async () => {
   const h = harness();
   const path = configCanariesPath(h.deps.stateDir);
   writeFileSync(path, "{broken json");
@@ -448,6 +448,7 @@ test("W1-T4113: unreadable canary state stops the pass and the timer reports why
 
   const timer = startConfigGarden(configGardenSpec(h.deps, { ledgerRows: () => [] }), h.deps, { ledgerRows: () => [] }, HOUR);
   timer.stop();
+  await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(h.landed.length, 0, "the failed pass did not open a configuration PR");
   assert.ok(h.logs.some((l) => l.step === "config.gardener_failed" && /unreadable .*config-gardener-canaries\.json/.test(String(l.extra?.error))));
 });
@@ -485,8 +486,8 @@ test("W1-T4113: cap re-derivation prices current-cap pressure with cache totals 
   assert.equal(derived.changed, true);
 });
 
-test("W1-T4113: rollback reports when the canary lines have moved on", () => {
-  const { h, cohort } = exposedBudgetCanary();
+test("W1-T4113: rollback reports when the canary lines have moved on", async () => {
+  const { h, cohort } = await exposedBudgetCanary();
   for (const id of cohort) {
     const path = join(h.root, "plan", "tasks.d", `${id}-x.yaml`);
     writeFileSync(path, readFileSync(path, "utf8").replace("  budget_usd: 9.00", "  budget_usd: 31.00"));
@@ -495,7 +496,7 @@ test("W1-T4113: rollback reports when the canary lines have moved on", () => {
   cohort.forEach((id, i) => h.rows.push(...run(`c${i}`, id, h.now() + HOUR, "blocked", 9.4)));
   rest.forEach((id, i) => h.rows.push(...run(`r${i}`, id, h.now() + HOUR, "merged", 5)));
   h.advance(2 * HOUR);
-  assert.throws(() => h.pass(), /rollback line changed or ambiguous/);
+  await assert.rejects(() => h.pass(), /rollback line changed or ambiguous/);
 
   const judged = readConfigCanaries(h.deps.stateDir)[0]!;
   assert.equal(judged.promotion.state, "canary", "an unproven rollback cannot settle the canary");

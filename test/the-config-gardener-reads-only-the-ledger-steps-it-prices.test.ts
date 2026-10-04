@@ -102,7 +102,7 @@ function recordingReader() {
   return { calls, returned, reader };
 }
 
-test("the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts: the read is filtered to CONFIG_GARDEN_LEDGER_STEPS and the inventory equals the unfiltered read's", (t) => {
+test("the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts: the read is filtered to CONFIG_GARDEN_LEDGER_STEPS and the inventory equals the unfiltered read's", async (t) => {
   const f = fixture(t);
   const rows = corpus();
   const third = Math.floor(rows.length / 3);
@@ -112,7 +112,7 @@ test("the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts: the rea
   ] });
 
   const rec = recordingReader();
-  const filtered = gardener.configInventory(f.garden, sources(), rec.reader);
+  const filtered = await gardener.configInventory(f.garden, sources(), rec.reader);
   assert.equal(rec.calls.length, 1, "one bounded union read per inventory");
   assert.deepEqual(rec.calls[0]?.step, steps(), "the read passes the step set itself");
   assert.equal(rec.calls[0]?.refuseIncomplete, true, "a bounded read still refuses an incomplete union");
@@ -123,29 +123,29 @@ test("the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts: the rea
   const everything = readLedgerUnionRecordsSync(f.stateDir, WINDOW).rows;
   assert.ok(everything.length > rec.returned.length && everything.some((r) => r.step === "worker.activity"), "positive control: the corpus holds rows outside the set");
   assert.equal(rec.returned.length, everything.filter((r) => steps().includes(String(r.step))).length, "every in-set row is read");
-  const unfiltered = gardener.configInventory(f.garden, sources(everything));
+  const unfiltered = await gardener.configInventory(f.garden, sources(everything));
   assert.ok(filtered.runs.length > 20 && filtered.cap?.derivation.pressure !== undefined && filtered.cap.derivation.cacheHitRatioUsed !== undefined, "positive control: runs, pressure and the cache mix are all measured");
   assert.deepEqual(filtered, unfiltered);
 });
 
-test("every step in CONFIG_GARDEN_LEDGER_STEPS changes the inventory when its rows are dropped", (t) => {
+test("every step in CONFIG_GARDEN_LEDGER_STEPS changes the inventory when its rows are dropped", async (t) => {
   const f = fixture(t);
   const rows = corpus();
-  const whole = gardener.configInventory(f.garden, sources(rows));
-  assert.deepEqual(gardener.configInventory(f.garden, sources(rows.filter((r) => steps().includes(String(r.step))))), whole, "rows outside the set are inert");
+  const whole = await gardener.configInventory(f.garden, sources(rows));
+  assert.deepEqual(await gardener.configInventory(f.garden, sources(rows.filter((r) => steps().includes(String(r.step))))), whole, "rows outside the set are inert");
   assert.ok(steps().length > 30, "positive control: the set is populated");
-  const inert = steps().filter((step) => {
-    const without = gardener.configInventory(f.garden, sources(rows.filter((r) => r.step !== step)));
-    return JSON.stringify(without) === JSON.stringify(whole);
-  });
+  const inert = (await Promise.all(steps().map(async (step) => {
+    const without = await gardener.configInventory(f.garden, sources(rows.filter((r) => r.step !== step)));
+    return JSON.stringify(without) === JSON.stringify(whole) ? step : undefined;
+  }))).filter((step): step is string => step !== undefined);
   assert.deepEqual(inert, [], "a step whose rows change nothing is either missing from the fixture or not read");
 });
 
-test("the config gardener's bounded read refuses an incomplete ledger union", (t) => {
+test("the config gardener's bounded read refuses an incomplete ledger union", async (t) => {
   const f = fixture(t);
   writeLedger([{ step: "run.start", run_id: "r1", ts: at(0) }], { dir: f.stateDir });
   writeFileSync(join(f.stateDir, "ledger.2026-09-30T00-00-00-000Z.ndjson.gz"), "not a gzip archive");
-  assert.throws(() => gardener.configInventory(f.garden, sources()), /config gardener: incomplete ledger union: .*ledger\.2026-09-30/);
+  await assert.rejects(() => gardener.configInventory(f.garden, sources()), /config gardener: incomplete ledger union: .*ledger\.2026-09-30/);
   assert.throws(() => gardener.readConfigGardenLedgerRows(f.stateDir), /config gardener: incomplete ledger union/);
 });
 
