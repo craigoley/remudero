@@ -1,4 +1,4 @@
-import { ghExec } from "./github-transport.js";
+import { ghExec, ghTextAsync } from "./github-transport.js";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
@@ -15,6 +15,9 @@ import {
   type OperatorMessageCheckResult,
 } from "./operator-message.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
+// W1-T5283: the escalation and issue-gateway bodies are written ONCE as steps (W1-T5284's driver
+// pair): runStepsSync for the CLI callers, runStepsAsync for the main-health rung on the daemon loop.
+import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
 import { validateDecisionSummary, type DecisionSummary, type SummarizeDeps } from "./feedback.js";
 import type { Mount, Mounts } from "./mounts.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
@@ -333,6 +336,7 @@ export function parseLabelledIssuesRest(raw: string): LabelledIssue[] {
     .map((i) => ({ number: i.number, url: i.html_url, state: i.state, title: i.title, body: i.body }));
 }
 
+
 export interface IssueGateway {
   /** Create a labeled issue; returns its URL. */
   create(title: string, body: string, labels: string[]): string;
@@ -355,6 +359,11 @@ export interface IssueGateway {
    *  job, never the operator's memory. Why: the 2026-07-17 incident, docs/forensics/escalate.md. */
   ensureLabel?(label: string): boolean;
 }
+
+/** W1-T5283 — an {@link IssueGateway} whose calls may return a promise, which {@link escalateAsync}
+ *  awaits. Every sync gateway is one. */
+export type AsyncIssueGateway = { [K in keyof IssueGateway]: Awaitable<IssueGateway[K]> };
+type Awaitable<F> = F extends (...args: infer P) => infer R ? (...args: P) => R | Promise<R> : F;
 
 /** The close transport reports whether GitHub accepted the citation or only the terminal close. */
 export type IssueCloseOutcome = "commented" | "comment_cap";
@@ -874,8 +883,9 @@ export async function summarizeEscalation(e: Escalation, deps: SummarizeDeps): P
   }
 }
 
-export interface EscalateDeps {
-  issues: IssueGateway;
+/** W1-T5283: `G` is {@link AsyncIssueGateway} for {@link escalateAsync}, which awaits each call. */
+export interface EscalateDeps<G extends AsyncIssueGateway = IssueGateway> {
+  issues: G;
   ledgerPath: string;
   runId: string;
   /** OPTIONAL (W1-T2494) — path to the JSONL thread store {@link appendThreadMessage} writes to.
@@ -1090,11 +1100,11 @@ export type DedupLookup =
  *  Used ONLY by {@link escalate}/{@link escalateWithJudge}, the one caller that turns "no match" into
  *  CREATING a new issue; every other reader of the dedup search (the pre-strike probe) keeps calling
  *  {@link findDuplicateEscalation} itself, unchanged. */
-function lookupDuplicateEscalation(e: EscalationDedupKey, deps: Pick<EscalateDeps, "issues">): DedupLookup {
+function* lookupDuplicateEscalation(e: EscalationDedupKey, deps: Pick<EscalateDeps<AsyncIssueGateway>, "issues">): Steps<DedupLookup> {
   if (!deps.issues.listOpen) return { kind: "none", open: [] };
   let open: OpenIssue[];
   try {
-    open = deps.issues.listOpen(NEEDS_HUMAN_LABEL);
+    open = yield* step(() => deps.issues.listOpen!(NEEDS_HUMAN_LABEL));
   } catch (error) {
     return { kind: "unreadable", error };
   }
@@ -1107,7 +1117,7 @@ function lookupDuplicateEscalation(e: EscalationDedupKey, deps: Pick<EscalateDep
  *  URL — none was opened) so {@link escalate}/{@link escalateWithJudge} keep their `string` return
  *  type; every caller only logs/interpolates it, and the ledger row (not the return value) is the
  *  durable record a human or the next tick reads. */
-function recordUnreadableDedup(e: Escalation, error: unknown, deps: EscalateDeps): string {
+function recordUnreadableDedup(e: Escalation, error: unknown, deps: Pick<EscalateDeps, "ledgerPath" | "runId">): string {
   appendLedger(deps.ledgerPath, {
     run_id: deps.runId,
     task_id: e.taskId,
@@ -1120,16 +1130,18 @@ function recordUnreadableDedup(e: Escalation, error: unknown, deps: EscalateDeps
 
 /** Append the dedup comment and the `escalation.deduped` ledger line for an already-found duplicate —
  *  extracted so {@link escalateWithJudge} shares it exactly, never a second `listOpen` read. */
-function recordDuplicateEscalation(e: Escalation, dup: OpenIssue, deps: EscalateDeps): string {
+function* recordDuplicateEscalation(e: Escalation, dup: OpenIssue, deps: EscalateDeps<AsyncIssueGateway>): Steps<string> {
   const prRef = extractPrRef(`${e.summary}\n${e.detail}`);
   const observedHead = e.headDedup === "independent" && e.headSha ? `, observed head ${e.headSha}` : "";
   const observedKey = prRef
     ? `task ${e.taskId}, PR #${prRef}${observedHead}`
     : `task ${e.taskId}, class ${e.class}${e.cause ? `, cause ${e.cause}` : ""}`;
-  deps.issues.comment?.(
-    dup.url,
-    `Another escalation observed the same condition (${observedKey}) while this issue ` +
-      `was already open — appending rather than opening a sibling (W1-T104/W1-T345).\n\n${renderIssueBody(e)}`,
+  yield* step(() =>
+    deps.issues.comment?.(
+      dup.url,
+      `Another escalation observed the same condition (${observedKey}) while this issue ` +
+        `was already open — appending rather than opening a sibling (W1-T104/W1-T345).\n\n${renderIssueBody(e)}`,
+    ),
   );
   appendLedger(deps.ledgerPath, {
     run_id: deps.runId,
@@ -1160,7 +1172,7 @@ function issueRefFromUrl(url: string): string {
  * "./escalation-catalogue.js".escalateStarvationCleared}: a close failure leaves that one issue
  * open and costs a ledger row, never a throw into the caller.
  */
-function closeSupersededEscalations(e: Escalation, prRef: string, open: OpenIssue[], newIssueUrl: string, deps: EscalateDeps): void {
+function* closeSupersededEscalations(e: Escalation, prRef: string, open: OpenIssue[], newIssueUrl: string, deps: EscalateDeps<AsyncIssueGateway>): Steps<void> {
   if (!e.headSha) return;
   const newIssueRef = issueRefFromUrl(newIssueUrl);
   for (const issue of open) {
@@ -1179,7 +1191,7 @@ function closeSupersededEscalations(e: Escalation, prRef: string, open: OpenIssu
       failure = "issue gateway cannot close issues";
     } else {
       try {
-        deps.issues.closeWithComment(issue.url, comment);
+        yield* step(() => deps.issues.closeWithComment!(issue.url, comment));
         delivered = true;
       } catch (err) {
         // CANNOT-OBSERVE MEANS WAIT: never rethrown — the ledger row below carries this as `failure`.
@@ -1207,9 +1219,9 @@ function closeSupersededEscalations(e: Escalation, prRef: string, open: OpenIssu
  *  (sweep.ts) is the only thing the reconciler filters open issues on, so a queue-label-less issue is
  *  invisible to it forever. A repo where the label genuinely cannot be attached fails `create()`: a
  *  visible, retriable failure, never a permanently un-retirable issue. Why: docs/forensics/escalate.md. */
-function createEscalationIssue(
+function* createEscalationIssue(
   e: Escalation,
-  deps: EscalateDeps,
+  deps: EscalateDeps<AsyncIssueGateway>,
   opts: {
     queueLabel: string;
     step: string;
@@ -1217,14 +1229,14 @@ function createEscalationIssue(
     extra?: Record<string, unknown>;
     messageCheck?: OperatorMessageCheckResult;
   },
-): string {
+): Steps<string> {
   const title = `[${e.class}] ${e.taskId}: ${e.summary}`;
-  deps.issues.ensureLabel?.(opts.queueLabel);
+  yield* step(() => deps.issues.ensureLabel?.(opts.queueLabel));
   const wanted = [CLASS_LABEL[e.class], ASK_TYPE_LABEL[classifyAsk(e)]];
   const labels: string[] = [opts.queueLabel];
   const degradedLabels: string[] = [];
   for (const label of wanted) {
-    if (!deps.issues.ensureLabel || deps.issues.ensureLabel(label)) {
+    if (!deps.issues.ensureLabel || (yield* step(() => deps.issues.ensureLabel!(label)))) {
       labels.push(label);
     } else {
       degradedLabels.push(label);
@@ -1240,11 +1252,12 @@ function createEscalationIssue(
   // purely additive, so detail, summary and recommendation render exactly as the caller wrote them.
   const messageFooter = opts.messageCheck ? operatorMessageFooter(opts.messageCheck) : undefined;
   if (messageFooter) body += `\n\n${messageFooter}`;
-  const url = deps.issues.create(title, body, labels);
-  if (opts.firstComment) {
+  const url = yield* step(() => deps.issues.create(title, body, labels));
+  const firstComment = opts.firstComment;
+  if (firstComment) {
     // W1-T349 design clause (ii): a demoted item's judge reason rides as the FIRST comment —
     // posted immediately after create(), before anything else can land on the issue.
-    deps.issues.comment?.(url, opts.firstComment);
+    yield* step(() => deps.issues.comment?.(url, firstComment));
   }
   appendLedger(deps.ledgerPath, {
     run_id: deps.runId,
@@ -1287,7 +1300,7 @@ function refuseUnlessResolvable(e: Escalation): Escalation {
  *  concern, which is the "appends rather than starting a new thread" case. BEST-EFFORT, like the dedup
  *  read: an unset `threadStorePath` is a silent no-op and a throwing write is swallowed, so "an
  *  escalation that never reaches the console behaves exactly as it does today" stays literal. */
-function recordThreadMessage(e: Escalation, deps: EscalateDeps): void {
+function recordThreadMessage(e: Escalation, deps: Pick<EscalateDeps, "threadStorePath">): void {
   if (!deps.threadStorePath) return;
   try {
     appendThreadMessage(
@@ -1317,24 +1330,35 @@ function recordThreadMessage(e: Escalation, deps: EscalateDeps): void {
  * length of the outage. Why: docs/forensics/escalate.md.
  */
 export function escalate(e: Escalation, deps: EscalateDeps): string {
+  return runStepsSync(escalateSteps(e, deps));
+}
+
+/** W1-T5283 — {@link escalate} with every gateway call awaited, for the main-health rung on the
+ *  daemon loop. The SAME steps under the async driver, so it opens, dedupes, supersedes and ledgers
+ *  exactly what the sync form does. */
+export function escalateAsync(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>): Promise<string> {
+  return runStepsAsync(escalateSteps(e, deps));
+}
+
+function* escalateSteps(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>): Steps<string> {
   if (e.options.length === 0) {
     throw new Error(`escalation for ${e.taskId} has no options — every escalation needs an actionable choice`);
   }
   validateEscalationOptionKinds(e);
   const resolved = withExplicitConsequence(refuseUnlessResolvable(e));
   recordThreadMessage(resolved, deps);
-  const dedup = lookupDuplicateEscalation(resolved, deps);
-  if (dedup.kind === "found") return recordDuplicateEscalation(resolved, dedup.issue, deps);
+  const dedup = yield* lookupDuplicateEscalation(resolved, deps);
+  if (dedup.kind === "found") return yield* recordDuplicateEscalation(resolved, dedup.issue, deps);
   if (dedup.kind === "unreadable") return recordUnreadableDedup(resolved, dedup.error, deps);
   const messageCheck = checkOperatorMessageSafe(resolved);
-  const url = createEscalationIssue(resolved, deps, {
+  const url = yield* createEscalationIssue(resolved, deps, {
     queueLabel: NEEDS_HUMAN_LABEL,
     step: "escalation.issue_opened",
     messageCheck,
   });
   // W1-T4659: a new issue for a NEW head retires whichever older-head issue(s) it just superseded.
   const prRef = extractPrRef(`${resolved.summary}\n${resolved.detail}`);
-  if (prRef) closeSupersededEscalations(resolved, prRef, dedup.open, url, deps);
+  if (prRef) yield* closeSupersededEscalations(resolved, prRef, dedup.open, url, deps);
   return url;
 }
 
@@ -1355,8 +1379,8 @@ export async function escalateWithJudge(
   validateEscalationOptionKinds(e);
   const resolved = withExplicitConsequence(refuseUnlessResolvable(e));
   recordThreadMessage(resolved, deps);
-  const dedup = lookupDuplicateEscalation(resolved, deps);
-  if (dedup.kind === "found") return recordDuplicateEscalation(resolved, dedup.issue, deps);
+  const dedup = runStepsSync(lookupDuplicateEscalation(resolved, deps));
+  if (dedup.kind === "found") return runStepsSync(recordDuplicateEscalation(resolved, dedup.issue, deps));
   if (dedup.kind === "unreadable") return recordUnreadableDedup(resolved, dedup.error, deps);
 
   const verdict = await judgeEscalation(resolved, deps);
@@ -1370,7 +1394,7 @@ export async function escalateWithJudge(
     judge_reason: verdict.reason,
   });
   const messageCheck = checkOperatorMessageSafe(resolved);
-  const url =
+  const url = runStepsSync(
     verdict.decision === "demote"
       ? createEscalationIssue(resolved, deps, {
           queueLabel: FLEET_NOTICE_LABEL,
@@ -1383,10 +1407,11 @@ export async function escalateWithJudge(
           queueLabel: NEEDS_HUMAN_LABEL,
           step: "escalation.issue_opened",
           messageCheck,
-        });
+        }),
+  );
   // W1-T4659: same supersede as escalate() above — either branch just opened a genuinely new issue.
   const prRef = extractPrRef(`${resolved.summary}\n${resolved.detail}`);
-  if (prRef) closeSupersededEscalations(resolved, prRef, dedup.open, url, deps);
+  if (prRef) runStepsSync(closeSupersededEscalations(resolved, prRef, dedup.open, url, deps));
   return url;
 }
 
@@ -1403,8 +1428,18 @@ export async function escalateWithJudge(
  *  "create() itself failed", not as a phantom successful delivery. */
 // Why: the 2026-07-21 daemon boot loop this wrapper ended (W1-T197's sibling) — docs/forensics/escalate.md.
 export function tryEscalate(e: Escalation, deps: EscalateDeps): string | null {
+  return runStepsSync(tryEscalateSteps(e, deps));
+}
+
+/** W1-T5283 — {@link tryEscalate} over {@link escalateAsync}: never rejects, and ledgers the same
+ *  `escalation.failed` row for a failure. */
+export function tryEscalateAsync(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>): Promise<string | null> {
+  return runStepsAsync(tryEscalateSteps(e, deps));
+}
+
+function* tryEscalateSteps(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>): Steps<string | null> {
   try {
-    return escalate(e, deps) || null;
+    return (yield* escalateSteps(e, deps)) || null;
   } catch (err) {
     appendLedger(deps.ledgerPath, {
       run_id: deps.runId,
@@ -1442,52 +1477,85 @@ export function ghIssueGateway(
   repo: string,
   opts: { exec?: (args: string[]) => string } = {},
 ): IssueGateway {
-  const repoArg = `${owner}/${repo}`;
   const run =
     opts.exec ??
     ((args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  return issueGatewaySteps(`${owner}/${repo}`, run, runStepsSync) as IssueGateway;
+}
+
+/** W1-T5283 — {@link ghIssueGateway} for the main-health rung on the daemon loop: the same argv and
+ *  failure classification, each `gh` child awaited on {@link ghTextAsync}. */
+export function ghIssueGatewayAsync(
+  owner: string,
+  repo: string,
+  opts: { exec?: (args: string[]) => Promise<string> } = {},
+): AsyncIssueGateway {
+  return issueGatewaySteps(`${owner}/${repo}`, opts.exec ?? ((args: string[]) => ghTextAsync(args)), runStepsAsync);
+}
+
+function issueGatewaySteps(
+  repoArg: string,
+  run: (args: string[]) => string | Promise<string>,
+  drive: (steps: Steps<unknown>) => unknown,
+): AsyncIssueGateway {
+  const gh = (args: string[]) => step(() => run(args));
   return {
-    ensureLabel(label) {
-      try {
-        run(["label", "create", label, "--repo", repoArg, "--color", "ededed", "--force"]);
-        return true;
-      } catch {
-        return false;
-      }
-    },
-    create(title, body, labels) {
-      assertLiveWriteAllowed("gh-issue-create", `filing an issue on ${repoArg}`);
-      const args = ["issue", "create", "--repo", repoArg, "--title", title, "--body", body];
-      for (const label of labels) args.push("--label", label);
-      return run(args).trim();
-    },
-    listOpen(label) {
-      // OPEN issues only, with body (carries `**Task:** <id>`). Read over REST's `/issues`, NOT
-      // `gh issue list --label`: that routes label filtering through GitHub's GraphQL `search()`
-      // connection, throttled account-wide here; `ghJson(` cannot parse this bare `--paginate` shape. THROWS
-      // on a `gh` failure — the caller degrades to no action this cycle, never "zero open".
-      return parseLabelledIssuesRest(run(labelledIssuesRestArgs(repoArg, label, "open")));
-    },
-    closeWithComment(url, comment) {
-      try {
-        run(["issue", "close", url, "--repo", repoArg, "--comment", comment]);
-        return "commented";
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        const cap1 = "Commenting is disabled on issues with more than 2500 comments";
-        const cap2 = "Commenting is disabled on issues with more than 2500 comments.";
-        if (msg.includes(cap1) || msg.includes(cap2)) {
-          // GitHub rejects closing with a citation comment when the cap is reached; close without a comment
-          run(["issue", "close", url, "--repo", repoArg]);
-          return "comment_cap";
-        }
-        throw err;
-      }
-    },
-    comment(url, body) {
-      run(["issue", "comment", url, "--repo", repoArg, "--body", body]);
-    },
-  };
+    ensureLabel: (label) =>
+      drive(
+        (function* () {
+          try {
+            yield* gh(["label", "create", label, "--repo", repoArg, "--color", "ededed", "--force"]);
+            return true;
+          } catch {
+            return false;
+          }
+        })(),
+      ),
+    create: (title, body, labels) =>
+      drive(
+        (function* () {
+          assertLiveWriteAllowed("gh-issue-create", `filing an issue on ${repoArg}`);
+          const args = ["issue", "create", "--repo", repoArg, "--title", title, "--body", body];
+          for (const label of labels) args.push("--label", label);
+          return (yield* gh(args)).trim();
+        })(),
+      ),
+    // OPEN issues only, with body (carries `**Task:** <id>`). Read over REST's `/issues`, NOT
+    // `gh issue list --label`: that routes label filtering through GitHub's GraphQL `search()`
+    // connection, throttled account-wide here; `ghJson(` cannot parse this bare `--paginate` shape. THROWS
+    // on a `gh` failure — the caller degrades to no action this cycle, never "zero open".
+    listOpen: (label) =>
+      drive(
+        (function* () {
+          return parseLabelledIssuesRest(yield* gh(labelledIssuesRestArgs(repoArg, label, "open")));
+        })(),
+      ),
+    closeWithComment: (url, comment) =>
+      drive(
+        (function* () {
+          try {
+            yield* gh(["issue", "close", url, "--repo", repoArg, "--comment", comment]);
+            return "commented";
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            const cap1 = "Commenting is disabled on issues with more than 2500 comments";
+            const cap2 = "Commenting is disabled on issues with more than 2500 comments.";
+            if (msg.includes(cap1) || msg.includes(cap2)) {
+              // GitHub rejects closing with a citation comment when the cap is reached; close without a comment
+              yield* gh(["issue", "close", url, "--repo", repoArg]);
+              return "comment_cap";
+            }
+            throw err;
+          }
+        })(),
+      ),
+    comment: (url, body) =>
+      drive(
+        (function* () {
+          yield* gh(["issue", "comment", url, "--repo", repoArg, "--body", body]);
+        })(),
+      ),
+  } as AsyncIssueGateway;
 }
 
 // ── W1-T2696: signed, single-use answer links ────────────────────────────────
