@@ -271,3 +271,18 @@ test("W1-T5539: an invalid reserved id fails rendering without writing or claimi
   assert.equal(existsSync(join(f.repo.dir, "plan/tasks.d")), false);
   assert.equal(f.rows.some((r) => r.step === "gate_garden.defuse_filed"), false);
 });
+
+test("W1-T5539: the defuse proof matches its own title under the executor's grep when the path holds a backslash", async () => {
+  const f = await fixture();
+  const action = gateGardenSpec(f.deps, f.probes, f.sources).inventory().candidates.find((a) => a.class === "defuse")!;
+  assert.equal(action.edit.kind, "defuse");
+  if (action.edit.kind === "defuse") action.edit.finding.file = "test/a\\d[1]*.test.ts";
+  const task = loadPlanFromYaml(renderDefuseShard(action, "W1-T6013").text, "backslash").tasks[0]!;
+  const pattern = /^grep: (.*) in test\/a\\d\[1\]\*\.test\.ts$/.exec(task.acceptance![0]!.proof!)?.[1];
+  assert.ok(pattern, task.acceptance![0]!.proof);
+  const target = join(f.repo.dir, "proof-target.txt");
+  writeFileSync(target, `test("W1-T6013: test/a\\d[1]*.test.ts stays defused across 2026-10-18T00:00:00.000Z", () => {});\n`);
+  assert.match(execFileSync("grep", ["-arn", "--", pattern, target], { encoding: "utf8" }), /^1:/);
+  writeFileSync(target, `test("W1-T6013: test/ad[1]*.test.ts stays defused across 2026-10-18T00:00:00.000Z", () => {});\n`);
+  assert.throws(() => execFileSync("grep", ["-arn", "--", pattern, target], { encoding: "utf8", stdio: "pipe" }));
+});

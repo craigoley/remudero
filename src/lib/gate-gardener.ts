@@ -134,6 +134,12 @@ function defuseEvidence(f: ExpiringFixture, leadDays: number): Record<string, un
   return { file: f.file, line: f.line, crossingDate: fixedClock(f.expiresAt).iso(), leadDays };
 }
 
+/** `s` as a BRE matching itself under the executor's `grep -arn`: one pass over a class holding the
+ *  backslash, so an escape this adds is never itself re-escaped and a `\` in a path stays literal. */
+function breLiteral(s: string): string {
+  return s.replace(/[\\.*[^$]/g, "\\$&");
+}
+
 export function renderDefuseShard(action: GateGardenAction, taskId: string) {
   if (action.edit.kind !== "defuse") throw new Error("gate gardener: mixed defuse plan");
   const { finding: f, leadDays, urgent } = action.edit;
@@ -143,7 +149,7 @@ export function renderDefuseShard(action: GateGardenAction, taskId: string) {
     taskId, title: `Defuse the expiring fixture in ${f.file} before ${crossing}`, origin: action.target,
     files: [f.file], cost: 1, costPopulation: urgent ? [0, 1] : [1],
     acceptance: [{ claim: `The census reports no crossing for ${f.file} with now past ${crossing}, and the test remains green across the crossing.`,
-      proof: `grep: test("${title.replace(/\./g, "\\.")}" in ${f.file}` }],
+      proof: `grep: test("${breLiteral(title)}" in ${f.file}` }],
     rationale: [
       `${f.file}:${f.line}: ${f.field} is stamped ${f.stamp}; ${f.threshold} crosses on ${crossing}.`,
       `Found ${f.daysLeft} days before crossing using a ${leadDays}-day lead horizon.`,
