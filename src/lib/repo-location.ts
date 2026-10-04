@@ -27,8 +27,7 @@
  * exactly that edge.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveOwnerRepoAt } from "./owner-repo.js";
 
