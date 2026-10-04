@@ -815,7 +815,7 @@ if [ -n "$PREV_EPOCH" ]; then SINCE_PREV_S="$((NOW_EPOCH - PREV_EPOCH))"; fi
 # W1-T5319: read the refresh receipt without requiring node or jq on a damaged host.
 acr_login_field() {
   printf '%s\n' "$ACR_LOGIN_RECEIPT" |
-    sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\(\([^\"\\\\]\|\\\\.\)*\)\".*/\1/p" |
+    sed -nE "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"(([^\"\\\\]|\\\\.)*)\".*/\1/p" |
     awk '{
       for (i = 1; i <= length($0); i++) {
         c = substr($0, i, 1)
