@@ -259,6 +259,43 @@ test("E5: two distinct activity events in the same millisecond each ledger their
   assert.equal(activity[2]?.tool_name, "Read", "the first heartbeat closes the tool and differs from the bare one after it");
 });
 
+for (const event of [
+  { kind: "working", turnsSoFar: 1 },
+  { kind: "working", text: "reading the file", turnsSoFar: 1 },
+  { kind: "tool-executing", toolName: "Read", turnsSoFar: 1 },
+  { kind: "message", text: "progress" },
+  { kind: "message", toolOutcome: "success" },
+  { kind: "message", toolName: "Read" },
+] satisfies Omit<WorkerStreamEvent, "tsMs">[]) {
+  test(`E5: repeated non-heartbeat activity is preserved (${JSON.stringify(event)})`, () => {
+    const root = tmpRoot("worker-activity-repeat");
+    const ledgerPath = ledgerPathFor(fakeConfig(root));
+    const sensor = buildWorkerStateSensor({ ledgerPath, runId: "run-repeat", taskId: "task-repeat", root });
+    for (let i = 0; i < 3; i++) sensor.observer({ ...event, tsMs: 8_000 });
+    const rows = readLedgerLines(ledgerPath);
+    const activity = rows.filter((line) => line.step === WORKER_ACTIVITY_LEDGER_STEP);
+    assert.equal(activity.length, 3);
+    assert.deepEqual(activity.map((line) => line.event_kind), [event.kind, event.kind, event.kind]);
+    assert.deepEqual(activity.map((line) => line.turns_so_far), [event.turnsSoFar, event.turnsSoFar, event.turnsSoFar]);
+    assert.equal(rows.filter((line) => line.step === WORKER_STATE_LEDGER_STEP).length, event.kind === "message" ? 0 : 1);
+  });
+}
+
+test("E5: heartbeat deduplication preserves new counts and resumes after meaningful activity", () => {
+  const root = tmpRoot("worker-heartbeat-counts");
+  const ledgerPath = ledgerPathFor(fakeConfig(root));
+  const sensor = buildWorkerStateSensor({ ledgerPath, runId: "run-counts", taskId: "task-counts", root });
+  sensor.observer({ kind: "message", tsMs: 9_000, turnsSoFar: 1 });
+  sensor.observer({ kind: "message", tsMs: 9_000, turnsSoFar: 1 });
+  sensor.observer({ kind: "message", tsMs: 9_000, turnsSoFar: 2 });
+  sensor.observer({ kind: "message", tsMs: 9_000, turnsSoFar: 2, text: "progress" });
+  sensor.observer({ kind: "message", tsMs: 9_000, turnsSoFar: 2 });
+  sensor.observer({ kind: "message", tsMs: 9_000, turnsSoFar: 2 });
+  const activity = readLedgerLines(ledgerPath).filter((line) => line.step === WORKER_ACTIVITY_LEDGER_STEP);
+  assert.deepEqual(activity.map((line) => line.turns_so_far), [1, 2, 2, 2]);
+  assert.equal(readFileSync(join(root, "state", "runs", "run-counts.tail"), "utf8").trim(), "progress");
+});
+
 // ── acceptance 3: no row / observer never fired ⇒ UNKNOWN, never `working` (W1-T130) ────────
 
 test("a fresh WorkerStateTracker with no observed event ever reads UNKNOWN (undefined) — never defaulted to working, and check() never fires quiet before anything was observed", () => {

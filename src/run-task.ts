@@ -2985,9 +2985,10 @@ export function buildWorkerStateSensor(args: {
       };
       // E5: a same-millisecond burst of bare heartbeats renders byte-identical rows; ledger one.
       const activityKey = JSON.stringify(activityRow);
-      if (activityKey !== lastActivityKey) {
+      const isBareHeartbeat = event.kind === "message" && !event.text && !event.toolName && !event.toolOutcome && !toolEnded;
+      if (!isBareHeartbeat || activityKey !== lastActivityKey) {
         appendLedger(args.ledgerPath, activityRow);
-        lastActivityKey = activityKey;
+        lastActivityKey = isBareHeartbeat ? activityKey : undefined;
       }
     } catch {
       // Best-effort: telemetry must never be able to take down the worker it observes.
