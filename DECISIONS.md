@@ -3554,6 +3554,8 @@ Status: accepted
 
 ## 2026-10-02 — Sol 6.1 replaces Sol 6 as the router lead
 
+Status: accepted
+
 Operator-authored: Craig requested Sol 6.1 routing, switch data for Field Trials, and Azure cash deployment.
 
 Operator authorized the subscription switch, Field Trials capture and Azure cash deployment.
@@ -3573,6 +3575,8 @@ before every turn and account for cache writes and whole-request long-context pr
 through a reviewed mounts change; never rewrite prior ledger records or experiment epochs.
 
 ## 2026-10-02 — Review the Sol 6.1 switch daily
+
+Status: accepted
 
 Operator-authored: Craig asked to review daily instead of waiting until October 16.
 
