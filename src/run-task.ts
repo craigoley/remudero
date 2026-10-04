@@ -33753,6 +33753,9 @@ export function loadDaemonPlan(
 }
 
 const ORIGIN_MAIN_LABEL = "origin/main:";
+/** The required acceptance-author-gate refuses a trailerless body with no block (#9005); this test fails while main holds a duplicate. */
+const SHARD_REPAIR_ACCEPTANCE =
+  "## Acceptance\n- no plan shard on main carries a duplicate key after this repair | unit test: no plan shard on main carries a duplicate key";
 type ShardRepairLog = (step: string, extra?: Record<string, unknown>) => void;
 
 /** W1-T5519 — the duplicate-key repair lane's state: `requests/` the loop writes, `opened.json` the plan garden's child writes. */
@@ -33837,7 +33840,7 @@ function repairRequestedShard(
       `The daemon quarantined \`${rel}\` (blob ${blob}): it fails to parse on a duplicated \`${keys}\` key, the merge race ` +
       `#8877 and #8922 repaired by hand. This keeps ${Object.entries(verdict.kept).map(([k, v]) => `\`${k}: ${v}\``).join(", ")}, the value ` +
       `the record's risk_ruling pin covers, and drops the other line and any backlog-gardener marker it carried.\n\n` +
-      `Opened by the duplicate-key repair lane (W1-T5519).`,
+      `Opened by the duplicate-key repair lane (W1-T5519).\n\n${SHARD_REPAIR_ACCEPTANCE}`,
   };
   let prUrl: string | undefined;
   try {
