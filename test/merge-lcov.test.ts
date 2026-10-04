@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, opendirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, opendirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -140,6 +140,7 @@ function runBoundedCompactor(output: string, maxChunkBytes: number, ...rawDirect
 
 /** A small real, source-mapped V8 profile keeps chunk/order controls independent of TSX's corpus. */
 function realMappedProfile(root: string): { result: Array<{ scriptId: string; url: string }>; 'source-map-cache': Record<string, unknown> } {
+  root = realpathSync(root);
   const probe = join(root, 'probe.cjs');
   const original = join(root, 'original.cjs');
   const lines = Array.from({ length: 64 }, (_, index) => `exports.f${index} = side => side ? ${index} : -${index + 1};`);
