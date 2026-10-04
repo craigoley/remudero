@@ -137,6 +137,7 @@ import { buildRepoDashboardRoutes } from "./repo-dashboard-route.js";
 import { buildTaskCardRoute } from "./task-card.js";
 import { buildAddOperatorNoteRoute, buildListOperatorNotesRoute } from "./operator-notes.js";
 import { buildRecordJudgeLabelRoute, fileJudgeLabelStore } from "./judge-calibration.js";
+import { createOperatorAgentRowsSource } from "./operator-agent-read-model.js";
 import { buildOperatorAgentRoutes, createOperatorAgentMemorySource, prewarmOperatorAgentReads, type OperatorAgentMemorySource } from "./operator-agent.js";
 import { buildContextControlsRoutes } from "./context-controls.js";
 import { createLastSeenStore, lastSeenPath, type LastSeenStore } from "./last-seen.js";
@@ -2734,6 +2735,7 @@ function assembleServeRoutes(
     ledgerPath: deps.ledgerPath,
     root: deps.fleetControlRoot,
     ...(operatorAgentMemory ? { memory: operatorAgentMemory } : {}),
+    ...(readModel ? { panelRows: createOperatorAgentRowsSource(readModel, { instance: deps.instances?.coreInstance ?? CORE_INSTANCE }) } : {}),
     goalBoard: () => {
       const state = deps.boardSnapshotSource?.current();
       if (state?.state === "unavailable") return undefined;

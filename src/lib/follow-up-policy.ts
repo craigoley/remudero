@@ -353,6 +353,12 @@ export function createFollowUpHistoryReader(): (ledgerPath: string, now?: number
     foldFollowUpHistory((await readLedgerUnionRecordsMemoized(dirname(ledgerPath), memo, { step: [...FOLLOW_UP_STEPS] })).rows, now);
 }
 
+/** The follow-up history folded from rows already in memory (E17: the read model's `panel.*` rows). */
+export function followUpHistoryFromRows(rows: ReadonlyArray<Record<string, unknown>>, now: number): FollowUpHistory[] {
+  const steps = new Set<string>(FOLLOW_UP_STEPS);
+  return foldFollowUpHistory(rows.filter((row) => typeof row.step === "string" && steps.has(row.step)), now);
+}
+
 function foldFollowUpHistory(rows: ReadonlyArray<Record<string, unknown>>, now: number): FollowUpHistory[] {
   const candidates = new Map<string, FollowUpCandidate>();
   const events = new Map<string, FollowUpEvent[]>();
