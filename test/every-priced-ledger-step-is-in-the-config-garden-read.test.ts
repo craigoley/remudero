@@ -92,6 +92,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "feedback.landing_sweep": A_LANE_RUN_ID,
   "machine_judge.landed": A_LANE_RUN_ID,
   "machine_judge.waiting": A_LANE_RUN_ID,
+  "machine_judge.withdrawn": A_LANE_RUN_ID,
   "selector-shadow.miss_filed": A_LANE_RUN_ID,
   "selector-shadow.structural_filed": A_LANE_RUN_ID,
   "plan.shard_repair_opened": A_LANE_RUN_ID,
