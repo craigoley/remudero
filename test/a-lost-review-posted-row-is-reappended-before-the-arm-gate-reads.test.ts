@@ -8,7 +8,9 @@ import type { Config } from "../src/lib/config.js";
 import { appendLedger } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import type { WorkerResult } from "../src/lib/worker.js";
-import { reappendLostReviewPosted, runReview } from "../src/run-task.js";
+// A namespace import, so this file still LOADS at the merge base (where the helper does not exist)
+// and its tests fail there as tests, which is what lets the reviewer see them discriminate.
+import * as runTask from "../src/run-task.js";
 import { ghShim } from "./helpers/gh-shim.js";
 
 // W1-T5516. PR #8887's `review.posted` row was lost to a ledger rotation race on 2026-10-03
@@ -78,7 +80,7 @@ async function driveReview(opts: { dropFirstPosted: boolean; runId: string }): P
     say: (msg) => void said.push(msg),
   };
   try {
-    await runReview({
+    await runTask.runReview({
       owner: "acme",
       repo: "remudero",
       prUrl: PR_URL,
@@ -172,7 +174,7 @@ const ROW = { state: "success", head_sha: HEAD_SHA, review_decision_digest: "sha
 function recheck(lines: Array<Record<string, unknown>> | Error) {
   const logged: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const said: string[] = [];
-  const outcome = reappendLostReviewPosted(
+  const outcome = runTask.reappendLostReviewPosted(
     {
       ledgerPath: "/nonexistent/ledger.ndjson",
       runId: "RUN-A",
