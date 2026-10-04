@@ -63,7 +63,10 @@ test("renderSkillDraft: a candidate with two or more supporting runs drafts a SK
   assert.match(draft!.markdown, /^applies-to: implement$/m);
   assert.match(draft!.name, /^implement-clean-single-strike/);
   assert.match(draft!.markdown, /## Procedure/);
-  assert.match(draft!.markdown, /Resolve the task on the first attempt/);
+  // W1-T4270 design (iii): a mixed candidate drafts ONLY its eligible signal's step —
+  // clean_single_strike names the merge outcome, not a technique, so its step is dropped.
+  assert.match(draft!.markdown, /Execute every acceptance criterion as a real, observed proof/);
+  assert.doesNotMatch(draft!.markdown, /Resolve the task on the first attempt/);
   assert.match(draft!.markdown, /## Evidence/);
   assert.match(draft!.markdown, /\[src: run#P1\]/);
   assert.match(draft!.markdown, /\[src: run#P2\]/);
@@ -75,10 +78,12 @@ test("renderSkillDraft: a single-run candidate renders NOTHING — one success i
   assert.equal(renderSkillDraft(candidate({ supportingRuns: 1, runIds: ["P1"] })), undefined);
 });
 
-test("renderSkillDraft: an unmapped signal key still renders (Rule 2 — the signal set is DATA), using the raw key as its own step", () => {
-  const draft = renderSkillDraft(candidate({ shapeKey: "implement:novel_shape", signals: ["novel_shape"] }));
-  assert.ok(draft);
-  assert.match(draft!.markdown, /- novel_shape/);
+test("renderSkillDraft: an unmapped signal key drafts NOTHING (W1-T4270 — an uncatalogued signal is never promoted to an injectable skill)", () => {
+  assert.equal(renderSkillDraft(candidate({ shapeKey: "implement:novel_shape", signals: ["novel_shape"] })), undefined);
+  // Beside an eligible signal, the uncatalogued key is dropped from the steps, never rendered raw.
+  const mixed = renderSkillDraft(candidate({ shapeKey: "implement:fully_executed_proof+novel_shape", signals: ["fully_executed_proof", "novel_shape"] }));
+  assert.ok(mixed);
+  assert.doesNotMatch(mixed!.markdown, /- novel_shape/);
 });
 
 test("renderSkillDrafts renders 'none' when nothing cleared the floor, and names each draft otherwise", () => {
