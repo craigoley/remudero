@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { fixedClock } from "../src/lib/clock.js";
 import { projectHumanGates, projectPinReviewerGates } from "../src/lib/human-gate.js";
 import { createLedgerProjector, openProjectorReadModel } from "../src/lib/ledger-projector.js";
@@ -120,7 +120,7 @@ test("malformed pin observations retain uncertainty and instances keep separate 
   assert.deepEqual(other.gates.map((gate) => gate.key).sort(), ["pin_drift:site:autoTriage", `stale_reviewer:site:${OLD}`]);
 });
 
-test("production now view rereads pin and reviewer sources outside its fact selection", (t) => {
+function nowFixture(t: TestContext) {
   const root = makeTempDir("human-gate-pin-reviewer");
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const ledgerDir = join(root, "state");
@@ -152,6 +152,11 @@ test("production now view rereads pin and reviewer sources outside its fact sele
   const read = (): NowViewData => view.materialize({ now: NOW + sequence,
     switches: { views: { now: "serve" } }, instances: [{ db, state: { instance: "core",
       generation: Number(db.meta("generation")), lease: "held", failures: 0, tickedAt: NOW, newestTs: null } }] })[0]!.data;
+  return { ledgerDir, planDir, pinPath, projector, append, read };
+}
+
+test("production now view rereads pin and reviewer sources outside its fact selection", (t) => {
+  const { planDir, pinPath, append, read } = nowFixture(t);
   append(boot, refusal, ask);
   assert.deepEqual(read().humanGates!.gates.map((gate) => gate.kind).sort(), ["pin_drift", "stale_reviewer"]);
   const matching = buildRatificationRow(pin.rung, policy.autoTriage, "v2", "operator", new Date(AT));
@@ -168,4 +173,20 @@ test("production now view rereads pin and reviewer sources outside its fact sele
   writeFileSync(pinPath, renderRatificationRow(matching));
   writeFileSync(join(planDir, "policy.yaml"), "[broken yaml");
   assert.match(read().humanGates!.sources.find((source) => source.name === "ratification-pins")!.reason!, /cannot read current ratification source/);
+});
+
+test("a pin drift and reviewer ask that rotated out of the live ledger still reach the now view", (t) => {
+  const { ledgerDir, projector, append, read } = nowFixture(t);
+  const unrelated = row("task.note", { ts: AT, detail: "mentions review.stale_reviewer_needs_human in passing" });
+  writeFileSync(join(ledgerDir, "ledger.2026-10-04T11-59-59-999Z.ndjson"),
+    [boot, refusal, unrelated, ask].map((r) => JSON.stringify(r) + "\n").join(""));
+  writeFileSync(join(ledgerDir, "ledger.ndjson"), "");
+  projector.tick();
+  const rotated = read().humanGates!;
+  assert.deepEqual(rotated.gates.map((gate) => gate.kind).sort(), ["pin_drift", "stale_reviewer"]);
+  assert.equal(rotated.gates.find((gate) => gate.kind === "stale_reviewer")!.url, URL);
+  assert.deepEqual(rotated.sources.filter((source) => ["ratification-pins", "reviewer-freshness"].includes(source.name))
+    .map((source) => source.state), ["complete", "complete"]);
+  append(row("daemon.freshness_not_stale", { arm: "up_to_date" }));
+  assert.deepEqual(read().humanGates!.gates.map((gate) => gate.kind), ["pin_drift"]);
 });
