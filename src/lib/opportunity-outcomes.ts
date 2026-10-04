@@ -4,6 +4,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { codeqlSnapshot, reconcileCodeqlQualityProposals, type CodeqlFilingSnapshot } from "./codeql-quality-intake.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import type { GardenerDeps } from "./gardener.js";
+import type { GardenerOverseerPorts, productionGardenerOverseerPorts } from "./gardener-overseer.js";
 import { ghJson } from "./github-transport.js";
 import { loadProposalRegistry } from "./inbox.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
@@ -139,10 +140,10 @@ function matchingTasks(work: OpportunityWork, source: OpportunitySource) {
 }
 
 /** Re-read source and runtime receipts on the admitted intake cadence; never change policy. */
-export function productionOpportunityOutcomePorts(garden: GardenerDeps, deps: {
+export function productionOpportunityOutcomePorts(garden: GardenerDeps, deps: Partial<
+  Pick<GardenerOverseerPorts, "readRows"> & Pick<Parameters<typeof productionGardenerOverseerPorts>[0], "fetch">
+> & {
   intake?: OpportunityIntakePorts;
-  fetch?: (args: string[]) => unknown;
-  readRows?: () => Record<string, unknown>[];
 } = {}): OpportunityOutcomePorts {
   const intake = deps.intake ?? productionOpportunityIntakePorts(garden);
   const clock = garden.clock ?? systemClock;
