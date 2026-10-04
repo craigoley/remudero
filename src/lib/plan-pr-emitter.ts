@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { acceptanceBlockDiagnostics, parseAcceptanceBlock, parseWhitelistedProof } from "./review.js";
+import { acceptanceBlockDiagnostics, acceptanceHeaderLine, parseAcceptanceBlock, parseWhitelistedProof } from "./review.js";
 import { emDashSeparatedProof, refuseNonDiscriminatingCriteria } from "./body-repair.js";
 import {
   checkCommitMessage,
@@ -95,10 +95,6 @@ export function bodyNeedsAcceptanceRepair(body: string): boolean {
   return diagnostics.emptyProofs > 0;
 }
 
-/** Mirrors {@link "./review.js".parseAcceptanceBlock}'s header regex, to demote a defective header so the
- *  parser walks past it to the repaired block appended below — otherwise a broken block would still be the only one the parser reaches. */
-const ACCEPTANCE_HEADER_RE = /^(\s*#{0,6}\s*\**\s*acceptance(\s+criteria)?\b\s*\**\s*:?\s*\**\s*)$/i;
-
 /** The suffix that demotes a superseded header. Prose, not a marker — nothing parses it. */
 export const SUPERSEDED_HEADER_SUFFIX = " (superseded — unparseable, see the repaired block below)";
 
@@ -147,15 +143,12 @@ export function replaceAcceptanceBlock(body: string, fallbackCriteria: Acceptanc
   // something about this diff and the fallback says only that the body parses.
   const recovered = recoverableCriteria(body);
   const block = renderAcceptanceBlock(recovered.length > 0 ? recovered : fallbackCriteria);
-  // Demote only the first matching header; a body with no header is unaffected.
-  let demoted = false;
-  const lines = body.split("\n").map((line) => {
-    if (demoted) return line;
-    const m = ACCEPTANCE_HEADER_RE.exec(line);
-    if (!m) return line;
-    demoted = true;
-    return `${m[1].replace(/\s+$/, "")}${SUPERSEDED_HEADER_SUFFIX}`;
-  });
+  // Demote the header the parser reads, so it walks past it to the repaired block appended below —
+  // otherwise a broken block would still be the only one it reaches. THE SAME fence-aware walker
+  // (W1-T5621): a fenced example header is left as written; a body with no header is unaffected.
+  const lines = body.split("\n");
+  const header = acceptanceHeaderLine(lines);
+  if (header >= 0) lines[header] = `${lines[header].replace(/\s+$/, "")}${SUPERSEDED_HEADER_SUFFIX}`;
   const trimmed = lines.join("\n").replace(/\s*$/, "");
   return trimmed.length > 0 ? `${trimmed}\n\n${block}\n` : `${block}\n`;
 }
