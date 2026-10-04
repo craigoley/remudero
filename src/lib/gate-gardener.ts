@@ -42,6 +42,7 @@ export interface GateDefuseSources {
   leadDays?: number;
   openOrigins?: () => string[];
   mintTaskId?: (branch: string) => string;
+  admissionViolations?: typeof machineFilingAdmissionViolations;
   execFile?: (command: string, args: string[], options: { cwd: string; encoding: "utf8" }) => string;
 }
 
@@ -160,7 +161,7 @@ function applyDefuseActions(ws: GardenCheckout, actions: GateGardenAction[], dep
     const draft = renderDefuseShard(action, "NEW-1");
     if (draft.refused) throw new Error(`gate gardener: defuse shard refused (${draft.refused})`);
     const plan = loadPlanFromYaml(draft.text, "defuse-admission");
-    const reasons = machineFilingAdmissionViolations(plan.tasks[0]!, {
+    const reasons = (sources.admissionViolations ?? machineFilingAdmissionViolations)(plan.tasks[0]!, {
       plan, releasedIds: new Set(), pathExists: (path) => existsSync(join(deps.repoRoot, path)),
     });
     if (reasons.length) throw new Error(`gate gardener: defuse shard refused (machine-filing-admission: ${reasons.join("; ")})`);

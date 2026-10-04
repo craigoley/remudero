@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { fixedClock } from "../src/lib/clock.js";
-import { gateGardenSpec, loadGateProbes, renderDefuseShard } from "../src/lib/gate-gardener.js";
-import { runGarden } from "../src/lib/gardener.js";
+import { gateGardenSpec, loadGateProbes, renderDefuseShard, type GateDefuseSources } from "../src/lib/gate-gardener.js";
+import { runGarden, type GardenCheckout } from "../src/lib/gardener.js";
 import { loadPlanFromYaml } from "../src/lib/plan.js";
 import { lintPlanCommand } from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -151,4 +151,123 @@ test("W1-T5539: unreadable open filing evidence fails the pass rather than claim
   assert.throws(() => spec.inventory(), /open PRs unavailable/);
   assert.equal(f.minted(), 0);
   assert.equal(f.rows.length, 0);
+});
+
+async function filingFixture(sources: GateDefuseSources = {}) {
+  const f = await fixture();
+  const spec = gateGardenSpec(f.deps, f.probes, {
+    ...f.sources,
+    admissionViolations: (task, context) => {
+      assert.equal(task.origin, ORIGIN);
+      assert.equal(task.verify, "human");
+      assert.equal(context.plan.tasks[0], task);
+      assert.equal(context.releasedIds.size, 0);
+      assert.equal(context.pathExists!(FILE), true);
+      assert.equal(context.pathExists!("test/missing.test.ts"), false);
+      return [];
+    },
+    ...sources,
+  });
+  const action = spec.inventory().candidates.find((a) => a.class === "defuse")!;
+  const workspace: GardenCheckout = f.deps.openWorkspace();
+  const apply = () => spec.apply(workspace, { acting: ["defuse"], actions: [action] }, {});
+  return { ...f, workspace, action, apply };
+}
+
+test("W1-T5539: an admitted filing writes its reserved shard and logs only a landed remedy", async () => {
+  const f = await filingFixture();
+  const result = f.apply()!;
+  assert.equal(f.minted(), 1);
+  assert.deepEqual(result.paths, ["plan/tasks.d/W1-T6001-defuse-fixture.yaml"]);
+  const task = loadPlanFromYaml(readFileSync(join(f.repo.dir, result.paths[0]!), "utf8"), "filed").tasks[0]!;
+  assert.equal(task.id, "W1-T6001");
+  assert.equal(task.origin, ORIGIN);
+  assert.deepEqual(task.files, [FILE]);
+  assert.equal(task.author_class, "machine");
+  assert.match(result.title, /file 1 expiring fixture remedy task/);
+  assert.match(result.body, /proof: grep: expiring-fixture:test\/fixture.test.ts in plan\/tasks.d\/W1-T6001-defuse-fixture.yaml/);
+  assert.equal(f.rows.some((r) => r.step === "gate_garden.defuse_filed"), false);
+  assert.equal(f.workspace.land(result), "https://github.com/acme/remudero/pull/1");
+  assert.deepEqual(f.landed, [result]);
+  assert.deepEqual(f.rows.filter((r) => r.step === "gate_garden.defuse_filed").map((r) => r.extra), [{
+    file: FILE, line: 2, crossingDate: "2026-10-18T00:00:00.000Z", leadDays: 21,
+  }]);
+});
+
+test("W1-T5539: an unlanded or failed filing never logs a filed remedy", async () => {
+  for (const throws of [false, true]) {
+    const f = await filingFixture();
+    f.workspace.land = () => {
+      if (throws) throw new Error("landing failed");
+      return undefined;
+    };
+    const result = f.apply()!;
+    if (throws) assert.throws(() => f.workspace.land(result), /landing failed/);
+    else assert.equal(f.workspace.land(result), undefined);
+    assert.equal(f.rows.some((r) => r.step === "gate_garden.defuse_filed"), false);
+  }
+});
+
+test("W1-T5539: reservation output must contain a held id before writing a shard", async () => {
+  for (const output of ["RESERVED W1-T6010 on origin\n", "unreserved W1-T6010\n"]) {
+    let reservations = 0;
+    const f = await filingFixture({
+      mintTaskId: undefined,
+      execFile: (command, args, options) => {
+        if (command !== process.execPath) return execFileSync(command, args, options);
+        reservations++;
+        assert.deepEqual(args, ["--import", "tsx", join(options.cwd, "src/run-task.ts"), "next-task-id", "--reserve", "--branch", "run-unfiled-1791072000000"]);
+        return output;
+      },
+    });
+    if (output.startsWith("RESERVED")) {
+      assert.deepEqual(f.apply()!.paths, ["plan/tasks.d/W1-T6010-defuse-fixture.yaml"]);
+    } else {
+      assert.throws(f.apply, /task-id reservation returned no held id/);
+      assert.equal(existsSync(join(f.repo.dir, "plan/tasks.d")), false);
+    }
+    assert.equal(reservations, 1);
+    assert.equal(f.rows.some((r) => r.step === "gate_garden.defuse_filed"), false);
+  }
+});
+
+test("W1-T5539: the default reservation process runs in the operator checkout", async () => {
+  const f = await filingFixture({ mintTaskId: undefined });
+  symlinkSync(join(ROOT, "node_modules"), join(f.repo.dir, "node_modules"), "dir");
+  f.put("src/run-task.ts", `import assert from "node:assert/strict";
+assert.equal(process.cwd(), ${JSON.stringify(f.repo.dir)});
+assert.deepEqual(process.argv.slice(2), ["next-task-id", "--reserve", "--branch", "run-unfiled-1791072000000"]);
+process.stdout.write("RESERVED W1-T6011 on origin\\n");
+`);
+  assert.deepEqual(f.apply()!.paths, ["plan/tasks.d/W1-T6011-defuse-fixture.yaml"]);
+  const failing = await filingFixture({ mintTaskId: undefined });
+  symlinkSync(join(ROOT, "node_modules"), join(failing.repo.dir, "node_modules"), "dir");
+  failing.put("src/run-task.ts", 'throw new Error("reservation unavailable");\n');
+  assert.throws(failing.apply, /reservation unavailable/);
+  assert.equal(existsSync(join(failing.repo.dir, "plan/tasks.d")), false);
+  assert.equal(failing.rows.some((r) => r.step === "gate_garden.defuse_filed"), false);
+});
+
+test("W1-T5539: malformed filings and missing branches fail before reservation", async () => {
+  const branchless = await filingFixture();
+  Reflect.deleteProperty(branchless.workspace, "branch");
+  assert.throws(branchless.apply, /filing workspace has no branch/);
+  assert.equal(branchless.minted(), 0);
+  const mixed = await filingFixture();
+  mixed.action.edit = { kind: "row", key: "fixture", to: 1 };
+  assert.throws(mixed.apply, /mixed defuse plan/);
+  assert.equal(mixed.minted(), 0);
+  const invalid = await filingFixture();
+  assert.equal(invalid.action.edit.kind, "defuse");
+  if (invalid.action.edit.kind === "defuse") invalid.action.edit.finding.file = "test/fixture.test.ts\n    - [";
+  assert.throws(invalid.apply, /defuse shard refused/);
+  assert.equal(invalid.minted(), 0);
+  assert.equal(existsSync(join(invalid.repo.dir, "plan/tasks.d")), false);
+});
+
+test("W1-T5539: an invalid reserved id fails rendering without writing or claiming a filing", async () => {
+  const f = await filingFixture({ mintTaskId: () => "W1-T6012\n  title: [" });
+  assert.throws(f.apply, /defuse shard refused/);
+  assert.equal(existsSync(join(f.repo.dir, "plan/tasks.d")), false);
+  assert.equal(f.rows.some((r) => r.step === "gate_garden.defuse_filed"), false);
 });
