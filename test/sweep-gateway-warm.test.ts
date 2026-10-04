@@ -330,7 +330,9 @@ test("both deriving rungs share that ONE gateway — warming one while the other
   const hookStart = src.indexOf("export function buildSweepHook(");
   const body = src.slice(hookStart, src.indexOf("\n}\n", hookStart));
   assert.match(body, /buildCreditCandidates\(owner, repo, plan, ledgerPath, log, boardGithub\)/, "the credit-backfill rung takes the warm gateway");
-  assert.match(body, /sweepEscalationReconcile\(owner, repo, plan, ledgerPath, runId, log, \{ github: boardGithub \}\)/, "and so does the escalation reconciler");
+  // W1-T4075 threads the tick-read generation through the same options object; the invariant is
+  // that `github` is the warm gateway, not that it is the object's only key.
+  assert.match(body, /sweepEscalationReconcile\(owner, repo, plan, ledgerPath, runId, log, \{ github: boardGithub[,}]/, "and so does the escalation reconciler");
 });
 
 test("`rmd sweep` — a one-shot CLI pass with no second poll — still builds its own gateway, so the default path is unchanged", () => {

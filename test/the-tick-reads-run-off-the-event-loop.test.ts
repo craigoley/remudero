@@ -264,17 +264,20 @@ test("W1-T4075: daemon alive reports the loop delay of a block shorter than the 
       runOne: async (id) => {
         await delay(30);
         execFileSync(process.execPath, ["-e", "setTimeout(() => {}, 100)"]);
-        await delay(220);
+        await delay(440);
         merged = true;
         return { taskId: id, runId: id, merged: true, costUsd: 0, verdict: "merged" };
       },
       readLoopTelemetry: telemetry.sample, sweepLight: async () => {},
       sleep: async (ms) => { await delay(ms); },
       log: (step, extra) => rows.push({ step, extra }),
-    }, { max: 1, headroomEnabled: false, pollIntervalMs: 200 });
+    }, { max: 1, headroomEnabled: false, pollIntervalMs: 400 });
     const alive = rows.find((row) => row.step === "daemon.alive")!.extra!;
     assert.ok(Number(alive.loop_delay_max_ms) >= 80);
-    assert.ok(Number(alive.loop_delay_max_ms) < 200);
+    // The ~100ms block plus a child node's startup measured 126-197ms on a loaded 8-core host, so a
+    // 200ms interval left no margin; 400ms keeps the block shorter than the interval it is
+    // reported within (the property under test) without racing the host's spawn latency.
+    assert.ok(Number(alive.loop_delay_max_ms) < 400);
     assert.ok(Number(alive.loop_delay_p99_ms) >= 80);
     assert.ok(Number(alive.sync_spawn_ms) >= 80);
     await delay(20);
