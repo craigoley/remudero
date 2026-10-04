@@ -1209,9 +1209,9 @@ import { guardZeroStreakRecord } from "./lib/retro-closure.js";
 import {
   buildDispatchValueContext,
   DISPATCH_VALUE_LEDGER_STEPS,
-  DISPATCH_VALUE_WINDOW_MS,
   planSeed,
   type DispatchValueContext,
+  type CostOfDelaySnapshot,
 } from "./lib/dispatch-value.js";
 import {
   boundRiskJudgeChangeView,
@@ -32541,34 +32541,89 @@ export function openSiblingObservation(
   };
 }
 
-/**
- * Build one selection cycle's pure value context from the rotated ledger union's dispatched attempts
- * (W1-T5112). The selector itself gets no reader: only an unreadable corpus refuses, and becomes
- * the exact former priority/scope/id order; every class is otherwise scored, thin ones near the mean.
- */
-function dispatchValueContextForSelection(
+const dispatchFilingCache = new Map<string, CostOfDelaySnapshot>();
+const dispatchFallbackKeys = new Map<string, string>();
+
+export function readDispatchFilingSnapshot(
+  planPath: string,
+  readGit?: (cwd: string, args: string[]) => string,
+): { kind: "ready"; snapshot: CostOfDelaySnapshot } | { kind: "refused"; reasons: readonly string[] } {
+  try {
+    const read = readGit ?? ((cwd: string, args: string[]) =>
+      execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", maxBuffer: 1 << 27 }));
+    // macOS exposes /var through /private/var; canonicalize only real filesystem reads so the
+    // injected reader seam remains usable with virtual fixture paths.
+    const canonicalPlanPath = readGit ? planPath : realpathSync(planPath);
+    const rootResult = read(dirname(canonicalPlanPath), ["rev-parse", "--show-toplevel"]).trim();
+    const root = readGit ? rootResult : realpathSync(rootResult);
+    if (read(root, ["rev-parse", "--is-shallow-repository"]).trim() !== "false") return { kind: "refused", reasons: ["incomplete-filing-history"] };
+    const planDir = relative(root, dirname(canonicalPlanPath)).split(sep).join("/") || ".";
+    const planTreeSha = read(root, ["rev-parse", `HEAD:${planDir}`]).trim();
+    if (!/^[a-f0-9]{40,64}$/.test(planTreeSha)) return { kind: "refused", reasons: ["unreadable-plan-tree"] };
+    const key = `${root}:${planPath}`;
+    const cached = dispatchFilingCache.get(key);
+    if (cached?.planTreeSha === planTreeSha) return { kind: "ready", snapshot: cached };
+    const relativePlanPath = relative(root, canonicalPlanPath);
+    const history = read(root, ["log", "--first-parent", "--reverse", "--format=filing:%ct", "--no-renames", "-p", "--unified=0", "HEAD", "--", relativePlanPath, `${planDir}/tasks.d`]);
+    const filedAtByTaskId = new Map<string, number>();
+    let at = NaN;
+    for (const line of history.split("\n")) {
+      const timestamp = /^filing:(\d+)$/.exec(line);
+      if (timestamp) at = Number(timestamp[1]) * 1000;
+      const id = /^\+\s*(?:-\s*)?id:\s*["']?([A-Z][A-Z0-9]*-T\d+)\b/.exec(line)?.[1];
+      if (id && Number.isFinite(at) && !filedAtByTaskId.has(id)) filedAtByTaskId.set(id, at);
+    }
+    if (filedAtByTaskId.size === 0) return { kind: "refused", reasons: ["missing-filing-history"] };
+    const snapshot = Object.freeze({ planTreeSha, filedAtByTaskId });
+    dispatchFilingCache.set(key, snapshot);
+    return { kind: "ready", snapshot };
+  } catch (error) {
+    return { kind: "refused", reasons: [`filing-history-unreadable:${String(error)}`] };
+  }
+}
+
+/** W1-T4064: the ledger snapshot supplies time and consumed slots; committed history supplies age.
+ * Fallbacks are keyed by the unreadable input, persisted in the ledger and deduplicated in-process. */
+export function dispatchValueContextForSelection(
   plan: Plan,
   isMerged: MergedSet,
   stateDir: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
+  planPath: string,
+  readLedger: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync,
+  readFiling: typeof readDispatchFilingSnapshot = readDispatchFilingSnapshot,
 ): DispatchValueContext | undefined {
-  const nowMs = systemClock.now();
-  const union = readLedgerUnionRecordsSync(stateDir, {
-    step: [...DISPATCH_VALUE_LEDGER_STEPS],
-    since: fixedClock(nowMs - DISPATCH_VALUE_WINDOW_MS).iso(),
+  const union = readLedger(stateDir, {
+    step: [...DISPATCH_VALUE_LEDGER_STEPS, "dispatch.cost_of_delay.fallback", "dispatch.cost_of_delay.ready", "dispatch.refused_already_merged"],
     refuseIncomplete: true,
   });
+  const fallback = (reasons: readonly string[], treeSha = planSeed(plan.tasks)) => {
+    const key = createHash("sha256").update(JSON.stringify([treeSha, reasons])).digest("hex");
+    const previous = union.rows.filter(row => row.step === "dispatch.cost_of_delay.fallback" || row.step === "dispatch.cost_of_delay.ready")
+      .sort((a, b) => String(a.ts).localeCompare(String(b.ts))).at(-1)?.key;
+    const changed = (dispatchFallbackKeys.get(stateDir) ?? previous) !== key;
+    if (changed) {
+      log("dispatch.cost_of_delay.fallback", { key, reasons, plan_tree_sha: treeSha });
+    }
+    dispatchFallbackKeys.set(stateDir, key);
+    return changed;
+  };
   if (!union.ok) {
-    log("dispatch.value.refused", { reason: "incomplete-union", unread_rotations: union.unread.length });
+    if (fallback(["incomplete-union", ...union.unread.slice().sort()])) {
+      log("dispatch.value.refused", { reason: "incomplete-union", unread_rotations: union.unread.length });
+    }
     return undefined;
   }
+  const filing = readFiling(planPath);
+  const evidence = union.rows.filter(row => row.step !== "dispatch.cost_of_delay.fallback" && row.step !== "dispatch.cost_of_delay.ready")
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  const times = evidence.map(row => typeof row.ts === "string" ? Date.parse(row.ts) : NaN).filter(Number.isFinite);
+  const filingTimes = filing.kind === "ready" ? [...filing.snapshot.filedAtByTaskId.values()] : [];
+  const nowMs = [...times, ...filingTimes].reduce((latest, at) => Math.max(latest, at), 0);
+  const openIds = new Set(plan.tasks.filter(task => !isMerged(task.id)).map(task => task.id));
+  const seed = filing.kind === "ready" ? filing.snapshot.planTreeSha : planSeed(plan.tasks);
   const calibrated = buildDispatchValueContext(
-    plan.tasks,
-    union.rows,
-    new Set(plan.tasks.filter((task) => !isMerged(task.id)).map((task) => task.id)),
-    nowMs,
-    union.ok,
-    planSeed(plan.tasks),
+    plan.tasks, evidence, openIds, nowMs, true, seed,
   );
   if (calibrated.kind === "refused") {
     log("dispatch.value.refused", { reason: calibrated.reasons.join(",") });
@@ -32579,7 +32634,15 @@ function dispatchValueContextForSelection(
     fleet: { mean: calibrated.fleet.mean, attempts: calibrated.fleet.attempts, merges: calibrated.fleet.merges },
     refused_classes: calibrated.refusals,
   });
-  return calibrated.context;
+  const scheduled = filing.kind === "ready"
+    ? buildDispatchValueContext(plan.tasks, evidence, openIds, nowMs, true, seed, filing.snapshot) : filing;
+  if (scheduled.kind === "refused") {
+    fallback(scheduled.reasons, seed);
+    return Object.freeze({ ...calibrated.context, costOfDelayFallback: true });
+  }
+  if (dispatchFallbackKeys.get(stateDir) !== "ready") log("dispatch.cost_of_delay.ready", { key: "ready", plan_tree_sha: seed });
+  dispatchFallbackKeys.set(stateDir, "ready");
+  return scheduled.context;
 }
 
 async function drainCommand(
@@ -32947,7 +33010,7 @@ async function drainCommand(
         // W1-T3412: the full-union read stays in this command layer and runs once for each
         // selection pass. `drain.ts` receives only this immutable context and remains pure.
         buildDispatchValueContext: (dispatchPlan, merged) =>
-          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log),
+          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log, planPath),
         isOpenPr,
         isCreditIndeterminate,
         // W1-T3216: THE PRODUCER. `resolveReleasedIds` (drain.ts) turns these lines into the
@@ -35543,7 +35606,7 @@ export async function daemonCommand(
         // W1-T3412: daemon selection uses the same complete-union calibration as the bounded
         // drain. A refused calibration returns undefined, preserving historic ordering.
         buildDispatchValueContext: (dispatchPlan, merged) =>
-          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log),
+          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log, target.planPath),
         isOpenPr,
         isCreditIndeterminate,
         // W1-T3216: THE PRODUCER, on the lane that actually dispatches — the same omission
