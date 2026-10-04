@@ -13,7 +13,7 @@
  */
 // Why: the "Option A" narrow-scope decision — docs/forensics/board.md#file-header
 
-import { recentEntryFromLine, RECENT_ACTIVITY_HISTORY_CAP, RECENT_ACTIVITY_VERBS, OPERATOR_ACTION_STEPS, type RecentActivityEntry } from "./recent-projection.js";
+import { recentEntryFromLine, RECENT_ACTIVITY_HISTORY_CAP, RECENT_ACTIVITY_VERBS, type RecentActivityEntry } from "./recent-projection.js";
 export { RECENT_ACTIVITY_VERBS } from "./recent-projection.js";
 export type { RecentActivityEntry, RecentActivityVerb } from "./recent-projection.js";
 import type { ServerResponse } from "node:http";
@@ -42,6 +42,9 @@ import { buildRecapEvents, type RecapEvent } from "./recap.js";
 import { computeGlanceSpend, type GlanceSpend } from "./glance.js";
 import { buildStatusBoard, type BlockedPrBlocker, type MergeHeldRow } from "./status-board.js";
 import { liveRunSpend, subscribeStatusStream } from "./status-stream-publisher.js";
+
+// Keep the live consumer's boundary visible to the ledger render-retention census.
+const OPERATOR_ACTION_STEPS = new Set(["console.kick_refused", "console.kick_dispatched"]);
 
 /** Ledger poll pace for the SSE stream — comfortably under the 2s acceptance budget. */
 export const DEFAULT_POLL_MS = 250;
