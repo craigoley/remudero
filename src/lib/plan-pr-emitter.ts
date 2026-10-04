@@ -574,6 +574,7 @@ function parsedShardProofs(text: string, opts?: { uniqueKeys: false }): string[]
   try {
     tasks = parseYaml(text, opts);
   } catch {
+    // Unparseable: undefined, not [] — a base falls back to its bytes; a head is the plan lint's to refuse, by name.
     return undefined;
   }
   const proofs: string[] = [];
