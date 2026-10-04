@@ -39108,29 +39108,39 @@ function refusalByClaimFromDecisionVerdict(value: unknown): Map<string, Criterio
 }
 
 /**
- * Recover the most recent failing review's unmet criteria for a task from the
- * ledger (`review.posted` / `fix.review` lines carry `unmet_criteria` + `reasons`).
+ * Recover the most recent failing review's unmet criteria from review.posted rows.
  * No PR-head checkout needed just to ROUTE the disposition — the fix rung itself
- * re-derives the authoritative verdict when it runs. Proof text is unavailable
- * from the ledger, so it degrades to "" (the fix prompt leans on claim + reason).
+ * re-derives the authoritative verdict when it runs. Proof context comes from
+ * that row's decision verdict; legacy missing execution outcomes stay unknown.
  */
 function unmetFromLedger(lines: Array<Record<string, unknown>>, taskId: string): CriterionVerdict[] {
   let claims: string[] = [];
   let reasons: string[] = [];
   let refusals = new Map<string, CriterionRefusal>();
+  let proofContext = new Map<string, Partial<CriterionVerdict>>();
   for (const line of lines) {
     if (line.step !== "review.posted" || line.task_id !== taskId) continue;
+    proofContext = new Map();
     if (line.state === "success") { claims = []; reasons = []; refusals = new Map(); continue; }
     if (Array.isArray(line.unmet_criteria)) claims = line.unmet_criteria.map(String);
     if (Array.isArray(line.reasons)) reasons = line.reasons.map(String);
     refusals = refusalByClaimFromDecisionVerdict(line.decision_verdict);
+    const decision = line.decision_verdict as { criteria?: unknown } | null | undefined;
+    if (Array.isArray(decision?.criteria)) {
+      for (const entry of decision.criteria) {
+        if (entry === null || typeof entry !== "object") continue;
+        const criterion = entry as Partial<CriterionVerdict>;
+        if (criterion.met === false && typeof criterion.claim === "string") proofContext.set(criterion.claim, criterion);
+      }
+    }
   }
   return claims.map((claim, i) => ({
     claim,
-    proof: "",
+    proof: proofContext.get(claim)?.proof ?? "",
     met: false,
     reason: reasons[i] ?? "",
-    proof_exec: "not_executable" as const,
+    // Legacy ledger rows can lack this required live-verdict field (W1-T5020).
+    proof_exec: proofContext.get(claim)?.proof_exec as CriterionVerdict["proof_exec"],
     refusal: refusals.get(claim),
   }));
 }
