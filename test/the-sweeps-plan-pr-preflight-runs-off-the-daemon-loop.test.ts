@@ -175,7 +175,8 @@ test("W1-T5521: the refusal-amendment rung's preflight check runs while a timer 
   );
   t.diagnostic(`max loop delay, preflight awaited: ${maxLagMs.toFixed(0)} ms`);
 
-  assert.equal(readFileSync(f.marks, "utf8"), "started\ndone\n", "the slow check ran to completion in a real child process");
+  // W1-T5531: the red amendment's base is preflighted alone too, so the slow check runs twice.
+  assert.equal(readFileSync(f.marks, "utf8"), "started\ndone\n".repeat(2), "the slow check ran to completion in a real child process");
   assert.ok(sawCheckRunning, "a tick landed while the preflight's child process was still running");
   assertWallClockBound(maxLagMs, LAG_BOUND_MS, `the loop's worst delay through the refusal-amendment rung was ${maxLagMs.toFixed(0)} ms`);
   assert.equal(result[0]!.outcome, "error", "the refused amendment is this pass's error outcome, as before");
@@ -223,7 +224,7 @@ test("W1-T5521 control: the sync planPrPreflightAtCommit wired back into the run
   );
   t.diagnostic(`max loop delay, preflight on the loop: ${maxLagMs.toFixed(0)} ms`);
 
-  assert.equal(readFileSync(f.marks, "utf8"), "started\ndone\n", "the same slow check ran");
+  assert.equal(readFileSync(f.marks, "utf8"), "started\ndone\n".repeat(2), "the same slow check ran, on the amendment and its base");
   assert.equal(sawCheckRunning, false, "no tick can land while spawnSync holds the thread");
   assert.ok(maxLagMs >= SLOW_CHECK_MS * 0.9, `the probe saw the synchronous check: ${maxLagMs.toFixed(0)} ms against ${SLOW_CHECK_MS} ms`);
   assertRefusedOnLintPlan(rows(f.ledger).find((r) => r.step === "plan_pr.preflight_refused")?.failures);
