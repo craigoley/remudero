@@ -1157,7 +1157,9 @@ import {
   repairRefusedTask,
   type RefusalViolation,
 } from "./lib/dispatch-repair.js";
-import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, replayOptIn } from "./lib/replay-harness.js";
+import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, replayOptIn,
+  pairedReviewerReplayCommand, replayPairedReviews, type ReviewerReplayCommandInput } from "./lib/replay-harness.js";
+import { judgeInstanceLiveness, readLivenessRows, LIVENESS_WINDOW_MS } from "./lib/fleet-liveness.js";
 import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, type GoldenTask } from "./lib/replay.js";
 import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount, type Mounts } from "./lib/mounts.js";
@@ -22094,6 +22096,17 @@ export interface ReplayGoldensDeps {
   writeLedger?: typeof appendLedger;
   now?: () => number;
   log?: (message: string) => void;
+}
+
+export async function benchmarkReviewerReplayCommand(rest: string[], deps: Partial<ReviewerReplayCommandInput>
+  & { usageDeps?: Parameters<typeof readUsageSnapshotPreferSdk>[1] } = {}): Promise<number> {
+  return pairedReviewerReplayCommand(rest, (input) => replayPairedReviews(input), {
+    ...deps, readIdle: deps.readIdle ?? (async (stateDir, config) => {
+      const instance = { name: "operator-reviewer", repo: "operator/reviewer", stateDir };
+      return { liveness: judgeInstanceLiveness(instance, readLivenessRows(instance, systemClock.now() - LIVENESS_WINDOW_MS), systemClock.now()),
+        headroom: await readUsageSnapshotPreferSdk(config, deps.usageDeps) };
+    }),
+  });
 }
 
 /**
@@ -51581,7 +51594,8 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     : rest[0] === "readiness" ? await benchmarkAaReadinessCommand(rest.slice(1),
       (request) => runBenchmarkAaReadiness({ ...benchmarkAaReadinessRuntime(request.stateDir), ...request }))
     : await benchmarkAaCommand(rest, (input) => buildBenchmarkAaReport(input))],
-  ["benchmark-paid-pilot", async (rest) => await benchmarkPaidPilotCommand(rest, (input) => activateBenchmarkPaidPilot(input),
+  ["benchmark-paid-pilot", async (rest) => rest[0] === "replay" ? await benchmarkReviewerReplayCommand(rest.slice(1))
+    : await benchmarkPaidPilotCommand(rest, (input) => activateBenchmarkPaidPilot(input),
     { pairedReport: pairedPilotReportView })],
   ["memory-lint", (rest) => memoryLintCommand(rest)],
   ["ledger-compact", (rest) => ledgerCompactCommand(rest)],

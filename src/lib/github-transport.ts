@@ -3,6 +3,7 @@ import type { ChildProcess, ExecFileSyncOptions, ExecFileSyncOptionsWithStringEn
 import { accessSync, constants as fsConstants, mkdirSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, sep } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 
 import { clockFromMillisFn, systemClock } from "./clock.js";
@@ -262,7 +263,7 @@ export async function ghJsonAsync(args: string[], execAsync: typeof execFileAsyn
       // review handlers enforce RMD_GH_TRANSPORT_FLOOR for their lifetime, but without this call the
       // CI/review wait loops bypassed that boundary entirely and could emit a rapid read burst.
       refuseSentinelGhToken("gh", args, undefined);
-      applyGhReadCadence(args);
+      await applyGhReadCadenceAsync(args);
       const { stdout } = await withGhKillEscalation(
         execAsync("gh", args, {
           encoding: "utf8",
@@ -316,7 +317,7 @@ export async function ghTextAsync(
   if (existing) return existing;
   const request = (async (): Promise<string> => {
     refuseSentinelGhToken("gh", args, undefined);
-    applyGhReadCadence(args);
+    await applyGhReadCadenceAsync(args);
     return read();
   })();
   asyncReadInFlight.set(key, request);
@@ -436,6 +437,11 @@ export function createNonBlockingGhCallPacer(opts: Parameters<typeof createGhCal
 function defaultBlockingSleepSync(ms: number): void {
   if (ms <= 0) return;
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** W1-T4970: the async readers' wait — a timer, so the event loop keeps running through it. */
+async function defaultTimerSleep(ms: number): Promise<void> {
+  await delay(ms);
 }
 
 export const DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS = 60_000;
@@ -839,6 +845,9 @@ export interface GhReadCadenceDeps {
   readStampMs?(path: string | undefined): number | undefined;
   stamp?(path: string | undefined): void;
   sleepSync?(ms: number): void;
+  /** W1-T4970: {@link applyGhReadCadenceAsync}'s awaited wait for the shared gap and the lock;
+   *  defaults to a real timer. The sync path ignores it and uses `sleepSync`. */
+  sleep?(ms: number): Promise<void>;
   warn?(line: string): void;
   /** W1-T4085: forces the bucket a read is accounted against, overriding `ghArgvBucketHint`'s own
    *  guess from the argv shape. `routeInteractiveGhRead` is the one caller: once a read is riding
@@ -864,32 +873,47 @@ const ghCadenceOwnStampMs = new Map<string, number>();
  * cannot protect two launchd jobs (or a worker and the daemon) from both seeing an old stamp. The
  * lock is a tiny directory because mkdir is atomic on the filesystems Remudero supports. It is
  * fail-open after a bounded wait, and stale locks are reclaimed so a killed process cannot freeze
- * GitHub access permanently.
+ * GitHub access permanently. One attempt is shared by the sync and async lock loops below.
  */
+function tryGhCadenceLock(lockPath: string, startedAt: number): "locked" | "reclaimed" | "wait" | "give-up" {
+  try {
+    mkdirSync(lockPath);
+    return "locked";
+  } catch {
+    try {
+      const ageMs = systemClock.now() - statSync(lockPath).mtimeMs;
+      if (ageMs > GH_CADENCE_LOCK_STALE_MS) {
+        rmdirSync(lockPath);
+        return "reclaimed";
+      }
+    } catch {
+      // The owner may have released the lock between stat and mkdir. Retry immediately.
+    }
+    return systemClock.now() - startedAt >= GH_CADENCE_LOCK_MAX_WAIT_MS ? "give-up" : "wait";
+  }
+}
+
+function releaseGhCadenceLock(lockPath: string, locked: boolean): void {
+  if (!locked) return;
+  try {
+    rmdirSync(lockPath);
+  } catch {
+    // Fail open: a cleanup failure must not turn a successful GitHub call into a daemon error.
+  }
+}
+
 function withGhCadenceLock<T>(stampPath: string, sleepSync: (ms: number) => void, fn: () => T): T {
   const lockPath = `${stampPath}.lock`;
   const startedAt = systemClock.now();
   let locked = false;
   try {
     mkdirSync(dirname(lockPath), { recursive: true });
-    while (!locked) {
-      try {
-        mkdirSync(lockPath);
+    for (let step = tryGhCadenceLock(lockPath, startedAt); step !== "give-up"; step = tryGhCadenceLock(lockPath, startedAt)) {
+      if (step === "locked") {
         locked = true;
         break;
-      } catch {
-        try {
-          const ageMs = systemClock.now() - statSync(lockPath).mtimeMs;
-          if (ageMs > GH_CADENCE_LOCK_STALE_MS) {
-            rmdirSync(lockPath);
-            continue;
-          }
-        } catch {
-          // The owner may have released the lock between stat and mkdir. Retry immediately.
-        }
-        if (systemClock.now() - startedAt >= GH_CADENCE_LOCK_MAX_WAIT_MS) break;
-        sleepSync(GH_CADENCE_LOCK_WAIT_MS);
       }
+      if (step === "wait") sleepSync(GH_CADENCE_LOCK_WAIT_MS);
     }
   } catch {
     // An unwritable cache is already a documented fail-open case; run the call without a lock.
@@ -897,13 +921,45 @@ function withGhCadenceLock<T>(stampPath: string, sleepSync: (ms: number) => void
   try {
     return fn();
   } finally {
-    if (locked) {
-      try {
-        rmdirSync(lockPath);
-      } catch {
-        // Fail open: a cleanup failure must not turn a successful GitHub call into a daemon error.
+    releaseGhCadenceLock(lockPath, locked);
+  }
+}
+
+/** W1-T4970: async reads in ONE process queue here before the file lock. The sync path never
+ *  needed this — a blocking caller cannot overlap itself — but an awaited gap can, and a second
+ *  read polling a lock its own process holds would give up after the bounded wait and race. */
+const ghCadenceAsyncQueue = new Map<string, Promise<void>>();
+
+/** The async twin of {@link withGhCadenceLock}: the same lock, attempts and bound, but every wait
+ *  is awaited, so the event loop keeps running while a sibling holds the lock. */
+async function withGhCadenceLockAsync<T>(stampPath: string, sleep: (ms: number) => Promise<void>, fn: () => Promise<T>): Promise<T> {
+  const prior = ghCadenceAsyncQueue.get(stampPath) ?? Promise.resolve();
+  let leave!: () => void;
+  const mine = new Promise<void>((resolve) => (leave = resolve));
+  const tail = prior.then(() => mine);
+  ghCadenceAsyncQueue.set(stampPath, tail);
+  await prior;
+  const lockPath = `${stampPath}.lock`;
+  const startedAt = systemClock.now();
+  let locked = false;
+  try {
+    try {
+      mkdirSync(dirname(lockPath), { recursive: true });
+      for (let step = tryGhCadenceLock(lockPath, startedAt); step !== "give-up"; step = tryGhCadenceLock(lockPath, startedAt)) {
+        if (step === "locked") {
+          locked = true;
+          break;
+        }
+        if (step === "wait") await sleep(GH_CADENCE_LOCK_WAIT_MS);
       }
+    } catch {
+      // An unwritable cache is already a documented fail-open case; run the call without a lock.
     }
+    return await fn();
+  } finally {
+    releaseGhCadenceLock(lockPath, locked);
+    leave();
+    if (ghCadenceAsyncQueue.get(stampPath) === tail) ghCadenceAsyncQueue.delete(stampPath);
   }
 }
 
@@ -911,17 +967,18 @@ export function resetGhCadenceAdvisoryForTest(): void {
   ghCadenceAdvisoryEmitted = false;
 }
 
-/**
- * THE WIRING — applied by `ghJson`/`ghExec` to a call that will REALLY spawn `gh`.
- *
- * A caller that injected its own `exec` is paced by nothing: it reaches no network, so pacing it
- * would stamp a shared window for a call that never spent from the limiter. That guard is also what
- * keeps this inert across the suite instead of writing a real stamp on every unit test.
- *
- * FAIL OPEN EVERYWHERE (design (v)). Every io path below already swallows its own errors, and the
- * pure decision treats an undecidable stamp as "allow", so the worst case is no pacing at all.
- */
-export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps = {}): GhReadCadenceDecision {
+/** One read's cadence, shared by the sync and async paths: the decision, and the shared-gap
+ *  arithmetic and stamp that run inside the lock. Only the WAITING differs between the two. */
+interface GhReadCadencePlan {
+  evaluate(): GhReadCadenceDecision;
+  /** `undefined`: writes, budget probes, and calls without a usable cache path need no shared
+   *  coordination, so no lock, gap or stamp. */
+  coordinatedStampPath: string | undefined;
+  sharedGapRemainingMs(stampPath: string): number;
+  stampAfterGap(stampPath: string): void;
+}
+
+function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): GhReadCadencePlan {
   const env = deps.env ?? process.env;
   const bucket = deps.bucketOverride ?? ghArgvBucketHint(args);
   const stampPath = ghReadCadenceStampPath(env, bucket);
@@ -930,8 +987,9 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
   const now = deps.nowMs ?? systemClock.now;
   const isWrite = ghArgvIsWrite(args);
   const isExempt = ghArgvIsCadenceExempt(args);
-  const burstAllowed = !isWrite && !isExempt && (ghReadBurstScope?.remaining ?? 0) > 0;
   const evaluate = (): GhReadCadenceDecision => {
+    // Read at evaluation, not planning: an async read may wait in the lock queue meanwhile.
+    const burstAllowed = !isWrite && !isExempt && (ghReadBurstScope?.remaining ?? 0) > 0;
     const decision = ghReadCadenceDecision({
       isWrite,
       isExempt,
@@ -959,27 +1017,71 @@ export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceD
     return decision;
   };
 
-  // Writes, budget probes, and calls without a usable cache path need no shared coordination.
-  if (isWrite || isExempt || stampPath === undefined) return evaluate();
-
-  const sleepSync = deps.sleepSync ?? defaultBlockingSleepSync;
   const sharedReadGapMs = resolveGhSharedReadGapMs(env);
+  return {
+    evaluate,
+    coordinatedStampPath: isWrite || isExempt ? undefined : stampPath,
+    sharedGapRemainingMs: (path) => {
+      // The 180-second floor is intentionally advisory for daemon multi-read sweeps. A bounded
+      // shared gap still protects the secondary limiter across sibling processes without making a
+      // normal sweep self-refuse after its first read.
+      const latest = readStampMs(path);
+      const ownLatest = latest !== undefined && ghCadenceOwnStampMs.get(path) === latest;
+      const elapsed = latest === undefined ? undefined : now() - latest;
+      return ownLatest || latest === undefined ? 0 : Math.max(0, sharedReadGapMs - Math.max(0, elapsed ?? 0));
+    },
+    stampAfterGap: (path) => {
+      // Stamp only after the gap so a concurrent process observes the completed transport slot.
+      stamp(path);
+      const stampedAt = readStampMs(path);
+      if (stampedAt === undefined) ghCadenceOwnStampMs.delete(path);
+      else ghCadenceOwnStampMs.set(path, stampedAt);
+    },
+  };
+}
+
+/**
+ * THE WIRING — applied by `ghJson`/`ghExec` to a call that will REALLY spawn `gh`.
+ *
+ * A caller that injected its own `exec` is paced by nothing: it reaches no network, so pacing it
+ * would stamp a shared window for a call that never spent from the limiter. That guard is also what
+ * keeps this inert across the suite instead of writing a real stamp on every unit test.
+ *
+ * FAIL OPEN EVERYWHERE (design (v)). Every io path below already swallows its own errors, and the
+ * pure decision treats an undecidable stamp as "allow", so the worst case is no pacing at all.
+ */
+export function applyGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps = {}): GhReadCadenceDecision {
+  const plan = planGhReadCadence(args, deps);
+  const stampPath = plan.coordinatedStampPath;
+  if (stampPath === undefined) return plan.evaluate();
+  const sleepSync = deps.sleepSync ?? defaultBlockingSleepSync;
   return withGhCadenceLock(stampPath, sleepSync, () => {
-    const decision = evaluate();
-    // The 180-second floor is intentionally advisory for daemon multi-read sweeps. A bounded
-    // shared gap still protects the secondary limiter across sibling processes without making a
-    // normal sweep self-refuse after its first read.
-    const latest = readStampMs(stampPath);
-    const ownLatest = latest !== undefined && ghCadenceOwnStampMs.get(stampPath) === latest;
-    const elapsed = latest === undefined ? undefined : now() - latest;
-    const remaining =
-      ownLatest || latest === undefined ? 0 : Math.max(0, sharedReadGapMs - Math.max(0, elapsed ?? 0));
+    const decision = plan.evaluate();
+    const remaining = plan.sharedGapRemainingMs(stampPath);
     if (remaining > 0) sleepSync(remaining);
-    // Stamp only after the gap so a concurrent process observes the completed transport slot.
-    stamp(stampPath);
-    const stampedAt = readStampMs(stampPath);
-    if (stampedAt === undefined) ghCadenceOwnStampMs.delete(stampPath);
-    else ghCadenceOwnStampMs.set(stampPath, stampedAt);
+    plan.stampAfterGap(stampPath);
+    return decision;
+  });
+}
+
+/**
+ * W1-T4970 — THE ASYNC TWIN, applied by `ghJsonAsync`/`ghTextAsync`. Same lock, decision, gap and
+ * stamp as {@link applyGhReadCadence}; the shared gap and the lock wait are AWAITED timers instead
+ * of `Atomics.wait`, so an async read no longer freezes the daemon's event loop while it waits.
+ */
+export async function applyGhReadCadenceAsync(
+  args: readonly string[],
+  deps: GhReadCadenceDeps = {},
+): Promise<GhReadCadenceDecision> {
+  const plan = planGhReadCadence(args, deps);
+  const stampPath = plan.coordinatedStampPath;
+  if (stampPath === undefined) return plan.evaluate();
+  const sleep = deps.sleep ?? defaultTimerSleep;
+  return await withGhCadenceLockAsync(stampPath, sleep, async () => {
+    const decision = plan.evaluate();
+    const remaining = plan.sharedGapRemainingMs(stampPath);
+    if (remaining > 0) await sleep(remaining);
+    plan.stampAfterGap(stampPath);
     return decision;
   });
 }
