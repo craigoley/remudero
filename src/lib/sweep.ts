@@ -1996,7 +1996,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
 
       worktreePath = join(worktreesDir(config), `ratchet-${task.id}-${pr.prNumber}-${nowMsImpl()}`);
-      createFixRungWorktree(repoDir, worktreePath, branch);
+      await createFixRungWorktree(repoDir, worktreePath, branch);
       const before = readBaselineRatchetWorktreeStateForBuild(worktreePath);
       if (!before) return decline("worktree_unreadable", { branch });
       if (before.headSha !== observedHeadSha || before.changedPaths.length > 0) {
@@ -3205,7 +3205,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const dispatchNowMs = nowMsImpl();
         worktreePath = join(worktreesDir(config), `sweep-${task.id}-${dispatchNowMs}`);
         try {
-          const recoveredHead = createFixRungWorktree(repoDir, worktreePath, realBranch);
+          const recoveredHead = await createFixRungWorktree(repoDir, worktreePath, realBranch);
           if (recoveredHead) {
             log("sweep.fix.checkout_recovered", {
               pr_number: pr.prNumber,

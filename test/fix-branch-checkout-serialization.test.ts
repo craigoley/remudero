@@ -117,7 +117,7 @@ function commitObject(repo: string, parent: string, msg: string): string {
 
 // ── (i) checkoutFixHeadRef / createFixRungWorktree — the non-destructive checkout ─────
 
-test("the sweep fix worktree supplies commitlint before its worker commits", () => {
+test("the sweep fix worktree supplies commitlint before its worker commits", async () => {
   const root = tmp("rmd-fix-toolchain-");
   try {
     const upstream = seedUpstream(root);
@@ -134,7 +134,7 @@ test("the sweep fix worktree supplies commitlint before its worker commits", () 
     execFileSync("git", ["-C", repoDir, "config", "core.hooksPath", hooks]);
 
     const unprepared = join(root, "unprepared");
-    createFixRungWorktree(repoDir, unprepared, "run-toolchain-probe");
+    await createFixRungWorktree(repoDir, unprepared, "run-toolchain-probe");
     writeFileSync(join(unprepared, "repair.txt"), "repaired\n");
     execFileSync("git", ["-C", unprepared, "add", "--", "repair.txt"]);
     assert.throws(
@@ -145,7 +145,7 @@ test("the sweep fix worktree supplies commitlint before its worker commits", () 
     execFileSync("git", ["-C", repoDir, "worktree", "remove", "--force", unprepared]);
 
     const worktree = join(root, "fix-worktree");
-    createFixRungWorktreeWithToolchain(repoDir, worktree, "run-toolchain-probe");
+    await createFixRungWorktreeWithToolchain(repoDir, worktree, "run-toolchain-probe");
     assert.equal(lstatSync(join(worktree, "node_modules")).isSymbolicLink(), true);
     writeFileSync(join(worktree, "repair.txt"), "repaired\n");
     execFileSync("git", ["-C", worktree, "add", "--", "repair.txt"]);
@@ -156,7 +156,7 @@ test("the sweep fix worktree supplies commitlint before its worker commits", () 
   }
 });
 
-test("an unavailable sweep fix toolchain refuses before a repair can commit", () => {
+test("an unavailable sweep fix toolchain refuses before a repair can commit", async () => {
   const root = tmp("rmd-fix-toolchain-refusal-");
   try {
     const upstream = seedUpstream(root);
@@ -166,7 +166,7 @@ test("an unavailable sweep fix toolchain refuses before a repair can commit", ()
     execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", "run-toolchain-refusal"]);
     const worktree = join(root, "fix-worktree");
     const originalHead = sha(repoDir, "origin/run-toolchain-refusal");
-    assert.throws(
+    await assert.rejects(
       () => createFixRungWorktreeWithToolchain(repoDir, worktree, "run-toolchain-refusal", () => false),
       /fix worktree toolchain unavailable/,
     );
@@ -177,7 +177,7 @@ test("an unavailable sweep fix toolchain refuses before a repair can commit", ()
   }
 });
 
-test("absent local ref: created fresh at origin/<branch> — unchanged from the old sequence", () => {
+test("absent local ref: created fresh at origin/<branch> — unchanged from the old sequence", async () => {
   const root = tmp("rmd-fbcs-absent-");
   try {
     const upstream = seedUpstream(root);
@@ -188,7 +188,7 @@ test("absent local ref: created fresh at origin/<branch> — unchanged from the 
     const expected = sha(repoDir, "origin/run-absent-probe");
 
     const worktreePath = join(root, "wt");
-    createFixRungWorktree(repoDir, worktreePath, "run-absent-probe");
+    await createFixRungWorktree(repoDir, worktreePath, "run-absent-probe");
 
     assert.equal(sha(worktreePath, "HEAD"), expected, "lands at origin/<branch>'s commit");
     assert.equal(
@@ -201,7 +201,7 @@ test("absent local ref: created fresh at origin/<branch> — unchanged from the 
   }
 });
 
-test("local ref BEHIND origin: fast-forwards — unchanged from the old sequence", () => {
+test("local ref BEHIND origin: fast-forwards — unchanged from the old sequence", async () => {
   const root = tmp("rmd-fbcs-behind-");
   try {
     const upstream = seedUpstream(root);
@@ -223,7 +223,7 @@ test("local ref BEHIND origin: fast-forwards — unchanged from the old sequence
 
     const worktreePath = join(root, "wt");
     // createFixRungWorktree fetches origin itself — repoDir need not fetch first.
-    createFixRungWorktree(repoDir, worktreePath, "run-ff-probe");
+    await createFixRungWorktree(repoDir, worktreePath, "run-ff-probe");
 
     assert.equal(sha(worktreePath, "HEAD"), aheadSha, "fast-forwarded to origin's new tip");
     assert.equal(sha(repoDir, "refs/heads/run-ff-probe"), aheadSha, "the shared local ref itself moved forward");
@@ -232,7 +232,7 @@ test("local ref BEHIND origin: fast-forwards — unchanged from the old sequence
   }
 });
 
-test("local ref EQUAL to origin: unchanged — a no-op reset either way", () => {
+test("local ref EQUAL to origin: unchanged — a no-op reset either way", async () => {
   const root = tmp("rmd-fbcs-equal-");
   try {
     const upstream = seedUpstream(root);
@@ -241,19 +241,19 @@ test("local ref EQUAL to origin: unchanged — a no-op reset either way", () => 
     execFileSync("git", ["-C", repoDir, "branch", "run-equal-probe"]);
     execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", "run-equal-probe"]);
     const worktreePath1 = join(root, "wt1");
-    createFixRungWorktree(repoDir, worktreePath1, "run-equal-probe");
+    await createFixRungWorktree(repoDir, worktreePath1, "run-equal-probe");
     execFileSync("git", ["-C", repoDir, "worktree", "remove", "--force", worktreePath1]);
     const expected = sha(repoDir, "refs/heads/run-equal-probe");
 
     const worktreePath2 = join(root, "wt2");
-    createFixRungWorktree(repoDir, worktreePath2, "run-equal-probe");
+    await createFixRungWorktree(repoDir, worktreePath2, "run-equal-probe");
     assert.equal(sha(worktreePath2, "HEAD"), expected);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("local ref AHEAD of origin: preserves the local commit, resets by CAS, and proceeds", () => {
+test("local ref AHEAD of origin: preserves the local commit, resets by CAS, and proceeds", async () => {
   const root = tmp("rmd-fbcs-ahead-");
   try {
     const upstream = seedUpstream(root);
@@ -267,7 +267,7 @@ test("local ref AHEAD of origin: preserves the local commit, resets by CAS, and 
     // (mirrors dispatchFix's own `finally` cleanup), leaving the branch unattached but the
     // commit only local. This is the exact race window PR #3261 reported.
     const wtA = join(root, "wtA");
-    createFixRungWorktree(repoDir, wtA, "run-ahead-probe");
+    await createFixRungWorktree(repoDir, wtA, "run-ahead-probe");
     commit(wtA, "local-only.txt", "round A's unpushed commit");
     const localSha = sha(wtA, "HEAD");
     assert.notEqual(localSha, originSha, "premise: round A really did move the branch ahead of origin");
@@ -276,7 +276,7 @@ test("local ref AHEAD of origin: preserves the local commit, resets by CAS, and 
     // Round B arrives after round A's claim is gone. The local-only commit remains recoverable,
     // but it no longer parks every future level-triggered repair pass.
     const wtB = join(root, "wtB");
-    const recovered = createFixRungWorktree(repoDir, wtB, "run-ahead-probe");
+    const recovered = await createFixRungWorktree(repoDir, wtB, "run-ahead-probe");
 
     assert.ok(recovered, "the non-ancestor transition is reported to the caller");
     assert.equal(recovered.localSha, localSha);
@@ -289,7 +289,7 @@ test("local ref AHEAD of origin: preserves the local commit, resets by CAS, and 
   }
 });
 
-test("local ref DIVERGED from origin: preserves the local side and proceeds from the remote side", () => {
+test("local ref DIVERGED from origin: preserves the local side and proceeds from the remote side", async () => {
   const root = tmp("rmd-fbcs-diverged-");
   try {
     const upstream = seedUpstream(root);
@@ -309,7 +309,7 @@ test("local ref DIVERGED from origin: preserves the local side and proceeds from
     execFileSync("git", ["-C", advancer, "push", "--quiet", "origin", branch]);
     const originSha = sha(advancer, branch);
 
-    const recovered = createFixRungWorktree(repoDir, join(root, "wt"), branch);
+    const recovered = await createFixRungWorktree(repoDir, join(root, "wt"), branch);
     assert.ok(recovered);
     assert.equal(sha(repoDir, recovered.recoveryRef), localSha);
     assert.equal(sha(repoDir, `refs/heads/${branch}`), originSha);
@@ -318,7 +318,7 @@ test("local ref DIVERGED from origin: preserves the local side and proceeds from
   }
 });
 
-test("a local ref held by a registered worktree is refused and no recovery ref is created", () => {
+test("a local ref held by a registered worktree is refused and no recovery ref is created", async () => {
   const root = tmp("rmd-fbcs-held-");
   try {
     const upstream = seedUpstream(root);
@@ -329,11 +329,11 @@ test("a local ref held by a registered worktree is refused and no recovery ref i
     execFileSync("git", ["-C", repoDir, "push", "--quiet", "origin", branch]);
     const originSha = sha(repoDir, `origin/${branch}`);
     const holder = join(root, "holder");
-    createFixRungWorktree(repoDir, holder, branch);
+    await createFixRungWorktree(repoDir, holder, branch);
     commit(holder, "held.txt", "held local commit");
     const localSha = sha(holder, "HEAD");
 
-    assert.throws(
+    await assert.rejects(
       () => createFixRungWorktree(repoDir, join(root, "challenger"), branch),
       (e: unknown) => e instanceof FixRungCheckoutRefusedError,
     );
@@ -345,7 +345,7 @@ test("a local ref held by a registered worktree is refused and no recovery ref i
   }
 });
 
-test("the recovered branch move is compare-and-swap protected against a concurrent ref change", () => {
+test("the recovered branch move is compare-and-swap protected against a concurrent ref change", async () => {
   const root = tmp("rmd-fbcs-cas-");
   try {
     const upstream = seedUpstream(root);
@@ -359,7 +359,7 @@ test("the recovered branch move is compare-and-swap protected against a concurre
     const racingSha = commitObject(repoDir, localSha, "racing commit");
     execFileSync("git", ["-C", repoDir, "checkout", "-q", "main"]);
 
-    assert.throws(
+    await assert.rejects(
       () =>
         createFixRungWorktree(repoDir, join(root, "wt"), branch, {
           beforeHeadCompareAndSwap: () =>
