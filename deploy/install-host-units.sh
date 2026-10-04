@@ -103,6 +103,40 @@ read_instance_registry() {
   ' "$registry_file"
 }
 
+# W1-T4863 — THE CREDENTIAL HAS ONE OWNER. Every instance gets its OWN writable claude_dir (D-11:
+# nothing mutable shared), so transcripts, settings and token refreshes of three daemons no longer
+# land in one directory. The subscription credential is the one thing that must still be shared, and
+# it is shared READ-ONLY: the `primary: true` instance's claude_dir holds the one writable copy (the
+# one refresher); every other instance bind-mounts that file :ro over its own directory. The owner is
+# read from the registry's existing `primary` marker, so no new field is added (both shell readers
+# refuse fields they do not know). Prints nothing when no live row is primary.
+registry_primary_claude_dir() {
+  awk '
+    function flush() { if (prim && !ret && dir != "" && out == "") out = dir }
+    { sub(/[[:space:]]+#.*/, "") }
+    /^[[:space:]]*$/ { next }
+    $0 ~ /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { flush(); dir = ""; prim = 0; ret = 0; next }
+    $0 ~ /^    claude_dir:/ { v = $0; sub(/^    claude_dir:[[:space:]]*/, "", v); gsub(/^"|"$/, "", v); dir = v }
+    $0 ~ /^    primary:[[:space:]]*true/ { prim = 1 }
+    $0 ~ /^    retired:[[:space:]]*true/ { ret = 1 }
+    END { flush(); if (out != "") print out }
+  ' "$1"
+}
+
+# The launcher's credential lines. Empty for the owner (its own claude_dir already holds the one
+# writable credential); a non-owner refuses when the owner's file is absent, because docker would
+# otherwise create a DIRECTORY at the mount source and the daemon would boot unauthenticated.
+render_credential_mount() {
+  [ -n "$CREDENTIAL_READONLY_SOURCE" ] || return 0
+  cat <<EOF
+if [ ! -f ${CREDENTIAL_READONLY_SOURCE} ]; then
+  echo "rmd-relaunch: REFUSING — the credential owner's file ${CREDENTIAL_READONLY_SOURCE} is missing." >&2
+  exit 1
+fi
+CREDENTIAL_ARGS=(-v ${CREDENTIAL_READONLY_SOURCE}:/home/node/.claude/.credentials.json:ro)
+EOF
+}
+
 require_abs_path() {
   local name="$1" value="$2"
   case "$value" in
@@ -149,6 +183,9 @@ SERVICE_UNIT_NAME="rmd-fleet.service"
 WATCHDOG_SERVICE_NAME="rmd-fleet-watchdog.service"
 WATCHDOG_TIMER_NAME="rmd-fleet-watchdog.timer"
 REGISTRY_FILE="${RMD_INSTANCE_REGISTRY:-}"
+# W1-T4863: empty = no registry names an owner, so nothing is overlaid read-only.
+CREDENTIAL_OWNER_DIR=""
+CREDENTIAL_READONLY_SOURCE=""
 
 if [ -n "$INSTANCE_NAME" ]; then
   validate_instance_name "$INSTANCE_NAME"
@@ -222,6 +259,7 @@ EOF
   SERVICE_UNIT_NAME="$service_name"
   WATCHDOG_SERVICE_NAME="$watchdog_service_name"
   WATCHDOG_TIMER_NAME="$watchdog_timer_name"
+  CREDENTIAL_OWNER_DIR="$(registry_primary_claude_dir "$REGISTRY_FILE")"
 fi
 
 # REFUSE RATHER THAN GUESS. Same posture `--print-daemon-run` takes when it cannot find a ledger:
@@ -254,6 +292,10 @@ case "$WATCHDOG_TIMER_NAME" in *.timer) : ;; *) echo "install-host-units: FATAL 
 require_abs_path "launcher_path" "$LAUNCHER"
 require_abs_path "revival_log" "$REVIVAL_LOG"
 require_abs_path "claude_dir" "$CLAUDE_DIR"
+if [ -n "$CREDENTIAL_OWNER_DIR" ]; then
+  require_abs_path "primary claude_dir" "$CREDENTIAL_OWNER_DIR"
+  [ "$CREDENTIAL_OWNER_DIR" = "$CLAUDE_DIR" ] || CREDENTIAL_READONLY_SOURCE="${CREDENTIAL_OWNER_DIR}/.credentials.json"
+fi
 require_abs_path "codex_dir" "$CODEX_DIR"
 require_abs_path "container_config_dir" "$CONTAINER_CONFIG_DIR"
 require_abs_path "cash_secret_dir" "$CASH_SECRET_DIR"
@@ -689,6 +731,9 @@ if [ -r ${BIN_DIR}/rmd-scratch-mounts ]; then
   echo "rmd-relaunch: scratch mounts \$SCRATCH_NOTE"
 fi
 
+CREDENTIAL_ARGS=()
+$(render_credential_mount)
+
 # --restart=on-failure:5 IS DELIBERATE: exit 0 is a STOP and must not be undone. Reboot survival is
 # rmd-fleet.service; crash recovery past the budget is rmd-fleet-watchdog.timer.
 # NODE_OPTIONS: without it V8 caps at ~2GB and the retro rung aborts at ~2046 MB on a 7.9GB host.
@@ -712,6 +757,7 @@ docker run -d --name ${CONTAINER_NAME} \\
   -v ${CONTAINER_CONFIG_DIR}:/home/node/.config/remudero \\
   -v "\$STATE_DIR":/home/node/Remudero \\
   -v ${CLAUDE_DIR}:/home/node/.claude \\
+  "\${CREDENTIAL_ARGS[@]+"\${CREDENTIAL_ARGS[@]}"}" \\
   "\${SCRATCH_ARGS[@]+"\${SCRATCH_ARGS[@]}"}" \\
   "\$IMAGE" \\
   ./bin/rmd daemon --repo ${DAEMON_REPO} --allow-self-target
