@@ -69,7 +69,7 @@ import {
   type FeedbackExpansion,
   type FeedbackStatus,
 } from "./feedback.js";
-import { queuedFeedbackLandings, type LandFeedbackOpts } from "./feedback-landing.js";
+import { queueFeedbackRecord, queuedFeedbackLandings, type LandFeedbackOpts } from "./feedback-landing.js";
 import {
   feedbackDischargeStateForTasks,
   feedbackOriginTag,
@@ -81,7 +81,7 @@ import {
 } from "./trace.js";
 import { computeFeedbackProjectionSync, indexedDischargeGithub, taskOriginsOf, type FeedbackProjectionInput, type FeedbackProjectionOutcome } from "./console-projection-worker.js";
 import type { Route } from "./service.js";
-import { PANEL_TASK_ID, appendPanelLedger, bearerTokenId, isRecord, jsonAction, requestPathLand, sendJson } from "./panel-actions.js";
+import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
 import { appendDailyCostCeilingOverrideAudit } from "./ledger.js";
 import {
   clearDailyCostCeilingOverride,
@@ -444,6 +444,7 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
       }
       const raw = input.replyTo !== undefined ? `[answer to feedback#${input.replyTo}] ${input.text}` : input.text;
       const origin = bearerTokenId(req);
+      const land = { stateRoot: deps.inboxRoot };
       const entry = captureFeedback(deps.root, {
         raw,
         attachments: input.attachments,
@@ -451,19 +452,21 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
         expansion: input.expansion,
         replyTo: input.replyTo,
         submissionKey: input.submissionKey,
-        land: requestPathLand(deps.feedbackLand ?? {}, deps.ledgerPath, input.replyTo ?? PANEL_TASK_ID, origin),
+        land,
       });
+      const staged = queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.inboxRoot);
+      const flipped = input.replyTo !== undefined && deps.feedbackLand ? [input.replyTo] : [];
       if (input.replyTo !== undefined) {
-        setFeedbackStatus(deps.root, input.replyTo, "answered", {
-          answeredBy: entry.id,
-          ...(deps.feedbackLand ? { land: requestPathLand(deps.feedbackLand, deps.ledgerPath, input.replyTo, origin) } : {}),
-        });
+        setFeedbackStatus(deps.root, input.replyTo, "answered", { answeredBy: entry.id, ...(deps.feedbackLand ? { land } : {}) });
       }
+      const inQueue = new Set(queuedFeedbackLandings(deps.inboxRoot));
+      const unqueued = [entry.id, ...flipped].map(feedbackEntryRepoPath).filter((rel) => !inQueue.has(rel));
       appendPanelLedger(deps.ledgerPath, "panel.feedback_submitted", entry.id, origin, {
         origin_field: entry.origin,
         reply_to: input.replyTo ?? null,
+        ...(unqueued.length === 0 ? { landing: "queued" } : { landing_error: staged.error ?? `not queued: ${unqueued.join(", ")}` }),
       });
-      sendJson(res, 200, { ok: true, entry });
+      sendJson(res, 200, { ok: true, entry, ...(unqueued.length === 0 ? { landing: "queued" } : {}) });
     }),
   };
 }
