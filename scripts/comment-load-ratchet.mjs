@@ -22,7 +22,7 @@
 //
 // Usage:
 //   node scripts/comment-load-ratchet.mjs [--base <ref>] [--root <dir>] [--baseline <path>]
-//   node scripts/comment-load-ratchet.mjs --json | --print | --check | --no-record
+//   node scripts/comment-load-ratchet.mjs --json | --print | --check | --no-record | --strict
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -460,6 +460,7 @@ export function main(argv) {
         print: { type: "boolean", default: false },
         check: { type: "boolean", default: false },
         "no-record": { type: "boolean", default: false },
+        strict: { type: "boolean", default: false },
       },
     }));
   } catch (e) {
@@ -511,7 +512,9 @@ export function main(argv) {
   // The ledger is the FIRST-pass ceiling; a file that breached it is re-judged against the merge
   // base, so growth main landed while this PR was open is not charged to this PR. Only breaching
   // files are read at the base, so a clean run pays nothing for this.
-  const inheritedAtBase = commentCountsAtBase(root, base, verdict.violations.map((v) => v.path));
+  // W1-T5623: `--strict` is MAIN's reading -- there the commit under test IS the base, so nothing is
+  // inherited: a crossing whose own push run was superseded must not excuse itself at HEAD^.
+  const inheritedAtBase = values.strict ? {} : commentCountsAtBase(root, base, verdict.violations.map((v) => v.path));
   const split = splitBaseInheritedViolations(verdict.violations, inheritedAtBase);
   recordInheritedGrowth(verdict.nextBaseline, split.inherited);
   const causedViolations = split.caused;
