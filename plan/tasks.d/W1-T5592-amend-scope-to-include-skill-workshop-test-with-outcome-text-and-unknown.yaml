@@ -1,0 +1,15 @@
+- id: W1-T5592
+  title: Amend scope to include skill-workshop test with outcome text and unknown-signal drafting
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - test/skill-workshop.test.ts
+  acceptance:
+    - claim: test/skill-workshop.test.ts asserts outcome text and drafts unknown-signal
+      proof: "grep: outcome text in test/skill-workshop.test.ts"
+  origin: architect
