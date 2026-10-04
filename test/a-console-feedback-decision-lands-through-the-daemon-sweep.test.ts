@@ -217,7 +217,7 @@ test("only the named sweep drains the queue: a capture's own landing leaves it f
   const rel = "plan/feedback/fb-later.yaml";
   landing.landFeedbackStatusContent(f.clone.dir, rel, "id: fb-later\nstatus: new\nraw: later\n", { stateRoot });
   const { gh } = fakeGh();
-  const r = withLiveWritesAllowed(() => landing.landFeedback(f.clone.dir, { gh, stateRoot, preflight: "skip-request-path" }));
+  const r = withLiveWritesAllowed(() => landing.landFeedback(f.clone.dir, { gh, stateRoot }));
   assert.equal(r.landed, false, JSON.stringify(r));
   assert.deepEqual(f.heads(), ["main"]);
   assert.deepEqual(landing.queuedFeedbackLandings(stateRoot), [rel]);

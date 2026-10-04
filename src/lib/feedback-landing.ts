@@ -151,8 +151,7 @@ export interface LandFeedbackOpts {
   requestReview?: LandingReviewRequest;
   log?: (step: string, extra?: Record<string, unknown>) => void;
   planPrPreflight?: (commitSha: string, pr: { title: string; body: string }) => PlanPrPreflightResult;
-  preflight?: "skip-request-path";
-  /** W1-T5460: daemon state root. Set, a status write QUEUES there; {@link sweepFeedbackLanding} lands it. */
+  /** W1-T5460: daemon state root. Set, a status write QUEUES there and `landFeedback` lands nothing; {@link sweepFeedbackLanding} lands it. */
   stateRoot?: string;
 }
 
@@ -883,14 +882,10 @@ function finishLanding(
     // any future refactor — dropping it silently reopens the hole #954 closed.
     assertLiveWriteAllowed("git-push", `force-pushing the ${kind.branch} branch`);
     const lane = `${kind.family}-landing`;
-    if (opts.preflight === "skip-request-path") {
-      opts.log?.("plan_pr.preflight_skipped", { lane, branch: kind.branch, reason: "request-path" });
-    } else {
-      const preflight = opts.planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommit(root, sha, pr));
-      const verdict = refusedPlanPrTrees.get(b.treeSha) ?? preflight(commitSha, { title: kind.prTitle, body: bodyOf(b) });
-      if (!verdict.ok) refusedPlanPrTrees.set(b.treeSha, verdict);
-      refuseRedPlanPr(verdict, { lane, branch: kind.branch, log: opts.log });
-    }
+    const preflight = opts.planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommit(root, sha, pr));
+    const verdict = refusedPlanPrTrees.get(b.treeSha) ?? preflight(commitSha, { title: kind.prTitle, body: bodyOf(b) });
+    if (!verdict.ok) refusedPlanPrTrees.set(b.treeSha, verdict);
+    refuseRedPlanPr(verdict, { lane, branch: kind.branch, log: opts.log });
     const lease = b.branchTipSha
       ? `--force-with-lease=refs/heads/${kind.branch}:${b.branchTipSha}`
       : `--force-with-lease=refs/heads/${kind.branch}:`;
@@ -1061,7 +1056,9 @@ function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): La
   }
 }
 
+/** W1-T5525: `stateRoot` set marks a console request; it stages with {@link queueFeedbackRecord}, so nothing lands here. */
 export function landFeedback(root: string, opts: LandFeedbackOpts = {}): LandFeedbackResult {
+  if (opts.stateRoot !== undefined) return { landed: false, files: [], queued: [] };
   const git = opts.git ?? defaultGit(root);
   return landPending(root, landingKind(FEEDBACK_LANDING_KIND, root, opts, git), { ...opts, git });
 }
@@ -1353,6 +1350,17 @@ function queueFeedbackLanding(stateRoot: string, relPath: string, content: strin
   } catch (e) {
     return { landed: false, files: [], error: `queueing ${relPath} under ${stateRoot} failed: ${String((e as Error)?.message ?? e)}` };
   }
+}
+
+/** W1-T5525: stage the record a console capture already wrote under `root`, byte for byte. */
+export function queueFeedbackRecord(root: string, relPath: string, stateRoot: string): LandFeedbackResult {
+  let content: string;
+  try {
+    content = readFileSync(join(root, relPath), "utf8");
+  } catch (e) {
+    return { landed: false, files: [], error: `reading ${relPath} under ${root} to queue it failed: ${String((e as Error)?.message ?? e)}` };
+  }
+  return queueFeedbackLanding(stateRoot, relPath, content);
 }
 
 /** Every record queued under `stateRoot` and not yet acknowledged landed — what the board may show as queued. */

@@ -48,11 +48,11 @@
 import { join } from "node:path";
 import { loadPlan, type Task } from "./plan.js";
 import { lintTask, type LintResult } from "./task-linter.js";
-import { captureFeedback, setFeedbackStatus, type FeedbackEntry } from "./feedback.js";
-import type { LandFeedbackOpts } from "./feedback-landing.js";
+import { captureFeedback, feedbackEntryRepoPath, setFeedbackStatus, type FeedbackEntry } from "./feedback.js";
+import { queueFeedbackRecord } from "./feedback-landing.js";
 import { loadSkill, loadSkillRegistry, searchGroundingSources, skillsDir, type GroundingNote, type Skill } from "./skill.js";
 import type { Route } from "./service.js";
-import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, requestPathLand, sendJson } from "./panel-actions.js";
+import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
 
 export interface PanelSkillRunDeps {
   /** Repo root — `.remudero/skills/`, `plan/tasks.yaml`, and `plan/feedback/` all live under here. */
@@ -60,13 +60,8 @@ export interface PanelSkillRunDeps {
   /** `plan/tasks.yaml`'s path — reloaded fresh on every request (mirrors GET /v1/trace, lib/panel-graph.ts). */
   planPath: string;
   ledgerPath: string;
-  /**
-   * W1-T191 SITE 4 (impl-EP) — the feedback-landing bridge, same shape `PanelGraphDeps.feedbackLand`
-   * carries. Absent ⇒ the raw local write, unchanged, which is what every test and every
-   * worktree-rooted caller wants. Supplied by the live server so a Refine grill lands on a bot branch
-   * instead of dirtying the daemon's own checkout.
-   */
-  feedbackLand?: LandFeedbackOpts;
+  /** W1-T5525: the state root the grill queues under for the daemon sweep (serve passes panelGraphDeps); absent ⇒ `root`. */
+  inboxRoot?: string;
 }
 
 // ── GROUND: consult the "plan" skill's OWN registry-declared grounding_sources ──────────────
@@ -186,6 +181,7 @@ export interface RunSkillResult {
   mode?: string;
   taskId: string;
   feedback: FeedbackEntry;
+  landing?: "queued";
 }
 
 /**
@@ -249,24 +245,21 @@ export function buildRunSkillRoute(deps: PanelSkillRunDeps): Route {
       const lint = lintTask(task);
       const grillText = buildClarifyGrill(task, lint, grounding);
       const origin = bearerTokenId(req);
-      const captured = captureFeedback(deps.root, { raw: grillText, origin: "ui", land: requestPathLand(deps.feedbackLand ?? {}, deps.ledgerPath, input.taskId, origin) });
-      // impl-EP: previously unreported twin of the reconcile-path defect — the same raw write into
-      // the daemon's checkout, on the `grilling` flip. Bridged the same way, and absent ⇒ unchanged.
-      const entry: FeedbackEntry = setFeedbackStatus(
-        deps.root,
-        captured.id,
-        "grilling",
-        deps.feedbackLand ? { land: requestPathLand(deps.feedbackLand, deps.ledgerPath, input.taskId, origin) } : {},
-      );
+      const stateRoot = deps.inboxRoot ?? deps.root;
+      const captured = captureFeedback(deps.root, { raw: grillText, origin: "ui", land: { stateRoot } });
+      // W1-T5525: the flip rewrites the capture's own untracked file, then the daemon sweep lands those bytes.
+      const entry: FeedbackEntry = setFeedbackStatus(deps.root, captured.id, "grilling");
+      const staged = queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), stateRoot);
 
       appendPanelLedger(deps.ledgerPath, "panel.skill_invoked", input.taskId, origin, {
         skill: input.skill,
         mode: input.mode,
         feedback_id: entry.id,
         grilling: true,
+        ...(staged.queued ? { landing: "queued" } : { landing_error: staged.error }),
       });
 
-      const body: RunSkillResult = { ok: true, skill: input.skill, mode: input.mode, taskId: input.taskId, feedback: entry };
+      const body: RunSkillResult = { ok: true, skill: input.skill, mode: input.mode, taskId: input.taskId, feedback: entry, ...(staged.queued ? { landing: "queued" as const } : {}) };
       sendJson(res, 200, body);
     }),
   };

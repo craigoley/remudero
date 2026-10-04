@@ -1,6 +1,9 @@
 import type { FeedbackEntry } from "./feedback.js";
 import { updateProposalRegistry, type Proposal } from "./inbox.js";
 import type { RawAlert } from "./ops.js";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 export const CODEQL_QUALITY_PROPOSAL_PREFIX = "codeql-quality:";
 
@@ -25,6 +28,27 @@ export interface CodeqlQualityReconciliation {
   createdProposalId?: string;
   updatedProposalIds: string[];
   retiredProposalIds: string[];
+  deltas: CodeqlQualityDelta[];
+}
+
+export interface CodeqlFilingSnapshot {
+  proposalId: string;
+  ruleId: string;
+  alertNumbers: string[];
+  scannerSha?: string;
+}
+
+export interface CodeqlQualityDelta extends CodeqlFilingSnapshot {
+  sourceProposalId: string;
+}
+
+export function codeqlSnapshot(proposal: Proposal): CodeqlFilingSnapshot | undefined {
+  const line = proposal.summary.split("\n").find((row) => row.startsWith("CodeQL-Snapshot: "));
+  if (!line) return undefined;
+  const value = JSON.parse(line.slice("CodeQL-Snapshot: ".length)) as CodeqlFilingSnapshot;
+  if (value.proposalId !== proposal.id || !value.ruleId || !Array.isArray(value.alertNumbers) ||
+    value.alertNumbers.some((id) => typeof id !== "string" || !id)) throw new Error(`invalid CodeQL snapshot: ${proposal.id}`);
+  return value;
 }
 
 function hasTag(alert: RawAlert, tag: string): boolean {
@@ -69,7 +93,7 @@ function activeCodeqlRuleIds(proposals: Proposal[]): ReadonlySet<string> {
   return new Set(
     proposals
       .filter((proposal) => proposal.id.startsWith(CODEQL_QUALITY_PROPOSAL_PREFIX))
-      .map((proposal) => proposal.id.slice(CODEQL_QUALITY_PROPOSAL_PREFIX.length)),
+      .map((proposal) => codeqlSnapshot(proposal)?.ruleId ?? proposal.id.slice(CODEQL_QUALITY_PROPOSAL_PREFIX.length)),
   );
 }
 
@@ -98,6 +122,21 @@ function proposalSummary(ruleId: string, alerts: CodeqlQualityAlert[]): string {
   );
 }
 
+function snapshotSummary(snapshot: CodeqlFilingSnapshot, alerts: CodeqlQualityAlert[]): string {
+  return `${proposalSummary(snapshot.ruleId, alerts)}\nCodeQL-Snapshot: ${JSON.stringify(snapshot)}`;
+}
+
+function filedSnapshots(registryPath: string): CodeqlFilingSnapshot[] {
+  try {
+    const rows = JSON.parse(readFileSync(join(dirname(registryPath), "opportunity-outcomes.json"), "utf8")) as Array<{ task?: unknown; codeql?: CodeqlFilingSnapshot }>;
+    if (!Array.isArray(rows)) throw new Error("malformed opportunity filing receipts");
+    return rows.filter((r) => r.task && r.codeql).map((r) => r.codeql!);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+}
+
 function groupByRule(alerts: CodeqlQualityAlert[]): Map<string, CodeqlQualityAlert[]> {
   const grouped = new Map<string, CodeqlQualityAlert[]>();
   for (const alert of alerts) {
@@ -116,11 +155,14 @@ export function reconcileCodeqlQualityProposals(
   registryPath: string,
   alerts: RawAlert[],
   feedback: FeedbackEntry[],
+  options: { scannerSha?: string; ratified?: readonly CodeqlFilingSnapshot[] } = {},
 ): CodeqlQualityReconciliation {
+  const ratified = options.ratified ?? filedSnapshots(registryPath);
   let result: CodeqlQualityReconciliation = {
     partition: partitionCodeqlQualityAlerts(alerts, feedback, []),
     updatedProposalIds: [],
     retiredProposalIds: [],
+    deltas: [],
   };
   updateProposalRegistry(registryPath, (current) => {
     const partition = partitionCodeqlQualityAlerts(alerts, feedback, current);
@@ -128,9 +170,11 @@ export function reconcileCodeqlQualityProposals(
     const currentCodeql = current.filter((proposal) => proposal.id.startsWith(CODEQL_QUALITY_PROPOSAL_PREFIX));
     const updatedProposalIds: string[] = [];
     const retiredProposalIds: string[] = [];
+    const deltas: CodeqlQualityDelta[] = [];
     let changed = false;
     const next = current.flatMap((proposal) => {
       if (!proposal.id.startsWith(CODEQL_QUALITY_PROPOSAL_PREFIX)) return [proposal];
+      if (ratified.some((pin) => pin.proposalId === proposal.id) || proposal.id.includes(":delta:")) return [proposal];
       const ruleId = proposal.id.slice(CODEQL_QUALITY_PROPOSAL_PREFIX.length);
       const matched = actionableByRule.get(ruleId);
       if (!matched || matched.length === 0) {
@@ -138,27 +182,43 @@ export function reconcileCodeqlQualityProposals(
         changed = true;
         return [];
       }
-      const summary = proposalSummary(ruleId, matched);
+      const summary = snapshotSummary({ proposalId: proposal.id, ruleId, alertNumbers: matched.map((a) => a.id), scannerSha: options.scannerSha }, matched);
       if (proposal.summary === summary) return [proposal];
       updatedProposalIds.push(proposal.id);
       changed = true;
       return [{ ...proposal, summary }];
     });
-    const activeRuleIds = activeCodeqlRuleIds(currentCodeql);
+    const activeRuleIds = new Set(activeCodeqlRuleIds(currentCodeql));
+    for (const pin of ratified) activeRuleIds.add(pin.ruleId);
     const firstUnassignedRule = [...groupByRule(partition.unassigned).keys()].sort((left, right) => left.localeCompare(right))[0];
     let createdProposalId: string | undefined;
     if (firstUnassignedRule && !activeRuleIds.has(firstUnassignedRule)) {
       const id = codeqlQualityProposalId(firstUnassignedRule);
       next.push({
         id,
-        summary: proposalSummary(firstUnassignedRule, actionableByRule.get(firstUnassignedRule) ?? []),
+        summary: snapshotSummary({ proposalId: id, ruleId: firstUnassignedRule, alertNumbers: (actionableByRule.get(firstUnassignedRule) ?? []).map((a) => a.id), scannerSha: options.scannerSha }, actionableByRule.get(firstUnassignedRule) ?? []),
         evidenceAnchors: [],
         retainAfterRatification: true,
       });
       createdProposalId = id;
       changed = true;
     }
-    result = { partition, createdProposalId, updatedProposalIds, retiredProposalIds };
+    for (const pin of ratified) {
+      const known = new Set(ratified.filter((s) => s.ruleId === pin.ruleId).flatMap((s) => s.alertNumbers));
+      for (const proposal of next) {
+        const snapshot = codeqlSnapshot(proposal);
+        if (proposal.id.includes(":delta:") && snapshot?.ruleId === pin.ruleId) for (const id of snapshot.alertNumbers) known.add(id);
+      }
+      const added = partition.eligible.filter((a) => a.ruleId === pin.ruleId && !known.has(a.id) && !partition.rejected.includes(a));
+      if (added.length === 0) continue;
+      const alertNumbers = added.map((a) => a.id);
+      const suffix = createHash("sha256").update(JSON.stringify(alertNumbers)).digest("hex").slice(0, 16);
+      const delta: CodeqlQualityDelta = { proposalId: `${pin.proposalId}:delta:${suffix}`, sourceProposalId: pin.proposalId, ruleId: pin.ruleId, alertNumbers, scannerSha: options.scannerSha };
+      deltas.push(delta);
+      next.push({ id: delta.proposalId, summary: snapshotSummary(delta, added), evidenceAnchors: [], retainAfterRatification: true });
+      changed = true;
+    }
+    result = { partition, createdProposalId, updatedProposalIds, retiredProposalIds, deltas };
     return changed ? next : null;
   });
   return result;
