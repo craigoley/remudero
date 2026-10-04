@@ -1,0 +1,46 @@
+- id: W1-T5624
+  title: "A WORKER THREAD MAKES NO SETUP DIRS AND A FOREIGN-NAMESPACE RUN KEEPS ITS OWN — every `new Worker({execArgv: process.execArgv})` re-runs test/setup's `installGhRefusalStub` and `installNoLiveRemote`, minting two `rmd-test-gh-*-<parentpid>-` dirs that a `terminate()` leaks, and `reapDeadOwnerDirs` judges liveness by pid alone behind a 60 s age read from a dir mtime that never moves, so a live run in another container's pid namespace loses its gh refusal stub after a minute"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the test setup's own dirs
+  origin: "operator session 2026-10-04: reviewing reapDeadOwnerDirs (W1-T5550, #9050)"
+  plan_refs: [W1-T5550, W1-T4119, W1-T4226, W1-T4805]
+  files: [test/setup/no-live-remote.ts, test/setup/tmp-hygiene.ts, test/a-worker-thread-makes-no-setup-dirs-and-a-foreign-namespace-dir-is-kept.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main d13d797c.
+    (a) WORKER THREADS. src passes `execArgv: process.execArgv` to every `new Worker`
+    (read-model-worker, status, serve-plan-reload, secret-boundary, console-projection-worker,
+    read-model-slow-lane); under the test runner that includes
+    `--import ./test/setup/tmp-hygiene.ts`. MEASURED with a scratch main+worker run under that
+    import: the worker (isMainThread=false) makes its own rmd-test-gh-config-<pid>- and
+    rmd-test-gh-refuse-<pid>- dirs, named with the PARENT's pid. A natural exit removes them; after
+    `worker.terminate()` (12 call sites in src) the worker's `process.on("exit")` never fires and
+    both dirs outlive the parent. The worker gains nothing from them: its env copy already carries
+    GH_CONFIG_DIR and the stub PATH.
+    (b) NAMESPACES. `DEAD_OWNER_MIN_AGE_MS`'s own doc says the age is the guard against a pid alive
+    in another pid namespace, but `reapDeadOwnerDirs` ages by `lstatSync(dir).mtimeMs`, set at
+    creation and never moved (refusals.log is created at install, so appends do not touch the
+    dir). Another container's run older than 60 s on a shared TMPDIR loses its GH_CONFIG_DIR and
+    refusal stub; its PATH then reaches the real gh, and `ghRefusalCount` reads 0, so the W1-T4226
+    exit check passes silently.
+  design: |
+    1. Skip `installNoLiveRemote`'s mkdtemp, `installGhRefusalStub` and both load-time reaps when
+       `!isMainThread` (node:worker_threads); the inherited env already holds the containment.
+    2. Name each setup dir `<prefix><pid>-<nsid>-<rand>`, nsid being the inode from
+       readlinkSync("/proc/self/ns/pid"), or "0" where /proc is absent (macOS).
+       `reapDeadOwnerDirs` keeps a dir whose nsid differs from its own (keep reason
+       "foreign-namespace") unless it is older than 24 h. Inject the ns reader through
+       `DeadOwnerReapDeps`.
+  acceptance:
+    - claim: "a worker thread loading the test setup creates no rmd-test-gh-* dir, and a dead-pid setup dir from another pid namespace younger than 24 h is kept as foreign-namespace"
+      proof: "unit test: test/a-worker-thread-makes-no-setup-dirs-and-a-foreign-namespace-dir-is-kept.test.ts"
+  falsifier: |
+    Drop the isMainThread guard and the worker test sees two new dirs. Drop the nsid comparison and
+    the foreign dir is reported removed.

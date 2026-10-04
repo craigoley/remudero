@@ -1,0 +1,40 @@
+- id: W1-T5620
+  title: "THE FEEDBACK-LANDING SWEEP'S PLAN-PR PREFLIGHT RUNS OFF THE DAEMON LOOP — W1-T5521 (#8993) moved the sweep's rungs to `planPrPreflightAtCommitAsync`, but `landPending`'s `pushOnce` (src/lib/feedback-landing.ts) still calls the sync `planPrPreflightAtCommit`, so a per-iteration `sweepFeedbackLanding` that pushes holds the loop for the whole preflight (~290 s measured for W1-T5521)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one defect — the async sweep and its rung wiring
+  origin: "operator session 2026-10-04: W1-T5521 (#8993) left sweepFeedbackLanding on the sync preflight"
+  plan_refs: [W1-T5521, W1-T5460, W1-T5525, W1-T5348, W1-T530, W1-T5284]
+  files: [src/lib/feedback-landing.ts, src/run-task.ts, test/the-feedback-landing-preflight-runs-off-the-daemon-loop.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main d13d797c. `pushOnce` inside `landPending`
+    (src/lib/feedback-landing.ts) runs `opts.planPrPreflight ?? planPrPreflightAtCommit(root, ...)`:
+    a sync `git worktree add` followed by `planPrPreflight`'s `spawnSync` checks (lint-plan,
+    task-id-existence, check-proof per proof, the shard census). `sweepFeedbackLanding` reaches it
+    from `sweepFeedbackLandingRung` (src/run-task.ts), which the daemon awaits in-process every
+    iteration (src/lib/daemon.ts); `DaemonDeps.sweepFeedbackLanding` is already Promise-typed.
+    W1-T5521 moved only sweep.ts's `planPrPreflightImpl`; its shard named this caller as a known
+    sibling left out of scope.
+    Ledger 10-02T23:58Z..10-04T11:35Z: 122 `feedback.landing_sweep` rows, all `pushed:false`, so
+    the stall is latent today. W1-T5460 (#8929) queues console decisions for this sweep and
+    W1-T5525 (#9049) routed the remaining console writes here, so pushes, and stalls, will grow.
+  design: |
+    Make the daemon path async end to end. Add `sweepFeedbackLandingAsync`, whose `landPending`
+    `pushOnce` awaits `planPrPreflightAtCommitAsync`; the `planPrPreflight` opt accepts a Promise.
+    `refusedPlanPrTrees` caching and `refuseRedPlanPr` semantics stay byte-identical.
+    `sweepFeedbackLandingRung` wires the async form. `landFeedback` (CLI and captureFeedback),
+    `landPlanReconcileShards` and the boot-time call keep the sync form. Sync git fetch and push
+    stay W1-T5284's concern.
+  acceptance:
+    - claim: "the daemon's feedback-landing sweep awaits its plan-PR preflight as child processes: a timer scheduled before a slow preflight check fires while the check runs, and a red verdict still pushes nothing"
+      proof: "unit test: test/the-feedback-landing-preflight-runs-off-the-daemon-loop.test.ts"
+  falsifier: |
+    Wire the sync `planPrPreflightAtCommit` back into the daemon rung. The suite's timer does not
+    fire until the slow fake check returns.
