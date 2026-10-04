@@ -15,6 +15,9 @@ import {
   type OperatorMessageCheckResult,
 } from "./operator-message.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
+// W1-T5283: the escalation and issue-gateway bodies are written ONCE as steps (W1-T5284's driver
+// pair): runStepsSync for the CLI callers, runStepsAsync for the main-health rung on the daemon loop.
+import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
 import { validateDecisionSummary, type DecisionSummary, type SummarizeDeps } from "./feedback.js";
 import type { Mount, Mounts } from "./mounts.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
@@ -333,53 +336,6 @@ export function parseLabelledIssuesRest(raw: string): LabelledIssue[] {
     .map((i) => ({ number: i.number, url: i.html_url, state: i.state, title: i.title, body: i.body }));
 }
 
-
-/** One effect a {@link Steps} body yields: a call that may return a promise. */
-type StepEffect = () => unknown;
-
-/**
- * W1-T5283 — the sync/async driver pair W1-T5284 (#9159) adds to git-push.ts, the same shape: a body
- * written ONCE as a generator that yields each gh effect, run by {@link runStepsSync} (calls it) for
- * the CLI callers and by {@link runStepsAsync} (awaits it) for the daemon loop. A throwing effect is
- * thrown back in at its `yield`, so every catch arm is the same code under both drivers. Fold these
- * onto git-push.ts's exports once both have landed.
- */
-export type Steps<R> = Generator<StepEffect, R, unknown>;
-
-/** Yield one effect; resumes with its value (awaited, under {@link runStepsAsync}). */
-export function* step<T>(effect: () => T | Promise<T>): Generator<StepEffect, T, unknown> {
-  return (yield effect) as T;
-}
-
-export function runStepsSync<R>(steps: Steps<R>): R {
-  let next = steps.next();
-  while (!next.done) {
-    let value: unknown;
-    try {
-      value = next.value();
-    } catch (error) {
-      next = steps.throw(error);
-      continue;
-    }
-    next = steps.next(value);
-  }
-  return next.value;
-}
-
-export async function runStepsAsync<R>(steps: Steps<R>): Promise<R> {
-  let next = steps.next();
-  while (!next.done) {
-    let value: unknown;
-    try {
-      value = await next.value();
-    } catch (error) {
-      next = steps.throw(error);
-      continue;
-    }
-    next = steps.next(value);
-  }
-  return next.value;
-}
 
 export interface IssueGateway {
   /** Create a labeled issue; returns its URL. */

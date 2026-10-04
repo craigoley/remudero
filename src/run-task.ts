@@ -491,10 +491,7 @@ import {
   ghIssueGateway,
   ghIssueGatewayAsync,
   presenceMode,
-  runStepsAsync,
-  runStepsSync,
   setPresenceMode,
-  step,
   tryEscalate,
   type Escalation,
   type EscalationClass,
@@ -503,7 +500,7 @@ import {
   type EscalationOption,
   type IssueGateway,
   type OpenIssue,
-  type PresenceMode, prReferentFromIssueText, loadEscalationLinkSecret, type Steps,} from "./lib/escalate.js";
+  type PresenceMode, prReferentFromIssueText, loadEscalationLinkSecret,} from "./lib/escalate.js";
 import {
   boardPrsRestArgs,
   checkRunsRestArgs,
@@ -2598,7 +2595,11 @@ import {
   gitPushRunBranchAsync,
   gitPushEmptyCommit,
   LanePushForeignHeadError,
+  runStepsAsync,
+  runStepsSync,
+  step,
   type PushRunBranchAsyncOpts,
+  type Steps,
 } from "./lib/git-push.js";
 import {
   ensureWorkerKeychain,
@@ -34234,8 +34235,7 @@ function* requeueActionsJobSteps(
   }
 }
 
-/** W1-T5283 — {@link requeueActionsJob} for the daemon's main-health rung: the same steps, with the
- *  rerun POST awaited on {@link ghTextAsync}. */
+/** W1-T5283 — {@link requeueActionsJob} for the main-health rung, the rerun POST awaited. */
 export function requeueActionsJobAsync(
   owner: string,
   repo: string,
@@ -35835,7 +35835,6 @@ export async function daemonCommand(
   // not two. Serve still only writes the signed marker and never receives this callback.
   const mainHealthRung = buildMainHealthRung(target.owner, target.repo, {
     fetch: (args) => ghJsonAsync(args),
-    // W1-T5283: the issue gateway, the CI evidence read and the requeue are awaited too.
     issues: ghIssueGatewayAsync(target.owner, target.repo),
     ledgerPath,
     runId,
@@ -38638,7 +38637,6 @@ export function defaultCiAnnotationFetch(owner: string, repo: string, checkRunId
   return failureAnnotationLines(out);
 }
 
-/** W1-T5283 — {@link defaultCiAnnotationFetch} with the read awaited on {@link ghTextAsync}. */
 export async function defaultCiAnnotationFetchAsync(owner: string, repo: string, checkRunId: string): Promise<string[]> {
   return failureAnnotationLines(await ghTextAsync(["api", `repos/${owner}/${repo}/check-runs/${checkRunId}/annotations`]));
 }
@@ -38660,7 +38658,6 @@ export function defaultCiJobLogFetch(owner: string, repo: string, jobId: string)
   });
 }
 
-/** W1-T5283 — {@link defaultCiJobLogFetch} with the read awaited on {@link ghTextAsync}. */
 export function defaultCiJobLogFetchAsync(owner: string, repo: string, jobId: string): Promise<string> {
   return ghTextAsync(["api", `repos/${owner}/${repo}/actions/jobs/${jobId}/logs`], { maxBuffer: 1 << 22 });
 }
@@ -38760,16 +38757,13 @@ export function fetchCiFailures(
   return runStepsSync(ciFailuresSteps(owner, repo, rollup, tailLines, ciFetchOptions(options)));
 }
 
-/** W1-T5283 — {@link CiFailureFetchOptions} whose reads may be awaited. */
 export interface CiFailureFetchOptionsAsync {
   fetchAnnotations?: (owner: string, repo: string, checkRunId: string) => string[] | Promise<string[]>;
   fetchJobLog?: (owner: string, repo: string, jobId: string) => string | Promise<string>;
   annotationReadLimit?: number;
 }
 
-/** W1-T5283 — {@link fetchCiFailures} for the daemon's main-health rung: the SAME steps, with each
- *  annotation and job-log read awaited (by default on {@link ghTextAsync}), so the failures, causes
- *  and tail sources are the sync form's. */
+/** W1-T5283 — {@link fetchCiFailures}'s SAME steps for the main-health rung, each read awaited. */
 export function fetchCiFailuresAsync(
   owner: string,
   repo: string,

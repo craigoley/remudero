@@ -23,9 +23,6 @@ import {
   ghIssueGateway,
   ghIssueGatewayAsync,
   NEEDS_HUMAN_LABEL,
-  runStepsAsync,
-  runStepsSync,
-  step,
   tryEscalate,
   tryEscalateAsync,
   type Escalation,
@@ -434,18 +431,4 @@ test("W1-T5283: the async defaults shell out to gh: the issue gateway, both evid
   } finally {
     gh.restore();
   }
-});
-
-test("W1-T5283: the step drivers resume a step's value and throw its failure back into the steps", async () => {
-  function* steps(effect: () => unknown): Generator<() => unknown, string, unknown> {
-    try {
-      return `ok:${String(yield* step(effect))}`;
-    } catch (error) {
-      return `caught:${(error as Error).message}`;
-    }
-  }
-  assert.equal(runStepsSync(steps(() => 1)), "ok:1");
-  assert.equal(await runStepsAsync(steps(async () => 2)), "ok:2");
-  assert.equal(runStepsSync(steps(() => { throw new Error("sync"); })), "caught:sync");
-  assert.equal(await runStepsAsync(steps(async () => { throw new Error("async"); })), "caught:async");
 });
