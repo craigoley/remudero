@@ -18,6 +18,9 @@
  *    (src/lib/github-transport.ts) refuses before spawning gh; GH_CONFIG_DIR points at an empty
  *    per-process dir so the operator's keyring login is unreachable.
  *  - App: GH_APP_PRIVATE_KEY_PATH / GH_APP_ID / GH_APP_INSTALLATION_ID are removed.
+ *  - scratch (W1-T5631): RMD_SCRATCH_SWITCH points at a dead path and RMD_SCRATCH is removed, so
+ *    deploy/scratch-mounts.sh never reads the host's real switch file: a recycle fixture plans no
+ *    scratch bind and mkdirs nothing under the real /mnt/scratch/rmd.
  * Children inherit all of it (a booted daemon, a spawned `bin/rmd`, a raw `git push`).
  * `RMD_ALLOW_LIVE_WRITES=1` stays the one whole-process opt-out.
  *
@@ -32,6 +35,9 @@ import { discoverLiveLedgerRoot, isTestRunner, LIVE_LEDGER_DENY_ROOT_ENV, LIVE_W
 
 /** Where every rewritten github.com push URL lands. It does not exist; its NAME is the message. */
 export const DEAD_PUSH_ROOT = "file:///nonexistent/W1-T4805-live-github-push-blocked-by-the-test-suite/";
+
+/** W1-T5631: the scratch switch every test process reads. It does not exist; its NAME is the message. */
+export const DEAD_SCRATCH_SWITCH = "/nonexistent/W1-T5631-scratch-switch-blocked-by-the-test-suite";
 
 /** The github.com push URL forms the rewrite covers. */
 export const GITHUB_PUSH_PREFIXES: readonly string[] = ["https://github.com/", "git@github.com:", "ssh://git@github.com/"];
@@ -55,6 +61,8 @@ export function installNoLiveRemote(env: NodeJS.ProcessEnv = process.env): { ghC
   if (env[LIVE_WRITE_OVERRIDE_ENV] === "1") return {};
   env[LIVE_LEDGER_DENY_ROOT_ENV] = discoverLiveLedgerRoot(env);
   for (const prefix of GITHUB_PUSH_PREFIXES) appendGitConfigEnv(`url.${DEAD_PUSH_ROOT}.pushInsteadOf`, prefix, env);
+  env.RMD_SCRATCH_SWITCH = DEAD_SCRATCH_SWITCH;
+  delete env.RMD_SCRATCH;
   env.GIT_TERMINAL_PROMPT = "0";
   env.GH_TOKEN = LIVE_WRITE_SENTINEL_TOKEN;
   env.GITHUB_TOKEN = LIVE_WRITE_SENTINEL_TOKEN;
