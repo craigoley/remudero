@@ -14,7 +14,9 @@ export interface StrikeLadderDecision {
 
 export function decideStrikeLadderRung(input: StrikeLadderInput): StrikeLadderDecision {
   const hold = (reason: string): StrikeLadderDecision => ({ rung: "hold", reason: `strike ladder hold: ${reason}` });
-  if (!input.mainTip?.sha || !Number.isFinite(Date.parse(input.mainTip.committedAt))) return hold("main tip unreadable");
+  if (input.mainTip === undefined) return hold("main tip unavailable");
+  if (!input.mainTip.sha) return hold("main tip sha unreadable");
+  if (!Number.isFinite(Date.parse(input.mainTip.committedAt))) return hold("main tip commit time unreadable");
   if (!input.currentMergeBaseSha) return hold("merge base unreadable");
   if (input.lastAttemptAt === undefined || (input.lastAttemptAt !== null && !Number.isFinite(Date.parse(input.lastAttemptAt)))) return hold("last attempt unreadable");
   if (!Number.isInteger(input.rebuildsSoFar) || input.rebuildsSoFar! < 0) return hold("rebuild notes unreadable");

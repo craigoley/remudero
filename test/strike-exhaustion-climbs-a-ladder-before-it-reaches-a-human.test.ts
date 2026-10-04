@@ -208,6 +208,15 @@ test("W1-T5536: a laddered PR never opens a per-PR escalation issue", async (t) 
 test("W1-T5536: pure decisions preserve unreadable inputs, attempt history and cause identity", () => {
   const input = { mainTip: MAIN, lastAttemptAt: stamp(-2000), currentMergeBaseSha: "old-main", rebuildsSoFar: 0, requeueable: true, refreshedAtMainTip: false };
   assert.equal(decideStrikeLadderRung(input).rung, "refresh");
+  for (const [mainTip, reason] of [
+    [undefined, "main tip unavailable"],
+    [{ ...MAIN, sha: "" }, "main tip sha unreadable"],
+    [{ ...MAIN, committedAt: "bad" }, "main tip commit time unreadable"],
+  ] as const) {
+    assert.deepEqual(decideStrikeLadderRung({ ...input, mainTip }), {
+      rung: "hold", reason: `strike ladder hold: ${reason}`,
+    });
+  }
   for (const over of [{ mainTip: undefined }, { mainTip: { ...MAIN, committedAt: "bad" } }, { currentMergeBaseSha: undefined }, { lastAttemptAt: undefined }, { lastAttemptAt: "bad" }, { rebuildsSoFar: -1 }, { rebuildsSoFar: 1.5 }, { requeueable: undefined }, { refreshedAtMainTip: undefined }]) {
     assert.equal(decideStrikeLadderRung({ ...input, ...over }).rung, "hold");
   }

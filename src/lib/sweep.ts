@@ -10655,7 +10655,7 @@ export async function runSweep(
   const applyStrikeLadder = async (pr: OpenPrView): Promise<string> => {
     const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, head_sha: pr.headSha };
     const record = (step: string, extra: Record<string, unknown>) => {
-      const line = { ...row, ts: new Date(now).toISOString(), step, ...extra };
+      const line = { ...row, ts: clockFromMillisFn(() => now).iso(), step, ...extra };
       appendLine(deps.ledgerPath, line);
       strikeLadderRows.push(line);
     };
@@ -10703,7 +10703,7 @@ export async function runSweep(
           `Unmet claims: ${pr.unmetCriteria.map(c => `${c.claim}: ${c.reason}`).join("; ")}\n` +
           `Strike history: ${JSON.stringify(pr.strikeHistory ?? [])}\nfix.commit_refused: ${JSON.stringify(refusals)}`,
         );
-        if (!effects!.appendNote({ taskId: pr.taskId!, author: "strike-ladder", ts: new Date(now).toISOString(), note })) {
+        if (!effects!.appendNote({ taskId: pr.taskId!, author: "strike-ladder", ts: clockFromMillisFn(() => now).iso(), note })) {
           return hold(`closed PR ${pr.prUrl} but the durable failure note could not be written`);
         }
         record("sweep.strike_ladder.requeued", { rebuild: rebuilds + 1, cause_key: causeKey });
