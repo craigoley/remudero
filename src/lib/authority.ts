@@ -484,6 +484,20 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
       "classifier, active-head reread and SHA-preserving chunk pruner. The full-sweep cadence is " +
       "throttled by a branch-set fingerprint and six-hour bound; the light in-flight pass cannot reach it.",
   },
+  // ── src/lib/machine-filing-judge.ts ──────────────────────────────────────────────────────
+  {
+    id: "machine-judge-withdraw-stale-pr",
+    action: "close the machine-filing judge's own open plan PR once origin/main has invalidated a ruling pin it lands",
+    module: "src/lib/machine-filing-judge.ts",
+    symbol: "runMachineFilingJudge (pending-PR stale-pin withdrawal)",
+    boundary: "gh-pr-close",
+    gate: "always",
+    ledgerSteps: ["machine_judge.withdrawn"],
+    verb: "rmd daemon (machine-judge garden, `rmd garden run machine-judge`)",
+    note:
+      "W1-T5317: fires only on a judge PR the judge itself opened and still holds as pending, and only when a record's " +
+      "pin on origin/main no longer matches the ruled or source pin; the records are judged again, never declined.",
+  },
   // ── src/lib/onboard/synthesize.ts ────────────────────────────────────────────────────────
   {
     id: "onboard-pr",
