@@ -282,6 +282,8 @@ export interface RunSummary {
   startTs: string;
   verdict: string;
   costUsd: number;
+  /** W1-T5526: `none` when no verdict line and no worker row priced the run — its 0 is unknown, not free. */
+  costSource?: "none";
   numTurns: number;
   prUrl?: string;
   /** The ledger-claimed PR url a `correction.provenance` line overrode; `prUrl` above is always
@@ -393,7 +395,14 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
     const outputTokens = lines
       .filter((l) => l.step && DONE_STEPS.has(l.step))
       .reduce((s, l) => s + outputTokensOf(l), 0);
-    const costLine = verdictLine ?? lines.find((l) => typeof l.cost_usd === "number");
+    // W1-T5526: with no verdict line, the worker's own DONE_STEPS rows price the run — never a probe,
+    // cost.anomaly, risk_judge or budget.warning row, which came first on every live settled run.
+    const workerCostRows = lines.filter(
+      (l) => l.step && DONE_STEPS.has(l.step) && (typeof l.cost_usd === "number" || typeof l.total_cost_usd === "number"),
+    );
+    const costUsd = verdictLine
+      ? typeof verdictLine.cost_usd === "number" ? verdictLine.cost_usd : 0
+      : workerCostRows.reduce((s, l) => s + costOf(l), 0);
     const prLine =
       lines.find((l) => l.step === "pr.opened") ?? verdictLine ?? lines.find((l) => l.pr_url);
     const claimedPrUrl = typeof prLine?.pr_url === "string" ? prLine.pr_url : undefined;
@@ -408,7 +417,8 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
       type: String(start.type ?? "unknown"),
       startTs: String(start.ts ?? ""),
       verdict: credit ? "merged" : observedVerdict,
-      costUsd: typeof costLine?.cost_usd === "number" ? costLine.cost_usd : 0,
+      costUsd,
+      ...(!verdictLine && workerCostRows.length === 0 ? { costSource: "none" as const } : {}),
       numTurns,
       outputTokens,
       prUrl,
