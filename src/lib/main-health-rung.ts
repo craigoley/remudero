@@ -13,8 +13,11 @@ import {
   classifyCiInfrastructureFailure,
   dedupeRollupByLatestAttempt,
   enrichMainHealthObservation,
+  failedMainGuardRuns,
   mainHealthEscalationDecision,
+  mainHealthFallbackRuns,
   mainHealthFromRollup,
+  mainHealthHeadInconclusive,
   requeuedCheckKeysFromLedger,
   type CiFailure,
   type MainHealthObservation,
@@ -114,6 +117,8 @@ function requiredString(value: unknown, field: string): string {
 
 interface WorkflowRunHistoryResponse {
   workflow_runs?: ReadonlyArray<{
+    id?: unknown;
+    name?: unknown;
     head_sha?: unknown;
     conclusion?: unknown;
     html_url?: unknown;
@@ -149,12 +154,40 @@ function mainPushRunHistoryFromResponse(response: WorkflowRunHistoryResponse): M
         .filter((pr) => pr.number !== undefined || pr.url !== undefined);
       return {
         headSha: run.head_sha,
+        ...(typeof run.name === "string" ? { workflowName: run.name } : {}),
+        ...(typeof run.id === "number" ? { runId: run.id } : {}),
         ...(typeof run.conclusion === "string" ? { conclusion: run.conclusion } : {}),
         ...(typeof run.html_url === "string" ? { url: run.html_url } : {}),
         ...(pullRequests.length > 0 ? { pullRequests } : {}),
       };
     })
     .filter((run): run is MainHealthRunHistoryEntry => run !== undefined);
+}
+
+interface WorkflowJobsResponse {
+  jobs?: ReadonlyArray<{
+    id?: unknown;
+    name?: unknown;
+    status?: unknown;
+    conclusion?: unknown;
+    html_url?: unknown;
+    started_at?: unknown;
+    completed_at?: unknown;
+  }>;
+}
+
+/** W1-T5490 — one completed run's jobs, shaped as rollup entries so the same judgment and the same
+ *  job-id evidence reader ({@link checkJobId} via `externalId`) apply to fallback evidence. */
+function rollupFromJobs(response: WorkflowJobsResponse | undefined): RollupCheckEntry[] {
+  return (response?.jobs ?? []).map((job) => ({
+    name: typeof job.name === "string" ? job.name : "",
+    ...(typeof job.status === "string" && job.status !== "" ? { status: job.status.toUpperCase() } : {}),
+    ...(typeof job.conclusion === "string" && job.conclusion !== "" ? { conclusion: job.conclusion.toUpperCase() } : {}),
+    ...(typeof job.html_url === "string" ? { detailsUrl: job.html_url } : {}),
+    ...(typeof job.id === "number" ? { externalId: `job:${job.id}` } : {}),
+    ...(typeof job.started_at === "string" ? { startedAt: job.started_at } : {}),
+    ...(typeof job.completed_at === "string" ? { completedAt: job.completed_at } : {}),
+  }));
 }
 
 export function escalationFor(observation: MainHealthObservation, branch: string): Escalation {
@@ -226,22 +259,105 @@ export function buildMainHealthRung(
       const sha = requiredString(commit?.sha, "default branch head sha");
       const rollup = await rollupForAsync(owner, repo, sha, deps.fetch);
       const required = new Set(deps.readRequiredChecks?.() ?? []);
-      let observation = mainHealthFromRollup(sha, rollup, required.size > 0 ? required : undefined);
+      const judgedAgainst = required.size > 0 ? required : undefined;
+      const judging = { cancelledIsPending: true } as const;
+      let observation = mainHealthFromRollup(sha, rollup, judgedAgainst, undefined, judging);
       // W1-T4472 (ii): applied BEFORE `advisoryFailing` is derived below, so a red main-tripwire
       // (never itself in `required`) is counted once, as a genuine failing check, rather than also
       // spilling into the advisory list `mainHealthFromRollup(sha, rollup, undefined)` would
       // otherwise place it on.
       observation = withTripwireOverride(observation, rollup);
+      // W1-T5490: the completed push-run history is read ONCE per observation and shared with the
+      // red-path enrichment below: it supplies fallback evidence and the guard workflows' verdicts.
+      let runHistory: MainHealthRunHistoryEntry[] | undefined;
+      let runHistoryUnavailable: string | undefined;
+      try {
+        const readMainRunHistory =
+          deps.readMainRunHistory ??
+          (async (branchName: string) =>
+            mainPushRunHistoryFromResponse(
+              (await deps.fetch(mainPushRunHistoryRestArgs(owner, repo, branchName))) as WorkflowRunHistoryResponse,
+            ));
+        runHistory = await readMainRunHistory(branch);
+        if (runHistory === undefined) runHistoryUnavailable = "the main push run-history reader returned no evidence";
+      } catch (error) {
+        runHistoryUnavailable = String((error as Error)?.message ?? error);
+        deps.log("main.health.run_history_unreadable", {
+          branch,
+          sha,
+          error: String((error as Error)?.message ?? error),
+        });
+      }
+      // W1-T5490 (a): a head whose required runs were all cancelled by the next push, or are still
+      // pending, concluded nothing — the latest COMPLETED main run that carries required checks
+      // decides instead. `decidedBySha` names which commit's evidence the verdict rests on.
+      let decidedBySha = sha;
+      let evidenceRollup: readonly RollupCheckEntry[] = rollup;
+      if (runHistory && mainHealthHeadInconclusive(observation)) {
+        for (const run of mainHealthFallbackRuns(runHistory)) {
+          let jobs: RollupCheckEntry[];
+          try {
+            jobs = rollupFromJobs(
+              (await deps.fetch(["api", `repos/${owner}/${repo}/actions/runs/${run.runId}/jobs?per_page=100`])) as WorkflowJobsResponse,
+            );
+          } catch (error) {
+            deps.log("main.health.completed_run_unreadable", {
+              branch,
+              sha,
+              run_sha: run.headSha,
+              run_id: run.runId,
+              error: String((error as Error)?.message ?? error),
+            });
+            break;
+          }
+          if (judgedRollup(jobs, required).length === 0) continue;
+          const fallback = mainHealthFromRollup(sha, jobs, judgedAgainst, undefined, judging);
+          observation = {
+            ...fallback,
+            reason: `main's head has no completed required run; the latest completed main run (${run.headSha}) decides: ${fallback.reason}`,
+          };
+          decidedBySha = run.headSha;
+          evidenceRollup = jobs;
+          break;
+        }
+      }
+      // W1-T5490 (a): a failed guard workflow reads main red even beside green required checks.
+      const guardFailures = runHistory ? failedMainGuardRuns(runHistory) : [];
+      if (guardFailures.length > 0) {
+        const guardNames = guardFailures.map((run) => run.workflowName!);
+        if (observation.state !== "red") decidedBySha = guardFailures[0]!.headSha;
+        observation = {
+          ...observation,
+          state: "red",
+          reason: `main guard workflow(s) failed on main: ${guardNames.join(", ")}${observation.state === "red" ? `; ${observation.reason}` : ""}`,
+          failingChecks: [...observation.failingChecks, ...guardNames.filter((name) => !observation.failingChecks.includes(name))],
+        };
+      }
       const advisoryFailing =
         required.size === 0
           ? []
-          : mainHealthFromRollup(sha, rollup, undefined).failingChecks.filter((name) => !observation.failingChecks.includes(name));
+          : mainHealthFromRollup(decidedBySha, evidenceRollup, undefined, undefined, judging).failingChecks.filter(
+              (name) => !observation.failingChecks.includes(name),
+            );
+      // Only CONCLUDED checks are a census `decideBaseRed` may read: a pending or skipped one is
+      // not evidence that main ran it green.
+      const notConcluded = new Set([...observation.pendingChecks, ...observation.nonEvidenceChecks]);
+      const observedChecks = [
+        ...new Set([
+          ...judgedRollup(evidenceRollup, required)
+            .map((c) => c.name ?? c.context ?? "unknown")
+            .filter((name) => !notConcluded.has(name)),
+          ...observation.failingChecks,
+        ]),
+      ];
       deps.log("main.health.observed", {
         branch,
         sha,
         state: observation.state,
         reason: observation.reason,
         failing_checks: observation.failingChecks,
+        observed_checks: observedChecks,
+        decided_by_sha: decidedBySha,
         pending_checks: observation.pendingChecks,
         non_evidence_checks: observation.nonEvidenceChecks,
         judged_against: required.size > 0 ? "ci-gate-required" : "all-checks",
@@ -267,31 +383,12 @@ export function buildMainHealthRung(
             ? new Set([...required, MAIN_TRIPWIRE_CHECK_NAME])
             : required;
         try {
-          failures = deps.readCiFailures ? await deps.readCiFailures(judgedRollup(rollup, evidenceRequired)) : undefined;
+          failures = deps.readCiFailures ? await deps.readCiFailures(judgedRollup(evidenceRollup, evidenceRequired)) : undefined;
           if (!deps.readCiFailures) ciFailuresUnavailable = "no CI failure reader configured";
           if (deps.readCiFailures && failures === undefined) ciFailuresUnavailable = "the CI failure reader returned no evidence";
         } catch (error) {
           ciFailuresUnavailable = String((error as Error)?.message ?? error);
           deps.log("main.health.ci_evidence_unreadable", {
-            branch,
-            sha,
-            error: String((error as Error)?.message ?? error),
-          });
-        }
-        let runHistory: MainHealthRunHistoryEntry[] | undefined;
-        let runHistoryUnavailable: string | undefined;
-        try {
-          const readMainRunHistory =
-            deps.readMainRunHistory ??
-            (async (branchName: string) =>
-              mainPushRunHistoryFromResponse(
-                (await deps.fetch(mainPushRunHistoryRestArgs(owner, repo, branchName))) as WorkflowRunHistoryResponse,
-              ));
-          runHistory = await readMainRunHistory(branch);
-          if (runHistory === undefined) runHistoryUnavailable = "the main push run-history reader returned no evidence";
-        } catch (error) {
-          runHistoryUnavailable = String((error as Error)?.message ?? error);
-          deps.log("main.health.run_history_unreadable", {
             branch,
             sha,
             error: String((error as Error)?.message ?? error),
@@ -323,7 +420,7 @@ export function buildMainHealthRung(
           classified.every(({ failure, signature: failureSignature }) => failure.jobId && failureSignature);
         if (allRetryable) {
           const priorKeys = requeuedCheckKeysFromLedger(readLedgerLines(deps.ledgerPath));
-          const repeated = classified.some(({ failure }) => priorKeys.has(`${sha}@${failure.name}`));
+          const repeated = classified.some(({ failure }) => priorKeys.has(`${decidedBySha}@${failure.name}`));
           if (!repeated) {
             let allDispatched = true;
             for (const { failure, signature: failureSignature } of classified) {
@@ -334,7 +431,7 @@ export function buildMainHealthRung(
                 task_id: MAIN_HEALTH_TASK_ID,
                 step: CHECK_REQUEUE_STEP,
                 surface: "main",
-                head_sha: sha,
+                head_sha: decidedBySha,
                 check_name: failure.name,
                 signature: namedSignature,
                 job_id: jobId,
@@ -359,7 +456,7 @@ export function buildMainHealthRung(
                 task_id: MAIN_HEALTH_TASK_ID,
                 step: "main.health.ci_requeued",
                 surface: "main",
-                head_sha: sha,
+                head_sha: decidedBySha,
                 check_name: failure.name,
                 signature: namedSignature,
                 job_id: jobId,

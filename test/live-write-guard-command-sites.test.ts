@@ -979,6 +979,9 @@ test("GUARDED SITE sweep fix-rung push: dispatchFix drives runFixRung to its bes
         '  *"--json state"*) echo \'{"state":"OPEN"}\' ;;',
         '  *"--json body"*) echo \'{"body":""}\' ;;',
         '  *"pr diff"*) echo "" ;;',
+        // W1-T4074: an unreadable PR diff now stands the rung down before dispatch, so the shim
+        // answers the changed-file read with the one file the run branch actually touches.
+        '  *"--json files"*) echo \'{"files":[{"path":"work.txt"}]}\' ;;',
         "  *) exit 0 ;;",
         "esac",
         "",

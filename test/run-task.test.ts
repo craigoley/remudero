@@ -1112,6 +1112,8 @@ function statefulFakeGh(opts: {
     'if (args[0] === "pr" && args[1] === "view") {',
     `  if (field === "headRefName") { process.stdout.write(JSON.stringify({ headRefName: ${JSON.stringify(opts.branch)} })); process.exit(0); }`,
     '  if (field === "body") { process.stdout.write(JSON.stringify({ body: "" })); process.exit(0); }',
+    // W1-T4074: an unreadable PR diff stands the fix rung down before dispatch — answer the read.
+    '  if (field === "files") { process.stdout.write(JSON.stringify({ files: [{ path: "src/lib/daemon.ts" }] })); process.exit(0); }',
     "}",
     // W1-T2268: `waitForCiGreen`/`pollToGate` now read REST (`gh api …`), never `gh pr view
     // --json statusCheckRollup`/`state,statusCheckRollup`. Both loops' composed-rollup reads

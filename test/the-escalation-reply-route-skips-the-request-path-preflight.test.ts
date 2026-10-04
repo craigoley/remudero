@@ -1,10 +1,11 @@
 /**
- * W1-T5473 — THE ESCALATION REPLY ROUTE SKIPS THE REQUEST-PATH PREFLIGHT.
+ * W1-T5473 — THE ESCALATION REPLY ROUTE SKIPS THE REQUEST-PATH PREFLIGHT, superseded by W1-T5525.
  *
  * PR #8891 routed the console's decision, submit and skills/run landings through `requestPathLand`, so the ~290 s
- * plan-PR preflight never runs inside a synchronous HTTP request. POST /v1/escalation/reply still called
- * `captureFeedback` with no landing options. This suite stands up a real server over a real git origin/clone pair
- * and a fake `gh`, posts one reply, and reads the ledger the route writes.
+ * plan-PR preflight never runs inside a synchronous HTTP request; #8928 did the same for POST /v1/escalation/reply.
+ * W1-T5525 deleted that skip: the reply now stages its capture under the state root for the daemon's landing
+ * sweep, which runs the preflight. This suite stands up a real server over a real git origin/clone pair and a
+ * fake `gh`, posts one reply, and pins that the request path neither runs the preflight nor lands anything.
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
@@ -22,7 +23,6 @@ import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
-const { LANDING_BRANCH } = landing;
 const TASK_ID = "W1-T9473";
 
 /** A clone of a bare origin whose main holds `files`; `heads()` lists origin's branches. */
@@ -87,26 +87,23 @@ async function postReply(deps: Parameters<typeof panel.buildEscalationReplyRoute
   }
 }
 
-test("the console's POST /v1/escalation/reply lands its capture without running the plan-PR preflight", async () => {
-  const fx = replyFixture("reply-lands");
+test("the console's POST /v1/escalation/reply queues its capture for the daemon sweep without running the plan-PR preflight", async () => {
+  const fx = replyFixture("reply-queues");
   await postReply(fx.deps);
   assert.equal(fx.counter.preflights, 0, "the reply's request path never runs the preflight checks");
-  assert.deepEqual(fx.f.heads(), [LANDING_BRANCH, "main"], "the reply's feedback entry still landed");
-  assert.equal(fx.ghCalls.filter((c) => c[1] === "create").length, 1, "the landing PR was still opened");
+  assert.deepEqual(fx.f.heads(), ["main"], "the request path lands nothing");
+  assert.equal(fx.ghCalls.length, 0, "no landing PR is opened on the request path");
+  assert.equal(landing.queuedFeedbackLandings(fx.deps.root).length, 1, "the reply's feedback entry is staged for the sweep");
 });
 
-test("an escalation reply ledgers plan_pr.preflight_skipped under the reply's task and the caller's origin", async () => {
+test("an escalation reply ledgers its queued landing and never a skipped preflight", async () => {
   const fx = replyFixture("reply-ledgers");
   await postReply(fx.deps);
   // ledger-read-intent: live
   const rows = readLedgerLines(fx.deps.ledgerPath);
-  const skipped = rows.filter((r) => r.step === "plan_pr.preflight_skipped");
-  assert.equal(skipped.length, 1, JSON.stringify(rows));
-  assert.equal(skipped[0].task_id, TASK_ID);
-  assert.equal(skipped[0].reason, "request-path");
-  assert.equal(skipped[0].lane, "feedback-landing");
+  assert.equal(rows.some((r) => r.step === "plan_pr.preflight_skipped"), false, JSON.stringify(rows));
   const replied = rows.find((r) => r.step === "panel.escalation_replied");
   assert.ok(replied, "the reply itself is still ledgered");
-  assert.equal(skipped[0].origin, replied.origin, "the skip names the same bearer as the reply");
-  assert.ok(fx.landLog.includes("plan_pr.preflight_skipped"), "the configured landing's own log still sees the skip");
+  assert.equal(replied.landing, "queued");
+  assert.deepEqual(fx.landLog, [], "the configured landing never ran");
 });

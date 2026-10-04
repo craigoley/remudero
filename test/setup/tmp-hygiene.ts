@@ -29,7 +29,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 // W1-T4805: FIRST import — process-level containment against live GitHub writes (dead push URLs, a
 // sentinel token, no App key). Every runner invocation already `--import`s this file, so it rides along.
-import { appendGitConfigEnv } from "./no-live-remote.js";
+import { appendGitConfigEnv, reapDeadOwnerDirs } from "./no-live-remote.js";
 import { reapableTmpPrefix } from "./reapable-prefix.js";
 
 /**
@@ -210,8 +210,13 @@ export function ghRefusalCount(): number {
   }
 }
 
+/** W1-T5550: the refusal stub's dir prefix. The owning pid follows it in every name, so a later
+ *  test process can remove the dir a SIGKILLed one left (see `reapDeadOwnerDirs`). */
+export const GH_REFUSE_DIR_PREFIX = "rmd-test-gh-refuse-";
+
 function installGhRefusalStub(): void {
-  const dir = fs.mkdtempSync(join(tmpdir(), "rmd-test-gh-refuse-"));
+  reapDeadOwnerDirs(GH_REFUSE_DIR_PREFIX);
+  const dir = fs.mkdtempSync(join(tmpdir(), `rmd-test-gh-refuse-${process.pid}-`));
   const ghPath = join(dir, "gh");
   const refusalsPath = join(dir, "refusals.log");
   fs.writeFileSync(refusalsPath, "");

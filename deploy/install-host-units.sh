@@ -51,6 +51,7 @@
 #   RMD_UNIT_DIR RMD_BIN_DIR RMD_LAUNCHER_PATH RMD_REVIVAL_LOG
 #   RMD_CLEANUP_PATH RMD_CLEANUP_LOG RMD_CRONTAB_CMD   (W1-T4770: root-disk janitor + cron)
 #   RMD_TMP_SWEEP_PATH RMD_TMP_SWEEP_CRON_PATH          (W1-T5036: guarded hourly temp sweep)
+#   RMD_LEGACY_USER_UNIT_DIR RMD_HOST_KERNEL            (W1-T5518: legacy user janitor is drift)
 set -euo pipefail
 
 MODE="check"
@@ -102,6 +103,40 @@ read_instance_registry() {
   ' "$registry_file"
 }
 
+# W1-T4863 — THE CREDENTIAL HAS ONE OWNER. Every instance gets its OWN writable claude_dir (D-11:
+# nothing mutable shared), so transcripts, settings and token refreshes of three daemons no longer
+# land in one directory. The subscription credential is the one thing that must still be shared, and
+# it is shared READ-ONLY: the `primary: true` instance's claude_dir holds the one writable copy (the
+# one refresher); every other instance bind-mounts that file :ro over its own directory. The owner is
+# read from the registry's existing `primary` marker, so no new field is added (both shell readers
+# refuse fields they do not know). Prints nothing when no live row is primary.
+registry_primary_claude_dir() {
+  awk '
+    function flush() { if (prim && !ret && dir != "" && out == "") out = dir }
+    { sub(/[[:space:]]+#.*/, "") }
+    /^[[:space:]]*$/ { next }
+    $0 ~ /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { flush(); dir = ""; prim = 0; ret = 0; next }
+    $0 ~ /^    claude_dir:/ { v = $0; sub(/^    claude_dir:[[:space:]]*/, "", v); gsub(/^"|"$/, "", v); dir = v }
+    $0 ~ /^    primary:[[:space:]]*true/ { prim = 1 }
+    $0 ~ /^    retired:[[:space:]]*true/ { ret = 1 }
+    END { flush(); if (out != "") print out }
+  ' "$1"
+}
+
+# The launcher's credential lines. Empty for the owner (its own claude_dir already holds the one
+# writable credential); a non-owner refuses when the owner's file is absent, because docker would
+# otherwise create a DIRECTORY at the mount source and the daemon would boot unauthenticated.
+render_credential_mount() {
+  [ -n "$CREDENTIAL_READONLY_SOURCE" ] || return 0
+  cat <<EOF
+if [ ! -f ${CREDENTIAL_READONLY_SOURCE} ]; then
+  echo "rmd-relaunch: REFUSING — the credential owner's file ${CREDENTIAL_READONLY_SOURCE} is missing." >&2
+  exit 1
+fi
+CREDENTIAL_ARGS=(-v ${CREDENTIAL_READONLY_SOURCE}:/home/node/.claude/.credentials.json:ro)
+EOF
+}
+
 require_abs_path() {
   local name="$1" value="$2"
   case "$value" in
@@ -148,6 +183,9 @@ SERVICE_UNIT_NAME="rmd-fleet.service"
 WATCHDOG_SERVICE_NAME="rmd-fleet-watchdog.service"
 WATCHDOG_TIMER_NAME="rmd-fleet-watchdog.timer"
 REGISTRY_FILE="${RMD_INSTANCE_REGISTRY:-}"
+# W1-T4863: empty = no registry names an owner, so nothing is overlaid read-only.
+CREDENTIAL_OWNER_DIR=""
+CREDENTIAL_READONLY_SOURCE=""
 
 if [ -n "$INSTANCE_NAME" ]; then
   validate_instance_name "$INSTANCE_NAME"
@@ -221,6 +259,7 @@ EOF
   SERVICE_UNIT_NAME="$service_name"
   WATCHDOG_SERVICE_NAME="$watchdog_service_name"
   WATCHDOG_TIMER_NAME="$watchdog_timer_name"
+  CREDENTIAL_OWNER_DIR="$(registry_primary_claude_dir "$REGISTRY_FILE")"
 fi
 
 # REFUSE RATHER THAN GUESS. Same posture `--print-daemon-run` takes when it cannot find a ledger:
@@ -253,6 +292,10 @@ case "$WATCHDOG_TIMER_NAME" in *.timer) : ;; *) echo "install-host-units: FATAL 
 require_abs_path "launcher_path" "$LAUNCHER"
 require_abs_path "revival_log" "$REVIVAL_LOG"
 require_abs_path "claude_dir" "$CLAUDE_DIR"
+if [ -n "$CREDENTIAL_OWNER_DIR" ]; then
+  require_abs_path "primary claude_dir" "$CREDENTIAL_OWNER_DIR"
+  [ "$CREDENTIAL_OWNER_DIR" = "$CLAUDE_DIR" ] || CREDENTIAL_READONLY_SOURCE="${CREDENTIAL_OWNER_DIR}/.credentials.json"
+fi
 require_abs_path "codex_dir" "$CODEX_DIR"
 require_abs_path "container_config_dir" "$CONTAINER_CONFIG_DIR"
 require_abs_path "cash_secret_dir" "$CASH_SECRET_DIR"
@@ -294,6 +337,85 @@ export RMD_OPENWEIGHT_API_KEY RMD_FOUNDRY_CLAUDE_API_KEY RMD_FOUNDRY_CLAUDE_ENDP
 CASH_BOOT_SECRETS
 }
 
+# Literal shell keeps the installer's environment out of the watchdog's preflight.
+render_deploy_code_refresh() {
+  cat <<'DEPLOY_CODE_REFRESH'
+deploy_code_idle() {
+  local container="$1" processes dir locks match_status
+  if ! processes="$(docker top "$container" -eo args 2>/dev/null)" || [ -z "$processes" ]; then
+    echo "rmd-relaunch: deploy code -- worker probe unreadable; deferring." >&2
+    return 1
+  fi
+  if printf '%s\n' "$processes" | grep -E 'claude .*--output-format|codex .*exec' >/dev/null; then
+    echo "rmd-relaunch: deploy code -- active workers; deferring." >&2
+    return 1
+  else
+    match_status=$?
+    if [ "$match_status" -ne 1 ]; then
+      echo "rmd-relaunch: deploy code -- worker probe unreadable (matcher failed); deferring." >&2
+      return 1
+    fi
+  fi
+  for dir in "$STATE_DIR/state/inflight" "$STATE_DIR/worktrees"; do
+    # Missing lock directories mean no locks; an unreadable existing path is unknown.
+    if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then continue; fi
+    if [ ! -d "$dir" ] || ! locks="$(find "$dir" -maxdepth 1 -name '*.lock' -print 2>/dev/null)"; then
+      echo "rmd-relaunch: deploy code -- lock probe unreadable at $dir; deferring." >&2
+      return 1
+    fi
+    if [ -n "$locks" ]; then
+      echo "rmd-relaunch: deploy code -- active locks at $dir; deferring." >&2
+      return 1
+    fi
+  done
+}
+
+deploy_code_clean() {
+  local code="$STATE_DIR/remudero" edits
+  if [ ! -e "$code/.git" ]; then
+    echo "rmd-relaunch: deploy code -- checkout missing; deferring." >&2
+    return 1
+  fi
+  if ! edits="$(GIT_OPTIONAL_LOCKS=0 git -C "$code" status --porcelain --untracked-files=all 2>/dev/null)"; then
+    echo "rmd-relaunch: deploy code -- status unreadable; deferring." >&2
+    return 1
+  fi
+  if [ -n "$edits" ]; then
+    echo "rmd-relaunch: deploy code -- local edits; deferring without discarding them." >&2
+    return 1
+  fi
+}
+
+refresh_deploy_code() {
+  local container="$1" code="$STATE_DIR/remudero" install_head
+  deploy_code_idle "$container" || return 1
+  deploy_code_clean || return 1
+  if ! git -C "$code" fetch --quiet origin main 2>/dev/null; then
+    echo "rmd-relaunch: deploy code -- fetch failed; deferring." >&2
+    return 1
+  fi
+  if ! git -C "$code" merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
+    echo "rmd-relaunch: deploy code -- checkout diverged or ancestry unreadable; deferring." >&2
+    return 1
+  fi
+  if ! install_head="$(git -C "$CHECKOUT" rev-parse HEAD 2>/dev/null)" || [ -z "$install_head" ] ||
+     ! git -C "$code" merge-base --is-ancestor "$install_head" origin/main 2>/dev/null; then
+    echo "rmd-relaunch: deploy code -- install checkout ancestry unreadable or ahead of origin/main; deferring." >&2
+    return 1
+  fi
+  # The daemon normally boots detached. An ff-only merge advances that HEAD without switching
+  # branches, resetting, cleaning, or restarting its already-loaded process.
+  deploy_code_idle "$container" || return 1
+  deploy_code_clean || return 1
+  if ! git -C "$code" merge --ff-only --quiet origin/main 2>/dev/null; then
+    echo "rmd-relaunch: deploy code -- fast-forward failed; deferring." >&2
+    return 1
+  fi
+  deploy_code_idle "$container" && deploy_code_clean
+}
+DEPLOY_CODE_REFRESH
+}
+
 render_launcher() {
   cat <<EOF
 #!/usr/bin/env bash
@@ -307,18 +429,12 @@ REVIVAL_LOG=${REVIVAL_LOG}
 CASH_SECRET_DIR=${CASH_SECRET_DIR_SHELL}
 # W1-T3269 — the checkout this host converges FROM, and the heap the installer requires. Rendered
 # in rather than re-derived, so the converge below uses the same inputs this file was rendered with.
-#
-# W1-T3604 — NOT ${STATE_DIR}/remudero. That is the DAEMON's own working tree (the checkout
-# deploy/entrypoint.sh's freshness sync moves with a detached git checkout, and worker exhaust
-# keeps dirty): journalctl on the live host read 464 refusals in 7 days and zero convergences,
-# because the tree this guard interrogated could never itself satisfy the guard.
-# ${STATE_DIR}/daemon-install is the SAME literal src/lib/install-root.ts's resolveInstallRoot
-# defaults to (config.installRoot, falling back to config.root plus "daemon-install", with
-# STATE_DIR being this script's config.root) — the checkout the deploy supervisor already keeps
-# clean and on main. Spelled out here rather than imported (this is bash, that module is
-# TypeScript) so it MUST be re-read, not re-typed, if that default ever moves. NO BACKTICKS AND NO
-# DOLLAR-PAREN IN THIS COMMENT — W1-T2953 already found that an unquoted heredoc EXECUTES both
-# while rendering.
+# W1-T3604 — daemon freshness sync detaches ${STATE_DIR}/remudero; worker exhaust keeps it dirty.
+# Using it for convergence caused 464 refusals in 7 days; the install tree stays clean and on main.
+# ${STATE_DIR}/daemon-install matches src/lib/install-root.ts's resolveInstallRoot default:
+# config.installRoot falls back to config.root plus "daemon-install"; STATE_DIR is config.root here.
+# Re-read that resolver if the default moves; this shell renderer cannot import TypeScript.
+# W1-T2953 — avoid backticks and dollar-paren here: this unquoted heredoc executes them.
 CHECKOUT=${STATE_DIR}/daemon-install
 UNITS_HEAP_MB=${MAX_OLD_SPACE_MB}
 INSTANCE_NAME=${INSTANCE_NAME:-}
@@ -473,12 +589,23 @@ converge_host_units() {
   INSTALLER_ENV=(RMD_NODE_MAX_OLD_SPACE_MB="\$UNITS_HEAP_MB")
   if [ -n "\$INSTANCE_NAME" ]; then
     INSTALLER_ENV=(RMD_INSTANCE_REGISTRY="\$INSTANCE_REGISTRY")
-    if env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --instance "\$INSTANCE_NAME" >/dev/null 2>&1; then
+    if units_check=\$(env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --instance "\$INSTANCE_NAME" 2>/dev/null); then
       return 0
     fi
-  elif env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" >/dev/null 2>&1; then
+  elif units_check=\$(env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" 2>/dev/null); then
     return 0
   fi
+
+  # W1-T5518 -- --install never retires a LEGACY user unit, so LEGACY-only drift is named, not
+  # reinstalled on every tick. MISSING or DRIFTED lines beside it still converge.
+  case "\$units_check" in
+    *"install-host-units: MISSING "*|*"install-host-units: DRIFTED "*) : ;;
+    *"install-host-units: LEGACY "*)
+      echo "rmd-relaunch: units -- only LEGACY drift, which --install never retires; not converging:" >&2
+      printf '%s\\n' "\$units_check" | grep -F -e 'LEGACY' -e 'retire it' >&2 || true
+      return 0
+      ;;
+  esac
 
   # Elevation is REQUIRED and never prompted for: the tick runs as the service user while the unit
   # dir is root-owned. No sudo, no converge -- reported, never fatal.
@@ -503,6 +630,8 @@ converge_host_units() {
   fi
   return 0
 }
+
+$(render_deploy_code_refresh)
 
 # THE STOP LEVER OUTRANKS THIS SCRIPT, INCLUDING AT BOOT AND FROM THE WATCHDOG.
 if [ -e "\$STATE_DIR/state/STOP" ]; then
@@ -541,11 +670,19 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   # moment to rewrite its units -- the rule W1-T3245 applied to the recycle decision.
   [ "\$BOOT" -eq 0 ] && converge_host_units
   if [ "\$BOOT" -eq 0 ] && [ -x "\$STATE_DIR/remudero/bin/rmd" ]; then
+    # W1-T4917: load current deploy code only after a verified idle fast-forward. Running from
+    # daemon-install conflates the invoking checkout with the tree deploy-run acts on.
+    # Refresh the source CLI before loading it; standalone executable entrypoints own their
+    # runtime and retain the supervisor invocation without requiring a source checkout.
+    if [ -f "\$STATE_DIR/remudero/src/run-task.ts" ]; then
+      refresh_deploy_code '${CONTAINER_NAME}' || exit 0
+    fi
     echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a RECYCLE is due."
     # W1-T4267: deploy-run reads resourcePolicyDrift for THIS container (named at install time --
     # the rendered launcher has no CONTAINER_NAME of its own) against the build policy it recycles with.
-    RMD_RESOURCE_POLICY_CONTAINER='${CONTAINER_NAME}' RMD_RESOURCE_POLICY_ROLE=build \\
-      "\$STATE_DIR/remudero/bin/rmd" deploy-run --image-drift-only --state-root "\$STATE_DIR" || \\
+    (cd "\$STATE_DIR/remudero" && \\
+      RMD_RESOURCE_POLICY_CONTAINER='${CONTAINER_NAME}' RMD_RESOURCE_POLICY_ROLE=build \\
+      "\$STATE_DIR/remudero/bin/rmd" deploy-run --image-drift-only --state-root "\$STATE_DIR") || \\
       echo "rmd-relaunch: deploy-run reported a problem; the daemon is untouched and the next tick re-asks." >&2
   else
     echo "rmd-relaunch: ${CONTAINER_NAME} already running -- nothing to do."
@@ -598,6 +735,9 @@ if [ -r ${BIN_DIR}/rmd-scratch-mounts ]; then
   echo "rmd-relaunch: scratch mounts \$SCRATCH_NOTE"
 fi
 
+CREDENTIAL_ARGS=()
+$(render_credential_mount)
+
 # --restart=on-failure:5 IS DELIBERATE: exit 0 is a STOP and must not be undone. Reboot survival is
 # rmd-fleet.service; crash recovery past the budget is rmd-fleet-watchdog.timer.
 # NODE_OPTIONS: without it V8 caps at ~2GB and the retro rung aborts at ~2046 MB on a 7.9GB host.
@@ -621,6 +761,7 @@ docker run -d --name ${CONTAINER_NAME} \\
   -v ${CONTAINER_CONFIG_DIR}:/home/node/.config/remudero \\
   -v "\$STATE_DIR":/home/node/Remudero \\
   -v ${CLAUDE_DIR}:/home/node/.claude \\
+  "\${CREDENTIAL_ARGS[@]+"\${CREDENTIAL_ARGS[@]}"}" \\
   "\${SCRATCH_ARGS[@]+"\${SCRATCH_ARGS[@]}"}" \\
   "\$IMAGE" \\
   ./bin/rmd daemon --repo ${DAEMON_REPO} --allow-self-target
@@ -759,18 +900,11 @@ WantedBy=timers.target
 EOF
 }
 
-# W1-T2953 — CHECK COMPARES DIRECTIVES, INSTALL WRITES EVERYTHING.
-#
-# The comparison was byte-for-byte over files that are mostly PROSE. MEASURED 2026-09-06: six of
-# seven artifacts read DRIFTED against Azure, and most of that was comment wording — the incident
-# forensics were expanded by hand on the host and never returned to the renderer. One red check
-# covering four real guard deletions and two paragraphs of prose is a check nobody can act on, and
-# `--install` looked like the remedy while it would have DELETED the four real guards.
-#
-# A systemd unit's semantics ARE its directives; comments are documentation. So check compares the
-# effective directive lines EXACTLY — every guard deletion is still caught, byte for byte in effect
-# — and stops reporting prose as drift. INSTALL is unchanged and still writes the full rendered
-# text, comments included, so the host keeps the documentation.
+# W1-T2953 — CHECK COMPARES DIRECTIVES, INSTALL WRITES EVERYTHING. A byte-for-byte compare read six
+# of seven artifacts DRIFTED against Azure on 2026-09-06, mostly comment wording, and `--install`
+# looked like the remedy while it would have DELETED four real guards. A unit's semantics ARE its
+# directives, so check compares effective directive lines EXACTLY (every guard deletion is still
+# caught) and ignores prose; install still writes the full text, comments included.
 effective_directives() {
   printf '%s\n' "$1" | sed -e 's/[[:space:]]*$//' -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d'
 }
@@ -945,9 +1079,36 @@ if [ -n "$CLEANUP_PATH" ]; then
   fi
 fi
 
+# W1-T5518 — the retired host-only user janitor (in no repo; 569 false EMERGENCY runs) is drift while
+# its unit files remain. Report only; a real home is read only in the real host layout or via override.
+LEGACY_JANITOR_TIMER="azure-remudero-janitor.timer"
+LEGACY_JANITOR_SERVICE="azure-remudero-janitor.service"
+HOST_KERNEL="${RMD_HOST_KERNEL:-$(uname -s 2>/dev/null || echo unknown)}"
+LEGACY_USER_UNIT_DIR="${RMD_LEGACY_USER_UNIT_DIR-}"
+if [ -z "$LEGACY_USER_UNIT_DIR" ] && [ "$UNIT_DIR" = "/etc/systemd/system" ]; then
+  LEGACY_USER_UNIT_DIR="/home/${SERVICE_USER}/.config/systemd/user"
+fi
+legacy=0
+if [ "$HOST_KERNEL" = "Linux" ] && [ -n "$LEGACY_USER_UNIT_DIR" ]; then
+  for legacy_path in "${LEGACY_USER_UNIT_DIR}/${LEGACY_JANITOR_TIMER}" "${LEGACY_USER_UNIT_DIR}/${LEGACY_JANITOR_SERVICE}" \
+                     "${LEGACY_USER_UNIT_DIR}"/*.wants/"${LEGACY_JANITOR_TIMER}"; do
+    if [ -e "$legacy_path" ] || [ -L "$legacy_path" ]; then
+      echo "install-host-units: LEGACY $legacy_path (the retired host-only user janitor; --install never edits a user unit)"
+      legacy=$(( legacy + 1 ))
+    fi
+  done
+  if [ "$legacy" -gt 0 ]; then
+    echo "install-host-units: retire it as ${SERVICE_USER}: systemctl --user disable --now ${LEGACY_JANITOR_TIMER} && rm -f ${LEGACY_USER_UNIT_DIR}/${LEGACY_JANITOR_TIMER} ${LEGACY_USER_UNIT_DIR}/${LEGACY_JANITOR_SERVICE} && systemctl --user daemon-reload"
+    if [ "$MODE" = "check" ]; then drift=$(( drift + legacy )); fi
+  fi
+fi
+
 if [ "$MODE" = "check" ]; then
   if [ "$drift" -gt 0 ]; then
     echo "install-host-units: ${drift} unit(s) missing or drifted — re-run with --install (as root)." >&2
+    if [ "$legacy" -gt 0 ]; then
+      echo "install-host-units: ${legacy} of them LEGACY — --install does not retire those; run the retire command above as ${SERVICE_USER}." >&2
+    fi
     exit 1
   fi
   echo "install-host-units: all units match this repo."
