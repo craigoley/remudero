@@ -302,6 +302,50 @@ export function evaluateInstrumentSurface(input) {
   return { violations, unmeasured: null };
 }
 
+export const PRECHECK_PARITY_BASELINE = "scripts/census-precheck-parity-baseline.json";
+
+/** Every census suite this script asks before the push, and how: `modeled` names the check that asks its
+ *  question here, `run` an npm script that runs it. test/every-ci-census-is-asked-before-the-push.test.ts
+ *  fails on a CI census on neither this nor the shrink-only baseline above (W1-T5616). */
+export const PRECHECK_PARITY = {
+  "test/clock-signature-census.test.ts": { modeled: clockViolations },
+  "test/comment-load-ratchet.test.ts": { modeled: commentLoadViolations },
+  "test/fixture-copy-census.test.ts": { modeled: fixtureCopyViolations },
+  "test/deps-interface-census.test.ts": { modeled: depsInterfaceViolations },
+  "test/repo-layout.test.ts": { modeled: houseLayoutViolations },
+  "test/instrument-surface-completeness.test.ts": { modeled: evaluateInstrumentSurface },
+};
+
+/** Census suites CI runs only in its ci/coverage shards, because no census name puts them in
+ *  `listRuleSuites`; each with the incident that showed a push was blind to it. */
+export const PRECHECK_EXTRA_CI_CENSUSES = {
+  "test/spend-is-counted-once-at-its-producer.test.ts": "SPEND_STEP_ROLES — #8988 #9041",
+  "test/ledger-rotation.test.ts": "DECISION_RELEVANT_LEDGER_STEPS — #8988 #9041",
+  "test/a-union-read-of-an-unretained-step-is-refused.test.ts": "DECISION_RELEVANT_LEDGER_STEPS — #8988 #9041",
+  "test/host-capability-fixtures.test.ts": "host-capability-fixtures — #8994",
+};
+
+/** CI's census population: the rule-check suites plus the extras, once each, sorted. */
+export function ciCensusPopulation(ruleSuites, extras = PRECHECK_EXTRA_CI_CENSUSES) {
+  return [...new Set([...ruleSuites, ...Object.keys(extras)])].sort();
+}
+
+/**
+ * The parity verdict. `unasked`: a population member neither on `parity` nor baselined. `stale`: a
+ * baseline row `parity` now asks or the population no longer holds, which must leave the baseline.
+ * `grown`: a row `baseBaseline` (the merge base's rows, null when it had no baseline) did not carry.
+ */
+export function precheckParityVerdict({ population, baseline, baseBaseline = null, parity = PRECHECK_PARITY }) {
+  const members = new Set(population);
+  const baselined = new Set(baseline);
+  const carried = new Set(baseBaseline ?? baseline);
+  return {
+    unasked: population.filter((p) => !Object.hasOwn(parity, p) && !baselined.has(p)).sort(),
+    stale: baseline.filter((p) => Object.hasOwn(parity, p) || !members.has(p)).sort(),
+    grown: baseline.filter((p) => !carried.has(p)).sort(),
+  };
+}
+
 function gitOut(root, args) {
   const res = git(args, { cwd: root });
   if (res.status !== 0) throw new Error(`git ${args[0]}: ${(res.stderr || "no diagnostic").trim()}`);
