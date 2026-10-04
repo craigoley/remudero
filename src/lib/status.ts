@@ -567,6 +567,8 @@ export type CreditStoreTaskRecord = Partial<Record<CreditStoreEntry["source"], C
    *  merged-path map in hand (the ordinary case) refuses the same credit it refused last time it
    *  had one, rather than resurrecting it. */
   invalidated?: Partial<Record<CreditStoreEntry["source"], DurableCreditInvalidation>>;
+  /** W1-T5551: the operator correction a projection last read live, kept past the ledger row's rotation. */
+  correction?: { prUrl: string; prNumber?: number };
 };
 
 /** DELIVERABLE A — the durable, GitHub-independent record of merge credit, keyed by task id then by the path
@@ -722,6 +724,13 @@ export function recordCredit(store: CreditStore, taskId: string, entry: CreditSt
   const existing = store[taskId] ?? {};
   if (existing[entry.source]) return store;
   return { ...store, [taskId]: { ...existing, [entry.source]: entry } };
+}
+
+/** Records `prUrl` as `taskId`'s durable correction credit, handing back the SAME store when it already holds it. */
+export function recordCorrectionCredit(store: CreditStore, taskId: string, prUrl: string): CreditStore {
+  const existing = store[taskId] ?? {};
+  if (existing.correction?.prUrl === prUrl) return store;
+  return { ...store, [taskId]: { ...existing, correction: { prUrl, prNumber: prNumberFromRef(prUrl) } } };
 }
 
 /** W1-T3996: SUBTRACT-ONLY — records that `source`'s durable entry for `taskId` is refused, tied
@@ -2570,7 +2579,16 @@ function derivePrPrecedence(
   // ref through a real gateway call at WRITE time, so this returns BEFORE any `deps.github` call and no read
   // result may demote it. Why: under quota exhaustion this rung re-dispatched a satisfied task
   const ledgerIndex = deps.ledgerIndex;
-  const correctedUrl = latestActualPrUrl(ledgerLines, task.id, ledgerIndex);
+  const readCreditStore = deps.readCreditStore ?? (() => loadCreditStore(deps.creditStorePath ?? defaultCreditStorePath(deps.ledgerPath)));
+  const writeCreditStore =
+    deps.writeCreditStore ?? ((store: CreditStore) => saveCreditStore(deps.creditStorePath ?? defaultCreditStorePath(deps.ledgerPath), store));
+  let creditStore = readCreditStore();
+  // W1-T5551: persisted on a live read, so the rung still answers once rotation has dropped the row.
+  const liveCorrection = latestActualPrUrl(ledgerLines, task.id, ledgerIndex);
+  if (liveCorrection && recordCorrectionCredit(creditStore, task.id, liveCorrection) !== creditStore) {
+    writeCreditStore((creditStore = recordCorrectionCredit(creditStore, task.id, liveCorrection)));
+  }
+  const correctedUrl = liveCorrection ?? creditStore[task.id]?.correction?.prUrl;
   // W1-T5353: every crediting rung below skips an OVERRIDDEN (task, PR) pairing and lets the next rung answer.
   if (correctedUrl && !overrides.excludes(prNumberFromRef(correctedUrl))) {
     return {
@@ -2586,10 +2604,6 @@ function derivePrPrecedence(
   // W1-T951 DURABLE CREDIT RUNG — directly UNDER `correction`, which must still override a stale entry, and
   // ABOVE every rung that reads a live PR record. That ordering is DELIVERABLE A's point: once credit is
   // durable, resolving it again costs NO PR-record read.
-  const readCreditStore = deps.readCreditStore ?? (() => loadCreditStore(deps.creditStorePath ?? defaultCreditStorePath(deps.ledgerPath)));
-  const writeCreditStore =
-    deps.writeCreditStore ?? ((store: CreditStore) => saveCreditStore(deps.creditStorePath ?? defaultCreditStorePath(deps.ledgerPath), store));
-  let creditStore = readCreditStore();
   const durableCredit = creditStore[task.id];
   if (durableCredit) {
     // Trailer is the STURDIER of the two evidentially — an anchored body hit, not a ref GitHub deletes on merge

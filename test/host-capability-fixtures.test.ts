@@ -155,6 +155,16 @@ const DECLARED: readonly Declared[] = [
   },
   {
     kind: "chmod",
+    file: "host-root-disk-janitor.test.ts",
+    key: "0o444",
+    count: 1,
+    reason:
+      "the cross-identity janitor lock: a non-root runner meets a lock it cannot write exactly as the user cron " +
+      "meets root's 0644 lock, proving the script opens it read-only. VACUOUS UNDER uid 0 — root opens any mode, " +
+      `so a root runner cannot tell read-only from read-write here. ${CHMOD_REMEDY}`,
+  },
+  {
+    kind: "chmod",
     file: "prune-liveness.test.ts",
     key: "0o500",
     count: 1,
