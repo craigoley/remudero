@@ -51757,13 +51757,15 @@ export async function main(
   await flushThenExit(await dispatchCommand(cmd, rest, REGISTRY, USAGE));
 }
 
+// W1-T4075: a read-plane worker thread loads this module as its entry and installs the producer.
+// Kept OUTSIDE the process-boundary region below, which exempts exit glue only.
+const readWorkerOptions = readPlaneWorkerInput<TickReadOptions>();
+if (readWorkerOptions) runReadPlaneWorker(createTickReadProducer(readWorkerOptions, { log: readPlaneWorkerLog }));
+
 // diff-cov: process-boundary - direct CLI guard; imported tests cover `main()` and
 // `exitCodeFor()`, while this wrapper only prints and exits the current process.
 // Only run when invoked directly (not when imported by tests).
-const readWorkerOptions = readPlaneWorkerInput<TickReadOptions>();
-if (readWorkerOptions) {
-  runReadPlaneWorker(createTickReadProducer(readWorkerOptions, { log: readPlaneWorkerLog }));
-} else if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+if (!readWorkerOptions && process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   main().catch((err) => {
     console.error("\n### RUN-TASK ERROR\n" + (err?.stack ?? String(err)));
     // W1-T2901: the process boundary asks the error its own exit code (an `RmdError` such as
