@@ -26,8 +26,16 @@
   design: |
     Run `invokes_gh`'s word match over `cov_segments` output; keep the raw `$( gh` / backtick
     substitution check on the full text, because an unquoted heredoc expands substitutions.
+    A heredoc FED TO AN INTERPRETER is code, not data: when the command reading the heredoc is a
+    shell or remote shell (`bash`, `sh`, `zsh`, `ssh … bash -s`, `ssh host <<EOF`), keep its body in
+    the word match. Dropping every body would let `bash <<'EOF'` / `gh pr view 1` / `EOF` run a gh
+    read unrefused (reproduced 2026-10-04 against this design in a patched copy of the hook).
   acceptance:
     - claim: "a heredoc whose body says 'over the async gh transport' is not counted as a gh call, while a gh command fed by a heredoc and a heredoc body holding a gh command substitution still are"
       proof: "unit test: test/a-heredoc-body-that-names-gh-is-not-a-gh-call.test.ts"
+    - claim: "a heredoc body fed to bash, or to ssh running bash -s, that holds a gh command is still counted as a gh call, under both a quoted and an unquoted delimiter"
+      proof: "unit test: a heredoc fed to an interpreter that runs gh is still a gh call"
   falsifier: |
     Revert to the whole-text match; the plain heredoc case is refused and the test fails.
+    Drop every heredoc body regardless of the reading command; the interpreter case is allowed and
+    its test fails.
