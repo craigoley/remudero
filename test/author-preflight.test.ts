@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { test } from 'node:test';
@@ -7,7 +7,7 @@ import { gitRepo } from './helpers/git-repo.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPT = join(ROOT, 'scripts/preflight-author.mjs');
-const mod = await import(pathToFileURL(SCRIPT).href) as {
+const mod = (existsSync(SCRIPT) ? await import(pathToFileURL(SCRIPT).href) : {}) as {
   verifiedSuites: (root: string, suites: string[]) => string[];
   completeTestResult: (result: { status: number | null; stdout?: string; signal?: string; error?: Error }) => boolean;
   main: (argv: string[], deps: { root: string; select?: (changed: string[]) => unknown }) => number;
@@ -39,6 +39,7 @@ function fixture() {
 }
 
 test('author preflight runs real affected tests without coverage and records exact tree scope', () => {
+  assert.equal(typeof mod.main, 'function', 'the shipped author gate must exist, including at the proof base');
   const f = fixture();
   assert.equal(mod.main([], { root: f.root }), 0);
   const receipt = f.receipt();
@@ -68,6 +69,23 @@ test('author preflight refuses a real test failure and preserves its failed rece
   assert.equal(mod.main([], { root: f.root }), 1);
   assert.equal(f.receipt().verdict, 'failed');
   assert.equal(f.receipt().steps[1].ok, false);
+});
+
+test('author preflight refuses static failure, a mutated tree and an unwritable receipt', () => {
+  const staticRed = fixture();
+  writeFileSync(join(staticRed.root, 'src/run-task.ts'), 'process.exitCode = 1;\n');
+  staticRed.git('add', '.'); staticRed.git('commit', '-m', 'test: fail the static gate');
+  assert.equal(mod.main([], { root: staticRed.root }), 1);
+  assert.equal(staticRed.receipt().steps[0].ok, false);
+  assert.equal(staticRed.receipt().steps[1].ok, true, 'static failure must not suppress affected-test evidence');
+  const mutated = fixture();
+  writeFileSync(join(mutated.root, 'src/run-task.ts'), "import { writeFileSync } from 'node:fs'; writeFileSync('untracked.ts', 'export {};');\n");
+  mutated.git('add', '.'); mutated.git('commit', '-m', 'test: mutate the author tree');
+  assert.equal(mod.main([], { root: mutated.root }), 1);
+  assert.match(mutated.receipt().error, /tree changed during verification/);
+  const unwritable = fixture();
+  writeFileSync(join(unwritable.root, 'coverage'), 'not a directory');
+  assert.equal(mod.main([], { root: unwritable.root }), 1, 'unrecordable results must not be reusable greens');
 });
 
 test('author preflight refuses dirty, stale-base, empty-diff, wrong-runtime and ghost-file claims', () => {

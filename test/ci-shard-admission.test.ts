@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -9,7 +9,7 @@ import { parse } from 'yaml';
 
 const root = process.cwd();
 const script = join(root, 'scripts/ci-shard-admission.mjs');
-const { requiresSetup } = await import(pathToFileURL(script).href) as {
+const { requiresSetup } = (existsSync(script) ? await import(pathToFileURL(script).href) : {}) as {
   requiresSetup: (files: unknown, opts: { event: string; shard: string; live: string }) => boolean;
 };
 type Step = { name?: string; id?: string; uses?: string; if?: string; run?: string };
