@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { findUntrialedModels, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -209,12 +210,14 @@ import {
 } from "./main-run-gaps.js";
 import { mutationVerdictRunIdsFromLedger, pullMutationVerdicts, readMutationVerdictZip } from "./mutation-verdict-pull.js";
 import {
+  REFUSAL_AMENDMENT_MAX_AGE_MS,
   REFUSAL_AMENDMENT_STEP,
   draftRefusalAmendment,
   extractRefusal,
   holdTaskForRefusal,
   noPrVerdictRowsFromLedger,
   readTaskShard,
+  refusalIsMainCaused,
   taskAwaitsAmendment,
   type RefusalAmendmentResult,
   type RefusalCandidate,
@@ -3214,6 +3217,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
         const fixWorktree = worktreePath;
         const rung = await runFixRung({
+          guardRoundHead: true,
           ...buildFixRungDispatchArgs({
             task,
             runId,
@@ -3499,7 +3503,18 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                 // W1-T5405: a red preflight is ledgered as this source run's outcome, so the next pass does not re-pay it.
                 const verdict = await planPrPreflightImpl(worktreePath, headSha, { title: input.title, body });
                 if (!planPrPreflightAllows(verdict, { lane: "refusal_amendment", branch: input.branch, log })) {
-                  log(REFUSAL_AMENDMENT_STEP, { task_id: c.taskId, source_run_id: c.runId, outcome: "preflight_refused", failures: verdict.failures });
+                  // W1-T5531: preflight the base alone, so a red main's refusal is retried once main moves.
+                  // A probe that cannot run records why and leaves the refusal final, as before W1-T5531.
+                  const base: { origin_main_sha?: string; main_red: boolean; main_red_probe_error?: string } = { main_red: false };
+                  try {
+                    base.origin_main_sha = planRepairGit("git", ["-C", worktreePath, "rev-parse", "HEAD^"]).trim();
+                    const onBase = await planPrPreflightImpl(repoDir, base.origin_main_sha, { title: input.title, body });
+                    base.main_red = refusalIsMainCaused(verdict.failures, onBase.failures);
+                  } catch (e) {
+                    const reason = String((e as Error)?.message ?? e);
+                    base.main_red_probe_error = reason;
+                  }
+                  log(REFUSAL_AMENDMENT_STEP, { task_id: c.taskId, source_run_id: c.runId, outcome: "preflight_refused", failures: verdict.failures, ...base });
                   throw new PlanPrPreflightRefusedError("refusal_amendment", verdict.failures);
                 }
                 gitPushRunBranchForBuild(worktreePath, { stdio: "ignore", expectedHeadSha: headSha });
@@ -9144,6 +9159,9 @@ export interface SweepDeps {
   /** W1-T5403 — risk-judge a head whose run ended `handed_off`, once, before the `mergeable` arm.
    *  Production wires {@link riskJudgeHandedOffHead}; omitted, such a head is held, never armed. */
   judgeHandedOffHead?: (pr: OpenPrView) => Promise<HandedOffHeadJudgment>;
+  /** W1-T5523 — where that judgment runs: off the pass, capped and bounded. Omitted, the process-wide
+   *  pool, so the dedup and the cap span every pass and both sweep entrypoints. */
+  handedOffHeadJudgments?: HandedOffHeadJudgmentPool;
   /** W1-T1000002 — WITHDRAW AN ARM THIS LANE DID NOT PLACE, called only when an operator hold stands
    *  over a PR already reporting armed. A disarm alone is undone by the next pass, whose dedup reads
    *  GitHub's live armed bit, so this fires EVERY pass the hold stands and the PR reads armed, and
@@ -9798,39 +9816,133 @@ export function handedOffHeadAwaitingJudgment(
   return handoff;
 }
 
-/** W1-T5403 — judge a handed-off head before the `mergeable` arm fires. Returns the stand-down
- *  reason when the arm must hold, `undefined` when it may proceed. A missing dep, a throw and an
- *  unavailable judge each hold and ledger `sweep.risk_judge_unavailable` naming why. */
-async function holdHandedOffHeadForRiskJudgment(
+/** PRIMARY CONTROL (W1-T5523): handed-off-head risk judgments in flight at once, process-wide. A
+ *  head over the cap is held and started by a later pass, once a slot frees. */
+export const HANDED_OFF_HEAD_JUDGMENT_CONCURRENCY_LIMIT = 2;
+
+/** BACKSTOP (W1-T5523): the wall clock one background judgment may hold its slot. It fires only on a
+ *  hung judge, whose head is then ledgered unavailable and asked again by a later pass. */
+export const HANDED_OFF_HEAD_JUDGMENT_TIMEOUT_MS = 30 * 60_000;
+
+/** W1-T5523 — one `pr@head` judgment started off the pass; `settled` is unset while it is in flight. */
+interface HandedOffHeadJudgmentFlight {
+  settled?: HandedOffHeadJudgment;
+}
+
+/** W1-T5523 — the judgments in flight, keyed `pr@head`, with the cap, the per-judgment bound and the
+ *  timer seam (returns a cancel) that enforces it. A settled judgment leaves the map: across passes
+ *  its ledgered `risk_judge.decision` row is the record, read back as before. */
+export interface HandedOffHeadJudgmentPool {
+  readonly limit: number;
+  readonly timeoutMs: number;
+  readonly schedule: (ms: number, fire: () => void) => () => void;
+  readonly flights: Map<string, HandedOffHeadJudgmentFlight>;
+}
+
+export function handedOffHeadJudgmentPool(
+  over: Partial<Pick<HandedOffHeadJudgmentPool, "limit" | "timeoutMs" | "schedule">> = {},
+): HandedOffHeadJudgmentPool {
+  return {
+    limit: HANDED_OFF_HEAD_JUDGMENT_CONCURRENCY_LIMIT,
+    timeoutMs: HANDED_OFF_HEAD_JUDGMENT_TIMEOUT_MS,
+    schedule: (ms, fire) => {
+      const timer = setTimeout(fire, ms);
+      timer.unref();
+      return () => clearTimeout(timer);
+    },
+    ...over,
+    flights: new Map(),
+  };
+}
+
+const sharedHandedOffHeadJudgments = handedOffHeadJudgmentPool();
+
+function logRiskJudgeUnavailable(
   pr: OpenPrView,
   handoff: string,
-  judge: SweepDeps["judgeHandedOffHead"],
+  reason: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-): Promise<string | undefined> {
-  const head = pr.headSha.slice(0, 7);
-  let judgment: HandedOffHeadJudgment;
-  if (judge === undefined) {
-    judgment = { action: "unavailable", reason: "no risk judge is wired into this sweep" };
-  } else {
-    try {
-      judgment = await judge(pr);
-    } catch (error) {
-      judgment = { action: "unavailable", reason: `risk judge threw: ${String((error as Error)?.message ?? error)}` };
-    }
-  }
-  if (judgment.action === "proceed") return undefined;
-  if (judgment.action === "escalate") {
-    return `risk judge escalated this handed-off head (${head}), no operator override recorded` +
-      (judgment.issueUrl ? ` — see ${judgment.issueUrl}` : "");
-  }
+): void {
   log("sweep.risk_judge_unavailable", {
     pr_number: pr.prNumber,
     head_sha: pr.headSha,
     ...(pr.taskId === undefined ? {} : { task_id: pr.taskId }),
     handoff,
-    reason: judgment.reason,
+    reason,
   });
-  return `risk judge unavailable for handed-off head ${head} (${judgment.reason}) — holding the arm; the next pass asks again`;
+}
+
+/** W1-T5523 — start `judge(pr)` without awaiting it. Its outcome is recorded on the flight and frees
+ *  the slot; a throw, a rejection, an `unavailable` answer or an overrun of the pool's bound ledgers
+ *  `sweep.risk_judge_unavailable` once. The first outcome wins, so a late answer changes nothing. */
+function startHandedOffHeadJudgment(
+  pr: OpenPrView,
+  handoff: string,
+  judge: NonNullable<SweepDeps["judgeHandedOffHead"]>,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  pool: HandedOffHeadJudgmentPool,
+): HandedOffHeadJudgmentFlight {
+  const key = `${pr.prNumber}@${pr.headSha}`;
+  const flight: HandedOffHeadJudgmentFlight = {};
+  pool.flights.set(key, flight);
+  let cancelBound = () => {};
+  const settle = (judgment: HandedOffHeadJudgment): void => {
+    if (flight.settled !== undefined) return;
+    flight.settled = judgment;
+    pool.flights.delete(key);
+    cancelBound();
+    if (judgment.action !== "unavailable") return;
+    logRiskJudgeUnavailable(pr, handoff, judgment.reason, log);
+  };
+  const threw = (error: unknown): void =>
+    settle({ action: "unavailable", reason: `risk judge threw: ${String((error as Error)?.message ?? error)}` });
+  cancelBound = pool.schedule(pool.timeoutMs, () =>
+    settle({ action: "unavailable", reason: `risk judgment outlived its ${pool.timeoutMs}ms bound` }),
+  );
+  try {
+    judge(pr).then(settle, threw);
+  } catch (error) {
+    threw(error); // a synchronous throw is ledgered unavailable exactly as a rejection is
+  }
+  return flight;
+}
+
+/** W1-T5403/W1-T5523 — the stand-down reason when a handed-off head's arm must hold, `undefined` when
+ *  its judgment proceeded. The judgment runs OFF the pass: a head with none starts one (when the cap
+ *  allows) and is held while it is in flight; the next pass reads its landed decision row. One
+ *  event-loop turn is yielded after a start, so a judgment needing no I/O is acted on at once. */
+async function holdHandedOffHeadForRiskJudgment(
+  pr: OpenPrView,
+  handoff: string,
+  judge: SweepDeps["judgeHandedOffHead"],
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  pool: HandedOffHeadJudgmentPool,
+): Promise<string | undefined> {
+  const head = pr.headSha.slice(0, 7);
+  const unavailable = (reason: string) =>
+    `risk judge unavailable for handed-off head ${head} (${reason}) — holding the arm; the next pass asks again`;
+  if (judge === undefined) {
+    const reason = "no risk judge is wired into this sweep";
+    logRiskJudgeUnavailable(pr, handoff, reason, log);
+    return unavailable(reason);
+  }
+  const inFlight =
+    `risk judgment in flight for handed-off head ${head} — holding the arm; the next pass reads its decision`;
+  if (pool.flights.has(`${pr.prNumber}@${pr.headSha}`)) return inFlight;
+  if (pool.flights.size >= pool.limit) {
+    return `risk judgment not started for handed-off head ${head} — ${pool.flights.size} in flight at the cap ` +
+      `of ${pool.limit}; holding the arm, a later pass starts it`;
+  }
+  const flight = startHandedOffHeadJudgment(pr, handoff, judge, log, pool);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const judgment = flight.settled;
+  if (judgment === undefined) return inFlight;
+  if (judgment.action === "proceed") return undefined;
+  if (judgment.action === "escalate") {
+    return `risk judge escalated this handed-off head (${head}), no operator override recorded` +
+      (judgment.issueUrl ? ` — see ${judgment.issueUrl}` : "");
+  }
+  return unavailable(judgment.reason);
 }
 
 function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorActions {
@@ -10693,6 +10805,13 @@ let lastReportedAnomalyGap: string | undefined;
 const lastReaderAgreementAt = new Map<string, number>();
 const READER_AGREEMENT_INTERVAL_MS = 15 * 60_000;
 
+/** Deployment deltas alone admit this full-sweep rung; elapsed time never makes a model due. */
+export async function runSweepBakeoff(input: DeploymentBakeoffInput): Promise<void> {
+  const state = readBakeoffTrialState(input.stateDir);
+  if (!state.pending && findUntrialedModels(input.deployed, state.trialed).length === 0) return;
+  await runDeploymentBakeoff(input);
+}
+
 const CONTRADICTORY_REASON = "review failing with no actionable unmet criteria (contradictory) — escalating";
 const CONTRADICTORY_BACKOFF_CAP_MS = 4 * 60 * 60_000;
 type ContradictoryMemory = {
@@ -11074,7 +11193,7 @@ export async function runSweep(
   if (deps.draftRefusalAmendments && deps.repairAdmissionSurface !== "light") {
     try {
       const candidates: RefusalCandidate[] = [];
-      for (const row of noPrVerdictRowsFromLedger(ledgerLines, now)) {
+      for (const row of noPrVerdictRowsFromLedger(ledgerLines, now, REFUSAL_AMENDMENT_MAX_AGE_MS, mainTipSha)) {
         const refusals = extractRefusal(row.reportExcerpt);
         if (refusals.length > 0) candidates.push({ ...row, refusals });
       }
@@ -12102,7 +12221,9 @@ export async function runSweep(
               // W1-T5403: a handed-off head never met the in-run risk judge — judge it once here.
               const handoff = handedOffHeadAwaitingJudgment(pr, ledgerLines);
               if (handoff !== undefined) {
-                const riskHold = await holdHandedOffHeadForRiskJudgment(pr, handoff, deps.judgeHandedOffHead, log);
+                const riskHold = await holdHandedOffHeadForRiskJudgment(
+                  pr, handoff, deps.judgeHandedOffHead, log, deps.handedOffHeadJudgments ?? sharedHandedOffHeadJudgments,
+                );
                 if (riskHold !== undefined) {
                   acted = false;
                   standDownReason = riskHold;

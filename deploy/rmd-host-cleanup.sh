@@ -28,11 +28,16 @@
 #                  Git metadata itself is excluded from recency checks because Git refreshes it.
 #   4. archive   — transcripts are moved, never deleted; refused when the archive root shares a
 #                  filesystem with /; only the archive itself ages out, after ARCHIVE_DAYS
-#   5. DRY_RUN=1 changes nothing; a pass that leaves / at or above HIGH_WATER exits non-zero
+#   5. DRY_RUN=1 changes nothing; a pass that leaves ANY watched filesystem past its mark exits
+#      non-zero, naming each one (W1-T5548, pinned by
+#      test/the-host-janitor-alarms-on-every-watched-filesystem.test.ts; `/` used to be the only alarm)
 
 # Every decision is logged: `KEEP <path>: <reason>` / `REMOVE <path>` / `ARCHIVE <path>` /
 # `PRUNE <path>: <bytes> bytes, ...` / `REFUSE <what>: <reason>`, then a summary `rmd-host-cleanup: / 57% -> 57% (-4 MB reclaimed this
-# pass)` that scripts/fleet-heartbeat.sh-style readers parse.
+# pass)` that scripts/fleet-heartbeat.sh-style readers parse. Then one line per watched DEVICE —
+# `rmd-host-cleanup: fs <mount> (<device>) <pct>% used, <free> free, mark <pct>%[/<free>]`, or
+# `rmd-host-cleanup: fs <path> unknown (df unreadable), mark ...` — and a `rmd-host-cleanup: FAIL
+# <mount> is at ...` line for each device past its mark. Neither carries the summary's `->`.
 
 # CRON. The schedule and log path live in ONE place: deploy/install-host-units.sh
 # (CLEANUP_CRON_SCHEDULE / RMD_CLEANUP_LOG). Nothing here schedules itself.
@@ -49,7 +54,16 @@
 #   RMD_CLEANUP_BIG_MB          size (MB) at which an idle file under a scratch root is swept
 #   RMD_CLEANUP_ARCHIVE_ROOT    where transcripts go
 #   RMD_CLEANUP_ROOT_FS         the filesystem being protected (default /)
-#   RMD_CLEANUP_DF              command printing `df -Pk`-shaped output for the root filesystem
+#   RMD_CLEANUP_DF              command taking a path and printing `df -Pk`-shaped output for the
+#                               filesystem holding it (default `df -Pk`)
+#   RMD_CLEANUP_WATCH_FS        space-separated `<path>:<pct>[/<min free>]` marks, one per watched
+#                               filesystem (<min free> is KB, or N with a K/M/G/T suffix). Default:
+#                               `/mnt/rmd:85 /mnt/scratch:90/40G` when RMD_CLEANUP_ROOT_FS is `/`,
+#                               otherwise none. RMD_CLEANUP_ROOT_FS:HIGH_WATER is added whenever the
+#                               list omits the root. A path that does not exist is skipped; paths
+#                               on one device (`df` column 1) are judged once, at the strictest of
+#                               each part of their marks. An unreadable df reads `unknown`, which is
+#                               neither full nor empty and does not fail the pass.
 #   RMD_CLEANUP_FSID            command taking a path and printing its filesystem id
 #   RMD_CLEANUP_LSOF            the lsof command (must accept -Fn and print n<path> lines)
 #   RMD_CLEANUP_CONTAINER_MAP   host_prefix:container_prefix — a held container-side name also counts
@@ -87,7 +101,10 @@ TMP_GLOBS="${RMD_CLEANUP_TMP_GLOBS-claude-* rmd-* remudero-* tmp.*}"     # [UNVE
 BIG_MB="${RMD_CLEANUP_BIG_MB:-200}"                                      # [UNVERIFIED]
 ARCHIVE_ROOT="${RMD_CLEANUP_ARCHIVE_ROOT:-/mnt/rmd/host-cleanup-archive}" # [UNVERIFIED]
 ROOT_FS="${RMD_CLEANUP_ROOT_FS:-/}"
-DF_CMD="${RMD_CLEANUP_DF:-df -Pk $ROOT_FS}"
+DF_CMD="${RMD_CLEANUP_DF:-df -Pk}"
+if [ -n "${RMD_CLEANUP_WATCH_FS+x}" ]; then WATCH_FS="$RMD_CLEANUP_WATCH_FS"
+elif [ "$ROOT_FS" = / ]; then WATCH_FS="/mnt/rmd:85 /mnt/scratch:90/40G"  # the Azure host's state + swap disks
+else WATCH_FS=""; fi  # a relocated root (a fixture, another layout) does not inherit the host's mounts
 FSID_CMD="${RMD_CLEANUP_FSID:-}"
 LSOF_CMD="${RMD_CLEANUP_LSOF:-lsof}"
 CONTAINER_MAP="${RMD_CLEANUP_CONTAINER_MAP:-}"
@@ -123,6 +140,31 @@ case "$ONLY_TMP" in
   *) echo "rmd-host-cleanup: FATAL RMD_CLEANUP_ONLY_TMP must be 0 or 1" >&2; exit 2 ;;
 esac
 
+# The watch list, parsed once and refused whole before the lock: a typo must not silently unwatch a
+# disk. W_* are parallel arrays (bash 3.2 on macOS has no associative arrays).
+W_PATH=(); W_PCT=(); W_FREE_KB=(); W_FREE_TXT=(); root_watched=0
+for entry in $WATCH_FS; do
+  w_path="${entry%:*}"; w_mark="${entry##*:}"; w_pct="${w_mark%%/*}"; w_free=""
+  case "$w_mark" in */*) w_free="${w_mark#*/}" ;; esac
+  case "$entry" in *:*) ;; *) w_path="" ;; esac
+  case "$w_pct" in ""|*[!0-9]*) w_path="" ;; esac
+  case "$w_free" in "") ;; *[!0-9KMGT]*|[KMGT]*|*[KMGT]?*) w_path="" ;; esac
+  if [ -z "$w_path" ] || [ "${w_pct:-0}" -gt 100 ] 2>/dev/null; then
+    echo "rmd-host-cleanup: FATAL RMD_CLEANUP_WATCH_FS entry '$entry' is not <path>:<pct>[/<min free>]" >&2; exit 2
+  fi
+  w_kb="${w_free%[KMGT]}"; w_kb=$(( 10#${w_kb:-0} )); w_pct=$(( 10#$w_pct ))
+  case "$w_free" in
+    *M) w_kb=$(( w_kb * 1024 )) ;; *G) w_kb=$(( w_kb * 1048576 )) ;; *T) w_kb=$(( w_kb * 1073741824 )) ;;
+  esac
+  [ "$w_path" = "$ROOT_FS" ] && root_watched=1
+  W_PATH+=("$w_path"); W_PCT+=("$w_pct"); W_FREE_KB+=("$w_kb"); W_FREE_TXT+=("$w_free")
+done
+if [ "$root_watched" = 0 ]; then
+  # ${a[@]+...}: bash before 4.4 calls an empty array unbound under `set -u`
+  W_PATH=("$ROOT_FS" ${W_PATH[@]+"${W_PATH[@]}"}); W_PCT=("$HIGH_WATER" ${W_PCT[@]+"${W_PCT[@]}"})
+  W_FREE_KB=(0 ${W_FREE_KB[@]+"${W_FREE_KB[@]}"}); W_FREE_TXT=("" ${W_FREE_TXT[@]+"${W_FREE_TXT[@]}"})
+fi
+
 log() { printf '%s\n' "$*"; }
 
 # The lock is created once (O_EXCL, so never through a symlink) and then opened READ-ONLY: flock
@@ -147,7 +189,7 @@ act() {
 }
 
 # root_pct / root_avail_kb from one df snapshot.
-df_field() { $DF_CMD 2>/dev/null | awk -v f="$1" 'NR==2 { gsub("%","",$5); print (f=="pct" ? $5 : $4) }'; }
+df_field() { $DF_CMD "$ROOT_FS" 2>/dev/null | awk -v f="$1" 'NR==2 { gsub("%","",$5); print (f=="pct" ? $5 : $4) }'; }
 
 # ── rule 1 ──
 is_idle() {
@@ -624,6 +666,44 @@ archive_transcript() {
   mkdir -p "$(dirname "$dest")" && cp -p -- "$f" "$dest" && rm -f -- "$f"
 }
 
+fmt_kb() { if [ "$1" -ge 1048576 ]; then printf '%sG' "$(( $1 / 1048576 ))"; else printf '%sM' "$(( $1 / 1024 ))"; fi; }
+mark_text() { printf '%s%%' "$1"; [ -z "$2" ] || printf '/%s' "$2"; }
+
+# One line per watched device, then a FAIL line for each device at or above its percent or below
+# its minimum free space. Paths sharing a device merge into one entry holding the strictest of each
+# part (lowest percent, largest minimum free). Sets FS_FAILED.
+judge_filesystems() {
+  local i j n=0 row dev avail pct mount fails=""
+  local D_DEV=() D_MOUNT=() D_PCT=() D_AVAIL=() D_MPCT=() D_MKB=() D_MTXT=()
+  FS_FAILED=0
+  for i in "${!W_PATH[@]}"; do
+    [ -e "${W_PATH[$i]}" ] || continue
+    row="$($DF_CMD "${W_PATH[$i]}" 2>/dev/null | awk 'NR==2 { gsub("%","",$5); print $1, $5, $4, $6 }')"
+    read -r dev pct avail mount <<<"$row"
+    case "${pct:-x}${avail:-x}" in *[!0-9]*)
+      log "rmd-host-cleanup: fs ${W_PATH[$i]} unknown (df unreadable), mark $(mark_text "${W_PCT[$i]}" "${W_FREE_TXT[$i]}")"
+      continue ;;
+    esac
+    for (( j = 0; j < n; j++ )); do [ "${D_DEV[$j]}" = "$dev" ] && break; done
+    if [ "$j" = "$n" ]; then
+      D_DEV[n]="$dev"; D_MOUNT[n]="${mount:-${W_PATH[$i]}}"; D_PCT[n]="$pct"; D_AVAIL[n]="$avail"
+      D_MPCT[n]="${W_PCT[$i]}"; D_MKB[n]="${W_FREE_KB[$i]}"; D_MTXT[n]="${W_FREE_TXT[$i]}"; n=$(( n + 1 ))
+    else
+      [ "${W_PCT[$i]}" -lt "${D_MPCT[$j]}" ] && D_MPCT[j]="${W_PCT[$i]}"
+      if [ "${W_FREE_KB[$i]}" -gt "${D_MKB[$j]}" ]; then D_MKB[j]="${W_FREE_KB[$i]}"; D_MTXT[j]="${W_FREE_TXT[$i]}"; fi
+    fi
+  done
+  for (( j = 0; j < n; j++ )); do
+    log "rmd-host-cleanup: fs ${D_MOUNT[$j]} (${D_DEV[$j]}) ${D_PCT[$j]}% used, $(fmt_kb "${D_AVAIL[$j]}") free, mark $(mark_text "${D_MPCT[$j]}" "${D_MTXT[$j]}")"
+    if [ "${D_PCT[$j]}" -ge "${D_MPCT[$j]}" ] || [ "${D_AVAIL[$j]}" -lt "${D_MKB[$j]}" ]; then
+      fails="${fails}rmd-host-cleanup: FAIL ${D_MOUNT[$j]} is at ${D_PCT[$j]}% with $(fmt_kb "${D_AVAIL[$j]}") free (${D_DEV[$j]}), past its mark $(mark_text "${D_MPCT[$j]}" "${D_MTXT[$j]}")
+"
+      FS_FAILED=1
+    fi
+  done
+  [ -z "$fails" ] || printf '%s' "$fails"
+}
+
 # ── the pass ──
 before_pct="$(df_field pct)"; before_avail="$(df_field avail)"
 before_pct="${before_pct:-0}"; before_avail="${before_avail:-0}"
@@ -706,8 +786,6 @@ after_pct="${after_pct:-0}"; after_avail="${after_avail:-0}"
 log "rmd-host-cleanup: / ${before_pct}% -> ${after_pct}% ($(( (after_avail - before_avail) / 1024 )) MB reclaimed this pass)"
 [ "$DRY_RUN" = 1 ] && log "rmd-host-cleanup: DRY_RUN=1 — nothing was changed"
 
-if [ "$after_pct" -ge "$HIGH_WATER" ]; then
-  log "rmd-host-cleanup: FAIL / is at ${after_pct}%, at or above HIGH_WATER=${HIGH_WATER}%"
-  exit 1
-fi
+judge_filesystems
+[ "$FS_FAILED" = 0 ] || exit 1
 exit 0

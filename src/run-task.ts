@@ -938,6 +938,7 @@ import {
   LEDGER_COST_TAG_INFRA,
   DECISION_RELEVANT_LEDGER_STEPS,
   markDaemonProcessActor,
+  markLedgerProcessActor,
   matchesRepoScopedTask,
   MAX_RETAINED_LINES_PER_STEP,
 } from "./lib/ledger.js";
@@ -2402,8 +2403,9 @@ export function buildSweepEffects(
 /**
  * W1-T5403 — the sweep's risk judge for a head whose run ended `handed_off`: the SAME judge mount,
  * live risk policy, spend collector and BLOCKED escalation the in-run call in runTaskBody uses, with
- * the change view read at judgment time. A settings or change-view failure surfaces as an
- * unavailable judge through `assessRisk`, never as a proceed. Wired by both sweep entrypoints.
+ * the change view read at judgment time over the async transport (W1-T5523: off the sweep pass). A
+ * settings or change-view failure surfaces as an unavailable judge through `assessRisk`, never as a
+ * proceed. Wired by both sweep entrypoints.
  */
 export function handedOffHeadRiskJudge(
   owner: string,
@@ -2415,7 +2417,7 @@ export function handedOffHeadRiskJudge(
   log: (step: string, extra?: Record<string, unknown>) => void,
   spawn?: typeof spawnWorker,
   escalateImpl: typeof escalate = escalate,
-  readChangeView: (prUrl: string) => RiskJudgeChangeView = changeView,
+  readChangeView: (prUrl: string) => RiskJudgeChangeView | Promise<RiskJudgeChangeView> = changeViewAsync,
 ): NonNullable<SweepDeps["judgeHandedOffHead"]> {
   return riskJudgeHandedOffHead((pr) => {
     const task = pr.taskId === undefined ? undefined : plan.byId.get(pr.taskId);
@@ -2437,7 +2439,7 @@ export function handedOffHeadRiskJudge(
             outPath: join(config.root, "tmp", `risk-judge-settings-${runId}.json`),
           });
           const mount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
-          const judged = { ...input, change: { ...input.change, changeView: readChangeView(pr.prUrl) } };
+          const judged = { ...input, change: { ...input.change, changeView: await readChangeView(pr.prUrl) } };
           return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend })(judged);
         },
         escalate: (verdict, action) =>
@@ -2689,6 +2691,7 @@ function realDeps(): ComposedRealGraph {
 // reason (see lib/cli-args.ts's own header) — src/lib/report-commands.ts's moved report verbs
 // need it too.
 import { flagValue, unknownArgError } from "./lib/cli-args.js";
+import { createHandWorktree, renderHandWorktree } from "./lib/hand-worktree.js";
 export { unknownArgError };
 
 // ── W1-T2888: the read-and-print report verbs, moved to src/lib/report-commands.ts ────────────
@@ -4932,11 +4935,27 @@ export async function fetchPrDiffFilesViaGh(prUrl: string, gh: (args: string[]) 
  * declared file list, which would just reproduce this task's own defect under a different name.
  */
 export function changeView(prUrl: string, fetch: (args: string[]) => unknown = ghJson): RiskJudgeChangeView {
+  return changeViewFromRows(fetch(changeViewArgs(prUrl)));
+}
+
+/** W1-T5523 — {@link changeView} over the async gh transport, for the sweep's background judgment. */
+export async function changeViewAsync(
+  prUrl: string,
+  fetch: (args: string[]) => Promise<unknown> = ghJsonAsync,
+): Promise<RiskJudgeChangeView> {
+  return changeViewFromRows(await fetch(changeViewArgs(prUrl)));
+}
+
+function changeViewArgs(prUrl: string): string[] {
   const target = prUrlTarget(prUrl);
   if (!target) {
     throw new Error(`change view: cannot resolve owner/repo/number from ${JSON.stringify(prUrl)} — refusing to guess`);
   }
-  const rows = fetch(["api", `repos/${target.owner}/${target.repo}/pulls/${target.number}/files?per_page=100`]) as Array<{
+  return ["api", `repos/${target.owner}/${target.repo}/pulls/${target.number}/files?per_page=100`];
+}
+
+function changeViewFromRows(response: unknown): RiskJudgeChangeView {
+  const rows = response as Array<{
     filename?: string;
     additions?: number;
     deletions?: number;
@@ -6285,7 +6304,7 @@ export const PR_OPEN_HANDOFF_STEP_OWNERS: readonly { step: string; owner: PrOpen
   { step: "capped_arm_refusal", owner: { kind: "sweep", by: "runReview -> armIfVerdictPermits -> decideArmFromLedgerVerdict" } },
   { step: "automerge_arm", owner: { kind: "sweep", by: "sweep mergeable disposition arms auto-merge on checks green + review success" } },
   { step: "merge_and_terminal_row", owner: { kind: "sweep", by: "GitHub auto-merge the sweep armed; this run's own terminal row is the handed_off verdict" } },
-  { step: "risk_judge", owner: { kind: "sweep", by: "sweep mergeable disposition -> judgeHandedOffHead (handedOffHeadRiskJudge -> runRiskJudge), once per handed-off head before arming" } },
+  { step: "risk_judge", owner: { kind: "sweep", by: "sweep mergeable disposition -> judgeHandedOffHead (handedOffHeadRiskJudge -> runRiskJudge), once per handed-off head before arming, off the pass (W1-T5523)" } },
   { step: "specialist_panel", owner: { kind: "in_run_only", by: "routeSpecialists in runTaskBody; a specialist.panel log row that gates nothing" } },
   { step: "irreversible_arm_refusal", owner: { kind: "declined", reason: "irreversible_diff" } },
   { step: "no_merge_boundary", owner: { kind: "declined", reason: "no_merge_boundary" } },
@@ -10035,6 +10054,8 @@ export function readPackageScriptsFor(worktreePath: string): Readonly<Record<str
  * `spawnWorker`/`waitForCiGreen`/`runReview` plus a small git-push wrapper.
  */
 export async function runFixRung(opts: {
+  /** W1-T4072: production pins harness commits and pushes to the dispatch head. */
+  guardRoundHead?: boolean;
   taskId: string;
   runId: string;
   /** `files` (W1-T322) — see runReview's own `task` doc; every real caller already passes the
@@ -10284,7 +10305,7 @@ export async function runFixRung(opts: {
      * rewound between the commit and this call raises `LanePushForeignHeadError` instead of
      * silently no-op'ing. Optional and additive — every existing test double that ignores its
      * third argument keeps working unchanged. */
-    push: (worktreePath: string, branch: string, expectedHeadSha?: string) => unknown;
+    push: (worktreePath: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => unknown;
     /** Fresh REST head read used only after the push to bind this worker to its exact output. */
     readHeadShaForProvenance?: (prUrl: string) => string;
     issues: IssueGateway;
@@ -11741,10 +11762,12 @@ export async function runFixRung(opts: {
     // so a commit the worker made itself is pushed, not re-read as "the worker changed nothing".
     let harnessCommitRefusalReason: string | undefined;
     let harnessCommitUndeclared: readonly string[] = [];
+    let harnessCommittedSha: string | undefined;
     const harnessCommit = (report: string, options: Pick<Parameters<typeof harnessCommitForShellLessWorker>[0], "subjectSource" | "derivedCommit" | "fixOutcome"> = {}) =>
       (deps.harnessCommitForShellLessWorker ?? harnessCommitForShellLessWorker)({
         harnessOwnsGit: fixHarnessOwnsGit,
-        commitCount: roundStartSha === undefined ? 0 : (deps.commitsAhead ?? commitsAhead)(opts.worktreePath, roundStartSha),
+        commitCount: opts.guardRoundHead && fixHarnessOwnsGit ? 0 : roundStartSha === undefined ? 0 : (deps.commitsAhead ?? commitsAhead)(opts.worktreePath, roundStartSha),
+        ...(opts.guardRoundHead ? { priorHeadSha: censusRefusalIsCurrent() ? roundStartSha ?? priorHeadSha : priorHeadSha, branch: opts.branch } : {}),
         report,
         worktreePath: opts.worktreePath,
         // The prompt and pre-strike guard already permit repairs to the inherited PR diff.
@@ -11760,6 +11783,7 @@ export async function runFixRung(opts: {
           harnessCommitRefusalReason = reason;
           harnessCommitUndeclared = undeclared;
         },
+        onCommit: (sha) => { harnessCommittedSha = sha; },
       });
     const fixReport = workerTranscript(fixResult);
     let fixOutcome = anchoredFixOutcome(fixReport);
@@ -11850,9 +11874,9 @@ export async function runFixRung(opts: {
     // if it no longer matches this snapshot, instead of silently pushing zero refs. Best-effort:
     // an unreadable HEAD here just means this round's push runs without the guard — the same
     // fail-open discipline every other optional read in this rung already takes.
-    let expectedHeadShaForPush: string | undefined;
+    let expectedHeadShaForPush = harnessCommittedSha;
     try {
-      expectedHeadShaForPush = execFileSync("git", ["-C", opts.worktreePath, "rev-parse", "HEAD"], {
+      expectedHeadShaForPush ??= execFileSync("git", ["-C", opts.worktreePath, "rev-parse", "HEAD"], {
         encoding: "utf8",
       }).trim();
     } catch {
@@ -12080,7 +12104,7 @@ export async function runFixRung(opts: {
       if (harnessCommitCount > 0) {
         let pushedHead: string | undefined;
         try {
-          const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush), expectedHeadShaForPush, "rung.strike");
+          const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? priorHeadSha : undefined), expectedHeadShaForPush, "rung.strike");
           if (pushed === undefined) pushedHead = expectedHeadShaForPush;
           if (pushed && pushed !== "refused") return pushed;
         } finally { logFixDone(pushedHead); }
@@ -12129,7 +12153,7 @@ export async function runFixRung(opts: {
     let roundPush: FixRungOutcome | "refused" | undefined;
     let pushedHeadSha: string | undefined;
     try {
-      roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush), expectedHeadShaForPush, "rung.strike");
+      roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? priorHeadSha : undefined), expectedHeadShaForPush, "rung.strike");
       if (roundPush === undefined) pushedHeadSha = expectedHeadShaForPush;
     } finally {
       logFixDone(pushedHeadSha);
@@ -16188,11 +16212,25 @@ export class FixRoundPushError extends RmdError {
 
 /** W1-T4693: the one push both fix-rung sites run. Stderr is piped so a refusal is readable; a foreign head
  *  still raises; the only silent failure is a remote that already holds this exact head. */
-export function pushFixRound(wt: string, branch: string, expectedHeadSha?: string): void {
+export function pushFixRound(
+  wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string,
+  deps: Pick<NonNullable<Parameters<typeof gitPushRunBranch>[1]>, "capture" | "exec"> = {},
+): void {
+  const capture = deps.capture ?? defaultGitCapture;
+  const push = deps.exec ?? ((file, args) => void execFileSync(file, args, { stdio: ["ignore", "ignore", "pipe"] }));
   try {
-    gitPushRunBranch(wt, { expectedHeadSha, exec: (file, args) => void execFileSync(file, args, { stdio: ["ignore", "ignore", "pipe"] }) });
+    if (priorHeadSha !== undefined && expectedHeadSha === undefined) throw new Error("refusing a leased fix push without the committed head sha");
+    gitPushRunBranch(wt, { expectedHeadSha, capture, exec: (file, args) => {
+      const pushArgs = priorHeadSha === undefined ? args : ["-C", wt, "push",
+        `--force-with-lease=refs/heads/${branch}:${priorHeadSha}`, "origin", `${expectedHeadSha}:refs/heads/${branch}`];
+      push(file, pushArgs, { stdio: "ignore" });
+      if (priorHeadSha !== undefined) {
+        const observed = capture("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`]).split(/\s/)[0];
+        if (observed !== expectedHeadSha) throw new Error(`leased push of ${branch} expected ${expectedHeadSha}, observed ${observed || "<absent>"}`);
+      }
+    } });
   } catch (err) {
-    if (err instanceof LanePushForeignHeadError) throw err;
+    if (err instanceof LanePushForeignHeadError && priorHeadSha === undefined) throw err;
     // spawnSync, not a try: an unreadable remote simply is not the expected head.
     const remote = spawnSync("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`], { encoding: "utf8" }).stdout?.split(/\s/)[0];
     if (expectedHeadSha !== undefined && remote === expectedHeadSha) return;
@@ -16364,11 +16402,12 @@ export async function pushFixRoundPrechecked(
   branch: string,
   expectedHeadSha?: string,
   ports: CoveragePrecheckPorts = {},
-  push: (wt: string, branch: string, expectedHeadSha?: string) => void = pushFixRound,
+  push: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => void = pushFixRound,
+  priorHeadSha?: string,
 ): Promise<void> {
   const refusal = coveragePushRefusal(await coveragePrecheck(wt, ports), log, "rung.fix_push");
   if (refusal) throw new FixRoundPushError("run-error", refusal, refusal.text);
-  push(wt, branch, expectedHeadSha);
+  push(wt, branch, expectedHeadSha, priorHeadSha);
 }
 
 export type CensusPushRungOutcome =
@@ -18567,6 +18606,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // get the rung for free (no duplicated fix-dispatch logic).
     if (review.state !== "success") {
       const rung = await runFixRung({
+        guardRoundHead: true,
         taskId,
         runId,
         task,
@@ -18629,7 +18669,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           execAcceptanceGateRepairProof: execGrepProofInWorktree(worktreePath),
           // W1-T2610 + W1-T4693: `expectedHeadSha` still raises `LanePushForeignHeadError` on a rewound ref;
           // a refusal or failure now throws `FixRoundPushError`, which `runFixRung` turns into a named round.
-          push: (wt, br, sha) => pushFixRoundPrechecked((step, extra) => log(step, extra), wt, br, sha),
+          push: (wt, br, sha, prior) => pushFixRoundPrechecked((step, extra) => log(step, extra), wt, br, sha, {}, pushFixRound, prior),
           readHeadShaForProvenance: readHeadShaRest,
           issues: ghIssueGateway(owner, task.repo),
           ledgerPath,
@@ -23117,6 +23157,30 @@ export function reapBranchesCommand(
     opts.onExitReason?.(`guard-list drift: ${Object.entries(counts).filter(([, v]) => v.length > 0).map(([k, v]) => `${k}=${v.length}`).join(" ")}`);
   }
   return drift ? 1 : 0;
+}
+
+/**
+ * `rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]` (W1-T5533) — the worktree a hand build
+ * works in, cut from fresh origin/main by `createHandWorktree` (src/lib/hand-worktree.ts). The
+ * parent defaults to the directory holding this checkout, so the worktree lands beside it.
+ */
+export function handWorktreeCommand(rest: string[], opts: { repoDir?: string; clock?: Clock; minFreeBytes?: number } = {}): number {
+  const taskId = rest[0];
+  const badArg = taskId === undefined || taskId.startsWith("--") ? "rmd hand-worktree: <taskId> (or `unfiled`) must come first"
+    : rest.at(-1) === "--parent" ? "rmd hand-worktree: --parent needs a directory" : unknownArgError("hand-worktree", rest.slice(1), ["--parent"]);
+  if (badArg) {
+    console.error(`${badArg}\nusage: ${commandSyntax("hand-worktree")}`);
+    return 2;
+  }
+  const repoDir = opts.repoDir ?? repoRoot;
+  const parent = flagValue(rest, "--parent") ?? dirname(resolve(repoDir));
+  const result = createHandWorktree({ repoDir, taskId, parent, clock: opts.clock, minFreeBytes: opts.minFreeBytes });
+  if (result.status === "refused") {
+    console.error(`rmd hand-worktree: refused — ${result.reason}`);
+    return 1;
+  }
+  console.log(renderHandWorktree(result));
+  return 0;
 }
 
 // ledgerGrepCommand / stepFromRawLedgerLine moved to src/lib/report-commands.ts (W1-T2888) —
@@ -29237,6 +29301,8 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
   successorWatch?: (opts: SuccessorWatchOptions) => Promise<SuccessorWatchReading>;
   /** Keep the production escalation path injectable so cadence fixtures never create GitHub issues. */
   successorEscalate?: typeof tryEscalate;
+  handRunCensus?: MeasurementCadenceReportOpts["handRunCensus"];
+  measurementReport?: typeof runMeasurementCadenceReportAsync;
 } = {}): {
   checkMeasurementCadence: () => MeasurementCadenceDecision;
   runMeasurementCadence: () => Promise<MeasurementCadenceRunResult>;
@@ -29316,7 +29382,7 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       });
       const planReconcileOption =
         planReconcile === undefined ? {} : { planReconcile: { ...planReconcile } };
-      const report = await runMeasurementCadenceReportAsync({
+      const report = await (deps.measurementReport ?? runMeasurementCadenceReportAsync)({
         stateDir: join(root, "state"),
         cwd: repoRoot,
         escalate: policyFor().values.measurementCadence.escalate,
@@ -29332,6 +29398,12 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         // on a tick this function's own caller (daemon.ts) already decided `fire: true` for.
         proofDebt: deps.proofDebtInput ? deps.proofDebtInput() : defaultProofDebtCadenceInput(repoRoot),
         ...planReconcileOption,
+        handRunCensus: {
+          ...deps.handRunCensus,
+          root: repoRoot,
+          ledgerPath: ledgerPathFor(configFor()),
+          runId: coverageRunId,
+        },
         coverageImprovement: {
           root: repoRoot,
           ledgerPath: ledgerPathFor(configFor()),
@@ -36383,6 +36455,7 @@ async function deployCommand(rest: string[]): Promise<number> {
  * Provisioning the install root is exclusively `rmd install-checkout`'s job, not this one's.
  */
 async function deployRunCommand(rest: string[]): Promise<number> {
+  markLedgerProcessActor("host_automation");
   const badArg = unknownArgError("deploy-run", rest, ["--state-root"], ["--dry-run", "--image-drift-only"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -37323,6 +37396,7 @@ export async function serveCommand(
     generation?: GenerationChannel;
   } = {},
 ): Promise<number> {
+  markLedgerProcessActor("service");
   // `--host` was documented in USAGE and read by resolveServeHosts, but was NOT in this
   // validator's value-flag list — so `rmd serve --host <addr>` exited 2 on its own documented
   // flag and the tailnet bind was reachable only via RMD_SERVE_HOST (W1-T152).
@@ -40632,7 +40706,7 @@ function preserveFixHead(repoDir: string, branch: string, localSha: string): str
 
 /** W1-T3696 A1. What {@link commitWorkerEdits} did, and what it refused to touch. */
 export interface WorkerEditCommit {
-  /** True only when a commit object was actually created. */
+  /** True only when the worker's edits were committed onto the branch. */
   readonly committed: boolean;
   /** The new HEAD sha, present only when `committed`. */
   readonly sha?: string;
@@ -40645,6 +40719,7 @@ export interface WorkerEditCommit {
   readonly admittedTests?: readonly string[];
   /** Why nothing was committed, when `committed` is false. */
   readonly reason?: string;
+  readonly headMoved?: { prior_head_sha: string; observed_head_sha: string; other_worktrees: string[] };
 }
 
 /**
@@ -40677,18 +40752,39 @@ export function commitWorkerEdits(
   // exists to prevent, and there is nothing this verb needs that the push verb did not.
   deps: PublishAbandonedFixOwnerAheadDeps = {},
   acceptance: readonly AcceptanceCriterion[] = [],
-  options: { admitTests?: boolean } = {},
+  options: { admitTests?: boolean; priorHeadSha?: string; branch?: string } = {},
 ): WorkerEditCommit {
   const runGit = deps.runGit ?? ((args: string[]) => execFileSync(
     "git",
     ["-C", repoDir, ...args],
-    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+      ...(options.priorHeadSha === undefined ? {} : { env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } }) },
   ));
   if (message.trim().length === 0) {
     return { committed: false, undeclared: [], reason: "refusing to commit with an empty message" };
   }
   if (declaredPaths.length === 0) {
     return { committed: false, undeclared: [], reason: "the task declares no files, so there is no surface to stage" };
+  }
+
+  const roundRef = options.priorHeadSha === undefined ? undefined : options.branch === undefined
+    ? runGit(["symbolic-ref", "HEAD"]).trim() : `refs/heads/${options.branch}`;
+  const movedHead = (undeclared: readonly string[], error?: unknown): WorkerEditCommit | undefined => {
+    const row = runGit(["for-each-ref", "--format=%(refname) %(objectname)", roundRef!]).split("\n")
+      .find((line) => line.startsWith(`${roundRef} `));
+    const observed = row?.slice(roundRef!.length + 1) ?? "<absent>";
+    if (observed === options.priorHeadSha) return undefined;
+    const otherWorktrees = runGit(["worktree", "list", "--porcelain"]).split("\n\n").filter((block) =>
+      block.split("\n").includes(`branch ${roundRef}`),
+    ).map((block) => block.split("\n").find((line) => line.startsWith("worktree "))!.slice(9))
+      .filter((path) => resolve(path) !== resolve(repoDir));
+    return { committed: false, undeclared,
+      reason: `branch moved during fix round: expected ${options.priorHeadSha}, observed ${observed}${error === undefined ? "" : `: ${String(error)}`}`,
+      headMoved: { prior_head_sha: options.priorHeadSha!, observed_head_sha: observed, other_worktrees: otherWorktrees } };
+  };
+  if (roundRef !== undefined) {
+    const refusal = movedHead([]);
+    if (refusal) return refusal;
   }
 
   const status = runGit(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]);
@@ -40722,11 +40818,30 @@ export function commitWorkerEdits(
     return { committed: false, undeclared, reason: "every change the worker made is outside its declared files" };
   }
 
-  runGit(["add", "-A", "--", ...declared]);
-  runGit(["commit", "-m", message]);
+  let sha: string;
+  if (roundRef === undefined) {
+    runGit(["add", "-A", "--", ...declared]);
+    runGit(["commit", "-m", message]);
+    sha = runGit(["rev-parse", "HEAD"]).trim();
+  } else {
+    const tree = temporaryIndexTree(repoDir, options.priorHeadSha!, (env) => {
+      execFileSync("git", ["-C", repoDir, "add", "-A", "--", ...declared], { env, stdio: ["ignore", "pipe", "pipe"] });
+    });
+    if (tree === runGit(["rev-parse", `${options.priorHeadSha}^{tree}`]).trim()) {
+      return { committed: false, undeclared, reason: "the worker changed nothing" };
+    }
+    sha = runGit(["commit-tree", tree, "-p", options.priorHeadSha!, "-m", message]).trim();
+    try {
+      runGit(["update-ref", roundRef, sha, options.priorHeadSha!]);
+    } catch (error) {
+      const refusal = movedHead(undeclared, error);
+      if (refusal) return refusal;
+      throw error;
+    }
+  }
   return {
     committed: true,
-    sha: runGit(["rev-parse", "HEAD"]).trim(),
+    sha,
     undeclared,
     ...(regenerable.length > 0 ? { regenerable } : {}),
     ...(proofMatchedTests.length > 0 ? { proofMatchedTests } : {}),
@@ -40966,6 +41081,8 @@ export function harnessCommitForShellLessWorker(
     declaredPaths: readonly string[];
     acceptance?: readonly AcceptanceCriterion[];
     admitTests?: boolean;
+    priorHeadSha?: string;
+    branch?: string;
     fixOutcome?: TypedFixOutcome["kind"];
     subjectSource?: "worker-authored" | "re-asked" | "harness-derived";
     derivedCommit?: { subject: string; reason: string };
@@ -40976,6 +41093,7 @@ export function harnessCommitForShellLessWorker(
     /** Receives the helper's exact refusal reason so a fix lane can record its own outcome row,
      *  with the undeclared paths it refused to stage (W1-T4207; empty when none were computed). */
     onRefusal?: (reason: string, undeclared?: readonly string[]) => void;
+    onCommit?: (sha: string) => void;
   },
   deps: { commit?: typeof commitWorkerEdits; ahead?: (worktreePath: string, base: string) => number } = {},
 ): number {
@@ -40996,7 +41114,10 @@ export function harnessCommitForShellLessWorker(
     input.assignmentId,
   );
   const subjectSource = asked === undefined ? "harness-derived" : input.subjectSource ?? "worker-authored";
-  const committed = commit(input.worktreePath, input.declaredPaths, message, {}, input.acceptance, { admitTests: input.admitTests });
+  const committed = commit(input.worktreePath, input.declaredPaths, message, {}, input.acceptance, {
+    admitTests: input.admitTests, priorHeadSha: input.priorHeadSha, branch: input.branch,
+  });
+  if (committed.headMoved) input.log("fix.head_moved_under_round", { ...committed.headMoved, reason: committed.reason });
   const refusalReason = committed.reason ?? "harness commit refused";
   input.log(committed.committed ? "implement.harness_commit" : "implement.harness_commit_refused", {
     ...(committed.sha ? { sha: committed.sha } : {}),
@@ -41012,6 +41133,7 @@ export function harnessCommitForShellLessWorker(
     input.onRefusal?.(refusalReason, committed.undeclared);
     return input.commitCount;
   }
+  if (committed.sha) input.onCommit?.(committed.sha);
   input.say(`harness committed the worker's edits (${committed.sha?.slice(0, 8)}) — it had no shell of its own`);
   return ahead(input.worktreePath, "origin/main");
 }
@@ -49917,6 +50039,12 @@ const COMMANDS: readonly CommandSpec[] = [
       " — none of them shells the full test:ci suite, though the four census:* entries above each spawn `node --test` on their own one named file; that spawn is timed, and an outlier is refused as RUNAWAY — not by a fixed millisecond ceiling, but by a bound derived from THIS SAME run's own cheapest census entry (W1-T2478 admitted the class under a measured bound, W1-T2545 made that bound relative so a growing corpus cannot outgrow it) — the one failure mode unique to --fast; W1-T2734's source-size signal is the one networked member, refreshing origin/main before a PR-relative measurement, and every other member stays network-free; --coverage (W1-T1074) ADDS runPreflightCoverage's diff-coverage gate alone, at author-time on its own freshly self-derived origin/main...HEAD base — never a caller-supplied diff — opt-in and slow by construction (minutes, not seconds: it shells the same full instrumented suite --ci-parity's coverage-ratchet job runs, because a coverage lcov needs the full suite and --fast can never carry one, by design), and REFUSES rather than reports on an empty diff, a tree left dirty in a diffed file, or a changed file with no lcov SF: instrumentation record (reported as UNPROVEN, naming the file); any subset of --ci-parity/--fast/--coverage may be passed; exits non-zero if any step fails, after every step has run and reported. EVERY run also writes a machine-readable verdict to `<repoRoot>/coverage/preflight-summary.json` (override with --summary-file <path>) — ok, the head sha, duration, pass/fail counts and every step — so an eight-minute result survives the container that produced it; written on FAIL as well as PASS, and a write failure never changes the exit code",
   },
   {
+    name: "hand-worktree",
+    syntax: "rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]",
+    summary: "Create a hand build's run-<taskId>-<epochMs> worktree from origin/main with linked node_modules.",
+    detail: "W1-T5533: the worktree a HAND build works in, made by one command instead of retyped. Refuses before writing anything when the task id is malformed, --parent is relative or missing, the target filesystem has under 2 GiB free, origin is unreachable, origin already has a run-<taskId>-* branch, or origin/main already carries a `Remudero-Task: <taskId>` trailer (`unfiled` skips the two duplicate checks). Then runs `git worktree add --no-track -b run-<taskId>-<epochMs> <parent>/<branch> origin/main` — no upstream, an ABSOLUTE path (--parent defaults to the directory holding this checkout) — and HARD-LINKS (`cp -al`, never a symlink, so a later `npm ci` cannot empty the donor) node_modules from the first sibling worktree on the same filesystem whose package-lock.json is byte-identical, whose node_modules/.bin is non-empty and whose top-level `npm ls` passes. When none qualifies it prints `npm ci` as the next step with each candidate's reason and the free space, and does not run it. Prints the path and branch; exits 0 created, 1 refused, 2 bad usage.",
+  },
+  {
     name: "next-task-id",
     syntax: "rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>] [--branch <name>]",
     summary: "Atomically CLAIM the next free W1-T<n> task id. `--no-reserve` prints one without claiming it.",
@@ -51038,6 +51166,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["replay-goldens", async (rest) => await replayGoldensCommand(rest)],
   ["check-acceptance", (rest) => checkAcceptanceCommand(rest)],
   ["next-task-id", async (rest) => await nextTaskIdCommand(rest)],
+  ["hand-worktree", (rest) => handWorktreeCommand(rest)],
   [
     "retro",
     async (rest) => {
@@ -51214,6 +51343,9 @@ export async function main(
     /* best-effort by contract — never let housekeeping fail the verb the operator asked for */
   }
   const [cmd, ...rest] = stripRepoRootFlag(process.argv.slice(2));
+  if (cmd === "serve") markLedgerProcessActor("service");
+  else if (cmd === "deploy-run") markLedgerProcessActor("host_automation");
+  else if (cmd === "daemon") markDaemonProcessActor();
   // W1-T2893: `arg` (== rest[0]) is no longer read here — each HANDLERS entry that needs it
   // (registry.ts's REGISTRY, built above) derives its own from `rest`, since the old flat
   // if-ladder this replaced is gone and this was its only remaining reader in main() itself.
