@@ -298,7 +298,9 @@ function decorateFeedbackLanding(entries: ReconciledFeedbackEntry[], deps: Panel
     deps.logProjection?.("serve.feedback_landing_queue_unreadable", { route: "/v1/feedback", reason: String((error as Error)?.message ?? error) });
     return entries.map((entry) => ({ ...entry, landingUnknown: true }));
   }
-  return entries.map((entry) => overlayQueuedFeedback(entry, queued));
+  const listed = new Set(entries.map((entry) => feedbackEntryRepoPath(entry.id)));
+  const queueOnly = [...queued].filter(([rel]) => !listed.has(rel)).map(([, record]) => ({ ...record, landing: "queued" }) as unknown as ReconciledFeedbackEntry);
+  return [...entries.map((entry) => overlayQueuedFeedback(entry, queued)), ...queueOnly];
 }
 
 /** GET /v1/feedback[?status=<status>] — the feedback inbox, read-scoped. */
@@ -399,10 +401,9 @@ function validateSubmitFeedback(body: unknown): { error: string } | SubmitFeedba
   };
 }
 
-/** The 400 refusal for a `replyTo` that cannot be answered, else undefined. Status is read from fetched origin/main,
- *  which feedback landing writes to; the daemon's checkout lags it and is the fallback only when that read fails.
- *  Main still says `grilling` until a reply's landing merges, so an answering entry already in the checkout refuses too. */
-function replyRefusal(root: string, replyTo: string): { refused: string } | undefined {
+/** The 400 refusal for a `replyTo` that cannot be answered, else undefined. Status reads from fetched origin/main, else the
+ *  checkout, else the landing queue; an answering entry in the checkout or queue refuses too, as main lags the reply. */
+function replyRefusal(root: string, replyTo: string, queued: ReadonlyMap<string, QueuedFeedbackRecord>): { refused: string } | undefined {
   let target: FeedbackEntry;
   let source = "origin/main";
   try {
@@ -413,17 +414,33 @@ function replyRefusal(root: string, replyTo: string): { refused: string } | unde
     try {
       target = readFeedbackEntry(root, replyTo);
     } catch {
-      return { refused: `replyTo names no known feedback entry "${replyTo}"` };
+      const queuedTarget = queued.get(feedbackEntryRepoPath(replyTo));
+      if (!queuedTarget) return { refused: `replyTo names no known feedback entry "${replyTo}"` };
+      source = "the landing queue (origin/main unreadable)";
+      target = queuedTarget as unknown as FeedbackEntry;
     }
   }
   if (target.status !== "grilling") {
     return { refused: `feedback#${replyTo} is not parked at grilling (status: ${target.status}, read from ${source}) — nothing to answer` };
   }
-  const answering = listFeedback(root).find((e) => e.reply_to === replyTo);
+  const inCheckout = listFeedback(root).find((e) => e.reply_to === replyTo);
+  const answering = inCheckout ?? ([...queued.values()] as unknown as FeedbackEntry[]).find((e) => e.reply_to === replyTo);
   if (!answering) return undefined;
   return {
-    refused: `feedback#${replyTo} is parked at grilling (status: grilling, read from ${source}) but the checkout already holds feedback#${answering.id} answering it — nothing to answer`,
+    refused: `feedback#${replyTo} is parked at grilling (status: grilling, read from ${source}) but ${inCheckout ? "the checkout" : "the landing queue"} already holds feedback#${answering.id} answering it — nothing to answer`,
   };
+}
+
+/** W1-T5628: the landing queue a dedup, reply or trace reads; unreadable, it answers 503 and returns undefined. */
+function readQueueForCheck(deps: PanelGraphDeps, route: string, res: ServerResponse): Map<string, QueuedFeedbackRecord> | undefined {
+  try {
+    return readQueuedFeedbackRecords(deps.inboxRoot);
+  } catch (error) {
+    const reason = String((error as Error)?.message ?? error);
+    deps.logProjection?.("serve.feedback_landing_queue_unreadable", { route, reason });
+    sendJson(res, 503, { error: "landing_queue_unreadable", detail: `the landing queue could not be read, so nothing is answered blind: ${reason}` });
+    return undefined;
+  }
 }
 
 /**
@@ -442,15 +459,17 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
     // W1-T404: LOW — bookkeeping, trivially reversible (capture-only).
     tier: "low",
     handler: jsonAction(validateSubmitFeedback, (input, req, res) => {
+      const queued = input.submissionKey || input.replyTo !== undefined ? readQueueForCheck(deps, "/v1/feedback", res) : new Map<string, QueuedFeedbackRecord>();
+      if (!queued) return;
       if (input.submissionKey) {
-        const existing = findFeedbackBySubmissionKey(deps.root, input.submissionKey);
+        const existing = findFeedbackBySubmissionKey(deps.root, input.submissionKey, deps.inboxRoot);
         if (existing) {
           sendJson(res, 200, { ok: true, entry: existing });
           return;
         }
       }
       if (input.replyTo !== undefined) {
-        const refusal = replyRefusal(deps.root, input.replyTo);
+        const refusal = replyRefusal(deps.root, input.replyTo, queued);
         if (refusal) {
           sendJson(res, 400, { error: "invalid_request", detail: refusal.refused });
           return;
@@ -519,7 +538,9 @@ export function buildPreviewFeedbackRoute(deps: PanelGraphDeps): Route {
     tier: "low",
     handler: jsonAction(validatePreviewFeedback, async (input, _req, res) => {
       if (input.replyTo !== undefined) {
-        const refusal = replyRefusal(deps.root, input.replyTo);
+        const queued = readQueueForCheck(deps, "/v1/feedback/preview", res);
+        if (!queued) return;
+        const refusal = replyRefusal(deps.root, input.replyTo, queued);
         if (refusal) {
           sendJson(res, 400, { error: "invalid_request", detail: refusal.refused });
           return;
@@ -569,16 +590,21 @@ export function buildTraceRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
           try {
             feedbackEntry = readFeedbackEntry(deps.root, feedbackId);
           } catch {
-            // origin names a feedback entry that no longer resolves -- render the chain without
-            // it, same as traceCommand's own "note and continue" behavior.
+            // origin names an entry that no longer resolves: render without it, as traceCommand does.
           }
         }
         chain = traceReverse(task, { plan, ledgerLines, github: deps.github }, feedbackEntry);
       } else {
-        let entry: FeedbackEntry;
+        let entry: FeedbackEntry | undefined;
         try {
           entry = readFeedbackEntry(deps.root, id);
         } catch {
+          // Not in the checkout: a console capture is only queued until it lands (W1-T5628).
+          const queued = readQueueForCheck(deps, "/v1/trace", res);
+          if (!queued) return;
+          entry = queued.get(feedbackEntryRepoPath(id)) as unknown as FeedbackEntry | undefined;
+        }
+        if (!entry) {
           sendJson(res, 404, { error: "not_found", detail: `'${id}' is neither a known task id nor a feedback entry` });
           return;
         }

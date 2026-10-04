@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { landFeedback, landFeedbackStatusContent, type LandFeedbackOpts } from "./feedback-landing.js";
+import { landFeedback, landFeedbackStatusContent, readQueuedFeedbackRecords, type LandFeedbackOpts } from "./feedback-landing.js";
 import type { Mount, Mounts } from "./mounts.js";
 import { resolveRiskJudgeMount } from "./risk-judge.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
@@ -702,9 +702,9 @@ export interface CaptureFeedbackOptions {
   /** Explicit id, overriding the default random `fb-<epoch>-<hex>` id. Machine-origin intake
    *  passes a deterministic id so a re-run's `existsSync` check is the whole dedup mechanism. */
   id?: string;
-  /** W1-T243 test seam only — passed through verbatim to {@link landFeedback} after the write.
-   *  A console route sets it to skip the request-path preflight (W1-T5348); a test injects a fake
-   *  `gh` to exercise the bridge without hitting real GitHub. */
+  /** Passed verbatim to {@link landFeedback} after the write. A console route sets `stateRoot`: nothing
+   *  lands here, the route stages the record with `queueFeedbackRecord` (W1-T5525), and the
+   *  `submissionKey` guard also scans that queue (W1-T5628). A test injects a fake `gh`. */
   land?: LandFeedbackOpts;
   /** W1-T350: the four-section expansion of `raw`, already produced by the caller's own
    * preview→arm→confirm round trip before this capture ever runs. `undefined`/`null` leaves
@@ -729,11 +729,11 @@ export interface CaptureFeedbackOptions {
 }
 
 /** Find an existing feedback entry by its console-minted `submission_key` (W1-T2302) —
- * {@link captureFeedback}'s never-clobber guard, run before it ever writes. `null` when nothing
- * carries this key. A linear scan over {@link listFeedback} rather than a second index, so it
- * survives a daemon restart with nothing new to go stale. */
-export function findFeedbackBySubmissionKey(root: string, key: string): FeedbackEntry | null {
-  return listFeedback(root).find((e) => e.submission_key === key) ?? null;
+ * {@link captureFeedback}'s never-clobber guard. `null` when nothing carries this key. A linear
+ * scan over {@link listFeedback} and, given `stateRoot`, its landing queue — no second index. */
+export function findFeedbackBySubmissionKey(root: string, key: string, stateRoot?: string): FeedbackEntry | null {
+  const queued = stateRoot === undefined ? [] : ([...readQueuedFeedbackRecords(stateRoot).values()] as unknown as FeedbackEntry[]);
+  return [...listFeedback(root), ...queued].find((e) => e.submission_key === key) ?? null;
 }
 
 /** Capture one feedback item: writes `plan/feedback/<id>.yaml` with `status: new`, copying any
@@ -746,7 +746,7 @@ export function findFeedbackBySubmissionKey(root: string, key: string): Feedback
  * landing/upstream sequencing is archived in docs/forensics/feedback.md. */
 export function captureFeedback(root: string, opts: CaptureFeedbackOptions): FeedbackEntry {
   if (opts.submissionKey) {
-    const existing = findFeedbackBySubmissionKey(root, opts.submissionKey);
+    const existing = findFeedbackBySubmissionKey(root, opts.submissionKey, opts.land?.stateRoot);
     if (existing) return existing;
   }
   const raw = opts.raw.trim();
@@ -850,7 +850,9 @@ export function setFeedbackStatus(
   if (!(FEEDBACK_STATUSES as readonly string[]).includes(status)) {
     throw new FeedbackError(`invalid status "${status}" — must be one of ${FEEDBACK_STATUSES.join(", ")}`);
   }
-  const entry = readFeedbackEntry(root, id);
+  // W1-T5628: a queued record is newer than the checkout, and a console capture exists only there.
+  const queued = opts.land?.stateRoot === undefined ? undefined : readQueuedFeedbackRecords(opts.land.stateRoot).get(feedbackEntryRepoPath(id));
+  const entry = (queued as unknown as FeedbackEntry | undefined) ?? readFeedbackEntry(root, id);
   const updated: FeedbackEntry = {
     ...entry,
     status,

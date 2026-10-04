@@ -23,6 +23,7 @@ import type { GitHub } from "../src/lib/status.js";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { landQueuedFeedback } from "./helpers/land-queued-feedback.js";
 
 // ── W3-T2: @remudero/api-client's FIRST runtime layer (MASTER-PLAN §7A) ─────────────────────
 //
@@ -310,9 +311,10 @@ test("createDaemonClient.submitFeedback(): POSTs /v1/feedback, returns the captu
 });
 
 test("createDaemonClient.listFeedback(): GETs /v1/feedback, returns entries the client itself just submitted", async () => {
-  await withGraphFixture(async (baseUrl) => {
+  await withGraphFixture(async (baseUrl, deps) => {
     const client = createDaemonClient({ baseUrl, token: WRITE_TOKEN });
     await client.submitFeedback("one");
+    landQueuedFeedback(deps.inboxRoot, deps.root); // the sweep lands the capture (W1-T5628)
     const result = await client.listFeedback();
     assert.equal(result.entries.length, 1);
     assert.equal(result.entries[0].raw, "one");
@@ -341,6 +343,7 @@ test("createDaemonClient.decideProposal(): POSTs /v1/feedback/decision, returns 
   await withGraphFixture(async (baseUrl, deps) => {
     const client = createDaemonClient({ baseUrl, token: WRITE_TOKEN });
     const submitted = await client.submitFeedback("x");
+    landQueuedFeedback(deps.inboxRoot, deps.root);
     setFeedbackStatus(deps.root, submitted.entry.id, "proposed", { proposalPr: "https://github.com/o/r/pull/1" });
     const result = await client.decideProposal(submitted.entry.id, "accept");
     assert.deepEqual(result, { ok: true, id: submitted.entry.id, status: "accepted", proposalPr: "https://github.com/o/r/pull/1" });
@@ -458,6 +461,7 @@ test("createDaemonClient.runSkill(): invoking Refine (plan/clarify) parks a gril
     assert.equal(run.mode, "clarify");
     assert.equal(run.feedback.status, "grilling");
     assert.match(run.feedback.raw, /W9-T1/);
+    landQueuedFeedback(root, root);
 
     // The grill renders inline, through the SAME listFeedback() the panel's inbox already uses.
     const inbox = await client.listFeedback("grilling");

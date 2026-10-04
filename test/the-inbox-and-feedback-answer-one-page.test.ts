@@ -8,6 +8,7 @@ import { readPage, readPageRequest } from "../src/lib/read-page.js";
 import { createService } from "../src/lib/service.js";
 import type { GitHub } from "../src/lib/status.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { landQueuedFeedback } from "./helpers/land-queued-feedback.js";
 
 // GET /v1/inbox was 1.99 MB on the fleet host (2026-09-30): 665 proposals in the four lanes, 623 of them
 // again under `fleet`, while the operator's own `needsYou` lanes were 42 items (82 KB). A console page
@@ -109,8 +110,10 @@ test("GET inbox refuses an unknown section or a page request with no list sectio
 });
 
 test("GET feedback with a limit answers one page and a cursor to the next", async () => {
-  await withService(fixture([], []), async (get, post) => {
+  const deps = fixture([], []);
+  await withService(deps, async (get, post) => {
     for (const text of ["one", "two", "three"]) assert.equal(await post("/v1/feedback", { text: `feedback ${text}` }), 200);
+    landQueuedFeedback(deps.inboxRoot, deps.root);
     const whole = await get("/v1/feedback");
     assert.equal((whole.body.entries as unknown[]).length, 3);
     assert.equal("page" in whole.body, false, "a bare GET keeps its old shape");
