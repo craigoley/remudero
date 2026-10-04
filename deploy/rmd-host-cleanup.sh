@@ -572,6 +572,65 @@ keep_scratch_for_repo() {
     done
   done <<< "$entries"
 }
+# W1-T5634. A unit another unit borrows objects from (objects/info/alternates) is kept: removing it
+# left /mnt/scratch/g and h unable to read HEAD. ONE bounded scan per pass, only inside the configured
+# roots: find -maxdepth 8 (a unit's repos sit at depth <= 4, as the repository scan below), no link
+# followed, node_modules and object fan-out pruned, at most 64 lines read per file. A target outside
+# the roots is only tested for existence, never opened. A failed scan keeps every unit it reaches.
+ALTERNATES_OK=1
+ALTERNATES=""  # "<alternates file><TAB><lexically normalized target>" lines
+normalize_path() {
+  printf '%s\n' "$1" | awk -F/ '{
+    n = 0
+    for (i = 1; i <= NF; i++) {
+      if ($i == "" || $i == ".") continue
+      if ($i == "..") { if (n > 0) n--; continue }
+      s[++n] = $i
+    }
+    out = ""; for (i = 1; i <= n; i++) out = out "/" s[i]
+    print (out == "" ? "/" : out)
+  }'
+}
+snapshot_alternates() {
+  local root files file lines line target
+  while IFS= read -r root; do
+    root="${root%/}"
+    [ -n "$root" ] && [ -d "$root" ] && [ ! -L "$root" ] || continue
+    if ! files="$(find "$root" -maxdepth 8 \( -name node_modules -o -path '*/objects/[0-9a-f][0-9a-f]' \
+        -o -path '*/objects/pack' \) -prune -o -type f -path '*/objects/info/alternates' -print 2>/dev/null)"; then
+      ALTERNATES_OK=0; return
+    fi
+    while IFS= read -r file; do
+      [ -n "$file" ] || continue
+      lines="$(head -n 64 -- "$file" 2>/dev/null)" || { ALTERNATES_OK=0; return; }
+      while IFS= read -r line; do
+        case "$line" in ""|"#"*) continue ;; /*) target="$line" ;; *) target="${file%/info/alternates}/$line" ;; esac
+        ALTERNATES="$ALTERNATES$file	$(normalize_path "$target")
+"
+      done <<< "$lines"
+    done <<< "$files"
+  done < <(printf '%s\n%s\n' "$SCRATCH_ROOTS" "$SCRATCH_PARENTS" | tr ':' '\n')
+}
+# Sets SCRATCH_REASON and fails when unit $1 must stay: it borrows from a store that is gone, or a
+# borrower outside it still names it. A borrower removed earlier in this pass no longer holds it.
+lender_check() {
+  local p="$1" pp file target borrower borrowers=""
+  if [ "$ALTERNATES_OK" != 1 ]; then SCRATCH_REASON="alternates scan failed (unknown)"; return 1; fi
+  pp="$(cd -P -- "$p" 2>/dev/null && pwd -P)" || pp="$p"
+  while IFS='	' read -r file target; do
+    [ -n "$file" ] || continue
+    case "$file" in
+      "$p"/*) [ -d "$target" ] || { SCRATCH_REASON="borrows from missing $target"; return 1; } ;;
+      *) case "$target" in
+           "$p"|"$p"/*|"$pp"|"$pp"/*)
+             [ -f "$file" ] || continue
+             borrower="${file%/objects/info/alternates}"; borrower="${borrower%/.git}"
+             case ", $borrowers, " in *", $borrower, "*) ;; *) borrowers="$borrowers${borrowers:+, }$borrower" ;; esac ;;
+         esac ;;
+    esac
+  done <<< "$ALTERNATES"
+  [ -z "$borrowers" ] || { SCRATCH_REASON="lends objects to $borrowers"; return 1; }
+}
 sweep_scratch_unit() {
   local p="$1" status entries entry repo head bundles bytes
   local IDLE_MINUTES="$SCRATCH_IDLE_MINUTES" SCRATCH_REASON=""
@@ -589,6 +648,7 @@ sweep_scratch_unit() {
   if ! entries="$(find "$p" -maxdepth 4 -name .git -prune -print 2>/dev/null)"; then
     log "KEEP $p: repository scan failed (unknown)"; return
   fi
+  if ! lender_check "$p"; then keep_scratch_for_repo "$p" "$SCRATCH_REASON" "$entries"; return; fi
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     case "$entry" in */.git) repo="${entry%/.git}" ;; *) log "KEEP $p: unreadable repository path"; return ;; esac
@@ -710,7 +770,7 @@ before_pct="${before_pct:-0}"; before_avail="${before_avail:-0}"
 snapshot_open
 [ "$OPEN_OK" = 1 ] || log "REFUSE sweeps: lsof failed — keeping everything (fail closed)"
 
-if [ -n "$SCRATCH_ROOTS$SCRATCH_PARENTS" ]; then snapshot_docker; fi
+if [ -n "$SCRATCH_ROOTS$SCRATCH_PARENTS" ]; then snapshot_docker; snapshot_alternates; fi
 while IFS= read -r root; do
   [ -n "$root" ] && sweep_scratch_root "$root"
 done < <(printf '%s\n' "$SCRATCH_ROOTS" | tr ':' '\n')

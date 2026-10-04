@@ -557,7 +557,7 @@ export interface components {
       discharged?: boolean;
       /** GET /v1/feedback only (W1-T1257): true when `discharged` could not be determined because the merged-set read failed or was truncated -- a partial read, never mistaken for "not discharged". Mutually exclusive with `discharged`; a read-time decoration only, exactly like `unverified`. */
       dischargeUndecidable?: boolean;
-      /** GET /v1/feedback only (W1-T5524): `queued` while this entry's decision is staged under the state root for the daemon's landing sweep (W1-T5460) and not yet on origin/main; absent once the sweep drops the record. Read fresh from the queue on every request; never written to plan/feedback/<id>.yaml. */
+      /** GET /v1/feedback only (W1-T5524): `queued` while this entry's decision is staged under the state root for the daemon's landing sweep (W1-T5460) and not yet on origin/main; absent once the sweep drops the record. Read fresh from the queue on every request; never written to plan/feedback/<id>.yaml. While `queued`, `status` and `answered_by` are the queued record's, not the checkout's (W1-T5627), and `?status=` filters on them, so a decided entry no longer reads `proposed`. */
       landing?: "queued";
       /** GET /v1/feedback only (W1-T5524): true on every entry when the landing queue could not be read -- a failed read, never mistaken for "nothing queued". Mutually exclusive with `landing`; a read-time decoration only, exactly like `dischargeUndecidable`. */
       landingUnknown?: boolean;
@@ -614,6 +614,8 @@ export interface components {
     SubmitFeedbackResult: {
       ok: boolean;
       entry: FeedbackEntry;
+      /** W1-T5626: `queued` when this write's feedback record was staged under the state root for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when the record was not staged. */
+      landing?: "queued";
     };
     /** One bounded activity, workstream, or authoritative artifact row. */
     OperatorActivityItem: {
@@ -739,6 +741,8 @@ export interface components {
       id: string;
       status: string;
       proposalPr: string | null;
+      /** W1-T5626: `queued` when this write's feedback record was staged under the state root for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when the record was not staged. */
+      landing?: "queued";
     };
     OperatorAgentEvidence: {
       label: string;
@@ -2095,6 +2099,8 @@ export interface components {
       mode?: string;
       taskId: string;
       feedback: FeedbackEntry;
+      /** W1-T5626: `queued` when this write's feedback record was staged under the state root for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when the record was not staged. */
+      landing?: "queued";
     };
     ExternalEffectPostcondition: {
       path: string;
@@ -3696,6 +3702,8 @@ export interface components {
       threadId: string;
       feedback: FeedbackEntry;
       interpretation: ReplyInterpretation;
+      /** W1-T5626: `queued` when this write's feedback record was staged under the state root for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when the record was not staged. */
+      landing?: "queued";
     };
     /** The closed set of routes a signed escalation answer link may name, each at the write tier serve.ts registers for it (src/lib/escalate.ts's `ESCALATION_OPTION_ROUTES`). */
     EscalationOptionRoute: "/v1/manual/approve" | "/v1/drain/kick" | "/v1/drain/run" | "/v1/inbox/approve" | "/v1/skills/run" | "/v1/control/pause" | "/v1/control/resume" | "/v1/control/stop" | "/v1/escalation/mark-handled" | "/v1/questions/answer" | "/v1/drain/feedback" | "/v1/auth/scope";
@@ -4249,6 +4257,7 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+          "503": Error;
         };
     };
   };
