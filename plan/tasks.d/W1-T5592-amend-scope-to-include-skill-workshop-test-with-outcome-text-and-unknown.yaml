@@ -5,7 +5,9 @@
   type: implement
   verify: auto
   risk: low
+  priority: 4
   status: queued
+  # backlog gardener: band=4 evidence=6ca8e405be9663fd
   attempts: 0
   rationale: |
     The skill-workshop outcome-text assertions and unknown-signal drafting need
