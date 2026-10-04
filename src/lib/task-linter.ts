@@ -3578,6 +3578,7 @@ const BUILD_VERIFICATION_CHECKS = new Set<LintCheck>([
   "proof-scope",
   "proof-self-path",
   "proof-name-resolution",
+  "proof-unit-test-unresolvable",
   "proof-base-discrimination",
   "proof-unit-test-base-wrapper",
   "shared-proof",
