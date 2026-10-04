@@ -72,13 +72,18 @@ export function formatGiB(bytes: number): string {
   return `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
 }
 
-/** Why `donor` cannot lend its node_modules to a worktree holding `lock`, or null when it can. */
-export function donorRejection(donor: string, lock: Buffer, npmCommand = "npm"): string | null {
+/**
+ * Why `donor` cannot lend its node_modules to a worktree holding `lock`, or null when it can.
+ * `targetDev` is the target filesystem's device: `cp -al` cannot hard-link across filesystems, so a
+ * donor on another one (a root-disk checkout lending to a scratch-disk parent) is no donor at all.
+ */
+export function donorRejection(donor: string, lock: Buffer, npmCommand = "npm", targetDev?: number): string | null {
   const lockPath = join(donor, "package-lock.json");
   if (!existsSync(lockPath)) return "no package-lock.json";
   if (!readFileSync(lockPath).equals(lock)) return "package-lock.json differs";
   const modules = join(donor, "node_modules");
   if (!existsSync(modules) || !lstatSync(modules).isDirectory()) return "node_modules is not a real directory";
+  if (targetDev !== undefined && statSync(modules).dev !== targetDev) return "node_modules is on another filesystem (cp -al cannot hard-link across it)";
   const bin = join(modules, ".bin");
   if (!existsSync(bin) || readdirSync(bin).length === 0) return "node_modules/.bin is empty";
   const ls = run(npmCommand, ["ls", "--depth=0", "--offline", "--no-update-notifier"], donor);
@@ -92,11 +97,12 @@ export function findDonor(repoDir: string, target: string, npmCommand = "npm"): 
   const list = run("git", ["-C", repoDir, "worktree", "list", "--porcelain"]);
   if (!list.ok) return { reasons: [`git worktree list failed: ${list.detail}`] };
   const lock = readFileSync(targetLock);
+  const targetDev = statSync(target).dev;
   const reasons: string[] = [];
   for (const line of list.stdout.split("\n")) {
     const candidate = line.startsWith("worktree ") ? line.slice("worktree ".length) : "";
     if (candidate === "" || resolve(candidate) === resolve(target)) continue;
-    const why = donorRejection(candidate, lock, npmCommand);
+    const why = donorRejection(candidate, lock, npmCommand, targetDev);
     if (why === null) return { donor: candidate };
     reasons.push(`${candidate}: ${why}`);
   }

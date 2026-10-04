@@ -205,6 +205,8 @@ test("each donor and link failure is named, never read as a clean miss", () => {
   const lender = donor(f, "lender");
   assert.equal(donorRejection(lender, Buffer.from(LOCK)), null);
   assert.match(donorRejection(lender, Buffer.from(LOCK), join(f.parent, "no-npm")) ?? "", /^npm ls failed: .*ENOENT/);
+  assert.equal(donorRejection(lender, Buffer.from(LOCK), "npm", statSync(lender).dev), null);
+  assert.match(donorRejection(lender, Buffer.from(LOCK), "npm", statSync(lender).dev + 1) ?? "", /on another filesystem/);
   assert.equal(donorRejection(f.parent, Buffer.from(LOCK)), "no package-lock.json");
   assert.deepEqual(findDonor(f.core.dir, f.parent), { reasons: [`${f.parent} has no package-lock.json`] });
   assert.match(JSON.stringify(findDonor(f.parent, lender)), /git worktree list failed/);
