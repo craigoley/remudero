@@ -198,6 +198,18 @@ test("W1-T5543: the plan round pushes only a preflight-clean commit", async () =
   assert.match(renderFixPrompt({ task: good.input.task, branch: pr.headRefName!, round: 1, evidence: { planGateFindings: red.failures, ciFailures: pr.ciFailures } }), /lint-plan/);
 });
 
+test("W1-T5543: a worker that only corrects the title repairs metadata without a push", async () => {
+  const titled = roundFixture({ paths: [], report: "PR_TITLE: chore(plan): corrected title" });
+  const result = await runner.runPlanScopedFixRound(titled.input);
+  assert.equal(result.outcome, "metadata-repaired", result.reason);
+  assert.equal(result.headSha, HEAD);
+  assert.equal(titled.written.at(-1)?.title, "chore(plan): corrected title");
+  assert.deepEqual(titled.pushed, []);
+  const idle = roundFixture({ paths: [], report: "nothing to do" });
+  assert.equal((await runner.runPlanScopedFixRound(idle.input)).reason, "the worker changed nothing");
+  assert.deepEqual(idle.written, []);
+});
+
 test("W1-T5543: a self-crediting filing body is cured without a worker", async () => {
   const fixed = roundFixture({ body: `${BODY}\n\nRemudero-Task: W1-T5543` });
   assert.equal((await runner.runPlanScopedFixRound(fixed.input)).outcome, "metadata-repaired");
@@ -343,6 +355,8 @@ test("the sweep adapter feeds CI tails and writes validated metadata through RES
     deps.materializePlanRoundWorktreeImpl = () => ({ failure: { message: "missing tree" } });
     assert.equal((await buildSweepEffects(deps).dispatchPlanGateRound!(pr)).reason, "missing tree");
     assert.equal(removed.length, 2, "a missing tree is not removed");
+    deps.ghJsonImpl = () => ({ head: { ref: pr.headRefName, sha: NEXT }, user: { login: "remudero-fleet[bot]" }, title: "t", body: BODY });
+    assert.equal((await buildSweepEffects(deps).dispatchPlanGateRound!(pr)).reason, "the filing head or author changed");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
