@@ -1,6 +1,13 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, realDeployDeps } from "./deployer.js";
+import { resolveInstallRoot } from "./install-root.js";
+import {
+  deployStateRows, mainWorkflowStateRows, reconcileFleetState,
+  type DeployStateReader, type FleetStateRow,
+} from "./state-reconciler.js";
 import { CONVENTIONAL_LIMITS, fitConventionalTitle } from "./commit-message.js";
 import { mintNextTaskId } from "./task-id.js";
 import { gitRemoteRefReserver, reserveTaskIdRemote, type RemoteReserveDeps } from "./task-id-reservation.js";
@@ -44,7 +51,8 @@ import {
   latestStrikeLadderAttempt, strikeCauseKey,
 } from "./strike-ladder.js";
 import { runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
-import { resolveLedgerUnion } from "./ledger-union.js";
+import { readLedgerUnionRawLinesSync, resolveLedgerUnion } from "./ledger-union.js";
+import { checkReaderAgreement, type ReaderAgreementOptions } from "./reader-agreement.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { isInPlanScope } from "./plan-scope.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "./mounts.js";
@@ -1269,6 +1277,8 @@ export interface BuildSweepEffectsDeps {
   reclaimWorkerImpl?: (info: { runId: string; taskId: string; elapsedMs: number }) => void | Promise<void>;
   disarmImpl?: (prUrl: string) => DisarmOutcome | void;
   readJsonImpl?: (args: string[]) => Promise<unknown>;
+  fleetDeployStateImpl?: DeployStateReader;
+  fleetDeploySensorsImpl?: DeployStateReader["deploy"];
   /** Shared pacer; omitted for the existing immediate CLI/test mode. */
   pacer?: GhCallPacer;
   fetchWorkflowRunObservationsImpl?: typeof fetchWorkflowRunObservations;
@@ -1565,6 +1575,7 @@ const settledMutationVerdictArtifacts = new Set<number>();
  * inserted in some canonical position.
  */
 export const SWEEP_EFFECT_SURFACE = [
+  "readerAgreement",
   "reproduceFailingTestsOnMain",
   "arm",
   "close",
@@ -1594,6 +1605,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "readMainRepair",
   // W1-T4817: finds a main commit no workflow ran on and dispatches its workflows at main's head.
   "reconcileMainRunGaps",
+  "readFleetState",
   "pullMutationVerdicts",
   "readStaleRedWorkflowRuns",
   "runStaleRedLocalRoute",
@@ -1624,6 +1636,7 @@ export const SWEEP_EFFECT_SURFACE = [
 
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
+  | "readerAgreement"
   | "reproduceFailingTestsOnMain"
   | "arm"
   | "close"
@@ -1653,6 +1666,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readMainTip"
   | "readMainRepair"
   | "reconcileMainRunGaps"
+  | "readFleetState"
   | "pullMutationVerdicts"
   | "readStaleRedWorkflowRuns"
   | "runStaleRedLocalRoute"
@@ -2046,6 +2060,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   };
 
   return {
+    readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
     // W1-T3618: the entrypoint's freshness gate, surfaced so the lib-built and entrypoint-built
     // effect surfaces stay key-identical (W1-T2890).
     reviewerCodeStaleThisPass: reviewerCodeStaleThisPassImpl,
@@ -3524,6 +3539,83 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
 
     // W1-T4817 — every read rides `readJsonImpl`, the one write rides `ghRunImpl`; a failed read
     // degrades to "no gap found this pass", never a guessed dispatch.
+    readFleetState: async (live) => {
+      readdirSync(dirname(ledgerPath));
+      const freshLive = readFileSync(ledgerPath, "utf8");
+      const union = readLedgerUnionRawLinesSync(dirname(ledgerPath), {
+        requireArchives: false, refuseIncomplete: true,
+        step: ["reconcile.repaired", "reconcile.repair_failed", "reconcile.escalated", "main.run_gap.dispatched", "deploy.ok"],
+      });
+      if (!union.ok || union.unclassified.length > 0) throw new Error(`fleet reconciliation history unreadable: ${[...union.unread, ...union.unclassified].join(", ")}`);
+      const history = [...parseLedger(union.rawLines.join("\n")), ...parseLedger(freshLive), ...live];
+      const rows: FleetStateRow[] = [];
+      const runCount = async (sha: string, workflow?: string): Promise<number | undefined> => {
+        const endpoint = workflow ? `actions/workflows/${workflow}/runs` : "actions/runs";
+        const body = await readJsonImpl(["api", `repos/${owner}/${repo}/${endpoint}?head_sha=${sha}&per_page=1`]) as
+          { total_count?: unknown } | undefined;
+        return typeof body?.total_count === "number" ? body.total_count : undefined;
+      };
+      try {
+        rows.push(...await mainWorkflowStateRows({
+          listMainCommits: async (limit) => {
+            const body = await readJsonImpl(["api", `repos/${owner}/${repo}/commits?sha=main&per_page=${limit * 2}`]) as
+              Array<{ sha: string; parents: Array<{ sha: string }> }>;
+            if (!Array.isArray(body)) throw new Error("main commit listing is not an array");
+            return body.filter((c) => typeof c?.sha === "string").map((c) => ({ sha: c.sha, parents: (c.parents ?? []).map((p) => p.sha) }));
+          },
+          countRunsForSha: (sha) => runCount(sha),
+          countWorkflowRuns: runCount,
+          changedFiles: async (sha) => {
+            const body = await readJsonImpl(["api", `repos/${owner}/${repo}/commits/${sha}`]) as
+              { files?: Array<{ filename: string }> } | undefined;
+            return body?.files?.map((f) => f.filename);
+          },
+          dispatch: (workflow) => ghRunImpl("gh", ["api", "-X", "POST", `repos/${owner}/${repo}/actions/workflows/${workflow}/dispatches`, "-f", "ref=main"]),
+        }, readWorkflowPushTriggers(repoDir), history, MAIN_RUN_GAP_LOOKBACK));
+      } catch (error) {
+        log("reconcile.unreadable", { pipeline: "ci", reason: String((error as Error)?.message ?? error) });
+      }
+      try {
+        const failedAt = (): number | undefined => {
+          try {
+            const body = JSON.parse(readFileSync(deployFailedAlertPath(config.root), "utf8")) as { at?: string };
+            const at = Date.parse(body.at ?? "");
+            if (!Number.isFinite(at)) throw new Error("failure latch has no valid timestamp");
+            return at;
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+            throw error;
+          }
+        };
+        const reader = deps.fleetDeployStateImpl ?? {
+          deploy: deps.fleetDeploySensorsImpl ?? realDeployDeps({
+            installPath: resolveInstallRoot(config), stateRoot: config.root, ledgerPath,
+            daemonLabel: "com.remudero.daemon", serveLabel: "com.remudero.serve",
+            servePort: config.serve?.port ?? 4317, uid: process.getuid?.() ?? 0, log,
+          }),
+          requestDeploy: () => {
+            mkdirSync(join(config.root, "state"), { recursive: true });
+            writeFileSync(deployMarkerPath(config.root), "W1-T4840: published image awaits deploy\n", { flag: "wx" });
+          },
+          deployRequested: () => existsSync(deployMarkerPath(config.root)),
+          failedAt,
+          clearFailure: (at: number) => {
+            if (failedAt() !== at) return;
+            for (const path of [deployLastFailedPath(config.root), deployFailedAlertPath(config.root)]) {
+              try { unlinkSync(path); } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+              }
+            }
+          },
+        };
+        rows.push(...deployStateRows(reader, history, (error) => {
+          log("reconcile.unreadable", { pipeline: "failure-latch", reason: String((error as Error)?.message ?? error) });
+        }));
+      } catch (error) {
+        log("reconcile.unreadable", { pipeline: "deploy", reason: String((error as Error)?.message ?? error) });
+      }
+      return { rows, history };
+    },
     reconcileMainRunGaps: async (history) => {
       let commits: MainCommitRef[] = [];
       try {
@@ -8993,6 +9085,7 @@ export interface StrikeLadderEffects {
 }
 
 export interface SweepDeps {
+  readerAgreement?: Omit<ReaderAgreementOptions, "ledgerPath" | "runId" | "appendLine" | "openPrCount">;
   reproduceFailingTestsOnMain?: (
     pr: OpenPrView, files: readonly string[], mainTipSha: string,
   ) => Promise<readonly BaseProbeFile[]>;
@@ -9264,6 +9357,9 @@ export interface SweepDeps {
    *  `runSweep` writes each as a ledger row. Called once per full pass, never per light-pass PR.
    *  Omitted, the sweep never looks. A THROW is contained and logged: it never fails the pass. */
   reconcileMainRunGaps?: (history: MainRunGapHistory) => Promise<readonly MainRunGapDispatch[]>;
+  readFleetState?: (live: readonly Record<string, unknown>[]) => Promise<{
+    rows: readonly FleetStateRow[]; history: readonly Record<string, unknown>[];
+  }>;
   /** W1-T2927 — pulls CI's `mutation-verdict-ledger` artifact (see mutation-verdict-pull.ts). */
   pullMutationVerdicts?: (recorded: ReadonlySet<string>) => Promise<readonly Record<string, unknown>[]>;
   /** W1-T2620 — RELEASE the one base-caused stand-down chosen this pass: never a loop, the same
@@ -10549,6 +10645,9 @@ export const MAX_STALE_PROOF_CLOSES_PER_PASS = 2;
 /** W1-T4702 — the last incomplete-union reason logged, so a persistent gap is logged once. */
 let lastReportedAnomalyGap: string | undefined;
 
+const lastReaderAgreementAt = new Map<string, number>();
+const READER_AGREEMENT_INTERVAL_MS = 15 * 60_000;
+
 export async function runSweep(
   openPrs: OpenPrView[],
   deps: SweepDeps,
@@ -10561,6 +10660,18 @@ export async function runSweep(
   const appendLine = deps.appendLine ?? appendLedger;
   const now = deps.now ? deps.now() : Date.now();
   const log = deps.log ?? (() => {});
+  const lastAgreement = lastReaderAgreementAt.get(deps.ledgerPath);
+  if (deps.readerAgreement && !deps.dryRun && deps.repairAdmissionSurface !== "light" &&
+      (lastAgreement === undefined || now - lastAgreement >= READER_AGREEMENT_INTERVAL_MS)) {
+    lastReaderAgreementAt.set(deps.ledgerPath, now);
+    try {
+      const findings = await checkReaderAgreement({ ...deps.readerAgreement, ledgerPath: deps.ledgerPath,
+        runId: deps.runId, appendLine });
+      for (const finding of findings) log("reader.disagreement", { ...finding });
+    } catch (error) {
+      log("reader.agreement.unavailable", { reason: String(error) });
+    }
+  }
   if (deps.readyDraft && (deps.actionable?.("held-draft") ?? true)) {
     for (const pr of openPrs) if (pr.isDraft === true) await deps.readyDraft(pr);
   }
@@ -10817,7 +10928,23 @@ export async function runSweep(
   // Full passes only: a light pass fans this function out one PR at a time, and the reads below
   // are per-pass, not per-PR. The dedupe is the ledger fold handed to the effect, so a commit
   // already handled costs no read and is never dispatched a second time.
-  if (deps.reconcileMainRunGaps && deps.repairAdmissionSurface !== "light") {
+  if (deps.readFleetState && !deps.dryRun && deps.repairAdmissionSurface !== "light") {
+    try {
+      const { rows, history } = await deps.readFleetState(ledgerLines);
+      await reconcileFleetState(rows, history, (event) => {
+        appendLine(deps.ledgerPath, { ...event, run_id: deps.runId, task_id: "SWEEP" });
+        log(event.step, event);
+      }, (gap) => {
+        appendLine(deps.ledgerPath, {
+          run_id: deps.runId, task_id: "INCIDENT", step: "incident.event", source: "daemon", kind: "invariant",
+          name: `reconcile.${gap.pipeline}`, message: `${gap.desired}: ${gap.reason} (${gap.target})`,
+          fingerprint: createHash("sha256").update(gap.gap_id).digest("hex"),
+        });
+      });
+    } catch (error) {
+      log("reconcile.unreadable", { reason: String((error as Error)?.message ?? error) });
+    }
+  } else if (!deps.readFleetState && deps.reconcileMainRunGaps && !deps.dryRun && deps.repairAdmissionSurface !== "light") {
     try {
       const dispatched = await deps.reconcileMainRunGaps(mainRunGapHistoryFromLedger(ledgerLines));
       for (const d of dispatched) {
