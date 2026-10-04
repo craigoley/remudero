@@ -27,9 +27,10 @@ import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { isMainThread } from "node:worker_threads";
 // W1-T4805: FIRST import — process-level containment against live GitHub writes (dead push URLs, a
 // sentinel token, no App key). Every runner invocation already `--import`s this file, so it rides along.
-import { appendGitConfigEnv, reapDeadOwnerDirs } from "./no-live-remote.js";
+import { appendGitConfigEnv, reapDeadOwnerDirs, setupDirOwnerTag } from "./no-live-remote.js";
 import { reapableTmpPrefix } from "./reapable-prefix.js";
 
 /**
@@ -233,7 +234,7 @@ export const GH_REFUSE_DIR_PREFIX = "rmd-test-gh-refuse-";
 
 function installGhRefusalStub(): void {
   reapDeadOwnerDirs(GH_REFUSE_DIR_PREFIX);
-  const dir = fs.mkdtempSync(join(tmpdir(), `rmd-test-gh-refuse-${process.pid}-`));
+  const dir = fs.mkdtempSync(join(tmpdir(), `rmd-test-gh-refuse-${setupDirOwnerTag()}`));
   const ghPath = join(dir, "gh");
   const refusalsPath = join(dir, "refusals.log");
   fs.writeFileSync(refusalsPath, "");
@@ -258,7 +259,10 @@ function installGhRefusalStub(): void {
   process.env.PATH = `${dir}:${process.env.PATH ?? ""}`;
 }
 
-installGhRefusalStub();
+// W1-T5624: a worker thread re-runs this module through the runner's execArgv, but its env copy
+// already puts the parent's stub first on PATH (and the stub logs to the parent's refusals.log, so the
+// parent's exit check counts a worker's refusal). A dir minted here would outlive `worker.terminate()`.
+if (isMainThread) installGhRefusalStub();
 
 process.on("exit", () => {
   // W1-T4226: read BEFORE the tmp-dir sweep below removes the stub's own dir (and the log
