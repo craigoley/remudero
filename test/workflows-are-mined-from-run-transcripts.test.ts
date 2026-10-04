@@ -85,9 +85,9 @@ test("W1-T4668: a staged procedure lists steps taken from successful transcripts
   // Staged as the skill draft's own Procedure section (design clause ii), citing the runs it came
   // from — a draft handed the SAME transcript corpus names the mined steps and their evidence.
   const candidate: ProceduralCandidateLike = {
-    shapeKey: "implement:clean_single_strike",
+    shapeKey: "implement:fully_executed_proof",
     taskType: "implement",
-    signals: ["clean_single_strike"],
+    signals: ["fully_executed_proof"], // W1-T4270: a clean_single_strike-only candidate drafts nothing
     runIds: ["P1", "P2"],
     taskIds: ["W1-T4700", "W1-T4701"],
     supportingRuns: 2,
@@ -112,9 +112,9 @@ test("W1-T4668: a shape with no distinguishing step stages nothing", () => {
   // A draft for that same shape, handed the same corpus, gets no workflow steps appended either —
   // its Procedure section is exactly what the signal-only path already rendered.
   const candidate: ProceduralCandidateLike = {
-    shapeKey: "diagnose:clean_single_strike",
+    shapeKey: "diagnose:fully_executed_proof",
     taskType: "diagnose",
-    signals: ["clean_single_strike"],
+    signals: ["fully_executed_proof"], // W1-T4270: a clean_single_strike-only candidate drafts nothing
     runIds: ["D1", "D2"],
     taskIds: ["W1-T4710", "W1-T4711"],
     supportingRuns: 2,

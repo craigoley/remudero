@@ -1,0 +1,37 @@
+- id: W1-T5632
+  title: "A PRECONDITION READER'S BOUND IS INJECTED, NOT WAITED ON — `readTaskPrecondition` hard-wires `PRECONDITION_TIMEOUT_MS` (5 s, SIGKILL), so W1-T4843's hung-subprocess test spends 5 s of wall clock every run and its real `node -e` tests share that bound, where a loaded coverage lane's slow child is SIGKILLed: one test goes red, and the failing/oversized test passes on `read-failed` for the wrong reason"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one bound — the reader's parameter and the existing suite that waits on it
+  origin: "operator session 2026-10-04: #8972's (W1-T4843) precondition test SIGKILLed once under coverage"
+  plan_refs: [W1-T4843, W1-T3599]
+  files: [src/lib/plan.ts, test/a-task-waits-on-its-precondition-not-its-breaker.test.ts, test/a-precondition-reader-bound-is-injected-not-waited-on.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main d13d797c. `readTaskPrecondition(args, run)` (src/lib/plan.ts)
+    always passes `timeout: PRECONDITION_TIMEOUT_MS` (5_000) with `killSignal: "SIGKILL"` and
+    offers no seam for the bound. In test/a-task-waits-on-its-precondition-not-its-breaker.test.ts
+    (#8972, unchanged since): "a hung real subprocess is killed within the reader timeout" waits
+    the full 5 s (MEASURED 5007 ms; file total ~6.1 s, 15/15 pass). The literal-arguments test and
+    the failing/oversized test spawn real `node -e` children under the same 5 s SIGKILL; under a
+    loaded coverage lane a child that exceeds it fails the literal test. The failing/oversized
+    test asserts only `reason === "read-failed"`, which a timeout also produces, so a SIGKILL
+    passes it without exercising exit-1 or maxBuffer.
+  design: |
+    Add a third parameter `timeoutMs = PRECONDITION_TIMEOUT_MS` to `readTaskPrecondition`;
+    production callers pass nothing. The hung test injects 200 ms and asserts ETIMEDOUT plus
+    `options.timeout === 200`. The real-subprocess tests inject a generous bound (120_000) so load
+    cannot kill them. The failing/oversized test asserts the error names its own cause (status 1,
+    or ENOBUFS / maxBuffer) and never ETIMEDOUT.
+  acceptance:
+    - claim: "the precondition reader's kill bound is a parameter defaulting to PRECONDITION_TIMEOUT_MS, a fixture-spawned hung child is killed at an injected bound, and a timeout cannot satisfy the failing-child cases"
+      proof: "unit test: test/a-precondition-reader-bound-is-injected-not-waited-on.test.ts"
+  falsifier: |
+    Hard-wire PRECONDITION_TIMEOUT_MS again and the injected-bound assertion fails. Make `run` throw
+    ETIMEDOUT and the failing/oversized cause assertions fail.

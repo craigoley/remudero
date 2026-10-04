@@ -1,0 +1,44 @@
+- id: W1-T5625
+  title: "W1-T5550'S SIBLING-WORKTREE CENSUS SEES EVERY SPELLING — `SIBLING_WORKTREE` matches only `addWorktree(join(dirname(x.dir)...`, so `${repo.dir}-wt` paths passed to `worktreeAdd`/`worktreeAddAsync`/`addWorktree` in worktree-base-currency-healthy, worktree-add-async and helpers/git-repo.test leak 10 worktrees and 9 `.base` files on every CLEAN run"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one census plus the three suites it names
+  origin: "operator session 2026-10-04: test/worktree-base-currency-healthy.test.ts builds `${repo.dir}-wt` outside W1-T5550's census"
+  plan_refs: [W1-T5550, W1-T5513, W1-T405]
+  files: [test/worktree-base-currency-healthy.test.ts, test/worktree-add-async.test.ts, test/helpers/git-repo.test.ts, test/a-killed-test-run-leaves-no-orphaned-worktree-or-setup-dir.test.ts, test/no-test-worktree-outlives-its-fixture.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main d13d797c.
+    W1-T5550's census (#9050), the test "W1-T5550 census: no test under test/ adds a worktree
+    beside its fixture dir instead of inside it" in
+    test/a-killed-test-run-leaves-no-orphaned-worktree-or-setup-dir.test.ts, matches only
+    `SIBLING_WORKTREE` (`addWorktree\(\s*join\(\s*dirname\(`). It misses a `${<x>.dir}-<suffix>`
+    template-literal sibling, a path held in a variable before it is passed, and the src entry
+    points `worktreeAdd`/`worktreeAddAsync` (src/lib/worker.ts). Eleven sites in three suites use
+    those shapes: worktree-base-currency-healthy (`-wt`, `-wt1`, `-wt2` via `worktreeAdd`),
+    worktree-add-async (seven suffixes) and helpers/git-repo.test (`const worktreeDir`).
+    MEASURED with TMPDIR on a scratch dir and a clean exit (3/3, 6/6, 8/8 pass): they left 10
+    `rmd-*-wt*` worktrees and 9 `<wt>.base` sidecars. tmp-hygiene removed only the mkdtemp'd
+    fixture repos, so each leftover worktree's gitdir dangles. This leaks on every run, not only on
+    SIGKILL.
+  design: |
+    1. Each of the three suites builds its worktree path inside its fixture dir
+       (`join(repo.dir, "wt")`, etc.).
+    2. Replace `SIBLING_WORKTREE` with a two-shape census over test/**/*.ts: (a) any template
+       literal `${<ident>.dir}-...`; (b) `dirname(<ident>.dir)` used as a path base — wherever
+       either feeds `addWorktree`, `worktreeAdd`, `worktreeAddAsync` or `"worktree", "add"`.
+    3. A positive control per shape.
+    4. The new test runs worktree-base-currency-healthy with a fresh TMPDIR and asserts nothing
+       remains after a clean exit.
+  acceptance:
+    - claim: "no test under test/ builds a worktree path beside its fixture dir in any of the three spellings, and a clean run of the healthy-path suite leaves its TMPDIR empty"
+      proof: "unit test: test/no-test-worktree-outlives-its-fixture.test.ts"
+  falsifier: |
+    Restore `${repo.dir}-wt` in worktree-base-currency-healthy.test.ts: the census names it, and the
+    clean-run check finds the leftover worktree and its `.base` sidecar.

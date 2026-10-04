@@ -10,9 +10,9 @@ import {
 
 function candidate(taskType: string): ProceduralCandidateLike {
   return {
-    shapeKey: `${taskType}:clean_single_strike`,
+    shapeKey: `${taskType}:fully_executed_proof`,
     taskType,
-    signals: ["clean_single_strike"],
+    signals: ["fully_executed_proof"], // W1-T4270: a clean_single_strike-only candidate drafts nothing
     runIds: ["RUN-1", "RUN-2"],
     taskIds: ["W1-T1", "W1-T2"],
     supportingRuns: 2,
