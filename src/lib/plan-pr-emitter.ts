@@ -561,13 +561,13 @@ function firstLineOf(output: string, status: number | null): string {
   return lines.find((l) => diagnosticLine.test(l)) ?? lines[0] ?? `exited ${status}`;
 }
 
-function shardProofs(text: string): string[] {
+function parsedShardProofs(text: string, opts?: { uniqueKeys: false }): string[] | undefined {
   let tasks: unknown;
   try {
-    tasks = parseYaml(text);
+    tasks = parseYaml(text, opts);
   } catch {
-    // An unparseable shard is the plan lint's to refuse, by name — this check has no proofs of it to read.
-    return [];
+    // A head is the plan lint's to refuse, by name; a base (duplicate keys allowed: a W1-T5519 repair's) falls back to its bytes.
+    return undefined;
   }
   const proofs: string[] = [];
   for (const task of Array.isArray(tasks) ? tasks : []) {
@@ -580,8 +580,11 @@ function shardProofs(text: string): string[] {
 }
 
 function introducedProofs(headText: string, baseText: string | undefined): string[] {
-  const atBase = new Set(baseText === undefined ? [] : shardProofs(baseText));
-  return shardProofs(headText).filter((p) => !atBase.has(p));
+  const head = parsedShardProofs(headText) ?? [];
+  if (baseText === undefined) return head;
+  const atBase = parsedShardProofs(baseText, { uniqueKeys: false });
+  const preexisting = atBase === undefined ? (p: string) => baseText.includes(p) : (p: string) => atBase.includes(p);
+  return head.filter((p) => !preexisting(p));
 }
 const CHANGED_SHARDS_ARGS = ["diff", "--name-only", "--diff-filter=AM", "origin/main...HEAD", "--", PLAN_TASK_SHARD_PREFIX];
 
