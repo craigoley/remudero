@@ -3,7 +3,7 @@ import { appendFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { computeRecentActivity, createRecentActivityCache } from "../src/lib/board.js";
-import { fixedClock } from "../src/lib/clock.js";
+import { fixedClock, systemClock } from "../src/lib/clock.js";
 import { createLedgerProjector, ledgerLineIdentity, openProjectorReadModel } from "../src/lib/ledger-projector.js";
 import { acquireLease, openReadModel, openScratchReadModel, withWriteTransaction } from "../src/lib/read-model-db.js";
 import { projectRecentEntry, readRecentActivity, RECENT_ACTIVITY_HISTORY_CAP, RECENT_ROW_PROJECTION } from "../src/lib/recent-projection.js";
@@ -72,6 +72,20 @@ test("W1-T4924: merged today is an exact count from the recent projection", (t) 
   assert.equal(f.read({ limit: RECENT_ACTIVITY_HISTORY_CAP }).entries.length, RECENT_ACTIVITY_HISTORY_CAP);
   assert.equal(f.read({ verbs: new Set(["merged"]) }).entries.length, 0, "the page has shed its merges");
   assert.equal(f.read({ limit: 1, verbs: new Set(["started"]) }).mergedToday, 2);
+  assert.equal(f.read({ nowMs: midnight + 86400000 }).mergedToday, 0);
+});
+
+test("recent merged-today reads the system clock port and honors an explicit UTC day", (t) => {
+  const f = fixture(t);
+  const midnight = Date.parse("2026-10-04T00:00:00Z");
+  f.ingest([
+    row("verdict.merged", midnight - 1, { pr_url: PR + "0" }),
+    row("verdict.merged", midnight, { pr_url: PR }),
+    row("verdict.merged", midnight + 1, { pr_url: PR + "2" }),
+  ]);
+  t.mock.method(systemClock, "date", fixedClock(midnight - 1).date);
+  assert.equal(readRecentActivity(f.db, "core", { plan }).mergedToday, 1);
+  assert.equal(f.read({ nowMs: midnight }).mergedToday, 2);
   assert.equal(f.read({ nowMs: midnight + 86400000 }).mergedToday, 0);
 });
 

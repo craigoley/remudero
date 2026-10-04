@@ -1,3 +1,4 @@
+import { fixedClock, systemClock } from "./clock.js";
 import type { Plan } from "./plan.js";
 import type { ReadModelDb, ReadModelStatement } from "./read-model-db.js";
 
@@ -308,7 +309,7 @@ export function readRecentActivity(db: ReadModelDb, instance: string, opts: Rece
     }
     if (!opts.verbs || opts.verbs.has(entry.verb)) entries.push(entry);
   }
-  const midnight = new Date(opts.nowMs ?? Date.now());
+  const midnight = (opts.nowMs === undefined ? systemClock : fixedClock(opts.nowMs)).date();
   midnight.setUTCHours(0, 0, 0, 0);
   const today = midnight.getTime();
   const counted = db.prepare(`SELECT m.task_id FROM recent_merge m
