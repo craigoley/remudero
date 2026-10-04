@@ -2614,8 +2614,10 @@ import {
   checkCliFreshness,
   checkReviewerCodeFreshnessAsync,
   checkServiceFreshness,
+  checkServiceFreshnessAsync,
   daemonFreshnessFromService,
   type ReviewerCodeFreshness,
+  type SelfSyncDeps,
 } from "./lib/self-sync.js";
 import { checkImageDrift, IMAGE_DRIFT_STEP } from "./lib/image-drift.js";
 import {
@@ -6297,7 +6299,7 @@ export interface PollDeps {
    * unprotected branch) takes `ciGateFromRollup` down its unchanged fail-closed fallback.
   */
   requiredContexts?: (owner: string, repo: string) => string[] | undefined;
-  externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+  externalWaitFreshness?: ExternalWaitFreshness;
   externalWaitRecycle?: () => string | undefined;
   /**
    * W1-T5345: yield the CI wait on its FIRST poll, after `run.awaiting_external` is written, so
@@ -6347,17 +6349,32 @@ export function prOpenHandoffDecline(run: { irreversible: boolean; noMerge: bool
   return undefined;
 }
 
-export function ciWaitFreshness(
-  read: () => DaemonFreshness,
-  clock: Clock = systemClock,
-): () => Extract<DaemonFreshness, { stale: true }> | undefined {
-  return () => {
-    const freshness = read();
+/** W1-T5282: a CI wait's freshness hook; the daemon's is awaited, so its `git fetch` never holds the loop. */
+export type ExternalWaitFreshness = () =>
+  | Extract<DaemonFreshness, { stale: true }>
+  | undefined
+  | Promise<Extract<DaemonFreshness, { stale: true }> | undefined>;
+
+export function ciWaitFreshness(read: () => DaemonFreshness, clock?: Clock): () => Extract<DaemonFreshness, { stale: true }> | undefined;
+export function ciWaitFreshness(read: () => Promise<DaemonFreshness>, clock?: Clock): () => Promise<Extract<DaemonFreshness, { stale: true }> | undefined>;
+export function ciWaitFreshness(read: () => DaemonFreshness | Promise<DaemonFreshness>, clock: Clock = systemClock): ExternalWaitFreshness {
+  const judge = (freshness: DaemonFreshness): Extract<DaemonFreshness, { stale: true }> | undefined => {
     if (!freshness.stale) return undefined;
     const nowMs = clock.now();
     const decision = decideFreshnessRestart({ changes: freshness.changes, busy: true, staleSinceMs: nowMs, nowMs, state: { total: 0, scoredShas: [] } });
     return decision.action === "restart" ? freshness : undefined;
   };
+  return () => {
+    const freshness = read();
+    return freshness instanceof Promise ? freshness.then(judge) : judge(freshness);
+  };
+}
+
+/** W1-T5282 — the daemon's two freshness reads of `repoDir`, both awaited: a sync `git fetch` here stalled the
+ *  loop 49 s (E36). The fetch is bounded by `GATEWAY_FETCH_TIMEOUT_MS`; a hung one reads as a failed fetch. */
+export function daemonFreshnessReads(repoDir: string, env: NodeJS.ProcessEnv = process.env, deps: SelfSyncDeps = {}) {
+  const read = (): Promise<DaemonFreshness> => checkServiceFreshnessAsync(repoDir, env, deps).then(daemonFreshnessFromService);
+  return { checkFreshness: read, externalWaitFreshness: ciWaitFreshness(read) };
 }
 
 // EXPORTED INLINE, not on the tail export list its sibling `waitForCiGreen` rides: that list is the
@@ -6798,7 +6815,7 @@ async function waitForCiGreen(
     if (i === 0) {
       log(AWAITING_EXTERNAL_LEDGER_STEP, { waiting_on: "ci" });
       // W1-T3793: yield only after retaining the external-wait record.
-      const freshness = deps.externalWaitFreshness?.();
+      const freshness = await deps.externalWaitFreshness?.();
       if (freshness) {
         log("run.freshness_handoff", {
           waiting_on: "ci",
@@ -14773,7 +14790,7 @@ interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   binaryPinDeps?: Parameters<typeof readBinaryPin>[0];
   claimReserver?: DispatchClaimReserver;
   containmentExec?: ProbeExecutor;
-  externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+  externalWaitFreshness?: ExternalWaitFreshness;
   externalWaitRecycle?: () => string | undefined;
   handOffAtPrOpen?: boolean;
   isolationExec?: IsolationProbeExecutor;
@@ -15599,7 +15616,7 @@ async function runTask(
      *  `deps.probeExec` already uses, without touching `loadConfig()` (unavailable in CI) or
      *  spawning a real sandboxed worker. Default: the real spawn-backed executor. */
     containmentExec?: ProbeExecutor;
-    externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+    externalWaitFreshness?: ExternalWaitFreshness;
     externalWaitRecycle?: () => string | undefined;
     /** W1-T5345: hand the PR to the sweep at the first CI poll ({@link PollDeps.handOffAtPrOpen}). Daemon only. */
     handOffAtPrOpen?: boolean;
@@ -36293,7 +36310,7 @@ export async function daemonCommand(
             // W1-T3793: only the daemon offers the cooperative external-CI-wait handoff. The
             // existing adapter is material-and-clean only; unassessed, dirty, and degraded
             // readings remain undefined and therefore cannot manufacture a restart.
-            externalWaitFreshness: ciWaitFreshness(() => daemonFreshnessFromService(checkServiceFreshness(effectiveRepoRoot, process.env))),
+            externalWaitFreshness: daemonFreshnessReads(effectiveRepoRoot).externalWaitFreshness,
             externalWaitRecycle: () => recyclePauseDetail(config.root),
             // W1-T5345: a daemon lane is free once its PR is open — the sweep owns CI wait and review.
             handOffAtPrOpen: true,
@@ -36369,7 +36386,7 @@ export async function daemonCommand(
         // test/daemon-freshness-wiring.test.ts's ordering test. So no idle gate has to be added: a
         // dispatch runs to its verdict first, which is also what bounds the restart rate (measured:
         // the daemon is inside a dispatch 18.2% of wall clock, p50 28.3 min).
-        checkFreshness: () => daemonFreshnessFromService(checkServiceFreshness(repoRoot, process.env)),
+        checkFreshness: daemonFreshnessReads(repoRoot).checkFreshness,
         readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(join(config.root, "state")),
         // impl-FZ / W1-T3554 — PLAN FRESHNESS, on BOTH the self-target and dedicated non-self
         // paths, so the reload always reads the SAME source the boot did (origin/main, never the
