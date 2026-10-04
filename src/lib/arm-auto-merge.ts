@@ -477,10 +477,15 @@ function isRealArmDepsObject(deps: unknown): boolean {
   return typeof deps === "object" && deps !== null && (deps as Record<PropertyKey, unknown>)[REAL_ARM_DEPS_MARKER] === true;
 }
 
+/** W1-T5284: a write or read {@link ArmDeps} lets the async driver await when `A` is true. */
+type MaybeAsync<T, A extends boolean> = A extends true ? T | Promise<T> : T;
+
 /** Injectable side effects for {@link armAutoMerge} — exported so a behavioral test drives EVERY
  *  branch (incl. the clean-status direct-merge fallback) with fakes; the real defaults are the
- *  same gh calls the function always made. */
-export interface ArmDeps {
+ *  same gh calls the function always made. W1-T5284: `ArmDeps<true>` is the same seam whose gh
+ *  writes (arm, disarm, direct merge, enqueue) and merge-queue read may be awaited —
+ *  {@link attemptArmAsync} awaits each; every other read stays as it is. */
+export interface ArmDeps<A extends boolean = false> {
   /** W1-T2347 — see {@link REAL_ARM_DEPS_MARKER}'s own doc. Optional and never set by a fixture. */
   [REAL_ARM_DEPS_MARKER]?: true;
   /** The PR's live head sha — read over REST, never `gh --json`. */
@@ -489,11 +494,11 @@ export interface ArmDeps {
   ledgerLines: () => Array<Record<string, unknown>>;
   /** `gh pr merge --auto --squash` — arms the deferred merge; throws on refusal. W1-T1111: NO
    *  `--delete-branch` (see the original ArmDeps.armAuto doc, preserved in git history, for why). */
-  armAuto: (prUrl: string) => void;
+  armAuto: (prUrl: string) => MaybeAsync<void, A>;
   /** `gh pr merge --squash` — the clean-status completion. W1-T1050: NO `--delete-branch`. */
-  mergeDirect: (prUrl: string) => void;
+  mergeDirect: (prUrl: string) => MaybeAsync<void, A>;
   /** `gh pr merge --disable-auto` — withdraws an early arm, W1-T125. */
-  disableAuto: (prUrl: string) => void;
+  disableAuto: (prUrl: string) => MaybeAsync<void, A>;
   /** W1-T1050: post-failure discriminator for a thrown {@link mergeDirect}. Optional; a caller
    *  that omits it keeps the pre-W1-T1050 fail-closed behavior (report `direct-merge-failed`). */
   isMerged?: (prUrl: string) => boolean;
@@ -514,10 +519,10 @@ export interface ArmDeps {
   sleepSync?: (ms: number) => void;
   /** W1-T4405 — OPTIONAL. True when the PR's base branch requires a merge queue. Absent (or
    *  false) keeps every pre-queue path byte-for-byte. */
-  mergeQueue?: (prUrl: string) => boolean;
+  mergeQueue?: (prUrl: string) => MaybeAsync<boolean, A>;
   /** W1-T4405 — OPTIONAL. `gh pr merge <url>`: on a queue branch this ENQUEUES the PR (the queue
    *  owns the merge method), where the REST merge endpoint would be refused as a queue bypass. */
-  enqueue?: (prUrl: string) => void;
+  enqueue?: (prUrl: string) => MaybeAsync<void, A>;
   /** W1-T4581 — explicit stack parents must all be merged before either arm or direct-merge path. */
   stackPrerequisite?: (prUrl: string) => StackPrerequisiteCheck;
   say: (msg: string) => void;
@@ -589,23 +594,11 @@ export function realArmDeps(
 }
 
 /**
- * W1-T5284 — {@link ArmDeps} whose gh WRITES (arm, disarm, direct merge, enqueue) and merge-queue
- * read may be awaited. {@link attemptArmAsync} awaits each; every other read stays as it is.
- */
-export type AsyncArmDeps = Omit<ArmDeps, "armAuto" | "mergeDirect" | "disableAuto" | "enqueue" | "mergeQueue"> & {
-  armAuto: (prUrl: string) => void | Promise<void>;
-  mergeDirect: (prUrl: string) => void | Promise<void>;
-  disableAuto: (prUrl: string) => void | Promise<void>;
-  enqueue?: (prUrl: string) => void | Promise<void>;
-  mergeQueue?: (prUrl: string) => boolean | Promise<boolean>;
-};
-
-/**
  * W1-T5284 — {@link realArmDeps} for the daemon: the same deps, with the at-open arm's `gh pr merge`
  * calls, its REST merge and its merge-queue read awaited on the async gh transport. MEASURED in the
  * core daemon's profile: `ghExec` 10.4 s and {@link baseBranchRequiresMergeQueue} 3.5 s on the loop.
  */
-export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig): AsyncArmDeps {
+export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig): ArmDeps<true> {
   return {
     ...realArmDeps(loadConfigImpl),
     armAuto: async (prUrl) => {
@@ -977,13 +970,10 @@ export const REST_MERGE_UNSETTLED_MAX_READS = 3;
 /** W1-T1280 — the short interval between one `UNKNOWN` re-read and the next. */
 export const REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS = 2_000;
 
-/** The deps {@link attemptArm} reads, over either the sync {@link ArmDeps} or {@link AsyncArmDeps}. */
-type AttemptArmDeps<D extends ArmDeps | AsyncArmDeps> = Pick<D, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-  Partial<Pick<D, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">>;
-
 export function attemptArm(
   prUrl: string,
-  deps: AttemptArmDeps<ArmDeps>,
+  deps: Pick<ArmDeps<false>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
+    Partial<Pick<ArmDeps<false>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">>,
   priorHeadSha?: string,
   // W1-T3551: read off `OpenPrView.isDraft` (POSITIVE match only — `undefined`/`false` both fall
   // through unchanged). This is the ONE shared call site {@link armAutoMergeDetailed} (ledger-gated
@@ -999,7 +989,8 @@ export function attemptArm(
  *  under the async driver, so every outcome class and `say` line is the sync form's. */
 export function attemptArmAsync(
   prUrl: string,
-  deps: AttemptArmDeps<AsyncArmDeps>,
+  deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">>,
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Promise<ArmAttemptResult> {
@@ -1008,7 +999,8 @@ export function attemptArmAsync(
 
 function* attemptArmSteps(
   prUrl: string,
-  deps: AttemptArmDeps<AsyncArmDeps>,
+  deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">>,
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Steps<ArmAttemptResult> {
@@ -1162,7 +1154,7 @@ function* attemptArmSteps(
 /** The REST merge once {@link directMergePreflight} has let it through. */
 function* mergeDirectAfterPreflightSteps(
   prUrl: string,
-  deps: Pick<AsyncArmDeps, "mergeDirect" | "isMerged" | "say">,
+  deps: Pick<ArmDeps<true>, "mergeDirect" | "isMerged" | "say">,
   evidence: DirectMergePreflightEvidence | undefined,
 ): Steps<ArmAttemptResult> {
   try {
@@ -1189,7 +1181,7 @@ function* mergeDirectAfterPreflightSteps(
  */
 function* attemptPlanPrMergeSteps(
   prUrl: string,
-  deps: Pick<AsyncArmDeps, "mergeDirect" | "isMerged" | "say"> & DirectMergePreflightDeps,
+  deps: Pick<ArmDeps<true>, "mergeDirect" | "isMerged" | "say"> & DirectMergePreflightDeps,
   planTouch: "touched" | "unreadable",
   priorHeadSha?: string,
 ): Steps<ArmAttemptResult> {
@@ -1237,7 +1229,7 @@ function* attemptPlanPrMergeSteps(
  */
 function* attemptQueueArmSteps(
   prUrl: string,
-  deps: Pick<AsyncArmDeps, "armAuto" | "isMerged" | "say"> & Partial<Pick<AsyncArmDeps, "enqueue">>,
+  deps: Pick<ArmDeps<true>, "armAuto" | "isMerged" | "say"> & Partial<Pick<ArmDeps<true>, "enqueue">>,
 ): Steps<ArmAttemptResult> {
   try {
     yield* step(() => deps.armAuto(prUrl));
@@ -1292,7 +1284,8 @@ export function armAutoMergeAtOpen(
  *  steps, with the arm's gh calls awaited over {@link realArmDepsAsync}. */
 export async function armAutoMergeAtOpenAsync(
   prUrl: string,
-  deps: AttemptArmDeps<AsyncArmDeps> = realArmDepsAsync(),
+  deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">> = realArmDepsAsync(),
   irreversible = false,
   isDraft = false,
 ): Promise<ArmOutcome> {
@@ -1302,7 +1295,8 @@ export async function armAutoMergeAtOpenAsync(
 
 function* armAtOpenSteps(
   prUrl: string,
-  deps: AttemptArmDeps<AsyncArmDeps>,
+  deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">>,
   irreversible: boolean,
   isDraft: boolean,
 ): Steps<ArmOutcome> {
@@ -1355,7 +1349,7 @@ export function disarmAutoMerge(
 /** W1-T5284 — {@link disarmAutoMerge} with `gh pr merge --disable-auto` awaited. */
 export async function disarmAutoMergeAsync(
   prUrl: string,
-  deps: Pick<AsyncArmDeps, "disableAuto" | "say"> & Partial<Pick<AsyncArmDeps, "isMerged">> = realArmDepsAsync(),
+  deps: Pick<ArmDeps<true>, "disableAuto" | "say"> & Partial<Pick<ArmDeps<true>, "isMerged">> = realArmDepsAsync(),
 ): Promise<DisarmOutcome> {
   requireExplicitArmSeam("disarmAutoMergeAsync", !isRealArmDepsObject(deps));
   return runStepsAsync(disarmSteps(prUrl, deps));
@@ -1363,7 +1357,7 @@ export async function disarmAutoMergeAsync(
 
 function* disarmSteps(
   prUrl: string,
-  deps: Pick<AsyncArmDeps, "disableAuto" | "say"> & Partial<Pick<AsyncArmDeps, "isMerged">>,
+  deps: Pick<ArmDeps<true>, "disableAuto" | "say"> & Partial<Pick<ArmDeps<true>, "isMerged">>,
 ): Steps<DisarmOutcome> {
   try {
     yield* step(() => deps.disableAuto(prUrl));

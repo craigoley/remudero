@@ -30,7 +30,7 @@ import {
   mergeDirectViaRestAsync,
   realArmDepsAsync,
   type ArmAttemptResult,
-  type AsyncArmDeps,
+  type ArmDeps,
 } from "../src/lib/arm-auto-merge.js";
 import {
   defaultGitCaptureAsync,
@@ -48,7 +48,7 @@ import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { addLaneWorktree, createDaemonLaneWorktree, createFixRungWorktree, pushFixRound } from "../src/run-task.js";
 import { ghShim } from "./helpers/gh-shim.js";
-import { GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
 
 type Log = (step: string, extra?: Record<string, unknown>) => void;
 
@@ -74,17 +74,12 @@ async function ticksWhileInFlight<T>(inFlight: () => boolean, call: () => Promis
  *  holds every fetch/ls-remote (upload-pack) and push (receive-pack) open while it is logged. */
 function slowOriginFixture(kind: string, extra: string[] = []) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t5284-${kind}-`));
-  const origin = join(root, "origin.git");
-  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", origin]);
-  const seed = join(root, "seed");
-  execFileSync("git", ["init", "--quiet", "-b", "main", seed]);
-  git(seed, "config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name);
-  git(seed, "config", "user.email", GIT_REPO_FIXTURE_IDENTITY.email);
-  writeFileSync(join(seed, "seed.txt"), "seed\n");
-  git(seed, "add", "-A");
-  git(seed, "commit", "--no-verify", "--quiet", "-m", "chore: seed");
-  git(seed, "push", "--quiet", origin, "main");
-  for (const branch of extra) git(seed, "push", "--quiet", origin, `main:refs/heads/${branch}`);
+  const originRepo = gitRepo({ bare: true, kind: `t5284-${kind}-origin` });
+  const origin = originRepo.dir;
+  const seed = gitRepo({ kind: `t5284-${kind}-seed` });
+  seed.addRemote("origin", origin);
+  seed.git("push", "--quiet", "origin", "main");
+  for (const branch of extra) seed.git("push", "--quiet", "origin", `main:refs/heads/${branch}`);
   const clone = join(root, "clone");
   execFileSync("git", ["clone", "--quiet", origin, clone]);
   git(clone, "config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name);
@@ -111,7 +106,9 @@ function slowOriginFixture(kind: string, extra: string[] = []) {
       return own[0] === `start ${service}` && !own.includes(`end ${service}`);
     },
     reset: () => rmSync(transportLog, { force: true }),
-    cleanup: () => rmSync(root, { recursive: true, force: true }),
+    cleanup: () => {
+      for (const dir of [root, origin, seed.dir]) rmSync(dir, { recursive: true, force: true });
+    },
   };
 }
 
@@ -617,7 +614,7 @@ test("W1-T5284: the async arm's real transport carries each gh write and the cac
 
 test("W1-T5284: the async at-open arm and disarm keep their sync outcomes", async () => {
   const said: string[] = [];
-  const deps: AsyncArmDeps = {
+  const deps: ArmDeps<true> = {
     headSha: () => "h",
     ledgerLines: () => [],
     armAuto: async () => {},
