@@ -96,8 +96,14 @@ export async function remeasureSettledGoals(input: {
     const ids = [...new Set([...goal.tasks, ...input.tasks.filter((t) => t.goal === goal.id).map((t) => t.id)])].sort();
     const key = createHash("sha256").update(JSON.stringify([goal, ids])).digest("hex");
     return { goal, ids, key };
-  }).filter(({ goal, ids, key }) => ids.length > 0 && ids.every((id) => taskById.has(id) && input.settled(id) === true) &&
-    (prior[goal.id]?.key !== key || clock.now() - Date.parse(prior[goal.id]!.ts) >= GOAL_REMEASUREMENT_CADENCE_MS));
+  }).filter(({ goal, ids, key }) => {
+    const measuredAt = Date.parse(prior[goal.id]?.ts ?? "");
+    const now = clock.now();
+    // A malformed or future checkpoint cannot postpone observation indefinitely.
+    return ids.length > 0 && ids.every((id) => taskById.has(id) && input.settled(id) === true) &&
+      (prior[goal.id]?.key !== key || !Number.isFinite(measuredAt) || measuredAt > now ||
+        now - measuredAt >= GOAL_REMEASUREMENT_CADENCE_MS);
+  });
   if (!due.length) return [];
   let rows = input.rows;
   const sourceProblems = new Set<string>();

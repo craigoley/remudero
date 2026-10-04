@@ -130,6 +130,26 @@ test("goal measurement commands are typed ledger queries with positive controls"
   assert.equal(measureGoal("terminal-missing-percent", [{ step: "worker.assignment", worker_assignment: { id: "a" } }, { step: "worker.assignment", worker_assignment: { id: "b" } }, { step: "implement.done", selection_assignment_id: "a" }]), 50);
 });
 
+test("a malformed or future goal checkpoint cannot indefinitely defer a settled goal measurement", async () => {
+  const fixture = writeLedger([]);
+  const input = { repoRoot: fixture.dir, stateDir: fixture.dir, tasks, goals: [goal], rows, clock,
+    settled: () => true, log: () => {} };
+  const path = join(fixture.dir, "goal-remeasurements.json");
+  try {
+    assert.equal((await remeasureSettledGoals(input))[0]!.step, "goal.moved");
+    for (const ts of ["malformed", fixedClock(clock.now() + GOAL_REMEASUREMENT_CADENCE_MS).iso()]) {
+      const checkpoint = JSON.parse(readFileSync(path, "utf8"));
+      checkpoint[goal.id].ts = ts;
+      writeFileSync(path, JSON.stringify(checkpoint));
+      assert.deepEqual(await remeasureSettledGoals({ ...input, settled: () => false }), [],
+        "bad metadata never makes unsettled work eligible");
+      const observations = await remeasureSettledGoals({ ...input, rows: [] });
+      assert.equal(observations[0]!.step, "goal.unmeasured", "missing evidence replaces the stale success claim");
+      assert.equal(JSON.parse(readFileSync(path, "utf8"))[goal.id].ts, clock.iso());
+    }
+  } finally { rmSync(fixture.dir, { recursive: true, force: true }); }
+});
+
 test("goals load from their own records and the task parser retains goal membership", () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-goal-records-"));
   try {
