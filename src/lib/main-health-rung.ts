@@ -1,8 +1,8 @@
 import {
   NEEDS_HUMAN_LABEL,
-  tryEscalate,
+  tryEscalateAsync,
+  type AsyncIssueGateway,
   type Escalation,
-  type IssueGateway,
   type OpenIssue,
 } from "./escalate.js";
 import { rollupForAsync, type GhApiFetcher } from "./open-prs-rest.js";
@@ -103,7 +103,8 @@ export interface MainHealthRungDeps {
   /** Every read is awaited: production passes the async `gh` transport, because a sync `ghJson`
    *  here held the core daemon's loop 144 s (E36, 2026-10-02). A sync fetcher still works. */
   fetch: GhApiFetcher;
-  issues: IssueGateway;
+  /** W1-T5283: every issue call is awaited, for the same reason as `fetch`; a sync gateway still works. */
+  issues: AsyncIssueGateway;
   ledgerPath: string;
   runId: string;
   log: (step: string, extra?: Record<string, unknown>) => void;
@@ -513,7 +514,7 @@ export function buildMainHealthRung(
             }
           }
         }
-        const issueUrl = tryEscalate(escalationFor(observation, branch), {
+        const issueUrl = await tryEscalateAsync(escalationFor(observation, branch), {
           issues: deps.issues,
           ledgerPath: deps.ledgerPath,
           runId: deps.runId,
@@ -545,9 +546,9 @@ export function buildMainHealthRung(
       if (!deps.issues.listOpen || !deps.issues.closeWithComment) {
         throw new Error("main-health resolution requires issue list and close support");
       }
-      const open = deps.issues.listOpen(NEEDS_HUMAN_LABEL).filter(isMainHealthIssue);
+      const open = (await deps.issues.listOpen(NEEDS_HUMAN_LABEL)).filter(isMainHealthIssue);
       for (const issue of open) {
-        deps.issues.closeWithComment(
+        await deps.issues.closeWithComment(
           issue.url,
           `Resolved automatically: default branch \`${branch}\` at \`${sha}\` now has genuine passing check evidence. ${observation.reason}`,
         );
