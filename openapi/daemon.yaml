@@ -7295,6 +7295,33 @@ components:
         decision:
           type: string
           enum: [file, merge]
+        state:
+          type: string
+          description: A not-ready item's classified state (W1-T5340).
+          enum: [not_ready, deferred_with_trigger]
+        trigger:
+          type: object
+          description: The unfired trigger holding a `deferred_with_trigger` proposal (src/lib/inbox.ts's `ProposalTrigger`).
+          required: [description, fired]
+          properties:
+            description: {type: string}
+            fired: {type: boolean}
+        resolution:
+          type: object
+          description: How the operator resolves a not-ready or deferred proposal (W1-T5340).
+          required: [method, path, fields]
+          properties:
+            method: {type: string, enum: [POST]}
+            path: {type: string, enum: [/v1/inbox/reframe]}
+            fields:
+              type: object
+              required: [proposalId]
+              properties:
+                proposalId: {type: string}
+        classification:
+          type: string
+          description: A `needsYou` item's shared ASK/RECORD classification (src/lib/ask-classification.ts, W1-T5340).
+          enum: [ASK, RECORD]
 
     ViewPage:
       type: object
@@ -7422,6 +7449,11 @@ components:
           type: object
           required: [decisions, instances]
           properties:
+            humanGates:
+              description: >
+                W1-T5340: every source's human gates, classified ASK/RECORD by the shared classifier,
+                with each unavailable or partial source named rather than counted as zero.
+              $ref: "#/components/schemas/HumanGateProjection"
             decisions:
               type: array
               description: Every present instance's open decisions, newest `askedAt` first (undated last).
@@ -8358,7 +8390,7 @@ components:
       type: object
       description: >
         W1-T2604: one not-ready proposal with the exact predicate failures that hold it
-        (src/lib/panel-graph.ts's `InboxNotReadyItem`). Carries no affordance.
+        (src/lib/panel-graph.ts's `InboxNotReadyItem`). W1-T5340 adds its classified `state`, a deferred item's `trigger`, and the reframe `resolution`.
       required:
         - proposalId
         - summary
@@ -8375,6 +8407,28 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/InboxPredicateFailure"
+        state:
+          type: string
+          enum: [not_ready, deferred_with_trigger]
+        trigger:
+          type: object
+          description: The unfired trigger holding a `deferred_with_trigger` proposal (src/lib/inbox.ts's `ProposalTrigger`).
+          required: [description, fired]
+          properties:
+            description: {type: string}
+            fired: {type: boolean}
+        resolution:
+          type: object
+          description: How the operator resolves a not-ready or deferred proposal (W1-T5340).
+          required: [method, path, fields]
+          properties:
+            method: {type: string, enum: [POST]}
+            path: {type: string, enum: [/v1/inbox/reframe]}
+            fields:
+              type: object
+              required: [proposalId]
+              properties:
+                proposalId: {type: string}
 
     InboxDeclinedItem:
       type: object
