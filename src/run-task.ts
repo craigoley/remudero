@@ -2400,7 +2400,7 @@ export function buildSweepEffects(
 /**
  * W1-T5403 — the sweep's risk judge for a head whose run ended `handed_off`: the SAME judge mount,
  * live risk policy, spend collector and BLOCKED escalation the in-run call in runTaskBody uses, with
- * the change view read at judgment time. A settings or change-view failure surfaces as an
+ * the change view read at judgment time over the async transport (W1-T5523: off the sweep pass). A settings or change-view failure surfaces as an
  * unavailable judge through `assessRisk`, never as a proceed. Wired by both sweep entrypoints.
  */
 export function handedOffHeadRiskJudge(
@@ -2413,7 +2413,7 @@ export function handedOffHeadRiskJudge(
   log: (step: string, extra?: Record<string, unknown>) => void,
   spawn?: typeof spawnWorker,
   escalateImpl: typeof escalate = escalate,
-  readChangeView: (prUrl: string) => RiskJudgeChangeView = changeView,
+  readChangeView: (prUrl: string) => RiskJudgeChangeView | Promise<RiskJudgeChangeView> = changeViewAsync,
 ): NonNullable<SweepDeps["judgeHandedOffHead"]> {
   return riskJudgeHandedOffHead((pr) => {
     const task = pr.taskId === undefined ? undefined : plan.byId.get(pr.taskId);
@@ -2435,7 +2435,7 @@ export function handedOffHeadRiskJudge(
             outPath: join(config.root, "tmp", `risk-judge-settings-${runId}.json`),
           });
           const mount = resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)));
-          const judged = { ...input, change: { ...input.change, changeView: readChangeView(pr.prUrl) } };
+          const judged = { ...input, change: { ...input.change, changeView: await readChangeView(pr.prUrl) } };
           return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend })(judged);
         },
         escalate: (verdict, action) =>
@@ -4930,11 +4930,27 @@ export async function fetchPrDiffFilesViaGh(prUrl: string, gh: (args: string[]) 
  * declared file list, which would just reproduce this task's own defect under a different name.
  */
 export function changeView(prUrl: string, fetch: (args: string[]) => unknown = ghJson): RiskJudgeChangeView {
+  return changeViewFromRows(fetch(changeViewArgs(prUrl)));
+}
+
+/** W1-T5523 — {@link changeView} over the async gh transport, for the sweep's background judgment. */
+export async function changeViewAsync(
+  prUrl: string,
+  fetch: (args: string[]) => Promise<unknown> = ghJsonAsync,
+): Promise<RiskJudgeChangeView> {
+  return changeViewFromRows(await fetch(changeViewArgs(prUrl)));
+}
+
+function changeViewArgs(prUrl: string): string[] {
   const target = prUrlTarget(prUrl);
   if (!target) {
     throw new Error(`change view: cannot resolve owner/repo/number from ${JSON.stringify(prUrl)} — refusing to guess`);
   }
-  const rows = fetch(["api", `repos/${target.owner}/${target.repo}/pulls/${target.number}/files?per_page=100`]) as Array<{
+  return ["api", `repos/${target.owner}/${target.repo}/pulls/${target.number}/files?per_page=100`];
+}
+
+function changeViewFromRows(response: unknown): RiskJudgeChangeView {
+  const rows = response as Array<{
     filename?: string;
     additions?: number;
     deletions?: number;
@@ -6283,7 +6299,7 @@ export const PR_OPEN_HANDOFF_STEP_OWNERS: readonly { step: string; owner: PrOpen
   { step: "capped_arm_refusal", owner: { kind: "sweep", by: "runReview -> armIfVerdictPermits -> decideArmFromLedgerVerdict" } },
   { step: "automerge_arm", owner: { kind: "sweep", by: "sweep mergeable disposition arms auto-merge on checks green + review success" } },
   { step: "merge_and_terminal_row", owner: { kind: "sweep", by: "GitHub auto-merge the sweep armed; this run's own terminal row is the handed_off verdict" } },
-  { step: "risk_judge", owner: { kind: "sweep", by: "sweep mergeable disposition -> judgeHandedOffHead (handedOffHeadRiskJudge -> runRiskJudge), once per handed-off head before arming" } },
+  { step: "risk_judge", owner: { kind: "sweep", by: "sweep mergeable disposition -> judgeHandedOffHead (handedOffHeadRiskJudge -> runRiskJudge), once per handed-off head before arming, off the pass (W1-T5523)" } },
   { step: "specialist_panel", owner: { kind: "in_run_only", by: "routeSpecialists in runTaskBody; a specialist.panel log row that gates nothing" } },
   { step: "irreversible_arm_refusal", owner: { kind: "declined", reason: "irreversible_diff" } },
   { step: "no_merge_boundary", owner: { kind: "declined", reason: "no_merge_boundary" } },
