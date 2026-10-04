@@ -9866,7 +9866,8 @@ async function holdHandedOffHeadForRiskJudgment(
     logRiskJudgeUnavailable(pr, handoff, reason, log);
     return unavailable(reason);
   }
-  const inFlight = `risk judgment in flight for handed-off head ${head} — holding the arm; the next pass reads its decision`;
+  const inFlight =
+    `risk judgment in flight for handed-off head ${head} — holding the arm; the next pass reads its decision`;
   if (pool.flights.has(`${pr.prNumber}@${pr.headSha}`)) return inFlight;
   if (pool.flights.size >= pool.limit) {
     return `risk judgment not started for handed-off head ${head} — ${pool.flights.size} in flight at the cap ` +

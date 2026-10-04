@@ -2400,8 +2400,9 @@ export function buildSweepEffects(
 /**
  * W1-T5403 — the sweep's risk judge for a head whose run ended `handed_off`: the SAME judge mount,
  * live risk policy, spend collector and BLOCKED escalation the in-run call in runTaskBody uses, with
- * the change view read at judgment time over the async transport (W1-T5523: off the sweep pass). A settings or change-view failure surfaces as an
- * unavailable judge through `assessRisk`, never as a proceed. Wired by both sweep entrypoints.
+ * the change view read at judgment time over the async transport (W1-T5523: off the sweep pass). A
+ * settings or change-view failure surfaces as an unavailable judge through `assessRisk`, never as a
+ * proceed. Wired by both sweep entrypoints.
  */
 export function handedOffHeadRiskJudge(
   owner: string,
