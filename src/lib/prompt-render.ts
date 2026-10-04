@@ -151,8 +151,8 @@ export function outOfDeclaredScopeFiles(
 // because `OpenPrView` carries it and this module already imports OpenPrView
 // from sweep.js; the reverse import would be circular (W1-T100).
 
-/** The six known fix-rung failure modes. See the taxonomy note above. */
-export type FixMode = "reviewer-unmet" | "body-coverage" | "ci-log" | "merge-conflict" | "gate-fix" | "proof-discrimination" | (string & {});
+/** The known fix-rung failure modes. See the taxonomy note above. */
+export type FixMode = "reviewer-unmet" | "body-coverage" | "ci-log" | "merge-conflict" | "gate-fix" | "proof-discrimination" | "plan-gate" | (string & {});
 
 /**
  * The block evidence a fix dispatch derives its MODE from. `review` carries a
@@ -187,6 +187,7 @@ export type FixMode = "reviewer-unmet" | "body-coverage" | "ci-log" | "merge-con
  * never checked when it is non-empty (see {@link FIX_MODE_RULES}'s `gate-fix` row).
  */
 export interface FixEvidence {
+  planGateFindings?: readonly { check: string; firstLine: string }[];
   review?: { unmetCriteria: CriterionVerdict[]; summary: string };
   ciFailures?: CiFailure[];
   /** W1-T106: the merge-conflict mode's ONLY input — conflicting files + both sides' log since merge-base. */
@@ -310,6 +311,10 @@ export const FIX_MODE_RULES: readonly FixModeRule[] = [
     when: (e) => e.mergeConflict !== undefined,
   },
   {
+    mode: "plan-gate",
+    when: (e) => e.planGateFindings !== undefined,
+  },
+  {
     mode: "ci-log",
     when: (e) => e.ciFailures !== undefined,
   },
@@ -424,6 +429,23 @@ export function renderFixPrompt(opts: {
         opts.evidence.constraint,
       ]
     : [];
+  if (mode === "plan-gate") {
+    return [header, ...constraintBlock,
+      `STAGEABLE PLAN PATHS: ${(opts.task.files ?? []).join(", ")}. Edit only these exact paths.`,
+      "The parent owns the commit, REST metadata write and push. You have no shell; save your edits.",
+      "Never edit src/, test/, another plan path, or an existing task's untouched criterion.",
+      "W1-T3231 self-credit rule: a filing cannot carry a Remudero-Task trailer for a task it introduces.",
+      "Every proof must discriminate this head from its merge base; passing at both is a stale proof.",
+      "Return COMMIT_MESSAGE: type(plan): subject. Metadata proposals are optional:",
+      "PR_TITLE: type(plan): subject",
+      "PR_ACCEPTANCE: followed by a complete ## Acceptance block, ending with END_PR_ACCEPTANCE.",
+      "The parent applies proposals only after the same preflight passes on the new commit and metadata.",
+      CI_LOG_FENCE_OPEN,
+      ...(opts.evidence.planGateFindings ?? []).map((f) => neutralizeFenceMarkers(`[${f.check}] ${f.firstLine}`)),
+      ...(opts.evidence.ciFailures ?? []).map((f) => neutralizeFenceMarkers(`[${f.name}] ${f.logTail}`)),
+      CI_LOG_FENCE_CLOSE,
+    ].join("\n");
+  }
   // W1-T1227: named EXPLICITLY, mode-agnostic (every branch below splices this in), so the fix
   // worker cannot claim it was never told. Omitted only when the task declares no `files` scope
   // at all — silence here is never a licence, it is simply nothing to report.

@@ -19,7 +19,7 @@ let counter = 0;
 function fixture(t: TestContext) {
   const remote = gitRepo({ kind: "t3423-remote", bare: true });
   const parent = gitRepo({ kind: "t3423-parent" });
-  const work = parent.addWorktree(join(dirname(parent.dir), `rmd-t3423-wt-${process.pid}-${counter++}`), "pushbranch");
+  const work = parent.addWorktree(join(parent.dir, `rmd-t3423-wt-${counter++}`), "pushbranch");
   t.after(() => work.cleanup());
 
   mkdirSync(join(work.dir, "hooks"), { recursive: true });
