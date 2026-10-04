@@ -4,7 +4,7 @@ import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rm
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "yaml";
-import { loadGoals, measureGoal, remeasureSettledGoals, withGoalRemeasurement, type GoalRecord } from "../src/lib/goals.js";
+import { GOAL_REMEASUREMENT_CADENCE_MS, loadGoals, measureGoal, remeasureSettledGoals, withGoalRemeasurement, type GoalRecord } from "../src/lib/goals.js";
 import { fixedClock, systemClock } from "../src/lib/clock.js";
 import { buildGather, renderGather } from "../src/lib/retro.js";
 import { parseTasksFromYaml, type Task } from "../src/lib/plan.js";
@@ -99,6 +99,24 @@ test("W1-T4684: an unmoved goal is handed to the retro", async () => {
     assert.equal(gather.unmovedGoals!.length, 1);
     assert.match(renderGather(gather), /G-flow: 10 -> 5/);
     assert.match(renderGather(gather), /governed plan/);
+  } finally { rmSync(fixture.dir, { recursive: true, force: true }); }
+});
+
+test("settled goals are revisited daily so a measured improvement cannot hide a later regression", async () => {
+  const fixture = writeLedger([]);
+  const events: string[] = [];
+  const input = { repoRoot: fixture.dir, stateDir: fixture.dir, tasks, goals: [goal], rows,
+    settled: () => true, log: (step: string) => events.push(step) };
+  try {
+    assert.equal((await remeasureSettledGoals({ ...input, clock }))[0]!.step, "goal.moved");
+    assert.deepEqual(await remeasureSettledGoals({ ...input, clock: fixedClock(clock.now() + GOAL_REMEASUREMENT_CADENCE_MS - 1) }), []);
+    const regressionRows = rows.map((row) => row.step === "verdict.merged" ? { ...row, ts: "2026-10-02T10:30:00Z" } : row);
+    const later = fixedClock(clock.now() + GOAL_REMEASUREMENT_CADENCE_MS);
+    assert.equal((await remeasureSettledGoals({ ...input, rows: regressionRows, clock: later }))[0]!.step, "goal.unmoved");
+    assert.deepEqual(await remeasureSettledGoals({ ...input, rows: regressionRows, clock: later }), []);
+    assert.equal((await remeasureSettledGoals({ ...input, rows: [], clock: fixedClock(later.now() + GOAL_REMEASUREMENT_CADENCE_MS) }))[0]!.step, "goal.unmeasured");
+    assert.deepEqual(events, ["goal.moved", "goal.unmoved", "goal.unmeasured"]);
+    assert.equal(JSON.parse(readFileSync(join(fixture.dir, "goal-remeasurements.json"), "utf8"))[goal.id].step, "goal.unmeasured");
   } finally { rmSync(fixture.dir, { recursive: true, force: true }); }
 });
 

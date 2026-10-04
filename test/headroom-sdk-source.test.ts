@@ -363,7 +363,7 @@ test("a native credential refresh timeout or lost store is unreadable and never 
   const dir = join(root, ".claude-fleet"); mkdirSync(dir);
   const path = join(dir, ".credentials.json");
   try {
-    for (const mode of ["timeout", "missing", "malformed", "no-expiry", "cleared", "invalid-bound"] as const) {
+    for (const mode of ["timeout", "missing", "malformed", "no-expiry", "no-refresh", "cleared", "invalid-bound"] as const) {
       let nowMs = 1_000; let called = 0; let closed = 0;
       writeFileSync(path, JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-refresh", expiresAt: 999 } }));
       const clock = { now: () => nowMs, date: () => new Date(nowMs), iso: () => new Date(nowMs).toISOString() };
@@ -375,9 +375,10 @@ test("a native credential refresh timeout or lost store is unreadable and never 
         if (mode === "missing") rmSync(path);
         if (mode === "malformed") writeFileSync(path, "not json");
         if (mode === "no-expiry") writeFileSync(path, JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-refresh" } }));
+        if (mode === "no-refresh") writeFileSync(path, JSON.stringify({ claudeAiOauth: { accessToken: "fixture-access", expiresAt: 0 } }));
         if (mode === "cleared") writeFileSync(path, JSON.stringify({ claudeAiOauth: { expiresAt: 0 } }));
       } } });
-      const expected = mode === "timeout" ? /bounded wait/ : mode === "invalid-bound" ? /invalid.*bound/ : mode === "no-expiry" ? /lost.*expiry/ : mode === "cleared" ? /lost.*refresh credential/ : /became unavailable/;
+      const expected = mode === "timeout" ? /bounded wait/ : mode === "invalid-bound" ? /invalid.*bound/ : mode === "no-expiry" ? /lost.*expiry/ : mode === "no-refresh" ? /lost.*refresh credential/ : mode === "cleared" ? /became unavailable: credential-file-empty/ : /became unavailable/;
       await assert.rejects(session.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET!(), expected);
       await session.return?.();
       assert.equal(called, 0, mode);

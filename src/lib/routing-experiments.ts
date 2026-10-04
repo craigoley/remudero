@@ -155,6 +155,13 @@ export interface ExperimentArmReport {
   meanNotionalCostUsd: number | null;
   costMissingAssignments: number;
   nonStarterAssignments: number;
+  receiptCoverage: {
+    assignments: number;
+    terminalAssignments: number;
+    costKnownAssignments: number;
+    servedModelKnownAssignments: number;
+    outcomeKnownAssignments: number;
+  };
 }
 
 export interface ExperimentReport {
@@ -178,6 +185,7 @@ type Row = Record<string, unknown>;
 
 const str = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
 const num = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
+const cost = (value: unknown): number | undefined => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 const mean = (values: number[]): number | null => (values.length === 0 ? null : values.reduce((a, b) => a + b, 0) / values.length);
 
 function median(values: number[]): number | null {
@@ -200,7 +208,7 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
   const armsSeen = new Map<string, Set<string>>();
   const crossed = new Set<string>();
   const assignmentTask = new Map<string, string>();
-  const receipts = new Map<string, { minutes?: number; tokens?: number; cost?: number; billingMode?: "api" | "subscription"; attempted?: true }>();
+  const receipts = new Map<string, { minutes?: number; tokens?: number; cost?: number; billingMode?: "api" | "subscription"; attempted?: true; servedModel?: string; success?: boolean }>();
   const excludedAssignments = { genericUnit: 0, changedTreatment: 0, unverifiedTreatment: 0 };
   const merges: Array<{ task: string; ts: string }> = [];
   const fixes: Array<{ task: string; ts: string }> = [];
@@ -249,9 +257,11 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
         ...(step === "worker.attempt" ? { attempted: true as const } : {}),
         ...(duration !== undefined ? { minutes: duration / 60_000 } : {}),
         ...(tokenTotal(row.tokens) !== undefined ? { tokens: tokenTotal(row.tokens) } : {}),
-        ...(num(row.total_cost_usd) !== undefined ? { cost: num(row.total_cost_usd) }
-          : num(row.cost_usd) !== undefined ? { cost: num(row.cost_usd) } : {}),
+        ...(cost(row.total_cost_usd) !== undefined ? { cost: cost(row.total_cost_usd) }
+          : cost(row.cost_usd) !== undefined ? { cost: cost(row.cost_usd) } : {}),
         ...(row.billing_mode === "api" || row.billing_mode === "subscription" ? { billingMode: row.billing_mode } : {}),
+        ...(str(row.served_model)?.trim() ? { servedModel: str(row.served_model) } : {}),
+        ...(typeof row.success === "boolean" ? { success: row.success } : {}),
       });
     }
   }
@@ -278,6 +288,13 @@ export function evaluateRoutingExperiment(rows: Iterable<Row>, experiment: Routi
       meanNotionalCostUsd: mean(armReceipts.flatMap((receipt) => (receipt.cost === undefined || receipt.billingMode !== "subscription" ? [] : [receipt.cost]))),
       costMissingAssignments: armAssignments.filter((receipt) => receipt?.cost === undefined || receipt.billingMode === undefined).length,
       nonStarterAssignments: armAssignments.filter((receipt) => receipt?.attempted !== true).length,
+      receiptCoverage: {
+        assignments: armAssignments.length,
+        terminalAssignments: armReceipts.length,
+        costKnownAssignments: armReceipts.filter((receipt) => receipt.cost !== undefined && receipt.billingMode !== undefined).length,
+        servedModelKnownAssignments: armReceipts.filter((receipt) => receipt.servedModel !== undefined).length,
+        outcomeKnownAssignments: armReceipts.filter((receipt) => receipt.success !== undefined).length,
+      },
     };
   });
   return {
