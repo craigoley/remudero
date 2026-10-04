@@ -11,9 +11,9 @@
   origin: "oper#followups-research-2026-09-22"
   plan_refs: [W1-T2697]
   files: [src/lib/ledger.ts, src/run-task.ts, src/lib/hand-run-census.ts, test/setup/tmp-hygiene.ts, test/the-operator-is-a-positive-signal.test.ts, scripts/test-tier-manifest.json]
-  priority: 3
+  priority: 2
   status: queued
-  # backlog gardener: band=3 evidence=cfaa04e23b3e361f
+  # backlog gardener: band=2 evidence=426d30dfe35a4c80
   attempts: 0
   rationale: |
     MEASURED (ledger union).
