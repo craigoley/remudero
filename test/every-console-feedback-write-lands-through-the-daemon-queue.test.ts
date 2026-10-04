@@ -88,7 +88,7 @@ async function post(routes: Route[], path: string, body: unknown): Promise<Recor
 const rel = (id: string) => `plan/feedback/${id}.yaml`;
 const queuedBytes = (stateRoot: string, id: string) => readFileSync(join(stateRoot, QUEUE_DIR, rel(id)), "utf8");
 // ledger-read-intent: live
-const ledgerRow = (ledgerPath: string, step: string) => readLedgerLines(ledgerPath).find((r) => r.step === step);
+const stepRow = (ledgerPath: string, step: string) => readLedgerLines(ledgerPath).find((r) => r.step === step);
 
 test("POST /v1/feedback stages its capture for the daemon sweep and answers landing: queued, with no git, gh or preflight", async () => {
   const fx = panelFixture("submit");
@@ -98,7 +98,7 @@ test("POST /v1/feedback stages its capture for the daemon sweep and answers land
   assert.deepEqual(fx.calls, [], "the request path never lands, so it never reaches git, gh or the preflight");
   assert.deepEqual(landing.queuedFeedbackLandings(fx.stateRoot), [rel(entry.id)]);
   assert.equal(queuedBytes(fx.stateRoot, entry.id), readFileSync(join(fx.root, rel(entry.id)), "utf8"), "the capture's own bytes are staged");
-  assert.equal(ledgerRow(fx.ledgerPath, "panel.feedback_submitted")?.landing, "queued");
+  assert.equal(stepRow(fx.ledgerPath, "panel.feedback_submitted")?.landing, "queued");
 });
 
 test("POST /v1/feedback with replyTo stages both the answer and the target's answered flip, leaving the checkout copy untouched", async () => {
@@ -122,7 +122,7 @@ test("POST /v1/feedback names a failed staging in its ledger row and never answe
   const body = await post([panelGraph.buildSubmitFeedbackRoute(fx.deps)], "/v1/feedback", { text: "nowhere to queue" });
   assert.equal(body.landing, undefined);
   assert.deepEqual(fx.calls, [], "a failed staging still never falls back to landing on the request path");
-  assert.match(String(ledgerRow(fx.ledgerPath, "panel.feedback_submitted")?.landing_error), /queueing plan\/feedback\/.* failed/);
+  assert.match(String(stepRow(fx.ledgerPath, "panel.feedback_submitted")?.landing_error), /queueing plan\/feedback\/.* failed/);
 });
 
 test("POST /v1/skills/run stages the Refine grill at grilling for the daemon sweep and answers landing: queued", async () => {
@@ -138,7 +138,7 @@ test("POST /v1/skills/run stages the Refine grill at grilling for the daemon swe
   assert.deepEqual(fx.calls, []);
   assert.deepEqual(landing.queuedFeedbackLandings(fx.stateRoot), [rel(grill.id)]);
   assert.match(queuedBytes(fx.stateRoot, grill.id), /^status: grilling$/m, "the queue holds the grill after its flip, not the bare capture");
-  assert.equal(ledgerRow(fx.ledgerPath, "panel.skill_invoked")?.landing, "queued");
+  assert.equal(stepRow(fx.ledgerPath, "panel.skill_invoked")?.landing, "queued");
 });
 
 test("POST /v1/escalation/reply stages its capture under the route's state root and answers landing: queued", async () => {
@@ -152,8 +152,8 @@ test("POST /v1/escalation/reply stages its capture under the route's state root 
   assert.equal(body.landing, "queued");
   assert.deepEqual(landing.queuedFeedbackLandings(stateRoot), [rel(entry.id)]);
   assert.match(queuedBytes(stateRoot, entry.id), /^thread_id: /m);
-  assert.equal(ledgerRow(ledgerPath, "panel.escalation_replied")?.landing, "queued");
-  assert.equal(ledgerRow(ledgerPath, "plan_pr.preflight_skipped"), undefined, "no route ledgers a skipped preflight any more");
+  assert.equal(stepRow(ledgerPath, "panel.escalation_replied")?.landing, "queued");
+  assert.equal(stepRow(ledgerPath, "plan_pr.preflight_skipped"), undefined, "no route ledgers a skipped preflight any more");
 });
 
 test("no code path lands feedback without the filer preflight: requestPathLand is gone and a landing always runs it", () => {
