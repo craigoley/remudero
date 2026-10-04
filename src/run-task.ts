@@ -32546,19 +32546,25 @@ const dispatchFallbackKeys = new Map<string, string>();
 
 export function readDispatchFilingSnapshot(
   planPath: string,
-  readGit: (cwd: string, args: string[]) => string = (cwd, args) =>
-    execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", maxBuffer: 1 << 27 }),
+  readGit?: (cwd: string, args: string[]) => string,
 ): { kind: "ready"; snapshot: CostOfDelaySnapshot } | { kind: "refused"; reasons: readonly string[] } {
   try {
-    const root = readGit(dirname(planPath), ["rev-parse", "--show-toplevel"]).trim();
-    if (readGit(root, ["rev-parse", "--is-shallow-repository"]).trim() !== "false") return { kind: "refused", reasons: ["incomplete-filing-history"] };
-    const planDir = relative(root, dirname(planPath)).split(sep).join("/") || ".";
-    const planTreeSha = readGit(root, ["rev-parse", `HEAD:${planDir}`]).trim();
+    const read = readGit ?? ((cwd: string, args: string[]) =>
+      execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", maxBuffer: 1 << 27 }));
+    // macOS exposes /var through /private/var; canonicalize only real filesystem reads so the
+    // injected reader seam remains usable with virtual fixture paths.
+    const canonicalPlanPath = readGit ? planPath : realpathSync(planPath);
+    const rootResult = read(dirname(canonicalPlanPath), ["rev-parse", "--show-toplevel"]).trim();
+    const root = readGit ? rootResult : realpathSync(rootResult);
+    if (read(root, ["rev-parse", "--is-shallow-repository"]).trim() !== "false") return { kind: "refused", reasons: ["incomplete-filing-history"] };
+    const planDir = relative(root, dirname(canonicalPlanPath)).split(sep).join("/") || ".";
+    const planTreeSha = read(root, ["rev-parse", `HEAD:${planDir}`]).trim();
     if (!/^[a-f0-9]{40,64}$/.test(planTreeSha)) return { kind: "refused", reasons: ["unreadable-plan-tree"] };
     const key = `${root}:${planPath}`;
     const cached = dispatchFilingCache.get(key);
     if (cached?.planTreeSha === planTreeSha) return { kind: "ready", snapshot: cached };
-    const history = readGit(root, ["log", "--first-parent", "--reverse", "--format=filing:%ct", "--no-renames", "-p", "--unified=0", "HEAD", "--", relative(root, planPath), `${planDir}/tasks.d`]);
+    const relativePlanPath = relative(root, canonicalPlanPath);
+    const history = read(root, ["log", "--first-parent", "--reverse", "--format=filing:%ct", "--no-renames", "-p", "--unified=0", "HEAD", "--", relativePlanPath, `${planDir}/tasks.d`]);
     const filedAtByTaskId = new Map<string, number>();
     let at = NaN;
     for (const line of history.split("\n")) {
