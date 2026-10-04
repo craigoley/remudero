@@ -4,7 +4,6 @@ import { systemClock, type Clock } from "./clock.js";
 import { codeqlSnapshot, reconcileCodeqlQualityProposals, type CodeqlFilingSnapshot } from "./codeql-quality-intake.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import type { GardenerDeps } from "./gardener.js";
-import type { GardenerOverseerPorts, productionGardenerOverseerPorts } from "./gardener-overseer.js";
 import { ghJson } from "./github-transport.js";
 import { loadProposalRegistry } from "./inbox.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
@@ -81,6 +80,7 @@ function outcomeOf(source: OpportunitySource, evidence: OpportunityEvidence, clo
   if (pr.repo !== candidate.repo || pr.taskId !== task.id || !pr.headSha || !pr.mergeSha || !Number.isFinite(Date.parse(pr.mergedAt))) return finish("unavailable", "credited PR source or head unavailable");
   result.pr = pr;
   if (!deployment) return finish("merged", "merged PR awaits deployment receipt; unmeasured");
+  // expiring-fixture: exempt -- injected clock checks future receipts; ageing cannot stale a deployment.
   const deployedAt = Date.parse(deployment.at);
   if (deployment.repo !== candidate.repo || ![pr.headSha, pr.mergeSha].includes(deployment.revision) || !deployment.receipt ||
     !Number.isFinite(deployedAt) || deployedAt < Date.parse(pr.mergedAt) || deployedAt > clock.now()) return finish("unavailable", "deployment revision or repository join unavailable");
@@ -117,7 +117,10 @@ export function reconcileOpportunityOutcomes(ports: OpportunityOutcomePorts): Op
 function readOutcomes(path: string): OpportunityOutcome[] {
   try {
     const rows: unknown = JSON.parse(readFileSync(path, "utf8"));
-    if (!Array.isArray(rows) || rows.some((row) => !row?.candidate?.repo || !row?.candidate?.key || !Array.isArray(row.sourceIds))) throw new Error(`malformed outcomes: ${path}`);
+    const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+    if (!Array.isArray(rows) || rows.some((row: unknown) => !isRecord(row) || !isRecord(row.candidate) ||
+      typeof row.candidate.repo !== "string" || row.candidate.repo.length === 0 ||
+      typeof row.candidate.key !== "string" || row.candidate.key.length === 0 || !Array.isArray(row.sourceIds))) throw new Error(`malformed outcomes: ${path}`);
     return rows;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
@@ -140,9 +143,9 @@ function matchingTasks(work: OpportunityWork, source: OpportunitySource) {
 }
 
 /** Re-read source and runtime receipts on the admitted intake cadence; never change policy. */
-export function productionOpportunityOutcomePorts(garden: GardenerDeps, deps: Partial<
-  Pick<GardenerOverseerPorts, "readRows"> & Pick<Parameters<typeof productionGardenerOverseerPorts>[0], "fetch">
-> & {
+export function productionOpportunityOutcomePorts(garden: GardenerDeps, deps: {
+  readRows?: () => Record<string, unknown>[];
+  fetch?: (args: string[]) => unknown;
   intake?: OpportunityIntakePorts;
 } = {}): OpportunityOutcomePorts {
   const intake = deps.intake ?? productionOpportunityIntakePorts(garden);
@@ -214,7 +217,8 @@ export function productionOpportunityOutcomePorts(garden: GardenerDeps, deps: Pa
       const filing = rows.find((r) => r.step === "ratify.approved" && r.task_id === source.proposalId);
       const result: OpportunityEvidence = { task: { id: task.id, repo: intake.repo, key: source.candidate.key, filedAt: typeof filing?.ts === "string" ? filing.ts : undefined } };
       const credit = loadCreditStore(join(garden.stateDir, "merge-credit.json"))[task.id];
-      const entry = [credit?.trailer, credit?.["head-branch"]].find((e) => e?.prState === "MERGED" && !credit?.invalidated?.[e.source]);
+      if (credit === undefined) return result;
+      const entry = [credit.trailer, credit["head-branch"]].find((e) => e?.prState === "MERGED" && credit.invalidated?.[e.source] === undefined);
       if (!entry) return result;
       const pr = fetch(["api", `repos/${intake.repo}/pulls/${entry.prNumber}`]) as { merged: boolean; html_url: string; merged_at: string; merge_commit_sha: string; head: { sha: string }; base: { repo: { full_name: string } } };
       if (!pr.merged) throw new Error("credited PR is not merged");

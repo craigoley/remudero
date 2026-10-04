@@ -124,6 +124,73 @@ test("outcome reconciliation distinguishes pending filed deployed and expired", 
   assert.equal(reconcileOpportunityOutcomes(ports(r))[0]!.state, "measured-hurt");
 });
 
+test("deployment receipts do not expire as the injected clock advances", () => {
+  const p = ports();
+  p.clock = fixedClock(clock.now() + 365 * 86400000);
+  assert.equal(reconcileOpportunityOutcomes(p)[0]!.state, "measured-helped");
+  p.clock = fixedClock(Date.parse(evidence().deployment!.at) - 1);
+  const future = reconcileOpportunityOutcomes(p)[0]!;
+  assert.equal(future.state, "unavailable");
+  assert.match(future.reason, /deployment/);
+});
+
+test("production rejects malformed persisted source identities", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-opportunity-malformed-"));
+  const work: OpportunityWork = { proposals: [], tasks: [], prs: [], mergedKeys: [], feedback: [] };
+  const intake = { repo, readWork: () => work } as OpportunityIntakePorts;
+  try {
+    for (const row of [null, {}, { candidate: null }, { candidate: {} },
+      { candidate: { repo, key: "" }, sourceIds: [] },
+      { candidate: { repo: "", key: source.candidate.key }, sourceIds: [] },
+      { candidate: { repo: 1, key: source.candidate.key }, sourceIds: [] },
+      { candidate: { repo, key: 1 }, sourceIds: [] },
+      { candidate: source.candidate, sourceIds: null }]) {
+      writeFileSync(join(root, "opportunity-outcomes.json"), JSON.stringify([row]));
+      assert.throws(() => reconcileOpportunityOutcomes(productionOpportunityOutcomePorts(
+        { stateDir: root, clock } as GardenerDeps, { intake, readRows: () => [] },
+      )), /malformed outcomes/);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("production distinguishes absent and invalidated merge credit from a valid alternate source", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-opportunity-credit-"));
+  const work: OpportunityWork = { proposals: [{ id: source.proposalId, summary: JSON.stringify(source.candidate), evidenceAnchors: [] }],
+    tasks: [{ id: "W1-T42", repo: "app", origin: source.candidate.key } as never], prs: [], mergedKeys: [], feedback: [] };
+  const intake = { repo, readWork: () => work } as OpportunityIntakePorts;
+  const reading = evidence();
+  const trailer = { source: "trailer", prUrl: reading.pr!.url, prNumber: 42, prState: "MERGED" };
+  const invalidated = { trailer: { prUrl: trailer.prUrl, prNumber: 42, reason: "durable-credit-plan-only" } };
+  let fetched = 0;
+  const fetch = (args: string[]): unknown => {
+    fetched++;
+    if (args[1]!.includes("/deployments?")) return [[]];
+    assert.match(args[1]!, /\/pulls\/43$/);
+    return { merged: true, html_url: `https://github.com/${repo}/pull/43`, merged_at: reading.pr!.mergedAt,
+      merge_commit_sha: "merge", head: { sha: "head" }, base: { repo: { full_name: repo } } };
+  };
+  const reconcile = () => reconcileOpportunityOutcomes(productionOpportunityOutcomePorts(
+    { stateDir: root, clock } as GardenerDeps, { intake, fetch, readRows: () => [] },
+  ))[0]!;
+  try {
+    assert.equal(reconcile().state, "filed");
+    for (const credit of [{}, { trailer: { ...trailer, prState: "OPEN" } }, { trailer, invalidated }]) {
+      writeFileSync(join(root, "merge-credit.json"), JSON.stringify({ "W1-T42": credit }));
+      const result = reconcile();
+      assert.equal(result.state, "filed");
+      assert.equal(result.pr, undefined);
+    }
+    assert.equal(fetched, 0, "missing or quarantined credit cannot trigger a PR fetch");
+    writeFileSync(join(root, "merge-credit.json"), JSON.stringify({ "W1-T42": { trailer, invalidated,
+      "head-branch": { source: "head-branch", prUrl: `https://github.com/${repo}/pull/43`, prNumber: 43, prState: "MERGED" },
+    } }));
+    const result = reconcile();
+    assert.equal(result.state, "merged");
+    assert.equal(result.pr?.url, `https://github.com/${repo}/pull/43`);
+    assert.equal(fetched, 2);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("the daemon reconciles settled outcomes on its existing intake cadence", async () => {
   let ticks = 0, saved = 0;
   const p = ports(); p.save = (outcomes) => { saved++; assert.equal(outcomes[0]!.state, "measured-helped"); };
