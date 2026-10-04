@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-02: gap review of W1-T5175 (#8686) against its first 50 serve.memory rows"
   plan_refs: [W1-T5175, W1-T4102]
   files: [src/lib/serve.ts, src/lib/serve-memory.ts, src/lib/incident-invariants.ts, test/serve-memory-names-where-rss-lives.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

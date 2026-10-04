@@ -14,6 +14,7 @@ import { gunzipSync as nodeGunzipSync } from "node:zlib";
 import { dirname } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook, type LedgerRotationMemo, type LedgerRotationMemoPass } from "./ledger-union.js";
+import { PLAN_ONLY_REVIEW_MARKER_STEP } from "./ledger-carry.js";
 import type { Plan, Task, TaskStatus } from "./plan.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
@@ -1181,7 +1182,7 @@ export function buildLedgerIndex(rows: ReadonlyArray<Record<string, unknown>>): 
       if (step === "pr.opened" && row.plan_only === true && typeof row.pr_url === "string") {
         planOnlyFilingPrUrls.add(row.pr_url);
       }
-      if (step === "review.posted" && row.plan_only === true &&
+      if ((step === "review.posted" || step === PLAN_ONLY_REVIEW_MARKER_STEP) && row.plan_only === true &&
           typeof row.pr_url === "string" && typeof row.head_sha === "string") {
         const heads = planOnlyReviewedHeads.get(row.pr_url) ?? new Set<string>();
         heads.add(row.head_sha);
@@ -2476,7 +2477,7 @@ function isPlanOnlyFilingPr(
   }
   return ledgerLines.some((l) =>
     l.pr_url === prUrl && l.plan_only === true &&
-    (l.step === "pr.opened" || (headSha !== undefined && l.step === "review.posted" && l.head_sha === headSha)));
+    (l.step === "pr.opened" || (headSha !== undefined && isPlanOnlyReviewEvidence(l) && l.head_sha === headSha)));
 }
 
 /** The review row only offers a safe durable-credit refusal after its head is checked against the merged PR. */
@@ -2486,7 +2487,12 @@ function hasPlanOnlyReviewForPr(
   index?: LedgerIndex,
 ): boolean {
   if (index !== undefined && index.rows === ledgerLines) return index.planOnlyReviewedHeads.has(prUrl);
-  return ledgerLines.some((l) => l.step === "review.posted" && l.plan_only === true && l.pr_url === prUrl && typeof l.head_sha === "string");
+  return ledgerLines.some((l) => isPlanOnlyReviewEvidence(l) && l.plan_only === true && l.pr_url === prUrl && typeof l.head_sha === "string");
+}
+
+/** A review row, or the compact marker rotation carries in its place once the PR's merge is recorded (ledger-carry.ts). */
+function isPlanOnlyReviewEvidence(l: Record<string, unknown>): boolean {
+  return l.step === "review.posted" || l.step === "review.plan_only_reviewed";
 }
 
 /** W1-T5353 — the override record as ONE derivation's per-PAIRING exclusion. The walk asks

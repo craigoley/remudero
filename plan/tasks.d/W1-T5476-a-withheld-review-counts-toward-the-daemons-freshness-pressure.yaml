@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: live ledger read at 15:29Z, the freshness scorer deferring while the reviewer withheld verdicts on #8880/#8882/#8883"
   plan_refs: [W1-T4945]
   files: [src/lib/deploy-judge.ts, src/lib/daemon.ts, test/a-withheld-review-counts-toward-the-daemons-freshness-pressure.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

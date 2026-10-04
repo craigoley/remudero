@@ -104,6 +104,24 @@ export interface TaskRiskRuling {
 export const TASK_TYPES = ["recon", "implement", "diagnose", "review", "manual"] as const;
 export type TaskType = (typeof TASK_TYPES)[number];
 
+export interface SymptomQuery {
+  pattern: string;
+  direction: "increase" | "decrease";
+}
+
+function validateSymptomQuery(value: unknown, id: string): SymptomQuery | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== "object") throw new PlanError(`task ${id}: invalid symptom_query`);
+  const { pattern, direction } = value as Record<string, unknown>;
+  if (typeof pattern !== "string" || !pattern.trim() || pattern.length > 200 ||
+    /\([^()]*[+*][^()]*\)[+*]/.test(pattern) || (direction !== "increase" && direction !== "decrease")) {
+    throw new PlanError(`task ${id}: symptom_query requires a ledger-grep pattern and increase|decrease direction`);
+  }
+  try { new RegExp(pattern); }
+  catch (error) { throw new PlanError(`task ${id}: invalid symptom_query pattern: ${String(error)}`); }
+  return { pattern, direction };
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -111,6 +129,7 @@ export interface Task {
   depends_on: string[];
   plan_refs?: string[];
   goal?: string;
+  symptom_query?: SymptomQuery;
   /** The PR corpus a machine-filed CI-learning shard was mined from. Written by the ci-learning
    *  rung on all 42 such shards and, until this field existed, DROPPED by the loader — so a title
    *  claiming "36 PULL REQUESTS" reached consumers with none attached. */
@@ -551,6 +570,7 @@ export function parseTasksFromYaml(text: string, sourceLabel: string, onDuplicat
       repo: req(e.repo as string, "repo", id),
       depends_on: Array.isArray(e.depends_on) ? (e.depends_on as string[]) : [],
       goal: typeof e.goal === "string" ? e.goal : undefined,
+      symptom_query: validateSymptomQuery(e.symptom_query, id),
       plan_refs: Array.isArray(e.plan_refs) ? (e.plan_refs as string[]) : undefined,
       ci_learning_prs: Array.isArray(e.ci_learning_prs)
         ? (e.ci_learning_prs as unknown[]).filter((n): n is number => typeof n === "number")

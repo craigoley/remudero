@@ -1,0 +1,134 @@
+- id: W1-T5537
+  title: "EVERY OPEN PR NAMES ONE BLOCKER AND ITS AUTOMATED OWNER — the sweep already disposes every open PR every pass, but into 12 dispositions that say what to DO, not what the PR is WAITING ON: `blocked-ambiguous` alone covered strike exhaustion, plan-only reds, metadata-only body reds and conflicts without evidence (195 needs-human issues from 2026-09-26 to 2026-10-03). Nothing records how long a PR has waited on what, or whether anything automated owns that wait"
+  repo: remudero
+  depends_on: [W1-T5536, W1-T5492]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 25.00
+  risk: high
+  band_meaning: span
+  origin: "operator session 2026-10-03: board peaked at 30 open PRs against a ~4 median; operator asked for one named blocker per open PR with an automated owner (the board doctor)"
+  plan_refs: [W1-T5490, W1-T5476, W1-T5492, W1-T4415]
+  files: [src/lib/pr-blocker.ts, src/lib/sweep.ts, test/every-open-pr-names-one-blocker-and-its-owner.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    THE CLOSED SET EXISTS AND IS THE WRONG AXIS.
+    - `Disposition` (src/lib/sweep.ts:3597) has 12 members: mergeable, blocked-fixable, refused-escalate,
+      stale, blocked-ambiguous, dep-review, post-review, conflicted, wait, held-draft, review-reused,
+      discriminate-only.
+    - `deriveDisposition` (sweep.ts:7659) is total over the 38-row `DISPOSITION_RULES` table (sweep.ts:6914).
+      runSweep writes exactly one `sweep.disposed` row per open PR per pass (sweep.ts:10775-10778, the header
+      invariant at :3590-3592).
+    - But a disposition names the sweep's ACTION. Measured over the 195 "needs a clarification" issues opened
+      from 2026-09-26, `blocked-ambiguous` carried at least six different waits:
+      - 76 metadata-only body reds (acceptance-author-gate / proof-discrimination);
+      - 71 plan-only PRs red on a gate the code-fix lane cannot stage;
+      - 16 strike exhaustions;
+      - 10 conflicts with no captured file evidence;
+      - 8 green-and-passed verdict mismatches;
+      - 4 contradictory reviews.
+    - `wait` likewise hides awaiting-CI, the W1-T5490 base-red stand-down, and armed-but-idle.
+
+    THE EXISTING "WHY IS IT STUCK" VIEWS RE-BUCKET THE SAME DISPOSITIONS AND RECORD NO AGE.
+    - board.ts `queueClass` (:233) has five classes over `ACTIONABLE_DISPOSITIONS` (:230).
+    - status-board.ts `BlockerRow` (:275) has four kinds, re-reading `sweep.disposed` through
+      `BLOCKED_PR_DISPOSITIONS` (:1540) and `rawBlockedPrCandidates` (:1545).
+    - No `board.blocker` row and no blocker age exist anywhere in src/.
+    - This task adds the blocker AT THE SOURCE, where every reader can reuse it. It does not add a third
+      classifier beside them.
+
+    PR-HOURS PER BLOCKER, 2026-09-26..2026-10-03, as far as the week-rows extract allows. The extract holds
+    pr.opened, review.*, fix.*, automerge.armed, verdict.merged, main.health.observed and the exhausted
+    sweep.disposed rows only. There are no check-run rows, so awaiting-ci and own-red are separated by the
+    first `fix.dispatch`. The 105 fleet PRs opened and merged inside the window:
+
+    | blocker (estimated) | PR-hours | today's owner |
+    |---|---|---|
+    | awaiting-ci / awaiting-review, no fix ever needed | 43.6 | CI + review lane |
+    | awaiting-ci before the first fix | 20.3 | CI |
+    | own-red / base-red fix loop (first fix to first verdict) | 65.3 | fix lane (23.7 PR-h overlapped main red) |
+    | strikes-exhausted to merge | 34.2 (55.5 across all 16 exhausted PRs) | NONE (escalation only) |
+    | armed to merged | 26.9 (16.2 in the 17 PRs armed more than 30 min) | NONE until W1-T5492 |
+    | stale-reviewer-withheld (first stale refusal to next post) | 17.4 over 45 PRs | W1-T5476 (queued) |
+    | review-failed to pass | 4.9 | fix lane |
+
+    Escalated issue-hours (open to close), owner NONE: metadata-only body red 121.1 h over 76 issues;
+    plan-only red 100.2 h over 71.
+
+    Main health over the window: 108.3 h `undetermined`, 30.9 h red, 13.5 h green. So base-red can only be
+    named reliably once W1-T5490 lands.
+
+    SCOPE AND DEVIATION.
+    - The operator asked for a separate `board.blocker` row per PR per pass. `sweep.disposed` already IS one
+      row per PR per pass, and the live ledger already rotates about four times an hour (W1-T4393).
+    - So the blocker rides that row as fields (`blocker`, `blocker_owner`, `blocker_since`,
+      `blocker_age_ms`) and adds no second per-PR-per-pass row. Same information, one row. This is flagged
+      as a deliberate substitution.
+    - depends_on W1-T5536 and W1-T5492 so the strikes-exhausted and armed-idle rows can name the owners
+      those tasks create, rather than shipping NONE and needing a second edit.
+
+    Rule 19: the pure classifier and owner table (src/lib/pr-blocker.ts, new) and the one write site
+    (sweep.ts) are two production files for one concern. So the band is high, with band_meaning: span.
+  design: |
+    1. CLOSED SET (src/lib/pr-blocker.ts). `PR_BLOCKERS` holds 14 members: awaiting-ci, own-red, base-red,
+       awaiting-review, review-failed, awaiting-arm, armed-idle, conflict, strikes-exhausted, escalated,
+       stale-reviewer-withheld, plan-proof-unrunnable, held-draft, other. `PR_BLOCKER_OWNERS` maps each to
+       the lane that acts on it, or `NONE`:
+       - awaiting-ci → `ci`
+       - own-red → `fix-lane`
+       - base-red → `main-health` (W1-T5490 stand-down)
+       - awaiting-review → `review-lane`
+       - review-failed → `fix-lane`
+       - awaiting-arm → `arm`
+       - armed-idle → `armed-idle-merge` (W1-T5492)
+       - conflict → `conflict-rebase`
+       - strikes-exhausted → `strike-ladder` (W1-T5536)
+       - stale-reviewer-withheld → `deploy-freshness` (W1-T5476 while it is queued; NONE if it is retired)
+       - plan-proof-unrunnable → `plan-repair` when `repairPlanPr`/`repairMetadata` can act, else NONE
+       - escalated → NONE
+       - held-draft → `ready-draft`
+       - other → NONE
+
+       The owner is a claim to be MEASURED, not trusted. The flow gardener (W1-T5538) judges whether
+       each owner actually clears its blocker.
+    2. TOTAL BY CONSTRUCTION.
+       - Every `DISPOSITION_RULES` row declares a `blocker`, and `DispositionResult` gains `blocker`.
+       - A census test walks the table and refuses a row without one, or with a name outside `PR_BLOCKERS`.
+       - The unreachable fallback in `deriveDisposition` returns `other`.
+    3. REFINE AT THE ONE WRITE SITE (sweep.ts:10775). `finalBlocker(ruleBlocker, facts)` folds in what only
+       runSweep knows:
+       - a W1-T5490 base-red stand-down this pass, or `classifyRedCause` (sweep.ts:5963) = `base-caused`
+         → base-red;
+       - a `reviewerCodeStaleThisPass` withhold → stale-reviewer-withheld;
+       - a `mergeable` PR with `autoMergeArmed` → armed-idle, else awaiting-arm;
+       - the late blocked-ambiguous overrides (`planCappedRepair`, plan-only and metadata-only reds) →
+         plan-proof-unrunnable;
+       - the strike-exhaustion predicate → strikes-exhausted.
+
+       It is a pure function over named inputs, never over reason text.
+    4. AGE. In runSweep, before the walk, build `priorBlockerByPr` from `ledgerLines`: each PR's latest
+       `sweep.disposed` row carrying `blocker`.
+       - Same blocker → `blocker_since` carries over.
+       - Changed blocker, or no prior → `blocker_since` = this pass's time, with `blocker_since_source:
+         "first-seen"` when no prior row was readable.
+       - Write `blocker`, `blocker_owner`, `blocker_since` and `blocker_age_ms` on the `sweep.disposed`
+         row, including on dry runs' logged view.
+    5. No behaviour change. No disposition, action, dedup key or reason string changes; only fields are added.
+  acceptance:
+    - claim: "every DISPOSITION_RULES row declares a blocker from the closed set, and a row without one fails the census"
+      proof: "grep: test(\"W1-T5537: every disposition row declares a blocker from the closed set in test/every-open-pr-names-one-blocker-and-its-owner.test.ts"
+    - claim: "a blocked-ambiguous exhaustion, a plan-only red and a no-evidence conflict are three different blockers with their own owners, and an armed green PR is armed-idle"
+      proof: "grep: test(\"W1-T5537: one disposition splits into the blocker each PR actually waits on in test/every-open-pr-names-one-blocker-and-its-owner.test.ts"
+    - claim: "each sweep.disposed row carries blocker, owner and since, and since carries over while the blocker is unchanged and resets when it changes"
+      proof: "grep: test(\"W1-T5537: a blocker keeps its since across passes and resets on change in test/every-open-pr-names-one-blocker-and-its-owner.test.ts"
+    - claim: "the sweep refines each PR's blocker at its one disposition write site"
+      proof: "grep: finalBlocker( in src/lib/sweep.ts"
+  falsifier: |
+    Three reverts, each turning a named case red:
+    - Delete `blocker` from one DISPOSITION_RULES row: the census names the row.
+    - Map blocked-ambiguous straight to `escalated`: the exhaustion and plan-only fixtures read the same
+      blocker.
+    - Always stamp `blocker_since` with the pass time: the second pass of an unchanged PR reads age 0.

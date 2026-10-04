@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Exit 0 only when the target repo still has zero open PRs and main has not moved
-# since the daemon's last positively empty admission. Any uncertainty wakes Node.
+# Exit 0 only when the target repo still has zero open PRs and neither target main
+# nor the daemon engine has moved since empty admission. Any uncertainty wakes Node.
 set -euo pipefail
 
 repo="${1:?owner/repo required}"
@@ -11,6 +11,9 @@ since="${5:?entry timestamp required}"
 marker="${6:?entry marker required}"
 engine="${7:?engine checkout required}"
 mode="${8:-full}"
+engine_base_sha="${9:-}"
+# Runtime helpers still use arg 7; the host supervisor advances this separate checkout.
+engine_observer="${10-$engine}"
 [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || exit 2
 [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]] || exit 2
 [[ "$since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.000Z$ ]] || exit 2
@@ -21,6 +24,32 @@ mode="${8:-full}"
 run_bounded() {
   if command -v timeout >/dev/null 2>&1; then timeout 45 "$@"; else "$@"; fi
 }
+
+engine_wake() {
+  local reason="$1" observed="${2:-unknown}" baseline="$engine_base_sha"
+  [[ "$baseline" =~ ^[0-9a-f]{40}$ ]] || baseline=unknown
+  printf '{"ts":"%s","run_id":"IDLE-ENGINE","task_id":"DAEMON","step":"daemon.idle_starved.engine_wake","lane":"daemon","reason":"%s","engine_base_sha":"%s","engine_head_sha":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" "$reason" "$baseline" "$observed" >> "$state/ledger.ndjson" || exit 2
+  printf 'idle_starved: %s; waking the full daemon\n' "$reason" >&2
+}
+
+# The recycler waits for fresh running code. Quiet mode must therefore observe its
+# installed engine, even when the runtime and target checkouts are unchanged.
+# Legacy callers without a
+# captured launch revision wake once to regain the ordinary freshness path.
+if ! [[ "$engine_base_sha" =~ ^[0-9a-f]{40}$ ]]; then
+  engine_wake engine_baseline_unavailable
+  exit 2
+fi
+engine_head=""
+if [ -z "$engine_observer" ] || ! engine_head="$(run_bounded git -C "$engine_observer" rev-parse --verify HEAD 2>/dev/null)" || ! [[ "$engine_head" =~ ^[0-9a-f]{40}$ ]]; then
+  engine_wake engine_head_unavailable
+  exit 2
+fi
+if [ "$engine_head" != "$engine_base_sha" ]; then
+  engine_wake engine_revision_changed "$engine_head"
+  exit 10
+fi
 
 # Console controls and inbox replies are work even when the GitHub board is still empty.
 for pattern in "$state"/KICK_REQUESTED-* "$state"/PR_ACTION_REQUESTED-*; do

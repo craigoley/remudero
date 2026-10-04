@@ -14,7 +14,7 @@
   files:
     - src/lib/onboarding-golive.ts
     - src/lib/serve.ts
-  status: queued
+  status: merged
   attempts: 0
   note: "OPERATOR RULING 2026-10-01: automate. Building this task needs no operator; the operator confirmation is the feature's own runtime step (the go-live endpoint asks for it). The lifetime-pressure judge's repeated needs_operator verdicts confused the two."
   rationale: |

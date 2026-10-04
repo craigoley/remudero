@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: hit by three builders on 2026-10-03; reproduced at origin/main 491cd7d0"
   plan_refs: [W1-T4915, W1-T4084]
   files: [scripts/diff-coverage-local.mjs, test/diff-coverage-local-honours-the-lcov-path-it-is-given.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

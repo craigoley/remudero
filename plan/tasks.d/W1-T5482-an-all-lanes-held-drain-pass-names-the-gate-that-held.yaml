@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: found building W1-T5404 (PR #8894)"
   plan_refs: [W1-T5404, W1-T342, W1-T1038]
   files: [src/lib/drain.ts, test/an-all-lanes-held-drain-pass-names-the-gate-that-held.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |
