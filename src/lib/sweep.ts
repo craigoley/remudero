@@ -10863,6 +10863,8 @@ export async function runSweep(
    *  that has already reached {@link fixCeilingInForce}. Only a successful claim releases. */
   function claimFixDispatch(
     pr: OpenPrView,
+    /** W1-T5544: the dispatch is the plan-shard flag (no worker round), so two refused WORKER rounds do not bar it. */
+    planFlagRung = false,
   ): { ok: true; release: () => void; run: <T>(fn: () => T | Promise<T>) => Promise<T> } | { ok: false; reason: string } {
     const fixKey = `${pr.taskId ?? ""}@${pr.headSha}`;
     if (inFlightFixKeys.has(fixKey)) {
@@ -10878,7 +10880,7 @@ export async function runSweep(
     const freshLines = readLedger(deps.ledgerPath);
     const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
     const freshTally = fixRoundTally(freshLines, pr.taskId, pr.headSha);
-    if (freshTally.strikes >= ceiling || freshTally.repeatedRefusal !== undefined) {
+    if (freshTally.strikes >= ceiling || (freshTally.repeatedRefusal !== undefined && !planFlagRung)) {
       inFlightFixKeys.delete(fixKey);
       return {
         ok: false,
@@ -11230,6 +11232,21 @@ export async function runSweep(
             `(${planRepairStrikes}/${MAX_PLAN_REPAIR_STRIKES})`
           : "capped review has only non-discriminating proofs — dispatching the existing bounded fix rung to repair the PR body";
       }
+    }
+    // W1-T5544 — LADDER RUNG TWO IS NOT STRIKE EXHAUSTION. Two identical refused proof-repair rounds at one head read
+    // as `repeatedFixRefusal`, which `isFixStrikeExhausted` turns into the strike ladder's blocked-ambiguous. For a
+    // fleet stale-proof red that still owes W1-T4943's plan-shard flag, that skips a rung: route it back to
+    // blocked-fixable, where the metadata arm hands it to the flag (and, once the flag is spent, to the exhausted state).
+    if (
+      disposition === "blocked-ambiguous" && pr.repeatedFixRefusal !== undefined && pr.priorStrikes < policy.strikeCap &&
+      typeof deps.dispatchPlanOnlyRepair === "function" && metadataOnlyRed(pr) !== undefined &&
+      proofRepairRouteEvidence(pr) !== undefined && priorPlanRepairStrikesFromLedger(pr, ledgerLines) < MAX_PLAN_REPAIR_STRIKES &&
+      selectDispositionRule(dispositionView, policy, now).rule?.when === isFixStrikeExhausted
+    ) {
+      disposition = "blocked-fixable";
+      reason =
+        `proof-repair rounds refused twice at this head (${pr.repeatedFixRefusal}) — no strike spent — ` +
+        `the plan-shard flag is the next rung`;
     }
     byDisposition[disposition]++;
 
@@ -12073,7 +12090,7 @@ export async function runSweep(
               // W1-T2520 — THE FIX-DISPATCH CLAIM. See {@link claimFixDispatch} for why a claim
               // alone, without the fresh re-read it also performs, would not have stopped the
               // observed race. A refusal spends nothing and stands down like any declined lane.
-              const fixClaim = claimFixDispatch(pr);
+              const fixClaim = claimFixDispatch(pr, proofRepairRoute !== undefined && !proofRepairActive);
               if (!fixClaim.ok) {
                 acted = false;
                 standDownReason = fixClaim.reason;
