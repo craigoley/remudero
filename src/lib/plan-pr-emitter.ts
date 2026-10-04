@@ -568,13 +568,12 @@ function firstLineOf(output: string, status: number | null): string {
   return lines.find((l) => diagnosticLine.test(l)) ?? lines[0] ?? `exited ${status}`;
 }
 
-/** The acceptance proofs a shard's text declares, or undefined when it does not parse. */
 function parsedShardProofs(text: string, opts?: { uniqueKeys: false }): string[] | undefined {
   let tasks: unknown;
   try {
     tasks = parseYaml(text, opts);
   } catch {
-    // Unparseable: undefined, not [] — a base falls back to its bytes; a head is the plan lint's to refuse, by name.
+    // An unparseable head shard is the plan lint's to refuse, by name; an unparseable base falls back to its bytes.
     return undefined;
   }
   const proofs: string[] = [];
@@ -587,9 +586,7 @@ function parsedShardProofs(text: string, opts?: { uniqueKeys: false }): string[]
   return proofs;
 }
 
-/** A head proof is pre-existing when origin/main's shard declares it. The base is read with duplicate keys allowed —
- *  a W1-T5519 repair's base is by definition the duplicate-key shard (W1-T5619) — and a base that still does not
- *  parse credits a proof whose exact text its bytes carry. An unparseable HEAD shard is the plan lint's to refuse. */
+/** A W1-T5519 repair's base IS a duplicate-key shard, so the base is read with duplicate keys allowed (W1-T5619). */
 function introducedProofs(headText: string, baseText: string | undefined): string[] {
   const head = parsedShardProofs(headText) ?? [];
   if (baseText === undefined) return head;
