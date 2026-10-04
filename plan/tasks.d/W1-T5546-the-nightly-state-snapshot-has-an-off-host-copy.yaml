@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: ledger-backup research"
   plan_refs: [W1-T5545, W1-T3677, W1-T234]
   files: [deploy/host-update.sh, test/the-nightly-state-snapshot-has-an-off-host-copy.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

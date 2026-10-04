@@ -124,7 +124,7 @@ function fixRungBaseOpts(worktreePath: string) {
   };
 }
 
-function initFixRungRepo(): { root: string; repoDir: string; worktreePath: string; branch: string } {
+async function initFixRungRepo(): Promise<{ root: string; repoDir: string; worktreePath: string; branch: string }> {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t2652-birth-`));
   const seed = join(root, "seed");
   const origin = join(root, "origin.git");
@@ -143,7 +143,7 @@ function initFixRungRepo(): { root: string; repoDir: string; worktreePath: strin
   execFileSync("git", ["-C", origin, "symbolic-ref", "HEAD", "refs/heads/main"], { env: GIT_ENV });
   execFileSync("git", ["clone", "--quiet", origin, repoDir], { env: GIT_ENV });
 
-  createFixRungWorktree(repoDir, worktreePath, branch);
+  await createFixRungWorktree(repoDir, worktreePath, branch);
   return { root, repoDir, worktreePath, branch };
 }
 
@@ -203,7 +203,7 @@ test("foreignTreeStandDownReason: absent birth/current snapshots and later round
 });
 
 test("runFixRung: round-1 drift from the real birth snapshot escalates without strike, spawn, push, commit, or mutation", async () => {
-  const { root, worktreePath, branch } = initFixRungRepo();
+  const { root, worktreePath, branch } = await initFixRungRepo();
   try {
     const birth = captureWorktreeSnapshotViaGit(worktreePath);
     assert.ok(worktreeSnapshotIsClean(birth), "newly materialized fix worktree must capture clean");

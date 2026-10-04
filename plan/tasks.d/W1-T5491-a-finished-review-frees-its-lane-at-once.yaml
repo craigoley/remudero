@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03 19:00Z: 28 open PRs; ledger read of review.pending_posted / review.posted timing"
   plan_refs: [W1-T2379, W1-T4732, W1-T2853]
   files: [src/lib/sweep.ts, src/lib/daemon.ts, test/a-finished-review-frees-its-lane-at-once.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

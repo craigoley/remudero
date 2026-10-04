@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: recycle-container tests fail on the Azure host with FAILED RUNTIME CONTRACT ... missing"
   plan_refs: [W1-T3087, W1-T5513, W1-T5550, W1-T4805]
   files: [test/setup/no-live-remote.ts, test/a-test-process-never-reads-the-hosts-scratch-switch.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

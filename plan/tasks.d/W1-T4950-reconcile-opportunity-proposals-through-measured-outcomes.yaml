@@ -12,7 +12,7 @@
   note: "reservation hand-off: plan-opportunity-outcomes-1790799000001 -> plan-opportunity-intake-1790799000000"
   plan_refs: [W1-T4110, W1-T4802, W1-T4949]
   files: [src/lib/opportunity-outcomes.ts, src/lib/codeql-quality-intake.ts, src/lib/gardener-overseer.ts, src/lib/daemon.ts, test/an-opportunity-is-not-a-win-until-measured.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     A proposal accepted, a task filed, and a PR merged are different events from deployment

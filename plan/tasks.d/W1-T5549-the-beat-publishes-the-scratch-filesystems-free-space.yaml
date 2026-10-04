@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: /mnt/scratch research (W1-T2767's remaining blind spot)"
   plan_refs: [W1-T2767, W1-T5548, W1-T5513]
   files: [scripts/fleet-heartbeat.sh, test/the-beat-publishes-the-scratch-filesystems-free-space.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: week ledger read 2026-09-26..10-03 (226 fix.dispatch, 103 fix.commit_refused, 5815 main.health.observed); complements W1-T5490"
   plan_refs: [W1-T5490, W1-T4351, W1-T2671, W1-T2789, W1-T527]
   files: [src/lib/base-reproduction.ts, src/lib/sweep.ts, src/run-task.ts, test/a-fix-red-that-reproduces-on-main-spends-no-strike.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

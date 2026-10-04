@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: #8877 and #8922, each a hand repair of the same merge race"
   plan_refs: [W1-T5472, W1-T5457, W1-T4409, W1-T4421]
   files: [src/lib/plan-shard-repair.ts, src/run-task.ts, test/a-duplicate-key-shard-quarantine-opens-its-own-repair-pr.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

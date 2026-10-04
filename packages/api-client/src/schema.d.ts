@@ -2905,6 +2905,23 @@ export interface components {
       reason?: string;
       lane?: "ready" | "drafting" | "notReady" | "declined";
       decision?: "file" | "merge";
+      /** A not-ready item's classified state (W1-T5340). */
+      state?: "not_ready" | "deferred_with_trigger";
+      /** The unfired trigger holding a `deferred_with_trigger` proposal (src/lib/inbox.ts's `ProposalTrigger`). */
+      trigger?: {
+        description: string;
+        fired: boolean;
+      };
+      /** How the operator resolves a not-ready or deferred proposal (W1-T5340). */
+      resolution?: {
+        method: "POST";
+        path: "/v1/inbox/reframe";
+        fields: {
+          proposalId: string;
+        };
+      };
+      /** A `needsYou` item's shared ASK/RECORD classification (src/lib/ask-classification.ts, W1-T5340). */
+      classification?: "ASK" | "RECORD";
     };
     /** Where one page of a paged view sits (docs/views.md, design D9). `next` is the next page's `cursor`, absent on the last; every page's body stays under 64 KiB. */
     ViewPage: {
@@ -2959,6 +2976,8 @@ export interface components {
       /** The union of the inputs' sources, by name. A missing input adds an `unavailable` `read-model:<now|inbox>@<instance>` source carrying the reason. */
       sources: (ViewSource)[];
       data: {
+        /** W1-T5340: every source's human gates, classified ASK/RECORD by the shared classifier, with each unavailable or partial source named rather than counted as zero. */
+        humanGates?: HumanGateProjection;
         /** Every present instance's open decisions, newest `askedAt` first (undated last). */
         decisions: (NowDecision)[];
         /** The `inbox` view's `section=needsYou` first page; absent with `reasons.inbox`. */
@@ -3406,12 +3425,26 @@ export interface components {
       /** When the drafting worker was spawned; an empty string when unrecorded. */
       spawnedAt: string;
     };
-    /** W1-T2604: one not-ready proposal with the exact predicate failures that hold it (src/lib/panel-graph.ts's `InboxNotReadyItem`). Carries no affordance. */
+    /** W1-T2604: one not-ready proposal with the exact predicate failures that hold it (src/lib/panel-graph.ts's `InboxNotReadyItem`). W1-T5340 adds its classified `state`, a deferred item's `trigger`, and the reframe `resolution`. */
     InboxNotReadyItem: {
       proposalId: string;
       summary: string;
       plain: PlainInboxMessage;
       reasons: (InboxPredicateFailure)[];
+      state?: "not_ready" | "deferred_with_trigger";
+      /** The unfired trigger holding a `deferred_with_trigger` proposal (src/lib/inbox.ts's `ProposalTrigger`). */
+      trigger?: {
+        description: string;
+        fired: boolean;
+      };
+      /** How the operator resolves a not-ready or deferred proposal (W1-T5340). */
+      resolution?: {
+        method: "POST";
+        path: "/v1/inbox/reframe";
+        fields: {
+          proposalId: string;
+        };
+      };
     };
     /** W1-T3408: one DECLINED proposal (src/lib/panel-graph.ts's `InboxDeclinedItem`), so POST /v1/inbox/restore's argument is discoverable. Nothing here is actionable except restore. */
     InboxDeclinedItem: {

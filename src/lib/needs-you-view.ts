@@ -8,6 +8,9 @@
  * zero: the instance or inbox carries `reason`, and an `unavailable` source names it.
  */
 import { systemClock, type Clock } from "./clock.js";
+import { projectClassifiedHumanGates, projectProposalHumanGates } from "./ask-classification.js";
+import type { HumanGateObservation, HumanGateProjection, HumanGateSource } from "./human-gate.js";
+import type { InboxClassification, InboxState } from "./inbox.js";
 import { INBOX_VIEW_NAME, INBOX_VIEW_VERSION, type InboxViewData } from "./inbox-view.js";
 import type { NowDecision } from "./now-decisions.js";
 import { NOW_VIEW_NAME, NOW_VIEW_VERSION, type NowAction, type NowViewData } from "./now-view.js";
@@ -29,6 +32,7 @@ export interface NeedsYouInstance {
 }
 
 export interface NeedsYouData {
+  humanGates: HumanGateProjection;
   /** Every present instance's open decisions, newest `askedAt` first. */
   decisions: NowDecision[];
   /** The `inbox` view's `section=needsYou` first page. */
@@ -47,6 +51,25 @@ function newestFirst(a: NowDecision, b: NowDecision): number {
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
+function decisionObservation(decision: NowDecision): HumanGateObservation {
+  return {
+    kind: decision.kind === "grill" ? "feedback_grill" : decision.kind,
+    subject: decision.kind === "task_question" ? decision.id : decision.taskId ?? decision.answer.fields.replyTo ?? decision.id,
+    ownerSurface: "inbox", openedAt: decision.askedAt ?? null, url: decision.answer.fields.issueUrl ?? null,
+    reason: decision.prompt, resolutionVerb: decision.kind === "manual_approval" ? "approve" : decision.kind === "escalation" ? "mark_handled" : "answer",
+  };
+}
+
+function projectionSources(projection: HumanGateProjection): HumanGateSource[] {
+  return projection.sources.map((source) => ({
+    ...source, instance: source.instance ?? "core",
+    gates: projection.gates.flatMap((gate) => {
+      const prefix = `${gate.kind}:${encodeURIComponent(source.instance ?? "core")}:`;
+      return gate.key.startsWith(prefix) ? [{ ...gate, subject: decodeURIComponent(gate.key.slice(prefix.length)) }] : [];
+    }),
+  }));
+}
+
 /** The composite's data and sources from the bodies held now; `known` are the instances the worker reported. */
 export function composeNeedsYou(bodies: ReadonlyMap<string, ReadModelBodyEntry>, known: Iterable<string>): { data: NeedsYouData; sources: ViewSource[]; generation: number } {
   const nows = new Map<string, ReadModelBodyEntry>();
@@ -61,6 +84,7 @@ export function composeNeedsYou(bodies: ReadonlyMap<string, ReadModelBodyEntry>,
   const sources: ViewSource[] = [];
   const inputs: ReadModelBodyEntry[] = [];
   const decisions: NowDecision[] = [];
+  const gateSources: HumanGateSource[] = [];
   const reasons: NonNullable<NeedsYouData["reasons"]> = {};
   const instances = names.map((instance): NeedsYouInstance => {
     const entry = nows.get(instance);
@@ -68,19 +92,34 @@ export function composeNeedsYou(bodies: ReadonlyMap<string, ReadModelBodyEntry>,
       : entry.version !== NOW_VIEW_VERSION ? `its now body is version ${entry.version}; this view reads ${NOW_VIEW_VERSION}` : undefined;
     if (reason !== undefined) {
       sources.push(absentSource(NOW_VIEW_NAME, instance, reason));
+      gateSources.push({ name: "now", instance, state: "unavailable", reason, gates: [] });
       return { instance, reason };
     }
     inputs.push(entry!);
     const data = entry!.body.data as NowViewData;
-    decisions.push(...data.decisions);
+    const projection = data.humanGates ?? projectClassifiedHumanGates([{
+      name: "now-decisions", instance, state: "partial", reason: "only the decisions display page is available",
+      gates: data.decisions.map(decisionObservation),
+    }]);
+    gateSources.push(...projectionSources(projection));
+    const keys = new Set(projection.gates.map((gate) => gate.key));
+    const instanceDecisions = data.decisions.filter((decision) => {
+      const gate = decisionObservation(decision);
+      const key = `${gate.kind}:${encodeURIComponent(decision.instance)}:${encodeURIComponent(gate.subject)}`;
+      return keys.delete(key);
+    });
+    decisions.push(...instanceDecisions);
     return {
       instance,
-      counts: { decisions: data.decisions.length, decisionsMore: data.decisionsMore ?? 0, actions: data.actions.length },
+      counts: { decisions: instanceDecisions.length, decisionsMore: data.decisionsMore ?? 0, actions: data.actions.length },
       actions: data.actions,
       ...(data.decisionsReasons ? { decisionsReasons: data.decisionsReasons } : {}),
     };
   });
-  if (names.length === 0) reasons.instances = "the read model has reported no instance yet";
+  if (names.length === 0) {
+    reasons.instances = "the read model has reported no instance yet";
+    gateSources.push({ name: "instances", instance: "core", state: "unavailable", reason: reasons.instances, gates: [] });
+  }
   let page: NeedsYouData["inbox"];
   if (inbox === undefined) reasons.inbox = "no inbox needsYou page yet";
   else if (inbox.version !== INBOX_VIEW_VERSION) reasons.inbox = `the inbox body is version ${inbox.version}; this view reads ${INBOX_VIEW_VERSION}`;
@@ -88,8 +127,24 @@ export function composeNeedsYou(bodies: ReadonlyMap<string, ReadModelBodyEntry>,
     inputs.push(inbox);
     const { items, counts, page: at } = inbox.body.data as InboxViewData;
     page = { items, counts, page: at };
+    const proposalStates = items.map((item) => {
+      const classified = item as typeof item & { state?: InboxState; trigger?: InboxClassification["trigger"] };
+      return {
+        proposalId: item.proposalId,
+        trigger: classified.trigger,
+        state: classified.state ??
+          (({ notReady: "not_ready" }[item.lane ?? ""] ?? item.lane ?? "not_ready") as InboxState),
+      };
+    });
+    const projection = projectProposalHumanGates(proposalStates);
+    gateSources.push(...projectionSources(projection).map((source): HumanGateSource => ({
+      ...source, ...(at.total > items.length ? { state: "partial", reason: "only the Inbox display page is available" } : {}),
+    })));
   }
-  if (reasons.inbox !== undefined) sources.push(absentSource(INBOX_VIEW_NAME, "core", reasons.inbox));
+  if (reasons.inbox !== undefined) {
+    sources.push(absentSource(INBOX_VIEW_NAME, "core", reasons.inbox));
+    gateSources.push({ name: "proposals", instance: "core", state: "unavailable", reason: reasons.inbox, gates: [] });
+  }
   const named = new Set(sources.map((s) => s.name));
   for (const source of inputs.flatMap((input) => input.body.sources)) {
     if (named.has(source.name)) continue;
@@ -97,6 +152,10 @@ export function composeNeedsYou(bodies: ReadonlyMap<string, ReadModelBodyEntry>,
     sources.push(source);
   }
   const data: NeedsYouData = {
+    humanGates: projectClassifiedHumanGates([...gateSources, ...sources.filter((source) => source.state !== "fresh").map((source): HumanGateSource => ({
+      name: source.name, instance: source.instance ?? "core", state: source.state === "unavailable" ? "unavailable" : "partial",
+      reason: source.reason ?? `source is ${source.state}`, gates: [],
+    }))]),
     decisions: decisions.sort(newestFirst), ...(page ? { inbox: page } : {}), instances, ...(Object.keys(reasons).length > 0 ? { reasons } : {}),
   };
   return { data, sources: sources.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)), generation: Math.max(0, ...inputs.map((i) => i.generation)) };

@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-deploy-code-1790773661000 -> plan-deploy-code-1790773661000"
   plan_refs: [W1-T4844, W1-T3604]
   files: [deploy/install-host-units.sh, src/lib/install-root.ts, test/the-deploy-tick-runs-current-deploy-code-without-tripping-its-guard.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-29: the site's 19:06Z deploy ran deploy code from its daemon tree (last booted 13:09Z), so a

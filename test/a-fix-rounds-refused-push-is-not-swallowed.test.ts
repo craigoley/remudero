@@ -302,19 +302,12 @@ function censusLane(fx: Fixture): { dir: string; branch: string; head: string } 
   return { dir, branch, head };
 }
 
-test("W1-T4693: pushFixRound — a head the remote already holds is a silent no-op; a foreign head still raises; a refusal is named", () => {
+test("W1-T4693: pushFixRound — a head the remote already holds is a silent no-op; a foreign head still raises; a refusal is named", async () => {
   const fx = buildFixture();
   try {
     const lane = censusLane(fx);
-    withLiveWritesAllowed(() => {
-      const refusal = (() => {
-        try {
-          pushFixRound(lane.dir, lane.branch, lane.head);
-        } catch (e) {
-          return e;
-        }
-        return undefined;
-      })();
+    await withLiveWritesAllowed(async () => {
+      const refusal = await pushFixRound(lane.dir, lane.branch, lane.head).then(() => undefined, (e: unknown) => e);
       assert.ok(refusal instanceof FixRoundPushError, `a refused push throws FixRoundPushError; got ${String(refusal)}`);
       assert.equal(refusal.pushCause, "census-refused-push");
       assert.deepEqual(refusal.refusal?.censuses, ["clock-signature"]);
@@ -322,8 +315,8 @@ test("W1-T4693: pushFixRound — a head the remote already holds is a silent no-
       // The head reaches origin by a path this helper does not own (it landed before the hook was armed);
       // the hook still refuses the now up-to-date push, and that is the one failure that means nothing.
       execFileSync("git", ["-C", lane.dir, "-c", "core.hooksPath=/dev/null", "push", "-q", "origin", "HEAD"]);
-      assert.doesNotThrow(() => pushFixRound(lane.dir, lane.branch, lane.head));
-      assert.throws(() => pushFixRound(lane.dir, lane.branch, "0".repeat(40)), LanePushForeignHeadError);
+      await assert.doesNotReject(() => pushFixRound(lane.dir, lane.branch, lane.head));
+      await assert.rejects(() => pushFixRound(lane.dir, lane.branch, "0".repeat(40)), LanePushForeignHeadError);
     });
     assert.deepEqual(fx.hookLog().map((l) => l.split(" ")[0]), ["refused"], "the up-to-date push ran the hook with nothing to send");
   } finally {
@@ -400,9 +393,9 @@ test("W1-T4693: the sweep's fix dispatch hands runFixRung the same push, so its 
       captureWorktreeSnapshotImpl: () => ({ headSha: "birth123" }),
       buildFixRungDispatchArgsImpl: () => ({}),
       openTaskIdsFromPlanImpl: () => new Set(["W1-T2890"]),
-      runFixRungImpl: async (args: { deps: { push: (wt: string, branch: string, sha: string) => void } }) => {
+      runFixRungImpl: async (args: { deps: { push: (wt: string, branch: string, sha: string) => Promise<void> } }) => {
         try {
-          args.deps.push(lane.dir, lane.branch, lane.head);
+          await args.deps.push(lane.dir, lane.branch, lane.head);
         } catch (e) {
           surfaced = e;
         }

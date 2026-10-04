@@ -45,12 +45,13 @@ export const SELF_SYNC_GUARD_ENV = "RMD_SELF_SYNC_DONE";
  * hand-rolled double that could drift from real git's behavior.
  */
 export { fetchOriginRetryingRefLock, type GitRunner } from "./git-fetch-retry.js";
-import { fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, type AsyncGitRunner, type GitRunner } from "./git-fetch-retry.js";
+import { fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, killAfterGrace, type AsyncGitRunner, type GitRunner } from "./git-fetch-retry.js";
 
 function asyncGit(repoDir: string, options: { maxBuffer?: number } = {}): AsyncGitRunner {
-  return (args) =>
+  return (args, signal) =>
     new Promise((resolve, reject) => {
-      execFile("git", ["-C", repoDir, ...args], { encoding: "utf8", ...options }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+      const child = execFile("git", ["-C", repoDir, ...args], { encoding: "utf8", ...options, signal }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+      signal?.addEventListener("abort", () => killAfterGrace(child), { once: true });
     });
 }
 
@@ -69,6 +70,7 @@ export interface SelfSyncDeps {
   reexec?: () => void;
   ignoreReentrancyGuard?: boolean;
   gitAsync?: AsyncGitRunner;
+  fetchTimeoutMs?: number; // W1-T5282: the awaited fetch's bound; defaults to `GATEWAY_FETCH_TIMEOUT_MS`
   /**
    * W1-T486: one ledger-shaped line per distinct refusal reason per process, no-op by default.
    * Carries `reason` and the two shas already in `warn()`'s message, plus a dirty-path `count`
@@ -493,7 +495,7 @@ export async function checkServiceFreshnessAsync(
   if (!deps.ignoreReentrancyGuard && alreadySelfSynced(env)) return { status: "guarded" };
   if (isCiEnv(env)) return { status: "guarded" };
   try {
-    await fetchOriginRetryingRefLockAsync(deps.gitAsync ?? asyncGit(repoDir));
+    await fetchOriginRetryingRefLockAsync(deps.gitAsync ?? asyncGit(repoDir), undefined, undefined, deps.fetchTimeoutMs);
   } catch (err) {
     return { status: "degraded", reason: `git fetch origin failed in ${repoDir}: ${String(err)}` };
   }

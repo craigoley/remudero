@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: follow-up to W1-T5474 (#8933)"
   plan_refs: [W1-T5474, W1-T5526]
   files: [test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |
