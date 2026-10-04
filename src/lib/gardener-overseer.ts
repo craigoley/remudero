@@ -12,6 +12,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { GardenEffectsUnreadableError, GardenStateUnreadableError, gardenEffectsPath, gardenStatePath, readGardenEffects, readGardenState, writeGardenEffects, type GardenEffect, type PrState } from "./gardener.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import type { OpportunityMeasurement } from "./opportunity-outcomes.js";
 
 /**
  * lib/gardener-overseer.ts (W1-T4802) — the gardener that watches every gardener.
@@ -91,6 +92,7 @@ export interface GardenerPrInfo {
 }
 
 export interface EffectReading {
+  opportunityMeasurement?: OpportunityMeasurement;
   /** The targeted cost before the merge and after, in the same unit; lower is better. */
   before: number;
   after: number;
@@ -561,7 +563,7 @@ export function runGardenerOverseer(deps: GardenerOverseerPorts): OverseerPass {
     const verdict = reading.verdict ?? (reading.before - reading.after > reading.se ? "credit" : reading.after - reading.before > reading.se ? "debit" : undefined);
     if (!verdict) continue;
     issue({ id, gardener: pr.gardener, actionClass: pr.actionClass, verdict, kind: "effect" });
-    recordTelemetry(`${OVERSEER_NAME}.effect_verdict`, { gardener: pr.gardener, class: pr.actionClass, pr_url: pr.url, verdict, before: reading.before, after: reading.after, se: reading.se, ...(reading.reason ? { reason: reading.reason } : {}) });
+    recordTelemetry(`${OVERSEER_NAME}.effect_verdict`, { gardener: pr.gardener, class: pr.actionClass, pr_url: pr.url, verdict, before: reading.before, after: reading.after, se: reading.se, ...(reading.reason ? { reason: reading.reason } : {}), ...(reading.opportunityMeasurement ? { opportunity_measurement: reading.opportunityMeasurement } : {}) });
   }
 
   // CHURN — near-identical merges from one gardener and class, landing faster than its metric could move.
