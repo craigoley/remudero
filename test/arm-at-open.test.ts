@@ -1132,9 +1132,11 @@ function armOpenMergedFakeGh(branch: string, callLogPath: string, headSha: strin
       // W1-T1031's `pulls/{n}/files` risk-judge read matches the generic `pulls/*` case too
       // (no `/files` suffix in the endpoints below), so it is answered by the SAME arm — an
       // empty JSON object, which the risk judge's own file-list mapper reads as zero files.
+      // W1-T5615: one non-plan file, never `[]`: an empty list cannot prove the PR leaves plan/
+      // alone, and the arm holds such a PR unarmed (`plan-pr-held`) rather than arming it.
       "if [[ \"$1\" == 'api' ]]; then",
       "  case \"$2\" in",
-      `    */pulls/*/files*) echo '[]'; exit 0 ;;`,
+      `    */pulls/*/files*) echo '[{"filename":"src/arm-open-fixture.ts"}]'; exit 0 ;;`,
       `    */pulls/*) echo '{"number":702,"state":"closed","merged":${!closedUnmerged},"merged_at":${closedUnmerged ? "null" : '"2026-01-01T00:00:00Z"'},"body":"","head":{"sha":"${headSha}"}}'; exit 0 ;;`,
       "    */check-runs*)",
       "      echo 'ci-poll' >> \"$CALLLOG\"",

@@ -1097,6 +1097,7 @@ const OPERATOR_AGENT_DECISION_STEPS = new Set([
   "automerge.direct_merge_preflight_refused",
   "automerge.direct_merge_update_failed",
   "automerge.direct_merge_updated",
+  "automerge.plan_pr_held",
   "automerge.rate_limited_rest_merge",
   "automerge.rate_limited_rest_merge_conflict",
   "automerge.rate_limited_rest_merge_refused",

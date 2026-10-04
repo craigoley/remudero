@@ -2140,6 +2140,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           return fresh;
         }),
         armAuto: () => { throw new Error("Pull request is in clean status"); },
+        armStanding: true, // W1-T5615: already armed, so a plan PR is not held here.
         mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
         mergeDirect: (prUrl) => {
           assertLiveWriteAllowed("gh-pr-merge", `merging armed-idle ${prUrl}`);
@@ -9079,7 +9080,9 @@ export type ArmOutcomeName =
   // deliberate refusal, mirrored here for the same reason every other member is.
   | "draft-refused"
   // W1-T4581: declared stack parents are not all merged, or their state could not be read.
-  | "stack-parent-refused";
+  | "stack-parent-refused"
+  // W1-T5615: a plan PR is never armed; held unarmed until it can take the direct path.
+  | "plan-pr-held";
 
 /** W1-T1117: `armFailureAction`'s return, mirrored here for the same reason
  *  {@link ArmOutcomeName} is. `"direct-merge"` is deliberately absent: that class never reaches an
