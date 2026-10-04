@@ -9,8 +9,9 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { userInfo } from "node:os";
 import { join } from "node:path";
 
 import { SCRIPT, age, fixture, git, repos, run, scratchDir, type Fixture } from "./helpers/host-cleanup-fixture.js";
@@ -292,7 +293,8 @@ test("the hourly temp sweep wrapper runs the janitor in temp-only mode and refus
   const wrapper = (extra: Record<string, string>) =>
     spawnSync("bash", ["deploy/rmd-tmp-sweep.sh"], { encoding: "utf8", env: { ...process.env, ...fx.env, ...extra } });
 
-  const ok = wrapper({ RMD_HOST_CLEANUP_SCRIPT: join(process.cwd(), SCRIPT), IDLE_MINUTES: "" });
+  // the wrapper's coverage default names the REAL home and /tmp caches; keep the run in the fixture
+  const ok = wrapper({ RMD_HOST_CLEANUP_SCRIPT: join(process.cwd(), SCRIPT), IDLE_MINUTES: "", RMD_CLEANUP_COVERAGE_PATHS: join(fx.root, "no-coverage") });
   assert.equal(ok.status, 0, ok.stderr + ok.stdout);
   assert.match(ok.stdout, /temporary-roots-only mode/);
   assert.equal(existsSync(idle), false, "the wrapper's six-hour default sweeps a 13-hour-old dir");
@@ -309,8 +311,148 @@ test("a clean idle checkout directly under the home is never swept by default", 
   age(live);
   const env: Record<string, string> = { ...fx.env };
   delete env.RMD_CLEANUP_WORKTREE_ROOTS;
-  const r = spawnSync("bash", [SCRIPT], { encoding: "utf8", env: { ...process.env, RMD_CLEANUP_WORKTREE_ROOTS: undefined, ...env } as NodeJS.ProcessEnv });
+  // the default clone root is the REAL /mnt/scratch/worktrees: DRY_RUN=1 still logs every REMOVE
+  // decision but touches nothing on a host that has that directory
+  const r = spawnSync("bash", [SCRIPT], { encoding: "utf8", env: { ...process.env, RMD_CLEANUP_WORKTREE_ROOTS: undefined, ...env, DRY_RUN: "1" } as NodeJS.ProcessEnv });
   assert.equal(r.status, 0, r.stderr + r.stdout);
   assert.equal(existsSync(live), true, "a home checkout is a live tree, not scratch");
   assert.doesNotMatch(r.stdout, new RegExp(`REMOVE ${live}`));
+});
+
+/** A PATH shim that logs each argv to `log` and then runs the real binary. */
+function loggingShim(fx: Fixture, name: string, log: string): void {
+  const real = execFileSync("which", [name], { encoding: "utf8" }).trim();
+  const shim = join(fx.root, "bin", name);
+  writeFileSync(shim, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> '${log}'\nexec '${real}' "$@"\n`);
+  chmodSync(shim, 0o755);
+}
+
+// The 23:00Z root pass after #8977 kept 43 units as "Git metadata is unreadable or missing": Git
+// refuses root on an operator-owned repo. GIT_TEST_ASSUME_DIFFERENT_OWNER=1 is Git's own switch
+// for that refusal, so the whole root path runs here without root.
+test("the root pass judges, bundles and reaps scratch repos another user owns", () => {
+  const fx = fixture();
+  const { main } = repos(fx);
+  const unit = scratchDir(fx, "clone-unit", false);
+  const repo = join(unit, "repo");
+  git(fx.root, "clone", "--quiet", main, repo);
+  git(repo, "checkout", "-b", "unpublished");
+  git(repo, "commit", "--allow-empty", "-m", "local branch only");
+  const unpublished = git(repo, "rev-parse", "HEAD").trim();
+  git(repo, "checkout", "main");
+  const linked = join(fx.scratch, "linked");
+  git(main, "worktree", "add", "-b", "linked", linked, "main");
+  age(unit); age(linked);
+  const tops = [realpathSync(linked), realpathSync(repo)].sort();
+  const gitLog = join(fx.root, "git.log");
+  loggingShim(fx, "git", gitLog);
+
+  const r = run(fx, {
+    RMD_CLEANUP_SCRATCH_ROOTS: fx.scratch, RMD_CLEANUP_TMP_ROOTS: "", RMD_CLEANUP_UID: "0",
+    GIT_TEST_ASSUME_DIFFERENT_OWNER: "1", PATH: `${join(fx.root, "bin")}:${process.env.PATH ?? ""}`,
+  });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.doesNotMatch(r.stdout, /unreadable/, r.stdout);
+  assert.equal(existsSync(unit), false, r.stdout);
+  assert.equal(existsSync(linked), false, r.stdout);
+  assert.ok(!git(main, "worktree", "list", "--porcelain").includes(linked), "removed through git worktree remove");
+  const archive = join(fx.env.RMD_CLEANUP_WORKTREE_ARCHIVE_ROOT, "scratch");
+  const bundles = readdirSync(archive).filter(n => n.endsWith(".bundle"));
+  assert.equal(bundles.length, 1, r.stdout);
+  assert.ok(git(main, "bundle", "list-heads", join(archive, bundles[0])).includes(`${unpublished} refs/heads/unpublished`));
+  assert.ok(r.stdout.indexOf("ARCHIVE-WORKTREE") < r.stdout.indexOf(`REMOVE ${unit}`), r.stdout);
+  // the exception is scoped to each repository's own top, never '*'
+  const scopes = new Set([...readFileSync(gitLog, "utf8").matchAll(/safe\.directory=(\S+)/g)].map(m => m[1]));
+  assert.deepEqual([...scopes].sort(), tops);
+});
+
+test("a root pass fetches a scratch repo as the repo's owner, never as root", () => {
+  const fx = fixture();
+  repos(fx);
+  const unit = scratchDir(fx, "fetch-unit", false);
+  const repo = join(unit, "repo");
+  git(fx.root, "clone", "--quiet", join(fx.root, "origin.git"), repo);
+  age(unit);
+  const runuserLog = join(fx.root, "runuser.log");
+  const runuser = join(fx.root, "bin", "runuser");
+  // stands in for runuser: past `--` the command runs as the repo's owner, whom Git trusts
+  writeFileSync(runuser, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> '${runuserLog}'\nwhile [ "$1" != -- ]; do shift; done; shift\nunset GIT_TEST_ASSUME_DIFFERENT_OWNER\nexec "$@"\n`);
+  chmodSync(runuser, 0o755);
+
+  const r = run(fx, {
+    RMD_CLEANUP_SCRATCH_ROOTS: fx.scratch, RMD_CLEANUP_TMP_ROOTS: "", RMD_CLEANUP_UID: "0",
+    RMD_CLEANUP_NO_FETCH: "", RMD_CLEANUP_RUNUSER: runuser, GIT_TEST_ASSUME_DIFFERENT_OWNER: "1",
+  });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(readFileSync(runuserLog, "utf8"), `-u ${userInfo().username} -- git -C ${repo} fetch --quiet --all\n`);
+  assert.equal(existsSync(unit), false, r.stdout);
+});
+
+test("a lock the running identity cannot write is still acquired and still excludes", () => {
+  // the user cron meets root's 0644 lock exactly as this run meets a 0444 one: readable, not writable
+  const fx = fixture();
+  const idle = scratchDir(fx, "rmd-idle", true);
+  const lock = fx.env.RMD_CLEANUP_LOCK_FILE;
+  writeFileSync(lock, "");
+  chmodSync(lock, 0o444);
+  const held = spawnSync("flock", ["-n", lock, "bash", SCRIPT], { encoding: "utf8", env: { ...process.env, ...fx.env } });
+  assert.equal(held.status, 0, held.stderr + held.stdout);
+  assert.match(held.stdout, /another janitor pass holds the lock/);
+  assert.equal(existsSync(idle), true, "the other identity's held lock still excludes this pass");
+  const r = run(fx);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.doesNotMatch(r.stdout, /REFUSE/);
+  assert.equal(existsSync(idle), false, r.stdout);
+});
+
+test("the default lock lives beside the script both crons run, never in sticky /tmp", () => {
+  const fx = fixture();
+  const install = join(fx.root, "install");
+  mkdirSync(install);
+  const script = join(install, "rmd-host-cleanup.sh");
+  copyFileSync(SCRIPT, script);
+  const env: NodeJS.ProcessEnv = { ...process.env, ...fx.env };
+  delete env.RMD_CLEANUP_LOCK_FILE;
+  const r = spawnSync("bash", [script], { encoding: "utf8", env });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  const lock = join(install, "rmd-host-cleanup.lock");
+  assert.equal(statSync(lock).mode & 0o777, 0o644, "created readable by every identity");
+  unlinkSync(lock);
+  symlinkSync(join(fx.root, "elsewhere"), lock);
+  const link = spawnSync("bash", [script], { encoding: "utf8", env });
+  assert.equal(link.status, 2, link.stdout);
+  assert.match(link.stdout, /REFUSE: cannot acquire janitor lock/);
+  assert.equal(existsSync(join(fx.root, "elsewhere")), false, "the lock is never created through a symlink");
+});
+
+test("a non-root pass sweeps no scratch root unless one is named; a root pass sweeps its defaults", () => {
+  const fx = fixture();
+  const sroot = join(fx.root, "mnt-scratch");
+  const unit = join(sroot, "idle-unit");
+  const parent = join(sroot, "o");
+  const child = join(parent, "idle-child");
+  for (const p of [unit, child]) { mkdirSync(p, { recursive: true }); writeFileSync(join(p, "data"), "x"); }
+  age(sroot);
+  const env: NodeJS.ProcessEnv = {
+    ...process.env, ...fx.env, RMD_CLEANUP_ROOT_SCRATCH_ROOTS: sroot, RMD_CLEANUP_ROOT_SCRATCH_PARENTS: parent,
+    RMD_HOST_CLEANUP_SCRIPT: join(process.cwd(), SCRIPT),
+    RMD_CLEANUP_COVERAGE_PATHS: join(fx.root, "no-coverage"),
+  };
+  delete env.RMD_CLEANUP_SCRATCH_ROOTS;
+  delete env.RMD_CLEANUP_SCRATCH_PARENTS;
+  const as = (cmd: string, uid: string) => spawnSync("bash", [cmd], { encoding: "utf8", env: { ...env, RMD_CLEANUP_UID: uid } });
+
+  for (const cmd of [SCRIPT, "deploy/rmd-tmp-sweep.sh"]) {
+    const user = as(cmd, "4242");
+    assert.equal(user.status, 0, user.stderr + user.stdout);
+    assert.equal(existsSync(unit), true, `${cmd} as a user: ${user.stdout}`);
+    assert.equal(existsSync(child), true, user.stdout);
+    assert.ok(!user.stdout.includes(sroot), user.stdout);
+  }
+  const root = as("deploy/rmd-tmp-sweep.sh", "0");
+  assert.equal(root.status, 0, root.stderr + root.stdout);
+  assert.equal(existsSync(unit), false, root.stdout);
+  assert.equal(existsSync(child), false, root.stdout);
+  assert.equal(existsSync(parent), true);
+  assert.equal(root.stdout.split(`KEEP ${parent}: workspace parent root\n`).length - 1, 1, root.stdout);
 });
