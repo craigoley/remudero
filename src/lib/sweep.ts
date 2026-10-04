@@ -14,10 +14,15 @@ import { parse as parseYaml } from "yaml";
 import {
   armAutoMergeDetailed,
   armFailureAction,
+  baseBranchRequiresMergeQueue,
   disarmAutoMerge,
   logArmAttribution,
+  mergeDirectViaRest,
+  readHeadShaRest as readArmHeadShaRest,
+  realArmDeps,
   stackPrerequisiteFromRest,
   type ArmAttemptResult,
+  type ArmDeps,
   type ArmLane,
   type ArmOutcome,
   type DisarmOutcome,
@@ -28,7 +33,7 @@ import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair } from "./classify.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { gitPushEmptyCommit, gitPushRunBranch } from "./git-push.js";
-import { ghJson, ghJsonAsync } from "./github-transport.js";
+import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
 import { acquireInflightLock, InflightLockError, type InflightLockHandle } from "./inflight-lock.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
@@ -1252,7 +1257,7 @@ export interface BuildSweepEffectsDeps {
     verdict: PostReviewStallVerdict,
     ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
   ) => void;
-  armImpl?: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult;
+  armImpl?: (prUrl: string, taskId: string | undefined, deps?: ArmDeps, isDraft?: boolean) => ArmOutcome | ArmAttemptResult;
   armSessionPrsOverride?: boolean;
   updateBranchImpl?: (pr: ArmedStalledPr) => Promise<UpdateBranchOutcome>;
   rebaseDirtyFleetBranchImpl?: (pr: OpenPrView) => DirtyFleetRebaseOutcome | Promise<DirtyFleetRebaseOutcome>;
@@ -2097,7 +2102,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // Every other outcome (including a bare "arm-error-ignored" with no captured text, which
     // cannot happen from this adapter but keeps every existing fake/test that returns a plain
     // `ArmOutcome` string compiling and behaving exactly as before) is returned unchanged.
-    arm: (pr) => {
+    arm: (pr, mode) => {
       if (repoMode === "shadow") {
         log("automerge.shadow_refused", {
           pr_url: pr.prUrl,
@@ -2106,13 +2111,33 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         });
         return "shadow-refused";
       }
+      // W1-T5492: select attemptArm's existing clean-status fallback without another --auto write.
+      const idleDeps: ArmDeps | undefined = mode === "armed-idle" ? {
+        ...realArmDeps(() => config),
+        ledgerLines: () => readLedgerLines(ledgerPath), // ledger-read-intent: live
+        headSha: (prUrl) => readArmHeadShaRest(prUrl, (args) => {
+          const fresh = ghJsonForBuild(args) as { state?: string; auto_merge?: unknown; head?: { sha?: string } };
+          if (fresh.state !== "open" || !fresh.auto_merge || fresh.head?.sha !== pr.headSha) {
+            throw new Error("armed-idle PR is no longer open and armed at the observed head");
+          }
+          return fresh;
+        }),
+        armAuto: () => { throw new Error("Pull request is in clean status"); },
+        mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
+        mergeDirect: (prUrl) => {
+          assertLiveWriteAllowed("gh-pr-merge", `merging armed-idle ${prUrl}`);
+          mergeDirectViaRest(prUrl, (_file, args, opts) => ghExec([...args, "-f", `sha=${pr.headSha}`], opts));
+        },
+      } : undefined;
       let attemptError: string | undefined;
       const outcome = armAndLogOutcome(
         pr.prUrl,
         pr.taskId,
         log,
         (prUrl, taskId) => {
-          const result = sweepArmImpl(prUrl, taskId);
+          const result = idleDeps
+            ? armImpl(prUrl, sweepArmTaskId(pr, armSessionPrs), idleDeps, pr.isDraft)
+            : sweepArmImpl(prUrl, taskId);
           if (typeof result !== "string") attemptError = result.error;
           return result;
         },
@@ -8948,6 +8973,7 @@ export interface SweepDeps {
    *  because that seeds the dedup. `void` reads as "armed". // Why: observed live on PR #960. */
   arm: (
     pr: OpenPrView,
+    mode?: "armed-idle",
   ) => ArmOutcomeName | ArmAttemptOutcome | void | Promise<ArmOutcomeName | ArmAttemptOutcome | void>;
   /** W1-T5403 — risk-judge a head whose run ended `handed_off`, once, before the `mergeable` arm.
    *  Production wires {@link riskJudgeHandedOffHead}; omitted, such a head is held, never armed. */
@@ -10519,6 +10545,31 @@ export async function runSweep(
     return { complete: true, lines: parseLedger(union.matches.join("\n")) };
   });
   const prior = priorActionsFromLedger(ledgerLines);
+  // Rotation retains arm_skipped receipts; sweep.disposed may prefer an older acted:true row.
+  const idleHeads = new Map<number, string>();
+  for (const line of ledgerLines) {
+    if (line.step !== "automerge.arm_skipped" || typeof line.pr_number !== "number" ||
+        typeof line.armed_idle_observed !== "boolean") continue;
+    if (line.armed_idle_observed === true && typeof line.head_sha === "string") {
+      idleHeads.set(line.pr_number, line.head_sha);
+    } else {
+      idleHeads.delete(line.pr_number);
+    }
+  }
+  const recordIdle = (step: string, pr: OpenPrView, observed: boolean, fields: Record<string, unknown> = {}): void => {
+    const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+      pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha,
+      dedupe_key: `${pr.prNumber}@${pr.headSha}` };
+    appendLine(deps.ledgerPath, { ...row, step, ...fields });
+    appendLine(deps.ledgerPath, { ...row, step: "automerge.arm_skipped", armed_idle_observed: observed,
+      reason: "auto-merge re-arm skipped; armed-idle observation recorded", idle_event: step });
+  };
+  const clearIdle = (pr: OpenPrView): void => {
+    if (!idleHeads.has(pr.prNumber) || deps.dryRun) return;
+    recordIdle("automerge.armed_idle_cleared", pr, false, { prior_head_sha: idleHeads.get(pr.prNumber),
+      reason: "armed-idle eligibility or head changed" });
+    idleHeads.delete(pr.prNumber);
+  };
   // W1-T3202 — FULL-SWEEP CAPACITY IS DERIVED ONCE, BEFORE ANY REPAIR CAN SPAWN. Reviews reserve
   // only their live spawning width (plan filings are deterministic), and the same active-worker
   // sample feeds both the adaptive review selector and the repair remainder. Light passes supply
@@ -11465,6 +11516,10 @@ export async function runSweep(
     // rung has not stalled out. Named here rather than silently stood down — the unnamed
     // stand-down is what two readers independently misread as an unwired action path.
     let dedupStandDownReason: string | undefined;
+    let armedIdleDue = false;
+    if (disposition !== "mergeable" || pr.autoMergeArmed !== true || idleHeads.get(pr.prNumber) !== pr.headSha) {
+      clearIdle(pr);
+    }
     switch (disposition) {
       case "mergeable": {
         // PREFER OBSERVED STATE: GitHub's own `autoMergeArmed` is the authority for "already armed";
@@ -11485,15 +11540,27 @@ export async function runSweep(
         const armedByGitHub = pr.autoMergeArmed === true;
         const armedByPriorPass = !armedByGitHub && prior.armed.has(`${pr.prNumber}@${pr.headSha}`);
         alreadyDone = armedByGitHub || armedByPriorPass || refused || hold !== undefined;
+        const idleEligible = armedByGitHub && !refused && hold === undefined && stackParentWithdrawal === undefined;
+        if (!idleEligible) clearIdle(pr);
+        if (idleEligible && !deps.dryRun && (deps.actionable?.("mergeable") ?? true)) {
+          armedIdleDue = idleHeads.get(pr.prNumber) === pr.headSha;
+          if (armedIdleDue) {
+            alreadyDone = false;
+            reason = "armed, reviewed and green at the same head on a later pass — attempting guarded completion";
+          } else {
+            recordIdle("automerge.armed_idle", pr, true, { reason: "first armed, reviewed, green idle sighting" });
+          }
+        }
         // W1-T1116: NAME WHICH DISJUNCT FIRED. This switch left all of them silent, the same gap
         // the fix arm above already closed, and the only reason two readers misdiagnosed a
         // correctly-held #2432 as a never-clearing dedup. Order matches the `||` above, so a reader
         // learns the FIRST true disjunct — the one that actually short-circuited `alreadyDone`.
-        if (armedByGitHub) {
+        if (armedByGitHub && !armedIdleDue) {
           dedupStandDownReason = stackParentWithdrawal
             ? `existing auto-merge withdrawal ${stackParentWithdrawal.error ? "failed" : stackParentWithdrawal.outcome ?? "attempted"}: ` +
               (stackParentWithdrawal.check.detail ?? "declared stack parents are not all merged")
-            : "auto-merge already armed (observed on GitHub) — nothing to re-arm";
+            : idleEligible ? "auto-merge already armed (observed on GitHub) — first idle sighting; awaiting a later pass"
+              : "auto-merge already armed (observed on GitHub) — nothing to re-arm";
         } else if (armedByPriorPass) {
           dedupStandDownReason = `auto-merge already armed by a prior sweep pass at this head (${pr.headSha.slice(0, 7)})`;
         } else if (refused) {
@@ -11717,14 +11784,21 @@ export async function runSweep(
               // READ THE OUTCOME. `armAutoMerge` does not throw — it RETURNS which of its seven
               // branches it took, and five of them armed nothing. Discarding it is what let
               // `acted:true` be recorded for a PR that was never armed.
-              const armResult = await deps.arm(pr);
+              const armResult = armedIdleDue ? await deps.arm(pr, "armed-idle") : await deps.arm(pr);
               // W1-T1117: `deps.arm` may return the bare name it always could, or the richer
               // outcome-plus-failureClass object. Unwrap once, here.
               const armOutcomeName = typeof armResult === "object" && armResult !== null ? armResult.outcome : armResult;
               // W1-T1061: capture the concrete outcome whenever one came back. A `void` return is
               // the legacy "treat as armed" shape and names no real branch, so no field is written.
               if (armOutcomeName !== undefined) armOutcome = armOutcomeName;
-              if (!armOutcomeArmed(armOutcomeName)) {
+              if (armedIdleDue) {
+                const step = armOutcomeName === "direct-merged" ? "automerge.armed_idle_merged"
+                  : armOutcomeName === "armed" ? "automerge.armed_idle_enqueued" : "automerge.armed_idle_refused";
+                const stillIdle = !["direct-merged", "head-unavailable", "ledger-refused", "hold-refused",
+                  "draft-refused", "stack-parent-refused"].includes(armOutcomeName ?? "unknown");
+                recordIdle(step, pr, stillIdle, { outcome: armOutcomeName ?? "unknown" });
+              }
+              if (!armOutcomeArmed(armOutcomeName) || (armedIdleDue && armOutcomeName === undefined)) {
                 acted = false;
                 // The refusal used to go only to `say` -> stdout -> daemon.out.log, leaving no
                 // trace in the ledger where anyone looks. Name it on the disposed line.
@@ -11734,7 +11808,7 @@ export async function runSweep(
                 // failure, so nothing says the SAME attempt will ever succeed. `"transient"` and
                 // `"retryable"` stay on the `acted:false` line just set, as before.
                 const failureClass = typeof armResult === "object" && armResult !== null ? armResult.failureClass : undefined;
-                if (armOutcomeName === "arm-error-ignored" && failureClass === "unknown") {
+                if (!armedIdleDue && armOutcomeName === "arm-error-ignored" && failureClass === "unknown") {
                   acted = true;
                   standDownReason = undefined;
                 }
