@@ -149,6 +149,17 @@ export const WORKTREE_SITE_REGISTRY: WorktreeSiteRow[] = [
     },
   },
   {
+    file: "src/lib/plan-pr-emitter.ts",
+    site: "planPrPreflightAtCommitAsync",
+    creates: "the same throwaway DETACHED preflight worktree, cut by an awaited child process for a daemon lane (W1-T5521)",
+    disposition: {
+      kind: "exempt",
+      because:
+        "the async form of planPrPreflightAtCommit above, for the same reason: it materializes the EXACT commit the " +
+        "sweep's plan-PR rung is about to push, so the preflight judges that tree, never a fresh branch off origin/main.",
+    },
+  },
+  {
     file: "src/lib/sweep.ts",
     site: "rebaseDirtyFleetBranchViaGit",
     creates: "a DETACHED worktree at the PR's own head sha, so that head can be rebased onto origin/main",
