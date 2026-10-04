@@ -52,6 +52,16 @@ export function spendAmountUsd(row: Record<string, unknown>): number | undefined
   return finiteNumber(row.total_cost_usd) ?? finiteNumber(row.cost_usd);
 }
 
+/**
+ * W1-T5629: the row's NOTIONAL (api-equivalent, never billed) price — a codex row's `notional_cost_usd`, which its
+ * worker prices from the routed model's tokens while `total_cost_usd` stays 0; every other row's {@link spendAmountUsd}.
+ * For analytics that compare lanes only: no budget, cap or spend series reads it. A codex row with no price stays
+ * `undefined`, so its billed 0 is never drawn as a price.
+ */
+export function notionalSpendUsd(row: Record<string, unknown>): number | undefined {
+  return row.provider === "codex" ? finiteNumber(row.notional_cost_usd) : spendAmountUsd(row);
+}
+
 /** The row's role: its own `spend_role` label, else its step's entry, else the pre-label rule (a string `model`). */
 export function spendRoleOf(row: Record<string, unknown>): SpendRole | undefined {
   if (row.spend_role === "produced" || row.spend_role === "restated") return row.spend_role;

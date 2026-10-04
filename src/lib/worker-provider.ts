@@ -96,6 +96,8 @@ interface CodexWorkerResult {
   provider: "codex";
   sessionId: string;
   costUsd: number;
+  /** W1-T5629: NOTIONAL, never billed — see {@link codexNotionalCostUsd}. Absent when the model is unpriced. */
+  notionalCostUsd?: number;
   numTurns: number;
   maxTurns?: number;
   text: string;
@@ -2754,6 +2756,22 @@ export function openWeightUsageUsd(deployment: string, promptTokens: number, com
     completionTokens * rate.outputUsdPerMillion) / 1_000_000;
 }
 
+/**
+ * W1-T5629: the NOTIONAL dollars of one codex session — what its tokens would cost at the routed model's published
+ * BASE rate, so a codex row stops reading as free beside Claude's notional price. Never billed: the subscription
+ * charges no per-request dollar, so this rides `notional_cost_usd` and `costUsd` stays 0 for every budget and cap.
+ * Base rate because the tokens are a SESSION sum, and the long-context tier prices a single request. Codex input
+ * includes its cached input. `undefined`, never 0, for a model {@link OPENWEIGHT_PRICES} does not price.
+ */
+export function codexNotionalCostUsd(model: string, tokens: { input: number; output: number; cacheRead: number }): number | undefined {
+  if (!Object.hasOwn(OPENWEIGHT_PRICES, model)) return undefined;
+  const price = openWeightPriceFor(model);
+  const cached = Math.min(tokens.input, tokens.cacheRead);
+  return ((tokens.input - cached) * price.inputUsdPerMillion +
+    cached * (price.cachedInputUsdPerMillion ?? price.inputUsdPerMillion) +
+    tokens.output * price.outputUsdPerMillion) / 1_000_000;
+}
+
 /** The allowance file. A fleet override must point at the same pre-migrated host mount in every cash instance. */
 export const OPENWEIGHT_ALLOWANCE_FILENAME = "openweight-allowance.json";
 export function sharedCashAllowancePath(config: Config): string | undefined {
@@ -4410,9 +4428,11 @@ async function spawnCodexWorkerInPrivateTemp(
     const parsed = stdout.finish();
     const isError = parsed.isError || exitCode !== 0;
     const model = selection?.model ?? config.workerProviders?.codexModel ?? "codex-default";
+    const notionalCostUsd = codexNotionalCostUsd(model, parsed.tokens);
     return {
       sessionId: parsed.sessionId || args.resumeSessionId || "",
       costUsd: 0,
+      ...(notionalCostUsd === undefined ? {} : { notionalCostUsd }),
       numTurns: parsed.numTurns,
       // Codex exec 0.152.0 exposes no max-turn flag; never ledger the Claude cap as enforced.
       maxTurns: undefined,
