@@ -666,7 +666,7 @@ function preflightTally() {
     result: (): PlanPrPreflightResult => ({ ok: failures.length === 0, failures, unreadable }),
   };
 }
-const threwReading = (e: unknown): PlanPrPreflightReading => ({ status: null, output: String((e as Error)?.message ?? e) });
+const errorText = (e: unknown): string => String((e as Error)?.message ?? e);
 function prTitleReading(title: string): PlanPrPreflightReading {
   const v = checkCommitMessage(title)[0];
   return v ? { status: 1, output: `${v.rule}: ${v.message}` } : { status: 0, output: "" };
@@ -686,7 +686,7 @@ export function planPrPreflight(input: { cwd: string; title: string; body: strin
     try {
       reading = run();
     } catch (e) {
-      reading = threwReading(e);
+      reading = { status: null, output: errorText(e) };
     }
     tally.record(check, reading);
   };
@@ -710,7 +710,7 @@ export async function planPrPreflightAsync(
     try {
       reading = await run();
     } catch (e) {
-      reading = threwReading(e);
+      reading = { status: null, output: errorText(e) };
     }
     tally.record(check, reading);
   };
@@ -722,10 +722,9 @@ export async function planPrPreflightAsync(
   return tally.result();
 }
 
-const unmaterialized = (commitSha: string, e: unknown): PlanPrPreflightResult => ({
-  ok: true,
-  failures: [],
-  unreadable: [{ check: "tree", firstLine: `${commitSha} could not be materialized: ${firstLineOf(String((e as Error)?.message ?? e), null)}` }],
+const unmaterialized = (commitSha: string, e: unknown): PlanPrPreflightFinding => ({
+  check: "tree",
+  firstLine: `${commitSha} could not be materialized: ${firstLineOf(errorText(e), null)}`,
 });
 function borrowNodeModules(repoDir: string, tree: string): void {
   if (existsSync(join(repoDir, "node_modules"))) symlinkSync(join(repoDir, "node_modules"), join(tree, "node_modules"));
@@ -740,7 +739,7 @@ export function planPrPreflightAtCommit(repoDir: string, commitSha: string, pr: 
     execFileSync("git", ["-C", repoDir, "worktree", "add", "--detach", "--quiet", tree, commitSha], { stdio: "pipe" });
   } catch (e) {
     rmSync(parent, { recursive: true, force: true });
-    return unmaterialized(commitSha, e);
+    return { ok: true, failures: [], unreadable: [unmaterialized(commitSha, e)] };
   }
   try {
     borrowNodeModules(repoDir, tree);
@@ -764,7 +763,7 @@ export async function planPrPreflightAtCommitAsync(
     await execFileAsync("git", ["-C", repoDir, "worktree", "add", "--detach", "--quiet", tree, commitSha]);
   } catch (e) {
     await rm(parent, { recursive: true, force: true });
-    return unmaterialized(commitSha, e);
+    return { ok: true, failures: [], unreadable: [unmaterialized(commitSha, e)] };
   }
   try {
     borrowNodeModules(repoDir, tree);
