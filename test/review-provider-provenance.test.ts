@@ -329,7 +329,7 @@ test("W1-T2594: production ordering records only after ownership/push and before
   const fixSnapshot = source.indexOf("const workerHeadReflogBefore = readWorktreeHeadReflog(opts.worktreePath)");
   const fixSpawn = source.indexOf("const spawnOutcome = await spawnFixWorkerBounded", fixSnapshot);
   const fixEvidence = source.indexOf("const workerHeadCreatedLocally = workerCreatedCurrentHead(opts.worktreePath", fixSpawn);
-  const fixPush = source.indexOf("deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush)");
+  const fixPush = source.indexOf("roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, opts.guardRoundHead && fixHarnessOwnsGit ? priorHeadSha : undefined)", fixEvidence);
   const fixClaim = source.indexOf("recordHeadProviderAfterPush(", fixPush);
   const fixCi = source.indexOf("deps.waitForCiGreen(opts.prUrl", fixPush);
   assert.ok(
