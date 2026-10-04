@@ -5909,8 +5909,9 @@ export const ACCEPTANCE_HEADER_RE = /^\s*#{0,6}\s*\**\s*acceptance(\s+criteria)?
  *  ACCEPTANCE_HEADER_RE}. Exported for the same reason {@link ACCEPTANCE_HEADER_RE} is (W1-T2762). */
 export const ACCEPTANCE_BULLET_RE = /^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/;
 
-/** A CommonMark fence opener — three or more backticks (whose info string holds no backtick) or tildes. */
-const FENCE_OPEN_RE = /^\s*(`{3,}(?=[^`]*$)|~{3,})/;
+/** A CommonMark fence opener — three or more backticks (whose info string holds no backtick) or tildes. Exported so a
+ *  fixture can drive both of its arms by name (the negative-reachability ratchet). */
+export const FENCE_OPEN_RE = /^\s*(`{3,}(?=[^`]*$)|~{3,})/;
 
 /** WHERE THE ACCEPTANCE BLOCK BEGINS — the index of the first line matching {@link ACCEPTANCE_HEADER_RE} OUTSIDE a
  *  fenced code block, or -1. W1-T5621: a body that SHOWS the format inside a ``` fence ahead of its real block used to

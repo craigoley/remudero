@@ -17,13 +17,14 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import {
-  acceptanceBlockDiagnostics,
-  acceptanceBlockRegion,
-  acceptanceHeaderLine,
-  parseAcceptanceBlock,
-} from "../src/lib/review.js";
+import * as review from "../src/lib/review.js";
+import { acceptanceBlockDiagnostics, acceptanceBlockRegion, parseAcceptanceBlock } from "../src/lib/review.js";
 import { replaceAcceptanceBlock, SUPERSEDED_HEADER_SUFFIX } from "../src/lib/plan-pr-emitter.js";
+
+// The two symbols this task ADDS are read off the namespace, never named-imported: a named import of
+// an export the base lacks fails the whole file at link time, so a base run would report a load
+// error — no evidence either way — instead of the real subtests failing on the old behaviour.
+const { acceptanceHeaderLine, FENCE_OPEN_RE } = review;
 
 const EXAMPLE = "- the example claim | grep: example in docs/example.md";
 const REAL = "- the real claim | unit test: the real test title";
@@ -41,6 +42,14 @@ function bodyWithFence(open: string, close: string): string {
     REAL, // 8
   ].join("\n");
 }
+
+test("FENCE_OPEN_RE opens on three or more backticks or tildes and on nothing else", () => {
+  assert.equal(FENCE_OPEN_RE.test("```ts"), true);
+  assert.equal(FENCE_OPEN_RE.test("  ~~~~"), true);
+  assert.equal(FENCE_OPEN_RE.test("## Acceptance"), false);
+  assert.equal(FENCE_OPEN_RE.test("``two``"), false);
+  assert.equal(FENCE_OPEN_RE.test("```js `inline` info"), false, "a backtick fence's info string holds no backtick");
+});
 
 test("a backtick-fenced example header is skipped and the real block parses", () => {
   const body = bodyWithFence("```md", "```");
