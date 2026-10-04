@@ -830,6 +830,44 @@ WantedBy=timers.target
 EOF
 }
 
+render_acr_login_bin() { cat "${SCRIPT_DIR}/acr-login.sh"; }
+
+render_acr_login_service() {
+  local registry="${REGISTRY:-${IMAGE%%/*}}"
+  registry="${registry%.azurecr.io}"
+  cat <<EOF
+[Unit]
+Description=Refresh the host's Azure Container Registry login
+After=docker.service network-online.target
+RequiresMountsFor=${STATE_DIR}
+
+[Service]
+Type=oneshot
+User=${SERVICE_USER}
+Group=${SERVICE_USER}
+Environment=RMD_ROOT=${STATE_DIR}
+Environment=REGISTRY=${registry}
+ExecStart=${BIN_DIR}/acr-login.sh --refresh
+TimeoutStartSec=5min
+EOF
+}
+
+render_acr_login_timer() {
+  cat <<'EOF'
+[Unit]
+Description=Refresh the registry login before its token expires
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1h
+AccuracySec=1min
+Unit=rmd-acr-login.service
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
 render_reaper_bin() {
   cat <<'EOF'
 #!/bin/bash
@@ -921,6 +959,9 @@ ${UNIT_DIR}/${WATCHDOG_TIMER_NAME}:render_watchdog_timer:0644
 "
 if [ -z "$INSTANCE_NAME" ] || [ "$INSTANCE_NAME" = "core" ]; then
   UNITS="${UNITS}
+${BIN_DIR}/acr-login.sh:render_acr_login_bin:0755
+${UNIT_DIR}/rmd-acr-login.service:render_acr_login_service:0644
+${UNIT_DIR}/rmd-acr-login.timer:render_acr_login_timer:0644
 ${BIN_DIR}/rmd-reap-stray-containers:render_reaper_bin:0755
 ${UNIT_DIR}/rmd-reap-stray.service:render_reaper_service:0644
 ${UNIT_DIR}/rmd-reap-stray.timer:render_reaper_timer:0644
@@ -1121,6 +1162,7 @@ if [ "$UNIT_DIR" = "/etc/systemd/system" ] && command -v systemctl >/dev/null 2>
   systemctl enable "${SERVICE_UNIT_NAME}" >/dev/null
   systemctl enable --now "${WATCHDOG_TIMER_NAME}" >/dev/null
   if [ -z "$INSTANCE_NAME" ] || [ "$INSTANCE_NAME" = "core" ]; then
+    systemctl enable --now rmd-acr-login.timer >/dev/null
     systemctl enable --now rmd-reap-stray.timer >/dev/null
     echo "install-host-units: reloaded systemd and enabled ${SERVICE_UNIT_NAME}, ${WATCHDOG_TIMER_NAME}, rmd-reap-stray.timer"
   else

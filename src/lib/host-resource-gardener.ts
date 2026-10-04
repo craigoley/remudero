@@ -448,6 +448,7 @@ interface FiledRecord {
 interface GardenState {
   episodes: Record<string, Episode>;
   filed: Record<string, FiledRecord>;
+  acrLogin: Record<string, { ts: string; result: "ok" | "failed"; escalatedAt?: string }>;
 }
 
 export function hostResourceStatePath(stateDir: string): string {
@@ -460,15 +461,15 @@ export function hostResourceOffPath(stateDir: string): string {
 
 function readState(stateDir: string): GardenState {
   const path = hostResourceStatePath(stateDir);
-  if (!existsSync(path)) return { episodes: {}, filed: {} };
+  if (!existsSync(path)) return { episodes: {}, filed: {}, acrLogin: {} };
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<GardenState>;
-    return { episodes: parsed.episodes ?? {}, filed: parsed.filed ?? {} };
+    return { episodes: parsed.episodes ?? {}, filed: parsed.filed ?? {}, acrLogin: parsed.acrLogin ?? {} };
   } catch (error) {
     // deliberate: an unreadable state file restarts every episode; the worst case is one repeat
     // handoff, which the open-feedback and plan-origin checks turn into a no-op.
     void error;
-    return { episodes: {}, filed: {} };
+    return { episodes: {}, filed: {}, acrLogin: {} };
   }
 }
 
@@ -576,14 +577,46 @@ export function runHostResourcePass(ports: HostResourcePorts): PassResult {
   if (existsSync(hostResourceOffPath(ports.stateDir))) return { ran: false, appended: 0, findings: [] };
   const nowMs = clock.now();
   const incoming: HostSample[] = [];
+  const state = readState(ports.stateDir);
   for (const beat of ports.readHeartbeats()) {
-    const sample = sampleFromPayload(beat.host, parseHeartbeatPayload(beat.payload));
+    const payload = parseHeartbeatPayload(beat.payload);
+    const result = payload["acr_login_result"];
+    const ts = payload["acr_login_ts"];
+    const episode = state.acrLogin[beat.host];
+    const refreshMs = Date.parse(ts ?? "");
+    const previousMs = Date.parse(episode?.ts ?? "");
+    const currentRefresh = !episode || refreshMs > previousMs || (refreshMs === previousMs && (result === "ok" || episode.result === result));
+    if ((result === "failed" || result === "ok") && ts && Number.isFinite(refreshMs) && currentRefresh) {
+      if (result === "ok") {
+        if (episode?.escalatedAt) ports.log(`${HOST_RESOURCE}.acr_login_recovered`, { host: beat.host, ts });
+        state.acrLogin[beat.host] = { ts, result };
+      } else {
+        const current = (state.acrLogin[beat.host] ??= { ts, result });
+        current.ts = ts;
+        current.result = result;
+        if (!current.escalatedAt && ports.escalate) {
+          const reason = payload["acr_login_reason"] || "registry refresh failed without a reason";
+          const command = `az login && az acr login -n ${payload["acr_login_registry"] || "synthwatcholey0620"}`;
+          const issueUrl = ports.escalate({
+            class: "MANUAL",
+            taskId: `host-acr-login-${beat.host}`,
+            summary: `host ${beat.host} cannot refresh its registry login; baked deploys are blocked`,
+            detail: `Host ${beat.host}, registry refresh ${ts}: ${reason}.\nRun on that host: ${command}`,
+            options: [{ label: "az-login", detail: `authenticate on ${beat.host}: ${command}`, kind: { type: "operator-only" } }],
+            recommendation: "az-login",
+            headDedup: "independent",
+          });
+          current.escalatedAt = clock.iso();
+          ports.log(`${HOST_RESOURCE}.acr_login_failed`, { host: beat.host, ts, reason, issue_url: issueUrl });
+        }
+      }
+    }
+    const sample = sampleFromPayload(beat.host, payload);
     if (sample) incoming.push(sample);
   }
   const { appended, all } = appendNewSamples(ports.stateDir, incoming, nowMs);
   if (appended.length) ports.log(`${HOST_RESOURCE}.sampled`, { appended: appended.length, hosts: [...new Set(appended.map((s) => s.host))].sort() });
 
-  const state = readState(ports.stateDir);
   const findings = [...new Set(all.map((s) => s.host))].sort().flatMap((host) => evaluateHost(host, all, nowMs));
   const live = new Set<string>();
   for (const f of findings) {

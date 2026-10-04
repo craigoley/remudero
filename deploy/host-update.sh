@@ -867,7 +867,8 @@ echo "host-update: no fleet container running"
 if [ "${DRY_RUN}" -eq 0 ] && [ "${RECLAIM_ONLY}" -eq 0 ]; then
   if command -v az >/dev/null 2>&1; then
     echo "host-update: az acr login -n ${REGISTRY}"
-    if ! az acr login -n "${REGISTRY}" >/dev/null; then
+    source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/acr-login.sh"
+    if ! rmd_acr_login "${REGISTRY}"; then
       echo "host-update: FAILED to authenticate to ${REGISTRY}." >&2
       echo "  ACR access tokens expire; this is the expected failure after a while away." >&2
       echo "    az login && az acr login -n ${REGISTRY}" >&2

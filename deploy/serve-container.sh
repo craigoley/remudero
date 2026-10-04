@@ -691,6 +691,17 @@ if [ ! -w "${SERVE_REPO_DIR}" ]; then
   exit 1
 fi
 
+source "${SCRIPT_ROOT}/deploy/acr-login.sh"
+REGISTRY="${REF%%/*}"
+REGISTRY="${REGISTRY%.azurecr.io}"
+if command -v az >/dev/null 2>&1; then
+  if ! rmd_acr_login "${REGISTRY}"; then
+    echo "serve-container: REFUSING — registry login failed; existing container was left untouched. Run az login on this host." >&2
+    exit 1
+  fi
+else
+  echo "serve-container: az unavailable; checking the host's existing docker login with the preflight pull." >&2
+fi
 echo "serve-container: preflight docker pull ${REF}"
 if ! docker pull "${REF}" >/dev/null 2>&1; then
   echo "serve-container: REFUSING — target image ${REF} could not be pulled; existing container was left untouched." >&2

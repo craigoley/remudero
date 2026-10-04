@@ -812,6 +812,39 @@ PREV_EPOCH="$(epoch_of "$PREV_BEAT_TS")"
 SINCE_PREV_S=""
 if [ -n "$PREV_EPOCH" ]; then SINCE_PREV_S="$((NOW_EPOCH - PREV_EPOCH))"; fi
 
+# W1-T5319: read the refresh receipt without requiring node or jq on a damaged host.
+acr_login_field() {
+  printf '%s\n' "$ACR_LOGIN_RECEIPT" |
+    sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\(\([^\"\\\\]\|\\\\.\)*\)\".*/\1/p" |
+    awk '{
+      for (i = 1; i <= length($0); i++) {
+        c = substr($0, i, 1)
+        if (c == "\\") {
+          c = substr($0, ++i, 1)
+          if (c ~ /^[nrtbf]$/) c = " "
+        }
+        printf "%s", c
+      }
+      print ""
+    }' | head -n 1
+}
+ACR_LOGIN_RESULT=unavailable
+ACR_LOGIN_TS=""
+ACR_LOGIN_REASON="the Azure CLI is not installed on this host"
+ACR_LOGIN_REGISTRY=""
+if command -v az >/dev/null 2>&1; then
+  ACR_LOGIN_RECEIPT="$(cat "${RMD_ROOT}/state/acr-login.json" 2>/dev/null)"
+  ACR_LOGIN_RESULT="$(acr_login_field result)"
+  case "$ACR_LOGIN_RESULT" in
+    ok|failed|unavailable)
+      ACR_LOGIN_TS="$(acr_login_field ts)"
+      ACR_LOGIN_REASON="$(acr_login_field reason)"
+      ACR_LOGIN_REGISTRY="$(acr_login_field registry)"
+      ;;
+    *) ACR_LOGIN_RESULT=unknown; ACR_LOGIN_REASON="no readable registry refresh result" ;;
+  esac
+fi
+
 # ── the payload ───────────────────────────────────────────────────────────────────────────────
 # `key=value`, one per line: greppable, phone-readable, and parseable by the watcher with no jq.
 PAYLOAD="$(cat <<EOF
@@ -870,6 +903,10 @@ since_prev_beat_s=${SINCE_PREV_S:-unknown}
 restart_source=${RESTART_SOURCE}
 restart_verdict=${RESTART_VERDICT}
 image_build_sha_source=${IMAGE_BUILD_SHA_SOURCE}
+acr_login_result=${ACR_LOGIN_RESULT}
+acr_login_ts=${ACR_LOGIN_TS}
+acr_login_reason=${ACR_LOGIN_REASON}
+acr_login_registry=${ACR_LOGIN_REGISTRY}
 EOF
 )"
 
