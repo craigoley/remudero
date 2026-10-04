@@ -10577,7 +10577,7 @@ function contradictoryKey(pr: OpenPrView, lines: readonly Record<string, unknown
 
 function contradictoryPrior(
   key: string, pr: OpenPrView, deps: SweepDeps, lines: readonly Record<string, unknown>[],
-): ContradictoryMemory | undefined {
+): { prior: ContradictoryMemory | undefined; hasHeadCheckpoint: boolean } {
   const cacheKey = `${deps.ledgerPath}@${key}`;
   let prior = contradictoryMemory.get(cacheKey);
   // W1-T4935: rotation keeps the acted row; recover newer backoff checkpoints from its archives.
@@ -10594,7 +10594,8 @@ function contradictoryPrior(
       interval: row.contradictory_interval_ms, next: row.contradictory_next_row_at,
     };
   }
-  return prior;
+  return { prior, hasHeadCheckpoint: rows.some(row => row.step === "sweep.disposed" &&
+    row.pr_number === pr.prNumber && row.head_sha === pr.headSha && typeof row.contradictory_key === "string") };
 }
 
 export async function runSweep(
@@ -11576,8 +11577,11 @@ export async function runSweep(
     byDisposition[disposition]++;
     const isContradictory = disposition === "blocked-ambiguous" && reason === CONTRADICTORY_REASON && !strikeLadderDue;
     const contradictionKey = isContradictory ? contradictoryKey(pr, ledgerLines) : undefined;
-    const priorContradiction = contradictionKey !== undefined
+    const contradictionHistory = contradictionKey !== undefined
       ? contradictoryPrior(contradictionKey, pr, deps, ledgerLines) : undefined;
+    const priorContradiction = contradictionHistory?.prior;
+    const legacyContradiction = isContradictory && prior.escalated.has(`${pr.prNumber}@${pr.headSha}`) &&
+      contradictionHistory?.hasHeadCheckpoint === false;
 
     // W1-T2345 — computed for EVERY disposition, never only blocked-ambiguous, and BEFORE the
     // per-disposition dedup below: this bounds the DERIVATION itself, orthogonal to whatever
@@ -11738,7 +11742,7 @@ export async function runSweep(
       case "refused-escalate":
         // W1-T514: sha-keyed, exactly like every sibling arm above — a new head re-earns its own
         // escalation rather than being deduped by a stale head's `acted:true` line forever.
-        alreadyDone = isContradictory ? priorContradiction !== undefined
+        alreadyDone = isContradictory ? priorContradiction !== undefined || legacyContradiction
           : !strikeLadderDue && prior.escalated.has(`${pr.prNumber}@${pr.headSha}`);
         // W1-T2427: the LARGEST silent population (7,888 rows). Without this sentence the row is
         // indistinguishable from `deps.escalate` being unwired or throwing.
@@ -13030,7 +13034,7 @@ export async function runSweep(
     }
 
     let contradictoryCheckpoint: ContradictoryMemory | undefined;
-    if (contradictionKey !== undefined && !deps.dryRun && (priorContradiction || contradictoryEscalated)) {
+    if (contradictionKey !== undefined && !deps.dryRun && (priorContradiction || contradictoryEscalated || legacyContradiction)) {
       const state: ContradictoryMemory = priorContradiction
         ? { ...priorContradiction, passes: priorContradiction.passes + 1 }
         : { key: contradictionKey, first: now, passes: 1, interval: DEFAULT_POLL_INTERVAL_MS,

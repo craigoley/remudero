@@ -81,6 +81,36 @@ test("a new head sha re-arms the contradictory escalation", async (t) => {
   assert.ok(dispositions(f.ledgerPath).every((row) => row.contradictory_pass_count === 1));
 });
 
+test("a legacy escalation seeds contradictory backoff without escalating again", async (t) => {
+  const f = fixture(t);
+  appendLedger(f.ledgerPath, {
+    run_id: "legacy", task_id: f.pr.taskId!, step: "sweep.disposed", pr_url: f.pr.prUrl,
+    pr_number: f.pr.prNumber, head_sha: f.pr.headSha, disposition: "blocked-ambiguous", acted: true,
+  });
+  f.review("decision-a");
+  const first = (await f.pass(NOW)).actions[0];
+  assert.equal(first.disposition, "blocked-ambiguous");
+  assert.equal(first.acted, false);
+  assert.match(String(dispositions(f.ledgerPath).at(-1)?.stand_down_reason),
+    /escalation was already filed for this head/);
+  assert.equal(dispositions(f.ledgerPath).at(-1)?.contradictory_pass_count, 1);
+  for (let i = 1; i < 40; i++) {
+    assert.equal((await f.pass(NOW + i * 90_000)).actions[0].acted, false);
+  }
+  assert.equal(f.escalations.length, 0);
+  assert.ok(dispositions(f.ledgerPath).length < 10);
+  appendLedger(f.ledgerPath, { run_id: "noise", task_id: "noise", step: "noise", text: "x".repeat(10_000) });
+  assert.equal(rotateLedger(f.ledgerPath, { ceilingBytes: 5_000, smoothingWindowMs: 0 }).rotated, true);
+  assert.equal(dispositions(f.ledgerPath).length, 1, "rotation retains the legacy acted row");
+  f.review("decision-b");
+  assert.equal((await f.pass(NOW + 40 * 90_000)).actions[0].acted, true);
+  assert.equal(f.escalations.length, 1);
+  const moved = { ...f.pr, headSha: "head-b" };
+  f.review("decision-b", moved);
+  assert.equal((await f.pass(NOW + 40 * 90_000 + 1, moved)).actions[0].acted, true);
+  assert.equal(f.escalations.length, 2);
+});
+
 test("the contradictory escalation backoff survives a restart", async (t) => {
   for (const rotated of [false, true]) {
     const f = fixture(t);
