@@ -214,7 +214,7 @@ function pushFixture(kind: string) {
   return { ...fx, wt, head: git(wt, "rev-parse", "HEAD") };
 }
 
-test("W1-T5284: a run branch push lets a timer fire while git push is in flight and refuses what the sync push refuses", async (t) => {
+test("W1-T5284: a run branch push lets a timer fire while git push is in flight", async (t) => {
   const fx = pushFixture("push");
   try {
     fx.reset();
@@ -472,7 +472,7 @@ function ghError(stderr: string): Error {
   return Object.assign(new Error("Command failed: gh pr merge"), { stderr });
 }
 
-test("W1-T5284: arming auto merge lets a timer fire while gh is in flight and returns the same outcome", async (t) => {
+test("W1-T5284: arming auto merge lets a timer fire while gh is in flight", async (t) => {
   const scratch = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t5284-arm-`));
   const done = join(scratch, "merge.done");
   const shim = ghShim(
