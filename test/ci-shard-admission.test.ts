@@ -47,7 +47,9 @@ test('CI idle shards run the actual install and classifier guards without depend
   const classify = ci.steps.find((step) => step.id === 'classify')!;
   for (const step of [install, chromium, classify]) {
     assert.equal(runStep(step, 'false').calls, '', `${step.name}: idle source shard must spawn no dependency tool`);
-    assert.match(runStep(step, 'true').calls, /called/, `${step.name}: positive control must actually exercise setup`);
+    for (const admitted of ['true', '', 'unknown']) {
+      assert.match(runStep(step, admitted).calls, /called/, `${step.name}: admitted or unreadable setup must actually run`);
+    }
   }
   const skipped = runStep(classify, 'false');
   assert.equal(readFileSync(join(skipped.fixture, 'changed-files.txt'), 'utf8'), 'src/leaf.ts\n');
