@@ -20,11 +20,14 @@
  * a `low` verdict must be: {@link earnedConfidenceBar}. A family that keeps helping is trusted
  * more, one that keeps failing less, and either recovers as its outcomes move.
  */
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import type { Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
+import { fetchOriginRetryingRefLock } from "./git-fetch-retry.js";
+import { ghExec } from "./github-transport.js";
 import type { GardenCheckout, PrState } from "./gardener.js";
 import type { Proposal } from "./inbox.js";
 import { parseTasksFromYaml, type Plan, type Task } from "./plan.js";
@@ -298,8 +301,41 @@ export function renderRuledShard(
   return { contents };
 }
 
+interface RulingPins {
+  id: string;
+  relPath: string;
+  pin: string;
+  sourcePin: string;
+}
+
+function mainRecords(root: string, paths: string[]): Map<string, string> {
+  // In-place callers have no merge target; Git-backed workspaces always refresh origin/main.
+  if (!existsSync(join(root, ".git"))) {
+    return new Map(paths.flatMap((path) => {
+      const text = readFileIfExists(join(root, path));
+      return text === undefined ? [] : [[path, text] as const];
+    }));
+  }
+  const git = (args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: "pipe" });
+  fetchOriginRetryingRefLock(git);
+  const target = git(["rev-parse", "origin/main"]).trim();
+  const present = new Set(git(["ls-tree", "-r", "--name-only", target, "--", ...paths]).trim().split("\n"));
+  return new Map(paths.filter((path) => present.has(path)).map((path) => [path, git(["show", `${target}:${path}`])]));
+}
+
+function staleRulingPins(records: RulingPins[], main: Map<string, string>): { id: string; pin: string; main_pin: string | null }[] {
+  return records.flatMap((record) => {
+    const text = main.get(record.relPath);
+    const task = text === undefined ? undefined : parseTasksFromYaml(text, record.relPath).find((t) => t.id === record.id);
+    const pin = task === undefined ? null : taskRulingPin(task);
+    // The source pin covers the unruled record; the rendered pin covers verify/priority after release.
+    return task?.status === "queued" && task.retirement === undefined && (pin === record.sourcePin || pin === record.pin)
+      ? [] : [{ id: record.id, pin: record.pin, main_pin: pin }];
+  });
+}
+
 interface MachineJudgeState {
-  pending?: { prUrl: string; ids: string[] };
+  pending?: { prUrl: string; ids: string[]; records?: RulingPins[]; repoRoot?: string };
   /** A record whose judge PR a person closed, by the pin it had: not re-asked until it changes. */
   declined?: Record<string, string>;
   /** The judge's answer for a record not yet landed, by the pin it judged: reused with no model call
@@ -387,6 +423,25 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   if (state.pending) {
     const pr = ports.prState?.(state.pending.prUrl) ?? "unknown";
     if (pr === "open" || pr === "unknown") {
+      const pendingPlan = ports.plan();
+      const records = state.pending.records ?? state.pending.ids.map((id) => ({
+        id, relPath: shardRelPath(pendingPlan.byId.get(id) ?? {}) ?? "",
+        pin: state.rulings?.[id]?.pin ?? "unknown", sourcePin: state.rulings?.[id]?.pin ?? "unknown",
+      }));
+      const source = pendingPlan.tasks.find((t) => t.sourcePath !== undefined)?.sourcePath;
+      const root = state.pending.repoRoot ?? (source === undefined ? undefined : dirname(dirname(dirname(source))));
+      if (root === undefined) throw new Error("machine judge: pending PR has no merge-target checkout");
+      const stale = staleRulingPins(records, mainRecords(root, records.map((r) => r.relPath).filter(Boolean)));
+      if (stale.length > 0) {
+        const comment = "Withdrawing stale machine-filing rulings after origin/main changed:\n" +
+          stale.map((r) => `${r.id}: ruling pin ${r.pin}; main pin ${r.main_pin ?? "removed"}`).join("\n");
+        ghExec(["pr", "close", state.pending.prUrl, "--comment", comment], { encoding: "utf8", stdio: "pipe" });
+        ports.log("machine_judge.withdrawn", { pr_url: state.pending.prUrl, stale });
+        for (const id of state.pending.ids) delete state.rulings?.[id];
+        state.pending = undefined;
+        writeAtomic(statePath, JSON.stringify(state) + "\n");
+        return report;
+      }
       ports.log("machine_judge.waiting", { pr_url: state.pending.prUrl });
       return report;
     }
@@ -467,7 +522,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   const root = ports.writeRoot ?? ws?.root;
   if (root === undefined) throw new Error("machine judge: neither a workspace nor a write root was supplied");
   try {
-    const landed: { id: string; relPath: string; pin: string; action: string }[] = [];
+    let landed: (RulingPins & { action: string })[] = [];
     for (const r of ruled) {
       try {
         const relPath = shardRelPath(r.task)!;
@@ -500,11 +555,11 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
           continue;
         }
         writeAtomic(join(root, relPath), out.contents);
-        landed.push({ id: r.task.id, relPath, pin, action: r.ruling.action });
+        landed.push({ id: r.task.id, relPath, pin, sourcePin: taskRulingPin(shardRecord(text!, relPath)), action: r.ruling.action });
         if (r.ruling.action === "proceed") report.proceeded.push(r.task.id);
         else {
           report.escalated.push(r.task.id);
-          ports.stageProposal(machineJudgeProposal(r));
+          if (!ws) ports.stageProposal(machineJudgeProposal(r));
         }
       } catch (e) {
         // One bad record is ledgered and skipped; the rest of the pass still lands (2026-09-30).
@@ -513,12 +568,27 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
       }
     }
     if (ws && landed.length > 0) {
+      const stale = staleRulingPins(landed, mainRecords(root, landed.map((l) => l.relPath)));
+      const staleIds = new Set(stale.map((r) => r.id));
+      for (const r of stale) {
+        delete state.rulings[r.id];
+        ports.log("machine_judge.pin_stale", { task_id: r.id, pin: r.pin, main_pin: r.main_pin });
+      }
+      landed = landed.filter((l) => !staleIds.has(l.id));
+      report.proceeded = report.proceeded.filter((id) => !staleIds.has(id));
+      report.escalated = report.escalated.filter((id) => !staleIds.has(id));
+      for (const r of ruled) if (report.escalated.includes(r.task.id)) ports.stageProposal(machineJudgeProposal(r));
+    }
+    if (ws && landed.length > 0) {
       report.prUrl = ws.land({
         paths: landed.map((l) => l.relPath),
         title: `chore(plan): the machine-filing judge rules on ${landed.length} machine-filed task(s)`,
         body: machineJudgePrBody(landed),
       });
-      if (report.prUrl) state.pending = { prUrl: report.prUrl, ids: landed.map((l) => l.id) };
+      if (report.prUrl) state.pending = {
+        prUrl: report.prUrl, ids: landed.map((l) => l.id), records: landed,
+        repoRoot: dirname(dirname(dirname(ruled[0]!.task.sourcePath!))),
+      };
       ports.log("machine_judge.landed", { pr_url: report.prUrl ?? null, ids: landed.map((l) => l.id) });
     }
   } finally {
