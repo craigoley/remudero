@@ -25,7 +25,7 @@ import { mkdir as mkdirAsync, readFile as readFileAsync } from "node:fs/promises
 import { baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile } from "./lib/base-reproduction.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { CHECK_REQUEUE_STEP, requeuedCheckKeysFromLedger } from "./lib/sweep.js";
-import { ghExec, ghJsonAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
+import { ghExec, ghJsonAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
@@ -489,6 +489,7 @@ import {
   escalationContractRevision,
   findDuplicateEscalation,
   ghIssueGateway,
+  ghIssueGatewayAsync,
   presenceMode,
   setPresenceMode,
   tryEscalate,
@@ -1157,7 +1158,9 @@ import {
   repairRefusedTask,
   type RefusalViolation,
 } from "./lib/dispatch-repair.js";
-import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, replayOptIn } from "./lib/replay-harness.js";
+import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, replayOptIn,
+  pairedReviewerReplayCommand, replayPairedReviews, type ReviewerReplayCommandInput } from "./lib/replay-harness.js";
+import { judgeInstanceLiveness, readLivenessRows, LIVENESS_WINDOW_MS } from "./lib/fleet-liveness.js";
 import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, type GoldenTask } from "./lib/replay.js";
 import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount, type Mounts } from "./lib/mounts.js";
@@ -2594,7 +2597,11 @@ import {
   gitPushRunBranchAsync,
   gitPushEmptyCommit,
   LanePushForeignHeadError,
+  runStepsAsync,
+  runStepsSync,
+  step,
   type PushRunBranchAsyncOpts,
+  type Steps,
 } from "./lib/git-push.js";
 import {
   ensureWorkerKeychain,
@@ -22096,6 +22103,17 @@ export interface ReplayGoldensDeps {
   log?: (message: string) => void;
 }
 
+export async function benchmarkReviewerReplayCommand(rest: string[], deps: Partial<ReviewerReplayCommandInput>
+  & { usageDeps?: Parameters<typeof readUsageSnapshotPreferSdk>[1] } = {}): Promise<number> {
+  return pairedReviewerReplayCommand(rest, (input) => replayPairedReviews(input), {
+    ...deps, readIdle: deps.readIdle ?? (async (stateDir, config) => {
+      const instance = { name: "operator-reviewer", repo: "operator/reviewer", stateDir };
+      return { liveness: judgeInstanceLiveness(instance, readLivenessRows(instance, systemClock.now() - LIVENESS_WINDOW_MS), systemClock.now()),
+        headroom: await readUsageSnapshotPreferSdk(config, deps.usageDeps) };
+    }),
+  });
+}
+
 /**
  * `rmd replay-goldens --confirm-spend [--limit N] [--ledger <path>]` -- W1-T2689's PRODUCTION
  * CALLER, the piece the golden-replay leg was missing.
@@ -34223,9 +34241,19 @@ export function requeueActionsJob(
   log: (step: string, extra?: Record<string, unknown>) => void,
   exec: (args: string[]) => unknown = ghExec,
 ): boolean {
+  return runStepsSync(requeueActionsJobSteps(owner, repo, failure, log, exec));
+}
+
+function* requeueActionsJobSteps(
+  owner: string,
+  repo: string,
+  failure: { name: string; jobId?: string },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  exec: (args: string[]) => unknown,
+): Steps<boolean> {
   if (!failure.jobId) return false;
   try {
-    exec(["api", "-X", "POST", `repos/${owner}/${repo}/actions/jobs/${failure.jobId}/rerun`]);
+    yield* step(() => exec(["api", "-X", "POST", `repos/${owner}/${repo}/actions/jobs/${failure.jobId}/rerun`]));
     return true;
   } catch (error) {
     log("main.health.ci_requeue.error", {
@@ -34235,6 +34263,16 @@ export function requeueActionsJob(
     });
     return false;
   }
+}
+
+export function requeueActionsJobAsync(
+  owner: string,
+  repo: string,
+  failure: { name: string; jobId?: string },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  exec: (args: string[]) => unknown = (args) => ghTextAsync(args),
+): Promise<boolean> {
+  return runStepsAsync(requeueActionsJobSteps(owner, repo, failure, log, exec));
 }
 
 /**
@@ -35826,13 +35864,13 @@ export async function daemonCommand(
   // not two. Serve still only writes the signed marker and never receives this callback.
   const mainHealthRung = buildMainHealthRung(target.owner, target.repo, {
     fetch: (args) => ghJsonAsync(args),
-    issues: ghIssueGateway(target.owner, target.repo),
+    issues: ghIssueGatewayAsync(target.owner, target.repo),
     ledgerPath,
     runId,
     log,
     freshMs: policy.values.githubEventWake.checkSettleMs,
-    readCiFailures: (rollup) => fetchCiFailures(target.owner, target.repo, [...(rollup ?? [])]),
-    requeueCheck: (failure) => requeueActionsJob(target.owner, target.repo, failure, log),
+    readCiFailures: (rollup) => fetchCiFailuresAsync(target.owner, target.repo, [...(rollup ?? [])]),
+    requeueCheck: (failure) => requeueActionsJobAsync(target.owner, target.repo, failure, log),
     // W1-T4056: judge only the checks that gate a merge. A scheduled monitor attaches its run to main's
     // head too, and judging it filed 65 of 83 "main is red" issues; a red one is now ledgered as
     // `advisory_failing_checks`. [] on any unreadable contract keeps "judge every check", never green.
@@ -38625,6 +38663,14 @@ export function defaultCiAnnotationFetch(owner: string, repo: string, checkRunId
   const out = ghExec(["api", `repos/${owner}/${repo}/check-runs/${checkRunId}/annotations`],
     { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
   );
+  return failureAnnotationLines(out);
+}
+
+export async function defaultCiAnnotationFetchAsync(owner: string, repo: string, checkRunId: string): Promise<string[]> {
+  return failureAnnotationLines(await ghTextAsync(["api", `repos/${owner}/${repo}/check-runs/${checkRunId}/annotations`]));
+}
+
+function failureAnnotationLines(out: string): string[] {
   const annotations = JSON.parse(out) as Array<{ annotation_level?: string; message?: string }>;
   return annotations
     .filter((a) => a.annotation_level === "failure" && typeof a.message === "string")
@@ -38639,6 +38685,10 @@ export function defaultCiJobLogFetch(owner: string, repo: string, jobId: string)
     stdio: ["ignore", "pipe", "ignore"],
     maxBuffer: 1 << 22,
   });
+}
+
+export function defaultCiJobLogFetchAsync(owner: string, repo: string, jobId: string): Promise<string> {
+  return ghTextAsync(["api", `repos/${owner}/${repo}/actions/jobs/${jobId}/logs`], { maxBuffer: 1 << 22 });
 }
 
 /** GitHub's job-log endpoint stamps every line; every line pattern below is anchored after it. */
@@ -38733,17 +38783,45 @@ export function fetchCiFailures(
   tailLines = 60,
   options: CiAnnotationFetch | CiFailureFetchOptions = {},
 ): CiFailure[] {
-  const fetch = ciFetchOptions(options);
+  return runStepsSync(ciFailuresSteps(owner, repo, rollup, tailLines, ciFetchOptions(options)));
+}
+
+export interface CiFailureFetchOptionsAsync {
+  fetchAnnotations?: (owner: string, repo: string, checkRunId: string) => string[] | Promise<string[]>;
+  fetchJobLog?: (owner: string, repo: string, jobId: string) => string | Promise<string>;
+  annotationReadLimit?: number;
+}
+
+export function fetchCiFailuresAsync(
+  owner: string,
+  repo: string,
+  rollup: RollupCheck[] | undefined,
+  tailLines = 60,
+  options: CiFailureFetchOptionsAsync = {},
+): Promise<CiFailure[]> {
+  return runStepsAsync(
+    ciFailuresSteps(owner, repo, rollup, tailLines, {
+      fetchAnnotations: options.fetchAnnotations ?? defaultCiAnnotationFetchAsync,
+      fetchJobLog: options.fetchJobLog ?? defaultCiJobLogFetchAsync,
+      annotationReadLimit: options.annotationReadLimit ?? DEFAULT_CI_ANNOTATION_READ_LIMIT,
+    }),
+  );
+}
+
+function* ciFailuresSteps(
+  owner: string,
+  repo: string,
+  rollup: RollupCheck[] | undefined,
+  tailLines: number,
+  fetch: Required<CiFailureFetchOptionsAsync>,
+): Steps<CiFailure[]> {
   let annotationReads = 0;
   const failing = dedupeRollupByLatestAttempt(rollup ?? []).filter((c) => {
     const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
     return REQUIRED_CHECK_FAIL.has(s);
   });
-  // #2918: `ci-gate` is a downstream aggregator — see `withoutDownstreamGateFailure`'s own doc.
-  // Applied HERE, at the single producer, so every consumer (the fix prompt, the escalation body,
-  // `describeCiFailures`) sees the same narrowed list rather than each re-deriving it.
-  return withoutDownstreamGateFailure(
-    failing.map((c) => {
+  const failures: CiFailure[] = [];
+  for (const c of failing) {
     const name = c.name ?? c.context ?? "unknown";
     let logTail = "";
     // The named outcome for an empty tail. STILL BEST-EFFORT: every path below either assigns a
@@ -38760,7 +38838,7 @@ export function fetchCiFailures(
     if (jobId && annotationReads < fetch.annotationReadLimit) {
       try {
         annotationReads += 1;
-        const messages = fetch.fetchAnnotations(owner, repo, jobId).filter((m) => m.trim() !== "");
+        const messages = (yield* step(() => fetch.fetchAnnotations(owner, repo, jobId))).filter((m) => m.trim() !== "");
         const evidence = messages.filter((m) => !isBareExitCodeAnnotation(m));
         const bareExitOnly = messages.length > 0 && evidence.length === 0;
         if (evidence.length > 0) {
@@ -38792,7 +38870,7 @@ export function fetchCiFailures(
     }
     if (jobId && (logTail.trim() === "" || annotationFallback?.outcome === "bare-exit-code")) {
       try {
-        const out = fetch.fetchJobLog(owner, repo, jobId);
+        const out = yield* step(() => fetch.fetchJobLog(owner, repo, jobId));
         const extracted = extractCiFailureRegion(out, tailLines);
         // W1-T2733: the region, PLUS any declared generator remedy the slice would have discarded.
         // Identical bytes to the region whenever the log names no recognised remedy.
@@ -38813,7 +38891,7 @@ export function fetchCiFailures(
         logTail = "";
       }
     }
-    return {
+    failures.push({
       name,
       logTail,
       conclusion: (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase(),
@@ -38822,9 +38900,12 @@ export function fetchCiFailures(
       ...(logUnavailable === undefined ? {} : { logUnavailable }),
       ...(tailSource ? { tailSource } : {}),
       ...(annotationFallback ? { annotationFallback } : {}),
-    };
-  }),
-  );
+    });
+  }
+  // #2918: `ci-gate` is a downstream aggregator — see `withoutDownstreamGateFailure`'s own doc.
+  // Applied HERE, at the single producer, so every consumer (the fix prompt, the escalation body,
+  // `describeCiFailures`) sees the same narrowed list rather than each re-deriving it.
+  return withoutDownstreamGateFailure(failures);
 }
 
 /**
@@ -51581,7 +51662,8 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     : rest[0] === "readiness" ? await benchmarkAaReadinessCommand(rest.slice(1),
       (request) => runBenchmarkAaReadiness({ ...benchmarkAaReadinessRuntime(request.stateDir), ...request }))
     : await benchmarkAaCommand(rest, (input) => buildBenchmarkAaReport(input))],
-  ["benchmark-paid-pilot", async (rest) => await benchmarkPaidPilotCommand(rest, (input) => activateBenchmarkPaidPilot(input),
+  ["benchmark-paid-pilot", async (rest) => rest[0] === "replay" ? await benchmarkReviewerReplayCommand(rest.slice(1))
+    : await benchmarkPaidPilotCommand(rest, (input) => activateBenchmarkPaidPilot(input),
     { pairedReport: pairedPilotReportView })],
   ["memory-lint", (rest) => memoryLintCommand(rest)],
   ["ledger-compact", (rest) => ledgerCompactCommand(rest)],
