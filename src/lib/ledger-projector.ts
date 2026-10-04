@@ -18,6 +18,7 @@ import { LEDGER_FILENAME } from "./ledger-path.js";
 import { ledgerRotationEntries, type LedgerCorpusEntry } from "./ledger-union.js";
 import { openReadModel, withWriteTransaction, type ReadModelDb, type ReadModelLease, type ReadModelStatement } from "./read-model-db.js";
 import { REPO_ROW_PROJECTION } from "./repo-ledger-index.js";
+import { RECENT_ROW_PROJECTION } from "./recent-projection.js";
 
 export const LEDGER_PROJECTOR_SCHEMA_VERSION = 1;
 /** A row stamped further ahead of ingest time than this is quarantined, not applied (design §1.2). */
@@ -58,7 +59,8 @@ export const LEDGER_PROJECTOR_DDL = `
 
 /** Opens (or creates) one instance's projector read model under `stateDir` (core's, design §1.7). */
 export function openProjectorReadModel(stateDir: string, instance: string, clock?: Clock, generation?: string | null): ReadModelDb {
-  return openReadModel({ stateDir, instance, schemaVersion: LEDGER_PROJECTOR_SCHEMA_VERSION, ddl: LEDGER_PROJECTOR_DDL, ...(clock ? { clock } : {}), ...(generation !== undefined ? { generation } : {}) });
+  return openReadModel({ stateDir, instance, schemaVersion: LEDGER_PROJECTOR_SCHEMA_VERSION, ddl: `${LEDGER_PROJECTOR_DDL}
+    INSERT OR IGNORE INTO meta(k, v) VALUES('instance', '${instance}');`, ...(clock ? { clock } : {}), ...(generation !== undefined ? { generation } : {}) });
 }
 
 /** The steps the fact store keeps (design §3.5 `FACT_STEPS`); every other row is identity-only. */
@@ -258,7 +260,7 @@ export function runWorkerRow(body: string, fields: string): Record<string, unkno
 }
 
 /** Every projection a store carries; a view that needs a table no projection keeps adds one here. */
-export const LEDGER_ROW_PROJECTIONS: readonly LedgerRowProjection[] = [REPO_ROW_PROJECTION, ACTIVITY_RING_PROJECTION, TASK_ACTIVITY_PROJECTION, RUN_ACTIVITY_PROJECTION, RUN_WORKER_PROJECTION];
+export const LEDGER_ROW_PROJECTIONS: readonly LedgerRowProjection[] = [REPO_ROW_PROJECTION, ACTIVITY_RING_PROJECTION, TASK_ACTIVITY_PROJECTION, RUN_ACTIVITY_PROJECTION, RUN_WORKER_PROJECTION, RECENT_ROW_PROJECTION];
 
 export interface LedgerProjectorOptions {
   /** The instance's state dir: the one holding its live ledger and rotation archives. */
