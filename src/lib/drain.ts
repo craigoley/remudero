@@ -11,7 +11,7 @@ import type { RunResult } from "./run-result.js";
 import { headroomExhausted, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
-import { checkDispatchGovernors, governorDeferPayload, type DispatchGovernorVerdict } from "./dispatch-governor.js";
+import { checkDispatchGovernors, governorDeferPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict } from "./dispatch-governor.js";
 import { releasedTaskIds, unmetDependencies, unmetTaskPrecondition, type Plan, type Task, type TaskPreconditionOptions, type UnmetTaskPrecondition } from "./plan.js";
 import {
   NO_OBSERVED_SCOPE,
@@ -1297,6 +1297,9 @@ export interface DrainDeps extends TaskPreconditionOptions {
    *  W1-T5404, once per single-lane pass in `runDrain`; a throw fails OPEN at both. Never consulted
    *  from the sweep. Optional. */
   checkMemoryGovernor?: () => MemoryGovernorResult | undefined;
+  /** W1-T5529: the QUIET-HOURS hold, forwarded to `checkDispatchGovernors` per lane, where a throw
+   *  fails open. Before this field no drain caller could reach W1-T5482's `quiet_hours_deferred`. */
+  checkQuietHours?: DispatchGovernorDeps["checkQuietHours"];
   /** W1-T119: true when a task's own GitHub read is INDETERMINATE, re-derived from the SAME
    *  projection `refreshMerged` just built — the same freshness contract as `isOpenPr`. Optional. */
   isIndeterminate?: (taskId: string) => boolean;
@@ -1512,7 +1515,10 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
 
     // DAILY COST CEILING (W1-T317): a global gate, checked here in the same position as headroom,
     // before `nextRunnable` is called. STOPS the pass outright; drainage never runs through this loop.
-    const costGoverned = deps.checkCostGovernor?.();
+    // W1-T5529: a throw FAILS CLOSED, as the per-lane `unreadable` verdict does — the pass ends.
+    const costRead = readPassGovernor("cost", () => deps.checkCostGovernor?.(), log);
+    if (costRead.kind === "unreadable") return summary(costRead.stopReason, costRead.stopDetail);
+    const costGoverned = costRead.result;
     if (costGoverned) {
       log("drain.cost_governor", {
         observed_day_cost_usd: costGoverned.observedDayCostUsd,
@@ -1525,8 +1531,10 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     }
 
     // QUEUE GOVERNOR / WIP CEILING (W1-T321): a global gate, checked in the same position as the cost
-    // governor. STOPS the pass outright; drainage never runs through this loop.
-    const queueGoverned = deps.checkQueueGovernor?.();
+    // governor. STOPS the pass outright; drainage never runs through this loop. A throw fails closed.
+    const queueRead = readPassGovernor("queue", () => deps.checkQueueGovernor?.(), log);
+    if (queueRead.kind === "unreadable") return summary(queueRead.stopReason, queueRead.stopDetail);
+    const queueGoverned = queueRead.result;
     if (queueGoverned) {
       log("drain.queue_governor", {
         observed_open_count: queueGoverned.observedOpenCount,
@@ -1749,6 +1757,28 @@ export function laneDispatchBudget(input: LaneBudgetInput): number {
   return Math.min(lanes, headroom);
 }
 
+/** W1-T5529 — one PASS-LEVEL cost or queue reading, in either drain loop. A throw is logged with the
+ *  error and answered `unreadable`, carrying that gate's deferral: the caller ends the pass on it, so
+ *  it fails CLOSED as the per-lane `unreadable` verdict in `checkDispatchGovernors` does — never
+ *  swallowed into "admitted". */
+function readPassGovernor<T>(
+  source: "cost" | "queue",
+  read: () => T | undefined,
+  log: NonNullable<DrainDeps["log"]>,
+): { kind: "read"; result: T | undefined } | { kind: "unreadable"; stopReason: StopReason; stopDetail: string } {
+  try {
+    return { kind: "read", result: read() };
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e);
+    log(source === "cost" ? "drain.cost_governor.unreadable" : "drain.queue_governor.unreadable", { error });
+    return {
+      kind: "unreadable",
+      stopReason: source === "cost" ? "cost_governor_deferred" : "queue_governor_deferred",
+      stopDetail: `${source} governor reading unreadable (${error}) — failing closed, new dispatch deferred`,
+    };
+  }
+}
+
 /** W1-T5482 — the stop of a lane pass whose EVERY lane `verdict` refused at admission: the gate that
  *  held, its reading worded as the pass-level checks word it. An unreadable reading is the deferral
  *  of the gate it came from, with the error kept in the detail. */
@@ -1919,7 +1949,9 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     }
 
     // DAILY COST CEILING (W1-T317) — see the single-lane loop's identical branch above.
-    const costGoverned = deps.checkCostGovernor?.();
+    const costRead = readPassGovernor("cost", () => deps.checkCostGovernor?.(), log);
+    if (costRead.kind === "unreadable") return summary(costRead.stopReason, costRead.stopDetail);
+    const costGoverned = costRead.result;
     if (costGoverned) {
       log("drain.cost_governor", {
         observed_day_cost_usd: costGoverned.observedDayCostUsd,
@@ -1933,7 +1965,9 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
 
     // QUEUE GOVERNOR / WIP CEILING (W1-T321) — see the single-lane loop's identical branch. Distinct
     // from `openPrCount`/`laneDispatchBudget` below, which only SIZES this pass; this stops it.
-    const queueGoverned = deps.checkQueueGovernor?.();
+    const queueRead = readPassGovernor("queue", () => deps.checkQueueGovernor?.(), log);
+    if (queueRead.kind === "unreadable") return summary(queueRead.stopReason, queueRead.stopDetail);
+    const queueGoverned = queueRead.result;
     if (queueGoverned) {
       log("drain.queue_governor", {
         observed_open_count: queueGoverned.observedOpenCount,
