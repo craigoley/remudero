@@ -1,0 +1,49 @@
+- id: W1-T5635
+  title: "THE STRIKE LADDER READS ITS OWN MERGE BASE AND CLIMBS PAST A CONFLICT — `decideStrikeLadderRung` holds 'merge base unreadable' because `currentMergeBaseSha` is hydrated only for review-orphaned PRs, and a refresh that conflicts holds forever instead of rebuilding: 140 holds and zero ladder actions since W1-T5536 shipped, while #9066/#8954 sat red for hours"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high  # Rule 19: one ladder — its effects, call site and wiring
+  origin: "operator session 2026-10-04: #9066 red since 08:01Z and #8954 since 03:45Z with no fix rung picking them up"
+  plan_refs: [W1-T100, W1-T5536, W1-T5542, W1-T5537, W1-T5532, W1-T5535, W1-T5534]
+  files: [src/lib/strike-ladder.ts, src/lib/sweep.ts, src/run-task.ts, test/strike-exhaustion-climbs-a-ladder-before-it-reaches-a-human.test.ts, test/the-strike-ladder-reads-a-merge-base-and-climbs-past-a-conflict.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main d13d797c; ledger read-only.
+    #9066 (W1-T5532): coverage-shard red 08:11Z; three codex fix rounds 08:16-08:25Z each
+    `fix.commit_refused` ("the worker changed nothing" x2, "no anchored COMMIT_MESSAGE line"); from
+    08:26Z `blocked-ambiguous` "fix rounds refused twice at this head"; dirty since 08:54Z (23
+    `sweep.dirty_fleet_rebase.conflict`). #8954 (W1-T4270): the same park since 01:32Z. The refused
+    rounds are W1-T5532/W1-T5534/W1-T5535's (unmerged). The park hands off to W1-T5536's strike
+    ladder: `isFixStrikeExhausted` admits `repeatedFixRefusal`, so in runSweep `strikeLadderDue`
+    routes the PR to `applyStrikeLadder` and suppresses the ordinary escalation. The ladder has
+    never acted: zero `sweep.strike_ladder.refreshed`/`requeued`/`digest_opened` rows in the 10-0x
+    rotations plus the live ledger (control: `sweep.strike_ladder.held` rows are visible).
+    W1-T100 routed blocked_ci to the ci-log fix rung; this task is the ladder AFTER that rung
+    is exhausted, which W1-T100 never covered.
+    (a) `applyStrikeLadder` passes `pr.currentMergeBaseSha`, which run-task.ts fills only from
+    `hydrateReviewReuseFacts(..., reviewOrphanedPrs, ...)`; every other ladder-due PR reads
+    undefined and holds — 75 "merge base unreadable" holds on #9061 #9066 #9079 #9076, 07:40-11:43Z.
+    (b) The refresh rung's `deps.updateBranch` -> "conflict" returns `hold("refresh did not
+    take...")`; the next pass picks refresh again because main still moved, so the PR never reaches
+    rebuild or digest — 65 holds on #8954, 05:24-11:43Z. The W1-T5536 suite injects
+    `currentMergeBaseSha` in its fixture and asserts that a conflict holds, so it cannot see either.
+  design: |
+    (i) Add `readMergeBase(pr)` to the strike-ladder effects: one compare `main...head` read
+    (`tryFetchReviewReuseFacts`' args), done lazily in `applyStrikeLadder` only when
+    `pr.currentMergeBaseSha` is absent and only for ladder-due PRs, so cost is bounded by that
+    population. Unreadable stays a named hold.
+    (ii) When the refresh returns "conflict", record it on the existing `sweep.strike_ladder.held`
+    row as `refresh_outcome`, then fall through to rebuild if requeueable && rebuilds < 2, else to
+    digest; a rebuild from main resolves the conflict. Update the W1-T5536 conflict case to match.
+  acceptance:
+    - claim: "a ladder-due PR outside the review-orphan population reads its merge base and refreshes, and a refresh that conflicts proceeds to rebuild (close and requeue) in the same pass"
+      proof: "unit test: test/the-strike-ladder-reads-a-merge-base-and-climbs-past-a-conflict.test.ts"
+  falsifier: |
+    Delete the `readMergeBase` fallback and "merge base unreadable" returns; delete the conflict
+    fall-through and the hold returns. Each fails the new test.

@@ -1,0 +1,43 @@
+- id: W1-T5618
+  title: "A SHARD REPAIR THAT DID NOT LAND IS RETRIED — `runShardRepairPass` deletes every request in `finally` whatever its outcome and `quarantineReporter` re-requests only in a new process, so a not-landed or failed repair waits for a restart; and `repairRequestedShard` skips a blob forever once `opened.json` names any PR, even one closed unmerged"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: medium
+  origin: "operator session 2026-10-04: reviewing the W1-T5519 plan self-repair lane (#8991, #9046)"
+  plan_refs: [W1-T5519, W1-T5472, W1-T5348, W1-T4409]
+  files: [src/run-task.ts, test/a-shard-repair-that-did-not-land-is-retried.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main d13d797c. W1-T5519 (#8991, follow-up #9046) wired the lane in
+    src/run-task.ts. `shardRepairRequester` writes requests/<hash>.json once per quarantine that
+    `quarantineReporter` has not already seen in this process (its in-process `reported` Set).
+    `runShardRepairPass` then calls `rmSync(path)` in `finally` for every request; its doc says
+    "A request is consumed whatever its outcome; a daemon restart re-requests". So
+    `plan.shard_repair_not_landed` (a preflight refusal) and `plan.shard_repair_failed` (a read or
+    land threw) both leave the shard quarantined and the lane idle until the next restart.
+    Separately, `repairRequestedShard` ledgers `plan.shard_repair_skipped` whenever `opened[blob]`
+    is set and never reads that PR's state. `opened.json` (state/plan-shard-repair) persists across
+    restarts, so a repair PR closed unmerged blocks those bytes for good.
+    One task, not two: both gaps are one rule in one state machine — "a blob is done only when its
+    repair PR is open or merged, or main's blob changed".
+  design: |
+    (i) A request stays until an end state: the PR opened, a deterministic
+    `repairDuplicateKeyShard` refusal for these bytes, or origin/main's blob now parses or differs.
+    A not-landed or failed attempt rewrites the request with `attempts+1` and a `next_at` backoff;
+    `shardRepairsPending` counts only due requests so the plan garden does not spin. After 3
+    attempts ledger `plan.shard_repair_abandoned`; the escalation stays standing.
+    (ii) Before skipping on `opened[blob]`, read the PR. Open or merged: skip as today. Closed
+    unmerged: drop the entry and open one fresh PR, recorded as `reopened`; a second close is
+    respected. An unreadable state skips, so a duplicate PR is never opened.
+  acceptance:
+    - claim: "a not-landed or failed shard repair keeps its request and is retried on a later pass without a restart, abandons after its attempt cap, and a blob whose recorded repair PR was closed unmerged gets one fresh PR while an open or merged one is still skipped"
+      proof: "unit test: test/a-shard-repair-that-did-not-land-is-retried.test.ts"
+  falsifier: |
+    Restore the unconditional `rmSync` in `finally` and the suite's not-landed request is gone
+    before the second pass. Drop the PR-state read and the closed-PR blob stays skipped.

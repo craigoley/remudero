@@ -1,0 +1,40 @@
+- id: W1-T5621
+  title: "AN ACCEPTANCE HEADER INSIDE A CODE FENCE IS AN EXAMPLE, NOT THE BLOCK — `parseAcceptanceBlock` and `acceptanceBlockRegion` match `ACCEPTANCE_HEADER_RE` on fenced lines, so a body that shows the format inside a ``` fence judges the example and never reads the real block, and `replaceAcceptanceBlock` demotes the example instead of the real header"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one fence-aware header walker, two readers
+  origin: "operator session 2026-10-04: a PR body quoting the acceptance format in a code fence"
+  plan_refs: [W1-T3142, W1-T2762, W1-T1264, W1-T3066]
+  files: [src/lib/review.ts, src/lib/plan-pr-emitter.ts, test/an-acceptance-header-inside-a-code-fence-is-an-example-not-the-block.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main d13d797c. `parseAcceptanceBlock` (src/lib/review.ts) walks lines
+    and enters its block at the first line matching `ACCEPTANCE_HEADER_RE`; it keeps no fence
+    state. `acceptanceBlockRegion` (shared with `acceptanceBlockDiagnostics` and
+    `stripQuotedRegions`) does the same walk. REPRODUCED with tsx on a body holding a fenced
+    example (a ``` fence holding "## Acceptance" and one example bullet with a grep proof) ahead
+    of the real "## Acceptance" header and its bullet with a unit-test proof: it returns ONLY the
+    example criterion and the region is {headerLine:2,endLine:4}, so review executes the example's
+    proof and never reads the real block. `replaceAcceptanceBlock` (src/lib/plan-pr-emitter.ts)
+    demotes the FIRST header match with its own copy of the regex — the fenced example — leaving
+    the author's real header live above the appended repair block. `stripQuotedRegions` already
+    tracks ``` fences for claim scanning; the acceptance header search is the reader that does not.
+  design: |
+    Add one exported fence-aware walker in review.ts, `acceptanceHeaderLine(lines)`. It toggles on
+    a CommonMark fence opener (``` or ~~~, closed by the same character with length at least the
+    opener's) and ignores a header match inside a fence. `parseAcceptanceBlock`,
+    `acceptanceBlockRegion` and `replaceAcceptanceBlock` all start from it, so the three cannot
+    disagree. Bullet parsing after the real header is unchanged. A body whose only header is
+    fenced resolves `[]`, which fails closed as before.
+  acceptance:
+    - claim: "parseAcceptanceBlock, acceptanceBlockRegion and replaceAcceptanceBlock skip an Acceptance header inside a backtick or tilde fence, so a body with a fenced example and a real block parses the real block's criteria and a repair demotes the real header"
+      proof: "unit test: test/an-acceptance-header-inside-a-code-fence-is-an-example-not-the-block.test.ts"
+  falsifier: |
+    Drop the fence check from the header walker. The fixture body parses back the fenced example's
+    criterion instead of the real one.

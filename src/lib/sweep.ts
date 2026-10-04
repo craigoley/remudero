@@ -38,6 +38,7 @@ import {
 } from "./arm-auto-merge.js";
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair } from "./classify.js";
+import { blockerFields, finalBlocker, priorBlockersFromLedger, type PrBlocker } from "./pr-blocker.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { gitPushEmptyCommit, gitPushRunBranch } from "./git-push.js";
@@ -4814,6 +4815,7 @@ export function planOnlyRunBranchReceipts(
 /** The disposition derived for one PR, plus a stated human reason. */
 export interface DispositionResult {
   disposition: Disposition;
+  blocker: PrBlocker;
   reason: string;
 }
 
@@ -7047,6 +7049,7 @@ function renderObservedFacts(pr: OpenPrView, state: ObservedBlockerState | undef
  *  TABLE edit. */
 interface DispositionRule {
   readonly disposition: Disposition;
+  readonly blocker: PrBlocker;
   /** Observed-state predicate over the PR and the tunable {@link SweepPolicy} thresholds. `now` is
    *  the same sweep-pass clock {@link ageDays} came from, threaded so the WAIT and stale-pending
    *  rows derive the pending age without a second, independently-sourced clock. */
@@ -7269,6 +7272,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // NOTHING about the PR but `status`. `"unique"` and `"indeterminate"` are both inert here.
     disposition: "stale",
     when: (pr, policy) => policy.supersessionDisposalEnabled === true && pr.supersessionVerdict?.status === "superseded",
+    blocker: "other",
     // Guards `evidence` defensively (never a `!` assertion) even though `when` above already
     // requires `status === "superseded"`: a malformed verdict must degrade to a legible reason,
     // never throw and abort the whole sweep pass over one bad producer.
@@ -7297,6 +7301,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // complement can never populate this field and can never be closed by this row.
     disposition: "stale",
     when: (pr) => pr.taskMergedBy != null,
+    blocker: "other",
     reason: (pr) => `task ${pr.taskId ?? "(unknown)"} already merged by #${pr.taskMergedBy} — closing the leftover implementation PR`,
   },
   {
@@ -7310,6 +7315,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // non-plan-filing condition that row established — never widens WHICH PRs a plan-filing
     // observation can close. Routes through the SAME reversible "stale" close every row here uses.
     disposition: "stale",
+    blocker: "other",
     when: (pr) =>
       pr.taskId !== undefined &&
       pr.isPlanFiling === false &&
@@ -7321,6 +7327,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
   },
   {
     disposition: "stale",
+    blocker: "other",
     when: (pr) =>
       pr.taskId !== undefined &&
       pr.taskRetirement !== undefined &&
@@ -7356,6 +7363,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // being what stands between a pull request and deletion.
     disposition: "stale",
     when: (pr) => pr.supersededBy != null && pr.supersessionVerdict?.status === "superseded",
+    blocker: "other",
     reason: (pr) =>
       `superseded-by #${pr.supersededBy}` +
       (pr.supersessionVerdict?.evidence
@@ -7365,6 +7373,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
   {
     disposition: "stale",
     when: (_pr, policy, ageDays) => ageDays >= policy.staleDays,
+    blocker: "other",
     reason: (_pr, policy, ageDays) =>
       `abandoned — no activity in ${Math.floor(ageDays)}d (>= ${policy.staleDays}d threshold)`,
   },
@@ -7375,6 +7384,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // majors, so routing is safe in every state; superseded and stale above still close first.
     disposition: "dep-review",
     when: (pr) => pr.isDependabot === true,
+    blocker: "awaiting-review",
     reason: (pr) => `dependabot PR — dep-review lane (checks ${pr.checksState}, review ${pr.reviewState})`,
   },
   {
@@ -7384,6 +7394,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // convert a refusal into a speculative patch. Required-CI red still wins via the explicit
     // guard, because that independent blocker must be repaired before any review verdict matters.
     disposition: "refused-escalate",
+    blocker: "escalated",
     when: (pr) =>
       !isBlockedCi(pr) &&
       pr.reviewState === "failure" &&
@@ -7398,6 +7409,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // generalised it to the blocked_ci shape via the same `isBlockedCi` rows 4 and 5 share —
     // without that, a strike-exhausted blocked_ci PR could never be re-armed by an answer.
     disposition: "blocked-fixable",
+    blocker: "review-failed",
     when: (pr, policy) => {
       if (!pr.pendingAnswer) return false;
       const reviewShape = pr.reviewState === "failure" && pr.unmetCriteria.length > 0;
@@ -7423,6 +7435,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // posted from scratch, so a re-offered head can still fail. NOT AUTHORITY TO OVERWRITE A
     // DIFFERENT BODY (W1-T2793): the guarded status site re-compares the digest before publishing.
     disposition: "post-review",
+    blocker: "awaiting-review",
     when: (pr) =>
       pr.checksState === "green" &&
       pr.requiredContextsUnreadable !== true &&
@@ -7443,6 +7456,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // "contradictory" forever. Requiring STRICT zero, not undefined, keeps legacy callers
     // byte-identical; `reviewPostRefused` makes the recovery one-shot for an unchanged input.
     disposition: "post-review",
+    blocker: "awaiting-review",
     when: (pr) =>
       pr.checksState === "green" &&
       pr.requiredContextsUnreadable !== true &&
@@ -7461,6 +7475,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // (design note iv: one ladder, one exhaustion route).
     disposition: "blocked-ambiguous",
     when: isFixStrikeExhausted,
+    blocker: "strikes-exhausted",
     // W1-T186: once checks are the reason strikes exhausted, NAME the check and sha here too, so
     // the ledgered reason never reads as the generic, uninvestigable "fix strikes exhausted".
     //
@@ -7484,6 +7499,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // Fix FIRST, ask only after exhaustion.
     disposition: "blocked-fixable",
     when: (pr) => isBlockedCi(pr),
+    blocker: "own-red",
     // W1-T2452: denominator is {@link fixCeilingInForce}, not the bare `policy.strikeCap` — see
     // that function's own doc; keeps this ratio naming the SAME ceiling the dispatch site
     // (`dispatchFix`, run-task.ts) actually budgets against.
@@ -7517,6 +7533,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // CLOSED until a producer populates `StrikeAttempt.unmetClaims`, so this row is inert today.
     disposition: "blocked-ambiguous",
     when: (pr) => pr.reviewState === "failure" && fixRungRepeatsIdenticalFailure(pr),
+    blocker: "escalated",
     reason: (pr, policy) =>
       `fix strike repeated the identical unmet criteria (strike ${pr.priorStrikes}/${policy.strikeCap}) — ` +
       `no further strike can add information — escalating before the cap`,
@@ -7528,6 +7545,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // still wins, but BEFORE ordinary review routing because this arm spends zero ordinary
     // strikes and reconstructs a different first effect.
     disposition: "blocked-fixable",
+    blocker: "review-failed",
     when: (pr) =>
       pr.reviewState === "failure" &&
       pr.instrumentEntangled === true &&
@@ -7546,6 +7564,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // `unmetCriteria` is non-empty this row is byte-identical to before that task.
     disposition: "blocked-fixable",
     when: (pr) => pr.reviewState === "failure" && (pr.unmetCriteria.length > 0 || (pr.actionableGateFailures?.length ?? 0) > 0),
+    blocker: "review-failed",
     // W1-T2452: denominator is {@link fixCeilingInForce} in both branches — see that
     // function's own doc; keeps this ratio naming the SAME ceiling the dispatch site
     // (`dispatchFix`, run-task.ts) actually budgets against.
@@ -7566,6 +7585,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // nothing unmet — that arm keeps today's wording verbatim for every attributable PR.
     disposition: "blocked-ambiguous",
     when: (pr) => pr.reviewState === "failure",
+    blocker: "escalated",
     reason: (pr) =>
       pr.criteriaRecoverable === false
         ? // W1-T2541: name the DERIVED repair, not only the defect. `diagnoseBodyDefects` reads the
@@ -7596,6 +7616,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // sufficient for the PR task's OWN rmd run branch, not for a human/contributor or foreign
     // run branch we do not own.
     disposition: "conflicted",
+    blocker: "conflict",
     when: (pr, policy) => {
       if (policy.mergeConflictAdmissionEnabled !== true || pr.mergeState !== "dirty") return false;
       const taskId = pr.taskId;
@@ -7645,6 +7666,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // the PR task's own rmd run branch; it is handled by the bounded worker above.
     disposition: "blocked-ambiguous",
     when: (pr) => pr.mergeState === "dirty",
+    blocker: "conflict",
     reason: (pr, policy) => {
       const evidence = pr.mergeConflict;
       const files = evidence?.files ?? [];
@@ -7664,6 +7686,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
   {
     disposition: "post-review",
     when: (pr) => reviewStatusSupersedesLedgerAttempt(pr),
+    blocker: "awaiting-review",
     reason: () =>
       "review_status_supersedes_ledger_attempt — GitHub reports a dated success strictly later than " +
       "the latest completed exact-input ledger attempt; re-running the authoritative reviewer before " +
@@ -7676,6 +7699,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // reviewer. Deliberately symmetric with the unowned FAILURE recovery above: both identity
     // signals must be present and the count STRICTLY zero, so legacy callers stay mergeable.
     disposition: "post-review",
+    blocker: "awaiting-review",
     when: (pr) =>
       pr.checksState === "green" &&
       pr.requiredContextsUnreadable !== true &&
@@ -7701,6 +7725,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // rejected alternative W1-T1000002 §(viii)(c) already on record.
     disposition: "held-draft",
     when: (pr) => pr.isDraft === true && pr.checksState === "green" && pr.reviewState === "success",
+    blocker: "held-draft",
     reason: () =>
       "open pull request is a draft — GitHub refuses auto-merge on a draft; held until marked " +
       "ready for review",
@@ -7729,6 +7754,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // re-earns its question and an override stops this row matching — `mergeable` then arms it.
     disposition: "blocked-ambiguous",
     when: (pr) => pr.checksState === "green" && pr.reviewState === "success" && pr.armRefusalIsTerminal === true,
+    blocker: "plan-proof-unrunnable",
     reason: () =>
       "every required check is green and remudero-review reports success, but the verdict ledgered " +
       "for this head is CAPPED (zero proofs executed) with no operator override — so auto-merge " +
@@ -7745,6 +7771,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // positive-distance PR, which never reaches here.
     disposition: "blocked-fixable",
     when: (pr, policy) => repairableCodeqlBlocker(pr) !== undefined && pr.priorStrikes < policy.strikeCap,
+    blocker: "own-red",
     reason: (pr) => {
       const alert = repairableCodeqlBlocker(pr);
       return (
@@ -7759,6 +7786,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // repaired and never auto-resolved, so it cannot look like a healthy wait.
     disposition: "blocked-ambiguous",
     when: (pr, policy) => scannerBlockerAmbiguity(pr, policy) !== undefined,
+    blocker: "escalated",
     reason: (pr, policy) =>
       `armed, checks green and review success, but mergeable_state is blocked and the scanner evidence is not one ` +
       `current CodeQL thread this fleet may repair (${scannerBlockerAmbiguity(pr, policy)}) — no thread is ` +
@@ -7770,6 +7798,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // words, "required contexts green, review success, unmerged".
     disposition: "mergeable",
     when: (pr) => pr.checksState === "green" && pr.reviewState === "success",
+    blocker: "awaiting-arm",
     reason: () => "review success, required checks green — arming auto-merge",
   },
   {
@@ -7780,6 +7809,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // escalate path as every other ambiguous block, so an operator sees a genuine question
     // instead of the PR sitting silently deduped forever.
     disposition: "blocked-ambiguous",
+    blocker: "escalated",
     when: (pr) =>
       pr.checksState === "green" &&
       pr.reviewState === "none" &&
@@ -7797,6 +7827,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // that did not change. The reason NAMES the head the verdict actually judged (acceptance
     // criterion 4) so the reuse is auditable, never a silent no-op.
     disposition: "review-reused",
+    blocker: "awaiting-review",
     when: (pr) =>
       pr.checksState === "green" &&
       pr.reviewState === "none" &&
@@ -7820,6 +7851,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // graded response, ordered STRICTLY BEFORE the total-loss rows below for the same reason as the
     // reuse row above.
     disposition: "discriminate-only",
+    blocker: "awaiting-review",
     when: (pr) =>
       pr.checksState === "green" &&
       pr.reviewState === "none" &&
@@ -7844,6 +7876,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // W1-T1018: the cap is no longer a PERMANENT wall — {@link reviewInputBackoffElapsed} must
     // ALSO read false, so once the backoff elapses this row yields and dispatch resumes.
     disposition: "blocked-ambiguous",
+    blocker: "escalated",
     when: (pr, policy, _ageDays, now) =>
       pr.checksState === "green" &&
       pr.reviewState === "none" &&
@@ -7867,6 +7900,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // prior verdict never carried forward. W1-T913/W1-T2844: `"pending"` matches once the owner is
     // proven dead or the pending is stale; a FRESH pending is EXCLUDED, claimed as `wait` below.
     disposition: "post-review",
+    blocker: "awaiting-review",
     when: (pr, policy, _ageDays, now) =>
       pr.checksState === "green" &&
       pr.requiredContextsUnreadable !== true &&
@@ -7899,6 +7933,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // the silence this task fixes for an escalation storm, which is strictly worse.
     disposition: "wait",
     when: (pr) => pr.checksState === "green" && pr.reviewState === "pending",
+    blocker: "awaiting-review",
     reason: (pr, policy, _ageDays, now) => {
       const age = reviewPendingAgeMinutes(pr, now);
       return (
@@ -7916,6 +7951,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // ACTION — re-running a concluded run is left to the operator, GitHub having refused it 403.
     disposition: "blocked-ambiguous",
     when: (pr) => pr.checksState === "pending" && stalledRunReason(pr.workflowRuns) !== undefined,
+    blocker: "awaiting-ci",
     reason: (pr) =>
       `stalled, not pending — ${stalledRunReason(pr.workflowRuns)} — a required check that never truly ` +
       `finished still blocks the merge; escalating once rather than waiting on something that will not arrive`,
@@ -7923,6 +7959,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
   {
     // Start one exact-input review after CI has registered, while its long checks still run.
     disposition: "post-review",
+    blocker: "awaiting-ci",
     when: (pr, policy, _ageDays, now) => {
       const age = pendingAgeMinutes(pr, now);
       return pr.checksState === "pending" && pr.reviewState === "none" &&
@@ -7941,6 +7978,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // timestamp.
     // Why: ~24 of 30 open needs-human issues on 2026-07-19 were exactly this shape.
     disposition: "wait",
+    blocker: "awaiting-ci",
     when: (pr, policy, _ageDays, now) => {
       if (pr.checksState !== "pending") return false;
       const mins = pendingAgeMinutes(pr, now);
@@ -7954,6 +7992,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // met or exceeded — a check stuck this long IS ambiguity, not merely in-flight. Uses the SAME
     // escalate path as the catch-all, with the elapsed minutes and the ceiling both named.
     disposition: "blocked-ambiguous",
+    blocker: "awaiting-ci",
     when: (pr, policy, _ageDays, now) => {
       if (pr.checksState !== "pending") return false;
       const mins = pendingAgeMinutes(pr, now);
@@ -7970,6 +8009,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // UNDATED FAILS TOWARD ESCALATE: an unreadable age is not evidence of youth, and treating it as
     // young would let a broken suite wait forever behind a bad timestamp.
     disposition: "wait",
+    blocker: "awaiting-ci",
     when: (pr, policy, _ageDays, now) => {
       if (pr.checksState !== "none") return false;
       const ageMin = absentAgeMinutes(pr, now);
@@ -7987,6 +8027,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // state, so it is never silent and never armed.
     disposition: "blocked-ambiguous",
     when: () => true,
+    blocker: "other",
     reason: (pr) =>
       `not positively mergeable — checks ${pr.checksState}, review ${pr.reviewState} — escalating`,
   },
@@ -8017,7 +8058,7 @@ export function deriveDisposition(
     // UNREACHABLE — the terminal row matches unconditionally. This guards the
     // no-disposition=none invariant against a future table edit that drops it.
     // The safe fallback is the LEAST permissive disposition — escalate, never arm.
-    return { disposition: "blocked-ambiguous", reason: "default (no rule matched) — escalating" };
+    return { disposition: "blocked-ambiguous", blocker: "other", reason: "default (no rule matched) — escalating" };
   }
   const reason = rule.reason(pr, policy, ageDays, now);
   // W1-T1201: the clamp can only ever SUPPRESS the bare stale row, the only row reading the
@@ -8026,9 +8067,10 @@ export function deriveDisposition(
   // row's reason actually fired.
   const clockSkewSuppressedStale =
     lifetimeAgeDays < activityAgeDays && activityAgeDays >= policy.staleDays && ageDays < policy.staleDays;
-  if (!clockSkewSuppressedStale) return { disposition: rule.disposition, reason };
+  if (!clockSkewSuppressedStale) return { disposition: rule.disposition, blocker: rule.blocker, reason };
   return {
     disposition: rule.disposition,
+    blocker: rule.blocker,
     reason:
       `${reason} — AGE CLAMP (W1-T1201): raw activity age ${Math.floor(activityAgeDays)}d would cross the ` +
       `${policy.staleDays}d stale threshold, but this PR has existed only ${Math.floor(lifetimeAgeDays)}d ` +
@@ -9086,6 +9128,7 @@ export interface StrikeLadderEffects {
 }
 
 export interface SweepDeps {
+  reviewerCodeStaleThisPass?: () => { oldSha: string; newSha: string } | undefined;
   readerAgreement?: Omit<ReaderAgreementOptions, "ledgerPath" | "runId" | "appendLine" | "openPrCount">;
   reproduceFailingTestsOnMain?: (
     pr: OpenPrView, files: readonly string[], mainTipSha: string,
@@ -9585,6 +9628,7 @@ function postReviewFailureHistoryDisposition(
   if (prior.reviewDiffCeilingRefused.has(reviewKey)) {
     return {
       disposition: "blocked-ambiguous",
+      blocker: "escalated",
       reason:
         `post-review cannot read GitHub's PR diff for ${reviewKey}: the diff exceeds GitHub's ` +
         `300-file ceiling — split the PR under 300 files or push a smaller head before retrying`,
@@ -9595,6 +9639,7 @@ function postReviewFailureHistoryDisposition(
   if (thrownAttempts > policy.strikeCap) {
     return {
       disposition: "blocked-ambiguous",
+      blocker: "escalated",
       reason:
         `post-review attempts for ${reviewKey} have thrown ${thrownAttempts} time(s), exceeding ` +
         `the ${policy.strikeCap}-strike retry cap for this unchanged review input — escalating`,
@@ -10656,6 +10701,46 @@ export async function runSweepBakeoff(input: DeploymentBakeoffInput): Promise<vo
   await runDeploymentBakeoff(input);
 }
 
+const CONTRADICTORY_REASON = "review failing with no actionable unmet criteria (contradictory) — escalating";
+const CONTRADICTORY_BACKOFF_CAP_MS = 4 * 60 * 60_000;
+type ContradictoryMemory = {
+  key: string; first: number; passes: number; interval: number; next: number;
+};
+const contradictoryMemory = new Map<string, ContradictoryMemory>();
+
+function contradictoryKey(pr: OpenPrView, lines: readonly Record<string, unknown>[]): string {
+  const review = lines.findLast(row => row.step === "review.posted" && row.pr_url === pr.prUrl &&
+    row.head_sha === pr.headSha && (pr.reviewInputDigest === undefined || row.review_input_digest === pr.reviewInputDigest));
+  const decision = review?.review_decision_digest ?? review?.decision_verdict ?? {
+    state: pr.reviewState, summary: pr.reviewSummary, criteria: pr.unmetCriteria,
+    reasons: review?.reasons, proofExec: review?.proof_exec, unmet: review?.unmet_criteria,
+  };
+  return createHash("sha256").update(JSON.stringify([pr.prUrl, pr.prNumber, pr.headSha, decision])).digest("hex");
+}
+
+function contradictoryPrior(
+  key: string, pr: OpenPrView, deps: SweepDeps, lines: readonly Record<string, unknown>[],
+): { prior: ContradictoryMemory | undefined; hasHeadCheckpoint: boolean } {
+  const cacheKey = `${deps.ledgerPath}@${key}`;
+  let prior = contradictoryMemory.get(cacheKey);
+  // W1-T4935: rotation keeps the acted row; recover newer backoff checkpoints from its archives.
+  const rows = !prior && !deps.readLedger && !deps.dryRun
+    ? [...parseLedger(resolveLedgerUnion(dirname(deps.ledgerPath), `"pr_number":${pr.prNumber}[,}]`,
+        undefined, { step: "sweep.disposed" }).matches.join("\n")), ...lines]
+    : lines;
+  for (const row of rows) {
+    if (row.contradictory_key !== key || typeof row.contradictory_first_escalation_at !== "number" ||
+        typeof row.contradictory_pass_count !== "number" || typeof row.contradictory_interval_ms !== "number" ||
+        typeof row.contradictory_next_row_at !== "number") continue;
+    if (!prior || row.contradictory_pass_count > prior.passes) prior = {
+      key, first: row.contradictory_first_escalation_at, passes: row.contradictory_pass_count,
+      interval: row.contradictory_interval_ms, next: row.contradictory_next_row_at,
+    };
+  }
+  return { prior, hasHeadCheckpoint: rows.some(row => row.step === "sweep.disposed" &&
+    row.pr_number === pr.prNumber && row.head_sha === pr.headSha && typeof row.contradictory_key === "string") };
+}
+
 export async function runSweep(
   openPrs: OpenPrView[],
   deps: SweepDeps,
@@ -10688,6 +10773,10 @@ export async function runSweep(
   // byte-identical — the level-triggered idempotence mechanism. The SAME read feeds
   // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
   const ledgerLines = readLedger(deps.ledgerPath);
+  const priorBlockerByPr = priorBlockersFromLedger(ledgerLines);
+  const ruleBlockerByIndex = new Map<number, PrBlocker>();
+  const planProofBlockedPrs = new Set<number>();
+  const baseRedStandDownPrs = new Set<number>();
   const strikeLadderRows = [...ledgerLines];
   openPrs = openPrs.map(pr => hasUnspentLadderRefresh(strikeLadderRows, pr.taskId, pr.prNumber)
     ? { ...pr, priorStrikes: fixCeilingInForce(pr, policy.strikeCap, policy.clarify) }
@@ -10805,6 +10894,7 @@ export async function runSweep(
     }
     const decision = decidePlanRepair(pr, facts, mainLatestRun, planRepairHistory);
     if (decision === undefined) return notRepaired;
+    if (decision.signature === "base-red") baseRedStandDownPrs.add(pr.prNumber);
     const ledgered = { ...row, step: PLAN_REPAIR_STEP, signature: decision.signature, action: decision.action, check_name: decision.check };
     if (decision.action === "wait") {
       const key = `${pr.prNumber}@${pr.headSha}@base-red-wait`;
@@ -11326,6 +11416,7 @@ export async function runSweep(
     reviewKey: string;
     mode: ReviewDispatchMode;
   }> = [];
+  const quietContradictoryRows = new Set<number>();
   // W1-T5030: close ATTEMPTS the stale-proof supersession arm has made this pass.
   let staleProofCloses = 0;
 
@@ -11356,6 +11447,47 @@ export async function runSweep(
     // main walk's "blocked-fixable" arm.
     extraDisposedFields: Record<string, unknown> | undefined = undefined,
   ): void {
+    const metadataWait = metadataOnlyRed(pr) !== undefined && !metadataRedRuledOut(ledgerLines, pr) &&
+      extraDisposedFields?.metadata_repair_outcome !== "not-metadata";
+    let reviewerWithheld = false;
+    let blockerReadFailure: { reason: string } | undefined;
+    const reviewDisposition = disposition === "post-review" || disposition === "review-reused" || disposition === "discriminate-only";
+    const reviewKey = reviewOutcomeKeyForPr(pr);
+    if (reviewDisposition && (deps.reviewerCodeStaleThisPass?.() !== undefined ||
+        prior.reviewFreshnessRefusals.get(reviewKey)?.freshness === "stale")) {
+      try {
+        const latest = readLedger(deps.ledgerPath).findLast(row =>
+          (row.step === "review.skipped_stale_reviewer_code" && row.pr === String(pr.prNumber) && row.run_id === deps.runId) ||
+          ((row.step === "review.posted" || row.step === "review.post_refused") &&
+            reviewOutcomeKey(String(row.task_id ?? ""), typeof row.pr_url === "string" ? row.pr_url : undefined,
+              String(row.head_sha ?? ""), typeof row.review_input_digest === "string" ? row.review_input_digest : undefined) === reviewKey));
+        reviewerWithheld = latest?.step === "review.skipped_stale_reviewer_code" || latest?.reviewer_code_freshness === "stale";
+      } catch (error) {
+        blockerReadFailure = { reason: String(error) };
+      }
+    }
+    const blocker = finalBlocker(ruleBlockerByIndex.get(index)!, {
+      baseRedStandDown: baseRedStandDownPrs.has(pr.prNumber),
+      baseCaused: isBlockedCi(pr) && classifyRedCause(pr, openPrs) === "base-caused",
+      reviewerCodeStaleThisPass: reviewerWithheld,
+      reviewerEvidenceUnreadable: blockerReadFailure !== undefined,
+      mergeable: disposition === "mergeable",
+      autoMergeArmed: pr.autoMergeArmed,
+      planProofUnrunnable: planProofBlockedPrs.has(pr.prNumber) ||
+        (isBlockedCi(pr) && pr.isPlanFiling === true) || metadataWait,
+      strikesExhausted: disposition === "blocked-ambiguous" && isFixStrikeExhausted(pr, policy),
+      ownRed: disposition === "blocked-fixable" && isBlockedCi(pr),
+    });
+    const planRepairCapable =
+      (metadataWait && typeof deps.repairMetadata === "function") ||
+      (pr.isPlanFiling === true && isMachineLanePlanHead(pr.headRefName) &&
+        typeof deps.readPlanRepairFacts === "function" && typeof deps.repairPlanPr === "function") ||
+      (planProofBlockedPrs.has(pr.prNumber) && typeof deps.dispatchPlanOnlyRepair === "function" &&
+        priorPlanRepairStrikesFromLedger(pr, ledgerLines) < MAX_PLAN_REPAIR_STRIKES);
+    const blockerRow = {
+      ...blockerFields(blocker, priorBlockerByPr.get(pr.prNumber), now, planRepairCapable),
+      ...(blockerReadFailure ? { blocker_read_error: blockerReadFailure.reason } : {}),
+    };
     // A real pass's `sweep.disposed` row below carries every field of these two rows, and on the
     // fleet each was an exact duplicate of it (1,454 of 14,089 core rows, 2026-09-24): write them only
     // under --dry-run, where that row is skipped and they are the pass's sole trace.
@@ -11380,6 +11512,7 @@ export async function runSweep(
       log("sweep.dispose", {
         pr_number: pr.prNumber,
         disposition,
+        ...blockerRow,
         acted,
         reason,
         deduped,
@@ -11388,10 +11521,8 @@ export async function runSweep(
       });
     }
 
-    // One ledger line per disposition (the INVARIANT). Skipped under --dry-run, because a preview
-    // must leave no trace. The rendered question rides along whenever one exists: an UNANSWERED
-    // question stays ledgered on every subsequent sweep, even once `acted` goes false.
-    if (!deps.dryRun) {
+    // Preview writes nothing; unchanged contradictory reviews checkpoint only when backoff is due.
+    if (!deps.dryRun && !quietContradictoryRows.has(index)) {
       // W1-T2345 — this PASS's own repeat-streak figures, computed once per PR earlier in the walk
       // and read back by `index`, so all four call sites carry it with no signature change.
       const repeat = repeatMeta.get(index);
@@ -11402,6 +11533,7 @@ export async function runSweep(
         pr_number: pr.prNumber,
         pr_url: pr.prUrl,
         disposition,
+        ...blockerRow,
         acted,
         reason,
         head_sha: pr.headSha,
@@ -11526,7 +11658,9 @@ export async function runSweep(
       freshnessRefusal?.attemptedAt !== undefined && Number.isFinite(pendingSince) &&
       freshnessRefusal.attemptedAt >= pendingSince;
     const dispositionView = refusedCurrentPending ? { ...pr, reviewPendingOwnerDead: true } : pr;
-    let { disposition, reason } = postReviewFailureHistoryDisposition(dispositionView, prior, policy, now) ?? deriveDisposition(dispositionView, policy, now);
+    const derived = postReviewFailureHistoryDisposition(dispositionView, prior, policy, now) ?? deriveDisposition(dispositionView, policy, now);
+    ruleBlockerByIndex.set(prIndex, derived.blocker);
+    let { disposition, reason } = derived;
     const strikeLadderDue = deps.strikeLadder !== undefined && disposition === "blocked-ambiguous" && !pr.pendingAnswer &&
       selectDispositionRule(dispositionView, policy, now).rule?.when === isFixStrikeExhausted;
     if (inheritedMergeState) {
@@ -11547,7 +11681,10 @@ export async function runSweep(
         repair.repaired = true;
         repair.reason = "plan-scoped round deferred";
         const base = decideBaseRed(pr, mainLatestRun, baseRedHistory);
-        if (base.kind !== "own") repair.reason = `plan-scoped round waits on base red: ${base.check}`;
+        if (base.kind !== "own") {
+          baseRedStandDownPrs.add(pr.prNumber);
+          repair.reason = `plan-scoped round waits on base red: ${base.check}`;
+        }
         else if (!deps.dryRun && (deps.actionable?.("blocked-fixable") ?? true) && !deps.workerAdmissionHold?.()) {
           const claimed = claimFixDispatch({ ...pr, taskId: pr.taskId ?? escalationTaskIdFor(pr) });
           if (!claimed.ok) {
@@ -11612,6 +11749,7 @@ export async function runSweep(
     // is wired, so any caller that omits it (every pre-existing fixture) keeps the old ladder.
     let planShardRepairDue = false;
     if (proofDiscrimination !== undefined && !decideSweepArm(pr, ledgerLines, undefined, readArmLedgerUnion).arm) {
+      planProofBlockedPrs.add(pr.prNumber);
       const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
       const planRepairCapable = typeof deps.dispatchPlanOnlyRepair === "function";
       const planRepairStrikes = priorPlanRepairStrikesFromLedger(pr, ledgerLines);
@@ -11650,6 +11788,13 @@ export async function runSweep(
         `the plan-shard flag is the next rung`;
     }
     byDisposition[disposition]++;
+    const isContradictory = disposition === "blocked-ambiguous" && reason === CONTRADICTORY_REASON && !strikeLadderDue;
+    const contradictionKey = isContradictory ? contradictoryKey(pr, ledgerLines) : undefined;
+    const contradictionHistory = contradictionKey !== undefined
+      ? contradictoryPrior(contradictionKey, pr, deps, ledgerLines) : undefined;
+    const priorContradiction = contradictionHistory?.prior;
+    const legacyContradiction = isContradictory && prior.escalated.has(`${pr.prNumber}@${pr.headSha}`) &&
+      contradictionHistory?.hasHeadCheckpoint === false;
 
     // W1-T2345 — computed for EVERY disposition, never only blocked-ambiguous, and BEFORE the
     // per-disposition dedup below: this bounds the DERIVATION itself, orthogonal to whatever
@@ -11664,7 +11809,7 @@ export async function runSweep(
     // Skipped entirely under --dry-run — a preview must leave no trace — and whenever a prior pass
     // already fired this run's escalation, the "stays quiet until the head moves" half of the
     // acceptance criteria.
-    if (repeatBoundTripped && !repeatAlreadyEscalated && !deps.dryRun) {
+    if (repeatBoundTripped && !repeatAlreadyEscalated && !deps.dryRun && !isContradictory) {
       try {
         // W1-T2381: THE LEDGER ROW IS THE WHOLE OUTPUT — no `deps.escalate()` call. The dedup key
         // is task+head+cause and never the repeat condition, so routing the trip to the issue
@@ -11691,7 +11836,7 @@ export async function runSweep(
     // so an unanswered question stays visible, even on a deduped pass. Skipped for an
     // unattributable filing PR, where there is only a stand-down to record.
     const question =
-      (disposition === "blocked-ambiguous" || disposition === "refused-escalate") && !unattributableFiling && !strikeLadderDue
+      (disposition === "blocked-ambiguous" || disposition === "refused-escalate") && !unattributableFiling && !strikeLadderDue && !priorContradiction
         ? renderClarificationQuestion(pr, reason, pr.strikeHistory ?? [])
         : undefined;
 
@@ -11810,7 +11955,8 @@ export async function runSweep(
       case "refused-escalate":
         // W1-T514: sha-keyed, exactly like every sibling arm above — a new head re-earns its own
         // escalation rather than being deduped by a stale head's `acted:true` line forever.
-        alreadyDone = !strikeLadderDue && prior.escalated.has(`${pr.prNumber}@${pr.headSha}`);
+        alreadyDone = isContradictory ? priorContradiction !== undefined || legacyContradiction
+          : !strikeLadderDue && prior.escalated.has(`${pr.prNumber}@${pr.headSha}`);
         // W1-T2427: the LARGEST silent population (7,888 rows). Without this sentence the row is
         // indistinguishable from `deps.escalate` being unwired or throwing.
         if (alreadyDone) {
@@ -11928,6 +12074,7 @@ export async function runSweep(
     let baseCausedMainTipSha: string | undefined;
     // W1-T4459: the "blocked-fixable" arm's dedup keys; see `sameHeadRedFixRefusal`.
     let extraDisposedFields: Record<string, unknown> | undefined;
+    let contradictoryEscalated = false;
     // W1-T254 — PER-PR THROW CONTAINMENT: a thrown action used to propagate straight out of
     // `runSweep` as one unattributed error, aborting the WHOLE pass. Named here and ledgered on
     // THIS PR's own line instead, so the loop always reaches the next PR.
@@ -12202,6 +12349,7 @@ export async function runSweep(
               // then spend this pass's ONE update-branch press once main is green; never a fix.
               const baseRed = decideBaseRed(pr, mainLatestRun, baseRedHistory);
               if (baseRed.kind !== "own") {
+                baseRedStandDownPrs.add(pr.prNumber);
                 acted = false;
                 const mainSha = mainLatestRun?.sha ?? "unread";
                 const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, check_name: baseRed.check, main_sha: mainSha };
@@ -12420,6 +12568,7 @@ export async function runSweep(
                   reproductionHistory.push({ ...row, step: "sweep.base_reproduction" });
                   acted = false;
                   standDownReason = `base red reproduced: ${reproductionFiles.join(", ")} fail at main ${mainTipSha} — no fix dispatched or strike spent`;
+                  baseRedStandDownPrs.add(pr.prNumber);
                   break;
                 }
                 const key = `${pr.prNumber}@${pr.headSha}`;
@@ -13001,6 +13150,7 @@ export async function runSweep(
                   standDownReason = `ABSENT re-push not wired — ${absentDecision.reason}`;
                 }
                 await deps.escalate(pr, reason, question!);
+                contradictoryEscalated = isContradictory;
               }
               break;
             case "dep-review":
@@ -13098,6 +13248,27 @@ export async function runSweep(
       continue;
     }
 
+    let contradictoryCheckpoint: ContradictoryMemory | undefined;
+    if (contradictionKey !== undefined && !deps.dryRun && (priorContradiction || contradictoryEscalated || legacyContradiction)) {
+      const state: ContradictoryMemory = priorContradiction
+        ? { ...priorContradiction, passes: priorContradiction.passes + 1 }
+        : { key: contradictionKey, first: now, passes: 1, interval: DEFAULT_POLL_INTERVAL_MS,
+            next: now + DEFAULT_POLL_INTERVAL_MS };
+      if (priorContradiction) {
+        if (now < state.next) quietContradictoryRows.add(prIndex);
+        else {
+          state.interval = Math.min(state.interval * 2, CONTRADICTORY_BACKOFF_CAP_MS);
+          state.next = now + state.interval;
+        }
+        standDownReason = `contradictory review unchanged — pass ${state.passes}; first escalation ` +
+          `${clockFromMillisFn(() => state.first).iso()}; next backoff row ` +
+          `${clockFromMillisFn(() => state.next).iso()}`;
+      }
+      extraDisposedFields = { ...extraDisposedFields, contradictory_key: state.key,
+        contradictory_first_escalation_at: state.first, contradictory_pass_count: state.passes,
+        contradictory_interval_ms: state.interval, contradictory_next_row_at: state.next };
+      contradictoryCheckpoint = state;
+    }
     finalizeDisposition(
       prIndex,
       pr,
@@ -13114,6 +13285,9 @@ export async function runSweep(
       baseCausedMainTipSha,
       extraDisposedFields,
     );
+    if (contradictoryCheckpoint) {
+      contradictoryMemory.set(`${deps.ledgerPath}@${contradictoryCheckpoint.key}`, contradictoryCheckpoint);
+    }
   }
 
   // ── W1-T1049 — REVIEW CONCURRENCY BUDGET, NOW ITS OWN ───────────────────────

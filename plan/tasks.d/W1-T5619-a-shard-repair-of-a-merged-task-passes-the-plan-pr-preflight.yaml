@@ -1,0 +1,39 @@
+- id: W1-T5619
+  title: "A DUPLICATE-KEY REPAIR OF A MERGED TASK'S SHARD PASSES THE PLAN-PR PREFLIGHT — `introducedProofs` reads base proofs with a unique-keys parse, so a base shard that fails on the duplicate yields none, every proof of the repaired shard counts as introduced, and a merged task's proofs pass at origin/main (check-proof exit 5) and refuse the repair"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: low
+  origin: "operator session 2026-10-04: reviewing the W1-T5519 plan self-repair lane (#8991, #9046)"
+  plan_refs: [W1-T5519, W1-T5348, W1-T4753, W1-T912]
+  files: [src/lib/plan-pr-emitter.ts, test/a-shard-repair-of-a-merged-task-passes-the-plan-pr-preflight.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main d13d797c. `changedShardProofs` and `changedShardProofsAsync`
+    (src/lib/plan-pr-emitter.ts) pass each changed shard's origin/main text to `introducedProofs`.
+    That calls `shardProofs(base)`, which parses with the yaml default `uniqueKeys: true` and
+    returns `[]` on any parse error. A W1-T5519 repair PR's base shard is, by definition, the one
+    with a duplicate key, so its base proofs read as none and every head proof counts as
+    introduced. `sortShardProof` marks a proof red on check-proof exit 5
+    (`CHECK_PROOF_EXIT.executedStale`, "passes at origin/main too"). A MERGED task's proofs pass at
+    base by construction — the case `changedShardProofs`' own doc carves out for plan-reconcile —
+    so `planPrPreflightAllows` refuses and the lane ledgers `plan.shard_repair_not_landed`.
+    Checked: `parse(dupShard)` throws "Map keys must be unique"; `parse(dupShard, { uniqueKeys:
+    false })` returns the acceptance list. A queued task's repair passes (W1-T5557, #9005) because
+    its proofs fail at base; no merged-task repair has been attempted yet.
+  design: |
+    In `introducedProofs` (shared by the sync and async forms), read the base with
+    `{ uniqueKeys: false }`, so a duplicate-key base still yields its proofs. If the base still
+    does not parse, count a head proof as pre-existing when its exact proof string occurs in the
+    base bytes. The head shard keeps the strict parse; lint-plan owns refusing it.
+  acceptance:
+    - claim: "a repair of a merged task's duplicate-key shard introduces no proofs and passes proof discrimination, while a new proof added to a shard is still checked against origin/main"
+      proof: "unit test: test/a-shard-repair-of-a-merged-task-passes-the-plan-pr-preflight.test.ts"
+  falsifier: |
+    Restore the strict base parse in `shardProofs`/`introducedProofs`. The suite's merged-task
+    repair reports its proofs as introduced, and the fake check-proof's exit 5 refuses it.
