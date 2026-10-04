@@ -568,13 +568,13 @@ function firstLineOf(output: string, status: number | null): string {
   return lines.find((l) => diagnosticLine.test(l)) ?? lines[0] ?? `exited ${status}`;
 }
 
-function shardProofs(text: string): string[] {
+/** The acceptance proofs a shard's text declares, or undefined when it does not parse. */
+function parsedShardProofs(text: string, opts?: { uniqueKeys: false }): string[] | undefined {
   let tasks: unknown;
   try {
-    tasks = parseYaml(text);
+    tasks = parseYaml(text, opts);
   } catch {
-    // An unparseable shard is the plan lint's to refuse, by name — this check has no proofs of it to read.
-    return [];
+    return undefined;
   }
   const proofs: string[] = [];
   for (const task of Array.isArray(tasks) ? tasks : []) {
@@ -586,9 +586,15 @@ function shardProofs(text: string): string[] {
   return proofs;
 }
 
+/** A head proof is pre-existing when origin/main's shard declares it. The base is read with duplicate keys allowed —
+ *  a W1-T5519 repair's base is by definition the duplicate-key shard (W1-T5619) — and a base that still does not
+ *  parse credits a proof whose exact text its bytes carry. An unparseable HEAD shard is the plan lint's to refuse. */
 function introducedProofs(headText: string, baseText: string | undefined): string[] {
-  const atBase = new Set(baseText === undefined ? [] : shardProofs(baseText));
-  return shardProofs(headText).filter((p) => !atBase.has(p));
+  const head = parsedShardProofs(headText) ?? [];
+  if (baseText === undefined) return head;
+  const atBase = parsedShardProofs(baseText, { uniqueKeys: false });
+  const preexisting = atBase === undefined ? (p: string) => baseText.includes(p) : (p: string) => atBase.includes(p);
+  return head.filter((p) => !preexisting(p));
 }
 const CHANGED_SHARDS_ARGS = ["diff", "--name-only", "--diff-filter=AM", "origin/main...HEAD", "--", PLAN_TASK_SHARD_PREFIX];
 
