@@ -167,6 +167,7 @@ import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { createChangedFilesCache } from "./lib/changed-files-cache.js";
 import { isHolderStale, readFileIfExists, writeAtomic } from "./lib/fs-race-safe.js";
+import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
 import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
@@ -606,7 +607,7 @@ import {
   preflightFailureNotice,
   preflightSummaryPath,
   remedyFilesForFailingChecks,
-  runCiParity,
+  runCiParityAdmitted,
   runPreflightCoverage,
   runPreflightFast,
   runTreeAdvisoryLine,
@@ -1483,6 +1484,7 @@ import {
   fixCeilingInForce,
   fixDispatchBudget,
   fixLedgerRowsForHead,
+  fixRoundTally,
   isBlockedCi,
   listRetirableEscalationIssues,
   logCostGovernorDeferral,
@@ -2993,6 +2995,7 @@ export function buildWorkerStateSensor(args: {
   let runawaySignaled = false;
   let lastWorkerText: string | undefined;
   let activeTool: { name: string; startedAtMs: number; reason?: string } | undefined;
+  let lastActivityKey: string | undefined;
 
   const recordTransition = (next: WorkerState): void => {
     try {
@@ -3043,7 +3046,7 @@ export function buildWorkerStateSensor(args: {
     const eventAt = new Date(event.tsMs).toISOString();
     const toolName = event.toolName ?? (event.kind === "tool-executing" ? boundedWorkerTelemetryText(event.text) : undefined);
     try {
-      appendLedger(args.ledgerPath, {
+      const activityRow = {
         run_id: args.runId,
         task_id: args.taskId,
         step: WORKER_ACTIVITY_LEDGER_STEP,
@@ -3075,7 +3078,14 @@ export function buildWorkerStateSensor(args: {
               ...(event.toolOutcome ? { tool_outcome: event.toolOutcome } : {}),
             }
           : {}),
-      });
+      };
+      // E5: a same-millisecond burst of bare heartbeats renders byte-identical rows; ledger one.
+      const activityKey = JSON.stringify(activityRow);
+      const isBareHeartbeat = event.kind === "message" && !event.text && !event.toolName && !event.toolOutcome && !toolEnded;
+      if (!isBareHeartbeat || activityKey !== lastActivityKey) {
+        appendLedger(args.ledgerPath, activityRow);
+        lastActivityKey = isBareHeartbeat ? activityKey : undefined;
+      }
     } catch {
       // Best-effort: telemetry must never be able to take down the worker it observes.
     }
@@ -6647,6 +6657,53 @@ function assertReviewerSnapshotIntegrity(cwd: string, expectedHeadSha: string): 
   }
 }
 
+/** What {@link reappendLostReviewPosted} found: THIS run's `review.posted` row in the ledger the arm
+ *  gate reads, a row it had to re-append, or a ledger it could not re-read (nothing appended). */
+export type ReviewPostedRecheck = "present" | "reappended" | "unreadable";
+
+/** W1-T5516 — re-read the ledger for THIS run's `review.posted` (run, head, decision digest) and
+ *  re-append `row` plus a `review.posted_reappended` row when it is gone, so a row lost by any cause
+ *  costs one re-read, not a second review. It never consults GitHub's status (W1-T230). */
+export function reappendLostReviewPosted(
+  ctx: {
+    ledgerPath: string;
+    runId: string;
+    headSha: string;
+    decisionDigest: string;
+    prUrl: string;
+    row: Record<string, unknown>;
+    log: (step: string, extra?: Record<string, unknown>) => void;
+    say: (msg: string) => void;
+  },
+  readLines: (path: string) => ReadonlyArray<Record<string, unknown>> = readLedgerLines,
+): ReviewPostedRecheck {
+  let lines: ReadonlyArray<Record<string, unknown>>;
+  try {
+    lines = readLines(ctx.ledgerPath);
+  } catch (e) {
+    const reason = `review.posted re-read failed for ${ctx.headSha.slice(0, 7)}: ${String((e as Error)?.message ?? e)}`;
+    ctx.say(`${reason} — nothing re-appended; the arm gate decides as written (W1-T5516)`);
+    return "unreadable";
+  }
+  const present = lines.some(
+    (l) =>
+      l.step === "review.posted" &&
+      l.run_id === ctx.runId &&
+      l.head_sha === ctx.headSha &&
+      l.review_decision_digest === ctx.decisionDigest,
+  );
+  if (present) return "present";
+  ctx.log("review.posted", ctx.row);
+  ctx.log("review.posted_reappended", {
+    head_sha: ctx.headSha,
+    pr_url: ctx.prUrl,
+    review_decision_digest: ctx.decisionDigest,
+    reason: "this run's review.posted row was not in the ledger the arm gate reads",
+  });
+  ctx.say(`remudero-review: review.posted for ${ctx.headSha.slice(0, 7)} was missing from the ledger — re-appended (W1-T5516)`);
+  return "reappended";
+}
+
 /**
  * THE REVIEW GATE CALL SITE (W1-T1D — the piece W1-T1C built the reviewer for but
  * nothing ever called; the split left the call site unowned). After the PR is open
@@ -7372,7 +7429,7 @@ async function runReview(args: {
   const proofExec = verdict.criteria.map((c) => c.proof_exec);
   // The gate TEACHES: the FULL list of unmet criteria goes to the ledger (and the
   // PR comment below) — the status description names only the first (length-capped).
-  log("review.posted", {
+  const reviewPostedRow = {
     context: REVIEW_CONTEXT,
     state: verdict.state,
     head_sha: headSha,
@@ -7444,7 +7501,8 @@ async function runReview(args: {
     // open fence, silently starving the count above — named rather than left to read as a mundane
     // zero.
     changeset_fence_unbalanced_at_eof: verdict.changesetFenceUnbalancedAtEof ?? null,
-  });
+  };
+  log("review.posted", reviewPostedRow);
   // W1-T322 (SHIPS-UNWIRED advisory floor): ADVISORY ONLY — ledgered here, never consulted by the
   // verdict/arm decision above or below. One `review.unwired_advisory` line per reason code (see
   // {@link "./lib/review.js".UnwiredAdvisory}'s doc), naming the PR (taskId + headSha + prUrl), the
@@ -7469,30 +7527,22 @@ async function runReview(args: {
     });
   }
   // impl-BL — THE MIRROR OF THE WITHDRAWAL ABOVE, AND IT MUST STAY BELOW THE `log("review.posted")`
-  // CALL DIRECTLY ABOVE THIS ONE. That line is the evidence W1-T230's gate requires: `armAutoMerge`
-  // → `priorReviewVerdictFromLedger` → `decideArmFromLedgerVerdict` looks for a `review.posted`
-  // ledger line matching this taskId AND this headSha, and fails CLOSED when it finds none.
+  // CALL ABOVE. That line is the evidence W1-T230's gate requires: `armAutoMerge` →
+  // `priorReviewVerdictFromLedger` → `decideArmFromLedgerVerdict` looks for a `review.posted` line
+  // matching this taskId AND headSha, and fails CLOSED when it finds none. It once sat right after
+  // `postReviewStatusGuarded`, which writes no `review.posted`, so every gated arm was refused
+  // (PR-977: the refusal at 00:57:06.808, its row at .809).
   //
-  // THIS CALL USED TO SIT 35 LINES HIGHER, immediately after `postReviewStatusGuarded`, under a
-  // comment asserting that function "just wrote" the `review.posted` line. IT DOES NOT — its only
-  // ledger writes are `review.post_refused` and `review.post_failed` (lib/review.ts, the two
-  // appendLedger calls in its body). The line it was reading for did not exist yet, so the gate
-  // fail-closed to `ledger-refused` on EVERY invocation this code path has ever had. The ledger
-  // shows each refused arm preceding its own `review.posted` by 0–1ms (PR-977: 00:57:06.808 vs
-  // .809; same-millisecond for PR-981/982/984, W1-T226, W1-T221). The only arms that have ever
-  // succeeded carry `at: "open"` — the ungated arm-at-open path.
+  // A ROW CAN STILL GO MISSING: a concurrent rotation (serve and the daemon share the volume) lost
+  // PR #8887's row. W1-T5514 drains that window, but a read between its rename and drain can still
+  // miss it. So THIS run's row is re-read and re-appended, ledgering `review.posted_reappended`,
+  // before the gate reads (W1-T5516). The gate never falls back to GitHub's status: that surface is
+  // mutable (W1-T230, #449). A failed re-read appends nothing and the gate fails closed as before.
   //
-  // WHY BELOW IS SAFE, not merely later: `appendLedger` is fully synchronous (openSync/writeSync/
-  // closeSync) and `readLedgerLines` is `readFileSync`, so the read-after-write is ordered within
-  // this process. Rotation cannot lose it either — `review.posted` is in
-  // DECISION_RELEVANT_LEDGER_STEPS and rotation's per-step cap keeps the NEWEST
-  // MAX_RETAINED_LINES_PER_STEP, of which this line is one.
-  //
-  // The gate still does real work here — it is NOT tautological now that its evidence exists.
-  // `armAutoMerge` re-reads the PR's CURRENT head (`deps.headSha(prUrl)`, a live `gh pr view`) and
-  // compares it to the head this verdict was written against, so a push landing between the
-  // verdict and this call is still refused. No `posted.posted` guard is needed: the `if
-  // (!posted.posted)` branch above already returned.
+  // The gate still does real work: `armAutoMerge` re-reads the PR's CURRENT head and refuses a push
+  // that landed after this verdict. No `posted.posted` guard is needed: that branch already returned.
+  reappendLostReviewPosted({ ledgerPath: args.ledgerPath, runId: args.runId, headSha, decisionDigest, prUrl,
+    row: reviewPostedRow, log, say });
   const armCtx = { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log };
   armIfVerdictPermits(verdict, armCtx, { arm: args.arm });
   // Record after both authoritative posting and auto-merge eligibility. The recorder
@@ -11313,6 +11363,7 @@ export async function runFixRung(opts: {
       // Unreadable HEAD: commitCount falls back to 0, as before this task — never a throw mid-dispatch.
     }
     const fixRoundStartedAtMs = systemClock.now();
+    const roundId = `${opts.runId}:${attempt}:${fixRoundStartedAtMs}`;
     const fixReceipt = fixWorkerReceipt(deps.spawn, deps.log, fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs), fixLaneBenchmarkWork(opts.task, deps.ledgerPath));
     let fixResult: WorkerResult;
     // W1-T1219: the spawn's elapsed ms on the SUCCESS path, the field `fix.spawn_abandoned` carries
@@ -11502,9 +11553,10 @@ export async function runFixRung(opts: {
           `spending strike ${attempt}/${opts.strikeCap}: ${opts.prUrl}`,
       );
     } else {
-      strikes = attempt;
+      if (!harnessCommitRefused) strikes = attempt;
       deps.log("fix.dispatch", {
-        strike: strikes,
+        round_id: roundId,
+        strike: attempt,
         strike_cap: opts.strikeCap,
         unmet_count: unmet.length,
         unmet_claims: unmet.map((criterion) => criterion.claim),
@@ -11519,7 +11571,7 @@ export async function runFixRung(opts: {
         // W1-T4803: which files conflicted, so the hot-file gardener can rank them by PR minutes.
         conflicted_files: conflictedFilePaths(currentMergeConflict),
       });
-      deps.say(
+      if (!harnessCommitRefused) deps.say(
         currentMergeConflict !== undefined
           ? `fix rung: strike ${strikes}/${opts.strikeCap} (${round}) — dispatching ONE merge-conflict fix worker for ` +
             `${(currentMergeConflict.files ?? []).length} conflicting file(s)`
@@ -11534,7 +11586,8 @@ export async function runFixRung(opts: {
     if (harnessCommitRefused) {
       const scopeAmendment = scopeAmendmentFromFixReport(workerTranscript(fixResult));
       deps.log("fix.commit_refused", {
-        strike: strikes,
+        round_id: roundId,
+        strike: attempt,
         round,
         mode: fixMode,
         head_sha: priorHeadSha,
@@ -11543,9 +11596,12 @@ export async function runFixRung(opts: {
         ...undeclaredPathsLedgerFields(harnessCommitUndeclared),
       });
     }
-    deps.log("fix.done", {
+    const logFixDone = (pushedHeadSha?: string) => deps.log("fix.done", {
       ...fixReceipt.ledgerFields(fixResult), // W1-T4613: FIRST, so every field this row already carried keeps its value
-      strike: strikes,
+      round_id: roundId,
+      head_sha: priorHeadSha,
+      pushed_head_sha: pushedHeadSha,
+      strike: attempt,
       round,
       session_id: fixResult.sessionId,
       subtype: harnessCommitRefused ? "commit_refused" : fixResult.subtype,
@@ -11598,11 +11654,13 @@ export async function runFixRung(opts: {
 
     // A shell-less worker that omitted or failed its harness commit produced no new head. The
     // refusal row is the positive release signal sweep.ts reads on the next pass; do not push an
-    // unchanged worktree or wait for CI against the old head, and let the cumulative ledger strike
-    // budget decide whether a later pass may try again or must escalate.
+    // unchanged worktree or wait for CI against the old head. The tally stops a repeated refusal
+    // separately from completed worker strikes (W1-T5542).
     if (harnessCommitRefused) {
+      logFixDone();
+      const refusedAtHead = fixRoundTally((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), opts.taskId, priorHeadSha).refusals.length;
       deps.say(
-        `fix rung: strike ${strikes}/${opts.strikeCap} refused by the harness — no commit was produced: ` +
+        `fix rung: refused (${Math.max(1, refusedAtHead)} at this head) by the harness — no commit was produced: ` +
           `${harnessCommitRefusalReason}`,
       );
       return {
@@ -11615,7 +11673,14 @@ export async function runFixRung(opts: {
       };
     }
 
-    const roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush), expectedHeadShaForPush, "rung.strike");
+    let roundPush: FixRungOutcome | "refused" | undefined;
+    let pushedHeadSha: string | undefined;
+    try {
+      roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush), expectedHeadShaForPush, "rung.strike");
+      if (roundPush === undefined) pushedHeadSha = expectedHeadShaForPush;
+    } finally {
+      logFixDone(pushedHeadSha);
+    }
     if (roundPush === "refused") continue;
     if (roundPush) return roundPush;
 
@@ -11941,6 +12006,7 @@ export async function runFixRung(opts: {
     // authorship check compares the live head against (sha lineage).
     rungOwnHeadSha = review.headSha;
     deps.log("fix.review", {
+      round_id: roundId,
       strike: strikes,
       state: review.state,
       unmet: review.criteria.filter((c) => !c.met).length,
@@ -27272,7 +27338,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
   const scopedCoverage = rest.includes("--no-fast")
     ? undefined
     : preflightCheckResult("fast-coverage:invocation", () => runPreflightScopedDiffCoverage(repoRoot, { spawn: deps.spawn }));
-  const ciParity = rest.includes("--ci-parity") ? runCiParity(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator }) : undefined;
+  const ciParity = rest.includes("--ci-parity") ? runCiParityAdmitted(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator }) : undefined;
   const coverage = rest.includes("--coverage") ? runPreflightCoverage(repoRoot, { spawn: deps.spawn, coverageFreeBytes: deps.coverageFreeBytes, coverageLockDiscriminator: deps.coverageLockDiscriminator }) : undefined;
   // W1-T3738: opt-in, because each proof spawns a real base worktree and a real test — the
   // 29-second default tier cannot absorb that. Named in the coverage line below either way.
@@ -27360,7 +27426,7 @@ export async function preflightCommand(rest: string[], deps: PreflightCommandDep
     { name: "the fast gate", enableWith: "drop --no-fast", ran: fast !== undefined },
     { name: "console-parity + census suites (W1-T4108)", enableWith: "drop --no-fast", ran: ciChecks !== undefined },
     { name: "scoped diff-coverage, source-mapped (W1-T4108)", enableWith: "drop --no-fast", ran: scopedCoverage !== undefined },
-    { name: "ci-parity", enableWith: "--ci-parity", ran: ciParity !== undefined },
+    { name: "ci-parity", enableWith: "--ci-parity", ran: ciParity?.execution === "completed" },
     { name: "coverage", enableWith: "--coverage", ran: coverage !== undefined },
     { name: "proof discrimination", enableWith: "--proofs", ran: proofs !== undefined },
   ];
@@ -33554,10 +33620,11 @@ export function reportQuarantined(
   quarantined: QuarantinedTask[],
   log: (step: string, extra?: Record<string, unknown>) => void,
   raise: (escalation: Escalation) => string,
+  requestRepair?: (q: QuarantinedTask) => void,
 ): void {
   for (const q of quarantined) {
     if (q.reason === "shard_invalid") {
-      reportInvalidShard(q, log, raise);
+      reportInvalidShard(q, log, raise, requestRepair);
       continue;
     }
     log("plan.duplicate_quarantined", { id: q.id, files: q.files, reason: q.reason });
@@ -33586,6 +33653,7 @@ function reportInvalidShard(
   q: QuarantinedTask,
   log: (step: string, extra?: Record<string, unknown>) => void,
   raise: (escalation: Escalation) => string,
+  requestRepair?: (q: QuarantinedTask) => void,
 ): void {
   const file = q.files[0] ?? q.id;
   log("plan.shard_quarantined", { id: q.id, file, error: q.error });
@@ -33605,6 +33673,12 @@ function reportInvalidShard(
   } catch (e) {
     log("plan.shard_escalation_failed", { id: q.id, file, reason: e instanceof Error ? e.message : String(e) });
   }
+  if (!requestRepair || !isDuplicateKeyError(q.error)) return;
+  try {
+    requestRepair(q);
+  } catch (e) {
+    log("plan.shard_repair_failed", { id: q.id, file, stage: "request", reason: e instanceof Error ? e.message : String(e) });
+  }
 }
 
 /** {@link reportQuarantined} for a daemon that re-reads its plan every tick: each quarantine is reported the first time
@@ -33612,6 +33686,7 @@ function reportInvalidShard(
 export function quarantineReporter(
   log: (step: string, extra?: Record<string, unknown>) => void,
   raise: (escalation: Escalation) => string,
+  requestRepair?: (q: QuarantinedTask) => void,
 ): (quarantined: QuarantinedTask[]) => void {
   const reported = new Set<string>();
   return (quarantined) => {
@@ -33621,7 +33696,7 @@ export function quarantineReporter(
       reported.add(key);
       return true;
     });
-    reportQuarantined(fresh, log, raise);
+    reportQuarantined(fresh, log, raise, requestRepair);
   };
 }
 
@@ -33639,6 +33714,148 @@ export function loadDaemonPlan(
   const { plan, quarantined } = load(planPath);
   reportQuarantined(quarantined, log, raise);
   return plan;
+}
+
+const ORIGIN_MAIN_LABEL = "origin/main:";
+type ShardRepairLog = (step: string, extra?: Record<string, unknown>) => void;
+
+/** W1-T5519 — the duplicate-key repair lane's state: `requests/` the loop writes, `opened.json` the plan garden's child writes. */
+export function shardRepairDir(stateDir: string): string {
+  return join(stateDir, "plan-shard-repair");
+}
+
+/** On the daemon loop: a duplicate-key quarantine becomes one small request file — no git, no gh, no repair yet. */
+export function shardRepairRequester(stateDir: string, log: ShardRepairLog): (q: QuarantinedTask) => void {
+  return (q) => {
+    const file = q.files[0] ?? q.id;
+    if (!file.startsWith(ORIGIN_MAIN_LABEL)) {
+      log("plan.shard_repair_refused", { id: q.id, file, reason: "the shard was not read from origin/main, so there is no blob to repair" });
+      return;
+    }
+    const name = `${createHash("sha256").update(file).digest("hex").slice(0, 16)}.json`;
+    writeAtomic(join(shardRepairDir(stateDir), "requests", name), `${JSON.stringify({ id: q.id, file })}\n`);
+    log("plan.shard_repair_requested", { id: q.id, file });
+  };
+}
+
+function shardRepairRequests(stateDir: string): string[] {
+  const dir = join(shardRepairDir(stateDir), "requests");
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir).filter((n) => n.endsWith(".json")).sort().map((n) => join(dir, n));
+}
+
+/** Whether a repair request waits — the plan garden's due probe, on the loop, so one directory read. */
+export function shardRepairsPending(stateDir: string): boolean {
+  return shardRepairRequests(stateDir).length > 0;
+}
+
+/** The plan garden with the repair lane in front of it: due while a request waits, and a repair failure never skips the garden. */
+export function withShardRepairs(stateDir: string, repairs: () => void, garden: RegisteredGardenPass, log: ShardRepairLog): RegisteredGardenPass {
+  return Object.assign(() => {
+    try {
+      repairs();
+    } catch (e) {
+      log("plan.shard_repair_failed", { stage: "pass", reason: String((e as Error)?.message ?? e) });
+    }
+    return garden();
+  }, { due: () => shardRepairsPending(stateDir) || (garden.due?.() ?? true) });
+}
+
+function repairRequestedShard(
+  request: { id: string; file: string },
+  opts: { stateDir: string; log: ShardRepairLog; readOriginBlob: (rel: string) => string; land: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined },
+): void {
+  const at = { id: request.id, file: request.file };
+  const failure = (stage: string, e: unknown) => ({ ...at, stage, reason: String((e as Error)?.message ?? e) });
+  const rel = request.file.slice(ORIGIN_MAIN_LABEL.length);
+  let text: string;
+  try {
+    text = opts.readOriginBlob(rel);
+  } catch (e) {
+    opts.log("plan.shard_repair_failed", failure("read", e));
+    return;
+  }
+  const blob = gitBlobSha(text);
+  const openedPath = join(shardRepairDir(opts.stateDir), "opened.json");
+  let opened: Record<string, string>;
+  try {
+    opened = JSON.parse(readFileIfExists(openedPath) ?? "{}") as Record<string, string>;
+  } catch (e) {
+    // An unreadable record cannot say these bytes were never opened: refuse rather than risk a second PR.
+    opts.log("plan.shard_repair_failed", failure("opened-record", e));
+    return;
+  }
+  if (opened[blob]) {
+    opts.log("plan.shard_repair_skipped", { ...at, blob, pr_url: opened[blob], reason: "a repair PR was already opened for these bytes" });
+    return;
+  }
+  const verdict = repairDuplicateKeyShard(text);
+  if ("refused" in verdict) {
+    opts.log("plan.shard_repair_refused", { ...at, blob, reason: verdict.reason });
+    return;
+  }
+  const keys = Object.keys(verdict.kept).join(", ");
+  const pr = {
+    title: `fix(plan): drop the duplicate ${keys} key from a quarantined shard`,
+    body:
+      `The daemon quarantined \`${rel}\` (blob ${blob}): it fails to parse on a duplicated \`${keys}\` key, the merge race ` +
+      `#8877 and #8922 repaired by hand. This keeps ${Object.entries(verdict.kept).map(([k, v]) => `\`${k}: ${v}\``).join(", ")}, the value ` +
+      `the record's risk_ruling pin covers, and drops the other line and any backlog-gardener marker it carried.\n\n` +
+      `Opened by the duplicate-key repair lane (W1-T5519).`,
+  };
+  let prUrl: string | undefined;
+  try {
+    prUrl = opts.land(rel, verdict.text, pr);
+  } catch (e) {
+    opts.log("plan.shard_repair_failed", failure("land", e));
+    return;
+  }
+  if (prUrl === undefined) {
+    opts.log("plan.shard_repair_not_landed", { ...at, blob, reason: "the plan-PR preflight refused the repair; plan_pr.preflight_refused names why" });
+    return;
+  }
+  writeAtomic(openedPath, `${JSON.stringify({ ...opened, [blob]: prUrl }, null, 2)}\n`);
+  opts.log("plan.shard_repair_opened", { ...at, blob, pr_url: prUrl, kept: verdict.kept });
+}
+
+/**
+ * Off the loop, inside the plan garden's child: each waiting request is repaired from origin/main's blob
+ * with {@link repairDuplicateKeyShard} and opened as a plan-only PR through {@link gardenCheckout} (its
+ * W1-T5348 preflight, then `createPlanPrRest`) — once per shard blob, by `opened.json`. A request is
+ * consumed whatever its outcome; a daemon restart re-requests a shard that still does not load.
+ */
+export function runShardRepairPass(opts: {
+  stateDir: string;
+  repoDir: string;
+  worktreesRoot: string;
+  owner: string;
+  repo: string;
+  log: ShardRepairLog;
+  readOriginBlob?: (rel: string) => string;
+  land?: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined;
+}): void {
+  const readOriginBlob =
+    opts.readOriginBlob ?? ((rel: string) => execFileSync("git", ["-C", opts.repoDir, "show", `origin/main:${rel}`], { encoding: "utf8", maxBuffer: 1 << 26, stdio: ["ignore", "pipe", "pipe"] }));
+  const land =
+    opts.land ??
+    ((rel: string, text: string, pr: { title: string; body: string }) => {
+      const checkout = gardenCheckout({ name: "plan", repoDir: opts.repoDir, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log });
+      try {
+        writeFileSync(join(checkout.root, rel), text);
+        return checkout.land({ paths: [rel], ...pr });
+      } finally {
+        checkout.dispose();
+      }
+    });
+  for (const path of shardRepairRequests(opts.stateDir)) {
+    try {
+      repairRequestedShard(JSON.parse(readFileSync(path, "utf8")) as { id: string; file: string }, { stateDir: opts.stateDir, log: opts.log, readOriginBlob, land });
+    } catch (e) {
+      opts.log("plan.shard_repair_failed", { request: path, stage: "pass", reason: String((e as Error)?.message ?? e) });
+    } finally {
+      rmSync(path, { force: true });
+    }
+  }
 }
 
 /** A garden branch whose PR create threw is deleted from origin, unless a PR does sit on it (the
@@ -33788,7 +34005,8 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
   switch (name) {
     case "plan": {
       const d = deps("plan");
-      return gardenPass(planGardenSpec(d), d);
+      const repairs = { stateDir, repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log };
+      return withShardRepairs(stateDir, () => runShardRepairPass(repairs), gardenPass(planGardenSpec(d), d), log);
     }
     case "backlog": {
       const d = deps("backlog");
@@ -34284,7 +34502,8 @@ export async function daemonCommand(
   let plan: Plan;
   const raiseDuplicate = (e: Escalation): string =>
     escalate({ ...e, runId }, { issues: ghIssueGateway(target.owner, target.repo), ledgerPath, runId });
-  const reportPlanQuarantine = quarantineReporter(log, raiseDuplicate);
+  const requestShardRepair = shardRepairRequester(join(config.root, "state"), log);
+  const reportPlanQuarantine = quarantineReporter(log, raiseDuplicate, requestShardRepair);
   const gardenContext: GardenBuildContext = { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate };
   const injectedPassSpawn: GardenPassSpawn | undefined = deps.gardenPassSpawn
     ?? (deps.gardenPassesInProcess ? (name, args, signal) => runRegisteredGardenPass(name, args, gardenContext, signal) : undefined);
@@ -37943,16 +38162,7 @@ export function priorStrikesFor(
   currentRegime: StrikeRegime = "keyword_only",
   currentHeadSha?: string,
 ): number {
-  if (!taskId) return 0;
-  let n = 0;
-  for (const line of fixLedgerRowsForHead(lines, taskId, currentHeadSha)) {
-    if (line.step !== "fix.dispatch") continue;
-    // Under the executed regime a keyword-era strike is amnestied; every other
-    // combination counts, so the cap keeps binding on same-regime failures.
-    if (currentRegime === "executed" && strikeRegimeOf(line) === "keyword_only") continue;
-    n++;
-  }
-  return n;
+  return fixRoundTally(lines, taskId, currentHeadSha, currentRegime).strikes;
 }
 
 /**
@@ -38426,6 +38636,8 @@ export function buildOpenPrViews(
       instrumentEntanglementPaths: instrumentEntanglement,
       previousInstrumentEntanglementPaths: previousInstrumentEntanglement,
       priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId), pr.headRefOid),
+      repeatedFixRefusal: fixRoundTally(ledger, taskId, pr.headRefOid).repeatedRefusal,
+      fixRefusalsAtHead: fixRoundTally(ledger, taskId, pr.headRefOid).refusals.length,
       strikeHistory: deriveStrikeHistory(ledger, taskId, pr.headRefOid),
       supersededBy,
       // W1-T2794 — DECLARED HERE, STAMPED LATER, and the two are not the same thing. The real
@@ -40073,12 +40285,13 @@ function lastCommitRefusalPromptLines(
     }
   }
   const paths = Array.isArray(last?.undeclared) ? last.undeclared.map(String) : [];
-  if (paths.length === 0) return [];
+  if (!last) return [];
   const omitted = typeof last?.undeclared_omitted === "number" ? ` (and ${last.undeclared_omitted} more)` : "";
   return [
     "",
-    `LAST STRIKE'S COMMIT WAS REFUSED (W1-T4207): the harness could not commit it — ${String(last?.reason)}. ` +
-      `Paths it could not commit: ${paths.join(", ")}${omitted}. Declared files: ${declaredFiles.join(", ")}. ` +
+    `LAST ROUND'S COMMIT WAS REFUSED (W1-T4207): the harness could not commit it — ${String(last.reason)}. ` +
+      (paths.length > 0 ? `Paths it could not commit: ${paths.join(", ")}${omitted}. ` : "") +
+      `Declared files: ${declaredFiles.join(", ")}. ` +
       `Keep this strike's change inside \`files:\`; if the fix genuinely needs a path outside it, change ` +
       `nothing there and say in your REPORT that the task needs amending.`,
   ];
@@ -42571,6 +42784,8 @@ export async function fixCommand(
     // reads it via the SAME sweep.ts row 7.
     criteriaRecoverable: taskId !== undefined,
     priorStrikes: priorStrikesFor(ledger, taskId, currentStrikeRegimeFor(ledger, taskId), raw.headRefOid),
+    repeatedFixRefusal: fixRoundTally(ledger, taskId, raw.headRefOid).repeatedRefusal,
+    fixRefusalsAtHead: fixRoundTally(ledger, taskId, raw.headRefOid).refusals.length,
     strikeHistory: deriveStrikeHistory(ledger, taskId, raw.headRefOid),
     // superseded-by is a cross-PR sweep concern (which OTHER open PR credits the
     // same task) — out of scope for a single explicitly-named PR lookup.

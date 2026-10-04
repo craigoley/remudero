@@ -16,11 +16,12 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { gunzipSync, gzipSync } from "node:zlib";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { gitRepo } from "./helpers/git-repo.js";
 
@@ -79,8 +80,9 @@ function writeStubs(dir: string): void {
     '  "system df")      echo "TYPE TOTAL ACTIVE SIZE"; exit 0 ;;',
     "esac",
     'case "$1" in',
-    '  ps) case "$STUB_MODE" in live) echo c0ffee ;; esac; exit 0 ;;',
-    '  inspect) case "$STUB_MODE" in live) echo "/remudero-daemon|rmd-local:latest|/home/node/Remudero " ;; esac; exit 0 ;;',
+    '  ps) case "$STUB_MODE" in live) echo c0ffee ;; ps-fails) echo "Cannot connect to the Docker daemon" >&2; exit 1 ;; esac; exit 0 ;;',
+    // W1-T5545: section 3a asks for the host side of the state mount; section 1 asks for the rest.
+    '  inspect) case "$STUB_MODE" in live) case "$*" in *.Source*) echo "${STUB_MOUNT_SRC:-}" ;; *) echo "/remudero-daemon|rmd-local:latest|/home/node/Remudero " ;; esac ;; esac; exit 0 ;;',
     "  run)",
     '    case "$STUB_MODE" in',
     // The image was already pruned, or never pulled: `--pull never` refuses exactly like this.
@@ -242,7 +244,7 @@ test("a failed snapshot fails the nightly rung loudly", () => {
   mkdirSync(join(vol, "state"), { recursive: true });
   const run = runRung("good", vol);
   assert.notEqual(run.status, 0, "a failed snapshot must not let the nightly run report success");
-  assert.match(run.stderr, /STATE SNAPSHOT FAILED — the snapshot exited 1/);
+  assert.match(run.stderr, /STATE SNAPSHOT FAILED — the snapshot of .*\/state exited 1:/);
   assert.match(run.stderr, /StateBackupError: state backup: snapshot of .* would be an empty archive/, "the cause is shown");
   assert.match(run.stderr, /nightly STATE SNAPSHOT did not leave a verified, recent archive/);
   assert.deepEqual(snapshotsIn(join(vol, "state-backups")), [], "nothing is published");
@@ -253,7 +255,7 @@ test("a snapshot whose image is gone fails the rung loudly instead of pulling on
   const vol = stateVolume();
   const run = runRung("no-image", vol);
   assert.notEqual(run.status, 0);
-  assert.match(run.stderr, /STATE SNAPSHOT FAILED — the snapshot exited 125/);
+  assert.match(run.stderr, /STATE SNAPSHOT FAILED — the snapshot of .*\/state exited 125:/);
   assert.match(run.stderr, /No such image/);
 });
 
@@ -273,34 +275,48 @@ test("a failed snapshot expires nothing", () => {
   assert.deepEqual(snapshotsIn(backups), seeded, "old snapshots are the only copies left when tonight's failed");
 });
 
-// ── 3. NO SNAPSHOT WHILE A FLEET CONTAINER IS LIVE ─────────────────────────────────────────────
+// ── 3. W1-T5545: A LIVE FLEET NO LONGER REFUSES THE SNAPSHOT ─────────────────────────────────
+// This section's falsifier INVERTED: W1-T3677 refused beside a live container, and the fleet runs
+// 24/7, so every nightly rung logged STATE SNAPSHOT MISSED. snapshotState is live-safe now.
 
-test("the snapshot refuses while a fleet container is live", () => {
+test("a live fleet container no longer refuses the snapshot", () => {
   const vol = stateVolume();
-  const run = runRung("live", vol);
-  assert.equal(run.calls.filter(isSnapshotRun).length, 0, "no snapshot may be taken beside a live container");
-  assert.deepEqual(snapshotsIn(run.backups), [], "and no archive of a possibly half-written ledger exists");
-  assert.match(run.stderr, /REFUSING state snapshot — a fleet container is RUNNING/);
-  assert.match(run.stderr, /rmd-local:latest/, "the refusal names the live holder");
-  // With no recent snapshot to fall back on, the refusal leaves the ledger unprotected: loud.
-  assert.notEqual(run.status, 0, "a refusal that leaves no recent snapshot must not report success");
-  assert.match(run.stderr, /STATE SNAPSHOT MISSED — nothing under .* is newer than 48h/);
+  const run = runRung("live", vol, ["--reclaim-only"], { STUB_MOUNT_SRC: vol });
+  assert.equal(run.status, 0, `a live container must not cost the night its backup:\n${run.stderr}`);
+  assert.doesNotMatch(run.stderr, /REFUSING state snapshot|STATE SNAPSHOT MISSED/);
+  assert.equal(run.calls.filter(isSnapshotRun).length, 1, "one root, mounted by the container AND named by RMD_STATE_DIR, is snapshotted once");
+  const snaps = snapshotsIn(run.backups);
+  assert.equal(snaps.length, 1, "the snapshot is taken beside the live container");
+  assert.equal(readFileSync(join(run.backups, snaps[0], "ledger.ndjson"), "utf8"), LEDGER);
 });
 
-test("a live refusal with a recent snapshot still standing does not fail the rung", () => {
+test("a docker that cannot list containers fails the snapshot instead of falling back to a default root", () => {
   const vol = stateVolume();
-  const fresh = seedSnapshot(join(vol, "state-backups"), new Date(), 2);
-  const run = runRung("live", vol);
-  assert.equal(run.status, 0, run.stderr);
-  assert.match(run.stderr, /REFUSING state snapshot/);
-  assert.match(run.stderr, new RegExp(`still stands: .*${fresh}`));
-  assert.deepEqual(snapshotsIn(join(vol, "state-backups")), [fresh], "the refusal writes and expires nothing");
-});
-
-test("a live refusal whose newest snapshot is past the age bound fails the rung", () => {
-  const vol = stateVolume();
-  seedSnapshot(join(vol, "state-backups"), new Date(Date.now() - 72 * 3600_000), 72);
-  const run = runRung("live", vol);
+  const run = runRung("ps-fails", vol);
   assert.notEqual(run.status, 0);
-  assert.match(run.stderr, /STATE SNAPSHOT MISSED/);
+  assert.match(run.stderr, /STATE SNAPSHOT FAILED — docker ps did not answer/);
+  assert.equal(run.calls.filter(isSnapshotRun).length, 0, "no root is guessed when the mounts cannot be read");
+});
+
+test("a second night hard-links the unchanged rotations, and expiring the first keeps their bytes", () => {
+  const vol = stateVolume();
+  const rotation = "ledger.2026-09-30T04-17-00-000Z.ndjson.gz";
+  const rows = '{"step":"run.start","task":"old"}\n';
+  writeFileSync(join(vol, "state", rotation), gzipSync(rows));
+  const first = runRung("good", vol);
+  assert.equal(first.status, 0, first.stderr);
+  assert.match(first.stdout, /0 rotation\(s\) hard-linked/, "control: the first night had nothing to link against");
+  const second = runRung("good", vol);
+  assert.equal(second.status, 0, second.stderr);
+  assert.match(second.stdout, /1 rotation\(s\) hard-linked to the previous archive/);
+  const [a, b] = snapshotsIn(second.backups);
+  assert.equal(statSync(join(second.backups, a, rotation)).ino, statSync(join(second.backups, b, rotation)).ino, "one inode, two archives");
+
+  const third = runRung("good", vol, ["--reclaim-only"], { RMD_STATE_BACKUP_KEEP: "1" });
+  assert.equal(third.status, 0, third.stderr);
+  const snaps = snapshotsIn(third.backups);
+  assert.equal(snaps.length, 1, "keep=1 expired both earlier archives");
+  const kept = join(third.backups, snaps[0], rotation);
+  assert.equal(statSync(kept).nlink, 1, "expiry only unlinked the older names");
+  assert.equal(gunzipSync(readFileSync(kept)).toString(), rows, "the rotation's bytes survive the expiry");
 });

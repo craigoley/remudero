@@ -34,9 +34,11 @@
 # reaper (see the recommendation at the foot of this file), not "just the old ones". A disk-space
 # script that can delete evidence is one bad predicate away from destroying the only copy, and the
 # blast radius is the whole fleet's history. This script MEASURES the state directory, read-only,
-# and on the nightly `--reclaim-only` rung COPIES `state/` (mounted read-only) into its sibling
-# `state-backups/` (section 3a, W1-T3677). The only thing that copy ever removes is one of its OWN
-# dated snapshots beyond the keep count — never anything under `state/`.
+# and on the nightly `--reclaim-only` rung COPIES every live root's `state/` (mounted read-only)
+# into its sibling `state-backups/` (section 3a, W1-T3677, W1-T5545). The only thing that copy ever
+# removes is one of its OWN dated snapshots beyond the keep count — never anything under `state/`.
+# With RMD_STATE_OFFHOST set it then copies them OFF the VM (section 3b, W1-T5546), expiring only
+# its OWN tagged Azure snapshots the same way.
 #
 # ── PLAIN BASH AND DOCKER, deliberately — the same discipline as deploy/verify-image.sh, which is
 # this script's sibling. It runs on a host that may have no node, no rmd and no checkout, and it
@@ -54,7 +56,9 @@
 #   RMD_STATE_DIR=/path ./deploy/host-update.sh            # if the bind mount is not ~/rmd-state
 #   ./deploy/host-update.sh --check-state-roots            # is EVERY instance's state on /mnt/rmd?
 #   ./deploy/host-update.sh --relocate-state-root <instance> <dest>  # copy one there, verified
-#   ./deploy/host-update.sh --reclaim-only     # the NIGHTLY rung: snapshot state/, then reclaim
+#   ./deploy/host-update.sh --reclaim-only     # the NIGHTLY rung: snapshot every live state/, then reclaim
+#   RMD_STATE_OFFHOST=azure-disk-snapshot:<rg>/<disk> ./deploy/host-update.sh --reclaim-only
+#                                              # ...and an off-host copy (or azure-blob:<acct>/<ctr>)
 
 set -euo pipefail
 
@@ -741,11 +745,13 @@ echo "host-update: target ${REF}"
 HOST_UPDATE_TMPDIR="${TMPDIR:-/tmp}"
 DOCKER_ERR=""
 PULL_LOG=""
+OFFHOST_TAR=""
 # Installed BEFORE the first mktemp on purpose: if the SECOND allocation fails, the first is
 # already registered and still gets removed.
 host_update_cleanup_tmp() {
   [ -n "${DOCKER_ERR}" ] && rm -f "${DOCKER_ERR}"
   [ -n "${PULL_LOG}" ] && rm -f "${PULL_LOG}"
+  [ -n "${OFFHOST_TAR}" ] && rm -f "${OFFHOST_TAR}"
   return 0
 }
 trap host_update_cleanup_tmp EXIT
@@ -937,7 +943,7 @@ else
   echo "  state volume:   ${STATE_DIR} does not exist on this host"
 fi
 
-# ── 3a. NIGHTLY STATE SNAPSHOT (W1-T3677) — before the reclaim, which can remove the image ─────
+# ── 3a. NIGHTLY STATE SNAPSHOT (W1-T3677, W1-T5545) — before the reclaim, which can remove the image ──
 # `snapshotState` (src/lib/ledger.ts, W1-T234) was built and tested and had never run: nothing
 # scheduled it and no snapshot existed on the host. This rung already runs nightly, so the snapshot
 # rides it — one maintenance story, not two.
@@ -947,119 +953,290 @@ fi
 # `--pull never` makes a missing image a loud failure rather than a download. It runs BEFORE section
 # 4 because, with no fleet container up, `docker image prune -a` removes that very image.
 #
-# INVARIANT: refuse while any fleet container is LIVE (section 1's `LIVE`) — a live daemon may be
-# mid-append, and a copy of a half-written ledger is not a backup. A refusal that leaves no snapshot
-# newer than RMD_STATE_BACKUP_MAX_AGE_HOURS fails the rung: a backup that is always skipped is the
-# exact silence this section exists to end.
+# W1-T5545 — EVERY LIVE ROOT, WITH THE FLEET UP. Until then this section had never succeeded: it
+# refused whenever a fleet container ran (always), and the cron sets no RMD_STATE_DIR, so it read
+# ~/rmd-state, an empty decoy, while the daemons mounted ~/rmd-state2, ~/rmd-site-state and
+# /mnt/rmd/remudero-console-state. So the roots are now DERIVED: the host side of every running
+# container's ${STATE_MOUNT_DEST} mount, plus RMD_STATE_DIR when set, and ${STATE_DIR} only when
+# neither names one. Each lands in its own <root>/state-backups. snapshotState is live-safe (whole
+# ledger lines, a mid-copy rotation re-copied, unchanged rotations hard-linked to the previous
+# archive), so there is no LIVE refusal: a race it cannot settle is a failure it reports itself.
+#
+# A ROOT WHOSE state/ HOLDS NO LEDGER beside a sibling directory whose state/ does fails the rung,
+# naming both — the rmd-state -> rmd-state2 drift. An EXISTING empty state/ no longer passes.
 #
 # VERIFY, DON'T TRUST: success is an archive the HOST can see holding files, never a zero exit. Any
 # failure sets `state_snapshot_failed`, which section 4c turns into a non-zero exit; the reclaim
 # still runs, because disk pressure does not wait on a backup.
 #
-# FALSIFIER: test/the-state-snapshot-actually-runs-on-this-host.test.ts — drop the invocation and no
-# archive appears; swallow a failure and the rung exits 0; drop the LIVE refusal and a snapshot is
-# taken beside a live container.
+# FALSIFIERS: test/the-state-snapshot-actually-runs-on-this-host.test.ts (the invocation, a failure
+# exits non-zero, a live container no longer refuses), test/the-nightly-rung-snapshots-the-state-
+# root-each-running-daemon-mounts.test.ts and test/a-derived-state-dir-with-no-ledger-beside-a-
+# sibling-that-has-one-fails-the-rung.test.ts.
 state_snapshot_failed=0
+STATE_SNAPSHOT_ARCHIVES=()
 if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   echo
-  STATE_SNAPSHOT_SRC="${STATE_DIR}/state"
   STATE_SNAPSHOT_IMAGE="${RMD_STATE_SNAPSHOT_IMAGE:-${REF}}"
   STATE_BACKUP_KEEP="${RMD_STATE_BACKUP_KEEP:-7}"
-  STATE_BACKUP_MAX_AGE_HOURS="${RMD_STATE_BACKUP_MAX_AGE_HOURS:-48}"
-  for knob in "RMD_STATE_BACKUP_KEEP=${STATE_BACKUP_KEEP}" "RMD_STATE_BACKUP_MAX_AGE_HOURS=${STATE_BACKUP_MAX_AGE_HOURS}"; do
-    case "${knob#*=}" in
-      ''|*[!0-9]*|0) echo "host-update: REFUSING — ${knob%%=*} must be a positive integer, got '${knob#*=}'." >&2; exit 2 ;;
-    esac
-  done
+  case "${STATE_BACKUP_KEEP}" in
+    ''|*[!0-9]*|0) echo "host-update: REFUSING — RMD_STATE_BACKUP_KEEP must be a positive integer, got '${STATE_BACKUP_KEEP}'." >&2; exit 2 ;;
+  esac
   # The container-side paths. The image's source tree is /app (deploy/Dockerfile's WORKDIR).
   SNAP_IN_STATE="/rmd-snapshot/state"
   SNAP_IN_BACKUPS="/rmd-snapshot/backups"
   SNAP_JS="import { snapshotState } from '/app/src/lib/ledger.ts';
 const s = snapshotState('${SNAP_IN_STATE}', '${SNAP_IN_BACKUPS}');
-console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.length);"
+console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.length, s.linked.length, s.vanished.length, s.ledgerTrimmedBytes);"
   # Only names snapshotState itself writes (`state-backup.<ISO stamp, : and . as ->`) are ever
-  # listed, counted as fresh, or expired — nothing else under the backup dir is this rung's to judge.
+  # listed or expired — nothing else under a backup dir is this rung's to judge.
   is_snapshot_name() {
     case "$1" in
       state-backup.[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]-[0-9][0-9]-[0-9][0-9]-[0-9][0-9][0-9]Z) return 0 ;;
     esac
     return 1
   }
-  # Every snapshot, oldest first (the ISO stamp sorts chronologically), optionally only those whose
-  # directory mtime is newer than <minutes>.
+  # Every snapshot under <backup dir>, oldest first (the ISO stamp sorts chronologically).
   list_snapshots() {
-    [ -d "${STATE_BACKUP_DIR}" ] || return 0
+    [ -d "$1" ] || return 0
     local n
-    if [ -n "${1:-}" ]; then
-      find "${STATE_BACKUP_DIR}" -mindepth 1 -maxdepth 1 -type d -name 'state-backup.*' -mmin "-$1" 2>/dev/null || true
-    else
-      find "${STATE_BACKUP_DIR}" -mindepth 1 -maxdepth 1 -type d -name 'state-backup.*' 2>/dev/null || true
-    fi | while IFS= read -r n; do
+    find "$1" -mindepth 1 -maxdepth 1 -type d -name 'state-backup.*' 2>/dev/null | while IFS= read -r n; do
       n="${n##*/}"
       if is_snapshot_name "${n}"; then printf '%s\n' "${n}"; fi
     done | sort
   }
-  if [ ! -d "${STATE_SNAPSHOT_SRC}" ]; then
-    # The rmd-state -> rmd-state2 drift the sibling scan exists for: a derived path with no state/
-    # beside one that has a ledger is a missed backup, not a fresh host.
-    sib_ledger="$(find_sibling_with_marker "${STATE_DIR}" "state/ledger.ndjson")"
-    if [ -n "${sib_ledger}" ]; then
-      echo "host-update: STATE SNAPSHOT FAILED — ${STATE_SNAPSHOT_SRC} does not exist, but" >&2
-      echo "  ${sib_ledger} does. Set RMD_STATE_DIR if that is the volume you mean." >&2
-      state_snapshot_failed=1
-    else
-      echo "host-update: state snapshot — ${STATE_SNAPSHOT_SRC} does not exist on this host; nothing to snapshot"
-    fi
-  elif [ -n "${LIVE}" ]; then
-    echo "host-update: REFUSING state snapshot — a fleet container is RUNNING." >&2
-    printf '%s\n' "${LIVE}" | sed 's/^/  /' >&2
-    echo "  A live daemon may be mid-append; a copy of a half-written ledger is not a backup." >&2
-    fresh_snap="$(list_snapshots "$((STATE_BACKUP_MAX_AGE_HOURS * 60))" | tail -1)"
-    if [ -n "${fresh_snap}" ]; then
-      echo "  The newest snapshot is under ${STATE_BACKUP_MAX_AGE_HOURS}h old and still stands: ${STATE_BACKUP_DIR}/${fresh_snap}" >&2
-    else
-      echo "host-update: STATE SNAPSHOT MISSED — nothing under ${STATE_BACKUP_DIR} is newer than ${STATE_BACKUP_MAX_AGE_HOURS}h." >&2
-      echo "  The ledger stays unprotected until this rung runs with the fleet stopped." >&2
-      state_snapshot_failed=1
-    fi
-  elif [ "${DRY_RUN}" -eq 1 ]; then
-    echo "host-update: state snapshot (DRY RUN) — would copy ${STATE_SNAPSHOT_SRC} (read-only) into ${STATE_BACKUP_DIR}"
-    echo "  via ${STATE_SNAPSHOT_IMAGE}, keeping the newest ${STATE_BACKUP_KEEP}; nothing written"
-  elif ! mkdir -p "${STATE_BACKUP_DIR}"; then
-    echo "host-update: STATE SNAPSHOT FAILED — cannot create ${STATE_BACKUP_DIR}." >&2
+  # The roots, one per line, deduplicated. A docker that does not answer is a FAILURE, not "no
+  # containers": falling back to the default would snapshot the decoy and report success.
+  snap_roots=""
+  if ! snap_ids="$(docker ps -q 2>&1)"; then
+    echo "host-update: STATE SNAPSHOT FAILED — docker ps did not answer, so the mounted state roots" >&2
+    echo "  cannot be derived: ${snap_ids}" >&2
     state_snapshot_failed=1
   else
-    echo "host-update: state snapshot — ${STATE_SNAPSHOT_SRC} -> ${STATE_BACKUP_DIR} via ${STATE_SNAPSHOT_IMAGE}"
-    snap_out="$(docker run --rm --pull never --network none --entrypoint node -w /app \
-      -v "${STATE_SNAPSHOT_SRC}:${SNAP_IN_STATE}:ro" -v "${STATE_BACKUP_DIR}:${SNAP_IN_BACKUPS}" \
-      "${STATE_SNAPSHOT_IMAGE}" --import tsx --input-type=module -e "${SNAP_JS}" 2>&1)" && snap_rc=0 || snap_rc=$?
-    snap_name="$(printf '%s\n' "${snap_out}" | awk '$1 == "RMD_STATE_SNAPSHOT" { n = $2 } END { print n }')"
-    is_snapshot_name "${snap_name}" || snap_name=""
-    if [ "${snap_rc}" -ne 0 ]; then
-      echo "host-update: STATE SNAPSHOT FAILED — the snapshot exited ${snap_rc}:" >&2
-      printf '%s\n' "${snap_out}" | sed 's/^/  /' >&2
-      state_snapshot_failed=1
-    elif [ -z "${snap_name}" ] || [ ! -d "${STATE_BACKUP_DIR}/${snap_name}" ] \
-         || [ -z "$(find "${STATE_BACKUP_DIR}/${snap_name}" -type f 2>/dev/null | head -1)" ]; then
-      echo "host-update: STATE SNAPSHOT FAILED — it exited 0 but published no archive this host can see" >&2
-      echo "  under ${STATE_BACKUP_DIR} (reported: '${snap_name:-nothing}'). Output was:" >&2
-      printf '%s\n' "${snap_out}" | sed 's/^/  /' >&2
-      state_snapshot_failed=1
-    else
-      echo "host-update: state snapshot — ${STATE_BACKUP_DIR}/${snap_name} verified"
-      # Retention, only after a verified NEW snapshot: keep the newest STATE_BACKUP_KEEP, never the
-      # one just written. A failed or refused night expires nothing.
-      snap_all="$(list_snapshots)"
-      snap_count="$(printf '%s\n' "${snap_all}" | grep -c . || true)"
-      snap_excess=$((snap_count - STATE_BACKUP_KEEP))
-      if [ "${snap_excess}" -gt 0 ]; then
-        printf '%s\n' "${snap_all}" | head -n "${snap_excess}" | while IFS= read -r old_snap; do
-          [ -n "${old_snap}" ] && [ "${old_snap}" != "${snap_name}" ] || continue
-          rm -rf -- "${STATE_BACKUP_DIR:?}/${old_snap}"
-          echo "  expired ${old_snap} (keeping the newest ${STATE_BACKUP_KEEP})"
-        done
+    for snap_id in ${snap_ids}; do
+      snap_src="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"${STATE_MOUNT_DEST}\"}}{{.Source}}{{end}}{{end}}" "${snap_id}" 2>/dev/null)" || snap_src=""
+      [ -n "${snap_src}" ] && snap_roots="${snap_roots}${snap_src%/}"$'\n'
+    done
+    [ -n "${RMD_STATE_DIR:-}" ] && snap_roots="${RMD_STATE_DIR%/}"$'\n'"${snap_roots}"
+    if [ -z "${snap_roots}" ]; then
+      echo "host-update: state snapshot — no running container mounts ${STATE_MOUNT_DEST} and RMD_STATE_DIR is unset; using ${STATE_DIR}"
+      snap_roots="${STATE_DIR}"$'\n'
+    fi
+    snap_roots="$(printf '%s' "${snap_roots}" | awk 'NF && !seen[$0]++')"
+  fi
+  while IFS= read -r snap_root; do
+    [ -n "${snap_root}" ] || continue
+    snap_state="${snap_root}/state"
+    snap_backups="${snap_root}/state-backups"
+    [ "${snap_root}" = "${STATE_DIR%/}" ] && snap_backups="${STATE_BACKUP_DIR}"
+    if [ ! -s "${snap_state}/ledger.ndjson" ]; then
+      sib_ledger="$(find_sibling_with_marker "${snap_root}" "state/ledger.ndjson")"
+      if [ -n "${sib_ledger}" ]; then
+        echo "host-update: STATE SNAPSHOT FAILED — ${snap_state}/ledger.ndjson does not exist or is empty, but" >&2
+        echo "  ${sib_ledger} does. Set RMD_STATE_DIR if that is the volume you mean." >&2
+        state_snapshot_failed=1
+        continue
+      fi
+      if [ ! -d "${snap_state}" ]; then
+        echo "host-update: state snapshot — ${snap_state} does not exist on this host; nothing to snapshot"
+        continue
       fi
     fi
+    if [ "${DRY_RUN}" -eq 1 ]; then
+      echo "host-update: state snapshot (DRY RUN) — would copy ${snap_state} (read-only) into ${snap_backups}"
+      echo "  via ${STATE_SNAPSHOT_IMAGE}, keeping the newest ${STATE_BACKUP_KEEP}; nothing written"
+      continue
+    fi
+    if ! mkdir -p "${snap_backups}"; then
+      echo "host-update: STATE SNAPSHOT FAILED — cannot create ${snap_backups}." >&2
+      state_snapshot_failed=1
+      continue
+    fi
+    echo "host-update: state snapshot — ${snap_state} -> ${snap_backups} via ${STATE_SNAPSHOT_IMAGE}"
+    snap_out="$(docker run --rm --pull never --network none --entrypoint node -w /app \
+      -v "${snap_state}:${SNAP_IN_STATE}:ro" -v "${snap_backups}:${SNAP_IN_BACKUPS}" \
+      "${STATE_SNAPSHOT_IMAGE}" --import tsx --input-type=module -e "${SNAP_JS}" 2>&1 </dev/null)" && snap_rc=0 || snap_rc=$?
+    snap_line="$(printf '%s\n' "${snap_out}" | awk '$1 == "RMD_STATE_SNAPSHOT" { l = $0 } END { print l }')"
+    read -r _snap_tag snap_name snap_files snap_linked snap_vanished snap_trimmed <<<"${snap_line}" || true
+    is_snapshot_name "${snap_name:-}" || snap_name=""
+    if [ "${snap_rc}" -ne 0 ]; then
+      echo "host-update: STATE SNAPSHOT FAILED — the snapshot of ${snap_state} exited ${snap_rc}:" >&2
+      printf '%s\n' "${snap_out}" | sed 's/^/  /' >&2
+      state_snapshot_failed=1
+      continue
+    fi
+    if [ -z "${snap_name}" ] || [ ! -d "${snap_backups}/${snap_name}" ] \
+       || [ -z "$(find "${snap_backups}/${snap_name}" -type f 2>/dev/null | head -1)" ]; then
+      echo "host-update: STATE SNAPSHOT FAILED — it exited 0 but published no archive this host can see" >&2
+      echo "  under ${snap_backups} (reported: '${snap_name:-nothing}'). Output was:" >&2
+      printf '%s\n' "${snap_out}" | sed 's/^/  /' >&2
+      state_snapshot_failed=1
+      continue
+    fi
+    echo "host-update: state snapshot — ${snap_backups}/${snap_name} verified"
+    echo "  ${snap_files} file(s): ${snap_linked} rotation(s) hard-linked to the previous archive," \
+      "${snap_vanished} removed by a live writer mid-copy, ${snap_trimmed} torn ledger byte(s) left out"
+    STATE_SNAPSHOT_ARCHIVES+=("${snap_backups}/${snap_name}")
+    # Retention, only after a verified NEW snapshot: keep the newest STATE_BACKUP_KEEP, never the
+    # one just written. A failed night expires nothing. Removing an archive only unlinks: a rotation
+    # hard-linked into a newer archive keeps its bytes there.
+    snap_all="$(list_snapshots "${snap_backups}")"
+    snap_count="$(printf '%s\n' "${snap_all}" | grep -c . || true)"
+    snap_excess=$((snap_count - STATE_BACKUP_KEEP))
+    if [ "${snap_excess}" -gt 0 ]; then
+      printf '%s\n' "${snap_all}" | head -n "${snap_excess}" | while IFS= read -r old_snap; do
+        [ -n "${old_snap}" ] && [ "${old_snap}" != "${snap_name}" ] || continue
+        rm -rf -- "${snap_backups:?}/${old_snap}"
+        echo "  expired ${old_snap} (keeping the newest ${STATE_BACKUP_KEEP})"
+      done
+    fi
+  done <<<"${snap_roots}"
+  # ── 3b. THE OFF-HOST COPY (W1-T5546) ──────────────────────────────────────────────────────
+  # Every archive above lands on the SAME Azure managed disk as the state it copies (remudero-data,
+  # /mnt/rmd), so a lost disk loses the ledger and every backup of it together. RMD_STATE_OFFHOST
+  # names where a copy goes OFF the VM. An UNSET target is one line, not a failure: an off-host copy
+  # has a recurring storage cost, and that is an operator decision, not this script's.
+  #   azure-disk-snapshot:<resource-group>/<disk>  an INCREMENTAL snapshot of the whole disk — every
+  #       root and every archive at once — after a `sync`, in the disk's own region, named
+  #       <disk>-<UTC stamp> and tagged purpose=fleet-state-backup created-by=host-update. Only after
+  #       it verifies are the newest RMD_STATE_OFFHOST_KEEP (default 7) of THOSE kept. A snapshot
+  #       missing either tag, or not named <disk>-<UTC stamp>, is never deleted — an operator's
+  #       hand-taken one (created-by=operator-session) included.
+  #   azure-blob:<account>/<container>  each archive verified above, as a .tar.gz named
+  #       <backup dir>/<archive>.tar.gz, uploaded with the host's `az login` (--auth-mode login).
+  #       No expiry here: a lifecycle rule on the container is the place for one.
+  # VERIFY, DON'T TRUST, again: success is `az snapshot show` reporting Succeeded with both tags, or
+  # the blob's contentLength equal to the local tarball's — never an exit code. Any failure sets
+  # state_snapshot_failed, so section 4c exits non-zero. RMD_STATE_OFFHOST_AZ replaces `az`.
+  # FALSIFIER: test/the-nightly-state-snapshot-has-an-off-host-copy.test.ts.
+  OFFHOST_TARGET="${RMD_STATE_OFFHOST:-}"
+  OFFHOST_AZ="${RMD_STATE_OFFHOST_AZ:-az}"
+  OFFHOST_KEEP="${RMD_STATE_OFFHOST_KEEP:-7}"
+  offhost_fail() { # <what failed> [command output, indented beneath]
+    echo "host-update: STATE SNAPSHOT OFF-HOST COPY FAILED — $1" >&2
+    [ -n "${2:-}" ] && printf '%s\n' "$2" | sed 's/^/  /' >&2
+    state_snapshot_failed=1
+  }
+  offhost_disk_snapshot() { # <resource group> <disk>
+    local rg="$1" disk="$2" out rc disk_id disk_loc name got want all count excess old
+    if ! out="$(sync 2>&1)"; then
+      offhost_fail "sync failed, so a disk snapshot could miss tonight's archives:" "${out}"
+      return
+    fi
+    out="$("${OFFHOST_AZ}" disk show -g "${rg}" -n "${disk}" --query "join('|', [id, location])" -o tsv 2>&1)" && rc=0 || rc=$?
+    disk_id="${out%%|*}"; disk_loc="${out#*|}"
+    if [ "${rc}" -ne 0 ] || [ -z "${disk_id}" ] || [ -z "${disk_loc}" ] || [ "${disk_loc}" = "${out}" ]; then
+      offhost_fail "az disk show -g ${rg} -n ${disk} exited ${rc} without an id|location:" "${out}"
+      return
+    fi
+    name="${disk}-$(date -u +%Y%m%dT%H%M%SZ)"
+    out="$("${OFFHOST_AZ}" snapshot create -g "${rg}" -n "${name}" --source "${disk_id}" -l "${disk_loc}" \
+      --incremental true --tags purpose=fleet-state-backup created-by=host-update -o none 2>&1)" && rc=0 || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+      offhost_fail "az snapshot create -g ${rg} -n ${name} exited ${rc}:" "${out}"
+      return
+    fi
+    got="$("${OFFHOST_AZ}" snapshot show -g "${rg}" -n "${name}" \
+      --query "join('|', [provisioningState, tags.purpose, tags.\"created-by\", creationData.sourceResourceId])" -o tsv 2>&1)" && rc=0 || rc=$?
+    want="Succeeded|fleet-state-backup|host-update|${disk_id}"
+    # ARM ids are case-insensitive and come back in whatever case the resource was created with.
+    if [ "${rc}" -ne 0 ] || [ "$(printf '%s' "${got}" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "${want}" | tr '[:upper:]' '[:lower:]')" ]; then
+      offhost_fail "az snapshot create exited 0 but az snapshot show -g ${rg} -n ${name} (exit ${rc}) does not report '${want}':" "${got}"
+      return
+    fi
+    echo "host-update: state snapshot off-host copy — azure disk snapshot ${rg}/${name} verified (incremental, of ${disk})"
+    # Retention, only after a verified NEW snapshot, and only of this rung's own (both tags, and the
+    # <disk>-<stamp> name it writes), oldest first by creation time.
+    all="$("${OFFHOST_AZ}" snapshot list -g "${rg}" \
+      --query "sort_by([?tags.purpose=='fleet-state-backup' && tags.\"created-by\"=='host-update'], &timeCreated)[].name" -o tsv 2>&1)" && rc=0 || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+      offhost_fail "az snapshot list -g ${rg} exited ${rc}, so no snapshot beyond the newest ${OFFHOST_KEEP} was expired:" "${all}"
+      return
+    fi
+    all="$(printf '%s\n' "${all}" | while IFS= read -r old; do
+      case "${old}" in
+        "${disk}"-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) printf '%s\n' "${old}" ;;
+      esac
+    done)"
+    count="$(printf '%s\n' "${all}" | grep -c . || true)"
+    excess=$((count - OFFHOST_KEEP))
+    [ "${excess}" -gt 0 ] || return 0
+    while IFS= read -r old; do
+      [ -n "${old}" ] && [ "${old}" != "${name}" ] || continue
+      if out="$("${OFFHOST_AZ}" snapshot delete -g "${rg}" -n "${old}" 2>&1)"; then
+        echo "  expired azure disk snapshot ${rg}/${old} (keeping the newest ${OFFHOST_KEEP})"
+      else
+        offhost_fail "az snapshot delete -g ${rg} -n ${old} failed; it is still billed:" "${out}"
+      fi
+    done <<<"$(printf '%s\n' "${all}" | head -n "${excess}")"
+  }
+  offhost_blob() { # <account> <container>
+    local account="$1" container="$2" archive backups name blob size remote out rc
+    for archive in "${STATE_SNAPSHOT_ARCHIVES[@]}"; do
+      backups="${archive%/*}"; name="${archive##*/}"
+      blob="${backups#/}/${name}.tar.gz"
+      if ! OFFHOST_TAR="$(mktemp "${backups}/.rmd-offhost-upload.XXXXXX" 2>&1)"; then
+        offhost_fail "cannot create a temporary tarball in ${backups} for ${name}:" "${OFFHOST_TAR}"
+        OFFHOST_TAR=""
+        continue
+      fi
+      if ! out="$(tar -czf "${OFFHOST_TAR}" -C "${backups}" "${name}" 2>&1)"; then
+        offhost_fail "tar of ${archive} failed:" "${out}"
+      else
+        size="$(wc -c <"${OFFHOST_TAR}" | tr -d ' ')"
+        out="$("${OFFHOST_AZ}" storage blob upload --auth-mode login --account-name "${account}" \
+          --container-name "${container}" --name "${blob}" --file "${OFFHOST_TAR}" --only-show-errors -o none 2>&1)" && rc=0 || rc=$?
+        if [ "${rc}" -ne 0 ]; then
+          offhost_fail "az storage blob upload of ${archive} to ${account}/${container} exited ${rc}:" "${out}"
+        else
+          remote="$("${OFFHOST_AZ}" storage blob show --auth-mode login --account-name "${account}" \
+            --container-name "${container}" --name "${blob}" --query properties.contentLength -o tsv 2>&1)" && rc=0 || rc=$?
+          if [ "${rc}" -ne 0 ] || [ "${remote}" != "${size}" ]; then
+            offhost_fail "az storage blob show reports '${remote}' (exit ${rc}) for ${account}/${container}/${blob}, not the ${size} bytes uploaded"
+          else
+            echo "host-update: state snapshot off-host copy — ${archive} -> azure-blob ${account}/${container}/${blob} verified (${size} bytes)"
+          fi
+        fi
+      fi
+      rm -f -- "${OFFHOST_TAR}"
+      OFFHOST_TAR=""
+    done
+  }
+  offhost_kind="" offhost_a="" offhost_b=""
+  if [ -n "${OFFHOST_TARGET}" ]; then
+    offhost_kind="${OFFHOST_TARGET%%:*}"
+    offhost_spec="${OFFHOST_TARGET#*:}"
+    offhost_a="${offhost_spec%%/*}"; offhost_b="${offhost_spec#*/}"
+    case "${offhost_kind}" in azure-disk-snapshot|azure-blob) ;; *) offhost_kind="" ;; esac
+    if [ -z "${offhost_kind}" ] || [ -z "${offhost_a}" ] || [ -z "${offhost_b}" ] \
+       || [ "${offhost_b}" = "${offhost_spec}" ] || [[ "${offhost_b}" == */* ]]; then
+      offhost_fail "RMD_STATE_OFFHOST='${OFFHOST_TARGET}' is neither azure-disk-snapshot:<resource-group>/<disk> nor azure-blob:<account>/<container>."
+      offhost_kind=""
+    fi
+    case "${OFFHOST_KEEP}" in
+      ''|*[!0-9]*|0) offhost_fail "RMD_STATE_OFFHOST_KEEP must be a positive integer, got '${OFFHOST_KEEP}'."; offhost_kind="" ;;
+    esac
+  fi
+  if [ -z "${OFFHOST_TARGET}" ]; then
+    echo "host-update: state snapshot off-host copy — NOT CONFIGURED: every archive above is on the same disk as"
+    echo "  the state it copies. Set RMD_STATE_OFFHOST=azure-disk-snapshot:<resource-group>/<disk> or"
+    echo "  azure-blob:<account>/<container>; enabling it is an operator COST decision (recurring storage)."
+  elif [ -z "${offhost_kind}" ]; then
+    : # refused above, already failing the rung
+  elif [ "${DRY_RUN}" -eq 1 ]; then
+    echo "host-update: state snapshot off-host copy (DRY RUN) — would copy to ${OFFHOST_TARGET}; nothing sent"
+  elif [ "${#STATE_SNAPSHOT_ARCHIVES[@]}" -eq 0 ]; then
+    if [ "${state_snapshot_failed}" -eq 1 ]; then
+      echo "host-update: state snapshot off-host copy — skipped: no archive was verified tonight (see above)" >&2
+    else
+      echo "host-update: state snapshot off-host copy — skipped: there was no state to snapshot tonight"
+    fi
+  elif ! command -v "${OFFHOST_AZ}" >/dev/null 2>&1; then
+    offhost_fail "RMD_STATE_OFFHOST is set but '${OFFHOST_AZ}' is not a command on PATH: install the Azure CLI and 'az login', or unset RMD_STATE_OFFHOST."
+  elif [ "${offhost_kind}" = "azure-disk-snapshot" ]; then
+    offhost_disk_snapshot "${offhost_a}" "${offhost_b}"
+  else
+    offhost_blob "${offhost_a}" "${offhost_b}"
   fi
 fi
 
@@ -1287,8 +1464,8 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   AFTER_AVAIL="$(df -Pk / | awk 'NR==2 {print $4}')"
   echo
   echo "host-update: reclaim-only — no pull, no restart. Free on / : ${AFTER_AVAIL} KiB"
-  # W1-T3677: section 3a's snapshot failed, was refused past its age bound, or missed a drifted
-  # state volume. The reclaim above still ran; the rung must not report success regardless.
+  # W1-T3677/W1-T5545: section 3a's snapshot of some live root failed, or a root held no ledger
+  # beside a sibling that does. The reclaim above still ran; the rung must not report success.
   if [ "${state_snapshot_failed}" -eq 1 ]; then
     echo "host-update: the nightly STATE SNAPSHOT did not leave a verified, recent archive — see above." >&2
     exit 1

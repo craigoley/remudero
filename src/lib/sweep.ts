@@ -32,7 +32,12 @@ import { ghJson, ghJsonAsync } from "./github-transport.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
 import { acquireInflightLock, InflightLockError, type InflightLockHandle } from "./inflight-lock.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
-import { appendLedger } from "./ledger.js";
+import { appendLedger, isRealStrike } from "./ledger.js";
+import { appendOperatorNote, loadOperatorNotesForTask, type OperatorNoteEntry } from "./operator-notes.js";
+import {
+  capStrikeLadderNote, decideStrikeLadderRung, firstFailingTestTitle, hasUnspentLadderRefresh,
+  latestStrikeLadderAttempt, strikeCauseKey,
+} from "./strike-ladder.js";
 import { runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import { resolveLedgerUnion } from "./ledger-union.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
@@ -45,7 +50,8 @@ import {
   createPlanPrRest,
   PlanPrPreflightRefusedError,
   planPrPreflightAllows,
-  planPrPreflightAtCommit,
+  planPrPreflightAtCommitAsync,
+  type PlanPrPreflightResult,
   probeExistingPlanPr,
 } from "./plan-pr-emitter.js";
 import {
@@ -1330,8 +1336,8 @@ export interface BuildSweepEffectsDeps {
   buildPlanPrBodyImpl?: typeof buildPlanPrBody;
   /** W1-T5349 — the plan-repair renumber's reservation; defaults to {@link reservePlanRepairTaskId}. */
   planRepairReserveIdImpl?: (worktreePath: string, filingBranch: string) => string;
-  /** W1-T5405 — the filer preflight both plan-PR rungs here run on their commit before the push. */
-  planPrPreflightImpl?: typeof planPrPreflightAtCommit;
+  /** W1-T5405 — the filer preflight both plan-PR rungs here run on their commit before the push; W1-T5521 awaits it. */
+  planPrPreflightImpl?: (...args: Parameters<typeof planPrPreflightAtCommitAsync>) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
 }
 
 export type ReviewDispatchMode =
@@ -1586,6 +1592,7 @@ export const SWEEP_EFFECT_SURFACE = [
   // W1-T5349: the plan-repair rung's fact read and its renumber/retitle effect.
   "readPlanRepairFacts",
   "repairPlanPr",
+  "strikeLadder",
 ] as const;
 
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
@@ -1596,6 +1603,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "dispatchFix"
   | "dispatchPlanOnlyRepair"
   | "escalate"
+  | "strikeLadder"
   | "readLiveState"
   | "terminalFixStandDown"
   | "readRedBaseRefreshFacts"
@@ -1714,7 +1722,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     fixRungCheckoutRefusedErrorImpl: FixRungCheckoutRefusedError = requiredSweepRuntimeCtor("fixRungCheckoutRefusedErrorImpl"),
     defaultBudgetUsd = 100,
     buildPlanPrBodyImpl = buildPlanPrBody,
-    planPrPreflightImpl = planPrPreflightAtCommit,
+    planPrPreflightImpl = planPrPreflightAtCommitAsync,
     updatePrBodyImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["updatePrBodyImpl"]>>("updatePrBodyImpl"),
   } = deps;
 
@@ -2438,6 +2446,64 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // channel, never a tasks.yaml edit, rule 15), and (2) use W1-T8's
     // `escalate()` purely as the notification TRANSPORT, carrying the SAME two
     // candidate resolutions as its options — never a generic needs-human.
+    strikeLadder: {
+      readNotes: (taskId) => {
+        let raw: string;
+        try {
+          raw = readFileSync(join(repoRoot, "plan", "operator-notes.ndjson"), "utf8");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+          throw error;
+        }
+        for (const line of raw.split("\n").filter(line => line.trim())) {
+          const entry = JSON.parse(line) as Partial<OperatorNoteEntry> | null;
+          if (typeof entry?.author !== "string" || !entry.author.trim() || typeof entry.taskId !== "string" || !entry.taskId.trim() ||
+              typeof entry.note !== "string" || !entry.note.trim() || typeof entry.ts !== "string" || !Number.isFinite(Date.parse(entry.ts))) {
+            throw new Error("operator note is unstamped or unreadable");
+          }
+        }
+        return loadOperatorNotesForTask(repoRoot, taskId);
+      },
+      appendNote: (entry) => appendOperatorNote(repoRoot, entry),
+      readAuthor: async (pr) => {
+        const row = await readJsonImpl(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as { user?: { login?: string } } | undefined;
+        return row?.user?.login;
+      },
+      digest: (pr, causeKey, rebuilds, listedIssues) => {
+        if (!issues.listOpen) return { outcome: "hold", reason: "strike ladder hold: issue list is not wired" };
+        let open: OpenIssue[];
+        try {
+          open = issues.listOpen("strike-ladder-digest");
+        } catch (error) {
+          return { outcome: "hold", reason: `strike ladder hold: issue list unreadable: ${String(error)}` };
+        }
+        const marker = `<!-- Strike-Ladder-PR: ${pr.prNumber} -->`;
+        const entry = `${marker}\n- ${pr.prUrl} — task ${pr.taskId ?? "unfiled"}; rebuilds ${rebuilds}/2; ` +
+          `${causeKey}; ${describeCiFailures(pr)}; ` +
+          `[operator notes](${config.consoleUrl ?? "http://localhost:4317"}/v1/operator-notes?taskId=${encodeURIComponent(pr.taskId ?? "")}) ` +
+          `(plan/operator-notes.ndjson).`;
+        const found = open.find(issue => (issue.body ?? "").split("\n").some(line => line.trim() === `**Cause-Key:** ${causeKey}`));
+        if (found) {
+          if ((found.body ?? "").includes(marker) || listedIssues.includes(found.url)) {
+            return { outcome: "listed", reason: "strike ladder digest: PR is already listed", issueUrl: found.url };
+          }
+          if (!issues.comment) return { outcome: "hold", reason: "strike ladder hold: issue comment is not wired" };
+          issues.comment(found.url, entry);
+          return { outcome: "appended", reason: "strike ladder digest: appended to the open cause issue", issueUrl: found.url };
+        }
+        const labels = ["needs-human", "strike-ladder-digest"];
+        for (const label of labels) {
+          if (issues.ensureLabel && !issues.ensureLabel(label)) return { outcome: "hold", reason: `strike ladder hold: label ${label} unavailable` };
+        }
+        const url = issues.create(`Strike exhaustion: ${causeKey}`, `**Cause-Key:** ${causeKey}\n\n${entry}`, labels);
+        try {
+          ghRunImpl("gh", ["issue", "edit", url, "--repo", `${owner}/${repo}`, "--add-assignee", owner]);
+        } catch (error) {
+          log("sweep.strike_ladder.assign_failed", { issue_url: url, assignee: owner, reason: String(error) });
+        }
+        return { outcome: "opened", reason: "strike ladder digest: opened one cause issue", issueUrl: url, assignee: owner };
+      },
+    },
     escalate: (pr, reason, question) => {
       const logged = appendQuestion(repoRoot, toQuestionEntry(question, new Date().toISOString()));
       log(logged ? "sweep.question.logged" : "sweep.question.log_failed", {
@@ -3269,7 +3335,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             readShard: (taskId) => readTaskShard(repoDir, taskId),
             probeExisting: (branch) => probeExistingPlanPr(ghJsonForBuild, owner, repo, branch),
             nowIso: () => clockFromMillisFn(nowMsImpl).iso(),
-            openAmendmentPr: (input) => {
+            openAmendmentPr: async (input) => {
               try {
                 planRepairGit("git", ["-C", repoDir, "fetch", "origin", "--quiet"]);
               } catch {
@@ -3300,7 +3366,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                   proofCwd: worktreePath,
                 });
                 // W1-T5405: a red preflight is ledgered as this source run's outcome, so the next pass does not re-pay it.
-                const verdict = planPrPreflightImpl(worktreePath, headSha, { title: input.title, body });
+                const verdict = await planPrPreflightImpl(worktreePath, headSha, { title: input.title, body });
                 if (!planPrPreflightAllows(verdict, { lane: "refusal_amendment", branch: input.branch, log })) {
                   log(REFUSAL_AMENDMENT_STEP, { task_id: c.taskId, source_run_id: c.runId, outcome: "preflight_refused", failures: verdict.failures });
                   throw new PlanPrPreflightRefusedError("refusal_amendment", verdict.failures);
@@ -3545,7 +3611,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           proofCwd: worktreePath,
         });
         // W1-T5405: the verdict rides this rung's ONE dispatch row, so a refusal spends a MAX_PLAN_REPAIR_STRIKES strike.
-        const verdict = planPrPreflightImpl(worktreePath, headSha, { title, body });
+        const verdict = await planPrPreflightImpl(worktreePath, headSha, { title, body });
         const preflightRow = verdict.unreadable.length > 0 ? { preflight_unreadable: verdict.unreadable } : {};
         if (!planPrPreflightAllows(verdict, { lane: "plan_repair", branch })) {
           planRepairLog("preflight_refused", { shard_path: shardRelPath, failures: verdict.failures, ...preflightRow });
@@ -4366,8 +4432,10 @@ export interface OpenPrView {
    *  It is not head-keyed: a new head with the SAME refusal is the recurrence this stop exists to
    *  catch. Absent or malformed ledger evidence fails closed. */
   previousInstrumentEntanglementPaths?: InstrumentEntanglementPaths;
-  /** Fix-rung strikes ALREADY attempted for this PR (from the ledger). */
+  /** Completed worker rounds that moved the head or reached a verdict (from the ledger). */
   priorStrikes: number;
+  repeatedFixRefusal?: string;
+  fixRefusalsAtHead?: number;
   /** W1-T2794 — the MERGED PR that already completed this PR's task, from the ownership-asserted
    *  credit projection ({@link CreditCandidate} with `merged: true`). STRICTLY STRONGER EVIDENCE
    *  than {@link supersededBy}, which means only that a higher-numbered OPEN peer shares the
@@ -6910,6 +6978,11 @@ function reviewReuseInputsFrom(pr: OpenPrView): ReviewReuseInputs {
  * CONFLICTED ABOVE mergeable, so a conflicting PR is never armed however green; and the
  * refused-head post-review row before the first-sighting one.
  */
+export function isFixStrikeExhausted(pr: OpenPrView, policy: SweepPolicy): boolean {
+  return (pr.reviewState === "failure" || isBlockedCi(pr)) &&
+    (pr.priorStrikes >= policy.strikeCap || pr.repeatedFixRefusal !== undefined);
+}
+
 export const DISPOSITION_RULES: readonly DispositionRule[] = [
   {
     // W1-T920 (DECISIONS.md #1987) — ROUTED THROUGH THE EXISTING "stale" disposition, never a new
@@ -7058,7 +7131,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       // `strikeCapForAnswer` returns the ADDITIONAL strikes an answer grants, so the cumulative
       // ceiling is the ORIGINAL cap plus that allowance — never an unconditional bypass of the
       // ledger's running count.
-      return pr.priorStrikes < policy.strikeCap + strikeCapForAnswer(policy.strikeCap, clarify);
+      return pr.repeatedFixRefusal === undefined && pr.priorStrikes < policy.strikeCap + strikeCapForAnswer(policy.strikeCap, clarify);
     },
     reason: (pr) =>
       `operator answered the clarification question — re-dispatching the fix rung with the added constraint (strike ${pr.priorStrikes + 1})`,
@@ -7110,7 +7183,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // review AND a blocked_ci PR (checks red) — off the SAME strike counter/cap
     // (design note iv: one ladder, one exhaustion route).
     disposition: "blocked-ambiguous",
-    when: (pr, policy) => (pr.reviewState === "failure" || isBlockedCi(pr)) && pr.priorStrikes >= policy.strikeCap,
+    when: isFixStrikeExhausted,
     // W1-T186: once checks are the reason strikes exhausted, NAME the check and sha here too, so
     // the ledgered reason never reads as the generic, uninvestigable "fix strikes exhausted".
     //
@@ -7118,6 +7191,8 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // an answered PR renders against its EXTENDED ceiling, so reaching it reads as exactly that
     // rather than an impossible overshoot of the base cap.
     reason: (pr, policy) => {
+      if (pr.repeatedFixRefusal !== undefined) return repeatedFixRefusalReason(pr.repeatedFixRefusal) +
+        (isBlockedCi(pr) ? ` — ${describeCiFailures(pr)}` : "");
       const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
       return isBlockedCi(pr)
         ? `fix strikes exhausted (${pr.priorStrikes}/${ceiling}) — ${describeCiFailures(pr)} — escalating`
@@ -7137,6 +7212,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     // (`dispatchFix`, run-task.ts) actually budgets against.
     reason: (pr, policy) => {
       const base = `${pr.checksState === "red" ? "required checks red" : describeCiFailures(pr)}`;
+      if ((pr.fixRefusalsAtHead ?? 0) > 0) return `${base} — refused (${pr.fixRefusalsAtHead} at this head) — retrying the fix round`;
       // W1-T2998 — NAME THE DETERMINISTIC REMEDY WHENEVER ONE EXISTS, INDEPENDENTLY OF WHETHER IT
       // MAY BE TAKEN. With `recordableRatchetRepairEnabled` false this sentence is the ONLY effect
       // of the classifier, and it is not decoration: it tells the operator reading the ledger, and
@@ -7644,17 +7720,22 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
  *  {@link DISPOSITION_RULES} row. W1-T1201 — AGE IS CLAMPED TO THE PR'S OWN LIFETIME, once, before
  *  any row reads it, AND THE CLAMP DOES NOT SILENTLY RESCUE: when it changes the outcome the
  *  `reason` says so, because a shifted clock once closed eleven live PRs. */
-export function deriveDisposition(
-  pr: OpenPrView,
-  policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
-  now: number = Date.now(),
-): DispositionResult {
+function selectDispositionRule(pr: OpenPrView, policy: SweepPolicy, now: number) {
   const parsed = Date.parse(pr.lastActivityAt);
   const activityAgeDays = Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : (now - parsed) / MS_PER_DAY;
   const createdParsed = pr.createdAt === undefined ? Number.NaN : Date.parse(pr.createdAt);
   const lifetimeAgeDays = Number.isNaN(createdParsed) ? Number.POSITIVE_INFINITY : (now - createdParsed) / MS_PER_DAY;
   const ageDays = Math.min(activityAgeDays, lifetimeAgeDays);
   const rule = DISPOSITION_RULES.find((r) => r.when(pr, policy, ageDays, now));
+  return { rule, activityAgeDays, lifetimeAgeDays, ageDays };
+}
+
+export function deriveDisposition(
+  pr: OpenPrView,
+  policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
+  now: number = Date.now(),
+): DispositionResult {
+  const { rule, activityAgeDays, lifetimeAgeDays, ageDays } = selectDispositionRule(pr, policy, now);
   if (!rule) {
     // UNREACHABLE — the terminal row matches unconditionally. This guards the
     // no-disposition=none invariant against a future table edit that drops it.
@@ -8685,10 +8766,23 @@ export function dispatchFixSpent(outcome: boolean | void): boolean {
 }
 
 /** Injected effects — the real command wires arm/close/fix/escalate; tests fake them. */
+export interface StrikeLadderEffects {
+  readNotes: (taskId: string) => OperatorNoteEntry[];
+  appendNote: (entry: OperatorNoteEntry) => boolean;
+  readAuthor: (pr: OpenPrView) => Promise<string | undefined>;
+  digest: (pr: OpenPrView, causeKey: string, rebuilds: number, listedIssues: string[]) => {
+    outcome: "opened" | "appended" | "listed" | "hold";
+    reason: string;
+    issueUrl?: string;
+    assignee?: string;
+  };
+}
+
 export interface SweepDeps {
   reproduceFailingTestsOnMain?: (
     pr: OpenPrView, files: readonly string[], mainTipSha: string,
   ) => Promise<readonly BaseProbeFile[]>;
+  strikeLadder?: StrikeLadderEffects;
   /** Arm GitHub auto-merge; idempotent at the GitHub level. RETURNS ITS OUTCOME: `armAutoMerge` does
    *  not throw, and most outcomes mean it armed NOTHING. The effect used to discard that value while
    *  the sweep recorded `acted: true` regardless, which hid the refusal and made it PERMANENT,
@@ -8900,6 +8994,8 @@ export interface SweepDeps {
    *  seed is untouched — only the `await` moves into {@link drainDetachedSweepActions}. NOT AN
    *  ADMISSION CHANGE. */
   detachFixWait?: boolean;
+  /** W1-T5491: the light pass owns this review promise and releases its reservation on settlement. */
+  detachReviewWait?: (work: Promise<void>) => void;
   /** THE ABSENT-CHECK-SUITE REMEDY (W1-T186 follow-up). Pushes an EMPTY commit to the PR's own
    *  branch, minting a fresh head sha, and returns it. Omitted, the lane stands down and the
    *  ordinary escalation runs — the stand-down is named on the disposed line, never silent. */
@@ -9779,14 +9875,14 @@ const ZERO_COUNTS = (): Record<Disposition, number> => ({
 const inFlightReviewKeys = new Set<string>();
 
 /** W1-T2520 — THE FIX-DISPATCH MUTEX, {@link inFlightReviewKeys}'s SIBLING for the other lane.
- *  `priorStrikes` is derived by COUNTING dispatch rows at view-build time, with no exclusion between
+ *  `priorStrikes` is derived from round outcomes at view-build time, with no exclusion between
  *  that count and the dispatch it gates, so A CLAIM ALONE IS NOT ENOUGH and
  *  {@link claimFixDispatch} RE-READS the ledger the instant the claim is taken. A SEPARATE Set from
  *  the review mutex. // Why: 13 dispatches across two PRs against a cap of 2. */
 const inFlightFixKeys = new Set<string>();
 
 /** W1-T5032 — a proof amendment's `fix.dispatch` identity row is an idempotency record, never a strike;
- *  hidden from `priorStrikesFor` and `freshFixDispatchCount` here, while `lookupIdentity` still reads it. */
+ *  hidden from the strike tally here, while `lookupIdentity` still reads it. */
 export function isProofAmendmentIdentityRow(line: Record<string, unknown>): boolean {
   return line.step === "fix.dispatch" && line.kind === "proof_amendment";
 }
@@ -9794,7 +9890,7 @@ export function isProofAmendmentIdentityRow(line: Record<string, unknown>): bool
 /** W1-T2788 — select the fix-rung ledger generation attributable to `currentHeadSha`. New rows name
  *  the head they targeted and require exact equality; legacy rows carry no head and reset only at a
  *  trustworthy observation for this task at the current head, so an incomplete history fails closed
- *  rather than manufacturing strike budget. `fix.review` also carries no head. */
+ *  rather than manufacturing strike budget. Legacy `fix.review` rows may carry no head. */
 export function fixLedgerRowsForHead(
   lines: Array<Record<string, unknown>>,
   taskId: string | undefined,
@@ -9845,27 +9941,72 @@ export function fixLedgerRowsForHead(
   return selected;
 }
 
-/** W1-T2520 — the fresh under-claim counterpart to `priorStrikesFor`. What it adds is FRESHNESS: it
- *  reads the ledger AFTER taking the claim, so two callers cannot act on the same stale count.
- *  COUNTS DISTINCT `strike` NUMBERS, NOT RAW ROWS — two GENUINE strikes can never share a number,
- *  so a duplicate value is always the SAME attempt re-described. */
-function freshFixDispatchCount(
+/** W1-T5542: count outcomes; legacy dispatches without receipts retain the historical cap. */
+export function fixRoundTally(
   lines: Array<Record<string, unknown>>,
   taskId: string | undefined,
-  currentHeadSha: string,
-): number {
-  if (!taskId) return 0;
-  const strikeNumbers = new Set<number>();
-  let unnumbered = 0;
-  for (const line of fixLedgerRowsForHead(lines, taskId, currentHeadSha)) {
-    if (line.step !== "fix.dispatch") continue;
-    if (typeof line.strike === "number") {
-      strikeNumbers.add(line.strike);
-    } else {
-      unnumbered++;
-    }
+  currentHeadSha?: string,
+  regime?: "executed" | "keyword_only",
+): { strikes: number; refusals: { reason: string; round_id: string }[]; repeatedRefusal?: string } {
+  const tally: ReturnType<typeof fixRoundTally> = { strikes: 0, refusals: [] };
+  if (!taskId) return tally;
+  if (regime === undefined) {
+    const proofExec = lines.findLast((line) => line.task_id === taskId && line.step === "review.posted")?.proof_exec;
+    regime = Array.isArray(proofExec) && proofExec.some((proof) => proof !== "not_executable") ? "executed" : "keyword_only";
   }
-  return strikeNumbers.size + unnumbered;
+  const selected = new Set(fixLedgerRowsForHead(lines, taskId, currentHeadSha).filter((line) => line.step === "fix.dispatch"));
+  type Round = { dispatch: Record<string, unknown>; id: string; done?: Record<string, unknown>; refusal?: Record<string, unknown>; reviewed?: boolean };
+  const rounds: Round[] = [];
+  const identified = new Map<string, Round>();
+  for (const [index, line] of lines.entries()) {
+    if (line.task_id !== taskId) continue;
+    const id = typeof line.round_id === "string" ? line.round_id : undefined;
+    if (line.step === "fix.dispatch") {
+      if (id !== undefined && identified.has(id)) continue;
+      const round: Round = { dispatch: line, id: id ?? `legacy:${index}` };
+      rounds.push(round);
+      if (id !== undefined) identified.set(id, round);
+      continue;
+    }
+    if (line.step !== "fix.commit_refused" && line.step !== "fix.done" && line.step !== "fix.review") continue;
+    const round = id !== undefined ? identified.get(id) : rounds.findLast((candidate) =>
+      candidate.dispatch.round_id === undefined && candidate.dispatch.strike === line.strike &&
+      (line.head_sha === undefined || candidate.dispatch.head_sha === undefined || line.head_sha === candidate.dispatch.head_sha) &&
+      (line.step === "fix.commit_refused" ? !candidate.refusal && !candidate.done : line.step === "fix.done" ? !candidate.done : !candidate.reviewed));
+    if (!round || (line.head_sha !== undefined && round.dispatch.head_sha !== undefined && line.head_sha !== round.dispatch.head_sha)) continue;
+    if (line.step === "fix.commit_refused") round.refusal = line;
+    if (line.step === "fix.done") round.done = line;
+    if (line.step === "fix.review") round.reviewed = true;
+  }
+  const reasons = new Map<string, number>();
+  for (const round of rounds) {
+    if (!selected.has(round.dispatch)) continue;
+    if (round.refusal || round.done?.subtype === "commit_refused") {
+      const reason = typeof round.refusal?.reason === "string" ? round.refusal.reason : "fix commit refused";
+      tally.refusals.push({ reason, round_id: round.id });
+      const count = (reasons.get(reason) ?? 0) + 1;
+      reasons.set(reason, count);
+      if (count === 2 && tally.repeatedRefusal === undefined) tally.repeatedRefusal = reason;
+      continue;
+    }
+    if (regime === "executed" && round.dispatch.verdict_regime !== "executed") continue;
+    // Older histories can omit receipts, and body repairs record a completed write at dispatch.
+    // An explicit receipt takes precedence; identified worker rounds always require an outcome.
+    if (round.dispatch.round_id === undefined && round.done === undefined) {
+      tally.strikes++;
+      continue;
+    }
+    const pushedHead = round.done?.pushed_head_sha;
+    if (isRealStrike({
+      workerRan: round.done !== undefined,
+      judgmentPosted: round.reviewed === true || (typeof pushedHead === "string" && pushedHead !== round.dispatch.head_sha),
+    })) tally.strikes++;
+  }
+  return tally;
+}
+
+function repeatedFixRefusalReason(reason: string): string {
+  return `fix rounds refused twice at this head (${reason}) — no strike spent — no further round can add information`;
 }
 
 /** W1-T2379 — THE DETACHED-WAIT REGISTRY, module-scoped for the reason {@link inFlightReviewKeys}
@@ -10200,6 +10341,10 @@ export async function runSweep(
   // byte-identical — the level-triggered idempotence mechanism. The SAME read feeds
   // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
   const ledgerLines = readLedger(deps.ledgerPath);
+  const strikeLadderRows = [...ledgerLines];
+  openPrs = openPrs.map(pr => hasUnspentLadderRefresh(strikeLadderRows, pr.taskId, pr.prNumber)
+    ? { ...pr, priorStrikes: fixCeilingInForce(pr, policy.strikeCap, policy.clarify) }
+    : pr);
   // W1-T3471: a live miss is not enough to call a verdict absent. Read the bounded archive∪live
   // union only on that rare path; an unreadable or archive-free corpus stays incomplete so the
   // historical fail-open remains intact.
@@ -10251,7 +10396,13 @@ export async function runSweep(
   const priorRepeatRuns = repeatDispositionStreaksFromLedger(ledgerLines);
   // W1-T2620/W1-T3422 — ONE read per pass, never per PR. The SHA-only compatibility seam stays
   // available to direct callers; production's effects cache both fields from one REST response.
-  const mainRepair = deps.readMainRepair ? await deps.readMainRepair() : undefined;
+  let mainRepair: MainRepairEvidence | undefined;
+  try {
+    mainRepair = deps.readMainRepair ? await deps.readMainRepair() : undefined;
+  } catch (error) {
+    if (!openPrs.some(pr => isFixStrikeExhausted(pr, policy) && !pr.pendingAnswer)) throw error;
+    log("sweep.strike_ladder.main_read_failed", { reason: String(error) });
+  }
   const mainTipSha = mainRepair?.sha ?? (deps.readMainTip ? await deps.readMainTip() : undefined);
   // W1-T2620 — AT MOST ONE base-caused PR selected for release THIS pass, oldest activity first,
   // computed ONCE before the walk — the same single-winner shape `selectUpdateBranchTarget` uses.
@@ -10495,6 +10646,86 @@ export async function runSweep(
   // W1-T2789: once this lane has attempted an update, the older armed/stale-gate update lane at
   // the end of the pass must not issue a second request against the same stale snapshot.
   let staleBaseAttemptedPrNumber: number | undefined;
+  const ladderUpdatedPrs = new Set<number>();
+  const ladderActedPrs = new Set<number>();
+  const applyStrikeLadder = async (pr: OpenPrView): Promise<string> => {
+    const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, head_sha: pr.headSha };
+    const record = (step: string, extra: Record<string, unknown>) => {
+      const line = { ...row, ts: clockFromMillisFn(() => now).iso(), step, ...extra };
+      appendLine(deps.ledgerPath, line);
+      strikeLadderRows.push(line);
+    };
+    const hold = (reason: string) => `strike ladder hold: ${reason}`;
+    try {
+      const effects = deps.strikeLadder;
+      const notes = pr.taskId && effects ? effects.readNotes(pr.taskId) : [];
+      const rebuilds = notes.filter(note => note.author === "strike-ladder").length;
+      const eligibleHead = pr.taskId !== undefined && pr.isPlanFiling !== true &&
+        fixHeadAcceptable(pr.headRefName, pr.taskId, isSyntheticOrchestratorLaneId(pr.taskId));
+      const author = eligibleHead && effects ? await effects.readAuthor(pr) : undefined;
+      const lastAttemptAt = latestStrikeLadderAttempt(strikeLadderRows, pr.taskId, pr.prNumber);
+      const decision = decideStrikeLadderRung({
+        lastAttemptAt, mainTip: mainRepair, currentMergeBaseSha: pr.currentMergeBaseSha,
+        rebuildsSoFar: effects ? rebuilds : undefined,
+        requeueable: eligibleHead ? (author ? isFleetAppAuthor(author) : undefined) : false,
+        refreshedAtMainTip: strikeLadderRows.some(r => r.step === "sweep.strike_ladder.refreshed" &&
+          r.pr_number === pr.prNumber && r.main_sha === mainRepair?.sha),
+      });
+      if (decision.rung === "hold") return decision.reason;
+      const live = await deps.readLiveState?.(pr);
+      if (live?.ok !== true || live.state?.toUpperCase() !== "OPEN") return hold("fresh OPEN state unreadable or PR is terminal");
+      if (!live.headSha || live.headSha !== pr.headSha) return hold("fresh head unreadable or head moved");
+      if (decision.rung === "refresh") {
+        if (!deps.updateBranch) return hold("update branch is not wired");
+        ladderUpdatedPrs.add(pr.prNumber);
+        const outcome = await deps.updateBranch(pr);
+        if (outcome !== "updated") return hold(`refresh did not take: ${outcome}`);
+        record("sweep.strike_ladder.refreshed", { old_head: pr.headSha, main_sha: mainRepair!.sha, last_attempt_at: lastAttemptAt });
+        ladderActedPrs.add(pr.prNumber);
+        return decision.reason;
+      }
+      const causeKey = strikeCauseKey(pr, failingTestFilesFromCiFailures(pr.ciFailures ?? []));
+      if (decision.rung === "rebuild") {
+        const reason = `${decision.reason}; cause ${causeKey}`;
+        await deps.close(pr, reason);
+        const closed = await deps.readLiveState?.(pr);
+        if (closed?.ok !== true || closed.state?.toUpperCase() !== "CLOSED" || closed.headSha !== pr.headSha) {
+          return hold("close was not confirmed at the expected head; no note written");
+        }
+        const refusals = fixRoundTally(strikeLadderRows, pr.taskId, pr.headSha).refusals;
+        const note = capStrikeLadderNote(
+          `${reason}\nClosed PR: ${pr.prUrl}; head: ${pr.headSha}\n` +
+          `Failing checks/tests: ${(pr.ciFailures ?? []).map(f => `${f.name}: ${firstFailingTestTitle(f.logTail) ?? "no failing title"}`).join("; ")}\n` +
+          `Unmet claims: ${pr.unmetCriteria.map(c => `${c.claim}: ${c.reason}`).join("; ")}\n` +
+          `Strike history: ${JSON.stringify(pr.strikeHistory ?? [])}\nfix.commit_refused: ${JSON.stringify(refusals)}`,
+        );
+        if (!effects!.appendNote({ taskId: pr.taskId!, author: "strike-ladder", ts: clockFromMillisFn(() => now).iso(), note })) {
+          return hold(`closed PR ${pr.prUrl} but the durable failure note could not be written`);
+        }
+        record("sweep.strike_ladder.requeued", { rebuild: rebuilds + 1, cause_key: causeKey });
+        ladderActedPrs.add(pr.prNumber);
+        return reason;
+      }
+      const listedIssues = strikeLadderRows.filter(r =>
+        (r.step === "sweep.strike_ladder.digest_opened" || r.step === "sweep.strike_ladder.digest_appended") &&
+        r.pr_number === pr.prNumber && r.cause_key === causeKey && typeof r.issue_url === "string")
+        .map(r => r.issue_url as string);
+      const result = effects!.digest(pr, causeKey, rebuilds, listedIssues);
+      if (result.outcome === "opened" || result.outcome === "appended") {
+        record(result.outcome === "opened" ? "sweep.strike_ladder.digest_opened" : "sweep.strike_ladder.digest_appended", {
+          cause_key: causeKey, issue_url: result.issueUrl, assignee: result.assignee,
+          prior_requeues: strikeLadderRows.filter(r => r.step === "sweep.strike_ladder.requeued" && r.task_id === pr.taskId)
+            .map(r => r.pr_number),
+        });
+        ladderActedPrs.add(pr.prNumber);
+      }
+      return result.reason;
+    } catch (error) {
+      const reason = hold(String(error));
+      record("sweep.strike_ladder.held", { reason });
+      return reason;
+    }
+  };
   const applyDirtyFleetRebase = async (
     pr: OpenPrView,
   ): Promise<{ handled: true; standDownReason: string } | { handled: false }> => {
@@ -10605,14 +10836,18 @@ export async function runSweep(
     // read before any claim existed, predates it.
     const freshLines = readLedger(deps.ledgerPath);
     const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
-    const freshStrikes = freshFixDispatchCount(freshLines, pr.taskId, pr.headSha);
-    if (freshStrikes >= ceiling) {
+    const freshTally = fixRoundTally(freshLines, pr.taskId, pr.headSha);
+    if (freshTally.strikes >= ceiling || freshTally.repeatedRefusal !== undefined) {
       inFlightFixKeys.delete(fixKey);
       return {
         ok: false,
-        reason: `fix strikes exhausted under the claim (${freshStrikes}/${ceiling}) — refused before dispatch, never spending a strike a concurrent sweep already spent`,
+        reason: freshTally.repeatedRefusal !== undefined
+          ? repeatedFixRefusalReason(freshTally.repeatedRefusal)
+          : `fix strikes exhausted under the claim (${freshTally.strikes}/${ceiling}) — refused before dispatch, never spending a strike a concurrent sweep already spent`,
       };
     }
+    pr.priorStrikes = freshTally.strikes;
+    pr.fixRefusalsAtHead = freshTally.refusals.length;
     let released = false;
     const release = () => {
       if (released) return;
@@ -10900,6 +11135,8 @@ export async function runSweep(
       freshnessRefusal.attemptedAt >= pendingSince;
     const dispositionView = refusedCurrentPending ? { ...pr, reviewPendingOwnerDead: true } : pr;
     let { disposition, reason } = postReviewFailureHistoryDisposition(dispositionView, prior, policy, now) ?? deriveDisposition(dispositionView, policy, now);
+    const strikeLadderDue = deps.strikeLadder !== undefined && disposition === "blocked-ambiguous" && !pr.pendingAnswer &&
+      selectDispositionRule(dispositionView, policy, now).rule?.when === isFixStrikeExhausted;
     if (inheritedMergeState) {
       reason =
         `${reason} — mergeability unread this pass; inherited last known "${inheritedMergeState.state}" ` +
@@ -10995,7 +11232,7 @@ export async function runSweep(
     // so an unanswered question stays visible, even on a deduped pass. Skipped for an
     // unattributable filing PR, where there is only a stand-down to record.
     const question =
-      (disposition === "blocked-ambiguous" || disposition === "refused-escalate") && !unattributableFiling
+      (disposition === "blocked-ambiguous" || disposition === "refused-escalate") && !unattributableFiling && !strikeLadderDue
         ? renderClarificationQuestion(pr, reason, pr.strikeHistory ?? [])
         : undefined;
 
@@ -11073,19 +11310,13 @@ export async function runSweep(
         // head nothing will move again. A dispatch that RESOLVED is never read as stalled.
         const metadataRed = disposition === "blocked-fixable" && metadataOnlyRed(pr) !== undefined &&
           !metadataRedRuledOut(ledgerLines, pr);
-        const refusal = disposition === "blocked-fixable" && !metadataRed ? sameHeadRedFixRefusal(ledgerLines, pr) : undefined;
         alreadyDone = metadataRed
           ? false
-          : refusal !== undefined && !refusal.scopeAmendment
-            ? true
-            : dispatchedThisHead && !fixRungStalledWithoutNewHead(ledgerLines, pr.taskId);
+          : dispatchedThisHead && !fixRungStalledWithoutNewHead(ledgerLines, pr.taskId);
         if (alreadyDone) {
-          // W1-T4459: the refusal reason rides this pass's own `sweep.disposed` stand_down_reason.
           dedupStandDownReason =
-            refusal
-              ? `fix refused at head ${pr.headSha.slice(0, 7)} with unchanged red checks: ${refusal.reason}`
-              : `fix already dispatched for this head (${pr.headSha.slice(0, 7)}) — awaiting its outcome ` +
-                `before spending another strike`;
+            `fix already dispatched for this head (${pr.headSha.slice(0, 7)}) — awaiting its outcome ` +
+            `before spending another strike`;
         }
         break;
       }
@@ -11104,7 +11335,7 @@ export async function runSweep(
       case "refused-escalate":
         // W1-T514: sha-keyed, exactly like every sibling arm above — a new head re-earns its own
         // escalation rather than being deduped by a stale head's `acted:true` line forever.
-        alreadyDone = prior.escalated.has(`${pr.prNumber}@${pr.headSha}`);
+        alreadyDone = !strikeLadderDue && prior.escalated.has(`${pr.prNumber}@${pr.headSha}`);
         // W1-T2427: the LARGEST silent population (7,888 rows). Without this sentence the row is
         // indistinguishable from `deps.escalate` being unwired or throwing.
         if (alreadyDone) {
@@ -11420,6 +11651,11 @@ export async function runSweep(
                 extraDisposedFields = { ...extraDisposedFields, scope_amendment_red_checks: redCheckNames(pr) };
                 acted = false;
                 standDownReason = reason;
+                break;
+              }
+              if (refusedSameRed && fixRoundTally(ledgerLines, pr.taskId, pr.headSha).refusals.length === 0) {
+                acted = false;
+                standDownReason = `fix commit refused at this head and red set (${refusedSameRed.reason}) — incomplete round history; awaiting a changed head or red set`;
                 break;
               }
               // W1-T527 — classify the evidence in hand before selecting a worker.
@@ -12187,6 +12423,12 @@ export async function runSweep(
                 standDownReason = missingTrailerRepair.standDownReason;
                 break;
               }
+              if (strikeLadderDue) {
+                standDownReason = await applyStrikeLadder(pr);
+                acted = ladderActedPrs.has(pr.prNumber);
+                reason = standDownReason;
+                break;
+              }
               const absentDecision = absentChecksRepushDecision(
                 pr,
                 policy,
@@ -12421,6 +12663,10 @@ export async function runSweep(
       );
       return;
     }
+    if (deps.detachReviewWait) {
+      finalizeDisposition(job.index, job.pr, jobDisposition, job.reason, job.question,
+        true, false, undefined, undefined, undefined, undefined, undefined);
+    }
     const repairCapacity = repairAdmissionTelemetry?.();
     if (deps.repairAdmissionSurface && repairCapacity) {
       log("sweep.review_started", {
@@ -12501,7 +12747,7 @@ export async function runSweep(
         // failure the row just above establishes a bounded retry clock.
         claim.release();
       }
-      finalizeDisposition(
+      if (!deps.detachReviewWait) finalizeDisposition(
         job.index,
         job.pr,
         jobDisposition,
@@ -12526,7 +12772,12 @@ export async function runSweep(
       while (true) {
         const job = takeNextReview();
         if (job === undefined) return;
-        await trackInFlightReview(runReview(job));
+        const work = trackInFlightReview(runReview(job));
+        if (deps.detachReviewWait) {
+          deps.detachReviewWait(work);
+          return;
+        }
+        await work;
       }
     }),
   );
@@ -12586,7 +12837,7 @@ export async function runSweep(
   // conflict is REPORTED and skipped rather than retried this pass.
   if (!deps.dryRun && deps.updateBranch) {
     const target = selectUpdateBranchTarget(
-      openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber && pr.prNumber !== baseRedRefreshPr),
+      openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber && pr.prNumber !== baseRedRefreshPr && !ladderUpdatedPrs.has(pr.prNumber)),
       now,
       deps.inFlightTaskIds ?? new Set(),
       deps.staleGateWorkflowsByPr ?? new Map(),
@@ -12711,6 +12962,19 @@ export async function runSweepLightPass(
   lightPassSpawningReservations += spawning.length;
   lightPassPlanFilingReservations += planFilings.length;
   for (const pr of [...spawning, ...planFilings]) lightPassReservedHeads.add(lightPassHeadKey(pr));
+  const spawningNumbers = new Set(spawning.map((pr) => pr.prNumber));
+  const releases = new Map<number, () => void>();
+  const detachedNumbers = new Set<number>();
+  for (const pr of [...spawning, ...planFilings]) {
+    let released = false;
+    releases.set(pr.prNumber, () => {
+      if (released) return;
+      released = true;
+      if (spawningNumbers.has(pr.prNumber)) lightPassSpawningReservations--;
+      else lightPassPlanFilingReservations--;
+      lightPassReservedHeads.delete(lightPassHeadKey(pr));
+    });
+  }
   try {
   // W1-T2931 — one host budget, with review/merge work served before new repair work. The light
   // pass still reconciles every PR concurrently; only the expensive fix-dispatch spending point
@@ -12742,7 +13006,7 @@ export async function runSweepLightPass(
       .map((pr) => pr.prNumber),
   );
   const admittedNumbers = spawning.map((p) => `#${p.prNumber}`).join(", ");
-  return await Promise.all(
+  const summaries = await Promise.all(
     openPrs.map((pr) => {
       const baseActionable = deps.actionable;
       const baseStandDownReasonFor = deps.standDownReasonFor;
@@ -12781,13 +13045,28 @@ export async function runSweepLightPass(
                         (admittedNumbers ? `; admitted ${admittedNumbers} ahead` : ""))
                   : baseStandDownReasonFor?.(d),
             };
-      return runSweep([pr], scopedDeps, policy);
+      if (spawningNumbers.has(pr.prNumber)) {
+        scopedDeps.detachReviewWait = (work) => {
+          detachedNumbers.add(pr.prNumber);
+          void work.finally(releases.get(pr.prNumber)).catch((error) => {
+            deps.log?.("sweep.post_review.failed", {
+              pr_number: pr.prNumber, head_sha: pr.headSha, error: String(error),
+            });
+          });
+        };
+      }
+      return runSweep([pr], scopedDeps, policy).finally(() => {
+        if (!detachedNumbers.has(pr.prNumber)) releases.get(pr.prNumber)?.();
+      });
     }),
   );
+  // Let completed effects release their capacity before a caller starts the next pass.
+  if (detachedNumbers.size > 0) await new Promise<void>((resolve) => setImmediate(resolve));
+  return summaries;
   } finally {
-    lightPassSpawningReservations -= spawning.length;
-    lightPassPlanFilingReservations -= planFilings.length;
-    for (const pr of [...spawning, ...planFilings]) lightPassReservedHeads.delete(lightPassHeadKey(pr));
+    for (const [number, release] of releases) {
+      if (!detachedNumbers.has(number)) release();
+    }
   }
 }
 

@@ -22,7 +22,8 @@ import {
   type PlanCoherenceFinding,
   type PlanCoherenceShardEntry,
 } from "./plan-coherence.js";
-import type { Task } from "./plan.js";
+import { parseTasksFromYaml, type Task, type SymptomQuery } from "./plan.js";
+import { systemClock } from "./clock.js";
 import { findExportDefinition, isExportReachable } from "./reachability.js";
 import { REPLAY_RESULT_STEP } from "./replay.js";
 import { utcWeekWindowMs } from "./time-window.js";
@@ -30,7 +31,7 @@ import { DEFAULT_TASK_CLASS } from "./task-class.js";
 import { lintTask, type LintOpts, type LintViolation } from "./task-linter.js";
 import type { QuestionEntry } from "./worker.js";
 import { renderSkillDraft, renderSkillDrafts, type SkillDraft } from "./skill-workshop.js";
-import { openLedgerUnion } from "./ledger-union.js";
+import { openLedgerUnion, readLedgerUnionRawLinesSync, realLedgerFs, type LedgerGrepFsDeps } from "./ledger-union.js";
 import { closureByClass, guardFireCounts, renderClosureByClass, renderGuardFireCounts, type ClassClosure, type GuardFireCount } from "./retro-closure.js";
 
 /** One parsed ledger line (superset of ledger.ts LedgerLine, as read back). */
@@ -281,6 +282,8 @@ export interface RunSummary {
   startTs: string;
   verdict: string;
   costUsd: number;
+  /** W1-T5526: `none` when no verdict line and no worker row priced the run — its 0 is unknown, not free. */
+  costSource?: "none";
   numTurns: number;
   prUrl?: string;
   /** The ledger-claimed PR url a `correction.provenance` line overrode; `prUrl` above is always
@@ -392,7 +395,14 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
     const outputTokens = lines
       .filter((l) => l.step && DONE_STEPS.has(l.step))
       .reduce((s, l) => s + outputTokensOf(l), 0);
-    const costLine = verdictLine ?? lines.find((l) => typeof l.cost_usd === "number");
+    // W1-T5526: with no verdict line, the worker's own DONE_STEPS rows price the run — never a probe,
+    // cost.anomaly, risk_judge or budget.warning row, which came first on every live settled run.
+    const workerCostRows = lines.filter(
+      (l) => l.step && DONE_STEPS.has(l.step) && (typeof l.cost_usd === "number" || typeof l.total_cost_usd === "number"),
+    );
+    const costUsd = verdictLine
+      ? typeof verdictLine.cost_usd === "number" ? verdictLine.cost_usd : 0
+      : workerCostRows.reduce((s, l) => s + costOf(l), 0);
     const prLine =
       lines.find((l) => l.step === "pr.opened") ?? verdictLine ?? lines.find((l) => l.pr_url);
     const claimedPrUrl = typeof prLine?.pr_url === "string" ? prLine.pr_url : undefined;
@@ -407,7 +417,8 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
       type: String(start.type ?? "unknown"),
       startTs: String(start.ts ?? ""),
       verdict: credit ? "merged" : observedVerdict,
-      costUsd: typeof costLine?.cost_usd === "number" ? costLine.cost_usd : 0,
+      costUsd,
+      ...(!verdictLine && workerCostRows.length === 0 ? { costSource: "none" as const } : {}),
       numTurns,
       outputTokens,
       prUrl,
@@ -1817,6 +1828,21 @@ export function buildGather(opts: {
   // matching candidate in the gather would be a procedure the gather never actually observed.
   const proceduralCandidates = mineProceduralCandidates(merged, records);
   const failedReviewFeedback = failedReviewFeedbackForRuns(scoped, records);
+  const followups = mineFollowups(followupRecords, opts.openTitles ?? []);
+  const planCoherence = planCoherenceRung(
+    opts.planCoherence?.monolith ?? { path: "plan/tasks.yaml", text: "" },
+    opts.planCoherence?.shards ?? { ok: false,
+      reason: "buildGather's opts.planCoherence was not supplied (no caller has wired plan/tasks.yaml + plan/tasks.d/ reads in yet)" },
+  );
+  if (planCoherence.kind !== "unexamined" && opts.planCoherence?.shards.ok && opts.github) {
+    const blobs = [opts.planCoherence.monolith, ...opts.planCoherence.shards.entries];
+    const tasks = blobs.flatMap(({ path, text }) => {
+      const raw = parseYaml(text) as unknown[];
+      return parseTasksFromYaml(JSON.stringify(raw.filter((entry) => entry !== null &&
+        typeof entry === "object" && "symptom_query" in entry)), path);
+    });
+    if (tasks.length > 0) followups.fixRemeasurement = { tasks, github: opts.github, now: opts.now ?? systemClock.now() };
+  }
   return {
     sinceTs: opts.sinceTs,
     totalRuns: scoped.length,
@@ -1856,7 +1882,7 @@ export function buildGather(opts: {
     taskDefectCounts: taskDefectCounts(scoped, mapping, mergeState),
     // The FULL ledger, never `scoped`: a followup must survive past the marker window, and
     // W1-T1013 makes "full" the archive ∪ live union, because rotation truncates the live file.
-    followups: mineFollowups(followupRecords, opts.openTitles ?? []),
+    followups,
     // FULL `records`: a LIFETIME figure truncated to one cycle is not a lifetime figure (D-10).
     mutationGateLifetime: mutationGateLifetime(records),
     // `opts.sinceTs`-scoped, unlike `mutationGateLifetime`: W1-T165 asks for a per-cycle figure.
@@ -1865,13 +1891,7 @@ export function buildGather(opts: {
     architectLaneShare: architectLaneShare(records),
     // UNCONDITIONAL, never gated on `opts.planCoherence`. The `{ ok: false, reason }` default
     // renders `unexamined` with a stated reason, never a silent omission or a bare zero (P48).
-    planCoherence: planCoherenceRung(
-      opts.planCoherence?.monolith ?? { path: "plan/tasks.yaml", text: "" },
-      opts.planCoherence?.shards ?? {
-        ok: false,
-        reason: "buildGather's opts.planCoherence was not supplied (no caller has wired plan/tasks.yaml + plan/tasks.d/ reads in yet)",
-      },
-    ),
+    planCoherence,
     closureByClass: closureByClass(scoped, shipped, opts.openTaskClasses ?? [], opts.sinceTs),
     guardFireCounts: guardFireCounts(scoped, mapping, opts.sinceTs, { fallbackRows: GUARD_REASON_FALLBACK_ROWS, priorZeroStreak: opts.priorGuardZeroStreak }),
   };
@@ -2685,6 +2705,101 @@ export interface FollowupHarvest {
   candidates: FollowupCandidate[];
   deduped: FollowupCandidate[];
   harvestLines: LedgerLine[];
+  fixRemeasurement?: { tasks: Task[]; github: ShippedGithub; now: number };
+}
+
+// Equal windows around merge compare event counts; 1–7 days is the task's observation window.
+const FIX_REMEASURE_DAY_MS = 86_400_000;
+
+function readFixCorpus(stateDir: string, query: SymptomQuery, from: number, merged: number, now: number,
+  deps: Parameters<typeof recordFollowupHarvest>[1]): { rows: Array<{ row: LedgerRecord; matched: boolean }>; reason?: string } {
+  const fs = deps.symptomFs ?? realLedgerFs;
+  const problems = new Set<string>();
+  const pattern = new RegExp(query.pattern);
+  let horizon = false, afterControl = false, retainedRows = 0, bytes = 0;
+  const read = readLedgerUnionRawLinesSync(stateDir, {
+    since: msToIso(from), requireArchives: true, refuseIncomplete: true,
+    keep: (line) => {
+      let row: LedgerRecord;
+      try { row = JSON.parse(line) as LedgerRecord; }
+      catch (error) {
+        const reason = `malformed-row: ${String(error)}`;
+        problems.add(reason);
+        return false;
+      }
+      const ts = typeof row?.ts === "string" ? Date.parse(row.ts) : Number.NaN;
+      if (!Number.isFinite(ts) || ts > now) { problems.add("invalid-or-future-timestamp"); return false; }
+      if (ts <= from) horizon = true;
+      if (ts >= merged) afterControl = true;
+      if (ts < from || (row.step !== "fix.remeasured" && !pattern.test(line))) return false;
+      bytes += Buffer.byteLength(line);
+      retainedRows++;
+      // PRIMARY CONTROL: a broad symptom query cannot retain more than the retro's existing budgets.
+      if (retainedRows > (deps.maxFixRows ?? RETRO_LEDGER_MAX_ROWS) || bytes > (deps.maxFixBytes ?? RETRO_LEDGER_MAX_BYTES)) {
+        problems.add("retention-budget"); return false;
+      }
+      return true;
+    },
+  }, { ...fs, readFileSync: (path) => {
+    try { return fs.readFileSync(path); }
+    catch (error) { problems.add(`unreadable-ledger: ${String(error)}`); throw error; }
+  } });
+  if (!read.ok || !read.liveFileRead || read.unclassified.length > 0) problems.add("incomplete-ledger-corpus");
+  if (!horizon || !afterControl) problems.add("window-positive-control-missing");
+  return { rows: read.rawLines.map((line) => ({ row: JSON.parse(line) as LedgerRecord, matched: pattern.test(line) })),
+    ...(problems.size > 0 ? { reason: [...problems].sort().join("; ") } : {}) };
+}
+
+function remeasureFixes(harvest: FollowupHarvest, deps: Parameters<typeof recordFollowupHarvest>[1]): void {
+  const context = harvest.fixRemeasurement;
+  if (context === undefined) return;
+  const write = deps.writeLedger ?? appendLedger;
+  const report = deps.reportFix ?? ((message: string) => console.log(message));
+  for (const task of context.tasks) {
+    const query = task.symptom_query;
+    if (query === undefined) continue;
+    try {
+      const unavailable = context.github.unavailable?.();
+      if (unavailable !== undefined) throw new Error(unavailable);
+      const pr = context.github.findMergedByTrailer(task.id);
+      if (pr === null) continue;
+      const raw = deps.readMergedPr ? deps.readMergedPr(pr.url) : JSON.parse(ghExec([
+        "pr", "view", pr.url, "--json", "state,mergedAt,body,headRefName",
+      ], { encoding: "utf8" }));
+      const receipt = raw as { state?: string; mergedAt?: string; body?: string; headRefName?: string } | null;
+      if (receipt?.state !== "MERGED" || typeof receipt.mergedAt !== "string" ||
+        !(receipt.body?.split("\n").some((line) => line.trim() === `Remudero-Task: ${task.id}`) ||
+          receipt.headRefName?.startsWith(`run-${task.id}-`))) throw new Error("PR merge identity is not confirmed");
+      // expiring-fixture: exempt -- merge fixtures age against the injected retro clock, fixed in tests.
+      const merged = Date.parse(receipt.mergedAt);
+      if (!Number.isFinite(merged)) throw new Error("PR merge timestamp is invalid");
+      const age = context.now - merged;
+      if (age < FIX_REMEASURE_DAY_MS || age > 7 * FIX_REMEASURE_DAY_MS) continue;
+      const key = JSON.stringify([task.repo, task.id, pr.url, receipt.mergedAt, query]);
+      const corpus = readFixCorpus(dirname(deps.ledgerPath), query, merged - age, merged, context.now, deps);
+      if (corpus.reason !== undefined) throw new Error(corpus.reason);
+      if (corpus.rows.some(({ row }) => row.step === "fix.remeasured" && row.key === key)) continue;
+      let before = 0, after = 0;
+      for (const { row, matched } of corpus.rows) {
+        if (row.step === "fix.remeasured" || row.step === "fix.unmeasured" || !matched) continue;
+        if (Date.parse(row.ts!) < merged) before++; else after++;
+      }
+      const moved = query.direction === "decrease" ? after < before : after > before;
+      const observation: LedgerLine = { run_id: `RETRO-${context.now}`, task_id: task.id, step: "fix.remeasured",
+        task: task.id, repo: task.repo, before, after, moved, key, pr_url: pr.url, merged_at: receipt.mergedAt,
+        ts: msToIso(context.now), symptom_query: query, window_ms: age };
+      write(deps.ledgerPath, observation);
+      const text = `${task.id}: symptom ${before} -> ${after} (${query.direction}); ${moved ? "worked" : "unmoved"}`;
+      report(`[retro] ${text}`);
+      if (!moved) harvest.candidates.push({ entryId: `fix:${key}`, type: "task", taskId: task.id,
+        runId: observation.run_id, prUrl: pr.url, text: `Investigate another remedy for ${text}` });
+    } catch (error) {
+      const reason = String((error as Error)?.message ?? error);
+      write(deps.ledgerPath, { run_id: `RETRO-${context.now}`, task_id: task.id, task: task.id,
+        step: "fix.unmeasured", reason, ts: msToIso(context.now) });
+      report(`[retro] ${task.id}: symptom unmeasured (${reason})`);
+    }
+  }
 }
 
 /** Significant words only (>=3 chars), so "a"/"is"/"to" noise cannot inflate overlap. */
@@ -2840,9 +2955,16 @@ export function mineFollowups(records: LedgerRecord[], openTitles: string[] = []
 
 /** Append every {@link FollowupHarvest.harvestLines} entry so a later {@link mineFollowups} pass
  *  mints neither the candidate nor the dedup match again. Invoked ONLY on a real retro. */
-export function recordFollowupHarvest(harvest: FollowupHarvest, deps: LedgerWriterDeps): void {
+export function recordFollowupHarvest(harvest: FollowupHarvest, deps: LedgerWriterDeps & {
+  readMergedPr?: (url: string) => unknown;
+  reportFix?: (message: string) => void;
+  symptomFs?: LedgerGrepFsDeps;
+  maxFixRows?: number;
+  maxFixBytes?: number;
+}): void {
   const writeLedger = deps.writeLedger ?? appendLedger;
   for (const line of harvest.harvestLines) writeLedger(deps.ledgerPath, line);
+  remeasureFixes(harvest, deps);
 }
 
 /** Render the follow-up harvest — every line a CANDIDATE citing its origin verbatim, never an
