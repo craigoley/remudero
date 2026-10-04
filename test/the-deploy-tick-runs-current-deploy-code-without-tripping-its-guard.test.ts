@@ -60,9 +60,11 @@ esac
 case "$1" in
   ps) echo healthy-container;;
   top)
+    # Real Docker refuses a ps format without a PID column: "Couldn't find PID field in ps output".
+    case " $* " in *" -eo "*) case "$*" in *pid*) : ;; *) echo "Error response from daemon: Couldn't find PID field in ps output" >&2; exit 1;; esac;; esac
     [ "\${FAULT:-}" != sensor ] || exit 1
     [ "\${FAULT:-}" != empty-sensor ] || exit 0
-    echo COMMAND
+    echo "PID COMMAND"
     case "\${FAULT:-}" in
       claude) echo 'node /tools/claude --output-format stream-json';;
       codex) echo 'node /tools/codex exec --json';;
@@ -94,6 +96,16 @@ test("W1-T4917: the deploy tick runs deploy code at least as new as the install 
   assert.match(read(f.deployed), new RegExp(`cwd=${f.daemon}`), "the invoker must be outside the install checkout");
   assert.match(read(f.calls), new RegExp(`-C ${f.daemon} merge --ff-only --quiet origin/main`));
   assert.doesNotMatch(read(f.calls), /reset|checkout|clean|rebase/);
+});
+
+test("the deploy tick's worker probe asks docker top for the pid column docker requires", (t) => {
+  // #9061 probed with `docker top <c> -eo args`; real Docker refuses a ps format without a PID
+  // field, so every live tick logged "worker probe unreadable" and no code deploy ran (2026-10-04).
+  const f = fixture(t);
+  const r = f.tick();
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /worker probe unreadable/, "a pid-requiring docker must still answer the probe");
+  assert.match(read(f.deployed), /^new deploy-run --image-drift-only/, "an idle daemon reaches deploy code");
 });
 
 test("W1-T4917: a standalone daemon entrypoint retains the healthy deploy tick", (t) => {

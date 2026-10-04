@@ -997,7 +997,7 @@ test(
     // W1-T1215: the call no longer stands as a bare statement — its return is handed straight to
     // `disposeDisarm`, because discarding it is what let a withdrawal GitHub REFUSED be recorded
     // as a completed one (#2506). The ordering this test exists to pin is unchanged.
-    const disarmIdx = runTaskSrc.indexOf("disposeDisarm(disarmAutoMerge(prUrl)");
+    const disarmIdx = runTaskSrc.indexOf("disposeDisarm(await disarmAutoMergeAsync(prUrl)");
     assert.ok(disarmIdx >= 0, "the capped-refusal branch must still disarm before escalating");
     const nextEscalateIdx = runTaskSrc.indexOf("escalate(", disarmIdx);
     assert.ok(nextEscalateIdx >= 0, "an escalate( call must follow the disarm");
@@ -1050,7 +1050,8 @@ test(
     // first `await`.
     const pollIdx = runTaskSrc.indexOf("const outcome = await pollToGate(prUrl,");
     assert.ok(pollIdx >= 0, "pollToGate must still be called");
-    const armIdx = runTaskSrc.lastIndexOf("armAutoMergeAtOpen(prUrl,", pollIdx);
+    // W1-T5284: runTaskBody awaits the async form, the same steps with the gh calls off the loop.
+    const armIdx = runTaskSrc.lastIndexOf("armAutoMergeAtOpenAsync(prUrl,", pollIdx);
     assert.ok(armIdx >= 0, "armAutoMergeAtOpen must be called before pollToGate");
     assert.ok(armIdx < pollIdx, "the arm must fire BEFORE the gate, never after it");
 
@@ -1088,7 +1089,7 @@ test(
 
     // Exactly one call site in the whole file — never two (e.g. a forgotten duplicate left at the
     // old PR-open site). With one site, the reachability proof above is a proof about THE arm.
-    const callSites = runTaskSrc.split("armAutoMergeAtOpen(prUrl,").length - 1;
+    const callSites = runTaskSrc.split("armAutoMergeAtOpenAsync(prUrl,").length - 1;
     assert.equal(callSites, 1, "armAutoMergeAtOpen must be called from exactly one site in runTask");
   },
 );

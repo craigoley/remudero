@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: follow-up to W1-T5460 (#8929), whose `queuedFeedbackLandings` was exported for this"
   plan_refs: [W1-T5460, W1-T5525]
   files: [src/lib/panel-graph.ts, openapi/daemon.yaml, test/the-feedback-inbox-shows-a-queued-decision-until-it-lands.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

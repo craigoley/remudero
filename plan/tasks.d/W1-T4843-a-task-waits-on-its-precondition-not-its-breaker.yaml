@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-flow-improve-1790732974000 -> plan-flow-improve-1790732974000"
   plan_refs: [W1-T4081, W1-T80]
   files: [src/lib/plan.ts, src/lib/drain.ts, test/a-task-waits-on-its-precondition-not-its-breaker.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-09-29: W1-T4081's worker refused with "[contradicts-another-criterion] Removing the predecessor

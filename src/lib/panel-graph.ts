@@ -103,6 +103,7 @@ import { LEDGER_FILENAME } from "./ledger-path.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
 import { fleetLaneDecisions, readFleetLaneStore, type FleetLaneDecision } from "./fleet-lane.js";
 import { inboxOwner } from "./inbox-owner.js";
+import { projectProposalHumanGates } from "./ask-classification.js";
 import { plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
 import {
   listThreadViews,
@@ -1533,6 +1534,9 @@ export interface InboxNotReadyItem {
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
   plain: PlainInboxMessage;
   reasons: PredicateFailure[];
+  state?: "not_ready" | "deferred_with_trigger";
+  trigger?: InboxClassification["trigger"];
+  resolution?: { method: "POST"; path: "/v1/inbox/reframe"; fields: { proposalId: string } };
 }
 
 /** W1-T4086: one fleet-owned proposal in `GET /v1/inbox`'s `fleet` list, with the lane it sits in. */
@@ -1909,22 +1913,31 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
         plain: plainInboxMessage(proposal, plainStore),
         reason: classification.declinedReason ?? "declined by an operator",
       });
-    } else if (classification.state === "not_ready") {
+    } else if (classification.state === "not_ready" || classification.state === "deferred_with_trigger") {
       // W1-T2604 (finding (i)): the failing predicate(s) classifyProposal already named,
       // never a bare "not_ready" — see InboxNotReadyItem's own doc.
-      notReady.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), reasons: classification.reasons });
+      notReady.push({
+        proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), reasons: classification.reasons,
+        state: classification.state, ...(classification.trigger ? { trigger: classification.trigger } : {}),
+        resolution: { method: "POST", path: "/v1/inbox/reframe", fields: { proposalId: proposal.id } },
+      });
     }
   }
   // W1-T4086: split every lane by who must act. `needsYou` holds only the operator's items;
-  // `fleet` holds the fleet's own findings with the lane each sits in. The four top-level
-  // lanes stay unchanged for one release so the console can move over without a break.
+  // `fleet` holds the fleet's own findings with the lane each sits in. The top-level
+  // lanes retain records; only the shared projection selects the operator's asks (W1-T5340).
   const isOperator = (item: { proposalId: string }) => inboxOwner({ id: item.proposalId }) === "operator";
+  const humanGates = projectProposalHumanGates(classifications.filter((c) => byId.has(c.proposalId)));
+  const asks = new Set(humanGates.gates.map((gate) => decodeURIComponent(gate.key.split(":")[2]!)));
+  const isAsk = (item: { proposalId: string }) => asks.has(item.proposalId);
+  const operatorItems = <T extends { proposalId: string }>(items: T[]) => items.filter(isOperator)
+    .map((item) => ({ ...item, classification: isAsk(item) ? "ASK" as const : "RECORD" as const }));
   const fleetDecisions = fleetLaneDecisions(ledgerLines as never, fleetLaneStoreForDisplay(join(inboxRoot, "state")));
   const needsYou = {
-    ready: ready.filter(isOperator),
-    drafting: drafting.filter(isOperator),
-    notReady: notReady.filter(isOperator),
-    declined: declined.filter(isOperator),
+    ready: operatorItems(ready),
+    drafting: operatorItems(drafting),
+    notReady: operatorItems(notReady),
+    declined: operatorItems(declined),
   };
   const fleet: InboxFleetItem[] = [
     ...ready.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "ready" as const })),
@@ -1941,9 +1954,12 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
     notReady: notReady.length,
     declined: declined.length,
     fleet: fleet.length,
-    needsYou: { ready: needsYou.ready.length, drafting: needsYou.drafting.length, notReady: needsYou.notReady.length, declined: needsYou.declined.length },
+    needsYou: {
+      ready: needsYou.ready.filter(isAsk).length, drafting: needsYou.drafting.filter(isAsk).length,
+      notReady: needsYou.notReady.filter(isAsk).length, declined: needsYou.declined.filter(isAsk).length,
+    },
   };
-  return { ready, drafting, notReady, declined, needsYou, fleet, counts };
+  return { ready, drafting, notReady, declined, needsYou, fleet, counts, humanGates };
 }
 
 /**

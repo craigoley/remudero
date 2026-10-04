@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  priority: 2
+  priority: 1
   budget_usd: 6.00
   risk: low
   origin: "operator session 90be18e2, 2026-10-02: first live ci-friction ladder filing"

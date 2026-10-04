@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03 19:04Z: #8876 and #8825 BLOCKED with auto-merge armed, review SUCCESS and every required check green; `PUT /pulls/N/merge` merged both"
   plan_refs: [W1-T2855, W1-T4405, W1-T5472]
   files: [src/lib/sweep.ts, test/an-armed-pr-github-never-merges-is-merged-directly.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -22,6 +22,8 @@ import { systemClock, type Clock } from "./clock.js";
 import { classificationSnapshotPath, readClassificationSnapshot } from "./fleet-lane.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { inboxOwner } from "./inbox-owner.js";
+import { projectProposalHumanGates } from "./ask-classification.js";
+import type { InboxState } from "./inbox.js";
 import {
   OPERATOR_AGENT_DECISION_STEP,
   OPERATOR_AGENT_OUTCOME_STEP,
@@ -280,15 +282,13 @@ function inboxCounts(classified: Classification, nowMs: number, sources: ViewSou
   });
   if (!classified) return { reason: "no inbox classification has been written yet" };
   let ready = 0;
-  let needsYou = 0;
+  const projection = projectProposalHumanGates(Object.entries(classified.states).map(([proposalId, state]) => ({ proposalId, state: state as InboxState })));
+  const needsYou = projection.count.inbox.count!;
   let fleet = 0;
   for (const [proposalId, state] of Object.entries(classified.states)) {
-    if (state !== "ready" && state !== "drafting" && state !== "not_ready") continue;
-    if (inboxOwner({ id: proposalId }) === "fleet") fleet += 1;
-    else {
-      needsYou += 1;
-      if (state === "ready") ready += 1;
-    }
+    if (inboxOwner({ id: proposalId }) === "fleet") {
+      if (state === "ready" || state === "drafting" || state === "not_ready" || state === "deferred_with_trigger") fleet += 1;
+    } else if (state === "ready") ready += 1;
   }
   return { ready, needsYou, fleet };
 }

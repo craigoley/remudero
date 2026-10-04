@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: the remaining half of W1-T5460 (#8929), after #8891 and #8928 added the request-path skip"
   plan_refs: [W1-T5460, W1-T5473, W1-T5348, W1-T5524]
   files: [src/lib/panel-graph.ts, src/lib/panel-skill-run.ts, src/lib/panel-actions.ts, src/lib/feedback-landing.ts, test/every-console-feedback-write-lands-through-the-daemon-queue.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

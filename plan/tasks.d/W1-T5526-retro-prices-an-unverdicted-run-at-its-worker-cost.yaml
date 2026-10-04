@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: found building W1-T5474 (#8933)"
   plan_refs: [W1-T5474, W1-T5527]
   files: [src/lib/retro.ts, test/retro-prices-an-unverdicted-run-at-its-worker-cost.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

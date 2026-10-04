@@ -124,18 +124,18 @@ function recordingLog(): { log: Log; rows: Row[] } {
 }
 
 /** The two non-approve lanes, read off the module namespace. */
-type LaneAdd = (repoDir: string, worktreesRoot: string, runId: string, log: Log) => { branch: string; worktreePath: string };
+type LaneAdd = (repoDir: string, worktreesRoot: string, runId: string, log: Log) => Promise<{ branch: string; worktreePath: string }>;
 const LANES: Array<[string, LaneAdd]> = [
   ["addLaneWorktree", runTaskModule.addLaneWorktree],
   ["createDaemonLaneWorktree", runTaskModule.createDaemonLaneWorktree],
 ];
 
 for (const [name, laneAdd] of LANES) {
-  test(`W1-T5356: a prune from another process during ${name}'s add skips the path, and the add completes locked`, () => {
+  test(`W1-T5356: a prune from another process during ${name}'s add skips the path, and the add completes locked`, async () => {
     const fx = managedFixture("t5356-lane");
     const out = installMidAddPrune(fx.repoDir, fx.worktreesRoot, fx.scratch);
     const { log, rows } = recordingLog();
-    const { worktreePath } = laneAdd(fx.repoDir, fx.worktreesRoot, "W1-T5356-1", log);
+    const { worktreePath } = await laneAdd(fx.repoDir, fx.worktreesRoot, "W1-T5356-1", log);
     assertSkippedMidAdd(readMidAdd(out, fx.scratch));
     assert.equal(rows.find((row) => row.step === "worktree.add_failed"), undefined, "the add was not cut out from under itself");
     assert.ok(existsSync(join(worktreePath, ".git")), "the worktree survived its add");
@@ -144,11 +144,11 @@ for (const [name, laneAdd] of LANES) {
     assert.equal(lock.run_id, "W1-T5356-1");
   });
 
-  test(`W1-T5356: a failed ${name} add leaves no run lock behind, and the failure still reaches the caller`, () => {
+  test(`W1-T5356: a failed ${name} add leaves no run lock behind, and the failure still reaches the caller`, async () => {
     const fx = managedFixture("t5356-lane-fail");
     const out = installMidAddPrune(fx.repoDir, fx.worktreesRoot, fx.scratch, 1);
     const { log, rows } = recordingLog();
-    assert.throws(() => laneAdd(fx.repoDir, fx.worktreesRoot, "W1-T5356-2", log));
+    await assert.rejects(() => laneAdd(fx.repoDir, fx.worktreesRoot, "W1-T5356-2", log));
     assert.equal(readMidAdd(out, fx.scratch).lockPresent, true, "the lock was written before the add that failed");
     assert.ok(rows.find((row) => row.step === "worktree.add_failed"), "the lane still ledgers its failed add");
     assert.deepEqual(runLocks(fx.worktreesRoot), [], "the liveness token written for the add does not outlive it");
@@ -252,12 +252,13 @@ test("W1-T5356: no approve gateway or run-* lane calls worktreeAdd bare — each
   for (const [kind, name] of [
     ["async function", "approveCommand"],
     ["async function", "approveBatchCommand"],
-    ["function", "addLaneWorktree"],
-    ["function", "createDaemonLaneWorktree"],
+    ["async function", "addLaneWorktree"],
+    ["async function", "createDaemonLaneWorktree"],
   ]) {
     const signature = `${kind} ${name}(`;
     const body = functionBody(src, signature);
     assert.doesNotMatch(body, bareAdd, `${signature} adds a worktree before locking it`);
-    assert.match(body, /addLockedRunWorktree\(/, `${signature} routes its add through addLockedRunWorktree`);
+    // W1-T5284: the two daemon lanes take the awaited form, which keeps the same lock-first order.
+    assert.match(body, /addLockedRunWorktree(?:Async)?\(/, `${signature} routes its add through addLockedRunWorktree`);
   }
 });
