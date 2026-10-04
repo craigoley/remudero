@@ -31,6 +31,7 @@ import { DEFAULT_TASK_CLASS } from "./task-class.js";
 import { lintTask, type LintOpts, type LintViolation } from "./task-linter.js";
 import type { QuestionEntry } from "./worker.js";
 import { renderSkillDraft, renderSkillDrafts, type SkillDraft } from "./skill-workshop.js";
+import { notionalSpendUsd } from "./spend-rows.js";
 import { openLedgerUnion, readLedgerUnionRawLinesSync, realLedgerFs, type LedgerGrepFsDeps } from "./ledger-union.js";
 import { closureByClass, guardFireCounts, renderClosureByClass, renderGuardFireCounts, type ClassClosure, type GuardFireCount } from "./retro-closure.js";
 
@@ -962,6 +963,9 @@ export interface LaneSpend {
   /** Sum of each row's `cost_usd`, falling back to `total_cost_usd` — {@link gatherRuns}'s own
    *  precedence. NOTIONAL, API-equivalent price on a subscription install, never billed spend. */
   costUsd: number;
+  /** W1-T5629: codex rows with no notional price (no `notional_cost_usd`), so `costUsd` omits them rather than
+   *  reading them as $0. Absent when every row was priced. */
+  unpricedRows?: number;
   /** The most recent `ts` this lane's rows carried; absent only when the lane logged none. */
   newestTs?: string;
   models: LaneModelShare[];
@@ -1054,8 +1058,17 @@ export function runModelIndex(records: LedgerRecord[]): Map<string, string> {
 function laneSpendOf(lane: string, step: string, rows: LedgerRecord[], byRun: ReadonlyMap<string, string>): LaneSpend {
   const models = new Map<string, { rows: number; viaRun: number }>();
   let newestTs: string | undefined;
+  let costUsd = 0;
+  let unpricedRows = 0;
   for (const r of rows) {
-    const own = ownModelOf(r);
+    // W1-T5629: a codex row's `cost_usd` is a hard 0 and its `model` the requested alias; its price is its notional,
+    // and the model that ran is its `routed_model`.
+    const codex = r.provider === "codex";
+    const cost = codex ? notionalSpendUsd(r) : costOf(r);
+    if (cost === undefined) unpricedRows += 1;
+    else costUsd += cost;
+    const routed = codex && typeof r.routed_model === "string" && r.routed_model.length > 0 ? r.routed_model : undefined;
+    const own = routed ?? ownModelOf(r);
     const joined = own === undefined && typeof r.run_id === "string" ? byRun.get(r.run_id) : undefined;
     const model = own ?? joined ?? UNATTRIBUTED_MODEL;
     const cell = models.get(model) ?? { rows: 0, viaRun: 0 };
@@ -1068,7 +1081,8 @@ function laneSpendOf(lane: string, step: string, rows: LedgerRecord[], byRun: Re
     lane,
     step,
     rows: rows.length,
-    costUsd: round(rows.reduce((s, r) => s + costOf(r), 0)),
+    costUsd: round(costUsd),
+    ...(unpricedRows > 0 ? { unpricedRows } : {}),
     ...(newestTs !== undefined ? { newestTs } : {}),
     models: [...models.entries()]
       .map(([model, c]) => ({ model, rows: c.rows, ...(c.viaRun > 0 ? { viaRun: c.viaRun } : {}) }))
@@ -1144,7 +1158,8 @@ function laneSpendRow(l: LaneSpend): string {
   const models = l.models.length
     ? l.models.map((m) => `${m.model}×${m.rows}${m.viaRun ? ` (${m.viaRun} via run join)` : ""}`).join(", ")
     : "(no rows)";
-  return `| ${l.lane} (\`${l.step}\`) | ${l.rows} | $${l.costUsd.toFixed(2)} | ${l.newestTs ?? "(none)"} | ${models} |`;
+  const unpriced = l.unpricedRows ? ` (+${l.unpricedRows} unpriced)` : "";
+  return `| ${l.lane} (\`${l.step}\`) | ${l.rows} | $${l.costUsd.toFixed(2)}${unpriced} | ${l.newestTs ?? "(none)"} | ${models} |`;
 }
 
 /** Render the lane table — Architect lanes first, in the SAME row shape, so the share is legible. */
