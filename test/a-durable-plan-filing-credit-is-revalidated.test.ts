@@ -188,25 +188,26 @@ test("W1-T3996 criterion 3: durable implementation and unreadable-path credits r
   assert.equal(unreadable.prNumber, 7003);
 });
 
-test("W1-T3996: a durable TRAILER credit is not re-checked against the path map — it was already vetted at write time", () => {
+// W1-T5552 REVERSED this test's premise. It pinned that a durable TRAILER entry was never re-checked,
+// because rung (c) vets one at write time — but entries saved BEFORE that diff refusal shipped were
+// never vetted at all (W1-T380 stayed credited by plan-only #1437). The trailer arm's own suite is
+// test/a-durable-trailer-credit-saved-before-the-diff-refusal-is-revalidated.test.ts.
+test("W1-T3996/W1-T5552: a durable TRAILER credit IS re-checked against the path map, since an old entry was never vetted", () => {
   const taskId = "W9-T3996-4";
   let store: CreditStore = {};
   store = recordCredit(store, taskId, { source: "trailer", prUrl: "u/8000", prNumber: 8000, prState: "MERGED" });
 
-  // Even a plan-only path list for this PR number must not disturb a durable TRAILER entry: rung
-  // (c)'s own write-time check already cleared it, so a second check here would only ever repeat
-  // that pass, never add coverage — and this pins that no such re-check was accidentally wired to
-  // BOTH sources.
   const proj = deriveStatus(task(taskId), {
     ledgerPath: "/tmp/does-not-exist/ledger.ndjson",
-    github: forbidPrReads(),
+    github: noLiveEvidence(),
     readLedger: () => [],
     readCreditStore: () => store,
+    writeCreditStore: (s) => { store = s; },
     mergedPathsByPr: new Map([[8000, PLAN_ONLY_FILING_PATHS]]),
   });
 
-  assert.equal(proj.merged, true);
-  assert.equal(proj.source, "trailer");
+  assert.equal(proj.merged, false);
+  assert.equal(store[taskId]?.invalidated?.trailer?.prNumber, 8000);
 });
 
 test("W1-T3996: loadCreditStore round-trips an invalidated entry off real JSON, not just the in-memory shape", () => {
