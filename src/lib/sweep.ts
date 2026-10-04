@@ -8426,6 +8426,9 @@ export type NonExecutedProofExecOutcome = Exclude<
 >;
 
 export interface ProofDiscriminationEvidence {
+  /** W1-T5544: `"gate-log"` marks evidence read from the red `proof-discrimination` check's own job log
+   *  at this head (no posted review exists for it); absent means the capped review's own rows. */
+  readonly source?: "review" | "gate-log";
   readonly proofs: ReadonlyArray<{
     readonly claim: string;
     readonly proof: string;
@@ -8485,6 +8488,33 @@ export function proofDiscriminationEvidenceFromCheckLog(
 export function carriesTaskTrailer(pr: Pick<OpenPrView, "taskId" | "body">): boolean {
   if (pr.taskId === undefined) return false;
   return pr.body === undefined || extractTaskTrailerId(pr.body) !== undefined;
+}
+
+/** W1-T5544: a proof-repair round refused this many times at ONE head hands the PR to W1-T4943's plan-shard
+ *  flag (`dispatchPlanOnlyRepair`) instead — the ladder's second rung. */
+export const MAX_PROOF_REPAIR_REFUSALS_PER_HEAD = 2;
+
+/** W1-T5544: the stale-proof evidence a metadata-only red carries, marked `gate-log` — undefined unless the PR is trailered
+ *  and `proof-discrimination` is the sole red with a log naming proofs (the same reader W1-T4943's arm uses). */
+export function proofRepairRouteEvidence(pr: OpenPrView): ProofDiscriminationEvidence | undefined {
+  if (!carriesTaskTrailer(pr)) return undefined;
+  const found = proofDiscriminationEvidenceFromCheckLog(pr.ciFailures ?? []);
+  return found ? { ...found, source: "gate-log" } : undefined;
+}
+
+/** W1-T5544: where a proof-repair route stands at this head — refused rounds (never strikes, W1-T5542) and any
+ *  proof-amendment PR already filed for this exact PR@head (its identity row is `fix.dispatch kind proof_amendment`). */
+export function proofRepairLadder(
+  pr: Pick<OpenPrView, "taskId" | "prNumber" | "headSha">,
+  lines: Array<Record<string, unknown>>,
+): { refusals: number; amendmentUrl?: string } {
+  const prefix = `${pr.taskId}:${pr.prNumber}:${pr.headSha}:`;
+  const amendment = lines.findLast((line) =>
+    isProofAmendmentIdentityRow(line) && typeof line.identity_key === "string" && line.identity_key.startsWith(prefix));
+  return {
+    refusals: fixRoundTally(lines, pr.taskId, pr.headSha).refusals.length,
+    ...(amendment ? { amendmentUrl: String(amendment.amendment_url ?? "") } : {}),
+  };
 }
 
 /** One of the four preconditions {@link diagnoseCappedRoutingBlock} names — matched to this
@@ -9675,7 +9705,14 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
 const METADATA_RED_CHECKS = new Set(["commitlint", "acceptance-author-gate", "proof-discrimination"]);
 
 /** `notMetadata`: the live title/body already pass, so the red is file-fixable and falls through to a worker. */
-export interface MetadataRepairResult { repaired: boolean; reason: string; notMetadata?: true }
+export interface MetadataRepairResult {
+  repaired: boolean;
+  reason: string;
+  notMetadata?: true;
+  /** W1-T5544: the body red has no deterministic cure (as opposed to an unreadable body or a failed write) — the
+   *  only shape a stale-proof red may be routed past the escalation on. */
+  noCure?: true;
+}
 
 /** A prior pass at this head found this metadata-only red set NOT a metadata defect. */
 export function metadataRedRuledOut(lines: ReadonlyArray<Record<string, unknown>>, pr: OpenPrView): boolean {
@@ -11615,6 +11652,9 @@ export async function runSweep(
               // W1-T4459: both dedup checks below read a PRIOR `sweep.disposed` row's extra fields
               // (see `sameHeadRedFixRefusal` for why no new ledger step).
               const metadataChecks = metadataRedRuledOut(ledgerLines, pr) ? undefined : metadataOnlyRed(pr);
+              // W1-T5544: set only when a body red with no deterministic cure carries stale-proof evidence —
+              // the escalation below is then skipped and the PR falls through to the proof-repair route.
+              let proofRepairRoute: ProofDiscriminationEvidence | undefined;
               if (metadataChecks) {
                 const priorRepair = ledgerLines.find((line) =>
                   line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
@@ -11628,9 +11668,27 @@ export async function runSweep(
                 const result: MetadataRepairResult = deps.repairMetadata
                   ? await deps.repairMetadata(pr, metadataChecks)
                   : { repaired: false, reason: "metadata repair effect is not wired" };
-                const outcome = result.repaired ? "repaired" : result.notMetadata ? "not-metadata" : "escalated";
+                if (result.noCure && !result.repaired && !result.notMetadata) {
+                  // THE ROUTE, NOT THE QUESTION (W1-T5544). Fleet-authored heads only: an operator's PR keeps
+                  // today's escalation. An unreadable author reads as not-fleet, never as fleet.
+                  const staleEvidence = proofRepairRouteEvidence(pr);
+                  if (staleEvidence && deps.readPlanRepairFacts) {
+                    try {
+                      if (isFleetAppAuthor((await deps.readPlanRepairFacts(pr)).authorLogin)) proofRepairRoute = staleEvidence;
+                    } catch (e) {
+                      log("sweep.proof_repair.facts_error", { pr_number: pr.prNumber, error: String((e as Error)?.message ?? e) });
+                    }
+                  }
+                }
+                const outcome = result.repaired
+                  ? "repaired"
+                  : result.notMetadata
+                  ? "not-metadata"
+                  : proofRepairRoute
+                  ? "proof-repair"
+                  : "escalated";
                 extraDisposedFields = { metadata_red_checks: metadataChecks, metadata_repair_outcome: outcome };
-                if (!result.notMetadata) {
+                if (!result.notMetadata && !proofRepairRoute) {
                   if (!result.repaired) {
                     await deps.escalate(
                       pr,
@@ -11896,7 +11954,22 @@ export async function runSweep(
               // evidence, never a mix. W1-T2236: the review branch also carries
               // `actionableGateFailures`. W1-T2231: the dedup gate reads `acted`, never `spent`.
               const staleProofs = carriesTaskTrailer(pr) ? proofDiscriminationEvidenceFromCheckLog(ciFailuresForFix) : undefined;
-              const fixEvidence = isBlockedCi(pr)
+              // W1-T5544 — THE LADDER, RUNG ONE. A routed stale-proof red gets a proof-repair round until it has
+              // been refused MAX_PROOF_REPAIR_REFUSALS_PER_HEAD times at this head (refusals are never strikes,
+              // W1-T5542); rung two is W1-T4943's plan-shard flag just below, rung three the exhausted state.
+              // A proof amendment already filed for this exact head stands the PR down: no round, no strike.
+              const proofRepairState = proofRepairRoute ? proofRepairLadder(pr, ledgerLines) : undefined;
+              if (proofRepairState?.amendmentUrl !== undefined) {
+                acted = false;
+                standDownReason = `proof amendment ${proofRepairState.amendmentUrl || "PR"} is filed for this head — standing down without a strike until it merges`;
+                break;
+              }
+              const proofRepairActive =
+                proofRepairRoute !== undefined && proofRepairState !== undefined &&
+                proofRepairState.refusals < MAX_PROOF_REPAIR_REFUSALS_PER_HEAD;
+              const fixEvidence = proofRepairActive
+                ? { unmetCriteria: [], proofDiscrimination: proofRepairRoute }
+                : isBlockedCi(pr)
                 ? { unmetCriteria: [], ciFailures: ciFailuresForFix }
                 : {
                     unmetCriteria: pr.unmetCriteria,
@@ -11986,7 +12059,7 @@ export async function runSweep(
                   scripts: ratchetScripts,
                 });
               }
-              if (staleProofs && (!deps.dispatchPlanOnlyRepair || priorPlanRepairStrikesFromLedger(pr, ledgerLines) >= MAX_PLAN_REPAIR_STRIKES)) {
+              if (staleProofs && !proofRepairActive && (!deps.dispatchPlanOnlyRepair || priorPlanRepairStrikesFromLedger(pr, ledgerLines) >= MAX_PLAN_REPAIR_STRIKES)) {
                 reason = `stale-proof red on ${staleProofs.proofs.map((p) => p.proof).join("; ")} — the plan-shard flag is spent or unwired, so no worker is dispatched`;
                 const flagEscalated = ledgerLines.some((line) =>
                   line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
@@ -12019,7 +12092,7 @@ export async function runSweep(
               }
               // W1-T3390 — fires here, in place of `dispatchFix` below, once the disposition
               // decision above found the body budget spent and a plan-shard repair still owed.
-              const planRepairEvidence = planShardRepairDue ? proofDiscrimination : staleProofs;
+              const planRepairEvidence = proofRepairActive ? undefined : planShardRepairDue ? proofDiscrimination : staleProofs;
               if (deps.dispatchPlanOnlyRepair && planRepairEvidence) {
                 const dispatchPlanOnlyRepair = deps.dispatchPlanOnlyRepair;
                 if (deps.detachFixWait) {
