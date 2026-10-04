@@ -31633,10 +31633,11 @@ export type UsageQueryFn = UsageProbeQueryFn;
 export async function readUsageSnapshotViaSdk(
   runQuery?: UsageQueryFn,
   onUnreadable: UsageProbeFailureSink = () => {},
+  context: Parameters<typeof openUsageProbeSession>[1] = {},
 ): Promise<UsageSnapshot | undefined> {
   // The session is opened by the SPAWN CHOKEPOINT (worker.ts), which owns the SDK import and the
   // live-spawn guard — see `openUsageProbeSession`. This module never touches the SDK.
-  const q = openUsageProbeSession(runQuery);
+  const q = openUsageProbeSession(runQuery, context);
 
   const method = q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
   if (typeof method !== "function") {
