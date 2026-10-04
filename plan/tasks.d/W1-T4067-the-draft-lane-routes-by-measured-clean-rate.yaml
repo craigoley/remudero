@@ -12,7 +12,7 @@
   plan_refs: [W1-T3621, W1-T3664, W1-T3095]
   files: [src/lib/draft-routing.ts, src/lib/worker.ts, src/lib/worker-provider.ts, src/run-task.ts, .remudero/mounts.yaml, test/the-draft-lane-routes-by-measured-clean-rate.test.ts, scripts/test-tier-manifest.json]
   priority: 2
-  status: queued
+  status: merged
   # backlog gardener: band=2 evidence=313deba415903a61
   attempts: 0
   rationale: |

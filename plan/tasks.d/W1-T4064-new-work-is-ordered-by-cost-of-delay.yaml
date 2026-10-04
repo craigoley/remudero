@@ -12,7 +12,7 @@
   plan_refs: [W1-T4006, W1-T3704]
   files: [src/lib/drain.ts, src/lib/dispatch-value.ts, src/run-task.ts, test/new-work-is-ordered-by-cost-of-delay.test.ts, scripts/test-tier-manifest.json]
   priority: 2
-  status: queued
+  status: merged
   # backlog gardener: band=2 evidence=cd54c84a609738ee
   attempts: 0
   rationale: |

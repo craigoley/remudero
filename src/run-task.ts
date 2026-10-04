@@ -123,9 +123,11 @@ import {
   armAutoMergeDetailed,
   attemptArm,
   armAutoMergeAtOpen,
+  armAutoMergeAtOpenAsync,
   classifyDisarmFailure,
   disarmOutcomeWithdrawn,
   disarmAutoMerge,
+  disarmAutoMergeAsync,
   logArmAttribution,
   armIfVerdictPermits,
   armOutcomeReason,
@@ -2585,7 +2587,15 @@ import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 // turns instead of dollars (this task's own declared `files:` list does not include
 // `plan/policy.yaml`, so no new policy row is added here).
 import { loadDefaultCostAnomalyPolicy, type CostAnomalyPolicy } from "./lib/cost-anomaly.js";
-import { defaultGitCapture, gitPushRunBranch, gitPushEmptyCommit, LanePushForeignHeadError } from "./lib/git-push.js";
+import {
+  defaultGitCapture,
+  defaultGitCaptureAsync,
+  gitPushRunBranch,
+  gitPushRunBranchAsync,
+  gitPushEmptyCommit,
+  LanePushForeignHeadError,
+  type PushRunBranchAsyncOpts,
+} from "./lib/git-push.js";
 import {
   ensureWorkerKeychain,
   materializeWorkerHome,
@@ -16220,28 +16230,30 @@ export class FixRoundPushError extends RmdError {
 }
 
 /** W1-T4693: the one push both fix-rung sites run. Stderr is piped so a refusal is readable; a foreign head
- *  still raises; the only silent failure is a remote that already holds this exact head. */
-export function pushFixRound(
+ *  still raises; the only silent failure is a remote that already holds this exact head. W1-T5284: every git
+ *  child is awaited — the sweep and runTaskBody run fix rounds on the daemon's loop. */
+export async function pushFixRound(
   wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string,
-  deps: Pick<NonNullable<Parameters<typeof gitPushRunBranch>[1]>, "capture" | "exec"> = {},
-): void {
-  const capture = deps.capture ?? defaultGitCapture;
-  const push = deps.exec ?? ((file, args) => void execFileSync(file, args, { stdio: ["ignore", "ignore", "pipe"] }));
+  deps: Pick<PushRunBranchAsyncOpts, "capture" | "exec"> = {},
+): Promise<void> {
+  const capture = deps.capture ?? defaultGitCaptureAsync;
+  const push = deps.exec ?? (async (file: string, args: string[]) => void (await execFilePromise(file, args)));
   try {
     if (priorHeadSha !== undefined && expectedHeadSha === undefined) throw new Error("refusing a leased fix push without the committed head sha");
-    gitPushRunBranch(wt, { expectedHeadSha, capture, exec: (file, args) => {
+    await gitPushRunBranchAsync(wt, { expectedHeadSha, capture, exec: async (file, args) => {
       const pushArgs = priorHeadSha === undefined ? args : ["-C", wt, "push",
         `--force-with-lease=refs/heads/${branch}:${priorHeadSha}`, "origin", `${expectedHeadSha}:refs/heads/${branch}`];
-      push(file, pushArgs, { stdio: "ignore" });
+      await push(file, pushArgs, { stdio: "ignore" });
       if (priorHeadSha !== undefined) {
-        const observed = capture("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`]).split(/\s/)[0];
+        const observed = (await capture("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`])).split(/\s/)[0];
         if (observed !== expectedHeadSha) throw new Error(`leased push of ${branch} expected ${expectedHeadSha}, observed ${observed || "<absent>"}`);
       }
     } });
   } catch (err) {
     if (err instanceof LanePushForeignHeadError && priorHeadSha === undefined) throw err;
-    // spawnSync, not a try: an unreadable remote simply is not the expected head.
-    const remote = spawnSync("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`], { encoding: "utf8" }).stdout?.split(/\s/)[0];
+    // An unreadable remote simply is not the expected head, so its failure reads as no head at all.
+    const remote = await execFilePromise("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`], { encoding: "utf8" })
+      .then(({ stdout }) => stdout.split(/\s/)[0], () => undefined);
     if (expectedHeadSha !== undefined && remote === expectedHeadSha) return;
     throw new FixRoundPushError(runErrorCause(err), censusPushRefusal(err), String((err as Error)?.message ?? err));
   }
@@ -16411,12 +16423,12 @@ export async function pushFixRoundPrechecked(
   branch: string,
   expectedHeadSha?: string,
   ports: CoveragePrecheckPorts = {},
-  push: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => void = pushFixRound,
+  push: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => void | Promise<void> = pushFixRound,
   priorHeadSha?: string,
 ): Promise<void> {
   const refusal = coveragePushRefusal(await coveragePrecheck(wt, ports), log, "rung.fix_push");
   if (refusal) throw new FixRoundPushError("run-error", refusal, refusal.text);
-  push(wt, branch, expectedHeadSha, priorHeadSha);
+  await push(wt, branch, expectedHeadSha, priorHeadSha);
 }
 
 export type CensusPushRungOutcome =
@@ -16524,7 +16536,7 @@ export async function repairCensusRefusedPush(input: {
       continue;
     }
     try {
-      gitPushRunBranch(cwd);
+      await gitPushRunBranchAsync(cwd);
     } catch (err) {
       const next = censusPushRefusal(err);
       if (!next) throw err;
@@ -18327,7 +18339,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       const coverageRefusal = coveragePushRefusal(await coveragePrecheck(worktreePath, opts.coveragePrecheckPorts), log, "fallback_push");
       try {
         if (coverageRefusal) throw new FixRoundPushError("run-error", coverageRefusal, coverageRefusal.text);
-        gitPushRunBranch(worktreePath);
+        await gitPushRunBranchAsync(worktreePath);
       } catch (err) {
         const refusal = err instanceof FixRoundPushError ? err.refusal : censusPushRefusal(err);
         if (!refusal) throw err;
@@ -18376,7 +18388,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // read that tip. `appendTaskTrailerToCommit` amends only when the trailer is missing, so
     // an already-trailered commit (a worker that wrote it itself) pays no second amend.
     if (appendTaskTrailerToCommit(worktreePath, taskId)) {
-      gitPushRunBranch(worktreePath, { force: true });
+      await gitPushRunBranchAsync(worktreePath, { force: true });
     }
     if (!prUrl) {
       let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
@@ -18879,7 +18891,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // W1-T1215: FOLLOW THE OUTCOME. This discarded the return and logged `automerge.disarmed`
       // unconditionally, so a withdrawal GitHub refused read as a completed one. `disposeDisarm`
       // holds the whole decision (and every lost-race-only read) where a test can reach it.
-      const disposition = disposeDisarm(disarmAutoMerge(prUrl), { prUrl, taskId, runId, ledgerPath, reason, refusal: armDecision.reason });
+      const disposition = disposeDisarm(await disarmAutoMergeAsync(prUrl), { prUrl, taskId, runId, ledgerPath, reason, refusal: armDecision.reason });
       log(disposition.step, disposition.row);
       const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
       const issueUrl = escalate(
@@ -19142,7 +19154,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const armOutcome: ArmOutcome | "no-merge-boundary-refused" | "shadow-instance-refused" = !shadowArmDecision.armed
       ? "shadow-instance-refused"
       : wipeTestArmDecision.armed
-        ? armAutoMergeAtOpen(prUrl, undefined, irreversible)
+        ? await armAutoMergeAtOpenAsync(prUrl, undefined, irreversible)
         : "no-merge-boundary-refused";
     // W1-T2258: `review.headSha` — the SAME head captured in `riskJudgeInput` above — is already
     // in scope here and simply was not put on the row; this is the SINGLE LARGEST dropped
@@ -30471,15 +30483,15 @@ export function runCitationStampPass(opts: {
 // Cuts a lane's `run-<runId>` worktree branch, ledgering a failed add before rethrowing
 // (W1-T2528) — shared by retro/triage/plan. Defined AFTER runTask (not beside `nextLaneEpochMs`):
 // tests static-scan for the FIRST `worktreeAdd(...` match to prove runTask's own guards precede it.
-export function addLaneWorktree(
+export async function addLaneWorktree(
   repoDir: string, worktreesRoot: string, runId: string, log: (step: string, extra?: Record<string, unknown>) => void,
-): { branch: string; worktreePath: string } {
+): Promise<{ branch: string; worktreePath: string }> {
   const branch = `run-${runId}`;
   const worktreePath = join(worktreesRoot, branch);
   try {
     // W1-T2621: thread the caller's own ledger through — `worktreeAdd` now emits the
     // `worktree.add` three-way base reading itself; see its doc in lib/worker.ts.
-    addLockedRunWorktree(repoDir, worktreePath, branch, "origin/main", runId, log);
+    await addLockedRunWorktreeAsync(repoDir, worktreePath, branch, "origin/main", runId, log);
   } catch (e) {
     log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
     throw e;
@@ -30498,6 +30510,22 @@ export function addLockedRunWorktree(
   writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: systemClock.iso() });
   try {
     worktreeAdd(repoDir, worktreePath, branch, base, { log });
+  } catch (e) {
+    removeRunLock(worktreePath);
+    throw e;
+  }
+}
+
+/** W1-T5284: {@link addLockedRunWorktree} for the daemon's lanes — the same lock-first order, with the add (and its
+ *  `git fetch`) awaited so the loop runs meanwhile. The lock now also covers a prune in THIS process. */
+export async function addLockedRunWorktreeAsync(
+  repoDir: string, worktreePath: string, branch: string, base: string, runId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<void> {
+  mkdirSync(worktreePath, { recursive: true });
+  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: systemClock.iso() });
+  try {
+    await worktreeAddAsync(repoDir, worktreePath, branch, base, { log });
   } catch (e) {
     removeRunLock(worktreePath);
     throw e;
@@ -30970,7 +30998,7 @@ async function retroCommand(
   }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
+  const { branch, worktreePath } = await addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
 
   // W1-T39: the next-runnable task for docs/ORIENTATION.md, from the SAME DAG +
   // GitHub-derived-status projection `rmd drain` dispatches from — never a second,
@@ -31222,12 +31250,12 @@ async function retroCommand(
 
     // Publication begins only after the local gate passes. A premature owned PR is updated in
     // place by pushing this same branch; the normal path publishes the branch for the first time.
-    gitPushRunBranch(worktreePath);
+    await gitPushRunBranchAsync(worktreePath);
 
     // W1-T1012: append the run trailer after validation (commit-message-only; no tested file
     // changes), then update the same branch atomically before PR creation/body repair.
     if (appendTaskTrailerToCommit(worktreePath, runId)) {
-      gitPushRunBranch(worktreePath, { force: true });
+      await gitPushRunBranchAsync(worktreePath, { force: true });
     }
 
     if (!prUrl) {
@@ -41857,6 +41885,9 @@ export function checkoutFixHeadRef(
   return recovery;
 }
 
+/** W1-T5284: the awaited git the daemon-resident fix rung and fix-round push run. */
+const execFilePromise = promisify(execFile);
+
 /**
  * W1-T1129: the fix rung's throwaway worktree AND its named local branch, extracted from
  * `dispatchFix` (its one call site) purely so this exact git sequence is directly unit-testable
@@ -41869,28 +41900,31 @@ export function checkoutFixHeadRef(
  *
  * W1-T2609/W1-T2839: the checkout step itself is now {@link checkoutFixHeadRef} — it never
  * force-resets the shared branch, and it preserves stale non-ancestor tips before CAS recovery.
+ *
+ * W1-T5284: the fetch and the add are awaited — the sweep runs this on the daemon's loop, and its
+ * sync `git fetch` held that loop. The branch claim the sweep takes first still serializes rounds.
  */
-export function createFixRungWorktree(
+export async function createFixRungWorktree(
   repoDir: string,
   worktreePath: string,
   branch: string,
   deps: CheckoutFixHeadRefDeps = {},
-): FixHeadRecovery | undefined {
-  execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "pipe" });
-  execFileSync("git", ["-C", repoDir, "worktree", "add", worktreePath, `origin/${branch}`], { stdio: "pipe" });
+): Promise<FixHeadRecovery | undefined> {
+  await execFilePromise("git", ["-C", repoDir, "fetch", "origin", "--quiet"]);
+  await execFilePromise("git", ["-C", repoDir, "worktree", "add", worktreePath, `origin/${branch}`]);
   return checkoutFixHeadRef(repoDir, worktreePath, branch, deps);
 }
 
 /** The sweep fix lane cuts its own branch-attached worktree, bypassing `worktreeAdd`'s
  * dependency link. Supply the same local CLI toolchain before its worker can commit; an
  * unavailable link refuses before a strike instead of failing at the commit-msg hook. */
-export function createFixRungWorktreeWithToolchain(
+export async function createFixRungWorktreeWithToolchain(
   repoDir: string,
   worktreePath: string,
   branch: string,
   prepare: (repoDir: string, worktreePath: string) => boolean = prepareWorktreeToolchain,
-): FixHeadRecovery | undefined {
-  const recovery = createFixRungWorktree(repoDir, worktreePath, branch);
+): Promise<FixHeadRecovery | undefined> {
+  const recovery = await createFixRungWorktree(repoDir, worktreePath, branch);
   if (!prepare(repoDir, worktreePath)) {
     throw new Error("fix worktree toolchain unavailable: node_modules could not be linked");
   }
@@ -44867,7 +44901,7 @@ async function triageCommandLocked(
   }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
+  const { branch, worktreePath } = await addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
 
   // W1-T348: the decision-summary rung, resolved ONCE and reused at both sites this run may
   // reach a human/operator — the GRILL escalation below and the proposal write further down.
@@ -45249,7 +45283,7 @@ async function triageCommandLocked(
       }
     }
 
-    gitPushRunBranch(worktreePath);
+    await gitPushRunBranchAsync(worktreePath);
 
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
@@ -45286,7 +45320,7 @@ async function triageCommandLocked(
         ["-C", worktreePath, "commit", "-m", `chore(triage): record proposal_pr for feedback#${feedbackId}`],
         { stdio: "inherit" },
       );
-      gitPushRunBranch(worktreePath);
+      await gitPushRunBranchAsync(worktreePath);
     }
 
     // DETERMINISTIC GUARD: a triage PR is PLAN-ONLY. Fail closed if the diff touches anything
@@ -45496,7 +45530,7 @@ export async function planCommand(
   }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
+  const { branch, worktreePath } = await addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
 
   let planIdBlock: TaskIdReservationBlock | undefined;
 
@@ -45724,7 +45758,7 @@ export async function planCommand(
       changedFiles: planPrFiles,
       proofCwd: worktreePath,
     });
-    gitPushRunBranch(worktreePath);
+    await gitPushRunBranchAsync(worktreePath);
 
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
@@ -45918,26 +45952,37 @@ export async function spawnEscalatedInboxDraft(
  * could not have observed) is still visible on the SAME ledger this whole rung already writes
  * to, not only as inherited git stderr in a separate log file.
  */
-export function createDaemonLaneWorktree(
+export async function createDaemonLaneWorktree(
   repoDir: string,
   worktreesRoot: string,
   runId: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-): { branch: string; worktreePath: string } {
+): Promise<{ branch: string; worktreePath: string }> {
   const pruned = pruneStaleRuns(repoDir, worktreesRoot, { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const branch = uniqueRunBranch(repoDir, runId);
+  // W1-T5284: the add is awaited, so a second lane from the same boot-long run id can pick a name while the first
+  // add has not created its branch yet. The sync add closed that window by blocking; the reservation holds it now.
+  const reserved = laneBranchesBeingAdded.get(repoDir) ?? new Set<string>();
+  laneBranchesBeingAdded.set(repoDir, reserved);
+  const branch = uniqueRunBranch(repoDir, runId, reserved);
+  reserved.add(branch);
   const worktreePath = join(worktreesRoot, branch);
   try {
     // W1-T2621: see addLaneWorktree's identical note, above — worktreeAdd itself emits
     // worktree.add now, given a ledger to emit it through.
-    addLockedRunWorktree(repoDir, worktreePath, branch, "origin/main", runId, log);
+    await addLockedRunWorktreeAsync(repoDir, worktreePath, branch, "origin/main", runId, log);
   } catch (e) {
     log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
     throw e;
+  } finally {
+    reserved.delete(branch);
   }
   return { branch, worktreePath };
 }
+
+/** W1-T5284: per repo, the `run-*` branches a {@link createDaemonLaneWorktree} add in this process has picked and not
+ *  yet created. */
+const laneBranchesBeingAdded = new Map<string, Set<string>>();
 
 export async function draftProposalBatch(
   toDraft: Proposal[],
@@ -45971,7 +46016,7 @@ export async function draftProposalBatch(
     mkdirSync(dirname(repoDir), { recursive: true });
     ghExec(["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
   }
-  const { branch, worktreePath } = createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
+  const { branch, worktreePath } = await createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
 
   try {
     const planText = readFileSync(join(worktreePath, "plan", "tasks.yaml"), "utf8");
@@ -46068,7 +46113,7 @@ export async function inboxBakeoffCommand(
     repoClone(["repo", "clone", `${owner}/${repo}`, repoDir]);
   }
   const baseMount = loadMounts(mountsPath(repoRoot)).synthesis.inbox_draft;
-  const { branch, worktreePath } = createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
+  const { branch, worktreePath } = await createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
   try {
     const planText = readFileSync(join(worktreePath, "plan", "tasks.yaml"), "utf8");
     const spawnFor = (candidate: BakeoffCandidate) => async (_proposal: Proposal, prompt: string) => {

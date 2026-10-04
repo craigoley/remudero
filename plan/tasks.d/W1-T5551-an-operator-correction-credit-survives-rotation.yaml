@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: credit research (0 of 2,979 projections carry source correction)"
   plan_refs: [W1-T3990, W1-T5514, W1-T5517, W1-T4393]
   files: [src/lib/status.ts, src/lib/ledger.ts, test/an-operator-correction-credit-survives-rotation.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

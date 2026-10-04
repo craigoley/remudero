@@ -252,9 +252,9 @@ const FIX_RUNG_MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400
 
 /** Both fix-rung `push:` deps ARE `pushFixRound` (W1-T4693), so this drives the real one, recording each call. */
 function productionShapedPush(pushed: Array<{ wt: string; branch: string; expectedHeadSha?: string }>) {
-  return (wt: string, branch: string, expectedHeadSha?: string): void => {
+  return async (wt: string, branch: string, expectedHeadSha?: string): Promise<void> => {
     pushed.push({ wt, branch, expectedHeadSha });
-    pushFixRound(wt, branch, expectedHeadSha);
+    await pushFixRound(wt, branch, expectedHeadSha);
   };
 }
 
@@ -434,8 +434,8 @@ test("W1-T2610: both fix-rung push deps pass expectedHeadSha through pushFixRoun
   assert.equal((runTask.match(/^ {10}push: \(wt, br, sha, prior\) => pushFixRoundPrechecked\(.*?, wt, br, sha, \{\}, pushFixRound, prior\),$/gm) ?? []).length, 1, "runTaskBody's fix rung passes the expected head and prior-head lease through the prechecked push");
   const prechecked = runTask.split("export async function pushFixRoundPrechecked(")[1]?.split("export type CensusPushRungOutcome")[0] ?? "";
   assert.match(prechecked, /push: .* = pushFixRound,/, "the precheck defaults to the shared push helper");
-  assert.match(prechecked, /push\(wt, branch, expectedHeadSha, priorHeadSha\);/, "the precheck preserves the expected head and prior-head lease");
+  assert.match(prechecked, /await push\(wt, branch, expectedHeadSha, priorHeadSha\);/, "the precheck preserves the expected head and prior-head lease");
   assert.equal((sweep.match(/^ {12}push: pushFixRound,$/gm) ?? []).length, 1, "the sweep's fix dispatch pushes through pushFixRound");
   assert.match(runTask, /pushFixRoundImpl: pushFixRound,/, "the sweep entrypoint injects the same helper");
-  assert.match(runTask, /gitPushRunBranch\(wt, \{ expectedHeadSha, capture, exec: /, "the helper threads expectedHeadSha to the leaf");
+  assert.match(runTask, /await gitPushRunBranchAsync\(wt, \{ expectedHeadSha, capture, exec: /, "the helper threads expectedHeadSha to the leaf");
 });

@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: reviewing reapDeadOwnerDirs (W1-T5550, #9050)"
   plan_refs: [W1-T5550, W1-T4119, W1-T4226, W1-T4805]
   files: [test/setup/no-live-remote.ts, test/setup/tmp-hygiene.ts, test/a-worker-thread-makes-no-setup-dirs-and-a-foreign-namespace-dir-is-kept.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

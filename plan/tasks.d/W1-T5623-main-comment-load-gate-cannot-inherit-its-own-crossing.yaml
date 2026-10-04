@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: census-precheck refusing any comment added to src/lib/ledger.ts (755 vs 753)"
   plan_refs: [W1-T3068, W1-T3655, W1-T3180, W1-T5522, W1-T3719]
   files: [scripts/comment-load-ratchet.mjs, .github/workflows/ci.yml, scripts/comment-load-baseline.json, test/main-can-cross-a-ceiling-no-pr-ever-broke.test.ts, test/main-comment-load-gate-cannot-inherit-its-own-crossing.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
