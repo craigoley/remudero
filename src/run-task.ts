@@ -1517,6 +1517,12 @@ import {
   REQUIRED_CHECK_FAIL,
   REQUIRED_CHECK_OK,
   runCreditBackfill,
+  closedPrFacts,
+  closedPrFromRef,
+  closedPrLookup,
+  runPrTerminalReconcile,
+  type ClosedPrFact,
+  type PrTerminalReconcileSummary,
   runEscalationReconcile,
   runPostFixReverification,
   runSweep,
@@ -35152,6 +35158,8 @@ export function createTickReadProducer(options: TickReadOptions, io: {
   const filingFiles = createPlanFilingFileCache();
   let reads = new Map<string, unknown>();
   let generationClock = 0;
+  const closedAt = new Map<number, string>();
+  let closedRows: ReadonlyArray<{ number: number; url: string; state: string }> = [];
   const fetch: GhApiFetcher = (args, budget) => {
     const endpoint = args.find((arg) => arg.startsWith(`repos/${owner}/${repo}/`));
     let key = args.join("\0");
@@ -35166,11 +35174,19 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     if (reads.has(key)) return reads.get(key);
     const answer = (io.fetch ?? ghJson)(args, budget);
     reads.set(key, answer);
+    if (endpoint?.includes("state=closed") && Array.isArray(answer)) { // W1-T5318: GitHub's own terminal times
+      for (const pr of answer as Array<{ number?: unknown; merged_at?: unknown; closed_at?: unknown }>) {
+        const at = pr.merged_at ?? pr.closed_at;
+        if (typeof pr.number === "number" && typeof at === "string") closedAt.set(pr.number, at);
+      }
+    }
     return answer;
   };
   const github = io.github ?? buildBatchedGithub(owner, repo, {
     log, pacer, snapshotCache: {
       ...snapshotCache,
+      closedSeed: () => { const seed = snapshotCache.closedSeed(); if (seed) closedRows = [...seed.values()]; return seed; },
+      commitClosed: (rows) => { closedRows = rows; return snapshotCache.commitClosed(rows); },
       commitOpen: (rows) => snapshotCache.commitOpen?.(rows, Date.now()) ?? false,
     }, changedFilesCache: {
       lookup: (url, state) => (state === "MERGED" || state === "CLOSED" ? files : openFiles).lookup(url, state),
@@ -35262,13 +35278,20 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     const creditUpdates = Object.entries(credits)
       .filter(([id, value]) => JSON.stringify(value) !== JSON.stringify(creditBefore[id]))
       .map(([id, after]) => ({ id, before: creditBefore[id], after }));
+    const closedPrs: ClosedPrFact[] = closedPrFacts(closedRows, closedAt, new Set(openPrRows?.map((pr) => pr.number)));
     return { plan, projection: [...projection], openBranches, openPrRows, openPrViews, openPrError, creditUpdates,
       creditCandidates, escalationCandidates, escalationIntake, boardItems,
-      staleGateWorkflowsByPr, behindMainByPr, mergedFixPrNumbers, postFixCiFailuresByPr };
+      staleGateWorkflowsByPr, behindMainByPr, mergedFixPrNumbers, postFixCiFailuresByPr, closedPrs };
   };
 }
 
 type TickReadFacts = Awaited<ReturnType<ReturnType<typeof createTickReadProducer>>>;
+
+export function sweepPrTerminalRung(github: Pick<GitHub, "prByRef">, ledgerPath: string, runId: string, // W1-T5318
+  tickRead?: Pick<TickReadFacts, "closedPrs">): PrTerminalReconcileSummary {
+  const lookup = tickRead?.closedPrs ? closedPrLookup(tickRead.closedPrs) : (url: string) => closedPrFromRef(github.prByRef(url));
+  return runPrTerminalReconcile(lookup, { ledgerPath, runId });
+}
 
 export function applyTickCreditUpdates(facts: Pick<TickReadFacts, "creditUpdates">, ledgerPath: string,
   log: (step: string, extra?: Record<string, unknown>) => void): void {
@@ -43405,6 +43428,7 @@ export function buildSweepHook(
       // W1-T150: the SAME credit-backfill rung `rmd sweep` runs, on the
       // daemon's own poll cadence — never a second, separately-scheduled loop.
       await runCreditBackfill(creditCandidates, { ledgerPath, runId, log });
+      sweepPrTerminalRung(boardGithub, ledgerPath, runId, tickRead); // W1-T5318: every closed PR, task or not
       // W1-T175 — the worktree reaper rung, on the daemon's own poll cadence: the hole
       // this closes is specifically an IDLE fleet (no run dispatched, so pruneStaleRuns'
       // run-start trigger never fires) leaving crashed-run debris to grow unbounded. Own
