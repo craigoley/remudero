@@ -2008,14 +2008,7 @@ export const PR_WORKFLOW_PARITY_TABLE: CiParityEntry[] = [
     workflow: "unwired-gate.yml",
     job: "unwired-gate",
     mirrored: true,
-    run: (repoRoot, spawn) => [
-      runStep("unwired-gate:mkdtemp", () =>
-        shellOut(spawn, "npm run --silent mkdtemp-callsite-check", "npm", ["run", "--silent", "mkdtemp-callsite-check"], { cwd: repoRoot }),
-      ),
-      runStep("unwired-gate:check", () =>
-        shellOut(spawn, "npm run --silent unwired-gate:check", "npm", ["run", "--silent", "unwired-gate:check"], { cwd: repoRoot }),
-      ),
-    ],
+    run: runUnwiredGateChecks,
   },
 ];
 
@@ -2036,6 +2029,46 @@ export interface CiParityDeps {
 export interface CiParityResult {
   steps: CiParityStepResult[];
   ok: boolean;
+}
+
+function runUnwiredGateChecks(repoRoot: string, spawn: PreflightSpawn): CiParityStepResult[] {
+  return [
+    runStep("unwired-gate:mkdtemp", () =>
+      shellOut(spawn, "npm run --silent mkdtemp-callsite-check", "npm", ["run", "--silent", "mkdtemp-callsite-check"], { cwd: repoRoot }),
+    ),
+    runStep("unwired-gate:check", () =>
+      shellOut(spawn, "npm run --silent unwired-gate:check", "npm", ["run", "--silent", "unwired-gate:check"], { cwd: repoRoot }),
+    ),
+  ];
+}
+
+export interface CiParityAdmissionResult extends CiParityResult {
+  execution: "completed" | "not-run";
+}
+
+/** The interactive full-validation route checks the same cleanup/wiring controls first.
+ * A failed or unreadable admission records its own cause and leaves full parity explicitly
+ * unrun. Once admitted, the existing engine still runs every registered job independently.
+ * Worker ratchets and the default preflight route do not acquire a full-suite invocation. */
+export function runCiParityAdmitted(repoRoot: string, deps: CiParityDeps = {}): CiParityAdmissionResult {
+  const admission = runUnwiredGateChecks(repoRoot, deps.spawn ?? defaultPreflightSpawn).map((step) => ({
+    ...step,
+    name: `ci-parity:admission:${step.name}`,
+    detail: `ci-parity:admission:${step.detail}`,
+  }));
+  if (admission.some((step) => !step.ok)) {
+    return {
+      ok: false,
+      execution: "not-run",
+      steps: [...admission, {
+        name: "ci-parity:not-run",
+        ok: false,
+        detail: "ci-parity:not-run: FAIL — admission did not pass; full CI parity was NOT RUN; resolve the named admission result and re-run",
+      }],
+    };
+  }
+  const full = runCiParity(repoRoot, deps);
+  return { ...full, execution: "completed", steps: [...admission, ...full.steps] };
 }
 
 /** `rmd preflight --ci-parity`'s engine. Prepends `ci-parity:drift` (red the moment a
