@@ -52,6 +52,7 @@ import {
 } from "./strike-ladder.js";
 import { runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import { readLedgerUnionRawLinesSync, resolveLedgerUnion } from "./ledger-union.js";
+import { checkReaderAgreement, type ReaderAgreementOptions } from "./reader-agreement.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { isInPlanScope } from "./plan-scope.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "./mounts.js";
@@ -1574,6 +1575,7 @@ const settledMutationVerdictArtifacts = new Set<number>();
  * inserted in some canonical position.
  */
 export const SWEEP_EFFECT_SURFACE = [
+  "readerAgreement",
   "reproduceFailingTestsOnMain",
   "arm",
   "close",
@@ -1634,6 +1636,7 @@ export const SWEEP_EFFECT_SURFACE = [
 
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
+  | "readerAgreement"
   | "reproduceFailingTestsOnMain"
   | "arm"
   | "close"
@@ -2057,6 +2060,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   };
 
   return {
+    readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
     // W1-T3618: the entrypoint's freshness gate, surfaced so the lib-built and entrypoint-built
     // effect surfaces stay key-identical (W1-T2890).
     reviewerCodeStaleThisPass: reviewerCodeStaleThisPassImpl,
@@ -9081,6 +9085,7 @@ export interface StrikeLadderEffects {
 }
 
 export interface SweepDeps {
+  readerAgreement?: Omit<ReaderAgreementOptions, "ledgerPath" | "runId" | "appendLine" | "openPrCount">;
   reproduceFailingTestsOnMain?: (
     pr: OpenPrView, files: readonly string[], mainTipSha: string,
   ) => Promise<readonly BaseProbeFile[]>;
@@ -10640,6 +10645,9 @@ export const MAX_STALE_PROOF_CLOSES_PER_PASS = 2;
 /** W1-T4702 — the last incomplete-union reason logged, so a persistent gap is logged once. */
 let lastReportedAnomalyGap: string | undefined;
 
+const lastReaderAgreementAt = new Map<string, number>();
+const READER_AGREEMENT_INTERVAL_MS = 15 * 60_000;
+
 export async function runSweep(
   openPrs: OpenPrView[],
   deps: SweepDeps,
@@ -10652,6 +10660,18 @@ export async function runSweep(
   const appendLine = deps.appendLine ?? appendLedger;
   const now = deps.now ? deps.now() : Date.now();
   const log = deps.log ?? (() => {});
+  const lastAgreement = lastReaderAgreementAt.get(deps.ledgerPath);
+  if (deps.readerAgreement && !deps.dryRun && deps.repairAdmissionSurface !== "light" &&
+      (lastAgreement === undefined || now - lastAgreement >= READER_AGREEMENT_INTERVAL_MS)) {
+    lastReaderAgreementAt.set(deps.ledgerPath, now);
+    try {
+      const findings = await checkReaderAgreement({ ...deps.readerAgreement, ledgerPath: deps.ledgerPath,
+        runId: deps.runId, appendLine });
+      for (const finding of findings) log("reader.disagreement", { ...finding });
+    } catch (error) {
+      log("reader.agreement.unavailable", { reason: String(error) });
+    }
+  }
   if (deps.readyDraft && (deps.actionable?.("held-draft") ?? true)) {
     for (const pr of openPrs) if (pr.isDraft === true) await deps.readyDraft(pr);
   }

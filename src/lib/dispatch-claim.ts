@@ -4,11 +4,11 @@ import { LEDGER_FILENAME } from "./ledger-path.js";
 import { ledgerLivePath, ledgerRotationEntries, realLedgerFs, rotationStampIso, type LedgerGrepFsDeps } from "./ledger-union.js";
 import { classifyPushFailure } from "./task-id-reservation.js";
 import { assertClaimRefPushAllowed } from "./live-write-guard.js";
+import type { Escalation } from "./escalate.js";
 
 /**
  * Cross-host git-ref CAS closing the dispatch-time race, in the same family as `refs/rmd-id/`
  * (W1-T509) and `refs/rmd-triage/` (W1-T1132), now at the dispatch rung (W1-T1268).
- *
  * INVARIANT: `isDispatchEligible`'s (drain.ts) two concurrency probes see only PUBLISHED work — an
  * open PR or a pushed run branch — so two lanes starting in the same window both see nothing
  * published and both spend. This claim is taken before any spend; it replaces none of drain.ts's
@@ -98,6 +98,68 @@ export function parseClaimAnchorMessage(message: string | undefined): ClaimAncho
   const mintedAtMs = Date.parse(m[3]!);
   if (!Number.isFinite(pid) || pid <= 0 || !Number.isFinite(mintedAtMs)) return undefined;
   return { pid, host: m[2]!, mintedAtMs, mintedAtIso: m[3]! };
+}
+
+/** BACKSTOP: a day-old cross-host claim needs a human ruling; age never authorizes release. */
+export const DISPATCH_CLAIM_STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+
+export interface DispatchClaimObservation {
+  readonly taskId: string;
+  readonly holder: string;
+  readonly identity?: ClaimAnchorIdentity;
+  readonly metadataError?: string;
+}
+
+export interface DispatchClaimEscalation extends Escalation {
+  readonly id: string;
+  readonly ref: string;
+  readonly holder: string;
+  readonly ageMs: number;
+}
+
+export function dispatchClaimAgeMs(identity: ClaimAnchorIdentity | undefined, nowMs: number): number | undefined {
+  if (!identity || !Number.isFinite(identity.mintedAtMs) || !Number.isFinite(nowMs)) return undefined;
+  return Math.max(0, nowMs - identity.mintedAtMs);
+}
+
+export function readDispatchClaimAnchor(holder: string, deps: ClaimGitDeps): Pick<DispatchClaimObservation, "identity" | "metadataError"> {
+  const fetched = deps.run(["fetch", "--quiet", "--no-write-fetch-head", "origin", holder]);
+  if (fetched.status !== 0) return { metadataError: `claim anchor fetch failed: ${fetched.stderr.trim()}` };
+  const commit = deps.run(["cat-file", "-p", holder]);
+  if (commit.status !== 0) return { metadataError: `claim anchor read failed: ${commit.stderr.trim()}` };
+  const blank = commit.stdout.indexOf("\n\n");
+  const identity = parseClaimAnchorMessage(blank < 0 ? undefined : commit.stdout.slice(blank + 2));
+  return identity ? { identity } : { metadataError: "claim anchor identity is unparseable" };
+}
+
+export function staleDispatchClaimEscalations(
+  claims: readonly DispatchClaimObservation[],
+  nowMs: number,
+  localHost: string,
+): DispatchClaimEscalation[] {
+  const escalations = new Map<string, DispatchClaimEscalation>();
+  for (const claim of claims) {
+    const ageMs = dispatchClaimAgeMs(claim.identity, nowMs);
+    if (ageMs === undefined || ageMs <= DISPATCH_CLAIM_STALE_THRESHOLD_MS || claim.identity?.host === localHost) continue;
+    const ref = dispatchClaimRef(claim.taskId);
+    const id = `${ref}@${claim.holder}`;
+    escalations.set(id, {
+      id, ref, holder: claim.holder, ageMs,
+      class: "MANUAL",
+      taskId: claim.taskId,
+      summary: `${claim.taskId}: stale dispatch claim`,
+      detail: `${ref} (holder ${claim.holder}, ${claim.identity!.pid}@${claim.identity!.host}) has age ${ageMs}ms. ` +
+        "Cross-host liveness is undecidable; age is not evidence that its holder is dead. Dispatch remains refused while this claim stands.",
+      options: [{
+        label: "inspect and release",
+        detail: `Only after confirming the holder is no longer working, an operator may release this exact claim: ` +
+          `git push --force-with-lease=${ref}:${claim.holder} origin :${ref}`,
+        kind: { type: "operator-only" },
+      }],
+      recommendation: "inspect and release",
+    });
+  }
+  return [...escalations.values()];
 }
 
 /**
