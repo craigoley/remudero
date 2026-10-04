@@ -134,7 +134,7 @@ test("W1-T5405: a red preflight on the refusal-amendment rung pushes nothing, op
 
   await withLiveWritesAllowed(() => runSweep([], sweepDeps(f)));
 
-  assert.equal(f.preflightCalls.length, 1, "the committed tree is preflighted once");
+  assert.equal(f.preflightCalls.length, 2, "the committed tree, then (W1-T5531) its base alone, are preflighted once each");
   assert.equal(f.preflightCalls[0]!.dir, f.worktrees[0], "on the worktree that holds the commit");
   assert.equal(f.preflightCalls[0]!.sha, COMMIT_SHA, "at the exact sha the push would carry");
   assert.match(f.preflightCalls[0]!.title, /^chore\(plan\): propose an amendment for W1-T5405-FIXTURE/);
@@ -156,7 +156,7 @@ test("W1-T5405: a red preflight on the refusal-amendment rung pushes nothing, op
   );
 
   await withLiveWritesAllowed(() => runSweep([], sweepDeps(f)));
-  assert.equal(f.preflightCalls.length, 1, "the next pass finds the source run handled and does not re-run the preflight");
+  assert.equal(f.preflightCalls.length, 2, "the next pass finds the source run handled and does not re-run the preflight");
   assert.equal(f.creates().length, 0);
 });
 

@@ -369,7 +369,7 @@ jobs:
               }
               run_main_ceiling_gate learnings-budget-ratchet learnings-budget-ratchet
               run_main_ceiling_gate claude-md-budget-ratchet claude-md-budget-ratchet
-              run_main_ceiling_gate comment-load-signal comment-load-signal -- --base HEAD^
+              run_main_ceiling_gate comment-load-signal comment-load-signal -- --base HEAD^ --strict
               # W1-T3655: THE CENSUS WATCHES ITS OWN BASE. expiring-fixture-census otherwise only
               # rides `comment-load-ratchet`, a `pull_request`-only job (W1-T1033) -- so a fixture
               # stamp already sitting on `main` reddened every open PR beside it while no run was

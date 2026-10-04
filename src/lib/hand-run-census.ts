@@ -22,11 +22,8 @@ import { captureFeedback, type CaptureFeedbackOptions, type FeedbackEntry } from
 
 // ── Reading operator rows out of the union ──────────────────────────────────────────────────
 
-/** A pre-filter pattern for {@link resolveLedgerUnion}, matching the RAW JSON field (the same
- *  `"<key>":"<literal>"` substring idiom `coverage-improvement.ts`'s own pattern uses) so the
- *  union read never has to parse every non-operator line just to find these. Anchored on the
- *  field itself, never a bare value — a bare `operator` would also match unrelated prose. */
-const HAND_RUN_OPERATOR_LEDGER_PATTERN = /"actor":"operator"/;
+/** Read the whole row population so a non-human majority cannot disappear behind a pre-filter. */
+const HAND_RUN_OPERATOR_LEDGER_PATTERN = /"step"\s*:/;
 
 /** One operator-authored ledger row, narrowed to the fields session-mining needs. `verb` is the
  *  actual command name `logCliInvocation` (src/run-task.ts) stamps onto every `cli.invoked` row
@@ -63,7 +60,7 @@ export function parseOperatorLedgerRows(rawLines: readonly string[]): HandRunLed
     }
     if (parsed === null || typeof parsed !== "object") continue;
     const line = parsed as { actor?: unknown; actor_pid?: unknown; step?: unknown; ts?: unknown; verb?: unknown };
-    if (line.actor !== "operator") continue;
+    if (line.actor !== "operator_human" && line.actor !== "operator_ai") continue;
     if (typeof line.actor_pid !== "number" || typeof line.step !== "string" || typeof line.ts !== "string") continue;
     if (!Number.isFinite(Date.parse(line.ts))) continue; // unparseable ts — never guessed into a session
     if (line.step === CLI_INVOKED_STEP && typeof line.verb !== "string") continue; // no verb — SKIPPED, never guessed
@@ -214,9 +211,7 @@ export type HandRunCensusResult =
   | { status: "measured"; recurrences: HandRunRecurrence[]; operatorRowCount: number };
 
 /** Read the ledger union for operator rows and mine recurrences — READ-ONLY, no write of any
- *  kind. `status: "refused"` when the union cannot be trusted (zero archives / a partial read —
- *  W1-T1013's own coverage-not-readability rule) OR when it carries no actor-stamped operator row
- *  yet (a pre-stamp corpus, or an operator-free window), never a false-healthy empty report. */
+ *  kind. Refuse an incomplete corpus, absent operator evidence, or a non-human majority. */
 export function censusHandRuns(
   stateDir: string,
   ledgerUnion: (stateDir: string, pattern: RegExp, fsDeps?: LedgerGrepFsDeps) => LedgerUnionResult = resolveLedgerUnion,
@@ -232,6 +227,18 @@ export function censusHandRuns(
   const rows = parseOperatorLedgerRows(union.matches);
   if (rows.length === 0) {
     return { status: "refused", refusedReason: "no actor-stamped operator row found in the ledger union yet" };
+  }
+  const population = union.matches.filter((raw) => {
+    try {
+      const line = JSON.parse(raw);
+      return line !== null && typeof line === "object" && typeof line.step === "string";
+    } catch (error) {
+      // A torn row cannot establish an actor's share of the population.
+      return false;
+    }
+  }).length;
+  if (rows.length * 2 < population) {
+    return { status: "refused", refusedReason: `mostly non-human ledger input: ${rows.length} operator rows of ${population}` };
   }
   return { status: "measured", recurrences: mineHandRunRecurrences(rows, { dayFloor: opts.dayFloor }), operatorRowCount: rows.length };
 }

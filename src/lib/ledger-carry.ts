@@ -27,9 +27,9 @@ export const LATEST_ROW_LEDGER_STEPS: ReadonlyMap<string, (row: Record<string, u
 ]);
 
 /**
- * A PR's sweep rows stop being carried only on a RECORDED merge, never on elapsed time: a PR on a long
- * CI or a hold keeps everything. The facts are `verdict.merged` (sweep credit backfill) and a run's
- * `verdict` row reading `merged`. A merged PR whose fact is absent from the file keeps its rows.
+ * This prune drops a PR's sweep rows only on a RECORDED merge (ledger.ts's boundSweepRows bounds the rest
+ * by age, W1-T5517): `verdict.merged` (sweep credit backfill) or a run's `verdict` row reading `merged`.
+ * A merged PR whose fact is absent from the file keeps its rows here.
  */
 function recordedMergeKey(row: Record<string, unknown>, step: string | undefined): string | undefined {
   if (step === "verdict.merged" || (step === "verdict" && row.verdict === "merged")) return sweepPrKey(row);

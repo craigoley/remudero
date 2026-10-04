@@ -76,18 +76,23 @@ test("a rotation stops carrying a merged PR's sweep rows but keeps the ones a re
   }
 });
 
-test("a long-waiting open PR keeps its carried sweep rows however far it trails the sweep", () => {
-  // #202 has waited five days behind #303's fresh rows; with no recorded merge nothing of it drops.
+test("a long-waiting open PR keeps every sweep row a reader reads however far it trails the sweep", () => {
+  // #202 has waited five days behind #303's fresh rows. W1-T5517: its newest row and its acted repair
+  // row stay; the older head's post-review row, which no live reader reads, is archived.
   const rows = [
+    disposed(202, 5 * DAY + 2_000, { head_sha: "e0", disposition: "blocked-fixable", acted: true }),
     disposed(202, 5 * DAY, { head_sha: "eee", disposition: "post-review", acted: true }),
     disposed(202, 5 * DAY - 1_000, { head_sha: "e2", disposition: "wait", acted: false }),
     mergedFact(999, 2_000),
     disposed(303, 1_000, { head_sha: "fff", disposition: "wait", acted: false }),
   ];
-  const { live, dir } = rotate(rows);
+  const { live, archived, dir } = rotate(rows);
   try {
     const heads = live.filter((r) => r.step === "sweep.disposed" && r.pr_number === 202).map((r) => r.head_sha).sort();
-    assert.deepEqual(heads, ["e2", "eee"]);
+    assert.deepEqual(heads, ["e0", "e2"]);
+    assert.ok(archived.includes(`"head_sha":"eee"`));
+    const policy = { ...DEFAULT_SWEEP_POLICY, repairFilingThreshold: 1 };
+    assert.deepEqual(dueRepairFilings(live, NOW, policy), dueRepairFilings(rows, NOW, policy), "dueRepairFilings reads the same");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
