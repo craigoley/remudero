@@ -1,4 +1,7 @@
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
+import { startReadPlane, startReadPlaneTelemetry, type ReadGeneration } from "./lib/read-plane.js";
+import { readPlaneWorkerInput, runReadPlaneWorker, readPlaneWorkerLog } from "./lib/read-plane.worker.js";
+import { renameSync } from "node:fs";
 import { remeasureSettledGoals, withGoalRemeasurement } from "./lib/goals.js";
 // The doctorCommand-only reads (DOCTOR_USAGE_EXIT, buildDoctorReport, readGitLocks, readMemInfo,
 // readPauseAgeMs, refuseUnsupportedArgs, classifyReadFailure, readDiskTotalBytes,
@@ -1422,6 +1425,9 @@ import {
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import {
   buildBatchedGithub,
+  defaultCreditStorePath,
+  loadCreditStore,
+  saveCreditStore,
   buildCommitTrailerIndex,
   buildLedgerIndex,
   classifyGhFailure,
@@ -29953,6 +29959,7 @@ export function boardReviewHooksForTick(
 }
 
 export function buildBoardReviewDaemonHooks(deps: {
+  checkItems?: () => BoardItem[] | undefined;
   check?: () => BoardReviewCadenceDecision;
   run?: () => Promise<BoardReviewReport>;
   config?: Config;
@@ -29986,7 +29993,9 @@ export function buildBoardReviewDaemonHooks(deps: {
   runBoardReview: () => Promise<BoardReviewReport>;
   /** W1-T5481: reads the open board OFF the loop; the next items read takes it once. */
   prefetchBoardReview: () => Promise<void>;
+  bindCheckItems: (source: () => BoardItem[] | undefined) => void;
 } {
+  let checkItems = deps.checkItems;
   const configFor = () => deps.config ?? loadConfig();
   const policyFor = () => deps.policy ?? loadPolicy(policyPath(repoRoot));
   // NO PROJECTION IS NOT AN EMPTY BOARD: the throw lands in `defaultBoardReviewItems`'s inner catch,
@@ -30006,7 +30015,8 @@ export function buildBoardReviewDaemonHooks(deps: {
   // The daemon now awaits `prefetchBoardReview` first; the read consumes that answer, or its error.
   const readAsync = deps.readJson ?? (deps.items || deps.itemsIo?.fetchOpenPrs ? undefined : ghJsonAsync);
   let prefetched: { prs: OpenPrRest[] } | { error: unknown } | undefined;
-  const prefetch = async (): Promise<void> => {
+  const prefetch = async (fresh = false): Promise<void> => {
+    if (!fresh && checkItems?.() !== undefined) return;
     if (!readAsync) return;
     try {
       const { owner, repo } = (deps.itemsIo?.resolveOwnerRepo ?? resolveOwnerRepo)();
@@ -30044,7 +30054,7 @@ export function buildBoardReviewDaemonHooks(deps: {
           // ONE read serves both the reconciler and the cadence decision below — see this
           // function's own header doc on why a second read here would be exactly the cost this
           // rung's design forbids paying twice.
-          const items = itemsFor();
+          const items = checkItems?.() ?? itemsFor();
           const { retiredProposalIds } = reconcile({
             items,
             registryPath: join(root, "state", "inbox-proposals.json"),
@@ -30073,8 +30083,8 @@ export function buildBoardReviewDaemonHooks(deps: {
       const root = configFor().root;
       const now = deps.now?.() ?? new Date();
       recordBoardReviewFire(boardReviewMarkerPath(root), now, 24 * 60 * 60 * 1000);
-      // W1-T5481: the run's own items read (W1-T3109 owns dropping it) is prefetched off the loop too.
-      await prefetch();
+      const generationItems = checkItems?.();
+      if (generationItems === undefined) await prefetch(true);
       return (deps.build ?? buildBoardReview)({
         policy: policyFor().values.boardReview,
         // AN EMPTY MARKER, DELIBERATELY, AND IT IS NOT A LIE ABOUT DISK.
@@ -30091,7 +30101,7 @@ export function buildBoardReviewDaemonHooks(deps: {
         // cleared for this run. The real marker on disk is untouched by this argument and is what
         // bounds the NEXT tick.
         marker: { kind: "ok", marker: { fires: [] } },
-        items: itemsFor(),
+        items: generationItems ?? itemsFor(),
         now,
         reportPath: boardReviewReportPath(root),
         registryPath: join(root, "state", "inbox-proposals.json"),
@@ -30101,7 +30111,8 @@ export function buildBoardReviewDaemonHooks(deps: {
         // no action at all, which is its own documented default.
       });
     });
-  return { checkBoardReview: check, runBoardReview: run, prefetchBoardReview: prefetch };
+  return { checkBoardReview: check, runBoardReview: run, prefetchBoardReview: () => prefetch(),
+    bindCheckItems: (source) => { checkItems = source; } };
 }
 
 /** The risk every generated sandbox subject is written with (wipe-test.ts's
@@ -34955,6 +34966,196 @@ export async function gardenCommand(rest: string[]): Promise<number> {
   return await runRegisteredGardenPass(name, rest.slice(2), { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate });
 }
 
+interface TickReadOptions {
+  owner: string;
+  repo: string;
+  config: Config;
+  ledgerPath: string;
+  checkoutRoot: string;
+}
+
+export function createTickReadProducer(options: TickReadOptions, io: {
+  fetch?: GhApiFetcher;
+  github?: GitHub;
+  issues?: IssueGateway;
+  changedFilesFetch?: (prNumber: string) => Promise<string[] | undefined>;
+  commitTrailerIndex?: () => Map<string, PrRef[]> | null;
+  evidenceRootFor?: (owner: string, repo: string) => string | undefined;
+  viewsDeps?: Parameters<typeof buildOpenPrViews>[3];
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+} = {}) {
+  const { owner, repo, config, ledgerPath, checkoutRoot } = options;
+  const log = io.log ?? (() => {});
+  const pacer = createGhCallPacer();
+  const snapshotCache = createBoardSnapshotCache(config.root, owner, repo, { log });
+  const fileOptions = { log, ...(io.changedFilesFetch ? { fetch: io.changedFilesFetch } : {}) };
+  const files = createChangedFilesCache(config.root, owner, repo, fileOptions);
+  let openFiles = files;
+  const filingFiles = createPlanFilingFileCache();
+  let reads = new Map<string, unknown>();
+  let generationClock = 0;
+  const fetch: GhApiFetcher = (args, budget) => {
+    const endpoint = args.find((arg) => arg.startsWith(`repos/${owner}/${repo}/`));
+    let key = args.join("\0");
+    if (endpoint?.includes("/pulls?") && endpoint.includes("state=open")) {
+      const url = new URL(endpoint, "https://api.github.com/");
+      url.searchParams.delete("sort");
+      url.searchParams.delete("direction");
+      if (!url.searchParams.has("page")) url.searchParams.set("page", "1");
+      url.searchParams.sort();
+      key = url.pathname + url.search;
+    }
+    if (reads.has(key)) return reads.get(key);
+    const answer = (io.fetch ?? ghJson)(args, budget);
+    reads.set(key, answer);
+    return answer;
+  };
+  const github = io.github ?? buildBatchedGithub(owner, repo, {
+    log, pacer, snapshotCache: {
+      ...snapshotCache,
+      commitOpen: (rows) => snapshotCache.commitOpen?.(rows, Date.now()) ?? false,
+    }, changedFilesCache: {
+      lookup: (url, state) => (state === "MERGED" || state === "CLOSED" ? files : openFiles).lookup(url, state),
+      settle: async () => { await files.settle(); await openFiles.settle(); },
+    },
+    // A logical tick clock expires each half once per generation, independent of read duration.
+    // Only cache age uses it; the persisted open snapshot above retains the real clock.
+    now: () => generationClock, ttlMs: 1, mergedTtlMs: 1,
+    exec: (args) => args.includes("--jq")
+      ? ghExec(args, { encoding: "utf8", stdio: "pipe" })
+      : JSON.stringify(fetch(args)),
+    commitTrailerIndex: io.commitTrailerIndex ?? (() => buildCommitTrailerIndex({ slug: `${owner}/${repo}`, cwd: checkoutRoot })()),
+  });
+  return async (request: { plan: Plan; previousProjection?: Array<[string, StatusProjection]> }) => {
+    const { plan } = request;
+    reads = new Map();
+    openFiles = createChangedFilesCache(config.root, owner, repo, fileOptions);
+    generationClock++;
+    github.resetFailureFlags?.();
+    let openPrRows: OpenPrRest[] | undefined;
+    let openPrError: string | undefined;
+    try { openPrRows = paceGhEntry(pacer, isGhRateLimitError, () => fetchOpenPrsWithPostedIds(owner, repo, fetch)); }
+    catch (error) {
+      openPrError = String(error);
+      log("read_plane.open_failed", { reason: openPrError });
+    }
+    let prior = request.previousProjection;
+    if (!prior) {
+      const stored = readFileIfExists(join(config.root, "state", "status.json"));
+      if (stored) {
+        try {
+          const parsed = JSON.parse(stored) as { tasks?: Record<string, StatusProjection> };
+          if (parsed.tasks && typeof parsed.tasks === "object") prior = Object.entries(parsed.tasks);
+        } catch (error) { log("read_plane.previous_unreadable", { reason: String(error) }); }
+      }
+    }
+    const previous = new Map(prior);
+    const creditBefore = loadCreditStore(defaultCreditStorePath(ledgerPath));
+    let credits = creditBefore;
+    const creditIo: Pick<DeriveDeps, "readCreditStore" | "writeCreditStore"> = {
+      readCreditStore: () => credits,
+      writeCreditStore: (store) => { credits = store; },
+    };
+    let openBranches: PrRef[] | undefined;
+    const derive = () => projectPlan(plan, {
+      ledgerPath, github, skipUncreditedBuildWarning: true, ...creditIo,
+      previousProjection: (id) => previous.get(id),
+      observeOpenPrCount: (rows) => { openBranches = rows ? [...rows] : undefined; },
+    });
+    let projection = derive();
+    await files.settle();
+    await openFiles.settle();
+    // Warm-up credit precedes its file evidence; only the settled derivation may publish it.
+    credits = creditBefore;
+    projection = derive();
+    const openPrViews = openPrRows ? buildOpenPrViews(owner, repo, ledgerPath, {
+      ...io.viewsDeps, fetch, pacer, planFilingFileCache: filingFiles, openPrRows,
+      readMainPlan: () => plan, isMerged: (task) => projection.get(task.id)?.merged ?? false,
+    }) : [];
+    const evidenceRootFor = io.evidenceRootFor ?? (() => checkoutRoot);
+    const credit = () => buildCreditCandidates(owner, repo, plan, ledgerPath, log, github, evidenceRootFor, readLedgerLines, creditIo);
+    const beforeCreditRead = credits;
+    let creditCandidates = credit();
+    await files.settle();
+    await openFiles.settle();
+    credits = beforeCreditRead;
+    creditCandidates = credit();
+    let escalationIntake: EscalationIntake | undefined;
+    const escalationCandidates = buildEscalationReconcileCandidates(owner, repo, plan, ledgerPath, log, {
+      github, issues: io.issues, evidenceRootFor, creditIo,
+      onIntake: (intake) => { escalationIntake = intake; },
+    });
+    const boardItems = openPrRows ? defaultBoardReviewItems(config, {
+      resolveOwnerRepo: () => ({ owner, repo }), fetchOpenPrs: () => openPrRows,
+      loadPlan: () => plan, projectPlan: () => projection,
+    }) : [];
+    const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, openPrViews);
+    const behindMainByPr = buildBehindMainByPr(owner, repo, openPrViews, fetch);
+    const mergedFixPrNumbers = [...new Set(DEFAULT_FIX_CLASSES.map((entry) => entry.fixPrNumber))]
+      .filter((number) => github.prByRef(number)?.state === "MERGED");
+    const rawByNumber = new Map(openPrRows?.map((pr) => [pr.number, pr]));
+    const postFixCiFailuresByPr = new Map(openPrViews.map((pr) => {
+      const raw = rawByNumber.get(pr.prNumber);
+      const failures = pr.checksState === "pending" && raw && !raw.rollupUnreadable
+        ? (io.viewsDeps?.fetchCiFailureEvidence ?? fetchCiFailures)(owner, repo, raw.statusCheckRollup)
+        : pr.ciFailures;
+      return [pr.prNumber, failures] as const;
+    }));
+    const creditUpdates = Object.entries(credits)
+      .filter(([id, value]) => JSON.stringify(value) !== JSON.stringify(creditBefore[id]))
+      .map(([id, after]) => ({ id, before: creditBefore[id], after }));
+    return { plan, projection: [...projection], openBranches, openPrRows, openPrViews, openPrError, creditUpdates,
+      creditCandidates, escalationCandidates, escalationIntake, boardItems,
+      staleGateWorkflowsByPr, behindMainByPr, mergedFixPrNumbers, postFixCiFailuresByPr };
+  };
+}
+
+type TickReadFacts = Awaited<ReturnType<ReturnType<typeof createTickReadProducer>>>;
+
+export function applyTickCreditUpdates(facts: Pick<TickReadFacts, "creditUpdates">, ledgerPath: string,
+  log: (step: string, extra?: Record<string, unknown>) => void): void {
+  if (facts.creditUpdates.length === 0) return;
+  const path = defaultCreditStorePath(ledgerPath);
+  const current = loadCreditStore(path);
+  let changed = false;
+  for (const update of facts.creditUpdates) {
+    if (JSON.stringify(current[update.id]) !== JSON.stringify(update.before)) {
+      log("read_plane.credit_write_conflict", { task_id: update.id });
+      continue;
+    }
+    current[update.id] = update.after;
+    changed = true;
+  }
+  if (changed) saveCreditStore(path, current);
+}
+
+export function buildDaemonReadRefresher(options: {
+  read: (input: { plan: Plan; previousProjection?: Array<[string, StatusProjection]> }) => Promise<ReadGeneration<TickReadFacts>>;
+  plan: () => Plan;
+  previous: () => Map<string, StatusProjection> | undefined;
+  invalidate: () => void;
+  publish: (snapshot: ReadGeneration<TickReadFacts>) => void;
+  ledgerPath: string;
+  statusPath: string;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+}): (plan?: Plan) => Promise<MergedSet> {
+  return async (plan = options.plan()) => {
+    options.invalidate();
+    const previous = options.previous();
+    const snapshot = await options.read({ plan, previousProjection: previous ? [...previous] : undefined });
+    applyTickCreditUpdates(snapshot.facts, options.ledgerPath, options.log);
+    const stage = `${options.statusPath}.${process.pid}.tmp`;
+    mkdirSync(dirname(options.statusPath), { recursive: true });
+    writeFileSync(stage, JSON.stringify({ generated_at: new Date().toISOString(),
+      note: "Machine-owned projection derived from GitHub. tasks.yaml is never rewritten.",
+      tasks: Object.fromEntries(snapshot.facts.projection) }) + "\n");
+    renameSync(stage, options.statusPath);
+    options.publish(snapshot);
+    const merged = new Set(snapshot.facts.projection.filter(([, projection]) => projection.merged).map(([id]) => id));
+    return (id) => merged.has(id);
+  };
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -35123,8 +35324,11 @@ export async function daemonCommand(
   const target = resolved.target;
 
   const runId = `DAEMON-${Date.now()}`;
-  const log = (step: string, extra: Record<string, unknown> = {}) =>
+  let lastReadPlaneStep: string | undefined;
+  const log = (step: string, extra: Record<string, unknown> = {}) => {
+    lastReadPlaneStep = step;
     appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra });
+  };
   log("daemon.target", {
     repo: target.repo,
     gateway: `${target.owner}/${target.repo}`,
@@ -35227,6 +35431,7 @@ export async function daemonCommand(
   // guard) — the SAME projection `refreshMerged` just derived, never a second
   // GitHub read path.
   let lastProj: Map<string, StatusProjection> | undefined;
+  let tickReadGeneration: ReadGeneration<TickReadFacts> | undefined;
   const boardSnapshotFor = memoiseBoardSnapshotByRepo(config.root, log);
   const targetCheckoutRoot = target.isSelf ? repoRoot : join(config.root, "repos", target.repo);
   const targetCommitTrailerIndex = () =>
@@ -35283,6 +35488,10 @@ export async function daemonCommand(
   const projectionGithub = githubFactory(target.owner, target.repo);
   const boardOpenPrCount = createOpenPrCountObservation();
   const refreshMerged: (planOverride?: Plan) => MergedSet = (planOverride = activePlanRef.current) => {
+    if (tickReadGeneration) {
+      const projection = lastProj;
+      return (id) => projection?.get(id)?.merged ?? false;
+    }
     // R-24: called once per tick, because `refreshMerged` is called once per tick — `runDaemon`'s
     // loop body opens with `deps.refreshMerged()` (lib/daemon.ts) exactly as `runDrain`'s two do.
     projectionGithub.resetFailureFlags?.();
@@ -35736,6 +35945,7 @@ export async function daemonCommand(
   const boardReviewHooks = target.isSelf
     ? boardReviewHooksForTick(config, { projection: () => lastProj, plan: () => activePlanRef.current })
     : undefined;
+  boardReviewHooks?.bindCheckItems(() => tickReadGeneration?.facts.boardItems);
   // W1-T2659: the wipe-test cadence rung. SELF-TARGET ONLY, same reason as measurement-cadence:
   // its marker and ledger live under this harness checkout. The pair itself still targets the
   // sandbox by default through runWipeTestPair/resolveWipeTestTarget.
@@ -35754,11 +35964,32 @@ export async function daemonCommand(
     log,
     mint: deps.gitCredentialMint,
   });
+  const readOptions: TickReadOptions = { owner: target.owner, repo: target.repo, config, ledgerPath, checkoutRoot: targetCheckoutRoot };
+  let inlineProducer: ReturnType<typeof createTickReadProducer> | undefined;
+  const readPlane = deps.githubFactory ? undefined : startReadPlane({
+    workerUrl: new URL(import.meta.url), workerInput: readOptions, log,
+    inline: (input: Parameters<ReturnType<typeof createTickReadProducer>>[0]) =>
+      (inlineProducer ??= createTickReadProducer(readOptions, { log }))(input),
+  });
+  const loopTelemetry = startReadPlaneTelemetry();
   try {
     const summary = await runDaemonFn(
       plan,
       {
         refreshMerged,
+        refreshMergedAsync: readPlane ? buildDaemonReadRefresher({
+          read: readPlane.read, plan: () => activePlanRef.current, previous: () => lastProj,
+          invalidate: () => { tickReadGeneration = undefined; },
+          publish: (snapshot) => {
+            tickReadGeneration = snapshot;
+            lastProj = new Map(snapshot.facts.projection);
+            boardOpenPrCount.reset();
+            boardOpenPrCount.observe(snapshot.facts.openBranches);
+          },
+          ledgerPath, statusPath, log,
+        }) : undefined,
+        readLoopTelemetry: loopTelemetry.sample,
+        lastStepBeforeBlock: () => lastReadPlaneStep,
         idleStarvedSupervised: process.env.RMD_IDLE_STARVED_SUPERVISED === "1" && !target.isSelf && !flagValue(rest, "--plan"),
         confirmedOpenPrCount: boardOpenPrCount.readConfirmed,
         onPlanReload: (fresh) => {
@@ -36120,6 +36351,7 @@ export async function daemonCommand(
           // W1-T4471: the one real wiring of the owner-reply reader.
           ghEscalationAnswerGateway(target.owner, target.repo),
           gitCredentialSocket?.socketPath,
+          () => tickReadGeneration?.facts,
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -36312,6 +36544,8 @@ export async function daemonCommand(
     // reason still resolves through `daemonExitCode` itself, unchanged.
     return daemonExitCodeForSummary(summary);
   } finally {
+    await readPlane?.stop();
+    loopTelemetry.stop();
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);
     githubEventWake.close(); // W1-T2568: never outlives the daemon's own normal-stop path either
@@ -38974,6 +39208,7 @@ export function buildOpenPrViews(
   // because the merge-state wiring below is otherwise unreachable in a test — every existing
   // sweep test builds `OpenPrView` fixtures by hand and so never exercises this function at all.
   deps: {
+    openPrRows?: OpenPrRest[];
     fetch?: GhApiFetcher;
     requiredContexts?: (owner: string, repo: string) => string[] | undefined;
     /**
@@ -39014,7 +39249,7 @@ export function buildOpenPrViews(
     ((record: PendingReviewStatusRecord) => assessPendingReviewOwner(record, { isPidAlive: defaultIsPidAlive }));
   // W1-T468: waits its turn on the shared pacer (a no-op absent one) before the real list call,
   // and reports back whether it was rate-limited — see lib/open-prs-rest.ts's `GhCallPacer` doc.
-  const raw = paceGhEntry(deps.pacer, isGhRateLimitError, () => fetchOpenPrsWithPostedIds(owner, repo, fetch)) as RawOpenPr[];
+  const raw = (deps.openPrRows ?? paceGhEntry(deps.pacer, isGhRateLimitError, () => fetchOpenPrsWithPostedIds(owner, repo, fetch))) as RawOpenPr[];
   const ledger = readLedgerLines(ledgerPath);
   // W1-T435: the SAME evidence pass that quotes an operator's steering note also produces
   // `pendingAnswer` from an answered clarification — a local file read, never GitHub.
@@ -39733,6 +39968,7 @@ export function buildCreditCandidates(
   evidenceRootFor: (owner: string, repo: string) => string | undefined = creditEvidenceRootFor,
   // Injectable only for the one-read regression; production uses projectPlan's normal reader.
   readLedger: DeriveDeps["readLedger"] = readLedgerLines,
+  creditIo: Pick<DeriveDeps, "readCreditStore" | "writeCreditStore"> = {},
 ): ReconcileCreditCandidate[] {
   // W1-T181: wires the same fetch-size/fetch-failure observability the SERVE board gateway gets —
   // this sweep/daemon-poll gateway shells the identical `gh pr list` this outage's fix targeted.
@@ -39748,6 +39984,7 @@ export function buildCreditCandidates(
     listOpenHeadBranches: undefined,
   };
   const deps: DeriveDeps = {
+    ...creditIo,
     ledgerPath,
     github: projectionGithub,
     mergedPathsByPr: readMergedPathsByPr(evidenceRoot),
@@ -39865,6 +40102,7 @@ export function buildEscalationReconcileCandidates(
     // folded into this builder's existing injected-object convention instead of a new positional
     // parameter. Omitted ⇒ {@link creditEvidenceRootFor}'s live git/config resolution.
     evidenceRootFor?: (owner: string, repo: string) => string | undefined;
+    creditIo?: Pick<DeriveDeps, "readCreditStore" | "writeCreditStore">;
   } = {},
 ): EscalationReconcileCandidate[] {
   const issues = injected.issues ?? ghIssueGateway(owner, repo);
@@ -39901,6 +40139,7 @@ export function buildEscalationReconcileCandidates(
   const evidenceRoot = (injected.evidenceRootFor ?? creditEvidenceRootFor)(owner, repo);
   const mergeSubjects = readMergeSubjectsByPr(evidenceRoot);
   const deps: DeriveDeps = {
+    ...injected.creditIo,
     ledgerPath,
     github: injected.github ?? buildBatchedGithub(owner, repo, { log }),
     mergedPathsByPr: readMergedPathsByPr(evidenceRoot),
@@ -41785,16 +42024,18 @@ export async function sweepEscalationReconcile(
   ledgerPath: string,
   runId: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  opts: { dryRun?: boolean; issues?: IssueGateway; github?: GitHub } = {},
+  opts: { dryRun?: boolean; issues?: IssueGateway; github?: GitHub;
+    tickRead?: Pick<TickReadFacts, "escalationCandidates" | "escalationIntake"> } = {},
 ): Promise<SweepEscalationReconcileSummary> {
   let intake: EscalationIntake | undefined;
-  const candidates = buildEscalationReconcileCandidates(owner, repo, plan, ledgerPath, log, {
+  const candidates = opts.tickRead?.escalationCandidates ?? buildEscalationReconcileCandidates(owner, repo, plan, ledgerPath, log, {
     issues: opts.issues,
     github: opts.github,
     onIntake: (i) => {
       intake = i;
     },
   });
+  if (opts.tickRead) intake = opts.tickRead.escalationIntake;
   const summary = await runEscalationReconcile(candidates, {
     intake,
     closeIssue: buildEscalationCloser(owner, repo, opts.issues),
@@ -42748,6 +42989,7 @@ export function buildSweepHook(
   escalationAnswerGateway?: EscalationAnswerGateway,
   // W1-T5115: the daemon's git credential socket. Omitted ⇒ fix workers keep the ambient helper.
   gitCredentialSocketPath?: string,
+  tickReadFor?: () => TickReadFacts | undefined,
 ): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
@@ -42805,6 +43047,7 @@ export function buildSweepHook(
   const branchReapStatePath = join(config.root, "state", automaticBranchReapStateFileName(repo));
   const branchReapState: AutomaticBranchReapState = readAutomaticBranchReapState(branchReapStatePath);
   return async (continueReviewAdmissions = () => true) => {
+    const tickRead = tickReadFor?.();
     try {
       await mainHealthRung?.();
     } catch (e) {
@@ -42828,8 +43071,9 @@ export function buildSweepHook(
     // W1-T4002: this pass's own plan-only filing receipts feed dispatch options; no stale re-read.
     let thisPassPlanOnlyRunBranchReceipts: ReturnType<typeof planOnlyRunBranchReceipts> = [];
     try {
-      await openPrReads.warm();
-      const openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
+      if (tickRead?.openPrError) throw new Error(tickRead.openPrError);
+      if (!tickRead) await openPrReads.warm();
+      const openPrs = tickRead ? structuredClone(tickRead.openPrViews) : buildOpenPrViews(owner, repo, ledgerPath, {
         fetch: openPrReads.fetcher(ghJson),
         pacer,
         planFilingFileCache,
@@ -42842,12 +43086,15 @@ export function buildSweepHook(
       // W1-T474 — the post-fix re-verification rung, on the daemon's own poll cadence and, same
       // as `sweepCommand`, run BEFORE `runSweep` so the fix rung never spends a strike on a PR
       // this pass just redrove (rationale (10) — see `sweepPostFixReverification`'s own doc).
-      const reverifySummary = await sweepPostFixReverification(owner, repo, openPrs, ledgerPath, runId, log);
+      const reverifySummary = await sweepPostFixReverification(owner, repo, openPrs, ledgerPath, runId, log, tickRead ? {
+        isMergedByNumber: (number) => tickRead.mergedFixPrNumbers.includes(number),
+        readCiFailures: (pr) => tickRead.postFixCiFailuresByPr.get(pr.prNumber),
+      } : {});
       const redrivenThisPass = new Set(
         reverifySummary.results.filter((r) => r.outcome === "redriven").map((r) => r.prNumber),
       );
       const prsForFixRung = openPrs.filter((pr) => !redrivenThisPass.has(pr.prNumber));
-      const plan = planAccessor?.() ?? bootPlan;
+      const plan = tickRead?.plan ?? planAccessor?.() ?? bootPlan;
       const effects = buildSweepEffects({
         owner: owner,
         repo: repo,
@@ -42867,9 +43114,9 @@ export function buildSweepHook(
       // see `sweepCommand`'s own comment on this exact line for the full rationale.
       const inflightDir = join(config.root, "state", "inflight");
       // W1-T1212: same two data inputs as `sweepCommand` — see that call site's own comment.
-      const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
+      const staleGateWorkflowsByPr = tickRead?.staleGateWorkflowsByPr ?? buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
       const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
-      const behindMainByPr = buildBehindMainByPr(owner, repo, prsForFixRung);
+      const behindMainByPr = tickRead?.behindMainByPr ?? buildBehindMainByPr(owner, repo, prsForFixRung);
       await probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { behindMainByPr });
       // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
       // composition change, not a new read: the credit rung already built exactly this set, just
@@ -42877,7 +43124,7 @@ export function buildSweepHook(
       // and escalating after #3874 merged its task — `supersededBy` is computed from the OPEN array,
       // so the peer relation vanished the moment the winner merged. ONE call per full sweep: the
       // array below is passed to the projection AND to `runCreditBackfill`, never rebuilt.
-      const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log, boardGithub);
+      const creditCandidates = tickRead?.creditCandidates ?? buildCreditCandidates(owner, repo, plan, ledgerPath, log, boardGithub);
       await runSweep(
         projectMergedTaskCandidates(prsForFixRung, creditCandidates),
         withFullSweepRepairAdmission({
@@ -42905,7 +43152,7 @@ export function buildSweepHook(
       // cadence. The missing third leg of the escalation lifecycle (creation W1-T8, dedup
       // W1-T195, closure here); same level-triggered doctrine as the credit rung below. Its
       // own read failures degrade to [] internally, so it never strands the credit rung.
-      await sweepEscalationReconcile(owner, repo, plan, ledgerPath, runId, log, { github: boardGithub });
+      await sweepEscalationReconcile(owner, repo, plan, ledgerPath, runId, log, { github: boardGithub, tickRead });
       // W1-T150: the SAME credit-backfill rung `rmd sweep` runs, on the
       // daemon's own poll cadence — never a second, separately-scheduled loop.
       await runCreditBackfill(creditCandidates, { ledgerPath, runId, log });
@@ -42955,7 +43202,7 @@ export function buildSweepHook(
     // W1-T192: the draft rung (fail-soft internally, its own try/catch) — a fired trigger
     // or an invalidated draft gets redrafted here, on the daemon's cadence, with no CLI
     // invocation required.
-    await draftHook();
+    await draftHook(tickRead);
     return reviewerCodeStale || thisPassPlanOnlyRunBranchReceipts.length > 0
       ? {
           ...(reviewerCodeStale ? { reviewerCodeStale } : {}),
@@ -45692,11 +45939,11 @@ export function buildInboxDraftHook(
   ) => Promise<DraftRungOutcome[]> = draftProposalBatch,
   grepAnchor: (ref: string, anchor: EvidenceAnchor) => boolean = (ref, anchor) => gitGrepAnchorTrue(repoRoot, ref, anchor),
   mainSha: () => string | undefined = () => readOriginMainSha(repoRoot),
-): () => Promise<void> {
+): (tickRead?: TickReadFacts) => Promise<void> {
   // W1-T2564: see the migration block below — this is the once-per-daemon-start scope it needs.
   let attemptsMigrated = false;
   const anchorGrepCache = createAnchorGrepCache();
-  return async () => {
+  return async (tickRead) => {
     try {
       const registryPath = join(config.root, "state", "inbox-proposals.json");
       const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
@@ -45751,9 +45998,16 @@ export function buildInboxDraftHook(
 
       let draftReadiness: ReadinessContext | undefined;
       try {
-        const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+        const plan = tickRead?.plan ?? loadPlan(join(repoRoot, "plan", "tasks.yaml"));
         const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
-        const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deriveDeps);
+        const projection = tickRead ? new Map(tickRead.projection) : undefined;
+        const { isMerged, depsUnobservable } = projection ? {
+          isMerged: (task: Task) => projection.get(task.id)?.merged ?? false,
+          depsUnobservable: (id: string): GhFailureReason | undefined => {
+            const row = projection.get(id);
+            return !row || row.indeterminate ? row?.unavailableReason ?? "unknown" : undefined;
+          },
+        } : buildDepsReadinessAccessors(plan, deriveDeps);
         const ledgerLines = readLedgerLines(ledgerPath);
         const sha = mainSha();
         draftReadiness = {
@@ -51408,7 +51662,10 @@ export async function main(
 // diff-cov: process-boundary - direct CLI guard; imported tests cover `main()` and
 // `exitCodeFor()`, while this wrapper only prints and exits the current process.
 // Only run when invoked directly (not when imported by tests).
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+const readWorkerOptions = readPlaneWorkerInput<TickReadOptions>();
+if (readWorkerOptions) {
+  runReadPlaneWorker(createTickReadProducer(readWorkerOptions, { log: readPlaneWorkerLog }));
+} else if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   main().catch((err) => {
     console.error("\n### RUN-TASK ERROR\n" + (err?.stack ?? String(err)));
     // W1-T2901: the process boundary asks the error its own exit code (an `RmdError` such as
