@@ -23,9 +23,10 @@
  *
  * Imported FIRST by test/setup/tmp-hygiene.ts, which every runner invocation already `--import`s.
  */
-import { lstatSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { lstatSync, mkdtempSync, readdirSync, readlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isMainThread } from "node:worker_threads";
 import { type Clock, systemClock } from "../../src/lib/clock.js";
 import { discoverLiveLedgerRoot, isTestRunner, LIVE_LEDGER_DENY_ROOT_ENV, LIVE_WRITE_OVERRIDE_ENV,
   LIVE_WRITE_SENTINEL_TOKEN } from "../../src/lib/live-write-guard.js";
@@ -49,8 +50,26 @@ export function appendGitConfigEnv(key: string, value: string, env: NodeJS.Proce
   env.GIT_CONFIG_COUNT = String(at + 1);
 }
 
-/** Apply the containment to `env`. Exported so a test can drive it against a scratch env. */
-export function installNoLiveRemote(env: NodeJS.ProcessEnv = process.env): { ghConfigDir?: string } {
+/** W1-T5624: this process's pid-namespace id — the inode in `/proc/self/ns/pid` (`pid:[<inode>]`),
+ *  or "0" where there is none to read (macOS), so every dir there reads as this namespace. */
+export function pidNamespaceId(readlink: (path: string) => string = readlinkSync): string {
+  try {
+    return /^pid:\[(\d+)\]$/.exec(readlink("/proc/self/ns/pid"))?.[1] ?? "0";
+  } catch {
+    return "0";
+  }
+}
+
+/** W1-T5624: what follows a setup dir's prefix — the owner's pid and pid-namespace id. */
+export function setupDirOwnerTag(): string {
+  return `${process.pid}-${pidNamespaceId()}-`;
+}
+
+/** Apply the containment to `env`. Exported so a test can drive it against a scratch env.
+ *  W1-T5624: a worker thread (`mainThread` false) re-runs this setup through the runner's execArgv,
+ *  but its env copy already holds the parent's GH_CONFIG_DIR, so it mints no dir — one it made would
+ *  outlive a `worker.terminate()`, which fires no `exit` in the worker. */
+export function installNoLiveRemote(env: NodeJS.ProcessEnv = process.env, mainThread = isMainThread): { ghConfigDir?: string } {
   if (!isTestRunner(env)) return {};
   if (env[LIVE_WRITE_OVERRIDE_ENV] === "1") return {};
   env[LIVE_LEDGER_DENY_ROOT_ENV] = discoverLiveLedgerRoot(env);
@@ -58,10 +77,11 @@ export function installNoLiveRemote(env: NodeJS.ProcessEnv = process.env): { ghC
   env.GIT_TERMINAL_PROMPT = "0";
   env.GH_TOKEN = LIVE_WRITE_SENTINEL_TOKEN;
   env.GITHUB_TOKEN = LIVE_WRITE_SENTINEL_TOKEN;
-  // W1-T5550: the owning pid is in the name, so a later process can tell this dir's owner is gone.
-  const ghConfigDir = mkdtempSync(join(tmpdir(), `rmd-test-gh-config-${process.pid}-`));
-  env.GH_CONFIG_DIR = ghConfigDir;
   for (const name of APP_KEY_ENV) delete env[name];
+  if (!mainThread) return {};
+  // W1-T5550: the owning pid is in the name, so a later process can tell this dir's owner is gone.
+  const ghConfigDir = mkdtempSync(join(tmpdir(), `rmd-test-gh-config-${setupDirOwnerTag()}`));
+  env.GH_CONFIG_DIR = ghConfigDir;
   return { ghConfigDir };
 }
 
@@ -74,6 +94,11 @@ export function installNoLiveRemote(env: NodeJS.ProcessEnv = process.env): { ghC
  * dirs sat there at filing. Each setup dir now carries its owner's pid (`<prefix><pid>-<random>`),
  * and every test process that loads the setup removes the same-prefix dirs under its own tmpdir
  * whose owner is not alive and which are older than {@link DEAD_OWNER_MIN_AGE_MS}.
+ *
+ * W1-T5624: and its pid-namespace id (`<prefix><pid>-<nsid>-<random>`). A pid only means something
+ * inside its own namespace, and the mtime the age reads never moves after creation, so a live run in
+ * another container sharing this tmp read as dead after a minute and lost its gh refusal stub. A dir
+ * from another namespace is now kept until {@link FOREIGN_NAMESPACE_MAX_AGE_MS}.
  */
 export const GH_CONFIG_DIR_PREFIX = "rmd-test-gh-config-";
 
@@ -81,8 +106,11 @@ export const GH_CONFIG_DIR_PREFIX = "rmd-test-gh-config-";
  *  that reads dead from here can belong to a live process in another pid namespace sharing tmp. */
 export const DEAD_OWNER_MIN_AGE_MS = 60_000;
 
+/** W1-T5624: a dir from another pid namespace younger than this is kept; its pid says nothing here. */
+export const FOREIGN_NAMESPACE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
 /** Why {@link reapDeadOwnerDirs} kept a dir it matched. */
-export type DeadOwnerKeepReason = "alive" | "fresh" | "not-removable";
+export type DeadOwnerKeepReason = "alive" | "fresh" | "foreign-namespace" | "not-removable";
 
 export interface DeadOwnerReap {
   removed: string[];
@@ -95,6 +123,8 @@ export interface DeadOwnerReapDeps {
   clock?: Clock;
   isAlive?: (pid: number) => boolean;
   minAgeMs?: number;
+  /** This process's pid-namespace id; default {@link pidNamespaceId}. */
+  namespaceId?: () => string;
 }
 
 /** `process.kill(pid, 0)` sends nothing; it only asks whether the pid exists. ESRCH is the one
@@ -116,19 +146,24 @@ function escapeRegExp(text: string): string {
 }
 
 /** Remove every `<prefix><pid>-*` directory under `root` whose owning pid is not alive and whose
- *  mtime is at least `minAgeMs` old. A name without a pid (made before W1-T5550) is not matched. */
+ *  mtime is at least `minAgeMs` old. A name without a pid (made before W1-T5550) is not matched.
+ *  A `<prefix><pid>-<nsid>-*` name whose nsid is not this process's is judged by age alone, against
+ *  {@link FOREIGN_NAMESPACE_MAX_AGE_MS}; a name with no nsid (made before W1-T5624) reads as ours. */
 export function reapDeadOwnerDirs(prefix: string, deps: DeadOwnerReapDeps = {}): DeadOwnerReap {
   const root = deps.root ?? tmpdir();
   const clock = deps.clock ?? systemClock;
   const isAlive = deps.isAlive ?? pidIsAlive;
   const minAgeMs = deps.minAgeMs ?? DEAD_OWNER_MIN_AGE_MS;
-  const owned = new RegExp(`^${escapeRegExp(prefix)}(\\d+)-`);
+  const ownNamespace = (deps.namespaceId ?? pidNamespaceId)();
+  // mkdtemp's random suffix is alphanumeric, so a pre-W1-T5624 `<pid>-<random>` never fills group 2.
+  const owned = new RegExp(`^${escapeRegExp(prefix)}(\\d+)-(?:(\\d+)-)?`);
   const result: DeadOwnerReap = { removed: [], kept: [] };
   for (const name of readdirSync(root)) {
     const match = owned.exec(name);
     if (match === null) continue;
     const pid = Number(match[1]);
-    if (pid === process.pid || isAlive(pid)) {
+    const foreign = match[2] !== undefined && match[2] !== ownNamespace;
+    if (!foreign && (pid === process.pid || isAlive(pid))) {
       result.kept.push({ name, reason: "alive" });
       continue;
     }
@@ -142,8 +177,8 @@ export function reapDeadOwnerDirs(prefix: string, deps: DeadOwnerReapDeps = {}):
       throw error;
     }
     if (!stat.isDirectory()) continue;
-    if (clock.now() - stat.mtimeMs < minAgeMs) {
-      result.kept.push({ name, reason: "fresh" });
+    if (clock.now() - stat.mtimeMs < (foreign ? FOREIGN_NAMESPACE_MAX_AGE_MS : minAgeMs)) {
+      result.kept.push({ name, reason: foreign ? "foreign-namespace" : "fresh" });
       continue;
     }
     try {
