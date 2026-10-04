@@ -442,11 +442,14 @@ export function priorStaleReviewerRecurrenceState(rawLedgerLines: readonly strin
 
 /** W1-T5476 — the terminal verdicts `postReviewStatusGuarded` withheld for stale reviewer code at or after
  *  `sinceMs`, read through `DaemonDeps.readLedgerLines`: review subprocesses write the refusals, so the ledger
- *  is the only place this process sees them. A torn line is counted, and a failed read is its own outcome. */
+ *  is the only place this process sees them. A torn line is counted, and a failed read is its own outcome.
+ *  W1-T5530 DECISION: a refusal whose freshness is "unreadable" is counted apart and adds NO restart pressure.
+ *  All 12 distinct ones in the live ledger (09-20..09-30) were `git fetch origin failed`: ref-lock races on the
+ *  shared .git, or a reflog it could not append to. A restart fixes neither, so `unreadable` stays off the bound. */
 export function withheldReviewsSince(
   readLedgerLines: () => readonly string[],
   sinceMs: number,
-): { kind: "counted"; withheld: number; unparseable: number } | { kind: "unreadable"; error: string } {
+): { kind: "counted"; withheld: number; unreadable: number; unparseable: number } | { kind: "unreadable"; error: string } {
   let rawLedgerLines: readonly string[];
   try {
     rawLedgerLines = readLedgerLines();
@@ -454,6 +457,7 @@ export function withheldReviewsSince(
     return { kind: "unreadable", error: String((error as Error)?.message ?? error) };
   }
   let withheld = 0;
+  let unreadable = 0;
   let unparseable = 0;
   for (const raw of rawLedgerLines) {
     if (!raw.includes('"review.post_refused"')) continue;
@@ -465,10 +469,11 @@ export function withheldReviewsSince(
       unparseable++;
       continue;
     }
-    if (row.step !== "review.post_refused" || row.reviewer_code_freshness !== "stale") continue;
-    if (typeof row.ts === "string" && Date.parse(row.ts) >= sinceMs) withheld++;
+    if (row.step !== "review.post_refused" || !(typeof row.ts === "string" && Date.parse(row.ts) >= sinceMs)) continue;
+    if (row.reviewer_code_freshness === "stale") withheld++;
+    else if (row.reviewer_code_freshness === "unreadable") unreadable++;
   }
-  return { kind: "counted", withheld, unparseable };
+  return { kind: "counted", withheld, unreadable, unparseable };
 }
 
 /** W1-T5344 — the first park after one task's delivery failure. Policy (design): long enough that
@@ -2846,7 +2851,12 @@ export async function runDaemon(
         ? {}
         : withheld.kind === "unreadable"
           ? { withheld_reviews_error: withheld.error }
-          : { withheld_reviews: withheld.withheld, ...(withheld.unparseable > 0 ? { withheld_reviews_unparseable: withheld.unparseable } : {}) };
+          : {
+              withheld_reviews: withheld.withheld,
+              // W1-T5530: reported, never weighed — see withheldReviewsSince's decision.
+              withheld_unreadable: withheld.unreadable,
+              ...(withheld.unparseable > 0 ? { withheld_reviews_unparseable: withheld.unparseable } : {}),
+            };
     const decision = decideFreshnessRestart({ changes: freshness.changes, busy, staleSinceMs, nowMs, state: freshnessPressure, withheldReviews });
     freshnessPressure = decision.state;
     log(FRESHNESS_DECISION_STEP, {
