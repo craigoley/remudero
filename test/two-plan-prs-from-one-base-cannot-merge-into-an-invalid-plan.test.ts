@@ -83,7 +83,7 @@ test("a behind PR touching no plan path still merges as-is", () => {
   assert.equal(result.directMergePreflight?.reason, undefined);
 });
 
-test("the plan-touch read runs only where W1-T3694 would merge a behind PR as-is", () => {
+test("the plan-touch read runs once per attempt, and never a second time in the preflight", () => {
   let reads = 0;
   const count = () => {
     reads += 1;
@@ -97,7 +97,8 @@ test("the plan-touch read runs only where W1-T3694 would merge a behind PR as-is
   const strictResult = attemptArm(PR, strict.deps, HEAD);
   assert.deepEqual(strict.calls, ["updateBranch"]);
   assert.equal(strictResult.directMergePreflight?.reason, undefined);
-  assert.equal(reads, 0);
+  // W1-T5615: the file list is now read once per attempt, before any arm; the preflight reuses it.
+  assert.equal(reads, 2);
   // No reader wired: the pre-W1-T5472 behaviour, byte for byte.
   const unwired = harness(undefined);
   assert.deepEqual((attemptArm(PR, unwired.deps, HEAD), unwired.calls), ["mergeDirect"]);
