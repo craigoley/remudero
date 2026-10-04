@@ -41,7 +41,7 @@ const TEST_DIR = join(REPO_ROOT, "test");
 const SIBLING_WORKTREE = /addWorktree\(\s*join\(\s*dirname\(\s*[\w.]+\.dir\s*\)/g;
 
 /** `file:line` for every sibling-shaped `addWorktree` call in `text`. */
-function siblingWorktreeSites(file: string, text: string): string[] {
+function siblingShapedSites(file: string, text: string): string[] {
   const sites: string[] = [];
   for (const match of text.matchAll(SIBLING_WORKTREE)) {
     sites.push(`${file}:${text.slice(0, match.index).split("\n").length}`);
@@ -60,7 +60,7 @@ test("W1-T5550 census: no test under test/ adds a worktree beside its fixture di
   // Positive controls. The pattern must see the shape it refuses (the sample is split so this file
   // does not match itself), and the corpus must hold the suites that call addWorktree at all.
   const sample = "const work = parent.addWorktree(join(" + "dirname(parent.dir), `x-wt-${n}`), \"b\");";
-  assert.deepEqual(siblingWorktreeSites("sample.ts", sample), ["sample.ts:1"]);
+  assert.deepEqual(siblingShapedSites("sample.ts", sample), ["sample.ts:1"]);
   const callers = sources.filter((s) => s.text.includes(".addWorktree(")).map((s) => s.file);
   for (const suite of [
     "test/a-census-this-branch-grows-is-refused-before-the-push.test.ts",
@@ -70,7 +70,7 @@ test("W1-T5550 census: no test under test/ adds a worktree beside its fixture di
     assert.ok(callers.includes(suite), `the scan must read ${suite}, which adds a worktree`);
   }
 
-  const offenders = sources.flatMap((s) => siblingWorktreeSites(s.file, s.text));
+  const offenders = sources.flatMap((s) => siblingShapedSites(s.file, s.text));
   assert.deepEqual(
     offenders,
     [],
