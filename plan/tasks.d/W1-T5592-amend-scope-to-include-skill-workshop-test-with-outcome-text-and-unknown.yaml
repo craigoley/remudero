@@ -7,6 +7,10 @@
   risk: low
   status: queued
   attempts: 0
+  rationale: |
+    The skill-workshop outcome-text assertions and unknown-signal drafting need
+    test/skill-workshop.test.ts in the declared scope so those behaviors can be
+    verified in the test file that exercises them.
   files:
     - test/skill-workshop.test.ts
   acceptance:
