@@ -455,6 +455,38 @@ test("W1-T4840: failed main reads leave the independent deploy and latch rows av
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("W1-T4840: failed deploy reads preserve the reason and leave CI gaps repairable", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-fleet-deploy-unreadable-"));
+  try {
+    for (const error of [new Error("deploy sensor unavailable"), "deploy sensor unavailable"]) {
+      const reader = deployReader();
+      reader.deploy.newestBakedSha = () => { throw error; };
+      const logs: Record<string, unknown>[] = [];
+      const posts: string[][] = [];
+      const effects = fixtureEffects(root, {
+        fleetDeployStateImpl: reader,
+        readJsonImpl: async (args) => {
+          const endpoint = args[1]!;
+          if (endpoint.includes("commits?")) return [{ sha: "head", parents: [{ sha: "gap" }] }, { sha: "gap", parents: [] }];
+          if (endpoint.includes("/commits/")) return { files: [{ filename: "src/lib/example.ts" }] };
+          return { total_count: endpoint.includes("head_sha=gap") ? 0 : 1 };
+        },
+        ghRunImpl: (_file, args) => { posts.push([...args]); },
+        log: (step, data) => { logs.push({ step, ...data }); },
+      });
+      const snapshot = await effects.readFleetState!([]);
+      assert.deepEqual(logs, [{ step: "reconcile.unreadable", pipeline: "deploy", reason: "deploy sensor unavailable" }]);
+      assert.ok(snapshot.rows.length > 0, "the independent CI reader still produces rows");
+      assert.ok(snapshot.rows.every((row) => row.pipeline === "ci"));
+      const events: Record<string, unknown>[] = [];
+      await reconcileFleetState(snapshot.rows, snapshot.history, (event) => events.push(event));
+      assert.ok(posts.some((args) => args.some((arg) => arg.endsWith("/ci.yml/dispatches"))));
+      assert.ok(events.some((event) => event.step === "reconcile.repaired" && event.pipeline === "ci" && event.commit === "gap"));
+      assert.deepEqual([reader.builds, reader.requests, reader.clears], [0, 0, 0]);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("W1-T4840: an unreadable latch preserves the reason and does not block an image repair", async () => {
   const reader = deployReader();
   reader.failedAt = () => { throw new Error("latch unreadable"); };
