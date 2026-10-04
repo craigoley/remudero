@@ -21,6 +21,7 @@ function fixture() {
   writeFileSync(join(root, '.gitignore'), 'node_modules\ncoverage\n');
   symlinkSync(join(ROOT, 'node_modules'), join(root, 'node_modules'));
   writeFileSync(join(root, 'scripts/diff-class.mjs'), '// This fixture has no census path readers.\n');
+  writeFileSync(join(root, 'scripts/census-precheck.mjs'), "console.log('fixture census precheck passed');\n");
   writeFileSync(join(root, 'test/setup/tmp-hygiene.ts'), 'export {};\n');
   writeFileSync(join(root, 'src/run-task.ts'), "console.log('fixture static preflight passed');\n");
   writeFileSync(join(root, 'src/leaf.ts'), 'export const value = 1;\n');
@@ -50,7 +51,7 @@ test('author preflight runs real affected tests without coverage and records exa
   assert.equal(receipt.baseSha, f.git('rev-parse', 'main'));
   assert.equal(receipt.selection, 'affected-floor');
   assert.deepEqual(receipt.suites, ['test/leaf.test.ts']);
-  assert.deepEqual(receipt.steps.map((s: { ok: boolean }) => s.ok), [true, true]);
+  assert.deepEqual(receipt.steps.map((s: { ok: boolean }) => s.ok), [true, true, true]);
 });
 
 test('author preflight full fallback includes unrelated tests for unmodelled configuration', () => {
@@ -62,13 +63,28 @@ test('author preflight full fallback includes unrelated tests for unmodelled con
   assert.deepEqual(f.receipt().suites, ['test/leaf.test.ts', 'test/other.test.ts']);
 });
 
+test('author preflight catches census failures before expensive validation and records unreadable census refusal', () => {
+  for (const status of [1, 2]) {
+    const f = fixture();
+    writeFileSync(join(f.root, 'scripts/census-precheck.mjs'), `process.exitCode = ${status};\n`);
+    writeFileSync(join(f.root, 'src/run-task.ts'), "import { writeFileSync, mkdirSync } from 'node:fs'; mkdirSync('coverage', { recursive: true }); writeFileSync('coverage/expensive-started', 'yes');\n");
+    f.git('add', '.'); f.git('commit', '-m', 'test: reject census before validation');
+    assert.equal(mod.main([], { root: f.root }), 1);
+    assert.equal(f.receipt().verdict, status === 2 ? 'refused' : 'failed');
+    assert.equal(f.receipt().steps.length, 1);
+    assert.equal(f.receipt().steps[0].name, 'census-precheck');
+    assert.equal(f.receipt().steps[0].ok, false);
+    assert.equal(existsSync(join(f.root, 'coverage/expensive-started')), false);
+  }
+});
+
 test('author preflight refuses a real test failure and preserves its failed receipt', () => {
   const f = fixture();
   writeFileSync(join(f.root, 'src/leaf.ts'), 'export const value = 3;\n');
   f.git('add', '.'); f.git('commit', '-m', 'test: break the leaf');
   assert.equal(mod.main([], { root: f.root }), 1);
   assert.equal(f.receipt().verdict, 'failed');
-  assert.equal(f.receipt().steps[1].ok, false);
+  assert.equal(f.receipt().steps[2].ok, false);
 });
 
 test('author preflight refuses static failure, a mutated tree and an unwritable receipt', () => {
@@ -76,8 +92,8 @@ test('author preflight refuses static failure, a mutated tree and an unwritable 
   writeFileSync(join(staticRed.root, 'src/run-task.ts'), 'process.exitCode = 1;\n');
   staticRed.git('add', '.'); staticRed.git('commit', '-m', 'test: fail the static gate');
   assert.equal(mod.main([], { root: staticRed.root }), 1);
-  assert.equal(staticRed.receipt().steps[0].ok, false);
-  assert.equal(staticRed.receipt().steps[1].ok, true, 'static failure must not suppress affected-test evidence');
+  assert.equal(staticRed.receipt().steps[1].ok, false);
+  assert.equal(staticRed.receipt().steps[2].ok, true, 'static failure must not suppress affected-test evidence');
   const mutated = fixture();
   writeFileSync(join(mutated.root, 'src/run-task.ts'), "import { writeFileSync } from 'node:fs'; writeFileSync('untracked.ts', 'export {};');\n");
   mutated.git('add', '.'); mutated.git('commit', '-m', 'test: mutate the author tree');

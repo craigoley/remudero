@@ -69,13 +69,21 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     if (receipt.suites.length === 0) throw new Error('no verified test files in the checkout');
     console.log(`author selection: ${receipt.selection}, ${receipt.suites.length} suite(s); head=${receipt.headSha}, base=${receipt.baseSha}`);
     if (!values['dry-run']) {
-      const staticResult = run(process.execPath, ['--import', 'tsx', join(root, 'src/run-task.ts'), 'preflight',
-        '--from', receipt.baseSha, '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
-      report('static-preflight', staticResult, staticResult.status === 0 && !staticResult.signal && !staticResult.error);
-      // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
-      const tests = run(process.execPath, ['--test', `--test-concurrency=${Math.min(4, availableParallelism())}`,
-        '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...receipt.suites]);
-      report('affected-tests', tests, completeTestResult(tests));
+      const census = run(process.execPath, [join(root, 'scripts/census-precheck.mjs'), '--base', receipt.baseSha]);
+      const censusOk = census.status === 0 && !census.signal && !census.error;
+      report('census-precheck', census, censusOk);
+      if (census.status === 2 || census.signal || census.error || census.status === null) {
+        throw new Error('census precheck could not measure the author tree; expensive validation was not started');
+      }
+      if (censusOk) {
+        const staticResult = run(process.execPath, ['--import', 'tsx', join(root, 'src/run-task.ts'), 'preflight',
+          '--from', receipt.baseSha, '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
+        report('static-preflight', staticResult, staticResult.status === 0 && !staticResult.signal && !staticResult.error);
+        // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
+        const tests = run(process.execPath, ['--test', `--test-concurrency=${Math.min(4, availableParallelism())}`,
+          '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...receipt.suites]);
+        report('affected-tests', tests, completeTestResult(tests));
+      }
       if (git(['rev-parse', 'HEAD']).trim() !== receipt.headSha || git(['status', '--porcelain', '--untracked-files=normal']).trim()) {
         throw new Error('the author tree changed during verification; receipt refused');
       }

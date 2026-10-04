@@ -7069,6 +7069,7 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // W1-T2428: the fast lane's diff classifier. It decides which suites the `ci` and `coverage-ratchet` jobs RUN, so a
   // diff touching it changes what those gates measure.
   "^scripts/diff-class\\.mjs$",
+  "^scripts/ci-shard-admission\\.mjs$",
   "^scripts/expiring-fixture-census\\.mjs$",
   "^scripts/baseline-monotonic-check\\.mjs$", // W1-T2906: refuses a baseline-score regression against origin/main
   "^scripts/gate-monotonic-check\\.mjs$", // W1-T3519: refuses a REQUIRED gate demoted against origin/main

@@ -6,8 +6,8 @@ the relevant tests needed no coverage collection. The frozen earlier rule remain
 this post-migration rule supersedes its first-push **full-parity** obligation.
 
 Commit first, then run `node --import tsx scripts/preflight-author.mjs` before the first push. The script refreshes and
-pins `origin/main`, verifies the committed tree and each selected test path, runs the existing
-default static preflight and the module-level affected floor, and refuses missing/zero test
+pins `origin/main`, verifies the committed tree and each selected test path, checks the shipped
+cheap census before expensive validation, runs default static preflight and the module-level affected floor, and refuses missing/zero test
 summaries. Configuration, dependency, workflow, fixture/helper, unknown and empty-floor changes
 fall back to every suite, without full-suite coverage instrumentation. A failing test is not
 retried into a green verdict. Keep the receipt in `coverage/preflight-author.json`; it records
@@ -17,6 +17,7 @@ The selector's symbol-level narrow set remains shadow-only. A highly connected m
 most of the repository; this is an honest result, not a reason to bypass its dependencies.
 `--dry-run` records selection only and never claims verification. Dirty trees, a failed fetch,
 an empty diff, a wrong pinned Node version or a tree changed during verification are refusals.
+An unreadable census is a refusal; a census violation fails without starting static checks or tests.
 
 **Author PASS is not CI PASS.** Hosted full-suite, source-mapped aggregate/diff coverage, review
 and security gates remain unchanged and required before merging. `rmd preflight --ci-parity`
