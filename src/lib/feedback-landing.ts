@@ -37,7 +37,13 @@ import { loadPlanFromYaml } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { mergeFeedbackRecord } from "./feedback-record-merge.js";
-import { PlanPrPreflightRefusedError, planPrPreflightAtCommit, refuseRedPlanPr, type PlanPrPreflightResult } from "./plan-pr-emitter.js";
+import {
+  PlanPrPreflightRefusedError,
+  planPrPreflightAtCommit,
+  planPrPreflightAtCommitAsync,
+  refuseRedPlanPr,
+  type PlanPrPreflightResult,
+} from "./plan-pr-emitter.js";
 
 /**
  * Mirrors measurement-cadence.ts's `CiLearningShardDraft`/`CiLearningFiledShard`/
@@ -191,6 +197,45 @@ export interface LandFeedbackResult {
 const ACKNOWLEDGEMENT_PATH_LIMIT = 50;
 
 const refusedPlanPrTrees = new Map<string, PlanPrPreflightResult>();
+
+type PlanPrPreflightAsk = { commitSha: string; pr: { title: string; body: string } };
+type PlanPrPreflightFn = (commitSha: string, pr: PlanPrPreflightAsk["pr"]) => PlanPrPreflightResult;
+type PlanPrPreflightAsyncFn = (commitSha: string, pr: PlanPrPreflightAsk["pr"]) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
+/** W1-T5620: a landing that yields at its one preflight, so the CLI drives it sync and the daemon sweep awaits it. */
+type LandingSteps = Generator<PlanPrPreflightAsk, LandFeedbackResult, PlanPrPreflightResult>;
+
+function driveLanding(steps: LandingSteps, preflight: PlanPrPreflightFn): LandFeedbackResult {
+  let step = steps.next();
+  while (!step.done) {
+    let verdict: PlanPrPreflightResult;
+    try {
+      verdict = preflight(step.value.commitSha, step.value.pr);
+    } catch (e) {
+      step = steps.throw(e); // thrown at the yield, where the inline call threw before W1-T5620
+      continue;
+    }
+    step = steps.next(verdict);
+  }
+  return step.value;
+}
+
+async function driveLandingAsync(steps: LandingSteps, preflight: PlanPrPreflightAsyncFn): Promise<LandFeedbackResult> {
+  let step = steps.next();
+  while (!step.done) {
+    let verdict: PlanPrPreflightResult;
+    try {
+      verdict = await preflight(step.value.commitSha, step.value.pr);
+    } catch (e) {
+      step = steps.throw(e); // a rejection reads exactly as the sync driver's throw
+      continue;
+    }
+    step = steps.next(verdict);
+  }
+  return step.value;
+}
+
+const syncPreflightOf = (root: string, opts: LandFeedbackOpts): PlanPrPreflightFn =>
+  opts.planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommit(root, sha, pr));
 
 function defaultGit(root: string): GitExec {
   return (args, opts) =>
@@ -832,16 +877,15 @@ function ensurePrOpen(
  * short-circuit proved the existing head already IS this exact tree — so whatever tree gets armed
  * is always the complete union as of the ref state it was computed against, never a partial one.
  */
-function finishLanding(
+function* finishLanding(
   kind: LandingKind,
   git: GitExec,
   gh: GhExec,
   build: LandingTreeBuild,
   rebuild: () => LandingTreeBuild,
   env: NodeJS.ProcessEnv,
-  root: string,
   opts: LandFeedbackOpts,
-): LandFeedbackResult {
+): LandingSteps {
   const requestReview = opts.requestReview;
   // W1-T3561: fold a build's refusals onto a result — never onto the tree/files it names, so a
   // refused record can never ride into an armed auto-merge PR by construction (criterion 4).
@@ -858,7 +902,7 @@ function finishLanding(
     return withRefused({ landed: true, files: build.unlanded, prUrl, error, pushed: false }, build.refused);
   }
 
-  const pushOnce = (b: LandingTreeBuild): void => {
+  const pushOnce = function* (b: LandingTreeBuild): Generator<PlanPrPreflightAsk, void, PlanPrPreflightResult> {
     const message = kind.commitMessage(b.unlanded);
     const commitSha = git(
       [
@@ -882,8 +926,7 @@ function finishLanding(
     // any future refactor — dropping it silently reopens the hole #954 closed.
     assertLiveWriteAllowed("git-push", `force-pushing the ${kind.branch} branch`);
     const lane = `${kind.family}-landing`;
-    const preflight = opts.planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommit(root, sha, pr));
-    const verdict = refusedPlanPrTrees.get(b.treeSha) ?? preflight(commitSha, { title: kind.prTitle, body: bodyOf(b) });
+    const verdict = refusedPlanPrTrees.get(b.treeSha) ?? (yield { commitSha, pr: { title: kind.prTitle, body: bodyOf(b) } });
     if (!verdict.ok) refusedPlanPrTrees.set(b.treeSha, verdict);
     refuseRedPlanPr(verdict, { lane, branch: kind.branch, log: opts.log });
     const lease = b.branchTipSha
@@ -893,7 +936,7 @@ function finishLanding(
   };
 
   try {
-    pushOnce(build);
+    yield* pushOnce(build);
   } catch (firstErr) {
     if (firstErr instanceof PlanPrPreflightRefusedError) return withRefused({ landed: false, files: [], error: firstErr.message }, build.refused);
     // Lost the lease: some OTHER owner's tip moved since we read it. Re-derive the union ONCE
@@ -910,7 +953,7 @@ function finishLanding(
       return withRefused({ landed: true, files: retried.unlanded, prUrl, error, pushed: false }, retried.refused);
     }
     try {
-      pushOnce(retried);
+      yield* pushOnce(retried);
     } catch (secondErr) {
       if (secondErr instanceof PlanPrPreflightRefusedError) return withRefused({ landed: false, files: [], error: secondErr.message }, retried.refused);
       // The ref moved again even under the retry (a third writer squeezed in) — refuse rather
@@ -951,6 +994,10 @@ interface LandPendingOpts extends LandFeedbackOpts {
 }
 
 function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): LandFeedbackResult {
+  return driveLanding(landPendingSteps(root, kind, opts), syncPreflightOf(root, opts));
+}
+
+function* landPendingSteps(root: string, kind: LandingKind, opts: LandPendingOpts): LandingSteps {
   const git = opts.git ?? defaultGit(root);
   const gh = opts.gh ?? defaultGh();
   let scratchDir: string | undefined;
@@ -1042,7 +1089,7 @@ function landPending(root: string, kind: LandingKind, opts: LandPendingOpts): La
       return buildTree(git(["rev-parse", "origin/main"]).trim());
     };
 
-    return withAcknowledgement(finishLanding(kind, git, gh, initialBuild, rebuild, env, root, opts));
+    return withAcknowledgement(yield* finishLanding(kind, git, gh, initialBuild, rebuild, env, opts));
   } catch (e) {
     return withAcknowledgement({ landed: false, files: [], error: String((e as Error)?.message ?? e) });
   } finally {
@@ -1078,15 +1125,33 @@ export interface SweepFeedbackLandingOpts extends LandFeedbackOpts {
  * Why: docs/forensics/feedback-landing.md#sweepfeedbacklanding.
  */
 export function sweepFeedbackLanding(root: string, opts: SweepFeedbackLandingOpts = {}): LandFeedbackResult {
-  const { log, ...landOpts } = opts;
+  return logLandingSweep(opts.log, driveLanding(sweepLandingSteps(root, opts), syncPreflightOf(root, opts)));
+}
+
+export interface SweepFeedbackLandingAsyncOpts extends Omit<SweepFeedbackLandingOpts, "planPrPreflight"> {
+  planPrPreflight?: PlanPrPreflightAsyncFn;
+}
+
+/** {@link sweepFeedbackLanding} for the daemon's per-poll rung (W1-T5620): its plan-PR preflight is awaited as child
+ *  processes ({@link planPrPreflightAtCommitAsync}), so a pushing pass no longer holds the loop for the whole check. */
+export async function sweepFeedbackLandingAsync(root: string, opts: SweepFeedbackLandingAsyncOpts = {}): Promise<LandFeedbackResult> {
+  const preflight = opts.planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommitAsync(root, sha, pr));
+  return logLandingSweep(opts.log, await driveLandingAsync(sweepLandingSteps(root, opts), preflight));
+}
+
+function sweepLandingSteps(root: string, opts: Omit<SweepFeedbackLandingOpts, "planPrPreflight">): LandingSteps {
+  const { log, ...landOpts } = { ...opts, planPrPreflight: undefined }; // the driver alone runs the preflight
   const git = landOpts.git ?? defaultGit(root);
-  const result = landPending(root, landingKind(FEEDBACK_LANDING_KIND, root, landOpts, git), {
+  return landPendingSteps(root, landingKind(FEEDBACK_LANDING_KIND, root, landOpts, git), {
     ...landOpts,
     git,
     log,
     reportAcknowledgement: true,
     drainQueue: true,
   });
+}
+
+function logLandingSweep(log: SweepFeedbackLandingOpts["log"], result: LandFeedbackResult): LandFeedbackResult {
   if (log) {
     const acknowledgement = result.acknowledgement;
     const acknowledgementEvidence = acknowledgement
@@ -1148,6 +1213,15 @@ function landContent(
   inputs: LandContentInput[],
   opts: LandFeedbackOpts,
 ): LandFeedbackResult {
+  return driveLanding(landContentSteps(root, kind, inputs, opts), syncPreflightOf(root, opts));
+}
+
+function* landContentSteps(
+  root: string,
+  kind: LandingKind,
+  inputs: LandContentInput[],
+  opts: LandFeedbackOpts,
+): LandingSteps {
   const git = opts.git ?? defaultGit(root);
   const gh = opts.gh ?? defaultGh();
   let scratchDir: string | undefined;
@@ -1219,7 +1293,7 @@ function landContent(
       return buildTree(git(["rev-parse", "origin/main"]).trim());
     };
 
-    return finishLanding(kind, git, gh, initialBuild, rebuild, env, root, opts);
+    return yield* finishLanding(kind, git, gh, initialBuild, rebuild, env, opts);
   } catch (e) {
     return { landed: false, files: [], error: String((e as Error)?.message ?? e) };
   } finally {

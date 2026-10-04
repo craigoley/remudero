@@ -585,7 +585,10 @@ import {
   recordDecision,
   recordRuling,
   sweepFeedbackLanding,
+  sweepFeedbackLandingAsync,
+  type LandFeedbackResult,
   type LandingReviewRequest,
+  type SweepFeedbackLandingOpts,
 } from "./lib/feedback-landing.js";
 import {
   reconcileFeedbackLanding,
@@ -20408,6 +20411,18 @@ export function planTreeIsBehindMain(source: string, repoDir: string): boolean {
 }
 
 /**
+ * The daemon's two feedback-landing rungs over one set of options (W1-T5620). `perPoll` is the loop's per-iteration
+ * rung and awaits its plan-PR preflight as child processes; `atBoot` is daemonBoot's synchronous boot-time pass.
+ * Falsifier: test/the-feedback-landing-preflight-runs-off-the-daemon-loop.test.ts.
+ */
+export function feedbackLandingSweepRungs(
+  root: string,
+  opts: Omit<SweepFeedbackLandingOpts, "planPrPreflight">,
+): { atBoot: () => LandFeedbackResult; perPoll: () => Promise<LandFeedbackResult> } {
+  return { atBoot: () => sweepFeedbackLanding(root, opts), perPoll: () => sweepFeedbackLandingAsync(root, opts) };
+}
+
+/**
  * Builds the {@link LandingReviewRequest} callback `daemonBoot` wires into `sweepFeedbackLanding`
  * (W1-T3990) — exported so its parse/dispatch/log behaviour is unit-testable without booting the
  * full daemon. Parses the PR number out of `prUrl`; an unparseable URL logs and returns without
@@ -35523,7 +35538,7 @@ export async function daemonCommand(
       kill: (pid) => killProcessGroup(pid),
       ledger: orphanWorkerKillLedger(ledgerPath),
     });
-  // W1-T530: the feedback-landing sweep, ONE shared closure wired into BOTH daemonBoot's
+  // W1-T530: the feedback-landing sweep, ONE shared option set wired into BOTH daemonBoot's
   // boot-time param (below) and DaemonDeps.sweepFeedbackLanding (the per-poll half, at the deps
   // literal further down) — mirrors `sweepOrphans` immediately above in shape. `repoRoot` (not
   // `config.root`/`target.repo`'s drained checkout) is the SAME root `captureFeedback`'s CLI
@@ -35544,16 +35559,17 @@ export async function daemonCommand(
     reviewCommand,
     `${target.owner}/${target.repo}`,
   );
-  const sweepFeedbackLandingRung = target.isSelf
-    ? () =>
-        sweepFeedbackLanding(repoRoot, {
-          log,
-          ledgerLines: () => readLedgerLines(ledgerPath),
-          requestReview: requestLandingReview,
-          // W1-T5460: drain the console decisions `rmd serve` queued under the same state root.
-          stateRoot: config.root,
-        })
+  // W1-T5620: the per-poll rung awaits its plan-PR preflight off the loop; the boot pass stays synchronous.
+  const feedbackLandingRungs = target.isSelf
+    ? feedbackLandingSweepRungs(repoRoot, {
+        log,
+        ledgerLines: () => readLedgerLines(ledgerPath),
+        requestReview: requestLandingReview,
+        // W1-T5460: drain the console decisions `rmd serve` queued under the same state root.
+        stateRoot: config.root,
+      })
     : undefined;
+  const sweepFeedbackLandingRung = feedbackLandingRungs?.perPoll;
   // ANTHROPIC-clean-env boot assertion (W1-T12b): checked once, before the loop
   // starts, over the daemon process's OWN live env — belt-and-suspenders atop
   // the launchd unit's own closed EnvironmentVariables allowlist (lib/launchd.ts).
@@ -35659,8 +35675,8 @@ export async function daemonCommand(
     daemonLoadedCodeSha,
     // W1-T530: the boot-time half of the feedback-landing sweep, wired at last (appended after
     // `bootHeadSha` per that param's own "no positional caller shifts" discipline) — see the
-    // shared `sweepFeedbackLandingRung` closure defined above this call.
-    sweepFeedbackLandingRung,
+    // shared `feedbackLandingRungs` defined above this call (its synchronous boot form).
+    feedbackLandingRungs?.atBoot,
     // W1-T991: `undefined` ⇒ daemonBoot's own default (THIS process's real
     // process.execPath/version) — never overridden here, only in tests.
     undefined,
@@ -36145,10 +36161,9 @@ export async function daemonCommand(
         // closure daemonBoot already runs once, above, wired here so a stray from a run that
         // ended BETWEEN polls (not only at the last boot) is still found within one cycle.
         sweepOrphans,
-        // W1-T530: the per-poll half of the feedback-landing sweep — the SAME
-        // `sweepFeedbackLandingRung` closure daemonBoot already runs once, above, wired here so
-        // an entry captured (or a landing attempt that failed) BETWEEN polls is still found
-        // within one cycle, not only at the last boot.
+        // W1-T530: the per-poll half of the feedback-landing sweep — the SAME options daemonBoot's
+        // pass runs with, wired here so an entry captured (or a landing attempt that failed)
+        // BETWEEN polls is still found within one cycle; awaited off the loop (W1-T5620).
         sweepFeedbackLanding: sweepFeedbackLandingRung,
         // RETRO CADENCE TRIGGER (W1-T160) — SELF-TARGET ONLY: the retro reads/writes
         // THIS repo's own MASTER-PLAN.md/LEARNINGS.md/plan/tasks.yaml/state, never a
