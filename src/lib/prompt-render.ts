@@ -524,6 +524,13 @@ export function renderFixPrompt(opts: {
       : [];
   const footer = [
     "",
+    "Report exactly one anchored `FIX_OUTCOME:` line before COMMIT_MESSAGE/PR_URL, choosing one outcome:",
+    "FIX_OUTCOME: FIXED — the saved edits fix this head; name COMMIT_MESSAGE if you can.",
+    "FIX_OUTCOME: BASE_RED — the failing tests also fail at origin/main's tip; the harness verifies before refunding a strike.",
+    "FIX_OUTCOME: FLAKE — rerun the failing jobs once on this head; only green CI refunds the strike.",
+    "FIX_OUTCOME: NEEDS_SCOPE <path>[,<path>...] — name repo-relative paths with no ..; non-test paths go to scope escalation.",
+    "FIX_OUTCOME: NEEDS_DESIGN <reason> — name the design blocker in at most 500 characters; no second round runs on this head.",
+    ...(!planOnlyTask ? ["Files under test/ may be added or edited although undeclared (R1); weakened assertions are judged by the reviewer's test-theater and assertion-discrimination gates."] : []),
     `Amend the SAME branch (${opts.branch}) — do NOT open a new PR and do NOT create a fix/*`,
     // W1-T136/W1-T137 class: the fix rung authors its OWN commit message and, until now, was
     // told NOTHING about the format — #427/#428 blocked on a 111-char round-3 header. Same
@@ -551,7 +558,7 @@ export function renderFixPrompt(opts: {
         `harness commits them onto ${opts.branch} and pushes. Name the commit subject on its own`,
         "line, anchored exactly like PR_URL: `COMMIT_MESSAGE: <type>(<scope>): <subject>` —",
         "Conventional Commits, lower-case subject, at most 100 CHARACTERS total. A longer or",
-        "missing line is refused and your edits are NOT committed, so the round produces nothing.",
+        "missing line is refused unless you state FIXED with saved edits; then the harness derives a subject.",
         `Your PR body`,
       ]
       : [`Then: \`git push origin HEAD\` (no -u) — never force-push. Your PR body`]),
