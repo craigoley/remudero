@@ -697,6 +697,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.strike_ladder.requeued",
   "sweep.strike_ladder.digest_opened",
   "sweep.strike_ladder.digest_appended",
+  "sweep.plan_round.pushed",
+  "sweep.plan_round.refused",
   // W1-T970: sweep.ts builds a sha-keyed `riskRefused` set off the escalated row, and (W1-T5403)
   // `handedOffHeadAwaitingJudgment` reads the decision row; losing either re-arms or re-judges a head.
   "risk_judge.escalated",

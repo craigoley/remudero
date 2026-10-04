@@ -92,7 +92,9 @@ test("renderSkillDrafts renders 'none' when nothing cleared the floor, and names
 // ── (2) scanSkillDraft: a tool, host or path outside the allowlist is refused, naming the line ─
 
 test("scanSkillDraft: a well-formed draft against the shipped worker.json shape passes clean", () => {
-  const draft = renderSkillDraft(candidate())!;
+  // Well-formed = no Procedure step that only restates its mined outcome (W1-T4283 refuses the
+  // clean_single_strike step), so the allowlist check is exercised on an actionable-only draft.
+  const draft = renderSkillDraft(candidate({ shapeKey: "implement:fully_executed_proof", signals: ["fully_executed_proof"] }))!;
   const allowlist = workerAllowlistFromSettings(fixtureSettings());
   assert.deepEqual(scanSkillDraft(draft, allowlist), { ok: true });
 });

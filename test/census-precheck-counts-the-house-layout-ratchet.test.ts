@@ -110,7 +110,7 @@ let counter = 0;
 function pushFixture(seed: Tree, change: Tree) {
   const remote = gitRepo({ kind: "house-layout-remote", bare: true });
   const parent = gitRepo({ kind: "house-layout-parent" });
-  const work = parent.addWorktree(join(dirname(parent.dir), `house-layout-wt-${process.pid}-${counter++}`), "pushbranch");
+  const work = parent.addWorktree(join(parent.dir, `house-layout-wt-${counter++}`), "pushbranch");
   const write = (tree: Tree) => {
     for (const [path, text] of Object.entries(tree)) {
       mkdirSync(dirname(join(work.dir, path)), { recursive: true });

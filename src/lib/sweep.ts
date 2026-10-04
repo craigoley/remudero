@@ -23,7 +23,7 @@ import {
   type DisarmOutcome,
   type StackPrerequisiteCheck,
 } from "./arm-auto-merge.js";
-import { diagnoseBodyDefects } from "./body-repair.js";
+import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair } from "./classify.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
@@ -41,6 +41,7 @@ import {
 import { runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import { resolveLedgerUnion } from "./ledger-union.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
+import { isInPlanScope } from "./plan-scope.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "./mounts.js";
 import { planParallelAttempts, type ShapeGain, type TaskShape } from "./parallel-attempts.js";
 import { strikeScheduleFor, type StrikePassRate } from "./strike-schedule.js";
@@ -117,6 +118,7 @@ import { parseLedger } from "./retro.js";
 import { selectRuntimeReviewWidth } from "./review-capacity.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import {
+  workerTranscript,
   activeWorkerCount,
   appendQuestion,
   cashFallbackRefusal,
@@ -1190,6 +1192,23 @@ export function renderHeldReviewQueueBlocker(blocker: HeldReviewQueueBlocker): s
   );
 }
 
+export type PlanScopedFixRoundInput = {
+  pr: OpenPrView;
+  task: { id: string; title: string; files: readonly string[] };
+  worktreePath: string;
+  title: string;
+  body: string;
+  runId?: string;
+  lastRefusal?: string;
+  deps: Pick<BuildSweepEffectsDeps, "log"> & Pick<BodyRepairDeps, "execProof"> & {
+    runGit?: (args: string[]) => string;
+    preflight?: BuildSweepEffectsDeps["planPrPreflightImpl"];
+    spawn: (prompt: string) => Promise<string>;
+    push: (sha: string) => unknown;
+    updateMetadata: (metadata: { title: string; body: string }) => Promise<void>;
+  };
+};
+
 export interface BuildSweepEffectsDeps {
   reproduceFailingTestsOnMainImpl?: SweepDeps["reproduceFailingTestsOnMain"];
   /** W1-T4415 — marks one draft PR ready for review; the entrypoint adapter supplies the write. */
@@ -1277,6 +1296,8 @@ export interface BuildSweepEffectsDeps {
   createFixRungWorktreeImpl?: SweepRuntimeFn;
   captureWorktreeSnapshotImpl?: SweepRuntimeFn;
   runFixRungImpl?: SweepRuntimeFn;
+  runPlanScopedFixRoundImpl?: SweepRuntimeFn;
+  materializePlanRoundWorktreeImpl?: SweepRuntimeFn;
   pushFixRoundImpl?: SweepRuntimeFn;
   buildFixRungDispatchArgsImpl?: SweepRuntimeFn;
   openTaskIdsFromPlanImpl?: SweepRuntimeFn;
@@ -1592,6 +1613,7 @@ export const SWEEP_EFFECT_SURFACE = [
   // W1-T5349: the plan-repair rung's fact read and its renumber/retitle effect.
   "readPlanRepairFacts",
   "repairPlanPr",
+  "dispatchPlanGateRound",
   "strikeLadder",
 ] as const;
 
@@ -1638,6 +1660,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "repairMetadata"
   | "readPlanRepairFacts"
   | "repairPlanPr"
+  | "dispatchPlanGateRound"
 > & {
   /** W1-T3618 — see `reviewerCodeStaleThisPassImpl`. Not a `SweepDeps` member: it is a read-back on
    *  this builder's own return, not an effect the sweep invokes. */
@@ -1690,6 +1713,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     createFixRungWorktreeImpl: createFixRungWorktree = requiredSweepRuntime("createFixRungWorktreeImpl"),
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit = requiredSweepRuntime("captureWorktreeSnapshotImpl"),
     runFixRungImpl: runFixRung = requiredSweepRuntime("runFixRungImpl"),
+    runPlanScopedFixRoundImpl: runPlanScopedFixRound = requiredSweepRuntime("runPlanScopedFixRoundImpl"),
+    materializePlanRoundWorktreeImpl: materializePlanRoundWorktree = requiredSweepRuntime("materializePlanRoundWorktreeImpl"),
     pushFixRoundImpl: pushFixRound = requiredSweepRuntime("pushFixRoundImpl"),
     buildFixRungDispatchArgsImpl: buildFixRungDispatchArgs = requiredSweepRuntime("buildFixRungDispatchArgsImpl"),
     openTaskIdsFromPlanImpl: openTaskIdsFromPlan = requiredSweepRuntime("openTaskIdsFromPlanImpl"),
@@ -2559,6 +2584,71 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         },
         { issues, ledgerPath, runId },
       );
+    },
+
+    dispatchPlanGateRound: async (pr) => {
+      let worktreePath = "";
+      let claim: InflightLockHandle | undefined;
+      try {
+        if (await dispatchFixPreflightStandDown(ghLiveState, pr, log)) return { outcome: "refused", reason: "the filing is terminal" };
+        const live = ghJsonForBuild(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as {
+          head: { ref: string; sha: string }; user: { login: string }; title: string; body: string;
+        };
+        if (live.head.sha !== pr.headSha || !isMachineLanePlanHead(live.head.ref) || !isFleetAppAuthor(live.user.login)) {
+          return { outcome: "refused", reason: "the filing head or author changed" };
+        }
+        const paths = await fetchPrDiffFilesViaGh(pr.prUrl);
+        const resolved = fixRungTaskForForBuild(plan, { prNumber: pr.prNumber }, live.body, live.head.ref, paths);
+        const task = { ...resolved.task, id: pr.taskId ?? escalationTaskIdFor(pr), files: resolved.task.files.filter(isInPlanScope) };
+        claim = acquireInflightLock(inflightDir, fixBranchClaimKey(owner, repo, live.head.ref), { run_id: runId });
+        const materialized = materializePlanRoundWorktree(config, repoDir, pr.prNumber, pr.headSha);
+        if (!materialized.worktreePath) return { outcome: "refused", reason: materialized.failure?.message ?? "the plan head could not be materialized" };
+        worktreePath = materialized.worktreePath;
+        const mount = resolveMount(loadMounts(mountsPath(repoRoot)), "fix", task.risk);
+        const settingsFile = renderWorkerSettings({ templatePath: join(repoRoot, "settings", "worker.json"),
+          hooksDir: join(repoRoot, "hooks"), outPath: join(config.root, "tmp", `plan-round-${pr.prNumber}.json`) });
+        const ciFailures = await fetchCiFailures(owner, repo, await restRollupFor(owner, repo, pr.headSha, readJsonImpl));
+        const roundEffects: PlanScopedFixRoundInput["deps"] = {
+          preflight: planPrPreflightImpl,
+          spawn: async (prompt: string) => {
+            const result = await (spawnImpl ?? benchmarkNonDispatchSpawn("plan-gate"))({
+              cwd: worktreePath, permissionMode: "bypassPermissions", settingsFile, model: mount.model, mountProvider: mount.provider, effort: mount.effort,
+              maxTurns: mount.maxTurns, maxBudgetUsd: task.budget_usd ?? defaultBudgetUsd, config, prompt,
+              tools: ["Read", "Write", "Edit", "Grep", "Glob"], cashTools: ["Read", "Write", "Edit", "Grep", "Glob", "RunCheck"],
+              runId, taskId: task.id,
+            });
+            log("sweep.plan_round.worker", { pr_number: pr.prNumber, head_sha: pr.headSha, cost_usd: result.costUsd,
+              num_turns: result.numTurns, subtype: result.subtype });
+            return workerTranscript(result);
+          },
+          push: (sha: string) => gitPushRunBranchForBuild(worktreePath, {
+            expectedHeadSha: sha,
+            capture: (file, args) => planRepairGit(file, args),
+            exec: (file, args) => { planRepairGit(file, [...args.slice(0, -1), `HEAD:refs/heads/${live.head.ref}`]); },
+          }),
+          updateMetadata: async (metadata: { title: string; body: string }) => {
+            const fresh = ghJsonForBuild(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as { head: { sha: string } };
+            if (fresh.head.sha !== pr.headSha) throw new Error("the filing head moved before the metadata write");
+            ghJsonForBuild(["api", "-X", "PATCH", `repos/${owner}/${repo}/pulls/${pr.prNumber}`,
+              "-f", `title=${metadata.title}`, "-f", `body=${metadata.body}`]);
+          },
+          log,
+        };
+        return await runPlanScopedFixRound({ pr: { ...pr, headRefName: live.head.ref, ciFailures }, task, worktreePath,
+          title: live.title, body: live.body, runId,
+          lastRefusal: parseLedger(ledgerPath).findLast((l) => l.step === "sweep.plan_round.refused" &&
+            l.pr_number === pr.prNumber && l.head_sha === pr.headSha)?.reason,
+          deps: roundEffects,
+        });
+      } catch (error) {
+        return { outcome: "refused", reason: String((error as Error)?.message ?? error) };
+      } finally {
+        try {
+          if (worktreePath) worktreeRemoveForBuild(repoDir, worktreePath);
+        } finally {
+          claim?.release();
+        }
+      }
     },
 
     dispatchFix: async (pr, evidence) => {
@@ -5070,6 +5160,8 @@ export interface MainHealthPullRequestRef {
 
 export interface MainHealthRunHistoryEntry {
   readonly headSha: string;
+  readonly workflowName?: string;
+  readonly runId?: number;
   readonly conclusion?: string;
   readonly url?: string;
   readonly pullRequests?: readonly MainHealthPullRequestRef[];
@@ -5224,6 +5316,57 @@ function mainHealthOperatorDetail(observation: MainHealthObservation): string {
   return lines.length > 0 ? ` ${lines.join(". ")}.` : "";
 }
 
+/** W1-T5490 — workflows whose latest real (non-cancelled) failed run on main reads main red even
+ *  when every required check is green: main-plan-guard is the only push-time witness that the plan
+ *  still loads, and lint-plan/claims never run on main's push. */
+export const MAIN_GUARD_WORKFLOWS: ReadonlySet<string> = new Set(["main-plan-guard"]);
+
+/** BACKSTOP (W1-T1266): completed main runs whose jobs the observer may read, at most, before
+ *  giving up on fallback evidence. The primary control is the first run that carries a required
+ *  check, which ends the search; this fires only when main-tripwire, CodeQL and other runs with no
+ *  required check crowd the newest completed history, and each candidate costs one jobs read. */
+export const MAIN_HEALTH_FALLBACK_RUN_LIMIT = 5;
+
+/** A superseded, skipped or stale run concluded nothing about the tree. */
+const MAIN_RUN_NON_VERDICT: ReadonlySet<string> = new Set(["CANCELLED", "SKIPPED", "STALE"]);
+
+function mainRunIsVerdict(run: MainHealthRunHistoryEntry): boolean {
+  const conclusion = (run.conclusion ?? "").toUpperCase();
+  return conclusion !== "" && !MAIN_RUN_NON_VERDICT.has(conclusion);
+}
+
+function isMainGuardRun(run: MainHealthRunHistoryEntry): boolean {
+  return run.workflowName !== undefined && MAIN_GUARD_WORKFLOWS.has(run.workflowName);
+}
+
+/** The latest real verdict of each {@link MAIN_GUARD_WORKFLOWS} member, newest-first history in,
+ *  only the failed ones out. A newer success supersedes an older failure; a cancelled run never does. */
+export function failedMainGuardRuns(history: readonly MainHealthRunHistoryEntry[]): MainHealthRunHistoryEntry[] {
+  const decided = new Set<string>();
+  const failed: MainHealthRunHistoryEntry[] = [];
+  for (const run of history) {
+    if (!isMainGuardRun(run) || decided.has(run.workflowName!) || !mainRunIsVerdict(run)) continue;
+    decided.add(run.workflowName!);
+    if (mainHealthFailureConclusion(run.conclusion)) failed.push(run);
+  }
+  return failed;
+}
+
+/** Completed, non-guard main runs (newest first) whose jobs may stand in for a head whose own
+ *  required runs were cancelled or are still pending. */
+export function mainHealthFallbackRuns(
+  history: readonly MainHealthRunHistoryEntry[],
+  limit: number = MAIN_HEALTH_FALLBACK_RUN_LIMIT,
+): MainHealthRunHistoryEntry[] {
+  return history.filter((run) => run.runId !== undefined && !isMainGuardRun(run) && mainRunIsVerdict(run)).slice(0, limit);
+}
+
+/** True when the head's own rollup concluded nothing: no required check yet, or one still pending
+ *  (a cancelled one included). An all-skipped/vacuous head DID complete, and is not replaced. */
+export function mainHealthHeadInconclusive(observation: MainHealthObservation): boolean {
+  return observation.state === "undetermined" && (observation.pendingChecks.length > 0 || observation.nonEvidenceChecks.length === 0);
+}
+
 /** Read main's rollup into a {@link MainHealthObservation}, reusing the exact dedupe and
  *  required-contexts filter {@link checksStateFromRollup} applies so the two can never disagree
  *  about which entries are in play — but judging them against a STRICTER question: skipped and
@@ -5233,6 +5376,7 @@ export function mainHealthFromRollup(
   rollup: readonly RollupCheckEntry[] | undefined,
   requiredContexts: Iterable<string> | undefined,
   vacuousSuccessNames: ReadonlySet<string> = PUSH_VACUOUS_SUCCESS_CHECK_NAMES,
+  options: { readonly cancelledIsPending?: boolean } = {},
 ): MainHealthObservation {
   const all = (rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT);
   const required = new Set(requiredContexts ?? []);
@@ -5261,7 +5405,9 @@ export function mainHealthFromRollup(
   for (const c of gate) {
     const name = c.name ?? c.context ?? "unknown";
     const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
-    if (REQUIRED_CHECK_FAIL.has(s)) {
+    // W1-T5490: main's push runs share one concurrency group, so a CANCELLED check there is a
+    // superseded run, not a verdict; the main-health observer reads it as outstanding.
+    if (REQUIRED_CHECK_FAIL.has(s) && !(options.cancelledIsPending && s === "CANCELLED")) {
       failingChecks.push(name);
     } else if (s === "SKIPPED" || vacuousSuccessNames.has(name)) {
       nonEvidenceChecks.push(name);
@@ -6142,6 +6288,8 @@ export interface MainLatestRun {
   sha: string;
   state: string;
   failingChecks: readonly string[];
+  /** Absent on legacy rows: absence of a name is evidence only when the observer supplied its census. */
+  observedChecks?: readonly string[];
 }
 
 export function mainLatestRunFromLedger(lines: readonly Record<string, unknown>[]): MainLatestRun | undefined {
@@ -6149,7 +6297,12 @@ export function mainLatestRunFromLedger(lines: readonly Record<string, unknown>[
   for (const line of lines) {
     if (line.step !== "main.health.observed" || typeof line.sha !== "string" || typeof line.state !== "string") continue;
     const failing = Array.isArray(line.failing_checks) ? line.failing_checks.filter((n): n is string => typeof n === "string") : [];
-    latest = { sha: line.sha, state: line.state, failingChecks: failing };
+    latest = {
+      sha: line.sha, state: line.state, failingChecks: failing,
+      ...(Array.isArray(line.observed_checks)
+        ? { observedChecks: line.observed_checks.filter((n): n is string => typeof n === "string") }
+        : {}),
+    };
   }
   return latest;
 }
@@ -6186,6 +6339,12 @@ export function decideBaseRed(
 ): BaseRedDecision {
   if (!isBlockedCi(pr)) return { kind: "own" };
   const names = (pr.ciFailures ?? []).map((failure) => failure.name);
+  if (main?.state === "red" && main.observedChecks !== undefined) {
+    // A known passing check is this diff's red, even beside an inherited failure.
+    if (names.some((name) => main.observedChecks!.includes(name) && !main.failingChecks.includes(name))) return { kind: "own" };
+    const absent = names.find((name) => !main.observedChecks!.includes(name));
+    if (absent !== undefined) return { kind: "wait", check: absent };
+  }
   const shared = main?.state === "red" ? names.find((name) => main.failingChecks.includes(name)) : undefined;
   if (shared !== undefined) return { kind: "wait", check: shared };
   const key = `${pr.prNumber}@${pr.headSha}`;
@@ -8873,6 +9032,12 @@ export interface SweepDeps {
     pr: OpenPrView,
     decision: Extract<PlanRepairDecision, { action: "renumber" | "retitle" }>,
   ) => PlanRepairOutcome | Promise<PlanRepairOutcome>;
+  dispatchPlanGateRound?: (pr: OpenPrView) => Promise<{
+    outcome: "pushed" | "refused" | "metadata-repaired";
+    headSha?: string;
+    reason?: string;
+    preflight?: PlanPrPreflightResult;
+  }>;
   /** W1-T2931 — claim one slot from the light pass's shared host budget immediately before a
    *  fix worker is dispatched. The claim is synchronous, so concurrent per-PR reconciliation
    *  cannot all observe the same free slot. Omitted by every non-light caller, preserving the
@@ -10418,6 +10583,7 @@ export async function runSweep(
   let baseRedRefreshPr: number | undefined;
   // W1-T5349 — the plan-repair rung's once-per-head record, folded once per pass.
   const planRepairHistory = planRepairHistoryFromLedger(ledgerLines);
+  const planRoundFacts = new Map<number, PlanRepairFacts>();
   const tryPlanRepair = async (pr: OpenPrView): Promise<{ repaired: boolean; reason: string }> => {
     const notRepaired = { repaired: false, reason: "" };
     if (!isMachineLanePlanHead(pr.headRefName) || !deps.readPlanRepairFacts || !deps.repairPlanPr) return notRepaired;
@@ -10425,6 +10591,7 @@ export async function runSweep(
     let facts: PlanRepairFacts;
     try {
       facts = await deps.readPlanRepairFacts(pr);
+      planRoundFacts.set(pr.prNumber, facts);
     } catch (e) {
       appendLine(deps.ledgerPath, { ...row, step: `${PLAN_REPAIR_STEP}.read_error`, error: String((e as Error)?.message ?? e) });
       return notRepaired;
@@ -11143,13 +11310,65 @@ export async function runSweep(
         `observed ${inheritedMergeState.observedAt ?? "at an undated prior pass"} for this exact head ` +
         `${pr.headSha.slice(0, 7)} (W1-T4470)`;
     }
-    // W1-T4351 — a positively classified plan filing has no implementation surface: every ci-log
-    // fix was refused "the task declares no files". Escalate naming the red instead (deduped per
-    // head like every escalation), never a worker strike that cannot produce a commit.
+    // W1-T5543: fleet filings have their own plan surface; the code rung still never owns one.
     if (disposition === "blocked-fixable" && isBlockedCi(pr) && pr.isPlanFiling === true) {
-      // W1-T5349 — a machine lane's mechanical red is repaired first; anything else escalates as before.
       const repair = await tryPlanRepair(pr);
-      disposition = repair.repaired ? "wait" : "refused-escalate";
+      const facts = planRoundFacts.get(pr.prNumber);
+      let planRoundExhausted = false;
+      if (!repair.repaired && deps.dispatchPlanGateRound && isFleetAppAuthor(facts?.authorLogin) &&
+          isMachineLanePlanHead(pr.headRefName)) {
+        const row = { pr_number: pr.prNumber, head_sha: pr.headSha, lane_head: pr.headRefName,
+          checks: (pr.ciFailures ?? []).map((f) => f.name), run_id: deps.runId, task_id: pr.taskId ?? "SWEEP" };
+        repair.repaired = true;
+        repair.reason = "plan-scoped round deferred";
+        const base = decideBaseRed(pr, mainLatestRun, baseRedHistory);
+        if (base.kind !== "own") repair.reason = `plan-scoped round waits on base red: ${base.check}`;
+        else if (!deps.dryRun && (deps.actionable?.("blocked-fixable") ?? true) && !deps.workerAdmissionHold?.()) {
+          const claimed = claimFixDispatch({ ...pr, taskId: pr.taskId ?? escalationTaskIdFor(pr) });
+          if (!claimed.ok) {
+            repair.reason = claimed.reason;
+            if (claimed.reason.includes("refused twice")) {
+              repair.repaired = false;
+              planRoundExhausted = true;
+            }
+          }
+          else {
+            const work = claimed.run(async () => {
+              const history = readLedger(deps.ledgerPath).filter((l) => l.pr_number === pr.prNumber && l.head_sha === pr.headSha &&
+                (l.step === "sweep.plan_round.pushed" || l.step === "sweep.plan_round.refused"));
+              if (history.some((l) => l.step === "sweep.plan_round.pushed")) {
+                repair.reason = "plan-scoped round already handled this head";
+                return;
+              }
+              const repeated = history.find((l) => history.filter((r) => r.reason === l.reason).length >= 2);
+              if (repeated) {
+                repair.repaired = false;
+                planRoundExhausted = true;
+                repair.reason = `; ${repeatedFixRefusalReason(String(repeated.reason))}`;
+                return;
+              }
+              const admission = claimFixAdmission?.(pr);
+              if (admission && !admission.admitted) {
+                repair.reason = admission.reason;
+                return;
+              }
+              appendLine(deps.ledgerPath, { ...row, step: "sweep.plan_round.dispatched" });
+              repair.reason = "plan-scoped round dispatched";
+              let result: Awaited<ReturnType<NonNullable<SweepDeps["dispatchPlanGateRound"]>>>;
+              try {
+                result = await deps.dispatchPlanGateRound!(pr);
+              } catch (error) {
+                result = { outcome: "refused", reason: String((error as Error)?.message ?? error) };
+              }
+              appendLine(deps.ledgerPath, { ...row, step: result.outcome === "refused" ? "sweep.plan_round.refused" : "sweep.plan_round.pushed", ...result });
+              repair.reason = `plan-scoped round ${result.outcome}${result.reason ? `: ${result.reason}` : ""}`;
+            });
+            if (deps.detachFixWait) detachSweepAction(work, { actionKind: "fix-dispatch", taskId: pr.taskId ?? escalationTaskIdFor(pr) });
+            else await work;
+          }
+        }
+      }
+      disposition = repair.repaired ? "wait" : planRoundExhausted ? "blocked-ambiguous" : "refused-escalate";
       const red = (pr.ciFailures ?? []).map((failure) => failure.name).join(", ") || "a required check";
       reason = repair.repaired
         ? repair.reason
@@ -11711,13 +11930,15 @@ export async function runSweep(
                     outcome = `error: ${String((e as Error)?.message ?? e)}`;
                   }
                   appendLine(deps.ledgerPath, { ...row, step: BASE_RED_REFRESH_STEP, outcome });
-                  standDownReason = `base red: ${baseRed.check} failed on main too; main is green at ${mainSha}, so the branch refresh was requested (${outcome}) — no fix dispatched`;
+                  standDownReason = `base red: ${baseRed.check} was held while main was red; main is green at ${mainSha}, so the branch refresh was requested (${outcome}) — no fix dispatched`;
                   break;
                 }
                 if (!baseRedHistory.stoodDown.has(`${pr.prNumber}@${pr.headSha}`)) appendLine(deps.ledgerPath, { ...row, step: BASE_RED_STOOD_DOWN_STEP });
                 standDownReason = baseRed.kind === "refresh"
-                  ? `base red: ${baseRed.check} failed on main too; main is green, but this pass's one branch refresh is spent or unwired — no fix dispatched`
-                  : `base red: ${baseRed.check} also fails on main's latest run (${mainSha}) — not this diff's; no fix dispatched, the branch refreshes once main is green`;
+                  ? `base red: ${baseRed.check} was held while main was red; main is green, but this pass's one branch refresh is spent or unwired — no fix dispatched`
+                  : mainLatestRun?.state === "red" && mainLatestRun.observedChecks !== undefined && !mainLatestRun.observedChecks.includes(baseRed.check)
+                    ? `base red: ${baseRed.check} is absent from main's latest run (${mainSha}), and main is red — no fix dispatched, the branch refreshes once main is green`
+                    : `base red: ${baseRed.check} also fails on main's latest run (${mainSha}) — not this diff's; no fix dispatched, the branch refreshes once main is green`;
                 break;
               }
               // W1-T4586 — A LIVE RUN FOR THIS HEAD SUPERSEDES ITS RED. Runs on one head share the

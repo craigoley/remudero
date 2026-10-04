@@ -792,8 +792,9 @@ test("real tree: armIfVerdictPermits/withdrawArmIfVerdictRefuses call sites that
   // PR-7492's sampled-risk integration coverage adds a selected-head assertion and shadow-spawn
   // assertions ahead of both, moving the same witnesses by nine to :6165/:6226. The candidates
   // still omit ledgerLines while supplying arm; only their coordinates moved.
-    "armIfVerdictPermits:test/run-task.test.ts:6165:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:6226:ledgerLines",
+  // W1-T4074 answers `pr view --json files` in statefulFakeGh (two lines ahead of both): :6167/:6228.
+    "armIfVerdictPermits:test/run-task.test.ts:6167:ledgerLines",
+    "armIfVerdictPermits:test/run-task.test.ts:6228:ledgerLines",
   ];
   for (const key of expectedKeys) {
     assert.ok(
