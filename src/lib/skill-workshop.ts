@@ -402,7 +402,7 @@ export interface StageSkillDraftResult {
 }
 
 /** Procedure steps, excluding restatements of the supplied mined outcomes. */
-function skillProcedureSteps(markdown: string, descriptions: readonly string[] = []): string[] {
+function skillProcedureSteps(markdown: string, descriptions: readonly string[]): string[] {
   const section = /^## Procedure\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(markdown)?.[1] ?? "";
   return section.split("\n").filter((line) =>
     line.startsWith("- ") && !descriptions.some((description) => restatesOutcome(line, description)),
@@ -448,7 +448,7 @@ export function stageSkillDraft(
         // W1-T4668) must replace the stored text, or approval writes the older, emptier skill.
         // Compare behavioral steps: removed outcome-only bullets do not count as lost procedure.
         const descriptions = draft.outcomeDescriptions?.length ? draft.outcomeDescriptions : [draft.description];
-        if (stored && skillProcedureSteps(draft.markdown).length > skillProcedureSteps(stored.markdown).length) {
+        if (stored && skillProcedureSteps(draft.markdown, descriptions).length > skillProcedureSteps(stored.markdown, descriptions).length) {
           refreshed = true;
           return current.map((p, i) => (i === existing ? { ...p, summary: skillDraftSummary(draft, reachability), skillFile } : p));
         }
