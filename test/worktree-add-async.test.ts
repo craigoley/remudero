@@ -22,7 +22,7 @@ test("a timer fires while an async worktree add waits on git", async () => {
   repo.git("config", "filter.delay.smudge", "sleep 0.25; cat");
   repo.git("add", ".gitattributes", "slow.txt");
   repo.git("commit", "--no-verify", "--quiet", "-m", "chore: add slow checkout fixture");
-  const worktree = `${repo.dir}-timer`;
+  const worktree = join(repo.dir, "timer");
   let finished = false;
   let timerSawPending = false;
   const timer = new Promise<void>((resolve) => setTimeout(() => {
@@ -40,8 +40,8 @@ test("the async worktree add ledgers the same row as the sync add", async () => 
   const repo = seededRepo();
   const syncRows: Array<[string, Record<string, unknown> | undefined]> = [];
   const asyncRows: Array<[string, Record<string, unknown> | undefined]> = [];
-  const syncPath = `${repo.dir}-sync`;
-  const asyncPath = `${repo.dir}-async`;
+  const syncPath = join(repo.dir, "sync");
+  const asyncPath = join(repo.dir, "async");
   worktreeAdd(repo.dir, syncPath, "run-sync", "origin/main", { log: (step, extra) => syncRows.push([step, extra]) });
   await worktreeAddAsync(repo.dir, asyncPath, "run-async", "origin/main", {
     log: (step, extra) => asyncRows.push([step, extra]),
@@ -56,7 +56,7 @@ test("the async worktree add ledgers the same row as the sync add", async () => 
 
 test("the async worktree add still refuses a stale base", async () => {
   const repo = seededRepo();
-  const worktree = `${repo.dir}-stale`;
+  const worktree = join(repo.dir, "stale");
   const rows: string[] = [];
   await assert.rejects(
     worktreeAddAsync(repo.dir, worktree, "run-stale", "origin/main", {
@@ -73,7 +73,7 @@ test("an unreadable remote head keeps the async add's warning and ledger distinc
   const repo = seededRepo();
   const warnings: string[] = [];
   const rows: Array<[string, Record<string, unknown> | undefined]> = [];
-  await worktreeAddAsync(repo.dir, `${repo.dir}-unreadable`, "run-unreadable", "origin/main", {
+  await worktreeAddAsync(repo.dir, join(repo.dir, "unreadable"), "run-unreadable", "origin/main", {
     readRemoteHead: () => { throw new Error("remote unavailable"); },
     warn: (message) => warnings.push(message),
     log: (step, extra) => rows.push([step, extra]),
@@ -102,7 +102,7 @@ test("an async Git failure relays both output streams and still rejects", () => 
 
   const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", [
     'import { worktreeAddAsync } from "./src/lib/worker.js";',
-    `try { await worktreeAddAsync(${JSON.stringify(repo.dir)}, ${JSON.stringify(`${repo.dir}-git-failure`)}, "run-git-failure"); process.exitCode = 2; }`,
+    `try { await worktreeAddAsync(${JSON.stringify(repo.dir)}, ${JSON.stringify(join(repo.dir, "git-failure"))}, "run-git-failure"); process.exitCode = 2; }`,
     'catch (error) { if (error.code !== 23) process.exitCode = 3; }',
   ].join("\n")], {
     cwd: process.cwd(),
@@ -120,7 +120,7 @@ test("an absent tracking ref is reported as unreadable without blocking the asyn
   repo.git("branch", "other");
   repo.git("remote", "set-branches", "origin", "other");
   repo.git("update-ref", "-d", "refs/remotes/origin/main");
-  const worktree = `${repo.dir}-missing-tracking-ref`;
+  const worktree = join(repo.dir, "missing-tracking-ref");
   const rows: Array<[string, Record<string, unknown> | undefined]> = [];
   const warnings: string[] = [];
 
