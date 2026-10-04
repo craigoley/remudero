@@ -74,6 +74,31 @@ export function withTripwireOverride(
   };
 }
 
+/** W1-T5630 — PRIMARY CONTROL: how long one head's completed run history (and the fallback jobs
+ *  read under it) is reused. The key already refetches on a new head or a newly completed head
+ *  check; this bounds staleness from runs finishing on OTHER commits while the head sits still.
+ *  Read 2026-10-04: 72 observations over 7 heads in 88 minutes, so each head's page refetched ~10x. */
+export const MAIN_HEALTH_RUN_HISTORY_TTL_MS = 5 * 60_000;
+
+/** The run-history cache key: the head sha plus each COMPLETED head rollup entry's name:verdict,
+ *  sorted. A check run carries a conclusion only once completed; a commit status counts once it
+ *  leaves `PENDING`. A guard workflow finishing on the head therefore changes the key. */
+function runHistoryCacheKey(sha: string, rollup: readonly RollupCheckEntry[]): string {
+  const completed = rollup
+    .map((c) => [c.name ?? c.context, c.conclusion || (c.state !== "PENDING" ? c.state : undefined)] as const)
+    .filter(([, verdict]) => verdict)
+    .map(([name, verdict]) => `${name}:${verdict}`)
+    .sort();
+  return `${sha}|${completed.join(",")}`;
+}
+
+interface RunHistoryCache {
+  key: string;
+  readAtMs: number;
+  history: MainHealthRunHistoryEntry[];
+  jobsByRunId: Map<number, RollupCheckEntry[]>;
+}
+
 export interface MainHealthRungDeps {
   /** Every read is awaited: production passes the async `gh` transport, because a sync `ghJson`
    *  here held the core daemon's loop 144 s (E36, 2026-10-02). A sync fetcher still works. */
@@ -242,6 +267,7 @@ export function buildMainHealthRung(
   let resolvedSignature: string | undefined;
   let lastSuccessfulObservationAtMs: number | undefined;
   let inFlight: Promise<void> | undefined;
+  let runHistoryCache: RunHistoryCache | undefined;
   const freshMs = Math.max(0, deps.freshMs ?? 0);
   const now = deps.now ?? Date.now;
 
@@ -267,26 +293,38 @@ export function buildMainHealthRung(
       // spilling into the advisory list `mainHealthFromRollup(sha, rollup, undefined)` would
       // otherwise place it on.
       observation = withTripwireOverride(observation, rollup);
-      // W1-T5490: the completed push-run history is read ONCE per observation and shared with the
-      // red-path enrichment below: it supplies fallback evidence and the guard workflows' verdicts.
+      // W1-T5490: the completed push-run history is shared with the red-path enrichment below: it
+      // supplies fallback evidence and the guard workflows' verdicts. W1-T5630: it is read once per
+      // head (see {@link runHistoryCacheKey}) and reused until MAIN_HEALTH_RUN_HISTORY_TTL_MS, aged
+      // on the injected clock; a negative age (a clock stepping back) or an unreadable read refetches.
       let runHistory: MainHealthRunHistoryEntry[] | undefined;
       let runHistoryUnavailable: string | undefined;
-      try {
-        const readMainRunHistory =
-          deps.readMainRunHistory ??
-          (async (branchName: string) =>
-            mainPushRunHistoryFromResponse(
-              (await deps.fetch(mainPushRunHistoryRestArgs(owner, repo, branchName))) as WorkflowRunHistoryResponse,
-            ));
-        runHistory = await readMainRunHistory(branch);
-        if (runHistory === undefined) runHistoryUnavailable = "the main push run-history reader returned no evidence";
-      } catch (error) {
-        runHistoryUnavailable = String((error as Error)?.message ?? error);
-        deps.log("main.health.run_history_unreadable", {
-          branch,
-          sha,
-          error: String((error as Error)?.message ?? error),
-        });
+      const cacheKey = runHistoryCacheKey(sha, rollup);
+      const cacheAgeMs = startedAtMs - (runHistoryCache?.readAtMs ?? Number.NaN);
+      const cacheHit =
+        runHistoryCache?.key === cacheKey && cacheAgeMs >= 0 && cacheAgeMs < MAIN_HEALTH_RUN_HISTORY_TTL_MS;
+      if (cacheHit) {
+        runHistory = runHistoryCache!.history;
+      } else {
+        runHistoryCache = undefined;
+        try {
+          const readMainRunHistory =
+            deps.readMainRunHistory ??
+            (async (branchName: string) =>
+              mainPushRunHistoryFromResponse(
+                (await deps.fetch(mainPushRunHistoryRestArgs(owner, repo, branchName))) as WorkflowRunHistoryResponse,
+              ));
+          runHistory = await readMainRunHistory(branch);
+          if (runHistory === undefined) runHistoryUnavailable = "the main push run-history reader returned no evidence";
+          else runHistoryCache = { key: cacheKey, readAtMs: startedAtMs, history: runHistory, jobsByRunId: new Map() };
+        } catch (error) {
+          runHistoryUnavailable = String((error as Error)?.message ?? error);
+          deps.log("main.health.run_history_unreadable", {
+            branch,
+            sha,
+            error: String((error as Error)?.message ?? error),
+          });
+        }
       }
       // W1-T5490 (a): a head whose required runs were all cancelled by the next push, or are still
       // pending, concluded nothing — the latest COMPLETED main run that carries required checks
@@ -297,9 +335,12 @@ export function buildMainHealthRung(
         for (const run of mainHealthFallbackRuns(runHistory)) {
           let jobs: RollupCheckEntry[];
           try {
-            jobs = rollupFromJobs(
-              (await deps.fetch(["api", `repos/${owner}/${repo}/actions/runs/${run.runId}/jobs?per_page=100`])) as WorkflowJobsResponse,
-            );
+            jobs =
+              runHistoryCache?.jobsByRunId.get(run.runId!) ??
+              rollupFromJobs(
+                (await deps.fetch(["api", `repos/${owner}/${repo}/actions/runs/${run.runId}/jobs?per_page=100`])) as WorkflowJobsResponse,
+              );
+            runHistoryCache?.jobsByRunId.set(run.runId!, jobs);
           } catch (error) {
             deps.log("main.health.completed_run_unreadable", {
               branch,
@@ -361,6 +402,7 @@ export function buildMainHealthRung(
         pending_checks: observation.pendingChecks,
         non_evidence_checks: observation.nonEvidenceChecks,
         judged_against: required.size > 0 ? "ci-gate-required" : "all-checks",
+        run_history_source: cacheHit ? "cache" : "fetched",
         ...(advisoryFailing.length > 0 ? { advisory_failing_checks: [...advisoryFailing].sort() } : {}),
       });
 
