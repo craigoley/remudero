@@ -2695,7 +2695,8 @@ function assembleServeRoutes(
     ...deps.panelGraph,
     inboxRoot: deps.fleetControlRoot,
     ratify: deps.panelGraph.ratify ?? ratifyCliGateway(deps.panelGraph.root, join(deps.fleetControlRoot, "state", "logs")),
-    ...(projectionWorker ? { projectFeedback: (input: FeedbackProjectionInput) => projectionWorker.feedback(input), logProjection: deps.log } : {}),
+    logProjection: deps.log,
+    ...(projectionWorker ? { projectFeedback: (input: FeedbackProjectionInput) => projectionWorker.feedback(input) } : {}),
   };
   const lastSeen = deps.lastSeen ?? createLastSeenStore(lastSeenPath(deps.fleetControlRoot));
   // W1-T500: SAME instance `createService`'s dispatch consults (see ServeDeps.confirmNonces's own
@@ -2891,10 +2892,9 @@ function assembleServeRoutes(
     // feedback entry, ledger `panel.skill_invoked`. No worker, no spend.
     //
     // `panelGraphDeps` is passed WHOLE and deliberately: this module needs the same `root`,
-    // `planPath`, `ledgerPath` and `feedbackLand` that POST /v1/feedback/decision already uses, and
-    // production sets `panelGraph.root` and `questionsRoot` to the SAME `repoRoot` (run-task.ts) —
-    // so the skills registry and the feedback write resolve under one root, and the grill lands on
-    // the bot branch instead of dirtying the daemon's checkout.
+    // `planPath`, `ledgerPath` and `inboxRoot` that POST /v1/feedback/decision already uses, so the
+    // skills registry and the grill resolve under one root, and the grill is moved into the
+    // `inboxRoot` landing queue the daemon's sweep lands (W1-T5525, W1-T5628), leaving no copy.
     ...buildPanelSkillRunRoutes(panelGraphDeps),
     buildTaskCardRoute(deps.board),
     // W1-T3352: synchronous read of process-owned state. The server assembly owns refresh and

@@ -1424,15 +1424,22 @@ function queueFeedbackLanding(stateRoot: string, relPath: string, content: strin
   }
 }
 
-/** W1-T5525: stage the record a console capture already wrote under `root`, byte for byte. */
-export function queueFeedbackRecord(root: string, relPath: string, stateRoot: string): LandFeedbackResult {
+/** W1-T5525: stage a console capture written under `root`, byte for byte; W1-T5628: then MOVE it (a failed stage keeps it). */
+export function queueFeedbackRecord(root: string, relPath: string, stateRoot: string, remove: (path: string) => void = unlinkSync): LandFeedbackResult {
   let content: string;
   try {
     content = readFileSync(join(root, relPath), "utf8");
   } catch (e) {
     return { landed: false, files: [], error: `reading ${relPath} under ${root} to queue it failed: ${String((e as Error)?.message ?? e)}` };
   }
-  return queueFeedbackLanding(stateRoot, relPath, content);
+  const staged = queueFeedbackLanding(stateRoot, relPath, content);
+  if (!staged.queued) return staged;
+  try {
+    remove(join(root, relPath));
+  } catch (e) {
+    return { ...staged, error: `${relPath} is queued, but removing its copy under ${root} failed: ${String((e as Error)?.message ?? e)}` };
+  }
+  return staged;
 }
 
 /** Every record queued under `stateRoot` and not yet acknowledged landed — what the board may show as queued. */
