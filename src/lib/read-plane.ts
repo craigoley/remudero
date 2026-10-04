@@ -1,4 +1,4 @@
-import { Worker } from "node:worker_threads";
+import { SHARE_ENV, Worker } from "node:worker_threads";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
@@ -91,9 +91,10 @@ export function startReadPlane<I, O>(options: {
     if (stopped) throw new Error("read plane stopped");
     const workerData = { kind: READ_PLANE_KIND, input: options.workerInput, entry: options.workerUrl.href };
     // tsx's main-thread loader does not install itself in a worker's module loader (W1-T4075).
+    // SHARE_ENV: the daemon's hourly GH_TOKEN refresh must reach the worker's reads.
     const held = options.spawn?.() ?? (options.workerUrl.pathname.endsWith(".ts")
-      ? new Worker(`const { workerData } = require('node:worker_threads'); import(${JSON.stringify(import.meta.resolve("tsx/esm/api"))}).then(({ register }) => { register(); return import(workerData.entry); });`, { eval: true, workerData })
-      : new Worker(options.workerUrl, { workerData }));
+      ? new Worker(`const { workerData } = require('node:worker_threads'); import(${JSON.stringify(import.meta.resolve("tsx/esm/api"))}).then(({ register }) => { register(); return import(workerData.entry); });`, { eval: true, workerData, env: SHARE_ENV })
+      : new Worker(options.workerUrl, { workerData, env: SHARE_ENV }));
     thread = held;
     held.on("message", (reply: { generation: number; facts?: O; error?: string; kind?: string; step?: string; extra?: Record<string, unknown> }) => {
       if (thread !== held) return;
