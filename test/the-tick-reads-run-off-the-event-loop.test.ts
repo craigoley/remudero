@@ -8,7 +8,7 @@ import { writeFileSync, existsSync, readFileSync, mkdirSync, rmSync, utimesSync 
 import { join } from "node:path";
 import { startReadPlane, startReadPlaneTelemetry, freezeReadGeneration } from "../src/lib/read-plane.js";
 import { createTickReadProducer, buildBoardReviewDaemonHooks, applyTickCreditUpdates, buildDaemonReadRefresher,
-  daemonCommand, projectionReadinessAccessors, tickReadReverificationDeps } from "../src/run-task.js";
+  buildInboxDraftHook, daemonCommand, projectionReadinessAccessors, tickReadReverificationDeps } from "../src/run-task.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { loadPlan } from "../src/lib/plan.js";
 import { runDaemon, type DaemonDeps, type DaemonSummary } from "../src/lib/daemon.js";
@@ -367,6 +367,26 @@ test("W1-T4075: the draft rung's readiness from a generation answers exactly as 
   assert.equal(accessors.depsUnobservable("B"), "rate_limited");
   assert.equal(accessors.depsUnobservable("C"), "unknown");
   assert.equal(accessors.depsUnobservable("NOT-IN-PLAN"), undefined, "a missing dependency is unmetDependencies' own case");
+});
+
+test("W1-T4075: the draft rung reads readiness from the generation it is handed", async () => {
+  const { plan, options } = fixture();
+  const root = options.config.root;
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(root, "state", "inbox-proposals.json"), JSON.stringify({ proposals: [{ id: "P-GEN", summary: "p", evidenceAnchors: [] }] }));
+  writeFileSync(join(root, "state", "ledger.ndjson"), "");
+  const rows: string[] = [];
+  const drafted: string[][] = [];
+  const hook = buildInboxDraftHook("o", "r", options.config as never, "RUN-GEN", (step) => rows.push(step),
+    async (due) => { drafted.push(due.map((p) => p.id)); return due.map((p) => ({ proposalId: p.id, ok: false as const, error: "ordinary failure" })); },
+    () => true, () => "a".repeat(40));
+  type DraftTickRead = NonNullable<Parameters<typeof hook>[0]>;
+  await hook({ plan, projection: [["A", { merged: true }]] } as unknown as DraftTickRead);
+  assert.deepEqual(drafted, [["P-GEN"]]);
+  assert.equal(rows.includes("inbox.draft_readiness_unavailable"), false, "a generation's projection serves readiness");
+  await hook({ plan, projection: 5 } as unknown as DraftTickRead);
+  assert.equal(rows.filter((step) => step === "inbox.draft_readiness_unavailable").length, 1,
+    "an unreadable generation projection is what readiness read — not a re-derived one");
 });
 
 test("W1-T4075: a worker's log rows reach the daemon ledger and the main thread's logger is inert", async () => {
