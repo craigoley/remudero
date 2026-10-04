@@ -8,18 +8,14 @@ store — `scripts/learnings-budget-ratchet.mjs` caps its injectable weight), `p
 `MASTER-PLAN.md`, `DECISIONS.md`, `LEARNINGS.md`. CLAUDE.md holds only workflow rules; it does not
 restate feature history.
 
-**Nothing in this file is a gate.** Every rule here is UNENFORCED prose that binds only because you
-read it. The gates are elsewhere and refuse you by name — `coverage-ratchet` and `diff-coverage` on
-coverage, `proof-dialect` at dispatch and `lint-plan`'s changed-tasks pass on proofs, `judgeReview`'s
-rubric on the PR, `SymlinkInstallRefusal` on a worktree install. That split is the point: a rule
-stated ONLY here can be broken silently, repeatedly. When one matters, make something refuse
-it — file the task; never sharpen the wording and call it closed.
+**Nothing in this file is a gate.** Rules bind readers; enforcement lives in `coverage-ratchet`,
+`diff-coverage`, `proof-dialect`, `lint-plan`, `judgeReview` and `SymlinkInstallRefusal`. When a
+rule needs enforcement, file the task; sharper prose alone cannot close it.
 
-**THIS FILE IS AN INDEX, AND THE ARROW IS AN INSTRUCTION TO YOU.** Every rule is a bolded HEADLINE
-followed by `→ doctrine/<section>/<rule>.md`. **The headline is the whole rule — obey it without
-opening anything.** The file it names holds the EVIDENCE: the measurement, the PR, the session that
-earned it. `cat` it when you doubt the rule or are about to do what it forbids. A pointer that does not resolve is a
-BUG, not a rule you may skip; `test/the-doctrine-index-points-at-every-body.test.ts` fails on one.
+**THIS FILE IS AN INDEX, AND THE ARROW IS AN INSTRUCTION TO YOU.** Each bolded HEADLINE points to
+`→ doctrine/<section>/<rule>.md`. **The headline is the whole rule — obey it without opening
+anything.** Open its body for evidence when applying or doubting it. A dangling pointer is a BUG,
+not permission to skip; `test/the-doctrine-index-points-at-every-body.test.ts` refuses it.
 
 **Maintaining this file:** an INTERACTIVE session loads the index and pays that tax every session;
 a DISPATCHED WORKER never sees it — `spawnWorker` passes `settingSources: []`, the SDK isolation
@@ -33,6 +29,7 @@ line numbers**. Each rule cites the PR that earned it.
 ## Before you push
 
 - **Run the shipped local gate before your FIRST push, not every commit.** → doctrine/before-you-push/run-the-shipped-local-gate-before-your-first-push-not.md
+- **SUPERSEDES the full-parity first-push obligation: run `node --import tsx scripts/preflight-author.mjs` on the committed tree; required hosted full-suite and coverage checks still gate merge.** → doctrine/before-you-push/author-feedback-is-not-hosted-assurance.md
 - **A test run with no `# tests` summary is NOT A RESULT, and a summary over an UNVERIFIED FILE LIST
   is not one either — `node --test` given a ghost path returns a green count, silently. `ls` first.** → doctrine/before-you-push/a-test-run-with-no-summary-is-not-a-result-and-a-summary.md
 

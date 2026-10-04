@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
-import { closeSync, constants, copyFileSync, fstatSync, linkSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { closeSync, constants, copyFileSync, fstatSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, join, relative, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { parseArgs } from 'node:util';
@@ -99,70 +98,46 @@ export function renderCoverageSummary(summary) {
   return `${output.join('\n')}\n`;
 }
 
-function withStagedRawCoverage(directories, collect) {
-  if (directories.length === 0) throw new Error('at least one raw coverage directory is required');
-  assertPinnedNodeVersion();
-  const TestCoverage = loadTestCoverage();
-  const staging = mkdtempSync(join(tmpdir(), 'rmd-merge-node-coverage-'));
-  let rawFileCount = 0;
-  let inputBytes = 0;
-  let stagedBytes = 0;
-  let peakBytes = 0;
+function readCoverageSource(file) {
+  const descriptor = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
-    for (const directory of directories) {
-      const files = coverageFilesUnder(directory, true);
-      if (files.length === 0) throw new Error(`${directory} contains no V8 coverage files`);
-      for (const file of files) {
-        if (COMPACT_COVERAGE_FILE.test(basename(file))) {
-          const source = readFileSync(file, 'utf8');
-          inputBytes += Buffer.byteLength(source);
-          const bundle = JSON.parse(source);
-          if (bundle.format !== COMPACT_FORMAT || !Array.isArray(bundle.sourceMaps) || !Array.isArray(bundle.reports)) {
-            throw new Error(`${file} is not a valid ${COMPACT_FORMAT} report`);
-          }
-          for (const report of bundle.reports) {
-            if (!Array.isArray(report.result) || typeof report.sourceMapRefs !== 'object' || report.sourceMapRefs === null) {
-              throw new Error(`${file} contains an invalid compact process report`);
-            }
-            const sourceMapCache = Object.create(null);
-            for (const [url, sourceMapIndex] of Object.entries(report.sourceMapRefs)) {
-              if (!Number.isSafeInteger(sourceMapIndex) || sourceMapIndex < 0 || sourceMapIndex >= bundle.sourceMaps.length) {
-                throw new Error(`${file} contains an invalid source-map reference for ${url}`);
-              }
-              sourceMapCache[url] = bundle.sourceMaps[sourceMapIndex];
-            }
-            const stagedName = `coverage-${process.pid}-${Date.now()}-${rawFileCount}.json`;
-            const stagedPath = join(staging, stagedName);
-            const stagedSource = JSON.stringify({
-              result: report.result,
-              'source-map-cache': sourceMapCache,
-            });
-            writeFileSync(stagedPath, stagedSource);
-            stagedBytes += Buffer.byteLength(stagedSource);
-            rawFileCount += 1;
-          }
-        } else {
-          const stagedName = `coverage-${process.pid}-${Date.now()}-${rawFileCount}.json`;
-          const stagedPath = join(staging, stagedName);
-          stagedBytes += stageRawCoverageFile(file, stagedPath);
-          inputBytes += fileBytes(stagedPath);
-          rawFileCount += 1;
+    return readFileSync(descriptor, 'utf8');
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function* coverageReports(directories, bytes) {
+  for (const directory of directories) {
+    const files = coverageFilesUnder(directory, true);
+    if (files.length === 0) throw new Error(`${directory} contains no V8 coverage files`);
+    for (const file of files) {
+      const source = readCoverageSource(file);
+      bytes.inputBytes += Buffer.byteLength(source);
+      const parsed = JSON.parse(source);
+      if (!COMPACT_COVERAGE_FILE.test(basename(file))) {
+        bytes.rawFileCount += 1;
+        yield parsed;
+        continue;
+      }
+      if (parsed.format !== COMPACT_FORMAT || !Array.isArray(parsed.sourceMaps) || !Array.isArray(parsed.reports)) {
+        throw new Error(`${file} is not a valid ${COMPACT_FORMAT} report`);
+      }
+      for (const report of parsed.reports) {
+        if (!Array.isArray(report.result) || typeof report.sourceMapRefs !== 'object' || report.sourceMapRefs === null) {
+          throw new Error(`${file} contains an invalid compact process report`);
         }
-        peakBytes = Math.max(peakBytes, inputBytes + stagedBytes);
+        const sourceMapCache = Object.create(null);
+        for (const [url, sourceMapIndex] of Object.entries(report.sourceMapRefs)) {
+          if (!Number.isSafeInteger(sourceMapIndex) || sourceMapIndex < 0 || sourceMapIndex >= parsed.sourceMaps.length) {
+            throw new Error(`${file} contains an invalid source-map reference for ${url}`);
+          }
+          sourceMapCache[url] = parsed.sourceMaps[sourceMapIndex];
+        }
+        bytes.rawFileCount += 1;
+        yield { result: report.result, 'source-map-cache': sourceMapCache };
       }
     }
-    const collector = new TestCoverage(
-      staging,
-      undefined,
-      process.cwd(),
-      ['test/**'],
-      undefined,
-      true,
-      { line: 0, branch: 0, function: 0 },
-    );
-    return collect(collector, rawFileCount, { inputBytes, stagingBytes: stagedBytes, peakBytes, stagingDir: staging });
-  } finally {
-    rmSync(staging, { recursive: true, force: true });
   }
 }
 
@@ -220,16 +195,27 @@ export function compactRawCoverageDirectories(directories) {
 }
 
 /**
- * Node's LCOV reporter numbers branches by their position in one run's branch array. Those IDs
- * are not stable across test shards. Stage every raw V8 report together, then let the exact
- * repository-pinned Node implementation merge source ranges before assigning LCOV indexes.
+ * Branch IDs vary across shards: feed retained reports, in order, to pinned Node's source mapper
+ * and range merger before it assigns LCOV indexes. Only its directory reader changes, so repeated
+ * source maps need no disk expansion; Node still owns mapping and summary algorithms.
  */
 export function mergeRawCoverageDirectories(directories) {
-  return withStagedRawCoverage(directories, (collector, rawFileCount, bytes) => {
-    const summary = collector.summary();
-    if (summary.files.length === 0) throw new Error('raw coverage merge produced no source records');
-    return { rawFileCount, summary, ...bytes };
-  });
+  if (directories.length === 0) throw new Error('at least one raw coverage directory is required');
+  assertPinnedNodeVersion();
+  const TestCoverage = loadTestCoverage();
+  const collector = new TestCoverage('', undefined, process.cwd(), ['test/**'], undefined, true,
+    { line: 0, branch: 0, function: 0 });
+  const bytes = { rawFileCount: 0, inputBytes: 0 };
+  collector.getCoverageFromDirectory = () => {
+    const merged = new Map();
+    for (const report of coverageReports(directories, bytes)) {
+      collector.mergeCoverage(merged, collector.mapCoverageWithSourceMap(report));
+    }
+    return [...merged.values()];
+  };
+  const summary = collector.summary();
+  if (summary.files.length === 0) throw new Error('raw coverage merge produced no source records');
+  return { ...bytes, summary, stagingBytes: 0, peakBytes: bytes.inputBytes, stagingDir: 'none' };
 }
 
 // W1-T4436: refuse a merge whose shard-directory count differs from ci.yml's `--shard-count`.

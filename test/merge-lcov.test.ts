@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, opendirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -81,6 +81,40 @@ function runCompactor(output: string, ...rawDirectories: string[]): string {
     ['--expose-internals', 'scripts/coverage-merge-ratchet.mjs', '--compact-output', output, ...rawDirectories],
     { cwd: process.cwd(), encoding: 'utf8', stdio: 'pipe' },
   );
+}
+
+function pinnedNodeControl(root: string, rawDirectories: string[]): { lcov: string; order: number[] } {
+  const staged = join(root, 'node-control');
+  mkdirSync(staged);
+  let index = 0;
+  for (const directory of rawDirectories) {
+    for (const name of readdirSync(directory).filter((entry) => /^coverage-\d+-\d{13}-\d+\.json$/.test(entry)).sort()) {
+      stageRawCoverageFile(join(directory, name), join(staged, `coverage-1-0000000000000-${String(index++).padStart(6, '0')}.json`));
+    }
+  }
+  // Node's native reader uses opendir, not sorted readdir. APFS can return these reports in a
+  // different order; mapping mutates Node's line-hit cache. Compare algorithms over identical
+  // report order, not over two independently chosen filesystem traversal orders.
+  const order: number[] = [];
+  const directory = opendirSync(staged);
+  try {
+    for (let entry; (entry = directory.readSync()) !== null;) {
+      order.push(Number(entry.name.match(/-(\d+)\.json$/)![1]));
+    }
+  } finally {
+    directory.closeSync();
+  }
+  const output = join(root, 'node-control.info');
+  execFileSync(process.execPath, ['--expose-internals', '--input-type=module', '-e', `
+    import { createRequire } from 'node:module';
+    import { writeFileSync } from 'node:fs';
+    import { renderCoverageSummary } from './scripts/coverage-merge-ratchet.mjs';
+    const { TestCoverage } = createRequire(import.meta.url)('internal/test_runner/coverage');
+    const collector = new TestCoverage(process.argv[1], undefined, process.cwd(), ['test/**'], undefined, true,
+      { line: 0, branch: 0, function: 0 });
+    writeFileSync(process.argv[2], renderCoverageSummary(collector.summary()));
+  `, staged, output], { cwd: process.cwd(), encoding: 'utf8', stdio: 'pipe' });
+  return { lcov: readFileSync(output, 'utf8'), order };
 }
 
 function compactBundles(directory: string): Array<Record<string, unknown>> {
@@ -339,7 +373,8 @@ test("W1-T4951: compacted four-shard coverage preserves line and branch totals",
     assert.ok(summaryTotals(compactLcov).LF > 0);
     compactPeak = Math.max(compactPeak, peak(compactLog));
     assert.ok(compactPeak < peak(directLog), `compact peak ${compactPeak} must be below raw peak ${peak(directLog)}`);
-    assert.ok(compactLog.includes(`stagingDir=${root}/rmd-merge-node-coverage-`));
+    assert.match(compactLog, /stagingBytes=0\b/);
+    assert.match(compactLog, /stagingDir=none\b/);
     context.diagnostic(`raw peak ${peak(directLog)} bytes; compact peak ${compactPeak} bytes`);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -353,6 +388,64 @@ test('corrupt compact coverage refuses the pinned-Node merge', () => {
   try {
     writeFileSync(join(compact, 'coverage-bundle-1-0000000000000-0.json'), '{}');
     assert.throws(() => runMerger(join(root, 'merged.info'), compact), /not a valid rmd-v8-coverage-bundle-v1 report/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('streamed compact coverage preserves pinned-Node LCOV without writable scratch', (context) => {
+  const root = mkdtempSync(join(tmpdir(), 'rmd-streamed-lcov-'));
+  const rawDirs = [join(root, 'left-raw'), join(root, 'right-raw')];
+  const compactDirs = [join(root, 'left-compact'), join(root, 'right-compact')];
+  const output = join(root, 'streamed.info');
+  try {
+    for (let index = 0; index < rawDirs.length; index += 1) {
+      mkdirSync(rawDirs[index]!);
+      const tap = execFileSync(process.execPath, [
+        '--enable-source-maps', '--experimental-test-coverage', '--test-coverage-exclude=test/**',
+        '--test', `--test-name-pattern=${index === 0 ? 'provider selector uses the subscription' : 'provider selector excludes an exhausted'}`,
+        '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', 'test/worker-provider.test.ts',
+      ], { cwd: process.cwd(), env: coverageEnv(rawDirs[index]!), encoding: 'utf8', stdio: 'pipe' });
+      assert.match(tap, /^# tests [1-9]\d*/m, 'the real profile producer must complete tests');
+      runCompactor(compactDirs[index]!, rawDirs[index]!);
+    }
+    const control = pinnedNodeControl(root, rawDirs);
+    assert.equal(control.order.length, rawDirs.length, 'this control has one process report per compact directory');
+    const log = execFileSync(process.execPath,
+      ['--expose-internals', 'scripts/coverage-merge-ratchet.mjs', '--output', output, ...control.order.map((index) => compactDirs[index]!)],
+      { cwd: process.cwd(), env: { ...process.env, TMPDIR: join(root, 'scratch-does-not-exist') }, encoding: 'utf8', stdio: 'pipe' });
+    const streamed = readFileSync(output, 'utf8').split('\n');
+    const expected = control.lcov.split('\n');
+    const mismatch = streamed.findIndex((line, index) => line !== expected[index]);
+    assert.equal(mismatch, -1, `LCOV mismatch at line ${mismatch + 1}: ${streamed[mismatch]} vs ${expected[mismatch]}`);
+    assert.equal(streamed.length, expected.length, 'every SF, DA, FNDA and BRDA field must match Node');
+    assert.ok(summaryTotals(control.lcov).BRF > 0, 'the control must measure branches');
+    assert.match(log, /stagingBytes=0\b/);
+    assert.match(log, /stagingDir=none\b/);
+    assert.equal(Number(log.match(/peakBytes=(\d+)/)?.[1]), Number(log.match(/inputBytes=(\d+)/)?.[1]));
+    context.diagnostic(log.trim());
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('streamed compact coverage refuses corrupt process reports and source-map references', () => {
+  const root = mkdtempSync(join(tmpdir(), 'rmd-invalid-streamed-lcov-'));
+  const compact = join(root, 'compact');
+  mkdirSync(compact);
+  const bundlePath = join(compact, 'coverage-bundle-1-0000000000000-0.json');
+  const base = { format: 'rmd-v8-coverage-bundle-v1', sourceMaps: [], reports: [] as unknown[] };
+  try {
+    for (const [report, message] of [
+      [{ result: null, sourceMapRefs: {} }, /invalid compact process report/],
+      [{ result: [], sourceMapRefs: null }, /invalid compact process report/],
+      [{ result: [], sourceMapRefs: { 'file:///invalid.ts': -1 } }, /invalid source-map reference/],
+      [{ result: [], sourceMapRefs: { 'file:///invalid.ts': 0 } }, /invalid source-map reference/],
+      [{ result: [], sourceMapRefs: { 'file:///invalid.ts': 0.5 } }, /invalid source-map reference/],
+    ] as const) {
+      writeFileSync(bundlePath, JSON.stringify({ ...base, reports: [report] }));
+      assert.throws(() => runMerger(join(root, 'output.info'), compact), message);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
