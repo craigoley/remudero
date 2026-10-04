@@ -31,6 +31,41 @@ export interface HumanGateSource {
   gates: readonly HumanGateObservation[];
 }
 
+interface ChangeManagementAction {
+  kind: "blocked_pr" | "merge_held";
+  prNumber?: number;
+  prUrl?: string;
+  disposition: string;
+  reason: string;
+  tone: "exhausted" | "held" | "blocked" | "unknown" | "repairing";
+  strike?: { n: number; of: number };
+  sortAt?: string;
+}
+
+export function projectChangeManagementGates(
+  input: Pick<HumanGateSource, "instance" | "state" | "reason"> & { actions: readonly ChangeManagementAction[] },
+): HumanGateSource {
+  const evidence = (action: ChangeManagementAction): string =>
+    `${action.disposition}: ${action.reason}${action.strike ? ` (failed repair attempts ${action.strike.n}/${action.strike.of})` : ""}`;
+  const unknown = input.actions.filter((action) => action.kind === "blocked_pr" && action.tone === "unknown");
+  const reasons = [...new Set([...(input.reason ? [input.reason] : []), ...unknown.map(evidence)])].sort();
+  const gates: HumanGateObservation[] = input.actions.flatMap((action) => {
+    if (action.kind === "blocked_pr" && action.tone === "repairing") return [];
+    const held = action.kind === "merge_held";
+    return [{
+      kind: action.kind, subject: String(action.prNumber ?? "fleet"),
+      ownerSurface: held || action.tone === "blocked" ? "change-management" : "inbox",
+      openedAt: action.sortAt ?? null, url: action.prUrl ?? null,
+      reason: evidence(action), resolutionVerb: held ? "release_hold" : "rework",
+    }];
+  });
+  return {
+    name: "change-management", instance: input.instance,
+    state: input.state === "complete" && unknown.length > 0 ? "partial" : input.state,
+    ...(reasons.length > 0 ? { reason: reasons.join("; ") } : {}), gates,
+  };
+}
+
 export type HumanGateCount = { count: number; atLeast?: never } | { atLeast: number; count?: never };
 
 export interface HumanGateProjection {
