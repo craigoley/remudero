@@ -11582,9 +11582,9 @@ export async function runFixRung(opts: {
       });
     const fixReport = workerTranscript(fixResult);
     const fixLeftEdits = () => (deps.worktreeHasUncommittedChanges ?? worktreeHasUncommittedChanges)(opts.worktreePath);
-    // W1-T5565: derive from the known failure for every shell-less writer before refusing a
-    // missing line. A worker-authored subject still wins; only an unknown failure needs a re-ask.
-    const derivedFirst = fixHarnessOwnsGit && fixLeftEdits()
+    // W1-T5565: identified shell-less writers derive from the known failure. Legacy results
+    // without a provider retain their session re-ask; a worker-authored subject still wins.
+    const derivedFirst = fixHarnessOwnsGit && (fixResult.provider ?? fixArgs.mountProvider) !== undefined && fixLeftEdits()
       ? derivedFixCommit(priorCiFailures?.[0]?.name ?? unmet[0]?.claim ?? gateFailuresNow?.[0]?.reason, opts.prUrl)
       : undefined;
     let harnessCommitCount = harnessCommit(fixReport, { derivedCommit: derivedFirst });
