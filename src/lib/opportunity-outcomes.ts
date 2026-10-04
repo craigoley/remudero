@@ -4,12 +4,14 @@ import { systemClock, type Clock } from "./clock.js";
 import { codeqlSnapshot, reconcileCodeqlQualityProposals, type CodeqlFilingSnapshot } from "./codeql-quality-intake.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import type { GardenerDeps } from "./gardener.js";
-import type { GardenerOverseerPorts, productionGardenerOverseerPorts } from "./gardener-overseer.js";
+import type { GardenerOverseerPorts, OpportunityMeasurement, productionGardenerOverseerPorts } from "./gardener-overseer.js";
 import { ghJson } from "./github-transport.js";
 import { loadProposalRegistry } from "./inbox.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { opportunityKey, productionOpportunityIntakePorts, type OpportunityCandidate, type OpportunityIntakePorts, type OpportunityWork } from "./opportunity-intake.js";
 import { loadCreditStore } from "./status.js";
+
+export type { OpportunityWindow, OpportunityMeasurement } from "./gardener-overseer.js";
 
 export interface OpportunitySource {
   candidate: OpportunityCandidate;
@@ -17,22 +19,6 @@ export interface OpportunitySource {
   sourceIds: string[];
   codeql?: CodeqlFilingSnapshot;
   expiresAt?: string;
-}
-export interface OpportunityWindow {
-  value: number;
-  denominator: number;
-  populationUnit: string;
-  unit: string;
-  start: string;
-  end: string;
-}
-export interface OpportunityMeasurement {
-  repo: string;
-  key: string;
-  revision: string;
-  targetedCost: { before: OpportunityWindow; after: OpportunityWindow };
-  failureRework?: { before: OpportunityWindow; after: OpportunityWindow };
-  verdict?: "credit" | "debit";
 }
 export interface OpportunityEvidence {
   task?: { id: string; repo: string; key: string; filedAt?: string };

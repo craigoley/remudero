@@ -12,7 +12,6 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { GardenEffectsUnreadableError, GardenStateUnreadableError, gardenEffectsPath, gardenStatePath, readGardenEffects, readGardenState, writeGardenEffects, type GardenEffect, type PrState } from "./gardener.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
-import type { OpportunityMeasurement } from "./opportunity-outcomes.js";
 
 /**
  * lib/gardener-overseer.ts (W1-T4802) — the gardener that watches every gardener.
@@ -89,6 +88,23 @@ export interface GardenerPrInfo {
   title: string;
   paths: string[];
   mergedAt?: string;
+}
+
+export interface OpportunityWindow {
+  value: number;
+  denominator: number;
+  populationUnit: string;
+  unit: string;
+  start: string;
+  end: string;
+}
+export interface OpportunityMeasurement {
+  repo: string;
+  key: string;
+  revision: string;
+  targetedCost: { before: OpportunityWindow; after: OpportunityWindow };
+  failureRework?: { before: OpportunityWindow; after: OpportunityWindow };
+  verdict?: "credit" | "debit";
 }
 
 export interface EffectReading {
