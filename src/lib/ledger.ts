@@ -672,6 +672,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // archived away, a completed migration reads as `hold` and the rung submits it again.
   "dep-review.migrate.completed",
   "review.posted",
+  // W1-T3691: daemon.ts rebuilds stale-reviewer skip recurrence at boot from this row; losing it
+  // forgets an already-requested freshness restart and can repeat the restart ladder.
+  "review.skipped_stale_reviewer_code",
   // status.ts's plan-only credit refusal reads it once rotation stops carrying a merged PR's review rows.
   PLAN_ONLY_REVIEW_MARKER_STEP,
   "review.post_refused",
