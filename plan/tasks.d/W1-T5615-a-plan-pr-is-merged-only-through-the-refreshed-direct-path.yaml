@@ -1,0 +1,49 @@
+- id: W1-T5615
+  title: "A PLAN PR IS NEVER ARMED FOR GITHUB AUTO-MERGE — W1-T5472's behind-plan-PR refresh lives only in `directMergePreflight`, but the review lane arms `--auto` while checks run and GitHub then merges a behind plan PR as-is: #8996 and #8997 were armed 3 ms apart at 00:16:53Z 10-04 from one base, merged 00:18 and 00:22, and main carried a duplicate `priority:` in w1-t5557-selector-shadow-miss.yaml until #9005"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 15.00
+  risk: medium
+  origin: "operator session 2026-10-04: race #3 (#8996 judge + #8997 gardener duplicated a key, repaired by #9005)"
+  plan_refs: [W1-T5472, W1-T5519, W1-T5457, W1-T5317, W1-T3694, W1-T2855, W1-T5492, W1-T5284]
+  files: [src/lib/arm-auto-merge.ts, test/a-plan-pr-is-merged-only-through-the-refreshed-direct-path.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main d13d797c.
+    W1-T5472 (#8910) added the plan-touch read (`readPlanTouch` -> `planTouchFromRest`) only inside
+    `directMergePreflight` (src/lib/arm-auto-merge.ts). `attemptArm` reaches that only after
+    `deps.armAuto` THROWS (the clean-status or quota fallback). When `armAuto` succeeds,
+    `attemptArm` returns `{ outcome: "armed" }` at once, and GitHub merges whenever the required
+    checks go green;
+    without strict protection (W1-T3694 rejected it) it never updates a behind head first.
+    The review lane (`armIfVerdictPermits` -> `armAutoMergeDetailed` -> `attemptArm`) arms at PASS,
+    before CI finishes. Ledger: `automerge.armed` rows for PR 8997 and PR 8996 at 00:16:53Z 10-04,
+    both `lane: review`, `outcome: armed`. GitHub merged #8996 at 00:18:31 and #8997, now behind
+    it, at 00:22:35. The daemon quarantined W1-T5557's shard at 00:33:32
+    (`plan.shard_quarantined`) and the W1-T5519 repair lane opened #9005. Third race (#8877,
+    #8922, #9005).
+    CI cannot refuse it: lint-plan (`--base HEAD^1`) and the unique-keys census each run once on
+    the PR's merge ref, and GitHub never re-runs them when a sibling merges; main-plan-guard.yml
+    runs only after the push to main. W1-T5457 lints only at land time, and W1-T5317 guards only
+    judge pins. A merge queue would also close it, but `main` is not a queue branch (operator call).
+  design: |
+    In `attemptArm`, before `deps.armAuto`, read `readPlanTouchOrUnreadable`. For "touched" or
+    "unreadable", never call `armAuto`. Read `deps.readMergeFacts`: when `mergeableState` is
+    "clean" or "behind", take the existing direct path (`directMergePreflight`, then
+    `mergeDirect`), so a behind plan PR is updated and re-checked first. Otherwise, or when the
+    facts cannot be read, return a new non-armed outcome `plan-pr-held` and ledger
+    `automerge.plan_pr_held` (register it in the ledger-step censuses it belongs to). Being
+    non-armed it keeps `acted:false` in the sweep, which retries it on its next `mergeable` pass.
+    Add the outcome to `ArmOutcome` and `armOutcomeReason`. "untouched", or no reader wired, arms
+    exactly as today. Already-armed plan PRs drain under the old rule.
+  acceptance:
+    - claim: "a plan-touching or unreadable-files PR is never armed with --auto: with checks pending it is held unarmed, when green and behind it is updated rather than merged, when green and current it is merged directly, and a PR touching no plan path is armed as before"
+      proof: "unit test: test/a-plan-pr-is-merged-only-through-the-refreshed-direct-path.test.ts"
+  falsifier: |
+    Remove the plan-touch check in front of `deps.armAuto`. For the suite's plan PR with
+    `mergeableState: "blocked"`, the fake `armAuto` is called and the result is `armed`.

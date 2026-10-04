@@ -27,10 +27,15 @@ test("the retro's skill drafts carry the workflow mined from successful transcri
     ...run("D1", "W1-T4810", 4, ["Edit"], true),
     ...run("D2", "W1-T4811", 5, ["Edit"], true),
     ...run("D3", "W1-T4812", 6, ["Edit"], true),
+    // W1-T4270: a clean_single_strike-only shape names the merge outcome and drafts nothing, so the
+    // successful runs also carry a fully-executed review — the eligible signal a draft is built from.
+    ...["P1", "P2", "P3"].map((runId) =>
+      JSON.stringify({ ts: "2026-05-07T00:00:00.000Z", run_id: runId, step: "review.posted", proof_exec: ["executed_pass", "executed_pass"] }),
+    ),
   ].join("\n");
   const gather = buildGather({ ledgerNdjson, learningsMd: "" });
-  const draft = gather.skillDrafts.find((d) => /clean-single-strike/.test(d.name));
-  assert.ok(draft, "the three clean single-strike runs stage a draft");
+  const draft = gather.skillDrafts.find((d) => /fully-exec/.test(d.name));
+  assert.ok(draft, "the three clean, fully-executed runs stage a draft");
   assert.match(draft!.markdown, /Call `Grep`/, "the distinguishing step from the successful transcripts is in the Procedure");
   assert.match(draft!.markdown, /\[src: transcript#P1\]/);
 });

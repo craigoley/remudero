@@ -1,0 +1,42 @@
+- id: W1-T5617
+  title: "THE PRE-PUSH CENSUS PRECHECK RUNS THE ADMITTED CENSUS SUITES — `CENSUS_ADMITTED_MEMBERS` (bound-kind, catch-erasure, negative-reachability, ledger-literal, authority, no-shallowing, no-draft-pr; each measured under 2 s) are projected into `FAST_GATE_STEPS`, which no worker runs since W1-T464, so hooks/pre-push passes a diff these suites refuse in CI"
+  repo: remudero
+  depends_on: [W1-T5616]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — precheck runs the admitted suites
+  origin: "operator session 2026-10-04: fleet PRs red in CI on censuses census-precheck passed (#8961 #8970 #9066 #9077 #9079)"
+  plan_refs: [W1-T3225, W1-T3224, W1-T5101, W1-T2595, W1-T2478, W1-T464]
+  files: [scripts/census-precheck.mjs, scripts/census-precheck-parity-baseline.json, test/census-precheck-runs-the-admitted-census-suites.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main d13d797c.
+    `CENSUS_ADMITTED_MEMBERS` (src/lib/ci-parity.ts) holds seven suites, each with a `walks`
+    prefix list and a `census:*` npm script, measured under `FAST_GATE_CENSUS_BOUND_MS` (2000).
+    Only `runPreflightFast` executes them. The worker contract dropped `rmd preflight`
+    (src/lib/compaction.ts, W1-T464), and `outputContractLines` names only comment-load-signal and
+    source-size-ratchet. hooks/pre-push runs census-precheck but no census suite.
+    Precheck already has a child-process precedent, `measureViaChild` (instrument-surface,
+    W1-T5101): time-bounded, and any failure becomes `unmeasured` (exit 2).
+    W1-T3225 removed suite-spawning from the hook because a hook child inherited GIT_DIR; W1-T3224's
+    `unset GIT_DIR ...` at the hook's top is that fix, and it runs before census-precheck.
+  design: |
+    1. In census-precheck, for each CENSUS_ADMITTED_MEMBERS member whose `walks` prefix matches a
+       changed path, run those suites once in a single child
+       (`node --test --import tsx --import ./test/setup/tmp-hygiene.ts <files>`) with GIT_* stripped
+       from the env and a 60 s bound.
+    2. Read the child's TAP. Each failing file becomes one row
+       `census-suite: <file> fails — run npm run <script>`, in the shape `censusPushRefusal` reads.
+    3. A spawn error, timeout, signal or missing `# tests` summary is `unmeasured`, never clean.
+    4. Move the run members out of W1-T5616's baseline into PRECHECK_PARITY.
+    This partly reverses W1-T3225 for the admitted set; state that in the PR for the operator.
+  acceptance:
+    - claim: "a diff that grows a census-admitted suite's population is refused by census-precheck with the suite named, an untouched population starts no child, and a child that cannot finish reads as not measured"
+      proof: "unit test: test/census-precheck-runs-the-admitted-census-suites.test.ts"
+  falsifier: |
+    Remove the admitted-suite pass from `evaluateCensusPrecheck`'s caller and the refusing fixture
+    exits 0. Map a child timeout to [] and the not-measured case exits 0 instead of 2.

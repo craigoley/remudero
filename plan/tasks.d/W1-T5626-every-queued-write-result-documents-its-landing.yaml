@@ -1,0 +1,38 @@
+- id: W1-T5626
+  title: "EVERY QUEUED CONSOLE WRITE DOCUMENTS ITS LANDING — POST /v1/feedback, /v1/feedback/decision, /v1/skills/run and /v1/escalation/reply answer `landing: queued` since #9049/#8929, but SubmitFeedbackResult, ProposalDecisionResult, RunSkillResult and EscalationReplyResult in openapi/daemon.yaml (and the generated api-client) declare no such field"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one contract — the openapi schemas and the api-client generated from them
+  origin: "operator session 2026-10-04: reviewing W1-T5524 (#9003) and W1-T5525 (#9049)"
+  plan_refs: [W1-T5525, W1-T5524, W1-T5460]
+  files: [openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/every-queued-write-result-documents-its-landing.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main d13d797c. W1-T5524 merged as #9003 and W1-T5525 as #9049 (both
+    shards still read `queued`). The 200 bodies spread `landing: "queued"` in
+    `buildSubmitFeedbackRoute` and `buildProposalDecisionRoute` (src/lib/panel-graph.ts), the
+    skills-run handler (src/lib/panel-skill-run.ts, whose own `RunSkillResult` type declares
+    `landing?: "queued"`) and `buildEscalationReplyRoute` (src/lib/panel-actions.ts). In
+    openapi/daemon.yaml, SubmitFeedbackResult {ok, entry}, ProposalDecisionResult {ok, id, status,
+    proposalPr}, RunSkillResult {ok, skill, mode, taskId, feedback} and EscalationReplyResult {ok,
+    taskId, threadId, feedback, interpretation} have no `landing`; #9003 documented it only on
+    FeedbackEntry. A typed client cannot see that a write is pending.
+    The console's rendering of the field lives in craigoley/remudero-console, not this plan.
+  design: |
+    Add an optional `landing: {type: string, enum: [queued]}` to the four schemas, with one shared
+    description: present when the record was staged for the daemon landing sweep (W1-T5460),
+    absent when staging failed. Regenerate with `npm run api-client:generate` so `api-client:check`
+    stays green. The test drives each route with a fake state root and asserts every top-level key
+    of its 200 body is a declared property of its schema.
+  acceptance:
+    - claim: "each of the four queued feedback write routes answers only keys its openapi result schema declares, and each schema declares landing with enum queued"
+      proof: "unit test: test/every-queued-write-result-documents-its-landing.test.ts"
+  falsifier: |
+    Remove `landing` from SubmitFeedbackResult. The suite's POST /v1/feedback body carries an
+    undeclared key.

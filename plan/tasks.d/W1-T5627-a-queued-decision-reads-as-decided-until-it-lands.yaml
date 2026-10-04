@@ -1,0 +1,39 @@
+- id: W1-T5627
+  title: "A QUEUED DECISION READS AS DECIDED UNTIL IT LANDS — `setFeedbackStatus` with `land.stateRoot` writes only the queue, so GET /v1/feedback serves the checkout's `status: proposed` beside `landing: queued`, and POST /v1/feedback/decision re-reads that stale status and accepts a second, even opposite, decision over the queued one"
+  repo: remudero
+  depends_on: [W1-T5626]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one defect — the queued-record overlay
+  origin: "operator session 2026-10-04: the board shows status proposed beside landing queued (W1-T5524)"
+  plan_refs: [W1-T5524, W1-T5525, W1-T5460]
+  files: [src/lib/panel-graph.ts, src/lib/feedback-landing.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/a-queued-decision-reads-as-decided-until-it-lands.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main d13d797c. `setFeedbackStatus` (src/lib/feedback.ts) calls
+    `landFeedbackStatusContent` when `opts.land` is set; with `stateRoot` that only calls
+    `queueFeedbackLanding` and never writes the checkout. `buildFeedbackInboxRoute` lists the
+    checkout and `decorateFeedbackLanding` adds only `landing: "queued"`, so a decided entry reads
+    `status: proposed` + `landing: queued` (an answered grill reads `grilling`), `?status=proposed`
+    still returns it, and the board offers the decision again. `buildProposalDecisionRoute` reads
+    `readFeedbackEntry(deps.root, ...)`, sees `proposed`, and stages a second record: the rename
+    overwrites the first and a second panel.proposal_accepted/rejected row is ledgered. The
+    console renders neither field (separate repo); this is the core half of "status proposed
+    beside queued".
+  design: |
+    Export a queued-record reader from feedback-landing.ts that parses each record
+    `queuedFeedbackLandings` names. `decorateFeedbackLanding` overlays the queued record's fields
+    (status, answered_by) on the entry it decorates, keeps `landing: "queued"`, and runs before the
+    `?status=` filter. `buildProposalDecisionRoute` reads the entry through the same overlay, so a
+    queued decision gets the existing 400 "not awaiting a decision"; a failed queue read there
+    refuses (503) and never decides blind. Update FeedbackEntry.landing's openapi description.
+  acceptance:
+    - claim: "GET /v1/feedback reports a queued decision's status (not the checkout's) with landing queued, status=proposed omits it, and a second decision on it is refused"
+      proof: "unit test: test/a-queued-decision-reads-as-decided-until-it-lands.test.ts"
+  falsifier: |
+    Drop the overlay from decorateFeedbackLanding. The staged accept reads back `proposed`, and a
+    second POST /v1/feedback/decision answers 200.

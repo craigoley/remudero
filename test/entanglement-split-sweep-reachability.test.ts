@@ -317,7 +317,7 @@ test("last exact-input review wins, so success or a different failure class clea
   }
 });
 
-// W1-T3172 unrelated review routes stay byte-identical.
+// W1-T3172 unrelated review routes stay behavior-identical; W1-T5537 adds the blocker field.
 test("ordinary unmet and Rule-15 review routes remain unchanged", () => {
   const base: OpenPrView = {
     prNumber: 1,
@@ -336,6 +336,7 @@ test("ordinary unmet and Rule-15 review routes remain unchanged", () => {
   };
   assert.deepEqual(deriveDisposition(base, DEFAULT_SWEEP_POLICY, JUDGED_AT_MS), {
     disposition: "blocked-fixable",
+    blocker: "review-failed",
     reason: "1 unmet criterion — strike 1/2",
   });
   const rule15 = deriveDisposition({ ...base, unmetCriteria: [], reviewSummary: "Standing rule 15" }, DEFAULT_SWEEP_POLICY, JUDGED_AT_MS);

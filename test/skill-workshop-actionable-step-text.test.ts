@@ -26,6 +26,23 @@ function rendered(signal: string): SkillDraft {
   })!;
 }
 
+/** W1-T4270: renderSkillDraft no longer drafts an outcome-only or unmapped signal, but a draft
+ *  staged before it (or built by another caller) still reaches the scanner. This rebuilds that
+ *  shape from a mixed render, which carries every mined outcome, with its Procedure swapped to the
+ *  given signal's own step alone. */
+function outcomeOnly(signal = "clean_single_strike"): SkillDraft {
+  const mixed = renderSkillDraft({
+    shapeKey: `implement:${signal}`,
+    taskType: "implement",
+    signals: [signal, "fully_executed_proof"],
+    runIds: ["P1", "P2"],
+    taskIds: ["W1-T300", "W1-T301"],
+    supportingRuns: 2,
+  })!;
+  const line = `- ${PROCEDURAL_STEP_TEXT[signal] ?? signal}`;
+  return { ...mixed, markdown: mixed.markdown.replace(`- ${PROCEDURAL_STEP_TEXT.fully_executed_proof}`, line) };
+}
+
 function described(description: string, ...steps: string[]): SkillDraft {
   return {
     name: "future-signal",
@@ -38,7 +55,8 @@ function described(description: string, ...steps: string[]): SkillDraft {
 }
 
 test("W1-T4283: the clean_single_strike step is refused as restating its own outcome", () => {
-  const draft = rendered("clean_single_strike");
+  assert.equal(rendered("clean_single_strike"), undefined, "W1-T4270: an outcome label is never drafted");
+  const draft = outcomeOnly("clean_single_strike");
   assert.ok(draft.markdown.includes(`- ${PROCEDURAL_STEP_TEXT.clean_single_strike}`));
   assert.equal(scanSkillDraft(draft, ALLOWLIST).ok, false);
 });
@@ -57,9 +75,9 @@ test("W1-T4283: mined transcript steps replace the outcome-only step, so the dra
     { ts: "2026-05-01T00:00:01.000Z", run_id: "D1", task_id: "W1-T302", step: "fix.dispatch" },
   ];
   const draft = renderSkillDraft({
-    shapeKey: "implement:clean_single_strike",
+    shapeKey: "implement:clean_single_strike+fully_executed_proof",
     taskType: "implement",
-    signals: ["clean_single_strike"],
+    signals: ["clean_single_strike", "fully_executed_proof"],
     runIds: ["P1", "P2"],
     taskIds: ["W1-T300", "W1-T301"],
     supportingRuns: 2,
@@ -78,7 +96,7 @@ test("W1-T4283: the fully_executed_proof step passes unchanged", () => {
 });
 
 test("W1-T4283: a refused draft names the offending step verbatim with offendingLine and reason", () => {
-  const draft = rendered("clean_single_strike");
+  const draft = outcomeOnly("clean_single_strike");
   const line = `- ${PROCEDURAL_STEP_TEXT.clean_single_strike}`;
   const result = scanSkillDraft(draft, ALLOWLIST);
   assert.equal(result.offendingLine, line);
@@ -106,7 +124,7 @@ test("W1-T4283: punctuation, case and grammatical filler add no behavioral conte
 test("W1-T4283: an actionable sibling cannot hide the first outcome-only step", () => {
   const draft = described("Verified results shipped.", "Run tests before shipping.", "Ship verified results.", "Verified results shipped.");
   assert.equal(scanSkillDraft(draft, ALLOWLIST).offendingLine, "- Ship verified results.");
-  const shipped = rendered("clean_single_strike");
+  const shipped = outcomeOnly("clean_single_strike");
   assert.equal(scanSkillDraft({ ...shipped, markdown: shipped.markdown.replace("## Evidence", "- Call `Grep` before editing.\n\n## Evidence") }, ALLOWLIST).ok, false);
 });
 
@@ -117,14 +135,15 @@ test("W1-T4283: outcome comparisons use only Procedure steps, not frontmatter or
 });
 
 test("W1-T4283: an unmapped signal cannot stage its raw key as a procedure", () => {
-  assert.equal(scanSkillDraft(rendered("future_outcome"), ALLOWLIST).ok, false);
+  assert.equal(rendered("future_outcome"), undefined, "W1-T4270: an uncatalogued signal is never drafted");
+  assert.equal(scanSkillDraft(outcomeOnly("future_outcome"), ALLOWLIST).ok, false);
 });
 
 test("W1-T4283: caller-supplied outcome metadata reaches the scanner without changing the signal table", () => {
   const draft = renderSkillDraft({
-    shapeKey: "implement:fast_delivery",
+    shapeKey: "implement:fast_delivery+fully_executed_proof",
     taskType: "implement",
-    signals: ["fast_delivery"],
+    signals: ["fast_delivery", "fully_executed_proof"],
     outcomeDescriptions: { fast_delivery: "Verified results shipped." },
     runIds: ["P1", "P2"],
     taskIds: ["W1-T300", "W1-T301"],
@@ -148,14 +167,14 @@ test("W1-T4283: empty outcome metadata falls back to the draft description", () 
 test("W1-T4283: removing outcome-only bullets does not prevent a behavioral draft refresh", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-test-actionable-refresh-"));
   const registry = join(dir, "proposals.json");
-  const outcomeOnly = rendered("clean_single_strike");
-  const id = skillDraftProposalId(outcomeOnly.procedureKey);
+  const staged = outcomeOnly("clean_single_strike");
+  const id = skillDraftProposalId(staged.procedureKey);
   const draft = {
-    ...outcomeOnly,
-    markdown: outcomeOnly.markdown.replace(PROCEDURAL_STEP_TEXT.clean_single_strike, "Call `Grep` before editing."),
+    ...staged,
+    markdown: staged.markdown.replace(PROCEDURAL_STEP_TEXT.clean_single_strike, "Call `Grep` before editing."),
   };
   try {
-    writeFileSync(registry, JSON.stringify({ proposals: [{ id, summary: "staged earlier", evidenceAnchors: [], skillFile: { name: outcomeOnly.name, markdown: outcomeOnly.markdown } }] }));
+    writeFileSync(registry, JSON.stringify({ proposals: [{ id, summary: "staged earlier", evidenceAnchors: [], skillFile: { name: staged.name, markdown: staged.markdown } }] }));
     const result = stageSkillDraft(registry, draft, ALLOWLIST, { reachable: true, reason: "fixture" });
     assert.equal(result.refreshed, true);
     assert.equal(result.alreadyStaged, true);
