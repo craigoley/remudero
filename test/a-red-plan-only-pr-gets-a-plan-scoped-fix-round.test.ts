@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -11,6 +10,7 @@ import { buildSweepEffects, DEFAULT_SWEEP_POLICY, drainDetachedSweepActions, fix
 import type { PlanPrPreflightResult } from "../src/lib/plan-pr-emitter.js";
 import { acceptanceAuthorTimeCheck } from "../src/lib/review.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
+import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "./helpers/git-repo.js";
 
 const HEAD = "a".repeat(40);
 const NEXT = "b".repeat(40);
@@ -241,14 +241,13 @@ test("the plan round carries read, spawn, metadata and push errors as refusals",
 
 test("the plan round's default git seam commits in a detached tree", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-plan-round-"));
-  const repo = join(root, "repos", "remudero");
-  mkdirSync(repo, { recursive: true });
-  const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: "pipe" }).trim();
+  const fixtureRepo = gitRepo({ seedCommit: false, kind: "plan-round-repo" });
+  const repo = fixtureRepo.dir;
+  const git = fixtureRepo.git;
   let tree: string | undefined;
   try {
-    git("init", "--quiet");
-    git("config", "user.name", "Fixture");
-    git("config", "user.email", "fixture@example.test");
+    git("config", "user.name", GIT_REPO_FIXTURE_IDENTITY.name);
+    git("config", "user.email", GIT_REPO_FIXTURE_IDENTITY.email);
     writeFileSync(join(repo, ".gitignore"), "node_modules\n");
     git("add", ".gitignore");
     git("commit", "--quiet", "-m", "chore(plan): fixture base");
@@ -286,6 +285,7 @@ test("the plan round's default git seam commits in a detached tree", async () =>
     assert.equal(noToolchain.failure?.message, "plan round toolchain unavailable");
   } finally {
     if (tree) git("worktree", "remove", "--force", tree);
+    fixtureRepo.cleanup();
     rmSync(root, { recursive: true, force: true });
   }
 });

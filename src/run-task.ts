@@ -1527,6 +1527,7 @@ import {
   type MemoryGovernorResult,
   type MergeConflictEvidence,
   type OpenPrView,
+  type PlanScopedFixRoundInput,
   type ReviewDispatchMode,
   type ReviewReuseInputs,
   type RollupCheckEntry,
@@ -5223,24 +5224,7 @@ function untouchedPlanCriterion(roundDiff: string, priorDiff: string, path: stri
   return false;
 }
 
-export async function runPlanScopedFixRound(input: {
-  pr: OpenPrView;
-  task: { id: string; title: string; files: readonly string[] };
-  worktreePath: string;
-  title: string;
-  body: string;
-  runId?: string;
-  lastRefusal?: string;
-  deps: {
-    runGit?: (args: string[]) => string;
-    preflight?: typeof planPrPreflightAtCommitAsync;
-    spawn: (prompt: string) => Promise<string>;
-    push: (sha: string) => unknown;
-    updateMetadata: (metadata: { title: string; body: string }) => Promise<void>;
-    execProof?: (proof: string) => { hits: number } | undefined;
-    log: (step: string, extra?: Record<string, unknown>) => void;
-  };
-}): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
+export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
   const { pr, deps, worktreePath } = input;
   const git = deps.runGit ?? ((args: string[]) => execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" }));
   const preflight = deps.preflight ?? planPrPreflightAtCommitAsync;
@@ -19141,7 +19125,7 @@ export function materializeReviewWorktree(
 }
 
 export function materializePlanRoundWorktree(config: Config, repoDir: string, prNumber: number, headSha: string,
-  deps: { materialize?: typeof materializeReviewWorktree; prepare?: typeof prepareWorktreeToolchain } = {},
+  deps: Pick<ReviewCommandDeps, "materialize"> & { prepare?: FreshTreeReviewSeams["prepareWorktree"] } = {},
 ): MaterializeReviewWorktreeResult {
   const result = (deps.materialize ?? materializeReviewWorktree)(config, repoDir, prNumber, headSha);
   if (result.worktreePath && !(deps.prepare ?? prepareWorktreeToolchain)(repoDir, result.worktreePath)) {

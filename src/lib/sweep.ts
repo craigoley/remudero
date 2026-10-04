@@ -18,7 +18,7 @@ import {
   type DisarmOutcome,
   type StackPrerequisiteCheck,
 } from "./arm-auto-merge.js";
-import { diagnoseBodyDefects } from "./body-repair.js";
+import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair } from "./classify.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
@@ -1181,6 +1181,23 @@ export function renderHeldReviewQueueBlocker(blocker: HeldReviewQueueBlocker): s
     `-- holding ${prList}`
   );
 }
+
+export type PlanScopedFixRoundInput = {
+  pr: OpenPrView;
+  task: { id: string; title: string; files: readonly string[] };
+  worktreePath: string;
+  title: string;
+  body: string;
+  runId?: string;
+  lastRefusal?: string;
+  deps: Pick<BuildSweepEffectsDeps, "log"> & Pick<BodyRepairDeps, "execProof"> & {
+    runGit?: (args: string[]) => string;
+    preflight?: BuildSweepEffectsDeps["planPrPreflightImpl"];
+    spawn: (prompt: string) => Promise<string>;
+    push: (sha: string) => unknown;
+    updateMetadata: (metadata: { title: string; body: string }) => Promise<void>;
+  };
+};
 
 export interface BuildSweepEffectsDeps {
   /** W1-T4415 — marks one draft PR ready for review; the entrypoint adapter supplies the write. */
@@ -2518,36 +2535,37 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const settingsFile = renderWorkerSettings({ templatePath: join(repoRoot, "settings", "worker.json"),
           hooksDir: join(repoRoot, "hooks"), outPath: join(config.root, "tmp", `plan-round-${pr.prNumber}.json`) });
         const ciFailures = await fetchCiFailures(owner, repo, await restRollupFor(owner, repo, pr.headSha, readJsonImpl));
+        const roundEffects: PlanScopedFixRoundInput["deps"] = {
+          preflight: planPrPreflightImpl,
+          spawn: async (prompt: string) => {
+            const result = await (spawnImpl ?? benchmarkNonDispatchSpawn("plan-gate"))({
+              cwd: worktreePath, permissionMode: "bypassPermissions", settingsFile, model: mount.model, mountProvider: mount.provider, effort: mount.effort,
+              maxTurns: mount.maxTurns, maxBudgetUsd: task.budget_usd ?? defaultBudgetUsd, config, prompt,
+              tools: ["Read", "Write", "Edit", "Grep", "Glob"], cashTools: ["Read", "Write", "Edit", "Grep", "Glob", "RunCheck"],
+              runId, taskId: task.id,
+            });
+            log("sweep.plan_round.worker", { pr_number: pr.prNumber, head_sha: pr.headSha, cost_usd: result.costUsd,
+              num_turns: result.numTurns, subtype: result.subtype });
+            return workerTranscript(result);
+          },
+          push: (sha: string) => gitPushRunBranchForBuild(worktreePath, {
+            expectedHeadSha: sha,
+            capture: (file, args) => planRepairGit(file, args),
+            exec: (file, args) => { planRepairGit(file, [...args.slice(0, -1), `HEAD:refs/heads/${live.head.ref}`]); },
+          }),
+          updateMetadata: async (metadata: { title: string; body: string }) => {
+            const fresh = ghJsonForBuild(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as { head: { sha: string } };
+            if (fresh.head.sha !== pr.headSha) throw new Error("the filing head moved before the metadata write");
+            ghJsonForBuild(["api", "-X", "PATCH", `repos/${owner}/${repo}/pulls/${pr.prNumber}`,
+              "-f", `title=${metadata.title}`, "-f", `body=${metadata.body}`]);
+          },
+          log,
+        };
         return await runPlanScopedFixRound({ pr: { ...pr, headRefName: live.head.ref, ciFailures }, task, worktreePath,
           title: live.title, body: live.body, runId,
           lastRefusal: parseLedger(ledgerPath).findLast((l) => l.step === "sweep.plan_round.refused" &&
             l.pr_number === pr.prNumber && l.head_sha === pr.headSha)?.reason,
-          deps: {
-            preflight: planPrPreflightImpl,
-            spawn: async (prompt: string) => {
-              const result = await (spawnImpl ?? benchmarkNonDispatchSpawn("plan-gate"))({
-                cwd: worktreePath, permissionMode: "bypassPermissions", settingsFile, model: mount.model, mountProvider: mount.provider, effort: mount.effort,
-                maxTurns: mount.maxTurns, maxBudgetUsd: task.budget_usd ?? defaultBudgetUsd, config, prompt,
-                tools: ["Read", "Write", "Edit", "Grep", "Glob"], cashTools: ["Read", "Write", "Edit", "Grep", "Glob", "RunCheck"],
-                runId, taskId: task.id,
-              });
-              log("sweep.plan_round.worker", { pr_number: pr.prNumber, head_sha: pr.headSha, cost_usd: result.costUsd,
-                num_turns: result.numTurns, subtype: result.subtype });
-              return workerTranscript(result);
-            },
-            push: (sha: string) => gitPushRunBranchForBuild(worktreePath, {
-              expectedHeadSha: sha,
-              capture: (file, args) => planRepairGit(file, args),
-              exec: (file, args) => { planRepairGit(file, [...args.slice(0, -1), `HEAD:refs/heads/${live.head.ref}`]); },
-            }),
-            updateMetadata: async (metadata: { title: string; body: string }) => {
-              const fresh = ghJsonForBuild(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as { head: { sha: string } };
-              if (fresh.head.sha !== pr.headSha) throw new Error("the filing head moved before the metadata write");
-              ghJsonForBuild(["api", "-X", "PATCH", `repos/${owner}/${repo}/pulls/${pr.prNumber}`,
-                "-f", `title=${metadata.title}`, "-f", `body=${metadata.body}`]);
-            },
-            log,
-          },
+          deps: roundEffects,
         });
       } catch (error) {
         return { outcome: "refused", reason: String((error as Error)?.message ?? error) };
