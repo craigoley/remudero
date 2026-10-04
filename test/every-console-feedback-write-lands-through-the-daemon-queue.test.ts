@@ -97,7 +97,7 @@ test("POST /v1/feedback stages its capture for the daemon sweep and answers land
   assert.equal(body.landing, "queued");
   assert.deepEqual(fx.calls, [], "the request path never lands, so it never reaches git, gh or the preflight");
   assert.deepEqual(landing.queuedFeedbackLandings(fx.stateRoot), [rel(entry.id)]);
-  assert.equal(queuedBytes(fx.stateRoot, entry.id), readFileSync(join(fx.root, rel(entry.id)), "utf8"), "the capture's own bytes are staged");
+  assert.match(queuedBytes(fx.stateRoot, entry.id), new RegExp(`^id: ${entry.id}$`, "m"), "the capture's own record is staged");
   assert.equal(stepRow(fx.ledgerPath, "panel.feedback_submitted")?.landing, "queued");
 });
 

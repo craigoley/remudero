@@ -10874,6 +10874,14 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          description: >
+            A `submissionKey` or `replyTo` check could not read the landing queue (W1-T5628), where a
+            console capture lives until it lands, so nothing is filed, queued or ledgered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/trace:
     get:
@@ -10899,6 +10907,14 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          description: >
+            The id is not in the checkout and the landing queue, where a console capture lives until it
+            lands, could not be read (W1-T5628), so the id is never called unknown.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/operator-activity:
     get:
@@ -15098,6 +15114,14 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          description: >
+            A `replyTo` check could not read the landing queue (W1-T5628), so no preview is drawn
+            for a reply the submit could not validate either.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/hooks/github:
     post:

@@ -4216,6 +4216,7 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+          "503": Error;
         };
     };
   };
@@ -4227,6 +4228,7 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+          "503": Error;
         };
     };
   };
@@ -5528,6 +5530,7 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+          "503": Error;
         };
     };
   };
