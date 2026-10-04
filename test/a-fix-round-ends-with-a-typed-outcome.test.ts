@@ -172,6 +172,7 @@ test("W1-T5532: a missing FIX_OUTCOME line behaves exactly as today", async () =
   assert.equal((await runFixRung(f.run)).outcome, "fixed");
   assert.equal(f.rows.find((r) => r.step === "fix.done")?.fix_outcome, "unstated");
   const missing = fixture("REPORT\nno commit line");
+  missing.worker.provider = undefined;
   missing.setEdit(() => writeFileSync(join(missing.repo.dir, "src/fix.ts"), "edit\n"));
   await runFixRung(missing.run);
   assert.equal(missing.counts().spawns, 2);
@@ -200,6 +201,8 @@ test("W1-T5532: the resumed writer can authorize a derived fix or report another
   assert.match(missingCommitLinePrompt({ provider: "claude", title: "fix", report: "REPORT", worktreePath: "/unused" }), /FIX_OUTCOME/);
   for (const answer of ["FIXED", "NEEDS_DESIGN clarify ownership"]) {
     const f = fixture("REPORT\nno commit line");
+    // Exercise the legacy session-resume path; known providers now commit the first attempt directly.
+    f.worker.provider = undefined;
     let calls = 0;
     f.run.deps.spawn = async () => {
       calls++;

@@ -654,6 +654,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "fix.commit_refused",
   // W1-T4207: `lastCommitRefusalPromptLines` (run-task.ts) reads its `subtype` to name the last refused paths.
   "fix.done",
+  // W1-T5532: the typed fix outcome is itself read by the next fix-lane decision; losing this
+  // terminal row on rotation would erase an explicit NEEDS_DESIGN hand-off.
+  "fix.needs_design",
   "fix.resolved",
   // W1-T1095: `fixRebaseAlreadySpent` (run-task.ts) reads this to enforce "at most one rebase per
   // blocked PR"; no timer backs it, so losing it restores an unbounded rebase-and-retry.
