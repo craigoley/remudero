@@ -69,7 +69,13 @@ import {
   type FeedbackExpansion,
   type FeedbackStatus,
 } from "./feedback.js";
-import { queueFeedbackRecord, queuedFeedbackLandings, type LandFeedbackOpts } from "./feedback-landing.js";
+import {
+  queueFeedbackRecord,
+  queuedFeedbackLandings,
+  readQueuedFeedbackRecords,
+  type LandFeedbackOpts,
+  type QueuedFeedbackRecord,
+} from "./feedback-landing.js";
 import {
   feedbackDischargeStateForTasks,
   feedbackOriginTag,
@@ -190,8 +196,8 @@ export interface PanelGraphDeps {
 /**
  * A reconciled {@link FeedbackEntry} as GET /v1/feedback returns it. `unverified`, `discharged`/
  * `dischargeUndecidable` (W1-T1257) and `landing`/`landingUnknown` (W1-T5524) are read-time-only, never
- * written to `plan/feedback/<id>.yaml` — present only when set, layered after this reconcile. None
- * ever changes `status`.
+ * written to `plan/feedback/<id>.yaml` — present only when set, layered after this reconcile. Only
+ * `landing` changes `status`: a queued entry reads its queued record's (W1-T5627).
  */
 export type ReconciledFeedbackEntry = FeedbackEntry & {
   unverified?: true;
@@ -275,16 +281,25 @@ export function decorateFeedbackDischargeByTasks(
   });
 }
 
-/** W1-T5524: one queue read per request; a failed read marks every entry `landingUnknown`, never "nothing queued". */
+/** W1-T5627: the queued record's decision fields over the checkout's entry — what the entry reads as until it lands. */
+function overlayQueuedFeedback<E extends FeedbackEntry>(entry: E, queued: ReadonlyMap<string, QueuedFeedbackRecord>): E | (E & { landing: "queued" }) {
+  const record = queued.get(feedbackEntryRepoPath(entry.id));
+  if (!record) return entry;
+  const answeredBy = record.answered_by === undefined ? {} : { answered_by: record.answered_by as string | null };
+  return { ...entry, status: record.status as FeedbackStatus, ...answeredBy, landing: "queued" };
+}
+
+/** W1-T5524: one queue read per request; a failed read marks every entry `landingUnknown`, never "nothing queued".
+ *  W1-T5627: a queued entry reads as its queued record says, so the caller's `?status=` filter sees the decision. */
 function decorateFeedbackLanding(entries: ReconciledFeedbackEntry[], deps: PanelGraphDeps): ReconciledFeedbackEntry[] {
-  let queued: Set<string>;
+  let queued: Map<string, QueuedFeedbackRecord>;
   try {
-    queued = new Set(queuedFeedbackLandings(deps.inboxRoot));
+    queued = readQueuedFeedbackRecords(deps.inboxRoot);
   } catch (error) {
     deps.logProjection?.("serve.feedback_landing_queue_unreadable", { route: "/v1/feedback", reason: String((error as Error)?.message ?? error) });
     return entries.map((entry) => ({ ...entry, landingUnknown: true }));
   }
-  return entries.map((entry) => (queued.has(feedbackEntryRepoPath(entry.id)) ? { ...entry, landing: "queued" } : entry));
+  return entries.map((entry) => overlayQueuedFeedback(entry, queued));
 }
 
 /** GET /v1/feedback[?status=<status>] — the feedback inbox, read-scoped. */
@@ -612,6 +627,21 @@ export function buildProposalDecisionRoute(deps: PanelGraphDeps): Route {
       } catch {
         sendJson(res, 404, { error: "not_found", detail: `no feedback entry "${input.id}"` });
         return;
+      }
+      // W1-T5627: a decision already queued for the landing sweep is this entry's status; deciding over it
+      // would overwrite the queued record and ledger a second decision. An unreadable queue refuses.
+      if (deps.feedbackLand) {
+        try {
+          entry = overlayQueuedFeedback(entry, readQueuedFeedbackRecords(deps.inboxRoot));
+        } catch (error) {
+          const reason = String((error as Error)?.message ?? error);
+          deps.logProjection?.("serve.feedback_landing_queue_unreadable", { route: "/v1/feedback/decision", reason });
+          sendJson(res, 503, {
+            error: "landing_queue_unreadable",
+            detail: `feedback#${input.id}'s landing queue could not be read, so it is never decided blind: ${reason}`,
+          });
+          return;
+        }
       }
       if (entry.status !== "proposed") {
         sendJson(res, 400, {

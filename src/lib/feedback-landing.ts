@@ -32,6 +32,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
+import { parse as parseYaml } from "yaml";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { loadPlanFromYaml } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -1438,6 +1439,27 @@ export function queueFeedbackRecord(root: string, relPath: string, stateRoot: st
 /** Every record queued under `stateRoot` and not yet acknowledged landed — what the board may show as queued. */
 export function queuedFeedbackLandings(stateRoot: string): string[] {
   return listRelFiles(feedbackPendingRoot(stateRoot), FEEDBACK_REL_DIR).filter((rel) => QUEUED_FEEDBACK_RECORD.test(rel)).sort();
+}
+
+/** A queued `plan/feedback/<id>.yaml` record as parsed — the decision the checkout does not carry yet. */
+export type QueuedFeedbackRecord = Record<string, unknown> & { status: string };
+
+/** W1-T5627: each queued record parsed, keyed by its repo path. Throws on an unreadable queue or a record
+ *  that is not an entry: a caller that cannot see the queued decision must not read the stale one. */
+export function readQueuedFeedbackRecords(stateRoot: string): Map<string, QueuedFeedbackRecord> {
+  const records = new Map<string, QueuedFeedbackRecord>();
+  for (const rel of queuedFeedbackLandings(stateRoot)) {
+    const bytes = readFileSync(join(feedbackPendingRoot(stateRoot), rel), "utf8");
+    let parsed: unknown;
+    try {
+      parsed = parseYaml(bytes);
+    } catch (e) {
+      throw new Error(`queued ${rel} is unparseable: ${String((e as Error)?.message ?? e)}`);
+    }
+    if (typeof (parsed as { status?: unknown } | null)?.status !== "string") throw new Error(`queued ${rel} is not a feedback entry`);
+    records.set(rel, parsed as QueuedFeedbackRecord);
+  }
+  return records;
 }
 
 function queuedFeedbackSources(stateRoot: string | undefined): Array<[string, string]> {
