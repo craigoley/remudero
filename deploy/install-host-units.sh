@@ -342,7 +342,7 @@ render_deploy_code_refresh() {
   cat <<'DEPLOY_CODE_REFRESH'
 deploy_code_idle() {
   local container="$1" processes dir locks match_status
-  if ! processes="$(docker top "$container" -eo args 2>/dev/null)" || [ -z "$processes" ]; then
+  if ! processes="$(docker top "$container" -eo pid,args 2>/dev/null)" || [ -z "$processes" ]; then
     echo "rmd-relaunch: deploy code -- worker probe unreadable; deferring." >&2
     return 1
   fi

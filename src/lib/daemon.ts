@@ -770,6 +770,11 @@ export type DaemonFreshness =
   | { stale: false; notStale?: DaemonFreshnessNotStale }
   | { stale: true; oldSha: string; newSha: string; installNeeded?: boolean; changes?: readonly DeployWorthChange[] };
 
+/** W1-T5282 — the real wiring's reading is awaited, its `git fetch` off the loop; a sync reading stays sync. */
+function isPendingFreshness(read: DaemonFreshness | Promise<DaemonFreshness> | undefined): read is Promise<DaemonFreshness> {
+  return read instanceof Promise;
+}
+
 /** W1-T3618 — a sweep pass's OWN report of a freshness discovery {@link DaemonDeps.checkFreshness}
  *  cannot see: reviewer-code freshness is read inside the sweep's review path, once per pass and
  *  before the first PR's worktree materializes, never by this module. When that read is stale the
@@ -1069,8 +1074,9 @@ export interface DaemonDeps {
   onPauseNeedsHuman?: (info: { holdId: string; owner: PauseHoldOwner; expiresAt: string | null }) => void | Promise<void>;
   workerAdmissionHold?: () => FleetControlHold | undefined;
   /** Reads freshness between iterations and on the dispatch ticker's cadence. A restart-worthy advance
-   *  closes admission; admitted lanes settle before the existing drain and stale exit (W1-T5308). */
-  checkFreshness?: () => DaemonFreshness;
+   *  closes admission; admitted lanes settle before the existing drain and stale exit (W1-T5308). A
+   *  promise is awaited at the tick's own boundaries; a lane's sync refill reads the latest settled one (W1-T5282). */
+  checkFreshness?: () => DaemonFreshness | Promise<DaemonFreshness>;
   /** Consulted only when freshness reports an install is needed. Runs before the loop stops for
    *  restart, never after, so the relaunched process inherits a dependency tree matching `newSha`.
    *  This module stays pure; the real command wires the install (W1-T151). */
@@ -1681,7 +1687,7 @@ interface InFlightTickerOwner {
   headroomSampler?: { lastSampleMs: number; clock: Clock; policy: HeadroomPolicy; enforced: boolean };
   /** Read per tick, so a dispatch taking over a background sweep's runner also takes its retrigger (W1-T4998). */
   sweepRetrigger?: SweepRetrigger;
-  onTick?: () => void;
+  onTick?: () => void | Promise<void>;
   /** W1-T4998: a background sweep still holding the runner a dispatch took over. Whichever of the two
    *  stops first leaves it to the other, so a pass that outlives the dispatch keeps its heartbeat. */
   sweepHold?: Pick<InFlightTickerOwner, "generation" | "headroomSampler" | "sweepRetrigger">;
@@ -1815,7 +1821,11 @@ function startInFlightTicker(
           if (!owner.active) break;
           if (owner.onTick) await new Promise<void>((resolve) => setImmediate(resolve));
           if (!owner.active) break;
-          owner.onTick?.();
+          const ticked = owner.onTick?.();
+          if (ticked) {
+            await ticked;
+            if (!owner.active) break;
+          }
           // The acknowledgement gap (W1-T1065 part iv). The pause row is written only inside the branch that acts
           // on a hold, so a hold created mid-drain was invisible: no row distinguished "seen, draining to
           // completion" from "not seen at all", and the operator escalated to a container stop. A re-check here
@@ -1989,7 +1999,7 @@ function startInFlightTicker(
  *  `runDaemon` into every call site — never a fresh object per call, which would make each phase
  *  re-derive "elapsed since last pass" from its own private zero (W1-T1272). */
 interface SweepRetrigger {
-  onDispatchTick?: () => void;
+  onDispatchTick?: () => void | Promise<void>;
   /** W1-T5343: the dispatch phase's live lane count, set per dispatch like `onDispatchTick` and read only there. */
   lanesInFlight?: () => number;
   /** Mirrors `DaemonOpts.sweepWallClockBoundMs` — the SAME bound the top-of-iteration call uses. */
@@ -3332,7 +3342,8 @@ export async function runDaemon(
     // Self-freshness, checked directly after both operator holds and before headroom and dispatch, so
     // origin/main advancing past this process's boot sha is noticed on the very next tick where the
     // daemon is neither stopped nor paused. Never interrupts in-flight work (W1-T126, W1-T936).
-    const freshness = deps.checkFreshness?.();
+    const freshnessRead = deps.checkFreshness?.();
+    const freshness = isPendingFreshness(freshnessRead) ? await freshnessRead : freshnessRead;
     logNotStaleFreshness(freshness);
     if (freshness?.stale) {
       // FORWARD PROGRESS OUTRANKS FRESHNESS FOR THE FIRST CYCLE, AND ONLY THE FIRST (W1-T2965).
@@ -4695,7 +4706,9 @@ export async function runDaemon(
     // never took it), which makes this branch's own `dispatchSet.length === 0` conjunct always
     // false. `reviewerCodeStale` is still computed here because `refetchedFreshness` (and the
     // `daemon.freshness_deferred` log below, which IS reached) reads it.
-    const selfFreshness = deps.checkFreshness?.();
+    const selfFreshnessRead = deps.checkFreshness?.();
+    const freshnessReadsAsync = isPendingFreshness(selfFreshnessRead);
+    const selfFreshness = isPendingFreshness(selfFreshnessRead) ? await selfFreshnessRead : selfFreshnessRead;
     logNotStaleFreshness(selfFreshness);
     const reviewerCodeStale = tickStaleReviewerAction.kind === "restart" ? sweepCycleOutcome?.reviewerCodeStale : undefined;
     const refetchedFreshness: DaemonFreshness | undefined =
@@ -4792,6 +4805,9 @@ export async function runDaemon(
     const inFlightTasks = new Set<Task>(admitted);
     let refillClosed: string | undefined;
     let inFlightFreshness: Extract<DaemonFreshness, { stale: true }> | undefined;
+    // W1-T5282: a lane's refill is synchronous and cannot await a fetch, so with an awaited reader it reads the
+    // latest reading settled since this tick began: the admission read above, then each dispatch tick's.
+    let settledFreshness = selfFreshness;
     const refillLane = (lane: number, finished: Task, outcome: PromiseSettledResult<RunResult>): Task | undefined => {
       inFlightTasks.delete(finished);
       if (outcome.status === "rejected") {
@@ -4805,7 +4821,7 @@ export async function runDaemon(
       const stopped = deps.checkStop?.();
       const paused = deps.checkPause?.();
       // W1-T5083: the same restart decision the top of tick asks; a sibling in flight makes it busy.
-      const freshness = refillClosed ? undefined : deps.checkFreshness?.();
+      const freshness = refillClosed ? undefined : freshnessReadsAsync ? settledFreshness : (deps.checkFreshness?.() as DaemonFreshness | undefined);
       const freshnessAction = freshness?.stale ? decideFreshness(freshness, true) : undefined;
       let reason =
         refillClosed ??
@@ -4849,14 +4865,22 @@ export async function runDaemon(
       attempted.push(next.id);
       return next;
     };
-    const onDispatchTick = deps.checkFreshness ? () => {
-      if (inFlightFreshness || inFlightTasks.size === 0 || deps.checkPause?.()) return;
-      const freshness = deps.checkFreshness!();
+    const actOnDispatchFreshness = (freshness: DaemonFreshness): void => {
+      settledFreshness = freshness;
       logNotStaleFreshness(freshness);
       if (freshness.stale && decideFreshness(freshness, true) === "restart") {
         inFlightFreshness = freshness;
         refillClosed = "stale code";
       }
+    };
+    const onDispatchTick = deps.checkFreshness ? (): void | Promise<void> => {
+      if (inFlightFreshness || inFlightTasks.size === 0 || deps.checkPause?.()) return;
+      const read = deps.checkFreshness!();
+      if (!isPendingFreshness(read)) return actOnDispatchFreshness(read);
+      // The pool can settle while the fetch is in flight; a reading for a finished dispatch is the next tick's.
+      return read.then((freshness) => {
+        if (!inFlightFreshness && inFlightTasks.size > 0) actOnDispatchFreshness(freshness);
+      });
     } : undefined;
     sweepRetrigger.onDispatchTick = onDispatchTick;
     const lanes = { inFlight: 0 };

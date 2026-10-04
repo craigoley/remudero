@@ -155,6 +155,7 @@ import {
   type IncidentInvariantRow,
 } from "./incident-invariants.js";
 import { checkServiceFreshness } from "./self-sync.js";
+import { GATEWAY_FETCH_TIMEOUT_MS } from "./git-fetch-retry.js";
 import { reloadServePlan, touchesReloadablePlan } from "./serve-plan-reload.js";
 import { publishThreadPlan } from "./thread-plan.js";
 import { changedPathsSince, serveRestartRelevant, type ChangedPathsRead, type ChangedPathsReader } from "./serve-restart-relevance.js";
@@ -1354,9 +1355,6 @@ export function consoleRecyclePatienceMs(
  *  check. At this cadence that is one cheap local command a minute, and only while the process is
  *  up, against the 3h25m of stale service the edge-only trigger actually produced. */
 export const RECYCLE_RECHECK_MS = 60_000;
-
-/** W1-T4229 BACKSTOP: a hung fetch must not hold the checkout read open past the next re-check. */
-export const GATEWAY_FETCH_TIMEOUT_MS = 60_000;
 
 /** One read of the gateway's own checkout, and whether it warrants the freshness restart. */
 export interface GatewayCheckoutAssessment {
