@@ -295,6 +295,85 @@ export RMD_OPENWEIGHT_API_KEY RMD_FOUNDRY_CLAUDE_API_KEY RMD_FOUNDRY_CLAUDE_ENDP
 CASH_BOOT_SECRETS
 }
 
+# Literal shell keeps the installer's environment out of the watchdog's preflight.
+render_deploy_code_refresh() {
+  cat <<'DEPLOY_CODE_REFRESH'
+deploy_code_idle() {
+  local container="$1" processes dir locks match_status
+  if ! processes="$(docker top "$container" -eo args 2>/dev/null)" || [ -z "$processes" ]; then
+    echo "rmd-relaunch: deploy code -- worker probe unreadable; deferring." >&2
+    return 1
+  fi
+  if printf '%s\n' "$processes" | grep -E 'claude .*--output-format|codex .*exec' >/dev/null; then
+    echo "rmd-relaunch: deploy code -- active workers; deferring." >&2
+    return 1
+  else
+    match_status=$?
+    if [ "$match_status" -ne 1 ]; then
+      echo "rmd-relaunch: deploy code -- worker probe unreadable (matcher failed); deferring." >&2
+      return 1
+    fi
+  fi
+  for dir in "$STATE_DIR/state/inflight" "$STATE_DIR/worktrees"; do
+    # Missing lock directories mean no locks; an unreadable existing path is unknown.
+    if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then continue; fi
+    if [ ! -d "$dir" ] || ! locks="$(find "$dir" -maxdepth 1 -name '*.lock' -print 2>/dev/null)"; then
+      echo "rmd-relaunch: deploy code -- lock probe unreadable at $dir; deferring." >&2
+      return 1
+    fi
+    if [ -n "$locks" ]; then
+      echo "rmd-relaunch: deploy code -- active locks at $dir; deferring." >&2
+      return 1
+    fi
+  done
+}
+
+deploy_code_clean() {
+  local code="$STATE_DIR/remudero" edits
+  if [ ! -e "$code/.git" ]; then
+    echo "rmd-relaunch: deploy code -- checkout missing; deferring." >&2
+    return 1
+  fi
+  if ! edits="$(GIT_OPTIONAL_LOCKS=0 git -C "$code" status --porcelain --untracked-files=all 2>/dev/null)"; then
+    echo "rmd-relaunch: deploy code -- status unreadable; deferring." >&2
+    return 1
+  fi
+  if [ -n "$edits" ]; then
+    echo "rmd-relaunch: deploy code -- local edits; deferring without discarding them." >&2
+    return 1
+  fi
+}
+
+refresh_deploy_code() {
+  local container="$1" code="$STATE_DIR/remudero" install_head
+  deploy_code_idle "$container" || return 1
+  deploy_code_clean || return 1
+  if ! git -C "$code" fetch --quiet origin main 2>/dev/null; then
+    echo "rmd-relaunch: deploy code -- fetch failed; deferring." >&2
+    return 1
+  fi
+  if ! git -C "$code" merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
+    echo "rmd-relaunch: deploy code -- checkout diverged or ancestry unreadable; deferring." >&2
+    return 1
+  fi
+  if ! install_head="$(git -C "$CHECKOUT" rev-parse HEAD 2>/dev/null)" || [ -z "$install_head" ] ||
+     ! git -C "$code" merge-base --is-ancestor "$install_head" origin/main 2>/dev/null; then
+    echo "rmd-relaunch: deploy code -- install checkout ancestry unreadable or ahead of origin/main; deferring." >&2
+    return 1
+  fi
+  # The daemon normally boots detached. An ff-only merge advances that HEAD without switching
+  # branches, resetting, cleaning, or restarting its already-loaded process.
+  deploy_code_idle "$container" || return 1
+  deploy_code_clean || return 1
+  if ! git -C "$code" merge --ff-only --quiet origin/main 2>/dev/null; then
+    echo "rmd-relaunch: deploy code -- fast-forward failed; deferring." >&2
+    return 1
+  fi
+  deploy_code_idle "$container" && deploy_code_clean
+}
+DEPLOY_CODE_REFRESH
+}
+
 render_launcher() {
   cat <<EOF
 #!/usr/bin/env bash
@@ -516,6 +595,8 @@ converge_host_units() {
   return 0
 }
 
+$(render_deploy_code_refresh)
+
 # THE STOP LEVER OUTRANKS THIS SCRIPT, INCLUDING AT BOOT AND FROM THE WATCHDOG.
 if [ -e "\$STATE_DIR/state/STOP" ]; then
   echo "rmd-relaunch: state/STOP present -- refusing to start. rm it to resume."
@@ -553,11 +634,15 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   # moment to rewrite its units -- the rule W1-T3245 applied to the recycle decision.
   [ "\$BOOT" -eq 0 ] && converge_host_units
   if [ "\$BOOT" -eq 0 ] && [ -x "\$STATE_DIR/remudero/bin/rmd" ]; then
+    # W1-T4917: load current deploy code only after a verified idle fast-forward. Running from
+    # daemon-install conflates the invoking checkout with the tree deploy-run acts on.
+    refresh_deploy_code '${CONTAINER_NAME}' || exit 0
     echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a RECYCLE is due."
     # W1-T4267: deploy-run reads resourcePolicyDrift for THIS container (named at install time --
     # the rendered launcher has no CONTAINER_NAME of its own) against the build policy it recycles with.
-    RMD_RESOURCE_POLICY_CONTAINER='${CONTAINER_NAME}' RMD_RESOURCE_POLICY_ROLE=build \\
-      "\$STATE_DIR/remudero/bin/rmd" deploy-run --image-drift-only --state-root "\$STATE_DIR" || \\
+    (cd "\$STATE_DIR/remudero" && \\
+      RMD_RESOURCE_POLICY_CONTAINER='${CONTAINER_NAME}' RMD_RESOURCE_POLICY_ROLE=build \\
+      "\$STATE_DIR/remudero/bin/rmd" deploy-run --image-drift-only --state-root "\$STATE_DIR") || \\
       echo "rmd-relaunch: deploy-run reported a problem; the daemon is untouched and the next tick re-asks." >&2
   else
     echo "rmd-relaunch: ${CONTAINER_NAME} already running -- nothing to do."
