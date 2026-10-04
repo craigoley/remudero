@@ -7,7 +7,8 @@
  *
  * Each route is driven with a fake state root; every top-level key of its 200 body must be a property of the
  * result schema openapi/daemon.yaml names for that route's 200, and that schema must declare `landing` with the
- * single enum value `queued`. The generated client mirrors the spec (`npm run api-client:check`).
+ * single enum value `queued`. The generated client mirrors the spec (`npm run api-client:check`), and a typed map
+ * below stops compiling if it ever drops `landing`.
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -17,6 +18,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { parse } from "yaml";
 
+import type { components } from "../packages/api-client/src/schema.js";
 import * as feedback from "../src/lib/feedback.js";
 import { appendThreadMessage } from "../src/lib/inbox-thread.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
@@ -142,11 +144,14 @@ test("each queued write's result schema declares landing as an optional string w
   }
 });
 
-test("the generated api-client types landing as an optional queued on all four results", () => {
-  const client = readFileSync(new URL("../packages/api-client/src/schema.d.ts", import.meta.url), "utf8");
-  for (const name of ["SubmitFeedbackResult", "ProposalDecisionResult", "RunSkillResult", "EscalationReplyResult"]) {
-    const block = client.match(new RegExp(`\\n    ${name}: \\{\\n([\\s\\S]*?)\\n    \\};`))?.[1];
-    assert.ok(block, `schema.d.ts declares ${name}`);
-    assert.match(block, /^ {6}landing\?: "queued";$/m, `${name} types landing?: "queued"`);
+/** Compile-time: `tsc --noEmit` (test/ is in tsconfig) refuses this map if the generated client drops `landing`. */
+const GENERATED_LANDING: {
+  [K in "SubmitFeedbackResult" | "ProposalDecisionResult" | "RunSkillResult" | "EscalationReplyResult"]-?: NonNullable<components["schemas"][K]["landing"]>;
+} = { SubmitFeedbackResult: "queued", ProposalDecisionResult: "queued", RunSkillResult: "queued", EscalationReplyResult: "queued" };
+
+test("the generated api-client types landing as queued on all four results", () => {
+  for (const path of ["/v1/feedback", "/v1/feedback/decision", "/v1/skills/run", "/v1/escalation/reply"]) {
+    const { name } = resultSchema(path);
+    assert.equal(GENERATED_LANDING[name as keyof typeof GENERATED_LANDING], "queued", `${name} is one of the four typed results`);
   }
 });
