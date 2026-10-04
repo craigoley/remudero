@@ -254,7 +254,8 @@ test("STRUCTURAL: all THREE disarmAutoMerge call sites follow the outcome — no
   // it does not match a bare-name call and is asserted by that shape instead.
   // TWO sites hand the outcome straight to `disposeDisarm`, which owns the whole decision; the
   // THIRD, `withdrawArmIfVerdictRefuses`, routes through its injectable `deps.disarm` seam.
-  const direct = [...src.matchAll(/disposeDisarm\(disarmAutoMerge\(prUrl\)/g)];
+  // W1-T5284: runTaskBody's capped-refusal site awaits the async form; the outcome is disposed the same way.
+  const direct = [...src.matchAll(/disposeDisarm\((?:await )?disarmAutoMerge(?:Async)?\(prUrl\)/g)];
   assert.equal(direct.length, 2, `expected the two direct call sites to dispose their outcome, found ${direct.length}`);
   assert.match(
     src,

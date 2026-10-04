@@ -24,14 +24,16 @@
  * have both run-task.ts and this file import the ONE copy; noted as a follow-up, not done here.
  */
 import { systemClock } from "./clock.js";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { loadConfig, type Config } from "./config.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { readLedgerLines } from "./status.js";
-import { ghExec } from "./github-transport.js";
+import { ghExec, ghJsonAsync, ghTextAsync } from "./github-transport.js";
+import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
 import {
   ghJson,
   ghRateLimitRefusalUnknown,
@@ -380,6 +382,20 @@ export function mergeDirectViaRest(
   exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber), { encoding: "utf8", stdio: "pipe" });
 }
 
+const execFilePromise = promisify(execFile);
+
+/** W1-T5284 — {@link mergeDirectViaRest} with the write awaited, for {@link realArmDepsAsync}. */
+export async function mergeDirectViaRestAsync(
+  prUrl: string,
+  exec: (file: string, args: string[], opts: { encoding: "utf8" }) => Promise<unknown> = execFilePromise,
+): Promise<void> {
+  const target = mergeTargetFromPrUrl(prUrl);
+  if (!target) {
+    throw new Error(`W1-T1255: cannot resolve owner/repo/number from ${prUrl} — refusing to merge blind`);
+  }
+  await exec("gh", ghMergePrArgv(target.owner, target.repo, target.prNumber), { encoding: "utf8" });
+}
+
 /**
  * W1-T1050: true when GitHub reports `prUrl` as MERGED right now — the ground truth `attemptArm`
  * consults after a {@link ArmDeps.mergeDirect} throw, rather than trusting the exit code alone.
@@ -561,14 +577,7 @@ export function realArmDeps(
     },
     // Cached per PR for MERGE_QUEUE_READ_TTL_MS: the sweep re-attempts arms every pass, and two REST
     // reads per attempt would spend the core budget on a setting that changes almost never.
-    mergeQueue: (prUrl) => {
-      const now = systemClock.now();
-      const hit = mergeQueueReads.get(prUrl);
-      if (hit && now - hit.at < MERGE_QUEUE_READ_TTL_MS) return hit.value;
-      const value = baseBranchRequiresMergeQueue(prUrl);
-      mergeQueueReads.set(prUrl, { at: now, value });
-      return value;
-    },
+    mergeQueue: (prUrl) => runStepsSync(cachedMergeQueueSteps(prUrl, ghJson)),
     enqueue: (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `adding ${prUrl} to the merge queue`);
       ghExec(["pr", "merge", prUrl], { encoding: "utf8", stdio: "pipe" });
@@ -578,23 +587,89 @@ export function realArmDeps(
   };
 }
 
+/**
+ * W1-T5284 — {@link ArmDeps} whose gh WRITES (arm, disarm, direct merge, enqueue) and merge-queue
+ * read may be awaited. {@link attemptArmAsync} awaits each; every other read stays as it is.
+ */
+export type AsyncArmDeps = Omit<ArmDeps, "armAuto" | "mergeDirect" | "disableAuto" | "enqueue" | "mergeQueue"> & {
+  armAuto: (prUrl: string) => void | Promise<void>;
+  mergeDirect: (prUrl: string) => void | Promise<void>;
+  disableAuto: (prUrl: string) => void | Promise<void>;
+  enqueue?: (prUrl: string) => void | Promise<void>;
+  mergeQueue?: (prUrl: string) => boolean | Promise<boolean>;
+};
+
+/**
+ * W1-T5284 — {@link realArmDeps} for the daemon: the same deps, with the at-open arm's `gh pr merge`
+ * calls, its REST merge and its merge-queue read awaited on the async gh transport. MEASURED in the
+ * core daemon's profile: `ghExec` 10.4 s and {@link baseBranchRequiresMergeQueue} 3.5 s on the loop.
+ */
+export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig): AsyncArmDeps {
+  return {
+    ...realArmDeps(loadConfigImpl),
+    armAuto: async (prUrl) => {
+      assertLiveWriteAllowed("gh-pr-merge", `arming auto-merge on ${prUrl}`);
+      await ghTextAsync(["pr", "merge", prUrl, "--auto", "--squash"]);
+    },
+    mergeDirect: async (prUrl) => {
+      assertLiveWriteAllowed("gh-pr-merge", `merging ${prUrl} directly`);
+      await mergeDirectViaRestAsync(prUrl);
+    },
+    disableAuto: async (prUrl) => {
+      assertLiveWriteAllowed("gh-pr-merge", `disabling auto-merge on ${prUrl}`);
+      await ghTextAsync(["pr", "merge", prUrl, "--disable-auto"]);
+    },
+    mergeQueue: (prUrl) => runStepsAsync(cachedMergeQueueSteps(prUrl, ghJsonAsync)),
+    enqueue: async (prUrl) => {
+      assertLiveWriteAllowed("gh-pr-merge", `adding ${prUrl} to the merge queue`);
+      await ghTextAsync(["pr", "merge", prUrl]);
+    },
+  };
+}
+
 const mergeQueueReads = new Map<string, { at: number; value: boolean }>();
 /** How long one PR's merge-queue reading is reused. A queue turned on mid-window reaches an
  *  already-read PR at most this late, and the REST merge it would try is refused by GitHub. */
 export const MERGE_QUEUE_READ_TTL_MS = 10 * 60_000;
+
+/** A REST reader either driver can run: {@link ghJson} under the sync one, {@link ghJsonAsync} under the async one. */
+type RestReader = (args: string[]) => unknown;
+
+// Cached per PR for MERGE_QUEUE_READ_TTL_MS: the sweep re-attempts arms every pass, and two REST
+// reads per attempt would spend the core budget on a setting that changes almost never.
+function* cachedMergeQueueSteps(prUrl: string, fetch: RestReader): Steps<boolean> {
+  const now = systemClock.now();
+  const hit = mergeQueueReads.get(prUrl);
+  if (hit && now - hit.at < MERGE_QUEUE_READ_TTL_MS) return hit.value;
+  const value = yield* mergeQueueSteps(prUrl, fetch);
+  mergeQueueReads.set(prUrl, { at: now, value });
+  return value;
+}
 
 /** W1-T4405 — does `prUrl`'s base branch require a merge queue? Read over REST (the PR's base ref,
  *  then the rules GitHub applies to that branch, which include rulesets). A read that fails answers
  *  FALSE: that keeps the pre-queue path, and GitHub itself refuses a REST merge that would bypass a
  *  real queue, whereas a wrong TRUE would send a plain `gh pr merge` to an unqueued branch. */
 export function baseBranchRequiresMergeQueue(prUrl: string, fetch: GhApiFetcher = ghJson): boolean {
+  return runStepsSync(mergeQueueSteps(prUrl, fetch));
+}
+
+/** W1-T5284 — {@link baseBranchRequiresMergeQueue} with both REST reads awaited ({@link ghJsonAsync}). */
+export function baseBranchRequiresMergeQueueAsync(
+  prUrl: string,
+  fetch: (args: string[]) => Promise<unknown> = ghJsonAsync,
+): Promise<boolean> {
+  return runStepsAsync(mergeQueueSteps(prUrl, fetch));
+}
+
+function* mergeQueueSteps(prUrl: string, fetch: RestReader): Steps<boolean> {
   const target = parsePrUrl(prUrl);
   if (!target) return false;
   try {
-    const pr = fetch(singlePrRestArgs(target.owner, target.repo, target.number)) as { base?: { ref?: string } };
+    const pr = (yield* step(() => fetch(singlePrRestArgs(target.owner, target.repo, target.number)))) as { base?: { ref?: string } };
     const branch = pr?.base?.ref;
     if (!branch) return false;
-    const rules = fetch(["api", `repos/${target.owner}/${target.repo}/rules/branches/${encodeURIComponent(branch)}`]);
+    const rules = yield* step(() => fetch(["api", `repos/${target.owner}/${target.repo}/rules/branches/${encodeURIComponent(branch)}`]));
     return Array.isArray(rules) && rules.some((rule) => (rule as { type?: unknown })?.type === "merge_queue");
   } catch {
     // unreadable ⇒ the pre-queue path, which GitHub's own queue enforcement keeps safe (see above)
@@ -901,10 +976,13 @@ export const REST_MERGE_UNSETTLED_MAX_READS = 3;
 /** W1-T1280 — the short interval between one `UNKNOWN` re-read and the next. */
 export const REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS = 2_000;
 
+/** The deps {@link attemptArm} reads, over either the sync {@link ArmDeps} or {@link AsyncArmDeps}. */
+type AttemptArmDeps<D extends ArmDeps | AsyncArmDeps> = Pick<D, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
+  Partial<Pick<D, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">>;
+
 export function attemptArm(
   prUrl: string,
-  deps: Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">>,
+  deps: AttemptArmDeps<ArmDeps>,
   priorHeadSha?: string,
   // W1-T3551: read off `OpenPrView.isDraft` (POSITIVE match only — `undefined`/`false` both fall
   // through unchanged). This is the ONE shared call site {@link armAutoMergeDetailed} (ledger-gated
@@ -913,6 +991,26 @@ export function attemptArm(
   // W1-T1000002 hold gate immediately below: gate WHERE ARMS ORIGINATE, not at every call site.
   isDraft?: boolean,
 ): ArmAttemptResult {
+  return runStepsSync(attemptArmSteps(prUrl, deps, priorHeadSha, isDraft));
+}
+
+/** W1-T5284 — {@link attemptArm} with its gh writes and merge-queue read awaited: the SAME steps
+ *  under the async driver, so every outcome class and `say` line is the sync form's. */
+export function attemptArmAsync(
+  prUrl: string,
+  deps: AttemptArmDeps<AsyncArmDeps>,
+  priorHeadSha?: string,
+  isDraft?: boolean,
+): Promise<ArmAttemptResult> {
+  return runStepsAsync(attemptArmSteps(prUrl, deps, priorHeadSha, isDraft));
+}
+
+function* attemptArmSteps(
+  prUrl: string,
+  deps: AttemptArmDeps<AsyncArmDeps>,
+  priorHeadSha?: string,
+  isDraft?: boolean,
+): Steps<ArmAttemptResult> {
   // DRAFT (W1-T3551): checked FIRST, before the ledger-hold read, so a draft never depends on
   // ledger I/O to stay unarmed. GitHub refuses `gh pr merge --auto` (and any direct-merge
   // fallback) on a draft PR — this is a GitHub-owned signal, never a ledger row.
@@ -954,16 +1052,16 @@ export function attemptArm(
       return { outcome: "stack-parent-refused", error: detail };
     }
   }
-  if (deps.mergeQueue?.(prUrl)) return attemptQueueArm(prUrl, deps);
+  if (yield* step(() => deps.mergeQueue?.(prUrl))) return yield* attemptQueueArmSteps(prUrl, deps);
   // W1-T5615: A PLAN PR IS NEVER ARMED. GitHub merges an armed PR the moment its checks go green,
   // behind or not, and those checks linted a plan that may not be the one landing: #8996 and
   // #8997 were armed 3 ms apart from one base, and the second merged behind the first with a
   // duplicate key. It takes the direct path, which updates a behind plan PR first (W1-T5472).
   // An arm GitHub already holds drains under the old rule.
   const planTouch = deps.armStanding ? undefined : readPlanTouchOrUnreadable(prUrl, deps);
-  if (planTouch === "touched" || planTouch === "unreadable") return attemptPlanPrMerge(prUrl, deps, planTouch, priorHeadSha);
+  if (planTouch === "touched" || planTouch === "unreadable") return yield* attemptPlanPrMergeSteps(prUrl, deps, planTouch, priorHeadSha);
   try {
-    deps.armAuto(prUrl);
+    yield* step(() => deps.armAuto(prUrl));
     return { outcome: "armed" };
   } catch (e) {
     const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
@@ -973,7 +1071,7 @@ export function attemptArm(
     if (armFailureAction(msg) === "direct-merge") {
       const preflight = directMergePreflight(prUrl, deps, priorHeadSha);
       if (!preflight.proceed) return preflight.result;
-      return mergeDirectAfterPreflight(prUrl, deps, preflight.evidence);
+      return yield* mergeDirectAfterPreflightSteps(prUrl, deps, preflight.evidence);
     }
     // W1-T1255: THE QUOTA FALLBACK. `armFailureIsRateLimited` (W1-T1235) is the ONLY trigger for
     // this second attempt — never `armFailureAction`'s wider `"transient"`, which also matches an
@@ -988,7 +1086,7 @@ export function attemptArm(
       const preflight = directMergePreflight(prUrl, deps, priorHeadSha, { error: msg, rateLimit: quota });
       if (!preflight.proceed) return preflight.result;
       try {
-        deps.mergeDirect(prUrl);
+        yield* step(() => deps.mergeDirect(prUrl));
         deps.say(`automerge.rate_limited_rest_merge (W1-T1255; arm refused on quota, PR already green): ${prUrl}`);
         return { outcome: "direct-merged", error: msg, rateLimit: quota, directMergePreflight: preflight.evidence };
       } catch (e3) {
@@ -1020,7 +1118,7 @@ export function attemptArm(
               });
               if (!retryPreflight.proceed) return retryPreflight.result;
               try {
-                deps.mergeDirect(prUrl);
+                yield* step(() => deps.mergeDirect(prUrl));
                 deps.say(
                   `automerge.rate_limited_rest_merge (W1-T1255; settled mergeable on retry ${read}): ${prUrl}`,
                 );
@@ -1061,13 +1159,13 @@ export function attemptArm(
 }
 
 /** The REST merge once {@link directMergePreflight} has let it through. */
-function mergeDirectAfterPreflight(
+function* mergeDirectAfterPreflightSteps(
   prUrl: string,
-  deps: Pick<ArmDeps, "mergeDirect" | "isMerged" | "say">,
+  deps: Pick<AsyncArmDeps, "mergeDirect" | "isMerged" | "say">,
   evidence: DirectMergePreflightEvidence | undefined,
-): ArmAttemptResult {
+): Steps<ArmAttemptResult> {
   try {
-    deps.mergeDirect(prUrl);
+    yield* step(() => deps.mergeDirect(prUrl));
     deps.say(`automerge.clean_status_direct_merge (already green — merged now): ${prUrl}`);
     return { outcome: "direct-merged", directMergePreflight: evidence };
   } catch (e2) {
@@ -1088,12 +1186,12 @@ function mergeDirectAfterPreflight(
  * head or updates a behind one. Any other state, unreadable facts, or a missing seam holds it
  * unarmed, and the sweep's next `mergeable` pass tries again.
  */
-function attemptPlanPrMerge(
+function* attemptPlanPrMergeSteps(
   prUrl: string,
-  deps: Pick<ArmDeps, "mergeDirect" | "isMerged" | "say"> & DirectMergePreflightDeps,
+  deps: Pick<AsyncArmDeps, "mergeDirect" | "isMerged" | "say"> & DirectMergePreflightDeps,
   planTouch: "touched" | "unreadable",
   priorHeadSha?: string,
-): ArmAttemptResult {
+): Steps<ArmAttemptResult> {
   let facts: ArmMergeFacts = {};
   let error: string | undefined;
   if (!deps.readMergeFacts || !deps.updateBranch) {
@@ -1110,7 +1208,7 @@ function attemptPlanPrMerge(
     const fresh = facts;
     const preflight = directMergePreflight(prUrl, { ...deps, readMergeFacts: () => fresh, readPlanTouch: () => planTouch }, priorHeadSha);
     if (!preflight.proceed) return preflight.result;
-    return mergeDirectAfterPreflight(prUrl, deps, preflight.evidence);
+    return yield* mergeDirectAfterPreflightSteps(prUrl, deps, preflight.evidence);
   }
   deps.say(
     `automerge.plan_pr_held (W1-T5615): plan_touch=${planTouch} mergeable_state=${String(facts.mergeableState)}` +
@@ -1136,12 +1234,12 @@ function attemptPlanPrMerge(
  * merge endpoint bypasses the queue, so every fallback that would reach it (clean status, the quota
  * fallback) enqueues instead, or reports the failure and leaves the PR for the next pass.
  */
-function attemptQueueArm(
+function* attemptQueueArmSteps(
   prUrl: string,
-  deps: Pick<ArmDeps, "armAuto" | "isMerged" | "say"> & Partial<Pick<ArmDeps, "enqueue">>,
-): ArmAttemptResult {
+  deps: Pick<AsyncArmDeps, "armAuto" | "isMerged" | "say"> & Partial<Pick<AsyncArmDeps, "enqueue">>,
+): Steps<ArmAttemptResult> {
   try {
-    deps.armAuto(prUrl);
+    yield* step(() => deps.armAuto(prUrl));
     deps.say(`automerge.queued (W1-T4405): auto-merge armed on a merge-queue branch — the queue merges it: ${prUrl}`);
     return { outcome: "armed" };
   } catch (e) {
@@ -1150,9 +1248,10 @@ function attemptQueueArm(
       deps.say(`automerge.queued (W1-T4405): already in the merge queue — armed, not stuck: ${prUrl}`);
       return { outcome: "armed" };
     }
-    if (armFailureAction(msg) === "direct-merge" && deps.enqueue) {
+    const enqueue = deps.enqueue;
+    if (armFailureAction(msg) === "direct-merge" && enqueue) {
       try {
-        deps.enqueue(prUrl);
+        yield* step(() => enqueue(prUrl));
         deps.say(`automerge.enqueued (W1-T4405): already green — added to the merge queue, never merged around it: ${prUrl}`);
         return { outcome: "armed" };
       } catch (e2) {
@@ -1185,6 +1284,27 @@ export function armAutoMergeAtOpen(
   isDraft = false,
 ): ArmOutcome {
   requireExplicitArmSeam("armAutoMergeAtOpen", !isRealArmDepsObject(deps));
+  return runStepsSync(armAtOpenSteps(prUrl, deps, irreversible, isDraft));
+}
+
+/** W1-T5284 — {@link armAutoMergeAtOpen} for runTaskBody, which runs on the daemon loop: the same
+ *  steps, with the arm's gh calls awaited over {@link realArmDepsAsync}. */
+export async function armAutoMergeAtOpenAsync(
+  prUrl: string,
+  deps: AttemptArmDeps<AsyncArmDeps> = realArmDepsAsync(),
+  irreversible = false,
+  isDraft = false,
+): Promise<ArmOutcome> {
+  requireExplicitArmSeam("armAutoMergeAtOpenAsync", !isRealArmDepsObject(deps));
+  return runStepsAsync(armAtOpenSteps(prUrl, deps, irreversible, isDraft));
+}
+
+function* armAtOpenSteps(
+  prUrl: string,
+  deps: AttemptArmDeps<AsyncArmDeps>,
+  irreversible: boolean,
+  isDraft: boolean,
+): Steps<ArmOutcome> {
   if (irreversible) {
     deps.say(
       `automerge.irreversible_refused (W1-T919/W1-T947): diff classified irreversible — refusing to ` +
@@ -1192,7 +1312,7 @@ export function armAutoMergeAtOpen(
     );
     return "irreversible-refused";
   }
-  return attemptArm(prUrl, deps, undefined, isDraft).outcome;
+  return (yield* attemptArmSteps(prUrl, deps, undefined, isDraft)).outcome;
 }
 
 /**
@@ -1228,8 +1348,24 @@ export function disarmAutoMerge(
   deps: Pick<ArmDeps, "disableAuto" | "say"> & Partial<Pick<ArmDeps, "isMerged">> = realArmDeps(),
 ): DisarmOutcome {
   requireExplicitArmSeam("disarmAutoMerge", !isRealArmDepsObject(deps));
+  return runStepsSync(disarmSteps(prUrl, deps));
+}
+
+/** W1-T5284 — {@link disarmAutoMerge} with `gh pr merge --disable-auto` awaited. */
+export async function disarmAutoMergeAsync(
+  prUrl: string,
+  deps: Pick<AsyncArmDeps, "disableAuto" | "say"> & Partial<Pick<AsyncArmDeps, "isMerged">> = realArmDepsAsync(),
+): Promise<DisarmOutcome> {
+  requireExplicitArmSeam("disarmAutoMergeAsync", !isRealArmDepsObject(deps));
+  return runStepsAsync(disarmSteps(prUrl, deps));
+}
+
+function* disarmSteps(
+  prUrl: string,
+  deps: Pick<AsyncArmDeps, "disableAuto" | "say"> & Partial<Pick<AsyncArmDeps, "isMerged">>,
+): Steps<DisarmOutcome> {
   try {
-    deps.disableAuto(prUrl);
+    yield* step(() => deps.disableAuto(prUrl));
     deps.say(`automerge.disarmed (W1-T125): early arm withdrawn — ${prUrl}`);
     return "disarmed";
   } catch (e) {

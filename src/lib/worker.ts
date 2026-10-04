@@ -2,7 +2,7 @@ import { connect as connectTcp, createServer as createTcpServer, type Socket, ty
 import { Agent as HttpAgent, createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createRequire } from "node:module";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
-import { fetchOriginRetryingRefLock, type GitRunner } from "./git-fetch-retry.js";
+import { fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, type GitRunner } from "./git-fetch-retry.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFileSync,
@@ -5204,7 +5204,9 @@ export async function worktreeAddAsync(
   if (enabled !== "true") {
     await worktreeGit(["-C", repoDir, "config", "--local", "extensions.worktreeConfig", "true"]);
   }
-  await worktreeGit(["-C", repoDir, "fetch", "origin", "--quiet"], true);
+  // W1-T5284: the sync form's ref-lock retry (#8043). Daemon lanes now add concurrently with dispatch,
+  // so two fetches of one repo can race for a ref lock where the sync add serialized them.
+  await fetchOriginRetryingRefLockAsync((args) => worktreeGit(["-C", repoDir, ...args], true));
   const ref = base.replace(/^origin\//, "");
   let localRefHead: string;
   try {
@@ -5311,12 +5313,15 @@ function localBranchExists(repoDir: string, branch: string): boolean {
  * without this the second call died forever. A LEFTOVER BRANCH IS THE COMMON CASE: `git worktree remove` never deletes the
  * branch it was checked out on. NEVER FORCES OR REUSES, and THE RUN ID ITSELF IS NEVER TOUCHED, so ledger attribution is
  * unchanged (W1-T2493; docs/forensics/worker.md). */
-export function uniqueRunBranch(repoDir: string, runId: string): string {
+export function uniqueRunBranch(repoDir: string, runId: string, reserved: ReadonlySet<string> = new Set()): string {
+  // W1-T5284: `reserved` names branches an add still in flight in THIS process has picked but not
+  // yet created — the sync add closed that window by blocking; an awaited add holds it explicitly.
+  const free = (candidate: string): boolean => !reserved.has(candidate) && !localBranchExists(repoDir, candidate);
   const base = `run-${runId}`;
-  if (!localBranchExists(repoDir, base)) return base;
+  if (free(base)) return base;
   for (let n = 2; n < 10_000; n++) {
     const candidate = `${base}-${n}`;
-    if (!localBranchExists(repoDir, candidate)) return candidate;
+    if (free(candidate)) return candidate;
   }
   throw new Error(`uniqueRunBranch: exhausted numbered suffixes for run id ${runId}`);
 }
