@@ -4,7 +4,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
 import { appendLedger, rotateLedger } from "../src/lib/ledger.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
@@ -80,6 +79,36 @@ test("a new head sha re-arms the contradictory escalation", async (t) => {
   await f.pass(NOW + 4, moved);
   assert.equal(f.escalations.length, 3, "a review change at the same head must re-arm");
   assert.ok(dispositions(f.ledgerPath).every((row) => row.contradictory_pass_count === 1));
+});
+
+test("a legacy escalation seeds contradictory backoff without escalating again", async (t) => {
+  const f = fixture(t);
+  appendLedger(f.ledgerPath, {
+    run_id: "legacy", task_id: f.pr.taskId!, step: "sweep.disposed", pr_url: f.pr.prUrl,
+    pr_number: f.pr.prNumber, head_sha: f.pr.headSha, disposition: "blocked-ambiguous", acted: true,
+  });
+  f.review("decision-a");
+  const first = (await f.pass(NOW)).actions[0];
+  assert.equal(first.disposition, "blocked-ambiguous");
+  assert.equal(first.acted, false);
+  assert.match(String(dispositions(f.ledgerPath).at(-1)?.stand_down_reason),
+    /escalation was already filed for this head/);
+  assert.equal(dispositions(f.ledgerPath).at(-1)?.contradictory_pass_count, 1);
+  for (let i = 1; i < 40; i++) {
+    assert.equal((await f.pass(NOW + i * 90_000)).actions[0].acted, false);
+  }
+  assert.equal(f.escalations.length, 0);
+  assert.ok(dispositions(f.ledgerPath).length < 10);
+  appendLedger(f.ledgerPath, { run_id: "noise", task_id: "noise", step: "noise", text: "x".repeat(10_000) });
+  assert.equal(rotateLedger(f.ledgerPath, { ceilingBytes: 5_000, smoothingWindowMs: 0 }).rotated, true);
+  assert.equal(dispositions(f.ledgerPath).length, 1, "rotation retains the legacy acted row");
+  f.review("decision-b");
+  assert.equal((await f.pass(NOW + 40 * 90_000)).actions[0].acted, true);
+  assert.equal(f.escalations.length, 1);
+  const moved = { ...f.pr, headSha: "head-b" };
+  f.review("decision-b", moved);
+  assert.equal((await f.pass(NOW + 40 * 90_000 + 1, moved)).actions[0].acted, true);
+  assert.equal(f.escalations.length, 2);
 });
 
 test("the contradictory escalation backoff survives a restart", async (t) => {
@@ -160,27 +189,4 @@ test("contradictory backoff separates PRs and legacy review decisions", async (t
   await f.pass(NOW + 2, { ...f.pr, reviewSummary: "a different contradictory decision" });
   await f.pass(NOW + 3, { ...f.pr, prNumber: 1867, prUrl: "https://github.com/o/r/pull/1867" });
   assert.equal(f.escalations.length, 3);
-});
-
-test("a head escalated before the contradictory key existed stays deduped and backs off", async (t) => {
-  const f = fixture(t);
-  f.review("decision-a");
-  const filed = NOW - 3_600_000;
-  appendLedger(f.ledgerPath, {
-    run_id: "pre-key", task_id: f.pr.taskId!, step: "sweep.disposed", pr_number: f.pr.prNumber,
-    pr_url: f.pr.prUrl, head_sha: f.pr.headSha, disposition: "blocked-ambiguous", acted: true,
-  }, { clock: fixedClock(filed) });
-  const first = await f.pass(NOW);
-  assert.equal(first.actions[0].acted, false, "W1-T514's head dedup still holds a pre-key escalation");
-  assert.equal(f.escalations.length, 0);
-  const seeded = dispositions(f.ledgerPath).at(-1)!;
-  assert.match(String(seeded.stand_down_reason), /an escalation was already filed for this head \(head-a\)/);
-  assert.match(String(seeded.stand_down_reason), /contradictory review unchanged — pass 2/);
-  assert.equal(seeded.contradictory_first_escalation_at, filed);
-  const before = dispositions(f.ledgerPath).length;
-  await f.pass(NOW + 1);
-  assert.equal(dispositions(f.ledgerPath).length, before, "the seeded checkpoint backs off like any other");
-  f.review("decision-b");
-  await f.pass(NOW + 2);
-  assert.equal(f.escalations.length, 1, "once keyed, a changed decision at the same head re-arms");
 });
