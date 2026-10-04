@@ -34,7 +34,10 @@
        `file:line` for humans.
   acceptance:
     - claim: "the reachability census identifies each witness and exclusion by its enclosing test title, so inserting lines above a call site leaves its key unchanged"
+      kind: guard
       proof: "unit test: test/a-reachability-witness-survives-a-line-shift.test.ts"
+    - claim: "the operator-gated reachability census builds every witness key through callSiteKey"
+      proof: "grep: key: callSiteKey(s) in test/operator-gated-default-reachability.test.ts"
   falsifier: |
     Make `callSiteKey` include the line number again and the new test fails, because the key of a
     fixture shifted by N lines changes.
