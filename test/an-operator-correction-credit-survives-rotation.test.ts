@@ -22,7 +22,8 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { rotateLedger } from "../src/lib/ledger.js";
 import type { Plan, Task } from "../src/lib/plan.js";
-import { defaultCreditStorePath, loadCreditStore, projectPlan, type CreditStore, type GitHub } from "../src/lib/status.js";
+import { defaultCreditStorePath, loadCreditStore, projectPlan, type CreditStore } from "../src/lib/status.js";
+import { fakeGitHub } from "./helpers/fake-github.js";
 
 const CORRECTED_PR = "https://github.com/craigoley/remudero/pull/6492";
 
@@ -40,21 +41,6 @@ function task(id: string): Task {
 
 function planOf(...tasks: Task[]): Plan {
   return { tasks, byId: new Map(tasks.map((t) => [t.id, t])) };
-}
-
-/** A healthy gateway that finds nothing anywhere — so `merged` can only come from the correction rung. */
-function silentGithub(): GitHub {
-  return {
-    prByRef: () => null,
-    findMergedByTrailer: () => null,
-    headRefName: () => undefined,
-    prBody: () => undefined,
-    readFailed: () => false,
-    readFailureReason: () => undefined,
-    issueByUrl: () => null,
-    issueReadFailed: () => false,
-    autoMergeArmed: () => false,
-  } as unknown as GitHub;
 }
 
 test("the convergence shed no longer evicts a correction.provenance row, even when it is the oldest row in the retained core", () => {
@@ -92,7 +78,7 @@ test("a correction.provenance credit still projects source correction after its 
     writeFileSync(ledgerPath, row + "\n" + rawLine("run.start", "W1-UNCORRECTED", tsMs + 1) + "\n");
 
     // 1. While the row is live, the projection credits it — and records it durably.
-    const first = projectPlan(plan, { ledgerPath, github: silentGithub() });
+    const first = projectPlan(plan, { ledgerPath, github: fakeGitHub() });
     assert.equal(first.get("W1-CORRECTED")?.source, "correction");
     assert.deepEqual(loadCreditStore(defaultCreditStorePath(ledgerPath))["W1-CORRECTED"]?.correction, {
       prUrl: CORRECTED_PR,
@@ -104,7 +90,7 @@ test("a correction.provenance credit still projects source correction after its 
     writeFileSync(ledgerPath, rawLine("run.start", "W1-UNCORRECTED", tsMs + 2) + "\n");
     assert.doesNotMatch(readFileSync(ledgerPath, "utf8"), /correction\.provenance/);
 
-    const after = projectPlan(plan, { ledgerPath, github: silentGithub() });
+    const after = projectPlan(plan, { ledgerPath, github: fakeGitHub() });
     assert.equal(after.get("W1-CORRECTED")?.source, "correction");
     assert.equal(after.get("W1-CORRECTED")?.status, "merged");
     assert.equal(after.get("W1-CORRECTED")?.prNumber, 6492);
@@ -127,7 +113,7 @@ test("a newer live correction replaces the durable one, and an unchanged one cos
     let store: CreditStore = { "W1-CORRECTED": { correction: { prUrl: CORRECTED_PR, prNumber: 6492 } } };
     const deps = {
       ledgerPath,
-      github: silentGithub(),
+      github: fakeGitHub(),
       readCreditStore: () => store,
       writeCreditStore: (next: CreditStore) => {
         writes++;
