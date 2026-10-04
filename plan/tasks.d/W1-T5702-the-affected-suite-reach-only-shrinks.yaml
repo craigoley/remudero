@@ -1,0 +1,38 @@
+- id: W1-T5702
+  title: "THE AFFECTED-SUITE REACH ONLY SHRINKS — 799 suites import src/run-task.ts directly and its forward closure is 430 of 438 src modules, so a change to almost any module selects ~90% of the suite; nothing stops the 800th import, and selection can go live only once median reach falls"
+  repo: remudero
+  depends_on: [W1-T5701]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the suite reach from src/run-task.ts only shrinks
+  band_meaning: span
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 6 and addendum (#8: go live only when median src module reach <= 30%); replaces the report's largest-SCC ratchet, since the real import graph has no cycle"
+  plan_refs: [W1-T5701, W1-T4404, W1-T2895, W1-T5705]
+  files: [src/lib/affected-suites.ts, scripts/affected-reach-baseline.json, test/the-affected-suite-reach-ratchet.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a; measured with the research graph scripts read-only.
+    Median src-module suite reach is 91.7% today, 85.7% once W1-T5701 strips comments, and 42% (1,049
+    suites) even for a comment-free imports-only graph. 799 suites import src/run-task.ts directly
+    and its forward closure is 430 of 438 src modules; with no suite importing run-task.ts the
+    median falls to 10.9% (272). The report's "ratchet the largest SCC (285 down)" measures an
+    artifact (W1-T5701: the real graph's largest SCC is 1; the existing dependency-cruiser ratchet
+    already holds cycles at 0), so the lever to ratchet is run-task.ts importers and median reach.
+    The addendum's go-live bar, median reach <= 30%, is reachable only by moving suites off
+    run-task.ts onto the modules they test.
+  design: |
+    Export the graph builder from src/lib/affected-suites.ts. A census records in
+    scripts/affected-reach-baseline.json: suites importing src/run-task.ts directly (799), the
+    selector graph's largest SCC after W1-T5701, and median src-module reach %. All three are
+    shrink-only: a value above its row fails naming the new importers; a value below passes and
+    prints the tighter number to record. As a whole-tree census it joins the census-precheck
+    population's shrink-only baseline like any new CI census (W1-T5616).
+  acceptance:
+    - claim: "a fixture tree whose new suite imports src/run-task.ts is refused by the reach ratchet naming that suite, and the recorded baseline equals the measured tree"
+      proof: "unit test: test/the-affected-suite-reach-ratchet.test.ts"
+  falsifier: |
+    Raise the recorded importer count by one: the fixture's new importer passes and the test fails.

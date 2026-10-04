@@ -1,0 +1,34 @@
+- id: W1-T5722
+  title: "THE DEPLOY HEALTH WINDOW FITS A MEASURED BOOT — realDeployDeps waits 45 s for a daemon.boot row, while a boot logs daemon.paths and may sit in daemon.boot_held first, so 8 of 15 kickstarts were declared unhealthy_rollback at about 46 s, at least 3 of them on healthy images"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — the deploy health verdict waits for a boot in progress
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-04: research/restart/report.md (restart efficiency) P5 and its unhealthy_rollback defect"
+  plan_refs: [W1-T3200, W1-T5688]
+  files: [src/lib/deployer.ts, test/the-deploy-health-window-fits-a-measured-boot.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. `realDeployDeps` (src/lib/deployer.ts) sets
+    `windowMs = o.healthWindowMs ?? 45_000` and polls `countLedgerBootsAfter`, which counts only
+    `daemon.boot` rows. A boot writes `daemon.paths` in `daemonCommand` before plan sync and
+    `daemon.boot` after it, and a recycle's own PAUSE can hold it (`daemon.boot_held`; one boot
+    delayed ~75 s). MEASURED (restart report): 8 of 15 kickstarts logged `deploy.unhealthy_rollback`
+    at ~46 s, at least 3 on images that then booted; 8 `deploy.unhealthy_rollback` rows in the
+    10-02..10-04 ledger. A false rollback re-deploys the old image and costs another boot.
+  design: |
+    A boot in progress — a `daemon.paths` or `daemon.boot_held` row after the restart — extends the
+    wait for `daemon.boot` to at least 180 s (a named, BACKSTOP-tagged constant), and the health
+    verdict row records which of the three rows it saw. No row at all within 45 s still reads
+    unhealthy as today.
+  acceptance:
+    - claim: "with a fake ledger, a daemon.paths row at 20 s and daemon.boot at 120 s reads healthy, a daemon.boot_held row extends the wait the same way, and no row within 45 s still reads unhealthy"
+      proof: "unit test: test/the-deploy-health-window-fits-a-measured-boot.test.ts"
+  falsifier: |
+    Count only `daemon.boot`: the 120 s fixture reads unhealthy at 45 s and the test fails.

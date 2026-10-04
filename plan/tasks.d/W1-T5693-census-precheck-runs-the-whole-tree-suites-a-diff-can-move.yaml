@@ -1,0 +1,44 @@
+- id: W1-T5693
+  title: "THE PRE-PUSH PRECHECK RUNS A WHOLE-TREE STRUCTURAL CENSUS ONLY WHEN THE DIFF CAN MOVE IT — cycle-ratchet, source-size and citation-anchor stay CI-only though each takes 4-13 s alone, so an import ring or a src/lib-to-cli import is learned from a full CI run"
+  repo: remudero
+  depends_on: [W1-T5692]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the pre-push precheck asks the census suites a diff can move
+  band_meaning: span
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 3, the structural half"
+  plan_refs: [W1-T5692, W1-T5663, W1-T4901, W1-T5677, W1-T5676]
+  files: [scripts/census-precheck.mjs, scripts/census-precheck-parity-baseline.json, package.json, test/census-precheck-runs-the-whole-tree-suites-a-diff-can-move.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. Timed alone at 3ae4a67a: cycle-ratchet 13.1 s
+    (dependency-cruiser over the tree), source-size-baseline-is-enforced 5.3 s,
+    citation-anchor-census 4.1 s, every-shard-on-main-is-lintable 17.1 s,
+    the-census-roster-is-named-not-numbered 24.0 s, fast-gate-admits-the-census-class 27.9 s. Reds
+    in the window: citation-anchor 5 (mostly single-shard machine ratify PRs #8725 #8813 #9058
+    #8869), source-size 3, cycle-ratchet 2. NOT ADMITTED, with reasons: every-shard-on-main-is-lintable
+    — a PR's own shard is already linted pre-push by W1-T4901's lint-plan-precheck, batch-9 W1-T5677
+    closes the --base/--all sizing gap, and 4+ of its 7 reds were main-red (#9003 #9007 #9008 in one
+    25-minute window); roster and fast-gate-admits — they re-run the admitted census steps and went
+    red as echoes of a catch-erasure failure W1-T5617 now catches, or of load (batch-9 W1-T5676).
+    The child's `CENSUS_SUITE_CHILD_TIME_BOUND_MS` is 60 s and a timeout reads NOT MEASURED (exit 2,
+    non-blocking), so several 13 s suites in one child risk a silent pass.
+  design: |
+    Extend W1-T5692's `PRECHECK_TRIGGERED_SUITES`: cycle-ratchet when a changed src/ or scripts/
+    file's import-specifier set grows, or .dependency-cruiser.cjs / scripts/cycle-baseline.json /
+    scripts/cycle-ratchet.mjs change; source-size-baseline-is-enforced when src/lib/** gains an
+    import of src/cli, or its ratchet script, ci-parity.ts or .dependency-cruiser.cjs change;
+    citation-anchor-census when a plan/tasks.d shard, MASTER-PLAN.md or its script changes (first
+    reproduce the red from #8813 head c17487c9 and name the failing test in the PR). Each structural
+    suite runs in its own child with its own bound, so one slow suite cannot time out the others.
+    Their rows leave `ciOnly`.
+  acceptance:
+    - claim: "with injected runSuites, a fixture diff adding an import that closes a ring starts cycle-ratchet in its own child, a src/lib import of src/cli starts source-size, and a diff touching neither starts no structural child"
+      proof: "unit test: test/census-precheck-runs-the-whole-tree-suites-a-diff-can-move.test.ts"
+  falsifier: |
+    Run the structural suites in W1-T5692's shared child: the three-suite fixture under a 20 s
+    injected bound reads NOT MEASURED for all of them and the test fails.

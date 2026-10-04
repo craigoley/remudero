@@ -1,0 +1,41 @@
+- id: W1-T5701
+  title: "THE AFFECTED-SUITE GRAPH READS NO COMMENT — `specifiers` and `namedPaths` regex raw source, so a JSDoc `{@link import(\"./review.js\")…}` or a backticked test path becomes a graph edge: the selector's 285-module strongly-connected component is made of comments (the comment-stripped import graph's largest is 1), and 210 edges from 37 src files exist only in comments"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 6, namedPaths ignores doc-comment paths"
+  plan_refs: [W1-T4404, W1-T4406, W1-T4787, W1-T2895, W1-T5702]
+  files: [src/lib/affected-suites.ts, test/the-affected-suite-graph-reads-no-comment.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a; graph scripts re-run read-only at that sha.
+    `specifiers` and `namedPaths` in src/lib/affected-suites.ts (used by `selectAffectedSuites`,
+    W1-T4404) match raw file text with no comment stripping, and `namedPaths` accepts backticks —
+    the doc-comment citation form. MEASURED: largest SCC 285 modules on imports-only edges and 563
+    (183 tests) with namedPaths; with comments stripped by a string-aware stripper, the imports-only
+    graph's largest SCC is 1, agreeing with dependency-cruiser (scripts/cycle-baseline.json
+    `maxCycles: 0`, W1-T2895). The 285 come from JSDoc text such as `{@link
+    import("./review.js").cappedOverrideFromLedger}` in src/lib/ledger.ts read as a dynamic import.
+    Comment-stripped with namedPaths kept: 393; and with no namedPaths edge to a `*.test.ts`: 279
+    (the rest is src naming scripts/*.mjs in strings while those scripts import src). 210 namedPaths
+    edges from 37 src files are comment-only, 73 of them to test/. CORRECTION to the first report:
+    there is no real cycle to break; this fixes the selector's reading of one. It does NOT make
+    selection selective on its own — median src-module suite reach is 91.7% today and 85.7% after
+    this; the real hub is 799 suites importing src/run-task.ts (W1-T5702).
+  design: |
+    `specifiers` and `namedPaths` run on comment-stripped text (string-aware: a `//` or `/*` inside a
+    string literal is kept). A namedPaths edge never targets a `*.test.ts` file (a suite is selected
+    by its own imports, not by being named). The selector stays shadow-only, so the existing shadow
+    record measures any new miss.
+  acceptance:
+    - claim: "with module b importing a, a doc comment in a that cites import(\"./b.js\") and test/b.test.ts adds no edge, so a change to b selects only test/b.test.ts, while a real dynamic import in code still adds its edge"
+      proof: "unit test: test/the-affected-suite-graph-reads-no-comment.test.ts"
+  falsifier: |
+    Remove the strip: the fixture's doc-comment edge selects test/a.test.ts for a change to b and the
+    test fails.

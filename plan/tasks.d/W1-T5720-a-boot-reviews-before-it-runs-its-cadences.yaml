@@ -1,0 +1,41 @@
+- id: W1-T5720
+  title: "A BOOT REVIEWS BEFORE IT RUNS ITS CADENCES — the main loop ticks a median 2 times per lifetime, so every iteration-top cadence, intake, auto-triage, retro trigger and garden fan-out piles onto tick 1 ahead of the first full pass: first sweep.pass p50 8.1 / p90 20.0 min after daemon.boot, first review.posted 15.1 / 39.7"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — boot-time ordering of the first pass and the tick-1 cadences
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-04: research/restart/report.md (restart efficiency) P2; reorders work and caches nothing — the 10-02 multi-select did not pick a warm first sweep"
+  plan_refs: [W1-T4075, W1-T4053, W1-T5366, W1-T5718, W1-T5723, W1-T5724]
+  files: [src/lib/daemon.ts, test/a-boot-reviews-before-it-runs-its-cadences.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a; boot measurements from the restart report (47 real
+    boots in 67.6 h, 16.7/day: freshness 30, deploy recycle 10, no-summary 4, exit error 3). Median /
+    p90 minutes after `daemon.boot`: first `sweep.pass` 8.1 / 20.0, first `review.posted` 15.1 /
+    39.7, first `verdict.merged` 21.4 / 81.2; cadences 58 s / 230 s; the first full sweep hit its
+    559 s bound on 38 of 47 boots. The loop ticks a median 2 times per lifetime (p90 4), so the
+    cadence rungs `runDaemon` evaluates at the top of each iteration (measurement, retro trigger,
+    intake/auto-triage, garden fan-out) effectively run only at boot, all on tick 1. W1-T4075's
+    warmed first sweep (#9123) is live and did not fix it: the 10-04 19:09 boot took 19.6 min to its
+    first `sweep.pass` with a 12.5-min freeze. RULING CONTEXT: on 10-02 the operator's multi-select
+    picked "a failed task ends its lane only" and "reviews continue during PAUSE", not a warm first
+    sweep and not a freshness minimum lifetime; this task reorders work and caches nothing.
+  design: |
+    (i) The first light pass after `daemon.boot` runs with no initial sleep.
+    (ii) Tick-1 cadences, intake, auto-triage, the retro trigger and the garden fan-out are deferred
+    until the first full pass settles, or until a BACKSTOP-tagged bound (a named constant, e.g. 10
+    min) passes, whichever comes first; each deferral logs one row naming the cadence and why.
+    (iii) Nothing is cached across boots and no cadence is skipped; after the gate opens the
+    cadences run as today.
+  acceptance:
+    - claim: "with fake deps, after boot the light pass and its review admission run before any tick-1 cadence starts, the cadences start once the first full pass settles, and a first pass that never settles releases them at the backstop bound"
+      proof: "unit test: test/a-boot-reviews-before-it-runs-its-cadences.test.ts"
+  falsifier: |
+    Remove the gate: the measurement and retro fakes start before the first light pass and the test
+    fails.

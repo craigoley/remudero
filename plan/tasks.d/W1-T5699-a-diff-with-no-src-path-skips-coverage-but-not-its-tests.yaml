@@ -1,0 +1,42 @@
+- id: W1-T5699
+  title: "A DIFF THAT TOUCHES NO src/ FILE SKIPS INSTRUMENTED COVERAGE AND STILL RUNS THE FULL SUITE — deploy/, hooks/, Dockerfile, learnings/, scripts/ and test+plan diffs all class SOURCE and pay the 8-shard instrumented run, though diff coverage of src is empty by construction"
+  repo: remudero
+  depends_on: [W1-T5700]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — a coverage class for diffs with no src path
+  band_meaning: span
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 5(c), DEPLOY/WORKFLOW and LEARNINGS classes; workflow edit is an operator build (W1-T5351)"
+  plan_refs: [W1-T3207, W1-T2428, W1-T4395, W1-T4396, W1-T5700, W1-T5703, W1-T5351]
+  files: [scripts/diff-class.mjs, .github/workflows/ci.yml, src/lib/selector-shadow-gardener.ts, test/a-diff-with-no-src-path-skips-coverage-but-not-its-tests.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. scripts/diff-class.mjs `CLASSES` are PLAN_ONLY,
+    DOCS_ONLY, SOURCE, and `classifyCoverage` adds TEST_ONLY only when every path is under test/;
+    anything else is SOURCE and runs coverage-ratchet's 8 instrumented shards (coverage-shard 2,668
+    runs x 12.0 min = 535 runner-h of SOURCE's 669 in 2.8 days). MEASURED, CI rows: 6 non-src PRs
+    classed SOURCE cost 16 runner-h (164 runner-min per PR), and 6 test+plan PRs 16.4 runner-h —
+    the first report's "10 PRs, 33.6 h" for deploy/workflow/learnings could not be re-derived from
+    the rows (no file lists), so the PR must re-measure the saving. Two cautions: (1) W1-T3207 made
+    coverage the test verdict on SOURCE, so a coverage skip must hand the verdict back to the
+    uninstrumented fast and slow tiers, and whether those are materially cheaper than the
+    instrumented shard is measured first; (2) readers of these paths are wider than
+    `censusSuiteFiles` admits (ci.yml 15 vs 165 suites mentioning it; deploy/rmd-host-cleanup.sh 17
+    vs 129), so the class runs the FULL uninstrumented suite, never a readers-only lane.
+  design: |
+    `classifyCoverage` returns NO_SRC when no changed path is under src/ and none is coverage or
+    toolchain config (package*.json, tsconfig*, ci.yml, ci-gate.yml, scripts/coverage-*); this covers
+    deploy/**, hooks/**, Dockerfile, learnings/**, scripts/** and test+plan mixes. On NO_SRC
+    coverage-shard skips with the same explicit skip line, ci-shard runs the full fast tier and
+    test-slow-shard the slow tier. Add NO_SRC to the classify clamp lists, the
+    coverage-ratchet-required event:class allowlist, and `explicitlySkippedRun`
+    (src/lib/selector-shadow-gardener.ts) so the shadow counts it as skipped.
+  acceptance:
+    - claim: "a deploy plus learnings diff and a test plus plan diff classify NO_SRC for coverage, ci.yml runs the full fast and slow tiers for that class, a diff with any src/ path or package-lock.json stays SOURCE, and a NO_SRC skip log counts as a skipped shadow run"
+      proof: "unit test: test/a-diff-with-no-src-path-skips-coverage-but-not-its-tests.test.ts"
+  falsifier: |
+    Drop the NO_SRC branch: the deploy-plus-learnings diff classifies SOURCE and the test fails.

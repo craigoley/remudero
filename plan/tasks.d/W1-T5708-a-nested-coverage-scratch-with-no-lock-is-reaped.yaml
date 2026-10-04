@@ -1,0 +1,40 @@
+- id: W1-T5708
+  title: "AN IDLE NESTED COVERAGE SCRATCH WITH NO LOCK IS REAPED AT ANY DEPTH — the tmp sweep matches `rmd-c-*` only directly under its roots, so 27.4 G of killed-run coverage scratch sits nested in ad-hoc checkouts (fh5 7.8 G, thread-followups 5.8 G, rmd-qa-namespace 7.6 G, remudero-followup-gate 6.8 G) that no later run of the same repo will ever reclaim"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 8 and addendum 7(c), the coverage scratch half"
+  plan_refs: [W1-T5655, W1-T4526, W1-T5707, W1-T5709, W1-T5550]
+  files: [deploy/rmd-host-cleanup.sh, test/a-nested-coverage-scratch-with-no-lock-is-reaped.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a and the host, read only. `coverageScratchDir`
+    (src/lib/ci-parity.ts) is `tmpdir()/rmd-c-<sha12(realpath repoRoot)>`; `testWithCoverageLeaf`
+    removes it and its `/tmp/rmd-c-<hash>.lock` in `finally`, which covers every early return
+    (failed shard, missing artifact, failed compaction). CORRECTION to the first report: a non-kill
+    failure does not leak; only SIGKILL does, so a "remove in finally" task is already done and is
+    not filed. Batch-9 W1-T5655 (open, #9138) reclaims a dead holder's scratch when a later run on
+    the SAME repoRoot hash takes the lock — never for an ad-hoc checkout nobody reruns. MEASURED
+    nested `rmd-c-*` ~27.4 G (13.6 G on /mnt/rmd): /mnt/rmd/fh5/rmd-c-7b57d0f60dc3 7.8 G (all
+    raw-shards/shard-1), thread-followups-combined-validation-*/{tmp,release/container-tmp}/rmd-c-eb21599037ad
+    3.5 + 2.3 G, /mnt/scratch/rmd-qa-namespace.*/tmp/rmd-c-* 7.6 G,
+    /mnt/scratch/remudero-followup-gate.*/tmp-kernel/rmd-c-* 6.8 G. The addendum's
+    `census-precheck-wt-*`/`house-layout-wt-*` families total only ~0.12 G (872 dirs) and stopped
+    growing with W1-T5550 (#9050); not included.
+  design: |
+    The janitor walks its tmp roots and scratch parents (bounded depth, no symlink following,
+    same-device only) for directories named exactly `rmd-c-<12 hex>`; one whose lock
+    `/tmp/rmd-c-<hash>.lock` is absent (or held by a dead pid once W1-T5655 records holders) and
+    whose newest mtime is older than the idle threshold is removed and logged with its size. A
+    present lock with a live or unattributed holder keeps it.
+  acceptance:
+    - claim: "an idle x/tmp/rmd-c-abcdef012345 with no lock is reaped at depth, the same directory with its /tmp lock present is kept, and a directory named rmd-c-notes is never matched"
+      proof: "unit test: test/a-nested-coverage-scratch-with-no-lock-is-reaped.test.ts"
+  falsifier: |
+    Keep top-level-only matching: the nested fixture scratch survives and the test fails.

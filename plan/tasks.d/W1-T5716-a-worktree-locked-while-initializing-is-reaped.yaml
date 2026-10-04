@@ -1,0 +1,35 @@
+- id: W1-T5716
+  title: "A WORKTREE WHOSE git worktree add WAS KILLED IS REAPED — the add leaves `locked: initializing`, executeWorktreeRemoval passes one --force, git refuses a locked tree, and the reaper's catch writes `removal-failed` forever: machine-judge-garden-1790870097951 has failed every pass since a 10-01 recycle, 55 rows in 2.8 days"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: medium
+  origin: "operator session 2026-10-04: research/flow/report.md addendum defect (worktree machine-judge-garden-1790870097951 fails removal since 10-01)"
+  plan_refs: [W1-T5634, W1-T5625]
+  files: [src/lib/worker.ts, test/a-worktree-locked-while-initializing-is-reaped.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a and the state checkout (read only). The admin dir
+    state2/remudero/.git/worktrees/machine-judge-garden-1790870097951/ holds `locked` =
+    `initializing` and an empty `index.lock`: the 10-01 15:55 container recycle killed
+    `gardenCheckout` -> `worktreeAdd` mid-add. `executeWorktreeRemoval` (src/lib/worker.ts) runs `git
+    worktree remove --force <path>` with ONE --force; git 2.43 refuses: "cannot remove a locked
+    working tree, lock reason: initializing … use 'remove -f -f'". The reaper's catch throws the
+    error away and keeps the tree as `removal-failed` — 55 such rows 10-02..10-04, the latest
+    10-04 17:47Z. A second record with the same lock, rmd-proof-base-s3rszM, sits outside the reaped
+    root. test/worktree-reap-removes-through-git.test.ts holds the reaper's existing git-removal
+    cases and is unchanged.
+  design: |
+    Before removal, read the admin dir's `locked` file: when its reason is exactly `initializing`,
+    remove with `-f -f`; any other lock reason keeps the tree under a new `locked` keep reason and
+    is never force-removed. A removal that still fails records git's stderr on the keep row.
+  acceptance:
+    - claim: "a worktree whose admin record is locked with reason initializing is removed through git and its admin record is gone, while a worktree locked with any other reason is kept as locked"
+      proof: "unit test: test/a-worktree-locked-while-initializing-is-reaped.test.ts"
+  falsifier: |
+    Keep one --force: the initializing fixture is kept as removal-failed and the test fails.

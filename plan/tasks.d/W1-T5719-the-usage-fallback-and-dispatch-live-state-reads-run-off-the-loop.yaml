@@ -1,0 +1,39 @@
+- id: W1-T5719
+  title: "THE USAGE CLI FALLBACK AND DISPATCH'S LIVE-STATE READS RUN OFF THE LOOP WITH A TIMEOUT — defaultUsageProbeRunner is execFileSync and drain's readLiveState is a synchronous gh read per candidate, about 14 s and 45 s of the 490-second freeze after the 10-04 19:09 boot"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — two admission-path reads stop blocking the daemon loop
+  band_meaning: span
+  origin: "operator session 2026-10-04: research/restart/report.md (restart efficiency) P1, the two reads no queued task covers"
+  plan_refs: [W1-T5284, W1-T5282, W1-T5283, W1-T4970, W1-T5718, W1-T5689]
+  files: [src/run-task.ts, src/lib/drain.ts, test/the-usage-fallback-and-dispatch-live-state-reads-run-off-the-loop.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. `readUsageSnapshotPreferSdk` (src/run-task.ts) falls
+    back to `readUsageSnapshot(config, defaultUsageProbeRunner, …)`, and `defaultUsageProbeRunner`
+    is `execFileSync(bin, argv, opts)`. drain.ts calls `opts.readLiveState?.(id, openPrNumber)` and
+    `deps.readLiveState!(taskId, prNumber)` synchronously during selection; the daemon wires it to
+    `ghLiveStateByNumber` -> `liveStateFromRest` over the synchronous `ghJson`. MEASURED (restart
+    report, stall S2 after the 10-04 19:09 boot, 490 s): usage CLI fallback 14 s, dispatch
+    live-state gh reads ~45 s; 180 `usage.probe_failed` rows 10-02..10-04. The rest of S2 is filed
+    and queued — W1-T5284 (gardenCheckout, triage and lane worktrees, ~330 s, being hand-built now),
+    W1-T5282 (freshness fetch), W1-T5283 (main-health gh), W1-T4970 (cadence sleep) — and is not
+    refiled here.
+  design: |
+    (i) The usage CLI fallback runs through an async runner (execFile with a timeout; a timeout is
+    the existing "spawn" failure kind, never a hang), and `readUsageSnapshotPreferSdk` awaits it.
+    (ii) drain's live-state reader may return a promise: selection reads the candidates' live states
+    concurrently through the async gh transport with a per-read timeout, before ranking, and a
+    timed-out read is "unknown" exactly as a failed read is today. CLI callers keep their behaviour.
+  acceptance:
+    - claim: "a usage CLI runner that never answers resolves as a spawn failure within its timeout while a timer scheduled before it still fires, and a dispatch selection over five candidates with a slow live-state reader keeps the loop responsive and treats a timed-out read as unknown"
+      proof: "unit test: test/the-usage-fallback-and-dispatch-live-state-reads-run-off-the-loop.test.ts"
+  falsifier: |
+    Restore `execFileSync` in the usage runner: the scheduled timer cannot fire during the probe and
+    the test fails.

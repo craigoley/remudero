@@ -1,0 +1,48 @@
+- id: W1-T5691
+  title: "A FIX ROUND MAY REGISTER ITS OWN CENSUS ENTRY OUTSIDE files: — 84 of 101 refused fix commits in 2.8 days were 'worker changed nothing', mostly census reds whose remedy is one added row in a registry file the task never declared (ENV_REGISTRY, DECISION_RELEVANT_LEDGER_STEPS, SPEND_STEP_ROLES, AUTHORITY_TABLE, a baseline), and 15 PRs needed a hand fix"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — an additive registry edit is admitted outside a fix round's files:
+  band_meaning: span
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 2 rung 1 and addendum #3 Task B"
+  plan_refs: [W1-T5534, W1-T5532, W1-T4450, W1-T5690, W1-T5692]
+  files: [src/lib/sweep.ts, src/run-task.ts, src/lib/prompt-render.ts, test/a-fix-round-may-register-its-own-census-entry.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. Fix lane, 10-02..10-04: 174 fix.dispatch, 101
+    commit_refused (84 "worker changed nothing", 14 no anchored COMMIT_MESSAGE). Closed PRs needing a
+    hand fix: 15 (#8795 #8822 #8823 #8954 #8961 #8970 #8972 #8973 #8988 #9041 #9076 #9077 #9079
+    #9085 #9117), 44 of their 52 dispatches refused. #9041's hand fix (squash 5940c90f) added two
+    rows to src/lib/ledger.ts `DECISION_RELEVANT_LEDGER_STEPS` and one to src/lib/spend-rows.ts
+    `SPEND_STEP_ROLES` — files the task never declared. The registries: ENV_REGISTRY
+    (src/lib/config-schema.ts), AUTHORITY_TABLE (src/lib/authority.ts), scripts/bound-kind-baseline.json,
+    and the catch-erasure tables in test/catch-erasure-ratchet.test.ts (already admitted through
+    W1-T5532's test scope). Precedent: `REGENERABLE_ARTIFACT_GENERATORS` (src/lib/sweep.ts, W1-T4450)
+    is staged by `commitWorkerEdits` even when undeclared. WHY NOT AMEND W1-T5534 (queued, its
+    dependency W1-T5532 merged as #9066): `requestScopeAmendment` opens an amendment PR and waits
+    for its merge, refuses `*-baseline.json`, and refuses paths absent from the worker's diff — a
+    worker that changed nothing never reaches it. This is the in-round fast path; W1-T5534 stays the
+    route for a real scope widening.
+  design: |
+    (i) An exported `ADDITIVE_REGISTRATION_SURFACES` table beside `REGENERABLE_ARTIFACT_GENERATORS`:
+    { path, literal } for DECISION_RELEVANT_LEDGER_STEPS (src/lib/ledger.ts), SPEND_STEP_ROLES
+    (src/lib/spend-rows.ts), ENV_REGISTRY (src/lib/config-schema.ts), AUTHORITY_TABLE
+    (src/lib/authority.ts), and the shrink-only baselines scripts/bound-kind-baseline.json.
+    (ii) `commitWorkerEdits` and its scope-guard filter admit an undeclared path from the table
+    only when its diff is purely ADDED lines inside the named literal (a baseline: only removed
+    rows), and record the admission on the commit row; any edit or deletion of an existing row
+    stays out of scope.
+    (iii) `renderFixPrompt` (src/lib/prompt-render.ts) names the table when the failing check is a
+    census whose remedy lives in one of these files, so the worker knows the edit is allowed.
+  acceptance:
+    - claim: "a fix round's undeclared ENV_REGISTRY or DECISION_RELEVANT_LEDGER_STEPS addition is committed and recorded as an admitted registration, while an edited or deleted existing row in the same file is refused as out of scope"
+      proof: "unit test: test/a-fix-round-may-register-its-own-census-entry.test.ts"
+  falsifier: |
+    Drop the table from the scope-guard filter: the #9041-shaped fixture (two added ledger.ts steps,
+    one spend role) is refused as out of scope and the test fails.

@@ -1,0 +1,48 @@
+- id: W1-T5694
+  title: "A SUPERSEDED RUN'S RE-RUN NEVER OVERRIDES THE NEWEST RUN — dedupeRollupByLatestAttempt keys a check by name alone, so on #9124 the sweep's 17:45Z re-run of an older run's cancelled job read coverage-ratchet red over a newer run's 17:13Z success, and re-runs of older runs replay stale body payloads (#8821, #9090)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — a rollup entry's identity is (workflow, name, run, attempt)
+  band_meaning: span
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 7, rollup identity"
+  plan_refs: [W1-T5654, W1-T1223, W1-T4105, W1-T4902, W1-T4586, W1-T5695]
+  files: [src/lib/sweep.ts, src/lib/open-prs-rest.ts, test/a-superseded-runs-rerun-never-overrides-the-newest-run.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. `dedupeRollupByLatestAttempt` (src/lib/sweep.ts) keys
+    on `c.name ?? c.context` only — latest `startedAt` wins, a same-second tie goes to the larger
+    checkRunId; `classifyRollupSupersession`, `stillRedRequiredNames`, `cancelledRequiredCheckNames`,
+    `redQualityGateNames` and src/lib/gate-fire-rate.ts inherit it. `rollupFromRest`
+    (src/lib/open-prs-rest.ts) maps no check_suite, app or workflow, though the run and job ids are
+    in each entry's details_url (`/actions/runs/<run>/job/<job>`) and `fetchWorkflowRunObservations`
+    already lists `/actions/runs?head_sha=` with id and run_attempt. #9124 head 0704ab90:
+    coverage-ratchet run 37217449601 attempt 1 FAILURE 16:54 (the SHARD HANG after a same-sha
+    concurrency cancel), run 37218417499 SUCCESS 17:13, run 37217449601 attempt 2 FAILURE 17:45 (the
+    sweep's own requeue) — name-only dedupe reads red again, and `cancelledRequiredChecks` takes its
+    jobId from that entry so a requeue can target the older run. Same-sha flips: #8821 fd382c64
+    proof-discrimination and #9090 1ae7af2c acceptance-author-gate, an older run re-run reading
+    FAILURE beside the newest run's SUCCESS. Newest-run-id across workflows is WRONG: on #9124 the CI
+    gate workflow's run 37218417359 (an `edited` event) failed at 16:53 while ci.yml's ci-gate
+    succeeded at 17:45 in the lower-numbered run, so the key must include the workflow. Batch-9
+    W1-T5654 (open, #9138) filters the fix arm's snapshot reds through a fresh rollup; its
+    correctness depends on this identity. SKIPPED stays a pass (GitHub's required-check semantics).
+  design: |
+    (i) `rollupFromRest` maps `workflowRunId` and `jobId` from details_url and the check run's
+    `external_id`; the workflow of each run comes from the head's runs listing.
+    (ii) Key = (workflow, name), or ("posted", name) for an `externalId` beginning `job:`. Within a
+    key: the newest run (max run id), then that run's latest attempt by startedAt. Across keys that
+    share a name, today's latest completion stands (ci-gate's designed `edited` re-aggregate).
+    (iii) A FAILURE from a run older than the newest run of its workflow — a SHARD HANG after a
+    same-sha cancel — drops out by construction; a genuine hang with no newer run stays red.
+  acceptance:
+    - claim: "the #9124 coverage-ratchet triple (older run attempt 1 failure, newer run success, older run attempt 2 failure) reads green, a same-run attempt 2 success over its attempt 1 failure still wins, and a lone failed run with no newer run stays red"
+      proof: "unit test: test/a-superseded-runs-rerun-never-overrides-the-newest-run.test.ts"
+  falsifier: |
+    Restore the name-only key: `stillRedRequiredNames(["coverage-ratchet"], …)` on the #9124 triple
+    returns ["coverage-ratchet"] and the test fails.

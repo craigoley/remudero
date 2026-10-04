@@ -1,0 +1,38 @@
+- id: W1-T5698
+  title: "A PLAN-ONLY DIFF RUNS THE SUITES THAT READ ITS PATHS, NOT EVERY SUITE NAMING plan/ — namesPlanOrDocsPath selects any suite with a quoted plan/ or docs/ literal (459 of 2,491), so a one-shard plan PR runs suites that only name plan/policy.yaml or plan/feedback: 54 of PLAN_ONLY's 87 runner-hours in 2.8 days"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 5(b), CI class v2"
+  plan_refs: [W1-T2428, W1-T4787, W1-T4397, W1-T5697]
+  files: [scripts/diff-class.mjs, test/a-plan-only-diff-runs-the-suites-that-read-its-paths.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. scripts/diff-class.mjs `planReadingSuiteFiles` keeps a
+    suite when `namesPlanOrDocsPath` matches any quoted `plan/` or `docs/` prefix literal,
+    `join(REPO_ROOT, "plan"|"docs")` or `MASTER-PLAN.md`: 459 of 2,491 suites at 3ae4a67a. Of those,
+    319 name plan/tasks*, 56 other plan files (plan/feedback 45, plan/policy.yaml 31) and 84 only
+    docs/ or MASTER-PLAN.md; about 138 also look like real-tree readers. MEASURED, CI rows
+    10-03..10-04: PLAN_ONLY 101 PRs, 87 runner-h, of which ci-shard's plan-reading run is 54;
+    open->merge p50 9 / p90 75 min. CAUTION: W1-T2428's history shows a reader discriminator once
+    dropped 6 suites that could fail, so the new selection must stay at least as wide as every suite
+    that went red on a PLAN_ONLY head in the window, and the census suites (`censusSuiteFiles`) stay
+    selected. Queued W1-T4787 (p4) also edits diff-class.mjs.
+  design: |
+    `planReadingSuiteFiles(changedPaths)` qualifies a suite by the changed paths: it names a changed
+    file, a changed shard's id, or a directory prefix of one (plan/tasks.d, plan/feedback, …), or it
+    enumerates the real plan tree (loadPlan of the repo root, a readdir of plan/tasks.d). A suite
+    that names only a plan path the diff did not touch is not selected. Docs-only literals select on
+    a docs/ change only. The selected count is printed beside today's for the PR to quote.
+  acceptance:
+    - claim: "for a lone plan/tasks.d shard diff, a suite that only names plan/policy.yaml is not selected, every-shard-on-main-is-lintable and a suite naming the changed shard id are selected, and a plan/policy.yaml diff selects the policy suite"
+      proof: "unit test: test/a-plan-only-diff-runs-the-suites-that-read-its-paths.test.ts"
+  falsifier: |
+    Restore the any-literal match: the policy-only suite is selected for the shard diff and the test
+    fails.
