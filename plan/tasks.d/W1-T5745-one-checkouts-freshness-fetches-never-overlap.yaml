@@ -1,0 +1,37 @@
+- id: W1-T5745
+  title: "ONE CHECKOUT'S FRESHNESS FETCHES NEVER OVERLAP — W1-T5282 awaits the daemon's freshness fetch, so the top of the tick, the dispatch ticker, each lane's CI-wait read and the reviewer-code gate can now each run `git fetch origin` on the same checkout at once, where the sync fetches ran one at a time; overlapping fetches contend for the same ref locks and read as retries or `degraded` freshness"
+  repo: remudero
+  depends_on: [W1-T5282]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: medium
+  origin: "operator session 2026-10-04: found while building W1-T5282 (#9161)"
+  plan_refs: [W1-T5282, W1-T5746, W1-T5689]
+  files: [src/lib/self-sync.ts, test/one-checkouts-freshness-fetches-never-overlap.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on #9161 (W1-T5282, open, head 92f4daef). `daemonFreshnessReads`
+    (src/run-task.ts) hands the daemon `checkFreshness` and `externalWaitFreshness`, both over
+    `checkServiceFreshnessAsync` (src/lib/self-sync.ts), which awaits
+    `fetchOriginRetryingRefLockAsync` -> `boundGitCall(git, ["fetch", "--quiet", "origin"], ...)`.
+    src/lib/daemon.ts reads `deps.checkFreshness` at the top of the tick, again for the batch
+    admission, and in `onDispatchTick`; each lane's CI wait reads `externalWaitFreshness`; and the
+    reviewer gate calls `checkReviewerCodeFreshnessAsync`, which runs its own async fetch of the
+    same repo. Nothing serializes them. Before W1-T5282 each fetch was synchronous, so two could not
+    overlap in one process. Two concurrent `git fetch` in one repo race for `.git/refs` and
+    `FETCH_HEAD` locks: the loser retries on `isRefLockFailure` (1 s, 2 s) or, past three attempts,
+    the read returns `degraded`, which the restart decision reads as an unknown.
+  design: |
+    Single-flight the fetch per repo dir: a module-level map from the resolved repo dir to the
+    in-flight `fetchOriginRetryingRefLockAsync` promise, joined by `checkServiceFreshnessAsync` and
+    `checkReviewerCodeFreshnessAsync` alike and cleared when it settles; each caller still runs its
+    own assessment after the shared fetch. An injected `gitAsync` (a test seam) does not join.
+  acceptance:
+    - claim: "two concurrent freshness reads of one checkout spawn one git fetch and both assess its result, while reads of two different checkouts fetch independently"
+      proof: "unit test: test/one-checkouts-freshness-fetches-never-overlap.test.ts"
+  falsifier: |
+    Drop the per-repo map: the two concurrent reads spawn two fetches and the test fails.
