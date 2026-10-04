@@ -1907,8 +1907,8 @@ function rotateLedgerLocked(
 
   // ── THE CONVERGENCE INVARIANT (W1-T244). Even after every bound above the retained core can
   // still exceed the ceiling. Post-rotation the live ledger MUST be strictly below it, or rotation
-  // cannot terminate. Shed the OLDEST retained lines by `ts`, never the newest, and leave one
-  // pointer line naming the archive. Falsifier: test/ledger-rotation-convergence.test.ts. Why: the
+  // cannot terminate. Shed the OLDEST retained lines by `ts`, never the newest nor a correction (W1-T5551),
+  // and leave one pointer line naming the archive. Falsifier: test/ledger-rotation-convergence.test.ts. Why: the
   // core once exceeded the ceiling live (docs/forensics/ledger.md#rotateledger). ───────────────
   let shedCount = 0;
   if (keptBytes + tailBytes >= ceilingBytes) {
@@ -1929,8 +1929,9 @@ function rotateLedgerLocked(
     // headroom — otherwise the very next append could put it straight back over. The invariant is
     // strictly enforced either way; this makes "converged" durable rather than a hair's-width pass.
     const targetBytes = Math.floor(ceilingBytes * 0.9);
-    const byAge = [...keptCandidates].sort((a, b) => (a.tsMs ?? 0) - (b.tsMs ?? 0));
-    const stillKept = new Set(byAge);
+    const sheddable = keptCandidates.filter((p) => p.step !== "correction.provenance");
+    const byAge = sheddable.sort((a, b) => (a.tsMs ?? 0) - (b.tsMs ?? 0));
+    const stillKept = new Set(keptCandidates);
     for (const victim of byAge) {
       if (keptBytes + tailBytes + pointerBytes < targetBytes) break;
       stillKept.delete(victim);

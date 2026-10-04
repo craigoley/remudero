@@ -26,6 +26,7 @@ import { LEDGER_FILENAME } from "./ledger-path.js";
 import { FUTURE_ROW_TOLERANCE_MS, LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, type LedgerProjector, type ProjectorTickResult } from "./ledger-projector.js";
 import { createNavBadgeReadModelView } from "./nav-badge-view.js";
 import { createNowView } from "./now-view.js";
+import { createOperatorAgentRowsView } from "./operator-agent-read-model.js";
 import { createTaskView, type ReadModelInstanceState as TaskViewInstanceState } from "./task-view.js";
 import { createDemandBook, type DemandBook } from "./view-demand.js";
 import {
@@ -1270,7 +1271,7 @@ export function runReadModelViewWorker(
     const inboxThread = createInboxThreadView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), clock, demand, log });
     ticker = createReadModelTicker({
       stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off", demand,
-      views: [...READ_MODEL_VIEWS, now, instances, task, inboxThread, ...extra],
+      views: [...READ_MODEL_VIEWS, now, instances, task, inboxThread, createOperatorAgentRowsView(ledgerSource), ...extra],
     });
     ticker.start();
     for (const msg of early.splice(0)) handle(msg);
