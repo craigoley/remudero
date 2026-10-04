@@ -14,6 +14,13 @@
  * under tsx, so a diff that can matter spawns scripts/lib/instrument-surface-census.mjs as a child
  * (`node --import tsx`), and a diff that cannot never starts it.
  *
+ * W1-T5617 PARTLY REVERSES W1-T3225 for the census-admitted suites: `CENSUS_ADMITTED_MEMBERS`
+ * (src/lib/ci-parity.ts) names suites measured under the fast-gate census bound, and only `rmd
+ * preflight` ran them, which no worker has run since W1-T464. A diff joining one's `walks` population
+ * now RUNS those suites, once, in one `node --test` child with every GIT_* variable stripped (the
+ * W1-T3224 mechanism behind the damage W1-T3225 recorded), bounded, and read from its TAP. They run
+ * on this tree only, so unlike the counts below a suite main already fails refuses here too.
+ *
  * ONLY GROWTH THIS BRANCH CAUSES REFUSES. Each count is taken twice, on this tree and on the merge
  * base with `--base`, and a finding blocks only when the base did not already carry it (or this
  * branch grew it further). A census main already fails is main's to fix. Blocking every push on
@@ -25,7 +32,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { isMainModule } from "./lib/argv.mjs";
 import { git } from "./lib/git.mjs";
 import {
@@ -302,6 +309,136 @@ export function evaluateInstrumentSurface(input) {
   return { violations, unmeasured: null };
 }
 
+const SCRIPT_REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const TMP_HYGIENE_URL = pathToFileURL(join(SCRIPT_REPO, "test", "setup", "tmp-hygiene.ts")).href;
+const ADMISSION_TABLE = "src/lib/ci-parity.ts";
+// BACKSTOP only: the seven admitted suites take 6-10 s together on an 8-core host; this ends a hung child as not measured.
+const CENSUS_SUITE_CHILD_TIME_BOUND_MS = 60_000;
+// A hook's GIT_DIR family (W1-T3224), a parent runner's context (it turns the child's TAP into v8 frames), and
+// the lanes' read-only escape, which only flips checkCliFreshness — no census reads it — and makes the setup refuse.
+const CHILD_ENV_DROPPED = /^(?:GIT_|NODE_TEST_CONTEXT$|RMD_SELF_SYNC_DONE$)/;
+
+function childEnv() {
+  return Object.fromEntries(Object.entries(process.env).filter(([k]) => !CHILD_ENV_DROPPED.test(k)));
+}
+
+function childOptions(root) {
+  return { cwd: root, encoding: "utf8", env: childEnv(), timeout: CENSUS_SUITE_CHILD_TIME_BOUND_MS, maxBuffer: 64 * 1024 * 1024 };
+}
+
+/** Throws, naming why, when a child did not run to a status: a spawn error (the time bound included) or a signal. */
+function assertChildFinished(res, what) {
+  if (res.error) throw new Error(`the ${what} child could not run to completion: ${res.error.message}`);
+  if (res.signal) throw new Error(`the ${what} child was ended by ${res.signal}`);
+}
+
+function isMember(m) {
+  return typeof m?.testFile === "string" && typeof m.script === "string" && Array.isArray(m.walks) && m.walks.length > 0;
+}
+
+/**
+ * The tree's own `CENSUS_ADMITTED_MEMBERS` as `{ testFile, script, walks }`, read by a child under tsx because
+ * the table is TypeScript. A tree that carries no table has no admitted suites; every failure to read one that
+ * exists THROWS, and an empty list is a failed read, never a clean set.
+ */
+export function listAdmittedCensusMembers(root, run = spawnSync) {
+  const table = join(root, ADMISSION_TABLE);
+  if (!existsSync(table)) return [];
+  const code =
+    `const m = await import(${JSON.stringify(pathToFileURL(table).href)});` +
+    "console.log(JSON.stringify(m.CENSUS_ADMITTED_MEMBERS.map((x) => ({ testFile: x.testFile, script: x.script, walks: [...(x.walks ?? [])] }))));";
+  const res = run(process.execPath, ["--import", import.meta.resolve("tsx"), "--input-type=module", "-e", code], childOptions(root));
+  assertChildFinished(res, "admission table");
+  if (res.status !== 0) {
+    throw new Error(`the admission table child exited ${res.status}: ${String(res.stderr || "no diagnostic").trim().slice(0, 300)}`);
+  }
+  let members;
+  try {
+    members = JSON.parse(String(res.stdout).trim());
+  } catch (e) {
+    throw new Error(`the admission table child printed output that is not JSON: ${String(e.message ?? e)}`);
+  }
+  if (!Array.isArray(members) || !members.every(isMember)) {
+    throw new Error("the admission table child printed JSON that is not a list of { testFile, script, walks }");
+  }
+  if (members.length === 0) throw new Error(`${ADMISSION_TABLE} lists no admitted member, which is a failed read, not a clean set`);
+  return members;
+}
+
+/** The given suites a TAP stream fails, read from each TOP-LEVEL `not ok` and its `location:`. Throws on a
+ *  failure it cannot attribute to one of `files`, so an unread failure is never dropped. */
+function failingSuitesFromTap(stdout, files) {
+  const lines = stdout.split("\n");
+  const failing = new Set();
+  lines.forEach((line, i) => {
+    if (!/^not ok \d+ - /.test(line)) return;
+    let location = null;
+    for (let j = i + 1; j < lines.length && /^\s/.test(lines[j]); j++) {
+      location ??= lines[j].match(/^ {2}location: '(.*):\d+:\d+'$/)?.[1] ?? null;
+    }
+    const file = files.find((f) => location === f || location?.endsWith(`/${f}`));
+    if (file === undefined) throw new Error(`the census suite child failed a test its TAP attributes to no suite it was given: ${line}`);
+    failing.add(file);
+  });
+  return [...failing];
+}
+
+/**
+ * Runs `files` (repo-relative suite paths) once, in ONE `node --test` child over `root`, and returns the ones
+ * that fail. THROWS, naming why, on every way the run can fail to be a measurement (spawn error, time bound,
+ * signal, no `# tests` summary, zero tests, a non-zero exit its TAP does not explain): never `[]` for those.
+ */
+export function runCensusSuitesViaChild({ root, files, run = spawnSync }) {
+  const args = ["--test", "--test-reporter=tap", "--import", import.meta.resolve("tsx"), "--import", TMP_HYGIENE_URL, ...files];
+  const res = run(process.execPath, args, childOptions(root));
+  assertChildFinished(res, "census suite");
+  const stdout = String(res.stdout ?? "");
+  const total = stdout.match(/^# tests (\d+)$/m);
+  if (total === null) {
+    throw new Error(
+      `the census suite child printed no \`# tests\` summary (exit ${res.status}): ${String(res.stderr || "no diagnostic").trim().slice(0, 300)}`,
+    );
+  }
+  if (Number(total[1]) === 0) throw new Error("the census suite child ran 0 tests, which is a failed run, not a clean one");
+  const failing = failingSuitesFromTap(stdout, files);
+  if (res.status !== 0 && failing.length === 0) {
+    throw new Error(`the census suite child exited ${res.status} but its TAP names no failing suite`);
+  }
+  return failing;
+}
+
+/**
+ * The admitted census suites this diff joins, run. A member joins when a changed path starts with one of its
+ * `walks` prefixes; the joined suites run once through `runSuites`, and each failing one is a row on ONE physical
+ * line in the shape src/run-task.ts censusPushRefusal reads. A diff joining none starts no child. Every failure
+ * to read the table or run the suites is `unmeasured` with its reason, never an empty violation list.
+ *
+ * @param {{ changed: string[], loadMembers: () => { testFile: string, script: string, walks: string[] }[],
+ *   runSuites: (files: string[]) => string[] }} input
+ * @returns {{ violations: string[], unmeasured: string | null }}
+ */
+export function evaluateAdmittedCensusSuites({ changed, loadMembers, runSuites }) {
+  if (changed.length === 0) return { violations: [], unmeasured: null };
+  let members;
+  try {
+    members = loadMembers();
+  } catch (e) {
+    return { violations: [], unmeasured: String(e?.message ?? e) };
+  }
+  const joined = members.filter((m) => changed.some((p) => m.walks.some((w) => p.startsWith(w))));
+  if (joined.length === 0) return { violations: [], unmeasured: null };
+  let failing;
+  try {
+    failing = new Set(runSuites([...new Set(joined.map((m) => m.testFile))]));
+  } catch (e) {
+    return { violations: [], unmeasured: String(e?.message ?? e) };
+  }
+  const violations = joined
+    .filter((m) => failing.has(m.testFile))
+    .map((m) => `census-suite: ${m.testFile} fails — run npm run ${m.script}`);
+  return { violations, unmeasured: null };
+}
+
 export const PRECHECK_PARITY_BASELINE = "scripts/census-precheck-parity-baseline.json";
 
 /** Every census suite this script asks before the push, and how: `modeled` names the check that asks its
@@ -314,6 +451,15 @@ export const PRECHECK_PARITY = {
   "test/deps-interface-census.test.ts": { modeled: depsInterfaceViolations },
   "test/repo-layout.test.ts": { modeled: houseLayoutViolations },
   "test/instrument-surface-completeness.test.ts": { modeled: evaluateInstrumentSurface },
+  "test/census-precheck-runs-the-admitted-census-suites.test.ts": { modeled: evaluateAdmittedCensusSuites },
+  // W1-T5617: CENSUS_ADMITTED_MEMBERS, run through each one's own npm script's suite.
+  "test/bound-kind-declared.test.ts": { run: "census:bound-kind" },
+  "test/ledger-literal-census.test.ts": { run: "census:ledger-literal" },
+  "test/catch-erasure-ratchet.test.ts": { run: "census:catch-erasure" },
+  "test/negative-reachability-ratchet.test.ts": { run: "census:negative-reachability" },
+  "test/authority-ratchet.test.ts": { run: "census:authority" },
+  "test/no-shallowing-of-the-canonical-checkout.test.ts": { run: "census:no-shallowing" },
+  "test/no-draft-pull-request-ever-sits-on-the-board.test.ts": { run: "census:no-draft-pr" },
 };
 
 /** Census suites CI runs only in its ci/coverage shards, because no census name puts them in
@@ -352,7 +498,7 @@ function gitOut(root, args) {
   return res.stdout;
 }
 
-export function main(argv, { measure = measureViaChild } = {}) {
+export function main(argv, { measure = measureViaChild, admitted = listAdmittedCensusMembers, runSuites = runCensusSuitesViaChild } = {}) {
   let values;
   try {
     ({ values } = parseArgs({
@@ -366,7 +512,7 @@ export function main(argv, { measure = measureViaChild } = {}) {
   const root = resolve(values.root);
   let violations;
   let changed;
-  let unmeasured = null;
+  const unmeasured = [];
   try {
     const mergeBase = gitOut(root, ["merge-base", "HEAD", values.base]).trim();
     changed = gitOut(root, ["diff", "--name-only", "--no-renames", mergeBase]).split("\n").filter(Boolean);
@@ -386,7 +532,14 @@ export function main(argv, { measure = measureViaChild } = {}) {
       measureInstrumentSurface: () => measure({ root, mergeBase }),
     });
     violations.push(...instrument.violations);
-    unmeasured = instrument.unmeasured;
+    if (instrument.unmeasured !== null) unmeasured.push(`instrument-surface NOT MEASURED - ${instrument.unmeasured}`);
+    const suites = evaluateAdmittedCensusSuites({
+      changed,
+      loadMembers: () => admitted(root),
+      runSuites: (files) => runSuites({ root, files }),
+    });
+    violations.push(...suites.violations);
+    if (suites.unmeasured !== null) unmeasured.push(`census suites NOT MEASURED - ${suites.unmeasured}`);
   } catch (e) {
     console.error(`census-precheck: could not measure — ${String(e.message ?? e)}`);
     return 2;
@@ -395,11 +548,11 @@ export function main(argv, { measure = measureViaChild } = {}) {
     console.error(`census-precheck: this branch grows ${violations.length} census count(s) CI will refuse:`);
     for (const v of violations) console.error(`  ${v}`);
     // AFTER the rows: censusPushRefusal stops at the first line that is not a row, so this cannot drop one.
-    if (unmeasured !== null) console.error(`census-precheck: instrument-surface NOT MEASURED - ${unmeasured}`);
+    for (const u of unmeasured) console.error(`census-precheck: ${u}`);
     return 1;
   }
-  if (unmeasured !== null) {
-    console.error(`census-precheck: instrument-surface NOT MEASURED - ${unmeasured}`);
+  if (unmeasured.length > 0) {
+    for (const u of unmeasured) console.error(`census-precheck: ${u}`);
     return 2;
   }
   console.log(`census-precheck: OK — ${changed.length} changed file(s) checked against ${values.base}`);
