@@ -1,0 +1,15 @@
+- id: W1-T5638
+  title: "Carry the coverage-ratchet lesson to the lane that keeps tripping it: add a matched entry to learnings/ci.yaml, the file loadLearningsCorpus indexes, to replace the dead learnings/ci-gate-lessons.yaml target"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - learnings/ci.yaml
+  acceptance:
+    - claim: the lane that trips the coverage-ratchet gate is reached by a matched learnings entry in the indexed corpus file rather than prose no dispatched worker reads
+      proof: "grep: coverage-ratchet in learnings/ci.yaml"
+  origin: proof-debt:W1-T3590
