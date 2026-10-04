@@ -289,8 +289,7 @@ function overlayQueuedFeedback<E extends FeedbackEntry>(entry: E, queued: Readon
   return { ...entry, status: record.status as FeedbackStatus, ...answeredBy, landing: "queued" };
 }
 
-/** W1-T5524: one queue read per request; a failed read marks every entry `landingUnknown`, never "nothing queued".
- *  W1-T5627: a queued entry reads as its queued record says, so the caller's `?status=` filter sees the decision. */
+/** W1-T5524: one queue read per request; a failed read marks every entry `landingUnknown`, never "nothing queued". */
 function decorateFeedbackLanding(entries: ReconciledFeedbackEntry[], deps: PanelGraphDeps): ReconciledFeedbackEntry[] {
   let queued: Map<string, QueuedFeedbackRecord>;
   try {
@@ -628,8 +627,7 @@ export function buildProposalDecisionRoute(deps: PanelGraphDeps): Route {
         sendJson(res, 404, { error: "not_found", detail: `no feedback entry "${input.id}"` });
         return;
       }
-      // W1-T5627: a decision already queued for the landing sweep is this entry's status; deciding over it
-      // would overwrite the queued record and ledger a second decision. An unreadable queue refuses.
+      // W1-T5627: a queued decision is this entry's status; an unreadable queue refuses rather than decide blind.
       if (deps.feedbackLand) {
         try {
           entry = overlayQueuedFeedback(entry, readQueuedFeedbackRecords(deps.inboxRoot));
