@@ -6,7 +6,7 @@
   verify: auto
   principles: {tdd: strict}
   budget_usd: 4.00
-  risk: low
+  risk: high  # Rule 19: one concern — the test process isolates the host scratch switch
   origin: "operator session 2026-10-04: recycle-container tests fail on the Azure host with FAILED RUNTIME CONTRACT ... missing"
   plan_refs: [W1-T3087, W1-T5513, W1-T5550, W1-T4805]
   files: [test/setup/no-live-remote.ts, test/a-test-process-never-reads-the-hosts-scratch-switch.test.ts]
