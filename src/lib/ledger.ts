@@ -744,6 +744,10 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // so both decide. Without them a rotation mid-stall resets the run and the stall goes unnoticed.
   "sweep.post_review.done",
   "sweep.post_review.failed",
+  // Exact-input eligibility/admission observations underpin review queue-delay joins. They
+  // retain the ordinary per-step bound; missing archived/source receipts stay unmeasured.
+  "sweep.review_eligible",
+  "sweep.review_admitted",
   // W1-T393 (MASTER-PLAN §11 D-10): retro.ts's `mutationGateLifetime` folds this into
   // `mutation-ratchet`'s LIFETIME record, so archiving it resets that figure on every rotation.
   "mutation.ratchet_verdict",
