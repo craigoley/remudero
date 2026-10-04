@@ -198,6 +198,9 @@ export interface WorkerResult {
   provider?: WorkerProviderId;
   sessionId: string;
   costUsd: number;
+  /** W1-T5629: a codex session's NOTIONAL price (`codexNotionalCostUsd`), never billed and never in `costUsd`.
+   *  Absent on every other provider, and on a codex model with no price row. */
+  notionalCostUsd?: number;
   /** Turns the worker actually took (SDK `num_turns`), recorded on BOTH the success and error paths, because turn count seeds
    * mounts.yaml calibration (W1-T5), so a failed run is never `0`. TRAP: `num_turns` does not count the unit
    * `Options.maxTurns` bounds — measured failures landed at cap+1 and one clean success at 17 under a cap of 8 — so never
@@ -523,6 +526,7 @@ export function workerLedgerFields(r: WorkerResult): {
   cache_read_input_tokens: number;
   cache_creation_input_tokens: number;
   total_cost_usd: number;
+  notional_cost_usd?: number;
   billing_mode: BillingMode;
   account_label?: string;
   verdict: string;
@@ -586,6 +590,8 @@ export function workerLedgerFields(r: WorkerResult): {
     tokens: r.tokens,
     ...cacheTokenLedgerFields(r.tokens),
     total_cost_usd: r.costUsd,
+    // W1-T5629: beside the billed figure, never in it — budgets and spend series keep reading `total_cost_usd`.
+    ...(r.notionalCostUsd === undefined ? {} : { notional_cost_usd: r.notionalCostUsd }),
     billing_mode: r.provider === "cash" ? "api" : billingMode(r.childEnvKeys),
     max_turns: r.maxTurns,
     // The account this spend is attributed to — a NAME, never a credential, carried verbatim off `WorkerResult.accountLabel`.
