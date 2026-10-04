@@ -10693,6 +10693,46 @@ let lastReportedAnomalyGap: string | undefined;
 const lastReaderAgreementAt = new Map<string, number>();
 const READER_AGREEMENT_INTERVAL_MS = 15 * 60_000;
 
+const CONTRADICTORY_REASON = "review failing with no actionable unmet criteria (contradictory) — escalating";
+const CONTRADICTORY_BACKOFF_CAP_MS = 4 * 60 * 60_000;
+type ContradictoryMemory = {
+  key: string; first: number; passes: number; interval: number; next: number;
+};
+const contradictoryMemory = new Map<string, ContradictoryMemory>();
+
+function contradictoryKey(pr: OpenPrView, lines: readonly Record<string, unknown>[]): string {
+  const review = lines.findLast(row => row.step === "review.posted" && row.pr_url === pr.prUrl &&
+    row.head_sha === pr.headSha && (pr.reviewInputDigest === undefined || row.review_input_digest === pr.reviewInputDigest));
+  const decision = review?.review_decision_digest ?? review?.decision_verdict ?? {
+    state: pr.reviewState, summary: pr.reviewSummary, criteria: pr.unmetCriteria,
+    reasons: review?.reasons, proofExec: review?.proof_exec, unmet: review?.unmet_criteria,
+  };
+  return createHash("sha256").update(JSON.stringify([pr.prUrl, pr.prNumber, pr.headSha, decision])).digest("hex");
+}
+
+function contradictoryPrior(
+  key: string, pr: OpenPrView, deps: SweepDeps, lines: readonly Record<string, unknown>[],
+): { prior: ContradictoryMemory | undefined; hasHeadCheckpoint: boolean } {
+  const cacheKey = `${deps.ledgerPath}@${key}`;
+  let prior = contradictoryMemory.get(cacheKey);
+  // W1-T4935: rotation keeps the acted row; recover newer backoff checkpoints from its archives.
+  const rows = !prior && !deps.readLedger && !deps.dryRun
+    ? [...parseLedger(resolveLedgerUnion(dirname(deps.ledgerPath), `"pr_number":${pr.prNumber}[,}]`,
+        undefined, { step: "sweep.disposed" }).matches.join("\n")), ...lines]
+    : lines;
+  for (const row of rows) {
+    if (row.contradictory_key !== key || typeof row.contradictory_first_escalation_at !== "number" ||
+        typeof row.contradictory_pass_count !== "number" || typeof row.contradictory_interval_ms !== "number" ||
+        typeof row.contradictory_next_row_at !== "number") continue;
+    if (!prior || row.contradictory_pass_count > prior.passes) prior = {
+      key, first: row.contradictory_first_escalation_at, passes: row.contradictory_pass_count,
+      interval: row.contradictory_interval_ms, next: row.contradictory_next_row_at,
+    };
+  }
+  return { prior, hasHeadCheckpoint: rows.some(row => row.step === "sweep.disposed" &&
+    row.pr_number === pr.prNumber && row.head_sha === pr.headSha && typeof row.contradictory_key === "string") };
+}
+
 export async function runSweep(
   openPrs: OpenPrView[],
   deps: SweepDeps,
@@ -11368,6 +11408,7 @@ export async function runSweep(
     reviewKey: string;
     mode: ReviewDispatchMode;
   }> = [];
+  const quietContradictoryRows = new Set<number>();
   // W1-T5030: close ATTEMPTS the stale-proof supersession arm has made this pass.
   let staleProofCloses = 0;
 
@@ -11472,10 +11513,8 @@ export async function runSweep(
       });
     }
 
-    // One ledger line per disposition (the INVARIANT). Skipped under --dry-run, because a preview
-    // must leave no trace. The rendered question rides along whenever one exists: an UNANSWERED
-    // question stays ledgered on every subsequent sweep, even once `acted` goes false.
-    if (!deps.dryRun) {
+    // Preview writes nothing; unchanged contradictory reviews checkpoint only when backoff is due.
+    if (!deps.dryRun && !quietContradictoryRows.has(index)) {
       // W1-T2345 — this PASS's own repeat-streak figures, computed once per PR earlier in the walk
       // and read back by `index`, so all four call sites carry it with no signature change.
       const repeat = repeatMeta.get(index);
@@ -11741,6 +11780,13 @@ export async function runSweep(
         `the plan-shard flag is the next rung`;
     }
     byDisposition[disposition]++;
+    const isContradictory = disposition === "blocked-ambiguous" && reason === CONTRADICTORY_REASON && !strikeLadderDue;
+    const contradictionKey = isContradictory ? contradictoryKey(pr, ledgerLines) : undefined;
+    const contradictionHistory = contradictionKey !== undefined
+      ? contradictoryPrior(contradictionKey, pr, deps, ledgerLines) : undefined;
+    const priorContradiction = contradictionHistory?.prior;
+    const legacyContradiction = isContradictory && prior.escalated.has(`${pr.prNumber}@${pr.headSha}`) &&
+      contradictionHistory?.hasHeadCheckpoint === false;
 
     // W1-T2345 — computed for EVERY disposition, never only blocked-ambiguous, and BEFORE the
     // per-disposition dedup below: this bounds the DERIVATION itself, orthogonal to whatever
@@ -11755,7 +11801,7 @@ export async function runSweep(
     // Skipped entirely under --dry-run — a preview must leave no trace — and whenever a prior pass
     // already fired this run's escalation, the "stays quiet until the head moves" half of the
     // acceptance criteria.
-    if (repeatBoundTripped && !repeatAlreadyEscalated && !deps.dryRun) {
+    if (repeatBoundTripped && !repeatAlreadyEscalated && !deps.dryRun && !isContradictory) {
       try {
         // W1-T2381: THE LEDGER ROW IS THE WHOLE OUTPUT — no `deps.escalate()` call. The dedup key
         // is task+head+cause and never the repeat condition, so routing the trip to the issue
@@ -11782,7 +11828,7 @@ export async function runSweep(
     // so an unanswered question stays visible, even on a deduped pass. Skipped for an
     // unattributable filing PR, where there is only a stand-down to record.
     const question =
-      (disposition === "blocked-ambiguous" || disposition === "refused-escalate") && !unattributableFiling && !strikeLadderDue
+      (disposition === "blocked-ambiguous" || disposition === "refused-escalate") && !unattributableFiling && !strikeLadderDue && !priorContradiction
         ? renderClarificationQuestion(pr, reason, pr.strikeHistory ?? [])
         : undefined;
 
@@ -11901,7 +11947,8 @@ export async function runSweep(
       case "refused-escalate":
         // W1-T514: sha-keyed, exactly like every sibling arm above — a new head re-earns its own
         // escalation rather than being deduped by a stale head's `acted:true` line forever.
-        alreadyDone = !strikeLadderDue && prior.escalated.has(`${pr.prNumber}@${pr.headSha}`);
+        alreadyDone = isContradictory ? priorContradiction !== undefined || legacyContradiction
+          : !strikeLadderDue && prior.escalated.has(`${pr.prNumber}@${pr.headSha}`);
         // W1-T2427: the LARGEST silent population (7,888 rows). Without this sentence the row is
         // indistinguishable from `deps.escalate` being unwired or throwing.
         if (alreadyDone) {
@@ -12019,6 +12066,7 @@ export async function runSweep(
     let baseCausedMainTipSha: string | undefined;
     // W1-T4459: the "blocked-fixable" arm's dedup keys; see `sameHeadRedFixRefusal`.
     let extraDisposedFields: Record<string, unknown> | undefined;
+    let contradictoryEscalated = false;
     // W1-T254 — PER-PR THROW CONTAINMENT: a thrown action used to propagate straight out of
     // `runSweep` as one unattributed error, aborting the WHOLE pass. Named here and ledgered on
     // THIS PR's own line instead, so the loop always reaches the next PR.
@@ -13094,6 +13142,7 @@ export async function runSweep(
                   standDownReason = `ABSENT re-push not wired — ${absentDecision.reason}`;
                 }
                 await deps.escalate(pr, reason, question!);
+                contradictoryEscalated = isContradictory;
               }
               break;
             case "dep-review":
@@ -13191,6 +13240,27 @@ export async function runSweep(
       continue;
     }
 
+    let contradictoryCheckpoint: ContradictoryMemory | undefined;
+    if (contradictionKey !== undefined && !deps.dryRun && (priorContradiction || contradictoryEscalated || legacyContradiction)) {
+      const state: ContradictoryMemory = priorContradiction
+        ? { ...priorContradiction, passes: priorContradiction.passes + 1 }
+        : { key: contradictionKey, first: now, passes: 1, interval: DEFAULT_POLL_INTERVAL_MS,
+            next: now + DEFAULT_POLL_INTERVAL_MS };
+      if (priorContradiction) {
+        if (now < state.next) quietContradictoryRows.add(prIndex);
+        else {
+          state.interval = Math.min(state.interval * 2, CONTRADICTORY_BACKOFF_CAP_MS);
+          state.next = now + state.interval;
+        }
+        standDownReason = `contradictory review unchanged — pass ${state.passes}; first escalation ` +
+          `${clockFromMillisFn(() => state.first).iso()}; next backoff row ` +
+          `${clockFromMillisFn(() => state.next).iso()}`;
+      }
+      extraDisposedFields = { ...extraDisposedFields, contradictory_key: state.key,
+        contradictory_first_escalation_at: state.first, contradictory_pass_count: state.passes,
+        contradictory_interval_ms: state.interval, contradictory_next_row_at: state.next };
+      contradictoryCheckpoint = state;
+    }
     finalizeDisposition(
       prIndex,
       pr,
@@ -13207,6 +13277,9 @@ export async function runSweep(
       baseCausedMainTipSha,
       extraDisposedFields,
     );
+    if (contradictoryCheckpoint) {
+      contradictoryMemory.set(`${deps.ledgerPath}@${contradictoryCheckpoint.key}`, contradictoryCheckpoint);
+    }
   }
 
   // ── W1-T1049 — REVIEW CONCURRENCY BUDGET, NOW ITS OWN ───────────────────────
