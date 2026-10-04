@@ -98,6 +98,16 @@ test("W1-T4917: the deploy tick runs deploy code at least as new as the install 
   assert.doesNotMatch(read(f.calls), /reset|checkout|clean|rebase/);
 });
 
+test("the deploy tick's worker probe asks docker top for the pid column docker requires", (t) => {
+  // #9061 probed with `docker top <c> -eo args`; real Docker refuses a ps format without a PID
+  // field, so every live tick logged "worker probe unreadable" and no code deploy ran (2026-10-04).
+  const f = fixture(t);
+  const r = f.tick();
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /worker probe unreadable/, "a pid-requiring docker must still answer the probe");
+  assert.match(read(f.deployed), /^new deploy-run --image-drift-only/, "an idle daemon reaches deploy code");
+});
+
 test("W1-T4917: a standalone daemon entrypoint retains the healthy deploy tick", (t) => {
   const f = fixture(t);
   rmSync(join(f.daemon, "src"), { recursive: true });
