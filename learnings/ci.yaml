@@ -155,3 +155,44 @@
     blocks; its CLI signal prints the proposed baseline row when a file exceeds its ceiling.
   src: "ci-learning:5505:comment-load-ratchet"
   cited: "2026-09-29"
+
+- id: a-board-wide-plan-red-is-main
+  subsystem: ci
+  lifecycle: active
+  files: ["plan/tasks.d/**", .github/workflows/ci.yml, src/lib/sweep.ts]
+  fact: >-
+    When lint-plan, claims and every coverage shard go red together on many unrelated PRs, main's
+    plan does not load. It happened three times on 2026-10-02/03, each time a duplicate `priority:`
+    key left by two machine plan PRs merged seconds apart. Check main-plan-guard on main and search
+    the open PRs for an existing fix first. Once main is green, run `gh api -X PUT
+    repos/<o>/<r>/pulls/<n>/update-branch` on each inherited-red PR: a job re-run replays the OLD
+    merge ref and stays red.
+  assertion: 'test -f test/no-plan-shard-carries-a-duplicate-key.test.ts'
+  src: PR#8922 (fix; #8714 the day before; #8936 an independent duplicate fix)
+  cited: "2026-10-03"
+
+- id: hand-review-collides-with-the-daemon
+  subsystem: ci
+  lifecycle: active
+  files: [src/lib/review.ts]
+  fact: >-
+    The remudero-review pending claim is read from the LOCAL ledger only, so `rmd review` run from a
+    session on another host cannot see a daemon review already in flight, and the daemon cannot see
+    the session's. 102 daemon reviews from 09-26 to 10-03 ran to completion on PRs that a session
+    had already reviewed and merged. Until W1-T5540 lands, check the PR's remudero-review status for
+    "review in progress (owned by run ...)" before reviewing by hand.
+  src: review.post_refused rows 09-26..10-03 (82 from the daemon review lane); W1-T5540
+  cited: "2026-10-03"
+
+- id: strikes-exhausted-counts-rows
+  subsystem: ci
+  lifecycle: active
+  files: [src/lib/sweep.ts, src/run-task.ts]
+  fact: >-
+    "fix strikes exhausted (2/2)" does not mean two fix rounds ran. `priorStrikesFor` counts fix
+    rows, and every `runFixRung` pass numbers itself strike 1, so two refused "the worker changed
+    nothing" rounds exhaust a PR with no real strike spent. That was all 16 exhaustions from 09-26
+    to 10-03, and #8868 later read 3/2. Read the PR's fix.commit_refused rows before treating it as
+    hard. W1-T5542 fixes the count.
+  src: ledger 09-26..10-03; W1-T5542
+  cited: "2026-10-03"
