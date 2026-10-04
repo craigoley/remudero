@@ -27,7 +27,7 @@ import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from 
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { assertLedgerPathNotLive } from "./live-write-guard.js";
 import { rotationStampIso } from "./ledger-union.js";
-import { pruneCarriedRows } from "./ledger-carry.js";
+import { PLAN_ONLY_REVIEW_MARKER_STEP, planOnlyReviewMarkers, pruneCarriedRows } from "./ledger-carry.js";
 import { resolveProducerIdentity, type ProducerIdentity } from "./producer-identity.js";
 import { WORKER_SCOPE_ENV } from "./worker-containment.js";
 
@@ -668,6 +668,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // archived away, a completed migration reads as `hold` and the rung submits it again.
   "dep-review.migrate.completed",
   "review.posted",
+  // status.ts's plan-only credit refusal reads it once rotation stops carrying a merged PR's review rows.
+  PLAN_ONLY_REVIEW_MARKER_STEP,
   "review.post_refused",
   "review.cannot_evaluate_escalated",
   // W1-T913: `lastPendingReviewStatusFromLedger` (review.ts) reads this back for per-head
@@ -1823,6 +1825,7 @@ function rotateLedgerLocked(
   });
 
   const carried = pruneCarriedRows(candidates);
+  const reviewMarkers = planOnlyReviewMarkers(candidates, carried);
   archivedLineCount += candidates.length - carried.length;
   candidates = carried;
 
@@ -1957,6 +1960,7 @@ function rotateLedgerLocked(
     (recarriedCount > 0 || recarry.torn.length > 0
       ? rotationRow("ledger.recarried", { count: recarriedCount, archives: recarry.archives, unreadable_archives: recarry.torn }, nowIso)
       : "") +
+    reviewMarkers.map((marker) => rotationRow(PLAN_ONLY_REVIEW_MARKER_STEP, marker, nowIso)).join("") +
     (retention.unreadable ? rotationRow("ledger.retained_steps_unreadable", { path: ledgerRetainedStepsPath(path) }, nowIso) : "") +
     (rateBytesPerHour > 0
       ? rotationRow("ledger.rotation_headroom", { rate_bytes_per_hour: rateBytesPerHour, ceiling_bytes: ceilingBytes }, nowIso)
