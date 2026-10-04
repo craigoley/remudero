@@ -17,6 +17,7 @@
   "deploy/entrypoint.sh": 263,
   "deploy/host-update.sh": 750,
   "deploy/install-container-runtime-mount-order.sh": 57,
+  "deploy/install-host-units.sh": 500,
   "deploy/recycle-container.sh": 750,
   "deploy/runtime-env-vars.sh": 39,
   "deploy/serve-container.sh": 265,
