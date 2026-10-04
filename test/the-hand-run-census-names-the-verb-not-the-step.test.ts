@@ -21,7 +21,7 @@ import {
  *  as a literal `null`/placeholder, matching how a real pre-verb-field row (or a torn one) would
  *  actually be missing the key rather than carrying a guessed value for it. */
 function cliLine(ts: string, actorPid: number, verb: string | undefined): string {
-  const raw: Record<string, unknown> = { ts, actor: "operator", actor_pid: actorPid, step: "cli.invoked" };
+  const raw: Record<string, unknown> = { ts, actor: "operator_human", actor_pid: actorPid, step: "cli.invoked" };
   if (verb !== undefined) raw.verb = verb;
   return JSON.stringify(raw);
 }

@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "oper#followups-research-2026-09-22"
   plan_refs: [W1-T2697]
-  files: [src/lib/ledger.ts, src/run-task.ts, src/lib/hand-run-census.ts, test/setup/tmp-hygiene.ts, test/the-operator-is-a-positive-signal.test.ts, scripts/test-tier-manifest.json]
+  files: [src/lib/ledger.ts, src/run-task.ts, src/lib/hand-run-census.ts, test/setup/tmp-hygiene.ts, test/the-operator-is-a-positive-signal.test.ts, test/hand-run-census.test.ts, test/the-hand-run-census-names-the-verb-not-the-step.test.ts, test/reap-cadence.test.ts, scripts/test-tier-manifest.json]
   priority: 2
   status: queued
   # backlog gardener: band=2 evidence=5451a619f4bd40e5
