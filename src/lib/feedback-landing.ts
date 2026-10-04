@@ -32,6 +32,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
+import { parse as parseYaml } from "yaml";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 import { loadPlanFromYaml } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -1387,11 +1388,10 @@ export function recordRuling(
   return landContent(root, landingKind(DECISIONS_LANDING_KIND, root, opts, git), [{ relPath, content }], { ...opts, git });
 }
 
-/** Land one feedback entry's already-serialized YAML via {@link landContent} — the write-site-2
- *  sibling of {@link recordDecision}. `setFeedbackStatus` calls this instead of `writeFileSync`
- *  when `opts.land` is set, so a status flip never shows up as `M`-modified in
- *  `checkCliFreshness`'s git status (the W1-T191 dirt this removes). Trade-off: a caller
- *  re-reading root's own copy right after won't see the flip until the next self-sync. */
+/** Land one feedback entry's already-serialized YAML via {@link landContent} — the write-site-2 sibling of
+ *  {@link recordDecision}. `setFeedbackStatus` calls this instead of `writeFileSync` when `opts.land` is set,
+ *  so a status flip never shows up as `M`-modified in `checkCliFreshness`'s git status (W1-T191). Trade-off:
+ *  root's own copy lacks the flip until the next self-sync; {@link readQueuedFeedbackRecords} reads it. */
 export function landFeedbackStatusContent(
   root: string,
   relPath: string,
@@ -1438,6 +1438,25 @@ export function queueFeedbackRecord(root: string, relPath: string, stateRoot: st
 /** Every record queued under `stateRoot` and not yet acknowledged landed — what the board may show as queued. */
 export function queuedFeedbackLandings(stateRoot: string): string[] {
   return listRelFiles(feedbackPendingRoot(stateRoot), FEEDBACK_REL_DIR).filter((rel) => QUEUED_FEEDBACK_RECORD.test(rel)).sort();
+}
+
+export type QueuedFeedbackRecord = Record<string, unknown> & { status: string };
+
+/** W1-T5627: each queued record parsed, by repo path; throws on an unreadable queue or a non-entry record. */
+export function readQueuedFeedbackRecords(stateRoot: string): Map<string, QueuedFeedbackRecord> {
+  const records = new Map<string, QueuedFeedbackRecord>();
+  for (const rel of queuedFeedbackLandings(stateRoot)) {
+    const bytes = readFileSync(join(feedbackPendingRoot(stateRoot), rel), "utf8");
+    let parsed: unknown;
+    try {
+      parsed = parseYaml(bytes);
+    } catch (e) {
+      throw new Error(`queued ${rel} is unparseable: ${String((e as Error)?.message ?? e)}`);
+    }
+    if (typeof (parsed as { status?: unknown } | null)?.status !== "string") throw new Error(`queued ${rel} is not a feedback entry`);
+    records.set(rel, parsed as QueuedFeedbackRecord);
+  }
+  return records;
 }
 
 function queuedFeedbackSources(stateRoot: string | undefined): Array<[string, string]> {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
 import { fixedClock } from "../src/lib/clock.js";
-import { loadPlanFromYaml, readTaskPrecondition, unmetTaskPrecondition, PRECONDITION_MAX_BYTES, PRECONDITION_TIMEOUT_MS, PlanError, type Plan } from "../src/lib/plan.js";
+import { loadPlanFromYaml, readTaskPrecondition, unmetTaskPrecondition, PRECONDITION_MAX_BYTES, PlanError, type Plan } from "../src/lib/plan.js";
 import { nextRunnable, runnableCandidates, runDrain, type DrainDeps } from "../src/lib/drain.js";
 
 function plan(fields = ""): Plan {
@@ -200,33 +200,21 @@ test("W1-T4843: the default reader really shells out to the shipped rmd help", (
 
 test("W1-T4843: the reader passes literal arguments with timeout, output cap and recursion guards", () => {
   const literal = "$(echo injected); `echo injected`";
+  // W1-T5632: a real child under the 5 s production bound is SIGKILLed on a loaded coverage lane.
   const output = readTaskPrecondition(["ledger-grep", literal], (file, args, options) => {
     assert.match(file, /\/bin\/rmd$/);
     assert.deepEqual(args, ["ledger-grep", literal]);
-    assert.equal(options.timeout, PRECONDITION_TIMEOUT_MS);
+    assert.equal(options.timeout, 120_000);
     assert.equal(options.maxBuffer, PRECONDITION_MAX_BYTES);
     assert.equal(options.killSignal, "SIGKILL");
     assert.equal(options.shell, false);
     assert.equal(options.env?.RMD_SELF_SYNC_DONE, "1");
     assert.equal(options.env?.RMD_TASK_PRECONDITION_READ, "1");
     return execFileSync(process.execPath, ["-e", "process.stdout.write(process.argv[1])", literal], options);
-  });
+  }, 120_000);
   assert.equal(output, literal);
   assert.throws(() => readTaskPrecondition(["drain"], () => { assert.fail("write verb reached runner"); }), PlanError);
 });
 
-test("W1-T4843: failing and oversized real subprocesses cannot satisfy a precondition", () => {
-  const subject = plan('  precondition: {read: [status], expect: ready}').tasks[0];
-  for (const script of ["process.stdout.write('ready');process.exit(1)", `process.stdout.write('x'.repeat(${PRECONDITION_MAX_BYTES + 1}))`,
-    `process.stderr.write('x'.repeat(${PRECONDITION_MAX_BYTES + 1}))`]) {
-    const result = unmetTaskPrecondition(subject, { readPrecondition: (args) => readTaskPrecondition(args,
-      (_file, _args, options) => execFileSync(process.execPath, ["-e", script], options)) });
-    assert.equal(result?.reason, "read-failed");
-  }
-});
-
-test("W1-T4843: a hung real subprocess is killed within the reader timeout", () => {
-  assert.throws(() => readTaskPrecondition(["status"], (_file, _args, options) =>
-    execFileSync(process.execPath, ["-e", "setInterval(() => {}, 1000)"], options)),
-  (error: unknown) => (error as NodeJS.ErrnoException).code === "ETIMEDOUT");
-});
+// W1-T5632 moved the failing/oversized and hung real-subprocess cases to
+// test/a-precondition-reader-bound-is-injected-not-waited-on.test.ts, which injects the bound.
