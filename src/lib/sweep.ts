@@ -21,6 +21,8 @@ export { failingTestFilesFromCiFailures } from "./base-reproduction.js";
 import { parse as parseYaml } from "yaml";
 import {
   armAutoMergeDetailed,
+  armEvidenceFingerprint,
+  decideArmReprobeFromFacts,
   armFailureAction,
   baseBranchRequiresMergeQueue,
   disarmAutoMerge,
@@ -30,6 +32,7 @@ import {
   realArmDeps,
   stackPrerequisiteFromRest,
   type ArmAttemptResult,
+  type ArmReprobeFacts,
   type ArmDeps,
   type ArmLane,
   type ArmOutcome,
@@ -176,6 +179,7 @@ import {
 } from "./escalate.js";
 import {
   compareRestArgs,
+  rollupFromRest,
   fetchWorkflowRunObservations,
   GhPaceFloorStandDownError,
   isScannerBlockerCandidate,
@@ -1583,6 +1587,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "readerAgreement",
   "reproduceFailingTestsOnMain",
   "arm",
+  "readArmFacts",
   "close",
   "dispatchFix",
   // W1-T3390 — the plan-only shard-repair rung, dispatched once the body-repair budget above is
@@ -1644,6 +1649,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readerAgreement"
   | "reproduceFailingTestsOnMain"
   | "arm"
+  | "readArmFacts"
   | "close"
   | "dispatchFix"
   | "dispatchPlanOnlyRepair"
@@ -2169,7 +2175,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       );
       // The fold itself is `sweepArmAttemptOutcome` (pure, beside `armFailureAction`) so each of
       // its arms is a unit fixture rather than a branch only a whole sweep pass can reach.
-      return sweepArmAttemptOutcome(outcome, attemptError);
+      const folded = sweepArmAttemptOutcome(outcome, attemptError);
+      return typeof folded === "object" ? { ...folded, error: attemptError } : folded;
     },
 
     // W1-T1000002 — THE CONVERGING WITHDRAWAL: sweep.ts calls this ONLY when an operator hold
@@ -2177,6 +2184,48 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // the sweep now owns a withdrawal call site of its own). `disarmImpl` never throws, so no
     // try/catch is needed here; the ledger line naming who held it and why is written by the
     // caller (sweep.ts's own `automerge.hold_withdrawal`), never duplicated here.
+    readArmFacts: async (pr) => {
+      try {
+        const target = `repos/${owner}/${repo}`;
+        const fresh = await readJsonImpl(["api", `${target}/pulls/${pr.prNumber}`]) as {
+          number: number; state: string; auto_merge: unknown; merged: boolean; draft: boolean;
+          head: { sha: string }; base: { sha: string; ref: string };
+          mergeable: boolean | null; mergeable_state: string;
+        };
+        const protection = await readJsonImpl(["api", `${target}/branches/${encodeURIComponent(fresh.base.ref)}/protection/required_status_checks`]) as {
+          contexts: string[]; checks?: { context: string }[];
+        };
+        const runs = await readJsonImpl(["api", `${target}/commits/${fresh.head.sha}/check-runs?filter=all&per_page=100`]) as {
+          total_count: number; check_runs: Parameters<typeof rollupFromRest>[0];
+        };
+        const statuses = await readJsonImpl(["api", `${target}/commits/${fresh.head.sha}/status`]) as {
+          sha: string; total_count: number; statuses: Parameters<typeof rollupFromRest>[1];
+        };
+        if (typeof fresh.number !== "number" || !("auto_merge" in fresh) ||
+            typeof fresh.head.sha !== "string" || typeof fresh.base.sha !== "string" ||
+            !Number.isSafeInteger(runs.total_count) || !Number.isSafeInteger(statuses.total_count) ||
+            !Array.isArray(protection.contexts) || !Array.isArray(runs.check_runs) ||
+            !Array.isArray(statuses.statuses) || statuses.sha !== fresh.head.sha ||
+            runs.total_count > runs.check_runs.length || statuses.total_count > statuses.statuses.length) {
+          throw new Error("incomplete head-specific arm evidence");
+        }
+        const latest = dedupeRollupByLatestAttempt(rollupFromRest(runs.check_runs, statuses.statuses));
+        const required = new Set([...protection.contexts, ...(protection.checks ?? []).map(c => c.context), REVIEW_CONTEXT]);
+        const checksGreen = [...required].every(name => latest.some(c => (c.name ?? c.context) === name &&
+          REQUIRED_CHECK_OK.has((c.state ?? c.conclusion ?? c.status ?? "").toUpperCase())));
+        return {
+          prNumber: fresh.number, headSha: fresh.head.sha, state: fresh.merged || fresh.draft ? "held" : fresh.state,
+          autoMergeArmed: fresh.auto_merge !== undefined && fresh.auto_merge !== null,
+          mergeable: fresh.mergeable, mergeableState: fresh.mergeable_state, baseSha: fresh.base.sha,
+          reviewPublished: latest.some(c => (c.name ?? c.context) === REVIEW_CONTEXT && c.state === "SUCCESS"),
+          checksGreen,
+        };
+      } catch (error) {
+        log("sweep.arm_evidence_unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: String(error) });
+        return undefined;
+      }
+    },
+
     disarmAutoMerge: (pr) => {
       disarmImpl(pr.prUrl);
     },
@@ -9114,6 +9163,7 @@ export type ArmFailureClass = "transient" | "retryable" | "unknown";
 export interface ArmAttemptOutcome {
   outcome: ArmOutcomeName;
   failureClass?: ArmFailureClass;
+  error?: string;
 }
 
 /** TRUE only for outcomes that genuinely armed or merged: `armed`, and `direct-merged`, where GitHub
@@ -9166,6 +9216,7 @@ export interface SweepDeps {
     pr: OpenPrView,
     mode?: "armed-idle",
   ) => ArmOutcomeName | ArmAttemptOutcome | void | Promise<ArmOutcomeName | ArmAttemptOutcome | void>;
+  readArmFacts?: (pr: OpenPrView) => ArmReprobeFacts | undefined | Promise<ArmReprobeFacts | undefined>;
   /** W1-T5403 — risk-judge a head whose run ended `handed_off`, once, before the `mergeable` arm.
    *  Production wires {@link riskJudgeHandedOffHead}; omitted, such a head is held, never armed. */
   judgeHandedOffHead?: (pr: OpenPrView) => Promise<HandedOffHeadJudgment>;
@@ -10069,7 +10120,9 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
         // SHA-KEYED, exactly like `fixed` below. Keyed by PR number alone this set had no expiry:
         // one `acted:true` line — including one recorded for an arm that never happened — deduped
         // that PR forever. A new head must re-earn the attempt.
-        armed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
+        if (line.arm_outcome !== "arm-error-ignored") {
+          armed.add(`${pr}@${typeof line.head_sha === "string" ? line.head_sha : ""}`);
+        }
         break;
       case "blocked-fixable":
       // W1-T106: a `conflicted` dispatch is the SAME "spend a fix-rung
@@ -10820,6 +10873,19 @@ export async function runSweepBakeoff(input: DeploymentBakeoffInput): Promise<vo
   const state = readBakeoffTrialState(input.stateDir);
   if (!state.pending && findUntrialedModels(input.deployed, state.trialed).length === 0) return;
   await runDeploymentBakeoff(input);
+}
+
+function claimArmEvidence(ledgerPath: string, pr: OpenPrView, facts: ArmReprobeFacts, runId: string): boolean {
+  const receiptDir = join(dirname(ledgerPath), "arm-reprobe-evidence");
+  const receipt = createHash("sha256").update(JSON.stringify([pr.prUrl, armEvidenceFingerprint(facts)])).digest("hex");
+  mkdirSync(receiptDir, { recursive: true });
+  try {
+    writeFileSync(join(receiptDir, receipt), JSON.stringify({ pr_url: pr.prUrl, facts, run_id: runId }), { flag: "wx" });
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw error;
+  }
 }
 
 const CONTRADICTORY_REASON = "review failing with no actionable unmet criteria (contradictory) — escalating";
@@ -12232,7 +12298,8 @@ export async function runSweep(
               // worthless while this independent path arms the same verdict seconds later. Stand
               // down instead — `acted:false` keeps this PR out of `prior.armed`, so the next pass
               // re-derives and arms the moment executed proof or a ledgered override lands.
-              const armDecision = decideSweepArm(pr, ledgerLines, undefined, readArmLedgerUnion);
+              const armLines = readLedger(deps.ledgerPath);
+              const armDecision = decideSweepArm(pr, armLines, undefined, readArmLedgerUnion);
               if (!armDecision.arm) {
                 acted = false;
                 standDownReason = armDecision.reason;
@@ -12250,6 +12317,54 @@ export async function runSweep(
                   break;
                 }
               }
+              const previousAttempt = armLines.findLast(line => line.step === "sweep.disposed" &&
+                line.pr_number === pr.prNumber && line.head_sha === pr.headSha && line.arm_outcome !== undefined);
+              const failedArm = previousAttempt?.arm_outcome === "arm-error-ignored" &&
+                (previousAttempt.arm_failure_class === "unknown" ||
+                  (previousAttempt.arm_failure_class === undefined && previousAttempt.acted === true));
+              const facts = !armedIdleDue ? await deps.readArmFacts?.(pr) : undefined;
+              if (facts) extraDisposedFields = { arm_evidence: facts, arm_evidence_fingerprint: armEvidenceFingerprint(facts) };
+              if (failedArm && !armedIdleDue) {
+                const publication = armLines.slice(armLines.indexOf(previousAttempt!) + 1).some(line =>
+                  line.step === "review.posted" && line.pr_url === pr.prUrl && line.head_sha === pr.headSha &&
+                  line.state === "success" && (pr.reviewInputDigest === undefined || line.review_input_digest === pr.reviewInputDigest));
+                const decision = decideArmReprobeFromFacts(pr, previousAttempt!.arm_evidence as ArmReprobeFacts | undefined,
+                  facts, publication);
+                extraDisposedFields = { ...extraDisposedFields, arm_reprobe_previous_failure: {
+                  outcome: previousAttempt!.arm_outcome, failureClass: previousAttempt!.arm_failure_class ?? "unknown",
+                  error: previousAttempt!.arm_error, fingerprint: previousAttempt!.arm_evidence_fingerprint,
+                },
+                  arm_reprobe_condition: decision.reason };
+                if (!decision.reconsider) {
+                  acted = false;
+                  standDownReason = deps.readArmFacts ? decision.reason
+                    : "failed arm was recorded as already armed by a prior sweep pass — no fresh evidence";
+                  break;
+                }
+              }
+              if (!armedIdleDue && facts?.autoMergeArmed === true) {
+                acted = false;
+                standDownReason = "auto-merge already armed (fresh GitHub observation) — nothing to re-arm";
+                break;
+              }
+              if (failedArm && facts) {
+                const freshLines = readLedger(deps.ledgerPath);
+                const refused = priorActionsFromLedger(freshLines).riskRefused.has(`${pr.prNumber}@${pr.headSha}`) &&
+                  !(pr.taskId && cappedOverrideFromLedger(freshLines, pr.taskId, pr.headSha));
+                const stack = deps.stackPrerequisite?.(pr);
+                const parity = decideSweepArm(pr, freshLines, undefined, readArmLedgerUnion);
+                if (automergeHoldFromLedger(freshLines, pr.prNumber) || refused ||
+                    (stack && stack.state !== "ready" && stack.state !== "unstacked") || !parity.arm) {
+                  acted = false;
+                  standDownReason = "fresh arm evidence does not release the standing merge refusal";
+                  break;
+                }
+              }
+              if (failedArm && facts && !claimArmEvidence(deps.ledgerPath, pr, facts, deps.runId)) {
+                acted = false;
+                standDownReason = "failed arm evidence already claimed — unchanged facts cannot spend again";
+                break;
+              }
               // READ THE OUTCOME. `armAutoMerge` does not throw — it RETURNS which of its seven
               // branches it took, and five of them armed nothing. Discarding it is what let
               // `acted:true` be recorded for a PR that was never armed.
@@ -12257,6 +12372,10 @@ export async function runSweep(
               // W1-T1117: `deps.arm` may return the bare name it always could, or the richer
               // outcome-plus-failureClass object. Unwrap once, here.
               const armOutcomeName = typeof armResult === "object" && armResult !== null ? armResult.outcome : armResult;
+              extraDisposedFields = { ...extraDisposedFields, arm_attempted: true, arm_armed: armOutcomeArmed(armOutcomeName) };
+              if (typeof armResult === "object" && armResult !== null) {
+                extraDisposedFields = { ...extraDisposedFields, arm_failure_class: armResult.failureClass, arm_error: armResult.error };
+              }
               // W1-T1061: capture the concrete outcome whenever one came back. A `void` return is
               // the legacy "treat as armed" shape and names no real branch, so no field is written.
               if (armOutcomeName !== undefined) armOutcome = armOutcomeName;
@@ -12278,6 +12397,7 @@ export async function runSweep(
                 // `"retryable"` stay on the `acted:false` line just set, as before.
                 const failureClass = typeof armResult === "object" && armResult !== null ? armResult.failureClass : undefined;
                 if (!armedIdleDue && armOutcomeName === "arm-error-ignored" && failureClass === "unknown") {
+                  if (facts) claimArmEvidence(deps.ledgerPath, pr, facts, deps.runId);
                   acted = true;
                   standDownReason = undefined;
                 }

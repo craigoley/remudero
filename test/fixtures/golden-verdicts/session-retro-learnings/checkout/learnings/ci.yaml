@@ -1,0 +1,14 @@
+- id: a-board-wide-plan-red-is-main
+  subsystem: ci
+  lifecycle: active
+  src: PRs #8714, #8877, #8922
+
+- id: hand-review-collides-with-the-daemon
+  subsystem: ci
+  lifecycle: active
+  src: "review.post_refused rows; W1-T5540"
+
+- id: strikes-exhausted-counts-rows
+  subsystem: ci
+  lifecycle: active
+  src: "ledger rows; W1-T5542"

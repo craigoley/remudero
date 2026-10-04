@@ -39877,6 +39877,11 @@ export function buildOpenPrViews(
  * plan-unavailable repo (already logged by the caller) simply yields plan.tasks
  * === [] here, never a hard failure of its own.
  */
+type MergeLogReadOptions = {
+  ref?: string;
+  cache?: { mergedPathsByPr?: Map<number, string[]>; mergeSubjects?: Map<number, string> };
+};
+
 /**
  * W1-T3067 — every merge commit's CHANGED PATHS on `origin/main`, keyed by the PR number a squash
  * merge puts in `(#N)`. ONE local git invocation per pass. This is the producer the plan-only DIFF
@@ -39896,13 +39901,14 @@ export function buildOpenPrViews(
  * unreadable root, and for the same reason: absence must never manufacture a refusal, only decline
  * to grant one.
  */
-export function readMergedPathsByPr(root: string | undefined, limit = MERGED_PATHS_SCAN_LIMIT): Map<number, string[]> {
+export function readMergedPathsByPr(root: string | undefined, limit = MERGED_PATHS_SCAN_LIMIT, opts: MergeLogReadOptions = {}): Map<number, string[]> {
   const byPr = new Map<number, string[]>();
   if (root === undefined) return byPr;
+  if (opts.cache?.mergedPathsByPr) return opts.cache.mergedPathsByPr;
   try {
     const out = execFileSync(
       "git",
-      ["log", "origin/main", "--first-parent", "--name-only", "--format=%x00%s", "-n", String(limit)],
+      ["log", opts.ref ?? "origin/main", "--first-parent", "--name-only", "--format=%x00%s", "-n", String(limit)],
       { cwd: root, encoding: "utf8", maxBuffer: 1 << 26 },
     );
     let current: number | undefined;
@@ -39920,6 +39926,7 @@ export function readMergedPathsByPr(root: string | undefined, limit = MERGED_PAT
       // twice means a re-merge, whose newest paths are the ones credit was derived from.
       if (files && files.length < MERGED_PATHS_PER_PR_CAP) files.push(path);
     }
+    if (opts.cache) opts.cache.mergedPathsByPr = byPr;
   } catch {
     /* best-effort: an unreadable log yields an empty map, and absent restores today's behaviour */
   }
@@ -39939,11 +39946,12 @@ export function readMergedPathsByPr(root: string | undefined, limit = MERGED_PAT
  * {@link readMergedPathsByPr}'s own: {@link creditEvidenceRootFor} found nothing provably rooted in
  * the requested `owner/repo`.
  */
-function readMergeSubjectsByPr(root: string | undefined): Map<number, string> {
+function readMergeSubjectsByPr(root: string | undefined, opts: MergeLogReadOptions = {}): Map<number, string> {
   const byPr = new Map<number, string>();
   if (root === undefined) return byPr;
+  if (opts.cache?.mergeSubjects) return opts.cache.mergeSubjects;
   try {
-    const out = execFileSync("git", ["log", "origin/main", "--format=%s", "-n", String(MERGE_SUBJECT_SCAN_LIMIT)], {
+    const out = execFileSync("git", ["log", opts.ref ?? "origin/main", "--format=%s", "-n", String(MERGE_SUBJECT_SCAN_LIMIT)], {
       cwd: root,
       encoding: "utf8",
       maxBuffer: 1 << 24,
@@ -39952,6 +39960,7 @@ function readMergeSubjectsByPr(root: string | undefined): Map<number, string> {
       const m = line.match(/\(#(\d+)\)\s*$/);
       if (m && !byPr.has(Number(m[1]))) byPr.set(Number(m[1]), line);
     }
+    if (opts.cache) opts.cache.mergeSubjects = byPr;
   } catch {
     /* best-effort: an unreadable log yields an empty map, and unknown declines */
   }
@@ -39967,6 +39976,25 @@ const MERGED_PATHS_PER_PR_CAP = 200;
 /** How far back {@link readMergeSubjectsByPr} scans. A BACKSTOP on cost, not a correctness bound:
  *  a credit older than this window reads UNKNOWN and therefore declines, which is the safe side. */
 const MERGE_SUBJECT_SCAN_LIMIT = 5000;
+
+const mergeLogEvidenceByRoot = new Map<string, NonNullable<MergeLogReadOptions["cache"]> & { sha: string }>();
+
+/** W1-T4774: retain one successful snapshot per checkout; failed reads remain retryable. */
+function resolveMergeLogReadOptions(root: string | undefined): MergeLogReadOptions {
+  if (root === undefined) return {};
+  const resolved = spawnSync("git", ["rev-parse", "--verify", "origin/main^{commit}"], { cwd: root, encoding: "utf8" });
+  const sha = resolved.status === 0 ? resolved.stdout.trim() : "";
+  if (!sha) {
+    mergeLogEvidenceByRoot.delete(root);
+    return {};
+  }
+  let cache = mergeLogEvidenceByRoot.get(root);
+  if (cache?.sha !== sha) {
+    cache = { sha };
+    mergeLogEvidenceByRoot.set(root, cache);
+  }
+  return { ref: sha, cache };
+}
 
 /**
  * W1-T3873 — THE GIT-EVIDENCE ROOT BOTH READERS BELOW MUST SCAN for a credit pass over
@@ -40130,6 +40158,7 @@ export function buildCreditCandidates(
   // walk below rather than per task — `deriveStatus` runs once per plan task (~1,400 a pass).
   // W1-T3873: rooted in `owner`/`repo`'s OWN checkout, never unconditionally the engine's.
   const evidenceRoot = evidenceRootFor(owner, repo);
+  const mergeLog = resolveMergeLogReadOptions(evidenceRoot);
   const baseGithub = github ?? buildBatchedGithub(owner, repo, { log });
   // This consumer already owns a whole-plan credit pass. Keep the merged batch (the projection's
   // fail-closed corroboration) but disable the unrelated open-board batch and taskless surface.
@@ -40141,7 +40170,7 @@ export function buildCreditCandidates(
     ...creditIo,
     ledgerPath,
     github: projectionGithub,
-    mergedPathsByPr: readMergedPathsByPr(evidenceRoot),
+    mergedPathsByPr: readMergedPathsByPr(evidenceRoot, MERGED_PATHS_SCAN_LIMIT, mergeLog),
     readLedger,
     skipTasklessEscalations: true,
     skipUncreditedBuildWarning: true,
@@ -40149,7 +40178,7 @@ export function buildCreditCandidates(
   // W1-T3063 — ONE local `git log` for the whole pass, never one per candidate and never a GitHub
   // call: W1-T2794 promised this rung adds no new read, and that promise is kept. A squash merge
   // puts `(#N)` in the subject, which is what maps a credit back to what earned it.
-  const mergeSubjects = readMergeSubjectsByPr(evidenceRoot);
+  const mergeSubjects = readMergeSubjectsByPr(evidenceRoot, mergeLog);
   const projection = projectPlan(plan, deps);
   // W1-T4078 — `buildBatchedGithub` already has each merged PR body in the same cache that fed
   // the projection. Read those bodies by PR number so the measured prerequisite-only split can
@@ -40284,19 +40313,16 @@ export function buildEscalationReconcileCandidates(
   // supersession incident (#4461) in a different surface. The free local evidence must reach here
   // too, or the refusal is fixed in one place and open in the other.
   //
-  // A SECOND `git log` PER SWEEP PASS IS THE COST, and it is local and bounded. The alternative —
-  // hoisting one map through the sweep composition into both builders — threads a new argument
-  // through call sites that do not otherwise change, for a saving measured in milliseconds.
-  //
   // W1-T3873: rooted in `owner`/`repo`'s OWN checkout, never unconditionally the engine's — see
   // {@link creditEvidenceRootFor}'s own doc, and `buildCreditCandidates`' identical fix above.
   const evidenceRoot = (injected.evidenceRootFor ?? creditEvidenceRootFor)(owner, repo);
-  const mergeSubjects = readMergeSubjectsByPr(evidenceRoot);
+  const mergeLog = resolveMergeLogReadOptions(evidenceRoot);
+  const mergeSubjects = readMergeSubjectsByPr(evidenceRoot, mergeLog);
   const deps: DeriveDeps = {
     ...injected.creditIo,
     ledgerPath,
     github: injected.github ?? buildBatchedGithub(owner, repo, { log }),
-    mergedPathsByPr: readMergedPathsByPr(evidenceRoot),
+    mergedPathsByPr: readMergedPathsByPr(evidenceRoot, MERGED_PATHS_SCAN_LIMIT, mergeLog),
   };
   const candidates: EscalationReconcileCandidate[] = [];
   for (const issue of open) {

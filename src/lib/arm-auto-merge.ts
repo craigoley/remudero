@@ -24,6 +24,7 @@
  * have both run-task.ts and this file import the ONE copy; noted as a follow-up, not done here.
  */
 import { systemClock } from "./clock.js";
+import { createHash } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -1584,10 +1585,62 @@ export function armOutcomeReason(outcome: ArmOutcome | "skipped", decisionReason
   }
 }
 
+export interface ArmReprobeFacts {
+  prNumber: number;
+  headSha: string;
+  state: string;
+  autoMergeArmed: boolean;
+  mergeable: boolean | null;
+  mergeableState: string;
+  baseSha: string;
+  reviewPublished: boolean;
+  checksGreen: boolean;
+}
+
+export function armEvidenceFingerprint(facts: ArmReprobeFacts): string {
+  return createHash("sha256").update(JSON.stringify([
+    facts.prNumber, facts.headSha, facts.state, facts.autoMergeArmed, facts.mergeable,
+    facts.mergeableState, facts.baseSha, facts.reviewPublished, facts.checksGreen,
+  ])).digest("hex");
+}
+
+/** W1-T5376: a successful read or elapsed time supplies no new merge permission. */
+export function decideArmReprobeFromFacts(
+  identity: { prNumber: number; headSha: string },
+  previous: ArmReprobeFacts | undefined,
+  facts: ArmReprobeFacts | undefined,
+  publishedAfterFailure = false,
+): { reconsider: boolean; reason: string; fingerprint?: string; observedArmed?: true } {
+  if (!facts || facts.prNumber !== identity.prNumber || facts.headSha !== identity.headSha || facts.state !== "open") {
+    return { reconsider: false, reason: "failed arm: unreadable or wrong-head evidence" };
+  }
+  if (facts.autoMergeArmed === true) {
+    return { reconsider: false, observedArmed: true, reason: "auto-merge already armed (fresh GitHub observation)" };
+  }
+  if (facts.autoMergeArmed !== false || facts.mergeable !== true ||
+      !["clean", "has_hooks"].includes(facts.mergeableState) || !facts.baseSha ||
+      facts.checksGreen !== true || facts.reviewPublished !== true) {
+    return { reconsider: false, reason: "failed arm: ambiguous, conflicting or incomplete evidence" };
+  }
+  const samePreviousHead = previous?.prNumber === identity.prNumber && previous.headSha === identity.headSha;
+  const published = samePreviousHead ? previous.reviewPublished === false : publishedAfterFailure;
+  const resolved = samePreviousHead && (previous.mergeable !== true ||
+    !["clean", "has_hooks"].includes(previous.mergeableState));
+  const baseChanged = samePreviousHead && !!previous.baseSha && previous.baseSha !== facts.baseSha;
+  if (!published && !resolved && !baseChanged) {
+    return { reconsider: false, reason: "failed arm: unchanged evidence supplies no remedy" };
+  }
+  return {
+    reconsider: true, fingerprint: armEvidenceFingerprint(facts),
+    reason: published ? "review publication completed" : resolved ? "mergeability resolved" : "base changed",
+  };
+}
+
 /**
  * PURE classifier for a failed `gh pr merge --auto` (exported for test): the "clean status"
  * class means the PR was ALREADY fully mergeable.
  */
+
 export function armFailureAction(stderrText: string): "direct-merge" | "transient" | "retryable" | "unknown" {
   if (/clean status/i.test(stderrText)) return "direct-merge";
   if (/timed? ?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|network|secondary rate limit|rate.limit|abuse detection|too many requests|5\d\d\b|GraphQL: (?:Something went wrong|Server Error)/i.test(
