@@ -2605,75 +2605,68 @@ function derivePrPrecedence(
   // ABOVE every rung that reads a live PR record. That ordering is DELIVERABLE A's point: once credit is
   // durable, resolving it again costs NO PR-record read.
   const durableCredit = creditStore[task.id];
+  // W1-T5552: PRs quarantined under EITHER source — no rung below may credit or re-persist one.
+  const quarantinedUrls = new Set(Object.values(durableCredit?.invalidated ?? {}).map((mark) => mark.prUrl));
   if (durableCredit) {
     // Trailer is the STURDIER of the two evidentially — an anchored body hit, not a ref GitHub deletes on merge
     // — but either alone suffices: this is a tie-break for which url to report. W1-T5353: an OVERRIDDEN
-    // entry is skipped for its sibling; both overridden, the rung falls through to the live rungs below.
-    const entry = [durableCredit.trailer, durableCredit["head-branch"]].find(
-      (e) => e !== undefined && !overrides.excludes(e.prNumber),
-    );
-    if (entry) {
-      // W1-T3996 DURABLE-CREDIT REVALIDATION — a HEAD-BRANCH entry gets ONE more look before this rung trusts
-      // it, because the rung that WRITES one (`corroborateByBranch` below) only ever ran the LEDGER-based
-      // `isPlanOnlyFilingPr` guard, never the DIFF-based `isPlanOnlyChangeset` one rung (c) runs before ITS OWN
-      // persist — so a plan-only filing PR whose ledger row carries no `plan_only` marker slips straight past
-      // it and sits in `merge-credit.json` forever (the W1-T3990/#6468 incident this task recovers). A TRAILER
-      // entry needs no second look: line ~2449 below only ever persists one AFTER `planOnlyRefusal` already
-      // cleared, so re-checking it here would just repeat a check it already passed.
-      const alreadyInvalidated = entry.source === "head-branch" ? durableCredit.invalidated?.["head-branch"] : undefined;
-      const planOnlyPaths =
-        !alreadyInvalidated && entry.source === "head-branch" ? deps.mergedPathsByPr?.get(entry.prNumber) : undefined;
-      const reviewedPr = !alreadyInvalidated && entry.source === "head-branch" &&
+    // entry (W1-T5552: or a QUARANTINED one) is skipped for its sibling; none left, the live rungs answer.
+    for (const entry of [durableCredit.trailer, durableCredit["head-branch"]]) {
+      if (entry === undefined || overrides.excludes(entry.prNumber)) continue;
+      if (durableCredit.invalidated?.[entry.source] || quarantinedUrls.has(entry.prUrl)) continue;
+      // W1-T3996 DURABLE-CREDIT REVALIDATION — ONE more look from FREE local `mergedPathsByPr` evidence; no
+      // row is no opinion. HEAD-BRANCH: its writer once skipped the diff check (W1-T3990/#6468). TRAILER
+      // (W1-T5552): an entry saved before the diff refusal (W1-T413/W1-T3067) was never checked — W1-T380
+      // stayed credited by plan-only #1437 until #8962. The `prByRef` review arm stays head-branch only.
+      const planOnlyPaths = deps.mergedPathsByPr?.get(entry.prNumber);
+      const reviewedPr = entry.source === "head-branch" &&
         hasPlanOnlyReviewForPr(ledgerLines, entry.prUrl, ledgerIndex)
         ? deps.github.prByRef(entry.prUrl) : null;
       const isRevalidatedPlanOnly = isPlanOnlyChangeset(planOnlyPaths ?? []) ||
         (reviewedPr?.headRefOid !== undefined &&
           isPlanOnlyFilingPr(ledgerLines, entry.prUrl, ledgerIndex, reviewedPr.headRefOid));
-      if (!alreadyInvalidated && !isRevalidatedPlanOnly) {
-        const base: StatusProjection = {
-          taskId: task.id,
-          source: entry.source,
-          status: "merged",
-          merged: true,
-          prUrl: entry.prUrl,
-          prNumber: entry.prNumber,
-          prState: entry.prState,
-          // DELIVERABLE B: the discoverable signal (design (iii)) — a task credited by exactly one
-          // of the two durable paths says so right here, in the SAME projection every existing
-          // caller of `merged`/`source` already reads, no second query required.
-          ...(isSinglePathCredited(creditStore, task.id) ? { singlePathCredit: true as const } : {}),
-        };
-        // W1-T119/W1-T179 PARITY: the durable record proves the MERGE beyond doubt, but `indeterminate` asks
-        // whether THIS cycle's read succeeded, so a dark cycle is still surfaced — from cheap flags the gateway
-        // already computed, never a NEW PR-record read.
-        if (deps.github.readFailed?.() || deps.github.readTruncated?.()) {
-          const previous = deps.previousProjection?.(task.id);
-          const now = deps.now ?? Date.now;
-          return {
-            ...base,
-            indeterminate: true,
-            unavailableReason: deps.github.readFailureReason?.() ?? "unknown",
-            githubUnobservableSince: previous?.githubUnobservableSince ?? new Date(now()).toISOString(),
-          };
-        }
-        return base;
-      }
       if (isRevalidatedPlanOnly) {
         // durable-credit-plan-only: SUBTRACT ONLY, tied to the EXACT recorded PR — never inferred from the
         // branch name, a task status field, or an operator override. Persisted so a LATER call with no path
         // map in hand (the ordinary case: the map is one bounded `git log` per PASS, not every derivation)
-        // reads this mark instead of re-deriving it, and so `corroborateByBranch` below — reached in THIS
-        // very call once the durable rung declines — cannot silently re-persist the same known-bad PR.
-        creditStore = invalidateDurableCredit(creditStore, task.id, "head-branch", {
+        // reads this mark instead of re-deriving it, and so `corroborateByBranch` and rung (c) below — reached
+        // in THIS very call once the durable rung declines — cannot silently re-persist the same known-bad PR.
+        creditStore = invalidateDurableCredit(creditStore, task.id, entry.source, {
           prUrl: entry.prUrl,
           prNumber: entry.prNumber,
           reason: "durable-credit-plan-only",
         });
         writeCreditStore(creditStore);
+        quarantinedUrls.add(entry.prUrl);
+        continue; // the sibling gets its own look; none left, the live rungs answer, reopening dispatch
       }
-      // FALL THROUGH, refused or already-quarantined alike: every rung below gets to answer as if this
-      // durable entry had never existed, which is what actually stops suppressing dispatch — merely
-      // flagging the surviving projection would still leave the task read as merged.
+      const base: StatusProjection = {
+        taskId: task.id,
+        source: entry.source,
+        status: "merged",
+        merged: true,
+        prUrl: entry.prUrl,
+        prNumber: entry.prNumber,
+        prState: entry.prState,
+        // DELIVERABLE B: the discoverable signal (design (iii)) — a task credited by exactly one
+        // of the two durable paths says so right here, in the SAME projection every existing
+        // caller of `merged`/`source` already reads, no second query required.
+        ...(isSinglePathCredited(creditStore, task.id) ? { singlePathCredit: true as const } : {}),
+      };
+      // W1-T119/W1-T179 PARITY: the durable record proves the MERGE beyond doubt, but `indeterminate` asks
+      // whether THIS cycle's read succeeded, so a dark cycle is still surfaced — from cheap flags the gateway
+      // already computed, never a NEW PR-record read.
+      if (deps.github.readFailed?.() || deps.github.readTruncated?.()) {
+        const previous = deps.previousProjection?.(task.id);
+        const now = deps.now ?? Date.now;
+        return {
+          ...base,
+          indeterminate: true,
+          unavailableReason: deps.github.readFailureReason?.() ?? "unknown",
+          githubUnobservableSince: previous?.githubUnobservableSince ?? new Date(now()).toISOString(),
+        };
+      }
+      return base;
     }
   }
 
@@ -2743,8 +2736,7 @@ function derivePrPrecedence(
     // W1-T3996: the durable rung above may have JUST quarantined this exact PR this very call (or on a
     // previous one) — without this, a plan-only filing whose ledger row carries no `plan_only` marker
     // would sail past `isPlanOnlyFilingPr` below and get re-persisted in the SAME projection that just
-    // refused it, undoing the revalidation before this function even returns.
-    const invalidatedUrl = creditStore[task.id]?.invalidated?.["head-branch"]?.prUrl;
+    // refused it, undoing the revalidation before this function even returns. W1-T5552: under EITHER source.
     const planOnlyByDiff = (pr: PrRef): boolean => {
       const files = deps.mergedPathsByPr?.get(pr.number) ?? deps.github.changedFiles?.(pr.url);
       return files !== undefined && isPlanOnlyChangeset(files);
@@ -2754,7 +2746,7 @@ function derivePrPrecedence(
         pr.state.toUpperCase() === "MERGED" &&
         ownsBranch(pr.headRefName, task.id) &&
         !debunked.has(pr.url) &&
-        pr.url !== invalidatedUrl &&
+        !quarantinedUrls.has(pr.url) &&
         // W1-T5353: an overridden pairing neither credits nor persists.
         !overrides.excludes(pr.number) &&
         // W1-T1004: this rung had NO plan-only guard at all before — a filing PR dispatched from this task's
@@ -2800,9 +2792,12 @@ function derivePrPrecedence(
   // W1-T5353: an OVERRIDDEN trailer hit is not this task's answer, but a later merge carrying the same trailer may
   // be — so widen to every trailered candidate (newest first) and take the first pairing the override leaves
   // standing. Paid ONLY when an override actually names the first hit. None standing reads as no hit at all.
+  // W1-T5552: a QUARANTINED hit is skipped the same way, so an older build behind it still answers
+  // (W1-T2318: build #2972, then plan-only amendment #3059).
+  const skipsTrailerPr = (pr: PrRef): boolean => overrides.excludes(pr.number) || quarantinedUrls.has(pr.url);
   const trailerPr =
-    firstTrailerPr && overrides.excludes(firstTrailerPr.number)
-      ? (deps.github.findMergedByTrailerAll?.(task.id) ?? []).find((pr) => !overrides.excludes(pr.number)) ?? null
+    firstTrailerPr && skipsTrailerPr(firstTrailerPr)
+      ? (deps.github.findMergedByTrailerAll?.(task.id) ?? []).find((pr) => !skipsTrailerPr(pr)) ?? null
       : firstTrailerPr;
   if (trailerPr && !debunkedTrailerUrls(ledgerLines, task.id, ledgerIndex).has(trailerPr.url)) {
     const head = deps.github.headRefName(trailerPr.url);
