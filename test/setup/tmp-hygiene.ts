@@ -25,7 +25,7 @@
  */
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 // W1-T4805: FIRST import — process-level containment against live GitHub writes (dead push URLs, a
 // sentinel token, no App key). Every runner invocation already `--import`s this file, so it rides along.
@@ -145,6 +145,11 @@ syncBuiltinESMExports();
 
 // W1-T4068: config and state are scratch data even for suites invoking main() in-process.
 process.env.RMD_TEST_LIVE_DENY_ROOT ??= join(process.env.HOME ?? tmpdir(), "Remudero");
+// Keep the installed browser cache reachable after HOME changes, including in spawned children.
+const browserCache = process.platform === "darwin" ? join(homedir(), "Library", "Caches")
+  : process.platform === "win32" ? process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local")
+  : process.env.XDG_CACHE_HOME || join(homedir(), ".cache");
+process.env.PLAYWRIGHT_BROWSERS_PATH ??= join(browserCache, "ms-playwright");
 const testHome = fs.mkdtempSync(join(tmpdir(), `rmd-test-home-${process.pid}-`));
 process.env.HOME = testHome;
 process.env.NODE_TEST_CONTEXT ??= "test-setup";

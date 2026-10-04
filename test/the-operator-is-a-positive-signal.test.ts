@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +13,30 @@ import { buildMeasurementCadenceDaemonHooks, main, serveCommand } from "../src/r
 import type { LedgerUnionResult } from "../src/lib/ledger-grep.js";
 
 type CadenceDeps = NonNullable<Parameters<typeof buildMeasurementCadenceDaemonHooks>[0]>;
+
+test("W1-T4068: scratch HOME preserves the browser cache for this process and its children", () => {
+  const home = mkdtempSync(join(tmpdir(), "rmd-browser-home-"));
+  const env = {
+    ...process.env, HOME: home, NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: undefined,
+    XDG_CACHE_HOME: undefined, LOCALAPPDATA: undefined, PLAYWRIGHT_BROWSERS_PATH: undefined,
+  };
+  const probe = (setup: boolean, browserPath?: string) => JSON.parse(execFileSync(process.execPath, [
+    "--import", "tsx",
+    ...(setup ? ["--import", "./test/setup/tmp-hygiene.ts"] : []),
+    "--input-type=module", "--eval",
+    'import { chromium } from "playwright"; console.log(JSON.stringify({ home: process.env.HOME, executable: chromium.executablePath(), browserPath: process.env.PLAYWRIGHT_BROWSERS_PATH }));',
+  ], { encoding: "utf8", env: { ...env, PLAYWRIGHT_BROWSERS_PATH: browserPath } }));
+  const control = probe(false);
+  const isolated = probe(true);
+  assert.notEqual(isolated.home, control.home);
+  assert.equal(isolated.executable, control.executable);
+  assert.ok(isolated.executable.startsWith(isolated.browserPath));
+  const inherited = probe(false, isolated.browserPath);
+  assert.equal(inherited.executable, control.executable);
+  const override = join(home, "custom-browsers");
+  assert.equal(probe(true, override).browserPath, override);
+  assert.equal(probe(true, "0").browserPath, "0");
+});
 
 async function invoke(t: TestContext, argv: string[]): Promise<void> {
   const saved = process.argv;
