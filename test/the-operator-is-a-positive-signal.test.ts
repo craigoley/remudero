@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { appendLedger, deriveLedgerActor, ledgerRowActor } from "../src/lib/ledger.js";
 import { configPath, loadConfig, type Config } from "../src/lib/config.js";
@@ -81,12 +81,18 @@ test("W1-T4068: test attribution refuses a live-root symlink and cannot spoof th
   const path = join(live, "ledger.ndjson");
   writeFileSync(path, "sentinel\n");
   symlinkSync(live, join(root, "alias"));
+  const outsideTmpdir = join(root, "outside-tmpdir");
+  symlinkSync(dirname(tmpdir()), outsideTmpdir);
   const saved = process.env.RMD_TEST_LIVE_DENY_ROOT;
   const override = process.env.RMD_ALLOW_LIVE_WRITES;
   process.env.RMD_TEST_LIVE_DENY_ROOT = live;
   process.env.RMD_ALLOW_LIVE_WRITES = "1";
   try {
     assert.throws(() => appendLedger(join(root, "alias", "ledger.ndjson"), { run_id: "r", task_id: "t", step: "probe" }), /REFUSED/);
+    assert.throws(
+      () => appendLedger(join(outsideTmpdir, "ledger.ndjson"), { run_id: "r", task_id: "t", step: "outside-temp" }),
+      /REFUSED test append outside the temporary root/,
+    );
     assert.equal(readFileSync(path, "utf8"), "sentinel\n");
     const scratch = join(root, "scratch", "ledger.ndjson");
     appendLedger(scratch, { run_id: "r", task_id: "t", step: "probe", actor: "operator_human" });
