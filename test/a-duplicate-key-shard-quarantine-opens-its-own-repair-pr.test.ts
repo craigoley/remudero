@@ -4,12 +4,13 @@
  * quarantines such a shard; this lane repairs it. The judge's `risk_ruling.pin` covers exactly one candidate.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { Escalation } from "../src/lib/escalate.js";
 import type { QuarantinedTask } from "../src/lib/plan.js";
+import { acceptanceAuthorTimeCheck, parseAcceptanceBlock, parseWhitelistedProof } from "../src/lib/review.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import * as runTask from "../src/run-task.js";
 import { gitRepo } from "./helpers/git-repo.js";
@@ -106,6 +107,27 @@ function landRecorder(answer: () => string | undefined = () => "https://github.c
   return { calls, land: (rel: string, text: string, pr: { title: string; body: string }) => (calls.push({ rel, text, ...pr }), answer()) };
 }
 
+const DUPLICATE_KEY_TEST_TITLE = "no plan shard on main carries a duplicate key";
+
+/** #9005: the repair PR carried no `## Acceptance` block and no trailer, so the required acceptance-author-gate
+ *  refused it (no-header). The body must parse, through the real parser, to the one criterion whose test fails at base. */
+function assertRepairBodyIsJudgeable(body: string): void {
+  assert.deepEqual(acceptanceAuthorTimeCheck(body), { ok: true, message: "Acceptance block is judgeable" });
+  assert.deepEqual(parseAcceptanceBlock(body), [
+    { claim: "no plan shard on main carries a duplicate key after this repair", proof: `unit test: ${DUPLICATE_KEY_TEST_TITLE}` },
+  ]);
+  const proof = parseWhitelistedProof(`unit test: ${DUPLICATE_KEY_TEST_TITLE}`);
+  assert.deepEqual([proof?.kind, proof?.nameFiltered], ["test", true], "a name-filtered unit test, not prose");
+  const suite = readFileSync(new URL("./no-plan-shard-carries-a-duplicate-key.test.ts", import.meta.url), "utf8");
+  assert.ok(suite.includes(`test("${DUPLICATE_KEY_TEST_TITLE}"`), "the proof names a test that exists");
+}
+
+test("a repair body without its Acceptance block is refused by the author-time gate", () => {
+  const bare = "The daemon quarantined `plan/tasks.d/x.yaml`.\n\nOpened by the duplicate-key repair lane (W1-T5519).";
+  assert.equal(acceptanceAuthorTimeCheck(bare).defect, "no-header");
+  assert.throws(() => assertRepairBodyIsJudgeable(bare));
+});
+
 test("the real 2026-10-03 duplicate keeps the judge's priority 2.5 and drops the gardener's line and marker", async () => {
   const { repairDuplicateKeyShard } = await repairModule();
   const verdict = repairDuplicateKeyShard(REAL_1003_SHARD);
@@ -185,6 +207,17 @@ test("a duplicate-key quarantine opens exactly one repair PR per shard blob", as
   pass();
   assert.equal(lane.calls.length, 1, "one PR per shard blob");
   assert.deepEqual(r.steps("plan.shard_repair_skipped").map((row) => row.extra.pr_url), ["https://github.com/o/r/pull/9001"]);
+});
+
+test("a shard repair PR body carries the acceptance block its required gate demands", async (t) => {
+  const clone = originCarrying(t, REAL_1003_SHARD);
+  const stateDir = tempDir(t, "shard-repair-acceptance");
+  const r = recorder();
+  const lane = landRecorder();
+  runTask.shardRepairRequester(stateDir, r.log)({ id: "W1-T5431", files: [`origin/main:${SHARD_REL}`], reason: "shard_invalid" });
+  runTask.runShardRepairPass({ stateDir, repoDir: clone.dir, worktreesRoot: stateDir, owner: "o", repo: "r", log: r.log, land: lane.land });
+  assert.equal(lane.calls.length, 1, JSON.stringify(r.rows));
+  assertRepairBodyIsJudgeable(lane.calls[0]!.body);
 });
 
 test("an uncovered quarantine escalates and ledgers its refusal, and opens nothing", async (t) => {

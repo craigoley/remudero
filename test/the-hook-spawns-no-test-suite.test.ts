@@ -38,7 +38,7 @@ let counter = 0;
 function fixture(opts: { untieredFile: boolean; ghostRow?: boolean }) {
   const remote = gitRepo({ kind: "t3225-remote", bare: true });
   const parent = gitRepo({ kind: "t3225-parent" });
-  const work = parent.addWorktree(join(dirname(parent.dir), `t3225-wt-${process.pid}-${counter++}`), "pushbranch");
+  const work = parent.addWorktree(join(parent.dir, `t3225-wt-${counter++}`), "pushbranch");
 
   mkdirSync(join(work.dir, "scripts"), { recursive: true });
   mkdirSync(join(work.dir, "hooks"), { recursive: true });

@@ -34,6 +34,7 @@ import type {
 } from "./measurement-cadence.js";
 import { buildMeasurementCadenceRow } from "./measurement-cadence.js";
 import { runOpportunityIntake, productionOpportunityIntakePorts, type OpportunityIntakePorts } from "./opportunity-intake.js";
+import { reconcileOpportunityOutcomes, productionOpportunityOutcomePorts, type OpportunityOutcomePorts } from "./opportunity-outcomes.js";
 import type { BoardReviewCadenceDecision, BoardReviewReport } from "./board-review.js";
 import type { DigestCadenceRunResult } from "./digest.js";
 import type { LedgerCompactionDecision, LedgerCompactionOutcome } from "./ledger-compaction-rung.js";
@@ -1176,6 +1177,7 @@ export interface DaemonDeps {
    *  perspective; run-task.ts owns markers, policy, GitHub, filesystem and worker effects. */
   checkIntakeRungs?: () => readonly IntakeRungDecision[];
   opportunityIntake?: OpportunityIntakePorts;
+  opportunityOutcomes?: OpportunityOutcomePorts;
   /** Run one enabled intake rung selected by {@link checkIntakeRungs}. */
   runIntakeRung?: (decision: Extract<IntakeRungDecision, { fire: true }>) => Promise<IntakeRungRunResult> | IntakeRungRunResult;
   /** The board-review rung, wired. Its unit is the whole open board rather than one PR, and it has its own policy row
@@ -4020,6 +4022,14 @@ export async function runDaemon(
             continue;
           }
           log("intake_cadence.fired", { rung: decision.rung, reason: decision.reason });
+          if (decision.rung === "codeqlQuality" && (deps.opportunityOutcomes || deps.knowledgeGardener)) {
+            try {
+              const outcomes = reconcileOpportunityOutcomes(deps.opportunityOutcomes ?? productionOpportunityOutcomePorts(deps.knowledgeGardener!));
+              log("opportunity_outcomes.reconciled", { outcomes });
+            } catch (error) {
+              log("opportunity_outcomes.failed", { reason: String(error) });
+            }
+          }
           if (decision.rung === "codeqlQuality" && (deps.opportunityIntake || deps.knowledgeGardener)) {
             try {
               const result = await runOpportunityIntake(deps.opportunityIntake ?? productionOpportunityIntakePorts(deps.knowledgeGardener!));

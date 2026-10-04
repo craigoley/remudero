@@ -30,6 +30,7 @@ import { isQueueDispatchRunStart } from "./ledger.js";
 // Why: the TOCTOU-race test — docs/forensics/status-board.md
 import fs from "node:fs";
 import { join } from "node:path";
+import { hostname } from "node:os";
 import {
   detectDaemonCrashLoop,
   DEFAULT_CRASHLOOP_WINDOW,
@@ -50,7 +51,7 @@ import {
   type LearningsInjectionTotals,
 } from "./digest.js";
 import { deployAutoPath, deployFailedAlertPath, sameCommit } from "./deployer.js";
-import { dispatchClaimRef } from "./dispatch-claim.js";
+import { dispatchClaimRef, dispatchClaimAgeMs, readDispatchClaimAnchor, staleDispatchClaimEscalations, type DispatchClaimObservation, type DispatchClaimEscalation } from "./dispatch-claim.js";
 import {
   checkOperatorMessage,
   type OperatorMessage,
@@ -501,6 +502,8 @@ export interface UncreditedBuildRow {
 /** NEEDS ME — the board's own escalation surface, distinct from `rmd serve`'s HTML "Needs me" panel, which is
  *  task-escalation-driven. A future sentinel is a new field here, not a new section. */
 export interface NeedsMeSection {
+  dispatchClaims?: DispatchClaimEscalation[];
+  dispatchClaimsUnknownReason?: string;
   /** Queued machine filings still parked for a person or the ratified judge. Unknown when merge or
    *  durable release state cannot be read; a missing gateway never becomes a reassuring zero. */
   parkedProposals?: { count?: number; taskIds: string[]; unknownReason?: string };
@@ -610,6 +613,7 @@ export interface StatusBoardDeps {
    *  operator can drop"; this read makes that true. ONE `git ls-remote`; `{status: "unreachable"}` is never "no claim
    *  held". */
   readDispatchClaims?: (repoDir: string) => DispatchClaimsRead;
+  localHost?: string;
 }
 
 // ── origin/main (local, no fetch) ───────────────────────────────────────────────────────────
@@ -649,10 +653,10 @@ function defaultReadSharedPauseState(repoDir: string): SharedPauseRead {
 
 /** W1-T2270: every held `refs/rmd-dispatch/<taskId>` claim via exactly ONE `git ls-remote` — {@link
  *  defaultReadSharedPauseState}'s cost profile over a namespace. `"unreachable"` on a nonzero exit: a failed read is
- *  never `"clear"`. `holder` is the anchor's own sha, never a second round trip to decode the pid and host. */
+ *  never `"clear"`. Anchor metadata is read at that exact SHA; an unreadable age stays unknown. */
 export type DispatchClaimsRead =
   | { readonly status: "clear" }
-  | { readonly status: "held"; readonly claims: ReadonlyArray<{ readonly taskId: string; readonly holder: string }> }
+  | { readonly status: "held"; readonly claims: ReadonlyArray<DispatchClaimObservation> }
   | { readonly status: "unreachable" };
 
 /** Every `refs/rmd-dispatch/<taskId>` line off the `ls-remote`, parsed the same split-on-tab way {@link
@@ -685,7 +689,21 @@ function defaultReadDispatchClaims(repoDir: string): DispatchClaimsRead {
     return { status: "unreachable" };
   }
   const claims = parseDispatchClaimLsRemote(stdout);
-  return claims.length ? { status: "held", claims } : { status: "clear" };
+  return claims.length ? { status: "held", claims: claims.map((claim) => ({
+    ...claim,
+    ...readDispatchClaimAnchor(claim.holder, {
+      run: (args) => {
+        try {
+          return { status: 0, stdout: execFileSync("git", ["-C", repoDir, ...args], {
+            encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+          }), stderr: "" };
+        } catch (error) {
+          const failure = error as { status?: number; stderr?: string | Buffer; message?: string };
+          return { status: failure.status ?? 1, stdout: "", stderr: String(failure.stderr ?? failure.message ?? error) };
+        }
+      },
+    }),
+  })) } : { status: "clear" };
 }
 
 // ── Ledger derivation ────────────────────────────────────────────────────────────────────────
@@ -1161,19 +1179,21 @@ function buildLatchRows(
   // this row makes it findable.
   const dispatchClaims = readDispatchClaims();
   if (dispatchClaims.status === "held") {
-    for (const { taskId, holder } of dispatchClaims.claims) {
+    for (const { taskId, holder, identity, metadataError } of dispatchClaims.claims) {
       // W1-T2446: "with no landed work observed" was asserted UNCONDITIONALLY, so for a task whose work HAD landed the
       // board kept saying it had not. `isMerged` is the SAME projection this render already built; the drop stays the
       // operator's.
       rows.push({
         name: `dispatch-claim:${taskId}`,
-        consequence: isMerged(taskId)
+        ageMs: dispatchClaimAgeMs(identity, nowMs),
+        consequence: (isMerged(taskId)
           ? `${taskId}'s dispatch claim ${dispatchClaimRef(taskId)} is held (holder ${holder}) — ${taskId} ` +
             `is credited MERGED, so this claim is stale, not live-guarded work: drop it with ` +
             `git push origin :${dispatchClaimRef(taskId)}`
           : `${taskId}'s dispatch claim ${dispatchClaimRef(taskId)} is held (holder ${holder}) with no ` +
             `landed work observed — a new dispatch of ${taskId} is refused until an operator drops it: ` +
-            `git push origin :${dispatchClaimRef(taskId)}`,
+            `git push origin :${dispatchClaimRef(taskId)}`) +
+          (metadataError ? ` — age unknown: ${metadataError}` : ""),
       });
     }
   } else if (dispatchClaims.status === "unreachable") {
@@ -2231,8 +2251,9 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   const isMerged: MergedSet = (id) => projections?.get(id)?.merged === true;
 
   // ── LATCHES ──
+  const dispatchClaims = readDispatchClaims(deps.repoDir);
   const rows = buildLatchRows(root, nowMs, isPidAlive, () => readSharedPauseState(deps.repoDir), originSha, () =>
-    readDispatchClaims(deps.repoDir), isMerged,
+    dispatchClaims, isMerged,
   );
   const latchesSection: LatchesSection = { rows, nextAction: undefined };
   latchesSection.nextAction = pickNextAction(LATCHES_NEXT_ACTIONS, latchesSection);
@@ -2304,6 +2325,13 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
   // extra pure fold (deriveNeedsMe), no second ledger read. ──────────────────────────────────
   const operatorReleases = readOperatorReleasesForBoard(root);
   const needsMe = deriveNeedsMe(lines, projections, plan, operatorReleases.ids, operatorReleases.reason);
+  needsMe.dispatchClaims = staleDispatchClaimEscalations(
+    dispatchClaims.status === "held" ? dispatchClaims.claims : [], nowMs, deps.localHost ?? hostname(),
+  );
+  if (dispatchClaims.status === "unreachable") needsMe.dispatchClaimsUnknownReason = "claim state is unreadable; escalation recovery is unconfirmed";
+  else if (dispatchClaims.status === "held" && dispatchClaims.claims.some((claim) => !claim.identity)) {
+    needsMe.dispatchClaimsUnknownReason = "claim age is unknown; stale-claim escalation recovery is unconfirmed";
+  }
 
   return {
     generatedAt: new Date(nowMs).toISOString(),
@@ -2632,6 +2660,8 @@ function renderNeedsMeBlock(n: NeedsMeSection): string[] {
     n.mergeHeld.length === 0 &&
     n.uncreditedBuilds.length === 0 &&
     !n.tokenFallback &&
+    (n.dispatchClaims ?? []).length === 0 &&
+    !n.dispatchClaimsUnknownReason &&
     (n.heldRoots ?? []).length === 0;
   if (otherSignalsQuiet && (!parked || parked.count === 0) && parked?.unknownReason === undefined) {
     out.push("nothing needs you");
@@ -2656,6 +2686,11 @@ function renderNeedsMeBlock(n: NeedsMeSection): string[] {
         `GH_TOKEN was left as found, so gh calls are billing the personal token's buckets, not the ` +
         `installation's (${since})`,
     );
+  }
+  if (n.dispatchClaimsUnknownReason) out.push(`dispatch claims : unknown — ${n.dispatchClaimsUnknownReason}`);
+  for (const claim of n.dispatchClaims ?? []) {
+    out.push(`stale dispatch claim : ${claim.ref} (holder ${claim.holder}), age ${formatAgeMs(claim.ageMs)} — ` +
+      `${claim.detail} ${claim.options[0]!.detail}`);
   }
   for (const r of n.mergeHeld) {
     const target = r.prNumber !== undefined ? `PR #${r.prNumber}${r.taskId ? ` (${r.taskId})` : ""}` : "the whole fleet";

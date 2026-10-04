@@ -45,7 +45,7 @@ const MACHINE_ONLY_SHARD = CLEAN_SHARD.replace("verify: auto", "verify: human\n 
 function fixture(t: TestContext, opts: { lintScript?: string } = {}) {
   const remote = gitRepo({ kind: "t4901-remote", bare: true });
   const parent = gitRepo({ kind: "t4901-parent" });
-  const work = parent.addWorktree(join(dirname(parent.dir), `rmd-t4901-wt-${process.pid}-${counter++}`), "pushbranch");
+  const work = parent.addWorktree(join(parent.dir, `rmd-t4901-wt-${counter++}`), "pushbranch");
   t.after(() => work.cleanup());
 
   for (const dir of ["hooks", "scripts/lib", "plan/tasks.d", "docs"]) mkdirSync(join(work.dir, dir), { recursive: true });
