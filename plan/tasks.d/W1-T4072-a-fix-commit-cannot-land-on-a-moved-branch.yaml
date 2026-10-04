@@ -12,7 +12,7 @@
   plan_refs: [W1-T3696]
   files: [src/run-task.ts, src/lib/sweep.ts, test/a-fix-commit-cannot-land-on-a-moved-branch.test.ts, scripts/test-tier-manifest.json]
   priority: 2
-  status: queued
+  status: merged
   # backlog gardener: band=2 evidence=a02eeffdbc677a39
   attempts: 0
   rationale: |

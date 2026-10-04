@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: fleet PRs red in CI on censuses census-precheck passed (#8961 #8970 #9066 #9077 #9079)"
   plan_refs: [W1-T3225, W1-T3224, W1-T5101, W1-T2595, W1-T2478, W1-T464]
   files: [scripts/census-precheck.mjs, scripts/census-precheck-parity-baseline.json, test/census-precheck-runs-the-admitted-census-suites.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

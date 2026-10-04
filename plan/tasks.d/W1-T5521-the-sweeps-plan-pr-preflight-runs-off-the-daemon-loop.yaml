@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: daemon loop stalls traced to the sweep's refusal-amendment and plan-repair preflights"
   plan_refs: [W1-T5405, W1-T5481, W1-T5284, W1-T5348, W1-T5361, W1-T5366]
   files: [src/lib/plan-pr-emitter.ts, src/lib/sweep.ts, test/the-sweeps-plan-pr-preflight-runs-off-the-daemon-loop.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03 (coordinator follow-up): plan-only reds dominate the escalation stream; #8956/#8957 (APPROVE ratifications) reddened on shards with no rationale, ratifier fix filed separately as W1-T5541"
   plan_refs: [W1-T5349, W1-T4351, W1-T4460, W1-T5118, W1-T5405, W1-T3390, W1-T5541, W1-T5544, W1-T5536]
   files: [src/lib/sweep.ts, src/run-task.ts, src/lib/prompt-render.ts, test/a-red-plan-only-pr-gets-a-plan-scoped-fix-round.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

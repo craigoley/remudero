@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: /mnt/scratch at 89% with ~120 GB of idle top-level entries no sweep reaches"
   plan_refs: [W1-T4770, W1-T3378, W1-T4804, W1-T5547, W1-T5548, W1-T5518, W1-T5550]
   files: [deploy/rmd-host-cleanup.sh, deploy/rmd-tmp-sweep.sh, test/helpers/host-cleanup-fixture.ts, test/host-root-disk-janitor.test.ts, test/a-top-level-scratch-workspace-idle-for-12-hours-is-removed.test.ts, test/a-scratch-workspace-holding-unpushed-commits-is-bundled-before-removal.test.ts, test/a-workspace-parent-root-is-never-removed-and-its-children-are-judged.test.ts, test/two-janitor-passes-cannot-run-at-the-same-time.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

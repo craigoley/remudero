@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: PR #8887's review.posted row, appended at 17:33:53Z during serve's 17:33:45Z rotation, exists in no ledger file"
   plan_refs: [W1-T244, W1-T230, W1-T4393, W1-T5516, W1-T5517]
   files: [src/lib/ledger.ts, src/run-task.ts, test/rows-a-second-process-appends-throughout-a-rotation-all-survive.test.ts, test/an-append-inside-the-rotation-rename-window-survives.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: reviewing W1-T5524 (#9003) and W1-T5525 (#9049)"
   plan_refs: [W1-T5525, W1-T5524, W1-T5460]
   files: [openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/every-queued-write-result-documents-its-landing.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |
