@@ -5,6 +5,7 @@ import {
   cpSync,
   existsSync,
   fstatSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -14,6 +15,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  writeFileSync,
   writeSync,
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
@@ -27,7 +29,7 @@ import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from 
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { assertLedgerPathNotLive } from "./live-write-guard.js";
 import { rotationStampIso } from "./ledger-union.js";
-import { pruneCarriedRows } from "./ledger-carry.js";
+import { PLAN_ONLY_REVIEW_MARKER_STEP, planOnlyReviewMarkers, pruneCarriedRows } from "./ledger-carry.js";
 import { resolveProducerIdentity, type ProducerIdentity } from "./producer-identity.js";
 import { WORKER_SCOPE_ENV } from "./worker-containment.js";
 
@@ -668,6 +670,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // archived away, a completed migration reads as `hold` and the rung submits it again.
   "dep-review.migrate.completed",
   "review.posted",
+  // status.ts's plan-only credit refusal reads it once rotation stops carrying a merged PR's review rows.
+  PLAN_ONLY_REVIEW_MARKER_STEP,
   "review.post_refused",
   "review.cannot_evaluate_escalated",
   // W1-T913: `lastPendingReviewStatusFromLedger` (review.ts) reads this back for per-head
@@ -1823,6 +1827,7 @@ function rotateLedgerLocked(
   });
 
   const carried = pruneCarriedRows(candidates);
+  const reviewMarkers = planOnlyReviewMarkers(candidates, carried);
   archivedLineCount += candidates.length - carried.length;
   candidates = carried;
 
@@ -1902,8 +1907,8 @@ function rotateLedgerLocked(
 
   // ── THE CONVERGENCE INVARIANT (W1-T244). Even after every bound above the retained core can
   // still exceed the ceiling. Post-rotation the live ledger MUST be strictly below it, or rotation
-  // cannot terminate. Shed the OLDEST retained lines by `ts`, never the newest, and leave one
-  // pointer line naming the archive. Falsifier: test/ledger-rotation-convergence.test.ts. Why: the
+  // cannot terminate. Shed the OLDEST retained lines by `ts`, never the newest nor a correction (W1-T5551),
+  // and leave one pointer line naming the archive. Falsifier: test/ledger-rotation-convergence.test.ts. Why: the
   // core once exceeded the ceiling live (docs/forensics/ledger.md#rotateledger). ───────────────
   let shedCount = 0;
   if (keptBytes + tailBytes >= ceilingBytes) {
@@ -1924,8 +1929,9 @@ function rotateLedgerLocked(
     // headroom — otherwise the very next append could put it straight back over. The invariant is
     // strictly enforced either way; this makes "converged" durable rather than a hair's-width pass.
     const targetBytes = Math.floor(ceilingBytes * 0.9);
-    const byAge = [...keptCandidates].sort((a, b) => (a.tsMs ?? 0) - (b.tsMs ?? 0));
-    const stillKept = new Set(byAge);
+    const sheddable = keptCandidates.filter((p) => p.step !== "correction.provenance");
+    const byAge = sheddable.sort((a, b) => (a.tsMs ?? 0) - (b.tsMs ?? 0));
+    const stillKept = new Set(keptCandidates);
     for (const victim of byAge) {
       if (keptBytes + tailBytes + pointerBytes < targetBytes) break;
       stillKept.delete(victim);
@@ -1957,6 +1963,7 @@ function rotateLedgerLocked(
     (recarriedCount > 0 || recarry.torn.length > 0
       ? rotationRow("ledger.recarried", { count: recarriedCount, archives: recarry.archives, unreadable_archives: recarry.torn }, nowIso)
       : "") +
+    reviewMarkers.map((marker) => rotationRow(PLAN_ONLY_REVIEW_MARKER_STEP, marker, nowIso)).join("") +
     (retention.unreadable ? rotationRow("ledger.retained_steps_unreadable", { path: ledgerRetainedStepsPath(path) }, nowIso) : "") +
     (rateBytesPerHour > 0
       ? rotationRow("ledger.rotation_headroom", { rate_bytes_per_hour: rateBytesPerHour, ceiling_bytes: ceilingBytes }, nowIso)
@@ -2034,22 +2041,41 @@ export interface StateBackupSnapshot {
   archiveDir: string;
   /** Relative paths of every file the snapshot copied, sorted, relative to `state/`. */
   entries: string[];
+  /** W1-T5545: rotations hard-linked to the last snapshot, files removed mid-copy, torn bytes cut. */
+  linked: string[];
+  vanished: string[];
+  ledgerTrimmedBytes: number;
 }
 
-/** Recursively lists every FILE (never a directory) under `root`, as sorted paths relative to
- *  `root`, skipping any relative path in `excluded`. ONE walk shared by staging, the post-copy
- *  verification and {@link restoreState}, so a traversal fix applies to all three. */
+/** Test-only strike points (`beforeCopy`, `afterLedgerRead`); `maxRaceAttempts` bounds every race. */
+export interface SnapshotStateOptions {
+  now?: () => Date;
+  copy?: (srcRoot: string, dstRoot: string, relPaths: readonly string[]) => void;
+  beforeCopy?: (rel: string) => void;
+  afterLedgerRead?: (attempt: number) => void;
+  maxRaceAttempts?: number;
+}
+
+// KIND: BACKSTOP — a healthy ledger settles on the first or second read (a few MB, read in ms).
+export const STATE_BACKUP_MAX_RACE_ATTEMPTS = 5;
+
+/** A rotation archive (`ledger.<ISO stamp>.ndjson[.gz]`): renamed in once, never modified. */
+export function isLedgerArchiveRelPath(rel: string): boolean {
+  return /^ledger\.\d{4}-\d{2}-\d{2}T[^/]*\.ndjson(\.gz)?$/.test(rel);
+}
+
+/** Every FILE under `root`, sorted, minus `excluded` — ONE walk for staging, verify and restore. Types
+ *  come from readdir, so a temp file renamed away mid-walk cannot fail it (W1-T5545). */
 function listStateFiles(root: string, excluded: ReadonlySet<string> = new Set()): string[] {
   const out: string[] = [];
   const walk = (relDir: string): void => {
     const absDir = relDir ? join(root, relDir) : root;
-    for (const name of readdirSync(absDir).sort()) {
-      const rel = relDir ? join(relDir, name) : name;
+    for (const d of readdirSync(absDir, { withFileTypes: true })) {
+      const rel = relDir ? join(relDir, d.name) : d.name;
       if (excluded.has(rel)) continue;
-      const abs = join(absDir, name);
-      const st = statSync(abs);
-      if (st.isDirectory()) walk(rel);
-      else if (st.isFile()) out.push(rel);
+      const kind = d.isSymbolicLink() ? statSync(join(absDir, d.name)) : d;
+      if (kind.isDirectory()) walk(rel);
+      else if (kind.isFile()) out.push(rel);
     }
   };
   walk("");
@@ -2061,17 +2087,104 @@ function listStateFiles(root: string, excluded: ReadonlySet<string> = new Set())
  *  0600 by design, and a backup that widened them on restore would be a regression. */
 function copyStateFiles(srcRoot: string, dstRoot: string, relPaths: readonly string[]): void {
   for (const rel of relPaths) {
-    const src = join(srcRoot, rel);
-    const dst = join(dstRoot, rel);
+    copyOneStateFile(join(srcRoot, rel), join(dstRoot, rel), statSync(join(srcRoot, rel)).mode);
+  }
+}
+
+function copyOneStateFile(src: string, dst: string, mode: number): void {
+  mkdirSync(dirname(dst), { recursive: true });
+  cpSync(src, dst, { force: true, preserveTimestamps: true });
+  try {
+    chmodSync(dst, mode);
+  } catch {
+    // best-effort: the bytes are copied; permission preservation is a hardening, not the contract.
+  }
+}
+
+/** Rotations first, the live ledger LAST, so rows rotated out before the read are already copied. */
+function liveCopyOrder(entries: readonly string[]): string[] {
+  const rank = (rel: string): number => (isLedgerArchiveRelPath(rel) ? 0 : rel === STATE_BACKUP_LEDGER_RELPATH ? 2 : 1);
+  return [...entries].sort((a, b) => rank(a) - rank(b) || (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/** The live ledger cut at its last `\n`, re-read while size/mtime/inode move; one fd checks AND reads. */
+function readLedgerThroughFd(src: string, attempt: number, afterRead?: (attempt: number) => void) {
+  const fd = openSync(src, "r");
+  try {
+    const before = fstatSync(fd);
+    const bytes = readFileSync(fd);
+    afterRead?.(attempt);
+    return { before, bytes, after: fstatSync(fd) };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function captureLiveLedger(src: string, dst: string, attempts: number, afterRead?: (attempt: number) => void): number {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const { before, bytes, after } = readLedgerThroughFd(src, attempt, afterRead);
+    const renamed = statSync(src).ino !== before.ino;
+    const raced = renamed || bytes.length !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs;
+    if (raced) continue;
+    const whole = bytes.lastIndexOf(0x0a) + 1;
     mkdirSync(dirname(dst), { recursive: true });
-    const srcStat = statSync(src);
-    cpSync(src, dst, { force: true });
-    try {
-      chmodSync(dst, srcStat.mode);
-    } catch {
-      // best-effort — an fs that refuses chmod (e.g. some network mounts) still has the
-      // bytes copied correctly; permission preservation is a hardening, not the contract.
+    writeFileSync(dst, bytes.subarray(0, whole), { mode: before.mode & 0o777 });
+    return bytes.length - whole;
+  }
+  throw new StateBackupError(
+    `state backup: the live ledger ${src} changed during each of ${attempts} copy attempts — refusing to publish a torn copy`,
+  );
+}
+
+/** Default copier: an unchanged rotation is hard-linked; a vanished file is RECORDED, never hidden. */
+function liveStateCopier(previous: string | undefined, opts: SnapshotStateOptions, report: Omit<StateBackupSnapshot, "archiveDir" | "entries">) {
+  const attempts = opts.maxRaceAttempts ?? STATE_BACKUP_MAX_RACE_ATTEMPTS;
+  return (srcRoot: string, dstRoot: string, relPaths: readonly string[]): void => {
+    for (const rel of relPaths) {
+      opts.beforeCopy?.(rel);
+      const src = join(srcRoot, rel);
+      const dst = join(dstRoot, rel);
+      if (rel === STATE_BACKUP_LEDGER_RELPATH) {
+        report.ledgerTrimmedBytes = captureLiveLedger(src, dst, attempts, opts.afterLedgerRead);
+        continue;
+      }
+      try {
+        const st = statSync(src);
+        const prior = previous !== undefined && isLedgerArchiveRelPath(rel) ? join(previous, rel) : undefined;
+        const priorSt = prior !== undefined && existsSync(prior) ? statSync(prior) : undefined;
+        if (prior !== undefined && priorSt?.size === st.size && Math.abs(priorSt.mtimeMs - st.mtimeMs) < 1) {
+          mkdirSync(dirname(dst), { recursive: true });
+          rmSync(dst, { force: true });
+          linkSync(prior, dst);
+          report.linked.push(rel);
+          continue;
+        }
+        copyOneStateFile(src, dst, st.mode);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT" || existsSync(src)) throw err;
+        report.vanished.push(rel);
+      }
     }
+  };
+}
+
+function newestStateBackup(backupsRoot: string): string | undefined {
+  const name = readdirSync(backupsRoot, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && d.name.startsWith("state-backup."))
+    .map((d) => d.name)
+    .sort()
+    .pop();
+  return name === undefined ? undefined : join(backupsRoot, name);
+}
+
+/** Read from DISK whichever copier ran: after the trim, an unparseable line is corruption. */
+function assertStagedLedgerParses(stagedLedger: string, stateDir: string): void {
+  const lines = readFileSync(stagedLedger, "utf8").split("\n");
+  const tail = lines.pop();
+  const bad = lines.findIndex((line) => parseLedgerLine(line).json === undefined);
+  if (bad >= 0 || tail !== "") {
+    const where = bad >= 0 ? `line ${bad + 1} does not parse as JSON` : "its last line has no newline";
+    throw new StateBackupError(`state backup: the ledger copied from ${stateDir}: ${where} — refusing to publish it`);
   }
 }
 
@@ -2081,29 +2194,37 @@ function datedStateBackupDir(backupsRoot: string, now: Date): string {
 }
 
 /**
- * Snapshots `stateDir` into a freshly-created, dated directory under `backupsRoot`. ATOMIC PUBLISH:
- * every copy is staged into a temp dir, verified from disk rather than from the in-memory list, and
- * only then renamed into its final dated name, so a process death mid-copy leaves at most an
- * orphaned temp dir. `backupsRoot` is never inside `stateDir`, which would recurse into its own
- * prior backups. VERIFICATION (design note ii — "a snapshot that is not verified is not a backup"):
- * throws {@link StateBackupError} when the staged copy is empty, or when the source held the ledger
- * or the proposals register and the staged copy does not. `opts.copy` overrides staging for ONE
- * reason, to make that verification falsifiable: `copyStateFiles` copies every entry or throws, so
- * the "staged copy lost a file" arm is otherwise unreachable, and an unreachable check is
- * indistinguishable from an absent one. Only test/state-backup.test.ts supplies it.
+ * Snapshots `stateDir` into a dated directory under `backupsRoot` (never inside `stateDir`): staged,
+ * verified from disk, then renamed. Throws {@link StateBackupError} on an empty copy, a lost ledger or
+ * proposals register, or an unparseable ledger line; `opts.copy` only makes the lost-file arm falsifiable.
+ * LIVE-SAFE (W1-T5545): runs with the fleet up; a mid-copy rotation is chased by re-listing, and only a
+ * race outlasting the bound refuses.
  */
-export function snapshotState(stateDir: string, backupsRoot: string, opts: { now?: () => Date; copy?: (srcRoot: string, dstRoot: string, relPaths: readonly string[]) => void } = {}): StateBackupSnapshot {
-  const now = opts.now ?? (() => new Date());
-  const copy = opts.copy ?? copyStateFiles;
+export function snapshotState(stateDir: string, backupsRoot: string, opts: SnapshotStateOptions = {}): StateBackupSnapshot {
+  const now = opts.now ?? systemClock.date;
+  const attempts = opts.maxRaceAttempts ?? STATE_BACKUP_MAX_RACE_ATTEMPTS;
+  const report: Omit<StateBackupSnapshot, "archiveDir" | "entries"> = { linked: [], vanished: [], ledgerTrimmedBytes: 0 };
   let tmpDir: string | undefined;
   try {
     if (!existsSync(stateDir)) {
       throw new StateBackupError(`state backup: source state dir does not exist: ${stateDir}`);
     }
     mkdirSync(backupsRoot, { recursive: true });
+    const copy = opts.copy ?? liveStateCopier(newestStateBackup(backupsRoot), opts, report);
     tmpDir = mkdtempSync(join(backupsRoot, ".state-backup-tmp-"));
     const sourceEntries = listStateFiles(stateDir, STATE_BACKUP_EXCLUDED_RELPATHS);
-    copy(stateDir, tmpDir, sourceEntries);
+    copy(stateDir, tmpDir, liveCopyOrder(sourceEntries));
+    for (let pass = 1; ; pass++) {
+      const have = new Set([...listStateFiles(tmpDir), ...report.vanished]);
+      const late = listStateFiles(stateDir, STATE_BACKUP_EXCLUDED_RELPATHS).filter((rel) => isLedgerArchiveRelPath(rel) && !have.has(rel));
+      if (late.length === 0) break;
+      if (pass >= attempts) {
+        throw new StateBackupError(
+          `state backup: rotations kept landing in ${stateDir} across ${attempts} copy passes (${late.join(", ")}) — refusing to publish a snapshot that may miss their rows`,
+        );
+      }
+      copy(stateDir, tmpDir, liveCopyOrder([...late, STATE_BACKUP_LEDGER_RELPATH]));
+    }
 
     const staged = listStateFiles(tmpDir);
     if (staged.length === 0) {
@@ -2117,11 +2238,12 @@ export function snapshotState(stateDir: string, backupsRoot: string, opts: { now
         `state backup: snapshot of ${stateDir} is missing ${missing.join(", ")}, present in the source — refusing to publish it`,
       );
     }
+    if (staged.includes(STATE_BACKUP_LEDGER_RELPATH)) assertStagedLedgerParses(join(tmpDir, STATE_BACKUP_LEDGER_RELPATH), stateDir);
 
     const archiveDir = datedStateBackupDir(backupsRoot, now());
     renameSync(tmpDir, archiveDir);
     tmpDir = undefined;
-    return { archiveDir, entries: staged };
+    return { archiveDir, entries: staged, ...report };
   } catch (err) {
     if (err instanceof StateBackupError) throw err;
     throw new StateBackupError(`state backup: snapshot of ${stateDir} failed: ${(err as Error).message}`, { cause: err });
