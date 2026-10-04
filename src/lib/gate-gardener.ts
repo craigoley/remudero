@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { systemClock } from "./clock.js";
+import { fixedClock, systemClock } from "./clock.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec, Outcome } from "./gardener.js";
 import { gateFireRatesPath, type GateFireRate, type GateFireRateReport } from "./gate-fire-rate.js";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -125,18 +125,18 @@ function defuseCandidates(deps: GardenerDeps, probes: GateProbes, sources: GateD
     }
     return [{ class: "defuse", target, file: finding.file,
       edit: { kind: "defuse", finding, leadDays, urgent: finding.daysLeft <= probes.ef!.MARGIN_DAYS },
-      reason: `${finding.file}:${finding.line} crosses ${finding.threshold} on ${new Date(finding.expiresAt).toISOString()} (${leadDays}-day lead).` }];
+      reason: `${finding.file}:${finding.line} crosses ${finding.threshold} on ${fixedClock(finding.expiresAt).iso()} (${leadDays}-day lead).` }];
   });
 }
 
 function defuseEvidence(f: ExpiringFixture, leadDays: number): Record<string, unknown> {
-  return { file: f.file, line: f.line, crossingDate: new Date(f.expiresAt).toISOString(), leadDays };
+  return { file: f.file, line: f.line, crossingDate: fixedClock(f.expiresAt).iso(), leadDays };
 }
 
 export function renderDefuseShard(action: GateGardenAction, taskId: string) {
   if (action.edit.kind !== "defuse") throw new Error("gate gardener: mixed defuse plan");
   const { finding: f, leadDays, urgent } = action.edit;
-  const crossing = new Date(f.expiresAt).toISOString();
+  const crossing = fixedClock(f.expiresAt).iso();
   const title = `${taskId}: ${f.file} stays defused across ${crossing}`;
   return renderMachineShard({
     taskId, title: `Defuse the expiring fixture in ${f.file} before ${crossing}`, origin: action.target,
