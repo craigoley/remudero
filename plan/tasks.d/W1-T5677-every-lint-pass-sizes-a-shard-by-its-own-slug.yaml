@@ -1,0 +1,34 @@
+- id: W1-T5677
+  title: "EVERY LINT PASS SIZES A SHARD BY ITS OWN SLUG — sizingViolation's own-falsifier discount reads opts.duplicateSlug, which only the --base changed-tasks pass supplies, so lint-plan --base passed W1-T5631 at risk: low while --all, pre-dispatch lint and every-shard-on-main-is-lintable scored two concerns"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: low
+  origin: "operator session 2026-10-04: watch log, lint-plan --base mode misses a sizing violation --all reports"
+  plan_refs: [W1-T2525, W1-T2543, W1-T1076, W1-T3086]
+  files: [src/lib/task-linter.ts, test/every-lint-pass-sizes-a-shard-by-its-own-slug.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9 (src/lib/task-linter.ts). `sizingViolation` takes its
+    own-falsifier discount (W1-T2525) from `const ownFalsifierSlug = opts.duplicateSlug?.trim()
+    .toLowerCase() || undefined;`. That opt is filled only by `duplicateCorpusOpts(true, …)` in the
+    scoped `--base` pass; `if (!scoped) return {};` leaves `lintPlan` (the `--all` pass), pre-dispatch
+    lint (`lintTask(task, preDispatchLint)`) and test/every-shard-on-main-is-lintable.test.ts without
+    a slug. MEASURED on W1-T5631 reset to `risk: low`: with no slug `subsystemsOf` returns
+    `[no-live-remote, a-test-process-never-reads-the-hosts-scratch-switch]` (a sizing block), with
+    the slug `[no-live-remote]`. So `--base` passed it and CI's "W1-T3086: violating shard files
+    cannot grow" refused it (#9094); pre-dispatch would also block such a task.
+  design: |
+    When `opts.duplicateSlug` is absent, `sizingViolation` derives the slug from `task.sourcePath`
+    through the existing pure `shardSlugFromPath`. `duplicateTitleViolations`' corpus gating is
+    unchanged; `VIOLATING_SHARD_BASELINE` may only shrink.
+  acceptance:
+    - claim: "lintPlan with no slug option and the scoped --base pass return the same sizing verdict for a shard whose companion test matches its filename slug"
+      proof: "unit test: test/every-lint-pass-sizes-a-shard-by-its-own-slug.test.ts"
+  falsifier: |
+    Remove the sourcePath fallback; the whole-plan pass reports two concerns and the test fails.

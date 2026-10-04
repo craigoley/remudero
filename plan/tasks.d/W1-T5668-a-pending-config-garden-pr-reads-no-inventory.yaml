@@ -1,0 +1,39 @@
+- id: W1-T5668
+  title: "A PENDING CONFIG-GARDEN PR READS NO INVENTORY, AND EVERY STEP THAT CAN BE A RUN'S FIRST PR_URL ROW IS IN ITS READ — since W1-T4969 `runConfigGarden` awaits the off-loop 60-day inventory whenever `gardenPassDue` is true, always true while a garden PR is pending, though `runGarden` then returns on an unchanged cheap fingerprint unread; and four KNOWN_GAP steps are absent from `CONFIG_GARDEN_LEDGER_STEPS`"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one surface — what the config garden's inventory reads and when
+  origin: "operator session 2026-10-04: watch log, runConfigGarden builds the async inventory every pass; four steps not in CONFIG_GARDEN_LEDGER_STEPS"
+  plan_refs: [W1-T4969, W1-T5474, W1-T5527, W1-T5526, W1-T4113]
+  files: [src/lib/gardener.ts, src/lib/config-gardener.ts, test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts, test/a-pending-config-garden-pr-reads-no-inventory.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9. `runConfigGarden` (src/lib/config-gardener.ts) does
+    `if (!gardenPassDue(spec, deps)) return { ran: false }; const inventory = await
+    spec.inventory();`, and `gardenPassDue` (src/lib/gardener.ts) returns true on `if
+    (state.pending) return true;`; `runGarden` then returns early on `if (state.lastCheap === cheap
+    && !terminalMetric) return { ran: false };` without reading the inventory. So while a garden PR
+    is open every pass spawns the measurement Worker and does the 60-day filtered union read (about
+    211 MB heap per W1-T5474) for nothing. Separately, test/every-priced-ledger-step-is-in-the-
+    config-garden-read.test.ts exempts `acceptance.repair.unrepresentable`, `changeset_claim.repaired`,
+    `retro.pr.recovered` and `pr.body_normalize.error` as `KNOWN_GAP` (0 rows in the live 60-day
+    union on 2026-10-04) and names the follow-up: list them in `CONFIG_GARDEN_LEDGER_STEPS`.
+    W1-T4969, W1-T5474, W1-T5526 and W1-T5527 are merged; nothing queued covers either.
+  design: |
+    (i) gardener.ts exports a sync `gardenNeedsInventory(spec, deps)` mirroring `runGarden`'s
+    pre-inventory returns (effects fold, filing-retry clock, a closed or merged pending PR, the
+    `lastCheap === cheap && !terminalMetric` return); `runConfigGarden` awaits the inventory only
+    when it is true.
+    (ii) Add the four steps to `CONFIG_GARDEN_LEDGER_STEPS` and delete their `KNOWN_GAP` entries.
+  acceptance:
+    - claim: "a pass with a pending open garden PR and an unchanged cheap fingerprint builds no inventory while a changed fingerprint still builds one, and gatherRuns over the filtered read attributes a run whose first pr_url row is one of the four steps"
+      proof: "unit test: test/a-pending-config-garden-pr-reads-no-inventory.test.ts"
+  falsifier: |
+    Restore the unconditional `await spec.inventory()`; the inventory counter reads 1 and the test
+    fails.

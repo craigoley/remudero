@@ -1,0 +1,34 @@
+- id: W1-T5676
+  title: "A CENSUS RUNAWAY IS CONFIRMED AGAINST A REFERENCE MEASURED AT THE SAME LOAD — runPreflightFast re-measures only the crossing entry and compares it to pass one's median, so a spawn-heavy suite slowed by host load (negative-reachability 4897 ms against a 4884 ms confirmation bound) is refused though its command passed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium
+  origin: "operator session 2026-10-04: watch log, negative-reachability census crossed its runaway bound under load"
+  plan_refs: [W1-T3408, W1-T2545, W1-T2478]
+  files: [src/lib/ci-parity.ts, test/a-census-runaway-re-measure-re-times-its-reference.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9. In `runPreflightFast` (src/lib/ci-parity.ts) a census
+    entry over `median * FAST_GATE_CENSUS_RUNAWAY_MULTIPLE` (4) from the first, sequential pass is
+    re-measured alone: `const confirmationThreshold = Math.ceil(threshold *
+    FAST_GATE_CENSUS_REMEASURE_MARGIN);` and it passes only `if (againMs <= confirmationThreshold)`.
+    The reference is fixed at pass-one load; the re-measure runs at whatever load the host has then.
+    Observed 2026-10-04: negative-reachability-census re-measured 4897 ms against ceil(4440 x 1.1) =
+    4884 ms and was refused as RUNAWAY although its command passed; the census is spawn- and IO-heavy
+    and slows more under load than its cheap siblings (11.7-28.9 s against ~8.6 s in other runs).
+    No queued task covers it.
+  design: |
+    On a crossing, re-time the crossing entry and the median-cost entry back to back through the
+    injected `now`/`spawn`, and refuse only when `againMs / max(FLOOR, refAgainMs)` exceeds
+    `MULTIPLE x MARGIN`. The refusal names both re-timed figures.
+  acceptance:
+    - claim: "with injected now/spawn, a 2x host slowdown during the re-measure (entry 8400 ms, reference 2100 ms) passes, while 10000 ms against a 1000 ms reference is still refused as RUNAWAY"
+      proof: "unit test: test/a-census-runaway-re-measure-re-times-its-reference.test.ts"
+  falsifier: |
+    Drop the reference re-time; the 2x-load case is refused and the test fails.

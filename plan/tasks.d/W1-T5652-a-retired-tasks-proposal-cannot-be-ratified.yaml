@@ -1,0 +1,36 @@
+- id: W1-T5652
+  title: "A RETIRED TASK'S PROPOSAL CANNOT BE RATIFIED — classifyProposal retires only verify-human:/machine-judge: asks, so `rmd approve` drafted #9099 for verify-human-automate:W1-T3332 (retirement: closed) and proof-debt:W1-T3590 (withdrawn), reading the plan from the CLI checkout instead of the origin/main worktree it writes into"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one defect — approve's retirement check misses two proposal kinds and reads the wrong plan
+  origin: "operator session 2026-10-04: watch log, #9099 (closed) ratified proposals on retired tasks"
+  plan_refs: [W1-T3385, W1-T4700, W1-T111]
+  files: [src/lib/inbox.ts, src/run-task.ts, test/a-retired-tasks-proposal-cannot-be-ratified.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9 and closed PR #9099 ("chore(plan): ratify
+    proof-debt:W1-T3590 via rmd approve"): W1-T3332 is `status: blocked, retirement: closed`, W1-T3590
+    `retirement: withdrawn` (a duplicate of the queued W1-T3828). `classifyProposal`
+    (src/lib/inbox.ts) is re-run at approve time via `loadProposalForRatify`, but its retirement arm
+    keys on `const taskAskId = /^(?:verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(
+    proposal.id)?.[1];`. `deriveTaskReferent` knows `proof-debt` but not `verify-human-automate`
+    (minted by verify-human-judge.ts as `verify-human-automate:${shard.id}`), and it feeds only the
+    merged check. So both #9099 subjects classified ready. `loadProposalForRatify` (src/run-task.ts)
+    also reads `loadPlan(join(repoRoot, "plan", "tasks.yaml"))` from the CLI checkout, not the
+    origin/main worktree the shards are written into.
+  design: |
+    (i) Retire on `deriveTaskReferent(proposal.id)`, extended with `verify-human-automate`, whenever
+    the task is `status: blocked` with any `retirement`.
+    (ii) `materializeAndCommitApproveFragment` re-checks the subject task against the worktree's own
+    (origin/main) plan before `fileRatificationDraft`, and writes nothing for a retired one.
+  acceptance:
+    - claim: "a verify-human-automate: or proof-debt: proposal whose task is blocked with a retirement classifies as retired, and approve writes no draft for it"
+      proof: "unit test: test/a-retired-tasks-proposal-cannot-be-ratified.test.ts"
+  falsifier: |
+    Revert to the two-prefix regex; both fixtures classify as ready and the test fails.

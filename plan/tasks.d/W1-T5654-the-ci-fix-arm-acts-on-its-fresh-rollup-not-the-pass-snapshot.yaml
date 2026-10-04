@@ -1,0 +1,47 @@
+- id: W1-T5654
+  title: "THE CI FIX ARM ACTS ON ITS FRESH ROLLUP, NOT A RED IT READ 48 MINUTES EARLIER — runSweep's blocked-fixable arm reads a fresh rollup (`readCiGateRollup`) but consults it only for `staleCiGateTransition`, then re-queues `pr.cancelledRequiredChecks` and dispatches on `pr.ciFailures` from the pass snapshot: on #9124 a pass clocked 16:57:27Z re-ran a superseded run's cancelled ci-gate and spent strike 1/2 on coverage-ratchet, green since 17:24Z"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one defect — the fix arm's requeue and dispatch read the pass snapshot
+  origin: "operator session 2026-10-04: #9124 (head 0704ab90) paid fix worker on a green PR at 17:45:56Z"
+  plan_refs: [W1-T4586, W1-T1275, W1-T2300, W1-T1223, W1-T4902, W1-T3345, W1-T4075]
+  files: [src/lib/sweep.ts, test/the-ci-fix-arm-acts-on-its-fresh-rollup-not-the-pass-snapshot.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-04 (#9124, head 0704ab90; check runs read from REST, live ledger read-only).
+    coverage-ratchet: 111483742193 (run 37217449601 attempt 1) failure, the ci.yml SHARD HANG step
+    after a same-sha concurrency cancel, 16:54:04Z; 111487309942 (run 37218417499) success, started
+    17:13:26Z; 111493336068 (run 37217449601 attempt 2, the sweep's own requeue at 17:45:55Z) a
+    failure copy. ci-gate succeeded at 17:24:13Z and again at 17:45:59Z. Ledger: `sweep.check_requeue.
+    dispatched job_id:"111483790238"` (the superseded run's cancelled ci-gate) at 17:45:55Z, then
+    `sweep.disposed … blocker:"own-red" blocker_since:"2026-10-04T16:57:27.376Z" blocker_age_ms:0
+    acted:true reason:"required checks red — ci-log fix, strike 1/2" red_checks:["coverage-ratchet"]`
+    and `fix.base_refresh_checked strike:1`. `blocker_age_ms:0` means the pass clock was 16:57:27Z:
+    the pass was held by the 16:57-17:43Z loop stall (`daemon.loop_lag lag_ms:2737080`). READ on
+    origin/main 284015b9: `dedupeRollupByLatestAttempt` (src/lib/sweep.ts) already keeps the latest
+    start per name, so this is staleness, not dedup. In `runSweep`'s blocked-fixable CI arm the fresh
+    `deps.readCiGateRollup(pr)` feeds only `staleCiGateTransition`, while `let ciFailuresForFix =
+    isBlockedCi(pr) ? pr.ciFailures ?? [] : [];` and `const cancelledChecks = isBlockedCi(pr) ?
+    pr.cancelledRequiredChecks ?? [] : [];` come from the snapshot. `liveCiRunForHead` (W1-T4586)
+    sees only a live run, and the newer run had completed. The rung's pre-strike re-read (W1-T4902,
+    `fixRungStandDownReason`) also did not stand down; its `catch { rollup = []; }` writes no row.
+  design: |
+    In the blocked-fixable CI arm, once `ciGateRollup` is read and non-empty, compute
+    `fresh = stillRedRequiredNames(names, ciGateRollup)` over the union of `pr.redRequiredChecks`,
+    `pr.ciFailures` and `pr.cancelledRequiredChecks` names; filter `ciFailuresForFix` and
+    `cancelledChecks` to `fresh` before the infrastructure, requeue and dispatch steps. When `fresh`
+    is empty: `acted = false`, a stand-down reason naming the checks green or in flight on the fresh
+    read, no requeue, no strike. An undefined or empty fresh read keeps today's behaviour.
+    NOT THIS TASK: ci.yml's naming of a same-sha concurrency cancel as SHARD HANG.
+  acceptance:
+    - claim: "a snapshot red whose fresh rollup is green spends no strike and re-queues nothing, while a check still red on the fresh rollup is fixed as today"
+      proof: "unit test: test/the-ci-fix-arm-acts-on-its-fresh-rollup-not-the-pass-snapshot.test.ts"
+  falsifier: |
+    Delete the `stillRedRequiredNames` filter; `requeueCheck` and `dispatchFix` are each called once
+    on the green-fresh fixture and the test fails.

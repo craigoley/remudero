@@ -1,0 +1,34 @@
+- id: W1-T5657
+  title: "RMD DRAIN HOLDS IN QUIET HOURS — drainCommand never wires checkQuietHours and the single-lane runDrain never reads it, so a hand-run drain dispatches paid builds while QUIET_HOURS is set, on its default three-lane path as well as at one lane"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one defect — quiet hours never reach the drain verb
+  origin: "operator session 2026-10-04: watch log, single-lane runDrain never reads checkQuietHours"
+  plan_refs: [W1-T5529, W1-T5482, W1-T2655, W1-T1038]
+  files: [src/lib/drain.ts, src/run-task.ts, test/rmd-drain-holds-in-quiet-hours.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9. The single-lane `runDrain` (src/lib/drain.ts) reads the
+    cost, queue and memory governors per pass and never `checkQuietHours`; only `runDrainLanes`
+    calls `checkDispatchGovernors(deps, undefined)`, which reads `deps.checkQuietHours?.()`.
+    Wider than first noted: `drainCommand` (src/run-task.ts) wires `checkCostGovernor`,
+    `checkQueueGovernor` and `checkMemoryGovernor` but not `checkQuietHours`; only `daemonCommand`
+    wires it (`isQuietHours(config.root) ? { deferred: true, detail: "QUIET_HOURS file present" }`).
+    So `rmd drain` ignores quiet hours on its default `DEFAULT_SWEEP_POLICY.dispatchLanes` (3) path
+    too. W1-T5529 (#9105) added the dep and tested quiet hours for the multi-lane daemon only.
+  design: |
+    (i) `runDrain` reads `deps.checkQuietHours` at pass level after the memory floor, fails open on
+    a throw (logged `drain.quiet_hours.unreadable`) as `checkDispatchGovernors` does, and ends the
+    pass `quiet_hours_deferred`.
+    (ii) `drainCommand` wires the same `isQuietHours(config.root)` closure the daemon uses.
+  acceptance:
+    - claim: "with a quiet-hours hold a single-lane runDrain pass ends quiet_hours_deferred with nothing dispatched, and drainCommand hands runDrain a checkQuietHours that defers when the QUIET_HOURS file is present"
+      proof: "unit test: test/rmd-drain-holds-in-quiet-hours.test.ts"
+  falsifier: |
+    Delete the pass-level read; the single-lane pass dispatches and the test fails.

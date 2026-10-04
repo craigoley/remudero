@@ -1,0 +1,53 @@
+- id: W1-T5681
+  title: "A FAILED NIGHTLY BACKUP ALARMS THE FLEET — the nightly rung's state snapshot and off-host Azure copy report only to ~/reclaim.log through a cron line nobody reads, so six consecutive failed nights (STATE SNAPSHOT MISSED, before W1-T5545) alarmed nobody, and the first off-host snapshot will fail just as silently"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one signal — the nightly snapshot result, from its writer to the beat to the escalation
+  band_meaning: span
+  origin: "operator ruling 2026-10-04: surface the nightly host-update state-snapshot and off-host snapshot result where the fleet sees it"
+  plan_refs: [W1-T5545, W1-T5546, W1-T3677, W1-T5319, W1-T4804, W1-T2349]
+  files: [deploy/host-update.sh, scripts/fleet-heartbeat.sh, src/lib/host-resource-gardener.ts, test/a-failed-nightly-backup-alarms-the-fleet.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 43190266. W1-T5545 (#8989) snapshots every running container's
+    state root in `deploy/host-update.sh --reclaim-only` (section 3a); W1-T5546 (#9009) adds the
+    off-host copy when `RMD_STATE_OFFHOST` is set (3b, `offhost_fail()`). Every failure only sets
+    `state_snapshot_failed=1`; section 4c turns that into "host-update: the nightly STATE SNAPSHOT
+    did not leave a verified, recent archive" on stderr and `exit 1`. The host crontab runs it
+    `17 4 * * * RMD_STATE_OFFHOST=azure-disk-snapshot:… host-update.sh --reclaim-only >>
+    ~/reclaim.log 2>&1` with no MAILTO, so neither the exit code nor the message has a reader.
+    ~/reclaim.log (read-only, untimestamped) holds six runs of `STATE SNAPSHOT MISSED — nothing
+    under …/state-backups is newer than 48h` that nobody saw until the 2026-10-03 research session
+    that filed W1-T5545; the 2026-10-04 04:18 run verified 3 roots and printed no off-host line, so
+    the next 04:17 run is the first Azure snapshot attempt, whose `az` depends on the same login
+    W1-T5319 found expiring. No reader exists: `scripts/fleet-heartbeat.sh`'s payload
+    (`daemon_verdict`, `supervisor_verdict`, `rmd_verdict`, `acr_login_result`, …) has no backup
+    field, and neither the watcher, `runHostResourcePass` (src/lib/host-resource-gardener.ts) nor
+    incident-invariants.ts reads a snapshot result. W1-T5319 (#9117) built exactly this path for a
+    host-cron result: a receipt, an `acr_login_result` beat field, and a per-host `acrLogin` episode
+    in `runHostResourcePass` that escalates once. The watcher workflow is NOT touched, so the fleet
+    can build this (a .github/workflows/ edit would make it operator-build).
+  design: |
+    (i) host-update.sh 4c, on `--reclaim-only` and not dry-run, writes a receipt atomically to
+    `${RMD_STATE_SNAPSHOT_RECEIPT:-${XDG_STATE_HOME:-$HOME/.local/state}/remudero/state-snapshot.receipt}`
+    (never the state volume): `result=ok|failed`, `ts`, `archives`, `offhost=ok|failed|not-configured`,
+    `reason` (the first failure headline). A run that dies before 4c writes nothing, so the receipt
+    ages — the "missing" signal.
+    (ii) fleet-heartbeat.sh (bash, no node) publishes `backup_verdict`: `FAILED: <reason>`; `ok` when
+    the receipt is at most 26 h old; `STALE — last nightly snapshot run <age> ago`; `unknown — no
+    snapshot receipt`; plus `backup_ts` and `backup_offhost`.
+    (iii) `runHostResourcePass` mirrors the `acrLogin` arm with a per-host `stateBackup` episode:
+    escalate once on FAILED or STALE, log `host_resource.state_backup_recovered` on ok, stay silent
+    on unknown. Both scripts are at their comment-load ceilings: add code, not prose.
+  acceptance:
+    - claim: "a failed or missing nightly state snapshot reaches the beat as backup_verdict FAILED or STALE, the host-resource gardener escalates it once per host, and an ok receipt records recovery"
+      proof: "unit test: test/a-failed-nightly-backup-alarms-the-fleet.test.ts"
+  falsifier: |
+    Delete the receipt write in section 4c; the failed-run beat reads `unknown`, the gardener
+    escalates nothing, and the test fails.

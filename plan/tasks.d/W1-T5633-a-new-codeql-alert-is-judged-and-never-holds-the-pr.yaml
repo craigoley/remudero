@@ -1,0 +1,55 @@
+- id: W1-T5633
+  title: "A NEW HIGH CODEQL ALERT IS JUDGED, FIXED OR RULED A FALSE POSITIVE, AND NEVER HOLDS THE PR — GitHub's `CodeQL` results check failed on #9034 ('1 new alert including 1 high severity') and the PR merged 31 min later, because ci-gate never waits on that check and nothing in the sweep or arm path reads it; the machine judge decides each alert instead of a person or an indefinite gate"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: high  # Rule 19: one concern — a new CodeQL alert on a PR head reaches the judge and gets a bounded outcome
+  band_meaning: span
+  origin: "operator session 2026-10-04: #9034 merged with open alert #311 js/incomplete-sanitization, fixed by #9045; amended 2026-10-04 by operator ruling: the judge decides, automate, never stuck"
+  plan_refs: [W1-T3980, W1-T1131, W1-T4400, W1-T5199, W1-T3725, W1-T5403, W1-T5523, W1-T5659, W1-T5671]
+  files: [src/lib/open-prs-rest.ts, src/lib/sweep.ts, src/lib/risk-judge.ts, src/run-task.ts, test/a-new-codeql-alert-is-judged-and-never-holds-the-pr.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main d13d797c, re-read at 284015b9. #9034 head 3e7dc896: check-run
+    `CodeQL` (app github-advanced-security) concluded failure at 04:00Z, summary "New alerts in code
+    changed by this pull request: 1 high" — alert #311, js/incomplete-sanitization in
+    src/lib/gate-gardener.ts. #9034 merged at 04:31Z by squash auto-merge; #9045 fixed the alert after
+    the merge. Branch protection requires [remudero-review, ci-gate]; ci-gate.yml's `REQUIRED` omits
+    CodeQL and W1-T1131 makes a non-REQUIRED check unable to hold the merge. judgeReview
+    (src/lib/review.ts) and the arm path read no code-scanning data. ops.ts
+    `normalizeCodeScanningAlert` polls repo-wide alerts only AFTER merge (plan/feedback/fb-alert-*),
+    and open-prs-rest.ts `hydrateScannerBlockerObservations` (W1-T3980) reads alerts only for armed,
+    green, blocked PRs. OPERATOR RULING 2026-10-04 on the first design (a ci-gate
+    `REQUIRED_WHEN_PRESENT` wait at `verify: human`): "the judge should decide this and we should try
+    to automate and not make things stuck". So the alert goes to the machine judge, and no outcome
+    waits on a person or holds indefinitely. The sweep already has the shape: W1-T5403's
+    `riskJudgeHandedOffHead` wraps `runRiskJudge` as `SweepDeps.judgeHandedOffHead`, and W1-T5523's
+    `HandedOffHeadJudgmentPool` runs judgments off the pass, capped and bounded, held only while one
+    is in flight (W1-T5659/W1-T5671 harden that pool and apply here unchanged).
+  design: |
+    (i) READ: when a head's `CodeQL` results check concluded failure, read its open alerts for
+    `refs/pull/<n>/head` (the `classifyScannerBlocker` listing, high/error severity on changed lines)
+    once per head, into `OpenPrView`.
+    (ii) JUDGE: before the `mergeable` arm, such a head starts one code-scanning judgment through the
+    same off-pass pool (a new judge input kind in src/lib/risk-judge.ts: rule id, severity, message,
+    path/line and the diff hunk). Outcomes: `fix` dispatches the existing fix lane with the alert as
+    the failure log (a strike, like a red required check); `false_positive` writes a
+    `code_scanning.judged_false_positive` row with the judge's reason and a PR comment naming it, and
+    the PR proceeds to arm on that head.
+    (iii) NEVER STUCK: an unavailable or escalating judge is not a hold — after the pool's bound, or
+    on escalate, the head goes to the fix lane; a fix that leaves the alert open is judged again on
+    the new head under the existing strike ladder. A PR with no `CodeQL` check (paths-ignored,
+    W1-T3725) is untouched; ci-gate.yml and branch protection are unchanged.
+    NOT THIS TASK: dismissing alerts on GitHub or any code-scanning ruleset (operator settings), and
+    W1-T3980's armed-PR hydration.
+  acceptance:
+    - claim: "a head whose CodeQL check failed on a new high alert is judged once; a fix ruling dispatches the fix lane, a false-positive ruling records its reason and arms the head, an unavailable judge past its bound dispatches the fix lane rather than holding, and a PR with no CodeQL check arms as today"
+      proof: "unit test: test/a-new-codeql-alert-is-judged-and-never-holds-the-pr.test.ts"
+  falsifier: |
+    Remove the code-scanning judgment from the arm path; the failing-CodeQL fixture arms with no
+    judgment, no fix dispatch and no recorded ruling, and the test fails.

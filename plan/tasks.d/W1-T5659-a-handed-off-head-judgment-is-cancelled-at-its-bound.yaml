@@ -1,0 +1,41 @@
+- id: W1-T5659
+  title: "A HANDED-OFF-HEAD RISK JUDGMENT IS CANCELLED AT ITS BOUND, NOT ABANDONED — W1-T5523's `startHandedOffHeadJudgment` settles an overrun as unavailable and frees its slot, but `runRiskJudge`/`realRiskJudge` take no AbortSignal, so the model call keeps spending past the concurrency cap and its late `risk_judge.decision` row (or BLOCKED escalation) is still acted on"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one defect — the judgment's bound never reaches the call it bounds
+  band_meaning: span
+  origin: "operator session 2026-10-04: watch log, W1-T5523 follow-ups (timed-out judge call abandoned, not cancelled)"
+  plan_refs: [W1-T5523, W1-T5403, W1-T1045]
+  files: [src/lib/worker.ts, src/lib/risk-judge.ts, src/lib/sweep.ts, src/run-task.ts, test/a-handed-off-head-judgment-is-cancelled-at-its-bound.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9 (W1-T5523 merged as a91f2b5c, #9104). In src/lib/sweep.ts
+    `HandedOffHeadJudgmentPool` keys flights `pr@head`, `HANDED_OFF_HEAD_JUDGMENT_CONCURRENCY_LIMIT
+    = 2`, `HANDED_OFF_HEAD_JUDGMENT_TIMEOUT_MS = 30 * 60_000`; the overrun path only calls
+    `settle({ action: "unavailable", … })`, which deletes the flight. The judge type is `(pr) =>
+    Promise<…>` with no signal; `realRiskJudge` (src/lib/risk-judge.ts) loops `await spawn(...)` up
+    to `RISK_JUDGE_MAX_ATTEMPTS = 3`, and `SpawnWorkerArgs` (src/lib/worker.ts) has no `signal`. So
+    the call keeps spending after the bound, the next pass starts a second judgment for the same
+    head (the cap of 2 no longer bounds real concurrency), and the abandoned call's
+    `risk_judge.decision` row is read by `handedOffHeadAwaitingJudgment` and arms the head (or files
+    a BLOCKED issue on escalate). The pool's doc — "The first outcome wins, so a late answer changes
+    nothing" — is false. No queued shard or open PR touches the risk judge.
+  design: |
+    (i) `SpawnWorkerArgs` gains an optional `signal?: AbortSignal`, chained into the existing
+    `options.abortController`.
+    (ii) `realRiskJudge`/`runRiskJudge` accept a signal and pass it to every spawn; once aborted they
+    write no available `risk_judge.decision` and no escalation, and return unavailable.
+    (iii) `SweepDeps.judgeHandedOffHead` becomes `(pr, signal)`; the pool's timeout aborts the
+    flight's controller before `settle`; `handedOffHeadRiskJudge` threads the signal.
+  acceptance:
+    - claim: "a judgment that outlives the pool's bound has its spawn aborted, writes no available risk_judge.decision row and no escalation, and the head is held until a fresh judgment lands"
+      proof: "unit test: test/a-handed-off-head-judgment-is-cancelled-at-its-bound.test.ts"
+  falsifier: |
+    Drop the `abort()` from the timeout fire; the fake spawn resolves after the bound, a
+    `risk_judge.decision` row lands and the next pass arms the head.

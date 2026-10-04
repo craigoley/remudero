@@ -1,0 +1,33 @@
+- id: W1-T5670
+  title: "A HEREDOC BODY THAT NAMES gh IS COUNTED AS A gh CALL — deny-floor's `invokes_gh` greps the whole command text, so a python or cat heredoc writing source that mentions 'gh ' is refused by the 180 s read-cadence floor, though `cov_segments` in the same hook already drops heredoc bodies"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: low
+  origin: "operator session 2026-10-04: watch log, deny-floor refuses a command whose text contains ghJsonAsync"
+  plan_refs: [W1-T3275, W1-T1066, W1-T4915]
+  files: [hooks/deny-floor.sh, test/a-heredoc-body-that-names-gh-is-not-a-gh-call.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9. The watch log blamed `ghJsonAsync`; it is not the
+    trigger: `invokes_gh` (hooks/deny-floor.sh) strips quotes per line and matches
+    `(^|[^A-Za-z0-9_/.-])gh[[:space:]]`, which `ghJsonAsync` never satisfies (five probe commands
+    containing it passed, with a positive control refused). The refused command, found in the
+    W1-T5523 session transcript, was a `python3 - <<'EOF'` source edit whose heredoc body held the doc
+    comment "…over the async gh transport…"; that "gh " counted as a gh read and the W1-T3275
+    cadence floor refused it ("a read-shaped `gh` call 67s after the last one"). The hook already
+    has `cov_segments` ("heredoc bodies and comments dropped", W1-T4915), which `invokes_gh` does
+    not use. No queued task covers it.
+  design: |
+    Run `invokes_gh`'s word match over `cov_segments` output; keep the raw `$( gh` / backtick
+    substitution check on the full text, because an unquoted heredoc expands substitutions.
+  acceptance:
+    - claim: "a heredoc whose body says 'over the async gh transport' is not counted as a gh call, while a gh command fed by a heredoc and a heredoc body holding a gh command substitution still are"
+      proof: "unit test: test/a-heredoc-body-that-names-gh-is-not-a-gh-call.test.ts"
+  falsifier: |
+    Revert to the whole-text match; the plain heredoc case is refused and the test fails.
