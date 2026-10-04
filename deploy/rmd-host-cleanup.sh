@@ -54,11 +54,19 @@
 #   RMD_CLEANUP_NO_FETCH=1      do not `git fetch` before judging a worktree saved
 #   RMD_CLEANUP_WATCH_ROOTS     roots scanned for WATCH: lines (files >= WATCH_MB, never removed)
 #   RMD_CLEANUP_ONLY_TMP=1      run the guarded temporary-root and scratch sweeps
-#   RMD_CLEANUP_SCRATCH_ROOTS   colon-separated roots whose immediate scratch units are swept
+#   RMD_CLEANUP_SCRATCH_ROOTS   colon-separated roots whose immediate scratch units are swept;
+#                               setting it is the explicit opt-in for a non-root pass
 #   RMD_CLEANUP_SCRATCH_PARENTS colon-separated parents kept while judging each child separately
+#   RMD_CLEANUP_ROOT_SCRATCH_ROOTS / RMD_CLEANUP_ROOT_SCRATCH_PARENTS  the defaults of the two
+#                               above for a ROOT pass (/mnt/scratch, /mnt/scratch/o). A non-root
+#                               pass defaults to NO scratch roots: judging a scratch unit idle
+#                               needs root's lsof view of every user's open files.
+#   RMD_CLEANUP_UID             the identity the pass decides as (default `id -u`)
+#   RMD_CLEANUP_RUNUSER         runs the one repo-writing Git call (fetch) as the repo's owner
 #   RMD_CLEANUP_SCRATCH_IDLE_MINUTES  minimum payload inactivity (default 720)
 #   RMD_CLEANUP_DOCKER          command for the running-container mount snapshot
-#   RMD_CLEANUP_LOCK_FILE       shared whole-pass flock file
+#   RMD_CLEANUP_LOCK_FILE       shared whole-pass flock file (default: beside this script, which
+#                               both the root and the user cron run, so one path serves both)
 #   RMD_CLEANUP_FLOCK           flock command (tests may simulate an unavailable lock)
 set -uo pipefail
 
@@ -84,11 +92,25 @@ CONTAINER_MAP="${RMD_CLEANUP_CONTAINER_MAP:-}"
 WATCH_ROOTS="${RMD_CLEANUP_WATCH_ROOTS-$CLEAN_HOME/.codex $CLEAN_HOME/.claude}"
 WATCH_MB="${RMD_CLEANUP_WATCH_MB:-500}"
 ONLY_TMP="${RMD_CLEANUP_ONLY_TMP:-0}"
-SCRATCH_ROOTS="${RMD_CLEANUP_SCRATCH_ROOTS-/mnt/scratch}"
-SCRATCH_PARENTS="${RMD_CLEANUP_SCRATCH_PARENTS-/mnt/scratch/o}"
+RUN_UID="${RMD_CLEANUP_UID:-$(id -u)}"
+if [ "$RUN_UID" = 0 ]; then
+  SCRATCH_ROOTS="${RMD_CLEANUP_SCRATCH_ROOTS-${RMD_CLEANUP_ROOT_SCRATCH_ROOTS-/mnt/scratch}}"
+  SCRATCH_PARENTS="${RMD_CLEANUP_SCRATCH_PARENTS-${RMD_CLEANUP_ROOT_SCRATCH_PARENTS-/mnt/scratch/o}}"
+else
+  # A non-root lsof cannot see another user's (or a container's root) open files, so it cannot
+  # prove a scratch unit is unheld. Only an explicit RMD_CLEANUP_SCRATCH_ROOTS opts a user pass in.
+  SCRATCH_ROOTS="${RMD_CLEANUP_SCRATCH_ROOTS-}"
+  SCRATCH_PARENTS="${RMD_CLEANUP_SCRATCH_PARENTS-}"
+fi
+RUNUSER_CMD="${RMD_CLEANUP_RUNUSER:-runuser}"
 SCRATCH_IDLE_MINUTES="${RMD_CLEANUP_SCRATCH_IDLE_MINUTES:-720}"
 DOCKER_CMD="${RMD_CLEANUP_DOCKER:-docker}"
-LOCK_FILE="${RMD_CLEANUP_LOCK_FILE:-/tmp/rmd-host-cleanup.lock}"
+# Not /tmp: a root-created 0644 lock there could not be opened for write by the user cron, and
+# with fs.protected_regular=2 root cannot O_CREAT-open a user's file in a sticky directory either.
+if ! SCRIPT_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"; then
+  echo "rmd-host-cleanup: FATAL cannot resolve the script directory for the lock" >&2; exit 2
+fi
+LOCK_FILE="${RMD_CLEANUP_LOCK_FILE:-$SCRIPT_DIR/rmd-host-cleanup.lock}"
 FLOCK_CMD="${RMD_CLEANUP_FLOCK:-flock}"
 
 case "$IDLE_MINUTES$HIGH_WATER$ARCHIVE_DAYS$BIG_MB$SCRATCH_IDLE_MINUTES" in
@@ -101,7 +123,13 @@ esac
 
 log() { printf '%s\n' "$*"; }
 
-if ! exec 9>>"$LOCK_FILE"; then log "REFUSE: cannot acquire janitor lock $LOCK_FILE"; exit 2; fi
+# The lock is created once (O_EXCL, so never through a symlink) and then opened READ-ONLY: flock
+# needs no write access, so whichever identity created it, any mode the other can read works, and
+# an open without O_CREAT is outside fs.protected_regular entirely.
+( set -C; umask 022; : > "$LOCK_FILE" ) 2>/dev/null
+if [ -L "$LOCK_FILE" ] || ! exec 9<"$LOCK_FILE"; then
+  log "REFUSE: cannot acquire janitor lock $LOCK_FILE"; exit 2
+fi
 $FLOCK_CMD -n -E 73 9
 lock_status=$?
 case "$lock_status" in
@@ -188,14 +216,36 @@ sweep_path() {
 }
 
 # ── rule 3 ──
+# Every Git call against a swept repository. The root pass reads repos the operator owns, and Git
+# refuses those ("detected dubious ownership") unless safe.directory names them; it is scoped to
+# THIS repo's physical top (what Git compares against), never '*'. These calls only read the repo
+# (status runs with GIT_OPTIONAL_LOCKS=0) or remove it, so root creates no files inside it.
+rgit() {
+  local repo="$1" top
+  shift
+  top="$(cd -P -- "$repo" 2>/dev/null && pwd -P)" || return 128
+  git -c safe.directory="$top" -C "$repo" "$@"
+}
+# The one call that WRITES into a repo is fetch (objects, refs, FETCH_HEAD). Run as root it would
+# leave root-owned files in the operator's .git that break their next fetch, so a root pass runs it
+# as the repo's owner, whose Git needs no exception.
+repo_fetch() {
+  local repo="$1" uid owner
+  shift
+  uid="$(stat -c %u -- "$repo" 2>/dev/null || stat -f %u -- "$repo" 2>/dev/null)" || return 1
+  if [ "$RUN_UID" != 0 ] || [ "$uid" = "$RUN_UID" ]; then rgit "$repo" fetch "$@"; return; fi
+  owner="$(stat -c %U -- "$repo" 2>/dev/null || stat -f %Su -- "$repo" 2>/dev/null)" || return 1
+  case "$owner" in ""|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  (cd -- "$repo" && $RUNUSER_CMD -u "$owner" -- git -C "$repo" fetch "$@")
+}
 worktree_clean() {
   local status
-  status="$(GIT_OPTIONAL_LOCKS=0 git -C "$1" status --porcelain 2>/dev/null)" || return 2
+  status="$(GIT_OPTIONAL_LOCKS=0 rgit "$1" status --porcelain 2>/dev/null)" || return 2
   [ -z "$status" ]
 }
 worktree_ignored_safe() {
   local status unknown
-  status="$(GIT_OPTIONAL_LOCKS=0 git -C "$1" status --porcelain --ignored=matching 2>/dev/null)" || return 2
+  status="$(GIT_OPTIONAL_LOCKS=0 rgit "$1" status --porcelain --ignored=matching 2>/dev/null)" || return 2
   unknown="$(printf '%s\n' "$status" | awk '
     substr($0, 1, 2) == "!!" {
       path=substr($0, 4); sub(/\/$/, "", path)
@@ -206,14 +256,14 @@ worktree_ignored_safe() {
 }
 worktree_saved() {
   local wt="$1" head br id
-  head="$(git -C "$wt" rev-parse HEAD 2>/dev/null)" || return 1
-  [ -n "$(git -C "$wt" branch -r --contains "$head" 2>/dev/null)" ] && return 0
-  br="$(git -C "$wt" symbolic-ref --short -q HEAD 2>/dev/null)" || return 1
+  head="$(rgit "$wt" rev-parse HEAD 2>/dev/null)" || return 1
+  [ -n "$(rgit "$wt" branch -r --contains "$head" 2>/dev/null)" ] && return 0
+  br="$(rgit "$wt" symbolic-ref --short -q HEAD 2>/dev/null)" || return 1
   case "$br" in
     run-*-[0-9]*)
       id="${br#run-}"; id="${id%-*}"
       case "$id" in ""|*[!A-Za-z0-9._-]*) return 1 ;; esac
-      git -C "$wt" log origin/main --fixed-strings --grep="Remudero-Task: $id" -n 1 --format=%H 2>/dev/null | grep -q . && return 0
+      rgit "$wt" log origin/main --fixed-strings --grep="Remudero-Task: $id" -n 1 --format=%H 2>/dev/null | grep -q . && return 0
       ;;
   esac
   return 1
@@ -222,7 +272,7 @@ archive_worktree_head() {
   local wt="$1" head="$2" archive="$WORKTREE_ARCHIVE_ROOT" name bundle tmp probe archive_fsid root_fsid
   local mode="${3:-head}" refs="$head HEAD" tag="" source="$ROOT_FS"
   if [ "$mode" = branches ]; then
-    refs="$(git -C "$wt" for-each-ref --format='%(objectname) %(refname)' refs/heads)" || return 1
+    refs="$(rgit "$wt" for-each-ref --format='%(objectname) %(refname)' refs/heads)" || return 1
     refs="$(printf '%s\n%s\n' "$head HEAD" "$refs")"
     tag="-$(printf '%s\n' "$refs" | cksum | awk '{print $1}')"
     source="$wt"
@@ -257,7 +307,7 @@ archive_worktree_head() {
   [ ! -e "$tmp" ] || return 1
   local -a bundle_refs=(HEAD)
   [ "$mode" = branches ] && bundle_refs+=(--branches)
-  if ! git -C "$wt" bundle create "$tmp" "${bundle_refs[@]}" >/dev/null 2>&1 || \
+  if ! rgit "$wt" bundle create "$tmp" "${bundle_refs[@]}" >/dev/null 2>&1 || \
      ! verify_worktree_bundle "$wt" "$tmp" "$refs"; then
     rm -f -- "$tmp"
     return 1
@@ -270,8 +320,8 @@ archive_worktree_head() {
 }
 verify_worktree_bundle() {
   local wt="$1" bundle="$2" refs="$3" heads ref
-  git -C "$wt" bundle verify "$bundle" >/dev/null 2>&1 || return 1
-  heads="$(git -C "$wt" bundle list-heads "$bundle" 2>/dev/null)" || return 1
+  rgit "$wt" bundle verify "$bundle" >/dev/null 2>&1 || return 1
+  heads="$(rgit "$wt" bundle list-heads "$bundle" 2>/dev/null)" || return 1
   while IFS= read -r ref; do
     [ -z "$ref" ] || printf '%s\n' "$heads" | grep -Fxq -- "$ref" || return 1
   done <<< "$refs"
@@ -283,7 +333,7 @@ sweep_worktree() {
   elif [ -f "$wt/.git" ] && [ ! -L "$wt/.git" ]; then kind="linked worktree"
   else log "KEEP $wt: Git metadata is missing or has an unexpected type"; return
   fi
-  if ! gitdir="$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null)" || [ ! -d "$gitdir" ]; then
+  if ! gitdir="$(rgit "$wt" rev-parse --absolute-git-dir 2>/dev/null)" || [ ! -d "$gitdir" ]; then
     log "KEEP $wt: Git metadata is unreadable or missing"; return
   fi
   if [ -f "$gitdir/locked" ]; then log "KEEP $wt: Git worktree is locked"; return; fi
@@ -307,9 +357,9 @@ sweep_worktree() {
     *) log "KEEP $wt: ignored-data scan failed (unknown)"; return ;;
   esac
   if [ "$DRY_RUN" != 1 ] && [ "${RMD_CLEANUP_NO_FETCH:-0}" != 1 ]; then
-    git -C "$wt" fetch --quiet origin 2>/dev/null || true
+    repo_fetch "$wt" --quiet origin 2>/dev/null || true
   fi
-  head="$(git -C "$wt" rev-parse HEAD 2>/dev/null)" || { log "KEEP $wt: HEAD is unreadable"; return; }
+  head="$(rgit "$wt" rev-parse HEAD 2>/dev/null)" || { log "KEEP $wt: HEAD is unreadable"; return; }
   if ! worktree_saved "$wt" && ! archive_worktree_head "$wt" "$head"; then
     log "KEEP $wt: unpublished HEAD could not be archived safely"; return
   fi
@@ -321,7 +371,7 @@ sweep_worktree() {
   fi
   if [ "$kind" = "standalone clone" ]; then
     if ! rm -rf -- "$wt"; then log "KEEP $wt: standalone clone removal failed"; fi
-  elif ! git -C "$wt" worktree remove -- "$wt" 2>/dev/null; then
+  elif ! rgit "$wt" worktree remove -- "$wt" 2>/dev/null; then
     log "KEEP $wt: git worktree remove failed; no recursive filesystem fallback"
   fi
 }
@@ -354,6 +404,13 @@ is_docker_mount() {
   done <<< "$DOCKER_MOUNTS"
   return 1
 }
+# A parent directly under a scratch root is met twice (as a unit, then as a parent): log it once.
+PARENTS_LOGGED=":"
+keep_parent() {
+  case "$PARENTS_LOGGED" in *":$1:"*) return ;; esac
+  PARENTS_LOGGED="$PARENTS_LOGGED$1:"
+  log "KEEP $1: workspace parent root"
+}
 scratch_guard() {
   local p="$1" protected parent
   case "${p##*/}" in
@@ -367,7 +424,7 @@ scratch_guard() {
   while IFS= read -r parent; do
     [ -n "$parent" ] || continue
     parent="${parent%/}"
-    case "$parent" in "$p"|"$p"/*) log "KEEP $p: workspace parent root"; return 1 ;; esac
+    case "$parent" in "$p"|"$p"/*) keep_parent "$p"; return 1 ;; esac
   done < <(printf '%s\n' "$SCRATCH_PARENTS" | tr ':' '\n')
   if is_protected_worktree "$p"; then log "KEEP $p: protected by janitor configuration"; return 1; fi
   while IFS= read -r protected; do
@@ -380,7 +437,7 @@ scratch_guard() {
 scratch_repo_check() {
   local repo="$1" gitdir raw parent status
   if [ -L "$repo/.git" ]; then SCRATCH_REASON="Git metadata has an unexpected type"; return 1; fi
-  if ! gitdir="$(git -C "$repo" rev-parse --absolute-git-dir 2>/dev/null)" || [ ! -d "$gitdir" ]; then
+  if ! gitdir="$(rgit "$repo" rev-parse --absolute-git-dir 2>/dev/null)" || [ ! -d "$gitdir" ]; then
     if [ -f "$repo/.git" ]; then
       raw="$(sed -n 's/^gitdir: //p' "$repo/.git")"
       case "$raw" in /*) ;; *) raw="$repo/$raw" ;; esac
@@ -408,10 +465,10 @@ scratch_repo_check() {
 scratch_repo_saved() {
   local repo="$1" refs head
   worktree_saved "$repo" || return 1
-  refs="$(git -C "$repo" for-each-ref --format='%(objectname)' refs/heads)" || return 1
+  refs="$(rgit "$repo" for-each-ref --format='%(objectname)' refs/heads)" || return 1
   while IFS= read -r head; do
     [ -n "$head" ] || continue
-    [ -n "$(git -C "$repo" branch -r --contains "$head" 2>/dev/null)" ] || return 1
+    [ -n "$(rgit "$repo" branch -r --contains "$head" 2>/dev/null)" ] || return 1
   done <<< "$refs"
 }
 archive_scratch_bundle() {
@@ -460,11 +517,11 @@ sweep_scratch_unit() {
   # Validate the whole unit before archiving or removing any of its repositories (W1-T5513).
   for repo in "${SCRATCH_LIVE_REPOS[@]}"; do
     if [ "$DRY_RUN" != 1 ] && [ "${RMD_CLEANUP_NO_FETCH:-0}" != 1 ]; then
-      if ! git -C "$repo" fetch --quiet --all 2>/dev/null; then
+      if ! repo_fetch "$repo" --quiet --all 2>/dev/null; then
         log "KEEP $p: Git fetch failed (unknown)"; return
       fi
     fi
-    head="$(git -C "$repo" rev-parse HEAD 2>/dev/null)" || { log "KEEP $p: HEAD is unreadable"; return; }
+    head="$(rgit "$repo" rev-parse HEAD 2>/dev/null)" || { log "KEEP $p: HEAD is unreadable"; return; }
     if ! scratch_repo_saved "$repo"; then
       if ! WORKTREE_ARCHIVE_ROOT="$WORKTREE_ARCHIVE_ROOT/scratch" archive_worktree_head "$repo" "$head" branches; then
         log "KEEP $p: local branches could not be archived safely"; return
@@ -481,7 +538,7 @@ sweep_scratch_unit() {
   for repo in "${SCRATCH_LIVE_REPOS[@]}"; do
     if [ -f "$repo/.git" ]; then
       log "REMOVE $repo (linked worktree)"
-      if ! act git -C "$repo" worktree remove -- "$repo"; then
+      if ! act rgit "$repo" worktree remove -- "$repo"; then
         log "KEEP $p: git worktree remove failed; no recursive filesystem fallback"; return
       fi
     fi
@@ -542,7 +599,7 @@ done < <(printf '%s\n' "$SCRATCH_ROOTS" | tr ':' '\n')
 while IFS= read -r parent; do
   [ -n "$parent" ] && [ -d "$parent" ] || continue
   parent="${parent%/}"
-  log "KEEP $parent: workspace parent root"
+  keep_parent "$parent"
   if [ -e "$parent/.rmd-scratch-keep" ] || [ -L "$parent" ]; then
     log "KEEP $parent: scratch keep marker or symbolic link"; continue
   fi
