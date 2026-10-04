@@ -123,7 +123,7 @@ for (const exit of ["stop", "freshness"] as const) {
   });
 }
 
-test("W1-T5491: the dispatch ticker refills a freed review lane and STOP closes admission", async () => {
+test("W1-T5491: the dispatch ticker refills a freed review lane and STOP drains reviews", async () => {
   const work = gate();
   const holds = Array.from({ length: 4 }, gate);
   const started: number[] = [];
@@ -288,5 +288,29 @@ test("W1-T5491: STOP waits for the admitting sweep and reports a review beyond t
     review.resolve();
     await daemon;
     await drainInFlightReviews({ boundMs: 1000 });
+  }
+});
+
+test("W1-T5491: STOP does not starve the clock of an already admitted detached retro", async () => {
+  const retro = gate();
+  let stopReads = 0;
+  let passes = 0;
+  const plan = loadPlanFromYaml("- id: A\n  title: a\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n", "retro-stop-test");
+  try {
+    const result = await runDaemon(plan, {
+      refreshMerged: () => () => true,
+      runOne: async () => { throw new Error("no dispatch expected"); },
+      sleep: settle,
+      checkStop: () => ++stopReads > 1 ? "STOP" : undefined,
+      checkRetroTrigger: () => ({ fire: true, reason: "merges", mergesSinceMarker: 99, daysSinceMarker: 0 }),
+      runRetroTrigger: async () => { await retro.promise; },
+      sweepLight: () => { if (++passes === 3) retro.resolve(); },
+    }, { pollIntervalMs: 1, sweepWallClockBoundMs: 1000 });
+    assert.equal(result.stopReason, "stopped");
+    assert.deepEqual(await drainDetachedSweepActions({ boundMs: 1000 }), []);
+    assert.ok(passes >= 3, "the detached retro's clock must keep running until its work settles");
+  } finally {
+    retro.resolve();
+    await drainDetachedSweepActions({ boundMs: 1000 });
   }
 });

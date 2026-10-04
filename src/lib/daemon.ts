@@ -1922,8 +1922,8 @@ function startInFlightTicker(
           }
           // W1-T4191: the light pass can admit fix and review workers, so an operator PAUSE withholds the
           // ORDINARY pass while the batch drains. Withheld, never aborted: work already in flight finishes.
-          // STOP closes review admission while the already admitted work drains.
-          const lightHalt = deps.checkStop?.() ?? deps.checkPause?.();
+          // The main loop owns STOP; this clock must keep serving an already admitted retro until it settles.
+          const lightHalt = deps.checkPause?.();
           if (lightHalt) {
             // W1-T5343: a pause stops new work, never the judging of finished work (W1-T4429 design iii), and
             // 11 dispatch-phase pauses once held ~210 min with 0 reviews. So run ONE review-only pass at a time,
