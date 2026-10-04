@@ -186,7 +186,8 @@ test("a duplicate-key quarantine opens exactly one repair PR per shard blob", as
   const r = recorder();
   const requester = runTask.shardRepairRequester(stateDir, r.log);
   const lane = landRecorder();
-  const pass = () => runTask.runShardRepairPass({ stateDir, repoDir: clone.dir, worktreesRoot: stateDir, owner: "o", repo: "r", log: r.log, land: lane.land });
+  const prState = () => "open" as const; // W1-T5618 reads the recorded PR before skipping its bytes
+  const pass = () => runTask.runShardRepairPass({ stateDir, repoDir: clone.dir, worktreesRoot: stateDir, owner: "o", repo: "r", log: r.log, land: lane.land, prState });
 
   runTask.syncPlanFromOrigin(clone.dir, "plan/tasks.yaml", { quarantine: runTask.quarantineReporter(r.log, r.raise, requester) });
   assert.equal(r.raised.length, 1, "the hand-repair escalation still stands");
@@ -247,7 +248,7 @@ test("the default plan-PR path really cuts the repair commit, and a refused push
   assert.deepEqual(readdirSync(join(stateDir, "wt")), [], "the checkout is disposed");
 });
 
-test("every way a repair request fails is ledgered and consumes the request", async (t) => {
+test("every way a repair request fails is ledgered", async (t) => {
   const clone = originCarrying(t, REAL_1003_SHARD);
   const stateDir = tempDir(t, "shard-repair-failures");
   const r = recorder();
@@ -283,7 +284,7 @@ test("every way a repair request fails is ledgered and consumes the request", as
   writeFileSync(join(runTask.shardRepairDir(stateDir), "requests", "torn.json"), "{");
   run();
   assert.equal(r.steps("plan.shard_repair_failed").at(-1)?.extra.stage, "pass");
-  assert.equal(runTask.shardRepairsPending(stateDir), false, "every request was consumed");
+  assert.equal(runTask.shardRepairsPending(stateDir), false, "the torn request was consumed; each failed one backs off (W1-T5618)");
 
   const blocked = join(stateDir, "a-file");
   writeFileSync(blocked, "");

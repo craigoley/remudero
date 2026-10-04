@@ -1014,7 +1014,8 @@ done
 # here, full stop — nothing below this section may ever run after it.
 if command -v az >/dev/null 2>&1; then
   echo "recycle-container: az acr login -n ${REGISTRY}"
-  if ! az acr login -n "${REGISTRY}" >/dev/null; then
+  source "${SCRIPT_DIR}/acr-login.sh"
+  if ! rmd_acr_login "${REGISTRY}"; then
     echo "recycle-container: REFUSING — FAILED to authenticate to ${REGISTRY}." >&2
     echo "  ${CONTAINER_NAME} is untouched. Run 'az login' if this is a fresh shell, then re-run." >&2
     exit 1

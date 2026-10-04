@@ -882,6 +882,9 @@ export interface DaemonDeps {
   reloadPlan?: () => Plan | null;
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
   refreshMerged: (plan?: Plan) => MergedSet;
+  refreshMergedAsync?: (plan?: Plan) => Promise<MergedSet>;
+  readLoopTelemetry?: () => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number };
+  lastStepBeforeBlock?: () => string | undefined;
   /** Rebind daemon-owned sweep/projection closures when the live plan reloads. */
   onPlanReload?: (plan: Plan) => void;
   /** The in-flight guard: the open PR number for a task, re-derived from the same projection `refreshMerged` just
@@ -1377,7 +1380,7 @@ interface InterphaseReviewClock {
  * Swallows everything: observability must never be able to take down the loop it observes.
  */
 export function reportLoopLag(
-  sample: { phase: string; dueAtMs: number; observedAtMs: number; intervalMs: number },
+  sample: { phase: string; dueAtMs: number; observedAtMs: number; intervalMs: number; lastStepBeforeBlock?: string },
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): void {
   try {
@@ -1388,6 +1391,7 @@ export function reportLoopLag(
       lag_ms: Math.round(lagMs),
       interval_ms: sample.intervalMs,
       missed_ticks: Math.floor(lagMs / sample.intervalMs),
+      last_step_before_block: sample.lastStepBeforeBlock,
     });
   } catch {
     // Reason: a throwing logger must cost the reading, never the tick.
@@ -1436,7 +1440,8 @@ export function startInterphaseReviewClock(
           const clockDueAtMs = interphaseClock.now() + quantumMs;
           const result = await wait(quantumMs);
           reportLoopLag(
-            { phase, dueAtMs: clockDueAtMs, observedAtMs: interphaseClock.now(), intervalMs: quantumMs },
+            { phase, dueAtMs: clockDueAtMs, observedAtMs: interphaseClock.now(), intervalMs: quantumMs,
+              lastStepBeforeBlock: deps.lastStepBeforeBlock?.() },
             log,
           );
           if (result === "wake") {
@@ -1801,8 +1806,9 @@ function startInFlightTicker(
           // clock, so an event arriving then remains pending for one later accepted pass (W1-T2568).
           const tickDueAtMs = daemonClock.now() + pollIntervalMs;
           const waitResult = await (owner.sweepRetrigger ? (deps.sleepUntilSweepWake ?? deps.sleep) : deps.sleep)(pollIntervalMs);
+          const lastStepBeforeBlock = deps.lastStepBeforeBlock?.();
           reportLoopLag(
-            { phase: owner.phase, dueAtMs: tickDueAtMs, observedAtMs: daemonClock.now(), intervalMs: pollIntervalMs },
+            { phase: owner.phase, dueAtMs: tickDueAtMs, observedAtMs: daemonClock.now(), intervalMs: pollIntervalMs, lastStepBeforeBlock },
             log,
           );
           if (waitResult === "wake") eventWakePending = true;
@@ -1821,6 +1827,7 @@ function startInFlightTicker(
           const diskHeadroom = deps.readDiskHeadroom?.();
           if (diskHeadroom?.verdict === "OK") diskHeadroomLatch.escalated = false;
           log("daemon.alive", {
+            ...deps.readLoopTelemetry?.(),
             phase: owner.phase,
             poll_interval_ms: pollIntervalMs,
             // W1-T2744: bounded cardinality on the existing heartbeat, never a promise-poll row.
@@ -2806,7 +2813,8 @@ export async function runDaemon(
     log("daemon.summary", { ...s });
     return s;
   };
-  if (deps.livenessPulse) livenessPulse = startLivenessPulse(pollIntervalMs, idleLaneClock, log, (sample) => reportLoopLag(sample, log));
+  if (deps.livenessPulse) livenessPulse = startLivenessPulse(pollIntervalMs, idleLaneClock, log,
+    (sample) => reportLoopLag({ ...sample, lastStepBeforeBlock: deps.lastStepBeforeBlock?.() }, log));
   const prActionPump = startPrActionPump(deps, pollIntervalMs, log);
   prActionPumpRef.stop = prActionPump.stop;
   prActionPumpRef.isBusy = prActionPump.isBusy;
@@ -2972,7 +2980,7 @@ export async function runDaemon(
       let creditVisible = false;
       let refreshError: string | undefined;
       try {
-        creditVisible = deps.refreshMerged(planForBatch)(task.id);
+        creditVisible = (deps.refreshMergedAsync ? await deps.refreshMergedAsync(planForBatch) : deps.refreshMerged(planForBatch))(task.id);
       } catch (error) {
         refreshError = String((error as Error)?.message ?? error);
         log("daemon.merge_credit_refresh_failed", { task: task.id, error: refreshError });
@@ -3358,7 +3366,7 @@ export async function runDaemon(
       if (drain) log("console.drain_consumed", { origin: drain.origin });
     }
 
-    const isMerged = deps.refreshMerged(planForBatch);
+    const isMerged = deps.refreshMergedAsync ? await deps.refreshMergedAsync(planForBatch) : deps.refreshMerged(planForBatch);
     for (const taskId of pendingMergedCredit) {
       if (!isMerged(taskId)) continue;
       pendingMergedCredit.delete(taskId);
