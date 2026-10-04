@@ -20,7 +20,7 @@ import {
   type PromotionRecord,
 } from "./experiment-promotion.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
-import { gardenStatePath, judgeGardenDecision, readGardenState, runGardenAsync, type GardenAction, type GardenCheckout, type GardenerDeps, type AsyncGardenSpec, type PrState } from "./gardener.js";
+import { gardenPassDue, gardenStatePath, judgeGardenDecision, readGardenState, runGarden, type GardenAction, type GardenCheckout, type GardenSpec, type GardenerDeps, type PrState } from "./gardener.js";
 import { buildEntryWeightIndex, DEFAULT_KNOWLEDGE_BUDGET_CHARS, loadLearningsCorpus } from "./learnings.js";
 import type { LedgerLine } from "./ledger.js";
 import { ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
@@ -816,13 +816,17 @@ function rollBack(deps: GardenerDeps, c: ConfigCanary): string | undefined {
   }
 }
 
-type ConfigGardenSpec = AsyncGardenSpec<ConfigGardenClass, ConfigInventory, ConfigGardenAction, GardenCheckout>;
+type ConfigGardenSpec = Omit<GardenSpec<ConfigGardenClass, ConfigInventory, ConfigGardenAction, GardenCheckout>, "inventory"> & {
+  inventory: () => Promise<ConfigInventory>;
+};
 
 /** One pass: judge the open canaries, then let the garden act, recording any change it lands as a new
  *  canary that waits in shadow for its merge. */
-export async function runConfigGarden(spec: ConfigGardenSpec, deps: GardenerDeps, sources: ConfigGardenSources = {}): ReturnType<typeof runGardenAsync<ConfigGardenClass, ConfigInventory, ConfigGardenAction, GardenCheckout>> {
+export async function runConfigGarden(spec: ConfigGardenSpec, deps: GardenerDeps, sources: ConfigGardenSources = {}): Promise<ReturnType<typeof runGarden<ConfigGardenClass, ConfigInventory, ConfigGardenAction, GardenCheckout>>> {
   await tendConfigCanaries(deps, async () => (await configInventory(deps, sources)).runs);
-  const pass = await runGardenAsync(spec, deps);
+  if (!gardenPassDue(spec, deps)) return { ran: false };
+  const inventory = await spec.inventory();
+  const pass = runGarden({ ...spec, inventory: () => inventory }, deps);
   const action = pass.plan?.actions[0];
   if (pass.prUrl && action) {
     // The action's shadow evidence was measured by the inventory. Starting the window from a
