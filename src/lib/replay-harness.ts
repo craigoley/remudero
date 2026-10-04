@@ -260,8 +260,6 @@ function inspectSnapshot(cwd: string): { path: string; content: string }[] {
     for (const name of readdirSync(dir).sort()) {
       if (name === ".git") throw new Error("reviewer-isolation-breach");
       const path = join(dir, name);
-      // One fd for the check and the read: O_NOFOLLOW refuses a symlink, so nothing swapped in after the
-      // listing is read under the sealed entry's name; O_NONBLOCK keeps a FIFO from hanging the open.
       let fd: number;
       try {
         fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
