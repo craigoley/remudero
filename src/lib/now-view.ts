@@ -36,7 +36,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { deriveLastPoll, readDiskFreeBytes, readGhRateLimitRemaining } from "./daemon-health.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { feedbackDir, listFeedback, type FeedbackEntry } from "./feedback.js";
-import { projectHumanGates, type HumanGateObservation, type HumanGateProjection, type HumanGateSource } from "./human-gate.js";
+import { projectChangeManagementGates, projectHumanGates, type HumanGateObservation, type HumanGateProjection, type HumanGateSource } from "./human-gate.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { readTaskActivity } from "./ledger-projector.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsSync, rotationStampIso, type LedgerRotationMemo, type LedgerRotationMemoPass } from "./ledger-union.js";
@@ -760,6 +760,12 @@ export function createNowView(opts: NowViewOptions): {
         reason: reasons.task_question ?? "the question reader does not report malformed-line completeness",
         gates: all.filter((decision) => decision.kind === "task_question").map(decisionGate) });
     }
+    const changeManagementUnknown = snapshot.github_unreachable || !snapshot.prQueue.complete || !!snapshot.blockedPrsUnverifiedReason;
+    sources.push(projectChangeManagementGates({
+      instance: instance.name, state: changeManagementUnknown ? "partial" : "complete",
+      ...(changeManagementUnknown ? { reason: snapshot.blockedPrsUnverifiedReason ?? snapshot.prQueue.unavailableReason ?? "GitHub PR state could not be completely verified" } : {}),
+      actions: nowActions(snapshot, rows),
+    }));
     const humanGates = projectHumanGates(sources);
     return { ...capDecisions(all), humanGates, ...(Object.keys(reasons).length > 0 ? { decisionsReasons: reasons } : {}) };
   };
