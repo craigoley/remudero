@@ -672,7 +672,11 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   if [ "\$BOOT" -eq 0 ] && [ -x "\$STATE_DIR/remudero/bin/rmd" ]; then
     # W1-T4917: load current deploy code only after a verified idle fast-forward. Running from
     # daemon-install conflates the invoking checkout with the tree deploy-run acts on.
-    refresh_deploy_code '${CONTAINER_NAME}' || exit 0
+    # Refresh the source CLI before loading it; standalone executable entrypoints own their
+    # runtime and retain the supervisor invocation without requiring a source checkout.
+    if [ -f "\$STATE_DIR/remudero/src/run-task.ts" ]; then
+      refresh_deploy_code '${CONTAINER_NAME}' || exit 0
+    fi
     echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a RECYCLE is due."
     # W1-T4267: deploy-run reads resourcePolicyDrift for THIS container (named at install time --
     # the rendered launcher has no CONTAINER_NAME of its own) against the build policy it recycles with.

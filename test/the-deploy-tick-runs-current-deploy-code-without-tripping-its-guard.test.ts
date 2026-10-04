@@ -25,7 +25,8 @@ function fixture(t: TestContext) {
   const stubs = join(root, "stubs");
   const calls = join(root, "calls");
   const deployed = join(root, "deployed");
-  for (const dir of [stubs, join(daemon, ".git"), join(daemon, "bin"), join(install, ".git"), join(install, "bin"), join(state, "state", "inflight"), join(state, "worktrees")]) mkdirSync(dir, { recursive: true });
+  for (const dir of [stubs, join(daemon, ".git"), join(daemon, "bin"), join(daemon, "src"), join(install, ".git"), join(install, "bin"), join(state, "state", "inflight"), join(state, "worktrees")]) mkdirSync(dir, { recursive: true });
+  writeFileSync(join(daemon, "src", "run-task.ts"), "export {};\n");
   writeFileSync(join(daemon, "version"), "old");
   executable(join(daemon, "bin", "rmd"), `#!/usr/bin/env bash\nprintf '%s %s cwd=%s\\n' "$(cat '${daemon}/version')" "$*" "$PWD" >> '${deployed}'\n`);
   executable(join(install, "bin", "rmd"), `#!/usr/bin/env bash\necho install-invoked >> '${deployed}'\n`);
@@ -93,6 +94,28 @@ test("W1-T4917: the deploy tick runs deploy code at least as new as the install 
   assert.match(read(f.deployed), new RegExp(`cwd=${f.daemon}`), "the invoker must be outside the install checkout");
   assert.match(read(f.calls), new RegExp(`-C ${f.daemon} merge --ff-only --quiet origin/main`));
   assert.doesNotMatch(read(f.calls), /reset|checkout|clean|rebase/);
+});
+
+test("W1-T4917: a standalone daemon entrypoint retains the healthy deploy tick", (t) => {
+  const f = fixture(t);
+  rmSync(join(f.daemon, "src"), { recursive: true });
+  rmSync(join(f.daemon, ".git"), { recursive: true });
+  const r = f.tick("sensor");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(read(f.deployed), /^old deploy-run --image-drift-only/);
+  assert.match(read(f.deployed), new RegExp(`cwd=${f.daemon}`));
+  assert.doesNotMatch(read(f.calls), new RegExp(`-C ${f.daemon} `));
+});
+
+test("W1-T4917: a source CLI with a missing entrypoint cannot run deploy logic", (t) => {
+  const f = fixture(t);
+  rmSync(join(f.daemon, "src"), { recursive: true });
+  cpSync("bin/rmd", join(f.daemon, "bin", "rmd"));
+  symlinkSync(resolve("node_modules"), join(f.daemon, "node_modules"), "dir");
+  const r = f.tick("sensor");
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /deploy-run reported a problem/);
+  assert.equal(read(f.deployed), "");
 });
 
 for (const [fault, reason] of [["claude", "active workers"], ["codex", "active workers"], ["sensor", "worker probe unreadable"], ["empty-sensor", "worker probe unreadable"], ["matcher", "worker probe unreadable"], ["dirty", "local edits"], ["dirty-after-fetch", "local edits"], ["status", "status unreadable"], ["fetch", "fetch failed"], ["diverged", "diverged"], ["install-ahead", "install checkout ancestry"], ["merge", "fast-forward failed"]]) {
