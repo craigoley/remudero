@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import fs, { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
@@ -15,6 +14,7 @@ import type { PairedReviewCase } from "../src/lib/paired-review-eval.js";
 import { reviewerReplayStack, sealedReviewer } from "../src/lib/replay-harness.js";
 import { verifyReviewerCaseEvidence } from "../src/lib/review-finding-evidence.js";
 import { benchmarkReviewerReplayCommand, HANDLERS } from "../src/run-task.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const idle = { liveness: { state: "up" as const, quiet: true as const },
@@ -23,14 +23,13 @@ const idle = { liveness: { state: "up" as const, quiet: true as const },
 function fixture(t: TestContext, identity = { repo: "fixture/alpha", id: "pair-live", taskId: "T-LIVE" }) {
   const root = mkdtempSync(join(tmpdir(), "rmd-reviewer-live-test-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const source = join(root, "source");
+  const repository = gitRepo({ seedCommit: false, kind: "reviewer-live-source" });
+  t.after(() => repository.cleanup());
+  const source = repository.dir;
   const stateDir = join(root, "state");
-  mkdirSync(source); mkdirSync(stateDir);
-  const git = (...args: string[]) => execFileSync("git", ["-C", source, ...args], {
-    encoding: "utf8", env: { PATH: process.env.PATH, HOME: root, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
-  }).trim();
-  git("init", "--quiet"); git("config", "user.name", "fixture"); git("config", "user.email", "fixture@example.test");
-  git("remote", "add", "origin", `https://github.com/${identity.repo}.git`);
+  mkdirSync(stateDir);
+  const git = repository.git;
+  repository.addRemote("origin", `https://github.com/${identity.repo}.git`);
   mkdirSync(join(source, "lib")); writeFileSync(join(source, "lib", "stable.ts"), "export const stable = true;\n");
   git("add", "lib/stable.ts");
   const commit = (text: string) => {
