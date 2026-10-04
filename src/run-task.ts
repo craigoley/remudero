@@ -173,7 +173,7 @@ import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/
 import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { gardenPassDue, runGarden, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./lib/gardener.js";
+import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, runGarden, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
@@ -34461,9 +34461,26 @@ function shardRepairRequests(stateDir: string): string[] {
   return readdirSync(dir).filter((n) => n.endsWith(".json")).sort().map((n) => join(dir, n));
 }
 
-/** Whether a repair request waits — the plan garden's due probe, on the loop, so one directory read. */
-export function shardRepairsPending(stateDir: string): boolean {
-  return shardRepairRequests(stateDir).length > 0;
+/** W1-T5618 — a request file: `attempts`, `blob` and `next_at` appear once an attempt has failed. */
+type ShardRepairRequest = { id: string; file: string; attempts?: number; blob?: string; next_at?: string };
+
+/** BACKSTOP: the attempts one shard blob gets before its request is abandoned to the standing escalation. */
+const SHARD_REPAIR_ATTEMPT_CAP = 3;
+
+/** Whether a request is due at `now`. A request that cannot be read is due, so the pass that consumes it runs. */
+function shardRepairRequestDue(path: string, now: number): boolean {
+  try {
+    const nextAt = (JSON.parse(readFileSync(path, "utf8")) as ShardRepairRequest).next_at;
+    return nextAt === undefined || Date.parse(nextAt) <= now;
+  } catch {
+    // deliberate: a torn or vanished request is "due" — the pass then ledgers it as a pass failure and consumes it.
+    return true;
+  }
+}
+
+/** Whether a repair request is due — the plan garden's due probe, on the loop. A backing-off request is not, so the garden never spins. */
+export function shardRepairsPending(stateDir: string, now: number = Date.now()): boolean {
+  return shardRepairRequests(stateDir).some((path) => shardRepairRequestDue(path, now));
 }
 
 /** The plan garden with the repair lane in front of it: due while a request waits, and a repair failure never skips the garden. */
@@ -34478,10 +34495,16 @@ export function withShardRepairs(stateDir: string, repairs: () => void, garden: 
   }, { due: () => shardRepairsPending(stateDir) || (garden.due?.() ?? true) });
 }
 
+/** `opened.json`'s value per blob: the PR url, or — once a closed-unmerged PR was replaced — the fresh PR and the one it replaced. */
+type ShardRepairOpened = string | { pr_url: string; reopened_from: string };
+
+/** What one attempt decided: `done` consumes the request; `retry` keeps it, charged to `blob` when the bytes were read. */
+type ShardRepairOutcome = { done: true } | { retry: true; blob?: string };
+
 function repairRequestedShard(
-  request: { id: string; file: string },
-  opts: { stateDir: string; log: ShardRepairLog; readOriginBlob: (rel: string) => string; land: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined },
-): void {
+  request: ShardRepairRequest,
+  opts: { stateDir: string; log: ShardRepairLog; readOriginBlob: (rel: string) => string; land: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined; prState: (prUrl: string) => PrState },
+): ShardRepairOutcome {
   const at = { id: request.id, file: request.file };
   const failure = (stage: string, e: unknown) => ({ ...at, stage, reason: String((e as Error)?.message ?? e) });
   const rel = request.file.slice(ORIGIN_MAIN_LABEL.length);
@@ -34490,26 +34513,40 @@ function repairRequestedShard(
     text = opts.readOriginBlob(rel);
   } catch (e) {
     opts.log("plan.shard_repair_failed", failure("read", e));
-    return;
+    return { retry: true };
   }
   const blob = gitBlobSha(text);
   const openedPath = join(shardRepairDir(opts.stateDir), "opened.json");
-  let opened: Record<string, string>;
+  let opened: Record<string, ShardRepairOpened>;
   try {
-    opened = JSON.parse(readFileIfExists(openedPath) ?? "{}") as Record<string, string>;
+    opened = JSON.parse(readFileIfExists(openedPath) ?? "{}") as Record<string, ShardRepairOpened>;
   } catch (e) {
     // An unreadable record cannot say these bytes were never opened: refuse rather than risk a second PR.
     opts.log("plan.shard_repair_failed", failure("opened-record", e));
-    return;
+    return { retry: true, blob };
   }
-  if (opened[blob]) {
-    opts.log("plan.shard_repair_skipped", { ...at, blob, pr_url: opened[blob], reason: "a repair PR was already opened for these bytes" });
-    return;
+  const prior = opened[blob];
+  let reopenedFrom: string | undefined;
+  if (typeof prior === "object") {
+    opts.log("plan.shard_repair_skipped", { ...at, blob, pr_url: prior.pr_url, reason: "a repair PR was already reopened once for these bytes; its close is respected" });
+    return { done: true };
+  }
+  if (prior !== undefined) {
+    const prState = opts.prState(prior);
+    if (prState === "unknown") {
+      opts.log("plan.shard_repair_skipped", { ...at, blob, pr_url: prior, pr_state: prState, reason: "the recorded repair PR's state could not be read; retried rather than risk a duplicate PR" });
+      return { retry: true, blob };
+    }
+    if (prState !== "closed") {
+      opts.log("plan.shard_repair_skipped", { ...at, blob, pr_url: prior, pr_state: prState, reason: "a repair PR was already opened for these bytes" });
+      return { done: true };
+    }
+    reopenedFrom = prior;
   }
   const verdict = repairDuplicateKeyShard(text);
   if ("refused" in verdict) {
     opts.log("plan.shard_repair_refused", { ...at, blob, reason: verdict.reason });
-    return;
+    return { done: true };
   }
   const keys = Object.keys(verdict.kept).join(", ");
   const pr = {
@@ -34525,21 +34562,42 @@ function repairRequestedShard(
     prUrl = opts.land(rel, verdict.text, pr);
   } catch (e) {
     opts.log("plan.shard_repair_failed", failure("land", e));
-    return;
+    return { retry: true, blob };
   }
   if (prUrl === undefined) {
     opts.log("plan.shard_repair_not_landed", { ...at, blob, reason: "the plan-PR preflight refused the repair; plan_pr.preflight_refused names why" });
+    return { retry: true, blob };
+  }
+  const entry: ShardRepairOpened = reopenedFrom === undefined ? prUrl : { pr_url: prUrl, reopened_from: reopenedFrom };
+  writeAtomic(openedPath, `${JSON.stringify({ ...opened, [blob]: entry }, null, 2)}\n`);
+  opts.log("plan.shard_repair_opened", { ...at, blob, pr_url: prUrl, kept: verdict.kept, ...(reopenedFrom === undefined ? {} : { reopened_from: reopenedFrom }) });
+  return { done: true };
+}
+
+/** W1-T5618 — a retried request is rewritten with its attempt count and backoff, or abandoned at the cap. Bytes
+ *  main changed since the last attempt start their own count: the old bytes' failures say nothing about them. */
+function rescheduleShardRepair(path: string, request: ShardRepairRequest, blob: string | undefined, now: number, log: ShardRepairLog): void {
+  const charged = blob ?? request.blob;
+  const newBytes = blob !== undefined && request.blob !== undefined && blob !== request.blob;
+  const attempts = (newBytes ? 0 : (request.attempts ?? 0)) + 1;
+  const at = { id: request.id, file: request.file, ...(charged === undefined ? {} : { blob: charged }) };
+  if (attempts >= SHARD_REPAIR_ATTEMPT_CAP) {
+    rmSync(path, { force: true });
+    log("plan.shard_repair_abandoned", { ...at, attempts, reason: `${attempts} repair attempts did not open a PR; the shard's quarantine escalation stands for a hand repair` });
     return;
   }
-  writeAtomic(openedPath, `${JSON.stringify({ ...opened, [blob]: prUrl }, null, 2)}\n`);
-  opts.log("plan.shard_repair_opened", { ...at, blob, pr_url: prUrl, kept: verdict.kept });
+  const nextAt = new Date(now + GARDEN_FILING_RETRY_BASE_MS * 2 ** (attempts - 1)).toISOString();
+  writeAtomic(path, `${JSON.stringify({ id: request.id, file: request.file, attempts, ...(charged === undefined ? {} : { blob: charged }), next_at: nextAt })}\n`);
+  log("plan.shard_repair_retry_scheduled", { ...at, attempt: attempts, next_at: nextAt });
 }
 
 /**
- * Off the loop, inside the plan garden's child: each waiting request is repaired from origin/main's blob
+ * Off the loop, inside the plan garden's child: each due request is repaired from origin/main's blob
  * with {@link repairDuplicateKeyShard} and opened as a plan-only PR through {@link gardenCheckout} (its
- * W1-T5348 preflight, then `createPlanPrRest`) — once per shard blob, by `opened.json`. A request is
- * consumed whatever its outcome; a daemon restart re-requests a shard that still does not load.
+ * W1-T5348 preflight, then `createPlanPrRest`) — once per shard blob, by `opened.json`, unless that PR was
+ * closed unmerged, when one fresh PR is opened (W1-T5618). A request is consumed only at an end state — a PR
+ * open or merged, a refusal, a request that cannot be read; a not-landed or failed attempt backs off and is
+ * retried on a later pass until {@link SHARD_REPAIR_ATTEMPT_CAP} abandons it.
  */
 export function runShardRepairPass(opts: {
   stateDir: string;
@@ -34550,6 +34608,8 @@ export function runShardRepairPass(opts: {
   log: ShardRepairLog;
   readOriginBlob?: (rel: string) => string;
   land?: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined;
+  prState?: (prUrl: string) => PrState;
+  now?: () => number;
 }): void {
   const readOriginBlob =
     opts.readOriginBlob ?? ((rel: string) => execFileSync("git", ["-C", opts.repoDir, "show", `origin/main:${rel}`], { encoding: "utf8", maxBuffer: 1 << 26, stdio: ["ignore", "pipe", "pipe"] }));
@@ -34564,14 +34624,21 @@ export function runShardRepairPass(opts: {
         checkout.dispose();
       }
     });
+  const prState = opts.prState ?? ((prUrl: string) => gardenPrState(opts.owner, opts.repo, prUrl, ghJson));
+  const now = (opts.now ?? Date.now)();
   for (const path of shardRepairRequests(opts.stateDir)) {
+    if (!shardRepairRequestDue(path, now)) continue;
+    let request: ShardRepairRequest;
     try {
-      repairRequestedShard(JSON.parse(readFileSync(path, "utf8")) as { id: string; file: string }, { stateDir: opts.stateDir, log: opts.log, readOriginBlob, land });
+      request = JSON.parse(readFileSync(path, "utf8")) as ShardRepairRequest;
     } catch (e) {
       opts.log("plan.shard_repair_failed", { request: path, stage: "pass", reason: String((e as Error)?.message ?? e) });
-    } finally {
       rmSync(path, { force: true });
+      continue;
     }
+    const outcome = repairRequestedShard(request, { stateDir: opts.stateDir, log: opts.log, readOriginBlob, land, prState });
+    if ("done" in outcome) rmSync(path, { force: true });
+    else rescheduleShardRepair(path, request, outcome.blob, now, opts.log);
   }
 }
 
