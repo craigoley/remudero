@@ -40,7 +40,8 @@ import {
   createPlanPrRest,
   PlanPrPreflightRefusedError,
   planPrPreflightAllows,
-  planPrPreflightAtCommit,
+  planPrPreflightAtCommitAsync,
+  type PlanPrPreflightResult,
   probeExistingPlanPr,
 } from "./plan-pr-emitter.js";
 import {
@@ -1324,8 +1325,8 @@ export interface BuildSweepEffectsDeps {
   buildPlanPrBodyImpl?: typeof buildPlanPrBody;
   /** W1-T5349 — the plan-repair renumber's reservation; defaults to {@link reservePlanRepairTaskId}. */
   planRepairReserveIdImpl?: (worktreePath: string, filingBranch: string) => string;
-  /** W1-T5405 — the filer preflight both plan-PR rungs here run on their commit before the push. */
-  planPrPreflightImpl?: typeof planPrPreflightAtCommit;
+  /** W1-T5405 — the filer preflight both plan-PR rungs here run on their commit before the push; W1-T5521 awaits it. */
+  planPrPreflightImpl?: (...args: Parameters<typeof planPrPreflightAtCommitAsync>) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
 }
 
 export type ReviewDispatchMode =
@@ -1706,7 +1707,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     fixRungCheckoutRefusedErrorImpl: FixRungCheckoutRefusedError = requiredSweepRuntimeCtor("fixRungCheckoutRefusedErrorImpl"),
     defaultBudgetUsd = 100,
     buildPlanPrBodyImpl = buildPlanPrBody,
-    planPrPreflightImpl = planPrPreflightAtCommit,
+    planPrPreflightImpl = planPrPreflightAtCommitAsync,
     updatePrBodyImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["updatePrBodyImpl"]>>("updatePrBodyImpl"),
   } = deps;
 
@@ -3260,7 +3261,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             readShard: (taskId) => readTaskShard(repoDir, taskId),
             probeExisting: (branch) => probeExistingPlanPr(ghJsonForBuild, owner, repo, branch),
             nowIso: () => clockFromMillisFn(nowMsImpl).iso(),
-            openAmendmentPr: (input) => {
+            openAmendmentPr: async (input) => {
               try {
                 planRepairGit("git", ["-C", repoDir, "fetch", "origin", "--quiet"]);
               } catch {
@@ -3291,7 +3292,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                   proofCwd: worktreePath,
                 });
                 // W1-T5405: a red preflight is ledgered as this source run's outcome, so the next pass does not re-pay it.
-                const verdict = planPrPreflightImpl(worktreePath, headSha, { title: input.title, body });
+                const verdict = await planPrPreflightImpl(worktreePath, headSha, { title: input.title, body });
                 if (!planPrPreflightAllows(verdict, { lane: "refusal_amendment", branch: input.branch, log })) {
                   log(REFUSAL_AMENDMENT_STEP, { task_id: c.taskId, source_run_id: c.runId, outcome: "preflight_refused", failures: verdict.failures });
                   throw new PlanPrPreflightRefusedError("refusal_amendment", verdict.failures);
@@ -3536,7 +3537,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           proofCwd: worktreePath,
         });
         // W1-T5405: the verdict rides this rung's ONE dispatch row, so a refusal spends a MAX_PLAN_REPAIR_STRIKES strike.
-        const verdict = planPrPreflightImpl(worktreePath, headSha, { title, body });
+        const verdict = await planPrPreflightImpl(worktreePath, headSha, { title, body });
         const preflightRow = verdict.unreadable.length > 0 ? { preflight_unreadable: verdict.unreadable } : {};
         if (!planPrPreflightAllows(verdict, { lane: "plan_repair", branch })) {
           planRepairLog("preflight_refused", { shard_path: shardRelPath, failures: verdict.failures, ...preflightRow });
