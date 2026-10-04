@@ -1,0 +1,15 @@
+- id: W1-T5641
+  title: "RATIFICATION CANDIDATE TASK: define migration path and testing for W1-T5641; link to W1-T5640"
+  origin: "derived from W1-T5640"
+  repo: remudero
+  depends_on: [W1-T5640]
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/ratification/W1-T5641.md
+  acceptance:
+    - claim: "The W1-T5641 task specifies a concrete migration path and test scaffolding for ratification execution"
+      proof: "unit test: plan/ratification/W1-T5641.md"

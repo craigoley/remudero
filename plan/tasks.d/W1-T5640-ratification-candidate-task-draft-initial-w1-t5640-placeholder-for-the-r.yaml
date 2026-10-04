@@ -1,0 +1,15 @@
+- id: W1-T5640
+  title: "RATIFICATION CANDIDATE TASK: draft initial W1-T5640 placeholder for the ratification window"
+  origin: "W1-T3332 governance intent"
+  repo: remudero
+  depends_on: []
+  type: recon
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/ratification/W1-T5640.md
+  acceptance:
+    - claim: "The W1-T5640 draft establishes the baseline acceptance criteria and links back to W1-T3332's governance intent"
+      proof: "unit test: plan/ratification/W1-T5640.md"

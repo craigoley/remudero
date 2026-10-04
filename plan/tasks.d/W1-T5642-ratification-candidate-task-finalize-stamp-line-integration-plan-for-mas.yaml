@@ -1,0 +1,15 @@
+- id: W1-T5642
+  title: "RATIFICATION CANDIDATE TASK: finalize stamp line integration plan for MASTER-PLAN.md"
+  origin: "derived from W1-T5641"
+  repo: remudero
+  depends_on: [W1-T5641]
+  type: review
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - plan/ratification/W1-T5642.md
+  acceptance:
+    - claim: "The W1-T5642 task defines how the stamp line will finalize the ratification and reflect W1-T5640..W1-T5642"
+      proof: "unit test: plan/ratification/W1-T5642.md"
