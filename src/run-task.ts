@@ -18677,10 +18677,11 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
  * (or absent), and `baseWorktreeFailure` names why the worktree could not be created.
  */
 export interface BaseProofDir {
-  pendingCheckout?: Promise<void>;
   baseCheckoutDir: string | undefined;
   baseUnreadablePaths: ReadonlySet<string>;
   baseIsCheckout: boolean;
+  /** (W1-T5528) Set only on the `detachedAsync` path: the base probe's checkout still in flight. */
+  pendingCheckout?: Promise<void>;
   baseWorktreeFailure?: string;
   /** (W1-T3190) Exactly the `test/**` paths COPIED in above, so `classifyBaseProofOutcome` reads
    *  the same set the copy used: a `grep:` naming one would otherwise find the copy and read as
