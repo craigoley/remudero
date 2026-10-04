@@ -10241,16 +10241,18 @@ export async function runFixRung(opts: {
   // W1-T1227: the changed-file list as it stood BEFORE this invocation's first strike —
   // {@link fixRungScopeStandDownReason}'s baseline, so a path already out of scope before this
   // rung ever ran (tolerated by `scopeGuardOutOfScopeFiles`'s push-and-flag disposition on the
-  // implement path) is never re-flagged as something the RUNG added. Best-effort: an omitted
-  // `deps.fetchPrDiffFiles`, or one that throws, degrades to `undefined` — the scope check below
-  // then simply never fires (fail OPEN, the same discipline every other pre-strike read in this
-  // function already follows), never a guessed baseline.
+  // implement path) is never re-flagged as something the RUNG added. An omitted reader skips
+  // the check; an unreadable diff stands down before dispatch (W1-T4074).
   let baselineDiffFiles: string[] | undefined;
   if (deps.fetchPrDiffFiles) {
     try {
       baselineDiffFiles = await deps.fetchPrDiffFiles(opts.prUrl);
-    } catch {
-      baselineDiffFiles = undefined;
+    } catch (error) {
+      const reason = `PR diff unreadable — no surface to stage can be verified: ${String(error)}`;
+      const site = (opts.task.files ?? []).length === 0 ? "rung.empty_commit_surface" : "rung.pr_diff_unreadable";
+      deps.log("fix.stood_down", { site, strike: strikes + 1, reason });
+      deps.say(`fix rung: ${reason} — standing down before spending a worker round`);
+      return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
     }
   }
   // W1-T1278 (condition B): THIS rung's own PR number, parsed once — `undefined` when `prUrl`
@@ -10803,8 +10805,8 @@ export async function runFixRung(opts: {
     // / `review.instrumentEntangled`, below) fires a whole round later, only after CI has gone green
     // and a full review has run. This check needs neither: it reads the live changed-file list
     // directly, so it fires as soon as the offending push is visible on GitHub, escalating instead of
-    // spending another strike. Best-effort (`deps.fetchPrDiffFiles` omitted or throwing skips this
-    // round's check entirely, fail OPEN) and NEVER writes the PR body or the task record — it only
+    // spending another strike. An omitted reader skips the check; an unreadable diff stands down.
+    // This never writes the PR body or the task record — it only
     // ledgers, says, and (like the rule-15/rule-25 refusals beside it) escalates.
     //
     // W1-T2653: this round's own declared remedy file(s) — the failing check(s) THIS strike is
@@ -10821,8 +10823,11 @@ export async function runFixRung(opts: {
       let currentDiffFiles: string[] | undefined;
       try {
         currentDiffFiles = await deps.fetchPrDiffFiles(opts.prUrl);
-      } catch {
-        currentDiffFiles = undefined;
+      } catch (error) {
+        const reason = `PR diff unreadable: ${String(error)}`;
+        deps.log("fix.stood_down", { site: "rung.pr_diff_unreadable", strike: strikes + 1, reason });
+        deps.say(`fix rung: ${reason} — standing down before spending a worker round`);
+        return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
       }
       const scopeStandDown =
         currentDiffFiles !== undefined
@@ -11304,7 +11309,9 @@ export async function runFixRung(opts: {
     // W1-T3727: WHO HOLDS THIS ROUND'S GIT, read once by BOTH the prompt and the tool bound so
     // the contract and the surface cannot disagree. The caller already pushes; only the commit moves.
     const { harnessCommits: fixHarnessOwnsGit, cashTools: fixCashTools } = fixRoundGitOwnership(opts.config);
-    const fixDeclaredPaths = [...(opts.task.files ?? []), ...(baselineDiffFiles ?? []), ...offeredCensusBaselines()];
+    const fixDeclaredPaths = [...new Set([
+      ...(opts.task.files ?? []), ...(baselineDiffFiles ?? []), ...reachableRemedyFiles.map((file) => file.path),
+    ])];
     if (fixHarnessOwnsGit && fixDeclaredPaths.length === 0) {
       const reason = "the fix has no surface to stage — declare task files or restore the PR diff before dispatch";
       deps.log("fix.stood_down", { site: "rung.empty_commit_surface", strike: attempt, reason });

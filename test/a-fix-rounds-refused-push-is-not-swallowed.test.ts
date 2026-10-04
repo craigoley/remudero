@@ -174,6 +174,8 @@ async function drive(fx: Fixture, t: { mock: { method: (o: object, k: string, f:
       { when: "--json headRefName", stdout: JSON.stringify({ headRefName: branch, headRefOid: PR_HEAD, body: "" }) },
       { when: "--json headRefOid", stdout: JSON.stringify({ headRefOid: PR_HEAD }) },
       { when: "--json body", stdout: JSON.stringify({ body: "" }) },
+      // W1-T4074: an unreadable PR diff stands the fix rung down before dispatch — answer the read.
+      { when: "--json files", stdout: JSON.stringify({ files: [{ path: "src/lib/daemon.ts" }] }) },
       { when: "pulls/501/", stdout: "[]" },
       { when: "check-runs", stdout: JSON.stringify({ check_runs: [{ name: "ci", status: "completed", conclusion: "success" }] }) },
       { when: "/status", stdout: JSON.stringify({ statuses: [] }) },
