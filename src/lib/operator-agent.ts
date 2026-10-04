@@ -10,7 +10,8 @@
 import { createHash } from "node:crypto";
 import { dirname } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { Route, WriteTier } from "./service.js";
+import type { Route, RouteHandler, WriteTier } from "./service.js";
+import { OPERATOR_AGENT_ROWS_VIEW, type OperatorAgentRowsSource } from "./operator-agent-read-model.js";
 import { clockFromMillisFn, fixedClock } from "./clock.js";
 import { EMERGENCY_STOP_CLEARED_LEDGER_STEP, EMERGENCY_STOP_ISSUED_LEDGER_STEP } from "./ledger.js";
 import {
@@ -63,6 +64,7 @@ import {
   applyFollowUpControl,
   evaluateFollowUpPolicy,
   createFollowUpHistoryReader,
+  followUpHistoryFromRows,
   followUpReceipt,
   type FollowUpCandidate,
   type FollowUpControl,
@@ -488,6 +490,7 @@ export type OperatorAgentRouteDependencies = Pick<PanelActionDeps, "ledgerPath">
   now?: () => number;
   memory?: OperatorAgentMemorySource;
   goalBoard?: () => GoalBoardView | undefined;
+  panelRows?: OperatorAgentRowsSource;
 };
 
 type ProposalRegistrationInput = { proposal: OperatorAgentProposal };
@@ -648,15 +651,53 @@ function operatorAgentUnionMemo(stateDir: string): LedgerRotationMemo {
   return memo;
 }
 
-function readOperatorAgentUnion(stateDir: string, opts: PanelUnionReadOptions): LedgerUnionRecordRead {
+let servedPanelRows: { stateDir: string; rows: ReadonlyArray<Record<string, unknown>> } | undefined;
+
+function servedRows(stateDir: string, step: PanelUnionReadOptions["step"]): Array<Record<string, unknown>> | undefined {
+  if (servedPanelRows?.stateDir !== stateDir) return undefined;
+  const steps = new Set<string>(typeof step === "string" ? [step] : step);
+  return servedPanelRows.rows.filter((row) => typeof row.step === "string" && steps.has(row.step));
+}
+
+function readOperatorAgentUnion(stateDir: string, opts: PanelUnionReadOptions): Array<Record<string, unknown>> {
+  const served = servedRows(stateDir, opts.step);
+  if (served) return served;
   const pass = operatorAgentUnionMemo(stateDir).pass({ parseMissing: true });
   const read = readLedgerUnionRecordsSync(stateDir, { ...opts, pattern: OPERATOR_AGENT_ROW, rotationRecords: pass.rotationRecords });
   pass.complete();
-  return read;
+  return read.rows;
+}
+
+function servedGet(deps: OperatorAgentRouteDependencies, handler: RouteHandler): RouteHandler {
+  const source = deps.panelRows;
+  if (!source) return handler;
+  return async (req, res, ctx) => {
+    const read = await source.read();
+    if ("legacy" in read) return handler(req, res, ctx);
+    if ("reason" in read) {
+      sendJson(res, 503, { error: "unavailable", source: OPERATOR_AGENT_ROWS_VIEW, reason: read.reason, sources: read.sources });
+      return;
+    }
+    if (read.stale.length > 0) res.setHeader("x-rmd-stale-sources", read.stale.join(","));
+    servedPanelRows = { stateDir: dirname(deps.ledgerPath), rows: read.rows };
+    try {
+      return handler(req, res, ctx);
+    } finally {
+      servedPanelRows = undefined;
+    }
+  };
+}
+
+function appendOperatorAgentRow(deps: OperatorAgentRouteDependencies, step: string, taskId: string, origin: string, extra?: Record<string, unknown>): ReturnType<typeof appendPanelLedger> {
+  const row = appendPanelLedger(deps.ledgerPath, step, taskId, origin, extra);
+  deps.panelRows?.noteWrite(row.ts);
+  return row;
 }
 
 /** {@link readOperatorAgentUnion}'s rows, with a rotation the memo lacks loaded off the loop (async gunzip, sliced parse). */
-function readOperatorAgentUnionAsync(stateDir: string, opts: PanelUnionReadOptions): Promise<LedgerUnionRecordRead> {
+function readOperatorAgentUnionAsync(stateDir: string, opts: PanelUnionReadOptions): Promise<Pick<LedgerUnionRecordRead, "rows">> {
+  const served = servedRows(stateDir, opts.step);
+  if (served) return Promise.resolve({ rows: served });
   const read = readLedgerUnionRecordsMemoized(stateDir, operatorAgentUnionMemo(stateDir), { ...opts, pattern: OPERATOR_AGENT_ROW });
   const tracked: Promise<unknown> = read
     .catch(() => undefined /* deliberate: the caller receives this rejection; tracking only waits for it */)
@@ -673,7 +714,7 @@ export async function prewarmOperatorAgentReads(ledgerPath: string): Promise<voi
 function contextRows(ledgerPath: string): Array<Record<string, unknown>> {
   return readOperatorAgentUnion(dirname(ledgerPath), {
     step: [CONTEXT_ITEM_STEP, CONTEXT_REVOKED_STEP, CONTEXT_DELETED_STEP],
-  }).rows;
+  });
 }
 
 /** W1-T3893: exported so `context-controls.ts` composes self-service inventory, forget, revoke,
@@ -1212,7 +1253,7 @@ const EXPERIMENT_STEPS = [
 ] as const;
 
 function readExperimentRows(ledgerPath: string): Array<Record<string, unknown>> {
-  return readOperatorAgentUnion(dirname(ledgerPath), { step: EXPERIMENT_STEPS }).rows;
+  return readOperatorAgentUnion(dirname(ledgerPath), { step: EXPERIMENT_STEPS });
 }
 
 function readPromotionRows(ledgerPath: string): Array<Record<string, unknown>> {
@@ -1224,7 +1265,7 @@ function readPromotionRows(ledgerPath: string): Array<Record<string, unknown>> {
       OPERATOR_AGENT_PROMOTION_ADVANCE_STEP,
       OPERATOR_AGENT_PROMOTION_ROLLBACK_STEP,
     ],
-  }).rows;
+  });
 }
 
 function settingsFromRow(row: Record<string, unknown>, requestedScope?: OperatorAgentSettingsScope): { settings: OperatorAgentSettings; scope?: OperatorAgentSettingsScope } | null {
@@ -1341,16 +1382,16 @@ export function createOperatorAgentMemorySource(
 
 function readRows(deps: OperatorAgentRouteDependencies): ReadonlyArray<Record<string, unknown>> {
   const memory = deps.memory?.current();
-  if (memory?.state === "ready") return memory.rows as ReadonlyArray<Record<string, unknown>>;
+  if (memory?.state === "ready" && servedPanelRows === undefined) return memory.rows as ReadonlyArray<Record<string, unknown>>;
   return readOperatorAgentUnion(dirname(deps.ledgerPath), {
     step: [OPERATOR_AGENT_PROPOSAL_STEP, OPERATOR_AGENT_DECISION_STEP, OPERATOR_AGENT_OUTCOME_STEP],
-  }).rows;
+  });
 }
 
 function readSettingsRows(deps: OperatorAgentRouteDependencies): ReadonlyArray<Record<string, unknown>> {
   const memory = deps.memory?.current();
-  if (memory?.state === "ready") return memory.rows as ReadonlyArray<Record<string, unknown>>;
-  return readOperatorAgentUnion(dirname(deps.ledgerPath), { step: OPERATOR_AGENT_SETTINGS_STEP }).rows;
+  if (memory?.state === "ready" && servedPanelRows === undefined) return memory.rows as ReadonlyArray<Record<string, unknown>>;
+  return readOperatorAgentUnion(dirname(deps.ledgerPath), { step: OPERATOR_AGENT_SETTINGS_STEP });
 }
 
 /**
@@ -1361,7 +1402,7 @@ function readSettingsRows(deps: OperatorAgentRouteDependencies): ReadonlyArray<R
  */
 function rejectColdOperatorAgentMemory(deps: OperatorAgentRouteDependencies, res: ServerResponse): boolean {
   const memory = deps.memory?.current();
-  if (!memory || memory.state === "ready") return false;
+  if (!memory || memory.state === "ready" || servedPanelRows !== undefined) return false;
   sendJson(res, 503, {
     error: "unavailable",
     source: "operator-agent-memory",
@@ -1568,7 +1609,7 @@ export function buildContextReadRoute(deps: OperatorAgentRouteDependencies): Rou
     path: "/v1/operator-agent/context",
     scope: "read",
     sensitivity: "sensitive",
-    handler: (req, res) => {
+    handler: servedGet(deps, (req, res) => {
       const url = new URL(req.url ?? "/", "http://rmd.local");
       const purpose = url.searchParams.get("purpose");
       const authorityRef = url.searchParams.get("authorityRef");
@@ -1578,7 +1619,7 @@ export function buildContextReadRoute(deps: OperatorAgentRouteDependencies): Rou
       );
       const stale = items.filter((item) => item.availability === "stale").map((item) => item.contextId);
       sendJson(res, 200, { items, stale, absent: items.length === 0, source: "ledger", asOf: new Date(now).toISOString() });
-    },
+    }),
   };
 }
 
@@ -1604,7 +1645,7 @@ export function buildContextRegisterRoute(deps: OperatorAgentRouteDependencies):
         sendJson(res, 200, { ok: true, existing: true, context: publicContext(existing, state, deps.now?.() ?? Date.now()) });
         return;
       }
-      appendPanelLedger(deps.ledgerPath, CONTEXT_ITEM_STEP, input.context.contextId, bearerTokenId(req), { context: input.context });
+      appendOperatorAgentRow(deps, CONTEXT_ITEM_STEP, input.context.contextId, bearerTokenId(req), { context: input.context });
       state.items.set(input.context.contextId, input.context);
       sendJson(res, 201, { ok: true, existing: false, context: publicContext(input.context, state, deps.now?.() ?? Date.now()) });
     }),
@@ -1646,7 +1687,7 @@ export function performContextRevoke(
   if (existing) return { status: 200, body: { ok: true, existing: true, receipt: existing } };
   const at = new Date(deps.now?.() ?? Date.now()).toISOString();
   const receipt = makeContextReceipt(input.contextId, "revoke", input.authorityRef, state, at);
-  appendPanelLedger(deps.ledgerPath, CONTEXT_REVOKED_STEP, input.contextId, actorId, {
+  appendOperatorAgentRow(deps, CONTEXT_REVOKED_STEP, input.contextId, actorId, {
     context_id: input.contextId,
     authority_ref: input.authorityRef,
     at,
@@ -1673,7 +1714,7 @@ export function performContextDelete(
   if (existing) return { status: 200, body: { ok: true, existing: true, receipt: existing } };
   const at = new Date(deps.now?.() ?? Date.now()).toISOString();
   const receipt = makeContextReceipt(input.contextId, "delete", input.authorityRef, state, at);
-  appendPanelLedger(deps.ledgerPath, CONTEXT_DELETED_STEP, input.contextId, actorId, {
+  appendOperatorAgentRow(deps, CONTEXT_DELETED_STEP, input.contextId, actorId, {
     context_id: input.contextId,
     authority_ref: input.authorityRef,
     at,
@@ -1716,7 +1757,7 @@ export function buildOperatorAgentProposalReadRoute(deps: OperatorAgentRouteDepe
     method: "GET",
     path: "/v1/operator-agent/proposals",
     scope: "read",
-    handler: (req, res) => {
+    handler: servedGet(deps, (req, res) => {
       if (rejectColdOperatorAgentMemory(deps, res)) return;
       const requested = requestedPreferenceScope(req, false);
       if (requested.error) {
@@ -1729,7 +1770,7 @@ export function buildOperatorAgentProposalReadRoute(deps: OperatorAgentRouteDepe
         return;
       }
       sendJson(res, 200, { ...presentOperatorAgentProposals(deps, proposals, requested.scope), source: "ledger" });
-    },
+    }),
   };
 }
 
@@ -1756,11 +1797,11 @@ export function buildOperatorAgentProposalRegisterRoute(deps: OperatorAgentRoute
       // this proposal's repo.
       const admission = checkEmergencyStop(activeEmergencyStops(deps), { actionKind: "action-admission", repo: input.proposal.repo }, deps.now?.() ?? Date.now());
       if (!admission.ok) {
-        appendPanelLedger(deps.ledgerPath, EMERGENCY_STOP_REFUSAL_STEP, input.proposal.proposalId, bearerTokenId(req), { receipt: admission.receipt });
+        appendOperatorAgentRow(deps, EMERGENCY_STOP_REFUSAL_STEP, input.proposal.proposalId, bearerTokenId(req), { receipt: admission.receipt });
         sendJson(res, 423, { ok: false, error: "emergency_stop_active", code: admission.code, receipt: admission.receipt });
         return;
       }
-      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_PROPOSAL_STEP, input.proposal.proposalId, bearerTokenId(req), { proposal: input.proposal });
+      appendOperatorAgentRow(deps, OPERATOR_AGENT_PROPOSAL_STEP, input.proposal.proposalId, bearerTokenId(req), { proposal: input.proposal });
       deps.memory?.record({ step: OPERATOR_AGENT_PROPOSAL_STEP, proposal: input.proposal });
       sendJson(res, 201, { ok: true, existing: false, proposal: input.proposal });
     }),
@@ -1786,7 +1827,7 @@ export function buildOperatorAgentDecisionRoute(deps: OperatorAgentRouteDependen
         return;
       }
       const at = new Date(deps.now?.() ?? Date.now()).toISOString();
-      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_DECISION_STEP, input.proposalId, bearerTokenId(req), {
+      appendOperatorAgentRow(deps, OPERATOR_AGENT_DECISION_STEP, input.proposalId, bearerTokenId(req), {
         proposal_id: input.proposalId,
         decision: input.decision,
         at,
@@ -1822,7 +1863,7 @@ export function buildOperatorAgentOutcomeRoute(deps: OperatorAgentRouteDependenc
         sendJson(res, 409, { error: "conflict", detail: `proposal ${input.proposalId} must be accepted before an outcome is recorded` });
         return;
       }
-      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_OUTCOME_STEP, input.proposalId, bearerTokenId(req), {
+      appendOperatorAgentRow(deps, OPERATOR_AGENT_OUTCOME_STEP, input.proposalId, bearerTokenId(req), {
         proposal_id: input.proposalId,
         outcome: input.outcome,
       });
@@ -1838,10 +1879,10 @@ export function buildOperatorAgentExperimentReadRoute(deps: OperatorAgentRouteDe
     method: "GET",
     path: "/v1/operator-agent/experiments",
     scope: "read",
-    handler: async (_req, res) => {
+    handler: servedGet(deps, async (_req, res) => {
       const { rows } = await readOperatorAgentUnionAsync(dirname(deps.ledgerPath), { step: EXPERIMENT_STEPS });
       sendJson(res, 200, { experiments: foldOperatorAgentExperiments(rows), source: "ledger" });
-    },
+    }),
   };
 }
 
@@ -1874,7 +1915,7 @@ export function buildOperatorAgentExperimentRegisterRoute(deps: OperatorAgentRou
         sendJson(res, 200, { ok: true, existing: true, experiment: existing });
         return;
       }
-      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_EXPERIMENT_STEP, input.experiment.experimentId, bearerTokenId(req), { experiment: input.experiment });
+      appendOperatorAgentRow(deps, OPERATOR_AGENT_EXPERIMENT_STEP, input.experiment.experimentId, bearerTokenId(req), { experiment: input.experiment });
       sendJson(res, 201, { ok: true, existing: false, experiment: input.experiment });
     }),
   };
@@ -1898,7 +1939,7 @@ export function buildOperatorAgentExperimentDecisionRoute(deps: OperatorAgentRou
         return;
       }
       const at = new Date(deps.now?.() ?? Date.now()).toISOString();
-      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_EXPERIMENT_DECISION_STEP, input.experimentId, bearerTokenId(req), {
+      appendOperatorAgentRow(deps, OPERATOR_AGENT_EXPERIMENT_DECISION_STEP, input.experimentId, bearerTokenId(req), {
         experiment_id: input.experimentId,
         decision: input.decision,
         at,
@@ -1928,7 +1969,7 @@ export function buildOperatorAgentExperimentOutcomeRoute(deps: OperatorAgentRout
       }
       const outcome = normaliseExperimentOutcome(input.outcome, existing.baseline);
       const at = new Date(deps.now?.() ?? Date.now()).toISOString();
-      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_EXPERIMENT_OUTCOME_STEP, input.experimentId, bearerTokenId(req), {
+      appendOperatorAgentRow(deps, OPERATOR_AGENT_EXPERIMENT_OUTCOME_STEP, input.experimentId, bearerTokenId(req), {
         experiment_id: input.experimentId,
         outcome,
         at,
@@ -1956,7 +1997,7 @@ export function buildOperatorAgentExperimentRollbackRoute(deps: OperatorAgentRou
         return;
       }
       const at = new Date(deps.now?.() ?? Date.now()).toISOString();
-      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_EXPERIMENT_ROLLBACK_STEP, input.experimentId, bearerTokenId(req), {
+      appendOperatorAgentRow(deps, OPERATOR_AGENT_EXPERIMENT_ROLLBACK_STEP, input.experimentId, bearerTokenId(req), {
         experiment_id: input.experimentId,
         rollback: input.rollback,
         at,
@@ -1972,7 +2013,7 @@ export function buildOperatorAgentPromotionReadRoute(deps: OperatorAgentRouteDep
     method: "GET",
     path: "/v1/operator-agent/promotions",
     scope: "read",
-    handler: (_req, res) => sendJson(res, 200, { promotions: readOperatorAgentPromotions(deps), source: "ledger" }),
+    handler: servedGet(deps, (_req, res) => sendJson(res, 200, { promotions: readOperatorAgentPromotions(deps), source: "ledger" })),
   };
 }
 
@@ -2020,7 +2061,7 @@ export function buildOperatorAgentPromotionRegisterRoute(deps: OperatorAgentRout
         });
         return;
       }
-      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_PROMOTION_STEP, input.promotion.promotionId, bearerTokenId(req), { promotion: input.promotion });
+      appendOperatorAgentRow(deps, OPERATOR_AGENT_PROMOTION_STEP, input.promotion.promotionId, bearerTokenId(req), { promotion: input.promotion });
       sendJson(res, 201, { ok: true, existing: false, promotion: input.promotion });
     }),
   };
@@ -2044,7 +2085,7 @@ export function buildOperatorAgentPromotionReplayRoute(deps: OperatorAgentRouteD
         return;
       }
       const at = new Date(deps.now?.() ?? Date.now()).toISOString();
-      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_PROMOTION_REPLAY_STEP, input.promotionId, bearerTokenId(req), {
+      appendOperatorAgentRow(deps, OPERATOR_AGENT_PROMOTION_REPLAY_STEP, input.promotionId, bearerTokenId(req), {
         promotion_id: input.promotionId,
         replay: input.replay,
         state: "replayed",
@@ -2073,7 +2114,7 @@ export function buildOperatorAgentPromotionDecisionRoute(deps: OperatorAgentRout
         return;
       }
       const at = new Date(deps.now?.() ?? Date.now()).toISOString();
-      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_PROMOTION_DECISION_STEP, input.promotionId, bearerTokenId(req), {
+      appendOperatorAgentRow(deps, OPERATOR_AGENT_PROMOTION_DECISION_STEP, input.promotionId, bearerTokenId(req), {
         promotion_id: input.promotionId,
         decision: "approved",
         state: "approved",
@@ -2140,11 +2181,11 @@ export function buildOperatorAgentPromotionAdvanceRoute(deps: OperatorAgentRoute
       // this promotion's repo.
       const admission = checkEmergencyStop(activeEmergencyStops(deps), { actionKind: "follow-up-promotion", repo: existing.scope.repo }, deps.now?.() ?? Date.now());
       if (!admission.ok) {
-        appendPanelLedger(deps.ledgerPath, EMERGENCY_STOP_REFUSAL_STEP, input.promotionId, bearerTokenId(req), { receipt: admission.receipt });
+        appendOperatorAgentRow(deps, EMERGENCY_STOP_REFUSAL_STEP, input.promotionId, bearerTokenId(req), { receipt: admission.receipt });
         sendJson(res, 423, { ok: false, error: "emergency_stop_active", code: admission.code, receipt: admission.receipt });
         return;
       }
-      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_PROMOTION_ADVANCE_STEP, input.promotionId, bearerTokenId(req), {
+      appendOperatorAgentRow(deps, OPERATOR_AGENT_PROMOTION_ADVANCE_STEP, input.promotionId, bearerTokenId(req), {
         promotion_id: input.promotionId,
         target: input.target,
         guard,
@@ -2184,7 +2225,7 @@ export function buildOperatorAgentPromotionRollbackRoute(deps: OperatorAgentRout
         return;
       }
       const at = new Date(deps.now?.() ?? Date.now()).toISOString();
-      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_PROMOTION_ROLLBACK_STEP, input.promotionId, bearerTokenId(req), {
+      appendOperatorAgentRow(deps, OPERATOR_AGENT_PROMOTION_ROLLBACK_STEP, input.promotionId, bearerTokenId(req), {
         promotion_id: input.promotionId,
         rollback: input.rollback,
         state: "rolled_back",
@@ -2222,7 +2263,7 @@ export function buildOperatorAgentConsequencePreflightRoute(deps: OperatorAgentR
       const result = evaluateConsequencePolicy(action, { now: nowIso });
       const refusal = result.ok ? undefined : recordConsequenceRefusal(result, { now: nowIso });
       const approval = consequenceApprovalProjection(action);
-      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_CONSEQUENCE_PREFLIGHT_STEP, action.id, bearerTokenId(req), {
+      appendOperatorAgentRow(deps, OPERATOR_AGENT_CONSEQUENCE_PREFLIGHT_STEP, action.id, bearerTokenId(req), {
         action_id: action.id,
         consequence_class: action.consequenceClass,
         ready: result.ok,
@@ -2356,7 +2397,7 @@ function storedApprovalProjection(value: unknown): ConsequenceApprovalProjection
 function consequenceRows(deps: OperatorAgentRouteDependencies): Array<Record<string, unknown>> {
   return readOperatorAgentUnion(dirname(deps.ledgerPath), {
     step: [OPERATOR_AGENT_CONSEQUENCE_PREFLIGHT_STEP, OPERATOR_AGENT_CONSEQUENCE_DECISION_STEP],
-  }).rows;
+  });
 }
 
 function latestConsequenceRows(deps: OperatorAgentRouteDependencies): {
@@ -2493,7 +2534,7 @@ export function buildOperatorAgentConsequencesReadRoute(deps: OperatorAgentRoute
     method: "GET",
     path: "/v1/operator-agent/consequences",
     scope: "read",
-    handler: (_req, res) => sendJson(res, 200, readPendingConsequences(deps)),
+    handler: servedGet(deps, (_req, res) => sendJson(res, 200, readPendingConsequences(deps))),
   };
 }
 
@@ -2554,7 +2595,7 @@ export function buildOperatorAgentConsequencesDecisionRoute(deps: OperatorAgentR
         at,
         ...(reason ? { reason } : {}),
       };
-      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_CONSEQUENCE_DECISION_STEP, input.consequenceId, actor, row);
+      appendOperatorAgentRow(deps, OPERATOR_AGENT_CONSEQUENCE_DECISION_STEP, input.consequenceId, actor, row);
       deps.memory?.record({ step: OPERATOR_AGENT_CONSEQUENCE_DECISION_STEP, ...row });
       sendJson(res, 200, {
         ok: true,
@@ -2655,10 +2696,12 @@ export function buildOperatorAgentFollowUpReadRoute(deps: OperatorAgentRouteDepe
     method: "GET",
     path: "/v1/operator-agent/follow-ups",
     scope: "read",
-    handler: async (_req, res) => {
-      const followUps = await readHistory(deps.ledgerPath, clockFromMillisFn(deps.now).now());
+    handler: servedGet(deps, async (_req, res) => {
+      const now = clockFromMillisFn(deps.now).now();
+      const served = servedPanelRows?.stateDir === dirname(deps.ledgerPath) ? servedPanelRows.rows : undefined;
+      const followUps = served ? followUpHistoryFromRows(served, now) : await readHistory(deps.ledgerPath, now);
       sendJson(res, 200, { followUps, source: "ledger" });
-    },
+    }),
   };
 }
 
@@ -2704,7 +2747,7 @@ export function buildOperatorAgentSettingsReadRoute(deps: OperatorAgentRouteDepe
     method: "GET",
     path: "/v1/operator-agent/settings",
     scope: "read",
-    handler: (req, res) => {
+    handler: servedGet(deps, (req, res) => {
       if (rejectColdOperatorAgentMemory(deps, res)) return;
       const requested = requestedSettingsScope(req);
       if (requested.error) {
@@ -2712,7 +2755,7 @@ export function buildOperatorAgentSettingsReadRoute(deps: OperatorAgentRouteDepe
         return;
       }
       sendJson(res, 200, readOperatorAgentSettings(deps, requested.scope));
-    },
+    }),
   };
 }
 
@@ -2732,7 +2775,7 @@ export function buildOperatorAgentSettingsWriteRoute(deps: OperatorAgentRouteDep
         ...(input.scope ? { scope: input.scope } : {}),
         updatedAt,
       };
-      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_SETTINGS_STEP, "operator-agent-settings", bearerTokenId(req), {
+      appendOperatorAgentRow(deps, OPERATOR_AGENT_SETTINGS_STEP, "operator-agent-settings", bearerTokenId(req), {
         settings: input.settings,
         ...(input.scope ? { scope: input.scope } : {}),
         updatedAt,
@@ -2791,7 +2834,7 @@ function preferenceActionValidator(action: PreferenceAction): (body: unknown) =>
 }
 
 function readOperatorPreferenceStates(deps: OperatorAgentRouteDependencies, now: number): PreferenceState[] {
-  return foldOperatorPreferences(readOperatorAgentUnion(dirname(deps.ledgerPath), { step: OPERATOR_PREFERENCE_LEDGER_STEPS }).rows, now);
+  return foldOperatorPreferences(readOperatorAgentUnion(dirname(deps.ledgerPath), { step: OPERATOR_PREFERENCE_LEDGER_STEPS }), now);
 }
 
 function requestedPreferenceScope(req: { url?: string }, required: boolean): { scope?: PreferenceScope; error?: string } {
@@ -2829,7 +2872,7 @@ export function buildOperatorPreferenceReadRoute(deps: OperatorAgentRouteDepende
     method: "GET",
     path: "/v1/operator-agent/preferences",
     scope: "read",
-    handler: (req, res) => {
+    handler: servedGet(deps, (req, res) => {
       const requested = requestedPreferenceScope(req, true);
       const scope = requested.scope;
       if (!scope) {
@@ -2839,7 +2882,7 @@ export function buildOperatorPreferenceReadRoute(deps: OperatorAgentRouteDepende
       const states = readOperatorPreferenceStates(deps, clockFromMillisFn(deps.now).now());
       const preferences = states.filter((state) => preferenceListedFor(state.preference.scope, scope)).map(projectOperatorPreference);
       sendJson(res, 200, { source: "ledger", stale: false, scope, preferences });
-    },
+    }),
   };
 }
 
@@ -2867,7 +2910,7 @@ export function buildOperatorPreferenceProposeRoute(deps: OperatorAgentRouteDepe
       }
       const decisions = preferenceDecisionSamples(readOperatorAgentHistory(deps), input.scope.repository);
       const preference = inferPreferenceHypothesis({ ...input, decisions, now, supersedes: same.at(-1)?.preference.preferenceId });
-      appendPanelLedger(deps.ledgerPath, OPERATOR_PREFERENCE_LEDGER_STEPS[0], preference.preferenceId, bearerTokenId(req), { preference });
+      appendOperatorAgentRow(deps, OPERATOR_PREFERENCE_LEDGER_STEPS[0], preference.preferenceId, bearerTokenId(req), { preference });
       sendJson(res, 201, { ok: true, existing: false, preference: projectOperatorPreference(evaluatePreference(preference, [], now)) });
     }),
   };
@@ -2902,7 +2945,7 @@ function buildOperatorPreferenceActionRoute(deps: OperatorAgentRouteDependencies
         return;
       }
       const event = preferenceReceipt(state, transition.lifecycle, { ...input, action, at: clock.iso() });
-      appendPanelLedger(deps.ledgerPath, OPERATOR_PREFERENCE_LEDGER_STEPS[1], state.preference.preferenceId, bearerTokenId(req), { event });
+      appendOperatorAgentRow(deps, OPERATOR_PREFERENCE_LEDGER_STEPS[1], state.preference.preferenceId, bearerTokenId(req), { event });
       sendJson(res, 200, { ok: true, linkedTo: event.preferenceId, ...event });
     }),
   };
@@ -3019,7 +3062,7 @@ const EMERGENCY_STEPS = [EMERGENCY_STOP_ISSUED_LEDGER_STEP, EMERGENCY_STOP_CLEAR
  *  memo, so a new rotation costs its own parse: keying on the archive-name set re-parsed all 380+
  *  archives inside the request after every rotation (12.5 s on the fleet host, 2026-09-30). */
 export function emergencyStopRows(ledgerPath: string): Array<Record<string, unknown>> {
-  return readOperatorAgentUnion(dirname(ledgerPath), { step: EMERGENCY_STEPS }).rows;
+  return readOperatorAgentUnion(dirname(ledgerPath), { step: EMERGENCY_STEPS });
 }
 
 interface EmergencyControlState {
@@ -3067,7 +3110,7 @@ export function buildEmergencyStopIssueRoute(deps: OperatorAgentRouteDependencie
         return;
       }
       const receipt = emergencyStopIssuedReceipt(stop, { now: deps.now?.() });
-      appendPanelLedger(deps.ledgerPath, EMERGENCY_STOP_ISSUED_LEDGER_STEP, stop.id, bearerTokenId(req), { stop, receipt });
+      appendOperatorAgentRow(deps, EMERGENCY_STOP_ISSUED_LEDGER_STEP, stop.id, bearerTokenId(req), { stop, receipt });
       sendJson(res, 201, { ok: true, stop, receipt });
     }),
   };
@@ -3096,7 +3139,7 @@ export function buildEmergencyStopClearRoute(deps: OperatorAgentRouteDependencie
         sendJson(res, 409, { ok: false, code: result.code, receipt: result.receipt });
         return;
       }
-      appendPanelLedger(deps.ledgerPath, EMERGENCY_STOP_CLEARED_LEDGER_STEP, stop.id, bearerTokenId(req), { stop_id: stop.id, receipt: result.receipt });
+      appendOperatorAgentRow(deps, EMERGENCY_STOP_CLEARED_LEDGER_STEP, stop.id, bearerTokenId(req), { stop_id: stop.id, receipt: result.receipt });
       sendJson(res, 200, { ok: true, receipt: result.receipt });
     }),
   };
@@ -3108,10 +3151,10 @@ export function buildEmergencyStopStatusRoute(deps: OperatorAgentRouteDependenci
     method: "GET",
     path: "/v1/operator-agent/emergency/status",
     scope: "read",
-    handler: async (_req, res) => {
+    handler: servedGet(deps, async (_req, res) => {
       const { rows } = await readOperatorAgentUnionAsync(dirname(deps.ledgerPath), { step: EMERGENCY_STEPS });
       sendJson(res, 200, { active: activeEmergencyStops(deps, rows), source: "ledger" });
-    },
+    }),
   };
 }
 
@@ -3253,7 +3296,7 @@ export function buildOperatorAgentDelegationHandoffRoute(deps: OperatorAgentRout
         deps.now?.() ?? Date.now(),
       );
       if (!admission.ok) {
-        appendPanelLedger(deps.ledgerPath, EMERGENCY_STOP_REFUSAL_STEP, envelope.id, bearerTokenId(req), { receipt: admission.receipt });
+        appendOperatorAgentRow(deps, EMERGENCY_STOP_REFUSAL_STEP, envelope.id, bearerTokenId(req), { receipt: admission.receipt });
         sendJson(res, 423, { ok: false, error: "emergency_stop_active", code: admission.code, receipt: admission.receipt });
         return;
       }
@@ -3279,7 +3322,7 @@ export function buildOperatorAgentDelegationHandoffRoute(deps: OperatorAgentRout
         ...(input.action.humanApproval ? { humanApproval: input.action.humanApproval } : {}),
       }, { now: deps.now?.() });
 
-      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_DELEGATION_HANDOFF_STEP, envelope.id, bearerTokenId(req), { receipt });
+      appendOperatorAgentRow(deps, OPERATOR_AGENT_DELEGATION_HANDOFF_STEP, envelope.id, bearerTokenId(req), { receipt });
       sendJson(res, verification.ok ? 200 : 409, { ok: verification.ok, receipt });
     }),
   };
@@ -3298,7 +3341,7 @@ export interface OperatorAgentActionHistory {
 function readActionRows(ledgerPath: string): Array<Record<string, unknown>> {
   return readOperatorAgentUnion(dirname(ledgerPath), {
     step: [OPERATOR_AGENT_ACTION_STEP, OPERATOR_AGENT_ACTION_DECISION_STEP, OPERATOR_AGENT_ACTION_RECEIPT_STEP],
-  }).rows;
+  });
 }
 
 function actionDecisionFromRow(row: Record<string, unknown>): { actionId: string; decision: AutomationApprovalDecision } | null {
@@ -3468,7 +3511,7 @@ function respondWithStep(
   extra: Record<string, unknown> = {},
 ): void {
   if (step.append) {
-    appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_ACTION_RECEIPT_STEP, step.receipt.actionId, bearerTokenId(req), { action_id: step.receipt.actionId, receipt: step.receipt, ...extra });
+    appendOperatorAgentRow(deps, OPERATOR_AGENT_ACTION_RECEIPT_STEP, step.receipt.actionId, bearerTokenId(req), { action_id: step.receipt.actionId, receipt: step.receipt, ...extra });
   }
   const ok = step.disposition !== "refused";
   sendJson(res, ok ? okStatus : 409, { ok, disposition: step.disposition, receipt: step.receipt, ...(step.preflight ? { preflight: step.preflight } : {}) });
@@ -3480,7 +3523,7 @@ export function buildOperatorAgentActionReadRoute(deps: OperatorAgentRouteDepend
     method: "GET",
     path: "/v1/operator-agent/actions",
     scope: "read",
-    handler: (_req, res) => sendJson(res, 200, { version: AUTOMATION_ACTION_VERSION, actions: readOperatorAgentActions(deps), source: "ledger" }),
+    handler: servedGet(deps, (_req, res) => sendJson(res, 200, { version: AUTOMATION_ACTION_VERSION, actions: readOperatorAgentActions(deps), source: "ledger" })),
   };
 }
 
@@ -3507,7 +3550,7 @@ export function buildOperatorAgentActionRegisterRoute(deps: OperatorAgentRouteDe
         sendJson(res, 409, { error: "conflict", detail: `idempotencyKey is already bound to action ${keyHolder.action.actionId}` });
         return;
       }
-      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_ACTION_STEP, input.action.actionId, bearerTokenId(req), { action: input.action });
+      appendOperatorAgentRow(deps, OPERATOR_AGENT_ACTION_STEP, input.action.actionId, bearerTokenId(req), { action: input.action });
       sendJson(res, 201, { ok: true, existing: false, action: input.action });
     }),
   };
@@ -3530,7 +3573,7 @@ export function buildOperatorAgentActionDecisionRoute(deps: OperatorAgentRouteDe
       }
       const at = clockFromMillisFn(deps.now).iso();
       const decidedBy = bearerTokenId(req);
-      appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_ACTION_DECISION_STEP, input.actionId, decidedBy, { action_id: input.actionId, decision: input.decision, decided_by: decidedBy, at });
+      appendOperatorAgentRow(deps, OPERATOR_AGENT_ACTION_DECISION_STEP, input.actionId, decidedBy, { action_id: input.actionId, decision: input.decision, decided_by: decidedBy, at });
       sendJson(res, 200, { ok: true, actionId: input.actionId, decision: input.decision, decidedBy, at });
     }),
   };
@@ -3582,7 +3625,7 @@ function executeCatalogued(deps: OperatorAgentRouteDependencies, req: IncomingMe
     origin,
     ...(deps.root ? { executor: { root: deps.root, ledgerPath: deps.ledgerPath } } : {}),
     ...(input.delegationId !== undefined ? { admissionExtra: { delegation_id: input.delegationId, delegation_cost_usd: input.estimatedCostUsd ?? 0 } } : {}),
-    appendReceipt: (receipt, extra) => appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_ACTION_RECEIPT_STEP, receipt.actionId, origin, { action_id: receipt.actionId, receipt, ...extra }),
+    appendReceipt: (receipt, extra) => appendOperatorAgentRow(deps, OPERATOR_AGENT_ACTION_RECEIPT_STEP, receipt.actionId, origin, { action_id: receipt.actionId, receipt, ...extra }),
   });
   sendJson(res, run.disposition === "refused" ? 409 : 200, { ok: run.disposition !== "refused", ...run });
 }
@@ -3603,7 +3646,7 @@ function actionExecuteRoute(deps: OperatorAgentRouteDependencies, path: string, 
         clock.now(),
       );
       if (!admission.ok) {
-        appendPanelLedger(deps.ledgerPath, EMERGENCY_STOP_REFUSAL_STEP, input.actionId, bearerTokenId(req), { receipt: admission.receipt });
+        appendOperatorAgentRow(deps, EMERGENCY_STOP_REFUSAL_STEP, input.actionId, bearerTokenId(req), { receipt: admission.receipt });
         sendJson(res, 423, { ok: false, error: "emergency_stop_active", code: admission.code, receipt: admission.receipt });
         return;
       }
@@ -3684,7 +3727,7 @@ export function buildOperatorAgentActionRollbackRoute(deps: OperatorAgentRouteDe
 const DELEGATION_STEPS = [DELEGATION_PROFILE_LEDGER_STEP, DELEGATION_DECISION_LEDGER_STEP, OPERATOR_AGENT_ACTION_RECEIPT_STEP] as const;
 
 export function readDelegationProfiles(deps: OperatorAgentRouteDependencies): DelegationProfileState[] {
-  return foldDelegationProfiles(readOperatorAgentUnion(dirname(deps.ledgerPath), { step: DELEGATION_STEPS }).rows, OPERATOR_AGENT_ACTION_RECEIPT_STEP);
+  return foldDelegationProfiles(readOperatorAgentUnion(dirname(deps.ledgerPath), { step: DELEGATION_STEPS }), OPERATOR_AGENT_ACTION_RECEIPT_STEP);
 }
 
 function findDelegation(deps: OperatorAgentRouteDependencies, delegationId: string): DelegationProfileState | undefined {
@@ -3728,12 +3771,12 @@ export function buildOperatorAgentDelegationReadRoute(deps: OperatorAgentRouteDe
     method: "GET",
     path: "/v1/operator-agent/delegations",
     scope: "read",
-    handler: async (_req, res) => {
+    handler: servedGet(deps, async (_req, res) => {
       const clock = clockFromMillisFn(deps.now);
       const { rows } = await readOperatorAgentUnionAsync(dirname(deps.ledgerPath), { step: DELEGATION_STEPS });
       const profiles = foldDelegationProfiles(rows, OPERATOR_AGENT_ACTION_RECEIPT_STEP).map((state) => projectDelegationProfile(state, clock));
       sendJson(res, 200, { version: DELEGATION_PROFILE_VERSION, profiles, source: "ledger" });
-    },
+    }),
   };
 }
 
@@ -3758,7 +3801,7 @@ export function buildOperatorAgentDelegationIssueRoute(deps: OperatorAgentRouteD
           sendJson(res, 409, { error: "conflict", detail: `delegationId ${built.profile.delegationId} is already issued; replace it instead` });
           return;
         }
-        appendPanelLedger(deps.ledgerPath, DELEGATION_PROFILE_LEDGER_STEP, built.profile.delegationId, bearerTokenId(req), { profile: built.profile });
+        appendOperatorAgentRow(deps, DELEGATION_PROFILE_LEDGER_STEP, built.profile.delegationId, bearerTokenId(req), { profile: built.profile });
         sendJson(res, 201, { ok: true, profile: projectDelegationProfile({ profile: built.profile, approval: "pending", spentCostUsd: 0, receipts: [] }, clock) });
       },
     ),
@@ -3800,7 +3843,7 @@ export function buildOperatorAgentDelegationDecisionRoute(deps: OperatorAgentRou
       }
       const at = clock.iso();
       const decidedBy = bearerTokenId(req);
-      appendPanelLedger(deps.ledgerPath, DELEGATION_DECISION_LEDGER_STEP, input.delegationId, decidedBy, {
+      appendOperatorAgentRow(deps, DELEGATION_DECISION_LEDGER_STEP, input.delegationId, decidedBy, {
         delegation_id: input.delegationId,
         decision: input.decision,
         decided_by: decidedBy,
@@ -3840,7 +3883,7 @@ export function buildOperatorAgentDelegationReplaceRoute(deps: OperatorAgentRout
         sendJson(res, 409, { error: "conflict", detail: `replacement id ${built.profile.delegationId} is already issued` });
         return;
       }
-      appendPanelLedger(deps.ledgerPath, DELEGATION_PROFILE_LEDGER_STEP, built.profile.delegationId, bearerTokenId(req), { profile: built.profile, ...(input.note ? { note: input.note } : {}) });
+      appendOperatorAgentRow(deps, DELEGATION_PROFILE_LEDGER_STEP, built.profile.delegationId, bearerTokenId(req), { profile: built.profile, ...(input.note ? { note: input.note } : {}) });
       sendJson(res, 201, {
         ok: true,
         delegationId: input.delegationId,
@@ -3856,11 +3899,11 @@ export function buildOperatorAgentDelegationReplaceRoute(deps: OperatorAgentRout
 export const OPERATOR_AGENT_INTENT_PLANS_PATH = "/v1/operator-agent/intent-plans";
 
 export function readIntentPlanStates(deps: OperatorAgentRouteDependencies): IntentPlanState[] {
-  return foldIntentPlans(readOperatorAgentUnion(dirname(deps.ledgerPath), { step: [INTENT_PLAN_LEDGER_STEP, INTENT_PLAN_EVENT_LEDGER_STEP] }).rows);
+  return foldIntentPlans(readOperatorAgentUnion(dirname(deps.ledgerPath), { step: [INTENT_PLAN_LEDGER_STEP, INTENT_PLAN_EVENT_LEDGER_STEP] }));
 }
 
 function proposedRequestDigest(deps: OperatorAgentRouteDependencies, state: IntentPlanState): string {
-  const rows = readOperatorAgentUnion(dirname(deps.ledgerPath), { step: [INTENT_PLAN_LEDGER_STEP, INTENT_PLAN_EVENT_LEDGER_STEP] }).rows;
+  const rows = readOperatorAgentUnion(dirname(deps.ledgerPath), { step: [INTENT_PLAN_LEDGER_STEP, INTENT_PLAN_EVENT_LEDGER_STEP] });
   const row = rows.find((item) => item.step === INTENT_PLAN_LEDGER_STEP && item.plan_id === state.plan.planId);
   return typeof row?.request_digest === "string" ? row.request_digest : state.plan.inputDigest;
 }
@@ -3883,7 +3926,7 @@ export function buildOperatorAgentIntentPlanReadRoute(deps: OperatorAgentRouteDe
     method: "GET",
     path: OPERATOR_AGENT_INTENT_PLANS_PATH,
     scope: "read",
-    handler: (_req, res) => sendJson(res, 200, { version: INTENT_PLAN_VERSION, state: "verified", intentPlans: readIntentPlanStates(deps).map((state) => projectPlan(deps, state)), source: "ledger" }),
+    handler: servedGet(deps, (_req, res) => sendJson(res, 200, { version: INTENT_PLAN_VERSION, state: "verified", intentPlans: readIntentPlanStates(deps).map((state) => projectPlan(deps, state)), source: "ledger" })),
   };
 }
 
@@ -3917,7 +3960,7 @@ export function buildOperatorAgentIntentPlanProposeRoute(deps: OperatorAgentRout
         const planned = request === input.body ? raw : buildIntentPlan(request, { clock, proposedBy });
         const [plan, stored] = planned.ok ? [planned.plan, request] : [raw.plan, input.body];
         const digest = stored === input.body ? {} : { request_digest: raw.plan.inputDigest };
-        appendPanelLedger(deps.ledgerPath, INTENT_PLAN_LEDGER_STEP, plan.planId, proposedBy, { plan_id: plan.planId, input: stored, created_at: plan.createdAt, proposed_by: proposedBy, ...digest });
+        appendOperatorAgentRow(deps, INTENT_PLAN_LEDGER_STEP, plan.planId, proposedBy, { plan_id: plan.planId, input: stored, created_at: plan.createdAt, proposed_by: proposedBy, ...digest });
         sendJson(res, 201, { ok: true, existing: false, ...projectPlan(deps, { plan, events: [] }) });
       },
     ),
@@ -3961,14 +4004,14 @@ function registerPlanActions(deps: OperatorAgentRouteDependencies, req: Incoming
     return false;
   }
   for (const action of actions) {
-    if (!all.some((history) => history.action.actionId === action.actionId)) appendPanelLedger(deps.ledgerPath, OPERATOR_AGENT_ACTION_STEP, action.actionId, bearerTokenId(req), { action });
+    if (!all.some((history) => history.action.actionId === action.actionId)) appendOperatorAgentRow(deps, OPERATOR_AGENT_ACTION_STEP, action.actionId, bearerTokenId(req), { action });
   }
   return true;
 }
 
 function respondWithPlanDecision(deps: OperatorAgentRouteDependencies, req: IncomingMessage, res: ServerResponse, state: IntentPlanState, action: string, result: IntentPlanDecisionResult): void {
   const { planId } = state.plan;
-  if (result.append && result.event) appendPanelLedger(deps.ledgerPath, INTENT_PLAN_EVENT_LEDGER_STEP, planId, bearerTokenId(req), { plan_id: planId, event: result.event });
+  if (result.append && result.event) appendOperatorAgentRow(deps, INTENT_PLAN_EVENT_LEDGER_STEP, planId, bearerTokenId(req), { plan_id: planId, event: result.event });
   if (result.disposition === "refused") {
     sendJson(res, 409, { ok: false, error: "conflict", planId, action, code: result.code, detail: result.reason, ...(result.event ? { at: result.event.at, event: result.event } : {}) });
     return;

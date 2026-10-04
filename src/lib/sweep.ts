@@ -40,7 +40,8 @@ import {
   createPlanPrRest,
   PlanPrPreflightRefusedError,
   planPrPreflightAllows,
-  planPrPreflightAtCommit,
+  planPrPreflightAtCommitAsync,
+  type PlanPrPreflightResult,
   probeExistingPlanPr,
 } from "./plan-pr-emitter.js";
 import {
@@ -1324,8 +1325,8 @@ export interface BuildSweepEffectsDeps {
   buildPlanPrBodyImpl?: typeof buildPlanPrBody;
   /** W1-T5349 — the plan-repair renumber's reservation; defaults to {@link reservePlanRepairTaskId}. */
   planRepairReserveIdImpl?: (worktreePath: string, filingBranch: string) => string;
-  /** W1-T5405 — the filer preflight both plan-PR rungs here run on their commit before the push. */
-  planPrPreflightImpl?: typeof planPrPreflightAtCommit;
+  /** W1-T5405 — the filer preflight both plan-PR rungs here run on their commit before the push; W1-T5521 awaits it. */
+  planPrPreflightImpl?: (...args: Parameters<typeof planPrPreflightAtCommitAsync>) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
 }
 
 export type ReviewDispatchMode =
@@ -1706,7 +1707,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     fixRungCheckoutRefusedErrorImpl: FixRungCheckoutRefusedError = requiredSweepRuntimeCtor("fixRungCheckoutRefusedErrorImpl"),
     defaultBudgetUsd = 100,
     buildPlanPrBodyImpl = buildPlanPrBody,
-    planPrPreflightImpl = planPrPreflightAtCommit,
+    planPrPreflightImpl = planPrPreflightAtCommitAsync,
     updatePrBodyImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["updatePrBodyImpl"]>>("updatePrBodyImpl"),
   } = deps;
 
@@ -3260,7 +3261,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             readShard: (taskId) => readTaskShard(repoDir, taskId),
             probeExisting: (branch) => probeExistingPlanPr(ghJsonForBuild, owner, repo, branch),
             nowIso: () => clockFromMillisFn(nowMsImpl).iso(),
-            openAmendmentPr: (input) => {
+            openAmendmentPr: async (input) => {
               try {
                 planRepairGit("git", ["-C", repoDir, "fetch", "origin", "--quiet"]);
               } catch {
@@ -3291,7 +3292,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                   proofCwd: worktreePath,
                 });
                 // W1-T5405: a red preflight is ledgered as this source run's outcome, so the next pass does not re-pay it.
-                const verdict = planPrPreflightImpl(worktreePath, headSha, { title: input.title, body });
+                const verdict = await planPrPreflightImpl(worktreePath, headSha, { title: input.title, body });
                 if (!planPrPreflightAllows(verdict, { lane: "refusal_amendment", branch: input.branch, log })) {
                   log(REFUSAL_AMENDMENT_STEP, { task_id: c.taskId, source_run_id: c.runId, outcome: "preflight_refused", failures: verdict.failures });
                   throw new PlanPrPreflightRefusedError("refusal_amendment", verdict.failures);
@@ -3536,7 +3537,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           proofCwd: worktreePath,
         });
         // W1-T5405: the verdict rides this rung's ONE dispatch row, so a refusal spends a MAX_PLAN_REPAIR_STRIKES strike.
-        const verdict = planPrPreflightImpl(worktreePath, headSha, { title, body });
+        const verdict = await planPrPreflightImpl(worktreePath, headSha, { title, body });
         const preflightRow = verdict.unreadable.length > 0 ? { preflight_unreadable: verdict.unreadable } : {};
         if (!planPrPreflightAllows(verdict, { lane: "plan_repair", branch })) {
           planRepairLog("preflight_refused", { shard_path: shardRelPath, failures: verdict.failures, ...preflightRow });
@@ -8915,6 +8916,8 @@ export interface SweepDeps {
    *  seed is untouched — only the `await` moves into {@link drainDetachedSweepActions}. NOT AN
    *  ADMISSION CHANGE. */
   detachFixWait?: boolean;
+  /** W1-T5491: the light pass owns this review promise and releases its reservation on settlement. */
+  detachReviewWait?: (work: Promise<void>) => void;
   /** THE ABSENT-CHECK-SUITE REMEDY (W1-T186 follow-up). Pushes an EMPTY commit to the PR's own
    *  branch, minting a fresh head sha, and returns it. Omitted, the lane stands down and the
    *  ordinary escalation runs — the stand-down is named on the disposed line, never silent. */
@@ -12430,6 +12433,10 @@ export async function runSweep(
       );
       return;
     }
+    if (deps.detachReviewWait) {
+      finalizeDisposition(job.index, job.pr, jobDisposition, job.reason, job.question,
+        true, false, undefined, undefined, undefined, undefined, undefined);
+    }
     const repairCapacity = repairAdmissionTelemetry?.();
     if (deps.repairAdmissionSurface && repairCapacity) {
       log("sweep.review_started", {
@@ -12510,7 +12517,7 @@ export async function runSweep(
         // failure the row just above establishes a bounded retry clock.
         claim.release();
       }
-      finalizeDisposition(
+      if (!deps.detachReviewWait) finalizeDisposition(
         job.index,
         job.pr,
         jobDisposition,
@@ -12535,7 +12542,12 @@ export async function runSweep(
       while (true) {
         const job = takeNextReview();
         if (job === undefined) return;
-        await trackInFlightReview(runReview(job));
+        const work = trackInFlightReview(runReview(job));
+        if (deps.detachReviewWait) {
+          deps.detachReviewWait(work);
+          return;
+        }
+        await work;
       }
     }),
   );
@@ -12720,6 +12732,19 @@ export async function runSweepLightPass(
   lightPassSpawningReservations += spawning.length;
   lightPassPlanFilingReservations += planFilings.length;
   for (const pr of [...spawning, ...planFilings]) lightPassReservedHeads.add(lightPassHeadKey(pr));
+  const spawningNumbers = new Set(spawning.map((pr) => pr.prNumber));
+  const releases = new Map<number, () => void>();
+  const detachedNumbers = new Set<number>();
+  for (const pr of [...spawning, ...planFilings]) {
+    let released = false;
+    releases.set(pr.prNumber, () => {
+      if (released) return;
+      released = true;
+      if (spawningNumbers.has(pr.prNumber)) lightPassSpawningReservations--;
+      else lightPassPlanFilingReservations--;
+      lightPassReservedHeads.delete(lightPassHeadKey(pr));
+    });
+  }
   try {
   // W1-T2931 — one host budget, with review/merge work served before new repair work. The light
   // pass still reconciles every PR concurrently; only the expensive fix-dispatch spending point
@@ -12751,7 +12776,7 @@ export async function runSweepLightPass(
       .map((pr) => pr.prNumber),
   );
   const admittedNumbers = spawning.map((p) => `#${p.prNumber}`).join(", ");
-  return await Promise.all(
+  const summaries = await Promise.all(
     openPrs.map((pr) => {
       const baseActionable = deps.actionable;
       const baseStandDownReasonFor = deps.standDownReasonFor;
@@ -12790,13 +12815,28 @@ export async function runSweepLightPass(
                         (admittedNumbers ? `; admitted ${admittedNumbers} ahead` : ""))
                   : baseStandDownReasonFor?.(d),
             };
-      return runSweep([pr], scopedDeps, policy);
+      if (spawningNumbers.has(pr.prNumber)) {
+        scopedDeps.detachReviewWait = (work) => {
+          detachedNumbers.add(pr.prNumber);
+          void work.finally(releases.get(pr.prNumber)).catch((error) => {
+            deps.log?.("sweep.post_review.failed", {
+              pr_number: pr.prNumber, head_sha: pr.headSha, error: String(error),
+            });
+          });
+        };
+      }
+      return runSweep([pr], scopedDeps, policy).finally(() => {
+        if (!detachedNumbers.has(pr.prNumber)) releases.get(pr.prNumber)?.();
+      });
     }),
   );
+  // Let completed effects release their capacity before a caller starts the next pass.
+  if (detachedNumbers.size > 0) await new Promise<void>((resolve) => setImmediate(resolve));
+  return summaries;
   } finally {
-    lightPassSpawningReservations -= spawning.length;
-    lightPassPlanFilingReservations -= planFilings.length;
-    for (const pr of [...spawning, ...planFilings]) lightPassReservedHeads.delete(lightPassHeadKey(pr));
+    for (const [number, release] of releases) {
+      if (!detachedNumbers.has(number)) release();
+    }
   }
 }
 

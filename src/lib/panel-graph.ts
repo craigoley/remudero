@@ -188,15 +188,17 @@ export interface PanelGraphDeps {
 // ── GET /v1/feedback — the inbox list ───────────────────────────────────────
 
 /**
- * A reconciled {@link FeedbackEntry} as GET /v1/feedback returns it. `unverified` and
- * `discharged`/`dischargeUndecidable` (W1-T1257) are read-time-only decorations, never written to
- * `plan/feedback/<id>.yaml` — present only when true, layered by {@link decorateFeedbackDischarge}
- * after this reconcile. Both can be true on the same entry at once; neither ever changes `status`.
+ * A reconciled {@link FeedbackEntry} as GET /v1/feedback returns it. `unverified`, `discharged`/
+ * `dischargeUndecidable` (W1-T1257) and `landing`/`landingUnknown` (W1-T5524) are read-time-only, never
+ * written to `plan/feedback/<id>.yaml` — present only when set, layered after this reconcile. None
+ * ever changes `status`.
  */
 export type ReconciledFeedbackEntry = FeedbackEntry & {
   unverified?: true;
   discharged?: true;
   dischargeUndecidable?: true;
+  landing?: "queued";
+  landingUnknown?: true;
 };
 
 /**
@@ -273,6 +275,18 @@ export function decorateFeedbackDischargeByTasks(
   });
 }
 
+/** W1-T5524: one queue read per request; a failed read marks every entry `landingUnknown`, never "nothing queued". */
+function decorateFeedbackLanding(entries: ReconciledFeedbackEntry[], deps: PanelGraphDeps): ReconciledFeedbackEntry[] {
+  let queued: Set<string>;
+  try {
+    queued = new Set(queuedFeedbackLandings(deps.inboxRoot));
+  } catch (error) {
+    deps.logProjection?.("serve.feedback_landing_queue_unreadable", { route: "/v1/feedback", reason: String((error as Error)?.message ?? error) });
+    return entries.map((entry) => ({ ...entry, landingUnknown: true }));
+  }
+  return entries.map((entry) => (queued.has(feedbackEntryRepoPath(entry.id)) ? { ...entry, landing: "queued" } : entry));
+}
+
 /** GET /v1/feedback[?status=<status>] — the feedback inbox, read-scoped. */
 export function buildFeedbackInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route {
   return {
@@ -305,7 +319,8 @@ export function buildFeedbackInboxRoute(deps: PanelGraphDeps, readPlanSnapshot?:
       const { entries: listed, filedTasks } = projected as Extract<FeedbackProjectionOutcome, { ok: true }>;
       // A read writes nothing: the slow lane persists each merged proposal's `accepted` (P4-T07).
       const reconciled = projectReconciledFeedback(listed, deps.statusGithub);
-      const decorated = filedTasks ? decorateFeedbackDischargeByTasks(reconciled, new Map(filedTasks), deps.statusGithub) : reconciled;
+      const discharged = filedTasks ? decorateFeedbackDischargeByTasks(reconciled, new Map(filedTasks), deps.statusGithub) : reconciled;
+      const decorated = deps.feedbackLand ? decorateFeedbackLanding(discharged, deps) : discharged;
       const entries = statusParam ? decorated.filter((e) => e.status === statusParam) : decorated;
       if (!pageRequest) sendJson(res, 200, { entries });
       else {
