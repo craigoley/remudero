@@ -11,9 +11,9 @@
   origin: "oper#followups-research-2026-09-22"
   plan_refs: [W1-T3621, W1-T3664, W1-T3095]
   files: [src/lib/draft-routing.ts, src/lib/worker.ts, src/lib/worker-provider.ts, src/run-task.ts, .remudero/mounts.yaml, test/the-draft-lane-routes-by-measured-clean-rate.test.ts, scripts/test-tier-manifest.json]
-  priority: 3
+  priority: 2
   status: queued
-  # backlog gardener: band=3 evidence=4d387e3d3751d84c
+  # backlog gardener: band=2 evidence=313deba415903a61
   attempts: 0
   rationale: |
     MEASURED (ledger union; 09-10..18 read through a file, 09-19..22 from the 4-day dump).

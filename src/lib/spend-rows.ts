@@ -32,6 +32,7 @@ export const SPEND_STEP_ROLES: Readonly<Record<string, SpendRole>> = {
   "fix.spawn_infra_blocked": "produced", // $0 by construction: nothing was billed
   "alert-fix.dispatched_worker": "produced",
   "census_push.strike": "produced",
+  "sweep.plan_round.worker": "produced",
   "inbox.draft_synthesized": "produced",
   "plan.synthesized": "produced",
   "triage.synthesized": "produced",

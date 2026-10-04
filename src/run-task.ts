@@ -16,7 +16,10 @@ import {
   readDiskFreeBytes,
   type CaptureSurfaceFireRecord,
 } from "./lib/doctor.js";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
+import { promisify } from "node:util";
+import { mkdir as mkdirAsync, readFile as readFileAsync } from "node:fs/promises";
+import { probeCacheFromLedger, probeCacheKey, type BaseProbeFile } from "./lib/base-reproduction.js";
 import { ghExec, ghJsonAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
@@ -1340,6 +1343,7 @@ import {
   resolveNameFilteredCandidates,
   narrowNameFilteredArgs,
   execWhitelistedProof,
+  execWhitelistedProofAsync,
   defaultProofSpawner,
   isCriterionRefusal,
   type ProofSpawner,
@@ -1368,6 +1372,9 @@ import {
 // W1-T3506: the pure write-boundary refusal (W1-T3389) `runFixRung`'s acceptance-gate body repair
 // must actually CALL before `updatePrBody`, not merely a capability sitting next to it unwired.
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "./lib/body-repair.js";
+import { diagnoseBodyDefects } from "./lib/body-repair.js";
+import { criterionFieldTampered, filingSelfCreditCheck } from "./lib/review.js";
+import { planPrPreflightAtCommitAsync } from "./lib/plan-pr-emitter.js";
 // receipt.js / ledger-replay.js: only receiptCommand/replayCommand read these, and both moved to
 // src/lib/report-commands.ts (W1-T2888), which imports them directly.
 import {
@@ -1525,6 +1532,7 @@ import {
   type MemoryGovernorResult,
   type MergeConflictEvidence,
   type OpenPrView,
+  type PlanScopedFixRoundInput,
   type ReviewDispatchMode,
   type ReviewReuseInputs,
   type RollupCheckEntry,
@@ -1911,6 +1919,94 @@ export function readyDraftViaGh(
     });
 }
 
+const baseReproductionExecFile = promisify(execFile);
+let baseReproductionQueue: Promise<void> = Promise.resolve();
+const baseReproductionHostCache = new Map<string, BaseProbeFile>();
+
+export function buildBaseReproductionProbe(
+  config: Config, repoDir: string, ledgerPath: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  deps: Pick<SweepDeps, "readLedger"> & {
+    git?: (args: string[], timeoutMs: number) => Promise<void>;
+    link?: typeof linkWorktreeNodeModules;
+    readFile?: (path: string) => Promise<unknown>;
+    execute?: typeof execWhitelistedProofAsync;
+    timeout?: () => number;
+    clock?: Clock;
+  } = {},
+): NonNullable<SweepDeps["reproduceFailingTestsOnMain"]> {
+  return (_pr, files, mainSha) => {
+    const pending = baseReproductionQueue.then(async () => {
+      const results = new Map<string, BaseProbeFile>();
+      const key = (file: string) => `${repoDir}:${probeCacheKey(mainSha, file)}`;
+      const cache = probeCacheFromLedger((deps.readLedger ?? readLedgerLines)(ledgerPath));
+      for (const file of files) {
+        const cached = baseReproductionHostCache.get(key(file)) ?? cache.get(probeCacheKey(mainSha, file));
+        if (cached) results.set(file, { ...cached, cached: true });
+      }
+      const missing = files.filter((file) => !results.has(file));
+      if (missing.length === 0) return files.map((file) => results.get(file)!);
+      const worktreePath = join(worktreesDir(config), `base-repro-${mainSha.slice(0, 12)}`);
+      const clock = deps.clock ?? systemClock;
+      const started = clock.now();
+      let created = false;
+      let timeoutMs: number | undefined;
+      const git = deps.git ?? (async (args: string[], timeout: number) => {
+        await baseReproductionExecFile("git", args, { timeout, killSignal: "SIGKILL", maxBuffer: 1 << 26 });
+      });
+      const unreadable = (file: string, detail: { reason: string }): BaseProbeFile =>
+        ({ file, outcome: "unrunnable", duration_ms: clock.now() - started, cached: false, ...detail });
+      try {
+        timeoutMs = checkProofTimeoutMs(deps.timeout);
+        await mkdirAsync(worktreesDir(config), { recursive: true });
+        await buildBaseProofDir([], repoDir, {
+          detachedAsync: { path: worktreePath, revision: mainSha, run: (args) => git(args, timeoutMs!) },
+        }).pendingCheckout;
+        created = true;
+        const linked = (deps.link ?? linkWorktreeNodeModules)(repoDir, worktreePath);
+        if (linked !== "linked" && linked !== "already-present") throw new Error(`probe node_modules: ${linked}`);
+        const read = deps.readFile ?? readFileAsync;
+        await read(join(worktreePath, "node_modules", "tsx", "package.json"));
+        for (const file of missing) {
+          const fileStarted = clock.now();
+          try {
+            await read(join(worktreePath, file));
+          } catch (error) {
+            results.set(file, (error as NodeJS.ErrnoException)?.code === "ENOENT"
+              ? { file, outcome: "absent", duration_ms: clock.now() - fileStarted, cached: false }
+              : unreadable(file, { reason: String(error) }));
+            continue;
+          }
+          try {
+            const proof = parseWhitelistedProof(`unit test: ${file}`);
+            if (!proof || proof.kind !== "test" || proof.nameFiltered) throw new Error(`unexecutable test path: ${file}`);
+            const outcome = await (deps.execute ?? execWhitelistedProofAsync)(proof, worktreePath, timeoutMs, undefined, {
+              refreshToolchain: () => { throw new Error("base probe cannot load its toolchain; installing is prohibited"); },
+            });
+            results.set(file, { file, outcome: outcome === "fail" ? "fails" : outcome === "pass" ? "passes" : "unrunnable",
+              duration_ms: clock.now() - fileStarted, cached: false,
+              ...(outcome === "no-match" ? { reason: "proof executed no matching test" } : {}) });
+          } catch (error) {
+            results.set(file, unreadable(file, { reason: String(error) }));
+          }
+        }
+      } catch (error) {
+        for (const file of missing) if (!results.has(file)) results.set(file, unreadable(file, { reason: String(error) }));
+      } finally {
+        if (created) {
+          try { await git(["-C", repoDir, "worktree", "remove", "--force", worktreePath], timeoutMs!); }
+          catch (error) { log("sweep.base_reproduction.cleanup_failed", { main_sha: mainSha, path: worktreePath, reason: String(error) }); }
+        }
+      }
+      for (const file of missing) baseReproductionHostCache.set(key(file), results.get(file)!);
+      return files.map((file) => results.get(file)!);
+    });
+    // The caller receives a rejection; settling the queue lets the next probe run (W1-T5528).
+    baseReproductionQueue = pending.then(() => {}, (error) => { log("sweep.base_reproduction.queue_failed", { reason: String(error) }); });
+    return pending;
+  };
+}
+
 export function buildSweepEffects(
   deps: BuildSweepEffectsDeps & {
     /** W1-T3618 test seam: override the reviewer-code freshness read the review gate below uses.
@@ -1923,6 +2019,7 @@ export function buildSweepEffects(
   },
 ): Pick<
   SweepDeps,
+  | "reproduceFailingTestsOnMain"
   | "arm"
   | "close"
   | "dispatchFix"
@@ -2222,6 +2319,7 @@ export function buildSweepEffects(
     return 0;
   };
   const effects = buildSweepEffectsFromLib({
+    reproduceFailingTestsOnMainImpl: buildBaseReproductionProbe(deps.config, reviewRepoDir, deps.ledgerPath, deps.log),
     repoRoot,
     localRepoName: resolveOwnerRepo().repo,
     nowMsImpl: Date.now,
@@ -2250,6 +2348,8 @@ export function buildSweepEffects(
     createFixRungWorktreeImpl: createFixRungWorktreeWithToolchain,
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit,
     runFixRungImpl: runFixRung,
+    runPlanScopedFixRoundImpl: runPlanScopedFixRound,
+    materializePlanRoundWorktreeImpl: materializePlanRoundWorktree,
     pushFixRoundImpl: pushFixRound,
     buildFixRungDispatchArgsImpl: buildFixRungDispatchArgs,
     openTaskIdsFromPlanImpl: openTaskIdsFromPlan,
@@ -5327,6 +5427,130 @@ export function wrappedGrepBodyRepair(body: string): AcceptanceGateBodyRepair | 
     after.length === criteria.length &&
     after.every((c) => wrappedGrepPattern(c.proof ?? "") === undefined && parseWhitelistedProof(c.proof ?? "") !== null);
   return clean ? { defect: "proof-shape", repairedBody: repaired } : undefined;
+}
+
+/** W1-T5543: preserve the prior head's criterion surface, including block scalar continuations. */
+function untouchedPlanCriterion(roundDiff: string, priorDiff: string, path: string): boolean {
+  if (!criterionFieldTampered(roundDiff)) return false;
+  const modified = new Set<number>();
+  let line = 0;
+  for (const text of priorDiff.split("\n")) {
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(text);
+    if (hunk) line = Number(hunk[1]);
+    else if (text.startsWith("+") && !text.startsWith("+++")) modified.add(line++);
+    else if (text.startsWith(" ")) line++;
+  }
+  const header = `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n`;
+  for (const hunk of roundDiff.split(/(?=^@@ )/m).slice(1)) {
+    if (!criterionFieldTampered(header + hunk)) continue;
+    const start = /^@@ -(\d+)/.exec(hunk);
+    let oldLine = Number(start?.[1]);
+    let removed = 0;
+    let added = 0;
+    for (const text of hunk.split("\n").slice(1)) {
+      if (text.startsWith("-")) {
+        if (!modified.has(oldLine)) return true;
+        removed++;
+        oldLine++;
+      } else if (text.startsWith("+")) added++;
+      else if (text.startsWith(" ")) oldLine++;
+    }
+    if (removed === 0 || added > removed) return true;
+  }
+  return false;
+}
+
+export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
+  const { pr, deps, worktreePath } = input;
+  const git = deps.runGit ?? ((args: string[]) => execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" }));
+  const preflight = deps.preflight ?? planPrPreflightAtCommitAsync;
+  const files = input.task.files.filter((path) => isInPlanScope(path) && !path.split("/").includes(".."));
+  let roundId: string | undefined;
+  const roundFields = () => ({ task_id: input.task.id, pr_number: pr.prNumber, head_sha: pr.headSha,
+    round_id: roundId, strike: pr.priorStrikes + 1, mode: "plan-gate" });
+  const refuse = (reason: string, verdict?: PlanPrPreflightResult) => {
+    if (roundId) {
+      deps.log("fix.commit_refused", { ...roundFields(), reason });
+      deps.log("fix.done", { ...roundFields(), subtype: "commit_refused" });
+    }
+    return { outcome: "refused" as const, reason, preflight: verdict };
+  };
+  let metadata = { title: input.title, body: input.body };
+  try {
+    if (files.length === 0) return refuse("the filing has no stageable plan paths");
+    if (git(["rev-parse", "HEAD"]).trim() !== pr.headSha) return refuse("the plan round head moved before dispatch");
+    const initial = await preflight(worktreePath, pr.headSha, metadata);
+    const existing = new Set(files.filter((path) => git(["ls-tree", "--name-only", "origin/main", "--", path]).trim() !== ""));
+    const introduced = files.filter((path) => !existing.has(path) && /^plan\/tasks\.d\/.*\.ya?ml$/.test(path))
+      .flatMap((path) => [...git(["show", `${pr.headSha}:${path}`]).matchAll(/^\s*-?\s*id:\s*(\S+)/gm)].map((m) => m[1]!));
+    let repairedBody = metadata.body;
+    const selfCredit = filingSelfCreditCheck(repairedBody, introduced);
+    if (!selfCredit.ok) repairedBody = repairedBody.replace(/^Remudero-Task:[ \t]*(\S+)[ \t]*(?:\r?\n|$)/gm,
+      (line, id: string) => id === selfCredit.taskId ? "" : line).trimEnd();
+    const structural = acceptanceGateBodyRepair(repairedBody, introduced.length ? filingAcceptanceCriteria(introduced, files) : undefined);
+    if (structural) repairedBody = structural.repairedBody;
+    const defects = diagnoseBodyDefects(repairedBody, parseAcceptanceBlock(repairedBody), { execProof: deps.execProof ?? execGrepProofInWorktree(worktreePath) });
+    for (const defect of defects) {
+      if (defect.kind !== "wrapped-proof" || !defect.repair || !defect.criterion) continue;
+      const proof = parseAcceptanceBlock(repairedBody)[defect.criterion - 1]?.proof;
+      if (proof) repairedBody = repairedBody.replace(proof, defect.repair);
+    }
+    if (repairedBody !== metadata.body) {
+      const candidate = { ...metadata, body: repairedBody };
+      const verdict = await preflight(worktreePath, pr.headSha, candidate);
+      if (!acceptanceAuthorTimeCheck(repairedBody).ok || !filingSelfCreditCheck(repairedBody, introduced).ok) return refuse("the repaired filing body fails author-time acceptance", verdict);
+      if (verdict.ok && verdict.unreadable.length === 0) {
+        await deps.updateMetadata(candidate);
+        return { outcome: "metadata-repaired", headSha: pr.headSha, preflight: verdict };
+      }
+      metadata = candidate;
+    }
+    roundId = `${input.runId ?? input.task.id}:${pr.priorStrikes + 1}:${systemClock.now()}`;
+    deps.log("fix.dispatch", { ...roundFields(), verdict_regime: "executed" });
+    const report = await deps.spawn(renderFixPrompt({ task: { ...input.task, files }, round: 1, branch: pr.headRefName!,
+      harnessCommits: true, evidence: { planGateFindings: [...initial.failures, ...initial.unreadable], ciFailures: pr.ciFailures,
+        constraint: input.lastRefusal } }));
+    if (git(["rev-parse", "HEAD"]).trim() !== pr.headSha) return refuse("the worker moved the plan round head");
+    const changed = workerChangedPaths(git(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]));
+    const outside = changed.filter((path) => !files.includes(path));
+    if (outside.length) return refuse(`plan round changed paths outside the PR's own plan paths: ${outside.join(", ")}`);
+    for (const path of changed.filter((p) => existing.has(p))) {
+      const diff = git(["diff", "HEAD", "--", path]);
+      const prior = git(["diff", "--unified=0", `origin/main...${pr.headSha}`, "--", path]);
+      if (untouchedPlanCriterion(diff, prior, path)) return refuse(`plan round changed an untouched criterion in ${path}`);
+    }
+    const proposedTitle = /^PR_TITLE:[ \t]*(.+)$/m.exec(report)?.[1];
+    const proposedAcceptance = /^PR_ACCEPTANCE:[ \t]*\r?\n([\s\S]*?)^END_PR_ACCEPTANCE[ \t]*$/m.exec(report)?.[1];
+    if (proposedTitle) metadata.title = proposedTitle.trim();
+    if (proposedAcceptance) {
+      const check = acceptanceAuthorTimeCheck(proposedAcceptance);
+      if (!check.ok) return refuse(check.message);
+      metadata.body = replaceAcceptanceBlock(metadata.body, parseAcceptanceBlock(proposedAcceptance));
+    }
+    if (!filingSelfCreditCheck(metadata.body, introduced).ok || !acceptanceAuthorTimeCheck(metadata.body).ok) return refuse("the proposed filing body fails author-time acceptance");
+    let sha = pr.headSha;
+    if (changed.length) {
+      const message = parseReport(report)?.commitMessage;
+      if (!message || checkCommitMessage(message).length) return refuse("the plan round needs a valid COMMIT_MESSAGE");
+      git(["add", "-A", "--", ...changed]);
+      git(["commit", "-m", message]);
+      sha = git(["rev-parse", "HEAD"]).trim();
+    } else if (metadata.title === input.title && metadata.body === input.body) return refuse("the worker changed nothing");
+    const verdict = await preflight(worktreePath, sha, metadata);
+    if (!verdict.ok || verdict.unreadable.length) return refuse((verdict.failures[0] ?? verdict.unreadable[0])!.firstLine, verdict);
+    if (metadata.title !== input.title || metadata.body !== input.body) await deps.updateMetadata(metadata);
+    if (sha === pr.headSha) {
+      deps.log("fix.done", { ...roundFields(), subtype: "success" });
+      return { outcome: "metadata-repaired", headSha: sha, preflight: verdict };
+    }
+    await deps.push(sha);
+    deps.log("fix.done", { ...roundFields(), subtype: "success", pushed_head_sha: sha });
+    return { outcome: "pushed", headSha: sha, preflight: verdict };
+  } catch (error) {
+    const reason = String((error as Error)?.message ?? error);
+    deps.log("sweep.plan_round.error", { pr_number: pr.prNumber, head_sha: pr.headSha, reason });
+    return refuse(reason);
+  }
 }
 
 /**
@@ -10255,16 +10479,18 @@ export async function runFixRung(opts: {
   // W1-T1227: the changed-file list as it stood BEFORE this invocation's first strike —
   // {@link fixRungScopeStandDownReason}'s baseline, so a path already out of scope before this
   // rung ever ran (tolerated by `scopeGuardOutOfScopeFiles`'s push-and-flag disposition on the
-  // implement path) is never re-flagged as something the RUNG added. Best-effort: an omitted
-  // `deps.fetchPrDiffFiles`, or one that throws, degrades to `undefined` — the scope check below
-  // then simply never fires (fail OPEN, the same discipline every other pre-strike read in this
-  // function already follows), never a guessed baseline.
+  // implement path) is never re-flagged as something the RUNG added. An omitted reader skips
+  // the check; an unreadable diff stands down before dispatch (W1-T4074).
   let baselineDiffFiles: string[] | undefined;
   if (deps.fetchPrDiffFiles) {
     try {
       baselineDiffFiles = await deps.fetchPrDiffFiles(opts.prUrl);
-    } catch {
-      baselineDiffFiles = undefined;
+    } catch (error) {
+      const reason = `PR diff unreadable — no surface to stage can be verified: ${String(error)}`;
+      const site = (opts.task.files ?? []).length === 0 ? "rung.empty_commit_surface" : "rung.pr_diff_unreadable";
+      deps.log("fix.stood_down", { site, strike: strikes + 1, reason });
+      deps.say(`fix rung: ${reason} — standing down before spending a worker round`);
+      return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
     }
   }
   // W1-T1278 (condition B): THIS rung's own PR number, parsed once — `undefined` when `prUrl`
@@ -10817,8 +11043,8 @@ export async function runFixRung(opts: {
     // / `review.instrumentEntangled`, below) fires a whole round later, only after CI has gone green
     // and a full review has run. This check needs neither: it reads the live changed-file list
     // directly, so it fires as soon as the offending push is visible on GitHub, escalating instead of
-    // spending another strike. Best-effort (`deps.fetchPrDiffFiles` omitted or throwing skips this
-    // round's check entirely, fail OPEN) and NEVER writes the PR body or the task record — it only
+    // spending another strike. An omitted reader skips the check; an unreadable diff stands down.
+    // This never writes the PR body or the task record — it only
     // ledgers, says, and (like the rule-15/rule-25 refusals beside it) escalates.
     //
     // W1-T2653: this round's own declared remedy file(s) — the failing check(s) THIS strike is
@@ -10835,8 +11061,11 @@ export async function runFixRung(opts: {
       let currentDiffFiles: string[] | undefined;
       try {
         currentDiffFiles = await deps.fetchPrDiffFiles(opts.prUrl);
-      } catch {
-        currentDiffFiles = undefined;
+      } catch (error) {
+        const reason = `PR diff unreadable: ${String(error)}`;
+        deps.log("fix.stood_down", { site: "rung.pr_diff_unreadable", strike: strikes + 1, reason });
+        deps.say(`fix rung: ${reason} — standing down before spending a worker round`);
+        return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
       }
       const scopeStandDown =
         currentDiffFiles !== undefined
@@ -11332,7 +11561,9 @@ export async function runFixRung(opts: {
       : [];
     const fixDeclaredPaths = proofRepairRound
       ? proofRepairStageable
-      : [...(opts.task.files ?? []), ...(baselineDiffFiles ?? []), ...offeredCensusBaselines()];
+      : [...new Set([
+          ...(opts.task.files ?? []), ...(baselineDiffFiles ?? []), ...reachableRemedyFiles.map((file) => file.path),
+        ])];
     // A proof-repair round with no test path to stage still runs: it may end in a PROOF_AMENDMENT instead of an edit.
     if (fixHarnessOwnsGit && fixDeclaredPaths.length === 0 && !proofRepairRound) {
       const reason = "the fix has no surface to stage — declare task files or restore the PR diff before dispatch";
@@ -18919,6 +19150,8 @@ export interface BaseProofDir {
   baseCheckoutDir: string | undefined;
   baseUnreadablePaths: ReadonlySet<string>;
   baseIsCheckout: boolean;
+  /** (W1-T5528) Set only on the `detachedAsync` path: the base probe's checkout still in flight. */
+  pendingCheckout?: Promise<void>;
   baseWorktreeFailure?: string;
   /** (W1-T3190) Exactly the `test/**` paths COPIED in above, so `classifyBaseProofOutcome` reads
    *  the same set the copy used: a `grep:` naming one would otherwise find the copy and read as
@@ -18969,6 +19202,7 @@ export function buildBaseProofDir(
   criteria: ReadonlyArray<{ proof?: string }>,
   headCheckoutDir: string,
   deps: {
+    detachedAsync?: { path: string; revision: string; run: (args: string[]) => Promise<void> };
     mergeBase?: (cwd: string) => string;
     showBlob?: (cwd: string, rev: string, repoRelPath: string) => string;
     makeDir?: () => string;
@@ -18986,6 +19220,15 @@ export function buildBaseProofDir(
     copyFile?: (src: string, dest: string) => void;
   } = {},
 ): BaseProofDir {
+  const detachedArgs = (repoDir: string, path: string, revision: string) =>
+    ["-C", repoDir, "worktree", "add", "--detach", path, revision];
+  if (deps.detachedAsync) {
+    const { path, revision, run } = deps.detachedAsync;
+    return {
+      baseCheckoutDir: path, baseUnreadablePaths: new Set(), addedTestFiles: new Set(), baseIsCheckout: false,
+      pendingCheckout: run(detachedArgs(headCheckoutDir, path, revision)),
+    };
+  }
   const mergeBase =
     deps.mergeBase ??
     ((cwd: string) =>
@@ -19014,7 +19257,7 @@ export function buildBaseProofDir(
       // stderr PIPED for the same reason `showBlob` pipes it: a base the repo cannot check out is
       // a degrade this function REPORTS (`baseWorktreeFailure`), never a `fatal:` line through a
       // passing review. `--detach`: no branch name is ever wanted here (W1-T232's lesson at the head).
-      execFileSync("git", ["-C", repoDir, "worktree", "add", "--detach", worktreePath, revision], {
+      execFileSync("git", detachedArgs(repoDir, worktreePath, revision), {
         stdio: ["ignore", "pipe", "pipe"],
       }));
   const makeDir = deps.makeDir ?? (() => mkdtempSync(join(tmpdir(), "rmd-proof-base-")));
@@ -19325,6 +19568,17 @@ export function materializeReviewWorktree(
   }
   registerReviewerCheckout(worktreePath);
   return { worktreePath };
+}
+
+export function materializePlanRoundWorktree(config: Config, repoDir: string, prNumber: number, headSha: string,
+  deps: Pick<ReviewCommandDeps, "materialize"> & { prepare?: FreshTreeReviewSeams["prepareWorktree"] } = {},
+): MaterializeReviewWorktreeResult {
+  const result = (deps.materialize ?? materializeReviewWorktree)(config, repoDir, prNumber, headSha);
+  if (result.worktreePath && !(deps.prepare ?? prepareWorktreeToolchain)(repoDir, result.worktreePath)) {
+    cleanupMaterializedWorktree(worktreeRemove, repoDir, result.worktreePath);
+    return { worktreePath: undefined, failure: { errorClass: "other", message: "plan round toolchain unavailable" } };
+  }
+  return result;
 }
 
 /** Best-effort removal of a worktree a materialization attempt itself just
@@ -33921,6 +34175,9 @@ export function loadDaemonPlan(
 }
 
 const ORIGIN_MAIN_LABEL = "origin/main:";
+/** The required acceptance-author-gate refuses a trailerless body with no block (#9005); this test fails while main holds a duplicate. */
+const SHARD_REPAIR_ACCEPTANCE =
+  "## Acceptance\n- no plan shard on main carries a duplicate key after this repair | unit test: no plan shard on main carries a duplicate key";
 type ShardRepairLog = (step: string, extra?: Record<string, unknown>) => void;
 
 /** W1-T5519 — the duplicate-key repair lane's state: `requests/` the loop writes, `opened.json` the plan garden's child writes. */
@@ -34005,7 +34262,7 @@ function repairRequestedShard(
       `The daemon quarantined \`${rel}\` (blob ${blob}): it fails to parse on a duplicated \`${keys}\` key, the merge race ` +
       `#8877 and #8922 repaired by hand. This keeps ${Object.entries(verdict.kept).map(([k, v]) => `\`${k}: ${v}\``).join(", ")}, the value ` +
       `the record's risk_ruling pin covers, and drops the other line and any backlog-gardener marker it carried.\n\n` +
-      `Opened by the duplicate-key repair lane (W1-T5519).`,
+      `Opened by the duplicate-key repair lane (W1-T5519).\n\n${SHARD_REPAIR_ACCEPTANCE}`,
   };
   let prUrl: string | undefined;
   try {

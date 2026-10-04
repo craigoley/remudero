@@ -52,7 +52,7 @@ function fixture(precheckBody: string, hookText?: string): Fixture {
   // checkout. MEASURED both ways — a plain-repo fixture cannot reproduce this no matter what the
   // hook does, and every fleet lane is a linked worktree.
   const parent = gitRepo({ kind: "t3224-parent" });
-  const work = parent.addWorktree(join(dirname(parent.dir), `t3224-wt-${process.pid}-${counter++}`), "pushbranch");
+  const work = parent.addWorktree(join(parent.dir, `t3224-wt-${counter++}`), "pushbranch");
   const victim = gitRepo({ kind: "t3224-victim" });
 
   mkdirSync(join(work.dir, "scripts"), { recursive: true });

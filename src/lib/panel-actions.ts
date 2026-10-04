@@ -36,8 +36,8 @@ import { hashToken } from "./last-seen.js";
 import { readLedgerLines, DEFAULT_LIVENESS_BOUND_MS, type LedgerReader } from "./status.js";
 import { deriveLastPoll } from "./daemon-health.js";
 import { deriveThreadId, readThread, appendThreadMessage, type ThreadIdentity } from "./inbox-thread.js";
-import { captureFeedback } from "./feedback.js";
-import type { LandFeedbackOpts } from "./feedback-landing.js";
+import { captureFeedback, feedbackEntryRepoPath } from "./feedback.js";
+import { queueFeedbackRecord } from "./feedback-landing.js";
 import { applyOperatorMergeHold, type OperatorMergeHoldAction } from "./operator-merge-hold.js";
 import {
   interpretReply,
@@ -73,8 +73,6 @@ export interface PanelActionDeps {
   interpretReplyDeps?: InterpretReplyDeps;
   /** Stamps the question-store answer {@link buildEscalationReplyRoute} records; unset ⇒ `systemClock`. */
   clock?: Clock;
-  /** The landing options {@link buildEscalationReplyRoute}'s capture lands with, wrapped by {@link requestPathLand}. */
-  feedbackLand?: LandFeedbackOpts;
 }
 
 /** Shared with lib/panel-graph.ts (W3-T6, the plan->task->PR graph + feedback/decision routes) -- one JSON-envelope writer for every panel route, never a second copy. */
@@ -156,17 +154,6 @@ export function appendPanelLedger(ledgerPath: string, step: string, taskId: stri
   const row: PanelLedgerRow = { step, ts: fixedClock(ms).iso(), run_id: `PANEL-${ms}` };
   appendLedger(ledgerPath, { ts: row.ts, run_id: row.run_id, task_id: taskId, step, origin, ...extra });
   return row;
-}
-
-export function requestPathLand(land: LandFeedbackOpts, ledgerPath: string, taskId: string, origin: string): LandFeedbackOpts {
-  return {
-    ...land,
-    preflight: "skip-request-path",
-    log: (step, extra) => {
-      if (step === "plan_pr.preflight_skipped") appendPanelLedger(ledgerPath, step, taskId, origin, extra);
-      land.log?.(step, extra);
-    },
-  };
 }
 
 /** The identity of one appended panel ledger row: the system-of-record reference an executor cites. */
@@ -858,8 +845,9 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
       }
 
       const origin = bearerTokenId(req);
-      const land = requestPathLand(deps.feedbackLand ?? {}, deps.ledgerPath, input.taskId, origin);
-      const entry = captureFeedback(deps.root, { raw: input.text, origin: "ui", threadId, land });
+      // W1-T5525: serve mounts this route on config.root, the state root the daemon's landing sweep drains.
+      const entry = captureFeedback(deps.root, { raw: input.text, origin: "ui", threadId, land: { stateRoot: deps.root } });
+      const staged = queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.root);
       // W1-T4471: the store `operatorVerdictEvidence` (lib/sweep.ts) reads; `input.taskId` is required above.
       const recordedToQuestionStore = appendQuestionAnswer(deps.root, {
         ts: (deps.clock ?? systemClock).iso(),
@@ -873,8 +861,9 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
         interpretation: interpretation.status,
         flows_to: "plan/questions.ndjson",
         recorded_to_question_store: recordedToQuestionStore,
+        ...(staged.queued ? { landing: "queued" } : { landing_error: staged.error }),
       });
-      sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, feedback: entry, interpretation });
+      sendJson(res, 200, { ok: true, taskId: input.taskId, threadId, feedback: entry, interpretation, ...(staged.queued ? { landing: "queued" } : {}) });
     }),
   };
 }

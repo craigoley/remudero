@@ -566,7 +566,7 @@ test("a clean feedback landing still pushes and opens its PR", () => {
   assert.equal(calls.filter((c) => c[1] === "create").length, 1);
 });
 
-// ── the console's synchronous request-path routes skip the preflight (operator ruling 2026-10-03) ──
+// ── the console's synchronous request-path routes queue for the daemon sweep (W1-T5460, W1-T5525) ──
 
 /** A clone whose origin/main holds one feedback entry at `status`, plus the panel deps a console route needs. */
 function requestPathFixture(kind: string, status: "proposed" | "grilling") {
@@ -625,33 +625,38 @@ test("the console's POST /v1/feedback/decision queues for the daemon sweep inste
   fx.cleanup();
 });
 
-test("the console's POST /v1/feedback replyTo answer lands its capture and its answered flip without the plan-PR preflight", async () => {
+test("the console's POST /v1/feedback replyTo answer queues its capture and its answered flip for the daemon sweep", async () => {
+  // W1-T5525 superseded this route's request-path skip: both records wait for the sweep's preflight.
   const fx = requestPathFixture("w5348-submit-route", "grilling");
-  await postRoute([buildSubmitFeedbackRoute(fx.panel)], "/v1/feedback", { text: "the answer", replyTo: fx.entry.id });
-  assert.equal(fx.counter.preflights, 0, "neither landing on the request path runs the preflight checks");
-  assert.deepEqual(fx.f.heads(), [LANDING_BRANCH, "main"], "the answer still landed");
-  const rows = fx.skipRows();
-  assert.equal(rows.length, 2, "one skip row per landing: the captured answer, then the answered flip");
-  assert.ok(rows.every((r) => r.reason === "request-path" && r.lane === "feedback-landing" && r.task_id === fx.entry.id), JSON.stringify(rows));
+  const stateRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w5348-submit-state-`));
+  await postRoute([buildSubmitFeedbackRoute({ ...fx.panel, inboxRoot: stateRoot })], "/v1/feedback", { text: "the answer", replyTo: fx.entry.id });
+  assert.equal(fx.counter.preflights, 0, "the request path never runs the preflight checks");
+  assert.deepEqual(fx.f.heads(), ["main"], "the request path pushes nothing");
+  assert.deepEqual(fx.skipRows(), [], "no landing ran on the request path, so none was skipped");
+  const queued = landing.queuedFeedbackLandings(stateRoot);
+  assert.equal(queued.length, 2, "the captured answer and the answered flip are both staged");
+  assert.ok(queued.includes(`plan/feedback/${fx.entry.id}.yaml`), JSON.stringify(queued));
+  rmSync(stateRoot, { recursive: true, force: true });
   fx.cleanup();
 });
 
-test("the console's POST /v1/skills/run Refine lands its grill without the plan-PR preflight and ledgers the skip", async () => {
+test("the console's POST /v1/skills/run Refine queues its grill for the daemon sweep instead of landing it", async () => {
   const fx = requestPathFixture("w5348-skill-run-route", "proposed");
+  const stateRoot = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w5348-skill-state-`));
   mkdirSync(skillsDir(fx.f.clone.dir), { recursive: true });
   writeFileSync(join(skillsDir(fx.f.clone.dir), "plan.yaml"), "tools:\n  - Read\npermission_profile: implement\noutput_contract: a PR\ngrounding_sources:\n  - plan/tasks.yaml\ngate: ci\ntier: G-17\n");
   const task = { id: "W9-T1", title: "Example task", repo: "remudero", depends_on: [], type: "implement", verify: "auto", risk: "medium", status: "queued", attempts: 0, origin: "architect", acceptance: [{ claim: "does it", proof: "unit test: does it" }] };
   writeFileSync(fx.panel.planPath, JSON.stringify([task]));
-  await postRoute(buildPanelSkillRunRoutes(fx.panel), "/v1/skills/run", { skill: "plan", mode: "clarify", taskId: "W9-T1" });
+  await postRoute(buildPanelSkillRunRoutes({ ...fx.panel, inboxRoot: stateRoot }), "/v1/skills/run", { skill: "plan", mode: "clarify", taskId: "W9-T1" });
   assert.equal(fx.counter.preflights, 0, "the Refine request never runs the preflight checks");
-  assert.deepEqual(fx.f.heads(), [LANDING_BRANCH, "main"], "the grill still landed");
-  const rows = fx.skipRows();
-  assert.ok(rows.length >= 1, "the skip is ledgered");
-  assert.ok(rows.every((r) => r.reason === "request-path" && r.task_id === "W9-T1"), JSON.stringify(rows));
+  assert.deepEqual(fx.f.heads(), ["main"], "the request path pushes nothing");
+  assert.deepEqual(fx.skipRows(), [], "no landing ran on the request path, so none was skipped");
+  assert.equal(landing.queuedFeedbackLandings(stateRoot).length, 1, "the grill is staged for the sweep");
+  rmSync(stateRoot, { recursive: true, force: true });
   fx.cleanup();
 });
 
-test("the daemon's feedback-landing sweep and a status write without the request-path option still run the preflight", () => {
+test("the daemon's feedback-landing sweep and a direct status write both run the preflight", () => {
   const f = originWith({ "README.md": "seed\n" }, "w5348-daemon-sweep");
   mkdirSync(join(f.clone.dir, "plan", "feedback"), { recursive: true });
   writeFileSync(join(f.clone.dir, "plan", "feedback", "fb-new.yaml"), "id: fb-new\nstatus: new\nraw: fresh\n");
@@ -670,5 +675,5 @@ test("the daemon's feedback-landing sweep and a status write without the request
     landing.landFeedbackStatusContent(f.clone.dir, "plan/feedback/fb-other.yaml", "id: fb-other\nstatus: grilling\nraw: other\n", { gh, planPrPreflight }),
   );
   assert.equal(status.landed, true, JSON.stringify(status));
-  assert.equal(preflights, 2, "only the console's request path opts out");
+  assert.equal(preflights, 2, "no caller opts out of the preflight");
 });
