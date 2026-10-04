@@ -204,8 +204,8 @@ test("W1-T4064: command snapshot is clock-free and unreadable inputs log once pe
   const snapshot = { planTreeSha: "tree-sha", filedAtByTaskId: filed };
   const readFiling = () => ({ kind: "ready" as const, snapshot });
   const corpus = { rows: [...history, { step: "verdict.merged", ts: new Date(NOW).toISOString() }], ok: true, unread: [] as string[] };
-  const readLedger = (() => corpus) as unknown as NonNullable<Parameters<typeof dispatchValueContextForSelection>[5]>["readLedger"];
-  const select = (state: string, filing = readFiling) => dispatchValueContextForSelection(plan([old, fresh]), () => false, state, log, "/fixture/tasks.yaml", { readLedger, readFiling: filing });
+  const readLedger = (() => corpus) as unknown as NonNullable<Parameters<typeof dispatchValueContextForSelection>[5]>;
+  const select = (state: string, filing = readFiling) => dispatchValueContextForSelection(plan([old, fresh]), () => false, state, log, "/fixture/tasks.yaml", readLedger, filing);
   const a = select("snapshot-ready");
   assert.ok(a?.stridePassByTaskId);
   const original = Date.now;
@@ -214,15 +214,15 @@ test("W1-T4064: command snapshot is clock-free and unreadable inputs log once pe
     assert.deepEqual([...select("snapshot-ready")!.stridePassByTaskId!], [...a.stridePassByTaskId!]);
   } finally { Date.now = original; }
   const missing = () => ({ kind: "refused" as const, reasons: ["missing-history"] });
-  const fallback = dispatchValueContextForSelection(plan([old, fresh]), () => false, "snapshot-fallback", log, "/fixture/tasks.yaml", { readLedger, readFiling: missing });
+  const fallback = dispatchValueContextForSelection(plan([old, fresh]), () => false, "snapshot-fallback", log, "/fixture/tasks.yaml", readLedger, missing);
   assert.ok(fallback?.costOfDelayFallback);
   assert.deepEqual(dispatchOrder([fresh, old], fallback).map(t => t.id), [old.id, fresh.id]);
-  dispatchValueContextForSelection(plan([old, fresh]), () => false, "snapshot-fallback", log, "/fixture/tasks.yaml", { readLedger, readFiling: missing });
+  dispatchValueContextForSelection(plan([old, fresh]), () => false, "snapshot-fallback", log, "/fixture/tasks.yaml", readLedger, missing);
   const fallbacks = logs.filter(row => row.step === "dispatch.cost_of_delay.fallback");
   assert.equal(fallbacks.length, 1);
   assert.deepEqual(fallbacks[0].extra?.reasons, ["missing-history"]);
   corpus.rows.push({ step: fallbacks[0].step, ...fallbacks[0].extra, ts: new Date(NOW).toISOString() });
-  dispatchValueContextForSelection(plan([old, fresh]), () => false, "snapshot-restarted", log, "/fixture/tasks.yaml", { readLedger, readFiling: missing });
+  dispatchValueContextForSelection(plan([old, fresh]), () => false, "snapshot-restarted", log, "/fixture/tasks.yaml", readLedger, missing);
   assert.equal(logs.filter(row => row.step === "dispatch.cost_of_delay.fallback").length, 1, "the persisted key survives restart");
   corpus.ok = false;
   corpus.unread.push("rotation-a");

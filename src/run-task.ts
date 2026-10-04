@@ -32584,9 +32584,10 @@ export function dispatchValueContextForSelection(
   stateDir: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   planPath: string,
-  deps: { readLedger?: typeof readLedgerUnionRecordsSync; readFiling?: typeof readDispatchFilingSnapshot } = {},
+  readLedger: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync,
+  readFiling: typeof readDispatchFilingSnapshot = readDispatchFilingSnapshot,
 ): DispatchValueContext | undefined {
-  const union = (deps.readLedger ?? readLedgerUnionRecordsSync)(stateDir, {
+  const union = readLedger(stateDir, {
     step: [...DISPATCH_VALUE_LEDGER_STEPS, "dispatch.cost_of_delay.fallback", "dispatch.cost_of_delay.ready", "dispatch.refused_already_merged"],
     refuseIncomplete: true,
   });
@@ -32607,7 +32608,7 @@ export function dispatchValueContextForSelection(
     }
     return undefined;
   }
-  const filing = (deps.readFiling ?? readDispatchFilingSnapshot)(planPath);
+  const filing = readFiling(planPath);
   const evidence = union.rows.filter(row => row.step !== "dispatch.cost_of_delay.fallback" && row.step !== "dispatch.cost_of_delay.ready")
     .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
   const times = evidence.map(row => typeof row.ts === "string" ? Date.parse(row.ts) : NaN).filter(Number.isFinite);
