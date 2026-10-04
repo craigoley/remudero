@@ -91,6 +91,12 @@ export function proofAmendmentIneligibleReason(
   if (!pr.isOpen) return "not-open";
   if (pr.planOnly) return "plan-only-pr";
   if (!pr.taskId) return "no-task-trailer";
+  // W1-T5544 — THE GATE-LOG EVIDENCE SOURCE. A PR red on `proof-discrimination` never has a posted
+  // success review (review runs only once checks are green), so the three review gates below can
+  // never hold for it. The gate's OWN log, read at this head, names the exact stale proofs instead —
+  // the fact those gates were standing in for. `validateProofAmendmentProposal` (byte-identical
+  // claim, reviewer grammar, head-vs-base discrimination) still runs unchanged after this returns.
+  if (evidence?.source === "gate-log") return evidence.proofs.length === 0 ? "no-evidence" : undefined;
   if (pr.reviewState !== "success") return "review-not-success";
   if (pr.capped !== true) return "not-capped";
   if (pr.criteria.some((c) => !c.met)) return "unmet-criteria";
