@@ -34252,7 +34252,6 @@ function* requeueActionsJobSteps(
   }
 }
 
-/** W1-T5283 — {@link requeueActionsJob} for the main-health rung, the rerun POST awaited. */
 export function requeueActionsJobAsync(
   owner: string,
   repo: string,
@@ -38780,7 +38779,6 @@ export interface CiFailureFetchOptionsAsync {
   annotationReadLimit?: number;
 }
 
-/** W1-T5283 — {@link fetchCiFailures}'s SAME steps for the main-health rung, each read awaited. */
 export function fetchCiFailuresAsync(
   owner: string,
   repo: string,
