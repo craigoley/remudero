@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -133,6 +133,7 @@ interface RunOpts {
 }
 
 function runRecycle(opts: RunOpts = {}): Run {
+  if (opts.scriptPath) cpSync(join(REPO_ROOT, "deploy", "acr-login.sh"), join(dirname(opts.scriptPath), "acr-login.sh"));
   const dir = mkdtempSync(join(tmpdir(), "recycle-wait-stub-"));
   const rec = mkdtempSync(join(tmpdir(), "recycle-wait-rec-"));
   const state = opts.stateDir ?? mkdtempSync(join(tmpdir(), "recycle-wait-state-"));

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -144,6 +145,7 @@ function runHostUpdate(
   scriptPath = SCRIPT,
   extraEnv: NodeJS.ProcessEnv = {},
 ): Run {
+  if (scriptPath !== SCRIPT) cpSync(join(REPO_ROOT, "deploy", "acr-login.sh"), join(dirname(scriptPath), "acr-login.sh"));
   const dir = mkdtempSync(join(tmpdir(), "host-update-stub-"));
   const rec = mkdtempSync(join(tmpdir(), "host-update-rec-"));
   const state = mkdtempSync(join(tmpdir(), "host-update-state-"));
