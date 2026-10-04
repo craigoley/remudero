@@ -309,7 +309,7 @@ test("W1-T5536: the default digest gateway shells out and assignment failure kee
 
 test("W1-T5536: failed refreshes, notes and ownership reads carry a retryable hold reason", async (t) => {
   for (const setup of [
-    (f: ReturnType<typeof fixture>) => { f.deps.updateBranch = () => "conflict"; },
+    (f: ReturnType<typeof fixture>) => { f.deps.updateBranch = () => "error"; },
     (f: ReturnType<typeof fixture>) => { f.deps.updateBranch = undefined; },
     (f: ReturnType<typeof fixture>) => { f.deps.updateBranch = () => { throw new Error("refresh write failed"); }; },
     (f: ReturnType<typeof fixture>) => { f.effects.strikeLadder!.readAuthor = async () => { throw new Error("author read failed"); }; },
@@ -321,6 +321,11 @@ test("W1-T5536: failed refreshes, notes and ownership reads carry a retryable ho
     assert.equal(f.rows.some(row => row.step === "sweep.strike_ladder.refreshed"), false);
     assert.equal(f.calls.includes("escalate"), false);
   }
+  const conflict = fixture(t);
+  conflict.deps.updateBranch = () => "conflict";
+  const climbed = await conflict.sweep([pr({ currentMergeBaseSha: "old-main" })]);
+  assert.match(climbed.actions[0].reason, /strike ladder rebuild 1\/2/, "W1-T5635: a conflict climbs instead of holding");
+  assert.ok(conflict.rows.some(row => row.step === "sweep.strike_ladder.held" && row.refresh_outcome === "conflict"));
   const note = fixture(t);
   note.effects.strikeLadder!.appendNote = () => false;
   const result = await note.sweep();
