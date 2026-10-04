@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { loadProposalRegistry } from "../src/lib/inbox.js";
 import {
   PROCEDURAL_STEP_TEXT,
   renderSkillDraft,
   scanSkillDraft,
+  skillDraftProposalId,
   stageSkillDraft,
   type SkillDraft,
 } from "../src/lib/skill-workshop.js";
@@ -141,4 +143,41 @@ test("W1-T4283: comparisons keep each mined outcome distinct instead of combinin
 test("W1-T4283: empty outcome metadata falls back to the draft description", () => {
   const draft = described("Verified results shipped.", "Ship verified results.");
   assert.equal(scanSkillDraft({ ...draft, outcomeDescriptions: [] }, ALLOWLIST).ok, false);
+});
+
+test("W1-T4283: removing outcome-only bullets does not prevent a behavioral draft refresh", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-test-actionable-refresh-"));
+  const registry = join(dir, "proposals.json");
+  const outcomeOnly = rendered("clean_single_strike");
+  const id = skillDraftProposalId(outcomeOnly.procedureKey);
+  const draft = {
+    ...outcomeOnly,
+    markdown: outcomeOnly.markdown.replace(PROCEDURAL_STEP_TEXT.clean_single_strike, "Call `Grep` before editing."),
+  };
+  try {
+    writeFileSync(registry, JSON.stringify({ proposals: [{ id, summary: "staged earlier", evidenceAnchors: [], skillFile: { name: outcomeOnly.name, markdown: outcomeOnly.markdown } }] }));
+    const result = stageSkillDraft(registry, draft, ALLOWLIST, { reachable: true, reason: "fixture" });
+    assert.equal(result.refreshed, true);
+    assert.equal(result.alreadyStaged, true);
+    assert.equal(result.refused, false);
+    assert.equal(loadProposalRegistry(registry)[0].skillFile!.markdown, draft.markdown);
+    assert.equal(stageSkillDraft(registry, draft, ALLOWLIST, { reachable: true, reason: "fixture" }).refreshed, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("W1-T4283: a staged restatement is discounted against the fallback draft description", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-test-actionable-refresh-fallback-"));
+  const registry = join(dir, "proposals.json");
+  const outcomeOnly = described("Verified results shipped.", "Ship verified results.");
+  const id = skillDraftProposalId(outcomeOnly.procedureKey);
+  const draft = described(outcomeOnly.description, "Inspect failing tests before shipping.");
+  try {
+    writeFileSync(registry, JSON.stringify({ proposals: [{ id, summary: "staged earlier", evidenceAnchors: [], skillFile: { name: outcomeOnly.name, markdown: outcomeOnly.markdown } }] }));
+    assert.equal(stageSkillDraft(registry, draft, ALLOWLIST, { reachable: true, reason: "fixture" }).refreshed, true);
+    assert.equal(loadProposalRegistry(registry)[0].skillFile!.markdown, draft.markdown);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

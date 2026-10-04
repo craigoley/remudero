@@ -396,15 +396,17 @@ export interface StageSkillDraftResult {
   alreadyStaged: boolean;
   /** An entry staged before W1-T4338 had no skill file; this call added it (and refreshed its summary). */
   backfilled?: boolean;
-  /** The staged entry's Procedure named fewer steps than this draft's, so this call replaced it. */
+  /** The staged entry's Procedure named fewer behavioral steps, so this call replaced it. */
   refreshed?: boolean;
   reason?: string;
 }
 
-/** The step lines of a SKILL.md's `## Procedure` section, in order. */
-function skillProcedureSteps(markdown: string): string[] {
+/** Procedure steps, excluding restatements of the supplied mined outcomes. */
+function skillProcedureSteps(markdown: string, descriptions: readonly string[] = []): string[] {
   const section = /^## Procedure\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(markdown)?.[1] ?? "";
-  return section.split("\n").filter((line) => line.startsWith("- "));
+  return section.split("\n").filter((line) =>
+    line.startsWith("- ") && !descriptions.some((description) => restatesOutcome(line, description)),
+  );
 }
 
 /**
@@ -444,7 +446,8 @@ export function stageSkillDraft(
         const stored = current[existing].skillFile;
         // The id is the PROCEDURE, so a draft whose Procedure grew (the transcript-mined steps of
         // W1-T4668) must replace the stored text, or approval writes the older, emptier skill.
-        // Only MORE steps replace it: a window that mined fewer never downgrades what is staged.
+        // Compare behavioral steps: removed outcome-only bullets do not count as lost procedure.
+        const descriptions = draft.outcomeDescriptions?.length ? draft.outcomeDescriptions : [draft.description];
         if (stored && skillProcedureSteps(draft.markdown).length > skillProcedureSteps(stored.markdown).length) {
           refreshed = true;
           return current.map((p, i) => (i === existing ? { ...p, summary: skillDraftSummary(draft, reachability), skillFile } : p));
