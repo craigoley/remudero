@@ -11,6 +11,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { callSiteKey, enclosingTestTitle, numberCallSites } from "./helpers/test-call-site-key.js";
+
 // ── W1-T2346: "the live-write guard fences four gh/git WRITE verbs and nothing else, so a unit
 // test that reaches `armIfVerdictPermits`' production default still performs a live REST head
 // read and a machine-local config/ledger read before any fence is consulted, and no check
@@ -383,8 +385,12 @@ function omittedObjectKeys(argText: string | undefined, fieldNames: readonly str
 
 interface TestCallSite {
   file: string;
+  /** For humans reading a failure only — never part of a key (W1-T5622, see `callSiteKey`). */
   line: number;
   name: string;
+  /** The enclosing test's title and this call's ordinal among same-name calls in it: the KEY. */
+  title: string | undefined;
+  ordinal: number;
   argsText: string;
   argTexts: string[];
 }
@@ -396,7 +402,7 @@ function findTestCallSites(entryNames: ReadonlySet<string>): TestCallSite[] {
   const testFiles = execFileSync("git", ["ls-files", "test"], { cwd: REPO_ROOT, encoding: "utf8" })
     .split("\n")
     .filter((f) => f.endsWith(".test.ts"));
-  const rows: TestCallSite[] = [];
+  const rows: Array<Omit<TestCallSite, "ordinal">> = [];
   for (const relFile of testFiles) {
     const text = readFileSync(join(REPO_ROOT, relFile), "utf8");
     const masked = maskNonCode(text);
@@ -413,11 +419,12 @@ function findTestCallSites(entryNames: ReadonlySet<string>): TestCallSite[] {
         }
         const argsTextOriginal = text.slice(argsOpen + 1, argsClose);
         const lineNo = masked.slice(0, mm.index).split("\n").length;
-        rows.push({ file: relFile, line: lineNo, name, argsText: argsTextOriginal, argTexts: splitTopLevel(argsTextOriginal) });
+        const title = enclosingTestTitle(text, mm.index);
+        rows.push({ file: relFile, line: lineNo, name, title, argsText: argsTextOriginal, argTexts: splitTopLevel(argsTextOriginal) });
       }
     }
   }
-  return rows;
+  return numberCallSites(rows);
 }
 
 // ── PART 4: the exclusion set — a REASON is the sole authority, never a boolean ─────────────────
@@ -448,17 +455,20 @@ const ARM_SEAM_TEST_REASON =
 // list instead, so this accidental blind spot is gone and the census now sees exactly what
 // test/arm-seam-default-is-opt-in.test.ts already proves: the SAME deliberate omission the other
 // three LEVEL-1 entry points are already excused for.
+// W1-T5622: keyed by enclosing test TITLE (`callSiteKey`), not line, so a diff inserting above a
+// witness no longer re-keys it; a failure still prints `file:line` for the reader.
+const ARM_SEAM_FILE = "test/arm-seam-default-is-opt-in.test.ts";
 const REACHABILITY_EXCLUSIONS: Readonly<Record<string, string>> = {
   // LEVEL-1 omitted-`deps` call sites (the first real-tree test below).
-  "armAutoMerge:test/arm-seam-default-is-opt-in.test.ts:81": ARM_SEAM_TEST_REASON,
-  "armAutoMergeDetailed:test/arm-seam-default-is-opt-in.test.ts:64": ARM_SEAM_TEST_REASON,
-  "armAutoMergeDetailed:test/arm-seam-default-is-opt-in.test.ts:179": ARM_SEAM_TEST_REASON,
-  "armAutoMergeDetailed:test/arm-seam-default-is-opt-in.test.ts:263": ARM_SEAM_TEST_REASON,
-  "armAutoMergeDetailed:test/arm-seam-default-is-opt-in.test.ts:282": ARM_SEAM_TEST_REASON,
-  "armAutoMergeDetailed:test/arm-seam-default-is-opt-in.test.ts:316": ARM_SEAM_TEST_REASON,
-  "armAutoMergeAtOpen:test/arm-seam-default-is-opt-in.test.ts:88": ARM_SEAM_TEST_REASON,
-  "armAutoMergeAtOpen:test/arm-seam-default-is-opt-in.test.ts:101": ARM_SEAM_TEST_REASON,
-  "disarmAutoMerge:test/arm-seam-default-is-opt-in.test.ts:106": ARM_SEAM_TEST_REASON,
+  [`armAutoMerge:${ARM_SEAM_FILE}:armAutoMerge reached with no deps refuses via the SAME check — forwarding does not construct a real default of its own first#1`]: ARM_SEAM_TEST_REASON,
+  [`armAutoMergeDetailed:${ARM_SEAM_FILE}:armAutoMergeDetailed reached with no deps under the test runner refuses, naming itself#1`]: ARM_SEAM_TEST_REASON,
+  [`armAutoMergeDetailed:${ARM_SEAM_FILE}:real tree: the refusal fires before any live gh read and before the ambient config/ledger is ever touched#1`]: ARM_SEAM_TEST_REASON,
+  [`armAutoMergeDetailed:${ARM_SEAM_FILE}:wrapped in withLiveWritesAllowed, armAutoMergeDetailed with no deps reaches the REAL realArmDeps() rather than refusing#1`]: ARM_SEAM_TEST_REASON,
+  [`armAutoMergeDetailed:${ARM_SEAM_FILE}:REGRESSION LOCK: the SAME call with no withLiveWritesAllowed wrapper still refuses#1`]: ARM_SEAM_TEST_REASON,
+  [`armAutoMergeDetailed:${ARM_SEAM_FILE}:real tree: with NODE_TEST_CONTEXT deliberately absent, armAutoMergeDetailed with no deps does NOT throw — production wiring is byte-identical#1`]: ARM_SEAM_TEST_REASON,
+  [`armAutoMergeAtOpen:${ARM_SEAM_FILE}:armAutoMergeAtOpen reached with no deps under the test runner refuses, naming itself#1`]: ARM_SEAM_TEST_REASON,
+  [`armAutoMergeAtOpen:${ARM_SEAM_FILE}:armAutoMergeAtOpen refuses even on the irreversible-refused branch — the guard precedes EVERY branch, not just the one that arms#1`]: ARM_SEAM_TEST_REASON,
+  [`disarmAutoMerge:${ARM_SEAM_FILE}:disarmAutoMerge reached with no deps under the test runner refuses, naming itself#1`]: ARM_SEAM_TEST_REASON,
 };
 
 function findUnexplainedReach<T extends { key: string }>(candidates: readonly T[], exclusions: Readonly<Record<string, string>>): T[] {
@@ -704,7 +714,7 @@ test("real tree: no UNEXCUSED test/ call site of a LEVEL-1 entry point (armAutoM
   }));
   const gaps = sites
     .filter((s) => positionalDepsOmitted(s.argTexts, depsIndexByName.get(s.name) ?? -1))
-    .map((s) => ({ key: `${s.name}:${s.file}:${s.line}`, file: s.file, line: s.line }));
+    .map((s) => ({ key: callSiteKey(s), file: s.file, line: s.line }));
   // W1-T2347 (design clause ii, same discipline the family-field exclusions below already use):
   // an omission is EXCUSED only with a substantive, non-blank reason in REACHABILITY_EXCLUSIONS —
   // never merely because it exists. The only entries excused today are
@@ -736,65 +746,27 @@ test("real tree: armIfVerdictPermits/withdrawArmIfVerdictRefuses call sites that
     for (const field of omitted) {
       const entry = fieldMap.get(field)!;
       const classification = entry.kind === "direct" ? entry.classification : "unfenced-read"; // a chain always bottoms out in realArmDeps(), never write-only
-      candidates.push({ key: `${s.name}:${s.file}:${s.line}:${field}`, file: s.file, line: s.line, name: s.name, field, classification });
+      candidates.push({ key: `${callSiteKey(s)}:${field}`, file: s.file, line: s.line, name: s.name, field, classification });
     }
   }
 
   const reported = findUnexplainedReach(candidates, REACHABILITY_EXCLUSIONS);
 
-  // THE THREE KNOWN, VERIFIED entries on this tree today (re-derive before trusting this list —
-  // the task's own note: the count is a query, not a constant). Each omits `ledgerLines` while
+  // THE THREE KNOWN, VERIFIED entries on this tree today. Each omits `ledgerLines` while
   // supplying `arm`, so each reaches armIfVerdictPermits's OWN inline unfenced ledger read
   // (rationale (2)'s third bullet) regardless of whether its fixture's verdict ever arms for
   // real — this file over-approximates in the SAFE direction, exactly like
   // `test/clock-sweep-effect-completeness.test.ts`'s own documented choice.
-  // W1-T2347 landed a fix in between the census and this re-derivation, adding lines ahead of
-  // these two in test/run-task.test.ts (a withLiveWritesAllowed wrap for an unrelated, pre-
-  // existing deliberate real-dependency fixture) — the task's own note said to re-derive before
-  // trusting this list, and re-deriving is exactly how these two shifted from :5885/:5946 to
-  // :5891/:5952. W1-T2540 then added 54 lines at :3210 (merge-conflict prompt fixtures, again
-  // ahead of both) and they shifted the same way, to :5945/:6006 — the SECOND time this exact
-  // re-derivation has been needed. W1-T2561 then added fourteen lines ahead of both, moving the
-  // witnesses to :5959/:6020. The plan-sync batch-read PR then added ONE line ahead of both (an
-  // `RMD_TMP_PREFIX` import at :92, so a fixture's temp dir is boot-sweep reapable) and they moved
-  // by exactly one, to :5960/:6021 — the FOURTH re-derivation. W1-T2811 then added ONE line ahead
-  // of both (an `assertWallClockBound` import, so this file's one wall-clock-bounded assertion
-  // declares itself) and they moved by exactly one again, to :5961/:6022 — the FIFTH. That is this
-  // note's own point: a line number is a QUERY over the current tree, and any diff inserting above
-  // these witnesses moves them. W1-T2889's deps-object collapse then rewrote run-task.test.ts's
-  // fixtures and moved both by FOUR, to :5965/:6026 — the SIXTH re-derivation, and the first where
-  // the mover was a refactor of the tests themselves rather than a line added above them. PR-5093
-  // then added 75 net lines ahead of both while covering assignment routing telemetry, moving them
-  // to :6040/:6101. The THIRD witness (arm-ordering.test.ts) is untouched by every one of these
-  // edits and unmoved, which is what keeps this case a census over the real tree rather than three
-  // moving literals. W1-T3602 then added THIRTEEN lines ahead of both — a `headRefName` on the
-  // `routeFix` conflicted-PR fixture, which the `conflicted` row's new rmd-ownership conjunct
-  // requires — and they moved by exactly thirteen, to :6053/:6114. The SEVENTH re-derivation, and
-  // the cleanest illustration yet of this note's own claim: the witnesses are the SAME two call
-  // sites, still omitting `ledgerLines` while supplying `arm`; only their coordinates moved.
+  // W1-T5622: these were `file:line` pins, and the two run-task.test.ts ones were re-derived in
+  // 16 commits (#8970: :6165/:6226 -> :6167/:6228) by diffs that only inserted lines above them —
+  // the SAME two call sites every time. They are now keyed by enclosing test title (`callSiteKey`),
+  // which no such diff moves. arm-ordering.test.ts's witness sits in a helper above every test,
+  // so it is keyed as module scope.
+  const RUN_TASK = "armIfVerdictPermits:test/run-task.test.ts";
   const expectedKeys = [
-    "armIfVerdictPermits:test/arm-ordering.test.ts:63:ledgerLines",
-  // W1-T3726 then added ELEVEN lines ahead of both (a behaviour-driven wiring test for the
-  // cash-divert spread, replacing a source-text assertion) and they moved by exactly eleven,
-  // to :6064/:6125 — the SEVENTH re-derivation, and the same lesson each time: these numbers
-  // are a QUERY over the current tree, not a constant, so any diff inserting above the
-  // witnesses moves them and the list must be re-derived rather than the test weakened.
-  // The step-up routing change then added FIFTY net lines ahead of both — a step_up mount
-  // assertion inside the two-strikes-then-diagnose behavioural test, and a new runFixRung case
-  // proving only the FINAL fresh strike steps up — and they moved by exactly fifty, to
-  // :6116/:6177. The EIGHTH re-derivation. Both witnesses are still the SAME two call sites,
-  // the PR-602 and PR-701 fixtures, each still omitting `ledgerLines` while supplying `arm`;
-  // only their coordinates moved, which is precisely what this note has claimed seven times.
-  // W1-T4226 then added THIRTY-FIVE lines ahead of both (a `fetchPrBody` fake on each fix-rung
-  // test that had been reading the PR body through the refused `gh`) and they moved by exactly
-  // thirty-five, to :6151/:6212. The NINTH re-derivation; still the same two call sites.
-  // The DECISION_REQUEST falsifier assertions added FIVE ahead of both: :6156/:6217, the TENTH.
-  // PR-7492's sampled-risk integration coverage adds a selected-head assertion and shadow-spawn
-  // assertions ahead of both, moving the same witnesses by nine to :6165/:6226. The candidates
-  // still omit ledgerLines while supplying arm; only their coordinates moved.
-  // W1-T4074 answers `pr view --json files` in statefulFakeGh (two lines ahead of both): :6167/:6228.
-    "armIfVerdictPermits:test/run-task.test.ts:6167:ledgerLines",
-    "armIfVerdictPermits:test/run-task.test.ts:6228:ledgerLines",
+    "armIfVerdictPermits:test/arm-ordering.test.ts:<module>#1:ledgerLines",
+    `${RUN_TASK}:armAndLogOutcome (sweep lane) vs armIfVerdictPermits (review lane): two different PRs' arm lines are told apart from the ledger alone via pr_number + lane, with no informative task id on either (W1-T449)#1:ledgerLines`,
+    `${RUN_TASK}:armAndLogOutcome and armIfVerdictPermits: a refused arm still logs automerge.arm_skipped — the added pr/lane fields never turn a refusal into an armed line (W1-T449)#1:ledgerLines`,
   ];
   for (const key of expectedKeys) {
     assert.ok(
