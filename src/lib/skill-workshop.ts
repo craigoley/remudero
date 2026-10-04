@@ -38,9 +38,7 @@ export interface ProceduralCandidateLike {
   supportingRuns: number;
 }
 
-/** Canonical step text per {@link import("./retro.js").PROCEDURAL_SUCCESS_SIGNALS} key. A signal
- *  key absent here (a caller-supplied signal, Rule 2 — the signal set is DATA) still renders: the
- *  raw key stands in for its own step rather than being silently dropped. */
+/** Canonical step text per {@link import("./retro.js").PROCEDURAL_SUCCESS_SIGNALS} key. */
 export const PROCEDURAL_STEP_TEXT: Readonly<Record<string, string>> = {
   clean_single_strike: "Resolve the task on the first attempt — land a fix that needs no `fix.dispatch` rung.",
   fully_executed_proof: "Execute every acceptance criterion as a real, observed proof — never let the keyword floor stand in for a run.",
@@ -59,6 +57,15 @@ const INJECTABLE_SKILL_TASK_TYPES = {
 
 function injectableSkillTaskType(taskType: string): Task["type"] | undefined {
   return Object.hasOwn(INJECTABLE_SKILL_TASK_TYPES, taskType) ? taskType as Task["type"] : undefined;
+}
+
+const SKILL_ELIGIBLE_SIGNALS: Readonly<Record<string, boolean>> = {
+  clean_single_strike: false,
+  fully_executed_proof: true,
+};
+
+function skillEligibleSignal(key: string): boolean {
+  return Object.hasOwn(SKILL_ELIGIBLE_SIGNALS, key) && SKILL_ELIGIBLE_SIGNALS[key];
 }
 
 /** One drafted skill: the rendered SKILL.md text plus the fields a scanner/stager needs without
@@ -98,8 +105,8 @@ export interface TranscriptContext {
 
 /**
  * Render one procedural candidate as a Claude Code skill draft (design clause i). `undefined` for
- * a candidate under the two-run floor: {@link import("./retro.js").mineProceduralCandidates}
- * already enforces this threshold, but a caller handing this function a single-run candidate
+ * a candidate with no eligible signal or under the two-run floor. Mining already enforces this
+ * threshold, but a caller handing this function a single-run candidate
  * directly (a test, or a future caller that skips mining) must get NOTHING rather than an
  * anecdote dressed as a proven procedure.
  *
@@ -113,6 +120,8 @@ export interface TranscriptContext {
  */
 export function renderSkillDraft(candidate: ProceduralCandidateLike, transcripts?: TranscriptContext): SkillDraft | undefined {
   if (candidate.supportingRuns < 2) return undefined;
+  const eligibleSignals = candidate.signals.filter(skillEligibleSignal);
+  if (eligibleSignals.length === 0) return undefined;
   const hash = proceduralCandidateHash(candidate);
   const procedureKey = procedureKeyFor(candidate);
   // The NAME follows the procedure too, so the written .claude/skills/<name>/ path is stable as
@@ -120,7 +129,7 @@ export function renderSkillDraft(candidate: ProceduralCandidateLike, transcripts
   const name = `${kebabSlug(candidate.shapeKey)}-${procedureKey.slice(0, 8)}`;
   const description = `A procedure shape proven across ${candidate.supportingRuns} merged ${candidate.taskType} run(s): ${candidate.signals.join(" + ")}.`;
   const appliesTo = injectableSkillTaskType(candidate.taskType);
-  const steps = candidate.signals.map((key) => `- ${PROCEDURAL_STEP_TEXT[key] ?? key}`);
+  const steps = eligibleSignals.map((key) => `- ${PROCEDURAL_STEP_TEXT[key] ?? key}`);
   const workflow = transcripts
     ? mineTranscriptWorkflows(transcripts.runs, transcripts.records).find((w) => w.taskType === candidate.taskType)
     : undefined;
