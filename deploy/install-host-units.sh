@@ -481,9 +481,8 @@ converge_host_units() {
     return 0
   fi
 
-  # W1-T5518 -- A LEGACY FINDING IS THE OPERATOR'S TO RETIRE. The install below never edits a user
-  # unit, so when LEGACY is the only drift, installing would rewrite every unit on every tick, forever,
-  # and fix nothing. Name it and stop. Real MISSING or DRIFTED lines beside it still converge.
+  # W1-T5518 -- --install never retires a LEGACY user unit, so LEGACY-only drift is named, not
+  # reinstalled on every tick. MISSING or DRIFTED lines beside it still converge.
   case "\$units_check" in
     *"install-host-units: MISSING "*|*"install-host-units: DRIFTED "*) : ;;
     *"install-host-units: LEGACY "*)
@@ -772,18 +771,11 @@ WantedBy=timers.target
 EOF
 }
 
-# W1-T2953 — CHECK COMPARES DIRECTIVES, INSTALL WRITES EVERYTHING.
-#
-# The comparison was byte-for-byte over files that are mostly PROSE. MEASURED 2026-09-06: six of
-# seven artifacts read DRIFTED against Azure, and most of that was comment wording — the incident
-# forensics were expanded by hand on the host and never returned to the renderer. One red check
-# covering four real guard deletions and two paragraphs of prose is a check nobody can act on, and
-# `--install` looked like the remedy while it would have DELETED the four real guards.
-#
-# A systemd unit's semantics ARE its directives; comments are documentation. So check compares the
-# effective directive lines EXACTLY — every guard deletion is still caught, byte for byte in effect
-# — and stops reporting prose as drift. INSTALL is unchanged and still writes the full rendered
-# text, comments included, so the host keeps the documentation.
+# W1-T2953 — CHECK COMPARES DIRECTIVES, INSTALL WRITES EVERYTHING. A byte-for-byte compare read six
+# of seven artifacts DRIFTED against Azure on 2026-09-06, mostly comment wording, and `--install`
+# looked like the remedy while it would have DELETED four real guards. A unit's semantics ARE its
+# directives, so check compares effective directive lines EXACTLY (every guard deletion is still
+# caught) and ignores prose; install still writes the full text, comments included.
 effective_directives() {
   printf '%s\n' "$1" | sed -e 's/[[:space:]]*$//' -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d'
 }
@@ -958,14 +950,8 @@ if [ -n "$CLEANUP_PATH" ]; then
   fi
 fi
 
-# W1-T5518 — THE LEGACY USER JANITOR IS DRIFT, AND ONLY THE OPERATOR RETIRES IT. ~/bin/remudero-janitor.sh
-# was in no repo. The user timer azure-remudero-janitor ran it every 30 minutes, it removed one thing
-# in 569 runs, and it logged a false 20 GiB-floor EMERGENCY on every run. The operator disabled it on
-# 2026-10-03. Its two real targets now sit in deploy/rmd-tmp-sweep.sh. Its unit files or its enable
-# link are reported here so nobody can re-enable or reinstall it silently. This only REPORTS and never
-# edits a user unit. Linux only, because systemd user units exist nowhere else. The real home is read
-# only in the real host layout or through an explicit RMD_LEGACY_USER_UNIT_DIR, so test temp trees
-# never read a real home.
+# W1-T5518 — the retired host-only user janitor (in no repo; 569 false EMERGENCY runs) is drift while
+# its unit files remain. Report only; a real home is read only in the real host layout or via override.
 LEGACY_JANITOR_TIMER="azure-remudero-janitor.timer"
 LEGACY_JANITOR_SERVICE="azure-remudero-janitor.service"
 HOST_KERNEL="${RMD_HOST_KERNEL:-$(uname -s 2>/dev/null || echo unknown)}"
