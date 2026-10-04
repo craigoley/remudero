@@ -3,9 +3,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { DEFAULT_SWEEP_POLICY, drainInFlightReviews, runSweep, runSweepLightPass, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
+import { buildSweepEffects, DEFAULT_SWEEP_POLICY, drainInFlightReviews, runSweep, runSweepLightPass, type OpenPrView, type SweepDeps } from "../src/lib/sweep.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { appendLedger, rotateLedger } from "../src/lib/ledger.js";
+import type { Config } from "../src/lib/config.js";
+import type { Plan } from "../src/lib/plan.js";
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "rmd-review-eligibility-"));
@@ -97,5 +99,27 @@ test("dry-run review telemetry writes no eligibility or admission receipts", asy
     fx.deps.dryRun = true;
     await runSweepLightPass([pr(1)], fx.deps);
     assert.deepEqual(fx.rows(), []);
+  } finally { fx.cleanup(); }
+});
+
+test("the production review attempt retains the same exact input identity as eligibility", async () => {
+  const fx = fixture();
+  try {
+    const candidate = pr(1);
+    fx.deps.actionable = () => false;
+    await runSweepLightPass([candidate], fx.deps);
+    const effects = buildSweepEffects({
+      owner: "fixture", repo: "repo", config: { root: fx.deps.ledgerPath, claudeBin: "/bin/true" } as Config,
+      ledgerPath: fx.deps.ledgerPath, runId: fx.deps.runId,
+      plan: { tasks: [], byId: new Map() } as unknown as Plan,
+      log: (step, extra) => appendLedger(fx.deps.ledgerPath, { run_id: "fixture", task_id: candidate.taskId!, step, ...extra }),
+      reviewRunner: async () => 0, armSessionPrsOverride: false,
+      issuesImpl: { create: () => "https://github.com/fixture/repo/issues/1" }, stallNotice: () => {},
+    });
+    await effects.postReview!(candidate);
+    const eligible = fx.rows().find(row => row.step === "sweep.review_eligible")!;
+    const attempted = fx.rows().find(row => row.step === "sweep.post_review.attempt")!;
+    assert.equal(attempted.review_key, eligible.review_key);
+    assert.equal(attempted.review_input_digest, candidate.reviewInputDigest);
   } finally { fx.cleanup(); }
 });
