@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 function executable(path: string, body: string): void {
   writeFileSync(path, body);
@@ -70,7 +71,8 @@ case "$1" in
   *) exit 1;;
 esac
 `);
-  executable(join(stubs, "gh"), "#!/usr/bin/env bash\nexit 1\n");
+  const github = ghShim([{ when: "", exit: 1 }]);
+  t.after(() => rmSync(github.dir, { recursive: true, force: true }));
   executable(join(stubs, "grep"), `#!/usr/bin/env bash\nif [ "\${FAULT:-}" = matcher ] && [ "$1" = -E ]; then exit 2; fi\nexec /usr/bin/grep "$@"\n`);
   const launcher = join(root, "launcher");
   const render = spawnSync("bash", ["deploy/install-host-units.sh", "--install"], {
@@ -78,7 +80,7 @@ esac
     env: { ...process.env, RMD_STATE_DIR: state, RMD_UNIT_DIR: join(root, "units"), RMD_BIN_DIR: join(root, "bin"), RMD_LAUNCHER_PATH: launcher, RMD_REVIVAL_LOG: join(root, "revivals"), RMD_NODE_MAX_OLD_SPACE_MB: "8192" },
   });
   assert.equal(render.status, 0, render.stderr);
-  const env = { ...process.env, PATH: `${stubs}:${process.env.PATH}` };
+  const env = { ...process.env, PATH: `${stubs}:${github.dir}:${process.env.PATH}` };
   const tick = (fault = "", boot = false) => spawnSync("bash", [launcher, ...(boot ? ["--boot"] : [])], { encoding: "utf8", cwd: root, env: { ...env, FAULT: fault }, timeout: 30000 });
   return { root, state, daemon, install, calls, deployed, env, tick };
 }
