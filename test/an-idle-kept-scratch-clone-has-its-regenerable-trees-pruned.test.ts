@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { age, fixture, git, repos, run, scratchDir, type Fixture } from "./helpers/host-cleanup-fixture.js";
 
 /** A clone under a scratch unit holding source, a dirty file, an ignored state/ and both caches. */
-function keptClone(fx: Fixture, main: string, unitName: string) {
+function keptUnit(fx: Fixture, main: string, unitName: string) {
   const unit = scratchDir(fx, unitName, false);
   const repo = join(unit, "repo");
   git(fx.root, "clone", "--quiet", main, repo);
@@ -33,15 +33,15 @@ test("test/an-idle-kept-scratch-clone-has-its-regenerable-trees-pruned.test.ts",
   const { main } = repos(fx);
 
   // kept for an ignored path beyond node_modules/coverage AND uncommitted changes
-  const dirty = keptClone(fx, main, "dirty-unit");
+  const dirty = keptUnit(fx, main, "dirty-unit");
   writeFileSync(join(dirty.repo, "uncommitted.txt"), "not committed\n");
   // kept because its local branch cannot be bundled: the archive shares the scratch filesystem
-  const unsaved = keptClone(fx, main, "unsaved-unit");
+  const unsaved = keptUnit(fx, main, "unsaved-unit");
   rmSync(join(unsaved.repo, "state"), { recursive: true, force: true });
   git(unsaved.repo, "checkout", "-q", "-b", "local-only");
   git(unsaved.repo, "commit", "-q", "--allow-empty", "-m", "never pushed");
   // a symlinked node_modules points outside the unit; it must never be followed
-  const linked = keptClone(fx, main, "symlink-unit");
+  const linked = keptUnit(fx, main, "symlink-unit");
   writeFileSync(join(linked.repo, "uncommitted.txt"), "x\n");
   const outside = join(fx.root, "outside-modules");
   mkdirSync(outside);
@@ -51,9 +51,9 @@ test("test/an-idle-kept-scratch-clone-has-its-regenerable-trees-pruned.test.ts",
   symlinkSync(outside, linkedModules);
 
   // fresh and live units carry the same caches and must keep them
-  const fresh = keptClone(fx, main, "fresh-unit");
+  const fresh = keptUnit(fx, main, "fresh-unit");
   writeFileSync(join(fresh.repo, "uncommitted.txt"), "x\n");
-  const live = keptClone(fx, main, "live-unit");
+  const live = keptUnit(fx, main, "live-unit");
   writeFileSync(join(live.repo, "uncommitted.txt"), "x\n");
   for (const u of [dirty, unsaved, linked, live]) age(u.unit);
   // age() follows the link; the link's own mtime is what find -mmin sees, so age it too
@@ -96,7 +96,7 @@ test("test/an-idle-kept-scratch-clone-has-its-regenerable-trees-pruned.test.ts",
 test("a kept unit's prune is only logged under DRY_RUN=1 and changes nothing", () => {
   const fx = fixture();
   const { main } = repos(fx);
-  const dirty = keptClone(fx, main, "dry-unit");
+  const dirty = keptUnit(fx, main, "dry-unit");
   writeFileSync(join(dirty.repo, "uncommitted.txt"), "x\n");
   age(dirty.unit);
   const r = run(fx, { ...scratchOnly(fx), DRY_RUN: "1" });
@@ -110,17 +110,17 @@ test("a kept unit's prune is only logged under DRY_RUN=1 and changes nothing", (
 test("a mounted, marked, locked, tracked or bundle-holding kept tree is never pruned", () => {
   const fx = fixture();
   const { main } = repos(fx);
-  const mounted = keptClone(fx, main, "mounted-unit");
-  const marked = keptClone(fx, main, "marked-unit");
+  const mounted = keptUnit(fx, main, "mounted-unit");
+  const marked = keptUnit(fx, main, "marked-unit");
   writeFileSync(join(marked.unit, ".rmd-scratch-keep"), "");
   // coverage/ is TRACKED here: Git does not call it disposable, so it stays
-  const tracked = keptClone(fx, main, "tracked-unit");
+  const tracked = keptUnit(fx, main, "tracked-unit");
   writeFileSync(join(tracked.repo, ".git", "info", "exclude"), "node_modules\nstate\n");
   git(tracked.repo, "add", "coverage");
   git(tracked.repo, "commit", "-q", "-m", "tracked coverage");
   writeFileSync(join(tracked.repo, ".git", "info", "exclude"), "node_modules\ncoverage\nstate\n");
   // a loose bundle inside coverage/ is a rescue the bundle archiver reads; it is never pruned
-  const bundled = keptClone(fx, main, "bundle-unit");
+  const bundled = keptUnit(fx, main, "bundle-unit");
   git(main, "bundle", "create", join(bundled.repo, "coverage", "rescue.bundle"), "--branches");
   // a locked linked worktree is an explicit hold: the unit and its caches stay
   const lockedUnit = scratchDir(fx, "locked-unit", false);
