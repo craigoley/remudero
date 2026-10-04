@@ -43,7 +43,7 @@ const PARENT_OF_FIXTURE_DIR =
   /\b(?:join|resolve)\(\s*dirname\(\s*[A-Za-z_$][\w$.]*\.dir\s*\)\s*,|\$\{\s*dirname\(\s*[A-Za-z_$][\w$.]*\.dir\s*\)\s*\}\//g;
 
 /** `file:line` for every sibling-shaped path in `text`, if the file adds a worktree at all. */
-function siblingWorktreeSites(file: string, text: string): string[] {
+function siblingPathSites(file: string, text: string): string[] {
   if (!ADDS_WORKTREE.test(text)) return [];
   const sites: string[] = [];
   for (const shape of [SUFFIXED_FIXTURE_DIR, PARENT_OF_FIXTURE_DIR]) {
@@ -65,20 +65,20 @@ const DIR = ".d" + "ir";
 
 test("W1-T5625 census: shape (a), the fixture dir plus a suffix, is seen however the path reaches the add", () => {
   const held = ["const wt = `${repo", DIR, "}-wt`;", "worktreeAdd(repo", DIR, ", wt, \"run\");"].join("");
-  assert.deepEqual(siblingWorktreeSites("held.ts", held), ["held.ts:1"]);
+  assert.deepEqual(siblingPathSites("held.ts", held), ["held.ts:1"]);
   const later = ["const a = `${repo", DIR, "}-async`;\nconst b = 1;\nawait worktreeAddAsync(r, a);"].join("");
-  assert.deepEqual(siblingWorktreeSites("async.ts", later), ["async.ts:1"]);
+  assert.deepEqual(siblingPathSites("async.ts", later), ["async.ts:1"]);
   const concat = ["git(\"worktree\", \"add\", repo", DIR, " + \"-wt\");"].join("");
-  assert.deepEqual(siblingWorktreeSites("concat.ts", concat), ["concat.ts:1"]);
+  assert.deepEqual(siblingPathSites("concat.ts", concat), ["concat.ts:1"]);
   const helper = ["const w = repo.addWorktree(`${repo", DIR, "}-wt`, \"b\");"].join("");
-  assert.deepEqual(siblingWorktreeSites("helper.ts", helper), ["helper.ts:1"]);
+  assert.deepEqual(siblingPathSites("helper.ts", helper), ["helper.ts:1"]);
 });
 
 test("W1-T5625 census: shape (b), the fixture's parent as a path base, is seen in both spellings", () => {
   const joined = ["const work = parent.addWorktree(join(dirname(parent", DIR, "), `x-wt`), \"b\");"].join("");
-  assert.deepEqual(siblingWorktreeSites("joined.ts", joined), ["joined.ts:1"]);
+  assert.deepEqual(siblingPathSites("joined.ts", joined), ["joined.ts:1"]);
   const templated = ["const wt = `${dirname(repo", DIR, ")}/wt`;\nworktreeAdd(repo", DIR, ", wt, \"r\");"].join("");
-  assert.deepEqual(siblingWorktreeSites("templated.ts", templated), ["templated.ts:1"]);
+  assert.deepEqual(siblingPathSites("templated.ts", templated), ["templated.ts:1"]);
 });
 
 test("W1-T5625 census: a worktree INSIDE its fixture dir, or a sibling path in a file that adds none, is not flagged", () => {
@@ -90,8 +90,8 @@ test("W1-T5625 census: a worktree INSIDE its fixture dir, or a sibling path in a
     "process.env.PATH = `${gh", DIR, "}:${saved}`;",
     "worktreeAdd(repo", DIR, ", a, \"r\");",
   ].join("\n");
-  assert.deepEqual(siblingWorktreeSites("inside.ts", inside), []);
-  assert.deepEqual(siblingWorktreeSites("noadd.ts", ["const x = `${repo", DIR, "}-wt`;"].join("")), []);
+  assert.deepEqual(siblingPathSites("inside.ts", inside), []);
+  assert.deepEqual(siblingPathSites("noadd.ts", ["const x = `${repo", DIR, "}-wt`;"].join("")), []);
 });
 
 test("W1-T5625 census: no test under test/ builds a worktree path beside its fixture dir in any spelling", () => {
@@ -106,7 +106,7 @@ test("W1-T5625 census: no test under test/ builds a worktree path beside its fix
   ]) {
     assert.ok(adders.includes(suite), `the scan must read ${suite}, which adds a worktree`);
   }
-  const offenders = sources.flatMap((s) => siblingWorktreeSites(s.file, s.text));
+  const offenders = sources.flatMap((s) => siblingPathSites(s.file, s.text));
   assert.deepEqual(
     offenders,
     [],
@@ -119,6 +119,7 @@ test("W1-T5625: a clean run of the healthy-path worktree suite leaves its TMPDIR
   const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: root };
   // A nested `node --test` reads NODE_TEST_CONTEXT as "report to a parent runner"; this one is its own.
   delete env.NODE_TEST_CONTEXT;
+  env.NODE_V8_COVERAGE = ""; // a nested runner under a coverage session must not enrol in it
   delete env.RMD_ALLOW_LIVE_WRITES;
   delete env.RMD_SELF_SYNC_DONE;
   const run = spawnSync(
