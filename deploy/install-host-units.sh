@@ -51,6 +51,7 @@
 #   RMD_UNIT_DIR RMD_BIN_DIR RMD_LAUNCHER_PATH RMD_REVIVAL_LOG
 #   RMD_CLEANUP_PATH RMD_CLEANUP_LOG RMD_CRONTAB_CMD   (W1-T4770: root-disk janitor + cron)
 #   RMD_TMP_SWEEP_PATH RMD_TMP_SWEEP_CRON_PATH          (W1-T5036: guarded hourly temp sweep)
+#   RMD_LEGACY_USER_UNIT_DIR RMD_HOST_KERNEL            (W1-T5518: legacy user janitor is drift)
 set -euo pipefail
 
 MODE="check"
@@ -473,12 +474,24 @@ converge_host_units() {
   INSTALLER_ENV=(RMD_NODE_MAX_OLD_SPACE_MB="\$UNITS_HEAP_MB")
   if [ -n "\$INSTANCE_NAME" ]; then
     INSTALLER_ENV=(RMD_INSTANCE_REGISTRY="\$INSTANCE_REGISTRY")
-    if env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --instance "\$INSTANCE_NAME" >/dev/null 2>&1; then
+    if units_check=\$(env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" --instance "\$INSTANCE_NAME" 2>/dev/null); then
       return 0
     fi
-  elif env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" >/dev/null 2>&1; then
+  elif units_check=\$(env "\${INSTALLER_ENV[@]}" "\$CHECKOUT/deploy/install-host-units.sh" 2>/dev/null); then
     return 0
   fi
+
+  # W1-T5518 -- A LEGACY FINDING IS THE OPERATOR'S TO RETIRE. The install below never edits a user
+  # unit, so when LEGACY is the only drift, installing would rewrite every unit on every tick, forever,
+  # and fix nothing. Name it and stop. Real MISSING or DRIFTED lines beside it still converge.
+  case "\$units_check" in
+    *"install-host-units: MISSING "*|*"install-host-units: DRIFTED "*) : ;;
+    *"install-host-units: LEGACY "*)
+      echo "rmd-relaunch: units -- only LEGACY drift, which --install never retires; not converging:" >&2
+      printf '%s\\n' "\$units_check" | grep -F -e 'LEGACY' -e 'retire it' >&2 || true
+      return 0
+      ;;
+  esac
 
   # Elevation is REQUIRED and never prompted for: the tick runs as the service user while the unit
   # dir is root-owned. No sudo, no converge -- reported, never fatal.
@@ -945,9 +958,42 @@ if [ -n "$CLEANUP_PATH" ]; then
   fi
 fi
 
+# W1-T5518 — THE LEGACY USER JANITOR IS DRIFT, AND ONLY THE OPERATOR RETIRES IT. ~/bin/remudero-janitor.sh
+# was in no repo. The user timer azure-remudero-janitor ran it every 30 minutes, it removed one thing
+# in 569 runs, and it logged a false 20 GiB-floor EMERGENCY on every run. The operator disabled it on
+# 2026-10-03. Its two real targets now sit in deploy/rmd-tmp-sweep.sh. Its unit files or its enable
+# link are reported here so nobody can re-enable or reinstall it silently. This only REPORTS and never
+# edits a user unit. Linux only, because systemd user units exist nowhere else. The real home is read
+# only in the real host layout or through an explicit RMD_LEGACY_USER_UNIT_DIR, so test temp trees
+# never read a real home.
+LEGACY_JANITOR_TIMER="azure-remudero-janitor.timer"
+LEGACY_JANITOR_SERVICE="azure-remudero-janitor.service"
+HOST_KERNEL="${RMD_HOST_KERNEL:-$(uname -s 2>/dev/null || echo unknown)}"
+LEGACY_USER_UNIT_DIR="${RMD_LEGACY_USER_UNIT_DIR-}"
+if [ -z "$LEGACY_USER_UNIT_DIR" ] && [ "$UNIT_DIR" = "/etc/systemd/system" ]; then
+  LEGACY_USER_UNIT_DIR="/home/${SERVICE_USER}/.config/systemd/user"
+fi
+legacy=0
+if [ "$HOST_KERNEL" = "Linux" ] && [ -n "$LEGACY_USER_UNIT_DIR" ]; then
+  for legacy_path in "${LEGACY_USER_UNIT_DIR}/${LEGACY_JANITOR_TIMER}" "${LEGACY_USER_UNIT_DIR}/${LEGACY_JANITOR_SERVICE}" \
+                     "${LEGACY_USER_UNIT_DIR}"/*.wants/"${LEGACY_JANITOR_TIMER}"; do
+    if [ -e "$legacy_path" ] || [ -L "$legacy_path" ]; then
+      echo "install-host-units: LEGACY $legacy_path (the retired host-only user janitor; --install never edits a user unit)"
+      legacy=$(( legacy + 1 ))
+    fi
+  done
+  if [ "$legacy" -gt 0 ]; then
+    echo "install-host-units: retire it as ${SERVICE_USER}: systemctl --user disable --now ${LEGACY_JANITOR_TIMER} && rm -f ${LEGACY_USER_UNIT_DIR}/${LEGACY_JANITOR_TIMER} ${LEGACY_USER_UNIT_DIR}/${LEGACY_JANITOR_SERVICE} && systemctl --user daemon-reload"
+    if [ "$MODE" = "check" ]; then drift=$(( drift + legacy )); fi
+  fi
+fi
+
 if [ "$MODE" = "check" ]; then
   if [ "$drift" -gt 0 ]; then
     echo "install-host-units: ${drift} unit(s) missing or drifted — re-run with --install (as root)." >&2
+    if [ "$legacy" -gt 0 ]; then
+      echo "install-host-units: ${legacy} of them LEGACY — --install does not retire those; run the retire command above as ${SERVICE_USER}." >&2
+    fi
     exit 1
   fi
   echo "install-host-units: all units match this repo."
