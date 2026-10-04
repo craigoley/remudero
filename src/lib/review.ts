@@ -5909,6 +5909,31 @@ export const ACCEPTANCE_HEADER_RE = /^\s*#{0,6}\s*\**\s*acceptance(\s+criteria)?
  *  ACCEPTANCE_HEADER_RE}. Exported for the same reason {@link ACCEPTANCE_HEADER_RE} is (W1-T2762). */
 export const ACCEPTANCE_BULLET_RE = /^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/;
 
+/** A CommonMark fence opener — three or more backticks (whose info string holds no backtick) or tildes. */
+const FENCE_OPEN_RE = /^\s*(`{3,}(?=[^`]*$)|~{3,})/;
+
+/** WHERE THE ACCEPTANCE BLOCK BEGINS — the index of the first line matching {@link ACCEPTANCE_HEADER_RE} OUTSIDE a
+ *  fenced code block, or -1. W1-T5621: a body that SHOWS the format inside a ``` fence ahead of its real block used to
+ *  parse back only the example, so review executed the example's proof and never read the real block. THE ONE header
+ *  walker: {@link parseAcceptanceBlock}, {@link acceptanceBlockRegion} and `replaceAcceptanceBlock` (plan-pr-emitter.ts)
+ *  all start here, so the reviewer, the author-time gate and the repair cannot disagree. A fence closes only on its
+ *  own character at the opener's length or longer with nothing after it; an unclosed fence runs to the end. */
+export function acceptanceHeaderLine(lines: readonly string[]): number {
+  let fence: string | undefined;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].replace(/\r$/, "");
+    if (fence !== undefined) {
+      const close = /^\s*(`{3,}|~{3,})\s*$/.exec(line);
+      if (close && close[1][0] === fence[0] && close[1].length >= fence.length) fence = undefined;
+      continue;
+    }
+    const open = FENCE_OPEN_RE.exec(line);
+    if (open) fence = open[1];
+    else if (ACCEPTANCE_HEADER_RE.test(line)) return index;
+  }
+  return -1;
+}
+
 /** THE LINE SPAN of a body's Acceptance block: from the header to the first line that is neither a bullet, an
  *  indented continuation, nor a tolerated leading blank — the boundary {@link acceptanceBlockDiagnostics} has always
  *  walked, EXPORTED so {@link stripQuotedRegions} shares it rather than keeping a second copy (W1-T3142).
@@ -5916,15 +5941,12 @@ export const ACCEPTANCE_BULLET_RE = /^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/;
  *  body byte-for-byte unchanged by the claim scan. */
 export function acceptanceBlockRegion(body: string): { headerLine: number; endLine: number; bulletsWritten: number } | undefined {
   const lines = (body ?? "").split("\n");
-  let headerLine = -1;
+  const headerLine = acceptanceHeaderLine(lines);
+  if (headerLine < 0) return undefined;
   let bulletsWritten = 0;
-  let index = 0;
+  let index = headerLine + 1;
   for (; index < lines.length; index += 1) {
     const line = lines[index].replace(/\r$/, "");
-    if (headerLine < 0) {
-      if (ACCEPTANCE_HEADER_RE.test(line)) headerLine = index;
-      continue;
-    }
     if (ACCEPTANCE_BULLET_RE.test(line)) {
       bulletsWritten += 1;
       continue;
@@ -5934,7 +5956,7 @@ export function acceptanceBlockRegion(body: string): { headerLine: number; endLi
     if (line.trim() === "" && bulletsWritten === 0) continue;
     break;
   }
-  return headerLine < 0 ? undefined : { headerLine, endLine: index, bulletsWritten };
+  return { headerLine, endLine: index, bulletsWritten };
 }
 
 
@@ -5977,16 +5999,11 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
    *  written BEFORE that split. An indented `proof:` continuation below such a bullet proves the split was a false
    *  positive — the proof lives on that line, so the pipe belonged to the claim — and restores this. */
   const unsplitLabelledClaims: (string | undefined)[] = [];
-  let inBlock = false;
-  for (const raw of lines) {
+  // Header: "Acceptance:", "**Acceptance:**", "## Acceptance", "Acceptance criteria:" — never one inside a fence.
+  const headerLine = acceptanceHeaderLine(lines);
+  if (headerLine < 0) return criteria;
+  for (const raw of lines.slice(headerLine + 1)) {
     const line = raw.replace(/\r$/, "");
-    // Header: "Acceptance:", "**Acceptance:**", "## Acceptance", "Acceptance criteria:".
-    if (!inBlock) {
-      if (ACCEPTANCE_HEADER_RE.test(line)) {
-        inBlock = true;
-      }
-      continue;
-    }
     const bullet = line.match(ACCEPTANCE_BULLET_RE);
     if (bullet) {
       const item = bullet[1].trim();
