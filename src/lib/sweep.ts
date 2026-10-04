@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { findUntrialedModels, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -10692,6 +10693,13 @@ let lastReportedAnomalyGap: string | undefined;
 
 const lastReaderAgreementAt = new Map<string, number>();
 const READER_AGREEMENT_INTERVAL_MS = 15 * 60_000;
+
+/** Deployment deltas alone admit this full-sweep rung; elapsed time never makes a model due. */
+export async function runSweepBakeoff(input: DeploymentBakeoffInput): Promise<void> {
+  const state = readBakeoffTrialState(input.stateDir);
+  if (!state.pending && findUntrialedModels(input.deployed, state.trialed).length === 0) return;
+  await runDeploymentBakeoff(input);
+}
 
 const CONTRADICTORY_REASON = "review failing with no actionable unmet criteria (contradictory) — escalating";
 const CONTRADICTORY_BACKOFF_CAP_MS = 4 * 60 * 60_000;
