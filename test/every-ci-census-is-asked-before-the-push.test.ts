@@ -21,14 +21,12 @@ import { fileURLToPath } from "node:url";
 
 import { MIN_RULE_SUITE_COUNT, listRuleSuites } from "../src/lib/ci-parity.js";
 import { gitRepo } from "./helpers/git-repo.js";
-import {
-  PRECHECK_EXTRA_CI_CENSUSES,
-  PRECHECK_PARITY,
-  PRECHECK_PARITY_BASELINE,
-  ciCensusPopulation,
-  precheckParityVerdict,
-  // @ts-ignore the executable .mjs module has no declaration file.
-} from "../scripts/census-precheck.mjs";
+// A NAMESPACE import, so a tree without these exports fails each test below rather than the load.
+// @ts-ignore the executable .mjs module has no declaration file.
+import * as precheck from "../scripts/census-precheck.mjs";
+
+const { PRECHECK_EXTRA_CI_CENSUSES, PRECHECK_PARITY, ciCensusPopulation, precheckParityVerdict } = precheck;
+const PRECHECK_PARITY_BASELINE = "scripts/census-precheck-parity-baseline.json";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -41,10 +39,17 @@ function readBaseline(text: string): string[] {
   return doc.ciOnly as string[];
 }
 
-const baseline = readBaseline(readFileSync(join(ROOT, PRECHECK_PARITY_BASELINE), "utf8"));
-const population: string[] = ciCensusPopulation(listRuleSuites(ROOT));
+/** Read inside each test, never at load, so a tree that lacks either fails a test instead of the file. */
+function live(): { baseline: string[]; population: string[] } {
+  assert.equal(precheck.PRECHECK_PARITY_BASELINE, PRECHECK_PARITY_BASELINE);
+  return {
+    baseline: readBaseline(readFileSync(join(ROOT, PRECHECK_PARITY_BASELINE), "utf8")),
+    population: ciCensusPopulation(listRuleSuites(ROOT)),
+  };
+}
 
 test("W1-T5616: every census suite CI runs is asked by census-precheck or listed in the shrink-only baseline", () => {
+  const { baseline, population } = live();
   // THE CORPUS CONTROL: a population that stopped seeing the tree would read as a clean sheet.
   assert.ok(population.length >= MIN_RULE_SUITE_COUNT + 4, `the population must be read, saw ${population.length}`);
   for (const known of ["test/clock-signature-census.test.ts", "test/negative-reachability-ratchet.test.ts"]) {
@@ -95,6 +100,7 @@ test("W1-T5616: every PRECHECK_PARITY entry names a real suite and how census-pr
 });
 
 test("W1-T5616: the baseline may only shrink — no row is absent from the merge base's baseline", (t) => {
+  const { baseline, population } = live();
   const mergeBase = spawnSync("git", ["merge-base", "HEAD", "origin/main"], { cwd: ROOT, encoding: "utf8" });
   if (mergeBase.status !== 0) {
     t.skip(`origin/main is not resolvable here (${mergeBase.stderr.trim()}); CI checks out with fetch-depth 0`);
@@ -110,6 +116,7 @@ test("W1-T5616: the baseline may only shrink — no row is absent from the merge
 });
 
 test("W1-T5616 falsifier: deleting one baseline row names that suite", () => {
+  const { baseline, population } = live();
   const victim = "test/negative-reachability-ratchet.test.ts";
   assert.ok(baseline.includes(victim), "the falsifier needs a baselined suite");
   const verdict = precheckParityVerdict({ population, baseline: baseline.filter((p) => p !== victim) }) as Verdict;
@@ -117,6 +124,7 @@ test("W1-T5616 falsifier: deleting one baseline row names that suite", () => {
 });
 
 test("W1-T5616 falsifier: deleting one PRECHECK_PARITY entry names that suite", () => {
+  const { baseline, population } = live();
   const victim = "test/clock-signature-census.test.ts";
   const parity = { ...(PRECHECK_PARITY as Record<string, ParityEntry>) };
   assert.ok(victim in parity, "the falsifier needs an asked suite");
