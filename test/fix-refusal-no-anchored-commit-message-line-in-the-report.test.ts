@@ -124,14 +124,32 @@ test("a review fix derives its subject from the unmet claim", async (t) => {
   assert.match(messages[0]!, /^fix: repair repair the check on #5325/);
 });
 
-test("a resumable writer is still asked once in its own session, and its answer is the subject", async (t) => {
+test("W1-T5565: fix_refusal:no-anchored-commit-message-line-in-the-report is prevented, not retried", async (t) => {
   const { outcome, rows, prompts, messages } = await fixRound(t, {
     provider: "claude", answer: "REPORT\nCOMMIT_MESSAGE: fix(src): repair the check as asked",
   });
   assert.equal(outcome.outcome, "fixed");
-  assert.equal(prompts.length, 2, "a resumable writer gets the one in-session ask");
-  assert.equal(prompts[1]!.resumeSessionId, "writer-session");
-  assert.equal(rows.filter((row) => row.step === "fix.commit_line_requested").length, 1);
-  assert.deepEqual(messages, ["fix(src): repair the check as asked"]);
-  assert.equal(rows.find((row) => row.step === "implement.harness_commit")?.subject_source, "re-asked");
+  assert.equal(prompts.length, 1, "a resumable writer needs no formatting dispatch either");
+  assert.equal(rows.some((row) => row.step === "fix.commit_line_requested"), false);
+  assert.equal(rows.some((row) => row.step === "implement.harness_commit_refused"), false);
+  assert.match(messages[0]!, /^fix: repair ci-gate on #5325\n\nHarness-derived subject:/);
+  assert.equal(rows.find((row) => row.step === "implement.harness_commit")?.subject_source, "harness-derived");
+});
+
+test("a resumable review writer derives from the unmet claim without another dispatch", async (t) => {
+  const { outcome, prompts, messages } = await fixRound(t, { provider: "claude", ci: false });
+  assert.equal(outcome.outcome, "fixed");
+  assert.equal(prompts.length, 1);
+  assert.match(messages[0]!, /^fix: repair repair the check on #5325/);
+});
+
+test("a resumable writer keeps its own subject and the scope guard", async (t) => {
+  const { outcome, prompts, messages, rows } = await fixRound(t, {
+    provider: "claude", report: "REPORT\nCOMMIT_MESSAGE: fix(src): preserve this subject",
+    refusal: "changed paths outside declared surface",
+  });
+  assert.equal(outcome.outcome, "stood_down");
+  assert.equal(prompts.length, 1);
+  assert.deepEqual(messages, ["fix(src): preserve this subject"]);
+  assert.equal(rows.find((row) => row.step === "fix.commit_refused")?.reason, "changed paths outside declared surface");
 });

@@ -11582,12 +11582,9 @@ export async function runFixRung(opts: {
       });
     const fixReport = workerTranscript(fixResult);
     const fixLeftEdits = () => (deps.worktreeHasUncommittedChanges ?? worktreeHasUncommittedChanges)(opts.worktreePath);
-    // W1-T4450: a round that left edits but no COMMIT_MESSAGE line is not discarded. W1-T5325: a
-    // writer that cannot resume (codex/cash) gets the subject derived from the failing check on the
-    // FIRST commit attempt, so the missing line is never refused and never re-asked — that re-ask was
-    // a fresh session whose loss refused the whole round. A worker-authored line still wins inside
-    // the helper. A resumable writer is still asked once in its own session (W1-T4052).
-    const derivedFirst = fixHarnessOwnsGit && writerCannotResume(fixResult.provider ?? fixArgs.mountProvider, fixArgs.tools) && fixLeftEdits()
+    // W1-T5565: derive from the known failure for every shell-less writer before refusing a
+    // missing line. A worker-authored subject still wins; only an unknown failure needs a re-ask.
+    const derivedFirst = fixHarnessOwnsGit && fixLeftEdits()
       ? derivedFixCommit(priorCiFailures?.[0]?.name ?? unmet[0]?.claim ?? gateFailuresNow?.[0]?.reason, opts.prUrl)
       : undefined;
     let harnessCommitCount = harnessCommit(fixReport, { derivedCommit: derivedFirst });
