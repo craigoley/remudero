@@ -107,3 +107,28 @@
   assertion: 'grep -q "allowlistKey(row.file, row.arg)" scripts/mkdtemp-callsite-check.mjs'
   src: W1-T2786
   cited: "2026-09-03"
+
+- id: a-proof-must-fail-at-base
+  subsystem: testing
+  lifecycle: active
+  files: ["test/**", scripts/proof-discrimination-gate.mjs]
+  fact: >-
+    A proof fails proof-discrimination when it passes at the merge base. That happens when its claim
+    describes behaviour the change PRESERVES, or when its assertions fall back (`x ?? default`) to the
+    old shape. Assert a state only the new code writes, such as the field it now records, and
+    confirm the test FAILS with origin/main's copy of the source before pushing.
+  assertion: 'test -f scripts/proof-discrimination-gate.mjs'
+  src: PR#8866 (f419763cc, W1-T4393)
+  cited: "2026-10-03"
+
+- id: title-tests-with-the-plan-proof
+  subsystem: testing
+  lifecycle: active
+  files: ["test/**", "plan/tasks.d/**"]
+  fact: >-
+    When a task's plan proofs read `unit test: <phrase>`, title the test that proves each claim with
+    that phrase verbatim. A suite covering the same behaviour under other titles executes none of
+    those proofs. On a run-<id> PR the review judges the PLAN, so it FAILs "proof names no matching
+    test" however good the suite is.
+  src: PR#8861 (f869e7ede, W1-T4266, 2 of 4 proofs executed until three tests were renamed)
+  cited: "2026-10-03"

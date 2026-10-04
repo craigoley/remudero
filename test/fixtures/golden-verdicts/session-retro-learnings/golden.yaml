@@ -1,0 +1,21 @@
+violation: none
+rule: >
+  W1-T3077: data edits to learnings shards change prompt content and need a golden verdict;
+  every stated learning proof must execute against an active entry in its shard.
+verdict:
+  state: success
+  capped: false
+  testTheater: false
+  criteriaTampered: false
+arm: true
+criteria:
+  - met: true
+    proof_exec: executed_pass
+  - met: true
+    proof_exec: executed_pass
+  - met: true
+    proof_exec: executed_pass
+  - met: true
+    proof_exec: executed_pass
+  - met: true
+    proof_exec: executed_pass
