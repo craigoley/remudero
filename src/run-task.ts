@@ -218,6 +218,7 @@ import {
   renderReconPrompt,
   scopeGuardOutOfScopeFiles,
   type FixEvidence,
+  type FixReviewFinding,
   type FixMode,
 } from "./lib/prompt-render.js";
 export {
@@ -10118,6 +10119,7 @@ export async function runFixRung(opts: {
   retriggerCap?: number;
   /** The blocked_review verdict that triggered this rung. */
   initialReview: ReviewRunResult;
+  initialCriterionIndices?: readonly number[];
   reviewBase: { owner: string; repo: string; headCheckoutDir: string; reviewerMount: Mount }; birthWorktreeSnapshot?: WorktreeSnapshot;
   /** The run's already-resolved worker-abandon policy, threaded into re-reviews so the advisory
    * reviewer does not reread policy from disk on every fix strike. */
@@ -11458,7 +11460,10 @@ export async function runFixRung(opts: {
     // only) so the empty-review-evidence guard below can tell "genuinely nothing unmet" apart
     // from "unmet, but only on a WORKER-hidden holdout criterion" (W1-T2236 design note i) —
     // the latter must keep dispatching off the review's own redacted summary, never stand down.
-    const rawUnmet = review.criteria.filter((c) => !c.met);
+    const rawUnmet = review.criteria.map((c, index) => {
+      const criterionIndex = review === opts.initialReview ? opts.initialCriterionIndices?.[index] ?? index + 1 : index + 1;
+      return { ...c, criterionIndex, holdout: opts.task.acceptance?.[criterionIndex - 1]?.holdout ?? c.holdout };
+    }).filter((c) => !c.met);
     const unmet = visibleCriteria(rawUnmet);
     const proofDiscriminationFromReview =
       opts.proofDiscrimination !== undefined &&
@@ -11582,7 +11587,8 @@ export async function runFixRung(opts: {
     // byte-identical re-block apart from real progress. Keyed on the SAME
     // worker-visible unmet set the fix rung actually dispatches (W1-T166).
     const priorHeadSha = review.headSha;
-    const priorDesign = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))().find((row) =>
+    const roundLedger = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))();
+    const priorDesign = roundLedger.find((row) =>
       row.step === "fix.needs_design" && row.task_id === opts.taskId && row.head_sha === priorHeadSha);
     if (priorDesign) {
       const reason = String(priorDesign.reason);
@@ -11620,7 +11626,9 @@ export async function runFixRung(opts: {
           // actually non-empty, so a `[]`/`undefined` value here is inert for a genuine
           // reviewer-unmet dispatch (unmet.length > 0) exactly as before this task.
           {
-            review: { unmetCriteria: unmet, summary: review.summary },
+            review: { unmetCriteria: unmet, summary: review.summary, findings: verifiedReviewFindingsForFix(
+              roundLedger, opts.taskId, opts.prUrl, priorHeadSha,
+            ) },
             actionableGateFailures: gateFailuresNow,
             proofDiscrimination: proofDiscriminationNow,
             constraint: opts.constraint,
@@ -39026,6 +39034,38 @@ function refusalByClaimFromDecisionVerdict(value: unknown): Map<string, Criterio
   return refusals;
 }
 
+export function verifiedReviewFindingsForFix(
+  rows: ReadonlyArray<Record<string, unknown>>, taskId: string, prUrl: string, headSha: string,
+): FixReviewFinding[] {
+  const findings: FixReviewFinding[] = [];
+  const seen = new Set<string>();
+  const validPath = (path: unknown): path is string => typeof path === "string" && path.length > 0 &&
+    path.length <= 240 && !isAbsolute(path) && !/[\\\x00-\x1f]/.test(path) && !path.split("/").includes("..");
+  if (!/^[a-f0-9]{40,64}$/.test(headSha)) return findings;
+  for (const row of rows) {
+    if (row.step !== "review.finding" || row.task_id !== taskId || row.pr_url !== prUrl ||
+        row.head_sha !== headSha || row.capture_state !== "verified") continue;
+    const anchor = row.anchor as Record<string, unknown> | null | undefined;
+    const producer = anchor?.changedProducer as Record<string, unknown> | null | undefined;
+    if (!anchor || anchor.status !== "verified" || !validPath(anchor.path) ||
+        !Number.isInteger(anchor.line) || Number(anchor.line) < 1 ||
+        !["changed", "dependency"].includes(String(anchor.kind)) ||
+        anchor.kind === "dependency" && !producer ||
+        producer !== undefined && (!producer || !validPath(producer.path) || !Number.isInteger(producer.line) || Number(producer.line) < 1) ||
+        typeof anchor.evidenceDigest !== "string" || !/^[a-f0-9]{64}$/.test(anchor.evidenceDigest) ||
+        typeof row.finding_id !== "string" || !/^[a-f0-9]{64}$/.test(row.finding_id) ||
+        !Number.isInteger(row.criterion_index) || Number(row.criterion_index) < 1 ||
+        typeof row.category !== "string" || !/^[a-z][a-z0-9_-]{1,31}$/.test(row.category) ||
+        !["low", "medium", "high"].includes(String(row.severity)) ||
+        typeof row.mechanism !== "string" || !row.mechanism.trim() || row.mechanism.length > 500 ||
+        !(row.remedy === null || typeof row.remedy === "string" && row.remedy.length <= 500) || seen.has(row.finding_id)) continue;
+    seen.add(row.finding_id);
+    findings.push({ criterionIndex: Number(row.criterion_index), path: anchor.path, line: Number(anchor.line),
+      mechanism: row.mechanism, remedy: row.remedy as string | null });
+  }
+  return findings;
+}
+
 /**
  * Recover the most recent failing review's unmet criteria for a task from the
  * ledger (`review.posted` / `fix.review` lines carry `unmet_criteria` + `reasons`).
@@ -40479,6 +40519,11 @@ export function buildFixRungDispatchArgs(args: {
   const isMergeConflict = evidence.mergeConflict !== undefined;
   const isCiLog = !isMergeConflict && evidence.ciFailures !== undefined;
   const unmet = evidence.unmetCriteria;
+  const initialCriterionIndices = unmet.map((c) => {
+    const matches = (args.task.acceptance ?? []).flatMap((criterion, index) =>
+      criterion.claim === c.claim && (!c.proof || criterion.proof === c.proof) ? [index] : []);
+    return matches.length === 1 ? matches[0]! + 1 : 0;
+  });
   // W1-T5544: gate-log evidence names proofs only; the plan's own criteria supply each claim.
   const proofDiscrimination = withPlanClaims(evidence.proofDiscrimination, args.task.acceptance);
 
@@ -40561,6 +40606,7 @@ export function buildFixRungDispatchArgs(args: {
     budgetUsd: args.budgetUsd,
     strikeCap: args.strikeCap,
     initialReview,
+    initialCriterionIndices,
     constraint: pr.pendingAnswer?.constraint,
     ciFailures: evidence.ciFailures,
     ciEvidenceDisagreement: isCiLog
