@@ -175,6 +175,7 @@ import {
   type OpenIssue,
 } from "./escalate.js";
 import {
+  compareRestArgs,
   fetchWorkflowRunObservations,
   GhPaceFloorStandDownError,
   isScannerBlockerCandidate,
@@ -2535,6 +2536,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       readAuthor: async (pr) => {
         const row = await readJsonImpl(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as { user?: { login?: string } } | undefined;
         return row?.user?.login;
+      },
+      readMergeBase: async (pr) => {
+        const compare = await readJsonImpl(compareRestArgs(owner, repo, "main", pr.headSha)) as { merge_base_commit?: { sha?: string } } | undefined;
+        return compare?.merge_base_commit?.sha;
       },
       digest: (pr, causeKey, rebuilds, listedIssues) => {
         if (!issues.listOpen) return { outcome: "hold", reason: "strike ladder hold: issue list is not wired" };
@@ -9119,6 +9124,8 @@ export interface StrikeLadderEffects {
   readNotes: (taskId: string) => OperatorNoteEntry[];
   appendNote: (entry: OperatorNoteEntry) => boolean;
   readAuthor: (pr: OpenPrView) => Promise<string | undefined>;
+  /** One `main...head` compare, read only for a ladder-due PR whose merge base was not hydrated. */
+  readMergeBase: (pr: OpenPrView) => Promise<string | undefined>;
   digest: (pr: OpenPrView, causeKey: string, rebuilds: number, listedIssues: string[]) => {
     outcome: "opened" | "appended" | "listed" | "hold";
     reason: string;
@@ -11144,13 +11151,16 @@ export async function runSweep(
         fixHeadAcceptable(pr.headRefName, pr.taskId, isSyntheticOrchestratorLaneId(pr.taskId));
       const author = eligibleHead && effects ? await effects.readAuthor(pr) : undefined;
       const lastAttemptAt = latestStrikeLadderAttempt(strikeLadderRows, pr.taskId, pr.prNumber);
-      const decision = decideStrikeLadderRung({
-        lastAttemptAt, mainTip: mainRepair, currentMergeBaseSha: pr.currentMergeBaseSha,
+      // W1-T5635: `currentMergeBaseSha` is hydrated only for review-orphaned PRs; read the rest here.
+      const currentMergeBaseSha = pr.currentMergeBaseSha ?? await effects?.readMergeBase(pr);
+      const input = {
+        lastAttemptAt, mainTip: mainRepair, currentMergeBaseSha,
         rebuildsSoFar: effects ? rebuilds : undefined,
         requeueable: eligibleHead ? (author ? isFleetAppAuthor(author) : undefined) : false,
-        refreshedAtMainTip: strikeLadderRows.some(r => r.step === "sweep.strike_ladder.refreshed" &&
-          r.pr_number === pr.prNumber && r.main_sha === mainRepair?.sha),
-      });
+        refreshedAtMainTip: strikeLadderRows.some(r => r.pr_number === pr.prNumber && r.main_sha === mainRepair?.sha &&
+          (r.step === "sweep.strike_ladder.refreshed" || (r.step === "sweep.strike_ladder.held" && r.refresh_outcome === "conflict"))),
+      };
+      let decision = decideStrikeLadderRung(input);
       if (decision.rung === "hold") return decision.reason;
       const live = await deps.readLiveState?.(pr);
       if (live?.ok !== true || live.state?.toUpperCase() !== "OPEN") return hold("fresh OPEN state unreadable or PR is terminal");
@@ -11159,10 +11169,17 @@ export async function runSweep(
         if (!deps.updateBranch) return hold("update branch is not wired");
         ladderUpdatedPrs.add(pr.prNumber);
         const outcome = await deps.updateBranch(pr);
-        if (outcome !== "updated") return hold(`refresh did not take: ${outcome}`);
-        record("sweep.strike_ladder.refreshed", { old_head: pr.headSha, main_sha: mainRepair!.sha, last_attempt_at: lastAttemptAt });
-        ladderActedPrs.add(pr.prNumber);
-        return decision.reason;
+        if (outcome === "conflict") {
+          // A conflict cannot clear by refreshing again; only a rebuild from main (or a human) can.
+          record("sweep.strike_ladder.held", { reason: hold("refresh did not take: conflict"), refresh_outcome: outcome, main_sha: mainRepair!.sha });
+          decision = decideStrikeLadderRung({ ...input, refreshedAtMainTip: true });
+        } else if (outcome !== "updated") {
+          return hold(`refresh did not take: ${outcome}`);
+        } else {
+          record("sweep.strike_ladder.refreshed", { old_head: pr.headSha, main_sha: mainRepair!.sha, last_attempt_at: lastAttemptAt });
+          ladderActedPrs.add(pr.prNumber);
+          return decision.reason;
+        }
       }
       const causeKey = strikeCauseKey(pr, failingTestFilesFromCiFailures(pr.ciFailures ?? []));
       if (decision.rung === "rebuild") {
