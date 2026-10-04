@@ -21,10 +21,15 @@ import { parse as parseYaml } from "yaml";
 import {
   armAutoMergeDetailed,
   armFailureAction,
+  baseBranchRequiresMergeQueue,
   disarmAutoMerge,
   logArmAttribution,
+  mergeDirectViaRest,
+  readHeadShaRest as readArmHeadShaRest,
+  realArmDeps,
   stackPrerequisiteFromRest,
   type ArmAttemptResult,
+  type ArmDeps,
   type ArmLane,
   type ArmOutcome,
   type DisarmOutcome,
@@ -35,7 +40,7 @@ import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair } from "./classify.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { gitPushEmptyCommit, gitPushRunBranch } from "./git-push.js";
-import { ghJson, ghJsonAsync } from "./github-transport.js";
+import { ghExec, ghJson, ghJsonAsync } from "./github-transport.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
 import { acquireInflightLock, InflightLockError, type InflightLockHandle } from "./inflight-lock.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
@@ -1259,7 +1264,7 @@ export interface BuildSweepEffectsDeps {
     verdict: PostReviewStallVerdict,
     ctx: { owner: string; repo: string; ledgerPath: string; runId: string; issues?: IssueGateway },
   ) => void;
-  armImpl?: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult;
+  armImpl?: (prUrl: string, taskId: string | undefined, deps?: ArmDeps, isDraft?: boolean) => ArmOutcome | ArmAttemptResult;
   armSessionPrsOverride?: boolean;
   updateBranchImpl?: (pr: ArmedStalledPr) => Promise<UpdateBranchOutcome>;
   rebaseDirtyFleetBranchImpl?: (pr: OpenPrView) => DirtyFleetRebaseOutcome | Promise<DirtyFleetRebaseOutcome>;
@@ -2108,7 +2113,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // Every other outcome (including a bare "arm-error-ignored" with no captured text, which
     // cannot happen from this adapter but keeps every existing fake/test that returns a plain
     // `ArmOutcome` string compiling and behaving exactly as before) is returned unchanged.
-    arm: (pr) => {
+    arm: (pr, mode) => {
       if (repoMode === "shadow") {
         log("automerge.shadow_refused", {
           pr_url: pr.prUrl,
@@ -2117,13 +2122,33 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         });
         return "shadow-refused";
       }
+      // W1-T5492: select attemptArm's existing clean-status fallback without another --auto write.
+      const idleDeps: ArmDeps | undefined = mode === "armed-idle" ? {
+        ...realArmDeps(() => config),
+        ledgerLines: () => readLedgerLines(ledgerPath), // ledger-read-intent: live
+        headSha: (prUrl) => readArmHeadShaRest(prUrl, (args) => {
+          const fresh = ghJsonForBuild(args) as { state?: string; auto_merge?: unknown; head?: { sha?: string } };
+          if (fresh.state !== "open" || !fresh.auto_merge || fresh.head?.sha !== pr.headSha) {
+            throw new Error("armed-idle PR is no longer open and armed at the observed head");
+          }
+          return fresh;
+        }),
+        armAuto: () => { throw new Error("Pull request is in clean status"); },
+        mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
+        mergeDirect: (prUrl) => {
+          assertLiveWriteAllowed("gh-pr-merge", `merging armed-idle ${prUrl}`);
+          mergeDirectViaRest(prUrl, (_file, args, opts) => ghExec([...args, "-f", `sha=${pr.headSha}`], opts));
+        },
+      } : undefined;
       let attemptError: string | undefined;
       const outcome = armAndLogOutcome(
         pr.prUrl,
         pr.taskId,
         log,
         (prUrl, taskId) => {
-          const result = sweepArmImpl(prUrl, taskId);
+          const result = idleDeps
+            ? armImpl(prUrl, sweepArmTaskId(pr, armSessionPrs), idleDeps, pr.isDraft)
+            : sweepArmImpl(prUrl, taskId);
           if (typeof result !== "string") attemptError = result.error;
           return result;
         },
@@ -8661,6 +8686,9 @@ export type NonExecutedProofExecOutcome = Exclude<
 >;
 
 export interface ProofDiscriminationEvidence {
+  /** W1-T5544: `"gate-log"` marks evidence read from the red `proof-discrimination` check's own job log
+   *  at this head (no posted review exists for it); absent means the capped review's own rows. */
+  readonly source?: "review" | "gate-log";
   readonly proofs: ReadonlyArray<{
     readonly claim: string;
     readonly proof: string;
@@ -8720,6 +8748,33 @@ export function proofDiscriminationEvidenceFromCheckLog(
 export function carriesTaskTrailer(pr: Pick<OpenPrView, "taskId" | "body">): boolean {
   if (pr.taskId === undefined) return false;
   return pr.body === undefined || extractTaskTrailerId(pr.body) !== undefined;
+}
+
+/** PRIMARY CONTROL on how many refused proof-repair rounds one head may spend (W1-T5544); at this many the PR is handed to
+ *  W1-T4943's plan-shard flag (`dispatchPlanOnlyRepair`) instead — the ladder's second rung. */
+export const MAX_PROOF_REPAIR_REFUSALS_PER_HEAD = 2;
+
+/** W1-T5544: the stale-proof evidence a metadata-only red carries, marked `gate-log` — undefined unless the PR is trailered
+ *  and `proof-discrimination` is the sole red with a log naming proofs (the same reader W1-T4943's arm uses). */
+export function proofRepairRouteEvidence(pr: OpenPrView): ProofDiscriminationEvidence | undefined {
+  if (!carriesTaskTrailer(pr)) return undefined;
+  const found = proofDiscriminationEvidenceFromCheckLog(pr.ciFailures ?? []);
+  return found ? { ...found, source: "gate-log" } : undefined;
+}
+
+/** W1-T5544: where a proof-repair route stands at this head — refused rounds (never strikes, W1-T5542) and any
+ *  proof-amendment PR already filed for this exact PR@head (its identity row is `fix.dispatch kind proof_amendment`). */
+export function proofRepairLadder(
+  pr: Pick<OpenPrView, "taskId" | "prNumber" | "headSha">,
+  lines: Array<Record<string, unknown>>,
+): { refusals: number; amendmentUrl?: string } {
+  const prefix = `${pr.taskId}:${pr.prNumber}:${pr.headSha}:`;
+  const amendment = lines.findLast((line) =>
+    isProofAmendmentIdentityRow(line) && typeof line.identity_key === "string" && line.identity_key.startsWith(prefix));
+  return {
+    refusals: fixRoundTally(lines, pr.taskId, pr.headSha).refusals.length,
+    ...(amendment ? { amendmentUrl: String(amendment.amendment_url ?? "") } : {}),
+  };
 }
 
 /** One of the four preconditions {@link diagnoseCappedRoutingBlock} names — matched to this
@@ -9036,6 +9091,7 @@ export interface SweepDeps {
    *  because that seeds the dedup. `void` reads as "armed". // Why: observed live on PR #960. */
   arm: (
     pr: OpenPrView,
+    mode?: "armed-idle",
   ) => ArmOutcomeName | ArmAttemptOutcome | void | Promise<ArmOutcomeName | ArmAttemptOutcome | void>;
   /** W1-T5403 — risk-judge a head whose run ended `handed_off`, once, before the `mergeable` arm.
    *  Production wires {@link riskJudgeHandedOffHead}; omitted, such a head is held, never armed. */
@@ -9922,7 +9978,14 @@ export function fixRungStalledWithoutNewHead(lines: Array<Record<string, unknown
 const METADATA_RED_CHECKS = new Set(["commitlint", "acceptance-author-gate", "proof-discrimination"]);
 
 /** `notMetadata`: the live title/body already pass, so the red is file-fixable and falls through to a worker. */
-export interface MetadataRepairResult { repaired: boolean; reason: string; notMetadata?: true }
+export interface MetadataRepairResult {
+  repaired: boolean;
+  reason: string;
+  notMetadata?: true;
+  /** W1-T5544: the body red has no deterministic cure (as opposed to an unreadable body or a failed write) — the
+   *  only shape a stale-proof red may be routed past the escalation on. */
+  noCure?: true;
+}
 
 /** A prior pass at this head found this metadata-only red set NOT a metadata defect. */
 export function metadataRedRuledOut(lines: ReadonlyArray<Record<string, unknown>>, pr: OpenPrView): boolean {
@@ -10610,6 +10673,31 @@ export async function runSweep(
     return { complete: true, lines: parseLedger(union.matches.join("\n")) };
   });
   const prior = priorActionsFromLedger(ledgerLines);
+  // Rotation retains arm_skipped receipts; sweep.disposed may prefer an older acted:true row.
+  const idleHeads = new Map<number, string>();
+  for (const line of ledgerLines) {
+    if (line.step !== "automerge.arm_skipped" || typeof line.pr_number !== "number" ||
+        typeof line.armed_idle_observed !== "boolean") continue;
+    if (line.armed_idle_observed === true && typeof line.head_sha === "string") {
+      idleHeads.set(line.pr_number, line.head_sha);
+    } else {
+      idleHeads.delete(line.pr_number);
+    }
+  }
+  const recordIdle = (step: string, pr: OpenPrView, observed: boolean, fields: Record<string, unknown> = {}): void => {
+    const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+      pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha,
+      dedupe_key: `${pr.prNumber}@${pr.headSha}` };
+    appendLine(deps.ledgerPath, { ...row, step, ...fields });
+    appendLine(deps.ledgerPath, { ...row, step: "automerge.arm_skipped", armed_idle_observed: observed,
+      reason: "auto-merge re-arm skipped; armed-idle observation recorded", idle_event: step });
+  };
+  const clearIdle = (pr: OpenPrView): void => {
+    if (!idleHeads.has(pr.prNumber) || deps.dryRun) return;
+    recordIdle("automerge.armed_idle_cleared", pr, false, { prior_head_sha: idleHeads.get(pr.prNumber),
+      reason: "armed-idle eligibility or head changed" });
+    idleHeads.delete(pr.prNumber);
+  };
   // W1-T3202 — FULL-SWEEP CAPACITY IS DERIVED ONCE, BEFORE ANY REPAIR CAN SPAWN. Reviews reserve
   // only their live spawning width (plan filings are deterministic), and the same active-worker
   // sample feeds both the adaptive review selector and the repair remainder. Light passes supply
@@ -11096,6 +11184,8 @@ export async function runSweep(
    *  that has already reached {@link fixCeilingInForce}. Only a successful claim releases. */
   function claimFixDispatch(
     pr: OpenPrView,
+    /** W1-T5544: the dispatch is the plan-shard flag (no worker round), so two refused WORKER rounds do not bar it. */
+    planFlagRung = false,
   ): { ok: true; release: () => void; run: <T>(fn: () => T | Promise<T>) => Promise<T> } | { ok: false; reason: string } {
     const fixKey = `${pr.taskId ?? ""}@${pr.headSha}`;
     if (inFlightFixKeys.has(fixKey)) {
@@ -11111,7 +11201,7 @@ export async function runSweep(
     const freshLines = readLedger(deps.ledgerPath);
     const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
     const freshTally = fixRoundTally(freshLines, pr.taskId, pr.headSha);
-    if (freshTally.strikes >= ceiling || freshTally.repeatedRefusal !== undefined) {
+    if (freshTally.strikes >= ceiling || (freshTally.repeatedRefusal !== undefined && !planFlagRung)) {
       inFlightFixKeys.delete(fixKey);
       return {
         ok: false,
@@ -11516,6 +11606,21 @@ export async function runSweep(
           : "capped review has only non-discriminating proofs — dispatching the existing bounded fix rung to repair the PR body";
       }
     }
+    // W1-T5544 — LADDER RUNG TWO IS NOT STRIKE EXHAUSTION. Two identical refused proof-repair rounds at one head read
+    // as `repeatedFixRefusal`, which `isFixStrikeExhausted` turns into the strike ladder's blocked-ambiguous. For a
+    // fleet stale-proof red that still owes W1-T4943's plan-shard flag, that skips a rung: route it back to
+    // blocked-fixable, where the metadata arm hands it to the flag (and, once the flag is spent, to the exhausted state).
+    if (
+      disposition === "blocked-ambiguous" && pr.repeatedFixRefusal !== undefined && pr.priorStrikes < policy.strikeCap &&
+      typeof deps.dispatchPlanOnlyRepair === "function" && metadataOnlyRed(pr) !== undefined &&
+      proofRepairRouteEvidence(pr) !== undefined && priorPlanRepairStrikesFromLedger(pr, ledgerLines) < MAX_PLAN_REPAIR_STRIKES &&
+      selectDispositionRule(dispositionView, policy, now).rule?.when === isFixStrikeExhausted
+    ) {
+      disposition = "blocked-fixable";
+      reason =
+        `proof-repair rounds refused twice at this head (${pr.repeatedFixRefusal}) — no strike spent — ` +
+        `the plan-shard flag is the next rung`;
+    }
     byDisposition[disposition]++;
 
     // W1-T2345 — computed for EVERY disposition, never only blocked-ambiguous, and BEFORE the
@@ -11572,6 +11677,10 @@ export async function runSweep(
     // rung has not stalled out. Named here rather than silently stood down — the unnamed
     // stand-down is what two readers independently misread as an unwired action path.
     let dedupStandDownReason: string | undefined;
+    let armedIdleDue = false;
+    if (disposition !== "mergeable" || pr.autoMergeArmed !== true || idleHeads.get(pr.prNumber) !== pr.headSha) {
+      clearIdle(pr);
+    }
     switch (disposition) {
       case "mergeable": {
         // PREFER OBSERVED STATE: GitHub's own `autoMergeArmed` is the authority for "already armed";
@@ -11592,15 +11701,27 @@ export async function runSweep(
         const armedByGitHub = pr.autoMergeArmed === true;
         const armedByPriorPass = !armedByGitHub && prior.armed.has(`${pr.prNumber}@${pr.headSha}`);
         alreadyDone = armedByGitHub || armedByPriorPass || refused || hold !== undefined;
+        const idleEligible = armedByGitHub && !refused && hold === undefined && stackParentWithdrawal === undefined;
+        if (!idleEligible) clearIdle(pr);
+        if (idleEligible && !deps.dryRun && (deps.actionable?.("mergeable") ?? true)) {
+          armedIdleDue = idleHeads.get(pr.prNumber) === pr.headSha;
+          if (armedIdleDue) {
+            alreadyDone = false;
+            reason = "armed, reviewed and green at the same head on a later pass — attempting guarded completion";
+          } else {
+            recordIdle("automerge.armed_idle", pr, true, { reason: "first armed, reviewed, green idle sighting" });
+          }
+        }
         // W1-T1116: NAME WHICH DISJUNCT FIRED. This switch left all of them silent, the same gap
         // the fix arm above already closed, and the only reason two readers misdiagnosed a
         // correctly-held #2432 as a never-clearing dedup. Order matches the `||` above, so a reader
         // learns the FIRST true disjunct — the one that actually short-circuited `alreadyDone`.
-        if (armedByGitHub) {
+        if (armedByGitHub && !armedIdleDue) {
           dedupStandDownReason = stackParentWithdrawal
             ? `existing auto-merge withdrawal ${stackParentWithdrawal.error ? "failed" : stackParentWithdrawal.outcome ?? "attempted"}: ` +
               (stackParentWithdrawal.check.detail ?? "declared stack parents are not all merged")
-            : "auto-merge already armed (observed on GitHub) — nothing to re-arm";
+            : idleEligible ? "auto-merge already armed (observed on GitHub) — first idle sighting; awaiting a later pass"
+              : "auto-merge already armed (observed on GitHub) — nothing to re-arm";
         } else if (armedByPriorPass) {
           dedupStandDownReason = `auto-merge already armed by a prior sweep pass at this head (${pr.headSha.slice(0, 7)})`;
         } else if (refused) {
@@ -11824,14 +11945,21 @@ export async function runSweep(
               // READ THE OUTCOME. `armAutoMerge` does not throw — it RETURNS which of its seven
               // branches it took, and five of them armed nothing. Discarding it is what let
               // `acted:true` be recorded for a PR that was never armed.
-              const armResult = await deps.arm(pr);
+              const armResult = armedIdleDue ? await deps.arm(pr, "armed-idle") : await deps.arm(pr);
               // W1-T1117: `deps.arm` may return the bare name it always could, or the richer
               // outcome-plus-failureClass object. Unwrap once, here.
               const armOutcomeName = typeof armResult === "object" && armResult !== null ? armResult.outcome : armResult;
               // W1-T1061: capture the concrete outcome whenever one came back. A `void` return is
               // the legacy "treat as armed" shape and names no real branch, so no field is written.
               if (armOutcomeName !== undefined) armOutcome = armOutcomeName;
-              if (!armOutcomeArmed(armOutcomeName)) {
+              if (armedIdleDue) {
+                const step = armOutcomeName === "direct-merged" ? "automerge.armed_idle_merged"
+                  : armOutcomeName === "armed" ? "automerge.armed_idle_enqueued" : "automerge.armed_idle_refused";
+                const stillIdle = !["direct-merged", "head-unavailable", "ledger-refused", "hold-refused",
+                  "draft-refused", "stack-parent-refused"].includes(armOutcomeName ?? "unknown");
+                recordIdle(step, pr, stillIdle, { outcome: armOutcomeName ?? "unknown" });
+              }
+              if (!armOutcomeArmed(armOutcomeName) || (armedIdleDue && armOutcomeName === undefined)) {
                 acted = false;
                 // The refusal used to go only to `say` -> stdout -> daemon.out.log, leaving no
                 // trace in the ledger where anyone looks. Name it on the disposed line.
@@ -11841,7 +11969,7 @@ export async function runSweep(
                 // failure, so nothing says the SAME attempt will ever succeed. `"transient"` and
                 // `"retryable"` stay on the `acted:false` line just set, as before.
                 const failureClass = typeof armResult === "object" && armResult !== null ? armResult.failureClass : undefined;
-                if (armOutcomeName === "arm-error-ignored" && failureClass === "unknown") {
+                if (!armedIdleDue && armOutcomeName === "arm-error-ignored" && failureClass === "unknown") {
                   acted = true;
                   standDownReason = undefined;
                 }
@@ -11937,6 +12065,9 @@ export async function runSweep(
               // W1-T4459: both dedup checks below read a PRIOR `sweep.disposed` row's extra fields
               // (see `sameHeadRedFixRefusal` for why no new ledger step).
               const metadataChecks = metadataRedRuledOut(ledgerLines, pr) ? undefined : metadataOnlyRed(pr);
+              // W1-T5544: set only when a body red with no deterministic cure carries stale-proof evidence —
+              // the escalation below is then skipped and the PR falls through to the proof-repair route.
+              let proofRepairRoute: ProofDiscriminationEvidence | undefined;
               if (metadataChecks) {
                 const priorRepair = ledgerLines.find((line) =>
                   line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
@@ -11950,9 +12081,27 @@ export async function runSweep(
                 const result: MetadataRepairResult = deps.repairMetadata
                   ? await deps.repairMetadata(pr, metadataChecks)
                   : { repaired: false, reason: "metadata repair effect is not wired" };
-                const outcome = result.repaired ? "repaired" : result.notMetadata ? "not-metadata" : "escalated";
+                if (result.noCure && !result.repaired && !result.notMetadata) {
+                  // THE ROUTE, NOT THE QUESTION (W1-T5544). Fleet-authored heads only: an operator's PR keeps
+                  // today's escalation. An unreadable author reads as not-fleet, never as fleet.
+                  const staleEvidence = proofRepairRouteEvidence(pr);
+                  if (staleEvidence && deps.readPlanRepairFacts) {
+                    try {
+                      if (isFleetAppAuthor((await deps.readPlanRepairFacts(pr)).authorLogin)) proofRepairRoute = staleEvidence;
+                    } catch (e) {
+                      log("sweep.proof_repair.facts_error", { pr_number: pr.prNumber, error: String((e as Error)?.message ?? e) });
+                    }
+                  }
+                }
+                const outcome = result.repaired
+                  ? "repaired"
+                  : result.notMetadata
+                  ? "not-metadata"
+                  : proofRepairRoute
+                  ? "proof-repair"
+                  : "escalated";
                 extraDisposedFields = { metadata_red_checks: metadataChecks, metadata_repair_outcome: outcome };
-                if (!result.notMetadata) {
+                if (!result.notMetadata && !proofRepairRoute) {
                   if (!result.repaired) {
                     await deps.escalate(
                       pr,
@@ -12269,7 +12418,22 @@ export async function runSweep(
               // evidence, never a mix. W1-T2236: the review branch also carries
               // `actionableGateFailures`. W1-T2231: the dedup gate reads `acted`, never `spent`.
               const staleProofs = carriesTaskTrailer(pr) ? proofDiscriminationEvidenceFromCheckLog(ciFailuresForFix) : undefined;
-              const fixEvidence = isBlockedCi(pr)
+              // W1-T5544 — THE LADDER, RUNG ONE. A routed stale-proof red gets a proof-repair round until it has
+              // been refused MAX_PROOF_REPAIR_REFUSALS_PER_HEAD times at this head (refusals are never strikes,
+              // W1-T5542); rung two is W1-T4943's plan-shard flag just below, rung three the exhausted state.
+              // A proof amendment already filed for this exact head stands the PR down: no round, no strike.
+              const proofRepairState = proofRepairRoute ? proofRepairLadder(pr, ledgerLines) : undefined;
+              if (proofRepairState?.amendmentUrl !== undefined) {
+                acted = false;
+                standDownReason = `proof amendment ${proofRepairState.amendmentUrl || "PR"} is filed for this head — standing down without a strike until it merges`;
+                break;
+              }
+              const proofRepairActive =
+                proofRepairRoute !== undefined && proofRepairState !== undefined &&
+                proofRepairState.refusals < MAX_PROOF_REPAIR_REFUSALS_PER_HEAD;
+              const fixEvidence = proofRepairActive
+                ? { unmetCriteria: [], proofDiscrimination: proofRepairRoute }
+                : isBlockedCi(pr)
                 ? { unmetCriteria: [], ciFailures: ciFailuresForFix }
                 : {
                     unmetCriteria: pr.unmetCriteria,
@@ -12359,7 +12523,7 @@ export async function runSweep(
                   scripts: ratchetScripts,
                 });
               }
-              if (staleProofs && (!deps.dispatchPlanOnlyRepair || priorPlanRepairStrikesFromLedger(pr, ledgerLines) >= MAX_PLAN_REPAIR_STRIKES)) {
+              if (staleProofs && !proofRepairActive && (!deps.dispatchPlanOnlyRepair || priorPlanRepairStrikesFromLedger(pr, ledgerLines) >= MAX_PLAN_REPAIR_STRIKES)) {
                 reason = `stale-proof red on ${staleProofs.proofs.map((p) => p.proof).join("; ")} — the plan-shard flag is spent or unwired, so no worker is dispatched`;
                 const flagEscalated = ledgerLines.some((line) =>
                   line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
@@ -12373,7 +12537,7 @@ export async function runSweep(
               // W1-T2520 — THE FIX-DISPATCH CLAIM. See {@link claimFixDispatch} for why a claim
               // alone, without the fresh re-read it also performs, would not have stopped the
               // observed race. A refusal spends nothing and stands down like any declined lane.
-              const fixClaim = claimFixDispatch(pr);
+              const fixClaim = claimFixDispatch(pr, proofRepairRoute !== undefined && !proofRepairActive);
               if (!fixClaim.ok) {
                 acted = false;
                 standDownReason = fixClaim.reason;
@@ -12392,7 +12556,7 @@ export async function runSweep(
               }
               // W1-T3390 — fires here, in place of `dispatchFix` below, once the disposition
               // decision above found the body budget spent and a plan-shard repair still owed.
-              const planRepairEvidence = planShardRepairDue ? proofDiscrimination : staleProofs;
+              const planRepairEvidence = proofRepairActive ? undefined : planShardRepairDue ? proofDiscrimination : staleProofs;
               if (deps.dispatchPlanOnlyRepair && planRepairEvidence) {
                 const dispatchPlanOnlyRepair = deps.dispatchPlanOnlyRepair;
                 if (deps.detachFixWait) {
