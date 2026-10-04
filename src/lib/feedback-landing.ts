@@ -201,7 +201,6 @@ const refusedPlanPrTrees = new Map<string, PlanPrPreflightResult>();
 type PlanPrPreflightAsk = { commitSha: string; pr: { title: string; body: string } };
 type PlanPrPreflightFn = (commitSha: string, pr: PlanPrPreflightAsk["pr"]) => PlanPrPreflightResult;
 type PlanPrPreflightAsyncFn = (commitSha: string, pr: PlanPrPreflightAsk["pr"]) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
-/** W1-T5620: a landing that yields at its one preflight, so the CLI drives it sync and the daemon sweep awaits it. */
 type LandingSteps = Generator<PlanPrPreflightAsk, LandFeedbackResult, PlanPrPreflightResult>;
 
 function driveLanding(steps: LandingSteps, preflight: PlanPrPreflightFn): LandFeedbackResult {
@@ -211,7 +210,7 @@ function driveLanding(steps: LandingSteps, preflight: PlanPrPreflightFn): LandFe
     try {
       verdict = preflight(step.value.commitSha, step.value.pr);
     } catch (e) {
-      step = steps.throw(e); // thrown at the yield, where the inline call threw before W1-T5620
+      step = steps.throw(e);
       continue;
     }
     step = steps.next(verdict);
@@ -226,7 +225,7 @@ async function driveLandingAsync(steps: LandingSteps, preflight: PlanPrPreflight
     try {
       verdict = await preflight(step.value.commitSha, step.value.pr);
     } catch (e) {
-      step = steps.throw(e); // a rejection reads exactly as the sync driver's throw
+      step = steps.throw(e);
       continue;
     }
     step = steps.next(verdict);
@@ -1132,15 +1131,14 @@ export interface SweepFeedbackLandingAsyncOpts extends Omit<SweepFeedbackLanding
   planPrPreflight?: PlanPrPreflightAsyncFn;
 }
 
-/** {@link sweepFeedbackLanding} for the daemon's per-poll rung (W1-T5620): its plan-PR preflight is awaited as child
- *  processes ({@link planPrPreflightAtCommitAsync}), so a pushing pass no longer holds the loop for the whole check. */
+/** {@link sweepFeedbackLanding} for the daemon's per-poll rung, its plan-PR preflight awaited off the loop (W1-T5620). */
 export async function sweepFeedbackLandingAsync(root: string, opts: SweepFeedbackLandingAsyncOpts = {}): Promise<LandFeedbackResult> {
   const preflight = opts.planPrPreflight ?? ((sha, pr) => planPrPreflightAtCommitAsync(root, sha, pr));
   return logLandingSweep(opts.log, await driveLandingAsync(sweepLandingSteps(root, opts), preflight));
 }
 
 function sweepLandingSteps(root: string, opts: Omit<SweepFeedbackLandingOpts, "planPrPreflight">): LandingSteps {
-  const { log, ...landOpts } = { ...opts, planPrPreflight: undefined }; // the driver alone runs the preflight
+  const { log, ...landOpts } = { ...opts, planPrPreflight: undefined };
   const git = landOpts.git ?? defaultGit(root);
   return landPendingSteps(root, landingKind(FEEDBACK_LANDING_KIND, root, landOpts, git), {
     ...landOpts,
