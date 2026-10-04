@@ -661,6 +661,8 @@ function armOpenCappedFakeGh(branch: string, callLogPath: string, headSha: strin
       `  if [[ "$5" == 'headRefName' ]]; then echo '{"headRefName":"${branch}"}'; exit 0; fi`,
       "  if [[ \"$5\" == 'body' ]]; then echo '{\"body\":\"\"}'; exit 0; fi",
       `  if [[ "$5" == 'headRefOid' ]]; then echo '{"headRefOid":"${headSha}"}'; exit 0; fi`,
+      // W1-T4074: an unreadable PR diff stands the fix rung down before dispatch — answer the read.
+      "  if [[ \"$5\" == 'files' ]]; then echo '{\"files\":[{\"path\":\"src/lib/daemon.ts\"}]}'; exit 0; fi",
       "fi",
       "if [[ \"$1\" == 'pr' && \"$2\" == 'edit' ]]; then exit 0; fi",
       "if [[ \"$1\" == 'pr' && \"$2\" == 'merge' ]]; then",

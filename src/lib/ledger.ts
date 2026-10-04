@@ -608,6 +608,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "main.health.observed",
   "sweep.base_red.stood_down",
   "sweep.base_red.refresh",
+  "sweep.base_reproduction", // W1-T5528: sweep.ts's probe cache and prior reproduced verdict
+  "fix.strike_refunded", // W1-T5528: `fixLedgerRowsForHead` drops each refunded strike by this row
   "escalation.issue_opened",
   // W1-T3166. READER: the operator asking "has the judge ever run, and what has it demoted", and
   // W1-T3167's re-judge rung, which must not re-ask a settled question. "escalation.demoted" was
@@ -695,6 +697,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.strike_ladder.requeued",
   "sweep.strike_ladder.digest_opened",
   "sweep.strike_ladder.digest_appended",
+  "sweep.plan_round.pushed",
+  "sweep.plan_round.refused",
   // W1-T970: sweep.ts builds a sha-keyed `riskRefused` set off the escalated row, and (W1-T5403)
   // `handedOffHeadAwaitingJudgment` reads the decision row; losing either re-arms or re-judges a head.
   "risk_judge.escalated",

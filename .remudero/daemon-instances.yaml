@@ -27,6 +27,16 @@
 # no-instance refusal. The registry being absent keeps the legacy default byte-for-byte, so an
 # older checkout is unaffected.
 #
+# W1-T4863 — EACH INSTANCE OWNS ITS `claude_dir`; THE CREDENTIAL HAS ONE OWNER. D-11 rules nothing
+# mutable shared between cells, and three daemons writing one ~/.claude put their transcripts,
+# settings and token refreshes in a single directory. `claude_dir` is now distinct per instance:
+# the `primary: true` instance (core) keeps `/home/craigoleyagent/.claude` and is the ONE refresher
+# of the subscription credential; `install-host-units.sh --instance <name>` mounts that owner's
+# `.credentials.json` READ-ONLY into every other instance's own directory. `.codex` and
+# `.config/remudero-container` stay shared (provider config, not per-run state). The host
+# directories `.claude-site` and `.claude-console` must exist (owned by the service user) before
+# the next `--install`. NOT measured on the host from this checkout: what each instance writes.
+#
 # W1-T4227 — THE FLEET'S ONE REGISTRY (Account → Project → Repository → Instance). Each instance
 # also names its `project` (absent means project "default", a standalone repo) and its
 # `github_repo` (owner/name); `rmd serve` reads them through `parseInstanceRegistry`
@@ -56,7 +66,7 @@ instances:
     github_repo: craigoley/remudero-site
     container_name: remudero-site-daemon
     state_dir: /home/craigoleyagent/rmd-site-state
-    claude_dir: /home/craigoleyagent/.claude
+    claude_dir: /home/craigoleyagent/.claude-site
     codex_dir: /home/craigoleyagent/.codex
     container_config_dir: /home/craigoleyagent/.config/remudero-container
     image: synthwatcholey0620.azurecr.io/remudero:latest
@@ -66,7 +76,7 @@ instances:
     github_repo: craigoley/remudero-console
     container_name: remudero-console-daemon
     state_dir: /mnt/rmd/remudero-console-state
-    claude_dir: /home/craigoleyagent/.claude
+    claude_dir: /home/craigoleyagent/.claude-console
     codex_dir: /home/craigoleyagent/.codex
     container_config_dir: /home/craigoleyagent/.config/remudero-container
     image: synthwatcholey0620.azurecr.io/remudero:latest
