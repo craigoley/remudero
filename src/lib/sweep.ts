@@ -31,6 +31,7 @@ import { appendLedger, isRealStrike } from "./ledger.js";
 import { runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import { resolveLedgerUnion } from "./ledger-union.js";
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
+import { isInPlanScope } from "./plan-scope.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "./mounts.js";
 import { planParallelAttempts, type ShapeGain, type TaskShape } from "./parallel-attempts.js";
 import { strikeScheduleFor, type StrikePassRate } from "./strike-schedule.js";
@@ -107,6 +108,7 @@ import { parseLedger } from "./retro.js";
 import { selectRuntimeReviewWidth } from "./review-capacity.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import {
+  workerTranscript,
   activeWorkerCount,
   appendQuestion,
   cashFallbackRefusal,
@@ -1266,6 +1268,8 @@ export interface BuildSweepEffectsDeps {
   createFixRungWorktreeImpl?: SweepRuntimeFn;
   captureWorktreeSnapshotImpl?: SweepRuntimeFn;
   runFixRungImpl?: SweepRuntimeFn;
+  runPlanScopedFixRoundImpl?: SweepRuntimeFn;
+  materializePlanRoundWorktreeImpl?: SweepRuntimeFn;
   pushFixRoundImpl?: SweepRuntimeFn;
   buildFixRungDispatchArgsImpl?: SweepRuntimeFn;
   openTaskIdsFromPlanImpl?: SweepRuntimeFn;
@@ -1580,6 +1584,7 @@ export const SWEEP_EFFECT_SURFACE = [
   // W1-T5349: the plan-repair rung's fact read and its renumber/retitle effect.
   "readPlanRepairFacts",
   "repairPlanPr",
+  "dispatchPlanGateRound",
 ] as const;
 
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
@@ -1623,6 +1628,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "repairMetadata"
   | "readPlanRepairFacts"
   | "repairPlanPr"
+  | "dispatchPlanGateRound"
 > & {
   /** W1-T3618 — see `reviewerCodeStaleThisPassImpl`. Not a `SweepDeps` member: it is a read-back on
    *  this builder's own return, not an effect the sweep invokes. */
@@ -1675,6 +1681,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     createFixRungWorktreeImpl: createFixRungWorktree = requiredSweepRuntime("createFixRungWorktreeImpl"),
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit = requiredSweepRuntime("captureWorktreeSnapshotImpl"),
     runFixRungImpl: runFixRung = requiredSweepRuntime("runFixRungImpl"),
+    runPlanScopedFixRoundImpl: runPlanScopedFixRound = requiredSweepRuntime("runPlanScopedFixRoundImpl"),
+    materializePlanRoundWorktreeImpl: materializePlanRoundWorktree = requiredSweepRuntime("materializePlanRoundWorktreeImpl"),
     pushFixRoundImpl: pushFixRound = requiredSweepRuntime("pushFixRoundImpl"),
     buildFixRungDispatchArgsImpl: buildFixRungDispatchArgs = requiredSweepRuntime("buildFixRungDispatchArgsImpl"),
     openTaskIdsFromPlanImpl: openTaskIdsFromPlan = requiredSweepRuntime("openTaskIdsFromPlanImpl"),
@@ -2486,6 +2494,70 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         },
         { issues, ledgerPath, runId },
       );
+    },
+
+    dispatchPlanGateRound: async (pr) => {
+      let worktreePath = "";
+      let claim: InflightLockHandle | undefined;
+      try {
+        if (await dispatchFixPreflightStandDown(ghLiveState, pr, log)) return { outcome: "refused", reason: "the filing is terminal" };
+        const live = ghJsonForBuild(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as {
+          head: { ref: string; sha: string }; user: { login: string }; title: string; body: string;
+        };
+        if (live.head.sha !== pr.headSha || !isMachineLanePlanHead(live.head.ref) || !isFleetAppAuthor(live.user.login)) {
+          return { outcome: "refused", reason: "the filing head or author changed" };
+        }
+        const paths = await fetchPrDiffFilesViaGh(pr.prUrl);
+        const resolved = fixRungTaskForForBuild(plan, { prNumber: pr.prNumber }, live.body, live.head.ref, paths);
+        const task = { ...resolved.task, id: pr.taskId ?? escalationTaskIdFor(pr), files: resolved.task.files.filter(isInPlanScope) };
+        claim = acquireInflightLock(inflightDir, fixBranchClaimKey(owner, repo, live.head.ref), { run_id: runId });
+        const materialized = materializePlanRoundWorktree(config, repoDir, pr.prNumber, pr.headSha);
+        if (!materialized.worktreePath) return { outcome: "refused", reason: materialized.failure?.message ?? "the plan head could not be materialized" };
+        worktreePath = materialized.worktreePath;
+        const mount = resolveMount(loadMounts(mountsPath(repoRoot)), "fix", task.risk);
+        const settingsFile = renderWorkerSettings({ templatePath: join(repoRoot, "settings", "worker.json"),
+          hooksDir: join(repoRoot, "hooks"), outPath: join(config.root, "tmp", `plan-round-${pr.prNumber}.json`) });
+        const ciFailures = await fetchCiFailures(owner, repo, await restRollupFor(owner, repo, pr.headSha, readJsonImpl));
+        return await runPlanScopedFixRound({ pr: { ...pr, headRefName: live.head.ref, ciFailures }, task, worktreePath,
+          title: live.title, body: live.body, runId,
+          lastRefusal: parseLedger(ledgerPath).findLast((l) => l.step === "sweep.plan_round.refused" &&
+            l.pr_number === pr.prNumber && l.head_sha === pr.headSha)?.reason,
+          deps: {
+            preflight: planPrPreflightImpl,
+            spawn: async (prompt: string) => {
+              const result = await (spawnImpl ?? benchmarkNonDispatchSpawn("plan-gate"))({
+                cwd: worktreePath, permissionMode: "bypassPermissions", settingsFile, model: mount.model, mountProvider: mount.provider, effort: mount.effort,
+                maxTurns: mount.maxTurns, maxBudgetUsd: task.budget_usd ?? defaultBudgetUsd, config, prompt,
+                tools: ["Read", "Write", "Edit", "Grep", "Glob"], cashTools: ["Read", "Write", "Edit", "Grep", "Glob", "RunCheck"],
+                runId, taskId: task.id,
+              });
+              log("sweep.plan_round.worker", { pr_number: pr.prNumber, head_sha: pr.headSha, cost_usd: result.costUsd,
+                num_turns: result.numTurns, subtype: result.subtype });
+              return workerTranscript(result);
+            },
+            push: (sha: string) => gitPushRunBranchForBuild(worktreePath, {
+              expectedHeadSha: sha,
+              capture: (file, args) => planRepairGit(file, args),
+              exec: (file, args) => { planRepairGit(file, [...args.slice(0, -1), `HEAD:refs/heads/${live.head.ref}`]); },
+            }),
+            updateMetadata: async (metadata: { title: string; body: string }) => {
+              const fresh = ghJsonForBuild(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]) as { head: { sha: string } };
+              if (fresh.head.sha !== pr.headSha) throw new Error("the filing head moved before the metadata write");
+              ghJsonForBuild(["api", "-X", "PATCH", `repos/${owner}/${repo}/pulls/${pr.prNumber}`,
+                "-f", `title=${metadata.title}`, "-f", `body=${metadata.body}`]);
+            },
+            log,
+          },
+        });
+      } catch (error) {
+        return { outcome: "refused", reason: String((error as Error)?.message ?? error) };
+      } finally {
+        try {
+          if (worktreePath) worktreeRemoveForBuild(repoDir, worktreePath);
+        } finally {
+          claim?.release();
+        }
+      }
     },
 
     dispatchFix: async (pr, evidence) => {
@@ -8795,6 +8867,12 @@ export interface SweepDeps {
     pr: OpenPrView,
     decision: Extract<PlanRepairDecision, { action: "renumber" | "retitle" }>,
   ) => PlanRepairOutcome | Promise<PlanRepairOutcome>;
+  dispatchPlanGateRound?: (pr: OpenPrView) => Promise<{
+    outcome: "pushed" | "refused" | "metadata-repaired";
+    headSha?: string;
+    reason?: string;
+    preflight?: PlanPrPreflightResult;
+  }>;
   /** W1-T2931 — claim one slot from the light pass's shared host budget immediately before a
    *  fix worker is dispatched. The claim is synchronous, so concurrent per-PR reconciliation
    *  cannot all observe the same free slot. Omitted by every non-light caller, preserving the
@@ -10325,6 +10403,7 @@ export async function runSweep(
   let baseRedRefreshPr: number | undefined;
   // W1-T5349 — the plan-repair rung's once-per-head record, folded once per pass.
   const planRepairHistory = planRepairHistoryFromLedger(ledgerLines);
+  const planRoundFacts = new Map<number, PlanRepairFacts>();
   const tryPlanRepair = async (pr: OpenPrView): Promise<{ repaired: boolean; reason: string }> => {
     const notRepaired = { repaired: false, reason: "" };
     if (!isMachineLanePlanHead(pr.headRefName) || !deps.readPlanRepairFacts || !deps.repairPlanPr) return notRepaired;
@@ -10332,6 +10411,7 @@ export async function runSweep(
     let facts: PlanRepairFacts;
     try {
       facts = await deps.readPlanRepairFacts(pr);
+      planRoundFacts.set(pr.prNumber, facts);
     } catch (e) {
       appendLine(deps.ledgerPath, { ...row, step: `${PLAN_REPAIR_STEP}.read_error`, error: String((e as Error)?.message ?? e) });
       return notRepaired;
@@ -10968,13 +11048,65 @@ export async function runSweep(
         `observed ${inheritedMergeState.observedAt ?? "at an undated prior pass"} for this exact head ` +
         `${pr.headSha.slice(0, 7)} (W1-T4470)`;
     }
-    // W1-T4351 — a positively classified plan filing has no implementation surface: every ci-log
-    // fix was refused "the task declares no files". Escalate naming the red instead (deduped per
-    // head like every escalation), never a worker strike that cannot produce a commit.
+    // W1-T5543: fleet filings have their own plan surface; the code rung still never owns one.
     if (disposition === "blocked-fixable" && isBlockedCi(pr) && pr.isPlanFiling === true) {
-      // W1-T5349 — a machine lane's mechanical red is repaired first; anything else escalates as before.
       const repair = await tryPlanRepair(pr);
-      disposition = repair.repaired ? "wait" : "refused-escalate";
+      const facts = planRoundFacts.get(pr.prNumber);
+      let planRoundExhausted = false;
+      if (!repair.repaired && deps.dispatchPlanGateRound && isFleetAppAuthor(facts?.authorLogin) &&
+          isMachineLanePlanHead(pr.headRefName)) {
+        const row = { pr_number: pr.prNumber, head_sha: pr.headSha, lane_head: pr.headRefName,
+          checks: (pr.ciFailures ?? []).map((f) => f.name), run_id: deps.runId, task_id: pr.taskId ?? "SWEEP" };
+        repair.repaired = true;
+        repair.reason = "plan-scoped round deferred";
+        const base = decideBaseRed(pr, mainLatestRun, baseRedHistory);
+        if (base.kind !== "own") repair.reason = `plan-scoped round waits on base red: ${base.check}`;
+        else if (!deps.dryRun && (deps.actionable?.("blocked-fixable") ?? true) && !deps.workerAdmissionHold?.()) {
+          const claimed = claimFixDispatch({ ...pr, taskId: pr.taskId ?? escalationTaskIdFor(pr) });
+          if (!claimed.ok) {
+            repair.reason = claimed.reason;
+            if (claimed.reason.includes("refused twice")) {
+              repair.repaired = false;
+              planRoundExhausted = true;
+            }
+          }
+          else {
+            const work = claimed.run(async () => {
+              const history = readLedger(deps.ledgerPath).filter((l) => l.pr_number === pr.prNumber && l.head_sha === pr.headSha &&
+                (l.step === "sweep.plan_round.pushed" || l.step === "sweep.plan_round.refused"));
+              if (history.some((l) => l.step === "sweep.plan_round.pushed")) {
+                repair.reason = "plan-scoped round already handled this head";
+                return;
+              }
+              const repeated = history.find((l) => history.filter((r) => r.reason === l.reason).length >= 2);
+              if (repeated) {
+                repair.repaired = false;
+                planRoundExhausted = true;
+                repair.reason = `; ${repeatedFixRefusalReason(String(repeated.reason))}`;
+                return;
+              }
+              const admission = claimFixAdmission?.(pr);
+              if (admission && !admission.admitted) {
+                repair.reason = admission.reason;
+                return;
+              }
+              appendLine(deps.ledgerPath, { ...row, step: "sweep.plan_round.dispatched" });
+              repair.reason = "plan-scoped round dispatched";
+              let result: Awaited<ReturnType<NonNullable<SweepDeps["dispatchPlanGateRound"]>>>;
+              try {
+                result = await deps.dispatchPlanGateRound!(pr);
+              } catch (error) {
+                result = { outcome: "refused", reason: String((error as Error)?.message ?? error) };
+              }
+              appendLine(deps.ledgerPath, { ...row, step: result.outcome === "refused" ? "sweep.plan_round.refused" : "sweep.plan_round.pushed", ...result });
+              repair.reason = `plan-scoped round ${result.outcome}${result.reason ? `: ${result.reason}` : ""}`;
+            });
+            if (deps.detachFixWait) detachSweepAction(work, { actionKind: "fix-dispatch", taskId: pr.taskId ?? escalationTaskIdFor(pr) });
+            else await work;
+          }
+        }
+      }
+      disposition = repair.repaired ? "wait" : planRoundExhausted ? "blocked-ambiguous" : "refused-escalate";
       const red = (pr.ciFailures ?? []).map((failure) => failure.name).join(", ") || "a required check";
       reason = repair.repaired
         ? repair.reason
