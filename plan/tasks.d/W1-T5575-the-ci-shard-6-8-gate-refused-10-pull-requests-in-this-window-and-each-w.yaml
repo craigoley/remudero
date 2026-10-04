@@ -3,10 +3,12 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 2.5
-  status: queued
+  status: blocked
+  retirement: withdrawn
+  # plan gardener: merge W1-T5575 into W1-T5401 — Its title and files repeat an older queued task.
   attempts: 0
   author_class: machine
   origin: "ci-learning:8725:ci-shard (6/8)"
@@ -17,3 +19,13 @@
     - claim: "the lane that trips the ci-shard (6/8) gate is reached by a matched learnings entry rather than prose no dispatched worker reads"
       proof: "grep: ci-learning:8725:ci-shard (6/8) in learnings/ci.yaml"
   note: "Filed by the ci-learning rung from ci-learning:8725:ci-shard (6/8). The ci-shard (6/8) gate went red on #8725 and was repaired; the repair touched docs/architecture.md, plan/tasks.d/w1-t5469-selector-shadow-miss.yaml, src/lib/ledger.ts, src/lib/panel-graph.ts, src/run-task.ts, test/no-plan-shard-carries-a-duplicate-key.test.ts, test/the-docs-stop-saying-containment-is-proven-per-run.test.ts, test/the-frontier-panel-names-every-filter-reason.test.ts, test/the-ledger-flags-a-row-stamped-in-the-future.test.ts, src/lib/garden-registry.ts, src/lib/incident-invariants.ts, src/lib/machine-filing-judge.ts, src/lib/serve-memory.ts, src/lib/serve.ts, src/lib/sweep.ts, test/a-garden-child-runs-under-a-heap-cap-at-low-priority.test.ts, test/a-lane-is-free-once-its-pull-request-is-open.test.ts, test/fix-refusal-every-change-the-worker-made-is-outside-its-declared-files.test.ts, test/serve-memory-names-where-rss-lives.test.ts, test/the-machine-judge-settles-an-operator-released-ruling.test.ts, test/the-sweep-runs-the-risk-judge-on-a-handed-off-head.test.ts, test/the-sweeps-own-plan-prs-run-the-filer-preflight.test.ts, plan/feedback/fb-1789364933974-18dfc1.yaml, src/lib/analytics-route.ts, src/lib/drain.ts, src/lib/feedback-landing.ts, src/lib/feedback.ts, src/lib/panel-actions.ts, src/lib/panel-skill-run.ts, src/lib/spend-rows.ts, src/lib/usage-telemetry.ts, test/a-machine-lane-never-opens-a-plan-pr-that-is-already-red.test.ts, test/an-analytics-request-returns-under-its-own-ceiling.test.ts, test/drains-single-lane-loop-checks-the-memory-gate-too.test.ts, test/the-headroom-card-sees-every-subscription.test.ts, test/the-usage-projection-shows-burn-and-routing.test.ts, .github/workflows/ci.yml, plan/feedback/fb-1789303258903-a19164.yaml, plan/tasks.d/W1-T5327-add-usage-of-quiethoursfilepath-in-fleet-control.yaml, plan/tasks.d/W1-T5395-diff-class-recognizes-doctrine-claude-md-and-agents-md-as-docs-paths-so.yaml, plan/tasks.d/W1-T5461-the-shadow-readiness-test-stops-its-worker-before-cleanup.yaml, plan/tasks.d/W1-T5492-an-armed-pr-github-never-merges-is-merged-directly.yaml, scripts/test-tier-manifest.json, src/lib/arm-auto-merge.ts, src/lib/containment.ts, src/lib/daemon.ts, src/lib/deploy-judge.ts, src/lib/isolation.ts, test/a-rule-checks-failure-is-titled-by-its-gate-not-commitlint.test.ts, test/a-withheld-review-counts-toward-the-daemons-freshness-pressure.test.ts, test/an-operator-correction-credit-survives-rotation.test.ts, test/containment-and-isolation-comments-match-the-once-per-boot-ruling.test.ts, test/containment-native-credential-failure.test.ts, test/every-lane-locks-its-worktree-before-adding-it.test.ts, test/every-plan-shard-parses-with-unique-keys.test.ts, test/shadow-readiness-accrues-without-console-traffic.test.ts, test/the-rule-checks-run-first.test.ts, test/the-shadow-readiness-test-stops-its-worker-before-cleanup.test.ts, test/two-plan-prs-from-one-base-cannot-merge-into-an-invalid-plan.test.ts. Recommended action: docs. Remedy surface: learnings/*.yaml. MACHINE-AUTHORED AND PARKED — a person decides what guidance changes."
+  risk_ruling:
+    verdict: "low"
+    action: proceed
+    confidence: 0.9
+    reasons:
+      - "The filed plan limits the remedy to a matched CI learning entry in learnings/ci.yaml, consistent with the sole declared file."
+      - "The supplied scope describes carrying repair lessons to workers; it specifies no sensitive access, deletion, irreversible action, or merge, deployment, infrastructure, or review policy change."
+      - "The record specifies automated verification with a grep-prefixed acceptance proof; the supplied family history reports 2 merged and 0 declined tasks. No actual change view or CI results are supplied."
+    judged_at: "2026-10-04T02:36:12.537Z"
+    pin: "72addce519412f9f258cee7d2a58473378a10cca3de2e475719e9425eff31351"

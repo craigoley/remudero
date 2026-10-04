@@ -1,0 +1,35 @@
+- id: W1-T5585
+  title: "THE CI FRICTION GARDENER'S COSTLIEST OPEN CAUSE — check:coverage-shard (5/8) cost 2489 PR minute(s) across 74 round(s) on 261 pull request(s)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human
+  risk: low
+  priority: 1.13
+  status: queued
+  attempts: 0
+  author_class: machine
+  origin: "ci-friction:check:coverage-shard (5/8)"
+  files:
+    - src/lib/ci-friction-gardener.ts
+    - test/check-coverage-shard-5-8.test.ts
+  acceptance:
+    - claim: "the harness no longer spends a fix round on check:coverage-shard (5/8)"
+      proof: "grep: test(\"W1-T5585: check:coverage-shard (5/8) is prevented, not retried\" in test/check-coverage-shard-5-8.test.ts"
+  note: "Filed by the ci-friction gardener (W1-T4435) at rung 1. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures check:coverage-shard (5/8)'s share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung 2."
+  rationale: |
+    MEASURED by the ci-friction gardener: check:coverage-shard (5/8) cost 2489 PR minute(s) (seven-day half-life) across 74 fix round(s) on 261 pull request(s).
+
+    WHERE IT COMES FROM:
+    - src/lib/ci-friction-gardener.ts: names "coverage-shard (5/8)" (1 line(s))
+
+    RECENT ROUNDS (newest first):
+    - PR #8940 at 2026-10-03T19:42:32Z: hand fix PR #8940: scripts/private-routing-daily-review.mjs, src/lib/baked-runtime-inputs.ts, src/lib/ci-friction-gardener.ts, src/lib/deploy-judge.ts, src/lib/field-trials-flow.ts, src/lib/field-tria
+    - PR #8690 at 2026-10-02T16:40:45Z: hand fix PR #8690: src/lib/ci-friction-gardener.ts, src/lib/ci-friction-remedy.ts; minutes are the pass median proxy (9.098133333333333), not measured repair time
+    - PR #8482 at 2026-10-01T21:19:08Z: hand fix PR #8482: src/lib/ci-friction-gardener.ts; minutes are the pass median proxy (9.098133333333333), not measured repair time
+    - PR #8300 at 2026-10-01T07:15:22Z: hand fix PR #8300: src/lib/ci-friction-gardener.ts, src/run-task.ts; minutes are the pass median proxy (9.098133333333333), not measured repair time
+    - PR #8147 at 2026-09-30T20:25:44Z: hand fix PR #8147: src/lib/ci-friction-gardener.ts, src/lib/machine-filing.ts, src/lib/measurement-cadence.ts; minutes are the pass median proxy (9.098133333333333), not measured repair time
+
+    WHAT COUNTS AS A REMEDY: a change to the code path above so that this round is never dispatched, or is self-healed
+    without spending a fix round. A paragraph in docs is not a remedy. After merge the gardener measures this cause's
+    share of all fix rounds in equal windows before and after; if it does not fall, the cause reopens one rung up.

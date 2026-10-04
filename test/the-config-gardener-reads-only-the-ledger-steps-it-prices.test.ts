@@ -190,7 +190,7 @@ test("the filtered read's peak heap on a realistic synthetic ledger is a small f
       { step: "pr.opened", run_id: id, pr_url: `https://github.com/acme/remudero/pull/${u}`, ts },
       { step: "verdict", run_id: id, task_id: `W1-T${u}`, verdict: "merged", cost_usd: 3.1, pr_url: `https://github.com/acme/remudero/pull/${u}`, ts },
       { step: "review.posted", run_id: id, pr_url: `https://github.com/acme/remudero/pull/${u}`, verdict: "approve", ts },
-      { step: "cost.anomaly", run_id: id, cost_usd: 3.1, class_p90: 2.2, ts },
+      { step: "automerge.armed", run_id: id, at: "open", outcome: "armed", ts },
     );
     for (let n = 0; n < 93; n++) {
       bucket.push({ step: ["worker.activity", "run.running_long", "worker.turns", "worker.state", "sweep.disposed", "ci.polling"][n % 6], run_id: n % 6 === 4 ? "sweep" : id, seq: n, detail: `${"activity ".repeat(38)}${u}:${n}`, ts });

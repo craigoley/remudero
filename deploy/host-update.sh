@@ -37,6 +37,8 @@
 # and on the nightly `--reclaim-only` rung COPIES every live root's `state/` (mounted read-only)
 # into its sibling `state-backups/` (section 3a, W1-T3677, W1-T5545). The only thing that copy ever
 # removes is one of its OWN dated snapshots beyond the keep count — never anything under `state/`.
+# With RMD_STATE_OFFHOST set it then copies them OFF the VM (section 3b, W1-T5546), expiring only
+# its OWN tagged Azure snapshots the same way.
 #
 # ── PLAIN BASH AND DOCKER, deliberately — the same discipline as deploy/verify-image.sh, which is
 # this script's sibling. It runs on a host that may have no node, no rmd and no checkout, and it
@@ -55,6 +57,8 @@
 #   ./deploy/host-update.sh --check-state-roots            # is EVERY instance's state on /mnt/rmd?
 #   ./deploy/host-update.sh --relocate-state-root <instance> <dest>  # copy one there, verified
 #   ./deploy/host-update.sh --reclaim-only     # the NIGHTLY rung: snapshot every live state/, then reclaim
+#   RMD_STATE_OFFHOST=azure-disk-snapshot:<rg>/<disk> ./deploy/host-update.sh --reclaim-only
+#                                              # ...and an off-host copy (or azure-blob:<acct>/<ctr>)
 
 set -euo pipefail
 
@@ -741,11 +745,13 @@ echo "host-update: target ${REF}"
 HOST_UPDATE_TMPDIR="${TMPDIR:-/tmp}"
 DOCKER_ERR=""
 PULL_LOG=""
+OFFHOST_TAR=""
 # Installed BEFORE the first mktemp on purpose: if the SECOND allocation fails, the first is
 # already registered and still gets removed.
 host_update_cleanup_tmp() {
   [ -n "${DOCKER_ERR}" ] && rm -f "${DOCKER_ERR}"
   [ -n "${PULL_LOG}" ] && rm -f "${PULL_LOG}"
+  [ -n "${OFFHOST_TAR}" ] && rm -f "${OFFHOST_TAR}"
   return 0
 }
 trap host_update_cleanup_tmp EXIT
@@ -1085,8 +1091,153 @@ console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.lengt
       done
     fi
   done <<<"${snap_roots}"
-  # W1-T5546's off-host copy hooks in HERE: STATE_SNAPSHOT_ARCHIVES holds every archive verified
-  # above, and a failed copy must set state_snapshot_failed=1 like every arm of this section.
+  # ── 3b. THE OFF-HOST COPY (W1-T5546) ──────────────────────────────────────────────────────
+  # Every archive above lands on the SAME Azure managed disk as the state it copies (remudero-data,
+  # /mnt/rmd), so a lost disk loses the ledger and every backup of it together. RMD_STATE_OFFHOST
+  # names where a copy goes OFF the VM. An UNSET target is one line, not a failure: an off-host copy
+  # has a recurring storage cost, and that is an operator decision, not this script's.
+  #   azure-disk-snapshot:<resource-group>/<disk>  an INCREMENTAL snapshot of the whole disk — every
+  #       root and every archive at once — after a `sync`, in the disk's own region, named
+  #       <disk>-<UTC stamp> and tagged purpose=fleet-state-backup created-by=host-update. Only after
+  #       it verifies are the newest RMD_STATE_OFFHOST_KEEP (default 7) of THOSE kept. A snapshot
+  #       missing either tag, or not named <disk>-<UTC stamp>, is never deleted — an operator's
+  #       hand-taken one (created-by=operator-session) included.
+  #   azure-blob:<account>/<container>  each archive verified above, as a .tar.gz named
+  #       <backup dir>/<archive>.tar.gz, uploaded with the host's `az login` (--auth-mode login).
+  #       No expiry here: a lifecycle rule on the container is the place for one.
+  # VERIFY, DON'T TRUST, again: success is `az snapshot show` reporting Succeeded with both tags, or
+  # the blob's contentLength equal to the local tarball's — never an exit code. Any failure sets
+  # state_snapshot_failed, so section 4c exits non-zero. RMD_STATE_OFFHOST_AZ replaces `az`.
+  # FALSIFIER: test/the-nightly-state-snapshot-has-an-off-host-copy.test.ts.
+  OFFHOST_TARGET="${RMD_STATE_OFFHOST:-}"
+  OFFHOST_AZ="${RMD_STATE_OFFHOST_AZ:-az}"
+  OFFHOST_KEEP="${RMD_STATE_OFFHOST_KEEP:-7}"
+  offhost_fail() { # <what failed> [command output, indented beneath]
+    echo "host-update: STATE SNAPSHOT OFF-HOST COPY FAILED — $1" >&2
+    [ -n "${2:-}" ] && printf '%s\n' "$2" | sed 's/^/  /' >&2
+    state_snapshot_failed=1
+  }
+  offhost_disk_snapshot() { # <resource group> <disk>
+    local rg="$1" disk="$2" out rc disk_id disk_loc name got want all count excess old
+    if ! out="$(sync 2>&1)"; then
+      offhost_fail "sync failed, so a disk snapshot could miss tonight's archives:" "${out}"
+      return
+    fi
+    out="$("${OFFHOST_AZ}" disk show -g "${rg}" -n "${disk}" --query "join('|', [id, location])" -o tsv 2>&1)" && rc=0 || rc=$?
+    disk_id="${out%%|*}"; disk_loc="${out#*|}"
+    if [ "${rc}" -ne 0 ] || [ -z "${disk_id}" ] || [ -z "${disk_loc}" ] || [ "${disk_loc}" = "${out}" ]; then
+      offhost_fail "az disk show -g ${rg} -n ${disk} exited ${rc} without an id|location:" "${out}"
+      return
+    fi
+    name="${disk}-$(date -u +%Y%m%dT%H%M%SZ)"
+    out="$("${OFFHOST_AZ}" snapshot create -g "${rg}" -n "${name}" --source "${disk_id}" -l "${disk_loc}" \
+      --incremental true --tags purpose=fleet-state-backup created-by=host-update -o none 2>&1)" && rc=0 || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+      offhost_fail "az snapshot create -g ${rg} -n ${name} exited ${rc}:" "${out}"
+      return
+    fi
+    got="$("${OFFHOST_AZ}" snapshot show -g "${rg}" -n "${name}" \
+      --query "join('|', [provisioningState, tags.purpose, tags.\"created-by\", creationData.sourceResourceId])" -o tsv 2>&1)" && rc=0 || rc=$?
+    want="Succeeded|fleet-state-backup|host-update|${disk_id}"
+    # ARM ids are case-insensitive and come back in whatever case the resource was created with.
+    if [ "${rc}" -ne 0 ] || [ "$(printf '%s' "${got}" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "${want}" | tr '[:upper:]' '[:lower:]')" ]; then
+      offhost_fail "az snapshot create exited 0 but az snapshot show -g ${rg} -n ${name} (exit ${rc}) does not report '${want}':" "${got}"
+      return
+    fi
+    echo "host-update: state snapshot off-host copy — azure disk snapshot ${rg}/${name} verified (incremental, of ${disk})"
+    # Retention, only after a verified NEW snapshot, and only of this rung's own (both tags, and the
+    # <disk>-<stamp> name it writes), oldest first by creation time.
+    all="$("${OFFHOST_AZ}" snapshot list -g "${rg}" \
+      --query "sort_by([?tags.purpose=='fleet-state-backup' && tags.\"created-by\"=='host-update'], &timeCreated)[].name" -o tsv 2>&1)" && rc=0 || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+      offhost_fail "az snapshot list -g ${rg} exited ${rc}, so no snapshot beyond the newest ${OFFHOST_KEEP} was expired:" "${all}"
+      return
+    fi
+    all="$(printf '%s\n' "${all}" | while IFS= read -r old; do
+      case "${old}" in
+        "${disk}"-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) printf '%s\n' "${old}" ;;
+      esac
+    done)"
+    count="$(printf '%s\n' "${all}" | grep -c . || true)"
+    excess=$((count - OFFHOST_KEEP))
+    [ "${excess}" -gt 0 ] || return 0
+    while IFS= read -r old; do
+      [ -n "${old}" ] && [ "${old}" != "${name}" ] || continue
+      if out="$("${OFFHOST_AZ}" snapshot delete -g "${rg}" -n "${old}" 2>&1)"; then
+        echo "  expired azure disk snapshot ${rg}/${old} (keeping the newest ${OFFHOST_KEEP})"
+      else
+        offhost_fail "az snapshot delete -g ${rg} -n ${old} failed; it is still billed:" "${out}"
+      fi
+    done <<<"$(printf '%s\n' "${all}" | head -n "${excess}")"
+  }
+  offhost_blob() { # <account> <container>
+    local account="$1" container="$2" archive backups name blob size remote out rc
+    for archive in "${STATE_SNAPSHOT_ARCHIVES[@]}"; do
+      backups="${archive%/*}"; name="${archive##*/}"
+      blob="${backups#/}/${name}.tar.gz"
+      if ! OFFHOST_TAR="$(mktemp "${backups}/.rmd-offhost-upload.XXXXXX" 2>&1)"; then
+        offhost_fail "cannot create a temporary tarball in ${backups} for ${name}:" "${OFFHOST_TAR}"
+        OFFHOST_TAR=""
+        continue
+      fi
+      if ! out="$(tar -czf "${OFFHOST_TAR}" -C "${backups}" "${name}" 2>&1)"; then
+        offhost_fail "tar of ${archive} failed:" "${out}"
+      else
+        size="$(wc -c <"${OFFHOST_TAR}" | tr -d ' ')"
+        out="$("${OFFHOST_AZ}" storage blob upload --auth-mode login --account-name "${account}" \
+          --container-name "${container}" --name "${blob}" --file "${OFFHOST_TAR}" --only-show-errors -o none 2>&1)" && rc=0 || rc=$?
+        if [ "${rc}" -ne 0 ]; then
+          offhost_fail "az storage blob upload of ${archive} to ${account}/${container} exited ${rc}:" "${out}"
+        else
+          remote="$("${OFFHOST_AZ}" storage blob show --auth-mode login --account-name "${account}" \
+            --container-name "${container}" --name "${blob}" --query properties.contentLength -o tsv 2>&1)" && rc=0 || rc=$?
+          if [ "${rc}" -ne 0 ] || [ "${remote}" != "${size}" ]; then
+            offhost_fail "az storage blob show reports '${remote}' (exit ${rc}) for ${account}/${container}/${blob}, not the ${size} bytes uploaded"
+          else
+            echo "host-update: state snapshot off-host copy — ${archive} -> azure-blob ${account}/${container}/${blob} verified (${size} bytes)"
+          fi
+        fi
+      fi
+      rm -f -- "${OFFHOST_TAR}"
+      OFFHOST_TAR=""
+    done
+  }
+  offhost_kind="" offhost_a="" offhost_b=""
+  if [ -n "${OFFHOST_TARGET}" ]; then
+    offhost_kind="${OFFHOST_TARGET%%:*}"
+    offhost_spec="${OFFHOST_TARGET#*:}"
+    offhost_a="${offhost_spec%%/*}"; offhost_b="${offhost_spec#*/}"
+    case "${offhost_kind}" in azure-disk-snapshot|azure-blob) ;; *) offhost_kind="" ;; esac
+    if [ -z "${offhost_kind}" ] || [ -z "${offhost_a}" ] || [ -z "${offhost_b}" ] \
+       || [ "${offhost_b}" = "${offhost_spec}" ] || [[ "${offhost_b}" == */* ]]; then
+      offhost_fail "RMD_STATE_OFFHOST='${OFFHOST_TARGET}' is neither azure-disk-snapshot:<resource-group>/<disk> nor azure-blob:<account>/<container>."
+      offhost_kind=""
+    fi
+    case "${OFFHOST_KEEP}" in
+      ''|*[!0-9]*|0) offhost_fail "RMD_STATE_OFFHOST_KEEP must be a positive integer, got '${OFFHOST_KEEP}'."; offhost_kind="" ;;
+    esac
+  fi
+  if [ -z "${OFFHOST_TARGET}" ]; then
+    echo "host-update: state snapshot off-host copy — NOT CONFIGURED: every archive above is on the same disk as"
+    echo "  the state it copies. Set RMD_STATE_OFFHOST=azure-disk-snapshot:<resource-group>/<disk> or"
+    echo "  azure-blob:<account>/<container>; enabling it is an operator COST decision (recurring storage)."
+  elif [ -z "${offhost_kind}" ]; then
+    : # refused above, already failing the rung
+  elif [ "${DRY_RUN}" -eq 1 ]; then
+    echo "host-update: state snapshot off-host copy (DRY RUN) — would copy to ${OFFHOST_TARGET}; nothing sent"
+  elif [ "${#STATE_SNAPSHOT_ARCHIVES[@]}" -eq 0 ]; then
+    if [ "${state_snapshot_failed}" -eq 1 ]; then
+      echo "host-update: state snapshot off-host copy — skipped: no archive was verified tonight (see above)" >&2
+    else
+      echo "host-update: state snapshot off-host copy — skipped: there was no state to snapshot tonight"
+    fi
+  elif ! command -v "${OFFHOST_AZ}" >/dev/null 2>&1; then
+    offhost_fail "RMD_STATE_OFFHOST is set but '${OFFHOST_AZ}' is not a command on PATH: install the Azure CLI and 'az login', or unset RMD_STATE_OFFHOST."
+  elif [ "${offhost_kind}" = "azure-disk-snapshot" ]; then
+    offhost_disk_snapshot "${offhost_a}" "${offhost_b}"
+  else
+    offhost_blob "${offhost_a}" "${offhost_b}"
+  fi
 fi
 
 # ── 4. RECLAIM ───────────────────────────────────────────────────────────────────────────────

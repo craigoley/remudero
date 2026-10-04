@@ -8916,6 +8916,8 @@ export interface SweepDeps {
    *  seed is untouched — only the `await` moves into {@link drainDetachedSweepActions}. NOT AN
    *  ADMISSION CHANGE. */
   detachFixWait?: boolean;
+  /** W1-T5491: the light pass owns this review promise and releases its reservation on settlement. */
+  detachReviewWait?: (work: Promise<void>) => void;
   /** THE ABSENT-CHECK-SUITE REMEDY (W1-T186 follow-up). Pushes an EMPTY commit to the PR's own
    *  branch, minting a fresh head sha, and returns it. Omitted, the lane stands down and the
    *  ordinary escalation runs — the stand-down is named on the disposed line, never silent. */
@@ -12431,6 +12433,10 @@ export async function runSweep(
       );
       return;
     }
+    if (deps.detachReviewWait) {
+      finalizeDisposition(job.index, job.pr, jobDisposition, job.reason, job.question,
+        true, false, undefined, undefined, undefined, undefined, undefined);
+    }
     const repairCapacity = repairAdmissionTelemetry?.();
     if (deps.repairAdmissionSurface && repairCapacity) {
       log("sweep.review_started", {
@@ -12511,7 +12517,7 @@ export async function runSweep(
         // failure the row just above establishes a bounded retry clock.
         claim.release();
       }
-      finalizeDisposition(
+      if (!deps.detachReviewWait) finalizeDisposition(
         job.index,
         job.pr,
         jobDisposition,
@@ -12536,7 +12542,12 @@ export async function runSweep(
       while (true) {
         const job = takeNextReview();
         if (job === undefined) return;
-        await trackInFlightReview(runReview(job));
+        const work = trackInFlightReview(runReview(job));
+        if (deps.detachReviewWait) {
+          deps.detachReviewWait(work);
+          return;
+        }
+        await work;
       }
     }),
   );
@@ -12721,6 +12732,19 @@ export async function runSweepLightPass(
   lightPassSpawningReservations += spawning.length;
   lightPassPlanFilingReservations += planFilings.length;
   for (const pr of [...spawning, ...planFilings]) lightPassReservedHeads.add(lightPassHeadKey(pr));
+  const spawningNumbers = new Set(spawning.map((pr) => pr.prNumber));
+  const releases = new Map<number, () => void>();
+  const detachedNumbers = new Set<number>();
+  for (const pr of [...spawning, ...planFilings]) {
+    let released = false;
+    releases.set(pr.prNumber, () => {
+      if (released) return;
+      released = true;
+      if (spawningNumbers.has(pr.prNumber)) lightPassSpawningReservations--;
+      else lightPassPlanFilingReservations--;
+      lightPassReservedHeads.delete(lightPassHeadKey(pr));
+    });
+  }
   try {
   // W1-T2931 — one host budget, with review/merge work served before new repair work. The light
   // pass still reconciles every PR concurrently; only the expensive fix-dispatch spending point
@@ -12752,7 +12776,7 @@ export async function runSweepLightPass(
       .map((pr) => pr.prNumber),
   );
   const admittedNumbers = spawning.map((p) => `#${p.prNumber}`).join(", ");
-  return await Promise.all(
+  const summaries = await Promise.all(
     openPrs.map((pr) => {
       const baseActionable = deps.actionable;
       const baseStandDownReasonFor = deps.standDownReasonFor;
@@ -12791,13 +12815,28 @@ export async function runSweepLightPass(
                         (admittedNumbers ? `; admitted ${admittedNumbers} ahead` : ""))
                   : baseStandDownReasonFor?.(d),
             };
-      return runSweep([pr], scopedDeps, policy);
+      if (spawningNumbers.has(pr.prNumber)) {
+        scopedDeps.detachReviewWait = (work) => {
+          detachedNumbers.add(pr.prNumber);
+          void work.finally(releases.get(pr.prNumber)).catch((error) => {
+            deps.log?.("sweep.post_review.failed", {
+              pr_number: pr.prNumber, head_sha: pr.headSha, error: String(error),
+            });
+          });
+        };
+      }
+      return runSweep([pr], scopedDeps, policy).finally(() => {
+        if (!detachedNumbers.has(pr.prNumber)) releases.get(pr.prNumber)?.();
+      });
     }),
   );
+  // Let completed effects release their capacity before a caller starts the next pass.
+  if (detachedNumbers.size > 0) await new Promise<void>((resolve) => setImmediate(resolve));
+  return summaries;
   } finally {
-    lightPassSpawningReservations -= spawning.length;
-    lightPassPlanFilingReservations -= planFilings.length;
-    for (const pr of [...spawning, ...planFilings]) lightPassReservedHeads.delete(lightPassHeadKey(pr));
+    for (const [number, release] of releases) {
+      if (!detachedNumbers.has(number)) release();
+    }
   }
 }
 
