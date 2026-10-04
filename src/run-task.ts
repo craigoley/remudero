@@ -1367,6 +1367,9 @@ import {
 // W1-T3506: the pure write-boundary refusal (W1-T3389) `runFixRung`'s acceptance-gate body repair
 // must actually CALL before `updatePrBody`, not merely a capability sitting next to it unwired.
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "./lib/body-repair.js";
+import { diagnoseBodyDefects } from "./lib/body-repair.js";
+import { criterionFieldTampered, filingSelfCreditCheck } from "./lib/review.js";
+import { planPrPreflightAtCommitAsync } from "./lib/plan-pr-emitter.js";
 // receipt.js / ledger-replay.js: only receiptCommand/replayCommand read these, and both moved to
 // src/lib/report-commands.ts (W1-T2888), which imports them directly.
 import {
@@ -1524,6 +1527,7 @@ import {
   type MemoryGovernorResult,
   type MergeConflictEvidence,
   type OpenPrView,
+  type PlanScopedFixRoundInput,
   type ReviewDispatchMode,
   type ReviewReuseInputs,
   type RollupCheckEntry,
@@ -2249,6 +2253,8 @@ export function buildSweepEffects(
     createFixRungWorktreeImpl: createFixRungWorktreeWithToolchain,
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit,
     runFixRungImpl: runFixRung,
+    runPlanScopedFixRoundImpl: runPlanScopedFixRound,
+    materializePlanRoundWorktreeImpl: materializePlanRoundWorktree,
     pushFixRoundImpl: pushFixRound,
     buildFixRungDispatchArgsImpl: buildFixRungDispatchArgs,
     openTaskIdsFromPlanImpl: openTaskIdsFromPlan,
@@ -5185,6 +5191,130 @@ export function acceptanceGateBodyRepair(
   const check = acceptanceAuthorTimeCheck(body);
   if (check.ok || (check.defect !== "no-header" && check.defect !== "empty-proofs")) return undefined;
   return { defect: check.defect, repairedBody: ensureJudgeableBody(body, fallback) };
+}
+
+/** W1-T5543: preserve the prior head's criterion surface, including block scalar continuations. */
+function untouchedPlanCriterion(roundDiff: string, priorDiff: string, path: string): boolean {
+  if (!criterionFieldTampered(roundDiff)) return false;
+  const modified = new Set<number>();
+  let line = 0;
+  for (const text of priorDiff.split("\n")) {
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(text);
+    if (hunk) line = Number(hunk[1]);
+    else if (text.startsWith("+") && !text.startsWith("+++")) modified.add(line++);
+    else if (text.startsWith(" ")) line++;
+  }
+  const header = `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n`;
+  for (const hunk of roundDiff.split(/(?=^@@ )/m).slice(1)) {
+    if (!criterionFieldTampered(header + hunk)) continue;
+    const start = /^@@ -(\d+)/.exec(hunk);
+    let oldLine = Number(start?.[1]);
+    let removed = 0;
+    let added = 0;
+    for (const text of hunk.split("\n").slice(1)) {
+      if (text.startsWith("-")) {
+        if (!modified.has(oldLine)) return true;
+        removed++;
+        oldLine++;
+      } else if (text.startsWith("+")) added++;
+      else if (text.startsWith(" ")) oldLine++;
+    }
+    if (removed === 0 || added > removed) return true;
+  }
+  return false;
+}
+
+export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
+  const { pr, deps, worktreePath } = input;
+  const git = deps.runGit ?? ((args: string[]) => execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" }));
+  const preflight = deps.preflight ?? planPrPreflightAtCommitAsync;
+  const files = input.task.files.filter((path) => isInPlanScope(path) && !path.split("/").includes(".."));
+  let roundId: string | undefined;
+  const roundFields = () => ({ task_id: input.task.id, pr_number: pr.prNumber, head_sha: pr.headSha,
+    round_id: roundId, strike: pr.priorStrikes + 1, mode: "plan-gate" });
+  const refuse = (reason: string, verdict?: PlanPrPreflightResult) => {
+    if (roundId) {
+      deps.log("fix.commit_refused", { ...roundFields(), reason });
+      deps.log("fix.done", { ...roundFields(), subtype: "commit_refused" });
+    }
+    return { outcome: "refused" as const, reason, preflight: verdict };
+  };
+  let metadata = { title: input.title, body: input.body };
+  try {
+    if (files.length === 0) return refuse("the filing has no stageable plan paths");
+    if (git(["rev-parse", "HEAD"]).trim() !== pr.headSha) return refuse("the plan round head moved before dispatch");
+    const initial = await preflight(worktreePath, pr.headSha, metadata);
+    const existing = new Set(files.filter((path) => git(["ls-tree", "--name-only", "origin/main", "--", path]).trim() !== ""));
+    const introduced = files.filter((path) => !existing.has(path) && /^plan\/tasks\.d\/.*\.ya?ml$/.test(path))
+      .flatMap((path) => [...git(["show", `${pr.headSha}:${path}`]).matchAll(/^\s*-?\s*id:\s*(\S+)/gm)].map((m) => m[1]!));
+    let repairedBody = metadata.body;
+    const selfCredit = filingSelfCreditCheck(repairedBody, introduced);
+    if (!selfCredit.ok) repairedBody = repairedBody.replace(/^Remudero-Task:[ \t]*(\S+)[ \t]*(?:\r?\n|$)/gm,
+      (line, id: string) => id === selfCredit.taskId ? "" : line).trimEnd();
+    const structural = acceptanceGateBodyRepair(repairedBody, introduced.length ? filingAcceptanceCriteria(introduced, files) : undefined);
+    if (structural) repairedBody = structural.repairedBody;
+    const defects = diagnoseBodyDefects(repairedBody, parseAcceptanceBlock(repairedBody), { execProof: deps.execProof ?? execGrepProofInWorktree(worktreePath) });
+    for (const defect of defects) {
+      if (defect.kind !== "wrapped-proof" || !defect.repair || !defect.criterion) continue;
+      const proof = parseAcceptanceBlock(repairedBody)[defect.criterion - 1]?.proof;
+      if (proof) repairedBody = repairedBody.replace(proof, defect.repair);
+    }
+    if (repairedBody !== metadata.body) {
+      const candidate = { ...metadata, body: repairedBody };
+      const verdict = await preflight(worktreePath, pr.headSha, candidate);
+      if (!acceptanceAuthorTimeCheck(repairedBody).ok || !filingSelfCreditCheck(repairedBody, introduced).ok) return refuse("the repaired filing body fails author-time acceptance", verdict);
+      if (verdict.ok && verdict.unreadable.length === 0) {
+        await deps.updateMetadata(candidate);
+        return { outcome: "metadata-repaired", headSha: pr.headSha, preflight: verdict };
+      }
+      metadata = candidate;
+    }
+    roundId = `${input.runId ?? input.task.id}:${pr.priorStrikes + 1}:${systemClock.now()}`;
+    deps.log("fix.dispatch", { ...roundFields(), verdict_regime: "executed" });
+    const report = await deps.spawn(renderFixPrompt({ task: { ...input.task, files }, round: 1, branch: pr.headRefName!,
+      harnessCommits: true, evidence: { planGateFindings: [...initial.failures, ...initial.unreadable], ciFailures: pr.ciFailures,
+        constraint: input.lastRefusal } }));
+    if (git(["rev-parse", "HEAD"]).trim() !== pr.headSha) return refuse("the worker moved the plan round head");
+    const changed = workerChangedPaths(git(["status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL]));
+    const outside = changed.filter((path) => !files.includes(path));
+    if (outside.length) return refuse(`plan round changed paths outside the PR's own plan paths: ${outside.join(", ")}`);
+    for (const path of changed.filter((p) => existing.has(p))) {
+      const diff = git(["diff", "HEAD", "--", path]);
+      const prior = git(["diff", "--unified=0", `origin/main...${pr.headSha}`, "--", path]);
+      if (untouchedPlanCriterion(diff, prior, path)) return refuse(`plan round changed an untouched criterion in ${path}`);
+    }
+    const proposedTitle = /^PR_TITLE:[ \t]*(.+)$/m.exec(report)?.[1];
+    const proposedAcceptance = /^PR_ACCEPTANCE:[ \t]*\r?\n([\s\S]*?)^END_PR_ACCEPTANCE[ \t]*$/m.exec(report)?.[1];
+    if (proposedTitle) metadata.title = proposedTitle.trim();
+    if (proposedAcceptance) {
+      const check = acceptanceAuthorTimeCheck(proposedAcceptance);
+      if (!check.ok) return refuse(check.message);
+      metadata.body = replaceAcceptanceBlock(metadata.body, parseAcceptanceBlock(proposedAcceptance));
+    }
+    if (!filingSelfCreditCheck(metadata.body, introduced).ok || !acceptanceAuthorTimeCheck(metadata.body).ok) return refuse("the proposed filing body fails author-time acceptance");
+    let sha = pr.headSha;
+    if (changed.length) {
+      const message = parseReport(report)?.commitMessage;
+      if (!message || checkCommitMessage(message).length) return refuse("the plan round needs a valid COMMIT_MESSAGE");
+      git(["add", "-A", "--", ...changed]);
+      git(["commit", "-m", message]);
+      sha = git(["rev-parse", "HEAD"]).trim();
+    } else if (metadata.title === input.title && metadata.body === input.body) return refuse("the worker changed nothing");
+    const verdict = await preflight(worktreePath, sha, metadata);
+    if (!verdict.ok || verdict.unreadable.length) return refuse((verdict.failures[0] ?? verdict.unreadable[0])!.firstLine, verdict);
+    if (metadata.title !== input.title || metadata.body !== input.body) await deps.updateMetadata(metadata);
+    if (sha === pr.headSha) {
+      deps.log("fix.done", { ...roundFields(), subtype: "success" });
+      return { outcome: "metadata-repaired", headSha: sha, preflight: verdict };
+    }
+    await deps.push(sha);
+    deps.log("fix.done", { ...roundFields(), subtype: "success", pushed_head_sha: sha });
+    return { outcome: "pushed", headSha: sha, preflight: verdict };
+  } catch (error) {
+    const reason = String((error as Error)?.message ?? error);
+    deps.log("sweep.plan_round.error", { pr_number: pr.prNumber, head_sha: pr.headSha, reason });
+    return refuse(reason);
+  }
 }
 
 /**
@@ -18992,6 +19122,17 @@ export function materializeReviewWorktree(
   }
   registerReviewerCheckout(worktreePath);
   return { worktreePath };
+}
+
+export function materializePlanRoundWorktree(config: Config, repoDir: string, prNumber: number, headSha: string,
+  deps: Pick<ReviewCommandDeps, "materialize"> & { prepare?: FreshTreeReviewSeams["prepareWorktree"] } = {},
+): MaterializeReviewWorktreeResult {
+  const result = (deps.materialize ?? materializeReviewWorktree)(config, repoDir, prNumber, headSha);
+  if (result.worktreePath && !(deps.prepare ?? prepareWorktreeToolchain)(repoDir, result.worktreePath)) {
+    cleanupMaterializedWorktree(worktreeRemove, repoDir, result.worktreePath);
+    return { worktreePath: undefined, failure: { errorClass: "other", message: "plan round toolchain unavailable" } };
+  }
+  return result;
 }
 
 /** Best-effort removal of a worktree a materialization attempt itself just
