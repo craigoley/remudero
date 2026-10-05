@@ -1366,6 +1366,10 @@ interface InterphaseReviewClock {
    * consumed an event edge that the ordinary full-sweep gate still needs to reconcile, and how
    * many passes it admitted. */
   stop(): Promise<{ eventWakeSeen: boolean; passes: number }>;
+  /** W1-T5803: an event wake the caller's own sleep consumed, handed on so this clock passes for it. */
+  handWake(): void;
+  /** Passes admitted so far, read without stopping the clock. */
+  passCount(): number;
 }
 
 /**
@@ -1502,6 +1506,11 @@ export function startInterphaseReviewClock(
       if (activePasses.size > 0) await Promise.all(activePasses);
       return { eventWakeSeen, passes };
     },
+    handWake: () => {
+      eventWakeSeen = true;
+      eventWakePending = true;
+    },
+    passCount: () => passes,
   };
 }
 
@@ -2808,7 +2817,23 @@ export async function runDaemon(
   // W1-T4088: the same pattern — an operator's reply is answered within a poll interval.
   const inboxResponder = deps.inboxResponder ? startInboxResponder(deps.inboxResponder, pollIntervalMs, log) : undefined;
   const gardenerRef: { stop: () => void } = { stop: () => {} };
+  // W1-T5803 — ONE pause review clock spans consecutive paused ticks, so its interval accrues across
+  // them. A per-tick clock restarted its interval every tick and stop() won the race: live 2026-10-05,
+  // 33 paused ticks ran one pass. Stopped by the first unpaused tick, and by `summary` on every exit.
+  const pauseReview: { clock?: InterphaseReviewClock; reported: number } = { reported: 0 };
+  const reportPauseReviewPasses = (passes: number): void => {
+    if (passes > pauseReview.reported) log("daemon.pause.review_passes", { tick: ticks, passes: passes - pauseReview.reported });
+    pauseReview.reported = passes;
+  };
+  const stopPauseReviewClock = async (): Promise<void> => {
+    const clock = pauseReview.clock;
+    if (!clock) return;
+    pauseReview.clock = undefined;
+    reportPauseReviewPasses((await clock.stop()).passes);
+    pauseReview.reported = 0;
+  };
   const summary = async (stopReason: DaemonStopReason, stopDetail?: string): Promise<DaemonSummary> => {
+    await stopPauseReviewClock();
     prActionPumpRef.stop();
     plainBackfill?.stop();
     fleetLane?.stop();
@@ -3333,15 +3358,20 @@ export async function runDaemon(
         pauseHoldGovernorStates.set(pauseHold.holdId, holdState);
         await stepPauseHoldGovernor(pauseHold, holdState, deps, log);
       }
-      const pauseReviewClock = startInterphaseReviewClock(deps, pollIntervalMs, log, "pause");
+      const pauseReviewClock = (pauseReview.clock ??= startInterphaseReviewClock(deps, pollIntervalMs, log, "pause"));
+      let slept: Awaited<ReturnType<typeof sleepUntilSweepWake>>;
       try {
-        await sleepUntilSweepWake(pollIntervalMs);
-      } finally {
-        const { passes } = await pauseReviewClock.stop();
-        if (passes > 0) log("daemon.pause.review_passes", { tick: ticks, passes });
+        slept = await sleepUntilSweepWake(pollIntervalMs);
+      } catch (e) {
+        await stopPauseReviewClock();
+        throw e;
       }
+      // W1-T5803: `wake()` resolves only its FIRST waiter, often this sleep — hand the event to the clock.
+      if (slept === "wake") pauseReviewClock.handWake();
+      reportPauseReviewPasses(pauseReviewClock.passCount());
       continue;
     }
+    await stopPauseReviewClock();
     // Self-freshness, checked directly after both operator holds and before headroom and dispatch, so
     // origin/main advancing past this process's boot sha is noticed on the very next tick where the
     // daemon is neither stopped nor paused. Never interrupts in-flight work (W1-T126, W1-T936).
