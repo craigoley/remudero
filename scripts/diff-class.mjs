@@ -8,7 +8,8 @@
 // THREE BASE CLASSES: PLAN_ONLY (every file in plan scope), DOCS_ONLY (every file in plan scope or
 // under `docs/`), SOURCE (anything else, including an empty or unreadable list). `classify()`
 // never throws and fails closed to SOURCE, never PLAN_ONLY, on anything undeterminable.
-// `classifyCoverage()` additionally returns TEST_ONLY when every changed path is under `test/`;
+// `classifyCoverage()` additionally returns TEST_ONLY when every changed path is under `test/`, and
+// NO_SRC (W1-T5699) when none is under `src/` or is coverage/toolchain config (`steersCoverage`);
 // it still fails closed to SOURCE for an empty, unreadable, or mixed list.
 //
 // USAGE: `--changed-files <path>` classifies a newline-separated file list (`-` reads stdin);
@@ -49,8 +50,25 @@ export const CLASSES = Object.freeze({
   SOURCE: "SOURCE",
 });
 
-/** The coverage lane's extra, safe-to-skip class. It is deliberately not a base class. */
-export const COVERAGE_CLASSES = Object.freeze({ ...CLASSES, TEST_ONLY: "TEST_ONLY" });
+/** The coverage lane's extra, safe-to-skip classes. They are deliberately not base classes. */
+export const COVERAGE_CLASSES = Object.freeze({ ...CLASSES, TEST_ONLY: "TEST_ONLY", NO_SRC: "NO_SRC" });
+
+/**
+ * W1-T5699 — whether a changed path can move instrumented coverage: a src/ path, or config that
+ * steers the coverage run or its toolchain (package*.json, tsconfig*, .nvmrc, ci.yml, ci-gate.yml,
+ * the coverage gate scripts). A diff carrying one stays SOURCE; a non-string fails closed.
+ */
+export function steersCoverage(path) {
+  return (
+    typeof path !== "string" ||
+    path.startsWith("src/") ||
+    /(?:^|\/)(?:package[^/]*\.json|tsconfig[^/]*)$/.test(path) ||
+    path === ".nvmrc" ||
+    path === ".github/workflows/ci.yml" ||
+    path === ".github/workflows/ci-gate.yml" ||
+    /^scripts\/(?:diff-)?coverage[^/]*$/.test(path)
+  );
+}
 
 /**
  * Whether a repo-relative path counts as "docs" for DOCS_ONLY — the `docs/` prefix only, never a
@@ -147,6 +165,14 @@ export function classifyCoverage(files) {
     return {
       class: COVERAGE_CLASSES.TEST_ONLY,
       reason: `all ${files.length} changed file(s) are under test/ — instrumented source coverage cannot move`,
+    };
+  }
+  // W1-T5699: no src/ path and no coverage or toolchain config — diff coverage of src/ is empty by
+  // construction. ci-shard and test-slow-shard then run the FULL uninstrumented fast and slow tiers.
+  if (!files.some(steersCoverage)) {
+    return {
+      class: COVERAGE_CLASSES.NO_SRC,
+      reason: `none of the ${files.length} changed file(s) is under src/ or is coverage/toolchain config — the full suite runs uninstrumented`,
     };
   }
   return base;
