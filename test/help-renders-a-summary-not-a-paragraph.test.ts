@@ -134,7 +134,7 @@ test("commandHelp(spec) contains that command's full detail verbatim, for every 
 // this reviewed inventory as part of the command addition.
 const BASELINE_COMMAND_NAMES = [
   "alert-fix", "approve", "authority", "autonomy-rate", "away", "benchmark-aa", "benchmark-paid-pilot", "board", "bundle", "caller-sweep", "case-file", "check-acceptance", "check-proof",
-  "census-membership", "ci-failures", "ci-learning", "correct", "coverage-improve", "daemon", "daemon-plist", "decline", "dep-review",
+  "census-membership", "ci-failures", "ci-learning", "claim", "correct", "coverage-improve", "daemon", "daemon-plist", "decline", "dep-review",
   "deploy", "deploy-plist", "deploy-run", "digest", "digest-plist", "doctor", "down", "drain",
   "emissions", "escalate", "feedback", "feedback-reconcile", "field-trials", "fix", "hand-runs",
   "hand-worktree",
@@ -176,6 +176,7 @@ const BASELINE_COMMAND_NAMES = [
 // Phase 1 P1-04: `read-model` — rebuild, status and kill switches of serve's read model — joins the registry.
 // W1-T5114: `garden` — one pass of one registered gardener, the daemon's off-loop child — joins the registry.
 // W1-T5687: `progress-watchdog` — the read-only progress verdict of a stalled sweep — joins the registry.
+// W1-T5859: `claim` — a hand build takes the fleet's dispatch claim (`rmd claim <task-id>`) — joins the registry.
 // W1-T5533: `hand-worktree` — a hand build's run-<taskId>-<epochMs> worktree in one command — joins the registry.
 test("COMMANDS carries the reviewed command-name inventory", () => {
   // The reviewed edit is the NAME added to the list above, beside its line of provenance. No count

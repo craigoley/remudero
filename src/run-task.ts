@@ -51153,6 +51153,75 @@ export function progressWatchdogCommand(
   return 0;
 }
 
+export interface ClaimVerbOpts {
+  reserver?: DispatchClaimReserver;
+  isPlanned?: (taskId: string) => boolean;
+  localHost?: string;
+}
+
+export function plannedOnOriginMain(taskId: string, dir: string = repoRoot): boolean {
+  const git = (args: string[]) => spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" });
+  git(["fetch", "--quiet", "origin", "main"]);
+  const shards = git(["ls-tree", "--name-only", "origin/main:plan/tasks.d"]);
+  if (shards.status === 0 && (shards.stdout ?? "").split("\n").some((n) => n.startsWith(`${taskId}-`))) return true;
+  const mono = git(["show", "origin/main:plan/tasks.yaml"]);
+  const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return mono.status === 0 && new RegExp(`^\\s*-?\\s*id:\\s*"?${escaped}"?\\s*$`, "m").test(mono.stdout ?? "");
+}
+
+export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
+  const taskId = rest[0];
+  const badArg = taskId === undefined || taskId.startsWith("-")
+    ? "rmd claim: a task id is required"
+    : unknownArgError("claim", rest.slice(1), [], ["--drop"]);
+  if (badArg !== null) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(taskId)) {
+    console.error(`rmd claim: '${taskId}' is not a task id`);
+    return 2;
+  }
+  if (!(opts.isPlanned ?? plannedOnOriginMain)(taskId)) {
+    console.error(`rmd claim: ${taskId} is not in the plan on origin/main — refusing to claim an unplanned id`);
+    return 1;
+  }
+  const reserver = opts.reserver ?? dispatchClaimReserverFor(repoRoot);
+  const ref = dispatchClaimRef(taskId);
+  if (rest.includes("--drop")) {
+    const sha = reserver.holder(taskId);
+    if (!sha) {
+      console.error(`rmd claim: ${ref} is not held — nothing to drop`);
+      return 1;
+    }
+    const identity = parseClaimAnchorMessage(reserver.anchorMessage?.(taskId));
+    const localHost = opts.localHost ?? hostname();
+    if (!identity || identity.host !== localHost) {
+      const who = identity ? `${identity.pid}@${identity.host}` : "an unreadable anchor";
+      console.error(`rmd claim: ${ref} is held by ${who}, not by this host (${localHost}) — refusing to drop another host's claim`);
+      return 1;
+    }
+    if (!reserver.drop(taskId, { expect: sha })) {
+      console.error(`rmd claim: could not drop ${ref} (it moved or origin is unreachable)`);
+      return 1;
+    }
+    console.log(`dropped ${ref}`);
+    return 0;
+  }
+  const outcome = reserver.attempt(taskId, reserver.mintAnchor());
+  const decision = decideDispatchClaim(outcome, {
+    taskId,
+    holder: outcome === "taken" ? reserver.holder(taskId) : undefined,
+    stderr: outcome === "unreachable" ? reserver.lastAttemptStderr?.() : undefined,
+  });
+  if (!decision.proceed) {
+    console.error(`rmd claim: ${decision.reason}`);
+    return 1;
+  }
+  console.log(`claimed ${ref}`);
+  return 0;
+}
+
 const COMMANDS: readonly CommandSpec[] = [
   {
     name: "run-task",
@@ -51282,6 +51351,12 @@ const COMMANDS: readonly CommandSpec[] = [
     syntax: "rmd progress-watchdog [--json] [--state-root <dir>]",
     summary: "Name a stalled sweep by its progress (sweep.pass, review, merge), not its daemon pulse.",
     detail: "W1-T5687: reads the deduplicated union of every ledger archive and the live ledger and prints one verdict: PROGRESSING, IDLE (no open PRs), STALLED (newest progress row over 15 min old: capture-diagnostics; over 30 min: recycle), CRASH_LOOP (3 or more daemon.paths boots in 15 min that never reached daemon.boot: hold-revive) or UNKNOWN (no rows or no open-PR count; never a silent none). Progress is ONLY a sweep.pass, review.posted or verdict.merged row: daemon.* and runtime.* rows are a pulse, not progress, which is why the 318-minute crash loop of 2026-10-03 read live to every daemon-prefix reader. The open-PR count is the newest sweep.pass row's enumerated field. On capture-diagnostics it writes one bundle (ledger tail, docker ps, the tenant's docker logs --tail, the verdict) under <state>/diagnostics/progress-<ts>/, at most one per 15 min. READ-ONLY: it recycles nothing; the host launcher acting on recycle / hold-revive is W1-T5688.",
+  },
+  {
+    name: "claim",
+    syntax: "rmd claim <task-id> [--drop]",
+    summary: "Take (or with --drop, drop) the dispatch claim the fleet honours, for a hand-build.",
+    detail: "W1-T5859: mints and pushes refs/rmd-dispatch/<task-id> through the same git-ref create-if-absent claim the fleet's own lanes take, with the same anchor message, so a hand-built task is visible to dispatch before its branch or PR is. Refuses a task id that is not in the plan on origin/main. Prints `claimed refs/rmd-dispatch/<id>` and exits 0 when created; exits 1 naming the holder when the claim is taken, and exits 1 without claiming when origin is unreachable (fail-closed). --drop removes the claim only when its anchor's host is this host (an abandoned hand-build), never another host's. A claim needs no release verb: the existing release arms drop it once the task has landed.",
   },
   {
     name: "routing-ab",
@@ -52314,6 +52389,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
   ["routing-ab", async (rest) => await routingAbCommand(rest)],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
+  ["claim", (rest) => claimCommand(rest)],
   ["impossible-canary", async (rest) => await impossibleCanaryCommand(rest, (input) => runImpossibleCanary(input))],
   ["benchmark-aa", async (rest) => rest[0] === "prospective" ? await prospectiveAaCommand(rest.slice(1), (input) => runProspectiveAa(input))
     : rest[0] === "readiness" ? await benchmarkAaReadinessCommand(rest.slice(1),
