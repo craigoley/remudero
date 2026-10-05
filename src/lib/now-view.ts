@@ -830,8 +830,10 @@ export function createNowView(opts: NowViewOptions): {
         statSync(path);
         return true;
       } catch (error) {
+        // ENOENT is the marker's real absence; any other failure is unknown, named, and never read as absent.
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-        unreadable.push(`${basename(path)}: ${(error as Error).message}`);
+        const reason = `${basename(path)}: ${(error as Error).message}`;
+        unreadable.push(reason);
         return undefined;
       }
     };
