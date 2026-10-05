@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log 17:44Z, the #9091 daemon loop stall"
   plan_refs: [W1-T2509, W1-T3104, W1-T192, W1-T5481, W1-T5620]
   files: [src/run-task.ts, test/no-daemon-loop-path-builds-the-unbatched-gateway.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

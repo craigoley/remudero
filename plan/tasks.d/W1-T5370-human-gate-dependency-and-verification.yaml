@@ -12,7 +12,7 @@
   origin: "2026-10-02 operator approved the human-gate implementation follow-ups"
   plan_refs: [W1-T5021, W1-T3188]
   files: [src/lib/human-gate.ts, src/lib/now-view.ts, src/lib/verify-human-judge.ts, test/human-gate-dependency-verification.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at aa981fe0c9bd37cb77246eec9609496826bcdf25: W1-T5021's shipped

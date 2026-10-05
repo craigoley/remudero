@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: #9267 disposed 'log NOT read ... FAILED (ENOBUFS: spawnSync gh ENOBUFS)' and stayed red until a hand fix"
   plan_refs: [W1-T5283, W1-T2733, W1-T2298, W1-T2291, W1-T3782]
   files: [src/run-task.ts, src/lib/github-transport.ts, test/a-large-ci-job-log-is-streamed-and-keeps-its-failing-region.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

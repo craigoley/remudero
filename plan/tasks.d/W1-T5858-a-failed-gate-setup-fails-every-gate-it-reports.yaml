@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5522 builder's follow-up; workflow edit is an operator build (W1-T5351)"
   plan_refs: [W1-T4399, W1-T5522, W1-T5695, W1-T2428]
   files: [.github/workflows/ci.yml, test/a-failed-gate-setup-fails-every-gate-it-reports.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

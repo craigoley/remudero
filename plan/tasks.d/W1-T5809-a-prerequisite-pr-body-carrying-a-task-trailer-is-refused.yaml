@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5779 (#9231) follow-up"
   plan_refs: [W1-T5779, W1-T2297, W1-T2436]
   files: [src/run-task.ts, test/a-prerequisite-pr-body-carrying-a-task-trailer-is-refused.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

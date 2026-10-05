@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: test/worktree-base-currency-healthy.test.ts builds `${repo.dir}-wt` outside W1-T5550's census"
   plan_refs: [W1-T5550, W1-T5513, W1-T405]
   files: [test/worktree-base-currency-healthy.test.ts, test/worktree-add-async.test.ts, test/helpers/git-repo.test.ts, test/a-killed-test-run-leaves-no-orphaned-worktree-or-setup-dir.test.ts, test/no-test-worktree-outlives-its-fixture.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

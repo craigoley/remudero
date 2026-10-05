@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: coordinator item 19 (root-cause the >60 s in-container git fetch)"
   plan_refs: [W1-T5282, W1-T5771, W1-T5745, W1-T3116, W1-T2529]
   files: [src/lib/git-fetch-retry.ts, src/lib/self-sync.ts, test/a-freshness-fetch-asks-only-for-main-and-names-where-it-stalled.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

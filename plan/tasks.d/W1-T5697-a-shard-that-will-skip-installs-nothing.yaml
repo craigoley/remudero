@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 5(a), CI class v2; a workflow edit is an operator build (W1-T5351)"
   plan_refs: [W1-T3207, W1-T2428, W1-T5515, W1-T5522, W1-T5351, W1-T5700]
   files: [.github/workflows/ci.yml, test/a-shard-that-will-skip-installs-nothing.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

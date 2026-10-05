@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: #9253 plan-scoped fix round refused by its own preflight (ledger fix.commit_refused 06:31:06Z)"
   plan_refs: [W1-T5543, W1-T5521, W1-T5405, W1-T3070, W1-T4414]
   files: [src/lib/plan-pr-emitter.ts, src/run-task.ts, test/a-plan-scoped-fix-round-reads-task-ids-with-its-own-head-ref.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

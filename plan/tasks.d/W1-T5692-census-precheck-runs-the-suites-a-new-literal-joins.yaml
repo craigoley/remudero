@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 3; the operator delegated the admission design ('think about the best way')"
   plan_refs: [W1-T5617, W1-T5616, W1-T5663, W1-T5666, W1-T3225, W1-T464, W1-T4656, W1-T5693]
   files: [scripts/census-precheck.mjs, scripts/census-precheck-parity-baseline.json, package.json, test/census-precheck-runs-the-suites-a-new-literal-joins.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5704 (#9246) follow-up; workflow edit is an operator build (W1-T5351)"
   plan_refs: [W1-T5704, W1-T3030, W1-T5351, W1-T5705]
   files: [.github/workflows/coverage-nightly.yml, test/a-recovered-scheduled-job-leaves-its-escalation-open-forever.test.ts, test/a-red-coverage-nightly-run-raises-a-needs-human-issue.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
