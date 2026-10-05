@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { fixedClock } from "./clock.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 // The DEFAULT export — a mutable object — so a test's `t.mock.method` can intercept the `fs` calls below. Named
 // bindings off `node:fs` are non-configurable, so mocking them throws.
@@ -3012,7 +3013,7 @@ function carryRatificationRationale(fragmentYaml: string, proposal: Ratification
   // Materializers rebuild payloads from fragment/id/stamp, so provenance must ride the fragment (W1-T5541).
   const run = /\(run ([^,)]+)/.exec(proposal.summary)?.[1];
   const epoch = /(?:^|-)(\d{13})(?:-|$)/.exec(run ?? proposal.id)?.[1];
-  const date = epoch ? new Date(Number(epoch)).toISOString().slice(0, 10) : /RATIFIED (\d{4}-\d{2}-\d{2})/.exec(stampLine)?.[1];
+  const date = epoch ? fixedClock(Number(epoch)).iso().slice(0, 10) : /RATIFIED (\d{4}-\d{2}-\d{2})/.exec(stampLine)?.[1];
   const source = proposal.originatingItemId ?? /https:\/\/github\.com\/[^\s,)]+\/pull\/\d+/.exec(proposal.summary)?.[0] ?? run ?? proposal.id;
   const provenance = `From the ${date ? `${date} ` : ""}${proposal.id.startsWith("followup:") ? "follow-up" : "proposal"} on ${source}, ratified via rmd approve:`;
   const document = parseDocument(fragmentYaml);
