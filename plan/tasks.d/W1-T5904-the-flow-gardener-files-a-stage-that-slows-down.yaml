@@ -1,0 +1,41 @@
+- id: W1-T5904
+  title: "THE FLOW GARDENER FILES A STAGE THAT SLOWS DOWN — PR time-to-merge, CI wall-clock, review-queue wait, ready-to-merged wait, pushes per PR and branch updates are all derivable from the ledger and GitHub, but nobody measures them until an operator asks why PRs feel slow; a daily flow report with per-class baselines would file the regression itself"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — a measured flow stage that regresses against its baseline files one follow-up
+  band_meaning: span
+  origin: "operator session 2026-10-05: throughput research ('lean into automated flow and self improvement')"
+  plan_refs: [W1-T5900, W1-T5901, W1-T5903, W1-T5825, W1-T4780]
+  files: [src/lib/flow-gardener.ts, src/lib/garden-registry.ts, test/the-flow-gardener-files-a-stage-that-slows-down.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    2026-10-05: the operator asked why PRs "still take a while". The answer needed a hand-built
+    measurement over the day's 120 merged PRs: plan PRs median 25 / p90 93 min (10-36 min of it
+    idle after green and reviewed), code PRs median 39 / p90 109 min (coverage shards 15-21 min per
+    cycle, shard 1 slowest; 13 main-merges and 27 extra fix pushes over 60 PRs; 162 branch updates
+    in the ledger). Every number came from rows the fleet already writes (`sweep.disposed`
+    blocker_since/age, `review.posted`, `automerge.*`, `sweep.update_branch.*`, `fix.*`) plus
+    GitHub check-run timings. The gardener pattern (W1-T4780, W1-T5825) already judges its own
+    actions over a metric and files follow-ups.
+  design: |
+    A gardener that, once a day, computes per PR class (plan / code / gardener) and per stage
+    (open->CI green, CI green->review posted, ready->merged, pushes per PR, branch updates per PR,
+    fix rounds per PR) the p50 and p90 over the last 24 h and a 7-day baseline, writes one
+    `flow.report` ledger row and a markdown summary, and files ONE follow-up (through the existing
+    inbox follow-up path) for each stage whose p50 exceeds its baseline by a stated factor (tagged
+    BACKSTOP), naming the stage, the class, the numbers and the three slowest PRs. A stage already
+    covered by an open follow-up is not re-filed. Register it in src/lib/garden-registry.ts beside
+    runSelectorShadowGardener so the daemon's garden cadence runs it.
+  acceptance:
+    - claim: "over a fixture ledger the flow gardener reports per-class stage p50/p90 and baselines, files exactly one follow-up for a plan-class ready-to-merged stage that doubled against its baseline naming the three slowest PRs, files nothing for a stable stage, and does not re-file a stage with an open follow-up"
+      proof: "unit test: test/the-flow-gardener-files-a-stage-that-slows-down.test.ts"
+    - claim: "the daemon's garden registry runs the flow gardener"
+      proof: "grep: runFlowGardener( in src/lib/garden-registry.ts"
+  falsifier: |
+    Never compare to the baseline: the doubled stage files nothing and the test fails.

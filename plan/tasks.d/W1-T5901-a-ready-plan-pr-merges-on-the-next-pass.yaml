@@ -1,0 +1,39 @@
+- id: W1-T5901
+  title: "A READY PLAN PR MERGES ON THE NEXT PASS — a plan PR is never armed for auto-merge (W1-T5615), so once green and reviewed it waits for the next FULL sweep's direct merge; light passes dispose it mergeable/awaiting-arm and defer, and the measured wait is 10-36 min on a 25-min median plan PR"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — a light pass may take the plan-PR direct-merge path a full sweep takes
+  band_meaning: span
+  origin: "operator session 2026-10-05: throughput research (plan updates and task adds lack a fast lane)"
+  plan_refs: [W1-T5615, W1-T5748, W1-T5472, W1-T4405]
+  files: [src/lib/sweep.ts, test/a-ready-plan-pr-merges-on-the-next-pass.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-05 over 32 plan PRs merged in the prior 24 h: time to merge median 25 min,
+    p90 93 min. Per-PR stage split for 12 of them: CI done at 7-12 min, review posted at 3-30 min,
+    and then 10-36 min more until merge with both already green. The ledger shows why: each light
+    pass writes `sweep.disposed mergeable / awaiting-arm` with `stand_down_reason: deferred to
+    full sweep (light pass)`, and full sweeps ran at irregular 13-30 min intervals (e.g. 15:48,
+    16:04, then 16:2x, 16:5x). Code PRs do not pay this: the review lane arms GitHub auto-merge
+    and they merge within 0-2 min of green. A plan PR cannot be armed (W1-T5615: an armed plan PR
+    merges behind a sibling and can land a duplicate key), so it depends on the sweep's own direct
+    merge, which only the full pass runs. W1-T5748's `decidePlanPrMergeSafety` already makes that
+    direct merge safe when behind.
+  design: |
+    A light pass that disposes a PLAN PR mergeable/awaiting-arm runs the same direct-merge path
+    the full sweep runs (fresh mergeability read, W1-T5748 safety decision, update-then-merge when
+    behind), capped at one plan PR per light pass. Code PRs keep today's light-pass behaviour.
+    When the base branch requires a merge queue (W1-T4405's detection), the plan PR is enqueued
+    instead, as the full pass already does.
+  acceptance:
+    - claim: "a light pass that disposes a green, reviewed, MERGEABLE plan PR direct-merges it through the W1-T5748 safety decision, merges at most one plan PR per light pass, enqueues it when the base requires a merge queue, and leaves a code PR deferred as today"
+      proof: "unit test: test/a-ready-plan-pr-merges-on-the-next-pass.test.ts"
+  falsifier: |
+    Keep the light-pass deferral: the ready plan PR is not merged by the light pass and the test
+    fails.

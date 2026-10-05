@@ -1,6 +1,7 @@
 // W1-T5050 (arch Phase 4 P4-T11): the `workstreams` view answers GET /v1/operator-activity's body from the
 // projector's activity_ring, materialized in the read-model worker and debounced on ring inserts.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -12,6 +13,7 @@ import { createReadModelTicker, ledgerSource, type ReadModelInstanceState, type 
 import { makeTempDir } from "../src/lib/tmp.js";
 import type { ViewBodyEntry } from "../src/lib/views.js";
 import { createWorkstreamsView, WORKSTREAMS_DEBOUNCE_MS, WORKSTREAMS_VIEW_NAME, type WorkstreamsData } from "../src/lib/workstreams-view.js";
+import { switchViewsOn } from "./helpers/read-model-switches.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 
@@ -115,6 +117,7 @@ test("W1-T5050: the workstreams view equals the operator activity route over the
   const f = fixture(t);
   const view = createWorkstreamsView<ReadModelInstanceState>({ instances: f.instances, ledgerSource });
   const posted: ReadModelWorkerMessage[] = [];
+  switchViewsOn(f.stateDir, [WORKSTREAMS_VIEW_NAME]);
   const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [view], clock: movingClock(NOW), holder: "workstreams-test", oracle: "off", post: (m) => posted.push(m) });
   ticker.start();
   ticker.tick();
@@ -141,6 +144,7 @@ test("W1-T5050: a ring insert re-materializes the workstreams view once inside t
   const clock = movingClock(NOW);
   const view = createWorkstreamsView<ReadModelInstanceState>({ instances: f.instances, ledgerSource, log: (step) => step === "workstreams.built" && built.push(clock.now()) });
   const posted: ReadModelWorkerMessage[] = [];
+  switchViewsOn(f.stateDir, [WORKSTREAMS_VIEW_NAME]);
   const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [view], clock, holder: "workstreams-test", oracle: "off", post: (m) => posted.push(m) });
   t.after(() => ticker.release());
   ticker.start();
@@ -176,6 +180,7 @@ test("unit test: the workstreams shadow side reads the route's ledger union and 
   const widened = { name: view.name, version: view.version, materialize: (ctx: Parameters<typeof view.materialize>[0]) =>
     view.materialize({ ...ctx, instances: [...ctx.instances, { state: state("orphan") }, { state: state("ghost") }] }) };
   const posted: ReadModelWorkerMessage[] = [];
+  switchViewsOn(f.stateDir, [WORKSTREAMS_VIEW_NAME]);
   const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [widened], clock: movingClock(NOW), holder: "workstreams-test", oracle: "off", post: (m) => posted.push(m) });
   t.after(() => ticker.release());
   ticker.start();
@@ -192,4 +197,36 @@ test("unit test: the workstreams shadow side reads the route's ledger union and 
   assert.equal(((data.instances[0]!.activity as { items: unknown[] }).items).length > 0, true, "control: the compared body has items");
   assert.deepEqual(legacy.data, data, "the route's union read, up to the ring's newest row, is the ring's body");
   assert.equal(view.legacy("", NOW, { instances: [] }), undefined, "a body this view did not build has no legacy side");
+});
+
+test("unit test: same-millisecond rows of different steps and repositories, appended against their hash order, give the workstreams view the route's body", async (t) => {
+  const f = fixture(t);
+  // The 2026-10-05 shadow diffs: rows sharing one millisecond, numbered `:<n>` and ranked in file order by the
+  // route but in `h` order by a version-1 ring. Two of one step, task and run differ only by repository.
+  const at = iso(NOW - 30_000);
+  const tied = [
+    { ts: at, step: "serve.analytics_refresh.started", task_id: "SERVE", run_id: "SERVE-1", repository: "craigoley/remudero-site" },
+    { ts: at, step: "serve.analytics_refresh.started", task_id: "SERVE", run_id: "SERVE-1", repository: "craigoley/remudero" },
+    { ts: at, step: "board_gateway.fetch_bytes", task_id: "DAEMON", run_id: "DAEMON-1", repository: "craigoley/remudero-console" },
+    { ts: at, step: "board_snapshot.unchanged", task_id: "DAEMON", run_id: "DAEMON-1" },
+  ].map((row) => JSON.stringify(row));
+  const h = (line: string): bigint => createHash("sha1").update(line).digest().readBigInt64BE(0);
+  const byHash = [...tied].sort((a, b) => (h(a) < h(b) ? -1 : 1));
+  const appended = [...byHash].reverse();
+  assert.notDeepEqual(appended, byHash, "control: the file order is not the hash order");
+  // An exact duplicate line is one event: the route's union keeps it once, and so must the ring.
+  appendFileSync(f.ledgerPath, [...appended, appended[0]!].map((line) => `${line}\n`).join(""));
+  const view = createWorkstreamsView<ReadModelInstanceState>({ instances: f.instances, ledgerSource });
+  const posted: ReadModelWorkerMessage[] = [];
+  switchViewsOn(f.stateDir, [WORKSTREAMS_VIEW_NAME]);
+  const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [view], clock: movingClock(NOW), holder: "workstreams-test", oracle: "off", post: (m) => posted.push(m) });
+  t.after(() => ticker.release());
+  ticker.start();
+  ticker.tick();
+  const [body] = bodiesOf(posted);
+  const activity = (body!.body.data as WorkstreamsData).instances[0]!.activity as unknown as Record<string, unknown>;
+  const route = await routeBody(f);
+  const ties = (route.items as Array<{ id: string; observedAt: string }>).filter((i) => i.observedAt === at);
+  assert.equal(ties.length, tied.length, "positive control: every tied row, and its duplicate once, reaches the route");
+  assert.deepEqual(withoutProjectionTime(activity), withoutProjectionTime(route));
 });

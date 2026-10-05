@@ -136,6 +136,14 @@ export interface NowTask {
   verifyHumanPending?: true;
   escalation?: { title?: string; issueUrl?: string; unverified?: true; openedAt?: string };
   worker?: { servedModel?: string; requestedModel?: string };
+  /** The run's worker liveness, carried from {@link BoardRow.workerState}: the console's fleet map evidences a
+   *  worker process only from it (a phase or a model is task context, not process evidence). It moves only on a
+   *  `worker.state` transition, so it does not churn the ETag the way per-event activity would. */
+  workerState?: BoardRow["workerState"];
+  /** When the run went quiet; present only while `workerState` is `quiet` ({@link BoardRow.workerStateSince}). */
+  workerStateSince?: string;
+  /** The row is running only on an open PR's strength: no live lock and no recent activity ({@link BoardRow.processUnevidenced}). */
+  processUnevidenced?: true;
 }
 
 export interface NowGroups {
@@ -408,6 +416,9 @@ function nowTask(row: BoardRow): NowTask {
     ...(row.needsHuman ? { needsHuman: row.needsHuman } : {}), ...(row.verifyHumanPending ? { verifyHumanPending: row.verifyHumanPending } : {}),
     ...(escalation ? { escalation } : {}),
     ...(t?.servedModel || t?.requestedModel ? { worker: { ...(t.servedModel ? { servedModel: t.servedModel } : {}), ...(t.requestedModel ? { requestedModel: t.requestedModel } : {}) } } : {}),
+    ...(row.workerState ? { workerState: row.workerState } : {}),
+    ...(row.workerState === "quiet" && row.workerStateSince ? { workerStateSince: row.workerStateSince } : {}),
+    ...(row.processUnevidenced ? { processUnevidenced: true as const } : {}),
   };
 }
 
@@ -817,14 +828,16 @@ export function createNowView(opts: NowViewOptions): {
   const probeHost = (instance: NowInstance, isCore: boolean): NowHostProbe => defaultProbeHost(instance, isCore, clock, opts.hostProbe);
   const listGrilling = opts.listGrilling ?? ((instance: NowInstance) => listFeedback(instance.feedbackRoot!));
   const feedbackAge = opts.feedbackAgeObservation ? measureFeedbackAge(opts.feedbackAgeObservation.roots, opts.feedbackAgeObservation.window) : undefined;
-  /** Core's feedback dir and question store, so an answer landing in either re-materializes at once. */
+  /** Core's feedback dir and question store, so an answer landing in either re-materializes at once. NOT the
+   *  live ledger's mtime: every ledger row the pin and reviewer gates read already advances the projector
+   *  generation `step` keys on, so the mtime only added serve's own diagnostic rows as a rebuild cause. */
   const decisionsKey = (instance: NowInstance): string => {
     const path = nowPlanPath(instance);
     const root = path ? dirname(dirname(path)) : undefined;
     const stores = instance.name === core && instance.feedbackRoot ? `${mtimeOf(feedbackDir(instance.feedbackRoot)) ?? "-"}:${mtimeOf(questionStorePath(instance.feedbackRoot)) ?? "-"}` : "none";
     const stateRoot = dirname(instance.ledgerDir);
     const markers = [deployImageManualPath, deployAutoPath, deployMarkerPath].map((path) => mtimeOf(path(stateRoot)) ?? "-").join(":");
-    return `${stores}:${mtimeOf(ledgerPathOf(instance)) ?? "-"}:${root ? `${mtimeOf(ratificationsPath(root)) ?? "-"}:${mtimeOf(policyPath(root)) ?? "-"}` : "none"}:${markers}`;
+    return `${stores}:${root ? `${mtimeOf(ratificationsPath(root)) ?? "-"}:${mtimeOf(policyPath(root)) ?? "-"}` : "none"}:${markers}`;
   };
   const gateMemos = new Map<string, ReturnType<typeof createLedgerRotationMemo>>();
   const gateRows = new Map<string, Array<Record<string, unknown>>>();

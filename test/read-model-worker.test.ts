@@ -439,7 +439,8 @@ test("the switch file keeps its last good reading and a view switched off is not
   const counted: ReadModelView = { name: "counted", version: 1, materialize: () => [{ key: "", data: { n: 1 }, sources: [] }] };
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir }], clock, views: [throws, counted], post: sink.post });
   t.after(() => ticker.release());
-  writeFileSync(path, JSON.stringify({ views: { counted: "off" } }));
+  // W1-T5896: a view with no switch is not built, so the broken one is switched on to show its failure is logged.
+  writeFileSync(path, JSON.stringify({ views: { counted: "off", broken: "shadow" } }));
   ticker.tick();
   assert.deepEqual(sink.messages.filter((m) => m.type === "body"), [], "a view switched off is not materialized");
   assert.deepEqual(sink.logs("read_model.materialize_failed"), [{ view: "broken", error: "boom" }]);
@@ -448,7 +449,7 @@ test("the switch file keeps its last good reading and a view switched off is not
   advance(READ_MODEL_SWITCH_RECHECK_MS);
   ticker.tick();
   assert.equal(sink.logs("read_model.switch_unreadable").length, 1);
-  assert.deepEqual(lastState(sink.messages).switches.views, { counted: "off" }, "an unreadable file keeps the last good switches");
+  assert.deepEqual(lastState(sink.messages).switches.views, { counted: "off", broken: "shadow" }, "an unreadable file keeps the last good switches");
   assert.equal(sink.messages.filter((m) => m.type === "body").length, 0);
 
   writeFileSync(path, JSON.stringify({ views: { counted: "serve" } }));

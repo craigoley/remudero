@@ -7018,6 +7018,90 @@ components:
                     consumer; `needsYou` above stays the proposal-lane count it always was.
                   $ref: "#/components/schemas/HumanGateCountSummary"
 
+    AnalyticsViewMetric:
+      type: object
+      description: One console-v1 metric (src/lib/analytics-route.ts's `ConsoleV1Metric`); `value` is null, never 0, when not collected.
+      required: [key, class, value]
+      properties:
+        key:
+          type: string
+          enum: [runs.completed, tokens.total, cache.reuse, cost.modeled.usd, duration.p50.ms, queue.pending]
+        class:
+          type: string
+          enum: [observed, provider_reported, modeled]
+        value: {type: [number, "null"]}
+        notCollectedReason: {type: string}
+
+    AnalyticsView:
+      type: object
+      description: >
+        GET /v1/views/analytics (docs/views.md, src/lib/analytics-view.ts; W1-T5055): every instance's
+        console-v1 analytics merged in core. The read-model worker builds it from the `source_snapshot`
+        rows the slow lane's analytics refresh commits per instance, so it answers from them after a
+        restart. One `analytics:<instance>` source per instance: unavailable before its first refresh,
+        stale with phase `failed` when its last refresh failed (the kept snapshot is still merged).
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [analytics]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [overview, coverage, instances]
+          properties:
+            overview:
+              type: array
+              description: >
+                The counted instances' metrics merged, in catalog order. Sums are summed, `cache.reuse` is
+                the ratio of the summed token terms, and `duration.p50.ms` the median of every instance's
+                runs together; nothing is averaged. `instances` is how many instances had a value.
+              items:
+                type: object
+                required: [key, class, value, instances]
+                properties:
+                  key:
+                    type: string
+                    enum: [runs.completed, tokens.total, cache.reuse, cost.modeled.usd, duration.p50.ms, queue.pending]
+                  class:
+                    type: string
+                    enum: [observed, provider_reported, modeled]
+                  value: {type: [number, "null"]}
+                  notCollectedReason: {type: string}
+                  instances: {type: integer}
+            coverage:
+              type: object
+              description: How many instances the overview counts, of how many serve projects; `missing` have no snapshot yet.
+              required: [counted, of, missing]
+              properties:
+                counted: {type: integer}
+                of: {type: integer}
+                missing:
+                  type: array
+                  items: {type: string}
+            instances:
+              type: array
+              description: Each instance's own metrics, or a `reason` when it has no snapshot yet.
+              items:
+                type: object
+                required: [instanceId]
+                properties:
+                  instanceId: {type: string}
+                  metrics:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AnalyticsViewMetric"
+                  reason: {type: string}
+
     ReadModelStatusView:
       type: object
       description: >
@@ -7998,6 +8082,19 @@ components:
           properties:
             servedModel: {type: string}
             requestedModel: {type: string}
+        workerState:
+          type: string
+          enum: [working, tool-executing, quiet]
+          description: >
+            The run's worker liveness from its newest `worker.state` transition (BoardRow.workerState). The
+            console's fleet map evidences a worker process only from this; absent means no transition was seen.
+        workerStateSince:
+          type: string
+          description: When the run went quiet; present only while `workerState` is `quiet`.
+        processUnevidenced:
+          type: boolean
+          enum: [true]
+          description: Running only on an open PR's strength, with no live lock and no recent activity.
 
     NowAction:
       type: object
@@ -13696,6 +13793,29 @@ paths:
                 $ref: "#/components/schemas/NavBadgeView"
         "400":
           $ref: "#/components/responses/InvalidRequest"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /v1/views/analytics:
+    get:
+      summary: Every instance's console-v1 analytics merged in core, in one read.
+      description: >
+        W1-T5055. Replaces the console's per-instance /v1/analytics reads and its own merge. Switched
+        off (or with no body yet) it answers serve's own merge over its in-process analytics caches.
+        Same ETag and 304 rules as every view. See docs/views.md.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyticsView"
         "304":
           description: The request's `If-None-Match` matched the view's ETag; no body.
         "401":

@@ -331,10 +331,33 @@ type MeasurementReply = { ok: true; value: ConfigInventory | MountSweep } | { ok
 type MountSweep = { cells: MountHeadroomCell[]; corpus?: { unread: string[] } };
 const CONFIG_MEASUREMENT_WORKER_KIND = "remudero-config-measurement";
 
+const HEAP_FLAG = /^--max[-_]old[-_]space[-_]size(?:=(.*))?$/;
+
+/**
+ * The measurement worker's options for a process started with `execArgv`. The garden child runs
+ * with `--max-old-space-size=<mb>` (garden-registry), and a Worker refuses V8 heap flags in its own
+ * execArgv, so passing `process.execArgv` through made 46 of 66 config passes fail with "invalid
+ * execArgv flags". The worker inherits its execArgv instead (the loader comes with it, and Node
+ * 24's test runner adds per-process flags a Worker also refuses), and the old-generation budget
+ * the heap flag carried becomes `resourceLimits.maxOldGenerationSizeMb`. Last flag wins, as in V8.
+ */
+export function measurementWorkerOptions(execArgv: readonly string[]): { resourceLimits?: { maxOldGenerationSizeMb: number } } {
+  let budgetMb: number | undefined;
+  for (let index = 0; index < execArgv.length; index += 1) {
+    const match = HEAP_FLAG.exec(execArgv[index]!);
+    if (!match) continue;
+    const value = match[1] ?? execArgv[index + 1];
+    if (match[1] === undefined) index += 1;
+    const mb = Number(value);
+    if (Number.isFinite(mb) && mb > 0) budgetMb = mb;
+  }
+  return budgetMb === undefined ? {} : { resourceLimits: { maxOldGenerationSizeMb: budgetMb } };
+}
+
 /** A worker failure refuses this measurement; it never falls back to reading on the event loop. */
 export function configMeasurementOffLoop<T>(input: ConfigMeasurement, workerUrl: URL = new URL(import.meta.url)): Promise<T> {
   return new Promise((resolve, reject) => {
-    const worker = new Worker(workerUrl, { workerData: { kind: CONFIG_MEASUREMENT_WORKER_KIND, input }, execArgv: process.execArgv });
+    const worker = new Worker(workerUrl, { workerData: { kind: CONFIG_MEASUREMENT_WORKER_KIND, input }, ...measurementWorkerOptions(process.execArgv) });
     worker.once("message", (reply: MeasurementReply) => {
       void worker.terminate();
       if (reply.ok) resolve(reply.value as T);

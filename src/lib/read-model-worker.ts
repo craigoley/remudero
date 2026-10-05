@@ -18,15 +18,16 @@ import { dirname, join } from "node:path";
 import { isMainThread, parentPort, SHARE_ENV, Worker, workerData } from "node:worker_threads";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
+import { createAnalyticsView } from "./analytics-view.js";
 import { createGithubKeepWarm, type GithubKeepWarm } from "./github-refresh-pacer.js";
 import { ghIssueGateway, tryEscalate, type EscalateDeps, type Escalation, type IssueGateway } from "./escalate.js";
 import { createInboxThreadView } from "./inbox-thread-view.js";
 import { createInstancesView } from "./instances-view.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { FUTURE_ROW_TOLERANCE_MS, LEDGER_PROJECTOR_SCHEMA_VERSION, createLedgerProjector, openProjectorReadModel, type LedgerProjector, type ProjectorTickResult } from "./ledger-projector.js";
-import { createNavBadgeReadModelView } from "./nav-badge-view.js";
-import { createNowView } from "./now-view.js";
-import { createOperatorAgentRowsView } from "./operator-agent-read-model.js";
+import { createNavBadgeReadModelView, NAV_BADGE_VIEW_NAME } from "./nav-badge-view.js";
+import { createNowView, NOW_VIEW_NAME } from "./now-view.js";
+import { createOperatorAgentRowsView, OPERATOR_AGENT_ROWS_VIEW } from "./operator-agent-read-model.js";
 import { createTaskView, type ReadModelInstanceState as TaskViewInstanceState } from "./task-view.js";
 import { createWorkstreamsView } from "./workstreams-view.js";
 import { createDemandBook, type DemandBook } from "./view-demand.js";
@@ -57,9 +58,12 @@ import {
   peekLease,
   quickCheckReadModel,
   releaseLease,
+  SOURCE_SNAPSHOT_DDL,
   withWriteTransaction,
+  writeSourceSnapshot,
   type ReadModelDb,
   type ReadModelLease,
+  type SourceSnapshotWrite,
 } from "./read-model-db.js";
 import { threadSlowLane, type SlowLane, type SlowLaneBodies, type SlowLaneConfig } from "./read-model-slow-lane.js";
 import { readModelCommand } from "./read-model-cli.js";
@@ -237,6 +241,7 @@ export interface ReadModelView {
   perInstance?: boolean;
   /** Its keys are built on demand (view-demand.ts): `materialize` returns only the keys the ticker's demand book holds live. */
   demand?: true;
+  snapshotSourced?: true;
 }
 
 /** Why a projector that is not fresh is not: the structured half of its `reason`. */
@@ -282,7 +287,40 @@ export const readModelStatusView: ReadModelView = {
 };
 
 /** Every view the worker materializes; later Phase 1 views register here. */
-export const READ_MODEL_VIEWS: readonly ReadModelView[] = [createNavBadgeReadModelView(ledgerSource), createRepositoriesReadModelView(ledgerSource), readModelStatusView];
+export const READ_MODEL_VIEWS: readonly ReadModelView[] = [createNavBadgeReadModelView(ledgerSource), createRepositoriesReadModelView(ledgerSource), createAnalyticsView(), readModelStatusView];
+
+export interface ReadModelViewReader {
+  consumer: string;
+  reader: string;
+  view?: string;
+}
+
+export type ReadModelViewReaders = Readonly<Record<string, readonly ReadModelViewReader[]>>;
+
+export const READ_MODEL_VIEW_READERS: ReadModelViewReaders = {
+  [READ_MODEL_STATUS_VIEW]: [
+    { consumer: "GET /v1/views/read-model", reader: "serve.ts servedByDefault" },
+    { consumer: "every auto switch", reader: "views.ts shownReadiness" },
+  ],
+  [NOW_VIEW_NAME]: [{ consumer: "needs-you", reader: "needs-you-view.ts composeNeedsYou", view: "needs-you" }],
+  "needs-you": [
+    { consumer: "GET /v1/status", reader: "serve.ts needsYouGates via withStatusNeedsYou" },
+    { consumer: NAV_BADGE_VIEW_NAME, reader: "needs-you-view.ts withNeedsYouView; serve.ts navBadgeWithDecisions", view: NAV_BADGE_VIEW_NAME },
+  ],
+  [OPERATOR_AGENT_ROWS_VIEW]: [{ consumer: "the operator agent", reader: "operator-agent-read-model.ts createOperatorAgentRowsSource: legacy only on an explicit off" }],
+};
+
+function readModelViewRead(view: string, switches: ReadModelSwitches, readers: ReadModelViewReaders, seen: Set<string>): boolean {
+  seen.add(view);
+  return (readers[view] ?? []).some(({ view: consumer }) => consumer === undefined
+    || (!seen.has(consumer) && ((switches.views[consumer] ?? "off") !== "off" || readModelViewRead(consumer, switches, readers, seen))));
+}
+
+export function readModelViewBuilt(view: string, switches: ReadModelSwitches, readers: ReadModelViewReaders = READ_MODEL_VIEW_READERS): boolean {
+  const mode = switches.views[view];
+  if (mode !== undefined) return mode !== "off";
+  return readModelViewRead(view, switches, readers, new Set());
+}
 
 const LEDGER_SOURCE_PREFIX = "ledger:";
 
@@ -319,6 +357,7 @@ export interface ReadModelTickerOptions {
   integrityCheck?: (request: IntegrityRequest, done: (result: IntegrityResult) => void) => void;
   /** Projects nothing: attaches to the stores the projector thread holds, takes its states from `observe`, and builds view bodies only. */
   viewsOnly?: boolean;
+  readers?: ReadModelViewReaders;
 }
 
 export interface IntegrityRequest {
@@ -528,6 +567,7 @@ export interface ReadModelTicker {
   release(): number;
   /** Takes every key of a view the slow lane built: each is served like a materialized body, and a key not among them is dropped. */
   accept(built: SlowLaneBodies): void;
+  acceptSnapshot(write: SourceSnapshotWrite): boolean;
   /** A views-only ticker's instance states, as the projector thread last posted them. */
   observe(instances: readonly ReadModelInstanceState[]): void;
   /** Main asked for a key of a demand view. True when the key is new, and its view is due at once. */
@@ -727,7 +767,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     if (slot.state.lease !== "held") log("read_model.lease_acquired", { instance: slot.instance.name, holder, was: slot.state.lease });
     if (!slot.projector) {
       const db = slot.db;
-      withWriteTransaction(db, got.lease, () => db.exec(VIEW_BODY_DDL));
+      withWriteTransaction(db, got.lease, () => db.exec(`${VIEW_BODY_DDL} ${SOURCE_SNAPSHOT_DDL}`));
       slot.projector = createLedgerProjector({
         ledgerDir: slot.instance.ledgerDir, db, lease: got.lease, clock,
         beforeCheckpoint: () => {
@@ -1012,6 +1052,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }
   }
 
+  const unswitched = new Map<string, { builds: number; ms: number }>();
+
   function build(unit: ViewUnit, now: number, ctx: ReadModelViewContext, generation: number, allowanceMs: number): void {
     const { view } = unit;
     const started = clock.now();
@@ -1032,10 +1074,22 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     if (ready) unit.startedAt = undefined;
     if (viewsOnly) opts.post({ type: "view_unit", ...named, phase: "end" });
     const stages = unit.costMs > passMs ? view.stages?.(scoped) : undefined;
-    if (unit.costMs > passMs) log("read_model.slow_view", { ...named, ms: unit.costMs, passMs, thread: viewsOnly ? "views" : "projector", ...(stages ? { stages } : {}) });
+    const tally = switches.views[view.name] === undefined ? unswitched.get(view.name) ?? { builds: 0, ms: 0 } : undefined;
+    if (tally) unswitched.set(view.name, { builds: tally.builds + 1, ms: tally.ms + unit.costMs });
+    if (unit.costMs > passMs) log("read_model.slow_view", { ...named, ms: unit.costMs, passMs, thread: viewsOnly ? "views" : "projector", ...(stages ? { stages } : {}), ...(tally ? { unswitched: unswitched.get(view.name) } : {}) });
   }
 
-  const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => switches.views[unit.view.name] !== "off" && unit.dueAt <= now).sort((a, b) => a.dueAt - b.dueAt);
+  const readers = opts.readers ?? READ_MODEL_VIEW_READERS;
+  let builtFor: ReadModelSwitches | undefined;
+  let builtViews = new Set<string>();
+  const built = (view: string): boolean => {
+    if (builtFor !== switches) {
+      builtFor = switches;
+      builtViews = new Set(views.filter((v) => readModelViewBuilt(v.name, switches, readers)).map((v) => v.name));
+    }
+    return builtViews.has(view);
+  };
+  const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => built(unit.view.name) && unit.dueAt <= now).sort((a, b) => a.dueAt - b.dueAt);
 
   /**
    * Builds the due view units, oldest first, in what is left of the pass that began at `tickStart`.
@@ -1149,7 +1203,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         if (observedAt === Number.NEGATIVE_INFINITY) return;
         for (const slot of slots) attachViews(slot, now);
       }
-      for (const unit of units) if (unit.view.name === view && switches.views[view] !== "off") materialize(now, now, unit);
+      for (const unit of units) if (unit.view.name === view && built(view)) materialize(now, now, unit);
       postState(now);
     },
     want(view: string, key: string): boolean {
@@ -1170,6 +1224,23 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       } catch (error) {
         log("read_model.materialize_failed", { view: built.view, error: (error as Error).message });
       }
+    },
+    acceptSnapshot(write: SourceSnapshotWrite): boolean {
+      const home = slots[0]!;
+      if (viewsOnly && observedAt !== Number.NEGATIVE_INFINITY) attachViews(home, clock.now());
+      const named = { instance: write.instance, ok: write.ok };
+      if (switches.projector !== "on" || home.db === undefined || home.lease === undefined) {
+        log("read_model.source_snapshot_dropped", { ...named, reason: switches.projector !== "on" ? "projector switched off" : "this serve does not hold the home store's lease" });
+        return false;
+      }
+      try {
+        writeSourceSnapshot(home.db, home.lease, write);
+      } catch (error) {
+        log("read_model.source_snapshot_failed", { ...named, error: (error as Error).message });
+        return false;
+      }
+      for (const unit of units) if (unit.view.snapshotSourced) unit.dueAt = 0;
+      return true;
     },
     observe(instances): void {
       observedAt = clock.now();
@@ -1217,6 +1288,7 @@ export type ReadModelViewsInput =
   | { type: "state"; instances: ReadModelInstanceState[] }
   | { type: "shadow"; request: ShadowRequest }
   | { type: "bodies"; built: SlowLaneBodies }
+  | { type: "snapshot"; snapshot: SourceSnapshotWrite }
   | { type: "want"; view: string; key: string }
   | { type: "stop" };
 
@@ -1253,7 +1325,8 @@ export function runReadModelViewWorker(
       } catch (error) {
         log("read_model.want_failed", { view: msg.view, error: (error as Error).message });
       }
-    } else ticker.accept(msg.built);
+    } else if (msg.type === "snapshot") ticker.acceptSnapshot(msg.snapshot);
+    else ticker.accept(msg.built);
   };
   port.on("message", handle);
   const loop = (): void => {
@@ -1291,6 +1364,7 @@ export interface ReadModelViewLane {
   state(instances: ReadModelInstanceState[]): void;
   shadow(request: ShadowRequest): void;
   accept(built: SlowLaneBodies): void;
+  snapshot(write: SourceSnapshotWrite): void;
   /** Main asked for a key of a demand view. */
   want(view: string, key: string): void;
   close(): void;
@@ -1353,6 +1427,7 @@ export function threadViews(opts: {
     state: (instances) => send({ type: "state", instances }),
     shadow: (request) => send({ type: "shadow", request }),
     accept: (built) => send({ type: "bodies", built }),
+    snapshot: (write) => send({ type: "snapshot", snapshot: write }),
     want: (view, key) => send({ type: "want", view, key }),
     close: () => {
       closed = true;
@@ -1404,12 +1479,14 @@ export function runReadModelWorker(
   });
   const post = (m: ReadModelWorkerMessage): void => {
     if (m.type === "state") {
+      slowLane?.views(m.switches.views);
       slowLane?.lease(m.instances[0]?.lease === "held");
       views.state(m.instances);
     }
     port.postMessage(m);
   };
-  if (data.slowLane) slowLane = threadSlowLane({ config: data.slowLane, log, onBodies: (built) => views.accept(built) });
+  const slowLaneConfig = data.slowLane && { ...data.slowLane, analytics: data.slowLane.analytics ?? { instances: data.instances.map((i) => ({ name: i.name, stateDir: i.ledgerDir })) } };
+  if (slowLaneConfig) slowLane = threadSlowLane({ config: slowLaneConfig, log, onBodies: (built) => views.accept(built), onSnapshot: (write) => views.snapshot(write) });
   const oracleRunner = threadOracle({ ...(data.escalationRepository ? { escalationRepository: data.escalationRepository } : {}), log });
   const ticker = createReadModelTicker({
     stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder, stopRequested, post, views: [], oracleRunner,

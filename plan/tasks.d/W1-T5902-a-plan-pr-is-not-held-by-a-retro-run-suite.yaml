@@ -1,0 +1,36 @@
+- id: W1-T5902
+  title: "A PLAN PR IS NOT HELD BY A RETRO-RUN SUITE — every PLAN_ONLY diff runs plan-reading candidates, and test/retro-marker-atomic.test.ts (458.7 s in the tier manifest, real runRetro runs with 12 spawns) lands alone on ci-shard 1/8 and sets a ~7.6-min floor under every plan PR's CI"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the retro marker suite's plan-reading half runs in seconds
+  band_meaning: span
+  origin: "operator session 2026-10-05: throughput research (plan-update CI floor)"
+  plan_refs: [W1-T3191, W1-T4395, W1-T4071, W1-T5700]
+  files: [test/retro-marker-atomic.test.ts, test/retro-marker-atomic-real-run.test.ts, scripts/test-tier-manifest.json]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-05: for a PLAN_ONLY diff (#9358) ci-shard (1/8) logged "running 1 of 480
+    plan-reading candidates on shard 1/8", predicted_duration_ms 458708, and its Test step took
+    418 s, the longest job in the plan PR's CI (light-gates is ~6 min). scripts/test-tier-manifest.json
+    records test/retro-marker-atomic.test.ts at 458708 ms. The suite calls `loadPlan` (so it is
+    correctly a plan-reading candidate) but also runs the real `runRetro` four times with 12
+    spawned processes, and that is where the time goes. Every plan filing therefore waits ~7.6 min
+    on a retro-execution test unrelated to whether the plan change is valid.
+  design: |
+    Split the suite: the plan-reading assertions (marker atomicity against a loaded plan) stay in
+    test/retro-marker-atomic.test.ts with the retro run injected or stubbed, so it finishes in
+    seconds; the real-run assertions move to test/retro-marker-atomic-real-run.test.ts, which does
+    not load the plan and so leaves the plan-reading set. Every assertion survives in one file or
+    the other. Refresh the manifest entries for both files from a measured run.
+  acceptance:
+    - claim: "the real-run retro marker assertions pass in test/retro-marker-atomic-real-run.test.ts, which does not load the plan, and the tier manifest records test/retro-marker-atomic.test.ts (the plan-reading half) under 30000 ms from a measured run"
+      proof: "unit test: test/retro-marker-atomic-real-run.test.ts"
+  falsifier: |
+    Leave the real runRetro calls in the plan-reading suite: its measured duration stays ~458 s and
+    the duration assertion fails.

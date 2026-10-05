@@ -16,6 +16,7 @@ import {
   type ReadModelWorkerMessage,
 } from "../src/lib/read-model-worker.js";
 import { makeTempDir } from "../src/lib/tmp.js";
+import { switchViewsOn } from "./helpers/read-model-switches.js";
 
 const T0 = Date.parse("2026-09-30T12:00:00.000Z");
 /** The work clock's cost of one applied row. */
@@ -107,6 +108,7 @@ test("a read-model tick with a large projection batch plus view body builds stay
   ];
   assert.ok(100 + 2 * 600 + 1_500 > PASS_MS && 1_500 > PASS_MS * READ_MODEL_VIEW_SHARE, "the fixture's bodies cannot share one pass");
   const messages: ReadModelWorkerMessage[] = [];
+  switchViewsOn(stateDir, views.map((v) => v.name));
   const ticker = createReadModelTicker({
     stateDir, instances: [{ name: "core", ledgerDir: coreDir }, { name: "console", ledgerDir: consoleDir }], clock: work.clock, holder: "view-budget", oracle: "off", views,
     post: (m) => void messages.push(m),
@@ -145,6 +147,7 @@ test("a read-model view is not rebuilt before its last cost divided by the view 
   writeBacklog(coreDir, 0, 0, 3);
   const work = workClock(stateDir);
   const built: string[] = [];
+  switchViewsOn(stateDir, ["paced"]);
   const ticker = createReadModelTicker({
     stateDir, instances: [{ name: "core", ledgerDir: coreDir }], clock: work.clock, holder: "view-pace", oracle: "off",
     views: [costly("paced", 200, work.advance, built)], post: () => {},

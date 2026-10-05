@@ -405,3 +405,58 @@ function immediate<T>(db: ReadModelDb, fn: () => T): T {
     throw error;
   }
 }
+
+/**
+ * A producer's persisted output, one row per (instance, name) (arch Phase 4 D10, W1-T5055): the slow lane's
+ * analytics refresh writes each instance's `console-v1`, `signals` and `usage-v1` here, so a view answers from
+ * the rows after a restart. A failed refresh sets `error` and leaves the last committed `as_of` and `body`.
+ */
+export const SOURCE_SNAPSHOT_DDL = `CREATE TABLE IF NOT EXISTS source_snapshot(instance TEXT NOT NULL, name TEXT NOT NULL,
+  as_of TEXT, body TEXT, error TEXT, error_ms INTEGER, PRIMARY KEY(instance, name)) WITHOUT ROWID;`;
+
+/** One producer run for one instance: every name it produced with their shared source time, or why it failed. */
+export type SourceSnapshotWrite =
+  | { instance: string; ok: true; asOf: string; bodies: ReadonlyArray<{ name: string; body: unknown }> }
+  | { instance: string; ok: false; names: readonly string[]; error: string; atMs: number };
+
+/**
+ * Commits one producer run in one fenced transaction: a complete snapshot and its source time land together or
+ * not at all, and a failure records why without touching the snapshot it keeps.
+ */
+export function writeSourceSnapshot(db: ReadModelDb, lease: ReadModelLease, write: SourceSnapshotWrite): void {
+  withWriteTransaction(db, lease, () => {
+    if (write.ok) {
+      const upsert = db.prepare(`INSERT INTO source_snapshot(instance, name, as_of, body, error, error_ms) VALUES(?, ?, ?, ?, NULL, NULL)
+        ON CONFLICT(instance, name) DO UPDATE SET as_of = excluded.as_of, body = excluded.body, error = NULL, error_ms = NULL`);
+      for (const { name, body } of write.bodies) upsert.run(write.instance, name, write.asOf, JSON.stringify(body));
+      return;
+    }
+    const failed = db.prepare(`INSERT INTO source_snapshot(instance, name, as_of, body, error, error_ms) VALUES(?, ?, NULL, NULL, ?, ?)
+      ON CONFLICT(instance, name) DO UPDATE SET error = excluded.error, error_ms = excluded.error_ms`);
+    for (const name of write.names) failed.run(write.instance, name, write.error, write.atMs);
+  });
+}
+
+/** One persisted source snapshot's state, without its body. */
+export interface SourceSnapshotState {
+  instance: string;
+  asOf: string | null;
+  error: string | null;
+  errorMs: number | null;
+}
+
+/** Every instance's row of `name`, bodies left unread: a reader parses a body only when its `asOf` moved. */
+export function sourceSnapshotStates(db: ReadModelDb, name: string): SourceSnapshotState[] {
+  return db.prepare("SELECT instance, as_of, error, error_ms FROM source_snapshot WHERE name = ? ORDER BY instance").all(name).map((row) => ({
+    instance: String(row.instance),
+    asOf: row.as_of === null ? null : String(row.as_of),
+    error: row.error === null ? null : String(row.error),
+    errorMs: row.error_ms === null ? null : Number(row.error_ms),
+  }));
+}
+
+/** The committed body of one instance's `name`, parsed; undefined when none was ever committed. */
+export function readSourceSnapshotBody(db: ReadModelDb, instance: string, name: string): unknown {
+  const body = db.prepare("SELECT body FROM source_snapshot WHERE instance = ? AND name = ?").get(instance, name)?.body;
+  return body === null || body === undefined ? undefined : JSON.parse(String(body));
+}

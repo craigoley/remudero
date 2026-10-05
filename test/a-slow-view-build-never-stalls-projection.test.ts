@@ -72,6 +72,9 @@ test("a six minute view build neither stalls projection nor silences the read-mo
   const stateDir = scratch(t, "slowview-state");
   const ledgerDir = scratch(t, "slowview-ledger");
   writeFileSync(join(ledgerDir, LIVE), row(Date.now(), "boot"));
+  // W1-T5896: a view with no switch is not built.
+  mkdirSync(join(stateDir, "read-model"), { recursive: true });
+  writeFileSync(join(stateDir, "read-model", "switches.json"), JSON.stringify({ views: { slow: "shadow" } }));
   const marks = join(scratch(t, "slowview-marks"), "marks.txt");
   // The watchdog's clock runs 30 times real time, so a 12 s build is 6 minutes to it.
   const scale = 30;
@@ -257,7 +260,7 @@ test("the view thread body builds the extra views it loads and answers shadow an
   const ledgerDir = scratch(t, "slowview-body-ledger");
   writeFileSync(join(ledgerDir, LIVE), row(Date.now(), "r1"));
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
-  writeFileSync(join(stateDir, "read-model", "switches.json"), JSON.stringify({ views: { inbox: "shadow" } }));
+  writeFileSync(join(stateDir, "read-model", "switches.json"), JSON.stringify({ views: { inbox: "shadow", extra: "shadow", analytics: "shadow" } }));
   const projector = projectorOf(stateDir, [{ name: "core", ledgerDir }], { now: () => Date.now(), date: () => new Date(), iso: () => new Date().toISOString() });
   t.after(() => projector.ticker.release());
   const viewsModule = moduleFile(t, "slowview-extra", `export default [{ name: "extra", version: 1, materialize: () => [{ key: "", data: { extra: true }, sources: [] }] }];\n`).href;
@@ -271,6 +274,9 @@ test("the view thread body builds the extra views it loads and answers shadow an
   assert.ok(fake.posted.some((m) => m.type === "log" && m.step === "view.shadow_diff" && m.extra.view === "extra"), "the shadow sample was compared");
   fake.send({ type: "bodies", built: { view: "inbox", version: 1, bodies: [{ key: "section=a", data: { a: 1 }, sources: [] }] } });
   assert.ok(fake.posted.some((m) => m.type === "body" && m.entry.view === "inbox"), "a slow-lane body is served");
+  // W1-T5055: a slow-lane source snapshot is committed by the view thread under the projector's lease.
+  fake.send({ type: "snapshot", snapshot: { instance: "core", ok: false, names: ["console-v1"], error: "refresh boom", atMs: Date.now() } });
+  await until(() => fake.posted.some((m) => m.type === "body" && m.entry.view === "analytics" && JSON.stringify(m.entry.body.data).includes("refresh boom")), "the committed failure reaches the analytics view");
   fake.send({ type: "stop" });
   assert.equal(fake.closed(), 1);
 });
