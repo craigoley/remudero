@@ -34,7 +34,10 @@ async function fixture(run: (root: string) => void): Promise<void> {
       "joined-docs": 'readFileSync(join(REPO_ROOT, "docs", "guide.md"));',
       master: 'readFileSync("MASTER-PLAN.md");',
       census: 'const area = "plan/"; readdirSync(root);',
-      source: 'readFileSync("src/lib/policy.ts");',
+      source: 'import { policy } from "../src/lib/policy.js";',
+      claude: 'readFileSync("CLAUDE.md");',
+      agents: 'readFileSync("AGENTS.md");',
+      doctrine: 'readFileSync("doctrine/ci-and-merging/x.md");',
       "near-prefix": 'readFileSync("plan/tasks.different");',
     };
     for (const [name, content] of Object.entries(suites)) {
@@ -53,7 +56,8 @@ test("test/a-plan-only-diff-runs-the-suites-that-read-its-paths.test.ts", async 
       "template-directory", "loader", "url-loader", "census"]) {
       assert.ok(shard.includes(`test/${name}.test.ts`), `${name} must run for a shard edit`);
     }
-    for (const name of ["other-id", "feedback", "docs", "joined-docs", "master", "source", "near-prefix"]) {
+    for (const name of ["other-id", "feedback", "docs", "joined-docs", "master", "source", "near-prefix",
+      "claude", "agents", "doctrine"]) {
       assert.ok(!shard.includes(`test/${name}.test.ts`), `${name} does not read the changed shard`);
     }
     const policy = planReadingSuiteFiles(root, ["plan/policy.yaml"]);
@@ -85,6 +89,23 @@ test("changed docs, feedback and master paths select their readers with director
     const mixed = planReadingSuiteFiles(root, [SHARD, "docs/guide.md"]);
     assert.ok(mixed.includes("test/id.test.ts") && mixed.includes("test/docs.test.ts"));
     assert.ok(planReadingSuiteFiles(root).includes("test/policy.test.ts"), "no changed list preserves the broad fallback");
+  });
+});
+
+test("root markdown and doctrine edits select their readers without unrelated plan readers", async () => {
+  await fixture((root) => {
+    for (const [path, name] of [
+      ["CLAUDE.md", "claude"],
+      ["AGENTS.md", "agents"],
+      ["doctrine/ci-and-merging/x.md", "doctrine"],
+    ]) {
+      assert.deepEqual(planReadingSuiteFiles(root, [path]), [`test/${name}.test.ts`]);
+    }
+    const mixed = planReadingSuiteFiles(root, [SHARD, "CLAUDE.md"]);
+    assert.ok(mixed.includes("test/shard.test.ts"));
+    assert.ok(mixed.includes("test/claude.test.ts"));
+    assert.ok(!mixed.includes("test/policy.test.ts"));
+    assert.ok(!mixed.includes("test/agents.test.ts"));
   });
 });
 
