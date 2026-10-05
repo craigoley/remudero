@@ -1364,8 +1364,9 @@ jobs:
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || [ "${GITHUB_EVENT_NAME}" = "merge_group" ] || { echo "W1-T1033: coverage-ratchet only runs its real work on pull_request/merge_group; skipping the real test-with-coverage run on a ${GITHUB_EVENT_NAME} event (see this job's own comment above)."; exit 0; }
           CLASS="${{ steps.classify.outputs.class }}"
           if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T2428 fast-lane: class=${CLASS} — skipping Test with coverage (no src/**/test/** path in this diff, so coverage cannot newly move)."
-            echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Test with coverage** (no src/**/test/** path in this diff)" >> "$GITHUB_STEP_SUMMARY"
+            case "$CLASS" in PLAN_ONLY|DOCS_ONLY) WHY="no src/**/test/** path" ;; *) WHY="no src/** path" ;; esac
+            echo "W1-T2428 fast-lane: class=${CLASS} — skipping Test with coverage (${WHY} in this diff, so coverage cannot newly move)."
+            echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Test with coverage** (${WHY} in this diff)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           # W1-T1217: `--import ./test/setup/tmp-hygiene.ts` is NOT optional here and its absence
@@ -1700,8 +1701,9 @@ jobs:
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || [ "${GITHUB_EVENT_NAME}" = "merge_group" ] || { echo "W1-T1033: coverage-ratchet only runs its real work on pull_request/merge_group; skipping on a ${GITHUB_EVENT_NAME} event (no pr.diff was computed above)."; exit 0; }
           CLASS="${{ steps.coverage-artifact.outputs.class }}"
           if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T2428 fast-lane: class=${CLASS} — skipping Diff coverage (no pr.diff was computed above; no src/**/test/** path in this diff to check)."
-            echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Diff coverage**" >> "$GITHUB_STEP_SUMMARY"
+            case "$CLASS" in PLAN_ONLY|DOCS_ONLY) WHY="no src/**/test/** path" ;; *) WHY="no src/** path" ;; esac
+            echo "W1-T2428 fast-lane: class=${CLASS} — skipping Diff coverage (no pr.diff was computed above; ${WHY} in this diff to check)."
+            echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Diff coverage** (${WHY} in this diff)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           node scripts/diff-coverage.mjs --lcov coverage/lcov.info --diff pr.diff
@@ -1714,7 +1716,7 @@ jobs:
           CLASS="${{ steps.coverage-artifact.outputs.class }}"
           if [ "$CLASS" != "SOURCE" ]; then
             echo "W1-T2428 fast-lane: class=${CLASS} — skipping Coverage ratchet (no coverage/lcov.info was collected above; no src/** path in this diff can move the aggregate)."
-            echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Coverage ratchet**" >> "$GITHUB_STEP_SUMMARY"
+            echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Coverage ratchet** (no src/** path in this diff)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           node scripts/coverage-ratchet.mjs --lcov coverage/lcov.info --baseline scripts/coverage-baseline.json
