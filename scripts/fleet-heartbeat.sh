@@ -845,6 +845,41 @@ if command -v az >/dev/null 2>&1; then
   esac
 fi
 
+BACKUP_RECEIPT="${RMD_STATE_SNAPSHOT_RECEIPT:-${XDG_STATE_HOME:-$HOME/.local/state}/remudero/state-snapshot.receipt}"
+BACKUP_VERDICT="unknown — no snapshot receipt"
+BACKUP_TS=""
+BACKUP_OFFHOST=unknown
+BACKUP_RESULT=""
+BACKUP_REASON=""
+if [ -f "$BACKUP_RECEIPT" ]; then
+  if BACKUP_CONTENT="$(cat "$BACKUP_RECEIPT" 2>/dev/null)"; then
+    while IFS='=' read -r backup_key backup_value; do
+      case "$backup_key" in
+        result) BACKUP_RESULT="$backup_value" ;;
+        ts) BACKUP_TS="$backup_value" ;;
+        offhost) BACKUP_OFFHOST="$backup_value" ;;
+        reason) BACKUP_REASON="$backup_value" ;;
+      esac
+    done <<<"$BACKUP_CONTENT"
+  fi
+  BACKUP_VERDICT="unknown — unreadable snapshot receipt"
+  BACKUP_EPOCH="$(epoch_of "$BACKUP_TS")"
+  case "$BACKUP_RESULT:$BACKUP_OFFHOST" in
+    ok:ok|ok:not-configured|failed:ok|failed:failed|failed:not-configured)
+      if [ -n "$BACKUP_EPOCH" ] && [ "$BACKUP_EPOCH" -le "$NOW_EPOCH" ]; then
+        BACKUP_AGE_S=$((NOW_EPOCH - BACKUP_EPOCH))
+        if [ "$BACKUP_AGE_S" -gt 93600 ]; then
+          BACKUP_VERDICT="STALE — last nightly snapshot run $(human_age "$BACKUP_AGE_S") ago"
+        elif [ "$BACKUP_RESULT" = failed ]; then
+          BACKUP_VERDICT="FAILED: ${BACKUP_REASON:-nightly snapshot failed without a reason}"
+        else
+          BACKUP_VERDICT=ok
+        fi
+      fi
+      ;;
+  esac
+fi
+
 # ── the payload ───────────────────────────────────────────────────────────────────────────────
 # `key=value`, one per line: greppable, phone-readable, and parseable by the watcher with no jq.
 PAYLOAD="$(cat <<EOF
@@ -907,6 +942,9 @@ acr_login_result=${ACR_LOGIN_RESULT}
 acr_login_ts=${ACR_LOGIN_TS}
 acr_login_reason=${ACR_LOGIN_REASON}
 acr_login_registry=${ACR_LOGIN_REGISTRY}
+backup_verdict=${BACKUP_VERDICT}
+backup_ts=${BACKUP_TS}
+backup_offhost=${BACKUP_OFFHOST}
 EOF
 )"
 

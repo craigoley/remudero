@@ -975,6 +975,13 @@ fi
 # root-each-running-daemon-mounts.test.ts and test/a-derived-state-dir-with-no-ledger-beside-a-
 # sibling-that-has-one-fails-the-rung.test.ts.
 state_snapshot_failed=0
+state_snapshot_reason=""
+state_snapshot_offhost=not-configured
+state_snapshot_fail() {
+  echo "$1" >&2
+  state_snapshot_failed=1
+  if [ -z "${state_snapshot_reason}" ]; then state_snapshot_reason="$1"; fi
+}
 STATE_SNAPSHOT_ARCHIVES=()
 if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   echo
@@ -1010,9 +1017,8 @@ console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.lengt
   # containers": falling back to the default would snapshot the decoy and report success.
   snap_roots=""
   if ! snap_ids="$(docker ps -q 2>&1)"; then
-    echo "host-update: STATE SNAPSHOT FAILED — docker ps did not answer, so the mounted state roots" >&2
+    state_snapshot_fail "host-update: STATE SNAPSHOT FAILED — docker ps did not answer, so the mounted state roots"
     echo "  cannot be derived: ${snap_ids}" >&2
-    state_snapshot_failed=1
   else
     for snap_id in ${snap_ids}; do
       snap_src="$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"${STATE_MOUNT_DEST}\"}}{{.Source}}{{end}}{{end}}" "${snap_id}" 2>/dev/null)" || snap_src=""
@@ -1033,9 +1039,8 @@ console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.lengt
     if [ ! -s "${snap_state}/ledger.ndjson" ]; then
       sib_ledger="$(find_sibling_with_marker "${snap_root}" "state/ledger.ndjson")"
       if [ -n "${sib_ledger}" ]; then
-        echo "host-update: STATE SNAPSHOT FAILED — ${snap_state}/ledger.ndjson does not exist or is empty, but" >&2
+        state_snapshot_fail "host-update: STATE SNAPSHOT FAILED — ${snap_state}/ledger.ndjson does not exist or is empty, but"
         echo "  ${sib_ledger} does. Set RMD_STATE_DIR if that is the volume you mean." >&2
-        state_snapshot_failed=1
         continue
       fi
       if [ ! -d "${snap_state}" ]; then
@@ -1049,8 +1054,7 @@ console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.lengt
       continue
     fi
     if ! mkdir -p "${snap_backups}"; then
-      echo "host-update: STATE SNAPSHOT FAILED — cannot create ${snap_backups}." >&2
-      state_snapshot_failed=1
+      state_snapshot_fail "host-update: STATE SNAPSHOT FAILED — cannot create ${snap_backups}."
       continue
     fi
     echo "host-update: state snapshot — ${snap_state} -> ${snap_backups} via ${STATE_SNAPSHOT_IMAGE}"
@@ -1061,17 +1065,15 @@ console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.lengt
     read -r _snap_tag snap_name snap_files snap_linked snap_vanished snap_trimmed <<<"${snap_line}" || true
     is_snapshot_name "${snap_name:-}" || snap_name=""
     if [ "${snap_rc}" -ne 0 ]; then
-      echo "host-update: STATE SNAPSHOT FAILED — the snapshot of ${snap_state} exited ${snap_rc}:" >&2
+      state_snapshot_fail "host-update: STATE SNAPSHOT FAILED — the snapshot of ${snap_state} exited ${snap_rc}:"
       printf '%s\n' "${snap_out}" | sed 's/^/  /' >&2
-      state_snapshot_failed=1
       continue
     fi
     if [ -z "${snap_name}" ] || [ ! -d "${snap_backups}/${snap_name}" ] \
        || [ -z "$(find "${snap_backups}/${snap_name}" -type f 2>/dev/null | head -1)" ]; then
-      echo "host-update: STATE SNAPSHOT FAILED — it exited 0 but published no archive this host can see" >&2
+      state_snapshot_fail "host-update: STATE SNAPSHOT FAILED — it exited 0 but published no archive this host can see"
       echo "  under ${snap_backups} (reported: '${snap_name:-nothing}'). Output was:" >&2
       printf '%s\n' "${snap_out}" | sed 's/^/  /' >&2
-      state_snapshot_failed=1
       continue
     fi
     echo "host-update: state snapshot — ${snap_backups}/${snap_name} verified"
@@ -1111,12 +1113,13 @@ console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.lengt
   # state_snapshot_failed, so section 4c exits non-zero. RMD_STATE_OFFHOST_AZ replaces `az`.
   # FALSIFIER: test/the-nightly-state-snapshot-has-an-off-host-copy.test.ts.
   OFFHOST_TARGET="${RMD_STATE_OFFHOST:-}"
+  if [ -n "${OFFHOST_TARGET}" ]; then state_snapshot_offhost=failed; fi
   OFFHOST_AZ="${RMD_STATE_OFFHOST_AZ:-az}"
   OFFHOST_KEEP="${RMD_STATE_OFFHOST_KEEP:-7}"
   offhost_fail() { # <what failed> [command output, indented beneath]
-    echo "host-update: STATE SNAPSHOT OFF-HOST COPY FAILED — $1" >&2
+    state_snapshot_fail "host-update: STATE SNAPSHOT OFF-HOST COPY FAILED — $1"
     [ -n "${2:-}" ] && printf '%s\n' "$2" | sed 's/^/  /' >&2
-    state_snapshot_failed=1
+    state_snapshot_offhost=failed
   }
   offhost_disk_snapshot() { # <resource group> <disk>
     local rg="$1" disk="$2" out rc disk_id disk_loc name got want all count excess old
@@ -1235,8 +1238,10 @@ console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.lengt
   elif ! command -v "${OFFHOST_AZ}" >/dev/null 2>&1; then
     offhost_fail "RMD_STATE_OFFHOST is set but '${OFFHOST_AZ}' is not a command on PATH: install the Azure CLI and 'az login', or unset RMD_STATE_OFFHOST."
   elif [ "${offhost_kind}" = "azure-disk-snapshot" ]; then
+    state_snapshot_offhost=ok
     offhost_disk_snapshot "${offhost_a}" "${offhost_b}"
   else
+    state_snapshot_offhost=ok
     offhost_blob "${offhost_a}" "${offhost_b}"
   fi
 fi
@@ -1465,6 +1470,29 @@ if [ "${RECLAIM_ONLY}" -eq 1 ]; then
   AFTER_AVAIL="$(df -Pk / | awk 'NR==2 {print $4}')"
   echo
   echo "host-update: reclaim-only — no pull, no restart. Free on / : ${AFTER_AVAIL} KiB"
+  if [ "${DRY_RUN}" -eq 0 ]; then
+    snapshot_receipt="${RMD_STATE_SNAPSHOT_RECEIPT:-${XDG_STATE_HOME:-$HOME/.local/state}/remudero/state-snapshot.receipt}"
+    snapshot_result=ok
+    if [ "${state_snapshot_failed}" -eq 1 ] || [ "${state_snapshot_offhost}" = failed ]; then
+      snapshot_result=failed
+    fi
+    snapshot_reason="${state_snapshot_reason//$'\n'/ }"
+    snapshot_reason="${snapshot_reason//$'\r'/ }"
+    if ! mkdir -p "$(dirname "${snapshot_receipt}")" \
+       || [ -d "${snapshot_receipt}" ] \
+       || ! snapshot_receipt_tmp="$(mktemp "${snapshot_receipt}.XXXXXX")"; then
+      echo "host-update: cannot prepare state snapshot receipt ${snapshot_receipt}" >&2
+      exit 1
+    fi
+    if ! printf 'result=%s\nts=%s\narchives=%s\noffhost=%s\nreason=%s\n' \
+      "${snapshot_result}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${#STATE_SNAPSHOT_ARCHIVES[@]}" \
+      "${state_snapshot_offhost}" "${snapshot_reason}" >"${snapshot_receipt_tmp}" \
+      || ! mv -f -- "${snapshot_receipt_tmp}" "${snapshot_receipt}"; then
+      rm -f -- "${snapshot_receipt_tmp}"
+      echo "host-update: cannot publish state snapshot receipt ${snapshot_receipt}" >&2
+      exit 1
+    fi
+  fi
   # W1-T3677/W1-T5545: section 3a's snapshot of some live root failed, or a root held no ledger
   # beside a sibling that does. The reclaim above still ran; the rung must not report success.
   if [ "${state_snapshot_failed}" -eq 1 ]; then

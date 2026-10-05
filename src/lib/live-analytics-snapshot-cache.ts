@@ -178,9 +178,16 @@ export function createLiveAnalyticsSnapshotCache(deps: LiveAnalyticsSnapshotCach
       // The adapter represents the absent provider snapshot explicitly.
     }
     let fallback: LiveProviderSnapshot | undefined;
-    if (!provider || provider.state === "not-probed" || (provider.state === "unknown" && provider.reason === "absent")) {
+    const absent = !provider || provider.state === "not-probed" || (provider.state === "unknown" && provider.reason === "absent");
+    // The routing file is rewritten only when the router runs, and its 60 s bound lapses whenever
+    // no worker spawns for a minute: a healthy idle fleet. The daemon samples headroom on its own
+    // cadence, so a fresh, newer reading replaces the lapsed one rather than the whole instance
+    // reading stale.
+    const lapsed = provider?.freshness === "stale";
+    if (absent || lapsed) {
       try {
-        fallback = readHeadroom(deps.root, clock.now());
+        const reading = readHeadroom(deps.root, clock.now());
+        if (absent || (reading?.freshness === "fresh" && Date.parse(reading.observedAt ?? "") > Date.parse(provider!.observedAt ?? ""))) fallback = reading;
       } catch {
         // A failed fallback read leaves the routing snapshot's own explicit state in place.
       }

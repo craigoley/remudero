@@ -56,6 +56,8 @@ export interface ViewDefinition<T = unknown> {
   version: number;
   /** A view's query parameters narrow it; an unusable one is `{ error }`, answered 400 `invalid_request`. */
   compute: (params: URLSearchParams) => { data: T; sources: ViewSource[] } | { error: string };
+  /** Per data path, the one source its value is computed from wholly: the shadow pairs the two sides' reads of it (view-shadow.ts). */
+  shadowSources?: Readonly<Record<string, string>>;
 }
 
 export interface ViewBody<T = unknown> {
