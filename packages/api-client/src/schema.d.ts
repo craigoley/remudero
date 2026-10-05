@@ -3265,6 +3265,12 @@ export interface components {
         servedModel?: string;
         requestedModel?: string;
       };
+      /** The run's worker liveness from its newest `worker.state` transition (BoardRow.workerState). The console's fleet map evidences a worker process only from this; absent means no transition was seen. */
+      workerState?: "working" | "tool-executing" | "quiet";
+      /** When the run went quiet; present only while `workerState` is `quiet`. */
+      workerStateSince?: string;
+      /** Running only on an open PR's strength, with no live lock and no recent activity. */
+      processUnevidenced?: true;
     };
     /** The console's actionQueueFromStatus, precomputed. `strike` is parsed once from the sweep's reason in every form it writes, replacing the console's regex; `sortAt` is the time of the sweep row that began the PR's current disposition (a re-emitted one does not move it). */
     NowAction: {

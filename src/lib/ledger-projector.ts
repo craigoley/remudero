@@ -63,10 +63,15 @@ export function openProjectorReadModel(stateDir: string, instance: string, clock
     INSERT OR IGNORE INTO meta(k, v) VALUES('instance', '${instance}');`, ...(clock ? { clock } : {}), ...(generation !== undefined ? { generation } : {}) });
 }
 
+/** A run's worker liveness transition: the now view carries `workerState` from it, so the fact store must keep it.
+ *  Written only when the state changes, so it adds a row per transition, never one per worker event. */
+const WORKER_STATE_STEP = "worker.state";
+
 /** The steps the fact store keeps (design §3.5 `FACT_STEPS`); every other row is identity-only. */
 export function isFactStep(step: string): boolean {
   return DECISION_RELEVANT_LEDGER_STEPS.has(step) || RENDER_RELEVANT_LEDGER_STEPS.has(step)
-    || MODEL_ATTRIBUTION_LEDGER_STEPS.has(step) || step === "worker.assignment" || step === EXTERNAL_EFFECT_RECONCILED_STEP
+    || MODEL_ATTRIBUTION_LEDGER_STEPS.has(step) || step === "worker.assignment" || step === WORKER_STATE_STEP
+    || step === EXTERNAL_EFFECT_RECONCILED_STEP
     || step.startsWith("panel.");
 }
 

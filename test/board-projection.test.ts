@@ -462,7 +462,8 @@ test("a run's newest row of a skipped step stands in the board rows until a newe
   assert.deepEqual(board.update().rederived, ["W1-T1"], "the run's own activity moves its task");
   assert.deepEqual(activity(board), [`W1-T1|r1@${new Date(T0 + 60_000).toISOString()}`]);
   r.clock.set(T0 + 120_000);
-  r.append({ step: "worker.state", task_id: "W1-T1", run_id: "r1", state: "working" }, { step: "verdict", task_id: "W1-T3", run_id: "r3", verdict: "no_pr" });
+  // A second worker.activity: worker.state is a fact step now (the now view carries workerState from it).
+  r.append({ step: "worker.activity", task_id: "W1-T1", run_id: "r1" }, { step: "verdict", task_id: "W1-T3", run_id: "r3", verdict: "no_pr" });
   board.update();
   assert.deepEqual(activity(board), [`W1-T1|r1@${new Date(T0 + 120_000).toISOString()}`], "one row per run, moved to its newest time");
   assert.deepEqual(board.rows().slice(-2).map((row) => row.step), ["verdict", BOARD_RUN_ACTIVITY_STEP], "in time order, after the fact rows of its instant");

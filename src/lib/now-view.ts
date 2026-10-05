@@ -136,6 +136,14 @@ export interface NowTask {
   verifyHumanPending?: true;
   escalation?: { title?: string; issueUrl?: string; unverified?: true; openedAt?: string };
   worker?: { servedModel?: string; requestedModel?: string };
+  /** The run's worker liveness, carried from {@link BoardRow.workerState}: the console's fleet map evidences a
+   *  worker process only from it (a phase or a model is task context, not process evidence). It moves only on a
+   *  `worker.state` transition, so it does not churn the ETag the way per-event activity would. */
+  workerState?: BoardRow["workerState"];
+  /** When the run went quiet; present only while `workerState` is `quiet` ({@link BoardRow.workerStateSince}). */
+  workerStateSince?: string;
+  /** The row is running only on an open PR's strength: no live lock and no recent activity ({@link BoardRow.processUnevidenced}). */
+  processUnevidenced?: true;
 }
 
 export interface NowGroups {
@@ -408,6 +416,9 @@ function nowTask(row: BoardRow): NowTask {
     ...(row.needsHuman ? { needsHuman: row.needsHuman } : {}), ...(row.verifyHumanPending ? { verifyHumanPending: row.verifyHumanPending } : {}),
     ...(escalation ? { escalation } : {}),
     ...(t?.servedModel || t?.requestedModel ? { worker: { ...(t.servedModel ? { servedModel: t.servedModel } : {}), ...(t.requestedModel ? { requestedModel: t.requestedModel } : {}) } } : {}),
+    ...(row.workerState ? { workerState: row.workerState } : {}),
+    ...(row.workerState === "quiet" && row.workerStateSince ? { workerStateSince: row.workerStateSince } : {}),
+    ...(row.processUnevidenced ? { processUnevidenced: true as const } : {}),
   };
 }
 

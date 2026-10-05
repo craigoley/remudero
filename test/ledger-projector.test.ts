@@ -87,6 +87,7 @@ test("the fact store keeps decision render and panel steps and a line's identity
   assert.equal(isFactStep("run.start"), true);
   assert.equal(isFactStep("implement.done"), true);
   assert.equal(isFactStep("worker.assignment"), true);
+  assert.equal(isFactStep("worker.state"), true, "the now view carries workerState from it");
   assert.equal(isFactStep("panel.operator_agent_proposal"), true);
   assert.equal(isFactStep("worker.activity"), false);
   const a = ledgerLineIdentity(line(T0, "run.start"));
