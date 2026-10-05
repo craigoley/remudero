@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { test, mock } from "node:test";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
 import { decideDispatchClaim, dispatchClaimRef, parseClaimAnchorMessage } from "../src/lib/dispatch-claim.js";
-import { claimCommand, COMMANDS, dispatchClaimReserverFor } from "../src/run-task.js";
+import { claimCommand, COMMANDS, dispatchClaimReserverFor, plannedOnOriginMain } from "../src/run-task.js";
 
 // W1-T5859: `rmd claim <task-id>` takes the same git-ref CAS claim the fleet's lanes take, so a
 // hand-build is visible to dispatch before its branch or PR is. Driven against a REAL bare remote.
@@ -148,4 +149,42 @@ test("rmd claim --drop removes only a claim minted on this host", () => {
   } finally {
     f.cleanup();
   }
+});
+
+test("plannedOnOriginMain reads origin/main's shards and tasks.yaml through real git", () => {
+  const f = fixture();
+  try {
+    mkdirSync(join(f.work, "plan", "tasks.d"), { recursive: true });
+    writeFileSync(join(f.work, "plan", "tasks.d", "W1-T9001-a-shard.yaml"), "- id: W1-T9001\n");
+    writeFileSync(join(f.work, "plan", "tasks.yaml"), "- id: W1-T9002\n  title: mono\n");
+    execFileSync("git", ["-C", f.work, "add", "-A"]);
+    execFileSync("git", ["-C", f.work, "commit", "-q", "-m", "plan"]);
+    execFileSync("git", ["-C", f.work, "push", "-q", "origin", "main"]);
+    assert.equal(plannedOnOriginMain("W1-T9001", f.work), true, "a shard on origin/main is planned");
+    assert.equal(plannedOnOriginMain("W1-T9002", f.work), true, "a tasks.yaml id on origin/main is planned");
+    assert.equal(plannedOnOriginMain("W1-T9003", f.work), false, "an id on neither is not planned");
+    assert.equal(plannedOnOriginMain("W1.T9002", f.work), false, "a dot in the id is literal, never a regex wildcard");
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("an id that is not task-shaped is refused before any plan or remote read", () => {
+  const r = run(["W1 T1"], { isPlanned: () => assert.fail("never read the plan"), reserver: undefined });
+  assert.equal(r.code, 2);
+  assert.match(r.err, /is not a task id/);
+});
+
+test("--drop reports a claim it could not drop instead of claiming success", () => {
+  const anchor = `rmd-dispatch claim 4242@${hostname()} 2026-10-05T00:00:00.000Z`;
+  const reserver = {
+    holder: () => "abc123",
+    anchorMessage: () => anchor,
+    drop: () => false,
+    attempt: () => assert.fail("--drop never attempts a claim"),
+    mintAnchor: () => assert.fail("--drop never mints"),
+  } as unknown as NonNullable<Parameters<typeof claimCommand>[1]>["reserver"];
+  const r = run(["W1-T9001", "--drop"], { isPlanned: () => true, reserver });
+  assert.equal(r.code, 1);
+  assert.match(r.err, /could not drop refs\/rmd-dispatch\/W1-T9001/);
 });

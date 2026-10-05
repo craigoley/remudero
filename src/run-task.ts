@@ -51087,7 +51087,7 @@ export function plannedOnOriginMain(taskId: string, dir: string = repoRoot): boo
   const shards = git(["ls-tree", "--name-only", "origin/main:plan/tasks.d"]);
   if (shards.status === 0 && (shards.stdout ?? "").split("\n").some((n) => n.startsWith(`${taskId}-`))) return true;
   const mono = git(["show", "origin/main:plan/tasks.yaml"]);
-  const escaped = taskId.replace(/[.]/g, "\\.");
+  const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return mono.status === 0 && new RegExp(`^\\s*-?\\s*id:\\s*"?${escaped}"?\\s*$`, "m").test(mono.stdout ?? "");
 }
 
