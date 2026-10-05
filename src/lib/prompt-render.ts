@@ -853,6 +853,7 @@ export function renderFixPrompt(opts: {
 export function renderPrerequisitePrPrompt(args: {
   task: { id: string; title: string };
   branch: string;
+  prerequisiteBranch?: string;
   prUrl: string;
   instrumentPaths: readonly string[];
   srcPaths: readonly string[];
@@ -866,7 +867,9 @@ export function renderPrerequisitePrPrompt(args: {
     "Your job is DIFFERENT: open a NEW, SEPARATE pull request — the prerequisite — that carries ONLY the " +
       "instrument-surface change below, standing on its own and passing its own CI. Do this:",
     "",
-    "1. Starting from a fresh branch off `origin/main` (never the branch above — leave it untouched), bring " +
+    (args.prerequisiteBranch
+      ? `1. Starting from the exact fresh branch \`${args.prerequisiteBranch}\` off \`origin/main\` (never the branch above — leave it untouched), bring `
+      : "1. Starting from a fresh branch off `origin/main` (never the branch above — leave it untouched), bring ") +
       "over ONLY these instrument-surface path(s), exactly as they read on that branch right now:",
     ...args.instrumentPaths.map((p) => `   - ${p}`),
     "2. These src/ path(s) belong to the ORIGINAL pull request and must NOT appear in your new one:",
@@ -876,6 +879,14 @@ export function renderPrerequisitePrPrompt(args: {
       "mechanical: a plain `git mv`/cherry-pick of the same hunk has already been tried twice and failed CI " +
       "both times.",
     "4. Push your branch and open the pull request against `main` with `gh pr create`.",
+    ...(args.prerequisiteBranch ? [
+      `   Use --head \`${args.prerequisiteBranch}\`, an explicit conventional --title, and --body-file.`,
+      "   The body MUST carry a bare ## Acceptance section with at least one single-line bullet:",
+      "   - <claim about this prerequisite> | unit test: <exact regression test title>",
+      "   Alternatively use: - <claim> | grep: <pattern matching a line this PR adds> in <path>",
+      "   Each proof must execute and name an added test or line; verify it fails without this change.",
+      "   This prerequisite builds no filed task: no Remudero-Task: trailer in the body or commits.",
+    ] : []),
     "5. Leave the ORIGINAL branch/PR entirely alone — no push, no edit, no comment on it.",
     "",
     "End your REPORT with a line reading exactly: PR_URL: <the new pull request's url>",

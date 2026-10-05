@@ -2377,7 +2377,10 @@ export function buildSweepEffects(
     resolveTaskContractAtHeadImpl: resolveFixRungTaskContractAtHead,
     createFixRungWorktreeImpl: createFixRungWorktreeWithToolchain,
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit,
-    runFixRungImpl: runFixRung,
+    runFixRungImpl: (args: Parameters<typeof runFixRung>[0]) => runFixRung({
+      ...args,
+      deps: { ...args.deps, readPrerequisitePr: args.deps.readPrerequisitePr ?? fetchPrerequisitePrViaGh },
+    }),
     runPlanScopedFixRoundImpl: runPlanScopedFixRound,
     materializePlanRoundWorktreeImpl: materializePlanRoundWorktree,
     pushFixRoundImpl: pushFixRound,
@@ -4939,6 +4942,10 @@ export async function updateBranchViaGh(pr: ArmedStalledPr): Promise<UpdateBranc
 export async function fetchPrBodyViaGh(prUrl: string, gh: (args: string[]) => unknown = ghJson): Promise<string> {
   const view = gh(["pr", "view", prUrl, "--json", "body"]) as { body?: string };
   return view.body ?? "";
+}
+
+export async function fetchPrerequisitePrViaGh(prUrl: string, gh: (args: string[]) => unknown = ghJson): Promise<{ headRefName: string; body: string }> {
+  return gh(["pr", "view", prUrl, "--json", "headRefName,body"]) as { headRefName: string; body: string };
 }
 
 /**
@@ -9203,6 +9210,7 @@ export function priorPrerequisitePrFor(lines: ReadonlyArray<Record<string, unkno
 export function buildPrerequisitePrDispatchArgs(args: {
   task: { id: string; title: string };
   branch: string;
+  prerequisiteBranch?: string;
   prUrl: string;
   worktreePath: string;
   mount: Mount;
@@ -9227,6 +9235,7 @@ export function buildPrerequisitePrDispatchArgs(args: {
     prompt: renderPrerequisitePrPrompt({
       task: args.task,
       branch: args.branch,
+      prerequisiteBranch: args.prerequisiteBranch,
       prUrl: args.prUrl,
       instrumentPaths: args.instrumentPaths,
       srcPaths: args.srcPaths,
@@ -10202,6 +10211,7 @@ export async function runFixRung(opts: {
   proofDiscrimination?: ProofDiscriminationEvidence;
   deps: {
     spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>;
+    readPrerequisitePr?: (prUrl: string) => Promise<{ headRefName: string; body: string }>;
     /** W1-T3868: test seam for the harness-owned commit decision; production uses the shared helper. */
     harnessCommitForShellLessWorker?: typeof harnessCommitForShellLessWorker;
     readMainTip?: () => string | Promise<string>;
@@ -11342,7 +11352,7 @@ export async function runFixRung(opts: {
       // as it does today when the prerequisite cannot go green.
       // W1-T3166: async because the escalation it opens is now judged. Wording and options are
       // untouched — W1-T2436 requires this arm to file the identical, already-understood issue.
-      const escalateInstrumentEntangled = async (): Promise<string> =>
+      const escalateInstrumentEntangled = async (prerequisiteRefusal?: string): Promise<string> =>
         await escalateWithJudge(
           {
             class: "BLOCKED",
@@ -11354,7 +11364,8 @@ export async function runFixRung(opts: {
               `changes measurement-instrument path(s) ${instrumentList} alongside src/ path(s) ${srcList} — two ` +
               `independently falsifiable claims ("the instrument is right" and "the code is right") shipped as one ` +
               `green, self-graded by the very instrument version it also changed. No worker may legitimately resolve ` +
-              `this by writing more code. Review summary: ${review.summary}`,
+              `this by writing more code. Review summary: ${review.summary}` +
+              (prerequisiteRefusal ? `\nPrerequisite refused: ${prerequisiteRefusal}` : ""),
             options: [
               {
                 label: "split",
@@ -11372,8 +11383,8 @@ export async function runFixRung(opts: {
         );
       // W1-T3166: async for the same reason as escalateInstrumentEntangled — its escalation is
       // now judged. Both return sites await; the outcome is unchanged.
-      const escalateAndExhaust = async (): Promise<FixRungOutcome> => {
-        const issueUrl = await escalateInstrumentEntangled();
+      const escalateAndExhaust = async (prerequisiteRefusal?: string): Promise<FixRungOutcome> => {
+        const issueUrl = await escalateInstrumentEntangled(prerequisiteRefusal);
         deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "instrument_entangled" });
         deps.say(`fix rung: escalated (instrument entanglement) — ${issueUrl}`);
         return { outcome: "escalated", review, strikes, retriggers, reason: "instrument_entangled", issueUrl };
@@ -11394,9 +11405,11 @@ export async function runFixRung(opts: {
           `fix rung: instrument path(s) ${instrumentList} entangled with src/ path(s) ${srcList} — dispatching ` +
             `a worker to open the prerequisite PR (never escalating straight to an issue): ${opts.prUrl}`,
         );
+        const prerequisiteBranch = `run-unfiled-${systemClock.now()}`;
         const dispatchArgs = buildPrerequisitePrDispatchArgs({
           task: opts.task,
           branch: opts.branch,
+          prerequisiteBranch,
           prUrl: opts.prUrl,
           worktreePath: opts.worktreePath,
           mount: opts.mount,
@@ -11427,6 +11440,26 @@ export async function runFixRung(opts: {
             reason: spawnOutcome.kind === "abandoned" ? "spawn wall-clock bound exceeded" : "worker opened no pull request",
           });
           return await escalateAndExhaust();
+        }
+        if (deps.readPrerequisitePr) {
+          let refusal: string | undefined;
+          let headRefName: string | undefined;
+          try {
+            const metadata = await deps.readPrerequisitePr(prerequisiteUrl!);
+            headRefName = metadata.headRefName;
+            const authorCheck = acceptanceAuthorTimeCheck(metadata.body, { trailerResolves: () => false });
+            if (headRefName !== prerequisiteBranch) refusal = `head ${headRefName} does not match minted head ${prerequisiteBranch}`;
+            else if (!authorCheck.ok) refusal = `${prerequisiteBranch}: ${authorCheck.message}`;
+          } catch (error) {
+            refusal = `${prerequisiteBranch}: PR metadata read failed: ${String(error)}`;
+          }
+          if (refusal) {
+            deps.log("fix.prerequisite_dispatch_failed", {
+              strike: strikes, prerequisite_pr: target.prNumber, prerequisite_branch: prerequisiteBranch,
+              head_ref_name: headRefName, reason: refusal,
+            });
+            return await escalateAndExhaust(refusal);
+          }
         }
         const ciState = ciGateState(await deps.waitForCiGreen(prerequisiteUrl!, deps.log));
         if (ciState !== "green") {
@@ -18725,6 +18758,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           resolveTaskContractAtHead: (prUrlArg, taskIdArg) => resolveFixRungTaskContractAtHead(prUrlArg, taskIdArg, worktreePath),
           runReview,
           fetchPrBody: fetchPrBodyViaGh,
+          readPrerequisitePr: fetchPrerequisitePrViaGh,
           // W1-T3506: the SAME worktree this round pushes to, run through the SAME proof
           // executor `judgeCriterion` itself uses (review.ts's parseWhitelistedProof/
           // execWhitelistedProof) — never a second, hand-rolled grep invocation.
