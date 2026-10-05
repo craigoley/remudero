@@ -92,6 +92,7 @@ export function combinedStatusRestArgs(owner: string, repo: string, sha: string)
 /** One check run as REST reports it (lowercase enums, snake_case keys). */
 interface RestCheckRun {
   id?: number;
+  external_id?: string | null;
   name?: string;
   /** "queued" | "in_progress" | "completed" — lowercase, where GraphQL reports "QUEUED" etc. */
   status?: string;
@@ -132,6 +133,10 @@ export interface RestRollupEntry {
   state?: string;
   detailsUrl?: string;
   checkRunId?: number;
+  externalId?: string;
+  workflowRunId?: number;
+  workflowId?: number;
+  jobId?: string;
   targetUrl?: string;
   /** W1-T2300 — when this attempt started, mapped by {@link rollupFromRest} from a check run's
    *  `started_at` or a status context's `created_at`; absent only on a malformed row.
@@ -152,6 +157,30 @@ function upper(v: string | null | undefined): string | undefined {
   return v == null || v === "" ? undefined : v.toUpperCase();
 }
 
+interface RestWorkflowRunIdentity { id?: number; workflow_id?: number }
+
+function actionsIdentity(c: RestCheckRun): { runId?: number; jobId?: string } {
+  const url = c.details_url?.match(/\/actions\/runs\/(\d+)\/job\/(\d+)/);
+  const posted = c.external_id?.match(/^run:(\d+):\d+:job:(\d+)$/);
+  const runId = Number(url?.[1] ?? posted?.[1]);
+  return {
+    ...(Number.isSafeInteger(runId) && runId > 0 ? { runId } : {}),
+    jobId: url?.[2] ?? posted?.[2] ?? c.external_id?.match(/^job:(\d+)$/)?.[1],
+  };
+}
+
+export function needsWorkflowIdentity(checkRuns: RestCheckRun[]): boolean {
+  const seen = new Map<string, number>();
+  for (const c of checkRuns) {
+    const { runId } = actionsIdentity(c);
+    if (runId === undefined) continue;
+    const name = c.name ?? "";
+    if (seen.has(name) && seen.get(name) !== runId) return true;
+    seen.set(name, runId);
+  }
+  return false;
+}
+
 /** Compose one GraphQL-shaped `statusCheckRollup` from REST's two halves. REST splits GraphQL's
  *  union across two endpoints, so both are read and concatenated: reading only `/check-runs` would
  *  drop `remudero-review` and make every reviewed PR look unreviewed.
@@ -160,7 +189,8 @@ function upper(v: string | null | undefined): string | undefined {
  *  a commit with zero statuses, and an invented entry flips `checksStateFromRollup` from "none" to
  *  "pending", so only real `statuses[]` rows become entries. The two shapes map
  *  {@link RestRollupEntry.startedAt} from two different source keys (W1-T2300). */
-export function rollupFromRest(checkRuns: RestCheckRun[], statuses: RestStatus[]): RestRollupEntry[] {
+export function rollupFromRest(checkRuns: RestCheckRun[], statuses: RestStatus[], workflowRuns?: readonly RestWorkflowRunIdentity[]): RestRollupEntry[] {
+  const workflows = new Map(workflowRuns?.map((r) => [r.id, r.workflow_id]));
   const fromRuns = checkRuns.map((c) => {
     const e: RestRollupEntry = { name: c.name ?? "" };
     const status = upper(c.status);
@@ -169,6 +199,14 @@ export function rollupFromRest(checkRuns: RestCheckRun[], statuses: RestStatus[]
     if (conclusion !== undefined) e.conclusion = conclusion;
     if (c.details_url) e.detailsUrl = c.details_url;
     if (typeof c.id === "number" && Number.isSafeInteger(c.id) && c.id > 0) e.checkRunId = c.id;
+    if (c.external_id) e.externalId = c.external_id;
+    if (workflowRuns !== undefined || c.external_id?.startsWith("run:")) {
+      const { runId, jobId } = actionsIdentity(c);
+      if (runId !== undefined) e.workflowRunId = runId;
+      if (jobId !== undefined) e.jobId = jobId;
+      const workflowId = workflows.get(runId);
+      if (typeof workflowId === "number") e.workflowId = workflowId;
+    }
     if (c.started_at) e.startedAt = c.started_at;
     if (c.completed_at) e.completedAt = c.completed_at;
     return e;
@@ -289,7 +327,11 @@ export function prStateFromRest(row: { state?: string; merged?: boolean; merged_
 export function rollupFor(owner: string, repo: string, sha: string, fetch: GhApiFetcher): RestRollupEntry[] {
   const runs = fetch(checkRunsRestArgs(owner, repo, sha)) as { check_runs?: RestCheckRun[] };
   const combined = fetch(combinedStatusRestArgs(owner, repo, sha)) as { statuses?: RestStatus[] };
-  return rollupFromRest(runs?.check_runs ?? [], combined?.statuses ?? []);
+  const checks = runs?.check_runs ?? [];
+  const listing = needsWorkflowIdentity(checks)
+    ? fetch(runsForHeadRestArgs(owner, repo, sha)) as { workflow_runs?: RestWorkflowRunIdentity[] }
+    : undefined;
+  return rollupFromRest(checks, combined?.statuses ?? [], listing === undefined ? undefined : listing?.workflow_runs ?? []);
 }
 
 export async function rollupForAsync(
@@ -300,7 +342,11 @@ export async function rollupForAsync(
 ): Promise<RestRollupEntry[]> {
   const runs = (await fetch(checkRunsRestArgs(owner, repo, sha))) as { check_runs?: RestCheckRun[] };
   const combined = (await fetch(combinedStatusRestArgs(owner, repo, sha))) as { statuses?: RestStatus[] };
-  return rollupFromRest(runs?.check_runs ?? [], combined?.statuses ?? []);
+  const checks = runs?.check_runs ?? [];
+  const listing = needsWorkflowIdentity(checks)
+    ? await fetch(runsForHeadRestArgs(owner, repo, sha)) as { workflow_runs?: RestWorkflowRunIdentity[] }
+    : undefined;
+  return rollupFromRest(checks, combined?.statuses ?? [], listing === undefined ? undefined : listing?.workflow_runs ?? []);
 }
 
 /** The sweep's open-PR enumeration, REST only — a drop-in for the `gh pr list --json …` call.

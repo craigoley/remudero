@@ -1,0 +1,37 @@
+- id: W1-T5829
+  title: "A SKIP GUARD REACHED THROUGH A CLASS VARIABLE IS ENUMERATED — W1-T5700 (#9261) added two `if [ ... ]; then` guards to test-slow-shard that reclassify `CLASS` (TEST_ONLY to SOURCE) and so decide whether the slow tier skips, but `enumerateSkipGuards` lists only a guard whose own block reaches `exit 0` within 8 lines, so neither is in the mutation population"
+  repo: remudero
+  depends_on: [W1-T5828]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — which ci.yml guards the mutation population counts
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5700 (#9261) hand-build follow-up"
+  plan_refs: [W1-T3220, W1-T3703, W1-T5700]
+  files: [scripts/workflow-guard-mutation-ratchet.mjs, scripts/workflow-guard-mutation-baseline.json, test/workflow-guard-mutation-ratchet.test.ts, test/a-skip-guard-reached-through-a-class-variable-is-enumerated.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-05 on origin/main 6fd35767: `enumerateSkipGuards` over ci.yml returns 29 guards
+    and neither W1-T5700 guard (`if [ "$CLASS" = "TEST_ONLY" ]; then` and the nested
+    `if [ "$(printf '%s\n' "$TEST_ONLY_RUN" | head -n 1)" = "files" ]; then`, test-slow-shard's
+    plan-reading step). Their blocks assign `CLASS`; the `exit 0` that skips is in a later
+    `case "$CLASS" in` arm, outside the 8-line `EXIT_LOOKAHEAD_LINES` window. An always-true mutant of
+    either would reclassify every test-helper diff and no suite would be asked to notice. The same
+    shape (an `if` that sets a variable a later skip reads, and a `case` arm that exits 0) can recur
+    in any job.
+  design: |
+    `enumerateSkipGuards` also lists (a) a `case "$VAR" in` whose arm reaches `exit 0` and (b) an
+    `if` guard whose block assigns a variable that a later skip-shaped guard or case in the same step
+    reads. Each gets a mutant that forces its branch. Keys keep the job#n text form, and guards first
+    counted by this change are recorded in the baseline as inherited, so no current PR goes red for
+    them.
+  acceptance:
+    - claim: "enumerateSkipGuards over today's ci.yml lists both W1-T5700 guards and the case arm they feed, a fixture step whose if assigns a variable read by a later exit-0 case is listed, and an unrelated if with no such reader is not"
+      proof: "unit test: test/a-skip-guard-reached-through-a-class-variable-is-enumerated.test.ts"
+  falsifier: |
+    Restore the 8-line exit-0 rule alone: the W1-T5700 guards are absent from the enumeration and the
+    test fails.
