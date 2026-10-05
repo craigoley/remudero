@@ -1,0 +1,32 @@
+- id: W1-T5808
+  title: "CHECK-PROOF WARNS WHEN ITS TARGET DIFFERS FROM HEAD — `rmd check-proof` (`checkProofCommand`, src/run-task.ts) runs a grep or unit-test proof against the working tree, so a dirty tree passed a grep proof locally while the pushed head failed review twice (#9209)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium
+  origin: "operator session 2026-10-05: #9209 (W1-T5676 rename) failed review twice on a proof check-proof passed"
+  plan_refs: [W1-T912, W1-T4590, W1-T2242]
+  files: [src/run-task.ts, test/check-proof-warns-when-its-target-differs-from-head.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main b790deee. `checkProofCommand` resolves each proof's path and
+    executes it with `execWhitelistedProof` in the checkout as it stands; only `--base` reads blobs
+    from a ref (W1-T912). Nothing compares the files a proof reads with HEAD, so an uncommitted or
+    unstaged edit answers locally and is absent from what was pushed. On 2026-10-05 #9209's grep proof
+    passed `rmd check-proof` in a dirty worktree and the reviewer, reading the pushed head, failed it
+    twice. src/run-task.ts sits at its comment-load ceiling: add no comment lines there.
+  design: |
+    Before executing, check-proof asks git (through an injectable seam) whether each path the proof
+    reads is modified, staged or untracked relative to HEAD; for each one it prints one stderr line
+    naming the path and saying the pushed head may answer differently. The verdict and exit code are
+    unchanged; a failed git read prints nothing extra.
+  acceptance:
+    - claim: "with a fake status seam reporting the proof's file modified, check-proof prints a warning naming that path and keeps its exit code, prints none for a clean file, and prints none when the seam throws"
+      proof: "unit test: test/check-proof-warns-when-its-target-differs-from-head.test.ts"
+  falsifier: |
+    Drop the status check: no warning is printed for the modified file and the test fails.
