@@ -51031,7 +51031,7 @@ export function progressWatchdogCommand(
   return 0;
 }
 
-export interface ClaimVerbDeps {
+export interface ClaimVerbOpts {
   reserver?: DispatchClaimReserver;
   isPlanned?: (taskId: string) => boolean;
   localHost?: string;
@@ -51047,7 +51047,7 @@ export function plannedOnOriginMain(taskId: string, dir: string = repoRoot): boo
   return mono.status === 0 && new RegExp(`^\\s*-?\\s*id:\\s*"?${escaped}"?\\s*$`, "m").test(mono.stdout ?? "");
 }
 
-export function claimCommand(rest: string[], deps: ClaimVerbDeps = {}): number {
+export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
   const taskId = rest[0];
   const badArg = taskId === undefined || taskId.startsWith("-")
     ? "rmd claim: a task id is required"
@@ -51060,11 +51060,11 @@ export function claimCommand(rest: string[], deps: ClaimVerbDeps = {}): number {
     console.error(`rmd claim: '${taskId}' is not a task id`);
     return 2;
   }
-  if (!(deps.isPlanned ?? plannedOnOriginMain)(taskId)) {
+  if (!(opts.isPlanned ?? plannedOnOriginMain)(taskId)) {
     console.error(`rmd claim: ${taskId} is not in the plan on origin/main — refusing to claim an unplanned id`);
     return 1;
   }
-  const reserver = deps.reserver ?? dispatchClaimReserverFor(repoRoot);
+  const reserver = opts.reserver ?? dispatchClaimReserverFor(repoRoot);
   const ref = dispatchClaimRef(taskId);
   if (rest.includes("--drop")) {
     const sha = reserver.holder(taskId);
@@ -51073,7 +51073,7 @@ export function claimCommand(rest: string[], deps: ClaimVerbDeps = {}): number {
       return 1;
     }
     const identity = parseClaimAnchorMessage(reserver.anchorMessage?.(taskId));
-    const localHost = deps.localHost ?? hostname();
+    const localHost = opts.localHost ?? hostname();
     if (!identity || identity.host !== localHost) {
       const who = identity ? `${identity.pid}@${identity.host}` : "an unreadable anchor";
       console.error(`rmd claim: ${ref} is held by ${who}, not by this host (${localHost}) — refusing to drop another host's claim`);

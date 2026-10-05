@@ -1,40 +1,38 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { test, mock } from "node:test";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "./helpers/git-repo.js";
 import { decideDispatchClaim, dispatchClaimRef, parseClaimAnchorMessage } from "../src/lib/dispatch-claim.js";
 import { claimCommand, COMMANDS, dispatchClaimReserverFor } from "../src/run-task.js";
 
 // W1-T5859: `rmd claim <task-id>` takes the same git-ref CAS claim the fleet's lanes take, so a
 // hand-build is visible to dispatch before its branch or PR is. Driven against a REAL bare remote.
 
-const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
-Object.assign(process.env, { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" });
+// The reserver runs git through spawnSync with the inherited environment, so the fixture's identity
+// must be in process.env for `commit-tree` (the anchor mint) to succeed on a stripped runner.
+Object.assign(process.env, {
+  GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
+  GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+  GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
+  GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+});
 
-function git(dir: string, ...args: string[]): string {
-  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", env: GIT_ENV });
-}
-
-interface Fixture { bare: string; work: string; cleanup(): void }
+interface Fixture { bare: string; work: string; setOrigin(url: string): void; cleanup(): void }
 
 function fixture(): Fixture {
-  const bare = mkdtempSync(join(tmpdir(), "rmd-claim-verb-bare-"));
-  const work = mkdtempSync(join(tmpdir(), "rmd-claim-verb-work-"));
-  execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", bare], { env: GIT_ENV });
-  execFileSync("git", ["init", "--quiet", "-b", "main", work], { env: GIT_ENV });
-  writeFileSync(join(work, "seed.txt"), "seed\n");
-  git(work, "add", "-A");
-  git(work, "commit", "--quiet", "-m", "chore: seed");
-  git(work, "remote", "add", "origin", bare);
-  git(work, "push", "--quiet", "origin", "main");
+  const bareRepo = gitRepo({ bare: true, kind: "claim-verb-bare" });
+  const workRepo = gitRepo({ kind: "claim-verb-work" });
+  workRepo.addRemote("origin", bareRepo.dir);
+  workRepo.git("push", "--quiet", "origin", "main");
   return {
-    bare,
-    work,
+    bare: bareRepo.dir,
+    work: workRepo.dir,
+    setOrigin: (url) => workRepo.git("remote", "set-url", "origin", url),
     cleanup() {
-      rmSync(bare, { recursive: true, force: true });
-      rmSync(work, { recursive: true, force: true });
+      bareRepo.cleanup();
+      workRepo.cleanup();
     },
   };
 }
@@ -103,7 +101,7 @@ test("rmd claim a second time exits 1 naming the holder and leaves the first cla
 test("rmd claim with an unreachable origin exits 1 without claiming", () => {
   const f = fixture();
   try {
-    git(f.work, "remote", "set-url", "origin", join(f.bare, "does-not-exist"));
+    f.setOrigin(join(f.bare, "does-not-exist"));
     const r = run(["W1-T5859"], { reserver: dispatchClaimReserverFor(f.work), isPlanned: () => true });
     assert.equal(r.code, 1);
     assert.match(r.err, /cannot reach origin to claim refs\/rmd-dispatch\/W1-T5859/);
