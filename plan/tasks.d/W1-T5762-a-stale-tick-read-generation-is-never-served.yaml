@@ -1,0 +1,37 @@
+- id: W1-T5762
+  title: "A STALE TICK-READ GENERATION IS NEVER SERVED — #9188's `onePassPerGeneration` hands a published generation to the first pass that asks, however old, and `refreshMerged` answers every refill from it while it is set, so when the tick's own sweep was skipped the first retriggered pass an hour later still reads the tick-top snapshot"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — the age bound on a served tick-read generation
+  band_meaning: span
+  origin: "operator session 2026-10-04: watch log 23:29Z, #9188 follow-up (generation age check)"
+  plan_refs: [W1-T4075, W1-T5761, W1-T5749]
+  files: [src/lib/read-plane.ts, src/run-task.ts, test/a-stale-tick-read-generation-is-never-served.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 9c38366f (contains #9188). `ReadGeneration<T>`
+    (src/lib/read-plane.ts) carries `generation`, `source` and `facts`, no time. `onePassPerGeneration`
+    serves a published generation once per number, so a generation published at the top of a tick
+    whose own sweep was skipped (a sweep already in flight) is served to the next consumer whenever it
+    comes; the 10-04 22:05Z boot published at ~22:08 and its next consumer came from a dispatch
+    phase that ran to 23:35Z (W1-T5761). daemonCommand's `refreshMerged` (src/run-task.ts) returns
+    `lastProj` merged flags whenever `tickReadGeneration` is set, and `bindCheckItems` reads its
+    `boardItems`, with no age check either. src/run-task.ts sits at its comment-load ceiling: add no
+    comment lines there.
+  design: |
+    A generation records `publishedAtMs` from the injected clock. A named BACKSTOP bound (e.g.
+    `TICK_READ_MAX_AGE_MS`, a few poll intervals) applies to every consumer: `onePassPerGeneration`
+    reads its own generation instead of serving an older one, and `refreshMerged`/the board binder
+    fall back to their live read; each refusal logs one `tick_read.stale_refused` row with the age.
+  acceptance:
+    - claim: "a generation older than the bound is not served by onePassPerGeneration and the consumer reads its own, while one younger than the bound is served exactly once as today"
+      proof: "unit test: test/a-stale-tick-read-generation-is-never-served.test.ts"
+  falsifier: |
+    Drop the age check: the fixture's hour-old generation is served to the first pass and the test
+    fails.

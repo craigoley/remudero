@@ -1,0 +1,45 @@
+- id: W1-T5779
+  title: "A PREREQUISITE SPLIT PR OPENS ON A CONFORMING HEAD WITH AN ACCEPTANCE BLOCK — `renderPrerequisitePrPrompt` tells the Rule-25 split worker to open \"a fresh branch\" with `gh pr create` and names neither the head form nor the body, so #9206 (`prereq-instrument-1791164997643`, split out of #9198) was born red on head-identity-gate and acceptance-author-gate, unfixable on the PR"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the prerequisite PR the fix rung asks for is born admissible
+  band_meaning: span
+  origin: "operator session 2026-10-05: fleet PR #9206 red 30+ min on head-identity-gate and acceptance-author-gate"
+  plan_refs: [W1-T2436, W1-T3172, W1-T3388, W1-T1060, W1-T297]
+  files: [src/lib/prompt-render.ts, src/run-task.ts, test/a-prerequisite-split-pr-opens-on-a-conforming-head-with-acceptance.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main f0452a82. The fix rung's instrument-entanglement arm (src/run-task.ts,
+    the `escalateInstrumentEntangled` block) calls `buildPrerequisitePrDispatchArgs`, whose prompt is
+    `renderPrerequisitePrPrompt` (src/lib/prompt-render.ts): "Starting from a fresh branch off
+    `origin/main` ... Push your branch and open the pull request against `main` with `gh pr create`".
+    It names no branch, no trailer and no body shape, and a dispatched worker never loads CLAUDE.md
+    (`settingSources: []`). LIVE 2026-10-05: the sweep disposed #9198 blocked-fixable at 01:49:51Z
+    ("structured instrument entanglement — dispatching W1-T2436 prerequisite split worker"); the
+    worker opened #9206 at 01:57:55Z as app/remudero-fleet on `prereq-instrument-1791164997643`, with
+    no `Remudero-Task:` trailer and no `## Acceptance` section. scripts/head-identity-gate.mjs admits
+    `run-<taskId>-<epochMs>`, `run-unfiled-<epochMs>` (`RUN_BRANCH_UNFILED_RE`), a trailer, or a
+    non-code diff (#9206 changes ci.yml and scripts/); acceptance-author-gate refuses a body with no
+    Acceptance block. GitHub cannot rename an open PR's head, so the PR is stranded at birth, and the
+    rung then waits on its CI (`waitForCiGreen`) before escalating.
+  design: |
+    (i) The rung mints the head itself as `run-unfiled-<epochMs>` (the prerequisite builds no filed
+    task, so a `Remudero-Task:` trailer would be a false credit) and passes it to
+    `renderPrerequisitePrPrompt`, which names that exact branch and a PR body that carries a
+    `## Acceptance` section with at least one `unit test:` or `grep:` proof naming a line the PR adds.
+    (ii) Before `waitForCiGreen`, the rung reads the opened PR's head ref and body: a head that is not
+    the minted branch, or a body `acceptanceAuthorTimeCheck` refuses, logs
+    `fix.prerequisite_dispatch_failed` with the reason and escalates as that arm does today, instead
+    of waiting out a red it cannot fix. Add no comment lines to src/run-task.ts (comment ceiling).
+  acceptance:
+    - claim: "the prerequisite prompt names a minted run-unfiled-<epochMs> head and an Acceptance section, and with a fake worker the rung escalates naming the head when the PR opens on another head or with a body acceptanceAuthorTimeCheck refuses, without waiting on CI"
+      proof: "unit test: test/a-prerequisite-split-pr-opens-on-a-conforming-head-with-acceptance.test.ts"
+  falsifier: |
+    Restore the prompt's unnamed "fresh branch": the prompt assertion finds no run-unfiled head and
+    the test fails.

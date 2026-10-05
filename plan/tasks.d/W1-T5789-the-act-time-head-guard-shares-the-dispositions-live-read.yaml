@@ -1,0 +1,34 @@
+- id: W1-T5789
+  title: "THE ACT-TIME HEAD GUARD SHARES THE DISPOSITION'S LIVE READ — W1-T5749's guard reads `readLiveState` before every acting disposition and blocked-fixable and conflicted then read it again (one extra REST read each), and the `sweep.disposed` row of a head-moved stand-down names only the snapshot head"
+  repo: remudero
+  depends_on: [W1-T5749]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — one live read per acting disposition, wired where the guard is built
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5749 (#9204) follow-up"
+  plan_refs: [W1-T5749, W1-T177, W1-T106]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/the-act-time-head-guard-shares-the-dispositions-live-read.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main f0452a82 (#9204 merged). `runSweep` (src/lib/sweep.ts) awaits
+    `deps.readLiveHeadSha?.(pr)` before the disposition switch; the daemon wires it as
+    `liveHeadShaFrom(effects.readLiveState)`, one fresh REST read that keeps only `headSha`. The
+    `blocked-fixable` and `conflicted` arms then call `deps.readLiveState?.(pr)` again with nothing
+    between the two reads, so each acting fix disposition pays two reads of the same PR. When the
+    guard stands an act down it writes `sweep.head_moved` (both shas), but the `sweep.disposed` row
+    for that PR carries `head_sha` = the snapshot head and the new head only inside the reason text.
+  design: |
+    Read `LiveStateResult` once at the guard (a `readLiveState`-shaped dep) and hand it to the arm,
+    so blocked-fixable and conflicted reuse it; the stale-red release keeps its own final read. A
+    head-moved `sweep.disposed` row also carries `live_head_sha`. Only cheap: if the arms cannot take
+    the shared read without a restructure, record that and stop.
+  acceptance:
+    - claim: "an acting blocked-fixable or conflicted disposition reads the PR's live state once, and a head-moved stand-down's sweep.disposed row carries live_head_sha"
+      proof: "unit test: test/the-act-time-head-guard-shares-the-dispositions-live-read.test.ts"
+  falsifier: |
+    Restore the arm's own `readLiveState` call: the counting fake sees two reads and the test fails.

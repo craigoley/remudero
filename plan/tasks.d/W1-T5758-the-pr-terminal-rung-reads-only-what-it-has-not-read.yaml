@@ -1,0 +1,39 @@
+- id: W1-T5758
+  title: "THE PR-TERMINAL RUNG READS ONLY WHAT IT HAS NOT READ — W1-T5318's `runPrTerminalReconcile` re-reads and parses the whole live ledger synchronously on every full sweep pass, and its first pending PR per process runs a synchronous union scan of every rotation: 5.9 s over 400 archives on the fleet host's state dir, on the daemon loop, once per boot"
+  repo: remudero
+  depends_on: [W1-T5318]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium
+  origin: "operator session 2026-10-04: watch log 22:55Z, W1-T5318 (#9179) follow-up (a)"
+  plan_refs: [W1-T5318, W1-T5689, W1-T5724]
+  files: [src/lib/sweep.ts, test/the-pr-terminal-rung-reads-only-what-it-has-not-read.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 9c38366f. `sweepPrTerminalRung` (src/run-task.ts) runs inside
+    `buildSweepHook` on every full pass and calls `runPrTerminalReconcile` (src/lib/sweep.ts), which
+    starts with `(deps.readLedger ?? readLedgerLines)(deps.ledgerPath)` — a synchronous read and
+    parse of the whole live file — and, when any PR is pending, `terminalKeysInArchives`, a
+    `readLedgerUnionRecordsSync` over every rotation, memoised per process. MEASURED 2026-10-05
+    (read-only, on ~/rmd-state2/state): live file 5.0 MB / 9,697 rows parsed in 56 ms; the archive
+    scan over 400 rotations took 5,879 ms. The daemon boots ~16.7 times a day (restart report), so
+    the scan is a ~6 s loop freeze per boot that grows with the archive count; the live read adds
+    a parse of the whole file per pass while the restart work is removing such freezes. The rung is
+    live and doing its job (1,142 `pr.terminal` rows by 00:04Z on 10-05).
+  design: |
+    (i) Keep a per-ledger-path cursor (inode, byte offset) with the named and terminal key sets;
+    each pass parses only the bytes appended since, and starts over when the inode changes or the
+    file shrinks (a rotation).
+    (ii) The archive half becomes an awaited `readLedgerUnionRecords` (async), so a boot's first
+    pending PR no longer blocks the loop; the rung awaits it before appending, so the dedup still
+    holds. Rows written are byte-identical to today's.
+  acceptance:
+    - claim: "a second pass over an appended live file parses only the appended rows, a rotated file is read from the start, the archive dedup is awaited off the loop, and no PR gets a second pr.terminal row"
+      proof: "unit test: test/the-pr-terminal-rung-reads-only-what-it-has-not-read.test.ts"
+  falsifier: |
+    Drop the cursor: the injected reader is asked for the whole file on the second pass and the
+    test fails.

@@ -1,0 +1,35 @@
+- id: W1-T5791
+  title: "A BATCHED PR CARRIES ITS MERGE TIME — `BatchedPr` (status.ts) drops the `merged_at` its search page already returns, so the retro's sync gateway credits a pre-marker gate-side merge with its local Remudero-Task commit date instead of GitHub's merge time, which W1-T5649's design (iii) asked for"
+  repo: remudero
+  depends_on: [W1-T5649]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — the batched merge time reaches the retro credit
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5649 (#9216) follow-up"
+  plan_refs: [W1-T5649, W1-T2509, W1-T3104]
+  files: [src/lib/status.ts, src/run-task.ts, test/a-batched-pr-carries-its-merge-time.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main f0452a82 and #9216 (W1-T5649, open). `BatchedPr`
+    (src/lib/status.ts) has number, url, state, headRefName, headRefOid, body, autoMergeRequest and
+    title; the batched search row's `pull_request.merged_at` is read only to derive `state`
+    (`prStateFromRest`). #9216's `retroShippedGithubGateway` answers trailer reads from one
+    `buildBatchedGithub` walk, so its merge time for a pre-marker run comes from the local trailer
+    commit's date (measured in #9216's body: #9091's squash commit is dated 1 s before its
+    `mergedAt`). The awaited gateway reads `merged_at` from its own search. status.ts was outside
+    W1-T5649's `files:`.
+  design: |
+    Carry `mergedAt` on `BatchedPr` and on the `PrRef` the batched `findMergedByTrailer` returns, and
+    have the sync retro gateway hand it to `shippedSince`, which prefers it over the commit date
+    (the commit date stays the fallback when it is absent). If W1-T5649 has not merged, stop and
+    record needs-design. Add no comment lines to src/run-task.ts.
+  acceptance:
+    - claim: "a batched trailer hit carries the search row's merged_at, and the sync retro gateway credits a pre-marker run with that time rather than its trailer commit's date"
+      proof: "unit test: test/a-batched-pr-carries-its-merge-time.test.ts"
+  falsifier: |
+    Drop `mergedAt` from the batched row: the credited time is the commit date and the test fails.
