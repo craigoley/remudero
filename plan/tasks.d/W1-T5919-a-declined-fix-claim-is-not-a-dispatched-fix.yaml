@@ -1,0 +1,69 @@
+- id: W1-T5919
+  title: "A DECLINED FIX CLAIM IS NOT A DISPATCHED FIX — `dispatchFix` returns normally after `sweep.fix.checkout_claim_declined`, so runSweep records the blocked-fixable disposition acted:true and `prior.fixed` dedups that head as fix already dispatched; W1-T1210's no-dispatch re-arm is task-keyed, so an earlier head's `fix.dispatch` row masks it and the PR waits silently forever"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the fix dedup counts only a real dispatch, and a repeatedly declined claim escalates after a BACKSTOP bound; the owner recovery itself is W1-T5918
+  band_meaning: span
+  origin: "operator session 2026-10-05: #9362/#9379 stuck on a declined fix claim after a daemon restart"
+  plan_refs: [W1-T1127, W1-T1210, W1-T1209, W1-T2863, W1-T2952, W1-T3822, W1-T5918]
+  files: [src/lib/sweep.ts, src/lib/ledger.ts, test/a-declined-fix-claim-is-not-a-dispatched-fix.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    LIVE 2026-10-05. After the 19:26Z daemon restart (new pid 163869), sweeps disposed #9362
+    (W1-T5285, head 83175eb) `blocked-fixable` acted:true at 19:58:27 and #9379 (W1-T5882, head
+    f251fd2) at 20:48:16. Each dispatch was declined at the checkout claim one second later
+    (`sweep.fix.checkout_claim_declined`, `registered_worktree_owner` /
+    `owner_dirty_recovery_preserve_failed`, see W1-T5918). No `fix.dispatch` row was written for
+    either head. Every pass afterwards (19:58 to 21:57 for #9362, 20:48 to 21:57 for #9379)
+    disposed them `blocked-fixable` acted:false with stand_down_reason "fix already dispatched
+    for this head (<sha>) — awaiting its outcome before spending another strike". No retry,
+    escalation or alert followed until the operator merged main by hand at about 22:00.
+
+    WHERE THE SEED COMES FROM. `priorActionsFromLedger` (src/lib/sweep.ts) folds `prior.fixed`
+    from `sweep.disposed` rows with `acted === true` and disposition `blocked-fixable` or
+    `conflicted`. It reads the disposition only, never a `fix.dispatch` row. W1-T1127 made a
+    THROW before `fix.dispatch` reach runSweep's catch (acted:false). The registered-owner
+    decline in `dispatchFix`, however, RETURNS by W1-T2863's own design ("return with no lock
+    reclaim, worktree creation, worker spawn or strike"), so runSweep records acted:true.
+    The `blocked-fixable` arm in runSweep computes
+    `dispatchedThisHead = prior.fixed.has(pr@head)` and re-arms only through
+    `fixRungStalledWithoutNewHead(ledgerLines, pr.taskId)`. That function is TASK-keyed and
+    returns `stalled || !dispatched`. W1-T5285 has a 17:34:58 `fix.dispatch` at head 81c30d8
+    followed by `fix.done`; W1-T5882 has a 18:12:16 `fix.dispatch` at 69516e6 with no outcome
+    row, because its worker died in the restart. In both cases an earlier head's dispatch
+    satisfies `dispatched` and leaves `stalled` false, so W1-T1210's "no owning dispatch reads
+    as stalled" never fires for the declined head. The decline rows also carry no `head_sha`.
+  design: |
+    (1) The real dispatch marker is the one W1-T1127/W1-T2403 already name: the `fix.dispatch`
+    or `fix.retrigger` row that flips `dispatchStarted` in `dispatchFix`'s log wrapper. A
+    registered-owner decline returns before it, so `dispatchFix` reports that outcome (for
+    example a `claimDeclined` result carrying `owner_recovery_reason`). runSweep then records
+    the disposition acted:false with a stand_down_reason naming the decline, and the existing
+    `acted !== true` skip in `priorActionsFromLedger` keeps it out of `prior.fixed`. A pass
+    after a decline therefore re-attempts the claim, which costs no strike and spawns no
+    worker. A dispatch in flight (acted:true, worker running, `fix.dispatch` not yet written)
+    keeps its dedup unchanged, and a live branch-claim holder (`InflightLockError`) still
+    stands down as today.
+    (2) Stamp `head_sha` on every `sweep.fix.checkout_claim_declined` row. Retain the step
+    across rotation by adding it to DECISION_RELEVANT_LEDGER_STEPS in src/lib/ledger.ts as a
+    bare entry (that file is at its comment-load ceiling). Its reader is the bound in (3).
+    (3) Add a constant `FIX_CLAIM_DECLINE_BACKSTOP`, tagged BACKSTOP in its doc comment. Once
+    one (PR, head) has that many decline rows, escalate needs-human once through the sweep's
+    existing escalation path, naming the PR, head, owner path, owner_recovery_reason and the
+    decline count. Dedup the escalation per (PR, head, reason), so a new head or a changed
+    reason re-earns it. Below the bound, each declined pass is visible as an acted:false
+    disposition naming the decline, never as "fix already dispatched".
+  acceptance:
+    - claim: "a blocked-fixable pass whose fix dispatch is declined at the checkout claim writes no fix.dispatch row and is not deduped as fix already dispatched on the next pass, even when the task holds an earlier head's fix.dispatch row, so the claim is re-attempted; after the BACKSTOP number of declines on one PR head the sweep escalates needs-human exactly once naming the owner and reason, while a dispatch that wrote fix.dispatch at this head stays deduped"
+      proof: "unit test: test/a-declined-fix-claim-is-not-a-dispatched-fix.test.ts"
+  falsifier: |
+    Keep `dispatchFix`'s decline returning as a normal dispatch: runSweep records acted:true,
+    `prior.fixed` holds pr@head, the earlier head's `fix.dispatch` row makes
+    `fixRungStalledWithoutNewHead` false, the next pass stands down with "fix already dispatched
+    for this head", no escalation is ever filed, and the test fails.

@@ -1,0 +1,75 @@
+- id: W1-T5920
+  title: "A JOB REQUEUE GITHUB REFUSES BECAUSE ITS RUN IS STILL RUNNING IS DROPPED — `actions/jobs/{id}/rerun` answers HTTP 403 'already running' or 'only jobs from the current attempt' during an Actions outage, the sweep and the fix rung's FLAKE rerun both spend their one bounded requeue on the refusal, and a FLAKE fix.done whose requeue never landed then holds the PR under 'fix already dispatched for this head' forever"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a requeue refused because its run is in flight is deferred and retried once the run concludes, bounded, and a FLAKE outcome whose requeue never landed does not hold the dispatch dedup
+  band_meaning: span
+  origin: "operator session 2026-10-05: #9362/#9379 stuck on a declined fix claim after a daemon restart"
+  plan_refs: [W1-T1223, W1-T2283, W1-T2403, W1-T2430, W1-T2431, W1-T3194, W1-T1210, W1-T5919]
+  files: [src/lib/sweep.ts, src/run-task.ts, src/lib/ledger.ts, test/a-job-requeue-refused-while-its-run-is-running-is-retried-not-dropped.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    LIVE 2026-10-05, during a GitHub Actions outage. 203 `sweep.check_requeue.error` rows
+    record `gh api -X POST repos/craigoley/remudero/actions/jobs/<id>/rerun` refused: 200 read
+    "gh: The workflow run containing this job is already running (HTTP 403)" and 3 read "gh: Only
+    jobs from the current attempt can be re-run (HTTP 403)". Example: PR #9388, 16 checks at
+    21:47:4xZ (squash-trailer-gate job 111989995761 among them), each with its
+    `sweep.check_requeued` row already written. Nothing retried any of them.
+
+    THE FIX RUNG HIT THE SAME REFUSAL. Workers returned fix_outcome FLAKE, and the rung's
+    `rerun-once` arm called `requeueActionsJob`. Every POST was refused 403 "already running"
+    and logged under the main-health step name `main.health.ci_requeue.error`. Each round then
+    wrote `fix.done` with `flake_claim: refuted`: W1-T5901 #9396 head 2e2dbad7 at 20:28:19,
+    W1-T5520 #9382 head 9d3a72c1 at 20:28:49, PR-9415 head 15888f0d at 21:42:48. Every later pass
+    disposed those PRs `blocked-fixable` acted:false with "fix already dispatched for this head
+    (<sha>) — awaiting its outcome before spending another strike" (#9396 and #9382 from 20:44 to
+    22:06) until the operator session merged main by hand at about 22:10.
+
+    WHY, IN THE CODE. (1) Both requeue sites write the bounding `sweep.check_requeued`
+    (CHECK_REQUEUE_STEP) row BEFORE the POST. The W1-T1223 cancelled-check arm in runSweep
+    ignores `requeueCheck`'s boolean, and the fix rung's `rerun-once` adds the key to `spent`
+    first. A refused POST therefore consumes the single retry `requeuedCheckKeysFromLedger`
+    allows per head and check, so the next pass escalates or does nothing. A 403 "already
+    running" is not a failed requeue: the run is in flight and its verdict is not in yet. (2)
+    `rerun-once` folds "the requeue never happened" into `flake_claim: refuted`, the same value as
+    "the requeue ran and CI stayed red". (3) `fixRungStalledWithoutNewHead` has no `fix.done`
+    arm, so a dispatch ending in `fix.done` reads not stalled. `prior.fixed` (seeded by the
+    acted:true disposition) then holds the head with nothing left to move it. W1-T1223/W1-T2283/
+    W1-T2430/W1-T3194 built and widened the requeue. W1-T2403 made a retrigger cost no strike.
+    None of them handles a refusal caused by the run still being in flight.
+  design: |
+    (1) Classify the job-rerun refusal in the one place both lanes share
+    (`requeueActionsJob`, and the sweep's `requeueCheck` closure). An HTTP 403 whose message is
+    "already running" or "only jobs from the current attempt" is DEFERRED, distinct from
+    `dispatched` and `failed`. Return a typed outcome rather than a boolean, and log the fix lane's
+    refusal under a fix-lane step instead of `main.health.ci_requeue.error`.
+    (2) A deferred requeue does not spend W1-T1223's one bounded retry. Write it as its own
+    `sweep.check_requeue.deferred` row (head, check, job id, refusal class), and have
+    `requeuedCheckKeysFromLedger` count only accepted attempts. On a later pass, once the fresh
+    rollup shows that check's run concluded and the check still red or cancelled, requeue it again,
+    re-resolving the CURRENT attempt's job id (the 'current attempt' refusal names a stale one).
+    Bound deferrals per (head, check) with a constant `CHECK_REQUEUE_DEFERRAL_BACKSTOP`, tagged
+    BACKSTOP in its doc comment. At the bound, escalate once through the existing
+    `escalateCancelledCheck` / `escalateInfrastructureCheck` path, naming the refusal.
+    Retain the deferred step in DECISION_RELEVANT_LEDGER_STEPS (src/lib/ledger.ts, bare entry)
+    because the bound reads it.
+    (3) The fix rung's `rerun-once` records `flake_claim: requeue_deferred` (not `refuted`)
+    when no requeue was accepted. `fixRungStalledWithoutNewHead` reads a `fix.done` carrying that
+    claim as stalled, so `prior.fixed` no longer holds the head. The next blocked-fixable pass then
+    takes the deferred requeue in (2) for the flake-claimed checks before it would spend another
+    worker strike. A FLAKE whose requeue was accepted and whose CI went green or stayed red keeps
+    today's confirmed/refuted accounting.
+  acceptance:
+    - claim: "a job rerun refused with HTTP 403 already running or not the current attempt is recorded deferred without spending the head's one bounded requeue, is requeued once its run concludes, and escalates after the BACKSTOP number of deferrals; a FLAKE fix round whose requeue was refused records requeue_deferred and does not hold the head under fix already dispatched, while an accepted requeue keeps today's single-retry bound and flake accounting"
+      proof: "unit test: test/a-job-requeue-refused-while-its-run-is-running-is-retried-not-dropped.test.ts"
+  falsifier: |
+    Keep the boolean `requeueCheck` and write CHECK_REQUEUE_STEP before the POST with no
+    deferred class: a 403 already-running refusal spends the key, the next pass re-queues nothing,
+    the FLAKE round records `refuted`, the following pass stands down "fix already dispatched for
+    this head", and the test fails.
