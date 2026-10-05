@@ -32,10 +32,12 @@ import {
   logArmAttribution,
   mergeDirectViaRest,
   readHeadShaRest as readArmHeadShaRest,
+  readMergeQueueMembership,
   realArmDeps,
   stackPrerequisiteFromRest,
   type ArmAttemptResult,
   type ArmReprobeFacts,
+  type MergeQueueMembership,
   type ArmDeps,
   type ArmLane,
   type ArmOutcome,
@@ -1660,6 +1662,8 @@ export const SWEEP_EFFECT_SURFACE = [
   "repairPlanPr",
   "dispatchPlanGateRound",
   "strikeLadder",
+  "readMergeQueueMembership",
+  "escalateRearmExhausted",
 ] as const;
 
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
@@ -1709,6 +1713,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "readPlanRepairFacts"
   | "repairPlanPr"
   | "dispatchPlanGateRound"
+  | "readMergeQueueMembership"
+  | "escalateRearmExhausted"
 > & {
   /** W1-T3618 — see `reviewerCodeStaleThisPassImpl`. Not a `SweepDeps` member: it is a read-back on
    *  this builder's own return, not an effect the sweep invokes. */
@@ -2487,6 +2493,32 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T3194 — a repeated or unaddressable positively identified infrastructure failure is
     // terminal for the deterministic retry lane, but never a source-code worker strike. The
     // escalation gateway supplies durable episode dedup for the exact task/head/cause tuple.
+    readMergeQueueMembership: (pr) => readMergeQueueMembership(pr.prUrl, readJsonImpl),
+
+    // W1-T5909: the same gateway dedup as the two check escalations — one issue per task/head/cause.
+    escalateRearmExhausted: (pr, rearms, bound) => {
+      return tryEscalate(
+        {
+          class: "BLOCKED",
+          taskId: escalationTaskIdFor(pr),
+          runId,
+          headSha: pr.headSha,
+          cause: "ci",
+          summary: `auto-merge disabled again after ${rearms} sweep re-arms at one head — ${pr.prUrl}`,
+          detail:
+            `GitHub disabled auto-merge on ${pr.prUrl} at head ${pr.headSha} after a sweep arm, and the ` +
+            `sweep re-armed it ${rearms} times (bound ${bound}). The merge queue ejecting it on every ` +
+            `group run is the usual cause; the sweep will not re-arm this head again.`,
+          options: [
+            { label: "investigate-queue", detail: "read the PR's merge-queue removal events and the group runs they name." },
+            { label: "re-arm-by-hand", detail: "re-arm auto-merge once the group failure is understood." },
+          ],
+          recommendation: "investigate-queue",
+        },
+        { issues, ledgerPath, runId },
+      );
+    },
+
     escalateInfrastructureCheck: (pr, check, reason, signature) => {
       tryEscalate(
         {
@@ -3989,6 +4021,24 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
  *  completed post that it still cannot count turns the next demand into an escalation. Two is the
  *  first admission plus one retry; a loop is only provable after the retry also completed. */
 export const REVIEW_INPUT_ADMISSION_BACKSTOP = 2;
+
+/** W1-T5909 — BACKSTOP: re-arms per (PR, head) after GitHub disarmed a sweep arm (W1-T4784's cap).
+ *  A queue that ejects one head this often is failing its group run, not flaking. */
+export const MAX_REARMS_AFTER_DISARM_PER_HEAD = 3;
+export const REARMED_AFTER_DISARM_STEP = "automerge.rearmed_after_disarm";
+export const REARM_EXHAUSTED_STEP = "automerge.rearm_exhausted";
+
+const rowsAtHead = (lines: ReadonlyArray<Record<string, unknown>>, step: string, pr: OpenPrView) =>
+  lines.filter((line) => line.step === step && line.pr_number === pr.prNumber && line.head_sha === pr.headSha);
+
+async function observedQueueMembership(deps: SweepDeps, pr: OpenPrView): Promise<MergeQueueMembership | undefined> {
+  if (!deps.readMergeQueueMembership) return undefined;
+  try {
+    return await deps.readMergeQueueMembership(pr);
+  } catch (e) {
+    return { unreadable: true, reason: String((e as Error)?.message ?? e) };
+  }
+}
 
 /** W1-T5863 — the sweep's admissions and the completed posts for ONE exact review input. */
 export interface ReviewInputLoopFacts {
@@ -9467,6 +9517,9 @@ export interface SweepDeps {
     mode?: "armed-idle",
   ) => ArmOutcomeName | ArmAttemptOutcome | void | Promise<ArmOutcomeName | ArmAttemptOutcome | void>;
   readArmFacts?: (pr: OpenPrView) => ArmReprobeFacts | undefined | Promise<ArmReprobeFacts | undefined>;
+  /** W1-T5909 — read only for an unarmed `mergeable` PR on a pass that may arm. Omitted: the memory dedup. */
+  readMergeQueueMembership?: (pr: OpenPrView) => MergeQueueMembership | Promise<MergeQueueMembership>;
+  escalateRearmExhausted?: (pr: OpenPrView, rearms: number, bound: number) => string | null | Promise<string | null>;
   /** W1-T5403 — risk-judge a head whose run ended `handed_off`, once, before the `mergeable` arm.
    *  Production wires {@link riskJudgeHandedOffHead}; omitted, such a head is held, never armed. */
   judgeHandedOffHead?: (pr: OpenPrView) => Promise<HandedOffHeadJudgment>;
@@ -12436,6 +12489,8 @@ export async function runSweep(
     // stand-down is what two readers independently misread as an unwired action path.
     let dedupStandDownReason: string | undefined;
     let armedIdleDue = false;
+    let rearmAfterDisarm: number | undefined;
+    let queueMembership: MergeQueueMembership | undefined;
     if (disposition !== "mergeable" || pr.autoMergeArmed !== true || idleHeads.get(pr.prNumber) !== pr.headSha) {
       clearIdle(pr);
     }
@@ -12457,8 +12512,32 @@ export async function runSweep(
         const hold = automergeHoldFromLedger(ledgerLines, pr.prNumber);
         if (hold && pr.autoMergeArmed === true) holdToWithdraw = hold;
         const armedByGitHub = pr.autoMergeArmed === true;
-        const armedByPriorPass = !armedByGitHub && prior.armed.has(`${pr.prNumber}@${pr.headSha}`);
-        alreadyDone = armedByGitHub || armedByPriorPass || refused || hold !== undefined;
+        // W1-T5909: a queued PR reads `auto_merge: null` too, so the queue is asked before the
+        // memory is believed. The memory dedups only when that read is unwired or unreadable.
+        const mergeActionable = deps.actionable?.("mergeable") ?? true;
+        queueMembership = !armedByGitHub && !refused && hold === undefined && mergeActionable
+          ? await observedQueueMembership(deps, pr) : undefined;
+        const queued = queueMembership === "queued";
+        const priorArmAtHead = prior.armed.has(`${pr.prNumber}@${pr.headSha}`);
+        const armedByPriorPass = !armedByGitHub && priorArmAtHead && typeof queueMembership !== "string";
+        const disarmedByGitHub = priorArmAtHead && queueMembership === "not-queued";
+        const rearms = disarmedByGitHub ? rowsAtHead(ledgerLines, REARMED_AFTER_DISARM_STEP, pr).length : 0;
+        const rearmExhausted = disarmedByGitHub && rearms >= MAX_REARMS_AFTER_DISARM_PER_HEAD;
+        if (disarmedByGitHub && !rearmExhausted) rearmAfterDisarm = rearms + 1;
+        alreadyDone = armedByGitHub || queued || armedByPriorPass || rearmExhausted || refused || hold !== undefined;
+        if (rearmExhausted && !deps.dryRun &&
+            !rowsAtHead(ledgerLines, REARM_EXHAUSTED_STEP, pr).some((line) => line.escalated === true)) {
+          const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: REARM_EXHAUSTED_STEP,
+            pr_number: pr.prNumber, head_sha: pr.headSha, rearms, bound: MAX_REARMS_AFTER_DISARM_PER_HEAD };
+          try {
+            // tryEscalate never throws: a null url is an undelivered issue, retried on the next pass.
+            const issueUrl = await deps.escalateRearmExhausted?.(pr, rearms, MAX_REARMS_AFTER_DISARM_PER_HEAD);
+            appendLine(deps.ledgerPath, { ...row, escalated: typeof issueUrl === "string",
+              ...(typeof issueUrl === "string" ? { issue_url: issueUrl } : {}) });
+          } catch (e) {
+            appendLine(deps.ledgerPath, { ...row, escalated: false, reason: String((e as Error)?.message ?? e) });
+          }
+        }
         const idleEligible = armedByGitHub && !refused && hold === undefined && stackParentWithdrawal === undefined;
         if (!idleEligible) clearIdle(pr);
         if (idleEligible && !deps.dryRun && (deps.actionable?.("mergeable") ?? true)) {
@@ -12480,8 +12559,16 @@ export async function runSweep(
               (stackParentWithdrawal.check.detail ?? "declared stack parents are not all merged")
             : idleEligible ? "auto-merge already armed (observed on GitHub) — first idle sighting; awaiting a later pass"
               : "auto-merge already armed (observed on GitHub) — nothing to re-arm";
+        } else if (queued) {
+          dedupStandDownReason = "in the merge queue (observed on GitHub) — nothing to re-arm";
         } else if (armedByPriorPass) {
-          dedupStandDownReason = `auto-merge already armed by a prior sweep pass at this head (${pr.headSha.slice(0, 7)})`;
+          const memory = `auto-merge already armed by a prior sweep pass at this head (${pr.headSha.slice(0, 7)})`;
+          dedupStandDownReason = typeof queueMembership === "object"
+            ? `queue membership unreadable (${queueMembership.reason}) — fell back to the prior-pass arm memory: ${memory}`
+            : memory;
+        } else if (rearmExhausted) {
+          dedupStandDownReason = `GitHub disarmed this head after ${rearms} sweep re-arms (bound ` +
+            `${MAX_REARMS_AFTER_DISARM_PER_HEAD}) — not re-armed; escalated once, see ${REARM_EXHAUSTED_STEP}`;
         } else if (refused) {
           // Carry the SAME `issue_url` the sibling `risk_judge.escalated` row already holds: the
           // pointer exists one row away, and this only moves it to the row a reader reaches first.
@@ -12652,7 +12739,8 @@ export async function runSweep(
     // AND a main tip was read; otherwise `undefined`, so no `main_tip_sha` field is written.
     let baseCausedMainTipSha: string | undefined;
     // W1-T4459: the "blocked-fixable" arm's dedup keys; see `sameHeadRedFixRefusal`.
-    let extraDisposedFields: Record<string, unknown> | undefined;
+    let extraDisposedFields: Record<string, unknown> | undefined = queueMembership === undefined ? undefined
+      : { queue_membership: typeof queueMembership === "string" ? queueMembership : "unreadable" };
     let contradictoryEscalated = false;
     // W1-T254 — PER-PR THROW CONTAINMENT: a thrown action used to propagate straight out of
     // `runSweep` as one unattributed error, aborting the WHOLE pass. Named here and ledgered on
@@ -12713,7 +12801,7 @@ export async function runSweep(
                 (previousAttempt.arm_failure_class === "unknown" ||
                   (previousAttempt.arm_failure_class === undefined && previousAttempt.acted === true));
               const facts = !armedIdleDue ? await deps.readArmFacts?.(pr) : undefined;
-              if (facts) extraDisposedFields = { arm_evidence: facts, arm_evidence_fingerprint: armEvidenceFingerprint(facts) };
+              if (facts) extraDisposedFields = { ...extraDisposedFields, arm_evidence: facts, arm_evidence_fingerprint: armEvidenceFingerprint(facts) };
               if (failedArm && !armedIdleDue) {
                 const publication = armLines.slice(armLines.indexOf(previousAttempt!) + 1).some(line =>
                   line.step === "review.posted" && line.pr_url === pr.prUrl && line.head_sha === pr.headSha &&
@@ -12758,6 +12846,10 @@ export async function runSweep(
               // READ THE OUTCOME. `armAutoMerge` does not throw — it RETURNS which of its seven
               // branches it took, and five of them armed nothing. Discarding it is what let
               // `acted:true` be recorded for a PR that was never armed.
+              if (rearmAfterDisarm !== undefined) {
+                appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: REARMED_AFTER_DISARM_STEP,
+                  pr_number: pr.prNumber, head_sha: pr.headSha, rearm_count: rearmAfterDisarm, bound: MAX_REARMS_AFTER_DISARM_PER_HEAD });
+              }
               const armResult = armedIdleDue ? await deps.arm(pr, "armed-idle") : await deps.arm(pr);
               // W1-T1117: `deps.arm` may return the bare name it always could, or the richer
               // outcome-plus-failureClass object. Unwrap once, here.
