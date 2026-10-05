@@ -317,6 +317,7 @@ export interface GitHub {
    *  accessor: collapsing a FAILED fetch into a PARTIAL one recreates the conflation W1-T119 prevents.
    *  Truncation only OMITS rows, so the deferral sits in `readFailed()`'s arm, never upstream of a credit. */
   readTruncated?(): boolean;
+  readBoardCoverage?(): { openTruncated: boolean; closedFloor?: string };
   /** R-24 (docs/audits/recon-2026-09-05.md): DROP THE FAILURE VERDICTS LEFT BY EARLIER ATTEMPTS, AND NOTHING
    *  ELSE. THE TRAP: a FAILED fetch replaces its half with an EMPTY one and stamps it (the W1-T181 pairing), so
    *  a half is dropped exactly when its verdict is. The delta caches are NOT touched.
@@ -4602,6 +4603,7 @@ export function buildBatchedGithub(
   // the other still carries. The accessor reports their OR.
   let lastOpenTruncated = false;
   let lastClosedTruncated = false;
+  let lastClosedFloor: string | undefined;
   const lastFetchTruncated = (): boolean => lastOpenTruncated || lastClosedTruncated;
   const run =
     opts.exec ??
@@ -4662,7 +4664,10 @@ export function buildBatchedGithub(
       // sets only on a THROW. W1-T2323: recorded against the half that produced it. Only the two real halves
       // reach here, so a third arm would be dead code no fixture could exercise.
       if (half === "open") lastOpenTruncated = fetched.truncated;
-      else lastClosedTruncated = fetched.truncated;
+      else {
+        lastClosedTruncated = fetched.truncated;
+        lastClosedFloor = fetched.truncated ? fetched.closedFloor : undefined;
+      }
       if (half === "open" && !fetched.truncated) snapshotCache?.commitOpen?.(fetched.rows, now());
       // W1-T181: log the payload size on every SUCCESSFUL fetch, so the next approach to whatever ceiling is
       // set above is observable in advance instead of arriving as a silent outage. Call count and mode are
@@ -5056,6 +5061,7 @@ export function buildBatchedGithub(
   };
   const applyMergedOutcome = (outcome: PrewarmChannelOutcome<BoardPrRest>, elapsedMs: number): void => {
     mergedFetchDurationMs = elapsedMs;
+    lastClosedFloor = undefined;
     if (!outcome.ok) {
       mergedOutcome = { failed: true, reason: outcome.reason };
       console.error(`board gateway: batched PR fetch failed (${outcome.reason}): ${outcome.message}`);
@@ -5385,6 +5391,10 @@ export function buildBatchedGithub(
       // this FIRST, never preceded by another method call, still reports accurately.
       index();
       return lastFetchTruncated();
+    },
+    readBoardCoverage() {
+      index();
+      return { openTruncated: lastOpenTruncated, ...(lastClosedTruncated && lastClosedFloor !== undefined ? { closedFloor: lastClosedFloor } : {}) };
     },
     // R-24: NEVER forces a fetch and performs no I/O — the whole point is that a caller can call
     // it at the top of every tick for free. See `resetFailureFlags`'s own doc above.

@@ -23,6 +23,7 @@ import { classificationSnapshotPath, readClassificationSnapshot } from "./fleet-
 import { writeAtomic } from "./fs-race-safe.js";
 import { inboxOwner } from "./inbox-owner.js";
 import { projectProposalHumanGates } from "./ask-classification.js";
+import { consumeHumanGateCounts, unavailableHumanGateCounts, type HumanGateCountSummary, type HumanGateProjection } from "./human-gate.js";
 import type { InboxState } from "./inbox.js";
 import {
   OPERATOR_AGENT_DECISION_STEP,
@@ -40,6 +41,7 @@ import {
 import { READ_MODEL_DIRNAME, readModelSidecarDir, type ReadModelDb } from "./read-model-db.js";
 import type { SourcePhase, ViewDefinition, ViewSource } from "./views.js";
 
+export const NAV_BADGE_VIEW_NAME = "nav-badge";
 export const NAV_BADGE_VIEW_VERSION = 1;
 
 /** The console engine's thresholds (agent.ts `AGENT_THRESHOLDS`). */
@@ -63,7 +65,31 @@ export interface NavBadgeData {
     instances: Array<{ instanceId: string; repository?: string; count?: number; reason?: string }>;
     reason?: string;
   };
-  inbox: { ready?: number; needsYou?: number; fleet?: number; reason?: string };
+  /** `needsYou` stays the proposal-lane count it always was; `decisions` is the shared Inbox decision count. */
+  inbox: { ready?: number; needsYou?: number; fleet?: number; reason?: string; decisions?: HumanGateCountSummary };
+}
+
+/** Why the badge has no composite to count from; its decisions are then a lower bound, never zero. */
+export const NAV_BADGE_NO_COMPOSITE = "the needs-you composite is not available: serve runs no read model";
+
+/**
+ * W1-T5373: the badge's Inbox decisions are the needs-you composite's, read through the shared consumer.
+ * The badge counts nothing itself, so it can never disagree with the composite, the now view or /v1/status.
+ */
+export function withNavBadgeDecisions(data: NavBadgeData, projection: HumanGateProjection | undefined): NavBadgeData {
+  const decisions = projection ? consumeHumanGateCounts(projection) : unavailableHumanGateCounts("needs-you", NAV_BADGE_NO_COMPOSITE);
+  return { ...data, inbox: { ...data.inbox, decisions } };
+}
+
+/** The legacy badge with the composite's decisions overlaid; the undecorated view stays the shadow's legacy side. */
+export function navBadgeWithDecisions(view: ViewDefinition<NavBadgeData>, projection: () => HumanGateProjection | undefined): ViewDefinition<NavBadgeData> {
+  return {
+    ...view,
+    compute: (params) => {
+      const computed = view.compute(params);
+      return "error" in computed ? computed : { ...computed, data: withNavBadgeDecisions(computed.data, projection()) };
+    },
+  };
 }
 
 type Candidate = { proposalId: string; category: string; signal: string; confidence: number };
@@ -304,7 +330,7 @@ function selectInstances<T extends { instanceId: string }>(all: readonly T[], pa
 /** The nav-badge view over serve's own caches, every instance by default or `?instances=a,b`. */
 export function navBadgeView(deps: { scopes: () => readonly NavBadgeScope[]; inboxRoot: string; clock?: Clock }): ViewDefinition<NavBadgeData> {
   return {
-    name: "nav-badge",
+    name: NAV_BADGE_VIEW_NAME,
     version: NAV_BADGE_VIEW_VERSION,
     compute: (params) => {
       const nowMs = (deps.clock ?? systemClock).now();
@@ -462,7 +488,7 @@ export function createNavBadgeReadModelView<S extends { instance: string; ticked
   const sourcesFile = readOnMtimeChange(readNavBadgeSources);
   const classification = readOnMtimeChange((path) => readClassificationSnapshot(dirname(path)));
   return {
-    name: "nav-badge",
+    name: NAV_BADGE_VIEW_NAME,
     version: NAV_BADGE_VIEW_VERSION,
     /** Folds each projected instance's fact delta one chunk per step, so a cold fold is never one unit. */
     prepare: ({ instances }, more) => {

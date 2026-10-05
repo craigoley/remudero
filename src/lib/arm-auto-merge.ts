@@ -32,6 +32,16 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { loadConfig, type Config } from "./config.js";
 import { ledgerPathFor } from "./ledger-path.js";
+import {
+  decidePlanPrMergeSafety,
+  planPrRefreshesFromLedger,
+  planSafetyGitAsync,
+  planSafetyGitSync,
+  planRelPaths,
+  readPlanMergeSafetySteps,
+  type PlanMergeSafeBasis,
+  type PlanMergeSafetyReadings,
+} from "./plan-pr-merge-safety.js";
 import { readLedgerLines } from "./status.js";
 import { ghExec, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
@@ -511,6 +521,9 @@ export interface ArmDeps<A extends boolean = false> {
   /** W1-T5472 — OPTIONAL. Whether the PR's changed files reach `plan/`. Absent keeps W1-T3694's
    *  behind-but-mergeable direct merge for every PR. */
   readPlanTouch?: (prUrl: string) => PlanTouch;
+  /** W1-T5748 — OPTIONAL. What `decidePlanPrMergeSafety` rules on for a behind plan PR GitHub would
+   *  merge as-is. Absent: refreshed, as W1-T5472 did. */
+  readPlanMergeSafety?: (prUrl: string) => MaybeAsync<PlanMergeSafetyReadings, A>;
   /** W1-T5615 — OPTIONAL. Set only by W1-T5492's armed-idle fallback: GitHub already holds an arm,
    *  so the plan-PR hold is skipped and the direct path (which updates a behind plan PR) runs. */
   armStanding?: true;
@@ -577,6 +590,7 @@ export function realArmDeps(
       const target = mergeTargetFromPrUrl(prUrl);
       return target ? planTouchFromRest(target.owner, target.repo, target.prNumber) : "unreadable";
     },
+    readPlanMergeSafety: (prUrl) => runStepsSync(planMergeSafetyInClone(prUrl, loadConfigImpl, ghJson, planSafetyGitSync)),
     sleepSync: (ms) => {
       if (ms <= 0) return;
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -614,11 +628,32 @@ export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig)
       await ghTextAsync(["pr", "merge", prUrl, "--disable-auto"]);
     },
     mergeQueue: (prUrl) => runStepsAsync(cachedMergeQueueSteps(prUrl, ghJsonAsync)),
+    readPlanMergeSafety: (prUrl) => runStepsAsync(planMergeSafetyInClone(prUrl, loadConfigImpl, ghJsonAsync, planSafetyGitAsync)),
     enqueue: async (prUrl) => {
       assertLiveWriteAllowed("gh-pr-merge", `adding ${prUrl} to the merge queue`);
       await ghTextAsync(["pr", "merge", prUrl]);
     },
   };
+}
+
+/** W1-T5748 — the merge-safety readings, with git run in the repo clone the merge probe uses. */
+function* planMergeSafetyInClone(
+  prUrl: string,
+  loadConfigImpl: typeof loadConfig,
+  rest: RestReader,
+  gitIn: typeof planSafetyGitSync,
+): Steps<PlanMergeSafetyReadings> {
+  const target = mergeTargetFromPrUrl(prUrl);
+  if (!target) return { error: `cannot resolve owner/repo/number from ${prUrl}` };
+  let root: string;
+  try {
+    root = loadConfigImpl().root;
+  } catch (e) {
+    // no clone to merge in: an error reading, which refreshes as W1-T5472 did.
+    return { error: String((e as Error)?.message ?? e) };
+  }
+  const clone = join(root, "repos", target.repo);
+  return yield* readPlanMergeSafetySteps(target, rest, gitIn(clone), planRelPaths(clone));
 }
 
 const mergeQueueReads = new Map<string, { at: number; value: boolean }>();
@@ -723,8 +758,15 @@ export interface DirectMergePreflightEvidence {
   error?: string;
   /** W1-T5472 — set only when the plan-touch read ran (a behind PR GitHub would merge as-is). */
   planTouch?: PlanTouch;
-  /** W1-T5472 — why a PR GitHub would merge as-is was updated instead. */
-  reason?: "plan_pr_behind";
+  /** W1-T5472 — why a PR GitHub would merge as-is was updated instead; W1-T5748 — or held, past
+   *  the refresh bound. */
+  reason?: "plan_pr_behind" | "plan_pr_refresh_bound";
+  /** W1-T5748 — why a behind plan PR was safe to merge as-is. */
+  planMergeSafe?: PlanMergeSafeBasis;
+  /** W1-T5748 — why it was not, when it was refreshed or escalated instead. */
+  planMergeUnsafe?: string;
+  /** W1-T5748 — the heads its earlier refreshes replaced, then the current one, once escalated. */
+  refreshedHeads?: string[];
   /** W1-T5615 — GitHub's `mergeable_state` behind a `plan-pr-held` outcome. */
   mergeableState?: string;
 }
@@ -805,8 +847,8 @@ export function armAutoMergeDetailed(
  * (W1-T125) so both the ledger-gated {@link armAutoMerge} and the ungated {@link
  * armAutoMergeAtOpen} share the EXACT same completion logic rather than duplicating it.
  */
-type DirectMergePreflightDeps = Pick<ArmDeps, "say"> &
-  Partial<Pick<ArmDeps, "headSha" | "readMergeFacts" | "updateBranch" | "readPlanTouch">>;
+type DirectMergePreflightDeps = Pick<ArmDeps<true>, "say"> &
+  Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety">>;
 
 type DirectMergePreflightDecision =
   | { proceed: true; evidence?: DirectMergePreflightEvidence }
@@ -816,12 +858,12 @@ type DirectMergePreflightDecision =
  * W1-T2855 — the one gate every direct REST merge in {@link attemptArm} crosses immediately
  * before its write.
  */
-function directMergePreflight(
+function* directMergePreflightSteps(
   prUrl: string,
   deps: DirectMergePreflightDeps,
   priorHeadSha?: string,
   context: Pick<ArmAttemptResult, "error" | "rateLimit"> = {},
-): DirectMergePreflightDecision {
+): Steps<DirectMergePreflightDecision> {
   if (!deps.readMergeFacts || !deps.updateBranch) return { proceed: true };
 
   let observedHead = priorHeadSha;
@@ -907,7 +949,37 @@ function directMergePreflight(
       evidence: { ...baseEvidence, ...(planTouch !== undefined ? { planTouch } : {}), remedy: "direct-merge" },
     };
   }
-  const planEvidence = planTouch !== undefined ? { planTouch, reason: "plan_pr_behind" as const } : {};
+  // W1-T5748: A PLAN PR WHOSE MERGED PLAN IS SAFE MERGES AS-IS. A refresh costs ~15 min of checks
+  // and review, and main moved faster than that all evening on 2026-10-04, so #9138 and #9155 were
+  // re-headed again and again. Unsafe or unreadable: refresh, and past the bound escalate.
+  let planEvidence: Partial<DirectMergePreflightEvidence> = {};
+  if (planTouch !== undefined) {
+    const safety = yield* planMergeSafetySteps(prUrl, deps);
+    if (safety.action === "merge") {
+      deps.say(
+        `automerge.plan_pr_merge_safe (W1-T5748): basis=${safety.basis} behind_by=${facts.behindBy} plan_touch=${planTouch}` +
+          ` — merging the behind plan PR as-is: ${prUrl}`,
+      );
+      return { proceed: true, evidence: { ...baseEvidence, planTouch, planMergeSafe: safety.basis, remedy: "direct-merge" } };
+    }
+    if (safety.action === "escalate") {
+      const refreshedHeads = [...safety.heads, ...(observedHead !== undefined ? [observedHead] : [])];
+      deps.say(
+        `automerge.plan_pr_refresh_escalated (W1-T5748): ${safety.refreshes} refreshes (bound reached) on heads ` +
+          `${refreshedHeads.join(", ")} — ${safety.why}; left for the operator, never updated again: ${prUrl}`,
+      );
+      const directMergePreflight: DirectMergePreflightEvidence = {
+        ...baseEvidence,
+        planTouch,
+        remedy: "retry-later",
+        reason: "plan_pr_refresh_bound",
+        planMergeUnsafe: safety.why,
+        refreshedHeads,
+      };
+      return { proceed: false, result: { outcome: "plan-pr-held", ...context, directMergePreflight } };
+    }
+    planEvidence = { planTouch, reason: "plan_pr_behind", planMergeUnsafe: safety.why };
+  }
 
   let update: { ok: boolean; error?: string };
   try {
@@ -955,6 +1027,22 @@ function readPlanTouchOrUnreadable(prUrl: string, deps: DirectMergePreflightDeps
   }
 }
 
+/** W1-T5748 — read the merge-safety inputs (a reader that throws reads as an error) and this PR's
+ *  earlier refreshes, then rule. Absent a reader the decision refreshes, as W1-T5472 did. */
+function* planMergeSafetySteps(prUrl: string, deps: DirectMergePreflightDeps): Steps<ReturnType<typeof decidePlanPrMergeSafety>> {
+  let readings: PlanMergeSafetyReadings | undefined;
+  const read = deps.readPlanMergeSafety;
+  if (read) {
+    try {
+      readings = yield* step(() => read(prUrl));
+    } catch (e) {
+      // the failure is the reading: an error, which refreshes and is named in the ledger row.
+      readings = { error: String((e as Error)?.message ?? e) };
+    }
+  }
+  return decidePlanPrMergeSafety({ readings, refreshes: planPrRefreshesFromLedger(deps.ledgerLines?.() ?? [], prUrl) });
+}
+
 /**
  * W1-T1280 — TRUE only when a REST merge refusal names the specific status GitHub returns for a
  * pull request whose mergeability it has not (or no longer) computed as definitely conflicting:
@@ -973,7 +1061,7 @@ export const REST_MERGE_UNSETTLED_RETRY_INTERVAL_MS = 2_000;
 export function attemptArm(
   prUrl: string,
   deps: Pick<ArmDeps<false>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<false>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">>,
+    Partial<Pick<ArmDeps<false>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">>,
   priorHeadSha?: string,
   // W1-T3551: read off `OpenPrView.isDraft` (POSITIVE match only — `undefined`/`false` both fall
   // through unchanged). This is the ONE shared call site {@link armAutoMergeDetailed} (ledger-gated
@@ -990,7 +1078,7 @@ export function attemptArm(
 export function attemptArmAsync(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">>,
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Promise<ArmAttemptResult> {
@@ -1000,7 +1088,7 @@ export function attemptArmAsync(
 function* attemptArmSteps(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">>,
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Steps<ArmAttemptResult> {
@@ -1062,7 +1150,7 @@ function* attemptArmSteps(
     // status"): every SWEEP-armed PR can land in exactly that state, so the fallback below
     // completes the merge outright rather than treating the refusal as a no-op.
     if (armFailureAction(msg) === "direct-merge") {
-      const preflight = directMergePreflight(prUrl, deps, priorHeadSha);
+      const preflight = yield* directMergePreflightSteps(prUrl, deps, priorHeadSha);
       if (!preflight.proceed) return preflight.result;
       return yield* mergeDirectAfterPreflightSteps(prUrl, deps, preflight.evidence);
     }
@@ -1076,7 +1164,7 @@ function* attemptArmSteps(
         `automerge.rate_limit_refused (W1-T1235): GitHub rate-limit budget exhausted (bucket: ` +
           `${quota.bucket}, resets: ${quota.resetsAt}) — ${msg} — ${prUrl}`,
       );
-      const preflight = directMergePreflight(prUrl, deps, priorHeadSha, { error: msg, rateLimit: quota });
+      const preflight = yield* directMergePreflightSteps(prUrl, deps, priorHeadSha, { error: msg, rateLimit: quota });
       if (!preflight.proceed) return preflight.result;
       try {
         yield* step(() => deps.mergeDirect(prUrl));
@@ -1105,7 +1193,7 @@ function* attemptArmSteps(
                 `automerge.rate_limited_rest_merge_retry (W1-T1280): mergeFactsFromRest settled ` +
                   `MERGEABLE on read ${read}/${REST_MERGE_UNSETTLED_MAX_READS} — retrying: ${prUrl}`,
               );
-              const retryPreflight = directMergePreflight(prUrl, deps, priorHeadSha, {
+              const retryPreflight = yield* directMergePreflightSteps(prUrl, deps, priorHeadSha, {
                 error: msg,
                 rateLimit: quota,
               });
@@ -1199,7 +1287,11 @@ function* attemptPlanPrMergeSteps(
   }
   if (error === undefined && (facts.mergeableState === "clean" || facts.mergeableState === "behind")) {
     const fresh = facts;
-    const preflight = directMergePreflight(prUrl, { ...deps, readMergeFacts: () => fresh, readPlanTouch: () => planTouch }, priorHeadSha);
+    const preflight = yield* directMergePreflightSteps(
+      prUrl,
+      { ...deps, readMergeFacts: () => fresh, readPlanTouch: () => planTouch },
+      priorHeadSha,
+    );
     if (!preflight.proceed) return preflight.result;
     return yield* mergeDirectAfterPreflightSteps(prUrl, deps, preflight.evidence);
   }
@@ -1269,7 +1361,7 @@ function* attemptQueueArmSteps(
 export function armAutoMergeAtOpen(
   prUrl: string,
   deps: (Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "sleepSync" | "stackPrerequisite">>) = realArmDeps(),
+    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "sleepSync" | "stackPrerequisite">>) = realArmDeps(),
   irreversible = false,
   // W1-T3551: threaded straight through to {@link attemptArm}'s shared gate — see that function's
   // own doc. Defaults false, so every existing call site (which predates this parameter and never
@@ -1285,7 +1377,7 @@ export function armAutoMergeAtOpen(
 export async function armAutoMergeAtOpenAsync(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">> = realArmDepsAsync(),
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">> = realArmDepsAsync(),
   irreversible = false,
   isDraft = false,
 ): Promise<ArmOutcome> {
@@ -1296,7 +1388,7 @@ export async function armAutoMergeAtOpenAsync(
 function* armAtOpenSteps(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite">>,
   irreversible: boolean,
   isDraft: boolean,
 ): Steps<ArmOutcome> {
@@ -1421,6 +1513,9 @@ export function logArmAttribution(
         ...(directMergePreflight.error !== undefined ? { remedy_error: directMergePreflight.error } : {}),
         ...(directMergePreflight.planTouch !== undefined ? { plan_touch: directMergePreflight.planTouch } : {}),
         ...(directMergePreflight.mergeableState !== undefined ? { mergeable_state: directMergePreflight.mergeableState } : {}),
+        ...(directMergePreflight.planMergeSafe !== undefined ? { plan_pr_merge_safe: directMergePreflight.planMergeSafe } : {}),
+        ...(directMergePreflight.planMergeUnsafe !== undefined ? { plan_merge_unsafe: directMergePreflight.planMergeUnsafe } : {}),
+        ...(directMergePreflight.refreshedHeads !== undefined ? { refreshed_heads: directMergePreflight.refreshedHeads } : {}),
       }
     : {};
   log(armOutcomeArmed(outcome) ? "automerge.armed" : armSkipStepName(outcome), {
