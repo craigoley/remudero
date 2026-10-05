@@ -1809,6 +1809,35 @@ export function knownPlanRepos(repoRoot: string): ReadonlySet<string> | undefine
 
 const HARNESS_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
+// W1-T5660: reject placeholder drafts without changing lint rules for inherited plan shards.
+function draftPlaceholderViolations(
+  task: import("./plan.js").Task,
+  directoryExists: (path: string) => boolean,
+): DraftLintViolation[] {
+  const out: DraftLintViolation[] = [];
+  const block = (check: string, message: string) => out.push({ check, severity: "block", message: `${task.id}: ${message}` });
+  const titleIds = task.title.match(/\b(?:W\d+-T\d+|NEW-\d+)\b/g) ?? [];
+  if (titleIds.some((id) => id === task.id || id.startsWith("NEW-"))) {
+    block("draft-placeholder-title", "title must describe the work without naming its own id or a NEW-n placeholder");
+  }
+  for (const criterion of task.acceptance ?? []) {
+    const label = /^unit test:\s*(.+)$/i.exec(criterion.proof.trim())?.[1].trim();
+    if (label && /^\S*\/\S*\.[A-Za-z0-9]+$/.test(label) && !label.startsWith("test/")) {
+      block("draft-path-proof", `unit-test path ${JSON.stringify(label)} must be under test/`);
+    }
+  }
+  for (const path of task.files ?? []) {
+    const directory = dirname(path);
+    if (directory !== "." && !directoryExists(directory)) {
+      block("draft-missing-directory", `files entry ${JSON.stringify(path)} names a nonexistent directory ${JSON.stringify(directory)}`);
+    }
+  }
+  if (!["recon", "implement", "diagnose"].includes(task.type)) {
+    block("draft-undispatched-type", `type ${JSON.stringify(task.type)} is outside the dispatched draft set (recon, implement, diagnose)`);
+  }
+  return out;
+}
+
 /** Lint a drafted fragment exactly as `rmd lint-plan` would. A fragment that does not parse is itself one block
  *  violation, so it drives a redraft rather than being cached as NOT-READY. */
 export function lintDraftedFragment(
@@ -1816,6 +1845,7 @@ export function lintDraftedFragment(
   proposalId: string,
   stampLine?: string,
   knownRepos: ReadonlySet<string> | undefined = knownPlanRepos(HARNESS_ROOT),
+  directoryExists: (path: string) => boolean = (path) => fs.existsSync(resolvePath(HARNESS_ROOT, path)),
 ): DraftLintViolation[] {
   let tasks;
   try {
@@ -1824,8 +1854,17 @@ export function lintDraftedFragment(
     return [{ check: "draft-parse", severity: "block", message: `fragment failed to parse — fix before re-emitting: ${String((e as Error)?.message ?? e)}` }];
   }
   const violations: DraftLintViolation[] = [];
-  for (const task of tasks) violations.push(...filingBlockers(lintTask(task, { knownRepos }).violations, undefined, true));
-  if (stampLine !== undefined) violations.push(...stampLineViolations(proposalId, stampLine, tasks.map((t) => t.id)));
+  for (const task of tasks) {
+    violations.push(...filingBlockers(lintTask(task, { knownRepos }).violations, undefined, true));
+    violations.push(...draftPlaceholderViolations(task, directoryExists));
+  }
+  if (stampLine !== undefined) {
+    violations.push(...stampLineViolations(proposalId, stampLine, tasks.map((t) => t.id)));
+    const label = stampLine.startsWith(`- ${proposalId} (`) ? stampLine.slice(proposalId.length + 4).split(")")[0] : "";
+    if (/^(?:W\d+-T\d+|NEW-\d+)(?:[\s/,.;–—-]+(?:W\d+-T\d+|NEW-\d+))*$/.test(label.trim())) {
+      violations.push({ check: "draft-placeholder-stamp", severity: "block", message: "stamp label must summarize the work, rather than list only task ids" });
+    }
+  }
   return violations;
 }
 
@@ -3172,7 +3211,8 @@ export function assertRatificationDraftFileable(
   worktreePath = process.cwd(),
 ): void {
   const relinted = relintRatificationFragment(fragmentYaml, proposalId);
-  const linted = lintDraftedFragment(relinted.ok ? relinted.fragmentYaml : fragmentYaml, proposalId, stampLine, knownRepos);
+  const linted = lintDraftedFragment(relinted.ok ? relinted.fragmentYaml : fragmentYaml, proposalId, stampLine, knownRepos,
+    (path) => fs.existsSync(resolvePath(worktreePath, path)));
   const violations = linted.map((v) => `[${v.check}] ${v.message}`);
   const parsed = safeParseFragment(relinted.ok ? relinted.fragmentYaml : fragmentYaml, proposalId);
   if ("plan" in parsed) {
