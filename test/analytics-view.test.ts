@@ -105,6 +105,25 @@ function world(t: TestCtx, clock: Clock, opts: { stateDir?: string; holder?: str
   return { stateDir, ticker, posted, body, logs, reading };
 }
 
+test("analytics fixtures explicitly enable snapshots while an unswitched analytics view stays dark", (t) => {
+  const { clock } = handClock(T0);
+  const darkState = scratch(t, "analytics-unswitched-state");
+  switchViewsOn(darkState, []);
+  const dark = world(t, clock, { stateDir: darkState });
+  t.after(() => dark.ticker.release());
+  assert.equal(dark.ticker.acceptSnapshot(written("core", snapshotOf(CORE_LINES, T0 - MINUTE))), true);
+  dark.ticker.tick();
+  assert.equal(dark.posted.some((m) => m.type === "body" && m.entry.view === ANALYTICS_VIEW_NAME), false,
+    "an explicit empty switch file stays dark even after a real non-empty snapshot is committed");
+
+  const served = world(t, clock);
+  t.after(() => served.ticker.release());
+  assert.equal(served.ticker.acceptSnapshot(written("core", snapshotOf(CORE_LINES, T0 - MINUTE))), true);
+  served.ticker.tick();
+  assert.equal(metric(served.body().data, "runs.completed").value, 2,
+    "positive control: the explicitly served view materializes its real snapshot");
+});
+
 test("W1-T5055: the analytics view merges every instance snapshot", (t) => {
   const { clock } = handClock(T0);
   const w = world(t, clock);

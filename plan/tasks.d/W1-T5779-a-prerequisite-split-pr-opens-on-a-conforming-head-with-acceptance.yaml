@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: fleet PR #9206 red 30+ min on head-identity-gate and acceptance-author-gate"
   plan_refs: [W1-T2436, W1-T3172, W1-T3388, W1-T1060, W1-T297]
   files: [src/lib/prompt-render.ts, src/run-task.ts, test/a-prerequisite-split-pr-opens-on-a-conforming-head-with-acceptance.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

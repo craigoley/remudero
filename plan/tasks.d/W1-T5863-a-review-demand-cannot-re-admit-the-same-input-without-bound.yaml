@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: live review loop on #9305 (operator: 'this should not happen')"
   plan_refs: [W1-T2860, W1-T5839, W1-T5813, W1-T3823, W1-T230]
   files: [src/lib/sweep.ts, src/run-task.ts, test/a-review-demand-cannot-re-admit-the-same-input-without-bound.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
