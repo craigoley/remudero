@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { CONFIG_GARDEN_LEDGER_STEPS } from "../src/lib/config-gardener.js";
+import { gatherRuns, type LedgerRecord } from "../src/lib/retro.js";
 
 /**
  * W1-T5527 — EVERY PRICED LEDGER STEP IS IN THE CONFIG GARDEN'S READ.
@@ -69,8 +70,11 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "sweep.escalation_closed": A_LANE_RUN_ID,
   "sweep.missing_task_trailer_repaired": A_LANE_RUN_ID,
   "sweep.post_fix_redriven": A_LANE_RUN_ID,
+  "sweep.post_review.attempt": A_LANE_RUN_ID,
   "sweep.red_base_refresh.attempted": A_LANE_RUN_ID,
   "sweep.red_base_refresh.error": A_LANE_RUN_ID,
+  "sweep.review_admitted": A_LANE_RUN_ID,
+  "sweep.review_eligible": A_LANE_RUN_ID,
   "sweep.stale_red_redrive.attempted": A_LANE_RUN_ID,
   "sweep.stale_red_redrive.local_route": A_LANE_RUN_ID,
   "sweep.stale_red_redrive.released": A_LANE_RUN_ID,
@@ -103,6 +107,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "automerge.capped_override_granted": A_LANE_RUN_ID,
   "dep-review.arm_unreachable": A_LANE_RUN_ID,
   "dep-review.decided": A_LANE_RUN_ID,
+  "dep-review.hold_reconcile_failed": A_LANE_RUN_ID,
   "dep-review.migrate.capture_failed": A_LANE_RUN_ID,
   "dep-review.migrate.closed": A_LANE_RUN_ID,
   "dep-review.migrate.completed": A_LANE_RUN_ID,
@@ -234,6 +239,30 @@ test("every exemption names a step the census still finds and the gardener does 
   assert.deepEqual(Object.keys(EXEMPT).filter((step) => !found.has(step)), [], "a stale exemption: the scan no longer finds the step");
   assert.deepEqual(Object.keys(EXEMPT).filter((step) => listed.has(step)), [], "an exemption for a step the gardener reads");
   assert.ok(Object.values(EXEMPT).every((reason) => reason.length > 40), "every exemption gives its reason");
+});
+
+test("sweep review telemetry does not change the config gardener's gathered runs", () => {
+  const worker: LedgerRecord[] = [
+    { run_id: "worker", task_id: "T-1", step: "run.start", type: "implement" },
+    { run_id: "worker", step: "implement.done", cost_usd: 2, num_turns: 3 },
+    { run_id: "worker", step: "pr.opened", pr_url: "https://github.com/fixture/repo/pull/1" },
+  ];
+  const telemetry: LedgerRecord[] = [
+    "sweep.review_eligible", "sweep.review_admitted", "sweep.post_review.attempt",
+  ].map(step => ({
+    run_id: "SWEEP-1", task_id: "T-1", step, pr_url: "https://github.com/fixture/repo/pull/2",
+  }));
+  const rows = [...worker, ...telemetry];
+  const filtered = rows.filter(row => CONFIG_GARDEN_LEDGER_STEPS.includes(String(row.step)));
+  assert.equal(filtered.length, worker.length, "all three sweep receipts are outside the filtered read");
+  const unfilteredRuns = gatherRuns(rows);
+  assert.equal(unfilteredRuns.length, 1, "positive control: the worker run is still gathered");
+  assert.equal(unfilteredRuns[0]!.prUrl, worker[2]!.pr_url);
+  assert.equal(unfilteredRuns[0]!.costUsd, 2);
+  assert.deepEqual(gatherRuns(filtered), unfilteredRuns);
+  assert.equal(gatherRuns([
+    { run_id: "SWEEP-1", task_id: "T-1", step: "run.start" }, ...telemetry,
+  ])[0]!.prUrl, telemetry[0]!.pr_url, "a lane with run.start would make the exemption unsafe");
 });
 
 test("the census reads each write idiom and ignores an unpriced or total-only row", () => {

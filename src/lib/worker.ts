@@ -112,6 +112,7 @@ import {
   workerCredentialFilePath,
   workerClaudeCredentialDir,
   workerKeychainPaths,
+  WorkerKeychainError,
   type SecurityRunner,
   lostWorkerHomeGrants,
   type WorkerHomeGrantOutcome,
@@ -1786,7 +1787,16 @@ export async function readClaudeProviderCapacity(
   const now = deps.now ?? Date.now;
   const cacheMs = config.workerProviders?.capacityCacheMs ?? 60_000;
   if (!deps.forceRefresh && claudeCapacityCache && now() - claudeCapacityCache.at < cacheMs) return claudeCapacityCache.value;
-  const session = (deps.openSession ?? openUsageProbeSession)();
+  let session: UsageProbeSession;
+  try {
+    session = (deps.openSession ?? openUsageProbeSession)();
+  } catch (error) {
+    if (!(error instanceof WorkerKeychainError)) throw error;
+    const value: ProviderCapacity = { provider: "claude", readable: false, windows: [],
+      detail: `capacity credential unavailable: ${error.reasonClass}` };
+    claudeCapacityCache = { at: now(), value };
+    return value;
+  }
   try {
     const method = session.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
     if (typeof method !== "function") {
@@ -2995,9 +3005,10 @@ async function waitForUsageCredentialRefresh(path: string, wait: UsageCredential
     return { ...verdict, refreshable: typeof token === "string" && token.length > 0 };
   };
   const initial = read();
+  if (initial.kind === "unusable") throw new Error(`usage credential unavailable: ${initial.reasonClass}`);
   // Pinned CLI 2.1.284 refreshes at now + 300000 >= expiresAt. Observe that same window,
   // only when this file has a refresh credential; a valid bare access token cannot rotate.
-  if (initial.kind !== "usable" || !initial.refreshable || initial.expiresAtMs === undefined ||
+  if (!initial.refreshable || initial.expiresAtMs === undefined ||
       initial.expiresAtMs > clock.now() + DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS) return;
   const maxWaitMs = wait.maxWaitMs ?? 15_000;
   if (!Number.isFinite(maxWaitMs) || maxWaitMs < 0) throw new Error("invalid usage credential refresh wait bound");
@@ -3013,6 +3024,12 @@ async function waitForUsageCredentialRefresh(path: string, wait: UsageCredential
     if (!current.refreshable) throw new Error("usage credential refresh lost its refresh credential");
     if (current.expiresAtMs > clock.now() + DEFAULT_CREDENTIAL_EXPIRY_SKEW_MS) return;
   }
+}
+
+function usageHasEnvironmentAuthentication(env: NodeJS.ProcessEnv): boolean {
+  return ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"].some(key => Boolean(env[key])) ||
+    ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_ANTHROPIC_AWS"]
+      .some(key => Boolean(env[key]) && !["0", "false"].includes(env[key]!.toLowerCase()));
 }
 
 /** Open a control-only SDK session for the usage probe. It lives HERE, in the spawn chokepoint, deliberately:
@@ -3035,6 +3052,9 @@ export function openUsageProbeSession(
       ...process.env,
       CLAUDE_CONFIG_DIR: workerClaudeCredentialDir(context.realHome ?? homedir()),
     };
+    if (!usageHasEnvironmentAuthentication(options.env)) {
+      assertWorkerCredentialFile(join(options.env.CLAUDE_CONFIG_DIR!, ".credentials.json"));
+    }
   }
   let closeInput!: () => void;
   const untilClosed = new Promise<void>((resolve) => { closeInput = resolve; });
@@ -3051,7 +3071,7 @@ export function openUsageProbeSession(
     ...(typeof method === "function" ? {
       usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => {
         await session.initializationResult?.();
-        if (options.env && !options.env.CLAUDE_CODE_OAUTH_TOKEN && !options.env.ANTHROPIC_API_KEY) {
+        if (options.env && !usageHasEnvironmentAuthentication(options.env)) {
           await waitForUsageCredentialRefresh(join(options.env.CLAUDE_CONFIG_DIR!, ".credentials.json"), context.refresh);
         }
         // Only account windows are consumed here. The default also scans seven days of local

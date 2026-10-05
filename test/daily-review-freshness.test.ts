@@ -64,6 +64,28 @@ test("daily status distinguishes measured invalid timestamps from an unmeasured 
     assert.doesNotMatch(JSON.stringify(result), /secret|\/private\/ledger/);
   } finally { f.close(); }
 });
+test("daily status exposes bounded receipt coverage and leaves invalid or legacy evidence unknown", () => {
+  const f = fixture();
+  const coverage = { assignments: 3, terminalAssignments: 2, costKnownAssignments: 1, servedModelKnownAssignments: 0, outcomeKnownAssignments: 2 };
+  const put = (value: unknown) => {
+    const next = report();
+    const arm = next.sources[0]!.reports[0]!.arms[0]!;
+    f.put({ ...next, sources: [{ ...next.sources[0], reports: [{ ...next.sources[0]!.reports[0], arms: [{ ...arm, receiptCoverage: value }] }] }] });
+    return readRoutingDailyStatus(f.dir, now).sources[0]!.reports[0]!.arms[0]!.receiptCoverage;
+  };
+  try {
+    f.put(report());
+    assert.equal(readRoutingDailyStatus(f.dir, now).sources[0]!.reports[0]!.arms[0]!.receiptCoverage, undefined);
+    assert.deepEqual(put({ ...coverage, raw: "secret" }), coverage);
+    for (const value of [null, [], {}, { ...coverage, costKnownAssignments: -1 },
+      { ...coverage, assignments: Number.MAX_SAFE_INTEGER + 1 }, { ...coverage, terminalAssignments: 4 },
+      { ...coverage, outcomeKnownAssignments: 3 }, { ...coverage, costKnownAssignments: "1" }]) {
+      assert.equal(put(value), undefined);
+    }
+    assert.deepEqual(put({ assignments: 0, terminalAssignments: 0, costKnownAssignments: 0, servedModelKnownAssignments: 0, outcomeKnownAssignments: 0 }),
+      { assignments: 0, terminalAssignments: 0, costKnownAssignments: 0, servedModelKnownAssignments: 0, outcomeKnownAssignments: 0 });
+  } finally { f.close(); }
+});
 test("analytics serves bounded daily freshness through the configured state directory", async () => {
   const f = fixture();
   try {

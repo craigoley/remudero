@@ -37,13 +37,16 @@ import { deriveLastPoll, readDiskFreeBytes, readGhRateLimitRemaining } from "./d
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { feedbackDir, listFeedback, type FeedbackEntry } from "./feedback.js";
 import {
+  consumeHumanGateCounts,
   measureFeedbackAge,
   projectChangeManagementGates,
   projectFeedbackGates,
   projectHumanGates,
   projectPinReviewerGates,
+  shownHumanGates,
   type FeedbackAgeEvidence,
   type FeedbackAgeRoot,
+  type HumanGateCountSummary,
   type HumanGateObservation,
   type HumanGateProjection,
   type HumanGateSource,
@@ -184,10 +187,12 @@ export interface NowViewData {
   decisionsReasons?: Partial<Record<"grill" | "task_question", string>>;
   /** Additive decision projection; its counts precede the legacy decisions display cap. */
   humanGates?: HumanGateProjection;
+  /** W1-T5373: this instance's needs-you count, read through the shared consumer before the display cap. */
+  needsYou?: HumanGateCountSummary;
 }
 
 /** The `decisions` half of one instance's body. */
-export type NowDecisionsData = Pick<NowViewData, "decisions" | "decisionsMore" | "decisionsReasons" | "humanGates">;
+export type NowDecisionsData = Pick<NowViewData, "decisions" | "decisionsMore" | "decisionsReasons" | "humanGates" | "needsYou">;
 
 function decisionGate(decision: NowDecision): HumanGateObservation {
   const kind = decision.kind === "grill" ? "feedback_grill" : decision.kind;
@@ -840,7 +845,10 @@ export function createNowView(opts: NowViewOptions): {
     }));
     sources.push(...pinReviewerSources(instance, now));
     const humanGates = projectHumanGates(sources);
-    return { ...capDecisions(all), humanGates, ...(Object.keys(reasons).length > 0 ? { decisionsReasons: reasons } : {}) };
+    const capped = capDecisions(all);
+    const shown = shownHumanGates(humanGates, capped.decisions.map((decision) => ({ instance: decision.instance, ...decisionGate(decision) })));
+    const needsYou = consumeHumanGateCounts(humanGates, { shown });
+    return { ...capped, humanGates, needsYou, ...(Object.keys(reasons).length > 0 ? { decisionsReasons: reasons } : {}) };
   };
   const behindMemo = new Map<string, { heads?: string; result?: PlanBehind }>();
   const planBehind = opts.planBehind ?? ((instance: NowInstance): PlanBehind => {
@@ -1019,7 +1027,7 @@ export function createNowView(opts: NowViewOptions): {
       const deps = { plan: built.plan, ledgerPath, github: built.gateway.github, readLedger: () => rows, now: () => now,
         readCreditStore: () => built.credit.credit, readCreditOverrideFile: () => built.credit.overrides };
       const snapshot = computeBoardSnapshot(deps);
-      const decisions: NowDecisionsData = { decisions: mine.decisions, ...(mine.decisionsMore ? { decisionsMore: mine.decisionsMore } : {}), ...(mine.decisionsReasons ? { decisionsReasons: mine.decisionsReasons } : {}), ...(mine.humanGates ? { humanGates: mine.humanGates } : {}) };
+      const decisions: NowDecisionsData = { decisions: mine.decisions, ...(mine.decisionsMore ? { decisionsMore: mine.decisionsMore } : {}), ...(mine.decisionsReasons ? { decisionsReasons: mine.decisionsReasons } : {}), ...(mine.humanGates ? { humanGates: mine.humanGates } : {}), ...(mine.needsYou ? { needsYou: mine.needsYou } : {}) };
       const legacy = assembleNowView({ instance: name, snapshot, rows, plan: built.plan, recent: [], health: mine.health, decisions, nowMs: now });
       legacy.board.spendTodayUsd = deriveDayCostUsd(spent.rows, built.builtMs);
       const captured = built.probe.health;
