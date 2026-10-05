@@ -50832,7 +50832,10 @@ export async function loadHeavyVerb(name: HeavyVerbName): Promise<void> {
 
 // W1-T5687: `rmd progress-watchdog` — read-only; names a stalled sweep by progress rows, never `daemon.*`.
 // Recycling on the verdict is W1-T5688.
-function progressWatchdogCommand(rest: string[]): number {
+export function progressWatchdogCommand(
+  rest: string[],
+  run: (file: string, args: string[]) => string = (file, args) => execFileSync(file, args, { encoding: "utf8", timeout: 30_000 }),
+): number {
   const badArg = unknownArgError("progress-watchdog", rest, ["--state-root"], ["--json"]);
   if (badArg) {
     console.error(badArg + "\n" + USAGE);
@@ -50846,9 +50849,7 @@ function progressWatchdogCommand(rest: string[]): number {
   });
   const verdict = decideProgressWatchdog({ rows: read.rows, nowMs, openPrCount: openPrCountFromRows(read.rows) });
   const bundle = verdict.action === "capture-diagnostics"
-    ? captureDiagnosticsBundle(stateDir, nowMs, verdict, read.rows, {
-      run: (file, args) => execFileSync(file, args, { encoding: "utf8", timeout: 30_000 }),
-    })
+    ? captureDiagnosticsBundle(stateDir, nowMs, verdict, read.rows, { run })
     : undefined;
   if (rest.includes("--json")) console.log(JSON.stringify({ stateDir, rowsRead: read.rows.length, ...verdict, bundle }));
   else {

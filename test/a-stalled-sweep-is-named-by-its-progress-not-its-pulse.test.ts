@@ -10,7 +10,10 @@ import {
   captureDiagnosticsBundle,
   decideProgressWatchdog,
   openPrCountFromRows,
+  renderProgressWatchdogVerdict,
 } from "../src/lib/progress-watchdog.js";
+import { progressWatchdogCommand } from "../src/run-task.js";
+import { writeLedger } from "./helpers/ledger-fixture.js";
 
 const NOW = Date.parse("2026-10-05T12:00:00.000Z");
 const MIN = 60_000;
@@ -158,6 +161,109 @@ test("rmd progress-watchdog reads the ledger and prints the verdict as JSON with
     assert.equal(out.state, "STALLED");
     assert.equal(out.action, "recycle");
     assert.equal(existsSync(join(dir, "diagnostics")), false, "a recycle verdict writes no bundle");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("renderProgressWatchdogVerdict prints the age in whole minutes, or none when no progress row was read", () => {
+  const base = { state: "STALLED" as const, action: "recycle" as const, failedBoots15m: 1, reason: "why" };
+  assert.equal(
+    renderProgressWatchdogVerdict({ ...base, progressAgeMs: 31 * MIN + 59_000 }),
+    "progress-watchdog: STALLED action=recycle progress_age=31 min failed_boots_15m=1 — why",
+  );
+  assert.equal(
+    renderProgressWatchdogVerdict({ ...base, state: "UNKNOWN", action: "none", progressAgeMs: null }),
+    "progress-watchdog: UNKNOWN action=none progress_age=none failed_boots_15m=1 — why",
+  );
+});
+
+/** Runs the verb in-process against a temp --state-root, capturing stdout and stderr. */
+function runVerb(
+  dir: string,
+  args: string[],
+  run?: (file: string, a: string[]) => string,
+): { code: number; out: string[]; err: string[] } {
+  const out: string[] = [];
+  const err: string[] = [];
+  const realLog = console.log;
+  const realError = console.error;
+  console.log = (...a: unknown[]) => void out.push(a.map(String).join(" "));
+  console.error = (...a: unknown[]) => void err.push(a.map(String).join(" "));
+  try {
+    return { code: progressWatchdogCommand(["--state-root", dir, ...args], run), out, err };
+  } finally {
+    console.log = realLog;
+    console.error = realError;
+  }
+}
+/** Rows whose only progress row is `sweepMinutesAgo` old, under a fresh daemon.pulse. */
+function verbRows(sweepMinutesAgo: number): Row[] {
+  const nowIso = (minutes: number): string => new Date(Date.now() - minutes * MIN).toISOString();
+  return [
+    { ts: nowIso(sweepMinutesAgo), step: "sweep.pass", run_id: "r", task_id: "x", enumerated: 3 },
+    { ts: nowIso(0.1), step: "daemon.pulse", run_id: "r", task_id: "x" },
+  ];
+}
+
+test("rmd progress-watchdog refuses an unknown flag with exit 2 and reads nothing", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}progress-watchdog-verb-`));
+  try {
+    const result = runVerb(dir, ["--bogus"]);
+    assert.equal(result.code, 2);
+    assert.match(result.err.join("\n"), /--bogus/);
+    assert.deepEqual(result.out, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("rmd progress-watchdog prints the rendered verdict in text mode and writes no bundle on recycle", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}progress-watchdog-verb-`));
+  try {
+    writeLedger(verbRows(40), { dir });
+    const calls: string[][] = [];
+    const result = runVerb(dir, [], (file, a) => (calls.push([file, ...a]), ""));
+    assert.equal(result.code, 0);
+    assert.equal(result.out.length, 1);
+    assert.match(result.out[0], /^progress-watchdog: STALLED action=recycle progress_age=(39|40) min failed_boots_15m=0 — /);
+    assert.deepEqual(calls, [], "a recycle verdict spawns no docker call");
+    assert.equal(existsSync(join(dir, "diagnostics")), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("rmd progress-watchdog on capture-diagnostics writes one bundle through the injected runner, then skips the next", () => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}progress-watchdog-verb-`));
+  try {
+    writeLedger(verbRows(20), { dir });
+    const calls: string[][] = [];
+    const run = (file: string, a: string[]): string => {
+      calls.push([file, ...a]);
+      return a[0] === "ps" ? "remudero-tenant\nunrelated\n" : "tenant log line\n";
+    };
+    const first = runVerb(dir, [], run);
+    assert.equal(first.code, 0);
+    assert.match(first.out[0], /^progress-watchdog: STALLED action=capture-diagnostics /);
+    assert.match(first.out[1], /^diagnostics bundle: .*progress-\d{8}T\d{6}Z$/);
+    assert.deepEqual(calls, [
+      ["docker", "ps", "--format", "{{.Names}}"],
+      ["docker", "logs", "--tail", "200", "remudero-tenant"],
+    ]);
+    const bundleDir = first.out[1].slice("diagnostics bundle: ".length);
+    assert.equal(readFileSync(join(bundleDir, "docker-logs-0.txt"), "utf8"), "# remudero-tenant\ntenant log line\n");
+
+    const second = runVerb(dir, [], run);
+    assert.match(second.out[1], /^diagnostics bundle skipped: a diagnostics bundle was written 0 min ago/);
+    assert.equal(calls.length, 2, "a skipped bundle spawns nothing");
+
+    const json = runVerb(dir, ["--json"], run);
+    assert.equal(json.code, 0);
+    const parsed = JSON.parse(json.out[0]) as Row;
+    assert.equal(parsed.action, "capture-diagnostics");
+    assert.equal(parsed.stateDir, dir);
+    assert.deepEqual(parsed.bundle, { written: false, skippedReason: "a diagnostics bundle was written 0 min ago (at most one per 15 min)" });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
