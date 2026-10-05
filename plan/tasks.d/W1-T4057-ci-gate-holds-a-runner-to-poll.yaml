@@ -11,8 +11,8 @@
   origin: "oper#ci-efficiency-research-2026-09-22"
   plan_refs: [W1-T24]
   files: [.github/workflows/ci-gate.yml, .github/workflows/ci.yml, test/ci-gate-concludes-from-events.test.ts, scripts/test-tier-manifest.json]
-  priority: 4
-  status: queued
+  status: blocked
+  retirement: retired
   # backlog gardener: band=4 evidence=91e8edbbb9c08c27
   attempts: 0
   rationale: |
@@ -56,4 +56,8 @@
     Keep the 2400 s poll and the third assertion goes red. Drop `edited` handling and the first goes red on a
     body-only head. Change the REQUIRED list or its rule and the second goes red.
   note: |
+    OPERATOR RULING 2026-10-05: retire this task as superseded by W1-T4400 (merged as 3105f07d): ci-gate.yml runs only on `edited` and the required ci-gate context is concluded by ci.yml's last job from completion, so no job holds a runner to poll.
+    The operator approved this retirement in the operator session ("go with all of your
+    recommended follow ups"). No other task, dependency or acceptance criterion changes.
+
     reservation hand-off: chore/file-flow-and-review-findings -> chore/file-ci-gate-polling

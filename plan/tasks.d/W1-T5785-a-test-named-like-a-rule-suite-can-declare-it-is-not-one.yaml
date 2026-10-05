@@ -12,7 +12,7 @@
   plan_refs: [W1-T5616, W1-T5676, W1-T2644, W1-T2525]
   files: [src/lib/ci-parity.ts, test/a-test-named-like-a-rule-suite-can-declare-it-is-not-one.test.ts]
   status: queued
-  priority: 2
+  priority: 1
   attempts: 0
   rationale: |
     READ 2026-10-05 on origin/main f0452a82. `listRuleSuites` (src/lib/ci-parity.ts) selects

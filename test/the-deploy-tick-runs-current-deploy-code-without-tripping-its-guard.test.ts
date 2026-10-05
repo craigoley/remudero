@@ -28,7 +28,9 @@ function fixture(t: TestContext) {
   for (const dir of [stubs, join(daemon, ".git"), join(daemon, "bin"), join(daemon, "src"), join(install, ".git"), join(install, "bin"), join(state, "state", "inflight"), join(state, "worktrees")]) mkdirSync(dir, { recursive: true });
   writeFileSync(join(daemon, "src", "run-task.ts"), "export {};\n");
   writeFileSync(join(daemon, "version"), "old");
-  executable(join(daemon, "bin", "rmd"), `#!/usr/bin/env bash\nprintf '%s %s cwd=%s\\n' "$(cat '${daemon}/version')" "$*" "$PWD" >> '${deployed}'\n`);
+  // The launcher also asks `rmd progress-watchdog` for a verdict (W1-T5688) before the deploy tick; that
+  // read-only call is not a deploy, so the stub answers it with no verdict and does not record it.
+  executable(join(daemon, "bin", "rmd"), `#!/usr/bin/env bash\n[ "$1" = progress-watchdog ] && exit 0\nprintf '%s %s cwd=%s\\n' "$(cat '${daemon}/version')" "$*" "$PWD" >> '${deployed}'\n`);
   executable(join(install, "bin", "rmd"), `#!/usr/bin/env bash\necho install-invoked >> '${deployed}'\n`);
   executable(join(stubs, "git"), `#!/usr/bin/env bash
 printf '%s\\n' "$*" >> '${calls}'

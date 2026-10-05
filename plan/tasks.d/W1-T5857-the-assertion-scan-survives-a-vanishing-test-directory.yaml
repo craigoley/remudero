@@ -1,0 +1,34 @@
+- id: W1-T5857
+  title: "THE ASSERTION SCAN SURVIVES A VANISHING TEST DIRECTORY — `listTestFiles` walks test/ with one recursive `readdirSync` while the mutant helper creates and deletes `test/mutants-*` directories in the same tree, so a concurrent run fails ENOENT on a directory that disappeared mid-walk"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 2.00
+  risk: high  # Rule 19: one concern — the test-file walk tolerates a directory removed during the walk
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5515 (#9299) builder's related-suite run"
+  plan_refs: [W1-T5515]
+  files: [scripts/assertion-discrimination-check.mjs, test/the-assertion-scan-survives-a-vanishing-test-directory.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main dcf5d34c. scripts/assertion-discrimination-check.mjs's
+    `listTestFiles` calls `readdirSync(testDir, { withFileTypes: true, recursive: true })`.
+    test/helpers/mutant-module.ts copies modules into `test/mutants-XXXXXX` directories and
+    removes them (its header names `test/mutants-*/`). W1-T5515's builder ran 176 related files
+    concurrently and test/assertion-discrimination-check.test.ts's "real check runs clean" test
+    failed ENOENT on a `test/mutants-*` path a sibling test had just removed; alone it passed
+    10/10. CI runs files concurrently too, so this is a latent flake in a required check.
+  design: |
+    The walk skips `mutants-*` directories (they are never real tests: the name is not
+    `*.test.ts`) and tolerates an entry that vanishes during the walk (ENOENT on a subdirectory
+    is skipped, any other error still throws). Real test files are listed exactly as before.
+  acceptance:
+    - claim: "listTestFiles over a tree whose mutants-* subdirectory is removed during the walk returns every real test file without throwing, never lists a mutants-* entry, and still throws on a non-ENOENT error"
+      proof: "unit test: test/the-assertion-scan-survives-a-vanishing-test-directory.test.ts"
+  falsifier: |
+    Keep the plain recursive walk: removing the mutants directory mid-walk throws ENOENT and the
+    test fails.

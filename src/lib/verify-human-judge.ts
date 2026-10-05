@@ -483,3 +483,34 @@ export async function applyAutomateVerdict(
   hooks.stageProposal(automationProposalFromJudgedShard(shard, verdict));
   return "automated";
 }
+
+/** One task's current judge ruling, or why there is none. "unclassified" is a gap a reader names: never an
+ *  approval, never a cleared task. */
+export type VerifyHumanRuling =
+  | { state: "judged"; decision: VerifyHumanDecision; reason: string; at: string | null }
+  | { state: "unclassified"; reason: string };
+
+/** W1-T5370: each task's CURRENT ruling, from its newest {@link VERIFY_HUMAN_JUDGED_STEP} row. A failed verdict
+ *  is the fail-open default rather than an answer, an unknown decision is unreadable, and a default-keyed ruling
+ *  whose `deps=` differs from today's dependency state answered a question that no longer stands (the next pass
+ *  re-asks it, per {@link observedStateKey}). Each reads back as unclassified. */
+export function currentVerifyHumanRulings(
+  rows: readonly Record<string, unknown>[],
+  depsAllMerged: (taskId: string) => boolean | undefined = () => undefined,
+): Map<string, VerifyHumanRuling> {
+  const newest = new Map<string, Record<string, unknown>>();
+  for (const row of rows) if (row?.step === VERIFY_HUMAN_JUDGED_STEP && typeof row.task_id === "string") newest.set(row.task_id, row);
+  const out = new Map<string, VerifyHumanRuling>();
+  for (const [taskId, row] of newest) {
+    const decision = row.judge_decision as VerifyHumanDecision;
+    const key = typeof row.observed_state === "string" ? row.observed_state : "";
+    const judgedDeps = key.startsWith(`${taskId}:`) ? /:deps=([01]):cited=[01]$/.exec(key)?.[1] : undefined;
+    const deps = depsAllMerged(taskId);
+    if (row.judge_failed === true) out.set(taskId, { state: "unclassified", reason: "the judge failed and its verdict is a fail-open default" });
+    else if (!VALID_DECISIONS.has(decision)) out.set(taskId, { state: "unclassified", reason: `unreadable judge decision ${JSON.stringify(row.judge_decision)}` });
+    else if (judgedDeps !== undefined && deps !== undefined && judgedDeps !== (deps ? "1" : "0")) {
+      out.set(taskId, { state: "unclassified", reason: `the ruling (${key}) predates the current dependency state; awaiting re-judgement` });
+    } else out.set(taskId, { state: "judged", decision, reason: typeof row.judge_reason === "string" ? row.judge_reason : "", at: typeof row.ts === "string" ? row.ts : null });
+  }
+  return out;
+}
