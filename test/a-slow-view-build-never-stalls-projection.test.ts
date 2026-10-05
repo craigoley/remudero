@@ -271,6 +271,9 @@ test("the view thread body builds the extra views it loads and answers shadow an
   assert.ok(fake.posted.some((m) => m.type === "log" && m.step === "view.shadow_diff" && m.extra.view === "extra"), "the shadow sample was compared");
   fake.send({ type: "bodies", built: { view: "inbox", version: 1, bodies: [{ key: "section=a", data: { a: 1 }, sources: [] }] } });
   assert.ok(fake.posted.some((m) => m.type === "body" && m.entry.view === "inbox"), "a slow-lane body is served");
+  // W1-T5055: a slow-lane source snapshot is committed by the view thread under the projector's lease.
+  fake.send({ type: "snapshot", snapshot: { instance: "core", ok: false, names: ["console-v1"], error: "refresh boom", atMs: Date.now() } });
+  await until(() => fake.posted.some((m) => m.type === "body" && m.entry.view === "analytics" && JSON.stringify(m.entry.body.data).includes("refresh boom")), "the committed failure reaches the analytics view");
   fake.send({ type: "stop" });
   assert.equal(fake.closed(), 1);
 });

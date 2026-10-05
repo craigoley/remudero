@@ -370,6 +370,8 @@ export interface AnalyticsSnapshot {
   spend: { cash: CashSpendSnapshot };
   usage?: UsageProjection;
   legacyUsage?: UsageProjection;
+  /** W1-T5055: the token terms `cache.reuse` is the ratio of, so instances merge by summing them. Non-enumerable: never on the wire. */
+  cacheReuseTokens?: CacheHitTokens;
   abilityMap?: AbilityMap;
   workIntegrity?: WorkIntegrity;
   judgeCalibration?: JudgeCalibration;
@@ -1706,6 +1708,7 @@ function snapshotFromAccumulator(
     enumerable: false,
     writable: false,
   });
+  Object.defineProperty(out, "cacheReuseTokens", { value: { input: acc.tokensTotal.input, cacheRead: acc.tokensTotal.cacheRead, cacheCreation: acc.tokensTotal.cacheCreation }, enumerable: false, writable: false });
   Object.defineProperty(out, "abilityMap", { value: snapshotAbilityMap(acc.routingTelemetry), enumerable: false, writable: false });
   Object.defineProperty(out, "workIntegrity", { value: deriveWorkIntegrity(acc.workIntegrityRows, { asOf: nowIso }), enumerable: false, writable: false });
   const judgeCalibration = deriveJudgeCalibration(acc.judgeCalibrationRows, {

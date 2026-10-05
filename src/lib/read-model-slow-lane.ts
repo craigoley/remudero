@@ -9,8 +9,9 @@
  * relays the lease from each state it posts. A thread that dies is respawned after a doubling delay,
  * and a unit that then succeeds resets it.
  *
- * Today's one unit is the inbox classification (inbox-view.ts), which the daemon's fleet lane acts
- * on. The lane makes no GitHub call: it reads the board snapshot whichever keep-warm owns the fetch
+ * Its units: the inbox classification (inbox-view.ts), which the daemon's fleet lane acts on, and the
+ * analytics refresh (W1-T5055, analytics-view.ts), which runs per instance off serve's event loop and hands
+ * each instance's output to the read-model worker to commit as `source_snapshot` rows. The lane makes no GitHub call: it reads the board snapshot whichever keep-warm owns the fetch
  * (switches.json `github`) persists through serve's gateway, the source the board and now view read.
  * THIS FILE IS LOADED TWICE, as read-model-worker.ts is: `workerData.kind` gates the thread's
  * branch, whose body is {@link runSlowLaneWorker}, named so a test can run it in-process.
@@ -23,6 +24,15 @@ import { FEEDBACK_VIEW_NAME, FEEDBACK_VIEW_VERSION, materializeFeedbackView } fr
 import { INBOX_CLASSIFY_INTERVAL_MS, INBOX_VIEW_NAME, INBOX_VIEW_VERSION, refreshInboxClassification, type InboxRefreshMemo } from "./inbox-view.js";
 import { acceptMergedFeedback, ratifyCliGateway, type PanelGraphDeps } from "./panel-graph.js";
 import { recordCreditStateEdge } from "./account-usage.js";
+import {
+  ANALYTICS_REFRESH_INTERVAL_MS,
+  ANALYTICS_REFRESH_TIMEOUT_MS,
+  deriveAnalyticsSnapshotFromCheckpointedLedger,
+  readAnalyticsCheckpoint,
+  type AnalyticsCheckpoint,
+} from "./analytics-route.js";
+import { ANALYTICS_SOURCE_NAMES, ANALYTICS_VIEW_NAME, analyticsSourceBodies } from "./analytics-view.js";
+import type { SourceSnapshotWrite } from "./read-model-db.js";
 import { snapshotGeneration, snapshotGithub, snapshotSource } from "./now-view.js";
 import type { GitHub } from "./status.js";
 import type { TraceGithub } from "./trace.js";
@@ -40,6 +50,8 @@ export interface SlowLaneConfig {
   inbox?: { root: string; planPath: string; ledgerPath: string; inboxRoot: string; repository: string };
   /** The credit-edge unit's inputs (account-usage.ts); absent, the lane records no credit edge. */
   accountUsage?: { ledgerPath: string; root: string; accountFilePath?: string };
+  /** The analytics unit's instances, each by the state dir holding its ledger; it runs only while the analytics view is switched on. */
+  analytics?: { instances: Array<{ name: string; stateDir: string }>; intervalMs?: number; timeoutMs?: number };
   intervalMs?: number;
 }
 
@@ -55,7 +67,9 @@ export interface SlowLaneBodies {
 export type SlowLaneMessage =
   | { type: "log"; step: string; extra: Record<string, unknown> }
   | { type: "unit"; unit: string; ok: boolean; ms: number }
-  | ({ type: "bodies" } & SlowLaneBodies);
+  | ({ type: "bodies" } & SlowLaneBodies)
+  /** One instance's analytics refresh, finished or failed, for the read-model worker to commit. */
+  | { type: "source_snapshot"; snapshot: SourceSnapshotWrite };
 
 interface SlowLaneUnit {
   name: string;
@@ -148,7 +162,70 @@ function creditEdgeUnit(config: NonNullable<SlowLaneConfig["accountUsage"]>, log
   };
 }
 
-type Port = { on(event: "message", run: (msg: { type?: string; held?: unknown }) => void): unknown; postMessage(value: unknown): void };
+/** The refresh the analytics unit runs: the one serve's analytics cache runs, unchanged. */
+export type AnalyticsRefresh = typeof deriveAnalyticsSnapshotFromCheckpointedLedger;
+
+/**
+ * The analytics refresh per instance (W1-T5055), each due once per refresh interval, while `enabled`. A pass only
+ * starts the due refreshes and returns, so a scan of a minute or more never holds the inbox unit behind it. Each
+ * resumes from the checkpoint it last built, first from the one serve's cache keeps; it never writes that file.
+ * A refresh that throws, times out or could not read its ledger posts a failure: the worker keeps the last snapshot.
+ */
+function analyticsUnit(
+  config: NonNullable<SlowLaneConfig["analytics"]>,
+  clock: Clock,
+  post: (message: SlowLaneMessage) => void,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  enabled: () => boolean,
+  refresh: AnalyticsRefresh,
+): SlowLaneUnit {
+  const intervalMs = config.intervalMs ?? ANALYTICS_REFRESH_INTERVAL_MS;
+  const timeoutMs = config.timeoutMs ?? ANALYTICS_REFRESH_TIMEOUT_MS;
+  const attempted = new Map<string, number>();
+  const checkpoints = new Map<string, AnalyticsCheckpoint | undefined>();
+  let running = false;
+  const refreshOne = async (instance: { name: string; stateDir: string }): Promise<void> => {
+    const started = clock.now();
+    attempted.set(instance.name, started);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new Error(`analytics refresh exceeded ${timeoutMs} ms`)), timeoutMs);
+    try {
+      const prior = checkpoints.has(instance.name) ? checkpoints.get(instance.name) : readAnalyticsCheckpoint(instance.stateDir);
+      const { snapshot, checkpoint } = await refresh(instance.stateDir, clock, controller.signal, prior);
+      controller.signal.throwIfAborted();
+      if (snapshot.benchmarkEvidence?.reason === "ledger-source-unreadable") throw new Error("the ledger could not be read");
+      checkpoints.set(instance.name, checkpoint);
+      post({ type: "source_snapshot", snapshot: { instance: instance.name, ok: true, asOf: snapshot.asOf!, bodies: analyticsSourceBodies(snapshot) } });
+      log("analytics.source_snapshot_built", { instance: instance.name, ms: clock.now() - started, asOf: snapshot.asOf });
+    } catch (error) {
+      const message = String((error as Error)?.message ?? error);
+      post({ type: "source_snapshot", snapshot: { instance: instance.name, ok: false, names: ANALYTICS_SOURCE_NAMES, error: message, atMs: clock.now() } });
+      log("analytics.source_snapshot_failed", { instance: instance.name, ms: clock.now() - started, error: message });
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  return {
+    name: "analytics",
+    run: async () => {
+      if (!enabled() || running) return { views: [] };
+      const due = config.instances.filter((instance) => clock.now() - (attempted.get(instance.name) ?? Number.NEGATIVE_INFINITY) >= intervalMs);
+      if (due.length > 0) {
+        running = true;
+        void (async () => {
+          for (const instance of due) await refreshOne(instance);
+          running = false;
+        })();
+      }
+      return { views: [] };
+    },
+  };
+}
+
+/** A view switch mode under which the view is built: the analytics unit runs only then. */
+const BUILT_MODES: ReadonlySet<unknown> = new Set(["shadow", "serve", "auto"]);
+
+type Port = { on(event: "message", run: (msg: { type?: string; held?: unknown; modes?: unknown }) => void): unknown; postMessage(value: unknown): void };
 
 /**
  * The thread's body: run every unit each interval while the lease is held. A lease newly held runs a
@@ -157,7 +234,7 @@ type Port = { on(event: "message", run: (msg: { type?: string; held?: unknown })
 export function runSlowLaneWorker(
   port: Port,
   data: SlowLaneConfig,
-  opts: { clock?: Clock; schedule?: (run: () => void, ms: number) => () => void; inbox?: Partial<PanelGraphDeps> } = {},
+  opts: { clock?: Clock; schedule?: (run: () => void, ms: number) => () => void; inbox?: Partial<PanelGraphDeps>; analyticsRefresh?: AnalyticsRefresh } = {},
 ): { stop(): void } {
   const clock = opts.clock ?? systemClock;
   const schedule = opts.schedule ?? ((run, ms) => {
@@ -166,7 +243,12 @@ export function runSlowLaneWorker(
   });
   const intervalMs = data.intervalMs ?? INBOX_CLASSIFY_INTERVAL_MS;
   const log = (step: string, extra: Record<string, unknown> = {}): void => port.postMessage({ type: "log", step, extra } satisfies SlowLaneMessage);
-  const units: SlowLaneUnit[] = [...(data.inbox ? coreUnits(data.inbox, clock, log, opts.inbox ?? {}) : []), ...(data.accountUsage ? [creditEdgeUnit(data.accountUsage, log)] : [])];
+  let modes: Record<string, unknown> = {};
+  const post = (message: SlowLaneMessage): void => port.postMessage(message);
+  const analytics = data.analytics
+    ? [analyticsUnit(data.analytics, clock, post, log, () => BUILT_MODES.has(modes[ANALYTICS_VIEW_NAME]), opts.analyticsRefresh ?? deriveAnalyticsSnapshotFromCheckpointedLedger)]
+    : [];
+  const units: SlowLaneUnit[] = [...(data.inbox ? coreUnits(data.inbox, clock, log, opts.inbox ?? {}) : []), ...(data.accountUsage ? [creditEdgeUnit(data.accountUsage, log)] : []), ...analytics];
   let held = false;
   let running = false;
   let stopped = false;
@@ -191,6 +273,7 @@ export function runSlowLaneWorker(
     if (!stopped) cancel = schedule(() => void pass(), intervalMs);
   };
   port.on("message", (msg) => {
+    if (msg.type === "views") modes = (msg.modes ?? {}) as Record<string, unknown>;
     if (msg.type !== "lease") return;
     const was = held;
     held = msg.held === true;
@@ -215,6 +298,8 @@ if (!isMainThread && (workerData as { kind?: unknown } | undefined)?.kind === SL
 export interface SlowLane {
   /** Whether this serve holds the home lease; the thread is spawned the first time it does. */
   lease(held: boolean): void;
+  /** The view switches as the worker last read them: a unit whose view is off does not run. */
+  views(modes: Record<string, string>): void;
   close(): void;
 }
 
@@ -225,10 +310,13 @@ export function threadSlowLane(opts: {
   log: (step: string, extra: Record<string, unknown>) => void;
   /** Each view a unit built, every key of it. */
   onBodies?: (built: SlowLaneBodies) => void;
+  /** Each instance's analytics refresh, finished or failed. */
+  onSnapshot?: (write: SourceSnapshotWrite) => void;
 }): SlowLane {
   const baseMs = opts.config.intervalMs ?? INBOX_CLASSIFY_INTERVAL_MS;
   let worker: Worker | undefined;
   let held = false;
+  let modes: Record<string, string> = {};
   let deaths = 0;
   let closed = false;
   let respawn: NodeJS.Timeout | undefined;
@@ -237,9 +325,12 @@ export function threadSlowLane(opts: {
     const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv, resourceLimits: { maxOldGenerationSizeMb: SLOW_LANE_HEAP_MB } });
     worker = spawned;
     spawned.unref();
+    // Ahead of the lease, so a thread's first pass already knows which views are switched on.
+    spawned.postMessage({ type: "views", modes });
     spawned.on("message", (msg: SlowLaneMessage) => {
       if (msg.type === "log") opts.log(msg.step, msg.extra);
       else if (msg.type === "bodies") opts.onBodies?.({ view: msg.view, version: msg.version, bodies: msg.bodies });
+      else if (msg.type === "source_snapshot") opts.onSnapshot?.(msg.snapshot);
       else if (msg.ok) deaths = 0;
     });
     spawned.on("error", (error) => opts.log("read_model.slow_lane_failed", { error: String(error?.message ?? error) }));
@@ -264,6 +355,11 @@ export function threadSlowLane(opts: {
       held = now;
       if (held && !worker && respawn === undefined) spawn();
       worker?.postMessage({ type: "lease", held });
+    },
+    views: (next) => {
+      if (closed || JSON.stringify(next) === JSON.stringify(modes)) return;
+      modes = { ...next };
+      worker?.postMessage({ type: "views", modes });
     },
     close: () => {
       closed = true;
