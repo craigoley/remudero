@@ -48,9 +48,9 @@ export { fetchOriginRetryingRefLock, type GitRunner } from "./git-fetch-retry.js
 import { fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, killAfterGrace, type AsyncGitRunner, type GitRunner } from "./git-fetch-retry.js";
 
 function asyncGit(repoDir: string, options: { maxBuffer?: number } = {}): AsyncGitRunner {
-  return (args, signal) =>
+  return (args, signal, env) =>
     new Promise((resolve, reject) => {
-      const child = execFile("git", ["-C", repoDir, ...args], { encoding: "utf8", ...options, signal }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+      const child = execFile("git", ["-C", repoDir, ...args], { encoding: "utf8", ...options, signal, env }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
       signal?.addEventListener("abort", () => killAfterGrace(child), { once: true });
     });
 }
@@ -156,9 +156,8 @@ export function checkCliFreshness(
   const log = deps.log ?? (() => {});
 
   try {
-    // Same call shape as W1-T60's syncPlanFromOrigin: `git fetch --quiet origin` only ever
-    // moves remote-tracking refs, never the working tree or local branches.
-    fetchOriginRetryingRefLock(git);
+    // The freshness refspec updates only origin/main, never the working tree or local branches.
+    fetchOriginRetryingRefLock(git, undefined, undefined, "main");
   } catch (err) {
     return { status: "degraded", reason: `git fetch origin failed in ${repoDir}: ${String(err)}` };
   }
@@ -479,7 +478,7 @@ export function checkServiceFreshness(
 
   const git = serviceGit(repoDir, deps);
   try {
-    fetchOriginRetryingRefLock(git);
+    fetchOriginRetryingRefLock(git, undefined, undefined, "main");
   } catch (err) {
     return { status: "degraded", reason: `git fetch origin failed in ${repoDir}: ${String(err)}` };
   }
@@ -495,7 +494,7 @@ export async function checkServiceFreshnessAsync(
   if (!deps.ignoreReentrancyGuard && alreadySelfSynced(env)) return { status: "guarded" };
   if (isCiEnv(env)) return { status: "guarded" };
   try {
-    await fetchOriginRetryingRefLockAsync(deps.gitAsync ?? asyncGit(repoDir), undefined, undefined, deps.fetchTimeoutMs);
+    await fetchOriginRetryingRefLockAsync(deps.gitAsync ?? asyncGit(repoDir), undefined, undefined, deps.fetchTimeoutMs, "main");
   } catch (err) {
     return { status: "degraded", reason: `git fetch origin failed in ${repoDir}: ${String(err)}` };
   }
@@ -653,7 +652,7 @@ function reviewerMainAdvance(
 function checkGuardedReviewerCodeFreshness(repoDir: string, deps: ReviewerCodeFreshnessOptions): ReviewerCodeFreshness {
   const git = reviewerGit(repoDir, deps);
   try {
-    fetchOriginRetryingRefLock(git);
+    fetchOriginRetryingRefLock(git, undefined, undefined, "main");
   } catch (error) {
     return { status: "unreadable", reason: `git fetch origin failed in ${repoDir}: ${String(error)}` };
   }
@@ -662,7 +661,7 @@ function checkGuardedReviewerCodeFreshness(repoDir: string, deps: ReviewerCodeFr
 
 async function checkGuardedReviewerCodeFreshnessAsync(repoDir: string, deps: ReviewerCodeFreshnessOptions): Promise<ReviewerCodeFreshness> {
   try {
-    await fetchOriginRetryingRefLockAsync(deps.gitAsync ?? asyncGit(repoDir, { maxBuffer: REVIEWER_GIT_MAX_BUFFER }));
+    await fetchOriginRetryingRefLockAsync(deps.gitAsync ?? asyncGit(repoDir, { maxBuffer: REVIEWER_GIT_MAX_BUFFER }), undefined, undefined, undefined, "main");
   } catch (error) {
     return { status: "unreadable", reason: `git fetch origin failed in ${repoDir}: ${String(error)}` };
   }
