@@ -26419,7 +26419,7 @@ export interface PlanReconcileDeps {
    *  second derivation that could disagree with it. Throwing here ABORTS the verb (see below). */
   creditedMergedIds?: () => Set<string>;
   readInlineRecords?: () => Array<{ taskId: string; text: string }> | undefined;
-  creditedProjection?: () => { ids: Set<string>; unknownReason?: string };
+  creditedProjection?: () => { ids: Set<string>; unknownReason?: string; boardFloor?: string; unreadPrIds?: Set<string> };
   log?: (step: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -26486,6 +26486,8 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
   }
 
   let credited: Set<string>;
+  let boardFloor: string | undefined;
+  let unreadPrIds: Set<string> | undefined;
   try {
     const projection: NonNullable<PlanReconcileDeps["creditedProjection"]> = deps.creditedProjection ?? (deps.creditedMergedIds ? () => ({ ids: deps.creditedMergedIds!() }) : () => creditProjectionWithReadState());
     const read = projection();
@@ -26495,6 +26497,9 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
       (deps.log ?? (() => {}))("plan.reconcile.unknown", { reason: read.unknownReason });
       return 2;
     }
+    boardFloor = read.boardFloor;
+    unreadPrIds = read.unreadPrIds;
+    if (read.unreadPrIds) credited = new Set([...credited].filter((id) => !read.unreadPrIds!.has(id)));
   } catch (e) {
     console.error(
       `### rmd plan-reconcile: the credit projection is unreadable (${String((e as Error)?.message ?? e)}) — ` +
@@ -26527,6 +26532,13 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
     ...(inline && "queued" in inline ? { inline_queued: inline.queued, inline_creditable: inline.creditable.length } : {}),
   });
   console.log(renderPlanReconcile(summary, write, inline));
+  if (boardFloor !== undefined) {
+    const withheld = unreadPrIds ? [...unreadPrIds] : [];
+    const names = withheld.slice(0, 20).join(", ") + (withheld.length > 20 ? ` (+${withheld.length - 20} more)` : "");
+    const suffix = withheld.length ? `; ${withheld.length} flip(s) withheld because their merged PR was not read and its body could not be checked: ${names} — flip them by hand after reading the PR` : "";
+    console.error(`### rmd plan-reconcile: CAVEAT — the closed-PR board read stopped at its page cap: PRs last updated before ${boardFloor} were not read, so the count above is exact for every shard credited by a commit trailer or by a PR read since then and a LOWER BOUND for any shard credited only by an older PR's body or branch${suffix}`);
+    (deps.log ?? (() => {}))("plan.reconcile.board_floor", { floor: boardFloor, withheld: withheld.length });
+  }
   return 0;
 }
 
@@ -26563,7 +26575,7 @@ export function creditProjectionWithReadState(
   checkoutRoot = repoRoot,
   creditBuilder: typeof buildCreditCandidates = buildCreditCandidates,
   github?: GitHub,
-): { ids: Set<string>; unknownReason?: string } {
+): { ids: Set<string>; unknownReason?: string; boardFloor?: string; unreadPrIds?: Set<string> } {
   const config = configOverride ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
   // No ledger means no positive merge-credit evidence. Return an empty projection rather than
@@ -26572,10 +26584,19 @@ export function creditProjectionWithReadState(
   const self = resolveOwnerRepo();
   const plan = loadPlan(join(checkoutRoot, "plan", "tasks.yaml"));
   const gateway = github ?? buildBatchedGithub(self.owner, self.repo);
-  const ids = new Set(creditBuilder(self.owner, self.repo, plan, ledgerPath, undefined, gateway).filter(creditIsReconcilable).map((c) => c.taskId));
+  const candidates = creditBuilder(self.owner, self.repo, plan, ledgerPath, undefined, gateway).filter(creditIsReconcilable);
+  const ids = new Set(candidates.map((c) => c.taskId));
   const state = gateway.readState?.();
-  const unknownReason = state === "failed" ? (gateway.readFailureReason?.() ?? "unknown") : state === "ok" && gateway.readTruncated?.() ? "truncated" : undefined;
-  return unknownReason === undefined ? { ids } : { ids, unknownReason };
+  if (state === "failed") return { ids, unknownReason: gateway.readFailureReason?.() ?? "unknown" };
+  if (state === "ok" && gateway.readTruncated?.()) {
+    const coverage = gateway.readBoardCoverage?.();
+    if (coverage?.openTruncated === false && coverage.closedFloor) {
+      const unreadPrIds = new Set(candidates.filter((c) => gateway.prByRef?.(c.prUrl) == null).map((c) => c.taskId));
+      return { ids, boardFloor: coverage.closedFloor, unreadPrIds };
+    }
+    return { ids, unknownReason: "truncated" };
+  }
+  return { ids };
 }
 
 export function defaultCreditedMergedIds(configOverride?: Config, checkoutRoot = repoRoot, creditBuilder: typeof buildCreditCandidates = buildCreditCandidates): Set<string> {
