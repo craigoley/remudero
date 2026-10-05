@@ -89,6 +89,11 @@ export const REPEATED_REFUSAL_RULE_ID = "repeated-refusal";
 export const LOOP_LAG_RULE_ID = "loop-lag";
 export const NO_MERGES_WITH_GREEN_QUEUE_RULE_ID = "no-merges-with-green-queue";
 export const SERVE_MEMORY_HEADROOM_RULE_ID = "serve-memory-headroom";
+export const DAEMON_LOOP_SILENT_RULE_ID = "daemon-loop-silent";
+
+/** Every step the daemon's own loop writes (`daemon.pulse`, `daemon.loop_lag`, ...) — the prefix
+ *  `deriveLastPoll` reads. */
+const DAEMON_STEP_PREFIX = "daemon.";
 
 // W1-T5355: serve's memory sample (serve-memory.ts, which re-exports these) is defined HERE so the
 // rule that reads it needs no import back into the module that imports this one.
@@ -213,6 +218,22 @@ const RULES: readonly InvariantRule[] = [
         bad: readings.length > 0 && best < LEGACY_RELIEF_HEADROOM,
         message: `headroom at most ${Math.round(best * 100)}% over ${readings.length} sample(s), below ${LEGACY_RELIEF_HEADROOM * 100}%; ` +
           `reliefs=${reliefs}; last rss=${numberField(last, "rss_bytes")} unattributed=${numberField(last, "unattributed_bytes")}`,
+      };
+    },
+  },
+  {
+    id: DAEMON_LOOP_SILENT_RULE_ID,
+    // W1-T5651: the daemon's own stall signals are timers on the loop that stalled, so this rule reads
+    // them from OUTSIDE it, in serve's process. Fifteen minutes clears every ordinary gap (the longest
+    // measured non-stall gap is 12.3 min). A row in the window (serve's own minute row, which also
+    // lands in the 75s short window) proves the ledger is live; an empty ledger is no evidence.
+    longMs: 15 * 60_000,
+    bad: (window) => {
+      const daemonRows = window.filter((row) => stringField(row, "step")?.startsWith(DAEMON_STEP_PREFIX));
+      const newest = window.at(-1);
+      return {
+        bad: window.length > 0 && daemonRows.length === 0,
+        message: `no daemon.* row in ${window.length} row(s); newest step=${(newest && stringField(newest, "step")) ?? "unknown"}`,
       };
     },
   },
