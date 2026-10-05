@@ -1564,6 +1564,10 @@ components:
           $ref: "#/components/schemas/ReadPage"
         staleness:
           $ref: "#/components/schemas/ConsoleResponseStaleness"
+        classifiedAt:
+          type: string
+          format: date-time
+          description: W1-T5897 -- under serve's slow lane, the `generatedAt` of the persisted classification this body was built from.
 
     SubmitFeedbackRequest:
       type: object
@@ -8878,6 +8882,10 @@ components:
           $ref: "#/components/schemas/InboxCounts"
         staleness:
           $ref: "#/components/schemas/ConsoleResponseStaleness"
+        classifiedAt:
+          type: string
+          format: date-time
+          description: W1-T5897 -- under serve's slow lane, the `generatedAt` of the persisted classification this body was built from.
 
     InboxDigestEntry:
       type: object
@@ -9323,6 +9331,7 @@ components:
             - reply_store_unavailable
             - reply_intent_conflict
             - reply_in_progress
+            - inbox_not_ready
         detail:
           type: string
         delivery:
@@ -9452,7 +9461,8 @@ components:
         `not_found` (no active proposal / no current operator thread), `not_ready` (approve of a
         proposal not currently READY -- detail is `refusalReason`), `already_ratified`,
         `already_declined`, `not_declined` (src/lib/inbox.ts's `applyProposalVerdict`),
-        `seq_ahead` (a read mark past the last message), `thread_store_unreadable`.
+        `seq_ahead` (a read mark past the last message), `thread_store_unreadable`,
+        `inbox_not_ready` (W1-T5897: serve's slow lane has not persisted an inbox classification yet).
       required:
         - error
         - detail
@@ -9467,6 +9477,7 @@ components:
             - not_declined
             - seq_ahead
             - thread_store_unreadable
+            - inbox_not_ready
         detail:
           type: string
 
@@ -14952,6 +14963,12 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "503":
+          description: "`inbox_not_ready` -- W1-T5897: serve's slow lane has not persisted an inbox classification yet."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
 
   /v1/inbox/digests:
     get:
@@ -15028,6 +15045,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InboxRefusal"
+        "503":
+          description: "`inbox_not_ready` -- W1-T5897: serve's slow lane has not persisted an inbox classification yet."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
 
   /v1/inbox/thread:
     get:
@@ -15064,6 +15087,12 @@ paths:
                 $ref: "#/components/schemas/InboxRefusal"
         "500":
           description: "`thread_store_unreadable` -- the thread store could not be read."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxRefusal"
+        "503":
+          description: "`inbox_not_ready` -- W1-T5897: serve's slow lane has not persisted an inbox classification yet."
           content:
             application/json:
               schema:
@@ -15124,7 +15153,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/InboxThreadReplyRefusal"
         "503":
-          description: "`reply_store_unavailable` -- the thread store write failed; `delivery` says whether the reply is known absent."
+          description: "`reply_store_unavailable` -- the thread store write failed; `delivery` says whether the reply is known absent. `inbox_not_ready` -- W1-T5897: no persisted inbox classification to check the thread against."
           content:
             application/json:
               schema:

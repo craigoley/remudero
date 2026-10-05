@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: watch log 23:29Z (one tick lasting 70+ min), stale-head diagnosis #9188"
   plan_refs: [W1-T4416, W1-T5083, W1-T5366, W1-T5720, W1-T5345, W1-T1044]
   files: [src/lib/daemon.ts, test/a-dispatch-phase-stops-refilling-lanes-after-a-bound.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

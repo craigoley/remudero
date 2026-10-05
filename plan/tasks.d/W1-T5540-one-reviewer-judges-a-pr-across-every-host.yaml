@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: root-cause program for the 28-PR backlog; review.post_refused rows 09-26..10-03"
   plan_refs: [W1-T913, W1-T3647, W1-T228, W1-T5491]
   files: [src/lib/review.ts, test/one-reviewer-judges-a-pr-across-every-host.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: SSE push-latency measurement on the host, live switches.json holds only nav-badge, repositories and now"
   plan_refs: [W1-T5885, W1-T5884]
   files: [src/lib/read-model-worker.ts, test/a-view-with-no-switch-is-not-built.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

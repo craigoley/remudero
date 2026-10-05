@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 2 rung 1 and addendum #3 Task B"
   plan_refs: [W1-T5534, W1-T5532, W1-T4450, W1-T5690, W1-T5692]
   files: [src/lib/sweep.ts, src/run-task.ts, src/lib/prompt-render.ts, test/a-fix-round-may-add-its-own-registry-row.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

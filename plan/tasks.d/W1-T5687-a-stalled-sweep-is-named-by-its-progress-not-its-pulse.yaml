@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 1, the progress watchdog's verdict half"
   plan_refs: [W1-T5651, W1-T2874, W1-T484, W1-T483, W1-T5688]
   files: [src/lib/progress-watchdog.ts, src/run-task.ts, test/a-stalled-sweep-is-named-by-its-progress-not-its-pulse.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

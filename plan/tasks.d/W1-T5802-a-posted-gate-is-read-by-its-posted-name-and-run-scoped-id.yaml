@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5695 build attempt (local WIP fc8b5770 on run-W1-T5695-1791176547422, unpushed) found its record unbuildable as one workflow PR"
   plan_refs: [W1-T5695, W1-T4438, W1-T2298, W1-T4399, W1-T3171]
   files: [src/lib/sweep.ts, src/lib/ci-control-plane.ts, src/lib/ci-parity.ts, test/a-posted-gate-is-read-by-its-posted-name-and-run-scoped-id.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   note: |

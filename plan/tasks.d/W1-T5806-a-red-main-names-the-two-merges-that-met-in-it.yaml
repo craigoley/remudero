@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: main red 03:41Z-04:16Z after #9213 + #9219; operator hotfix #9234"
   plan_refs: [W1-T1014, W1-T4472, W1-T5515, W1-T5522, W1-T5649, W1-T5650]
   files: [src/lib/main-health-rung.ts, test/a-red-main-names-the-two-merges-that-met-in-it.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -604,6 +604,8 @@ export interface components {
       counts: InboxCounts;
       page?: ReadPage;
       staleness?: ConsoleResponseStaleness;
+      /** W1-T5897 -- under serve's slow lane, the `generatedAt` of the persisted classification this body was built from. */
+      classifiedAt?: string;
     };
     /** POST /v1/feedback's body -- submit feedback from the panel (ALWAYS captured with origin: ui, never taken from this body). `replyTo`, if given, must name an existing entry parked `grilling` -- this is "answer a grill" v1 (src/lib/panel-graph.ts's header explains why): the answer is captured as a fresh feedback entry that re-enters triage, rather than a second, parallel answer-delivery primitive ahead of the still-unbuilt W1-T42 grill mechanics. */
     SubmitFeedbackRequest: {
@@ -3620,6 +3622,8 @@ export interface components {
       fleet?: (InboxFleetItem)[];
       counts?: InboxCounts;
       staleness?: ConsoleResponseStaleness;
+      /** W1-T5897 -- under serve's slow lane, the `generatedAt` of the persisted classification this body was built from. */
+      classifiedAt?: string;
     };
     /** One stored daily digest (src/lib/serve.ts's `ConsoleInboxDigestEntry`). */
     InboxDigestEntry: {
@@ -3786,7 +3790,7 @@ export interface components {
     };
     /** A non-2xx body from POST /v1/inbox/thread/reply's handler. `delivery` says whether the reply is known not to be stored (`not_delivered`) or cannot be confirmed (`unverified`). */
     InboxThreadReplyRefusal: {
-      error: "not_found" | "reply_store_unavailable" | "reply_intent_conflict" | "reply_in_progress";
+      error: "not_found" | "reply_store_unavailable" | "reply_intent_conflict" | "reply_in_progress" | "inbox_not_ready";
       detail?: string;
       delivery?: "not_delivered" | "unverified";
       replyId?: string;
@@ -3838,9 +3842,9 @@ export interface components {
       proposalId: string;
       restored: boolean;
     };
-    /** A handler-level refusal from an inbox route, always with a human-readable `detail`. `not_found` (no active proposal / no current operator thread), `not_ready` (approve of a proposal not currently READY -- detail is `refusalReason`), `already_ratified`, `already_declined`, `not_declined` (src/lib/inbox.ts's `applyProposalVerdict`), `seq_ahead` (a read mark past the last message), `thread_store_unreadable`. */
+    /** A handler-level refusal from an inbox route, always with a human-readable `detail`. `not_found` (no active proposal / no current operator thread), `not_ready` (approve of a proposal not currently READY -- detail is `refusalReason`), `already_ratified`, `already_declined`, `not_declined` (src/lib/inbox.ts's `applyProposalVerdict`), `seq_ahead` (a read mark past the last message), `thread_store_unreadable`, `inbox_not_ready` (W1-T5897: serve's slow lane has not persisted an inbox classification yet). */
     InboxRefusal: {
-      error: "not_found" | "not_ready" | "already_ratified" | "already_declined" | "not_declined" | "seq_ahead" | "thread_store_unreadable";
+      error: "not_found" | "not_ready" | "already_ratified" | "already_declined" | "not_declined" | "seq_ahead" | "thread_store_unreadable" | "inbox_not_ready";
       detail: string;
     };
     /** POST /v1/escalation/reply's body (src/lib/panel-actions.ts's `validateEscalationReply`). `taskId`, `class`, `cause` and `prRef` derive the escalation's thread id (`thread:<taskId>::<class>::<cause|->::<prRef|->`, src/lib/inbox-thread.ts's `deriveThreadId`). */
@@ -5556,6 +5560,7 @@ export interface paths {
           "400": Error;
           "401": Error;
           "403": Error;
+          "503": InboxRefusal;
         };
     };
   };
@@ -5585,6 +5590,7 @@ export interface paths {
           "401": Error;
           "403": Error;
           "500": InboxRefusal;
+          "503": InboxRefusal;
         };
     };
   };
@@ -5596,6 +5602,7 @@ export interface paths {
           "403": Error;
           "404": InboxRefusal;
           "500": InboxRefusal;
+          "503": InboxRefusal;
         };
     };
   };

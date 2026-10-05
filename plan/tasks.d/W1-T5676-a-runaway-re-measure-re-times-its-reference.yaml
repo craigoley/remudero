@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log, negative-reachability census crossed its runaway bound under load"
   plan_refs: [W1-T3408, W1-T2545, W1-T2478]
   files: [src/lib/ci-parity.ts, test/a-runaway-re-measure-re-times-its-reference.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |
