@@ -736,6 +736,7 @@ export interface InboxClassification {
   draftStale?: boolean;
   /** Present iff state === "ready" — the reasoning rides with the recommendation. */
   draft?: DraftedCandidate;
+  proposal?: RatificationProvenance;
   /** Present iff this READY item is a structured lifecycle action rather than a drafted task. */
   lifecycleAction?: SkillLifecycleAction;
   /** W1-T4338: present iff this READY item is a skill-workshop draft whose approval writes a skill file. */
@@ -1339,7 +1340,7 @@ export function classifyProposal(
   }
 
   if (reasons.length === 0) {
-    return { proposalId: proposal.id, state: "ready", reasons: [], draftStale, draft, ...referentUnverified };
+    return { proposalId: proposal.id, state: "ready", reasons: [], draftStale, draft, proposal, ...referentUnverified };
   }
   return { proposalId: proposal.id, state: "not_ready", reasons, draftStale, ...referentUnverified };
 }
@@ -2860,7 +2861,9 @@ export function approveProposal(
   }
   const payload: RatificationPayload = {
     proposalId: classification.proposalId,
-    fragmentYaml: draft?.fragmentYaml ?? "",
+    fragmentYaml: draft && classification.proposal
+      ? carryRatificationRationale(draft.fragmentYaml, classification.proposal, draft.stampLine)
+      : draft?.fragmentYaml ?? "",
     stampLine: draft?.stampLine ?? "",
   };
 
@@ -3003,6 +3006,49 @@ export interface ShardWriteFs {
   writeFileSync: (path: string, data: string, enc: "utf8") => void;
 }
 
+type RatificationProvenance = Pick<Proposal, "id" | "summary" | "originatingItemId">;
+
+function carryRatificationRationale(fragmentYaml: string, proposal: RatificationProvenance, stampLine: string): string {
+  // Materializers rebuild payloads from fragment/id/stamp, so provenance must ride the fragment (W1-T5541).
+  const run = /\(run ([^,)]+)/.exec(proposal.summary)?.[1];
+  const epoch = /(?:^|-)(\d{13})(?:-|$)/.exec(run ?? proposal.id)?.[1];
+  const date = epoch ? new Date(Number(epoch)).toISOString().slice(0, 10) : /RATIFIED (\d{4}-\d{2}-\d{2})/.exec(stampLine)?.[1];
+  const source = proposal.originatingItemId ?? /https:\/\/github\.com\/[^\s,)]+\/pull\/\d+/.exec(proposal.summary)?.[0] ?? run ?? proposal.id;
+  const provenance = `From the ${date ? `${date} ` : ""}${proposal.id.startsWith("followup:") ? "follow-up" : "proposal"} on ${source}, ratified via rmd approve:`;
+  const document = parseDocument(fragmentYaml);
+  if (!isSeq(document.contents)) return fragmentYaml;
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  for (const node of document.contents.items) {
+    if (!isMap(node) || !node.range) continue;
+    const value: unknown = node.get("rationale");
+    const rationale = typeof value === "string" && value.trim() ? value : proposal.summary;
+    if (rationale.startsWith(`${provenance}\n`)) continue;
+    const scalar = node.get("rationale", true);
+    const pair = node.items.find((item) => isScalar(item.key) && item.key.value === "rationale");
+    const rendered = stringifyYaml({ rationale: `${provenance}\n${rationale}` }, {
+      defaultKeyType: "PLAIN",
+      defaultStringType: /[\t ]$|\n{2,}$/.test(rationale) ? "QUOTE_DOUBLE" : "BLOCK_FOLDED",
+      blockQuote: "folded", lineWidth: 96,
+    }).trimEnd().slice("rationale: ".length).replace(/\n/g, "\n  ");
+    if (isScalar(scalar) && scalar.range) {
+      const end = scalar.range[1] + (fragmentYaml[scalar.range[1]] === "\n" ? 1 : 0);
+      const space = fragmentYaml[scalar.range[0] - 1] === ":" ? " " : "";
+      edits.push({ start: scalar.range[0], end, text: `${space}${rendered}\n` });
+    } else if (pair && isScalar(pair.key) && pair.key.range) {
+      const start = pair.key.range[1] + 1;
+      const end = fragmentYaml.indexOf("\n", start);
+      edits.push({ start, end: end < 0 ? fragmentYaml.length : end + 1, text: ` ${rendered}\n` });
+    } else {
+      edits.push({ start: node.range[1], end: node.range[1], text: `\n  rationale: ${rendered}\n` });
+    }
+  }
+  let carried = fragmentYaml;
+  for (const edit of edits.sort((a, b) => b.start - a.start)) {
+    carried = carried.slice(0, edit.start) + edit.text + carried.slice(edit.end);
+  }
+  return carried;
+}
+
 /** Repair only the two mechanical filing failures. Scalar ranges keep all other authored YAML bytes intact. */
 export function relintRatificationFragment(fragmentYaml: string, proposalId: string):
   | { ok: true; fragmentYaml: string }
@@ -3094,10 +3140,13 @@ export function writeRatificationShards(
   proposalId: string,
   fs: ShardWriteFs,
   joinPath: (...parts: string[]) => string,
+  provenance?: RatificationProvenance,
+  stampLine = "",
 ): string[] {
   const relinted = relintRatificationFragment(fragmentYaml, proposalId);
   if (!relinted.ok) throw new Error(`rmd approve: refusing to file ${proposalId} — ${relinted.reason}`);
-  const shards = ratificationShardFiles(relinted.fragmentYaml);
+  const carried = provenance ? carryRatificationRationale(relinted.fragmentYaml, provenance, stampLine) : relinted.fragmentYaml;
+  const shards = ratificationShardFiles(carried);
   if (!shards.ok) throw new Error(`rmd approve: refusing to file ${proposalId} — ${shards.reason}`);
   fs.mkdirSync(joinPath(worktreePath, "plan", "tasks.d"), { recursive: true });
   for (const file of shards.files) fs.writeFileSync(joinPath(worktreePath, file.relPath), file.contents, "utf8");
@@ -3119,10 +3168,25 @@ export function assertRatificationDraftFileable(
   proposalId: string,
   stampLine: string,
   knownRepos: ReadonlySet<string> | undefined,
+  worktreePath = process.cwd(),
 ): void {
   const relinted = relintRatificationFragment(fragmentYaml, proposalId);
   const linted = lintDraftedFragment(relinted.ok ? relinted.fragmentYaml : fragmentYaml, proposalId, stampLine, knownRepos);
   const violations = linted.map((v) => `[${v.check}] ${v.message}`);
+  const parsed = safeParseFragment(relinted.ok ? relinted.fragmentYaml : fragmentYaml, proposalId);
+  if ("plan" in parsed) {
+    const directory = (path: string): boolean => path.endsWith("/") ||
+      fs.statSync(resolvePath(worktreePath, path), { throwIfNoEntry: false })?.isDirectory() === true;
+    for (const task of parsed.plan.tasks) {
+      for (const path of task.files ?? []) {
+        if (directory(path)) violations.push(`[draft-directory-files] ${task.id} files entry ${JSON.stringify(path)} is a directory`);
+      }
+      for (const criterion of task.acceptance ?? []) {
+        const path = /^grep:\s*[\s\S]*\s+in\s+(\S+)\s*$/i.exec(criterion.proof.trim())?.[1];
+        if (path && directory(path)) violations.push(`[draft-directory-grep] ${task.id} grep proof target ${JSON.stringify(path)} is a directory`);
+      }
+    }
+  }
   if (!relinted.ok && violations.length === 0) violations.push(relinted.reason);
   if (violations.length > 0) throw new RatificationDraftRefusedError(proposalId, violations);
 }
@@ -3131,13 +3195,13 @@ export function assertRatificationDraftFileable(
  *  stamp replaced a bullet, which the PR body's Changed files once named regardless. */
 export function fileRatificationDraft(
   worktreePath: string,
-  payload: { fragmentYaml: string; proposalId: string; stampLine: string },
+  payload: { fragmentYaml: string; proposalId: string; stampLine: string; proposal?: RatificationProvenance },
   fs: ShardWriteFs & { readFileSync: (path: string, enc: "utf8") => string },
   joinPath: (...parts: string[]) => string,
   knownRepos: ReadonlySet<string> | undefined = knownPlanRepos(worktreePath),
 ): string[] {
-  assertRatificationDraftFileable(payload.fragmentYaml, payload.proposalId, payload.stampLine, knownRepos);
-  const written = writeRatificationShards(worktreePath, payload.fragmentYaml, payload.proposalId, fs, joinPath);
+  assertRatificationDraftFileable(payload.fragmentYaml, payload.proposalId, payload.stampLine, knownRepos, worktreePath);
+  const written = writeRatificationShards(worktreePath, payload.fragmentYaml, payload.proposalId, fs, joinPath, payload.proposal, payload.stampLine);
   const masterPlanPath = joinPath(worktreePath, "MASTER-PLAN.md");
   const before = fs.readFileSync(masterPlanPath, "utf8");
   const after = applyStampToMasterPlan(before, payload.proposalId, payload.stampLine);
@@ -3173,7 +3237,7 @@ export function fileRatificationBatch(
   joinPath: (...parts: string[]) => string,
   knownRepos: ReadonlySet<string> | undefined = knownPlanRepos(worktreePath),
 ): { writtenPaths: string[]; filedIds: string[] } {
-  for (const p of payloads) assertRatificationDraftFileable(p.fragmentYaml, p.proposalId, p.stampLine, knownRepos);
+  for (const p of payloads) assertRatificationDraftFileable(p.fragmentYaml, p.proposalId, p.stampLine, knownRepos, worktreePath);
   const written = new Set<string>();
   const filedIds: string[] = [];
   for (const payload of payloads) {
@@ -3313,7 +3377,11 @@ export function planRatificationBatch(
       });
       continue;
     }
-    accepted.push({ proposalId: c.proposalId, fragmentYaml: c.draft.fragmentYaml, stampLine: c.draft.stampLine });
+    accepted.push({
+      proposalId: c.proposalId,
+      fragmentYaml: c.proposal ? carryRatificationRationale(c.draft.fragmentYaml, c.proposal, c.draft.stampLine) : c.draft.fragmentYaml,
+      stampLine: c.draft.stampLine,
+    });
     // Q5: fold this NOW-accepted member's own drafted shard slugs into the corpus BEFORE the next member is checked —
     // dedupping against main UNION accepted-so-far, additive only.
     corpus = [...corpus, ...draftedShardSlugs(c.draft.fragmentYaml)];
