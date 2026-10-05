@@ -564,6 +564,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // test that derives this set from its consumers -- not a log line nobody reads.
   "repair.lease_posted",
   "pr.opened",
+  "pr.stuck", // W1-T5900: runSweep dedupes a stalled stage across passes and rotation.
+  "pr.stuck.resolved", // Retain its resolution so rotation cannot resolve the same stage again.
   // W1-T2594: provider-diverse reviewer routing resolves this row by exact task + PR + head.
   // Rotating it away would make an unchanged head route differently after maintenance.
   "pr.head_provider",
