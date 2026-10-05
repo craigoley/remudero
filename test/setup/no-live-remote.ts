@@ -78,8 +78,11 @@ export function setupDirOwnerTag(): string {
 export function installNoLiveRemote(env: NodeJS.ProcessEnv = process.env, mainThread = isMainThread): { ghConfigDir?: string } {
   if (!isTestRunner(env)) return {};
   if (env[LIVE_WRITE_OVERRIDE_ENV] === "1") return {};
-  env[LIVE_LEDGER_DENY_ROOT_ENV] = discoverLiveLedgerRoot(env);
-  for (const prefix of GITHUB_PUSH_PREFIXES) appendGitConfigEnv(`url.${DEAD_PUSH_ROOT}.pushInsteadOf`, prefix, env);
+  // A worker keeps an inherited deny root: under SHARE_ENV its env IS the parent's, and one re-derived
+  // from a test's own HOME refused the parent's ledger writes, hanging serve's shutdown (#9160).
+  env[LIVE_LEDGER_DENY_ROOT_ENV] = mainThread ? discoverLiveLedgerRoot(env) : env[LIVE_LEDGER_DENY_ROOT_ENV] ?? discoverLiveLedgerRoot(env);
+  // A worker thread's env already holds the parent's entries; under SHARE_ENV it IS the parent's env.
+  if (mainThread) for (const prefix of GITHUB_PUSH_PREFIXES) appendGitConfigEnv(`url.${DEAD_PUSH_ROOT}.pushInsteadOf`, prefix, env);
   env.RMD_SCRATCH_SWITCH = DEAD_SCRATCH_SWITCH;
   delete env.RMD_SCRATCH;
   env.GIT_TERMINAL_PROMPT = "0";

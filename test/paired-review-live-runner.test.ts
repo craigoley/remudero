@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import fs, { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { BENCHMARK_AA_RECEIPT_VERSION, BENCHMARK_AA_VERSION } from "../src/lib/benchmark-aa.js";
 import { activateBenchmarkPaidPilot, buildPaidPilotReport, paidArmPauseReasons, paidPilotArmAdmission, parsePaidPilotRequest,
@@ -375,6 +376,31 @@ test("the sealed runner rejects unsupported effort, changed stack, oversized and
   f.git("add", "value.ts"); f.git("commit", "--quiet", "-m", "oversize fixture");
   await assert.rejects(sealedReviewer(settings)({ ...arm, headSha: f.git("rev-parse", "HEAD") }), /unrepresentable/);
   assert.equal(calls, 0);
+});
+
+test("the sealed reviewer refuses an entry swapped for a symlink or a FIFO during the review, without hanging", async (t) => {
+  const f = fixture(t);
+  const arm = { opaqueArmId: "opaque", repo: f.pair.repo, baseSha: f.pair.baseSha, headSha: f.pair.bug.headSha,
+    taskContextDigest: f.pair.taskContextDigest, changedFileShapeDigest: f.pair.changedFileShapeDigest,
+    stack: f.stack, selectionPropensity: 0.5 as const, requestedModel: "gpt-6.1-sol", requestedEffort: "medium" };
+  const swapped = (plant: (cwd: string) => void) => sealedReviewer({ config: f.config, sources: new Map([[f.pair.repo, f.source]]),
+    reserveUsd: 2, contexts: new Map([[f.pair.taskContextDigest, "Review the change to the value constant."]]),
+    provider: async (args, _config, selection) => {
+      const decoy = join(args.workerHome, "value.ts");
+      mkdirSync(args.workerHome, { recursive: true });
+      writeFileSync(decoy, readFileSync(join(args.cwd, "value.ts")), { mode: 0o444 });
+      const sealedMode = statSync(args.cwd).mode;
+      chmodSync(args.cwd, 0o755);
+      rmSync(join(args.cwd, "value.ts"));
+      plant(join(args.cwd, "value.ts"));
+      chmodSync(args.cwd, sealedMode);
+      return { isError: false, apiError: false, text: JSON.stringify({ verdict: "pass", findings: [] }),
+        sessionId: "provider-session", servedModel: selection.model, effort: selection.effort,
+        workerDurationMs: 5, costUsd: 0.01, tokens: { input: 10, output: 2 } };
+    } })(arm);
+  // The symlink resolves to byte-identical sealed content, so only the no-follow open can tell it apart.
+  await assert.rejects(swapped((path) => symlinkSync(join(dirname(path), "..", "home", "value.ts"), path)), /isolation-breach/);
+  await assert.rejects(swapped((path) => execFileSync("mkfifo", ["-m", "444", path])), /isolation-breach/);
 });
 
 test("worker reentry cannot activate an operator reviewer call", async (t) => {

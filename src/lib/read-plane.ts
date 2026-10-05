@@ -67,6 +67,28 @@ export interface ReadGeneration<T> {
   facts: T;
 }
 
+/** A published generation answers ONE consumer pass. The daemon publishes one only at the top of
+ * a tick, and a dispatch phase can hold the loop for an hour while the full sweep is retriggered;
+ * reusing it there disposed merged PRs and dead heads (DAEMON-1791151532775, 2026-10-04). A later
+ * pass reads its own generation, unpublished. Unpublished, or no plane to read: undefined, which
+ * leaves the consumer on its own live read. */
+export function onePassPerGeneration<I, T>(
+  current: () => ReadGeneration<T> | undefined,
+  read: ((input: I) => Promise<ReadGeneration<T>>) | undefined,
+  input: () => I,
+): () => Promise<T | undefined> {
+  let consumed: number | undefined;
+  return async () => {
+    const published = current();
+    if (published && published.generation !== consumed) {
+      consumed = published.generation;
+      return published.facts;
+    }
+    if (!published || !read) return undefined;
+    return (await read(input())).facts;
+  };
+}
+
 export function startReadPlane<I, O>(options: {
   workerUrl: URL;
   workerInput: unknown;
