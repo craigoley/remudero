@@ -1,0 +1,53 @@
+- id: W1-T5894
+  title: "ONE PLAN CHANGE IS ONE GIT READ FOR EVERY THREAD — `publishThreadPlan` broadcasts only the pin (path, repoDir, ref), so every subscribed thread's `adopt` runs its own `readServePlanAtRef` git read and parse of the same commit: five threads adopting one ref cost about 50 s of git and 25 s of parsing per plan merge on the host"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19 sizing: spans thread-plan, serve-plan-reload and an existing suite; one concern — main reads the plan blobs at a ref once and every thread parses those, never git
+  band_meaning: span
+  origin: "operator session 2026-10-05: serve.plan_pin_adopted rows on the host for ref 33de1e947, measured 15:16Z"
+  plan_refs: [W1-T4481]
+  files: [src/lib/thread-plan.ts, src/lib/serve-plan-reload.ts, test/serve-workers-follow-the-reloaded-plan.test.ts, test/one-plan-change-is-one-git-read-for-every-thread.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 8b8f15c9. serve's `reloadPlan` (src/lib/serve.ts) calls
+    `reloadServePlan`, whose read already runs `readServePlanAtRef` once (off the loop, through
+    `readServePlanOffLoop`), and its `onReloaded` calls `publishThreadPlan({ path, repoDir, ref })`
+    (src/lib/thread-plan.ts, E43 #8784). That posts only `{ type: "pin", pin }` on the
+    `remudero-thread-plan-pin` BroadcastChannel; every thread's `adopt` then calls
+    `readServePlanAtRef(pin.repoDir, pin.ref)` itself: a `git show`, an `ls-tree` and a
+    `cat-file --batch` over every shard, then `mergePlanBlobsQuarantiningDuplicates`. The `ask`
+    reply re-posts the same bare pin to a late thread.
+    MEASURED 2026-10-05 15:16Z on the host (serve.plan_pin_adopted rows for ref 33de1e947): five
+    threads adopted the same ref with gitMs 5385, 5810, 5901, 6272 and 25816, and parseMs about
+    4,900 to 5,600 each (3,220 tasks): about 50 s of git and 25 s of parsing per plan merge, on a
+    host where serve forks generations several times an hour and the git reads contend with
+    every other git on the box.
+  design: |
+    Main reads the blobs at the ref once and the threads only parse. Have the read return the
+    blobs it parsed (`readServePlanBlobs`'s `{ label, text }[]`, or one concatenated buffer) beside
+    the plan, and make the pin message carry them: post the texts with the pin (a BroadcastChannel
+    structured-clones them per receiver), or put them in a SharedArrayBuffer the message names, so
+    the text is copied at most once per thread and git runs once. serve.ts's `onReloaded` already
+    hands `publishThreadPlan` the whole `PlanRead`, so carrying the blobs on it needs no serve.ts
+    change. `published` keeps the blobs for the `ask` reply, so a thread that starts later adopts
+    without git too. A thread's `adopt`
+    parses the received blobs with `mergePlanBlobsQuarantiningDuplicates`; it never calls
+    `readServePlanAtRef`. Keep one `serve.plan_pin_adopted` row per thread with that thread's
+    `parseMs`, and carry main's single `gitMs` (the one read) on each row rather than a per-thread
+    git time. A thread whose parse fails still posts `adopt_failed` and keeps its plan; the
+    existing suite test/serve-workers-follow-the-reloaded-plan.test.ts ("a worker that cannot read
+    the pinned commit keeps its plan and the failure is ledgered") moves to a blob that fails to
+    parse, since a thread no longer reads git. The other tests in that suite keep passing; they are
+    not a proof here because they pass at base.
+  acceptance:
+    - claim: "one plan change published to N subscribed worker threads performs exactly one git read of the plan at that ref (counted across main and every thread), each thread still adopts the same ref and answers the same task ids, and each serve.plan_pin_adopted row carries that thread's parseMs; a thread started after the publish adopts through ask with no further git read"
+      proof: "unit test: test/one-plan-change-is-one-git-read-for-every-thread.test.ts"
+  falsifier: |
+    Keep the bare-pin broadcast with `readServePlanAtRef` in `adopt`: every thread runs its own
+    git read, the count is 1 + N, and the test fails.

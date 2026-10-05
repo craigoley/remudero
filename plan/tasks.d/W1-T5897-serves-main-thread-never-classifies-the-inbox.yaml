@@ -1,0 +1,61 @@
+- id: W1-T5897
+  title: "SERVE'S MAIN THREAD NEVER CLASSIFIES THE INBOX — every serve generation starts with an empty `inboxClassifyStates` memo and its inbox routes run a cold `classifyAllProposalsSliced` pass of 1 to 6.5 minutes over about 1,032 proposals, while serve forks a generation per merge: single reads blocked up to 13.8 s, past the console's 5 s budget, though the slow lane already classifies off-thread"
+  repo: remudero
+  depends_on: [W1-T5886]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — the inbox classification is made on the slow lane only, and every main-thread reader answers from what it persisted
+  band_meaning: span
+  origin: "operator session 2026-10-05: read-only host evidence gathered by the W1-T5886 build (PR #9364)"
+  plan_refs: [W1-T5886, W1-T5269, W1-T4089]
+  files: [src/lib/panel-graph.ts, src/lib/inbox-view.ts, src/lib/fleet-lane.ts, src/lib/read-model-slow-lane.ts, src/lib/serve.ts, test/serves-main-thread-never-classifies-the-inbox.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main f3f2130e. `inboxClassifyStates` (src/lib/panel-graph.ts) is a
+    WeakMap keyed by the `PanelGraphDeps` object, so each serve generation starts with no
+    classification and no anchor-grep cache. `buildInboxRoute` (GET /v1/inbox),
+    `buildInboxAttentionCensusRoute`, `buildInboxThreadRoute`, the reply route and
+    `inboxThreadListSources`' `classify` all await `classifyAllProposalsSliced(deps, ...)` on
+    serve's main thread. Its cold pass reads the retained-release union and classifies every
+    proposal; `anchorGrepFor` keys its cache per main sha, so every merge empties it.
+    The slow lane's inbox unit (`coreUnits` in src/lib/read-model-slow-lane.ts) already runs
+    `refreshInboxClassification` (src/lib/inbox-view.ts) off-thread and logs
+    `inbox.classification_written`, but what it persists through `writeClassificationSnapshot`
+    (src/lib/fleet-lane.ts, state/inbox-classified.json) is only `{ proposalId, state }` per
+    proposal, too little to build the inbox lanes, needsYou included.
+    MEASURED 2026-10-05 by the W1-T5886 build (PR #9364, read-only host evidence): a cold pass
+    reads the retained-release union over about 402 archives (about 150 MB gz) and classifies
+    about 1,032 proposals in 1 to 6.5 minutes; serve logged 17 `serve.start` rows from 12:40 to
+    16:09Z, some 79 s apart, so a generation can be replaced before its pass lands; during a pass
+    single reads blocked up to 13.8 s on the event loop.
+    RELATION TO W1-T5886: that task (open PR #9364) makes the thread list and the inbox view's
+    legacy side answer from the slow lane's classification. This one finishes the move: no inbox
+    route classifies on the main thread at all, the persisted classification is complete, and a
+    new generation starts from it. Build after #9364 merges or rebase onto it; both touch
+    panel-graph.ts, inbox-view.ts, fleet-lane.ts and serve.ts.
+  design: |
+    1. The slow lane persists the FULL classification each pass (proposals, classifications and
+       whatever `inboxLanes` needs to build every lane, needsYou included) with its own identity
+       and generatedAt, written atomically beside or instead of state/inbox-classified.json, and
+       the fleet lane keeps reading the states it reads today.
+    2. Every main-thread inbox reader (`buildInboxRoute`, the attention census, the thread and
+       thread-list routes, the inbox view's legacy side) answers from that persisted
+       classification, paired by snapshot identity as #9338 pairs the nav-badge inbox counts, so
+       the shadow comparator never compares the inbox view with its own body. Its age is the slow
+       lane's generatedAt; nothing persisted yet is an explicit not-ready answer, never an empty
+       list and never a main-thread pass.
+    3. A generation handoff carries the held classification (or reads the persisted one at boot)
+       instead of starting cold. `classifyAllProposalsSliced` stays for the slow lane; the main
+       thread does not call it on a request.
+  acceptance:
+    - claim: "a freshly forked serve generation with a persisted full classification and an empty main-thread memo answers GET /v1/inbox and the inbox thread list from that classification, with its generatedAt as the source age, and runs no main-thread classification pass"
+      proof: "unit test: a fresh serve generation answers the inbox from the persisted classification"
+    - claim: "serving GET /v1/inbox, the attention census and an inbox thread read on serve's main thread performs no classifyAllProposalsSliced pass; with nothing persisted the inbox answers not ready rather than classifying"
+      proof: "unit test: an inbox request on serve's main thread runs no classification pass"
+  falsifier: |
+    Keep the routes on `classifyAllProposalsSliced(deps, ...)`: the fresh generation classifies
+    cold on its first read and both tests see a main-thread pass.
