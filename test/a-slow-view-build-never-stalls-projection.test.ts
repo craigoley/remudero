@@ -260,7 +260,7 @@ test("the view thread body builds the extra views it loads and answers shadow an
   const ledgerDir = scratch(t, "slowview-body-ledger");
   writeFileSync(join(ledgerDir, LIVE), row(Date.now(), "r1"));
   mkdirSync(join(stateDir, "read-model"), { recursive: true });
-  writeFileSync(join(stateDir, "read-model", "switches.json"), JSON.stringify({ views: { inbox: "shadow", extra: "shadow" } }));
+  writeFileSync(join(stateDir, "read-model", "switches.json"), JSON.stringify({ views: { inbox: "shadow", extra: "shadow", analytics: "shadow" } }));
   const projector = projectorOf(stateDir, [{ name: "core", ledgerDir }], { now: () => Date.now(), date: () => new Date(), iso: () => new Date().toISOString() });
   t.after(() => projector.ticker.release());
   const viewsModule = moduleFile(t, "slowview-extra", `export default [{ name: "extra", version: 1, materialize: () => [{ key: "", data: { extra: true }, sources: [] }] }];\n`).href;
