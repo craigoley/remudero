@@ -75,6 +75,7 @@ const {
       assertAged?: () => void;
       assertComplete?: () => void;
       recordedPopulationByFile?: Record<string, number>;
+      env?: NodeJS.ProcessEnv;
     }) => number;
   };
 
@@ -641,6 +642,34 @@ test("W1-T3388: an unreadable base ref turns attribution off rather than refusin
   assert.equal(code, 1, "the strict, un-attributed reading still blocks");
   assert.match(output.join("\n"), /BLOCKED/);
   assert.doesNotMatch(output.join("\n"), /inherited from the base/, "no base ⇒ no ownership claim");
+});
+
+test("W1-T5826: a pull_request run names an inherited crossing in its report but publishes no warning annotation", () => {
+  // The `::warning` channel is the push-to-main lane's lead time for a crossing no push planted.
+  // On a PR the same crossing is already NAMED in the report as the base's; annotating it on
+  // every open PR would repeat W1-T3388's one-stamp-many-PRs noise in a new channel.
+  const line = `  lastActivityAt: "${at(-13 * DAY)}",\n`;
+  const output: string[] = [];
+  const code = main({
+    execFile: (cmd, args) => {
+      if (cmd === "node") return JSON.stringify({ staleDays: THRESHOLD });
+      if (args[0] === "ls-files") return "test/a.test.ts\n";
+      if (args[0] === "rev-parse") return "deadbeef\n";
+      if (args[0] === "show") return line;
+      throw new Error(`unexpected: ${cmd} ${args.join(" ")}`);
+    },
+    readFile: () => line,
+    now: () => NOW,
+    log: (message) => output.push(message),
+    assertAged: () => undefined,
+    assertComplete: () => undefined,
+    recordedPopulationByFile: { "test/a.test.ts": 1 },
+    env: { RMD_CI_REPORT: "1" },
+  });
+
+  assert.equal(code, 0);
+  assert.match(output.join("\n"), /inherited from the base -- NOT this diff/);
+  assert.ok(!output.some((l) => l.startsWith("::warning")), "no warning annotation off the main lane");
 });
 
 test("the freshness-restart fixture is exempt because runSweep judges it against the injected clock", () => {
