@@ -1,9 +1,10 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import type { ChildProcess, ExecFileSyncOptions, ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 import { accessSync, constants as fsConstants, mkdirSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { StringDecoder } from "node:string_decoder";
 import { promisify } from "node:util";
 
 import { clockFromMillisFn, systemClock } from "./clock.js";
@@ -326,6 +327,94 @@ export async function ghTextAsync(
   } finally {
     if (asyncReadInFlight.get(key) === request) asyncReadInFlight.delete(key);
   }
+}
+
+/** A single streamed line longer than this keeps its prefix only, so a newline-free body cannot grow memory. */
+export const GH_STREAM_MAX_LINE_CHARS = 1 << 20;
+const GH_STREAM_STDERR_CHARS = 4096;
+
+/**
+ * Streams a plain-text `gh` response line by line with NO whole-body buffer: each newline-delimited
+ * line (the final partial line included, even when empty, exactly as `String#split` yields them)
+ * goes to `onLine` as it arrives, so memory is the caller's reducer, not the response size.
+ * Paced and sentinel-guarded like {@link ghTextAsync}; a wedged child gets SIGTERM at `timeout`
+ * and SIGKILL one grace later. Rejects with the exit status and a stderr excerpt on a failed run.
+ */
+export async function ghStreamLinesAsync(
+  args: string[],
+  onLine: (line: string) => void,
+  opts: { timeout?: number; killGraceMs?: number } = {},
+): Promise<void> {
+  const timeout = opts.timeout ?? DEFAULT_GH_CALL_TIMEOUT_MS;
+  const graceMs = opts.killGraceMs ?? DEFAULT_GH_KILL_GRACE_MS;
+  refuseSentinelGhToken("gh", args, undefined);
+  await applyGhReadCadenceAsync(args);
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn("gh", args, { stdio: ["ignore", "pipe", "pipe"] });
+    const decoder = new StringDecoder("utf8");
+    let carry = "";
+    let dropping = false;
+    let stderr = "";
+    let timedOut = false;
+    let settled = false;
+    const pushText = (text: string): void => {
+      let from = 0;
+      for (;;) {
+        const at = text.indexOf("\n", from);
+        if (at < 0) break;
+        onLine(dropping ? carry : carry + text.slice(from, at));
+        carry = "";
+        dropping = false;
+        from = at + 1;
+      }
+      if (!dropping) carry += text.slice(from);
+      if (carry.length > GH_STREAM_MAX_LINE_CHARS) {
+        carry = carry.slice(0, GH_STREAM_MAX_LINE_CHARS);
+        dropping = true;
+      }
+    };
+    const killTimer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      const hard = setTimeout(() => child.kill("SIGKILL"), graceMs);
+      hard.unref();
+      child.once("close", () => clearTimeout(hard));
+    }, timeout);
+    const finish = (err?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(killTimer);
+      if (err) reject(err);
+      else resolve();
+    };
+    child.stdout.on("data", (chunk: Buffer) => {
+      try {
+        pushText(decoder.write(chunk));
+      } catch (err) {
+        child.kill("SIGKILL");
+        finish(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      if (stderr.length < GH_STREAM_STDERR_CHARS) stderr = (stderr + chunk.toString("utf8")).slice(0, GH_STREAM_STDERR_CHARS);
+    });
+    child.on("error", (err) => finish(err));
+    child.on("close", (code, signal) => {
+      if (settled) return;
+      if (timedOut || code !== 0) {
+        const how = timedOut ? `timed out after ${timeout}ms` : signal ? `killed by ${signal}` : `exited ${code}`;
+        finish(new Error(`gh ${args[0] ?? ""} ${how}${stderr.trim() ? `: ${stderr.trim()}` : ""}`));
+        return;
+      }
+      try {
+        pushText(decoder.end());
+        onLine(carry);
+        finish();
+      } catch (err) {
+        finish(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  });
 }
 
 export const DEFAULT_GH_PACE_MIN_GAP_MS = 1_500;
