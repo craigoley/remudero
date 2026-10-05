@@ -16,7 +16,7 @@
     - src/lib/status.ts
     - src/run-task.ts
     - test/plan-reconcile-truncated-read-is-coverage-aware.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-01 at origin/main 926efe8c2 by reading source with `git show origin/main:<path>` (src/lib/open-prs-rest.ts, src/lib/status.ts and src/run-task.ts are byte-identical between 03a0843dc and 926efe8c2). The GitHub-side figures (6582 closed PRs, 52 REST calls, a page-50 floor of 2026-08-18T02:49:29Z with about 1582 closed PRs unread) are the sibling draft W1-T5100's measurement through a GET-only REST shim and are used here as given; I could not re-run them (no network read of the board from this sandbox). W1-T5100 is a sibling draft with a provisional id; its WINDOW-SHORT report (merged shards whose git evidence fell outside the two git scan windows) is a different set and is not duplicated here.

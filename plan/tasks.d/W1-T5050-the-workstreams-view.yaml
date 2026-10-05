@@ -15,7 +15,7 @@
     - src/lib/workstreams-view.ts
     - test/workstreams-view.test.ts
     - src/lib/read-model-worker.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-01: /v1/operator-activity took 990 ms and 3,602 ms in two gentle sweeps. Its cold boot

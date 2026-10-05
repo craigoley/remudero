@@ -10,7 +10,10 @@ pins `origin/main`, verifies the committed tree and each selected test path, che
 cheap census before expensive validation, runs default static preflight and the module-level affected floor, and refuses missing/zero test
 summaries. Configuration, dependency, workflow, fixture/helper, unknown and empty-floor changes
 fall back to every suite, without full-suite coverage instrumentation. A failing test is not
-retried into a green verdict. Keep the receipt in `coverage/preflight-author.json`; it records
+retried into a green verdict. An unsuccessful static gate stops before affected tests: the receipt cannot
+pass, retains the selected floor and native static outcome, and explicitly records why tests were not run.
+Use the full-parity commands below when deliberately collecting further diagnostic evidence.
+Keep the receipt in `coverage/preflight-author.json`; it records
 the exact head/base, suites, reasons, duration and outcomes on failure as well as success.
 
 The selector's symbol-level narrow set remains shadow-only. A highly connected module may select
