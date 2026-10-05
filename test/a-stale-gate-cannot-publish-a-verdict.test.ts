@@ -112,7 +112,7 @@ test("W1-T3337: the CLI self-reexec guard never suppresses the reviewer code pro
     },
   });
   assert.equal(result.status, "stale");
-  assert.deepEqual(calls, ["fetch --quiet origin", "rev-parse HEAD", "rev-parse origin/main", `merge-base ${OLD} ${MAIN}`, `diff --name-only ${OLD}..${MAIN}`]);
+  assert.deepEqual(calls, ["fetch --quiet --no-tags origin +refs/heads/main:refs/remotes/origin/main", "rev-parse HEAD", "rev-parse origin/main", `merge-base ${OLD} ${MAIN}`, `diff --name-only ${OLD}..${MAIN}`]);
 });
 
 test("W1-T3337: an unreadable guarded diff withholds the terminal verdict", () => {

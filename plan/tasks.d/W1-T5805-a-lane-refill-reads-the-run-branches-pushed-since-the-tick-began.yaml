@@ -1,0 +1,44 @@
+- id: W1-T5805
+  title: "A LANE REFILL READS THE RUN BRANCHES PUSHED SINCE THE TICK BEGAN — `refillLane` reuses the dispatch phase's `dispatchOpts`, whose `hasPushedRunBranch` closes over ONE `git ls-remote` taken at the tick's start, so on 2026-10-05 a refill at 02:43Z dispatched W1-T5650 while its run branch had been on origin, with open PR #9210, since ~02:16Z; the fleet then built and merged a duplicate (#9219)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the branch probe a refill decides on
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5650 built twice (#9210 hand-built, #9219 fleet)"
+  plan_refs: [W1-T4416, W1-T5761, W1-T5762, W1-T534, W1-T916, W1-T4002, W1-T1268]
+  files: [src/lib/daemon.ts, test/a-lane-refill-reads-the-run-branches-pushed-since-the-tick-began.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main b790deee and the fleet ledger archives. src/lib/daemon.ts builds
+    `pushedRunBranches`/`pushedRunRefs` from `deps.readPushedRunBranches()` once, above
+    `dispatchOpts`, with the plan-only receipts and orphan evidence; `refillLane` (W1-T4416) passes
+    `...dispatchOpts` to `runnableCandidates`, so every refill in the phase answers
+    `hasPushedRunBranch` from the tick-start read. Its `isOpenPr` reads `lastProj`, which
+    `refreshMerged` serves unchanged while a tick-read generation is set (W1-T5762 bounds that age).
+    LIVE, run DAEMON-1791165882568: the phase's selection pass logged dispatch.skipped rows at
+    02:08:09-02:08:19Z; branch run-W1-T5650-1791165209009 was pushed and #9210 (cao825, trailer
+    `Remudero-Task: W1-T5650`) opened 02:16:36Z; refill passes at 02:36:39Z and 02:42:40Z skipped
+    other tasks but not W1-T5650, and `dispatch.lane_refilled` (lane 0, finished W1-T5649,
+    next W1-T5650) fired 02:43:03Z; `dispatch.claim` created refs/rmd-dispatch/W1-T5650 at 02:43:26Z
+    because a hand build takes no claim. The same frozen read kept refusing merged tasks as
+    run-branch-already-pushed (W1-T5748 at 02:36Z after #9205 merged). W1-T5649's duplicate is the
+    other direction: the fleet's run started 02:11:23Z, before the hand-built branch existed.
+    W1-T5761 (merged #9233) bounds the phase at 20 min, which narrows the window and does not close it.
+  design: |
+    `refillLane` re-reads the run-branch state for its own pass (one `ls-remote`, no API budget,
+    plus the receipts and orphan evidence the tick-start read uses) and builds `hasPushedRunBranch`
+    from it, the same per-pass shape drain.ts's `refreshRunBranchState` already has; a failed read
+    keeps today's fail-open direction and logs it. The open-PR half is W1-T5762's and is not
+    duplicated here.
+  acceptance:
+    - claim: "a dispatch phase whose tick-start read held no run branch for a task refuses that task at a later refill once the branch reader returns one for it, logging run-branch-already-pushed, and still refills it when the reader returns none"
+      proof: "unit test: test/a-lane-refill-reads-the-run-branches-pushed-since-the-tick-began.test.ts"
+  falsifier: |
+    Let the refill reuse the tick-start closure: the task pushed mid-phase is dispatched and the
+    test fails.

@@ -1,0 +1,41 @@
+- id: W1-T5803
+  title: "THE PAUSE REVIEW CLOCK RUNS ACROSS PAUSED TICKS — each PAUSE tick starts a fresh `startInterphaseReviewClock(..., \"pause\")`, sleeps one poll interval and stops it, while the clock fires only once a full interval has elapsed or it is handed an event wake, so stop() wins the race: 2026-10-05 05:12Z on, 29 paused ticks under a recycle PAUSE ran ONE review pass, and W1-T4429 (iii) 'reviews keep flowing beside the sleep' did nothing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the review clock that runs while the fleet is paused
+  band_meaning: span
+  origin: "operator session 2026-10-05: live ledger DAEMON-1791176702134 under the 05:10Z recycle PAUSE"
+  plan_refs: [W1-T4429, W1-T5343, W1-T4045, W1-T2996, W1-T4732]
+  files: [src/lib/daemon.ts, test/the-pause-review-clock-runs-across-paused-ticks.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main b790deee. In src/lib/daemon.ts the PAUSE branch of the tick loop
+    calls `startInterphaseReviewClock(deps, pollIntervalMs, log, "pause")`, then
+    `await sleepUntilSweepWake(pollIntervalMs)`, then `pauseReviewClock.stop()`. The clock's runner
+    waits in quanta of `INTERPHASE_REVIEW_CLOCK_STOP_BOUND_MS` (1 s) and starts a pass only when
+    `elapsedMs >= pollIntervalMs` or a wait returned "wake". Two ways it loses: (a) with no event the
+    outer sleep and the clock's elapsed time reach the same interval together, and stop() lands
+    first; (b) `createSweepWakeSignal.wake()` (src/lib/github-event-wake.ts) resolves only
+    `activeWaits[0]`, and the outer pause sleep sits ahead of every 1 s re-wait the clock queues,
+    so a GitHub event ends the paused tick and the clock never sees it. LIVE 2026-10-05, run
+    DAEMON-1791176702134 (poll_interval_ms 60000): 33 `daemon.pause` rows 05:12:16Z..05:28:49Z,
+    12 to 60 s apart (wakes ending each tick), one `daemon.pause.review_passes` (passes 1,
+    05:15:56Z, after a 127 s tick), and no `review.posted` after 05:03Z.
+  design: |
+    One pause review clock lives across consecutive paused ticks: started on the first paused
+    tick, stopped on the first tick that is not paused (and on STOP and shutdown), so its interval
+    accrues across ticks. A paused tick whose sleep returned "wake" hands that wake to the clock
+    (or runs one review-only pass), so an event during PAUSE is reviewed promptly. The per-tick
+    `daemon.pause.review_passes` row keeps its shape. No change to the drain or interphase scopes.
+  acceptance:
+    - claim: "with an injected clock, wake signal and fake sweepLight, ten paused ticks of one poll interval each run at least nine review-only passes, a paused tick ended by an event wake runs a pass for it, and the clock stops on the first unpaused tick"
+      proof: "unit test: test/the-pause-review-clock-runs-across-paused-ticks.test.ts"
+  falsifier: |
+    Restore the per-tick start/stop: the ten-tick fixture counts zero or one pass and the test
+    fails.
