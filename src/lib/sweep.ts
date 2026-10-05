@@ -11034,7 +11034,7 @@ export async function runSweep(
         const fresh = result.status === "fresh" && result.codeSha === recovery.loadedCodeSha;
         const nextBackoff = fresh ? 0 : Math.min(backoff * 2, policy.pendingCeilingMinutes, 60);
         appendLine(deps.ledgerPath, {
-          ts: new Date(now).toISOString(), run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+          ts: clockFromMillisFn(() => now).iso(), run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
           step: "sweep.reviewer_freshness_probe", pr_number: pr.prNumber, pr_url: pr.prUrl,
           head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest, review_key: key,
           refusal_at: refusal.attemptedAt, loaded_code_sha: recovery.loadedCodeSha,
