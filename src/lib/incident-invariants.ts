@@ -231,8 +231,11 @@ const RULES: readonly InvariantRule[] = [
     bad: (window) => {
       const daemonRows = window.filter((row) => stringField(row, "step")?.startsWith(DAEMON_STEP_PREFIX));
       const newest = window.at(-1);
+      // Serve's own minute row is the proof that the ledger writer is alive: other rows (a lone
+      // serve.memory sample, a refusal) say nothing about whether the daemon should be speaking.
+      const serveAlive = window.some((row) => row.step === RUNTIME_LOOP_LAG_STEP);
       return {
-        bad: window.length > 0 && daemonRows.length === 0,
+        bad: serveAlive && daemonRows.length === 0,
         message: `no daemon.* row in ${window.length} row(s); newest step=${(newest && stringField(newest, "step")) ?? "unknown"}`,
       };
     },
