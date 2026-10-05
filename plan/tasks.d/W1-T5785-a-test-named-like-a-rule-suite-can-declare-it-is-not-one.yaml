@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5676 falsifier rename (#9209)"
   plan_refs: [W1-T5616, W1-T5676, W1-T2644, W1-T2525]
   files: [src/lib/ci-parity.ts, test/a-test-named-like-a-rule-suite-can-declare-it-is-not-one.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

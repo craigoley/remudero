@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: serve.plan_pin_adopted rows on the host for ref 33de1e947, measured 15:16Z"
   plan_refs: [W1-T4481]
   files: [src/lib/thread-plan.ts, src/lib/serve-plan-reload.ts, test/serve-workers-follow-the-reloaded-plan.test.ts, test/one-plan-change-is-one-git-read-for-every-thread.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

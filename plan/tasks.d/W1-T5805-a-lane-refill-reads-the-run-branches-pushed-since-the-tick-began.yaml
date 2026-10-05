@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5650 built twice (#9210 hand-built, #9219 fleet)"
   plan_refs: [W1-T4416, W1-T5761, W1-T5762, W1-T534, W1-T916, W1-T4002, W1-T1268]
   files: [src/lib/daemon.ts, test/a-lane-refill-reads-the-run-branches-pushed-since-the-tick-began.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

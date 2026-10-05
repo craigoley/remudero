@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 7, distinct names for API-posted gate reports; workflow edits are an operator build (W1-T5351). Re-planned 2026-10-05 after a build attempt (local WIP fc8b5770, unpushed)"
   plan_refs: [W1-T5694, W1-T5368, W1-T3720, W1-T5351, W1-T4399, W1-T5515, W1-T5802, W1-T3781, W1-T4402, W1-T3171, W1-T4438, W1-T351]
   files: [.github/workflows/ci.yml, .github/workflows/ci-gate.yml, MASTER-PLAN.md, test/a-posted-gate-never-shares-a-name-with-a-job.test.ts, test/a-bundled-job-names-the-gate-that-refused.test.ts, test/a-github-503-retries-posted-gate-checks.test.ts, test/a-posted-gate-check-stays-rerunnable.test.ts, test/a-rule-checks-failure-is-titled-by-its-gate-not-commitlint.test.ts, test/the-rule-checks-run-first.test.ts, test/ci-gate-required-format.test.ts, test/fast-lane-classifier.test.ts, test/ci-title-lint.test.ts, test/commitlint-mode.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

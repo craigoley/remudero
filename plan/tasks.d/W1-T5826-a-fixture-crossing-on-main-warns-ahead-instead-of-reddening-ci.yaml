@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: main red #2 on the expiring-fixture census; workflow edit is an operator build (W1-T5351)"
   plan_refs: [W1-T3655, W1-T3719, W1-T5539, W1-T3272, W1-T5351]
   files: [.github/workflows/ci.yml, scripts/expiring-fixture-census.mjs, test/expiring-fixture-census.test.ts, test/a-fixture-crossing-on-main-warns-ahead-instead-of-reddening-ci.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

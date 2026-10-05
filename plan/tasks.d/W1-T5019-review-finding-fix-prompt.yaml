@@ -11,7 +11,7 @@
   band_meaning: span
   origin: "operator-approved Orca comparison, 2026-09-30"
   files: [src/lib/prompt-render.ts, src/run-task.ts, test/review-finding-fix-prompt.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED at c94c2bf49: review.finding rows preserve validated path, line, mechanism and remedy, but

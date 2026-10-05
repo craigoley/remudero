@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log, lint-plan should flag a test-only files: list whose every proof is a unit test"
   plan_refs: [W1-T2835, W1-T3098, W1-T5527, W1-T5622, W1-T5418]
   files: [src/lib/task-linter.ts, test/a-test-only-task-carries-a-discriminating-proof.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

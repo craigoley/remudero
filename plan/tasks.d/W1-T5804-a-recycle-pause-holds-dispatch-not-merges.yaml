@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: recycle pid 2822260 started 05:10:24Z; 10-02 ruling 'reviews continue during PAUSE'"
   plan_refs: [W1-T4429, W1-T5127, W1-T5140, W1-T2598, W1-T5281, W1-T5803]
   files: [src/lib/daemon.ts, src/lib/recycle-yield.ts, test/a-recycle-pause-holds-dispatch-not-merges.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
