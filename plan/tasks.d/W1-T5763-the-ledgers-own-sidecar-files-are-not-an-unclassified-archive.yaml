@@ -1,0 +1,47 @@
+- id: W1-T5763
+  title: "THE LEDGER'S OWN SIDECAR FILES ARE NOT AN UNCLASSIFIED ARCHIVE — `listedLedgerFiles` counts every `ledger.*` name that is not a rotation as unclassified, including ledger.ts's own `ledger.ndjson.carried.json` and `ledger.ndjson.retained-steps.json`, so the W1-T4817 fleet-state reconciler has refused on every full pass since #9071 merged: 62 `reconcile.unreadable` rows and zero reconcile outcomes 10-04 11:41Z to 10-05 00:00Z"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one defect — the union reader's file classification
+  band_meaning: span
+  origin: "operator session 2026-10-04: watch log 23:29Z (repeated reconcile.unreadable on ledger.ndjson.bak, carried.json, retained-steps.json)"
+  plan_refs: [W1-T4817, W1-T5517, W1-T5041]
+  files: [src/lib/ledger-union.ts, src/lib/ledger-path.ts, src/lib/ledger.ts, test/the-ledgers-own-sidecar-files-are-not-an-unclassified-archive.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 9c38366f. src/lib/ledger-union.ts `listedLedgerFiles` returns
+    `unclassified` = every name starting `ledger.` other than `ledger.ndjson` that is not a rotation
+    entry. src/lib/ledger.ts writes `${ledgerPath}.carried.json` and
+    `${ledgerPath}.retained-steps.json` beside the live file on every rotation. #9071 (W1-T4817,
+    merged 10-04 11:26Z) added `readFleetState` (src/lib/sweep.ts), which throws "fleet
+    reconciliation history unreadable" when `union.unclassified.length > 0`; `runSweep` logs that as
+    `reconcile.unreadable`, and because `deps.readFleetState` is set the older
+    `reconcileMainRunGaps` branch does not run either. MEASURED on the fleet ledger: 62
+    `reconcile.unreadable` rows from 11:41:49Z on 10-04 to 00:00Z on 10-05, each naming
+    /home/node/Remudero/state/ledger.ndjson.bak, ledger.ndjson.carried.json and
+    ledger.ndjson.retained-steps.json, and no `reconcile.repaired`, `reconcile.repair_failed`,
+    `reconcile.escalated` or `main.run_gap.dispatched` row in that window. The same refusal reaches
+    the other strict readers: cash-trial.ts, panel-graph.ts, reader-agreement.ts, retro.ts
+    (`incomplete-ledger-corpus`) and triage-lane-outcomes.ts. The .bak is a 2.2 MB copy dated
+    2026-08-20 on the host, outside the repo.
+  design: |
+    The two sidecar suffixes live in one leaf both modules read (ledger-path.ts, beside
+    LEDGER_FILENAME); ledger.ts's `ledgerCarriedPrefixPath`/`ledgerRetainedStepsPath` build from
+    them (their doc already claims "no reader lists it as an archive"; ledger.ts is at its
+    comment-load ceiling, so add no comment lines). `listedLedgerFiles` classifies those names as
+    known non-archives and leaves them out of `unclassified` and of the corpus. A name that could be
+    a rotation in a form the parser misses stays unclassified (the reason the check exists), and so
+    does an unknown copy such as `ledger.ndjson.bak`; removing the host's copy is an operator step,
+    named in the PR.
+  acceptance:
+    - claim: "a state dir holding the live file, a rotation, ledger.ndjson.carried.json and ledger.ndjson.retained-steps.json reads ok with no unclassified files, while an added ledger.ndjson.bak or a misnamed rotation is still reported unclassified"
+      proof: "unit test: test/the-ledgers-own-sidecar-files-are-not-an-unclassified-archive.test.ts"
+  falsifier: |
+    Remove the sidecar classification: the carried and retained-steps files are reported
+    unclassified and the test fails.
