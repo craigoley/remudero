@@ -1,0 +1,42 @@
+- id: W1-T5923
+  title: "THE COVERAGE LANE'S CRITICAL PATH IS ITS SLOWEST SHARD PLUS A SERIAL 4.7-MINUTE MERGE — in a median 22-minute CI run the eight coverage shards' test steps ran 625 s to 871 s (a 39% spread on a duration-balanced split), and coverage-ratchet then spent 280 s in `scripts/coverage-merge-ratchet.mjs` merging raw V8 coverage before it could gate, so every source PR waits for the worst shard and then for the merge"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the coverage lane's wall clock; it changes a required check's job graph and its shard split
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-05: 'why is this all taking so long? How do we improve efficiency and automated throughput?'"
+  plan_refs: [W1-T5705, W1-T5697, W1-T3207, W1-T1041, W1-T4398]
+  files: [.github/workflows/ci.yml, scripts/coverage-merge-ratchet.mjs, scripts/test-tier-manifest.mjs, test/the-coverage-lane-critical-path-is-its-slowest-shard-plus-a-serial-merge.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-05 on CI run 37352884517 (a pull_request run of the median 22-minute wall clock;
+    pre-outage pull_request CI over 100 successful runs: p10 7, p50 22, p90 27 min):
+    - coverage-shard test steps ("Test with coverage"): 4/8 871 s, 2/8 625 s; shard jobs 11-16 min,
+      all started 18:01-18:02Z and finished 18:13-18:18Z.
+    - coverage-ratchet started 18:18Z, after the last shard, and its step "Merge raw V8 coverage shards
+      before assigning LCOV branch indexes" (scripts/coverage-merge-ratchet.mjs) took 280 s; the run
+      finished 18:23Z. Critical path = slowest shard + the serial merge.
+    - Shards are split by `scripts/test-tier-manifest.mjs --select-all --shard N/8` on manifest
+      durations the test gardener refreshes (adopt-durations, #9291 today), yet still spread 39%.
+      Likely cause, to confirm: the durations are measured uninstrumented while the coverage lane
+      runs instrumented, and instrumentation slows suites unevenly.
+  design: |
+    Measure first, then change only what the measurement supports. (1) Balance the coverage split on
+    COVERAGE-LANE durations (per-file instrumented timings from the shards' own TAP output), not the
+    uninstrumented ones; target a max/min shard spread under 15%. (2) Shorten the serial merge: each
+    shard pre-reduces its own raw V8 files into one merged blob before upload, so coverage-ratchet merges
+    eight inputs rather than thousands, keeping the branch-index assignment exactly as today
+    (byte-identical lcov.info on the same inputs is the invariant). (3) Report the before/after critical
+    path in the PR. Every guard on coverage-ratchet's verdict is unchanged; this changes wall clock only.
+  acceptance:
+    - claim: "the coverage split balances on instrumented per-file durations and each shard pre-reduces its raw V8 coverage, and the merged lcov.info is byte-identical to today's merge of the same raw inputs"
+      proof: "unit test: test/the-coverage-lane-critical-path-is-its-slowest-shard-plus-a-serial-merge.test.ts"
+  falsifier: |
+    Change the pre-reduction so it reorders functions or drops a range: the merged lcov.info differs
+    from the reference merge and the test fails.
