@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -10,6 +11,7 @@ const SCRIPT = join(ROOT, 'scripts/preflight-author.mjs');
 const mod = (existsSync(SCRIPT) ? await import(pathToFileURL(SCRIPT).href) : {}) as {
   verifiedSuites: (root: string, suites: string[]) => string[];
   completeTestResult: (result: { status: number | null; stdout?: string; signal?: string; error?: Error }) => boolean;
+  authorEnvironment: (parent: NodeJS.ProcessEnv) => NodeJS.ProcessEnv;
   main: (argv: string[], deps: { root: string; select?: (changed: string[]) => unknown }) => number;
 };
 
@@ -52,6 +54,40 @@ test('author preflight runs real affected tests without coverage and records exa
   assert.equal(receipt.selection, 'affected-floor');
   assert.deepEqual(receipt.suites, ['test/leaf.test.ts']);
   assert.deepEqual(receipt.steps.map((s: { ok: boolean }) => s.ok), [true, true, true]);
+});
+
+test('author preflight clears foreign Git scope without hiding a dirty intended tree', () => {
+  const f = fixture();
+  const foreign = fixture();
+  foreign.git('commit', '--allow-empty', '-m', 'test: foreign Git scope');
+  const env = { ...process.env, GIT_DIR: join(foreign.root, '.git'), GIT_WORK_TREE: foreign.root,
+    GIT_INDEX_FILE: join(foreign.root, '.git/index'), GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'core.worktree', GIT_CONFIG_VALUE_0: foreign.root };
+  const invoke = () => spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
+    `import { main } from ${JSON.stringify(pathToFileURL(SCRIPT).href)}; process.exit(main([], { root: ${JSON.stringify(f.root)} }));`],
+  { cwd: ROOT, encoding: 'utf8', env });
+  const before = foreign.git('rev-parse', 'HEAD');
+  const result = invoke();
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(f.receipt().verdict, 'passed');
+  assert.equal(f.receipt().headSha, f.git('rev-parse', 'HEAD'));
+  assert.notEqual(f.receipt().headSha, before);
+  writeFileSync(join(f.root, 'untracked.ts'), 'export {};');
+  assert.equal(invoke().status, 1, 'a clean foreign repository cannot conceal intended-tree changes');
+  assert.equal(f.receipt().verdict, 'refused');
+  assert.match(f.receipt().error, /uncommitted or untracked/);
+  assert.equal(foreign.git('rev-parse', 'HEAD'), before);
+  assert.equal(foreign.git('status', '--porcelain'), '');
+  const names = spawnSync('git', ['rev-parse', '--local-env-vars'], { cwd: ROOT, encoding: 'utf8' });
+  assert.equal(names.status, 0, names.stderr);
+  const keys = [...names.stdout.trim().split('\n'), 'GIT_NAMESPACE', 'GIT_QUARANTINE_PATH'];
+  const parent = Object.fromEntries(keys.map(key => [key, 'foreign'])) as NodeJS.ProcessEnv;
+  parent.GIT_SSH_COMMAND = 'fixture-transport';
+  const original = { ...parent };
+  const sanitized = mod.authorEnvironment(parent);
+  for (const key of keys) assert.equal(sanitized[key], undefined, `${key} must not redirect child Git`);
+  assert.equal(sanitized.GIT_SSH_COMMAND, 'fixture-transport', 'transport configuration is not repository scope');
+  assert.deepEqual(parent, original, 'do not mutate the caller environment');
 });
 
 test('author preflight full fallback includes unrelated tests for unmodelled configuration', () => {

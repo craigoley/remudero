@@ -9,6 +9,18 @@ import { listTestFiles } from './test-tier-manifest.mjs';
 import { isMainModule, parseArgv } from './lib/argv.mjs';
 import { REPO_ROOT } from './lib/repo-root.mjs';
 
+export function authorEnvironment(parent) {
+  const env = { ...parent, NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: '' };
+  // Git's repository-local environment overrides cwd, including in test subprocesses.
+  // Keep transport/auth settings, but never certify a foreign HEAD, index or object store.
+  for (const key of ['GIT_DIR', 'GIT_INDEX_FILE', 'GIT_WORK_TREE', 'GIT_PREFIX',
+    'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_COMMON_DIR',
+    'GIT_NAMESPACE', 'GIT_QUARANTINE_PATH', 'GIT_CONFIG', 'GIT_CONFIG_PARAMETERS',
+    'GIT_CONFIG_COUNT', 'GIT_IMPLICIT_WORK_TREE', 'GIT_GRAFT_FILE', 'GIT_NO_REPLACE_OBJECTS',
+    'GIT_REPLACE_REF_BASE', 'GIT_SHALLOW_FILE']) delete env[key];
+  return env;
+}
+
 export function verifiedSuites(root, suites) {
   return [...new Set(suites)].sort().map((suite) => {
     const path = resolve(root, suite);
@@ -35,7 +47,7 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
     node: process.version, dryRun: Boolean(values['dry-run']), steps: [], suites: [] };
   const run = (file, args, extra = {}) => spawn(file, args, {
     cwd: root, encoding: 'utf8', maxBuffer: 100 * 1024 * 1024,
-    env: { ...process.env, NODE_TEST_CONTEXT: undefined, NODE_V8_COVERAGE: '' }, ...extra,
+    env: authorEnvironment(process.env), ...extra,
   });
   const git = (args) => {
     const result = run('git', args);
