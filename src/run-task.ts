@@ -43498,7 +43498,6 @@ export function buildSweepHook(
   // SAME instance for this daemon's whole life, exactly as `boardGithub` itself is shared.
   const boardGithub = github ?? buildBatchedGithub(owner, repo, { log, pacer });
   if (!github && snapshotCache) boardGithub.seedBoardSnapshot?.(snapshotCache);
-  // W1-T5650: the draft rung's readiness rides this SAME gateway (built after it, so it can).
   const draftHook = buildInboxDraftHook(owner, repo, config, runId, log, undefined, undefined, undefined, boardGithub);
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
@@ -46413,9 +46412,7 @@ export function buildInboxDraftHook(
   ) => Promise<DraftRungOutcome[]> = draftProposalBatch,
   grepAnchor: (ref: string, anchor: EvidenceAnchor) => boolean = (ref, anchor) => gitGrepAnchorTrue(repoRoot, ref, anchor),
   mainSha: () => string | undefined = () => readOriginMainSha(repoRoot),
-  // W1-T5650: the sweep's daemon-lifetime BATCHED gateway. The readiness block below used to build
-  // an unbatched gateway every pass, and `buildDepsReadinessAccessors` then ran one synchronous
-  // trailer search per plan task. Omitted ⇒ ONE batched gateway for this hook's life.
+  // W1-T5650: the sweep's daemon-lifetime BATCHED gateway; omitted ⇒ one batched gateway per hook.
   github?: GitHub,
 ): (tickRead?: TickReadFacts) => Promise<void> {
   let lazyGithub: GitHub | undefined;
@@ -46792,9 +46789,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config } = {
     writeFileSync(draftsPath, JSON.stringify(drafts, null, 2), "utf8");
   }
 
-  // W1-T5650: BATCHED, not `ghGateway`. The daemon's intake `inbox` rung runs this very function
-  // (buildIntakeRungsDaemonHooks), so it is a loop path: the unbatched gateway cost one synchronous
-  // trailer search per plan task `buildDepsReadinessAccessors` derives.
+  // W1-T5650: BATCHED — the daemon's intake `inbox` rung runs this function, so it is a loop path.
   const deriveDeps: DeriveDeps = { ledgerPath, github: buildBatchedGithub(owner, repo) };
   const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deriveDeps);
   const openProposalIds = new Set(proposals.map((p) => p.id));
