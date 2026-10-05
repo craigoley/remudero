@@ -396,6 +396,7 @@ function callEvidence(row: Record<string, unknown>) {
     : row.success === false ? { state: "failed", value: false }
       : unavailable("worker-outcome-not-reported");
   const cost = observedNonnegative(row.total_cost_usd, "worker-cost-not-reported");
+  const notional = observedNonnegative(Object.hasOwn(row, "notional_cost_usd") ? row.notional_cost_usd : row.total_cost_usd, "worker-cost-not-reported");
   const billingMode = row.billing_mode === "api" || row.billing_mode === "subscription"
     ? row.billing_mode : undefined;
   const otherMode = unavailable("different-billing-mode");
@@ -408,7 +409,7 @@ function callEvidence(row: Record<string, unknown>) {
       source: "worker-result-estimate-not-invoice" as const,
       billingMode: billingMode ? { state: "observed" as const, value: billingMode } : unavailable("billing-mode-not-reported"),
       apiCostUsd: billingMode === "api" ? cost : billingMode ? otherMode : unavailable("billing-mode-not-reported"),
-      subscriptionNotionalUsd: billingMode === "subscription" ? cost : billingMode ? otherMode : unavailable("billing-mode-not-reported"),
+      subscriptionNotionalUsd: billingMode === "subscription" ? notional : billingMode ? otherMode : unavailable("billing-mode-not-reported"),
     },
   };
 }
@@ -431,6 +432,7 @@ export function benchmarkWorkerAttemptResources(result: WorkerResult) {
     ...(observedEnvelope ? { billing_mode: fields.billing_mode } : {}),
     ...(tokensObserved ? { tokens: fields.tokens } : {}),
     ...(costObserved ? { total_cost_usd: fields.total_cost_usd } : {}),
+    ...(observedEnvelope && fields.notional_cost_usd !== undefined ? { notional_cost_usd: fields.notional_cost_usd } : {}),
   };
 }
 
