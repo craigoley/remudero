@@ -417,3 +417,32 @@ test("the push stream tells the rollup each open close and handover with the sub
   a.req.emit("close");
   assert.deepEqual(rollup.summary().streams.views, { opened: 3, closed: 1, peak: 3, handovers: { slow_consumer: 1, recycle: 1 }, subscribers: 0 }, "a close after a handover is not a second close");
 });
+
+test("a sampled view.emitted row bounds its row's wait with prevRowTs and buildStartedAt", async (t) => {
+  const rm = fakeReadModel({ now: "serve" });
+  let at = T0;
+  const stepped: Clock = { now: () => at, date: () => new Date(at), iso: () => new Date(at).toISOString() };
+  const rows: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const { url } = await serve(t, { names: ["now"], readModel: rm, clock: stepped, every: timers().every, log: (step, extra) => void rows.push({ step, ...(extra ? { extra } : {}) }) });
+  const iso = (ms: number): string => new Date(ms).toISOString();
+  /** A body reflecting rows up to `rowMs`, from a build that began at `startedMs`. */
+  const built = (n: number, rowMs: number, startedMs: number): ViewBodyEntry => {
+    const e = entry("now", "instance=core", { n });
+    return { ...e, buildStartedMs: startedMs, body: { ...e.body, sources: [{ name: "ledger:core", asOf: iso(rowMs), state: "fresh" }] } };
+  };
+  rm.post(built(0, T0 - 9_000, T0 - 8_000));
+  const stream = await open(t, `${url}${VIEW_EVENTS_PATH}`);
+  await stream.next((f) => f.event === "hello");
+  // [emitted at, newest row reflected, build started]: the middle event falls inside the minute and is not ledgered.
+  for (const [n, emitAt, rowMs, startedMs] of [[1, T0, T0 - 1_000, T0 - 500], [2, T0 + 10_000, T0 + 8_000, T0 + 8_500], [3, T0 + 60_000, T0 + 50_000, T0 + 56_000]] as const) {
+    at = emitAt;
+    rm.post(built(n, rowMs, startedMs));
+    await stream.next((f) => f.event === "view" && f.id?.endsWith(`:${n}`) === true);
+  }
+  const sampled = rows.filter((r) => r.step === "view.emitted").map((r) => r.extra!);
+  assert.equal(sampled.length, 2, "control: one row per key per minute");
+  assert.deepEqual(sampled.map((r) => ({ emittedAt: r.emittedAt, rowTs: r.rowTs, prevRowTs: r.prevRowTs, buildStartedAt: r.buildStartedAt })), [
+    { emittedAt: iso(T0), rowTs: iso(T0 - 1_000), prevRowTs: iso(T0 - 9_000), buildStartedAt: iso(T0 - 500) },
+    { emittedAt: iso(T0 + 60_000), rowTs: iso(T0 + 50_000), prevRowTs: iso(T0 + 8_000), buildStartedAt: iso(T0 + 56_000) },
+  ]);
+});
