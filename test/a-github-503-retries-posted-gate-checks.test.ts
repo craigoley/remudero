@@ -38,6 +38,8 @@ sleep() { :; }
       GITHUB_REPOSITORY: "owner/repo",
       HEAD_SHA: "abc123",
       POSTING_JOB_ID: "12345",
+      POSTING_RUN_ID: "777",
+      POSTING_RUN_ATTEMPT: "2",
       GH_LOG_FILE: join(root, "calls"),
       GH_RETRIED: join(root, "retried"),
       GH_FAIL_KIND: "transient",
@@ -48,7 +50,7 @@ sleep() { :; }
     const calls = readFileSync(env.GH_LOG_FILE, "utf8").trim().split("\n");
     assert.equal(calls.filter((line) => line.includes("name=jscpd-gate")).length, 2);
     assert.ok(calls.some((line) => line.includes("name=baseline-monotonic")));
-    assert.ok(calls.every((line) => line.includes("external_id=job:12345")));
+    assert.ok(calls.every((line) => line.includes("external_id=run:777:2:job:12345")));
 
     writeFileSync(env.GH_LOG_FILE, "");
     const permanent = spawnSync("bash", ["-c", stub + reporter.run], {

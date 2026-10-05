@@ -185,6 +185,8 @@ import {
 import {
   compareRestArgs,
   rollupFromRest,
+  needsWorkflowIdentity,
+  runsForHeadRestArgs,
   fetchWorkflowRunObservations,
   GhPaceFloorStandDownError,
   isScannerBlockerCandidate,
@@ -2214,7 +2216,12 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             runs.total_count > runs.check_runs.length || statuses.total_count > statuses.statuses.length) {
           throw new Error("incomplete head-specific arm evidence");
         }
-        const latest = dedupeRollupByLatestAttempt(rollupFromRest(runs.check_runs, statuses.statuses));
+        const workflowListing = needsWorkflowIdentity(runs.check_runs)
+          ? await readJsonImpl(runsForHeadRestArgs(owner, repo, fresh.head.sha)) as {
+            workflow_runs?: Parameters<typeof rollupFromRest>[2];
+          } : undefined;
+        const latest = dedupeRollupByLatestAttempt(rollupFromRest(runs.check_runs, statuses.statuses,
+          workflowListing === undefined ? undefined : workflowListing?.workflow_runs ?? []));
         const required = new Set([...protection.contexts, ...(protection.checks ?? []).map(c => c.context), REVIEW_CONTEXT]);
         const checksGreen = [...required].every(name => latest.some(c => (c.name ?? c.context) === name &&
           REQUIRED_CHECK_OK.has((c.state ?? c.conclusion ?? c.status ?? "").toUpperCase())));
@@ -4996,8 +5003,7 @@ export interface RollupCheckEntry {
    *  a CheckRun's `startedAt`, a StatusContext's mapped `createdAt` — so it is present on every
    *  entry the real gateway reports, and is what {@link dedupeRollupByLatestAttempt} sorts on. */
   startedAt?: string;
-  /** Terminal completion time, when the source transport supplied it. This does not participate
-   * in attempt ordering; {@link startedAt} remains the stable rollup dedupe key. */
+  /** Terminal completion time selects between independent workflows sharing a check name. */
   completedAt?: string;
   /** Actions job details URL when this entry is a check run. Preserved so the main-health reader
    * can feed the same job-id-bearing evidence producer as the PR sweep. */
@@ -5006,6 +5012,9 @@ export interface RollupCheckEntry {
   checkRunId?: number;
   /** Checks API posts keep this id even when GitHub rewrites detailsUrl to /runs/<check run id>. */
   externalId?: string;
+  workflowRunId?: number;
+  workflowId?: number;
+  jobId?: string;
 }
 
 /** Resolve only a real Actions job id. A check-run URL's /runs/<id> is not a job id. A posted
@@ -5034,23 +5043,38 @@ export const REQUIRED_CHECK_FAIL = new Set([
   "STALE",
 ]);
 
-/** Group rollup entries by check name or status context and keep the latest start. GitHub records
- *  starts to the second, so check runs tied on that field use their numeric id. Commit statuses
- *  have no check-run id and retain the historical last-encountered tie behavior. */
+/** W1-T5694: newest run per workflow/name, then latest attempt; independent producers use completion.
+ *  Entries without workflow identity retain start/id ordering and last-encountered status ties. */
 export function dedupeRollupByLatestAttempt<T extends RollupCheckEntry>(rollup: readonly T[]): T[] {
-  const latest = new Map<string, T>();
+  const groups = new Map<string, T>();
+  const identity = (c: T) => {
+    const posted = /^(?:run:\d+:\d+:)?job:\d+$/.test(c.externalId ?? "");
+    const workflow = posted ? "posted" : c.workflowId === undefined ? "legacy" : `workflow:${c.workflowId}`;
+    return { key: JSON.stringify([workflow, c.name ?? c.context ?? ""]), known: posted || c.workflowId !== undefined };
+  };
+  const later = (c: T, prior: T, completion = false): boolean => {
+    const time = (e: T) => completion ? e.completedAt ?? e.startedAt ?? "" : e.startedAt ?? "";
+    if (time(c) !== time(prior)) return time(c) > time(prior);
+    return typeof c.checkRunId !== "number" || typeof prior.checkRunId !== "number" || c.checkRunId >= prior.checkRunId;
+  };
   for (const c of rollup) {
-    const key = c.name ?? c.context ?? "";
-    const prior = latest.get(key);
-    if (!prior || (c.startedAt ?? "") > (prior.startedAt ?? "")) {
-      latest.set(key, c);
-    } else if ((c.startedAt ?? "") === (prior.startedAt ?? "")) {
-      if (typeof c.checkRunId === "number" && typeof prior.checkRunId === "number") {
-        if (c.checkRunId >= prior.checkRunId) latest.set(key, c);
-      } else {
-        latest.set(key, c);
-      }
+    const { key, known } = identity(c);
+    const prior = groups.get(key);
+    if (!prior) {
+      groups.set(key, c);
+      continue;
     }
+    if (known && c.workflowRunId !== undefined && prior.workflowRunId !== undefined && c.workflowRunId !== prior.workflowRunId) {
+      if (c.workflowRunId > prior.workflowRunId) groups.set(key, c);
+    } else if (later(c, prior)) {
+      groups.set(key, c);
+    }
+  }
+  const latest = new Map<string, T>();
+  for (const c of groups.values()) {
+    const name = c.name ?? c.context ?? "";
+    const prior = latest.get(name);
+    if (!prior || later(c, prior, true)) latest.set(name, c);
   }
   return [...latest.values()];
 }

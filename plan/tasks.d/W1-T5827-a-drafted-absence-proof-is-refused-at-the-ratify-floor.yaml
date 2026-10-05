@@ -1,0 +1,40 @@
+- id: W1-T5827
+  title: "A DRAFTED ABSENCE PROOF IS REFUSED AT THE RATIFY FLOOR — `rmd approve` filed W1-T5814 (#9253) with `grep: \"renderPromotionProposals\" not found in docs/forensics/retro.md`, which parses as a positive grep for the literal `\"renderPromotionProposals\" not found` and can never pass; `lintDraftedFragment` returned no violation for it"
+  repo: remudero
+  depends_on: [W1-T5660]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — the draft floor refuses a grep proof written as an absence
+  band_meaning: span
+  origin: "operator session 2026-10-05: #9253 (W1-T5814) hand-fixed at a5df9dcc"
+  plan_refs: [W1-T4700, W1-T5541, W1-T5660, W1-T1088]
+  files: [src/lib/inbox.ts, test/a-drafted-absence-proof-is-refused-at-the-ratify-floor.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 6fd35767 and #9253's first commit 33bd9d08. The drafted shard
+    claimed "docs/forensics/retro.md no longer mentions renderPromotionProposals" and proved it with
+    `grep: "renderPromotionProposals" not found in docs/forensics/retro.md`. The executor splits on
+    the last ` in `, so the pattern is `"renderPromotionProposals" not found`, a string no file will
+    hold; the task could never pass review. The fix agent restated it as a unit test (a5df9dcc).
+    `fileRatificationDraft` runs `assertRatificationDraftFileable`, whose `lintDraftedFragment` lints
+    each task with `lintTask` and checks the stamp; nothing reads the proof's sense. W1-T1088
+    (merged) put the "no absence proof" rule in the filing grammar, but the inbox draft lane does not
+    read that grammar. The other half of #9253's defect, the shard with no rationale, is W1-T5541's
+    (queued, open PR #9230), and W1-T5660 adds placeholder checks to the same floor, so this waits
+    for it. A plan-wide negation lint was rejected before (feedback#fb-1784808265903-d381f8); this
+    check is draft-only and does not touch shards on main.
+  design: |
+    `lintDraftedFragment` blocks a drafted `grep:` proof whose pattern ends in an absence phrase
+    (` not found`, ` absent`, ` no longer`, ` is gone`, ` removed`), or begins with `no ` / `not `
+    followed by a quoted literal, naming the criterion and telling the redraft to state the change as
+    a positive proof (a unit test, or a grep for the replacement text). The check runs only on drafts,
+    so existing shards are unaffected.
+  acceptance:
+    - claim: "lintDraftedFragment blocks #9253's original W1-T5814 fragment naming its absence proof, passes the same fragment with a unit-test proof, and passes a positive grep whose literal contains the word found"
+      proof: "unit test: test/a-drafted-absence-proof-is-refused-at-the-ratify-floor.test.ts"
+  falsifier: |
+    Remove the check: the #9253 fragment lints clean and the test fails.

@@ -17,7 +17,7 @@ import { dirname, join } from "node:path";
 // message-only rewrite that changed nothing but the gate's verdict) while leaving the artifact
 // that actually lands on main -- the PR title -- completely unchecked.
 //
-// This suite proves the relocation two ways: (1) reading .github/workflows/ci.yml to show the
+// This suite proves the relocation two ways: (1) reading .github/workflows/pr-title-lint.yml to show the
 // `commitlint` job now feeds the PR title, not a git commit range, into the same commitlint CLI
 // + config that test/commitlint-config.test.ts already proves is ACTIVE; and (2) driving that
 // real CLI against fixture titles/commit messages to prove the accept/reject behavior actually
@@ -35,13 +35,13 @@ function lint(message: string) {
   );
 }
 
+// W1-T5695: ci.yml's copy of the title lint is gone; pr-title-lint.yml's `commitlint` job (its
+// only job) is the sole producer of the `commitlint` check, so the wiring pins read it.
 async function commitlintJobBody(): Promise<string> {
-  const ciYml = await readFile(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
-  const jobStart = ciYml.indexOf("\n  commitlint:");
-  assert.notEqual(jobStart, -1, "ci.yml must declare a commitlint job");
-  const nextJobStart = ciYml.indexOf("\n  leak-grep:", jobStart);
-  assert.notEqual(nextJobStart, -1, "commitlint job body must be findable in ci.yml (bounded by the next job)");
-  return ciYml.slice(jobStart, nextJobStart);
+  const workflow = await readFile(join(REPO_ROOT, ".github", "workflows", "pr-title-lint.yml"), "utf8");
+  const jobStart = workflow.indexOf("\n  commitlint:");
+  assert.notEqual(jobStart, -1, "pr-title-lint.yml must declare a commitlint job");
+  return workflow.slice(jobStart);
 }
 
 // ── CI wiring: the linted object is now the PR title, not the branch-commit range ──

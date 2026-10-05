@@ -19,7 +19,7 @@ name: CI gate
 # docs/forensics/ci-gate-yml.md (W1-T24).
 #
 # W1-T4406: this CONTRACT's REQUIRED list is a `pull_request`-time list — most of its ~17
-# one-runner entries are steps of ci.yml's `commitlint` job, itself `if: github.event_name ==
+# one-runner entries are steps of ci.yml's `light-gates` job, itself `if: github.event_name ==
 # 'pull_request'`, so they never register on a GitHub merge queue's `merge_group` commit. ci.yml's
 # own embedded `ci-gate` job (the one that runs this contract on every non-`edited` event)
 # deliberately stays `pull_request`-only for exactly that reason — see its own comment. The merge
@@ -83,6 +83,7 @@ jobs:
         "claims",
         "learnings-budget-ratchet",
         "commitlint",
+        "rule-checks",
         "api-client-drift",
         "no-hand-rolled-fetch",
         "prompt-surface-gate",
@@ -123,22 +124,23 @@ jobs:
       # REQUIRED "once it is live on main". It refuses a REQUIRED context demoted with no reviewed
       # GATE_RATIONALE; promoting it is a one-line follow-up after it has run clean on main.
       #
-      # W1-T4399: ~17 one-runner gates (commitlint, lint-plan, depcruise, containment-probe,
+      # W1-T4399: ~17 one-runner gates (rule-checks, lint-plan, depcruise, containment-probe,
       # jscpd-gate, claims, learnings-budget-ratchet, api-client-drift, no-hand-rolled-fetch,
       # prompt-surface-gate, leak-grep, assertion-discrimination, task-id-existence,
-      # comment-load-ratchet, source-size, baseline-monotonic) now run as STEPS of one
-      # job in ci.yml (the former `commitlint` job, expanded in place — see its own header comment
-      # there for why it keeps that key rather than a new one), which posts each gate's result
-      # under its OWN unchanged name via the checks API. No name here changes and no name is added:
-      # every one of the sixteen OTHER gates keeps its own ci.yml job key, registered but
+      # comment-load-ratchet, source-size, baseline-monotonic) now run as STEPS of one job in
+      # ci.yml (key `commitlint`, named `light-gates` — its own header comment says why it keeps
+      # that key), which posts each gate's result under its OWN name via the checks API. Every
+      # one of the sixteen OTHER gates keeps its own ci.yml job key, registered but
       # permanently `if: false`, under its ORIGINAL `name:` (never renamed — this file's REQUIRED/
       # ADVISORY entries derive from a real job's `name:`, and a rename would leave the original
       # stale). So a skipped stub and the consolidated job's real post SHARE one name on every PR;
-      # this file's own read already groups by name and keeps only the latest `started_at`
-      # (W1-T123), unmodified, which is what resolves that duplicate.
+      # this file's read groups by name AND producer class (W1-T5695), and a skip never fails.
+      # W1-T5695: `light-gates` is that job's own run, green by construction (continue-on-error
+      # steps); each gate it runs is posted under its own REQUIRED name, `rule-checks` included.
       ADVISORY: >-
         [
         "squash-trailer-gate",
+        "light-gates",
         "gate-monotonic",
         "flake-retry-aggregate",
         "test-slow-shard (1/2)",
@@ -233,12 +235,20 @@ jobs:
             # the latest `started_at`, breaking same-second ties by numeric check-run id -- a
             # name whose failed attempt is followed by a later success reads as that success;
             # everything downstream evaluates ONLY this deduped, latest-per-name list.
+            # W1-T5695: the group is name AND PRODUCER CLASS -- "posted" when external_id is
+            # ci.yml's `run:<run>:<attempt>:job:<id>` (or the older `job:<id>`), else "job" --
+            # never the full external_id, so a rerun of the posting job still supersedes its own
+            # earlier post, while a later same-name job success can no longer hide a failed post
+            # (#8905). A name is not ready while ANY of its groups is incomplete (steps 1 and 3).
             # (`--slurp` can't combine with `-q`, so flatten the page array with a separate jq.)
             local raw attempt=1
             while [ "${attempt}" -le "${RETRY_ATTEMPTS}" ]; do
               if raw="$(gh api "repos/${REPO}/commits/${SHA}/check-runs?per_page=100" --paginate --slurp)"; then
-                jq -c '[ .[].check_runs[] | {id, name, status, conclusion, started_at} ]
-                        | group_by(.name)
+                jq -c '[ .[].check_runs[] | {id, name, status, conclusion, started_at, external_id}
+                          | .producer = (if ((.external_id // "")
+                                             | test("^(run:[0-9]+:[0-9]+:)?job:[0-9]+$"))
+                                         then "posted" else "job" end) ]
+                        | group_by([.name, .producer])
                         | map(max_by([.started_at, (.id // 0)]))' <<< "${raw}"
                 return 0
               fi
@@ -274,7 +284,8 @@ jobs:
           while :; do
             runs="$(runs_json)" || unreadable_die
             not_ready="$(jq -r --argjson req "${REQUIRED}" '
-              ([ .[] | select(.status=="completed") | .name ]) as $done
+              (([ .[] | select(.status=="completed") | .name ] | unique)
+                - [ .[] | select(.status!="completed") | .name ]) as $done
               | ($req - $done)
               | .[]' <<< "${runs}")"
             [ -z "${not_ready}" ] && break
@@ -344,7 +355,8 @@ jobs:
               sleep "${GRACE_POLL_INTERVAL_SECONDS}"
               runs="$(runs_json)" || unreadable_die
               not_ready="$(jq -r --argjson req "${REQUIRED}" '
-                ([ .[] | select(.status=="completed") | .name ]) as $done
+                (([ .[] | select(.status=="completed") | .name ] | unique)
+                  - [ .[] | select(.status!="completed") | .name ]) as $done
                 | ($req - $done)
                 | .[]' <<< "${runs}")"
               # Not every required name is terminal yet (a rerun is mid-flight) -- keep polling

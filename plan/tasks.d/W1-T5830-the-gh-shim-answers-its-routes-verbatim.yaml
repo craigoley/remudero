@@ -1,0 +1,34 @@
+- id: W1-T5830
+  title: "THE GH SHIM ANSWERS ITS ROUTES VERBATIM — test/helpers/gh-shim.ts renders each route as `echo <JSON.stringify(text)>` in a /bin/sh script, so dash's echo turns a `\\n` escape into a newline (a JSON answer holding one becomes invalid JSON) and the double quotes let `$` and backticks expand; W1-T5811 (#9268) had to keep its fixture body on one line to avoid it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one concern — the shared gh shim prints exactly the route's text
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5811 (#9268) hand-build follow-up"
+  plan_refs: [W1-T2903, W1-T5811]
+  files: [test/helpers/gh-shim.ts, test/the-gh-shim-answers-its-routes-verbatim.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 6fd35767. `renderScript` writes `echo ${JSON.stringify(r.stdout)}`
+    and `echo ${JSON.stringify(r.stderr)} 1>&2` into a `#!/bin/sh` script. JSON.stringify escapes a
+    newline in the text as `\n`, and /bin/sh (dash) echo interprets backslash escapes, so the shim
+    prints a raw newline inside what was a JSON string. Inside double quotes `$NAME`, `$(...)` and
+    backticks also expand. #9268 (W1-T5811, head 46bab8c7) records the workaround in its test: "One
+    line, no backslash escapes: the shim's `/bin/sh` echo would expand a `\n` in a body." 105 test
+    files import the helper, so the fix must keep the trailing newline every route prints today.
+  design: |
+    `ghShim` writes each route's stdout and stderr to files in the shim's own directory and the
+    script answers with `cat` on them, followed by the newline `echo` printed before. Text never
+    passes through shell quoting. Routes, ordering, `addRoute`, delays, done files and call
+    recording are unchanged.
+  acceptance:
+    - claim: "a route whose stdout is JSON holding an escaped newline, a dollar sign, a backtick and a backslash answers bytes that JSON.parse back to the original value, stderr round-trips the same way, and an existing plain route still prints its text and one trailing newline"
+      proof: "unit test: test/the-gh-shim-answers-its-routes-verbatim.test.ts"
+  falsifier: |
+    Restore the echo rendering: the escaped-newline answer fails JSON.parse and the test fails.

@@ -1,0 +1,35 @@
+- id: W1-T5831
+  title: "THE PROGRESS WATCHDOG SAYS IT WRITES A DIAGNOSTICS BUNDLE — W1-T5687 (#9255) labels `rmd progress-watchdog` READ-ONLY in its registry detail, its console-parity CLI_ONLY note and its command comment, while on a capture-diagnostics verdict it writes <state>/diagnostics/progress-<ts>/ and runs docker"
+  repo: remudero
+  depends_on: [W1-T5687]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 2.00
+  risk: high  # Rule 19: one concern — the progress-watchdog texts name the bundle it writes
+  band_meaning: span
+  origin: "operator session 2026-10-05: #9255 (W1-T5687) docs-claims fix follow-up"
+  plan_refs: [W1-T5687, W1-T5688]
+  files: [src/run-task.ts, scripts/console-parity-ratchet.mjs, test/the-progress-watchdog-says-it-writes-a-diagnostics-bundle.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on #9255's head bff929ea (W1-T5687, open). The COMMANDS entry's detail ends
+    "READ-ONLY: it recycles nothing", the CLI_ONLY entry in scripts/console-parity-ratchet.mjs reads
+    "a read-only progress verdict over the ledger union", and the comment above
+    `progressWatchdogCommand` says "read-only". The same command calls `captureDiagnosticsBundle`,
+    which creates <state>/diagnostics/progress-<ts>/ (ledger tail, `docker ps`, `docker logs`, the
+    verdict) at most once per 15 min. The fix agent on #9255 wrote the operator-guide row correctly;
+    the other three still claim no writes. W1-T5688 will recycle on this verdict, so an operator
+    reading "read-only" would run it on the daemon host expecting no side effect.
+  design: |
+    The three texts say what the command does: it recycles nothing and writes at most one
+    diagnostics bundle per 15 min under <state>/diagnostics/ on a capture-diagnostics verdict.
+    Behaviour is unchanged. src/run-task.ts sits at its comment-load ceiling, so the comment is
+    reworded in place, not lengthened.
+  acceptance:
+    - claim: "the progress-watchdog registry detail and its CLI_ONLY note name the diagnostics bundle it writes and neither calls the command read-only"
+      proof: "unit test: test/the-progress-watchdog-says-it-writes-a-diagnostics-bundle.test.ts"
+  falsifier: |
+    Restore "READ-ONLY" in the detail: the assertion on the registry text fails.

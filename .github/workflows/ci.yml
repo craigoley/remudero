@@ -265,6 +265,7 @@ jobs:
           : > test-only-run.txt
           if [ "$CLASS" = "SOURCE" ] && [ -s changed-files.txt ]; then
             node --import tsx scripts/diff-class.mjs --test-only-run --changed-files changed-files.txt > test-only-run.txt 2>>diff-class.log || : > test-only-run.txt
+            if [ ! -s test-only-run.txt ] && [ "$(node scripts/diff-class.mjs --coverage-class --changed-files changed-files.txt 2>>diff-class.log || echo NO_SRC)" = "NO_SRC" ]; then echo full > test-only-run.txt; fi
           fi
       - name: Test
         # W1-T255: routed through scripts/test-with-retry.mjs (`npm run test:ci`), not plain
@@ -738,7 +739,16 @@ jobs:
           fi
           git fetch --no-tags origin "${GITHUB_BASE_REF}" >/dev/null 2>&1 || true
           git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" > changed-files.txt 2>/dev/null || : > changed-files.txt
-          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
+          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt --coverage-class 2>diff-class.log)" || CLASS="SOURCE"
+          if [ "$CLASS" = "TEST_ONLY" ]; then
+            TEST_ONLY_RUN="$(node scripts/diff-class.mjs --test-only-run --changed-files changed-files.txt 2>>diff-class.log)" || TEST_ONLY_RUN=""
+            if [ "$(printf '%s\n' "$TEST_ONLY_RUN" | head -n 1)" = "files" ]; then
+              echo "W1-T5700: only *.test.ts files changed — ci-shard runs exactly those suites, slow ones included; test-slow skips."
+              CLASS="SOURCE"
+            else
+              echo "W1-T5700: a test helper, fixture or setup file changed and coverage-ratchet skips TEST_ONLY — test-slow runs the slow tier."
+            fi
+          fi
           echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
           case "$CLASS" in
             PLAN_ONLY|DOCS_ONLY) ;;
@@ -918,7 +928,7 @@ jobs:
               ;;
           esac
   commitlint:
-    # W1-T4399 — ~17 one-minute gates (commitlint, leak-grep, learnings-budget-ratchet,
+    # W1-T4399 — ~17 one-minute gates (rule-checks, leak-grep, learnings-budget-ratchet,
     # jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise,
     # containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate,
     # task-id-existence, source-size, comment-load-ratchet, baseline-monotonic) used to be their
@@ -930,8 +940,8 @@ jobs:
     # matrix, mutation-ratchet's Stryker cache) stays its own job, untouched below. (iii)
     # `continue-on-error` means one step failing never skips the next — every step below always
     # runs and always reports.
-    name: commitlint
-    # WHY THIS JOB KEEPS THE `commitlint` KEY rather than a new one, e.g. `light-gates`: adding a
+    name: light-gates
+    # WHY THIS JOB KEEPS THE `commitlint` KEY under its `light-gates` name (W1-T5695): adding a
     # genuinely NEW ci.yml job key would force a matching new entry in src/lib/ci-parity.ts
     # (test/preflight-ci-parity.test.ts asserts ci.yml's job list against that table in both
     # directions), and Standing rule 25 refuses a single PR editing that table beside the workflow
@@ -942,22 +952,20 @@ jobs:
     # names, permanently `if: false` rather than deleted or renamed — deleting one is the same
     # ci-parity.ts problem as above, and renaming one breaks a DIFFERENT invariant:
     # test/every-pr-check-is-required-or-advisory.test.ts derives every REQUIRED/ADVISORY entry
-    # from a real job's `name:` and refuses one nothing derives. So THIS job's own check run is
-    # ALSO still named "commitlint" (unchanged), same as every other stub below reuses its own
-    # original name — meaning a skipped stub and this job's real, checks-API-posted result for
-    # that same gate share one name on every PR. ci-gate.yml's own read already groups check runs
-    # by name and keeps only the latest `started_at` (W1-T123, for the identical "a rerun leaves an
-    # earlier attempt behind" case), unmodified, which is what resolves that duplicate: this job
-    # needs real work first (checkout, `npm ci`, the gates themselves), so its post always lands
-    # later than a stub's near-instant skip. `if: false` never queues a runner, so a stub costs
-    # nothing at runtime.
+    # from a real job's `name:` and refuses one nothing derives. So every stub below reuses its own
+    # original name — a skipped stub and this job's checks-API post for that gate share one name.
+    # W1-T5695: no RUNNABLE job shares a posted name (the PR title lint is pr-title-lint.yml's
+    # `commitlint` alone), each post's external_id is `run:<run>:<attempt>:job:<id>`, and
+    # ci-gate.yml's read keeps the latest `started_at` per name AND producer class ("posted" or
+    # "job"), so a job's later success never masks a failed post (#8905) and a stub's skip never
+    # fails. `if: false` never queues a runner, so a stub costs nothing at runtime.
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
     timeout-minutes: 15
     permissions:
       contents: read
       checks: write # W1-T4399: to post each gate's own check run below.
-      pull-requests: read # W1-T351: commitlint's `gh pr view` step needs this.
+      pull-requests: read # task-id-existence's open-PR read (`--require-open-prs`) needs this.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -988,20 +996,6 @@ jobs:
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/gate-reports"
           node --import tsx scripts/list-rule-suites.mjs --run 2>&1 | tee "$RUNNER_TEMP/gate-reports/rule-checks.log"
-
-      - name: commitlint (the PR title — read LIVE via `gh pr view`, not the opened-event payload snapshot)
-        id: commitlint
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          PR_TITLE="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title --jq .title)"
-          if [ -z "$PR_TITLE" ]; then
-            echo "::error::commitlint: gh pr view returned an EMPTY title for PR #$PR_NUMBER -- this is an empty read (API/auth failure), distinct from a non-conventional title. Do not edit the title to fix this; investigate the gh call."
-            exit 1
-          fi
-          printf '%s\n' "$PR_TITLE" | npx commitlint --config commitlint.config.mjs --verbose
 
       - name: leak-grep (plaintext secret tripwire)
         id: leak-grep
@@ -1141,9 +1135,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           POSTING_JOB_ID: ${{ job.check_run_id }}
+          POSTING_RUN_ID: ${{ github.run_id }}
+          POSTING_RUN_ATTEMPT: ${{ github.run_attempt }}
           GATE_REPORT_DIR: ${{ runner.temp }}/gate-reports
           OUTCOME_RULE_CHECKS: ${{ steps.rule-checks.outcome }}
-          OUTCOME_COMMITLINT: ${{ steps.commitlint.outcome }}
           OUTCOME_LEAK_GREP: ${{ steps.leak-grep.outcome }}
           OUTCOME_LEARNINGS_BUDGET_RATCHET: ${{ steps.learnings-budget-ratchet.outcome }}
           OUTCOME_CLAUDE_MD_BUDGET_RATCHET: ${{ steps.claude-md-budget-ratchet.outcome }}
@@ -1190,7 +1185,7 @@ jobs:
               if error=$(gh api "repos/${GITHUB_REPOSITORY}/check-runs" \
                 -f "name=${check_name}" \
                 -f "head_sha=${HEAD_SHA}" \
-                -f "external_id=job:${POSTING_JOB_ID}" \
+                -f "external_id=run:${POSTING_RUN_ID}:${POSTING_RUN_ATTEMPT}:job:${POSTING_JOB_ID}" \
                 -f "status=completed" \
                 -f "conclusion=${conclusion}" \
                 -f "output[title]=${title}" \
@@ -1208,7 +1203,7 @@ jobs:
             done
             echo "W1-T4399: reported ${check_name} = ${conclusion} (step outcome(s): $*); title: ${title}"
           }
-          report "commitlint" "commitlint=${OUTCOME_COMMITLINT}" "rule-checks=${OUTCOME_RULE_CHECKS}"
+          report "rule-checks" "${OUTCOME_RULE_CHECKS}"
           report "leak-grep" "${OUTCOME_LEAK_GREP}"
           report "learnings-budget-ratchet" "learnings-budget-ratchet=${OUTCOME_LEARNINGS_BUDGET_RATCHET}" "claude-md-budget-ratchet=${OUTCOME_CLAUDE_MD_BUDGET_RATCHET}"
           report "jscpd-gate" "${OUTCOME_JSCPD_GATE}"
@@ -1279,7 +1274,7 @@ jobs:
         # `isInPlanScope` from src/lib/plan-scope.ts. Two of the repo's three scope predicates
         # already disagree; a bash reimplementation here would be a fourth (W1-T2428, Q1). It fails
         # closed twice over: the script resolves an unreadable, empty or malformed input to SOURCE,
-        # and this step clamps stdout to the four known coverage tokens, so even a bare Node invocation that
+        # and this step clamps stdout to the five known coverage tokens, so even a bare Node invocation that
         # cannot start leaves CLASS=SOURCE. `plan-scope.ts` is a dependency-free leaf and Node 22.22.3
         # strips its type annotations, so this runs before npm ci. On a push, changed-files.txt is left
         # empty and the script's own empty-list rule resolves it to SOURCE.
@@ -1296,7 +1291,7 @@ jobs:
           fi
           CLASS="$(node scripts/diff-class.mjs --coverage-class --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
           case "$CLASS" in
-            PLAN_ONLY|DOCS_ONLY|TEST_ONLY|SOURCE) ;;
+            PLAN_ONLY|DOCS_ONLY|TEST_ONLY|NO_SRC|SOURCE) ;;
             *) CLASS="SOURCE" ;;
           esac
           cat diff-class.log || true
@@ -1635,7 +1630,7 @@ jobs:
             case "$VALUE" in
               # W1-T4406: merge_group:* joins the whitelist alongside pull_request:* — the classify
               # step above now computes a real class for a merge_group run too.
-              pull_request:PLAN_ONLY|pull_request:DOCS_ONLY|pull_request:TEST_ONLY|pull_request:SOURCE|merge_group:PLAN_ONLY|merge_group:DOCS_ONLY|merge_group:TEST_ONLY|merge_group:SOURCE|push:SOURCE) ;;
+              pull_request:PLAN_ONLY|pull_request:DOCS_ONLY|pull_request:TEST_ONLY|pull_request:NO_SRC|pull_request:SOURCE|merge_group:PLAN_ONLY|merge_group:DOCS_ONLY|merge_group:TEST_ONLY|merge_group:NO_SRC|merge_group:SOURCE|push:SOURCE) ;;
               *)
                 echo "coverage-ratchet: coverage-shard-${SHARD} carried unrecognised class metadata '${VALUE}'."
                 exit 1
@@ -1997,7 +1992,7 @@ jobs:
     #
     # W1-T4406: DELIBERATELY STAYS `pull_request`-only, unlike every job it `needs:`. This gate's
     # own REQUIRED list (ci-gate.yml) names ~26 checks, most of them ~17 one-runner gates the
-    # `commitlint` job posts (commitlint, lint-plan, jscpd-gate, claims, ...) that are themselves
+    # `light-gates` job posts (rule-checks, lint-plan, jscpd-gate, claims, ...) that are themselves
     # `if: github.event_name == 'pull_request'` and would never register on a `merge_group` commit
     # — so waiting on the full list there would time out and deadlock the queue on every entry
     # (the exact skipped/absent-required-check class INVARIANT 2 above exists to avoid). The merge

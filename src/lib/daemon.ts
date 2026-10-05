@@ -73,7 +73,7 @@ import {
   type ObservedScopeByTask,
 } from "./dispatch-overlap.js";
 import { DEPLOY_IDLE_DEFER_CEILING_MS } from "./deployer.js";
-import { evaluatePauseTier, type PauseTier, type PauseTierInput } from "./fleet-control.js";
+import { evaluatePauseTier, isRecyclePauseDetail, type PauseTier, type PauseTierInput } from "./fleet-control.js";
 import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 // Type-only, so no runtime edge is added to daemon-health.ts, which already imports a value from
@@ -186,6 +186,17 @@ export const DEFAULT_SWEEP_RETRIGGER_INTERVAL_MS = 20 * 60_000;
 
 /** BACKSTOP: stop refill prolonging one tick indefinitely; admitted lanes still finish (W1-T5761). */
 export const DISPATCH_PHASE_REFILL_BOUND_MS = 20 * 60_000;
+
+/** W1-T5720 — BACKSTOP: the longest tick 1's cadences and the garden fan-out wait, from boot, for the
+ *  first full pass. That pass's own 559 s bound normally opens the gate first, so this fires never. */
+export const BOOT_CADENCE_GATE_BOUND_MS = 10 * 60_000;
+
+/** W1-T5720: the tick-1 rungs the boot gate holds, by their deps key, each ledgered when deferred. */
+const BOOT_GATED_CADENCES = [
+  "sweepOrphans", "sweepFeedbackLanding", "checkGithubPosture", "checkMeasurementCadence", "checkDigestCadence",
+  "checkLedgerCompaction", "checkBenchmarkCohort", "checkCiLearningCadence", "checkBoardReview", "checkIntakeRungs",
+  "checkRetroTrigger", "checkWipeTestCadence", "checkAutoTriage",
+] as const satisfies ReadonlyArray<keyof DaemonDeps>;
 
 /** The exit code a freshness self-restart uses, distinct from a crash's 1 (W1-T490). 75 is
  *  `EX_TEMPFAIL` from sysexits(3), which is what a stale stop is: nothing is wrong, the process
@@ -753,6 +764,8 @@ export interface DaemonOpts {
    *  Distinct from the bound above, which limits how long any one pass may run; this limits how
    *  often a new one may start. Never consulted by the once-per-iteration call (W1-T1272). */
   sweepRetriggerIntervalMs?: number;
+  /** W1-T5720: the boot gate's bound in real ms (default {@link BOOT_CADENCE_GATE_BOUND_MS}). */
+  bootCadenceGateBoundMs?: number;
 }
 
 /** A non-stale freshness verdict must name the decision arm that produced it. `unassessed` deliberately retains the
@@ -891,7 +904,8 @@ export interface DaemonDeps {
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
   refreshMerged: (plan?: Plan) => MergedSet;
   refreshMergedAsync?: (plan?: Plan) => Promise<MergedSet>;
-  readLoopTelemetry?: () => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number };
+  readLoopTelemetry?: (() => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number;
+    sync_spawn_top?: unknown[] }) & { peek?: () => unknown };
   lastStepBeforeBlock?: () => string | undefined;
   /** Rebind daemon-owned sweep/projection closures when the live plan reloads. */
   onPlanReload?: (plan: Plan) => void;
@@ -919,10 +933,10 @@ export interface DaemonDeps {
    *  number of times with no new owned PR since. Re-derived from the ledger each call, so it persists
    *  across restarts, unlike this loop's in-memory flip below (P29(ii)). */
   isCircuitTripped?: (taskId: string) => boolean;
-  /** Raw pushed-run-branch listing, read once per tick and parsed by `runBranchTaskIds`. Injected
-   *  for the same reason it is on `DrainDeps`: this module reads its world through deps, and the
-   *  raw-output shape makes one sweep per tick the only form that type checks (W1-T916). */
-  readPushedRunBranches?: () => string;
+  /** Raw pushed-run-branch listing, read at the tick's start and again by each lane refill (W1-T5805),
+   *  parsed by `runBranchTaskIds`. Injected for the same reason it is on `DrainDeps`: this module reads
+   *  its world through deps (W1-T916). A promised read is awaited; a throw or rejection is ledgered. */
+  readPushedRunBranches?: () => string | Promise<string>;
   /** Same contract as `DrainDeps.readOrphanRunBranchEvidence`: read once per tick, absent releases nothing. */
   readOrphanRunBranchEvidence?: () => OrphanRunBranchEvidence | undefined;
   /** The same {@link ObservedScopeByTask} `DrainDeps.observedByTask` takes, threaded to both the
@@ -1328,6 +1342,57 @@ function transientGhDispatchFailure(err: unknown): { detail: string } | undefine
  * too. Matching the two named endpoints keeps a WRITE failure (create, merge, comment) on today's
  * fatal path unchanged, per design (iii).
  */
+/** W1-T5805: the run-branch facts one selection pass decides on. The tick's start reads them and so does
+ *  each lane refill: a branch pushed mid-phase (#9210, 02:16Z) was invisible to a refill at 02:43Z. */
+interface RunBranchState {
+  ids: ReadonlySet<string> | undefined;
+  refs: readonly PushedRunRef[];
+  orphanEvidence: OrphanRunBranchEvidence | undefined;
+}
+
+function runBranchStateFrom(raw: string | undefined, orphanEvidence: OrphanRunBranchEvidence | undefined): RunBranchState {
+  if (raw === undefined) return { ids: undefined, refs: [], orphanEvidence };
+  return { ids: runBranchTaskIds(raw), refs: parsePushedRunRefs(raw), orphanEvidence };
+}
+
+/** Calls the reader, awaiting only a promised read, so a sync reader keeps a refill synchronous. */
+function readRunBranchListing(
+  read: (() => string | Promise<string>) | undefined,
+  onFailure: (error: unknown) => string | undefined,
+): string | undefined | Promise<string | undefined> {
+  let raw: string | Promise<string> | undefined;
+  try {
+    raw = read?.();
+  } catch (error) {
+    return onFailure(error); // the caller's `onFailure` ledgers the failure and names the fallback
+  }
+  return raw instanceof Promise ? raw.catch((error: unknown) => /* ledgered, as above */ onFailure(error)) : raw;
+}
+
+/** The two options a pass's run-branch read decides; none when no reader was wired. */
+function runBranchDispatchOpts(
+  { ids, refs, orphanEvidence }: RunBranchState,
+  receipts: readonly PlanOnlyRunBranchReceipt[],
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Pick<NextRunnableOpts, "hasPushedRunBranch" | "onSkipRunBranch"> {
+  if (!ids) return {};
+  return {
+    // W1-T4002: `stillBlockedByPushedRunBranch` is the SAME predicate drain.ts's own
+    // selection loops apply — see that function's doc. Before returning, name every
+    // OTHERWISE-blocking ref this pass's receipts released, so the collision an operator
+    // sees is explicit rather than a silent non-block.
+    hasPushedRunBranch: (id: string) => {
+      const refsForTask = refs.filter((r) => r.taskId === id);
+      const stillBlocked = stillBlockedByPushedRunBranch(id, ids, undefined, refs, receipts, orphanEvidence);
+      if (!stillBlocked && refsForTask.length > 0) logPlanOnlyRunBranchException(log, id, refsForTask, receipts, orphanEvidence);
+      return stillBlocked;
+    },
+    // Rides the existing skip row with its own reason: no new step, and deliberately not the stood-down
+    // row, which has three emitters and no reader.
+    onSkipRunBranch: (t: Task) => log("dispatch.skipped", { task: t.id, reason: "run-branch-already-pushed" }),
+  };
+}
+
 /** W1-T5083: a rejection the settle loop treats as lane-local (it logs and the pass continues). */
 function refillLaneLocalRejection(err: unknown): boolean {
   if (transientGhDispatchFailure(err) !== undefined || isSpawnInfraBlocked(err)) return false;
@@ -1366,6 +1431,14 @@ interface InterphaseReviewClock {
    * consumed an event edge that the ordinary full-sweep gate still needs to reconcile, and how
    * many passes it admitted. */
   stop(): Promise<{ eventWakeSeen: boolean; passes: number }>;
+  /** W1-T5803: an event wake the caller's own sleep consumed, handed on so this clock passes for it. */
+  handWake(): void;
+  /** Passes admitted so far, read without stopping the clock. */
+  passCount(): number;
+}
+
+function peekSyncSpawnTop(deps: Pick<DaemonDeps, "readLoopTelemetry">): unknown {
+  try { return deps.readLoopTelemetry?.peek?.(); } catch { return undefined; /* Reason: observability only. */ }
 }
 
 /**
@@ -1389,7 +1462,9 @@ interface InterphaseReviewClock {
  * Swallows everything: observability must never be able to take down the loop it observes.
  */
 export function reportLoopLag(
-  sample: { phase: string; dueAtMs: number; observedAtMs: number; intervalMs: number; lastStepBeforeBlock?: string },
+  sample: { phase: string; dueAtMs: number; observedAtMs: number; intervalMs: number; lastStepBeforeBlock?: string;
+    /** W1-T5718: the longest synchronous spawn of the window this lag closes, read without closing it. */
+    syncSpawnTop?: unknown },
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): void {
   try {
@@ -1401,6 +1476,7 @@ export function reportLoopLag(
       interval_ms: sample.intervalMs,
       missed_ticks: Math.floor(lagMs / sample.intervalMs),
       last_step_before_block: sample.lastStepBeforeBlock,
+      ...(sample.syncSpawnTop === undefined ? {} : { sync_spawn_top: sample.syncSpawnTop }),
     });
   } catch {
     // Reason: a throwing logger must cost the reading, never the tick.
@@ -1450,7 +1526,7 @@ export function startInterphaseReviewClock(
           const result = await wait(quantumMs);
           reportLoopLag(
             { phase, dueAtMs: clockDueAtMs, observedAtMs: interphaseClock.now(), intervalMs: quantumMs,
-              lastStepBeforeBlock: deps.lastStepBeforeBlock?.() },
+              lastStepBeforeBlock: deps.lastStepBeforeBlock?.(), syncSpawnTop: peekSyncSpawnTop(deps) },
             log,
           );
           if (result === "wake") {
@@ -1502,6 +1578,11 @@ export function startInterphaseReviewClock(
       if (activePasses.size > 0) await Promise.all(activePasses);
       return { eventWakeSeen, passes };
     },
+    handWake: () => {
+      eventWakeSeen = true;
+      eventWakePending = true;
+    },
+    passCount: () => passes,
   };
 }
 
@@ -1817,7 +1898,8 @@ function startInFlightTicker(
           const waitResult = await (owner.sweepRetrigger ? (deps.sleepUntilSweepWake ?? deps.sleep) : deps.sleep)(pollIntervalMs);
           const lastStepBeforeBlock = deps.lastStepBeforeBlock?.();
           reportLoopLag(
-            { phase: owner.phase, dueAtMs: tickDueAtMs, observedAtMs: daemonClock.now(), intervalMs: pollIntervalMs, lastStepBeforeBlock },
+            { phase: owner.phase, dueAtMs: tickDueAtMs, observedAtMs: daemonClock.now(), intervalMs: pollIntervalMs, lastStepBeforeBlock,
+              syncSpawnTop: peekSyncSpawnTop(deps) },
             log,
           );
           if (waitResult === "wake") eventWakePending = true;
@@ -2051,6 +2133,9 @@ async function runGatedSweep(
   // The shared liveness flag. Optional and trailing, so every existing caller behaves exactly as
   // before, which is what keeps the W1-T1044 bound tests meaningful (W1-T2582).
   liveness?: SweepLiveness,
+  // W1-T5804: a pass run BECAUSE of a recycle PAUSE holds worker admission on the live STOP/PAUSE
+  // read even where `deps.workerAdmissionHold` is unwired, so it can never start a fix worker.
+  recyclePause?: true,
 ): Promise<SweepCycleOutcome | undefined> {
   // Decline, do not duplicate. Checked before the ticker starts, so a declined pass costs nothing at
   // all. This one gate closes both routes into a concurrent pass, because all three call sites pass
@@ -2073,7 +2158,7 @@ async function runGatedSweep(
     const continueReviewAdmissions = (() =>
       reviewAdmissionsOpen && deps.checkStop?.() === undefined && deps.checkPause?.() === undefined) as ReviewAdmissionGate;
     const workerAdmissionHold = (): string | undefined => {
-      const hold = deps.workerAdmissionHold?.();
+      const hold = deps.workerAdmissionHold?.() ?? (recyclePause ? resolveFleetControlHold(deps) : undefined);
       if (!hold) return undefined;
       const reason = `fleet ${hold.control} hold: ${hold.detail}`;
       log("daemon.admission_held", { surface: "full-sweep", control: hold.control, detail: hold.detail, reason });
@@ -2483,18 +2568,27 @@ export function startPrActionPump(
 
 /** W1-T4416: a lane pool. Each task runs on its own lane; a lane that settles while a sibling is still
  *  in flight may take `refill`'s next task, appended to `tasks`. Resolves, never rejects, once every lane
- *  settles, with outcomes indexed like `tasks`. The first wave is invoked synchronously, as the batch was. */
+ *  settles, with outcomes indexed like `tasks`. The first wave is invoked synchronously, as the batch was.
+ *  W1-T5805: a promised refill holds its lane busy until it answers; a rejected one ends that lane. */
 export function runLanePool<T extends { id: string }, R>(
   tasks: T[],
   run: (id: string) => Promise<R>,
-  refill: (lane: number, finished: T, outcome: PromiseSettledResult<R>) => T | undefined,
+  refill: (lane: number, finished: T, outcome: PromiseSettledResult<R>) => T | undefined | Promise<T | undefined>,
   // W1-T5343: a live view of the count, read by the phase ticker. Optional and trailing.
   lanes: { inFlight: number } = { inFlight: 0 },
 ): Promise<PromiseSettledResult<R>[]> {
   const settled: PromiseSettledResult<R>[] = [];
   const firstWave = tasks.map((t) => run(t.id));
+  let refilling = 0;
   return new Promise((resolve) => {
     if (tasks.length === 0) resolve(settled);
+    const take = (lane: number, next: T | undefined): void => {
+      if (next) {
+        tasks.push(next);
+        start(tasks.length - 1, lane, (async () => run(next.id))());
+      }
+      if (lanes.inFlight + refilling === 0) resolve(settled);
+    };
     const start = (i: number, lane: number, p: Promise<R>): void => {
       lanes.inFlight++;
       p.then(
@@ -2503,12 +2597,13 @@ export function runLanePool<T extends { id: string }, R>(
       ).then((outcome) => {
         settled[i] = outcome;
         lanes.inFlight--;
-        const next = lanes.inFlight > 0 ? refill(lane, tasks[i], outcome) : undefined;
-        if (next) {
-          tasks.push(next);
-          start(tasks.length - 1, lane, (async () => run(next.id))());
-        }
-        if (lanes.inFlight === 0) resolve(settled);
+        const next = lanes.inFlight + refilling > 0 ? refill(lane, tasks[i], outcome) : undefined;
+        if (!(next instanceof Promise)) return take(lane, next);
+        refilling++;
+        void next.catch(() => /* a failed refill ends only its own lane, as a held one does */ undefined).then((t) => {
+          refilling--;
+          take(lane, t);
+        });
       });
     };
     firstWave.forEach((p, i) => start(i, i, p));
@@ -2552,6 +2647,7 @@ export async function runDaemon(
         const pass = started.then((outcome) => {
           completedSweeps.push({ outcome, durationMs: Math.max(0, daemonClock.now() - startedAtMs) });
           if (backgroundSweep === pass) backgroundSweep = undefined;
+          openBootGate("first_pass");
         });
         backgroundSweep = pass;
       },
@@ -2808,11 +2904,29 @@ export async function runDaemon(
   // W1-T4088: the same pattern — an operator's reply is answered within a poll interval.
   const inboxResponder = deps.inboxResponder ? startInboxResponder(deps.inboxResponder, pollIntervalMs, log) : undefined;
   const gardenerRef: { stop: () => void } = { stop: () => {} };
+  // W1-T5803 — ONE pause review clock spans consecutive paused ticks, so its interval accrues across
+  // them. A per-tick clock restarted its interval every tick and stop() won the race: live 2026-10-05,
+  // 33 paused ticks ran one pass. Stopped by the first unpaused tick, and by `summary` on every exit.
+  const pauseReview: { clock?: InterphaseReviewClock; reported: number } = { reported: 0 };
+  const reportPauseReviewPasses = (passes: number): void => {
+    if (passes > pauseReview.reported) log("daemon.pause.review_passes", { tick: ticks, passes: passes - pauseReview.reported });
+    pauseReview.reported = passes;
+  };
+  const stopPauseReviewClock = async (): Promise<void> => {
+    const clock = pauseReview.clock;
+    if (!clock) return;
+    pauseReview.clock = undefined;
+    reportPauseReviewPasses((await clock.stop()).passes);
+    pauseReview.reported = 0;
+  };
   const summary = async (stopReason: DaemonStopReason, stopDetail?: string): Promise<DaemonSummary> => {
+    if (pauseReview.clock) await stopPauseReviewClock();
     prActionPumpRef.stop();
     plainBackfill?.stop();
     fleetLane?.stop();
     inboxResponder?.stop();
+    clearTimeout(bootGateTimer);
+    bootGateTrigger ??= "exited";
     gardenerRef.stop();
     livenessPulse?.stop();
     if (stopReason === "stopped") {
@@ -2827,15 +2941,42 @@ export async function runDaemon(
     return s;
   };
   if (deps.livenessPulse) livenessPulse = startLivenessPulse(pollIntervalMs, idleLaneClock, log,
-    (sample) => reportLoopLag({ ...sample, lastStepBeforeBlock: deps.lastStepBeforeBlock?.() }, log));
+    (sample) => reportLoopLag({ ...sample, lastStepBeforeBlock: deps.lastStepBeforeBlock?.(),
+      syncSpawnTop: peekSyncSpawnTop(deps) }, log));
   const prActionPump = startPrActionPump(deps, pollIntervalMs, log);
   prActionPumpRef.stop = prActionPump.stop;
   prActionPumpRef.isBusy = prActionPump.isBusy;
+  // W1-T5720 — THE BOOT GATE. Tick 1 runs a light pass at once, then holds its cadences until the first full
+  // pass returns or the BACKSTOP passes (10-05: first `sweep.pass` 6.7-15.8 min after `daemon.boot`). It holds
+  // only what is wired: with nothing to defer, tick 1's admission keeps W1-T4998's no-wait contract.
+  const bootGateBoundMs = opts.bootCadenceGateBoundMs ?? BOOT_CADENCE_GATE_BOUND_MS;
+  const bootGateStartedAtMs = daemonClock.now();
+  const bootGateHolds = deps.sweep !== undefined && ((deps.gardens?.length ?? 0) > 0 || BOOT_GATED_CADENCES.some((k) => deps[k]));
+  let bootGateTrigger: string | undefined = bootGateHolds ? undefined : "nothing_to_defer";
+  let releaseBootGate = (): void => {};
+  const bootGateOpened = new Promise<void>((resolve) => (releaseBootGate = resolve));
+  const deferredGardens = bootGateHolds ? (deps.gardens ?? []) : [];
+  const deferBootCadence = (cadence: string): void =>
+    log("daemon.boot_gate.deferred", { cadence, reason: "first full pass has not settled", bound_ms: bootGateBoundMs });
   const gardens = [
     ...(deps.knowledgeGardener ? [startKnowledgeGardener(deps.knowledgeGardener, pollIntervalMs)] : []),
-    ...(deps.gardens ?? []).map((start) => start(pollIntervalMs)),
+    ...(bootGateHolds ? [] : (deps.gardens ?? [])).map((start) => start(pollIntervalMs)),
   ];
   gardenerRef.stop = () => gardens.forEach((g) => g.stop());
+  if (deferredGardens.length > 0) deferBootCadence("gardens");
+  const openBootGate = (trigger: string): void => {
+    if (bootGateTrigger !== undefined) return;
+    bootGateTrigger = trigger;
+    clearTimeout(bootGateTimer);
+    log("daemon.boot_gate.opened", {
+      trigger, waited_ms: Math.max(0, daemonClock.now() - bootGateStartedAtMs), bound_ms: bootGateBoundMs,
+      pass_in_flight: sweepLiveness.inFlight,
+    });
+    gardens.push(...deferredGardens.map((start) => start(pollIntervalMs)));
+    releaseBootGate();
+  };
+  // Unref'd: while the gate is closed the first pass's own bound timer keeps the process alive.
+  const bootGateTimer = bootGateHolds ? setTimeout(() => openBootGate("backstop"), bootGateBoundMs).unref() : undefined;
 
   // W1-T3756 — an ordinary false result used to erase the distinction between a current daemon and
   // one that could not inspect itself. Log the adapter's four decision arms at the consumer, where
@@ -3326,6 +3467,19 @@ export async function runDaemon(
         { lane: "daemon", gate: "pause", condition: { detail: paused }, heartbeatMs: GATE_OBSERVATION_HEARTBEAT_MS, clock: daemonClock },
         log,
       );
+      // W1-T5804: a recycle's own PAUSE holds only worker-spawning work. Dispatch stays withheld (this
+      // branch `continue`s) and the full pass runs on its normal cadence with review and fix admission
+      // closed by the PAUSE, so a reviewed green PR is still armed and merged while the recycle waits
+      // on in-flight workers. Every other PAUSE reason keeps its full meaning: no pass at all.
+      if (isRecyclePauseDetail(paused)) {
+        log("daemon.admission_held", { surface: "dispatch", control: "PAUSE", detail: paused, reason: `fleet PAUSE hold: ${paused}` });
+        if (deps.sweep && !backgroundSweep) {
+          sweepRetriggerState.lastRunAtMs = daemonClock.now();
+          sweepRetrigger.slot.adopt(
+            runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness, true),
+          );
+        }
+      }
       // W1-T4429 (ii): govern a structured hold's tier; (iii): reviews keep flowing beside the sleep.
       const pauseHold = deps.checkPauseHold?.();
       if (pauseHold) {
@@ -3333,15 +3487,21 @@ export async function runDaemon(
         pauseHoldGovernorStates.set(pauseHold.holdId, holdState);
         await stepPauseHoldGovernor(pauseHold, holdState, deps, log);
       }
-      const pauseReviewClock = startInterphaseReviewClock(deps, pollIntervalMs, log, "pause");
+      const pauseReviewClock = (pauseReview.clock ??= startInterphaseReviewClock(deps, pollIntervalMs, log, "pause"));
+      let slept: Awaited<ReturnType<typeof sleepUntilSweepWake>>;
       try {
-        await sleepUntilSweepWake(pollIntervalMs);
-      } finally {
-        const { passes } = await pauseReviewClock.stop();
-        if (passes > 0) log("daemon.pause.review_passes", { tick: ticks, passes });
+        slept = await sleepUntilSweepWake(pollIntervalMs);
+      } catch (e) {
+        await stopPauseReviewClock();
+        throw e;
       }
+      // W1-T5803: `wake()` resolves only its FIRST waiter, often this sleep — hand the event to the clock.
+      if (slept === "wake") pauseReviewClock.handWake();
+      reportPauseReviewPasses(pauseReviewClock.passCount());
       continue;
     }
+    // Guarded, never a bare await: an unpaused tick must not gain a microtask turn (W1-T343 lanes).
+    if (pauseReview.clock) await stopPauseReviewClock();
     // Self-freshness, checked directly after both operator holds and before headroom and dispatch, so
     // origin/main advancing past this process's boot sha is noticed on the very next tick where the
     // daemon is neither stopped nor paused. Never interrupts in-flight work (W1-T126, W1-T936).
@@ -3517,6 +3677,15 @@ export async function runDaemon(
       }
     };
 
+    if (bootGateTrigger === undefined) {
+      try {
+        await deps.sweepLight?.({ reviewOnly: true });
+      } catch (e) {
+        log("daemon.sweep_light.failed", { phase: "boot", error: String((e as Error)?.message ?? e) });
+      }
+      for (const cadence of BOOT_GATED_CADENCES) if (deps[cadence]) deferBootCadence(cadence);
+      await bootGateOpened;
+    }
     const cadencesStartedAtMs = daemonClock.now();
     // Orphan sweep, on the same once-per-iteration cadence as the reconciler above; boot already runs it
     // once. Best-effort: a process-listing hiccup costs one logged tick (W1-T117 part ii).
@@ -4240,14 +4409,19 @@ export async function runDaemon(
     // it is collected here per tick and the census below can name it alongside the other buckets.
     const circuitBrokenThisTick: string[] = [];
     // One branch sweep per tick, resolved before the options object so the closure below is a
-    // set-membership test rather than a round trip per candidate (W1-T916).
-      const pushedRunBranchesRaw = deps.readPushedRunBranches?.();
-      const pushedRunBranches = pushedRunBranchesRaw !== undefined ? runBranchTaskIds(pushedRunBranchesRaw) : undefined;
-      const pushedRunRefs: readonly PushedRunRef[] = pushedRunBranchesRaw !== undefined ? parsePushedRunRefs(pushedRunBranchesRaw) : [];
+    // set-membership test rather than a round trip per candidate (W1-T916). A failed read refuses
+    // nothing, the direction a guard on whether work starts at all must fail.
+      const readRunBranchesFor = (site: "tick" | "lane-refill", fallback: string | undefined) =>
+        readRunBranchListing(deps.readPushedRunBranches, (error) => {
+          log("dispatch.run_branch_read_failed", { site, error: String((error as Error)?.message ?? error) });
+          return fallback;
+        });
+      const tickRunBranchRead = readRunBranchesFor("tick", undefined);
+      const tickRunBranchListing = tickRunBranchRead instanceof Promise ? await tickRunBranchRead : tickRunBranchRead;
       // W1-T4002 — the most recent completed full sweep already proved these (W1-T4998); see
       // `SweepCycleOutcome.planOnlyRunBranchReceipts`'s doc for why no second GitHub read happens.
       const planOnlyReceiptsThisTick: readonly PlanOnlyRunBranchReceipt[] = sweepCycleOutcome?.planOnlyRunBranchReceipts ?? [];
-      const orphanEvidenceThisTick: OrphanRunBranchEvidence | undefined = deps.readOrphanRunBranchEvidence?.();
+      const runBranchStateThisTick = runBranchStateFrom(tickRunBranchListing, deps.readOrphanRunBranchEvidence?.());
       const dispatchOpts: NextRunnableOpts = {
       dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
       isOpenPr: deps.isOpenPr,
@@ -4280,33 +4454,7 @@ export async function runDaemon(
       observedByTask: deps.observedByTask,
       // The argument W1-T534 declared and nothing supplied — see `DrainDeps` for why the reader is
       // injected and the parse hoisted (W1-T916).
-      ...(pushedRunBranches
-        ? {
-            // W1-T4002: `stillBlockedByPushedRunBranch` is the SAME predicate drain.ts's own
-            // selection loops apply — see that function's doc. Before returning, name every
-            // OTHERWISE-blocking ref this tick's receipts released, so the collision an operator
-            // sees is explicit rather than a silent non-block.
-            hasPushedRunBranch: (id: string) => {
-              const refsForTask = pushedRunRefs.filter((r) => r.taskId === id);
-              const stillBlocked = stillBlockedByPushedRunBranch(
-                id,
-                pushedRunBranches,
-                undefined,
-                pushedRunRefs,
-                planOnlyReceiptsThisTick,
-                orphanEvidenceThisTick,
-              );
-              if (!stillBlocked && refsForTask.length > 0) {
-                logPlanOnlyRunBranchException(log, id, refsForTask, planOnlyReceiptsThisTick, orphanEvidenceThisTick);
-              }
-              return stillBlocked;
-            },
-            // Rides the existing skip row with its own reason: no new step, and deliberately not the stood-down
-            // row, which has three emitters and no reader.
-            onSkipRunBranch: (t: Task) =>
-              log("dispatch.skipped", { task: t.id, reason: "run-branch-already-pushed" }),
-          }
-        : {}),
+      ...runBranchDispatchOpts(runBranchStateThisTick, planOnlyReceiptsThisTick, log),
       onFiltered: idleReasons.onFiltered,
       // In-flight: a legible skip on console and ledger; the daemon keeps polling rather than treating an
       // open PR as a block (W1-T80).
@@ -4812,7 +4960,7 @@ export async function runDaemon(
     // W1-T5282: a lane's refill is synchronous and cannot await a fetch, so with an awaited reader it reads the
     // latest reading settled since this tick began: the admission read above, then each dispatch tick's.
     let settledFreshness = selfFreshness;
-    const refillLane = (lane: number, finished: Task, outcome: PromiseSettledResult<RunResult>): Task | undefined => {
+    const refillLane = (lane: number, finished: Task, outcome: PromiseSettledResult<RunResult>): Task | undefined | Promise<Task | undefined> => {
       inFlightTasks.delete(finished);
       if (outcome.status === "rejected") {
         // W1-T5083: a lane-local rejection (the settle loop logs it and the pass continues) never closes refill.
@@ -4837,40 +4985,48 @@ export async function runDaemon(
         (paused ? `pause: ${paused}` : undefined) ??
         (freshnessAction === "restart" ? "stale code" : undefined) ??
         (governed ? `governor: ${governed.kind}` : undefined);
-      let next: Task | undefined;
-      if (reason === undefined) {
-        try {
-          reloadPlanBinding();
-          const snapshot = { plan, isMerged: deps.refreshMerged(plan) };
-          const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.() });
-          const pool = runnableCandidates(snapshot.plan, snapshot.isMerged, budget > inFlightTasks.size ? laneCount : 0, {
-            ...dispatchOpts,
-            dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
-            excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...pendingMergedCredit, ...passIds]),
-          });
-          const fits = partitionByFileOverlap([...inFlightTasks, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
-          next = fits.dispatch.find((t) => !inFlightTasks.has(t));
-          if (next) snapshots.push(snapshot);
-        } catch (e) {
-          reason = `refill read failed: ${String((e as Error)?.message ?? e)}`;
+      // W1-T5805: the refill decides on its OWN branch read, never the tick's: a branch pushed since the
+      // tick began must refuse its task here. A failed read decides on the tick-start reading instead.
+      const chooseRefill = (runBranchListing: string | undefined): Task | undefined => {
+        let next: Task | undefined;
+        if (reason === undefined) {
+          try {
+            reloadPlanBinding();
+            const snapshot = { plan, isMerged: deps.refreshMerged(plan) };
+            const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.() });
+            const runBranchState = runBranchStateFrom(runBranchListing, deps.readOrphanRunBranchEvidence?.());
+            const pool = runnableCandidates(snapshot.plan, snapshot.isMerged, budget > inFlightTasks.size ? laneCount : 0, {
+              ...dispatchOpts,
+              ...runBranchDispatchOpts(runBranchState, planOnlyReceiptsThisTick, log),
+              dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
+              excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...pendingMergedCredit, ...passIds]),
+            });
+            const fits = partitionByFileOverlap([...inFlightTasks, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
+            next = fits.dispatch.find((t) => !inFlightTasks.has(t));
+            if (next) snapshots.push(snapshot);
+          } catch (e) {
+            reason = `refill read failed: ${String((e as Error)?.message ?? e)}`;
+          }
         }
-      }
-      if (!next) {
-        log("dispatch.lane_refill_held", {
-          lane,
-          finished_task: finished.id,
-          reason: reason ?? "no disjoint runnable task within the lane budget",
-          ...(reason === "phase bound" ? { phase_age_ms: phaseAgeMs } : {}),
-          ...(freshnessAction ? { freshness_action: freshnessAction } : {}),
-        });
-        return undefined;
-      }
-      passIds.add(next.id);
-      inFlightTasks.add(next);
-      log("dispatch.lane_refilled", { lane, finished_task: finished.id, next_task: next.id });
-      log("daemon.iteration", { task: next.id, attempted: attempted.length + 1, max: opts.max ?? null });
-      attempted.push(next.id);
-      return next;
+        if (!next) {
+          log("dispatch.lane_refill_held", {
+            lane,
+            finished_task: finished.id,
+            reason: reason ?? "no disjoint runnable task within the lane budget",
+            ...(reason === "phase bound" ? { phase_age_ms: phaseAgeMs } : {}),
+            ...(freshnessAction ? { freshness_action: freshnessAction } : {}),
+          });
+          return undefined;
+        }
+        passIds.add(next.id);
+        inFlightTasks.add(next);
+        log("dispatch.lane_refilled", { lane, finished_task: finished.id, next_task: next.id });
+        log("daemon.iteration", { task: next.id, attempted: attempted.length + 1, max: opts.max ?? null });
+        attempted.push(next.id);
+        return next;
+      };
+      const runBranchRead = reason === undefined ? readRunBranchesFor("lane-refill", tickRunBranchListing) : undefined;
+      return runBranchRead instanceof Promise ? runBranchRead.then(chooseRefill) : chooseRefill(runBranchRead);
     };
     const actOnDispatchFreshness = (freshness: DaemonFreshness): void => {
       settledFreshness = freshness;
