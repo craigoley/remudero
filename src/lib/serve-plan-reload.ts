@@ -34,7 +34,26 @@ export function touchesReloadablePlan(changedPaths: readonly string[] | undefine
 /** BACKSTOP: fires only on a hung git; it bounds one reload attempt. */
 export const PLAN_RELOAD_TIMEOUT_MS = 30_000;
 
-export type PlanRead = { plan: Plan; quarantined: QuarantinedTask[]; gitMs?: number; parseMs?: number; threadId?: number };
+/** The plan blobs one read took from git, UTF-8 in ONE SharedArrayBuffer (W1-T5894): posting it to a thread shares the
+ *  bytes instead of cloning ~19 MB per receiver, so serve's threads parse the commit main read and never run git. */
+export type PlanText = { buffer: SharedArrayBuffer; labels: string[]; ends: number[] };
+
+export type PlanRead = { plan: Plan; quarantined: QuarantinedTask[]; gitMs?: number; parseMs?: number; threadId?: number; text?: PlanText };
+
+export function packPlanBlobs(blobs: ReadonlyArray<{ label: string; text: string }>): PlanText {
+  const ends: number[] = [];
+  let total = 0;
+  for (const blob of blobs) ends.push((total += Buffer.byteLength(blob.text, "utf8")));
+  const buffer = new SharedArrayBuffer(total);
+  const bytes = Buffer.from(buffer);
+  blobs.forEach((blob, i) => bytes.write(blob.text, i === 0 ? 0 : ends[i - 1]!, "utf8"));
+  return { buffer, labels: blobs.map((blob) => blob.label), ends };
+}
+
+export function unpackPlanBlobs(text: PlanText): Array<{ label: string; text: string }> {
+  const bytes = Buffer.from(text.buffer);
+  return text.labels.map((label, i) => ({ label, text: bytes.toString("utf8", i === 0 ? 0 : text.ends[i - 1]!, text.ends[i]!) }));
+}
 
 const PLAN_RELOAD_WORKER_KIND = "remudero-serve-plan-reload" as const;
 
@@ -58,7 +77,7 @@ export async function readServePlanAtRef(repoDir: string, ref: string, clock: Cl
   const blobs = await readServePlanBlobs(repoDir, ref);
   const parsedAt = clock.now();
   const read = mergePlanBlobsQuarantiningDuplicates(blobs);
-  return { ...read, gitMs: parsedAt - startedAt, parseMs: clock.now() - parsedAt, threadId };
+  return { ...read, gitMs: parsedAt - startedAt, parseMs: clock.now() - parsedAt, threadId, text: packPlanBlobs(blobs) };
 }
 
 async function readServePlanBlobs(repoDir: string, ref: string): Promise<Array<{ label: string; text: string }>> {

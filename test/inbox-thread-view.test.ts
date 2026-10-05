@@ -7,7 +7,7 @@ import { appendThreadMessage, inboxThreadId, inboxThreadIdentity } from "../src/
 import { INBOX_THREAD_VIEW_NAME, createInboxThreadView, inboxThreadStoreFile, inboxThreadViewKey, type InboxThreadViewData } from "../src/lib/inbox-thread-view.js";
 import { inboxThreadStorePath } from "../src/lib/panel-graph.js";
 import { openProjectorReadModel } from "../src/lib/ledger-projector.js";
-import { createReadModelTicker, type ReadModelBodyEntry, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
+import { createReadModelTicker, readModelSwitchesPath, type ReadModelBodyEntry, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import { createDemandBook } from "../src/lib/view-demand.js";
 
@@ -63,6 +63,9 @@ function fixture(t: TestCtx, lane = "ready"): Fixture {
   const f: Fixture = { inboxRoot, stateDir: join(root, "read-model-state"), ledgerDir, clock, messages, tick: () => {} };
   seedInbox(f, lane);
   const view = createInboxThreadView({ inboxRoot, demand, clock });
+  // W1-T5896: a view with no switch is not built; its route serves it only under serve.
+  mkdirSync(join(f.stateDir, "read-model"), { recursive: true });
+  writeFileSync(readModelSwitchesPath(f.stateDir), JSON.stringify({ views: { "inbox-thread": "serve" } }));
   const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: [instance], clock, holder: "inbox-thread-view", oracle: "off", demand, views: [view], post: (m) => void messages.push(m) });
   t.after(() => ticker.release());
   ticker.start();
