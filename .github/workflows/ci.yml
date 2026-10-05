@@ -959,9 +959,14 @@ jobs:
     # ci-gate.yml's read keeps the latest `started_at` per name AND producer class ("posted" or
     # "job"), so a job's later success never masks a failed post (#8905) and a stub's skip never
     # fails. `if: false` never queues a runner, so a stub costs nothing at runtime.
+    # W1-T5522: also on the group commit (two PRs can each bump one recorded literal from one base);
+    # there every base read is GATE_BASE, the queue's landing base, never HEAD^1 (the previous entry)
+    # or a stale origin/main. pull_request argv is unchanged. Test: the-merge-queue-runs-the-recorded-*.
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' # W1-T1033: PR-only; see the `on:` block above.
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group' # W1-T1033/W1-T5522
     timeout-minutes: 15
+    env:
+      GATE_BASE: ${{ github.event.merge_group.base_sha }} # empty on pull_request
     permissions:
       contents: read
       checks: write # W1-T4399: to post each gate's own check run below.
@@ -977,7 +982,11 @@ jobs:
       - name: Determine this diff's fast-lane class (shared by every path-scoped gate below — see each original job's own comment, compacted to docs/forensics/ci-yml.md, for why each is scoped the way it is)
         id: classify
         run: |
-          git diff --name-only HEAD^1...HEAD > changed-files.txt || : > changed-files.txt
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            git diff --name-only HEAD^1...HEAD > changed-files.txt || : > changed-files.txt
+          else
+            git diff --name-only "$GATE_BASE"...HEAD > changed-files.txt || : > changed-files.txt
+          fi
           CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
           case "$CLASS" in
             PLAN_ONLY|DOCS_ONLY|SOURCE) ;;
@@ -1012,7 +1021,9 @@ jobs:
         continue-on-error: true
         env:
           BASE_SHA: HEAD^1
-        run: npm run --silent claude-md-budget-ratchet
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then export BASE_SHA="$GATE_BASE"; fi
+          npm run --silent claude-md-budget-ratchet
 
       - name: jscpd-gate (duplication ceiling)
         id: jscpd-gate
@@ -1033,7 +1044,12 @@ jobs:
       - name: lint-plan (rmd lint-plan, PR-changed tasks only)
         id: lint-plan
         continue-on-error: true
-        run: npm run --silent lint-plan -- --base HEAD^1
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            npm run --silent lint-plan -- --base HEAD^1
+          else
+            npm run --silent lint-plan -- --base "$GATE_BASE"
+          fi
 
       - name: dependency-cruiser fitness rules
         id: depcruise
@@ -1052,7 +1068,11 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          git diff --name-only HEAD^1...HEAD > changed-files.txt
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            git diff --name-only HEAD^1...HEAD > changed-files.txt
+          else
+            git diff --name-only "$GATE_BASE"...HEAD > changed-files.txt
+          fi
           cat changed-files.txt
           node --import tsx .github/scripts/containment-diff-trigger.ts changed-files.txt
           MATCHED="$(grep '^matched=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)"
@@ -1076,6 +1096,7 @@ jobs:
 
       - name: prompt-surface-gate (requires golden evidence for prompt/learnings edits)
         id: prompt-surface-gate
+        if: github.event_name == 'pull_request' # W1-T5522: the PR's own evidence; a skip posts success
         continue-on-error: true
         run: |
           git fetch --no-tags origin "${GITHUB_BASE_REF}" >/dev/null 2>&1 || true
@@ -1086,13 +1107,23 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
-        run: npm run --silent task-id-existence:check -- --require-open-prs
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then # W1-T5522: a queued PR is open and would match itself
+            node scripts/task-id-existence-check.mjs --base "$GATE_BASE"
+          else
+            npm run --silent task-id-existence:check -- --require-open-prs
+          fi
 
       - name: source-size (growth informs review and follow-up work; measurement failure still refuses)
         id: source-size
         if: steps.classify.outputs.class == 'SOURCE'
         continue-on-error: true
-        run: npm run --silent source-size-signal
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then
+            npm run --silent source-size-signal -- --base "$GATE_BASE"
+          else
+            npm run --silent source-size-signal
+          fi
 
       - name: Comment-load ratchet (no file grows past its ceiling; no added block over 25 lines)
         id: comment-load-ratchet
@@ -1102,7 +1133,11 @@ jobs:
           # W1-T3720: tee each bundled gate's report so the reporting step can name the refuser.
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/gate-reports"
-          npm run --silent comment-load-signal 2>&1 | tee "$RUNNER_TEMP/gate-reports/comment-load-ratchet.log"
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then
+            npm run --silent comment-load-signal -- --base "$GATE_BASE" 2>&1 | tee "$RUNNER_TEMP/gate-reports/comment-load-ratchet.log"
+          else
+            npm run --silent comment-load-signal 2>&1 | tee "$RUNNER_TEMP/gate-reports/comment-load-ratchet.log"
+          fi
 
       - name: Expiring-fixture census (no fixture crosses its threshold inside the margin)
         id: expiring-fixture-census
@@ -1113,6 +1148,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/gate-reports"
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then git update-ref refs/remotes/origin/main "$GATE_BASE"; fi # W1-T5522: no base flag
           node scripts/expiring-fixture-census.mjs 2>&1 | tee "$RUNNER_TEMP/gate-reports/expiring-fixture-census.log"
 
       - name: Console-parity ratchet (every verb maps to a route or a stated cli-only reason)
@@ -1127,13 +1163,18 @@ jobs:
       - name: baseline-monotonic (no SCORE_TABLE floor/ceiling regresses against origin/main without a reviewed bumpRationale)
         id: baseline-monotonic
         continue-on-error: true
-        run: node scripts/baseline-monotonic-check.mjs
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then
+            node scripts/baseline-monotonic-check.mjs --base "$GATE_BASE"
+          else
+            node scripts/baseline-monotonic-check.mjs
+          fi
 
       - name: Report each gate's result under its own required check-run name (checks API — W1-T4399 design (i))
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }} # W1-T5522: the group commit
           POSTING_JOB_ID: ${{ job.check_run_id }}
           POSTING_RUN_ID: ${{ github.run_id }}
           POSTING_RUN_ATTEMPT: ${{ github.run_attempt }}
