@@ -1,0 +1,39 @@
+- id: W1-T5682
+  title: "A FIX WORKER CAN READ ITS PREDECESSOR'S TRANSCRIPT — W1-T3079's `predecessorTranscriptPromptLines` tells every fix and diagnose worker to read `<root>/state/transcripts/<taskId>/…`, but deny-floor rule 14 (W1-T5016) confines worker file tools to the worktree, TMPDIR and the worker HOME, so every such read is refused and the seance pointer is silently dead"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one defect — the transcript pointer names a path the worker floor refuses; touches the security floor
+  origin: "operator session 2026-10-04: W1-T4842 fix worker's report (2026-10-03) — the predecessor transcript read was refused"
+  plan_refs: [W1-T3079, W1-T5016, W1-T5354, W1-T4842]
+  files: [src/run-task.ts, hooks/deny-floor.sh, test/a-fix-worker-can-read-its-predecessors-transcript.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 43190266. `predecessorTranscriptPaths` (src/run-task.ts) returns
+    `listArchivedTranscripts(root, taskId)` paths under `join(root, "state", "transcripts", taskId)`,
+    and `predecessorTranscriptPromptLines` renders "Read the newest one before acting" followed by
+    those paths; the fix prompt splices them in (`...predecessorTranscriptPromptLines(
+    predecessorTranscriptPaths(opts.config.root, opts.taskId, { excludeRunId: opts.runId }))`).
+    hooks/deny-floor.sh rule 14 (`ft_check`, worker lane via `--confine-file-tools`) allows only the
+    assigned worktree, READS through its node_modules link, `${TMPDIR:-/tmp}`, a `worker-home*` HOME
+    and the session's own ~/.claude/projects dir, so a Read of /home/node/Remudero/state/transcripts/…
+    is denied. Observed in the W1-T4842 fix worker's report on 2026-10-03. W1-T5354's `~` tightening
+    (#8830) stays: 0 `~` refusals in 124,990 ledger rows since it merged.
+  design: |
+    (i) PREFERRED: before spawn, copy the named predecessor transcript(s) into the worker's TMPDIR
+    (size-capped, newest first, the same `limit`) and point the prompt lines at the copies; the
+    state volume stays outside the floor.
+    (ii) Only if (i) cannot work: a READ-only allowance in `ft_check` for exactly
+    `<root>/state/transcripts/<this task id>/`, nothing wider.
+    (iii) Optional: the `~` denial message names the expanded `$HOME` path.
+  acceptance:
+    - claim: "a fix rung with an archived predecessor transcript renders prompt paths that the worker floor allows a Read of, and a Read of another task's transcript is still refused"
+      proof: "unit test: test/a-fix-worker-can-read-its-predecessors-transcript.test.ts"
+  falsifier: |
+    Point the prompt back at the state/transcripts path; the floor refuses the Read and the test
+    fails.

@@ -1,0 +1,44 @@
+- id: W1-T5730
+  title: "THE NOW AND FEEDBACK VIEWS READ THE LANDING QUEUE — `materializeFeedbackView` and the now view's `listGrilling` read only the checkout's `listFeedback`, so a queued decision still reads `proposed` (or an answered grill still asks) on the console, and once W1-T5628 moves a console capture into the queue that capture is invisible on both until the sweep lands it"
+  repo: remudero
+  depends_on: [W1-T5627]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — every feedback reader overlays the landing queue
+  band_meaning: span
+  origin: "operator session 2026-10-04: follow-up audit (research/audit/followups.md) item 88, from #9158 (W1-T5628) review"
+  plan_refs: [W1-T5627, W1-T5628, W1-T5524, W1-T5525]
+  files: [src/lib/feedback-view.ts, src/lib/now-view.ts, src/lib/feedback-landing.ts, src/lib/panel-graph.ts, test/the-now-and-feedback-views-read-the-landing-queue.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 70bb29f8. W1-T5627 (#9146) made GET /v1/feedback overlay each
+    queued record (`readQueuedFeedbackRecords` in src/lib/feedback-landing.ts, applied by the
+    file-private `overlayQueuedFeedback` in src/lib/panel-graph.ts). Two readers still see only the
+    checkout: `feedbackBodies`/`materializeFeedbackView` (src/lib/feedback-view.ts, the `feedback`
+    view the console pages) project `computeFeedbackProjectionSync` over `root` alone, and the now
+    view's default `listGrilling` (src/lib/now-view.ts) is
+    `listFeedback(instance.feedbackRoot, { status: "grilling" })`. Neither file names the queue.
+    So a decision POSTed through /v1/feedback/decision reads `proposed` in the view until it lands,
+    and an answered grill stays an open `feedback_grill` decision on the now page. #9158 (W1-T5628,
+    open at this sha) moves every console capture, a /v1/skills/run grill included, OUT of the
+    checkout into the queue, so a fresh capture or grill is absent from both views until the sweep
+    lands it and serve's checkout refreshes.
+  design: |
+    Share one reader: export the queued overlay from src/lib/feedback-landing.ts (the
+    `overlayQueuedFeedback` shape, plus queued records with no checkout entry appended as entries
+    carrying `landing: "queued"`), and have panel-graph.ts, feedback-view.ts and now-view.ts call it.
+    The feedback view's input gains the state root; the now view's grill list reads the overlaid
+    entries filtered to `grilling`. An unreadable queue marks each view's source with the
+    reason (the now view's `partial`, the feedback view's degraded source), never "nothing
+    queued". If #9158 has not merged when this is built, the fresh-capture case is a queued
+    record with no checkout copy, written directly by the test.
+  acceptance:
+    - claim: "a queued decision reads decided and a queue-only capture is listed in the feedback view, an answered queued grill leaves the now view's grill list while a queue-only grill joins it, and an unreadable queue is named in both views' sources"
+      proof: "unit test: test/the-now-and-feedback-views-read-the-landing-queue.test.ts"
+  falsifier: |
+    Leave feedback-view.ts reading `root` alone: the queued decision reads `proposed` and the
+    queue-only capture is missing, and the test fails.

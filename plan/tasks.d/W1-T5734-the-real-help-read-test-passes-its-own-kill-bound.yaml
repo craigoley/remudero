@@ -1,0 +1,33 @@
+- id: W1-T5734
+  title: "THE REAL HELP-READ TEST PASSES ITS OWN KILL BOUND — W1-T4843's 'the default reader really shells out to the shipped rmd help' calls `readTaskPrecondition([\"--help\"])` with no bound, so a real `bin/rmd --help` child runs under the 5 s production PRECONDITION_TIMEOUT_MS and SIGKILL on a loaded coverage lane, the flake W1-T5632 fixed only in its siblings"
+  repo: remudero
+  depends_on: [W1-T5632]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 2.00
+  risk: low
+  origin: "operator session 2026-10-04: follow-up audit (research/audit/followups.md) item 91"
+  plan_refs: [W1-T5632, W1-T4843, W1-T5680]
+  files: [test/a-task-waits-on-its-precondition-not-its-breaker.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 70bb29f8. W1-T5632 (#9142) made `readTaskPrecondition`
+    (src/lib/plan.ts) take `timeoutMs`, defaulting to PRECONDITION_TIMEOUT_MS (5_000, SIGKILL), and
+    passed 120_000 to the real `node -e` tests in test/a-task-waits-on-its-precondition-not-its-breaker.test.ts.
+    The same file's "W1-T4843: the default reader really shells out to the shipped rmd help" still
+    calls `readTaskPrecondition(["--help"])`: it spawns the real bin/rmd (tsx startup plus the
+    command registry) under the 5 s production bound, the exact shape W1-T5632 measured being
+    SIGKILLed on a loaded coverage lane. Batch-9 W1-T5680 (#9138, open) re-bounds five other
+    wall-clock tests and does not name this one.
+  design: |
+    Pass the real runner and the file's existing 120_000 bound explicitly:
+    `readTaskPrecondition(["--help"], execFileSync, 120_000)`, importing `execFileSync` from
+    node:child_process. The production default stays asserted by W1-T5632's own suite.
+  acceptance:
+    - claim: "the real help-read test passes the real runner with a 120 s bound instead of the 5 s production default"
+      proof: 'grep: readTaskPrecondition(\["--help"\], execFileSync, 120_000) in test/a-task-waits-on-its-precondition-not-its-breaker.test.ts'
+  falsifier: |
+    Drop the bound argument: the grep reads 0 and the help read runs under 5 s again.

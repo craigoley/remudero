@@ -1,0 +1,37 @@
+- id: W1-T5767
+  title: "A COVERAGE SHARD THAT CANNOT REPORT NAMES THE TRUNCATED RAW FILE — #9178's coverage shard 1/8 ran 2,983 tests with 0 failures and still went red on node's 'Could not report code coverage. SyntaxError: Unterminated string in JSON at position 65536', a raw V8 file cut at exactly 64 KiB; test-with-retry names no file for it, so it is neither retried nor attributable"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: low
+  origin: "operator session 2026-10-04: watch log 23:06Z (#9178 shard 1, coverage JSON truncated at 65536, 0 test failures)"
+  plan_refs: [W1-T4398, W1-T4112, W1-T2276]
+  files: [scripts/test-with-retry.mjs, test/a-coverage-shard-that-cannot-report-names-the-truncated-raw-file.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 9c38366f. ci.yml's coverage shards run
+    `node scripts/test-with-retry.mjs --coverage-first-pass coverage/raw ...`; W1-T4398's rule is
+    that a failure no file can be named for is not retried. MEASURED: #9178 head 3d4b2700, run
+    37241496914 attempt 1, job 111550956026 (coverage-shard 1/8), 23:05:25Z on 10-04: `# tests 2983`,
+    `# fail 0`, and the line "Warning: Could not report code coverage. SyntaxError: Unterminated
+    string in JSON at position 65536 (line 1 column 65537)"; a re-run passed. Position 65536 is one
+    64 KiB write, which reads like a raw coverage-<pid>-*.json still being written (or killed
+    mid-write) by a child process when the runner collected the directory. Sweep of the other 22
+    failed coverage-shard logs among 42 failed CI runs 10-03..10-04: 0 hits (that corpus excludes
+    re-run attempts; #9178's own run was found only by its PR, so the rate is a floor). Rare, but
+    each costs a shard re-run and an operator log dig.
+  design: |
+    When pass 1 exits non-zero with `# fail 0` and its output carries "Could not report code
+    coverage", the wrapper parses each `coverage-*.json` in the raw dir, and prints one greppable
+    `COVERAGE-REPORT-FAILED:` line per file that does not parse (name, bytes, the pid from its name)
+    to stdout and $GITHUB_STEP_SUMMARY. The exit code is unchanged; nothing is retried.
+  acceptance:
+    - claim: "given a fake pass-1 output with fail 0 and the could-not-report warning and a raw dir holding one 65536-byte truncated coverage file, the wrapper prints COVERAGE-REPORT-FAILED naming that file and its pid and keeps the non-zero exit"
+      proof: "unit test: test/a-coverage-shard-that-cannot-report-names-the-truncated-raw-file.test.ts"
+  falsifier: |
+    Skip the raw-dir scan: no COVERAGE-REPORT-FAILED line is printed and the test fails.

@@ -1,0 +1,36 @@
+- id: W1-T5653
+  title: "A BASE REPRODUCTION ROW RECORDS A SETUP FAILURE ONCE — one `sweep.base_reproduction` row was 340,598 of the step's 385,054 live ledger bytes: 795 probed files each carrying the same 299-byte `git worktree add … already exists` error, from an uncapped file list, a per-file copy of one setup error, and a stale base-repro dir never removed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one defect — the probe's row grows with its file count on a setup failure
+  origin: "operator session 2026-10-04: watch log, sweep.base_reproduction 381 KB in 70 rows"
+  plan_refs: [W1-T5528, W1-T5318, W1-T5517]
+  files: [src/run-task.ts, src/lib/base-reproduction.ts, src/lib/sweep.ts, test/a-base-reproduction-row-records-a-setup-failure-once.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-04 on the live ledger (read-only): 74 `sweep.base_reproduction` rows, 385,054 B;
+    one row is 340,598 B — PR #9076 at main 997219be, 795 files, 793 carrying the same 299-byte
+    reason `git worktree add … base-repro-997219bee2bd … fatal: … already exists`; the other 73 rows
+    are ~0.6 KB. READ on origin/main 284015b9: (1) `baseReproductionFiles`
+    (src/lib/base-reproduction.ts) has no cap, so a whole-suite failure log yields 795 paths; (2) the
+    outer catch in `buildBaseReproductionProbe` (src/run-task.ts) copies one setup error into every
+    file (`for (const file of missing) if (!results.has(file)) results.set(file, unreadable(file, {
+    reason: String(error) }));`); (3) the `finally` removes the `base-repro-<sha>` dir only `if
+    (created)`, so a stale one fails every later probe at that sha. These rows carry `pr_number` but
+    no `pr_url`, so W1-T5318's pr_url-keyed prune (queued) would not reach them.
+  design: |
+    (i) A probe-wide setup failure is recorded once (`setup_error`), files marked `unrunnable` with
+    no per-file reason; any per-file reason is length-capped.
+    (ii) Cap the probed file count; above it the verdict is `unrunnable` with reason "too many".
+    (iii) Remove a pre-existing `base-repro-<sha>` dir before `worktree add`.
+  acceptance:
+    - claim: "a probe whose worktree setup fails over 795 files writes one row whose size does not grow with the file count, and a stale base-repro dir no longer fails the next probe"
+      proof: "unit test: test/a-base-reproduction-row-records-a-setup-failure-once.test.ts"
+  falsifier: |
+    Restore the per-file `String(error)` copy; the 795-file fixture row exceeds the size bound.

@@ -1,0 +1,49 @@
+- id: W1-T5649
+  title: "RE-LAND THE RETRO'S PER-ATTEMPT CLOSURE WITHOUT SEARCHING HISTORY ON THE DAEMON LOOP — #9091 (W1-T5113) dropped shippedSince's sinceTs pre-filter so it could read each run's merge time, and the trigger then ran one synchronous trailer search per run in history: a 44m52s daemon stall on 2026-10-04 (16:57:34Z-17:42:26Z), reverted by #9131"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: high  # Rule 19: one defect — W1-T5113's closure math, re-landed with a bounded merge-time read
+  origin: "operator session 2026-10-04: watch log 17:44Z, daemon loop stall after the 16:55Z recycle loaded #9091"
+  plan_refs: [W1-T5113, W1-T3104, W1-T51, W1-T2288, W1-T2509]
+  files: [src/lib/retro-closure.ts, src/lib/retro.ts, src/run-task.ts, test/retro-closure-per-attempt-never-searches-history.test.ts, test/the-retro-emits-closure-by-class-and-guard-fire-counts.test.ts, test/retro-shipped-wiring.test.ts, test/retro-trigger-corpus.test.ts, test/a-ledger-credit-row-finalises-the-run-it-credits.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9, which still carries #9091 (be461724). `shippedSince`
+    (src/lib/retro.ts) now loops `for (const r of runs)` over every run in history; before #9091 it
+    was `const scoped = sinceTs ? runs.filter((r) => r.startTs > sinceTs) : runs; for (const r of
+    scoped)`. Each non-merged run calls `github.findMergedByTrailer(r.taskId)`, each merged one calls
+    `github.headRefName(r.prUrl)`, and a trailer hit with no `mergedAt` calls `ghExec(["pr","view",
+    …,"mergedAt"])`. In the daemon, `retroTriggerCheck` (src/run-task.ts, the `checkRetroTrigger`
+    DaemonDeps hook) reaches that loop through `retroShippedGithubGateway()`, which wraps the
+    unbatched `ghGateway`: every one of those calls is a synchronous `gh` spawn on the event loop.
+    MEASURED on the live ledger (all three rotation forms): the daemon (actor_pid 1407560) wrote no
+    `daemon.*` row from 16:57:34Z to 17:36:35Z; its `daemon.loop_lag` row at 17:43:29Z reads
+    lag_ms 2737080 (45 missed ticks) and `daemon.sweep.abandoned` elapsed_ms 2872627. Sampled
+    children of that pid were one trailer search per task (RETRO, TRIAGE-fb-…, W1-T3821). #9131
+    reverts #9091 whole, which also drops W1-T5113's correct closure math (merges over dispatched
+    attempts; merges credited by merge time). W1-T3104 (queued) separately removes every per-run
+    GitHub lookup from the trigger itself; this task does not wait for it, and bounds the shared
+    `shippedSince` read on its own so neither the trigger nor the full gather scans history.
+  design: |
+    The end state is the same whether or not #9131's revert has merged first.
+    (i) Re-apply W1-T5113's closure math in src/lib/retro-closure.ts: denominator = the class's
+    dispatched attempts in the window (filings when supplied), `mergeTs` carried on RunSummary,
+    ShippedRecord and ClosureShipped, the cell reads "<merged> of <n> attempts".
+    (ii) `shippedSince` selects candidates LOCALLY before any gateway call: a ledger-merged run only
+    when its `mergeTs ?? creditTs` is after the marker; a GitHub-arm run only when it started after
+    the marker or its task id appears as a `Remudero-Task:` trailer in a `mergedCommits()` commit
+    (local git log) dated after the marker. Gateway calls are bounded by candidates, never history.
+    (iii) `retroShippedGithubGateway` answers `findMergedByTrailer`/`headRefName` and `mergedAt`
+    from one `buildBatchedGithub` fetch, and the per-PR `ghExec` mergedAt read is removed.
+  acceptance:
+    - claim: "with 400 pre-marker runs and 2 post-marker runs, shippedSince makes at most 2 trailer searches and no head lookup for a pre-marker merge, while a pre-marker run merged after the marker is still credited and the closure rate reads merges over dispatched attempts"
+      proof: "unit test: test/retro-closure-per-attempt-never-searches-history.test.ts"
+  falsifier: |
+    Restore `for (const r of runs)` without the local candidate filter; the counting gateway sees
+    one trailer search per pre-marker run and the test fails.

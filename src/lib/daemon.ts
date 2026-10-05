@@ -33,7 +33,7 @@ import type {
   WipeTestCadenceRunResult,
 } from "./measurement-cadence.js";
 import { buildMeasurementCadenceRow } from "./measurement-cadence.js";
-import { runOpportunityIntake, productionOpportunityIntakePorts, type OpportunityIntakePorts } from "./opportunity-intake.js";
+import { runOpportunityIntake, openOpportunityIntakePorts, type OpportunityIntakePorts } from "./opportunity-intake.js";
 import { reconcileOpportunityOutcomes, productionOpportunityOutcomePorts, type OpportunityOutcomePorts } from "./opportunity-outcomes.js";
 import type { BoardReviewCadenceDecision, BoardReviewReport } from "./board-review.js";
 import type { DigestCadenceRunResult } from "./digest.js";
@@ -4051,7 +4051,7 @@ export async function runDaemon(
           }
           if (decision.rung === "codeqlQuality" && (deps.opportunityIntake || deps.knowledgeGardener)) {
             try {
-              const result = await runOpportunityIntake(deps.opportunityIntake ?? productionOpportunityIntakePorts(deps.knowledgeGardener!));
+              const result = await runOpportunityIntake(deps.opportunityIntake ?? await openOpportunityIntakePorts(deps.knowledgeGardener!));
               log("opportunity_intake.ran", { ...result, rung: decision.rung });
             } catch (error) {
               log("opportunity_intake.failed", { reason: String(error) });

@@ -1,0 +1,34 @@
+- id: W1-T5678
+  title: "A WORKER THREAD MINTS NO TEST HOME AND A DEAD RUN'S HOME IS REAPED — test/setup/tmp-hygiene.ts mkdtemps `rmd-test-home-<pid>-` in every file worker that re-runs the setup, and `worker.terminate()` skips the exit sweep (147 leaked in /mnt/scratch/rmd-work-tmp on 2026-10-04, up to 30 for one pid)"
+  repo: remudero
+  depends_on: [W1-T5624]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one defect — the test setup mints a home per worker thread
+  origin: "operator session 2026-10-04: watch log, rmd-test-home-<pid>-* still leaks per worker"
+  plan_refs: [W1-T5624, W1-T5550]
+  files: [test/setup/tmp-hygiene.ts, test/a-worker-thread-mints-no-test-home.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9. test/setup/tmp-hygiene.ts runs `const testHome =
+    fs.mkdtempSync(join(tmpdir(), \`rmd-test-home-${process.pid}-\`)); process.env.HOME = testHome;`
+    at import time with no `isMainThread` guard, removes it only through the `process.on("exit")`
+    list, and never calls `reapDeadOwnerDirs` for that prefix (it does for GH_REFUSE_DIR_PREFIX).
+    Reproduced: a `--import` file worker stopped by `worker.terminate()` leaves its dir. Live: 147
+    `rmd-test-home-*` in /mnt/scratch/rmd-work-tmp, all owner pids dead. #9128 (W1-T5624) guards
+    only the gh stub with `isMainThread` and leaves testHome, so this depends on it (same file).
+  design: |
+    Only the main thread mints the test home and writes its config; a worker keeps the inherited
+    HOME. Name the dir with `setupDirOwnerTag()` and call `reapDeadOwnerDirs(TEST_HOME_PREFIX)` (a named const for `rmd-test-home-`)
+    before minting, so a SIGKILLed run's home is reaped on the next load.
+  acceptance:
+    - claim: "the setup reaps a dead owner's test home before it mints one"
+      proof: 'grep: reapDeadOwnerDirs(TEST_HOME_PREFIX) in test/setup/tmp-hygiene.ts'
+    - claim: "a terminated worker thread leaves no rmd-test-home dir"
+      proof: "unit test: test/a-worker-thread-mints-no-test-home.test.ts"
+  falsifier: |
+    Drop the `isMainThread` guard; the terminate case finds a new rmd-test-home dir.

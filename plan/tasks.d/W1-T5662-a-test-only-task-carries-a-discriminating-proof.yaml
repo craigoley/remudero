@@ -1,0 +1,35 @@
+- id: W1-T5662
+  title: "A TEST-ONLY TASK CARRIES A DISCRIMINATING PROOF — a task whose files: are all under test/ and whose every proof is a unit test is non-discriminating by construction (buildBaseProofDir copies the added tests to base), so W1-T5527 and W1-T5622 each needed a plan amendment (#9103, #9120) before their build could go green"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium
+  origin: "operator session 2026-10-04: watch log, lint-plan should flag a test-only files: list whose every proof is a unit test"
+  plan_refs: [W1-T2835, W1-T3098, W1-T5527, W1-T5622, W1-T5418]
+  files: [src/lib/task-linter.ts, test/a-test-only-task-carries-a-discriminating-proof.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9. No lint rule exists for this: `proofBaseDiscriminationViolations`
+    (W1-T2835, src/lib/task-linter.ts) is warn-only, path-form only, and silent on forward references.
+    `buildBaseProofDir` (src/run-task.ts, W1-T3098) copies the diff's added `test/**` files into the
+    base checkout, so with no src change a test passes at both trees, grades `executed_stale`, and
+    discriminates nothing. Hit twice this week: W1-T5527 (`files:` one census test, amended by #9103)
+    and W1-T5622 (three test/ files, amended by #9120); both needed a `grep:` criterion added before
+    the build could pass review. W1-T5418 (the generic proof-discrimination gardener) does not cover
+    it.
+  design: |
+    A `proof-test-only-discrimination` check: fires when every non-`plan/` `files:` entry is under
+    `test/` and every criterion that is not `kind: guard` and has no `satisfied_by` uses a
+    `unit test:` proof (either form), with zero `grep:` proofs. Warn on the whole plan; block on a
+    new or changed shard through the existing introduced-diagnostic promotion. Measure the hit count
+    on main first and name it in the PR.
+  acceptance:
+    - claim: "lint-plan reports the check on W1-T5527's original filing shape and is silent on its amended shape with a grep: criterion"
+      proof: "unit test: test/a-test-only-task-carries-a-discriminating-proof.test.ts"
+  falsifier: |
+    Delete the check; the original shape lints clean and the test fails.

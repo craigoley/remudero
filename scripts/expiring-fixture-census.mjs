@@ -92,6 +92,18 @@ export const AGED_FIELDS = [
     source: "src/lib/retro.ts",
     evidence: ["Date.parse(lastAttempt.retroAttemptAt)", "now.getTime() >= nextEligibleAtMs"],
   },
+  {
+    field: "from",
+    threshold: "feedback age observation-window start",
+    source: "src/lib/human-gate.ts",
+    evidence: ["Date.parse(supplied.window.from)", "input.now >= Date.parse(supplied.window.from)"],
+  },
+  {
+    field: "through",
+    threshold: "feedback age observation-window end",
+    source: "src/lib/human-gate.ts",
+    evidence: ["Date.parse(supplied.window.through)", "input.now <= Date.parse(supplied.window.through)"],
+  },
 ];
 
 /** The population ratchet: each file's measured fixture count as captured on W1-T3334.

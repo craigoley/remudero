@@ -1,0 +1,38 @@
+- id: W1-T5664
+  title: "A CODEX RUN STILL PRICES AT $0 IN THE RETRO — W1-T5629 prices only the architect lane table; gatherRuns reads the verdict's cost_usd (0) for 1,051 codex implement/fix runs, and gpt-6-sol/gpt-5.6-sol have no notional row because OPENWEIGHT_PRICES doubles as the cash-deployment allowlist"
+  repo: remudero
+  depends_on: [W1-T5629]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one defect — the codex notional price stops short of the run and verdict rows
+  band_meaning: span
+  origin: "operator session 2026-10-04: watch log, W1-T5629 (#9129) follow-ups"
+  plan_refs: [W1-T5629, W1-T5526, W1-T4066]
+  files: [src/lib/worker-provider.ts, src/run-task.ts, src/lib/retro.ts, test/a-codex-run-is-priced-at-its-notional-in-the-retro.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on #9129 (W1-T5629, merged 9c084f14). #9129 adds
+    `codexNotionalCostUsd` (undefined when `!Object.hasOwn(OPENWEIGHT_PRICES, model)`),
+    `workerLedgerFields` emits `notional_cost_usd`, and `notionalSpendUsd` is read only by
+    `laneSpendOf`. (a) `terminalVerdictFields` (src/run-task.ts) restates only `total_cost_usd`, and
+    `gatherRuns` (src/lib/retro.ts) prices a run from the verdict's `cost_usd` (0 for codex) or the
+    worker rows' `costOf`, never the notional; W1-T5629 counted 750 codex implement.done and 301
+    fix.done rows, all $0. (b) `OPENWEIGHT_PRICES` holds gpt-6.1-sol but not gpt-6-sol or
+    gpt-5.6-sol (49 rows); its comment says Sol is "deliberately NOT here" because the table is also
+    the cash allowlist (`openWeightPriceFor` throws `OpenWeightUnpricedDeploymentError`), so adding
+    them there would make them routable cash deployments.
+  design: |
+    (i) A codex-only `CODEX_NOTIONAL_PRICES` table: the `OPENWEIGHT_PRICES` rows plus gpt-6-sol and
+    gpt-5.6-sol at published rates with `readAt`; `openWeightPriceFor` never reads it.
+    (ii) `codexNotionalCostUsd` reads that table; `terminalVerdictFields` restates
+    `notional_cost_usd`; `gatherRuns` prices a codex run with `notionalSpendUsd`, an unpriced one
+    absent, never 0. NOT THIS TASK: budgets, cash governors or the spend series.
+  acceptance:
+    - claim: "a codex run with gpt-6-sol tokens carries a non-zero notional cost in gatherRuns, while openWeightPriceFor still refuses gpt-6-sol as a cash deployment"
+      proof: "unit test: test/a-codex-run-is-priced-at-its-notional-in-the-retro.test.ts"
+  falsifier: |
+    Drop the verdict restate; the run reads $0 and the test fails.

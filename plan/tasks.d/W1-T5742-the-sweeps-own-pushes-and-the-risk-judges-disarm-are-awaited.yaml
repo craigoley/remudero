@@ -1,0 +1,40 @@
+- id: W1-T5742
+  title: "THE SWEEP'S OWN PUSHES AND THE RISK JUDGE'S DISARM ARE AWAITED — after W1-T5284 the sweep still pushes through the sync `gitPushRunBranch` (sweep.ts's `gitPushRunBranchForBuild`, run-task.ts's `buildSweepEffects` and `buildProofAmendmentWritePorts`), and the risk judge's escalate closure still calls the sync `disarmAutoMerge`"
+  repo: remudero
+  depends_on: [W1-T5284]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — the remaining daemon pushes and disarm go through W1-T5284's async forms
+  band_meaning: span
+  origin: "operator session 2026-10-04: found while building W1-T5284 (#9159)"
+  plan_refs: [W1-T5284, W1-T5689, W1-T4477]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/the-sweeps-own-pushes-and-the-risk-judges-disarm-are-awaited.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on #9159 (W1-T5284, open, head e186f087), which adds `gitPushRunBranchAsync` and
+    `disarmAutoMergeAsync` and routes runTaskBody, retro, pushFixRound and the at-open arm to them.
+    Still synchronous on that head: src/lib/sweep.ts's `gitPushRunBranchImpl:
+    gitPushRunBranchForBuild = gitPushRunBranch` default and its call sites (the sweep's build,
+    fix and amendment pushes); src/run-task.ts's `buildSweepEffects` (`gitPushRunBranch(wt, {
+    stdio: "ignore", expectedHeadSha })`, plus an `execFileSync` git port) and
+    `buildProofAmendmentWritePorts` (`gitPushFn` over `gitPushRunBranch`); and the risk judge's
+    `escalate` closure in runTaskBody, `disposeDisarm(disarmAutoMerge(prUrl), ...)`, whose sync
+    `gh pr merge --disable-auto` runs inside an otherwise awaited risk-judge call. Each is a
+    daemon-loop path. Batch-10's W1-T5689 (#9155, open) baselines such sites; it does not convert
+    them.
+  design: |
+    Route the sweep's push port, `buildSweepEffects` and `buildProofAmendmentWritePorts` to
+    `gitPushRunBranchAsync` (the port types become Promise-returning; their callers already run in
+    async sweep steps), and make the escalate closure await `disarmAutoMergeAsync` (the risk judge's
+    escalate port accepts a Promise). Refusals, ledger rows and push leases are byte-identical; any
+    claim a sync push held by blocking is held explicitly.
+  acceptance:
+    - claim: "a sweep push and a risk-judge escalation's disarm each let a timer fire while git push or gh is in flight, and refuse what the sync forms refuse"
+      proof: "unit test: test/the-sweeps-own-pushes-and-the-risk-judges-disarm-are-awaited.test.ts"
+  falsifier: |
+    Leave `gitPushRunBranchForBuild` defaulting to the sync push: the sweep-push probe sees the
+    timer fire only after the push settles and the test fails.

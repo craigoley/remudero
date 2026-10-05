@@ -1,0 +1,37 @@
+- id: W1-T5739
+  title: "EVERY INBOX LANE ITEM DECLARES ITS CLASSIFICATION — W1-T5340 (#9139) has GET /v1/inbox's needsYou lanes send `classification: ASK|RECORD` on each item, but openapi/daemon.yaml's InboxReadyItem, InboxDraftingItem, InboxNotReadyItem and InboxDeclinedItem do not declare it, and no strict schema test reads that route's lane items, so the drift cannot go red"
+  repo: remudero
+  depends_on: [W1-T5340]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — the inbox lane items' declared contract
+  band_meaning: span
+  origin: "operator session 2026-10-04: coordinator follow-up on #9139 (W1-T5340) review"
+  plan_refs: [W1-T5340, W1-T5021]
+  files: [openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/every-view-body-matches-its-schema.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04: #9139 (W1-T5340) is OPEN, head 978a3640, so origin/main 70bb29f8 does not yet
+    send the field. On that head `inboxLanes` (src/lib/panel-graph.ts) maps each needsYou lane
+    through `operatorItems`, adding `classification: "ASK" | "RECORD"`; its 978a3640 contract
+    commit declares `classification` on the inbox VIEW's item schema and `humanGates` on needs-you,
+    but the four lane schemas GET /v1/inbox's needsYou references (InboxReadyItem,
+    InboxDraftingItem, InboxNotReadyItem, InboxDeclinedItem) carry no `classification` property
+    (0 of 4, read from that head's openapi/daemon.yaml). test/every-view-body-matches-its-schema.test.ts
+    validates every REGISTERED VIEW body strictly (undeclared fields refused), and GET /v1/inbox is
+    a route, not a view, so its lane items are read by no strict test.
+  design: |
+    Declare `classification` (enum ASK, RECORD; present on needsYou lane items only) on the four
+    lane schemas, regenerate packages/api-client/src/schema.d.ts, and add a test to
+    test/every-view-body-matches-its-schema.test.ts that serves GET /v1/inbox from the file's
+    existing fixture and validates its `needsYou` lane items with the same strict validator.
+  acceptance:
+    - claim: "GET /v1/inbox's needsYou lane items validate strictly against their declared schemas, classification included"
+      proof: "grep: W1-T5739: every GET /v1/inbox lane item validates against its declared schema in test/every-view-body-matches-its-schema.test.ts"
+  falsifier: |
+    Drop `classification` from InboxNotReadyItem: the strict validator refuses the fixture's
+    notReady lane item and the new test fails.

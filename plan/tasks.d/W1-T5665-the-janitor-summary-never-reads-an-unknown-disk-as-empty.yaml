@@ -1,0 +1,33 @@
+- id: W1-T5665
+  title: "THE JANITOR'S ROOT SUMMARY NEVER READS AN UNKNOWN DISK AS EMPTY, AND A MARK TOO LONG TO COMPARE IS REFUSED — `before_pct:-0` logs an unreadable / as 0% (and its whole free space as reclaimed), and a 20+-digit RMD_CLEANUP_WATCH_FS percent makes `[ -gt 100 ]` error silently, then wraps in `$(( ))` to a negative or a plausible 85"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: low
+  origin: "operator session 2026-10-04: watch log, W1-T5548 follow-ups"
+  plan_refs: [W1-T5548, W1-T4770]
+  files: [deploy/rmd-host-cleanup.sh, test/the-janitor-summary-never-reads-an-unknown-disk-as-empty.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9 (deploy/rmd-host-cleanup.sh). `before_pct="${before_pct:-0}";
+    before_avail="${before_avail:-0}"` (and the `after_*` pair) feed `log "rmd-host-cleanup: /
+    ${before_pct}% -> ${after_pct}% (… MB reclaimed this pass)"`, so an empty `df_field` prints 0%
+    and a one-sided read prints the whole free space as reclaimed. The watch-mark check
+    `[ "${w_pct:-0}" -gt 100 ] 2>/dev/null` exits 2 on 123456789012345678901 (out of range, hidden),
+    so the mark passes; `$(( 10#$w_pct ))` then wraps it to -5670419503621182411 (every disk past
+    its mark, exit 1 forever), and 18446744073709551701 becomes 85. Reproduced in bash. Follow-up of
+    W1-T5548 (#9106); W1-T5634 is the only queued task on this file and is unrelated.
+  design: |
+    An empty or non-numeric df figure prints `unknown` and omits the reclaimed MB. A mark of more
+    than 3 digits, or a free figure of more than 15, is refused by `case` before any `[ -gt ]` or
+    `$(( ))` (exit 2, the existing FATAL message).
+  acceptance:
+    - claim: "an unreadable root df is reported as unknown, not 0%, and an RMD_CLEANUP_WATCH_FS mark with a 20-digit percent exits 2"
+      proof: "unit test: test/the-janitor-summary-never-reads-an-unknown-disk-as-empty.test.ts"
+  falsifier: |
+    Restore `:-0` or delete the length guard; the matching case fails.

@@ -44,6 +44,42 @@ test("Sol 6.1 review is due every day before October 16 without lowering the sam
   assert.ok(lines.some((line) => line.includes("daily provisional review; next 2026-10-03")));
 });
 
+test("daily trial receipt coverage never substitutes selected models or merges for provider evidence", async () => {
+  const f = fixture();
+  try {
+    writeFileSync(join(f.sources[0]!.stateDir, "ledger.ndjson"), ndjson([
+      assignment("1"), assignment("2"), assignment("3"),
+      { ts: "2026-10-02T10:01:00Z", step: "worker.attempt", selection_assignment_id: "a-1", served_model: "gpt-6.1-sol-2026-09-29", success: false, total_cost_usd: 0, billing_mode: "api" },
+      { ts: "2026-10-02T10:01:01Z", step: "verdict", selection_assignment_id: "a-1", success: false },
+      { ts: "2026-10-02T10:02:00Z", step: "worker.attempt", selection_assignment_id: "a-2", served_model: " ", total_cost_usd: 0.2 },
+      { ts: "2026-10-02T10:03:00Z", step: "verdict.merged", task_id: "W1-T3" },
+    ]));
+    const report = (await dailyRoutingReview({ ...f, asOf })).snapshot.sources[0].reports.find((item: { id: string }) => item.id === epoch.id);
+    const arm = report.arms.find((item: { arm: string }) => item.arm === "sol61");
+    assert.deepEqual(arm.receiptCoverage, { assignments: 3, terminalAssignments: 2, costKnownAssignments: 1,
+      servedModelKnownAssignments: 1, outcomeKnownAssignments: 1 });
+    assert.equal(arm.nonStarterAssignments, 1);
+    assert.equal(arm.costMissingAssignments, 2);
+    assert.equal(arm.merged, 1);
+    const persisted = JSON.parse(readFileSync(join(f.outDir, "latest.json"), "utf8"));
+    assert.deepEqual(persisted.sources[0].reports.find((item: { id: string }) => item.id === epoch.id).arms[1].receiptCoverage, arm.receiptCoverage);
+  } finally { f.close(); }
+});
+
+test("negative trial costs remain missing while a measured zero cash cost is retained", () => {
+  const report = evaluateRoutingExperiment([
+    assignment("1"), assignment("2"), assignment("3"),
+    { step: "worker.attempt", selection_assignment_id: "a-1", total_cost_usd: -1, cost_usd: -2, billing_mode: "api" },
+    { step: "worker.attempt", selection_assignment_id: "a-2", total_cost_usd: 0, billing_mode: "api" },
+    { step: "worker.attempt", selection_assignment_id: "a-3", total_cost_usd: -1, cost_usd: 0.2, billing_mode: "subscription" },
+  ], epoch, "2026-10-02");
+  const arm = report.arms.find(item => item.arm === "sol61")!;
+  assert.equal(arm.meanCashCostUsd, 0);
+  assert.equal(arm.meanNotionalCostUsd, 0.2);
+  assert.equal(arm.costMissingAssignments, 1);
+  assert.equal(arm.receiptCoverage.costKnownAssignments, 2);
+});
+
 test("daily routing review reads all three ledger forms once and keeps repositories separate", async () => {
   const f = fixture();
   try {

@@ -1,0 +1,35 @@
+- id: W1-T5672
+  title: "THE PER-POLL FEEDBACK LANDING RUNS GIT OFF THE LOOP — W1-T5620 awaits only its plan-PR preflight; `sweepLandingSteps` still drives `defaultGit` (execFileSync), so every daemon poll blocks on a `git fetch origin` even with nothing to land, plus its push and PR calls"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one defect — the landing's git seam is synchronous on the daemon loop
+  origin: "operator session 2026-10-04: watch log, sync git fetch/push on the loop beside W1-T5284"
+  plan_refs: [W1-T5620, W1-T5284, W1-T5521, W1-T530]
+  files: [src/lib/feedback-landing.ts, test/the-per-poll-feedback-landing-runs-git-off-the-loop.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9. The per-poll `sweepFeedbackLandingAsync` (W1-T5620,
+    merged 193cc9d7) awaits only the preflight. `sweepLandingSteps` uses `landOpts.git ??
+    defaultGit(root)`, and `defaultGit` is `execFileSync("git", ["-C", root, ...args], …)`;
+    `landPendingSteps` opens with `git(["fetch", "origin", "--quiet"])` unconditionally, so every
+    poll pays a synchronous network fetch on the loop even with nothing pending, followed by
+    hash-object/update-index, `git(["push", lease, …])`, and `defaultGh` -> a synchronous `ghExec`.
+    W1-T5284 (queued, files worker.ts, git-push.ts, arm-auto-merge.ts, run-task.ts) covers
+    worktreeAdd, gitPushRunBranch and the arm path, not feedback-landing.ts. The boot pass in
+    `daemonBoot` stays synchronous by design (W1-T5620's wiring comment) and is NOT THIS TASK.
+  design: |
+    Give `sweepFeedbackLandingAsync` an async git/gh seam (yieldable to the generator driver, as the
+    preflight already is), keeping the sync boot and CLI forms and byte-identical results; skip the
+    fetch when the dirty-file scan and the queue are both empty.
+  acceptance:
+    - claim: "a per-poll landing lets a timer fire while its git fetch is in flight, returns the same result as the sync sweep, and fetches nothing when nothing is pending"
+      proof: "unit test: test/the-per-poll-feedback-landing-runs-git-off-the-loop.test.ts"
+  falsifier: |
+    Route `sweepFeedbackLandingAsync` back to `defaultGit`; the timer fires only after the fetch
+    settles and the test fails.

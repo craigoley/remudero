@@ -1,0 +1,35 @@
+- id: W1-T5743
+  title: "AN ASYNC GH WRITE IS NEVER COALESCED — `ghTextAsync` single-flights every identical in-flight call by its args, writes included, so once W1-T5284 routes `gh pr merge` through it a second `pr merge --auto` issued after an intervening `--disable-auto` joins the first call's promise and the PR can end disarmed though the last intent was armed"
+  repo: remudero
+  depends_on: [W1-T5284]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium
+  origin: "operator session 2026-10-04: found while building W1-T5284 (#9159)"
+  plan_refs: [W1-T5284, W1-T3297]
+  files: [src/lib/github-transport.ts, test/an-async-gh-write-is-never-coalesced.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 70bb29f8 and #9159 (W1-T5284, open, head e186f087).
+    `ghTextAsync` (src/lib/github-transport.ts) keys `asyncReadInFlight` by
+    `text:${JSON.stringify(args)}:${maxBuffer}:${timeout}` and returns an existing promise for any
+    identical in-flight args; the comment says "joins same-request reads", but nothing checks that
+    the args are a read. On #9159 `realArmDepsAsync` sends `pr merge <url> --auto --squash`,
+    `pr merge <url> --disable-auto` and `pr merge <url>` through it. Two identical concurrent writes
+    collapse into one gh process: harmless when the write is idempotent and nothing intervenes, but
+    an arm issued after a disarm that is still in flight behind an earlier identical arm is never
+    sent. Not measured live: the async arm path has not shipped.
+  design: |
+    Coalesce only reads: a `gh api` call with no `-X`/`--method` other than GET, and the read-only
+    `gh pr view`/`pr list`/`pr checks` forms; every other call (`pr merge`, `api -X POST|PUT|PATCH|
+    DELETE`, `pr edit`, `pr comment`) runs its own process and still pays the cadence. Apply the
+    same rule to `ghJsonAsync`'s key.
+  acceptance:
+    - claim: "two identical concurrent pr merge writes spawn two gh processes while two identical concurrent api GET reads still share one"
+      proof: "unit test: test/an-async-gh-write-is-never-coalesced.test.ts"
+  falsifier: |
+    Key writes like reads: the two pr merge calls share one process and the test fails.

@@ -5,6 +5,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import type { Escalation } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
+import { runStepsAsync, runStepsSync, step, type StepEffect, type Steps } from "./git-push.js";
 import { sampleBeta, seededRandom } from "./knowledge-value.js";
 
 /**
@@ -179,13 +180,111 @@ export interface GardenCheckout {
   dispose: () => void;
 }
 
+/** W1-T5740: the daemon's form of a checkout — the same tree, its landing and disposal awaited. */
+export type GardenCheckoutAsync<W extends GardenCheckout = GardenCheckout> = Omit<W, "land" | "dispose"> & {
+  land: (opts: { paths: string[]; title: string; body: string }) => Promise<string | undefined>;
+  dispose: () => Promise<void>;
+};
+
+/** Opens a pass's checkout: the CLI's synchronous one, or the daemon's, made off the event loop. */
+export type GardenWorkspacePort<W extends GardenCheckout = GardenCheckout> = () => W | Promise<GardenCheckoutAsync<W>>;
+
+/** What a synchronous caller is handed when an async port reaches it: a promise read as a checkout. */
+export const ASYNC_PORT_UNDER_SYNC_PASS = "an async garden workspace port reached a synchronous pass; drive it with its async form";
+
+export function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return typeof (value as { then?: unknown } | null | undefined)?.then === "function";
+}
+
+/** The checkout a synchronous caller can use. An async port's promise is refused, and the checkout it
+ *  makes is disposed once made, so the refusal leaves no worktree behind. */
+export function syncGardenWorkspace<W extends GardenCheckout>(ws: W | Promise<GardenCheckoutAsync<W>>): W {
+  if (!isPromiseLike(ws)) return ws;
+  throw refuseAsyncPort(ws);
+}
+
+function refuseAsyncPort(made: PromiseLike<unknown>): Error {
+  Promise.resolve(made)
+    .then((value) => (value as { dispose?: () => unknown } | null | undefined)?.dispose?.())
+    .catch(() => {
+      // The refusal already reached the caller; a port that never made a checkout leaves nothing to dispose.
+    });
+  return new Error(ASYNC_PORT_UNDER_SYNC_PASS);
+}
+
+/** {@link runStepsSync}, refusing an effect that returns a promise: the refusal is thrown into the steps
+ *  at that yield, so a pass's own catch ledgers it rather than landing a promise as a PR url, and a
+ *  checkout the refused effect makes is disposed once made. */
+export function runStepsSyncOnly<R>(steps: Steps<R>): R {
+  return runStepsSync(refusingPromises(steps));
+}
+
+function* refusingPromises<R>(steps: Steps<R>): Steps<R> {
+  let next = steps.next();
+  while (!next.done) {
+    const effect = next.value;
+    let value: unknown;
+    try {
+      value = yield () => {
+        const made = effect();
+        if (!isPromiseLike(made)) return made;
+        throw refuseAsyncPort(made);
+      };
+    } catch (error) {
+      next = steps.throw(error);
+      continue;
+    }
+    next = steps.next(value);
+  }
+  return next.value;
+}
+
+/** Drives `steps` synchronously until an effect returns a promise, then awaits the rest: steps over
+ *  synchronous ports finish before this returns, and steps over the daemon's async ports yield the loop. */
+export function runStepsEager<R>(steps: Steps<R>): R | Promise<R> {
+  let next = steps.next();
+  while (!next.done) {
+    let value: unknown;
+    try {
+      value = next.value();
+    } catch (error) {
+      next = steps.throw(error);
+      continue;
+    }
+    if (isPromiseLike(value)) return resumeSteps(steps, value);
+    next = steps.next(value);
+  }
+  return next.value;
+}
+
+async function resumeSteps<R>(steps: Steps<R>, pending: PromiseLike<unknown>): Promise<R> {
+  let settled: { ok: true; value: unknown } | { ok: false; error: unknown };
+  try {
+    settled = { ok: true, value: await pending };
+  } catch (error) {
+    settled = { ok: false, error };
+  }
+  let next: IteratorResult<StepEffect, R> = settled.ok ? steps.next(settled.value) : steps.throw(settled.error);
+  while (!next.done) {
+    let value: unknown;
+    try {
+      value = await next.value();
+    } catch (error) {
+      next = steps.throw(error);
+      continue;
+    }
+    next = steps.next(value);
+  }
+  return next.value;
+}
+
 export interface GardenerDeps<W extends GardenCheckout = GardenCheckout> {
   stateDir: string;
   /** The checkout the gardener reads its corpus from for planning (the daemon's own). */
   repoRoot: string;
   /** Directories outside the repo a spec may also read (the knowledge gardener: operator memory). */
   memoryDirs?: string[];
-  openWorkspace: () => W;
+  openWorkspace: GardenWorkspacePort<W>;
   log: (step: string, extra?: Record<string, unknown>) => void;
   prState?: (prUrl: string) => PrState;
   seed?: number;
@@ -429,11 +528,35 @@ export function gardenPassDue<C extends string>(
   return state.lastCheap !== spec.cheapFingerprint();
 }
 
-/** One pass of the gardener `spec` describes. Returns what it did. */
+/** What one pass did. */
+export interface GardenPassResult<C extends string, A extends GardenAction<C>> {
+  ran: boolean;
+  plan?: GardenPlan<C, A>;
+  prUrl?: string;
+  scorecard?: Record<string, unknown>;
+}
+
+/** One pass of the gardener `spec` describes, over a synchronous workspace port. Returns what it did. */
 export function runGarden<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
   spec: GardenSpec<C, I, A, W>,
   deps: GardenerDeps<W>,
-): { ran: boolean; plan?: GardenPlan<C, A>; prUrl?: string; scorecard?: Record<string, unknown> } {
+): GardenPassResult<C, A> {
+  return runStepsSyncOnly(gardenPassSteps(spec, deps));
+}
+
+/** {@link runGarden} with its checkout made, landed and disposed off the event loop (W1-T5740): the
+ *  same steps, so the same rows, state and refusals. */
+export function runGardenAsync<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
+  spec: GardenSpec<C, I, A, W>,
+  deps: GardenerDeps<W>,
+): Promise<GardenPassResult<C, A>> {
+  return runStepsAsync(gardenPassSteps(spec, deps));
+}
+
+function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
+  spec: GardenSpec<C, I, A, W>,
+  deps: GardenerDeps<W>,
+): Steps<GardenPassResult<C, A>> {
   const statePath = gardenStatePath(deps.stateDir, spec.name);
   let state = readGardenState(statePath, spec.classes);
   // The overseer's verdicts reach the Beta record here, at the start of a pass, from a file it owns.
@@ -497,15 +620,16 @@ export function runGarden<C extends string, I, A extends GardenAction<C>, W exte
   let prUrl: string | undefined;
   if (acting !== undefined && plan.actions.length > 0) {
     try {
-      const ws = deps.openWorkspace();
+      const ws = yield* step<W | GardenCheckoutAsync<W>>(() => deps.openWorkspace());
       try {
-        const landing = spec.apply(ws, plan, scorecard);
+        // A spec's apply only writes the tree; landing and disposal stay with the pass, awaited or not.
+        const landing = spec.apply(ws as unknown as W, plan, scorecard);
         if (landing) {
           const why = spec.review?.[acting];
-          prUrl = ws.land(why ? { ...landing, body: judgedByOutcomeNote(spec.name, acting, why) + landing.body } : landing);
+          prUrl = yield* step(() => ws.land(why ? { ...landing, body: judgedByOutcomeNote(spec.name, acting, why) + landing.body } : landing));
         }
       } finally {
-        ws.dispose();
+        yield* step(() => ws.dispose());
       }
     } catch (e) {
       // A failed filing is not a pass: no fingerprint is recorded, so the same work is retried once
@@ -539,18 +663,26 @@ export function startGarden<C extends string, I, A extends GardenAction<C>, W ex
   intervalMs: number,
 ): { stop: () => void } {
   let running = false;
+  const failed = (e: unknown) => {
+    // An unreadable state file also names its path and failure class, so the row says what to repair.
+    const unreadable = e instanceof GardenStateUnreadableError || e instanceof GardenEffectsUnreadableError ? { path: e.path, failure_class: e.failureClass } : {};
+    deps.log(`${spec.name}.gardener_failed`, { error: String((e as Error)?.message ?? e), ...unreadable });
+  };
+  const done = () => {
+    running = false;
+  };
+  // W1-T5740: a pass over the daemon's async port holds `running` until its awaited checkout settles.
   const tick = () => {
     if (running) return;
     running = true;
     try {
-      runGarden(spec, deps);
+      const pass = runStepsEager(gardenPassSteps(spec, deps));
+      if (isPromiseLike(pass)) return void Promise.resolve(pass).catch(failed).finally(done);
     } catch (e) {
-      // An unreadable state file also names its path and failure class, so the row says what to repair.
-      const unreadable = e instanceof GardenStateUnreadableError || e instanceof GardenEffectsUnreadableError ? { path: e.path, failure_class: e.failureClass } : {};
-      deps.log(`${spec.name}.gardener_failed`, { error: String((e as Error)?.message ?? e), ...unreadable });
-    } finally {
-      running = false;
+      // A pass that throws before its first await is ledgered here, as an awaited one's rejection is above.
+      failed(e);
     }
+    done();
   };
   tick();
   const timer = setInterval(tick, intervalMs);

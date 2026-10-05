@@ -1,0 +1,38 @@
+- id: W1-T5667
+  title: "A FENCE INSIDE AN HTML COMMENT HIDES THE ACCEPTANCE BLOCK — #9125's `acceptanceHeaderLine` walks fences but not comments, so a ``` inside <!-- --> ahead of the real header parses 0 criteria, and `stripQuotedRegions` keeps a second, backtick-only fence toggle that leaves a ~~~-fenced quote scanned as a claim"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — one markdown line classifier for both acceptance walkers
+  origin: "operator session 2026-10-04: watch log, W1-T5621 (#9125) follow-ups"
+  plan_refs: [W1-T5621, W1-T3142, W1-T308, W1-T2549]
+  files: [src/lib/review.ts, test/a-fence-inside-an-html-comment-does-not-hide-the-acceptance-block.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9 (src/lib/review.ts). `acceptanceHeaderLine` knows fences
+    but not HTML comments or the CommonMark 3-space indent limit; `stripQuotedRegions` keeps its own
+    toggle (`if (/^\s*```/.test(line)) inFence = false;`): backticks only, any ``` closes, no length
+    rule, though it does handle comments. MEASURED with a probe against 284015b9: a body with
+    `<!-- note`, a ``` line, `-->`, then `## Acceptance` and a bullet gives `acceptanceHeaderLine` =
+    -1, 0 criteria, and `acceptanceBlockDiagnostics` `headerFound:false, defective:true` — GitHub
+    never renders that fence, and before #9125 the header matched. A 4-space-indented ``` (an
+    indented code block) also gives -1. A `~~~`-fenced "This PR is plan-only." stays visible to
+    `stripQuotedRegions`'s claim scan (the W1-T308 class) while `acceptanceHeaderLine` treats `~~~`
+    as a fence. An unclosed fence before the header failing closed matches GitHub's render and is
+    kept, but its diagnostic names no reason. W1-T5507 (queued) only changes `bodyContradictsDiff`
+    hint text.
+  design: |
+    One exported line classifier (comment ownership first, as `stripQuotedRegions` orders it; fences
+    of backticks or `~~~` with the length rule and at most 3 spaces of indent), used by both
+    `acceptanceHeaderLine` and `stripQuotedRegions`. `acceptanceBlockDiagnostics` adds
+    `headerInsideFence` when a header exists only inside an unclosed fence.
+  acceptance:
+    - claim: "a ``` inside an HTML comment and a 4-space-indented ``` ahead of the header each parse 1 criterion, a ~~~-fenced quote is blanked from the claim scan, and W1-T5621's fenced-example body is unchanged"
+      proof: "unit test: test/a-fence-inside-an-html-comment-does-not-hide-the-acceptance-block.test.ts"
+  falsifier: |
+    Restore the comment-blind walker; the HTML-comment body parses 0 criteria and the test fails.
