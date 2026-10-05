@@ -2682,8 +2682,6 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // the thing") — a capped, green, unreviewable PR needs an operator to look at it and either
       // override the cap or merge it by hand; nothing downstream can move it further on its own.
       const cls: EscalationClass = reason.startsWith("PR stage stalled:") || isCappedReviewOrphanEscalation(pr, policy) ? "MANUAL" : "BLOCKED";
-      // W1-T5908: a conflict escalation records the disposition that raised it and the base it
-      // was raised against, so the fix rung can tell when that cause has cleared.
       const file = (context: string): void => { escalate(
         {
           class: cls,
@@ -4480,10 +4478,8 @@ export function conflictRefusalCause(
     : "conflict repair was not admitted";
 }
 
-/** W1-T5908 — BACKSTOP: passes a dirty, evidence-less PR on one head may WAIT while GitHub's
- *  mergeability reads `unknown` before the no-evidence escalation fires. Sized above the longest
- *  observed healthy run (`mergeStateFromRest`'s doc: five consecutive `unknown` polls), so the
- *  bound only fires once a read has stayed unknown past anything GitHub has been seen to need. */
+/** W1-T5908 — BACKSTOP: passes a dirty, evidence-less head may wait on `unknown` mergeability before
+ *  escalating; sized above `mergeStateFromRest`'s five observed consecutive `unknown` polls. */
 export const MERGEABILITY_UNKNOWN_WAIT_BACKSTOP = 6;
 
 /** W1-T5908 — the reason code a conflict escalation records as its `**Raised-by:**` line: which
@@ -4501,10 +4497,8 @@ export function mergeabilityReadUnknown(pr: Pick<OpenPrView, "mergeableState">):
   return pr.mergeableState === "unknown";
 }
 
-/** W1-T5908 — per PR, how many passes the CURRENT head has already spent in the
- *  mergeability-unknown wait (a `wait` row carrying the `conflict` blocker). Counted over the
- *  whole head, never only a trailing run, so the escalation that ends the wait is not followed by
- *  a fresh wait on the same head. A new head starts at zero. */
+/** W1-T5908 — per PR, passes the CURRENT head spent in the mergeability-unknown wait (`wait` rows
+ *  with the `conflict` blocker), counted over the whole head so an escalation is not re-waited. */
 export function mergeabilityUnknownWaitsFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
 ): Map<number, { headSha: string; passes: number }> {
@@ -4528,9 +4522,8 @@ export function conflictEscalationContext(pr: Pick<OpenPrView, "mergeConflict">,
   return `**Raised-by:** ${code}\n${baseSha ? `**Base:** ${baseSha}\n` : ""}\n`;
 }
 
-/** W1-T5908 — the cause an open conflict escalation was raised for, when THIS round shows it has
- *  cleared: the evidence it was raised without is now captured, or the base it was raised against
- *  has moved. `undefined` means the cause still holds (or the issue never recorded one). */
+/** W1-T5908 — an open conflict escalation's cause when THIS round shows it cleared (evidence now
+ *  captured, or the base moved); `undefined` when it still holds or was never recorded. */
 export function clearedConflictEscalationCause(
   body: string | undefined,
   current: { conflictEvidenceCaptured: boolean; baseSha?: string },
@@ -8061,9 +8054,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     },
   },
   {
-    // W1-T5908 — a dirty read with no evidence while GitHub's mergeability is still `unknown` is
-    // a transient read, not a question: wait for a pass that captures the evidence, and let the
-    // row below escalate only once MERGEABILITY_UNKNOWN_WAIT_BACKSTOP passes have gone by.
+    // W1-T5908: no evidence while mergeability reads `unknown` is transient; wait up to the BACKSTOP.
     disposition: "wait",
     blocker: "conflict",
     when: (pr, _policy, _ageDays, _now, facts) => {
