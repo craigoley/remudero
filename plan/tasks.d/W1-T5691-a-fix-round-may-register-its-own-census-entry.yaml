@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 2 rung 1 and addendum #3 Task B"
   plan_refs: [W1-T5534, W1-T5532, W1-T4450, W1-T5690, W1-T5692]
-  files: [src/lib/sweep.ts, src/run-task.ts, src/lib/prompt-render.ts, test/a-fix-round-may-add-its-own-registry-row.test.ts]
+  files: [src/lib/sweep.ts, src/run-task.ts, src/lib/prompt-render.ts, test/a-fix-round-may-register-its-own-census-entry.test.ts]
   status: queued
   priority: 1
   attempts: 0
@@ -42,14 +42,7 @@
     census whose remedy lives in one of these files, so the worker knows the edit is allowed.
   acceptance:
     - claim: "a fix round's undeclared ENV_REGISTRY or DECISION_RELEVANT_LEDGER_STEPS addition is committed and recorded as an admitted registration, while an edited or deleted existing row in the same file is refused as out of scope"
-      proof: "unit test: test/a-fix-round-may-add-its-own-registry-row.test.ts"
+      proof: "unit test: test/a-fix-round-may-register-its-own-census-entry.test.ts"
   falsifier: |
     Drop the table from the scope-guard filter: the #9041-shaped fixture (two added ledger.ts steps,
     one spend role) is refused as out of scope and the test fails.
-  note: |
-    2026-10-05 (PR #9267 hand fix): the test file moved from
-    test/a-fix-round-may-register-its-own-census-entry.test.ts to
-    test/a-fix-round-may-add-its-own-registry-row.test.ts. A test path naming "census" joins
-    listRuleSuites' rule-check population, and W1-T5616's parity census then requires a
-    PRECHECK_PARITY entry census-precheck does not actually run. This suite is a behaviour test,
-    not a census; the claim is unchanged.
