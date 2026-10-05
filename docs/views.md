@@ -324,6 +324,27 @@ diskFreeBytes?, rateLimitRemaining?, daemon{ state, at?, reason? }, reasons? }, 
   host probe of that instance, computed in the worker (`createNowView`'s `legacy`).
 - Probe gauges come from the view whenever both probes read them, so two samples moments apart are not a diff.
 
+## `host` (version 1)
+
+`GET /v1/views/host`: the console's /host page in one read (arch Phase 4 §1.1 and §5, P4-T14, W1-T5053,
+`src/lib/host-view.ts`). Schema: `HostView`. Dark until `switches.json` sets `host` to `serve`.
+
+`data`: each part is the body its route answers, built by the same function.
+- `control` (GET /v1/control/status), `accountUsage` (GET /v1/account-usage, without its `*AgeMs` fields,
+  which move on every sample; each `*AsOf` stays), `providerRouting` (GET /v1/provider-routing), `skills`
+  (GET /v1/skills's list) and `selfMeasurement` (GET /v1/self-measurement).
+- `gauges`: the EXACT disk free bytes of core's state dir and the REST `rate_limit` remaining, with
+  `reasons` naming why one is absent. `now` carries the same gauges as bands.
+
+Built in the read-model worker's view thread, re-sampled at most once a minute (`HOST_PROBE_INTERVAL_MS`).
+`gh api rate_limit` and the self-measurement ledger union are read asynchronously there; each answer lands
+in the next build without a file re-read. Sources: `host-probe:<i>` (the sample time), `account:<i>` (the
+account cache's `usageAsOf`, stale while the usage is unknown) and `ledger:<i>`.
+- The GET writes nothing. The credit-state edge is ledgered by the slow lane's credit-edge unit, once
+  per change, whether or not anyone reads (§5 GET write 1).
+- Shadow side: serve's computation over the same deps its routes answer with, the gauges and the
+  measurement taken from the view's latest body (as `now` takes its probe gauges).
+
 ## `instances` (version 1)
 
 `GET /v1/views/instances`: one instance list, saying what this serve actually serves (arch Phase 4 §4,

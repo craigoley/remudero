@@ -674,12 +674,14 @@ export function buildAccountUsageRoute(deps: AccountUsageDeps): Route {
     method: "GET",
     path: "/v1/account-usage",
     scope: "read",
-    handler: (_req, res) => {
-      const now = deps.now ?? Date.now;
-      const readLedger = deps.readLedger ?? readLedgerLines;
-      const policy = deps.policy ?? loadDefaultPolicy();
-      const resolveCeiling = deps.resolveCeiling ?? (() => resolveDailyCostCeiling(deps.root ?? process.cwd(), policy));
-      sendJson(res, 200, deriveAccountUsage(readMergedAccount(deps), readLedger(deps.ledgerPath), now(), resolveCeiling()));
-    },
+    handler: (_req, res) => sendJson(res, 200, accountUsageBody(deps)),
   };
+}
+
+/** The route's body, also the `host` view's account part (host-view.ts); `lines` is a ledger read the caller already holds. */
+export function accountUsageBody(deps: AccountUsageDeps, lines: ReadonlyArray<Record<string, unknown>> = (deps.readLedger ?? readLedgerLines)(deps.ledgerPath)): AccountUsageSnapshot {
+  const now = deps.now ?? Date.now;
+  const policy = deps.policy ?? loadDefaultPolicy();
+  const resolveCeiling = deps.resolveCeiling ?? (() => resolveDailyCostCeiling(deps.root ?? process.cwd(), policy));
+  return deriveAccountUsage(readMergedAccount(deps), lines, now(), resolveCeiling());
 }

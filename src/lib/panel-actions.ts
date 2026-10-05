@@ -278,30 +278,32 @@ export function buildControlStatusRoute(deps: ControlStatusDeps): Route {
     method: "GET",
     path: "/v1/control/status",
     scope: "read",
-    handler: (_req, res) => {
-      const now = deps.now ?? Date.now;
-      const readLedger = deps.readLedger ?? readLedgerLines;
-      const livenessBoundMs = deps.livenessBoundMs ?? DEFAULT_LIVENESS_BOUND_MS;
-      // A read that throws (permissions, I/O) is caught HERE, not inside readLedgerLines (which
-      // has ~50 other call sites, some load-bearing) — a rendering-only degrade to `unknown`
-      // rather than a 500 that blanks the whole panel.
-      let verdict: DaemonLivenessVerdict;
-      try {
-        verdict = deriveDaemonLiveness(readLedger(deps.ledgerPath), now(), livenessBoundMs);
-      } catch {
-        verdict = { reason: "ledger-unreadable" };
-      }
-      const status: FleetControlStatus = {
-        paused: isPaused(deps.root),
-        pauseDetail: pauseDetail(deps.root),
-        stopped: isStopped(deps.root),
-        stopDetail: stopDetail(deps.root),
-        quietHours: isQuietHours(deps.root),
-        daemonLive: verdict.live,
-        daemonLiveReason: verdict.reason,
-      };
-      sendJson(res, 200, status);
-    },
+    handler: (_req, res) => sendJson(res, 200, controlStatusBody(deps)),
+  };
+}
+
+/** The route's body, also the `host` view's control part (host-view.ts); `lines` is a ledger read the caller already holds. */
+export function controlStatusBody(deps: ControlStatusDeps, lines?: ReadonlyArray<Record<string, unknown>>): FleetControlStatus {
+  const now = deps.now ?? Date.now;
+  const readLedger = deps.readLedger ?? readLedgerLines;
+  const livenessBoundMs = deps.livenessBoundMs ?? DEFAULT_LIVENESS_BOUND_MS;
+  // A read that throws (permissions, I/O) is caught HERE, not inside readLedgerLines (which
+  // has ~50 other call sites, some load-bearing) — a rendering-only degrade to `unknown`
+  // rather than a 500 that blanks the whole panel.
+  let verdict: DaemonLivenessVerdict;
+  try {
+    verdict = deriveDaemonLiveness(lines ?? readLedger(deps.ledgerPath), now(), livenessBoundMs);
+  } catch {
+    verdict = { reason: "ledger-unreadable" };
+  }
+  return {
+    paused: isPaused(deps.root),
+    pauseDetail: pauseDetail(deps.root),
+    stopped: isStopped(deps.root),
+    stopDetail: stopDetail(deps.root),
+    quietHours: isQuietHours(deps.root),
+    daemonLive: verdict.live,
+    daemonLiveReason: verdict.reason,
   };
 }
 

@@ -20,6 +20,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { createGithubKeepWarm, type GithubKeepWarm } from "./github-refresh-pacer.js";
 import { ghIssueGateway, tryEscalate, type EscalateDeps, type Escalation, type IssueGateway } from "./escalate.js";
+import { createHostView, hostViewConfig, type HostViewConfig } from "./host-view.js";
 import { createInboxThreadView } from "./inbox-thread-view.js";
 import { createInstancesView } from "./instances-view.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
@@ -1204,6 +1205,8 @@ export interface ReadModelViewsData {
   viewsModule?: string;
   /** The inbox root the `inbox-thread` view reads its thread store from; absent, that view reports why it has no body. */
   inboxRoot?: string;
+  /** The `host` view's inputs (host-view.ts); absent, that view builds no body. */
+  host?: HostViewConfig;
 }
 
 /** What the projector thread tells its view thread. */
@@ -1269,9 +1272,10 @@ export function runReadModelViewWorker(
     const demand = createDemandBook({ clock });
     const task = createTaskView({ instances: data.instances, ledgerSource, clock, demand, log });
     const inboxThread = createInboxThreadView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), clock, demand, log });
+    const host = createHostView({ ...(data.host ? { config: data.host } : {}), ledgerSource, clock });
     ticker = createReadModelTicker({
       stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off", demand,
-      views: [...READ_MODEL_VIEWS, now, instances, task, inboxThread, createOperatorAgentRowsView(ledgerSource), ...extra],
+      views: [...READ_MODEL_VIEWS, now, instances, task, inboxThread, host, createOperatorAgentRowsView(ledgerSource), ...extra],
     });
     ticker.start();
     for (const msg of early.splice(0)) handle(msg);
@@ -1376,6 +1380,12 @@ export interface ReadModelWorkerData {
   viewsModule?: string;
 }
 
+/** The host view reads what the slow lane's credit-edge unit reads, plus the checkout's skills. */
+function hostOf(slowLane: SlowLaneConfig | undefined): { host?: HostViewConfig } {
+  const host = hostViewConfig(slowLane);
+  return host ? { host } : {};
+}
+
 /** The worker branch's body: tick on a timer until asked to stop, then release and signal. */
 export function runReadModelWorker(
   port: { on(event: "message", run: (msg: { type?: string }) => void): unknown; postMessage(value: unknown): void; close(): void },
@@ -1392,7 +1402,7 @@ export function runReadModelWorker(
   const log = (step: string, extra: Record<string, unknown>): void => port.postMessage({ type: "log", step, extra } satisfies ReadModelWorkerMessage);
   const holder = randomUUID();
   const views = threadViews({
-    data: { stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}) },
+    data: { stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}), ...hostOf(data.slowLane) },
     relay: (m) => port.postMessage(m), log, clock,
   });
   const post = (m: ReadModelWorkerMessage): void => {
