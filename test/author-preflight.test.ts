@@ -80,7 +80,8 @@ test('author preflight clears foreign Git scope without hiding a dirty intended 
   assert.equal(foreign.git('status', '--porcelain'), '');
   const names = spawnSync('git', ['rev-parse', '--local-env-vars'], { cwd: ROOT, encoding: 'utf8' });
   assert.equal(names.status, 0, names.stderr);
-  const keys = [...names.stdout.trim().split('\n'), 'GIT_NAMESPACE', 'GIT_QUARANTINE_PATH'];
+  const keys = [...names.stdout.trim().split('\n'), 'GIT_NAMESPACE', 'GIT_QUARANTINE_PATH',
+    'GIT_INTERNAL_SUPER_PREFIX'];
   const parent = Object.fromEntries(keys.map(key => [key, 'foreign'])) as NodeJS.ProcessEnv;
   parent.GIT_SSH_COMMAND = 'fixture-transport';
   const original = { ...parent };
