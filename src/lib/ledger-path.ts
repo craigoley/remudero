@@ -3,6 +3,8 @@ import { join } from "node:path";
 import type { Config } from "./config.js";
 
 export const LEDGER_FILENAME = "ledger.ndjson";
+export const LEDGER_CARRIED_PREFIX_SUFFIX = ".carried.json";
+export const LEDGER_RETAINED_STEPS_SUFFIX = ".retained-steps.json";
 
 /**
  * W1-T143 (DAEMON OBSERVABILITY): the ONE canonical ledger path, a PURE function of
