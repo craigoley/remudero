@@ -1,0 +1,61 @@
+- id: W1-T5802
+  title: "A POSTED GATE IS READ BY ITS POSTED NAME AND ITS RUN-SCOPED ID — `checkJobId` (sweep.ts) accepts only `^job:(\\d+)$` and `derivePrCheckCandidates` (ci-control-plane.ts) names only job `name:`s, so W1-T5695's run-scoped external_id would blind the sweep's rerun and log reads, and its own-name `rule-checks` post would need a stub job plus ci-parity and gate-posture rows beside a workflow edit"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — every reader of a posted gate accepts the shape W1-T5695 posts, before it posts it
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5695 build attempt (local WIP fc8b5770 on run-W1-T5695-1791176547422, unpushed) found its record unbuildable as one workflow PR"
+  plan_refs: [W1-T5695, W1-T4438, W1-T2298, W1-T4399, W1-T3171]
+  files: [src/lib/sweep.ts, src/lib/ci-control-plane.ts, src/lib/ci-parity.ts, test/a-posted-gate-is-read-by-its-posted-name-and-run-scoped-id.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  note: |
+    reservation hand-off: unknown -> run-unfiled-1791177306545
+  rationale: |
+    READ 2026-10-05 on origin/main b790deee. W1-T5695 changes what ci.yml's checks-API reporter
+    posts, and two src readers refuse the new shape. (1) `checkJobId` (src/lib/sweep.ts) returns
+    `detailsUrl`'s `/job/<id>` or `externalId.match(/^job:(\d+)$/)`; a posted check's detailsUrl
+    is rewritten to `/runs/<check-run-id>` (W1-T2298), so for a post the external_id is the only
+    job id. Its readers are the sweep's `reaggregateCiGate` rerun, `fetchCiFailures`' annotation
+    and log reads, and `cancelledRequiredChecks` (src/run-task.ts). An external_id of
+    `run:<runId>:<attempt>:job:<jobId>` reads undefined in all of them, so the reader must land
+    before the reporter changes. (2) `derivePrCheckCandidates` (src/lib/ci-control-plane.ts) derives
+    candidates from each job's `name:` (or key) only. test/every-pr-check-is-required-or-advisory
+    refuses a REQUIRED entry no candidate names, so a REQUIRED `rule-checks` posted by a step needs
+    a job of that name. W1-T4399's pattern is an `if: false` stub, but a new ci.yml job key is
+    pinned in both directions by `CI_PARITY_TABLE` (src/lib/ci-parity.ts,
+    test/preflight-ci-parity.test.ts) and by `gate-posture.ts`, which declares every ci.yml job key
+    as `ci:<key>`. Those src rows cannot ship beside the workflow edit (standing rule 25; the
+    W1-T3171 carve-out in `mandatoryRegistrationPaths`, src/lib/review.ts, admits only ci.yml +
+    ci-gate.yml and needs both registrations added together). Either order of a src PR and a
+    workflow PR leaves one of them red against the census. Deriving posted names removes the stub
+    and both rows. (3) Under W1-T5695's amended design ci.yml's `commitlint` job stops linting the
+    PR title, so its CI_PARITY_TABLE `reason` ("this job lints the SQUASH-MERGE PR TITLE") goes
+    stale, and only a src PR can reword it.
+  design: |
+    (i) `checkJobId` reads the job id from `job:<id>` and from `run:<runId>:<attempt>:job:<id>`,
+    anchored, and from nothing else. `detailsUrl`'s `/job/<id>` still wins.
+    (ii) `derivePrCheckCandidates` also yields each check name a step posts through the checks API.
+    A step counts as a reporter when its `run` POSTs `repos/${GITHUB_REPOSITORY}/check-runs`. Each of
+    its `report "<name>"` call lines (not the `report()` definition) contributes `<name>`. A name
+    that still holds `${` gets the unresolved-template marker, the same as a matrix name does.
+    `CiJob` gains `steps`. On main every posted name is also a stub job's name, so the derived set
+    stays the same after dedupe: test/every-pr-check-is-required-or-advisory and
+    scripts/ci-control-plane-precheck.mjs pass without edits.
+    (iii) Reword ci.yml `commitlint`'s CI_PARITY_TABLE `reason` so it is true both before and after
+    W1-T5695. The job bundles the one-runner gates (W1-T4399), each mirrored by its own row, and the
+    PR-title lint has no local equivalent: the title is read from GitHub. Keep `job:` and `mirrored:`
+    unchanged.
+    No workflow edit. ci.yml's posted shape changes only in W1-T5695.
+  acceptance:
+    - claim: "checkJobId returns the job id for both `job:<id>` and `run:<runId>:<attempt>:job:<id>` external ids and undefined for any other external id, fetchCiFailures and cancelledRequiredChecks carry that id for a run-scoped post, and derivePrCheckCandidates names a check that a step posts with `report \"<name>\"` to the checks API even when no job carries that name (a `report` line in a step that posts nothing is not derived), while the real tree's registry gaps stay empty"
+      proof: "unit test: test/a-posted-gate-is-read-by-its-posted-name-and-run-scoped-id.test.ts"
+  falsifier: |
+    Restore `/^job:(\d+)$/`: a `run:777:2:job:12345` external id reads undefined and the test
+    fails. Drop the reporter derivation: the fixture's posted-only name is missing from the
+    candidates and the test fails.
