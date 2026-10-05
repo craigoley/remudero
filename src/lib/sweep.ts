@@ -1091,6 +1091,17 @@ export interface RegisteredFixOwnerRecoveryDeps {
   resetTrackedDirty?: SweepRuntimeFn;
 }
 
+export interface FixOwnerResidue {
+  markerKind: "MERGE_HEAD" | "CHERRY_PICK_HEAD" | "REVERT_HEAD" | null;
+  markerSha: string | null;
+  unmergedPaths: string[];
+  unmergedMore: number;
+  stagedPaths: string[];
+  stagedMore: number;
+  status: string;
+  refusal?: "owner_dirty_staged_only_refused";
+}
+
 // ── W1-T3691 — STALE-REVIEWER-CODE SKIP RECURRENCE. A `review.skipped_stale_reviewer_code` skip
 // (`buildReviewerCodeFreshnessGate`, src/run-task.ts) is re-derived every sweep and, on its own, is
 // silent and terminal: this tracks whether the SAME code sha keeps recurring across sweeps and
@@ -3020,6 +3031,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             return;
           }
           let preservedRecoveryRef: string | undefined;
+          let residue: FixOwnerResidue | undefined;
           if (recovery.kind === "preserve-tracked-dirty") {
             const localSha = snapshot.localSha;
             if (!localSha) {
@@ -3034,19 +3046,24 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               return;
             }
             try {
-              preservedRecoveryRef = String((registeredOwnerRecovery.preserveTrackedDirty ?? requiredSweepRuntime("registeredOwnerRecovery.preserveTrackedDirty"))(
+              const preserved: unknown = (registeredOwnerRecovery.preserveTrackedDirty ?? requiredSweepRuntime("registeredOwnerRecovery.preserveTrackedDirty"))(
                 repoDir,
                 registeredOwner,
                 realBranch,
                 localSha,
-              ));
-              log("sweep.fix.checkout_owner_dirty_preserved", {
-                pr_number: pr.prNumber,
-                task_id: task.id,
-                branch: realBranch,
-                local_sha_prefix: localSha.slice(0, 12),
-                recovery_ref: preservedRecoveryRef.slice(0, 512),
-              });
+              );
+              if (typeof preserved === "object" && preserved !== null) {
+                residue = preserved as FixOwnerResidue;
+              } else {
+                preservedRecoveryRef = String(preserved);
+                log("sweep.fix.checkout_owner_dirty_preserved", {
+                  pr_number: pr.prNumber,
+                  task_id: task.id,
+                  branch: realBranch,
+                  local_sha_prefix: localSha.slice(0, 12),
+                  recovery_ref: preservedRecoveryRef.slice(0, 512),
+                });
+              }
             } catch (e) {
               log("sweep.fix.checkout_claim_declined", {
                 reason: "registered_worktree_owner",
@@ -3059,6 +3076,36 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
                 error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
               });
               return;
+            }
+            if (residue?.refusal) {
+              log("sweep.fix.checkout_claim_declined", {
+                reason: "registered_worktree_owner",
+                owner_recovery_reason: residue.refusal,
+                pr_number: pr.prNumber,
+                task_id: task.id,
+                branch: realBranch,
+                worktree_path: snapshot.path,
+                local_sha_prefix: localSha.slice(0, 12),
+                staged_paths: residue.stagedPaths,
+                staged_more: residue.stagedMore,
+              });
+              return;
+            }
+            if (residue) {
+              log("sweep.fix.checkout_owner_residue_discarded", {
+                pr_number: pr.prNumber,
+                task_id: task.id,
+                branch: realBranch,
+                worktree_path: snapshot.path,
+                local_sha_prefix: localSha.slice(0, 12),
+                marker_kind: residue.markerKind,
+                marker_sha: residue.markerSha,
+                unmerged_paths: residue.unmergedPaths,
+                unmerged_more: residue.unmergedMore,
+                staged_paths: residue.stagedPaths,
+                staged_more: residue.stagedMore,
+                status_excerpt: residue.status,
+              });
             }
             // The recovery ref above is now durably proven to reproduce this owner's tree. Plain
             // `git worktree remove` below refuses a dirty worktree, so the owner's tracked
@@ -3074,13 +3121,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             } catch (e) {
               log("sweep.fix.checkout_claim_declined", {
                 reason: "registered_worktree_owner",
-                owner_recovery_reason: "owner_dirty_recovery_reset_failed",
+                owner_recovery_reason: residue ? "owner_residue_reset_failed" : "owner_dirty_recovery_reset_failed",
                 pr_number: pr.prNumber,
                 task_id: task.id,
                 branch: realBranch,
                 worktree_path: snapshot.path,
                 local_sha_prefix: localSha.slice(0, 12),
-                recovery_ref: preservedRecoveryRef.slice(0, 512),
+                recovery_ref: preservedRecoveryRef?.slice(0, 512),
                 error: capStderrExcerpt(String((e as Error)?.message ?? e), STDERR_EXCERPT_CAP),
               });
               return;
@@ -3202,6 +3249,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               owner_history_action: recovery.kind,
               local_contained_by_remote: snapshot.historyState === "contained",
               recovery_ref: preservedRecoveryRef?.slice(0, 512),
+              residue_discarded: residue !== undefined,
               no_live_claim: snapshot.claimState === "clear",
               no_process_cwd: snapshot.processState === "clear",
             },
