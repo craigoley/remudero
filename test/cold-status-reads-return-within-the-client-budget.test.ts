@@ -285,17 +285,15 @@ test("cold or blocked reads report unavailable or stale state instead of a fabri
   }
 });
 
+async function recordColdApplicationLatency(route: Route, transportDelayMs = 0): Promise<{ latencyMs: number; preparationMs: number; response: Response }> {
+  const fixtureStarted = performance.now();
+  let applicationStarted = fixtureStarted;
+  const response = await serveRoute(route, () => { applicationStarted = performance.now(); }, transportDelayMs);
+  return { latencyMs: performance.now() - applicationStarted, preparationMs: applicationStarted - fixtureStarted, response };
+}
+
 test("cold-read timing fixture records a measurable latency", async () => {
   const deps = depsFor(tmpRoot());
-  const samples: number[] = [];
-  const measure = async <T>(fn: () => Promise<T>): Promise<T> => {
-    const startedAt = performance.now();
-    try {
-      return await fn();
-    } finally {
-      samples.push(performance.now() - startedAt);
-    }
-  };
 
   // Use the same-turn cold-read shape that exposed the ordering bug: a synchronous block runs
   // before the route's first await. The fixed implementation has already armed its deadline, so
@@ -304,10 +302,7 @@ test("cold-read timing fixture records a measurable latency", async () => {
   const BLOCK_MS = 300;
   const BUDGET_MS = 100;
   const [route] = boundConsoleReadRoutes([slowJsonRoute("/v1/status", 1_000, BLOCK_MS)], deps, BUDGET_MS);
-  await measure(() => serveRoute(route));
-
-  assert.equal(samples.length, 1);
-  const [latencyMs] = samples;
+  const { latencyMs } = await recordColdApplicationLatency(route);
   assert.ok(Number.isFinite(latencyMs) && latencyMs > 0, `expected a measurable positive cold-read latency, got ${latencyMs}`);
   // The regression this fixture guards against: an ordering bug that lets a cold read balloon past
   // its budget unnoticed. Bounding the recorded sample turns that into a failing assertion here
@@ -316,4 +311,23 @@ test("cold-read timing fixture records a measurable latency", async () => {
     latencyMs < BLOCK_MS + BUDGET_MS * 0.5,
     `cold-read latency ${latencyMs.toFixed(1)}ms should stay below the blocked-read budget boundary`,
   );
+});
+
+test("recorded cold-read latency excludes delayed transport without warming the application", async () => {
+  const deps = depsFor(tmpRoot());
+  const BLOCK_MS = 300, BUDGET_MS = 100, TRANSPORT_PREPARATION_MS = 150;
+  let underlyingReads = 0;
+  const underlying = slowJsonRoute("/v1/status", 1_000, BLOCK_MS);
+  const [route] = boundConsoleReadRoutes([{ ...underlying, handler: (...args) => {
+    underlyingReads += 1;
+    return underlying.handler(...args);
+  } }], deps, BUDGET_MS);
+  const { latencyMs, preparationMs, response } = await recordColdApplicationLatency(route, TRANSPORT_PREPARATION_MS);
+  assert.ok(preparationMs >= TRANSPORT_PREPARATION_MS - 10, "the real delayed transport is a positive control");
+  assert.equal(underlyingReads, 1, "transport preparation must not warm the application read");
+  assert.ok(Number.isFinite(latencyMs) && latencyMs > 0);
+  assert.ok(latencyMs < BLOCK_MS + BUDGET_MS * 0.5, `application latency ${latencyMs.toFixed(1)}ms includes transport preparation`);
+  const body = await response.json() as { staleness?: { status?: string }; tasks?: Array<{ unavailableReason?: string }> };
+  assert.equal(body.staleness?.status, "unavailable");
+  assert.equal(body.tasks?.[0]?.unavailableReason, "not_yet_collected");
 });
