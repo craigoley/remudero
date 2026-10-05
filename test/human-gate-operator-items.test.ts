@@ -240,6 +240,8 @@ test("production now view classifies operator items from the ledger and the depl
 
 test("production now view names an unreadable deploy marker instead of reading it as absent", (t) => {
   const { root, append, read } = nowFixture(t);
+  // DEPLOY_AUTO only decides who recycles while DEPLOY_IMAGE_MANUAL holds image recycles.
+  writeFileSync(deployImageManualPath(root), "");
   // A self-referencing symlink makes stat fail with ELOOP: a real failure that is not the marker's absence.
   symlinkSync("DEPLOY_AUTO", deployAutoPath(root));
   append(drift(0), boot(0));
