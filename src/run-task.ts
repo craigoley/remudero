@@ -18648,8 +18648,6 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       await gitPushRunBranchAsync(worktreePath, { force: true });
     }
     if (!prUrl) {
-      const deferred = await deferOpenToSiblingPr(ctx, { impl, branch, worktreePath, repoDir, costUsd });
-      if (deferred) return deferred;
       let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
       try {
         prCreate = ghPrCreateFillCommand(worktreePath, owner, task.repo, branch, lastCommitSubject(worktreePath));
@@ -18677,6 +18675,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         say(`verdict: failed — PR open refused (${err.refusalClass}); branch ${branch} kept on origin at ${headSha}`);
         return { taskId, runId, merged: false, costUsd, verdict: "failed" };
       }
+      // After the local open checks: a refused open never reads GitHub, and a sibling still stops the create.
+      const deferred = await deferOpenToSiblingPr(ctx, { impl, branch, worktreePath, repoDir, costUsd });
+      if (deferred) return deferred;
       prUrl = runGhPrCreate(prCreate, branch, log, say, opts.prCreateExec).prUrl;
       // A worker may have opened this exact PR without reporting its URL. The generic-422
       // adoption above discovers it only here, after the earlier direct-PR normalization point.
