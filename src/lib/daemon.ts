@@ -73,8 +73,7 @@ import {
   type ObservedScopeByTask,
 } from "./dispatch-overlap.js";
 import { DEPLOY_IDLE_DEFER_CEILING_MS } from "./deployer.js";
-import { evaluatePauseTier, type PauseTier, type PauseTierInput } from "./fleet-control.js";
-import { isRecyclePauseDetail } from "./recycle-yield.js";
+import { evaluatePauseTier, isRecyclePauseDetail, type PauseTier, type PauseTierInput } from "./fleet-control.js";
 import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 // Type-only, so no runtime edge is added to daemon-health.ts, which already imports a value from

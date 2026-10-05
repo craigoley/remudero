@@ -4,9 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { runDaemon, resolveFleetControlHold, type DaemonDeps } from "../src/lib/daemon.js";
-import { pauseDetail, requestPause, requestStop, stopDetail } from "../src/lib/fleet-control.js";
+import { checkSharedPause, isRecyclePauseDetail, pauseDetail, requestPause, requestStop, stopDetail, type SharedPauseGitDeps } from "../src/lib/fleet-control.js";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
-import { isRecyclePauseDetail } from "../src/lib/recycle-yield.js";
 import { DEFAULT_SWEEP_POLICY, runSweep, type OpenPrView } from "../src/lib/sweep.js";
 import { readLedgerLines } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
@@ -83,10 +82,13 @@ interface Observed {
 
 /** Runs the daemon through a few paused ticks, its sweep hook the REAL `runSweep` over fake effects
  *  wired the way production wires them: the daemon's gate is the review and worker admission check. */
-async function runPaused(root: string, opts: { wireWorkerAdmissionHold: boolean }): Promise<Observed> {
+async function runPaused(
+  root: string,
+  opts: { wireWorkerAdmissionHold: boolean; checkPause?: () => string | undefined },
+): Promise<Observed> {
   const seen: Observed = { sweeps: 0, armed: [], merged: [], fixed: [], reviewed: [], dispatched: [], lines: [], sweepLedger: join(root, "sweep-ledger.ndjson") };
   const checkStop = (): string | undefined => stopDetail(root);
-  const checkPause = (): string | undefined => pauseDetail(root);
+  const checkPause = opts.checkPause ?? ((): string | undefined => pauseDetail(root));
   let sleeps = 0;
   const deps: DaemonDeps = {
     refreshMerged: () => () => false,
@@ -180,6 +182,56 @@ test("W1-T5804: an operator PAUSE with any other reason runs no sweep, arms noth
       `"${reason}": no recycle hold row is written for an operator PAUSE`,
     );
   }
+});
+
+/** The shared cross-host hold's git reads, faked: `ls-remote` reports `ref` (held, absent or
+ *  unreachable) and an attributable anchor, so production's `checkSharedPause` composes it with the local flag. */
+function sharedHold(ref: "held" | "absent" | "unreachable"): SharedPauseGitDeps & { lsRemotes: number } {
+  const git = {
+    lsRemotes: 0,
+    run: (args: string[]): { status: number; stdout: string } => {
+      if (args[0] === "ls-remote") {
+        git.lsRemotes++;
+        if (ref === "unreachable") return { status: 128, stdout: "" };
+        return { status: 0, stdout: ref === "held" ? "0123abcd\trefs/rmd-pause/hold\n" : "" };
+      }
+      if (args[0] === "cat-file") return { status: 0, stdout: "rmd-pause hold 4242@operator-host 2026-10-05T05:00:00.000Z\nreason: operator maintenance\n" };
+      throw new Error(`unexpected git ${args.join(" ")}`);
+    },
+    mintAnchor: () => "0123abcd",
+  };
+  return git;
+}
+
+test("W1-T5804: a recycle PAUSE never masks an operator's shared hold — with both set, no sweep runs and nothing is armed or merged", async (t) => {
+  for (const ref of ["held", "unreachable"] as const) {
+    const root = tempRoot(t);
+    engageRecyclePause(root);
+    const git = sharedHold(ref);
+    const checkPause = (): string | undefined => checkSharedPause(root, git);
+    assert.equal(isRecyclePauseDetail(checkPause()), false, `${ref}: the operator's shared hold wins over the local recycle PAUSE`);
+    const seen = await runPaused(root, { wireWorkerAdmissionHold: true, checkPause });
+
+    assert.ok(git.lsRemotes > 0, `${ref}: the shared ref was read beside the local recycle PAUSE`);
+    assert.equal(seen.sweeps, 0, `${ref}: no full sweep runs under the operator's hold`);
+    assert.deepEqual(seen.armed, [], `${ref}: nothing is armed`);
+    assert.deepEqual(seen.merged, [], `${ref}: nothing is merged`);
+    assert.deepEqual(seen.dispatched, [], `${ref}: nothing is dispatched`);
+  }
+});
+
+test("W1-T5804: a recycle PAUSE with no shared hold set still arms and merges through production's composed PAUSE read", async (t) => {
+  const root = tempRoot(t);
+  engageRecyclePause(root);
+  const git = sharedHold("absent");
+  const checkPause = (): string | undefined => checkSharedPause(root, git);
+  assert.equal(checkPause(), `PAUSE requested: ${RECYCLE_REASON}`, "an absent shared hold leaves the recycle's own detail");
+  const seen = await runPaused(root, { wireWorkerAdmissionHold: true, checkPause });
+
+  assert.ok(seen.sweeps >= 1, "the full sweep ran");
+  assert.ok(seen.merged.includes(9217), "the green reviewed PR was armed and merged");
+  assert.deepEqual(seen.dispatched, [], "nothing is dispatched");
+  assert.deepEqual(seen.fixed, [], "no fix worker started");
 });
 
 test("W1-T5804: no PAUSE at all is not a recycle PAUSE", () => {
