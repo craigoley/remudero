@@ -1,0 +1,46 @@
+- id: W1-T5650
+  title: "NO DAEMON-LOOP PATH BUILDS THE UNBATCHED GITHUB GATEWAY — `ghGateway` answers every per-task query with its own synchronous `gh` spawn, and nothing refuses a loop path that reaches it: the retro trigger did (a 44m52s stall on 2026-10-04) and the sweep's inbox-draft readiness still does, one trailer search per plan task it derives"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one invariant — the daemon loop never reaches a per-task synchronous gateway
+  origin: "operator session 2026-10-04: watch log 17:44Z, the #9091 daemon loop stall"
+  plan_refs: [W1-T2509, W1-T3104, W1-T192, W1-T5481, W1-T5620]
+  files: [src/run-task.ts, test/no-daemon-loop-path-builds-the-unbatched-gateway.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9. `ghGateway` (src/lib/status.ts) is the unbatched
+    gateway: `findMergedByTrailer` is one search per task id, synchronously. `buildBatchedGithub`
+    answers the same `GitHub` interface from one batched fetch (W1-T2509 memoises it per repo for
+    dispatch). The non-comment `ghGateway(` construction sites in src are all in src/run-task.ts:
+    `retroShippedGithubGateway` (reached from `retroTriggerCheck`, the `checkRetroTrigger` DaemonDeps
+    hook — the 2026-10-04 stall, 16:57:34Z-17:42:26Z, see the #9091 re-land task), `buildInboxDraftHook`
+    (built once per daemon start by `buildSweepHook`; each pass's draft readiness does
+    `deriveDeps = { ledgerPath, github: ghGateway(owner, repo) }` and `buildDepsReadinessAccessors`
+    calls `deriveStatus` per task), and four CLI-only verbs (`inboxCommand`, `loadProposalForRatify`,
+    `loadProposalsForRatify`, `correctCommand`). Each loop stall so far was fixed one site at a time
+    (E36, W1-T5481, W1-T5620) after it was measured on the live daemon; no census refuses the next
+    site, so a single loop-over-history change re-opened it within two hours of deploy.
+  design: |
+    (i) A census test: the population is every enclosing function of a `ghGateway(` call in
+    src/**/*.ts (comments stripped), plus any function returning one of those. Loop reach is a
+    name-based fixed point seeded from the function values in `daemonCommand`'s DaemonDeps literal
+    and the hook builders it calls (`build*DaemonHooks`, `buildSweepHook`): a function is reachable
+    when its identifier appears in a reachable function's body. A reachable population member is
+    refused by name, unless listed in a shrink-only exemption table whose entry names why its calls
+    are bounded per pass (an entry for a site the census no longer reaches is itself a failure).
+    (ii) `buildInboxDraftHook` takes the sweep's daemon-lifetime batched gateway for its readiness
+    `deriveDeps` instead of building `ghGateway` per pass, so the draft rung leaves the population.
+    Until W1-T3104 lands, `retroShippedGithubGateway` is the table's one entry, its reason naming
+    the post-marker candidate bound, until the trigger stops building the unbatched gateway.
+  acceptance:
+    - claim: "the census names a loop-reachable function that builds ghGateway and passes once it is removed, and the inbox-draft readiness answers isMerged for 50 plan tasks with zero unbatched trailer searches"
+      proof: "unit test: test/no-daemon-loop-path-builds-the-unbatched-gateway.test.ts"
+  falsifier: |
+    Put `ghGateway(owner, repo)` back into `buildInboxDraftHook`'s readiness block; the census
+    names `buildInboxDraftHook` and the counting test sees one search per task.

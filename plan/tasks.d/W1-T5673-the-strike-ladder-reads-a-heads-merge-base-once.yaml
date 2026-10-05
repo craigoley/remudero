@@ -1,0 +1,31 @@
+- id: W1-T5673
+  title: "THE STRIKE LADDER READS A HEAD'S MERGE BASE ONCE — W1-T5635's `readMergeBase` issues a REST compare for every laddered PR without a hydrated base on every full pass, uncapped and before the rung decision, although the merge base of main and an unchanged head never moves"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: low
+  origin: "operator session 2026-10-04: watch log, one compare per pass per un-hydrated laddered PR"
+  plan_refs: [W1-T5635, W1-T5536, W1-T5630]
+  files: [src/lib/sweep.ts, test/the-strike-ladder-reads-a-heads-merge-base-once.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9 (W1-T5635 merged bbc2d99a, #9112). `applyStrikeLadder`
+    (src/lib/sweep.ts): `const currentMergeBaseSha = pr.currentMergeBaseSha ?? await
+    effects?.readMergeBase(pr);`; `buildSweepEffects`' `readMergeBase` calls
+    `readJsonImpl(compareRestArgs(owner, repo, "main", pr.headSha))`. The read runs before
+    `decideStrikeLadderRung`, even when the decision would hold on `mainTip` alone, with no cap and
+    no cache. The merge base of main and a fixed head cannot change while main advances, so
+    `pr@headSha` is a sound key. W1-T5630 (main-health reads once per head) is the sibling pattern.
+  design: |
+    Memoise `readMergeBase` per `pr@headSha` in a process map pruned to the open set; cache only a
+    defined sha so a failed read retries; skip the read when `mainRepair` is undefined.
+  acceptance:
+    - claim: "two sweep passes over the same laddered head issue one compare read, and a failed read is retried on the next pass"
+      proof: "unit test: test/the-strike-ladder-reads-a-heads-merge-base-once.test.ts"
+  falsifier: |
+    Remove the memo; the fake reader counts 2 and the test fails.
