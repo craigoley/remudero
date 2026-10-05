@@ -57,6 +57,7 @@
     "plan-reconcile",
     "pr-owner",
     "preflight",
+    "progress-watchdog",
     "project",
     "proof-queue-audit",
     "ratify",

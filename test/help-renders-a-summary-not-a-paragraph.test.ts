@@ -142,7 +142,7 @@ const BASELINE_COMMAND_NAMES = [
   "garden",
   "knowledge",
   "learnings", "ledger-compact", "ledger-grep", "lint-plan", "memory-lint", "merge-hold", "mcp", "next-task-id", "note", "notify", "onboard", "ops", "pause",
-  "peek", "plan", "plan-reconcile", "preflight", "project", "proof-queue-audit", "ratify", "reap-branches", "receipt",
+  "peek", "plan", "plan-reconcile", "preflight", "progress-watchdog", "project", "proof-queue-audit", "ratify", "reap-branches", "receipt",
   "pr-owner",
   "read-model",
   "reframe",
@@ -175,6 +175,7 @@ const BASELINE_COMMAND_NAMES = [
 // W1-T3547: `triage-outcomes` — the read-only per-provider triage-lane outcome fold — joins the registry.
 // Phase 1 P1-04: `read-model` — rebuild, status and kill switches of serve's read model — joins the registry.
 // W1-T5114: `garden` — one pass of one registered gardener, the daemon's off-loop child — joins the registry.
+// W1-T5687: `progress-watchdog` — the read-only progress verdict of a stalled sweep — joins the registry.
 // W1-T5533: `hand-worktree` — a hand build's run-<taskId>-<epochMs> worktree in one command — joins the registry.
 test("COMMANDS carries the reviewed command-name inventory", () => {
   // The reviewed edit is the NAME added to the list above, beside its line of provenance. No count
