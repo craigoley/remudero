@@ -4800,15 +4800,23 @@ export interface VerdictStabilityResult {
   suppressed: boolean;
 }
 
+/** W1-T5839 — the key a review row is written and read under. `unfiled` is the branch-shape sentinel every
+ *  `run-unfiled-<ms>` PR shares, never a task, so it (like an absent id) becomes `PR-<n>`; a real id is unchanged. */
+export function reviewKeyForTaskId(taskId: string | undefined, prNumber: number): string {
+  return taskId !== undefined && taskId !== "unfiled" ? taskId : `PR-${prNumber}`;
+}
+
 /** Recover the most recent `review.posted` verdict for `taskId` from ledger lines, last one wins — the same scanning
  * idiom `unmetFromLedger` (run-task.ts) and every other precedence helper here already use. No new storage. */
 export function priorReviewVerdictFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
+  prUrl?: string,
 ): PriorReviewVerdict | undefined {
   let prior: PriorReviewVerdict | undefined;
   for (const line of lines) {
     if (line.step !== "review.posted" || line.task_id !== taskId) continue;
+    if (prUrl !== undefined && typeof line.pr_url === "string" && line.pr_url !== prUrl) continue;
     if (typeof line.head_sha !== "string") continue;
     if (line.state !== "success" && line.state !== "failure") continue;
     // `capped`/`plan_only` are read back from the SAME line that carried `state`, never recomputed: the arming path

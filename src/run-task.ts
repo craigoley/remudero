@@ -1348,6 +1348,7 @@ import {
   postReviewPending,
   postReviewStatusGuarded,
   priorReviewVerdictFromLedger,
+  reviewKeyForTaskId,
   resolveAutoMergeArm,
   planOnlyDiff,
   enforcementDataInDiff,
@@ -7623,7 +7624,7 @@ async function runReview(args: {
   // predecessor — see applyVerdictStability's doc comment (lib/review.ts) for
   // the #388 fixture this fixes and why it is asymmetric (downgrades only).
   const prior = args.ledgerPath
-    ? priorReviewVerdictFromLedger(readLedgerLines(args.ledgerPath), task.id)
+    ? priorReviewVerdictFromLedger(readLedgerLines(args.ledgerPath), task.id, args.prUrl)
     : undefined;
   let { verdict, suppressed } = applyVerdictStability(computed, headSha, prior);
   const contractDigest = reviewContractDigest({
@@ -20672,9 +20673,10 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     view.headRefName,
     planOnlyFiling ?? isPlanOnlyFilingPr(reviewLedger, view.url),
   );
+  const reviewKey = reviewKeyForTaskId(taskId, view.number);
   const runId = `review-PR${view.number}-${Date.now()}`;
   const log = (step: string, extra: Record<string, unknown> = {}) =>
-    appendLedger(ledgerPath, { run_id: runId, task_id: taskId ?? `PR-${view.number}`, step, lane: "review", ...extra });
+    appendLedger(ledgerPath, { run_id: runId, task_id: reviewKey, step, lane: "review", ...extra });
   const reviewSubject = resolveReviewSubjectCheckout({
     config,
     rest,
@@ -20706,7 +20708,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       subjectRepoDir,
       join(config.root, "state", `managed-checkout-${repo}.lock`),
       log,
-      (failure) => void tryEscalate(managedCheckoutInstallEscalation(failure, taskId ?? `PR-${view.number}`, runId), { issues: ghIssueGateway(owner, repo), ledgerPath, runId }),
+      (failure) => void tryEscalate(managedCheckoutInstallEscalation(failure, reviewKey, runId), { issues: ghIssueGateway(owner, repo), ledgerPath, runId }),
       deps.refreshSubjectInstall,
     );
   }
@@ -20778,7 +20780,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     }
   }
 
-  const provenanceKey = { taskId: taskId ?? `PR-${view.number}`, prUrl: view.url, headSha: view.headRefOid };
+  const provenanceKey = { taskId: reviewKey, prUrl: view.url, headSha: view.headRefOid };
   const provenance = resolveReviewProviderProvenance(reviewLedger, provenanceKey);
   log("review.provider_provenance", reviewProviderProvenanceLedgerFields(provenance, provenanceKey));
 
@@ -20852,7 +20854,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       owner,
       repo,
       sha: view.headRefOid,
-      taskId: taskId ?? `PR-${view.number}`,
+      taskId: reviewKey,
       runId,
       ledgerPath,
       prUrl: view.url,
@@ -20908,7 +20910,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
           // impl-BG: excludes dependabot heads from the post-verdict arm (the dep-review lane owns those).
           headRefName: view.headRefName,
           task: {
-            id: taskId ?? `PR-${view.number}`,
+            id: reviewKey,
             acceptance: criteria,
             files: taskDeclaredFiles,
             risk: taskRisk,
@@ -20956,7 +20958,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
     const restored = await postStatusDep({
       owner, repo, sha: view.headRefOid, state: verdict.state,
       description: reviewPostedDescription(verdict),
-      taskId: taskId ?? `PR-${view.number}`, evidence: reviewEvidenceStrength(verdict.criteria),
+      taskId: reviewKey, evidence: reviewEvidenceStrength(verdict.criteria),
       ledgerPath, runId, prUrl: view.url, reviewInputDigest: inputDigest,
       reviewDecisionDigest: verdict.reviewDecisionDigest,
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
@@ -40125,7 +40127,7 @@ export function buildOpenPrViews(
       resequence && resequence.unmetDependencies.length > 0 ? resequence.unmetDependencies : undefined;
     const fileObservation = planFilingFiles.get(pr.number);
     const observedFiles = fileObservation?.state === "complete" ? fileObservation.paths : undefined;
-    const reviewLedgerKey = taskId ?? `PR-${pr.number}`;
+    const reviewLedgerKey = reviewKeyForTaskId(taskId, pr.number);
     const inputDigest = reviewInputDigest(pr.headRefOid, pr.body ?? "");
     const peers = isSupersessionOwnerTaskId(taskId) ? (byTask.get(taskId) ?? []) : [];
     const newest = peers.length ? Math.max(...peers) : pr.number;
@@ -40144,13 +40146,13 @@ export function buildOpenPrViews(
         : undefined;
     // Historical heads explain why a status is absent. The separate exact-input scan below owns
     // retry count/backoff, so prior heads and infrastructure refusals cannot spend its budget.
-    const reviewOrphans = reviewOrphansFor(ledger, taskId, pr.headRefOid);
+    const reviewOrphans = reviewOrphansFor(ledger, taskId ? reviewLedgerKey : undefined, pr.headRefOid);
     // W1-T3704 (completed here) — the REVIEWED side of the reuse comparison, off the SAME ledger already in hand.
     // `priorReviewVerdictFromLedger` takes the LAST `review.posted` row for this task, which for a
     // PR that IS orphaned is by definition a row at some earlier head — and `reviewedHeadSha`
     // carries that sha so the disposition's reason names the head the reused verdict judged,
     // rather than asserting a reuse no reader can audit.
-    const priorReviewForReuse = taskId ? priorReviewVerdictFromLedger(ledger, taskId) : undefined;
+    const priorReviewForReuse = taskId ? priorReviewVerdictFromLedger(ledger, reviewLedgerKey, pr.url) : undefined;
     const currentContractDigest = taskRecord?.acceptance?.length
       ? reviewContractDigest({
           taskId: taskRecord.id,
@@ -40169,7 +40171,7 @@ export function buildOpenPrViews(
     // "criteria unrecoverable", and never dispatched the already-supported synthetic fix rung.
     // Read the identity the producer actually wrote for every PR; an absent row still returns
     // `[]`, and this does not invent a creditable plan task or widen `criteriaRecoverable`.
-    const unmetKey = taskId ?? `PR-${pr.number}`;
+    const unmetKey = reviewLedgerKey;
     // W1-T913: the SAME synthetic `PR-<n>` fallback `reviewCommand`/`runReview` already key every
     // `review.pending_posted`/`review.posted` ledger line with (task.id there, `taskId ?? PR-<n>`
     // here) — never a second, independently-derived key. Only consulted when the LIVE rollup
@@ -40186,7 +40188,7 @@ export function buildOpenPrViews(
     // confines `filingUnmetKey` above to plan filings, and #1991 (the motivating case) is a
     // `DECISIONS.md` PR, not a filing. This widens WHERE a gate failure's remedy can be READ
     // FROM; it does not touch `unmetKey`/`criteriaRecoverable` or what either means.
-    const gateFailureKey = taskId ?? `PR-${pr.number}`;
+    const gateFailureKey = reviewLedgerKey;
     const instrumentEntanglement = reviewState === "failure"
       ? instrumentEntanglementFromLedger(ledger, reviewLedgerKey, pr.url, pr.headRefOid, inputDigest)
       : undefined;
