@@ -18,7 +18,10 @@ import { citation } from "./provenance.js";
 import type { CriterionVerdict } from "./review.js";
 import {
   describeCiLogUnavailable,
+  ADDITIVE_REGISTRATION_SURFACES,
+  isAdditiveRegistrationChange,
   REGENERABLE_ARTIFACT_GENERATORS,
+  type RegistrationChange,
   type ActionableGateFailure,
   type CiFailure,
   type MergeConflictEvidence,
@@ -86,13 +89,16 @@ export const ONE_TEST_SUITE_AT_A_TIME_LINE =
 export function scopeGuardOutOfScopeFiles(
   diffFiles: readonly string[],
   declaredFiles: readonly string[] | undefined,
+  registrationChanges: readonly RegistrationChange[] = [],
 ): string[] {
   if (diffFiles.length === 0) return [];
   if (!declaredFiles || declaredFiles.length === 0) return [...diffFiles];
   const declared = new Set(declaredFiles);
+  const admittedRegistrations = declaredFiles.every(isInPlanScope) ? [] : registrationChanges.filter(isAdditiveRegistrationChange).map((change) => change.path);
   return diffFiles.filter(
     (f) =>
       !declared.has(f) &&
+      !admittedRegistrations.includes(f) &&
       !Object.hasOwn(REGENERABLE_ARTIFACT_GENERATORS, f) &&
       !isCompanionPath(f, GENERATED_LEDGER_CLASSES),
   );
@@ -119,11 +125,12 @@ export function scopeGuardOutOfScopeFiles(
 export function outOfDeclaredScopeFiles(
   files: readonly string[],
   declaredFiles: readonly string[] | undefined,
+  registrationChanges: readonly RegistrationChange[] = [],
 ): string[] {
   if (!declaredFiles || declaredFiles.length === 0) return [];
   return declaredFiles.every(isInPlanScope)
     ? outOfPlanScopeFiles([...files])
-    : scopeGuardOutOfScopeFiles(files, declaredFiles);
+    : scopeGuardOutOfScopeFiles(files, declaredFiles, registrationChanges);
 }
 
 // ── FIX-RUNG FAILURE-MODE TAXONOMY (W1-T94, W1-T76 follow-up) ────────────────
@@ -504,7 +511,7 @@ export function renderFixPrompt(opts: {
             : []),
           ...(!planOnlyTask
             ? [
-                `REGISTRY EXCEPTION (W1-T2651): the one bounded exception to "do not push it" is a path this ` +
+                `REGISTRY EXCEPTION (W1-T2651): a bounded exception to "do not push it" is a path this ` +
                   `repo's own generator registry declares (REGENERABLE_ARTIFACT_GENERATORS, lib/sweep.ts — ` +
                   `currently ${registryPaths.join(", ")}). If the failing gate you are fixing names one of ` +
                   `those paths as its own remedy, you MAY commit it alongside the declared scope above — the ` +
@@ -513,6 +520,16 @@ export function renderFixPrompt(opts: {
                   `diff you actually pushed. Every other path outside the declared list still follows the ` +
                   `"do NOT push it" rule above verbatim; this is not a general licence to widen scope.`,
               ]
+            : []),
+          ...(!planOnlyTask && (opts.evidence.ciFailures ?? []).some((failure) =>
+            /census|registry|bound-kind|authority-ratchet/.test(failure.name) ||
+            ADDITIVE_REGISTRATION_SURFACES.some((row) => failure.logTail.includes(row.literal) || failure.logTail.includes(row.path)))
+            ? [`ADDITIVE REGISTRATION EXCEPTION (W1-T5691): ADDITIVE_REGISTRATION_SURFACES in src/lib/sweep.ts ` +
+                `permits purely added rows inside these named literals: ` +
+                ADDITIVE_REGISTRATION_SURFACES.map((row) => `${row.path} (${row.literal}${"shrinkOnly" in row ? "; removed rows only" : ""})`).join(", ") +
+                `. You MAY save these bounded registrations outside files:. An edited or deleted existing row ` +
+                `in a registry, changes outside its literal, or baseline growth remain out of scope. ` +
+                `The harness validates the diff and records admitted registrations on its commit row.`]
             : []),
           ...(inheritedOutOfScope.length > 0
             ? [

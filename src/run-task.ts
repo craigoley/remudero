@@ -1607,6 +1607,9 @@ import {
   creditSubjectIsImplementation,
   planOnlyRunBranchReceipts,
   REGENERABLE_ARTIFACT_GENERATORS,
+  ADDITIVE_REGISTRATION_SURFACES,
+  isAdditiveRegistrationChange,
+  type RegistrationChange,
   repairLadderCommand,
   trackRepairLadder,
   isPostReviewDiffCeilingRefusal,
@@ -6079,6 +6082,7 @@ export function fixRungScopeStandDownReason(
   declaredFiles: readonly string[] | undefined,
   reachableRemedyFiles: readonly ReachableRemedyFileInput[] = [],
   failingChecks: readonly Pick<CiFailure, "name" | "logTail">[] = [],
+  registrationChanges: readonly RegistrationChange[] = [],
 ):
   | {
       reason: string;
@@ -6089,7 +6093,8 @@ export function fixRungScopeStandDownReason(
   | undefined {
   if (!declaredFiles || declaredFiles.length === 0) return undefined;
   const planOnlyTask = declaredFiles.every(isInPlanScope);
-  const reachableRemedyPaths = reachableRemedyFiles.map(remedyFilePath);
+  const reachableRemedyPaths = reachableRemedyFiles.map(remedyFilePath)
+    .filter((path) => !ADDITIVE_REGISTRATION_SURFACES.some((row) => row.path === path));
   // W1-T2653: widen the comparison set for THIS call only — never plan-only (see doc above).
   const effectiveDeclaredFiles = planOnlyTask
     ? declaredFiles
@@ -6097,7 +6102,7 @@ export function fixRungScopeStandDownReason(
     ? [...declaredFiles, ...reachableRemedyPaths]
     : declaredFiles;
   const alreadyOutOfScope = new Set(outOfDeclaredScopeFiles(baselineDiffFiles, effectiveDeclaredFiles));
-  const newOutOfScopePaths = outOfDeclaredScopeFiles(currentDiffFiles, effectiveDeclaredFiles).filter(
+  const newOutOfScopePaths = outOfDeclaredScopeFiles(currentDiffFiles, effectiveDeclaredFiles, registrationChanges).filter(
     (f) => !alreadyOutOfScope.has(f),
   );
   if (newOutOfScopePaths.length === 0) return undefined;
@@ -11177,6 +11182,7 @@ export async function runFixRung(opts: {
               admitFixTests && opts.task.files ? [...opts.task.files, "test/"] : opts.task.files,
               reachableRemedyFiles,
               currentCiFailures ?? [],
+              readRegistrationChanges(opts.worktreePath, currentDiffFiles, "origin/main", undefined, currentPinnedSha),
             )
           : undefined;
       if (scopeStandDown) {
@@ -18373,7 +18379,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         );
         diffFiles = undefined;
       }
-      const outOfScope = diffFiles === undefined ? [] : scopeGuardOutOfScopeFiles(diffFiles, task.files);
+      const outOfScope = diffFiles === undefined ? [] : scopeGuardOutOfScopeFiles(diffFiles, task.files,
+        readRegistrationChanges(worktreePath, diffFiles, "origin/main"));
       if (outOfScope.length > 0) {
         // THE REASON IS THIS DECISION'S OWN (the #981 rule — a ledger line carries the reason from
         // the decision that produced its outcome, never from a neighbouring gate).
@@ -41419,9 +41426,34 @@ export interface WorkerEditCommit {
   /** W1-T5386: new tests admitted by the task's own title proofs. */
   readonly proofMatchedTests?: readonly string[];
   readonly admittedTests?: readonly string[];
+  readonly admittedRegistrations?: readonly string[];
   /** Why nothing was committed, when `committed` is false. */
   readonly reason?: string;
   readonly headMoved?: { prior_head_sha: string; observed_head_sha: string; other_worktrees: string[] };
+}
+
+/** Read worker edits against HEAD, or committed registrations against their merge base. */
+export function readRegistrationChanges(
+  repoDir: string,
+  paths: readonly string[],
+  baseRef?: string,
+  git?: PublishAbandonedFixOwnerAheadDeps["runGit"],
+  headRef = "HEAD",
+): RegistrationChange[] {
+  const runGit = git ?? ((args: string[]) => execFileSync("git", ["-C", repoDir, ...args],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  return paths.filter((path) => ADDITIVE_REGISTRATION_SURFACES.some((row) => row.path === path)).map((path) => {
+    try {
+      const base = baseRef === undefined ? headRef : runGit(["merge-base", baseRef, headRef]).trim();
+      const before = runGit(["show", `${base}:${path}`]);
+      const after = baseRef === undefined
+        ? lstatSync(join(repoDir, path)).isFile() ? readFileSync(join(repoDir, path), "utf8") : undefined
+        : runGit(["show", `${headRef}:${path}`]);
+      return { path, before, after };
+    } catch (error) {
+      return { path, error: `registration evidence unreadable: ${String(error)}` };
+    }
+  });
 }
 
 /**
@@ -41433,7 +41465,7 @@ export interface WorkerEditCommit {
  * being a per-provider exception.
  *
  * STAGES BY EXPLICIT DECLARED PATH, NEVER `git add -A` BARE. `declaredPaths` is the task's own
- * `files:` surface, plus regenerable artifacts and new tests named by its own title proofs.
+ * `files:` surface, plus regenerable artifacts, bounded registrations, and new tests named by its own title proofs.
  * Anything else the worker changed is REPORTED in `undeclared` and left
  * uncommitted -- so a worker cannot widen its own blast radius by writing somewhere it never
  * declared, and the caller can escalate loudly instead of discovering it in a diff later. This
@@ -41513,11 +41545,15 @@ export function commitWorkerEdits(
     declaresProofTitle(readFileSync(join(repoDir, path), "utf8"), titles),
   );
   const admittedTests = options.admitTests ? changed.filter((path) => path.startsWith("test/") && !path.split("/").includes("..")) : [];
+  const registrationChanges = declaredPaths.every(isInPlanScope) ? [] :
+    readRegistrationChanges(repoDir, changed.filter((path) => !pathIsUnderDeclaredSurface(path, declaredPaths)), undefined, runGit, options.priorHeadSha);
+  const admittedRegistrations = registrationChanges.filter(isAdditiveRegistrationChange).map((change) => change.path);
   const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths) ||
-    regenerable.includes(path) || proofMatchedTests.includes(path) || admittedTests.includes(path));
+    regenerable.includes(path) || proofMatchedTests.includes(path) || admittedTests.includes(path) || admittedRegistrations.includes(path));
   const undeclared = changed.filter((path) => !declared.includes(path));
   if (declared.length === 0) {
-    return { committed: false, undeclared, reason: "every change the worker made is outside its declared files" };
+    return { committed: false, undeclared, reason: "every change the worker made is outside its declared files" +
+      registrationChanges.filter((change) => change.error).map((change) => `; ${change.path}: ${change.error}`).join("") };
   }
 
   let sha: string;
@@ -41548,6 +41584,7 @@ export function commitWorkerEdits(
     ...(regenerable.length > 0 ? { regenerable } : {}),
     ...(proofMatchedTests.length > 0 ? { proofMatchedTests } : {}),
     ...(admittedTests.length > 0 ? { admittedTests } : {}),
+    ...(admittedRegistrations.length > 0 ? { admittedRegistrations } : {}),
   };
 }
 
@@ -41826,6 +41863,7 @@ export function harnessCommitForShellLessWorker(
     subject_source: subjectSource,
     ...(input.fixOutcome ? { fix_outcome: input.fixOutcome } : {}),
     ...(committed.admittedTests?.length ? { admitted_tests: committed.admittedTests } : {}),
+    ...(committed.admittedRegistrations?.length ? { admitted_registrations: committed.admittedRegistrations } : {}),
     ...(committed.regenerable && committed.regenerable.length > 0 ? { regenerable: committed.regenerable } : {}),
     ...(committed.proofMatchedTests?.length ? { proofMatchedTests: committed.proofMatchedTests } : {}),
     ...(!committed.committed ? { reason: refusalReason } : {}),
