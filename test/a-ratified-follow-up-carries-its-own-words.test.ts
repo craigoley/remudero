@@ -171,3 +171,16 @@ test("W1-T5541: every task in a fragment carries prose and file-only grep proofs
   }
   assert.equal(loadCorpus({ cwd: root }).units.length, 3);
 });
+
+test("W1-T5541: a collection-valued rationale is replaced with the follow-up text", () => {
+  const root = worktree();
+  const authored = fragment + "\n  rationale: [not, prose]\n  note: keep this note verbatim\n";
+  const paths = fileRatificationDraft(root, {
+    proposalId: proposal.id, fragmentYaml: authored, stampLine, proposal,
+  }, fs, join, known);
+  const yaml = fs.readFileSync(join(root, paths[0]), "utf8");
+  assert.ok(yaml.startsWith(fragment + "\n  rationale: >-\n"));
+  assert.ok(yaml.endsWith("  note: keep this note verbatim\n"));
+  assert.equal(parse(yaml)[0].rationale,
+    "From the 2026-09-16 follow-up on PR-5737, ratified via rmd approve:\n" + proposal.summary);
+});
