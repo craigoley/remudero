@@ -41,19 +41,15 @@ import { appendPanelLedger } from "./panel-actions.js";
 
 export type FleetLaneDecision = "file" | "merge";
 
-export interface FleetLaneDeps {
+export interface FleetLaneDeps<R extends number | Promise<number> = number> {
   stateDir: string;
   ledgerPath: string;
   /** How many PRs the fleet merged in the last 24 hours. */
-  mergedLastDay: () => number;
+  mergedLastDay: () => R;
   /** Hand one drafted finding to the ordinary approve flow (`rmd approve`, detached). */
   approve: (proposalId: string) => void;
   clock?: Clock;
 }
-
-export type FleetLaneAsyncDeps = Omit<FleetLaneDeps, "mergedLastDay"> & {
-  mergedLastDay: () => number | Promise<number>;
-};
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -163,7 +159,7 @@ export function readFleetLaneStore(stateDir: string): DecisionStore {
   return raw === undefined ? {} : (JSON.parse(raw) as DecisionStore);
 }
 
-function decide(deps: FleetLaneAsyncDeps, store: DecisionStore, proposalId: string, decision: FleetLaneDecision, extra: Record<string, unknown> = {}): void {
+function decide(deps: FleetLaneDeps<number | Promise<number>>, store: DecisionStore, proposalId: string, decision: FleetLaneDecision, extra: Record<string, unknown> = {}): void {
   const reason = PLAIN_REASON[decision];
   if (machineTokens(reason).length > 0) throw new Error(`fleet-lane: reason for ${decision} is not plain`);
   store[proposalId] = { decision, ts: (deps.clock ?? systemClock).iso() };
@@ -185,11 +181,11 @@ export function triageFleetLane(deps: FleetLaneDeps): FleetLanePass {
   return runStepsSync(triageFleetLaneSteps(deps));
 }
 
-export function triageFleetLaneAsync(deps: FleetLaneAsyncDeps): Promise<FleetLanePass> {
+export function triageFleetLaneAsync(deps: FleetLaneDeps<number | Promise<number>>): Promise<FleetLanePass> {
   return runStepsAsync(triageFleetLaneSteps(deps));
 }
 
-function* triageFleetLaneSteps(deps: FleetLaneAsyncDeps): Steps<FleetLanePass> {
+function* triageFleetLaneSteps(deps: FleetLaneDeps<number | Promise<number>>): Steps<FleetLanePass> {
   const now = (deps.clock ?? systemClock).now();
   const snapshot = readClassificationSnapshot(deps.stateDir);
   if (!snapshot) return { filed: [], merged: [], room: 0 };

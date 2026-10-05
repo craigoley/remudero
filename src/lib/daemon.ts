@@ -16,12 +16,12 @@
 
 import type { AutoTriageDecision } from "./auto-triage.js";
 import { startPlainBackfill, type PlainBackfillDeps } from "./inbox-plain.js";
-import { startFleetLane, triageFleetLaneAsync, type FleetLaneAsyncDeps } from "./fleet-lane.js";
+import { startFleetLane, triageFleetLaneAsync, type FleetLaneDeps } from "./fleet-lane.js";
 import type { Escalation } from "./escalate.js";
 import { governorIncidentFromLedgerRow, governorTiersFromLedger, sreGovernorVerdict, SRE_GOVERNOR_STEP, type SreGovernorControls, type SreGovernorIncident, type SreGovernorVerdict } from "./sre-governor.js";
 import { runSreLanePass, sreLaneOffPath, type SreLaneInput } from "./sre-lane.js";
 import { daemonSreGovernorEnforcer, receiptFromLedgerRow, type SreGovernorEnforcer, type SreRunbookReceipt } from "./sre-runbooks.js";
-import { startGarden, type GardenerAsyncDeps } from "./gardener.js";
+import { startGarden, type GardenerDeps, type PrState } from "./gardener.js";
 import { knowledgeGardenSpec, type GardenWorkspace } from "./knowledge-gardener.js";
 import { startInboxResponder, type InboxResponderDeps } from "./inbox-responder.js";
 import { startLivenessPulse } from "./liveness-pulse.js";
@@ -1143,7 +1143,7 @@ export interface DaemonDeps {
    *  on its own timer beside the main loop. Absent in tests that do not exercise it. */
   plainBackfill?: PlainBackfillDeps;
   /** W1-T4089: files and folds the fleet's own findings, on its own timer beside the main loop. */
-  fleetLane?: FleetLaneAsyncDeps;
+  fleetLane?: FleetLaneDeps<number | Promise<number>>;
   /** W1-T4390: the SRE governor's second enforcer, evaluated every tick over the SRE instance's
    *  ledger ({@link stepSreGovernor}). Absent, it reads `fleetLane`'s state root — TRAP: the
    *  registry (W1-T4227) names no instance `state_dir` yet, and the SRE lane runs on this daemon's
@@ -1151,7 +1151,7 @@ export interface DaemonDeps {
   sreGovernor?: SreGovernorEnforcer;
   /** W1-T4095: the knowledge gardener — scores, prunes and consolidates the knowledge base on its own
    *  timer beside the main loop, and lands its changes as one reviewed PR per pass. */
-  knowledgeGardener?: GardenerAsyncDeps<GardenWorkspace>;
+  knowledgeGardener?: GardenerDeps<GardenWorkspace, PrState | Promise<PrState>>;
   /** W1-T4110/W1-T4941: registered gardens, including the backlog gardener, start off the loop
    * through `rmd garden run <name>` on independent timers. */
   gardens?: ReadonlyArray<(intervalMs: number) => { stop: () => void }>;

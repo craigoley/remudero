@@ -279,7 +279,7 @@ async function resumeSteps<R>(steps: Steps<R>, pending: PromiseLike<unknown>): P
   return next.value;
 }
 
-export interface GardenerDeps<W extends GardenCheckout = GardenCheckout> {
+export interface GardenerDeps<W extends GardenCheckout = GardenCheckout, P extends PrState | Promise<PrState> = PrState> {
   stateDir: string;
   /** The checkout the gardener reads its corpus from for planning (the daemon's own). */
   repoRoot: string;
@@ -287,16 +287,12 @@ export interface GardenerDeps<W extends GardenCheckout = GardenCheckout> {
   memoryDirs?: string[];
   openWorkspace: GardenWorkspacePort<W>;
   log: (step: string, extra?: Record<string, unknown>) => void;
-  prState?: (prUrl: string) => PrState;
+  prState?: (prUrl: string) => P;
   seed?: number;
   clock?: Clock;
   /** Raises a failure streak to a person (escalate.ts); absent, the streak is ledgered only. */
   escalate?: (escalation: Escalation) => string;
 }
-
-export type GardenerAsyncDeps<W extends GardenCheckout = GardenCheckout> = Omit<GardenerDeps<W>, "prState"> & {
-  prState?: (prUrl: string) => PrState | Promise<PrState>;
-};
 
 export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout> {
   /** Ledger prefix, state-file stem and off-switch prefix (upper-cased). */
@@ -587,14 +583,14 @@ export function runGarden<C extends string, I, A extends GardenAction<C>, W exte
  *  same steps, so the same rows, state and refusals. */
 export function runGardenAsync<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
   spec: GardenSpec<C, I, A, W>,
-  deps: GardenerAsyncDeps<W>,
+  deps: GardenerDeps<W, PrState | Promise<PrState>>,
 ): Promise<GardenPassResult<C, A>> {
   return runStepsAsync(gardenPassSteps(spec, deps));
 }
 
 function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
   spec: GardenSpec<C, I, A, W>,
-  deps: GardenerAsyncDeps<W>,
+  deps: GardenerDeps<W, PrState | Promise<PrState>>,
 ): Steps<GardenPassResult<C, A>> {
   const statePath = gardenStatePath(deps.stateDir, spec.name);
   let state = readGardenState(statePath, spec.classes);
@@ -705,7 +701,7 @@ function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W exte
 /** Run passes on their own timer beside the main loop, never two at once. */
 export function startGarden<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
   spec: GardenSpec<C, I, A, W>,
-  deps: GardenerAsyncDeps<W>,
+  deps: GardenerDeps<W, PrState | Promise<PrState>>,
   intervalMs: number,
 ): { stop: () => void } {
   let running = false;

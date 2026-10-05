@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 
@@ -11,43 +11,45 @@ import { ghJsonAsync } from "../src/lib/github-transport.js";
 import { runAutomaticBranchReapRung, reapBranchesCommand, reapBranchesCommandAsync } from "../src/run-task.js";
 import type { AutomaticBranchReapState } from "../src/lib/branch-reaper.js";
 import type { Config } from "../src/lib/config.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
+import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
 
 function slowChildren() {
-  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}reap-garden-loop-`));
+  const githubRoutes: GhShimRoute[] = [
+    { when: "head=", stdout: "merged\ttrue", delaySeconds: 0.07 },
+    { when: "pulls/", stdout: '{"merged":true,"state":"closed"}', delaySeconds: 0.07 },
+    { when: "", delaySeconds: 0.07 },
+  ];
+  const github = ghShim(githubRoutes, { kind: "reap-garden-loop" });
+  const gitRoutes: GhShimRoute[] = [
+    { when: "ls-remote", stdout: "main-sha\trefs/heads/main\nold-sha\trefs/heads/old" },
+    { when: "--merged=origin/main", stdout: "origin/main" },
+    { when: "for-each-ref", stdout: "origin/main\tmain-sha\t1\norigin/old\told-sha\t1" },
+    { when: "grep -l -F", exit: 1 },
+    { when: "log", stdout: "sha1\nsha2" },
+    { when: "" },
+  ].map((route) => ({ ...route, delaySeconds: 0.07 }));
+  const git = ghShim(gitRoutes, { kind: "reap-garden-git", command: "git" });
+  const root = github.dir;
   mkdirSync(join(root, "src"));
-  const calls = join(root, "calls.ndjson");
-  writeFileSync(calls, "");
-  const child = `#!${process.execPath}
-const fs = require("node:fs"), path = require("node:path");
-const root = path.dirname(__filename), args = process.argv.slice(2);
-const cmd = path.basename(__filename), id = process.pid;
-const log = phase => fs.appendFileSync(path.join(root, "calls.ndjson"), JSON.stringify({id, phase, cmd, args}) + "\\n");
-log("start");
-setTimeout(() => {
-  log("end");
-  if (fs.existsSync(path.join(root, "fail-" + cmd))) process.exit(2);
-  if (cmd === "gh") {
-    const endpoint = args[1] || "";
-    process.stdout.write(endpoint.includes("head=") ? "merged\\ttrue\\n" : endpoint.includes("pulls/") ? '{"merged":true,"state":"closed"}' : "");
-  } else if (args[0] === "ls-remote") process.stdout.write("main-sha\\trefs/heads/main\\nold-sha\\trefs/heads/old\\n");
-  else if (args[0] === "for-each-ref") process.stdout.write(args.includes("--merged=origin/main") ? "origin/main\\n" : "origin/main\\tmain-sha\\t1\\norigin/old\\told-sha\\t1\\n");
-  else if (args[0] === "grep" && args.includes("-F")) process.exit(1);
-  else if (args.includes("log")) process.stdout.write("sha1\\nsha2\\n");
-}, 70);
-`;
-  for (const name of ["git", "gh"]) writeFileSync(join(root, name), child, { mode: 0o755 });
   const priorPath = process.env.PATH;
-  process.env.PATH = `${root}:${priorPath}`;
-  const rows = (): Array<{ id: number; phase: string; cmd: string; args: string[] }> =>
-    readFileSync(calls, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  process.env.PATH = `${git.dir}:${github.dir}:${priorPath}`;
+  const rows = () => [
+    ...git.events().map((row) => ({ ...row, cmd: "git" })),
+    ...github.events().map((row) => ({ ...row, cmd: "gh" })),
+  ];
   return {
     root, rows,
-    fail: (cmd: string) => writeFileSync(join(root, `fail-${cmd}`), "failed"),
+    fail: (cmd: "git" | "gh") => {
+      const shim = cmd === "git" ? git : github;
+      const routes = cmd === "git" ? gitRoutes : githubRoutes;
+      shim.addRoute({ when: "", exit: 2, delaySeconds: 0.07 });
+      return () => { for (const route of [...routes].reverse()) shim.addRoute(route); };
+    },
     close: () => {
       if (priorPath === undefined) delete process.env.PATH;
       else process.env.PATH = priorPath;
       rmSync(root, { recursive: true, force: true });
+      rmSync(git.dir, { recursive: true, force: true });
     },
   };
 }
@@ -103,10 +105,10 @@ describe("test/the-reap-and-garden-reads-never-block-the-loop.test.ts", () => {
     const statePath = garden.gardenStatePath(fx.root, "demo");
     const pending = { prUrl: "https://github.com/acme/demo/pull/1", actionClass: "a" as const, baseline: { trials: 0, successes: 0 } };
     const initial = { ...garden.initialGardenState(["a"]), pending, lastCheap: "same" };
-    writeFileSync(statePath, JSON.stringify(initial));
+    await writeFile(statePath, JSON.stringify(initial));
     const rows: string[] = [];
     let reading: Promise<unknown> | undefined;
-    const deps: garden.GardenerAsyncDeps = {
+    const deps: garden.GardenerDeps<garden.GardenCheckout, garden.PrState | Promise<garden.PrState>> = {
       stateDir: fx.root, repoRoot: fx.root, openWorkspace: () => { throw new Error("no filing"); },
       prState: (url) => garden.gardenPrState("acme", "demo", url, (args) => {
         reading = ghJsonAsync(args);
@@ -119,7 +121,7 @@ describe("test/the-reap-and-garden-reads-never-block-the-loop.test.ts", () => {
       assert.equal(garden.readGardenState(statePath, ["a"]).pending, undefined);
       assert.deepEqual(rows, ["demo.gardener_judged"]);
       fx.fail("gh");
-      writeFileSync(statePath, JSON.stringify(initial));
+      await writeFile(statePath, JSON.stringify(initial));
       rows.length = 0;
       await garden.runGardenAsync(spec, deps);
       assert.deepEqual(garden.readGardenState(statePath, ["a"]), initial, "an unreadable PR stays unknown and unjudged");
@@ -173,11 +175,11 @@ describe("test/the-reap-and-garden-reads-never-block-the-loop.test.ts", () => {
     const run = () => runAutomaticBranchReapRung("acme", "demo", { root: fx.root } as Config,
       join(fx.root, "ledger.ndjson"), "RETRY", (_step, extra = {}) => logs.push(extra), state, { root: fx.root });
     try {
-      fx.fail("git");
+      const recover = fx.fail("git");
       await run();
       assert.equal(logs[0]?.outcome, "unreadable");
       assert.equal(state.lastRunAtMs, undefined);
-      rmSync(join(fx.root, "fail-git"));
+      recover();
       await run();
       assert.ok(logs.some((row) => row.outcome === "completed_with_drift_or_failure"));
       assert.ok(state.lastRunAtMs);
