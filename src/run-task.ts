@@ -11913,6 +11913,7 @@ export async function runFixRung(opts: {
     // so a commit the worker made itself is pushed, not re-read as "the worker changed nothing".
     let harnessCommitRefusalReason: string | undefined;
     let harnessCommitUndeclared: readonly string[] = [];
+    let harnessCommitMarkerFiles: readonly string[] = [];
     let harnessCommittedSha: string | undefined;
     const harnessCommit = (report: string, options: Pick<Parameters<typeof harnessCommitForShellLessWorker>[0], "subjectSource" | "derivedCommit" | "fixOutcome"> = {}) =>
       (deps.harnessCommitForShellLessWorker ?? harnessCommitForShellLessWorker)({
@@ -11931,9 +11932,10 @@ export async function runFixRung(opts: {
         requireMergeHead: currentMergeConflict !== undefined,
         log: deps.log,
         say: deps.say,
-        onRefusal: (reason, undeclared = []) => {
+        onRefusal: (reason, undeclared = [], markerFiles = []) => {
           harnessCommitRefusalReason = reason;
           harnessCommitUndeclared = undeclared;
+          harnessCommitMarkerFiles = markerFiles;
         },
         onCommit: (sha) => { harnessCommittedSha = sha; },
       });
@@ -12017,6 +12019,17 @@ export async function runFixRung(opts: {
     }
     const harnessCommitRefused = harnessCommitRefusalReason !== undefined && harnessCommitCount === 0;
     const mergeCommitRefused = harnessCommitRefused && harnessCommitRefusalReason === MERGE_HEAD_ABSENT_REASON;
+    // W1-T5227: a refusal for leftover conflict markers IS an unresolved conflict. The merge stays pending
+    // (nothing was staged), so the next strike is a merge-conflict round on those files; exhaustion then
+    // reports the existing merge_conflict_unresolved. No new outcome, no new escalation path.
+    const markerCommitRefused = harnessCommitRefused && harnessCommitMarkerFiles.length > 0;
+    if (markerCommitRefused && currentMergeConflict === undefined) {
+      currentMergeConflict = {
+        files: harnessCommitMarkerFiles.map((path) => ({ path, oursDeleted: 0, theirsDeleted: 0 })),
+        oursLog: "",
+        theirsLog: "",
+      };
+    }
 
     // W1-T2610: the sha this round believes it just committed, read as early as possible after
     // the worker returns — BEFORE the `readRoundCommits` await, the ledger writes, and the
@@ -12082,7 +12095,7 @@ export async function runFixRung(opts: {
           `spending strike ${attempt}/${opts.strikeCap}: ${opts.prUrl}`,
       );
     } else {
-      if (!harnessCommitRefused || mergeCommitRefused) strikes = attempt;
+      if (!harnessCommitRefused || mergeCommitRefused || markerCommitRefused) strikes = attempt;
       deps.log("fix.dispatch", {
         ...(mergeCommitRefused ? {} : { round_id: roundId }),
         strike: attempt,
@@ -12126,6 +12139,7 @@ export async function runFixRung(opts: {
         ...(fixOutcome?.kind === "FIXED" && harnessCommitRefusalReason === "the worker changed nothing" ? { fix_outcome_contradiction: true } : {}),
         ...(scopeAmendment ? { scope_amendment_detail: scopeAmendment } : {}),
         ...undeclaredPathsLedgerFields(harnessCommitUndeclared),
+        ...(markerCommitRefused ? { conflict_marker_files: harnessCommitMarkerFiles } : {}),
       });
     }
     const fixClaimFields: Record<string, unknown> = {};
@@ -12288,7 +12302,7 @@ export async function runFixRung(opts: {
         });
       }
       logFixDone();
-      if (mergeCommitRefused) continue;
+      if (mergeCommitRefused || markerCommitRefused) continue;
       const refusedAtHead = fixRoundTally((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), opts.taskId, priorHeadSha).refusals.length;
       deps.say(
         `fix rung: refused (${Math.max(1, refusedAtHead)} at this head) by the harness — no commit was produced: ` +
@@ -16416,6 +16430,8 @@ export type CoveragePrecheckPorts = {
   run?: (wt: string, suites: string[], timeoutMs: number) => CoverageRunResult | Promise<CoverageRunResult>;
   /** Bounds captured output in the real runner; the default retains spawnSync's 64 MiB ceiling. */
   maxOutputBytes?: number;
+  /** W1-T5227: the head's files (against origin/main) still holding a conflict marker. */
+  conflictMarkers?: (wt: string) => string[];
 };
 
 const COVERAGE_SRC_FILE = /^src\/.*\.ts$/;
@@ -16561,6 +16577,20 @@ export async function pushFixRoundPrechecked(
   push: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => void | Promise<void> = pushFixRound,
   priorHeadSha?: string,
 ): Promise<void> {
+  // W1-T5227: a head carrying a conflict marker never leaves the worktree, whoever committed it.
+  let markerFiles: string[] = [];
+  try {
+    markerFiles = (ports.conflictMarkers ?? ((dir) => leftoverConflictMarkerPaths(
+      worktreeGitRunner(dir), [], { against: "origin/main", head: "HEAD" })))(wt);
+  } catch (error) {
+    // Unreadable (no origin/main, not a repo): the coverage precheck below fails open the same way.
+    log("push.conflict_marker_check_unavailable", { site: "rung.fix_push", error: String((error as Error)?.message ?? error) });
+  }
+  if (markerFiles.length > 0) {
+    const text = `conflict-marker-check: this head carries leftover conflict markers in ${markerFiles.join(", ")}; resolve them before pushing`;
+    log("push.conflict_marker_refused", { site: "rung.fix_push", files: markerFiles });
+    throw new FixRoundPushError("run-error", { text, censuses: ["conflict-marker"], offeredBaselines: [] }, text);
+  }
   const refusal = coveragePushRefusal(await coveragePrecheck(wt, ports), log, "rung.fix_push");
   if (refusal) throw new FixRoundPushError("run-error", refusal, refusal.text);
   await push(wt, branch, expectedHeadSha, priorHeadSha);
@@ -41673,6 +41703,8 @@ export interface WorkerEditCommit {
   readonly admittedRegistrations?: readonly string[];
   /** Why nothing was committed, when `committed` is false. */
   readonly reason?: string;
+  /** W1-T5227: the declared paths still holding a conflict marker; nothing staged, MERGE_HEAD left live. */
+  readonly conflictMarkerFiles?: readonly string[];
   readonly headMoved?: { prior_head_sha: string; observed_head_sha: string; other_worktrees: string[] };
 }
 
@@ -41715,6 +41747,42 @@ export function ciLogNamedSourcePaths(
   }
   return [...found].map(([path, job]) => ({ path, job }));
 }
+/** W1-T5227: the reason prefix a marker refusal carries; the fix rung reads the files off `conflictMarkerFiles`. */
+export const CONFLICT_MARKER_REFUSAL_PREFIX = "leftover conflict markers in";
+
+/**
+ * W1-T5227: WHICH OF `paths` STILL HOLD A CONFLICT MARKER. Git's own detector, never a hand-rolled
+ * regex: `git diff --check` prints `<path>:<line>: leftover conflict marker` for each one (plus
+ * whitespace findings, which are ignored here). `--diff-filter=U` is NOT consulted: a worker resolves by
+ * writing the file, never by `git add`, so a RESOLVED path is still unmerged until the harness stages it.
+ * `against` is the ref diffed from (`HEAD` for the worktree before a stage; the PR base for a pushed head,
+ * with `head` naming the commit). Must run BEFORE `git add`: the add is what marks a conflicted path
+ * resolved. A `--check` finding exits non-zero, so its stdout is read off the throw.
+ */
+export function leftoverConflictMarkerPaths(
+  runGit: GitRunner,
+  paths: readonly string[],
+  range: { against?: string; head?: string } = {},
+): string[] {
+  const scope = paths.length === 0 ? [] : ["--", ...paths];
+  const refs = [range.against ?? "HEAD", ...(range.head === undefined ? [] : [range.head])];
+  const read = (args: string[]): string => {
+    try {
+      return runGit(args);
+    } catch (error) {
+      const out = (error as { stdout?: unknown }).stdout;
+      if (typeof out === "string" || Buffer.isBuffer(out)) return String(out);
+      throw error;
+    }
+  };
+  const found = new Set<string>();
+  for (const line of read(["diff", "--check", ...refs, ...scope]).split("\n")) {
+    const hit = /^(.+?):\d+: leftover conflict marker/.exec(line);
+    if (hit) found.add(hit[1]!);
+  }
+  return [...found].sort();
+}
+
 /**
  * W1-T3696 A1: COMMIT A WORKER'S EDITS FROM THE HARNESS, so the worker never needs a git tool.
  *
@@ -41814,6 +41882,13 @@ export function commitWorkerEdits(
   if (declared.length === 0) {
     return { committed: false, undeclared, reason: "every change the worker made is outside its declared files" +
       registrationChanges.filter((change) => change.error).map((change) => `; ${change.path}: ${change.error}`).join("") };
+  }
+
+  // W1-T5227: BEFORE any add — `git add` marks a conflicted path resolved whatever it holds.
+  const markerFiles = leftoverConflictMarkerPaths(runGit, declared);
+  if (markerFiles.length > 0) {
+    return { committed: false, undeclared, conflictMarkerFiles: markerFiles,
+      reason: `${CONFLICT_MARKER_REFUSAL_PREFIX} ${markerFiles.join(", ")}; nothing was staged` };
   }
 
   let sha: string;
@@ -42114,7 +42189,7 @@ export function harnessCommitForShellLessWorker(
     say: (msg: string) => void;
     /** Receives the helper's exact refusal reason so a fix lane can record its own outcome row,
      *  with the undeclared paths it refused to stage (W1-T4207; empty when none were computed). */
-    onRefusal?: (reason: string, undeclared?: readonly string[]) => void;
+    onRefusal?: (reason: string, undeclared?: readonly string[], conflictMarkerFiles?: readonly string[]) => void;
     onCommit?: (sha: string) => void;
   },
   deps: { commit?: typeof commitWorkerEdits; ahead?: (worktreePath: string, base: string) => number } = {},
@@ -42156,9 +42231,10 @@ export function harnessCommitForShellLessWorker(
     ...(committed.proofMatchedTests?.length ? { proofMatchedTests: committed.proofMatchedTests } : {}),
     ...(!committed.committed ? { reason: refusalReason } : {}),
     ...(committed.undeclared.length > 0 ? { undeclared: committed.undeclared } : {}),
+    ...(committed.conflictMarkerFiles?.length ? { conflict_marker_files: committed.conflictMarkerFiles } : {}),
   });
   if (!committed.committed) {
-    input.onRefusal?.(refusalReason, committed.undeclared);
+    input.onRefusal?.(refusalReason, committed.undeclared, committed.conflictMarkerFiles);
     return input.commitCount;
   }
   if (committed.sha) input.onCommit?.(committed.sha);
