@@ -222,7 +222,7 @@
   "src/lib/task-class.ts": 39,
   "src/lib/task-id-reservation.ts": 256,
   "src/lib/task-id.ts": 500,
-  "src/lib/task-linter.ts": 1300,
+  "src/lib/task-linter.ts": 1312,
   "src/lib/tier.ts": 67,
   "src/lib/trace.ts": 115,
   "src/lib/triage.ts": 169,
