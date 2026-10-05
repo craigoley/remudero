@@ -1,0 +1,49 @@
+- id: W1-T5895
+  title: "AN OPENAPI CHANGE SELECTS THE CONTRACT SUITES, NOT THE FULL SUITE — `fullRunTrigger` in the affected-suite selector treats openapi/daemon.yaml and packages/api-client/src/schema.d.ts as outside what it models, so `rmd preflight-author` answers `full-fallback, ~2,588 suite(s)` for every contract change and the author gate is unusable for them"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: medium  # Rule 19: one concern — the two contract files select the suites that read them instead of the full set
+  band_meaning: span
+  origin: "operator session 2026-10-05: preflight-author on #9346, #9355 and an inbox fix each selected the full suite"
+  plan_refs: [W1-T4404, W1-T5705]
+  files: [src/lib/affected-suites.ts, test/an-openapi-change-selects-the-contract-suites-not-the-full-suite.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 8b8f15c9. scripts/preflight-author.mjs selects through
+    `affectedSelectionOrFull` (src/lib/affected-suites.ts) and labels a `fullRun` selection
+    `full-fallback`, then runs `listTestFiles(root)`. `selectAffectedSuites` returns `fullRun` as
+    soon as `fullRunTrigger` finds a changed path outside `MODELLED`
+    (`src|scripts|bin|test|docs|doctrine|plan` and top-level `.md`), so openapi/daemon.yaml and
+    packages/api-client/src/schema.d.ts both force the full set.
+    OBSERVED 2026-10-05 on three PRs (#9346, #9355, an inbox fix): `author selection:
+    full-fallback, ~2,588 suite(s)`, runs of 25 to 45 min, load near 400 with other sessions on
+    the same Mac. CLAUDE.md makes preflight-author the first-push gate and the house rule forbids
+    the full suite locally, so a contract change has no usable author gate.
+    WHO READS THE CONTRACT: test/helpers/openapi-strict.ts loads openapi/daemon.yaml by
+    `join(..., "openapi", "daemon.yaml")` and suites import it (every-view-body-matches-its-schema,
+    the-contract-says-what-the-daemon-sends, every-served-route-is-in-the-contract); others name
+    the path directly (api-client-drift-check, contract-manifest-*, consumer-breaking-change,
+    the-contract-census-lives-with-its-consumer). `namedPaths` only sees `src|scripts|bin|test`
+    paths, so the graph cannot reach any of them today.
+    The selector is shared with CI's coverage selection (W1-T4404 shadow, W1-T5705 live), so this
+    narrows both; the shadow record is the check that the new edge misses nothing.
+  design: |
+    Model the two contract files instead of falling back. A changed openapi/daemon.yaml or
+    packages/api-client/src/schema.d.ts selects every code file whose content names it, as a
+    literal path or as joined segments (`"openapi", "daemon.yaml"`), and the import graph then
+    walks from those files as it does from a changed module, so a suite reaching
+    test/helpers/openapi-strict.ts is selected through it. Derive the readers from content, not a
+    hand list. Any other path under openapi/ or packages/ still forces a full run with its reason.
+    A diff that also touches src/ selects the union, so route changes keep their own suites.
+  acceptance:
+    - claim: "selectAffectedSuites over a diff of only the OpenAPI spec under openapi/ returns fullRun false and selects a suite that names the path directly and a suite that reaches it only through a helper that joins its segments, and leaves out an unrelated suite; the same holds for the generated api-client schema.d.ts, and a diff touching another openapi/ path still returns fullRun true"
+      proof: "unit test: test/an-openapi-change-selects-the-contract-suites-not-the-full-suite.test.ts"
+  falsifier: |
+    Keep openapi/ and packages/ outside `MODELLED`: the openapi-only diff returns fullRun true with
+    no suites and the test fails.
