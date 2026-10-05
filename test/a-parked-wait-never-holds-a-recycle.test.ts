@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,10 +9,16 @@ import { requestPause } from "../src/lib/fleet-control.js";
 import { acquireInflightLock } from "../src/lib/inflight-lock.js";
 import { recyclePauseDetail } from "../src/lib/recycle-yield.js";
 import { buildSweepEffects, DEFAULT_SWEEP_POLICY, type OpenPrView } from "../src/lib/sweep.js";
-import { fixBranchClaimKey, pollToGate, runFixRung, waitForCiGreen, withInflightRunLock, type PollDeps } from "../src/run-task.js";
+import { fixBranchClaimKey, pollToGate, runFixRung, runTask, waitForCiGreen, withInflightRunLock, type PollDeps } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
+import type { ProbeExecResult } from "../src/lib/containment.js";
+import type { ProbeExecResult as IsolationProbeExecResult } from "../src/lib/isolation.js";
+import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import type { Task } from "../src/lib/plan.js";
-import type { WorkerResult } from "../src/lib/worker.js";
+import type { GitHub } from "../src/lib/status.js";
+import type { spawnWorker, WorkerResult } from "../src/lib/worker.js";
+import { ghShim } from "./helpers/gh-shim.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const TASK_ID = "W1-T5140";
@@ -204,4 +211,97 @@ test("W1-T5140: an operator pause keeps the sweep CI wait until it turns green",
   assert.equal(polls, 3);
   assert.ok(!rows.some((r) => r.step === "inflight.recycle_yield"));
   assert.deepEqual(readdirSync(join(root, "state", "inflight")), []);
+});
+
+test("W1-T5140: a run task's fix round waiting on CI hands its PR off and releases its task lock", async (t) => {
+  const taskId = "T-PARKED-FIX";
+  const prUrl = "https://github.com/acme/remudero/pull/502";
+  const prHead = "d".repeat(40);
+  const fixedTs = 1790600000000;
+  const branch = `run-${taskId}-${fixedTs}`;
+  const planYaml = [`- id: ${taskId}`, "  title: a fix round parks on CI", "  repo: remudero", "  type: implement", "  verify: auto",
+    "  risk: medium", "  files: [src/lib/daemon.ts]", "  origin: test", "  status: queued", ""].join("\n");
+  const root = mkdtempSync(join(tmpdir(), "rmd-parked-fix-root-"));
+  const origin = gitRepo({ bare: true, kind: "parked-fix-origin" });
+  const seed = gitRepo({ cloneFrom: origin.dir, kind: "parked-fix-seed" });
+  t.after(() => { origin.cleanup(); seed.cleanup(); rmSync(root, { recursive: true, force: true }); });
+  writeFileSync(join(root, "tasks.yaml"), planYaml);
+  writeFileSync(join(seed.dir, "README.md"), "seed\n");
+  mkdirSync(join(seed.dir, "plan"), { recursive: true });
+  writeFileSync(join(seed.dir, "plan", "tasks.yaml"), planYaml);
+  seed.git("add", "-A");
+  seed.git("commit", "-q", "-m", "seed");
+  seed.git("push", "-q", "origin", "main");
+  mkdirSync(join(root, "repos"), { recursive: true });
+  const local = join(root, "repos", "remudero");
+  execFileSync("git", ["clone", "-q", origin.dir, local]);
+  execFileSync("git", ["-C", local, "config", "user.email", "fixture@remudero.invalid"]);
+  execFileSync("git", ["-C", local, "config", "user.name", "remudero test fixture"]);
+  const gh = ghShim([
+    { when: "--json headRefName", stdout: JSON.stringify({ headRefName: branch, headRefOid: prHead, body: "" }) },
+    { when: "--json headRefOid", stdout: JSON.stringify({ headRefOid: prHead }) },
+    { when: "--json body", stdout: JSON.stringify({ body: "" }) },
+    { when: "--json files", stdout: JSON.stringify({ files: [{ path: "src/lib/daemon.ts" }] }) },
+    { when: "pulls/502/", stdout: "[]" },
+    { when: "check-runs", stdout: JSON.stringify({ check_runs: [{ name: "ci", status: "completed", conclusion: "success" }] }) },
+    { when: "/status", stdout: JSON.stringify({ statuses: [] }) },
+    { when: "pulls/502", stdout: JSON.stringify({ state: "open", merged: false, head: { sha: prHead } }) },
+    { when: "issue create", stdout: "https://github.com/acme/remudero/issues/502" },
+    { when: "api", stdout: "[]" },
+  ], { kind: "parked-fix-gh" });
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${gh.dir}:${savedPath}`;
+  t.after(() => { process.env.PATH = savedPath; rmSync(gh.dir, { recursive: true, force: true }); });
+  t.mock.method(Date, "now", () => fixedTs);
+  const worker = (over: Partial<WorkerResult>) => ({
+    sessionId: "implement-session", costUsd: 0.02, numTurns: 1, text: "", blocks: [], stderr: "", subtype: "success",
+    isError: false, apiError: false, permissionDenials: [], childEnvKeys: [], model: "test", effort: "test",
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false, ...over,
+  }) as WorkerResult;
+  let spawns = 0;
+  let fixes = 0;
+  let recycling = false;
+  const spawn: typeof spawnWorker = async (args) => {
+    spawns++;
+    if (spawns === 1) return worker({ text: "RECON REPORT\nOBSERVED: fixture\n" });
+    if (!String(args.prompt).startsWith("You are a FIX worker")) return worker({ text: `REPORT\nPR_URL: ${prUrl}\n` });
+    fixes++;
+    writeFileSync(join(args.cwd!, "fix.txt"), "fixed\n");
+    execFileSync("git", ["-C", args.cwd!, "add", "-A"]);
+    execFileSync("git", ["-C", args.cwd!, "commit", "-q", "-m", "fix: answer the review"]);
+    // The fix round's push leaves CI pending, and the recycle engages while the round waits on it.
+    gh.addRoute({ when: "check-runs", stdout: JSON.stringify({ check_runs: [{ name: "ci", status: "in_progress" }] }) });
+    recycling = true;
+    return worker({ sessionId: "fix-session", text: "REPORT\nfix applied\n" });
+  };
+  const offline: GitHub = { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
+  const result = await withLiveWritesAllowed(() => runTask(taskId, {
+    skipGitSync: true, planPath: join(root, "tasks.yaml"), github: offline,
+    config: { claudeBin: "/bin/true", root, installRoot: process.cwd() } as Config, spawn,
+    containmentExec: (token: string): Promise<ProbeExecResult> =>
+      Promise.resolve({ transcript: `touch ../${token}: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
+    isolationExec: (): Promise<IsolationProbeExecResult> =>
+      Promise.resolve({ transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -", aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0 }),
+    runReview: async () => ({
+      state: "failure", criteria: [], testTheater: false, summary: "failure — one unmet criterion", floorDegraded: false,
+      capped: false, keywordOnly: false, planOnly: false, headSha: prHead, reviewerOutcome: "success",
+    }),
+    externalWaitRecycle: () => (recycling ? `PAUSE requested: ${RECYCLE}` : undefined),
+  }));
+  const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").split("\n").filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(fixes, 1, `one fix worker ran; steps=${JSON.stringify(ledger.map((row) => row.step))}`);
+  assert.equal(result.verdict, "handed_off", "the run hands its open PR off instead of holding the recycle");
+  assert.equal(result.prUrl, prUrl);
+  assert.equal(result.merged, false);
+  const verdict = ledger.find((row) => row.step === "verdict");
+  assert.equal(verdict?.verdict, "handed_off");
+  assert.equal(verdict?.reason, "recycle_yield");
+  assert.equal(verdict?.pr_url, prUrl);
+  assert.equal(ledger.find((row) => row.step === "run.freshness_handoff")?.trigger, "recycle");
+  const parked = ledger.find((row) => row.step === "inflight.recycle_yield");
+  assert.equal(parked?.lock_key, taskId);
+  assert.equal(parked?.waiting_on, "ci");
+  assert.equal(existsSync(join(root, "state", "inflight", `${taskId}.lock`)), false, "the task lock is released on the handoff");
+  assert.ok(!gh.calls().some((call) => call.includes("issue create")), "a recycle handoff never escalates");
 });
