@@ -91,6 +91,11 @@
     "census:wall-clock-bound": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/a-wall-clock-bound-declares-itself.test.ts",
     "census:authority": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/authority-ratchet.test.ts",
     "census:no-draft-pr": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/no-draft-pull-request-ever-sits-on-the-board.test.ts",
+    "census:ledger-rotation": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/ledger-rotation.test.ts",
+    "census:unretained-step": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/a-union-read-of-an-unretained-step-is-refused.test.ts",
+    "census:spend": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/spend-is-counted-once-at-its-producer.test.ts",
+    "census:env-var-registry": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/env-var-registry.test.ts",
+    "census:error-subclass": "node --test --import tsx --import ./test/setup/tmp-hygiene.ts test/error-subclass-census.test.ts",
     "worker-branch-shape:check": "node scripts/worker-branch-shape.mjs",
     "commitlint": "commitlint",
     "changelog": "commit-and-tag-version"

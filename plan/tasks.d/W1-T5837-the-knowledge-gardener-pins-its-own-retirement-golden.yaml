@@ -1,0 +1,49 @@
+- id: W1-T5837
+  title: "THE KNOWLEDGE GARDENER PINS ITS OWN RETIREMENT GOLDEN — a retire/fold PR changes only learnings/*.yaml data and docs/knowledge-garden-log.md, scripts/prompt-surface-gate.mjs (W1-T3077) admits a learnings data change only on a golden verdict under test/fixtures/golden-verdicts/**, and nothing in src/ or scripts/ writes one, so every gardener PR (#7073 #7101 #7205 #7245 #7647 #7910 #7977, open #9277) has needed a hand refresh of the knowledge-retire golden"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — a gardener retire/fold pass carries its own golden evidence
+  band_meaning: span
+  origin: "operator session 2026-10-05: #9277 (knowledge-garden-1791190143932) needed the hand commit e978c5ea to pass prompt-surface-gate"
+  plan_refs: [W1-T4095, W1-T3077, W1-T423, W1-T4240]
+  files: [src/lib/knowledge-gardener.ts, test/the-knowledge-gardener-pins-its-own-retirement-golden.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 2a15706f. `knowledgeGardenSpec`'s `apply`
+    (src/lib/knowledge-gardener.ts) lands `applyLearningActions`' changed shards plus GARDEN_LOG
+    and nothing else. scripts/prompt-surface-gate.mjs treats each changed learnings/*.yaml as a
+    PATH surface (a data change; `isCommentOnlyYamlChange` exempts comment-only edits), and for a
+    path surface `evidenceFor` admits only a changed path under test/fixtures/golden-verdicts/.
+    `grep -rln golden-verdicts src scripts` names only the gate itself.
+    git log on origin/main for test/fixtures/golden-verdicts/knowledge-retire: every commit since
+    W1-T4240 (#6770) is a gardener PR — #7073 #7101 #7205 #7245 #7647 #7910 #7977 — each
+    re-pinning the case to its own retirement. Open #9277 has fleet commit 0e191514 and the hand
+    commit e978c5ea "test(knowledge): pin the strikes-exhausted-counts-rows retirement golden"
+    (diff.patch, criteria.yaml, report.md, checkout/). The self-maintenance loop W1-T4095 built
+    never lands without a person.
+    NOT TAKEN: exempting a marked `lifecycle: active` to `superseded` flip in the gate. It is
+    cheaper, but it drops the judge replay test/golden-verdicts.test.ts runs over the real
+    retirement ("A regression here stalls the self-maintenance loop silently", the case's own
+    golden.yaml); writing the case from the pass keeps that replay on every gardener PR.
+  design: |
+    When a pass's actions include `retire` or `merge` and `applyLearningActions` changed a shard,
+    `apply` also rewrites test/fixtures/golden-verdicts/knowledge-retire/ from the pass itself and
+    adds those paths to the PR's `paths`: diff.patch is the pass's own unified diff of the changed
+    shards and GARDEN_LOG, rendered from the before/after text `apply` already holds in the
+    `diff --git` / `@@` shape judgeReview parses; checkout/ is replaced by the post-pass copies of
+    those files; criteria.yaml holds the pass's own proofs (the garden-log heading and each
+    `knowledge gardener: <class> <target>` marker line); report.md is the PR body. golden.yaml is
+    left as it is: its verdict facts hold for any correct retirement. A pass without a retire or
+    merge action (repair-reference, rule-merge, refresh) writes no golden.
+  acceptance:
+    - claim: "a retire pass over a fixture repo writes the knowledge-retire case from its own diff and lists those paths in the PR, the real prompt-surface gate passes over the pass's changed paths, and the judge over the written case reaches the golden verdict; a pass with no retire or merge action writes no golden"
+      proof: "unit test: test/the-knowledge-gardener-pins-its-own-retirement-golden.test.ts"
+  falsifier: |
+    Drop the golden write from `apply`: the pass's paths name no golden-verdicts file, the real
+    prompt-surface gate refuses the pass's learnings change, and the test fails.

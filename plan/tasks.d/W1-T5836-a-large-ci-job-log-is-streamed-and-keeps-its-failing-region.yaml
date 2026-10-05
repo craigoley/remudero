@@ -1,0 +1,56 @@
+- id: W1-T5836
+  title: "A LARGE CI JOB LOG IS STREAMED AND KEEPS ITS FAILING REGION — the fix lane reads a failed check's Actions job log with one buffered `gh api .../actions/jobs/<id>/logs` call capped at 4 MiB (`maxBuffer: 1 << 22`, a synchronous spawn on the sweep's path), so a coverage-shard log past the cap dies ENOBUFS, the fix rung gets no failing test, and the PR strands red (#9267, 199 sweep.disposed rows over 5 PRs since 2026-10-04)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — a failed check's job log is read without a whole-body buffer
+  band_meaning: span
+  origin: "operator session 2026-10-05: #9267 disposed 'log NOT read ... FAILED (ENOBUFS: spawnSync gh ENOBUFS)' and stayed red until a hand fix"
+  plan_refs: [W1-T5283, W1-T2733, W1-T2298, W1-T2291, W1-T3782]
+  files: [src/run-task.ts, src/lib/github-transport.ts, test/a-large-ci-job-log-is-streamed-and-keeps-its-failing-region.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 2a15706f. `ciFailuresSteps` (src/run-task.ts) reads a failed
+    check's job log through `fetch.fetchJobLog` and only then cuts it down with
+    `extractCiFailureRegion` and `retainGeneratorRemediesForRegion`, so the WHOLE body is held
+    first. Both defaults buffer it: `defaultCiJobLogFetch` is a synchronous `ghExec` with
+    `maxBuffer: 1 << 22` and `defaultCiJobLogFetchAsync` is `ghTextAsync` with the same 4 MiB cap.
+    The sweep's runtime wires the SYNC producer (`fetchCiFailuresImpl: fetchCiFailures` in
+    src/run-task.ts), and so does `runFixRung`'s `deps.fetchCiFailures`; only the main-health rung
+    reads through `fetchCiFailuresAsync` (W1-T5283, #9169).
+    LIVE: a coverage shard's log is past 4 MiB. Ledger 2026-10-04..05 (rotations
+    2026-10-04T01-53 .. 2026-10-04T06-17 and 2026-10-05T08-21, plus the live file): 199
+    `sweep.disposed` rows carry "log NOT read: the log fetch was attempted and FAILED (ENOBUFS:
+    spawnSync gh ENOBUFS)" across #8970 (128), #9008 (38), #9007 (26), #9009 (4) and #9267 (3);
+    552 of the matched failures name coverage-shard (8/8), 3 name coverage-shard (2/8). The
+    first is 2026-10-04T01:08Z; the zero rotations 10-01..10-04T01-03 are the control that the
+    query reads the archives. On #9267 (W1-T5691) the row at 08:16:53Z reads blocker own-red since
+    07:52:53Z, "retrying the fix round" with no failing test to hand the worker; the PR stayed red
+    until a hand fix. Raising the cap only moves the cliff: the log grows with the suite.
+    src/run-task.ts has one comment line of headroom under its comment-load ceiling: add no
+    comment prose there.
+  design: |
+    (1) A streamed job-log read: spawn the same `gh api repos/<o>/<r>/actions/jobs/<id>/logs`
+    asynchronously (github-transport's pacing and kill escalation, no `maxBuffer`) and fold its
+    stdout line by line into a bounded reducer that keeps exactly what the cut keeps today — the
+    TAP `not ok` blocks, each `##[error]` with its CI_STEP_ERROR_CONTEXT_LINES of context, one copy
+    of each FLAKE-RETRY line, the `failing tests:` block, the declared generator remedies (up to
+    MAX_RETAINED_REMEDY_LINES) and a rolling last `tailLines` window — each candidate held to
+    `tailLines` lines, chosen at end of stream by `extractCiFailureRegion`'s own precedence.
+    (2) That read is the default job-log source of `fetchCiFailuresAsync`; an injected
+    `fetchJobLog` keeps today's whole-text contract so existing tests stand.
+    (3) The sweep's `fetchCiFailuresImpl` and `runFixRung`'s `deps.fetchCiFailures` are wired to
+    `fetchCiFailuresAsync`, so neither fix-lane read spawns synchronously on the event loop. The
+    sync `fetchCiFailures` keeps its signature for its remaining callers.
+  acceptance:
+    - claim: "a 6 MiB job log served by a real gh shim, with one `not ok` block near its start and the tail line at its end, comes back through the fix lane's wired producer with that block and no logUnavailable; on fixture logs under 4 MiB the streamed region equals extractCiFailureRegion plus the retained remedies"
+      proof: "unit test: test/a-large-ci-job-log-is-streamed-and-keeps-its-failing-region.test.ts"
+  falsifier: |
+    Put the buffered 4 MiB read back as the default job-log source (or wire the sweep back to the
+    sync `fetchCiFailures`): the 6 MiB shim log fails the read, the failure carries
+    `logUnavailable` fetch-failed and no `not ok` block, and the test fails.
