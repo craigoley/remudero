@@ -197,6 +197,7 @@ function posted(run: JobRun): Array<[string, string]> {
 
 // The argv each base-reading or PR-scoped step reaches today on pull_request, recorded verbatim.
 const PR_ARGV: Record<string, string[]> = {
+  install: ["npm ci"],
   classify: ["git diff --name-only HEAD^1...HEAD", "node scripts/diff-class.mjs --changed-files changed-files.txt"],
   "rule-checks": ["node --import tsx scripts/list-rule-suites.mjs --run"],
   "leak-grep": ["leak-grep.sh "],

@@ -30,7 +30,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isMainModule } from "./lib/argv.mjs";
@@ -420,6 +420,27 @@ function addsLiteral({ changed, readHead, readBase }, pattern, group) {
   });
 }
 
+const IMPORT_SPECIFIER_RE = /(?:\bfrom|\bimport|\brequire)\s*\(?\s*(["'])([^"'\r\n]+)\1/g;
+const IMPORT_SCOPE_RE = /^(?:src|scripts)\/.+\.(?:[cm]?[jt]sx?)$/;
+const LIB_SCOPE_RE = /^src\/lib\/.+\.[cm]?[jt]sx?$/;
+/** What `src/lib` may never import (.dependency-cruiser.cjs): the CLI layer, the spike and the task runner. */
+const LAYER_ABOVE_LIB_RE = /^src\/(?:cli(?:\/|\.|$)|spike\.|run-task\.)/;
+
+/** W1-T5693: a changed file in `inScope` whose head imports a specifier (kept by `keep(specifier, path)`) its
+ *  merge-base text did not. A new file's every import is new. */
+function addsImport({ changed, readHead, readBase }, inScope, keep = () => true) {
+  if (typeof readHead !== "function" || typeof readBase !== "function") return false;
+  const specifiers = (text, path) =>
+    new Set([...String(text ?? "").matchAll(IMPORT_SPECIFIER_RE)].map((m) => m[2]).filter((spec) => keep(spec, path)));
+  return changed.filter((path) => inScope.test(path)).some((path) => {
+    const base = specifiers(readBase(path), path);
+    return [...specifiers(readHead(path), path)].some((spec) => !base.has(spec));
+  });
+}
+
+const importsLayerAboveLib = (spec, path) =>
+  spec.startsWith(".") && LAYER_ABOVE_LIB_RE.test(posix.normalize(posix.join(posix.dirname(path), spec)));
+
 function stepTrigger(input) {
   return input.changed.some((path) => path === "src/lib/ledger.ts" || path === "src/lib/spend-rows.ts") ||
     addsLiteral(input, STEP_LITERAL_RE, 2);
@@ -439,11 +460,23 @@ export const PRECHECK_TRIGGERED_SUITES = [
   { testFile: "test/error-subclass-census.test.ts", script: "census:error-subclass",
     trigger: (input) => input.changed.includes("scripts/error-subclass-baseline.json") || addsLiteral(input, ERROR_CLASS_RE, 1),
     remedy: "adopt RmdError in src/lib/errors.ts or record the reviewed ceiling in scripts/error-subclass-baseline.json" },
+  // W1-T5693: whole-tree structural censuses, 4-13 s each alone; `structural` runs each in its OWN child.
+  { testFile: "test/cycle-ratchet.test.ts", script: "census:cycle-ratchet", structural: true,
+    trigger: (input) => input.changed.some((p) => [".dependency-cruiser.cjs", "scripts/cycle-baseline.json", "scripts/cycle-ratchet.mjs"].includes(p)) ||
+      addsImport(input, IMPORT_SCOPE_RE),
+    remedy: "break the import ring or record the reviewed ceiling in scripts/cycle-baseline.json" },
+  { testFile: "test/source-size-baseline-is-enforced.test.ts", script: "census:source-size", structural: true,
+    trigger: (input) => input.changed.some((p) => ["scripts/source-size-ratchet.mjs", "src/lib/ci-parity.ts", ".dependency-cruiser.cjs"].includes(p)) ||
+      addsImport(input, LIB_SCOPE_RE, importsLayerAboveLib),
+    remedy: "src/lib must not import src/cli, src/spike.ts or src/run-task.ts (.dependency-cruiser.cjs)" },
+  { testFile: "test/citation-anchor-census.test.ts", script: "census:citation-anchor", structural: true,
+    trigger: ({ changed }) => changed.some((p) => p.startsWith("plan/tasks.d/") || p === "MASTER-PLAN.md" || p === "scripts/citation-anchor-census.mjs"),
+    remedy: "anchor each #NNNN citation the shard or MASTER-PLAN.md adds (scripts/citation-anchor-census.mjs)" },
 ];
 
 /**
  * Admitted suites join by `walks` prefixes; triggered suites join by new literals or registry changes.
- * They run once through `runSuites`; each failure is one row in the shape censusPushRefusal reads.
+ * They run through `runSuites` (the structural ones each in their own call); each failure is one row in the shape censusPushRefusal reads.
  * A diff joining none starts no child. Every failure
  * to read the table or run the suites is `unmeasured` with its reason, never an empty violation list.
  *
@@ -465,16 +498,27 @@ export function evaluateAdmittedCensusSuites({ changed, loadMembers, runSuites, 
   const admitted = members.filter((m) => changed.some((p) => m.walks.some((w) => p.startsWith(w))));
   const joined = [...new Map([...admitted, ...triggered].map((m) => [m.testFile, m])).values()];
   if (joined.length === 0) return { violations: [], unmeasured: null };
-  let failing;
-  try {
-    failing = new Set(runSuites([...new Set(joined.map((m) => m.testFile))]));
-  } catch (e) {
-    return { violations: [], unmeasured: String(e?.message ?? e) };
+  // W1-T5693: the slow whole-tree suites each run in their OWN child, so one that exceeds its time bound reads
+  // NOT MEASURED alone and cannot turn the others' verdicts into a silent pass.
+  const groups = [joined.filter((m) => !m.structural), ...joined.filter((m) => m.structural).map((m) => [m])]
+    .filter((group) => group.length > 0);
+  const violations = [];
+  const unmeasured = [];
+  for (const group of groups) {
+    let failing;
+    try {
+      failing = new Set(runSuites([...new Set(group.map((m) => m.testFile))]));
+    } catch (e) {
+      unmeasured.push(String(e?.message ?? e));
+      continue;
+    }
+    violations.push(
+      ...group
+        .filter((m) => failing.has(m.testFile))
+        .map((m) => `census-suite: ${m.testFile} fails — run npm run ${m.script}${m.remedy ? `; ${m.remedy}` : ""}`),
+    );
   }
-  const violations = joined
-    .filter((m) => failing.has(m.testFile))
-    .map((m) => `census-suite: ${m.testFile} fails — run npm run ${m.script}${m.remedy ? `; ${m.remedy}` : ""}`);
-  return { violations, unmeasured: null };
+  return { violations, unmeasured: unmeasured.length === 0 ? null : unmeasured.join("; ") };
 }
 
 export const PRECHECK_PARITY_BASELINE = "scripts/census-precheck-parity-baseline.json";
@@ -492,6 +536,8 @@ export const PRECHECK_PARITY = {
   "test/census-precheck-runs-the-admitted-census-suites.test.ts": { modeled: evaluateAdmittedCensusSuites },
   // W1-T5692: the literal-triggered suites join the same evaluateAdmittedCensusSuites child.
   "test/census-precheck-runs-the-suites-a-new-literal-joins.test.ts": { modeled: evaluateAdmittedCensusSuites },
+  // W1-T5693: the whole-tree structural suites join the same evaluateAdmittedCensusSuites, each in its own child.
+  "test/census-precheck-runs-the-whole-tree-suites-a-diff-can-move.test.ts": { modeled: evaluateAdmittedCensusSuites },
   // W1-T5617: CENSUS_ADMITTED_MEMBERS, run through each one's own npm script's suite.
   "test/bound-kind-declared.test.ts": { run: "census:bound-kind" },
   "test/ledger-literal-census.test.ts": { run: "census:ledger-literal" },

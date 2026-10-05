@@ -3059,6 +3059,8 @@ export interface components {
             disposition: string;
             queueClass: "actionable" | "active" | "ready-held" | "waiting" | "unknown";
             held: boolean;
+            /** The PR head's remudero-review state from the board snapshot; absent from bodies built before it was projected. */
+            reviewState?: "success" | "failure" | "pending" | "none" | "unreadable" | "not-applicable";
           })[];
         };
         /** Blocked PRs and merge holds, most urgent tone first. */

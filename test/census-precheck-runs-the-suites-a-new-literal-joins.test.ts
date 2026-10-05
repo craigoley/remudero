@@ -103,7 +103,8 @@ test("W1-T5692: triggered suite registrations expose executable scripts and leav
     assert.ok(scripts[member.script].endsWith(member.testFile));
     assert.ok(!ciOnly.includes(member.testFile));
   }
-  assert.equal(precheck.PRECHECK_TRIGGERED_SUITES.length, 5);
+  // W1-T5692's five literal-triggered suites, plus W1-T5693's three whole-tree structural ones.
+  assert.equal(precheck.PRECHECK_TRIGGERED_SUITES.length, 8);
 });
 
 test("W1-T5692: the CLI supplies head and merge-base readers to the triggered suites", (t) => {

@@ -1,0 +1,32 @@
+- id: W1-T5893
+  title: "A NARROW SET SMALLER THAN THE SHARD COUNT STILL NARROWS — selectPlanReadingShard refuses fewer candidates than shards, so under W1-T5705's live selection every narrow set below eight suites falls back to the full suite, losing the saving on exactly the smallest diffs"
+  repo: remudero
+  depends_on: [W1-T5705]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one concern — a small candidate set shards with empty shards instead of being refused
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5705 (#9350) builder's follow-up 3"
+  plan_refs: [W1-T5705, W1-T5700, W1-T4395]
+  files: [scripts/test-tier-manifest.mjs, test/a-narrow-set-smaller-than-the-shard-count-still-narrows.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main and W1-T5705's head b490fd5b (#9350).
+    `selectPlanReadingShard` (scripts/test-tier-manifest.mjs) shards a candidate list across the
+    shard count and refuses a list shorter than the count; W1-T5705's coverage step treats that
+    refusal as "fall back to --select-all". A diff whose narrow set is one to seven suites (the
+    commonest small change) therefore runs the whole instrumented suite on all eight shards.
+  design: |
+    With fewer candidates than shards, assign one candidate to each of the first N shards and give
+    the rest an explicit empty selection (the shard reports `selection: narrow` with zero suites
+    and passes), instead of refusing. An empty or unreadable candidate list still refuses, so the
+    caller still falls back on a real error.
+  acceptance:
+    - claim: "three candidates over eight shards put one suite on each of three shards and an explicit empty selection on the other five, every candidate runs exactly once, and an empty candidate list is still refused"
+      proof: "unit test: test/a-narrow-set-smaller-than-the-shard-count-still-narrows.test.ts"
+  falsifier: |
+    Keep the refusal: the three-candidate fixture throws and the test fails.

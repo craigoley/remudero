@@ -973,9 +973,11 @@ jobs:
       pull-requests: read # task-id-existence's open-PR read (`--require-open-prs`) needs this.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: checkout
         with:
           fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        id: setup-node
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -996,6 +998,7 @@ jobs:
           echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
           echo "W1-T3512 fast-lane: this diff classifies as ${CLASS}."
       - name: Install (clean, from lockfile)
+        id: install
         run: npm ci
 
       - name: rule-checks population (tree-derived census and ratchet suites, without coverage)
@@ -1179,6 +1182,7 @@ jobs:
           POSTING_RUN_ID: ${{ github.run_id }}
           POSTING_RUN_ATTEMPT: ${{ github.run_attempt }}
           GATE_REPORT_DIR: ${{ runner.temp }}/gate-reports
+          SETUP_OUTCOMES: checkout=${{ steps.checkout.outcome }} setup-node=${{ steps.setup-node.outcome }} classify=${{ steps.classify.outcome }} install=${{ steps.install.outcome }}
           OUTCOME_RULE_CHECKS: ${{ steps.rule-checks.outcome }}
           OUTCOME_LEAK_GREP: ${{ steps.leak-grep.outcome }}
           OUTCOME_LEARNINGS_BUDGET_RATCHET: ${{ steps.learnings-budget-ratchet.outcome }}
@@ -1209,6 +1213,10 @@ jobs:
           # native job conclusion computed before this task).
           # W1-T3720: the NAME stays the required context; a failing check is TITLED by the gate(s)
           # that refused (scripts/bundled-gate-report.mjs, `<step-id>=<outcome>` args).
+          SETUP_FAILED=""
+          for setup in ${SETUP_OUTCOMES:-}; do
+            case "${setup##*=}" in success|"") ;; *) SETUP_FAILED="${SETUP_FAILED:+$SETUP_FAILED }${setup}" ;; esac
+          done
           report() {
             local check_name="$1"
             shift
@@ -1222,6 +1230,10 @@ jobs:
             done
             title="$(node scripts/bundled-gate-report.mjs "$check_name" "$@")" || title="$check_name"
             [ -n "$title" ] || title="$check_name"
+            if [ -n "$SETUP_FAILED" ]; then
+              conclusion="failure"
+              title="${check_name}: setup did not succeed (${SETUP_FAILED}), so no gate ran"
+            fi
             while true; do
               if error=$(gh api "repos/${GITHUB_REPOSITORY}/check-runs" \
                 -f "name=${check_name}" \
