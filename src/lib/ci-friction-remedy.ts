@@ -215,7 +215,7 @@ export function ciFrictionCauseState(
 // ── Locating the owner of a cause ──────────────────────────────────────────────────────────
 
 export interface OwnerSearch {
-  /** Files under `src/` or `scripts/` (never tests, docs or plan) containing `term` literally, each
+  /** Files under `src/` or `scripts/` (never tests, docs or plan) containing `term` literally as a whole token, each
    *  with its hit count. */
   filesContaining: (term: string) => Array<{ file: string; hits: number }>;
   fileExists: (file: string) => boolean;
@@ -244,7 +244,18 @@ export function ownerSearchTerms(key: string, details: readonly string[]): strin
     }
   } else if (kind === "check") {
     const [first, family] = name.split(":");
-    terms.push(first === "ci-log" && family ? family : first!);
+    const check = first === "ci-log" && family ? family : first!;
+    if (first === "ci-log") {
+      for (const detail of details) {
+        for (const part of detail.split(/ — |; /)) {
+          const signature = /^(.+?): (.+)$/.exec(part);
+          if (!signature) continue;
+          const namedFamily = signature[1]!.replace(/\s*\(\d+\/\d+\)$/, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+          if (namedFamily === check) terms.push(signature[2]!);
+        }
+      }
+    }
+    terms.push(check);
   } else if (kind === "main_merge") {
     terms.push(name);
   }
@@ -269,9 +280,19 @@ export function locateCiFrictionOwner(key: string, details: readonly string[], s
     const file = key.slice("main_merge:".length);
     return search.fileExists(file) ? { files: [file], why: [`${file}: main merged into the PR over a change to it`] } : undefined;
   }
+  const terms = ownerSearchTerms(key, details);
+  const matches = terms.map((term) => ({ term, files: search.filesContaining(term) })).filter((m) => m.files.length > 0);
+  // Specificity is relative to this cause's own search, measured in distinct files, not hit volume.
+  const breadth = (m: typeof matches[number]) => new Set(m.files.map((f) => f.file)).size;
+  const narrowest = Math.min(...matches.map(breadth));
+  let specific = matches.filter((m) => breadth(m) === narrowest);
+  // A located signature wins a tie with the check family; an unmatched signature adds no evidence.
+  if (key.startsWith("check:ci-log:") && specific.some((m) => m.term !== terms.at(-1))) {
+    specific = specific.filter((m) => m.term !== terms.at(-1));
+  }
   const scores = new Map<string, { hits: number; term: string }>();
-  for (const term of ownerSearchTerms(key, details)) {
-    for (const { file, hits } of search.filesContaining(term)) {
+  for (const { term, files } of specific) {
+    for (const { file, hits } of files) {
       const prior = scores.get(file);
       if (!prior || hits > prior.hits) scores.set(file, { hits, term });
     }

@@ -26,7 +26,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmdirSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants as fsConstants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, rmdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 import { z } from "zod";
@@ -258,12 +258,23 @@ function inspectSnapshot(cwd: string): { path: string; content: string }[] {
   const files: { path: string; content: string }[] = [];
   const walk = (dir: string, prefix: string) => {
     for (const name of readdirSync(dir).sort()) {
+      if (name === ".git") throw new Error("reviewer-isolation-breach");
       const path = join(dir, name);
-      const info = lstatSync(path);
-      if (name === ".git" || info.isSymbolicLink() || (info.mode & 0o222) !== 0) throw new Error("reviewer-isolation-breach");
-      if (info.isDirectory()) walk(path, `${prefix}${name}/`);
-      else if (info.isFile()) files.push({ path: `${prefix}${name}`, content: readFileSync(path, "utf8") });
-      else throw new Error("reviewer-isolation-breach");
+      let fd: number;
+      try {
+        fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+      } catch {
+        throw new Error("reviewer-isolation-breach");
+      }
+      try {
+        const info = fstatSync(fd);
+        if ((info.mode & 0o222) !== 0) throw new Error("reviewer-isolation-breach");
+        if (info.isDirectory()) walk(path, `${prefix}${name}/`);
+        else if (info.isFile()) files.push({ path: `${prefix}${name}`, content: readFileSync(fd, "utf8") });
+        else throw new Error("reviewer-isolation-breach");
+      } finally {
+        closeSync(fd);
+      }
     }
   };
   walk(cwd, "");

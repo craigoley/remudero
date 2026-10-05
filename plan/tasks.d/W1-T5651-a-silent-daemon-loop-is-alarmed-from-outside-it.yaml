@@ -1,0 +1,42 @@
+- id: W1-T5651
+  title: "A STALLED DAEMON LOOP IS ALARMED FROM OUTSIDE IT — the only stall signals (`daemon.loop_lag`, `daemon.pulse`) are timers on the loop that stalled, so the 44m52s stall on 2026-10-04 was named only after it ended; serve's incident monitor, a separate process writing every minute through the stall, has no rule for a silent daemon"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a silent daemon is alarmed from outside its loop
+  origin: "operator session 2026-10-04: watch log 17:44Z, the #9091 daemon loop stall"
+  plan_refs: [W1-T4384, W1-T4385, W1-T484]
+  files: [src/lib/incident-invariants.ts, test/a-silent-daemon-loop-is-alarmed-from-outside-it.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9. `startLivenessPulse` (src/lib/liveness-pulse.ts) and
+    the `daemon.loop_lag` report run on the daemon's own event loop: "a blocked loop still reads
+    silent", and the lag row is written only when the loop frees. `startIncidentInvariantsMonitor`
+    (src/lib/serve.ts) runs in serve's process every minute and ledgers each `evaluateIncidentInvariants`
+    finding as `incident.event`, which the SRE lane (W1-T4385) files; its RULES (dispatch-stall,
+    repeated-refusal, loop-lag on serve's own `runtime.loop_lag`, no-merges-with-green-queue,
+    serve-memory-headroom) have none for a silent daemon. MEASURED on the live ledger, all three
+    rotation forms: the daemon (actor_pid 1407560) wrote no `daemon.*` row 16:57:34Z-17:36:35Z
+    (39.0 min) while serve wrote 39 `runtime.loop_lag` rows 17:00-17:39Z; the first stall evidence
+    was `daemon.loop_lag` lag_ms 2737080 at 17:43:29Z. Gap census of `daemon.*` rows, 10-02 12:00Z
+    to 10-04 (5353 rows): 5 gaps over 15 min (39.0, 24.4, 23.0, 20.5 — 10-02, the day
+    research/loop-stall.md diagnosed — and 19.9 at 10-03 02:44Z, the hung-review stall); every
+    other gap is at most 12.3 min. The scripts/fleet-heartbeat.sh verdict (DAEMON_STALE_AFTER_S=600)
+    reaches only the hourly watcher workflow.
+  design: |
+    (i) A `daemon-loop-silent` rule in RULES (src/lib/incident-invariants.ts), long window 15 min:
+    bad when the window holds at least one row (the ledger is live; serve's own minute row
+    guarantees one) and no row whose step starts with `daemon.` — the same prefix `deriveLastPoll`
+    reads. The message names the window's row count and the newest non-daemon step.
+    (ii) It rides the existing serve monitor and `incident.event` path unchanged, so it fires from
+    a process the stall cannot block. NOT THIS TASK: restarting the daemon from serve.
+  acceptance:
+    - claim: "a 15-minute window with serve rows and no daemon.* row yields a daemon-loop-silent finding, while a window with one daemon.pulse row, or an empty ledger, yields none"
+      proof: "unit test: test/a-silent-daemon-loop-is-alarmed-from-outside-it.test.ts"
+  falsifier: |
+    Remove the rule from RULES; the stalled-window case yields no finding and the test fails.

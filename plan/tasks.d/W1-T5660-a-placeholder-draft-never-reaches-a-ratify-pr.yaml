@@ -1,0 +1,38 @@
+- id: W1-T5660
+  title: "A PLACEHOLDER DRAFT NEVER REACHES A RATIFY PR — lintDraftedFragment returns zero violations for #9099's three drafted tasks: titles naming their own id, unit-test proofs naming a .md outside test/, files under a nonexistent plan/ratification/, type: review (which the mounts-row census refuses), and an ids-only stamp label"
+  repo: remudero
+  depends_on: [W1-T5541]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one surface — the W1-T4700 draft floor's placeholder checks
+  origin: "operator session 2026-10-04: watch log, #9099 (closed) placeholder drafts passed the W1-T4700 floor"
+  plan_refs: [W1-T4700, W1-T5541, W1-T5348]
+  files: [src/lib/inbox.ts, src/lib/task-linter.ts, test/a-placeholder-draft-never-reaches-a-ratify-pr.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-04 on origin/main 284015b9: `lintDraftedFragment` on #9099's drafted fragment
+    (three tasks, with its stamp) returns `[]`; the positive control (the same fragment with
+    `repo: master-plan`) returns 3 violations. It passes: titles naming their own id ("draft initial
+    W1-T<n> placeholder"); `unit test: plan/ratification/W1-T<n>.md`, which parses as a name-filtered
+    title that `proofUnitTestUnresolvableViolations` skips (`declaresTestFile` false on a plan-only
+    filing); `files:` under the nonexistent `plan/ratification/`; `type: review`, which trips
+    test/mounts-row-readers.test.ts's `UNREAD_ROW_ALLOWLIST.review`; a stamp whose label is only ids
+    (`stampLineViolations` checks only the prefix and the `->` id list). W1-T5541 (queued, same file)
+    covers prose-less shards and directory `files:`; this task does not duplicate those. Adding the
+    mounts-row census to `planPrPreflight` is an operator decision; refusing `type: review` at the
+    floor closes the same hole for drafts.
+  design: |
+    Draft-only checks in the W1-T4700 floor, each a block, so no shard on main regresses: a title
+    containing the task's own id or `NEW-n`; a `unit test:` label shaped like a path (a `/` and an
+    extension) outside `test/`; a `files:` entry whose top directory does not exist in the worktree
+    (an existence predicate injected from `fileRatificationDraft`); a `type:` outside the dispatched
+    set; a stamp label made only of ids.
+  acceptance:
+    - claim: "lintDraftedFragment refuses #9099's fragment with at least one block per drafted task, and a well-formed draft still passes"
+      proof: "unit test: test/a-placeholder-draft-never-reaches-a-ratify-pr.test.ts"
+  falsifier: |
+    Remove the new checks; the #9099 fragment returns `[]` and the test fails.

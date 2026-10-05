@@ -1,0 +1,53 @@
+- id: W1-T5748
+  title: "A BEHIND PLAN PR MERGES WHEN ITS MERGED PLAN IS SAFE, NOT ONLY AFTER A REFRESH — `directMergePreflight` updates every behind plan PR (`plan_pr_behind`) and leaves it for fresh checks and review (~15 min), main moves every few minutes, so batch 9 (#9138) and batch 10 (#9155) were re-headed 2 and 3 times between 20:36Z and 21:29Z on 2026-10-04 and never merged"
+  repo: remudero
+  depends_on: [W1-T5615, W1-T5472]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — the behind-plan-PR merge decision reads the merged plan, not the distance
+  band_meaning: span
+  origin: "operator session 2026-10-04: observed live on #9138/#9155 (coordinator, 21:45Z); W1-T5615 (#9119) follow-up"
+  plan_refs: [W1-T5615, W1-T5472, W1-T2855, W1-T5696, W1-T5733, W1-T5749]
+  files: [src/lib/arm-auto-merge.ts, src/lib/plan-pr-merge-safety.ts, test/a-behind-plan-pr-merges-when-its-merged-plan-is-safe.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 70bb29f8 and the live core ledger (read only; 9,923 rows read,
+    19:00-21:50Z). `directMergePreflight` (src/lib/arm-auto-merge.ts) returns `direct-merge` for a
+    behind PR only when GitHub does not require up-to-date branches AND `readPlanTouch` reads
+    `untouched`; W1-T5472 made every plan-touching (or unreadable) behind PR call `updateBranch`
+    and return `direct-merge-updated` with `reason: "plan_pr_behind"`, "awaiting fresh checks and
+    review". W1-T5615 (#9119) routes every plan PR through that path. A plan PR's checks plus its
+    review take ~15 min; main merged more often than that all afternoon, so the refreshed head is
+    behind again by the time it is green. LIVE: `automerge.direct_merge_updated` reason
+    plan_pr_behind for #9155 at 20:36:03, 21:00:18 and 21:22:27 (heads 14df9d6d -> c80ed790 ->
+    fd26d2c8 -> 634285b5) and for #9138 at 21:05:48 and 21:28:47 (2b739554 -> ced95c15 ->
+    bc5a54f2, then cc291a4b), each followed by `sweep.disposed` "review never posted — running one
+    exact-input review"; neither merged in the window. The hazard W1-T5472 guards is narrower than
+    "behind": #8871 merged two commits behind and git joined its `priority:` line to #8872's in one
+    shard, a duplicate key that refused the whole plan. Two plan PRs that touch disjoint shards, or
+    whose merge into current main loads and lints, cannot produce it. Batch-10 W1-T5696 (#9155,
+    open) makes the sweep's DISTANCE refresh change-aware; it does not touch this preflight branch.
+  design: |
+    Before `updateBranch` on a behind plan-touching PR, call `decidePlanPrMergeSafety(` from a new
+    src/lib/plan-pr-merge-safety.ts: (a) DISJOINT — the PR's changed plan paths (its file list,
+    already read for `readPlanTouch`) share no path with the plan paths main changed since the PR's
+    merge base (one compare read); or (b) MERGED TREE LOADS — `git merge-tree --write-tree` of the
+    PR head into fetched origin/main has no conflict, and the plan loaded from that tree's blobs
+    (`mergePlanBlobsQuarantiningDuplicates`) quarantines nothing and passes `lint-plan`'s structural
+    checks. Either one: proceed to `direct-merge` and record which (`plan_pr_merge_safe: disjoint |
+    merged_tree`). Neither, or an unreadable input: refresh as today. Bound the refreshes per PR
+    (counted from prior `direct_merge_updated` rows with reason plan_pr_behind); past the bound,
+    escalate to the operator naming the heads instead of updating again. All reads run under the
+    async arm driver where W1-T5284 provides one.
+  acceptance:
+    - claim: "a behind plan PR whose shards are disjoint from main's plan changes since its merge base merges directly without an update, one whose merged tree loads and lints merges directly, an overlapping PR whose merged tree carries a duplicate key is updated, and a PR past the refresh bound is escalated instead of updated"
+      proof: "unit test: test/a-behind-plan-pr-merges-when-its-merged-plan-is-safe.test.ts"
+    - claim: "the direct-merge preflight calls the plan merge-safety decision"
+      proof: "grep: decidePlanPrMergeSafety( in src/lib/arm-auto-merge.ts"
+  falsifier: |
+    Keep the unconditional `plan_pr_behind` update: the disjoint fixture is updated instead of
+    merged and the test fails.

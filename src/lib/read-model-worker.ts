@@ -15,7 +15,7 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, constants, existsSync, fstatSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { isMainThread, parentPort, Worker, workerData } from "node:worker_threads";
+import { isMainThread, parentPort, SHARE_ENV, Worker, workerData } from "node:worker_threads";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { createGithubKeepWarm, type GithubKeepWarm } from "./github-refresh-pacer.js";
@@ -459,7 +459,7 @@ export function threadOracle(opts: { workerUrl?: URL; escalationRepository?: str
   };
   const spawnOracle = (): Worker => {
     const data: ReadModelOracleData = { kind: READ_MODEL_ORACLE_KIND, ...(opts.escalationRepository ? { escalationRepository: opts.escalationRepository } : {}) };
-    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv, resourceLimits: { maxOldGenerationSizeMb: READ_MODEL_ORACLE_HEAP_MB } });
+    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv, env: SHARE_ENV, resourceLimits: { maxOldGenerationSizeMb: READ_MODEL_ORACLE_HEAP_MB } });
     spawned.unref();
     spawned.on("message", (msg: { type?: string; id?: number; result?: OracleSliceResult }) => {
       if (msg.type === "done" && msg.id === pending?.id) settle(msg.result!);
@@ -1310,7 +1310,7 @@ export function threadViews(opts: {
   let building: { view: string; instance?: string; since: number; reported: boolean } | undefined;
   const spawnViews = (): void => {
     const data: ReadModelViewsData = { ...opts.data, kind: READ_MODEL_VIEWS_KIND };
-    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv });
+    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv, env: SHARE_ENV });
     worker = spawned;
     building = undefined;
     spawned.unref();
@@ -1759,7 +1759,8 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       ...(opts.slowLane ? { slowLane: opts.slowLane } : {}),
       ...(opts.viewsModule ? { viewsModule: opts.viewsModule } : {}),
     };
-    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv });
+    // SHARE_ENV, as on every long-lived thread here: escalations need serve's refreshed GH_TOKEN (#9156).
+    const spawned = new Worker(opts.workerUrl ?? new URL(import.meta.url), { workerData: data, execArgv: process.execArgv, env: SHARE_ENV });
     signal = new Int32Array(shared);
     worker = spawned;
     heardAt = clock.now();

@@ -1,0 +1,40 @@
+- id: W1-T5731
+  title: "POST /v1/FEEDBACK ANSWERS 503 ON AN UNREADABLE LANDING QUEUE — `buildSubmitFeedbackRoute` calls `queuedFeedbackLandings` after the capture is staged and before its ledger row, so a queue dir that cannot be read throws out of the handler as a 500 with no `panel.feedback_submitted` row, while /v1/feedback/decision refuses the same condition 503 `landing_queue_unreadable`"
+  repo: remudero
+  depends_on: [W1-T5627]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — POST /v1/feedback refuses an unreadable queue as its siblings do
+  band_meaning: span
+  origin: "operator session 2026-10-04: follow-up audit (research/audit/followups.md) item 89, from #9158 (W1-T5628) review"
+  plan_refs: [W1-T5627, W1-T5628, W1-T5525]
+  files: [src/lib/panel-graph.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/post-feedback-answers-503-on-an-unreadable-landing-queue.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 70bb29f8. In `buildSubmitFeedbackRoute` (src/lib/panel-graph.ts,
+    POST /v1/feedback) the handler runs `captureFeedback`, `queueFeedbackRecord`, the reply's
+    `setFeedbackStatus`, then `new Set(queuedFeedbackLandings(deps.inboxRoot))` with no try. That
+    reader walks the queue with `listRelFiles` (src/lib/feedback-landing.ts), whose `readdirSync`/
+    `statSync` throw on an unreadable dir; the throw escapes `jsonAction` (src/lib/panel-actions.ts
+    has no catch around `act`), so the client gets a 500 after the capture was written and staged,
+    and the `panel.feedback_submitted` ledger row is never appended. The decision route in the same
+    file catches the same reader and answers 503 `landing_queue_unreadable` with a
+    `serve.feedback_landing_queue_unreadable` row (W1-T5627). #9158 (W1-T5628, open at this sha)
+    adds a second throwing read on this path: `findFeedbackBySubmissionKey` with a `stateRoot`
+    calls `readQueuedFeedbackRecords` before the capture.
+  design: |
+    Read the queue once, up front, in a try: an unreadable queue answers 503
+    `landing_queue_unreadable` BEFORE any capture is written, logs
+    `serve.feedback_landing_queue_unreadable` with route /v1/feedback, and declares the 503 in
+    openapi/daemon.yaml (api-client regenerated). A failure after the capture is staged records the
+    ledger row with `landing_error`, never a bare 500.
+  acceptance:
+    - claim: "with an unreadable landing queue, POST /v1/feedback answers 503 landing_queue_unreadable, writes no capture, and logs the refusal for its route; a readable queue still answers 200 with landing queued"
+      proof: "unit test: test/post-feedback-answers-503-on-an-unreadable-landing-queue.test.ts"
+  falsifier: |
+    Drop the up-front read: the unreadable-queue request answers 500 after writing a capture, and the
+    test fails.

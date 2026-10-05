@@ -1,0 +1,42 @@
+- id: W1-T5744
+  title: "A SHARED-ENV THREAD RUNS NO MAIN-THREAD SETUP WRITE — a worker thread re-runs the test setup through the runner's execArgv, and tmp-hygiene.ts's `appendGitConfigEnv` calls and `installNoLiveRemote`'s `pushInsteadOf` appends and token writes run there unguarded; under `env: SHARE_ENV` (the read plane since #9156, the read-model threads with #9160) they land in the PARENT's env, so each spawned thread grows the test process's GIT_CONFIG_COUNT"
+  repo: remudero
+  depends_on: [W1-T5624]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — the test setup's process.env writes are main-thread-only
+  band_meaning: span
+  origin: "operator session 2026-10-04: #9160 read-model SHARE_ENV hotfix notes"
+  plan_refs: [W1-T5624, W1-T5678, W1-T4805, W1-T5736]
+  files: [test/setup/tmp-hygiene.ts, test/setup/no-live-remote.ts, test/a-shared-env-thread-runs-no-main-thread-setup-write.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 70bb29f8 and #9160 (open, head cdf66405, which changes only
+    src/lib/read-model-worker.ts and its own test, not test/setup). A Worker inherits the runner's
+    `--import ./test/setup/tmp-hygiene.ts` execArgv, so the setup re-runs in each thread (W1-T5624's
+    own comment says so). W1-T5624 guarded only the dir-minting halves: `installGhRefusalStub` and
+    `installNoLiveRemote`'s GH_CONFIG_DIR sit behind `isMainThread`; batch-9 W1-T5678 (#9138, open)
+    guards the test-home mint and the HOME reassignment. Still unguarded in a thread:
+    tmp-hygiene.ts's `appendGitConfigEnv("gc.auto", "0")` and `("receive.autogc", "false")`, and
+    `installNoLiveRemote`'s `url.<dead>.pushInsteadOf` appends plus its RMD_SCRATCH_SWITCH,
+    GIT_TERMINAL_PROMPT, GH_TOKEN and GITHUB_TOKEN writes, all before its `if (!mainThread) return {}`.
+    With a copied env those writes die with the thread. With `env: SHARE_ENV` they are the parent's
+    env: every spawn appends another set of GIT_CONFIG_KEY_n/VALUE_n entries to the test process,
+    and every later git child it spawns carries them. Not yet observed failing; the shared-env
+    population is hours old.
+  design: |
+    In a worker thread the setup modules make no `process.env` write: the GIT_CONFIG appends and
+    `installNoLiveRemote`'s env writes move behind `isMainThread` (a thread already holds the
+    parent's values, shared or copied). Leave the HOME half to W1-T5678. A test spawns a SHARE_ENV
+    worker under the real setup execArgv and asserts the parent's GIT_CONFIG_COUNT and every
+    GIT_CONFIG_KEY_n are unchanged after the thread starts.
+  acceptance:
+    - claim: "a SHARE_ENV worker thread started under the test setup leaves the parent's GIT_CONFIG_COUNT and GIT_CONFIG entries unchanged"
+      proof: "unit test: test/a-shared-env-thread-runs-no-main-thread-setup-write.test.ts"
+  falsifier: |
+    Drop the `isMainThread` guard on tmp-hygiene.ts's gc appends: the parent's GIT_CONFIG_COUNT grows
+    after the thread starts and the test fails.

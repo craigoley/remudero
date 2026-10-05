@@ -1,0 +1,45 @@
+- id: W1-T5749
+  title: "THE SWEEP NEVER ACTS ON A HEAD THE PR HAS LEFT — after #9138 moved to cc291a4b, the full sweep kept disposing it at 2b739554 and arming against that head every pass (21:31-21:46Z on 2026-10-04: `arm outcome: ledger-refused` while the same row's arm evidence read head cc291a4b clean, reviewed and green), and #9155 escalated `stale-pending` at a head it had abandoned an hour earlier"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — a disposition acts only on the PR's live head
+  band_meaning: span
+  origin: "operator session 2026-10-04: observed live on #9138/#9155 (coordinator, 21:45Z)"
+  plan_refs: [W1-T230, W1-T5615, W1-T5726, W1-T5748, W1-T5690]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/the-sweep-never-acts-on-a-head-the-pr-has-left.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 in the live core ledger (read only), run DAEMON-1791146175125. #9138's head
+    moved 2b739554 -> ced95c15 (21:05:48 update) -> bc5a54f2 (21:28:47) -> cc291a4b. Light passes
+    disposed it at the live head (21:39:19, 21:40:11, 21:43:28, 21:45:36, 21:46:54: cc291a4b,
+    `deferred to full sweep (light pass)`), while the full sweep's rows at 21:27:28, 21:31:37,
+    21:36:19, 21:41:28 and 21:46:22 carry `head_sha` 2b739554, `disposition: mergeable`,
+    `arm_attempted: true`, `arm_outcome: ledger-refused`, and an `arm_evidence.headSha` of
+    bc5a54f2/cc291a4b (at 21:36:19 onward: mergeableState clean, reviewPublished true,
+    checksGreen true). `armAutoMergeDetailed` (src/lib/arm-auto-merge.ts) re-reads the head and
+    refuses when the ledger verdict does not match it, so the full sweep's stale snapshot turns a
+    mergeable PR into a refusal every pass, and the refusal is recorded against a head that no
+    longer exists. #9155 likewise: rows at c80ed790 (21:27:53, 21:33:27, 21:36:58) after its head
+    moved to fd26d2c8 at 21:22:27, ending in `stale-pending — checks pending 65m (>= 60m ceiling) —
+    escalating` at 21:41:25 and 21:46:15 for that abandoned head. The full sweep's PR snapshot
+    source was not identified at filing; finding it is the first step.
+  design: |
+    (i) Name the source: find which full-sweep input supplies a head older than the live one (a
+    cached PR list, a per-pass snapshot reused across passes, or a head taken from the last review
+    verdict) and fix it at the source. (ii) Guard the act: immediately before any acting
+    disposition (arm, update, review dispatch, escalation) compare the snapshot head with the head
+    the act re-reads; on a mismatch, record `sweep.head_moved` with both shas and re-derive the
+    disposition from the live head on the next pass instead of acting. A disposition row's
+    `head_sha` is always the head it acted on.
+  acceptance:
+    - claim: "a full-sweep pass whose PR snapshot carries an older head than the live head records sweep.head_moved with both shas and neither arms nor escalates at the old head, while a pass whose snapshot matches acts as before"
+      proof: "unit test: test/the-sweep-never-acts-on-a-head-the-pr-has-left.test.ts"
+  falsifier: |
+    Remove the head comparison: the stale-snapshot fixture arms against the old head, the ledger
+    gate refuses it, and the test fails.

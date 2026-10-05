@@ -117,7 +117,7 @@ import {
   type JudgeLabelsInput,
   type JudgeLabelStore,
 } from "./judge-calibration.js";
-import { isCashSpendProducer, isProducedSpendRow, spendAmountUsd, spendRoleOf } from "./spend-rows.js";
+import { isCashSpendProducer, spendAmountUsd, spendRoleOf } from "./spend-rows.js";
 import {
   ROUTING_POOL_VERSION,
   buildRoutingPoolProjection,

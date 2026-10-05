@@ -1,0 +1,35 @@
+- id: W1-T5671
+  title: "A HANDED-OFF-HEAD JUDGMENT IS STARTED ONCE PER HEAD AND OUTLIVES NO SWEEP — a flight that settles after the pass's ledger read is deleted and started again from the stale snapshot, and one-shot `rmd sweep` exits through `flushThenExit` with its background judgment still in flight, after its spend and before its decision row"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one defect — a judgment's outcome is not kept past its flight
+  origin: "operator session 2026-10-04: watch log, W1-T5523 follow-ups (started twice; one-shot sweep loses it)"
+  plan_refs: [W1-T5523, W1-T4063]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/a-handed-off-head-judgment-is-started-once-and-awaited-by-a-one-shot-sweep.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9. `runSweep` (src/lib/sweep.ts) reads `ledgerLines` once
+    per pass; a flight that settles after that read is deleted from `pool.flights`, so when the loop
+    reaches that PR `handedOffHeadAwaitingJudgment(pr, ledgerLines)` sees no decision row,
+    `pool.flights.has(...)` is false, and `startHandedOffHeadJudgment` runs a second model call for
+    the same `pr@head`. Separately `sweepCommand` (src/run-task.ts) returns 0 right after
+    `runSweep`, `main` calls `flushThenExit` -> `process.exit(code)` (src/lib/flush-exit.ts), and the
+    pool timer is `unref()`'d, so repeated `rmd sweep` runs pay one model call per handed-off head
+    each time and never arm it.
+  design: |
+    (i) The pool keeps a settled proceed/escalate outcome keyed `pr@head`, pruned when the head
+    leaves the open set; `holdHandedOffHeadForRiskJudgment` consults it before starting. An
+    unavailable outcome is still dropped so it is asked again.
+    (ii) Export a bounded `awaitHandedOffHeadJudgments(pool)`; `sweepCommand` gives `runSweep` its
+    own pool and awaits it (bounded by `timeoutMs`) before printing its summary.
+  acceptance:
+    - claim: "a judgment that settles between the pass's ledger read and its PR is acted on without a second judge call, and a one-shot sweep returns only after its started judgments settle or reach their bound"
+      proof: "unit test: test/a-handed-off-head-judgment-is-started-once-and-awaited-by-a-one-shot-sweep.test.ts"
+  falsifier: |
+    Delete the settled-outcome lookup; the judge fake is called twice for one `pr@head`.
