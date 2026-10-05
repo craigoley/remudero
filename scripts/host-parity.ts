@@ -55,7 +55,7 @@ import {
 function runNodeTest(cwd: string, target: string): string {
   const r = spawnSync(
     "node",
-    ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", target],
+    ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", target],
     { cwd, encoding: "utf8", maxBuffer: 256 * 1024 * 1024 },
   );
   return `${r.stdout ?? ""}\n${r.stderr ?? ""}`;

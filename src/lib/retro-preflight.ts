@@ -396,6 +396,7 @@ async function runAttempt(worktreePath: string, run: RetroPrepublishRunner, now:
       "scripts/test-with-retry.mjs",
       process.execPath,
       "--test",
+      "--test-reporter=tap",
       "--import", "tsx",
       "--import", "./test/setup/tmp-hygiene.ts",
       ...enumeration.suites,

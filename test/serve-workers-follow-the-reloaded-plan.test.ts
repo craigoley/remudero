@@ -72,7 +72,7 @@ const adoptions = (rows: Row[], path?: string): Row[] => rows.filter(([step, row
 test("a plan-only commit the slot's working tree never sees reaches the board worker and a views thread after reloadServePlan", async (t) => {
   const fixture = slot();
   const { ids } = boardWorker(t, fixture);
-  const view = new Worker(new URL("./helpers/plan-pin-view-thread.ts", import.meta.url), { workerData: { planPath: fixture.planPath, ledgerDir: fixture.dir, ids: ["W1-T1", "W1-T2"] }, execArgv: process.execArgv });
+  const view = new Worker(new URL("./helpers/plan-pin-view-thread.ts", import.meta.url), { workerData: { planPath: fixture.planPath, ledgerDir: fixture.dir, ids: ["W1-T1", "W1-T2"] } });
   t.after(() => void view.terminate());
   const viewIds = async (): Promise<string[]> => {
     const answer = new Promise<string[]>((resolve) => view.once("message", resolve));

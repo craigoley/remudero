@@ -152,7 +152,7 @@ export function createBoardProjectionWorker(
         delayMs: options.delayMs ?? 0,
       };
       try {
-        thread = new Worker(options.workerUrl ?? new URL(import.meta.url), { workerData: data, transferList: [port2], execArgv: process.execArgv });
+        thread = new Worker(options.workerUrl ?? new URL(import.meta.url), { workerData: data, transferList: [port2] });
       } catch (error) {
         // A spawn failure is not an absent projection: it is surfaced to the caller below with its
         // cause as the `worker_spawn_failed` reason, so the board falls back knowingly.

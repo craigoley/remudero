@@ -234,20 +234,12 @@ test("W1-T2440: if the Worker itself cannot even be constructed, warm() falls ba
   const dir = mkdtempSync(join(tmpdir(), "rmd-board-prewarm-spawnfail-"));
   const counterFile = join(dir, "calls.log");
   const ghBin = writeFakeGh(dir, counterFile);
-  const gh: GitHub = buildBatchedGithub("o", "r", { ghBin });
-
   // A REAL, deterministic way to make `new Worker(...)` throw SYNCHRONOUSLY, never a mocked
-  // constructor: Node's worker_threads validates `execArgv` against an allow-list and throws
-  // `ERR_WORKER_INVALID_EXEC_ARGV` for a flag outside it — `runPrewarmWorker` passes
-  // `process.execArgv` straight through unmodified, so mutating the REAL, live global array
-  // (never anything internal to status.ts) reproduces the exact failure this fallback exists
-  // for. Pushed and popped around the ONE synchronous call that can observe it.
-  process.execArgv.push("--this-flag-does-not-exist-w1-t2440");
-  try {
-    gh.warm?.();
-  } finally {
-    process.execArgv.pop();
-  }
+  // constructor: a worker URL with a non-file scheme is refused by the constructor itself
+  // (`ERR_INVALID_URL_SCHEME`, on Node 22 and 24 alike). The worker inherits its execArgv, so an
+  // invalid flag pushed onto `process.execArgv` no longer reaches it and cannot be the seam.
+  const gh: GitHub = buildBatchedGithub("o", "r", { ghBin, workerUrl: new URL("https://invalid.example/prewarm-worker.js") });
+  gh.warm?.();
 
   // The fallback runs FULLY SYNCHRONOUSLY (a blocking execFileSync, exactly like the pre-worker
   // path) — no waitUntil needed; readState is already settled the instant warm() returns.

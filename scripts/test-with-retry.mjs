@@ -254,6 +254,16 @@ function isNodeCommand(cmd) {
   return basename(cmd) === "node" || basename(cmd).startsWith("node.");
 }
 
+/** The failure parsers above read TAP only. Node 22 defaulted a piped `node --test` to TAP; Node 24
+ *  defaults to `spec` on every stream, which would leave a failing run with no attributable file, no
+ *  scoped retry and no flake-ledger row. So a Node test command that names no reporter is given TAP
+ *  explicitly; one that names its own reporter is left as written. */
+export function withTapReporter(cmd, args) {
+  if (!isNodeCommand(cmd) || !args.includes("--test") || args.some((arg) => arg.startsWith("--test-reporter"))) return [...args];
+  const at = args.indexOf("--test") + 1;
+  return [...args.slice(0, at), "--test-reporter=tap", ...args.slice(at)];
+}
+
 function isTestFileSelector(arg) {
   return /\.test\.(?:[cm]?[jt]s)$/.test(arg) || (/[*?[\]]/.test(arg) && /\.test\./.test(arg));
 }
@@ -267,7 +277,7 @@ export function retryInvocationForFailedFiles(cmd, args, failedFiles) {
   if (args[0]?.endsWith("scripts/test-tier-manifest.mjs")) {
     return {
       cmd,
-      args: ["--test", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", ...failedFiles],
+      args: ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", ...failedFiles],
       scoped: true,
     };
   }
@@ -309,7 +319,7 @@ export function coverageRetryInvocation(cmd, args, failedFiles, env = process.en
   }
   // EMPTY, NOT DELETED: Node copies its own NODE_V8_COVERAGE into any child whose env lacks the
   // key, so a deleted key still hands an enclosing coverage run's directory to the retry.
-  return { cmd, args: [...retained, ...failedFiles], env: { ...env, NODE_V8_COVERAGE: "" } };
+  return { cmd, args: [...withTapReporter(cmd, retained), ...failedFiles], env: { ...env, NODE_V8_COVERAGE: "" } };
 }
 
 function runOnce(cmd, args, env = process.env) {
@@ -376,7 +386,8 @@ function recordFlakeEvidence(headline, names) {
 export async function main(argv) {
   const coverageFirstPass = argv[0] === "--coverage-first-pass";
   const rawCoverageDir = coverageFirstPass ? argv[1] : undefined;
-  const [cmd, ...args] = coverageFirstPass ? argv.slice(2) : argv;
+  const [cmd, ...given] = coverageFirstPass ? argv.slice(2) : argv;
+  const args = cmd ? withTapReporter(cmd, given) : given;
   if (!cmd || (coverageFirstPass && !rawCoverageDir)) {
     console.error("usage: test-with-retry.mjs <command> [args...]");
     console.error("       test-with-retry.mjs --coverage-first-pass <raw-coverage-dir> <command> [args...]");
