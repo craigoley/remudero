@@ -1,15 +1,18 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statfsSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, statfsSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { availableParallelism, tmpdir } from "node:os";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { availableParallelism, hostname, tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 
 import { readAffectedSuitesInput, selectAffectedSuites, type AffectedSuitesInput } from "./affected-suites.js";
 import { defaultPreflightSpawn, spawnFailureDetail, typecheckStep, type PreflightSpawn } from "./commit-message.js";
 import { ciControlPlaneParity } from "./ci-control-plane.js";
+import { systemClock } from "./clock.js";
 import { resolveHostPole, type HostPole } from "./host-parity.js";
+import { defaultIsPidAlive } from "./drain-lock.js";
+import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
 // W1-T3099: the judge's own two primitives, imported rather than re-derived.
 import { criterionFieldTampered, planOnlyDiff } from "./review.js";
 
@@ -983,6 +986,54 @@ function testWithCoverageShards(
   };
 }
 
+interface CoverageLockHolder {
+  pid: number;
+  host: string;
+  startedAt: string;
+  scratch: string;
+}
+
+function parseCoverageLockHolder(raw: string): CoverageLockHolder {
+  const holder = JSON.parse(raw);
+  if (!Number.isSafeInteger(holder?.pid) || holder.pid <= 0 ||
+      typeof holder.host !== "string" || holder.host.length === 0 ||
+      typeof holder.startedAt !== "string" || !Number.isFinite(Date.parse(holder.startedAt)) ||
+      typeof holder.scratch !== "string") {
+    throw new Error("unattributed coverage lock: invalid holder record");
+  }
+  return holder;
+}
+
+function acquireCoverageLock(lockDir: string): { reason: string } | undefined {
+  try {
+    mkdirSync(lockDir);
+    return undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") return { reason: `cannot acquire ${lockDir}: ${String(error)}` };
+  }
+  try {
+    let scratch: string | undefined;
+    const result = reclaimStaleLock(join(lockDir, "holder.json"), {
+      parseHolder: parseCoverageLockHolder,
+      isStale: (holder) => {
+        scratch = holder.scratch;
+        return isHolderStale(holder, { isPidAlive: defaultIsPidAlive });
+      },
+    });
+    if (result.outcome === "live") return { reason: `another local gate owns ${lockDir} (pid ${result.holder.pid} on ${result.holder.host})` };
+    if (result.outcome !== "reclaimed") return { reason: `another local gate owns ${lockDir}; unattributed or changed lock (${result.outcome})` };
+    if (scratch !== undefined && isAbsolute(scratch) && /^rmd-c-[0-9a-f]{12}$/.test(basename(scratch))) {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+    // An empty-only removal cannot erase a replacement holder's record (W1-T5655).
+    rmdirSync(lockDir);
+    mkdirSync(lockDir);
+    return undefined;
+  } catch (error) {
+    return { reason: `another local gate owns ${lockDir}; unattributed or unreclaimable lock (${String(error)})` };
+  }
+}
+
 export function testWithCoverageLeaf(
   repoRoot: string, spawn: PreflightSpawn, lcovPath: string,
   freeBytes: (path: string) => number = (path) => {
@@ -1001,16 +1052,18 @@ export function testWithCoverageLeaf(
     return { ok: false, detail: `FAIL — coverage-ratchet: scratch volume has ${available} free bytes; need ${COVERAGE_FREE_RESERVE_BYTES} before starting coverage shards. Set TMPDIR to an isolated scratch volume with sufficient space.` };
   }
   const lockDir = coverageGateLockDir(repoRoot, lockDiscriminator);
-  try {
-    mkdirSync(lockDir);
-  } catch (error) {
-    return { ok: false, detail: `FAIL — coverage-ratchet: another local gate owns ${lockDir}; wait for it to finish or use an isolated scratch volume (${String(error)}).` };
-  }
+  const lockFailure = acquireCoverageLock(lockDir);
+  if (lockFailure !== undefined) return { ok: false, detail: `FAIL — coverage-ratchet: ${lockFailure.reason}` };
   const nested = activeTmp !== undefined && existsSync(stableScratch) && pathIsWithin(stableScratch, activeTmp);
 
   let scratchDir = stableScratch;
   let ownedNestedScratch: string | undefined;
   try {
+    const holder: CoverageLockHolder = {
+      pid: process.pid, host: hostname(), startedAt: systemClock.iso(),
+      scratch: nested ? join(stableScratch, "n-pending") : stableScratch,
+    };
+    writeFileSync(join(lockDir, "holder.json"), JSON.stringify(holder), { flag: "wx" });
     mkdirSync(join(repoRoot, "coverage"), { recursive: true });
     if (nested) {
       // Resolve aliases before making the child; never clear an outer gate's scratch.
@@ -1022,11 +1075,12 @@ export function testWithCoverageLeaf(
       mkdirSync(stableScratch, { recursive: true });
       scratchDir = realpathSync(stableScratch);
     }
+    writeFileSync(join(lockDir, "holder.json"), JSON.stringify({ ...holder, scratch: scratchDir }));
     return testWithCoverageShards(repoRoot, spawn, lcovPath, scratchDir, join(scratchDir, "raw-shards"));
   } finally {
     if (ownedNestedScratch !== undefined) {
       rmSync(ownedNestedScratch, { recursive: true, force: true });
-    } else {
+    } else if (!nested) {
       rmSync(stableScratch, { recursive: true, force: true });
     }
     rmSync(lockDir, { recursive: true, force: true });
@@ -3478,11 +3532,17 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
   // PASS TWO: with every census cost measured on the SAME machine in the SAME run, a runaway is
   // the entry costing several times the run's TYPICAL (median) entry — a ratio neither a slow
   // runner nor one accidentally-fast sibling can manufacture (W1-T3408). An entry whose own
-  // command FAILED is left alone. TIERED: a first crossing is re-measured once, alone; only a
+  // command FAILED is left alone. TIERED: a first crossing is re-measured once; only a
   // SECOND crossing beyond a 10% confirmation margin refuses — a loaded runner crossed by 2%
   // on PR #6821, and current no-draft census crossed by 0.7–5.7%, with PASSing commands.
+  // W1-T5676: the re-measure is judged against the median-cost entry RE-TIMED back to back with
+  // it, never pass one's median — a reference fixed at pass-one load refused a 4897ms re-measure
+  // against 4884ms on a loaded host (2026-10-04). The median POSITION never crosses: a crossing
+  // entry costs over 4x the median, the entry there at most 2x it.
   const threshold = censusRunawayThresholdMs([...censusCosts.values()]);
   if (threshold !== undefined) {
+    const byCost = [...censusCosts].sort((a, b) => a[1] - b[1]);
+    const referenceIndex = byCost[Math.floor(byCost.length / 2)]![0];
     for (const [i, firstMs] of censusCosts) {
       if (firstMs <= threshold || !steps[i].ok) continue;
       const { job, script } = gateSteps[i];
@@ -3496,11 +3556,16 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
         steps[i] = { ...again, detail: `${again.detail} (on the re-measure after ${firstMs}ms crossed ${threshold}ms)` };
         continue;
       }
-      const confirmationThreshold = Math.ceil(threshold * FAST_GATE_CENSUS_REMEASURE_MARGIN);
+      const reference = gateSteps[referenceIndex];
+      const refAgainMs = timedCensus(reference.script).elapsedMs;
+      const refAgain = `${reference.job} re-timed back to back at ${refAgainMs}ms`;
+      const confirmationThreshold = Math.ceil(
+        Math.max(FAST_GATE_CENSUS_REFERENCE_FLOOR_MS, refAgainMs) * FAST_GATE_CENSUS_RUNAWAY_MULTIPLE * FAST_GATE_CENSUS_REMEASURE_MARGIN,
+      );
       if (againMs <= confirmationThreshold) {
         steps[i] = {
           ...steps[i],
-          detail: `${steps[i].detail} — RE-MEASURED: ${firstMs}ms crossed the ${threshold}ms runaway bound once; one re-run took ${againMs}ms, within the ${confirmationThreshold}ms confirmation margin (passed)`,
+          detail: `${steps[i].detail} — RE-MEASURED: ${firstMs}ms crossed the ${threshold}ms runaway bound once; one re-run took ${againMs}ms, against ${refAgain}, within the ${confirmationThreshold}ms confirmation margin (passed)`,
         };
         continue;
       }
@@ -3510,8 +3575,8 @@ export function runPreflightFast(repoRoot: string, deps: PreflightFastDeps = {})
         ok: false,
         detail:
           `${job}: RUNAWAY — npm run --silent ${script} took ${measured}, the re-measure over ${confirmationThreshold}ms ` +
-          `(${FAST_GATE_CENSUS_RUNAWAY_MULTIPLE}x this run's median census cost, floored at ` +
-          `${FAST_GATE_CENSUS_REFERENCE_FLOOR_MS}ms); its own result would have PASSed. Refused by a bound ` +
+          `(${FAST_GATE_CENSUS_RUNAWAY_MULTIPLE}x the median-cost entry ${refAgain}, floored at ` +
+          `${FAST_GATE_CENSUS_REFERENCE_FLOOR_MS}ms, plus the margin); its own result would have PASSed. Refused by a bound ` +
           `derived from this run's own measurements, never by a written constant a growing corpus outgrows`,
       };
     }

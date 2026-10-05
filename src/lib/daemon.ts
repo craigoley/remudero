@@ -184,6 +184,9 @@ export const DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS = 559_000;
  *  so {@link SweepLiveness} excludes the duplicate (W1-T2582). Forensics: docs/forensics/daemon.md. */
 export const DEFAULT_SWEEP_RETRIGGER_INTERVAL_MS = 20 * 60_000;
 
+/** BACKSTOP: stop refill prolonging one tick indefinitely; admitted lanes still finish (W1-T5761). */
+export const DISPATCH_PHASE_REFILL_BOUND_MS = 20 * 60_000;
+
 /** The exit code a freshness self-restart uses, distinct from a crash's 1 (W1-T490). 75 is
  *  `EX_TEMPFAIL` from sysexits(3), which is what a stale stop is: nothing is wrong, the process
  *  needs newer code. Trap: the value is duplicated in `deploy/entrypoint.sh`, which cannot import
@@ -4800,6 +4803,7 @@ export async function runDaemon(
     // Concurrent dispatch: settle-all, never fail-fast, so a sibling lane's rejection can never abort another lane
     // in flight, and every lane's outcome is recorded before this tick decides anything (W1-T343). W1-T4416: a lane
     // that frees while a sibling runs refills from a FRESH read through the same gates; one lane never refills.
+    const dispatchPhaseStartedAtMs = daemonClock.now();
     const snapshots = admitted.map(() => ({ plan: planForBatch, isMerged }));
     const passIds = new Set(admitted.map((t) => t.id));
     const inFlightTasks = new Set<Task>(admitted);
@@ -4817,6 +4821,8 @@ export async function runDaemon(
       // W1-T4662: `handed_off` (a healthy freshness yield) deliberately does NOT match here — only
       // a genuine, repeated `blocked_transient` API failure closes this lane's refill.
       else if (outcome.value.verdict === "blocked_transient") refillClosed ??= "blocked_transient";
+      const phaseAgeMs = daemonClock.now() - dispatchPhaseStartedAtMs;
+      if (phaseAgeMs > DISPATCH_PHASE_REFILL_BOUND_MS) refillClosed ??= "phase bound";
       const governed = refillClosed ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
       const stopped = deps.checkStop?.();
       const paused = deps.checkPause?.();
@@ -4854,6 +4860,7 @@ export async function runDaemon(
           lane,
           finished_task: finished.id,
           reason: reason ?? "no disjoint runnable task within the lane budget",
+          ...(reason === "phase bound" ? { phase_age_ms: phaseAgeMs } : {}),
           ...(freshnessAction ? { freshness_action: freshnessAction } : {}),
         });
         return undefined;

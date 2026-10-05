@@ -27,7 +27,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { ExternalEffectResult } from "./action-reconciliation.js";
 import { defaultIsPidAlive, parseDrainLockInfo, type DrainLockInfo } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from "./fs-race-safe.js";
-import { LEDGER_FILENAME } from "./ledger-path.js";
+import { LEDGER_CARRIED_PREFIX_SUFFIX, LEDGER_FILENAME, LEDGER_RETAINED_STEPS_SUFFIX } from "./ledger-path.js";
 import { assertLedgerPathNotLive } from "./live-write-guard.js";
 import { rotationStampIso } from "./ledger-union.js";
 import { PLAN_ONLY_REVIEW_MARKER_STEP, planOnlyReviewMarkers, PR_TERMINAL_STEP, pruneCarriedRows } from "./ledger-carry.js";
@@ -1172,11 +1172,11 @@ export function ledgerRotationLockPath(ledgerPath: string): string {
  *  `{bytes, sha256, rateBytesPerHour, effectiveCeilingBytes}`. Every prefix row is already archived, so the next
  *  rotation archives only the bytes after it. Ends in `.json`, so no reader lists it as an archive. */
 export function ledgerCarriedPrefixPath(ledgerPath: string): string {
-  return `${ledgerPath}.carried.json`;
+  return `${ledgerPath}${LEDGER_CARRIED_PREFIX_SUFFIX}`;
 }
 
 export function ledgerRetainedStepsPath(ledgerPath: string): string {
-  return `${ledgerPath}.retained-steps.json`;
+  return `${ledgerPath}${LEDGER_RETAINED_STEPS_SUFFIX}`;
 }
 
 interface RetainedStepsRecord {

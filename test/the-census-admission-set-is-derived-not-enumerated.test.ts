@@ -364,7 +364,8 @@ test("runPreflightFast: a passing census just above the bound twice clears the n
     spawn,
     steps,
     packageJsonText: packageJsonTextFor(steps),
-    now: fakeNow([900, 1600, 1700, 1750, 1800, 1850, 7450, 7450]),
+    // W1-T5676: the last figure is the median-cost entry re-timed beside the re-measure.
+    now: fakeNow([900, 1600, 1700, 1750, 1800, 1850, 7450, 7450, 1750]),
   });
   assert.equal(FAST_GATE_CENSUS_REMEASURE_MARGIN, 1.1);
   assert.equal(result.ok, true, result.steps.at(-1)?.detail);

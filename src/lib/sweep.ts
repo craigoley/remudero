@@ -12747,6 +12747,22 @@ export async function runSweep(
                 break;
               }
               let ciFailuresForFix = isBlockedCi(pr) ? pr.ciFailures ?? [] : [];
+              let cancelledChecks = isBlockedCi(pr) ? pr.cancelledRequiredChecks ?? [] : [];
+              if (ciGateRollup?.length) {
+                const names = [...new Set([
+                  ...(pr.redRequiredChecks ?? []),
+                  ...ciFailuresForFix.map((failure) => failure.name),
+                  ...cancelledChecks.map((check) => check.name),
+                ])];
+                const fresh = new Set(stillRedRequiredNames(names, ciGateRollup));
+                ciFailuresForFix = ciFailuresForFix.filter((failure) => fresh.has(failure.name));
+                cancelledChecks = cancelledChecks.filter((check) => fresh.has(check.name));
+                if (names.length > 0 && fresh.size === 0) {
+                  acted = false;
+                  standDownReason = `fresh CI rollup: snapshot red checks ${names.join(", ")} are green or in flight — no requeue or fix strike`;
+                  break;
+                }
+              }
               // W1-T3194 — A POSITIVELY IDENTIFIED CI-INFRASTRUCTURE FAILURE HAS NO DEFECT IN THE
               // DIFF. Use the SAME job-only effect and durable head/check bound as cancellations,
               // before any fix claim or worker strike. A generic 403 never reaches this branch.
@@ -12821,7 +12837,6 @@ export async function runSweep(
               // W1-T1223 — A CANCELLED REQUIRED CHECK HAS NO DEFECT IN THE DIFF for a fix-rung
               // worker to read. Fires BEFORE `dispatchFix` so a PR whose ENTIRE red verdict is
               // cancellations never spends a strike on nothing.
-              const cancelledChecks = isBlockedCi(pr) ? pr.cancelledRequiredChecks ?? [] : [];
               if (cancelledChecks.length > 0) {
                 let requeuedAny = false;
                 const outcomes: string[] = [];

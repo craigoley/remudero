@@ -10,7 +10,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock, type IsHolderStaleOpts } from "./fs-race-safe.js";
 import { appendLedger } from "./ledger.js";
 import { systemClock, type Clock } from "./clock.js";
-import { prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
+import { combinedStatusRestArgs, prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
 // W1-T2895: review.ts imports "src/lib/plan-scope" through the leaf module below.
 import { isInPlanScope } from "./plan-scope.js";
 import { loadPlanAtRef, readBlobsAtRef, visibleCriteria, type AcceptanceCriterion, type GitBlobRunner, type TaskRisk } from "./plan.js";
@@ -7087,6 +7087,7 @@ export const INSTRUMENT_SURFACE: readonly string[] = [
   // W1-T2428: the fast lane's diff classifier. It decides which suites the `ci` and `coverage-ratchet` jobs RUN, so a
   // diff touching it changes what those gates measure.
   "^scripts/diff-class\\.mjs$",
+  "^scripts/ci-shard-admission\\.mjs$",
   "^scripts/expiring-fixture-census\\.mjs$",
   "^scripts/baseline-monotonic-check\\.mjs$", // W1-T2906: refuses a baseline-score regression against origin/main
   "^scripts/gate-monotonic-check\\.mjs$", // W1-T3519: refuses a REQUIRED gate demoted against origin/main
@@ -9467,6 +9468,8 @@ export interface PostReviewPendingOpts {
   reviewInputDigest?: string;
   reviewEngineRevision?: string;
   fetchLifecycle: () => PrLifecycleState;
+  /** Combined commit-status reader; the default observes claims from every host. */
+  fetchStatus?: GhApiFetcher;
   /** Injected raw poster (tests) — forwarded to {@link postReviewStatusGuarded} unchanged. */
   post?: PostReviewStatusGuardedOpts["post"];
   lockOpts?: AcquireReviewStatusLockOpts;
@@ -9488,8 +9491,9 @@ export interface PostReviewPendingResult {
 /** THE ONE PENDING-POST ENTRY POINT (design (a)/(d)): every detector — `runReview`'s own start, `reviewCommand`'s own
  * start, and transitively the sweep's post-review dispatch — calls this ONCE, at DETECTION, before the worktree, proof
  * and reviewer-spawn work a review's latency is spent on. It goes through {@link postReviewStatusGuarded}, so the
- * W1-T135 retry, the W1-T228 lifecycle refusal and the W1-T203 reviewer identity all apply. TWO REFUSALS, BOTH DECIDED
- * HERE before touching the lock or network. (1) NEVER REGRESS A TERMINAL VERDICT FOR THE SAME REVIEW INPUT TO PENDING:
+ * W1-T135 retry, the W1-T228 lifecycle refusal and the W1-T203 reviewer identity all apply. A fresh lifecycle read
+ * precedes local deduplication; the shared commit status also guards against claims from other hosts.
+ * (1) NEVER REGRESS A TERMINAL VERDICT FOR THE SAME REVIEW INPUT TO PENDING:
  * {@link decideReviewStatusPost}'s precedence only refuses `executed -> no_evidence`, and a pending attempt is always
  * `no_evidence`, so a prior `no_evidence` TERMINAL verdict for this head would sail through; a changed body is a fresh
  * input and may post again. (2) IDEMPOTENT PER INPUT, BUT ONLY INSIDE {@link REVIEW_LOCK_TTL_MS} (W1-T3647): a
@@ -9500,6 +9504,16 @@ export interface PostReviewPendingResult {
  * own owning run may already be dead. The posted status carries the posting `run_id`, which is what sweep.ts's
  * `OpenPrView.reviewPendingSince` producer derives its staleness clock from. */
 export async function postReviewPending(opts: PostReviewPendingOpts): Promise<PostReviewPendingResult> {
+  const lifecycle = opts.fetchLifecycle();
+  if (lifecycle.merged || lifecycle.closed) {
+    const closed = lifecycle.merged ? "merged" : "closed";
+    const reason = `pr_${closed}`;
+    appendLedger(opts.ledgerPath, {
+      run_id: opts.runId, task_id: opts.taskId, step: "review.skipped_closed_lifecycle",
+      head_sha: opts.sha, pr_url: opts.prUrl, reason,
+    });
+    return { posted: false, lifecycle: closed, reason: `PR is already ${closed}` };
+  }
   const lines = readLiveLedgerRecords(opts.ledgerPath);
   const hasInputIdentity = opts.prUrl !== undefined && opts.reviewInputDigest !== undefined;
   const priorTerminal = hasInputIdentity
@@ -9552,6 +9566,35 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     // fall through and post a fresh pending as the NEW holder, naming what it took over from
     // rather than silently overwriting it.
     takenOverFrom = priorPending;
+  }
+  try {
+    const raw = (opts.fetchStatus ?? ghJson)(combinedStatusRestArgs(opts.owner, opts.repo, opts.sha)) as {
+      statuses?: Array<{ context?: string; state?: string; description?: string; created_at?: string }>;
+    } | null;
+    if (!raw || !Array.isArray(raw.statuses) || raw.statuses.some(status => !status || typeof status.context !== "string")) {
+      throw new Error("combined commit status has no readable statuses array");
+    }
+    const status = raw.statuses.find(status => status.context === REVIEW_CONTEXT);
+    if (status && !["pending", "success", "failure", "error"].includes(status.state ?? "")) {
+      throw new Error("unrecognized remudero-review state");
+    }
+    if (status?.state === "pending") {
+      const foreignRun = /owned by run ([^\s)]+)\)/.exec(status.description ?? "")?.[1];
+      if (!foreignRun) throw new Error("pending remudero-review owner is unreadable");
+      if (foreignRun !== opts.runId) {
+        const claimedAtMs = Date.parse(status.created_at ?? "");
+        const ageMs = (opts.clock ?? systemClock).now() - claimedAtMs;
+        if (!Number.isFinite(ageMs) || ageMs < REVIEW_LOCK_TTL_MS) {
+          return {
+            posted: false,
+            reason: `remudero-review is already pending (owned by run ${foreignRun}) — host-independent claim; no-op`,
+          };
+        }
+        takenOverFrom = { headSha: opts.sha, runId: foreignRun, postedAt: status.created_at! };
+      }
+    }
+  } catch (error) {
+    return { posted: false, reason: `holding review: shared remudero-review status unreadable — ${String(error)}` };
   }
   const description = (
     takenOverFrom

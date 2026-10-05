@@ -13,6 +13,7 @@ CLAUDE.md remains the maintained source; open it in this checkout when a headlin
 ## Rule Headlines
 
 - **Run the shipped local gate before your FIRST push, not every commit.**
+- **SUPERSEDES the full-parity first-push obligation: run `node --import tsx scripts/preflight-author.mjs` on the committed tree; required hosted full-suite and coverage checks still gate merge.**
 - **A test run with no `# tests` summary is NOT A RESULT, and a summary over an UNVERIFIED FILE LIST
   is not one either — `node --test` given a ghost path returns a green count, silently. `ls` first.**
 - **THE BLOCK MUST PARSE BEFORE ANY PROOF IN IT CAN RUN — check GITHUB'S STORED BODY with
