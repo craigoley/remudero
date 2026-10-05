@@ -5528,7 +5528,8 @@ function untouchedPlanCriterion(roundDiff: string, priorDiff: string, path: stri
 export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
   const { pr, deps, worktreePath } = input;
   const git = deps.runGit ?? ((args: string[]) => execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" }));
-  const preflight = deps.preflight ?? planPrPreflightAtCommitAsync;
+  const preflightImpl = deps.preflight ?? planPrPreflightAtCommitAsync;
+  const preflight = (tree: string, sha: string, meta: { title: string; body: string }) => preflightImpl(tree, sha, { ...meta, headRef: pr.headRefName });
   const files = input.task.files.filter((path) => isInPlanScope(path) && !path.split("/").includes(".."));
   let roundId: string | undefined;
   const roundFields = () => ({ task_id: input.task.id, pr_number: pr.prNumber, head_sha: pr.headSha,
