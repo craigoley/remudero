@@ -14291,6 +14291,8 @@ export async function runSweep(
 let lightPassSpawningReservations = 0;
 let lightPassPlanFilingReservations = 0;
 const lightPassReservedHeads = new Set<string>();
+// W1-T5901: at most one plan PR direct-merges across overlapping light passes.
+let lightPassPlanMergeInFlight = false;
 const lightPassHeadKey = (pr: OpenPrView): string => `${pr.prNumber}@${pr.headSha}`;
 
 export async function runSweepLightPass(
@@ -14329,6 +14331,11 @@ export async function runSweepLightPass(
   lightPassPlanFilingReservations += planFilings.length;
   for (const pr of [...spawning, ...planFilings]) lightPassReservedHeads.add(lightPassHeadKey(pr));
   const spawningNumbers = new Set(spawning.map((pr) => pr.prNumber));
+  // W1-T5901: ONE ready plan PR per light pass (and per overlapping pass) takes the direct-merge path.
+  const planMergeCandidate = lightPassPlanMergeInFlight
+    ? undefined
+    : selectLightPassPlanMerge(openPrs, policy, now, selectionLedgerLines);
+  if (planMergeCandidate) lightPassPlanMergeInFlight = true;
   const releases = new Map<number, () => void>();
   const detachedNumbers = new Set<number>();
   for (const pr of [...spawning, ...planFilings]) {
@@ -14411,6 +14418,13 @@ export async function runSweepLightPass(
                         (admittedNumbers ? `; admitted ${admittedNumbers} ahead` : ""))
                   : baseStandDownReasonFor?.(d),
             };
+      if (planMergeCandidate?.prNumber === pr.prNumber) {
+        // W1-T5901: admit `mergeable` for this one plan PR only. `deps.arm` is the full sweep's own
+        // path — it merge-queues when the base requires one (W1-T4405) and otherwise reads fresh
+        // mergeability, rules through W1-T5748's `decidePlanPrMergeSafety`, and updates-then-merges.
+        const laneActionable = scopedDeps.actionable;
+        scopedDeps.actionable = (d) => d === "mergeable" || (laneActionable ? laneActionable(d) : true);
+      }
       if (spawningNumbers.has(pr.prNumber)) {
         scopedDeps.detachReviewWait = (work) => {
           detachedNumbers.add(pr.prNumber);
@@ -14430,10 +14444,29 @@ export async function runSweepLightPass(
   if (detachedNumbers.size > 0) await new Promise<void>((resolve) => setImmediate(resolve));
   return summaries;
   } finally {
+    if (planMergeCandidate) lightPassPlanMergeInFlight = false;
     for (const [number, release] of releases) {
       if (!detachedNumbers.has(number)) release();
     }
   }
+}
+
+/** W1-T5901 — the ONE plan PR a light pass may direct-merge: a plan-only filing PR (the positive
+ *  {@link OpenPrView.isPlanFiling} signal — never inferred) whose disposition is `mergeable`. A code
+ *  PR is never chosen. Fewest prior arm attempts at this head first, so one PR the arm path keeps
+ *  refusing cannot starve the others; then lowest number. */
+export function selectLightPassPlanMerge(
+  openPrs: readonly OpenPrView[],
+  policy: SweepPolicy,
+  now: number,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+): OpenPrView | undefined {
+  const attempts = (pr: OpenPrView): number =>
+    ledgerLines.filter((l) => l.step === "sweep.disposed" && l.pr_number === pr.prNumber &&
+      l.head_sha === pr.headSha && l.arm_attempted === true).length;
+  return openPrs
+    .filter((pr) => pr.isPlanFiling === true && deriveDisposition(pr, policy, now).disposition === "mergeable")
+    .sort((a, b) => attempts(a) - attempts(b) || a.prNumber - b.prNumber)[0];
 }
 
 /** Outcome keys already known, before admission, to make the action-time review guard stand down. */
