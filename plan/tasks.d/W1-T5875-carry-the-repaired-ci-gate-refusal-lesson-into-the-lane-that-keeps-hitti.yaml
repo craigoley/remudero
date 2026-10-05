@@ -1,0 +1,33 @@
+- id: W1-T5875
+  title: Carry the repaired ci-gate refusal lesson into the lane that keeps hitting it
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - LEARNINGS.md
+  acceptance:
+    - claim: LEARNINGS.md carries one entry naming the dominant ci-gate refusal reason behind the 40 repaired pull requests, with the repair that worked and the lane that keeps hitting it
+      proof: "grep: ci-gate refusal in LEARNINGS.md"
+    - claim: The entry is written in the existing LEARNINGS entry schema, so the learnings injection path can pick it up for that lane without any code change
+      proof: "grep: ci-gate in LEARNINGS.md"
+  origin: verify-human-automate:W1-T3750
+  rationale: >-
+    From the 2026-10-02 proposal on verify-human-automate:W1-T3750, ratified via rmd approve:
+  
+    W1-T3750 was filed `verify: human` 4 days ago and a judge reads it as safe to enter the
+    self-improvement flow:
+      all dependencies are merged and the task is a straightforward application of existing learnings to prevent future ci‑gate refusals, which can be handled by the self‑improvement flow without operator judgement.
+  
+    THE ci-gate GATE REFUSED 40 PULL REQUESTS IN THIS WINDOW AND EACH WAS REPAIRED — carry the
+    lesson to the lane that keeps hitting it, so the same gate stops refusing for the same reason
+  
+  
+    Dependencies all merged: yes. Cited in src/: no.
+  
+  
+    This is an automation candidate only. The existing inbox/draft flow owns the next step; the
+    shard, plan records, release rows, and merge gates remain unchanged.
