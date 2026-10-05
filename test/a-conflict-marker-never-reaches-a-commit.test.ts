@@ -193,6 +193,88 @@ test("W1-T5227: the fix round push refuses a head whose tree carries conflict ma
   }
 });
 
+test("W1-T5227: an unreadable marker scan is logged and does not block the push", async () => {
+  const log: Array<{ step: string } & Record<string, unknown>> = [];
+  let pushed = 0;
+  const ports = {
+    conflictMarkers: () => { throw new Error("no origin/main"); },
+    changedFiles: () => [],
+    select: () => ({ suites: [] }),
+  } as never;
+  await pushFixRoundPrechecked(
+    (step, extra) => log.push({ step, ...(extra ?? {}) }), "/nonexistent-w1t5227", "run-x", undefined, ports, () => { pushed += 1; });
+  assert.equal(pushed, 1, "an unreadable scan fails open, as the coverage precheck does");
+  const unavailable = log.find((l) => l.step === "push.conflict_marker_check_unavailable");
+  assert.equal(unavailable?.site, "rung.fix_push");
+  assert.equal(unavailable?.error, "no origin/main");
+});
+
+test("W1-T5227: a marker refusal in a non-merge round turns the next strike into a merge-conflict round", async () => {
+  const wt = divergedPair("w1t5227-promote");
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t5227-promote-`));
+  try {
+    const startSha = wt.git("rev-parse", "HEAD");
+    const lines: Array<{ step: string } & Record<string, unknown>> = [];
+    let spawns = 0;
+    let commitCalls = 0;
+    const run = {
+      taskId: "W1-T5227Y",
+      runId: "W1-T5227Y-run",
+      task: { id: "W1-T5227Y", title: "resolve the conflict", files: [CONFLICT_FILE] },
+      prUrl: "https://github.com/acme/remudero/pull/5227",
+      branch: "run-W1-T5227Y-1",
+      worktreePath: wt.dir,
+      initialSessionId: "initial-session",
+      mount: MOUNT,
+      settingsFile: join(root, "settings.json"),
+      config: { root, workerProviders: { harnessCommitsFix: true } } as Config,
+      budgetUsd: 10,
+      strikeCap: 2,
+      initialReview: fakeReview("failure", startSha),
+      reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: root, reviewerMount: MOUNT },
+      // No mergeConflict: strike 1 is an ordinary round, so only the marker refusal can make strike 2 one.
+      deps: {
+        spawn: async (_args: SpawnWorkerArgs) => {
+          spawns += 1;
+          if (spawns === 2) writeFileSync(join(wt.dir, CONFLICT_FILE), RESOLVED);
+          return worker("REPORT\nCOMMIT_MESSAGE: fix(x): resolve the merge conflict");
+        },
+        harnessCommitForShellLessWorker: (input: Parameters<typeof harnessCommitForShellLessWorker>[0]) => {
+          commitCalls += 1;
+          if (commitCalls === 1) {
+            assert.equal(input.requireMergeHead, false, "strike 1 is not a merge-conflict round");
+            input.onRefusal?.(`${"leftover conflict markers in"} ${CONFLICT_FILE}; nothing was staged`, [], [CONFLICT_FILE]);
+            return 0;
+          }
+          assert.equal(input.requireMergeHead, true, "strike 2 is a merge-conflict round");
+          return harnessCommitForShellLessWorker(input);
+        },
+        waitForCiGreen: async () => "green" as const,
+        fetchPrBody: async () => "REPORT\nresolved",
+        runReview: async () => fakeReview("success", wt.git("rev-parse", "HEAD")),
+        push: () => {},
+        issues: issues(),
+        ledgerPath: join(root, "ledger.ndjson"),
+        log: (step: string, extra?: Record<string, unknown>) => lines.push({ step, ...(extra ?? {}) }),
+        say: () => {},
+        account: (result: WorkerResult) => result,
+      },
+    };
+    await runFixRung(run as never);
+
+    const refused = lines.filter((l) => l.step === "fix.commit_refused");
+    assert.equal(refused.length, 1);
+    assert.deepEqual(refused[0]!.conflict_marker_files, [CONFLICT_FILE]);
+    assert.equal(lines.filter((l) => l.step === "fix.merge_started").length, 1, "only strike 2 starts the merge");
+    const dispatches = lines.filter((l) => l.step === "fix.dispatch");
+    assert.deepEqual(dispatches.map((d) => d.conflicted_files), [[CONFLICT_FILE], [CONFLICT_FILE]]);
+    assert.equal(parentCount(wt), 2, "the resolved retry commits as the two-parent merge");
+  } finally {
+    wt.cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T5227: the pre-commit hook refuses a marker commit for every committer", () => {
   const repo = gitRepo({ kind: "w1t5227-hook", seedCommit: true });
   try {
