@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -281,10 +281,10 @@ test("the daemon's SRE lane builds its input from the awaited merge rate", async
   const home = mkdtempSync(join(tmpdir(), "rmd-w1t5285-sre-"));
   const root = join(home, "Remudero");
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
-  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  await writeFile(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
   mkdirSync(join(root, "state"), { recursive: true });
   const planPath = join(home, "tasks.yaml");
-  writeFileSync(planPath, "[]\n");
+  await writeFile(planPath, "[]\n");
   const oldHome = process.env.HOME;
   const oldSre = process.env.RMD_SRE_LANE;
   process.env.HOME = home;
