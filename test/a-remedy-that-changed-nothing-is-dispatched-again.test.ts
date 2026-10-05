@@ -275,7 +275,8 @@ test("the first entanglement records its structured cause but opens a prerequisi
     deps: {
       spawn: async () => workerResult("REPORT\nPR_URL: https://github.com/craigoley/remudero/pull/9001"),
       waitForCiGreen: async () => "green",
-      fetchPrBody: async () => FAKE_PR_BODY, // W1-T4226: the PR body through its seam, not a refused `gh pr view`
+      // W1-T5809: the opened prerequisite's body — trailer-free with an Acceptance block, or admission refuses it.
+      fetchPrBody: async () => "Splits the instrument half.\n\n## Acceptance\n- it reads | grep: newField in scripts/diff-coverage.mjs",
       readPrerequisiteState: async () => ({ ok: true, state: "OPEN" }) as never,
       runReview: async () => { throw new Error("an open prerequisite parks before ordinary review"); },
       push: () => { throw new Error("the entangled branch is not pushed in place"); },
