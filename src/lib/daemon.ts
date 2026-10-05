@@ -187,6 +187,17 @@ export const DEFAULT_SWEEP_RETRIGGER_INTERVAL_MS = 20 * 60_000;
 /** BACKSTOP: stop refill prolonging one tick indefinitely; admitted lanes still finish (W1-T5761). */
 export const DISPATCH_PHASE_REFILL_BOUND_MS = 20 * 60_000;
 
+/** W1-T5720 — BACKSTOP: the longest tick 1's cadences and the garden fan-out wait, from boot, for the
+ *  first full pass. That pass's own 559 s bound normally opens the gate first, so this fires never. */
+export const BOOT_CADENCE_GATE_BOUND_MS = 10 * 60_000;
+
+/** W1-T5720: the tick-1 rungs the boot gate holds, by their deps key, each ledgered when deferred. */
+const BOOT_GATED_CADENCES = [
+  "sweepOrphans", "sweepFeedbackLanding", "checkGithubPosture", "checkMeasurementCadence", "checkDigestCadence",
+  "checkLedgerCompaction", "checkBenchmarkCohort", "checkCiLearningCadence", "checkBoardReview", "checkIntakeRungs",
+  "checkRetroTrigger", "checkWipeTestCadence", "checkAutoTriage",
+] as const satisfies ReadonlyArray<keyof DaemonDeps>;
+
 /** The exit code a freshness self-restart uses, distinct from a crash's 1 (W1-T490). 75 is
  *  `EX_TEMPFAIL` from sysexits(3), which is what a stale stop is: nothing is wrong, the process
  *  needs newer code. Trap: the value is duplicated in `deploy/entrypoint.sh`, which cannot import
@@ -753,6 +764,8 @@ export interface DaemonOpts {
    *  Distinct from the bound above, which limits how long any one pass may run; this limits how
    *  often a new one may start. Never consulted by the once-per-iteration call (W1-T1272). */
   sweepRetriggerIntervalMs?: number;
+  /** W1-T5720: the boot gate's bound in real ms (default {@link BOOT_CADENCE_GATE_BOUND_MS}). */
+  bootCadenceGateBoundMs?: number;
 }
 
 /** A non-stale freshness verdict must name the decision arm that produced it. `unassessed` deliberately retains the
@@ -2634,6 +2647,7 @@ export async function runDaemon(
         const pass = started.then((outcome) => {
           completedSweeps.push({ outcome, durationMs: Math.max(0, daemonClock.now() - startedAtMs) });
           if (backgroundSweep === pass) backgroundSweep = undefined;
+          openBootGate("first_pass");
         });
         backgroundSweep = pass;
       },
@@ -2911,6 +2925,8 @@ export async function runDaemon(
     plainBackfill?.stop();
     fleetLane?.stop();
     inboxResponder?.stop();
+    clearTimeout(bootGateTimer);
+    bootGateTrigger ??= "exited";
     gardenerRef.stop();
     livenessPulse?.stop();
     if (stopReason === "stopped") {
@@ -2930,11 +2946,37 @@ export async function runDaemon(
   const prActionPump = startPrActionPump(deps, pollIntervalMs, log);
   prActionPumpRef.stop = prActionPump.stop;
   prActionPumpRef.isBusy = prActionPump.isBusy;
+  // W1-T5720 — THE BOOT GATE. Tick 1 runs a light pass at once, then holds its cadences until the first full
+  // pass returns or the BACKSTOP passes (10-05: first `sweep.pass` 6.7-15.8 min after `daemon.boot`). It holds
+  // only what is wired: with nothing to defer, tick 1's admission keeps W1-T4998's no-wait contract.
+  const bootGateBoundMs = opts.bootCadenceGateBoundMs ?? BOOT_CADENCE_GATE_BOUND_MS;
+  const bootGateStartedAtMs = daemonClock.now();
+  const bootGateHolds = deps.sweep !== undefined && ((deps.gardens?.length ?? 0) > 0 || BOOT_GATED_CADENCES.some((k) => deps[k]));
+  let bootGateTrigger: string | undefined = bootGateHolds ? undefined : "nothing_to_defer";
+  let releaseBootGate = (): void => {};
+  const bootGateOpened = new Promise<void>((resolve) => (releaseBootGate = resolve));
+  const deferredGardens = bootGateHolds ? (deps.gardens ?? []) : [];
+  const deferBootCadence = (cadence: string): void =>
+    log("daemon.boot_gate.deferred", { cadence, reason: "first full pass has not settled", bound_ms: bootGateBoundMs });
   const gardens = [
     ...(deps.knowledgeGardener ? [startKnowledgeGardener(deps.knowledgeGardener, pollIntervalMs)] : []),
-    ...(deps.gardens ?? []).map((start) => start(pollIntervalMs)),
+    ...(bootGateHolds ? [] : (deps.gardens ?? [])).map((start) => start(pollIntervalMs)),
   ];
   gardenerRef.stop = () => gardens.forEach((g) => g.stop());
+  if (deferredGardens.length > 0) deferBootCadence("gardens");
+  const openBootGate = (trigger: string): void => {
+    if (bootGateTrigger !== undefined) return;
+    bootGateTrigger = trigger;
+    clearTimeout(bootGateTimer);
+    log("daemon.boot_gate.opened", {
+      trigger, waited_ms: Math.max(0, daemonClock.now() - bootGateStartedAtMs), bound_ms: bootGateBoundMs,
+      pass_in_flight: sweepLiveness.inFlight,
+    });
+    gardens.push(...deferredGardens.map((start) => start(pollIntervalMs)));
+    releaseBootGate();
+  };
+  // Unref'd: while the gate is closed the first pass's own bound timer keeps the process alive.
+  const bootGateTimer = bootGateHolds ? setTimeout(() => openBootGate("backstop"), bootGateBoundMs).unref() : undefined;
 
   // W1-T3756 — an ordinary false result used to erase the distinction between a current daemon and
   // one that could not inspect itself. Log the adapter's four decision arms at the consumer, where
@@ -3635,6 +3677,15 @@ export async function runDaemon(
       }
     };
 
+    if (bootGateTrigger === undefined) {
+      try {
+        await deps.sweepLight?.({ reviewOnly: true });
+      } catch (e) {
+        log("daemon.sweep_light.failed", { phase: "boot", error: String((e as Error)?.message ?? e) });
+      }
+      for (const cadence of BOOT_GATED_CADENCES) if (deps[cadence]) deferBootCadence(cadence);
+      await bootGateOpened;
+    }
     const cadencesStartedAtMs = daemonClock.now();
     // Orphan sweep, on the same once-per-iteration cadence as the reconciler above; boot already runs it
     // once. Best-effort: a process-listing hiccup costs one logged tick (W1-T117 part ii).
