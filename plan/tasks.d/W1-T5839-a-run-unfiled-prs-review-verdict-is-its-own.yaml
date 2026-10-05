@@ -12,7 +12,7 @@
   plan_refs: [W1-T5813, W1-T3535, W1-T3505, W1-T230, W1-T178, W1-T3704]
   files: [src/run-task.ts, src/lib/review.ts, src/lib/arm-auto-merge.ts, test/a-run-unfiled-prs-review-verdict-is-its-own.test.ts]
   status: queued
-  priority: 2
+  priority: 1
   attempts: 0
   rationale: |
     READ 2026-10-05 on origin/main 83ac0329 and the fleet ledger (live file plus the 2026-10-05

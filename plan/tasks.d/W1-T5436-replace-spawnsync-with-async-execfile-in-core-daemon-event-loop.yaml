@@ -5,10 +5,14 @@
   type: implement
   verify: auto
   risk: low
-  priority: 4
-  status: queued
+  status: blocked
+  retirement: retired
   # backlog gardener: band=4 evidence=7e0e3d000f704b2a
   attempts: 0
+  note: |
+    OPERATOR RULING 2026-10-05: retire this task as superseded by W1-T5689 (queued, p1), which bans every new synchronous spawn on a daemon-loop path rather than converting one call site; this record's single spawnSync conversion is a subset of it.
+    The operator approved this retirement in the operator session ("go with all of your
+    recommended follow ups"). No other task, dependency or acceptance criterion changes.
   files:
     - src/lib/daemon.ts
   rationale: |
