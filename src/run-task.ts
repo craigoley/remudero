@@ -1626,6 +1626,8 @@ import {
   isRetryableReviewThrow,
   riskJudgeHandedOffHead,
   reviewInputLoopFacts,
+  hasCapturedMergeConflictEvidence,
+  clearedConflictEscalationCause,
 } from "./lib/sweep.js";
 // Compatibility exports: W1-T2789 moved the shared exact-path decision into the sweep leaf so
 // the sweep and fix rung cannot disagree, while existing callers of run-task.ts keep their API.
@@ -8824,6 +8826,7 @@ export function openEscalationStandDownReason(
   headSha: string,
   candidate: OpenIssue | undefined,
   currentContractRevision?: string,
+  current?: { conflictEvidenceCaptured: boolean; baseSha?: string },
 ): { reason: string } | undefined {
   if (!candidate) return undefined; // nothing open on this key — the ordinary path
   const candidateHead = escalationHeadSha(candidate.body);
@@ -8841,6 +8844,7 @@ export function openEscalationStandDownReason(
   if (candidateRevision !== undefined && currentContractRevision !== undefined && candidateRevision !== currentContractRevision) {
     return undefined;
   }
+  if (current && clearedConflictEscalationCause(candidate.body, current) !== undefined) return undefined;
   return {
     reason:
       `a needs-human escalation for this exact (task, PR, head ${headSha}, cause) is ALREADY OPEN and ` +
@@ -8848,6 +8852,27 @@ export function openEscalationStandDownReason(
       `someone and append to that same issue; standing down until it is closed, the head moves, or the ` +
       `task contract changes`,
   };
+}
+
+export function resolveClearedEscalation(
+  issues: IssueGateway,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  taskId: string,
+  issueUrl: string,
+  clearedCause: string,
+): void {
+  const comment =
+    `Resolved by change (W1-T5908): the cause this escalation was raised for has cleared — ${clearedCause}. ` +
+    `The fleet's merge-conflict repair is dispatched for this PR, so no human decision is pending; closing automatically.`;
+  const row = { task_id: taskId, superseded_issue_url: issueUrl, resolved_by: "change", cleared_cause: clearedCause };
+  try {
+    if (!issues.closeWithComment) throw new Error("issue gateway cannot close issues");
+    issues.closeWithComment(issueUrl, comment);
+  } catch (err) {
+    log("escalation.superseded", { ...row, delivered: false, failure: String((err as Error)?.message ?? err) });
+    return;
+  }
+  log("escalation.superseded", { ...row, delivered: true });
 }
 
 /**
@@ -9000,6 +9025,8 @@ async function fixRungStandDownReason(
     headSha: string;
     key: EscalationDedupKey;
     find: (key: EscalationDedupKey) => OpenIssue | undefined;
+    current?: { conflictEvidenceCaptured: boolean; baseSha?: string };
+    resolve?: (candidate: OpenIssue, clearedCause: string) => void;
   },
 ): Promise<{ reason: string; foreignHead?: { headSha: string; author: string }; foreignTree?: ForeignTreeStandDown } | undefined> {
   if (!readLiveState) return undefined;
@@ -9087,15 +9114,21 @@ async function fixRungStandDownReason(
     // before this ever sees it. A second catch around it would be an arm no production path can
     // reach (measured: `diff-coverage` flagged it as an added line with zero covering tests) and
     // a second, silently-drifting statement of the same guarantee.
+    const candidate = openEscalation.find(openEscalation.key);
     const alreadyAsked = openEscalationStandDownReason(
       openEscalation.headSha,
-      openEscalation.find(openEscalation.key),
+      candidate,
       // W1-T3579: read straight off the SAME key the probe/producer both build below — never a
       // second computation — so the comparison and the dedup key can never disagree about which
       // revision "current" names.
       openEscalation.key.contractRevision,
+      openEscalation.current,
     );
     if (alreadyAsked) return alreadyAsked;
+    const clearedCause = candidate && escalationHeadSha(candidate.body) === openEscalation.headSha && openEscalation.current
+      ? clearedConflictEscalationCause(candidate.body, openEscalation.current)
+      : undefined;
+    if (candidate && clearedCause) openEscalation.resolve?.(candidate, clearedCause);
   }
 
   return undefined;
@@ -10263,6 +10296,7 @@ export async function runFixRung(opts: {
    * `noReviewYet` reversion.
    */
   mergeConflict?: MergeConflictEvidence;
+  baseSha?: string;
   /**
    * W1-T2236: the SWEEP's already-computed structured gate-failure remedy (W1-T923,
    * {@link OpenPrView.actionableGateFailures}) — seeds ROUND 1 ONLY of a review-mode dispatch
@@ -10781,6 +10815,9 @@ export async function runFixRung(opts: {
               contractRevision: currentContractRevision,
             },
             find: (key: EscalationDedupKey) => findDuplicateEscalation(key, { issues: deps.issues }),
+            current: { conflictEvidenceCaptured: hasCapturedMergeConflictEvidence(currentMergeConflict), baseSha: opts.baseSha },
+            resolve: (candidate: OpenIssue, clearedCause: string) =>
+              resolveClearedEscalation(deps.issues, deps.log, opts.taskId, candidate.url, clearedCause),
           }
         : undefined,
     );
@@ -41199,6 +41236,7 @@ export function buildFixRungDispatchArgs(args: {
         })
       : undefined,
     mergeConflict: evidence.mergeConflict,
+    ...(evidence.baseSha !== undefined ? { baseSha: evidence.baseSha } : {}),
     // W1-T2236: threaded through unconditionally, mirroring `ciFailures`/`mergeConflict` above —
     // `runFixRung`'s round-1 gate only reads this when it is ALSO a review-mode round (neither
     // merge-conflict nor ci-log), so its presence here for those two branches is inert.
