@@ -1,16 +1,16 @@
 - id: W1-T5695
   title: "A POSTED GATE NEVER SHARES A NAME WITH A WORKFLOW JOB — three producers name a check `commitlint` on every head (ci.yml's always-green job, the API-posted AND of commitlint and rule-checks, pr-title-lint.yml's job), so on #8905 an API-posted failure was masked by a later title-lint success under name-only dedupe and ci-gate's jq"
   repo: remudero
-  depends_on: []
+  depends_on: [W1-T5802]
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 12.00
+  budget_usd: 16.00
   risk: high  # Rule 19: one concern — every posted gate report carries a name and identity no job shares
   band_meaning: blast-radius
-  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 7, distinct names for API-posted gate reports; workflow edits are an operator build (W1-T5351)"
-  plan_refs: [W1-T5694, W1-T5368, W1-T3720, W1-T5351, W1-T4399, W1-T5515]
-  files: [.github/workflows/ci.yml, .github/workflows/ci-gate.yml, .github/workflows/pr-title-lint.yml, test/a-posted-gate-never-shares-a-name-with-a-job.test.ts]
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 7, distinct names for API-posted gate reports; workflow edits are an operator build (W1-T5351). Re-planned 2026-10-05 after a build attempt (local WIP fc8b5770, unpushed)"
+  plan_refs: [W1-T5694, W1-T5368, W1-T3720, W1-T5351, W1-T4399, W1-T5515, W1-T5802, W1-T3781, W1-T4402, W1-T3171, W1-T4438, W1-T351]
+  files: [.github/workflows/ci.yml, .github/workflows/ci-gate.yml, MASTER-PLAN.md, test/a-posted-gate-never-shares-a-name-with-a-job.test.ts, test/a-bundled-job-names-the-gate-that-refused.test.ts, test/a-github-503-retries-posted-gate-checks.test.ts, test/a-posted-gate-check-stays-rerunnable.test.ts, test/a-rule-checks-failure-is-titled-by-its-gate-not-commitlint.test.ts, test/the-rule-checks-run-first.test.ts, test/ci-gate-required-format.test.ts, test/fast-lane-classifier.test.ts, test/ci-title-lint.test.ts, test/commitlint-mode.test.ts]
   status: queued
   priority: 1
   attempts: 0
@@ -29,20 +29,66 @@
     c17487c9: the posted failure sat beside two successes and a 10-03T03:41 fix.dispatch targeted
     `commitlint` for a citation-anchor-census red. Workarounds that exist only for the collision:
     `METADATA_RED_CHECKS` includes "commitlint" and `titleOnlyCommitlintRed` parses the log.
+    RE-PLANNED 2026-10-05 on origin/main b790deee. A build of the first design (WIP fc8b5770) could
+    not go green, for four reasons. (1) Its `rule-checks` stub job key is pinned in both directions
+    by `CI_PARITY_TABLE` (src/lib/ci-parity.ts) and by gate-posture.ts's `ci:<key>` declarations.
+    Rule 25 refuses those src rows beside a workflow edit. The W1-T3171 carve-out
+    (`mandatoryRegistrationPaths`, src/lib/review.ts) admits only ci.yml + ci-gate.yml, so the
+    pr-title-lint.yml edit already took it out of reach. No src-first or workflow-first order kept
+    both PRs green. W1-T5802 derives posted names in `derivePrCheckCandidates`, so no stub is
+    needed. (2) `checkJobId` (src/lib/sweep.ts) reads only `^job:(\d+)$`, so a run-scoped
+    external_id would blind the sweep's rerun and failure-log reads. W1-T5802 lands that reader
+    first. (3) Renaming pr-title-lint.yml's job breaks two things. W1-T3781's title edit could no
+    longer clear a title red: ci.yml never fires on `edited`, so its posted `commitlint` would stay
+    red. W1-T4402's census (test/an-edit-reruns-only-what-reads-the-body) justifies ci-gate.yml's
+    `edited` trigger only while REQUIRED names every title reader's check, so an ADVISORY
+    `pr-title` fails it. (4) About a dozen existing tests pin the old shape, and the old `files:`
+    listed none of them. W1-T351 (ci.yml's live title read, pinned by test/ci-title-lint) is not
+    redone here. This task only moves those pins to pr-title-lint.yml's identical step, because it
+    removes ci.yml's copy of the title lint.
   design: |
-    (i) ci.yml posts the rule-checks half under its own name `rule-checks` (an `if: false` stub job
-    of that name, the W1-T4399 pattern, keeps test/every-pr-check-is-required-or-advisory.test.ts
-    deriving it from a real job) and ci-gate.yml's REQUIRED names it; `commitlint` then means the
-    commit-message lint alone.
-    (ii) pr-title-lint.yml's job gets its own `name:` (`pr-title`).
-    (iii) The posted `external_id` carries run id and attempt (`run:<id>:<attempt>:job:<id>`) and the
-    checkJobId reader accepts both forms.
-    (iv) ci-gate.yml's jq groups by that identity before taking the newest.
-    The matching `CI_PARITY_TABLE` row (src/lib/ci-parity.ts) and dropping "commitlint" from
-    `METADATA_RED_CHECKS` follow in a src PR; standing rule 25 refuses them beside a workflow edit.
+    ONE PRODUCER PER NAME. The title verdict has exactly one producer. Everything ci.yml posts has
+    a name that no runnable job registers.
+    (i) ci.yml's `commitlint` job (the W1-T4399 bundling job; its KEY stays `commitlint`, so
+    CI_PARITY_TABLE, gate-posture and every `needs:` are untouched) changes its `name:` to
+    `light-gates` and drops its PR-title lint step. Its reporter stops posting `commitlint` and
+    posts `report "rule-checks" "${OUTCOME_RULE_CHECKS}"` under that name. Add no stub job:
+    W1-T5802 derives the name from the `report` line. ci-gate.yml's REQUIRED gains `rule-checks`.
+    ADVISORY gains `light-gates`, with a comment saying it is green by construction
+    (continue-on-error steps) and that each gate it runs is posted under its own REQUIRED name.
+    (ii) pr-title-lint.yml is NOT edited. Its job, `name: commitlint`, becomes the only producer of
+    `commitlint` and stays REQUIRED. A title edit re-runs it on `edited`, which keeps W1-T3781's
+    clearing of a title red. W1-T4402's census still finds every title reader's check in REQUIRED.
+    So `commitlint` means the PR-title lint alone, and there is no `pr-title` name. (This settles the
+    open call in favor of REQUIRED. It also rejects an ADVISORY second name for the same verdict.)
+    METADATA_RED_CHECKS keeps "commitlint", which is now title-only by construction.
+    (iii) Each post's `external_id` is `run:${{ github.run_id }}:${{ github.run_attempt }}:job:<id>`.
+    W1-T5802's `checkJobId` reads it.
+    (iv) ci-gate.yml's jq groups by name AND PRODUCER CLASS before it takes the newest. The class is
+    "posted" when external_id matches `^(run:[0-9]+:[0-9]+:)?job:[0-9]+$` and "job" otherwise. Group
+    by the class, never by the full external_id: a rerun of the posting job must still supersede its
+    own earlier post (W1-T123), and a full-identity group would keep that stale failure. A name is
+    not-ready while any of its groups is incomplete. A skipped `if: false` stub beside a post never
+    fails.
+    (v) Update the tests that pin the old shape, all listed in `files:`: the reporter's posted names,
+    titles and external_id; the ci.yml title-lint pins in ci-title-lint and commitlint-mode, which
+    move to pr-title-lint.yml's step; the REQUIRED fixture in ci-gate-required-format; and
+    fast-lane-classifier acceptance 8's ci.yml job-name list (`commitlint` becomes `light-gates`).
+    Regenerate MASTER-PLAN.md with `npm run capability-snapshot`. These must pass UNMODIFIED:
+    title-edit-commitlint-workflow, an-edit-reruns-only-what-reads-the-body,
+    every-pr-check-is-required-or-advisory, push-ci-on-main, preflight-ci-parity. If one of them
+    needs an edit, the design is wrong: stop and record needs-design. Do not widen `files:`.
+    (vi) The new test's name check compares the names the reporter POSTS (its `report "<name>"`
+    lines) with the `name:`s of runnable jobs (not `if: false`) in every workflow. Do not compare
+    against `derivePrCheckCandidates`' output: after W1-T5802 that output includes the posted
+    names, so every post would read as a collision.
+    No src/ edit, so rule 25 cannot refuse this PR. If W1-T5802 has not merged, stop and record
+    needs-design. A later src cleanup can drop `titleOnlyCommitlintRed`'s posted-log arm, which
+    goes dead here; it is harmless until then.
   acceptance:
-    - claim: "no check name is produced both by an API post in ci.yml and by a job in any workflow, rule-checks is posted under its own name and listed in ci-gate's REQUIRED, and ci-gate's grouping reads the #8905 pair (posted failure, later same-name job success) as failing"
+    - claim: "no check name ci.yml's reporter posts is the name of a runnable job in any workflow; rule-checks is posted under its own name (with a run-scoped external_id) and listed in ci-gate's REQUIRED; commitlint is produced only by pr-title-lint.yml's job, which still fires on edited and stays REQUIRED; ci.yml's bundling job is named light-gates and is ADVISORY; and ci-gate's grouping reads the #8905 pair (posted failure, later same-name job success) as failing while a rerun of the posting job still supersedes its own earlier post"
       proof: "unit test: test/a-posted-gate-never-shares-a-name-with-a-job.test.ts"
   falsifier: |
-    Post rule-checks under `commitlint` again: the name census finds the collision and the #8905
-    fixture reads green through ci-gate's jq; the test fails.
+    Post rule-checks under `commitlint` again, or put the title-lint step back with its post: the
+    name check finds the collision and the test fails. Revert ci-gate's jq to `group_by(.name)`:
+    the #8905 fixture reads green and the test fails.
