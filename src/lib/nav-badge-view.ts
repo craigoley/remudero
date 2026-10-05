@@ -301,9 +301,12 @@ function sumAgent(counted: readonly CountedInstance[]): NavBadgeData["agent"] {
 
 type Classification = ReturnType<typeof readClassificationSnapshot>;
 
+/** The inbox counts' one source; its as-of is the classification's `generatedAt`, so it names the snapshot counted. */
+const INBOX_CLASSIFICATION_SOURCE = "inbox-classification";
+
 function inboxCounts(classified: Classification, nowMs: number, sources: ViewSource[]): NavBadgeData["inbox"] {
   sources.push({
-    name: "inbox-classification", asOf: classified?.generatedAt ?? null, state: classified ? sourceAge(classified.generatedAt, nowMs, INBOX_STALE_AFTER_MS) : "unavailable",
+    name: INBOX_CLASSIFICATION_SOURCE, asOf: classified?.generatedAt ?? null, state: classified ? sourceAge(classified.generatedAt, nowMs, INBOX_STALE_AFTER_MS) : "unavailable",
     kind: "inbox-store", budgetMs: INBOX_STALE_AFTER_MS,
   });
   if (!classified) return { reason: "no inbox classification has been written yet" };
@@ -332,6 +335,8 @@ export function navBadgeView(deps: { scopes: () => readonly NavBadgeScope[]; inb
   return {
     name: NAV_BADGE_VIEW_NAME,
     version: NAV_BADGE_VIEW_VERSION,
+    // The worker's body counts the classification it last read; the inbox classifier can rewrite it before this reads it again.
+    shadowSources: { inbox: INBOX_CLASSIFICATION_SOURCE },
     compute: (params) => {
       const nowMs = (deps.clock ?? systemClock).now();
       const scopes = selectInstances(deps.scopes(), params);

@@ -450,6 +450,7 @@ interface GardenState {
   episodes: Record<string, Episode>;
   filed: Record<string, FiledRecord>;
   acrLogin: Record<string, { ts: string; result: "ok" | "failed"; escalatedAt?: string }>;
+  stateBackup: Record<string, { ts: string; verdict: string; escalatedAt?: string }>;
 }
 
 export function hostResourceStatePath(stateDir: string): string {
@@ -462,15 +463,15 @@ export function hostResourceOffPath(stateDir: string): string {
 
 function readState(stateDir: string): GardenState {
   const path = hostResourceStatePath(stateDir);
-  if (!existsSync(path)) return { episodes: {}, filed: {}, acrLogin: {} };
+  if (!existsSync(path)) return { episodes: {}, filed: {}, acrLogin: {}, stateBackup: {} };
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<GardenState>;
-    return { episodes: parsed.episodes ?? {}, filed: parsed.filed ?? {}, acrLogin: parsed.acrLogin ?? {} };
+    return { episodes: parsed.episodes ?? {}, filed: parsed.filed ?? {}, acrLogin: parsed.acrLogin ?? {}, stateBackup: parsed.stateBackup ?? {} };
   } catch (error) {
     // deliberate: an unreadable state file restarts every episode; the worst case is one repeat
     // handoff, which the open-feedback and plan-origin checks turn into a no-op.
     void error;
-    return { episodes: {}, filed: {}, acrLogin: {} };
+    return { episodes: {}, filed: {}, acrLogin: {}, stateBackup: {} };
   }
 }
 
@@ -621,6 +622,33 @@ function* hostResourcePassSteps(ports: HostResourcePorts): Steps<PassResult> {
           });
           current.escalatedAt = clock.iso();
           ports.log(`${HOST_RESOURCE}.acr_login_failed`, { host: beat.host, ts, reason, issue_url: issueUrl });
+        }
+      }
+    }
+    const backupVerdict = payload["backup_verdict"];
+    const backupTs = payload["backup_ts"];
+    const backupEpisode = state.stateBackup[beat.host];
+    const backupMs = Date.parse(backupTs ?? "");
+    if (backupTs && Number.isFinite(backupMs) && (!backupEpisode || backupMs >= Date.parse(backupEpisode.ts))) {
+      if (backupVerdict === "ok") {
+        if (backupEpisode?.escalatedAt) ports.log(`${HOST_RESOURCE}.state_backup_recovered`, { host: beat.host, ts: backupTs });
+        state.stateBackup[beat.host] = { ts: backupTs, verdict: backupVerdict };
+      } else if (backupVerdict?.startsWith("FAILED") || backupVerdict?.startsWith("STALE")) {
+        const current = (state.stateBackup[beat.host] ??= { ts: backupTs, verdict: backupVerdict });
+        current.ts = backupTs;
+        current.verdict = backupVerdict;
+        if (!current.escalatedAt && ports.escalate) {
+          const issueUrl = ports.escalate({
+            class: "MANUAL",
+            taskId: `host-state-backup-${beat.host}`,
+            summary: `host ${beat.host} has a failed or missing nightly state backup`,
+            detail: `Host ${beat.host}, nightly snapshot ${backupTs}: ${backupVerdict}.\nOff-host: ${payload["backup_offhost"] || "unknown"}.\nInspect ~/reclaim.log and the snapshot receipt, repair the snapshot or Azure login failure, then rerun host-update.sh --reclaim-only.`,
+            options: [{ label: "repair-backup", detail: `restore and verify the nightly state backup on ${beat.host}`, kind: { type: "operator-only" } }],
+            recommendation: "repair-backup",
+            headDedup: "independent",
+          });
+          current.escalatedAt = clock.iso();
+          ports.log(`${HOST_RESOURCE}.state_backup_failed`, { host: beat.host, ts: backupTs, verdict: backupVerdict, offhost: payload["backup_offhost"], issue_url: issueUrl });
         }
       }
     }

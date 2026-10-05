@@ -29,6 +29,7 @@ import {
   type DuplicateCorpusEntry,
 } from "./knowledge-dedup.js";
 import { classifyGrepZeroHit } from "./grep-zero-cause.js";
+import { RULE_SUITE_NAME_RE } from "./ci-parity.js";
 
 /** Deterministic task linter (MASTER-PLAN §5C Layer A).
  *  A PURE function over a loaded {@link Task}/{@link Plan}: no LLM, no I/O, no side effects. Every
@@ -92,6 +93,7 @@ export type LintCheck =
   | "proof-base-discrimination"
   | "proof-unit-test-base-wrapper"
   | "proof-test-only-discrimination"
+  | "new-shard-rule-suite"
   | "shard-shape";
 export type LintSeverity = "block" | "warn";
 
@@ -1840,6 +1842,40 @@ export function proofTestOnlyDiscriminationViolations(task: Task): LintViolation
         "the build cannot go green without a plan amendment (W1-T5527 #9103, W1-T5622 #9120). Add a " +
         "`grep:` criterion on a line the new test file introduces, which misses at base, and mark the " +
         "census/preservation criterion `kind: guard`.",
+    },
+  ];
+}
+
+export function newShardRuleSuiteViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const isNew = opts.riskTransition
+    ? opts.riskTransition.baseTask === undefined
+    : opts.postMergeAmendment !== undefined &&
+      opts.postMergeAmendment.baseTask === undefined &&
+      opts.baseAcceptance !== undefined;
+  if (!isNew) return [];
+  const proofs = (task.acceptance ?? []).map((c) => c.proof ?? "").filter((p) => /^\s*`?unit test:/i.test(p));
+  const named = [...(task.files ?? []), ...proofs.flatMap((p) => p.match(/test\/[^\s"'`,;()]+\.test\.ts/g) ?? [])];
+  const paths = [...new Set(named)].filter(
+    (p) => /^test\/.+\.test\.ts$/.test(p) && RULE_SUITE_NAME_RE.test(p.slice("test/".length)) && !opts.pathExistsAtBase?.(p),
+  );
+  const prose = [task.rationale, task.note, task.prompt, (task as Task & { design?: string }).design].join("\n");
+  if (paths.length === 0 || /@not-a-rule-suite[ \t]*:[ \t]*\S/.test(prose)) return [];
+  const parityRow = (p: string): boolean =>
+    (task.files ?? []).includes("scripts/census-precheck.mjs") &&
+    [...prose.matchAll(/PRECHECK_PARITY/g)].some((m) =>
+      prose.slice(Math.max(0, m.index! - 300), m.index! + 300).includes(p.slice(p.lastIndexOf("/") + 1)),
+    );
+  const refused = paths.filter((p) => !parityRow(p));
+  if (refused.length === 0) return [];
+  return [
+    {
+      check: "new-shard-rule-suite",
+      severity: "block",
+      message:
+        `new shard ${task.id} names ${refused.join(", ")}, which listRuleSuites reads as a CI rule suite ` +
+        "(census/ratchet/baseline in the name) and every-ci-census-is-asked-before-the-push refuses with no " +
+        "parity row — rename the slug, declare `@not-a-rule-suite: <reason>` in the design, or list " +
+        "scripts/census-precheck.mjs in files and name the test's basename beside PRECHECK_PARITY",
     },
   ];
 }
@@ -3684,6 +3720,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofGrepAlreadyTrueViolations(task, opts));
   violations.push(...proofUnitTestBaseWrapperViolations(task, opts));
   violations.push(...proofTestOnlyDiscriminationViolations(task));
+  violations.push(...newShardRuleSuiteViolations(task, opts));
   violations.push(...postMergeAmendmentViolations(task, opts));
   violations.push(...blockedDispositionViolations(task, opts));
   violations.push(...blockedRecordUnruledViolations(task));
