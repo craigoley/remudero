@@ -44,12 +44,13 @@ export const EXEMPT_MARKER = "expiring-fixture: exempt";
 
 /**
  * Set (to any truthy string) by ci.yml ONLY on the `ci` job's push-to-main lane (W1-T3655), never
- * on a `pull_request` run. On that lane `origin/main` IS the commit under test -- the run has no
- * earlier base to inherit a crossing FROM, so treating it as one would let a stamp sitting on main
- * excuse itself as "inherited" and go green on the one run that exists to catch it. This is the
- * arm the task's own falsifier calls "the one most likely to be got wrong, since it fails open and
- * looks green": an explicit flag set by the caller who KNOWS which lane it is beats inferring it
- * from a `rev-parse` comparison a coincidental match could satisfy by accident.
+ * on a `pull_request` run. On that lane `origin/main` IS the commit under test, so it is never read
+ * as a base: a stamp sitting on main would excuse itself as "inherited" on the one run that exists
+ * to watch it. W1-T5826: the lane attributes against the push's PARENT instead, which ci.yml passes
+ * explicitly (`--base HEAD^`). A crossing already on that parent is a calendar crossing no push
+ * planted -- warned ahead, never a red main; one this push introduced or moved still blocks. No
+ * explicit base, or an unreadable one, keeps the reading strict -- the flag decides the arm, never
+ * a `rev-parse` comparison a coincidental match could satisfy by accident.
  */
 export const CENSUS_MAIN_BRANCH_RUN = "CENSUS_MAIN_BRANCH_RUN";
 
@@ -443,7 +444,7 @@ export function formatReport({ population, reported, exempt, alreadyExpired = []
     } else {
       out.push(
         `expiring-fixture-census: CLEAR -- this run charges nothing; ${reported.length} inherited crossing(s) reported below, owned ` +
-          `by the base and caught on the push-to-main lane (${CENSUS_MAIN_BRANCH_RUN}):`,
+          `by the base and warned ahead of its red date on the push-to-main lane (${CENSUS_MAIN_BRANCH_RUN}):`,
       );
     }
     for (const r of [...reported].sort((a, b) => a.daysLeft - b.daysLeft)) {
@@ -497,16 +498,48 @@ export function encodeAnnotation(text) {
   return text.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
 }
 
-/** Write the report to the two channels a job can actually reach. No-op unless RMD_CI_REPORT is set. */
-export function emitCiReport(tool, report, { blocked, env = process.env, log = console.log, append = null } = {}) {
+/** One inherited crossing as a single line: file, line, threshold and the date it goes red. */
+export function describeWarning(r) {
+  return `${r.file}:${r.line} ${r.field}="${r.stamp}" vs ${r.threshold} -- goes red ${expiryDay(r.expiresAt)}, inherited from the push's parent (not charged; defuse it before then)`;
+}
+
+/** Write the report to the two channels a job can actually reach. No-op unless RMD_CI_REPORT is set.
+ *  `warnings` (W1-T5826) are the main lane's inherited crossings: a `::warning` each, anchored to
+ *  the fixture's file and line, plus one step-summary line each -- named ahead, never a red. */
+export function emitCiReport(tool, report, { blocked, warnings = [], env = process.env, log = console.log, append = null } = {}) {
   if (!env.RMD_CI_REPORT) return false;
   if (blocked) log(`::error title=${tool}::${encodeAnnotation(report)}`);
+  for (const w of warnings) log(`::warning file=${w.file},line=${w.line},title=${tool}::${encodeAnnotation(describeWarning(w))}`);
   const summaryPath = env.GITHUB_STEP_SUMMARY;
   if (summaryPath) {
     const write = append ?? appendFileSync;
-    write(summaryPath, `### ${tool}\n\n\u0060\u0060\u0060\n${report}\n\u0060\u0060\u0060\n\n`);
+    const warned = warnings.map((w) => `- :warning: ${describeWarning(w)}\n`).join("");
+    write(summaryPath, `### ${tool}\n\n${warned}${warned ? "\n" : ""}\u0060\u0060\u0060\n${report}\n\u0060\u0060\u0060\n\n`);
   }
   return true;
+}
+
+/** `--base <ref>` from the CLI: the explicit base to attribute crossings against, else undefined. */
+export function baseArg(argv) {
+  const i = argv.indexOf("--base");
+  return i >= 0 && argv[i + 1] ? argv[i + 1] : undefined;
+}
+
+/** A reader for `<baseRef>:<path>`, or undefined when the ref does not resolve (a shallow clone, a
+ *  fresh local repo, a root commit's absent parent) -- the gate then reads strict, as it always has. */
+function baseFileReader(execFile, baseRef) {
+  try {
+    execFile("git", ["rev-parse", "--verify", `${baseRef}^{commit}`], { encoding: "utf8", stdio: "pipe" });
+  } catch {
+    return undefined;
+  }
+  return (path) => {
+    try {
+      return execFile("git", ["show", `${baseRef}:${path}`], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024, stdio: "pipe" });
+    } catch {
+      return undefined; // absent at base ⇒ the file is this diff's own
+    }
+  };
 }
 
 export function main({
@@ -526,8 +559,10 @@ export function main({
     assertFieldListComplete({ files: srcFiles, readFile, agedFields: [...AGED_FIELDS, ...KNOWN_UNCOVERED_CLOCK_FIELDS] });
   },
   recordedPopulationByFile = RECORDED_POPULATION_BY_FILE,
-  baseRefOverride,
+  argv = [],
+  baseRefOverride = baseArg(argv),
   env = process.env,
+  append = null,
 } = {}) {
   assertAged();
   assertComplete();
@@ -535,30 +570,12 @@ export function main({
   // The threshold comes from the policy the sweep actually loads, never a copy of the number here.
   const policy = JSON.parse(execFile("node", ["--import", "tsx", "-e", "import {loadDefaultPolicy} from './src/lib/policy.ts'; console.log(JSON.stringify(loadDefaultPolicy().values.sweep));"], { encoding: "utf8" }));
   // Default to origin/main rather than requiring a workflow change to pass it: CI checks out with
-  // fetch-depth 0, so the ref is present. Unreadable (a shallow clone, a fresh local repo) leaves
-  // `readBaseFile` undefined and the gate behaves exactly as it did before attribution existed.
-  const baseRef = baseRefOverride ?? "origin/main";
-  let readBaseFile;
-  // W1-T3655: on the base's own run there is no earlier base to inherit FROM -- see
-  // CENSUS_MAIN_BRANCH_RUN's own comment for why this is checked BEFORE the rev-parse probe
-  // rather than folded into it. `readBaseFile` stays undefined, so every crossing reads exactly as
-  // strict as it would with no base readable at all.
-  if (env[CENSUS_MAIN_BRANCH_RUN]) {
-    readBaseFile = undefined;
-  } else {
-    try {
-      execFile("git", ["rev-parse", "--verify", `${baseRef}^{commit}`], { encoding: "utf8", stdio: "pipe" });
-      readBaseFile = (path) => {
-        try {
-          return execFile("git", ["show", `${baseRef}:${path}`], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024, stdio: "pipe" });
-        } catch {
-          return undefined; // absent at base ⇒ the file is this diff's own
-        }
-      };
-    } catch {
-      readBaseFile = undefined;
-    }
-  }
+  // fetch-depth 0, so the ref is present. Unreadable leaves `readBaseFile` undefined: strict.
+  // W1-T3655/W1-T5826: on the base's own run `origin/main` is the commit under test, so only an
+  // EXPLICIT base -- ci.yml's `--base HEAD^`, the push's parent -- is read; without one, strict.
+  const mainLane = Boolean(env[CENSUS_MAIN_BRANCH_RUN]);
+  const baseRef = mainLane ? baseRefOverride : (baseRefOverride ?? "origin/main");
+  const readBaseFile = baseRef ? baseFileReader(execFile, baseRef) : undefined;
   const result = censusExpiringFixtures({
     files,
     readFile,
@@ -569,17 +586,16 @@ export function main({
   const populationDrop = refusePopulationDrop(result.populationByFile, recordedPopulationByFile);
   const report = formatReport({ ...result, populationDrop });
   log(report);
-  // ATTRIBUTION NAMES THE OWNER, AND NOW DOES MOVE THE GATE FOR THE HALF IT CAN PROVE IS NOT THIS
-  // DIFF'S (W1-T3655). W1-T3388 deliberately left every crossing blocking, inherited or not,
-  // because nothing observed `main` -- a non-blocking inherited crossing would have been a warning
-  // no gate enforced, and the bomb would still reach its own red date unfixed. ci.yml's `ci` job
-  // now runs this census on its push-to-main lane too (CENSUS_MAIN_BRANCH_RUN, see above), so a
-  // stamp sitting on main is caught by the run that owns it. With that run in place, a crossing
-  // marked `inherited === true` is reported -- never hidden -- but no longer charged to a PR that
-  // did not plant it; only a crossing this diff itself introduced, or a population drop, blocks.
+  // ATTRIBUTION NAMES THE OWNER, AND MOVES THE GATE FOR THE HALF IT CAN PROVE IS NOT THIS DIFF'S
+  // (W1-T3655). A crossing marked `inherited === true` is reported -- never hidden -- but charged to
+  // no PR that did not plant it; only a crossing this diff introduced, or a population drop, blocks.
+  // W1-T5826 (operator design, 2026-10-05): the push-to-main lane reads the same way against the
+  // push's parent. A crossing no push planted is the CALENDAR's -- it turned main red on 10-01 and
+  // 10-05 with no diff involved -- so there it is a `::warning` naming its red date, ahead of it.
   const blocked = isBlocked({ reported: result.reported, populationDrop });
-  emitCiReport("expiring-fixture-census", report, { blocked });
+  const warnings = mainLane ? result.reported.filter((r) => r.inherited === true) : [];
+  emitCiReport("expiring-fixture-census", report, { blocked, warnings, env, log, append });
   return blocked ? 1 : 0;
 }
 
-if (process.argv[1] && process.argv[1].endsWith("expiring-fixture-census.mjs")) process.exit(main());
+if (process.argv[1] && process.argv[1].endsWith("expiring-fixture-census.mjs")) process.exit(main({ argv: process.argv.slice(2) }));

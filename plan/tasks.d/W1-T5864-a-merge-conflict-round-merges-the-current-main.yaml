@@ -1,0 +1,46 @@
+- id: W1-T5864
+  title: "A MERGE-CONFLICT ROUND MERGES THE CURRENT MAIN — the shell-less conflict round runs `git merge --no-commit --no-ff origin/main` on the worktree's unfetched origin/main, a stale ref already in the branch merges as up to date with no MERGE_HEAD, the worker hand-edits files anyway, and the harness commits a single-parent 'merge' it logs FIXED while GitHub still reports the PR dirty; later rounds change nothing and the PR strands"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — a merge-conflict round only spends a worker on, and only commits, a real merge of current main
+  band_meaning: span
+  origin: "operator session 2026-10-05: fleet #9301 (W1-T5374) stayed dirty after three merge-conflict rounds (operator: 'why hasn't rmd automatically resolved them? fix that root cause')"
+  plan_refs: [W1-T4458, W1-T3696, W1-T3727, W1-T5374]
+  files: [src/run-task.ts, test/a-merge-conflict-round-merges-the-current-main.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main and the fleet ledger. `startShellLessMergeConflictMerge`
+    (src/run-task.ts, W1-T4458) runs `git merge --no-commit --no-ff origin/main` in the fix
+    worktree with no fetch first, and returns `{ started: true }` whenever the merge exits 0, so
+    "Already up to date" (no MERGE_HEAD) counts as a started merge. The worktree's origin/main is
+    the managed checkout's ref, which lags when its refresh is refused (worktree.node_modules_refused
+    / managed_checkout_not_refreshed rows at 10:40Z the same day).
+    LIVE 2026-10-05 on #9301 (W1-T5374, branch base b78d433f at 11:11Z): GitHub reported it dirty
+    against #9289 (c9124ee2, 11:40:30Z), which edits the same src/lib/human-gate.ts and
+    src/lib/now-view.ts. The 11:43Z round logged fix.merge_started, the worker ran (15.6 s) and
+    `implement.harness_commit` wrote 8b86263f "fix(human-gate): merge origin/main into ..." with
+    fix_outcome FIXED. That commit has ONE parent (6001a668), and c9124ee2 is not in its history:
+    no merge happened, so the PR stayed dirty. The 11:49Z and 11:51Z rounds each logged
+    `fix.commit_refused` "the worker changed nothing" in the same second as `fix.dispatch`, and
+    the fleet never retried or escalated; the PR sat dirty until the operator asked.
+  design: |
+    (1) `startShellLessMergeConflictMerge` fetches `origin main` (no tags) before merging, and
+    reports `started: false` with a reason when the fetch fails or the merge leaves no MERGE_HEAD
+    and no conflict (already up to date while GitHub says dirty), so no worker is spent on a
+    merge that never began. (2) The harness commit of a merge-conflict round commits only while
+    MERGE_HEAD is present, so the commit has main as its second parent; with no MERGE_HEAD it
+    refuses with a named reason instead of writing a single-parent "merge". (3) A round that ends
+    in either refusal is a failed strike that escalates at the strike cap like any other, never a
+    silent stand-down.
+  acceptance:
+    - claim: "a merge-conflict round on a worktree whose origin/main is stale fetches main and starts a real merge with MERGE_HEAD set, the harness commit of a resolved round has two parents with current main as the second, an already-up-to-date merge reports not started and spends no worker, and a merge-mode commit without MERGE_HEAD is refused by name and counts as a failed strike"
+      proof: "unit test: test/a-merge-conflict-round-merges-the-current-main.test.ts"
+  falsifier: |
+    Drop the fetch: the stale-ref fixture merges as up to date, the round commits a single-parent
+    'merge', and the test fails on the parent count.

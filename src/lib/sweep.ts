@@ -8335,12 +8335,12 @@ export function decideSweepArm(
   readLedgerUnion?: () => { complete: boolean; lines: ReadonlyArray<Record<string, unknown>> } | undefined,
 ): ArmDecision {
   const armId = pr.taskId ?? `PR-${pr.prNumber}`;
-  let facts = postedArmFactsFromLedger(ledgerLines, armId, pr.headSha);
+  let facts = postedArmFactsFromLedger(ledgerLines, armId, pr.headSha, pr.prUrl);
   if (!facts && readLedgerUnion) {
     try {
       const union = readLedgerUnion();
       if (union?.complete) {
-        facts = postedArmFactsFromLedger(union.lines, armId, pr.headSha);
+        facts = postedArmFactsFromLedger(union.lines, armId, pr.headSha, pr.prUrl);
         if (!facts) {
           return {
             arm: false,
@@ -8355,7 +8355,7 @@ export function decideSweepArm(
   if (!facts) {
     return { arm: true, reason: "no ledgered verdict recoverable for this head — arming as before (no evidence to refuse on)" };
   }
-  const override = facts.capped ? cappedOverrideFromLedger(ledgerLines, armId, pr.headSha) : undefined;
+  const override = facts.capped ? cappedOverrideFromLedger(ledgerLines, armId, pr.headSha, pr.prUrl) : undefined;
   return decideAutoMergeArm(
     { state: "success", capped: facts.capped, planOnly: facts.planOnly },
     false,
@@ -9167,8 +9167,7 @@ export function cappedProofDiscriminationFromLedger(
   if (!pr.taskId) return undefined;
   let evidence: ProofDiscriminationEvidence | undefined;
   for (const line of lines) {
-    if (line.step !== "review.posted" || line.task_id !== pr.taskId) continue;
-    if (line.pr_url !== pr.prUrl || line.head_sha !== pr.headSha) continue;
+    if (line.step !== "review.posted" || line.pr_url !== pr.prUrl || line.head_sha !== pr.headSha) continue;
     evidence = undefined;
     if (line.state !== "success" || line.capped !== true || line.plan_only === true) continue;
     const verdict = line.decision_verdict;
@@ -12355,7 +12354,7 @@ export async function runSweep(
         const riskRefusedKey = `${pr.prNumber}@${pr.headSha}`;
         const refused =
           prior.riskRefused.has(riskRefusedKey) &&
-          !(pr.taskId !== undefined && cappedOverrideFromLedger(ledgerLines, pr.taskId, pr.headSha) !== undefined);
+          !(pr.taskId !== undefined && cappedOverrideFromLedger(ledgerLines, pr.taskId, pr.headSha, pr.prUrl) !== undefined);
         // W1-T1000002: A HOLD IS A LEDGERED REFUSAL, NOT A BARE DISARM. Deliberately NEVER
         // sha-keyed, unlike `refused` above: a hold binds the PR, not any one head, so a push while
         // held changes nothing. No dedup key is seeded, so the pass re-derives whole the moment an
@@ -12646,7 +12645,7 @@ export async function runSweep(
               if (failedArm && facts) {
                 const freshLines = readLedger(deps.ledgerPath);
                 const refused = priorActionsFromLedger(freshLines).riskRefused.has(`${pr.prNumber}@${pr.headSha}`) &&
-                  !(pr.taskId && cappedOverrideFromLedger(freshLines, pr.taskId, pr.headSha));
+                  !(pr.taskId && cappedOverrideFromLedger(freshLines, pr.taskId, pr.headSha, pr.prUrl));
                 const stack = deps.stackPrerequisite?.(pr);
                 const parity = decideSweepArm(pr, freshLines, undefined, readArmLedgerUnion);
                 if (automergeHoldFromLedger(freshLines, pr.prNumber) || refused ||
