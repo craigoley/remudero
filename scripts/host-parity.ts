@@ -50,11 +50,13 @@ import {
   type HostPole,
 } from "../src/lib/host-parity.js";
 
+// diff-cov: process-boundary — running a suite in a child node cannot carry a DA hit without
+// forking; the parity verdict is decided from this output in src/lib/host-parity.ts, unit-tested there.
 /** One `node --test` invocation, returning its combined output. A nonzero exit is a failing test,
  *  which is the ordinary case here — never a throw. */
 function runNodeTest(cwd: string, target: string): string {
   const r = spawnSync(
-    "node",
+    process.execPath,
     ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", target],
     { cwd, encoding: "utf8", maxBuffer: 256 * 1024 * 1024 },
   );
