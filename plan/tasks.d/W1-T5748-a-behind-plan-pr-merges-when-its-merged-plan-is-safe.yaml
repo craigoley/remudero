@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: observed live on #9138/#9155 (coordinator, 21:45Z); W1-T5615 (#9119) follow-up"
   plan_refs: [W1-T5615, W1-T5472, W1-T2855, W1-T5696, W1-T5733, W1-T5749]
   files: [src/lib/arm-auto-merge.ts, src/lib/plan-pr-merge-safety.ts, test/a-behind-plan-pr-merges-when-its-merged-plan-is-safe.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

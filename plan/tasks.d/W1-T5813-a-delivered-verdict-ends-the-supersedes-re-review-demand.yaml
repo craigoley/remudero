@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: #9155 (batch 10 filing) clean 30+ min under repeated post-review dispositions"
   plan_refs: [W1-T5726, W1-T3823, W1-T2860, W1-T2299, W1-T230]
   files: [src/lib/sweep.ts, test/a-delivered-verdict-ends-the-supersedes-re-review-demand.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

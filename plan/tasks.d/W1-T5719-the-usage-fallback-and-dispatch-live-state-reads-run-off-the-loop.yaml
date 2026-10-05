@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: research/restart/report.md (restart efficiency) P1, the two reads no queued task covers"
   plan_refs: [W1-T5284, W1-T5282, W1-T5283, W1-T4970, W1-T5718, W1-T5689]
   files: [src/run-task.ts, src/lib/drain.ts, test/the-usage-fallback-and-dispatch-live-state-reads-run-off-the-loop.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

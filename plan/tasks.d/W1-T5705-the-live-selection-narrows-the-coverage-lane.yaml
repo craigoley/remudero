@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 6 (the live switch only after the shadow miss rate clears) and addendum (ship behind the merge queue); workflow edit is an operator build (W1-T5351)"
   plan_refs: [W1-T4404, W1-T4406, W1-T5701, W1-T5702, W1-T5703, W1-T5704, W1-T5515, W1-T5522]
   files: [.github/workflows/ci.yml, test/the-live-selection-narrows-the-coverage-lane.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |
