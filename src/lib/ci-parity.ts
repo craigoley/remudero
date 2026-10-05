@@ -9,6 +9,7 @@ import { parse as parseYaml } from "yaml";
 import { readAffectedSuitesInput, selectAffectedSuites, type AffectedSuitesInput } from "./affected-suites.js";
 import { defaultPreflightSpawn, spawnFailureDetail, typecheckStep, type PreflightSpawn } from "./commit-message.js";
 import { ciControlPlaneParity } from "./ci-control-plane.js";
+import { systemClock } from "./clock.js";
 import { resolveHostPole, type HostPole } from "./host-parity.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, reclaimStaleLock } from "./fs-race-safe.js";
@@ -1059,7 +1060,7 @@ export function testWithCoverageLeaf(
   let ownedNestedScratch: string | undefined;
   try {
     const holder: CoverageLockHolder = {
-      pid: process.pid, host: hostname(), startedAt: new Date().toISOString(),
+      pid: process.pid, host: hostname(), startedAt: systemClock.iso(),
       scratch: nested ? join(stableScratch, "n-pending") : stableScratch,
     };
     writeFileSync(join(lockDir, "holder.json"), JSON.stringify(holder), { flag: "wx" });
