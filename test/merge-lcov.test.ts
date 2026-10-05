@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, linkSync, mkdirSync, mkdtempSync, opendirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -85,39 +85,31 @@ function runCompactor(output: string, ...rawDirectories: string[]): string {
 }
 
 function pinnedNodeControl(root: string, rawDirectories: string[]): { lcov: string; order: number[]; reportPaths: string[] } {
-  const staged = join(root, 'node-control');
-  mkdirSync(staged);
+  // Match the production merger's explicit input order: caller directory order, then sorted report paths.
+  // Do not infer order from a separate process's directory enumeration; filesystems can return a different
+  // order there, making the expected LCOV depend on the host rather than on the reports being compared.
   const reportPaths = rawDirectories.flatMap((directory) =>
     readdirSync(directory)
       .filter((entry) => /^coverage-\d+-\d{13}-\d+\.json$/.test(entry))
       .sort()
       .map((entry) => join(directory, entry)));
-  for (const [index, reportPath] of reportPaths.entries()) {
-    stageRawCoverageFile(reportPath, join(staged, `coverage-1-0000000000000-${String(index).padStart(6, '0')}.json`));
-  }
-  // Node's native reader uses opendir, not sorted readdir. APFS can return these reports in a
-  // different order; mapping mutates Node's line-hit cache. Compare algorithms over identical
-  // report order, not over two independently chosen filesystem traversal orders.
-  const order: number[] = [];
-  const directory = opendirSync(staged);
-  try {
-    for (let entry; (entry = directory.readSync()) !== null;) {
-      order.push(Number(entry.name.match(/-(\d+)\.json$/)![1]));
-    }
-  } finally {
-    directory.closeSync();
-  }
   const output = join(root, 'node-control.info');
   execFileSync(process.execPath, ['--expose-internals', '--input-type=module', '-e', `
     import { createRequire } from 'node:module';
-    import { writeFileSync } from 'node:fs';
+    import { readFileSync, writeFileSync } from 'node:fs';
     import { renderCoverageSummary } from './scripts/coverage-merge-ratchet.mjs';
     const { TestCoverage } = createRequire(import.meta.url)('internal/test_runner/coverage');
-    const collector = new TestCoverage(process.argv[1], undefined, process.cwd(), ['test/**'], undefined, true,
+    const collector = new TestCoverage('', undefined, process.cwd(), ['test/**'], undefined, true,
       { line: 0, branch: 0, function: 0 });
-    writeFileSync(process.argv[2], renderCoverageSummary(collector.summary()));
-  `, staged, output], { cwd: process.cwd(), encoding: 'utf8', stdio: 'pipe' });
-  return { lcov: readFileSync(output, 'utf8'), order, reportPaths };
+    const merged = new Map();
+    for (const path of process.argv.slice(2)) {
+      const report = JSON.parse(readFileSync(path, 'utf8'));
+      collector.mergeCoverage(merged, collector.mapCoverageWithSourceMap(report));
+    }
+    collector.getCoverageFromDirectory = () => [...merged.values()];
+    writeFileSync(process.argv[1], renderCoverageSummary(collector.summary()));
+  `, output, ...reportPaths], { cwd: process.cwd(), encoding: 'utf8', stdio: 'pipe' });
+  return { lcov: readFileSync(output, 'utf8'), order: reportPaths.map((_, index) => index), reportPaths };
 }
 
 function compactBundles(directory: string): Array<Record<string, unknown>> {
