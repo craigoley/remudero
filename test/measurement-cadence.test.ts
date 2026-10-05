@@ -380,7 +380,7 @@ test("REACHABILITY: daemonCommand actually WIRES checkMeasurementCadence/runMeas
   }
 });
 
-test("THE WIRED HOOK, CALLED FOR REAL: check + run actually execute the producer's body, not just its type", async () => {
+test("THE WIRED HOOK, CALLED FOR REAL: the producer executes while unrelated cadence leaves stay fixture-owned", async () => {
   // `buildMeasurementCadenceDaemonHooks` is the function `daemonCommand` constructs at its call
   // site (see the REACHABILITY test above) — this calls the closures it RETURNS, so the marker
   // read/write and the three-verb report assembly inside them are actually exercised, not merely
@@ -388,6 +388,10 @@ test("THE WIRED HOOK, CALLED FOR REAL: check + run actually execute the producer
   const root = mkdtempSync(join(tmpdir(), "rmd-mc-hook-"));
   try {
     mkdirSync(join(root, "state"), { recursive: true });
+    let historicalLookups = 0;
+    let verifierCalls = 0;
+    let successorCalls = 0;
+    const fixtureShipDate = (): string => { historicalLookups++; return "unknown"; };
     const hooks = buildMeasurementCadenceDaemonHooks({
       config: { root } as Config,
       now: () => NOW,
@@ -397,6 +401,25 @@ test("THE WIRED HOOK, CALLED FOR REAL: check + run actually execute the producer
         detail: "offline fixture",
       }),
       creditedMergedIds: () => new Set(),
+      // Keep the real producer, scans and marker discipline. Independent cadence leaves
+      // have their own native/default tests; this fixture must not invoke live providers,
+      // GitHub landing, the proof-debt audit or one git log per adoption finding.
+      verifyHumanCadenceResult: async () => {
+        verifierCalls++;
+        return {
+          parked: 0, judged: 0, needsOperator: [], automated: [], backlog: [],
+          judgeFailed: [], skipped: [], stateChanged: [], ageBandReasks: [], status: "clear",
+        };
+      },
+      successorWatch: async () => {
+        successorCalls++;
+        return { status: "refused", successors: [], alerted: [], refusedReason: "offline fixture" };
+      },
+      successorEscalate: () => { throw new Error("a marker fixture must never escalate a successor"); },
+      planReconcileLand: () => { throw new Error("a marker fixture must never land a plan PR"); },
+      proofDebtInput: () => undefined,
+      adoptionShipDateFor: fixtureShipDate,
+      adoptionShipDateForAsync: async () => fixtureShipDate(),
     });
 
     const decision = hooks.checkMeasurementCadence();
@@ -406,6 +429,10 @@ test("THE WIRED HOOK, CALLED FOR REAL: check + run actually execute the producer
     assert.equal(result.ruleEfficacy.status, "refused", "a freshly created state dir has no ledger at all");
     assert.equal(result.ruleEfficacy.escalated, false, "the shipped policy's escalate flag is off");
     assert.equal(result.coverageImprovement?.status, "refused", "the daemon hook must include the coverage-improvement member");
+    assert.equal(verifierCalls, 1, "the real hook consumes the fixture-owned verifier once");
+    assert.equal(successorCalls, 1, "the real hook consumes the fixture-owned offline catalog once");
+    assert.equal(result.successorWatch?.status, "refused", "unavailable catalog evidence stays unavailable");
+    assert.ok(historicalLookups > 0, "the real adoption scan consumes the fixture's explicit unknown dates");
 
     // THE MARKER-FIRST DISCIPLINE: runMeasurementCadence must have recorded the fire BEFORE (or
     // regardless of) the report body running, so an immediate re-check inside the interval refuses.
