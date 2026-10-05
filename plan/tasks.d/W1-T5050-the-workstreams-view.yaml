@@ -38,6 +38,7 @@
     Fold only fact steps: rows of a non-fact step the route shows are missing and the parity proof fails.
     Re-materialize per row: a burst of inserts builds the body more than once and the second proof fails.
   note: |
+    HOLD RELEASED 2026-10-05: P4-T03's activity_ring projection is in ledger-projector.ts.
     DISPATCH HOLD: waits for P4-T03 (the projector's activity_ring projection). A Phase 4 critical-path task is hand-built on a run-unfiled
     branch with no plan id, so depends_on cannot name it. RELEASE: one plan amendment deleting
     dispatch_hold once that merges (tracked in arch-plan.md, Phase 4).
