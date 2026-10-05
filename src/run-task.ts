@@ -50732,12 +50732,8 @@ export async function loadHeavyVerb(name: HeavyVerbName): Promise<void> {
   }
 }
 
-/**
- * W1-T5687: `rmd progress-watchdog [--json] [--state-root <dir>]` — names a stalled sweep by its
- * PROGRESS (sweep.pass / review.posted / verdict.merged), never its pulse (`daemon.*`). READ-ONLY:
- * it prints the verdict and, on capture-diagnostics, writes at most one bundle per 15 min. It
- * recycles nothing; acting on recycle / hold-revive is W1-T5688's.
- */
+// W1-T5687: `rmd progress-watchdog` — read-only; names a stalled sweep by progress rows, never `daemon.*`.
+// Recycling on the verdict is W1-T5688.
 function progressWatchdogCommand(rest: string[]): number {
   const badArg = unknownArgError("progress-watchdog", rest, ["--state-root"], ["--json"]);
   if (badArg) {
