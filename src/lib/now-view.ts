@@ -18,7 +18,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import {
   computeBoardSnapshot,
@@ -37,7 +37,7 @@ import { deriveLastPoll, readDiskFreeBytes, readGhRateLimitRemaining } from "./d
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { feedbackDir, listFeedback, type FeedbackEntry } from "./feedback.js";
 import { heldDependencyRoots } from "./held-dependency-roots.js";
-import { projectChangeManagementGates, projectDependencyVerificationGates, projectHumanGates, type DependencyReviewFact, type HumanGateObservation, type HumanGateProjection, type HumanGateSource } from "./human-gate.js";
+import { projectChangeManagementGates, projectDependencyVerificationGates, projectHumanGates, projectPinReviewerGates, type DependencyReviewFact, type HumanGateObservation, type HumanGateProjection, type HumanGateSource } from "./human-gate.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { readTaskActivity } from "./ledger-projector.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsSync, rotationStampIso, type LedgerRotationMemo, type LedgerRotationMemoPass } from "./ledger-union.js";
@@ -54,6 +54,9 @@ import {
 } from "./now-decisions.js";
 import type { BoardIssueRest, BoardPrRest } from "./open-prs-rest.js";
 import type { Plan } from "./plan.js";
+import { loadPolicy, policyPath, type PolicyValues } from "./policy.js";
+import { ratificationsPath, type Ratifications } from "./ratification.js";
+import { parse as parseYaml } from "yaml";
 import type { ReadModelDb, ReadModelLease } from "./read-model-db.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { buildBatchedGithub, readLedgerLines, resolveEscalation, type BatchedPr, type GitHub } from "./status.js";
@@ -579,6 +582,7 @@ export interface NowViewOptions {
   listGrilling?: (instance: NowInstance) => FeedbackEntry[];
   /** How far each instance's checkout is behind origin/main's plan; production reads git ({@link gitPlanBehind}). */
   planBehind?: (instance: NowInstance) => PlanBehind;
+  readPinPolicy?: (instance: NowInstance) => PolicyValues;
 }
 
 /** How many plan-touching commits on origin/main a checkout lacks, and the oldest one's time; or why that is unknowable. */
@@ -777,10 +781,59 @@ export function createNowView(opts: NowViewOptions): {
   const probeHost = (instance: NowInstance, isCore: boolean): NowHostProbe => defaultProbeHost(instance, isCore, clock, opts.hostProbe);
   const listGrilling = opts.listGrilling ?? ((instance: NowInstance) => listFeedback(instance.feedbackRoot!, { status: "grilling" }));
   /** Core's feedback dir and question store, so an answer landing in either re-materializes at once. */
-  const decisionsKey = (instance: NowInstance): string =>
-    instance.name === core && instance.feedbackRoot ? `${mtimeOf(feedbackDir(instance.feedbackRoot)) ?? "-"}:${mtimeOf(questionStorePath(instance.feedbackRoot)) ?? "-"}` : "none";
+  const decisionsKey = (instance: NowInstance): string => {
+    const path = nowPlanPath(instance);
+    const root = path ? dirname(dirname(path)) : undefined;
+    const stores = instance.name === core && instance.feedbackRoot ? `${mtimeOf(feedbackDir(instance.feedbackRoot)) ?? "-"}:${mtimeOf(questionStorePath(instance.feedbackRoot)) ?? "-"}` : "none";
+    return `${stores}:${mtimeOf(ledgerPathOf(instance)) ?? "-"}:${root ? `${mtimeOf(ratificationsPath(root)) ?? "-"}:${mtimeOf(policyPath(root)) ?? "-"}` : "none"}`;
+  };
+  const gateMemos = new Map<string, ReturnType<typeof createLedgerRotationMemo>>();
+  const gateRows = new Map<string, Array<Record<string, unknown>>>();
+  const pinReviewerSources = (instance: NowInstance, nowMs: number): HumanGateSource[] => {
+    const memo = gateMemos.get(instance.name) ?? createLedgerRotationMemo((rows) => rows.filter((row) =>
+      row.step === "rung.unratified" || row.step === "daemon.boot" || row.step === "daemon.freshness_not_stale" ||
+      row.step === "review.post_refused" || typeof row.step === "string" && row.step.startsWith("review.stale_reviewer_")));
+    gateMemos.set(instance.name, memo);
+    const pass = memo.pass({ parseMissing: true });
+    const read = readLedgerUnionRecordsSync(instance.ledgerDir, { refuseIncomplete: true, rotationRecords: pass.rotationRecords,
+      pattern: /rung\.unratified|daemon\.boot|daemon\.freshness_not_stale|review\.post_refused|review\.stale_reviewer_/ });
+    pass.complete();
+    const complete = read.ok && read.liveFileRead && read.torn === 0 && read.unclassified.length === 0;
+    if (complete) gateRows.set(instance.name, read.rows);
+    let pins: Ratifications | undefined;
+    let policy: PolicyValues | undefined;
+    let pinReason: string | undefined;
+    const path = nowPlanPath(instance);
+    try {
+      if (!path) throw new NowViewError("instance names no repository for ratification pins");
+      const root = dirname(dirname(path));
+      const pinPath = ratificationsPath(root);
+      try {
+        const raw: unknown = parseYaml(readFileSync(pinPath, "utf8"));
+        if (!Array.isArray(raw) || raw.some((entry) => !entry || typeof entry.rung !== "string" || typeof entry.operationHash !== "string")) {
+          throw new NowViewError("ratification pin table has unreadable rows");
+        }
+        pins = new Map(raw.map((entry) => [entry.rung, {
+          rung: entry.rung, operationHash: entry.operationHash,
+          ratifiedAt: typeof entry.ratifiedAt === "string" ? entry.ratifiedAt : "",
+          ratifiedBy: typeof entry.ratifiedBy === "string" ? entry.ratifiedBy : "",
+        }]));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        pins = new Map();
+      }
+      policy = opts.readPinPolicy ? opts.readPinPolicy(instance) : loadPolicy(policyPath(root)).values;
+    } catch (error) {
+      const reason = `cannot read current ratification source: ${String((error as Error).message)}`;
+      pinReason = reason;
+    }
+    return projectPinReviewerGates({ instance: instance.name, state: complete ? "complete" : "partial",
+      ...(!complete ? { reason: "pin/reviewer ledger source is missing, unreadable or incomplete" } : {}),
+      rows: complete ? read.rows : gateRows.get(instance.name) ?? read.rows, pins, policy, pinReason,
+      nowMs, freshnessBudgetMs: NOW_DAEMON_SILENT_MS });
+  };
   /** One instance's open decisions: grill and task questions from core's stores, escalations from its own board. */
-  const decisionsOf = (instance: NowInstance, db: ReadModelDb, snapshot: BoardSnapshot, rows: ReadonlyArray<Row>, plan: Plan | undefined, github: GitHub): NowDecisionsData => {
+  const decisionsOf = (instance: NowInstance, db: ReadModelDb, snapshot: BoardSnapshot, rows: ReadonlyArray<Row>, plan: Plan | undefined, github: GitHub, nowMs: number): NowDecisionsData => {
     const reasons: NonNullable<NowViewData["decisionsReasons"]> = {};
     const all = escalationDecisions(instance.name, snapshot.tasks, escalationClasses(rows), instance.name === core);
     if (instance.name !== core) {
@@ -816,6 +869,7 @@ export function createNowView(opts: NowViewOptions): {
       actions: nowActions(snapshot, rows),
     }));
     sources.push(...nowDependencyVerificationGates({ instance: instance.name, ...(instance.repo ? { repo: instance.repo } : {}), plan, rows, github, snapshot }));
+    sources.push(...pinReviewerSources(instance, nowMs));
     const humanGates = projectHumanGates(sources);
     return { ...capDecisions(all), humanGates, ...(Object.keys(reasons).length > 0 ? { decisionsReasons: reasons } : {}) };
   };
@@ -897,7 +951,7 @@ export function createNowView(opts: NowViewOptions): {
       h.probe = probeHost(instance, instance.name === core);
       h.healthAt = b.now;
     }],
-    ["decisions", (instance, b) => void (b.decisions = decisionsOf(instance, b.db, b.snapshot!, b.rows!, b.plan, b.gateway!.github))],
+    ["decisions", (instance, b) => void (b.decisions = decisionsOf(instance, b.db, b.snapshot!, b.rows!, b.plan, b.gateway!.github, b.now))],
     ["assemble", (instance, b) => {
       const { h, snapshot, rows, now, state } = b as Required<NowBuild>;
       const data = assembleNowView({ instance: instance.name, snapshot, rows, plan: b.plan!, recent: computeRecentActivity(depsOf(instance, b), h.recent, 20), health: h.probe!.health, decisions: b.decisions!, nowMs: now });
