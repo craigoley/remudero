@@ -1130,6 +1130,74 @@ function nextCurated(
   return undefined;
 }
 
+/** W1-T5719 — a live-state reader may be synchronous (CLI callers, tests) or return a promise (the
+ *  daemon's async gh transport). */
+export type LiveStateReader = (taskId: string, prNumber: number) => string | undefined | Promise<string | undefined>;
+
+/** W1-T5719 — BACKSTOP: ceiling on ONE live-state read before the pass treats it as unknown. */
+export const DEFAULT_LIVE_STATE_TIMEOUT_MS = 15_000;
+
+/** W1-T5719 — the outcome of {@link prefetchLiveStates}: a synchronous lookup the (synchronous,
+ *  pure) selectors consult, plus which reads were abandoned for taking too long. */
+export interface PrefetchedLiveStates {
+  read: (taskId: string, prNumber: number) => string | undefined;
+  timedOut: ReadonlySet<string>;
+}
+
+/**
+ * W1-T5719 — read every in-flight candidate's live PR state CONCURRENTLY and OFF THE LOOP, before
+ * the synchronous selectors rank anything. Selection used to call a synchronous reader once per
+ * candidate (about 45 s of the 490 s freeze after the 10-04 19:09 boot); now the reads overlap, each
+ * bounded by `timeoutMs`, and the loop stays responsive while they are in flight.
+ *
+ * INVARIANT: a read that times out, rejects, or throws is `undefined` — EXACTLY what a failed read
+ * was before — and `isDispatchEligible` treats `undefined` as "still in flight, skip it". The failure
+ * mode stays a skip, never a dispatch. Only tasks the plan holds an open PR for, and that are not
+ * already merged, are read — the same population the per-candidate walk could ever have reached.
+ * A synchronous reader still works (its value is simply awaited); it cannot be interrupted, but it
+ * never could be.
+ */
+export async function prefetchLiveStates(
+  plan: Plan,
+  isMerged: MergedSet,
+  isOpenPr: OpenPrCheck | undefined,
+  readLiveState: LiveStateReader,
+  timeoutMs: number = DEFAULT_LIVE_STATE_TIMEOUT_MS,
+): Promise<PrefetchedLiveStates> {
+  const states = new Map<string, string | undefined>();
+  const timedOut = new Set<string>();
+  const pending: Promise<void>[] = [];
+  for (const t of plan.tasks) {
+    const prNumber = isOpenPr?.(t.id);
+    if (prNumber === undefined || isMerged(t.id)) continue;
+    const key = `${t.id}#${prNumber}`;
+    if (states.has(key)) continue;
+    states.set(key, undefined); // unknown until proven otherwise
+    pending.push(
+      (async () => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const deadline = new Promise<"timeout">((resolve) => {
+          timer = setTimeout(() => resolve("timeout"), timeoutMs);
+        });
+        try {
+          const outcome = await Promise.race([
+            Promise.resolve().then(() => readLiveState(t.id, prNumber)),
+            deadline,
+          ]);
+          if (outcome === "timeout") timedOut.add(t.id);
+          else states.set(key, outcome);
+        } catch (e) {
+          void e; // a rejected or throwing read is an UNKNOWN one, as a failed read always was
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      })(),
+    );
+  }
+  await Promise.all(pending);
+  return { read: (taskId, prNumber) => states.get(`${taskId}#${prNumber}`), timedOut };
+}
+
 /** Build the exact command to resume a drain from where it stopped. */
 export function resumeCommand(opts: DrainOpts): string {
   const parts = ["rmd drain"];
@@ -1229,7 +1297,10 @@ export interface DrainDeps extends TaskPreconditionOptions {
   onOpenSiblingBuild?: NextRunnableOpts["onOpenSiblingBuild"];
   /** W1-T177: an OPTIONAL fresh, live re-read of one candidate in-flight PR's GitHub state — see
    *  {@link NextRunnableOpts.readLiveState} for the full contract. Optional. */
-  readLiveState?: (taskId: string, prNumber: number) => string | undefined;
+  readLiveState?: LiveStateReader;
+  /** W1-T5719: per-read ceiling for {@link readLiveState}; a read past it is unknown. Default
+   *  {@link DEFAULT_LIVE_STATE_TIMEOUT_MS}. */
+  liveStateTimeoutMs?: number;
   /** W1-T1035: an OPTIONAL fresh re-check of whether a just-observed MERGED PR credits the task it
    *  was opened for — see {@link NextRunnableOpts.isLiveMergeCredited} for the discrimination. */
   isLiveMergeCredited?: (taskId: string, prNumber: number) => boolean;
@@ -1570,6 +1641,11 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
     const currentPushedRunRefs = pushedRunRefs;
     const currentPlanOnlyReceipts = planOnlyReceipts;
     const currentOrphanEvidence = orphanEvidence;
+    // W1-T5719: the candidates' live PR states are read CONCURRENTLY and OFF THE LOOP, each bounded,
+    // BEFORE the synchronous selectors rank anything; a timed-out read is unknown, as a failed one is.
+    const prefetchedLive = deps.readLiveState
+      ? await prefetchLiveStates(plan, isMerged, deps.isOpenPr, deps.readLiveState, deps.liveStateTimeoutMs)
+      : undefined;
     const skipOpts: NextRunnableOpts = {
       clock: deps.clock,
       readPrecondition: deps.readPrecondition,
@@ -1622,10 +1698,16 @@ export async function runDrain(plan: Plan, deps: DrainDeps, opts: DrainOpts = {}
       onSkip: (t, prNumber) => log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }),
       // W1-T177: wrap the injected reader so a FAILED read is LEDGERED here. It still resolves to
       // undefined, so `nextRunnable`'s fail-open contract is unchanged; the failure is just legible.
-      readLiveState: deps.readLiveState
+      readLiveState: prefetchedLive
         ? (taskId, prNumber) => {
-            const state = deps.readLiveState!(taskId, prNumber);
-            if (state === undefined) log("dispatch.live_state_indeterminate", { task: taskId, pr_number: prNumber });
+            const state = prefetchedLive.read(taskId, prNumber);
+            if (state === undefined) {
+              log("dispatch.live_state_indeterminate", {
+                task: taskId,
+                pr_number: prNumber,
+                ...(prefetchedLive.timedOut.has(taskId) ? { timed_out: true } : {}),
+              });
+            }
             return state;
           }
         : undefined,
@@ -1999,6 +2081,11 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
     const currentPushedRunRefs = pushedRunRefs;
     const currentPlanOnlyReceipts = planOnlyReceipts;
     const currentOrphanEvidence = orphanEvidence;
+    // W1-T5719: the candidates' live PR states are read CONCURRENTLY and OFF THE LOOP, each bounded,
+    // BEFORE the synchronous selectors rank anything; a timed-out read is unknown, as a failed one is.
+    const prefetchedLive = deps.readLiveState
+      ? await prefetchLiveStates(plan, isMerged, deps.isOpenPr, deps.readLiveState, deps.liveStateTimeoutMs)
+      : undefined;
     const skipOpts: NextRunnableOpts = {
       clock: deps.clock,
       readPrecondition: deps.readPrecondition,
@@ -2047,10 +2134,16 @@ async function runDrainLanes(plan: Plan, deps: DrainDeps, opts: DrainOpts): Prom
           }
         : {}),
       onSkip: (t, prNumber) => log("dispatch.skipped", { task: t.id, reason: "open-pr", pr_number: prNumber }),
-      readLiveState: deps.readLiveState
+      readLiveState: prefetchedLive
         ? (taskId, prNumber) => {
-            const state = deps.readLiveState!(taskId, prNumber);
-            if (state === undefined) log("dispatch.live_state_indeterminate", { task: taskId, pr_number: prNumber });
+            const state = prefetchedLive.read(taskId, prNumber);
+            if (state === undefined) {
+              log("dispatch.live_state_indeterminate", {
+                task: taskId,
+                pr_number: prNumber,
+                ...(prefetchedLive.timedOut.has(taskId) ? { timed_out: true } : {}),
+              });
+            }
             return state;
           }
         : undefined,
