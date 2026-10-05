@@ -27,6 +27,8 @@ export const LIVE_ANALYTICS_REFRESH_INTERVAL_MS = 15_000;
 const HEADROOM_TAIL_BYTES = 2 * 1024 * 1024;
 /** A headroom row older than this many of the daemon's own sampling intervals is stale. */
 const HEADROOM_STALE_INTERVALS = 3;
+/** How old a provider reading may be before analytics calls it stale: three of the daemon's own sampling intervals. */
+const displayStaleAfterMs = HEADROOM_STALE_INTERVALS * HEADROOM_SAMPLE_MAX_AGE_MS;
 export const HEADROOM_FALLBACK_REASON = "source: the daemon's own daemon.headroom ledger reading; no routing probe was available";
 
 type JsonRecord = Record<string, unknown>;
@@ -179,10 +181,13 @@ export function createLiveAnalyticsSnapshotCache(deps: LiveAnalyticsSnapshotCach
     }
     let fallback: LiveProviderSnapshot | undefined;
     const absent = !provider || provider.state === "not-probed" || (provider.state === "unknown" && provider.reason === "absent");
-    // The routing file is rewritten only when the router runs, and its 60 s bound lapses whenever
-    // no worker spawns for a minute: a healthy idle fleet. The daemon samples headroom on its own
-    // cadence, so a fresh, newer reading replaces the lapsed one rather than the whole instance
-    // reading stale.
+    // The routing file's 60 s bound is the ROUTER's cache validity, not how old a reading may be
+    // before the console calls it stale: it lapses whenever no worker spawns for a minute, a healthy
+    // idle fleet. A lapsed reading is judged against the daemon's own sampling cadence instead, the
+    // bound the headroom fallback already uses; one older than that yields to a fresh, newer reading.
+    if (provider?.freshness === "stale" && clock.now() - Date.parse(provider.observedAt ?? "") <= displayStaleAfterMs) {
+      provider = { ...provider, freshness: "fresh" };
+    }
     const lapsed = provider?.freshness === "stale";
     if (absent || lapsed) {
       try {
