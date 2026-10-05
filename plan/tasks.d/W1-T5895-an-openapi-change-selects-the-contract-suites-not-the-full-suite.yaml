@@ -15,6 +15,9 @@
   priority: 3
   attempts: 0
   rationale: |
+    ALSO MEASURED 2026-10-05: a 2-file src diff (src/lib/live-analytics-snapshot-cache.ts plus its one test, PR #9370)
+    selected "affected-floor, 2253 suite(s)", so the ordinary affected floor is near-full too, not only the
+    OpenAPI fallback; the builder should report the floor's fan-in for a leaf src module and narrow it.
     READ 2026-10-05 on origin/main 8b8f15c9. scripts/preflight-author.mjs selects through
     `affectedSelectionOrFull` (src/lib/affected-suites.ts) and labels a `fullRun` selection
     `full-fallback`, then runs `listTestFiles(root)`. `selectAffectedSuites` returns `fullRun` as
