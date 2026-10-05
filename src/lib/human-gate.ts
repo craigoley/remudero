@@ -1,3 +1,6 @@
+import type { PolicyValues } from "./policy.js";
+import { ratificationPinCheck, type Ratifications } from "./ratification.js";
+
 /** Source-owned decisions, projected without granting authority or performing actions. */
 export type HumanGateKind =
   | "escalation" | "manual_approval" | "task_question" | "feedback_grill"
@@ -64,6 +67,86 @@ export function projectChangeManagementGates(
     state: input.state === "complete" && unknown.length > 0 ? "partial" : input.state,
     ...(reasons.length > 0 ? { reason: reasons.join("; ") } : {}), gates,
   };
+}
+
+export interface PinReviewerGateInput {
+  instance: string;
+  state: HumanGateSource["state"];
+  reason?: string;
+  rows: ReadonlyArray<Record<string, unknown>>;
+  pins?: Ratifications;
+  policy?: PolicyValues;
+  pinReason?: string;
+  nowMs: number;
+  freshnessBudgetMs: number;
+}
+
+/** W1-T5371: consume the producers' decisions; a checkout HEAD cannot identify loaded daemon code. */
+export function projectPinReviewerGates(input: PinReviewerGateInput): HumanGateSource[] {
+  const time = (row: Record<string, unknown>): number => typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+  const rows = input.rows.filter((row) => Number.isFinite(time(row)) && time(row) <= input.nowMs)
+    .sort((a, b) => time(a) - time(b));
+  const source = (name: string, reasons: string[], gates: HumanGateObservation[]): HumanGateSource => ({
+    name, instance: input.instance,
+    state: input.state === "unavailable" ? "unavailable" : reasons.length > 0 || input.state === "partial" ? "partial" : "complete",
+    ...(reasons.length > 0 ? { reason: [...new Set(reasons)].join("; ") } : {}), gates,
+  });
+  const common = input.state !== "complete" ? [input.reason ?? "source ledger completeness was not established"] : [];
+  const pinReasons = [...common, ...(input.pinReason ? [input.pinReason] : [])];
+  const pinGates: HumanGateObservation[] = [];
+  const refusals = new Map<string, Record<string, unknown>>();
+  for (const row of rows) if (row.step === "rung.unratified" && typeof row.rung === "string") refusals.set(row.rung, row);
+  for (const [rung, row] of refusals) {
+    let reason = typeof row.diff === "string" ? row.diff : `rung '${rung}' refused with unreadable operation evidence`;
+    // The emitting checker supplies the contract version; do not duplicate the CLI's private registry.
+    const version = /live policy\+contract "([^"]+)" now computes [a-f0-9]{64}/.exec(reason)?.[1];
+    let block: unknown = input.policy;
+    for (const segment of rung.split(".")) block = block && typeof block === "object" ? (block as Record<string, unknown>)[segment] : undefined;
+    if (version && block !== undefined && input.pins?.has(rung)) {
+      const current = ratificationPinCheck(rung, block, version, input.pins);
+      if (current.fire) continue;
+      reason = current.diff;
+    } else {
+      pinReasons.push(`rung '${rung}' current pin, policy or producer contract could not be verified`);
+    }
+    pinGates.push({ kind: "pin_drift", subject: rung, ownerSurface: "inbox", openedAt: String(row.ts),
+      url: typeof row.pr_url === "string" ? row.pr_url : null, reason, resolutionVerb: "reratify" });
+  }
+  const pinSource = source("ratification-pins", pinReasons, pinGates);
+  if (input.pinReason && input.pins === undefined) pinSource.state = "unavailable";
+
+  const reviewerReasons = [...common];
+  const boot = rows.findLast((row) => row.step === "daemon.boot");
+  const loaded = typeof boot?.head_sha === "string" && boot.head_sha.length > 0 ? boot.head_sha : undefined;
+  if (!loaded) reviewerReasons.push("loaded reviewer code identity is unknown: no readable daemon.boot head_sha");
+  const evidence = rows.findLast((row) => row.step === "daemon.freshness_not_stale" ||
+    row.step === "review.post_refused" && row.reviewer_code_freshness !== undefined ||
+    typeof row.step === "string" && row.step.startsWith("review.stale_reviewer_"));
+  const current = evidence !== undefined && boot !== undefined && time(evidence) >= time(boot) &&
+    input.nowMs - time(evidence) <= input.freshnessBudgetMs;
+  const fresh = current && loaded !== undefined && evidence!.step === "daemon.freshness_not_stale" &&
+    (evidence!.arm === "up_to_date" || evidence!.arm === "immaterial" && evidence!.old_sha === loaded);
+  const upstream = evidence?.origin_main_sha ?? evidence?.new_sha;
+  const evidenceCode = evidence?.code_sha ?? evidence?.reviewer_code_sha ?? evidence?.old_sha;
+  if (!current) reviewerReasons.push("current reviewer upstream evidence is missing or stale");
+  else if (!fresh && (typeof upstream !== "string" || upstream.length === 0 || evidenceCode !== loaded)) {
+    reviewerReasons.push(typeof evidence!.detail === "string" ? evidence!.detail :
+      typeof evidence!.reviewer_code_reason === "string" ? evidence!.reviewer_code_reason : "reviewer upstream or loaded-code evidence is unreadable");
+  }
+  const decision = rows.findLast((row) => (row.step === "review.stale_reviewer_needs_human" ||
+    row.step === "review.stale_reviewer_held" || row.step === "review.stale_reviewer_restart_requested") &&
+    typeof row.code_sha === "string" && row.code_sha.length > 0 && (!loaded || row.code_sha === loaded));
+  const ask = decision?.step === "review.stale_reviewer_needs_human" ? decision : undefined;
+  const resolved = loaded !== undefined && rows.findLast((row) => row.step === "daemon.freshness_not_stale" &&
+    time(row) >= time(boot!) && (row.arm === "up_to_date" || row.arm === "immaterial" && row.old_sha === loaded));
+  const reviewerGates: HumanGateObservation[] = [];
+  if (ask && !(resolved && time(resolved) >= time(ask))) {
+    reviewerGates.push({ kind: "stale_reviewer", subject: String(ask.code_sha), ownerSurface: "inbox",
+      openedAt: String(ask.ts), url: typeof ask.pr_url === "string" ? ask.pr_url : null,
+      reason: typeof ask.reason === "string" ? ask.reason : "the reviewer recurrence producer needs a person",
+      resolutionVerb: "restart" });
+  }
+  return [pinSource, source("reviewer-freshness", reviewerReasons, reviewerGates)];
 }
 
 export type HumanGateCount = { count: number; atLeast?: never } | { atLeast: number; count?: never };
