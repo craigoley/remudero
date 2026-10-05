@@ -267,6 +267,9 @@ async function driveRealGatewayApprove(opts: { headRead?: "fails"; armedOnHead?:
   mkdirSync(join(seed.dir, "plan", "tasks.d"), { recursive: true });
   writeFileSync(join(seed.dir, "plan", "tasks.yaml"), planTask("W1-T4", "a seed task the plan loader accepts"));
   writeFileSync(join(seed.dir, "MASTER-PLAN.md"), "# MASTER PLAN\n\nfixture\n");
+  // W1-T5660: the draft floor refuses a files: entry whose directory the worktree lacks.
+  mkdirSync(join(seed.dir, "src", "lib"), { recursive: true });
+  writeFileSync(join(seed.dir, "src", "lib", ".gitkeep"), "");
   seed.git("add", "-A");
   seed.git("commit", "--quiet", "-m", "chore: seed plan");
   seed.addRemote("origin", origin.dir);
