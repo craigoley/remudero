@@ -314,6 +314,7 @@ export interface RunSummary {
   verdictSource?: "ledger-credit";
   observedVerdict?: string;
   creditTs?: string;
+  mergeTs?: string;
   creditMatch?: "pr_url" | "task_id";
   /** W1-T4711: its verdict row {@link isNeverWorkedVerdict} — a run, but no sample of its class. */
   neverWorked?: true;
@@ -412,12 +413,14 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
     const prUrl = correctedUrl ?? claimedPrUrl;
     const observedVerdict = String(verdictLine?.verdict ?? "incomplete");
     const credit = ledgerCreditFor(credits, observedVerdict, prUrl, taskId);
+    const mergeTs = credit?.row.ts ?? (observedVerdict === "merged" ? verdictLine?.ts : undefined);
     runs.push({
       runId,
       taskId,
       type: String(start.type ?? "unknown"),
       startTs: String(start.ts ?? ""),
       verdict: credit ? "merged" : observedVerdict,
+      ...(typeof mergeTs === "string" ? { mergeTs } : {}),
       costUsd,
       ...(!verdictLine && workerCostRows.length === 0 ? { costSource: "none" as const } : {}),
       numTurns,
@@ -713,6 +716,7 @@ export interface ShippedRecord {
   costUsd: number;
   numTurns: number;
   source: "ledger" | "github";
+  mergeTs?: string;
   /** Present ONLY for a GitHub-discovered or ledger-credited merge whose run did NOT observe verdict=merged. */
   annotation?: string;
 }
@@ -721,7 +725,7 @@ export interface ShippedRecord {
  *  branch for the P9 ownership assert — run-task.ts's `PrHeadGateway` shape at the READ side. */
 export interface ShippedGithub {
   /** Find a MERGED PR whose body contains `Remudero-Task: <taskId>`. null if none. */
-  findMergedByTrailer(taskId: string): { number: number; url: string } | null;
+  findMergedByTrailer(taskId: string): { number: number; url: string; mergedAt?: string } | null;
   /** The PR's head branch name, or undefined if it cannot be resolved. */
   headRefName(prUrl: string): string | undefined;
   /** DEGRADE LOUDLY (W1-T132): a known-throttled or erroring gateway returns a reason NAMING it,
@@ -740,24 +744,53 @@ export interface ShippedResult {
   discrepancies: string[];
 }
 
-/** UNION ledger-merged runs with GitHub-derived merged, `Remudero-Task`-trailered PRs, scoped to
- *  runs started strictly after `sinceTs` (W1-T51). A ledger-ABSENT merge is credited with source
- *  "github" and annotated `gate-side merge; run ended <verdict>`.
- *
- *  P9 OWNERSHIP ASSERT: before crediting ANY merge, the PR's `headRefName` must equal the claiming
- *  run's OWN branch ({@link ownBranchOf}). A stale or foreign trailer is REJECTED and named in
- *  `discrepancies` — never silently dropped, never silently trusted. `runs` already carries the
- *  correction override, so the assert checks the truth. Why: docs/forensics/retro.md. */
+/** UNION ledger and GitHub merges by merge time, regardless of run start (W1-T5113).
+ *  P9 ownership still requires the credited PR's head to match the run's own branch.
+ *  Missing merge times are named, never replaced with a run start to scope a credit. */
 export function shippedSince(
   runs: RunSummary[],
   sinceTs: string | undefined,
   github: ShippedGithub,
 ): ShippedResult {
-  const scoped = sinceTs ? runs.filter((r) => r.startTs > sinceTs) : runs;
   const shipped: ShippedRecord[] = [];
   const discrepancies: string[] = [];
+  const sinceMs = sinceTs ? Date.parse(sinceTs) : undefined;
+  // W1-T5649: CANDIDATES ARE SELECTED LOCALLY, BEFORE ANY GATEWAY CALL. Every gateway call below can
+  // spawn `gh` on the daemon's event loop, so the work is bounded by candidates, never by history.
+  // The trailer dates are read lazily, once, off the local `git log`.
+  let trailerMergeAt: Map<string, { ms: number; iso: string }> | undefined;
+  const trailerMergeOf = (taskId: string): { ms: number; iso: string } | undefined => {
+    if (trailerMergeAt === undefined) {
+      trailerMergeAt = new Map();
+      let commits: GitLogCommit[] = [];
+      try {
+        commits = github.mergedCommits?.() ?? [];
+      } catch (error) {
+        const reason = `merged-commit read failed — only runs started after the marker are candidates: ${String(error)}`;
+        discrepancies.push(reason);
+      }
+      for (const c of commits) {
+        const id = RETRO_TRAILER_RE.exec(c.message)?.[1];
+        const ms = Date.parse(c.date);
+        if (id && Number.isFinite(ms) && ms > (trailerMergeAt.get(id)?.ms ?? -Infinity)) trailerMergeAt.set(id, { ms, iso: c.date });
+      }
+    }
+    return trailerMergeAt.get(taskId);
+  };
+  const isCandidate = (r: RunSummary): boolean => {
+    if (sinceMs === undefined || !Number.isFinite(sinceMs)) return true;
+    if (r.verdict === "merged") {
+      const ts = r.mergeTs ?? r.creditTs;
+      // An unknown merge time stays a candidate so it is NAMED below rather than dropped silently.
+      return ts === undefined || !Number.isFinite(Date.parse(ts)) || Date.parse(ts) > sinceMs;
+    }
+    if (r.startTs > (sinceTs as string)) return true;
+    const merged = trailerMergeOf(r.taskId);
+    return merged !== undefined && merged.ms > sinceMs;
+  };
 
-  for (const r of scoped) {
+  for (const r of runs) {
+    if (!isCandidate(r)) continue;
     const ownBranch = ownBranchOf(r.runId);
     if (r.verdict === "merged") {
       if (!r.prUrl) {
@@ -772,6 +805,12 @@ export function shippedSince(
         );
         continue;
       }
+      const mergeTs = r.mergeTs ?? r.creditTs;
+      if (sinceTs && (mergeTs === undefined || !Number.isFinite(Date.parse(mergeTs)))) {
+        discrepancies.push(`${r.taskId} (${r.runId}): ledger merge time is unknown — cannot credit this window`);
+        continue;
+      }
+      if (sinceTs && !(Date.parse(mergeTs!) > Date.parse(sinceTs))) continue;
       shipped.push({
         taskId: r.taskId,
         runId: r.runId,
@@ -779,6 +818,7 @@ export function shippedSince(
         costUsd: r.costUsd,
         numTurns: r.numTurns,
         source: "ledger",
+        ...(mergeTs !== undefined ? { mergeTs } : {}),
         ...(r.verdictSource === "ledger-credit" ? { annotation: ledgerCreditAnnotation(r) } : {}),
       });
     } else {
@@ -792,6 +832,14 @@ export function shippedSince(
         );
         continue;
       }
+      // The merge time is the gateway's own `mergedAt` or the local trailer commit's date, never a
+      // per-PR `gh pr view` spawn (W1-T5649).
+      const mergeTs = pr.mergedAt ?? (sinceTs ? trailerMergeOf(r.taskId)?.iso : undefined);
+      if (sinceTs && (mergeTs === undefined || !Number.isFinite(Date.parse(mergeTs)))) {
+        discrepancies.push(`${r.taskId} (${r.runId}): merge time is unknown for ${pr.url} — cannot credit this window`);
+        continue;
+      }
+      if (sinceTs && !(Date.parse(mergeTs!) > Date.parse(sinceTs))) continue;
       shipped.push({
         taskId: r.taskId,
         runId: r.runId,
@@ -799,6 +847,7 @@ export function shippedSince(
         costUsd: r.costUsd,
         numTurns: r.numTurns,
         source: "github",
+        ...(mergeTs !== undefined ? { mergeTs } : {}),
         annotation: `gate-side merge; run ended ${r.verdict}`,
       });
       discrepancies.push(
@@ -816,7 +865,7 @@ function ledgerCreditAnnotation(r: RunSummary): string {
 }
 
 export function ledgerCreditDiscrepancies(runs: RunSummary[], sinceTs: string | undefined): string[] {
-  const scoped = sinceTs ? runs.filter((r) => r.startTs > sinceTs) : runs;
+  const scoped = sinceTs ? runs.filter((r) => r.creditTs !== undefined && Date.parse(r.creditTs) > Date.parse(sinceTs)) : runs;
   return scoped
     .filter((r) => r.verdictSource === "ledger-credit")
     .map((r) => {
@@ -826,11 +875,13 @@ export function ledgerCreditDiscrepancies(runs: RunSummary[], sinceTs: string | 
     });
 }
 
-/** The ledger-only fallback when no gateway is wired: `mergedSince` crediting, no unverified claim. */
-function ledgerOnlyShipped(merged: RunSummary[]): ShippedRecord[] {
-  return merged
-    .filter((r): r is RunSummary & { prUrl: string } => typeof r.prUrl === "string")
-    .map((r) => ({ taskId: r.taskId, runId: r.runId, prUrl: r.prUrl, costUsd: r.costUsd, numTurns: r.numTurns, source: "ledger" as const }));
+/** The ledger-only fallback credits merges by merge time, with no GitHub ownership claim. */
+function ledgerOnlyShipped(runs: RunSummary[], sinceTs?: string): ShippedRecord[] {
+  return runs
+    .filter((r): r is RunSummary & { prUrl: string } => r.verdict === "merged" && typeof r.prUrl === "string" &&
+      (!sinceTs || (r.mergeTs !== undefined && Date.parse(r.mergeTs) > Date.parse(sinceTs))))
+    .map((r) => ({ taskId: r.taskId, runId: r.runId, prUrl: r.prUrl, costUsd: r.costUsd, numTurns: r.numTurns, source: "ledger" as const,
+      ...(r.mergeTs !== undefined ? { mergeTs: r.mergeTs } : {}) }));
 }
 
 // ── W1-T2288: the retro TRIGGER's merges beyond shippedSince's reach ─────────
@@ -1829,7 +1880,7 @@ export function buildGather(opts: {
   const merged = mergedSince(runs, opts.sinceTs);
   const union = opts.github
     ? shippedSince(runs, opts.sinceTs, opts.github)
-    : { shipped: ledgerOnlyShipped(merged), discrepancies: [] as string[] };
+    : { shipped: ledgerOnlyShipped(runs, opts.sinceTs), discrepancies: [] as string[] };
   const shipped = union.shipped;
   const discrepancies = [...union.discrepancies, ...ledgerCreditDiscrepancies(runs, opts.sinceTs)];
   // Checked ONCE, after the union runs so a healthy union still gets full credit: a reason here
@@ -1907,7 +1958,7 @@ export function buildGather(opts: {
     // UNCONDITIONAL, never gated on `opts.planCoherence`. The `{ ok: false, reason }` default
     // renders `unexamined` with a stated reason, never a silent omission or a bare zero (P48).
     planCoherence,
-    closureByClass: closureByClass(scoped, shipped, opts.openTaskClasses ?? [], opts.sinceTs),
+    closureByClass: closureByClass(runs, shipped, opts.openTaskClasses ?? [], opts.sinceTs),
     guardFireCounts: guardFireCounts(scoped, mapping, opts.sinceTs, { fallbackRows: GUARD_REASON_FALLBACK_ROWS, priorZeroStreak: opts.priorGuardZeroStreak }),
   };
 }

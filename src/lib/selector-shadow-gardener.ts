@@ -697,7 +697,7 @@ export async function runSelectorShadowGardener(
     `${paths.length ? paths.join(", ") : miss.headSha} -> ${miss.file}`;
   /** Land one plan-task file for a miss, returning the PR url and the id minted for it. */
   const land = async (miss: SelectorShadowMiss, build: (taskId: string) => { contents: string; title: string; body: (relativePath: string) => string }) => {
-    const workspace = deps.openWorkspace();
+    const workspace = await deps.openWorkspace();
     try {
       if (!workspace.branch) throw new Error("selector shadow: filing workspace has no branch for task-id reservation");
       const taskId = mintTaskId(workspace.branch);
@@ -708,11 +708,11 @@ export async function runSelectorShadowGardener(
       const lint = lintTask(task);
       if (!lint.ok) throw new Error(`selector shadow: missed-edge task failed lint: ${lint.violations.map((v) => v.check).join(", ")}`);
       writeAtomic(join(workspace.root, relativePath), made.contents);
-      const prUrl = workspace.land({ paths: [relativePath], title: made.title, body: made.body(relativePath) });
+      const prUrl = await workspace.land({ paths: [relativePath], title: made.title, body: made.body(relativePath) });
       if (!prUrl) throw new Error("selector shadow: task PR was not opened");
       return { taskId, prUrl };
     } finally {
-      workspace.dispose();
+      await workspace.dispose();
     }
   };
   let filedThisPass = false;

@@ -28,7 +28,7 @@ import type { Clock } from "./clock.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { fetchOriginRetryingRefLock } from "./git-fetch-retry.js";
 import { ghExec } from "./github-transport.js";
-import type { GardenCheckout, PrState } from "./gardener.js";
+import type { GardenWorkspacePort, PrState } from "./gardener.js";
 import type { Proposal } from "./inbox.js";
 import { parseTasksFromYaml, type Plan, type Task } from "./plan.js";
 import {
@@ -364,7 +364,7 @@ export interface MachineJudgePorts {
   /** Where a family's gardener keeps its Beta record: `<stateDir>/<family>-gardener.json`. */
   gardenRecord?: (family: string) => { alpha: number; beta: number } | undefined;
   /** Land the rewrites as one plan-only PR (the daemon). Absent, `writeRoot` is written in place. */
-  openWorkspace?: () => GardenCheckout;
+  openWorkspace?: GardenWorkspacePort;
   writeRoot?: string;
   /** Task ids the operator released with `rmd approve` ({@link readOperatorReleases}). */
   operatorReleases?: () => ReadonlySet<string>;
@@ -518,7 +518,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   writeAtomic(statePath, JSON.stringify(state) + "\n");
   if (ruled.length === 0) return report;
 
-  const ws = ports.writeRoot === undefined ? ports.openWorkspace?.() : undefined;
+  const ws = ports.writeRoot === undefined ? await ports.openWorkspace?.() : undefined;
   const root = ports.writeRoot ?? ws?.root;
   if (root === undefined) throw new Error("machine judge: neither a workspace nor a write root was supplied");
   try {
@@ -580,7 +580,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
       for (const r of ruled) if (report.escalated.includes(r.task.id)) ports.stageProposal(machineJudgeProposal(r));
     }
     if (ws && landed.length > 0) {
-      report.prUrl = ws.land({
+      report.prUrl = await ws.land({
         paths: landed.map((l) => l.relPath),
         title: `chore(plan): the machine-filing judge rules on ${landed.length} machine-filed task(s)`,
         body: machineJudgePrBody(landed),
@@ -592,7 +592,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
       ports.log("machine_judge.landed", { pr_url: report.prUrl ?? null, ids: landed.map((l) => l.id) });
     }
   } finally {
-    ws?.dispose();
+    await ws?.dispose();
   }
   writeAtomic(statePath, JSON.stringify(state) + "\n");
   return report;
