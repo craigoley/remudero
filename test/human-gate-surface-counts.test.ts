@@ -158,7 +158,7 @@ test("every human decision surface reports the same uncapped source-qualified co
     assert.deepEqual(summary.instances.find((i) => i.instance === "site")?.inbox, expected, `${name} keeps the instance identity`);
     if (name !== "now") assert.deepEqual(summary.instances.find((i) => i.instance === "core")?.inbox, { count: 0 }, `${name}: a complete source may report exact zero`);
     assert.ok(summary.kinds.covered.includes("escalation") && summary.kinds.covered.includes("proposal") || name === "now", name);
-    assert.ok(summary.kinds.missing.includes("held_root"), `${name} names the gate kinds no adapter reads yet`);
+    assert.ok(summary.kinds.covered.includes("held_root") && summary.kinds.missing.length > 0 && !summary.kinds.missing.some((kind) => summary.kinds.covered.includes(kind)), `${name} names the gate kinds no adapter reads yet`);
   }
   assert.deepEqual(all.now.display, { shown: NOW_DECISIONS_CAP, more: { count: 3 } }, "the now view exposes its paging");
   assert.deepEqual(all.composite.display, { shown: NOW_DECISIONS_CAP, more: { count: 3 } }, "the composite exposes its paging");
