@@ -36,7 +36,8 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { deriveLastPoll, readDiskFreeBytes, readGhRateLimitRemaining } from "./daemon-health.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { feedbackDir, listFeedback, type FeedbackEntry } from "./feedback.js";
-import { projectChangeManagementGates, projectHumanGates, type HumanGateObservation, type HumanGateProjection, type HumanGateSource } from "./human-gate.js";
+import { heldDependencyRoots } from "./held-dependency-roots.js";
+import { projectChangeManagementGates, projectDependencyVerificationGates, projectHumanGates, type DependencyReviewFact, type HumanGateObservation, type HumanGateProjection, type HumanGateSource } from "./human-gate.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { readTaskActivity } from "./ledger-projector.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsSync, rotationStampIso, type LedgerRotationMemo, type LedgerRotationMemoPass } from "./ledger-union.js";
@@ -55,10 +56,11 @@ import type { BoardIssueRest, BoardPrRest } from "./open-prs-rest.js";
 import type { Plan } from "./plan.js";
 import type { ReadModelDb, ReadModelLease } from "./read-model-db.js";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { buildBatchedGithub, readLedgerLines, type BatchedPr, type GitHub } from "./status.js";
+import { buildBatchedGithub, readLedgerLines, resolveEscalation, type BatchedPr, type GitHub } from "./status.js";
 import { deriveDayCostUsd, windowCostRows } from "./sweep.js";
 import { threadPlan, threadPlanPin } from "./thread-plan.js";
 import { utcDayWindowMs } from "./time-window.js";
+import { currentVerifyHumanRulings } from "./verify-human-judge.js";
 import { judgeSource } from "./view-freshness.js";
 import { legacyRowIndex, type LegacyRows, type ShadowLatest, type ShadowSum } from "./view-shadow.js";
 import { effectiveViewMode, type ViewSource, type ViewSwitchMode } from "./views.js";
@@ -183,6 +185,53 @@ function decisionGate(decision: NowDecision): HumanGateObservation {
     reason: decision.prompt.split("\n").find((line) => line.trim() !== "")?.trim() ?? decision.title,
     resolutionVerb: decision.kind === "manual_approval" ? "approve" : decision.kind === "escalation" ? "mark_handled" : "answer",
   };
+}
+
+const DEP_REVIEW_TASK = /^dep-review(?:-arm)?-PR(\d+)$/;
+
+/** Reads each producer's own record, joined the board's way: dependency escalations by `resolveEscalation`'s issue
+ *  join, held roots by `heldDependencyRoots` over the board's merge state, verify-human by the judge's newest ruling.
+ *  An existing release (`ratify.approved`, `released: verify-human`) frees a root and settles its verify ask. */
+export function nowDependencyVerificationGates(input: {
+  instance: string; repo?: string; plan: Plan | undefined; rows: ReadonlyArray<Row>; github: GitHub;
+  snapshot: Pick<BoardSnapshot, "tasks" | "prQueue" | "github_unreachable">;
+}): HumanGateSource[] {
+  const { snapshot, rows } = input;
+  const decided = new Map<string, Row>();
+  const escalated = new Set<string>();
+  const released = new Set<string>();
+  for (const row of rows) {
+    if (typeof row.task_id !== "string") continue;
+    if (row.step === "dep-review.decided") decided.set(row.task_id, row);
+    else if (row.step === "escalation.issue_opened" && DEP_REVIEW_TASK.test(row.task_id)) escalated.add(row.task_id);
+    else if (row.step === "ratify.approved" && row.released === "verify-human") released.add(row.task_id);
+  }
+  const openPrs = new Map(snapshot.prQueue.rows.map((pr) => [pr.prNumber, pr.prUrl]));
+  const dependencyReview = [...escalated].sort().map((taskId): DependencyReviewFact => {
+    const prNumber = Number(DEP_REVIEW_TASK.exec(taskId)![1]);
+    const verdict = decided.get(`dep-review-PR${prNumber}`);
+    const escalation = resolveEscalation(rows as Array<Record<string, unknown>>, taskId, input.github);
+    return {
+      repo: input.repo ?? null, prNumber, prUrl: openPrs.get(prNumber) ?? (typeof verdict?.pr_url === "string" ? verdict.pr_url : null),
+      decision: typeof verdict?.decision === "string" ? verdict.decision : null,
+      escalation: escalation ? { ...(escalation.escalationClass ? { class: escalation.escalationClass } : {}), ...(escalation.issueUrl ? { issueUrl: escalation.issueUrl } : {}),
+        ...(escalation.openedAt ? { openedAt: escalation.openedAt } : {}), ...(escalation.unverified ? { unverified: true } : {}) } : null,
+      prOpen: snapshot.prQueue.complete ? openPrs.has(prNumber) : null,
+    };
+  });
+  const byId = new Map(snapshot.tasks.map((t) => [t.taskId, t]));
+  const merged = (id: string): boolean => byId.get(id)?.status === "merged" || byId.get(id)?.status === "done";
+  const roots = input.plan ? heldDependencyRoots(input.plan, merged, released) : [];
+  const rulings = currentVerifyHumanRulings(rows as Array<Record<string, unknown>>);
+  const githubGap = snapshot.github_unreachable || !snapshot.prQueue.complete;
+  return projectDependencyVerificationGates({
+    instance: input.instance,
+    dependencyReview: { state: githubGap ? "partial" : "complete", ...(githubGap ? { reason: snapshot.prQueue.unavailableReason ?? "GitHub PR state could not be completely verified" } : {}), items: dependencyReview },
+    heldRoots: { state: input.plan ? "complete" : "unavailable", ...(input.plan ? {} : { reason: "no plan was read, so held roots are unknown" }),
+      items: roots.map((root) => ({ ...root, url: byId.get(root.rootId)?.prUrl ?? byId.get(root.rootId)?.escalationIssueUrl ?? null })) },
+    verifyHuman: { state: "complete", items: snapshot.tasks.filter((t) => t.verifyHumanPending && !released.has(t.taskId)).map((t) => ({
+      taskId: t.taskId, url: t.prUrl ?? null, judgment: rulings.get(t.taskId) ?? { state: "unclassified", reason: "no judge verdict recorded" } })) },
+  });
 }
 
 const RUNNING_STATUSES = new Set(["running", "fixing", "review", "diagnosing"]);
@@ -731,7 +780,7 @@ export function createNowView(opts: NowViewOptions): {
   const decisionsKey = (instance: NowInstance): string =>
     instance.name === core && instance.feedbackRoot ? `${mtimeOf(feedbackDir(instance.feedbackRoot)) ?? "-"}:${mtimeOf(questionStorePath(instance.feedbackRoot)) ?? "-"}` : "none";
   /** One instance's open decisions: grill and task questions from core's stores, escalations from its own board. */
-  const decisionsOf = (instance: NowInstance, db: ReadModelDb, snapshot: BoardSnapshot, rows: ReadonlyArray<Row>): NowDecisionsData => {
+  const decisionsOf = (instance: NowInstance, db: ReadModelDb, snapshot: BoardSnapshot, rows: ReadonlyArray<Row>, plan: Plan | undefined, github: GitHub): NowDecisionsData => {
     const reasons: NonNullable<NowViewData["decisionsReasons"]> = {};
     const all = escalationDecisions(instance.name, snapshot.tasks, escalationClasses(rows), instance.name === core);
     if (instance.name !== core) {
@@ -766,6 +815,7 @@ export function createNowView(opts: NowViewOptions): {
       ...(changeManagementUnknown ? { reason: snapshot.blockedPrsUnverifiedReason ?? snapshot.prQueue.unavailableReason ?? "GitHub PR state could not be completely verified" } : {}),
       actions: nowActions(snapshot, rows),
     }));
+    sources.push(...nowDependencyVerificationGates({ instance: instance.name, ...(instance.repo ? { repo: instance.repo } : {}), plan, rows, github, snapshot }));
     const humanGates = projectHumanGates(sources);
     return { ...capDecisions(all), humanGates, ...(Object.keys(reasons).length > 0 ? { decisionsReasons: reasons } : {}) };
   };
@@ -847,7 +897,7 @@ export function createNowView(opts: NowViewOptions): {
       h.probe = probeHost(instance, instance.name === core);
       h.healthAt = b.now;
     }],
-    ["decisions", (instance, b) => void (b.decisions = decisionsOf(instance, b.db, b.snapshot!, b.rows!))],
+    ["decisions", (instance, b) => void (b.decisions = decisionsOf(instance, b.db, b.snapshot!, b.rows!, b.plan, b.gateway!.github))],
     ["assemble", (instance, b) => {
       const { h, snapshot, rows, now, state } = b as Required<NowBuild>;
       const data = assembleNowView({ instance: instance.name, snapshot, rows, plan: b.plan!, recent: computeRecentActivity(depsOf(instance, b), h.recent, 20), health: h.probe!.health, decisions: b.decisions!, nowMs: now });

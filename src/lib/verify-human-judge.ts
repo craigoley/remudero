@@ -483,3 +483,23 @@ export async function applyAutomateVerdict(
   hooks.stageProposal(automationProposalFromJudgedShard(shard, verdict));
   return "automated";
 }
+
+/** One task's current judge ruling, or the reason there is none. "unclassified" is a gap the reader names, never
+ *  a default: neither an approval nor a cleared task. */
+export type VerifyHumanRuling =
+  | { state: "judged"; decision: VerifyHumanDecision; reason: string; at: string | null }
+  | { state: "unclassified"; reason: string };
+
+/** Each task's ruling from its NEWEST {@link VERIFY_HUMAN_JUDGED_STEP} row (W1-T5370). A failed verdict is the
+ *  fail-open default rather than an answer, and an unknown decision is unreadable: both read back as unclassified. */
+export function currentVerifyHumanRulings(rows: readonly Record<string, unknown>[]): Map<string, VerifyHumanRuling> {
+  const out = new Map<string, VerifyHumanRuling>();
+  for (const row of rows) {
+    if (row?.step !== VERIFY_HUMAN_JUDGED_STEP || typeof row.task_id !== "string") continue;
+    const decision = row.judge_decision as VerifyHumanDecision;
+    if (row.judge_failed === true) out.set(row.task_id, { state: "unclassified", reason: "the judge failed and its verdict is a fail-open default" });
+    else if (!VALID_DECISIONS.has(decision)) out.set(row.task_id, { state: "unclassified", reason: `unreadable judge decision ${JSON.stringify(row.judge_decision)}` });
+    else out.set(row.task_id, { state: "judged", decision, reason: typeof row.judge_reason === "string" ? row.judge_reason : "", at: typeof row.ts === "string" ? row.ts : null });
+  }
+  return out;
+}
