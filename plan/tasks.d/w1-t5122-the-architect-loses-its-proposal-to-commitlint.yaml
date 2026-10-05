@@ -13,7 +13,7 @@
   note: "reservation hand-off: plan-architect-harness-1790853551000 -> plan-architect-harness-1790853551000"
   plan_refs: [W1-T45, W1-T136, W1-T3243, W1-T4111]
   files: [src/lib/plan-architect.ts, src/run-task.ts, test/the-architect-proposal-survives-commitlint-and-uses-its-mount.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-10-01: the operator-approved trial (`rmd plan --mode=expand` with a 4.5 KB ledger-evidence brief)

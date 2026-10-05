@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5699 (#9281) builder's follow-up; workflow edit is an operator build (W1-T5351)"
   plan_refs: [W1-T5699, W1-T2428, W1-T3512]
   files: [.github/workflows/ci.yml, test/a-coverage-skip-message-names-the-diff-class.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

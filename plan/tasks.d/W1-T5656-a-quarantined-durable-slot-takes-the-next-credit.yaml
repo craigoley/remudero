@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log, recordCredit and the quarantined same-source entry"
   plan_refs: [W1-T5552, W1-T3996, W1-T951, W1-T5353]
   files: [src/lib/status.ts, test/a-quarantined-durable-slot-takes-the-next-credit.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

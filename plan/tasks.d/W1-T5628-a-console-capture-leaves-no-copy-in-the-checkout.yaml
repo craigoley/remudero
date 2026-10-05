@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: reviewing W1-T5525 (#9049) request-path land removal"
   plan_refs: [W1-T5525, W1-T2749, W1-T1054, W1-T3562, W1-T5524]
   files: [src/lib/feedback-landing.ts, src/lib/feedback.ts, src/lib/panel-graph.ts, src/lib/serve.ts, test/a-console-capture-leaves-no-copy-in-the-checkout.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

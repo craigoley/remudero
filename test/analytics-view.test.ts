@@ -3,7 +3,7 @@
 // in core. These tests drive the real ticker over real SQLite stores, the real refresh over a real ledger, and
 // the real worker with its slow lane and view threads.
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -27,6 +27,7 @@ import { runSlowLaneWorker, type AnalyticsRefresh, type SlowLaneMessage } from "
 import { createReadModelTicker, readModelSwitchesPath, runReadModelWorker, type ReadModelWorkerMessage } from "../src/lib/read-model-worker.js";
 import { makeTempDir } from "../src/lib/tmp.js";
 import type { ViewSource } from "../src/lib/views.js";
+import { switchViewsOn } from "./helpers/read-model-switches.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 
@@ -84,6 +85,8 @@ function world(t: TestCtx, clock: Clock, opts: { stateDir?: string; holder?: str
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "ledger.ndjson"), `${JSON.stringify({ ts: iso(T0 - MINUTE), step: "daemon.tick" })}\n`);
   }
+  // W1-T5896 builds no view whose switch is absent; a test that set its own switch keeps it.
+  if (!existsSync(readModelSwitchesPath(stateDir))) switchViewsOn(stateDir, [ANALYTICS_VIEW_NAME]);
   const posted: ReadModelWorkerMessage[] = [];
   const ticker = createReadModelTicker({
     stateDir, instances: [{ name: "core", ledgerDir: coreDir }, { name: "site", ledgerDir: siteDir }], views: [createAnalyticsView()],

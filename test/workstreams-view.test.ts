@@ -218,6 +218,7 @@ test("unit test: same-millisecond rows of different steps and repositories, appe
   appendFileSync(f.ledgerPath, [...appended, appended[0]!].map((line) => `${line}\n`).join(""));
   const view = createWorkstreamsView<ReadModelInstanceState>({ instances: f.instances, ledgerSource });
   const posted: ReadModelWorkerMessage[] = [];
+  switchViewsOn(f.stateDir, [WORKSTREAMS_VIEW_NAME]);
   const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [view], clock: movingClock(NOW), holder: "workstreams-test", oracle: "off", post: (m) => posted.push(m) });
   t.after(() => ticker.release());
   ticker.start();

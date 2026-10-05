@@ -65,7 +65,7 @@ function fixture(t: TestCtx): { root: string; stateDir: string } {
     { ts: iso(60_000), step: "daemon.tick" },
   ];
   writeFileSync(join(stateDir, "ledger.ndjson"), rows.map((r) => `${JSON.stringify({ host: "h1", ...r })}\n`).join(""));
-  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve" } }));
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", analytics: "serve" } }));
   const ledgerPath = join(stateDir, "ledger.ndjson");
   createRepositoriesSourcePublisher({ stateDir, instances: () => repositoriesSources({ ledgerPath, fleetControlRoot: root, questionsRoot: root, panelGraph: { planPath: join(root, "plan", "tasks.yaml") }, instances: { stateBase: join(root, "instances") } } as unknown as ServeDeps) })();
   return { root, stateDir };

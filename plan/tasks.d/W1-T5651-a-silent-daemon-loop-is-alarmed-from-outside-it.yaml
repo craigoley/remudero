@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log 17:44Z, the #9091 daemon loop stall"
   plan_refs: [W1-T4384, W1-T4385, W1-T484]
   files: [src/lib/incident-invariants.ts, test/a-silent-daemon-loop-is-alarmed-from-outside-it.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

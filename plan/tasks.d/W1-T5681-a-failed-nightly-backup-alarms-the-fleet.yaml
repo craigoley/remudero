@@ -11,7 +11,7 @@
   origin: "operator ruling 2026-10-04: surface the nightly host-update state-snapshot and off-host snapshot result where the fleet sees it"
   plan_refs: [W1-T5545, W1-T5546, W1-T3677, W1-T5319, W1-T4804, W1-T2349]
   files: [deploy/host-update.sh, scripts/fleet-heartbeat.sh, src/lib/host-resource-gardener.ts, test/a-failed-nightly-backup-alarms-the-fleet.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: #9138 (batch-9 filing, `plan-only`) stuck at head b7ccb2dd after a daemon restart and main moving; unstuck by hand by merging main"
   plan_refs: [W1-T2860, W1-T2793, W1-T230, W1-T5713, W1-T5690]
   files: [src/run-task.ts, test/a-re-review-always-ends-in-a-recorded-outcome.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

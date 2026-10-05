@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: g/repo and h/repo alternates point at a deleted remudero-preflight-W1-T4884 dir (seen 10-03, still broken 10-04)"
   plan_refs: [W1-T5513, W1-T5547]
   files: [deploy/rmd-host-cleanup.sh, test/a-scratch-unit-that-lends-git-objects-is-kept.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |
