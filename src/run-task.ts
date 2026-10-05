@@ -1399,6 +1399,7 @@ import {
   DEPENDABOT_IGNORE_MAJOR_COMMAND,
   buildDepReviewArmUnreachableEscalation,
   buildDepReviewEscalation,
+  reconcileDepReviewHold,
   decideDepReview,
   depReviewMigrationSubmissionKey,
   renderDepReviewMigrationFeedback,
@@ -21017,6 +21018,7 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
  * `which claude`, which does not exist on a CI runner.
  */
 export interface DepReviewDeps {
+  now?: () => number;
   gh?: (args: string[]) => unknown;
   prDiff?: (prUrl: string) => string;
   config?: Config;
@@ -21106,8 +21108,32 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     diff,
     checks: view.statusCheckRollup ?? [],
   });
-  log("dep-review.decided", { ...result, pr_url: view.url });
+  log("dep-review.decided", { ...result, pr_url: view.url, head_sha: view.headRefOid });
   console.log(`### rmd dep-review PR #${view.number} — ${result.decision}: ${result.reason}`);
+
+  try {
+    reconcileDepReviewHold({
+      statePath: join(dirname(ledgerPath), "dep-review-holds", owner, repo, `PR${view.number}.json`),
+      prUrl: view.url,
+      prNumber: view.number,
+      title: view.title ?? "",
+      body: view.body ?? "",
+      headSha: view.headRefOid,
+      result,
+      nowMs: (deps.now ?? Date.now)(),
+      escalationDeps: () => ({ issues: deps.issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
+      log,
+    });
+  } catch (error) {
+    log("dep-review.decided", {
+      ...result, decision: "hold", review_decision: result.decision,
+      reason: `dependency hold reconciliation incomplete: ${String(error)}`,
+      pr_url: view.url, head_sha: view.headRefOid,
+    });
+    log("dep-review.hold_reconcile_failed", { pr_url: view.url, head_sha: view.headRefOid, error: String(error) });
+    console.log(`dependency hold escalation reconciliation failed; will retry: ${String(error)}`);
+    return 1;
+  }
 
   if (result.decision === "refuse") {
     console.log(`no remudero-review posted (refused): ${view.url}`);
