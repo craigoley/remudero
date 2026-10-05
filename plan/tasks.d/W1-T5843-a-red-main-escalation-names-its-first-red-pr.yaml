@@ -1,0 +1,36 @@
+- id: W1-T5843
+  title: "A RED-MAIN ESCALATION NAMES ITS FIRST RED PR — the main-health issue's detail is built from `observation.reason`, while the first red push run, the merged PR that produced it and the failing test titles are composed only into the decision's reason, which no issue reads"
+  repo: remudero
+  depends_on: [W1-T5806]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one concern — the escalation body carries the diagnosis the decision already computed
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5806 (#9288) builder's follow-up"
+  plan_refs: [W1-T5806, W1-T5283]
+  files: [src/lib/main-health-rung.ts, test/a-red-main-escalation-names-its-first-red-pr.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 83ac0329. `mainHealthEscalationDecision` (src/lib/sweep.ts)
+    returns `reason: main (<sha>) is red ... ${observation.reason}.${mainHealthOperatorDetail(
+    observation)}`, and `mainHealthOperatorDetail` renders the failing test titles and "first
+    red main push run: <sha>; merged PR #N (<url>); after <sha> was green". `escalationFor`
+    (src/lib/main-health-rung.ts) calls that decision only to gate, then writes
+    `detail: The default branch ... is red. ${observation.reason}.`, so the issue an operator
+    reads never names the PR that turned main red. On 2026-10-05 main went red twice on two green
+    PRs merging together (#9213 + #9219, #9259's fixture); both were diagnosed by hand.
+    W1-T5806 (#9288, open) changes main-health-rung.ts too; this waits for it.
+  design: |
+    `escalationFor` builds its detail from the operator detail the decision already composes
+    (the failing titles and the first-red line, plus W1-T5806's merges that met, once merged),
+    not from `observation.reason` alone. The issue text is otherwise unchanged.
+  acceptance:
+    - claim: "a red observation with a first red commit and failing test titles escalates with a detail naming the merged PR number, its first red push run and the titles, and one without a first red commit still escalates with the observation's reason"
+      proof: "unit test: test/a-red-main-escalation-names-its-first-red-pr.test.ts"
+  falsifier: |
+    Keep `observation.reason` as the only detail: the escalation body lacks the PR number and the
+    test fails.

@@ -1,0 +1,31 @@
+- id: W1-T5847
+  title: "ONE STALE BOARD GENERATION LOGS ONE ROW — W1-T5762's board binder checks generation freshness on its prefetch and again on its check, so one stale tick writes two `tick_read.stale_refused` rows for the same consumer and generation"
+  repo: remudero
+  depends_on: [W1-T5762]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 2.00
+  risk: high  # Rule 19: one concern — a refusal is logged once per consumer and generation
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5762 (#9295) builder's follow-up"
+  plan_refs: [W1-T5762, W1-T4075]
+  files: [src/lib/read-plane.ts, test/one-stale-board-generation-logs-one-row.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on #9295's head 3d0f9cd2 (W1-T5762, open). `freshReadGeneration`
+    (src/lib/read-plane.ts) logs one `tick_read.stale_refused` row each time it refuses, and the
+    board binder (`bindCheckItems`, src/run-task.ts) calls it with consumer `board_items` on its
+    prefetch and again when it reads items. One stale tick therefore writes two identical rows,
+    and a reader counting stale ticks from the ledger double-counts the board.
+  design: |
+    `freshReadGeneration` logs a refusal once per (consumer, generation); a repeat refusal of
+    the same pair returns undefined without a row. The memory is bounded to the latest
+    generation per consumer. No caller changes.
+  acceptance:
+    - claim: "refusing the same stale generation twice for one consumer writes one stale_refused row, a different consumer or a newer stale generation writes its own row, and a fresh generation is served as before"
+      proof: "unit test: test/one-stale-board-generation-logs-one-row.test.ts"
+  falsifier: |
+    Log on every refusal: the double refusal writes two rows and the test fails.

@@ -1,0 +1,45 @@
+- id: W1-T5839
+  title: "A RUN-UNFILED PR'S REVIEW VERDICT IS WRITTEN AND READ UNDER ITS OWN PR — its review rows are keyed by the shared `unfiled` sentinel or by `PR-<n>` depending on the plan-filing classification of that pass, and `priorReviewVerdictFromLedger` takes the last row for the key, so one ad-hoc PR can be judged by another's verdict"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — a review verdict row belongs to exactly one PR
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5813 (#9290) follow-up; #9249 review rows flapped PR-9249 -> unfiled"
+  plan_refs: [W1-T5813, W1-T3535, W1-T3505, W1-T230, W1-T178, W1-T3704]
+  files: [src/run-task.ts, src/lib/review.ts, src/lib/arm-auto-merge.ts, test/a-run-unfiled-prs-review-verdict-is-its-own.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 83ac0329 and the fleet ledger (live file plus the 2026-10-05
+    rotations). `resolveReviewTaskId` (src/run-task.ts) returns the literal `unfiled` for every
+    `run-unfiled-<ms>` head unless the PR is classified a plan-only filing, when it returns
+    undefined; `buildOpenPrViews` then keys reviews `reviewLedgerKey = taskId ?? PR-<n>`. So the
+    key of one PR changes with its classification: #9249's `review.posted` rows read task_id
+    PR-9249 at 05:48:33Z and `unfiled` at 06:08:15Z; #9259 (not plan-only) wrote `unfiled`.
+    `priorReviewVerdictFromLedger` (src/lib/review.ts) scans by task id alone, last row wins, so
+    every `unfiled` PR shares one verdict slot. W1-T5813 (#9290) filtered the SWEEP arm's lines
+    by PR url (`armLedgerLinesForPr`) after #9155 was ledger-refused four times on another PR's
+    verdict; three readers remain unscoped: `armAutoMergeDetailed` (src/lib/arm-auto-merge.ts),
+    the W1-T178 verdict-stability read in `runReview`, and `priorReviewForReuse` in
+    `buildOpenPrViews` (both src/run-task.ts). W1-T3535 already narrowed `unfiled` out of
+    supersession ownership; this narrows it out of verdict identity.
+    src/run-task.ts sits at its comment-load ceiling: add no comment prose there.
+  design: |
+    (1) The sentinel never keys a review row: wherever a review key is minted from a resolved
+    task id (`reviewLedgerKey`, and the id the review lane writes on `review.posted`), a value
+    that `isSupersessionOwnerTaskId` rejects becomes `PR-<n>`, so a run-unfiled PR has the same
+    key whatever its classification. A real id from a trailer or `run-<taskId>-<ms>` is
+    unchanged. (2) `priorReviewVerdictFromLedger` gains an optional PR url and skips a
+    `review.posted` row whose `pr_url` names a different PR (a legacy row with no `pr_url` still
+    counts, as in `armLedgerLinesForPr`); every caller that knows its PR passes it.
+  acceptance:
+    - claim: "a run-unfiled PR's review key is PR-<n> whether or not it is classified a plan-only filing, a trailer or run-branch id is unchanged, and priorReviewVerdictFromLedger given a PR url ignores another PR's newer row under the same key while a legacy row with no pr_url still counts"
+      proof: "unit test: test/a-run-unfiled-prs-review-verdict-is-its-own.test.ts"
+  falsifier: |
+    Revert either half: two run-unfiled PRs with rows under `unfiled` hand the older PR the newer
+    PR's verdict, or one PR's key differs between a plan-only and a not-plan-only pass.
