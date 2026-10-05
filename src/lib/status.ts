@@ -548,11 +548,8 @@ export interface CreditBackfillReceipt {
   prNumber: number;
 }
 
-/** W1-T3996: a SUBTRACT-ONLY quarantine mark against one durable {@link CreditStoreEntry} source,
- *  tied to the EXACT recorded PR that proved it plan-only — never inferred from a branch name, a
- *  task status field, or an operator override (design's own bar). Once written it is never
- *  cleared by this module; only a fresh, non-plan-only credit for the SAME source could displace
- *  it, and nothing here manufactures one. */
+/** A subtract-only quarantine tied to the exact PR proved plan-only. Marks survive replacement
+ *  credits: a source may recover, but the quarantined PR must never recover through any source. */
 export interface DurableCreditInvalidation {
   prUrl: string;
   prNumber: number;
@@ -563,11 +560,9 @@ export interface DurableCreditInvalidation {
 /** One task's durable merge-evidence paths plus independent backfill-writer bookkeeping. */
 export type CreditStoreTaskRecord = Partial<Record<CreditStoreEntry["source"], CreditStoreEntry>> & {
   backfillReceipt?: CreditBackfillReceipt;
-  /** W1-T3996: sources whose durable entry above has been REVALIDATED and found plan-only. A
-   *  reader consults this BEFORE trusting the sibling entry, so a later projection with no
-   *  merged-path map in hand (the ordinary case) refuses the same credit it refused last time it
-   *  had one, rather than resurrecting it. */
-  invalidated?: Partial<Record<CreditStoreEntry["source"], DurableCreditInvalidation>>;
+  /** Legacy source-keyed marks plus later PR-url-keyed marks. Every value quarantines its PR
+   *  across both credit sources, including when no merged-path evidence is available. */
+  invalidated?: Record<string, DurableCreditInvalidation>;
   /** W1-T5551: the operator correction a projection last read live, kept past the ledger row's rotation. */
   correction?: { prUrl: string; prNumber?: number };
 };
@@ -719,11 +714,16 @@ export function saveCreditStore(path: string, store: CreditStore, fsDeps: Credit
  *  read-time projection only. The daemon runs projectPlan with the default writer and owns the store. */
 export const SERVE_KEEPS_CREDITS_IN_MEMORY = (_store: CreditStore): void => {};
 
-/** Merges one newly-discovered credit into the store, immutably. Idempotent: a source already recorded is left
- *  untouched, which keeps the function correct standing alone even though the durable rung returns first. */
+function quarantinedCreditUrls(record: CreditStoreTaskRecord | undefined): Set<string> {
+  return new Set(Object.values(record?.invalidated ?? {}).map((mark) => mark.prUrl));
+}
+
+/** Immutably records eligible credit, replacing only a quarantined entry in an occupied slot. */
 export function recordCredit(store: CreditStore, taskId: string, entry: CreditStoreEntry): CreditStore {
   const existing = store[taskId] ?? {};
-  if (existing[entry.source]) return store;
+  const quarantined = quarantinedCreditUrls(existing);
+  const current = existing[entry.source];
+  if (quarantined.has(entry.prUrl) || (current && !quarantined.has(current.prUrl))) return store;
   return { ...store, [taskId]: { ...existing, [entry.source]: entry } };
 }
 
@@ -734,13 +734,8 @@ export function recordCorrectionCredit(store: CreditStore, taskId: string, prUrl
   return { ...store, [taskId]: { ...existing, correction: { prUrl, prNumber: prNumberFromRef(prUrl) } } };
 }
 
-/** W1-T3996: SUBTRACT-ONLY — records that `source`'s durable entry for `taskId` is refused, tied
- *  to the exact PR the caller just proved plan-only. Idempotent, matching {@link recordCredit}'s
- *  own shape: a source already quarantined is left untouched rather than overwritten, so the
- *  FIRST reason recorded stands as the audit trail. This never removes the sibling
- *  {@link CreditStoreEntry} itself — a live rung (e.g. `corroborateByBranch`) that re-derives the
- *  SAME source must still see it occupied and refuse to persist a duplicate, which is why the
- *  quarantine sits ALONGSIDE the entry rather than in place of it. */
+/** Adds a PR quarantine without removing entries or earlier marks. The first mark keeps its
+ *  legacy source key; subsequent PRs use their URL, preserving every audit reason durably. */
 export function invalidateDurableCredit(
   store: CreditStore,
   taskId: string,
@@ -748,8 +743,9 @@ export function invalidateDurableCredit(
   invalidation: DurableCreditInvalidation,
 ): CreditStore {
   const existing = store[taskId] ?? {};
-  if (existing.invalidated?.[source]) return store;
-  return { ...store, [taskId]: { ...existing, invalidated: { ...existing.invalidated, [source]: invalidation } } };
+  if (quarantinedCreditUrls(existing).has(invalidation.prUrl)) return store;
+  const key = existing.invalidated?.[source] ? invalidation.prUrl : source;
+  return { ...store, [taskId]: { ...existing, invalidated: { ...existing.invalidated, [key]: invalidation } } };
 }
 
 /** Whether the backfill writer has durably recorded a successful append for this task. Kept
@@ -2621,14 +2617,14 @@ function derivePrPrecedence(
   // durable, resolving it again costs NO PR-record read.
   const durableCredit = creditStore[task.id];
   // W1-T5552: PRs quarantined under EITHER source — no rung below may credit or re-persist one.
-  const quarantinedUrls = new Set(Object.values(durableCredit?.invalidated ?? {}).map((mark) => mark.prUrl));
+  const quarantinedUrls = quarantinedCreditUrls(durableCredit);
   if (durableCredit) {
     // Trailer is the STURDIER of the two evidentially — an anchored body hit, not a ref GitHub deletes on merge
     // — but either alone suffices: this is a tie-break for which url to report. W1-T5353: an OVERRIDDEN
     // entry (W1-T5552: or a QUARANTINED one) is skipped for its sibling; none left, the live rungs answer.
     for (const entry of [durableCredit.trailer, durableCredit["head-branch"]]) {
       if (entry === undefined || overrides.excludes(entry.prNumber)) continue;
-      if (durableCredit.invalidated?.[entry.source] || quarantinedUrls.has(entry.prUrl)) continue;
+      if (quarantinedUrls.has(entry.prUrl)) continue;
       // W1-T3996 DURABLE-CREDIT REVALIDATION — ONE more look from FREE local `mergedPathsByPr` evidence; no
       // row is no opinion. HEAD-BRANCH: its writer once skipped the diff check (W1-T3990/#6468). TRAILER
       // (W1-T5552): an entry saved before the diff refusal (W1-T413/W1-T3067) was never checked — W1-T380
