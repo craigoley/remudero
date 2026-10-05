@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import test from "node:test";
+import { clockFromMillisFn } from "../src/lib/clock.js";
 import { reportLoopLag } from "../src/lib/daemon.js";
 import { startReadPlaneTelemetry } from "../src/lib/read-plane.js";
 
@@ -13,7 +14,7 @@ function withSlowExecFileSync(run: (call: (file: string, args: string[], ms: num
   let pending = 0;
   Object.assign(childProcess, { execFileSync: () => { clock += pending; return ""; } });
   syncBuiltinESMExports();
-  const telemetry = startReadPlaneTelemetry({ now: () => clock });
+  const telemetry = startReadPlaneTelemetry({ clock: clockFromMillisFn(() => clock) });
   try {
     run((file, args, ms) => { pending = ms; childProcess.execFileSync(file, args); }, telemetry);
   } finally {

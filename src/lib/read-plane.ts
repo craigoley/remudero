@@ -2,6 +2,7 @@ import { SHARE_ENV, Worker } from "node:worker_threads";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
+import { clockFromMillisFn, type Clock } from "./clock.js";
 
 export const READ_PLANE_KIND = "remudero-tick-reads";
 
@@ -35,11 +36,11 @@ function callerFrame(): string | undefined {
   return frame?.trim().slice(0, 200);
 }
 
-export function startReadPlaneTelemetry(options: { now?: () => number } = {}): {
+export function startReadPlaneTelemetry(options: { clock?: Clock } = {}): {
   sample: ReadPlaneSampler;
   stop(): void;
 } {
-  const now = options.now ?? (() => performance.now());
+  const now = (options.clock ?? clockFromMillisFn(() => performance.now())).now;
   const histogram = monitorEventLoopDelay({ resolution: 10 });
   histogram.enable();
   let syncMs = 0;

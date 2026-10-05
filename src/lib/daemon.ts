@@ -1369,7 +1369,7 @@ interface InterphaseReviewClock {
   stop(): Promise<{ eventWakeSeen: boolean; passes: number }>;
 }
 
-function peekSyncSpawnTop(deps: { readLoopTelemetry?: { peek?: () => unknown } }): unknown {
+function peekSyncSpawnTop(deps: Pick<DaemonDeps, "readLoopTelemetry">): unknown {
   try { return deps.readLoopTelemetry?.peek?.(); } catch { return undefined; /* Reason: observability only. */ }
 }
 
