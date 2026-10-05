@@ -28,6 +28,7 @@ import {
   isBlockedRow,
   isRunningRow,
   type BoardSnapshot,
+  type PrQueueRow,
   type RecentActivityCache,
 } from "./board.js";
 import { createBoardProjection, rowsNamingTasksBefore, type BoardProjection, type Row } from "./board-projection.js";
@@ -186,7 +187,7 @@ export interface NowViewData {
     tasks: NowTask[];
     groups: NowGroups;
   };
-  prQueue: { complete: boolean; unavailableReason?: string; rows: Array<{ prNumber: number; prUrl: string; title: string; taskId?: string; disposition: string; queueClass: string; held: boolean }> };
+  prQueue: { complete: boolean; unavailableReason?: string; rows: Array<{ prNumber: number; prUrl: string; title: string; taskId?: string; disposition: string; queueClass: string; held: boolean; reviewState: PrQueueRow["reviewState"] }> };
   actions: NowAction[];
   recent: { entries: Array<{ ts: string; verb: string; taskId: string; title: string; detail?: string; costUsd?: number; prUrl?: string }>; mergedToday: { count: number; day: string } };
   health: NowHealth;
@@ -444,7 +445,7 @@ export function assembleNowView(input: {
     prQueue: {
       complete: snapshot.prQueue.complete,
       ...(snapshot.prQueue.unavailableReason ? { unavailableReason: snapshot.prQueue.unavailableReason } : {}),
-      rows: snapshot.prQueue.rows.map((r) => ({ prNumber: r.prNumber, prUrl: r.prUrl, title: r.title, ...(r.taskId ? { taskId: r.taskId } : {}), disposition: r.disposition, queueClass: r.queueClass, held: r.held })),
+      rows: snapshot.prQueue.rows.map((r) => ({ prNumber: r.prNumber, prUrl: r.prUrl, title: r.title, ...(r.taskId ? { taskId: r.taskId } : {}), disposition: r.disposition, queueClass: r.queueClass, held: r.held, reviewState: r.reviewState })),
     },
     actions: nowActions(snapshot, input.rows),
     recent: {
