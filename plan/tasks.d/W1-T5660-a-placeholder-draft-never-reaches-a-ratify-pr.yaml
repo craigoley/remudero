@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log, #9099 (closed) placeholder drafts passed the W1-T4700 floor"
   plan_refs: [W1-T4700, W1-T5541, W1-T5348]
   files: [src/lib/inbox.ts, src/lib/task-linter.ts, test/a-placeholder-draft-never-reaches-a-ratify-pr.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

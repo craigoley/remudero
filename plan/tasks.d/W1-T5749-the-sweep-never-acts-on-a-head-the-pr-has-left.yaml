@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: observed live on #9138/#9155 (coordinator, 21:45Z)"
   plan_refs: [W1-T230, W1-T5615, W1-T5726, W1-T5748, W1-T5690]
   files: [src/lib/sweep.ts, src/run-task.ts, test/the-sweep-never-acts-on-a-head-the-pr-has-left.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

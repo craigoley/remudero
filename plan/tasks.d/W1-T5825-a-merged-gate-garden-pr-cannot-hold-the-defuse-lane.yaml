@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: root cause of the main-red expiring-fixture crossing hot-fixed by #9259"
   plan_refs: [W1-T5539, W1-T4116, W1-T4802, W1-T3272]
   files: [src/lib/gardener.ts, src/lib/gate-gardener.ts, test/a-merged-gate-garden-pr-cannot-hold-the-defuse-lane.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

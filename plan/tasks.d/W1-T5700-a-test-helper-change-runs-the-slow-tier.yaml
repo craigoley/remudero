@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: research/flow/report.md addendum defect (a TEST_ONLY PR touching only a helper runs no slow tier); workflow edit is an operator build (W1-T5351)"
   plan_refs: [W1-T4395, W1-T4396, W1-T3207, W1-T5351, W1-T5697]
   files: [.github/workflows/ci.yml, test/a-test-helper-change-runs-the-slow-tier.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

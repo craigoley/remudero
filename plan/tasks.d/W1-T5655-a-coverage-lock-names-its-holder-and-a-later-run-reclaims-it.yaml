@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log, the stranded coverage lock and the 7.8 GB in /mnt/rmd/fh5"
   plan_refs: [W1-T4526, W1-T3378, W1-T1067]
   files: [src/lib/ci-parity.ts, test/a-coverage-lock-names-its-holder-and-a-later-run-reclaims-it.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

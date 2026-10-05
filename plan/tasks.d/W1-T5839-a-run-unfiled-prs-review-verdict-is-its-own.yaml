@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: W1-T5813 (#9290) follow-up; #9249 review rows flapped PR-9249 -> unfiled"
   plan_refs: [W1-T5813, W1-T3535, W1-T3505, W1-T230, W1-T178, W1-T3704]
   files: [src/run-task.ts, src/lib/review.ts, src/lib/arm-auto-merge.ts, test/a-run-unfiled-prs-review-verdict-is-its-own.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
