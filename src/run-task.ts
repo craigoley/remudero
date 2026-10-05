@@ -2713,6 +2713,7 @@ import {
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 import { fetchPrDiff } from "./lib/pr-diff.js";
+import { GATEWAY_FETCH_TIMEOUT_MS } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable } from "./lib/owner-repo.js";
 import { resolveRepoLayout } from "./lib/repo-layout.js";
 export { resolveRepoRoot };
@@ -32795,6 +32796,16 @@ export function readPushedRunBranchesOutput(
   }
 }
 
+/** W1-T5805 — the same read as an awaited child, for the daemon's tick and each lane refill: killed past
+ *  `timeoutMs`, and REJECTING on any failure so the daemon ledgers it and keeps its fail-open direction. */
+export async function readPushedRunBranchesOutputAsync(
+  exec: (cmd: string, args: string[], opts: { encoding: "utf8"; cwd: string; timeout: number; killSignal: "SIGKILL" }) => Promise<{ stdout: string }> = execFilePromise as never,
+  timeoutMs = GATEWAY_FETCH_TIMEOUT_MS,
+): Promise<string> {
+  const opts = { encoding: "utf8", cwd: repoRoot, timeout: timeoutMs, killSignal: "SIGKILL" } as const;
+  return (await exec("git", ["ls-remote", "--heads", "origin", "run-*"], opts)).stdout;
+}
+
 /** Bounded page walk — same shape and bound `reapBranchesCommand`'s own `state=all` read already
  *  uses (8 pages, 100/page = 800 rows), never a per-branch lookup. */
 const RUN_BRANCH_CLOSED_PR_MAX_PAGES = 8;
@@ -36400,10 +36411,9 @@ export async function daemonCommand(
         // spends neither the REST nor the GraphQL budget — measured at 46 refs in 199 ms with
         // `core` remaining identical before and after.
         //
-        // FAIL OPEN, DELIBERATELY: a throw here (network blip, auth) yields "" and therefore an
-        // EMPTY set, so no task is refused — precisely today's behaviour. The degraded outcome is
-        // "no improvement", never "dispatch wrongly blocked".
-        readPushedRunBranches: () => readPushedRunBranchesOutput(),
+        // FAIL OPEN, DELIBERATELY: a failed read (network blip, auth) refuses no task. W1-T5805: the
+        // daemon awaits it, at each tick and lane refill, and ledgers the failure.
+        readPushedRunBranches: () => readPushedRunBranchesOutputAsync(),
         readOrphanRunBranchEvidence: orphanRunBranchEvidenceReader(
           join(config.root, "state", automaticBranchReapStateFileName(target.repo)),
           () => liveInflightRuns(inflightDir).map((r) => r.taskId),
@@ -45812,17 +45822,10 @@ export async function planCommand(
   const { owner, repo } = resolveOwnerRepo();
 
   // G-17 Tier Invariant: the plan Architect MUST outrank implement workers.
-  // ONE-ARGUMENT ON PURPOSE — the only Architect-tier site that does NOT read the mounts
-  // `architect:` row, so this resolves through `config.architectModel ?? "opus"`. #781 wired the
-  // other three and scoped this one out in terms: "judge and the manual `rmd plan` command are
-  // out of the ruling's scope and unchanged" (fb-1784921980488-44b355 §4). Passing `mountsTable`
-  // here would be a MODEL CHANGE for this lane, not a cleanup — see .remudero/mounts.yaml's
-  // `architect:` block for the measured before/after and why the invariant is unaffected either
-  // way. `mountsTable` loads below because this lane does take its turn cap from the row.
-  const arch = architectModel(config);
+  const mountsTable = loadMounts(mountsPath(repoRoot));
+  const arch = architectModel(config, mountsTable);
   const wrk = workerModel(config);
   assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
-  const mountsTable = loadMounts(mountsPath(repoRoot));
 
   const ledgerPath = ledgerPathFor(config);
   const taskId = `PLAN-${mode}`;
@@ -45830,7 +45833,7 @@ export async function planCommand(
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "plan", ...extra });
   const say = (msg: string) => console.log(`\n### [plan] ${msg}`);
-  log("plan.start", { mode, brief, architect: arch, worker: wrk });
+  log("plan.start", { mode, brief, architect: arch, effort: mountsTable.architect.effort, worker: wrk });
   say(`plan ${runId} — mode=${mode} — architect ${arch} over worker ${wrk}`);
 
   const settingsFile = renderWorkerSettings({
@@ -45919,6 +45922,7 @@ export async function planCommand(
           permissionMode: "bypassPermissions",
           settingsFile,
           model: arch, // the Architect tier
+          effort: mountsTable.architect.effort,
           maxTurns: mountsTable.architect.maxTurns, // MOUNT-GOVERNED (§9) — never a hardcoded literal.
           maxBudgetUsd: DEFAULT_BUDGET_USD,
           config,
@@ -46070,7 +46074,7 @@ export async function planCommand(
       .map((line) => line.trim())
       .filter(Boolean);
     const planPrBody = buildPlanPrBody({
-      intro: `rmd plan --mode=${mode} proposed plan-only changes.`,
+      intro: `rmd plan --mode=${mode} proposed plan-only changes.\n\nOperator brief\n\n${brief || "(none — whole-plan scope)"}`,
       criteria: filingAcceptanceCriteria(reservedIds, planPrFiles),
       changedFiles: planPrFiles,
       proofCwd: worktreePath,

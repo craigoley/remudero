@@ -1,3 +1,5 @@
+import { utcDayOf, type SloRungTaken } from "./pr-blocker.js";
+
 export interface StrikeLadderInput {
   lastAttemptAt: string | null | undefined;
   mainTip?: { sha: string; committedAt: string };
@@ -88,4 +90,31 @@ export function hasUnspentLadderRefresh(
 export function capStrikeLadderNote(note: string): string {
   const suffix = "\n[truncated at 2,000 characters]";
   return note.length <= 2000 ? note : note.slice(0, 2000 - suffix.length) + suffix;
+}
+
+/** W1-T5690 — the ledger's rung rows for one PR/task as the SLO reads them. Refresh is "at this
+ *  head" by main tip (a refresh moves the head), the others by head sha. Rebuild rows are the
+ *  `requeued` rows of the TASK, so the lifetime and per-UTC-day caps see every head. */
+export function sloRungHistory(
+  rows: readonly Record<string, unknown>[],
+  at: { taskId: string | undefined; prNumber: number; headSha: string; mainSha: string | undefined },
+): SloRungTaken[] {
+  const out: SloRungTaken[] = [];
+  for (const r of rows) {
+    const atMs = typeof r.ts === "string" ? Date.parse(r.ts) : Number.NaN;
+    if (r.step === "sweep.strike_ladder.refreshed" && r.pr_number === at.prNumber) {
+      out.push({ rung: "refresh", atMs, atThisHead: at.mainSha !== undefined && r.main_sha === at.mainSha });
+    } else if (r.step === "sweep.strike_ladder.requeued" && at.taskId !== undefined && r.task_id === at.taskId) {
+      out.push({ rung: "rebuild", atMs, atThisHead: r.head_sha === at.headSha });
+    } else if ((r.step === "sweep.strike_ladder.digest_opened" || r.step === "sweep.strike_ladder.digest_appended") &&
+        r.pr_number === at.prNumber) {
+      out.push({ rung: "digest", atMs, atThisHead: r.head_sha === at.headSha });
+    }
+  }
+  return out;
+}
+
+/** W1-T5690 — has a rebuild for this task already run on `nowMs`'s UTC day? */
+export function rebuiltOnUtcDay(history: readonly SloRungTaken[], nowMs: number): boolean {
+  return history.some(h => h.rung === "rebuild" && utcDayOf(h.atMs) === utcDayOf(nowMs));
 }
