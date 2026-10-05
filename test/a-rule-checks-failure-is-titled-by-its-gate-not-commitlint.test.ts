@@ -11,6 +11,8 @@ import { parse as parseYaml } from "yaml";
 // the `rule-checks` step (the tree-derived census and ratchet suites, W1-T4433). W1-T3720 titles a
 // bundled check by the gate that refused, but this bundle was posted from two BARE outcomes, and a
 // bare outcome's id is the check's own name — so a red census suite was still titled `commitlint`.
+// W1-T5695 then gave rule-checks its OWN posted name, so the title lint (pr-title-lint.yml's
+// `commitlint`) and the census can no longer share, or mask, one check run.
 // These tests EXECUTE the real workflow steps (the rule-checks step and the reporting step) under
 // bash with stubbed `node`/`gh`, so a later edit to either is what they check.
 
@@ -19,7 +21,7 @@ type Step = { id?: string; env?: Record<string, string>; run?: string };
 
 function commitlintSteps(): Step[] {
   const workflow = parseYaml(readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8")) as {
-    jobs: { commitlint: { steps: Step[] } };
+    jobs: { commitlint: { steps: Step[] } }; // the `light-gates` job keeps its `commitlint` key
   };
   return workflow.jobs.commitlint.steps;
 }
@@ -44,8 +46,8 @@ function runRuleChecksStep(report: string, exitCode: number): { status: number |
   }
 }
 
-/** Run the REAL reporting step with a recording `gh` stub; return the posted `commitlint` check run. */
-function postedCommitlint(outcomes: Record<string, string>, reports: Record<string, string>): { name: string; conclusion: string; title: string } | undefined {
+/** Run the REAL reporting step with a recording `gh` stub; return the posted check run named `name`. */
+function postedCheck(outcomes: Record<string, string>, reports: Record<string, string>, name = "rule-checks"): { name: string; conclusion: string; title: string } | undefined {
   const reporter = commitlintSteps().find((s) => s.run?.includes("report()"));
   assert.ok(reporter?.run && reporter.env, "ci.yml's commitlint job must carry the report() step");
   const root = mkdtempSync(join(tmpdir(), "rmd-commitlint-report-"));
@@ -58,7 +60,7 @@ function postedCommitlint(outcomes: Record<string, string>, reports: Record<stri
     const run = spawnSync("bash", ["-c", stub + reporter.run], {
       cwd: REPO_ROOT,
       encoding: "utf8",
-      env: { ...process.env, ...outcomeEnv, GITHUB_REPOSITORY: "owner/repo", HEAD_SHA: "abc123", POSTING_JOB_ID: "1", GATE_REPORT_DIR: root, GH_LOG_FILE: logFile },
+      env: { ...process.env, ...outcomeEnv, GITHUB_REPOSITORY: "owner/repo", HEAD_SHA: "abc123", POSTING_JOB_ID: "1", POSTING_RUN_ID: "7", POSTING_RUN_ATTEMPT: "1", GATE_REPORT_DIR: root, GH_LOG_FILE: logFile },
     });
     assert.equal(run.status, 0, run.stderr);
     return readFileSync(logFile, "utf8")
@@ -69,29 +71,22 @@ function postedCommitlint(outcomes: Record<string, string>, reports: Record<stri
         conclusion: /-f conclusion=(\S+) /.exec(line)?.[1] ?? "",
         title: /-f output\[title\]=(.*?) -f output\[summary\]=/.exec(line)?.[1] ?? "",
       }))
-      .find((c) => c.name === "commitlint");
+      .find((c) => c.name === name);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 }
 
-test("W1-T5368: a failing rule-checks step with a passing commitlint is titled rule-checks, and the check name stays commitlint", () => {
-  // FALSIFIER: with the bare `report "commitlint" "${OUTCOME_COMMITLINT}" "${OUTCOME_RULE_CHECKS}"`
-  // the failing rule-checks outcome's id is the check name, so this title reads `commitlint`.
-  assert.deepEqual(postedCommitlint({ OUTCOME_RULE_CHECKS: "failure" }, {}), { name: "commitlint", conclusion: "failure", title: "rule-checks" });
+test("W1-T5368: a failing rule-checks step is titled rule-checks under its own posted name, never commitlint", () => {
+  // FALSIFIER: posted under `commitlint` again, the rule-checks red reddens the title verdict.
+  assert.deepEqual(postedCheck({ OUTCOME_RULE_CHECKS: "failure" }, {}), { name: "rule-checks", conclusion: "failure", title: "rule-checks" });
+  assert.equal(postedCheck({ OUTCOME_RULE_CHECKS: "failure" }, {}, "commitlint"), undefined, "the title lint is pr-title-lint.yml's alone (W1-T5695)");
   // A rule-checks report that names the refusing suite's gate BLOCKED titles the check by that gate.
   assert.deepEqual(
-    postedCommitlint({ OUTCOME_RULE_CHECKS: "failure" }, { "rule-checks": "clock-signature-census: BLOCKED -- 2 new signature(s)\n" }),
-    { name: "commitlint", conclusion: "failure", title: "clock-signature-census" },
+    postedCheck({ OUTCOME_RULE_CHECKS: "failure" }, { "rule-checks": "clock-signature-census: BLOCKED -- 2 new signature(s)\n" }),
+    { name: "rule-checks", conclusion: "failure", title: "clock-signature-census" },
   );
-  // The PR-title half is still named commitlint, and both halves failing name both.
-  assert.deepEqual(postedCommitlint({ OUTCOME_COMMITLINT: "failure" }, {}), { name: "commitlint", conclusion: "failure", title: "commitlint" });
-  assert.deepEqual(postedCommitlint({ OUTCOME_COMMITLINT: "failure", OUTCOME_RULE_CHECKS: "failure" }, {}), {
-    name: "commitlint",
-    conclusion: "failure",
-    title: "commitlint, rule-checks",
-  });
-  assert.deepEqual(postedCommitlint({}, {}), { name: "commitlint", conclusion: "success", title: "commitlint" });
+  assert.deepEqual(postedCheck({}, {}), { name: "rule-checks", conclusion: "success", title: "rule-checks" });
 });
 
 test("W1-T5368: the rule-checks step tees its report under pipefail, so its outcome is unchanged", () => {
@@ -104,8 +99,8 @@ test("W1-T5368: the rule-checks step tees its report under pipefail, so its outc
   assert.equal(green.log, "rule-checks: OK\n");
 
   // End to end: the teed log, read back by the real reporting step, names the refusing gate.
-  assert.deepEqual(postedCommitlint({ OUTCOME_RULE_CHECKS: "failure" }, { "rule-checks": red.log ?? "" }), {
-    name: "commitlint",
+  assert.deepEqual(postedCheck({ OUTCOME_RULE_CHECKS: "failure" }, { "rule-checks": red.log ?? "" }), {
+    name: "rule-checks",
     conclusion: "failure",
     title: "clock-signature-census",
   });

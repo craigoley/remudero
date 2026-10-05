@@ -186,7 +186,10 @@ test("the nightly workflow is bounded, read-only and pinned", () => {
   for (const [jobId, job] of jobsOf(doc)) {
     const minutes = job["timeout-minutes"];
     assert.ok(typeof minutes === "number" && minutes > 0 && minutes <= 60, `${jobId} must bound its runtime (got ${minutes})`);
-    assert.equal(job.permissions, undefined, `${jobId} must not widen the read-only top-level permissions`);
+    // W1-T5811: the one job that delivers a needs-human issue holds `issues: write`, and only it.
+    const delivers = (job.steps ?? []).some((s) => s.run?.includes("needs-human-issue.mjs"));
+    if (delivers) assert.deepEqual(job.permissions, { contents: "read", issues: "write" }, `${jobId} needs exactly issues: write`);
+    else assert.equal(job.permissions, undefined, `${jobId} must not widen the read-only top-level permissions`);
     for (const s of job.steps ?? []) {
       if (s.uses === undefined) continue;
       assert.match(s.uses, /^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/, `${jobId}: ${s.uses} must be pinned to a full commit sha`);
