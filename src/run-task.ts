@@ -31687,7 +31687,7 @@ export type AsyncUsageProbeRunner = (
   opts: { encoding: "utf8"; env: Record<string, string>; maxBuffer: number; timeout: number },
 ) => Promise<string>;
 
-/** Ceiling on the CLI fallback. A timeout is reported as the existing `"spawn"` failure stage. */
+/** BACKSTOP: ceiling on the CLI fallback. A timeout is reported as the existing `"spawn"` failure stage. */
 export const USAGE_PROBE_TIMEOUT_MS = 30_000;
 
 const usageProbeExecFile = promisify(execFile);

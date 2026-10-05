@@ -1134,7 +1134,7 @@ function nextCurated(
  *  daemon's async gh transport). */
 export type LiveStateReader = (taskId: string, prNumber: number) => string | undefined | Promise<string | undefined>;
 
-/** W1-T5719 — ceiling on ONE live-state read before the pass treats it as unknown. */
+/** W1-T5719 — BACKSTOP: ceiling on ONE live-state read before the pass treats it as unknown. */
 export const DEFAULT_LIVE_STATE_TIMEOUT_MS = 15_000;
 
 /** W1-T5719 — the outcome of {@link prefetchLiveStates}: a synchronous lookup the (synchronous,
