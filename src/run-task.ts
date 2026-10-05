@@ -43412,11 +43412,7 @@ export function buildSweepHook(
   const resolvedReadMainPlan = legacyResequenceShape
     ? (isMergedOrReadMainPlan as ((root: string) => Plan) | undefined)
     : readMainPlan;
-  // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
-  // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
-  // why it rides THIS seam rather than a second, separately-scheduled loop.
-  const draftHook = buildInboxDraftHook(owner, repo, config, runId, log);
-  // ONE GATEWAY FOR THE DAEMON'S WHOLE LIFE, built here for the same reason `draftHook` above is:
+  // ONE GATEWAY FOR THE DAEMON'S WHOLE LIFE, built here for the same reason `draftHook` below is:
   // this function runs once per daemon start, the closure it returns runs once per poll.
   //
   // THE DELTA WAS ALREADY BUILT AND A CONSTRUCTOR'S LIFETIME WAS DEFEATING IT. `buildBatchedGithub`
@@ -43450,6 +43446,10 @@ export function buildSweepHook(
   // SAME instance for this daemon's whole life, exactly as `boardGithub` itself is shared.
   const boardGithub = github ?? buildBatchedGithub(owner, repo, { log, pacer });
   if (!github && snapshotCache) boardGithub.seedBoardSnapshot?.(snapshotCache);
+  // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
+  // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
+  // why it rides THIS seam rather than a second, separately-scheduled loop.
+  const draftHook = buildInboxDraftHook(owner, repo, config, runId, log, undefined, undefined, undefined, boardGithub);
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
   const openPrReads = createGhReadWarmer(ghJsonAsync);
@@ -46341,11 +46341,10 @@ export async function inboxBakeoffCommand(
  * quo, not a regression; `rmd inbox` remains available to force a draft on demand in the
  * meantime.
  */
-// Exported, with `draftBatch` an injectable seam defaulting to the real draftProposalBatch
-// (logic UNCHANGED — same mirrors runTask's opts.github escape hatch, drainCommand's
-// githubFactory, etc.): draftProposalBatch itself clones a real worktree and spawns a real
-// Architect worker, so a behavioral test of THIS hook's own inflight-file write/clear
-// discipline (W1-T193) needs a seam to stand in for it without paying that cost.
+// Exported, with `draftBatch` an injectable seam defaulting to the real draftProposalBatch:
+// it clones a worktree and spawns an Architect, which a test of the inflight discipline
+// (W1-T193) must not pay. W1-T5650: `github` is the sweep's daemon-lifetime BATCHED gateway —
+// readiness never builds `ghGateway` (one search per task); `onReadiness` observes each pass's.
 export function buildInboxDraftHook(
   owner: string,
   repo: string,
@@ -46362,6 +46361,8 @@ export function buildInboxDraftHook(
   ) => Promise<DraftRungOutcome[]> = draftProposalBatch,
   grepAnchor: (ref: string, anchor: EvidenceAnchor) => boolean = (ref, anchor) => gitGrepAnchorTrue(repoRoot, ref, anchor),
   mainSha: () => string | undefined = () => readOriginMainSha(repoRoot),
+  github: GitHub = buildBatchedGithub(owner, repo, { log }),
+  onReadiness?: (readiness: ReadinessContext) => void,
 ): (tickRead?: TickReadFacts) => Promise<void> {
   // W1-T2564: see the migration block below — this is the once-per-daemon-start scope it needs.
   let attemptsMigrated = false;
@@ -46422,7 +46423,7 @@ export function buildInboxDraftHook(
       let draftReadiness: ReadinessContext | undefined;
       try {
         const plan = tickRead?.plan ?? loadPlan(join(repoRoot, "plan", "tasks.yaml"));
-        const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
+        const deriveDeps: DeriveDeps = { ledgerPath, github };
         const { isMerged, depsUnobservable } = tickRead
           ? projectionReadinessAccessors(new Map(tickRead.projection))
           : buildDepsReadinessAccessors(plan, deriveDeps);
@@ -46437,6 +46438,7 @@ export function buildInboxDraftHook(
           isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
           isDeclined: (id) => declinedReasonInLedger(ledgerLines, id),
         };
+        onReadiness?.(draftReadiness);
       } catch (e) {
         log("inbox.draft_readiness_unavailable", { error: String((e as Error)?.message ?? e) });
       }
