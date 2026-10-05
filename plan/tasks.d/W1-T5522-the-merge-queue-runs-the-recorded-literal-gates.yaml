@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator session 2026-10-03: root-cause program for the 28-PR backlog; follow-up to W1-T5515 so the merge queue catches the races in the 2026-09-29 merge-queue plan"
   plan_refs: [W1-T4406, W1-T4399, W1-T3512, W1-T3655, W1-T4431, W1-T1014]
-  files: [.github/workflows/ci.yml, .github/workflows/ci-gate.yml, test/the-ci-gate-reports-on-the-merge-group-commit.test.ts, test/the-light-gates-share-one-runner.test.ts, test/the-census-watches-its-own-base.test.ts, test/fast-lane-classifier.test.ts, test/push-ci-on-main.test.ts, test/the-merge-queue-runs-the-recorded-literal-ratchets.test.ts]
+  files: [.github/workflows/ci.yml, .github/workflows/ci-gate.yml, test/the-ci-gate-reports-on-the-merge-group-commit.test.ts, test/the-light-gates-share-one-runner.test.ts, test/the-census-watches-its-own-base.test.ts, test/fast-lane-classifier.test.ts, test/push-ci-on-main.test.ts, test/the-merge-queue-runs-the-recorded-literal-gates.test.ts]
   status: queued
   priority: 1
   attempts: 0
@@ -112,17 +112,17 @@
        test/the-census-watches-its-own-base.test.ts:216-217, test/fast-lane-classifier.test.ts:796 (and the
        else-branch regex at :383), and test/push-ci-on-main.test.ts:240-247. Keep each assertion that NO
        class- or path-based job `if:` exists, and that push still never reaches the job.
-    7. New suite test/the-merge-queue-runs-the-recorded-literal-ratchets.test.ts. It parses ci.yml and runs
+    7. New suite test/the-merge-queue-runs-the-recorded-literal-gates.test.ts. It parses ci.yml and runs
        the relevant step bodies through the shell-step harness the-full-suite-runs-in-the-merge-queue.test.ts
        uses (`runStep` with an env), with GITHUB_EVENT_NAME=merge_group and pull_request, and asserts the
        argv each one reaches.
   acceptance:
     - claim: "on merge_group the commitlint job runs, comment-load-ratchet, baseline-monotonic, lint-plan, task-id-existence and source-size are invoked against github.event.merge_group.base_sha (never HEAD^1 or a live origin/main), and every gate posts its check run on github.sha"
-      proof: "grep: test(\"W1-T5522: a group commit runs the ratchets against the queue base in test/the-merge-queue-runs-the-recorded-literal-ratchets.test.ts"
+      proof: "grep: test(\"W1-T5522: a group commit runs the ratchets against the queue base in test/the-merge-queue-runs-the-recorded-literal-gates.test.ts"
     - claim: "the PR title lint and prompt-surface-gate are skipped on merge_group and task-id-existence drops --require-open-prs there, so a queued PR never collides with itself; on pull_request every step reaches the exact argv it reaches today"
-      proof: "grep: test(\"W1-T5522: the pull_request steps are unchanged and the PR-only steps skip in test/the-merge-queue-runs-the-recorded-literal-ratchets.test.ts"
+      proof: "grep: test(\"W1-T5522: the pull_request steps are unchanged and the PR-only steps skip in test/the-merge-queue-runs-the-recorded-literal-gates.test.ts"
     - claim: "MERGE_GROUP_REQUIRED equals the 18 names the merge_group run posts with a real constituent, at least 18, and the merge-group gate fails when comment-load-ratchet alone is red"
-      proof: "grep: test(\"W1-T5522: a red comment-load ratchet on the group commit fails the gate in test/the-merge-queue-runs-the-recorded-literal-ratchets.test.ts"
+      proof: "grep: test(\"W1-T5522: a red comment-load ratchet on the group commit fails the gate in test/the-merge-queue-runs-the-recorded-literal-gates.test.ts"
   falsifier: |
     Revert the commitlint job's guard to pull_request-only: the first test's merge_group arm finds the job
     skipped and no comment-load invocation. That is the state in which #7001-style default-bucket rows from

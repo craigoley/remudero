@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runFixRung } from "../src/run-task.js";
+import { ciLogNamedSourcePaths, runFixRung } from "../src/run-task.js";
 import type { Config } from "../src/lib/config.js";
 import type { ReviewVerdict } from "../src/lib/review.js";
 import type { WorkerResult } from "../src/lib/worker.js";
@@ -116,4 +116,17 @@ test("W1-T5385: a mixed repair stages only the inherited edit", async () => {
   assert.equal(result.repo.git("show", "--format=", "--name-only", "HEAD"), inherited);
   assert.match(result.repo.git("status", "--porcelain"), /\?\? src\/rogue.ts/);
   assert.deepEqual(result.rows.find((row) => row.step === "implement.harness_commit")?.undeclared, [rogue]);
+});
+
+test("W1-T5801: fix_refusal:every-change-the-worker-made-is-outside-its-declared-files is prevented, not retried", async () => {
+  const repo = gitRepo({ kind: "w1-t5801" });
+  mkdirSync(join(repo.dir, "src"));
+  writeFileSync(join(repo.dir, "src/named.ts"), "export const named = 1;\n");
+  const failures = [{ name: "unit", logTail: "at f (src/named.ts:12:3)\nat g (src/missing.ts:1:1)\nat h (../src/named.ts:1:1)" }];
+  // A file the failing log names and that exists is reachable for this repair, so the round is not refused.
+  assert.deepEqual(ciLogNamedSourcePaths(failures, repo.dir), [{ path: "src/named.ts", job: "unit" }]);
+  assert.deepEqual(ciLogNamedSourcePaths([{ name: "unit", logTail: "no paths here" }], repo.dir), []);
+  // A path the log never names stays refused.
+  const result = await repair("known", rogue);
+  assert.equal(result.outcome.outcome, "stood_down");
 });

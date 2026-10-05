@@ -1364,8 +1364,9 @@ jobs:
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || [ "${GITHUB_EVENT_NAME}" = "merge_group" ] || { echo "W1-T1033: coverage-ratchet only runs its real work on pull_request/merge_group; skipping the real test-with-coverage run on a ${GITHUB_EVENT_NAME} event (see this job's own comment above)."; exit 0; }
           CLASS="${{ steps.classify.outputs.class }}"
           if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T2428 fast-lane: class=${CLASS} — skipping Test with coverage (no src/**/test/** path in this diff, so coverage cannot newly move)."
-            echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Test with coverage** (no src/**/test/** path in this diff)" >> "$GITHUB_STEP_SUMMARY"
+            case "$CLASS" in PLAN_ONLY|DOCS_ONLY) WHY="no src/**/test/** path" ;; *) WHY="no src/** path" ;; esac
+            echo "W1-T2428 fast-lane: class=${CLASS} — skipping Test with coverage (${WHY} in this diff, so coverage cannot newly move)."
+            echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Test with coverage** (${WHY} in this diff)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           # W1-T1217: `--import ./test/setup/tmp-hygiene.ts` is NOT optional here and its absence
@@ -1700,8 +1701,9 @@ jobs:
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || [ "${GITHUB_EVENT_NAME}" = "merge_group" ] || { echo "W1-T1033: coverage-ratchet only runs its real work on pull_request/merge_group; skipping on a ${GITHUB_EVENT_NAME} event (no pr.diff was computed above)."; exit 0; }
           CLASS="${{ steps.coverage-artifact.outputs.class }}"
           if [ "$CLASS" != "SOURCE" ]; then
-            echo "W1-T2428 fast-lane: class=${CLASS} — skipping Diff coverage (no pr.diff was computed above; no src/**/test/** path in this diff to check)."
-            echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Diff coverage**" >> "$GITHUB_STEP_SUMMARY"
+            case "$CLASS" in PLAN_ONLY|DOCS_ONLY) WHY="no src/**/test/** path" ;; *) WHY="no src/** path" ;; esac
+            echo "W1-T2428 fast-lane: class=${CLASS} — skipping Diff coverage (no pr.diff was computed above; ${WHY} in this diff to check)."
+            echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Diff coverage** (${WHY} in this diff)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           node scripts/diff-coverage.mjs --lcov coverage/lcov.info --diff pr.diff
@@ -1714,7 +1716,7 @@ jobs:
           CLASS="${{ steps.coverage-artifact.outputs.class }}"
           if [ "$CLASS" != "SOURCE" ]; then
             echo "W1-T2428 fast-lane: class=${CLASS} — skipping Coverage ratchet (no coverage/lcov.info was collected above; no src/** path in this diff can move the aggregate)."
-            echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Coverage ratchet**" >> "$GITHUB_STEP_SUMMARY"
+            echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Coverage ratchet** (no src/** path in this diff)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           node scripts/coverage-ratchet.mjs --lcov coverage/lcov.info --baseline scripts/coverage-baseline.json
@@ -1990,22 +1992,21 @@ jobs:
     # `always()` IS LOAD-BEARING: without it a failing needed job SKIPS this job, and GitHub counts a
     # skipped required check as passing. FALSIFIER: test/the-ci-gate-does-not-hold-a-runner.test.ts.
     #
-    # W1-T4406: DELIBERATELY STAYS `pull_request`-only, unlike every job it `needs:`. This gate's
-    # own REQUIRED list (ci-gate.yml) names ~26 checks, most of them ~17 one-runner gates the
-    # `light-gates` job posts (rule-checks, lint-plan, jscpd-gate, claims, ...) that are themselves
-    # `if: github.event_name == 'pull_request'` and would never register on a `merge_group` commit
-    # — so waiting on the full list there would time out and deadlock the queue on every entry
-    # (the exact skipped/absent-required-check class INVARIANT 2 above exists to avoid). The merge
-    # queue's own ruleset is expected to require the underlying check NAMES this file's `ci`,
-    # `coverage-ratchet` and `test-slow` jobs already post unconditionally — not this aggregate —
-    # exactly as W1-T4405's design note keeps `remudero-review` off the queue's own requirements.
+    # W1-T4406/W1-T5515: IT RUNS ON THE MERGE QUEUE'S GROUP COMMIT TOO. Branch protection requires
+    # this context, and a job skipped on `merge_group` is a skipped required check that GitHub counts
+    # as passing: the 2026-09-29 sandbox rehearsal saw the queue merge a group whose `ci` was red.
+    # The full REQUIRED list cannot be waited on there (seven names come from pull_request-only
+    # workflows and never register), so on `merge_group` the step passes `--event merge_group` and
+    # the runner gates on ci-gate.yml's MERGE_GROUP_REQUIRED (`ci`, `coverage-ratchet`, `test-slow`,
+    # all `needs:` of this job). SHA falls back to github.sha, the group head, where the PR head sha
+    # is empty. FALSIFIER: test/the-ci-gate-reports-on-the-merge-group-commit.test.ts.
     name: ci-gate
     runs-on: ubuntu-latest
     needs: [squash-trailer-gate, ci, flake-retry-aggregate, ci-required, test-slow-shard, test-slow, commitlint, leak-grep, coverage-ratchet, coverage-ratchet-required, mutation-ratchet, learnings-budget-ratchet, jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic]
     # `always()` must still aggregate a FAILED dependency, but alone it also survives normal
     # cancellation and keeps a superseded PR run's concurrency slot occupied (W1-T4604).
     # GitHub re-evaluates this job condition when cancelling: the second arm releases that run.
-    if: ${{ always() && !cancelled() && github.event_name == 'pull_request' }}
+    if: ${{ always() && !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
     # Light band. Its wait starts only after every ci.yml job has finished, so it covers stragglers
     # from OTHER workflows alone (all done by minute 4 on every PR measured): a 900 s WAIT_CAP_SECONDS
     # here, plus ci-gate.yml's 600 s grace window, still ends inside this bound — so the gate's own
@@ -2017,7 +2018,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
-      SHA: ${{ github.event.pull_request.head.sha }}
+      SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       WAIT_CAP_SECONDS: "900"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -2028,4 +2029,4 @@ jobs:
       - name: Install (clean, from lockfile)
         run: npm ci
       - name: Aggregate sibling check results (ci-gate.yml's own step — fail only on a REAL failure)
-        run: node scripts/ci-gate-from-contract.mjs
+        run: node scripts/ci-gate-from-contract.mjs --event "${{ github.event_name }}"

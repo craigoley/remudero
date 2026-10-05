@@ -25,7 +25,7 @@ import { mkdir as mkdirAsync, readFile as readFileAsync } from "node:fs/promises
 import { baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile } from "./lib/base-reproduction.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { CHECK_REQUEUE_STEP, requeuedCheckKeysFromLedger } from "./lib/sweep.js";
-import { ghExec, ghJsonAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
+import { ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
@@ -2395,7 +2395,7 @@ export function buildSweepEffects(
     openTaskIdsFromPlanImpl: openTaskIdsFromPlan,
     waitForCiGreenImpl: waitForCiGreen,
     restRollupForImpl: restRollupFor,
-    fetchCiFailuresImpl: fetchCiFailures,
+    fetchCiFailuresImpl: fetchCiFailuresAsync,
     runReviewImpl: runReview,
     fetchPrBodyImpl: fetchPrBodyViaGh,
     // W1-T3869: the missing-trailer repair's writer. Unwired, `requiredSweepRuntime` throws
@@ -11195,6 +11195,7 @@ export async function runFixRung(opts: {
     const reachableRemedyFiles = [
       ...remedyFilesForFailingChecks((currentCiFailures ?? []).map((f) => f.name)),
       ...offeredCensusBaselines().map((path) => ({ path, job: "census-precheck" })),
+      ...ciLogNamedSourcePaths(currentCiFailures ?? [], opts.worktreePath),
     ];
     if (deps.fetchPrDiffFiles && baselineDiffFiles !== undefined) {
       let currentDiffFiles: string[] | undefined;
@@ -18761,16 +18762,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
           // rollup over `restRollupFor` — the same REST read the gate itself used — so the two
           // readers cannot answer about different heads. No sha (a stub, or a gate that reported
           // none) falls back to the pre-existing `gh pr view` read unchanged, fail open.
-          fetchCiFailures: async (prUrlArg, sha) => {
-            if (sha) {
-              const roll = await restRollupFor(owner, task.repo, sha, ghJsonAsync);
-              return fetchCiFailures(owner, task.repo, roll);
-            }
-            const v = ghJson(["pr", "view", prUrlArg, "--json", "statusCheckRollup"]) as {
-              statusCheckRollup?: RollupCheck[];
-            };
-            return fetchCiFailures(owner, task.repo, v.statusCheckRollup);
-          },
+          fetchCiFailures: fixRungCiFailures(owner, task.repo),
           // W1-T1278 (condition A): the SAME `gh pr view --json statusCheckRollup` shape
           // `fetchCiFailures` above reads, but RAW (never filtered to failing names only) — the
           // pre-strike gate needs to see a currently-red name's PENDING later attempt, which
@@ -38994,6 +38986,12 @@ export function defaultCiJobLogFetchAsync(owner: string, repo: string, jobId: st
 const ACTIONS_LOG_TIMESTAMP = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z ?/;
 /** PRIMARY CONTROL: lines of a failed step's own output kept before each `##[error]` marker. */
 export const CI_STEP_ERROR_CONTEXT_LINES = 8;
+const CI_STEP_GROUP_LINE = /^##\[(?:end)?group\]/;
+const CI_TAP_FAILURE_LINE = /^\s*not ok \d+ - /;
+const CI_TAP_BLOCK_END_LINE = /^\s*\.\.\.\s*$/;
+const CI_FLAKE_RETRY_LINE = /FLAKE-RETRY(?:-RECOVERED)?\s*:/;
+const CI_FAILING_TESTS_LINE = /(?:✖|✕|✗|x)\s+failing tests:/i;
+const CI_TEST_SUMMARY_LINE = /^\s*(?:#|ℹ)\s+(?:tests|suites|pass|fail|cancelled|skipped|todo|duration_ms)\b/;
 
 /** Each failed step's own last output lines, read back from its `##[error]` marker to the step's
  *  header. In a job that runs many gates this is what names WHICH gate failed and why. */
@@ -39002,7 +39000,7 @@ function stepErrorContext(lines: readonly string[]): number[] {
   for (let index = 0; index < lines.length; index += 1) {
     if (!lines[index].startsWith("##[error]")) continue;
     let start = index;
-    while (start > 0 && index - start < CI_STEP_ERROR_CONTEXT_LINES && !/^##\[(?:end)?group\]/.test(lines[start - 1])) start -= 1;
+    while (start > 0 && index - start < CI_STEP_ERROR_CONTEXT_LINES && !CI_STEP_GROUP_LINE.test(lines[start - 1])) start -= 1;
     for (let at = start; at <= index; at += 1) kept.push(at);
   }
   return kept;
@@ -39011,13 +39009,13 @@ function stepErrorContext(lines: readonly string[]): number[] {
 export function extractCiFailureRegion(log: string, tailLines: number): string {
   const lines = log.split("\n").map((line) => line.replace(ACTIONS_LOG_TIMESTAMP, ""));
   const kept = new Set<number>();
-  const isRetryLine = (line: string) => /FLAKE-RETRY(?:-RECOVERED)?\s*:/.test(line);
+  const isRetryLine = (line: string) => CI_FLAKE_RETRY_LINE.test(line);
   let inTapFailure = false;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
-    if (/^\s*not ok \d+ - /.test(line)) inTapFailure = true;
+    if (CI_TAP_FAILURE_LINE.test(line)) inTapFailure = true;
     if (inTapFailure) kept.add(index);
-    if (inTapFailure && /^\s*\.\.\.\s*$/.test(line)) inTapFailure = false;
+    if (inTapFailure && CI_TAP_BLOCK_END_LINE.test(line)) inTapFailure = false;
     if (isRetryLine(line)) kept.add(index);
   }
   const stepErrors = stepErrorContext(lines);
@@ -39038,11 +39036,11 @@ export function extractCiFailureRegion(log: string, tailLines: number): string {
       .trim();
   };
   if (kept.size > 0) return region([...kept, ...stepErrors]);
-  const failingTestsAt = lines.findIndex((line) => /(?:✖|✕|✗|x)\s+failing tests:/i.test(line.trim()));
+  const failingTestsAt = lines.findIndex((line) => CI_FAILING_TESTS_LINE.test(line.trim()));
   if (failingTestsAt >= 0) {
     const summaryAt = lines.findIndex(
       (line, index) =>
-        index > failingTestsAt && /^\s*(?:#|ℹ)\s+(?:tests|suites|pass|fail|cancelled|skipped|todo|duration_ms)\b/.test(line),
+        index > failingTestsAt && CI_TEST_SUMMARY_LINE.test(line),
     );
     const end = summaryAt >= 0 ? summaryAt : failingTestsAt + tailLines;
     return lines.slice(failingTestsAt, Math.min(end, failingTestsAt + tailLines)).join("\n").trim();
@@ -39075,6 +39073,79 @@ function retainGeneratorRemediesForRegion(fullLog: string, region: string): stri
   return [RETAINED_REMEDY_HEADER, ...retained, "", region].join("\n");
 }
 
+export function ciFailureRegionReducer(tailLines: number): { push(rawLine: string): void; finish(): string } {
+  const regionCap = Math.max(1, tailLines);
+  const remedyCap = MAX_RETAINED_REMEDY_LINES + regionCap;
+  const selected: Array<{ index: number; line: string }> = [];
+  const recent: Array<{ index: number; line: string }> = [];
+  const tail: string[] = [];
+  const failingTests: string[] = [];
+  const retrySeen = new Set<string>();
+  const remedies: string[] = [];
+  let index = -1;
+  let kept = 0;
+  let stepErrors = 0;
+  let inTapFailure = false;
+  let failingTestsState: "unseen" | "open" | "closed" = "unseen";
+  const select = (at: number, line: string): void => {
+    let slot = selected.length;
+    while (slot > 0 && selected[slot - 1].index >= at) {
+      if (selected[slot - 1].index === at) return;
+      slot -= 1;
+    }
+    selected.splice(slot, 0, { index: at, line });
+    if (selected.length > regionCap) selected.shift();
+  };
+  return {
+    push(rawLine: string): void {
+      index += 1;
+      const line = rawLine.replace(ACTIONS_LOG_TIMESTAMP, "");
+      const trimmedRaw = rawLine.trim();
+      if (remedies.length < remedyCap && remedyGeneratorNamedInLog(rawLine) !== undefined && !remedies.includes(trimmedRaw)) {
+        remedies.push(trimmedRaw);
+      }
+      if (CI_TAP_FAILURE_LINE.test(line)) inTapFailure = true;
+      const retry = CI_FLAKE_RETRY_LINE.test(line);
+      if (inTapFailure || retry) kept += 1;
+      if (retry && !retrySeen.has(line.trim())) select(index, line);
+      if (retry) retrySeen.add(line.trim());
+      if (inTapFailure && !retry) select(index, line);
+      if (inTapFailure && CI_TAP_BLOCK_END_LINE.test(line)) inTapFailure = false;
+      if (line.startsWith("##[error]")) {
+        stepErrors += 1;
+        let start = recent.length;
+        while (start > 0 && !CI_STEP_GROUP_LINE.test(recent[start - 1].line)) start -= 1;
+        for (const prior of recent.slice(start)) if (!CI_FLAKE_RETRY_LINE.test(prior.line)) select(prior.index, prior.line);
+        if (!retry) select(index, line);
+      }
+      recent.push({ index, line });
+      if (recent.length > CI_STEP_ERROR_CONTEXT_LINES) recent.shift();
+      if (failingTestsState === "unseen" && CI_FAILING_TESTS_LINE.test(line.trim())) failingTestsState = "open";
+      else if (failingTestsState === "open" && CI_TEST_SUMMARY_LINE.test(line)) failingTestsState = "closed";
+      if (failingTestsState === "open" && failingTests.length < tailLines) failingTests.push(line);
+      tail.push(line);
+      if (tail.length > tailLines) tail.shift();
+    },
+    finish(): string {
+      const region =
+        kept === 0 && failingTestsState !== "unseen"
+          ? failingTests.join("\n").trim()
+          : kept > 0 || stepErrors > 0
+            ? selected.map((entry) => entry.line).join("\n").trim()
+            : tail.join("\n").trim();
+      const seen = new Set(region.split("\n").map((l) => l.trim()).filter((l) => remedyGeneratorNamedInLog(l) !== undefined));
+      const retained = remedies.filter((l) => !seen.has(l)).slice(0, MAX_RETAINED_REMEDY_LINES);
+      return retained.length === 0 ? region : [RETAINED_REMEDY_HEADER, ...retained, "", region].join("\n");
+    },
+  };
+}
+
+export async function defaultCiJobLogRegionAsync(owner: string, repo: string, jobId: string, tailLines: number): Promise<string> {
+  const reducer = ciFailureRegionReducer(tailLines);
+  await ghLinesAsync(["api", `repos/${owner}/${repo}/actions/jobs/${jobId}/logs`], (line) => reducer.push(line));
+  return reducer.finish();
+}
+
 export function fetchCiFailures(
   owner: string,
   repo: string,
@@ -39103,8 +39174,17 @@ export function fetchCiFailuresAsync(
       fetchAnnotations: options.fetchAnnotations ?? defaultCiAnnotationFetchAsync,
       fetchJobLog: options.fetchJobLog ?? defaultCiJobLogFetchAsync,
       annotationReadLimit: options.annotationReadLimit ?? DEFAULT_CI_ANNOTATION_READ_LIMIT,
+      readJobLogRegion: options.fetchJobLog ? undefined : defaultCiJobLogRegionAsync,
     }),
   );
+}
+
+export function fixRungCiFailures(owner: string, repo: string): (prUrl: string, sha?: string) => Promise<CiFailure[]> {
+  return async (prUrl, sha) => {
+    if (sha) return fetchCiFailuresAsync(owner, repo, await restRollupFor(owner, repo, sha, ghJsonAsync));
+    const v = ghJson(["pr", "view", prUrl, "--json", "statusCheckRollup"]) as { statusCheckRollup?: RollupCheck[] };
+    return fetchCiFailuresAsync(owner, repo, v.statusCheckRollup);
+  };
 }
 
 function* ciFailuresSteps(
@@ -39112,7 +39192,9 @@ function* ciFailuresSteps(
   repo: string,
   rollup: RollupCheck[] | undefined,
   tailLines: number,
-  fetch: Required<CiFailureFetchOptionsAsync>,
+  fetch: Required<CiFailureFetchOptionsAsync> & {
+    readJobLogRegion?: (owner: string, repo: string, jobId: string, tailLines: number) => Promise<string>;
+  },
 ): Steps<CiFailure[]> {
   let annotationReads = 0;
   const failing = dedupeRollupByLatestAttempt(rollup ?? []).filter((c) => {
@@ -39169,11 +39251,15 @@ function* ciFailuresSteps(
     }
     if (jobId && (logTail.trim() === "" || annotationFallback?.outcome === "bare-exit-code")) {
       try {
-        const out = yield* step(() => fetch.fetchJobLog(owner, repo, jobId));
-        const extracted = extractCiFailureRegion(out, tailLines);
-        // W1-T2733: the region, PLUS any declared generator remedy the slice would have discarded.
-        // Identical bytes to the region whenever the log names no recognised remedy.
-        logTail = retainGeneratorRemediesForRegion(out, extracted);
+        const readRegion = fetch.readJobLogRegion;
+        if (readRegion) logTail = yield* step(() => readRegion(owner, repo, jobId, tailLines));
+        else {
+          const out = yield* step(() => fetch.fetchJobLog(owner, repo, jobId));
+          const extracted = extractCiFailureRegion(out, tailLines);
+          // W1-T2733: the region, PLUS any declared generator remedy the slice would have discarded.
+          // Identical bytes to the region whenever the log names no recognised remedy.
+          logTail = retainGeneratorRemediesForRegion(out, extracted);
+        }
         logUnavailable = logTail.trim() === "" ? { kind: "empty-log" } : undefined;
         if (logUnavailable === undefined) tailSource = "log";
       } catch (err) {
@@ -41579,6 +41665,21 @@ export function readRegistrationChanges(
   });
 }
 
+/** W1-T5801: a repair the failing check's own log names (an existing src/ or scripts/ file) is reachable for THIS repair, via the shared reachableRemedyFiles list. */
+export function ciLogNamedSourcePaths(
+  failures: readonly { name: string; logTail: string }[],
+  repoDir: string,
+): { path: string; job: string }[] {
+  const found = new Map<string, string>();
+  for (const failure of failures) {
+    for (const match of failure.logTail.matchAll(/(?:^|[\s("'])((?:src|scripts)\/[\w./-]+\.[cm]?[jt]s)\b/g)) {
+      const path = match[1]!;
+      if (path.split("/").includes("..") || found.has(path) || found.size >= 5) continue;
+      if (existsSync(join(repoDir, path))) found.set(path, failure.name);
+    }
+  }
+  return [...found].map(([path, job]) => ({ path, job }));
+}
 /**
  * W1-T3696 A1: COMMIT A WORKER'S EDITS FROM THE HARNESS, so the worker never needs a git tool.
  *
@@ -41600,6 +41701,7 @@ export function readRegistrationChanges(
  * however it is written. That is the whole point of doing this here rather than handing a cheap
  * model a shell to run `git commit` with.
  */
+
 export function commitWorkerEdits(
   repoDir: string,
   declaredPaths: readonly string[],

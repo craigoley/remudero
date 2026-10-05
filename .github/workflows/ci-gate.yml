@@ -18,14 +18,14 @@ name: CI gate
 # Why: the synthwatch #102 replay, the class-bug argument and the branch-protection flip are in
 # docs/forensics/ci-gate-yml.md (W1-T24).
 #
-# W1-T4406: this CONTRACT's REQUIRED list is a `pull_request`-time list — most of its ~17
-# one-runner entries are steps of ci.yml's `light-gates` job, itself `if: github.event_name ==
-# 'pull_request'`, so they never register on a GitHub merge queue's `merge_group` commit. ci.yml's
-# own embedded `ci-gate` job (the one that runs this contract on every non-`edited` event)
-# deliberately stays `pull_request`-only for exactly that reason — see its own comment. The merge
-# queue's ruleset is expected to require the underlying check names ci.yml's `ci`, `coverage-
-# ratchet` and `test-slow` jobs already post unconditionally (they gained a `merge_group` trigger
-# in that same task), not this aggregate; nothing in THIS file needed to change for that.
+# W1-T4406/W1-T5515: REQUIRED below is the `pull_request`-time list. Seven of its names come from
+# workflows that never trigger on `merge_group`, so a merge queue's group commit cannot produce them.
+# MERGE_GROUP_REQUIRED, beside it, is the subset whose producing ci.yml job DOES run there (`ci`,
+# `coverage-ratchet`, `test-slow`); ci.yml's `ci-gate` job selects it on a group commit by passing
+# `--event merge_group` to scripts/ci-gate-from-contract.mjs, which refuses an absent, empty or
+# non-subset list. The step below is shared, unchanged, by both modes; the PR-only gates already
+# passed on the PR head, the precondition for entering the queue. FALSIFIER:
+# test/the-ci-gate-reports-on-the-merge-group-commit.test.ts derives the subset from ci.yml.
 
 on:
   pull_request:
@@ -100,6 +100,16 @@ jobs:
         "source-size",
         "coverage-session-blanking",
         "baseline-monotonic",
+        "test-slow"
+        ]
+      # W1-T5515: the REQUIRED names a `merge_group` commit produces — those whose ci.yml job runs on
+      # that event (neither `if: false` nor the pull_request-only guard). Read ONLY under the
+      # runner's explicit `--event merge_group`; no other event, and this file's own job, never
+      # consults it. Same one-name-per-line format as REQUIRED.
+      MERGE_GROUP_REQUIRED: >-
+        [
+        "ci",
+        "coverage-ratchet",
         "test-slow"
         ]
       # Never waited on, never failed for: ci-gate is self, and remudero-review is a separate

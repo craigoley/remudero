@@ -1,0 +1,48 @@
+- id: W1-T5859
+  title: "A HAND-BUILD TAKES THE DISPATCH CLAIM THE FLEET HONOURS — an operator-session build of a filed task holds no `refs/rmd-dispatch/<id>` claim, so the fleet sees it only once a cached read shows its branch or PR, and dispatched W1-T5836 2.5 minutes after the hand-built PR opened; add `rmd claim <task-id>` so a hand-build takes the same git-ref CAS claim the fleet's own lanes take"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — a human-started build is visible to dispatch through the one claim namespace it already reads
+  band_meaning: span
+  origin: "operator session 2026-10-05: duplicate #9308 (fleet W1-T5836) vs hand-built #9300; also W1-T5649 (#9216 vs #9213) and W1-T5650 (#9210 vs #9219) on 2026-10-05"
+  plan_refs: [W1-T2270, W1-T2784, W1-T5805, W1-T5762, W1-T4691]
+  files: [src/run-task.ts, docs/cli-reference.md, docs/operator-guide.md, scripts/console-parity-baseline.json, scripts/console-parity-ratchet.mjs, test/help-renders-a-summary-not-a-paragraph.test.ts, test/a-hand-build-takes-the-dispatch-claim-the-fleet-honours.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main dcf5d34c and the fleet ledger. The fleet's lanes claim a task
+    with an orphan commit pushed to `refs/rmd-dispatch/<taskId>` (`gitDispatchClaimReserver`,
+    src/lib/dispatch-claim.ts); `decideDispatchClaim` refuses a second lane on `taken`, before
+    any spend. An operator-session build has no way to take that claim: the CLI has no claim
+    verb (`rmd release` is the circuit-breaker release, W1-T4691). Such a build is visible only
+    through its run branch or PR, which dispatch reads from a projection that can be minutes old
+    (W1-T5762 bounds a served generation at 5 min; `dispatch.stood_down` rows read "cached
+    in-flight read was stale"). MEASURED 2026-10-05: an operator build of W1-T5836 pushed
+    `run-W1-T5836-1791196437555` at about 11:14Z and opened #9300 at 11:15:07Z; the fleet ran
+    `run.start` for W1-T5836 at 11:17:47Z, built the same three files for 50 minutes, and
+    opened duplicate #9308 at 12:08Z, after #9300 had merged at 11:41Z (closed by hand). Two
+    more pairs that day were the same race the other way round (W1-T5649, W1-T5650).
+    RELEASE NEEDS NO NEW RULE: `decideDispatchClaimRelease`'s dead-claimant arms need the same
+    host or a daemon mint row, which an operator-host claim never matches, so the claim holds
+    until the evidence arm sees the task landed, and a day-old one escalates (BACKSTOP).
+    src/run-task.ts sits at its comment-load ceiling: add no comment prose there.
+  design: |
+    `rmd claim <task-id>` mints and pushes the dispatch claim through the existing reserver (the
+    same anchor message and git-ref CAS), refusing a task id that is not in the plan. It prints
+    `claimed refs/rmd-dispatch/<id>` and exits 0 on `created`; on `taken` it exits 1 naming the
+    holder's anchor; on `unreachable` it exits 1 (fail-closed, as `decideDispatchClaim`).
+    `rmd claim <task-id> --drop` drops a claim only when its anchor's host is this host (a
+    hand-build that is abandoned), never another host's. Register the verb in the command table,
+    docs/cli-reference.md, docs/operator-guide.md's command table and the console-parity census
+    exactly as W1-T5687 did for `progress-watchdog`.
+  acceptance:
+    - claim: "rmd claim on an unclaimed planned task pushes refs/rmd-dispatch/<id> with the reserver's anchor message and exits 0, a second claim exits 1 naming the holder, an unreachable origin exits 1 without claiming, an unplanned id is refused, and --drop removes only a claim minted on this host"
+      proof: "unit test: test/a-hand-build-takes-the-dispatch-claim-the-fleet-honours.test.ts"
+  falsifier: |
+    Remove the verb: the claim test cannot reach a claimed ref, and a dispatch decision over the
+    same fake remote proceeds for a task a hand-build is building.
