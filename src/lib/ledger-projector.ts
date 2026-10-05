@@ -63,10 +63,15 @@ export function openProjectorReadModel(stateDir: string, instance: string, clock
     INSERT OR IGNORE INTO meta(k, v) VALUES('instance', '${instance}');`, ...(clock ? { clock } : {}), ...(generation !== undefined ? { generation } : {}) });
 }
 
+/** A run's worker liveness transition: the now view carries `workerState` from it, so the fact store must keep it.
+ *  Written only when the state changes, so it adds a row per transition, never one per worker event. */
+const WORKER_STATE_STEP = "worker.state";
+
 /** The steps the fact store keeps (design §3.5 `FACT_STEPS`); every other row is identity-only. */
 export function isFactStep(step: string): boolean {
   return DECISION_RELEVANT_LEDGER_STEPS.has(step) || RENDER_RELEVANT_LEDGER_STEPS.has(step)
-    || MODEL_ATTRIBUTION_LEDGER_STEPS.has(step) || step === "worker.assignment" || step === EXTERNAL_EFFECT_RECONCILED_STEP
+    || MODEL_ATTRIBUTION_LEDGER_STEPS.has(step) || step === "worker.assignment" || step === WORKER_STATE_STEP
+    || step === EXTERNAL_EFFECT_RECONCILED_STEP
     || step.startsWith("panel.");
 }
 
@@ -259,6 +264,22 @@ export function runWorkerRow(body: string, fields: string): Record<string, unkno
   return row;
 }
 
+/**
+ * Serve's own diagnostics, which it writes into the ledger it projects (W1-T5884). A committed batch
+ * whose fresh rows are ALL these is still projected and checkpointed, but does not advance
+ * `generation`: advancing it made `now@core` due on its own telemetry, a rebuild loop. Each member is
+ * diagnostic-only: not an {@link isFactStep} step, no `task_id`/`run_id` for the task, run or recent
+ * projections, outside the repo index's markers, and no view reads it back (only the unread
+ * activity ring keeps it).
+ * - `read_model.slow_view`: a view build that overran its pass (read-model-worker `build`).
+ * - `read_model.materialize_deferred`: the units a pass had no time for (read-model-worker `materialize`).
+ * - `read_model.now_slow_stage`: one now build stage over its bound (now-view `step`).
+ * - `view.emitted`: the per-key publish latency sample (view-events).
+ */
+export const SERVE_DIAGNOSTIC_STEPS: ReadonlySet<string> = new Set([
+  "read_model.slow_view", "read_model.materialize_deferred", "read_model.now_slow_stage", "view.emitted",
+]);
+
 /** Every projection a store carries; a view that needs a table no projection keeps adds one here. */
 export const LEDGER_ROW_PROJECTIONS: readonly LedgerRowProjection[] = [REPO_ROW_PROJECTION, ACTIVITY_RING_PROJECTION, TASK_ACTIVITY_PROJECTION, RUN_ACTIVITY_PROJECTION, RUN_WORKER_PROJECTION, RECENT_ROW_PROJECTION];
 
@@ -374,6 +395,8 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
   /** Rows applied per ms in the last timed transaction; unknown until one took measurable time. */
   let linesPerMs: number | undefined;
   let deadline = Number.POSITIVE_INFINITY;
+  /** Whether the open transaction applied a fresh row that is not one of {@link SERVE_DIAGNOSTIC_STEPS}. */
+  let advances = false;
 
   /** Out of budget: every tick applies at least one transaction, so a backlog always moves. */
   function spent(c: ProjectorTickResult): boolean {
@@ -424,6 +447,10 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
       c.fresh++;
       const at = line.indexOf(STEP_KEY);
       const scanned = at < 0 ? "" : line.slice(at + STEP_KEY.length, line.indexOf('"', at + STEP_KEY.length));
+      // A second `"step":"` means the first may be nested, so only a parse can name the row's step.
+      const ambiguous = at >= 0 && line.includes(STEP_KEY, at + STEP_KEY.length);
+      // Only a step named unambiguously counts as serve's own diagnostic; any other fresh row may be one a view reads.
+      if (ambiguous || !SERVE_DIAGNOSTIC_STEPS.has(scanned)) advances = true;
       if (id.tsMs > now + FUTURE_ROW_TOLERANCE_MS) {
         sql.quarantine.run(id.tsMs, id.h, id.ts, scanned, now, line);
         c.quarantined++;
@@ -432,8 +459,6 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
       let parsed: { row?: Record<string, unknown> } | undefined;
       const parse = (): Record<string, unknown> | undefined => (parsed ??= { row: parseRow(line) }).row;
       for (const p of projections) if (p.markers.some((marker) => line.includes(marker))) p.apply(db, line, id, parse);
-      // A second `"step":"` means the first may be nested, so only a parse can name the row's step.
-      const ambiguous = at >= 0 && line.includes(STEP_KEY, at + STEP_KEY.length);
       if (!ambiguous && !(at >= 0 && factStep(scanned)) && !line.includes(COST_KEY)) continue;
       const row = parse();
       if (!row) {
@@ -451,11 +476,15 @@ export function createLedgerProjector(opts: LedgerProjectorOptions): LedgerProje
     const started = clock.now();
     const linesBefore = c.lines;
     withWriteTransaction(db, lease, () => {
+      const freshBefore = c.fresh;
+      advances = false;
       apply();
       for (const p of projections) p.settle?.(db);
       opts.beforeCheckpoint?.(source);
       sql.checkpoint.run(source, checkpoint.ino, checkpoint.size, checkpoint.off, checkpoint.fp);
-      sql.generation.run();
+      // A batch of only serve diagnostics changes nothing a view reads (W1-T5884). One with no fresh
+      // row still advances: a re-read is the progress the stall watchdog counts by this generation.
+      if (advances || c.fresh === freshBefore) sql.generation.run();
     });
     c.transactions++;
     opts.onCommit?.(source, c.lines - linesBefore);

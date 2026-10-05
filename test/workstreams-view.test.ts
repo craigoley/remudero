@@ -12,6 +12,7 @@ import { createReadModelTicker, ledgerSource, type ReadModelInstanceState, type 
 import { makeTempDir } from "../src/lib/tmp.js";
 import type { ViewBodyEntry } from "../src/lib/views.js";
 import { createWorkstreamsView, WORKSTREAMS_DEBOUNCE_MS, WORKSTREAMS_VIEW_NAME, type WorkstreamsData } from "../src/lib/workstreams-view.js";
+import { switchViewsOn } from "./helpers/read-model-switches.js";
 
 type TestCtx = { after: (fn: () => void) => void };
 
@@ -115,6 +116,7 @@ test("W1-T5050: the workstreams view equals the operator activity route over the
   const f = fixture(t);
   const view = createWorkstreamsView<ReadModelInstanceState>({ instances: f.instances, ledgerSource });
   const posted: ReadModelWorkerMessage[] = [];
+  switchViewsOn(f.stateDir, [WORKSTREAMS_VIEW_NAME]);
   const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [view], clock: movingClock(NOW), holder: "workstreams-test", oracle: "off", post: (m) => posted.push(m) });
   ticker.start();
   ticker.tick();
@@ -141,6 +143,7 @@ test("W1-T5050: a ring insert re-materializes the workstreams view once inside t
   const clock = movingClock(NOW);
   const view = createWorkstreamsView<ReadModelInstanceState>({ instances: f.instances, ledgerSource, log: (step) => step === "workstreams.built" && built.push(clock.now()) });
   const posted: ReadModelWorkerMessage[] = [];
+  switchViewsOn(f.stateDir, [WORKSTREAMS_VIEW_NAME]);
   const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [view], clock, holder: "workstreams-test", oracle: "off", post: (m) => posted.push(m) });
   t.after(() => ticker.release());
   ticker.start();
@@ -176,6 +179,7 @@ test("unit test: the workstreams shadow side reads the route's ledger union and 
   const widened = { name: view.name, version: view.version, materialize: (ctx: Parameters<typeof view.materialize>[0]) =>
     view.materialize({ ...ctx, instances: [...ctx.instances, { state: state("orphan") }, { state: state("ghost") }] }) };
   const posted: ReadModelWorkerMessage[] = [];
+  switchViewsOn(f.stateDir, [WORKSTREAMS_VIEW_NAME]);
   const ticker = createReadModelTicker({ stateDir: f.stateDir, instances: f.instances, views: [widened], clock: movingClock(NOW), holder: "workstreams-test", oracle: "off", post: (m) => posted.push(m) });
   t.after(() => ticker.release());
   ticker.start();

@@ -1,0 +1,50 @@
+- id: W1-T5896
+  title: "A VIEW WITH NO SWITCH IS NOT BUILT — `dueUnits` in the read-model worker keeps any unit whose `switches.views[name] !== \"off\"`, so a view absent from switches.json is materialized on the single view thread while `viewMode` answers undefined and its route answers 404 view_disabled: inbox, feedback, needs-you, inbox-thread, instances and task are built and never served"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium  # Rule 19: one concern — an absent switch means off on the view thread, except for an input a served view needs
+  band_meaning: span
+  origin: "operator session 2026-10-05: SSE push-latency measurement on the host, live switches.json holds only nav-badge, repositories and now"
+  plan_refs: [W1-T5885, W1-T5884]
+  files: [src/lib/read-model-worker.ts, test/a-view-with-no-switch-is-not-built.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 8b8f15c9. In `createReadModelTicker`
+    (src/lib/read-model-worker.ts) `dueUnits` filters
+    `switches.views[unit.view.name] !== "off"`, and the on-demand path filters the same way, so an
+    ABSENT switch builds. `DEFAULT_READ_MODEL_SWITCHES` is `{ projector: "on", views: {} }`. The
+    serving side disagrees: `viewMode` (src/lib/views.ts) returns the switch as is, so an absent
+    one is undefined and the route answers 404 `view_disabled`; the slow lane's `accept` in the
+    same worker already drops a body whose `effectiveViewMode` is neither shadow nor serve.
+    OBSERVED 2026-10-05: the host's switches.json names only nav-badge, repositories and now, so
+    inbox, feedback, needs-you, inbox-thread, instances and task (and workstreams once #9360
+    merges) are due and built but dark. That is work on the one view thread whose head-of-line
+    blocking dominates SSE push latency (W1-T5885).
+    CAVEAT: a dark view may feed a served one. needs-you's body is composed from each instance's
+    now and the inbox view's needsYou page (src/lib/needs-you-view.ts), and nav-badge reads the
+    inputs serve publishes (src/lib/nav-badge-view.ts). A served ROUTE can read a dark view's body
+    too: serve.ts's `needsYouGates` reads the needs-you body for GET /v1/status `needsYou` and for
+    the nav-badge decisions (`navBadgeWithDecisions`), so needs-you, and the inbox body it
+    composes from, may be required while their own routes are dark. A view a served view or
+    route reads must keep building.
+  design: |
+    MEASURE FIRST: before changing the filter, record per-view build counts and ms for dark views
+    on an existing row or a cheap in-memory counter surfaced on an existing status body or row
+    (for example the `view_unit` end heartbeat or `read_model.slow_view`), never a new per-build
+    ledger row, and name in the PR what the host showed. Then make an absent switch mean off in
+    `dueUnits` and the on-demand path, unless the unit is an input of a view whose effective mode
+    is shadow or serve, or of a served route that reads its body (the needs-you case above); that
+    dependency is declared next to the view definitions, not inferred per build, and the source
+    names each declared edge's reader. An explicit `off` stays off, and `shadow`/`serve`/`auto` behave as today.
+  acceptance:
+    - claim: "with switches naming one served view that reads another view's body and nothing else, a view absent from the switches with no served dependent is never materialized, a view switched off explicitly is never materialized, the served view is built, and the absent view the served one reads is still built"
+      proof: "unit test: test/a-view-with-no-switch-is-not-built.test.ts"
+  falsifier: |
+    Keep `!== "off"` in `dueUnits`: the absent view with no served dependent is materialized and
+    the test fails.

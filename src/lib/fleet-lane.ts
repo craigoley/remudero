@@ -57,21 +57,32 @@ export function classificationSnapshotPath(stateDir: string): string {
   return `${stateDir}/inbox-classified.json`;
 }
 
-/** Written by serve's slow lane (inbox-view.ts), never by a read: each proposal's current classification state. */
-export function writeClassificationSnapshot(stateDir: string, classifications: Array<{ proposalId: string; state: string }>, clock: Clock = systemClock): void {
-  const states: Record<string, string> = {};
-  for (const c of classifications) states[c.proposalId] = c.state;
-  writeAtomic(classificationSnapshotPath(stateDir), JSON.stringify({ generatedAt: clock.iso(), states }) + "\n");
+/** Whether the pass a snapshot records saw every input (W1-T5886): serve's thread list labels rows read from it. */
+export interface ClassificationEvidence {
+  complete: boolean;
+  incompleteReason?: string;
 }
 
-/** The last written classification, with when it was written; undefined when none is readable. */
-export function readClassificationSnapshot(stateDir: string): { generatedAt: string | null; states: Record<string, string> } | undefined {
+/** Written by serve's slow lane (inbox-view.ts), never by a read: each proposal's current classification state. */
+export function writeClassificationSnapshot(stateDir: string, classifications: Array<{ proposalId: string; state: string }>, clock: Clock = systemClock, evidence?: ClassificationEvidence): void {
+  const states: Record<string, string> = {};
+  for (const c of classifications) states[c.proposalId] = c.state;
+  writeAtomic(classificationSnapshotPath(stateDir), JSON.stringify({ generatedAt: clock.iso(), ...(evidence ?? {}), states }) + "\n");
+}
+
+/** The last written classification, with when it was written; undefined when none is readable. `complete` is absent
+ *  when the writer did not record it. */
+export function readClassificationSnapshot(stateDir: string): ({ generatedAt: string | null; states: Record<string, string> } & Partial<ClassificationEvidence>) | undefined {
   const raw = readJson(classificationSnapshotPath(stateDir));
   if (!raw) return undefined;
   try {
-    const parsed = JSON.parse(raw) as { generatedAt?: unknown; states?: unknown };
+    const parsed = JSON.parse(raw) as { generatedAt?: unknown; states?: unknown; complete?: unknown; incompleteReason?: unknown };
     if (!parsed.states || typeof parsed.states !== "object") return undefined;
-    return { generatedAt: typeof parsed.generatedAt === "string" ? parsed.generatedAt : null, states: parsed.states as Record<string, string> };
+    return {
+      generatedAt: typeof parsed.generatedAt === "string" ? parsed.generatedAt : null, states: parsed.states as Record<string, string>,
+      ...(typeof parsed.complete === "boolean" ? { complete: parsed.complete } : {}),
+      ...(typeof parsed.incompleteReason === "string" ? { incompleteReason: parsed.incompleteReason } : {}),
+    };
   } catch {
     // deliberate: an unreadable snapshot reads as none, and the lane then does nothing this pass.
     return undefined;
