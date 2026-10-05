@@ -130,7 +130,9 @@ test('author preflight refuses static failure, a mutated tree and an unwritable 
   staticRed.git('add', '.'); staticRed.git('commit', '-m', 'test: fail the static gate');
   assert.equal(mod.main([], { root: staticRed.root }), 1);
   assert.equal(staticRed.receipt().steps[1].ok, false);
-  assert.equal(staticRed.receipt().steps[2].ok, true, 'static failure must not suppress affected-test evidence');
+  assert.equal(staticRed.receipt().verdict, 'failed');
+  assert.equal(staticRed.receipt().steps.length, 2, 'failed static evidence is retained without starting another run');
+  assert.match(staticRed.receipt().affectedTestsNotRunReason, /static-preflight did not succeed/);
   const mutated = fixture();
   writeFileSync(join(mutated.root, 'src/run-task.ts'), "import { writeFileSync } from 'node:fs'; writeFileSync('untracked.ts', 'export {};');\n");
   mutated.git('add', '.'); mutated.git('commit', '-m', 'test: mutate the author tree');
@@ -202,6 +204,31 @@ test('author preflight rejects skipped-only verification and accepts a real pass
   assert.equal(mod.main([], { root: f.root, select: selection }), 0);
   assert.equal(f.receipt().verdict, 'passed');
   assert.equal(f.receipt().steps[2].ok, true);
+});
+
+test('author preflight starts affected tests only after a successful native static gate', () => {
+  for (const outcome of ['passed', 'failed', 'signalled'] as const) {
+    const f = fixture();
+    const witness = join(f.root, 'coverage/affected-test-witness');
+    writeFileSync(join(f.root, 'src/run-task.ts'), outcome === 'signalled'
+      ? "process.kill(process.pid, 'SIGTERM');\n"
+      : `console.log('native static witness'); process.exitCode = ${outcome === 'passed' ? 0 : 1};\n`);
+    writeFileSync(join(f.root, 'test/leaf.test.ts'),
+      "import { test } from 'node:test'; import { writeFileSync } from 'node:fs'; test('affected execution witness', () => writeFileSync('coverage/affected-test-witness', 'ran'));\n");
+    f.git('add', '.'); f.git('commit', '-m', `test: static gate ${outcome}`);
+    const select = () => ({ fullRun: false, suites: ['test/leaf.test.ts'], reasons: [] });
+    assert.equal(mod.main([], { root: f.root, select }), outcome === 'passed' ? 0 : 1);
+    const receipt = f.receipt();
+    assert.deepEqual(receipt.suites, ['test/leaf.test.ts'], 'the selected floor is unchanged, not narrowed to avoid a red');
+    assert.equal(receipt.verdict, outcome === 'passed' ? 'passed' : 'failed');
+    assert.equal(existsSync(witness), outcome === 'passed', 'an unsuccessful static gate must not start known-doomed tests');
+    assert.deepEqual(receipt.steps.map((step: { name: string }) => step.name), outcome === 'passed'
+      ? ['census-precheck', 'static-preflight', 'affected-tests'] : ['census-precheck', 'static-preflight']);
+    if (outcome !== 'passed') assert.match(receipt.affectedTestsNotRunReason, /static-preflight did not succeed/);
+    else assert.equal(receipt.affectedTestsNotRunReason, undefined);
+    if (outcome === 'signalled') assert.equal(receipt.steps[1].signal, 'SIGTERM');
+    if (outcome === 'passed') assert.equal(receipt.steps[2].testSummary.tests, 1, 'positive control: a successful gate really executes its test');
+  }
 });
 
 test('author preflight retains large real failures privately while keeping terminal feedback bounded', () => {

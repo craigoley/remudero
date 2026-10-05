@@ -120,11 +120,19 @@ export function main(argv, { root = REPO_ROOT, spawn = spawnSync,
       if (censusOk) {
         const staticResult = run(process.execPath, ['--import', 'tsx', join(root, 'src/run-task.ts'), 'preflight',
           '--from', receipt.baseSha, '--summary-file', join(root, 'coverage/preflight-author-static.json')]);
-        report('static-preflight', staticResult, staticResult.status === 0 && !staticResult.signal && !staticResult.error);
-        // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
-        const tests = run(process.execPath, ['--test', `--test-concurrency=${Math.min(4, availableParallelism())}`,
-          '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...receipt.suites]);
-        report('affected-tests', tests, completeTestResult(tests));
+        const staticOk = staticResult.status === 0 && !staticResult.signal && !staticResult.error;
+        report('static-preflight', staticResult, staticOk);
+        // An unsuccessful static gate already makes this tree unpublishable. Keep its failed
+        // receipt and selected floor, but don't spend another full run on known-doomed tests.
+        if (staticOk) {
+          // No whole-suite retry or instrumentation. A missing target/summary is a refusal, never green.
+          const tests = run(process.execPath, ['--test', `--test-concurrency=${Math.min(4, availableParallelism())}`,
+            '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', ...receipt.suites]);
+          report('affected-tests', tests, completeTestResult(tests));
+        } else {
+          receipt.affectedTestsNotRunReason = 'static-preflight did not succeed; see its native outcome';
+          console.log('affected-tests: NOT RUN — static-preflight did not succeed; selected floor retained in the receipt');
+        }
       }
       if (git(['rev-parse', 'HEAD']).trim() !== receipt.headSha || git(['status', '--porcelain', '--untracked-files=normal']).trim()) {
         throw new Error('the author tree changed during verification; receipt refused');
