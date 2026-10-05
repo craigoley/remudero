@@ -416,6 +416,163 @@ refresh_deploy_code() {
 DEPLOY_CODE_REFRESH
 }
 
+# W1-T5688 — the launcher's ACTION LADDER on W1-T5687's `rmd progress-watchdog` verdict. Literal
+# shell (a quoted heredoc), so nothing in it is expanded at render time.
+render_progress_watchdog_ladder() {
+  cat <<'PROGRESS_WATCHDOG_LADDER'
+# W1-T5688 — ACT ON THE PROGRESS VERDICT, NOT ONLY ON A STOPPED CONTAINER. On 2026-10-03 this tick
+# revived 14 times into one crash (each prev_restarts=5) and named CRASH LOOP 3h44m in, in a marker
+# nothing reads; a wedged-but-running daemon was never acted on at all, because the healthy arm's
+# `refresh_deploy_code || exit 0` ended every tick that had workers in flight. Four rungs:
+#   capture-diagnostics -- the verb wrote the bundle; this appends one revival-log line naming it.
+#   recycle             -- deploy/recycle-container.sh, at most once per WATCHDOG_RECYCLE_GAP_S. A
+#                          refusal is logged with its reason and retried on a later tick only.
+#   hold-revive         -- the revive arm starts nothing until origin/main's sha or the image id
+#                          differs from the one recorded when the loop was named. The hold OUTLIVES
+#                          the verdict's 15-minute window: a held daemon writes no boots, so the
+#                          verdict would otherwise lapse and revive the same input every ~20 min.
+#   none / unreadable   -- everything below runs exactly as before this task.
+WATCHDOG_RECYCLE_GAP_S=1800
+WATCHDOG_RECYCLE_AT="$STATE_DIR/state/watchdog-recycle-at"
+WATCHDOG_HOLD="$STATE_DIR/state/watchdog-hold-revive"
+PROGRESS_VERDICT=""
+PROGRESS_STATE=""
+PROGRESS_ACTION=""
+
+watchdog_stamp() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# A string field of the verdict's one-line JSON (JSON.stringify writes no spaces).
+verdict_field() {
+  printf '%s\n' "$PROGRESS_VERDICT" | sed -n 's/.*"'"$1"'":"\([^"]*\)".*/\1/p' | head -n 1
+}
+
+# RMD_SELF_SYNC_DONE=1 skips checkCliFreshness, which would fetch and fast-forward the tree the
+# workers run on -- the very mutation refresh_deploy_code's idle gate exists to withhold.
+read_progress_verdict() {
+  local rmd="$STATE_DIR/remudero/bin/rmd" out tmo=()
+  PROGRESS_VERDICT=""; PROGRESS_STATE=""; PROGRESS_ACTION=""
+  [ -x "$rmd" ] || return 0
+  command -v timeout >/dev/null 2>&1 && tmo=(timeout 120)
+  if ! out="$(cd "$STATE_DIR/remudero" && RMD_SELF_SYNC_DONE=1 ${tmo[@]+"${tmo[@]}"} "$rmd" progress-watchdog --json --state-root "$STATE_DIR/state" 2>/dev/null)"; then
+    echo "rmd-relaunch: progress-watchdog -- verdict unreadable; acting as before." >&2
+    return 0
+  fi
+  PROGRESS_VERDICT="$(printf '%s\n' "$out" | grep -E '^\{' | tail -n 1 || true)"
+  PROGRESS_STATE="$(verdict_field state)"
+  PROGRESS_ACTION="$(verdict_field action)"
+  echo "rmd-relaunch: progress-watchdog -- ${PROGRESS_STATE:-UNKNOWN} action=${PROGRESS_ACTION:-none}"
+}
+
+note_progress_verdict() {
+  [ "$PROGRESS_ACTION" = "capture-diagnostics" ] || return 0
+  local dir; dir="$(verdict_field dir)"
+  printf '%s watchdog-verdict state=%s action=%s bundle=%s\n' "$(watchdog_stamp)" "$PROGRESS_STATE" \
+    "$PROGRESS_ACTION" "${dir:-skipped}" >> "$REVIVAL_LOG" 2>/dev/null || true
+}
+
+# Returns 0 only when it RAN recycle-container.sh, so the caller ends the tick on one action.
+recycle_on_verdict() {
+  local container="$1" now last out rc script="$CHECKOUT/deploy/recycle-container.sh" result reason args=() envs=()
+  [ "$PROGRESS_ACTION" = "recycle" ] || return 1
+  now="$(date -u +%s)"
+  last="$(cat "$WATCHDOG_RECYCLE_AT" 2>/dev/null || true)"
+  case "$last" in ''|*[!0-9]*) last="" ;; esac
+  if [ -n "$last" ] && [ "$((now - last))" -lt "$WATCHDOG_RECYCLE_GAP_S" ]; then
+    echo "rmd-relaunch: progress-watchdog -- a recycle ran $((now - last))s ago; at most one per ${WATCHDOG_RECYCLE_GAP_S}s."
+    return 1
+  fi
+  # STAMPED BEFORE THE ATTEMPT: a refusal is retried on a later tick, never in this one.
+  mkdir -p "$STATE_DIR/state" 2>/dev/null || true
+  printf '%s\n' "$now" > "$WATCHDOG_RECYCLE_AT" 2>/dev/null || true
+  [ -n "$INSTANCE_NAME" ] && args=(--instance "$INSTANCE_NAME")
+  [ -n "$INSTANCE_REGISTRY" ] && envs=(RMD_INSTANCE_REGISTRY="$INSTANCE_REGISTRY")
+  echo "rmd-relaunch: progress-watchdog -- ${PROGRESS_STATE}; recycling $container via $script."
+  if [ ! -f "$script" ]; then
+    out="recycle-container.sh missing at $script"; rc=127
+  elif out="$(env ${envs[@]+"${envs[@]}"} RMD_STATE_DIR="$STATE_DIR" RMD_DAEMON_CONTAINER="$container" \
+      bash "$script" ${args[@]+"${args[@]}"} 2>&1)"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  printf '%s\n' "$out"
+  if [ "$rc" -eq 0 ]; then result=ok; reason=replaced; else
+    result=refused
+    reason="$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -n 1 | tr -s '[:space:]' ' ' || true)"
+  fi
+  printf '%s watchdog-recycle result=%s rc=%s reason=%s\n' "$(watchdog_stamp)" "$result" "$rc" "${reason:-none}" \
+    >> "$REVIVAL_LOG" 2>/dev/null || true
+  return 0
+}
+
+# "sha=<origin/main> digest=<image id>" -- the two inputs a revive starts from; unreadable = unknown.
+revive_input() {
+  local code="$STATE_DIR/remudero" sha digest
+  git -C "$code" fetch --quiet origin main >/dev/null 2>&1 || true
+  sha="$(git -C "$code" rev-parse --verify --quiet origin/main 2>/dev/null || true)"
+  digest="$(docker image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || true)"
+  printf 'sha=%s digest=%s\n' "${sha:-unknown}" "${digest:-unknown}"
+}
+
+# An input moved only when BOTH readings are known and differ: an unreadable one is no evidence.
+revive_input_changed() {
+  local was="$1" now="$2" key a b
+  for key in sha digest; do
+    a="$(printf '%s\n' "$was" | sed -n 's/.*'"$key"'=\([^ ]*\).*/\1/p')"
+    b="$(printf '%s\n' "$now" | sed -n 's/.*'"$key"'=\([^ ]*\).*/\1/p')"
+    if [ -n "$a" ] && [ -n "$b" ] && [ "$a" != unknown ] && [ "$b" != unknown ] && [ "$a" != "$b" ]; then return 0; fi
+  done
+  return 1
+}
+
+# The last ledger step of each of the newest $1 daemon boots (run_ids that wrote daemon.paths).
+last_steps_before_exit() {
+  tail -n 5000 "$STATE_DIR/state/ledger.ndjson" 2>/dev/null | awk -v n="${1:-0}" '
+    {
+      rid = ""; st = ""
+      if (match($0, /"run_id":"[^"]*"/)) rid = substr($0, RSTART + 10, RLENGTH - 11)
+      if (match($0, /"step":"[^"]*"/)) st = substr($0, RSTART + 8, RLENGTH - 9)
+      if (rid == "" || st == "") next
+      if (st == "daemon.paths" && !(rid in seen)) { seen[rid] = 1; order[++k] = rid }
+      if (rid in seen) last[rid] = st
+    }
+    END {
+      out = ""; from = k - n + 1; if (from < 1) from = 1
+      for (i = from; i <= k; i++) out = out (out == "" ? "" : ",") last[order[i]]
+      print out
+    }' || true
+}
+
+# Returns 0 when the revive must NOT happen this tick.
+hold_revive_on_verdict() {
+  local was now fb steps line
+  if [ ! -f "$WATCHDOG_HOLD" ]; then
+    [ "$PROGRESS_ACTION" = "hold-revive" ] || return 1
+    now="$(revive_input)"
+    fb="$(printf '%s\n' "$PROGRESS_VERDICT" | sed -n 's/.*"failedBoots15m":\([0-9]*\).*/\1/p')"
+    steps="$(last_steps_before_exit "${fb:-0}")"
+    line="$(watchdog_stamp) crash-loop-hold failed_boots=${fb:-unknown} last_steps=${steps:-unknown} $now"
+    mkdir -p "$STATE_DIR/state" 2>/dev/null || true
+    printf '%s\n' "$now" > "$WATCHDOG_HOLD" 2>/dev/null || true
+    printf '%s\n' "$line" >> "$REVIVAL_LOG" 2>/dev/null || true
+    printf '%s\n' "$line" > "$STATE_DIR/state/DAEMON_CRASH_LOOP" 2>/dev/null || true
+    echo "rmd-relaunch: CRASH LOOP -- not reviving into the same input ($now). It revives when origin/main or the image changes; rm $WATCHDOG_HOLD to revive anyway." >&2
+    return 0
+  fi
+  was="$(cat "$WATCHDOG_HOLD" 2>/dev/null || true)"
+  now="$(revive_input)"
+  if revive_input_changed "$was" "$now"; then
+    rm -f "$WATCHDOG_HOLD" 2>/dev/null || true
+    printf '%s crash-loop-release %s was %s\n' "$(watchdog_stamp)" "$now" "$was" >> "$REVIVAL_LOG" 2>/dev/null || true
+    echo "rmd-relaunch: CRASH LOOP hold released -- input changed ($was -> $now); reviving."
+    return 1
+  fi
+  echo "rmd-relaunch: CRASH LOOP hold -- input unchanged ($now); not reviving." >&2
+  return 0
+}
+PROGRESS_WATCHDOG_LADDER
+}
+
 render_launcher() {
   cat <<EOF
 #!/usr/bin/env bash
@@ -633,6 +790,8 @@ converge_host_units() {
 
 $(render_deploy_code_refresh)
 
+$(render_progress_watchdog_ladder)
+
 # THE STOP LEVER OUTRANKS THIS SCRIPT, INCLUDING AT BOOT AND FROM THE WATCHDOG.
 if [ -e "\$STATE_DIR/state/STOP" ]; then
   echo "rmd-relaunch: state/STOP present -- refusing to start. rm it to resume."
@@ -670,6 +829,12 @@ if [ -n "\$(docker ps -q -f name='^${CONTAINER_NAME}\$' 2>/dev/null)" ]; then
   # moment to rewrite its units -- the rule W1-T3245 applied to the recycle decision.
   [ "\$BOOT" -eq 0 ] && converge_host_units
   if [ "\$BOOT" -eq 0 ] && [ -x "\$STATE_DIR/remudero/bin/rmd" ]; then
+    # W1-T5688: THE VERDICT IS READ BEFORE refresh_deploy_code, whose \`|| exit 0\` ends every tick
+    # with workers in flight -- exactly the ticks a wedged daemon produces.
+    read_progress_verdict
+    [ "\$PROGRESS_STATE" = CRASH_LOOP ] || rm -f "\$WATCHDOG_HOLD" 2>/dev/null || true
+    note_progress_verdict
+    if recycle_on_verdict '${CONTAINER_NAME}'; then exit 0; fi
     # W1-T4917: load current deploy code only after a verified idle fast-forward. Running from
     # daemon-install conflates the invoking checkout with the tree deploy-run acts on.
     # Refresh the source CLI before loading it; standalone executable entrypoints own their
@@ -699,6 +864,12 @@ if [ ! -s "\$STATE_DIR/state/ledger.ndjson" ]; then
   echo "rmd-relaunch: FATAL -- \$STATE_DIR/state/ledger.ndjson missing or empty; wrong volume?" >&2
   exit 1
 fi
+
+# W1-T5688 — HOLD, DON'T SPEND A BOOT ON AN UNCHANGED INPUT. Before the revival record, so a held
+# tick writes no revive line and the count below only sees boots that actually happened.
+read_progress_verdict
+note_progress_verdict
+if hold_revive_on_verdict; then exit 0; fi
 
 # A REVIVAL MUST LEAVE A TRACE. Recreating the container RESETS docker's RestartCount, so without
 # this record a crash loop is invisible: every beat is fresh and every daemon is young.
