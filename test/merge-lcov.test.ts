@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, opendirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, linkSync, mkdirSync, mkdtempSync, opendirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -84,14 +84,16 @@ function runCompactor(output: string, ...rawDirectories: string[]): string {
   );
 }
 
-function pinnedNodeControl(root: string, rawDirectories: string[]): { lcov: string; order: number[] } {
+function pinnedNodeControl(root: string, rawDirectories: string[]): { lcov: string; order: number[]; reportPaths: string[] } {
   const staged = join(root, 'node-control');
   mkdirSync(staged);
-  let index = 0;
-  for (const directory of rawDirectories) {
-    for (const name of readdirSync(directory).filter((entry) => /^coverage-\d+-\d{13}-\d+\.json$/.test(entry)).sort()) {
-      stageRawCoverageFile(join(directory, name), join(staged, `coverage-1-0000000000000-${String(index++).padStart(6, '0')}.json`));
-    }
+  const reportPaths = rawDirectories.flatMap((directory) =>
+    readdirSync(directory)
+      .filter((entry) => /^coverage-\d+-\d{13}-\d+\.json$/.test(entry))
+      .sort()
+      .map((entry) => join(directory, entry)));
+  for (const [index, reportPath] of reportPaths.entries()) {
+    stageRawCoverageFile(reportPath, join(staged, `coverage-1-0000000000000-${String(index).padStart(6, '0')}.json`));
   }
   // Node's native reader uses opendir, not sorted readdir. APFS can return these reports in a
   // different order; mapping mutates Node's line-hit cache. Compare algorithms over identical
@@ -115,7 +117,7 @@ function pinnedNodeControl(root: string, rawDirectories: string[]): { lcov: stri
       { line: 0, branch: 0, function: 0 });
     writeFileSync(process.argv[2], renderCoverageSummary(collector.summary()));
   `, staged, output], { cwd: process.cwd(), encoding: 'utf8', stdio: 'pipe' });
-  return { lcov: readFileSync(output, 'utf8'), order };
+  return { lcov: readFileSync(output, 'utf8'), order, reportPaths };
 }
 
 function compactBundles(directory: string): Array<Record<string, unknown>> {
@@ -590,29 +592,42 @@ test('corrupt compact coverage refuses the pinned-Node merge', () => {
 test('streamed compact coverage preserves pinned-Node LCOV without writable scratch', (context) => {
   const root = mkdtempSync(join(tmpdir(), 'rmd-streamed-lcov-'));
   const rawDirs = [join(root, 'left-raw'), join(root, 'right-raw')];
-  const compactDirs = [join(root, 'left-compact'), join(root, 'right-compact')];
   const output = join(root, 'streamed.info');
   try {
     for (let index = 0; index < rawDirs.length; index += 1) {
       mkdirSync(rawDirs[index]!);
-      const tap = execFileSync(process.execPath, [
-        '--enable-source-maps', '--experimental-test-coverage', '--test-coverage-exclude=test/**',
-        '--test', `--test-name-pattern=${index === 0 ? 'provider selector uses the subscription' : 'provider selector excludes an exhausted'}`,
-        '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', 'test/worker-provider.test.ts',
-      ], { cwd: process.cwd(), env: coverageEnv(rawDirs[index]!), encoding: 'utf8', stdio: 'pipe' });
-      assert.match(tap, /^# tests [1-9]\d*/m, 'the real profile producer must complete tests');
-      assert.match(tap, /^# pass [1-9]\d*/m, 'the real profile producer must execute a passing test');
-      assert.match(tap, /^# fail 0$/m, 'the real profile producer must not hide a failed test');
-      runCompactor(compactDirs[index]!, rawDirs[index]!);
+      const pattern = index === 0
+        ? 'provider selector uses the subscription'
+        : 'provider selector excludes an exhausted';
+      for (let run = 0; run < 2; run += 1) {
+        const tap = execFileSync(process.execPath, [
+          '--enable-source-maps', '--experimental-test-coverage', '--test-coverage-exclude=test/**',
+          '--test', `--test-name-pattern=${pattern}`,
+          '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', 'test/worker-provider.test.ts',
+        ], { cwd: process.cwd(), env: coverageEnv(rawDirs[index]!), encoding: 'utf8', stdio: 'pipe' });
+        assert.match(tap, /^# tests [1-9]\d*/m, 'the real profile producer must complete tests');
+        assert.match(tap, /^# pass [1-9]\d*/m, 'the real profile producer must execute a passing test');
+        assert.match(tap, /^# fail 0$/m, 'the real profile producer must not hide a failed test');
+      }
     }
     const control = pinnedNodeControl(root, rawDirs);
     const reportCounts = rawDirs.map((directory) => readdirSync(directory)
       .filter((name) => /^coverage-\d+-\d{13}-\d+\.json$/.test(name)).length);
-    assert.ok(reportCounts.every((count) => count > 0), `each compact directory must contribute process reports, got ${reportCounts.join(',')}`);
-    assert.equal(control.order.length, reportCounts.reduce((sum, count) => sum + count, 0),
+    assert.ok(reportCounts.every((count) => count > 1), `each compact directory must contribute multiple process reports, got ${reportCounts.join(',')}`);
+    assert.equal(control.reportPaths.length, reportCounts.reduce((sum, count) => sum + count, 0),
+      'the control must enumerate every process report across all compact directories');
+    assert.equal(control.order.length, control.reportPaths.length,
       'the pinned-Node control must retain every process report in its captured order');
+    const compactReportDirs = control.reportPaths.map((reportPath, index) => {
+      const rawReportDir = join(root, `raw-report-${index}`);
+      const compactReportDir = join(root, `compact-report-${index}`);
+      mkdirSync(rawReportDir);
+      linkSync(reportPath, join(rawReportDir, `coverage-1-0000000000000-${String(index).padStart(6, '0')}.json`));
+      runCompactor(compactReportDir, rawReportDir);
+      return compactReportDir;
+    });
     const log = execFileSync(process.execPath,
-      ['--expose-internals', 'scripts/coverage-merge-ratchet.mjs', '--output', output, ...control.order.map((index) => compactDirs[index]!)],
+      ['--expose-internals', 'scripts/coverage-merge-ratchet.mjs', '--output', output, ...control.order.map((index) => compactReportDirs[index]!)],
       { cwd: process.cwd(), env: { ...process.env, TMPDIR: join(root, 'scratch-does-not-exist') }, encoding: 'utf8', stdio: 'pipe' });
     const streamed = readFileSync(output, 'utf8').split('\n');
     const expected = control.lcov.split('\n');
