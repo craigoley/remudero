@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { findUntrialedModels, readBakeoffTrialState, runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
@@ -4203,6 +4204,92 @@ export const REGENERABLE_ARTIFACT_GENERATORS: Readonly<Record<string, string>> =
   "MASTER-PLAN.md": "capability-snapshot",
   "packages/api-client/src/schema.d.ts": "api-client:generate",
 });
+
+export const ADDITIVE_REGISTRATION_SURFACES = Object.freeze([
+  { path: "src/lib/ledger.ts", literal: "DECISION_RELEVANT_LEDGER_STEPS" },
+  { path: "src/lib/spend-rows.ts", literal: "SPEND_STEP_ROLES" },
+  { path: "src/lib/config-schema.ts", literal: "ENV_REGISTRY" },
+  { path: "src/lib/authority.ts", literal: "AUTHORITY_TABLE" },
+  { path: "scripts/bound-kind-baseline.json", literal: "grandfathered", shrinkOnly: true },
+] as const);
+
+export type RegistrationChange = { path: string; before?: string; after?: string; error?: string };
+
+function registrationLiteral(source: string, literal: string, json: boolean) {
+  const declaration = new RegExp(json ? `^ *"${literal}": *\\[` :
+    `^export const ${literal}\\b[^\\n=]*=\\s*(?:new Set\\()?([\\[{])`, "gm");
+  const matches = [...source.matchAll(declaration)];
+  if (matches.length !== 1) return undefined;
+  const start = matches[0].index! + matches[0][0].length;
+  const close = source[start - 1] === "[" ? SyntaxKind.CloseBracketToken : SyntaxKind.CloseBraceToken;
+  const scanner = createScanner(true, undefined, source.slice(start));
+  const stack: SyntaxKind[] = [];
+  const rows: string[] = [];
+  let rowStart: number | undefined;
+  for (let token = scanner.scan(); token !== SyntaxKind.EndOfFile; token = scanner.scan()) {
+    if (scanner.isUnterminated() || token === SyntaxKind.TemplateHead || token === SyntaxKind.SlashToken) return undefined;
+    if (stack.length === 0 && (token === SyntaxKind.CommaToken || token === close)) {
+      if (rowStart !== undefined) rows.push(source.slice(start + rowStart, start + scanner.getTokenStart()));
+      rowStart = undefined;
+      if (token === close) return { prefix: source.slice(0, start), suffix: source.slice(start + scanner.getTokenStart()), rows };
+      continue;
+    }
+    rowStart ??= scanner.getTokenStart();
+    const closing = token === SyntaxKind.OpenBraceToken ? SyntaxKind.CloseBraceToken :
+      token === SyntaxKind.OpenBracketToken ? SyntaxKind.CloseBracketToken :
+      token === SyntaxKind.OpenParenToken ? SyntaxKind.CloseParenToken : undefined;
+    if (closing !== undefined) stack.push(closing);
+    else if ([SyntaxKind.CloseBraceToken, SyntaxKind.CloseBracketToken, SyntaxKind.CloseParenToken].includes(token)) {
+      if (stack.pop() !== token) return undefined;
+    }
+  }
+  return undefined;
+}
+
+function registrationKey(row: string, literal: string): string | undefined {
+  const scanner = createScanner(true, undefined, row);
+  const first = scanner.scan();
+  if (literal === "ENV_REGISTRY") {
+    if (first !== SyntaxKind.Identifier || scanner.getTokenValue() !== "envEntry" || scanner.scan() !== SyntaxKind.OpenParenToken) return undefined;
+    return scanner.scan() === SyntaxKind.StringLiteral ? scanner.getTokenValue() : undefined;
+  }
+  if (literal === "AUTHORITY_TABLE") {
+    if (first !== SyntaxKind.OpenBraceToken) return undefined;
+    while (scanner.scan() !== SyntaxKind.EndOfFile) {
+      if (scanner.getTokenValue() === "id" && scanner.scan() === SyntaxKind.ColonToken && scanner.scan() === SyntaxKind.StringLiteral) return scanner.getTokenValue();
+    }
+    return undefined;
+  }
+  if (literal === "DECISION_RELEVANT_LEDGER_STEPS") {
+    const value = first === SyntaxKind.StringLiteral ? scanner.getTokenValue() :
+      first === SyntaxKind.Identifier ? `symbol:${scanner.getTokenValue()}` : undefined;
+    return scanner.scan() === SyntaxKind.EndOfFile ? value : undefined;
+  }
+  return first === SyntaxKind.StringLiteral || (literal === "SPEND_STEP_ROLES" && first === SyntaxKind.Identifier)
+    ? scanner.getTokenValue() : undefined;
+}
+
+function registrationSubsequence(small: readonly string[], large: readonly string[]): boolean {
+  let index = 0;
+  for (const value of large) if (value === small[index]) index++;
+  return index === small.length;
+}
+
+/** W1-T5691: preserve every existing row and every byte outside the named literal. */
+export function isAdditiveRegistrationChange(change: RegistrationChange): boolean {
+  const surface = ADDITIVE_REGISTRATION_SURFACES.find((row) => row.path === change.path);
+  if (!surface || change.before === undefined || change.after === undefined || change.error) return false;
+  const shrink = "shrinkOnly" in surface;
+  const before = registrationLiteral(change.before, surface.literal, shrink);
+  const after = registrationLiteral(change.after, surface.literal, shrink);
+  if (!before || !after || before.prefix !== after.prefix || before.suffix !== after.suffix) return false;
+  const [small, large] = shrink ? [after, before] : [before, after];
+  const [smallText, largeText] = shrink ? [change.after, change.before] : [change.before, change.after];
+  if (small.rows.length >= large.rows.length || !registrationSubsequence(small.rows, large.rows) ||
+      !registrationSubsequence(smallText.split("\n"), largeText.split("\n"))) return false;
+  const keys = large.rows.map((row) => registrationKey(row, surface.literal));
+  return keys.every((key) => key !== undefined) && new Set(keys).size === keys.length;
+}
 
 /** W1-T2548 — PURE, deterministic (rule 2), admitted ALONGSIDE and never instead of
  *  {@link isPureConcurrentAddition}. Requires EVERY conflicting path to carry a declared generator,
