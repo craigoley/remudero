@@ -1881,6 +1881,21 @@ export function spawnRmdReviewForFreshTree(
   });
 }
 
+export function reviewOptionFlags(opts: Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode">): string[] {
+  return [
+    ...(opts.planOnlyFiling === undefined ? [] : [opts.planOnlyFiling ? "--plan-only-filing" : "--not-plan-only-filing"]),
+    ...(opts.executionMode === undefined ? [] : ["--execution-mode", opts.executionMode]),
+  ];
+}
+
+export function reviewOptionsFromFlags(rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode"> {
+  const mode = flagValue(rest, "--execution-mode");
+  return {
+    ...(rest.includes("--plan-only-filing") ? { planOnlyFiling: true } : rest.includes("--not-plan-only-filing") ? { planOnlyFiling: false } : {}),
+    ...(mode === "semantic" || mode === "deterministic" ? { executionMode: mode } : {}),
+  };
+}
+
 export function buildReviewerCodeFreshnessGate(
   readFreshness: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>,
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -1920,7 +1935,7 @@ export function buildReviewerCodeFreshnessGate(
           // W1-T4055 — WHY, NOT ONLY WHETHER. 52 of 53 fresh-tree reviews once exited non-zero with
           // nothing but an exit code ledgered; the cause is what the next fix needs.
           let failure: string | undefined;
-          return reviewFromFreshTree(prArg, rest, freshness, (why) => { failure = why; }).then((code) => {
+          return reviewFromFreshTree(prArg, [...rest, ...reviewOptionFlags(reviewDeps)], freshness, (why) => { failure = why; }).then((code) => {
             if (code !== undefined) {
               const why = code === 0 ? {} : { failure: failure ?? "no failure reported" };
               log("review.ran_from_fresh_tree", { ...stale, exit_code: code, ...why });
@@ -20589,6 +20604,7 @@ export function makeLandingReviewRequest(
 }
 
 async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCommandDeps = {}): Promise<number> {
+  deps = { ...reviewOptionsFromFlags(rest), ...deps };
   const {
     fetchView,
     loadConfig: loadConfigDep,
