@@ -9276,6 +9276,8 @@ export async function prerequisitePrAdmissionRefusal(
     return `prerequisite ${prUrl} opened on head ${head.headRefName}, not the minted ${mintedBranch}`;
   }
   const body = read.fetchPrBody ? await read.fetchPrBody(prUrl).catch((error: unknown) => ({ unreadable: String(error) })) : undefined;
+  const trailer = typeof body === "string" ? extractTaskTrailerId(body) : undefined;
+  if (trailer !== undefined) return `prerequisite ${prUrl} body carries "Remudero-Task: ${trailer}" — a prerequisite credits no task`;
   const check = typeof body === "string" ? acceptanceAuthorTimeCheck(body) : undefined;
   return check && !check.ok ? `prerequisite ${prUrl} body refused (${check.defect}): ${check.message}` : undefined;
 }
