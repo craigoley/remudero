@@ -28307,11 +28307,11 @@ function tryReadFollowupTitles(label: string, read: () => string[]): string[] {
  * design ii): `unavailable()` backed by ONE cheap `gh api rate_limit` probe. Shared by
  * `retroCommand`'s own gather AND the daemon's cadence-trigger check (W1-T160,
  * `retroTriggerCheck` below) so both read the SAME credited-merge signal off the SAME
- * gateway construction, never two independently-behaving GitHub reads.
+ * gateway construction. BATCHED, never per-call `ghGateway`: one fetch answers every lookup (W1-T5649).
  */
 function retroShippedGithubGateway(): ShippedGithub {
   const { owner, repo } = resolveOwnerRepo();
-  const baseGithub = ghGateway(owner, repo);
+  const baseGithub = buildBatchedGithub(owner, repo);
   return {
     findMergedByTrailer: (taskId) => baseGithub.findMergedByTrailer(taskId),
     headRefName: (prUrl) => baseGithub.headRefName(prUrl),
