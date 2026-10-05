@@ -12,7 +12,7 @@
   origin: "operator session 2026-10-02: core daemon CPU profile (E36) and #8674's follow-up audit"
   plan_refs: [W1-T4477, W1-T5074, W1-T2610, W1-T4693]
   files: [src/lib/worker.ts, src/lib/git-push.ts, src/lib/arm-auto-merge.ts, src/run-task.ts, test/daemon-worktrees-pushes-and-arms-never-block-the-loop.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-02. In live CPU profiles of the core daemon, the 48 h loop-stall rows put 585 s in retro and

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: live ledger DAEMON-1791176702134 under the 05:10Z recycle PAUSE"
   plan_refs: [W1-T4429, W1-T5343, W1-T4045, W1-T2996, W1-T4732]
   files: [src/lib/daemon.ts, test/the-pause-review-clock-runs-across-paused-ticks.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

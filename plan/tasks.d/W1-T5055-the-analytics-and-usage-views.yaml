@@ -21,7 +21,7 @@
     - test/a-slow-view-build-never-stalls-projection.test.ts
     - test/read-model-worker.test.ts
     - test/nav-badge-from-the-read-model.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     MEASURED 2026-10-01: the analytics refresh is p50 8 s, p90 49 s and max 90 s for core. The console merges

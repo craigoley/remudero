@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 6, namedPaths ignores doc-comment paths"
   plan_refs: [W1-T4404, W1-T4406, W1-T4787, W1-T2895, W1-T5702]
   files: [src/lib/affected-suites.ts, test/the-affected-suite-graph-reads-no-comment.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

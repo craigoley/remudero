@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: root-cause program for the 28-PR backlog; operator ruling: turn the merge queue on for main once this lands"
   plan_refs: [W1-T4406, W1-T4405, W1-T4400, W1-T4604, W1-T4399, W1-T4784, W1-T1014]
   files: [.github/workflows/ci.yml, .github/workflows/ci-gate.yml, scripts/ci-gate-from-contract.mjs, test/the-ci-gate-does-not-hold-a-runner.test.ts, test/push-ci-on-main.test.ts, test/fast-lane-classifier.test.ts, test/the-ci-gate-reports-on-the-merge-group-commit.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

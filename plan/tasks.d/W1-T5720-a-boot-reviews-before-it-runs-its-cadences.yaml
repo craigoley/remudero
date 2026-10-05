@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: research/restart/report.md (restart efficiency) P2; reorders work and caches nothing — the 10-02 multi-select did not pick a warm first sweep"
   plan_refs: [W1-T4075, W1-T4053, W1-T5366, W1-T5718, W1-T5723, W1-T5724]
   files: [src/lib/daemon.ts, test/a-boot-reviews-before-it-runs-its-cadences.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

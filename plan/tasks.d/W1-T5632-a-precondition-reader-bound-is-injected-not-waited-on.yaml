@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: #8972's (W1-T4843) precondition test SIGKILLed once under coverage"
   plan_refs: [W1-T4843, W1-T3599]
   files: [src/lib/plan.ts, test/a-task-waits-on-its-precondition-not-its-breaker.test.ts, test/a-precondition-reader-bound-is-injected-not-waited-on.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |
