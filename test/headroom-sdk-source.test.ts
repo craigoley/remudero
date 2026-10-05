@@ -23,12 +23,12 @@
  * `queryFn` seam; the live-spawn guard is asserted directly in its own test.
  */
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openUsageProbeSession } from "../src/lib/worker.js";
-import { materializeWorkerHome } from "../src/lib/worker-home.js";
+import { clearClaudeCapacityCache, openUsageProbeSession, readClaudeProviderCapacity } from "../src/lib/worker.js";
+import { materializeWorkerHome, WorkerKeychainError } from "../src/lib/worker-home.js";
 import {
   usageSnapshotFromSdk,
   WEEKLY_ALL_MODELS_LABEL,
@@ -38,6 +38,15 @@ import {
   type UsageSnapshot,
 } from "../src/lib/headroom.js";
 import { readUsageSnapshotViaSdk, readUsageSnapshotPreferSdk, type UsageProbeFailureStage } from "../src/run-task.js";
+
+const SDK_TEST_HOME = realpathSync(mkdtempSync(join(tmpdir(), "rmd-usage-sdk-fixture-")));
+const SDK_CREDENTIAL_DIR = join(SDK_TEST_HOME, ".claude-fleet");
+mkdirSync(SDK_CREDENTIAL_DIR, { mode: 0o700 });
+writeFileSync(join(SDK_CREDENTIAL_DIR, ".credentials.json"), JSON.stringify({
+  claudeAiOauth: { accessToken: "fixture-access", refreshToken: "fixture-refresh", expiresAt: Date.now() + 3_600_000 },
+}), { mode: 0o600 });
+const SDK_CONTEXT = { realHome: SDK_TEST_HOME, platform: "linux" as const };
+after(() => rmSync(SDK_TEST_HOME, { recursive: true, force: true }));
 
 /** A full, healthy reading in the exact shape the pinned SDK declares. */
 const READING: SdkUsageReading = {
@@ -101,7 +110,7 @@ test("a model bucket with no usable utilization is DROPPED, never defaulted to 0
 test("UNKNOWN 1: the method is absent (a future SDK renamed it) ⇒ undefined, never 0%", () => {
   const q = fakeQuery({ omitMethod: true });
   const s = sink();
-  return readUsageSnapshotViaSdk(q.fn, s.fn).then((out) => {
+  return readUsageSnapshotViaSdk(q.fn, s.fn, SDK_CONTEXT).then((out) => {
     assert.equal(out, undefined, "no reading — NOT a zero-used snapshot");
     assert.equal(s.seen[0]?.stage, "sdk");
     assert.match(s.seen[0].reason, /absent on this SDK/);
@@ -111,7 +120,7 @@ test("UNKNOWN 1: the method is absent (a future SDK renamed it) ⇒ undefined, n
 test("UNKNOWN 2: the call THROWS ⇒ undefined, with its own distinct reason", async () => {
   const q = fakeQuery({ usage: async () => { throw new Error("control request refused"); } });
   const s = sink();
-  assert.equal(await readUsageSnapshotViaSdk(q.fn, s.fn), undefined);
+  assert.equal(await readUsageSnapshotViaSdk(q.fn, s.fn, SDK_CONTEXT), undefined);
   assert.equal(s.seen[0]?.stage, "sdk");
   assert.match(s.seen[0].reason, /threw: control request refused/);
 });
@@ -119,7 +128,7 @@ test("UNKNOWN 2: the call THROWS ⇒ undefined, with its own distinct reason", a
 test("UNKNOWN 3: rate_limits_available false (an API key) ⇒ undefined, and NOT zero-used", async () => {
   const q = fakeQuery({ usage: async () => ({ subscription_type: null, rate_limits_available: false, rate_limits: null }) });
   const s = sink();
-  assert.equal(await readUsageSnapshotViaSdk(q.fn, s.fn), undefined);
+  assert.equal(await readUsageSnapshotViaSdk(q.fn, s.fn, SDK_CONTEXT), undefined);
   assert.match(s.seen[0].reason, /no usable rate-limit windows/);
   // And at the mapper level, the state that matters most: available:false is not a 0% account.
   assert.equal(usageSnapshotFromSdk({ rate_limits_available: false, rate_limits: null }), undefined);
@@ -143,7 +152,7 @@ test("THE LAW, ASSERTED DIRECTLY: no unreadable state ever yields a 0%-used snap
 
 test("a healthy reading maps and the probe tears the session down", async () => {
   const q = fakeQuery({ usage: async () => READING });
-  assert.equal((await readUsageSnapshotViaSdk(q.fn, () => {}))?.session.percentUsed, 18);
+  assert.equal((await readUsageSnapshotViaSdk(q.fn, () => {}, SDK_CONTEXT))?.session.percentUsed, 18);
   assert.equal(q.calls.returned, 1, "the probe session is closed, not left open");
 });
 
@@ -153,13 +162,26 @@ test("CONSUMED, NOT FETCHED: the SDK reading changes the governor's decision", a
   // snapshot and asserts the answer FLIPS with the reading.
   const at = async (utilization: number): Promise<UsageSnapshot> => {
     const q = fakeQuery({ usage: async () => ({ ...READING, rate_limits: { ...READING.rate_limits, five_hour: { utilization, resets_at: null } } }) });
-    return (await readUsageSnapshotViaSdk(q.fn, () => {}))!;
+    return (await readUsageSnapshotViaSdk(q.fn, () => {}, SDK_CONTEXT))!;
   };
   assert.equal(headroomExhausted(await at(10), HEADROOM_LIMIT_PCT), null, "10% used ⇒ no window over the ceiling, dispatch permitted");
   const held = headroomExhausted(await at(99), HEADROOM_LIMIT_PCT);
   assert.ok(held, "99% used ⇒ the governor holds");
   assert.equal(held.window, "session (5h)", "and it names the SDK-sourced window it held on");
   assert.equal(held.percentUsed, 99);
+});
+
+test("the SDK usage reader forwards Linux credential context without reading the operator home", async () => {
+  let closed = 0;
+  const result = await readUsageSnapshotViaSdk((params) => {
+    assert.equal(params.options?.env?.CLAUDE_CONFIG_DIR, SDK_CREDENTIAL_DIR);
+    return {
+      usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => READING,
+      return: async () => { closed++; },
+    };
+  }, () => {}, SDK_CONTEXT);
+  assert.equal(result?.session.percentUsed, 18);
+  assert.equal(closed, 1);
 });
 
 // ── THE CLI FALLBACK IS RETAINED ──────────────────────────────────────────────────────────────
@@ -232,6 +254,7 @@ test("the usage control session observes the actual narrowed Linux worker creden
     const workerHome = join(root, "worker");
     mkdirSync(join(realHome, ".claude"), { recursive: true });
     mkdirSync(join(realHome, ".claude-fleet"), { recursive: true });
+    writeFileSync(join(realHome, ".claude-fleet", ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "fixture-access" } }));
     materializeWorkerHome({ workerHome, realHome });
     const q = fakeQuery({ omitMethod: true });
     let params: Parameters<import("../src/lib/worker.js").UsageProbeQueryFn>[0] | undefined;
@@ -246,11 +269,102 @@ test("the usage control session observes the actual narrowed Linux worker creden
     await session.return?.();
     assert.equal((await next).done, true);
     rmSync(join(realHome, ".claude-fleet"), { recursive: true });
+    writeFileSync(join(realHome, ".claude", ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "fixture-access" } }));
     openUsageProbeSession((p) => { params = p; return (q.fn as () => ReturnType<typeof openUsageProbeSession>)(); }, { realHome, platform: "linux" });
     assert.equal(params!.options.env!.CLAUDE_CONFIG_DIR, join(realHome, ".claude"));
     openUsageProbeSession((p) => { params = p; return (q.fn as () => ReturnType<typeof openUsageProbeSession>)(); }, { realHome, platform: "darwin" });
     assert.equal(params!.options.env, undefined);
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("capacity refuses real unusable credential stores before opening its SDK transport", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-probe-grant-"));
+  const dir = join(root, ".claude-fleet"); mkdirSync(dir);
+  const path = join(dir, ".credentials.json");
+  let opened = 0;
+  const openSession = () => openUsageProbeSession(() => {
+    opened++;
+    return { usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => READING, return: async () => {} };
+  }, { realHome: root, platform: "linux" });
+  const config = { claudeBin: "/unused", root, workerProviders: { capacityCacheMs: 60_000 } };
+  try {
+    for (const [contents, reason] of [
+      [undefined, "credential-item-missing"], ["bad-json", "credential-file-malformed"],
+      [JSON.stringify({ claudeAiOauth: { accessToken: null, refreshToken: null, expiresAt: 0 } }), "credential-file-empty"],
+    ] as const) {
+      rmSync(path, { force: true });
+      if (contents !== undefined) writeFileSync(path, contents);
+      clearClaudeCapacityCache();
+      const result = await readClaudeProviderCapacity(config, { openSession, now: () => 1_000 });
+      assert.equal(result.readable, false);
+      assert.deepEqual(result.windows, []);
+      assert.equal(result.detail, `capacity credential unavailable: ${reason}`);
+      assert.deepEqual(await readClaudeProviderCapacity(config, { openSession, now: () => 1_001 }), result);
+      assert.equal(opened, 0);
+    }
+    rmSync(path, { force: true }); mkdirSync(path);
+    const unreadable = await readClaudeProviderCapacity(config, { openSession, forceRefresh: true });
+    assert.equal(unreadable.detail, "capacity credential unavailable: credential-file-unreadable");
+    assert.equal(opened, 0);
+    rmSync(path, { recursive: true });
+    writeFileSync(path, JSON.stringify({ claudeAiOauth: { accessToken: "fixture-access" } }));
+    const restored = await readClaudeProviderCapacity(config, { openSession, forceRefresh: true, accountLabel: () => undefined });
+    assert.equal(restored.readable, true);
+    assert.equal(opened, 1);
+  } finally { clearClaudeCapacityCache(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("capacity preserves unexpected opening failures rather than inventing a credential verdict", async () => {
+  clearClaudeCapacityCache();
+  await assert.rejects(readClaudeProviderCapacity({ claudeBin: "/unused", root: "/unused" }, {
+    openSession: () => { throw new Error("transport opening refused"); },
+  }), /transport opening refused/);
+  clearClaudeCapacityCache();
+});
+
+test("a credential lost during SDK initialization prevents the usage control and releases its session", async () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-probe-grant-"));
+  const dir = join(root, ".claude-fleet"); mkdirSync(dir);
+  const path = join(dir, ".credentials.json");
+  writeFileSync(path, JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-refresh" } }));
+  let called = 0; let closed = 0;
+  const session = openUsageProbeSession(() => ({
+    initializationResult: async () => { writeFileSync(path, JSON.stringify({ claudeAiOauth: {} })); },
+    usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => { called++; return READING; },
+    return: async () => { closed++; },
+  }), { realHome: root, platform: "linux" });
+  try {
+    await assert.rejects(session.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET!(), /usage credential unavailable: credential-file-empty/);
+    assert.equal(called, 0);
+    await session.return?.(); assert.equal(closed, 1);
+  } finally { await session.return?.(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("usage authentication environment and Darwin keychain retain their existing credential precedence", async () => {
+  const keys = ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_ANTHROPIC_AWS"];
+  const saved = keys.map(key => [key, process.env[key]] as const);
+  const root = mkdtempSync(join(tmpdir(), "rmd-probe-grant-"));
+  let calls = 0;
+  const q = () => { calls++; return { return: async () => {} }; };
+  try {
+    for (const key of keys) delete process.env[key];
+    assert.throws(() => openUsageProbeSession(q, { realHome: root, platform: "linux" }), WorkerKeychainError);
+    for (const key of keys) {
+      process.env[key] = key.startsWith("CLAUDE_CODE_USE_") ? "1" : "fixture-only-key";
+      await openUsageProbeSession(q, { realHome: root, platform: "linux" }).return?.();
+      delete process.env[key];
+    }
+    for (const value of ["0", "false"]) {
+      process.env.CLAUDE_CODE_USE_BEDROCK = value;
+      assert.throws(() => openUsageProbeSession(q, { realHome: root, platform: "linux" }), WorkerKeychainError);
+    }
+    delete process.env.CLAUDE_CODE_USE_BEDROCK;
+    await openUsageProbeSession(q, { realHome: root, platform: "darwin" }).return?.();
+    assert.equal(calls, keys.length + 1);
+  } finally {
+    for (const [key, value] of saved) if (value === undefined) delete process.env[key]; else process.env[key] = value;
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -271,7 +385,7 @@ test("the usage probe waits for initialization without ending input and skips tr
     },
     return: async () => { closed++; },
   };
-  const session = openUsageProbeSession((params) => { iterator = params.prompt[Symbol.asyncIterator](); return raw; });
+  const session = openUsageProbeSession((params) => { iterator = params.prompt[Symbol.asyncIterator](); return raw; }, SDK_CONTEXT);
   let inputEnded = false;
   const input = iterator!.next().then((result) => { inputEnded = true; return result; });
   const answer = session.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET!();
@@ -299,7 +413,7 @@ test("an initialization failure stays unreadable and the usage probe still relea
       usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => { called++; return READING; },
       return: async () => { closed++; },
     };
-  }, seen.fn);
+  }, seen.fn, SDK_CONTEXT);
   assert.equal(result, undefined);
   assert.match(seen.seen[0].reason, /native initialization refused/);
   assert.equal(called, 0);
@@ -312,7 +426,7 @@ test("a usage probe whose injected transport has no teardown still releases stre
   const session = openUsageProbeSession((params) => {
     input = params.prompt[Symbol.asyncIterator]().next();
     return {};
-  });
+  }, SDK_CONTEXT);
   assert.equal(session.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET, undefined);
   await session.return?.();
   assert.equal((await input!).done, true);
@@ -323,7 +437,7 @@ test("a synchronous usage transport refusal releases its retained input and pres
   assert.throws(() => openUsageProbeSession((params) => {
     input = params.prompt[Symbol.asyncIterator]().next();
     throw new Error("transport opening refused");
-  }), /transport opening refused/);
+  }, SDK_CONTEXT), /transport opening refused/);
   assert.equal((await input!).done, true);
 });
 
@@ -363,7 +477,7 @@ test("a native credential refresh timeout or lost store is unreadable and never 
   const dir = join(root, ".claude-fleet"); mkdirSync(dir);
   const path = join(dir, ".credentials.json");
   try {
-    for (const mode of ["timeout", "missing", "malformed", "no-expiry", "cleared", "invalid-bound"] as const) {
+    for (const mode of ["timeout", "missing", "malformed", "no-expiry", "no-refresh", "cleared", "invalid-bound"] as const) {
       let nowMs = 1_000; let called = 0; let closed = 0;
       writeFileSync(path, JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-refresh", expiresAt: 999 } }));
       const clock = { now: () => nowMs, date: () => new Date(nowMs), iso: () => new Date(nowMs).toISOString() };
@@ -375,9 +489,10 @@ test("a native credential refresh timeout or lost store is unreadable and never 
         if (mode === "missing") rmSync(path);
         if (mode === "malformed") writeFileSync(path, "not json");
         if (mode === "no-expiry") writeFileSync(path, JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-refresh" } }));
+        if (mode === "no-refresh") writeFileSync(path, JSON.stringify({ claudeAiOauth: { accessToken: "fixture-access", expiresAt: 0 } }));
         if (mode === "cleared") writeFileSync(path, JSON.stringify({ claudeAiOauth: { expiresAt: 0 } }));
       } } });
-      const expected = mode === "timeout" ? /bounded wait/ : mode === "invalid-bound" ? /invalid.*bound/ : mode === "no-expiry" ? /lost.*expiry/ : mode === "cleared" ? /lost.*refresh credential/ : /became unavailable/;
+      const expected = mode === "timeout" ? /bounded wait/ : mode === "invalid-bound" ? /invalid.*bound/ : mode === "no-expiry" ? /lost.*expiry/ : mode === "no-refresh" ? /lost.*refresh credential/ : mode === "cleared" ? /became unavailable: credential-file-empty/ : /became unavailable/;
       await assert.rejects(session.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET!(), expected);
       await session.return?.();
       assert.equal(called, 0, mode);
@@ -391,8 +506,8 @@ test("a healthy or unknown-expiry usage credential does not wait for a rotation"
   const dir = join(root, ".claude-fleet"); mkdirSync(dir);
   const path = join(dir, ".credentials.json");
   try {
-    for (const raw of [JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-refresh", expiresAt: 3_601_000 } }), JSON.stringify({ claudeAiOauth: { expiresAt: 1_001 } }), JSON.stringify({ claudeAiOauth: {} }), "not json", undefined]) {
-      if (raw === undefined) rmSync(path, { force: true }); else writeFileSync(path, raw);
+    for (const raw of [JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-refresh", expiresAt: 3_601_000 } }), JSON.stringify({ claudeAiOauth: { accessToken: "fixture-access", expiresAt: 1_001 } }), JSON.stringify({ claudeAiOauth: { refreshToken: "fixture-refresh" } })]) {
+      writeFileSync(path, raw);
       const session = openUsageProbeSession(() => ({ usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => READING }), {
         realHome: root, platform: "linux", refresh: { clock: { now: () => 1_000, date: () => new Date(1_000), iso: () => new Date(1_000).toISOString() }, sleep: async () => { assert.fail("no observed expired credential"); } },
       });

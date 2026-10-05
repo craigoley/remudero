@@ -84,6 +84,26 @@ test("a healthy credential is usable and its stated expiry is reported, not judg
   assert.equal(typeof (v.kind === "usable" ? v.expiresAtMs : undefined), "number");
 });
 
+test("a metadata-only credential is refused by the real spawn before the SDK boundary", async () => {
+  const home = homeWith(JSON.stringify({ claudeAiOauth: { accessToken: null, refreshToken: null, expiresAt: 0 } }));
+  const { reachedSpawn, err } = await spawnAgainst(home, "linux");
+  assert.equal(reachedSpawn, false);
+  assert.ok(err instanceof WorkerKeychainError);
+  assert.equal(err.reasonClass, "credential-file-empty");
+  assert.match(err.message, /neither an access credential nor a refresh credential/);
+});
+
+test("credential presence distinguishes native renewal from empty or malformed token fields", () => {
+  for (const token of [undefined, null, "", " \t", 42, {}]) {
+    const verdict = classifyWorkerCredentialFile(() => JSON.stringify({ claudeAiOauth: { accessToken: token } }));
+    assert.equal(verdict.kind === "unusable" && verdict.reasonClass, "credential-file-empty");
+  }
+  assert.equal(classifyWorkerCredentialFile(() => JSON.stringify({ claudeAiOauth: [] })).kind, "unusable");
+  for (const credential of [{ accessToken: "fixture-access", expiresAt: 0 }, { refreshToken: "fixture-refresh", expiresAt: 0 }]) {
+    assert.equal(classifyWorkerCredentialFile(() => JSON.stringify({ claudeAiOauth: credential })).kind, "usable");
+  }
+});
+
 test("an EXPIRED credential is still usable here — refusing it would be a bound firing on a healthy fleet", () => {
   // On darwin an expired credential triggers RE-PROVISIONING from the login keychain. Off darwin
   // the file IS the source, there is nothing to re-provision from, and the CLI maintains its own
