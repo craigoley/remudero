@@ -1,0 +1,37 @@
+- id: W1-T5856
+  title: "THE POST-FIX RE-VERIFICATION READS A LARGE CI LOG — W1-T5836 streams the job log for the sweep's and the fix rung's CI reads, but `runPostFixReverification`'s default reader still calls the buffered synchronous `fetchCiFailures`, so a coverage-shard log past 4 MiB still dies ENOBUFS there"
+  repo: remudero
+  depends_on: [W1-T5836]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one concern — the re-verification's CI read goes through the streamed reader
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5836 (#9300) builder's follow-up"
+  plan_refs: [W1-T5836, W1-T5283]
+  files: [src/run-task.ts, test/the-post-fix-reverification-reads-a-large-ci-log.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main dcf5d34c. W1-T5836 (#9300, merged 11:41Z) added
+    `ghLinesAsync` and `fetchCiFailuresAsync`'s streamed job-log region, and rewired the sweep
+    (`fetchCiFailuresImpl`) and `runFixRung` (`fixRungCiFailures`). The post-fix re-verification
+    wiring in src/run-task.ts still defaults `readCiFailuresImpl` to
+    `ghJson(["pr","view",...,"statusCheckRollup"])` then the synchronous `fetchCiFailures`, whose
+    job-log fetch is the 4 MiB `maxBuffer` read that failed ENOBUFS 199 times on 2026-10-04..05
+    (W1-T5836's evidence). A coverage-shard log is past that cap, so re-verifying a fix whose PR
+    has a red coverage shard reads no failure and can misjudge the fix.
+    src/run-task.ts sits at its comment-load ceiling: add no comment prose there.
+  design: |
+    The default `readCiFailuresImpl` reads through `fetchCiFailuresAsync` (the streamed region),
+    awaited where the re-verification already awaits; an injected `opts.readCiFailures` is
+    unchanged. If `runPostFixReverification` takes a sync reader today, widen its seam to accept
+    a promise and await it.
+  acceptance:
+    - claim: "the post-fix re-verification's default CI reader returns the failing region of a 6 MiB job log served by the shared gh shim, with no fetch failure, while the synchronous reader on the same shim reports ENOBUFS"
+      proof: "unit test: test/the-post-fix-reverification-reads-a-large-ci-log.test.ts"
+  falsifier: |
+    Keep the synchronous `fetchCiFailures` default: the 6 MiB fixture reads no failing region and
+    the test fails.

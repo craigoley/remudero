@@ -419,15 +419,15 @@ jobs:
               # W1-T3655: THE CENSUS WATCHES ITS OWN BASE. expiring-fixture-census otherwise only
               # rides `comment-load-ratchet`, a `pull_request`-only job (W1-T1033) -- so a fixture
               # stamp already sitting on `main` reddened every open PR beside it while no run was
-              # ever charged with fixing it (MEASURED 2026-09-16: one main-branch stamp took
-              # #5725, #5733, #5734, #5736, #5738 and #5739 red at once, each paying the same
-              # diagnosis separately). It is not an `npm run` script, so it is invoked directly
-              # rather than through `run_main_ceiling_gate` above. `CENSUS_MAIN_BRANCH_RUN=1`
-              # forces the STRICT reading: on this lane `origin/main` IS the commit under test, so
-              # reading it as an earlier base to inherit a crossing from would let a main-branch
-              # bomb excuse itself on the one run that exists to catch it.
+              # ever charged with fixing it (MEASURED 2026-09-16: one main-branch stamp took six
+              # PRs red at once). It is not an `npm run` script, so it is invoked directly.
+              # `CENSUS_MAIN_BRANCH_RUN=1` stops it reading `origin/main` (the commit under test)
+              # as a base; W1-T5826 (operator, 2026-10-05): `--base HEAD^` attributes against the
+              # push's parent instead, so a crossing this push planted blocks while one the
+              # calendar brought to an untouched stamp is a `::warning` ahead of its red date.
+              # An unreadable HEAD^ reads strict. A population drop still blocks.
               echo "::group::main-ceiling-drift:expiring-fixture-census"
-              CENSUS_MAIN_BRANCH_RUN=1 RMD_CI_REPORT=1 node scripts/expiring-fixture-census.mjs || {
+              CENSUS_MAIN_BRANCH_RUN=1 RMD_CI_REPORT=1 node scripts/expiring-fixture-census.mjs --base HEAD^ || {
                 CODE=1
                 echo "main-ceiling-drift: expiring-fixture-census BLOCKED on main itself"
               }

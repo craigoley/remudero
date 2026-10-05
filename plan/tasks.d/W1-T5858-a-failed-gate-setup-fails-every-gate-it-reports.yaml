@@ -1,0 +1,37 @@
+- id: W1-T5858
+  title: "A FAILED GATE SETUP FAILS EVERY GATE IT REPORTS — in ci.yml's commitlint job, a failed `npm ci` or classify step skips every later gate step, and the always() reporter maps a skipped outcome to SUCCESS, so all the per-gate checks it posts read green on a job that checked nothing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — a setup failure is never reported as a passed gate
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-05: W1-T5522 builder's follow-up; workflow edit is an operator build (W1-T5351)"
+  plan_refs: [W1-T4399, W1-T5522, W1-T5695, W1-T2428]
+  files: [.github/workflows/ci.yml, test/a-failed-gate-setup-fails-every-gate-it-reports.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main dcf5d34c. ci.yml's commitlint job runs classify and
+    `Install (clean, from lockfile)` (`npm ci`) before its gate steps, then an `if: always()`
+    reporter posts one check run per gate (`report "rule-checks"`, `report "lint-plan"`,
+    `report "task-id-existence"` and the rest). Its `report()` sets `conclusion=success` unless an
+    outcome is neither `success` nor `skipped`, by design: a fast-laned gate the diff cannot move
+    is skipped and reports success (W1-T4399). But a failed setup step also leaves every later
+    gate `skipped`, so each posted check reads success. Whether anything then stays red depends on
+    the job's own check being required; W1-T5522 leaves `commitlint` out of the merge-group
+    required list, so on a queue group commit nothing would.
+  design: |
+    The reporter distinguishes the two causes of `skipped`: if any setup step the gates depend on
+    (classify, install) did not succeed, every gate it reports is posted as failure with a title
+    naming the failed setup step; otherwise today's mapping stands. The fast-lane skip path is
+    unchanged.
+  acceptance:
+    - claim: "with the install or classify step failed, the reporter posts every gate check as failure naming the failed setup step, and with setup green a fast-laned skipped gate still posts success"
+      proof: "unit test: test/a-failed-gate-setup-fails-every-gate-it-reports.test.ts"
+  falsifier: |
+    Keep `skipped` mapped to success regardless of setup: the failed-install fixture posts every
+    gate green and the test fails.

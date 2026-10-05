@@ -173,7 +173,7 @@ export function lastReviewDecisionTerminal(
 ): ReviewDecisionTerminal | undefined {
   let terminal: ReviewDecisionTerminal | undefined;
   for (const line of lines) {
-    if (line.step !== "review.posted" || line.task_id !== taskId || line.pr_url !== prUrl || line.review_decision_digest !== digest) continue;
+    if (line.step !== "review.posted" || !reviewRowNamesPr(line, taskId, prUrl) || line.review_decision_digest !== digest) continue;
     const verdict = line.decision_verdict as ReviewVerdict | undefined;
     if (!verdict || (verdict.state !== "success" && verdict.state !== "failure") || !Array.isArray(verdict.criteria)) continue;
     terminal = {
@@ -4800,15 +4800,39 @@ export interface VerdictStabilityResult {
   suppressed: boolean;
 }
 
+/** W1-T5839 — what `taskIdFromRunBranch` recovers from every `run-unfiled-<epochMs>` head: a branch-shape SENTINEL that
+ *  every ad-hoc PR shares, never a task (W1-T3535), so it owns neither supersession nor a review verdict. */
+export const UNFILED_RUN_SENTINEL = "unfiled";
+
+/** W1-T5839 — THE KEY A PR's REVIEW ROWS ARE WRITTEN UNDER: the resolved task id, else `PR-<n>` — and the sentinel is
+ *  "else" too. `resolveReviewTaskId` answers `unfiled` or `undefined` for ONE run-unfiled PR depending on that pass's
+ *  plan-filing classification, so keying its answer directly let the review lane write `unfiled` while the sweep read
+ *  `PR-9305`: 16 success re-reviews of one plan PR in 31 minutes (2026-10-05), and every `unfiled` PR shared one
+ *  last-row-wins verdict slot. A trailer or `run-<taskId>-<ms>` id passes through unchanged. */
+export function reviewLedgerKeyFor(taskId: string | undefined, prNumber: number): string {
+  return taskId === undefined || taskId === UNFILED_RUN_SENTINEL ? `PR-${prNumber}` : taskId;
+}
+
+/** W1-T5839 — DOES THIS LEDGER ROW BELONG TO THIS PR? A row naming a `pr_url` belongs to exactly that PR, whatever
+ *  `task_id` it was stamped with: the url is the identity, a task key is a label two PRs (or two classifications of
+ *  one PR) can disagree on. Only a legacy row with no `pr_url` falls back to the key, as W1-T5813's
+ *  `armLedgerLinesForPr` keeps it. This is also the transition: rows already written as `unfiled` carry their url. */
+export function reviewRowNamesPr(line: Record<string, unknown>, key: string | undefined, prUrl: string): boolean {
+  return typeof line.pr_url === "string" ? line.pr_url === prUrl : key !== undefined && line.task_id === key;
+}
+
 /** Recover the most recent `review.posted` verdict for `taskId` from ledger lines, last one wins — the same scanning
- * idiom `unmetFromLedger` (run-task.ts) and every other precedence helper here already use. No new storage. */
+ * idiom `unmetFromLedger` (run-task.ts) and every other precedence helper here already use. No new storage. W1-T5839:
+ * given `prUrl`, a row is matched by {@link reviewRowNamesPr} instead, so another PR's newer row never wins. */
 export function priorReviewVerdictFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
+  prUrl?: string,
 ): PriorReviewVerdict | undefined {
   let prior: PriorReviewVerdict | undefined;
   for (const line of lines) {
-    if (line.step !== "review.posted" || line.task_id !== taskId) continue;
+    if (line.step !== "review.posted") continue;
+    if (prUrl === undefined ? line.task_id !== taskId : !reviewRowNamesPr(line, taskId, prUrl)) continue;
     if (typeof line.head_sha !== "string") continue;
     if (line.state !== "success" && line.state !== "failure") continue;
     // `capped`/`plan_only` are read back from the SAME line that carried `state`, never recomputed: the arming path
@@ -5376,10 +5400,12 @@ export function cappedOverrideFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string,
   headSha: string,
+  prUrl?: string,
 ): CappedOverride | undefined {
   let found: CappedOverride | undefined;
   for (const line of lines) {
-    if (line.step !== "automerge.capped_override_granted" || line.task_id !== taskId) continue;
+    if (line.step !== "automerge.capped_override_granted") continue;
+    if (prUrl === undefined ? line.task_id !== taskId : !reviewRowNamesPr(line, taskId, prUrl)) continue;
     if (typeof line.by !== "string" || typeof line.reason !== "string") continue;
     if (typeof line.head_sha !== "string" || line.head_sha !== headSha) continue;
     found = { by: line.by, reason: line.reason, headSha: line.head_sha };
@@ -5593,11 +5619,13 @@ export function postedArmFactsFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string | undefined,
   headSha: string | undefined,
+  prUrl?: string,
 ): PostedArmFacts | undefined {
   if (!taskId || !headSha) return undefined;
   let facts: PostedArmFacts | undefined;
   for (const line of lines) {
-    if (line.step !== "review.posted" || line.task_id !== taskId) continue;
+    if (line.step !== "review.posted") continue;
+    if (prUrl === undefined ? line.task_id !== taskId : !reviewRowNamesPr(line, taskId, prUrl)) continue;
     if (typeof line.head_sha !== "string" || line.head_sha !== headSha) continue;
     if (typeof line.capped !== "boolean") continue;
     // `plan_only` absent ⇒ false ⇒ a capped legacy verdict refuses. See (b) above.
@@ -8682,8 +8710,7 @@ function lastPostedReviewStatusForInput(
   for (const line of lines) {
     if (
       line.step !== "review.posted" ||
-      line.task_id !== taskId ||
-      line.pr_url !== prUrl ||
+      !reviewRowNamesPr(line, taskId, prUrl) ||
       line.head_sha !== headSha ||
       line.review_input_digest !== inputDigest
     ) {
@@ -8730,11 +8757,13 @@ function pendingReviewStatusRecord(line: Record<string, unknown>): PendingReview
 export function lastPendingReviewStatusFromLedger(
   lines: ReadonlyArray<Record<string, unknown>>,
   taskId: string | undefined,
+  prUrl?: string,
 ): PendingReviewStatusRecord | undefined {
   if (!taskId) return undefined;
   let prior: PendingReviewStatusRecord | undefined;
   for (const line of lines) {
-    if (line.step !== "review.pending_posted" || line.task_id !== taskId) continue;
+    if (line.step !== "review.pending_posted") continue;
+    if (prUrl === undefined ? line.task_id !== taskId : !reviewRowNamesPr(line, taskId, prUrl)) continue;
     prior = pendingReviewStatusRecord(line) ?? prior;
   }
   return prior;

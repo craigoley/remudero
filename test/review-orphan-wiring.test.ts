@@ -272,7 +272,8 @@ test("legacy rows without an input identity and infrastructure refusals never co
   const ledger = [
     { step: "review.posted", task_id: taskId, head_sha: CURRENT },
     { step: "review.post_refused", task_id: taskId, head_sha: CURRENT, pr_url: prUrl, review_input_digest: digest },
-    { step: "review.posted", task_id: "OTHER", head_sha: CURRENT, pr_url: prUrl, review_input_digest: digest },
+    // W1-T5839: a row is attributed by its pr_url, so the foreign row must name another PR.
+    { step: "review.posted", task_id: "OTHER", head_sha: CURRENT, pr_url: `${prUrl}8`, review_input_digest: digest },
   ];
   assert.deepEqual(reviewAttemptsForInput(ledger, taskId, prUrl, CURRENT, digest), { attempts: 0 });
 });
