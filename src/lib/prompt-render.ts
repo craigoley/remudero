@@ -856,7 +856,10 @@ export function renderPrerequisitePrPrompt(args: {
   prUrl: string;
   instrumentPaths: readonly string[];
   srcPaths: readonly string[];
+  /** W1-T5779: the `run-unfiled-<epochMs>` head the rung minted; absent keeps the pre-W1-T5779 text. */
+  prerequisiteBranch?: string;
 }): string {
+  const head = args.prerequisiteBranch;
   return [
     `Task ${args.task.id} (${args.task.title})'s own pull request ${args.prUrl} (branch \`${args.branch}\`) was ` +
       `refused by the blocked_review fix rung under Standing rule 25: it changes measurement-instrument ` +
@@ -866,7 +869,11 @@ export function renderPrerequisitePrPrompt(args: {
     "Your job is DIFFERENT: open a NEW, SEPARATE pull request — the prerequisite — that carries ONLY the " +
       "instrument-surface change below, standing on its own and passing its own CI. Do this:",
     "",
-    "1. Starting from a fresh branch off `origin/main` (never the branch above — leave it untouched), bring " +
+    (head
+      ? `1. Create the branch \`${head}\` off \`origin/main\` (\`git switch -c ${head} origin/main\`) — that exact ` +
+        "name and no other, since head-identity-gate refuses any head outside its forms and GitHub cannot rename " +
+        "an open pull request's head; never the branch above, leave it untouched. Bring "
+      : "1. Starting from a fresh branch off `origin/main` (never the branch above — leave it untouched), bring ") +
       "over ONLY these instrument-surface path(s), exactly as they read on that branch right now:",
     ...args.instrumentPaths.map((p) => `   - ${p}`),
     "2. These src/ path(s) belong to the ORIGINAL pull request and must NOT appear in your new one:",
@@ -875,7 +882,13 @@ export function renderPrerequisitePrPrompt(args: {
       "anything the instrument-surface change requires to pass CI by itself. Do not assume the split is " +
       "mechanical: a plain `git mv`/cherry-pick of the same hunk has already been tried twice and failed CI " +
       "both times.",
-    "4. Push your branch and open the pull request against `main` with `gh pr create`.",
+    head
+      ? `4. Push \`${head}\` and open the pull request against \`main\` with \`gh pr create --head ${head}\`. ` +
+        "Its body MUST carry a `## Acceptance` section (acceptance-author-gate refuses a body without one): one " +
+        "bullet per claim, `- <claim> | unit test: <literal test title>` or `- <claim> | grep: <pattern> in <path>`, " +
+        "each on ONE line, at least one proof naming a line this pull request adds. Put no `Remudero-Task:` " +
+        "trailer in the body or the commits — this prerequisite builds no filed task, so a trailer is a false credit."
+      : "4. Push your branch and open the pull request against `main` with `gh pr create`.",
     "5. Leave the ORIGINAL branch/PR entirely alone — no push, no edit, no comment on it.",
     "",
     "End your REPORT with a line reading exactly: PR_URL: <the new pull request's url>",

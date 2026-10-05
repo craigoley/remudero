@@ -39,6 +39,7 @@ test("a review claim records when it was taken", async () => {
       runId: "run-first",
       ledgerPath,
       fetchLifecycle: () => NOT_MERGED,
+      fetchStatus: () => ({ statuses: [] }),
       post: () => {},
     });
     assert.equal(result.posted, true);
@@ -78,6 +79,7 @@ test("a claim older than the ttl is taken over by the next reviewer", async () =
       runId: "run-alive",
       ledgerPath,
       fetchLifecycle: () => NOT_MERGED,
+      fetchStatus: () => ({ statuses: [] }),
       post: (o) => {
         posts.push(o as { description?: string });
       },
@@ -119,6 +121,7 @@ test("a claim inside the ttl still defers (falsifier control)", async () => {
       runId: "run-second",
       ledgerPath,
       fetchLifecycle: () => NOT_MERGED,
+      fetchStatus: () => ({ statuses: [] }),
       post: (o) => {
         posts.push(o);
       },
@@ -155,6 +158,7 @@ test("a claim with an unreadable age is treated as live", async () => {
       runId: "run-second",
       ledgerPath,
       fetchLifecycle: () => NOT_MERGED,
+      fetchStatus: () => ({ statuses: [] }),
       post: (o) => {
         posts.push(o);
       },

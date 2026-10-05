@@ -1,0 +1,40 @@
+- id: W1-T5721
+  title: "A FRESHNESS DRAIN WAITS ONLY FOR WORK THE RESTART WOULD LOSE — the drain awaits every detached sweep action to its bound, including best-effort cadences and fix dispatches that only wait on CI, so drains held dispatch 232 min since 10-02 and 13 ran to the bound and abandoned anyway"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — which detached actions a freshness drain awaits
+  band_meaning: span
+  origin: "operator session 2026-10-04: research/restart/report.md (restart efficiency) P3"
+  plan_refs: [W1-T2865, W1-T4053, W1-T2744, W1-T4998, W1-T5723]
+  files: [src/lib/daemon.ts, src/lib/sweep.ts, test/a-freshness-drain-waits-only-for-work-the-restart-would-lose.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. On a freshness restart `runDaemon` logs
+    `daemon.freshness_drain.started` and awaits `drainDetachedSweepActions` and
+    `drainInFlightReviews` together, each bounded by the sweep wall-clock bound, then logs
+    `daemon.detached_action_abandoned` per survivor. The registry (`detachSweepAction`,
+    src/lib/sweep.ts) holds kinds `fix-dispatch` (including `detachFixWait`'s CI wait after a worker
+    has pushed) and best-effort cadences registered by runDaemon: measurement-cadence,
+    benchmark-cohort, ci-learning, retro, auto-triage. A cadence's work is redone by the next
+    process, and a pushed fix's CI wait is re-derived from the PR on the next sweep, so awaiting
+    them only delays the restart. MEASURED (restart report): freshness restarts 30 of 47 boots;
+    drains 232 min since 10-02 (~82 min/day of dispatch hold); 13 ran to the bound and abandoned
+    anyway (~63 min/day).
+  design: |
+    The drain releases at once every best-effort cadence kind and every fix-dispatch whose worker
+    has exited (only its detached CI wait remains), logging each release with its kind and reason;
+    it still awaits a fix-dispatch whose worker is running and every in-flight review, up to the
+    bound, as today. The detached-action record gains the phase it needs to tell the two
+    fix-dispatch cases apart.
+  acceptance:
+    - claim: "with a registry holding a retro cadence, a fix dispatch in its CI wait, a fix dispatch with a live worker and an in-flight review, the drain releases the first two at once and awaits the other two"
+      proof: "unit test: test/a-freshness-drain-waits-only-for-work-the-restart-would-lose.test.ts"
+  falsifier: |
+    Await every registered action again: the drain holds for the retro fake's full duration and the
+    test fails.

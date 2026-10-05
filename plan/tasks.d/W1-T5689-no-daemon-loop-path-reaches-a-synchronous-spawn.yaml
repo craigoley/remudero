@@ -1,0 +1,48 @@
+- id: W1-T5689
+  title: "NO NEW DAEMON-LOOP PATH REACHES A SYNCHRONOUS SPAWN — 398 execFileSync/spawnSync/execSync calls in 76 src files and 87 sync ghExec/ghJson calls outside the transport exist, each loop stall so far was fixed one site at a time after it was measured live, and the only census (gh-transport) asks where gh is spawned, not whether the loop can reach it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a census of loop-reachable synchronous spawns
+  band_meaning: span
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 1, the sync-spawn census"
+  plan_refs: [W1-T5650, W1-T5282, W1-T5284, W1-T4970, W1-T5436, W1-T5481, W1-T5620]
+  files: [test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. Counted (comment lines excluded): 398
+    `execFileSync(`/`spawnSync(`/`execSync(` calls in 76 src files — src/run-task.ts 190,
+    src/lib/worker.ts 37, review.ts 9, report-commands.ts 9, sweep.ts 8, plan-pr-emitter.ts 7 — and
+    87 sync `ghExec(`/`ghJson(` calls outside src/lib/github-transport.ts; src/lib/daemon.ts has
+    none. test/gh-transport-census.test.ts (baseline scripts/gh-transport-baseline.json) refuses a
+    `gh` spawn outside the transport but not a loop path reaching one. The loop stalls of the window
+    (10-04 16:54 51 min #9091, 10-03 02:33 54 min review hang, and others) were each fixed per site
+    (E36, W1-T5481, W1-T5620). Batch-9 W1-T5650 (open in #9138) adds the reach fixed point for
+    `ghGateway(` constructions only, seeded from `daemonCommand`'s DaemonDeps literal and the
+    `build*DaemonHooks`/`buildSweepHook` builders. The queued converters W1-T5282 (freshness
+    fetch), W1-T5284 (worktrees, pushes, arms), W1-T4970 (the `Atomics.wait` cadence sleep) and
+    batch-9 W1-T5672 shrink the population; nothing stops it growing. W1-T5436 names
+    src/lib/daemon.ts for functions that live in src/lib/review.ts and is superseded by this census.
+  design: |
+    A census test. Population: every enclosing function whose comment-stripped body calls
+    `execFileSync`, `spawnSync`, `execSync`, `ghExec`, `ghExecFile`, `ghJson(` (not `ghJsonAsync`),
+    `Atomics.wait` or `defaultBlockingSleepSync`. Reach: the same name-based fixed point W1-T5650
+    defines (seeded from DaemonDeps and the daemon hook builders); if W1-T5650 has merged, import its
+    helper rather than re-deriving it. Baseline: an in-test table `SYNC_SPAWN_LOOP_BASELINE`
+    {functionName: count} recorded at build time, catch-erasure style — the test fails only on a
+    reachable name absent from the table or a count above its row, so W1-T5282/W1-T5284/W1-T4970
+    shrink it without touching this file. Positive control: the population includes
+    `syncPlanFromOrigin` and `sweepLandingSteps`.
+  acceptance:
+    - claim: "the census carries a recorded per-function baseline of loop-reachable synchronous spawns"
+      proof: "grep: SYNC_SPAWN_LOOP_BASELINE in test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts"
+    - claim: "the census names a fixture function in the loop reach that gains an execFileSync call and passes on the recorded tree"
+      proof: "unit test: test/no-daemon-loop-path-reaches-a-synchronous-spawn.test.ts"
+  falsifier: |
+    Add `execFileSync("git", ["fetch"])` to a function named in DaemonDeps: the census names it.
+    Empty the population scan: the positive control (syncPlanFromOrigin) fails.

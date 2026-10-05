@@ -359,7 +359,8 @@ test("planCommitMessage: names the mode and brief without crediting an unbuilt f
     brief: "onboard a new repo",
   });
   assert.match(msg, /^chore\(plan\): --mode=create — add W1-T300/);
-  assert.match(msg, /Brief: onboard a new repo/);
+  // W1-T5122: a `Brief:` token paragraph is read by commitlint as a footer; the label is not a token.
+  assert.match(msg, /Operator brief \(summary\) — onboard a new repo/);
   assert.doesNotMatch(msg, /Acceptance:|Remudero-Task:/);
 });
 
@@ -370,7 +371,7 @@ test("planCommitMessage: notes whole-plan scope when no brief was given", () => 
     mode: "expand",
     brief: "",
   });
-  assert.match(msg, /Brief: \(none — whole-plan scope\)/);
+  assert.match(msg, /Operator brief \(summary\) — \(none — whole-plan scope\)/);
 });
 
 // W1-T3483 acceptance criterion 3: the complete generated plan proposal message — header, mode,
@@ -445,8 +446,7 @@ test("planCommitMessage wraps structured plan acceptance and preserves trailer",
 // 2026-09-13 passed a 738-character operator brief and commitlint rejected the resulting
 // message's unwrapped `Brief:` line (`footer-max-line-length`). This reproduces that magnitude
 // directly (628 chars, same order as the real one) rather than the ~140-char brief the test above
-// already covers, and additionally proves no word of the brief is lost in the wrap — only
-// re-flowed onto more lines.
+// already covers (since W1-T5122 the brief itself is kept by the ledger and PR body, not here).
 test("planCommitMessage wraps a long brief and preserves it", () => {
   const brief =
     "Repair the RMD plan lane so a long operator-supplied brief never blows commitlint line-length " +
@@ -470,13 +470,13 @@ test("planCommitMessage wraps a long brief and preserves it", () => {
 
   for (const line of message.split("\n")) assert.ok(line.length <= 100, `over-long line: ${JSON.stringify(line)}`);
 
-  // Provenance: the brief survives WHOLE — re-flowed across lines, never truncated or dropped.
-  // The message is `header\n\n<wrapped Brief paragraph>\n`; everything after the header is the
-  // one wrapped paragraph, so rejoining it with spaces must reproduce "Brief: " + the brief text.
+  // W1-T5122 changed this contract: the commit carries a one-line summary of the brief's first
+  // sentence, never the brief verbatim. The WHOLE brief is preserved on the `plan.start` ledger
+  // row and in the plan PR body (planCommand), so this test now pins the summary line instead.
   const [, bodyBlock] = message.split("\n\n");
-  assert.ok(bodyBlock, "expected a wrapped body block after the header");
-  const reflowed = bodyBlock.trimEnd().split("\n").join(" ");
-  assert.equal(reflowed, `Brief: ${brief}`);
+  assert.ok(bodyBlock, "expected a summary body block after the header");
+  assert.match(bodyBlock.trimEnd(), /^Operator brief \(summary\) — repair the RMD plan lane so a long/);
+  assert.doesNotMatch(message, /Two real rmd plan|^Brief:/m);
 
   const root = join(dirname(fileURLToPath(import.meta.url)), "..");
   const result = spawnSync(process.execPath, [join(root, "node_modules", ".bin", "commitlint")], {

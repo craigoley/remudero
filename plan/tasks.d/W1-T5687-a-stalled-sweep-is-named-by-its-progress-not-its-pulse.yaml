@@ -1,0 +1,61 @@
+- id: W1-T5687
+  title: "A STALLED SWEEP IS NAMED FROM OUTSIDE THE DAEMON BY ITS PROGRESS, NOT ITS PULSE — every liveness reader keys on the `daemon.` step prefix, so through the 318-minute crash loop of 2026-10-03 (107 boots, 0 sweep.pass) fleet-heartbeat.sh read the daemon live: 228 daemon.* rows, no gap over 600 s"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the out-of-loop progress verdict a host timer can act on
+  band_meaning: span
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 1, the progress watchdog's verdict half"
+  plan_refs: [W1-T5651, W1-T2874, W1-T484, W1-T483, W1-T5688]
+  files: [src/lib/progress-watchdog.ts, src/run-task.ts, test/a-stalled-sweep-is-named-by-its-progress-not-its-pulse.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a; ledger evidence from the union of all three rotation
+    forms, 10-02..10-04 (212,180 rows), read only. MEASURED: 277 PRs closed 10-03..10-04 spent 450
+    PR-hours open, and 191 of them (42%) were spent while the daemon was not sweeping. The
+    `sweep.pass` gap census (7,225 rows) holds 45 gaps over 15 min and 14 over 30 min, 1,491 min in
+    all: 10-03 09:46 318 min, 10-02 12:48 63, 10-03 02:33 54, 10-03 01:25 51, 10-04 16:54 51 (#9091),
+    10-04 12:01 45. Every liveness reader on main reads the wrong signal:
+    `scripts/fleet-heartbeat.sh` takes the newest `"step":"daemon\.` row against
+    DAEMON_STALE_AFTER_S=600 and only reports; `deriveLastPoll` uses the same prefix;
+    `startLivenessPulse` (`daemon.pulse`) says of itself "It is not progress"; `judgeSweepLiveness`
+    (src/lib/doctor.ts) reads `sweep.pass` but its bound is SWEEP_STALL_MULTIPLIER=3 times the
+    longest gap ever seen, so the 318-minute gap lifted it to ~16 h. In the 10-03 crash window
+    (09:50-14:52) the ledger holds 107 `daemon.paths`, 107 `daemon.target`, 40 `daemon.pulse` and 31
+    `daemon.loop_lag` rows, 300 `runtime.loop_lag` rows and 0 `sweep.pass`; 106 of the 107
+    `daemon.paths` run_ids never reached `daemon.boot` (logged in `daemonCommand` before plan sync
+    and in src/lib/daemon.ts after it). Only 5 of the 45 gaps held a 15-minute `daemon.*` silence,
+    so W1-T5651's `daemon-loop-silent` rule (batch 9, open in #9138, so named in plan_refs until it
+    is on main) alarms on 5 and acts on none; build after it. This is the progress verdict the host
+    can act on (W1-T5688).
+  design: |
+    (i) Pure `decideProgressWatchdog({ rows, nowMs, openPrCount })` in a new
+    src/lib/progress-watchdog.ts, returning { state: PROGRESSING | IDLE | STALLED | CRASH_LOOP |
+    UNKNOWN, action: none | capture-diagnostics | recycle | hold-revive, progressAgeMs,
+    failedBoots15m, reason }. Progress is the newest of `sweep.pass`, `review.posted` and
+    `verdict.merged`; `daemon.*` and `runtime.*` rows never count as progress. A failed boot is a
+    `daemon.paths` row whose run_id has no `daemon.boot` row once a later `daemon.paths` supersedes
+    it. Order: 3 or more failed boots in 15 min -> CRASH_LOOP / hold-revive; openPrCount 0 -> IDLE /
+    none; progress age over 30 min -> STALLED / recycle; over 15 min -> STALLED /
+    capture-diagnostics; no rows or an unknown open-PR count -> UNKNOWN, never a silent none. The
+    open-PR count is the newest `sweep.pass` row's `enumerated` field. The bounds are named
+    constants tagged with their bound kind.
+    (ii) A read-only verb `rmd progress-watchdog [--json] [--state-root <dir>]` reads the ledger
+    through the existing three-form union reader, prints the verdict, and on capture-diagnostics
+    writes one bundle (ledger tail, `docker ps`/`docker logs --tail` of the tenant, the verdict)
+    under <state>/diagnostics/progress-<ts>/, at most one per 15 min. It recycles nothing.
+    NOT THIS TASK: wiring it into the host launcher and acting on recycle / hold-revive (W1-T5688).
+  acceptance:
+    - claim: "a fixture whose newest sweep.pass is 31 minutes old, with daemon.pulse, daemon.loop_lag and runtime.loop_lag rows every 60 s and open PRs, reads STALLED with action recycle; at 16 minutes it reads capture-diagnostics; three daemon.paths boots in 15 minutes with no daemon.boot read CRASH_LOOP; zero open PRs read IDLE; an empty ledger reads UNKNOWN"
+      proof: "unit test: test/a-stalled-sweep-is-named-by-its-progress-not-its-pulse.test.ts"
+    - claim: "the rmd progress-watchdog verb calls the pure verdict"
+      proof: "grep: decideProgressWatchdog( in src/run-task.ts"
+  falsifier: |
+    Count `daemon.*` rows as progress (today's prefix rule): the 31-minute fixture reads
+    PROGRESSING and the test fails — the exact reading fleet-heartbeat.sh gave through the 10-03
+    crash loop.

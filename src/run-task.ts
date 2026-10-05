@@ -2713,6 +2713,7 @@ import {
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 import { fetchPrDiff } from "./lib/pr-diff.js";
+import { GATEWAY_FETCH_TIMEOUT_MS } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable } from "./lib/owner-repo.js";
 import { resolveRepoLayout } from "./lib/repo-layout.js";
 export { resolveRepoRoot };
@@ -8564,6 +8565,7 @@ export interface LiveHeadResult {
   ok: boolean;
   headSha?: string;
   author?: string;
+  headRefName?: string;
 }
 
 /**
@@ -8576,16 +8578,17 @@ export interface LiveHeadResult {
  * even when `commits` is not sha-ordered. A throw (rate limit, network,
  * auth) or a response missing `headRefOid` reports `ok:false`.
  */
-function ghLiveHead(prUrl: string): LiveHeadResult {
+export function ghLiveHead(prUrl: string, gh: (args: string[]) => unknown = ghJson): LiveHeadResult {
   try {
-    const v = ghJson(["pr", "view", prUrl, "--json", "headRefOid,commits"]) as {
+    const v = gh(["pr", "view", prUrl, "--json", "headRefOid,headRefName,commits"]) as {
       headRefOid?: string;
+      headRefName?: string;
       commits?: Array<{ oid?: string; authors?: Array<{ login?: string; name?: string }> }>;
     };
     if (!v?.headRefOid) return { ok: false };
     const headCommit = v.commits?.find((c) => c.oid === v.headRefOid);
     const author = headCommit?.authors?.[0]?.login ?? headCommit?.authors?.[0]?.name;
-    return { ok: true, headSha: v.headRefOid, author };
+    return { ok: true, headSha: v.headRefOid, author, headRefName: v.headRefName };
   } catch {
     return { ok: false };
   }
@@ -9213,6 +9216,7 @@ export function buildPrerequisitePrDispatchArgs(args: {
   taskId: string;
   instrumentPaths: readonly string[];
   srcPaths: readonly string[];
+  prerequisiteBranch?: string;
 }): SpawnWorkerArgs {
   return {
     cwd: args.worktreePath,
@@ -9230,11 +9234,28 @@ export function buildPrerequisitePrDispatchArgs(args: {
       prUrl: args.prUrl,
       instrumentPaths: args.instrumentPaths,
       srcPaths: args.srcPaths,
+      prerequisiteBranch: args.prerequisiteBranch,
     }),
     tools: FIX_WORKER_TOOLS,
     runId: args.runId,
     taskId: args.taskId,
   };
+}
+
+/** W1-T5779: why an opened prerequisite PR cannot pass head-identity-gate or acceptance-author-gate, or undefined
+ *  when it can or a read gave no evidence (an `ok:false` head, a throwing body read), which leaves the CI wait as before. */
+export async function prerequisitePrAdmissionRefusal(
+  prUrl: string,
+  mintedBranch: string,
+  read: { readLiveHead?: (prUrl: string) => LiveHeadResult | Promise<LiveHeadResult>; fetchPrBody?: (prUrl: string) => Promise<string> },
+): Promise<string | undefined> {
+  const head = read.readLiveHead ? await read.readLiveHead(prUrl) : undefined;
+  if (head?.ok && head.headRefName !== undefined && head.headRefName !== mintedBranch) {
+    return `prerequisite ${prUrl} opened on head ${head.headRefName}, not the minted ${mintedBranch}`;
+  }
+  const body = read.fetchPrBody ? await read.fetchPrBody(prUrl).catch((error: unknown) => ({ unreadable: String(error) })) : undefined;
+  const check = typeof body === "string" ? acceptanceAuthorTimeCheck(body) : undefined;
+  return check && !check.ok ? `prerequisite ${prUrl} body refused (${check.defect}): ${check.message}` : undefined;
 }
 
 /**
@@ -10240,14 +10261,10 @@ export async function runFixRung(opts: {
      */
     readLiveState?: (prUrl: string) => LiveStateResult | Promise<LiveStateResult>;
     /**
-     * W1-T296: an OPTIONAL fresh read of THIS PR's live head sha + its head
-     * commit's author, consulted ONLY at the pre-strike gate (site
-     * `rung.strike`), and ONLY once this invocation has itself pushed at
-     * least one round (see {@link branchAuthorshipStandDownReason}'s
-     * "first round has no prior head" contract). Never a cached snapshot —
-     * a fresh `gh` read every time, mirroring `readLiveState`'s own
-     * discipline. Omitted, or a failed/indeterminate read, behaves EXACTLY
-     * as before this check existed: the rung proceeds.
+     * W1-T296: an OPTIONAL fresh read of a PR's live head sha + head commit author, consulted at the pre-strike
+     * gate (site `rung.strike`) only once this invocation has pushed a round (see {@link branchAuthorshipStandDownReason}'s
+     * "first round has no prior head" contract), and (W1-T5779) for an opened prerequisite's head ref. Never a
+     * cached snapshot, mirroring `readLiveState`. Omitted, or a failed/indeterminate read, the rung proceeds.
      */
     readLiveHead?: (prUrl: string) => LiveHeadResult | Promise<LiveHeadResult>;
     /**
@@ -11394,6 +11411,7 @@ export async function runFixRung(opts: {
           `fix rung: instrument path(s) ${instrumentList} entangled with src/ path(s) ${srcList} — dispatching ` +
             `a worker to open the prerequisite PR (never escalating straight to an issue): ${opts.prUrl}`,
         );
+        const prerequisiteBranch = `run-unfiled-${systemClock.now()}`;
         const dispatchArgs = buildPrerequisitePrDispatchArgs({
           task: opts.task,
           branch: opts.branch,
@@ -11407,6 +11425,7 @@ export async function runFixRung(opts: {
           taskId: opts.taskId,
           instrumentPaths,
           srcPaths,
+          prerequisiteBranch,
         });
         // W1-T1044: the SAME wall-clock bound + best-effort reclaim every ordinary strike's own
         // spawn already takes (spawnFixWorkerBounded) — this dispatch is never a strike (`strikes`
@@ -11426,6 +11445,11 @@ export async function runFixRung(opts: {
             strike: strikes,
             reason: spawnOutcome.kind === "abandoned" ? "spawn wall-clock bound exceeded" : "worker opened no pull request",
           });
+          return await escalateAndExhaust();
+        }
+        const admissionRefusal = await prerequisitePrAdmissionRefusal(prerequisiteUrl!, prerequisiteBranch, deps);
+        if (admissionRefusal) {
+          deps.log("fix.prerequisite_dispatch_failed", { strike: strikes, prerequisite_pr: target.prNumber, reason: admissionRefusal });
           return await escalateAndExhaust();
         }
         const ciState = ciGateState(await deps.waitForCiGreen(prerequisiteUrl!, deps.log));
@@ -26448,7 +26472,7 @@ export interface PlanReconcileDeps {
    *  second derivation that could disagree with it. Throwing here ABORTS the verb (see below). */
   creditedMergedIds?: () => Set<string>;
   readInlineRecords?: () => Array<{ taskId: string; text: string }> | undefined;
-  creditedProjection?: () => { ids: Set<string>; unknownReason?: string; boardFloor?: string; unreadPrIds?: Set<string> };
+  creditedProjection?: () => { ids: Set<string>; unknownReason?: string; boardFloor?: string; unreadPrIds?: Set<string>; windowShort?: readonly string[] };
   log?: (step: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -26475,6 +26499,15 @@ function readPlanShards(dir: string): Array<{ taskId: string; path: string; text
     if (id) out.push({ taskId: id, path, text });
   }
   return out;
+}
+
+export function windowShortShards(
+  shards: ReadonlyArray<{ taskId: string; text: string }>,
+  credited: ReadonlySet<string>,
+  windowShort: readonly string[] = [],
+): string[] {
+  const short = new Set(windowShort);
+  return shards.filter((sh) => short.has(sh.taskId) && reconcileShardStatus(sh.text, sh.taskId, (id) => credited.has(id)).skipped === "not-credited-merged").map((sh) => sh.taskId).sort();
 }
 
 /**
@@ -26517,13 +26550,22 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
   let credited: Set<string>;
   let boardFloor: string | undefined;
   let unreadPrIds: Set<string> | undefined;
+  let windowShort: string[] = [];
+  const reportWindowShort = () => {
+    if (windowShort.length === 0) return;
+    const names = windowShort.slice(0, 20).join(", ") + (windowShort.length > 20 ? ` (+${windowShort.length - 20} more)` : "");
+    console.error(`### rmd plan-reconcile: WINDOW-SHORT — ${windowShort.length} queued shard(s) are merged on origin/main but their merge subject and changed paths are outside the credit scan windows (subjects: last ${MERGE_SUBJECT_SCAN_LIMIT} commits, paths: last ${MERGED_PATHS_SCAN_LIMIT}) or carry no (#N), so they cannot be judged and were NOT flipped: ${names} — flip them by hand in a plan-only PR`);
+    (deps.log ?? (() => {}))("plan.reconcile.window_short", { count: windowShort.length });
+  };
   try {
     const projection: NonNullable<PlanReconcileDeps["creditedProjection"]> = deps.creditedProjection ?? (deps.creditedMergedIds ? () => ({ ids: deps.creditedMergedIds!() }) : () => creditProjectionWithReadState());
     const read = projection();
     credited = read.ids;
+    windowShort = windowShortShards(shards, credited, read.windowShort);
     if (read.unknownReason !== undefined) {
       console.error(`### rmd plan-reconcile: UNKNOWN — the merged-PR read did not complete (${read.unknownReason}); no reconcile count can be derived from it and nothing was written`);
       (deps.log ?? (() => {}))("plan.reconcile.unknown", { reason: read.unknownReason });
+      reportWindowShort();
       return 2;
     }
     boardFloor = read.boardFloor;
@@ -26568,7 +26610,8 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
     console.error(`### rmd plan-reconcile: CAVEAT — the closed-PR board read stopped at its page cap: PRs last updated before ${boardFloor} were not read, so the count above is exact for every shard credited by a commit trailer or by a PR read since then and a LOWER BOUND for any shard credited only by an older PR's body or branch${suffix}`);
     (deps.log ?? (() => {}))("plan.reconcile.board_floor", { floor: boardFloor, withheld: withheld.length });
   }
-  return 0;
+  reportWindowShort();
+  return windowShort.length > 0 ? 2 : 0;
 }
 
 type InlineReconcileReport = { queued: number; creditable: readonly string[] } | { unreadable: string };
@@ -26604,7 +26647,7 @@ export function creditProjectionWithReadState(
   checkoutRoot = repoRoot,
   creditBuilder: typeof buildCreditCandidates = buildCreditCandidates,
   github?: GitHub,
-): { ids: Set<string>; unknownReason?: string; boardFloor?: string; unreadPrIds?: Set<string> } {
+): { ids: Set<string>; unknownReason?: string; boardFloor?: string; unreadPrIds?: Set<string>; windowShort?: readonly string[] } {
   const config = configOverride ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
   // No ledger means no positive merge-credit evidence. Return an empty projection rather than
@@ -26613,19 +26656,22 @@ export function creditProjectionWithReadState(
   const self = resolveOwnerRepo();
   const plan = loadPlan(join(checkoutRoot, "plan", "tasks.yaml"));
   const gateway = github ?? buildBatchedGithub(self.owner, self.repo);
-  const candidates = creditBuilder(self.owner, self.repo, plan, ledgerPath, undefined, gateway).filter(creditIsReconcilable);
-  const ids = new Set(candidates.map((c) => c.taskId));
+  const candidates = creditBuilder(self.owner, self.repo, plan, ledgerPath, undefined, gateway);
+  const reconcilable = candidates.filter(creditIsReconcilable);
+  const ids = new Set(reconcilable.map((c) => c.taskId));
+  const windowShort = candidates.filter((c) => c.merged === true && c.creditIsImplementation === undefined && c.creditHasBuildDiff === undefined && c.creditHasOtherBuildMerge !== true).map((c) => c.taskId).sort();
+  const projection = { ids, ...(windowShort.length > 0 ? { windowShort } : {}) };
   const state = gateway.readState?.();
-  if (state === "failed") return { ids, unknownReason: gateway.readFailureReason?.() ?? "unknown" };
+  if (state === "failed") return { ...projection, unknownReason: gateway.readFailureReason?.() ?? "unknown" };
   if (state === "ok" && gateway.readTruncated?.()) {
     const coverage = gateway.readBoardCoverage?.();
     if (coverage?.openTruncated === false && coverage.closedFloor) {
-      const unreadPrIds = new Set(candidates.filter((c) => gateway.prByRef?.(c.prUrl) == null).map((c) => c.taskId));
-      return { ids, boardFloor: coverage.closedFloor, unreadPrIds };
+      const unreadPrIds = new Set(reconcilable.filter((c) => gateway.prByRef?.(c.prUrl) == null).map((c) => c.taskId));
+      return { ...projection, boardFloor: coverage.closedFloor, unreadPrIds };
     }
-    return { ids, unknownReason: "truncated" };
+    return { ...projection, unknownReason: "truncated" };
   }
-  return { ids };
+  return projection;
 }
 
 export function defaultCreditedMergedIds(configOverride?: Config, checkoutRoot = repoRoot, creditBuilder: typeof buildCreditCandidates = buildCreditCandidates): Set<string> {
@@ -32750,6 +32796,16 @@ export function readPushedRunBranchesOutput(
   }
 }
 
+/** W1-T5805 — the same read as an awaited child, for the daemon's tick and each lane refill: killed past
+ *  `timeoutMs`, and REJECTING on any failure so the daemon ledgers it and keeps its fail-open direction. */
+export async function readPushedRunBranchesOutputAsync(
+  exec: (cmd: string, args: string[], opts: { encoding: "utf8"; cwd: string; timeout: number; killSignal: "SIGKILL" }) => Promise<{ stdout: string }> = execFilePromise as never,
+  timeoutMs = GATEWAY_FETCH_TIMEOUT_MS,
+): Promise<string> {
+  const opts = { encoding: "utf8", cwd: repoRoot, timeout: timeoutMs, killSignal: "SIGKILL" } as const;
+  return (await exec("git", ["ls-remote", "--heads", "origin", "run-*"], opts)).stdout;
+}
+
 /** Bounded page walk — same shape and bound `reapBranchesCommand`'s own `state=all` read already
  *  uses (8 pages, 100/page = 800 rows), never a per-branch lookup. */
 const RUN_BRANCH_CLOSED_PR_MAX_PAGES = 8;
@@ -36355,10 +36411,9 @@ export async function daemonCommand(
         // spends neither the REST nor the GraphQL budget — measured at 46 refs in 199 ms with
         // `core` remaining identical before and after.
         //
-        // FAIL OPEN, DELIBERATELY: a throw here (network blip, auth) yields "" and therefore an
-        // EMPTY set, so no task is refused — precisely today's behaviour. The degraded outcome is
-        // "no improvement", never "dispatch wrongly blocked".
-        readPushedRunBranches: () => readPushedRunBranchesOutput(),
+        // FAIL OPEN, DELIBERATELY: a failed read (network blip, auth) refuses no task. W1-T5805: the
+        // daemon awaits it, at each tick and lane refill, and ledgers the failure.
+        readPushedRunBranches: () => readPushedRunBranchesOutputAsync(),
         readOrphanRunBranchEvidence: orphanRunBranchEvidenceReader(
           join(config.root, "state", automaticBranchReapStateFileName(target.repo)),
           () => liveInflightRuns(inflightDir).map((r) => r.taskId),
@@ -40233,13 +40288,13 @@ function readMergeSubjectsByPr(root: string | undefined, opts: MergeLogReadOptio
 
 /** How far back {@link readMergedPathsByPr} scans. A BACKSTOP on cost, not a correctness bound: a
  *  merge outside the window has no entry and takes the pre-existing path. */
-const MERGED_PATHS_SCAN_LIMIT = 4000;
+export const MERGED_PATHS_SCAN_LIMIT = 4000;
 /** Per-PR path cap. `isPlanOnlyChangeset` only needs to see ONE non-plan path to answer, so a
  *  1,000-file merge does not need 1,000 strings held to decide it. */
 const MERGED_PATHS_PER_PR_CAP = 200;
 /** How far back {@link readMergeSubjectsByPr} scans. A BACKSTOP on cost, not a correctness bound:
  *  a credit older than this window reads UNKNOWN and therefore declines, which is the safe side. */
-const MERGE_SUBJECT_SCAN_LIMIT = 5000;
+export const MERGE_SUBJECT_SCAN_LIMIT = 5000;
 
 const mergeLogEvidenceByRoot = new Map<string, NonNullable<MergeLogReadOptions["cache"]> & { sha: string }>();
 
@@ -45767,17 +45822,10 @@ export async function planCommand(
   const { owner, repo } = resolveOwnerRepo();
 
   // G-17 Tier Invariant: the plan Architect MUST outrank implement workers.
-  // ONE-ARGUMENT ON PURPOSE — the only Architect-tier site that does NOT read the mounts
-  // `architect:` row, so this resolves through `config.architectModel ?? "opus"`. #781 wired the
-  // other three and scoped this one out in terms: "judge and the manual `rmd plan` command are
-  // out of the ruling's scope and unchanged" (fb-1784921980488-44b355 §4). Passing `mountsTable`
-  // here would be a MODEL CHANGE for this lane, not a cleanup — see .remudero/mounts.yaml's
-  // `architect:` block for the measured before/after and why the invariant is unaffected either
-  // way. `mountsTable` loads below because this lane does take its turn cap from the row.
-  const arch = architectModel(config);
+  const mountsTable = loadMounts(mountsPath(repoRoot));
+  const arch = architectModel(config, mountsTable);
   const wrk = workerModel(config);
   assertArchitectAboveWorker(arch, wrk); // throws (fail-closed) on violation
-  const mountsTable = loadMounts(mountsPath(repoRoot));
 
   const ledgerPath = ledgerPathFor(config);
   const taskId = `PLAN-${mode}`;
@@ -45785,7 +45833,7 @@ export async function planCommand(
   const log = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, lane: "plan", ...extra });
   const say = (msg: string) => console.log(`\n### [plan] ${msg}`);
-  log("plan.start", { mode, brief, architect: arch, worker: wrk });
+  log("plan.start", { mode, brief, architect: arch, effort: mountsTable.architect.effort, worker: wrk });
   say(`plan ${runId} — mode=${mode} — architect ${arch} over worker ${wrk}`);
 
   const settingsFile = renderWorkerSettings({
@@ -45874,6 +45922,7 @@ export async function planCommand(
           permissionMode: "bypassPermissions",
           settingsFile,
           model: arch, // the Architect tier
+          effort: mountsTable.architect.effort,
           maxTurns: mountsTable.architect.maxTurns, // MOUNT-GOVERNED (§9) — never a hardcoded literal.
           maxBudgetUsd: DEFAULT_BUDGET_USD,
           config,
@@ -46025,7 +46074,7 @@ export async function planCommand(
       .map((line) => line.trim())
       .filter(Boolean);
     const planPrBody = buildPlanPrBody({
-      intro: `rmd plan --mode=${mode} proposed plan-only changes.`,
+      intro: `rmd plan --mode=${mode} proposed plan-only changes.\n\nOperator brief\n\n${brief || "(none — whole-plan scope)"}`,
       criteria: filingAcceptanceCriteria(reservedIds, planPrFiles),
       changedFiles: planPrFiles,
       proofCwd: worktreePath,
@@ -51338,7 +51387,7 @@ function commandSyntax(name: string): string {
 // (test/run-task.test.ts, test/install-symlink-refusal.test.ts, plus this file's own
 // InstallFreshnessDeps consumers below) keeps its import path unchanged. This is a
 // PURE MOVE — the function body and behaviour are byte-identical to the pre-move version.
-import { reconcilePlan, type ReconcileSummary } from "./lib/plan-reconcile.js";
+import { reconcilePlan, reconcileShardStatus, type ReconcileSummary } from "./lib/plan-reconcile.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 export { hashInstallInputs, installHashMarkerPath };

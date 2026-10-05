@@ -1,0 +1,35 @@
+- id: W1-T5723
+  title: "THE MEASUREMENT CADENCE RUNS OUT OF PROCESS AND A RESTART DOES NOT DISCARD IT — it runs detached but in the daemon's own process, fires on tick 1 of every boot, takes 37-119 min, and 4 of 11 runs were killed by restarts; it is the prime suspect for the unattributed 322-second freeze after the 10-04 19:09 boot"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — the measurement cadence's process boundary
+  band_meaning: span
+  origin: "operator session 2026-10-04: research/restart/report.md (restart efficiency) P6"
+  plan_refs: [W1-T5718, W1-T5720, W1-T5721]
+  files: [src/lib/daemon.ts, src/lib/measurement-cadence.ts, test/the-measurement-cadence-runs-out-of-process.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. `runDaemon` runs `runMeasurementCadence` through
+    `detachSweepAction(…, { actionKind: "measurement-cadence" })` and logs
+    `measurement_cadence.detached` ("the cadence runs detached so the sweep keeps its turn") and
+    `measurement_cadence.ran` from `buildMeasurementCadenceRow`; it is the same process, so any
+    synchronous work inside it freezes the loop, and a restart ends it. MEASURED (restart report):
+    the cadence fires on tick 1 of every boot, runs 37-119 min, and 4 of 11 runs were killed by
+    restarts. Stall S1 after the 10-04 19:09 boot (19:15:13-19:20:35, 322 s) is unattributed; the
+    prime suspect is this cadence's synchronous adoption corpus/report (W1-T5718 will name it).
+  design: |
+    The cadence runs as a child process (the garden-registry spawn pattern, its own heap limit) with
+    a run id and a state file; the daemon only starts it and reads its result row. On boot, a run
+    whose child is still alive is adopted, not restarted; a dead child's partial state is resumed
+    or discarded by rule, logged either way. The freshness drain (W1-T5721) never waits on it.
+  acceptance:
+    - claim: "with a fake spawner, the cadence starts a child rather than running in-process, a second boot with the child still alive adopts the run instead of starting another, and a dead child's run is logged and restarted once"
+      proof: "unit test: test/the-measurement-cadence-runs-out-of-process.test.ts"
+  falsifier: |
+    Run the cadence in-process again: the fake spawner is never called and the test fails.

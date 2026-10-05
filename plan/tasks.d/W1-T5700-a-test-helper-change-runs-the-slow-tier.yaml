@@ -1,0 +1,34 @@
+- id: W1-T5700
+  title: "A TEST-HELPER CHANGE RUNS THE SLOW TIER BEFORE IT MERGES — a TEST_ONLY diff touching only test/helpers or test/setup makes ci-shard run --run fast while test-slow-shard classifies it SOURCE and skips, and coverage skips it as TEST_ONLY, so ~254 slow suites first meet the helper on main"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium
+  origin: "operator session 2026-10-04: research/flow/report.md addendum defect (a TEST_ONLY PR touching only a helper runs no slow tier); workflow edit is an operator build (W1-T5351)"
+  plan_refs: [W1-T4395, W1-T4396, W1-T3207, W1-T5351, W1-T5697]
+  files: [.github/workflows/ci.yml, test/a-test-helper-change-runs-the-slow-tier.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. For a diff under test/helpers/** or test/setup/**,
+    scripts/diff-class.mjs `testOnlyRun` returns "full", so ci-shard runs `--run fast` only;
+    test-slow-shard classifies with the base `classify`, gets SOURCE, and skips with its
+    "coverage-ratchet owns…" line; coverage-ratchet's `classifyCoverage` returns TEST_ONLY and skips
+    too. The slow tier — the test-tier manifest's files at or over `thresholdMs` 5000, about 254 —
+    therefore never runs before merge on a helper change; it runs only on main's push lane
+    (W1-T4396), where a red is everyone's. Related: test/a-test-only-change-runs-its-own-tests.test.ts
+    (W1-T4395) covers the fast half.
+  design: |
+    test-slow-shard skips only when the COVERAGE class is SOURCE (coverage-ratchet then owns the
+    verdict); on TEST_ONLY with `testOnlyRun` "full" it runs `test:slow`. A TEST_ONLY "files" run
+    (only suites changed) keeps its narrower slow run.
+  acceptance:
+    - claim: "parsing ci.yml with the classify outputs a test/helpers-only diff produces, test-slow-shard reaches its slow-tier run, while a SOURCE diff still skips it"
+      proof: "unit test: test/a-test-helper-change-runs-the-slow-tier.test.ts"
+  falsifier: |
+    Keep test-slow-shard's skip keyed on the base classify: the helper-only fixture skips and the
+    test fails.

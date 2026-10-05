@@ -1,0 +1,53 @@
+- id: W1-T5692
+  title: "THE PRE-PUSH PRECHECK RUNS THE CENSUS SUITES A NEW LITERAL JOINS — a new ledger step, RMD_ env name or Error subclass enters a census CI runs but hooks/pre-push never asks: #9041 added sweep.plan_round.* steps, passed precheck, and went red in CI on ledger-rotation and the spend-role census until a hand fix"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the pre-push precheck asks the census suites a diff can move
+  band_meaning: span
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 3; the operator delegated the admission design ('think about the best way')"
+  plan_refs: [W1-T5617, W1-T5616, W1-T5663, W1-T5666, W1-T3225, W1-T464, W1-T4656, W1-T5693]
+  files: [scripts/census-precheck.mjs, scripts/census-precheck-parity-baseline.json, package.json, test/census-precheck-runs-the-suites-a-new-literal-joins.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. scripts/census-precheck.mjs (W1-T5617, #9127) runs
+    the seven `CENSUS_ADMITTED_MEMBERS` suites whose `walks` prefix a changed path starts with, in
+    one `runCensusSuitesViaChild` child; every other CI census sits in the shrink-only `ciOnly` list
+    of scripts/census-precheck-parity-baseline.json (96 rows). `CENSUS_ADMITTED_MEMBERS`
+    (src/lib/ci-parity.ts) is the `rmd preflight --fast` table — 2000 ms bound, predicate (a) — and
+    the wrong route for these suites. MEASURED, fix.dispatch signatures 10-02..10-04: 26 of 68 fixed
+    keys failed a ciOnly census, led by ledger-rotation (DECISION_RELEVANT) 5, error-subclass 4 and
+    env-var-registry 2, the suites a src literal joins. #9041 (W1-T5543, head fc936d34, coverage
+    shard 6/8 job 111362230735): "DECISION_RELEVANT_LEDGER_STEPS is missing step(s)…
+    sweep.plan_round.refused, sweep.plan_round.pushed" and "W1-T4066: every cost-bearing log step
+    declares a spend role … sweep.plan_round.worker"; neither suite is asked today. Timed alone:
+    env-var-registry 1.1 s, error-subclass-census 1.0 s, a-union-read 1.4 s, ledger-rotation 9.6 s,
+    spend-is-counted-once 10.2 s. DESIGN RULING (delegated): a content trigger per suite, not the full
+    ~102-suite population in every worker (~304 s serial, ~75 s 4-way): W1-T464 measured 15-17 min
+    per push earning 0, about 90 of the 102 suites never went red in the window, and a refusal from
+    this hook already returns to the same worker session (`censusPushRefusal` ->
+    `repairCensusRefusedPush`, W1-T4656), so the hook IS the in-worker channel.
+  design: |
+    (i) A `PRECHECK_TRIGGERED_SUITES` table in scripts/census-precheck.mjs: { testFile, script,
+    trigger({ changed, readHead, readBase }) }. A trigger fires when the head's literal set minus
+    the base's is non-empty on a changed src/**/*.ts, reusing the readHead/readBase seam:
+    ledger-rotation + a-union-read-of-an-unretained-step + spend-is-counted-once on a new step literal
+    (`step === "x"`, `case "x":`, `log*("x", …)`, `step: "x"`) or a change to src/lib/ledger.ts or
+    src/lib/spend-rows.ts; env-var-registry on a new bare `(RMD|REMUDERO)_[A-Z0-9_]+` token (correct
+    after batch-9 W1-T5666 widens the census to dot access) or a config-schema.ts change;
+    error-subclass-census on a new `class X extends Error` or its baseline changing.
+    (ii) Fired suites join the existing child; each gets a `census:*` package.json script and a
+    `PRECHECK_PARITY` `{ run }` entry, and its row leaves `ciOnly`. A refusal keeps the
+    `census-suite: <file> fails — run npm run <script>` shape and names the registry file to edit.
+    (iii) Base-red handling is batch-9 W1-T5663's (head-red/base-green only); build after it.
+  acceptance:
+    - claim: "with injected runSuites, a head adding a sweep.plan_round.pushed step literal and a cost-bearing log step with ledger.ts and spend-rows.ts unchanged starts the ledger-rotation and spend suites and refuses, a new RMD_ token starts env-var-registry, and a src diff adding no literal starts no child"
+      proof: "unit test: test/census-precheck-runs-the-suites-a-new-literal-joins.test.ts"
+  falsifier: |
+    Delete the step-literal trigger: the #9041-shaped fixture exits 0 with no child started, which
+    is what 3ae4a67a's precheck does on fc936d34 against its merge base today.

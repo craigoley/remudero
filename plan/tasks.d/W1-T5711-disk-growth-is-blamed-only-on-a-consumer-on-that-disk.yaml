@@ -1,0 +1,33 @@
+- id: W1-T5711
+  title: "DISK GROWTH IS BLAMED ONLY ON A CONSUMER ON THAT DISK — attributeGrowth picks the fastest-growing consumer without asking its device, so janitor_ineffective rows blamed transcripts for the root disk's fall though ~/.claude and ~/.codex are bind mounts of the /mnt/rmd device"
+  repo: remudero
+  depends_on: [W1-T5710]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: low
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 8 (12 janitor_ineffective rows blamed transcripts/state), re-measured"
+  plan_refs: [W1-T5710, W1-T5549]
+  files: [src/lib/host-resource-gardener.ts, test/disk-growth-is-blamed-only-on-a-consumer-on-that-disk.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. `attributeGrowth` (src/lib/host-resource-gardener.ts)
+    picks the fastest-growing consumer for a falling device without checking which device that
+    consumer is on. MEASURED (10-02..10-04 ledger): 45 `host_resource.janitor_ineffective` rows (the
+    first report said 12), 15 attributed to "transcripts" (8 device=root, 7 device=state), the rest
+    inodes or swap, unattributed. ~/.claude and ~/.codex are bind mounts of /dev/nvme0n1p1, the
+    /mnt/rmd device, so the 8 root-device attributions name a consumer that cannot fill the root
+    disk. W1-T5710 publishes each consumer's device.
+  design: |
+    `attributeGrowth` filters candidates to consumers whose published device equals the falling
+    device; with none it attributes "unattributed: no measured consumer on <device>", never the
+    fastest consumer elsewhere. A consumer with no device field (an older heartbeat) is treated as
+    unknown-device and never attributed.
+  acceptance:
+    - claim: "a root-device fall with transcripts growing fastest on the state device is reported unattributed, a state-device fall attributes transcripts, and a consumer with no device field is never blamed"
+      proof: "unit test: test/disk-growth-is-blamed-only-on-a-consumer-on-that-disk.test.ts"
+  falsifier: |
+    Drop the device filter: the root-device fixture blames transcripts and the test fails.

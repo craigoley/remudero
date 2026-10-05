@@ -1,0 +1,39 @@
+- id: W1-T5697
+  title: "A CI SHARD THAT WILL SKIP INSTALLS NOTHING FIRST — ci-shard and test-slow-shard run npm ci and the Playwright Chromium install before they classify the diff, then skip on a SOURCE pull request, about 35 runner-hours in 2.8 days spent installing for jobs that run no test"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 5(a), CI class v2; a workflow edit is an operator build (W1-T5351)"
+  plan_refs: [W1-T3207, W1-T2428, W1-T5515, W1-T5522, W1-T5351, W1-T5700]
+  files: [.github/workflows/ci.yml, test/a-shard-that-will-skip-installs-nothing.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. In ci.yml's ci-shard the order is checkout -> npm ci ->
+    Playwright Chromium -> Typecheck (shard 1) -> classify (`node --import tsx
+    scripts/diff-class.mjs`) -> Test, and on a pull_request SOURCE diff Test exits at once (W1-T3207:
+    coverage-ratchet owns the verdict). So shards 2-8 pay npm ci and Chromium for nothing and shard 1
+    pays Chromium for nothing. test-slow-shard installs, then checks the tier, then classifies and
+    skips on SOURCE. coverage-shard and the commitlint bundle already classify before install with
+    plain `node scripts/diff-class.mjs` (native type stripping on Node 22.22.3); diff-class.mjs and
+    test-tier-manifest.mjs import only node: builtins. MEASURED, CI rows 10-03..10-04: ci-shard
+    install-then-skip 28 runner-h and test-slow-shard 6.6 runner-h on SOURCE heads (121 runner-min
+    per SOURCE head in all). Queued W1-T5515 and W1-T5522 (p1) also edit ci.yml and
+    test/push-ci-on-main.test.ts; land after them or merge carefully.
+  design: |
+    Move the classify step (plain `node scripts/diff-class.mjs`) ahead of Install in ci-shard and
+    test-slow-shard, and guard Install and the Chromium step on the classify output: on a
+    pull_request SOURCE diff with RMD_AFFECTED_SUITE_LIVE 0, shards 2-8 install nothing, shard 1
+    installs for Typecheck and skips Chromium, and test-slow-shard installs nothing when it will
+    skip. push, merge_group and workflow_dispatch events are unchanged (the push-safety census,
+    test/push-ci-on-main.test.ts, stays green).
+  acceptance:
+    - claim: "parsing ci.yml, in ci-shard and test-slow-shard the classify step precedes npm ci and Chromium, both install steps are guarded on the pull_request SOURCE skip, and the push and merge_group paths still install unconditionally"
+      proof: "unit test: test/a-shard-that-will-skip-installs-nothing.test.ts"
+  falsifier: |
+    Put Install back above classify: the step-order assertion fails.

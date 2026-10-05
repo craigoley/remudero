@@ -1,0 +1,44 @@
+- id: W1-T5813
+  title: "A DELIVERED VERDICT ENDS THE SUPERSEDES RE-REVIEW DEMAND — on #9155 at an unchanged head c7a6af55 the sweep disposed `post-review` 'review_status_supersedes_ledger_attempt ... re-running the authoritative reviewer' 30 times from 03:17Z to 04:44Z, each with the review claim deduped ('a verdict was already DELIVERED for input'), so no reviewer ran, the arm read `ledger-refused`, and a clean, passed plan PR sat until a branch update gave it a new head"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the supersedes rule and the delivered-verdict dedup agree
+  band_meaning: span
+  origin: "operator session 2026-10-05: #9155 (batch 10 filing) clean 30+ min under repeated post-review dispositions"
+  plan_refs: [W1-T5726, W1-T3823, W1-T2860, W1-T2299, W1-T230]
+  files: [src/lib/sweep.ts, test/a-delivered-verdict-ends-the-supersedes-re-review-demand.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main b790deee and the fleet ledger (DAEMON-1791170780650). #9155's
+    review review-PR9155-1791171696213 wrote `review.posted` at 03:43:12Z for head c7a6af55 (GitHub
+    status success 03:43:11Z), then `automerge.plan_pr_held` (behind_by 8). From then to 04:44Z
+    every sweep row for #9155 was `sweep.disposed` post-review with reason
+    review_status_supersedes_ledger_attempt, `acted: false`, `deduped: true`, stand_down_reason "a
+    verdict was already DELIVERED for input ...", and the sweep's arm attempts at 04:02, 04:10 and
+    04:20Z read `ledger-refused`; no `sweep.post_review.attempt` or review child ran. 04:44Z
+    `sweep.update_branch.updated` gave a new head, which was reviewed and merged 04:58Z.
+    `reviewStatusSupersedesLedgerAttempt` (src/lib/sweep.ts) fires when the status time is
+    strictly later than `reviewInputLastAttemptAt` for the current input with at least one prior
+    attempt; the review claim then stands the re-run down as delivered. W1-T5726 (queued) makes a
+    replayed review write `review.posted`; here no review child starts, so it cannot help. The 59
+    earlier W1-T2860 ("no matching completed review.posted") rows on #9155 are W1-T5726's.
+  design: |
+    First name, from #9155's rows, which two timestamps the predicate compared and why the arm read
+    ledger-refused (state it in the PR). Then make the three readers agree: a verdict the review
+    claim reports as delivered for this exact input counts as the completed exact-input attempt for
+    `reviewStatusSupersedesLedgerAttempt` and for the arm's ledger gate, so the next pass arms,
+    merges directly or updates a behind plan PR instead of re-disposing post-review. A post-review
+    disposition stood down as delivered on consecutive passes at one head logs the stand-down once
+    per head, not every pass.
+  acceptance:
+    - claim: "a sweep fixture replaying #9155's rows (status success after a completed exact-input attempt, review claim deduped as delivered) disposes the PR to arm or update on the next pass instead of post-review, while a status success with no delivered verdict for the input still disposes post-review"
+      proof: "unit test: test/a-delivered-verdict-ends-the-supersedes-re-review-demand.test.ts"
+  falsifier: |
+    Leave the predicate blind to the delivered verdict: the fixture disposes post-review on every
+    pass and the test fails.

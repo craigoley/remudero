@@ -128,8 +128,14 @@ jobs:
           fi
           SETUP="$(node scripts/ci-shard-admission.mjs --changed-files admission-files.txt --shard ${{ matrix.shard }})" || SETUP="true"
           case "$SETUP" in false) ;; *) SETUP="true" ;; esac
+          BROWSER="$SETUP"
+          if [ "$SETUP" != "false" ] && [ "${{ matrix.shard }}" = "1" ] && ! grep -qxF ".github/workflows/ci.yml" admission-files.txt; then
+            BROWSER="$(node scripts/ci-shard-admission.mjs --changed-files admission-files.txt --shard 2)" || BROWSER="true"
+            case "$BROWSER" in false) ;; *) BROWSER="true" ;; esac
+          fi
           echo "setup=${SETUP}" >> "$GITHUB_OUTPUT"
-          echo "- ci shard ${{ matrix.shard }}/8: setup=${SETUP}; full required coverage is unchanged." >> "$GITHUB_STEP_SUMMARY"
+          echo "browser=${BROWSER}" >> "$GITHUB_OUTPUT"
+          echo "- ci shard ${{ matrix.shard }}/8: setup=${SETUP}, browser=${BROWSER} (W1-T5697: shard 1 keeps setup for Typecheck; its browser serves Test, or a ci.yml diff's guard-mutation suites); full required coverage is unchanged." >> "$GITHUB_STEP_SUMMARY"
       - name: Restore npm cache only for admitted work
         if: ${{ steps.admission.outputs.setup != 'false' }}
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -151,12 +157,13 @@ jobs:
       # R-50: caches the downloaded browser binary only, keyed on runner OS plus the exact
       # playwright version pinned in package-lock.json, never a lockfile hash. No apt interaction.
       - name: Cache Playwright's Chromium download
-        if: ${{ steps.admission.outputs.setup != 'false' }}
+        if: ${{ steps.admission.outputs.browser != 'false' }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
       - name: Install Playwright's Chromium (W1-T153 shell a11y/responsive tests need a real headless browser — Lighthouse-equivalent axe-core scan, 390px/1440px no-hscroll, fleet-control read-back/STOP-confirm interaction)
+        if: ${{ steps.admission.outputs.browser != 'false' }}
         # NO `--with-deps`, and that is the whole fix: it is what invoked apt, and apt is what
         # failed. Measured on a green run, `--with-deps` installed nine FONT packages and no
         # browser dependency at all — every Chromium shared library is already in the runner image
@@ -715,20 +722,6 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-      - name: Install (clean, from lockfile)
-        run: npm ci
-      - name: Determine Playwright's pinned browser version (cache key input)
-        id: playwright-version
-        run: |
-          VERSION="$(node -e "console.log(require('./package-lock.json').packages['node_modules/playwright'].version)")"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-      - name: Cache Playwright's Chromium download
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
-      - name: Install Playwright's Chromium (the slow tier includes browser-backed console suites)
-        run: npx playwright install chromium
       - name: Check every test file is tiered (W1-T2904 unwired-gate wiring — `test:tier:check` refuses an untiered file so the fast/slow split can trust scripts/test-tier-manifest.json before either tier runs)
         run: |
           # A push has no base branch; the tier check is a per-PR admission gate that main already passed.
@@ -745,7 +738,16 @@ jobs:
           fi
           git fetch --no-tags origin "${GITHUB_BASE_REF}" >/dev/null 2>&1 || true
           git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" > changed-files.txt 2>/dev/null || : > changed-files.txt
-          CLASS="$(node --import tsx scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
+          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt --coverage-class 2>diff-class.log)" || CLASS="SOURCE"
+          if [ "$CLASS" = "TEST_ONLY" ]; then
+            TEST_ONLY_RUN="$(node scripts/diff-class.mjs --test-only-run --changed-files changed-files.txt 2>>diff-class.log)" || TEST_ONLY_RUN=""
+            if [ "$(printf '%s\n' "$TEST_ONLY_RUN" | head -n 1)" = "files" ]; then
+              echo "W1-T5700: only *.test.ts files changed — ci-shard runs exactly those suites, slow ones included; test-slow skips."
+              CLASS="SOURCE"
+            else
+              echo "W1-T5700: a test helper, fixture or setup file changed and coverage-ratchet skips TEST_ONLY — test-slow runs the slow tier."
+            fi
+          fi
           echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
           case "$CLASS" in
             PLAN_ONLY|DOCS_ONLY) ;;
@@ -755,7 +757,7 @@ jobs:
               exit 0
               ;;
           esac
-          if ! node --import tsx scripts/diff-class.mjs --list-plan-reading-suites --changed-files changed-files.txt > plan-reading-suites.txt; then
+          if ! node scripts/diff-class.mjs --list-plan-reading-suites --changed-files changed-files.txt > plan-reading-suites.txt; then
             echo "established=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -768,6 +770,23 @@ jobs:
             cat plan-reading-selector.log
             echo "established=false" >> "$GITHUB_OUTPUT"
           fi
+      - name: Install (clean, from lockfile)
+        if: ${{ steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
+        run: npm ci
+      - name: Determine Playwright's pinned browser version (cache key input)
+        id: playwright-version
+        run: |
+          VERSION="$(node -e "console.log(require('./package-lock.json').packages['node_modules/playwright'].version)")"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright's Chromium download
+        if: ${{ steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+      - name: Install Playwright's Chromium (the slow tier includes browser-backed console suites)
+        if: ${{ steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
+        run: npx playwright install chromium
       - name: Run the slow tier (scripts/test-tier-manifest.json's slow-tier files; none recorded yet still exits 0)
         run: |
           if [ "${{ steps.plan-reading.outputs.established }}" = "true" ]; then

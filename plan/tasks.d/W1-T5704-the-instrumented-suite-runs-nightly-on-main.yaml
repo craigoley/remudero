@@ -1,0 +1,36 @@
+- id: W1-T5704
+  title: "THE INSTRUMENTED SUITE RUNS NIGHTLY ON MAIN — eight scheduled workflows exist (codeql, clock-sweep, mutation-nightly, osv, semgrep and others) and none runs coverage; coverage-ratchet shell-skips on push, so main's absolute coverage floor is measured only through PR heads and a narrowed PR selection would have no full run to fall back on"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 6, the nightly full instrumented run; workflow edit is an operator build (W1-T5351)"
+  plan_refs: [W1-T1033, W1-T4396, W1-T4404, W1-T5705, W1-T5351]
+  files: [.github/workflows/coverage-nightly.yml, test/the-instrumented-suite-runs-nightly-on-main.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. Scheduled workflows: codeql, clock-sweep,
+    fleet-heartbeat-watch, mutation-nightly, osv-scanner, recovery-drill, scorecard, semgrep — none
+    runs the test suite. A push to main runs the full UNINSTRUMENTED fast tier (ci-shard, 8 shards)
+    and the slow tier (W1-T4396), but coverage-ratchet shell-skips on push (W1-T1033), so no
+    instrumented run ever measures main itself. CORRECTION to the first report: main does get a full
+    test run on push; what is missing is an instrumented one. The live selector (W1-T5705) needs it:
+    narrowed PR coverage can check diff coverage over the selection, but the absolute floor must be
+    read from a full instrumented run on main.
+  design: |
+    A new workflow on `schedule:` (nightly) plus `workflow_dispatch`, on main HEAD: the 8 coverage
+    shards with `--select-all`, the merge, and the absolute-floor ratchet; it uploads the merged
+    coverage artifact and a ledgerable summary. It joins the advisory/required check census
+    (test/every-pr-check-is-required-or-advisory.test.ts) as advisory and passes the pinned-action
+    lint; no event guard skips `schedule`.
+  acceptance:
+    - claim: "the nightly workflow has a schedule trigger and workflow_dispatch, runs the eight coverage shards with --select-all on main and the absolute-floor ratchet, and no step's if: skips the schedule event"
+      proof: "unit test: test/the-instrumented-suite-runs-nightly-on-main.test.ts"
+  falsifier: |
+    Guard the coverage step on `github.event_name == 'pull_request'` (the W1-T1033 shape): the
+    schedule-reachability assertion fails.

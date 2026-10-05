@@ -135,6 +135,7 @@ printf '%s\\n' "$*" >> ${JSON.stringify(ghLog)}
 case "$1 $2" in
   "api "*)
     case "$*" in
+      *commits/*/status*) echo '{"statuses":[]}' ;;
       *pulls/*) echo '{"number":1,"html_url":"https://github.com/o/r/pull/1","updated_at":"t","body":"","head":{"ref":"b","sha":"${HEAD}"}}' ;;
       *) echo '{}' ;;
     esac ;;
@@ -329,6 +330,7 @@ test("W1-T913 criterion 3: postReviewPending posts state=pending through postRev
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
       ownerIdentity: { pid: 4242, startedAt: ownerStartedAt },
       fetchLifecycle: () => NOT_MERGED,
+      fetchStatus: () => ({ statuses: [] }),
       post: (o) => {
         posts.push(o);
       },
@@ -414,6 +416,7 @@ test("W1-T913 criterion 3: a second pending post for the SAME head is a no-op â€
       runId: "run-913-a",
       ledgerPath,
       fetchLifecycle: () => NOT_MERGED,
+      fetchStatus: () => ({ statuses: [] }),
       post,
     });
     assert.equal(first.posted, true);
@@ -429,6 +432,7 @@ test("W1-T913 criterion 3: a second pending post for the SAME head is a no-op â€
       runId: "run-913-b",
       ledgerPath,
       fetchLifecycle: () => NOT_MERGED,
+      fetchStatus: () => ({ statuses: [] }),
       post,
     });
 
@@ -461,6 +465,7 @@ test("W1-T913: a pending post for a NEW head (a push landed) is NOT a no-op â€” 
       runId: "run-913-a",
       ledgerPath,
       fetchLifecycle: () => NOT_MERGED,
+      fetchStatus: () => ({ statuses: [] }),
       post,
     });
     const second = await postReviewPending({
@@ -471,6 +476,7 @@ test("W1-T913: a pending post for a NEW head (a push landed) is NOT a no-op â€” 
       runId: "run-913-a",
       ledgerPath,
       fetchLifecycle: () => NOT_MERGED,
+      fetchStatus: () => ({ statuses: [] }),
       post,
     });
 
@@ -505,6 +511,7 @@ test("a PR-body edit on the same head is a new pending-review input, not a dedup
       prUrl,
       reviewInputDigest: reviewInputDigest(sha, "old body"),
       fetchLifecycle: () => NOT_MERGED,
+      fetchStatus: () => ({ statuses: [] }),
       post,
     });
     appendLedger(ledgerPath, {
@@ -527,6 +534,7 @@ test("a PR-body edit on the same head is a new pending-review input, not a dedup
       prUrl,
       reviewInputDigest: reviewInputDigest(sha, "corrected body"),
       fetchLifecycle: () => NOT_MERGED,
+      fetchStatus: () => ({ statuses: [] }),
       post,
     });
 
@@ -577,6 +585,7 @@ test("W1-T913: postReviewPending never regresses an already-posted TERMINAL verd
       runId: "run-913",
       ledgerPath,
       fetchLifecycle: () => NOT_MERGED,
+      fetchStatus: () => ({ statuses: [] }),
       post,
     });
     const keywordResult = await postReviewPending({
@@ -587,6 +596,7 @@ test("W1-T913: postReviewPending never regresses an already-posted TERMINAL verd
       runId: "run-913",
       ledgerPath,
       fetchLifecycle: () => NOT_MERGED,
+      fetchStatus: () => ({ statuses: [] }),
       post,
     });
 
@@ -617,6 +627,7 @@ test("W1-T913: the terminal state REPLACES the pending on completion â€” postRev
       runId: "run-913",
       ledgerPath,
       fetchLifecycle: () => NOT_MERGED,
+      fetchStatus: () => ({ statuses: [] }),
       post,
     });
     assert.equal(pending.posted, true);

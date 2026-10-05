@@ -1,0 +1,39 @@
+- id: W1-T5718
+  title: "A LOOP FREEZE NAMES THE SYNCHRONOUS SPAWNS THAT HELD IT — daemon.alive reports only a total sync_spawn_ms (706 s of a 1,031 s window after the 10-04 19:09 boot), so a 322-second stall stays unattributed and every loop-blocking fix starts with a hunt"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — loop telemetry names its top synchronous spawns
+  band_meaning: span
+  origin: "operator session 2026-10-04: research/restart/report.md (restart efficiency) P4, the enabler to build first"
+  plan_refs: [W1-T4075, W1-T5689, W1-T5284, W1-T5282, W1-T5283, W1-T4970, W1-T5719]
+  files: [src/lib/read-plane.ts, src/lib/daemon.ts, test/a-loop-freeze-names-the-sync-spawns-that-held-it.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. `startReadPlaneTelemetry` (src/lib/read-plane.ts) wraps
+    `execFileSync`, `execSync` and `spawnSync` and accumulates only a total `sync_spawn_ms`, which
+    `runDaemon` logs on `daemon.alive` beside the loop-delay histogram; `daemon.loop_lag` carries no
+    attribution at all. MEASURED (restart report, 47 boots in 67.6 h): the first 30 min after a boot
+    are a median 5.6 min frozen; whole lifetimes 18.4 of 67.6 h (~27%); max loop lag in the first
+    30 min p50 182 s / p90 568 s. After the 10-04 19:09 boot — the first to run W1-T4075's warmed
+    first sweep (#9123) — `sync_spawn_ms` was 706 s of a 1,031 s window (68%; ~25% steady state).
+    Stall S1 (19:15:13-19:20:35, 322 s) is still unattributed; S2 (490 s) was attributed only by
+    reading worktree and gh rows by hand. The queued converters (W1-T5284, W1-T5282, W1-T5283,
+    W1-T4970) each target a site found that way.
+  design: |
+    The wrapper also records, per call of at least 2 s: the command and its first argument, the
+    duration, and one caller frame (the first stack frame outside read-plane.ts and node internals).
+    `sample()` returns `sync_spawn_top`: at most 3 entries, longest first, reset with the window.
+    `daemon.alive` carries `sync_spawn_top`, and `daemon.loop_lag` carries the top entry of the
+    window it closes. No argument beyond the first is recorded (no tokens or bodies).
+  acceptance:
+    - claim: "with an injected slow execFileSync, a 3 s gh call and a 2.5 s git call appear in sync_spawn_top longest first with command, first argument and a caller frame, a 1 s call does not, at most three entries are kept, and the list resets after a sample"
+      proof: "unit test: test/a-loop-freeze-names-the-sync-spawns-that-held-it.test.ts"
+  falsifier: |
+    Drop the per-call record: `sync_spawn_top` is empty while `sync_spawn_ms` reads 5.5 s, and the
+    test fails.

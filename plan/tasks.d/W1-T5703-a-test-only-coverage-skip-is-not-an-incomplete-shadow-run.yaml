@@ -1,0 +1,34 @@
+- id: W1-T5703
+  title: "A TEST_ONLY COVERAGE SKIP IS A SKIPPED SHADOW RUN, NOT AN INCOMPLETE ONE — explicitlySkippedRun matches only class=PLAN_ONLY|DOCS_ONLY, so the selector shadow reads 4 incomplete runs and stays 'insufficient' with a zero miss rate over 45 complete runs"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: low
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 6, the shadow evidence the live switch waits on"
+  plan_refs: [W1-T4404, W1-T4406, W1-T5705, W1-T5699]
+  files: [src/lib/selector-shadow-gardener.ts, test/a-test-only-coverage-skip-is-not-an-incomplete-shadow-run.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. `selectorShadowReport` (src/lib/selector-shadow-gardener.ts)
+    reads "ready" only with zero misses, at least 40 complete runs, at least 30 narrow failures and
+    ZERO incomplete runs. Its newest ledger row (10-04T18:17Z): floor 51/51 and narrow 31/31
+    selected, missRate 0, narrow median 1,563.5 suites (37% saving), floor median 2,281 (8%),
+    runsComplete 45, runsIncomplete 4 -> "insufficient". `explicitlySkippedRun` matches only
+    `coverage-shard (k/8) … W1-T2428 fast-lane: class=(PLAN_ONLY|DOCS_ONLY) — skipping Test with
+    coverage`; a TEST_ONLY coverage skip prints the same line with TEST_ONLY and so counts as
+    incomplete — structurally the likely 4 (not confirmed per run; the PR names them).
+  design: |
+    `explicitlySkippedRun` accepts any coverage skip class the classifier emits (TEST_ONLY today,
+    and W1-T5699's NO_SRC once it lands), read from one exported list rather than a literal
+    alternation. A run with a selector line stays complete; a log with neither stays incomplete.
+  acceptance:
+    - claim: "eight TEST_ONLY skip lines count as one skipped shadow run, eight PLAN_ONLY lines still do, and a log with seven of eight skip lines stays incomplete"
+      proof: "unit test: test/a-test-only-coverage-skip-is-not-an-incomplete-shadow-run.test.ts"
+  falsifier: |
+    Restore the PLAN_ONLY|DOCS_ONLY alternation: the TEST_ONLY log counts incomplete and the test
+    fails.

@@ -1,0 +1,35 @@
+- id: W1-T5710
+  title: "THE HEARTBEAT MEASURES THE DISK'S REAL CONSUMERS — fleet-heartbeat.sh consumer_kb reads /var/lib/docker (absent: the data root is /mnt/rmd/docker) and a shadowed worktrees underlay, and never containerd, coverage scratch or /mnt/rmd/tmp, so the 27 G of images and 27 G of coverage scratch are invisible to every growth report"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 8 and addendum 7(d), fleet-heartbeat consumer_kb real roots"
+  plan_refs: [W1-T483, W1-T5549, W1-T5711, W1-T2874]
+  files: [scripts/fleet-heartbeat.sh, test/the-heartbeat-measures-the-real-disk-consumers.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a and the host, read only. scripts/fleet-heartbeat.sh
+    `consumer_kb` measures ${RMD_ROOT}/worktrees, ${RMD_ROOT}/state, /var/lib/docker (Linux only),
+    /tmp/claude* + ${RMD_ROOT}/tmp, ~/.claude/projects + ~/.codex, ~/.npm. On this host
+    /etc/docker/daemon.json sets data-root /mnt/rmd/docker, /var/lib/docker does not exist, and
+    /var/lib/containerd is a mount of the /mnt/rmd device (27.2 G of images); RMD_ROOT/worktrees
+    (~/rmd-state2/worktrees) is the shadowed underlay holding 1.4 G of September trees while the live
+    worktrees are bind-mounted from /mnt/scratch/rmd/rmd-state2/worktrees. Never measured: containerd,
+    coverage scratch (`rmd-c-*`, ~27 G), /mnt/rmd/tmp, /mnt/rmd's top level.
+  design: |
+    `consumer_kb` reads docker's real data root (`docker info --format '{{.DockerRootDir}}'`, falling
+    back to daemon.json, then /var/lib/docker), /var/lib/containerd, the live worktrees path (the
+    bind source when the underlay is shadowed), the coverage scratch dirs, /mnt/rmd/tmp and the
+    /mnt/rmd top level; each published consumer carries the device it lives on. An unreadable root
+    publishes an explicit unknown, never 0.
+  acceptance:
+    - claim: "with /var/lib/docker absent and a fake docker reporting a data root, the heartbeat publishes consumer_docker_kb from that root and a consumer_containerd_kb, each consumer names its device, and an unreadable root publishes unknown rather than 0"
+      proof: "unit test: test/the-heartbeat-measures-the-real-disk-consumers.test.ts"
+  falsifier: |
+    Keep the hard-coded /var/lib/docker: the fixture publishes no docker consumer and the test fails.

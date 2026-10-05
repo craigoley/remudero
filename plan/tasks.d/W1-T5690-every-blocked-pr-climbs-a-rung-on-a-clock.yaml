@@ -1,0 +1,55 @@
+- id: W1-T5690
+  title: "EVERY BLOCKED PR CLIMBS A RUNG ON A CLOCK — W1-T5537 stamps each disposition with a blocker and its `blocker_age_ms`, but nothing reads the age: 9 of the 14 blocked-ambiguous sources map to owner NONE, and #8954 sat 10.2 h in a no-op fix hold (451 hold rows, 449 acted:false) before a hand fix"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one invariant — every blocker older than its SLO takes the next rung
+  band_meaning: span
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 2 and its addendum (45-minute SLO, no-op hold enters at rebuild, sweep.slo_rung, one rebuild per task per day)"
+  plan_refs: [W1-T5537, W1-T5536, W1-T5635, W1-T5538, W1-T5691, W1-T5534]
+  files: [src/lib/pr-blocker.ts, src/lib/strike-ladder.ts, src/lib/sweep.ts, test/every-blocked-pr-climbs-a-rung-on-a-clock.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a (W1-T5537 merged as #9077, W1-T5635 as #9112; their
+    shards still read queued). `PR_BLOCKERS` (src/lib/pr-blocker.ts) has 14 members and
+    `blockerFields` writes blocker, blocker_owner, blocker_since, blocker_age_ms onto
+    `sweep.disposed`; `priorBlockersFromLedger` only carries `since` forward — no reader acts on
+    the age. `blocked-ambiguous` has 14 sources (12 `DISPOSITION_RULES` rows in src/lib/sweep.ts,
+    the `deriveDisposition` default, 2 in `postReviewFailureHistoryDisposition`): escalated 7,
+    other 2, awaiting-ci 2, strikes-exhausted 1, conflict 1, plan-proof-unrunnable 1; 9 map to
+    owner NONE in `PR_BLOCKER_OWNERS`. The no-op hold is blocker `strikes-exhausted` with the
+    `repeatedFixRefusalReason` text "fix rounds refused twice at this head". MEASURED (10-02..10-04
+    ledger): 1,496 `sweep.disposed` rows carry it — #8954 453, #9066 167, #8970 165, #8961 141,
+    #8972 116, #8973 112, #9079 82, #9076 80, #9061 74. #8954 (W1-T4270): 451 rows 01:32-11:46
+    (10.2 h), 449 acted:false, 66 failed dirty-fleet rebases and 67 "strike ladder hold: refresh did
+    not take: conflict"; merged 13:13 after a hand fix. #8825: 101 rows "ci-log fix, strike 1/2" and
+    0 fix.dispatch. Since #9112 a no-op hold does reach `decideStrikeLadderRung` (refresh, rebuild,
+    digest, hold), but `refresh` fires whenever main moved since the last attempt, so on a busy main
+    a no-op hold loops refresh -> two refused rounds -> hold and never reaches rebuild; the ladder's
+    hold reasons (tip/merge base/attempt/notes/ownership unreadable) carry no deadline. Live since
+    15:59Z: 0 `sweep.strike_ladder.*` rows against 254 blocker-bearing `sweep.disposed` rows — the
+    ladder is unexercised.
+  design: |
+    (i) Pure `decideSloRung({ blocker, owner, reasonClass, blockerAgeMs, rungHistory, nowMs })` in
+    src/lib/pr-blocker.ts with BLOCKER_SLO_MS = 45 min. Under the SLO: none. Over it: the next rung
+    of refresh -> rebuild -> digest, skipping any rung already taken at this head. A no-op hold
+    (strikes-exhausted with the repeated-refusal reason) enters directly at `rebuild`: a fresh
+    worker, given the W1-T5691 registry allowlist once that lands. A ladder `hold` or an owner-NONE
+    blocker older than the SLO climbs too.
+    (ii) Rebuilds stay under the ladder's lifetime cap of 2 and add a cap of 1 per task per UTC
+    day, counted from `sweep.strike_ladder.requeued` rows (already decision-relevant).
+    (iii) runSweep applies the rung through the existing ladder actions and logs
+    `sweep.slo_rung { pr, blocker, age_min, rung }` — an observability row that no decision reads.
+    (iv) Invariant: every `DISPOSITION_RULES` row whose disposition is blocked-ambiguous, the
+    default, and the post-review-failure rows map to a rung with a deadline.
+  acceptance:
+    - claim: "every blocked-ambiguous source in DISPOSITION_RULES maps to a rung with a deadline; a no-op hold older than 45 minutes rebuilds without refreshing; a second rebuild for the same task on the same UTC day is refused; a replay of #8954's hold rows yields a rung action within 45 minutes"
+      proof: "unit test: test/every-blocked-pr-climbs-a-rung-on-a-clock.test.ts"
+  falsifier: |
+    Remove the age arm from `decideSloRung`: the #8954 replay (451 hold rows) yields 0 actions and
+    the test fails. Add a blocked-ambiguous rule with no rung: the invariant names it.

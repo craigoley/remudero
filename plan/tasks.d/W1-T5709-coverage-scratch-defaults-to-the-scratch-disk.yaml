@@ -1,0 +1,35 @@
+- id: W1-T5709
+  title: "COVERAGE SCRATCH DEFAULTS TO THE SCRATCH DISK, AND REFUSES THE STATE DISK — coverageScratchDir follows TMPDIR, which the operator shell points at /mnt/rmd/tmp (12 G free), so every local coverage run there either fails the 20 GiB reserve or writes 8 GB onto the disk the fleet's state lives on, while /mnt/scratch has 342 G free"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: medium
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 8 and addendum 7(b), refuse TMPDIR/coverage on /mnt/rmd"
+  plan_refs: [W1-T5655, W1-T5669, W1-T5631, W1-T5708]
+  files: [src/lib/ci-parity.ts, test/coverage-scratch-defaults-to-the-scratch-disk.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. `coverageScratchDir` (src/lib/ci-parity.ts) resolves
+    `tmpdir()/rmd-c-<hash>` with no volume preference; `testWithCoverageLeaf` refuses only a path
+    inside the checkout, an over-long path, free space under `COVERAGE_FREE_RESERVE_BYTES` (20 GiB)
+    and a held lock. TMPDIR=/mnt/rmd/tmp comes from the operator's ~/.bashrc and ~/.profile (outside
+    the repo — named for the operator, not edited here). /mnt/rmd: 12 G free; /mnt/scratch: 342 G.
+    So local coverage from that shell fails the reserve today, and when it passed earlier it wrote
+    onto the state disk (fh5's 7.8 G scratch). Batch-9 W1-T5669 makes hand worktrees default to the
+    scratch disk; this is the coverage half. Batch-9 W1-T5655 and W1-T5676 also edit ci-parity.ts.
+  design: |
+    `coverageScratchDir` prefers the scratch root (`RMD_SCRATCH_ROOT`, default /mnt/scratch when it
+    is a mount) over a TMPDIR on another device whenever the scratch root has the reserve; it
+    refuses only when neither has it, naming both free figures. A TMPDIR already on the scratch
+    device is used as today. The chosen root is printed in the gate's first line.
+  acceptance:
+    - claim: "with TMPDIR on a fake 12 GiB-free state volume and a 300 GiB-free scratch root, the scratch dir lands under the scratch root; with both under 20 GiB the run refuses naming both; with TMPDIR already on the scratch device it is used unchanged"
+      proof: "unit test: test/coverage-scratch-defaults-to-the-scratch-disk.test.ts"
+  falsifier: |
+    Remove the scratch-root preference: the 12 GiB fixture refuses instead of using scratch and the
+    test fails.

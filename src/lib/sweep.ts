@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFile
 import { createHash } from "node:crypto";
 import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, realDeployDeps } from "./deployer.js";
 import { resolveInstallRoot } from "./install-root.js";
+import { probeReviewerCodeFreshnessAsync, type ReviewerCodeFreshness } from "./self-sync.js";
 import {
   deployStateRows, mainWorkflowStateRows, reconcileFleetState,
   type DeployStateReader, type FleetStateRow,
@@ -41,7 +42,9 @@ import {
 } from "./arm-auto-merge.js";
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair } from "./classify.js";
-import { blockerFields, finalBlocker, priorBlockersFromLedger, type PrBlocker } from "./pr-blocker.js";
+import {
+  blockerFields, decideSloRung, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
+} from "./pr-blocker.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { gitPushEmptyCommit, gitPushRunBranch } from "./git-push.js";
@@ -53,7 +56,7 @@ import { appendLedger, isRealStrike } from "./ledger.js";
 import { appendOperatorNote, loadOperatorNotesForTask, type OperatorNoteEntry } from "./operator-notes.js";
 import {
   capStrikeLadderNote, decideStrikeLadderRung, firstFailingTestTitle, hasUnspentLadderRefresh,
-  latestStrikeLadderAttempt, strikeCauseKey,
+  latestStrikeLadderAttempt, rebuiltOnUtcDay, sloRungHistory, strikeCauseKey,
 } from "./strike-ladder.js";
 import { runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import { readLedgerUnionRawLinesSync, readLedgerUnionRecordsSync, resolveLedgerUnion } from "./ledger-union.js";
@@ -4918,9 +4921,10 @@ export interface RollupCheckEntry {
   externalId?: string;
 }
 
-/** Resolve only a real Actions job id. A check-run URL's /runs/<id> is not a job id. */
+/** Resolve only a real Actions job id. A check-run URL's /runs/<id> is not a job id. A posted
+ *  gate's external id is `job:<id>` or run-scoped `run:<runId>:<attempt>:job:<id>` (W1-T5802). */
 export function checkJobId(check: Pick<RollupCheckEntry, "detailsUrl" | "externalId">): string | undefined {
-  return check.detailsUrl?.match(/\/job\/(\d+)/)?.[1] ?? check.externalId?.match(/^job:(\d+)$/)?.[1];
+  return check.detailsUrl?.match(/\/job\/(\d+)/)?.[1] ?? check.externalId?.match(/^(?:run:\d+:\d+:)?job:(\d+)$/)?.[1];
 }
 
 /** Conclusions GitHub's OWN merge-eligibility treats as SATISFYING a required check (W1-T103):
@@ -9262,6 +9266,7 @@ export interface SweepDeps {
   reviewerCodeRecovery?: {
     loadedCodeSha?: string;
     isLoadedCodeAtOrAfter: (requiredOriginMainSha: string) => boolean;
+    probeFreshness?: () => Promise<ReviewerCodeFreshness>;
     /** The daemon has a guarded fresh-tree review runner for stale loaded code. */
     freshTreeReviewAvailable?: boolean;
     /** Returns and clears the last local ancestry-read failure, if the recovery implementation
@@ -9696,7 +9701,7 @@ export function isPostReviewDiffCeilingRefusal(reason: unknown): boolean {
   );
 }
 
-function postReviewFailureHistoryDisposition(
+export function postReviewFailureHistoryDisposition(
   pr: OpenPrView,
   prior: Pick<PriorActions, "reviewDiffCeilingRefused" | "reviewRetryableThrowCounts">,
   policy: SweepPolicy,
@@ -9767,7 +9772,11 @@ interface ReviewerCodeFreshnessRefusal {
   /** Present only on a stale refusal emitted by postReviewStatusGuarded. A missing or malformed
    * value must never license recovery: an old ledger row cannot prove what source it required. */
   requiredOriginMainSha?: string;
+  probe?: { attemptedAt: number; backoffMinutes: number; loadedCodeSha: string; fresh: boolean };
 }
+
+// BACKSTOP: only an unreadable refusal starts this pause; failed probes double it.
+const UNREADABLE_REVIEWER_BACKOFF_MINUTES = 5;
 
 function reviewerCodeFreshnessBackoffReason(
   freshnessRefusals: ReadonlyMap<string, ReviewerCodeFreshnessRefusal>,
@@ -9780,13 +9789,17 @@ function reviewerCodeFreshnessBackoffReason(
   if (refusal === undefined) return undefined;
   const attemptedAt = refusal.attemptedAt;
   if (attemptedAt === undefined) return undefined;
+  if (refusal.freshness === "unreadable" && recovery?.loadedCodeSha) {
+    const probe = refusal.probe?.loadedCodeSha === recovery.loadedCodeSha ? refusal.probe : undefined;
+    if (probe?.fresh) return undefined;
+    const backoff = Math.min(probe?.backoffMinutes ?? UNREADABLE_REVIEWER_BACKOFF_MINUTES, policy.pendingCeilingMinutes);
+    const age = Math.max(0, (now - (probe?.attemptedAt ?? attemptedAt)) / 60_000);
+    return `freshness recovery backoff remains inside the ${policy.pendingCeilingMinutes}m pending ceiling; ` +
+      `unreadable reviewer-source BACKSTOP ${backoff}m (${Math.floor(age)}m elapsed) — awaiting proven freshness`;
+  }
   let ancestryCheckFailure: string | undefined;
-  // The 60-minute ceiling protects an old or unprovable reviewer from certifying a newer
-  // origin/main. A daemon that has proved its already-loaded module graph contains that exact
-  // target no longer needs the delay. This is intentionally narrower than "the checkout is
-  // fresh": the predicate sees the boot-captured SHA, never a mutable working-tree HEAD, and
-  // any missing provenance, non-stale refusal, unreadable ancestry, or false result retains the
-  // existing ceiling.
+  // A stale refusal releases early only when the boot-captured module SHA contains its target.
+  // Missing provenance and unreadable ancestry retain the stale path's existing bound.
   if (
     refusal.freshness === "stale" &&
     typeof refusal.requiredOriginMainSha === "string" &&
@@ -9805,7 +9818,7 @@ function reviewerCodeFreshnessBackoffReason(
   }
   const ageMinutes = Math.max(0, (now - attemptedAt) / 60_000);
   // The daemon can retry with a fresh reviewer tree after a short bounded pause.
-  // Direct callers and unreadable refusals retain the original pending ceiling.
+  // Direct callers without loaded-code provenance retain the original pending ceiling.
   const ceiling = refusal.freshness === "stale" &&
     typeof refusal.requiredOriginMainSha === "string" && refusal.requiredOriginMainSha.length > 0 &&
     recovery?.freshTreeReviewAvailable === true
@@ -10030,6 +10043,17 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
   const absentRepushes = new Map<number, { count: number; shas: Set<string> }>();
   const missingTaskTrailerRepairs = new Set<string>();
   for (const line of lines) {
+    if (line.step === "sweep.reviewer_freshness_probe" && typeof line.review_key === "string") {
+      const refusal = reviewFreshnessRefusals.get(line.review_key);
+      const at = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
+      if (refusal?.freshness === "unreadable" && refusal.attemptedAt === line.refusal_at &&
+          Number.isFinite(at) && typeof line.loaded_code_sha === "string" &&
+          typeof line.backoff_minutes === "number" && line.backoff_minutes >= 0) {
+        refusal.probe = { attemptedAt: at, backoffMinutes: line.backoff_minutes,
+          loadedCodeSha: line.loaded_code_sha, fresh: line.outcome === "fresh" };
+      }
+      continue;
+    }
     // W1-T4581 — a stack-parent refusal can follow an earlier successful arm on this exact head.
     // The refusal/withdrawal invalidates that old dedup marker; otherwise the child would remain
     // suppressed even after its parents merge and GitHub's auto-merge bit is false.
@@ -10993,6 +11017,42 @@ export async function runSweep(
     return { complete: true, lines: parseLedger(union.matches.join("\n")) };
   });
   const prior = priorActionsFromLedger(ledgerLines);
+  const freshnessBackoff = async (
+    refusals: ReadonlyMap<string, ReviewerCodeFreshnessRefusal>, pr: OpenPrView,
+  ): Promise<string | undefined> => {
+    const key = reviewOutcomeKeyForPr(pr);
+    const refusal = refusals.get(key);
+    const recovery = deps.reviewerCodeRecovery;
+    if (refusal?.freshness === "unreadable" && refusal.attemptedAt !== undefined && recovery?.loadedCodeSha) {
+      const probe = refusal.probe?.loadedCodeSha === recovery.loadedCodeSha ? refusal.probe : undefined;
+      const backoff = Math.min(probe?.backoffMinutes ?? UNREADABLE_REVIEWER_BACKOFF_MINUTES, policy.pendingCeilingMinutes);
+      if ((probe === undefined || probe.fresh === false) &&
+          now - (probe?.attemptedAt ?? refusal.attemptedAt) >= backoff * 60_000 && !deps.dryRun) {
+        let result: ReviewerCodeFreshness;
+        try {
+          result = await (recovery.probeFreshness?.() ?? probeReviewerCodeFreshnessAsync(recovery.loadedCodeSha));
+        } catch (error) {
+          result = { status: "unreadable", reason: `reviewer freshness probe failed: ${String(error)}` };
+        }
+        const fresh = result.status === "fresh" && result.codeSha === recovery.loadedCodeSha;
+        const nextBackoff = fresh ? 0 : Math.min(backoff * 2, policy.pendingCeilingMinutes, 60);
+        appendLine(deps.ledgerPath, {
+          ts: clockFromMillisFn(() => now).iso(), run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+          step: "sweep.reviewer_freshness_probe", pr_number: pr.prNumber, pr_url: pr.prUrl,
+          head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest, review_key: key,
+          refusal_at: refusal.attemptedAt, loaded_code_sha: recovery.loadedCodeSha,
+          outcome: fresh ? "fresh" : result.status === "stale" ? "stale" : "unreadable",
+          backoff_minutes: nextBackoff,
+          ...(result.status === "unreadable" ? { reason: result.reason } : {
+            origin_main_sha: result.originMainSha,
+            reason: fresh && result.status === "fresh" ? `loaded reviewer code is fresh (${result.advance})` : "loaded reviewer code freshness is not proven",
+          }),
+        });
+        refusal.probe = { attemptedAt: now, backoffMinutes: nextBackoff, loadedCodeSha: recovery.loadedCodeSha, fresh };
+      }
+    }
+    return reviewerCodeFreshnessBackoffReason(refusals, key, policy, now, recovery);
+  };
   if (deps.repairAdmissionSurface !== "light") {
     observeReviewEligibility(openPrs, deps, policy, now, ledgerLines, {
       delivered: prior.reviewDelivered,
@@ -11338,7 +11398,10 @@ export async function runSweep(
   let staleBaseAttemptedPrNumber: number | undefined;
   const ladderUpdatedPrs = new Set<number>();
   const ladderActedPrs = new Set<number>();
-  const applyStrikeLadder = async (pr: OpenPrView): Promise<string> => {
+  // W1-T5690: the SLO clock's view of one PR — set only for a blocked-ambiguous PR whose blocker has
+  // outlived BLOCKER_SLO_MS. `noOp` is the repeated-refusal hold, which enters the climb at rebuild.
+  interface SloContext { blocker: PrBlocker; owner: string; ageMs: number; noOp: boolean; strikeOwned: boolean }
+  const applyStrikeLadder = async (pr: OpenPrView, slo?: SloContext): Promise<string> => {
     const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, head_sha: pr.headSha };
     const record = (step: string, extra: Record<string, unknown>) => {
       const line = { ...row, ts: clockFromMillisFn(() => now).iso(), step, ...extra };
@@ -11364,7 +11427,29 @@ export async function runSweep(
           (r.step === "sweep.strike_ladder.refreshed" || (r.step === "sweep.strike_ladder.held" && r.refresh_outcome === "conflict"))),
       };
       let decision = decideStrikeLadderRung(input);
-      if (decision.rung === "hold") return decision.reason;
+      const rungHistory = sloRungHistory(strikeLadderRows, {
+        taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha, mainSha: mainRepair?.sha });
+      if (slo) {
+        const unavailable: SloRung[] = [];
+        if (mainRepair === undefined || input.refreshedAtMainTip || !currentMergeBaseSha ||
+            currentMergeBaseSha === mainRepair.sha || !deps.updateBranch) unavailable.push("refresh");
+        if (!effects || pr.taskId === undefined || input.requeueable !== true || rebuilds >= 2) unavailable.push("rebuild");
+        const sloDecision = decideSloRung({
+          blocker: slo.blocker, owner: slo.owner, blockerAgeMs: slo.ageMs, nowMs: now, rungHistory, unavailable,
+          reasonClass: slo.noOp ? "no-op-hold" : decision.rung === "hold" ? "ladder-hold" : "other",
+        });
+        if (sloDecision.rung === "none") {
+          if (!slo.strikeOwned) return `slo: ${sloDecision.reason}`;
+          if (decision.rung === "hold") return decision.reason;
+        } else {
+          decision = { rung: sloDecision.rung, reason: `slo rung ${sloDecision.rung}: ${sloDecision.reason}` };
+          log("sweep.slo_rung", { pr: pr.prNumber, blocker: slo.blocker, age_min: Math.floor(slo.ageMs / 60_000), rung: sloDecision.rung });
+        }
+      } else if (decision.rung === "hold") return decision.reason;
+      // W1-T5690: one rebuild per task per UTC day, on top of the lifetime cap of 2, on every path in.
+      if (decision.rung === "rebuild" && rebuiltOnUtcDay(rungHistory, now)) {
+        decision = { rung: "digest", reason: "strike ladder digest: a rebuild already ran for this task today (UTC); one per task per day" };
+      }
       const live = await deps.readLiveState?.(pr);
       if (live?.ok !== true || live.state?.toUpperCase() !== "OPEN") return hold("fresh OPEN state unreadable or PR is terminal");
       if (!live.headSha || live.headSha !== pr.headSha) return hold("fresh head unreadable or head moved");
@@ -11376,6 +11461,9 @@ export async function runSweep(
           // A conflict cannot clear by refreshing again; only a rebuild from main (or a human) can.
           record("sweep.strike_ladder.held", { reason: hold("refresh did not take: conflict"), refresh_outcome: outcome, main_sha: mainRepair!.sha });
           decision = decideStrikeLadderRung({ ...input, refreshedAtMainTip: true });
+          if (decision.rung === "rebuild" && rebuiltOnUtcDay(rungHistory, now)) {
+            decision = { rung: "digest", reason: "strike ladder digest: a rebuild already ran for this task today (UTC); one per task per day" };
+          }
         } else if (outcome !== "updated") {
           return hold(`refresh did not take: ${outcome}`);
         } else {
@@ -11469,9 +11557,9 @@ export async function runSweep(
    *  claimed during the sequential walk, so a later fix action could hold a review candidate's key
    *  for minutes with no review in flight. The fresh read is the other half: reading synchronously
    *  after `add` makes the mutex and the durable outcome one atomic decision boundary. */
-  function claimReview(
-    reviewKey: string,
-  ): { ok: true; release: () => void } | { ok: false; deduped: boolean; reason: string } {
+  async function claimReview(
+    reviewKey: string, pr: OpenPrView,
+  ): Promise<{ ok: true; release: () => void } | { ok: false; deduped: boolean; reason: string }> {
     if (claimedReviewKeys.has(reviewKey)) {
       return {
         ok: false,
@@ -11486,13 +11574,7 @@ export async function runSweep(
       const durableRefusal = fresh.reviewRefused.has(reviewKey);
       const retryBackoff =
         retryableReviewThrowBackoffReason(fresh.reviewRetryableThrows, reviewKey, policy, now) ??
-        reviewerCodeFreshnessBackoffReason(
-          fresh.reviewFreshnessRefusals,
-          reviewKey,
-          policy,
-          now,
-          deps.reviewerCodeRecovery,
-        );
+        await freshnessBackoff(fresh.reviewFreshnessRefusals, pr);
       if (delivered || durableRefusal || retryBackoff !== undefined) {
         claimedReviewKeys.delete(reviewKey);
         return {
@@ -11883,6 +11965,22 @@ export async function runSweep(
     let { disposition, reason } = derived;
     const strikeLadderDue = deps.strikeLadder !== undefined && disposition === "blocked-ambiguous" && !pr.pendingAnswer &&
       selectDispositionRule(dispositionView, policy, now).rule?.when === isFixStrikeExhausted;
+    // W1-T5690: a blocked-ambiguous PR whose blocker is older than its SLO and still has an untaken
+    // rung takes it, even when the strike rule did not match (owner NONE, awaiting-ci, conflict ...).
+    const sloBlocker = blockerFields(derived.blocker, priorBlockerByPr.get(pr.prNumber), now);
+    const sloContext: SloContext = {
+      blocker: derived.blocker, owner: sloBlocker.blocker_owner, ageMs: sloBlocker.blocker_age_ms,
+      noOp: derived.blocker === "strikes-exhausted" && pr.repeatedFixRefusal !== undefined,
+      strikeOwned: strikeLadderDue,
+    };
+    const sloLadderDue = deps.strikeLadder !== undefined && disposition === "blocked-ambiguous" && !pr.pendingAnswer &&
+      !deps.dryRun && pr.isPlanFiling !== true &&
+      decideSloRung({
+        blocker: sloContext.blocker, owner: sloContext.owner, blockerAgeMs: sloContext.ageMs, nowMs: now,
+        reasonClass: sloContext.noOp ? "no-op-hold" : "other",
+        rungHistory: sloRungHistory(strikeLadderRows, {
+          taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha, mainSha: mainRepair?.sha }),
+      }).rung !== "none";
     if (inheritedMergeState) {
       reason =
         `${reason} — mergeability unread this pass; inherited last known "${inheritedMergeState.state}" ` +
@@ -12008,7 +12106,7 @@ export async function runSweep(
         `the plan-shard flag is the next rung`;
     }
     byDisposition[disposition]++;
-    const isContradictory = disposition === "blocked-ambiguous" && reason === CONTRADICTORY_REASON && !strikeLadderDue;
+    const isContradictory = disposition === "blocked-ambiguous" && reason === CONTRADICTORY_REASON && !strikeLadderDue && !sloLadderDue;
     const contradictionKey = isContradictory ? contradictoryKey(pr, ledgerLines) : undefined;
     const contradictionHistory = contradictionKey !== undefined
       ? contradictoryPrior(contradictionKey, pr, deps, ledgerLines) : undefined;
@@ -12176,7 +12274,7 @@ export async function runSweep(
         // W1-T514: sha-keyed, exactly like every sibling arm above — a new head re-earns its own
         // escalation rather than being deduped by a stale head's `acted:true` line forever.
         alreadyDone = isContradictory ? priorContradiction !== undefined || legacyContradiction
-          : !strikeLadderDue && prior.escalated.has(`${pr.prNumber}@${pr.headSha}`);
+          : !strikeLadderDue && !sloLadderDue && prior.escalated.has(`${pr.prNumber}@${pr.headSha}`);
         // W1-T2427: the LARGEST silent population (7,888 rows). Without this sentence the row is
         // indistinguishable from `deps.escalate` being unwired or throwing.
         if (alreadyDone) {
@@ -12206,13 +12304,7 @@ export async function runSweep(
         const reviewDurablyRefused = prior.reviewRefused.has(reviewKey);
         const retryBackoff =
           retryableReviewThrowBackoffReason(prior.reviewRetryableThrows, reviewKey, policy, now) ??
-          reviewerCodeFreshnessBackoffReason(
-            prior.reviewFreshnessRefusals,
-            reviewKey,
-            policy,
-            now,
-            deps.reviewerCodeRecovery,
-          );
+          await freshnessBackoff(prior.reviewFreshnessRefusals, pr);
         alreadyDone = reviewDelivered || reviewDurablyRefused || retryBackoff !== undefined;
         // W1-T2427 — THE SENTENCE MUST SEPARATE FOUR STATES THAT OTHERWISE LOOK IDENTICAL: this
         // dedup firing, `deps.postReview` never being wired, the light-pass admission being lost to
@@ -12702,6 +12794,22 @@ export async function runSweep(
                 break;
               }
               let ciFailuresForFix = isBlockedCi(pr) ? pr.ciFailures ?? [] : [];
+              let cancelledChecks = isBlockedCi(pr) ? pr.cancelledRequiredChecks ?? [] : [];
+              if (ciGateRollup?.length) {
+                const names = [...new Set([
+                  ...(pr.redRequiredChecks ?? []),
+                  ...ciFailuresForFix.map((failure) => failure.name),
+                  ...cancelledChecks.map((check) => check.name),
+                ])];
+                const fresh = new Set(stillRedRequiredNames(names, ciGateRollup));
+                ciFailuresForFix = ciFailuresForFix.filter((failure) => fresh.has(failure.name));
+                cancelledChecks = cancelledChecks.filter((check) => fresh.has(check.name));
+                if (names.length > 0 && fresh.size === 0) {
+                  acted = false;
+                  standDownReason = `fresh CI rollup: snapshot red checks ${names.join(", ")} are green or in flight — no requeue or fix strike`;
+                  break;
+                }
+              }
               // W1-T3194 — A POSITIVELY IDENTIFIED CI-INFRASTRUCTURE FAILURE HAS NO DEFECT IN THE
               // DIFF. Use the SAME job-only effect and durable head/check bound as cancellations,
               // before any fix claim or worker strike. A generic 403 never reaches this branch.
@@ -12776,7 +12884,6 @@ export async function runSweep(
               // W1-T1223 — A CANCELLED REQUIRED CHECK HAS NO DEFECT IN THE DIFF for a fix-rung
               // worker to read. Fires BEFORE `dispatchFix` so a PR whose ENTIRE red verdict is
               // cancellations never spends a strike on nothing.
-              const cancelledChecks = isBlockedCi(pr) ? pr.cancelledRequiredChecks ?? [] : [];
               if (cancelledChecks.length > 0) {
                 let requeuedAny = false;
                 const outcomes: string[] = [];
@@ -13376,8 +13483,8 @@ export async function runSweep(
                 standDownReason = missingTrailerRepair.standDownReason;
                 break;
               }
-              if (strikeLadderDue) {
-                standDownReason = await applyStrikeLadder(pr);
+              if (strikeLadderDue || sloLadderDue) {
+                standDownReason = await applyStrikeLadder(pr, sloLadderDue ? sloContext : undefined);
                 acted = ladderActedPrs.has(pr.prNumber);
                 reason = standDownReason;
                 break;
@@ -13623,7 +13730,7 @@ export async function runSweep(
   const runReview = async (job: (typeof orderedReviews)[number]): Promise<void> => {
     const jobDisposition: Disposition =
       job.mode.kind === "full-review" ? "post-review" : job.mode.kind === "reuse" ? "review-reused" : "discriminate-only";
-    const claim = claimReview(job.reviewKey);
+    const claim = await claimReview(job.reviewKey, job.pr);
     if (!claim.ok) {
       finalizeDisposition(
         job.index,

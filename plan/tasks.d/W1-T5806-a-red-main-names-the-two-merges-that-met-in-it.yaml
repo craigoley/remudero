@@ -1,0 +1,41 @@
+- id: W1-T5806
+  title: "A RED MAIN NAMES THE TWO MERGES THAT MET IN IT — #9213 (W1-T5649, merged 03:14Z) changed the retro gateway and #9219 (W1-T5650, merged 03:41Z) passed CI on a head that predated it, so its new census went red on main 2/5 until hotfix #9234 at 04:16Z and every PR's shard 8 went red; main-health saw the red at once and folded it into the long-open MAIN-HEALTH issue #9149, naming neither PR"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — attributing a red main to the merges that met in it
+  band_meaning: span
+  origin: "operator session 2026-10-05: main red 03:41Z-04:16Z after #9213 + #9219; operator hotfix #9234"
+  plan_refs: [W1-T1014, W1-T4472, W1-T5515, W1-T5522, W1-T5649, W1-T5650]
+  files: [src/lib/main-health-rung.ts, test/a-red-main-names-the-two-merges-that-met-in-it.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main b790deee and the fleet ledger. #9213 (22d52cfe) changed
+    src/run-task.ts's retro gateway to the batched fetch; #9219 (7f2eff91) added
+    test/no-daemon-loop-path-builds-the-unbatched-gateway.test.ts and also changed src/run-task.ts,
+    and its CI ran on head 978e7f2c, whose parent is not a descendant of 22d52cfe. Both were green;
+    together main failed that census 2/5. `main.health.observed` read the per-commit main-tripwire
+    red on 7f2eff91 at 03:45:20Z and `main.health.escalated` fired, but every escalation from
+    02:39Z to 04:31Z was `escalation.deduped` into MANUAL issue #9149, opened earlier for another
+    red, and `escalationFor` (src/lib/main-health-rung.ts) names only the head and the failing
+    checks. The fix was an operator hand-build (#9234, 35 min after the merge). Prevention at merge
+    time is the operator's: strict required checks were declined (W1-T1014, 2026-09-22) and the
+    merge-queue decision is pending (W1-T5515, W1-T5522); this task decides neither.
+  design: |
+    When main-health reads red on a head that is a PR merge (A), it lists the PRs merged on main
+    between the base A's last green CI ran on (A's head's merge-base with main) and A's merge, and
+    keeps those whose changed paths intersect A's changed paths. When any remain, the observed and
+    escalated rows carry `red_pr`, `met_prs` and `shared_paths` (fields on the existing rows, no new
+    step), and the escalation is keyed to A's merge, not deduped into an older open MAIN-HEALTH
+    issue, with a summary naming A and each met PR and the shared paths. Reads are git and the
+    existing PR file lists; a failed read leaves today's escalation unchanged.
+  acceptance:
+    - claim: "with a fake git and PR file reader, a red on the merge of a PR whose CI base predates another merged PR touching a shared path opens one escalation naming both PR numbers and the shared path, a red with no such PR escalates as today, and a failed read leaves the escalation unchanged"
+      proof: "unit test: test/a-red-main-names-the-two-merges-that-met-in-it.test.ts"
+  falsifier: |
+    Drop the met-PR lookup: the escalation names neither PR and the test fails.

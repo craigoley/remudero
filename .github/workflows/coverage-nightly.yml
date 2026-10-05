@@ -1,0 +1,186 @@
+name: Coverage Nightly
+
+# Coverage Nightly (W1-T5704): the full instrumented suite, run on main itself.
+#
+# Purpose: main's absolute coverage floor needs a reading taken on main. ci.yml's `coverage-ratchet`
+# shell-skips its real work on push (W1-T1033), so before this file the floor was read only through
+# PR heads. A narrowed PR selection (W1-T5705) needs this full run to fall back on.
+#
+# What it runs: ci.yml's eight coverage shards with `--select-all`, the cross-shard V8 merge, and
+# the absolute-floor ratchet. It uploads the merged lcov and a JSON summary a ledger can ingest.
+#
+# INVARIANT: no `if:` and no shell guard reads the event name. A `pull_request` guard is the
+# W1-T1033 shape, and here it would turn every scheduled run into a green no-op.
+# Falsifier: test/the-instrumented-suite-runs-nightly-on-main.test.ts.
+#
+# Not a required check and not a PR trigger, the same polarity as mutation-nightly.yml. It
+# registers no pull_request check, so ci-gate.yml's REQUIRED/ADVISORY lists need no entry.
+# It spends nothing: standard runners on a public repo, read-only token, no live state.
+on:
+  schedule:
+    # Nightly, off-peak, not on :00/:30 (codeql 04:17 Mon, osv 03:14, mutation 03:31).
+    - cron: "52 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One queue, never cancelled: a newer dispatch waits rather than discarding a measurement in flight.
+concurrency:
+  group: coverage-nightly
+  cancel-in-progress: false
+
+jobs:
+  shards:
+    name: coverage-nightly-shard (${{ matrix.shard }}/8)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    # ci.yml's coverage shard sits at 39m (its own W1-T1009 derivation); nightly has no ci-gate
+    # wait cap to stay under, so it takes a little more headroom.
+    timeout-minutes: 45
+    steps:
+      - name: Refuse any ref but main (this workflow measures main's floor)
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::coverage-nightly measures main; this run was started on ${GITHUB_REF}."
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Install (clean, from lockfile)
+        run: npm ci
+      - name: Determine Playwright's pinned browser version (cache key input)
+        id: playwright-version
+        run: |
+          VERSION="$(node -e "console.log(require('./package-lock.json').packages['node_modules/playwright'].version)")"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright's Chromium download
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+      - name: Install Playwright's Chromium (the suite launches a real headless browser)
+        run: npx playwright install chromium
+      - name: Test with coverage (the same selection and flags as ci.yml's coverage shard)
+        # A red suite still yields a measurement: the exit code rides the artifact and the merge
+        # job fails the run after uploading. Only a missing lcov or raw report fails here.
+        run: |
+          node scripts/test-tier-manifest.mjs --select-all --shard ${{ matrix.shard }}/8 \
+            > coverage-test-files.txt
+          if ! grep -q . coverage-test-files.txt; then
+            echo "::error::coverage-nightly: shard ${{ matrix.shard }}/8 selected no test files."
+            exit 1
+          fi
+          mapfile -t COVERAGE_TEST_FILES < coverage-test-files.txt
+          mkdir -p coverage/raw coverage-artifact/raw
+          set +e
+          node scripts/test-with-retry.mjs --coverage-first-pass coverage/raw \
+            node --enable-source-maps --experimental-test-coverage --test-coverage-exclude="test/**" \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=tap --test-reporter-destination=stderr \
+            --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \
+            --test --import tsx --import ./test/setup/tmp-hygiene.ts "${COVERAGE_TEST_FILES[@]}" 2>&1
+          TEST_EXIT="$?"
+          set -e
+          echo "${TEST_EXIT}" > coverage-artifact/test-exit
+          if [ ! -s coverage/lcov.info ]; then
+            echo "::error::coverage-nightly: shard ${{ matrix.shard }}/8 produced no lcov."
+            exit 1
+          fi
+          if ! find coverage/raw -maxdepth 1 -type f -name 'coverage-*.json' -print -quit | grep -q .; then
+            echo "::error::coverage-nightly: shard ${{ matrix.shard }}/8 produced no raw V8 coverage."
+            exit 1
+          fi
+      - name: Compact this shard's raw V8 coverage for the merge
+        run: |
+          mkdir -p coverage/compact
+          node --expose-internals scripts/coverage-merge-ratchet.mjs --compact-output coverage/compact coverage/raw
+          cp coverage/lcov.info coverage-artifact/lcov.info
+          cp coverage/compact/coverage-*.json coverage-artifact/raw/
+      - name: Upload coverage shard
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-shard-${{ matrix.shard }}
+          path: coverage-artifact
+          retention-days: 1
+          if-no-files-found: error
+
+  merge:
+    name: coverage-nightly
+    runs-on: ubuntu-latest
+    needs: [shards]
+    # ci.yml's aggregator measured a 7m merge and sits at 20m (PR #8080); same bound here.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Download coverage shards
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: coverage-shard-*
+          path: coverage-shards
+      - name: Merge raw V8 coverage shards into one lcov
+        run: |
+          mkdir -p coverage
+          node --expose-internals scripts/coverage-merge-ratchet.mjs --output coverage/lcov.info \
+            --shard-count 8 \
+            coverage-shards/coverage-shard-1/raw coverage-shards/coverage-shard-2/raw \
+            coverage-shards/coverage-shard-3/raw coverage-shards/coverage-shard-4/raw \
+            coverage-shards/coverage-shard-5/raw coverage-shards/coverage-shard-6/raw \
+            coverage-shards/coverage-shard-7/raw coverage-shards/coverage-shard-8/raw
+      - name: Write the ledgerable summary (totals from the ratchet's own lcov parser)
+        run: |
+          mkdir -p coverage-nightly-artifact
+          cp coverage/lcov.info coverage-nightly-artifact/lcov.info
+          node --input-type=module -e '
+            import { readFileSync, writeFileSync } from "node:fs";
+            import { parseLcovTotals, classifyCoverageTier } from "./scripts/coverage-ratchet.mjs";
+            const totals = parseLcovTotals(readFileSync("coverage/lcov.info", "utf8"));
+            const baseline = JSON.parse(readFileSync("scripts/coverage-baseline.json", "utf8"));
+            const shardTestExits = {};
+            for (let n = 1; n <= 8; n += 1) {
+              shardTestExits[n] = Number(readFileSync(`coverage-shards/coverage-shard-${n}/test-exit`, "utf8").trim());
+            }
+            const summary = {
+              kind: "coverage_nightly.measured", task: "W1-T5704", sha: process.env.GITHUB_SHA,
+              ref: process.env.GITHUB_REF, run_id: process.env.GITHUB_RUN_ID, measured_at: new Date().toISOString(),
+              lines_pct: totals.linesPct, branches_pct: totals.branchesPct, lf: totals.lf, lh: totals.lh,
+              brf: totals.brf, brh: totals.brh, skipped_records: totals.skippedRecords,
+              tier: classifyCoverageTier(totals, baseline).tier, shard_test_exits: shardTestExits,
+            };
+            writeFileSync("coverage-nightly-artifact/coverage-nightly-summary.json", JSON.stringify(summary, null, 2) + "\n");
+            console.log(JSON.stringify(summary));
+          '
+      - name: Upload the merged lcov and the summary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-nightly
+          path: |
+            coverage-nightly-artifact/lcov.info
+            coverage-nightly-artifact/coverage-nightly-summary.json
+          retention-days: 14
+          if-no-files-found: error
+      - name: Coverage ratchet (main's absolute floor)
+        run: node scripts/coverage-ratchet.mjs --lcov coverage/lcov.info --baseline scripts/coverage-baseline.json
+      - name: Fail the run if any shard's instrumented suite was red (after the measurement is uploaded)
+        run: |
+          RED=""
+          for SHARD in 1 2 3 4 5 6 7 8; do
+            CODE="$(cat "coverage-shards/coverage-shard-${SHARD}/test-exit")"
+            [ "$CODE" = "0" ] || RED="${RED} ${SHARD}(exit ${CODE})"
+          done
+          if [ -n "$RED" ]; then
+            echo "::error::coverage-nightly: the instrumented suite was red on main in shard(s):${RED}."
+            exit 1
+          fi

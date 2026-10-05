@@ -1,0 +1,34 @@
+- id: W1-T5809
+  title: "A PREREQUISITE PR BODY CARRYING A TASK TRAILER IS REFUSED — W1-T5779's `prerequisitePrAdmissionRefusal` checks the opened prerequisite's body with `acceptanceAuthorTimeCheck(body)` and no options, which returns ok for ANY `Remudero-Task:` trailer before it looks for an Acceptance block, so a split worker that adds a trailer passes the check with no Acceptance section and a false credit"
+  repo: remudero
+  depends_on: [W1-T5779]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one concern — the prerequisite body check refuses a task trailer
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5779 (#9231) follow-up"
+  plan_refs: [W1-T5779, W1-T2297, W1-T2436]
+  files: [src/run-task.ts, test/a-prerequisite-pr-body-carrying-a-task-trailer-is-refused.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main b790deee (contains #9231, W1-T5779). `prerequisitePrAdmissionRefusal`
+    (src/run-task.ts) reads the opened prerequisite PR's head, then its body, and refuses only when
+    `acceptanceAuthorTimeCheck(body)` is not ok. With no `expectedTaskId` and no `trailerResolves`,
+    that function (src/lib/review.ts) returns ok as soon as `extractTaskTrailerId` finds any trailer,
+    "criteria resolve from plan/tasks.yaml", without reading the body's Acceptance block. The
+    prerequisite builds no filed task, and `renderPrerequisitePrPrompt` tells the worker to put no
+    trailer anywhere because one is a false credit; the check does not hold the worker to it.
+    src/run-task.ts sits at its comment-load ceiling: add no comment lines there.
+  design: |
+    `prerequisitePrAdmissionRefusal` refuses a body in which `extractTaskTrailerId` finds a trailer,
+    naming the trailer and that a prerequisite credits no task, before it runs
+    `acceptanceAuthorTimeCheck`; a trailer-free body is checked exactly as today.
+  acceptance:
+    - claim: "a prerequisite body carrying a Remudero-Task trailer and no Acceptance block is refused naming the trailer, a trailer-free body with a valid Acceptance block is admitted, and a trailer-free body with no Acceptance block is refused as today"
+      proof: "unit test: test/a-prerequisite-pr-body-carrying-a-task-trailer-is-refused.test.ts"
+  falsifier: |
+    Drop the trailer refusal: the trailered body is admitted and the test fails.

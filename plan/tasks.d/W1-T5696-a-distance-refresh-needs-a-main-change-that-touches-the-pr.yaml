@@ -1,0 +1,51 @@
+- id: W1-T5696
+  title: "A DISTANCE REFRESH NEEDS A MAIN-SIDE CHANGE THAT TOUCHES THE PR — openPrsBehindMain merges main into any reviewed PR 11 or more commits behind, so 75 of 76 sweep refreshes in 2.8 days were `distance`, and in 26 of 63 replayed ones main had changed none of the PR's files and no baseline, workflow or lockfile: a full CI run and a re-review bought nothing"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the distance refresh arm asks what main changed
+  band_meaning: span
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 4 and addendum (#4: armed+stale-blocked, a fixed base red, a ceiling)"
+  plan_refs: [W1-T3277, W1-T3920, W1-T5528, W1-T2671, W1-T4351, W1-T1212, W1-T5658]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/a-distance-refresh-needs-a-main-change-that-touches-the-pr.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. `openPrsBehindMain` (src/lib/sweep.ts) has two
+    reasons: `distance` when `behindBy > reviewWaitingBranchRefreshThreshold` (10 in
+    `DEFAULT_SWEEP_POLICY`, so 11 or more) and `stale-blocked` (W1-T3920, merged #6317: armed,
+    blocked, green, reviewed, behind). Dirty PRs are already excluded (the merge-conflict fix mode
+    owns a conflict), and a base red main has fixed is already refreshed by W1-T4351/W1-T5528
+    (`baseRedRefreshPr`). MEASURED, 10-02..10-04: 76 `sweep.update_branch.updated`, 75 with
+    update_reason distance (behind 11-38 plus one 73; 8 at exactly 11), 46 on SOURCE PRs. Replayed
+    with local git (63 usable heads, main's tip at each row's time): main changed one of the PR's own
+    files 13; no overlap but a recorded baseline, workflow or lockfile moved 24 (16 on the tight set
+    below); neither 26 (34 on the tight set); more than 60 behind 0. So 41-54% of distance refreshes
+    were avoidable — about 40-50 runner-hours of SOURCE CI (121 runner-min per head) and 20-25
+    re-reviews, not the first report's 93 h. A 60-commit ceiling alone (addendum) would have
+    refreshed none, dropping the 24 baseline-moved cases W1-T3277 exists for (#4790 comment-load).
+    `buildBehindMainByPr` (src/run-task.ts) already calls `compare/<head>...main` and keeps only
+    `ahead_by`; the same response's `files[]` (capped at 300) is the base-side change list, and
+    `OpenPrView.changedFiles` holds the PR's own paths.
+  design: |
+    (i) `buildBehindMainByPr` also fills a parallel `baseChangedFilesByPr: Map<number, { files:
+    string[]; truncated: boolean }>` from the same compare (truncated when 300 files); do not change
+    `behindMainByPr`'s type (batch-9 W1-T5658 reads it).
+    (ii) The `distance` arm refreshes only when the base files intersect `pr.changedFiles`, or hit
+    an exported `REFRESH_RELEVANT_BASE_PATHS` (`scripts/*-baseline.json`, ci.yml, ci-gate.yml,
+    package.json, package-lock.json, tsconfig*.json), or behindBy exceeds a new
+    `reviewWaitingBranchRefreshCeiling` (60), or a fact is unknown (no map entry, changedFiles
+    undefined, truncated) — the unknown case keeps today's refresh.
+    (iii) update_reason names the cause (distance-overlap, distance-baseline, distance-ceiling,
+    distance-unknown) and the `sweep.update_branch.*` row carries `matching_base_files`.
+    `stale-blocked` and the base-red refreshes are unchanged.
+  acceptance:
+    - claim: "a reviewed PR 17 behind whose main-side changes touch none of its files and no refresh-relevant path is not refreshed, one whose own file changed on main is refreshed as distance-overlap, a recorded baseline change refreshes as distance-baseline, an unknown base-file list keeps the refresh, and an armed stale-blocked PR is refreshed with no overlap"
+      proof: "unit test: test/a-distance-refresh-needs-a-main-change-that-touches-the-pr.test.ts"
+  falsifier: |
+    Delete the intersection predicate: the no-overlap PR 17 behind is refreshed and the test fails.
+    W1-T3277's tests stay green because they supply no base-file map (the unknown path).

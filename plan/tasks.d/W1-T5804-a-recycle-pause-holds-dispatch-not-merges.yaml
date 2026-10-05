@@ -1,0 +1,40 @@
+- id: W1-T5804
+  title: "A RECYCLE PAUSE HOLDS DISPATCH, NOT MERGES — deploy/recycle-container.sh writes state/PAUSE before waiting up to RMD_RECYCLE_WAIT_S=3000 s for in-flight workers, and while paused the daemon runs no full sweep, so green reviewed PRs are neither armed nor merged for as long as the slowest worker runs (2026-10-05: PAUSE from 05:10:24Z, container still not recycled at 05:30Z)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — what a recycle's own PAUSE stops
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-05: recycle pid 2822260 started 05:10:24Z; 10-02 ruling 'reviews continue during PAUSE'"
+  plan_refs: [W1-T4429, W1-T5127, W1-T5140, W1-T2598, W1-T5281, W1-T5803]
+  files: [src/lib/daemon.ts, src/lib/recycle-yield.ts, test/a-recycle-pause-holds-dispatch-not-merges.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main b790deee. deploy/recycle-container.sh section 5 writes PAUSE
+    with RECYCLE_PAUSE_REASON "container recycle (deploy/recycle-container.sh)" and then waits on
+    state/inflight locks for up to WAIT_SECONDS (default 3000, sized to implement p95 47 min,
+    W1-T2598). The daemon's PAUSE branch (src/lib/daemon.ts) only sleeps beside the pause review
+    clock (W1-T4429 iii, broken by W1-T5803's race): no full sweep runs, so a green PR with a
+    posted PASS is not armed or merged and a plan PR is not merged directly. W1-T5127's
+    `recyclePauseDetail` (src/lib/recycle-yield.ts) already tells a recycle PAUSE from an operator
+    hold. LIVE 2026-10-05: recycle pid 2822260 wrote PAUSE at 05:10:24Z; at 05:30Z the container was
+    not yet recycled and the ledger held no sweep.pass after 05:15:54Z.
+  design: |
+    Under a recycle PAUSE (and only that one: an operator hold is unchanged) the daemon runs its
+    full sweep on the normal cadence with every worker-spawning action withheld: no dispatch, no
+    fix rung and no new review child that would hold an inflight lock the recycle waits on, while
+    verdict reads, arming and direct merges of already-reviewed PRs proceed. Each withheld action
+    logs one row naming the recycle hold. The other remedy (start the PAUSE only once in-flight
+    workers are near done) is named in the PR as not built, for the operator to weigh; the
+    deploy-health window proposal (research P5) is related, not part of this task.
+  acceptance:
+    - claim: "with a recycle PAUSE the daemon tick runs a sweep that arms and merges a green reviewed PR and dispatches nothing and starts no fix worker, while an operator PAUSE with any other reason runs no sweep as today"
+      proof: "unit test: test/a-recycle-pause-holds-dispatch-not-merges.test.ts"
+  falsifier: |
+    Treat the recycle PAUSE like any PAUSE: the reviewed PR is never armed in the fixture and the
+    test fails.
