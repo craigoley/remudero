@@ -178,7 +178,7 @@ import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/
 import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, runGarden, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
+import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, runGardenAsync, type GardenAction, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
@@ -192,7 +192,7 @@ import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGa
 import { gardenFamilyRecord, isRulingShaped, readOperatorReleases, recordOperatorRelease, runMachineFilingJudge, type MachineJudgePorts } from "./lib/machine-filing-judge.js";
 import { daemonEvidenceCoverageInput, runEvidenceCoverageGardener } from "./lib/evidence-coverage-gardener.js";
 import { daemonSreLaneInput, openIncidentFeedbackOrigins, startSreLane } from "./lib/sre-lane.js";
-import { fileConsumerVia, gitHeartbeatSource, HOST_RESOURCE, runHostResourcePass } from "./lib/host-resource-gardener.js";
+import { fileConsumerVia, gitHeartbeatSource, HOST_RESOURCE, runHostResourcePassAsync } from "./lib/host-resource-gardener.js";
 import { daemonSreRunbookHost, daemonSreRunbookPass, readRunbookReceipts, sreRunbookCatalog } from "./lib/sre-runbooks.js";
 import { fixMemoryDir, lintMemoryDir, mergeMemoryDirs, renderMemoryLint, type KnowledgeText } from "./lib/memory-lint.js";
 import { learningUsagePath, readLearningUsage, recordLearningUsage, seedOf } from "./lib/knowledge-value.js";
@@ -923,6 +923,7 @@ import {
   createPlanPrRest,
   planPrPreflight,
   planPrPreflightAllows,
+  planPrPreflightAsync,
   refuseRedPlanPr,
   type PlanPrPreflightResult,
   ensureJudgeableBody,
@@ -28307,11 +28308,11 @@ function tryReadFollowupTitles(label: string, read: () => string[]): string[] {
  * design ii): `unavailable()` backed by ONE cheap `gh api rate_limit` probe. Shared by
  * `retroCommand`'s own gather AND the daemon's cadence-trigger check (W1-T160,
  * `retroTriggerCheck` below) so both read the SAME credited-merge signal off the SAME
- * gateway construction, never two independently-behaving GitHub reads.
+ * gateway construction. BATCHED, never per-call `ghGateway`: one fetch answers every lookup (W1-T5649).
  */
 function retroShippedGithubGateway(): ShippedGithub {
   const { owner, repo } = resolveOwnerRepo();
-  const baseGithub = ghGateway(owner, repo);
+  const baseGithub = buildBatchedGithub(owner, repo);
   return {
     findMergedByTrailer: (taskId) => baseGithub.findMergedByTrailer(taskId),
     headRefName: (prUrl) => baseGithub.headRefName(prUrl),
@@ -34851,7 +34852,42 @@ export function retractGardenBranch(o: {
 /** A fresh worktree of origin/main a gardener changes and lands as one PR on its own branch. Every
  *  garden PR opens READY FOR REVIEW — never a draft (operator ruling, 2026-09-24: a draft sits like a
  *  stuck PR) — so the sweep reviews and arms it like any other fleet PR (`GARDEN_BRANCH_RE`). */
-export function gardenCheckout(opts: {
+export function gardenCheckout(opts: GardenCheckoutOpts): GardenCheckout {
+  const branch = `${opts.name}-garden-${(opts.clock ?? systemClock).now()}`;
+  const root = join(opts.worktreesRoot, branch);
+  worktreeAdd(opts.repoDir, root, branch, "origin/main", { log: opts.log });
+  const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const io: GardenLandIo = {
+    git,
+    docsIndex: () => execFileSync(process.execPath, [join(root, "scripts", "generate-docs-index.mjs")], { cwd: root, stdio: "pipe" }),
+    preflight: opts.preflight ?? planPrPreflight,
+  };
+  return {
+    root,
+    branch,
+    land: (landing) => runStepsSync(gardenLandSteps(opts, root, branch, landing, io)),
+    dispose: () => worktreeRemove(opts.repoDir, root),
+  };
+}
+
+export async function gardenCheckoutAsync(opts: GardenCheckoutOpts): Promise<GardenCheckoutAsync> {
+  const branch = `${opts.name}-garden-${(opts.clock ?? systemClock).now()}`;
+  const root = join(opts.worktreesRoot, branch);
+  await worktreeAddAsync(opts.repoDir, root, branch, "origin/main", { log: opts.log });
+  const io: GardenLandIo = {
+    git: async (...args: string[]) => (await execFilePromise("git", ["-C", root, ...args], { encoding: "utf8" })).stdout,
+    docsIndex: () => execFilePromise(process.execPath, [join(root, "scripts", "generate-docs-index.mjs")], { cwd: root }),
+    preflight: opts.preflight ?? planPrPreflightAsync,
+  };
+  return {
+    root,
+    branch,
+    land: (landing) => runStepsAsync(gardenLandSteps(opts, root, branch, landing, io)),
+    dispose: async () => worktreeRemove(opts.repoDir, root),
+  };
+}
+
+export interface GardenCheckoutOpts {
   name: GardenName;
   repoDir: string;
   worktreesRoot: string;
@@ -34862,68 +34898,70 @@ export function gardenCheckout(opts: {
   clock?: Clock;
   /** W1-T5348: the plan-PR preflight over the committed tree; injected only by a test. */
   preflight?: (input: { cwd: string; title: string; body: string }) => PlanPrPreflightResult;
-}): GardenCheckout {
-  const branch = `${opts.name}-garden-${(opts.clock ?? systemClock).now()}`;
-  const root = join(opts.worktreesRoot, branch);
-  worktreeAdd(opts.repoDir, root, branch, "origin/main", { log: opts.log });
-  const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-  return {
-    root,
-    branch,
-    land: ({ paths, title, body }) => {
-      git("add", "--", ...paths);
-      // A garden log under docs/ changes what docs/docs-index.json must say, and docs-index-check
-      // refuses a PR whose index is stale — regenerate it with the checkout's own generator.
-      if (paths.some((p) => p.startsWith("docs/") && p.endsWith(".md"))) {
-        execFileSync(process.execPath, [join(root, "scripts", "generate-docs-index.mjs")], { cwd: root, stdio: "pipe" });
-        git("add", "--", "docs/docs-index.json");
-      }
-      // commitlint refuses a header over 100 characters, and a cause name makes a long title: fit
-      // the header (prefix kept, cut at a space or hyphen, since a cause is one hyphenated token)
-      // for both the commit and the PR, and carry the full title in each body.
-      const fitted = fitConventionalTitle(title);
-      const fullTitle = fitted.trimmed ? `Full title: ${title}\n\n` : "";
-      git("commit", "-q", "-m", `${fitted.header}\n\n${wrapBodyLines(`${fullTitle}Tended by the ${opts.name} gardener.`).join("\n")}`);
-      // Both guards run BEFORE the push: a push that lands and a PR that is then refused leaves a
-      // branch with no PR — 103 test-run plan-garden-* heads on origin by 2026-09-29.
-      assertLiveWriteAllowed("git-push", `pushing the ${opts.name} garden branch ${branch}`);
-      assertLiveWriteAllowed("gh-pr-create", `opening a ${opts.name} garden PR against ${opts.owner}/${opts.repo}`);
-      // W1-T5348: a tree CI would refuse is never pushed — the lane's not-landed outcome instead of a red PR.
-      const verdict = (opts.preflight ?? planPrPreflight)({ cwd: root, title: fitted.header, body: fullTitle + body });
-      if (!planPrPreflightAllows(verdict, { lane: opts.name, branch, log: opts.log })) return undefined;
-      git("push", "-q", "origin", `HEAD:refs/heads/${branch}`);
-      const fetcher = opts.fetcher ?? ghJson;
-      try {
-        return createPlanPrRest(fetcher, opts.owner, opts.repo, { title: fitted.header, body: fullTitle + body, head: branch, base: "main" }).prUrl;
-      } catch (e) {
-        retractGardenBranch({ branch, git, name: opts.name, owner: opts.owner, repo: opts.repo, fetcher, log: opts.log });
-        throw e;
-      }
-    },
-    dispose: () => worktreeRemove(opts.repoDir, root),
-  };
 }
 
-export function knowledgeGardenWorkspace(opts: {
-  repoDir: string;
-  worktreesRoot: string;
-  owner: string;
-  repo: string;
-  log: (step: string, extra?: Record<string, unknown>) => void;
-  fetcher?: GhApiFetcher;
-  clock?: Clock;
-}): GardenWorkspace {
+interface GardenLandIo {
+  git: (...args: string[]) => string | Promise<string>;
+  docsIndex: () => unknown;
+  preflight: (input: { cwd: string; title: string; body: string }) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
+}
+
+function* gardenLandSteps(
+  opts: GardenCheckoutOpts,
+  root: string,
+  branch: string,
+  { paths, title, body }: { paths: string[]; title: string; body: string },
+  io: GardenLandIo,
+): Steps<string | undefined> {
+  yield* step(() => io.git("add", "--", ...paths));
+  // A garden log under docs/ changes what docs/docs-index.json must say, and docs-index-check
+  // refuses a PR whose index is stale — regenerate it with the checkout's own generator.
+  if (paths.some((p) => p.startsWith("docs/") && p.endsWith(".md"))) {
+    yield* step(io.docsIndex);
+    yield* step(() => io.git("add", "--", "docs/docs-index.json"));
+  }
+  // commitlint refuses a header over 100 characters, and a cause name makes a long title: fit
+  // the header (prefix kept, cut at a space or hyphen, since a cause is one hyphenated token)
+  // for both the commit and the PR, and carry the full title in each body.
+  const fitted = fitConventionalTitle(title);
+  const fullTitle = fitted.trimmed ? `Full title: ${title}\n\n` : "";
+  yield* step(() => io.git("commit", "-q", "-m", `${fitted.header}\n\n${wrapBodyLines(`${fullTitle}Tended by the ${opts.name} gardener.`).join("\n")}`));
+  // Both guards run BEFORE the push: a push that lands and a PR that is then refused leaves a
+  // branch with no PR — 103 test-run plan-garden-* heads on origin by 2026-09-29.
+  assertLiveWriteAllowed("git-push", `pushing the ${opts.name} garden branch ${branch}`);
+  assertLiveWriteAllowed("gh-pr-create", `opening a ${opts.name} garden PR against ${opts.owner}/${opts.repo}`);
+  // W1-T5348: a tree CI would refuse is never pushed — the lane's not-landed outcome instead of a red PR.
+  const verdict = yield* step(() => io.preflight({ cwd: root, title: fitted.header, body: fullTitle + body }));
+  if (!planPrPreflightAllows(verdict, { lane: opts.name, branch, log: opts.log })) return undefined;
+  yield* step(() => io.git("push", "-q", "origin", `HEAD:refs/heads/${branch}`));
+  const fetcher = opts.fetcher ?? ghJson;
+  try {
+    return createPlanPrRest(fetcher, opts.owner, opts.repo, { title: fitted.header, body: fullTitle + body, head: branch, base: "main" }).prUrl;
+  } catch (e) {
+    const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    retractGardenBranch({ branch, git, name: opts.name, owner: opts.owner, repo: opts.repo, fetcher, log: opts.log });
+    throw e;
+  }
+}
+
+export function knowledgeGardenWorkspace(opts: KnowledgeGardenWorkspaceOpts): GardenWorkspace {
   const checkout = gardenCheckout({ ...opts, name: "knowledge" });
-  return {
-    ...checkout,
-    refreshAssertions: () => {
-      execFileSync(process.execPath, [join(checkout.root, "scripts", "learnings-assert-check.mjs"), "--dir", join(checkout.root, "learnings")], { cwd: checkout.root, stdio: "pipe" });
-      return execFileSync("git", ["-C", checkout.root, "status", "--porcelain", "--", "learnings"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => line.slice(3));
-    },
-  };
+  return { ...checkout, refreshAssertions: () => refreshKnowledgeAssertions(checkout.root) };
+}
+
+export async function knowledgeGardenWorkspaceAsync(opts: KnowledgeGardenWorkspaceOpts): Promise<GardenCheckoutAsync<GardenWorkspace>> {
+  const checkout = await gardenCheckoutAsync({ ...opts, name: "knowledge" });
+  return { ...checkout, refreshAssertions: () => refreshKnowledgeAssertions(checkout.root) };
+}
+
+type KnowledgeGardenWorkspaceOpts = Omit<GardenCheckoutOpts, "name" | "preflight">;
+
+function refreshKnowledgeAssertions(root: string): string[] {
+  execFileSync(process.execPath, [join(root, "scripts", "learnings-assert-check.mjs"), "--dir", join(root, "learnings")], { cwd: root, stdio: "pipe" });
+  return execFileSync("git", ["-C", root, "status", "--porcelain", "--", "learnings"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] })
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => line.slice(3));
 }
 
 /** What {@link buildRegisteredGarden} builds a garden over: the daemon's own config, repo and ledger writers. */
@@ -34936,6 +34974,10 @@ export interface GardenBuildContext {
   raiseDuplicate: (e: Escalation) => string;
 }
 
+export function daemonGardenWorkspace(ctx: Pick<GardenBuildContext, "config" | "repoRoot" | "owner" | "repo" | "log">, name: GardenName): () => Promise<GardenCheckoutAsync> {
+  return () => gardenCheckoutAsync({ name, repoDir: ctx.repoRoot, worktreesRoot: worktreesDir(ctx.config), owner: ctx.owner, repo: ctx.repo, log: ctx.log });
+}
+
 /** One pass of one garden; it logs its own failure under the garden's own step name and never throws. */
 export type RegisteredGardenPass = (() => void | Promise<void>) & { due?: () => boolean };
 
@@ -34946,15 +34988,15 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
   const deps = (garden: Parameters<typeof gardenCheckout>[0]["name"], escalate?: (e: Escalation) => string): GardenerDeps => ({
     stateDir,
     repoRoot,
-    openWorkspace: () => gardenCheckout({ name: garden, repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log }),
+    openWorkspace: daemonGardenWorkspace(ctx, garden),
     prState: (prUrl: string) => gardenPrState(owner, repo, prUrl, ghJson),
     log,
     ...(escalate ? { escalate } : {}),
   });
   const withDue = (pass: () => void | Promise<void>, due: () => boolean): RegisteredGardenPass => Object.assign(pass, { due });
-  const gardenPass = <C extends string, I, A extends GardenAction<C>>(spec: GardenSpec<C, I, A, GardenCheckout>, d: GardenerDeps): RegisteredGardenPass => withDue(() => {
+  const gardenPass = <C extends string, I, A extends GardenAction<C>>(spec: GardenSpec<C, I, A, GardenCheckout>, d: GardenerDeps): RegisteredGardenPass => withDue(async () => {
     try {
-      runGarden(spec, d);
+      await runGardenAsync(spec, d);
     } catch (e) {
       log(`${spec.name}.gardener_failed`, { error: String((e as Error)?.message ?? e) });
     }
@@ -35001,7 +35043,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
                 log("test.evidence_failed", { error: feed.error });
               }
             }
-            const pass = runGarden(testGardenSpec(d, probe), d);
+            const pass = await runGardenAsync(testGardenSpec(d, probe), d);
             if (opts.hourly) {
               log("test.pass", { ran: pass.ran, feed, pr_url: pass.prUrl ?? null, proposal_present: existsSync(testManifestProposalPath(stateDir)) });
             }
@@ -35067,7 +35109,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       const d: GardenerDeps = {
         stateDir,
         repoRoot,
-        openWorkspace: () => gardenCheckout({ name: "selector-shadow", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log }),
+        openWorkspace: daemonGardenWorkspace(ctx, "selector-shadow"),
         log,
       };
       return selectorShadowGardenPass(d, owner, repo, ciLearningTaskIdMinter(repoRoot));
@@ -35127,11 +35169,11 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         openIncidentOrigins: () => openIncidentFeedbackOrigins(repoRoot),
         escalate: raiseDuplicate,
         planOrigins: () => loadPlan(resolveRepoLayout(repoRoot).planMonolith).tasks.map((t) => t.origin).filter((o): o is string => typeof o === "string"),
-        fileConsumer: fileConsumerVia(() => gardenCheckout({ name: "host-resource", repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log }), mintTaskId),
+        fileConsumer: fileConsumerVia(daemonGardenWorkspace(ctx, "host-resource"), mintTaskId),
       };
-      return () => {
+      return async () => {
         try {
-          runHostResourcePass(ports);
+          await runHostResourcePassAsync(ports);
         } catch (error) {
           log(`${HOST_RESOURCE}.failed`, { error: String((error as Error)?.message ?? error), reason: "a pass that throws is logged and the next tick tries again" });
         }
@@ -36516,7 +36558,7 @@ export async function daemonCommand(
                 stateDir: join(config.root, "state"),
                 repoRoot,
                 openWorkspace: () =>
-                  knowledgeGardenWorkspace({ repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
+                  knowledgeGardenWorkspaceAsync({ repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner: self.owner, repo: self.repo, log }),
                 prState: (prUrl) => gardenPrState(self.owner, self.repo, prUrl, ghJson),
                 log,
               },
@@ -43464,8 +43506,7 @@ export function buildSweepHook(
   // W1-T192: the daemon-side draft rung, built ONCE per daemon start (mirrors this
   // function's own once-per-daemon-start construction) — see buildInboxDraftHook's doc for
   // why it rides THIS seam rather than a second, separately-scheduled loop.
-  const draftHook = buildInboxDraftHook(owner, repo, config, runId, log);
-  // ONE GATEWAY FOR THE DAEMON'S WHOLE LIFE, built here for the same reason `draftHook` above is:
+  // ONE GATEWAY FOR THE DAEMON'S WHOLE LIFE, built here once per daemon start, as `draftHook` below is:
   // this function runs once per daemon start, the closure it returns runs once per poll.
   //
   // THE DELTA WAS ALREADY BUILT AND A CONSTRUCTOR'S LIFETIME WAS DEFEATING IT. `buildBatchedGithub`
@@ -43499,6 +43540,7 @@ export function buildSweepHook(
   // SAME instance for this daemon's whole life, exactly as `boardGithub` itself is shared.
   const boardGithub = github ?? buildBatchedGithub(owner, repo, { log, pacer });
   if (!github && snapshotCache) boardGithub.seedBoardSnapshot?.(snapshotCache);
+  const draftHook = buildInboxDraftHook(owner, repo, config, runId, log, undefined, undefined, undefined, boardGithub);
   const planFilingFileCache = createPlanFilingFileCache();
   const reportPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
   const openPrReads = createGhReadWarmer(ghJsonAsync);
@@ -46412,7 +46454,10 @@ export function buildInboxDraftHook(
   ) => Promise<DraftRungOutcome[]> = draftProposalBatch,
   grepAnchor: (ref: string, anchor: EvidenceAnchor) => boolean = (ref, anchor) => gitGrepAnchorTrue(repoRoot, ref, anchor),
   mainSha: () => string | undefined = () => readOriginMainSha(repoRoot),
+  github?: GitHub,
 ): (tickRead?: TickReadFacts) => Promise<void> {
+  let lazyGithub: GitHub | undefined;
+  const readinessGithub = (): GitHub => github ?? (lazyGithub ??= buildBatchedGithub(owner, repo));
   // W1-T2564: see the migration block below — this is the once-per-daemon-start scope it needs.
   let attemptsMigrated = false;
   const anchorGrepCache = createAnchorGrepCache();
@@ -46472,7 +46517,7 @@ export function buildInboxDraftHook(
       let draftReadiness: ReadinessContext | undefined;
       try {
         const plan = tickRead?.plan ?? loadPlan(join(repoRoot, "plan", "tasks.yaml"));
-        const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
+        const deriveDeps: DeriveDeps = { ledgerPath, github: readinessGithub() };
         const { isMerged, depsUnobservable } = tickRead
           ? projectionReadinessAccessors(new Map(tickRead.projection))
           : buildDepsReadinessAccessors(plan, deriveDeps);
@@ -46785,7 +46830,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config } = {
     writeFileSync(draftsPath, JSON.stringify(drafts, null, 2), "utf8");
   }
 
-  const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
+  const deriveDeps: DeriveDeps = { ledgerPath, github: buildBatchedGithub(owner, repo) };
   const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deriveDeps);
   const openProposalIds = new Set(proposals.map((p) => p.id));
   // W1-T190: re-derive "already ratified" from the ledger on every `rmd inbox` pass, never
@@ -47372,7 +47417,7 @@ export function productionMachineFilingJudgePorts(opts: {
     riskPolicy: () => readRiskPolicy(policyPath(opts.repoRoot)),
     gardenRecord: (family) => gardenFamilyRecord(opts.stateDir, family),
     operatorReleases: () => readOperatorReleases(opts.stateDir),
-    openWorkspace: () => gardenCheckout({ name: "machine-judge", repoDir: opts.repoRoot, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, fetcher, clock: opts.clock }),
+    openWorkspace: () => gardenCheckoutAsync({ name: "machine-judge", repoDir: opts.repoRoot, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, fetcher, clock: opts.clock }),
     prState: (prUrl) => gardenPrState(opts.owner, opts.repo, prUrl, fetcher),
     stageProposal: (proposal) => void stageInboxProposalOnce(join(opts.stateDir, "inbox-proposals.json"), proposal),
     log: opts.log,

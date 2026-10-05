@@ -20,7 +20,7 @@ import {
   type PromotionRecord,
 } from "./experiment-promotion.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
-import { gardenPassDue, gardenStatePath, judgeGardenDecision, readGardenState, runGarden, type GardenAction, type GardenCheckout, type GardenSpec, type GardenerDeps, type PrState } from "./gardener.js";
+import { gardenPassDue, gardenStatePath, judgeGardenDecision, readGardenState, runGardenAsync, type GardenAction, type GardenCheckout, type GardenPassResult, type GardenSpec, type GardenerDeps, type PrState } from "./gardener.js";
 import { buildEntryWeightIndex, DEFAULT_KNOWLEDGE_BUDGET_CHARS, loadLearningsCorpus } from "./learnings.js";
 import type { LedgerLine } from "./ledger.js";
 import { ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
@@ -787,7 +787,7 @@ export async function tendConfigCanaries(deps: GardenerDeps, runs: () => Promise
     }
     c.promotion = { ...c.promotion, state: step.state };
     c.reason = step.reason ?? c.reason;
-    if (step.verdict === "rolled_back" && exposed) c.rollbackPrUrl = rollBack(deps, c);
+    if (step.verdict === "rolled_back" && exposed) c.rollbackPrUrl = await rollBack(deps, c);
     if (step.verdict === "rolled_back") settlePending(deps.stateDir, c.prUrl, "debit");
     if (step.verdict === "promoted") settlePending(deps.stateDir, c.prUrl, "credit");
     if (step.verdict === "expired") settlePending(deps.stateDir, c.prUrl, "release");
@@ -800,8 +800,8 @@ export async function tendConfigCanaries(deps: GardenerDeps, runs: () => Promise
 }
 
 /** Land a PR reverting exactly the canary's lines; the receipt is its url, or why there was none. */
-function rollBack(deps: GardenerDeps, c: ConfigCanary): string | undefined {
-  const ws = deps.openWorkspace();
+async function rollBack(deps: GardenerDeps, c: ConfigCanary): Promise<string | undefined> {
+  const ws = await deps.openWorkspace();
   try {
     const edits = reverseEdits(c.edits);
     const paths = applyExactConfigRollback(ws.root, edits);
@@ -810,11 +810,11 @@ function rollBack(deps: GardenerDeps, c: ConfigCanary): string | undefined {
       return undefined;
     }
     const body = [`The config gardener (W1-T4113) rolls back its \`${c.actionClass}\` canary from ${c.prUrl}: ${c.reason ?? "a cohort guardrail breach"}.`, "", ...acceptance(edits)].join("\n");
-    const prUrl = ws.land({ paths, title: `revert(config): the config gardener rolls back its ${c.actionClass} canary`, body });
+    const prUrl = await ws.land({ paths, title: `revert(config): the config gardener rolls back its ${c.actionClass} canary`, body });
     if (!prUrl) throw new Error(`config gardener: rollback PR was not opened for ${c.prUrl}`);
     return prUrl;
   } finally {
-    ws.dispose();
+    await ws.dispose();
   }
 }
 
@@ -824,11 +824,11 @@ type ConfigGardenSpec = Omit<GardenSpec<ConfigGardenClass, ConfigInventory, Conf
 
 /** One pass: judge the open canaries, then let the garden act, recording any change it lands as a new
  *  canary that waits in shadow for its merge. */
-export async function runConfigGarden(spec: ConfigGardenSpec, deps: GardenerDeps, sources: ConfigGardenSources = {}): Promise<ReturnType<typeof runGarden<ConfigGardenClass, ConfigInventory, ConfigGardenAction, GardenCheckout>>> {
+export async function runConfigGarden(spec: ConfigGardenSpec, deps: GardenerDeps, sources: ConfigGardenSources = {}): Promise<GardenPassResult<ConfigGardenClass, ConfigGardenAction>> {
   await tendConfigCanaries(deps, async () => (await configInventory(deps, sources)).runs);
   if (!gardenPassDue(spec, deps)) return { ran: false };
   const inventory = await spec.inventory();
-  const pass = runGarden({ ...spec, inventory: () => inventory }, deps);
+  const pass = await runGardenAsync({ ...spec, inventory: () => inventory }, deps);
   const action = pass.plan?.actions[0];
   if (pass.prUrl && action) {
     // The action's shadow evidence was measured by the inventory. Starting the window from a

@@ -1,0 +1,37 @@
+- id: W1-T5770
+  title: "AN INTERACTIVE GH READ AWAITS ITS CADENCE, AND A SYNC READ NEVER WAITS ON A LOCK ITS OWN PROCESS'S ASYNC READ HOLDS — `routeInteractiveGhRead` is async but calls the blocking `applyGhReadCadence`, and a sync read beside an in-flight async read sleeps the loop the holder needs, then gives up after the bounded wait and runs unlocked"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium
+  origin: "operator session 2026-10-04: watch log 22:00Z, W1-T4970 (#9167) follow-ups"
+  plan_refs: [W1-T4970, W1-T4085, W1-T5743, W1-T5689]
+  files: [src/lib/github-transport.ts, test/an-interactive-gh-read-awaits-its-cadence.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 9c38366f. src/lib/github-transport.ts: W1-T4970 (#9167) added
+    `applyGhReadCadenceAsync` and `withGhCadenceLockAsync` (an in-process queue, then the mkdir
+    file lock, waits awaited). `routeInteractiveGhRead` (async, W1-T4085) still returns
+    `applyGhReadCadence(args, deps)` on both of its non-app-token paths, so its gap and lock waits
+    run through `sleepSync`. And `withGhCadenceLock` (sync) polls the same file lock with
+    `sleepSync(GH_CADENCE_LOCK_WAIT_MS)`: when an async read in the same process holds the lock, the
+    sync waiter blocks the event loop that holder needs to finish, so it can only reach "give-up"
+    after `GH_CADENCE_LOCK_MAX_WAIT_MS` and then runs its call with no lock, the race the lock
+    exists to stop. Not measured live; found while building W1-T4970.
+  design: |
+    (i) `routeInteractiveGhRead` awaits `applyGhReadCadenceAsync`.
+    (ii) The sync path checks the in-process async queue for its stamp path first: when this
+    process's own async read holds the lock, the sync read skips the poll and runs at once with one
+    stderr advisory (the `ghCadenceAdvisoryEmitted` pattern), instead of sleeping the loop to the
+    give-up bound; cross-process locking is unchanged.
+  acceptance:
+    - claim: "routeInteractiveGhRead lets the event loop tick during its cadence gap, and a sync read issued while the same process's async read holds the lock returns without sleeping to the give-up bound"
+      proof: "unit test: test/an-interactive-gh-read-awaits-its-cadence.test.ts"
+  falsifier: |
+    Keep the sync cadence call: the loop-tick counter reads 0 across the fake gap and the test
+    fails.

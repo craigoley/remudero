@@ -7,7 +7,8 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import type { Escalation } from "./escalate.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import type { GardenCheckout } from "./gardener.js";
+import { runStepsEager, runStepsSyncOnly, type GardenCheckout, type GardenCheckoutAsync, type GardenWorkspacePort } from "./gardener.js";
+import { runStepsAsync, step, type Steps } from "./git-push.js";
 import { renderMachineShard } from "./machine-filing.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 
@@ -428,7 +429,7 @@ export interface HostResourcePorts {
   /** Every `origin:` the plan already holds. */
   planOrigins: () => readonly string[];
   /** File a plan-only task for one persistent grower; returns the PR url. */
-  fileConsumer?: (f: ConsumerFiling) => string | undefined;
+  fileConsumer?: (f: ConsumerFiling) => string | undefined | Promise<string | undefined>;
 }
 
 interface Episode {
@@ -532,7 +533,7 @@ export function consumerShardYaml(f: ConsumerFiling, taskId: string): string {
 }
 
 /** File one persistent grower through a checkout: the shard alone, so the filing PR is plan-only. */
-export function landConsumerShard(ws: GardenCheckout, mintTaskId: (branch?: string) => string, f: ConsumerFiling): string | undefined {
+export function landConsumerShard(ws: GardenCheckout | GardenCheckoutAsync, mintTaskId: (branch?: string) => string, f: ConsumerFiling): string | undefined | Promise<string | undefined> {
   if (!ws.branch) throw new Error("host-resource gardener: filing workspace has no branch for task-id reservation");
   const taskId = mintTaskId(ws.branch);
   const contents = consumerShardYaml(f, taskId);
@@ -553,16 +554,19 @@ export function landConsumerShard(ws: GardenCheckout, mintTaskId: (branch?: stri
   return ws.land({ paths: [relPath], title: `chore(plan): host ${f.host} ${f.consumer} keeps growing and no janitor rule reaps it`, body });
 }
 
-/** The production filer: a fresh checkout per filing, always disposed, the shard landed through it. */
-export function fileConsumerVia(openWorkspace: () => GardenCheckout, mintTaskId: (branch?: string) => string): (f: ConsumerFiling) => string | undefined {
-  return (f) => {
-    const ws = openWorkspace();
-    try {
-      return landConsumerShard(ws, mintTaskId, f);
-    } finally {
-      ws.dispose();
-    }
-  };
+/** The production filer: a fresh checkout per filing, always disposed, the shard landed through it —
+ *  synchronously over the CLI's port, awaited over the daemon's (W1-T5740). */
+export function fileConsumerVia(openWorkspace: GardenWorkspacePort, mintTaskId: (branch?: string) => string): (f: ConsumerFiling) => string | undefined | Promise<string | undefined> {
+  return (f) => runStepsEager(consumerFilingSteps(openWorkspace, mintTaskId, f));
+}
+
+function* consumerFilingSteps(openWorkspace: GardenWorkspacePort, mintTaskId: (branch?: string) => string, f: ConsumerFiling): Steps<string | undefined> {
+  const ws = yield* step<GardenCheckout | GardenCheckoutAsync>(openWorkspace);
+  try {
+    return yield* step(() => landConsumerShard(ws, mintTaskId, f));
+  } finally {
+    yield* step(() => ws.dispose());
+  }
 }
 
 export interface PassResult {
@@ -573,6 +577,15 @@ export interface PassResult {
 
 /** One pass: sample new beats, evaluate every host, act once per episode. */
 export function runHostResourcePass(ports: HostResourcePorts): PassResult {
+  return runStepsSyncOnly(hostResourcePassSteps(ports));
+}
+
+/** {@link runHostResourcePass} with its filing awaited, for the daemon's async workspace port (W1-T5740). */
+export function runHostResourcePassAsync(ports: HostResourcePorts): Promise<PassResult> {
+  return runStepsAsync(hostResourcePassSteps(ports));
+}
+
+function* hostResourcePassSteps(ports: HostResourcePorts): Steps<PassResult> {
   const clock = ports.clock ?? systemClock;
   if (existsSync(hostResourceOffPath(ports.stateDir))) return { ran: false, appended: 0, findings: [] };
   const nowMs = clock.now();
@@ -656,7 +669,8 @@ export function runHostResourcePass(ports: HostResourcePorts): PassResult {
       const alreadyFiled = rec !== undefined && rec.url !== undefined;
       if (!ports.planOrigins().includes(origin) && !alreadyFiled && retryOk) {
         try {
-          const url = ports.fileConsumer({ host: f.host, device: f.device, consumer: a.consumer, origin, attribution: a });
+          const fileConsumer = ports.fileConsumer;
+          const url = yield* step(() => fileConsumer({ host: f.host, device: f.device, consumer: a.consumer, origin, attribution: a }));
           if (url !== undefined) {
             state.filed[origin] = { at: clock.iso(), url, growthKbPerHourAtFiling: a.growthKbPerHour };
             ports.log(`${HOST_RESOURCE}.filed`, { ...row, consumer: a.consumer, growth_kb_per_hour: Math.round(a.growthKbPerHour), share: Math.round(a.share * 100) / 100, pr_url: url });

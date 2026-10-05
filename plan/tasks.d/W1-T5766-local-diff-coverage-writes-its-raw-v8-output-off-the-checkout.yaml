@@ -1,0 +1,36 @@
+- id: W1-T5766
+  title: "LOCAL DIFF COVERAGE WRITES ITS RAW V8 OUTPUT OFF THE CHECKOUT AND REMOVES IT — scripts/diff-coverage-local.mjs runs the instrumented tests with NODE_V8_COVERAGE=coverage/raw under the repo and never clears it, so on 2026-10-04 one W1-T5283 run wrote ~5 GB there and filled the root disk to 100%"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: medium
+  origin: "operator session 2026-10-04: watch log 22:21Z (root disk hit 100% during #9169's coverage run); W1-T5709 covers coverageScratchDir only"
+  plan_refs: [W1-T5709, W1-T5655, W1-T3299]
+  files: [scripts/diff-coverage-local.mjs, test/local-diff-coverage-writes-its-raw-v8-output-off-the-checkout.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 9c38366f. scripts/diff-coverage-local.mjs `ensureRawCoverageDir`
+    makes `<repo>/coverage/raw` and `runInstrumentedTests` spawns node with
+    `NODE_V8_COVERAGE: "coverage/raw"` (cwd the repo root); nothing removes it afterwards, so the
+    raw JSON of every run accumulates in the checkout. The gate itself reads only the lcov the
+    reporter writes. Batch-10 W1-T5709 moves `coverageScratchDir` (src/lib/ci-parity.ts, the
+    coverage-ratchet path) to the scratch disk and does not touch this script. MEASURED 2026-10-04
+    22:21Z: a local `diff-coverage:local` run for W1-T5283 wrote ~5 GB to coverage/raw on the 29 GB
+    root disk and filled it; agents now symlink coverage/ to /mnt/scratch by hand (agent rule).
+  design: |
+    The raw dir is a fresh `mkdtemp` under `os.tmpdir()` (the script's diff temp dir already lives
+    there; W1-T5709 decides where tmp should point), passed as NODE_V8_COVERAGE, and removed in a
+    `finally` once the instrumented run returns (kept only with an explicit `--keep-raw`, which
+    prints its path). The lcov path and the gate are unchanged, and the dir is transient, so the
+    disk holds one run's raw output at most.
+  acceptance:
+    - claim: "with injected deps, the instrumented run's NODE_V8_COVERAGE points outside the repo root, the dir is removed after a passing and after a failing run, and --keep-raw keeps it and prints its path"
+      proof: "unit test: test/local-diff-coverage-writes-its-raw-v8-output-off-the-checkout.test.ts"
+  falsifier: |
+    Restore NODE_V8_COVERAGE=coverage/raw: the env the fake spawn sees points inside the repo and
+    the test fails.

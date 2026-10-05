@@ -1,0 +1,38 @@
+- id: W1-T5764
+  title: "A DEPLOY RECYCLE NEVER REPLACES A BOOT THAT HAS NOT SWEPT YET — the deployer's idle gate reads a just-booted daemon as idle, so on 2026-10-04 the 23:35:02Z freshness boot was recycled at 23:43:52Z for #9184 (a run-task.ts-only advance the daemon's own freshness path would have taken) before its first sweep.pass: 4 of 16 kickstarts 10-01..10-04 landed under 9 min after a boot"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — a settling boot is not an idle gap for a deploy
+  band_meaning: span
+  origin: "operator session 2026-10-04: watch log 23:46Z (two boots back to back); related to restart report P5 (W1-T5722) and P7 (operator)"
+  plan_refs: [W1-T341, W1-T5722, W1-T5720, W1-T4945]
+  files: [src/lib/deployer.ts, test/a-deploy-recycle-never-replaces-a-boot-that-has-not-swept.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 9c38366f. src/lib/deployer.ts `daemonIsIdle` counts live
+    workers, in-flight locks and worktree locks; `evaluateIdleGate` bounds a busy deferral at
+    `DEPLOY_IDLE_DEFER_CEILING_MS` (30 min). A daemon that booted seconds ago has none of those yet,
+    so it reads idle. MEASURED, fleet ledger: freshness boot 23:35:02Z (pid 2175840, code
+    c13e1250), `deploy.pulled` 23:39:08Z to 9859f474 (#9184, merged 23:37:03Z, touching only
+    src/run-task.ts and a test, no IMAGE_BAKED_PATHS file), `deploy.kickstart` 23:43:52Z
+    (recycle-container), new boot 23:44:07Z; the first boot wrote pulses and no sweep.pass. Over
+    10-01..10-04, 4 of 16 `deploy.kickstart` rows came 3.1-8.8 min after the previous boot
+    (10-03 20:36Z, 10-04 00:57Z, 04:44Z, 23:43Z). A boot's first sweep.pass takes a median 8.1 min
+    (restart report), so each such recycle throws one boot's warm-up away.
+  design: |
+    The idle probe gains a `bootSettling` reading: the running daemon's last `daemon.boot` is younger
+    than a named BACKSTOP bound and no `sweep.pass` has been logged since it. A settling boot is not
+    idle, so the kickstart defers through the existing ceiling path with `deploy.not_idle` naming
+    `boot-settling`; an unreadable boot/sweep read degrades to not-idle like every other probe
+    read. Image-drift recycles keep their own path.
+  acceptance:
+    - claim: "a probe with no workers whose daemon booted 3 min ago with no sweep.pass since is not idle and the kickstart defers naming boot-settling, the same probe after a sweep.pass is idle, and a settling boot past the bound proceeds"
+      proof: "unit test: test/a-deploy-recycle-never-replaces-a-boot-that-has-not-swept.test.ts"
+  falsifier: |
+    Drop bootSettling from daemonIsIdle: the 3-minute boot reads idle and the test fails.
