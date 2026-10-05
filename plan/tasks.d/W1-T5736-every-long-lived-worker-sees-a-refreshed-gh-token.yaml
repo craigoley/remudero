@@ -1,0 +1,50 @@
+- id: W1-T5736
+  title: "EVERY LONG-LIVED WORKER SEES A REFRESHED GH_TOKEN — a `new Worker()` without `env: SHARE_ENV` copies `process.env` at spawn, serve and the daemon refresh GH_TOKEN hourly, and a persistent worker that calls GitHub then 401s for the rest of its life: #9156 fixed the read plane and #9160 the read-model threads, one site at a time, and nothing stops the next Worker repeating it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium
+  origin: "operator session 2026-10-04: P1 read-plane GH_TOKEN incident (#9156), follow-up audit (research/audit/followups.md) item 87 and section C, #9160 hotfix notes"
+  plan_refs: [W1-T4075, W1-T2905, W1-T5284, W1-T5282]
+  files: [test/every-long-lived-worker-sees-a-refreshed-gh-token.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 70bb29f8 (#9156 merged) and #9160 (open, head cdf66405).
+    Node's `new Worker(url, opts)` without `env` copies the spawning thread's `process.env` at
+    spawn; only `env: SHARE_ENV` lets a later write reach the thread. serve and the daemon each
+    re-mint `process.env.GH_TOKEN` hourly. #9156 gave src/lib/read-plane.ts `env: SHARE_ENV` after
+    the daemon read plane 401'd from 20:10:41Z; #9160 gives the read-model projector
+    (`createReadModelWorker`, stall escalations through `ghIssueGateway`), its `threadOracle` (drift
+    escalations; spawned FROM the projector) and `threadViews` the same, and leaves the one-shot
+    integrity and issue threads copying a fresh env per spawn. STILL COPYING, long-lived or
+    repeated, each to be classed by GitHub use: read-model-slow-lane.ts (header: no GitHub call;
+    `SlowLaneGithubRefused`), board-worker.ts (facts proxied to the parent's `github`),
+    console-projection-worker.ts (pure projection), status.ts's board prewarm, repo-dashboard-route.ts
+    (ledger only), config-gardener.ts and serve-plan-reload.ts (local work per spawn);
+    secret-boundary.ts passes an explicit `env: { ...process.env }` and mints from the App key, not
+    GH_TOKEN; worker-provider.ts's codex probe is short. Queued work that may add Workers (W1-T5284,
+    W1-T5282, batch-10's W1-T5689/W1-T5719/W1-T5723) names no env rule.
+    ADMISSION: test/source-text-assertion-census.test.ts (W1-T2905) excludes a test file that
+    declares `@source-text-subject` — its own refusal text says to declare it when the subject IS the
+    source — and 51 test files do, among them the src-scanning censuses
+    test/benchmark-worker-caller-census.test.ts and test/deps-interface-census.test.ts.
+  design: |
+    (i) A census over src/**/*.ts that declares `@source-text-subject` with its reason: every
+    `new Worker(` call (located by a TypeScript AST walk, so comments and strings never count)
+    passes `env: SHARE_ENV`, or sits in an exemption table keyed by file and worker kind with its
+    reason (one-shot per spawn, no GitHub call, or an explicit env with a named credential source).
+    A row naming no live site is stale and fails, so the table cannot rot. (ii) A behavioural check:
+    a fixture worker spawned through the same options the census admits reads a GH_TOKEN its parent
+    changed after spawn. (iii) If #9160 has not merged at build time, the census fails on
+    read-model-worker.ts by name; build on #9160 rather than carrying its fix.
+  acceptance:
+    - claim: "the census fails by file and kind on a Worker spawn with neither env SHARE_ENV nor an exemption row and on a stale exemption row, passes on the recorded tree, and a SHARE_ENV fixture thread reads a GH_TOKEN its parent changed after spawn"
+      proof: "unit test: test/every-long-lived-worker-sees-a-refreshed-gh-token.test.ts"
+  falsifier: |
+    Remove `env: SHARE_ENV` from read-plane.ts's spawn: the census names read-plane.ts and the test
+    fails.

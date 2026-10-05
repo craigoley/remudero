@@ -1,0 +1,42 @@
+- id: W1-T5737
+  title: "EVERY CI SCRIPT RATCHET HAS A PRE-PUSH VERDICT — W1-T5616's parity census population is test suites only (`ciCensusPopulation` over `listRuleSuites` plus PRECHECK_EXTRA_CI_CENSUSES), so the script-level gates CI runs (learnings-budget, claude-md-budget, cycle, coverage-merge, mutation, baseline-monotonic, expiring-fixture-census, comment-load-signal) can be asked by nothing before the push and no census says so"
+  repo: remudero
+  depends_on: [W1-T5616]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — the pre-push parity census population
+  band_meaning: span
+  origin: "operator session 2026-10-04: watch log 15:41Z, follow-up audit (research/audit/followups.md) item 42"
+  plan_refs: [W1-T5616, W1-T5617, W1-T5692, W1-T5693]
+  files: [scripts/census-precheck.mjs, scripts/census-precheck-parity-baseline.json, test/every-ci-script-ratchet-has-a-pre-push-verdict.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 70bb29f8. scripts/census-precheck.mjs's `precheckParityVerdict`
+    (W1-T5616) gives each member of `ciCensusPopulation(ruleSuites, PRECHECK_EXTRA_CI_CENSUSES)` a
+    verdict: on PRECHECK_PARITY (asked before the push) or in the shrink-only `ciOnly` list of
+    scripts/census-precheck-parity-baseline.json; every member is a test/*.test.ts path. The ci.yml
+    gate job also runs script ratchets as their own steps: `learnings-budget-ratchet`,
+    `claude-md-budget-ratchet`, `cycle-ratchet`, `comment-load-ratchet` (comment-load-signal),
+    `expiring-fixture-census`, `baseline-monotonic` (scripts/baseline-monotonic-check.mjs); the
+    coverage job runs scripts/coverage-merge-ratchet.mjs and the mutation job
+    scripts/mutation-ratchet.mjs. `rmd preflight` (src/lib/ci-parity.ts) mirrors several, but none
+    is in the parity population, so a new script gate can join CI with no pre-push verdict and
+    nothing fails. Batch-10 W1-T5692/W1-T5693 (#9155, open) admit chosen suites and cycle-ratchet
+    to the precheck; they do not widen the population.
+  design: |
+    Add the gate-job and coverage/mutation script steps to the population, parsed from ci.yml (a
+    step whose `run:` is `npm run --silent <script>` or `node scripts/<name>.mjs` and whose id or
+    script names a ratchet, census, budget or monotonic check), each keyed `script:<name>`. Each
+    needs a verdict: asked by census-precheck or hooks/pre-push, or a `ciOnlyScripts` row in the
+    baseline with its reason (mirrored by `rmd preflight` only, or CI-only by cost). The baseline
+    section is shrink-only like `ciOnly`.
+  acceptance:
+    - claim: "the parity census reads the script ratchet steps out of ci.yml, fails by name on a fixture script step with no verdict, and passes when it is baselined or asked"
+      proof: "unit test: test/every-ci-script-ratchet-has-a-pre-push-verdict.test.ts"
+  falsifier: |
+    Leave the population test-suites only: the fixture script step with no verdict passes and the
+    test fails.
