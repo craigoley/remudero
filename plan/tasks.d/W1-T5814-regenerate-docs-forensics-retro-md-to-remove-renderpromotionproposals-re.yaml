@@ -7,9 +7,24 @@
   risk: low
   status: queued
   attempts: 0
+  rationale: |
+    #7844 retired the learnings promotion pass and deleted renderPromotionProposals from
+    src/lib/retro.ts, but docs/forensics/retro.md still archives a section headed with that
+    function. The archive cites line ranges in a file that no longer carries the symbol, so a
+    reader following it finds nothing. Drop the section and add a test that pins its absence.
+  note: |
+    Amended on PR #9253 (ratify PR, red on ci-shard and rule-checks). The drafted record had no
+    rationale, design or note, so loadCorpus read no prose unit for it and the
+    citation-anchor-census smoke test failed. Its proof was also unexecutable: the parser read
+    'grep: "renderPromotionProposals" not found in <path>' as a positive grep for the literal
+    text '"renderPromotionProposals" not found', which can never match. A grep that must MISS
+    after the change fails the PR that satisfies it (ACCEPTANCE_PROOF_GRAMMAR), so the claim is
+    now proven by a named test in test/retro.test.ts, the suite for the module this archive
+    documents, and that file is in scope.
   files:
     - docs/forensics/retro.md
+    - test/retro.test.ts
   acceptance:
     - claim: docs/forensics/retro.md no longer mentions renderPromotionProposals
-      proof: 'grep: "renderPromotionProposals" not found in docs/forensics/retro.md'
+      proof: "unit test: the retro forensics archive carries no section for the retired renderPromotionProposals"
   origin: architect
