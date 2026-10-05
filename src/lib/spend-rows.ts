@@ -23,6 +23,7 @@ export const SPEND_STEP_ROLES: Readonly<Record<string, SpendRole>> = {
   verdict: "restated", // the run's last worker, via `terminalVerdictFields`, or the run's running total
   "cost.anomaly": "restated", // a finding about a run's cost, never a spend of its own
   "budget.warning": "restated", // the run's accumulated cost so far, ledgered once at a threshold
+  "pr.open_deferred_to_existing": "restated", // the run's accumulated cost at a deferred PR open (W1-T5520)
   "implement.done": "produced",
   "implement.resumed": "produced",
   "recon.done": "produced",
