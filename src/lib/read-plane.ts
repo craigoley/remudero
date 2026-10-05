@@ -2,7 +2,7 @@ import { SHARE_ENV, Worker } from "node:worker_threads";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
-import { clockFromMillisFn, type Clock } from "./clock.js";
+import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 
 export const READ_PLANE_KIND = "remudero-tick-reads";
 
@@ -121,25 +121,54 @@ export function freezeReadGeneration<T>(value: T, seen = new WeakSet<object>()):
 export interface ReadGeneration<T> {
   generation: number;
   source: "worker" | "inline";
+  /** When the read that produced `facts` began, from the plane's injected clock (W1-T5762). */
+  publishedAtMs: number;
   facts: T;
+}
+
+/** BACKSTOP: the oldest tick-read generation any consumer is served — five 60 s poll intervals.
+ * A tick's own consumers read it within that tick; one older was published by a tick whose pass
+ * was skipped, and the 10-04 22:08Z one reached a consumer at 23:35Z (W1-T5761, W1-T5762). */
+export const TICK_READ_MAX_AGE_MS = 5 * 60_000;
+
+export interface TickReadAgeBound {
+  consumer: string;
+  clock?: Clock;
+  maxAgeMs?: number;
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+}
+
+/** The published generation while it is no older than the bound. An older one answers undefined
+ * with one `tick_read.stale_refused` row, which leaves the consumer on its own read. */
+export function freshReadGeneration<T>(published: ReadGeneration<T> | undefined, bound: TickReadAgeBound):
+  ReadGeneration<T> | undefined {
+  if (!published) return undefined;
+  const maxAgeMs = bound.maxAgeMs ?? TICK_READ_MAX_AGE_MS;
+  const ageMs = (bound.clock ?? systemClock).now() - published.publishedAtMs;
+  if (ageMs <= maxAgeMs) return published;
+  bound.log?.("tick_read.stale_refused", { consumer: bound.consumer, generation: published.generation,
+    age_ms: ageMs, max_age_ms: maxAgeMs });
+  return undefined;
 }
 
 /** A published generation answers ONE consumer pass. The daemon publishes one only at the top of
  * a tick, and a dispatch phase can hold the loop for an hour while the full sweep is retriggered;
  * reusing it there disposed merged PRs and dead heads (DAEMON-1791151532775, 2026-10-04). A later
- * pass reads its own generation, unpublished. Unpublished, or no plane to read: undefined, which
- * leaves the consumer on its own live read. */
+ * pass reads its own generation, unpublished, and so does the first pass once the published one is
+ * past {@link TICK_READ_MAX_AGE_MS}. Unpublished, or no plane to read: undefined, which leaves the
+ * consumer on its own live read. */
 export function onePassPerGeneration<I, T>(
   current: () => ReadGeneration<T> | undefined,
   read: ((input: I) => Promise<ReadGeneration<T>>) | undefined,
   input: () => I,
+  bound: Omit<TickReadAgeBound, "consumer"> = {},
 ): () => Promise<T | undefined> {
   let consumed: number | undefined;
   return async () => {
     const published = current();
     if (published && published.generation !== consumed) {
       consumed = published.generation;
-      return published.facts;
+      if (freshReadGeneration(published, { consumer: "full_sweep", ...bound })) return published.facts;
     }
     if (!published || !read) return undefined;
     return (await read(input())).facts;
@@ -152,7 +181,9 @@ export function startReadPlane<I, O>(options: {
   inline: (input: I) => O | Promise<O>;
   log: (step: string, extra?: Record<string, unknown>) => void;
   spawn?: () => Worker;
+  clock?: Clock;
 }): { read(input: I): Promise<ReadGeneration<O>>; stop(): Promise<void> } {
+  const now = (options.clock ?? systemClock).now;
   let thread: Worker | undefined;
   let stopped = false;
   let generation = 0;
@@ -194,18 +225,20 @@ export function startReadPlane<I, O>(options: {
       const captured = structuredClone(input);
       const run = async (): Promise<ReadGeneration<O>> => {
         if (stopped) throw new Error("read plane stopped");
+        let publishedAtMs = now();
         try {
           const held = start();
           const facts = await new Promise<O>((resolve, reject) => {
             pending.set(id, { resolve, reject });
             held.postMessage({ generation: id, input: captured });
           });
-          return freezeReadGeneration({ generation: id, source: "worker", facts });
+          return freezeReadGeneration({ generation: id, source: "worker", publishedAtMs, facts });
         } catch (error) {
           pending.delete(id);
           if (stopped) throw error;
           options.log("read_plane.inline", { generation: id, reason: String(error) });
-          return freezeReadGeneration({ generation: id, source: "inline", facts: await options.inline(captured) });
+          publishedAtMs = now();
+          return freezeReadGeneration({ generation: id, source: "inline", publishedAtMs, facts: await options.inline(captured) });
         }
       };
       const result = tail.then(run);

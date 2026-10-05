@@ -1,5 +1,5 @@
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
-import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, type ReadGeneration } from "./lib/read-plane.js";
+import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshReadGeneration, type ReadGeneration } from "./lib/read-plane.js";
 import { readPlaneWorkerInput, runReadPlaneWorker, readPlaneWorkerLog } from "./lib/read-plane.worker.js";
 import { renameSync } from "node:fs";
 import { remeasureSettledGoals, withGoalRemeasurement } from "./lib/goals.js";
@@ -35969,7 +35969,7 @@ export async function daemonCommand(
   const projectionGithub = githubFactory(target.owner, target.repo);
   const boardOpenPrCount = createOpenPrCountObservation();
   const refreshMerged: (planOverride?: Plan) => MergedSet = (planOverride = activePlanRef.current) => {
-    if (tickReadGeneration) {
+    if (freshReadGeneration(tickReadGeneration, { consumer: "refresh_merged", log })) {
       const projection = lastProj;
       return (id) => projection?.get(id)?.merged ?? false;
     }
@@ -36427,7 +36427,7 @@ export async function daemonCommand(
   const boardReviewHooks = target.isSelf
     ? boardReviewHooksForTick(config, { projection: () => lastProj, plan: () => activePlanRef.current })
     : undefined;
-  boardReviewHooks?.bindCheckItems(() => tickReadGeneration?.facts.boardItems);
+  boardReviewHooks?.bindCheckItems(() => freshReadGeneration(tickReadGeneration, { consumer: "board_items", log })?.facts.boardItems);
   // W1-T2659: the wipe-test cadence rung. SELF-TARGET ONLY, same reason as measurement-cadence:
   // its marker and ledger live under this harness checkout. The pair itself still targets the
   // sandbox by default through runWipeTestPair/resolveWipeTestTarget.
@@ -36833,7 +36833,7 @@ export async function daemonCommand(
           ghEscalationAnswerGateway(target.owner, target.repo),
           gitCredentialSocket?.socketPath,
           onePassPerGeneration(() => tickReadGeneration, readPlane?.read,
-            () => ({ plan: activePlanRef.current, previousProjection: lastProj ? [...lastProj] : undefined })),
+            () => ({ plan: activePlanRef.current, previousProjection: lastProj ? [...lastProj] : undefined }), { log }),
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
