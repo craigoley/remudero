@@ -1,5 +1,6 @@
 import type { PolicyValues } from "./policy.js";
 import { ratificationPinCheck, type Ratifications } from "./ratification.js";
+import type { NeedsMeSection } from "./status-board.js";
 
 /** Source-owned decisions, projected without granting authority or performing actions. */
 export type HumanGateKind =
@@ -147,6 +148,117 @@ export function projectPinReviewerGates(input: PinReviewerGateInput): HumanGateS
       resolutionVerb: "restart" });
   }
   return [pinSource, source("reviewer-freshness", reviewerReasons, reviewerGates)];
+}
+
+export type OperatorItemKind = "costAnomaly" | "imageDrift" | "tokenFallback" | "uncreditedBuilds";
+
+/** W1-T5374: each NEEDS ME operator item, classified by its producer's real action route — never by its presence. */
+export const OPERATOR_ITEM_CLASSIFICATION: Readonly<Record<OperatorItemKind, {
+  route: "record" | "gate-when-source-holds"; producer: string; why: string;
+}>> = {
+  costAnomaly: { route: "record", producer: "src/lib/cost-anomaly.ts",
+    why: "the sentinel reports a settled run's spend and never stops or changes a run; no source verb resolves it" },
+  tokenFallback: { route: "record", producer: "src/lib/github-app.ts",
+    why: "the refresh loop re-arms after every failure, so recovery stays automated; no person's verb mints the token" },
+  uncreditedBuilds: { route: "record", producer: "src/lib/status.ts",
+    why: "the warning never credits a task or feeds eligibility; crediting is not an authority this surface holds" },
+  imageDrift: { route: "gate-when-source-holds", producer: "src/lib/deployer.ts",
+    why: "the deployer's watchdog recycles a drifted image itself once it is published" },
+};
+
+/** A classified operator item. It carries no resolution verb: acknowledging one is a read, never a grant. */
+export interface OperatorItemRecord {
+  kind: OperatorItemKind;
+  instance: string;
+  subject: string;
+  observedAt: string | null;
+  url: string | null;
+  evidence: string;
+  freshness: "current" | "stale" | "unknown";
+  disposition: "record" | "gate";
+  why: string;
+}
+
+export interface OperatorItemGateInput {
+  instance: string;
+  state: HumanGateSource["state"];
+  reason?: string;
+  /** {@link deriveOperatorItems}'s rows; an absent `uncreditedBuilds` was not observed, never an empty list. */
+  items: Pick<NeedsMeSection, "costAnomaly" | "imageDrift" | "tokenFallback"> & { uncreditedBuilds?: NeedsMeSection["uncreditedBuilds"] };
+  uncreditedReason?: string;
+  /** Every `daemon.boot` time: each boot re-runs the image check, so two after a drift row mean a boot did not see it. */
+  bootTimes: readonly string[];
+  /** state/DEPLOY_IMAGE_MANUAL: present, absent, or unreadable — and why, when unreadable. */
+  imageRecycleManual: boolean | undefined;
+  imageRecycleReason?: string;
+  nowMs: number;
+  freshnessBudgetMs: number;
+}
+
+export function projectOperatorItemGates(input: OperatorItemGateInput): {
+  source: HumanGateSource; records: OperatorItemRecord[]; unobserved: Array<{ kind: OperatorItemKind; reason: string }>;
+} {
+  const age = (ts: string | undefined): OperatorItemRecord["freshness"] => {
+    const ms = ts === undefined ? Number.NaN : Date.parse(ts);
+    if (!Number.isFinite(ms) || ms > input.nowMs) return "unknown";
+    return input.nowMs - ms <= input.freshnessBudgetMs ? "current" : "stale";
+  };
+  const records: OperatorItemRecord[] = [];
+  const record = (kind: OperatorItemKind, item: Omit<OperatorItemRecord, "kind" | "instance" | "disposition" | "why">) =>
+    records.push({ kind, instance: input.instance, ...item, disposition: "record", why: OPERATOR_ITEM_CLASSIFICATION[kind].why });
+  const money = (usd: number, known: boolean): string => known ? `${usd.toFixed(2)}` : "unknown";
+  for (const row of input.items.costAnomaly) {
+    const unknown = new Set(row.unknown ?? []);
+    record("costAnomaly", { subject: row.runId, observedAt: row.ts ?? null, url: null, freshness: age(row.ts),
+      evidence: `${row.taskId} (${row.runId}) [${row.taskClass}] ${unknown.has("cost_usd") ? "cost unknown" : money(row.costUsd, true)} ` +
+        `vs class median ${money(row.medianCostUsd, !unknown.has("median_cost_usd"))} (>${row.multiplier}x, n=${row.sampleSize})` });
+  }
+  const token = input.items.tokenFallback;
+  if (token) {
+    const freshness = age(token.ts);
+    record("tokenFallback", { subject: "github-app-installation-token", observedAt: token.ts ?? null, url: null, freshness,
+      evidence: `the App installation token refresh last failed (${token.reason}); ` +
+        `${token.lastOkTs ? `last good refresh ${token.lastOkTs}` : "no successful refresh on record"}` +
+        (freshness === "current" ? "" : "; no retry of the refresh loop has been observed since") });
+  }
+  const unobserved: Array<{ kind: OperatorItemKind; reason: string }> = [];
+  if (input.items.uncreditedBuilds === undefined) {
+    unobserved.push({ kind: "uncreditedBuilds", reason: input.uncreditedReason ?? "uncredited builds were not read" });
+  }
+  for (const row of input.items.uncreditedBuilds ?? []) {
+    record("uncreditedBuilds", { subject: row.taskId, observedAt: null, url: row.prUrl, freshness: "current",
+      evidence: `merged #${row.prNumber} names ${row.taskId} in its ${row.namedIn}, but no credit surface claimed it` });
+  }
+  const reasons = input.state !== "complete" ? [input.reason ?? "operator-item ledger completeness was not established"] : [];
+  const gates: HumanGateObservation[] = [];
+  const drift = input.items.imageDrift;
+  if (drift) {
+    const driftMs = drift.ts === undefined ? Number.NaN : Date.parse(drift.ts);
+    const later = input.bootTimes.filter((ts) => Date.parse(ts) > driftMs).length;
+    const freshness: OperatorItemRecord["freshness"] = !Number.isFinite(driftMs) || driftMs > input.nowMs ? "unknown" : later >= 2 ? "stale" : "current";
+    const evidence = `running image built at ${drift.buildSha} is missing a baked change at ${drift.bakedSha}` +
+      (freshness === "stale" ? "; a later boot re-ran the image check without re-observing drift" : "");
+    const held = freshness === "current" && input.imageRecycleManual === true;
+    const why = held ? "state/DEPLOY_IMAGE_MANUAL holds image recycles behind rmd deploy, so nothing recycles it but a person"
+      : OPERATOR_ITEM_CLASSIFICATION.imageDrift.why;
+    records.push({ kind: "imageDrift", instance: input.instance, subject: `image-drift:${drift.buildSha}`,
+      observedAt: drift.ts ?? null, url: null, evidence, freshness, disposition: held ? "gate" : "record", why });
+    if (held) {
+      gates.push({ kind: "operator_item", subject: `image-drift:${drift.buildSha}`, ownerSurface: "inbox",
+        openedAt: drift.ts!, url: null, reason: `${evidence}; ${why}`, resolutionVerb: "restart" });
+    } else if (freshness === "current" && input.imageRecycleManual === undefined) {
+      reasons.push(`image recycle mode is unreadable (${input.imageRecycleReason ?? "no reason recorded"}), so whether the deployer or a person recycles the drift is unknown`);
+    } else if (freshness === "unknown" && input.imageRecycleManual !== false) {
+      reasons.push("an image drift observation has no readable time, so it cannot be placed against the current boot");
+    }
+  }
+  records.sort((a, b) => compareText(a.kind, b.kind) || compareText(a.subject, b.subject));
+  return {
+    source: { name: "operator-items", instance: input.instance,
+      state: input.state === "unavailable" ? "unavailable" : reasons.length > 0 ? "partial" : "complete",
+      ...(reasons.length > 0 ? { reason: reasons.join("; ") } : {}), gates },
+    records, unobserved,
+  };
 }
 
 export type HumanGateCount = { count: number; atLeast?: never } | { atLeast: number; count?: never };

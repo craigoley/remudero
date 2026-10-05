@@ -445,6 +445,8 @@ export interface CostAnomalyRow {
   sampleSize: number;
   /** The `cost.anomaly` ledger line's own `ts`, when present. */
   ts?: string;
+  /** W1-T5374: the money fields the row did not carry, which read 0 above; a reader must say unknown, not $0.00. */
+  unknown?: Array<"cost_usd" | "median_cost_usd">;
 }
 
 /** W1-T1021 IMAGE DRIFT — the newest un-dismissed `daemon.image_drift` row: a baked path changed on `main` AFTER the
@@ -2010,29 +2012,12 @@ function deriveMergeHeld(lines: ReadonlyArray<Record<string, unknown>>): MergeHe
   return rows;
 }
 
-function deriveNeedsMe(
+/** W1-T5374: the four operator-item producers NEEDS ME renders, exported so the now view's human-gate adapter
+ *  classifies the SAME rows this board shows rather than a second derivation of them. */
+export function deriveOperatorItems(
   lines: ReadonlyArray<Record<string, unknown>>,
-  projections: Map<string, StatusProjection> | undefined,
-  plan?: Plan,
-  operatorReleasedIds: ReadonlySet<string> = new Set(),
-  releaseReadError?: string,
-): NeedsMeSection {
-  const parkedProposals: NonNullable<NeedsMeSection["parkedProposals"]> =
-    !plan || !projections || releaseReadError
-      ? { taskIds: [], unknownReason: releaseReadError ?? (!plan ? "plan is unreadable" : "merge state is unavailable") }
-      : (() => {
-          const ledgerReleased = new Set(
-            lines.filter((line) => line.step === "ratify.approved" && typeof line.task_id === "string").map((line) => line.task_id as string),
-          );
-          const taskIds = plan.tasks
-            .filter((task) =>
-              task.author_class === "machine" && task.verify === "human" && task.status === "queued" &&
-              projections.get(task.id)?.merged === false && !operatorReleasedIds.has(task.id) && !ledgerReleased.has(task.id),
-            )
-            .map((task) => task.id)
-            .sort();
-          return { count: taskIds.length, taskIds };
-        })();
+  projections: ReadonlyMap<string, StatusProjection> | undefined,
+): Pick<NeedsMeSection, "costAnomaly" | "imageDrift" | "tokenFallback" | "uncreditedBuilds"> {
   // W1-T931: this board's read of `cost.anomaly` rows — never a re-derivation of the detector's math, which lives in
   // cost-anomaly.ts. DEDUPED BY `run_id`, LAST ONE WINS.
   // Why: the concurrent-write risk — docs/forensics/status-board.md
@@ -2044,6 +2029,7 @@ function deriveNeedsMe(
     const ts = typeof l.ts === "string" ? l.ts : undefined;
     const existing = byRunId.get(runId);
     if (existing && !isNewer(ts, existing.ts)) continue;
+    const unknown = (["cost_usd", "median_cost_usd"] as const).filter((field) => typeof l[field] !== "number");
     byRunId.set(runId, {
       runId,
       taskId: typeof l.task_id === "string" ? l.task_id : "?",
@@ -2053,6 +2039,7 @@ function deriveNeedsMe(
       multiplier: typeof l.multiplier === "number" ? l.multiplier : 0,
       sampleSize: typeof l.sample_size === "number" ? l.sample_size : 0,
       ts,
+      ...(unknown.length > 0 ? { unknown } : {}),
     });
   }
   const costAnomaly = [...byRunId.values()].sort((a, b) => (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0));
@@ -2089,10 +2076,6 @@ function deriveNeedsMe(
       ? { reason: lastFail.reason, ...(lastFail.ts ? { ts: lastFail.ts } : {}), ...(lastOkTs ? { lastOkTs } : {}) }
       : undefined;
 
-  // W1-T1000003: currently-standing operator merge holds — a pure re-read of the SAME hold reader sweep.ts and
-  // run-task.ts already consult, never a second gateway or ledger pass.
-  const mergeHeld = deriveMergeHeld(lines);
-
   // W1-T2392: READ, never re-derive. `deriveStatus` already decided this per task and put it on the projection; this
   // walks the SAME map, so no second plan pass. Sorted by task id so the block is stable between renders.
   const uncreditedBuilds: UncreditedBuildRow[] = [];
@@ -2102,6 +2085,38 @@ function deriveNeedsMe(
     uncreditedBuilds.push({ taskId, prNumber: w.prNumber, prUrl: w.prUrl, namedIn: w.namedIn });
   }
   uncreditedBuilds.sort((a, b) => a.taskId.localeCompare(b.taskId));
+
+  return { costAnomaly, imageDrift, uncreditedBuilds, ...(tokenFallback ? { tokenFallback } : {}) };
+}
+
+function deriveNeedsMe(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  projections: Map<string, StatusProjection> | undefined,
+  plan?: Plan,
+  operatorReleasedIds: ReadonlySet<string> = new Set(),
+  releaseReadError?: string,
+): NeedsMeSection {
+  const parkedProposals: NonNullable<NeedsMeSection["parkedProposals"]> =
+    !plan || !projections || releaseReadError
+      ? { taskIds: [], unknownReason: releaseReadError ?? (!plan ? "plan is unreadable" : "merge state is unavailable") }
+      : (() => {
+          const ledgerReleased = new Set(
+            lines.filter((line) => line.step === "ratify.approved" && typeof line.task_id === "string").map((line) => line.task_id as string),
+          );
+          const taskIds = plan.tasks
+            .filter((task) =>
+              task.author_class === "machine" && task.verify === "human" && task.status === "queued" &&
+              projections.get(task.id)?.merged === false && !operatorReleasedIds.has(task.id) && !ledgerReleased.has(task.id),
+            )
+            .map((task) => task.id)
+            .sort();
+          return { count: taskIds.length, taskIds };
+        })();
+  const { costAnomaly, imageDrift, tokenFallback, uncreditedBuilds } = deriveOperatorItems(lines, projections);
+
+  // W1-T1000003: currently-standing operator merge holds — a pure re-read of the SAME hold reader sweep.ts and
+  // run-task.ts already consult, never a second gateway or ledger pass.
+  const mergeHeld = deriveMergeHeld(lines);
 
   // W1-T4192: read merge state off the SAME projections, so a held root is never judged on a second derivation.
   const heldRoots =

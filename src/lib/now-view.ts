@@ -36,7 +36,11 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { deriveLastPoll, readDiskFreeBytes, readGhRateLimitRemaining } from "./daemon-health.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { feedbackDir, listFeedback, type FeedbackEntry } from "./feedback.js";
-import { consumeHumanGateCounts, projectChangeManagementGates, projectHumanGates, projectPinReviewerGates, shownHumanGates, type HumanGateCountSummary, type HumanGateObservation, type HumanGateProjection, type HumanGateSource } from "./human-gate.js";
+import { deployImageManualPath } from "./deployer.js";
+import {
+  consumeHumanGateCounts, projectChangeManagementGates, projectHumanGates, projectOperatorItemGates, projectPinReviewerGates,
+  shownHumanGates, type HumanGateCountSummary, type HumanGateObservation, type HumanGateProjection, type HumanGateSource,
+} from "./human-gate.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { readTaskActivity } from "./ledger-projector.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsSync, rotationStampIso, type LedgerRotationMemo, type LedgerRotationMemoPass } from "./ledger-union.js";
@@ -59,6 +63,7 @@ import { parse as parseYaml } from "yaml";
 import type { ReadModelDb, ReadModelLease } from "./read-model-db.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { buildBatchedGithub, readLedgerLines, type BatchedPr, type GitHub } from "./status.js";
+import { deriveOperatorItems } from "./status-board.js";
 import { deriveDayCostUsd, windowCostRows } from "./sweep.js";
 import { threadPlan, threadPlanPin } from "./thread-plan.js";
 import { utcDayWindowMs } from "./time-window.js";
@@ -738,7 +743,8 @@ export function createNowView(opts: NowViewOptions): {
     const path = nowPlanPath(instance);
     const root = path ? dirname(dirname(path)) : undefined;
     const stores = instance.name === core && instance.feedbackRoot ? `${mtimeOf(feedbackDir(instance.feedbackRoot)) ?? "-"}:${mtimeOf(questionStorePath(instance.feedbackRoot)) ?? "-"}` : "none";
-    return `${stores}:${mtimeOf(ledgerPathOf(instance)) ?? "-"}:${root ? `${mtimeOf(ratificationsPath(root)) ?? "-"}:${mtimeOf(policyPath(root)) ?? "-"}` : "none"}`;
+    return `${stores}:${mtimeOf(ledgerPathOf(instance)) ?? "-"}:${root ? `${mtimeOf(ratificationsPath(root)) ?? "-"}:${mtimeOf(policyPath(root)) ?? "-"}` : "none"}` +
+      `:${mtimeOf(deployImageManualPath(dirname(instance.ledgerDir))) ?? "-"}`;
   };
   const gateMemos = new Map<string, ReturnType<typeof createLedgerRotationMemo>>();
   const gateRows = new Map<string, Array<Record<string, unknown>>>();
@@ -785,6 +791,38 @@ export function createNowView(opts: NowViewOptions): {
       rows: complete ? read.rows : gateRows.get(instance.name) ?? read.rows, pins, policy, pinReason,
       nowMs, freshnessBudgetMs: NOW_DAEMON_SILENT_MS });
   };
+  const operatorMemos = new Map<string, ReturnType<typeof createLedgerRotationMemo>>();
+  const operatorRows = new Map<string, Array<Record<string, unknown>>>();
+  /** W1-T5374: NEEDS ME's operator items, read through status-board's own producers and classified by action route.
+   *  Only the gate source joins this body; the records stay on the status board, which still renders every row. */
+  const operatorItems = (instance: NowInstance, nowMs: number): HumanGateSource => {
+    const steps = /cost\.anomaly|daemon\.image_drift|daemon\.boot|github_app\.token_refresh/;
+    const memo = operatorMemos.get(instance.name) ?? createLedgerRotationMemo((rows) => rows.filter((row) =>
+      typeof row.step === "string" && steps.test(row.step)));
+    operatorMemos.set(instance.name, memo);
+    const pass = memo.pass({ parseMissing: true });
+    const read = readLedgerUnionRecordsSync(instance.ledgerDir, { refuseIncomplete: true, rotationRecords: pass.rotationRecords, pattern: steps });
+    pass.complete();
+    const complete = read.ok && read.liveFileRead && read.torn === 0 && read.unclassified.length === 0;
+    if (complete) operatorRows.set(instance.name, read.rows);
+    const rows = complete ? read.rows : operatorRows.get(instance.name) ?? read.rows;
+    let imageRecycleManual: boolean | undefined;
+    let imageRecycleReason: string | undefined;
+    try {
+      statSync(deployImageManualPath(dirname(instance.ledgerDir)));
+      imageRecycleManual = true;
+    } catch (error) {
+      const reason = (error as NodeJS.ErrnoException).code === "ENOENT" ? undefined : String((error as Error).message);
+      if (reason === undefined) imageRecycleManual = false;
+      imageRecycleReason = reason;
+    }
+    return projectOperatorItemGates({ instance: instance.name, state: complete ? "complete" : "partial",
+      ...(!complete ? { reason: "operator-item ledger source is missing, unreadable or incomplete" } : {}),
+      items: { ...deriveOperatorItems(rows, undefined), uncreditedBuilds: undefined },
+      uncreditedReason: "the now view's board projection skips uncredited-build reads",
+      bootTimes: rows.filter((row) => row.step === "daemon.boot" && typeof row.ts === "string").map((row) => row.ts as string),
+      imageRecycleManual, ...(imageRecycleReason ? { imageRecycleReason } : {}), nowMs, freshnessBudgetMs: NOW_DAEMON_SILENT_MS }).source;
+  };
   /** One instance's open decisions: grill and task questions from core's stores, escalations from its own board. */
   const decisionsOf = (instance: NowInstance, db: ReadModelDb, snapshot: BoardSnapshot, rows: ReadonlyArray<Row>, nowMs: number): NowDecisionsData => {
     const reasons: NonNullable<NowViewData["decisionsReasons"]> = {};
@@ -822,6 +860,7 @@ export function createNowView(opts: NowViewOptions): {
       actions: nowActions(snapshot, rows),
     }));
     sources.push(...pinReviewerSources(instance, nowMs));
+    sources.push(operatorItems(instance, nowMs));
     const humanGates = projectHumanGates(sources);
     const capped = capDecisions(all);
     const shown = shownHumanGates(humanGates, capped.decisions.map((decision) => ({ instance: decision.instance, ...decisionGate(decision) })));
