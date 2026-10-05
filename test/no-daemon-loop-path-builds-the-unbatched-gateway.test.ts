@@ -18,7 +18,7 @@
 // gateway, including paths no single execution drives; the same shape as test/gh-transport-census.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -27,6 +27,7 @@ import { loadPlan, type Plan, type Task } from "../src/lib/plan.js";
 import { buildBatchedGithub, ghGateway } from "../src/lib/status.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 import { buildDepsReadinessAccessors, buildInboxDraftHook } from "../src/run-task.js";
+import { ghShim } from "./helpers/gh-shim.js";
 
 /** Functions the loop DOES reach that build the unbatched gateway, with the reason each is bounded.
  *  SHRINK-ONLY: an entry the census no longer reaches (or whose function no longer builds the
@@ -169,17 +170,12 @@ test("the exemption table is shrink-only: every entry states why its calls are b
 });
 
 /** A `gh` on PATH that logs every invocation: the only way to SEE a synchronous spawn. */
-function withCountingGh<T>(dir: string, body: (calls: () => string[]) => T): T {
-  const bin = join(dir, "bin");
-  mkdirSync(bin, { recursive: true });
-  const callLog = join(dir, "gh-calls.log");
-  writeFileSync(join(bin, "gh"), `#!/bin/sh\necho "$@" >> "${callLog}"\necho '[]'\n`);
-  chmodSync(join(bin, "gh"), 0o755);
-  writeFileSync(callLog, "");
+function withCountingGh<T>(body: (calls: () => string[]) => T): T {
+  const shim = ghShim([{ when: "api", stdout: "[]" }], { kind: "t5650-gh" });
   const oldPath = process.env.PATH;
-  process.env.PATH = `${bin}:${oldPath ?? ""}`;
+  process.env.PATH = `${shim.dir}:${oldPath ?? ""}`;
   try {
-    return body(() => readFileSync(callLog, "utf8").split("\n").filter((l) => /search/.test(l)));
+    return body(() => shim.calls().filter((l) => /search/.test(l)));
   } finally {
     process.env.PATH = oldPath;
   }
@@ -200,13 +196,13 @@ test("unit test: test/no-daemon-loop-path-builds-the-unbatched-gateway.test.ts â
   writeFileSync(ledgerPath, "");
   const tasks = unlandedTasks(50);
   const plan = { byId: new Map(tasks.map((t) => [t.id, t])) } as unknown as Plan;
-  withCountingGh(dir, (searches) => {
+  withCountingGh((searches) => {
     // CONTROL: the instrument sees the unbatched gateway. 50 tasks cost 50 synchronous searches.
     const unbatched = buildDepsReadinessAccessors(plan, { ledgerPath, github: ghGateway("o", "r") });
     for (const t of tasks) unbatched.isMerged(t);
     assert.ok(searches().length >= 50, `the control must see one search per task; saw ${searches().length}`);
   });
-  withCountingGh(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t5650b-`)), (searches) => {
+  withCountingGh((searches) => {
     // The gateway the draft rung now receives: the sweep's daemon-lifetime batched one.
     const batched = buildBatchedGithub("o", "r", { fetchAll: () => [], fetchAllIssues: () => [], commitTrailerIndex: () => new Map() });
     const accessors = buildDepsReadinessAccessors(plan, { ledgerPath, github: batched });
@@ -226,7 +222,7 @@ test("the draft rung runs clean on the injected batched gateway and spawns no se
   );
   const batched = buildBatchedGithub("o", "r", { fetchAll: () => [], fetchAllIssues: () => [], commitTrailerIndex: () => new Map() });
   const logs: string[] = [];
-  await withCountingGh(dir, async (searches) => {
+  await withCountingGh(async (searches) => {
     const hook = buildInboxDraftHook("o", "r", { root } as Config, "RUN-5650", (s) => void logs.push(s), async () => [], undefined, () => "sha", batched);
     await hook();
     assert.deepEqual(searches(), []);
