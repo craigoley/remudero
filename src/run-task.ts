@@ -6198,7 +6198,7 @@ export function openTaskIdsFromPlan(plan: Plan, projection?: ReadonlyMap<string,
 
 interface GateOutcome {
   merged: boolean;
-  verdict?: "awaiting_merge" | "blocked_ci";
+  verdict?: "awaiting_merge" | "blocked_ci" | "handed_off";
   reason: string;
   headSha?: string;
   checks?: string[];
@@ -6457,6 +6457,12 @@ export async function pollToGate(
         checks,
       };
     }
+    if (i === 0) log(AWAITING_EXTERNAL_LEDGER_STEP, { waiting_on: "pr" });
+    const recycle = deps.externalWaitRecycle?.();
+    if (recycle) {
+      log("run.freshness_handoff", { waiting_on: "pr", head_sha: sha, trigger: "recycle", detail: recycle });
+      return { merged: false, verdict: "handed_off", reason: "recycle_yield", headSha: sha, checks };
+    }
     readings.push(roll);
     if (readings.length > STALL_WINDOW) readings.shift(); // checkWaitStalled only ever looks at the last STALL_WINDOW
     const stall = checkWaitStalled(readings);
@@ -6482,11 +6488,6 @@ export async function pollToGate(
         checks,
       };
     }
-      // W1-T1211: ONCE per wait, on the first poll only — never per iteration. The light pass
-      // reads this row to tell a WAITING run (worker turn finished, GitHub is the blocker) from a
-      // WORKING one, and the polling row beside it cannot carry that decision because the rotator
-      // is right to shed it. See `runIsAwaitingExternal`.
-      if (i === 0) log(AWAITING_EXTERNAL_LEDGER_STEP, { waiting_on: "pr" });
     if (i === 0 || i % 5 === 0) {
       log("pr.polling", {
         state,
@@ -8469,7 +8470,7 @@ export function fixRungTerminationVerdict(
 }
 
 export interface FixRungOutcome {
-  outcome: "fixed" | "escalated" | "stood_down" | "spawn_abandoned" | "parked" | "rebased" | "base_refreshed" | "needs_design";
+  outcome: "fixed" | "escalated" | "stood_down" | "spawn_abandoned" | "parked" | "rebased" | "base_refreshed" | "needs_design" | "handed_off";
   /** The last review computed — passing when `outcome === "fixed"`. Unchanged from the PRIOR
    *  round's own verdict when `outcome === "spawn_abandoned"` (W1-T1044): the strike that
    *  abandoned never produced a new head to re-review. */
@@ -10575,6 +10576,11 @@ export async function runFixRung(opts: {
     proofDiscriminationEvidenceFromCriteria(review.criteria) !== undefined;
   let strikes = 0;
   let retriggers = 0;
+  const ciHandoff = (ci: CiGateOutcome | "green" | "red" | "timeout"): FixRungOutcome | undefined => {
+    if (typeof ci === "string" || ci.state !== "freshness_handoff") return undefined;
+    deps.log("fix.ci_not_green", { strike: strikes, ci: ci.state, sha: ci.sha });
+    return { outcome: "handed_off", review, strikes, retriggers, reason: ci.recycle ? "recycle_yield" : "freshness_yield" };
+  };
   let sessionToResume: string | undefined = opts.initialSessionId;
   // W1-T100: true until a REAL review has run FOR THE CURRENT head. A
   // blocked_ci dispatch (opts.ciFailures set) has no reviewer verdict at all
@@ -11163,6 +11169,8 @@ export async function runFixRung(opts: {
           // the next iteration re-derives from THAT — either another generator-fixable round, or a
           // real fall-through to the ordinary worker dispatch.
           const gated = await deps.waitForCiGreen(opts.prUrl, deps.log);
+          const handoff = ciHandoff(gated);
+          if (handoff) return handoff;
           currentPinnedSha = ciGateSha(gated) ?? currentPinnedSha;
           if (deps.fetchCiFailures) {
             try {
@@ -11510,7 +11518,10 @@ export async function runFixRung(opts: {
           deps.log("fix.prerequisite_dispatch_failed", { strike: strikes, prerequisite_pr: target.prNumber, reason: admissionRefusal });
           return await escalateAndExhaust();
         }
-        const ciState = ciGateState(await deps.waitForCiGreen(prerequisiteUrl!, deps.log));
+        const ci = await deps.waitForCiGreen(prerequisiteUrl!, deps.log);
+        const handoff = ciHandoff(ci);
+        if (handoff) return handoff;
+        const ciState = ciGateState(ci);
         if (ciState !== "green") {
           // THE REFUSAL CONDITION, SECOND ARM: a prerequisite that CANNOT GO GREEN escalates
           // exactly as the rung does today (rationale (5)) — never merged, never rebased onto.
@@ -12248,6 +12259,8 @@ export async function runFixRung(opts: {
       if (requeued) {
         try {
           const ci = await deps.waitForCiGreen(opts.prUrl, deps.log);
+          const handoff = ciHandoff(ci);
+          if (handoff) { logFixDone(); return handoff; }
           green = ciGateState(ci) === "green" && (!ciGateSha(ci) || ciGateSha(ci) === priorHeadSha);
         } catch (error) {
           deps.log("fix.flake_verification_failed", { head_sha: priorHeadSha, reason: String(error) });
@@ -12348,6 +12361,8 @@ export async function runFixRung(opts: {
     );
 
     const ci = await deps.waitForCiGreen(opts.prUrl, deps.log);
+    const handoff = ciHandoff(ci);
+    if (handoff) return handoff;
     // W1-T2804: one gate read, one sha, and the miner below is pinned to it — never a second
     // independent head resolution between the two halves of a single decision.
     currentPinnedSha = ciGateSha(ci) ?? currentPinnedSha;
@@ -16223,7 +16238,7 @@ async function runTask(
       spawn: benchmarkNonDispatchSpawn("aa-prospective", rawSpawn), maxBudgetUsd: PAIRED_ATTEMPT_MAX_BUDGET_USD, clockBoundMs: workerAbandonMs }) }
     : { dispatchRefusal: PAIRED_CLI_REFUSAL }), task, lane: "implement", stateDir: join(config.root, "state"), config,
     harnessRevision: (opts.benchmarkStackEvidence ?? workerBoundaryStack).harnessRevision });
-  try {
+  return withInflightRunLock(inflightLock, taskId, log, async (runLog) => {
     const ctx: RunTaskContext = {
       cashContainmentBoundary,
       cashContainmentState,
@@ -16232,7 +16247,7 @@ async function runTask(
       github,
       isMerged,
       ledgerPath,
-      log,
+      log: runLog,
       openTaskIds,
       opts,
       owner,
@@ -16250,8 +16265,30 @@ async function runTask(
       workerStateSensor,
     };
     return await runTaskBody(ctx);
+  });
+}
+
+/** Release the run's task lock after unwinding, retaining attribution for a recycle handoff. */
+export async function withInflightRunLock<T>(
+  lock: InflightLockHandle,
+  taskId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  run: (log: (step: string, extra?: Record<string, unknown>) => void) => Promise<T>,
+): Promise<T> {
+  let waitingOn: unknown;
+  try {
+    return await run((step, extra) => {
+      if (step === "run.freshness_handoff" && extra?.trigger === "recycle") waitingOn = extra.waiting_on;
+      log(step, extra);
+    });
   } finally {
-    inflightLock.release();
+    try {
+      if (waitingOn) log("inflight.recycle_yield", {
+        lock_key: basename(lock.path, ".lock"), task_id: taskId, run_id: lock.info.run_id, waiting_on: waitingOn,
+      });
+    } finally {
+      lock.release();
+    }
   }
 }
 
@@ -18817,7 +18854,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         deps: {
           // W1-T3718: the SAME repair-ladder tracking the sweep's fix spawn carries.
           spawn: trackRepairLadder(spawn, { config, log }),
-          waitForCiGreen,
+          waitForCiGreen: (url, waitLog) => waitForCiGreen(url, waitLog, 6, { externalWaitRecycle: opts.externalWaitRecycle }),
           // W1-T138: refresh the ci-log evidence whenever a strike leaves CI
           // non-green — see runFixRung's own doc for why this must happen on
           // every strike, not just the first.
@@ -18922,6 +18959,14 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         });
         say(`verdict: blocked — fix worker spawn abandoned (wall-clock bound): ${prUrl}`);
         return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
+      }
+      if (rung.outcome === "handed_off") {
+        log("verdict", {
+          verdict: "handed_off", pr_url: prUrl, reason: rung.reason, cost_usd: costUsd,
+          billing_mode: billingMode(impl.childEnvKeys), account_label: impl.accountLabel, ...terminalVerdictFields(impl),
+        });
+        say(`verdict: handed_off (${rung.reason}) — PR left OPEN: ${prUrl}`);
+        return { taskId, runId, prUrl, merged: false, costUsd, verdict: "handed_off" };
       }
       if (rung.outcome === "escalated") {
         log("verdict", {
@@ -19331,7 +19376,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // the poll times out, the PR is LEFT OPEN and the verdict is blocked_ci —
     // pending is treated as blocked, never as pass. No Action arms a PR; only
     // this code, only on PRs it opened.
-    const outcome = await pollToGate(prUrl, (s, extra) => log(s, extra));
+    const outcome = await pollToGate(prUrl, (s, extra) => log(s, extra), 6, {
+      externalWaitRecycle: opts.externalWaitRecycle ?? (() => recyclePauseDetail(config.root)),
+    });
 
     if (outcome.merged) {
       log("pr.merged", { state: "MERGED" });

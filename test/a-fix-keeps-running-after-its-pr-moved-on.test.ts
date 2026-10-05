@@ -360,6 +360,10 @@ async function dispatchWithRung(rungReturns: "watch" | "plain") {
         log: (step, extra) => logs.push({ step, extra }),
         ghJsonImpl: (args) => {
           ghCalls.push(args);
+          if (args.includes("headRefName,headRefOid,body,files")) {
+            return { headRefName: "run-W1-T4079-1790000000000", headRefOid: OLD_HEAD, body: "", files: [] };
+          }
+          assert.ok(args.includes("headRefOid,statusCheckRollup"), "the injected reader handles only admission and watcher reads");
           if (ghCalls.filter((a) => a.includes("headRefOid,statusCheckRollup")).length === 1) throw new Error("gh: HTTP 502");
           return { headRefOid: NEW_HEAD, statusCheckRollup: [] };
         },
@@ -404,6 +408,7 @@ async function dispatchWithRung(rungReturns: "watch" | "plain") {
 test("W1-T4105: the sweep's fix dispatch watches the PR with one read per poll and keeps a superseded worktree", async () => {
   const { logs, removed, ghCalls } = await dispatchWithRung("watch");
   assert.deepEqual(removed, [], "a superseded worker's worktree is kept for diagnosis");
+  assert.equal(ghCalls.filter((a) => a.includes("headRefName,headRefOid,body,files")).length, 1, "admission reads the branch and body once before watching");
   const watchReads = ghCalls.filter((a) => a.includes("headRefOid,statusCheckRollup"));
   assert.equal(watchReads.length, 2, "one PR read per poll: the unreadable one, then the one that saw the new head");
   const unknown = logs.find((l) => l.step === "fix.superseded_unknown");
