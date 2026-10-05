@@ -103,6 +103,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "automerge.capped_override_granted": A_LANE_RUN_ID,
   "dep-review.arm_unreachable": A_LANE_RUN_ID,
   "dep-review.decided": A_LANE_RUN_ID,
+  "dep-review.hold_reconcile_failed": A_LANE_RUN_ID,
   "dep-review.migrate.capture_failed": A_LANE_RUN_ID,
   "dep-review.migrate.closed": A_LANE_RUN_ID,
   "dep-review.migrate.completed": A_LANE_RUN_ID,

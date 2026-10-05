@@ -175,6 +175,22 @@ test("dependency hold retries failed delivery and retirement without approving r
   f.failClose(false);
   assert.equal(await f.run(), 0);
   assert.equal(f.closed.length, 1);
+  const rows = f.ledger();
+  const failures = rows.filter((row) => row.step === "dep-review.hold_reconcile_failed");
+  assert.equal(failures.length, 3);
+  assert.deepEqual(failures.map((row) => row.error), [
+    "Error: dependency hold escalation not delivered; retry after the issue read recovers",
+    "Error: create unavailable",
+    "Error: close unavailable",
+  ]);
+  for (const failure of failures) {
+    assert.match(failure.run_id, /^dep-review-PR5022-[0-9]+$/);
+    assert.equal(failure.lane, "dep-review");
+    assert.equal(failure.pr_url, "https://github.com/craigoley/remudero/pull/5022");
+    assert.equal(failure.head_sha, "a".repeat(40));
+    assert.equal(rows.some((row) => row.run_id === failure.run_id && row.step === "run.start"), false,
+      "the config gardener skips dependency command runs without run.start");
+  }
 });
 
 test("short lived dependency hold recovery resets the age on the same head", async (t) => {
