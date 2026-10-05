@@ -407,25 +407,63 @@ export function runCensusSuitesViaChild({ root, files, run = spawnSync }) {
   return failing;
 }
 
+const STEP_LITERAL_RE = /(?:\bstep\s*===|\bcase|\blog\w*\s*\(|\bstep\s*:)\s*(["'`])([^"'`\r\n$]+)\1/g;
+const ENV_NAME_RE = /\b(?:RMD|REMUDERO)_[A-Z0-9_]+\b/g;
+const ERROR_CLASS_RE = /\bclass\s+([\w$]+)\s+extends\s+Error\b/g;
+
+function addsLiteral({ changed, readHead, readBase }, pattern, group) {
+  if (typeof readHead !== "function" || typeof readBase !== "function") return false;
+  const literals = (text) => new Set([...String(text ?? "").matchAll(pattern)].map((m) => m[group]));
+  return changed.filter((path) => CLOCK_SCOPE_RE.test(path)).some((path) => {
+    const base = literals(readBase(path));
+    return [...literals(readHead(path))].some((literal) => !base.has(literal));
+  });
+}
+
+function stepTrigger(input) {
+  return input.changed.some((path) => path === "src/lib/ledger.ts" || path === "src/lib/spend-rows.ts") ||
+    addsLiteral(input, STEP_LITERAL_RE, 2);
+}
+
+/** W1-T5692: these slower censuses join the same child when changed source adds a literal. */
+export const PRECHECK_TRIGGERED_SUITES = [
+  { testFile: "test/ledger-rotation.test.ts", script: "census:ledger-rotation", trigger: stepTrigger,
+    remedy: "register DECISION_RELEVANT_LEDGER_STEPS in src/lib/ledger.ts" },
+  { testFile: "test/a-union-read-of-an-unretained-step-is-refused.test.ts", script: "census:unretained-step", trigger: stepTrigger,
+    remedy: "register DECISION_RELEVANT_LEDGER_STEPS in src/lib/ledger.ts" },
+  { testFile: "test/spend-is-counted-once-at-its-producer.test.ts", script: "census:spend", trigger: stepTrigger,
+    remedy: "declare SPEND_STEP_ROLES in src/lib/spend-rows.ts" },
+  { testFile: "test/env-var-registry.test.ts", script: "census:env-var-registry",
+    trigger: (input) => input.changed.includes("src/lib/config-schema.ts") || addsLiteral(input, ENV_NAME_RE, 0),
+    remedy: "register ENV_REGISTRY in src/lib/config-schema.ts" },
+  { testFile: "test/error-subclass-census.test.ts", script: "census:error-subclass",
+    trigger: (input) => input.changed.includes("scripts/error-subclass-baseline.json") || addsLiteral(input, ERROR_CLASS_RE, 1),
+    remedy: "adopt RmdError in src/lib/errors.ts or record the reviewed ceiling in scripts/error-subclass-baseline.json" },
+];
+
 /**
- * The admitted census suites this diff joins, run. A member joins when a changed path starts with one of its
- * `walks` prefixes; the joined suites run once through `runSuites`, and each failing one is a row on ONE physical
- * line in the shape src/run-task.ts censusPushRefusal reads. A diff joining none starts no child. Every failure
+ * Admitted suites join by `walks` prefixes; triggered suites join by new literals or registry changes.
+ * They run once through `runSuites`; each failure is one row in the shape censusPushRefusal reads.
+ * A diff joining none starts no child. Every failure
  * to read the table or run the suites is `unmeasured` with its reason, never an empty violation list.
  *
  * @param {{ changed: string[], loadMembers: () => { testFile: string, script: string, walks: string[] }[],
- *   runSuites: (files: string[]) => string[] }} input
+ *   runSuites: (files: string[]) => string[], readHead?: (p: string) => string | null,
+ *   readBase?: (p: string) => string | null }} input
  * @returns {{ violations: string[], unmeasured: string | null }}
  */
-export function evaluateAdmittedCensusSuites({ changed, loadMembers, runSuites }) {
+export function evaluateAdmittedCensusSuites({ changed, loadMembers, runSuites, readHead, readBase }) {
   if (changed.length === 0) return { violations: [], unmeasured: null };
   let members;
+  let triggered;
   try {
     members = loadMembers();
+    triggered = PRECHECK_TRIGGERED_SUITES.filter((m) => m.trigger({ changed, readHead, readBase }));
   } catch (e) {
     return { violations: [], unmeasured: String(e?.message ?? e) };
   }
-  const joined = members.filter((m) => changed.some((p) => m.walks.some((w) => p.startsWith(w))));
+  const admitted = members.filter((m) => changed.some((p) => m.walks.some((w) => p.startsWith(w))));
+  const joined = [...new Map([...admitted, ...triggered].map((m) => [m.testFile, m])).values()];
   if (joined.length === 0) return { violations: [], unmeasured: null };
   let failing;
   try {
@@ -435,7 +473,7 @@ export function evaluateAdmittedCensusSuites({ changed, loadMembers, runSuites }
   }
   const violations = joined
     .filter((m) => failing.has(m.testFile))
-    .map((m) => `census-suite: ${m.testFile} fails — run npm run ${m.script}`);
+    .map((m) => `census-suite: ${m.testFile} fails — run npm run ${m.script}${m.remedy ? `; ${m.remedy}` : ""}`);
   return { violations, unmeasured: null };
 }
 
@@ -460,6 +498,7 @@ export const PRECHECK_PARITY = {
   "test/authority-ratchet.test.ts": { run: "census:authority" },
   "test/no-shallowing-of-the-canonical-checkout.test.ts": { run: "census:no-shallowing" },
   "test/no-draft-pull-request-ever-sits-on-the-board.test.ts": { run: "census:no-draft-pr" },
+  ...Object.fromEntries(PRECHECK_TRIGGERED_SUITES.map((m) => [m.testFile, { run: m.script }])),
 };
 
 /** Census suites CI runs only in its ci/coverage shards, because no census name puts them in
@@ -516,13 +555,16 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
   try {
     const mergeBase = gitOut(root, ["merge-base", "HEAD", values.base]).trim();
     changed = gitOut(root, ["diff", "--name-only", "--no-renames", mergeBase]).split("\n").filter(Boolean);
-    violations = evaluateCensusPrecheck({
-      changed,
+    const readers = {
       readHead: (p) => (existsSync(join(root, p)) ? readFileSync(join(root, p), "utf8") : null),
       readBase: (p) => {
         const res = git(["show", `${mergeBase}:${p}`], { cwd: root });
         return res.status === 0 ? res.stdout : null;
       },
+    };
+    violations = evaluateCensusPrecheck({
+      changed,
+      ...readers,
       measuredFiles: listMeasuredFiles(root),
       testFiles: listFixtureCopyFiles(root),
       srcFiles: listHouseLayoutSrcFiles(root),
@@ -535,6 +577,7 @@ export function main(argv, { measure = measureViaChild, admitted = listAdmittedC
     if (instrument.unmeasured !== null) unmeasured.push(`instrument-surface NOT MEASURED - ${instrument.unmeasured}`);
     const suites = evaluateAdmittedCensusSuites({
       changed,
+      ...readers,
       loadMembers: () => admitted(root),
       runSuites: (files) => runSuites({ root, files }),
     });
