@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 1, the action-ladder half"
   plan_refs: [W1-T5687, W1-T5651, W1-T3268, W1-T2585, W1-T5519]
   files: [deploy/install-host-units.sh, test/fixtures/azure-host-units/rmd-relaunch.sh, test/the-host-watchdog-acts-on-a-stalled-daemon.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

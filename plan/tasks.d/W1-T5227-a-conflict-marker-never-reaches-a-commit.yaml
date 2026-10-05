@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-02: E34, fleet fix-lane commit 4c047d2bd on PR #8551"
   plan_refs: [W1-T4458, W1-T3696, W1-T3727, W1-T4207, W1-T4797, W1-T137, W1-T2773, W1-T106]
   files: [src/run-task.ts, hooks/pre-commit, test/a-conflict-marker-never-reaches-a-commit.test.ts]
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     EVIDENCE: `git show 4c047d2bd`. Author "Remudero Fleet", subject "fix(now-view): retain probe rows and

@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: the board shows status proposed beside landing queued (W1-T5524)"
   plan_refs: [W1-T5524, W1-T5525, W1-T5460]
   files: [src/lib/panel-graph.ts, src/lib/feedback-landing.ts, openapi/daemon.yaml, packages/api-client/src/schema.d.ts, test/a-queued-decision-reads-as-decided-until-it-lands.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |
