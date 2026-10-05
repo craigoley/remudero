@@ -294,6 +294,10 @@ export interface GardenerDeps<W extends GardenCheckout = GardenCheckout> {
   escalate?: (escalation: Escalation) => string;
 }
 
+export type GardenerAsyncDeps<W extends GardenCheckout = GardenCheckout> = Omit<GardenerDeps<W>, "prState"> & {
+  prState?: (prUrl: string) => PrState | Promise<PrState>;
+};
+
 export interface GardenSpec<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout> {
   /** Ledger prefix, state-file stem and off-switch prefix (upper-cased). */
   name: string;
@@ -483,11 +487,17 @@ export function judgedByOutcomeNote(name: string, actionClass: string, why: stri
 }
 
 /** Where a landed PR stands, read over REST with the given fetcher. */
-export function gardenPrState(owner: string, repo: string, prUrl: string, fetch: (args: string[]) => unknown): PrState {
+export function gardenPrState(owner: string, repo: string, prUrl: string, fetch: (args: string[]) => Promise<unknown>): PrState | Promise<PrState>;
+export function gardenPrState(owner: string, repo: string, prUrl: string, fetch: (args: string[]) => unknown): PrState;
+export function gardenPrState(owner: string, repo: string, prUrl: string, fetch: (args: string[]) => unknown): PrState | Promise<PrState> {
+  return runStepsEager(gardenPrStateSteps(owner, repo, prUrl, fetch));
+}
+
+function* gardenPrStateSteps(owner: string, repo: string, prUrl: string, fetch: (args: string[]) => unknown): Steps<PrState> {
   const n = /\/pull\/(\d+)/.exec(prUrl)?.[1];
   if (!n) return "unknown";
   try {
-    const pr = fetch(["api", `repos/${owner}/${repo}/pulls/${n}`]) as { merged?: boolean; state?: string };
+    const pr = (yield* step(() => fetch(["api", `repos/${owner}/${repo}/pulls/${n}`]))) as { merged?: boolean; state?: string };
     return pr.merged ? "merged" : pr.state === "closed" ? "closed" : "open";
   } catch {
     // deliberate: an unreadable PR is "unknown", which keeps the pending class waiting, never judged on a guess.
@@ -577,14 +587,14 @@ export function runGarden<C extends string, I, A extends GardenAction<C>, W exte
  *  same steps, so the same rows, state and refusals. */
 export function runGardenAsync<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
   spec: GardenSpec<C, I, A, W>,
-  deps: GardenerDeps<W>,
+  deps: GardenerAsyncDeps<W>,
 ): Promise<GardenPassResult<C, A>> {
   return runStepsAsync(gardenPassSteps(spec, deps));
 }
 
 function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
   spec: GardenSpec<C, I, A, W>,
-  deps: GardenerDeps<W>,
+  deps: GardenerAsyncDeps<W>,
 ): Steps<GardenPassResult<C, A>> {
   const statePath = gardenStatePath(deps.stateDir, spec.name);
   let state = readGardenState(statePath, spec.classes);
@@ -602,7 +612,7 @@ function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W exte
   if ((gardenFilingRetryAt(state.filingFailures) ?? 0) > (deps.clock ?? systemClock).now()) return { ran: false };
   const cheap = spec.cheapFingerprint();
   const pendingBefore = state.pending;
-  const prState = pendingBefore ? deps.prState?.(pendingBefore.prUrl) ?? "unknown" : undefined;
+  const prState = pendingBefore ? (yield* step(() => deps.prState?.(pendingBefore.prUrl) ?? "unknown")) : undefined;
   // Closing any PR is a debit, and a reviewed class credits its merge; neither needs a corpus read.
   if (pendingBefore && (prState === "closed" || (judgedByDecision(spec, pendingBefore.actionClass) && prState === "merged"))) {
     const judged = judgeGardenDecision(state, prState);
@@ -695,7 +705,7 @@ function* gardenPassSteps<C extends string, I, A extends GardenAction<C>, W exte
 /** Run passes on their own timer beside the main loop, never two at once. */
 export function startGarden<C extends string, I, A extends GardenAction<C>, W extends GardenCheckout>(
   spec: GardenSpec<C, I, A, W>,
-  deps: GardenerDeps<W>,
+  deps: GardenerAsyncDeps<W>,
   intervalMs: number,
 ): { stop: () => void } {
   let running = false;
