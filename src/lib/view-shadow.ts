@@ -551,6 +551,29 @@ export interface ShadowLegacy {
   inputs?: Readonly<Record<string, unknown>>;
   /** Why legacy's own sources say it is not ready ({@link unreadySources}): the sample is skipped, not compared. */
   unready?: string;
+  /** Per data path, the source it is computed from wholly and the as-of legacy read it at: a diff there when the
+   *  body read that source at another as-of compared two different inputs, so it is `timing`, never `real`. */
+  paired?: Readonly<Record<string, { source: string; asOf: string | null }>>;
+}
+
+/** The diff under a {@link ShadowLegacy.paired} path whose source the body read at another as-of, judged `timing`. */
+function unpairedRead(path: string, paired: ShadowLegacy["paired"], sources: readonly ViewSource[] | undefined): { classification: ShadowClassification; reason: string } | undefined {
+  for (const [under, read] of Object.entries(paired ?? {})) {
+    if (path !== under && !path.startsWith(`${under}.`)) continue;
+    const bodyRead = sources?.find((source) => source.name === read.source);
+    if (bodyRead && bodyRead.asOf !== read.asOf) return { classification: "timing", reason: `legacy read ${read.source} as of ${read.asOf}, the body as of ${bodyRead.asOf}` };
+  }
+  return undefined;
+}
+
+/** What legacy read of each source its definition pairs ({@link ViewDefinition.shadowSources}). */
+function pairedReads(declared: ViewDefinition["shadowSources"], sources: readonly ViewSource[]): ShadowLegacy["paired"] {
+  const out: Record<string, { source: string; asOf: string | null }> = {};
+  for (const [path, name] of Object.entries(declared ?? {})) {
+    const read = sources.find((source) => source.name === name);
+    if (read) out[path] = { source: name, asOf: read.asOf };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /** A derived path takes its inputs' classes: `real` unless an input differs and every differing input is explained. */
@@ -723,7 +746,7 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
         ...(legacy.horizonMs !== undefined ? { legacyHorizonMs: legacy.horizonMs } : {}), ...(legacy.duplicates ? { duplicates: legacy.duplicates } : {}),
         ...(legacy.rows ? { legacyRows: legacy.rows } : {}), ...(legacy.orderRows ? { orderRows: legacy.orderRows } : {}),
       });
-      const judged = raw.filter((d) => !legacy.derived?.[d.path]).map((d) => ({ path: d.path, ...classifyShadowDiff(d, ev) }));
+      const judged = raw.filter((d) => !legacy.derived?.[d.path]).map((d) => ({ path: d.path, ...(unpairedRead(d.path, legacy.paired, body.sources) ?? classifyShadowDiff(d, ev)) }));
       const diffs = raw.map((d) => {
         const inputs = legacy.derived?.[d.path];
         return inputs ? { path: d.path, ...classifyDerived(inputs, judged) } : judged.find((j) => j.path === d.path)!;
@@ -737,7 +760,7 @@ export function createViewShadow(opts: ViewShadowOptions): ViewShadow {
           const d = raw.find((r) => r.path === path)!;
           return { legacy: excerpt(d.legacy), view: excerpt(d.view) };
         };
-        opts.log(VIEW_SHADOW_DIFF_STEP, { view, key, classes, ...(legacy.inputs ? { inputs: legacy.inputs } : {}), diffs: diffs.map((d) => (d.classification === "real" ? { ...d, ...sides(d.path) } : d)) });
+        opts.log(VIEW_SHADOW_DIFF_STEP, { view, key, classes, ...(legacy.inputs ? { inputs: legacy.inputs } : {}), ...(legacy.paired ? { paired: legacy.paired } : {}), diffs: diffs.map((d) => (d.classification === "real" ? { ...d, ...sides(d.path) } : d)) });
       }
       summarize(view, state, now, { diffs });
       opts.store?.save(view, state);
@@ -795,7 +818,8 @@ export function legacyViewSampler(opts: { legacy: readonly ViewDefinition[]; pos
       if (rendered === undefined || "error" in rendered) return opts.post({ view, key, requests });
       const asOf = rendered.body.asOf === null ? Number.NaN : Date.parse(rendered.body.asOf);
       const unready = unreadySources(rendered.body.sources);
-      opts.post({ view, key, requests, legacy: { data: rendered.body.data, asOfMs: Number.isFinite(asOf) ? asOf : clock.now(), ...(unready ? { unready } : {}) } });
+      const paired = pairedReads(definition!.shadowSources, rendered.body.sources);
+      opts.post({ view, key, requests, legacy: { data: rendered.body.data, asOfMs: Number.isFinite(asOf) ? asOf : clock.now(), ...(unready ? { unready } : {}), ...(paired ? { paired } : {}) } });
     },
   });
 }
