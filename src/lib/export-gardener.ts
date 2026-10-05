@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { basename, join, posix } from "node:path";
 
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";

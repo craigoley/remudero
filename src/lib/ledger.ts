@@ -30,7 +30,7 @@ import { isHolderStale, reclaimStaleLock, writeAtomic, type FileIdentity } from 
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { assertLedgerPathNotLive } from "./live-write-guard.js";
 import { rotationStampIso } from "./ledger-union.js";
-import { PLAN_ONLY_REVIEW_MARKER_STEP, planOnlyReviewMarkers, pruneCarriedRows } from "./ledger-carry.js";
+import { PLAN_ONLY_REVIEW_MARKER_STEP, planOnlyReviewMarkers, PR_TERMINAL_STEP, pruneCarriedRows } from "./ledger-carry.js";
 import { resolveProducerIdentity, type ProducerIdentity } from "./producer-identity.js";
 import { WORKER_SCOPE_ENV } from "./worker-containment.js";
 
@@ -629,6 +629,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "dispatch.starvation.cleared",
   "verdict",
   "verdict.merged",
+  PR_TERMINAL_STEP, // W1-T5318: pruneCarriedRows' terminal fact, and runPrTerminalReconcile's live dedup
   "correction.provenance",
   "sweep.disposed",
   // W1-T4351: sweep.ts's `decideBaseRed` reads main's latest run and each head's base-red record;
@@ -819,6 +820,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   EMERGENCY_STOP_CLEARED_LEDGER_STEP,
   OPERATOR_PREFERENCE_PROPOSED_LEDGER_STEP,
   OPERATOR_PREFERENCE_EVENT_LEDGER_STEP,
+  "review.finding", // W1-T5019: verifiedReviewFindingsForFix (run-task.ts) feeds repair prompts.
   // KEEP THE W1-T964 TRIO LAST, immediately before the Set's close: test/ledger-rotation.test.ts
   // anchors its mutation check on those three lines followed by `]);` and asserts the needle occurs
   // EXACTLY once. A block appended after them silently breaks that anchor.

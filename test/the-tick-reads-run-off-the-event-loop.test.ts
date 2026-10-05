@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
-import { startReadPlane, startReadPlaneTelemetry, freezeReadGeneration } from "../src/lib/read-plane.js";
+import { startReadPlane, startReadPlaneTelemetry, freezeReadGeneration, onePassPerGeneration } from "../src/lib/read-plane.js";
 import { createTickReadProducer, buildBoardReviewDaemonHooks, applyTickCreditUpdates, buildDaemonReadRefresher,
   buildInboxDraftHook, daemonCommand, projectionReadinessAccessors, tickReadReverificationDeps } from "../src/run-task.js";
 import { makeTempDir } from "../src/lib/tmp.js";
@@ -443,4 +443,35 @@ test("W1-T4075: the real daemon wiring publishes a worker generation that the ti
     rmSync(gh.dir, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("a full sweep retriggered in the same tick reads a fresh generation, never the consumed one", async () => {
+  // DAEMON-1791151532775: one tick held its dispatch phase 70 minutes; every retriggered full pass
+  // reused that tick's open-PR views, so merged PRs and superseded heads were disposed for an hour.
+  const fixture = fixtureReader();
+  const produce = createTickReadProducer(fixture.options, fixture.io);
+  const published = freezeReadGeneration({ generation: 1, source: "worker" as const,
+    facts: await produce({ plan: fixture.plan }) });
+  const previous = new Map(published.facts.projection);
+  const requests: unknown[] = [];
+  let generation = 1;
+  const read = async (input: Parameters<typeof produce>[0]) => {
+    requests.push(input.previousProjection);
+    return freezeReadGeneration({ generation: ++generation, source: "worker" as const, facts: await produce(input) });
+  };
+  const input = () => ({ plan: fixture.plan, previousProjection: [...previous] });
+  const tickRead = onePassPerGeneration(() => published, read, input);
+  assert.equal(await tickRead(), published.facts, "the tick's own pass consumes the published generation");
+  assert.equal(requests.length, 0);
+  fixture.setListed([2]);
+  const retriggered = await tickRead();
+  assert.deepEqual(retriggered?.openPrViews.map((pr) => pr.prNumber), [2], "a merged PR is no longer swept");
+  assert.deepEqual(requests, [[...previous]]);
+  assert.deepEqual(published.facts.openPrViews.map((pr) => pr.prNumber), [1, 2], "the published generation is untouched");
+  assert.equal(await onePassPerGeneration(() => undefined, read, input)(), undefined,
+    "no published generation leaves the hook on its own live read");
+  const planeless = onePassPerGeneration(() => published, undefined, input);
+  assert.equal(await planeless(), published.facts);
+  assert.equal(await planeless(), undefined, "a consumed generation with no read plane is never reused");
+  assert.equal(requests.length, 1);
 });

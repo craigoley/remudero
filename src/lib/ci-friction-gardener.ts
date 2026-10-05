@@ -573,7 +573,8 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
     filesContaining: (term) => {
       let out = "";
       try {
-        out = git(["grep", "-c", "-F", "-e", term, refName, "--", "src", "scripts"]);
+        // -w: a term found only inside larger identifiers ("ci" in "decision") names no code path.
+        out = git(["grep", "-c", "-F", "-w", "-e", term, refName, "--", "src", "scripts"]);
       } catch (e) {
         // `git grep` exits 1 when nothing matches: no owner, which the ladder escalates.
         if ((e as { status?: number }).status !== 1) throw e;

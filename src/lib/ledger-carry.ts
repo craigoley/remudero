@@ -26,13 +26,16 @@ export const LATEST_ROW_LEDGER_STEPS: ReadonlyMap<string, (row: Record<string, u
   ["dep-review.decided", (row: Record<string, unknown>) => String(row.task_id)],
 ]);
 
+/** W1-T5318: one row per closed PR, merged or not, written by the sweep from GitHub's own closed state. */
+export const PR_TERMINAL_STEP = "pr.terminal";
+
 /**
- * This prune drops a PR's sweep rows only on a RECORDED merge (ledger.ts's boundSweepRows bounds the rest
- * by age, W1-T5517): `verdict.merged` (sweep credit backfill) or a run's `verdict` row reading `merged`.
- * A merged PR whose fact is absent from the file keeps its rows here.
+ * This prune drops a PR's sweep rows only on a RECORDED terminal fact (ledger.ts's boundSweepRows bounds the
+ * rest by age, W1-T5517): `verdict.merged` (sweep credit backfill), a run's `verdict` row reading `merged`, or
+ * a `pr.terminal` row (merged or closed, W1-T5318). A closed PR whose fact is absent keeps its rows here.
  */
 function recordedMergeKey(row: Record<string, unknown>, step: string | undefined): string | undefined {
-  if (step === "verdict.merged" || (step === "verdict" && row.verdict === "merged")) return sweepPrKey(row);
+  if (step === "verdict.merged" || step === PR_TERMINAL_STEP || (step === "verdict" && row.verdict === "merged")) return sweepPrKey(row);
   return undefined;
 }
 
@@ -50,7 +53,12 @@ function keptAfterMerge(row: Record<string, unknown>): boolean {
 }
 
 function sweepPrKey(row: Record<string, unknown>): string | undefined {
-  const match = typeof row.pr_url === "string" ? /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(row.pr_url) : null;
+  return prUrlKey(row.pr_url);
+}
+
+/** `owner/repo#n` for a GitHub PR url, the identity every PR-keyed carry and terminal-row read shares. */
+export function prUrlKey(prUrl: unknown): string | undefined {
+  const match = typeof prUrl === "string" ? /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(prUrl) : null;
   return match ? `${match[1]}#${match[2]}` : undefined;
 }
 

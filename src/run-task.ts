@@ -1,5 +1,5 @@
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
-import { startReadPlane, startReadPlaneTelemetry, type ReadGeneration } from "./lib/read-plane.js";
+import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, type ReadGeneration } from "./lib/read-plane.js";
 import { readPlaneWorkerInput, runReadPlaneWorker, readPlaneWorkerLog } from "./lib/read-plane.worker.js";
 import { renameSync } from "node:fs";
 import { remeasureSettledGoals, withGoalRemeasurement } from "./lib/goals.js";
@@ -25,7 +25,7 @@ import { mkdir as mkdirAsync, readFile as readFileAsync } from "node:fs/promises
 import { baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile } from "./lib/base-reproduction.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { CHECK_REQUEUE_STEP, requeuedCheckKeysFromLedger } from "./lib/sweep.js";
-import { ghExec, ghJsonAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
+import { ghExec, ghJsonAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
@@ -218,6 +218,7 @@ import {
   renderReconPrompt,
   scopeGuardOutOfScopeFiles,
   type FixEvidence,
+  type FixReviewFinding,
   type FixMode,
 } from "./lib/prompt-render.js";
 export {
@@ -489,6 +490,7 @@ import {
   escalationContractRevision,
   findDuplicateEscalation,
   ghIssueGateway,
+  ghIssueGatewayAsync,
   presenceMode,
   setPresenceMode,
   tryEscalate,
@@ -1157,7 +1159,9 @@ import {
   repairRefusedTask,
   type RefusalViolation,
 } from "./lib/dispatch-repair.js";
-import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, replayOptIn } from "./lib/replay-harness.js";
+import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, replayOptIn,
+  pairedReviewerReplayCommand, replayPairedReviews, type ReviewerReplayCommandInput } from "./lib/replay-harness.js";
+import { judgeInstanceLiveness, readLivenessRows, LIVENESS_WINDOW_MS } from "./lib/fleet-liveness.js";
 import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, type GoldenTask } from "./lib/replay.js";
 import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount, type Mounts } from "./lib/mounts.js";
@@ -1517,6 +1521,12 @@ import {
   REQUIRED_CHECK_FAIL,
   REQUIRED_CHECK_OK,
   runCreditBackfill,
+  closedPrFacts,
+  closedPrFromRef,
+  closedPrLookup,
+  runPrTerminalReconcile,
+  type ClosedPrFact,
+  type PrTerminalReconcileSummary,
   runEscalationReconcile,
   runPostFixReverification,
   runSweep,
@@ -2594,7 +2604,11 @@ import {
   gitPushRunBranchAsync,
   gitPushEmptyCommit,
   LanePushForeignHeadError,
+  runStepsAsync,
+  runStepsSync,
+  step,
   type PushRunBranchAsyncOpts,
+  type Steps,
 } from "./lib/git-push.js";
 import {
   ensureWorkerKeychain,
@@ -10118,6 +10132,7 @@ export async function runFixRung(opts: {
   retriggerCap?: number;
   /** The blocked_review verdict that triggered this rung. */
   initialReview: ReviewRunResult;
+  initialCriterionIndices?: readonly number[];
   reviewBase: { owner: string; repo: string; headCheckoutDir: string; reviewerMount: Mount }; birthWorktreeSnapshot?: WorktreeSnapshot;
   /** The run's already-resolved worker-abandon policy, threaded into re-reviews so the advisory
    * reviewer does not reread policy from disk on every fix strike. */
@@ -11458,7 +11473,10 @@ export async function runFixRung(opts: {
     // only) so the empty-review-evidence guard below can tell "genuinely nothing unmet" apart
     // from "unmet, but only on a WORKER-hidden holdout criterion" (W1-T2236 design note i) —
     // the latter must keep dispatching off the review's own redacted summary, never stand down.
-    const rawUnmet = review.criteria.filter((c) => !c.met);
+    const rawUnmet = review.criteria.map((c, index) => {
+      const criterionIndex = review === opts.initialReview ? opts.initialCriterionIndices?.[index] ?? index + 1 : index + 1;
+      return { ...c, criterionIndex, holdout: opts.task.acceptance?.[criterionIndex - 1]?.holdout ?? c.holdout };
+    }).filter((c) => !c.met);
     const unmet = visibleCriteria(rawUnmet);
     const proofDiscriminationFromReview =
       opts.proofDiscrimination !== undefined &&
@@ -11582,7 +11600,8 @@ export async function runFixRung(opts: {
     // byte-identical re-block apart from real progress. Keyed on the SAME
     // worker-visible unmet set the fix rung actually dispatches (W1-T166).
     const priorHeadSha = review.headSha;
-    const priorDesign = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))().find((row) =>
+    const roundLedger = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))();
+    const priorDesign = roundLedger.find((row) =>
       row.step === "fix.needs_design" && row.task_id === opts.taskId && row.head_sha === priorHeadSha);
     if (priorDesign) {
       const reason = String(priorDesign.reason);
@@ -11620,7 +11639,9 @@ export async function runFixRung(opts: {
           // actually non-empty, so a `[]`/`undefined` value here is inert for a genuine
           // reviewer-unmet dispatch (unmet.length > 0) exactly as before this task.
           {
-            review: { unmetCriteria: unmet, summary: review.summary },
+            review: { unmetCriteria: unmet, summary: review.summary, findings: verifiedReviewFindingsForFix(
+              roundLedger, opts.taskId, opts.prUrl, priorHeadSha,
+            ) },
             actionableGateFailures: gateFailuresNow,
             proofDiscrimination: proofDiscriminationNow,
             constraint: opts.constraint,
@@ -22094,6 +22115,17 @@ export interface ReplayGoldensDeps {
   writeLedger?: typeof appendLedger;
   now?: () => number;
   log?: (message: string) => void;
+}
+
+export async function benchmarkReviewerReplayCommand(rest: string[], deps: Partial<ReviewerReplayCommandInput>
+  & { usageDeps?: Parameters<typeof readUsageSnapshotPreferSdk>[1] } = {}): Promise<number> {
+  return pairedReviewerReplayCommand(rest, (input) => replayPairedReviews(input), {
+    ...deps, readIdle: deps.readIdle ?? (async (stateDir, config) => {
+      const instance = { name: "operator-reviewer", repo: "operator/reviewer", stateDir };
+      return { liveness: judgeInstanceLiveness(instance, readLivenessRows(instance, systemClock.now() - LIVENESS_WINDOW_MS), systemClock.now()),
+        headroom: await readUsageSnapshotPreferSdk(config, deps.usageDeps) };
+    }),
+  });
 }
 
 /**
@@ -34224,9 +34256,19 @@ export function requeueActionsJob(
   log: (step: string, extra?: Record<string, unknown>) => void,
   exec: (args: string[]) => unknown = ghExec,
 ): boolean {
+  return runStepsSync(requeueActionsJobSteps(owner, repo, failure, log, exec));
+}
+
+function* requeueActionsJobSteps(
+  owner: string,
+  repo: string,
+  failure: { name: string; jobId?: string },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  exec: (args: string[]) => unknown,
+): Steps<boolean> {
   if (!failure.jobId) return false;
   try {
-    exec(["api", "-X", "POST", `repos/${owner}/${repo}/actions/jobs/${failure.jobId}/rerun`]);
+    yield* step(() => exec(["api", "-X", "POST", `repos/${owner}/${repo}/actions/jobs/${failure.jobId}/rerun`]));
     return true;
   } catch (error) {
     log("main.health.ci_requeue.error", {
@@ -34236,6 +34278,16 @@ export function requeueActionsJob(
     });
     return false;
   }
+}
+
+export function requeueActionsJobAsync(
+  owner: string,
+  repo: string,
+  failure: { name: string; jobId?: string },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  exec: (args: string[]) => unknown = (args) => ghTextAsync(args),
+): Promise<boolean> {
+  return runStepsAsync(requeueActionsJobSteps(owner, repo, failure, log, exec));
 }
 
 /**
@@ -35153,6 +35205,8 @@ export function createTickReadProducer(options: TickReadOptions, io: {
   const filingFiles = createPlanFilingFileCache();
   let reads = new Map<string, unknown>();
   let generationClock = 0;
+  const closedAt = new Map<number, string>();
+  let closedRows: ReadonlyArray<{ number: number; url: string; state: string }> = [];
   const fetch: GhApiFetcher = (args, budget) => {
     const endpoint = args.find((arg) => arg.startsWith(`repos/${owner}/${repo}/`));
     let key = args.join("\0");
@@ -35167,11 +35221,19 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     if (reads.has(key)) return reads.get(key);
     const answer = (io.fetch ?? ghJson)(args, budget);
     reads.set(key, answer);
+    if (endpoint?.includes("state=closed") && Array.isArray(answer)) { // W1-T5318: GitHub's own terminal times
+      for (const pr of answer as Array<{ number?: unknown; merged_at?: unknown; closed_at?: unknown }>) {
+        const at = pr.merged_at ?? pr.closed_at;
+        if (typeof pr.number === "number" && typeof at === "string") closedAt.set(pr.number, at);
+      }
+    }
     return answer;
   };
   const github = io.github ?? buildBatchedGithub(owner, repo, {
     log, pacer, snapshotCache: {
       ...snapshotCache,
+      closedSeed: () => { const seed = snapshotCache.closedSeed(); if (seed) closedRows = [...seed.values()]; return seed; },
+      commitClosed: (rows) => { closedRows = rows; return snapshotCache.commitClosed(rows); },
       commitOpen: (rows) => snapshotCache.commitOpen?.(rows, Date.now()) ?? false,
     }, changedFilesCache: {
       lookup: (url, state) => (state === "MERGED" || state === "CLOSED" ? files : openFiles).lookup(url, state),
@@ -35263,13 +35325,20 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     const creditUpdates = Object.entries(credits)
       .filter(([id, value]) => JSON.stringify(value) !== JSON.stringify(creditBefore[id]))
       .map(([id, after]) => ({ id, before: creditBefore[id], after }));
+    const closedPrs: ClosedPrFact[] = closedPrFacts(closedRows, closedAt, new Set(openPrRows?.map((pr) => pr.number)));
     return { plan, projection: [...projection], openBranches, openPrRows, openPrViews, openPrError, creditUpdates,
       creditCandidates, escalationCandidates, escalationIntake, boardItems,
-      staleGateWorkflowsByPr, behindMainByPr, mergedFixPrNumbers, postFixCiFailuresByPr };
+      staleGateWorkflowsByPr, behindMainByPr, mergedFixPrNumbers, postFixCiFailuresByPr, closedPrs };
   };
 }
 
 type TickReadFacts = Awaited<ReturnType<ReturnType<typeof createTickReadProducer>>>;
+
+export function sweepPrTerminalRung(github: Pick<GitHub, "prByRef">, ledgerPath: string, runId: string, // W1-T5318
+  tickRead?: Pick<TickReadFacts, "closedPrs">): PrTerminalReconcileSummary {
+  const lookup = tickRead?.closedPrs ? closedPrLookup(tickRead.closedPrs) : (url: string) => closedPrFromRef(github.prByRef(url));
+  return runPrTerminalReconcile(lookup, { ledgerPath, runId });
+}
 
 export function applyTickCreditUpdates(facts: Pick<TickReadFacts, "creditUpdates">, ledgerPath: string,
   log: (step: string, extra?: Record<string, unknown>) => void): void {
@@ -35827,13 +35896,13 @@ export async function daemonCommand(
   // not two. Serve still only writes the signed marker and never receives this callback.
   const mainHealthRung = buildMainHealthRung(target.owner, target.repo, {
     fetch: (args) => ghJsonAsync(args),
-    issues: ghIssueGateway(target.owner, target.repo),
+    issues: ghIssueGatewayAsync(target.owner, target.repo),
     ledgerPath,
     runId,
     log,
     freshMs: policy.values.githubEventWake.checkSettleMs,
-    readCiFailures: (rollup) => fetchCiFailures(target.owner, target.repo, [...(rollup ?? [])]),
-    requeueCheck: (failure) => requeueActionsJob(target.owner, target.repo, failure, log),
+    readCiFailures: (rollup) => fetchCiFailuresAsync(target.owner, target.repo, [...(rollup ?? [])]),
+    requeueCheck: (failure) => requeueActionsJobAsync(target.owner, target.repo, failure, log),
     // W1-T4056: judge only the checks that gate a merge. A scheduled monitor attaches its run to main's
     // head too, and judging it filed 65 of 83 "main is red" issues; a red one is now ledgered as
     // `advisory_failing_checks`. [] on any unreadable contract keeps "judge every check", never green.
@@ -36522,7 +36591,8 @@ export async function daemonCommand(
           // W1-T4471: the one real wiring of the owner-reply reader.
           ghEscalationAnswerGateway(target.owner, target.repo),
           gitCredentialSocket?.socketPath,
-          () => tickReadGeneration?.facts,
+          onePassPerGeneration(() => tickReadGeneration, readPlane?.read,
+            () => ({ plan: activePlanRef.current, previousProjection: lastProj ? [...lastProj] : undefined })),
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -38626,6 +38696,14 @@ export function defaultCiAnnotationFetch(owner: string, repo: string, checkRunId
   const out = ghExec(["api", `repos/${owner}/${repo}/check-runs/${checkRunId}/annotations`],
     { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
   );
+  return failureAnnotationLines(out);
+}
+
+export async function defaultCiAnnotationFetchAsync(owner: string, repo: string, checkRunId: string): Promise<string[]> {
+  return failureAnnotationLines(await ghTextAsync(["api", `repos/${owner}/${repo}/check-runs/${checkRunId}/annotations`]));
+}
+
+function failureAnnotationLines(out: string): string[] {
   const annotations = JSON.parse(out) as Array<{ annotation_level?: string; message?: string }>;
   return annotations
     .filter((a) => a.annotation_level === "failure" && typeof a.message === "string")
@@ -38640,6 +38718,10 @@ export function defaultCiJobLogFetch(owner: string, repo: string, jobId: string)
     stdio: ["ignore", "pipe", "ignore"],
     maxBuffer: 1 << 22,
   });
+}
+
+export function defaultCiJobLogFetchAsync(owner: string, repo: string, jobId: string): Promise<string> {
+  return ghTextAsync(["api", `repos/${owner}/${repo}/actions/jobs/${jobId}/logs`], { maxBuffer: 1 << 22 });
 }
 
 /** GitHub's job-log endpoint stamps every line; every line pattern below is anchored after it. */
@@ -38734,17 +38816,45 @@ export function fetchCiFailures(
   tailLines = 60,
   options: CiAnnotationFetch | CiFailureFetchOptions = {},
 ): CiFailure[] {
-  const fetch = ciFetchOptions(options);
+  return runStepsSync(ciFailuresSteps(owner, repo, rollup, tailLines, ciFetchOptions(options)));
+}
+
+export interface CiFailureFetchOptionsAsync {
+  fetchAnnotations?: (owner: string, repo: string, checkRunId: string) => string[] | Promise<string[]>;
+  fetchJobLog?: (owner: string, repo: string, jobId: string) => string | Promise<string>;
+  annotationReadLimit?: number;
+}
+
+export function fetchCiFailuresAsync(
+  owner: string,
+  repo: string,
+  rollup: RollupCheck[] | undefined,
+  tailLines = 60,
+  options: CiFailureFetchOptionsAsync = {},
+): Promise<CiFailure[]> {
+  return runStepsAsync(
+    ciFailuresSteps(owner, repo, rollup, tailLines, {
+      fetchAnnotations: options.fetchAnnotations ?? defaultCiAnnotationFetchAsync,
+      fetchJobLog: options.fetchJobLog ?? defaultCiJobLogFetchAsync,
+      annotationReadLimit: options.annotationReadLimit ?? DEFAULT_CI_ANNOTATION_READ_LIMIT,
+    }),
+  );
+}
+
+function* ciFailuresSteps(
+  owner: string,
+  repo: string,
+  rollup: RollupCheck[] | undefined,
+  tailLines: number,
+  fetch: Required<CiFailureFetchOptionsAsync>,
+): Steps<CiFailure[]> {
   let annotationReads = 0;
   const failing = dedupeRollupByLatestAttempt(rollup ?? []).filter((c) => {
     const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
     return REQUIRED_CHECK_FAIL.has(s);
   });
-  // #2918: `ci-gate` is a downstream aggregator — see `withoutDownstreamGateFailure`'s own doc.
-  // Applied HERE, at the single producer, so every consumer (the fix prompt, the escalation body,
-  // `describeCiFailures`) sees the same narrowed list rather than each re-deriving it.
-  return withoutDownstreamGateFailure(
-    failing.map((c) => {
+  const failures: CiFailure[] = [];
+  for (const c of failing) {
     const name = c.name ?? c.context ?? "unknown";
     let logTail = "";
     // The named outcome for an empty tail. STILL BEST-EFFORT: every path below either assigns a
@@ -38761,7 +38871,7 @@ export function fetchCiFailures(
     if (jobId && annotationReads < fetch.annotationReadLimit) {
       try {
         annotationReads += 1;
-        const messages = fetch.fetchAnnotations(owner, repo, jobId).filter((m) => m.trim() !== "");
+        const messages = (yield* step(() => fetch.fetchAnnotations(owner, repo, jobId))).filter((m) => m.trim() !== "");
         const evidence = messages.filter((m) => !isBareExitCodeAnnotation(m));
         const bareExitOnly = messages.length > 0 && evidence.length === 0;
         if (evidence.length > 0) {
@@ -38793,7 +38903,7 @@ export function fetchCiFailures(
     }
     if (jobId && (logTail.trim() === "" || annotationFallback?.outcome === "bare-exit-code")) {
       try {
-        const out = fetch.fetchJobLog(owner, repo, jobId);
+        const out = yield* step(() => fetch.fetchJobLog(owner, repo, jobId));
         const extracted = extractCiFailureRegion(out, tailLines);
         // W1-T2733: the region, PLUS any declared generator remedy the slice would have discarded.
         // Identical bytes to the region whenever the log names no recognised remedy.
@@ -38814,7 +38924,7 @@ export function fetchCiFailures(
         logTail = "";
       }
     }
-    return {
+    failures.push({
       name,
       logTail,
       conclusion: (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase(),
@@ -38823,9 +38933,12 @@ export function fetchCiFailures(
       ...(logUnavailable === undefined ? {} : { logUnavailable }),
       ...(tailSource ? { tailSource } : {}),
       ...(annotationFallback ? { annotationFallback } : {}),
-    };
-  }),
-  );
+    });
+  }
+  // #2918: `ci-gate` is a downstream aggregator — see `withoutDownstreamGateFailure`'s own doc.
+  // Applied HERE, at the single producer, so every consumer (the fix prompt, the escalation body,
+  // `describeCiFailures`) sees the same narrowed list rather than each re-deriving it.
+  return withoutDownstreamGateFailure(failures);
 }
 
 /**
@@ -39027,30 +39140,72 @@ function refusalByClaimFromDecisionVerdict(value: unknown): Map<string, Criterio
   return refusals;
 }
 
+export function verifiedReviewFindingsForFix(
+  rows: ReadonlyArray<Record<string, unknown>>, taskId: string, prUrl: string, headSha: string,
+): FixReviewFinding[] {
+  const findings: FixReviewFinding[] = [];
+  const seen = new Set<string>();
+  const validPath = (path: unknown): path is string => typeof path === "string" && path.length > 0 &&
+    path.length <= 240 && !isAbsolute(path) && !/[\\\x00-\x1f]/.test(path) && !path.split("/").includes("..");
+  if (!/^[a-f0-9]{40,64}$/.test(headSha)) return findings;
+  for (const row of rows) {
+    if (row.step !== "review.finding" || row.task_id !== taskId || row.pr_url !== prUrl ||
+        row.head_sha !== headSha || row.capture_state !== "verified") continue;
+    const anchor = row.anchor as Record<string, unknown> | null | undefined;
+    const producer = anchor?.changedProducer as Record<string, unknown> | null | undefined;
+    if (!anchor || anchor.status !== "verified" || !validPath(anchor.path) ||
+        !Number.isInteger(anchor.line) || Number(anchor.line) < 1 ||
+        !["changed", "dependency"].includes(String(anchor.kind)) ||
+        anchor.kind === "dependency" && !producer ||
+        producer !== undefined && (!producer || !validPath(producer.path) || !Number.isInteger(producer.line) || Number(producer.line) < 1) ||
+        typeof anchor.evidenceDigest !== "string" || !/^[a-f0-9]{64}$/.test(anchor.evidenceDigest) ||
+        typeof row.finding_id !== "string" || !/^[a-f0-9]{64}$/.test(row.finding_id) ||
+        !Number.isInteger(row.criterion_index) || Number(row.criterion_index) < 1 ||
+        typeof row.category !== "string" || !/^[a-z][a-z0-9_-]{1,31}$/.test(row.category) ||
+        !["low", "medium", "high"].includes(String(row.severity)) ||
+        typeof row.mechanism !== "string" || !row.mechanism.trim() || row.mechanism.length > 500 ||
+        !(row.remedy === null || typeof row.remedy === "string" && row.remedy.length <= 500) || seen.has(row.finding_id)) continue;
+    seen.add(row.finding_id);
+    findings.push({ criterionIndex: Number(row.criterion_index), path: anchor.path, line: Number(anchor.line),
+      mechanism: row.mechanism, remedy: row.remedy as string | null });
+  }
+  return findings;
+}
+
 /**
- * Recover the most recent failing review's unmet criteria for a task from the
- * ledger (`review.posted` / `fix.review` lines carry `unmet_criteria` + `reasons`).
+ * Recover the most recent failing review's unmet criteria from review.posted rows.
  * No PR-head checkout needed just to ROUTE the disposition — the fix rung itself
- * re-derives the authoritative verdict when it runs. Proof text is unavailable
- * from the ledger, so it degrades to "" (the fix prompt leans on claim + reason).
+ * re-derives the authoritative verdict when it runs. Proof context comes from
+ * that row's decision verdict; legacy missing execution outcomes stay unknown.
  */
 function unmetFromLedger(lines: Array<Record<string, unknown>>, taskId: string): CriterionVerdict[] {
   let claims: string[] = [];
   let reasons: string[] = [];
   let refusals = new Map<string, CriterionRefusal>();
+  let proofContext = new Map<string, Partial<CriterionVerdict>>();
   for (const line of lines) {
     if (line.step !== "review.posted" || line.task_id !== taskId) continue;
+    proofContext = new Map();
     if (line.state === "success") { claims = []; reasons = []; refusals = new Map(); continue; }
     if (Array.isArray(line.unmet_criteria)) claims = line.unmet_criteria.map(String);
     if (Array.isArray(line.reasons)) reasons = line.reasons.map(String);
     refusals = refusalByClaimFromDecisionVerdict(line.decision_verdict);
+    const decision = line.decision_verdict as { criteria?: unknown } | null | undefined;
+    if (Array.isArray(decision?.criteria)) {
+      for (const entry of decision.criteria) {
+        if (entry === null || typeof entry !== "object") continue;
+        const criterion = entry as Partial<CriterionVerdict>;
+        if (criterion.met === false && typeof criterion.claim === "string") proofContext.set(criterion.claim, criterion);
+      }
+    }
   }
   return claims.map((claim, i) => ({
     claim,
-    proof: "",
+    proof: proofContext.get(claim)?.proof ?? "",
     met: false,
     reason: reasons[i] ?? "",
-    proof_exec: "not_executable" as const,
+    // Legacy ledger rows can lack this required live-verdict field (W1-T5020).
+    proof_exec: proofContext.get(claim)?.proof_exec as CriterionVerdict["proof_exec"],
     refusal: refusals.get(claim),
   }));
 }
@@ -40480,6 +40635,11 @@ export function buildFixRungDispatchArgs(args: {
   const isMergeConflict = evidence.mergeConflict !== undefined;
   const isCiLog = !isMergeConflict && evidence.ciFailures !== undefined;
   const unmet = evidence.unmetCriteria;
+  const initialCriterionIndices = unmet.map((c) => {
+    const matches = (args.task.acceptance ?? []).flatMap((criterion, index) =>
+      criterion.claim === c.claim && (!c.proof || criterion.proof === c.proof) ? [index] : []);
+    return matches.length === 1 ? matches[0]! + 1 : 0;
+  });
   // W1-T5544: gate-log evidence names proofs only; the plan's own criteria supply each claim.
   const proofDiscrimination = withPlanClaims(evidence.proofDiscrimination, args.task.acceptance);
 
@@ -40562,6 +40722,7 @@ export function buildFixRungDispatchArgs(args: {
     budgetUsd: args.budgetUsd,
     strikeCap: args.strikeCap,
     initialReview,
+    initialCriterionIndices,
     constraint: pr.pendingAnswer?.constraint,
     ciFailures: evidence.ciFailures,
     ciEvidenceDisagreement: isCiLog
@@ -43241,7 +43402,7 @@ export function buildSweepHook(
   escalationAnswerGateway?: EscalationAnswerGateway,
   // W1-T5115: the daemon's git credential socket. Omitted ⇒ fix workers keep the ambient helper.
   gitCredentialSocketPath?: string,
-  tickReadFor?: () => TickReadFacts | undefined,
+  tickReadFor?: () => TickReadFacts | undefined | Promise<TickReadFacts | undefined>,
 ): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
@@ -43299,7 +43460,7 @@ export function buildSweepHook(
   const branchReapStatePath = join(config.root, "state", automaticBranchReapStateFileName(repo));
   const branchReapState: AutomaticBranchReapState = readAutomaticBranchReapState(branchReapStatePath);
   return async (continueReviewAdmissions = () => true) => {
-    const tickRead = tickReadFor?.();
+    const tickRead = await tickReadFor?.();
     try {
       await mainHealthRung?.();
     } catch (e) {
@@ -43406,6 +43567,7 @@ export function buildSweepHook(
       // W1-T150: the SAME credit-backfill rung `rmd sweep` runs, on the
       // daemon's own poll cadence — never a second, separately-scheduled loop.
       await runCreditBackfill(creditCandidates, { ledgerPath, runId, log });
+      sweepPrTerminalRung(boardGithub, ledgerPath, runId, tickRead); // W1-T5318: every closed PR, task or not
       // W1-T175 — the worktree reaper rung, on the daemon's own poll cadence: the hole
       // this closes is specifically an IDLE fleet (no run dispatched, so pruneStaleRuns'
       // run-start trigger never fires) leaving crashed-run debris to grow unbounded. Own
@@ -51582,7 +51744,8 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     : rest[0] === "readiness" ? await benchmarkAaReadinessCommand(rest.slice(1),
       (request) => runBenchmarkAaReadiness({ ...benchmarkAaReadinessRuntime(request.stateDir), ...request }))
     : await benchmarkAaCommand(rest, (input) => buildBenchmarkAaReport(input))],
-  ["benchmark-paid-pilot", async (rest) => await benchmarkPaidPilotCommand(rest, (input) => activateBenchmarkPaidPilot(input),
+  ["benchmark-paid-pilot", async (rest) => rest[0] === "replay" ? await benchmarkReviewerReplayCommand(rest.slice(1))
+    : await benchmarkPaidPilotCommand(rest, (input) => activateBenchmarkPaidPilot(input),
     { pairedReport: pairedPilotReportView })],
   ["memory-lint", (rest) => memoryLintCommand(rest)],
   ["ledger-compact", (rest) => ledgerCompactCommand(rest)],
