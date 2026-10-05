@@ -1619,6 +1619,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "postReview",
   "repushAbsent",
   "updateBranch",
+  "mergeQueue", // W1-T5903: the behind-main refresh stands down under a merge queue
   "captureRepairFeedback",
   "disarmAutoMerge",
   "stackPrerequisite",
@@ -1680,6 +1681,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "postReview"
   | "repushAbsent"
   | "updateBranch"
+  | "mergeQueue"
   | "readyDraft"
   | "draftRefusalAmendments"
   | "captureRepairFeedback"
@@ -2681,7 +2683,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // fits the disposition semantically (this module's own header: "only a human hand can do
       // the thing") — a capped, green, unreviewable PR needs an operator to look at it and either
       // override the cap or merge it by hand; nothing downstream can move it further on its own.
-      const cls: EscalationClass = isCappedReviewOrphanEscalation(pr, policy) ? "MANUAL" : "BLOCKED";
+      const cls: EscalationClass = reason.startsWith("PR stage stalled:") || isCappedReviewOrphanEscalation(pr, policy) ? "MANUAL" : "BLOCKED";
       escalate(
         {
           class: cls,
@@ -2698,7 +2700,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           // fix-rung-exhaustion issue named, `escalate()` appends here instead of
           // opening a sibling — the #412/#413-shaped duplicate this task fixes.
           headSha: pr.headSha,
-          ...(reason === "review failing with no actionable unmet criteria (contradictory) — escalating"
+          ...(reason.startsWith("PR stage stalled:") || reason === "review failing with no actionable unmet criteria (contradictory) — escalating"
             ? { headDedup: "independent" as const }
             : {}),
           cause: escalationCause(pr.mergeState === "dirty", isBlockedCi(pr)),
@@ -3539,6 +3541,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // W1-T528 — the action half of W1-T520. `runSweep` calls this AT MOST ONCE per pass, on the
     // single PR `selectUpdateBranchTarget` chose — see `SweepDeps.updateBranch`'s own doc.
     updateBranch: (pr) => updateBranchImpl(pr),
+
+    // W1-T5903 — the queue tests the merged result, so staleness against main is the queue's job.
+    mergeQueue: (prUrl) => baseBranchRequiresMergeQueue(prUrl, ghJsonForBuild),
 
     readyDraft: (pr) => readyDraftImpl(pr),
 
@@ -4490,6 +4495,8 @@ export const DEFAULT_CLARIFY_POLICY: ClarifyPolicy = { resetStrikeCounterOnAnswe
 /** Tunable thresholds as DATA (rule 2), never inlined constants in the predicate. A test proves
  *  that by tightening `staleDays` alone and flipping a fixture PR's disposition (acceptance 3). */
 export interface SweepPolicy {
+  /** BACKSTOP: name a stage only after its ordinary owner has failed to move it (W1-T5900). */
+  stageBackstops: Partial<Record<PrBlocker, { kind: "BACKSTOP"; minutes: number }>>;
   /** No activity in >= this many days ⇒ the PR is abandoned -> close. */
   staleDays: number;
   /** Max fix-rung strikes before a failing review escalates instead of fixing. */
@@ -4714,6 +4721,12 @@ function loadReviewPolicy(): { value: number; min: number; max: number; capacity
 const REVIEW_POLICY = loadReviewPolicy();
 
 export const DEFAULT_SWEEP_POLICY: SweepPolicy = {
+  stageBackstops: {
+    "awaiting-arm": { kind: "BACKSTOP", minutes: 30 },
+    "conflict": { kind: "BACKSTOP", minutes: 30 },
+    "own-red": { kind: "BACKSTOP", minutes: 45 },
+    "awaiting-review": { kind: "BACKSTOP", minutes: 30 },
+  },
   staleDays: POLICY_SWEEP.staleDays,
   strikeCap: POLICY_SWEEP.strikeCap,
   clarify: DEFAULT_CLARIFY_POLICY,
@@ -8506,10 +8519,13 @@ export function openPrsBehindMain(
   prs: readonly OpenPrView[],
   behindMainByPr: ReadonlyMap<number, number>,
   policy: Pick<SweepPolicy, "reviewWaitingBranchRefreshEnabled" | "reviewWaitingBranchRefreshThreshold">,
+  queuedPrNumbers: ReadonlySet<number> = new Set(),
 ): ArmedStalledPr[] {
   if (policy.reviewWaitingBranchRefreshEnabled !== true) return [];
   const out: ArmedStalledPr[] = [];
   for (const pr of prs) {
+    // W1-T5903: the base requires a merge queue, which validates the merged result itself.
+    if (queuedPrNumbers.has(pr.prNumber)) continue;
     const behindBy = behindMainByPr.get(pr.prNumber);
     if (behindBy === undefined) continue;
     if (pr.mergeState === "dirty" || pr.mergeable === false) continue;
@@ -8616,6 +8632,18 @@ export function codeqlBlockerCiFailure(alert: ScannerAlertIdentity): CiFailure {
   };
 }
 
+/** W1-T5903 — the behind-main candidates a merge queue stands down. The queue tests the group
+ *  commit, so refreshing the branch against main only spends a CI cycle and a re-review. `queued`
+ *  is the injected per-PR queue fact; this stays pure. */
+export function queuedBehindMainSkips(
+  prs: readonly OpenPrView[],
+  behindMainByPr: ReadonlyMap<number, number>,
+  policy: Pick<SweepPolicy, "reviewWaitingBranchRefreshEnabled" | "reviewWaitingBranchRefreshThreshold">,
+  queued: (pr: ArmedStalledPr) => boolean,
+): ArmedStalledPr[] {
+  return openPrsBehindMain(prs, behindMainByPr, policy).filter(queued);
+}
+
 /** W1-T528 — THE ACTION HALF OF W1-T520: selects AT MOST ONE PR from {@link armedButStalled}'s own
  *  set, never a second predicate recomputing the same two facts. ONE PER PASS, OLDEST HEAD FIRST —
  *  updating mints a NEW head and a verdict is input-pinned, so updating the whole stalled set each
@@ -8628,6 +8656,7 @@ export function selectUpdateBranchTarget(
   updatedForWorkflow: ReadonlySet<string> = new Set(),
   behindMainByPr: ReadonlyMap<number, number> = new Map(),
   policy: Pick<SweepPolicy, "reviewWaitingBranchRefreshEnabled" | "reviewWaitingBranchRefreshThreshold"> = DEFAULT_SWEEP_POLICY,
+  queuedPrNumbers: ReadonlySet<number> = new Set(),
 ): ArmedStalledPr | undefined {
   // W1-T1212: the UNION of two disjoint-by-construction predicates, never a widening of either. A
   // PR named by both contributes ONE candidate; the first writer wins, and which shape wins
@@ -8636,7 +8665,7 @@ export function selectUpdateBranchTarget(
   for (const c of [
     ...armedButStalled(prs),
     ...redPrWithStaleGate(prs, staleGateWorkflowsByPr, updatedForWorkflow),
-    ...openPrsBehindMain(prs, behindMainByPr, policy),
+    ...openPrsBehindMain(prs, behindMainByPr, policy, queuedPrNumbers),
   ]) {
     if (!combined.has(c.prNumber)) combined.set(c.prNumber, c);
   }
@@ -9452,6 +9481,8 @@ export interface StrikeLadderEffects {
 }
 
 export interface SweepDeps {
+  /** The already-listed peers retained when the light pass reconciles one PR at a time. */
+  stuckStagePeers?: readonly OpenPrView[];
   reviewerCodeStaleThisPass?: () => { oldSha: string; newSha: string } | undefined;
   readerAgreement?: Omit<ReaderAgreementOptions, "ledgerPath" | "runId" | "appendLine" | "openPrCount">;
   reproduceFailingTestsOnMain?: (
@@ -9695,6 +9726,10 @@ export interface SweepDeps {
    *  {@link selectUpdateBranchTarget} chose: never a loop, never a second attempt this pass. A
    *  `"conflict"` outcome is REPORTED and never retried by this call. */
   updateBranch?: (pr: ArmedStalledPr) => UpdateBranchOutcome | Promise<UpdateBranchOutcome>;
+  /** W1-T5903 — whether the PR's base branch requires a merge queue. When it does, the queue tests
+   *  the merged result, so the behind-main distance refresh ({@link openPrsBehindMain}) stands down
+   *  for that PR. Omitted or throwing reads as "no queue": the pre-queue behaviour is unchanged. */
+  mergeQueue?: (prUrl: string) => boolean;
   /** W1-T2999 — before escalating a dirty PR on a fleet-owned `run-<id>-<epoch>` head, try the
    *  one safe mechanical repair: rebase that head onto current main and push it back with an
    *  explicit lease pinned to the observed head sha. A `"rebased"` result stands down the
@@ -11260,6 +11295,73 @@ export async function runSweep(
   // {@link decideSweepArm}'s head-bound recovery, so arming parity costs no extra read.
   const ledgerLines = readLedger(deps.ledgerPath);
   const priorBlockerByPr = priorBlockersFromLedger(ledgerLines);
+  const stageKey = (row: Record<string, unknown>) => JSON.stringify([row.pr_number, row.blocker, row.blocker_since]);
+  const stuckStages = new Map<string, Record<string, unknown>>();
+  const resolvedStages = new Set<string>();
+  for (const row of ledgerLines) {
+    if (row.step === "pr.stuck" || (row.step === "sweep.disposed" && row.stage_stuck === true)) {
+      stuckStages.set(stageKey(row), row);
+    }
+    if (row.step === "pr.stuck.resolved") resolvedStages.add(stageKey(row));
+  }
+  const reportStuckStage = async (pr: OpenPrView, fields: ReturnType<typeof blockerFields>, repairStarted: boolean,
+    standDownReason: string | undefined): Promise<void> => {
+    if (deps.dryRun) return;
+    const key = stageKey({ pr_number: pr.prNumber, ...fields });
+    const record = (step: string, extra: Record<string, unknown>) => appendLine(deps.ledgerPath, {
+      run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", ts: clockFromMillisFn(() => now).iso(),
+      pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, step, ...extra,
+    });
+    for (const [oldKey, row] of stuckStages) {
+      if (row.pr_number !== pr.prNumber || oldKey === key || resolvedStages.has(oldKey)) continue;
+      record("pr.stuck.resolved", { blocker: row.blocker, blocker_since: row.blocker_since,
+        resolved_blocker: fields.blocker, resolved_blocker_since: fields.blocker_since });
+      resolvedStages.add(oldKey);
+    }
+    const bound = policy.stageBackstops[fields.blocker];
+    if (!bound || fields.blocker_age_ms <= bound.minutes * 60_000 || stuckStages.has(key) ||
+        /(?:MERGED|CLOSED)/.test(standDownReason ?? "")) return;
+    const belongs = (row: Record<string, unknown>) => row.pr_number === pr.prNumber || row.pr_url === pr.prUrl ||
+      (row.pr_number === undefined && row.pr_url === undefined && pr.taskId !== undefined && row.task_id === pr.taskId);
+    const since = Date.parse(fields.blocker_since);
+    const currentRows = readLedger(deps.ledgerPath);
+    const reportedStage = currentRows.find(row => row.step === "pr.stuck" && stageKey(row) === key);
+    if (reportedStage) { stuckStages.set(key, reportedStage); return; }
+    const stageRows = currentRows.filter(row => belongs(row) && Date.parse(String(row.ts)) >= since);
+    if ((fields.blocker === "conflict" || fields.blocker === "own-red") &&
+        (repairStarted || stageRows.some(row => row.step === "fix.dispatch" ||
+          (row.step === "fix.done" && typeof row.pushed_head_sha === "string")) ||
+          (priorBlockerByPr.get(pr.prNumber)?.blocker === fields.blocker &&
+            ledgerLines.findLast(row => row.step === "sweep.disposed" && row.pr_number === pr.prNumber)?.head_sha !== pr.headSha))) return;
+    const diagnoses: string[] = [];
+    if (stageRows.some(row => row.step === "review.posted") &&
+        !stageRows.some(row => row.step === "automerge.armed")) diagnoses.push("review loop");
+    const lastFix = currentRows.findLast(row => belongs(row) && row.step === "fix.done" && row.pushed_head_sha === pr.headSha);
+    if (pr.mergeState === "dirty" && Array.isArray(lastFix?.parents) && lastFix.parents.length === 1) diagnoses.push("failed merge");
+    if (pr.taskId && isDispatchedRunBranch(pr.headRefName) && (deps.stuckStagePeers ?? openPrs).some(other => other.prNumber !== pr.prNumber &&
+        other.taskId === pr.taskId && isDispatchedRunBranch(other.headRefName) && other.headRefName !== pr.headRefName)) {
+      diagnoses.push("duplicate build");
+    }
+    const diagnosis = diagnoses.length ? diagnoses.join("; ") : "unknown signature";
+    const reason = `PR stage stalled: #${pr.prNumber} ${pr.prUrl} — ${fields.blocker} for ` +
+      `${Math.floor(fields.blocker_age_ms / 60_000)} minutes (BACKSTOP ${bound.minutes}); ` +
+      `since ${fields.blocker_since}; DIAGNOSIS: ${diagnosis}`;
+    const row = { pr_number: pr.prNumber, ...fields, diagnosis, bound_minutes: bound.minutes, bound_kind: bound.kind };
+    record("pr.stuck", row);
+    stuckStages.set(key, row);
+    try {
+      await deps.escalate(pr, reason, {
+        taskId: escalationTaskIdFor(pr), prNumber: pr.prNumber, prUrl: pr.prUrl, question: reason,
+        criterion: "", reviewerRequirement: reason, specText: "", strikeHistory: pr.strikeHistory ?? [],
+        resolutions: [
+          { label: "repair the stalled stage", detail: `Inspect ${fields.blocker} and its ${diagnosis} diagnosis.` },
+          { label: "close the PR", detail: "Close it if the work is redundant or no longer needed." },
+        ],
+      });
+    } catch (error) {
+      record("pr.stuck.escalation_failed", { ...row, reason: String(error) });
+    }
+  };
   const ruleBlockerByIndex = new Map<number, PrBlocker>();
   const planProofBlockedPrs = new Set<number>();
   const baseRedStandDownPrs = new Set<number>();
@@ -11985,7 +12087,7 @@ export async function runSweep(
    *  factored out so the synchronous walk and the concurrent review batch ledger and log IDENTICALLY.
    *  Unconditional counting matches the original inline placement: a deduped PR reaches here with
    *  `acted:false` and no error, so neither counter moves. W1-T1061: `armOutcome` rides alongside. */
-  function finalizeDisposition(
+  async function finalizeDisposition(
     index: number,
     pr: OpenPrView,
     disposition: Disposition,
@@ -12007,7 +12109,7 @@ export async function runSweep(
     // W1-T4459: dedup keys on this pass's row (see `sameHeadRedFixRefusal`); set only by the
     // main walk's "blocked-fixable" arm.
     extraDisposedFields: Record<string, unknown> | undefined = undefined,
-  ): void {
+  ): Promise<void> {
     const metadataWait = metadataOnlyRed(pr) !== undefined && !metadataRedRuledOut(ledgerLines, pr) &&
       extraDisposedFields?.metadata_repair_outcome !== "not-metadata";
     let reviewerWithheld = false;
@@ -12049,6 +12151,10 @@ export async function runSweep(
       ...blockerFields(blocker, priorBlockerByPr.get(pr.prNumber), now, planRepairCapable),
       ...(blockerReadFailure ? { blocker_read_error: blockerReadFailure.reason } : {}),
     };
+    if (armOutcome !== "armed" && armOutcome !== "direct-merged") {
+      const repairStarted = acted && spent !== false && (disposition === "conflicted" || disposition === "blocked-fixable");
+      await reportStuckStage(pr, blockerRow, repairStarted, standDownReason);
+    }
     // A real pass's `sweep.disposed` row below carries every field of these two rows, and on the
     // fleet each was an exact duplicate of it (1,454 of 14,089 core rows, 2026-09-24): write them only
     // under --dry-run, where that row is skipped and they are the pass's sole trace.
@@ -12102,6 +12208,7 @@ export async function runSweep(
         acted,
         reason,
         head_sha: pr.headSha,
+        ...(stuckStages.has(stageKey({ pr_number: pr.prNumber, ...blockerRow })) ? { stage_stuck: true } : {}),
         // W1-T4633 — the branch a reversible plan-resequence close must keep; the reaper reads it.
         ...(disposition === "stale" && acted && pr.headRefName && reason.includes(PLAN_RESEQUENCE_CLOSE_MARKER)
           ? { keep_head_branch: pr.headRefName }
@@ -13927,7 +14034,7 @@ export async function runSweep(
         contradictory_interval_ms: state.interval, contradictory_next_row_at: state.next };
       contradictoryCheckpoint = state;
     }
-    finalizeDisposition(
+    await finalizeDisposition(
       prIndex,
       pr,
       disposition,
@@ -13999,7 +14106,7 @@ export async function runSweep(
       job.mode.kind === "full-review" ? "post-review" : job.mode.kind === "reuse" ? "review-reused" : "discriminate-only";
     const claim = await claimReview(job.reviewKey, job.pr);
     if (!claim.ok) {
-      finalizeDisposition(
+      await finalizeDisposition(
         job.index,
         job.pr,
         jobDisposition,
@@ -14029,7 +14136,7 @@ export async function runSweep(
       observation_version: 1,
     });
     if (deps.detachReviewWait) {
-      finalizeDisposition(job.index, job.pr, jobDisposition, job.reason, job.question,
+      await finalizeDisposition(job.index, job.pr, jobDisposition, job.reason, job.question,
         true, false, undefined, undefined, undefined, undefined, undefined);
     }
     const repairCapacity = repairAdmissionTelemetry?.();
@@ -14112,7 +14219,7 @@ export async function runSweep(
         // failure the row just above establishes a bounded retry clock.
         claim.release();
       }
-      if (!deps.detachReviewWait) finalizeDisposition(
+      if (!deps.detachReviewWait) await finalizeDisposition(
         job.index,
         job.pr,
         jobDisposition,
@@ -14152,7 +14259,7 @@ export async function runSweep(
   // pass may own it for a real active review. Ledger `acted:false` with no outcome key.
   const unstartedReviews = orderedReviews.slice(nextReviewIndex);
   for (const job of unstartedReviews) {
-    finalizeDisposition(
+    await finalizeDisposition(
       job.index,
       job.pr,
       "post-review",
@@ -14201,14 +14308,47 @@ export async function runSweep(
   // just reported and, when the dep is wired, requests GitHub update it. Never a loop, and a
   // conflict is REPORTED and skipped rather than retried this pass.
   if (!deps.dryRun && deps.updateBranch) {
+    const refreshPrs = openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber && pr.prNumber !== baseRedRefreshPr && !ladderUpdatedPrs.has(pr.prNumber));
+    const behindMainByPr = deps.behindMainByPr ?? new Map<number, number>();
+    // W1-T5903: a behind-main candidate whose base requires a merge queue stands down; ONE
+    // `sweep.update_branch.skipped_queue` row per PR and head names it. A queue read that throws
+    // reads as "no queue", so the pre-queue refresh is unchanged.
+    const queuedPrNumbers = new Set<number>();
+    const mergeQueue = deps.mergeQueue;
+    if (mergeQueue) {
+      const skipped = queuedBehindMainSkips(refreshPrs, behindMainByPr, policy, (c) => {
+        try {
+          return mergeQueue(c.prUrl) === true;
+        } catch {
+          return false; // a queue read that fails is "no queue": the refresh below is unchanged
+        }
+      });
+      for (const c of skipped) {
+        queuedPrNumbers.add(c.prNumber);
+        const already = ledgerLines.some(
+          (l) => l.step === "sweep.update_branch.skipped_queue" && l.pr_number === c.prNumber && l.head_sha === c.headSha,
+        );
+        if (already) continue;
+        // No `pr_url`: the row is keyed by pr_number + head_sha, and a priced-row census would claim it.
+        appendLine(deps.ledgerPath, {
+          run_id: deps.runId,
+          task_id: c.taskId ?? "SWEEP",
+          step: "sweep.update_branch.skipped_queue",
+          pr_number: c.prNumber,
+          head_sha: c.headSha,
+          ...(c.behindBy === undefined ? {} : { behind_by: c.behindBy }),
+        });
+      }
+    }
     const target = selectUpdateBranchTarget(
-      openPrs.filter((pr) => pr.prNumber !== staleBaseAttemptedPrNumber && pr.prNumber !== baseRedRefreshPr && !ladderUpdatedPrs.has(pr.prNumber)),
+      refreshPrs,
       now,
       deps.inFlightTaskIds ?? new Set(),
       deps.staleGateWorkflowsByPr ?? new Map(),
       deps.updatedForWorkflow ?? new Set(),
-      deps.behindMainByPr ?? new Map(),
+      behindMainByPr,
       policy,
+      queuedPrNumbers,
     );
     if (target) {
       // W1-T1212: a `StaleGatePr` (never `armedButStalled`'s own shape) carries the ONE extra
@@ -14291,6 +14431,8 @@ export async function runSweep(
 let lightPassSpawningReservations = 0;
 let lightPassPlanFilingReservations = 0;
 const lightPassReservedHeads = new Set<string>();
+// W1-T5901: at most one plan PR direct-merges across overlapping light passes.
+let lightPassPlanMergeInFlight = false;
 const lightPassHeadKey = (pr: OpenPrView): string => `${pr.prNumber}@${pr.headSha}`;
 
 export async function runSweepLightPass(
@@ -14329,6 +14471,11 @@ export async function runSweepLightPass(
   lightPassPlanFilingReservations += planFilings.length;
   for (const pr of [...spawning, ...planFilings]) lightPassReservedHeads.add(lightPassHeadKey(pr));
   const spawningNumbers = new Set(spawning.map((pr) => pr.prNumber));
+  // W1-T5901: ONE ready plan PR per light pass (and per overlapping pass) takes the direct-merge path.
+  const planMergeCandidate = lightPassPlanMergeInFlight
+    ? undefined
+    : selectLightPassPlanMerge(openPrs, policy, now, selectionLedgerLines);
+  if (planMergeCandidate) lightPassPlanMergeInFlight = true;
   const releases = new Map<number, () => void>();
   const detachedNumbers = new Set<number>();
   for (const pr of [...spawning, ...planFilings]) {
@@ -14383,6 +14530,7 @@ export async function runSweepLightPass(
         selectedNumbers.has(pr.prNumber) || outcomeDedupedNumbers.has(pr.prNumber)
           ? {
               ...deps,
+              stuckStagePeers: openPrs,
               detachFixWait: true,
               repairAdmissionSurface: "light",
               repairAdmissionTelemetry: repairAdmission.snapshot,
@@ -14391,6 +14539,7 @@ export async function runSweepLightPass(
             }
           : {
               ...deps,
+              stuckStagePeers: openPrs,
               detachFixWait: true,
               repairAdmissionSurface: "light",
               repairAdmissionTelemetry: repairAdmission.snapshot,
@@ -14411,6 +14560,13 @@ export async function runSweepLightPass(
                         (admittedNumbers ? `; admitted ${admittedNumbers} ahead` : ""))
                   : baseStandDownReasonFor?.(d),
             };
+      if (planMergeCandidate?.prNumber === pr.prNumber) {
+        // W1-T5901: admit `mergeable` for this one plan PR only. `deps.arm` is the full sweep's own
+        // path — it merge-queues when the base requires one (W1-T4405) and otherwise reads fresh
+        // mergeability, rules through W1-T5748's `decidePlanPrMergeSafety`, and updates-then-merges.
+        const laneActionable = scopedDeps.actionable;
+        scopedDeps.actionable = (d) => d === "mergeable" || (laneActionable ? laneActionable(d) : true);
+      }
       if (spawningNumbers.has(pr.prNumber)) {
         scopedDeps.detachReviewWait = (work) => {
           detachedNumbers.add(pr.prNumber);
@@ -14430,10 +14586,29 @@ export async function runSweepLightPass(
   if (detachedNumbers.size > 0) await new Promise<void>((resolve) => setImmediate(resolve));
   return summaries;
   } finally {
+    if (planMergeCandidate) lightPassPlanMergeInFlight = false;
     for (const [number, release] of releases) {
       if (!detachedNumbers.has(number)) release();
     }
   }
+}
+
+/** W1-T5901 — the ONE plan PR a light pass may direct-merge: a plan-only filing PR (the positive
+ *  {@link OpenPrView.isPlanFiling} signal — never inferred) whose disposition is `mergeable`. A code
+ *  PR is never chosen. Fewest prior arm attempts at this head first, so one PR the arm path keeps
+ *  refusing cannot starve the others; then lowest number. */
+export function selectLightPassPlanMerge(
+  openPrs: readonly OpenPrView[],
+  policy: SweepPolicy,
+  now: number,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+): OpenPrView | undefined {
+  const attempts = (pr: OpenPrView): number =>
+    ledgerLines.filter((l) => l.step === "sweep.disposed" && l.pr_number === pr.prNumber &&
+      l.head_sha === pr.headSha && l.arm_attempted === true).length;
+  return openPrs
+    .filter((pr) => pr.isPlanFiling === true && deriveDisposition(pr, policy, now).disposition === "mergeable")
+    .sort((a, b) => attempts(a) - attempts(b) || a.prNumber - b.prNumber)[0];
 }
 
 /** Outcome keys already known, before admission, to make the action-time review guard stand down. */
