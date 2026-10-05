@@ -19,7 +19,7 @@
 import { readPage, readPageRequest, type ReadPageRequest } from "./read-page.js";
 import { adoptionFindingGone, adoptionLatestPath, readAdoptionLatest } from "./measurement-cadence.js";
 import { createHash, randomUUID } from "node:crypto";
-import { systemClock } from "./clock.js";
+import { fixedClock, systemClock } from "./clock.js";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { basename, dirname, join, relative } from "node:path";
@@ -101,7 +101,7 @@ import { buildActionResultsRoute } from "./action-results.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, rotationStampIso } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
-import { fleetLaneDecisions, readFleetLaneStore, type FleetLaneDecision } from "./fleet-lane.js";
+import { classificationSnapshotPath, fleetLaneDecisions, readClassificationSnapshot, readFleetLaneStore, type ClassificationEvidence, type FleetLaneDecision } from "./fleet-lane.js";
 import { inboxOwner } from "./inbox-owner.js";
 import { projectProposalHumanGates } from "./ask-classification.js";
 import { plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
@@ -116,7 +116,7 @@ import {
 } from "./inbox-responder.js";
 import {
   createInboxThreadListView, readInboxThreadListView, warmInboxThreadListView,
-  type ThreadListClassification, type ThreadListSources,
+  type ThreadListClassification, type ThreadListRefreshSettled, type ThreadListSources,
 } from "./inbox-thread-list-view.js";
 import { appendThreadMessage, appendThreadReplyOnce, inboxThreadIdentity, proposalIdOfThread, readAllThreads, readThread } from "./inbox-thread.js";
 import {
@@ -2031,7 +2031,7 @@ const CLASSIFICATION_TO_THREAD_STATE: Partial<Record<string, InboxThreadItem["st
 
 /** Every operator-owned item with its plain message and state, off the SAME classification
  *  `GET /v1/inbox` renders. */
-function operatorThreadItems(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan, classified = classifyAllProposalsMemo(deps, readPlanSnapshot)): InboxThreadItem[] {
+function operatorThreadItems(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan, classified: ThreadListInbox = classifyAllProposalsMemo(deps, readPlanSnapshot)): InboxThreadItem[] {
   const { proposals, classifications } = classified;
   const plainStore = readPlainStore(plainStorePath(join(deps.inboxRoot, "state")));
   const items: InboxThreadItem[] = [];
@@ -2157,29 +2157,76 @@ function readThreadsOr500(deps: PanelGraphDeps, res: ServerResponse) {
 /** How often a built thread-list view re-warms its classification with no request in flight. */
 const INBOX_THREAD_LIST_WARM_MS = 60_000;
 
-/** The thread list's seams over this deps: the one coalescing classifier, the held classification, and the live stores. */
-function inboxThreadListSources(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): ThreadListSources<ClassifiedInbox> {
-  const stamped = (classified: ClassifiedInbox, fallbackMs: number): ThreadListClassification<ClassifiedInbox> => {
+export interface ThreadListInbox {
+  proposals: readonly Proposal[];
+  classifications: ReadonlyArray<Pick<InboxClassification, "proposalId" | "state">>;
+}
+
+export function inboxClassificationEvidence(classified: Pick<ClassifiedInbox, "projection" | "classifications">): ClassificationEvidence {
+  const partial = [...classified.projection.values()].some((value) => value.indeterminate) || classified.classifications.some((value) => value.referentUnverified);
+  return partial ? { complete: false, incompleteReason: "the GitHub projection or a proposal referent is indeterminate" } : { complete: true };
+}
+
+const slowLaneClassifications = new WeakMap<PanelGraphDeps, { stamp: string; held: ThreadListClassification<ThreadListInbox> | undefined }>();
+
+export function peekSlowLaneClassification(deps: PanelGraphDeps): ThreadListClassification<ThreadListInbox> | undefined {
+  const stat = deps.inboxStatFile ?? statStamp;
+  const stateDir = join(deps.inboxRoot, "state");
+  const { registryPath } = inboxInputPaths(deps);
+  const stamp = JSON.stringify([stat(classificationSnapshotPath(stateDir)) ?? null, stat(registryPath) ?? null]);
+  const memo = slowLaneClassifications.get(deps);
+  if (memo?.stamp === stamp) return memo.held;
+  const held = readSlowLaneClassification(stateDir, registryPath);
+  slowLaneClassifications.set(deps, { stamp, held });
+  return held;
+}
+
+function readSlowLaneClassification(stateDir: string, registryPath: string): ThreadListClassification<ThreadListInbox> | undefined {
+  const snapshot = readClassificationSnapshot(stateDir);
+  const classifiedAtMs = Date.parse(snapshot?.generatedAt ?? "");
+  if (snapshot === undefined || !Number.isFinite(classifiedAtMs)) return undefined;
+  const proposals = parseProposalRegistry(readFileIfExists(registryPath));
+  const classifications = proposals.flatMap((p) => {
+    const state = snapshot.states[p.id];
+    return state === undefined ? [] : [{ proposalId: p.id, state: state as InboxClassification["state"] }];
+  });
+  const complete = snapshot.complete === true;
+  const incompleteReason = complete ? undefined
+    : snapshot.incompleteReason ?? (snapshot.complete === undefined ? "the slow lane's snapshot does not record whether its pass saw every input" : "the slow lane's pass did not see every input");
+  return { classified: { proposals, classifications }, classifiedAtMs, complete, ...(incompleteReason === undefined ? {} : { incompleteReason }) };
+}
+
+/** The thread list's seams: the classifier, and the newer of this serve's and the slow lane's (W1-T5886) held classification. */
+export function inboxThreadListSources(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): ThreadListSources<ThreadListInbox> {
+  const stamped = (classified: ClassifiedInbox, fallbackMs: number): ThreadListClassification<ThreadListInbox> => {
     const held = peekClassifiedInboxStamped(deps);
     // The memo may hand back a ledger-refreshed copy of the held result; the proposals array is the shared identity.
     const classifiedAtMs = held !== undefined && held.result.proposals === classified.proposals ? held.classifiedAtMs : fallbackMs;
-    const partial = [...classified.projection.values()].some((value) => value.indeterminate) || classified.classifications.some((value) => value.referentUnverified);
-    return {
-      classified, classifiedAtMs, complete: !partial,
-      ...(partial ? { incompleteReason: "the GitHub projection or a proposal referent is indeterminate" } : {}),
-    };
+    return { classified, classifiedAtMs, ...inboxClassificationEvidence(classified) };
   };
+  let reportedAtMs: number | undefined;
   return {
     now: () => systemClock.now(),
     classify: async () => stamped(await classifyAllProposalsSliced(deps, readPlanSnapshot), systemClock.now()),
     peek: () => {
       const held = peekClassifiedInboxStamped(deps);
-      return held === undefined ? undefined : stamped(held.result, held.classifiedAtMs);
+      const own = held === undefined ? undefined : stamped(held.result, held.classifiedAtMs);
+      const slowLane = peekSlowLaneClassification(deps);
+      if (own === undefined) return slowLane;
+      return slowLane !== undefined && slowLane.classifiedAtMs > own.classifiedAtMs ? slowLane : own;
     },
     readThreads: () => readAllThreads({ threadStorePath: inboxThreadStorePath(deps.inboxRoot) }),
     readMarks: () => readReadMarks(readMarksPath(join(deps.inboxRoot, "state"))),
     items: (classified) => operatorThreadItems(deps, readPlanSnapshot, classified),
     inputsKey: () => statStamp(plainStorePath(join(deps.inboxRoot, "state"))) ?? "absent",
+    report: (settled: ThreadListRefreshSettled) => {
+      if (settled.outcome === "failed") {
+        deps.logProjection?.("inbox.thread_list_classification_failed", { error: settled.error, ms: settled.ms });
+      } else if (settled.classifiedAtMs !== reportedAtMs) {
+        reportedAtMs = settled.classifiedAtMs;
+        deps.logProjection?.("inbox.thread_list_classified", { ms: settled.ms, classifiedAt: fixedClock(settled.classifiedAtMs).iso() });
+      }
+    },
   };
 }
 
@@ -2760,6 +2807,6 @@ export function buildPanelWriteRoutes(deps: PanelGraphDeps): Route[] {
 
 /** Every panel graph route, for a caller registering the full set at once (`rmd serve` wiring). */
 export function buildPanelGraphRoutes(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): Route[] {
-  const bound = readPlanSnapshot ? { ...deps, readPlanSnapshot } : deps;
+  const bound = readPlanSnapshot && deps.readPlanSnapshot !== readPlanSnapshot ? { ...deps, readPlanSnapshot } : deps;
   return [...buildPanelReadRoutes(bound, readPlanSnapshot), ...buildPanelWriteRoutes(bound)];
 }

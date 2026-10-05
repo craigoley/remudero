@@ -2716,6 +2716,10 @@ function assembleServeRoutes(
     logProjection: deps.log,
     ...(projectionWorker ? { projectFeedback: (input: FeedbackProjectionInput) => projectionWorker.feedback(input) } : {}),
   };
+  // W1-T5886: the panel routes and the inbox view's legacy side share ONE deps object. The inbox classification memo is
+  // keyed by it, and the legacy side was handed `panelGraphDeps` while the routes classified under a copy, so it
+  // answered "serve has not classified the inbox yet" even while the thread list served a held classification.
+  const panelReadDeps: PanelGraphDeps = { ...panelGraphDeps, readPlanSnapshot: () => deps.board.plan };
   const lastSeen = deps.lastSeen ?? createLastSeenStore(lastSeenPath(deps.fleetControlRoot));
   // W1-T500: SAME instance `createService`'s dispatch consults (see ServeDeps.confirmNonces's own
   // doc for why that has to be true) -- {@link buildServeServer} resolves this once and threads it
@@ -2801,7 +2805,7 @@ function assembleServeRoutes(
   // The shadow compares the worker's badge with the undecorated legacy one; only the served badge carries decisions.
   const shadowed = withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name], onServed: routeReads.served,
     readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME], requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"] },
-    legacy: [navBadge, inboxLegacyView(panelGraphDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan)] });
+    legacy: [navBadge, inboxLegacyView(panelReadDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan)] });
   const served = { ...shadowed, legacy: shadowed.legacy.map((view) => view === navBadge ? navBadgeWithDecisions(navBadge, needsYouGates) : view) };
   const rawRoutes = [
     withStatusNeedsYou(withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen, deps.boardSnapshotSource), modelApprovals), readLadder), needsYouGates),
@@ -2896,7 +2900,7 @@ function assembleServeRoutes(
     ...buildOperatorAgentActionHandoffRoutes({ root: deps.fleetControlRoot, ledgerPath: deps.ledgerPath, claimRoot: deps.fleetControlRoot,
       instance: assistantControl.instance, repository: assistantControl.repository }),
     ...contextControlsRoutes,
-    ...buildPanelGraphRoutes(panelGraphDeps, () => deps.board.plan),
+    ...buildPanelGraphRoutes(panelReadDeps, panelReadDeps.readPlanSnapshot),
     // W1-T284: the skills-panel button SET, read-scoped -- was built (lib/panel-skills.ts,
     // W3-T8) but never wired into the real route table, so GET /v1/skills 404'd on every
     // running console. `questionsRoot` IS repoRoot (see that field's own doc, above) and

@@ -12,7 +12,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { readClassificationSnapshot, writeClassificationSnapshot } from "./fleet-lane.js";
 import { pruneRatifiedProposals, updateProposalRegistry } from "./inbox.js";
 import { INBOX_STALE_AFTER_MS } from "./nav-badge-view.js";
-import { classifyAllProposalsSliced, inboxLanes, peekClassifiedInbox, type PanelGraphDeps } from "./panel-graph.js";
+import { classifyAllProposalsSliced, inboxClassificationEvidence, inboxLanes, peekClassifiedInbox, type PanelGraphDeps } from "./panel-graph.js";
 import { pagesWithin, viewKey, type ViewDefinition, type ViewSource } from "./views.js";
 
 /** How often the slow lane reclassifies. An unchanged input set is answered from the classifier's memo. */
@@ -39,8 +39,9 @@ export interface InboxRefresh {
   generatedAt: string | null;
 }
 
-function statesKey(states: Record<string, string>): string {
-  return JSON.stringify(Object.entries(states).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+/** The states and whether the pass saw every input: a change to either rewrites the snapshot. Unrecorded completeness keys apart from both. */
+function statesKey(states: Record<string, string>, complete: boolean | undefined): string {
+  return JSON.stringify([complete ?? null, Object.entries(states).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))]);
 }
 
 /**
@@ -53,7 +54,7 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
   if (memo.states === undefined) {
     const onDisk = readClassificationSnapshot(stateDir);
     const writtenMs = onDisk?.generatedAt ? Date.parse(onDisk.generatedAt) : Number.NaN;
-    Object.assign(memo, onDisk ? { states: statesKey(onDisk.states) } : {}, Number.isFinite(writtenMs) ? { writtenAtMs: writtenMs } : {});
+    Object.assign(memo, onDisk ? { states: statesKey(onDisk.states, onDisk.complete) } : {}, Number.isFinite(writtenMs) ? { writtenAtMs: writtenMs } : {});
   }
   const classified = await classifyAllProposalsSliced(deps);
   const { registryPath, proposals, classifications } = classified;
@@ -67,12 +68,13 @@ export async function refreshInboxClassification(deps: PanelGraphDeps, memo: Inb
   }
   const states: Record<string, string> = {};
   for (const c of classifications) states[c.proposalId] = c.state;
-  const key = statesKey(states);
+  const evidence = inboxClassificationEvidence(classified);
+  const key = statesKey(states, evidence.complete);
   const now = clock.now();
   const changed = key !== memo.states;
   const written = changed || memo.writtenAtMs === undefined || now - memo.writtenAtMs >= INBOX_CLASSIFICATION_RESTAMP_MS;
   if (written) {
-    writeClassificationSnapshot(stateDir, classifications, clock);
+    writeClassificationSnapshot(stateDir, classifications, clock, evidence);
     memo.states = key;
     memo.writtenAtMs = now;
   }
