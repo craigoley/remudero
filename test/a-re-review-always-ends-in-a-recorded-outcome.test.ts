@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+
+import { gitRepo } from "./helpers/git-repo.js";
 
 import type { Config } from "../src/lib/config.js";
 import { postReviewStatusGuarded } from "../src/lib/review.js";
@@ -12,17 +14,12 @@ import { reviewAttemptsForInput, reviewCommand, type ReviewRunResult } from "../
 const REPO_ROOT = join(import.meta.dirname, "..");
 const CONTROLLER_HEAD = execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 
-function git(dir: string, args: string[]): string {
-  return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-}
-
-function initRepo(root: string): string {
-  const repoDir = join(root, "repos", "portal");
+/** Seeds the managed checkout `<root>/repos/portal` from the shared git fixture (test/helpers). */
+function seedTarget(root: string): string {
+  const fixture = gitRepo({ kind: "review-confirmed" });
+  const repoDir = fixture.dir;
   mkdirSync(join(repoDir, "plan", "tasks.d"), { recursive: true });
-  git(repoDir, ["init", "--quiet", "-b", "main"]);
-  git(repoDir, ["config", "user.email", "t@example.invalid"]);
-  git(repoDir, ["config", "user.name", "T"]);
-  git(repoDir, ["remote", "add", "origin", "https://github.com/acme/portal.git"]);
+  fixture.addRemote("origin", "https://github.com/acme/portal.git");
   writeFileSync(
     join(repoDir, "plan", "tasks.yaml"),
     [
@@ -32,9 +29,13 @@ function initRepo(root: string): string {
     ].join("\n") + "\n",
   );
   writeFileSync(join(repoDir, "plan", "tasks.d", ".gitkeep"), "");
-  git(repoDir, ["add", "-A"]);
-  git(repoDir, ["commit", "--quiet", "-m", "seed"]);
-  return git(repoDir, ["rev-parse", "HEAD"]);
+  fixture.git("add", "-A");
+  fixture.git("commit", "--quiet", "-m", "seed");
+  const head = fixture.git("rev-parse", "HEAD");
+  // reviewCommand resolves the target at `<root>/repos/<repo>` and requires a real directory there.
+  mkdirSync(join(root, "repos"), { recursive: true });
+  renameSync(repoDir, join(root, "repos", "portal"));
+  return head;
 }
 
 function verdict(head: string): ReviewRunResult {
@@ -47,7 +48,7 @@ function verdict(head: string): ReviewRunResult {
 test("a replayed decision whose live status already matches writes review.posted for the new input digest", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-review-confirmed-"));
   try {
-    const head = initRepo(root);
+    const head = seedTarget(root);
     const code = await reviewCommand("8", ["--repo", "acme/portal"], {
       enforceReviewSubjectCheckout: true,
       fetchView: (args) => {
