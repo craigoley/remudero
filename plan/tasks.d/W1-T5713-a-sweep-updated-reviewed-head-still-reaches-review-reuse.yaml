@@ -1,0 +1,42 @@
+- id: W1-T5713
+  title: "A SWEEP-UPDATED REVIEWED HEAD STILL REACHES REVIEW REUSE — reviewOrphansFor skips every head the sweep itself superseded, so after a merge-from-main the reuse rows never see an orphan and the PR gets a full LLM review under 'review never posted': 21 of 37 re-reviewed sweep updates in 2.8 days had an identical own diff and contract, and every verdict repeated"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a sweep-superseded reviewed head is an orphan the reuse rows can see
+  band_meaning: span
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 9, review reuse across a merge-from-main head"
+  plan_refs: [W1-T1015, W1-T3704, W1-T3798, W1-T3901, W1-T2793, W1-T5714, W1-T5696]
+  files: [src/run-task.ts, test/review-orphan-wiring.test.ts, test/a-sweep-updated-reviewed-head-still-reaches-review-reuse.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. Cross-head reuse already exists (W1-T3704, W1-T3798,
+    W1-T3901): `reviewContractDigest` (src/lib/review.ts), `ownDiffDigestFromCompareFiles`
+    (src/lib/open-prs-rest.ts), `reviewReuseVerdict` (src/lib/sweep.ts: reuse | discriminate-only |
+    full-review) and `reviewReuseRunner`/`discriminateReviewReuseAsync` (src/run-task.ts). But
+    `reviewOrphansFor` (src/run-task.ts) does `if (sweepUpdatedHeads.has(sha)) continue;` (W1-T1015,
+    #6377) so a head the sweep's own update superseded is never an orphan, `orphanedByPush` is
+    false, reuse facts are never hydrated, and the PR falls to a full review. The skip's purpose —
+    not spending orphan strikes — is now redundant: the cap reads `priorReviewAttemptsForInput` and
+    `priorOrphans` is diagnostic only. MEASURED (10-02..10-04): 653 `sweep.post_review.attempt` rows,
+    all full-review; 0 reuse and 0 discriminate-only dispositions. Of 76 sweep updates, 37 had both
+    heads reviewed; 21 had identical own-diff and contract digests and an unchanged verdict (16
+    success->success, 5 failure->failure), ~92 review-minutes; all 16 checkable locally share a
+    `git patch-id --stable`; 15 of the 21 are filed tasks (the other 6 are W1-T5714's). CORRECTIONS:
+    the first report's "75 orphan re-reviews" are 75 disposition rows over 24 heads, and "~60 min
+    each" was not reproduced (median ~7.5 min review, ~10 min to the next verdict).
+  design: |
+    In `reviewOrphansFor`, a sweep-superseded reviewed head sets `orphanedByPush` (so the reuse rows
+    hydrate and can match) but stays out of `priorOrphans` and `lastAttemptAt` (so it spends no
+    orphan strike). Update the W1-T1015 test "a sweep-updated prior head does not increment the
+    orphan count" to expect `orphanedByPush: true, priorOrphans: 0`.
+  acceptance:
+    - claim: "a sweep-updated reviewed head with an unchanged own-diff and contract digest disposes discriminate-only instead of post-review, and still counts no orphan strike, while a foreign push is counted as before"
+      proof: "unit test: test/a-sweep-updated-reviewed-head-still-reaches-review-reuse.test.ts"
+  falsifier: |
+    Restore the `continue` skip: the sweep-updated fixture disposes post-review and the test fails.

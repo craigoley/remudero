@@ -1,0 +1,55 @@
+- id: W1-T5726
+  title: "A RE-REVIEW ALWAYS ENDS IN A RECORDED OUTCOME FOR THE INPUT IT JUDGED — a replayed review decision whose GitHub status already reads success exits 0 having written no review.posted, so the sweep's 'no matching completed review.posted evidence for this exact input' row re-ran #9138's reviewer every pass at an unchanged head and it never merged"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one invariant — every review run ends posted, refused or escalated, never silent
+  band_meaning: span
+  origin: "operator session 2026-10-04: #9138 (batch-9 filing, `plan-only`) stuck at head b7ccb2dd after a daemon restart and main moving; unstuck by hand by merging main"
+  plan_refs: [W1-T2860, W1-T2793, W1-T230, W1-T5713, W1-T5690]
+  files: [src/run-task.ts, test/a-re-review-always-ends-in-a-recorded-outcome.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a; live ledger rows read only. #9138 head b7ccb2dd had
+    `review.posted` success at 19:06:52Z (input digest v2:123dbdbf). After the 19:09 daemon restart
+    (new reviewer code bfcb848b) and main moving, `DISPOSITION_RULES`' W1-T2860 row ("checks green
+    and GitHub reports remudero-review success, but the ledger has no matching completed
+    review.posted evidence for this exact input — re-running the authoritative reviewer") fired 9
+    times; it requires `priorReviewAttemptsForInput === 0`, which counts only `review.posted` and
+    `review.post_refused` rows. Each review child (review-PR9138-1791143761533, -1791143883852,
+    -1791143965164, -1791144257906) wrote ONE row, `review.provider_provenance` "no-exact-claim",
+    and the daemon logged `sweep.post_review.done exit:0` and `review.ran_from_fresh_tree
+    exit_code:0`; no `review.posted`, `review.post_refused`, `review.reviewer.skipped` or pending
+    post. The exit-0, row-less path in code: the review's `claimReviewDecision` returns `replay`
+    for an unchanged decision digest (head, diff, body, acceptance, declared files, ownership), the
+    verdict comes back `decisionDisposition: "replayed"`, and `reviewCommand`'s replay block calls
+    `postStatusDep`; when the live status already reads the same state it returns `replayed`, the
+    command sets `replayStatusAction = "confirmed"` and returns 0 — only the `restored` branch logs
+    `review.posted`. The new input digest therefore never gets a completed row, the count stays 0,
+    and the sweep re-runs it. Between runs the PR alternated with "checks pending 53m/55m (< 60m
+    ceiling)" and one `stale-pending` escalation at 20:05Z on a green `plan-only` PR; that flapping
+    read is the second half of this task.
+  design: |
+    (i) The replay-confirmed branch logs `review.posted` for the input it judged — the new
+    `review_input_digest`, the replayed `review_decision_digest`, `status_confirmed: true` — so
+    `priorReviewAttemptsForInput` sees a completed exact-input attempt and the W1-T2860 row stops
+    matching. (Equivalently safe alternative, if the reviewer prefers: the sweep accepts the
+    existing posted verdict when only the input revision or base moved and the decision digest is
+    unchanged. Pick one and name why in the PR.)
+    (ii) Invariant: every exit path of the review command after `review.provider_provenance` writes
+    exactly one of `review.posted`, `review.post_refused`, or an escalation row; a path that would
+    exit with none writes `review.post_refused` with reason `no-terminal-row` instead of silence.
+    (iii) Measure the flapping read on #9138's rows (which rollup field read pending while the
+    checks were green) and fix it in the same task only if it is in the review path; otherwise name
+    it in the PR as a follow-up with the measured field.
+  acceptance:
+    - claim: "a replayed decision whose live status already matches writes review.posted for the new input digest, so a second sweep pass does not re-run the reviewer, and a replay of #9138's rows ends with one completed exact-input attempt instead of repeated provenance-only runs"
+      proof: "unit test: test/a-re-review-always-ends-in-a-recorded-outcome.test.ts"
+  falsifier: |
+    Restore the silent `confirmed` branch: the #9138 replay leaves `priorReviewAttemptsForInput` at
+    0, the W1-T2860 row matches again, and the test fails.

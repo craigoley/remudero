@@ -1,0 +1,37 @@
+- id: W1-T5724
+  title: "THE BOOT PATH LOADS ONLY WHAT THE FIRST PASS NEEDS — dispatch's lifetime history (13 s), the knowledge gardener (33 s) and an uncached tsx transpile (~20 s per process) all run before the first sweep on each of 16.7 boots a day"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — boot-path work moved behind the first pass
+  band_meaning: span
+  origin: "operator session 2026-10-04: research/restart/report.md (restart efficiency) P9; measure the tsx share before the cache change"
+  plan_refs: [W1-T4095, W1-T5720]
+  files: [src/run-task.ts, src/lib/daemon.ts, deploy/entrypoint.sh, test/the-boot-path-loads-only-what-the-first-pass-needs.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. `lifetimeHistory` (src/run-task.ts) builds dispatch's
+    `LifetimeHistory` eagerly whenever its producer runs, ~13 s at boot (restart report); runDaemon
+    starts `startKnowledgeGardener` among its boot-time gardeners, ~33 s; the container runs src
+    through `node --import tsx` (deploy/entrypoint.sh) with no persistent NODE_COMPILE_CACHE or tsx
+    cache on the state volume, ~20 s per process. Boots: 47 in 67.6 h (16.7/day). Expected saving
+    ~15 min/day (report estimate; the PR re-measures each part).
+  design: |
+    (i) Dispatch reads the lifetime history lazily — on the first selection that needs it — and
+    memoises it for the process.
+    (ii) The knowledge gardener starts after the first full sweep settles (W1-T5720's gate when it
+    lands, else its own first-pass signal).
+    (iii) Measure the tsx share of boot first (time to `daemon.paths` with and without a warm
+    cache); only if it is at least 10 s, point NODE_COMPILE_CACHE and the tsx cache at a directory
+    on the state volume in deploy/entrypoint.sh. Quote both measurements in the PR.
+  acceptance:
+    - claim: "with fake deps, boot builds no lifetime history until the first selection asks for it and then builds it once, and the knowledge gardener starts only after the first full pass settles"
+      proof: "unit test: test/the-boot-path-loads-only-what-the-first-pass-needs.test.ts"
+  falsifier: |
+    Build the lifetime history eagerly again: the fake producer is called at boot and the test
+    fails.

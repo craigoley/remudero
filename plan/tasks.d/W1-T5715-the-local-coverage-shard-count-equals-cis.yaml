@@ -1,0 +1,35 @@
+- id: W1-T5715
+  title: "THE LOCAL COVERAGE SHARD COUNT EQUALS CI'S — CI_COVERAGE_SHARD_COUNT is 4 in ci-parity.ts while ci.yml's coverage-ratchet matrix runs 8 shards, and the only test pins the 4 under a title that still calls it CI's, so rmd ci-parity and preflight partition the suite differently from the gate they mirror"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — the local coverage shard count follows ci.yml
+  band_meaning: span
+  origin: "operator session 2026-10-04: research/flow/report.md addendum defect (CI_COVERAGE_SHARD_COUNT is 4 in ci-parity.ts but ci.yml uses 8)"
+  plan_refs: [W1-T5655, W1-T5676, W1-T5709]
+  files: [src/lib/ci-parity.ts, test/the-coverage-entry-shards-the-way-ci-does.test.ts, test/the-local-coverage-shard-count-equals-cis.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. `CI_COVERAGE_SHARD_COUNT = 4` (src/lib/ci-parity.ts) is
+    read by `coverageShardConcurrency`, the local coverage leaf's `--shard k/4`, the compact-shard
+    merge inputs and the per-shard verdict loops. ci.yml's coverage-ratchet matrix has 8 shards, as
+    do ci-shard and `DEFAULT_CI_SHARD_COUNT = 8` in scripts/test-tier-manifest.mjs.
+    test/the-coverage-entry-shards-the-way-ci-does.test.ts asserts `CI_COVERAGE_SHARD_COUNT` equals
+    4 under "coverage shard scheduling is CPU-bounded while the shard count stays CI's four"; the
+    ci-sharding tests derive their counts from ci.yml's `jobs.ci` matrix but never read ci-parity.
+    So a local coverage run's per-shard memory and timing, and any shard-scoped failure, do not
+    match CI's. Batch-9 W1-T5655 and W1-T5676 also edit ci-parity.ts.
+  design: |
+    Derive the count from ci.yml's coverage-ratchet matrix (or set 8 and add the parity assertion),
+    keep concurrency capped by CPU count, and retitle the old test. Measure one local run's peak
+    memory and wall time at 8 against 4 on this host and quote both in the PR.
+  acceptance:
+    - claim: "the local coverage shard count equals the length of ci.yml's coverage-ratchet shard matrix, and concurrency stays capped by CPU count"
+      proof: "unit test: test/the-local-coverage-shard-count-equals-cis.test.ts"
+  falsifier: |
+    Leave the constant at 4: the parity test reads 8 from ci.yml and fails.

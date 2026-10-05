@@ -1,0 +1,35 @@
+- id: W1-T5725
+  title: "THE CONFIG GARDENER STARTS ITS WORKER WITH FLAGS A WORKER ACCEPTS — it passes process.execArgv to new Worker, and the garden child runs with --max-old-space-size=2048, so the worker throws 'Initiated Worker with invalid execArgv flags': 46 of 66 config.gardener_failed rows 10-02..10-04 (54 of 74 since 10-03)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: low
+  origin: "operator session 2026-10-04: research/restart/report.md defect (config.gardener_failed invalid execArgv flags)"
+  plan_refs: [W1-T4095]
+  files: [src/lib/config-gardener.ts, test/the-config-gardener-starts-its-worker-with-flags-a-worker-accepts.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. src/lib/garden-registry.ts spawns each gardener child
+    as `spawn(execPath, [...execArgv, "--max-old-space-size=<heapLimitMb>", entry, "garden", "run",
+    name, …])`. Inside that child src/lib/config-gardener.ts starts its measurement worker with
+    `new Worker(workerUrl, { workerData: …, execArgv: process.execArgv })`, which now includes
+    `--max-old-space-size=2048`; Node refuses V8 heap flags in a Worker's execArgv (a worker's heap is
+    set by `resourceLimits`), so the worker throws "Initiated Worker with invalid execArgv flags:
+    --max-old-space-size=2048". MEASURED: 46 of 66 `config.gardener_failed` rows in the 10-02..10-04
+    ledger carry that message (the restart report counts 54 of 74 since 10-03) — the config gardener
+    mostly fails.
+  design: |
+    The worker's execArgv is process.execArgv with V8 heap flags (`--max-old-space-size`,
+    `--max-semi-space-size`, and their `=`-less forms) removed; the heap limit, if any, is passed as
+    `resourceLimits.maxOldGenerationSizeMb` instead. Other flags (`--import tsx`) are kept.
+  acceptance:
+    - claim: "given an execArgv holding --import tsx and --max-old-space-size=2048, the worker options keep --import tsx, drop the heap flag and set resourceLimits.maxOldGenerationSizeMb to 2048, and a real Worker started with them runs"
+      proof: "unit test: test/the-config-gardener-starts-its-worker-with-flags-a-worker-accepts.test.ts"
+  falsifier: |
+    Pass process.execArgv through unchanged: the real Worker throws "invalid execArgv flags" and the
+    test fails.

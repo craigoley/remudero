@@ -1,0 +1,40 @@
+- id: W1-T5717
+  title: "EVERY DECISIONS.md ENTRY CARRIES A STATUS, AND CI SAYS SO — scripts/decisions-status.mjs --check exits 1 on main because the two 2026-10-02 Sol 6.1 entries (#8650, #8671) have no Status: line; no test or CI job runs the check, and the machine writer that appends entries stamps none"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: human  # ruling-verify: it stamps the status of two operator rulings
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — DECISIONS.md entries carry a status and CI checks it
+  band_meaning: span
+  origin: "operator session 2026-10-04: DECISIONS.md status integrity (coordinator; the backfill is closed PR #9144, branch run-unfiled-1791141034897, 98a1f255)"
+  plan_refs: [W1-T4096, W1-T352]
+  files: [DECISIONS.md, src/spike.ts, test/every-decisions-entry-carries-a-status.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. `node --import tsx scripts/decisions-status.mjs
+    --check` exits 1 ("DECISIONS.md is missing a status somewhere"): `deriveDecisionStatuses`
+    (src/lib/narrative-fold.ts, W1-T4096) would stamp "## 2026-10-02 — Sol 6.1 replaces Sol 6 as the
+    router lead" (#8650) and "## 2026-10-02 — Review the Sol 6.1 switch daily" (#8671). With #9144's
+    backfill (98a1f255: `Status: accepted` under each heading) applied to a copy, the check prints
+    "every entry already carries a status" and exits 0. Both stay accepted: the switch is still live
+    and the daily-review entry only replaces the first one's review date. #8428 stamped the whole
+    file once on 09-30; it regressed two days later because nothing re-checks. Writers: the only code
+    that appends an entry is the WS-0 spike's `appendFileSync` in src/spike.ts (no Status line);
+    the fleet's rulings land in plan/decisions.d, and hand/worker PRs (#8650, #8671) write the rest,
+    so the CI census is what catches them. Open PR #9141 already stamps its new entry.
+  design: |
+    (i) A census test runs `deriveDecisionStatuses` over the repo's DECISIONS.md and fails when it
+    would change the text, naming each heading it would stamp and the command that stamps it.
+    (ii) Backfill both 2026-10-02 entries with `Status: accepted` exactly as #9144 did.
+    (iii) src/spike.ts's appended entry carries a `Status: accepted` line.
+  acceptance:
+    - claim: "the census passes on a DECISIONS.md whose every entry carries a status and names the heading of an entry that lacks one"
+      proof: "unit test: test/every-decisions-entry-carries-a-status.test.ts"
+  falsifier: |
+    Remove one backfilled `Status: accepted` line: the census names "Review the Sol 6.1 switch
+    daily" and fails. (A grep on the identical Status lines could not discriminate, so the proof is
+    the census itself, which fails at the base tree.)

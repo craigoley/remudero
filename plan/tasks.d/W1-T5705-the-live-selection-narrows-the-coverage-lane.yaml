@@ -1,0 +1,38 @@
+- id: W1-T5705
+  title: "THE LIVE SUITE SELECTION NARROWS THE COVERAGE LANE, WHERE THE COST IS — RMD_AFFECTED_SUITE_LIVE changes only ci-shard's Test step, which on a SOURCE pull request already exits early, so flipping it to 1 adds a floor run and saves nothing of coverage-shard's 535 runner-hours"
+  repo: remudero
+  depends_on: [W1-T5703, W1-T5704, W1-T5515, W1-T5522]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: high  # Rule 19: one concern — the coverage lane runs the selected suites when selection is live
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 6 (the live switch only after the shadow miss rate clears) and addendum (ship behind the merge queue); workflow edit is an operator build (W1-T5351)"
+  plan_refs: [W1-T4404, W1-T4406, W1-T5701, W1-T5702, W1-T5703, W1-T5704, W1-T5515, W1-T5522]
+  files: [.github/workflows/ci.yml, test/the-live-selection-narrows-the-coverage-lane.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a. `RMD_AFFECTED_SUITE_LIVE: "0"` sits in ci.yml's top
+    env and its only reader is ci-shard's Test step (W1-T4406); on a pull_request SOURCE diff that
+    step is the W1-T3207 early exit, and coverage-ratchet always runs `test-tier-manifest.mjs
+    --select-all`. It also selects the FLOOR (`sel.suites`, median 2,281 suites, 8% saving), not
+    `narrow` (median 1,563.5, 37%). MEASURED cost: coverage-shard 2,668 runs x 12.0 min = 535 of
+    SOURCE's 669 runner-h in 2.8 days; coverage critical path 18.1/20.7 min. The shadow's gate
+    (`selectorShadowReport`) is stricter than the report's "< 1% miss": it wants zero misses, and
+    reads "insufficient" today only for 4 incomplete runs (W1-T5703). Prerequisites: the nightly
+    instrumented run on main for the absolute floor (W1-T5704), and the merge-group gate (W1-T5515,
+    W1-T5522) so a group commit is checked with the full set before merge.
+  design: |
+    When RMD_AFFECTED_SUITE_LIVE is 1 and the run is not a full run (push, merge_group, dispatch,
+    toolchain change), coverage-shard runs the selector's `narrow` set instead of `--select-all`;
+    diff coverage is computed over that selection and the absolute floor is read from the newest
+    nightly (W1-T5704) or merge-group run. The flag flip itself stays a one-line operator PR, made
+    only when the shadow verdict reads "ready". With the flag at 0 nothing changes.
+  acceptance:
+    - claim: "parsing ci.yml, with the live flag at 1 on a pull_request SOURCE run coverage-shard invokes the narrow selection instead of --select-all, with the flag at 0 or on push and merge_group it keeps --select-all, and the absolute-floor step reads the nightly artifact when narrowed"
+      proof: "unit test: test/the-live-selection-narrows-the-coverage-lane.test.ts"
+  falsifier: |
+    Leave coverage-shard on `--select-all` under the live flag: the narrowed-run assertion fails.

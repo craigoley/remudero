@@ -1,0 +1,41 @@
+- id: W1-T5707
+  title: "THE JANITOR REAPS AN IDLE AD-HOC WORKSPACE ON THE STATE DISK'S TOP LEVEL, BEHIND A DENY-LIST — /mnt/rmd is in no janitor root, so thread-followups-* (13.6 G, idle 38 h), fh5 (8.0 G) and tf5-* sit unswept on a disk at 91% with 12 G free"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — /mnt/rmd becomes a scratch parent the janitor sweeps
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 8 and addendum 7(b), /mnt/rmd as a janitor parent with a deny-list"
+  plan_refs: [W1-T5513, W1-T5547, W1-T5634, W1-T5665, W1-T5669, W1-T5708, W1-T5709]
+  files: [deploy/rmd-host-cleanup.sh, test/the-janitor-reaps-the-state-disks-ad-hoc-top-level.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 3ae4a67a and the host (du, crontab), read only. /mnt/rmd: 126 G,
+    108 used, 12 free at 18:50Z. The hourly cron runs `rmd-tmp-sweep.sh` with
+    RMD_CLEANUP_TMP_ROOTS = /tmp, rmd-state2/tmp, /mnt/rmd/tmp, /mnt/scratch/tmp and globs `rmd-*
+    node-coverage-*`; deploy/rmd-host-cleanup.sh's glob loop looks only directly under each root,
+    and its scratch parents are /mnt/scratch and /mnt/scratch/o only. So /mnt/rmd's top level is
+    swept by nothing: thread-followups-* 13.6 G (idle ~38 h), fh5 8.0 G (7.7 G of it one killed
+    coverage run's raw V8 shard), tf5-*. Top-level entries that must never be reaped: agent-claude,
+    agent-codex, archive, containerd, docker, host, host-cleanup-archive,
+    host-cleanup-worktree-archive, lost+found, remudero-console-state, remudero-site-state,
+    site-state, state2, tmp. Reclaimable on the measured tree: ~21.6 G. A second raw line in
+    /etc/cron.d/rmd-tmp-sweep (outside the repo) has the same name blindness and bypasses the
+    janitor's guards — named for the operator, not edited here.
+  design: |
+    Add /mnt/rmd (overridable, like the scratch parents) as a scratch parent swept by the existing
+    `sweep_scratch_root` guards and bundle archive, with a 720-minute idle threshold and an explicit
+    deny-list of the names above; an entry on the deny-list, a mount point, or anything with a live
+    process cwd/open file under it is kept and logged with its reason. An unknown name that is idle
+    is reaped through the archive path, never deleted outright.
+  acceptance:
+    - claim: "in a fixture state-disk root, an idle thread-followups-x workspace is archived and reaped, a deny-listed state2 or containerd entry is kept, and a fresh ad-hoc entry under 720 minutes idle is kept"
+      proof: "unit test: test/the-janitor-reaps-the-state-disks-ad-hoc-top-level.test.ts"
+  falsifier: |
+    Remove /mnt/rmd from the scratch parents: the idle fixture workspace survives and the test fails.
+    Drop the deny-list: the fixture state2 is reaped and the test fails.
