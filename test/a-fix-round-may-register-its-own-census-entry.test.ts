@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -9,6 +8,7 @@ import {
   readRegistrationChanges, renderFixPrompt, scopeGuardOutOfScopeFiles,
 } from "../src/run-task.js";
 import * as sweep from "../src/lib/sweep.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const declared = ["src/lib/worker.ts"];
 const ledger = "src/lib/ledger.ts";
@@ -141,9 +141,11 @@ test("unreadable or missing registry evidence refuses the exception", (t) => {
 });
 
 test("real git stages only the admitted registration beside an undeclared sibling", (t) => {
-  const dir = fixture(t, { [ledger]: sources[ledger] });
-  const git = (...args: string[]) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" });
-  git("init", "--quiet", "--initial-branch", "main");
+  const repo = gitRepo({ seedCommit: false, kind: "registration" });
+  const { dir, git } = repo;
+  t.after(() => repo.cleanup());
+  mkdirSync(dirname(join(dir, ledger)), { recursive: true });
+  writeFileSync(join(dir, ledger), sources[ledger]);
   git("config", "user.name", "fixture");
   git("config", "user.email", "fixture@example.invalid");
   git("add", "--", ledger);
