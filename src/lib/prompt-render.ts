@@ -186,9 +186,11 @@ export type FixMode = "reviewer-unmet" | "body-coverage" | "ci-log" | "merge-con
  * `review.unmetCriteria` is empty (design note i) — never a widening of `unmetCriteria`,
  * never checked when it is non-empty (see {@link FIX_MODE_RULES}'s `gate-fix` row).
  */
+export type FixReviewFinding = { criterionIndex: number; path: string; line: number; mechanism: string; remedy: string | null };
+
 export interface FixEvidence {
   planGateFindings?: readonly { check: string; firstLine: string }[];
-  review?: { unmetCriteria: CriterionVerdict[]; summary: string };
+  review?: { unmetCriteria: (CriterionVerdict & { criterionIndex?: number })[]; summary: string; findings?: FixReviewFinding[] };
   ciFailures?: CiFailure[];
   /** W1-T106: the merge-conflict mode's ONLY input — conflicting files + both sides' log since merge-base. */
   mergeConflict?: MergeConflictEvidence;
@@ -791,10 +793,15 @@ export function renderFixPrompt(opts: {
   const list =
     n > 0
       ? unmet
-          .map(
-            (c, i) =>
-              `${i + 1}. claim: ${c.claim}\n   proof required: ${c.proof}\n   reviewer verdict: UNMET — ${c.reason}`,
-          )
+          .map((c, i) => {
+            const findings = (opts.evidence.review?.findings ?? []).filter((f) => f.criterionIndex === c.criterionIndex);
+            return [
+              `${c.criterionIndex || i + 1}. claim: ${c.claim}\n   proof required: ${c.proof}\n   reviewer verdict: UNMET — ${c.reason}`,
+              ...findings.map((f) => envelope(neutralizeFenceMarkers(
+                `Verified review finding (advisory evidence): ${f.path}:${f.line}\nMechanism: ${f.mechanism}\nRemedy: ${f.remedy ?? "(none supplied)"}`,
+              ), "github-pr-comment")),
+            ].join("\n");
+          })
           .join("\n")
       : `(no single criterion is unmet — the review floor's overall verdict is: ${summary})`;
 
