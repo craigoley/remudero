@@ -1,10 +1,11 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 
-import { declinedReasonInLedger, isRatifiedInLedger, parseDraftCache, parseProposalRegistry, type Proposal } from "./inbox.js";
+import { declinedReasonInLedger, isRatifiedInLedger, parseDraftCache, parseProposalRegistry, type InboxClassification, type Proposal } from "./inbox.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
 import { machineTokens } from "./inbox-plain.js";
 import { appendPanelLedger } from "./panel-actions.js";
@@ -82,6 +83,51 @@ export function readClassificationSnapshot(stateDir: string): ({ generatedAt: st
     };
   } catch {
     // deliberate: an unreadable snapshot reads as none, and the lane then does nothing this pass.
+    return undefined;
+  }
+}
+
+/** W1-T5897: everything serve's inbox readers build from, which the slow lane persists so serve's main thread never classifies. */
+export function persistedInboxPath(stateDir: string): string {
+  return `${stateDir}/inbox-classification.json`;
+}
+
+/** What one slow-lane pass classified. `identity` names the content; a re-stamp of the same content keeps it. */
+export interface PersistedInboxContent extends ClassificationEvidence {
+  proposals: Proposal[];
+  classifications: InboxClassification[];
+  /** The only ledger rows the readers take from a pass: fleet-lane decisions and verify-human releases. */
+  ledgerRows: Array<Record<string, unknown>>;
+  mergedTaskIds: string[];
+  projectionIndeterminate: boolean;
+}
+export interface PersistedInbox extends PersistedInboxContent {
+  identity: string;
+  generatedAt: string;
+}
+
+export function persistedInboxIdentity(content: PersistedInboxContent): string {
+  return createHash("sha256").update(JSON.stringify(content)).digest("hex").slice(0, 32);
+}
+
+/** Written atomically by the slow lane, stamped at `atMs`, the same instant the view bodies it built name. */
+export function writePersistedInbox(stateDir: string, content: PersistedInboxContent, atMs: number): PersistedInbox {
+  const persisted = { identity: persistedInboxIdentity(content), generatedAt: fixedClock(atMs).iso(), ...content };
+  writeAtomic(persistedInboxPath(stateDir), JSON.stringify(persisted) + "\n");
+  return persisted;
+}
+
+/** The last persisted classification; undefined when none is readable, which a reader answers as not ready. */
+export function readPersistedInbox(stateDir: string): PersistedInbox | undefined {
+  const raw = readJson(persistedInboxPath(stateDir));
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as Partial<PersistedInbox>;
+    const valid = typeof parsed.identity === "string" && Number.isFinite(Date.parse(parsed.generatedAt ?? "")) && Array.isArray(parsed.proposals) &&
+      Array.isArray(parsed.classifications) && Array.isArray(parsed.ledgerRows) && Array.isArray(parsed.mergedTaskIds) && typeof parsed.complete === "boolean";
+    return valid ? (parsed as PersistedInbox) : undefined;
+  } catch {
+    // deliberate: a torn or foreign file is no classification, answered as not ready until the next pass rewrites it.
     return undefined;
   }
 }
