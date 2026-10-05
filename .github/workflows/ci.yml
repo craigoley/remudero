@@ -738,7 +738,16 @@ jobs:
           fi
           git fetch --no-tags origin "${GITHUB_BASE_REF}" >/dev/null 2>&1 || true
           git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" > changed-files.txt 2>/dev/null || : > changed-files.txt
-          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
+          CLASS="$(node scripts/diff-class.mjs --changed-files changed-files.txt --coverage-class 2>diff-class.log)" || CLASS="SOURCE"
+          if [ "$CLASS" = "TEST_ONLY" ]; then
+            TEST_ONLY_RUN="$(node scripts/diff-class.mjs --test-only-run --changed-files changed-files.txt 2>>diff-class.log)" || TEST_ONLY_RUN=""
+            if [ "$(printf '%s\n' "$TEST_ONLY_RUN" | head -n 1)" = "files" ]; then
+              echo "W1-T5700: only *.test.ts files changed — ci-shard runs exactly those suites, slow ones included; test-slow skips."
+              CLASS="SOURCE"
+            else
+              echo "W1-T5700: a test helper, fixture or setup file changed and coverage-ratchet skips TEST_ONLY — test-slow runs the slow tier."
+            fi
+          fi
           echo "class=${CLASS}" >> "$GITHUB_OUTPUT"
           case "$CLASS" in
             PLAN_ONLY|DOCS_ONLY) ;;
