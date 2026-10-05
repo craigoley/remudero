@@ -7,8 +7,9 @@
  *     `dirname` plus a `<prefix>-wt-<pid>-<n>` name. Nothing created it through `mkdtempSync`, so the
  *     exit-time sweep in test/setup/tmp-hygiene.ts never knew it existed, and removing the fixture left
  *     it behind with a dangling gitdir. Each worktree now lives INSIDE its fixture repo's dir, so the
- *     one removal takes the worktree and its `.git/worktrees/<name>` record together. The census below
- *     keeps the sibling shape from coming back.
+ *     one removal takes the worktree and its `.git/worktrees/<name>` record together. The census that
+ *     keeps every sibling spelling from coming back is in
+ *     test/no-test-worktree-outlives-its-fixture.test.ts (W1-T5625).
  *  2. test/setup/no-live-remote.ts (`rmd-test-gh-config-`) and test/setup/tmp-hygiene.ts
  *     (`rmd-test-gh-refuse-`) removed their dirs only in `process.on("exit")`, which a SIGKILL skips.
  *     Each name now carries its owner's pid, and the next test process to load the setup removes a
@@ -19,7 +20,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { type ChildProcess, spawn } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,48 +36,6 @@ import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const { GH_CONFIG_DIR_PREFIX, pidIsAlive, reapDeadOwnerDirs } = noLiveRemote;
 const { GH_REFUSE_DIR_PREFIX } = tmpHygiene;
-const TEST_DIR = join(REPO_ROOT, "test");
-
-/** A worktree path built from the fixture's PARENT directory — the sibling shape that leaked. */
-const SIBLING_WORKTREE = /addWorktree\(\s*join\(\s*dirname\(\s*[\w.]+\.dir\s*\)/g;
-
-/** `file:line` for every sibling-shaped `addWorktree` call in `text`. */
-function siblingShapedSites(file: string, text: string): string[] {
-  const sites: string[] = [];
-  for (const match of text.matchAll(SIBLING_WORKTREE)) {
-    sites.push(`${file}:${text.slice(0, match.index).split("\n").length}`);
-  }
-  return sites;
-}
-
-function testSources(): Array<{ file: string; text: string }> {
-  return readdirSync(TEST_DIR, { recursive: true, encoding: "utf8" })
-    .filter((rel) => rel.endsWith(".ts") && !rel.split("/").includes("node_modules"))
-    .map((rel) => ({ file: `test/${rel}`, text: readFileSync(join(TEST_DIR, rel), "utf8") }));
-}
-
-test("W1-T5550 census: no test under test/ adds a worktree beside its fixture dir instead of inside it", () => {
-  const sources = testSources();
-  // Positive controls. The pattern must see the shape it refuses (the sample is split so this file
-  // does not match itself), and the corpus must hold the suites that call addWorktree at all.
-  const sample = "const work = parent.addWorktree(join(" + "dirname(parent.dir), `x-wt-${n}`), \"b\");";
-  assert.deepEqual(siblingShapedSites("sample.ts", sample), ["sample.ts:1"]);
-  const callers = sources.filter((s) => s.text.includes(".addWorktree(")).map((s) => s.file);
-  for (const suite of [
-    "test/a-census-this-branch-grows-is-refused-before-the-push.test.ts",
-    "test/census-precheck-counts-the-house-layout-ratchet.test.ts",
-    "test/a-hook-child-does-not-inherit-the-pushing-repo.test.ts",
-  ]) {
-    assert.ok(callers.includes(suite), `the scan must read ${suite}, which adds a worktree`);
-  }
-
-  const offenders = sources.flatMap((s) => siblingShapedSites(s.file, s.text));
-  assert.deepEqual(
-    offenders,
-    [],
-    "put the worktree INSIDE the fixture dir (join(parent.dir, `<name>-${n}`)) — a sibling outlives the fixture",
-  );
-});
 
 test("W1-T5550: a worktree inside its fixture dir is gone, gitdir and all, once the fixture is removed", () => {
   const parent = gitRepo({ kind: "t5550-parent" });

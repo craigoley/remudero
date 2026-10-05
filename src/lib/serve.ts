@@ -84,7 +84,7 @@ import {
   type CiIncidentState,
 } from "./ci-incidents.js";
 import { loadEscalationLinkSecret, readEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
-import { classifyAskRecordItem } from "./ask-classification.js";
+import { projectClassifiedHumanGates } from "./ask-classification.js";
 import { buildReadModelViewRoutes, viewMode, type ViewBodySource } from "./views.js";
 import { createViewEvents, VIEW_EVENTS_PATH, type ViewEvents } from "./view-events.js";
 import { navBadgeView, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
@@ -155,6 +155,7 @@ import {
   type IncidentInvariantRow,
 } from "./incident-invariants.js";
 import { checkServiceFreshness } from "./self-sync.js";
+import { GATEWAY_FETCH_TIMEOUT_MS } from "./git-fetch-retry.js";
 import { reloadServePlan, touchesReloadablePlan } from "./serve-plan-reload.js";
 import { publishThreadPlan } from "./thread-plan.js";
 import { changedPathsSince, serveRestartRelevant, type ChangedPathsRead, type ChangedPathsReader } from "./serve-restart-relevance.js";
@@ -743,16 +744,16 @@ function projectModelApprovals(
   }));
 }
 
-/** W1-T3394: `row.needsHuman` is one of the classifier's four source shapes — a needs-human
- *  escalation (escalate.ts, W1-T8/T77's BLOCKED-AMBIGUOUS disposition) — so routed through {@link
- *  classifyAskRecordItem} rather than read as a bare boolean here, even though today's only
- *  consumer (this initial-board cut) still just wants "does this need attention now". Byte-
- *  identical to the prior `row.needsHuman === true` check: `resolved` is the negation of the same
- *  flag, and the classifier's `escalation` arm is exactly `resolved ? RECORD : ASK`. This is the
- *  classifier's production call site (W1-T3395/W1-T3396 will consult it for the full NEEDS ME
- *  split; this task only needs it reachable from src, not from its own tests alone). */
+/** Keep observed escalation asks on the initial board through the shared projection (W1-T5340). */
 function taskRendersOnInitialBoard(row: BoardRow): boolean {
-  const escalationIsAsk = classifyAskRecordItem({ kind: "escalation", resolved: row.needsHuman !== true }) === "ASK";
+  const escalationIsAsk = projectClassifiedHumanGates([{
+    name: "escalations", instance: "core", state: row.escalationUnverified ? "partial" : "complete",
+    gates: [{
+      classification: { kind: "escalation", resolved: row.needsHuman !== true },
+      kind: "escalation", subject: row.taskId, ownerSurface: "inbox", openedAt: row.escalationOpenedAt ?? null,
+      url: row.escalationIssueUrl ?? null, reason: row.escalationTitle ?? row.title, resolutionVerb: "mark_handled",
+    }],
+  }]).gates.length > 0;
   return row.phase !== undefined || escalationIsAsk || row.verifyHumanPending === true;
 }
 
@@ -1354,9 +1355,6 @@ export function consoleRecyclePatienceMs(
  *  check. At this cadence that is one cheap local command a minute, and only while the process is
  *  up, against the 3h25m of stale service the edge-only trigger actually produced. */
 export const RECYCLE_RECHECK_MS = 60_000;
-
-/** W1-T4229 BACKSTOP: a hung fetch must not hold the checkout read open past the next re-check. */
-export const GATEWAY_FETCH_TIMEOUT_MS = 60_000;
 
 /** One read of the gateway's own checkout, and whether it warrants the freshness restart. */
 export interface GatewayCheckoutAssessment {
@@ -2697,7 +2695,8 @@ function assembleServeRoutes(
     ...deps.panelGraph,
     inboxRoot: deps.fleetControlRoot,
     ratify: deps.panelGraph.ratify ?? ratifyCliGateway(deps.panelGraph.root, join(deps.fleetControlRoot, "state", "logs")),
-    ...(projectionWorker ? { projectFeedback: (input: FeedbackProjectionInput) => projectionWorker.feedback(input), logProjection: deps.log } : {}),
+    logProjection: deps.log,
+    ...(projectionWorker ? { projectFeedback: (input: FeedbackProjectionInput) => projectionWorker.feedback(input) } : {}),
   };
   const lastSeen = deps.lastSeen ?? createLastSeenStore(lastSeenPath(deps.fleetControlRoot));
   // W1-T500: SAME instance `createService`'s dispatch consults (see ServeDeps.confirmNonces's own
@@ -2893,10 +2892,9 @@ function assembleServeRoutes(
     // feedback entry, ledger `panel.skill_invoked`. No worker, no spend.
     //
     // `panelGraphDeps` is passed WHOLE and deliberately: this module needs the same `root`,
-    // `planPath`, `ledgerPath` and `feedbackLand` that POST /v1/feedback/decision already uses, and
-    // production sets `panelGraph.root` and `questionsRoot` to the SAME `repoRoot` (run-task.ts) —
-    // so the skills registry and the feedback write resolve under one root, and the grill lands on
-    // the bot branch instead of dirtying the daemon's checkout.
+    // `planPath`, `ledgerPath` and `inboxRoot` that POST /v1/feedback/decision already uses, so the
+    // skills registry and the grill resolve under one root, and the grill is moved into the
+    // `inboxRoot` landing queue the daemon's sweep lands (W1-T5525, W1-T5628), leaving no copy.
     ...buildPanelSkillRunRoutes(panelGraphDeps),
     buildTaskCardRoute(deps.board),
     // W1-T3352: synchronous read of process-owned state. The server assembly owns refresh and

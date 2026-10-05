@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -150,6 +150,7 @@ interface RunOpts {
 }
 
 function runRecycle(opts: RunOpts): Run {
+  if (opts.scriptPath) cpSync(join(REPO_ROOT, "deploy", "acr-login.sh"), join(dirname(opts.scriptPath), "acr-login.sh"));
   const stubDir = mkdtempSync(join(tmpdir(), "w1-t2588-stub-"));
   const rec = mkdtempSync(join(tmpdir(), "w1-t2588-rec-"));
   mkdirSync(opts.stateDir, { recursive: true });

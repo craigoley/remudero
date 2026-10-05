@@ -128,6 +128,7 @@ const SEED_ROWS: readonly SeedRow[] = [
       "direct-merge-preflight-refused",
       "irreversible-refused",
       "hold-refused",
+      "plan-pr-held",
       "skipped",
     ],
   },

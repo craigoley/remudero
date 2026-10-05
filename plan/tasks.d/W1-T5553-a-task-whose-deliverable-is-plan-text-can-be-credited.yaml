@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: credit research; operator PR #8962 credited W1-T3941, W1-T3981 and W1-T3989 by `pr:`"
   plan_refs: [W1-T4942, W1-T3067, W1-T413, W1-T3941, W1-T3981, W1-T5552]
   files: [src/lib/status.ts, test/a-task-whose-deliverable-is-plan-text-can-be-credited.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

@@ -69,7 +69,13 @@ import {
   type FeedbackExpansion,
   type FeedbackStatus,
 } from "./feedback.js";
-import { queueFeedbackRecord, queuedFeedbackLandings, type LandFeedbackOpts } from "./feedback-landing.js";
+import {
+  queueFeedbackRecord,
+  queuedFeedbackLandings,
+  readQueuedFeedbackRecords,
+  type LandFeedbackOpts,
+  type QueuedFeedbackRecord,
+} from "./feedback-landing.js";
 import {
   feedbackDischargeStateForTasks,
   feedbackOriginTag,
@@ -97,6 +103,7 @@ import { LEDGER_FILENAME } from "./ledger-path.js";
 import { InflightLockError, withInflightLock } from "./inflight-lock.js";
 import { fleetLaneDecisions, readFleetLaneStore, type FleetLaneDecision } from "./fleet-lane.js";
 import { inboxOwner } from "./inbox-owner.js";
+import { projectProposalHumanGates } from "./ask-classification.js";
 import { plainInboxMessage, plainStorePath, readPlainStore, type PlainInboxMessage } from "./inbox-plain.js";
 import {
   listThreadViews,
@@ -190,8 +197,8 @@ export interface PanelGraphDeps {
 /**
  * A reconciled {@link FeedbackEntry} as GET /v1/feedback returns it. `unverified`, `discharged`/
  * `dischargeUndecidable` (W1-T1257) and `landing`/`landingUnknown` (W1-T5524) are read-time-only, never
- * written to `plan/feedback/<id>.yaml` — present only when set, layered after this reconcile. None
- * ever changes `status`.
+ * written to `plan/feedback/<id>.yaml` — present only when set, layered after this reconcile. Only
+ * `landing` changes `status`: a queued entry reads its queued record's (W1-T5627).
  */
 export type ReconciledFeedbackEntry = FeedbackEntry & {
   unverified?: true;
@@ -275,16 +282,26 @@ export function decorateFeedbackDischargeByTasks(
   });
 }
 
+/** W1-T5627: the queued record's decision fields over the checkout's entry — what the entry reads as until it lands. */
+function overlayQueuedFeedback<E extends FeedbackEntry>(entry: E, queued: ReadonlyMap<string, QueuedFeedbackRecord>): E | (E & { landing: "queued" }) {
+  const record = queued.get(feedbackEntryRepoPath(entry.id));
+  if (!record) return entry;
+  const answeredBy = record.answered_by === undefined ? {} : { answered_by: record.answered_by as string | null };
+  return { ...entry, status: record.status as FeedbackStatus, ...answeredBy, landing: "queued" };
+}
+
 /** W1-T5524: one queue read per request; a failed read marks every entry `landingUnknown`, never "nothing queued". */
 function decorateFeedbackLanding(entries: ReconciledFeedbackEntry[], deps: PanelGraphDeps): ReconciledFeedbackEntry[] {
-  let queued: Set<string>;
+  let queued: Map<string, QueuedFeedbackRecord>;
   try {
-    queued = new Set(queuedFeedbackLandings(deps.inboxRoot));
+    queued = readQueuedFeedbackRecords(deps.inboxRoot);
   } catch (error) {
     deps.logProjection?.("serve.feedback_landing_queue_unreadable", { route: "/v1/feedback", reason: String((error as Error)?.message ?? error) });
     return entries.map((entry) => ({ ...entry, landingUnknown: true }));
   }
-  return entries.map((entry) => (queued.has(feedbackEntryRepoPath(entry.id)) ? { ...entry, landing: "queued" } : entry));
+  const listed = new Set(entries.map((entry) => feedbackEntryRepoPath(entry.id)));
+  const queueOnly = [...queued].filter(([rel]) => !listed.has(rel)).map(([, record]) => ({ ...record, landing: "queued" }) as unknown as ReconciledFeedbackEntry);
+  return [...entries.map((entry) => overlayQueuedFeedback(entry, queued)), ...queueOnly];
 }
 
 /** GET /v1/feedback[?status=<status>] — the feedback inbox, read-scoped. */
@@ -385,10 +402,9 @@ function validateSubmitFeedback(body: unknown): { error: string } | SubmitFeedba
   };
 }
 
-/** The 400 refusal for a `replyTo` that cannot be answered, else undefined. Status is read from fetched origin/main,
- *  which feedback landing writes to; the daemon's checkout lags it and is the fallback only when that read fails.
- *  Main still says `grilling` until a reply's landing merges, so an answering entry already in the checkout refuses too. */
-function replyRefusal(root: string, replyTo: string): { refused: string } | undefined {
+/** The 400 refusal for a `replyTo` that cannot be answered, else undefined. Status reads from fetched origin/main, else the
+ *  checkout, else the landing queue; an answering entry in the checkout or queue refuses too, as main lags the reply. */
+function replyRefusal(root: string, replyTo: string, queued: ReadonlyMap<string, QueuedFeedbackRecord>): { refused: string } | undefined {
   let target: FeedbackEntry;
   let source = "origin/main";
   try {
@@ -399,17 +415,33 @@ function replyRefusal(root: string, replyTo: string): { refused: string } | unde
     try {
       target = readFeedbackEntry(root, replyTo);
     } catch {
-      return { refused: `replyTo names no known feedback entry "${replyTo}"` };
+      const queuedTarget = queued.get(feedbackEntryRepoPath(replyTo));
+      if (!queuedTarget) return { refused: `replyTo names no known feedback entry "${replyTo}"` };
+      source = "the landing queue (origin/main unreadable)";
+      target = queuedTarget as unknown as FeedbackEntry;
     }
   }
   if (target.status !== "grilling") {
     return { refused: `feedback#${replyTo} is not parked at grilling (status: ${target.status}, read from ${source}) — nothing to answer` };
   }
-  const answering = listFeedback(root).find((e) => e.reply_to === replyTo);
+  const inCheckout = listFeedback(root).find((e) => e.reply_to === replyTo);
+  const answering = inCheckout ?? ([...queued.values()] as unknown as FeedbackEntry[]).find((e) => e.reply_to === replyTo);
   if (!answering) return undefined;
   return {
-    refused: `feedback#${replyTo} is parked at grilling (status: grilling, read from ${source}) but the checkout already holds feedback#${answering.id} answering it — nothing to answer`,
+    refused: `feedback#${replyTo} is parked at grilling (status: grilling, read from ${source}) but ${inCheckout ? "the checkout" : "the landing queue"} already holds feedback#${answering.id} answering it — nothing to answer`,
   };
+}
+
+/** W1-T5628: the landing queue a dedup, reply or trace reads; unreadable, it answers 503 and returns undefined. */
+function readQueueForCheck(deps: PanelGraphDeps, route: string, res: ServerResponse): Map<string, QueuedFeedbackRecord> | undefined {
+  try {
+    return readQueuedFeedbackRecords(deps.inboxRoot);
+  } catch (error) {
+    const reason = String((error as Error)?.message ?? error);
+    deps.logProjection?.("serve.feedback_landing_queue_unreadable", { route, reason });
+    sendJson(res, 503, { error: "landing_queue_unreadable", detail: `the landing queue could not be read, so nothing is answered blind: ${reason}` });
+    return undefined;
+  }
 }
 
 /**
@@ -428,15 +460,17 @@ export function buildSubmitFeedbackRoute(deps: PanelGraphDeps): Route {
     // W1-T404: LOW — bookkeeping, trivially reversible (capture-only).
     tier: "low",
     handler: jsonAction(validateSubmitFeedback, (input, req, res) => {
+      const queued = input.submissionKey || input.replyTo !== undefined ? readQueueForCheck(deps, "/v1/feedback", res) : new Map<string, QueuedFeedbackRecord>();
+      if (!queued) return;
       if (input.submissionKey) {
-        const existing = findFeedbackBySubmissionKey(deps.root, input.submissionKey);
+        const existing = findFeedbackBySubmissionKey(deps.root, input.submissionKey, deps.inboxRoot);
         if (existing) {
           sendJson(res, 200, { ok: true, entry: existing });
           return;
         }
       }
       if (input.replyTo !== undefined) {
-        const refusal = replyRefusal(deps.root, input.replyTo);
+        const refusal = replyRefusal(deps.root, input.replyTo, queued);
         if (refusal) {
           sendJson(res, 400, { error: "invalid_request", detail: refusal.refused });
           return;
@@ -505,7 +539,9 @@ export function buildPreviewFeedbackRoute(deps: PanelGraphDeps): Route {
     tier: "low",
     handler: jsonAction(validatePreviewFeedback, async (input, _req, res) => {
       if (input.replyTo !== undefined) {
-        const refusal = replyRefusal(deps.root, input.replyTo);
+        const queued = readQueueForCheck(deps, "/v1/feedback/preview", res);
+        if (!queued) return;
+        const refusal = replyRefusal(deps.root, input.replyTo, queued);
         if (refusal) {
           sendJson(res, 400, { error: "invalid_request", detail: refusal.refused });
           return;
@@ -555,16 +591,21 @@ export function buildTraceRoute(deps: PanelGraphDeps, readPlanSnapshot?: () => P
           try {
             feedbackEntry = readFeedbackEntry(deps.root, feedbackId);
           } catch {
-            // origin names a feedback entry that no longer resolves -- render the chain without
-            // it, same as traceCommand's own "note and continue" behavior.
+            // origin names an entry that no longer resolves: render without it, as traceCommand does.
           }
         }
         chain = traceReverse(task, { plan, ledgerLines, github: deps.github }, feedbackEntry);
       } else {
-        let entry: FeedbackEntry;
+        let entry: FeedbackEntry | undefined;
         try {
           entry = readFeedbackEntry(deps.root, id);
         } catch {
+          // Not in the checkout: a console capture is only queued until it lands (W1-T5628).
+          const queued = readQueueForCheck(deps, "/v1/trace", res);
+          if (!queued) return;
+          entry = queued.get(feedbackEntryRepoPath(id)) as unknown as FeedbackEntry | undefined;
+        }
+        if (!entry) {
           sendJson(res, 404, { error: "not_found", detail: `'${id}' is neither a known task id nor a feedback entry` });
           return;
         }
@@ -592,11 +633,11 @@ function validateProposalDecision(body: unknown): { error: string } | ProposalDe
 }
 
 /**
- * POST /v1/feedback/decision — write-scoped. Accept or reject a `proposed` entry over a proposal
- * PR lib/triage.ts already opened. Only a `proposed` entry can be decided (400 otherwise — this
- * caller has a precondition `setFeedbackStatus` itself does not enforce). Ledgers
- * `panel.proposal_accepted`/`panel.proposal_rejected` with the panel's bearer as `origin`.
- * W1-T5460: the flip QUEUES under `inboxRoot` (the state root); the daemon's landing sweep pushes it.
+ * POST /v1/feedback/decision — write-scoped. Accept or reject a `proposed` entry over a proposal PR
+ * lib/triage.ts already opened. Only a `proposed` entry can be decided (400 otherwise — a precondition
+ * `setFeedbackStatus` does not enforce). Ledgers `panel.proposal_accepted`/`panel.proposal_rejected`
+ * with the panel's bearer as `origin`. W1-T5460: the flip QUEUES under `inboxRoot` for the landing sweep;
+ * W1-T5627: a queued decision is the entry's status, and an unreadable queue refuses (503).
  */
 export function buildProposalDecisionRoute(deps: PanelGraphDeps): Route {
   return {
@@ -612,6 +653,19 @@ export function buildProposalDecisionRoute(deps: PanelGraphDeps): Route {
       } catch {
         sendJson(res, 404, { error: "not_found", detail: `no feedback entry "${input.id}"` });
         return;
+      }
+      if (deps.feedbackLand) {
+        try {
+          entry = overlayQueuedFeedback(entry, readQueuedFeedbackRecords(deps.inboxRoot));
+        } catch (error) {
+          const reason = String((error as Error)?.message ?? error);
+          deps.logProjection?.("serve.feedback_landing_queue_unreadable", { route: "/v1/feedback/decision", reason });
+          sendJson(res, 503, {
+            error: "landing_queue_unreadable",
+            detail: `feedback#${input.id}'s landing queue could not be read, so it is never decided blind: ${reason}`,
+          });
+          return;
+        }
       }
       if (entry.status !== "proposed") {
         sendJson(res, 400, {
@@ -1480,6 +1534,9 @@ export interface InboxNotReadyItem {
   /** W1-T4087: the item's plain-language message; `summary` stays as the raw Details. */
   plain: PlainInboxMessage;
   reasons: PredicateFailure[];
+  state?: "not_ready" | "deferred_with_trigger";
+  trigger?: InboxClassification["trigger"];
+  resolution?: { method: "POST"; path: "/v1/inbox/reframe"; fields: { proposalId: string } };
 }
 
 /** W1-T4086: one fleet-owned proposal in `GET /v1/inbox`'s `fleet` list, with the lane it sits in. */
@@ -1856,22 +1913,31 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
         plain: plainInboxMessage(proposal, plainStore),
         reason: classification.declinedReason ?? "declined by an operator",
       });
-    } else if (classification.state === "not_ready") {
+    } else if (classification.state === "not_ready" || classification.state === "deferred_with_trigger") {
       // W1-T2604 (finding (i)): the failing predicate(s) classifyProposal already named,
       // never a bare "not_ready" — see InboxNotReadyItem's own doc.
-      notReady.push({ proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), reasons: classification.reasons });
+      notReady.push({
+        proposalId: proposal.id, summary: proposal.summary, plain: plainInboxMessage(proposal, plainStore), reasons: classification.reasons,
+        state: classification.state, ...(classification.trigger ? { trigger: classification.trigger } : {}),
+        resolution: { method: "POST", path: "/v1/inbox/reframe", fields: { proposalId: proposal.id } },
+      });
     }
   }
   // W1-T4086: split every lane by who must act. `needsYou` holds only the operator's items;
-  // `fleet` holds the fleet's own findings with the lane each sits in. The four top-level
-  // lanes stay unchanged for one release so the console can move over without a break.
+  // `fleet` holds the fleet's own findings with the lane each sits in. The top-level
+  // lanes retain records; only the shared projection selects the operator's asks (W1-T5340).
   const isOperator = (item: { proposalId: string }) => inboxOwner({ id: item.proposalId }) === "operator";
+  const humanGates = projectProposalHumanGates(classifications.filter((c) => byId.has(c.proposalId)));
+  const asks = new Set(humanGates.gates.map((gate) => decodeURIComponent(gate.key.split(":")[2]!)));
+  const isAsk = (item: { proposalId: string }) => asks.has(item.proposalId);
+  const operatorItems = <T extends { proposalId: string }>(items: T[]) => items.filter(isOperator)
+    .map((item) => ({ ...item, classification: isAsk(item) ? "ASK" as const : "RECORD" as const }));
   const fleetDecisions = fleetLaneDecisions(ledgerLines as never, fleetLaneStoreForDisplay(join(inboxRoot, "state")));
   const needsYou = {
-    ready: ready.filter(isOperator),
-    drafting: drafting.filter(isOperator),
-    notReady: notReady.filter(isOperator),
-    declined: declined.filter(isOperator),
+    ready: operatorItems(ready),
+    drafting: operatorItems(drafting),
+    notReady: operatorItems(notReady),
+    declined: operatorItems(declined),
   };
   const fleet: InboxFleetItem[] = [
     ...ready.map((i) => ({ proposalId: i.proposalId, summary: i.summary, plain: i.plain, lane: "ready" as const })),
@@ -1888,9 +1954,12 @@ export function inboxLanes(classified: Pick<ClassifiedInbox, "proposals" | "clas
     notReady: notReady.length,
     declined: declined.length,
     fleet: fleet.length,
-    needsYou: { ready: needsYou.ready.length, drafting: needsYou.drafting.length, notReady: needsYou.notReady.length, declined: needsYou.declined.length },
+    needsYou: {
+      ready: needsYou.ready.filter(isAsk).length, drafting: needsYou.drafting.filter(isAsk).length,
+      notReady: needsYou.notReady.filter(isAsk).length, declined: needsYou.declined.filter(isAsk).length,
+    },
   };
-  return { ready, drafting, notReady, declined, needsYou, fleet, counts };
+  return { ready, drafting, notReady, declined, needsYou, fleet, counts, humanGates };
 }
 
 /**

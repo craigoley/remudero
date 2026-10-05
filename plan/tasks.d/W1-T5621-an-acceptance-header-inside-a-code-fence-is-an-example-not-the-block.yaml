@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: a PR body quoting the acceptance format in a code fence"
   plan_refs: [W1-T3142, W1-T2762, W1-T1264, W1-T3066]
   files: [src/lib/review.ts, src/lib/plan-pr-emitter.ts, test/an-acceptance-header-inside-a-code-fence-is-an-example-not-the-block.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

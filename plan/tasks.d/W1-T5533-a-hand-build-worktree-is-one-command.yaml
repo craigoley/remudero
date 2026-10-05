@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: hand builders lost time to worktree-add upstream errors, relative paths landing under core/, and per-build installs that filled the root disk"
   plan_refs: [W1-T2777, W1-T137, W1-T221]
   files: [src/lib/hand-worktree.ts, src/run-task.ts, docs/cli-reference.md, test/a-hand-build-worktree-is-one-command.test.ts]
-  status: queued
+  status: merged
   priority: 3
   attempts: 0
   rationale: |

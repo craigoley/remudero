@@ -57,7 +57,7 @@ test("REACHABILITY: daemonCommand WIRES checkFreshness into the deps it hands ru
     assert.equal(typeof captured.checkFreshness, "function", "the daemon must wire a code-freshness check");
 
     // And it is CALLABLE and returns the loop's own contract — not merely present.
-    const verdict = captured.checkFreshness!();
+    const verdict = await captured.checkFreshness!();
     assert.equal(verdict.stale, false, "under the CI guard it fails safe rather than bouncing the daemon");
 
     // runInstall stays deliberately unwired — serviceFreshnessGate already runs ensureInstallFresh

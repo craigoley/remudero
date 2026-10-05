@@ -1,4 +1,7 @@
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
+import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, type ReadGeneration } from "./lib/read-plane.js";
+import { readPlaneWorkerInput, runReadPlaneWorker, readPlaneWorkerLog } from "./lib/read-plane.worker.js";
+import { renameSync } from "node:fs";
 import { remeasureSettledGoals, withGoalRemeasurement } from "./lib/goals.js";
 // The doctorCommand-only reads (DOCTOR_USAGE_EXIT, buildDoctorReport, readGitLocks, readMemInfo,
 // readPauseAgeMs, refuseUnsupportedArgs, classifyReadFailure, readDiskTotalBytes,
@@ -22,7 +25,7 @@ import { mkdir as mkdirAsync, readFile as readFileAsync } from "node:fs/promises
 import { baseReproductionFiles, decideBaseReproduction, probeCacheFromLedger, probeCacheKey, type BaseProbeFile } from "./lib/base-reproduction.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, type FixOutcome as TypedFixOutcome } from "./lib/fix-outcome.js";
 import { CHECK_REQUEUE_STEP, requeuedCheckKeysFromLedger } from "./lib/sweep.js";
-import { ghExec, ghJsonAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
+import { ghExec, ghJsonAsync, ghTextAsync, withDaemonGhTransportFloor, withGhTransportFloor } from "./lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
@@ -120,9 +123,11 @@ import {
   armAutoMergeDetailed,
   attemptArm,
   armAutoMergeAtOpen,
+  armAutoMergeAtOpenAsync,
   classifyDisarmFailure,
   disarmOutcomeWithdrawn,
   disarmAutoMerge,
+  disarmAutoMergeAsync,
   logArmAttribution,
   armIfVerdictPermits,
   armOutcomeReason,
@@ -173,7 +178,7 @@ import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/
 import { mergedInLastDay } from "./lib/fleet-lane.js";
 import { gardenPrState, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { gardenPassDue, runGarden, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./lib/gardener.js";
+import { GARDEN_FILING_RETRY_BASE_MS, gardenPassDue, runGarden, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, GARDEN_DUE_FAILED_STEP, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
@@ -213,6 +218,7 @@ import {
   renderReconPrompt,
   scopeGuardOutOfScopeFiles,
   type FixEvidence,
+  type FixReviewFinding,
   type FixMode,
 } from "./lib/prompt-render.js";
 export {
@@ -484,6 +490,7 @@ import {
   escalationContractRevision,
   findDuplicateEscalation,
   ghIssueGateway,
+  ghIssueGatewayAsync,
   presenceMode,
   setPresenceMode,
   tryEscalate,
@@ -1152,7 +1159,9 @@ import {
   repairRefusedTask,
   type RefusalViolation,
 } from "./lib/dispatch-repair.js";
-import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, replayOptIn } from "./lib/replay-harness.js";
+import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, replayOptIn,
+  pairedReviewerReplayCommand, replayPairedReviews, type ReviewerReplayCommandInput } from "./lib/replay-harness.js";
+import { judgeInstanceLiveness, readLivenessRows, LIVENESS_WINDOW_MS } from "./lib/fleet-liveness.js";
 import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, type GoldenTask } from "./lib/replay.js";
 import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount, type Mounts } from "./lib/mounts.js";
@@ -1426,6 +1435,9 @@ import {
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import {
   buildBatchedGithub,
+  defaultCreditStorePath,
+  loadCreditStore,
+  saveCreditStore,
   buildCommitTrailerIndex,
   buildLedgerIndex,
   classifyGhFailure,
@@ -1509,6 +1521,12 @@ import {
   REQUIRED_CHECK_FAIL,
   REQUIRED_CHECK_OK,
   runCreditBackfill,
+  closedPrFacts,
+  closedPrFromRef,
+  closedPrLookup,
+  runPrTerminalReconcile,
+  type ClosedPrFact,
+  type PrTerminalReconcileSummary,
   runEscalationReconcile,
   runPostFixReverification,
   runSweep,
@@ -2579,7 +2597,19 @@ import { LiveSpawnBlockedError } from "./lib/spawn-guard.js";
 // turns instead of dollars (this task's own declared `files:` list does not include
 // `plan/policy.yaml`, so no new policy row is added here).
 import { loadDefaultCostAnomalyPolicy, type CostAnomalyPolicy } from "./lib/cost-anomaly.js";
-import { defaultGitCapture, gitPushRunBranch, gitPushEmptyCommit, LanePushForeignHeadError } from "./lib/git-push.js";
+import {
+  defaultGitCapture,
+  defaultGitCaptureAsync,
+  gitPushRunBranch,
+  gitPushRunBranchAsync,
+  gitPushEmptyCommit,
+  LanePushForeignHeadError,
+  runStepsAsync,
+  runStepsSync,
+  step,
+  type PushRunBranchAsyncOpts,
+  type Steps,
+} from "./lib/git-push.js";
 import {
   ensureWorkerKeychain,
   materializeWorkerHome,
@@ -2593,8 +2623,10 @@ import {
   checkCliFreshness,
   checkReviewerCodeFreshnessAsync,
   checkServiceFreshness,
+  checkServiceFreshnessAsync,
   daemonFreshnessFromService,
   type ReviewerCodeFreshness,
+  type SelfSyncDeps,
 } from "./lib/self-sync.js";
 import { checkImageDrift, IMAGE_DRIFT_STEP } from "./lib/image-drift.js";
 import {
@@ -6276,7 +6308,7 @@ export interface PollDeps {
    * unprotected branch) takes `ciGateFromRollup` down its unchanged fail-closed fallback.
   */
   requiredContexts?: (owner: string, repo: string) => string[] | undefined;
-  externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+  externalWaitFreshness?: ExternalWaitFreshness;
   externalWaitRecycle?: () => string | undefined;
   /**
    * W1-T5345: yield the CI wait on its FIRST poll, after `run.awaiting_external` is written, so
@@ -6326,17 +6358,32 @@ export function prOpenHandoffDecline(run: { irreversible: boolean; noMerge: bool
   return undefined;
 }
 
-export function ciWaitFreshness(
-  read: () => DaemonFreshness,
-  clock: Clock = systemClock,
-): () => Extract<DaemonFreshness, { stale: true }> | undefined {
-  return () => {
-    const freshness = read();
+/** W1-T5282: a CI wait's freshness hook; the daemon's is awaited, so its `git fetch` never holds the loop. */
+export type ExternalWaitFreshness = () =>
+  | Extract<DaemonFreshness, { stale: true }>
+  | undefined
+  | Promise<Extract<DaemonFreshness, { stale: true }> | undefined>;
+
+export function ciWaitFreshness(read: () => DaemonFreshness, clock?: Clock): () => Extract<DaemonFreshness, { stale: true }> | undefined;
+export function ciWaitFreshness(read: () => Promise<DaemonFreshness>, clock?: Clock): () => Promise<Extract<DaemonFreshness, { stale: true }> | undefined>;
+export function ciWaitFreshness(read: () => DaemonFreshness | Promise<DaemonFreshness>, clock: Clock = systemClock): ExternalWaitFreshness {
+  const judge = (freshness: DaemonFreshness): Extract<DaemonFreshness, { stale: true }> | undefined => {
     if (!freshness.stale) return undefined;
     const nowMs = clock.now();
     const decision = decideFreshnessRestart({ changes: freshness.changes, busy: true, staleSinceMs: nowMs, nowMs, state: { total: 0, scoredShas: [] } });
     return decision.action === "restart" ? freshness : undefined;
   };
+  return () => {
+    const freshness = read();
+    return freshness instanceof Promise ? freshness.then(judge) : judge(freshness);
+  };
+}
+
+/** W1-T5282 — the daemon's two freshness reads of `repoDir`, both awaited: a sync `git fetch` here stalled the
+ *  loop 49 s (E36). The fetch is bounded by `GATEWAY_FETCH_TIMEOUT_MS`; a hung one reads as a failed fetch. */
+export function daemonFreshnessReads(repoDir: string, env: NodeJS.ProcessEnv = process.env, deps: SelfSyncDeps = {}) {
+  const read = (): Promise<DaemonFreshness> => checkServiceFreshnessAsync(repoDir, env, deps).then(daemonFreshnessFromService);
+  return { checkFreshness: read, externalWaitFreshness: ciWaitFreshness(read) };
 }
 
 // EXPORTED INLINE, not on the tail export list its sibling `waitForCiGreen` rides: that list is the
@@ -6777,7 +6824,7 @@ async function waitForCiGreen(
     if (i === 0) {
       log(AWAITING_EXTERNAL_LEDGER_STEP, { waiting_on: "ci" });
       // W1-T3793: yield only after retaining the external-wait record.
-      const freshness = deps.externalWaitFreshness?.();
+      const freshness = await deps.externalWaitFreshness?.();
       if (freshness) {
         log("run.freshness_handoff", {
           waiting_on: "ci",
@@ -10085,6 +10132,7 @@ export async function runFixRung(opts: {
   retriggerCap?: number;
   /** The blocked_review verdict that triggered this rung. */
   initialReview: ReviewRunResult;
+  initialCriterionIndices?: readonly number[];
   reviewBase: { owner: string; repo: string; headCheckoutDir: string; reviewerMount: Mount }; birthWorktreeSnapshot?: WorktreeSnapshot;
   /** The run's already-resolved worker-abandon policy, threaded into re-reviews so the advisory
    * reviewer does not reread policy from disk on every fix strike. */
@@ -11425,7 +11473,10 @@ export async function runFixRung(opts: {
     // only) so the empty-review-evidence guard below can tell "genuinely nothing unmet" apart
     // from "unmet, but only on a WORKER-hidden holdout criterion" (W1-T2236 design note i) —
     // the latter must keep dispatching off the review's own redacted summary, never stand down.
-    const rawUnmet = review.criteria.filter((c) => !c.met);
+    const rawUnmet = review.criteria.map((c, index) => {
+      const criterionIndex = review === opts.initialReview ? opts.initialCriterionIndices?.[index] ?? index + 1 : index + 1;
+      return { ...c, criterionIndex, holdout: opts.task.acceptance?.[criterionIndex - 1]?.holdout ?? c.holdout };
+    }).filter((c) => !c.met);
     const unmet = visibleCriteria(rawUnmet);
     const proofDiscriminationFromReview =
       opts.proofDiscrimination !== undefined &&
@@ -11549,7 +11600,8 @@ export async function runFixRung(opts: {
     // byte-identical re-block apart from real progress. Keyed on the SAME
     // worker-visible unmet set the fix rung actually dispatches (W1-T166).
     const priorHeadSha = review.headSha;
-    const priorDesign = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))().find((row) =>
+    const roundLedger = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))();
+    const priorDesign = roundLedger.find((row) =>
       row.step === "fix.needs_design" && row.task_id === opts.taskId && row.head_sha === priorHeadSha);
     if (priorDesign) {
       const reason = String(priorDesign.reason);
@@ -11587,7 +11639,9 @@ export async function runFixRung(opts: {
           // actually non-empty, so a `[]`/`undefined` value here is inert for a genuine
           // reviewer-unmet dispatch (unmet.length > 0) exactly as before this task.
           {
-            review: { unmetCriteria: unmet, summary: review.summary },
+            review: { unmetCriteria: unmet, summary: review.summary, findings: verifiedReviewFindingsForFix(
+              roundLedger, opts.taskId, opts.prUrl, priorHeadSha,
+            ) },
             actionableGateFailures: gateFailuresNow,
             proofDiscrimination: proofDiscriminationNow,
             constraint: opts.constraint,
@@ -14752,7 +14806,7 @@ interface RunTaskBodyOptions extends ProbeAdmissionOptions {
   binaryPinDeps?: Parameters<typeof readBinaryPin>[0];
   claimReserver?: DispatchClaimReserver;
   containmentExec?: ProbeExecutor;
-  externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+  externalWaitFreshness?: ExternalWaitFreshness;
   externalWaitRecycle?: () => string | undefined;
   handOffAtPrOpen?: boolean;
   isolationExec?: IsolationProbeExecutor;
@@ -15578,7 +15632,7 @@ async function runTask(
      *  `deps.probeExec` already uses, without touching `loadConfig()` (unavailable in CI) or
      *  spawning a real sandboxed worker. Default: the real spawn-backed executor. */
     containmentExec?: ProbeExecutor;
-    externalWaitFreshness?: () => Extract<DaemonFreshness, { stale: true }> | undefined;
+    externalWaitFreshness?: ExternalWaitFreshness;
     externalWaitRecycle?: () => string | undefined;
     /** W1-T5345: hand the PR to the sweep at the first CI poll ({@link PollDeps.handOffAtPrOpen}). Daemon only. */
     handOffAtPrOpen?: boolean;
@@ -16214,28 +16268,30 @@ export class FixRoundPushError extends RmdError {
 }
 
 /** W1-T4693: the one push both fix-rung sites run. Stderr is piped so a refusal is readable; a foreign head
- *  still raises; the only silent failure is a remote that already holds this exact head. */
-export function pushFixRound(
+ *  still raises; the only silent failure is a remote that already holds this exact head. W1-T5284: every git
+ *  child is awaited — the sweep and runTaskBody run fix rounds on the daemon's loop. */
+export async function pushFixRound(
   wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string,
-  deps: Pick<NonNullable<Parameters<typeof gitPushRunBranch>[1]>, "capture" | "exec"> = {},
-): void {
-  const capture = deps.capture ?? defaultGitCapture;
-  const push = deps.exec ?? ((file, args) => void execFileSync(file, args, { stdio: ["ignore", "ignore", "pipe"] }));
+  deps: Pick<PushRunBranchAsyncOpts, "capture" | "exec"> = {},
+): Promise<void> {
+  const capture = deps.capture ?? defaultGitCaptureAsync;
+  const push = deps.exec ?? (async (file: string, args: string[]) => void (await execFilePromise(file, args)));
   try {
     if (priorHeadSha !== undefined && expectedHeadSha === undefined) throw new Error("refusing a leased fix push without the committed head sha");
-    gitPushRunBranch(wt, { expectedHeadSha, capture, exec: (file, args) => {
+    await gitPushRunBranchAsync(wt, { expectedHeadSha, capture, exec: async (file, args) => {
       const pushArgs = priorHeadSha === undefined ? args : ["-C", wt, "push",
         `--force-with-lease=refs/heads/${branch}:${priorHeadSha}`, "origin", `${expectedHeadSha}:refs/heads/${branch}`];
-      push(file, pushArgs, { stdio: "ignore" });
+      await push(file, pushArgs, { stdio: "ignore" });
       if (priorHeadSha !== undefined) {
-        const observed = capture("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`]).split(/\s/)[0];
+        const observed = (await capture("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`])).split(/\s/)[0];
         if (observed !== expectedHeadSha) throw new Error(`leased push of ${branch} expected ${expectedHeadSha}, observed ${observed || "<absent>"}`);
       }
     } });
   } catch (err) {
     if (err instanceof LanePushForeignHeadError && priorHeadSha === undefined) throw err;
-    // spawnSync, not a try: an unreadable remote simply is not the expected head.
-    const remote = spawnSync("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`], { encoding: "utf8" }).stdout?.split(/\s/)[0];
+    // An unreadable remote simply is not the expected head, so its failure reads as no head at all.
+    const remote = await execFilePromise("git", ["-C", wt, "ls-remote", "origin", `refs/heads/${branch}`], { encoding: "utf8" })
+      .then(({ stdout }) => stdout.split(/\s/)[0], () => undefined);
     if (expectedHeadSha !== undefined && remote === expectedHeadSha) return;
     throw new FixRoundPushError(runErrorCause(err), censusPushRefusal(err), String((err as Error)?.message ?? err));
   }
@@ -16405,12 +16461,12 @@ export async function pushFixRoundPrechecked(
   branch: string,
   expectedHeadSha?: string,
   ports: CoveragePrecheckPorts = {},
-  push: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => void = pushFixRound,
+  push: (wt: string, branch: string, expectedHeadSha?: string, priorHeadSha?: string) => void | Promise<void> = pushFixRound,
   priorHeadSha?: string,
 ): Promise<void> {
   const refusal = coveragePushRefusal(await coveragePrecheck(wt, ports), log, "rung.fix_push");
   if (refusal) throw new FixRoundPushError("run-error", refusal, refusal.text);
-  push(wt, branch, expectedHeadSha, priorHeadSha);
+  await push(wt, branch, expectedHeadSha, priorHeadSha);
 }
 
 export type CensusPushRungOutcome =
@@ -16518,7 +16574,7 @@ export async function repairCensusRefusedPush(input: {
       continue;
     }
     try {
-      gitPushRunBranch(cwd);
+      await gitPushRunBranchAsync(cwd);
     } catch (err) {
       const next = censusPushRefusal(err);
       if (!next) throw err;
@@ -18321,7 +18377,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       const coverageRefusal = coveragePushRefusal(await coveragePrecheck(worktreePath, opts.coveragePrecheckPorts), log, "fallback_push");
       try {
         if (coverageRefusal) throw new FixRoundPushError("run-error", coverageRefusal, coverageRefusal.text);
-        gitPushRunBranch(worktreePath);
+        await gitPushRunBranchAsync(worktreePath);
       } catch (err) {
         const refusal = err instanceof FixRoundPushError ? err.refusal : censusPushRefusal(err);
         if (!refusal) throw err;
@@ -18370,7 +18426,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // read that tip. `appendTaskTrailerToCommit` amends only when the trailer is missing, so
     // an already-trailered commit (a worker that wrote it itself) pays no second amend.
     if (appendTaskTrailerToCommit(worktreePath, taskId)) {
-      gitPushRunBranch(worktreePath, { force: true });
+      await gitPushRunBranchAsync(worktreePath, { force: true });
     }
     if (!prUrl) {
       let prCreate: ReturnType<typeof ghPrCreateFillCommand>;
@@ -18873,7 +18929,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
       // W1-T1215: FOLLOW THE OUTCOME. This discarded the return and logged `automerge.disarmed`
       // unconditionally, so a withdrawal GitHub refused read as a completed one. `disposeDisarm`
       // holds the whole decision (and every lost-race-only read) where a test can reach it.
-      const disposition = disposeDisarm(disarmAutoMerge(prUrl), { prUrl, taskId, runId, ledgerPath, reason, refusal: armDecision.reason });
+      const disposition = disposeDisarm(await disarmAutoMergeAsync(prUrl), { prUrl, taskId, runId, ledgerPath, reason, refusal: armDecision.reason });
       log(disposition.step, disposition.row);
       const prNum = prUrl.match(/\/pull\/(\d+)/)?.[1] ?? prUrl;
       const issueUrl = escalate(
@@ -19136,7 +19192,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     const armOutcome: ArmOutcome | "no-merge-boundary-refused" | "shadow-instance-refused" = !shadowArmDecision.armed
       ? "shadow-instance-refused"
       : wipeTestArmDecision.armed
-        ? armAutoMergeAtOpen(prUrl, undefined, irreversible)
+        ? await armAutoMergeAtOpenAsync(prUrl, undefined, irreversible)
         : "no-merge-boundary-refused";
     // W1-T2258: `review.headSha` — the SAME head captured in `riskJudgeInput` above — is already
     // in scope here and simply was not put on the row; this is the SINGLE LARGEST dropped
@@ -22059,6 +22115,17 @@ export interface ReplayGoldensDeps {
   writeLedger?: typeof appendLedger;
   now?: () => number;
   log?: (message: string) => void;
+}
+
+export async function benchmarkReviewerReplayCommand(rest: string[], deps: Partial<ReviewerReplayCommandInput>
+  & { usageDeps?: Parameters<typeof readUsageSnapshotPreferSdk>[1] } = {}): Promise<number> {
+  return pairedReviewerReplayCommand(rest, (input) => replayPairedReviews(input), {
+    ...deps, readIdle: deps.readIdle ?? (async (stateDir, config) => {
+      const instance = { name: "operator-reviewer", repo: "operator/reviewer", stateDir };
+      return { liveness: judgeInstanceLiveness(instance, readLivenessRows(instance, systemClock.now() - LIVENESS_WINDOW_MS), systemClock.now()),
+        headroom: await readUsageSnapshotPreferSdk(config, deps.usageDeps) };
+    }),
+  });
 }
 
 /**
@@ -29998,6 +30065,7 @@ export function boardReviewHooksForTick(
 }
 
 export function buildBoardReviewDaemonHooks(deps: {
+  checkItems?: () => BoardItem[] | undefined;
   check?: () => BoardReviewCadenceDecision;
   run?: () => Promise<BoardReviewReport>;
   config?: Config;
@@ -30031,7 +30099,9 @@ export function buildBoardReviewDaemonHooks(deps: {
   runBoardReview: () => Promise<BoardReviewReport>;
   /** W1-T5481: reads the open board OFF the loop; the next items read takes it once. */
   prefetchBoardReview: () => Promise<void>;
+  bindCheckItems: (source: () => BoardItem[] | undefined) => void;
 } {
+  let checkItems = deps.checkItems;
   const configFor = () => deps.config ?? loadConfig();
   const policyFor = () => deps.policy ?? loadPolicy(policyPath(repoRoot));
   // NO PROJECTION IS NOT AN EMPTY BOARD: the throw lands in `defaultBoardReviewItems`'s inner catch,
@@ -30051,7 +30121,8 @@ export function buildBoardReviewDaemonHooks(deps: {
   // The daemon now awaits `prefetchBoardReview` first; the read consumes that answer, or its error.
   const readAsync = deps.readJson ?? (deps.items || deps.itemsIo?.fetchOpenPrs ? undefined : ghJsonAsync);
   let prefetched: { prs: OpenPrRest[] } | { error: unknown } | undefined;
-  const prefetch = async (): Promise<void> => {
+  const prefetch = async (fresh = false): Promise<void> => {
+    if (!fresh && checkItems?.() !== undefined) return;
     if (!readAsync) return;
     try {
       const { owner, repo } = (deps.itemsIo?.resolveOwnerRepo ?? resolveOwnerRepo)();
@@ -30089,7 +30160,7 @@ export function buildBoardReviewDaemonHooks(deps: {
           // ONE read serves both the reconciler and the cadence decision below — see this
           // function's own header doc on why a second read here would be exactly the cost this
           // rung's design forbids paying twice.
-          const items = itemsFor();
+          const items = checkItems?.() ?? itemsFor();
           const { retiredProposalIds } = reconcile({
             items,
             registryPath: join(root, "state", "inbox-proposals.json"),
@@ -30118,8 +30189,8 @@ export function buildBoardReviewDaemonHooks(deps: {
       const root = configFor().root;
       const now = deps.now?.() ?? new Date();
       recordBoardReviewFire(boardReviewMarkerPath(root), now, 24 * 60 * 60 * 1000);
-      // W1-T5481: the run's own items read (W1-T3109 owns dropping it) is prefetched off the loop too.
-      await prefetch();
+      const generationItems = checkItems?.();
+      if (generationItems === undefined) await prefetch(true);
       return (deps.build ?? buildBoardReview)({
         policy: policyFor().values.boardReview,
         // AN EMPTY MARKER, DELIBERATELY, AND IT IS NOT A LIE ABOUT DISK.
@@ -30136,7 +30207,7 @@ export function buildBoardReviewDaemonHooks(deps: {
         // cleared for this run. The real marker on disk is untouched by this argument and is what
         // bounds the NEXT tick.
         marker: { kind: "ok", marker: { fires: [] } },
-        items: itemsFor(),
+        items: generationItems ?? itemsFor(),
         now,
         reportPath: boardReviewReportPath(root),
         registryPath: join(root, "state", "inbox-proposals.json"),
@@ -30146,7 +30217,8 @@ export function buildBoardReviewDaemonHooks(deps: {
         // no action at all, which is its own documented default.
       });
     });
-  return { checkBoardReview: check, runBoardReview: run, prefetchBoardReview: prefetch };
+  return { checkBoardReview: check, runBoardReview: run, prefetchBoardReview: () => prefetch(),
+    bindCheckItems: (source) => { checkItems = source; } };
 }
 
 /** The risk every generated sandbox subject is written with (wipe-test.ts's
@@ -30460,15 +30532,15 @@ export function runCitationStampPass(opts: {
 // Cuts a lane's `run-<runId>` worktree branch, ledgering a failed add before rethrowing
 // (W1-T2528) — shared by retro/triage/plan. Defined AFTER runTask (not beside `nextLaneEpochMs`):
 // tests static-scan for the FIRST `worktreeAdd(...` match to prove runTask's own guards precede it.
-export function addLaneWorktree(
+export async function addLaneWorktree(
   repoDir: string, worktreesRoot: string, runId: string, log: (step: string, extra?: Record<string, unknown>) => void,
-): { branch: string; worktreePath: string } {
+): Promise<{ branch: string; worktreePath: string }> {
   const branch = `run-${runId}`;
   const worktreePath = join(worktreesRoot, branch);
   try {
     // W1-T2621: thread the caller's own ledger through — `worktreeAdd` now emits the
     // `worktree.add` three-way base reading itself; see its doc in lib/worker.ts.
-    addLockedRunWorktree(repoDir, worktreePath, branch, "origin/main", runId, log);
+    await addLockedRunWorktreeAsync(repoDir, worktreePath, branch, "origin/main", runId, log);
   } catch (e) {
     log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
     throw e;
@@ -30487,6 +30559,22 @@ export function addLockedRunWorktree(
   writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: systemClock.iso() });
   try {
     worktreeAdd(repoDir, worktreePath, branch, base, { log });
+  } catch (e) {
+    removeRunLock(worktreePath);
+    throw e;
+  }
+}
+
+/** W1-T5284: {@link addLockedRunWorktree} for the daemon's lanes — the same lock-first order, with the add (and its
+ *  `git fetch`) awaited so the loop runs meanwhile. The lock now also covers a prune in THIS process. */
+export async function addLockedRunWorktreeAsync(
+  repoDir: string, worktreePath: string, branch: string, base: string, runId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<void> {
+  mkdirSync(worktreePath, { recursive: true });
+  writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: systemClock.iso() });
+  try {
+    await worktreeAddAsync(repoDir, worktreePath, branch, base, { log });
   } catch (e) {
     removeRunLock(worktreePath);
     throw e;
@@ -30959,7 +31047,7 @@ async function retroCommand(
   }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
+  const { branch, worktreePath } = await addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
 
   // W1-T39: the next-runnable task for docs/ORIENTATION.md, from the SAME DAG +
   // GitHub-derived-status projection `rmd drain` dispatches from — never a second,
@@ -31211,12 +31299,12 @@ async function retroCommand(
 
     // Publication begins only after the local gate passes. A premature owned PR is updated in
     // place by pushing this same branch; the normal path publishes the branch for the first time.
-    gitPushRunBranch(worktreePath);
+    await gitPushRunBranchAsync(worktreePath);
 
     // W1-T1012: append the run trailer after validation (commit-message-only; no tested file
     // changes), then update the same branch atomically before PR creation/body repair.
     if (appendTaskTrailerToCommit(worktreePath, runId)) {
-      gitPushRunBranch(worktreePath, { force: true });
+      await gitPushRunBranchAsync(worktreePath, { force: true });
     }
 
     if (!prUrl) {
@@ -34167,9 +34255,19 @@ export function requeueActionsJob(
   log: (step: string, extra?: Record<string, unknown>) => void,
   exec: (args: string[]) => unknown = ghExec,
 ): boolean {
+  return runStepsSync(requeueActionsJobSteps(owner, repo, failure, log, exec));
+}
+
+function* requeueActionsJobSteps(
+  owner: string,
+  repo: string,
+  failure: { name: string; jobId?: string },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  exec: (args: string[]) => unknown,
+): Steps<boolean> {
   if (!failure.jobId) return false;
   try {
-    exec(["api", "-X", "POST", `repos/${owner}/${repo}/actions/jobs/${failure.jobId}/rerun`]);
+    yield* step(() => exec(["api", "-X", "POST", `repos/${owner}/${repo}/actions/jobs/${failure.jobId}/rerun`]));
     return true;
   } catch (error) {
     log("main.health.ci_requeue.error", {
@@ -34179,6 +34277,16 @@ export function requeueActionsJob(
     });
     return false;
   }
+}
+
+export function requeueActionsJobAsync(
+  owner: string,
+  repo: string,
+  failure: { name: string; jobId?: string },
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  exec: (args: string[]) => unknown = (args) => ghTextAsync(args),
+): Promise<boolean> {
+  return runStepsAsync(requeueActionsJobSteps(owner, repo, failure, log, exec));
 }
 
 /**
@@ -34476,9 +34584,27 @@ function shardRepairRequests(stateDir: string): string[] {
   return readdirSync(dir).filter((n) => n.endsWith(".json")).sort().map((n) => join(dir, n));
 }
 
-/** Whether a repair request waits — the plan garden's due probe, on the loop, so one directory read. */
-export function shardRepairsPending(stateDir: string): boolean {
-  return shardRepairRequests(stateDir).length > 0;
+/** W1-T5618 — a request file: `attempts`, `blob` and `next_at` appear once an attempt has failed. */
+type ShardRepairRequest = { id: string; file: string; attempts?: number; blob?: string; next_at?: string };
+
+/** BACKSTOP: the attempts one shard blob gets before its request is abandoned to the standing escalation. */
+const SHARD_REPAIR_ATTEMPT_CAP = 3;
+
+/** Whether a request is due at `now`. A request that cannot be read is due, so the pass that consumes it runs. */
+function shardRepairRequestDue(path: string, now: number): boolean {
+  try {
+    const nextAt = (JSON.parse(readFileSync(path, "utf8")) as ShardRepairRequest).next_at;
+    return nextAt === undefined || Date.parse(nextAt) <= now;
+  } catch {
+    // deliberate: a torn or vanished request is "due" — the pass then ledgers it as a pass failure and consumes it.
+    return true;
+  }
+}
+
+/** Whether a repair request is due — the plan garden's due probe, on the loop. A backing-off request is not, so the garden never spins. */
+export function shardRepairsPending(stateDir: string, clock: Clock = systemClock): boolean {
+  const now = clock.now();
+  return shardRepairRequests(stateDir).some((path) => shardRepairRequestDue(path, now));
 }
 
 /** The plan garden with the repair lane in front of it: due while a request waits, and a repair failure never skips the garden. */
@@ -34493,10 +34619,16 @@ export function withShardRepairs(stateDir: string, repairs: () => void, garden: 
   }, { due: () => shardRepairsPending(stateDir) || (garden.due?.() ?? true) });
 }
 
+/** `opened.json`'s value per blob: the PR url, or — once a closed-unmerged PR was replaced — the fresh PR and the one it replaced. */
+type ShardRepairOpened = string | { pr_url: string; reopened_from: string };
+
+/** What one attempt decided: `done` consumes the request; `retry` keeps it, charged to `blob` when the bytes were read. */
+type ShardRepairOutcome = { done: true } | { retry: true; blob?: string };
+
 function repairRequestedShard(
-  request: { id: string; file: string },
-  opts: { stateDir: string; log: ShardRepairLog; readOriginBlob: (rel: string) => string; land: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined },
-): void {
+  request: ShardRepairRequest,
+  opts: { stateDir: string; log: ShardRepairLog; readOriginBlob: (rel: string) => string; land: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined; prState: (prUrl: string) => PrState },
+): ShardRepairOutcome {
   const at = { id: request.id, file: request.file };
   const failure = (stage: string, e: unknown) => ({ ...at, stage, reason: String((e as Error)?.message ?? e) });
   const rel = request.file.slice(ORIGIN_MAIN_LABEL.length);
@@ -34505,26 +34637,40 @@ function repairRequestedShard(
     text = opts.readOriginBlob(rel);
   } catch (e) {
     opts.log("plan.shard_repair_failed", failure("read", e));
-    return;
+    return { retry: true };
   }
   const blob = gitBlobSha(text);
   const openedPath = join(shardRepairDir(opts.stateDir), "opened.json");
-  let opened: Record<string, string>;
+  let opened: Record<string, ShardRepairOpened>;
   try {
-    opened = JSON.parse(readFileIfExists(openedPath) ?? "{}") as Record<string, string>;
+    opened = JSON.parse(readFileIfExists(openedPath) ?? "{}") as Record<string, ShardRepairOpened>;
   } catch (e) {
     // An unreadable record cannot say these bytes were never opened: refuse rather than risk a second PR.
     opts.log("plan.shard_repair_failed", failure("opened-record", e));
-    return;
+    return { retry: true, blob };
   }
-  if (opened[blob]) {
-    opts.log("plan.shard_repair_skipped", { ...at, blob, pr_url: opened[blob], reason: "a repair PR was already opened for these bytes" });
-    return;
+  const prior = opened[blob];
+  let reopenedFrom: string | undefined;
+  if (typeof prior === "object") {
+    opts.log("plan.shard_repair_skipped", { ...at, blob, pr_url: prior.pr_url, reason: "a repair PR was already reopened once for these bytes; its close is respected" });
+    return { done: true };
+  }
+  if (prior !== undefined) {
+    const prState = opts.prState(prior);
+    if (prState === "unknown") {
+      opts.log("plan.shard_repair_skipped", { ...at, blob, pr_url: prior, pr_state: prState, reason: "the recorded repair PR's state could not be read; retried rather than risk a duplicate PR" });
+      return { retry: true, blob };
+    }
+    if (prState !== "closed") {
+      opts.log("plan.shard_repair_skipped", { ...at, blob, pr_url: prior, pr_state: prState, reason: "a repair PR was already opened for these bytes" });
+      return { done: true };
+    }
+    reopenedFrom = prior;
   }
   const verdict = repairDuplicateKeyShard(text);
   if ("refused" in verdict) {
     opts.log("plan.shard_repair_refused", { ...at, blob, reason: verdict.reason });
-    return;
+    return { done: true };
   }
   const keys = Object.keys(verdict.kept).join(", ");
   const pr = {
@@ -34540,21 +34686,42 @@ function repairRequestedShard(
     prUrl = opts.land(rel, verdict.text, pr);
   } catch (e) {
     opts.log("plan.shard_repair_failed", failure("land", e));
-    return;
+    return { retry: true, blob };
   }
   if (prUrl === undefined) {
     opts.log("plan.shard_repair_not_landed", { ...at, blob, reason: "the plan-PR preflight refused the repair; plan_pr.preflight_refused names why" });
+    return { retry: true, blob };
+  }
+  const entry: ShardRepairOpened = reopenedFrom === undefined ? prUrl : { pr_url: prUrl, reopened_from: reopenedFrom };
+  writeAtomic(openedPath, `${JSON.stringify({ ...opened, [blob]: entry }, null, 2)}\n`);
+  opts.log("plan.shard_repair_opened", { ...at, blob, pr_url: prUrl, kept: verdict.kept, ...(reopenedFrom === undefined ? {} : { reopened_from: reopenedFrom }) });
+  return { done: true };
+}
+
+/** W1-T5618 — a retried request is rewritten with its attempt count and backoff, or abandoned at the cap. Bytes
+ *  main changed since the last attempt start their own count: the old bytes' failures say nothing about them. */
+function rescheduleShardRepair(path: string, request: ShardRepairRequest, blob: string | undefined, now: number, log: ShardRepairLog): void {
+  const charged = blob ?? request.blob;
+  const newBytes = blob !== undefined && request.blob !== undefined && blob !== request.blob;
+  const attempts = (newBytes ? 0 : (request.attempts ?? 0)) + 1;
+  const at = { id: request.id, file: request.file, ...(charged === undefined ? {} : { blob: charged }) };
+  if (attempts >= SHARD_REPAIR_ATTEMPT_CAP) {
+    rmSync(path, { force: true });
+    log("plan.shard_repair_abandoned", { ...at, attempts, reason: `${attempts} repair attempts did not open a PR; the shard's quarantine escalation stands for a hand repair` });
     return;
   }
-  writeAtomic(openedPath, `${JSON.stringify({ ...opened, [blob]: prUrl }, null, 2)}\n`);
-  opts.log("plan.shard_repair_opened", { ...at, blob, pr_url: prUrl, kept: verdict.kept });
+  const nextAt = new Date(now + GARDEN_FILING_RETRY_BASE_MS * 2 ** (attempts - 1)).toISOString();
+  writeAtomic(path, `${JSON.stringify({ id: request.id, file: request.file, attempts, ...(charged === undefined ? {} : { blob: charged }), next_at: nextAt })}\n`);
+  log("plan.shard_repair_retry_scheduled", { ...at, attempt: attempts, next_at: nextAt });
 }
 
 /**
- * Off the loop, inside the plan garden's child: each waiting request is repaired from origin/main's blob
+ * Off the loop, inside the plan garden's child: each due request is repaired from origin/main's blob
  * with {@link repairDuplicateKeyShard} and opened as a plan-only PR through {@link gardenCheckout} (its
- * W1-T5348 preflight, then `createPlanPrRest`) — once per shard blob, by `opened.json`. A request is
- * consumed whatever its outcome; a daemon restart re-requests a shard that still does not load.
+ * W1-T5348 preflight, then `createPlanPrRest`) — once per shard blob, by `opened.json`, unless that PR was
+ * closed unmerged, when one fresh PR is opened (W1-T5618). A request is consumed only at an end state — a PR
+ * open or merged, a refusal, a request that cannot be read; a not-landed or failed attempt backs off and is
+ * retried on a later pass until {@link SHARD_REPAIR_ATTEMPT_CAP} abandons it.
  */
 export function runShardRepairPass(opts: {
   stateDir: string;
@@ -34565,6 +34732,8 @@ export function runShardRepairPass(opts: {
   log: ShardRepairLog;
   readOriginBlob?: (rel: string) => string;
   land?: (rel: string, text: string, pr: { title: string; body: string }) => string | undefined;
+  prState?: (prUrl: string) => PrState;
+  clock?: Clock;
 }): void {
   const readOriginBlob =
     opts.readOriginBlob ?? ((rel: string) => execFileSync("git", ["-C", opts.repoDir, "show", `origin/main:${rel}`], { encoding: "utf8", maxBuffer: 1 << 26, stdio: ["ignore", "pipe", "pipe"] }));
@@ -34579,14 +34748,21 @@ export function runShardRepairPass(opts: {
         checkout.dispose();
       }
     });
+  const prState = opts.prState ?? ((prUrl: string) => gardenPrState(opts.owner, opts.repo, prUrl, ghJson));
+  const now = (opts.clock ?? systemClock).now();
   for (const path of shardRepairRequests(opts.stateDir)) {
+    if (!shardRepairRequestDue(path, now)) continue;
+    let request: ShardRepairRequest;
     try {
-      repairRequestedShard(JSON.parse(readFileSync(path, "utf8")) as { id: string; file: string }, { stateDir: opts.stateDir, log: opts.log, readOriginBlob, land });
+      request = JSON.parse(readFileSync(path, "utf8")) as ShardRepairRequest;
     } catch (e) {
       opts.log("plan.shard_repair_failed", { request: path, stage: "pass", reason: String((e as Error)?.message ?? e) });
-    } finally {
       rmSync(path, { force: true });
+      continue;
     }
+    const outcome = repairRequestedShard(request, { stateDir: opts.stateDir, log: opts.log, readOriginBlob, land, prState });
+    if ("done" in outcome) rmSync(path, { force: true });
+    else rescheduleShardRepair(path, request, outcome.blob, now, opts.log);
   }
 }
 
@@ -35000,6 +35176,224 @@ export async function gardenCommand(rest: string[]): Promise<number> {
   return await runRegisteredGardenPass(name, rest.slice(2), { config, repoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate });
 }
 
+interface TickReadOptions {
+  owner: string;
+  repo: string;
+  config: Config;
+  ledgerPath: string;
+  checkoutRoot: string;
+}
+
+export function createTickReadProducer(options: TickReadOptions, io: {
+  fetch?: GhApiFetcher;
+  github?: GitHub;
+  issues?: IssueGateway;
+  changedFilesFetch?: (prNumber: string) => Promise<string[] | undefined>;
+  commitTrailerIndex?: () => Map<string, PrRef[]> | null;
+  evidenceRootFor?: (owner: string, repo: string) => string | undefined;
+  viewsDeps?: Parameters<typeof buildOpenPrViews>[3];
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+} = {}) {
+  const { owner, repo, config, ledgerPath, checkoutRoot } = options;
+  const log = io.log ?? (() => {});
+  const pacer = createGhCallPacer();
+  const snapshotCache = createBoardSnapshotCache(config.root, owner, repo, { log });
+  const fileOptions = { log, ...(io.changedFilesFetch ? { fetch: io.changedFilesFetch } : {}) };
+  const files = createChangedFilesCache(config.root, owner, repo, fileOptions);
+  let openFiles = files;
+  const filingFiles = createPlanFilingFileCache();
+  let reads = new Map<string, unknown>();
+  let generationClock = 0;
+  const closedAt = new Map<number, string>();
+  let closedRows: ReadonlyArray<{ number: number; url: string; state: string }> = [];
+  const fetch: GhApiFetcher = (args, budget) => {
+    const endpoint = args.find((arg) => arg.startsWith(`repos/${owner}/${repo}/`));
+    let key = args.join("\0");
+    if (endpoint?.includes("/pulls?") && endpoint.includes("state=open")) {
+      const url = new URL(endpoint, "https://api.github.com/");
+      url.searchParams.delete("sort");
+      url.searchParams.delete("direction");
+      if (!url.searchParams.has("page")) url.searchParams.set("page", "1");
+      url.searchParams.sort();
+      key = url.pathname + url.search;
+    }
+    if (reads.has(key)) return reads.get(key);
+    const answer = (io.fetch ?? ghJson)(args, budget);
+    reads.set(key, answer);
+    if (endpoint?.includes("state=closed") && Array.isArray(answer)) { // W1-T5318: GitHub's own terminal times
+      for (const pr of answer as Array<{ number?: unknown; merged_at?: unknown; closed_at?: unknown }>) {
+        const at = pr.merged_at ?? pr.closed_at;
+        if (typeof pr.number === "number" && typeof at === "string") closedAt.set(pr.number, at);
+      }
+    }
+    return answer;
+  };
+  const github = io.github ?? buildBatchedGithub(owner, repo, {
+    log, pacer, snapshotCache: {
+      ...snapshotCache,
+      closedSeed: () => { const seed = snapshotCache.closedSeed(); if (seed) closedRows = [...seed.values()]; return seed; },
+      commitClosed: (rows) => { closedRows = rows; return snapshotCache.commitClosed(rows); },
+      commitOpen: (rows) => snapshotCache.commitOpen?.(rows, Date.now()) ?? false,
+    }, changedFilesCache: {
+      lookup: (url, state) => (state === "MERGED" || state === "CLOSED" ? files : openFiles).lookup(url, state),
+      settle: async () => { await files.settle(); await openFiles.settle(); },
+    },
+    // A logical tick clock expires each half once per generation, independent of read duration.
+    // Only cache age uses it; the persisted open snapshot above retains the real clock.
+    now: () => generationClock, ttlMs: 1, mergedTtlMs: 1,
+    // Every read goes through the generation-memoised JSON fetch: the gateway's one `--jq` read
+    // (changed files) is answered by the changed-files cache above and never reaches `exec`.
+    exec: (args) => JSON.stringify(fetch(args)),
+    commitTrailerIndex: io.commitTrailerIndex ?? (() => buildCommitTrailerIndex({ slug: `${owner}/${repo}`, cwd: checkoutRoot })()),
+  });
+  return async (request: { plan: Plan; previousProjection?: Array<[string, StatusProjection]> }) => {
+    const { plan } = request;
+    reads = new Map();
+    openFiles = createChangedFilesCache(config.root, owner, repo, fileOptions);
+    generationClock++;
+    github.resetFailureFlags?.();
+    let openPrRows: OpenPrRest[] | undefined;
+    let openPrError: string | undefined;
+    try { openPrRows = paceGhEntry(pacer, isGhRateLimitError, () => fetchOpenPrsWithPostedIds(owner, repo, fetch)); }
+    catch (error) {
+      openPrError = String(error);
+      log("read_plane.open_failed", { reason: openPrError });
+    }
+    let prior = request.previousProjection;
+    if (!prior) {
+      const stored = readFileIfExists(join(config.root, "state", "status.json"));
+      if (stored) {
+        try {
+          const parsed = JSON.parse(stored) as { tasks?: Record<string, StatusProjection> };
+          if (parsed.tasks && typeof parsed.tasks === "object") prior = Object.entries(parsed.tasks);
+        } catch (error) { log("read_plane.previous_unreadable", { reason: String(error) }); }
+      }
+    }
+    const previous = new Map(prior);
+    const creditBefore = loadCreditStore(defaultCreditStorePath(ledgerPath));
+    let credits = creditBefore;
+    const creditIo: Pick<DeriveDeps, "readCreditStore" | "writeCreditStore"> = {
+      readCreditStore: () => credits,
+      writeCreditStore: (store) => { credits = store; },
+    };
+    let openBranches: PrRef[] | undefined;
+    const derive = () => projectPlan(plan, {
+      ledgerPath, github, skipUncreditedBuildWarning: true, ...creditIo,
+      previousProjection: (id) => previous.get(id),
+      observeOpenPrCount: (rows) => { openBranches = rows ? [...rows] : undefined; },
+    });
+    let projection = derive();
+    await files.settle();
+    await openFiles.settle();
+    // Warm-up credit precedes its file evidence; only the settled derivation may publish it.
+    credits = creditBefore;
+    projection = derive();
+    const openPrViews = openPrRows ? buildOpenPrViews(owner, repo, ledgerPath, {
+      ...io.viewsDeps, fetch, pacer, planFilingFileCache: filingFiles, openPrRows,
+      readMainPlan: () => plan, isMerged: (task) => projection.get(task.id)?.merged ?? false,
+    }) : [];
+    const evidenceRootFor = io.evidenceRootFor ?? (() => checkoutRoot);
+    const credit = () => buildCreditCandidates(owner, repo, plan, ledgerPath, log, github, evidenceRootFor, readLedgerLines, creditIo);
+    const beforeCreditRead = credits;
+    let creditCandidates = credit();
+    await files.settle();
+    await openFiles.settle();
+    credits = beforeCreditRead;
+    creditCandidates = credit();
+    let escalationIntake: EscalationIntake | undefined;
+    const escalationCandidates = buildEscalationReconcileCandidates(owner, repo, plan, ledgerPath, log, {
+      github, issues: io.issues, evidenceRootFor, creditIo,
+      onIntake: (intake) => { escalationIntake = intake; },
+    });
+    const boardItems = openPrRows ? defaultBoardReviewItems(config, {
+      resolveOwnerRepo: () => ({ owner, repo }), fetchOpenPrs: () => openPrRows,
+      loadPlan: () => plan, projectPlan: () => projection,
+    }) : [];
+    const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, openPrViews);
+    const behindMainByPr = buildBehindMainByPr(owner, repo, openPrViews, fetch);
+    const mergedFixPrNumbers = [...new Set(DEFAULT_FIX_CLASSES.map((entry) => entry.fixPrNumber))]
+      .filter((number) => github.prByRef(number)?.state === "MERGED");
+    const rawByNumber = new Map(openPrRows?.map((pr) => [pr.number, pr]));
+    const postFixCiFailuresByPr = new Map(openPrViews.map((pr) => {
+      const raw = rawByNumber.get(pr.prNumber);
+      const failures = pr.checksState === "pending" && raw && !raw.rollupUnreadable
+        ? (io.viewsDeps?.fetchCiFailureEvidence ?? fetchCiFailures)(owner, repo, raw.statusCheckRollup)
+        : pr.ciFailures;
+      return [pr.prNumber, failures] as const;
+    }));
+    const creditUpdates = Object.entries(credits)
+      .filter(([id, value]) => JSON.stringify(value) !== JSON.stringify(creditBefore[id]))
+      .map(([id, after]) => ({ id, before: creditBefore[id], after }));
+    const closedPrs: ClosedPrFact[] = closedPrFacts(closedRows, closedAt, new Set(openPrRows?.map((pr) => pr.number)));
+    return { plan, projection: [...projection], openBranches, openPrRows, openPrViews, openPrError, creditUpdates,
+      creditCandidates, escalationCandidates, escalationIntake, boardItems,
+      staleGateWorkflowsByPr, behindMainByPr, mergedFixPrNumbers, postFixCiFailuresByPr, closedPrs };
+  };
+}
+
+type TickReadFacts = Awaited<ReturnType<ReturnType<typeof createTickReadProducer>>>;
+
+export function sweepPrTerminalRung(github: Pick<GitHub, "prByRef">, ledgerPath: string, runId: string, // W1-T5318
+  tickRead?: Pick<TickReadFacts, "closedPrs">): PrTerminalReconcileSummary {
+  const lookup = tickRead?.closedPrs ? closedPrLookup(tickRead.closedPrs) : (url: string) => closedPrFromRef(github.prByRef(url));
+  return runPrTerminalReconcile(lookup, { ledgerPath, runId });
+}
+
+export function applyTickCreditUpdates(facts: Pick<TickReadFacts, "creditUpdates">, ledgerPath: string,
+  log: (step: string, extra?: Record<string, unknown>) => void): void {
+  if (facts.creditUpdates.length === 0) return;
+  const path = defaultCreditStorePath(ledgerPath);
+  const current = loadCreditStore(path);
+  let changed = false;
+  for (const update of facts.creditUpdates) {
+    if (JSON.stringify(current[update.id]) !== JSON.stringify(update.before)) {
+      log("read_plane.credit_write_conflict", { task_id: update.id });
+      continue;
+    }
+    current[update.id] = update.after;
+    changed = true;
+  }
+  if (changed) saveCreditStore(path, current);
+}
+
+/** W1-T4075: the post-fix re-verification rung's two reads, answered from one tick-read generation. */
+export function tickReadReverificationDeps(tickRead: Pick<TickReadFacts, "mergedFixPrNumbers" | "postFixCiFailuresByPr">): {
+  isMergedByNumber: (prNumber: number) => boolean;
+  readCiFailures: (pr: OpenPrView) => CiFailure[] | undefined;
+} {
+  return {
+    isMergedByNumber: (number) => tickRead.mergedFixPrNumbers.includes(number),
+    readCiFailures: (pr) => tickRead.postFixCiFailuresByPr.get(pr.prNumber),
+  };
+}
+
+export function buildDaemonReadRefresher(options: {
+  read: (input: { plan: Plan; previousProjection?: Array<[string, StatusProjection]> }) => Promise<ReadGeneration<TickReadFacts>>;
+  plan: () => Plan;
+  previous: () => Map<string, StatusProjection> | undefined;
+  invalidate: () => void;
+  publish: (snapshot: ReadGeneration<TickReadFacts>) => void;
+  ledgerPath: string;
+  statusPath: string;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+}): (plan?: Plan) => Promise<MergedSet> {
+  return async (plan = options.plan()) => {
+    options.invalidate();
+    const previous = options.previous();
+    const snapshot = await options.read({ plan, previousProjection: previous ? [...previous] : undefined });
+    applyTickCreditUpdates(snapshot.facts, options.ledgerPath, options.log);
+    const stage = `${options.statusPath}.${process.pid}.tmp`;
+    mkdirSync(dirname(options.statusPath), { recursive: true });
+    writeFileSync(stage, JSON.stringify({ generated_at: new Date().toISOString(),
+      note: "Machine-owned projection derived from GitHub. tasks.yaml is never rewritten.",
+      tasks: Object.fromEntries(snapshot.facts.projection) }) + "\n");
+    renameSync(stage, options.statusPath);
+    options.publish(snapshot);
+    const merged = new Set(snapshot.facts.projection.filter(([, projection]) => projection.merged).map(([id]) => id));
+    return (id) => merged.has(id);
+  };
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -35168,8 +35562,11 @@ export async function daemonCommand(
   const target = resolved.target;
 
   const runId = `DAEMON-${Date.now()}`;
-  const log = (step: string, extra: Record<string, unknown> = {}) =>
+  let lastReadPlaneStep: string | undefined;
+  const log = (step: string, extra: Record<string, unknown> = {}) => {
+    lastReadPlaneStep = step;
     appendLedger(ledgerPath, { run_id: runId, task_id: "DAEMON", step, lane: "daemon", ...extra });
+  };
   log("daemon.target", {
     repo: target.repo,
     gateway: `${target.owner}/${target.repo}`,
@@ -35272,6 +35669,7 @@ export async function daemonCommand(
   // guard) — the SAME projection `refreshMerged` just derived, never a second
   // GitHub read path.
   let lastProj: Map<string, StatusProjection> | undefined;
+  let tickReadGeneration: ReadGeneration<TickReadFacts> | undefined;
   const boardSnapshotFor = memoiseBoardSnapshotByRepo(config.root, log);
   const targetCheckoutRoot = target.isSelf ? repoRoot : join(config.root, "repos", target.repo);
   const targetCommitTrailerIndex = () =>
@@ -35328,6 +35726,10 @@ export async function daemonCommand(
   const projectionGithub = githubFactory(target.owner, target.repo);
   const boardOpenPrCount = createOpenPrCountObservation();
   const refreshMerged: (planOverride?: Plan) => MergedSet = (planOverride = activePlanRef.current) => {
+    if (tickReadGeneration) {
+      const projection = lastProj;
+      return (id) => projection?.get(id)?.merged ?? false;
+    }
     // R-24: called once per tick, because `refreshMerged` is called once per tick — `runDaemon`'s
     // loop body opens with `deps.refreshMerged()` (lib/daemon.ts) exactly as `runDrain`'s two do.
     projectionGithub.resetFailureFlags?.();
@@ -35493,13 +35895,13 @@ export async function daemonCommand(
   // not two. Serve still only writes the signed marker and never receives this callback.
   const mainHealthRung = buildMainHealthRung(target.owner, target.repo, {
     fetch: (args) => ghJsonAsync(args),
-    issues: ghIssueGateway(target.owner, target.repo),
+    issues: ghIssueGatewayAsync(target.owner, target.repo),
     ledgerPath,
     runId,
     log,
     freshMs: policy.values.githubEventWake.checkSettleMs,
-    readCiFailures: (rollup) => fetchCiFailures(target.owner, target.repo, [...(rollup ?? [])]),
-    requeueCheck: (failure) => requeueActionsJob(target.owner, target.repo, failure, log),
+    readCiFailures: (rollup) => fetchCiFailuresAsync(target.owner, target.repo, [...(rollup ?? [])]),
+    requeueCheck: (failure) => requeueActionsJobAsync(target.owner, target.repo, failure, log),
     // W1-T4056: judge only the checks that gate a merge. A scheduled monitor attaches its run to main's
     // head too, and judging it filed 65 of 83 "main is red" issues; a red one is now ledgered as
     // `advisory_failing_checks`. [] on any unreadable contract keeps "judge every check", never green.
@@ -35782,6 +36184,7 @@ export async function daemonCommand(
   const boardReviewHooks = target.isSelf
     ? boardReviewHooksForTick(config, { projection: () => lastProj, plan: () => activePlanRef.current })
     : undefined;
+  boardReviewHooks?.bindCheckItems(() => tickReadGeneration?.facts.boardItems);
   // W1-T2659: the wipe-test cadence rung. SELF-TARGET ONLY, same reason as measurement-cadence:
   // its marker and ledger live under this harness checkout. The pair itself still targets the
   // sandbox by default through runWipeTestPair/resolveWipeTestTarget.
@@ -35800,11 +36203,32 @@ export async function daemonCommand(
     log,
     mint: deps.gitCredentialMint,
   });
+  const readOptions: TickReadOptions = { owner: target.owner, repo: target.repo, config, ledgerPath, checkoutRoot: targetCheckoutRoot };
+  let inlineProducer: ReturnType<typeof createTickReadProducer> | undefined;
+  const readPlane = deps.githubFactory ? undefined : startReadPlane({
+    workerUrl: new URL(import.meta.url), workerInput: readOptions, log,
+    inline: (input: Parameters<ReturnType<typeof createTickReadProducer>>[0]) =>
+      (inlineProducer ??= createTickReadProducer(readOptions, { log }))(input),
+  });
+  const loopTelemetry = startReadPlaneTelemetry();
   try {
     const summary = await runDaemonFn(
       plan,
       {
         refreshMerged,
+        refreshMergedAsync: readPlane ? buildDaemonReadRefresher({
+          read: readPlane.read, plan: () => activePlanRef.current, previous: () => lastProj,
+          invalidate: () => { tickReadGeneration = undefined; },
+          publish: (snapshot) => {
+            tickReadGeneration = snapshot;
+            lastProj = new Map(snapshot.facts.projection);
+            boardOpenPrCount.reset();
+            boardOpenPrCount.observe(snapshot.facts.openBranches);
+          },
+          ledgerPath, statusPath, log,
+        }) : undefined,
+        readLoopTelemetry: loopTelemetry.sample,
+        lastStepBeforeBlock: () => lastReadPlaneStep,
         idleStarvedSupervised: process.env.RMD_IDLE_STARVED_SUPERVISED === "1" && !target.isSelf && !flagValue(rest, "--plan"),
         confirmedOpenPrCount: boardOpenPrCount.readConfirmed,
         onPlanReload: (fresh) => {
@@ -35929,7 +36353,7 @@ export async function daemonCommand(
             // W1-T3793: only the daemon offers the cooperative external-CI-wait handoff. The
             // existing adapter is material-and-clean only; unassessed, dirty, and degraded
             // readings remain undefined and therefore cannot manufacture a restart.
-            externalWaitFreshness: ciWaitFreshness(() => daemonFreshnessFromService(checkServiceFreshness(effectiveRepoRoot, process.env))),
+            externalWaitFreshness: daemonFreshnessReads(effectiveRepoRoot).externalWaitFreshness,
             externalWaitRecycle: () => recyclePauseDetail(config.root),
             // W1-T5345: a daemon lane is free once its PR is open — the sweep owns CI wait and review.
             handOffAtPrOpen: true,
@@ -36005,7 +36429,7 @@ export async function daemonCommand(
         // test/daemon-freshness-wiring.test.ts's ordering test. So no idle gate has to be added: a
         // dispatch runs to its verdict first, which is also what bounds the restart rate (measured:
         // the daemon is inside a dispatch 18.2% of wall clock, p50 28.3 min).
-        checkFreshness: () => daemonFreshnessFromService(checkServiceFreshness(repoRoot, process.env)),
+        checkFreshness: daemonFreshnessReads(repoRoot).checkFreshness,
         readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(join(config.root, "state")),
         // impl-FZ / W1-T3554 — PLAN FRESHNESS, on BOTH the self-target and dedicated non-self
         // paths, so the reload always reads the SAME source the boot did (origin/main, never the
@@ -36166,6 +36590,8 @@ export async function daemonCommand(
           // W1-T4471: the one real wiring of the owner-reply reader.
           ghEscalationAnswerGateway(target.owner, target.repo),
           gitCredentialSocket?.socketPath,
+          onePassPerGeneration(() => tickReadGeneration, readPlane?.read,
+            () => ({ plan: activePlanRef.current, previousProjection: lastProj ? [...lastProj] : undefined })),
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -36357,6 +36783,8 @@ export async function daemonCommand(
     // reason still resolves through `daemonExitCode` itself, unchanged.
     return daemonExitCodeForSummary(summary);
   } finally {
+    await readPlane?.stop();
+    loopTelemetry.stop();
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);
     githubEventWake.close(); // W1-T2568: never outlives the daemon's own normal-stop path either
@@ -38267,6 +38695,14 @@ export function defaultCiAnnotationFetch(owner: string, repo: string, checkRunId
   const out = ghExec(["api", `repos/${owner}/${repo}/check-runs/${checkRunId}/annotations`],
     { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
   );
+  return failureAnnotationLines(out);
+}
+
+export async function defaultCiAnnotationFetchAsync(owner: string, repo: string, checkRunId: string): Promise<string[]> {
+  return failureAnnotationLines(await ghTextAsync(["api", `repos/${owner}/${repo}/check-runs/${checkRunId}/annotations`]));
+}
+
+function failureAnnotationLines(out: string): string[] {
   const annotations = JSON.parse(out) as Array<{ annotation_level?: string; message?: string }>;
   return annotations
     .filter((a) => a.annotation_level === "failure" && typeof a.message === "string")
@@ -38281,6 +38717,10 @@ export function defaultCiJobLogFetch(owner: string, repo: string, jobId: string)
     stdio: ["ignore", "pipe", "ignore"],
     maxBuffer: 1 << 22,
   });
+}
+
+export function defaultCiJobLogFetchAsync(owner: string, repo: string, jobId: string): Promise<string> {
+  return ghTextAsync(["api", `repos/${owner}/${repo}/actions/jobs/${jobId}/logs`], { maxBuffer: 1 << 22 });
 }
 
 /** GitHub's job-log endpoint stamps every line; every line pattern below is anchored after it. */
@@ -38375,17 +38815,45 @@ export function fetchCiFailures(
   tailLines = 60,
   options: CiAnnotationFetch | CiFailureFetchOptions = {},
 ): CiFailure[] {
-  const fetch = ciFetchOptions(options);
+  return runStepsSync(ciFailuresSteps(owner, repo, rollup, tailLines, ciFetchOptions(options)));
+}
+
+export interface CiFailureFetchOptionsAsync {
+  fetchAnnotations?: (owner: string, repo: string, checkRunId: string) => string[] | Promise<string[]>;
+  fetchJobLog?: (owner: string, repo: string, jobId: string) => string | Promise<string>;
+  annotationReadLimit?: number;
+}
+
+export function fetchCiFailuresAsync(
+  owner: string,
+  repo: string,
+  rollup: RollupCheck[] | undefined,
+  tailLines = 60,
+  options: CiFailureFetchOptionsAsync = {},
+): Promise<CiFailure[]> {
+  return runStepsAsync(
+    ciFailuresSteps(owner, repo, rollup, tailLines, {
+      fetchAnnotations: options.fetchAnnotations ?? defaultCiAnnotationFetchAsync,
+      fetchJobLog: options.fetchJobLog ?? defaultCiJobLogFetchAsync,
+      annotationReadLimit: options.annotationReadLimit ?? DEFAULT_CI_ANNOTATION_READ_LIMIT,
+    }),
+  );
+}
+
+function* ciFailuresSteps(
+  owner: string,
+  repo: string,
+  rollup: RollupCheck[] | undefined,
+  tailLines: number,
+  fetch: Required<CiFailureFetchOptionsAsync>,
+): Steps<CiFailure[]> {
   let annotationReads = 0;
   const failing = dedupeRollupByLatestAttempt(rollup ?? []).filter((c) => {
     const s = (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
     return REQUIRED_CHECK_FAIL.has(s);
   });
-  // #2918: `ci-gate` is a downstream aggregator — see `withoutDownstreamGateFailure`'s own doc.
-  // Applied HERE, at the single producer, so every consumer (the fix prompt, the escalation body,
-  // `describeCiFailures`) sees the same narrowed list rather than each re-deriving it.
-  return withoutDownstreamGateFailure(
-    failing.map((c) => {
+  const failures: CiFailure[] = [];
+  for (const c of failing) {
     const name = c.name ?? c.context ?? "unknown";
     let logTail = "";
     // The named outcome for an empty tail. STILL BEST-EFFORT: every path below either assigns a
@@ -38402,7 +38870,7 @@ export function fetchCiFailures(
     if (jobId && annotationReads < fetch.annotationReadLimit) {
       try {
         annotationReads += 1;
-        const messages = fetch.fetchAnnotations(owner, repo, jobId).filter((m) => m.trim() !== "");
+        const messages = (yield* step(() => fetch.fetchAnnotations(owner, repo, jobId))).filter((m) => m.trim() !== "");
         const evidence = messages.filter((m) => !isBareExitCodeAnnotation(m));
         const bareExitOnly = messages.length > 0 && evidence.length === 0;
         if (evidence.length > 0) {
@@ -38434,7 +38902,7 @@ export function fetchCiFailures(
     }
     if (jobId && (logTail.trim() === "" || annotationFallback?.outcome === "bare-exit-code")) {
       try {
-        const out = fetch.fetchJobLog(owner, repo, jobId);
+        const out = yield* step(() => fetch.fetchJobLog(owner, repo, jobId));
         const extracted = extractCiFailureRegion(out, tailLines);
         // W1-T2733: the region, PLUS any declared generator remedy the slice would have discarded.
         // Identical bytes to the region whenever the log names no recognised remedy.
@@ -38455,7 +38923,7 @@ export function fetchCiFailures(
         logTail = "";
       }
     }
-    return {
+    failures.push({
       name,
       logTail,
       conclusion: (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase(),
@@ -38464,9 +38932,12 @@ export function fetchCiFailures(
       ...(logUnavailable === undefined ? {} : { logUnavailable }),
       ...(tailSource ? { tailSource } : {}),
       ...(annotationFallback ? { annotationFallback } : {}),
-    };
-  }),
-  );
+    });
+  }
+  // #2918: `ci-gate` is a downstream aggregator — see `withoutDownstreamGateFailure`'s own doc.
+  // Applied HERE, at the single producer, so every consumer (the fix prompt, the escalation body,
+  // `describeCiFailures`) sees the same narrowed list rather than each re-deriving it.
+  return withoutDownstreamGateFailure(failures);
 }
 
 /**
@@ -38668,30 +39139,72 @@ function refusalByClaimFromDecisionVerdict(value: unknown): Map<string, Criterio
   return refusals;
 }
 
+export function verifiedReviewFindingsForFix(
+  rows: ReadonlyArray<Record<string, unknown>>, taskId: string, prUrl: string, headSha: string,
+): FixReviewFinding[] {
+  const findings: FixReviewFinding[] = [];
+  const seen = new Set<string>();
+  const validPath = (path: unknown): path is string => typeof path === "string" && path.length > 0 &&
+    path.length <= 240 && !isAbsolute(path) && !/[\\\x00-\x1f]/.test(path) && !path.split("/").includes("..");
+  if (!/^[a-f0-9]{40,64}$/.test(headSha)) return findings;
+  for (const row of rows) {
+    if (row.step !== "review.finding" || row.task_id !== taskId || row.pr_url !== prUrl ||
+        row.head_sha !== headSha || row.capture_state !== "verified") continue;
+    const anchor = row.anchor as Record<string, unknown> | null | undefined;
+    const producer = anchor?.changedProducer as Record<string, unknown> | null | undefined;
+    if (!anchor || anchor.status !== "verified" || !validPath(anchor.path) ||
+        !Number.isInteger(anchor.line) || Number(anchor.line) < 1 ||
+        !["changed", "dependency"].includes(String(anchor.kind)) ||
+        anchor.kind === "dependency" && !producer ||
+        producer !== undefined && (!producer || !validPath(producer.path) || !Number.isInteger(producer.line) || Number(producer.line) < 1) ||
+        typeof anchor.evidenceDigest !== "string" || !/^[a-f0-9]{64}$/.test(anchor.evidenceDigest) ||
+        typeof row.finding_id !== "string" || !/^[a-f0-9]{64}$/.test(row.finding_id) ||
+        !Number.isInteger(row.criterion_index) || Number(row.criterion_index) < 1 ||
+        typeof row.category !== "string" || !/^[a-z][a-z0-9_-]{1,31}$/.test(row.category) ||
+        !["low", "medium", "high"].includes(String(row.severity)) ||
+        typeof row.mechanism !== "string" || !row.mechanism.trim() || row.mechanism.length > 500 ||
+        !(row.remedy === null || typeof row.remedy === "string" && row.remedy.length <= 500) || seen.has(row.finding_id)) continue;
+    seen.add(row.finding_id);
+    findings.push({ criterionIndex: Number(row.criterion_index), path: anchor.path, line: Number(anchor.line),
+      mechanism: row.mechanism, remedy: row.remedy as string | null });
+  }
+  return findings;
+}
+
 /**
- * Recover the most recent failing review's unmet criteria for a task from the
- * ledger (`review.posted` / `fix.review` lines carry `unmet_criteria` + `reasons`).
+ * Recover the most recent failing review's unmet criteria from review.posted rows.
  * No PR-head checkout needed just to ROUTE the disposition — the fix rung itself
- * re-derives the authoritative verdict when it runs. Proof text is unavailable
- * from the ledger, so it degrades to "" (the fix prompt leans on claim + reason).
+ * re-derives the authoritative verdict when it runs. Proof context comes from
+ * that row's decision verdict; legacy missing execution outcomes stay unknown.
  */
 function unmetFromLedger(lines: Array<Record<string, unknown>>, taskId: string): CriterionVerdict[] {
   let claims: string[] = [];
   let reasons: string[] = [];
   let refusals = new Map<string, CriterionRefusal>();
+  let proofContext = new Map<string, Partial<CriterionVerdict>>();
   for (const line of lines) {
     if (line.step !== "review.posted" || line.task_id !== taskId) continue;
+    proofContext = new Map();
     if (line.state === "success") { claims = []; reasons = []; refusals = new Map(); continue; }
     if (Array.isArray(line.unmet_criteria)) claims = line.unmet_criteria.map(String);
     if (Array.isArray(line.reasons)) reasons = line.reasons.map(String);
     refusals = refusalByClaimFromDecisionVerdict(line.decision_verdict);
+    const decision = line.decision_verdict as { criteria?: unknown } | null | undefined;
+    if (Array.isArray(decision?.criteria)) {
+      for (const entry of decision.criteria) {
+        if (entry === null || typeof entry !== "object") continue;
+        const criterion = entry as Partial<CriterionVerdict>;
+        if (criterion.met === false && typeof criterion.claim === "string") proofContext.set(criterion.claim, criterion);
+      }
+    }
   }
   return claims.map((claim, i) => ({
     claim,
-    proof: "",
+    proof: proofContext.get(claim)?.proof ?? "",
     met: false,
     reason: reasons[i] ?? "",
-    proof_exec: "not_executable" as const,
+    // Legacy ledger rows can lack this required live-verdict field (W1-T5020).
+    proof_exec: proofContext.get(claim)?.proof_exec as CriterionVerdict["proof_exec"],
     refusal: refusals.get(claim),
   }));
 }
@@ -39021,6 +39534,7 @@ export function buildOpenPrViews(
   // because the merge-state wiring below is otherwise unreachable in a test — every existing
   // sweep test builds `OpenPrView` fixtures by hand and so never exercises this function at all.
   deps: {
+    openPrRows?: OpenPrRest[];
     fetch?: GhApiFetcher;
     requiredContexts?: (owner: string, repo: string) => string[] | undefined;
     /**
@@ -39061,7 +39575,7 @@ export function buildOpenPrViews(
     ((record: PendingReviewStatusRecord) => assessPendingReviewOwner(record, { isPidAlive: defaultIsPidAlive }));
   // W1-T468: waits its turn on the shared pacer (a no-op absent one) before the real list call,
   // and reports back whether it was rate-limited — see lib/open-prs-rest.ts's `GhCallPacer` doc.
-  const raw = paceGhEntry(deps.pacer, isGhRateLimitError, () => fetchOpenPrsWithPostedIds(owner, repo, fetch)) as RawOpenPr[];
+  const raw = (deps.openPrRows ?? paceGhEntry(deps.pacer, isGhRateLimitError, () => fetchOpenPrsWithPostedIds(owner, repo, fetch))) as RawOpenPr[];
   const ledger = readLedgerLines(ledgerPath);
   // W1-T435: the SAME evidence pass that quotes an operator's steering note also produces
   // `pendingAnswer` from an answered clarification — a local file read, never GitHub.
@@ -39535,6 +40049,11 @@ export function buildOpenPrViews(
  * plan-unavailable repo (already logged by the caller) simply yields plan.tasks
  * === [] here, never a hard failure of its own.
  */
+type MergeLogReadOptions = {
+  ref?: string;
+  cache?: { mergedPathsByPr?: Map<number, string[]>; mergeSubjects?: Map<number, string> };
+};
+
 /**
  * W1-T3067 — every merge commit's CHANGED PATHS on `origin/main`, keyed by the PR number a squash
  * merge puts in `(#N)`. ONE local git invocation per pass. This is the producer the plan-only DIFF
@@ -39554,13 +40073,14 @@ export function buildOpenPrViews(
  * unreadable root, and for the same reason: absence must never manufacture a refusal, only decline
  * to grant one.
  */
-export function readMergedPathsByPr(root: string | undefined, limit = MERGED_PATHS_SCAN_LIMIT): Map<number, string[]> {
+export function readMergedPathsByPr(root: string | undefined, limit = MERGED_PATHS_SCAN_LIMIT, opts: MergeLogReadOptions = {}): Map<number, string[]> {
   const byPr = new Map<number, string[]>();
   if (root === undefined) return byPr;
+  if (opts.cache?.mergedPathsByPr) return opts.cache.mergedPathsByPr;
   try {
     const out = execFileSync(
       "git",
-      ["log", "origin/main", "--first-parent", "--name-only", "--format=%x00%s", "-n", String(limit)],
+      ["log", opts.ref ?? "origin/main", "--first-parent", "--name-only", "--format=%x00%s", "-n", String(limit)],
       { cwd: root, encoding: "utf8", maxBuffer: 1 << 26 },
     );
     let current: number | undefined;
@@ -39578,6 +40098,7 @@ export function readMergedPathsByPr(root: string | undefined, limit = MERGED_PAT
       // twice means a re-merge, whose newest paths are the ones credit was derived from.
       if (files && files.length < MERGED_PATHS_PER_PR_CAP) files.push(path);
     }
+    if (opts.cache) opts.cache.mergedPathsByPr = byPr;
   } catch {
     /* best-effort: an unreadable log yields an empty map, and absent restores today's behaviour */
   }
@@ -39597,11 +40118,12 @@ export function readMergedPathsByPr(root: string | undefined, limit = MERGED_PAT
  * {@link readMergedPathsByPr}'s own: {@link creditEvidenceRootFor} found nothing provably rooted in
  * the requested `owner/repo`.
  */
-function readMergeSubjectsByPr(root: string | undefined): Map<number, string> {
+function readMergeSubjectsByPr(root: string | undefined, opts: MergeLogReadOptions = {}): Map<number, string> {
   const byPr = new Map<number, string>();
   if (root === undefined) return byPr;
+  if (opts.cache?.mergeSubjects) return opts.cache.mergeSubjects;
   try {
-    const out = execFileSync("git", ["log", "origin/main", "--format=%s", "-n", String(MERGE_SUBJECT_SCAN_LIMIT)], {
+    const out = execFileSync("git", ["log", opts.ref ?? "origin/main", "--format=%s", "-n", String(MERGE_SUBJECT_SCAN_LIMIT)], {
       cwd: root,
       encoding: "utf8",
       maxBuffer: 1 << 24,
@@ -39610,6 +40132,7 @@ function readMergeSubjectsByPr(root: string | undefined): Map<number, string> {
       const m = line.match(/\(#(\d+)\)\s*$/);
       if (m && !byPr.has(Number(m[1]))) byPr.set(Number(m[1]), line);
     }
+    if (opts.cache) opts.cache.mergeSubjects = byPr;
   } catch {
     /* best-effort: an unreadable log yields an empty map, and unknown declines */
   }
@@ -39625,6 +40148,25 @@ const MERGED_PATHS_PER_PR_CAP = 200;
 /** How far back {@link readMergeSubjectsByPr} scans. A BACKSTOP on cost, not a correctness bound:
  *  a credit older than this window reads UNKNOWN and therefore declines, which is the safe side. */
 const MERGE_SUBJECT_SCAN_LIMIT = 5000;
+
+const mergeLogEvidenceByRoot = new Map<string, NonNullable<MergeLogReadOptions["cache"]> & { sha: string }>();
+
+/** W1-T4774: retain one successful snapshot per checkout; failed reads remain retryable. */
+function resolveMergeLogReadOptions(root: string | undefined): MergeLogReadOptions {
+  if (root === undefined) return {};
+  const resolved = spawnSync("git", ["rev-parse", "--verify", "origin/main^{commit}"], { cwd: root, encoding: "utf8" });
+  const sha = resolved.status === 0 ? resolved.stdout.trim() : "";
+  if (!sha) {
+    mergeLogEvidenceByRoot.delete(root);
+    return {};
+  }
+  let cache = mergeLogEvidenceByRoot.get(root);
+  if (cache?.sha !== sha) {
+    cache = { sha };
+    mergeLogEvidenceByRoot.set(root, cache);
+  }
+  return { ref: sha, cache };
+}
 
 /**
  * W1-T3873 — THE GIT-EVIDENCE ROOT BOTH READERS BELOW MUST SCAN for a credit pass over
@@ -39780,6 +40322,7 @@ export function buildCreditCandidates(
   evidenceRootFor: (owner: string, repo: string) => string | undefined = creditEvidenceRootFor,
   // Injectable only for the one-read regression; production uses projectPlan's normal reader.
   readLedger: DeriveDeps["readLedger"] = readLedgerLines,
+  creditIo: Pick<DeriveDeps, "readCreditStore" | "writeCreditStore"> = {},
 ): ReconcileCreditCandidate[] {
   // W1-T181: wires the same fetch-size/fetch-failure observability the SERVE board gateway gets —
   // this sweep/daemon-poll gateway shells the identical `gh pr list` this outage's fix targeted.
@@ -39787,6 +40330,7 @@ export function buildCreditCandidates(
   // walk below rather than per task — `deriveStatus` runs once per plan task (~1,400 a pass).
   // W1-T3873: rooted in `owner`/`repo`'s OWN checkout, never unconditionally the engine's.
   const evidenceRoot = evidenceRootFor(owner, repo);
+  const mergeLog = resolveMergeLogReadOptions(evidenceRoot);
   const baseGithub = github ?? buildBatchedGithub(owner, repo, { log });
   // This consumer already owns a whole-plan credit pass. Keep the merged batch (the projection's
   // fail-closed corroboration) but disable the unrelated open-board batch and taskless surface.
@@ -39795,9 +40339,10 @@ export function buildCreditCandidates(
     listOpenHeadBranches: undefined,
   };
   const deps: DeriveDeps = {
+    ...creditIo,
     ledgerPath,
     github: projectionGithub,
-    mergedPathsByPr: readMergedPathsByPr(evidenceRoot),
+    mergedPathsByPr: readMergedPathsByPr(evidenceRoot, MERGED_PATHS_SCAN_LIMIT, mergeLog),
     readLedger,
     skipTasklessEscalations: true,
     skipUncreditedBuildWarning: true,
@@ -39805,7 +40350,7 @@ export function buildCreditCandidates(
   // W1-T3063 — ONE local `git log` for the whole pass, never one per candidate and never a GitHub
   // call: W1-T2794 promised this rung adds no new read, and that promise is kept. A squash merge
   // puts `(#N)` in the subject, which is what maps a credit back to what earned it.
-  const mergeSubjects = readMergeSubjectsByPr(evidenceRoot);
+  const mergeSubjects = readMergeSubjectsByPr(evidenceRoot, mergeLog);
   const projection = projectPlan(plan, deps);
   // W1-T4078 — `buildBatchedGithub` already has each merged PR body in the same cache that fed
   // the projection. Read those bodies by PR number so the measured prerequisite-only split can
@@ -39912,6 +40457,7 @@ export function buildEscalationReconcileCandidates(
     // folded into this builder's existing injected-object convention instead of a new positional
     // parameter. Omitted ⇒ {@link creditEvidenceRootFor}'s live git/config resolution.
     evidenceRootFor?: (owner: string, repo: string) => string | undefined;
+    creditIo?: Pick<DeriveDeps, "readCreditStore" | "writeCreditStore">;
   } = {},
 ): EscalationReconcileCandidate[] {
   const issues = injected.issues ?? ghIssueGateway(owner, repo);
@@ -39939,18 +40485,16 @@ export function buildEscalationReconcileCandidates(
   // supersession incident (#4461) in a different surface. The free local evidence must reach here
   // too, or the refusal is fixed in one place and open in the other.
   //
-  // A SECOND `git log` PER SWEEP PASS IS THE COST, and it is local and bounded. The alternative —
-  // hoisting one map through the sweep composition into both builders — threads a new argument
-  // through call sites that do not otherwise change, for a saving measured in milliseconds.
-  //
   // W1-T3873: rooted in `owner`/`repo`'s OWN checkout, never unconditionally the engine's — see
   // {@link creditEvidenceRootFor}'s own doc, and `buildCreditCandidates`' identical fix above.
   const evidenceRoot = (injected.evidenceRootFor ?? creditEvidenceRootFor)(owner, repo);
-  const mergeSubjects = readMergeSubjectsByPr(evidenceRoot);
+  const mergeLog = resolveMergeLogReadOptions(evidenceRoot);
+  const mergeSubjects = readMergeSubjectsByPr(evidenceRoot, mergeLog);
   const deps: DeriveDeps = {
+    ...injected.creditIo,
     ledgerPath,
     github: injected.github ?? buildBatchedGithub(owner, repo, { log }),
-    mergedPathsByPr: readMergedPathsByPr(evidenceRoot),
+    mergedPathsByPr: readMergedPathsByPr(evidenceRoot, MERGED_PATHS_SCAN_LIMIT, mergeLog),
   };
   const candidates: EscalationReconcileCandidate[] = [];
   for (const issue of open) {
@@ -40090,6 +40634,11 @@ export function buildFixRungDispatchArgs(args: {
   const isMergeConflict = evidence.mergeConflict !== undefined;
   const isCiLog = !isMergeConflict && evidence.ciFailures !== undefined;
   const unmet = evidence.unmetCriteria;
+  const initialCriterionIndices = unmet.map((c) => {
+    const matches = (args.task.acceptance ?? []).flatMap((criterion, index) =>
+      criterion.claim === c.claim && (!c.proof || criterion.proof === c.proof) ? [index] : []);
+    return matches.length === 1 ? matches[0]! + 1 : 0;
+  });
   // W1-T5544: gate-log evidence names proofs only; the plan's own criteria supply each claim.
   const proofDiscrimination = withPlanClaims(evidence.proofDiscrimination, args.task.acceptance);
 
@@ -40172,6 +40721,7 @@ export function buildFixRungDispatchArgs(args: {
     budgetUsd: args.budgetUsd,
     strikeCap: args.strikeCap,
     initialReview,
+    initialCriterionIndices,
     constraint: pr.pendingAnswer?.constraint,
     ciFailures: evidence.ciFailures,
     ciEvidenceDisagreement: isCiLog
@@ -41513,6 +42063,9 @@ export function checkoutFixHeadRef(
   return recovery;
 }
 
+/** W1-T5284: the awaited git the daemon-resident fix rung and fix-round push run. */
+const execFilePromise = promisify(execFile);
+
 /**
  * W1-T1129: the fix rung's throwaway worktree AND its named local branch, extracted from
  * `dispatchFix` (its one call site) purely so this exact git sequence is directly unit-testable
@@ -41525,28 +42078,31 @@ export function checkoutFixHeadRef(
  *
  * W1-T2609/W1-T2839: the checkout step itself is now {@link checkoutFixHeadRef} — it never
  * force-resets the shared branch, and it preserves stale non-ancestor tips before CAS recovery.
+ *
+ * W1-T5284: the fetch and the add are awaited — the sweep runs this on the daemon's loop, and its
+ * sync `git fetch` held that loop. The branch claim the sweep takes first still serializes rounds.
  */
-export function createFixRungWorktree(
+export async function createFixRungWorktree(
   repoDir: string,
   worktreePath: string,
   branch: string,
   deps: CheckoutFixHeadRefDeps = {},
-): FixHeadRecovery | undefined {
-  execFileSync("git", ["-C", repoDir, "fetch", "origin", "--quiet"], { stdio: "pipe" });
-  execFileSync("git", ["-C", repoDir, "worktree", "add", worktreePath, `origin/${branch}`], { stdio: "pipe" });
+): Promise<FixHeadRecovery | undefined> {
+  await execFilePromise("git", ["-C", repoDir, "fetch", "origin", "--quiet"]);
+  await execFilePromise("git", ["-C", repoDir, "worktree", "add", worktreePath, `origin/${branch}`]);
   return checkoutFixHeadRef(repoDir, worktreePath, branch, deps);
 }
 
 /** The sweep fix lane cuts its own branch-attached worktree, bypassing `worktreeAdd`'s
  * dependency link. Supply the same local CLI toolchain before its worker can commit; an
  * unavailable link refuses before a strike instead of failing at the commit-msg hook. */
-export function createFixRungWorktreeWithToolchain(
+export async function createFixRungWorktreeWithToolchain(
   repoDir: string,
   worktreePath: string,
   branch: string,
   prepare: (repoDir: string, worktreePath: string) => boolean = prepareWorktreeToolchain,
-): FixHeadRecovery | undefined {
-  const recovery = createFixRungWorktree(repoDir, worktreePath, branch);
+): Promise<FixHeadRecovery | undefined> {
+  const recovery = await createFixRungWorktree(repoDir, worktreePath, branch);
   if (!prepare(repoDir, worktreePath)) {
     throw new Error("fix worktree toolchain unavailable: node_modules could not be linked");
   }
@@ -41880,16 +42436,18 @@ export async function sweepEscalationReconcile(
   ledgerPath: string,
   runId: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  opts: { dryRun?: boolean; issues?: IssueGateway; github?: GitHub } = {},
+  opts: { dryRun?: boolean; issues?: IssueGateway; github?: GitHub;
+    tickRead?: Pick<TickReadFacts, "escalationCandidates" | "escalationIntake"> } = {},
 ): Promise<SweepEscalationReconcileSummary> {
   let intake: EscalationIntake | undefined;
-  const candidates = buildEscalationReconcileCandidates(owner, repo, plan, ledgerPath, log, {
+  const candidates = opts.tickRead?.escalationCandidates ?? buildEscalationReconcileCandidates(owner, repo, plan, ledgerPath, log, {
     issues: opts.issues,
     github: opts.github,
     onIntake: (i) => {
       intake = i;
     },
   });
+  if (opts.tickRead) intake = opts.tickRead.escalationIntake;
   const summary = await runEscalationReconcile(candidates, {
     intake,
     closeIssue: buildEscalationCloser(owner, repo, opts.issues),
@@ -42843,6 +43401,7 @@ export function buildSweepHook(
   escalationAnswerGateway?: EscalationAnswerGateway,
   // W1-T5115: the daemon's git credential socket. Omitted ⇒ fix workers keep the ambient helper.
   gitCredentialSocketPath?: string,
+  tickReadFor?: () => TickReadFacts | undefined | Promise<TickReadFacts | undefined>,
 ): (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> {
   const legacyResequenceShape = typeof reviewerCodeRecoveryOrIsMerged === "function";
   const reviewerCodeRecovery = legacyResequenceShape ? undefined : reviewerCodeRecoveryOrIsMerged;
@@ -42900,6 +43459,7 @@ export function buildSweepHook(
   const branchReapStatePath = join(config.root, "state", automaticBranchReapStateFileName(repo));
   const branchReapState: AutomaticBranchReapState = readAutomaticBranchReapState(branchReapStatePath);
   return async (continueReviewAdmissions = () => true) => {
+    const tickRead = await tickReadFor?.();
     try {
       await mainHealthRung?.();
     } catch (e) {
@@ -42923,8 +43483,9 @@ export function buildSweepHook(
     // W1-T4002: this pass's own plan-only filing receipts feed dispatch options; no stale re-read.
     let thisPassPlanOnlyRunBranchReceipts: ReturnType<typeof planOnlyRunBranchReceipts> = [];
     try {
-      await openPrReads.warm();
-      const openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
+      if (tickRead?.openPrError) throw new Error(tickRead.openPrError);
+      if (!tickRead) await openPrReads.warm();
+      const openPrs = tickRead ? structuredClone(tickRead.openPrViews) : buildOpenPrViews(owner, repo, ledgerPath, {
         fetch: openPrReads.fetcher(ghJson),
         pacer,
         planFilingFileCache,
@@ -42937,12 +43498,13 @@ export function buildSweepHook(
       // W1-T474 — the post-fix re-verification rung, on the daemon's own poll cadence and, same
       // as `sweepCommand`, run BEFORE `runSweep` so the fix rung never spends a strike on a PR
       // this pass just redrove (rationale (10) — see `sweepPostFixReverification`'s own doc).
-      const reverifySummary = await sweepPostFixReverification(owner, repo, openPrs, ledgerPath, runId, log);
+      const reverifySummary = await sweepPostFixReverification(owner, repo, openPrs, ledgerPath, runId, log,
+        tickRead ? tickReadReverificationDeps(tickRead) : {});
       const redrivenThisPass = new Set(
         reverifySummary.results.filter((r) => r.outcome === "redriven").map((r) => r.prNumber),
       );
       const prsForFixRung = openPrs.filter((pr) => !redrivenThisPass.has(pr.prNumber));
-      const plan = planAccessor?.() ?? bootPlan;
+      const plan = tickRead?.plan ?? planAccessor?.() ?? bootPlan;
       const effects = buildSweepEffects({
         owner: owner,
         repo: repo,
@@ -42962,9 +43524,9 @@ export function buildSweepHook(
       // see `sweepCommand`'s own comment on this exact line for the full rationale.
       const inflightDir = join(config.root, "state", "inflight");
       // W1-T1212: same two data inputs as `sweepCommand` — see that call site's own comment.
-      const staleGateWorkflowsByPr = buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
+      const staleGateWorkflowsByPr = tickRead?.staleGateWorkflowsByPr ?? buildStaleGateWorkflowsByPr(owner, repo, prsForFixRung);
       const updatedForWorkflow = updatedForWorkflowFromLedger(ledgerPath);
-      const behindMainByPr = buildBehindMainByPr(owner, repo, prsForFixRung);
+      const behindMainByPr = tickRead?.behindMainByPr ?? buildBehindMainByPr(owner, repo, prsForFixRung);
       await probeOpenPrMerges(prsForFixRung, ledgerPath, log, join(config.root, "repos", repo), { behindMainByPr });
       // W1-T2794 — BUILT HERE, BEFORE DISPOSITION, AND REUSED BY THE BACKFILL RUNG BELOW. This is a
       // composition change, not a new read: the credit rung already built exactly this set, just
@@ -42972,7 +43534,7 @@ export function buildSweepHook(
       // and escalating after #3874 merged its task — `supersededBy` is computed from the OPEN array,
       // so the peer relation vanished the moment the winner merged. ONE call per full sweep: the
       // array below is passed to the projection AND to `runCreditBackfill`, never rebuilt.
-      const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log, boardGithub);
+      const creditCandidates = tickRead?.creditCandidates ?? buildCreditCandidates(owner, repo, plan, ledgerPath, log, boardGithub);
       await runSweep(
         projectMergedTaskCandidates(prsForFixRung, creditCandidates),
         withFullSweepRepairAdmission({
@@ -43000,10 +43562,11 @@ export function buildSweepHook(
       // cadence. The missing third leg of the escalation lifecycle (creation W1-T8, dedup
       // W1-T195, closure here); same level-triggered doctrine as the credit rung below. Its
       // own read failures degrade to [] internally, so it never strands the credit rung.
-      await sweepEscalationReconcile(owner, repo, plan, ledgerPath, runId, log, { github: boardGithub });
+      await sweepEscalationReconcile(owner, repo, plan, ledgerPath, runId, log, { github: boardGithub, tickRead });
       // W1-T150: the SAME credit-backfill rung `rmd sweep` runs, on the
       // daemon's own poll cadence — never a second, separately-scheduled loop.
       await runCreditBackfill(creditCandidates, { ledgerPath, runId, log });
+      sweepPrTerminalRung(boardGithub, ledgerPath, runId, tickRead); // W1-T5318: every closed PR, task or not
       // W1-T175 — the worktree reaper rung, on the daemon's own poll cadence: the hole
       // this closes is specifically an IDLE fleet (no run dispatched, so pruneStaleRuns'
       // run-start trigger never fires) leaving crashed-run debris to grow unbounded. Own
@@ -43050,7 +43613,7 @@ export function buildSweepHook(
     // W1-T192: the draft rung (fail-soft internally, its own try/catch) — a fired trigger
     // or an invalidated draft gets redrafted here, on the daemon's cadence, with no CLI
     // invocation required.
-    await draftHook();
+    await draftHook(tickRead);
     return reviewerCodeStale || thisPassPlanOnlyRunBranchReceipts.length > 0
       ? {
           ...(reviewerCodeStale ? { reviewerCodeStale } : {}),
@@ -44517,7 +45080,7 @@ async function triageCommandLocked(
   }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
+  const { branch, worktreePath } = await addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
 
   // W1-T348: the decision-summary rung, resolved ONCE and reused at both sites this run may
   // reach a human/operator — the GRILL escalation below and the proposal write further down.
@@ -44899,7 +45462,7 @@ async function triageCommandLocked(
       }
     }
 
-    gitPushRunBranch(worktreePath);
+    await gitPushRunBranchAsync(worktreePath);
 
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
@@ -44936,7 +45499,7 @@ async function triageCommandLocked(
         ["-C", worktreePath, "commit", "-m", `chore(triage): record proposal_pr for feedback#${feedbackId}`],
         { stdio: "inherit" },
       );
-      gitPushRunBranch(worktreePath);
+      await gitPushRunBranchAsync(worktreePath);
     }
 
     // DETERMINISTIC GUARD: a triage PR is PLAN-ONLY. Fail closed if the diff touches anything
@@ -45146,7 +45709,7 @@ export async function planCommand(
   }
   const pruned = pruneStaleRuns(repoDir, worktreesDir(config), { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const { branch, worktreePath } = addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
+  const { branch, worktreePath } = await addLaneWorktree(repoDir, worktreesDir(config), runId, log); // W1-T2528
 
   let planIdBlock: TaskIdReservationBlock | undefined;
 
@@ -45374,7 +45937,7 @@ export async function planCommand(
       changedFiles: planPrFiles,
       proofCwd: worktreePath,
     });
-    gitPushRunBranch(worktreePath);
+    await gitPushRunBranchAsync(worktreePath);
 
     // The title is the SAME header string that just went into the commit, split off
     // its first line — never a second computation (W1-T327 design point ii).
@@ -45568,26 +46131,37 @@ export async function spawnEscalatedInboxDraft(
  * could not have observed) is still visible on the SAME ledger this whole rung already writes
  * to, not only as inherited git stderr in a separate log file.
  */
-export function createDaemonLaneWorktree(
+export async function createDaemonLaneWorktree(
   repoDir: string,
   worktreesRoot: string,
   runId: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
-): { branch: string; worktreePath: string } {
+): Promise<{ branch: string; worktreePath: string }> {
   const pruned = pruneStaleRuns(repoDir, worktreesRoot, { graceMs: DEFAULT_PRUNE_GRACE_MS });
   if (pruned.worktrees.length || pruned.branches.length || pruned.skipped.length) log("worktree.prune", { ...pruned });
-  const branch = uniqueRunBranch(repoDir, runId);
+  // W1-T5284: the add is awaited, so a second lane from the same boot-long run id can pick a name while the first
+  // add has not created its branch yet. The sync add closed that window by blocking; the reservation holds it now.
+  const reserved = laneBranchesBeingAdded.get(repoDir) ?? new Set<string>();
+  laneBranchesBeingAdded.set(repoDir, reserved);
+  const branch = uniqueRunBranch(repoDir, runId, reserved);
+  reserved.add(branch);
   const worktreePath = join(worktreesRoot, branch);
   try {
     // W1-T2621: see addLaneWorktree's identical note, above — worktreeAdd itself emits
     // worktree.add now, given a ledger to emit it through.
-    addLockedRunWorktree(repoDir, worktreePath, branch, "origin/main", runId, log);
+    await addLockedRunWorktreeAsync(repoDir, worktreePath, branch, "origin/main", runId, log);
   } catch (e) {
     log("worktree.add_failed", { branch, error: String((e as Error)?.message ?? e) });
     throw e;
+  } finally {
+    reserved.delete(branch);
   }
   return { branch, worktreePath };
 }
+
+/** W1-T5284: per repo, the `run-*` branches a {@link createDaemonLaneWorktree} add in this process has picked and not
+ *  yet created. */
+const laneBranchesBeingAdded = new Map<string, Set<string>>();
 
 export async function draftProposalBatch(
   toDraft: Proposal[],
@@ -45621,7 +46195,7 @@ export async function draftProposalBatch(
     mkdirSync(dirname(repoDir), { recursive: true });
     ghExec(["repo", "clone", `${owner}/${repo}`, repoDir], { stdio: "inherit" });
   }
-  const { branch, worktreePath } = createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
+  const { branch, worktreePath } = await createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
 
   try {
     const planText = readFileSync(join(worktreePath, "plan", "tasks.yaml"), "utf8");
@@ -45718,7 +46292,7 @@ export async function inboxBakeoffCommand(
     repoClone(["repo", "clone", `${owner}/${repo}`, repoDir]);
   }
   const baseMount = loadMounts(mountsPath(repoRoot)).synthesis.inbox_draft;
-  const { branch, worktreePath } = createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
+  const { branch, worktreePath } = await createDaemonLaneWorktree(repoDir, worktreesDir(config), runId, log);
   try {
     const planText = readFileSync(join(worktreePath, "plan", "tasks.yaml"), "utf8");
     const spawnFor = (candidate: BakeoffCandidate) => async (_proposal: Proposal, prompt: string) => {
@@ -45787,11 +46361,11 @@ export function buildInboxDraftHook(
   ) => Promise<DraftRungOutcome[]> = draftProposalBatch,
   grepAnchor: (ref: string, anchor: EvidenceAnchor) => boolean = (ref, anchor) => gitGrepAnchorTrue(repoRoot, ref, anchor),
   mainSha: () => string | undefined = () => readOriginMainSha(repoRoot),
-): () => Promise<void> {
+): (tickRead?: TickReadFacts) => Promise<void> {
   // W1-T2564: see the migration block below — this is the once-per-daemon-start scope it needs.
   let attemptsMigrated = false;
   const anchorGrepCache = createAnchorGrepCache();
-  return async () => {
+  return async (tickRead) => {
     try {
       const registryPath = join(config.root, "state", "inbox-proposals.json");
       const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
@@ -45846,9 +46420,11 @@ export function buildInboxDraftHook(
 
       let draftReadiness: ReadinessContext | undefined;
       try {
-        const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+        const plan = tickRead?.plan ?? loadPlan(join(repoRoot, "plan", "tasks.yaml"));
         const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
-        const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deriveDeps);
+        const { isMerged, depsUnobservable } = tickRead
+          ? projectionReadinessAccessors(new Map(tickRead.projection))
+          : buildDepsReadinessAccessors(plan, deriveDeps);
         const ledgerLines = readLedgerLines(ledgerPath);
         const sha = mainSha();
         draftReadiness = {
@@ -46072,6 +46648,19 @@ export function buildDepsReadinessAccessors(plan: Plan, deriveDeps: DeriveDeps):
     return projection.indeterminate ? (projection.unavailableReason ?? "unknown") : undefined;
   };
   return { isMerged, depsUnobservable };
+}
+
+/** W1-T4075: {@link buildDepsReadinessAccessors}' two answers, read from a tick-read generation's
+ *  projection of the same plan instead of re-deriving each task. A task absent from it is absent
+ *  from the plan, so it answers `undefined` exactly as the deriving accessor does. */
+export function projectionReadinessAccessors(projection: ReadonlyMap<string, StatusProjection>): ReturnType<typeof buildDepsReadinessAccessors> {
+  return {
+    isMerged: (t) => projection.get(t.id)?.merged ?? false,
+    depsUnobservable: (taskId) => {
+      const row = projection.get(taskId);
+      return row?.indeterminate ? (row.unavailableReason ?? "unknown") : undefined;
+    },
+  };
 }
 
 /**
@@ -51154,7 +51743,8 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
     : rest[0] === "readiness" ? await benchmarkAaReadinessCommand(rest.slice(1),
       (request) => runBenchmarkAaReadiness({ ...benchmarkAaReadinessRuntime(request.stateDir), ...request }))
     : await benchmarkAaCommand(rest, (input) => buildBenchmarkAaReport(input))],
-  ["benchmark-paid-pilot", async (rest) => await benchmarkPaidPilotCommand(rest, (input) => activateBenchmarkPaidPilot(input),
+  ["benchmark-paid-pilot", async (rest) => rest[0] === "replay" ? await benchmarkReviewerReplayCommand(rest.slice(1))
+    : await benchmarkPaidPilotCommand(rest, (input) => activateBenchmarkPaidPilot(input),
     { pairedReport: pairedPilotReportView })],
   ["memory-lint", (rest) => memoryLintCommand(rest)],
   ["ledger-compact", (rest) => ledgerCompactCommand(rest)],
@@ -51503,10 +52093,15 @@ export async function main(
   await flushThenExit(await dispatchCommand(cmd, rest, REGISTRY, USAGE));
 }
 
+// W1-T4075: a read-plane worker thread loads this module as its entry and installs the producer.
+// Kept OUTSIDE the process-boundary region below, which exempts exit glue only.
+const readWorkerOptions = readPlaneWorkerInput<TickReadOptions>();
+if (readWorkerOptions) runReadPlaneWorker(createTickReadProducer(readWorkerOptions, { log: readPlaneWorkerLog }));
+
 // diff-cov: process-boundary - direct CLI guard; imported tests cover `main()` and
 // `exitCodeFor()`, while this wrapper only prints and exits the current process.
 // Only run when invoked directly (not when imported by tests).
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+if (!readWorkerOptions && process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   main().catch((err) => {
     console.error("\n### RUN-TASK ERROR\n" + (err?.stack ?? String(err)));
     // W1-T2901: the process boundary asks the error its own exit code (an `RmdError` such as

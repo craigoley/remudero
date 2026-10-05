@@ -1452,7 +1452,9 @@ components:
             GET /v1/feedback only (W1-T5524): `queued` while this entry's decision is staged under
             the state root for the daemon's landing sweep (W1-T5460) and not yet on origin/main;
             absent once the sweep drops the record. Read fresh from the queue on every request;
-            never written to plan/feedback/<id>.yaml.
+            never written to plan/feedback/<id>.yaml. While `queued`, `status` and `answered_by`
+            are the queued record's, not the checkout's (W1-T5627), and `?status=` filters on
+            them, so a decided entry no longer reads `proposed`.
         landingUnknown:
           type: boolean
           description: >
@@ -1590,6 +1592,14 @@ components:
           type: boolean
         entry:
           $ref: "#/components/schemas/FeedbackEntry"
+        landing:
+          type: string
+          enum:
+            - queued
+          description: >
+            W1-T5626: `queued` when this write's feedback record was staged under the state root
+            for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when
+            the record was not staged.
 
     OperatorActivityItem:
       type: object
@@ -1962,6 +1972,14 @@ components:
           type:
             - string
             - "null"
+        landing:
+          type: string
+          enum:
+            - queued
+          description: >
+            W1-T5626: `queued` when this write's feedback record was staged under the state root
+            for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when
+            the record was not staged.
 
     OperatorAgentEvidence:
       type: object
@@ -5592,6 +5610,14 @@ components:
           type: string
         feedback:
           $ref: "#/components/schemas/FeedbackEntry"
+        landing:
+          type: string
+          enum:
+            - queued
+          description: >
+            W1-T5626: `queued` when this write's feedback record was staged under the state root
+            for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when
+            the record was not staged.
 
     # ── W1-T3899 (external-effect-v1) — connector truth is separate from an action receipt. ──
     ExternalEffectPostcondition:
@@ -7295,6 +7321,33 @@ components:
         decision:
           type: string
           enum: [file, merge]
+        state:
+          type: string
+          description: A not-ready item's classified state (W1-T5340).
+          enum: [not_ready, deferred_with_trigger]
+        trigger:
+          type: object
+          description: The unfired trigger holding a `deferred_with_trigger` proposal (src/lib/inbox.ts's `ProposalTrigger`).
+          required: [description, fired]
+          properties:
+            description: {type: string}
+            fired: {type: boolean}
+        resolution:
+          type: object
+          description: How the operator resolves a not-ready or deferred proposal (W1-T5340).
+          required: [method, path, fields]
+          properties:
+            method: {type: string, enum: [POST]}
+            path: {type: string, enum: [/v1/inbox/reframe]}
+            fields:
+              type: object
+              required: [proposalId]
+              properties:
+                proposalId: {type: string}
+        classification:
+          type: string
+          description: A `needsYou` item's shared ASK/RECORD classification (src/lib/ask-classification.ts, W1-T5340).
+          enum: [ASK, RECORD]
 
     ViewPage:
       type: object
@@ -7422,6 +7475,11 @@ components:
           type: object
           required: [decisions, instances]
           properties:
+            humanGates:
+              description: >
+                W1-T5340: every source's human gates, classified ASK/RECORD by the shared classifier,
+                with each unavailable or partial source named rather than counted as zero.
+              $ref: "#/components/schemas/HumanGateProjection"
             decisions:
               type: array
               description: Every present instance's open decisions, newest `askedAt` first (undated last).
@@ -8358,7 +8416,7 @@ components:
       type: object
       description: >
         W1-T2604: one not-ready proposal with the exact predicate failures that hold it
-        (src/lib/panel-graph.ts's `InboxNotReadyItem`). Carries no affordance.
+        (src/lib/panel-graph.ts's `InboxNotReadyItem`). W1-T5340 adds its classified `state`, a deferred item's `trigger`, and the reframe `resolution`.
       required:
         - proposalId
         - summary
@@ -8375,6 +8433,28 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/InboxPredicateFailure"
+        state:
+          type: string
+          enum: [not_ready, deferred_with_trigger]
+        trigger:
+          type: object
+          description: The unfired trigger holding a `deferred_with_trigger` proposal (src/lib/inbox.ts's `ProposalTrigger`).
+          required: [description, fired]
+          properties:
+            description: {type: string}
+            fired: {type: boolean}
+        resolution:
+          type: object
+          description: How the operator resolves a not-ready or deferred proposal (W1-T5340).
+          required: [method, path, fields]
+          properties:
+            method: {type: string, enum: [POST]}
+            path: {type: string, enum: [/v1/inbox/reframe]}
+            fields:
+              type: object
+              required: [proposalId]
+              properties:
+                proposalId: {type: string}
 
     InboxDeclinedItem:
       type: object
@@ -9178,6 +9258,14 @@ components:
           $ref: "#/components/schemas/FeedbackEntry"
         interpretation:
           $ref: "#/components/schemas/ReplyInterpretation"
+        landing:
+          type: string
+          enum:
+            - queued
+          description: >
+            W1-T5626: `queued` when this write's feedback record was staged under the state root
+            for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when
+            the record was not staged.
 
     EscalationOptionRoute:
       type: string
@@ -10840,6 +10928,14 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          description: >
+            A `submissionKey` or `replyTo` check could not read the landing queue (W1-T5628), where a
+            console capture lives until it lands, so nothing is filed, queued or ledgered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/trace:
     get:
@@ -10865,6 +10961,14 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          description: >
+            The id is not in the checkout and the landing queue, where a console capture lives until it
+            lands, could not be read (W1-T5628), so the id is never called unknown.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/operator-activity:
     get:
@@ -10944,7 +11048,8 @@ paths:
         "accepting a proposal from the panel is ledgered with the panel bearer as origin"
         (W3-T6 acceptance) -- src/lib/feedback.ts's `setFeedbackStatus`, ledgers
         `panel.proposal_accepted`/`panel.proposal_rejected`. Only a `proposed` entry may be
-        decided (400 otherwise).
+        decided (400 otherwise); a decision already queued for the landing sweep is the entry's
+        status (W1-T5627), so a second decision on it is refused 400.
       security:
         - bearerWrite: []
       requestBody:
@@ -10968,6 +11073,14 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          description: >
+            The landing queue could not be read (W1-T5627), so the entry's queued decision is
+            unknown and nothing is decided, queued or ledgered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/operator-agent/context:
     get:
@@ -15055,6 +15168,14 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          description: >
+            A `replyTo` check could not read the landing queue (W1-T5628), so no preview is drawn
+            for a reply the submit could not validate either.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /v1/hooks/github:
     post:

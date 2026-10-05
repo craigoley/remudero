@@ -53,7 +53,7 @@ test("production retro finalization regenerates, calls the real preflight, then 
     "regenerateHarnessArtifacts();",
     "const preflightOptions: RunRetroPrepublishPreflightOptions = {",
     "await runRetroPrepublishPreflight(preflightOptions)",
-    "gitPushRunBranch(worktreePath);",
+    "await gitPushRunBranchAsync(worktreePath);",
     'log("pr.opened"',
     "saveMarker(markerPath, nextMarker);",
     "const reviewCode = await reviewCommand(prNum);",
@@ -68,7 +68,7 @@ test("production recovers and owns an existing exact-head PR before provider-sti
     "const remotePrExisted = Boolean(prUrl);",
     "checkPrOwnership(prUrl, branch",
     "const preflightOptions: RunRetroPrepublishPreflightOptions = {",
-    "gitPushRunBranch(worktreePath);",
+    "await gitPushRunBranchAsync(worktreePath);",
     "if (!prUrl) {\n      const prCreate",
   ]);
   assert.match(source, /workerProviders: \{ \.\.\.config\.workerProviders, enabled: \[worker\.provider\] \}/);

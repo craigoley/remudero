@@ -1,0 +1,49 @@
+- id: W1-T5747
+  title: "EGRESS READINESS TELLS A STALLED LOOP FROM A DEAD PROXY — in observe mode (W1-T1289), every one of the 4 `egress_unenforced` rows since 2026-10-02 reads \"worker egress readiness timed out\", and 3 of them fell inside 23 minutes of the 2026-10-03 09:14Z incident. The proxy and its readiness probe share the daemon's event loop, so a stalled loop reads as a dead proxy, and under RMD_WORKER_EGRESS=enforce each one would fail a worker spawn"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 12.00
+  risk: medium
+  origin: "operator session 2026-10-04: pre-enforce check of W1-T1289 observe-mode rows on the Azure host"
+  plan_refs: [W1-T1289]
+  files: [src/lib/worker.ts, test/egress-readiness-tells-a-stalled-loop-from-a-dead-proxy.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED on the Azure live ledger, 2026-10-04 21:40Z. 4 rows carry `egress_unenforced`, all on
+    `fix.done` and all with the value "worker egress readiness timed out": 2026-10-03T09:03Z, 09:09Z,
+    09:26Z and 17:48Z. That is against about 420 spawn rows in the same live window (200 fix.done,
+    223 run.start/worker.assignment). The first three fall inside the 2026-10-03 09:14Z-14:50Z
+    incident, when main's plan did not load and the daemon was under load.
+    The proxy is in-process: src/lib/worker.ts `startWorkerEgressProxy` (:6691) builds its listeners
+    with `createTcpServer`/`createHttpServer` in the daemon process. `egressReadinessExchange` (about
+    :6862) dials 127.0.0.1 with `socket.setTimeout(EGRESS_READY_MS)` (5000 ms, :6686). A loopback
+    exchange with a live listener cannot take 5 s unless the event loop that serves BOTH ends is
+    blocked; memory note "loop stalls are sync gh/exec" records multi-second loop stalls on this host.
+    So today's timeouts are evidence about the loop, not the proxy. In observe mode they are logged
+    and the worker runs; in enforce mode the same timeout refuses the spawn.
+  design: |
+    1. Measure loop lag across the readiness exchange: record `performance.now()` before and after,
+       and sample event-loop delay (`monitorEventLoopDelay` or a setImmediate gap) for the window.
+       When the timeout fires, classify the failure: `loop_stalled` when the observed lag is at least
+       the timeout share it consumed, otherwise `proxy_unresponsive`.
+    2. `loop_stalled`: retry the exchange once on a fresh socket after the loop has turned. Only a
+       second failure, or any `proxy_unresponsive` failure, is a readiness failure. The proxy is
+       never declared dead on a stall alone.
+    3. Record the classification and lag on the existing `egress_unenforced` / enforce-refusal field,
+       e.g. "worker egress readiness timed out (loop_stalled lag 5.4s; retry ok)", so the enforce
+       flip can be judged on `proxy_unresponsive` rows only.
+    4. A healthy exchange is byte-identical to today: no retry and no new field.
+  acceptance:
+    - claim: "a readiness exchange whose timeout fires during an event-loop stall retries once and succeeds instead of failing the spawn"
+      proof: "grep: test(\"W1-T5747: a stalled loop retries readiness once instead of failing in test/egress-readiness-tells-a-stalled-loop-from-a-dead-proxy.test.ts"
+    - claim: "a listener that never answers is still a readiness failure, classified proxy_unresponsive"
+      proof: "grep: test(\"W1-T5747: an unresponsive proxy still fails readiness in test/egress-readiness-tells-a-stalled-loop-from-a-dead-proxy.test.ts"
+  falsifier: |
+    Remove the retry: the suite blocks the loop past EGRESS_READY_MS during the first exchange
+    (a synchronous busy-wait), and readiness rejects with "worker egress readiness timed out"
+    although the proxy answers immediately once the loop turns.

@@ -557,7 +557,7 @@ export interface components {
       discharged?: boolean;
       /** GET /v1/feedback only (W1-T1257): true when `discharged` could not be determined because the merged-set read failed or was truncated -- a partial read, never mistaken for "not discharged". Mutually exclusive with `discharged`; a read-time decoration only, exactly like `unverified`. */
       dischargeUndecidable?: boolean;
-      /** GET /v1/feedback only (W1-T5524): `queued` while this entry's decision is staged under the state root for the daemon's landing sweep (W1-T5460) and not yet on origin/main; absent once the sweep drops the record. Read fresh from the queue on every request; never written to plan/feedback/<id>.yaml. */
+      /** GET /v1/feedback only (W1-T5524): `queued` while this entry's decision is staged under the state root for the daemon's landing sweep (W1-T5460) and not yet on origin/main; absent once the sweep drops the record. Read fresh from the queue on every request; never written to plan/feedback/<id>.yaml. While `queued`, `status` and `answered_by` are the queued record's, not the checkout's (W1-T5627), and `?status=` filters on them, so a decided entry no longer reads `proposed`. */
       landing?: "queued";
       /** GET /v1/feedback only (W1-T5524): true on every entry when the landing queue could not be read -- a failed read, never mistaken for "nothing queued". Mutually exclusive with `landing`; a read-time decoration only, exactly like `dischargeUndecidable`. */
       landingUnknown?: boolean;
@@ -614,6 +614,8 @@ export interface components {
     SubmitFeedbackResult: {
       ok: boolean;
       entry: FeedbackEntry;
+      /** W1-T5626: `queued` when this write's feedback record was staged under the state root for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when the record was not staged. */
+      landing?: "queued";
     };
     /** One bounded activity, workstream, or authoritative artifact row. */
     OperatorActivityItem: {
@@ -739,6 +741,8 @@ export interface components {
       id: string;
       status: string;
       proposalPr: string | null;
+      /** W1-T5626: `queued` when this write's feedback record was staged under the state root for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when the record was not staged. */
+      landing?: "queued";
     };
     OperatorAgentEvidence: {
       label: string;
@@ -2095,6 +2099,8 @@ export interface components {
       mode?: string;
       taskId: string;
       feedback: FeedbackEntry;
+      /** W1-T5626: `queued` when this write's feedback record was staged under the state root for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when the record was not staged. */
+      landing?: "queued";
     };
     ExternalEffectPostcondition: {
       path: string;
@@ -2899,6 +2905,23 @@ export interface components {
       reason?: string;
       lane?: "ready" | "drafting" | "notReady" | "declined";
       decision?: "file" | "merge";
+      /** A not-ready item's classified state (W1-T5340). */
+      state?: "not_ready" | "deferred_with_trigger";
+      /** The unfired trigger holding a `deferred_with_trigger` proposal (src/lib/inbox.ts's `ProposalTrigger`). */
+      trigger?: {
+        description: string;
+        fired: boolean;
+      };
+      /** How the operator resolves a not-ready or deferred proposal (W1-T5340). */
+      resolution?: {
+        method: "POST";
+        path: "/v1/inbox/reframe";
+        fields: {
+          proposalId: string;
+        };
+      };
+      /** A `needsYou` item's shared ASK/RECORD classification (src/lib/ask-classification.ts, W1-T5340). */
+      classification?: "ASK" | "RECORD";
     };
     /** Where one page of a paged view sits (docs/views.md, design D9). `next` is the next page's `cursor`, absent on the last; every page's body stays under 64 KiB. */
     ViewPage: {
@@ -2953,6 +2976,8 @@ export interface components {
       /** The union of the inputs' sources, by name. A missing input adds an `unavailable` `read-model:<now|inbox>@<instance>` source carrying the reason. */
       sources: (ViewSource)[];
       data: {
+        /** W1-T5340: every source's human gates, classified ASK/RECORD by the shared classifier, with each unavailable or partial source named rather than counted as zero. */
+        humanGates?: HumanGateProjection;
         /** Every present instance's open decisions, newest `askedAt` first (undated last). */
         decisions: (NowDecision)[];
         /** The `inbox` view's `section=needsYou` first page; absent with `reasons.inbox`. */
@@ -3400,12 +3425,26 @@ export interface components {
       /** When the drafting worker was spawned; an empty string when unrecorded. */
       spawnedAt: string;
     };
-    /** W1-T2604: one not-ready proposal with the exact predicate failures that hold it (src/lib/panel-graph.ts's `InboxNotReadyItem`). Carries no affordance. */
+    /** W1-T2604: one not-ready proposal with the exact predicate failures that hold it (src/lib/panel-graph.ts's `InboxNotReadyItem`). W1-T5340 adds its classified `state`, a deferred item's `trigger`, and the reframe `resolution`. */
     InboxNotReadyItem: {
       proposalId: string;
       summary: string;
       plain: PlainInboxMessage;
       reasons: (InboxPredicateFailure)[];
+      state?: "not_ready" | "deferred_with_trigger";
+      /** The unfired trigger holding a `deferred_with_trigger` proposal (src/lib/inbox.ts's `ProposalTrigger`). */
+      trigger?: {
+        description: string;
+        fired: boolean;
+      };
+      /** How the operator resolves a not-ready or deferred proposal (W1-T5340). */
+      resolution?: {
+        method: "POST";
+        path: "/v1/inbox/reframe";
+        fields: {
+          proposalId: string;
+        };
+      };
     };
     /** W1-T3408: one DECLINED proposal (src/lib/panel-graph.ts's `InboxDeclinedItem`), so POST /v1/inbox/restore's argument is discoverable. Nothing here is actionable except restore. */
     InboxDeclinedItem: {
@@ -3696,6 +3735,8 @@ export interface components {
       threadId: string;
       feedback: FeedbackEntry;
       interpretation: ReplyInterpretation;
+      /** W1-T5626: `queued` when this write's feedback record was staged under the state root for the daemon's landing sweep (W1-T5460) and is not yet on origin/main; absent when the record was not staged. */
+      landing?: "queued";
     };
     /** The closed set of routes a signed escalation answer link may name, each at the write tier serve.ts registers for it (src/lib/escalate.ts's `ESCALATION_OPTION_ROUTES`). */
     EscalationOptionRoute: "/v1/manual/approve" | "/v1/drain/kick" | "/v1/drain/run" | "/v1/inbox/approve" | "/v1/skills/run" | "/v1/control/pause" | "/v1/control/resume" | "/v1/control/stop" | "/v1/escalation/mark-handled" | "/v1/questions/answer" | "/v1/drain/feedback" | "/v1/auth/scope";
@@ -4208,6 +4249,7 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+          "503": Error;
         };
     };
   };
@@ -4219,6 +4261,7 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+          "503": Error;
         };
     };
   };
@@ -4249,6 +4292,7 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+          "503": Error;
         };
     };
   };
@@ -5519,6 +5563,7 @@ export interface paths {
           "401": Error;
           "403": Error;
           "404": Error;
+          "503": Error;
         };
     };
   };

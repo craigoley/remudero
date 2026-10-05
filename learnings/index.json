@@ -73,17 +73,20 @@
     },
     "ci.yaml": {
       "entries": [
+        "a-board-wide-plan-red-is-main",
         "body-fetch-guards-on-http-not-size",
         "comment-load-ratchet-lane",
         "commitlint-pr-title-lane",
         "diff-coverage-needs-cis-own-flags",
         "diff-coverage-ok-can-be-vacuous",
+        "hand-review-collides-with-the-daemon",
         "inherited-violation-not-authors",
         "lease-is-not-a-supersession-guard",
         "required-check-poster",
         "rerun-the-job-not-the-run",
         "rollup-dedupe-by-latest-attempt",
-        "skipped-check-deadlock"
+        "skipped-check-deadlock",
+        "strikes-exhausted-counts-rows"
       ],
       "globs": [
         ".github/**",
@@ -193,13 +196,15 @@
     },
     "testing.yaml": {
       "entries": [
+        "a-proof-must-fail-at-base",
         "control-proves-reach-not-window",
         "grep-anchor-must-fit-one-line",
         "lazy-config-in-ci",
         "live-proof-runs-the-checked-out-code",
         "position-is-presentation-not-identity",
         "scan-both-quote-styles",
-        "task-linting-is-mostly-deterministic"
+        "task-linting-is-mostly-deterministic",
+        "title-tests-with-the-plan-proof"
       ],
       "globs": [
         "bin/rmd",
@@ -207,12 +212,14 @@
         "plan/tasks.d/**",
         "plan/tasks.yaml",
         "scripts/**",
+        "scripts/proof-discrimination-gate.mjs",
         "src/lib/config.ts",
         "src/lib/containment.ts",
         "src/lib/ledger-union.ts",
         "src/lib/review.ts",
         "src/lib/self-sync.ts",
-        "src/lib/task-linter.ts"
+        "src/lib/task-linter.ts",
+        "test/**"
       ],
       "symbols": [
         "mkdtemp"

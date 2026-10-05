@@ -18,6 +18,7 @@ import { readFeedbackEntry } from "../src/lib/feedback.js";
 import { skillsDir } from "../src/lib/skill.js";
 import { lintTask } from "../src/lib/task-linter.js";
 import type { Task } from "../src/lib/plan.js";
+import { landQueuedFeedback } from "./helpers/land-queued-feedback.js";
 
 // ── W3-T8 round 3: invoking Refine runs the plan --mode=clarify skill and shows the grill ──
 // inline (MASTER-PLAN §5B/§7) — the review gate's UNMET acceptance claim from rounds 1 and 2.
@@ -407,7 +408,8 @@ test("POST /v1/skills/run Refine (plan/clarify): parks a `grilling` feedback ent
     assert.match(body.feedback.raw, /W9-T1/);
     assert.match(body.feedback.raw, /\[sizing\]/);
 
-    // The entry really is durable and reads back `grilling` (not just the response body).
+    // The entry really is durable and reads back `grilling` once the sweep lands it (W1-T5628).
+    landQueuedFeedback(root, root);
     const onDisk = readFeedbackEntry(root, body.feedback.id);
     assert.equal(onDisk.status, "grilling");
     assert.equal(onDisk.origin, "ui");
@@ -436,6 +438,7 @@ test("end to end: Refine's grill renders inline via GET /v1/feedback, then POST 
     github: { prView: () => null },
     statusGithub: { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined },
     ratify: { approve() {}, reframe() {} },
+    feedbackLand: {}, // as serve wires it: the grill is only queued, and the inbox and the reply read the queue
   };
   const routes = [...buildPanelSkillRunRoutes(skillRunDeps), buildFeedbackInboxRoute(graphDeps), buildSubmitFeedbackRoute(graphDeps)];
 

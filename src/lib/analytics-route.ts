@@ -117,7 +117,7 @@ import {
   type JudgeLabelsInput,
   type JudgeLabelStore,
 } from "./judge-calibration.js";
-import { isCashSpendProducer, isProducedSpendRow, spendAmountUsd, spendRoleOf } from "./spend-rows.js";
+import { isCashSpendProducer, spendAmountUsd, spendRoleOf } from "./spend-rows.js";
 import {
   ROUTING_POOL_VERSION,
   buildRoutingPoolProjection,
@@ -1097,6 +1097,7 @@ const OPERATOR_AGENT_DECISION_STEPS = new Set([
   "automerge.direct_merge_preflight_refused",
   "automerge.direct_merge_update_failed",
   "automerge.direct_merge_updated",
+  "automerge.plan_pr_held",
   "automerge.rate_limited_rest_merge",
   "automerge.rate_limited_rest_merge_conflict",
   "automerge.rate_limited_rest_merge_refused",

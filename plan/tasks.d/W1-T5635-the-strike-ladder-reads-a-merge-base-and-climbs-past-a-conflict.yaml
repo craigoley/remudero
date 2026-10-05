@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: #9066 red since 08:01Z and #8954 since 03:45Z with no fix rung picking them up"
   plan_refs: [W1-T100, W1-T5536, W1-T5542, W1-T5537, W1-T5532, W1-T5535, W1-T5534]
   files: [src/lib/strike-ladder.ts, src/lib/sweep.ts, src/run-task.ts, test/strike-exhaustion-climbs-a-ladder-before-it-reaches-a-human.test.ts, test/the-strike-ladder-reads-a-merge-base-and-climbs-past-a-conflict.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

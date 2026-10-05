@@ -2259,6 +2259,7 @@
     "test/the-terminal-can-decline-a-proposal.test.ts": 16000,
     "test/the-test-shards-are-sized-by-wall-time.test.ts": 627,
     "test/the-test-suite-tends-itself.test.ts": 5700,
+    "test/the-tick-reads-run-off-the-event-loop.test.ts": 22000,
     "test/the-top-of-tick-freshness-exit-precedes-every-dispatch.test.ts": 1400,
     "test/the-top-tier-is-not-claude-only.test.ts": 544,
     "test/the-transport-paces-its-own-reads.test.ts": 1380,

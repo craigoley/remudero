@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: race #3 (#8996 judge + #8997 gardener duplicated a key, repaired by #9005)"
   plan_refs: [W1-T5472, W1-T5519, W1-T5457, W1-T5317, W1-T3694, W1-T2855, W1-T5492, W1-T5284]
   files: [src/lib/arm-auto-merge.ts, test/a-plan-pr-is-merged-only-through-the-refreshed-direct-path.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

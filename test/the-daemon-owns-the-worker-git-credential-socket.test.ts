@@ -331,7 +331,13 @@ test("task and fix workers both receive the daemon git credential socket", async
   // THE DAEMON HANDS THE SAME PATH TO BOTH LAUNCHERS.
   const seen = await driveDaemon(true);
   assert.equal(seen.taskOpts?.gitCredentialSocketPath, seen.socketPath, "runOne threads the socket into runTask");
-  assert.equal(seen.sweepArgs?.at(-1), seen.socketPath, "and the full sweep hook receives the SAME path for its fix rung");
+  // W1-T4075 appended the tick-read accessor after the socket, so the socket is located by VALUE,
+  // not by a trailing position the next appended seam would shift again.
+  assert.deepEqual(
+    seen.sweepArgs?.filter((arg) => arg === seen.socketPath),
+    [seen.socketPath],
+    "and the full sweep hook receives the SAME path for its fix rung",
+  );
 
   // THE TASK WORKER: every spawn through runTask's one wrapper carries it, as a git-only handle.
   const socketPath = join(scratchDir("task-socket"), "helper.sock");
@@ -435,7 +441,12 @@ test("an unconfigured daemon creates no git credential socket", async () => {
   assert.equal(seen.duringLoop, undefined, "no socket exists while the daemon loop runs");
   assert.equal(existsSync(join(seen.root, "state", "git-credential")), false, "and no socket directory was made");
   assert.equal(seen.taskOpts !== undefined && "gitCredentialSocketPath" in seen.taskOpts, false, "runTask gets no socket key at all");
-  assert.equal(seen.sweepArgs?.at(-1), undefined, "and neither does the sweep hook");
+  assert.ok(seen.sweepArgs, "the sweep hook was built");
+  assert.equal(
+    seen.sweepArgs.some((arg) => typeof arg === "string" && arg.includes("git-credential")),
+    false,
+    "and neither does the sweep hook",
+  );
   assert.deepEqual(seen.mintedFor, []);
 
   assert.equal(

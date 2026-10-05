@@ -113,8 +113,9 @@ test("W1-T5616: the baseline may only shrink — no row is absent from the merge
 
 test("W1-T5616 falsifier: deleting one baseline row names that suite", () => {
   const { baseline, population } = live();
-  const victim = "test/negative-reachability-ratchet.test.ts";
-  assert.ok(baseline.includes(victim), "the falsifier needs a baselined suite");
+  // Any baselined suite: a fixed name leaves this baseline once precheck asks it (W1-T5617 moved seven).
+  const victim = baseline[0];
+  assert.ok(victim !== undefined, "the falsifier needs a baselined suite");
   const verdict = precheckParityVerdict({ population, baseline: baseline.filter((p) => p !== victim) }) as Verdict;
   assert.deepEqual(verdict.unasked, [victim]);
 });

@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: week ledger read 2026-09-26..10-03; operator ruling R1 (fix rounds may add and edit test files outside files:)"
   plan_refs: [W1-T5386, W1-T5325, W1-T4450, W1-T4207, W1-T4052, W1-T3434, W1-T2403, W1-T1223]
   files: [src/lib/fix-outcome.ts, src/lib/prompt-render.ts, src/run-task.ts, test/a-fix-round-ends-with-a-typed-outcome.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

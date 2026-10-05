@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: PR #8887's lost review.posted row (W1-T5514's evidence)"
   plan_refs: [W1-T5514, W1-T230]
   files: [src/run-task.ts, test/a-lost-review-posted-row-is-reappended-before-the-arm-gate-reads.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

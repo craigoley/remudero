@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: root cause of the rotation rate behind W1-T5514's lost row"
   plan_refs: [W1-T4393, W1-T5514, W1-T244, W1-T230]
   files: [src/lib/ledger.ts, src/run-task.ts, test/the-ledgers-retained-core-leaves-rotation-headroom.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

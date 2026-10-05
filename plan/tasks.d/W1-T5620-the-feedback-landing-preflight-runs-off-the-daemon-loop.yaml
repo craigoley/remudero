@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: W1-T5521 (#8993) left sweepFeedbackLanding on the sync preflight"
   plan_refs: [W1-T5521, W1-T5460, W1-T5525, W1-T5348, W1-T530, W1-T5284]
   files: [src/lib/feedback-landing.ts, src/run-task.ts, test/the-feedback-landing-preflight-runs-off-the-daemon-loop.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

@@ -247,11 +247,13 @@ function validatePrecondition(value: unknown, id: string): TaskPrecondition | un
 
 export type PreconditionCommandRunner = (file: string, args: string[], options: ExecFileSyncOptionsWithStringEncoding) => string;
 
-export function readTaskPrecondition(args: string[], run: PreconditionCommandRunner = execFileSync): string {
+/** W1-T5632: `timeoutMs` is the kill bound, injected by tests; production callers pass nothing. */
+export function readTaskPrecondition(args: string[], run: PreconditionCommandRunner = execFileSync,
+  timeoutMs: number = PRECONDITION_TIMEOUT_MS): string {
   validatePrecondition({ read: args, expect: "validation" }, "precondition-reader");
   return run(PRECONDITION_RMD_BIN, args, {
     encoding: "utf8",
-    timeout: PRECONDITION_TIMEOUT_MS,
+    timeout: timeoutMs,
     maxBuffer: PRECONDITION_MAX_BYTES,
     killSignal: "SIGKILL",
     shell: false,

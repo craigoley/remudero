@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: #8970 had to re-pin run-task.test.ts arm call sites"
   plan_refs: [W1-T2346, W1-T2347, W1-T2887]
   files: [test/helpers/test-call-site-key.ts, test/operator-gated-default-reachability.test.ts, test/a-reachability-witness-survives-a-line-shift.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

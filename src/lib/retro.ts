@@ -31,6 +31,7 @@ import { DEFAULT_TASK_CLASS } from "./task-class.js";
 import { lintTask, type LintOpts, type LintViolation } from "./task-linter.js";
 import type { QuestionEntry } from "./worker.js";
 import { renderSkillDraft, renderSkillDrafts, type SkillDraft } from "./skill-workshop.js";
+import { notionalSpendUsd } from "./spend-rows.js";
 import { openLedgerUnion, readLedgerUnionRawLinesSync, realLedgerFs, type LedgerGrepFsDeps } from "./ledger-union.js";
 import { closureByClass, guardFireCounts, renderClosureByClass, renderGuardFireCounts, type ClassClosure, type GuardFireCount } from "./retro-closure.js";
 
@@ -313,7 +314,6 @@ export interface RunSummary {
   verdictSource?: "ledger-credit";
   observedVerdict?: string;
   creditTs?: string;
-  mergeTs?: string;
   creditMatch?: "pr_url" | "task_id";
   /** W1-T4711: its verdict row {@link isNeverWorkedVerdict} — a run, but no sample of its class. */
   neverWorked?: true;
@@ -412,14 +412,12 @@ export function gatherRuns(records: LedgerRecord[]): RunSummary[] {
     const prUrl = correctedUrl ?? claimedPrUrl;
     const observedVerdict = String(verdictLine?.verdict ?? "incomplete");
     const credit = ledgerCreditFor(credits, observedVerdict, prUrl, taskId);
-    const mergeTs = credit?.row.ts ?? (observedVerdict === "merged" ? verdictLine?.ts : undefined);
     runs.push({
       runId,
       taskId,
       type: String(start.type ?? "unknown"),
       startTs: String(start.ts ?? ""),
       verdict: credit ? "merged" : observedVerdict,
-      ...(typeof mergeTs === "string" ? { mergeTs } : {}),
       costUsd,
       ...(!verdictLine && workerCostRows.length === 0 ? { costSource: "none" as const } : {}),
       numTurns,
@@ -715,7 +713,6 @@ export interface ShippedRecord {
   costUsd: number;
   numTurns: number;
   source: "ledger" | "github";
-  mergeTs?: string;
   /** Present ONLY for a GitHub-discovered or ledger-credited merge whose run did NOT observe verdict=merged. */
   annotation?: string;
 }
@@ -724,7 +721,7 @@ export interface ShippedRecord {
  *  branch for the P9 ownership assert — run-task.ts's `PrHeadGateway` shape at the READ side. */
 export interface ShippedGithub {
   /** Find a MERGED PR whose body contains `Remudero-Task: <taskId>`. null if none. */
-  findMergedByTrailer(taskId: string): { number: number; url: string; mergedAt?: string } | null;
+  findMergedByTrailer(taskId: string): { number: number; url: string } | null;
   /** The PR's head branch name, or undefined if it cannot be resolved. */
   headRefName(prUrl: string): string | undefined;
   /** DEGRADE LOUDLY (W1-T132): a known-throttled or erroring gateway returns a reason NAMING it,
@@ -743,18 +740,24 @@ export interface ShippedResult {
   discrepancies: string[];
 }
 
-/** UNION ledger and GitHub merges by merge time, regardless of run start (W1-T5113).
- *  P9 ownership still requires the credited PR's head to match the run's own branch.
- *  Missing merge times are named, never replaced with a run start to scope a credit. */
+/** UNION ledger-merged runs with GitHub-derived merged, `Remudero-Task`-trailered PRs, scoped to
+ *  runs started strictly after `sinceTs` (W1-T51). A ledger-ABSENT merge is credited with source
+ *  "github" and annotated `gate-side merge; run ended <verdict>`.
+ *
+ *  P9 OWNERSHIP ASSERT: before crediting ANY merge, the PR's `headRefName` must equal the claiming
+ *  run's OWN branch ({@link ownBranchOf}). A stale or foreign trailer is REJECTED and named in
+ *  `discrepancies` — never silently dropped, never silently trusted. `runs` already carries the
+ *  correction override, so the assert checks the truth. Why: docs/forensics/retro.md. */
 export function shippedSince(
   runs: RunSummary[],
   sinceTs: string | undefined,
   github: ShippedGithub,
 ): ShippedResult {
+  const scoped = sinceTs ? runs.filter((r) => r.startTs > sinceTs) : runs;
   const shipped: ShippedRecord[] = [];
   const discrepancies: string[] = [];
 
-  for (const r of runs) {
+  for (const r of scoped) {
     const ownBranch = ownBranchOf(r.runId);
     if (r.verdict === "merged") {
       if (!r.prUrl) {
@@ -769,12 +772,6 @@ export function shippedSince(
         );
         continue;
       }
-      const mergeTs = r.mergeTs ?? r.creditTs;
-      if (sinceTs && (mergeTs === undefined || !Number.isFinite(Date.parse(mergeTs)))) {
-        discrepancies.push(`${r.taskId} (${r.runId}): ledger merge time is unknown — cannot credit this window`);
-        continue;
-      }
-      if (sinceTs && !(Date.parse(mergeTs!) > Date.parse(sinceTs))) continue;
       shipped.push({
         taskId: r.taskId,
         runId: r.runId,
@@ -782,7 +779,6 @@ export function shippedSince(
         costUsd: r.costUsd,
         numTurns: r.numTurns,
         source: "ledger",
-        ...(mergeTs !== undefined ? { mergeTs } : {}),
         ...(r.verdictSource === "ledger-credit" ? { annotation: ledgerCreditAnnotation(r) } : {}),
       });
     } else {
@@ -796,23 +792,6 @@ export function shippedSince(
         );
         continue;
       }
-      let mergeTs = pr.mergedAt;
-      if (sinceTs && mergeTs === undefined) {
-        try {
-          mergeTs = ghExec(["pr", "view", pr.url, "--json", "mergedAt", "--jq", ".mergedAt"], {
-            encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
-          }).trim();
-        } catch (error) {
-          const reason = `${r.taskId} (${r.runId}): merge time read failed for ${pr.url}: ${String(error)}`;
-          discrepancies.push(reason);
-          continue;
-        }
-      }
-      if (sinceTs && (mergeTs === undefined || !Number.isFinite(Date.parse(mergeTs)))) {
-        discrepancies.push(`${r.taskId} (${r.runId}): merge time is unknown for ${pr.url} — cannot credit this window`);
-        continue;
-      }
-      if (sinceTs && !(Date.parse(mergeTs!) > Date.parse(sinceTs))) continue;
       shipped.push({
         taskId: r.taskId,
         runId: r.runId,
@@ -820,7 +799,6 @@ export function shippedSince(
         costUsd: r.costUsd,
         numTurns: r.numTurns,
         source: "github",
-        ...(mergeTs !== undefined ? { mergeTs } : {}),
         annotation: `gate-side merge; run ended ${r.verdict}`,
       });
       discrepancies.push(
@@ -838,7 +816,7 @@ function ledgerCreditAnnotation(r: RunSummary): string {
 }
 
 export function ledgerCreditDiscrepancies(runs: RunSummary[], sinceTs: string | undefined): string[] {
-  const scoped = sinceTs ? runs.filter((r) => r.creditTs !== undefined && Date.parse(r.creditTs) > Date.parse(sinceTs)) : runs;
+  const scoped = sinceTs ? runs.filter((r) => r.startTs > sinceTs) : runs;
   return scoped
     .filter((r) => r.verdictSource === "ledger-credit")
     .map((r) => {
@@ -848,13 +826,11 @@ export function ledgerCreditDiscrepancies(runs: RunSummary[], sinceTs: string | 
     });
 }
 
-/** The ledger-only fallback credits merges by merge time, with no GitHub ownership claim. */
-function ledgerOnlyShipped(runs: RunSummary[], sinceTs?: string): ShippedRecord[] {
-  return runs
-    .filter((r): r is RunSummary & { prUrl: string } => r.verdict === "merged" && typeof r.prUrl === "string" &&
-      (!sinceTs || (r.mergeTs !== undefined && Date.parse(r.mergeTs) > Date.parse(sinceTs))))
-    .map((r) => ({ taskId: r.taskId, runId: r.runId, prUrl: r.prUrl, costUsd: r.costUsd, numTurns: r.numTurns, source: "ledger" as const,
-      ...(r.mergeTs !== undefined ? { mergeTs: r.mergeTs } : {}) }));
+/** The ledger-only fallback when no gateway is wired: `mergedSince` crediting, no unverified claim. */
+function ledgerOnlyShipped(merged: RunSummary[]): ShippedRecord[] {
+  return merged
+    .filter((r): r is RunSummary & { prUrl: string } => typeof r.prUrl === "string")
+    .map((r) => ({ taskId: r.taskId, runId: r.runId, prUrl: r.prUrl, costUsd: r.costUsd, numTurns: r.numTurns, source: "ledger" as const }));
 }
 
 // ── W1-T2288: the retro TRIGGER's merges beyond shippedSince's reach ─────────
@@ -962,6 +938,9 @@ export interface LaneSpend {
   /** Sum of each row's `cost_usd`, falling back to `total_cost_usd` — {@link gatherRuns}'s own
    *  precedence. NOTIONAL, API-equivalent price on a subscription install, never billed spend. */
   costUsd: number;
+  /** W1-T5629: codex rows with no notional price (no `notional_cost_usd`), so `costUsd` omits them rather than
+   *  reading them as $0. Absent when every row was priced. */
+  unpricedRows?: number;
   /** The most recent `ts` this lane's rows carried; absent only when the lane logged none. */
   newestTs?: string;
   models: LaneModelShare[];
@@ -1054,8 +1033,17 @@ export function runModelIndex(records: LedgerRecord[]): Map<string, string> {
 function laneSpendOf(lane: string, step: string, rows: LedgerRecord[], byRun: ReadonlyMap<string, string>): LaneSpend {
   const models = new Map<string, { rows: number; viaRun: number }>();
   let newestTs: string | undefined;
+  let costUsd = 0;
+  let unpricedRows = 0;
   for (const r of rows) {
-    const own = ownModelOf(r);
+    // W1-T5629: a codex row's `cost_usd` is a hard 0 and its `model` the requested alias; its price is its notional,
+    // and the model that ran is its `routed_model`.
+    const codex = r.provider === "codex";
+    const cost = codex ? notionalSpendUsd(r) : costOf(r);
+    if (cost === undefined) unpricedRows += 1;
+    else costUsd += cost;
+    const routed = codex && typeof r.routed_model === "string" && r.routed_model.length > 0 ? r.routed_model : undefined;
+    const own = routed ?? ownModelOf(r);
     const joined = own === undefined && typeof r.run_id === "string" ? byRun.get(r.run_id) : undefined;
     const model = own ?? joined ?? UNATTRIBUTED_MODEL;
     const cell = models.get(model) ?? { rows: 0, viaRun: 0 };
@@ -1068,7 +1056,8 @@ function laneSpendOf(lane: string, step: string, rows: LedgerRecord[], byRun: Re
     lane,
     step,
     rows: rows.length,
-    costUsd: round(rows.reduce((s, r) => s + costOf(r), 0)),
+    costUsd: round(costUsd),
+    ...(unpricedRows > 0 ? { unpricedRows } : {}),
     ...(newestTs !== undefined ? { newestTs } : {}),
     models: [...models.entries()]
       .map(([model, c]) => ({ model, rows: c.rows, ...(c.viaRun > 0 ? { viaRun: c.viaRun } : {}) }))
@@ -1144,7 +1133,8 @@ function laneSpendRow(l: LaneSpend): string {
   const models = l.models.length
     ? l.models.map((m) => `${m.model}×${m.rows}${m.viaRun ? ` (${m.viaRun} via run join)` : ""}`).join(", ")
     : "(no rows)";
-  return `| ${l.lane} (\`${l.step}\`) | ${l.rows} | $${l.costUsd.toFixed(2)} | ${l.newestTs ?? "(none)"} | ${models} |`;
+  const unpriced = l.unpricedRows ? ` (+${l.unpricedRows} unpriced)` : "";
+  return `| ${l.lane} (\`${l.step}\`) | ${l.rows} | $${l.costUsd.toFixed(2)}${unpriced} | ${l.newestTs ?? "(none)"} | ${models} |`;
 }
 
 /** Render the lane table — Architect lanes first, in the SAME row shape, so the share is legible. */
@@ -1839,7 +1829,7 @@ export function buildGather(opts: {
   const merged = mergedSince(runs, opts.sinceTs);
   const union = opts.github
     ? shippedSince(runs, opts.sinceTs, opts.github)
-    : { shipped: ledgerOnlyShipped(runs, opts.sinceTs), discrepancies: [] as string[] };
+    : { shipped: ledgerOnlyShipped(merged), discrepancies: [] as string[] };
   const shipped = union.shipped;
   const discrepancies = [...union.discrepancies, ...ledgerCreditDiscrepancies(runs, opts.sinceTs)];
   // Checked ONCE, after the union runs so a healthy union still gets full credit: a reason here
@@ -1917,7 +1907,7 @@ export function buildGather(opts: {
     // UNCONDITIONAL, never gated on `opts.planCoherence`. The `{ ok: false, reason }` default
     // renders `unexamined` with a stated reason, never a silent omission or a bare zero (P48).
     planCoherence,
-    closureByClass: closureByClass(runs, shipped, opts.openTaskClasses ?? [], opts.sinceTs),
+    closureByClass: closureByClass(scoped, shipped, opts.openTaskClasses ?? [], opts.sinceTs),
     guardFireCounts: guardFireCounts(scoped, mapping, opts.sinceTs, { fallbackRows: GUARD_REASON_FALLBACK_ROWS, priorZeroStreak: opts.priorGuardZeroStreak }),
   };
 }

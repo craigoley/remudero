@@ -394,13 +394,14 @@ test("daemonCommand supplies the real REST and issue gateways to the one event-a
   assert.match(call, /buildMainHealthRung\(target\.owner, target\.repo/);
   // E36: the awaited transport — a sync ghJson here held the daemon loop 144 s.
   assert.match(call, /fetch: \(args\) => ghJsonAsync\(args\)/);
-  assert.match(call, /issues: ghIssueGateway\(target\.owner, target\.repo\)/);
-  assert.match(call, /readCiFailures:\s*\(rollup\)\s*=>\s*fetchCiFailures/);
+  // W1-T5283: the issue gateway, the CI evidence read and the requeue are awaited too.
+  assert.match(call, /issues: ghIssueGatewayAsync\(target\.owner, target\.repo\)/);
+  assert.match(call, /readCiFailures:\s*\(rollup\)\s*=>\s*fetchCiFailuresAsync\(/);
   // W1-T3194: the endpoint literal moved into `requeueActionsJob` when it was extracted so its
   // three arms could be unit-tested. The INVARIANT is unchanged and still asserted, one hop over:
   // the wiring delegates to that function, and that function targets ONE job by id, never the
   // whole-run `rerun-failed-jobs` endpoint.
-  assert.match(call, /requeueCheck:\s*\(failure\)\s*=>\s*requeueActionsJob\(target\.owner, target\.repo, failure, log\)/);
+  assert.match(call, /requeueCheck:\s*\(failure\)\s*=>\s*requeueActionsJobAsync\(target\.owner, target\.repo, failure, log\)/);
   // W1-T4056: main-health judges the target checkout's ci-gate contract, not every check on main.
   assert.match(call, /readRequiredChecks:\s*\(\)\s*=>\s*readCiGateRequiredChecks\(targetCheckoutRoot\)/);
   const requeueFn = source.slice(source.indexOf("export function requeueActionsJob("));

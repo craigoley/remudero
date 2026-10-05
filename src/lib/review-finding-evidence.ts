@@ -2,6 +2,8 @@ import { createHash, createPublicKey, verify } from "node:crypto";
 import { closeSync, openSync, readSync } from "node:fs";
 import { z } from "zod";
 import type { FindingFlowRow, VerifiedFindingEvidence } from "./review-finding-outcomes.js";
+import type { GoldenCorpusItem } from "./golden-corpus.js";
+import type { PairedReviewCase } from "./paired-review-eval.js";
 
 /** BACKSTOP: bound private receipt ingestion and projection size; overflow remains counted. */
 export const MAX_FINDING_EVIDENCE_RECEIPTS = 1_000;
@@ -63,6 +65,52 @@ export interface FindingEvidenceReport {
 }
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+
+const reviewerCaseSchema = z.object({ version: z.literal("paired-review-case-evidence-v1"),
+  pairDigest: digest, corpusDigest: digest, repo: boundedText, baseSha: sha,
+  bug: z.object({ headSha: sha, outcome: z.literal("mechanism-failed") }).strict(),
+  benign: z.object({ headSha: sha, outcome: z.literal("passed") }).strict(),
+  context: z.string().min(1).max(16_384), observedAt: timestamp, scorerRevision: digest,
+  mechanism: z.object({ text: boundedText, path: boundedText, line: z.number().int().positive(), remedy: boundedText }).strict(),
+}).strict();
+
+/** Scorer keys are read separately; neither a manifest nor a model response can authenticate labels. */
+export function verifyReviewerCaseEvidence(pair: PairedReviewCase, corpus: GoldenCorpusItem, raw: unknown,
+  rawKeys: unknown, scorerRevision: string, asOf: string): { ok: true; evidence: z.infer<typeof reviewerCaseSchema> }
+  | { ok: false; reason: string } {
+  const refused = (reason: string) => ({ ok: false as const, reason });
+  const envelope = envelopeSchema.safeParse(raw);
+  const keys = keysSchema.safeParse(rawKeys);
+  if (!envelope.success || !keys.success) return refused("case-evidence-or-trust-invalid");
+  const matching = keys.data.filter((key) => key.id === envelope.data.keyId && key.role === "scorer");
+  if (matching.length !== 1) return refused("case-evidence-scorer-untrusted");
+  try {
+    const key = createPublicKey(matching[0]!.publicKey);
+    if (key.asymmetricKeyType !== "ed25519" || !verify(null, Buffer.from(envelope.data.payload), key,
+      Buffer.from(envelope.data.signature, "base64"))) return refused("case-evidence-unauthenticated");
+    const parsed = reviewerCaseSchema.safeParse(JSON.parse(envelope.data.payload));
+    if (!parsed.success) return refused("case-evidence-payload-invalid");
+    const value = parsed.data;
+    const digestOf = (part: unknown) => hash(JSON.stringify(part));
+    if (value.pairDigest !== digestOf(pair) || value.corpusDigest !== digestOf(corpus)
+      || value.repo !== pair.repo || value.baseSha !== pair.baseSha || value.scorerRevision !== scorerRevision
+      || value.bug.headSha !== pair.bug.headSha || value.benign.headSha !== pair.benign.headSha
+      || digestOf(value.bug) !== pair.bug.evidence.digest || digestOf(value.benign) !== pair.benign.evidence.digest
+      || digestOf(value.context) !== pair.taskContextDigest || digestOf(value.mechanism) !== pair.sealedMechanismDigest
+      || pair.bug.label !== "faulty" || pair.benign.label !== "benign"
+      || pair.bug.evidence.observed !== true || pair.benign.evidence.observed !== true
+      || pair.bug.evidence.kind !== "executable-falsifier" || pair.benign.evidence.kind !== "executable-falsifier"
+      || corpus.heldOut !== true || corpus.taskId !== pair.corpusTaskId || corpus.baseSha !== pair.baseSha
+      || corpus.headSha !== pair.bug.headSha || !corpus.proofs.length
+      || ![asOf, pair.createdAt, corpus.mergedAt].every((date) => Number.isFinite(Date.parse(date)))
+      || Date.parse(value.observedAt) > Date.parse(asOf)
+      || Date.parse(value.observedAt) < Date.parse(pair.createdAt) || Date.parse(corpus.mergedAt) > Date.parse(value.observedAt))
+      return refused("case-evidence-source-binding-invalid");
+    return { ok: true, evidence: value };
+  } catch (error) {
+    return refused(`case-evidence-verification-failed:${sourceFailure(error)}`);
+  }
+}
 
 function readBoundedJson(path: string, limit: number): unknown {
   const fd = openSync(path, "r");
