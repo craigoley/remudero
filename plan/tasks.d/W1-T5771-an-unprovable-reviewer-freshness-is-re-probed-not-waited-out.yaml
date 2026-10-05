@@ -1,0 +1,44 @@
+- id: W1-T5771
+  title: "AN UNPROVABLE REVIEWER-CODE FRESHNESS IS RE-PROBED, NOT WAITED OUT — one transient `git fetch` timeout makes every review refuse its terminal verdict as `unreadable`, and `reviewerCodeFreshnessBackoffReason` gives an unreadable refusal the full 60-min pending ceiling (a stale one gets 5 min), so on 2026-10-05 from 00:26Z to past 00:51Z no review ran while #9138, #9155, #9168, #9170, #9173 and #9181 sat green"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — how an unreadable reviewer-freshness refusal recovers
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-05: coordinator item 18 (00:17-00:47Z review stall after reviewer fetch timeouts)"
+  plan_refs: [W1-T5476, W1-T5282, W1-T5772, W1-T5726]
+  files: [src/lib/sweep.ts, src/lib/self-sync.ts, test/an-unprovable-reviewer-freshness-is-re-probed-not-waited-out.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 9c38366f. src/lib/self-sync.ts
+    `checkGuardedReviewerCodeFreshnessAsync` returns `unreadable` whenever
+    `fetchOriginRetryingRefLockAsync` throws, including a fetch killed at GATEWAY_FETCH_TIMEOUT_MS,
+    and src/lib/review.ts refuses the terminal verdict ("reviewer code freshness is unprovable").
+    src/lib/sweep.ts `reviewerCodeFreshnessBackoffReason` shortens the backoff to 5 min only for a
+    `stale` refusal with a fresh-tree review available; "Direct callers and unreadable refusals
+    retain the original pending ceiling" (60 min). MEASURED on the fleet ledger: `review.post_refused`
+    "git fetch --quiet origin exceeded its 60000ms bound and was killed" in /home/node/Remudero/
+    remudero at 00:05:34, 00:16:50, 00:17:06, 00:17:39, 00:25:00, 00:25:11 and 00:25:16Z (the
+    coordinator counted 11 across the rotation), an `incident.event repeated-refusal` from 00:18:33Z;
+    then 106 `sweep.disposed` rows 00:07-00:51Z across those six PRs read "freshness recovery backoff
+    remains inside the 60m pending ceiling" while saying "re-running the review lane". The last
+    `review.posted` was 00:27:19Z. `git ls-remote` of main from inside the container took 0.2 s at
+    00:48Z, so the question the refusal could not answer was cheap to ask again.
+  design: |
+    An `unreadable` refusal gets its own short BACKSTOP-tagged backoff (a few minutes) and, when it
+    elapses, a cheap re-probe: `git ls-remote origin refs/heads/main` (bounded) compared with the
+    reviewer's loaded code sha, then the existing materiality check when they differ. A probe that
+    proves the code fresh, or behind only immaterially, releases the hold and the review runs; a
+    probe that fails again keeps the hold and doubles the backoff up to the 60-min ceiling. Each
+    re-probe logs one row with its outcome. Stale refusals keep today's path.
+  acceptance:
+    - claim: "after an unreadable freshness refusal, a review key is held only for the short backoff, a passing ls-remote re-probe releases it while a failing one holds it with a doubled backoff capped at the pending ceiling, and a stale refusal keeps today's 5-minute path"
+      proof: "unit test: test/an-unprovable-reviewer-freshness-is-re-probed-not-waited-out.test.ts"
+  falsifier: |
+    Give unreadable refusals the pending ceiling again: the fixture PR is still held 10 min after a
+    passing re-probe and the test fails.

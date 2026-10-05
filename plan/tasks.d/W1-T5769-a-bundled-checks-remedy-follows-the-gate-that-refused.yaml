@@ -1,0 +1,43 @@
+- id: W1-T5769
+  title: "A BUNDLED CHECK'S REMEDY FOLLOWS THE GATE THAT REFUSED, NOT THE CHECK NAME — ci.yml posts comment-load-ratchet, expiring-fixture-census and console-parity under one check named comment-load-ratchet, and `recordableRatchetRepairFor` keys on that name, so on 2026-10-04 the sweep told #9186 its whole fix was `npm run comment-load-ratchet` (a recorded number) while the check's own title said expiring-fixture-census refused"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one defect — the recordable-ratchet classifier reads the bundle's name
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-04: watch log 23:55Z (#9186: red is expiring-fixture-census bundled under the comment-load-ratchet check name; misdirects triage)"
+  plan_refs: [W1-T3720, W1-T2998, W1-T4004, W1-T4399, W1-T5695]
+  files: [src/lib/sweep.ts, test/a-bundled-checks-remedy-follows-the-gate-that-refused.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 9c38366f. ci.yml's commitlint job ends with
+    `report "comment-load-ratchet" "comment-load-ratchet=…" "expiring-fixture-census=…"
+    "console-parity=…"` (also `learnings-budget-ratchet` + `claude-md-budget-ratchet`, `depcruise` +
+    `cycle-ratchet`, `commitlint` + `rule-checks`). W1-T3720 (#8747) made the posted TITLE name the
+    refusing gate and kept the NAME, the required context. src/lib/sweep.ts `recordableRatchetRepairFor`
+    builds its red set from `redRequiredChecks` and `ciFailures[].name` only, and
+    `RATIFIED_BASELINE_RATCHET_REPAIRS` admits `comment-load-ratchet` for an unattended baseline
+    write. MEASURED: #9186 head 2519141a, check run comment-load-ratchet = failure, title
+    "expiring-fixture-census" (23:22:26Z); every `sweep.disposed` for #9186 from 23:27Z to 23:59Z
+    reads "every red check is a RECORDABLE ratchet whose remedy is a recorded number (npm run
+    comment-load-ratchet) — deterministic repair is available but DISABLED". With
+    `recordableRatchetRepairEnabled` on, the sweep would record a comment-load baseline for a refusal
+    that recording cannot clear; today it only misdirects the fix worker and the operator. Splitting
+    the check names is a workflow and branch-protection change (operator build, like W1-T5695); this
+    task fixes the reader.
+  design: |
+    A failing check whose title or log tail names gates by the shared `<gate>: BLOCKED` headline
+    (the convention scripts/bundled-gate-report.mjs reads) contributes those gate names to the red
+    set instead of its own name; a bundle whose refusing gate has no ratified script is not
+    recordable, and the dispatch reason names the refusing gate. A check that names no gate keeps
+    today's behaviour. The rollup read carries the check-run title where GitHub returns it.
+  acceptance:
+    - claim: "a comment-load-ratchet failure whose title is expiring-fixture-census is not recordable and its reason names expiring-fixture-census, while one whose title is comment-load-ratchet still yields npm run comment-load-ratchet"
+      proof: "unit test: test/a-bundled-checks-remedy-follows-the-gate-that-refused.test.ts"
+  falsifier: |
+    Key on the check name again: the #9186-shaped failure reads recordable and the test fails.

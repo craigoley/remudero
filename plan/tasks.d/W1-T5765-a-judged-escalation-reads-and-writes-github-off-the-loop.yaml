@@ -1,0 +1,40 @@
+- id: W1-T5765
+  title: "A JUDGED ESCALATION READS AND WRITES GITHUB OFF THE LOOP — `escalateWithJudge` is async but runs its dedup search, issue create and supersede closes through `runStepsSync` on the sync IssueGateway, so each of its eight run-task.ts callers blocks the daemon loop on gh calls although W1-T5283 gave plain escalations an async driver"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the judged escalation path's GitHub calls are awaited
+  band_meaning: span
+  origin: "operator session 2026-10-04: watch log 22:21Z, W1-T5283 (#9169) follow-up (escalateWithJudge and other escalate callers still sync)"
+  plan_refs: [W1-T5283, W1-T349, W1-T5689, W1-T5741, W1-T5742]
+  files: [src/lib/escalate.ts, src/run-task.ts, test/a-judged-escalation-reads-and-writes-github-off-the-loop.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 9c38366f. src/lib/escalate.ts `escalateAsync`/`tryEscalateAsync`
+    (W1-T5283, #9169) drive `escalateSteps` with `runStepsAsync` over an `AsyncIssueGateway`.
+    `escalateWithJudge` (W1-T349, the judged choke point) awaits only the judge: it calls
+    `runStepsSync(lookupDuplicateEscalation(...))`, `runStepsSync(createEscalationIssue(...))` and
+    `runStepsSync(closeSupersededEscalations(...))` on `EscalateDeps`' sync gateway. It has eight call
+    sites in src/run-task.ts (fix-rung and review escalations reached from the daemon), and 56 plain
+    `escalate(` / 24 `tryEscalate(` references remain in src (comments included), against one
+    `tryEscalateAsync`. Batch-10 W1-T5689 censuses new sync spawns on the loop and batch-11 W1-T5742
+    moves the risk judge's disarm; batch-11 W1-T5741 converts the async arm path's GitHub readers
+    (arm-auto-merge.ts); none of them touches escalate.ts. src/run-task.ts is at its comment-load
+    ceiling: add no comment lines there.
+  design: |
+    `escalateWithJudge` takes an async issue gateway and drives the three step generators with
+    `runStepsAsync`; the daemon-reachable run-task.ts callers pass the async gateway W1-T5283 built
+    (`ghIssueGatewayAsync`). Ledger rows, dedup and the judge order (dedup first, judge never on an
+    unreadable surface) are byte-identical; a sync-only caller outside the daemon keeps a thin sync
+    wrapper.
+  acceptance:
+    - claim: "with an async fake gateway whose calls resolve on a timer, escalateWithJudge lets the event loop tick while its dedup search and issue create are in flight, and writes the same ledger rows as the sync path for found, unreadable, demote and deliver"
+      proof: "unit test: test/a-judged-escalation-reads-and-writes-github-off-the-loop.test.ts"
+  falsifier: |
+    Keep runStepsSync: the loop-tick counter reads 0 while the fake gateway call is pending and the
+    test fails.
