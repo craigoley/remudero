@@ -64,7 +64,7 @@ exit 1
   return { root, docker, state, code, registry };
 }
 
-function runServe(root: ReturnType<typeof fixture>, instance: string): ReturnType<typeof spawnSync> {
+function runServe(root: ReturnType<typeof fixture>, instance: string, dockerMarker = join(root.root, "no-dockerenv")): ReturnType<typeof spawnSync> {
   return spawnSync("bash", [SCRIPT, "--instance", instance, "--dry-run"], {
     cwd: REPO_ROOT,
     encoding: "utf8",
@@ -76,7 +76,7 @@ function runServe(root: ReturnType<typeof fixture>, instance: string): ReturnTyp
       RMD_INSTANCE_REGISTRY: root.registry,
       RMD_SERVE_REPO_DIR: root.code,
       RMD_SERVE_DOCKER_NETWORK: "rmd-test-net",
-      RMD_DOCKERENV_PATH: join(root.root, "no-dockerenv"),
+      RMD_SERVE_DOCKERENV_PATH: dockerMarker,
     },
   });
 }
@@ -88,6 +88,21 @@ function stdout(result: ReturnType<typeof spawnSync>): string {
 function stderr(result: ReturnType<typeof spawnSync>): string {
   return result.stderr?.toString() ?? "";
 }
+
+test("the gateway fixture controls the real Docker guard without weakening its refusal", () => {
+  const root = fixture();
+  try {
+    const marker = join(root.root, "docker-marker");
+    writeFileSync(marker, "fixture marker\n");
+    const refused = runServe(root, "site", marker);
+    assert.notEqual(refused.status, 0, "an existing Docker marker must refuse the host operation");
+    assert.match(stderr(refused), /container|host/i);
+    const allowed = runServe(root, "site");
+    assert.equal(allowed.status, 0, `${stdout(allowed)}\n${stderr(allowed)}`);
+  } finally {
+    rmSync(root.root, { recursive: true, force: true });
+  }
+});
 
 test("a second instance serves its own gateway from its own state directory", () => {
   const root = fixture();
@@ -118,7 +133,7 @@ test("the legacy invocation stays the core gateway on port 4317", () => {
         RMD_STATE_DIR: root.state,
         RMD_SERVE_REPO_DIR: root.code,
         RMD_SERVE_DOCKER_NETWORK: "rmd-test-net",
-        RMD_DOCKERENV_PATH: join(root.root, "no-dockerenv"),
+        RMD_SERVE_DOCKERENV_PATH: join(root.root, "no-dockerenv"),
       },
     });
     assert.equal(result.status, 0, `${stdout(result)}\n${stderr(result)}`);
