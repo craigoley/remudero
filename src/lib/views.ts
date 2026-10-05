@@ -140,6 +140,8 @@ export interface ViewBodyEntry {
   generation: number;
   etag: string;
   body: ViewBody;
+  /** When the build that produced it began (its first bounded step); absent on a stored or slow-lane body. Not persisted. */
+  buildStartedMs?: number;
 }
 
 /** What the routes need from the read-model worker's handle (src/lib/read-model-worker.ts). */

@@ -2970,6 +2970,21 @@ export interface components {
         page: ViewPage;
       };
     };
+    /** GET /v1/views/workstreams (docs/views.md, src/lib/workstreams-view.ts; W1-T5050, P4-T11): the operator activity page as one body across instances. Each entry is what GET /v1/operator-activity answers for that instance, built by the same function in the read-model worker from the projector's `activity_ring` (the newest rows of any step) plus the instance checkout's plan. Rebuilt on a ring insert, a plan change or a GitHub snapshot re-save, debounced 1 s. Dark until state/read-model/switches.json sets `workstreams` to `serve`. */
+    WorkstreamsView: {
+      view: "workstreams";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        instances: ({
+          instance: string;
+          activity: OperatorActivityResult;
+        })[];
+      };
+    };
     /** GET /v1/views/host (docs/views.md, src/lib/host-view.ts; W1-T5053, P4-T14): the console's /host page in one read. Each part is the body its route answers, built by the same function: `control` GET /v1/control/status, `accountUsage` GET /v1/account-usage without its `*AgeMs` fields, `providerRouting` GET /v1/provider-routing, `skills` GET /v1/skills's list, `selfMeasurement` GET /v1/self-measurement. `gauges` are the exact disk and REST rate-limit readings (the `now` view carries them as bands). Built in the read-model worker's view thread at most once a minute, the rate limit and the measurement union read asynchronously. The view writes nothing; the credit-state edge is ledgered by the slow lane. Dark until state/read-model/switches.json sets `host` to `serve`. */
     HostView: {
       view: "host";
@@ -5257,6 +5272,17 @@ export interface paths {
     get: {
       responses: {
           "200": NeedsYouView;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/workstreams": {
+    get: {
+      responses: {
+          "200": WorkstreamsView;
           "304": undefined;
           "401": Error;
           "403": Error;

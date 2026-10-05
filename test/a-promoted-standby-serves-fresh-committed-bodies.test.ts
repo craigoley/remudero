@@ -82,7 +82,9 @@ test("bodies reloaded at promote carry the active generation's last commit", (t)
   assert.equal(standby.body("read-model")?.etag, booted.etag, "until promote the standby still holds its boot-time copy");
 
   assert.equal(standby.reload(), 1, "one body changed since boot");
-  assert.deepEqual(standby.body("read-model"), latest, "the promoted generation serves exactly what the active one last committed");
+  // buildStartedMs is in-memory only (ViewBodyEntry: "Not persisted"), so a body reloaded from the DB never carries it.
+  const { buildStartedMs: _inMemoryOnly, ...committed } = latest;
+  assert.deepEqual(standby.body("read-model"), committed, "the promoted generation serves exactly what the active one last committed");
   assert.equal(standby.reload(), 0, "a second reload finds nothing newer");
   assert.deepEqual(logs.filter(([step]) => step === "read_model.reloaded").map(([, extra]) => extra?.replaced), [1, 0]);
 });
