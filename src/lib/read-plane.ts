@@ -2,39 +2,96 @@ import { SHARE_ENV, Worker } from "node:worker_threads";
 import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
+import { clockFromMillisFn, type Clock } from "./clock.js";
 
 export const READ_PLANE_KIND = "remudero-tick-reads";
 
-export function startReadPlaneTelemetry(): {
-  sample(): { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number };
+/** A synchronous child-process call long enough to name when it froze the loop (W1-T5718). */
+export interface SyncSpawnEntry {
+  via: string;
+  command: string;
+  first_arg?: string;
+  duration_ms: number;
+  caller?: string;
+}
+
+export interface ReadPlaneSample {
+  loop_delay_max_ms: number;
+  loop_delay_p99_ms: number;
+  sync_spawn_ms: number;
+  sync_spawn_top: SyncSpawnEntry[];
+}
+
+/** The sampler is handed to the daemon unbound; `peek` reads the longest call of the open window
+ *  WITHOUT closing it, so `daemon.loop_lag` can name it while `daemon.alive` still owns the reset. */
+export type ReadPlaneSampler = (() => ReadPlaneSample) & { peek(): SyncSpawnEntry | undefined };
+
+export const SYNC_SPAWN_RECORD_MIN_MS = 2000;
+export const SYNC_SPAWN_TOP_N = 3;
+const ARG_MAX_CHARS = 80;
+
+function callerFrame(): string | undefined {
+  const lines = (new Error().stack ?? "").split("\n").slice(1);
+  const frame = lines.find((line) => !/read-plane\.[cm]?[jt]s/.test(line) && !/node:/.test(line));
+  return frame?.trim().slice(0, 200);
+}
+
+export function startReadPlaneTelemetry(options: { clock?: Clock } = {}): {
+  sample: ReadPlaneSampler;
   stop(): void;
 } {
+  const now = (options.clock ?? clockFromMillisFn(() => performance.now())).now;
   const histogram = monitorEventLoopDelay({ resolution: 10 });
   histogram.enable();
   let syncMs = 0;
   let depth = 0;
+  let top: SyncSpawnEntry[] = [];
   const names = ["execFileSync", "execSync", "spawnSync"] as const;
   const originals = names.map((name) => childProcess[name]);
+  const record = (via: string, args: unknown[], durationMs: number): void => {
+    try {
+      const head = String(args[0] ?? "");
+      // execSync's argument is a whole shell line that can carry tokens or bodies: keep only its first word.
+      const command = (via === "execSync" ? head.trim().split(/\s+/)[0] ?? "" : head).slice(0, ARG_MAX_CHARS);
+      const rest = args[1];
+      const first = via === "execSync" || !Array.isArray(rest) || rest.length === 0 ? undefined
+        : String(rest[0]).slice(0, ARG_MAX_CHARS);
+      const entry: SyncSpawnEntry = { via, command, duration_ms: Math.round(durationMs), caller: callerFrame() };
+      if (first !== undefined) entry.first_arg = first;
+      top = [...top, entry].sort((a, b) => b.duration_ms - a.duration_ms).slice(0, SYNC_SPAWN_TOP_N);
+    } catch {
+      // Reason: attribution is best effort and must never take down the call it observes.
+    }
+  };
   names.forEach((name, index) => {
     const original = originals[index] as (...args: unknown[]) => unknown;
     const wrapper = (...args: unknown[]): unknown => {
-      const began = performance.now();
+      const began = now();
       depth++;
       try { return original.apply(childProcess, args); }
-      finally { if (--depth === 0) syncMs += performance.now() - began; }
+      finally {
+        if (--depth === 0) {
+          const took = now() - began;
+          syncMs += took;
+          if (took >= SYNC_SPAWN_RECORD_MIN_MS) record(name, args, took);
+        }
+      }
     };
     Object.assign(childProcess, { [name]: wrapper });
   });
   syncBuiltinESMExports();
   let stopped = false;
+  const sample = Object.assign((): ReadPlaneSample => {
+    const out: ReadPlaneSample = { loop_delay_max_ms: histogram.max / 1e6,
+      loop_delay_p99_ms: histogram.count ? histogram.percentile(99) / 1e6 : 0, sync_spawn_ms: syncMs,
+      sync_spawn_top: top };
+    histogram.reset();
+    syncMs = 0;
+    top = [];
+    return out;
+  }, { peek: (): SyncSpawnEntry | undefined => top[0] });
   return {
-    sample() {
-      const sample = { loop_delay_max_ms: histogram.max / 1e6,
-        loop_delay_p99_ms: histogram.count ? histogram.percentile(99) / 1e6 : 0, sync_spawn_ms: syncMs };
-      histogram.reset();
-      syncMs = 0;
-      return sample;
-    },
+    sample,
     stop() {
       if (stopped) return;
       stopped = true;
