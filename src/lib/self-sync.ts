@@ -1,9 +1,7 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { constants as osConstants } from "node:os";
 import { resolve } from "node:path";
-// Type-only: erased at runtime, so daemon.ts stays a one-way dependency and keeps its
-// filesystem-free purity even though this module shells out to git.
-import type { DaemonFreshness } from "./daemon.js";
+import { fileURLToPath } from "node:url";
 // Why: a deliberate runtime (not type-only) import. treeFfSafe is deployer.ts's own dirty-vs-
 // incoming predicate, reused here rather than re-derived, at the accepted cost of widening this
 // module's (and so the whole CLI's) startup import graph. Falsifier: a second intersection of
@@ -45,7 +43,7 @@ export const SELF_SYNC_GUARD_ENV = "RMD_SELF_SYNC_DONE";
  * hand-rolled double that could drift from real git's behavior.
  */
 export { fetchOriginRetryingRefLock, type GitRunner } from "./git-fetch-retry.js";
-import { fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, killAfterGrace, type AsyncGitRunner, type GitRunner } from "./git-fetch-retry.js";
+import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, killAfterGrace, type AsyncGitRunner, type GitRunner } from "./git-fetch-retry.js";
 
 function asyncGit(repoDir: string, options: { maxBuffer?: number } = {}): AsyncGitRunner {
   return (args, signal) =>
@@ -561,7 +559,7 @@ function assessFetchedService(repoDir: string, git: GitRunner): ServiceFreshness
 }
 
 /**
- * {@link ServiceFreshness} → {@link DaemonFreshness}: the adapter behind `DaemonDeps.checkFreshness`.
+ * The service freshness adapter behind `DaemonDeps.checkFreshness`.
  * Not {@link checkCliFreshness}, which cannot answer this on a container — it refuses a detached
  * HEAD (how the daemon boots) with no sha pair, and it mutates, which a daemon must never do.
  *
@@ -571,10 +569,10 @@ function assessFetchedService(repoDir: string, git: GitRunner): ServiceFreshness
  * forbids). `installNeeded` stays unset: `serviceFreshnessGate` already installs on every boot.
  * Why: docs/forensics/self-sync.md#daemonfreshnessfromservice.
  */
-export function daemonFreshnessFromService(svc: ServiceFreshness): DaemonFreshness {
-  if (svc.status === "guarded") return { stale: false, notStale: { arm: "unassessed", serviceStatus: "guarded" } };
+export function daemonFreshnessFromService(svc: ServiceFreshness) {
+  if (svc.status === "guarded") return { stale: false, notStale: { arm: "unassessed", serviceStatus: "guarded" } } as const;
   if (svc.status === "degraded") {
-    return { stale: false, notStale: { arm: "unassessed", serviceStatus: "degraded", detail: svc.reason } };
+    return { stale: false, notStale: { arm: "unassessed", serviceStatus: "degraded", detail: svc.reason } } as const;
   }
   if (svc.dirty) {
     return {
@@ -583,18 +581,19 @@ export function daemonFreshnessFromService(svc: ServiceFreshness): DaemonFreshne
         arm: "dirty",
         ...(svc.behind ? { oldSha: svc.behind.oldSha, newSha: svc.behind.newSha } : {}),
       },
-    };
+    } as const;
   }
-  if (!svc.behind) return { stale: false, notStale: { arm: "up_to_date" } };
+  if (!svc.behind) return { stale: false, notStale: { arm: "up_to_date" } } as const;
   // An advance that cannot change this process's module graph is no reason to replace it (W1-T2964).
   if (!advanceIsMaterial(svc.behind.changedPaths)) {
     return {
       stale: false,
       notStale: { arm: "immaterial", oldSha: svc.behind.oldSha, newSha: svc.behind.newSha },
-    };
+    } as const;
   }
   const { oldSha, newSha, changes } = svc.behind;
-  return { stale: true, oldSha, newSha, ...(changes ? { changes } : {}) };
+  const stale = { stale: true, oldSha, newSha, ...(changes ? { changes } : {}) } as const;
+  return stale as typeof stale & { installNeeded?: boolean };
 }
 
 export type ReviewerCodeFreshness =
@@ -611,6 +610,31 @@ export interface ReviewerCodeFreshnessOptions {
 }
 
 const REVIEWER_GIT_MAX_BUFFER = 256 * 1024 * 1024; // run-task.ts > 1 MiB
+
+export const REVIEWER_FRESHNESS_PROBE_TIMEOUT_MS = 5_000; // BACKSTOP: a hung re-probe must release the sweep
+
+export async function probeReviewerCodeFreshnessAsync(
+  loadedCodeSha: string | undefined,
+  deps: ReviewerCodeFreshnessOptions & { repoDir?: string; timeoutMs?: number } = {},
+): Promise<ReviewerCodeFreshness> {
+  if (!loadedCodeSha) return { status: "unreadable", reason: "loaded reviewer code sha is unavailable" };
+  if (!/^[a-f0-9]{40,64}$/i.test(loadedCodeSha)) {
+    return { status: "unreadable", reason: "loaded reviewer code sha is malformed" };
+  }
+  const repoDir = deps.repoDir ?? fileURLToPath(new URL("../../", import.meta.url));
+  let remote: string;
+  try {
+    remote = await boundGitCall(deps.gitAsync ?? asyncGit(repoDir),
+      ["ls-remote", "origin", "refs/heads/main"], deps.timeoutMs ?? REVIEWER_FRESHNESS_PROBE_TIMEOUT_MS);
+  } catch (error) {
+    return { status: "unreadable", reason: `reviewer freshness ls-remote failed: ${String(error)}` };
+  }
+  const match = /^([a-f0-9]{40,64})\trefs\/heads\/main$/i.exec(remote.trim());
+  if (!match) return { status: "unreadable", reason: "ls-remote returned no unambiguous main ref" };
+  const originMainSha = match[1];
+  if (loadedCodeSha === originMainSha) return { status: "fresh", codeSha: loadedCodeSha, originMainSha, advance: "none" };
+  return reviewerMainAdvance(reviewerGit(repoDir, deps), loadedCodeSha, originMainSha);
+}
 
 function reviewerGit(repoDir: string, deps: ReviewerCodeFreshnessOptions): GitRunner {
   const options = { encoding: "utf8", stdio: "pipe", maxBuffer: REVIEWER_GIT_MAX_BUFFER } as const;

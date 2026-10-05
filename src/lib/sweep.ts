@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFile
 import { createHash } from "node:crypto";
 import { deployFailedAlertPath, deployLastFailedPath, deployMarkerPath, realDeployDeps } from "./deployer.js";
 import { resolveInstallRoot } from "./install-root.js";
+import { probeReviewerCodeFreshnessAsync, type ReviewerCodeFreshness } from "./self-sync.js";
 import {
   deployStateRows, mainWorkflowStateRows, reconcileFleetState,
   type DeployStateReader, type FleetStateRow,
@@ -9262,6 +9263,7 @@ export interface SweepDeps {
   reviewerCodeRecovery?: {
     loadedCodeSha?: string;
     isLoadedCodeAtOrAfter: (requiredOriginMainSha: string) => boolean;
+    probeFreshness?: () => Promise<ReviewerCodeFreshness>;
     /** The daemon has a guarded fresh-tree review runner for stale loaded code. */
     freshTreeReviewAvailable?: boolean;
     /** Returns and clears the last local ancestry-read failure, if the recovery implementation
@@ -9767,7 +9769,11 @@ interface ReviewerCodeFreshnessRefusal {
   /** Present only on a stale refusal emitted by postReviewStatusGuarded. A missing or malformed
    * value must never license recovery: an old ledger row cannot prove what source it required. */
   requiredOriginMainSha?: string;
+  probe?: { attemptedAt: number; backoffMinutes: number; loadedCodeSha: string; fresh: boolean };
 }
+
+// BACKSTOP: only an unreadable refusal starts this pause; failed probes double it.
+const UNREADABLE_REVIEWER_BACKOFF_MINUTES = 5;
 
 function reviewerCodeFreshnessBackoffReason(
   freshnessRefusals: ReadonlyMap<string, ReviewerCodeFreshnessRefusal>,
@@ -9780,13 +9786,17 @@ function reviewerCodeFreshnessBackoffReason(
   if (refusal === undefined) return undefined;
   const attemptedAt = refusal.attemptedAt;
   if (attemptedAt === undefined) return undefined;
+  if (refusal.freshness === "unreadable" && recovery?.loadedCodeSha) {
+    const probe = refusal.probe?.loadedCodeSha === recovery.loadedCodeSha ? refusal.probe : undefined;
+    if (probe?.fresh) return undefined;
+    const backoff = Math.min(probe?.backoffMinutes ?? UNREADABLE_REVIEWER_BACKOFF_MINUTES, policy.pendingCeilingMinutes);
+    const age = Math.max(0, (now - (probe?.attemptedAt ?? attemptedAt)) / 60_000);
+    return `freshness recovery backoff remains inside the ${policy.pendingCeilingMinutes}m pending ceiling; ` +
+      `unreadable reviewer-source BACKSTOP ${backoff}m (${Math.floor(age)}m elapsed) — awaiting proven freshness`;
+  }
   let ancestryCheckFailure: string | undefined;
-  // The 60-minute ceiling protects an old or unprovable reviewer from certifying a newer
-  // origin/main. A daemon that has proved its already-loaded module graph contains that exact
-  // target no longer needs the delay. This is intentionally narrower than "the checkout is
-  // fresh": the predicate sees the boot-captured SHA, never a mutable working-tree HEAD, and
-  // any missing provenance, non-stale refusal, unreadable ancestry, or false result retains the
-  // existing ceiling.
+  // A stale refusal releases early only when the boot-captured module SHA contains its target.
+  // Missing provenance and unreadable ancestry retain the stale path's existing bound.
   if (
     refusal.freshness === "stale" &&
     typeof refusal.requiredOriginMainSha === "string" &&
@@ -9805,7 +9815,7 @@ function reviewerCodeFreshnessBackoffReason(
   }
   const ageMinutes = Math.max(0, (now - attemptedAt) / 60_000);
   // The daemon can retry with a fresh reviewer tree after a short bounded pause.
-  // Direct callers and unreadable refusals retain the original pending ceiling.
+  // Direct callers without loaded-code provenance retain the original pending ceiling.
   const ceiling = refusal.freshness === "stale" &&
     typeof refusal.requiredOriginMainSha === "string" && refusal.requiredOriginMainSha.length > 0 &&
     recovery?.freshTreeReviewAvailable === true
@@ -10030,6 +10040,17 @@ function priorActionsFromLedger(lines: Array<Record<string, unknown>>): PriorAct
   const absentRepushes = new Map<number, { count: number; shas: Set<string> }>();
   const missingTaskTrailerRepairs = new Set<string>();
   for (const line of lines) {
+    if (line.step === "sweep.reviewer_freshness_probe" && typeof line.review_key === "string") {
+      const refusal = reviewFreshnessRefusals.get(line.review_key);
+      const at = typeof line.ts === "string" ? Date.parse(line.ts) : Number.NaN;
+      if (refusal?.freshness === "unreadable" && refusal.attemptedAt === line.refusal_at &&
+          Number.isFinite(at) && typeof line.loaded_code_sha === "string" &&
+          typeof line.backoff_minutes === "number" && line.backoff_minutes >= 0) {
+        refusal.probe = { attemptedAt: at, backoffMinutes: line.backoff_minutes,
+          loadedCodeSha: line.loaded_code_sha, fresh: line.outcome === "fresh" };
+      }
+      continue;
+    }
     // W1-T4581 — a stack-parent refusal can follow an earlier successful arm on this exact head.
     // The refusal/withdrawal invalidates that old dedup marker; otherwise the child would remain
     // suppressed even after its parents merge and GitHub's auto-merge bit is false.
@@ -10993,6 +11014,42 @@ export async function runSweep(
     return { complete: true, lines: parseLedger(union.matches.join("\n")) };
   });
   const prior = priorActionsFromLedger(ledgerLines);
+  const freshnessBackoff = async (
+    refusals: ReadonlyMap<string, ReviewerCodeFreshnessRefusal>, pr: OpenPrView,
+  ): Promise<string | undefined> => {
+    const key = reviewOutcomeKeyForPr(pr);
+    const refusal = refusals.get(key);
+    const recovery = deps.reviewerCodeRecovery;
+    if (refusal?.freshness === "unreadable" && refusal.attemptedAt !== undefined && recovery?.loadedCodeSha) {
+      const probe = refusal.probe?.loadedCodeSha === recovery.loadedCodeSha ? refusal.probe : undefined;
+      const backoff = Math.min(probe?.backoffMinutes ?? UNREADABLE_REVIEWER_BACKOFF_MINUTES, policy.pendingCeilingMinutes);
+      if ((probe === undefined || probe.fresh === false) &&
+          now - (probe?.attemptedAt ?? refusal.attemptedAt) >= backoff * 60_000 && !deps.dryRun) {
+        let result: ReviewerCodeFreshness;
+        try {
+          result = await (recovery.probeFreshness?.() ?? probeReviewerCodeFreshnessAsync(recovery.loadedCodeSha));
+        } catch (error) {
+          result = { status: "unreadable", reason: `reviewer freshness probe failed: ${String(error)}` };
+        }
+        const fresh = result.status === "fresh" && result.codeSha === recovery.loadedCodeSha;
+        const nextBackoff = fresh ? 0 : Math.min(backoff * 2, policy.pendingCeilingMinutes, 60);
+        appendLine(deps.ledgerPath, {
+          ts: new Date(now).toISOString(), run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
+          step: "sweep.reviewer_freshness_probe", pr_number: pr.prNumber, pr_url: pr.prUrl,
+          head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest, review_key: key,
+          refusal_at: refusal.attemptedAt, loaded_code_sha: recovery.loadedCodeSha,
+          outcome: fresh ? "fresh" : result.status === "stale" ? "stale" : "unreadable",
+          backoff_minutes: nextBackoff,
+          ...(result.status === "unreadable" ? { reason: result.reason } : {
+            origin_main_sha: result.originMainSha,
+            reason: fresh && result.status === "fresh" ? `loaded reviewer code is fresh (${result.advance})` : "loaded reviewer code freshness is not proven",
+          }),
+        });
+        refusal.probe = { attemptedAt: now, backoffMinutes: nextBackoff, loadedCodeSha: recovery.loadedCodeSha, fresh };
+      }
+    }
+    return reviewerCodeFreshnessBackoffReason(refusals, key, policy, now, recovery);
+  };
   if (deps.repairAdmissionSurface !== "light") {
     observeReviewEligibility(openPrs, deps, policy, now, ledgerLines, {
       delivered: prior.reviewDelivered,
@@ -11469,9 +11526,9 @@ export async function runSweep(
    *  claimed during the sequential walk, so a later fix action could hold a review candidate's key
    *  for minutes with no review in flight. The fresh read is the other half: reading synchronously
    *  after `add` makes the mutex and the durable outcome one atomic decision boundary. */
-  function claimReview(
-    reviewKey: string,
-  ): { ok: true; release: () => void } | { ok: false; deduped: boolean; reason: string } {
+  async function claimReview(
+    reviewKey: string, pr: OpenPrView,
+  ): Promise<{ ok: true; release: () => void } | { ok: false; deduped: boolean; reason: string }> {
     if (claimedReviewKeys.has(reviewKey)) {
       return {
         ok: false,
@@ -11486,13 +11543,7 @@ export async function runSweep(
       const durableRefusal = fresh.reviewRefused.has(reviewKey);
       const retryBackoff =
         retryableReviewThrowBackoffReason(fresh.reviewRetryableThrows, reviewKey, policy, now) ??
-        reviewerCodeFreshnessBackoffReason(
-          fresh.reviewFreshnessRefusals,
-          reviewKey,
-          policy,
-          now,
-          deps.reviewerCodeRecovery,
-        );
+        await freshnessBackoff(fresh.reviewFreshnessRefusals, pr);
       if (delivered || durableRefusal || retryBackoff !== undefined) {
         claimedReviewKeys.delete(reviewKey);
         return {
@@ -12206,13 +12257,7 @@ export async function runSweep(
         const reviewDurablyRefused = prior.reviewRefused.has(reviewKey);
         const retryBackoff =
           retryableReviewThrowBackoffReason(prior.reviewRetryableThrows, reviewKey, policy, now) ??
-          reviewerCodeFreshnessBackoffReason(
-            prior.reviewFreshnessRefusals,
-            reviewKey,
-            policy,
-            now,
-            deps.reviewerCodeRecovery,
-          );
+          await freshnessBackoff(prior.reviewFreshnessRefusals, pr);
         alreadyDone = reviewDelivered || reviewDurablyRefused || retryBackoff !== undefined;
         // W1-T2427 — THE SENTENCE MUST SEPARATE FOUR STATES THAT OTHERWISE LOOK IDENTICAL: this
         // dedup firing, `deps.postReview` never being wired, the light-pass admission being lost to
@@ -13623,7 +13668,7 @@ export async function runSweep(
   const runReview = async (job: (typeof orderedReviews)[number]): Promise<void> => {
     const jobDisposition: Disposition =
       job.mode.kind === "full-review" ? "post-review" : job.mode.kind === "reuse" ? "review-reused" : "discriminate-only";
-    const claim = claimReview(job.reviewKey);
+    const claim = await claimReview(job.reviewKey, job.pr);
     if (!claim.ok) {
       finalizeDisposition(
         job.index,
