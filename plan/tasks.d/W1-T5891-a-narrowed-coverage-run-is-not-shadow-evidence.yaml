@@ -10,7 +10,7 @@
   band_meaning: span
   origin: "operator session 2026-10-05: W1-T5705 (#9350) builder's follow-up 1, a precondition of the live flip"
   plan_refs: [W1-T5705, W1-T4404, W1-T5703, W1-T5701]
-  files: [src/lib/selector-shadow-gardener.ts, test/a-narrowed-coverage-run-is-not-shadow-evidence.test.ts]
+  files: [.github/workflows/ci.yml, src/lib/selector-shadow-gardener.ts, test/a-narrowed-coverage-run-is-not-shadow-evidence.test.ts]
   status: queued
   priority: 2
   attempts: 0
@@ -23,6 +23,10 @@
     reads as a perfect prediction. `selectorShadowReport` (src/lib/selector-shadow-gardener.ts)
     already counts only complete eight-shard runs, but has no notion of a narrowed run. The miss
     rate that gates the live flip would then be inflated by the flip's own runs.
+    ADDITIVE RECON 2026-10-05 on 15406e72: the existing bounded gardener reads job logs, not the
+    staged artifact. Include ci.yml so the actual selected mode is emitted as a dedicated log
+    marker after selection; preserve it through the existing log filter/cache. Bump the reader
+    cache version so already-cached new runs cannot silently lose their selection marker.
   design: |
     A shadow run whose shards report `selection: narrow` (from the staged marker) is recorded but
     excluded from the miss-rate and saving evidence, with a `narrowed` count in the report so the
