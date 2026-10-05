@@ -1,0 +1,36 @@
+- id: W1-T5788
+  title: "NO GARDEN PASS RUNS ON A SYNC DRIVER BESIDE THE ASYNC PORT — after W1-T5740 `runGardenPass` (knowledge-gardener.ts) and `startTestGarden` (test-gardener.ts) still drive the sync `runGarden`, which refuses an async workspace port, and `runShardRepairPass` still opens its own sync `gardenCheckout` in the plan-garden child"
+  repo: remudero
+  depends_on: [W1-T5740]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — every garden pass and checkout runs on the async driver
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5740 (#9214) follow-up"
+  plan_refs: [W1-T5740, W1-T4112, W1-T4095, W1-T5114]
+  files: [src/lib/knowledge-gardener.ts, src/lib/test-gardener.ts, src/run-task.ts, test/no-garden-pass-runs-on-a-sync-driver-beside-the-async-port.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on #9214 (W1-T5740, open). `runGardenPass` calls `runGarden(knowledgeGardenSpec(deps),
+    deps)` and `startTestGarden`'s tick calls `runGarden(spec, deps)`; #9214 makes a sync pass handed an
+    async port refuse it as a ledgered filing failure. Neither has a src caller on that head (the
+    daemon's knowledge garden goes through `startKnowledgeGardener` -> `startGarden`, the test garden
+    through `buildRegisteredGarden`'s `runGardenAsync`), so each is a trap for the next caller rather
+    than a live stall. `runShardRepairPass`'s default `land` opens `gardenCheckout({ name: "plan", ...})`
+    synchronously; it runs in the `rmd garden run plan` child (src/lib/garden-registry.ts spawns it),
+    off the daemon loop, so it costs no loop time and is converted only so one checkout form remains
+    on the garden paths.
+  design: |
+    Delete `runGardenPass` and `startTestGarden` if no caller remains, else route them through
+    `runGardenAsync`/`startGarden`; give `runShardRepairPass`'s default land `gardenCheckoutAsync`
+    (its pass is already awaited in the child). Add no comment lines to src/run-task.ts.
+  acceptance:
+    - claim: "no exported garden driver calls the sync runGarden with a daemon port, and the shard-repair pass lands a repaired shard through gardenCheckoutAsync with the same rows"
+      proof: "unit test: test/no-garden-pass-runs-on-a-sync-driver-beside-the-async-port.test.ts"
+  falsifier: |
+    Keep `runShardRepairPass` on the sync `gardenCheckout`: the injected async checkout factory is
+    never called and the test fails.

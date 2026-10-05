@@ -1,0 +1,37 @@
+- id: W1-T5781
+  title: "THE SWEEP'S ARM ATTEMPT RUNS ITS PLAN MERGE-SAFETY READS OFF THE LOOP — the sweep arms through the synchronous `armAutoMergeDetailed` over `realArmDeps`, so W1-T5748's `git fetch`, `git merge-tree` and `cat-file --batch` (60 s cap each, `planSafetyGitSync`) and its three REST reads block the daemon loop on every behind, green plan PR"
+  repo: remudero
+  depends_on: [W1-T5748]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the sweep's arm path is awaited
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5748 (#9205) follow-up"
+  plan_refs: [W1-T5748, W1-T5284, W1-T5741, W1-T5689, W1-T5492]
+  files: [src/lib/sweep.ts, src/lib/arm-auto-merge.ts, test/the-sweeps-arm-attempt-runs-its-plan-reads-off-the-loop.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main f0452a82. `buildSweepEffects` (src/lib/sweep.ts) defaults
+    `armImpl = armAutoMergeDetailed`, a sync driver whose default deps are `realArmDeps()`; there
+    `readPlanMergeSafety` is `runStepsSync(planMergeSafetyInClone(..., ghJson, planSafetyGitSync))`,
+    and `planSafetyGitSync` is `spawnSync("git", ...)` with `GIT_CALL_MS` = 60_000 per call. The
+    armed-idle `idleDeps` spread `realArmDeps(() => config)` too. The async forms exist
+    (`realArmDepsAsync`, `planSafetyGitAsync`, `armAutoMergeAtOpenAsync`) but only the at-open arm
+    uses them. The sweep's `arm` port already accepts a Promise (`SweepDeps.arm`, awaited in
+    `runSweep`). Batch-11 W1-T5741 makes `realArmDepsAsync`'s REST readers async; it does not route
+    the sweep through the async driver.
+  design: |
+    Add `armAutoMergeDetailedAsync` (the same steps under `runStepsAsync`, as
+    `armAutoMergeAtOpenAsync` does) and make the sweep's arm closure and its armed-idle deps use it
+    over `realArmDepsAsync`. Outcomes, ledger rows and `automerge.*` lines are unchanged. Build after
+    or beside W1-T5780, which makes every behind plan PR read the merged tree.
+  acceptance:
+    - claim: "a sweep arm of a behind plan PR lets a timer fire while the merge-safety git call is in flight and returns the same outcome and automerge rows as the sync driver"
+      proof: "unit test: test/the-sweeps-arm-attempt-runs-its-plan-reads-off-the-loop.test.ts"
+  falsifier: |
+    Leave `armImpl` defaulting to the sync driver: the timer fires only after the git call settles
+    and the test fails.
