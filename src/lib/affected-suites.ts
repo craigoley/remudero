@@ -67,6 +67,68 @@ export function fullRunTrigger(changed: readonly string[]): string | undefined {
   return changed.find((f) => !MODELLED.test(f) || (f.startsWith("test/") && !SUITE.test(f)));
 }
 
+/** Characters after which a `/` can only begin a regex literal. */
+const REGEX_PRECEDERS = "(,=:[!&|?{};+-*%<>~^";
+
+/** W1-T5701 — `content` with every comment blanked, STRING-AWARE: a `//` or `/*` inside a string,
+ *  template or regex literal is kept, and so is every string's text (specifiers live in strings).
+ *  Without this a JSDoc import link or a backticked test path in prose read as a graph edge, and the
+ *  selector's 285-module strongly-connected component was made of comments. A regex literal is
+ *  recognised by what precedes its `/`, so a quote inside one cannot open a string; a `'` or `"`
+ *  string ends at its line's end, so one misread cannot swallow the rest of the file. */
+export function stripComments(content: string): string {
+  let out = "";
+  let last = ""; // the last significant (non-space, non-comment) character emitted
+  let i = 0;
+  const n = content.length;
+  while (i < n) {
+    const c = content[i]!;
+    const next = content[i + 1];
+    if (c === "/" && next === "/") {
+      while (i < n && content[i] !== "\n") i += 1;
+      continue;
+    }
+    if (c === "/" && next === "*") {
+      const end = content.indexOf("*/", i + 2);
+      i = end < 0 ? n : end + 2;
+      out += " ";
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      let j = i + 1;
+      while (j < n && content[j] !== c) {
+        if (content[j] === "\\") j += 1;
+        else if (c !== "`" && content[j] === "\n") break;
+        j += 1;
+      }
+      out += content.slice(i, j + 1);
+      i = j + 1;
+      last = c;
+      continue;
+    }
+    if (c === "/" && (last === "" || REGEX_PRECEDERS.includes(last))) {
+      let j = i + 1;
+      let inClass = false;
+      while (j < n && content[j] !== "\n") {
+        const d = content[j]!;
+        if (d === "\\") j += 1;
+        else if (d === "[") inClass = true;
+        else if (d === "]") inClass = false;
+        else if (d === "/" && !inClass) break;
+        j += 1;
+      }
+      out += content.slice(i, j + 1);
+      i = j + 1;
+      last = "/";
+      continue;
+    }
+    out += c;
+    if (!/\s/.test(c)) last = c;
+    i += 1;
+  }
+  return out;
+}
+
 /** Every module specifier a file names: static and dynamic imports, re-exports and requires. */
 function specifiers(content: string): string[] {
   const out: string[] = [];
@@ -88,7 +150,8 @@ function namedPaths(content: string): string[] {
     const middle = [...m[2]!.matchAll(/["']([\w.-]+)["']/g)].map((p) => p[1]);
     out.push([m[1], ...middle, m[3]].join("/"));
   }
-  return out;
+  // A suite is selected by its own imports, never by being NAMED: a test path in a string is prose.
+  return out.filter((p) => !/\.test\.ts$/.test(p));
 }
 
 /** Resolves a relative specifier from `from` against the known files, TS's `.js` → `.ts` included. */
@@ -119,7 +182,7 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   const known = new Set([...all, ...files]);
   const importers = new Map<string, Set<string>>();
   for (const file of all) {
-    const content = input.files.get(file)!;
+    const content = stripComments(input.files.get(file)!);
     const deps_ = [
       ...specifiers(content).map((s) => resolve(file, s, known)),
       ...namedPaths(content).filter((p) => known.has(p)),
