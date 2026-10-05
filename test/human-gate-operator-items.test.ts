@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fixedClock } from "../src/lib/clock.js";
@@ -236,4 +236,15 @@ test("production now view classifies operator items from the ledger and the depl
   const recycled = read();
   assert.deepEqual(operatorGates(recycled), []);
   assert.equal(operatorSource(recycled).state, "complete");
+});
+
+test("production now view names an unreadable deploy marker instead of reading it as absent", (t) => {
+  const { root, append, read } = nowFixture(t);
+  // A self-referencing symlink makes stat fail with ELOOP: a real failure that is not the marker's absence.
+  symlinkSync("DEPLOY_AUTO", deployAutoPath(root));
+  append(drift(0), boot(0));
+  const source = read().humanGates!.sources.find((s) => s.name === "operator-items")!;
+  assert.deepEqual(read().humanGates!.gates.filter((g) => g.kind === "operator_item"), []);
+  assert.equal(source.state, "partial");
+  assert.match(source.reason!, /deploy markers are unreadable \(DEPLOY_AUTO: .*ELOOP/);
 });
