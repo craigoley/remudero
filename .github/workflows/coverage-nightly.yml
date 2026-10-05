@@ -16,6 +16,11 @@ name: Coverage Nightly
 # Not a required check and not a PR trigger, the same polarity as mutation-nightly.yml. It
 # registers no pull_request check, so ci-gate.yml's REQUIRED/ADVISORY lists need no entry.
 # It spends nothing: standard runners on a public repo, read-only token, no live state.
+#
+# DELIVERY (W1-T5811): a red run on a schedule nobody watches notifies no one, so the `notify` job
+# raises a needs-human issue through scripts/needs-human-issue.mjs, naming the red shard(s) or the
+# floor, and closes it with `--resolved` on the run that recovers -- the mechanism the other four
+# scheduled raisers use. That job alone holds `issues: write`.
 on:
   schedule:
     # Nightly, off-peak, not on :00/:30 (codeql 04:17 Mon, osv 03:14, mutation 03:31).
@@ -119,6 +124,9 @@ jobs:
     needs: [shards]
     # ci.yml's aggregator measured a 7m merge and sits at 20m (PR #8080); same bound here.
     timeout-minutes: 20
+    # The ratchet's own outcome, so `notify` can say the FLOOR failed rather than only "merge red".
+    outputs:
+      floor: ${{ steps.ratchet.outcome }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -172,6 +180,7 @@ jobs:
           retention-days: 14
           if-no-files-found: error
       - name: Coverage ratchet (main's absolute floor)
+        id: ratchet
         run: node scripts/coverage-ratchet.mjs --lcov coverage/lcov.info --baseline scripts/coverage-baseline.json
       - name: Fail the run if any shard's instrumented suite was red (after the measurement is uploaded)
         run: |
@@ -184,3 +193,109 @@ jobs:
             echo "::error::coverage-nightly: the instrumented suite was red on main in shard(s):${RED}."
             exit 1
           fi
+
+  # W1-T5811 -- the delivery of record. A cron job has no PR to carry a red result, so this job
+  # judges the WHOLE run and files the verdict where a human sees it. `if: always()` because a shard
+  # that dies before its upload skips `merge`, and that is exactly a night that must alarm.
+  notify:
+    name: coverage-nightly-notify
+    runs-on: ubuntu-latest
+    needs: [shards, merge]
+    if: always()
+    # R-50: a checkout, at most one artifact download and two gh calls; the sibling raisers run in
+    # well under a minute, and 15m bounds a hung download with headroom.
+    timeout-minutes: 15
+    # Job-level permissions REPLACE the top-level block, so `contents: read` is restated; `issues:
+    # write` is the delivery's minimum, scoped to this job alone (Scorecard TokenPermissions).
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # No `npm ci`, as in fleet-heartbeat-watch.yml: scripts/needs-human-issue.mjs uses only node
+      # builtins, so the alarm still fires on the night `npm ci` itself is what broke.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      # Only a red run reads the shard exits, to name which shard failed; a green night skips it.
+      # Best effort: a shard that died uploaded nothing, and the judge below names that absence.
+      - name: Download the shards' exit codes (red runs only)
+        if: needs.shards.result != 'success' || needs.merge.result != 'success'
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: coverage-shard-*
+          path: coverage-shards
+      - name: Judge the run and name what failed
+        id: verdict
+        env:
+          SHARDS_RESULT: ${{ needs.shards.result }}
+          MERGE_RESULT: ${{ needs.merge.result }}
+          FLOOR_OUTCOME: ${{ needs.merge.outputs.floor }}
+        run: |
+          set -euo pipefail
+          if [ "${SHARDS_RESULT}" = "success" ] && [ "${MERGE_RESULT}" = "success" ]; then
+            echo "coverage-nightly is green: shards=success merge=success floor=${FLOOR_OUTCOME}" > coverage-nightly-report.txt
+            echo "verdict=green" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          FAILING=""
+          DETAIL=""
+          for SHARD in 1 2 3 4 5 6 7 8; do
+            EXIT_FILE="coverage-shards/coverage-shard-${SHARD}/test-exit"
+            if [ ! -f "${EXIT_FILE}" ]; then
+              FAILING="${FAILING} shard ${SHARD}/8,"
+              DETAIL="${DETAIL}shard ${SHARD}/8: no artifact (the shard job failed before its upload)"$'\n'
+            else
+              CODE="$(tr -d '[:space:]' < "${EXIT_FILE}")"
+              if [ "${CODE}" != "0" ]; then
+                FAILING="${FAILING} shard ${SHARD}/8,"
+                DETAIL="${DETAIL}shard ${SHARD}/8: the instrumented suite was red (exit ${CODE})"$'\n'
+              fi
+            fi
+          done
+          case "${FLOOR_OUTCOME}" in
+            success) DETAIL="${DETAIL}floor: held (scripts/coverage-baseline.json)"$'\n' ;;
+            failure)
+              FAILING="${FAILING} floor,"
+              DETAIL="${DETAIL}floor: the absolute-floor ratchet FAILED (main fell below scripts/coverage-baseline.json)"$'\n'
+              ;;
+            *) DETAIL="${DETAIL}floor: not measured (merge job: ${MERGE_RESULT})"$'\n' ;;
+          esac
+          FAILING="${FAILING%,}"
+          {
+            echo "coverage-nightly is red: shards=${SHARDS_RESULT} merge=${MERGE_RESULT} floor=${FLOOR_OUTCOME:-not run}; failing:${FAILING:- (no shard or floor named -- read the run)}"
+            echo
+            printf '%s' "${DETAIL}"
+          } > coverage-nightly-report.txt
+          cat coverage-nightly-report.txt
+          echo "verdict=red" >> "$GITHUB_OUTPUT"
+      # `!= 'green'`, not `== 'red'`: a judge that crashed wrote no verdict, and only a PROVEN green
+      # run may stay silent (the W1-T130 degrade-loudly polarity).
+      - name: Notify a human (the delivery of record -- see this workflow's header)
+        if: always() && steps.verdict.outputs.verdict != 'green'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_WHEN: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          test -s coverage-nightly-report.txt || echo "coverage-nightly is red: no report (the judge step failed before writing one) -- read the run" > coverage-nightly-report.txt
+          node scripts/needs-human-issue.mjs \
+            --source coverage-nightly \
+            --title "coverage-nightly is failing" \
+            --preamble "$(head -n 1 coverage-nightly-report.txt)" \
+            --body-file coverage-nightly-report.txt
+      # W1-T3030 -- THE CLOSING HALF OF THE DELIVERY ABOVE. `--resolved` is a silent no-op when no
+      # coverage-nightly issue is open, which is every ordinary night; it speaks only on the green
+      # run that ends an escalation, and closes only the issue carrying this source's marker.
+      - name: Close this job's needs-human issue once it recovers
+        if: success() && steps.verdict.outputs.verdict == 'green'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_WHEN: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          node scripts/needs-human-issue.mjs --resolved --source coverage-nightly
