@@ -20,9 +20,11 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, relative, sep } from "node:path";
+import { isMap, isScalar, isSeq, parseDocument } from "yaml";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { execWhitelistedProof, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
+import { execWhitelistedProof, INSTRUMENT_SURFACE, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
 import type { ProofDiscriminationEvidence } from "./sweep.js";
+import { renderAcceptanceBlock } from "./plan-pr-emitter.js";
 
 /** One worker-proposed replacement, parsed from the fix-rung report (see {@link
  *  parseProofAmendmentProposal}) or constructed directly by a test. `claim`/`oldProof` must be
@@ -469,5 +471,106 @@ export function requestProofAmendment(request: ProofAmendmentRequest, deps: Proo
     return { kind: "created", amendmentUrl: created.prUrl, amendmentNumber: created.prNumber };
   } finally {
     deps.worktreeRemove(deps.repoDir, worktreePath);
+  }
+}
+
+export interface ScopeAmendmentRequest {
+  readonly taskId: string;
+  readonly prNumber: number;
+  readonly prUrl: string;
+  readonly headSha: string;
+  readonly trailerTaskId?: string;
+  readonly paths: readonly string[];
+  readonly changedPaths: readonly string[];
+}
+
+export type ScopeAmendmentOutcome = Exclude<ProofAmendmentOutcome, { kind: "ineligible" } | { kind: "refused" }> |
+  { kind: "refused"; reason: string; detail: string };
+
+export function requestScopeAmendment(request: ScopeAmendmentRequest, deps: ProofAmendmentWritePorts): ScopeAmendmentOutcome {
+  const refuse = (reason: string, detail: string): ScopeAmendmentOutcome => ({ kind: "refused", reason, detail });
+  if (!Number.isSafeInteger(request.prNumber) || request.prNumber <= 0) return refuse("invalid-pr", "no implementation PR number");
+  if (!request.trailerTaskId || request.trailerTaskId !== request.taskId) {
+    return refuse("no-task-trailer", "the implementation PR must carry the matching task trailer");
+  }
+  const paths = [...new Set(request.paths)].sort();
+  if (paths.length === 0) return refuse("no-paths", "the worker requested no paths");
+  for (const path of paths) {
+    if (/^(?:\/|[A-Za-z]:)/.test(path) || /[\\\x00-\x1f\x7f]/.test(path) ||
+        path.split("/").some((part) => part === "" || part === "." || part === "..")) {
+      return refuse("invalid-path", path);
+    }
+    if (path.startsWith("plan/")) return refuse("plan-path", path);
+    if (INSTRUMENT_SURFACE.some((pattern) => new RegExp(pattern).test(path)) || /(?:-ratchet\.mjs|-baseline\.json)$/.test(path)) {
+      return refuse("instrument-path", path);
+    }
+    if (path.startsWith("test/")) return refuse("test-path", path);
+    if (!request.changedPaths.includes(path)) return refuse("path-not-changed", path);
+  }
+  const digest = createHash("sha256").update(paths.join("\0")).digest("hex").slice(0, 20);
+  const key = `scope:${request.taskId}:${request.prNumber}:${digest}`;
+  const existing = deps.lookupIdentity(key);
+  if (existing?.merged) {
+    const result = deps.updateBranch(request.prUrl, request.headSha);
+    return { kind: "branch_update_requested", ...result };
+  }
+  if (existing) return { kind: "resumed", amendmentUrl: existing.amendmentUrl, amendmentNumber: existing.amendmentNumber };
+  const branch = `scope-amendment/${request.taskId}-${request.prNumber}`;
+  const probed = deps.probeExisting(branch);
+  if (probed) {
+    deps.recordIdentity(key, { amendmentUrl: probed.prUrl, amendmentNumber: probed.prNumber, merged: false });
+    return { kind: "resumed", amendmentUrl: probed.prUrl, amendmentNumber: probed.prNumber };
+  }
+  const shard = deps.findShard(deps.repoDir, request.taskId);
+  if (!shard || !shard.path.startsWith("plan/")) return refuse("shard-not-found", request.taskId);
+  const doc = parseDocument(shard.text);
+  const tasks = isSeq(doc.contents) ? doc.contents.items : [];
+  const matches = tasks.filter((task) => {
+    const id = isMap(task) ? task.get("id", true) : undefined;
+    return isScalar(id) && String(id.value) === request.taskId;
+  });
+  const task = matches[0];
+  const files = isMap(task) ? task.get("files", true) : undefined;
+  if (doc.errors.length > 0 || matches.length !== 1 || !isSeq(files) || !files.range ||
+      !files.items.every((item) => isScalar(item) && typeof item.value === "string")) {
+    return refuse("shard-drifted", "the task must have one readable files sequence");
+  }
+  const additions = paths.filter((path) => !files.toJSON().includes(path));
+  if (additions.length === 0) return refuse("already-declared", "all requested paths are already in files");
+  const [start, end] = files.range;
+  let insert: number;
+  let extra: string;
+  if (files.flow) {
+    const last = files.items.at(-1);
+    insert = isScalar(last) ? last.range![1] : start + 1;
+    extra = `${files.items.length > 0 ? ", " : ""}${additions.map((path) => JSON.stringify(path)).join(", ")}`;
+  } else {
+    insert = end;
+    const lineStart = shard.text.lastIndexOf("\n", start) + 1;
+    const indent = shard.text.slice(lineStart, start).match(/^ */)![0];
+    extra = `${shard.text[insert - 1] === "\n" ? "" : "\n"}${additions.map((path) => `${indent}- ${JSON.stringify(path)}\n`).join("")}`;
+  }
+  const text = shard.text.slice(0, insert) + extra + shard.text.slice(insert);
+  if (parseDocument(text).errors.length > 0) return refuse("shard-drifted", "appending paths would invalidate the files sequence");
+  const wp = deps.worktreePathFor(request.taskId, request.prNumber);
+  deps.worktreeAdd(deps.repoDir, wp, branch);
+  try {
+    const currentShard = deps.findShard(wp, request.taskId);
+    if (currentShard?.path !== shard.path || currentShard.text !== shard.text) {
+      return refuse("shard-drifted", "the amendment base differs from the observed task shard");
+    }
+    deps.writeFile(join(wp, shard.path), text);
+    deps.gitAdd(wp, shard.path);
+    const title = `fix(plan): extend ${request.taskId.toLowerCase()}'s files for #${request.prNumber}`;
+    const sha = deps.gitCommit(wp, `${title}\n\nAppend validated worker paths to files only.`);
+    deps.gitPush(wp, branch, sha);
+    const created = deps.createPr({ title, head: branch, base: "main",
+      body: `Scope amendment for #${request.prNumber}. Only ${shard.path}'s files list changes.\n\n` +
+        renderAcceptanceBlock(additions.map((path) => ({ claim: `files includes ${path}`,
+          proof: `grep: ${path.replace(/[.*[\\^$]/g, "\\$&")} in ${shard.path}` }))) });
+    deps.recordIdentity(key, { amendmentUrl: created.prUrl, amendmentNumber: created.prNumber, merged: false });
+    return { kind: "created", amendmentUrl: created.prUrl, amendmentNumber: created.prNumber };
+  } finally {
+    deps.worktreeRemove(deps.repoDir, wp);
   }
 }

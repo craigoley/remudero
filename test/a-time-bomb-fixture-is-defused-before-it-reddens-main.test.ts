@@ -272,6 +272,22 @@ test("W1-T5539: an invalid reserved id fails rendering without writing or claimi
   assert.equal(f.rows.some((r) => r.step === "gate_garden.defuse_filed"), false);
 });
 
+/** GNU and BSD grep can differ in whether recursive single-file output includes its target. */
+function assertExecutorGrepLine(output: string, target: string, line: string): void {
+  const match = `1:${line}\n`;
+  assert.ok(output === match || output === `${target}:${match}`, "grep must return the exact matching line with only an optional exact target prefix");
+}
+
+test("W1-T5539: a grep fixture checks the exact matching line with or without the target prefix", () => {
+  const target = "/fixture/proof-target.txt";
+  const line = 'test("a literal backslash \\ and [1]* stay matched", () => {});';
+  assertExecutorGrepLine(`1:${line}\n`, target, line);
+  assertExecutorGrepLine(`${target}:1:${line}\n`, target, line);
+  for (const output of [`/another/target:1:${line}\n`, `1:${line.replace("\\", "")}\n`, `2:${line}\n`, `1:${line}\nextra output\n`]) {
+    assert.throws(() => assertExecutorGrepLine(output, target, line));
+  }
+});
+
 test("W1-T5539: the defuse proof matches its own title under the executor's grep when the path holds a backslash", async () => {
   const f = await fixture();
   const action = gateGardenSpec(f.deps, f.probes, f.sources).inventory().candidates.find((a) => a.class === "defuse")!;
@@ -281,8 +297,9 @@ test("W1-T5539: the defuse proof matches its own title under the executor's grep
   const pattern = /^grep: (.*) in test\/a\\d\[1\]\*\.test\.ts$/.exec(task.acceptance![0]!.proof!)?.[1];
   assert.ok(pattern, task.acceptance![0]!.proof);
   const target = join(f.repo.dir, "proof-target.txt");
-  writeFileSync(target, `test("W1-T6013: test/a\\d[1]*.test.ts stays defused across 2026-10-18T00:00:00.000Z", () => {});\n`);
-  assert.match(execFileSync("grep", ["-arn", "--", pattern, target], { encoding: "utf8" }), /^1:/);
+  const matchingLine = `test("W1-T6013: test/a\\d[1]*.test.ts stays defused across 2026-10-18T00:00:00.000Z", () => {});`;
+  writeFileSync(target, `${matchingLine}\n`);
+  assertExecutorGrepLine(execFileSync("grep", ["-arn", "--", pattern, target], { encoding: "utf8" }), target, matchingLine);
   writeFileSync(target, `test("W1-T6013: test/ad[1]*.test.ts stays defused across 2026-10-18T00:00:00.000Z", () => {});\n`);
   assert.throws(() => execFileSync("grep", ["-arn", "--", pattern, target], { encoding: "utf8", stdio: "pipe" }));
 });

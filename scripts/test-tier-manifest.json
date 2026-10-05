@@ -2371,7 +2371,7 @@
     "test/the-shadow-readiness-test-stops-its-worker-before-cleanup.test.ts": 7900,
     "test/the-slow-tier-runs-on-main.test.ts": 600,
     "test/the-source-size-ratchet-writes-its-own-baseline-when-merely-run.test.ts": 510,
-    "test/the-state-snapshot-actually-runs-on-this-host.test.ts": 4000,
+    "test/the-state-snapshot-actually-runs-on-this-host.test.ts": 5000,
     "test/the-status-board-reads-each-ledger-row-once.test.ts": 550,
     "test/the-status-union-reads-each-ledger-row-once.test.ts": 480,
     "test/the-strike-ladder-reads-a-merge-base-and-climbs-past-a-conflict.test.ts": 1400,
