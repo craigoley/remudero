@@ -891,7 +891,8 @@ export interface DaemonDeps {
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
   refreshMerged: (plan?: Plan) => MergedSet;
   refreshMergedAsync?: (plan?: Plan) => Promise<MergedSet>;
-  readLoopTelemetry?: () => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number };
+  readLoopTelemetry?: (() => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number;
+    sync_spawn_top?: unknown[] }) & { peek?: () => unknown };
   lastStepBeforeBlock?: () => string | undefined;
   /** Rebind daemon-owned sweep/projection closures when the live plan reloads. */
   onPlanReload?: (plan: Plan) => void;
@@ -1368,6 +1369,10 @@ interface InterphaseReviewClock {
   stop(): Promise<{ eventWakeSeen: boolean; passes: number }>;
 }
 
+function peekSyncSpawnTop(deps: { readLoopTelemetry?: { peek?: () => unknown } }): unknown {
+  try { return deps.readLoopTelemetry?.peek?.(); } catch { return undefined; /* Reason: observability only. */ }
+}
+
 /**
  * W1-T4041 — REPORT A TICK THAT CAME BACK LATE, AND NAME THE PHASE THAT WAS IN FORCE.
  *
@@ -1389,7 +1394,9 @@ interface InterphaseReviewClock {
  * Swallows everything: observability must never be able to take down the loop it observes.
  */
 export function reportLoopLag(
-  sample: { phase: string; dueAtMs: number; observedAtMs: number; intervalMs: number; lastStepBeforeBlock?: string },
+  sample: { phase: string; dueAtMs: number; observedAtMs: number; intervalMs: number; lastStepBeforeBlock?: string;
+    /** W1-T5718: the longest synchronous spawn of the window this lag closes, read without closing it. */
+    syncSpawnTop?: unknown },
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): void {
   try {
@@ -1401,6 +1408,7 @@ export function reportLoopLag(
       interval_ms: sample.intervalMs,
       missed_ticks: Math.floor(lagMs / sample.intervalMs),
       last_step_before_block: sample.lastStepBeforeBlock,
+      ...(sample.syncSpawnTop === undefined ? {} : { sync_spawn_top: sample.syncSpawnTop }),
     });
   } catch {
     // Reason: a throwing logger must cost the reading, never the tick.
@@ -1450,7 +1458,7 @@ export function startInterphaseReviewClock(
           const result = await wait(quantumMs);
           reportLoopLag(
             { phase, dueAtMs: clockDueAtMs, observedAtMs: interphaseClock.now(), intervalMs: quantumMs,
-              lastStepBeforeBlock: deps.lastStepBeforeBlock?.() },
+              lastStepBeforeBlock: deps.lastStepBeforeBlock?.(), syncSpawnTop: peekSyncSpawnTop(deps) },
             log,
           );
           if (result === "wake") {
@@ -1817,7 +1825,8 @@ function startInFlightTicker(
           const waitResult = await (owner.sweepRetrigger ? (deps.sleepUntilSweepWake ?? deps.sleep) : deps.sleep)(pollIntervalMs);
           const lastStepBeforeBlock = deps.lastStepBeforeBlock?.();
           reportLoopLag(
-            { phase: owner.phase, dueAtMs: tickDueAtMs, observedAtMs: daemonClock.now(), intervalMs: pollIntervalMs, lastStepBeforeBlock },
+            { phase: owner.phase, dueAtMs: tickDueAtMs, observedAtMs: daemonClock.now(), intervalMs: pollIntervalMs, lastStepBeforeBlock,
+              syncSpawnTop: peekSyncSpawnTop(deps) },
             log,
           );
           if (waitResult === "wake") eventWakePending = true;
@@ -2827,7 +2836,8 @@ export async function runDaemon(
     return s;
   };
   if (deps.livenessPulse) livenessPulse = startLivenessPulse(pollIntervalMs, idleLaneClock, log,
-    (sample) => reportLoopLag({ ...sample, lastStepBeforeBlock: deps.lastStepBeforeBlock?.() }, log));
+    (sample) => reportLoopLag({ ...sample, lastStepBeforeBlock: deps.lastStepBeforeBlock?.(),
+      syncSpawnTop: peekSyncSpawnTop(deps) }, log));
   const prActionPump = startPrActionPump(deps, pollIntervalMs, log);
   prActionPumpRef.stop = prActionPump.stop;
   prActionPumpRef.isBusy = prActionPump.isBusy;
