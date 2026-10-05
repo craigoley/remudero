@@ -610,16 +610,16 @@ test('streamed compact coverage preserves pinned-Node LCOV without writable scra
       'the control must enumerate every process report across all compact directories');
     assert.equal(control.order.length, control.reportPaths.length,
       'the pinned-Node control must retain every process report in its captured order');
-    const compactReportDirs = control.reportPaths.map((reportPath, index) => {
-      const rawReportDir = join(root, `raw-report-${index}`);
-      const compactReportDir = join(root, `compact-report-${index}`);
-      mkdirSync(rawReportDir);
-      linkSync(reportPath, join(rawReportDir, `coverage-1-0000000000000-${String(index).padStart(6, '0')}.json`));
-      runCompactor(compactReportDir, rawReportDir);
-      return compactReportDir;
+    // Compact whole shards, matching production. On Linux, Node also emits a runner-only profile
+    // whose scripts are all excluded by test/**; that file has no source records and must be
+    // skipped within a shard, not treated as a standalone shard that must produce a bundle.
+    const compactDirs = rawDirs.map((rawDir, index) => {
+      const compactDir = join(root, `compact-shard-${index}`);
+      runCompactor(compactDir, rawDir);
+      return compactDir;
     });
     const log = execFileSync(process.execPath,
-      ['--expose-internals', 'scripts/coverage-merge-ratchet.mjs', '--output', output, ...control.order.map((index) => compactReportDirs[index]!)],
+      ['--expose-internals', 'scripts/coverage-merge-ratchet.mjs', '--output', output, ...compactDirs],
       { cwd: process.cwd(), env: { ...process.env, TMPDIR: join(root, 'scratch-does-not-exist') }, encoding: 'utf8', stdio: 'pipe' });
     const streamed = readFileSync(output, 'utf8').split('\n');
     const expected = control.lcov.split('\n');
