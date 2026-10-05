@@ -329,7 +329,7 @@ export async function ghTextAsync(
   }
 }
 
-/** A single streamed line longer than this keeps its prefix only, so a newline-free body cannot grow memory. */
+/** BACKSTOP: a single streamed line longer than this keeps its prefix only, so a newline-free body cannot grow memory. */
 export const GH_STREAM_MAX_LINE_CHARS = 1 << 20;
 const GH_STREAM_STDERR_CHARS = 4096;
 
@@ -391,6 +391,7 @@ export async function ghStreamLinesAsync(
       try {
         pushText(decoder.write(chunk));
       } catch (err) {
+        // a throwing onLine fails the whole read: the child is killed and the error is the rejection
         child.kill("SIGKILL");
         finish(err instanceof Error ? err : new Error(String(err)));
       }
@@ -411,6 +412,7 @@ export async function ghStreamLinesAsync(
         onLine(carry);
         finish();
       } catch (err) {
+        // the final line's reducer error is the rejection, never swallowed into a clean end
         finish(err instanceof Error ? err : new Error(String(err)));
       }
     });
