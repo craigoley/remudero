@@ -437,7 +437,7 @@ test("acceptance 8: every job name declared in ci.yml is unchanged by this task 
   const doc = parseYaml(ciYml) as { jobs: Record<string, { name?: string }> };
   const namesBeforeThisTask = [
     "ci",
-    "commitlint",
+    "light-gates", // W1-T5695 renamed the `commitlint`-keyed bundling job; the key is unchanged
     "leak-grep",
     "coverage-ratchet",
     "mutation-ratchet",

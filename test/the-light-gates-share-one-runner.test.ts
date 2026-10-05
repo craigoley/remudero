@@ -52,8 +52,10 @@ function loadCiGateRequired(): string[] {
 }
 
 // Every REQUIRED name this task moved off its own job and onto a step of `commitlint`.
+// W1-T5695: the title lint left this job (pr-title-lint.yml is the sole `commitlint`), and the
+// rule-checks step now posts under its own REQUIRED name.
 const MOVED_GATE_NAMES = [
-  "commitlint",
+  "rule-checks",
   "leak-grep",
   "learnings-budget-ratchet",
   "jscpd-gate",

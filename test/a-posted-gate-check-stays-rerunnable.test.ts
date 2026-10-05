@@ -97,5 +97,7 @@ test("W1-T4438: a re-drive of a failed posted gate reruns its job", async () => 
   const workflow = parseYaml(readFileSync(".github/workflows/ci.yml", "utf8")) as { jobs: Record<string, { steps: Array<{ env?: Record<string, string>; run?: string }> }> };
   const reporter = workflow.jobs.commitlint.steps.find((step) => step.run?.includes("report()"));
   assert.equal(reporter?.env?.POSTING_JOB_ID, "${{ job.check_run_id }}");
-  assert.match(reporter?.run ?? "", /external_id=job:\$\{POSTING_JOB_ID\}/);
+  assert.equal(reporter?.env?.POSTING_RUN_ID, "${{ github.run_id }}");
+  assert.equal(reporter?.env?.POSTING_RUN_ATTEMPT, "${{ github.run_attempt }}");
+  assert.match(reporter?.run ?? "", /external_id=run:\$\{POSTING_RUN_ID\}:\$\{POSTING_RUN_ATTEMPT\}:job:\$\{POSTING_JOB_ID\}/);
 });
