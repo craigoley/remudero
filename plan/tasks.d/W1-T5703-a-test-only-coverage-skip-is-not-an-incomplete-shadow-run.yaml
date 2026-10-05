@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: research/flow/report.md (change-aware flow) item 6, the shadow evidence the live switch waits on"
   plan_refs: [W1-T4404, W1-T4406, W1-T5705, W1-T5699]
   files: [src/lib/selector-shadow-gardener.ts, test/a-test-only-coverage-skip-is-not-an-incomplete-shadow-run.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

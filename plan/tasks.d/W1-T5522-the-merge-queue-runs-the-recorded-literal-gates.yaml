@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-03: root-cause program for the 28-PR backlog; follow-up to W1-T5515 so the merge queue catches the races in the 2026-09-29 merge-queue plan"
   plan_refs: [W1-T4406, W1-T4399, W1-T3512, W1-T3655, W1-T4431, W1-T1014]
   files: [.github/workflows/ci.yml, .github/workflows/ci-gate.yml, test/the-ci-gate-reports-on-the-merge-group-commit.test.ts, test/the-light-gates-share-one-runner.test.ts, test/the-census-watches-its-own-base.test.ts, test/fast-lane-classifier.test.ts, test/push-ci-on-main.test.ts, test/the-merge-queue-runs-the-recorded-literal-gates.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

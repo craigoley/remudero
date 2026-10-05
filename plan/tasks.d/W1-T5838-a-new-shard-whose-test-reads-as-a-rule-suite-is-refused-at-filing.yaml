@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: third census-name rename of the day (#9275, W1-T5691)"
   plan_refs: [W1-T5785, W1-T5616, W1-T5676, W1-T5691, W1-T5692]
   files: [src/lib/task-linter.ts, src/lib/ci-parity.ts, test/a-new-shard-whose-test-reads-as-a-rule-suite-is-refused-at-filing.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

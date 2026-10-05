@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-05: duplicate #9308 (fleet W1-T5836) vs hand-built #9300; also W1-T5649 (#9216 vs #9213) and W1-T5650 (#9210 vs #9219) on 2026-10-05"
   plan_refs: [W1-T2270, W1-T2784, W1-T5805, W1-T5762, W1-T4691]
   files: [src/run-task.ts, docs/cli-reference.md, docs/operator-guide.md, scripts/console-parity-baseline.json, scripts/console-parity-ratchet.mjs, test/help-renders-a-summary-not-a-paragraph.test.ts, test/a-hand-build-takes-the-dispatch-claim-the-fleet-honours.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |
