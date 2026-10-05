@@ -2713,6 +2713,7 @@ import {
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 import { fetchPrDiff } from "./lib/pr-diff.js";
+import { GATEWAY_FETCH_TIMEOUT_MS } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable } from "./lib/owner-repo.js";
 import { resolveRepoLayout } from "./lib/repo-layout.js";
 export { resolveRepoRoot };
@@ -32795,6 +32796,16 @@ export function readPushedRunBranchesOutput(
   }
 }
 
+/** W1-T5805 — the same read as an awaited child, for the daemon's tick and each lane refill: killed past
+ *  `timeoutMs`, and REJECTING on any failure so the daemon ledgers it and keeps its fail-open direction. */
+export async function readPushedRunBranchesOutputAsync(
+  exec: (cmd: string, args: string[], opts: { encoding: "utf8"; cwd: string; timeout: number; killSignal: "SIGKILL" }) => Promise<{ stdout: string }> = execFilePromise as never,
+  timeoutMs = GATEWAY_FETCH_TIMEOUT_MS,
+): Promise<string> {
+  const opts = { encoding: "utf8", cwd: repoRoot, timeout: timeoutMs, killSignal: "SIGKILL" } as const;
+  return (await exec("git", ["ls-remote", "--heads", "origin", "run-*"], opts)).stdout;
+}
+
 /** Bounded page walk — same shape and bound `reapBranchesCommand`'s own `state=all` read already
  *  uses (8 pages, 100/page = 800 rows), never a per-branch lookup. */
 const RUN_BRANCH_CLOSED_PR_MAX_PAGES = 8;
@@ -36400,10 +36411,9 @@ export async function daemonCommand(
         // spends neither the REST nor the GraphQL budget — measured at 46 refs in 199 ms with
         // `core` remaining identical before and after.
         //
-        // FAIL OPEN, DELIBERATELY: a throw here (network blip, auth) yields "" and therefore an
-        // EMPTY set, so no task is refused — precisely today's behaviour. The degraded outcome is
-        // "no improvement", never "dispatch wrongly blocked".
-        readPushedRunBranches: () => readPushedRunBranchesOutput(),
+        // FAIL OPEN, DELIBERATELY: a failed read (network blip, auth) refuses no task. W1-T5805: the
+        // daemon awaits it, at each tick and lane refill, and ledgers the failure.
+        readPushedRunBranches: () => readPushedRunBranchesOutputAsync(),
         readOrphanRunBranchEvidence: orphanRunBranchEvidenceReader(
           join(config.root, "state", automaticBranchReapStateFileName(target.repo)),
           () => liveInflightRuns(inflightDir).map((r) => r.taskId),
