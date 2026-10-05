@@ -217,7 +217,7 @@ test("W1-T5282: a hung freshness fetch ends at its bound and never reads fresh",
   };
   const svc = await checkServiceFreshnessAsync("/repo", {}, { ignoreReentrancyGuard: true, git: localGit(), gitAsync: hung, fetchTimeoutMs: 20 });
   assert.equal(svc.status, "degraded");
-  assert.match((svc as { reason: string }).reason, /git fetch origin failed in \/repo: Error: git fetch --quiet origin exceeded its 20ms bound/);
+  assert.match((svc as { reason: string }).reason, /git fetch origin failed in \/repo: Error: git fetch --quiet --no-tags origin \+refs\/heads\/main:refs\/remotes\/origin\/main exceeded its 20ms bound/);
   assert.equal(seenSignal?.aborted, true, "the runner is told to kill its child");
   const reading = daemonFreshnessFromService(svc);
   assert.equal(reading.stale, false);
@@ -225,7 +225,10 @@ test("W1-T5282: a hung freshness fetch ends at its bound and never reads fresh",
 
   // The daemon's own reader, through the same bound.
   const viaDaemon = await daemonFreshnessReads("/repo", {}, { ignoreReentrancyGuard: true, git: localGit(), gitAsync: hung, fetchTimeoutMs: 20 }).checkFreshness();
-  assert.deepEqual(viaDaemon, reading);
+  // W1-T5772: a killed fetch's detail now ends with its last trace2 region and elapsed ms, which vary per call.
+  const sansStall = (r: unknown) => JSON.parse(JSON.stringify(r).replace(/; last trace2 region: [^"]*; elapsed \d+ms/, ""));
+  assert.match(JSON.stringify(viaDaemon), /; last trace2 region: [^"]*; elapsed \d+ms/);
+  assert.deepEqual(sansStall(viaDaemon), sansStall(reading));
 
   // A REAL git whose transport hangs: the default runner's child is killed at the bound.
   const origin = gitRepo({ kind: "hung-fetch" });
