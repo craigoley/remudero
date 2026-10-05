@@ -1,0 +1,50 @@
+- id: W1-T5911
+  title: "AN OPERATOR WHO ENQUEUES A RISK-HELD HEAD BY HAND RELEASES IT FOR THE SWEEP — the risk judge's hold on a head clears only on a new head or a `capped_override_granted` row, which only `rmd review --override-capped-by` writes after a full re-review, so an operator who arms or enqueues the held PR by hand leaves no override; when the merge queue then ejects it the sweep refuses to re-arm and the operator must enqueue it again on every ejection"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: high  # Rule 19: one concern — a human arm of a risk-held head is recorded as that head's override; the sweep arm path sits in front of auto-merge
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-05: #9391 enqueued by hand three times during a GitHub Actions outage ('when does this manual work end?!')"
+  plan_refs: [W1-T970, W1-T219, W1-T5403, W1-T5909, W1-T1000002, W1-T4784]
+  files: [src/lib/sweep.ts, src/lib/arm-auto-merge.ts, src/lib/ledger.ts, test/an-operator-who-enqueues-a-risk-held-head-by-hand-releases-it-for-the-sweep.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  note: "reservation hand-off: run-unfiled-1791235471919 -> run-unfiled-1791237718711"
+  rationale: |
+    LIVE 2026-10-05, fleet #9391 (W1-T5534, head d931064b). The review lane armed it at 19:24Z and the
+    sweep enqueued it at 19:30Z. A GitHub Actions outage cancelled its group's checks and the queue
+    ejected it at 19:45:53Z (failed_checks), which disables auto-merge. The sweep's re-arm ran the
+    W1-T5403 risk judge, which escalated at confidence 0.68 (issue #9395: src/lib/ledger.ts was outside
+    the task's files:; the change was one line in DECISION_RELEVANT_LEDGER_STEPS). The operator read the
+    diff and enqueued it by hand: the PR timeline shows AddedToMergeQueueEvent by cao825 at 19:52:27Z and
+    again at 21:23:42Z, against remudero-fleet for the sweep's own enqueue. The queue ejected it again at
+    21:12:18Z. Every pass since disposes it awaiting-arm with stand_down_reason "risk judge escalated this
+    head, no operator override recorded — see #9395": the refusal in src/lib/sweep.ts (`refused`, folded
+    from `risk_judge.escalated` rows) clears only on a new head or a head-bound
+    `automerge.capped_override_granted` row (cappedOverrideFromLedger, src/lib/review.ts), and the only
+    writer of that row is `rmd review <pr> --override-capped-by`, which re-runs a full review first. The
+    operator's own arm, the decision the escalation asked for, is invisible to the sweep, so every
+    ejection costs the operator another hand enqueue.
+  design: |
+    (1) For a mergeable PR whose head is risk-refused (`prior.riskRefused` holds `<pr>@<head>`) and has no
+    override row, read the PR's AutoMergeEnabledEvent and AddedToMergeQueueEvent timeline items once
+    (GraphQL; a new reader beside W1-T5909's readMergeQueueMembership in src/lib/arm-auto-merge.ts). An
+    event whose actor is NOT the fleet's own login, dated after this head's `risk_judge.escalated` row, is
+    the operator's release. (2) On that observation the sweep writes one head-bound
+    `automerge.risk_override_observed` row (by: <actor login>, reason naming the event and time,
+    head_sha, pr_url, issue_url), and the refusal honours it exactly as it honours a capped override:
+    same head only (W1-T219), never carried to a new head. (3) From then on the head is armable, so an
+    ejection re-arms through W1-T5909's bounded path (build after W1-T5909 merges; it shares the dedup). (4) The fleet's login is resolved, not hard-coded;
+    when it or the timeline is unreadable the refusal stands and the disposed row names why (fail
+    closed: never a success-shaped default). An operator hold (W1-T1000002) still outranks everything.
+  acceptance:
+    - claim: "a risk-refused head that a non-fleet actor armed or enqueued after the escalation is recorded once as a head-bound risk override and armed by the next pass, while a fleet-actor event, an event before the escalation, a new head, an unreadable timeline or fleet login, and an operator hold each leave the refusal standing with the reason named"
+      proof: "unit test: test/an-operator-who-enqueues-a-risk-held-head-by-hand-releases-it-for-the-sweep.test.ts"
+  falsifier: |
+    Keep the refusal clearing only on a capped_override_granted row: the operator-enqueued head stays
+    refused and the test fails.
