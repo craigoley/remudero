@@ -68,7 +68,7 @@ test("W1-T4400: ci-gate evaluates on completion events without a wait loop", () 
   assert.deepEqual([...job.needs!].sort(), others);
   // always() is load-bearing for failed needs; !cancelled() is load-bearing for releasing a
   // superseded run's concurrency slot after ordinary cancellation.
-  assert.equal(job.if, "${{ always() && !cancelled() && github.event_name == 'pull_request' }}");
+  assert.equal(job.if, "${{ always() && !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}");
   assert.match(job.steps!.map((s) => s.run ?? "").join("\n"), /node scripts\/ci-gate-from-contract\.mjs/);
 
   // The real runner evaluates the real contract ONCE when everything has finished: one read, pass.
@@ -119,7 +119,7 @@ test("superseded ci gate stops on cancellation without holding a new head", () =
   assert.equal(ci.concurrency?.group, "ci-${{ github.event.pull_request.number || github.ref }}");
   assert.equal(ci.concurrency?.["cancel-in-progress"], "${{ github.event_name == 'pull_request' }}");
   assert.equal(ci.jobs["ci-gate"]!.if,
-    "${{ always() && !cancelled() && github.event_name == 'pull_request' }}");
+    "${{ always() && !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}");
 });
 
 test("current head ci gate remains fail closed after cancellation repair", () => {
