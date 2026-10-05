@@ -178,10 +178,16 @@ test("a board-review proposal whose referent is STILL LIVE classifies identicall
 
   const trackedClassification = classifyProposal(tracked, draft, liveCtx);
   const legacyClassification = classifyProposal(legacy, draft, liveCtx);
+  const { proposal: trackedSource, ...trackedResult } = trackedClassification;
+  const { proposal: legacySource, ...legacyResult } = legacyClassification;
+
+  // W1-T5541 carries the original proposal into ratification; its explicit provenance differs.
+  assert.strictEqual(trackedSource, tracked, "ratification retains the explicit source proposal");
+  assert.strictEqual(legacySource, legacy, "ratification retains the legacy source proposal");
 
   assert.deepEqual(
-    trackedClassification,
-    legacyClassification,
+    trackedResult,
+    legacyResult,
     "an explicit originatingItemId and W1-T2460's id-derived fallback must resolve a live referent identically",
   );
   assert.equal(trackedClassification.state, "ready");

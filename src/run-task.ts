@@ -1,5 +1,5 @@
 import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.js";
-import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, type ReadGeneration } from "./lib/read-plane.js";
+import { startReadPlane, startReadPlaneTelemetry, onePassPerGeneration, freshReadGeneration, type ReadGeneration } from "./lib/read-plane.js";
 import { readPlaneWorkerInput, runReadPlaneWorker, readPlaneWorkerLog } from "./lib/read-plane.worker.js";
 import { renameSync } from "node:fs";
 import { remeasureSettledGoals, withGoalRemeasurement } from "./lib/goals.js";
@@ -985,6 +985,13 @@ import {
   type LedgerGrepFsDeps,
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
+import {
+  PROGRESS_WATCHDOG_READ_STEPS,
+  captureDiagnosticsBundle,
+  decideProgressWatchdog,
+  openPrCountFromRows,
+  renderProgressWatchdogVerdict,
+} from "./lib/progress-watchdog.js";
 import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-canary.js";
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
@@ -1607,6 +1614,9 @@ import {
   creditSubjectIsImplementation,
   planOnlyRunBranchReceipts,
   REGENERABLE_ARTIFACT_GENERATORS,
+  ADDITIVE_REGISTRATION_SURFACES,
+  isAdditiveRegistrationChange,
+  type RegistrationChange,
   repairLadderCommand,
   trackRepairLadder,
   isPostReviewDiffCeilingRefusal,
@@ -5528,7 +5538,8 @@ function untouchedPlanCriterion(roundDiff: string, priorDiff: string, path: stri
 export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
   const { pr, deps, worktreePath } = input;
   const git = deps.runGit ?? ((args: string[]) => execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8" }));
-  const preflight = deps.preflight ?? planPrPreflightAtCommitAsync;
+  const preflightImpl = deps.preflight ?? planPrPreflightAtCommitAsync;
+  const preflight = (tree: string, sha: string, meta: { title: string; body: string }) => preflightImpl(tree, sha, { ...meta, headRef: pr.headRefName });
   const files = input.task.files.filter((path) => isInPlanScope(path) && !path.split("/").includes(".."));
   let roundId: string | undefined;
   const roundFields = () => ({ task_id: input.task.id, pr_number: pr.prNumber, head_sha: pr.headSha,
@@ -6080,6 +6091,7 @@ export function fixRungScopeStandDownReason(
   declaredFiles: readonly string[] | undefined,
   reachableRemedyFiles: readonly ReachableRemedyFileInput[] = [],
   failingChecks: readonly Pick<CiFailure, "name" | "logTail">[] = [],
+  registrationChanges: readonly RegistrationChange[] = [],
 ):
   | {
       reason: string;
@@ -6090,7 +6102,8 @@ export function fixRungScopeStandDownReason(
   | undefined {
   if (!declaredFiles || declaredFiles.length === 0) return undefined;
   const planOnlyTask = declaredFiles.every(isInPlanScope);
-  const reachableRemedyPaths = reachableRemedyFiles.map(remedyFilePath);
+  const reachableRemedyPaths = reachableRemedyFiles.map(remedyFilePath)
+    .filter((path) => !ADDITIVE_REGISTRATION_SURFACES.some((row) => row.path === path));
   // W1-T2653: widen the comparison set for THIS call only — never plan-only (see doc above).
   const effectiveDeclaredFiles = planOnlyTask
     ? declaredFiles
@@ -6098,7 +6111,7 @@ export function fixRungScopeStandDownReason(
     ? [...declaredFiles, ...reachableRemedyPaths]
     : declaredFiles;
   const alreadyOutOfScope = new Set(outOfDeclaredScopeFiles(baselineDiffFiles, effectiveDeclaredFiles));
-  const newOutOfScopePaths = outOfDeclaredScopeFiles(currentDiffFiles, effectiveDeclaredFiles).filter(
+  const newOutOfScopePaths = outOfDeclaredScopeFiles(currentDiffFiles, effectiveDeclaredFiles, registrationChanges).filter(
     (f) => !alreadyOutOfScope.has(f),
   );
   if (newOutOfScopePaths.length === 0) return undefined;
@@ -9275,6 +9288,8 @@ export async function prerequisitePrAdmissionRefusal(
     return `prerequisite ${prUrl} opened on head ${head.headRefName}, not the minted ${mintedBranch}`;
   }
   const body = read.fetchPrBody ? await read.fetchPrBody(prUrl).catch((error: unknown) => ({ unreadable: String(error) })) : undefined;
+  const trailer = typeof body === "string" ? extractTaskTrailerId(body) : undefined;
+  if (trailer !== undefined) return `prerequisite ${prUrl} body carries "Remudero-Task: ${trailer}" — a prerequisite credits no task`;
   const check = typeof body === "string" ? acceptanceAuthorTimeCheck(body) : undefined;
   return check && !check.ok ? `prerequisite ${prUrl} body refused (${check.defect}): ${check.message}` : undefined;
 }
@@ -11199,6 +11214,7 @@ export async function runFixRung(opts: {
               admitFixTests && opts.task.files ? [...opts.task.files, "test/"] : opts.task.files,
               reachableRemedyFiles,
               currentCiFailures ?? [],
+              readRegistrationChanges(opts.worktreePath, currentDiffFiles, "origin/main", undefined, currentPinnedSha),
             )
           : undefined;
       if (scopeStandDown) {
@@ -18395,7 +18411,8 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         );
         diffFiles = undefined;
       }
-      const outOfScope = diffFiles === undefined ? [] : scopeGuardOutOfScopeFiles(diffFiles, task.files);
+      const outOfScope = diffFiles === undefined ? [] : scopeGuardOutOfScopeFiles(diffFiles, task.files,
+        readRegistrationChanges(worktreePath, diffFiles, "origin/main"));
       if (outOfScope.length > 0) {
         // THE REASON IS THIS DECISION'S OWN (the #981 rule — a ledger line carries the reason from
         // the decision that produced its outcome, never from a neighbouring gate).
@@ -20977,6 +20994,15 @@ async function reviewCommand(prArg: string, rest: string[] = [], deps: ReviewCom
       });
     } else if (restored.replayed) {
       replayStatusAction = "confirmed";
+      // W1-T5726: nothing posted, but this input WAS judged; no row leaves the attempt count 0 and the sweep re-reviews (#9138).
+      log("review.posted", {
+        context: REVIEW_CONTEXT, state: verdict.state, head_sha: view.headRefOid, pr_url: view.url,
+        review_input_digest: inputDigest, review_engine_revision: REVIEW_ENGINE_REVISION,
+        review_decision_digest: verdict.reviewDecisionDigest, decision_verdict: verdict,
+        evaluator_provenance: verdict.evaluatorProvenance,
+        reviewer_outcome: verdict.reviewerOutcome, proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
+        status_confirmed: true,
+      });
     } else {
       verdict.verdictWithheld = restored.reason ?? "could not restore the live remudero-review status";
     }
@@ -35968,7 +35994,7 @@ export async function daemonCommand(
   const projectionGithub = githubFactory(target.owner, target.repo);
   const boardOpenPrCount = createOpenPrCountObservation();
   const refreshMerged: (planOverride?: Plan) => MergedSet = (planOverride = activePlanRef.current) => {
-    if (tickReadGeneration) {
+    if (freshReadGeneration(tickReadGeneration, { consumer: "refresh_merged", log })) {
       const projection = lastProj;
       return (id) => projection?.get(id)?.merged ?? false;
     }
@@ -36426,7 +36452,7 @@ export async function daemonCommand(
   const boardReviewHooks = target.isSelf
     ? boardReviewHooksForTick(config, { projection: () => lastProj, plan: () => activePlanRef.current })
     : undefined;
-  boardReviewHooks?.bindCheckItems(() => tickReadGeneration?.facts.boardItems);
+  boardReviewHooks?.bindCheckItems(() => freshReadGeneration(tickReadGeneration, { consumer: "board_items", log })?.facts.boardItems);
   // W1-T2659: the wipe-test cadence rung. SELF-TARGET ONLY, same reason as measurement-cadence:
   // its marker and ledger live under this harness checkout. The pair itself still targets the
   // sandbox by default through runWipeTestPair/resolveWipeTestTarget.
@@ -36832,7 +36858,7 @@ export async function daemonCommand(
           ghEscalationAnswerGateway(target.owner, target.repo),
           gitCredentialSocket?.socketPath,
           onePassPerGeneration(() => tickReadGeneration, readPlane?.read,
-            () => ({ plan: activePlanRef.current, previousProjection: lastProj ? [...lastProj] : undefined })),
+            () => ({ plan: activePlanRef.current, previousProjection: lastProj ? [...lastProj] : undefined }), { log }),
         ),
         // W1-T254 (the #707 fix): the restricted light-sweep ticker — ticks ONLY
         // the deterministic post-review re-post while `runOne` is unbounded and in
@@ -41523,9 +41549,34 @@ export interface WorkerEditCommit {
   /** W1-T5386: new tests admitted by the task's own title proofs. */
   readonly proofMatchedTests?: readonly string[];
   readonly admittedTests?: readonly string[];
+  readonly admittedRegistrations?: readonly string[];
   /** Why nothing was committed, when `committed` is false. */
   readonly reason?: string;
   readonly headMoved?: { prior_head_sha: string; observed_head_sha: string; other_worktrees: string[] };
+}
+
+/** Read worker edits against HEAD, or committed registrations against their merge base. */
+export function readRegistrationChanges(
+  repoDir: string,
+  paths: readonly string[],
+  baseRef?: string,
+  git?: PublishAbandonedFixOwnerAheadDeps["runGit"],
+  headRef = "HEAD",
+): RegistrationChange[] {
+  const runGit = git ?? ((args: string[]) => execFileSync("git", ["-C", repoDir, ...args],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  return paths.filter((path) => ADDITIVE_REGISTRATION_SURFACES.some((row) => row.path === path)).map((path) => {
+    try {
+      const base = baseRef === undefined ? headRef : runGit(["merge-base", baseRef, headRef]).trim();
+      const before = runGit(["show", `${base}:${path}`]);
+      const after = baseRef === undefined
+        ? lstatSync(join(repoDir, path)).isFile() ? readFileSync(join(repoDir, path), "utf8") : undefined
+        : runGit(["show", `${headRef}:${path}`]);
+      return { path, before, after };
+    } catch (error) {
+      return { path, error: `registration evidence unreadable: ${String(error)}` };
+    }
+  });
 }
 
 /**
@@ -41537,7 +41588,7 @@ export interface WorkerEditCommit {
  * being a per-provider exception.
  *
  * STAGES BY EXPLICIT DECLARED PATH, NEVER `git add -A` BARE. `declaredPaths` is the task's own
- * `files:` surface, plus regenerable artifacts and new tests named by its own title proofs.
+ * `files:` surface, plus regenerable artifacts, bounded registrations, and new tests named by its own title proofs.
  * Anything else the worker changed is REPORTED in `undeclared` and left
  * uncommitted -- so a worker cannot widen its own blast radius by writing somewhere it never
  * declared, and the caller can escalate loudly instead of discovering it in a diff later. This
@@ -41617,11 +41668,15 @@ export function commitWorkerEdits(
     declaresProofTitle(readFileSync(join(repoDir, path), "utf8"), titles),
   );
   const admittedTests = options.admitTests ? changed.filter((path) => path.startsWith("test/") && !path.split("/").includes("..")) : [];
+  const registrationChanges = declaredPaths.every(isInPlanScope) ? [] :
+    readRegistrationChanges(repoDir, changed.filter((path) => !pathIsUnderDeclaredSurface(path, declaredPaths)), undefined, runGit, options.priorHeadSha);
+  const admittedRegistrations = registrationChanges.filter(isAdditiveRegistrationChange).map((change) => change.path);
   const declared = changed.filter((path) => pathIsUnderDeclaredSurface(path, declaredPaths) ||
-    regenerable.includes(path) || proofMatchedTests.includes(path) || admittedTests.includes(path));
+    regenerable.includes(path) || proofMatchedTests.includes(path) || admittedTests.includes(path) || admittedRegistrations.includes(path));
   const undeclared = changed.filter((path) => !declared.includes(path));
   if (declared.length === 0) {
-    return { committed: false, undeclared, reason: "every change the worker made is outside its declared files" };
+    return { committed: false, undeclared, reason: "every change the worker made is outside its declared files" +
+      registrationChanges.filter((change) => change.error).map((change) => `; ${change.path}: ${change.error}`).join("") };
   }
 
   let sha: string;
@@ -41652,6 +41707,7 @@ export function commitWorkerEdits(
     ...(regenerable.length > 0 ? { regenerable } : {}),
     ...(proofMatchedTests.length > 0 ? { proofMatchedTests } : {}),
     ...(admittedTests.length > 0 ? { admittedTests } : {}),
+    ...(admittedRegistrations.length > 0 ? { admittedRegistrations } : {}),
   };
 }
 
@@ -41930,6 +41986,7 @@ export function harnessCommitForShellLessWorker(
     subject_source: subjectSource,
     ...(input.fixOutcome ? { fix_outcome: input.fixOutcome } : {}),
     ...(committed.admittedTests?.length ? { admitted_tests: committed.admittedTests } : {}),
+    ...(committed.admittedRegistrations?.length ? { admitted_registrations: committed.admittedRegistrations } : {}),
     ...(committed.regenerable && committed.regenerable.length > 0 ? { regenerable: committed.regenerable } : {}),
     ...(committed.proofMatchedTests?.length ? { proofMatchedTests: committed.proofMatchedTests } : {}),
     ...(!committed.committed ? { reason: refusalReason } : {}),
@@ -50823,6 +50880,36 @@ export async function loadHeavyVerb(name: HeavyVerbName): Promise<void> {
   }
 }
 
+// W1-T5687: `rmd progress-watchdog` — read-only; names a stalled sweep by progress rows, never `daemon.*`.
+// Recycling on the verdict is W1-T5688.
+export function progressWatchdogCommand(
+  rest: string[],
+  run: (file: string, args: string[]) => string = (file, args) => execFileSync(file, args, { encoding: "utf8", timeout: 30_000 }),
+): number {
+  const badArg = unknownArgError("progress-watchdog", rest, ["--state-root"], ["--json"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const stateDir = flagValue(rest, "--state-root") ?? join(loadConfig().root, "state");
+  const nowMs = systemClock.now();
+  const read = readLedgerUnionRecordsSync(stateDir, {
+    since: new Date(nowMs - 24 * 3_600_000).toISOString(),
+    step: PROGRESS_WATCHDOG_READ_STEPS,
+  });
+  const verdict = decideProgressWatchdog({ rows: read.rows, nowMs, openPrCount: openPrCountFromRows(read.rows) });
+  const bundle = verdict.action === "capture-diagnostics"
+    ? captureDiagnosticsBundle(stateDir, nowMs, verdict, read.rows, { run })
+    : undefined;
+  if (rest.includes("--json")) console.log(JSON.stringify({ stateDir, rowsRead: read.rows.length, ...verdict, bundle }));
+  else {
+    console.log(renderProgressWatchdogVerdict(verdict));
+    if (bundle?.written) console.log(`diagnostics bundle: ${bundle.dir}`);
+    else if (bundle) console.log(`diagnostics bundle skipped: ${bundle.skippedReason}`);
+  }
+  return 0;
+}
+
 const COMMANDS: readonly CommandSpec[] = [
   {
     name: "run-task",
@@ -50946,6 +51033,12 @@ const COMMANDS: readonly CommandSpec[] = [
     syntax: "rmd ledger-grep <pattern>",
     summary: "Grep the deduplicated union of every ledger archive and the live ledger file.",
     detail: "the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing",
+  },
+  {
+    name: "progress-watchdog",
+    syntax: "rmd progress-watchdog [--json] [--state-root <dir>]",
+    summary: "Name a stalled sweep by its progress (sweep.pass, review, merge), not its daemon pulse.",
+    detail: "W1-T5687: reads the deduplicated union of every ledger archive and the live ledger and prints one verdict: PROGRESSING, IDLE (no open PRs), STALLED (newest progress row over 15 min old: capture-diagnostics; over 30 min: recycle), CRASH_LOOP (3 or more daemon.paths boots in 15 min that never reached daemon.boot: hold-revive) or UNKNOWN (no rows or no open-PR count; never a silent none). Progress is ONLY a sweep.pass, review.posted or verdict.merged row: daemon.* and runtime.* rows are a pulse, not progress, which is why the 318-minute crash loop of 2026-10-03 read live to every daemon-prefix reader. The open-PR count is the newest sweep.pass row's enumerated field. On capture-diagnostics it writes one bundle (ledger tail, docker ps, the tenant's docker logs --tail, the verdict) under <state>/diagnostics/progress-<ts>/, at most one per 15 min. READ-ONLY: it recycles nothing; the host launcher acting on recycle / hold-revive is W1-T5688.",
   },
   {
     name: "routing-ab",
@@ -51977,6 +52070,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["reap-branches", (rest) => reapBranchesCommand(rest)],
   ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
   ["routing-ab", async (rest) => await routingAbCommand(rest)],
+  ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["impossible-canary", async (rest) => await impossibleCanaryCommand(rest, (input) => runImpossibleCanary(input))],
   ["benchmark-aa", async (rest) => rest[0] === "prospective" ? await prospectiveAaCommand(rest.slice(1), (input) => runProspectiveAa(input))
     : rest[0] === "readiness" ? await benchmarkAaReadinessCommand(rest.slice(1),

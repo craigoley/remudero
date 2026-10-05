@@ -1,0 +1,36 @@
+- id: W1-T5846
+  title: "A STALE-GENERATION REFILL READS OFF THE EVENT LOOP — W1-T5762 refuses a read generation older than its backstop and `refreshMerged` then falls back to the synchronous projection, so in a dispatch phase longer than the bound every lane refill blocks the loop on a live read"
+  repo: remudero
+  depends_on: [W1-T5762]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — the lane refill's merged-set read never blocks the loop
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5762 (#9295) builder's follow-up"
+  plan_refs: [W1-T5762, W1-T4075, W1-T5805]
+  files: [src/lib/daemon.ts, test/a-stale-generation-refill-reads-off-the-event-loop.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 83ac0329 and #9295's head 3d0f9cd2 (W1-T5762, open).
+    W1-T5762 adds `freshReadGeneration` with `TICK_READ_MAX_AGE_MS` (5 min, a BACKSTOP); its
+    `refreshMerged` gates on it and, on a refused generation, falls back to its live read, the
+    synchronous projection, which is how every refill read before W1-T4075. src/lib/daemon.ts
+    already has an async port (`refreshMergedAsync`, used at two batch sites), but the lane
+    refill's snapshot still calls `deps.refreshMerged(plan)`. So during a dispatch phase longer
+    than the bound, every lane refill runs a synchronous read on the event loop and logs one
+    stale row; its builder measured the first cold read at about 20 s. Loop stalls are what the
+    off-thread read plane exists to prevent (daemon.loop_lag reached 19 s on 2026-10-05).
+  design: |
+    The lane refill reads its merged set through `refreshMergedAsync` when it is wired (the
+    sync path stays only for a deps object that supplies none), awaiting it where the refill
+    already awaits its branch read (W1-T5805). No other refill semantics change.
+  acceptance:
+    - claim: "a lane refill with an async merged-set port wired reads through it and never calls the sync refreshMerged, a deps object without the port still refills through the sync one, and the refill admits the same tasks either way"
+      proof: "unit test: test/a-stale-generation-refill-reads-off-the-event-loop.test.ts"
+  falsifier: |
+    Keep `deps.refreshMerged(plan)` in the refill snapshot: the sync spy is called with the async
+    port wired and the test fails.

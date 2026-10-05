@@ -190,7 +190,8 @@
 
 - id: strikes-exhausted-counts-rows
   subsystem: ci
-  lifecycle: active
+  # knowledge gardener: retire strikes-exhausted-counts-rows
+  lifecycle: superseded
   files: [src/lib/sweep.ts, src/run-task.ts]
   fact: >-
     Historical "fix strikes exhausted (2/2)" rows can overstate real strikes. Before W1-T5542,

@@ -5,7 +5,7 @@ import {
   type Escalation,
   type OpenIssue,
 } from "./escalate.js";
-import { rollupForAsync, type GhApiFetcher } from "./open-prs-rest.js";
+import { prFilesRestArgs, rollupForAsync, type GhApiFetcher } from "./open-prs-rest.js";
 import { appendLedger } from "./ledger.js";
 import { readLedgerLines } from "./status.js";
 import {
@@ -118,6 +118,122 @@ export interface MainHealthRungDeps {
   readMainRunHistory?: (branch: string) => MainHealthRunHistoryEntry[] | undefined | Promise<MainHealthRunHistoryEntry[] | undefined>;
   requeueCheck?: (failure: CiFailure) => boolean | void | Promise<boolean | void>;
   readRequiredChecks?: () => readonly string[];
+  /** W1-T5806: the git reads that name the merges a red met in; defaults to GitHub's over `fetch`. */
+  mergeReader?: MainHealthMergeReader;
+  /** W1-T5806: one PR's changed paths; defaults to its `pulls/N/files` list over `fetch`. */
+  readPrFiles?: (prNumber: number) => readonly string[] | undefined | Promise<readonly string[] | undefined>;
+}
+
+type Awaitable<T> = T | Promise<T>;
+
+/** W1-T5806 — the git questions {@link findMetPrs} asks. Every answer is awaited. */
+export interface MainHealthMergeReader {
+  /** The PR whose merge produced `sha`, that PR's last head and the merge's first parent; undefined
+   *  when `sha` is no PR merge. */
+  prMerge(sha: string): Awaitable<{ number: number; headSha: string; parentSha: string } | undefined>;
+  mergeBase(a: string, b: string): Awaitable<string>;
+  /** The PRs merged on main after `base`, up to and including `tip`. */
+  prsMergedBetween(base: string, tip: string): Awaitable<readonly number[]>;
+}
+
+/** W1-T5806 — a red PR merge (A) and the PRs merged after the base A's CI ran on that share a path. */
+export interface MetPrs {
+  mergeSha: string;
+  ciBaseSha: string;
+  redPr: number;
+  metPrs: number[];
+  sharedPaths: string[];
+}
+
+type MetPrLookup = { met?: MetPrs; unreadable?: string };
+
+/** BACKSTOP: PR file lists one red head may read. The window between a PR's CI base and its merge
+ *  is normally a handful of merges; past this the lookup gives up and today's escalation stands. */
+export const MAIN_HEALTH_MET_PR_LIMIT = 20;
+
+function squashPrNumber(message: unknown): number | undefined {
+  const subject = String(message ?? "").split("\n")[0] ?? "";
+  const n = /\(#(\d+)\)\s*$/.exec(subject)?.[1];
+  return n === undefined ? undefined : Number(n);
+}
+
+interface RestCommit {
+  commit?: { message?: unknown };
+  parents?: ReadonlyArray<{ sha?: unknown }>;
+}
+
+/** The production {@link MainHealthMergeReader}: GitHub's commit, PR and compare reads over the same
+ *  awaited `fetch` the rung already uses. Main squash-merges, so a `(#N)` subject names the PR. */
+function restMergeReader(owner: string, repo: string, fetch: GhApiFetcher): MainHealthMergeReader {
+  const base = `repos/${owner}/${repo}`;
+  return {
+    prMerge: async (sha) => {
+      const commit = (await fetch(["api", `${base}/commits/${sha}`])) as RestCommit;
+      const number = squashPrNumber(commit?.commit?.message);
+      if (number === undefined) return undefined;
+      const pr = (await fetch(["api", `${base}/pulls/${number}`])) as { head?: { sha?: unknown } };
+      return {
+        number,
+        headSha: requiredString(pr?.head?.sha, `PR #${number} head sha`),
+        parentSha: requiredString(commit?.parents?.[0]?.sha, "merge parent sha"),
+      };
+    },
+    mergeBase: async (a, b) => {
+      const compare = (await fetch(["api", `${base}/compare/${b}...${a}?per_page=1`])) as { merge_base_commit?: { sha?: unknown } };
+      return requiredString(compare?.merge_base_commit?.sha, "merge base sha");
+    },
+    prsMergedBetween: async (from, tip) => {
+      const compare = (await fetch(["api", `${base}/compare/${from}...${tip}?per_page=100`])) as {
+        total_commits?: unknown;
+        commits?: ReadonlyArray<RestCommit>;
+      };
+      const commits = compare?.commits ?? [];
+      if (typeof compare?.total_commits === "number" && compare.total_commits > commits.length) {
+        throw new Error(`compare ${from}...${tip} read ${commits.length} of ${compare.total_commits} commits`);
+      }
+      return commits.map((c) => squashPrNumber(c.commit?.message)).filter((n): n is number => n !== undefined);
+    },
+  };
+}
+
+/** W1-T5806 — when `sha` is PR A's merge, the PRs merged on main between A's CI base (A's head's
+ *  merge-base with main) and A's merge whose changed paths intersect A's. Throws on any failed read. */
+async function findMetPrs(
+  sha: string,
+  reader: MainHealthMergeReader,
+  readPrFiles: NonNullable<MainHealthRungDeps["readPrFiles"]>,
+): Promise<MetPrs | undefined> {
+  const merge = await reader.prMerge(sha);
+  if (!merge) return undefined;
+  const ciBaseSha = await reader.mergeBase(merge.headSha, merge.parentSha);
+  const between = [...new Set(await reader.prsMergedBetween(ciBaseSha, merge.parentSha))].filter((n) => n !== merge.number);
+  if (between.length === 0) return undefined;
+  if (between.length > MAIN_HEALTH_MET_PR_LIMIT) {
+    throw new Error(`${between.length} merges since PR #${merge.number}'s CI base, more than ${MAIN_HEALTH_MET_PR_LIMIT}`);
+  }
+  const filesOf = async (n: number): Promise<readonly string[]> => {
+    const files = await readPrFiles(n);
+    if (!files || files.length === 0) throw new Error(`PR #${n} has no readable file list`);
+    return files;
+  };
+  const own = new Set(await filesOf(merge.number));
+  const metPrs: number[] = [];
+  const shared = new Set<string>();
+  for (const n of between) {
+    const overlap = (await filesOf(n)).filter((path) => own.has(path));
+    if (overlap.length === 0) continue;
+    metPrs.push(n);
+    for (const path of overlap) shared.add(path);
+  }
+  if (metPrs.length === 0) return undefined;
+  return { mergeSha: sha, ciBaseSha, redPr: merge.number, metPrs: metPrs.sort((a, b) => a - b), sharedPaths: [...shared].sort() };
+}
+
+function metPrFields(lookup: MetPrLookup | undefined): Record<string, unknown> {
+  if (lookup?.met) {
+    return { red_pr: lookup.met.redPr, met_prs: lookup.met.metPrs, shared_paths: lookup.met.sharedPaths };
+  }
+  return lookup?.unreadable ? { met_prs_unreadable: lookup.unreadable } : {};
 }
 
 function judgedRollup(rollup: readonly RollupCheckEntry[], required: ReadonlySet<string>): RollupCheckEntry[] {
@@ -216,18 +332,25 @@ function rollupFromJobs(response: WorkflowJobsResponse | undefined): RollupCheck
   }));
 }
 
-export function escalationFor(observation: MainHealthObservation, branch: string): Escalation {
+/** W1-T5806: a met escalation names PRs as `PR #N`, never a `/pull/` URL — the escalation reconciler
+ *  reads a URL as the issue's referent and would retire it as soon as it saw that PR merged. */
+export function escalationFor(observation: MainHealthObservation, branch: string, met?: MetPrs): Escalation {
   const decision = mainHealthEscalationDecision(observation);
   if (!decision.escalate || !decision.class) {
     throw new Error(`refusing to build a main-health escalation for ${observation.state}`);
   }
+  const metNames = met?.metPrs.map((n) => `PR #${n}`).join(", ");
   return {
     class: decision.class,
     taskId: MAIN_HEALTH_TASK_ID,
     runId: undefined,
-    headSha: observation.sha,
-    summary: "main's own check suite is red",
+    headSha: met ? met.mergeSha : observation.sha,
+    summary: met ? `main is red where PR #${met.redPr} met ${metNames}` : "main's own check suite is red",
     detail:
+      (met
+        ? `PR #${met.redPr} merged as \`${met.mergeSha}\`; its CI ran on \`${met.ciBaseSha}\`, before ${metNames} ` +
+          `merged, and they share ${met.sharedPaths.map((path) => `\`${path}\``).join(", ")}. Each passed CI alone. `
+        : "") +
       `The default branch \`${branch}\` at \`${observation.sha}\` is red. ${observation.reason}. ` +
       "This observer never auto-reverts or pauses unrelated dispatch; an explicit operator ruling " +
       "is required to hold the queue. The automatic PR repair and update paths remain active.",
@@ -269,6 +392,14 @@ export function buildMainHealthRung(
   let lastSuccessfulObservationAtMs: number | undefined;
   let inFlight: Promise<void> | undefined;
   let runHistoryCache: RunHistoryCache | undefined;
+  let metPrCache: { sha: string; lookup: MetPrLookup } | undefined;
+  const mergeReader = deps.mergeReader ?? restMergeReader(owner, repo, deps.fetch);
+  const readPrFiles =
+    deps.readPrFiles ??
+    (async (n: number) => {
+      const rows = (await deps.fetch(prFilesRestArgs(owner, repo, n))) as ReadonlyArray<{ filename?: unknown }> | undefined;
+      return (Array.isArray(rows) ? rows : []).map((row) => row.filename).filter((f): f is string => typeof f === "string");
+    });
   const freshMs = Math.max(0, deps.freshMs ?? 0);
   const now = deps.now ?? Date.now;
 
@@ -392,6 +523,18 @@ export function buildMainHealthRung(
           ...observation.failingChecks,
         ]),
       ];
+      // W1-T5806: read once per red head; a failed read is named here and changes no escalation.
+      if (observation.state === "red" && metPrCache?.sha !== decidedBySha) {
+        let lookup: MetPrLookup;
+        try {
+          const met = await findMetPrs(decidedBySha, mergeReader, readPrFiles);
+          lookup = met ? { met } : {};
+        } catch (error) {
+          lookup = { unreadable: String((error as Error)?.message ?? error) };
+        }
+        metPrCache = { sha: decidedBySha, lookup };
+      }
+      const metLookup = observation.state === "red" ? metPrCache?.lookup : undefined;
       deps.log("main.health.observed", {
         branch,
         sha,
@@ -405,6 +548,7 @@ export function buildMainHealthRung(
         judged_against: required.size > 0 ? "ci-gate-required" : "all-checks",
         run_history_source: cacheHit ? "cache" : "fetched",
         ...(advisoryFailing.length > 0 ? { advisory_failing_checks: [...advisoryFailing].sort() } : {}),
+        ...metPrFields(metLookup),
       });
 
       if (observation.state === "red") {
@@ -514,7 +658,7 @@ export function buildMainHealthRung(
             }
           }
         }
-        const issueUrl = await tryEscalateAsync(escalationFor(observation, branch), {
+        const issueUrl = await tryEscalateAsync(escalationFor(observation, branch, metLookup?.met), {
           issues: deps.issues,
           ledgerPath: deps.ledgerPath,
           runId: deps.runId,
@@ -526,6 +670,7 @@ export function buildMainHealthRung(
             sha,
             failing_checks: observation.failingChecks,
             issue_url: issueUrl,
+            ...(metLookup?.met ? metPrFields(metLookup) : {}),
           });
         }
         lastSuccessfulObservationAtMs = startedAtMs;

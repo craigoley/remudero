@@ -500,6 +500,7 @@ const CHECK_PROOF_STALE_EXIT = 5;
 
 const LINT_PLAN_ARGV = [LINT_PLAN_SCRIPT];
 const TASK_ID_ARGV = [TASK_ID_SCRIPT, "--base", "origin/main", "--require-open-prs"];
+const taskIdArgv = (headRef?: string): string[] => (headRef ? [...TASK_ID_ARGV, "--head-ref", headRef] : TASK_ID_ARGV);
 const SHARD_CENSUS_ARGV = ["--import", "tsx", "--test", "--test-reporter=tap", SHARD_CENSUS_TEST];
 const checkProofArgv = (proof: string): string[] => ["--import", "tsx", RUN_TASK_ENTRY, "check-proof", proof, "--base", "origin/main"];
 
@@ -541,7 +542,7 @@ async function runInTreeAsync(cwd: string, relPath: string, argv: string[]): Pro
 /** The four checks that shell out inside `cwd` (`checkProof` answers check-proof's exit), sync and awaited. */
 const defaultPreflightChecks = {
   lintPlan: (cwd: string): PlanPrPreflightReading => runInTree(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV),
-  taskIdExistence: (cwd: string): PlanPrPreflightReading => taskIdReading(runInTree(cwd, TASK_ID_SCRIPT, TASK_ID_ARGV)),
+  taskIdExistence: (cwd: string, headRef?: string): PlanPrPreflightReading => taskIdReading(runInTree(cwd, TASK_ID_SCRIPT, taskIdArgv(headRef))),
   shardCensus: (cwd: string): PlanPrPreflightReading => shardCensusReading(runInTree(cwd, SHARD_CENSUS_TEST, SHARD_CENSUS_ARGV)),
   checkProof: (cwd: string, proof: string): number | null => runInTree(cwd, RUN_TASK_ENTRY, checkProofArgv(proof)).status,
 };
@@ -549,7 +550,8 @@ const defaultPreflightChecks = {
 export type PlanPrPreflightChecks = Partial<typeof defaultPreflightChecks>;
 const defaultPreflightChecksAsync = {
   lintPlan: (cwd: string): Promise<PlanPrPreflightReading> => runInTreeAsync(cwd, LINT_PLAN_SCRIPT, LINT_PLAN_ARGV),
-  taskIdExistence: async (cwd: string): Promise<PlanPrPreflightReading> => taskIdReading(await runInTreeAsync(cwd, TASK_ID_SCRIPT, TASK_ID_ARGV)),
+  taskIdExistence: async (cwd: string, headRef?: string): Promise<PlanPrPreflightReading> =>
+    taskIdReading(await runInTreeAsync(cwd, TASK_ID_SCRIPT, taskIdArgv(headRef))),
   shardCensus: async (cwd: string): Promise<PlanPrPreflightReading> => shardCensusReading(await runInTreeAsync(cwd, SHARD_CENSUS_TEST, SHARD_CENSUS_ARGV)),
   checkProof: async (cwd: string, proof: string): Promise<number | null> => (await runInTreeAsync(cwd, RUN_TASK_ENTRY, checkProofArgv(proof))).status,
 };
@@ -674,7 +676,7 @@ function prTitleReading(title: string): PlanPrPreflightReading {
  * task-id-existence `--require-open-prs`, proof discrimination of the PR body and of each changed shard through
  * `rmd check-proof --base origin/main`, the PR-title lint, and the `every-shard-on-main-is-lintable` census.
  */
-export function planPrPreflight(input: { cwd: string; title: string; body: string }, checks: PlanPrPreflightChecks = {}): PlanPrPreflightResult {
+export function planPrPreflight(input: { cwd: string; title: string; body: string; headRef?: string }, checks: PlanPrPreflightChecks = {}): PlanPrPreflightResult {
   const d = { ...defaultPreflightChecks, ...checks };
   const tally = preflightTally();
   const read = (check: PlanPrPreflightCheck, run: () => PlanPrPreflightReading): void => {
@@ -687,7 +689,7 @@ export function planPrPreflight(input: { cwd: string; title: string; body: strin
     tally.record(check, reading);
   };
   read("lint-plan", () => d.lintPlan(input.cwd));
-  read("task-id-existence", () => d.taskIdExistence(input.cwd));
+  read("task-id-existence", () => d.taskIdExistence(input.cwd, input.headRef));
   read("proof-discrimination", () => proofDiscrimination(input.cwd, input.body, d.checkProof));
   read("pr-title", () => prTitleReading(input.title));
   read("shard-census", () => d.shardCensus(input.cwd));
@@ -696,7 +698,7 @@ export function planPrPreflight(input: { cwd: string; title: string; body: strin
 
 /** {@link planPrPreflight} as awaited child processes (W1-T5521): the same checks, order and verdict, off the loop. */
 export async function planPrPreflightAsync(
-  input: { cwd: string; title: string; body: string },
+  input: { cwd: string; title: string; body: string; headRef?: string },
   checks: PlanPrPreflightAsyncChecks = {},
 ): Promise<PlanPrPreflightResult> {
   const d = { ...defaultPreflightChecksAsync, ...checks };
@@ -711,7 +713,7 @@ export async function planPrPreflightAsync(
     tally.record(check, reading);
   };
   await read("lint-plan", () => d.lintPlan(input.cwd));
-  await read("task-id-existence", () => d.taskIdExistence(input.cwd));
+  await read("task-id-existence", () => d.taskIdExistence(input.cwd, input.headRef));
   await read("proof-discrimination", () => proofDiscriminationAsync(input.cwd, input.body, d.checkProof));
   await read("pr-title", () => prTitleReading(input.title));
   await read("shard-census", () => d.shardCensus(input.cwd));
@@ -728,7 +730,12 @@ function borrowNodeModules(repoDir: string, tree: string): void {
 
 /** {@link planPrPreflight} on a commit no checkout has at HEAD (feedback-landing's `commit-tree` sha): a detached
  *  worktree of it is materialized beside `repoDir`, borrows its node_modules, and is removed after. */
-export function planPrPreflightAtCommit(repoDir: string, commitSha: string, pr: { title: string; body: string }, checks: PlanPrPreflightChecks = {}): PlanPrPreflightResult {
+export function planPrPreflightAtCommit(
+  repoDir: string,
+  commitSha: string,
+  pr: { title: string; body: string; headRef?: string },
+  checks: PlanPrPreflightChecks = {},
+): PlanPrPreflightResult {
   const parent = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-pr-preflight-`));
   const tree = join(parent, "tree");
   try {
@@ -750,7 +757,7 @@ export function planPrPreflightAtCommit(repoDir: string, commitSha: string, pr: 
 export async function planPrPreflightAtCommitAsync(
   repoDir: string,
   commitSha: string,
-  pr: { title: string; body: string },
+  pr: { title: string; body: string; headRef?: string },
   checks: PlanPrPreflightAsyncChecks = {},
 ): Promise<PlanPrPreflightResult> {
   const parent = await mkdtemp(join(tmpdir(), `${RMD_TMP_PREFIX}plan-pr-preflight-`));

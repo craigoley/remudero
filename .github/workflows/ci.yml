@@ -265,6 +265,7 @@ jobs:
           : > test-only-run.txt
           if [ "$CLASS" = "SOURCE" ] && [ -s changed-files.txt ]; then
             node --import tsx scripts/diff-class.mjs --test-only-run --changed-files changed-files.txt > test-only-run.txt 2>>diff-class.log || : > test-only-run.txt
+            if [ ! -s test-only-run.txt ] && [ "$(node scripts/diff-class.mjs --coverage-class --changed-files changed-files.txt 2>>diff-class.log || echo NO_SRC)" = "NO_SRC" ]; then echo full > test-only-run.txt; fi
           fi
       - name: Test
         # W1-T255: routed through scripts/test-with-retry.mjs (`npm run test:ci`), not plain
@@ -1273,7 +1274,7 @@ jobs:
         # `isInPlanScope` from src/lib/plan-scope.ts. Two of the repo's three scope predicates
         # already disagree; a bash reimplementation here would be a fourth (W1-T2428, Q1). It fails
         # closed twice over: the script resolves an unreadable, empty or malformed input to SOURCE,
-        # and this step clamps stdout to the four known coverage tokens, so even a bare Node invocation that
+        # and this step clamps stdout to the five known coverage tokens, so even a bare Node invocation that
         # cannot start leaves CLASS=SOURCE. `plan-scope.ts` is a dependency-free leaf and Node 22.22.3
         # strips its type annotations, so this runs before npm ci. On a push, changed-files.txt is left
         # empty and the script's own empty-list rule resolves it to SOURCE.
@@ -1290,7 +1291,7 @@ jobs:
           fi
           CLASS="$(node scripts/diff-class.mjs --coverage-class --changed-files changed-files.txt 2>diff-class.log)" || CLASS="SOURCE"
           case "$CLASS" in
-            PLAN_ONLY|DOCS_ONLY|TEST_ONLY|SOURCE) ;;
+            PLAN_ONLY|DOCS_ONLY|TEST_ONLY|NO_SRC|SOURCE) ;;
             *) CLASS="SOURCE" ;;
           esac
           cat diff-class.log || true
@@ -1629,7 +1630,7 @@ jobs:
             case "$VALUE" in
               # W1-T4406: merge_group:* joins the whitelist alongside pull_request:* — the classify
               # step above now computes a real class for a merge_group run too.
-              pull_request:PLAN_ONLY|pull_request:DOCS_ONLY|pull_request:TEST_ONLY|pull_request:SOURCE|merge_group:PLAN_ONLY|merge_group:DOCS_ONLY|merge_group:TEST_ONLY|merge_group:SOURCE|push:SOURCE) ;;
+              pull_request:PLAN_ONLY|pull_request:DOCS_ONLY|pull_request:TEST_ONLY|pull_request:NO_SRC|pull_request:SOURCE|merge_group:PLAN_ONLY|merge_group:DOCS_ONLY|merge_group:TEST_ONLY|merge_group:NO_SRC|merge_group:SOURCE|push:SOURCE) ;;
               *)
                 echo "coverage-ratchet: coverage-shard-${SHARD} carried unrecognised class metadata '${VALUE}'."
                 exit 1

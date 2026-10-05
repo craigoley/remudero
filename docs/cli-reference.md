@@ -35,6 +35,7 @@ usage:
   rmd reap-branches [--prune]   # Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.
   rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...   # Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
+  rmd progress-watchdog [--json] [--state-root <dir>]   # Name a stalled sweep by its progress (sweep.pass, review, merge), not its daemon pulse.
   rmd routing-ab [--json]   # Compare the arms of each live routing experiment (Sol vs Sonnet) from the ledger union.
   rmd impossible-canary --model <id> [--model <id>]... --scaffold <revision> --grader <executable> [--state-dir <dir>] [--json]   # Run sealed impossible-task canaries per model and count cheating events with exact intervals.
   rmd benchmark-aa --trial <manifest.json> [--state-dir <dir>] [--case-files <snapshot.json>] [--out <report.json>] [--no-cohort] [--json] | prospective register --trial <manifest.json> | prospective report --trial-id <id> [--out <report.json>] [--json] | prospective pause --trial-id <id> [--note <text>] | readiness --trial-id <id> [--trial <manifest.json>] [--instance-root <name>=<state-dir>]... [--max-pairs <n>] [--out <receipt.json>] [--json]   # Report an A/A integrity trial: two labels, one pinned stack, and no winner.
@@ -326,6 +327,16 @@ rmd ledger-grep <pattern>
 ```
 
 the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing
+
+### `rmd progress-watchdog`
+
+Name a stalled sweep by its progress (sweep.pass, review, merge), not its daemon pulse.
+
+```
+rmd progress-watchdog [--json] [--state-root <dir>]
+```
+
+W1-T5687: reads the deduplicated union of every ledger archive and the live ledger and prints one verdict: PROGRESSING, IDLE (no open PRs), STALLED (newest progress row over 15 min old: capture-diagnostics; over 30 min: recycle), CRASH_LOOP (3 or more daemon.paths boots in 15 min that never reached daemon.boot: hold-revive) or UNKNOWN (no rows or no open-PR count; never a silent none). Progress is ONLY a sweep.pass, review.posted or verdict.merged row: daemon.* and runtime.* rows are a pulse, not progress, which is why the 318-minute crash loop of 2026-10-03 read live to every daemon-prefix reader. The open-PR count is the newest sweep.pass row's enumerated field. On capture-diagnostics it writes one bundle (ledger tail, docker ps, the tenant's docker logs --tail, the verdict) under <state>/diagnostics/progress-<ts>/, at most one per 15 min. READ-ONLY: it recycles nothing; the host launcher acting on recycle / hold-revive is W1-T5688.
 
 ### `rmd routing-ab`
 

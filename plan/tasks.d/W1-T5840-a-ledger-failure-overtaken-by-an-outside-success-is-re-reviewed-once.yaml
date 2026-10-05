@@ -1,0 +1,41 @@
+- id: W1-T5840
+  title: "A LEDGER FAILURE OVERTAKEN BY A NEWER OUTSIDE SUCCESS IS RE-REVIEWED ONCE — since W1-T5813 a delivered verdict ends the supersedes re-review demand, so W1-T3823's own case (the daemon's failure, then a newer manual or external success) falls to the arm path, which refuses the failure forever while the board reads green"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — the re-review demand fires once for a delivered failure a newer success contradicts
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5813 (#9290) builder's follow-up — a real re-review for W1-T3823's case still has no path"
+  plan_refs: [W1-T3823, W1-T5813, W1-T230, W1-T3704]
+  files: [src/lib/sweep.ts, test/a-ledger-failure-overtaken-by-an-outside-success-is-re-reviewed-once.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 83ac0329. `reviewStatusSupersedesLedgerAttempt`
+    (src/lib/sweep.ts) is W1-T3823's re-review demand: green checks, a GitHub review status of
+    success newer than the last exact-input ledger attempt, at least one attempt. W1-T5813
+    (#9290) added `deliveredForInput`: when the review claim already delivered a verdict for
+    this input the demand returns false, which ended #9155's post-review loop (03:17Z-04:44Z).
+    Its builder reported the cost: W1-T3823's own case IS a delivered verdict (the daemon's
+    failure), so the demand never fires for it; the PR falls through to the arm, W1-T230 refuses
+    the ledger failure, and nothing ever re-runs the authoritative reviewer while GitHub shows
+    success. Before #9290 the delivered dedup already suppressed every re-run, so the case was
+    unreachable then too: W1-T3823's recovery has never worked in production.
+  design: |
+    The demand distinguishes the delivered verdict's STATE. A delivered success for this input
+    still ends it (W1-T5813's case). A delivered FAILURE whose `review.posted` time is older than
+    a GitHub review status of success demands one re-review, keyed on (PR url, head sha, input
+    digest, that status's timestamp) so the same contradiction re-reviews at most once; a
+    second success status with a newer timestamp may demand once more. The re-review is the
+    normal authoritative review of that input. Its new verdict, success or failure, is what the
+    arm then reads.
+  acceptance:
+    - claim: "a delivered ledger failure followed by a newer GitHub success demands exactly one re-review for that input and status timestamp, a delivered success still ends the demand, and a repeat pass after the re-review was attempted demands nothing"
+      proof: "unit test: test/a-ledger-failure-overtaken-by-an-outside-success-is-re-reviewed-once.test.ts"
+  falsifier: |
+    Keep `deliveredForInput` ending the demand for every delivered state: the failure-then-success
+    fixture demands no re-review and the test fails.

@@ -170,7 +170,7 @@ test("W1-T4075: one generation serves sweep and board review and credit with one
   const refresh = buildDaemonReadRefresher({
     read: async (request) => {
       assert.deepEqual(request.previousProjection, facts.projection);
-      return freezeReadGeneration({ generation: 3, source: "worker" as const, facts: next });
+      return freezeReadGeneration({ generation: 3, source: "worker" as const, publishedAtMs: Date.now(), facts: next });
     }, plan: () => fixture.plan, previous: () => new Map(facts.projection),
     invalidate: () => { invalidated++; }, publish: () => { published++; },
     ledgerPath: fixture.options.ledgerPath, statusPath, log: () => {},
@@ -450,14 +450,15 @@ test("a full sweep retriggered in the same tick reads a fresh generation, never 
   // reused that tick's open-PR views, so merged PRs and superseded heads were disposed for an hour.
   const fixture = fixtureReader();
   const produce = createTickReadProducer(fixture.options, fixture.io);
-  const published = freezeReadGeneration({ generation: 1, source: "worker" as const,
+  const published = freezeReadGeneration({ generation: 1, source: "worker" as const, publishedAtMs: Date.now(),
     facts: await produce({ plan: fixture.plan }) });
   const previous = new Map(published.facts.projection);
   const requests: unknown[] = [];
   let generation = 1;
   const read = async (input: Parameters<typeof produce>[0]) => {
     requests.push(input.previousProjection);
-    return freezeReadGeneration({ generation: ++generation, source: "worker" as const, facts: await produce(input) });
+    return freezeReadGeneration({ generation: ++generation, source: "worker" as const, publishedAtMs: Date.now(),
+      facts: await produce(input) });
   };
   const input = () => ({ plan: fixture.plan, previousProjection: [...previous] });
   const tickRead = onePassPerGeneration(() => published, read, input);

@@ -1,0 +1,3 @@
+- id: strikes-exhausted-counts-rows
+  # knowledge gardener: retire strikes-exhausted-counts-rows
+  lifecycle: superseded

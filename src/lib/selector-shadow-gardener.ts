@@ -249,12 +249,18 @@ export function selectorShadowRecoveredFlakes(log: string): Array<{ shard: numbe
   return out.sort((a, b) => a.shard - b.shard || a.file.localeCompare(b.file));
 }
 
-/** PLAN_ONLY and DOCS_ONLY coverage jobs explicitly skip the shadow command. Require all eight
+/** W1-T5703: every class scripts/diff-class.mjs's COVERAGE_CLASSES skips coverage on (all but SOURCE). */
+export const SELECTOR_SHADOW_SKIP_CLASSES = Object.freeze(["PLAN_ONLY", "DOCS_ONLY", "TEST_ONLY", "NO_SRC"] as const);
+const EXPLICIT_SKIP_LINE = new RegExp(
+  `coverage-shard \\(([1-8])\\/8\\).*W1-T2428 fast-lane: class=(${SELECTOR_SHADOW_SKIP_CLASSES.join("|")}) — skipping Test with coverage`,
+);
+
+/** A skip-class coverage job explicitly skips the shadow command. Require all eight
  * actual skip lines before excluding a run; a missing or unreadable job is still incomplete. */
 function explicitlySkippedRun(log: string): boolean {
   const shards = new Set<number>();
   for (const line of log.split(/\r?\n/)) {
-    const match = /coverage-shard \(([1-8])\/8\).*W1-T2428 fast-lane: class=(PLAN_ONLY|DOCS_ONLY) — skipping Test with coverage/.exec(line);
+    const match = EXPLICIT_SKIP_LINE.exec(line);
     if (match) shards.add(Number(match[1]));
   }
   return shards.size === SELECTOR_SHADOW_SHARDS && parseSelectorShadowLines(log).length === 0;
