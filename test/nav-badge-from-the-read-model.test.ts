@@ -132,6 +132,9 @@ async function fixture(t: TestCtx, opts: { inbox?: boolean } = {}): Promise<Fixt
   const corpus = panelCorpus();
   writeRotations(stateDir, corpus.core.archive, corpus.core.live);
   writeRotations(consoleDir, corpus.console.archive, corpus.console.live);
+  // W1-T5896: a view with no switch is not built; shadow builds the worker's badge while serve still answers legacy.
+  mkdirSync(join(stateDir, "read-model"), { recursive: true });
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "shadow" } }));
   if (opts.inbox !== false) {
     writeFileSync(join(stateDir, "inbox-classified.json"), JSON.stringify({ generatedAt: iso(30_000), states: { "ruling:a": "ready", "ruling:b": "not_ready", "ruling:c": "declined", "adoption:x": "ready", "adoption:y": "drafting" } }));
   }

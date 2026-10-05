@@ -11,10 +11,14 @@
   origin: "oper#followups-research-2026-09-22"
   plan_refs: [W1-T2904, W1-T3302, W1-T3699, W1-T3724, W1-T3207]
   files: [.github/workflows/ci.yml, scripts/test-tier-manifest.mjs, scripts/test-duration-reporter.mjs, test/coverage-durations-self-correct.test.ts, scripts/test-tier-manifest.json]
-  priority: 4
+  priority: 1
   status: queued
   # backlog gardener: band=4 evidence=cde6f8297dd9f80a
   attempts: 0
+  note: |
+    PRIORITY 4 -> 1, 2026-10-05 (operator throughput research): coverage-shard (1/8) ran 18-21 min
+    on every sampled code PR while shards 2-8 ran 15-16 min, so shard 1 is the critical path of
+    every code PR's CI cycle (~20-25 min per push); balancing it saves ~3-5 min per cycle.
   rationale: |
     MEASURED 2026-09-22 from 15 successful source-PR CI runs x 4 coverage shards (job logs) and 80 sampled runs.
     (1) The balancer's predictions are even (14.9-15.3 min per shard) but actual/predicted spans 0.47-1.20, with a

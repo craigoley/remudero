@@ -23,6 +23,7 @@ import {
   type ReadModelWorkerMessage,
 } from "../src/lib/read-model-worker.js";
 import type { ViewBodyEntry } from "../src/lib/views.js";
+import { createAnalyticsView } from "../src/lib/analytics-view.js";
 import { createNavBadgeReadModelView } from "../src/lib/nav-badge-view.js";
 import { createRepositoriesReadModelView, createRepositoriesSourcePublisher } from "../src/lib/repositories-view.js";
 import { repositoriesSources, type ServeDeps } from "../src/lib/serve.js";
@@ -64,7 +65,7 @@ function fixture(t: TestCtx): { root: string; stateDir: string } {
     { ts: iso(60_000), step: "daemon.tick" },
   ];
   writeFileSync(join(stateDir, "ledger.ndjson"), rows.map((r) => `${JSON.stringify({ host: "h1", ...r })}\n`).join(""));
-  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve" } }));
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { "nav-badge": "serve", repositories: "serve", now: "serve", instances: "serve", analytics: "serve" } }));
   const ledgerPath = join(stateDir, "ledger.ndjson");
   createRepositoriesSourcePublisher({ stateDir, instances: () => repositoriesSources({ ledgerPath, fleetControlRoot: root, questionsRoot: root, panelGraph: { planPath: join(root, "plan", "tasks.yaml") }, instances: { stateBase: join(root, "instances") } } as unknown as ServeDeps) })();
   return { root, stateDir };
@@ -80,7 +81,7 @@ function materialize(root: string, stateDir: string, at: number, holder: string)
   });
   const posted: ReadModelWorkerMessage[] = [];
   // A RESTART re-imports the worker, so every view's in-memory state starts empty: build them afresh.
-  const views = [createNavBadgeReadModelView(ledgerSource), createRepositoriesReadModelView(ledgerSource), readModelStatusView];
+  const views = [createNavBadgeReadModelView(ledgerSource), createRepositoriesReadModelView(ledgerSource), createAnalyticsView(), readModelStatusView];
   assert.deepEqual(views.map((v) => v.name), READ_MODEL_VIEWS.map((v) => v.name), "the same views the worker registers");
   const ticker = createReadModelTicker({ stateDir, instances: [{ name: "core", ledgerDir: stateDir }], views: [...views, now, createInstancesView({ instances: [{ name: "core", ledgerDir: stateDir }], repoPath: daemonInstanceRegistryPath(root), ledgerSource })], clock, holder, post: (m) => void posted.push(m) });
   try {
@@ -110,7 +111,7 @@ test("every read-model view materializes the same etag after a serve restart", (
   const { root, stateDir } = fixture(t);
   const first = materialize(root, stateDir, T0, "serve-a");
   // CORPUS CONTROL: every registered view materialized, so none passes by being absent on both sides.
-  assert.deepEqual([...new Set([...first.values()].map((b) => b.view))].sort(), ["instances", "nav-badge", "now", "read-model", "repositories"]);
+  assert.deepEqual([...new Set([...first.values()].map((b) => b.view))].sort(), ["analytics", "instances", "nav-badge", "now", "read-model", "repositories"]);
 
   const repos = first.get("repositories\u0000")!.body.data as { instances: Array<{ summary?: { repos: unknown[] } }> };
   assert.equal(repos.instances[0]?.summary?.repos.length, 1, `control: a real repositories summary, not an error body: ${JSON.stringify(repos)}`);

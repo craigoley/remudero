@@ -35,6 +35,7 @@ import { buildServeServer, repositoriesSources, type ServeDeps } from "../src/li
 import { makeTempDir } from "../src/lib/tmp.js";
 import { createViewShadow, readShadowEvidence, type ShadowComparison, type ShadowRequest } from "../src/lib/view-shadow.js";
 import type { ViewBody, ViewSource } from "../src/lib/views.js";
+import { switchViewsOn } from "./helpers/read-model-switches.js";
 
 // P1-08: the repositories view is #7926's repos summary for every instance, computed from each instance's
 // read-model `repo_row` table, counted once however many rotations carry a row, and dark until switched.
@@ -154,6 +155,7 @@ function ticker(f: Fixture, opts: { now?: number; holder?: string; view?: Return
   let now = opts.now ?? NOW;
   const view = opts.view ?? createRepositoriesReadModelView(ledgerSource);
   const clock = { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() };
+  switchViewsOn(f.stateDir, ["repositories"], "shadow");
   const inner = createReadModelTicker({
     stateDir: f.stateDir,
     instances: [{ name: "core", ledgerDir: f.stateDir }, { name: "console", ledgerDir: join(f.consoleRoot, "state") }],
