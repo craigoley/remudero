@@ -1,0 +1,35 @@
+- id: W1-T5811
+  title: "A RED COVERAGE-NIGHTLY RUN RAISES A NEEDS-HUMAN ISSUE — W1-T5704's coverage-nightly.yml (#9246) runs with `permissions: contents: read` and calls no raiser, so a red nightly floor measurement notifies no one, unlike mutation-nightly, clock-sweep, recovery-drill and fleet-heartbeat-watch"
+  repo: remudero
+  depends_on: [W1-T5704]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — a red nightly coverage run alarms
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5704 (#9246) follow-up; workflow edit is an operator build (W1-T5351)"
+  plan_refs: [W1-T5704, W1-T3030, W1-T5351, W1-T5705]
+  files: [.github/workflows/coverage-nightly.yml, test/a-recovered-scheduled-job-leaves-its-escalation-open-forever.test.ts, test/a-red-coverage-nightly-run-raises-a-needs-human-issue.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on #9246's head 1a17b439 (W1-T5704, open) and origin/main b790deee. The new
+    workflow declares `permissions: contents: read`, runs eight shards, the merge and the
+    absolute-floor ratchet, and uploads an artifact; a failure ends as a red run on a schedule
+    nobody watches. The four scheduled jobs that alarm do it through scripts/needs-human-issue.mjs
+    (raise on failure, `--resolved --source` on success), and
+    test/a-recovered-scheduled-job-leaves-its-escalation-open-forever.test.ts's "every workflow that
+    RAISES also RESOLVES" case lists exactly those four and asserts the count. Workflow files are an
+    operator build (W1-T5351).
+  design: |
+    coverage-nightly.yml gains `issues: write` and, after the merge job, a step that raises a
+    needs-human issue through scripts/needs-human-issue.mjs when the run failed (naming the failing
+    shard or the floor) and resolves it with `--resolved --source coverage-nightly` on success,
+    never on a pull_request event. The raiser census adds coverage-nightly and its count becomes five.
+  acceptance:
+    - claim: "parsing coverage-nightly.yml, it grants issues write, raises through needs-human-issue.mjs on failure and resolves on success, and the raiser census lists five raisers including coverage-nightly"
+      proof: "unit test: test/a-red-coverage-nightly-run-raises-a-needs-human-issue.test.ts"
+  falsifier: |
+    Remove the raise step: the parse finds no needs-human-issue.mjs call and the test fails.

@@ -1,0 +1,37 @@
+- id: W1-T5807
+  title: "A LEDGER ROTATION'S OWN LOCK AND STAGE FILES ARE NOT UNCLASSIFIED — `listedLedgerFiles` reports every `ledger.*` name that is not a rotation as unclassified, and W1-T5763 exempted only the carried and retained-steps sidecars, so during a rotation `ledger.ndjson.rotate.lock` and writeAtomic's `*.rotate-tmp-<pid>-<uuid>` stages make a strict ledger-union reader refuse; `ledgerRotationLockPath`'s doc claims both are invisible, true only of `ledgerRotationEntries`"
+  repo: remudero
+  depends_on: [W1-T5763]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — transient rotation files in the strict union's classification
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5763 (#9232) follow-up"
+  plan_refs: [W1-T5763, W1-T4817, W1-T5514, W1-T2899]
+  files: [src/lib/ledger-union.ts, src/lib/ledger-path.ts, test/a-ledger-rotations-own-lock-and-stage-files-are-not-unclassified.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main b790deee (contains #9232, W1-T5763). `listedLedgerFiles`
+    (src/lib/ledger-union.ts) filters names starting `ledger.`, drops NEVER_ROTATE_FILENAME and the
+    two sidecars, and returns the rest that are not rotations as `unclassified`. src/lib/ledger.ts
+    names `ledgerRotationLockPath` = `<ledger>.rotate.lock` and `writeFileAtomic` stages through
+    `writeAtomic(..., { tmpTag: "rotate-tmp" })` (src/lib/fs-race-safe.ts: `<path>.rotate-tmp-<pid>-<uuid>`),
+    for the live rewrite and for each `ledger.<stamp>.ndjson.gz` archive; ledger-compact.ts stages
+    with tag `ledger-compact-tmp`. All start with `ledger.` and none is a rotation, so a strict
+    reader (the W1-T4817 reconciler's `reconcile.unreadable`) refuses for as long as one exists.
+    src/lib/ledger.ts is at its comment-load ceiling.
+  design: |
+    The lock suffix and the stage tags live in ledger-path.ts beside the sidecar suffixes, and
+    ledger.ts and ledger-compact.ts build from them (no new comment lines in ledger.ts).
+    `listedLedgerFiles` leaves the lock and any `<ledger file>.<known tag>-<pid>-<uuid>` stage out of
+    `unclassified` and out of the corpus. Unknown names, `ledger.ndjson.bak` and misnamed rotations
+    stay unclassified, as W1-T5763 keeps them.
+  acceptance:
+    - claim: "a state dir holding the live file, a rotation, ledger.ndjson.rotate.lock, a ledger.ndjson.rotate-tmp stage and an archive's rotate-tmp stage reads ok with no unclassified files, while ledger.ndjson.bak and a name with an unknown tag stay unclassified"
+      proof: "unit test: test/a-ledger-rotations-own-lock-and-stage-files-are-not-unclassified.test.ts"
+  falsifier: |
+    Remove the lock and stage exemptions: the union reports them unclassified and the test fails.

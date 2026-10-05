@@ -1,0 +1,37 @@
+- id: W1-T5812
+  title: "THE COVERAGE-NIGHTLY SUMMARY REACHES THE LEDGER — W1-T5704's run uploads coverage-nightly-summary.json 'a ledger can ingest', and nothing reads it: W1-T5705 reads the nightly lcov for the absolute floor, not the summary, so main's measured floor never appears in the ledger"
+  repo: remudero
+  depends_on: [W1-T5704]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — the nightly coverage summary reaches the ledger
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5704 (#9246) follow-up"
+  plan_refs: [W1-T5704, W1-T5705, W1-T5811]
+  files: [src/lib/coverage-nightly-intake.ts, src/run-task.ts, test/the-coverage-nightly-summary-reaches-the-ledger.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on #9246's head 1a17b439 and origin/main b790deee. The workflow's "Write the
+    ledgerable summary" step writes coverage-nightly-artifact/coverage-nightly-summary.json (totals
+    from the ratchet's own lcov parser) and uploads it beside the merged lcov. No src/ path names
+    coverage-nightly or that artifact. W1-T5705's design reads "the newest nightly (W1-T5704) or
+    merge-group run" for the absolute floor inside ci.yml; it does not ledger the reading.
+    src/run-task.ts sits at its comment-load ceiling.
+  design: |
+    A daily daemon cadence (the existing cadence marker shape), wired in src/run-task.ts through an
+    exported `readCoverageNightlySummary` in the new module, reads the newest completed
+    coverage-nightly run on main and its summary artifact through the GitHub API and appends one
+    row per run, keyed by run id so a re-read adds nothing, carrying the totals, the head sha and
+    the run's conclusion. If the row is a new step it joins the ledger step censuses. A failed read
+    logs once and retries next cadence.
+  acceptance:
+    - claim: "with a fake GitHub reader returning a completed run and its summary, one row carrying the totals, head sha and run id is appended, a second pass over the same run appends none, and a failed read appends none and logs the failure"
+      proof: "unit test: test/the-coverage-nightly-summary-reaches-the-ledger.test.ts"
+    - claim: "the daemon wiring calls the intake"
+      proof: "grep: readCoverageNightlySummary( in src/run-task.ts"
+  falsifier: |
+    Drop the run-id key: the second pass appends a duplicate row and the test fails.

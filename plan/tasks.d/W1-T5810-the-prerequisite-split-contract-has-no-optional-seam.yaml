@@ -1,0 +1,35 @@
+- id: W1-T5810
+  title: "THE PREREQUISITE SPLIT CONTRACT HAS NO OPTIONAL SEAM — W1-T5779 left `renderPrerequisitePrPrompt`'s `prerequisiteBranch` optional (absent renders the old unnamed 'fresh branch' text) and `prerequisitePrAdmissionRefusal` skips the head and body checks wherever `readLiveHead`/`fetchPrBody` are not wired, so a caller that omits either gets the pre-W1-T5779 behaviour silently"
+  repo: remudero
+  depends_on: [W1-T5779]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — the prerequisite split's branch and readers are required
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5779 (#9231) follow-up"
+  plan_refs: [W1-T5779, W1-T5809, W1-T2436]
+  files: [src/lib/prompt-render.ts, src/run-task.ts, test/prompt-render.test.ts, test/the-prerequisite-split-contract-has-no-optional-seam.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main b790deee (contains #9231). `renderPrerequisitePrPrompt`
+    (src/lib/prompt-render.ts) takes `prerequisiteBranch?` and, when it is absent, renders "Starting
+    from a fresh branch off `origin/main`" and a bare `gh pr create`, the text #9206 was born red
+    under; `buildPrerequisitePrDispatchArgs` (src/run-task.ts) passes it through as optional, and
+    test/prompt-render.test.ts pins the no-branch form against the compat renderer.
+    `prerequisitePrAdmissionRefusal` treats a missing `readLiveHead` or `fetchPrBody` as no evidence
+    and returns undefined, so the rung waits on CI as before. The production sweep sites wire both;
+    the type does not require it. src/run-task.ts sits at its comment-load ceiling.
+  design: |
+    `prerequisiteBranch` becomes required in both signatures and the no-branch text is deleted;
+    test/prompt-render.test.ts is re-pinned to the named-branch form. The prerequisite path takes
+    its head and body readers as required arguments, and a rung built without them refuses the
+    prerequisite dispatch with a reason naming the missing reader instead of skipping the check.
+  acceptance:
+    - claim: "the prerequisite prompt always names the minted branch and a type check rejects a call without it, and a rung given no head or body reader logs fix.prerequisite_dispatch_failed naming the missing reader without waiting on CI"
+      proof: "unit test: test/the-prerequisite-split-contract-has-no-optional-seam.test.ts"
+  falsifier: |
+    Restore the optional reader: the rung with no body reader waits on CI and the test fails.
