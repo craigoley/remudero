@@ -8564,6 +8564,7 @@ export interface LiveHeadResult {
   ok: boolean;
   headSha?: string;
   author?: string;
+  headRefName?: string;
 }
 
 /**
@@ -8576,16 +8577,17 @@ export interface LiveHeadResult {
  * even when `commits` is not sha-ordered. A throw (rate limit, network,
  * auth) or a response missing `headRefOid` reports `ok:false`.
  */
-function ghLiveHead(prUrl: string): LiveHeadResult {
+export function ghLiveHead(prUrl: string, gh: (args: string[]) => unknown = ghJson): LiveHeadResult {
   try {
-    const v = ghJson(["pr", "view", prUrl, "--json", "headRefOid,commits"]) as {
+    const v = gh(["pr", "view", prUrl, "--json", "headRefOid,headRefName,commits"]) as {
       headRefOid?: string;
+      headRefName?: string;
       commits?: Array<{ oid?: string; authors?: Array<{ login?: string; name?: string }> }>;
     };
     if (!v?.headRefOid) return { ok: false };
     const headCommit = v.commits?.find((c) => c.oid === v.headRefOid);
     const author = headCommit?.authors?.[0]?.login ?? headCommit?.authors?.[0]?.name;
-    return { ok: true, headSha: v.headRefOid, author };
+    return { ok: true, headSha: v.headRefOid, author, headRefName: v.headRefName };
   } catch {
     return { ok: false };
   }
@@ -9213,6 +9215,7 @@ export function buildPrerequisitePrDispatchArgs(args: {
   taskId: string;
   instrumentPaths: readonly string[];
   srcPaths: readonly string[];
+  prerequisiteBranch?: string;
 }): SpawnWorkerArgs {
   return {
     cwd: args.worktreePath,
@@ -9230,11 +9233,28 @@ export function buildPrerequisitePrDispatchArgs(args: {
       prUrl: args.prUrl,
       instrumentPaths: args.instrumentPaths,
       srcPaths: args.srcPaths,
+      prerequisiteBranch: args.prerequisiteBranch,
     }),
     tools: FIX_WORKER_TOOLS,
     runId: args.runId,
     taskId: args.taskId,
   };
+}
+
+/** W1-T5779: why an opened prerequisite PR cannot pass head-identity-gate or acceptance-author-gate, or undefined
+ *  when it can or a read gave no evidence (an `ok:false` head, a throwing body read), which leaves the CI wait as before. */
+export async function prerequisitePrAdmissionRefusal(
+  prUrl: string,
+  mintedBranch: string,
+  read: { readLiveHead?: (prUrl: string) => LiveHeadResult | Promise<LiveHeadResult>; fetchPrBody?: (prUrl: string) => Promise<string> },
+): Promise<string | undefined> {
+  const head = read.readLiveHead ? await read.readLiveHead(prUrl) : undefined;
+  if (head?.ok && head.headRefName !== undefined && head.headRefName !== mintedBranch) {
+    return `prerequisite ${prUrl} opened on head ${head.headRefName}, not the minted ${mintedBranch}`;
+  }
+  const body = read.fetchPrBody ? await read.fetchPrBody(prUrl).catch((error: unknown) => ({ unreadable: String(error) })) : undefined;
+  const check = typeof body === "string" ? acceptanceAuthorTimeCheck(body) : undefined;
+  return check && !check.ok ? `prerequisite ${prUrl} body refused (${check.defect}): ${check.message}` : undefined;
 }
 
 /**
@@ -10240,14 +10260,10 @@ export async function runFixRung(opts: {
      */
     readLiveState?: (prUrl: string) => LiveStateResult | Promise<LiveStateResult>;
     /**
-     * W1-T296: an OPTIONAL fresh read of THIS PR's live head sha + its head
-     * commit's author, consulted ONLY at the pre-strike gate (site
-     * `rung.strike`), and ONLY once this invocation has itself pushed at
-     * least one round (see {@link branchAuthorshipStandDownReason}'s
-     * "first round has no prior head" contract). Never a cached snapshot —
-     * a fresh `gh` read every time, mirroring `readLiveState`'s own
-     * discipline. Omitted, or a failed/indeterminate read, behaves EXACTLY
-     * as before this check existed: the rung proceeds.
+     * W1-T296: an OPTIONAL fresh read of a PR's live head sha + head commit author, consulted at the pre-strike
+     * gate (site `rung.strike`) only once this invocation has pushed a round (see {@link branchAuthorshipStandDownReason}'s
+     * "first round has no prior head" contract), and (W1-T5779) for an opened prerequisite's head ref. Never a
+     * cached snapshot, mirroring `readLiveState`. Omitted, or a failed/indeterminate read, the rung proceeds.
      */
     readLiveHead?: (prUrl: string) => LiveHeadResult | Promise<LiveHeadResult>;
     /**
@@ -11394,6 +11410,7 @@ export async function runFixRung(opts: {
           `fix rung: instrument path(s) ${instrumentList} entangled with src/ path(s) ${srcList} — dispatching ` +
             `a worker to open the prerequisite PR (never escalating straight to an issue): ${opts.prUrl}`,
         );
+        const prerequisiteBranch = `run-unfiled-${systemClock.now()}`;
         const dispatchArgs = buildPrerequisitePrDispatchArgs({
           task: opts.task,
           branch: opts.branch,
@@ -11407,6 +11424,7 @@ export async function runFixRung(opts: {
           taskId: opts.taskId,
           instrumentPaths,
           srcPaths,
+          prerequisiteBranch,
         });
         // W1-T1044: the SAME wall-clock bound + best-effort reclaim every ordinary strike's own
         // spawn already takes (spawnFixWorkerBounded) — this dispatch is never a strike (`strikes`
@@ -11426,6 +11444,11 @@ export async function runFixRung(opts: {
             strike: strikes,
             reason: spawnOutcome.kind === "abandoned" ? "spawn wall-clock bound exceeded" : "worker opened no pull request",
           });
+          return await escalateAndExhaust();
+        }
+        const admissionRefusal = await prerequisitePrAdmissionRefusal(prerequisiteUrl!, prerequisiteBranch, deps);
+        if (admissionRefusal) {
+          deps.log("fix.prerequisite_dispatch_failed", { strike: strikes, prerequisite_pr: target.prNumber, reason: admissionRefusal });
           return await escalateAndExhaust();
         }
         const ciState = ciGateState(await deps.waitForCiGreen(prerequisiteUrl!, deps.log));
