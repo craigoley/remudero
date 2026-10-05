@@ -42,7 +42,9 @@ import {
 } from "./arm-auto-merge.js";
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair } from "./classify.js";
-import { blockerFields, finalBlocker, priorBlockersFromLedger, type PrBlocker } from "./pr-blocker.js";
+import {
+  blockerFields, decideSloRung, finalBlocker, priorBlockersFromLedger, type PrBlocker, type SloRung,
+} from "./pr-blocker.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { type Config, fixStrikeCap, overflowFallbackRefusal } from "./config.js";
 import { gitPushEmptyCommit, gitPushRunBranch } from "./git-push.js";
@@ -54,7 +56,7 @@ import { appendLedger, isRealStrike } from "./ledger.js";
 import { appendOperatorNote, loadOperatorNotesForTask, type OperatorNoteEntry } from "./operator-notes.js";
 import {
   capStrikeLadderNote, decideStrikeLadderRung, firstFailingTestTitle, hasUnspentLadderRefresh,
-  latestStrikeLadderAttempt, strikeCauseKey,
+  latestStrikeLadderAttempt, rebuiltOnUtcDay, sloRungHistory, strikeCauseKey,
 } from "./strike-ladder.js";
 import { runRiskJudge, type RiskJudgeConfig, type RiskJudgeInput, type RiskJudgeOrchestratorDeps } from "./risk-judge.js";
 import { readLedgerUnionRawLinesSync, readLedgerUnionRecordsSync, resolveLedgerUnion } from "./ledger-union.js";
@@ -9698,7 +9700,7 @@ export function isPostReviewDiffCeilingRefusal(reason: unknown): boolean {
   );
 }
 
-function postReviewFailureHistoryDisposition(
+export function postReviewFailureHistoryDisposition(
   pr: OpenPrView,
   prior: Pick<PriorActions, "reviewDiffCeilingRefused" | "reviewRetryableThrowCounts">,
   policy: SweepPolicy,
@@ -11395,7 +11397,10 @@ export async function runSweep(
   let staleBaseAttemptedPrNumber: number | undefined;
   const ladderUpdatedPrs = new Set<number>();
   const ladderActedPrs = new Set<number>();
-  const applyStrikeLadder = async (pr: OpenPrView): Promise<string> => {
+  // W1-T5690: the SLO clock's view of one PR — set only for a blocked-ambiguous PR whose blocker has
+  // outlived BLOCKER_SLO_MS. `noOp` is the repeated-refusal hold, which enters the climb at rebuild.
+  interface SloContext { blocker: PrBlocker; owner: string; ageMs: number; noOp: boolean; strikeOwned: boolean }
+  const applyStrikeLadder = async (pr: OpenPrView, slo?: SloContext): Promise<string> => {
     const row = { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", pr_number: pr.prNumber, head_sha: pr.headSha };
     const record = (step: string, extra: Record<string, unknown>) => {
       const line = { ...row, ts: clockFromMillisFn(() => now).iso(), step, ...extra };
@@ -11421,7 +11426,29 @@ export async function runSweep(
           (r.step === "sweep.strike_ladder.refreshed" || (r.step === "sweep.strike_ladder.held" && r.refresh_outcome === "conflict"))),
       };
       let decision = decideStrikeLadderRung(input);
-      if (decision.rung === "hold") return decision.reason;
+      const rungHistory = sloRungHistory(strikeLadderRows, {
+        taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha, mainSha: mainRepair?.sha });
+      if (slo) {
+        const unavailable: SloRung[] = [];
+        if (mainRepair === undefined || input.refreshedAtMainTip || !currentMergeBaseSha ||
+            currentMergeBaseSha === mainRepair.sha || !deps.updateBranch) unavailable.push("refresh");
+        if (!effects || pr.taskId === undefined || input.requeueable !== true || rebuilds >= 2) unavailable.push("rebuild");
+        const sloDecision = decideSloRung({
+          blocker: slo.blocker, owner: slo.owner, blockerAgeMs: slo.ageMs, nowMs: now, rungHistory, unavailable,
+          reasonClass: slo.noOp ? "no-op-hold" : decision.rung === "hold" ? "ladder-hold" : "other",
+        });
+        if (sloDecision.rung === "none") {
+          if (!slo.strikeOwned) return `slo: ${sloDecision.reason}`;
+          if (decision.rung === "hold") return decision.reason;
+        } else {
+          decision = { rung: sloDecision.rung, reason: `slo rung ${sloDecision.rung}: ${sloDecision.reason}` };
+          log("sweep.slo_rung", { pr: pr.prNumber, blocker: slo.blocker, age_min: Math.floor(slo.ageMs / 60_000), rung: sloDecision.rung });
+        }
+      } else if (decision.rung === "hold") return decision.reason;
+      // W1-T5690: one rebuild per task per UTC day, on top of the lifetime cap of 2, on every path in.
+      if (decision.rung === "rebuild" && rebuiltOnUtcDay(rungHistory, now)) {
+        decision = { rung: "digest", reason: "strike ladder digest: a rebuild already ran for this task today (UTC); one per task per day" };
+      }
       const live = await deps.readLiveState?.(pr);
       if (live?.ok !== true || live.state?.toUpperCase() !== "OPEN") return hold("fresh OPEN state unreadable or PR is terminal");
       if (!live.headSha || live.headSha !== pr.headSha) return hold("fresh head unreadable or head moved");
@@ -11433,6 +11460,9 @@ export async function runSweep(
           // A conflict cannot clear by refreshing again; only a rebuild from main (or a human) can.
           record("sweep.strike_ladder.held", { reason: hold("refresh did not take: conflict"), refresh_outcome: outcome, main_sha: mainRepair!.sha });
           decision = decideStrikeLadderRung({ ...input, refreshedAtMainTip: true });
+          if (decision.rung === "rebuild" && rebuiltOnUtcDay(rungHistory, now)) {
+            decision = { rung: "digest", reason: "strike ladder digest: a rebuild already ran for this task today (UTC); one per task per day" };
+          }
         } else if (outcome !== "updated") {
           return hold(`refresh did not take: ${outcome}`);
         } else {
@@ -11934,6 +11964,22 @@ export async function runSweep(
     let { disposition, reason } = derived;
     const strikeLadderDue = deps.strikeLadder !== undefined && disposition === "blocked-ambiguous" && !pr.pendingAnswer &&
       selectDispositionRule(dispositionView, policy, now).rule?.when === isFixStrikeExhausted;
+    // W1-T5690: a blocked-ambiguous PR whose blocker is older than its SLO and still has an untaken
+    // rung takes it, even when the strike rule did not match (owner NONE, awaiting-ci, conflict ...).
+    const sloBlocker = blockerFields(derived.blocker, priorBlockerByPr.get(pr.prNumber), now);
+    const sloContext: SloContext = {
+      blocker: derived.blocker, owner: sloBlocker.blocker_owner, ageMs: sloBlocker.blocker_age_ms,
+      noOp: derived.blocker === "strikes-exhausted" && pr.repeatedFixRefusal !== undefined,
+      strikeOwned: strikeLadderDue,
+    };
+    const sloLadderDue = deps.strikeLadder !== undefined && disposition === "blocked-ambiguous" && !pr.pendingAnswer &&
+      !deps.dryRun && pr.isPlanFiling !== true &&
+      decideSloRung({
+        blocker: sloContext.blocker, owner: sloContext.owner, blockerAgeMs: sloContext.ageMs, nowMs: now,
+        reasonClass: sloContext.noOp ? "no-op-hold" : "other",
+        rungHistory: sloRungHistory(strikeLadderRows, {
+          taskId: pr.taskId, prNumber: pr.prNumber, headSha: pr.headSha, mainSha: mainRepair?.sha }),
+      }).rung !== "none";
     if (inheritedMergeState) {
       reason =
         `${reason} — mergeability unread this pass; inherited last known "${inheritedMergeState.state}" ` +
@@ -12059,7 +12105,7 @@ export async function runSweep(
         `the plan-shard flag is the next rung`;
     }
     byDisposition[disposition]++;
-    const isContradictory = disposition === "blocked-ambiguous" && reason === CONTRADICTORY_REASON && !strikeLadderDue;
+    const isContradictory = disposition === "blocked-ambiguous" && reason === CONTRADICTORY_REASON && !strikeLadderDue && !sloLadderDue;
     const contradictionKey = isContradictory ? contradictoryKey(pr, ledgerLines) : undefined;
     const contradictionHistory = contradictionKey !== undefined
       ? contradictoryPrior(contradictionKey, pr, deps, ledgerLines) : undefined;
@@ -12227,7 +12273,7 @@ export async function runSweep(
         // W1-T514: sha-keyed, exactly like every sibling arm above — a new head re-earns its own
         // escalation rather than being deduped by a stale head's `acted:true` line forever.
         alreadyDone = isContradictory ? priorContradiction !== undefined || legacyContradiction
-          : !strikeLadderDue && prior.escalated.has(`${pr.prNumber}@${pr.headSha}`);
+          : !strikeLadderDue && !sloLadderDue && prior.escalated.has(`${pr.prNumber}@${pr.headSha}`);
         // W1-T2427: the LARGEST silent population (7,888 rows). Without this sentence the row is
         // indistinguishable from `deps.escalate` being unwired or throwing.
         if (alreadyDone) {
@@ -13436,8 +13482,8 @@ export async function runSweep(
                 standDownReason = missingTrailerRepair.standDownReason;
                 break;
               }
-              if (strikeLadderDue) {
-                standDownReason = await applyStrikeLadder(pr);
+              if (strikeLadderDue || sloLadderDue) {
+                standDownReason = await applyStrikeLadder(pr, sloLadderDue ? sloContext : undefined);
                 acted = ladderActedPrs.has(pr.prNumber);
                 reason = standDownReason;
                 break;
