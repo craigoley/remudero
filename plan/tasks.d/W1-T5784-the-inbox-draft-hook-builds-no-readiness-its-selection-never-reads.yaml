@@ -1,0 +1,38 @@
+- id: W1-T5784
+  title: "THE INBOX DRAFT HOOK BUILDS NO READINESS ITS SELECTION NEVER READS — `buildInboxDraftHook` loads the plan and builds `isMerged`/`depsUnobservable` accessors every pass, but draft selection (`draftExclusionForProposal`) reads only ratified, declined, board referents, evidence anchors and open conflicts"
+  repo: remudero
+  depends_on: [W1-T5650]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — the draft rung builds only what its selection reads
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5650 (#9210) follow-up"
+  plan_refs: [W1-T5650, W1-T192, W1-T4075]
+  files: [src/run-task.ts, src/lib/inbox.ts, test/no-daemon-loop-path-builds-the-unbatched-gateway.test.ts, test/the-inbox-draft-hook-builds-no-readiness-its-selection-never-reads.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main f0452a82 and #9210 (W1-T5650, open). `buildInboxDraftHook`
+    (src/run-task.ts) builds `draftReadiness` each pass: `tickRead?.plan ?? loadPlan(...)` (a sync
+    plan load when no tick read is handed in), a gateway (`ghGateway` on main; #9210 passes the
+    sweep's batched one), and `isMerged`/`depsUnobservable` from `buildDepsReadinessAccessors` or the
+    tick projection. It hands that context to `draftsDueOnDaemon` -> `proposalsNeedingDraft` ->
+    `draftExclusionForProposal` (src/lib/inbox.ts), which reads `isRatified`, `isDeclined`,
+    `boardReferents`, `grepAnchorTrue` and `openProposalIds` only. `isMerged` is lazy, so it costs
+    nothing today, but the plan load and the gateway are built for a reader that never runs, and
+    #9210's test asserts on that unused accessor.
+  design: |
+    Give draft selection its own narrow context type (the five fields it reads) and have the hook
+    build only that: no plan load, no gateway, no readiness accessors. Drop the `github` and
+    `onReadiness` parameters #9210 added to the hook and adjust its census test's inbox-draft half to
+    assert the hook builds no gateway. If W1-T5650 has not merged, stop and record needs-design.
+    Add no comment lines to src/run-task.ts.
+  acceptance:
+    - claim: "a draft pass with no tick read selects the same proposals as before while loading no plan and building no GitHub gateway"
+      proof: "unit test: test/the-inbox-draft-hook-builds-no-readiness-its-selection-never-reads.test.ts"
+  falsifier: |
+    Restore the hook's `loadPlan` and gateway: the injected plan loader and gateway factory are
+    called and the test fails.
