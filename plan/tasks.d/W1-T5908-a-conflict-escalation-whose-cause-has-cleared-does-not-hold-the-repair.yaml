@@ -1,0 +1,44 @@
+- id: W1-T5908
+  title: "A CONFLICT ESCALATION WHOSE CAUSE HAS CLEARED DOES NOT HOLD THE REPAIR — one pass that sees a dirty PR while GitHub's mergeability is still `unknown` captures no conflict evidence and escalates needs-human at once; the next pass captures the evidence and dispositions the PR for the merge-conflict worker, but the fix rung stands down for as long as an escalation is open on the same (task, PR, head, cause), so the PR waits for a human who has nothing to decide"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — a transient no-evidence read neither escalates nor, once cleared, blocks the conflict repair
+  band_meaning: span
+  origin: "operator session 2026-10-05: #9374 stuck dirty ('why were merge conflicts not auto-handled on 9374? fix them and then fix the root cause')"
+  plan_refs: [W1-T5864, W1-T78, W1-T3579, W1-T5900, W1-T2548]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/a-conflict-escalation-whose-cause-has-cleared-does-not-hold-the-repair.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    LIVE 2026-10-05, fleet #9374 (W1-T5053): its 17:58Z merge-conflict round committed a real
+    two-parent merge (71826974, W1-T5864 working). Main then took W1-T5055's analytics view and the
+    PR went dirty again at 18:31Z. That pass read mergeability `unknown` (GitHub was still
+    computing), captured no conflicting-file evidence, and fell to the `blocked-ambiguous`
+    dirty row (src/lib/sweep.ts, `conflictRefusalCause` -> "no valid conflicting-file evidence was
+    captured"); the W1-T78 clarification rung opened needs-human issue #9384 at 18:32Z. Every pass
+    from then on captured the evidence and dispositioned `conflicted — dispatching the bounded
+    merge-conflict fix worker`, but at 18:36Z the fix rung logged `fix.stood_down`: "a needs-human
+    escalation for this exact (task, PR, head 71826974…, cause) is ALREADY OPEN" (src/run-task.ts;
+    it re-admits only when the head moves or the task contract changes). A conflict changes with the
+    BASE, not the head, and the escalation's question (no evidence) no longer applied, yet the PR sat
+    dirty until the operator asked and it was merged by hand (b5889af8) and #9384 closed by hand.
+  design: |
+    (1) A dirty PR with no captured evidence while its mergeability reads `unknown` is a WAIT
+    (blocker `mergeability-unknown`), not blocked-ambiguous; it escalates only if evidence is still
+    absent after a bounded number of passes (a constant tagged BACKSTOP). (2) The escalation records
+    which disposition raised it (its reason code). When a later pass dispositions the same PR to an
+    actionable row (here `conflicted`, dispatching the merge-conflict worker), the stand-down does
+    not apply, and the sweep closes the escalation with a comment naming the cleared cause
+    (resolved-by-change), so a human is not left holding a question the fleet already answered.
+    For a `conflict` cause, a moved base sha also re-admits, as a moved head does today.
+  acceptance:
+    - claim: "a dirty PR with unknown mergeability and no evidence waits instead of escalating until the bound, and an open no-evidence conflict escalation does not stand down a merge-conflict round once a pass captures the evidence: the round dispatches and the escalation is closed naming the cleared cause, while an escalation whose cause still holds keeps standing the rung down"
+      proof: "unit test: test/a-conflict-escalation-whose-cause-has-cleared-does-not-hold-the-repair.test.ts"
+  falsifier: |
+    Keep the head-only re-admission: the evidence-captured pass stands down on the open
+    no-evidence escalation and the test fails.

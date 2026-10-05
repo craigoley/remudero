@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-03: #8956/#8957 red on test/citation-anchor-census.test.ts; #8956 closed as settled, #8957 repaired by hand (8cad24892)"
   plan_refs: [W1-T111, W1-T4700, W1-T5348]
   files: [src/lib/inbox.ts, test/a-ratified-follow-up-carries-its-own-words.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |

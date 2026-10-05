@@ -10,7 +10,7 @@
   origin: "operator session 2026-10-04: watch log 17:44Z, daemon loop stall after the 16:55Z recycle loaded #9091"
   plan_refs: [W1-T5113, W1-T3104, W1-T51, W1-T2288, W1-T2509]
   files: [src/lib/retro-closure.ts, src/lib/retro.ts, src/run-task.ts, test/retro-closure-per-attempt-never-searches-history.test.ts, test/the-retro-emits-closure-by-class-and-guard-fire-counts.test.ts, test/retro-shipped-wiring.test.ts, test/retro-trigger-corpus.test.ts, test/a-ledger-credit-row-finalises-the-run-it-credits.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

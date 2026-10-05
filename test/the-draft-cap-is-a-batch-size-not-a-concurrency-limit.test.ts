@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { TestContext } from "node:test";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { INBOX_DRAFT_DISALLOWED_TOOLS, runDraftRung, DAEMON_DRAFT_BATCH_CAP } from "../src/lib/inbox.js";
@@ -11,7 +13,7 @@ const REPO_ROOT = join(import.meta.dirname, "..");
 //
 // The throughput half of this task shipped as #3588 (W1-T2664) the day after it was filed:
 // `runDraftRung` runs an indexed worker pool, so a batch of N finishes in about the time of the
-// SLOWEST draft rather than the sum. This suite pins that, and then pins the half #3588 did not
+// SLOWEST draft in each cap-sized wave rather than the sum. This suite pins that, and then pins the half #3588 did not
 // address and made load-bearing by shipping.
 //
 // THE SAFETY HALF. `draftProposalBatch` materialises ONE worktree per batch and hands that same
@@ -32,11 +34,15 @@ const proposal = (id: string): Proposal => ({ id, summary: `proposal ${id}`, evi
 function overlappingSpawn(durationMs: number) {
   let inFlight = 0;
   let peak = 0;
+  const startedAt: number[] = [];
+  const finishedAt: number[] = [];
   const spawn = async (): Promise<unknown> => {
+    startedAt.push(Date.now());
     inFlight += 1;
     peak = Math.max(peak, inFlight);
     await new Promise((r) => setTimeout(r, durationMs));
     inFlight -= 1;
+    finishedAt.push(Date.now());
     return {
       sessionId: "S",
       costUsd: 0,
@@ -46,38 +52,57 @@ function overlappingSpawn(durationMs: number) {
       isError: false,
     };
   };
-  return { spawn, peak: () => peak };
+  return { spawn, peak: () => peak, startedAt, finishedAt };
 }
 
-// ── criterion 1: N drafts take about one draft's time, not N ────────────────────────────────
-
-test("W1-T2591: a batch of N drafts finishes in about the time of one draft rather than N of them", async () => {
-  const n = 4;
+/** Drive the real pool with a virtual clock, not a loaded host's scheduling latency.
+ * Only the fake worker's timer and Date are mocked. Real setImmediate drains promise continuations
+ * between waves; no fixed number of microtasks, wall-clock margin, or production cap is changed.
+ */
+async function assertDraftWaves(t: TestContext, n: number) {
   const each = 60;
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
   const rec = overlappingSpawn(each);
-  const started = Date.now();
-  await runDraftRung(
-    Array.from({ length: n }, (_, i) => proposal(`P${i}`)),
-    "- id: W1-T1\n",
-    { spawn: rec.spawn as never, log: () => {} } as never,
-    "RUN",
-  );
-  const elapsed = Date.now() - started;
-  // The sequential shape this task measured would take n * each. The pool takes about `each`.
-  assert.ok(elapsed < n * each * 0.75, `expected ~${each}ms, not the sequential ~${n * each}ms; got ${elapsed}ms`);
-  assert.ok(rec.peak() > 1, `drafts must actually overlap; peak in-flight was ${rec.peak()}`);
+  const proposals = Array.from({ length: n }, (_, i) => proposal(`P${i}`));
+  const run = runDraftRung(proposals, "- id: W1-T1\n", { spawn: rec.spawn as never, log: () => {} } as never, "RUN");
+  const waves = Math.ceil(n / DAEMON_DRAFT_BATCH_CAP);
+  try {
+    await nextTurn();
+    assert.equal(rec.startedAt.length, Math.min(n, DAEMON_DRAFT_BATCH_CAP), "the first cohort starts before any draft can finish");
+    assert.equal(rec.finishedAt.length, 0, "positive control: timers have not been advanced");
+    for (let wave = 1; wave <= waves; wave++) {
+      t.mock.timers.tick(each - 1);
+      await nextTurn();
+      assert.equal(rec.finishedAt.length, Math.min(n, (wave - 1) * DAEMON_DRAFT_BATCH_CAP), "no draft may finish before its full duration");
+      t.mock.timers.tick(1);
+      await nextTurn();
+      assert.equal(rec.finishedAt.length, Math.min(n, wave * DAEMON_DRAFT_BATCH_CAP), "every member of the wave finishes together");
+      assert.equal(rec.startedAt.length, Math.min(n, (wave + 1) * DAEMON_DRAFT_BATCH_CAP), "the next cohort uses the freed lanes");
+    }
+    const outcomes = await run;
+    assert.deepEqual(outcomes.map((outcome) => outcome.proposalId), proposals.map((p) => p.id), "every proposal has one ordered outcome");
+    assert.deepEqual(rec.startedAt, proposals.map((_, i) => Math.floor(i / DAEMON_DRAFT_BATCH_CAP) * each));
+    assert.deepEqual(rec.finishedAt, proposals.map((_, i) => (Math.floor(i / DAEMON_DRAFT_BATCH_CAP) + 1) * each));
+    assert.equal(Date.now(), waves * each, "elapsed virtual time is waves × draft duration, not N × duration");
+    assert.equal(rec.peak(), Math.min(n, DAEMON_DRAFT_BATCH_CAP), "the shipped cap is reached but never exceeded");
+  } finally {
+    // Finish fixture work even when a falsifier serializes the pool, before the context resets timers.
+    for (let i = 0; i < n; i++) {
+      t.mock.timers.tick(each);
+      await nextTurn();
+    }
+    await run;
+  }
+}
+
+// ── criterion 1: each cap-sized wave takes one logical draft's time, not N ──────────────────
+
+test("draft pool completes in cap-sized virtual-clock waves rather than serial draft time", async (t) => {
+  await assertDraftWaves(t, DAEMON_DRAFT_BATCH_CAP + 1);
 });
 
-test("W1-T2591: concurrency never exceeds the shipped cap, so the cap still bounds the batch", async () => {
-  const rec = overlappingSpawn(20);
-  const n = DAEMON_DRAFT_BATCH_CAP + 3;
-  await runDraftRung(
-    Array.from({ length: n }, (_, i) => proposal(`P${i}`)),
-    "- id: W1-T1\n",
-    { spawn: rec.spawn as never, log: () => {} } as never,
-    "RUN",
-  );
-  assert.ok(rec.peak() <= DAEMON_DRAFT_BATCH_CAP, `peak ${rec.peak()} must not exceed the cap ${DAEMON_DRAFT_BATCH_CAP}`);
+test("W1-T2591: concurrency never exceeds the shipped cap, so the cap still bounds the batch", async (t) => {
+  await assertDraftWaves(t, DAEMON_DRAFT_BATCH_CAP + 3);
 });
 
 // ── criterion 2: the shared worktree is shown safe, not asserted safe ───────────────────────
@@ -165,20 +190,7 @@ test("W1-T2591: an unrestricted spawn is unchanged — the option is omitted, ne
 
 // ── criterion 3: the batch stays inside the sweep's bound at the shipped cap ─────────────────
 
-test("W1-T2591: the batch stays within the sweep wall-clock bound at the shipped cap", async () => {
-  // The pool's whole point: at the cap, elapsed approaches the SLOWEST draft, not their sum. A
-  // full cap-sized batch of 300ms drafts must not cost cap * 300ms, which is what crossed the
-  // sweep's await bound on 2026-09-02 and motivated #3588.
-  const each = 40;
-  const rec = overlappingSpawn(each);
-  const started = Date.now();
-  await runDraftRung(
-    Array.from({ length: DAEMON_DRAFT_BATCH_CAP }, (_, i) => proposal(`P${i}`)),
-    "- id: W1-T1\n",
-    { spawn: rec.spawn as never, log: () => {} } as never,
-    "RUN",
-  );
-  const elapsed = Date.now() - started;
-  const sequential = DAEMON_DRAFT_BATCH_CAP * each;
-  assert.ok(elapsed < sequential * 0.75, `a cap-sized batch must not cost the sequential ${sequential}ms; got ${elapsed}ms`);
+test("a cap-sized draft batch completes in one virtual-clock wave", async (t) => {
+  // This proves the pool's non-serial scheduling, not a real deployment latency SLO.
+  await assertDraftWaves(t, DAEMON_DRAFT_BATCH_CAP);
 });

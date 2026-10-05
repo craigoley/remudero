@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: watch log 23:29Z (repeated reconcile.unreadable on ledger.ndjson.bak, carried.json, retained-steps.json)"
   plan_refs: [W1-T4817, W1-T5517, W1-T5041]
   files: [src/lib/ledger-union.ts, src/lib/ledger-path.ts, src/lib/ledger.ts, test/the-ledgers-own-sidecar-files-are-not-an-unclassified-archive.test.ts]
-  status: queued
+  status: merged
   priority: 1
   attempts: 0
   rationale: |

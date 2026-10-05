@@ -11,7 +11,7 @@
   origin: "operator session 2026-10-04: watch log 23:29Z, #9188 follow-up (generation age check)"
   plan_refs: [W1-T4075, W1-T5761, W1-T5749]
   files: [src/lib/read-plane.ts, src/run-task.ts, test/a-stale-tick-read-generation-is-never-served.test.ts]
-  status: queued
+  status: merged
   priority: 2
   attempts: 0
   rationale: |
