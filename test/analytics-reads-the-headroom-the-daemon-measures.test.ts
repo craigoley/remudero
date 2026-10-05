@@ -211,3 +211,39 @@ test("the headroom tail read skips torn and non-headroom rows", () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a routing snapshot that lapsed while the fleet sat idle yields to a fresher daemon headroom reading", async () => {
+  // The router last ran 3 minutes ago, so its 60 s bound has lapsed; the daemon sampled 1 minute ago.
+  const lapsed = { state: "selected" as const, freshness: "stale" as const, observedAt: "2026-09-24T11:57:00.000Z", providers: [{ provider: "codex", readable: true, windows: [{ name: "codex primary 10080m", usedPercent: 76 }] }] };
+  const root = daemonRoot([headroomRow("2026-09-24T11:59:00.000Z", 40)]);
+  try {
+    const cache = createLiveAnalyticsSnapshotCache({ root, readStatus: () => undefined, readProvider: () => lapsed, clock: fixedClock(NOW), schedule: () => ({ cancel() {} }) });
+    await cache.refresh();
+    assert.equal(cache.current().provider.allowance.remaining.state, "observed", "an idle minute is not stale evidence");
+    assert.equal(cache.current().provider.allowance.remaining.value, 60);
+    assert.equal(cache.current().provider.accounts.asOf, "2026-09-24T11:59:00.000Z");
+    assert.equal(cache.current().provider.accounts.reason, HEADROOM_FALLBACK_REASON, "the console can say where the number came from");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a lapsed routing snapshot stays stale when the daemon headroom reading is no fresher", async () => {
+  const lapsed = { state: "selected" as const, freshness: "stale" as const, observedAt: "2026-09-24T11:57:00.000Z", providers: [{ provider: "codex", readable: true, windows: [{ name: "codex primary 10080m", usedPercent: 76 }] }] };
+  const old = daemonRoot([headroomRow("2026-09-24T10:00:00.000Z", 40)]);
+  const older = daemonRoot([headroomRow("2026-09-24T11:50:00.000Z", 40)]);
+  try {
+    for (const root of [old, older]) {
+      const cache = createLiveAnalyticsSnapshotCache({ root, readStatus: () => undefined, readProvider: () => lapsed, clock: fixedClock(NOW), schedule: () => ({ cancel() {} }) });
+      await cache.refresh();
+      assert.equal(cache.current().provider.allowance.remaining.state, "stale", "a stale or older fallback never replaces the router's own reading");
+      assert.equal(cache.current().provider.accounts.accounts[0]!.provider, "codex");
+    }
+    const failing = createLiveAnalyticsSnapshotCache({ root: old, readStatus: () => undefined, readProvider: () => lapsed, readHeadroom: () => { throw new Error("EIO"); }, schedule: () => ({ cancel() {} }) });
+    await failing.refresh();
+    assert.equal(failing.current().provider.allowance.remaining.state, "stale", "a failed fallback read keeps the lapsed reading's own state");
+  } finally {
+    rmSync(old, { recursive: true, force: true });
+    rmSync(older, { recursive: true, force: true });
+  }
+});

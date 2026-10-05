@@ -7634,6 +7634,10 @@ components:
                         type: string
                         enum: [actionable, active, ready-held, waiting, unknown]
                       held: {type: boolean}
+                      reviewState:
+                        type: string
+                        description: The PR head's remudero-review state from the board snapshot; absent from bodies built before it was projected.
+                        enum: [success, failure, pending, none, unreadable, not-applicable]
             actions:
               type: array
               description: Blocked PRs and merge holds, most urgent tone first.
