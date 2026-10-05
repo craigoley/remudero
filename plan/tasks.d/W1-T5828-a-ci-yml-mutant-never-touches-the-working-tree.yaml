@@ -1,0 +1,37 @@
+- id: W1-T5828
+  title: "A CI.YML MUTANT NEVER TOUCHES THE WORKING TREE — scripts/workflow-guard-mutation-ratchet.mjs's `withMutant` writes each mutant over .github/workflows/ci.yml in the checkout and restores it on `finally`/`exit`, so any ci.yml-reading test run concurrently in that worktree reads a mutant, and a SIGKILL mid-run leaves the mutant on disk to be committed"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 4.00
+  risk: high  # Rule 19: one concern — where the guard mutants are written
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5700 (#9261) hand-build follow-up"
+  plan_refs: [W1-T3220, W1-T3703, W1-T5700]
+  files: [scripts/workflow-guard-mutation-ratchet.mjs, test/workflow-guard-mutation-ratchet.test.ts, test/a-ci-yml-mutant-never-touches-the-working-tree.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 6fd35767. `withMutant(guard, original, fn, io = { path: CI_YML,
+    write: writeFileSync })` writes `mutateGuardLine(original, guard)` to the repo's own ci.yml, runs
+    the ci.yml-reading suites with cwd REPO_ROOT, and writes the original back in `finally` and on a
+    process `exit` listener. A `node --test` run in the same worktree during that window (a hand
+    build running its related suites beside the ratchet, as on 2026-10-05 for W1-T5700) reads an
+    always-true guard. SIGKILL and OOM run neither restore, leaving the mutant in the tree. In CI the
+    step runs alone on shard 1, so only local runs are exposed; those are where workflow edits are
+    built (W1-T5351).
+  design: |
+    The ratchet materializes one scratch copy of the checkout per run (a detached worktree of HEAD
+    with the working ci.yml and the changed test files copied in, node_modules linked), writes every
+    mutant to the copy's ci.yml, and runs the suites with cwd in the copy. The real ci.yml is only
+    read. The copy is removed at the end and on a failed run, and a copy left by a killed run is
+    reclaimed by the next one. Verdicts and the baseline are unchanged.
+  acceptance:
+    - claim: "with an injected suite runner that records the ci.yml it reads, every mutant is read from the scratch copy, the checkout's ci.yml bytes and mtime are unchanged across the run and after a runner that throws, and a stale copy from an earlier run is removed"
+      proof: "unit test: test/a-ci-yml-mutant-never-touches-the-working-tree.test.ts"
+  falsifier: |
+    Point withMutant back at the checkout's ci.yml: the recorded reads come from the real path and the
+    checkout's file changes during the run, so the test fails.

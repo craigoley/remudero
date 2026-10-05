@@ -1,0 +1,41 @@
+- id: W1-T5826
+  title: "A FIXTURE CROSSING ON MAIN WARNS AHEAD INSTEAD OF REDDENING CI — ci-shard 1's push-to-main lane runs expiring-fixture-census with CENSUS_MAIN_BRANCH_RUN=1 and fails the required `ci` check when an untouched stamp comes within 7 days of its threshold, so the calendar alone turns main red (2026-10-05 ~06:00Z, test/auto-merge-blocked-codeql-review-thread.test.ts:166, hot-fixed by #9259) and the daemon holds plan-scoped rounds on the red base"
+  repo: remudero
+  depends_on: [W1-T5825]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — what the main lane does with a crossing no push planted
+  band_meaning: span
+  origin: "operator session 2026-10-05: main red #2 on the expiring-fixture census; workflow edit is an operator build (W1-T5351)"
+  plan_refs: [W1-T3655, W1-T3719, W1-T5539, W1-T3272, W1-T5351]
+  files: [.github/workflows/ci.yml, scripts/expiring-fixture-census.mjs, test/expiring-fixture-census.test.ts, test/a-fixture-crossing-on-main-warns-ahead-instead-of-reddening-ci.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 6fd35767. ci.yml's ci-shard job, on `push` and shard 1, runs
+    `CENSUS_MAIN_BRANCH_RUN=1 RMD_CI_REPORT=1 node scripts/expiring-fixture-census.mjs` inside the
+    main-ceiling block and sets CODE=1 on a refusal. That variable makes the census read STRICT
+    (W1-T3655): every crossing within MARGIN_DAYS (7) blocks, with no base to attribute it to. On PRs
+    an inherited crossing already only warns (W1-T3388/W1-T3655). The main lane therefore turns red
+    on a date, not a diff. LIVE 2026-10-05: ci-shard 1 BLOCKED at 13b9379c on
+    test/auto-merge-blocked-codeql-review-thread.test.ts:166 (`lastActivityAt` 2026-09-27 against
+    staleDays), hot-fixed by #9259 with a census-sanctioned exemption, and the daemon held
+    plan-scoped rounds ("waits on base red", e.g. #9253) meanwhile. The same class reddened main for
+    23 h on 10-01/10-02 (W1-T5539's record). W1-T5539's defuse lane is the lead-time warning, and
+    W1-T5825 is what lets it act; this task removes the outage once that warning can work.
+    OPERATOR DESIGN CHOICE: this reverses W1-T3655's "on main it BLOCKS" for crossings no push
+    planted. Workflow files are an operator build (W1-T5351).
+  design: |
+    On the push-to-main lane the census attributes each crossing against `HEAD^` as the PR lane does
+    against its base: a crossing this push introduced or moved still sets CODE=1. A crossing that was
+    already on `HEAD^` is reported as a `::warning::` annotation and in the step summary with its
+    file, line, threshold and crossing date, and does not fail the shard. A population drop still
+    blocks. With no readable `HEAD^` the reading stays strict, as today.
+  acceptance:
+    - claim: "run on a main-lane fixture, an inherited crossing exits 0 with a warning naming file, line and crossing date, a crossing introduced by the pushed commit exits non-zero, an unreadable HEAD^ stays strict, and ci.yml's main lane passes the push's parent to the census"
+      proof: "unit test: test/a-fixture-crossing-on-main-warns-ahead-instead-of-reddening-ci.test.ts"
+  falsifier: |
+    Restore the strict main reading: the inherited-crossing fixture exits non-zero and the test fails.
