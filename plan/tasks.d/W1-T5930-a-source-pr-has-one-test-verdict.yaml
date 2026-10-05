@@ -10,7 +10,7 @@
   band_meaning: blast-radius
   origin: "operator session 2026-10-05: reduce repeated CI/coverage work; current-main 15406e72bfe86b72a1f7b3d86dd688c51f44bac7"
   plan_refs: [W1-T3207, W1-T4406, W1-T5705, W1-T5891, W1-T5892]
-  files: [.github/workflows/ci.yml, test/a-source-pr-has-one-test-verdict.test.ts]
+  files: [.github/workflows/ci.yml, test/a-source-pr-has-one-test-verdict.test.ts, test/the-full-suite-runs-in-the-merge-queue.test.ts]
   status: queued
   priority: 2
   attempts: 0
@@ -30,6 +30,8 @@
     the real workflow shell body in controls proving ordinary SOURCE diffs invoke no second
     test runner at flag 0 or 1, while changed-test and helper fallback work still runs. Keep
     the live flag at 0: promotion and baseline qualification remain separate governed work.
+    Update W1-T4406's historical CI-floor assertion to follow its new coverage owner; retain
+    the real selector subprocess control against the coverage step and full merge-group controls.
   acceptance:
     - claim: "SOURCE PR CI delegates its test verdict to coverage with either live flag without a second selector or test harness, while changed-test and helper-full paths still execute and stable required aggregators remain present"
       proof: "unit test: test/a-source-pr-has-one-test-verdict.test.ts"
