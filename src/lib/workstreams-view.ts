@@ -66,14 +66,19 @@ interface Built {
   ringNewestMs: number;
 }
 
+/** Whether the store holds the ring this view reads: a version-1 ring, with no `seq`, is one the projector has not rebuilt yet. */
 function ringBuilt(db: ReadModelDb): boolean {
-  return db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'activity_ring'").get() !== undefined;
+  return db.prepare("SELECT 1 AS ok FROM pragma_table_info('activity_ring') WHERE name = 'seq'").get() !== undefined;
 }
 
-/** The ring's rows, oldest first; none for a store that has not built the projection. */
+/**
+ * The ring's rows, oldest first and same-millisecond rows in the order the projector applied them (the
+ * file's order), which is the order the route hands {@link buildOperatorActivityProjection}; none for a
+ * store that has not built the projection.
+ */
 export function readActivityRing(db: ReadModelDb): Row[] {
   if (!ringBuilt(db)) return [];
-  return db.prepare("SELECT body FROM activity_ring ORDER BY ts_ms, h").all().map((r) => JSON.parse(String(r.body)) as Row);
+  return db.prepare("SELECT body FROM activity_ring ORDER BY ts_ms, seq").all().map((r) => JSON.parse(String(r.body)) as Row);
 }
 
 /** Moves on any insert into the ring or trim of it. */

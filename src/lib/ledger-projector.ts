@@ -116,21 +116,36 @@ const activityRingInserts = new WeakMap<ReadModelDb, ReadModelStatement>();
 /**
  * The newest {@link ACTIVITY_RING_ROWS} rows of ANY step: operator activity ranks the newest rows of
  * every step, which `fact` cannot answer. Each transaction inserts its rows and then trims the ring
- * back to the newest by `(ts_ms, h)`, so any read order leaves the same rows.
+ * back to the newest by `(ts_ms, seq)`, so any read order leaves the same rows.
+ *
+ * `seq` is the order the projector applied the rows: within a file, the file's order. Operator
+ * activity numbers and truncates same-millisecond rows in the order it is handed them, and the route
+ * hands them in file order, so a ring ordered by `h` (version 1) gave a busy ledger's ties different
+ * ids than the route (2026-10-05: 6 diffs in 7 shadow samples). A new row's rowid exceeds every row the
+ * ring holds, which is all an order among held rows needs. A row whose `ts` is not its first key is
+ * placed by its parsed `ts`, as the route ranks it, not at epoch 0 where `ledgerLineIdentity` puts it.
+ * An exact duplicate line is applied once, as the route's union reader keeps it once (W1-T4820).
+ * Residual: a tie split across a rotation boundary is applied archive-first, while the union reads the
+ * live file first.
  */
 export const ACTIVITY_RING_PROJECTION: LedgerRowProjection = {
   name: "activity_ring",
-  version: 1,
+  version: 2,
   tables: ["activity_ring"],
-  ddl: "CREATE TABLE IF NOT EXISTS activity_ring(ts_ms INTEGER NOT NULL, h INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(ts_ms, h)) WITHOUT ROWID;",
+  // Version 1's table had no `seq`; a version change empties the store, so dropping it loses nothing.
+  ddl: `DROP TABLE IF EXISTS activity_ring;
+    CREATE TABLE activity_ring(seq INTEGER PRIMARY KEY, ts_ms INTEGER NOT NULL, h INTEGER NOT NULL, body TEXT NOT NULL, UNIQUE(ts_ms, h));
+    CREATE INDEX activity_ring_order ON activity_ring(ts_ms, seq);`,
   markers: [STEP_KEY],
-  apply(db, line, id) {
+  apply(db, line, id, parse) {
     let insert = activityRingInserts.get(db);
     if (!insert) activityRingInserts.set(db, insert = db.prepare("INSERT OR IGNORE INTO activity_ring(ts_ms, h, body) VALUES(?, ?, ?)"));
-    insert.run(id.tsMs, id.h, line);
+    const ts = id.ts ? undefined : parse()?.ts;
+    const parsed = typeof ts === "string" ? Date.parse(ts) : Number.NaN;
+    insert.run(Number.isFinite(parsed) ? parsed : id.tsMs, id.h, line);
   },
   settle(db) {
-    db.prepare(`DELETE FROM activity_ring WHERE (ts_ms, h) < (SELECT ts_ms, h FROM activity_ring ORDER BY ts_ms DESC, h DESC
+    db.prepare(`DELETE FROM activity_ring WHERE (ts_ms, seq) < (SELECT ts_ms, seq FROM activity_ring ORDER BY ts_ms DESC, seq DESC
       LIMIT 1 OFFSET ${ACTIVITY_RING_ROWS - 1})`).run();
   },
 };
