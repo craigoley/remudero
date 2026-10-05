@@ -796,6 +796,7 @@ export type WorkerKeychainReasonClass =
   | "provision-failed"
   | "credential-file-unreadable"
   | "credential-file-malformed"
+  | "credential-file-empty"
   | "credential-too-short-for-run"
   /** R-3: the keychain PROVISIONING LOCK was still held by a holder judged live after this call
    *  waited out `keychainProvisionLockWaitMs`. Named separately from `provision-failed` on
@@ -1002,13 +1003,14 @@ export type WorkerCredentialFileVerdict =
   | { kind: "usable"; expiresAtMs?: number }
   | { kind: "unusable"; reasonClass: WorkerKeychainReasonClass; detail: string };
 
-/** PURE (given a reader): classify the non-darwin credential file. Four observations, four answers,
+/** PURE (given a reader): classify the non-darwin credential file. Distinct observations and answers,
  *  none collapsed — the same null/empty discipline `readLedgerLines` and `GitHub.readFailed` keep.
  *  ENOENT is `credential-item-missing`, the SAME class the darwin rung uses because it is the same
  *  fact; any other throw is `credential-file-unreadable`, because a permissions problem is not an
  *  absence; non-JSON bytes are `credential-file-malformed`, as is JSON with no `claudeAiOauth` object.
+ *  An object holding no access or refresh token is `credential-file-empty`.
  *  TRAP: a file was observed holding only an `mcpOAuth` section, which a file-exists check waves
- *  through. Anything else is `usable`; expiry is reported, never refused. */
+ *  through. Credential presence permits native renewal; expiry is reported, never refused. */
 export function classifyWorkerCredentialFile(read: () => string): WorkerCredentialFileVerdict {
   let raw: string;
   try {
@@ -1026,13 +1028,20 @@ export function classifyWorkerCredentialFile(read: () => string): WorkerCredenti
     return { kind: "unusable", reasonClass: "credential-file-malformed", detail: "file is not valid JSON" };
   }
   const oauth = (parsed as { claudeAiOauth?: unknown } | null)?.claudeAiOauth;
-  if (typeof oauth !== "object" || oauth === null) {
+  if (typeof oauth !== "object" || oauth === null || Array.isArray(oauth)) {
     return {
       kind: "unusable",
       reasonClass: "credential-file-malformed",
       detail: "file parses but carries no claudeAiOauth section — it holds no Claude credential",
     };
   }
+  const credential = oauth as { accessToken?: unknown; refreshToken?: unknown };
+  const hasToken = [credential.accessToken, credential.refreshToken]
+    .some((token) => typeof token === "string" && token.trim().length > 0);
+  if (!hasToken) return {
+    kind: "unusable", reasonClass: "credential-file-empty",
+    detail: "claudeAiOauth holds neither an access credential nor a refresh credential",
+  };
   // REUSED, never re-derived: the SAME extractor the darwin sidecar path runs against the keychain
   // secret, which its own doc records as byte-identical in shape to this file.
   return { kind: "usable", expiresAtMs: extractCredentialExpiryMs(raw) };

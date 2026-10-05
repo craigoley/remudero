@@ -1,0 +1,34 @@
+- id: W1-T5669
+  title: "A HAND WORKTREE DEFAULTS TO THE SCRATCH DISK — `handWorktreeCommand` defaults `--parent` to `dirname(repoDir)`, so every hand build from the operator checkout lands on the root disk (82% used, 5.2 GB free) beside /mnt/scratch's 342 GB"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one default — where a hand worktree lands
+  origin: "operator session 2026-10-04: watch log, hand-worktree --parent defaults beside the checkout"
+  plan_refs: [W1-T5533]
+  files: [src/run-task.ts, src/lib/hand-worktree.ts, docs/cli-reference.md, test/a-hand-worktree-defaults-to-the-scratch-disk.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9. `handWorktreeCommand` (src/run-task.ts):
+    `const parent = flagValue(rest, "--parent") ?? dirname(resolve(repoDir));` — for
+    /home/craigoleyagent/rmd-op that is /home/craigoleyagent on the root disk (82%, 5.2 GB free);
+    /mnt/scratch is 21% used, 342 GB free. W1-T5533 (#9093) built the verb; nothing else touches the
+    default. Trade-off: `donorRejection` refuses a cross-filesystem donor (`cp -al` cannot hard-link
+    across it), so a scratch default hard-links only from a donor already on /mnt/scratch. The
+    default must not be /mnt/scratch/worktrees, the janitor's `WORKTREE_ROOTS`, which archives and
+    removes a worktree idle 6 h.
+  design: |
+    Export `defaultHandWorktreeParent(repoDir, { scratchRoot, exists })`: `<scratchRoot>/hand` when
+    scratchRoot (default /mnt/scratch, the root deploy/scratch-mounts.sh uses) is an existing
+    directory, else `dirname(repoDir)`. `--parent` still wins; the output names the chosen parent and
+    why, and says `npm ci` when no same-filesystem donor exists.
+  acceptance:
+    - claim: "with no --parent, rmd hand-worktree places the worktree under the scratch root when it exists and beside the checkout only when it does not"
+      proof: "unit test: test/a-hand-worktree-defaults-to-the-scratch-disk.test.ts"
+  falsifier: |
+    Restore `dirname(resolve(repoDir))` as the only default; the scratch-root case fails.

@@ -1,0 +1,39 @@
+- id: W1-T5656
+  title: "A QUARANTINED DURABLE SLOT TAKES THE NEXT CREDIT — recordCredit refuses to overwrite a filled source slot even when its entry is quarantined, so a task a live rung re-credits never gets a usable durable entry and pays the live rungs again every pass (126 marked tasks in the live store, 72 with no usable durable entry)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one defect — a quarantine mark holds the slot it should free
+  origin: "operator session 2026-10-04: watch log, recordCredit and the quarantined same-source entry"
+  plan_refs: [W1-T5552, W1-T3996, W1-T951, W1-T5353]
+  files: [src/lib/status.ts, test/a-quarantined-durable-slot-takes-the-next-credit.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9 (src/lib/status.ts). `recordCredit` returns early on a
+    filled slot: `if (existing[entry.source]) return store;`. `invalidateDurableCredit` writes the
+    quarantine mark BESIDE the entry (`invalidated: { ...existing.invalidated, [source]: … }`), so
+    the quarantined entry keeps its slot, and the durable rung of `derivePrPrecedence` skips it by
+    source (`if (durableCredit.invalidated?.[entry.source] || quarantinedUrls.has(entry.prUrl))
+    continue;`). When rung (c) then credits an older build through `findMergedByTrailerAll` (or
+    `corroborateByBranch` finds a branch hit), its `writeCreditStore(recordCredit(...))` is a no-op,
+    and the next pass pays the live rungs again. Live store (state/merge-credit.json, read-only):
+    2560 entries, 126 tasks carry marks (50 trailer, 77 head-branch), every trailer mark sits on the
+    slot's own entry, and 72 tasks have no usable durable entry. No queued shard or open PR touches
+    `recordCredit` (#9124 does not).
+  design: |
+    (i) A quarantine names a PR, not a slot: `invalidateDurableCredit` keeps every quarantined PR
+    url, and a later mark never drops an earlier one. The subtract-only rule is unchanged.
+    (ii) `recordCredit` replaces a slot whose current entry's PR is quarantined when the new entry's
+    PR is not.
+    (iii) The durable rung skips an entry only when its `prUrl` is quarantined.
+  acceptance:
+    - claim: "once a live rung credits a non-quarantined PR for a task whose trailer slot holds a quarantined PR, the next derivation answers from the durable rung with no trailer search, and the quarantined PR is still never credited"
+      proof: "unit test: test/a-quarantined-durable-slot-takes-the-next-credit.test.ts"
+  falsifier: |
+    Restore `if (existing[entry.source]) return store;`; the second derivation calls the trailer
+    search again and the test fails.

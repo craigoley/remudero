@@ -1,0 +1,33 @@
+- id: W1-T5663
+  title: "A CENSUS SUITE MAIN ALREADY FAILS REFUSES EVERY JOINING PUSH — W1-T5617's admitted-suite run reads only this tree, so one red suite on main blocks every src push that walks its population, and hooks/pre-push still says the precheck spawns only read-only git"
+  repo: remudero
+  depends_on: [W1-T5617]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium
+  origin: "operator session 2026-10-04: watch log, W1-T5617 (#9127) follow-ups"
+  plan_refs: [W1-T5617, W1-T3225, W1-T3224]
+  files: [scripts/census-precheck.mjs, hooks/pre-push, test/a-census-suite-main-already-fails-does-not-refuse-a-joining-push.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9 and #9127 (W1-T5617, merged c99bd3f7; re-checked on 43190266). On main hooks/pre-push
+    says census-precheck "imports each one's own counter, reads files and spawns only read-only git …
+    a census main already fails is not this push's to answer for" — true on main. #9127 adds
+    `evaluateAdmittedCensusSuites` / `runCensusSuitesViaChild` to scripts/census-precheck.mjs, and its
+    own header admits "They run on this tree only, so unlike the counts below a suite main already
+    fails refuses here too." #9127 does not touch hooks/pre-push, so once it merges the hook comment
+    is false (it now spawns a `node --test` child that builds git fixtures), and a red suite on main
+    refuses every push joining its population.
+  design: |
+    For each suite failing on head, run it once more on the merge base (a detached worktree that
+    borrows node_modules) and refuse only head-red/base-green; a broken base run reports "not
+    measured" (exit 2), never a pass. Rewrite the hook comment to say what the precheck spawns.
+  acceptance:
+    - claim: "with injected runSuites, a suite red on both base and head does not refuse, red on head only refuses, and an unrunnable base exits 2"
+      proof: "unit test: test/a-census-suite-main-already-fails-does-not-refuse-a-joining-push.test.ts"
+  falsifier: |
+    Drop the base run; the both-red case refuses and the test fails.
