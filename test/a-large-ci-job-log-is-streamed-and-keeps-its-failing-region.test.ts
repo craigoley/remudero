@@ -19,35 +19,21 @@ const TS = "2026-10-05T01:02:03.0000000Z ";
 
 /** A real `gh` PATH shim whose job-log route streams `logFile` and whose annotations route is empty. */
 async function withLogShim<T>(
-  log: string | ((write: (chunk: string) => void) => void),
+  log: string,
   exitCode: number,
   body: (shim: { calls(): string[] }) => Promise<T>,
 ): Promise<T> {
-  const shim = ghShim([], { kind: "streamed-job-log" });
   const work = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}streamed-job-log-cache-`));
   const logFile = join(work, "job.log");
-  let text = "";
-  if (typeof log === "string") text = log;
-  else {
-    const parts: string[] = [];
-    log((chunk) => parts.push(chunk));
-    text = parts.join("");
-  }
-  writeFileSync(logFile, text);
-  writeFileSync(
-    join(shim.dir, "gh"),
+  writeFileSync(logFile, log);
+  const shim = ghShim(
     [
-      "#!/bin/sh",
-      `printf '%s\\n' "$*" >> ${JSON.stringify(join(shim.dir, "calls.log"))}`,
-      'case "$*" in',
-      "  *annotations*) echo '[]' ;;",
+      { when: "annotations", stdout: "[]" },
       exitCode === 0
-        ? `  */logs) cat ${JSON.stringify(logFile)} ;;`
-        : `  */logs) echo 'HTTP 502: bad gateway' 1>&2; exit ${exitCode} ;;`,
-      "esac",
-      "",
-    ].join("\n"),
-    { mode: 0o755 },
+        ? { when: "/logs", stdoutFile: logFile }
+        : { when: "/logs", stderr: "HTTP 502: bad gateway", exit: exitCode },
+    ],
+    { kind: "streamed-job-log" },
   );
   const saved = { PATH: process.env.PATH, RMD_GH_CACHE_HOME: process.env.RMD_GH_CACHE_HOME };
   process.env.PATH = `${shim.dir}:${process.env.PATH ?? ""}`;
