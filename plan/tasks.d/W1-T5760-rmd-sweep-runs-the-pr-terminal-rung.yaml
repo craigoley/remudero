@@ -1,0 +1,32 @@
+- id: W1-T5760
+  title: "`rmd sweep` RUNS THE PR-TERMINAL RUNG — W1-T5318 wired `sweepPrTerminalRung` only into the daemon's `buildSweepHook`, while `sweepCommand` runs the credit backfill and the escalation reconcile but no terminal rung, so a hand-run or detached sweep never records a closed PR's terminal fact"
+  repo: remudero
+  depends_on: [W1-T5318]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: low
+  origin: "operator session 2026-10-04: watch log 22:55Z, W1-T5318 (#9179) follow-up (c)"
+  plan_refs: [W1-T5318, W1-T150]
+  files: [src/run-task.ts, test/rmd-sweep-runs-the-pr-terminal-rung.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 9c38366f. src/run-task.ts `sweepPrTerminalRung` has one call
+    site, in `buildSweepHook` after `runCreditBackfill` (comment "W1-T5318: every closed PR, task or
+    not"). `sweepCommand` (the `rmd sweep` verb) runs `runCreditBackfill` and
+    `sweepEscalationReconcile` with `{ dryRun }` and never the terminal rung, so W1-T150's rule that
+    the daemon runs "the SAME credit-backfill rung `rmd sweep` runs" does not hold for this rung.
+    src/run-task.ts sits at its comment-load ceiling (17,750 on 10-04): add no comment lines there.
+  design: |
+    `sweepCommand` calls the terminal rung after its credit backfill with a `prByRef` port of the
+    gateway type the daemon passes (`sweepCommand` builds none today, so it constructs one);
+    `--dry-run` reaches `runPrTerminalReconcile`'s existing `dryRun` (counts, appends nothing), which
+    `sweepPrTerminalRung` must start passing through; the printed summary includes the count.
+  acceptance:
+    - claim: "rmd sweep with a fake GitHub reporting one closed PR named in the ledger appends one pr.terminal row, and with --dry-run appends none"
+      proof: "unit test: test/rmd-sweep-runs-the-pr-terminal-rung.test.ts"
+  falsifier: |
+    Remove the call: the closed PR gets no pr.terminal row and the test fails.

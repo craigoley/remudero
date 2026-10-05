@@ -1,0 +1,45 @@
+- id: W1-T5772
+  title: "A FRESHNESS FETCH ASKS ONLY FOR MAIN, AND ONE KILLED AT ITS BOUND NAMES WHERE IT STALLED — the reviewer and daemon freshness reads run a full `git fetch origin` (+refs/heads/*) in a checkout holding 9,143 refs and 134,875 loose objects; inside the container it exceeded 60 s from 00:05Z to 00:25Z on 2026-10-05 and the daemon's own freshness went `unassessed` at 23:56Z, while on a host copy the same fetch took 1.1 s"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — what a freshness read fetches and what a killed fetch reports
+  band_meaning: span
+  origin: "operator session 2026-10-05: coordinator item 19 (root-cause the >60 s in-container git fetch)"
+  plan_refs: [W1-T5282, W1-T5771, W1-T5745, W1-T3116, W1-T2529]
+  files: [src/lib/git-fetch-retry.ts, src/lib/self-sync.ts, test/a-freshness-fetch-asks-only-for-main-and-names-where-it-stalled.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 9c38366f. src/lib/git-fetch-retry.ts
+    `fetchOriginRetryingRefLock`/`fetchOriginRetryingRefLockAsync` run `git fetch --quiet origin`
+    with the checkout's configured refspec, `+refs/heads/*:refs/remotes/origin/*`; self-sync.ts's
+    daemon freshness (W1-T5282) and reviewer-code freshness reads call them, and only origin/main is
+    read afterwards. MEASURED read-only on the managed checkout (~/rmd-state2/remudero, the
+    container's /home/node/Remudero/remudero): 9,143 refs, of which 4,026 are refs/remotes while
+    GitHub holds 105 heads (fetch.prune is unset); 3,092 local heads; 134,875 loose objects (3.5 GB)
+    and 49 packs. On a copy of that .git on the host's scratch disk: full fetch 1,088 ms (trace2
+    negotiation done at 0.71 s), repeat 287 ms, `fetch --no-tags origin main` 277 ms, ls-remote main
+    168 ms. So ref count alone does not explain the in-container 60 s kills (7+ reviewer refusals
+    00:05-00:25Z; daemon freshness `unassessed` 23:56Z); the cause is unattributed, because a fetch
+    killed at its bound reports only "exceeded its 60000ms bound". Copying that .git took 424 s on
+    the host, a sign the loose-object store is the likelier cost (object maintenance is W1-T3116,
+    queued).
+  design: |
+    (i) Freshness reads fetch the one ref they read: `git fetch --quiet --no-tags origin
+    +refs/heads/main:refs/remotes/origin/main`, through the same retry and bound; other callers of
+    the helper keep the full fetch.
+    (ii) Every bounded fetch runs with GIT_TRACE2_EVENT to a temp file; when it is killed at the
+    bound, the thrown error and the refusal reason name the last trace2 region entered (e.g.
+    negotiation, index-pack, check_connected) and the elapsed ms, and the file is removed either
+    way. An operator can then tell network, negotiation, locks and object-store cost apart from the
+    ledger alone.
+  acceptance:
+    - claim: "a freshness read's fetch argv names only refs/heads/main with --no-tags, a full-fetch caller's argv is unchanged, and a fake fetch that times out after entering a negotiation region throws an error naming that region and the elapsed ms"
+      proof: "unit test: test/a-freshness-fetch-asks-only-for-main-and-names-where-it-stalled.test.ts"
+  falsifier: |
+    Keep the bare `fetch origin`: the freshness argv carries no refspec and the test fails.
