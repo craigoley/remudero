@@ -90,6 +90,7 @@ import { createViewEvents, VIEW_EVENTS_PATH, type ViewEvents } from "./view-even
 import { analyticsLegacyView } from "./analytics-view.js";
 import { NAV_BADGE_NO_COMPOSITE, navBadgeView, navBadgeWithDecisions, startNavBadgeSourcePublisher, type NavBadgeScope } from "./nav-badge-view.js";
 import { NOW_VIEW_NAME } from "./now-view.js";
+import { HOST_VIEW_NAME, hostLegacyView, providerPolicyConfigFromStatus, providerRoutingBody, type HostViewData } from "./host-view.js";
 import { FEEDBACK_VIEW_NAME, feedbackLegacyView } from "./feedback-view.js";
 import { INBOX_VIEW_NAME, inboxLegacyView } from "./inbox-view.js";
 import { NEEDS_YOU_VIEW_NAME, withNeedsYouView, type NeedsYouData } from "./needs-you-view.js";
@@ -2143,16 +2144,8 @@ export function buildProviderRoutingRoute(deps: {
     method: "GET",
     path: "/v1/provider-routing",
     scope: "read",
-    handler: (_req, res) => {
-      const read = deps.read ?? readProviderRoutingStatus;
-      const status = read(deps.root, { now: deps.now });
-      const config = providerPolicyConfigFromStatus(status);
-      const policy = config ? resolveProviderRoutingPolicy(deps.root, config, { now: deps.now }) : status.policy;
-      // The status remains the daemon's last material routing decision. Overlay only the live
-      // policy projection so a successful console write, expiry, or clear stays visible before
-      // the next dispatch refreshes capacities/selection; Serve still performs no provider probe.
-      sendJson(res, 200, policy ? { ...status, policy } : status);
-    },
+    // The body is the `host` view's providerRouting part too (host-view.ts).
+    handler: (_req, res) => sendJson(res, 200, providerRoutingBody(deps)),
   };
 }
 
@@ -2172,17 +2165,6 @@ function validateProviderRoutingPolicyBody(body: unknown): { error: string } | {
   // The store is the one schema authority. Keep the unknown object wrapped so a hostile `error`
   // key cannot be mistaken for jsonAction's own validation-error envelope.
   return { value: body as ProviderRoutingPolicyOverrideInput };
-}
-
-function providerPolicyConfigFromStatus(status: ProviderRoutingStatus): { workerProviders: { enabled: WorkerProviderId[]; reservePercent: number } } | undefined {
-  const committed = status.policy?.committed;
-  if (!committed) return undefined;
-  return {
-    workerProviders: {
-      enabled: [...committed.enabledProviders],
-      reservePercent: committed.reservePercent,
-    },
-  };
 }
 
 function providerPolicyAuditProjection(policy: ReturnType<typeof resolveProviderRoutingPolicy>): Record<string, unknown> {
@@ -2669,7 +2651,7 @@ function assembleServeRoutes(
     ...badgeScopes];
   const modelApprovals = deps.modelApprovals ?? [];
   const routeReads = deps.routeReadRollup ?? createRouteReadRollup();
-  const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME], servedByDefault: [readModelStatusView.name],
+  const viewEvents = createViewEvents({ names: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, HOST_VIEW_NAME], servedByDefault: [readModelStatusView.name],
     ...(readModel ? { readModel } : {}), every: deps.readModel?.every, log: deps.log, onSubscribers: (change, n, reason) => routeReads.stream("views", change, n, reason) });
   // CAPTURED ONCE, HERE. buildServeRoutes runs exactly once per `rmd serve` process, so this is
   // server start; both the shell span and GET /v1/version close over this one value and neither
@@ -2804,12 +2786,15 @@ function assembleServeRoutes(
     instance: deps.instances?.coreInstance ?? CORE_INSTANCE, repository: deps.assistantRepository, bootSha: consoleSha };
   const needsYouGates = (): HumanGateProjection | undefined => (readModel?.body(NEEDS_YOU_VIEW_NAME)?.body.data as NeedsYouData | undefined)?.humanGates;
   const navBadge = navBadgeView({ inboxRoot: deps.fleetControlRoot, scopes: navBadgeScopes });
+  // W1-T5053: the host view's legacy side reads through the same deps its four routes answer with.
+  const hostLegacy = hostLegacyView({ control: controlStatusDeps, account: accountUsageDeps, providerRouting: { root: deps.fleetControlRoot, ...deps.providerRouting }, skillsRoot: deps.questionsRoot },
+    () => readModel?.body(HOST_VIEW_NAME)?.body.data as HostViewData | undefined);
   // W1-T5055: the analytics view's legacy side merges serve's own per-instance caches, as the worker merges their snapshots.
   const analyticsLegacy = analyticsLegacyView({ scopes: () => navBadgeScopes().map((scope) => ({ instanceId: scope.instanceId, analytics: scope.analytics })) });
   // The shadow compares the worker's badge with the undecorated legacy one; only the served badge carries decisions.
   const shadowed = withViewShadow(readModel, { readModel, servedByDefault: [readModelStatusView.name], onServed: routeReads.served,
-    readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME], requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"] },
-    legacy: [navBadge, analyticsLegacy, inboxLegacyView(panelReadDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan)] });
+    readModelViews: [...READ_MODEL_VIEWS.map((view) => view.name), NOW_VIEW_NAME, INSTANCES_VIEW_NAME, INBOX_VIEW_NAME, FEEDBACK_VIEW_NAME, NEEDS_YOU_VIEW_NAME, WORKSTREAMS_VIEW_NAME, HOST_VIEW_NAME], requiredParams: { [NOW_VIEW_NAME]: ["instance"], [INBOX_VIEW_NAME]: ["section"] },
+    legacy: [navBadge, analyticsLegacy, inboxLegacyView(panelReadDeps), feedbackLegacyView(panelGraphDeps, () => deps.board.plan), hostLegacy] });
   const served = { ...shadowed, legacy: shadowed.legacy.map((view) => view === navBadge ? navBadgeWithDecisions(navBadge, needsYouGates) : view) };
   const rawRoutes = [
     withStatusNeedsYou(withRepairLadder(projectConsoleStatusRoute(buildStatusRoute(deps.board, lastSeen, deps.boardSnapshotSource), modelApprovals), readLadder), needsYouGates),

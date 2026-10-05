@@ -3025,6 +3025,30 @@ export interface components {
         })[];
       };
     };
+    /** GET /v1/views/host (docs/views.md, src/lib/host-view.ts; W1-T5053, P4-T14): the console's /host page in one read. Each part is the body its route answers, built by the same function: `control` GET /v1/control/status, `accountUsage` GET /v1/account-usage without its `*AgeMs` fields, `providerRouting` GET /v1/provider-routing, `skills` GET /v1/skills's list, `selfMeasurement` GET /v1/self-measurement. `gauges` are the exact disk and REST rate-limit readings (the `now` view carries them as bands). Built in the read-model worker's view thread at most once a minute, the rate limit and the measurement union read asynchronously. The view writes nothing; the credit-state edge is ledgered by the slow lane. Dark until state/read-model/switches.json sets `host` to `serve`. */
+    HostView: {
+      view: "host";
+      version: 1;
+      generatedAt: string;
+      asOf: string | null;
+      stale: boolean;
+      sources: (ViewSource)[];
+      data: {
+        control: FleetControlStatus;
+        accountUsage: AccountUsageSnapshot;
+        providerRouting: ProviderRoutingStatus;
+        skills: (SkillEntry)[];
+        selfMeasurement: (SelfMeasurementRows) | (SelfMeasurementUnreadable);
+        gauges: {
+          /** statfs `bavail * bsize` of core's state dir, exact. */
+          diskFreeBytes?: number;
+          /** `gh api rate_limit`'s `resources.core.remaining`, exact. */
+          rateLimitRemaining?: number;
+          /** Why a gauge is absent, per gauge. */
+          reasons?: Record<string, string>;
+        };
+      };
+    };
     /** GET /v1/views/needs-you (docs/views.md, src/lib/needs-you-view.ts): a view of views (P4-T08). Serve recomposes it from the bodies it holds, every instance's `now` and the `inbox` view's `section=needsYou` page, whenever one moves; it reads no store. An input with no usable body is absent with a reason, never zero. Dark until state/read-model/switches.json sets `needs-you` to `serve`. */
     NeedsYouView: {
       view: "needs-you";
@@ -3364,10 +3388,10 @@ export interface components {
       entries: (RecentActivityEntry)[];
       staleness?: ConsoleResponseStaleness;
     };
-    /** One `measurement_cadence.ran` ledger row (src/lib/measurement-cadence.ts's `MeasurementCadenceRowEntry`). `result` is keyed by cadence verb (camelCased) and each value is that verb's SUMMARY (`summarizeMeasurementValue`): scalars, short strings and array counts. The verb set grows with the cadence, so the map is genuinely open. */
+    /** One `measurement_cadence.ran` ledger row (src/lib/measurement-cadence.ts's `MeasurementCadenceRowEntry`). `result` is keyed by cadence verb (camelCased) and each value is that verb's SUMMARY (`summarizeMeasurementValue`): scalars, short strings and array counts. The verb set grows with the cadence, so the map is genuinely open, and so is each summary (`true`, not `{}`, so the strict view validator reads it open too: GET /v1/views/host). */
     SelfMeasurementRow: {
       ts: string;
-      result: Record<string, unknown>;
+      result: Record<string, never>;
     };
     /** The newest measurement rows, newest first. */
     SelfMeasurementRows: {
@@ -5317,6 +5341,17 @@ export interface paths {
     get: {
       responses: {
           "200": WorkstreamsView;
+          "304": undefined;
+          "401": Error;
+          "403": Error;
+          "404": undefined;
+        };
+    };
+  };
+  "/v1/views/host": {
+    get: {
+      responses: {
+          "200": HostView;
           "304": undefined;
           "401": Error;
           "403": Error;
