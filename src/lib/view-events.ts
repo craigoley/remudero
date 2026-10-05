@@ -25,7 +25,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { systemClock, type Clock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { ifNoneMatchHits } from "./console-snapshot-cache.js";
 import type { ReadModelWorkerHandle } from "./read-model-worker.js";
 import type { Route } from "./service.js";
@@ -47,7 +47,10 @@ export const VIEW_EVENTS_RETRY_MS = 3_000;
  *  refetch (design §4.2 lever 1: nav-badge is ~1.5 KB; `now`, ~100 KB, is refetched). */
 export const VIEW_EVENTS_INLINE_BYTES = 4 * 1024;
 /** One `view.emitted` ledger row per key at most this often: a latency sample, not a log of every event. Its
- *  `rowTs` (the newest ledger row the body reflects) and `emittedAt` time the host-side hops on one clock. */
+ *  `rowTs` (the newest ledger row the body reflects) and `emittedAt` time the host-side hops on one clock.
+ *  `rowTs` is read when the build STARTS, so `emittedAt - rowTs` omits a row's wait for that start: `prevRowTs`
+ *  (the newest row the key's previous event reflected) bounds it, since the oldest row this body is the first
+ *  to show is the first after `prevRowTs`, and `buildStartedAt` splits the wait from the build. */
 export const VIEW_EMITTED_SAMPLE_MS = 60_000;
 
 /** One served view's version per key, and the views whose switch is not `serve`. */
@@ -121,6 +124,8 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
   const sampledAt = new Map<string, number>();
   const subs = new Set<Subscriber>();
   const emitted = new Map<string, string>();
+  /** The newest ledger row each key's last event reflected, kept across every event, sampled or not. */
+  const reflected = new Map<string, string | null>();
   let seq = 0;
   let stopRunning: (() => void) | undefined;
 
@@ -198,11 +203,15 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
     const body = { ...entry.body, stale, asOf, sources };
     const bytes = Buffer.byteLength(JSON.stringify(body));
     const emittedAt = clock.iso();
+    const rowTs = newestLedgerRow(sources);
+    const prevRowTs = reflected.get(id);
+    reflected.set(id, rowTs);
     const event = { view: entry.view, key: entry.key, etag, stale, emittedAt, asOf, cause };
     const text = frame("view", bytes <= inlineBytes ? { ...event, body } : event, `${bootId}:${seq}`);
     if (now - (sampledAt.get(id) ?? Number.NEGATIVE_INFINITY) >= VIEW_EMITTED_SAMPLE_MS) {
       sampledAt.set(id, now);
-      opts.log?.("view.emitted", { view: entry.view, key: entry.key, etag, cause, emittedAt, rowTs: newestLedgerRow(sources), bytes, inline: bytes <= inlineBytes, subscribers: subs.size });
+      opts.log?.("view.emitted", { view: entry.view, key: entry.key, etag, cause, emittedAt, rowTs, bytes, inline: bytes <= inlineBytes, subscribers: subs.size,
+        ...(prevRowTs ? { prevRowTs } : {}), ...(entry.buildStartedMs !== undefined ? { buildStartedAt: fixedClock(entry.buildStartedMs).iso() } : {}) });
     }
     for (const sub of subs) if (!sub.views || sub.views.has(entry.view)) deliver(sub, id, text, now);
   };
@@ -224,7 +233,11 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
   /** Timers and the worker listener exist only while somebody is subscribed. */
   const run = (readModel: NonNullable<ViewEventsOptions["readModel"]>): void => {
     emitted.clear();
-    for (const [id, judged] of current(clock.now())) emitted.set(id, judged.etag);
+    reflected.clear();
+    for (const [id, judged] of current(clock.now())) {
+      emitted.set(id, judged.etag);
+      reflected.set(id, newestLedgerRow(judged.sources));
+    }
     const stops = [
       readModel.onBody((entry) => {
         if (!served(entry.view)) return;

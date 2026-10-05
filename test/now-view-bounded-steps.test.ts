@@ -171,3 +171,44 @@ test("W1-T5066: a failed stage discards its partial build and retries cleanly", 
   assert.equal(view.materialize(w.ctx).length, 1);
   assert.equal(reads, 2);
 });
+
+/** A ticker over one core instance whose plan read costs 900 ms and GitHub read 1,700 ms: the first call outgrows the pass. */
+function slowFirstCall(t: TestCtx) {
+  const root = scratch(t);
+  const clock = handClock();
+  const ledgerDir = seededDir(root, clock);
+  const feedbackRoot = join(root, "checkout");
+  mkdirSync(join(feedbackRoot, "plan", "feedback"), { recursive: true });
+  const stateDir = join(root, "state");
+  mkdirSync(join(stateDir, "read-model"), { recursive: true });
+  writeFileSync(readModelSwitchesPath(stateDir), JSON.stringify({ views: { now: "shadow" } }));
+  const instance = { name: "core", ledgerDir, repo: "o/r", feedbackRoot };
+  const view = createNowView({
+    instances: [instance], clock, ...seams(clock, 0),
+    readPlan: () => (clock.advance(900), PLAN),
+    github: () => (clock.advance(1_700), { github: GATEWAY, generation: "g", source: { asOf: null, state: "fresh" } }),
+  });
+  const posted: ReadModelWorkerMessage[] = [];
+  const ticker = createReadModelTicker({ stateDir, instances: [instance], clock, views: [view], oracle: "off", passBudgetMs: PASS_MS, post: (m) => void posted.push(m) });
+  t.after(() => ticker.release());
+  ticker.start();
+  for (let ticks = 0; !posted.some((m) => m.type === "body" && m.entry.view === "now") && ticks < 20; ticks++) {
+    ticker.tick();
+    clock.advance(250);
+  }
+  return { clock, posted };
+}
+
+test("a slow now build's read_model.slow_view row names each stage's ms", (t) => {
+  const { posted } = slowFirstCall(t);
+  const slow = posted.flatMap((m) => (m.type === "log" && m.step === "read_model.slow_view" ? [m.extra] : []));
+  assert.deepEqual(slow, [{ view: "now", instance: "core", ms: 2_600, passMs: PASS_MS, thread: "projector", stages: { plan: 900, github: 1_700 } }]);
+});
+
+test("a now body built across bounded steps carries the start of its first step as buildStartedMs", (t) => {
+  const { posted } = slowFirstCall(t);
+  const body = posted.find((m) => m.type === "body" && m.entry.view === "now");
+  assert.ok(body?.type === "body", "the body was built");
+  assert.ok(Date.parse(body.entry.body.generatedAt) > T0 + 2_600, `control: the body was finished in a later call, at ${body.entry.body.generatedAt}`);
+  assert.equal(body.entry.buildStartedMs, T0);
+});

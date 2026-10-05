@@ -229,6 +229,7 @@ export interface ReadModelView {
   materialize(ctx: ReadModelViewContext): Array<{ key: string; data: unknown; sources: ViewSource[] }>;
   /** Work ahead of `materialize`, one bounded step per `more()`; false while some remains, and no body is built before it is done. */
   prepare?(ctx: ReadModelViewContext, more: () => boolean): boolean;
+  stages?(ctx: ReadModelViewContext): Record<string, number> | undefined;
   /** The shadow comparator's legacy side for one key, computed in the worker beside the view's body. */
   legacy?(key: string, now: number, data: unknown): ShadowLegacy | undefined;
   /** Its bodies are per instance: each instance's is built, timed and paced as a unit of its own. */
@@ -538,10 +539,11 @@ export interface ReadModelTicker {
 interface ViewUnit {
   view: ReadModelView;
   slot?: Slot;
-  /** What its last build took; absent until it has run once. */
+  /** What its last build call took (absent until one ran); `startedAt` is the first call of a bounded build in flight. */
   costMs?: number;
   /** Not rebuilt before this: its last cost divided by {@link READ_MODEL_VIEW_SHARE}. */
   dueAt: number;
+  startedAt?: number;
 }
 
 class ReadModelStopRequested extends RmdError {
@@ -948,7 +950,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   /** One materialized body: its source readings are noted, and it is persisted and posted only when its ETag moved. */
-  function publish(name: string, version: number, key: string, data: unknown, sources: ViewSource[], generation: number): void {
+  function publish(name: string, version: number, key: string, data: unknown, sources: ViewSource[], generation: number, buildStartedMs?: number): void {
     for (const source of sources) {
       if (source.name.startsWith(LEDGER_SOURCE_PREFIX)) continue;
       const reading = JSON.stringify({ ...source, lagMs: undefined });
@@ -961,7 +963,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const id = `${name}\u0000${key}`;
     if (lastEtag.get(id) === etag) return;
     const body: ViewBody = { view: name, version, generatedAt: clock.iso(), asOf: oldestAsOf(sources), stale, sources, data };
-    const entry: ReadModelBodyEntry = { view: name, key, version, generation, etag, body };
+    const entry: ReadModelBodyEntry = { view: name, key, version, generation, etag, body, ...(buildStartedMs !== undefined ? { buildStartedMs } : {}) };
     if (switches.projector === "on") persist(entry);
     lastEtag.set(id, etag);
     latest.set(id, body);
@@ -1015,18 +1017,21 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const named = { view: view.name, ...(unit.slot ? { instance: unit.slot.instance.name } : {}) };
     if (viewsOnly) opts.post({ type: "view_unit", ...named, phase: "start" });
     let ready = true;
+    const scoped = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
+    const buildStartedMs = (unit.startedAt ??= started);
     try {
-      const scoped = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
       ready = view.prepare?.(scoped, stepsUntil(started + allowanceMs)) ?? true;
-      for (const { key, data, sources } of ready ? view.materialize(scoped) : []) publish(view.name, view.version, key, data, sources, generation);
+      for (const { key, data, sources } of ready ? view.materialize(scoped) : []) publish(view.name, view.version, key, data, sources, generation, buildStartedMs);
     } catch (error) {
       log("read_model.materialize_failed", { view: view.name, error: (error as Error).message });
     }
     const finished = clock.now();
     unit.costMs = finished - started;
     unit.dueAt = ready ? finished + unit.costMs / READ_MODEL_VIEW_SHARE : finished;
+    if (ready) unit.startedAt = undefined;
     if (viewsOnly) opts.post({ type: "view_unit", ...named, phase: "end" });
-    if (unit.costMs > passMs) log("read_model.slow_view", { ...named, ms: unit.costMs, passMs, thread: viewsOnly ? "views" : "projector" });
+    const stages = unit.costMs > passMs ? view.stages?.(scoped) : undefined;
+    if (unit.costMs > passMs) log("read_model.slow_view", { ...named, ms: unit.costMs, passMs, thread: viewsOnly ? "views" : "projector", ...(stages ? { stages } : {}) });
   }
 
   const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => switches.views[unit.view.name] !== "off" && unit.dueAt <= now).sort((a, b) => a.dueAt - b.dueAt);
