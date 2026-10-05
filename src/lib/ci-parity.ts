@@ -2711,6 +2711,8 @@ export const CENSUS_POPULATION: readonly CensusPopulationMember[] = [
   ),
 ];
 
+export const RULE_SUITE_NAME_RE = /(?:census|ratchet|baseline)/i;
+
 /** Minimum discovered rule-check files required to keep the fast lane from silently collapsing. */
 export const MIN_RULE_SUITE_COUNT = 20;
 
@@ -2733,12 +2735,11 @@ export function listRuleSuites(repoRoot: string): string[] {
   }
   const tracked = new Set(result.stdout.split(/\r?\n/).filter(Boolean));
   const roster = new Set(CENSUS_POPULATION.map((member) => member.testFile));
-  const ruleName = /(?:census|ratchet|baseline)/i;
   const suites = [...tracked]
     .filter((path) => {
       if (!path.endsWith(".test.ts")) return false;
       if (roster.has(path)) return true;
-      if (!ruleName.test(path.slice("test/".length))) return false;
+      if (!RULE_SUITE_NAME_RE.test(path.slice("test/".length))) return false;
       const text = readFileSync(join(repoRoot, path), "utf8");
       const header = text.match(/^\s*(?:(?:\/\/[^\r\n]*(?:\r?\n|$)|\/\*[\s\S]*?\*\/)\s*)*/)![0];
       const markers = [...header.matchAll(/@not-a-rule-suite\b([^\r\n]*)/g)];
