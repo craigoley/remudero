@@ -1,31 +1,25 @@
 #!/usr/bin/env node
-// scripts/arch-remeasure.mjs — W1-T5059: the plan-complete re-measure instrument (Phase 4 design §9, P4-T20).
+// Plan-complete re-measure instrument — W1-T5059, Phase 4 design §9 (P4-T20).
 //
-// TWO MODES, BOTH GENTLE AND READ-ONLY:
-//   probe    sequential GETs, a 3 s gap, aborting (exit 3) after two consecutive `runtime.loop_lag` windows
-//            over 10 s. The read token is read in-process from `<stateDir>/service-tokens.json` and is NEVER
-//            printed; response bodies are hashed, never stored.
-//   recount  independent recounts over the LEDGER UNION in all three rotation forms, compared with the `now`
-//            view: (a) today's merges distinct by PR vs `recent.mergedToday.count`; (b) in-flight runs vs
-//            `board.counts.running`; (c) open grill entries vs `decisions[kind=grill]` (corpus: the FEEDBACK
-//            STORE, not the ledger). One JSON line per recount, then a summary line.
+// Read-only modes:
+//   probe: sequential GETs, 3 s apart; exit 3 after two consecutive loop-lag windows over 10 s.
+//   Read tokens stay in-process; response bodies are hashed, never stored.
+//   recount: compare distinct PRs merged today and in-flight runs over the ledger union with
+//   `recent.mergedToday.count` and `board.counts.running`; compare open feedback-store grill
+//   entries with `decisions[kind=grill]`. Emit one JSON line per recount, then a summary.
 //
-// THE CONTROL (doctrine: "the rotations come in two forms" / "the control must prove each form was read"):
-// file DISCOVERY is one directory listing classified by form, kept separate from the READER, which counts the
-// files it actually read per form. A form PRESENT on disk that contributed ZERO files to the read is glob
-// blindness: the recount refuses with `oracle_blind` and exits 2. A form with no files on disk is reported
-// `absent (0 on disk)` and is NOT refused — the production host measured 398 .gz, 0 plain, 1 live, so
-// "any form has zero files" would refuse every real run.
+// Control: classify one directory listing by form independently of the reader's completed files.
+// A present form with zero files read means glob blindness: refuse with `oracle_blind`, exit 2.
+// An absent form is reported as `absent (0 on disk)`; refusing it would reject valid corpora.
+// Doctrine: "the rotations come in two forms" / "the control must prove each form was read".
+// Falsifier: test/arch-remeasure.test.ts omits a present rotation form holding the only merges.
 //
-// DEPENDENCY-FREE ON PURPOSE: node builtins only, so the file can be copied to a host without a checkout.
-// `yaml` is used for the feedback store when importable, else a top-level-key scanner (labelled in output).
+// Standalone: node builtins; optional `yaml` for feedback, else a labelled top-level-key scanner.
 //
-// USAGE:
+// Usage:
 //   node scripts/arch-remeasure.mjs recount [--state-dir D] [--now-file F | --host H] [--plan-root R] [--feedback-root R]
-//   --plan-root and --feedback-root default to this file's checkout. They must name the checkout the VIEW reads: on the
-//   production host that is the managed checkout (`<config.root>/repos/remudero`), not serve's own repo mount —
-//   measured 2026-10-05, the serve mount's plan was two days behind (17 vs 74 merges) and its feedback store one
-//   grill entry short.
+//   Roots default to this file's checkout. Match the view's checkout to avoid stale plan/feedback counts;
+//   production uses the managed checkout (`<config.root>/repos/remudero`), not serve's repo mount.
 //   node scripts/arch-remeasure.mjs probe   [--state-dir D] [--host H] [--routes a,b] [--sweeps N] [--out F]
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
