@@ -1,0 +1,42 @@
+- id: W1-T5658
+  title: "A FIX ROUND TYPECHECKS ITS HEAD MERGED WITH MAIN — the fleet's #9085 round pushed 8ad98155, which compiles alone, onto a head 4 commits behind main; CI's refs/pull/9085/merge failed TS2300 (both sides added the same createHash import), and nothing between the worker's commit and pushFixRound ever compiles head merged with origin/main"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 14.00
+  risk: high  # Rule 19: one defect — a fix-round push never compiles the tree CI will build
+  band_meaning: span
+  origin: "operator session 2026-10-04: watch log, the fleet's push lands a head that fails tsc (#9085)"
+  plan_refs: [W1-T4797, W1-T4693, W1-T2671, W1-T5457, W1-T5227]
+  files: [src/run-task.ts, src/lib/merge-probe.ts, src/lib/sweep.ts, test/a-fix-round-typechecks-its-head-merged-with-main.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-04 (#9085, ledger read-only). The watch log called it a merge-main push; it was
+    not. Fleet fix round DAEMON-1791113720156 started on head 55bcb36f; `fix.base_refresh_checked`
+    logged `behind_by: 4, refresh: false` (`decideRedBaseRefresh` refreshes only when base files
+    match the failing files). The worker committed 8ad98155 (no import change) and `pushFixRound`
+    pushed it. CI checks out `refs/pull/9085/merge` ("Merge 8ad98155 into bc6d167b") and failed
+    `src/lib/sweep.ts(2,10)` / `(5,10): error TS2300: Duplicate identifier 'createHash'`: the PR's
+    661132fd and main's #9071 (1f9e597a) each added `import { createHash } from "node:crypto"` at
+    different lines, which `git merge` combines with no textual conflict. READ on origin/main
+    284015b9: hooks/pre-push runs no tsc, `pushFixRoundPrechecked` runs only the coverage precheck,
+    and the sweep path passes `push: pushFixRound` directly. #9076 (gardener.js lost an export after
+    a main merge) is the same class. W1-T5457 is the plan-shard analogue, W1-T5227 is about conflict
+    markers; open #9127 has no tsc.
+  design: |
+    Before a fix-round push whose HEAD is behind origin/main, run `git merge-tree --write-tree HEAD
+    origin/main` (as src/lib/merge-probe.ts already does); on a clean merge, materialise that tree in
+    a scratch worktree with linked node_modules and run `tsc --noEmit` asynchronously, off the loop.
+    When the merged tree fails where HEAD passes, refuse the push as a named `FixRoundPushError`
+    refusal (or start a merge-main round), ledger it, and wire it into both the sweep and run fix
+    paths.
+  acceptance:
+    - claim: "a fix-round push is refused, with a ledgered reason, when HEAD typechecks but HEAD merged with origin/main does not, and a head whose merge typechecks is pushed as today"
+      proof: "unit test: test/a-fix-round-typechecks-its-head-merged-with-main.test.ts"
+  falsifier: |
+    Remove the precheck; the fixture where the branch and main each add the same import at
+    different lines is pushed and the test fails.

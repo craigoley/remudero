@@ -1,0 +1,38 @@
+- id: W1-T5655
+  title: "A KILLED COVERAGE RUN'S LOCK NAMES ITS HOLDER AND A LATER RUN RECLAIMS IT, WITH ITS SCRATCH — `testWithCoverageLeaf` takes `/tmp/rmd-c-<hash>.lock` as an EMPTY mkdir and removes it and its ~8 GB scratch only in `finally`, so a SIGKILLed run strands a lock nobody can attribute (every later local coverage run refuses until the 6 h /tmp janitor) and a scratch that outlives it"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 8.00
+  risk: medium
+  origin: "operator session 2026-10-04: watch log, the stranded coverage lock and the 7.8 GB in /mnt/rmd/fh5"
+  plan_refs: [W1-T4526, W1-T3378, W1-T1067]
+  files: [src/lib/ci-parity.ts, test/a-coverage-lock-names-its-holder-and-a-later-run-reclaims-it.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9. `testWithCoverageLeaf` (src/lib/ci-parity.ts) takes the
+    lock with `mkdirSync(lockDir)` (`coverageGateLockDir`: `/tmp/rmd-c-<sha(realpath repoRoot)>.lock`)
+    and removes it only in `finally { … rmSync(lockDir, …) }`; a failed mkdir returns `FAIL —
+    coverage-ratchet: another local gate owns ${lockDir}`. The lock is an empty directory: no pid,
+    host, start time or scratch path, so nothing can test the holder's liveness. Live: /tmp/rmd-c-
+    bc47d4c360ba.lock was created 13:02Z and still empty at 17:48Z with no live holder; the hourly
+    /etc/cron.d/rmd-tmp-sweep (IDLE_MINUTES=360) is the only release. The same finally-only cleanup
+    stranded `coverageScratchDir` /mnt/rmd/fh5/rmd-c-7b57d0f60dc3 (7,995,228 KB, last written 10-03
+    18:45Z) after its lock was reaped. No queued task covers it (W1-T4526, W1-T3378 merged).
+  design: |
+    (i) The lock carries a holder record {pid, host, startedAt, scratch} (holder.json inside the dir,
+    or the lock as a `wx` file).
+    (ii) On EEXIST read the holder; when `isHolderStale` (src/lib/fs-race-safe.ts) says it is dead,
+    reclaim it with `reclaimStaleLock` (the drain-lock.ts pattern), remove the recorded scratch only
+    when its basename is `rmd-c-<12 hex>`, and retry the acquire once.
+    (iii) A live holder is refused naming its pid; a lock with no holder is refused as today and
+    called unattributed.
+  acceptance:
+    - claim: "a coverage lock whose recorded holder pid is no longer running is reclaimed with its recorded scratch and the run proceeds, while a live holder's lock is still refused naming its pid"
+      proof: "unit test: test/a-coverage-lock-names-its-holder-and-a-later-run-reclaims-it.test.ts"
+  falsifier: |
+    Delete the stale-holder reclaim branch; the dead-pid case reads `another local gate owns` again.

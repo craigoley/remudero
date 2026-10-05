@@ -4,6 +4,19 @@ import { systemClock, type Clock } from "./clock.js";
 
 const text = (value: unknown, limit = 160) => typeof value === "string" ? value.slice(0, limit) : undefined;
 const count = (value: unknown) => Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : undefined;
+function receiptCoverage(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const raw = value as Record<string, unknown>;
+  const coverage = {
+    assignments: count(raw.assignments), terminalAssignments: count(raw.terminalAssignments),
+    costKnownAssignments: count(raw.costKnownAssignments), servedModelKnownAssignments: count(raw.servedModelKnownAssignments),
+    outcomeKnownAssignments: count(raw.outcomeKnownAssignments),
+  };
+  if (Object.values(coverage).some(item => item === undefined) ||
+    coverage.terminalAssignments! > coverage.assignments! ||
+    [coverage.costKnownAssignments!, coverage.servedModelKnownAssignments!, coverage.outcomeKnownAssignments!].some(item => item > coverage.terminalAssignments!)) return undefined;
+  return coverage;
+}
 export function readRoutingDailyStatus(stateDir: string | undefined, clock: Clock = systemClock) {
   const unavailable = (reason: string) => ({ version: "routing-daily-v1", state: "unavailable", asOf: null, comparativeClaims: "none", alerts: [reason], sources: [] });
   if (!stateDir) return unavailable("daily-review-not-configured");
@@ -43,7 +56,7 @@ export function readRoutingDailyStatus(stateDir: string | undefined, clock: Cloc
         reports: Array.isArray(source.reports) ? source.reports.slice(0, 20).flatMap((item: Record<string, unknown> | null) => item && text(item.id) ? [{
           id: text(item.id), reviewState: text(item.reviewState), nextAction: text(item.nextAction), minTasksPerArm: count(item.minTasksPerArm),
           assignments: count(item.assignments), crossoverTasks: count(item.crossoverTasks),
-          arms: Array.isArray(item.arms) ? item.arms.slice(0, 10).flatMap((arm: Record<string, unknown> | null) => arm && text(arm.arm) ? [{ arm: text(arm.arm), tasks: count(arm.tasks), merged: count(arm.merged), costMissingAssignments: count(arm.costMissingAssignments) }] : []) : [],
+          arms: Array.isArray(item.arms) ? item.arms.slice(0, 10).flatMap((arm: Record<string, unknown> | null) => arm && text(arm.arm) ? [{ arm: text(arm.arm), tasks: count(arm.tasks), merged: count(arm.merged), costMissingAssignments: count(arm.costMissingAssignments), receiptCoverage: receiptCoverage(arm.receiptCoverage) }] : []) : [],
         }] : []) : [] })) };
   } catch (error) {
     const reason = (error as NodeJS.ErrnoException).code === "ENOENT" ? "daily-review-missing" : error instanceof SyntaxError ? "daily-review-json-invalid" : "daily-review-unreadable";

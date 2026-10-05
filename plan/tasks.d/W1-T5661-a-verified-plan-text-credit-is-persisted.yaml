@@ -1,0 +1,37 @@
+- id: W1-T5661
+  title: "A VERIFIED PLAN-TEXT CREDIT IS PERSISTED AND RECONCILABLE — persistVerifiedCredit refuses every all-plan changeset with no task in hand, so W1-T5553's plan-text deliverable is verified already_satisfied, dropped, and re-dispatched; creditEvidenceFor likewise marks it as having no build diff, so `rmd plan reconcile` never flips it"
+  repo: remudero
+  depends_on: [W1-T5553]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one defect — the plan-text exemption stops at rung (c) and misses the persist and reconcile readers
+  origin: "operator session 2026-10-04: watch log, persistVerifiedCredit and creditEvidenceFor follow-ups of W1-T5553 (#9124)"
+  plan_refs: [W1-T5553, W1-T3990, W1-T272, W1-T5552]
+  files: [src/lib/status.ts, src/run-task.ts, test/a-verified-plan-text-credit-is-persisted.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9 and #9124's head 0704ab90 (merged 3f934073). `persistVerifiedCredit`
+    (src/lib/status.ts) takes no task and refuses `if (isPlanOnlyChangeset(files)) return
+    "plan-only";`; its caller is `runTask`'s already_satisfied exit (src/run-task.ts,
+    `persistVerifiedCredit(ledgerPath, taskId, resolved, github.changedFiles?.(resolved.url))`).
+    #9124 (W1-T5553) adds `refusesAsPlanOnly(task, files)` to rung (c) only and leaves this function
+    alone, so the two disagree: `resolveAlreadySatisfied` verifies the claimed PR anywhere in
+    `findMergedByTrailerAll`, while rung (c) reads only the newest trailer hit, so a newer
+    `chore(plan)` filing hides the older delivery and the verified credit is neither persisted nor
+    re-derived — the W1-T3990 loop class. Separately `creditEvidenceFor` (src/run-task.ts) sets
+    `creditHasBuildDiff = !isBookkeepingOnlyChangeset(paths)`, so a plan-text delivery is never
+    `creditIsReconcilable` and `rmd plan reconcile` never records it.
+  design: |
+    (i) `persistVerifiedCredit` takes `task: Pick<Task, "id" | "files">` and refuses on
+    `refusesAsPlanOnly(task, files)`; the already_satisfied caller passes its task.
+    (ii) `creditEvidenceFor` receives the task's declared files and sets `creditHasBuildDiff` when
+    `isPlanTextDeliverable(task, paths)` holds.
+  acceptance:
+    - claim: "a plan-text task's verified PR whose changeset is its declared shards persists as recorded and is reconcilable, while a filing PR adding only the task's own shard still returns plan-only"
+      proof: "unit test: test/a-verified-plan-text-credit-is-persisted.test.ts"
+  falsifier: |
+    Revert to `isPlanOnlyChangeset(files)`; the plan-text case returns "plan-only" and the test fails.

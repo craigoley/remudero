@@ -1,0 +1,54 @@
+- id: W1-T5680
+  title: "A WALL-CLOCK TEST BOUND IS AN ABSOLUTE NUMBER ON A LOADED HOST — five tests (W1-T5521's rung lag, the unmocked fast-gate census run, W1-T2913's 10 ms-vs-100 ms control, W1-T4113's 20 s garden wait, read-model-worker's 250 ms loop lag) red with no defect under load; each bound becomes relative to a same-run control or a generous deadline"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 6.00
+  risk: high  # Rule 19: one concern — absolute wall-clock bounds in tests, one idiom applied per site
+  origin: "operator session 2026-10-04: watch log, the batch-9 timing-flake family"
+  plan_refs: [W1-T2811, W1-T5521, W1-T2913, W1-T4113, W1-T3408, W1-T5632]
+  files: [test/the-sweeps-plan-pr-preflight-runs-off-the-daemon-loop.test.ts, test/fast-gate-admits-the-census-class.test.ts, test/detached-sweep-drain-is-bounded.test.ts, test/worker-config-tends-itself.test.ts, test/the-gates-tend-themselves.test.ts, test/read-model-worker.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-04 on origin/main 284015b9. (1) test/the-sweeps-plan-pr-preflight-runs-off-the-
+    daemon-loop.test.ts: `const LAG_BOUND_MS = SLOW_CHECK_MS / 2;` (1000 ms) via
+    `assertWallClockBound(maxLagMs, LAG_BOUND_MS, …)`; 5335 ms observed under load is the rung's own
+    synchronous git/plan work, not the awaited preflight. (2) test/fast-gate-admits-the-census-
+    class.test.ts's unmocked census run asserts `step.ok` with no cost-only RUNAWAY tolerance, while
+    test/the-census-admission-set-is-derived-not-enumerated.test.ts already accepts a RUNAWAY whose
+    "own result would have PASSed". (3) test/detached-sweep-drain-is-bounded.test.ts: the W1-T2913
+    control settles with `setTimeout(resolve, 10)` against `sweepWallClockBoundMs: 100`, and the
+    bound test runs under `{ timeout: 250 }`. (4) test/worker-config-tends-itself.test.ts and
+    test/the-gates-tend-themselves.test.ts wait `waited < 20_000` for a worker-thread tsx load that
+    takes 32-35 s on this host. (5) test/read-model-worker.test.ts asserts lag max 250 ms / p99
+    50 ms, red at base under coverage on a loaded host. The repo's idioms: `assertWallClockBound`
+    declares a site (census `RECORDED_DECLARED_WALL_CLOCK_BOUND_FILES = 28`, `_SITES = 46` in
+    test/a-wall-clock-bound-declares-itself.test.ts), a same-run control (read-model-worker's
+    `loopProbe`), and a generous never-asserted deadline (120_000). No queued task or open PR
+    covers these; W1-T5632 touches only the precondition reader.
+  design: |
+    (1) Measure a same-fixture baseline (an instant-refusing check, `baselineLagMs`) and assert
+    `maxLagMs < baselineLagMs + LAG_BOUND_MS`. (2) Copy the sibling's cost-only RUNAWAY tolerance.
+    (3) The control's dispatch settles at once (`SETTLES_AT_ONCE`), the bound test's timeout rises
+    to 30 s. (4) Wait deadlines become `waited < 120_000`. (5) Scale the lag bound by the same-run
+    inline control (`Math.max(250, inlineLag.maxMs / 2)`, likewise p99). Keep every
+    `assertWallClockBound` site so the 28/46 census holds.
+  acceptance:
+    - claim: "the W1-T5521 rung lag is bounded relative to a same-fixture baseline"
+      proof: "grep: baselineLagMs in test/the-sweeps-plan-pr-preflight-runs-off-the-daemon-loop.test.ts"
+    - claim: "the unmocked fast-gate census run tolerates a cost-only RUNAWAY whose own result passed"
+      proof: "grep: its own result would have PASSed in test/fast-gate-admits-the-census-class.test.ts"
+    - claim: "the W1-T2913 control's dispatch settles at once"
+      proof: "grep: SETTLES_AT_ONCE in test/detached-sweep-drain-is-bounded.test.ts"
+    - claim: "the config gardener wait allows a slow worker-thread load"
+      proof: "grep: waited < 120_000 in test/worker-config-tends-itself.test.ts"
+    - claim: "read-model-worker's lag bound scales with its same-run inline control"
+      proof: "grep: inlineLag\\.maxMs / 2 in test/read-model-worker.test.ts"
+  falsifier: |
+    Restore the absolute bounds and run the six files under `stress -c $(nproc)`: at least one
+    reds. With the fix, the deterministic controls (the sync-variant W1-T5521 control, the inline
+    lag control) still red on a real regression.
