@@ -8,8 +8,14 @@ import { pauseDetail } from "./fleet-control.js";
 
 const RECYCLE_PAUSE = "PAUSE requested: container recycle (deploy/recycle-container.sh)";
 
+/** W1-T5804: whether an already-read PAUSE detail is the recycle's own. Exact match: an operator hold
+ *  that merely mentions the script is still an operator hold. */
+export function isRecyclePauseDetail(detail: string | undefined): boolean {
+  return detail === RECYCLE_PAUSE;
+}
+
 /** The PAUSE detail when the local PAUSE was engaged for a container recycle, else `undefined`. */
 export function recyclePauseDetail(root: string, readDetail: (root: string) => string | undefined = pauseDetail): string | undefined {
   const detail = readDetail(root);
-  return detail === RECYCLE_PAUSE ? detail : undefined;
+  return isRecyclePauseDetail(detail) ? detail : undefined;
 }
