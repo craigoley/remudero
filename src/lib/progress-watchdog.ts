@@ -11,6 +11,7 @@
  */
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fixedClock } from "./clock.js";
 
 export type ProgressWatchdogState = "PROGRESSING" | "IDLE" | "STALLED" | "CRASH_LOOP" | "UNKNOWN";
 export type ProgressWatchdogAction = "none" | "capture-diagnostics" | "recycle" | "hold-revive";
@@ -133,7 +134,7 @@ export interface DiagnosticsBundleResult {
 }
 
 function bundleStamp(ms: number): string {
-  return new Date(ms).toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+  return fixedClock(ms).iso().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
 }
 
 /** Parses `progress-YYYYMMDDTHHMMSSZ` back to epoch ms, or undefined for any other name. */
@@ -169,7 +170,7 @@ export function captureDiagnosticsBundle(
       return `# ${file} ${args.join(" ")} failed: ${err instanceof Error ? err.message : String(err)}\n`;
     }
   };
-  writeFileSync(join(dir, "verdict.json"), JSON.stringify({ ...verdict, at: new Date(nowMs).toISOString() }, null, 2) + "\n");
+  writeFileSync(join(dir, "verdict.json"), JSON.stringify({ ...verdict, at: fixedClock(nowMs).iso() }, null, 2) + "\n");
   writeFileSync(join(dir, "ledger-tail.ndjson"), rows.slice(-200).map((row) => JSON.stringify(row)).join("\n") + "\n");
   const ps = attempt("docker", ["ps", "--format", "{{.Names}}"]);
   writeFileSync(join(dir, "docker-ps.txt"), ps);

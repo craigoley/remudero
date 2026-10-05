@@ -50888,7 +50888,7 @@ const COMMANDS: readonly CommandSpec[] = [
   {
     name: "progress-watchdog",
     syntax: "rmd progress-watchdog [--json] [--state-root <dir>]",
-    summary: "Name a stalled sweep by its progress (sweep.pass, review.posted, verdict.merged), not its daemon pulse.",
+    summary: "Name a stalled sweep by its progress (sweep.pass, review, merge), not its daemon pulse.",
     detail: "W1-T5687: reads the deduplicated union of every ledger archive and the live ledger and prints one verdict: PROGRESSING, IDLE (no open PRs), STALLED (newest progress row over 15 min old: capture-diagnostics; over 30 min: recycle), CRASH_LOOP (3 or more daemon.paths boots in 15 min that never reached daemon.boot: hold-revive) or UNKNOWN (no rows or no open-PR count; never a silent none). Progress is ONLY a sweep.pass, review.posted or verdict.merged row: daemon.* and runtime.* rows are a pulse, not progress, which is why the 318-minute crash loop of 2026-10-03 read live to every daemon-prefix reader. The open-PR count is the newest sweep.pass row's enumerated field. On capture-diagnostics it writes one bundle (ledger tail, docker ps, the tenant's docker logs --tail, the verdict) under <state>/diagnostics/progress-<ts>/, at most one per 15 min. READ-ONLY: it recycles nothing; the host launcher acting on recycle / hold-revive is W1-T5688.",
   },
   {

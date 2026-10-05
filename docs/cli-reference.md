@@ -35,7 +35,7 @@ usage:
   rmd reap-branches [--prune]   # Classify every remote branch as deletable, guarded or held; --prune deletes the deletable set.
   rmd memory-lint [--fix] [--merge <from-dir>] <memory-dir>...   # Check a Claude Code memory directory for dead links, load-limit pressure and repeated knowledge.
   rmd ledger-grep <pattern>   # Grep the deduplicated union of every ledger archive and the live ledger file.
-  rmd progress-watchdog [--json] [--state-root <dir>]   # Name a stalled sweep by its progress (sweep.pass, review.posted, verdict.merged), not its daemon pulse.
+  rmd progress-watchdog [--json] [--state-root <dir>]   # Name a stalled sweep by its progress (sweep.pass, review, merge), not its daemon pulse.
   rmd routing-ab [--json]   # Compare the arms of each live routing experiment (Sol vs Sonnet) from the ledger union.
   rmd impossible-canary --model <id> [--model <id>]... --scaffold <revision> --grader <executable> [--state-dir <dir>] [--json]   # Run sealed impossible-task canaries per model and count cheating events with exact intervals.
   rmd benchmark-aa --trial <manifest.json> [--state-dir <dir>] [--case-files <snapshot.json>] [--out <report.json>] [--no-cohort] [--json] | prospective register --trial <manifest.json> | prospective report --trial-id <id> [--out <report.json>] [--json] | prospective pause --trial-id <id> [--note <text>] | readiness --trial-id <id> [--trial <manifest.json>] [--instance-root <name>=<state-dir>]... [--max-pairs <n>] [--out <receipt.json>] [--json]   # Report an A/A integrity trial: two labels, one pinned stack, and no winner.
@@ -330,7 +330,7 @@ the deduplicated union of every state/ledger.*.ndjson.gz archive and the live st
 
 ### `rmd progress-watchdog`
 
-Name a stalled sweep by its progress (sweep.pass, review.posted, verdict.merged), not its daemon pulse.
+Name a stalled sweep by its progress (sweep.pass, review, merge), not its daemon pulse.
 
 ```
 rmd progress-watchdog [--json] [--state-root <dir>]
