@@ -2716,7 +2716,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // the thing") — a capped, green, unreviewable PR needs an operator to look at it and either
       // override the cap or merge it by hand; nothing downstream can move it further on its own.
       const cls: EscalationClass = reason.startsWith("PR stage stalled:") || isCappedReviewOrphanEscalation(pr, policy) ? "MANUAL" : "BLOCKED";
-      escalate(
+      const file = (context: string): void => { escalate(
         {
           class: cls,
           // See {@link escalationTaskIdFor} — pure and separately tested, so the mint that makes
@@ -2738,13 +2738,15 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           cause: escalationCause(pr.mergeState === "dirty", isBlockedCi(pr)),
           summary: `PR ${pr.prUrl} needs a clarification — ${reason}`,
           detail:
-            `The CLARIFICATION-QUESTION rung (W1-T78, ratifies P22's new rung) reconciled open PR #${pr.prNumber} ` +
+            `${context}The CLARIFICATION-QUESTION rung (W1-T78, ratifies P22's new rung) reconciled open PR #${pr.prNumber} ` +
             `to BLOCKED-AMBIGUOUS: ${reason}.\n\n${question.question}`,
           options: question.resolutions.map((r) => ({ label: r.label, detail: r.detail })),
           recommendation: question.resolutions[0].label,
         },
         { issues, ledgerPath, runId },
-      );
+      ); };
+      if (pr.mergeState !== "dirty") return file("");
+      return readMainCommit().then((main) => file(conflictEscalationContext(pr, main?.sha)));
     },
 
     dispatchPlanGateRound: async (pr) => {
@@ -4529,6 +4531,67 @@ export function conflictRefusalCause(
   return undeclared.length > 0
     ? `conflict repair was not admitted for ${undeclared.join(", ")}`
     : "conflict repair was not admitted";
+}
+
+/** W1-T5908 — BACKSTOP: passes a dirty, evidence-less head may wait on `unknown` mergeability before
+ *  escalating; sized above `mergeStateFromRest`'s five observed consecutive `unknown` polls. */
+export const MERGEABILITY_UNKNOWN_WAIT_BACKSTOP = 6;
+
+/** W1-T5908 — the reason code a conflict escalation records as its `**Raised-by:**` line: which
+ *  disposition raised it. Only the no-evidence code is a question a later capture can answer. */
+export const CONFLICT_EVIDENCE_MISSING_REASON_CODE = "conflict-evidence-missing";
+export const CONFLICT_NOT_ADMITTED_REASON_CODE = "conflict-not-admitted";
+
+/** W1-T5908 — the `**Raised-by:**`/`**Base:**` lines {@link conflictEscalationContext} writes. */
+export const RAISED_BY_LINE_RE = /^\*\*Raised-by:\*\*\s*(\S+)\s*$/m;
+export const BASE_SHA_LINE_RE = /^\*\*Base:\*\*\s*(\S+)\s*$/m;
+
+/** W1-T5908 — GitHub's raw `mergeable_state` this pass read `unknown`: the pass cannot tell a
+ *  conflict whose evidence is still computing from one whose evidence will never come. */
+export function mergeabilityReadUnknown(pr: Pick<OpenPrView, "mergeableState">): boolean {
+  return pr.mergeableState === "unknown";
+}
+
+/** W1-T5908 — per PR, passes the CURRENT head spent in the mergeability-unknown wait (`wait` rows
+ *  with the `conflict` blocker), counted over the whole head so an escalation is not re-waited. */
+export function mergeabilityUnknownWaitsFromLedger(
+  lines: ReadonlyArray<Record<string, unknown>>,
+): Map<number, { headSha: string; passes: number }> {
+  const out = new Map<number, { headSha: string; passes: number }>();
+  for (const line of lines) {
+    if (line.step !== "sweep.disposed" || typeof line.pr_number !== "number" || typeof line.head_sha !== "string") continue;
+    const prev = out.get(line.pr_number);
+    const passes = prev?.headSha === line.head_sha ? prev.passes : 0;
+    const waited = line.disposition === "wait" && line.blocker === "conflict";
+    out.set(line.pr_number, { headSha: line.head_sha, passes: passes + (waited ? 1 : 0) });
+  }
+  return out;
+}
+
+/** W1-T5908 — the lines a conflict escalation's body carries beside Head/Cause: the reason code
+ *  of the disposition that raised it and the base it was raised against. */
+export function conflictEscalationContext(pr: Pick<OpenPrView, "mergeConflict">, baseSha: string | undefined): string {
+  const code = hasCapturedMergeConflictEvidence(pr.mergeConflict)
+    ? CONFLICT_NOT_ADMITTED_REASON_CODE
+    : CONFLICT_EVIDENCE_MISSING_REASON_CODE;
+  return `**Raised-by:** ${code}\n${baseSha ? `**Base:** ${baseSha}\n` : ""}\n`;
+}
+
+/** W1-T5908 — an open conflict escalation's cause when THIS round shows it cleared (evidence now
+ *  captured, or the base moved); `undefined` when it still holds or was never recorded. */
+export function clearedConflictEscalationCause(
+  body: string | undefined,
+  current: { conflictEvidenceCaptured: boolean; baseSha?: string },
+): string | undefined {
+  const raisedBy = RAISED_BY_LINE_RE.exec(body ?? "")?.[1];
+  if (raisedBy === CONFLICT_EVIDENCE_MISSING_REASON_CODE && current.conflictEvidenceCaptured) {
+    return `raised by ${raisedBy} — the conflicting-file evidence is now captured and the PR dispositions conflicted`;
+  }
+  const raisedBase = BASE_SHA_LINE_RE.exec(body ?? "")?.[1];
+  if (raisedBase !== undefined && current.baseSha !== undefined && raisedBase !== current.baseSha) {
+    return `raised against base ${raisedBase} — the base has moved to ${current.baseSha}`;
+  }
+  return undefined;
 }
 
 /** W1-T78 policy (rule 2) — how many strikes a fix-rung RE-DISPATCH gets once an operator answers a
@@ -7412,6 +7475,9 @@ interface DispositionRule {
 export interface DispositionFacts {
   /** The review claim holds a DELIVERED verdict for this PR's exact current input. */
   reviewVerdictDelivered?: boolean;
+  /** W1-T5908 — passes this head already waited on an unknown mergeability read; see
+   *  {@link mergeabilityUnknownWaitsFromLedger}. Omitted reads as zero. */
+  mergeabilityUnknownPasses?: number;
 }
 
 /** W1-T114 — minutes checks have been pending on this head, or `undefined` when there is nothing to
@@ -8041,6 +8107,26 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
         `it must inspect actual hunks and a fresh review and CI gate the new head`
       );
     },
+  },
+  {
+    // W1-T5908: no evidence while mergeability reads `unknown` is transient; wait up to the BACKSTOP.
+    disposition: "wait",
+    blocker: "conflict",
+    when: (pr, _policy, _ageDays, _now, facts) => {
+      const taskId = pr.taskId;
+      return (
+        pr.mergeState === "dirty" &&
+        taskId !== undefined &&
+        fixHeadAcceptable(pr.headRefName, taskId, isSyntheticOrchestratorLaneId(taskId)) &&
+        !hasCapturedMergeConflictEvidence(pr.mergeConflict) &&
+        mergeabilityReadUnknown(pr) &&
+        (facts?.mergeabilityUnknownPasses ?? 0) < MERGEABILITY_UNKNOWN_WAIT_BACKSTOP
+      );
+    },
+    reason: () =>
+      `mergeability-unknown — merge conflict (mergeState dirty) read while GitHub's mergeable_state is ` +
+      `still unknown and no conflicting-file evidence was captured — waiting for a pass that captures ` +
+      `it (escalates after ${MERGEABILITY_UNKNOWN_WAIT_BACKSTOP} passes on this head)`,
   },
   {
     // A dirty contributor, foreign-run branch, an explicit policy disable, or missing evidence
@@ -9111,6 +9197,8 @@ export interface FixDispatchEvidence {
   ciFailures?: CiFailure[];
   /** W1-T106: the merge-conflict fix mode's input — populated for a `conflicted` dispatch only. */
   mergeConflict?: MergeConflictEvidence;
+  /** W1-T5908: the main tip this `conflicted` dispatch was derived against. */
+  baseSha?: string;
   /** W1-T2236: see this interface's own doc, above. Populated ONLY when `unmetCriteria` is empty. */
   actionableGateFailures?: ActionableGateFailure[];
   /** W1-T3172: cold-sweep authority for W1-T2436's prerequisite-worker route. */
@@ -11539,6 +11627,7 @@ export async function runSweep(
   // W1-T2345 — the SAME fresh-every-pass, ledger-only fold as `requeuedCheckKeys`/
   // `reaggregatedCiGateKeys` above. See `repeatDispositionStreaksFromLedger`'s own doc.
   const priorRepeatRuns = repeatDispositionStreaksFromLedger(ledgerLines);
+  const mergeabilityUnknownWaits = mergeabilityUnknownWaitsFromLedger(ledgerLines);
   // W1-T2620/W1-T3422 — ONE read per pass, never per PR. The SHA-only compatibility seam stays
   // available to direct callers; production's effects cache both fields from one REST response.
   let mainRepair: MainRepairEvidence | undefined;
@@ -12385,7 +12474,11 @@ export async function runSweep(
       freshnessRefusal.attemptedAt >= pendingSince;
     const dispositionView = refusedCurrentPending ? { ...pr, reviewPendingOwnerDead: true } : pr;
     // W1-T5813: the SAME delivered set the post-review claim dedups on, so the two cannot disagree.
-    const dispositionFacts: DispositionFacts = { reviewVerdictDelivered: prior.reviewDelivered.has(reviewOutcomeKeyForPr(pr)) };
+    const unknownWaits = mergeabilityUnknownWaits.get(pr.prNumber);
+    const dispositionFacts: DispositionFacts = {
+      reviewVerdictDelivered: prior.reviewDelivered.has(reviewOutcomeKeyForPr(pr)),
+      mergeabilityUnknownPasses: unknownWaits?.headSha === pr.headSha ? unknownWaits.passes : 0,
+    };
     const derived = postReviewFailureHistoryDisposition(dispositionView, prior, policy, now) ??
       deriveDisposition(dispositionView, policy, now, dispositionFacts);
     ruleBlockerByIndex.set(prIndex, derived.blocker);
@@ -13641,7 +13734,8 @@ export async function runSweep(
               // dispatch carries merge-conflict evidence and never a mix. W1-T2231: the
               // "conflicted" analogue of the blocked-fixable capture above — both are
               // dispatch-based repair surfaces, so both feed `spent` the same way.
-              const conflictedEvidence = { unmetCriteria: [], mergeConflict: pr.mergeConflict };
+              const conflictedEvidence = { unmetCriteria: [], mergeConflict: pr.mergeConflict,
+                ...(mainTipSha !== undefined ? { baseSha: mainTipSha } : {}) };
               // W1-T2752: the conflicted twin of the blocked-fixable terminal check above, same
               // reasoning — see `SweepDeps.terminalFixStandDown`'s own doc.
               const conflictedTerminalStandDown = deps.terminalFixStandDown?.(pr);
