@@ -239,6 +239,10 @@ test("W1-T1033: the pull request trigger is byte-for-byte unchanged", async () =
       // W1-T4400/W1-T4604/W1-T5515: register after failed needs and on merge-group commits, but not on
       // push or cancellation.
       assert.equal(job.if, "${{ always() && !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}");
+    } else if (jobId === "commitlint") {
+      // W1-T5522: the light gates also run on the merge queue's group commit; push never reaches them.
+      assert.equal(job.if, "github.event_name == 'pull_request' || github.event_name == 'merge_group'");
+      assert.doesNotMatch(String(job.if), /push/);
     } else {
       assert.equal(
         job.if,

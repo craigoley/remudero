@@ -99,8 +99,8 @@ test("W1-T4399: the light gates run as steps of one job", () => {
 
   // The job itself runs unconditionally on a pull_request event (never a class- or path-based
   // job-level if:, which would strand every gate it hosts absent — the #729/skipped-check-
-  // deadlock class ci-gate.yml's own header names).
-  assert.equal(job!.if, "github.event_name == 'pull_request'", "the commitlint job must stay a plain PR guard at the JOB level");
+  // deadlock class ci-gate.yml's own header names). W1-T5522: it also runs on merge_group, never push.
+  assert.equal(job!.if, "github.event_name == 'pull_request' || github.event_name == 'merge_group'", "the commitlint job must stay a plain event guard at the JOB level");
 
   // The moved gates' own former job keys stay registered (ci-parity.ts parity, see ci.yml's own
   // comment) but permanently skipped, never queuing a second runner for the same work.

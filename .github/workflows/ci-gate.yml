@@ -21,7 +21,7 @@ name: CI gate
 # W1-T4406/W1-T5515: REQUIRED below is the `pull_request`-time list. Seven of its names come from
 # workflows that never trigger on `merge_group`, so a merge queue's group commit cannot produce them.
 # MERGE_GROUP_REQUIRED, beside it, is the subset whose producing ci.yml job DOES run there (`ci`,
-# `coverage-ratchet`, `test-slow`); ci.yml's `ci-gate` job selects it on a group commit by passing
+# `coverage-ratchet`, `test-slow`, and since W1-T5522 the light gates); ci.yml's `ci-gate` job selects it on a group commit by passing
 # `--event merge_group` to scripts/ci-gate-from-contract.mjs, which refuses an absent, empty or
 # non-subset list. The step below is shared, unchanged, by both modes; the PR-only gates already
 # passed on the PR head, the precondition for entering the queue. FALSIFIER:
@@ -106,11 +106,29 @@ jobs:
       # that event (neither `if: false` nor the pull_request-only guard). Read ONLY under the
       # runner's explicit `--event merge_group`; no other event, and this file's own job, never
       # consults it. Same one-name-per-line format as REQUIRED.
+      # W1-T5522: plus every name ci.yml's `commitlint` job posts with a constituent step that runs
+      # there (the recorded-literal ratchets). prompt-surface-gate stays out: its only step is
+      # pull_request-guarded, so requiring it would be vacuous.
       MERGE_GROUP_REQUIRED: >-
         [
         "ci",
         "coverage-ratchet",
-        "test-slow"
+        "test-slow",
+        "rule-checks",
+        "leak-grep",
+        "learnings-budget-ratchet",
+        "jscpd-gate",
+        "claims",
+        "assertion-discrimination",
+        "lint-plan",
+        "depcruise",
+        "containment-probe",
+        "api-client-drift",
+        "no-hand-rolled-fetch",
+        "task-id-existence",
+        "source-size",
+        "comment-load-ratchet",
+        "baseline-monotonic"
         ]
       # Never waited on, never failed for: ci-gate is self, and remudero-review is a separate
       # required context the orchestrator posts directly rather than a check-run.

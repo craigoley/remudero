@@ -380,6 +380,9 @@ test("acceptance 6: job-level conditions are only PR guards, stable-name aggrega
       // W1-T4400/W1-T4604/W1-T5515: aggregate failed dependencies on PRs and merge-group commits, but
       // release cancelled runs.
       assert.equal(job.if, "${{ always() && !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}");
+    } else if (jobId === "commitlint") {
+      // W1-T5522: the light gates also run on the group commit — still an event guard, never a class.
+      assert.equal(job.if, "github.event_name == 'pull_request' || github.event_name == 'merge_group'");
     } else {
       assert.match(String(job.if), /^github\.event_name == 'pull_request'$/, `job '${jobId}' carries an unexpected job-level if: '${job.if}'`);
     }
@@ -792,10 +795,11 @@ test("W1-T3512 acceptance 1: every wired step skips via its OWN step-level if:, 
 test("W1-T3512 acceptance 2: a class-based condition lives at the STEP level only — commitlint's own job-level if: stays the plain PR guard, and the report step (if: always()) still runs to post a conclusion for a skipped step", () => {
   const doc = parseYaml(CI_YML) as { jobs: Record<string, { if?: string | boolean; steps?: Array<{ name?: string; id?: string; if?: string; env?: Record<string, string> }> }> };
   const job = doc.jobs.commitlint!;
+  // W1-T5522 widened the plain PR guard to the merge queue's event; it is still an event guard.
   assert.equal(
     job.if,
-    "github.event_name == 'pull_request'",
-    "commitlint's job-level if must stay a plain PR guard — a class-based job-level if would strand every gate it now hosts absent, deadlocking branch protection forever",
+    "github.event_name == 'pull_request' || github.event_name == 'merge_group'",
+    "commitlint's job-level if must stay a plain event guard — a class-based job-level if would strand every gate it now hosts absent, deadlocking branch protection forever",
   );
   const classifyStep = job.steps!.find((s) => s.id === "classify");
   assert.equal(classifyStep?.if, undefined, "the classify step must carry no step-level if: of its own — it always runs so every later step can read its output");
