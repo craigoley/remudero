@@ -1,0 +1,15 @@
+- id: W1-T5814
+  title: Regenerate docs/forensics/retro.md to remove renderPromotionProposals references
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  status: queued
+  attempts: 0
+  files:
+    - docs/forensics/retro.md
+  acceptance:
+    - claim: docs/forensics/retro.md no longer mentions renderPromotionProposals
+      proof: 'grep: "renderPromotionProposals" not found in docs/forensics/retro.md'
+  origin: architect
