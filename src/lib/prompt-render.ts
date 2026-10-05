@@ -511,7 +511,7 @@ export function renderFixPrompt(opts: {
             : []),
           ...(!planOnlyTask
             ? [
-                `REGISTRY EXCEPTION (W1-T2651): a bounded exception to "do not push it" is a path this ` +
+                `REGISTRY EXCEPTION (W1-T2651): the one bounded exception to "do not push it" is a path this ` +
                   `repo's own generator registry declares (REGENERABLE_ARTIFACT_GENERATORS, lib/sweep.ts — ` +
                   `currently ${registryPaths.join(", ")}). If the failing gate you are fixing names one of ` +
                   `those paths as its own remedy, you MAY commit it alongside the declared scope above — the ` +

@@ -51,7 +51,7 @@ function fakeGit(paths: string[], calls: string[][] = []) {
   };
 }
 
-test("test/a-fix-round-may-register-its-own-census-entry.test.ts", (t) => {
+test("test/a-fix-round-may-add-its-own-registry-row.test.ts", (t) => {
   for (const path of [env, ledger]) {
     const dir = fixture(t, { [path]: added(path) });
     const result = commitWorkerEdits(dir, declared, "fix(worker): register census row", { runGit: fakeGit([path]) });
