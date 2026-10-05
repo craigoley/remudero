@@ -32,12 +32,7 @@ import { ghShim } from "./helpers/gh-shim.js";
 /** Functions the loop DOES reach that build the unbatched gateway, with the reason each is bounded.
  *  SHRINK-ONLY: an entry the census no longer reaches (or whose function no longer builds the
  *  gateway) is itself a failure, so the table can only get shorter. */
-const LOOP_REACHABLE_EXEMPTIONS: Readonly<Record<string, string>> = {
-  retroShippedGithubGateway:
-    "reached from retroTriggerCheck (the checkRetroTrigger hook). Bounded per pass: the trigger counts " +
-    "only merges AFTER the retro marker, so the trailer searches are limited to the post-marker " +
-    "candidates, not the plan. Leaves the table when W1-T3104 stops the trigger building the unbatched gateway.",
-};
+const LOOP_REACHABLE_EXEMPTIONS: Readonly<Record<string, string>> = {};
 
 interface Fn {
   name: string;
@@ -138,7 +133,8 @@ test("census: the seed and the population are real, so the walk cannot pass vacu
   const fns = topLevelFunctions();
   assert.ok(fns.some((f) => f.name === "daemonCommand"), "the walk must find daemonCommand to seed from");
   const pop = population(fns);
-  assert.ok(pop.includes("retroShippedGithubGateway"), `population must see the known site; got ${pop.join(", ")}`);
+  // W1-T5649 (#9213) took the retro gateway off ghGateway, so the population's known sites are CLI-only.
+  assert.ok(!pop.includes("retroShippedGithubGateway"), `the retro gateway answers from the batched fetch; got ${pop.join(", ")}`);
   assert.ok(pop.includes("correctCommand"), "population must see the CLI-only sites too");
   const reach = loopReachable(fns, "daemonCommand");
   assert.ok(reach.has("retroTriggerCheck") && reach.has("buildInboxDraftHook"), "the loop reaches the retro trigger and the draft hook");
@@ -166,7 +162,7 @@ test("the exemption table is shrink-only: every entry states why its calls are b
   for (const [name, reason] of Object.entries(LOOP_REACHABLE_EXEMPTIONS)) {
     assert.ok(reason.length > 40, `${name} must carry a stated reason`);
   }
-  assert.deepEqual(Object.keys(LOOP_REACHABLE_EXEMPTIONS), ["retroShippedGithubGateway"], "the table may only shrink");
+  assert.deepEqual(Object.keys(LOOP_REACHABLE_EXEMPTIONS), [], "the table may only shrink");
 });
 
 /** A `gh` on PATH that logs every invocation: the only way to SEE a synchronous spawn. */
