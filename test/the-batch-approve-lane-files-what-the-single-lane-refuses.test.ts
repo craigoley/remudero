@@ -74,6 +74,8 @@ test("#7608's shape in a batch is refused before anything is minted or written â
   const wt = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t4706-unit-`));
   const masterPlan = `# plan\n- ${PROPOSAL_7608} (open)\n- P-VALID (open)\n`;
   writeFileSync(join(wt, "MASTER-PLAN.md"), masterPlan, "utf8");
+  // W1-T5660: the draft floor refuses a files: entry whose directory the worktree lacks.
+  mkdirSync(join(wt, "src", "lib"), { recursive: true });
   const valid = { proposalId: "P-VALID", ...draftFor("P-VALID", "Rotate the quux ledger for the batch fixture", "src/lib/quux.ts") };
   const materialized: string[] = [];
   assert.throws(
@@ -129,6 +131,9 @@ async function drive(opts: {
   mkdirSync(join(seed.dir, ".remudero"), { recursive: true });
   writeFileSync(join(seed.dir, "plan", "tasks.yaml"), "- id: W1-T4\n  title: a seed task the plan loader accepts\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: human\n  status: queued\n  attempts: 0\n");
   writeFileSync(join(seed.dir, "MASTER-PLAN.md"), opts.masterPlan ?? "# MASTER PLAN\n\nfixture\n");
+  // W1-T5660: the draft floor refuses a files: entry whose directory the worktree lacks.
+  mkdirSync(join(seed.dir, "src", "lib"), { recursive: true });
+  writeFileSync(join(seed.dir, "src", "lib", ".gitkeep"), "");
   // The repo rule's names come from the checkout's own fleet registry, as they do in production.
   copyFileSync(join(REPO_ROOT, ".remudero", "daemon-instances.yaml"), join(seed.dir, ".remudero", "daemon-instances.yaml"));
   seed.git("add", "-A");

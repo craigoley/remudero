@@ -92,6 +92,9 @@ function makeOrigin(feedbackId?: string): string {
   mkdirSync(join(seed, "plan", "feedback"), { recursive: true });
   writeFileSync(join(seed, "plan", "tasks.yaml"), VALID_TASK("W1-T4", "a seed task the plan loader accepts"));
   writeFileSync(join(seed, "MASTER-PLAN.md"), "# MASTER PLAN\n\nfixture\n");
+  // W1-T5660: the draft floor refuses a files: entry whose directory the worktree lacks.
+  mkdirSync(join(seed, "src", "lib"), { recursive: true });
+  writeFileSync(join(seed, "src", "lib", ".gitkeep"), "");
   if (feedbackId) {
     writeFileSync(
       join(seed, "plan", "feedback", `${feedbackId}.yaml`),

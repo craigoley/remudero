@@ -34,6 +34,8 @@ const known = new Set(["remudero", "none"]);
 function worktree(): string {
   const root = fs.mkdtempSync(join(tmpdir(), "rmd-t5541-"));
   fs.writeFileSync(join(root, "MASTER-PLAN.md"), "# Master plan\n");
+  // W1-T5660: the draft floor refuses a files: entry whose directory the worktree lacks.
+  fs.mkdirSync(join(root, "src", "lib"), { recursive: true });
   return root;
 }
 

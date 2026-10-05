@@ -31,7 +31,7 @@ import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "./lib/review-findings.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/plan-index.ts imports its sibling.
 import { censusSatisfiedTasks } from "../scripts/satisfied-task-census.mjs";
-import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, opendirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -2741,7 +2741,7 @@ import {
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 import { fetchPrDiff } from "./lib/pr-diff.js";
-import { GATEWAY_FETCH_TIMEOUT_MS } from "./lib/git-fetch-retry.js";
+import { fetchOriginRetryingRefLock, GATEWAY_FETCH_TIMEOUT_MS } from "./lib/git-fetch-retry.js";
 import { asOwnerRepoUnresolvable } from "./lib/owner-repo.js";
 import { resolveRepoLayout } from "./lib/repo-layout.js";
 export { resolveRepoRoot };
@@ -11831,6 +11831,16 @@ export async function runFixRung(opts: {
         strike: attempt,
         ...(merged.reason ? { reason: merged.reason } : {}),
       });
+      if (!merged.started) {
+        strikes = attempt;
+        deps.log("fix.dispatch", {
+          strike: attempt, strike_cap: opts.strikeCap, unmet_count: unmet.length, round, mode: fixMode,
+          verdict_regime: verdictRegime, head_sha: priorHeadSha, reason: merged.reason,
+          conflicted_files: conflictedFilePaths(currentMergeConflict),
+        });
+        deps.say(`fix rung: strike ${attempt}/${opts.strikeCap} FAILED, no worker spent — the merge of current main did not start: ${merged.reason}`);
+        continue;
+      }
     }
 
     const workerHeadReflogBefore = readWorktreeHeadReflog(opts.worktreePath);
@@ -11918,6 +11928,7 @@ export async function runFixRung(opts: {
         admitTests: admitFixTests,
         ...options,
         assignmentId: fixResult.selectionAssignmentId,
+        requireMergeHead: currentMergeConflict !== undefined,
         log: deps.log,
         say: deps.say,
         onRefusal: (reason, undeclared = []) => {
@@ -12005,6 +12016,7 @@ export async function runFixRung(opts: {
       }
     }
     const harnessCommitRefused = harnessCommitRefusalReason !== undefined && harnessCommitCount === 0;
+    const mergeCommitRefused = harnessCommitRefused && harnessCommitRefusalReason === MERGE_HEAD_ABSENT_REASON;
 
     // W1-T2610: the sha this round believes it just committed, read as early as possible after
     // the worker returns — BEFORE the `readRoundCommits` await, the ledger writes, and the
@@ -12070,9 +12082,9 @@ export async function runFixRung(opts: {
           `spending strike ${attempt}/${opts.strikeCap}: ${opts.prUrl}`,
       );
     } else {
-      if (!harnessCommitRefused) strikes = attempt;
+      if (!harnessCommitRefused || mergeCommitRefused) strikes = attempt;
       deps.log("fix.dispatch", {
-        round_id: roundId,
+        ...(mergeCommitRefused ? {} : { round_id: roundId }),
         strike: attempt,
         strike_cap: opts.strikeCap,
         unmet_count: unmet.length,
@@ -12276,6 +12288,7 @@ export async function runFixRung(opts: {
         });
       }
       logFixDone();
+      if (mergeCommitRefused) continue;
       const refusedAtHead = fixRoundTally((deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), opts.taskId, priorHeadSha).refusals.length;
       deps.say(
         `fix rung: refused (${Math.max(1, refusedAtHead)} at this head) by the harness — no commit was produced: ` +
@@ -41490,14 +41503,17 @@ function temporaryIndexTree(
   repoDir: string,
   baseSha: string,
   mutate: (env: NodeJS.ProcessEnv) => void,
+  seedIndexPath?: string,
 ): string {
   const dir = mkdtempSync(join(tmpdir(), "rmd-dirty-fix-owner-index-"));
   const env = { ...process.env, GIT_INDEX_FILE: join(dir, "index") };
   try {
-    execFileSync("git", ["-C", repoDir, "read-tree", baseSha], {
-      env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    if (seedIndexPath === undefined) {
+      execFileSync("git", ["-C", repoDir, "read-tree", baseSha], {
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } else copyFileSync(seedIndexPath, env.GIT_INDEX_FILE);
     mutate(env);
     return execFileSync("git", ["-C", repoDir, "write-tree"], {
       encoding: "utf8",
@@ -41806,19 +41822,24 @@ export function commitWorkerEdits(
     runGit(["commit", "-m", message]);
     sha = runGit(["rev-parse", "HEAD"]).trim();
   } else {
+    const mergeHead = mergeHeadPresent(runGit) ? runGit(["rev-parse", "MERGE_HEAD"]).trim() : undefined;
     const tree = temporaryIndexTree(repoDir, options.priorHeadSha!, (env) => {
       execFileSync("git", ["-C", repoDir, "add", "-A", "--", ...declared], { env, stdio: ["ignore", "pipe", "pipe"] });
-    });
-    if (tree === runGit(["rev-parse", `${options.priorHeadSha}^{tree}`]).trim()) {
+    }, mergeHead === undefined ? undefined : resolve(repoDir, runGit(["rev-parse", "--git-path", "index"]).trim()));
+    if (mergeHead === undefined && tree === runGit(["rev-parse", `${options.priorHeadSha}^{tree}`]).trim()) {
       return { committed: false, undeclared, reason: "the worker changed nothing" };
     }
-    sha = runGit(["commit-tree", tree, "-p", options.priorHeadSha!, "-m", message]).trim();
+    sha = runGit(["commit-tree", tree, "-p", options.priorHeadSha!, ...(mergeHead === undefined ? [] : ["-p", mergeHead]), "-m", message]).trim();
     try {
       runGit(["update-ref", roundRef, sha, options.priorHeadSha!]);
     } catch (error) {
       const refusal = movedHead(undeclared, error);
       if (refusal) return refusal;
       throw error;
+    }
+    if (mergeHead !== undefined) {
+      runGit(["merge", "--quit"]);
+      runGit(["read-tree", sha]);
     }
   }
   return {
@@ -41903,10 +41924,17 @@ function mergeHeadPresent(runGit: GitRunner): boolean {
  */
 export function startShellLessMergeConflictMerge(
   worktreePath: string,
-  runGit: GitRunner = (args) =>
-    execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+  injectedGit?: GitRunner,
 ): { started: boolean; reason?: string } {
+  const runGit = injectedGit ?? worktreeGitRunner(worktreePath);
   if (mergeHeadPresent(runGit)) return { started: true };
+  if (injectedGit === undefined) {
+    try {
+      fetchOriginRetryingRefLock(runGit, undefined, 3, "main");
+    } catch (e) {
+      return { started: false, reason: `fetch of origin main failed: ${String((e as Error)?.message ?? e)}` };
+    }
+  }
   try {
     runGit(["merge", "--no-commit", "--no-ff", "origin/main"]);
   } catch (e) {
@@ -41916,7 +41944,17 @@ export function startShellLessMergeConflictMerge(
       return { started: false, reason: String((e as Error)?.message ?? e) };
     }
   }
-  return { started: true };
+  return mergeHeadPresent(runGit) ? { started: true } : { started: false, reason: MERGE_UP_TO_DATE_REASON };
+}
+
+export const MERGE_UP_TO_DATE_REASON =
+  "origin/main is already in this branch: the merge left no MERGE_HEAD and no conflict, so there is nothing to resolve";
+
+export const MERGE_HEAD_ABSENT_REASON =
+  "a merge-conflict round's commit needs MERGE_HEAD, so current main is its second parent; no merge is in progress";
+
+function worktreeGitRunner(worktreePath: string): GitRunner {
+  return (args) => execFileSync("git", ["-C", worktreePath, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 
 /**
@@ -42071,6 +42109,7 @@ export function harnessCommitForShellLessWorker(
     derivedCommit?: { subject: string; reason: string };
     /** W1-T4614: the selection assignment of the worker whose edits this commits; its trailer names it. */
     assignmentId?: string;
+    requireMergeHead?: boolean;
     log: (step: string, extra?: Record<string, unknown>) => void;
     say: (msg: string) => void;
     /** Receives the helper's exact refusal reason so a fix lane can record its own outcome row,
@@ -42081,6 +42120,11 @@ export function harnessCommitForShellLessWorker(
   deps: { commit?: typeof commitWorkerEdits; ahead?: (worktreePath: string, base: string) => number } = {},
 ): number {
   if (!input.harnessOwnsGit || input.commitCount !== 0) return input.commitCount;
+  if (input.requireMergeHead && !mergeHeadPresent(worktreeGitRunner(input.worktreePath))) {
+    input.log("implement.harness_commit_refused", { reason: MERGE_HEAD_ABSENT_REASON });
+    input.onRefusal?.(MERGE_HEAD_ABSENT_REASON, []);
+    return input.commitCount;
+  }
   const commit = deps.commit ?? commitWorkerEdits;
   const ahead = deps.ahead ?? commitsAhead;
   const asked = parseReport(input.report)?.commitMessage;
