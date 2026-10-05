@@ -1,0 +1,45 @@
+- id: W1-T5824
+  title: "A PLAN-SCOPED FIX ROUND READS TASK IDS WITH ITS OWN HEAD REF — `planPrPreflightAtCommitAsync` runs task-id-existence in a `git worktree add --detach` tree with `--base origin/main --require-open-prs` and no `--head-ref`, so the open-PR half cannot exclude the PR under repair and flags the PR's own new id as ALREADY CLAIMED; every plan-scoped fix round on a plan PR that adds a task id is refused (#9253, 2026-10-05)"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — the plan-PR preflight names the PR it is checking
+  band_meaning: span
+  origin: "operator session 2026-10-05: #9253 plan-scoped fix round refused by its own preflight (ledger fix.commit_refused 06:31:06Z)"
+  plan_refs: [W1-T5543, W1-T5521, W1-T5405, W1-T3070, W1-T4414]
+  files: [src/lib/plan-pr-emitter.ts, src/run-task.ts, test/a-plan-scoped-fix-round-reads-task-ids-with-its-own-head-ref.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 6fd35767. `runPlanScopedFixRound` (src/run-task.ts) calls
+    `planPrPreflightAtCommitAsync(worktreePath, sha, metadata)` before the worker (its findings are
+    the worker's `planGateFindings`) and again on the worker's commit. That function
+    (src/lib/plan-pr-emitter.ts) materializes the commit with `git worktree add --detach` and runs
+    scripts/task-id-existence-check.mjs with `TASK_ID_ARGV`, which is `--base origin/main
+    --require-open-prs` and nothing else. The script's own head ref is `--head-ref`, then
+    `GITHUB_HEAD_REF`, then `currentBranch(cwd)`. In a detached tree on the daemon all three are
+    empty, so the PR being repaired is not excluded from the open-PR scan, and an id the PR adds is
+    reported as claimed by another open PR: the PR itself.
+    LIVE 2026-10-05, run DAEMON-1791179621847, PR #9253 (ratify W1-T5814): `fix.dispatch` 06:28:12Z,
+    then `fix.commit_refused` 06:31:06Z with reason "task-id-existence: FAILED -- the following
+    added id(s) are ALREADY CLAIMED by another OPEN PR:". The PR stayed red until a hand fix at
+    07:38Z. W1-T5543 introduced the round; a plan PR that adds a shard is its main population, so
+    the round can never land its own repair there. The pre-push sweep preflights (refusal amendment,
+    plan repair) run before any PR exists and are not affected. src/run-task.ts sits at its
+    comment-load ceiling: add no comment lines there.
+  design: |
+    `planPrPreflightAtCommit` and `planPrPreflightAtCommitAsync` accept an optional `headRef` with
+    the title and body; when it is set, the task-id-existence check's argv gains `--head-ref
+    <headRef>` and the injected `taskIdExistence` seam receives it. `runPlanScopedFixRound` passes
+    `pr.headRefName` on every preflight call. Without a `headRef` the argv is unchanged, so the
+    pre-PR callers behave as today.
+  acceptance:
+    - claim: "a plan-scoped fix round passes the PR's head ref to every preflight call, the task-id-existence argv carries --head-ref only when one is given, and a real task-id-existence run over a fixture whose open PR is the head itself passes with the head ref and refuses without it"
+      proof: "unit test: test/a-plan-scoped-fix-round-reads-task-ids-with-its-own-head-ref.test.ts"
+  falsifier: |
+    Drop the head ref from runPlanScopedFixRound's preflight calls: the recorded preflight
+    arguments carry no head ref and the fixture run refuses the PR's own id, so the test fails.
