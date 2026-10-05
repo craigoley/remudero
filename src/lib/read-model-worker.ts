@@ -28,6 +28,7 @@ import { createNavBadgeReadModelView } from "./nav-badge-view.js";
 import { createNowView } from "./now-view.js";
 import { createOperatorAgentRowsView } from "./operator-agent-read-model.js";
 import { createTaskView, type ReadModelInstanceState as TaskViewInstanceState } from "./task-view.js";
+import { createWorkstreamsView } from "./workstreams-view.js";
 import { createDemandBook, type DemandBook } from "./view-demand.js";
 import {
   ORACLE_DEFAULT_WINDOW_MS,
@@ -1269,9 +1270,10 @@ export function runReadModelViewWorker(
     const demand = createDemandBook({ clock });
     const task = createTaskView({ instances: data.instances, ledgerSource, clock, demand, log });
     const inboxThread = createInboxThreadView({ ...(data.inboxRoot ? { inboxRoot: data.inboxRoot } : {}), clock, demand, log });
+    const workstreams = createWorkstreamsView({ instances: data.instances, ledgerSource, log });
     ticker = createReadModelTicker({
       stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, clock, holder: data.holder, post, viewsOnly: true, oracle: "off", demand,
-      views: [...READ_MODEL_VIEWS, now, instances, task, inboxThread, createOperatorAgentRowsView(ledgerSource), ...extra],
+      views: [...READ_MODEL_VIEWS, now, instances, task, inboxThread, workstreams, createOperatorAgentRowsView(ledgerSource), ...extra],
     });
     ticker.start();
     for (const msg of early.splice(0)) handle(msg);

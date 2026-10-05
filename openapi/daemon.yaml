@@ -7456,6 +7456,44 @@ components:
             page:
               $ref: "#/components/schemas/ViewPage"
 
+    WorkstreamsView:
+      type: object
+      description: >
+        GET /v1/views/workstreams (docs/views.md, src/lib/workstreams-view.ts; W1-T5050, P4-T11): the
+        operator activity page as one body across instances. Each entry is what GET /v1/operator-activity
+        answers for that instance, built by the same function in the read-model worker from the projector's
+        `activity_ring` (the newest rows of any step) plus the instance checkout's plan. Rebuilt on a ring
+        insert, a plan change or a GitHub snapshot re-save, debounced 1 s. Dark until
+        state/read-model/switches.json sets `workstreams` to `serve`.
+      required: [view, version, generatedAt, asOf, stale, sources, data]
+      properties:
+        view:
+          type: string
+          enum: [workstreams]
+        version:
+          type: integer
+          enum: [1]
+        generatedAt: {type: string, format: date-time}
+        asOf: {type: [string, "null"]}
+        stale: {type: boolean}
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/ViewSource"
+        data:
+          type: object
+          required: [instances]
+          properties:
+            instances:
+              type: array
+              items:
+                type: object
+                required: [instance, activity]
+                properties:
+                  instance: {type: string}
+                  activity:
+                    $ref: "#/components/schemas/OperatorActivityResult"
+
     NeedsYouView:
       type: object
       description: >
@@ -13888,6 +13926,33 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           description: The view is dark (`view_disabled`), shadowed (`view_shadow`) or not composed (`view_not_ready`).
+
+  /v1/views/workstreams:
+    get:
+      summary: The operator activity page for every instance, served from the read model.
+      description: >
+        W1-T5050 (arch Phase 4 design §1.1, P4-T11). Answers what GET /v1/operator-activity answers, per
+        instance, without a request-time ledger fold; no query parameters. DARK: it answers 404
+        `view_disabled` until state/read-model/switches.json sets `workstreams` to `serve`, and `shadow`
+        answers 404 `view_shadow` while the worker compares it with the route's own computation. Same ETag
+        and 304 rules as every view. See docs/views.md.
+      security:
+        - bearerRead: []
+      responses:
+        "200":
+          description: The view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkstreamsView"
+        "304":
+          description: The request's `If-None-Match` matched the view's ETag; no body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The view is dark (`view_disabled`), shadowed (`view_shadow`), or has no body yet (`view_not_ready`).
 
   /v1/views/events:
     get:
