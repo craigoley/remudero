@@ -393,6 +393,18 @@ function readChangedFilesArg(value) {
   return parseChangedFiles(raw);
 }
 
+/**
+ * CI shard admission (dependency-free, runs on native Node before any dependency install). Only the
+ * already-idle source PR shards (2..8, no live affected-suite run) may skip dependency/browser setup;
+ * every other case, including any unreadable or empty diff, fails closed to "setup required".
+ */
+export function requiresSetup(files, { event, shard, live }) {
+  return event !== "pull_request" || !/^[2-8]$/.test(String(shard)) || live !== "0" ||
+    !Array.isArray(files) || files.length === 0 ||
+    !files.every((file) => typeof file === "string" && file.length > 0) ||
+    classifyCoverage(files).class !== "SOURCE";
+}
+
 export function main(argv) {
   const { values } = parseArgs({
     args: argv,
@@ -415,8 +427,24 @@ export function main(argv) {
       // test/host-capability-fixtures.test.ts ratchets against a declared allowlist this task's
       // file scope (W1-T1227) does not include.
       "plan-reading-root": { type: "string" },
+      // Prints `true`/`false`: whether this CI shard needs dependency + browser setup (see requiresSetup).
+      "ci-admission": { type: "boolean", default: false },
+      shard: { type: "string" },
     },
   });
+
+  if (values["ci-admission"]) {
+    let files;
+    try { files = readChangedFilesArg(values["changed-files"]); }
+    catch (err) { console.error(`CI admission: unreadable diff; keeping setup (${err && err.message ? err.message : String(err)})`); }
+    const setup = requiresSetup(files, {
+      event: process.env.GITHUB_EVENT_NAME, shard: values.shard, live: process.env.RMD_AFFECTED_SUITE_LIVE,
+    });
+    console.error(`CI admission: setup=${setup}; ${setup ? "real work or uncertainty" : "coverage owns source tests; no duplicate shard work"}`);
+    console.log(setup ? "true" : "false");
+    process.exitCode = 0;
+    return;
+  }
 
   if (values["test-only-run"]) {
     try {

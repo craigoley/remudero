@@ -115,9 +115,34 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
+      - name: Admit setup only for a shard with work
+        id: admission
+        run: |
+          : > admission-files.txt
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ -n "${GITHUB_BASE_REF}" ]; then
+            if git fetch --no-tags origin "${GITHUB_BASE_REF}" && git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" > admission-files.txt; then
+              echo "CI admission: fresh diff available."
+            else
+              : > admission-files.txt
+            fi
+          fi
+          SETUP="$(node scripts/diff-class.mjs --ci-admission --changed-files admission-files.txt --shard ${{ matrix.shard }})" || SETUP="true"
+          case "$SETUP" in false) ;; *) SETUP="true" ;; esac
+          echo "setup=${SETUP}" >> "$GITHUB_OUTPUT"
+          echo "- ci shard ${{ matrix.shard }}/8: setup=${SETUP}; full required coverage is unchanged." >> "$GITHUB_STEP_SUMMARY"
+      - name: Restore npm cache only for admitted work
+        if: ${{ steps.admission.outputs.setup != 'false' }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
           cache: npm
       - name: Install (clean, from lockfile)
-        run: npm ci
+        run: |
+          if [ "${{ steps.admission.outputs.setup }}" != "false" ]; then
+            npm ci
+          else
+            echo "CI admission: no dependency install for an idle source shard."
+          fi
       - name: Determine Playwright's pinned browser version (cache key input)
         id: playwright-version
         run: |
@@ -126,6 +151,7 @@ jobs:
       # R-50: caches the downloaded browser binary only, keyed on runner OS plus the exact
       # playwright version pinned in package-lock.json, never a lockfile hash. No apt interaction.
       - name: Cache Playwright's Chromium download
+        if: ${{ steps.admission.outputs.setup != 'false' }}
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
@@ -144,7 +170,12 @@ jobs:
         # FALSIFIER: test/workflow-playwright-install.test.ts refuses `--with-deps` and every
         # retry/wait token in either install step.
         # Why: W1-T1027 filed it, W1-T1034 (#2223) measured it — docs/forensics/ci-yml.md.
-        run: npx playwright install chromium
+        run: |
+          if [ "${{ steps.admission.outputs.setup }}" != "false" ]; then
+            npx playwright install chromium
+          else
+            echo "CI admission: no browser download for an idle source shard."
+          fi
       - name: Typecheck
         # §5 TIER 2, quality gate 4/4 (W1-T98): this step is TS-strict's actual enforcement. A
         # strict-mode violation anywhere in src/**/test/** fails it and blocks merge via ci-gate.
@@ -169,6 +200,13 @@ jobs:
         # no `run:` body here may name one (#3187). Falsifier: test/push-ci-on-main.test.ts.
         id: classify
         run: |
+          if [ "${{ steps.admission.outputs.setup }}" = "false" ]; then
+            cp admission-files.txt changed-files.txt
+            : > test-only-run.txt
+            echo "class=SOURCE" >> "$GITHUB_OUTPUT"
+            echo "rename_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # PUSH-SAFE BY CONSTRUCTION, and that is an INVARIANT not a preference:
           # test/push-ci-on-main.test.ts asserts no `run:` body in THIS job mentions
           # any request-scoped context token — this job also runs on a push to
@@ -1615,7 +1653,7 @@ jobs:
           fi
           for SHARD in 1 2 3 4 5 6 7 8; do
             RAW_DIR="coverage-shards/coverage-shard-${SHARD}/raw"
-            if ! find "$RAW_DIR" -maxdepth 1 -type f -name 'coverage-bundle-*.json' -print -quit 2>/dev/null | grep -q .; then
+            if ! find "$RAW_DIR" -maxdepth 1 -type f \( -name 'coverage-bundle-*.json' -o -name 'coverage-corpus-*.json' \) -print -quit 2>/dev/null | grep -q .; then
               echo "coverage-ratchet: expected compact V8 coverage for shard ${SHARD}; refusing a partial merge."
               exit 1
             fi
