@@ -41,7 +41,7 @@
  */
 
 import { readFileSync, statfsSync } from "node:fs";
-import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import { ghExec } from "./github-transport.js";
 import type { ServerResponse } from "node:http";
 import { readLedgerLines, type LedgerReader } from "./status.js";
@@ -49,6 +49,9 @@ import { systemClock, type Clock } from "./clock.js";
 import { DEFAULT_POLL_INTERVAL_MS, IDLE_STARVED_PULSE_MS, IDLE_STARVED_PULSE_STEP } from "./poll-interval.js";
 import type { Route } from "./service.js";
 import { parseGhRateLimitHeaders } from "./worker.js";
+
+/** `@types/node` 22 names this IntervalHistogram and 24 ELDHistogram; the return type is both. */
+type EventLoopDelayHistogram = ReturnType<typeof monitorEventLoopDelay>;
 
 /** {@link deriveLastPoll}'s result — see this module's header for each field's own source. */
 export interface DaemonPollInfo {
@@ -361,9 +364,9 @@ const LAG_WINDOW_MS = 60_000;
 /** A rolling one-minute `monitorEventLoopDelay` window, started on first read. */
 export function createEventLoopLagMonitor(
   clock: Clock = systemClock,
-  histogram: () => IntervalHistogram = () => monitorEventLoopDelay({ resolution: 20 }),
+  histogram: () => EventLoopDelayHistogram = () => monitorEventLoopDelay({ resolution: 20 }),
 ): () => EventLoopLag | undefined {
-  let hist: IntervalHistogram | undefined;
+  let hist: EventLoopDelayHistogram | undefined;
   let startedAt = 0;
   return () => {
     if (!hist) {
