@@ -1,0 +1,43 @@
+- id: W1-T5884
+  title: "SERVE'S OWN DIAGNOSTIC ROWS DO NOT MOVE THE READ MODEL GENERATION — `commit()` in the ledger projector bumps `generation` on every committed batch whatever the rows are, so the `read_model.slow_view`, `read_model.materialize_deferred` and `view.emitted` rows serve writes into core's ledger make `now@core` due again: a self-feeding rebuild loop that keeps the single view thread about 35% busy on now alone"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: medium  # Rule 19: one concern — a batch of serve diagnostic rows is projected but never advances the generation views key on
+  band_meaning: span
+  origin: "operator session 2026-10-05: SSE push-latency measurement on the host (extracts in the session scratch push-latency/, with #9344 and #9338 open)"
+  plan_refs: [W1-T5066]
+  files: [src/lib/ledger-projector.ts, test/serves-own-diagnostic-rows-do-not-move-the-read-model-generation.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main 0b8d2a21. `createLedgerProjector`'s `commit()`
+    (src/lib/ledger-projector.ts) runs `sql.generation.run()` inside every write transaction,
+    whatever the batch held. The now view's `step` (src/lib/now-view.ts) starts a build whenever
+    `h.generation !== entry.state.generation`, so any appended row makes `now@<instance>` due.
+    Serve writes its own diagnostics into core's ledger: `read_model.slow_view` and
+    `read_model.materialize_deferred` (src/lib/read-model-worker.ts) and `view.emitted`
+    (src/lib/view-events.ts). A now build that runs long logs slow_view, publishing logs
+    view.emitted, the projector ingests both, the generation moves, and now is due again.
+    MEASURED 2026-10-05 on the host: `now@core` costs about 2.7 s per build (47 builds over 2.5 s
+    in 18 min, one 6.66 s), and most `view.emitted.rowTs` values in the sample WERE these
+    diagnostic rows, so the view thread spends about 35% of its time rebuilding now for its own
+    telemetry. That time is head-of-line blocking for every cheap view (W1-T5885). Target
+    event-to-screen is under 5 s.
+  design: |
+    The builder chooses the shape: a named set of serve diagnostic steps (at least the three
+    above), or serve-lane diagnostics by a marker the rows already carry. A committed batch whose
+    fresh rows are ALL in that set still projects them (facts, projections, checkpoint) but does
+    not advance `generation`; a batch with any other row advances it as today. The set must not
+    include a real serve state row that a view reads; name in the source why each member is
+    diagnostic-only.
+  acceptance:
+    - claim: "appending only read_model.slow_view, read_model.materialize_deferred and view.emitted rows leaves the projector generation unchanged while the rows are still projected and checkpointed, and a now view held at that generation stays not due; a negative control appending one ordinary row advances the generation"
+      proof: "unit test: test/serves-own-diagnostic-rows-do-not-move-the-read-model-generation.test.ts"
+  falsifier: |
+    Keep the unconditional `sql.generation.run()` in `commit()`: the diagnostic-only batch moves
+    the generation and the test fails.
