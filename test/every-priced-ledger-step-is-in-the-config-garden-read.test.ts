@@ -76,6 +76,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "sweep.red_base_refresh.error": A_LANE_RUN_ID,
   "sweep.review_admitted": A_LANE_RUN_ID,
   "sweep.review_eligible": A_LANE_RUN_ID,
+  "sweep.reviewer_freshness_probe": A_LANE_RUN_ID, // W1-T5771: the freshness re-probe, under SWEEP-/DAEMON- run ids
   "sweep.stale_red_redrive.attempted": A_LANE_RUN_ID,
   "sweep.stale_red_redrive.local_route": A_LANE_RUN_ID,
   "sweep.stale_red_redrive.released": A_LANE_RUN_ID,
