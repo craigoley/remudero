@@ -138,6 +138,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "review.finding": AFTER_PR_OPENED,
   "review.post_failed": AFTER_PR_OPENED,
   "review.posted_reappended": AFTER_PR_OPENED,
+  "review.skipped_closed_lifecycle": AFTER_PR_OPENED,
   "review.verdict_conflict": AFTER_PR_OPENED,
   "run.handoff_declined": AFTER_PR_OPENED,
   "shadow.verdict": AFTER_PR_OPENED,
@@ -264,6 +265,26 @@ test("sweep review telemetry does not change the config gardener's gathered runs
   assert.equal(gatherRuns([
     { run_id: "SWEEP-1", task_id: "T-1", step: "run.start" }, ...telemetry,
   ])[0]!.prUrl, telemetry[0]!.pr_url, "a lane with run.start would make the exemption unsafe");
+});
+
+test("closed review skips preserve the config gardener's gathered runs", () => {
+  const prUrl = "https://github.com/fixture/repo/pull/1";
+  const worker: LedgerRecord[] = [
+    { run_id: "worker", task_id: "T-1", step: "run.start", type: "implement" },
+    { run_id: "worker", step: "implement.done", cost_usd: 2, num_turns: 3 },
+    { run_id: "worker", step: "pr.opened", pr_url: prUrl },
+  ];
+  for (const reason of ["pr_merged", "pr_closed"]) {
+    const rows: LedgerRecord[] = [...worker,
+      { run_id: "worker", step: "review.skipped_closed_lifecycle", pr_url: prUrl, reason },
+      { run_id: "review-PR1", step: "review.skipped_closed_lifecycle", pr_url: prUrl, reason },
+    ];
+    const gathered = gatherRuns(rows);
+    assert.equal(gathered.length, 1, "the independent review lane has no run.start");
+    assert.equal(gathered[0]!.prUrl, prUrl, "the worker's pr.opened remains its credit source");
+    assert.equal(gathered[0]!.costUsd, 2);
+    assert.deepEqual(gatherRuns(rows.filter(row => CONFIG_GARDEN_LEDGER_STEPS.includes(String(row.step)))), gathered);
+  }
 });
 
 test("the census reads each write idiom and ignores an unpriced or total-only row", () => {
