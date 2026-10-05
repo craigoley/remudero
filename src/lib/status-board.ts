@@ -445,6 +445,8 @@ export interface CostAnomalyRow {
   sampleSize: number;
   /** The `cost.anomaly` ledger line's own `ts`, when present. */
   ts?: string;
+  /** W1-T5374: the money fields the row did not carry, which read 0 above; a reader says unknown, never $0.00. */
+  unknown?: Array<"cost_usd" | "median_cost_usd">;
 }
 
 /** W1-T1021 IMAGE DRIFT — the newest un-dismissed `daemon.image_drift` row: a baked path changed on `main` AFTER the
@@ -2033,6 +2035,33 @@ function deriveNeedsMe(
             .sort();
           return { count: taskIds.length, taskIds };
         })();
+  const { costAnomaly, imageDrift, tokenFallback, uncreditedBuilds } = deriveOperatorItems(lines, projections);
+
+  // W1-T1000003: currently-standing operator merge holds — a pure re-read of the SAME hold reader sweep.ts and
+  // run-task.ts already consult, never a second gateway or ledger pass.
+  const mergeHeld = deriveMergeHeld(lines);
+
+  // W1-T4192: read merge state off the SAME projections, so a held root is never judged on a second derivation.
+  const heldRoots =
+    plan && projections ? heldDependencyRoots(plan, (id) => projections.get(id)?.merged === true) : undefined;
+
+  return {
+    parkedProposals,
+    costAnomaly,
+    imageDrift,
+    mergeHeld,
+    uncreditedBuilds,
+    ...(tokenFallback ? { tokenFallback } : {}),
+    ...(heldRoots ? { heldRoots } : {}),
+  };
+}
+
+/** W1-T5374: NEEDS ME's four operator-item producers, exported so the now view's human-gate adapter classifies the
+ *  SAME rows this board renders rather than a second derivation of them. */
+export function deriveOperatorItems(
+  lines: ReadonlyArray<Record<string, unknown>>,
+  projections: ReadonlyMap<string, StatusProjection> | undefined,
+): Pick<NeedsMeSection, "costAnomaly" | "imageDrift" | "tokenFallback" | "uncreditedBuilds"> {
   // W1-T931: this board's read of `cost.anomaly` rows — never a re-derivation of the detector's math, which lives in
   // cost-anomaly.ts. DEDUPED BY `run_id`, LAST ONE WINS.
   // Why: the concurrent-write risk — docs/forensics/status-board.md
@@ -2044,6 +2073,7 @@ function deriveNeedsMe(
     const ts = typeof l.ts === "string" ? l.ts : undefined;
     const existing = byRunId.get(runId);
     if (existing && !isNewer(ts, existing.ts)) continue;
+    const unknown = (["cost_usd", "median_cost_usd"] as const).filter((field) => typeof l[field] !== "number");
     byRunId.set(runId, {
       runId,
       taskId: typeof l.task_id === "string" ? l.task_id : "?",
@@ -2053,6 +2083,7 @@ function deriveNeedsMe(
       multiplier: typeof l.multiplier === "number" ? l.multiplier : 0,
       sampleSize: typeof l.sample_size === "number" ? l.sample_size : 0,
       ts,
+      ...(unknown.length > 0 ? { unknown } : {}),
     });
   }
   const costAnomaly = [...byRunId.values()].sort((a, b) => (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0));
@@ -2089,10 +2120,6 @@ function deriveNeedsMe(
       ? { reason: lastFail.reason, ...(lastFail.ts ? { ts: lastFail.ts } : {}), ...(lastOkTs ? { lastOkTs } : {}) }
       : undefined;
 
-  // W1-T1000003: currently-standing operator merge holds — a pure re-read of the SAME hold reader sweep.ts and
-  // run-task.ts already consult, never a second gateway or ledger pass.
-  const mergeHeld = deriveMergeHeld(lines);
-
   // W1-T2392: READ, never re-derive. `deriveStatus` already decided this per task and put it on the projection; this
   // walks the SAME map, so no second plan pass. Sorted by task id so the block is stable between renders.
   const uncreditedBuilds: UncreditedBuildRow[] = [];
@@ -2103,19 +2130,7 @@ function deriveNeedsMe(
   }
   uncreditedBuilds.sort((a, b) => a.taskId.localeCompare(b.taskId));
 
-  // W1-T4192: read merge state off the SAME projections, so a held root is never judged on a second derivation.
-  const heldRoots =
-    plan && projections ? heldDependencyRoots(plan, (id) => projections.get(id)?.merged === true) : undefined;
-
-  return {
-    parkedProposals,
-    costAnomaly,
-    imageDrift,
-    mergeHeld,
-    uncreditedBuilds,
-    ...(tokenFallback ? { tokenFallback } : {}),
-    ...(heldRoots ? { heldRoots } : {}),
-  };
+  return { costAnomaly, imageDrift, uncreditedBuilds, ...(tokenFallback ? { tokenFallback } : {}) };
 }
 
 function readOperatorReleasesForBoard(root: string): { ids: ReadonlySet<string>; reason?: string } {
@@ -2649,6 +2664,12 @@ function renderLearningsInjectionBlock(s: LearningsInjectionSection): string[] {
   return out;
 }
 
+/** W1-T5374: one anomaly money field as rendered: unknown when the row did not carry it, never a verified $0.00. */
+export function costAnomalyUsd(row: CostAnomalyRow, field: "cost_usd" | "median_cost_usd"): string {
+  if (row.unknown?.includes(field)) return "unknown";
+  return `$${(field === "cost_usd" ? row.costUsd : row.medianCostUsd).toFixed(2)}`;
+}
+
 /** W1-T931 — one line per un-dismissed `cost.anomaly` row, naming the run, its class, its cost and the median exceeded.
  *  W1-T1021 adds an image-drift row naming both shas. `nothing needs you` only when NEITHER has anything to report. */
 function renderNeedsMeBlock(n: NeedsMeSection): string[] {
@@ -2713,8 +2734,8 @@ function renderNeedsMeBlock(n: NeedsMeSection): string[] {
   }
   for (const r of n.costAnomaly) {
     out.push(
-      `cost.anomaly : ${r.taskId} (${r.runId}) [${r.taskClass}] $${r.costUsd.toFixed(2)} vs class median ` +
-        `$${r.medianCostUsd.toFixed(2)} (>${r.multiplier}x, n=${r.sampleSize})`,
+      `cost.anomaly : ${r.taskId} (${r.runId}) [${r.taskClass}] ${costAnomalyUsd(r, "cost_usd")} vs class median ` +
+        `${costAnomalyUsd(r, "median_cost_usd")} (>${r.multiplier}x, n=${r.sampleSize})`,
     );
   }
   if (n.imageDrift) {
