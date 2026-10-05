@@ -55,9 +55,9 @@ test('CI idle shards run the actual install and classifier guards without depend
   assert.equal(readFileSync(join(skipped.fixture, 'changed-files.txt'), 'utf8'), 'src/leaf.ts\n');
   assert.match(readFileSync(join(skipped.fixture, 'out'), 'utf8'), /class=SOURCE/);
   assert.equal(ci.if, undefined, 'the matrix check must still register');
-  for (const name of ['Restore npm cache only for admitted work', "Cache Playwright's Chromium download"]) {
-    assert.equal(ci.steps.find((step) => step.name === name)?.if, "${{ steps.admission.outputs.setup != 'false' }}");
-  }
+  assert.equal(ci.steps.find((step) => step.name === 'Restore npm cache only for admitted work')?.if, "${{ steps.admission.outputs.setup != 'false' }}");
+  // W1-T5697: the browser cache follows the browser admission, which equals setup on shards 2-8.
+  assert.equal(ci.steps.find((step) => step.name === "Cache Playwright's Chromium download")?.if, "${{ steps.admission.outputs.browser != 'false' }}");
   const admission = ci.steps.findIndex((step) => step.id === 'admission');
   assert.ok(admission > 0 && admission < ci.steps.indexOf(install), 'admission must precede installation');
 });

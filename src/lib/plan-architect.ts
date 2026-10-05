@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { shapeCommitMessage } from "./commit-message.js";
+import { checkCommitMessage, shapeCommitMessage } from "./commit-message.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
 import type { Escalation, EscalationOption } from "./escalate.js";
 import { grillChoiceError, parseGrillFalsifier, parseGrillOptions, parseGrillRecommendation } from "./grill-choices.js";
@@ -537,14 +537,24 @@ export function planCommitMessage(opts: {
   brief: string;
 }): string {
   const { decision, mode, brief } = opts;
-  // W1-T136 class: `decision.detail` is LLM free text, so this header could exceed
-  // commitlint's header-max-length (100) — a red REQUIRED check on an already-open PR.
-  // shapeCommitMessage caps it and preserves the overflow in the body.
-  return shapeCommitMessage(
+  const label = "Operator brief (summary) — ";
+  const firstSentence = brief.trim().split(/(?<=[.!?])\s+/)[0].replace(/\s+/g, " ");
+  const summary = shapeCommitMessage(
+    "chore(plan)",
+    firstSentence || "(none — whole-plan scope)",
+    "",
+    { headerMaxLength: 100 - label.length + "chore(plan): ".length, bodyMaxLineLength: 100 },
+  ).header.slice("chore(plan): ".length);
+  const body = label + summary;
+  const shaped = shapeCommitMessage(
     `chore(plan)`,
     `--mode=${mode} — ${decision.detail}`,
-    brief.length > 0 ? `Brief: ${brief}` : "Brief: (none — whole-plan scope)",
-  ).message.trimEnd();
+    body,
+  );
+  // W1-T5122: an unbreakable proposal token must not cost the already-produced plan.
+  return (checkCommitMessage(shaped.message).length === 0
+    ? shaped.message
+    : `${shaped.header}\n\n${body}`).trimEnd();
 }
 
 // ── Propose-outcome commit (harness-owned, REAL git — no dry-run) ───────────

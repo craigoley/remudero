@@ -128,7 +128,12 @@ test("W1-T5536: an unmoved base closes the PR and requeues its task with a failu
   for (const text of ["5536", "old-head", "check:ci#a broken invariant", "ci (3/8)", "strike", "the worker changed nothing"]) assert.ok(notes[0].note.includes(text), text);
   assert.deepEqual(loadOperatorNotesForTask(f.root, "W1-T9999"), []);
   assert.ok(f.rows.some(r => r.step === "sweep.strike_ladder.requeued" && r.rebuild === 1));
-  await f.sweep([pr({ prNumber: 5537, prUrl: "https://github.com/acme/remudero/pull/5537", headSha: "second-build" })]);
+  const second = pr({ prNumber: 5537, prUrl: "https://github.com/acme/remudero/pull/5537", headSha: "second-build" });
+  // W1-T5690: one rebuild per task per UTC day — the same day's second build gets the digest.
+  await f.sweep([second]);
+  assert.equal(loadOperatorNotesForTask(f.root, "W1-T5536").length, 1);
+  f.deps.now = () => NOW + 24 * 60 * 60_000;
+  await f.sweep([second]);
   assert.equal(loadOperatorNotesForTask(f.root, "W1-T5536").length, 2);
   assert.ok(f.rows.some(r => r.step === "sweep.strike_ladder.requeued" && r.rebuild === 2));
   const refused = fixture(t);

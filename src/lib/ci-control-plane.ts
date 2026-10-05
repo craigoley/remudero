@@ -6,6 +6,7 @@ export type CiJob = {
   name?: string;
   uses?: string;
   strategy?: { matrix?: Record<string, unknown> };
+  steps?: Array<{ run?: string }>;
 };
 
 export type WorkflowDoc = { on?: unknown; jobs?: Record<string, CiJob> };
@@ -50,6 +51,14 @@ function expandMatrixNames(template: string, matrix: Record<string, unknown>): s
   }, [template]);
 }
 
+/** W1-T5802: names a step posts through the checks API — each `report "<name>"` call line of a step
+ *  whose `run` POSTs `repos/${GITHUB_REPOSITORY}/check-runs` (not the `report()` definition). */
+function postedCheckNames(job: CiJob): string[] {
+  return (job.steps ?? [])
+    .filter((step) => /gh api\s+"?repos\/\$\{GITHUB_REPOSITORY\}\/check-runs(?=["\s\\]|$)/m.test(step.run ?? ""))
+    .flatMap((step) => [...(step.run ?? "").matchAll(/^\s*report\s+"([^"]+)"/gm)].map((match) => match[1]!));
+}
+
 /** Derive every check-run name that a pull_request workflow in this tree can register. */
 export function derivePrCheckCandidates(relPath: string, doc: WorkflowDoc): string[] {
   if (!firesOnPullRequest(doc.on)) return [];
@@ -62,6 +71,10 @@ export function derivePrCheckCandidates(relPath: string, doc: WorkflowDoc): stri
     }
     for (const name of job.strategy?.matrix ? expandMatrixNames(job.name ?? jobId, job.strategy.matrix) : [job.name ?? jobId]) {
       candidates.push(name.includes("${{") ? `${relPath}#${jobId} (unresolved template after matrix expansion: ${JSON.stringify(name)})` : name);
+    }
+    for (const name of postedCheckNames(job)) {
+      const candidate = name.includes("${") ? `${relPath}#${jobId} (unresolved template in a posted check name: ${JSON.stringify(name)})` : name;
+      if (!candidates.includes(candidate)) candidates.push(candidate);
     }
   }
   return candidates;
