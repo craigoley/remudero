@@ -601,10 +601,16 @@ test('streamed compact coverage preserves pinned-Node LCOV without writable scra
         '--import', 'tsx', '--import', './test/setup/tmp-hygiene.ts', 'test/worker-provider.test.ts',
       ], { cwd: process.cwd(), env: coverageEnv(rawDirs[index]!), encoding: 'utf8', stdio: 'pipe' });
       assert.match(tap, /^# tests [1-9]\d*/m, 'the real profile producer must complete tests');
+      assert.match(tap, /^# pass [1-9]\d*/m, 'the real profile producer must execute a passing test');
+      assert.match(tap, /^# fail 0$/m, 'the real profile producer must not hide a failed test');
       runCompactor(compactDirs[index]!, rawDirs[index]!);
     }
     const control = pinnedNodeControl(root, rawDirs);
-    assert.equal(control.order.length, rawDirs.length, 'this control has one process report per compact directory');
+    const reportCounts = rawDirs.map((directory) => readdirSync(directory)
+      .filter((name) => /^coverage-\d+-\d{13}-\d+\.json$/.test(name)).length);
+    assert.ok(reportCounts.every((count) => count > 0), `each compact directory must contribute process reports, got ${reportCounts.join(',')}`);
+    assert.equal(control.order.length, reportCounts.reduce((sum, count) => sum + count, 0),
+      'the pinned-Node control must retain every process report in its captured order');
     const log = execFileSync(process.execPath,
       ['--expose-internals', 'scripts/coverage-merge-ratchet.mjs', '--output', output, ...control.order.map((index) => compactDirs[index]!)],
       { cwd: process.cwd(), env: { ...process.env, TMPDIR: join(root, 'scratch-does-not-exist') }, encoding: 'utf8', stdio: 'pipe' });
