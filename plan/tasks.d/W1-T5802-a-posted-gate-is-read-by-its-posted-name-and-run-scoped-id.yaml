@@ -14,6 +14,8 @@
   status: queued
   priority: 1
   attempts: 0
+  note: |
+    reservation hand-off: unknown -> run-unfiled-1791177306545
   rationale: |
     READ 2026-10-05 on origin/main b790deee. W1-T5695 changes what ci.yml's checks-API reporter
     posts, and two src readers refuse the new shape. (1) `checkJobId` (src/lib/sweep.ts) returns
