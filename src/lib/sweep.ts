@@ -2308,7 +2308,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     postReview: async (pr, mode = { kind: "full-review" }) => {
       log("sweep.post_review.attempt", {
         pr_number: pr.prNumber,
+        pr_url: pr.prUrl,
         head_sha: pr.headSha,
+        review_key: reviewOutcomeKeyForPr(pr),
+        review_input_digest: pr.reviewInputDigest,
         review_mode: mode.kind,
         ...(mode.kind === "full-review" ? {} : { judged_head_sha: mode.judgedHeadSha }),
       });
@@ -10978,6 +10981,13 @@ export async function runSweep(
     return { complete: true, lines: parseLedger(union.matches.join("\n")) };
   });
   const prior = priorActionsFromLedger(ledgerLines);
+  if (deps.repairAdmissionSurface !== "light") {
+    observeReviewEligibility(openPrs, deps, policy, now, ledgerLines, {
+      delivered: prior.reviewDelivered,
+      refused: prior.reviewRefused,
+      retryableThrows: prior.reviewRetryableThrows,
+    }, "full");
+  }
   // Rotation retains arm_skipped receipts; sweep.disposed may prefer an older acted:true row.
   const idleHeads = new Map<number, string>();
   for (const line of ledgerLines) {
@@ -13611,6 +13621,19 @@ export async function runSweep(
       );
       return;
     }
+    appendLine(deps.ledgerPath, {
+      run_id: deps.runId,
+      task_id: job.pr.taskId ?? "SWEEP",
+      step: "sweep.review_admitted",
+      pr_number: job.pr.prNumber,
+      pr_url: job.pr.prUrl,
+      head_sha: job.pr.headSha,
+      review_key: job.reviewKey,
+      review_input_digest: job.pr.reviewInputDigest,
+      review_mode: job.mode.kind,
+      surface: deps.repairAdmissionSurface ?? "full",
+      observation_version: 1,
+    });
     if (deps.detachReviewWait) {
       finalizeDisposition(job.index, job.pr, jobDisposition, job.reason, job.question,
         true, false, undefined, undefined, undefined, undefined, undefined);
@@ -13898,6 +13921,7 @@ export async function runSweepLightPass(
     refused: selectionPrior.reviewRefused,
     retryableThrows: selectionPrior.reviewRetryableThrows,
   };
+  observeReviewEligibility(openPrs, deps, policy, now, selectionLedgerLines, outcomes, "light");
   const queueDepth = reviewAdmissionQueueDepth(openPrs, policy, now, outcomes);
   const activeWorkers = (deps.readActiveWorkerCount ?? activeWorkerCount)();
   const policySemanticBound = effectiveReviewWidth(deps, policy, queueDepth, now, selectionLedgerLines, activeWorkers);
@@ -14047,6 +14071,36 @@ function reviewAdmissionOutcomeKnown(
     retryableReviewThrowBackoffReason(outcomes.retryableThrows ?? EMPTY_RETRYABLE_REVIEW_THROWS, key, policy, now) !==
       undefined
   );
+}
+
+/** Record observed eligibility before either admission bound. It is not PR creation time or
+ * proof of the first-ever eligible instant. Exact input keys avoid joining changed bodies;
+ * the live receipt suppresses repeated polls, while archived observations remain recoverable. */
+function observeReviewEligibility(
+  openPrs: readonly OpenPrView[],
+  deps: SweepDeps,
+  policy: SweepPolicy,
+  now: number,
+  ledgerLines: ReadonlyArray<Record<string, unknown>>,
+  outcomes: ReviewAdmissionOutcomes,
+  surface: SweepRepairSurface,
+): void {
+  if (deps.dryRun) return;
+  const observed = new Set(ledgerLines.filter(row => row.step === "sweep.review_eligible")
+    .map(row => row.review_key));
+  const append = deps.appendLine ?? appendLedger;
+  for (const pr of openPrs) {
+    const key = reviewOutcomeKeyForPr(pr);
+    if (observed.has(key) || deriveDisposition(pr, policy, now).disposition !== "post-review" ||
+        reviewAdmissionOutcomeKnown(pr, outcomes, policy, now)) continue;
+    append(deps.ledgerPath, {
+      run_id: deps.runId, task_id: pr.taskId ?? "SWEEP", step: "sweep.review_eligible",
+      pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha,
+      review_key: key, review_input_digest: pr.reviewInputDigest, surface,
+      observation_version: 1,
+    });
+    observed.add(key);
+  }
 }
 
 /** W1-T526 — WHICH OPEN PRS the light pass admits into `post-review`. Branch protection's `strict`
