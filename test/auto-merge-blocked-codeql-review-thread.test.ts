@@ -163,7 +163,7 @@ function blockedPr(over: Partial<OpenPrView> = {}): OpenPrView {
     checksState: "green",
     unmetCriteria: [],
     priorStrikes: 0,
-    lastActivityAt: "2026-09-27T11:00:00Z",
+    lastActivityAt: "2026-09-27T11:00:00Z", // expiring-fixture: exempt -- compared only against this suite's INJECTED now (NOW), never the wall clock; 13/13 pass with Date.now shifted +30d
     headSha: HEAD,
     headRefName: BRANCH,
     autoMergeArmed: true,
