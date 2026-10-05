@@ -73,7 +73,7 @@ import {
   type ObservedScopeByTask,
 } from "./dispatch-overlap.js";
 import { DEPLOY_IDLE_DEFER_CEILING_MS } from "./deployer.js";
-import { evaluatePauseTier, type PauseTier, type PauseTierInput } from "./fleet-control.js";
+import { evaluatePauseTier, isRecyclePauseDetail, type PauseTier, type PauseTierInput } from "./fleet-control.js";
 import { HEADROOM_LIMIT_PCT, RESET_UNKNOWN, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 // Type-only, so no runtime edge is added to daemon-health.ts, which already imports a value from
@@ -2120,6 +2120,9 @@ async function runGatedSweep(
   // The shared liveness flag. Optional and trailing, so every existing caller behaves exactly as
   // before, which is what keeps the W1-T1044 bound tests meaningful (W1-T2582).
   liveness?: SweepLiveness,
+  // W1-T5804: a pass run BECAUSE of a recycle PAUSE holds worker admission on the live STOP/PAUSE
+  // read even where `deps.workerAdmissionHold` is unwired, so it can never start a fix worker.
+  recyclePause?: true,
 ): Promise<SweepCycleOutcome | undefined> {
   // Decline, do not duplicate. Checked before the ticker starts, so a declined pass costs nothing at
   // all. This one gate closes both routes into a concurrent pass, because all three call sites pass
@@ -2142,7 +2145,7 @@ async function runGatedSweep(
     const continueReviewAdmissions = (() =>
       reviewAdmissionsOpen && deps.checkStop?.() === undefined && deps.checkPause?.() === undefined) as ReviewAdmissionGate;
     const workerAdmissionHold = (): string | undefined => {
-      const hold = deps.workerAdmissionHold?.();
+      const hold = deps.workerAdmissionHold?.() ?? (recyclePause ? resolveFleetControlHold(deps) : undefined);
       if (!hold) return undefined;
       const reason = `fleet ${hold.control} hold: ${hold.detail}`;
       log("daemon.admission_held", { surface: "full-sweep", control: hold.control, detail: hold.detail, reason });
@@ -3422,6 +3425,19 @@ export async function runDaemon(
         { lane: "daemon", gate: "pause", condition: { detail: paused }, heartbeatMs: GATE_OBSERVATION_HEARTBEAT_MS, clock: daemonClock },
         log,
       );
+      // W1-T5804: a recycle's own PAUSE holds only worker-spawning work. Dispatch stays withheld (this
+      // branch `continue`s) and the full pass runs on its normal cadence with review and fix admission
+      // closed by the PAUSE, so a reviewed green PR is still armed and merged while the recycle waits
+      // on in-flight workers. Every other PAUSE reason keeps its full meaning: no pass at all.
+      if (isRecyclePauseDetail(paused)) {
+        log("daemon.admission_held", { surface: "dispatch", control: "PAUSE", detail: paused, reason: `fleet PAUSE hold: ${paused}` });
+        if (deps.sweep && !backgroundSweep) {
+          sweepRetriggerState.lastRunAtMs = daemonClock.now();
+          sweepRetrigger.slot.adopt(
+            runGatedSweep(deps, pollIntervalMs, sweepWallClockBoundMs, log, diskHeadroomLatch, headroomSampler, sweepLiveness, true),
+          );
+        }
+      }
       // W1-T4429 (ii): govern a structured hold's tier; (iii): reviews keep flowing beside the sleep.
       const pauseHold = deps.checkPauseHold?.();
       if (pauseHold) {

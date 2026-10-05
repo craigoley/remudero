@@ -223,6 +223,15 @@ export function stopDetail(root: string): string | undefined {
 }
 
 /** Human-readable ledger/summary detail when PAUSED; `undefined` when not. */
+/** The detail {@link pauseDetail} renders for deploy/recycle-container.sh's own PAUSE (W1-T5127). */
+const RECYCLE_PAUSE_DETAIL = "PAUSE requested: container recycle (deploy/recycle-container.sh)";
+
+/** W1-T5804: whether an already-read PAUSE detail is the recycle's own. Exact match: an operator hold
+ *  that merely mentions the script is still an operator hold. */
+export function isRecyclePauseDetail(detail: string | undefined): boolean {
+  return detail === RECYCLE_PAUSE_DETAIL;
+}
+
 export function pauseDetail(root: string): string | undefined {
   if (!isPaused(root)) return undefined;
   const info = readFlag(pauseFilePath(root));
@@ -577,7 +586,9 @@ function resolveSharedPauseAnchor(sha: string, deps: SharedPauseGitDeps): Shared
  */
 export function checkSharedPause(root: string, deps: SharedPauseGitDeps): string | undefined {
   const local = pauseDetail(root);
-  if (local) return local;
+  // W1-T5804: a recycle's own PAUSE lets the daemon arm and merge, so it must never mask an operator's
+  // shared hold. The SAME ref read an unpaused tick pays runs, and a hold (or unreachable) wins over it.
+  if (local && !isRecyclePauseDetail(local)) return local;
   const ls = lsRemoteSharedPause(deps);
   if (ls.status === 0 && ls.sha) {
     const anchor = resolveSharedPauseAnchor(ls.sha, deps);
@@ -606,7 +617,7 @@ export function checkSharedPause(root: string, deps: SharedPauseGitDeps): string
       `optimistically (an unreachable remote is never read as clear)`
     );
   }
-  return undefined;
+  return local;
 }
 
 // ── W1-T4429: TIERED, SELF-HEALING ESCALATION (design (ii)) ────────────────────────────────────
