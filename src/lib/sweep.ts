@@ -4267,16 +4267,14 @@ async function applyCiTimeoutRefresh(
   if (terminal) return `${head}; refresh refused: ${terminal}`;
   if (live.headSha !== pr.headSha) return `${head}; refresh refused: head moved to ${live.headSha ?? "an unreadable sha"}`;
   appendLine(deps.ledgerPath, { ...row, step: "sweep.ci_timeout_refresh.attempted" });
-  let outcome: string;
-  let error: string | undefined;
+  let result: { outcome: string; error?: string };
   try {
-    outcome = await deps.updateBranch(pr);
+    result = { outcome: await deps.updateBranch(pr) };
   } catch (e) {
-    outcome = "error";
-    error = String((e as Error)?.message ?? e);
+    result = { outcome: "error", error: String((e as Error)?.message ?? e) };
   }
-  appendLine(deps.ledgerPath, { ...row, step: "sweep.ci_timeout_refresh.outcome", outcome, ...(error ? { error } : {}) });
-  if (outcome !== "updated") return escalate(`update-branch returned ${outcome}${error ? ` (${error})` : ""}`);
+  appendLine(deps.ledgerPath, { ...row, step: "sweep.ci_timeout_refresh.outcome", ...result });
+  if (result.outcome !== "updated") return escalate(`update-branch returned ${result.outcome}${result.error ? ` (${result.error})` : ""}`);
   return `${head}; base refresh requested, a new head re-runs them — no requeue or fix strike`;
 }
 
