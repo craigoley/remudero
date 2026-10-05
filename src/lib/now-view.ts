@@ -37,15 +37,19 @@ import { deriveLastPoll, readDiskFreeBytes, readGhRateLimitRemaining } from "./d
 import { deployAutoPath, deployImageManualPath, deployMarkerPath } from "./deployer.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { feedbackDir, listFeedback, type FeedbackEntry } from "./feedback.js";
+import { heldDependencyRoots } from "./held-dependency-roots.js";
 import {
   consumeHumanGateCounts,
   measureFeedbackAge,
   projectChangeManagementGates,
+  projectDependencyVerificationGates,
   projectFeedbackGates,
   projectHumanGates,
   projectOperatorItemGates,
   projectPinReviewerGates,
   shownHumanGates,
+  type DependencyEscalation,
+  type DependencyReviewFact,
   type FeedbackAgeEvidence,
   type DeployMarkerReading,
   type FeedbackAgeRoot,
@@ -71,17 +75,18 @@ import {
 } from "./now-decisions.js";
 import type { BoardIssueRest, BoardPrRest } from "./open-prs-rest.js";
 import { projectReconciledFeedback } from "./panel-graph.js";
-import type { Plan } from "./plan.js";
+import { unmetDependencies, type Plan } from "./plan.js";
 import { loadPolicy, policyPath, type PolicyValues } from "./policy.js";
 import { ratificationsPath, type Ratifications } from "./ratification.js";
 import { parse as parseYaml } from "yaml";
 import type { ReadModelDb, ReadModelLease } from "./read-model-db.js";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { buildBatchedGithub, readLedgerLines, type BatchedPr, type GitHub } from "./status.js";
+import { buildBatchedGithub, readLedgerLines, resolveEscalation, type BatchedPr, type GitHub } from "./status.js";
 import { deriveOperatorItems } from "./status-board.js";
 import { deriveDayCostUsd, windowCostRows } from "./sweep.js";
 import { threadPlan, threadPlanPin } from "./thread-plan.js";
 import { utcDayWindowMs } from "./time-window.js";
+import { currentVerifyHumanRulings } from "./verify-human-judge.js";
 import { judgeSource } from "./view-freshness.js";
 import { legacyRowIndex, type LegacyRows, type ShadowLatest, type ShadowSum } from "./view-shadow.js";
 import { effectiveViewMode, type ViewSource, type ViewSwitchMode } from "./views.js";
@@ -208,6 +213,61 @@ function decisionGate(decision: NowDecision): HumanGateObservation {
     reason: decision.prompt.split("\n").find((line) => line.trim() !== "")?.trim() ?? decision.title,
     resolutionVerb: decision.kind === "manual_approval" ? "approve" : decision.kind === "escalation" ? "mark_handled" : "answer",
   };
+}
+
+const DEP_REVIEW_TASK = /^dep-review(?:-(arm|hold))?-PR(\d+)$/;
+
+/** W1-T5370: each producer's own record, joined the board's way. Dependency escalations go through resolveEscalation's
+ *  issue join; held roots through heldDependencyRoots over the board's merge state; verify-human through the
+ *  judge's current ruling. An existing release (`ratify.approved`, `released: verify-human`) frees a root and
+ *  settles its verify ask. */
+export function nowDependencyVerificationGates(input: {
+  instance: string; repo?: string; plan: Plan | undefined; rows: ReadonlyArray<Row>; github: GitHub;
+  snapshot: Pick<BoardSnapshot, "tasks" | "prQueue" | "github_unreachable">;
+}): HumanGateSource[] {
+  const { snapshot, rows, plan } = input;
+  const decided = new Map<number, Row>();
+  const escalated = new Map<number, Set<string>>();
+  const released = new Set<string>();
+  for (const row of rows) {
+    if (typeof row.task_id !== "string") continue;
+    const dep = DEP_REVIEW_TASK.exec(row.task_id);
+    if (row.step === "ratify.approved" && row.released === "verify-human") released.add(row.task_id);
+    else if (dep && row.step === "dep-review.decided" && !dep[1]) decided.set(Number(dep[2]), row);
+    else if (dep && row.step === "escalation.issue_opened") escalated.set(Number(dep[2]), (escalated.get(Number(dep[2])) ?? new Set()).add(row.task_id));
+  }
+  const ledger = rows as Array<Record<string, unknown>>;
+  const openPrs = new Map(snapshot.prQueue.rows.map((pr) => [pr.prNumber, pr.prUrl]));
+  const dependencyReview = [...escalated].sort(([a], [b]) => a - b).map(([prNumber, taskIds]): DependencyReviewFact => {
+    const verdict = decided.get(prNumber);
+    // A reconciliation failure re-logs the review as `hold`; the review's own verdict rides `review_decision`.
+    const decision = verdict?.review_decision ?? verdict?.decision;
+    return {
+      repo: input.repo ?? null, prNumber, prUrl: openPrs.get(prNumber) ?? (typeof verdict?.pr_url === "string" ? verdict.pr_url : null),
+      decision: typeof decision === "string" ? decision : null, prOpen: snapshot.prQueue.complete ? openPrs.has(prNumber) : null,
+      escalations: [...taskIds].sort().flatMap((taskId): DependencyEscalation[] => {
+        const open = resolveEscalation(ledger, taskId, input.github);
+        return open ? [{ producer: (DEP_REVIEW_TASK.exec(taskId)![1] ?? "manual") as DependencyEscalation["producer"], ...(open.escalationClass ? { class: open.escalationClass } : {}),
+          ...(open.issueUrl ? { issueUrl: open.issueUrl } : {}), ...(open.openedAt ? { openedAt: open.openedAt } : {}), ...(open.unverified ? { unverified: true as const } : {}) }] : [];
+      }),
+    };
+  });
+  const byId = new Map(snapshot.tasks.map((t) => [t.taskId, t]));
+  const merged = (id: string): boolean => byId.get(id)?.merged === true;
+  const depsMerged = (id: string): boolean | undefined => {
+    const task = plan?.byId.get(id);
+    return task ? unmetDependencies(plan!, task, (t) => merged(t.id)).length === 0 : undefined;
+  };
+  const rulings = currentVerifyHumanRulings(ledger, depsMerged);
+  const githubGap = snapshot.github_unreachable || !snapshot.prQueue.complete;
+  return projectDependencyVerificationGates({
+    instance: input.instance,
+    dependencyReview: { state: githubGap ? "partial" : "complete", ...(githubGap ? { reason: snapshot.prQueue.unavailableReason ?? "GitHub PR state could not be completely verified" } : {}), items: dependencyReview },
+    heldRoots: { state: plan ? "complete" : "unavailable", ...(plan ? {} : { reason: "no plan was read, so held roots are unknown" }),
+      items: (plan ? heldDependencyRoots(plan, merged, released) : []).map((root) => ({ ...root, url: byId.get(root.rootId)?.prUrl ?? byId.get(root.rootId)?.escalationIssueUrl ?? null })) },
+    verifyHuman: { state: "complete", items: snapshot.tasks.filter((t) => t.verifyHumanPending && !released.has(t.taskId)).map((t) => ({
+      taskId: t.taskId, url: t.prUrl ?? null, judgment: rulings.get(t.taskId) ?? { state: "unclassified" as const, reason: "no judge verdict recorded" } })) },
+  });
 }
 
 const RUNNING_STATUSES = new Set(["running", "fixing", "review", "diagnosing"]);
@@ -848,7 +908,7 @@ export function createNowView(opts: NowViewOptions): {
       deploy, nowMs, freshnessBudgetMs: NOW_DAEMON_SILENT_MS });
   };
   /** One instance's open decisions: grill and task questions from core's stores, escalations from its own board. */
-  const decisionsOf = (instance: NowInstance, db: ReadModelDb, snapshot: BoardSnapshot, rows: ReadonlyArray<Row>, now: number, statusGithub: GitHub): NowDecisionsData => {
+  const decisionsOf = (instance: NowInstance, db: ReadModelDb, snapshot: BoardSnapshot, rows: ReadonlyArray<Row>, now: number, statusGithub: GitHub, plan: Plan | undefined): NowDecisionsData => {
     const reasons: NonNullable<NowViewData["decisionsReasons"]> = {};
     const all = escalationDecisions(instance.name, snapshot.tasks, escalationClasses(rows), instance.name === core);
     let feedbackEntries: FeedbackEntry[] = [];
@@ -888,6 +948,7 @@ export function createNowView(opts: NowViewOptions): {
       ...(changeManagementUnknown ? { reason: snapshot.blockedPrsUnverifiedReason ?? snapshot.prQueue.unavailableReason ?? "GitHub PR state could not be completely verified" } : {}),
       actions: nowActions(snapshot, rows),
     }));
+    sources.push(...nowDependencyVerificationGates({ instance: instance.name, ...(instance.repo ? { repo: instance.repo } : {}), plan, rows, github: statusGithub, snapshot }));
     sources.push(...pinReviewerSources(instance, now));
     // Only the gate source joins this body; every record stays on rmd status's NEEDS ME block, unchanged.
     sources.push(operatorItemsOf(instance, now).source);
@@ -975,7 +1036,7 @@ export function createNowView(opts: NowViewOptions): {
       h.probe = probeHost(instance, instance.name === core);
       h.healthAt = b.now;
     }],
-    ["decisions", (instance, b) => void (b.decisions = decisionsOf(instance, b.db, b.snapshot!, b.rows!, b.now, b.h!.gateway.github))],
+    ["decisions", (instance, b) => void (b.decisions = decisionsOf(instance, b.db, b.snapshot!, b.rows!, b.now, b.h!.gateway.github, b.plan))],
     ["assemble", (instance, b) => {
       const { h, snapshot, rows, now, state } = b as Required<NowBuild>;
       const data = assembleNowView({ instance: instance.name, snapshot, rows, plan: b.plan!, recent: computeRecentActivity(depsOf(instance, b), h.recent, 20), health: h.probe!.health, decisions: b.decisions!, nowMs: now });
