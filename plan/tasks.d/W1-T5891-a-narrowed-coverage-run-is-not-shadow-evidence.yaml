@@ -1,0 +1,35 @@
+- id: W1-T5891
+  title: "A NARROWED COVERAGE RUN IS NOT SHADOW EVIDENCE — once W1-T5705's live selection narrows the coverage lane, the W1-T4404 shadow step still records the run, and every failure in a narrowed run is inside the selection by construction, so selectorShadowReport would count narrowed runs as zero-miss evidence for the very switch they depend on"
+  repo: remudero
+  depends_on: [W1-T5705]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one concern — only a full-suite run is evidence about the selector's misses
+  band_meaning: span
+  origin: "operator session 2026-10-05: W1-T5705 (#9350) builder's follow-up 1, a precondition of the live flip"
+  plan_refs: [W1-T5705, W1-T4404, W1-T5703, W1-T5701]
+  files: [src/lib/selector-shadow-gardener.ts, test/a-narrowed-coverage-run-is-not-shadow-evidence.test.ts]
+  status: queued
+  priority: 2
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on W1-T5705's head b490fd5b (#9350). With RMD_AFFECTED_SUITE_LIVE=1 a pull
+    request's coverage shards run only the selector's narrow set and stage a
+    `coverage-artifact/selection` marker (`narrow` or `all`). The W1-T4404 shadow step
+    measures misses by comparing the selector's prediction to the suites that FAILED; in a run
+    that executed only the selected suites, no unselected suite can fail, so every narrowed run
+    reads as a perfect prediction. `selectorShadowReport` (src/lib/selector-shadow-gardener.ts)
+    already counts only complete eight-shard runs, but has no notion of a narrowed run. The miss
+    rate that gates the live flip would then be inflated by the flip's own runs.
+  design: |
+    A shadow run whose shards report `selection: narrow` (from the staged marker) is recorded but
+    excluded from the miss-rate and saving evidence, with a `narrowed` count in the report so the
+    exclusion is visible. Runs with `all`, or with no marker (every run before W1-T5705), count as
+    today.
+  acceptance:
+    - claim: "selectorShadowReport over full runs and narrowed runs computes its miss rate from the full runs only and reports the narrowed run count, and a report of only full runs is unchanged"
+      proof: "unit test: test/a-narrowed-coverage-run-is-not-shadow-evidence.test.ts"
+  falsifier: |
+    Count narrowed runs: a narrowed run with zero misses lowers the miss rate and the test fails.

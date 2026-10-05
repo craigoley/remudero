@@ -84,7 +84,8 @@ test("W1-T5617: an untouched population starts no child", () => {
     runs++;
     return files;
   };
-  const found = evaluate(["plan/tasks.d/W1-T1-x.yaml", "docs/src/readme.md", "DECISIONS.md"], [BOUNDS, WORKFLOWS, TESTS], runSuites);
+  // W1-T5693: a plan/tasks.d shard now joins the citation-anchor census, so it is no longer an untouched path.
+  const found = evaluate(["plan/x.yaml", "docs/src/readme.md", "DECISIONS.md"], [BOUNDS, WORKFLOWS, TESTS], runSuites);
   assert.deepEqual(found, { violations: [], unmeasured: null });
   assert.equal(runs, 0, "no suite runs for a diff no admitted suite walks");
   // An empty diff does not even read the admission table.

@@ -1,0 +1,35 @@
+- id: W1-T5892
+  title: "THE LIVE COVERAGE FLIP REQUIRES A FRESH NIGHTLY FLOOR — a narrowed pull request reads its absolute coverage floor from the newest coverage-nightly (kept 14 days) or coverage-merged (kept 1 day) lcov and refuses when none is readable, so flipping RMD_AFFECTED_SUITE_LIVE while the nightly is unhealthy blocks every source PR"
+  repo: remudero
+  depends_on: [W1-T5705]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 3.00
+  risk: high  # Rule 19: one concern — the live flag cannot take effect without a readable floor
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-05: W1-T5705 (#9350) builder's follow-up 2; workflow edit is an operator build (W1-T5351)"
+  plan_refs: [W1-T5705, W1-T5704, W1-T5811]
+  files: [.github/workflows/ci.yml, test/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts]
+  status: queued
+  priority: 3
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on W1-T5705's head b490fd5b (#9350). When any coverage shard narrowed, the
+    aggregator's Coverage ratchet step downloads the absolute floor from the newest completed
+    `coverage-nightly` run on main or a ci.yml merge_group run (`coverage-merged`), moving on when
+    a download fails and refusing when none can be read. Nightly artifacts are kept 14 days and
+    coverage-merged 1 day, and a red nightly raises a needs-human issue (W1-T5811) but does not
+    stop the live flag. So a nightly outage while the flag is on blocks every narrowed source PR
+    on an infrastructure fault unrelated to the PR.
+  design: |
+    A narrowed shard runs only when a readable floor exists: the shard's selection step checks for
+    a coverage-nightly or coverage-merged artifact newer than a stated bound (tagged BACKSTOP) and
+    falls back to `--select-all` with a named reason when there is none, so the run is full and
+    measures its own floor. The ratchet's refusal stays for the case where a narrowed run still
+    finds no floor.
+  acceptance:
+    - claim: "with the live flag on and no coverage-nightly or coverage-merged artifact within the bound, the coverage shard falls back to the full suite naming the missing floor, with a fresh artifact it narrows, and with the flag off nothing changes"
+      proof: "unit test: test/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts"
+  falsifier: |
+    Narrow without checking the floor: the no-artifact fixture narrows and the test fails.
