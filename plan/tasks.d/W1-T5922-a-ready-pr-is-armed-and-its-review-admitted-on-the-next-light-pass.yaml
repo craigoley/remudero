@@ -1,0 +1,48 @@
+- id: W1-T5922
+  title: "A READY PR IS ARMED, AND ITS REVIEW ADMITTED, ON THE NEXT LIGHT PASS — `lightPassActionable` (src/run-task.ts) admits only post-review, blocked-fixable and conflicted, so every `mergeable` arm and every review admission waits for the next FULL sweep, which runs once per daemon loop iteration (measured 2026-10-05: gap p50 13.3 min, p90 28.4 min, max 29.7 min), and a PR pays that wait twice, once for its review and once for its arm"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 10.00
+  risk: high  # Rule 19: one concern — the light pass gains the two cheap, bounded actions (arm, review admission); it sits in front of auto-merge and of paid review spend
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-05: 'why is this all taking so long? How do we improve efficiency and automated throughput?'"
+  plan_refs: [W1-T100, W1-T5901, W1-T254, W1-T2430, W1-T2519, W1-T1272, W1-T5403, W1-T473]
+  files: [src/run-task.ts, src/lib/sweep.ts, test/a-ready-pr-is-armed-and-its-review-admitted-on-the-next-light-pass.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-05 over the live ledger and the GitHub API. 80 PRs merged since 2026-10-04 had an
+    open-to-merge time of p50 38 min and p90 120 min for code PRs, and p50 29 min for plan-only PRs.
+    The CI wall clock is p50 22 min. Most of the rest is the daemon waiting for its own full sweep:
+    - Full passes (`sweep.pass` with enumerated > 1) ran 12 times from 12:00Z, gap p50 13.3, p90 28.4,
+      max 29.7 min. A full pass runs once per loop iteration, and DEFAULT_SWEEP_RETRIGGER_INTERVAL_MS
+      (20 min, src/lib/daemon.ts) is the only backstop while a long phase holds the loop.
+    - Review admission happens only on a full pass: #9373, #9372 and #9375 read
+      `sweep.review_eligible` (surface light) at 17:10:54Z and `sweep.review_admitted` (surface full)
+      at about 17:50Z, a 40-minute wait; #9364 waited 49 min. Admissions arrive 3-4 per full pass.
+    - In 9 of 16 sampled merged PRs remudero-review posted AFTER ci-gate was green, by 2 to 44 min
+      (#9368 44, #9372/#9373 33, #9375 26), so review, not CI, set the merge time.
+    - The arm: `lightPassActionable` returns false for `mergeable`, so a green, reviewed PR waits for
+      the next full pass (#9424 at 22:17/22:19Z: "deferred to full sweep (light pass)"). W1-T5901
+      covers plan PRs only (direct merge); code PRs are untouched.
+    W1-T100 shares src/lib/sweep.ts and src/run-task.ts but routes blocked_ci to the ci-log fix path;
+    this task touches neither that routing nor the fix ladder, only which dispositions a light pass may act on.
+  design: |
+    (1) `lightPassActionable` admits `mergeable`: the arm is one GitHub call and spawns no worker. The
+    arm path's own guards are unchanged (decideSweepArm, the W1-T5403 risk judge, operator holds, the
+    dedup), and a light pass that cannot read what the arm needs stands down and names why. (2) The
+    review admission that today waits for the full surface is admitted on a light pass under the SAME
+    bound the full pass uses (the semantic/review admission bound and its light-pass reservations,
+    lightPassSpawningReservations), so the paid spend bound is unchanged; only its latency moves.
+    (3) A row names which surface acted, so the latency win is measurable: eligible->admitted and
+    green->armed by surface. Coordinate with W1-T5901 (plan PRs) so a plan PR is not handled twice.
+  acceptance:
+    - claim: "on a light pass a green, reviewed mergeable PR is armed through the same guarded arm path the full sweep uses, and a review-eligible PR is admitted under the same admission bound, while a risk-refused head, an operator hold, an already-armed PR and a full admission bound each still stand down with the reason named"
+      proof: "unit test: test/a-ready-pr-is-armed-and-its-review-admitted-on-the-next-light-pass.test.ts"
+  falsifier: |
+    Keep `lightPassActionable` returning false for `mergeable`: the light pass leaves the green,
+    reviewed PR unarmed and the test fails.

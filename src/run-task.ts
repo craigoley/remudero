@@ -938,6 +938,8 @@ import {
   findTaskShard,
   parseProofAmendmentProposal,
   requestProofAmendment,
+  requestScopeAmendment,
+  type ScopeAmendmentOutcome,
   type ProofAmendmentOutcome,
   type ProofAmendmentRecord,
   type ProofAmendmentWritePorts,
@@ -10287,6 +10289,8 @@ export async function runFixRung(opts: {
     requeueCheck?: (failure: CiFailure) => boolean | Promise<boolean>;
     /** W1-T5544: test seam for the proof-repair gate; production reads the round's git diff and runs `check-proof --base`. */
     proofRepairRoundRefusal?: typeof proofRepairRoundRefusalInWorktree;
+    scopeAmendmentWritePorts?: ProofAmendmentWritePorts;
+    scopeAmendmentPortsIo?: Parameters<typeof buildProofAmendmentWritePorts>[1];
     /** W1-T4450: test seam for "did the round leave uncommitted edits"; production reads git status. */
     worktreeHasUncommittedChanges?: (worktreePath: string) => boolean;
     /** W1-T4458 (i): test seam; production runs `git merge --no-commit --no-ff origin/main`. */
@@ -10662,6 +10666,26 @@ export async function runFixRung(opts: {
   // does not parse, in which case the pre-strike merge-conflict check below is skipped every
   // round (never a guessed number).
   const prNumber = prNumberFromRef(opts.prUrl);
+  const amendScope = async (paths: string[], changedPaths: string[], headSha: string): Promise<ScopeAmendmentOutcome> => {
+    let outcome: ScopeAmendmentOutcome;
+    try {
+      const body = await (deps.fetchPrBody ?? fetchPrBodyViaGh)(opts.prUrl);
+      const trailers = [...body.matchAll(/^Remudero-Task:[ \t]*(\S+)[ \t]*$/gm)];
+      const ports = deps.scopeAmendmentWritePorts ?? buildProofAmendmentWritePorts({
+        taskId: opts.taskId, worktreePath: opts.worktreePath, config: opts.config,
+        owner: opts.reviewBase.owner, repo: opts.reviewBase.repo, prNumber: prNumber!,
+        ledgerLinesNow: (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), log: deps.log,
+        gitOps: buildProofAmendmentGitOps(execFileSync), amendmentKind: "scope_amendment",
+      }, deps.scopeAmendmentPortsIo);
+      outcome = requestScopeAmendment({ taskId: opts.taskId, prNumber: prNumber!, prUrl: opts.prUrl,
+        headSha, paths, changedPaths, trailerTaskId: trailers.length === 1 ? trailers[0][1] : undefined }, ports);
+    } catch (error) {
+      outcome = { kind: "refused", reason: "scope-amendment-error", detail: String(error) };
+    }
+    deps.log("fix.scope_amendment", { outcome: outcome.kind, ...outcome, paths, head_sha: headSha,
+      pr_number: prNumber, amendment_url: "amendmentUrl" in outcome ? outcome.amendmentUrl : undefined });
+    return outcome;
+  };
   // W1-T2671: at most one base-gap read/update attempt per invocation. A successful update ends
   // this invocation because GitHub's update-branch endpoint is asynchronous and the current
   // worktree is now stale; the next level-triggered sweep reconstructs both CI and the checkout
@@ -11697,6 +11721,16 @@ export async function runFixRung(opts: {
     // worker-visible unmet set the fix rung actually dispatches (W1-T166).
     const priorHeadSha = review.headSha;
     const roundLedger = (deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))();
+    const pendingScope = roundLedger.findLast((row) => row.step === "fix.scope_amendment" &&
+      row.task_id === opts.taskId && row.pr_number === prNumber && row.head_sha === priorHeadSha &&
+      ["created", "resumed", "branch_update_requested"].includes(String(row.outcome)));
+    if (pendingScope && Array.isArray(pendingScope.paths)) {
+      const paths = pendingScope.paths as string[];
+      const resumed = await amendScope(paths, paths, priorHeadSha);
+      if (resumed.kind === "refused") deps.log("fix.commit_refused", { head_sha: priorHeadSha,
+        reason: resumed.detail, scope_amendment_detail: `NEEDS_SCOPE ${paths.join(",")}` });
+      return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment branch update" };
+    }
     const priorDesign = roundLedger.find((row) =>
       row.step === "fix.needs_design" && row.task_id === opts.taskId && row.head_sha === priorHeadSha);
     if (priorDesign) {
@@ -12107,7 +12141,7 @@ export async function runFixRung(opts: {
           `spending strike ${attempt}/${opts.strikeCap}: ${opts.prUrl}`,
       );
     } else {
-      if (!harnessCommitRefused || mergeCommitRefused || markerCommitRefused) strikes = attempt;
+      if (fixAction.kind !== "scope-needed" && (!harnessCommitRefused || mergeCommitRefused || markerCommitRefused)) strikes = attempt;
       deps.log("fix.dispatch", {
         ...(mergeCommitRefused ? {} : { round_id: roundId }),
         strike: attempt,
@@ -12137,9 +12171,8 @@ export async function runFixRung(opts: {
       );
     }
     sessionToResume = fixResult.sessionId;
-    if (harnessCommitRefused) {
-      const scopeAmendment = fixAction.kind === "scope-needed"
-        ? `NEEDS_SCOPE ${fixAction.paths.join(",")}` : scopeAmendmentFromFixReport(workerTranscript(fixResult));
+    if (harnessCommitRefused && fixAction.kind !== "scope-needed") {
+      const scopeAmendment = scopeAmendmentFromFixReport(workerTranscript(fixResult));
       deps.log("fix.commit_refused", {
         round_id: roundId,
         strike: attempt,
@@ -12155,7 +12188,7 @@ export async function runFixRung(opts: {
       });
     }
     const fixClaimFields: Record<string, unknown> = {};
-    const logFixDone = (pushedHeadSha?: string) => deps.log("fix.done", {
+    const logFixDone = (pushedHeadSha?: string, subtype?: string) => deps.log("fix.done", {
       ...fixReceipt.ledgerFields(fixResult), // W1-T4613: FIRST, so every field this row already carried keeps its value
       round_id: roundId,
       fix_outcome: fixOutcome?.kind ?? "unstated",
@@ -12165,7 +12198,7 @@ export async function runFixRung(opts: {
       strike: attempt,
       round,
       session_id: fixResult.sessionId,
-      subtype: harnessCommitRefused || fixAction.kind === "scope-needed" ? "commit_refused" : fixResult.subtype,
+      subtype: subtype ?? (harnessCommitRefused || fixAction.kind === "scope-needed" ? "commit_refused" : fixResult.subtype),
       ...(harnessCommitRefused || fixAction.kind === "scope-needed" ? { worker_subtype: fixResult.subtype } : {}),
       cost_usd: fixResult.costUsd,
       billing_mode: billingMode(fixResult.childEnvKeys),
@@ -12279,7 +12312,20 @@ export async function runFixRung(opts: {
     }
     if (fixAction.kind === "scope-needed") {
       deps.log("fix.scope_needed", { paths: fixAction.paths, head_sha: priorHeadSha });
-      if (!harnessCommitRefused) deps.log("fix.commit_refused", { strike: attempt, round, head_sha: priorHeadSha,
+      let amendment: ScopeAmendmentOutcome;
+      try {
+        const changed = workerChangedPaths(execFileSync("git", ["-C", opts.worktreePath, "status", "--porcelain", "-z", GIT_UNTRACKED_FILES_ALL], { encoding: "utf8" }));
+        if (roundStartSha) changed.push(...execFileSync("git", ["-C", opts.worktreePath, "diff", "--name-only", "-z", roundStartSha, "HEAD"], { encoding: "utf8" }).split("\0").filter(Boolean));
+        amendment = await amendScope(fixAction.paths, changed, priorHeadSha);
+      } catch (error) {
+        amendment = { kind: "refused", reason: "worker-diff-unreadable", detail: String(error) };
+        deps.log("fix.scope_amendment", { outcome: amendment.kind, ...amendment, paths: fixAction.paths, head_sha: priorHeadSha });
+      }
+      if (amendment.kind !== "refused") {
+        logFixDone(undefined, "scope_amendment_pending");
+        return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment merge" };
+      }
+      deps.log("fix.commit_refused", { round_id: roundId, strike: attempt, round, head_sha: priorHeadSha,
         reason: "non-test paths need scope", scope_amendment_detail: `NEEDS_SCOPE ${fixAction.paths.join(",")}`,
         fix_outcome: fixOutcome?.kind });
       if (harnessCommitCount > 0) {
@@ -12992,6 +13038,7 @@ export function buildProofAmendmentWritePorts(
     ledgerLinesNow: readonly Record<string, unknown>[];
     log: (step: string, extra?: Record<string, unknown>) => void;
     gitOps: { gitAdd: (worktreePath: string, relPath: string) => void; gitCommit: (worktreePath: string, message: string) => string };
+    amendmentKind?: "proof_amendment" | "scope_amendment";
   },
   io: {
     findShardFn?: typeof findTaskShard;
@@ -13021,6 +13068,7 @@ export function buildProofAmendmentWritePorts(
     assertLiveWriteAllowedFn = assertLiveWriteAllowed,
   } = io;
   const { taskId, worktreePath, config, owner, repo, prNumber, ledgerLinesNow, log, gitOps } = params;
+  const scope = params.amendmentKind === "scope_amendment";
   return {
     repoDir: worktreePath,
     findShard: findShardFn,
@@ -13041,11 +13089,11 @@ export function buildProofAmendmentWritePorts(
       const created = createPlanPrRestFn(ghJsonFn, owner, repo, o);
       return { prUrl: created.prUrl, prNumber: created.prNumber };
     },
-    worktreePathFor: (tid, num) => join(worktreesDir(config), `proof-amendment-${tid}-${num}`),
+    worktreePathFor: (tid, num) => join(worktreesDir(config), `${scope ? "scope" : "proof"}-amendment-${tid}-${num}`),
     lookupIdentity: (key): ProofAmendmentRecord | undefined => {
       const row = [...ledgerLinesNow]
         .reverse()
-        .find((l) => l.step === "fix.dispatch" && l.kind === "proof_amendment" && l.identity_key === key) as
+        .find((l) => (scope ? l.step === "fix.scope_amendment" : l.step === "fix.dispatch" && l.kind === "proof_amendment") && l.identity_key === key) as
         | Record<string, unknown>
         | undefined;
       if (!row) return undefined;
@@ -13063,6 +13111,11 @@ export function buildProofAmendmentWritePorts(
       return { amendmentUrl, amendmentNumber, merged };
     },
     recordIdentity: (key, record) => {
+      if (scope) {
+        log("fix.scope_amendment", { kind: "scope_amendment", task_id: taskId, pr_number: prNumber,
+          identity_key: key, amendment_url: record.amendmentUrl, amendment_number: record.amendmentNumber });
+        return;
+      }
       log("fix.dispatch", {
         kind: "proof_amendment",
         task_id: taskId,

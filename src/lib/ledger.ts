@@ -564,6 +564,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // test that derives this set from its consumers -- not a log line nobody reads.
   "repair.lease_posted",
   "pr.opened",
+  "pr.stuck", // W1-T5900: runSweep dedupes a stalled stage across passes and rotation.
+  "pr.stuck.resolved", // Retain its resolution so rotation cannot resolve the same stage again.
   // W1-T2594: provider-diverse reviewer routing resolves this row by exact task + PR + head.
   // Rotating it away would make an unchanged head route differently after maintenance.
   "pr.head_provider",
@@ -685,6 +687,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T4207: `lastCommitRefusalPromptLines` (run-task.ts) reads its `subtype` to name the last refused paths.
   "fix.done",
   "fix.needs_design", // W1-T5532: preserve the explicit hand-off for the next fix-lane decision.
+  "fix.scope_amendment", // W1-T5534: runFixRung and lookupIdentity resume pending amendments after rotation.
   "fix.resolved",
   // W1-T1095: `fixRebaseAlreadySpent` (run-task.ts) reads this to enforce "at most one rebase per
   // blocked PR"; no timer backs it, so losing it restores an unbounded rebase-and-retry.
@@ -797,6 +800,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "sweep.update_branch.attempted",
   "sweep.update_branch.conflict",
   "sweep.update_branch.error",
+  // W1-T5903: runSweep reads this row back to write ONE skipped_queue row per PR and head; dropping
+  // it on rotation would re-log the same stand-down every pass.
+  "sweep.update_branch.skipped_queue",
   // W1-T1235: `latestGhRateLimitRefusalsFromLedger` (run-task.ts) reads the newest row per bucket
   // for `rmd status`'s GITHUB BUCKETS section. Kept here, not in the render set, because GitHub's
   // resets outlast RENDER_STEP_RETENTION_WINDOW_MS and an operator needs the LAST refusal however
