@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 
@@ -8,6 +9,7 @@ import * as fleet from "../src/lib/fleet-lane.js";
 import * as garden from "../src/lib/gardener.js";
 import * as daemon from "../src/lib/daemon.js";
 import { ghJsonAsync } from "../src/lib/github-transport.js";
+import * as runTask from "../src/run-task.js";
 import { runAutomaticBranchReapRung, reapBranchesCommand, reapBranchesCommandAsync } from "../src/run-task.js";
 import type { AutomaticBranchReapState } from "../src/lib/branch-reaper.js";
 import type { Config } from "../src/lib/config.js";
@@ -261,3 +263,50 @@ describe("test/the-reap-and-garden-reads-never-block-the-loop.test.ts", () => {
     } finally { lane.stop(); }
   });
 });
+
+test("a reap pass that throws past its own containment releases its in-flight key and rethrows", () => {
+  const config = { root: tmpdir(), claudeBin: "/bin/true" } as Config;
+  const exec = (cmd: string, args: string[]): string => (args[0] === "ls-remote" ? "a1\trefs/heads/main\n" : "");
+  const throwingLog = (): void => { throw new Error("ledger write failed"); };
+  const run = (log: (step: string, extra?: Record<string, unknown>) => void) => runAutomaticBranchReapRung(
+    "other-owner", "inflight-repo", config, join(tmpdir(), "rmd-unused-ledger.ndjson"), "SWEEP-THROW", log, {},
+    { root: tmpdir(), exec, clock: { now: () => 1000 } });
+  assert.throws(() => run(throwingLog), /ledger write failed/);
+  const steps: string[] = [];
+  run((step) => { steps.push(step); });
+  assert.ok(steps.length > 0, "the key was released, so the next pass for the same repo runs instead of returning early");
+});
+
+test("the daemon's SRE lane builds its input from the awaited merge rate", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "rmd-w1t5285-sre-"));
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  mkdirSync(join(root, "state"), { recursive: true });
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+  const oldHome = process.env.HOME;
+  const oldSre = process.env.RMD_SRE_LANE;
+  process.env.HOME = home;
+  process.env.RMD_SRE_LANE = "1";
+  t.after(() => {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    if (oldSre === undefined) delete process.env.RMD_SRE_LANE;
+    else process.env.RMD_SRE_LANE = oldSre;
+    rmSync(home, { recursive: true, force: true });
+  });
+  let gardens: unknown[] | undefined;
+  await runTask.daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
+    gardenPassSpawn: async () => 0,
+    runDaemon: async (_plan, d) => {
+      gardens = (d as { gardens?: unknown[] }).gardens;
+      return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+    },
+  } as Parameters<typeof runTask.daemonCommand>[1]);
+  const start = gardens?.at(-1) as ((intervalMs: number) => { stop: () => void; settled: () => Promise<void> }) | undefined;
+  assert.equal(typeof start, "function", "precondition: RMD_SRE_LANE=1 adds the SRE starter last");
+  const lane = start!(60 * 60_000);
+  try { await lane.settled(); } finally { lane.stop(); }
+});
+
