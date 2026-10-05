@@ -985,6 +985,13 @@ import {
   type LedgerGrepFsDeps,
 } from "./lib/ledger-grep.js";
 import { routingAbCommand } from "./lib/routing-experiments.js";
+import {
+  PROGRESS_WATCHDOG_READ_STEPS,
+  captureDiagnosticsBundle,
+  decideProgressWatchdog,
+  openPrCountFromRows,
+  renderProgressWatchdogVerdict,
+} from "./lib/progress-watchdog.js";
 import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-canary.js";
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
@@ -50725,6 +50732,39 @@ export async function loadHeavyVerb(name: HeavyVerbName): Promise<void> {
   }
 }
 
+/**
+ * W1-T5687: `rmd progress-watchdog [--json] [--state-root <dir>]` — names a stalled sweep by its
+ * PROGRESS (sweep.pass / review.posted / verdict.merged), never its pulse (`daemon.*`). READ-ONLY:
+ * it prints the verdict and, on capture-diagnostics, writes at most one bundle per 15 min. It
+ * recycles nothing; acting on recycle / hold-revive is W1-T5688's.
+ */
+function progressWatchdogCommand(rest: string[]): number {
+  const badArg = unknownArgError("progress-watchdog", rest, ["--state-root"], ["--json"]);
+  if (badArg) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  const stateDir = flagValue(rest, "--state-root") ?? join(loadConfig().root, "state");
+  const nowMs = systemClock.now();
+  const read = readLedgerUnionRecordsSync(stateDir, {
+    since: new Date(nowMs - 24 * 3_600_000).toISOString(),
+    step: PROGRESS_WATCHDOG_READ_STEPS,
+  });
+  const verdict = decideProgressWatchdog({ rows: read.rows, nowMs, openPrCount: openPrCountFromRows(read.rows) });
+  const bundle = verdict.action === "capture-diagnostics"
+    ? captureDiagnosticsBundle(stateDir, nowMs, verdict, read.rows, {
+      run: (file, args) => execFileSync(file, args, { encoding: "utf8", timeout: 30_000 }),
+    })
+    : undefined;
+  if (rest.includes("--json")) console.log(JSON.stringify({ stateDir, rowsRead: read.rows.length, ...verdict, bundle }));
+  else {
+    console.log(renderProgressWatchdogVerdict(verdict));
+    if (bundle?.written) console.log(`diagnostics bundle: ${bundle.dir}`);
+    else if (bundle) console.log(`diagnostics bundle skipped: ${bundle.skippedReason}`);
+  }
+  return 0;
+}
+
 const COMMANDS: readonly CommandSpec[] = [
   {
     name: "run-task",
@@ -50848,6 +50888,12 @@ const COMMANDS: readonly CommandSpec[] = [
     syntax: "rmd ledger-grep <pattern>",
     summary: "Grep the deduplicated union of every ledger archive and the live ledger file.",
     detail: "the deduplicated union of every state/ledger.*.ndjson.gz archive and the live state/ledger.ndjson, matched against <pattern>. Replaces the manual `grep -h '<pat>' state/ledger.*.ndjson state/ledger.ndjson | sort -u` idiom, which glob-matches ZERO gzipped archives on this host and silently answers from the live file alone (a measured 3.1x undercount). Prints the pattern, state dir and archive count BEFORE any match, then EXITS NON-ZERO, naming the globbed directory, when ZERO archive files were read — never falling back to a live-file-only count. READ-ONLY: writes no ledger line, no state file, deletes/moves nothing",
+  },
+  {
+    name: "progress-watchdog",
+    syntax: "rmd progress-watchdog [--json] [--state-root <dir>]",
+    summary: "Name a stalled sweep by its progress (sweep.pass, review.posted, verdict.merged), not its daemon pulse.",
+    detail: "W1-T5687: reads the deduplicated union of every ledger archive and the live ledger and prints one verdict: PROGRESSING, IDLE (no open PRs), STALLED (newest progress row over 15 min old: capture-diagnostics; over 30 min: recycle), CRASH_LOOP (3 or more daemon.paths boots in 15 min that never reached daemon.boot: hold-revive) or UNKNOWN (no rows or no open-PR count; never a silent none). Progress is ONLY a sweep.pass, review.posted or verdict.merged row: daemon.* and runtime.* rows are a pulse, not progress, which is why the 318-minute crash loop of 2026-10-03 read live to every daemon-prefix reader. The open-PR count is the newest sweep.pass row's enumerated field. On capture-diagnostics it writes one bundle (ledger tail, docker ps, the tenant's docker logs --tail, the verdict) under <state>/diagnostics/progress-<ts>/, at most one per 15 min. READ-ONLY: it recycles nothing; the host launcher acting on recycle / hold-revive is W1-T5688.",
   },
   {
     name: "routing-ab",
@@ -51879,6 +51925,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["reap-branches", (rest) => reapBranchesCommand(rest)],
   ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
   ["routing-ab", async (rest) => await routingAbCommand(rest)],
+  ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
   ["impossible-canary", async (rest) => await impossibleCanaryCommand(rest, (input) => runImpossibleCanary(input))],
   ["benchmark-aa", async (rest) => rest[0] === "prospective" ? await prospectiveAaCommand(rest.slice(1), (input) => runProspectiveAa(input))
     : rest[0] === "readiness" ? await benchmarkAaReadinessCommand(rest.slice(1),
