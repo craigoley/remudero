@@ -44272,7 +44272,7 @@ export function buildSweepHook(
  * `runSweep` the full sweep hook above uses — never a second, independently
  * built reconciler — but passes `actionable: d => d === "post-review"` so
  * ONLY the deterministic, sha-pinned, mutex-serialized re-post can fire here;
- * dispatchFix/close/escalate/depReview/arm always stand down
+ * dispatchFix/close/escalate/depReview always stand down (arm: W1-T5922)
  * ("deferred to full sweep (light pass)") and re-derive on the next FULL
  * sweep instead, preserving the single-threaded reason those lanes exist
  * for. Deliberately excludes the credit-backfill rung and the inbox-draft
@@ -44336,8 +44336,13 @@ export function lightPassActionable(
   // 3-line shape back, byte-identical (W1-T1211) — this is an ADDITIVE 3rd parameter, not a
   // change to `fixRungAllowed`'s own meaning.
   requeueLaneOnly: boolean = false,
+  // W1-T5922 — TRUE only on `buildSweepLightHook`'s ordinary pass. An arm is one GitHub call behind
+  // the full sweep's own guards (decideSweepArm, the W1-T5403 risk judge, holds, dedups); it spawns
+  // no worker. Default false, so every 2- and 3-argument caller keeps its original shape.
+  armAllowed: boolean = false,
 ): boolean {
   if (disposition === "post-review") return true;
+  if (disposition === "mergeable") return armAllowed;
   // The two dispositions whose ACTION is `dispatchFix` — the only lane that spawns a worker.
   // `blocked-fixable` alone gains the second admitting arm above; `conflicted`'s sole action is
   // always `dispatchFix` (merge-conflict resolution), so it stays gated on `fixRungAllowed` only
@@ -44537,7 +44542,10 @@ export function buildSweepLightHook(
             // demonstrably waiting rather than working — see `lightPassActionable` and
             // `runIsAwaitingExternal` above. Read once per tick, not per PR, so the whole fan-out
             // sees one consistent answer.
-            actionable: (d) => lightPassActionable(d, fixRungAllowed),
+            actionable: (d) => lightPassActionable(d, fixRungAllowed, false, !reviewOnly),
+            // W1-T5922: the arm's own reads, wired as the full hook wires them.
+            readLiveHeadSha: liveHeadShaFrom(effects.readLiveState),
+            judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, activePlan, ledgerPath, runId, log),
             // W1-T528: `runSweepLightPass` fans ONE `runSweep` call out PER open PR, concurrently
             // (this function's own doc, directly above) — `selectUpdateBranchTarget`'s "oldest
             // head first" only holds ACROSS the whole open-PR set one `runSweep` call sees, so N

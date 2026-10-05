@@ -11163,6 +11163,9 @@ export function readyDraftPullRequest(
 /** PRIMARY CONTROL on how many stale-proof supersession closes one sweep pass may make; a PR over the cap keeps its red and is re-derived next pass. */
 export const MAX_STALE_PROOF_CLOSES_PER_PASS = 2;
 
+/** W1-T5922: `pr@head` arms in flight process-wide, so a light pass and the background full pass never both arm one head. */
+const armsInFlight = new Set<string>();
+
 /** W1-T4702 — the last incomplete-union reason logged, so a persistent gap is logged once. */
 let lastReportedAnomalyGap: string | undefined;
 
@@ -12543,7 +12546,9 @@ export async function runSweep(
         alreadyDone = armedByGitHub || armedByPriorPass || refused || hold !== undefined;
         const idleEligible = armedByGitHub && !refused && hold === undefined && stackParentWithdrawal === undefined;
         if (!idleEligible) clearIdle(pr);
-        if (idleEligible && !deps.dryRun && (deps.actionable?.("mergeable") ?? true)) {
+        // W1-T5922: idle is measured between FULL passes; a light pass never completes one.
+        if (idleEligible && !deps.dryRun && deps.repairAdmissionSurface !== "light" &&
+            (deps.actionable?.("mergeable") ?? true)) {
           armedIdleDue = idleHeads.get(pr.prNumber) === pr.headSha;
           if (armedIdleDue) {
             alreadyDone = false;
@@ -12757,7 +12762,9 @@ export async function runSweep(
       } else {
         try {
           // W1-T5749: the snapshot can outlive its head (#9138 armed, #9155 escalated on dead heads).
-          const liveHead = await deps.readLiveHeadSha?.(pr);
+          // W1-T5922: a light pass reads the live head for its arm only; its other lanes are unchanged.
+          const liveHead = deps.repairAdmissionSurface === "light" && disposition !== "mergeable"
+            ? undefined : await deps.readLiveHeadSha?.(pr);
           if (liveHead !== undefined && liveHead !== pr.headSha) {
             acted = false;
             standDownReason = `head moved from ${pr.headSha.slice(0, 8)} to ${liveHead.slice(0, 8)} ` +
@@ -12840,11 +12847,24 @@ export async function runSweep(
               // READ THE OUTCOME. `armAutoMerge` does not throw — it RETURNS which of its seven
               // branches it took, and five of them armed nothing. Discarding it is what let
               // `acted:true` be recorded for a PR that was never armed.
-              const armResult = armedIdleDue ? await deps.arm(pr, "armed-idle") : await deps.arm(pr);
+              const armKey = `${pr.prNumber}@${pr.headSha}`;
+              if (armsInFlight.has(armKey)) {
+                acted = false;
+                standDownReason = "an arm for this head is already in flight on another sweep pass — not arming twice";
+                break;
+              }
+              armsInFlight.add(armKey);
+              let armResult: Awaited<ReturnType<SweepDeps["arm"]>>;
+              try {
+                armResult = armedIdleDue ? await deps.arm(pr, "armed-idle") : await deps.arm(pr);
+              } finally {
+                armsInFlight.delete(armKey);
+              }
               // W1-T1117: `deps.arm` may return the bare name it always could, or the richer
               // outcome-plus-failureClass object. Unwrap once, here.
               const armOutcomeName = typeof armResult === "object" && armResult !== null ? armResult.outcome : armResult;
-              extraDisposedFields = { ...extraDisposedFields, arm_attempted: true, arm_armed: armOutcomeArmed(armOutcomeName) };
+              extraDisposedFields = { ...extraDisposedFields, arm_attempted: true, arm_armed: armOutcomeArmed(armOutcomeName),
+                ...(deps.repairAdmissionSurface === "light" ? { arm_surface: "light" } : {}) };
               if (typeof armResult === "object" && armResult !== null) {
                 extraDisposedFields = { ...extraDisposedFields, arm_failure_class: armResult.failureClass, arm_error: armResult.error };
               }
@@ -14508,6 +14528,13 @@ export async function runSweepLightPass(
         // mergeability, rules through W1-T5748's `decidePlanPrMergeSafety`, and updates-then-merges.
         const laneActionable = scopedDeps.actionable;
         scopedDeps.actionable = (d) => d === "mergeable" || (laneActionable ? laneActionable(d) : true);
+      } else if (pr.isPlanFiling === true && deps.actionable?.("mergeable") === true) {
+        // W1-T5922: the light pass arms code PRs; every other plan PR keeps W1-T5901's one-per-pass bound.
+        const laneActionable = scopedDeps.actionable;
+        const laneReason = scopedDeps.standDownReasonFor;
+        scopedDeps.actionable = (d) => d !== "mergeable" && (laneActionable ? laneActionable(d) : true);
+        scopedDeps.standDownReasonFor = (d) => d === "mergeable"
+          ? "one plan PR direct-merges per light pass (W1-T5901) — deferred to full sweep (light pass)" : laneReason?.(d);
       }
       if (spawningNumbers.has(pr.prNumber)) {
         scopedDeps.detachReviewWait = (work) => {
