@@ -213,8 +213,8 @@ test("the headroom tail read skips torn and non-headroom rows", () => {
 });
 
 test("a routing snapshot that lapsed while the fleet sat idle yields to a fresher daemon headroom reading", async () => {
-  // The router last ran 3 minutes ago, so its 60 s bound has lapsed; the daemon sampled 1 minute ago.
-  const lapsed = { state: "selected" as const, freshness: "stale" as const, observedAt: "2026-09-24T11:57:00.000Z", providers: [{ provider: "codex", readable: true, windows: [{ name: "codex primary 10080m", usedPercent: 76 }] }] };
+  // The router last ran 20 minutes ago, past even the daemon's own sampling bound; the daemon sampled 1 minute ago.
+  const lapsed = { state: "selected" as const, freshness: "stale" as const, observedAt: "2026-09-24T11:40:00.000Z", providers: [{ provider: "codex", readable: true, windows: [{ name: "codex primary 10080m", usedPercent: 76 }] }] };
   const root = daemonRoot([headroomRow("2026-09-24T11:59:00.000Z", 40)]);
   try {
     const cache = createLiveAnalyticsSnapshotCache({ root, readStatus: () => undefined, readProvider: () => lapsed, clock: fixedClock(NOW), schedule: () => ({ cancel() {} }) });
@@ -229,9 +229,10 @@ test("a routing snapshot that lapsed while the fleet sat idle yields to a freshe
 });
 
 test("a lapsed routing snapshot stays stale when the daemon headroom reading is no fresher", async () => {
-  const lapsed = { state: "selected" as const, freshness: "stale" as const, observedAt: "2026-09-24T11:57:00.000Z", providers: [{ provider: "codex", readable: true, windows: [{ name: "codex primary 10080m", usedPercent: 76 }] }] };
+  // Past the daemon's own 15-minute sampling bound, so the routing reading is stale on either clock.
+  const lapsed = { state: "selected" as const, freshness: "stale" as const, observedAt: "2026-09-24T11:30:00.000Z", providers: [{ provider: "codex", readable: true, windows: [{ name: "codex primary 10080m", usedPercent: 76 }] }] };
   const old = daemonRoot([headroomRow("2026-09-24T10:00:00.000Z", 40)]);
-  const older = daemonRoot([headroomRow("2026-09-24T11:50:00.000Z", 40)]);
+  const older = daemonRoot([headroomRow("2026-09-24T11:20:00.000Z", 40)]);
   try {
     for (const root of [old, older]) {
       const cache = createLiveAnalyticsSnapshotCache({ root, readStatus: () => undefined, readProvider: () => lapsed, clock: fixedClock(NOW), schedule: () => ({ cancel() {} }) });
@@ -245,5 +246,22 @@ test("a lapsed routing snapshot stays stale when the daemon headroom reading is 
   } finally {
     rmSync(old, { recursive: true, force: true });
     rmSync(older, { recursive: true, force: true });
+  }
+});
+
+test("a routing reading minutes past its 60 s cache bound still reads fresh to analytics", async () => {
+  // Measured 2026-10-05 16:42Z: the router observed at 16:38:14 (freshUntil 16:39:14) and the newest
+  // daemon.headroom row was 16:27:40, so no fresher fallback existed and the console read the whole
+  // instance as stale four minutes after a routing decision.
+  const recent = { state: "selected" as const, freshness: "stale" as const, observedAt: "2026-09-24T11:56:00.000Z", providers: [{ provider: "codex", readable: true, windows: [{ name: "codex primary 10080m", usedPercent: 76 }] }] };
+  const root = daemonRoot([headroomRow("2026-09-24T11:45:00.000Z", 40)]);
+  try {
+    const cache = createLiveAnalyticsSnapshotCache({ root, readStatus: () => undefined, readProvider: () => recent, clock: fixedClock(NOW), schedule: () => ({ cancel() {} }) });
+    await cache.refresh();
+    assert.equal(cache.current().provider.allowance.remaining.state, "observed", "four minutes is inside the daemon's own sampling bound");
+    assert.equal(cache.current().provider.accounts.accounts[0]!.provider, "codex", "the router's own multi-provider reading is kept, not replaced by the older headroom row");
+    assert.equal(cache.current().provider.accounts.reason, undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

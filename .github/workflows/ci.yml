@@ -1456,7 +1456,35 @@ jobs:
           # ci-gate's list — it must still register and still fail on a coverage regression. The
           # comment two blocks below is what makes artifact absence fail closed: no step in this job
           # carries a YAML conditional, so a failing shard makes the stable aggregator refuse.
-          if ! node scripts/test-tier-manifest.mjs --select-all --shard ${{ matrix.shard }}/8 --base HEAD^1 \
+          SELECTION="all"
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "${RMD_AFFECTED_SUITE_LIVE:-0}" = "1" ]; then
+            git diff -U0 HEAD^1...HEAD > "${RUNNER_TEMP}/affected.diff" 2>/dev/null || : > "${RUNNER_TEMP}/affected.diff"
+            node --import tsx -e '
+              import { readFileSync, writeFileSync } from "node:fs";
+              const root = process.env.GITHUB_WORKSPACE || process.cwd();
+              const [changedPath, diffPath, outPath] = process.argv.slice(1);
+              const changed = readFileSync(changedPath, "utf8").split("\n").map((l) => l.trim()).filter(Boolean);
+              const mod = await import(root + "/src/lib/affected-suites.ts");
+              const { callerReachableSuites } = await import(root + "/src/lib/ci-parity.ts");
+              const { defaultPreflightSpawn } = await import(root + "/src/lib/commit-message.ts");
+              const symbols = () => mod.changedSymbols(readFileSync(diffPath, "utf8"), (p) => readFileSync(root + "/" + p, "utf8"));
+              const sel = mod.affectedSelectionOrFull(changed, () => mod.readAffectedSuitesInput(root, changed,
+                { symbolSuites: callerReachableSuites(symbols(), root, defaultPreflightSpawn).suites }));
+              const narrow = sel.fullRun ? [] : sel.narrow ?? [];
+              writeFileSync(outPath, narrow.length === 0 ? "full\n" : narrow.join("\n") + "\n");
+              console.log("W1-T5705: live coverage selection -> " + (narrow.length === 0 ? "FULL: " + (sel.reasons[0] ?? "no narrow set") : narrow.length + " narrow suite(s)"));
+            ' changed-files.txt "${RUNNER_TEMP}/affected.diff" coverage-narrow-suites.txt || echo "full" > coverage-narrow-suites.txt
+            if [ "$(head -n 1 coverage-narrow-suites.txt 2>/dev/null || true)" != "full" ] \
+              && node scripts/test-tier-manifest.mjs --select-candidates coverage-narrow-suites.txt --shard ${{ matrix.shard }}/8 --base HEAD^1 \
+                > coverage-test-files.txt 2> coverage-shard-selection.log && grep -q . coverage-test-files.txt; then
+              SELECTION="narrow"
+            else
+              cat coverage-shard-selection.log 2>/dev/null || true
+              echo "W1-T5705: no usable narrow selection for this shard; running its full --select-all shard."
+            fi
+          fi
+          echo "$SELECTION" > coverage-selection.txt
+          if [ "$SELECTION" = "all" ] && ! node scripts/test-tier-manifest.mjs --select-all --shard ${{ matrix.shard }}/8 --base HEAD^1 \
             > coverage-test-files.txt 2> coverage-shard-selection.log; then
             cat coverage-shard-selection.log || true
             echo "coverage-ratchet: duration-balanced test selection failed; refusing to run a partial or unclassified coverage shard."
@@ -1516,6 +1544,7 @@ jobs:
         run: |
           mkdir -p coverage-artifact
           printf '%s\n' "${GITHUB_EVENT_NAME}:${{ steps.classify.outputs.class }}" > coverage-artifact/class
+          printf '%s\n' "$(cat coverage-selection.txt 2>/dev/null || echo all)" > coverage-artifact/selection
           if [ -s coverage/lcov.info ]; then
             # The raw process reports were 514 MB for ONE shard on this PR's first live run.
             # Deduplicate repeated source maps locally while retaining every process boundary and
@@ -1763,6 +1792,8 @@ jobs:
       - name: Coverage ratchet (blocks a PR whose branch coverage is below the absolute floor)
         env:
           RMD_CI_REPORT: "1"
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           # W1-T4406: merge_group widens this guard alongside pull_request (never replaces it).
           [ "${GITHUB_EVENT_NAME}" = "pull_request" ] || [ "${GITHUB_EVENT_NAME}" = "merge_group" ] || { echo "W1-T1033: coverage-ratchet only runs its real work on pull_request/merge_group; skipping on a ${GITHUB_EVENT_NAME} event (no coverage/lcov.info was collected above)."; exit 0; }
@@ -1770,6 +1801,26 @@ jobs:
           if [ "$CLASS" != "SOURCE" ]; then
             echo "W1-T2428 fast-lane: class=${CLASS} — skipping Coverage ratchet (no coverage/lcov.info was collected above; no src/** path in this diff can move the aggregate)."
             echo "- W1-T2428 fast-lane: class=${CLASS} — skipped **Coverage ratchet** (no src/** path in this diff)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if grep -qsx narrow coverage-shards/coverage-shard-*/selection; then
+            LCOV=""
+            { gh run list --workflow coverage-nightly.yml --branch main --status completed --limit 5 --json databaseId,createdAt \
+                --jq '.[] | "\(.createdAt) \(.databaseId) coverage-nightly"' || true
+              gh run list --workflow ci.yml --event merge_group --status completed --limit 5 --json databaseId,createdAt \
+                --jq '.[] | "\(.createdAt) \(.databaseId) coverage-merged"' || true; } | sort -r > floor-runs.txt
+            while read -r _ RUN ARTIFACT; do
+              if gh run download "$RUN" -n "$ARTIFACT" -D "floor-${RUN}" && [ -s "floor-${RUN}/lcov.info" ]; then
+                LCOV="floor-${RUN}/lcov.info"
+                echo "W1-T5705: this PR ran a narrowed selection; the absolute floor is read from ${ARTIFACT} run ${RUN}."
+                break
+              fi
+            done < floor-runs.txt
+            if [ -z "$LCOV" ]; then
+              echo "::error::W1-T5705: a narrowed selection found no nightly or merge-group lcov to read the absolute floor from; refusing."
+              exit 1
+            fi
+            node scripts/coverage-ratchet.mjs --lcov "$LCOV" --baseline scripts/coverage-baseline.json
             exit 0
           fi
           node scripts/coverage-ratchet.mjs --lcov coverage/lcov.info --baseline scripts/coverage-baseline.json
