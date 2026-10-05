@@ -2833,7 +2833,7 @@ export async function runDaemon(
     pauseReview.reported = 0;
   };
   const summary = async (stopReason: DaemonStopReason, stopDetail?: string): Promise<DaemonSummary> => {
-    await stopPauseReviewClock();
+    if (pauseReview.clock) await stopPauseReviewClock();
     prActionPumpRef.stop();
     plainBackfill?.stop();
     fleetLane?.stop();
@@ -3371,7 +3371,8 @@ export async function runDaemon(
       reportPauseReviewPasses(pauseReviewClock.passCount());
       continue;
     }
-    await stopPauseReviewClock();
+    // Guarded, never a bare await: an unpaused tick must not gain a microtask turn (W1-T343 lanes).
+    if (pauseReview.clock) await stopPauseReviewClock();
     // Self-freshness, checked directly after both operator holds and before headroom and dispatch, so
     // origin/main advancing past this process's boot sha is noticed on the very next tick where the
     // daemon is neither stopped nor paused. Never interrupts in-flight work (W1-T126, W1-T936).
