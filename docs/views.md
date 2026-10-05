@@ -324,6 +324,23 @@ diskFreeBytes?, rateLimitRemaining?, daemon{ state, at?, reason? }, reasons? }, 
   host probe of that instance, computed in the worker (`createNowView`'s `legacy`).
 - Probe gauges come from the view whenever both probes read them, so two samples moments apart are not a diff.
 
+## `workstreams` (version 1)
+
+`GET /v1/views/workstreams`: the operator activity page, one body across instances (arch Phase 4 §1.1,
+P4-T11, W1-T5050, `src/lib/workstreams-view.ts`). Schema: `WorkstreamsView`. Dark until `switches.json` sets
+`workstreams` to `serve`; until then the console reads `/v1/operator-activity` as before.
+
+`data.instances[]`: `{ instance, activity }`, one per projected instance, where `activity` is exactly what
+`GET /v1/operator-activity` answers for it (`OperatorActivityResult`), built by the same
+`buildOperatorActivityProjection` over the projector's `activity_ring` (the newest 500 rows of any step)
+instead of a request-time ledger union. The plan half reads what the route reads: the checkout's plan,
+`projectPlan` over the live ledger and the persisted GitHub snapshot, and the dispatcher's frontier.
+- Rebuilt when the ring takes an insert, the plan changes or the GitHub snapshot is re-saved, once the first
+  unbuilt change is 1 s old: a burst of inserts costs one build.
+- Sources: `ledger:<i>`, `plan:<i>` and `github:<i>` per instance.
+- Shadow side: the route's computation (its memoized ledger union, up to the ring's newest row) over the
+  same build's plan half, so a diff is a ring row the union disagrees with.
+
 ## `instances` (version 1)
 
 `GET /v1/views/instances`: one instance list, saying what this serve actually serves (arch Phase 4 §4,

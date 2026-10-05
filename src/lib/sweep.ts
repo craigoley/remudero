@@ -14,7 +14,8 @@ import {
 import { CONVENTIONAL_LIMITS, fitConventionalTitle } from "./commit-message.js";
 import { mintNextTaskId } from "./task-id.js";
 import { gitRemoteRefReserver, reserveTaskIdRemote, type RemoteReserveDeps } from "./task-id-reservation.js";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { recyclePauseDetail } from "./recycle-yield.js";
 import {
   baseReproductionFiles, decideBaseReproduction, failingTestFilesFromCiFailures,
   probeCacheFromLedger, probeCacheKey, refundedStrikeKeys, strikesToRefund, type BaseProbeFile,
@@ -2784,6 +2785,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // this round's whole checkout→commit→push window (acquired just before the worktree is
       // created, released once `runFixRung` returns/throws), never a narrower slice.
       let branchClaim: InflightLockHandle | undefined;
+      let recycleTaskId: string | undefined;
       // W1-T1127: TRUE only once `runFixRung` has demonstrably spent a real strike — i.e. its
       // OWN `fix.dispatch` line below has been written. `runSweep`'s `sweep.disposed` dedup seed
       // (`prior.fixed`, sweep.ts) is keyed off THAT line's later effect (an `acted:true` row),
@@ -2867,7 +2869,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // why a hardcoded `[]` here made a `blocked_review` synthetic dispatch
         // permanently unjudgeable. `files` rides the SAME call for the SAME reason
         // (W1-T4460): the synthetic task's own commit surface.
-        const headRef = ghJson(["pr", "view", pr.prUrl, "--json", "headRefName,headRefOid,body,files"]) as {
+        const headRef = ghJsonForBuild(["pr", "view", pr.prUrl, "--json", "headRefName,headRefOid,body,files"]) as {
           headRefName?: string;
           headRefOid?: string;
           body?: string;
@@ -3335,7 +3337,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               (args: SpawnWorkerArgs) => (spawnImpl ?? benchmarkNonDispatchSpawn("sweep-fix"))({ ...args, resumeSessionId: args.resumeSessionId || undefined }),
               { config, log: (s: string, extra?: Record<string, unknown>) => log(s, { task_id: task.id, ...extra }) },
             ),
-            waitForCiGreen,
+            waitForCiGreen: async (prUrl: string, waitLog: (step: string, extra?: Record<string, unknown>) => void) => {
+              const ci = await waitForCiGreen(prUrl, waitLog, 6, { externalWaitRecycle: () => recyclePauseDetail(config.root) });
+              if (ci.state === "freshness_handoff" && ci.recycle) recycleTaskId = task.id;
+              return ci;
+            },
             // W1-T138: refresh the ci-log evidence whenever a strike leaves CI
             // non-green — see runFixRung's own doc for why this must happen on
             // every strike, not just the first.
@@ -3466,7 +3472,13 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // W1-T2609: release the branch claim LAST, on every exit path (return, decline, throw) —
         // symmetric with the worktree cleanup just above, so a lost race or a mid-round crash
         // never strands the claim past this round's own dispatch.
-        branchClaim?.release();
+        try {
+          if (branchClaim && recycleTaskId) log("inflight.recycle_yield", {
+            lock_key: basename(branchClaim.path, ".lock"), task_id: recycleTaskId, run_id: branchClaim.info.run_id, waiting_on: "ci",
+          });
+        } finally {
+          branchClaim?.release();
+        }
       }
     },
 

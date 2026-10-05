@@ -1,0 +1,65 @@
+- id: W1-T5882
+  title: "THE CODE BEHAVES THE SAME ON NODE 22 AND NODE 24 — before the runtime moves, make the repo independent of three Node 24 changes: piped node --test output defaults to spec not TAP, process.execArgv under the test runner carries flags a Worker refuses, and the internal TestCoverage constructor and readline line breaks changed"
+  repo: remudero
+  depends_on: [W1-T5725]
+  dispatch_hold: true
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 20.00
+  risk: high
+  band_meaning: blast-radius
+  origin: "operator session 2026-10-05: Node 22 to 24 upgrade, CI probe of probe/node24-ci runs 37329361415 and 37334420618"
+  plan_refs: [W1-T2770]
+  files: [package.json, scripts/clock-sweep.mjs, scripts/coverage-merge-ratchet.mjs, scripts/host-parity.ts, scripts/preflight-author.mjs, scripts/test-tier-manifest.mjs, scripts/test-with-retry.mjs, scripts/workflow-guard-mutation-ratchet.mjs, src/lib/board-worker.ts, src/lib/ci-parity.ts, src/lib/console-projection-worker.ts, src/lib/ledger-union.ts, src/lib/read-model-slow-lane.ts, src/lib/read-model-worker.ts, src/lib/repo-dashboard-route.ts, src/lib/retro-preflight.ts, src/lib/review.ts, src/lib/secret-boundary.ts, src/lib/serve-plan-reload.ts, src/lib/status.ts, src/lib/worker-provider.ts, src/run-task.ts, test/a-proof-can-name-a-second-runners-suite.test.ts, test/a-shard-that-produced-no-summary-is-not-a-failure-set.test.ts, test/board-prewarm-does-not-block.test.ts, test/board-prewarm-refreshes-ahead.test.ts, test/cross-repo-proof-suite-registry.test.ts, test/fast-gate-admits-the-census-class.test.ts, test/merge-lcov.test.ts, test/no-test-worktree-outlives-its-fixture.test.ts, test/node-24-runtime-compatibility.test.ts, test/proof-exec-tmp-hygiene.test.ts, test/pure-path-proof-outcomes.test.ts, test/pure-proof-incomplete-run.test.ts, test/retro-prepublish-validation.test.ts, test/review.test.ts, test/serve-workers-follow-the-reloaded-plan.test.ts, test/test-with-retry.test.ts, test/tests-exercise-the-path-they-name.test.ts, test/the-coverage-lane-retries-a-flake.test.ts, test/the-local-gate-writes-coverage-where-ci-does.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    MEASURED 2026-10-05 by running this repo's own ci.yml on Node 24.21.0 (workflow_dispatch on
+    probe/node24-ci, run 37329361415): 47 distinct tests failed across all 8 shards and both slow
+    shards hit their timeout. Four causes, each read in Node's v22.22.3 and v24.21.0 sources:
+    (1) Node 23 made spec the default reporter on every stream; v22 chose TAP for a non-TTY stdout. The
+    proof executor (review.ts), preflight-author, retro-preflight, test-with-retry, clock-sweep and
+    the workflow-guard ratchet parse TAP from a piped node --test that names no reporter, so on 24 a
+    passing unit-test proof grades inconclusive and a failing suite attributes no file.
+    (2) Under Node 24's test runner, process.execArgv carries every option at its default
+    (--stack-trace-limit, --tls-cipher-list, ...). Thirteen Worker constructions pass it as execArgv
+    and throw ERR_WORKER_INVALID_EXEC_ARGV; an inherited execArgv (the default) loads tsx and runs.
+    (3) internal/test_runner/coverage TestCoverage went from 7 positional arguments to
+    (dir, origDir, options); coverage-merge-ratchet.mjs's old call silently drops its globs.
+    (4) readline breaks lines on U+2028/U+2029 from Node 24, which JSON leaves unescaped, so the
+    ledger union reader would split a valid row into two damaged ones.
+    With these fixes applied (run 37334420618) the slow shards pass and the remaining reds were
+    argv-pinning tests, updated here.
+  design: |
+    Every captured nested node --test names --test-reporter=tap; test-with-retry adds it to a wrapped
+    node --test command that names no reporter, and test-tier-manifest always reports TAP to stdout.
+    Worker constructions stop passing process.execArgv and inherit it (board prewarm fault tests use a
+    non-file worker URL as their real synchronous construction failure). coverage-merge-ratchet.mjs
+    builds TestCoverage through newTestCoverage, which picks the 7- or 3-argument shape by arity and
+    refuses any other. ledger-union.ts reads rows with ndjsonLines (LF only, UTF-8 safe across chunks).
+    Every change holds on Node 22, so this merges while CI still runs 22; W1-T5883 moves the pin.
+  acceptance:
+    - claim: "every nested node --test whose output is read names the TAP reporter"
+      proof: 'grep: test("W1-T5882: every captured nested node --test run names the TAP reporter" in test/node-24-runtime-compatibility.test.ts'
+    - claim: "the proof executor's runs print TAP whichever runtime executes them"
+      proof: 'grep: test("W1-T5882: a proof run prints TAP whichever runtime executes it" in test/node-24-runtime-compatibility.test.ts'
+    - claim: "test-with-retry names TAP for a wrapped node --test command that names no reporter"
+      proof: 'grep: test("W1-T5882: test-with-retry names TAP for a node --test command that names no reporter" in test/node-24-runtime-compatibility.test.ts'
+    - claim: "no Worker construction is handed process.execArgv"
+      proof: 'grep: test("W1-T5882: no worker thread is handed process\.execArgv" in test/node-24-runtime-compatibility.test.ts'
+    - claim: "the coverage merger builds Node's TestCoverage for the 22 and 24 constructor shapes and refuses any other"
+      proof: 'grep: test("W1-T5882: the coverage merger builds Node''s TestCoverage for either constructor shape" in test/node-24-runtime-compatibility.test.ts'
+    - claim: "a ledger row carrying U+2028 or U+2029 reads as one row"
+      proof: 'grep: test("W1-T5882: a ledger row carrying U+2028 reads as one row" in test/node-24-runtime-compatibility.test.ts'
+  falsifier: |
+    Drop --test-reporter=tap from the proof executor's path form: the census lists src/lib/review.ts.
+    Put execArgv: process.execArgv back on any Worker: the worker census lists that file. Call
+    TestCoverage with seven arguments on Node 24: the real-class summary loses its working directory.
+  note: |
+    DISPATCH HOLD: operator hand build (2026-10-05 ruling: the Node 24 upgrade is too big and risky for
+    a worker). Built on a run-W1-T5882-<epoch> branch; depends on W1-T5725, whose fix removes the last
+    execArgv: process.execArgv (config-gardener.ts) the worker census reads. W1-T5883 moves the pin.
+    Scope-time checks 2026-10-05: no run-W1-T5882 branch on origin; no open PR or origin/main commit
+    covers a Node 24 upgrade. Reserved from the operator checkout for this filing branch.

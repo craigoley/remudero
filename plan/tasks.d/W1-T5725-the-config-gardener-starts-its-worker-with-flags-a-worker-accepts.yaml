@@ -2,6 +2,7 @@
   title: "THE CONFIG GARDENER STARTS ITS WORKER WITH FLAGS A WORKER ACCEPTS — it passes process.execArgv to new Worker, and the garden child runs with --max-old-space-size=2048, so the worker throws 'Initiated Worker with invalid execArgv flags': 46 of 66 config.gardener_failed rows 10-02..10-04 (54 of 74 since 10-03)"
   repo: remudero
   depends_on: []
+  dispatch_hold: true
   type: implement
   verify: auto
   principles: {tdd: strict}
@@ -23,13 +24,25 @@
     --max-old-space-size=2048". MEASURED: 46 of 66 `config.gardener_failed` rows in the 10-02..10-04
     ledger carry that message (the restart report counts 54 of 74 since 10-03) — the config gardener
     mostly fails.
+  note: |
+    DISPATCH HOLD: operator hand build (2026-10-05), carried with the Node 24 upgrade (W1-T5882
+    depends on it). Issue #9111 closes only after a live config gardener pass succeeds on the fleet.
+    Scope-time checks 2026-10-05: no run-W1-T5725 branch on origin, no open or merged build PR, no
+    inflight claim on the core instance.
   design: |
-    The worker's execArgv is process.execArgv with V8 heap flags (`--max-old-space-size`,
-    `--max-semi-space-size`, and their `=`-less forms) removed; the heap limit, if any, is passed as
-    `resourceLimits.maxOldGenerationSizeMb` instead. Other flags (`--import tsx`) are kept.
+    AMENDED 2026-10-05 (operator ruling). The worker is given no execArgv, so it inherits the
+    parent's: the loader (`--import tsx`) and every other compatible flag come with it, and no V8 heap
+    flag is forwarded for the Worker to refuse. The old-generation budget the heap flag carried
+    (`--max-old-space-size` / `--max_old_space_size`, `=` and separate-value forms, last one wins) is
+    passed as `resourceLimits.maxOldGenerationSizeMb`. Measurement stays on the worker: no
+    synchronous fallback. The original design (process.execArgv minus the heap flags) was MEASURED to
+    still throw under Node 24's test runner, which adds per-process flags a Worker also refuses;
+    inheriting runs on Node 22 and 24, under the runner and in a garden-shaped child.
   acceptance:
-    - claim: "given an execArgv holding --import tsx and --max-old-space-size=2048, the worker options keep --import tsx, drop the heap flag and set resourceLimits.maxOldGenerationSizeMb to 2048, and a real Worker started with them runs"
-      proof: "unit test: test/the-config-gardener-starts-its-worker-with-flags-a-worker-accepts.test.ts"
+    - claim: "the worker's options carry no execArgv and an old-generation budget parsed from every heap flag form"
+      proof: 'grep: test("W1-T5725: the heap budget is parsed from every heap flag form" in test/the-config-gardener-starts-its-worker-with-flags-a-worker-accepts.test.ts'
+    - claim: "a gardener child started with --import tsx and --max-old-space-size=2048 runs the real configMeasurementOffLoop on a Worker held to a 2048 MB old generation"
+      proof: 'grep: test("W1-T5725: a gardener child with a heap flag runs its config measurement on a real worker" in test/the-config-gardener-starts-its-worker-with-flags-a-worker-accepts.test.ts'
   falsifier: |
-    Pass process.execArgv through unchanged: the real Worker throws "invalid execArgv flags" and the
-    test fails.
+    Pass process.execArgv through unchanged: the garden-shaped child's Worker throws "Initiated Worker
+    with invalid execArgv flags: --max-old-space-size=2048" and the second test fails.

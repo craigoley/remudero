@@ -1,0 +1,77 @@
+- id: W1-T5886
+  title: "The Inbox thread list answers 503 classification_pending for a whole day because serve's main thread never lands its own classification while the slow lane lands one every pass — answer the thread list from the slow lane's classification"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 24.00
+  risk: high
+  origin: "2026-10-05 operator report: app.remudero.com/inbox for craigoley/remudero is Unavailable; live read-only probe of remudero-serve"
+  plan_refs: ["W1-T5269", "W1-T5339", "W1-T5049", "W1-T4261", "core #8264", "core #8278"]
+  files:
+    - src/lib/panel-graph.ts
+    - src/lib/inbox-thread-list-view.ts
+    - src/lib/read-model-slow-lane.ts
+    - src/lib/inbox-view.ts
+    - src/lib/serve.ts
+    - test/inbox-thread-list-view.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-10-05 15:06-15:12Z on the Azure host (read-only, read token, inside remudero-serve):
+    GET /v1/inbox/threads and GET /v1/i/core/inbox/threads answered 503 on 8 of 8 reads, 7 of them
+    inbox_threads_classification_pending ("the first classification is still running") in 1.6-2.9 s,
+    also with ?qualified=1, so no held classification existed. GET /v1/inbox?section=needsYou
+    answered 200 only from serve's console snapshot cache: x-rmd-generated-at 2026-10-04T18:03:45Z,
+    x-rmd-cache-age-ms 76071255 (21 h). GET /v1/views/inbox?section=needsYou answered 400 "serve has
+    not classified the inbox yet" (the view is switched off, so its legacy side peeks the same
+    empty memo). Meanwhile the slow lane's inbox unit logged inbox.classification_written in every
+    recent ledger archive (latest 2026-10-05T14:57:10Z), so classification itself works off-thread.
+    serve hands off to a new generation on every main merge (serve.start 3-7 times per archive,
+    serve.handoff_done fromSha/toSha), and each generation starts with an empty main-thread memo
+    (inboxClassifyStates is keyed by the deps object); buildInboxThreadsRoute arms its warm cadence
+    only on the first read. The main-thread pass (classifyAllProposalsSliced via
+    inboxThreadListSources.classify) has not stored a result in any generation since 18:03Z; why it
+    never completes (a pass that throws after the 1.5 s wait is reported as pending, never logged,
+    because refresh() returns {ok:false} silently) is unmeasured.
+    CONSEQUENCE: the console's Inbox (the "Inbox" item in its main nav) shows no conversations,
+    core-wide or for the core repository, even once the instances view advertises inbox/threads.
+  design: |
+    1. MEASURE FIRST: make a failed or abandoned main-thread classification visible — append one
+       ledger row (or a serve log) naming the error when inboxThreadListSources' classify rejects,
+       and report the pass duration when it lands. Reproduce on a copy of the host inbox state (or a
+       fixture with a throwing classifyOne) and name the cause in the PR.
+    2. FIX THE DEPENDENCY: the thread list (inbox-thread-list-view.ts ThreadListSources.peek, wired
+       in panel-graph.ts inboxThreadListSources) must be able to answer from the classification the
+       slow lane (read-model-slow-lane.ts coreUnits "inbox" unit, refreshInboxClassification in
+       inbox-view.ts) already lands every pass, so a new serve generation answers its first thread
+       list as stale-with-source (qualified) or fresh, never classification_pending while a slow-lane
+       classification is held. Post what the projection needs (proposals and their classifications,
+       with classifiedAtMs) from the slow-lane thread to serve main, or have main read the slow
+       lane's persisted result; keep the source age honest (the slow lane's classifiedAt, never the
+       post time). Apply the same source to the inbox view's legacy side so /v1/views/inbox stops
+       answering 400 while off.
+    Keep W1-T5269's contract: only a source-verified fresh classification may use the legacy
+    {threads} 200; stale rows need ?qualified=1; nothing held stays an explicit 503, never an empty
+    list. Do not raise timeouts. Do not change the instance contract (instance-inbox-contract.ts)
+    or the console.
+  acceptance:
+    - claim: "a classification that fails after the read's wait is reported, not silently pending forever"
+      proof: 'grep: a late classification failure is reported in test/inbox-thread-list-view.test.ts'
+    - claim: "a fresh serve generation answers the thread list from the slow lane's held classification"
+      proof: 'grep: a cold main memo answers from the slow lane classification in test/inbox-thread-list-view.test.ts'
+    - claim: "the slow-lane classification's own time is the source age"
+      proof: 'grep: slow lane classification keeps its own classifiedAt in test/inbox-thread-list-view.test.ts'
+  falsifier: |
+    Revert peek to the main-thread memo only: the cold-memo test returns classification_pending.
+    Stamp the slow-lane result with the time main received it: the classifiedAt test fails.
+    Drop the failure report from refresh(): the late-failure test sees no report.
+  note: |
+    Reserved on refs/rmd-id/W1-T5886 for run-unfiled-1791213223833 (W1-T5876..W1-T5885 were held).
+    Open core PRs swept by title for inbox/thread/classification/instances: only #9338 (nav-badge
+    inbox counts pairing), which does not touch the thread list. Separate from the console's
+    "does not advertise inbox/threads" page, whose cause is the dark `instances` view
+    (read-model switches.json has no instances entry -> off -> 404 view_disabled; arch plan B4) —
+    an operator switch, not this task. Plan-only filing; not implementation credit.

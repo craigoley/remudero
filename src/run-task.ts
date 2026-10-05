@@ -6198,7 +6198,7 @@ export function openTaskIdsFromPlan(plan: Plan, projection?: ReadonlyMap<string,
 
 interface GateOutcome {
   merged: boolean;
-  verdict?: "awaiting_merge" | "blocked_ci";
+  verdict?: "awaiting_merge" | "blocked_ci" | "handed_off";
   reason: string;
   headSha?: string;
   checks?: string[];
@@ -6457,6 +6457,12 @@ export async function pollToGate(
         checks,
       };
     }
+    if (i === 0) log(AWAITING_EXTERNAL_LEDGER_STEP, { waiting_on: "pr" });
+    const recycle = deps.externalWaitRecycle?.();
+    if (recycle) {
+      log("run.freshness_handoff", { waiting_on: "pr", head_sha: sha, trigger: "recycle", detail: recycle });
+      return { merged: false, verdict: "handed_off", reason: "recycle_yield", headSha: sha, checks };
+    }
     readings.push(roll);
     if (readings.length > STALL_WINDOW) readings.shift(); // checkWaitStalled only ever looks at the last STALL_WINDOW
     const stall = checkWaitStalled(readings);
@@ -6482,11 +6488,6 @@ export async function pollToGate(
         checks,
       };
     }
-      // W1-T1211: ONCE per wait, on the first poll only — never per iteration. The light pass
-      // reads this row to tell a WAITING run (worker turn finished, GitHub is the blocker) from a
-      // WORKING one, and the polling row beside it cannot carry that decision because the rotator
-      // is right to shed it. See `runIsAwaitingExternal`.
-      if (i === 0) log(AWAITING_EXTERNAL_LEDGER_STEP, { waiting_on: "pr" });
     if (i === 0 || i % 5 === 0) {
       log("pr.polling", {
         state,
@@ -8469,7 +8470,7 @@ export function fixRungTerminationVerdict(
 }
 
 export interface FixRungOutcome {
-  outcome: "fixed" | "escalated" | "stood_down" | "spawn_abandoned" | "parked" | "rebased" | "base_refreshed" | "needs_design";
+  outcome: "fixed" | "escalated" | "stood_down" | "spawn_abandoned" | "parked" | "rebased" | "base_refreshed" | "needs_design" | "handed_off";
   /** The last review computed — passing when `outcome === "fixed"`. Unchanged from the PRIOR
    *  round's own verdict when `outcome === "spawn_abandoned"` (W1-T1044): the strike that
    *  abandoned never produced a new head to re-review. */
@@ -10575,6 +10576,11 @@ export async function runFixRung(opts: {
     proofDiscriminationEvidenceFromCriteria(review.criteria) !== undefined;
   let strikes = 0;
   let retriggers = 0;
+  const ciHandoff = (ci: CiGateOutcome | "green" | "red" | "timeout"): FixRungOutcome | undefined => {
+    if (typeof ci === "string" || ci.state !== "freshness_handoff") return undefined;
+    deps.log("fix.ci_not_green", { strike: strikes, ci: ci.state, sha: ci.sha });
+    return { outcome: "handed_off", review, strikes, retriggers, reason: ci.recycle ? "recycle_yield" : "freshness_yield" };
+  };
   let sessionToResume: string | undefined = opts.initialSessionId;
   // W1-T100: true until a REAL review has run FOR THE CURRENT head. A
   // blocked_ci dispatch (opts.ciFailures set) has no reviewer verdict at all
@@ -11163,6 +11169,8 @@ export async function runFixRung(opts: {
           // the next iteration re-derives from THAT — either another generator-fixable round, or a
           // real fall-through to the ordinary worker dispatch.
           const gated = await deps.waitForCiGreen(opts.prUrl, deps.log);
+          const handoff = ciHandoff(gated);
+          if (handoff) return handoff;
           currentPinnedSha = ciGateSha(gated) ?? currentPinnedSha;
           if (deps.fetchCiFailures) {
             try {
@@ -11510,7 +11518,10 @@ export async function runFixRung(opts: {
           deps.log("fix.prerequisite_dispatch_failed", { strike: strikes, prerequisite_pr: target.prNumber, reason: admissionRefusal });
           return await escalateAndExhaust();
         }
-        const ciState = ciGateState(await deps.waitForCiGreen(prerequisiteUrl!, deps.log));
+        const ci = await deps.waitForCiGreen(prerequisiteUrl!, deps.log);
+        const handoff = ciHandoff(ci);
+        if (handoff) return handoff;
+        const ciState = ciGateState(ci);
         if (ciState !== "green") {
           // THE REFUSAL CONDITION, SECOND ARM: a prerequisite that CANNOT GO GREEN escalates
           // exactly as the rung does today (rationale (5)) — never merged, never rebased onto.
@@ -12248,6 +12259,8 @@ export async function runFixRung(opts: {
       if (requeued) {
         try {
           const ci = await deps.waitForCiGreen(opts.prUrl, deps.log);
+          const handoff = ciHandoff(ci);
+          if (handoff) { logFixDone(); return handoff; }
           green = ciGateState(ci) === "green" && (!ciGateSha(ci) || ciGateSha(ci) === priorHeadSha);
         } catch (error) {
           deps.log("fix.flake_verification_failed", { head_sha: priorHeadSha, reason: String(error) });
@@ -12348,6 +12361,8 @@ export async function runFixRung(opts: {
     );
 
     const ci = await deps.waitForCiGreen(opts.prUrl, deps.log);
+    const handoff = ciHandoff(ci);
+    if (handoff) return handoff;
     // W1-T2804: one gate read, one sha, and the miner below is pinned to it — never a second
     // independent head resolution between the two halves of a single decision.
     currentPinnedSha = ciGateSha(ci) ?? currentPinnedSha;
@@ -16223,7 +16238,7 @@ async function runTask(
       spawn: benchmarkNonDispatchSpawn("aa-prospective", rawSpawn), maxBudgetUsd: PAIRED_ATTEMPT_MAX_BUDGET_USD, clockBoundMs: workerAbandonMs }) }
     : { dispatchRefusal: PAIRED_CLI_REFUSAL }), task, lane: "implement", stateDir: join(config.root, "state"), config,
     harnessRevision: (opts.benchmarkStackEvidence ?? workerBoundaryStack).harnessRevision });
-  try {
+  return withInflightRunLock(inflightLock, taskId, log, async (runLog) => {
     const ctx: RunTaskContext = {
       cashContainmentBoundary,
       cashContainmentState,
@@ -16232,7 +16247,7 @@ async function runTask(
       github,
       isMerged,
       ledgerPath,
-      log,
+      log: runLog,
       openTaskIds,
       opts,
       owner,
@@ -16250,8 +16265,30 @@ async function runTask(
       workerStateSensor,
     };
     return await runTaskBody(ctx);
+  });
+}
+
+/** Release the run's task lock after unwinding, retaining attribution for a recycle handoff. */
+export async function withInflightRunLock<T>(
+  lock: InflightLockHandle,
+  taskId: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  run: (log: (step: string, extra?: Record<string, unknown>) => void) => Promise<T>,
+): Promise<T> {
+  let waitingOn: unknown;
+  try {
+    return await run((step, extra) => {
+      if (step === "run.freshness_handoff" && extra?.trigger === "recycle") waitingOn = extra.waiting_on;
+      log(step, extra);
+    });
   } finally {
-    inflightLock.release();
+    try {
+      if (waitingOn) log("inflight.recycle_yield", {
+        lock_key: basename(lock.path, ".lock"), task_id: taskId, run_id: lock.info.run_id, waiting_on: waitingOn,
+      });
+    } finally {
+      lock.release();
+    }
   }
 }
 
@@ -18817,7 +18854,7 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         deps: {
           // W1-T3718: the SAME repair-ladder tracking the sweep's fix spawn carries.
           spawn: trackRepairLadder(spawn, { config, log }),
-          waitForCiGreen,
+          waitForCiGreen: (url, waitLog) => waitForCiGreen(url, waitLog, 6, { externalWaitRecycle: opts.externalWaitRecycle }),
           // W1-T138: refresh the ci-log evidence whenever a strike leaves CI
           // non-green — see runFixRung's own doc for why this must happen on
           // every strike, not just the first.
@@ -18922,6 +18959,14 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
         });
         say(`verdict: blocked — fix worker spawn abandoned (wall-clock bound): ${prUrl}`);
         return { taskId, runId, prUrl, merged: false, costUsd, verdict: "blocked" };
+      }
+      if (rung.outcome === "handed_off") {
+        log("verdict", {
+          verdict: "handed_off", pr_url: prUrl, reason: rung.reason, cost_usd: costUsd,
+          billing_mode: billingMode(impl.childEnvKeys), account_label: impl.accountLabel, ...terminalVerdictFields(impl),
+        });
+        say(`verdict: handed_off (${rung.reason}) — PR left OPEN: ${prUrl}`);
+        return { taskId, runId, prUrl, merged: false, costUsd, verdict: "handed_off" };
       }
       if (rung.outcome === "escalated") {
         log("verdict", {
@@ -19331,7 +19376,9 @@ export async function runTaskBody(ctx: RunTaskContext): Promise<RunResult> {
     // the poll times out, the PR is LEFT OPEN and the verdict is blocked_ci —
     // pending is treated as blocked, never as pass. No Action arms a PR; only
     // this code, only on PRs it opened.
-    const outcome = await pollToGate(prUrl, (s, extra) => log(s, extra));
+    const outcome = await pollToGate(prUrl, (s, extra) => log(s, extra), 6, {
+      externalWaitRecycle: opts.externalWaitRecycle ?? (() => recyclePauseDetail(config.root)),
+    });
 
     if (outcome.merged) {
       log("pr.merged", { state: "MERGED" });
@@ -51153,6 +51200,75 @@ export function progressWatchdogCommand(
   return 0;
 }
 
+export interface ClaimVerbOpts {
+  reserver?: DispatchClaimReserver;
+  isPlanned?: (taskId: string) => boolean;
+  localHost?: string;
+}
+
+export function plannedOnOriginMain(taskId: string, dir: string = repoRoot): boolean {
+  const git = (args: string[]) => spawnSync("git", ["-C", dir, ...args], { encoding: "utf8" });
+  git(["fetch", "--quiet", "origin", "main"]);
+  const shards = git(["ls-tree", "--name-only", "origin/main:plan/tasks.d"]);
+  if (shards.status === 0 && (shards.stdout ?? "").split("\n").some((n) => n.startsWith(`${taskId}-`))) return true;
+  const mono = git(["show", "origin/main:plan/tasks.yaml"]);
+  const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return mono.status === 0 && new RegExp(`^\\s*-?\\s*id:\\s*"?${escaped}"?\\s*$`, "m").test(mono.stdout ?? "");
+}
+
+export function claimCommand(rest: string[], opts: ClaimVerbOpts = {}): number {
+  const taskId = rest[0];
+  const badArg = taskId === undefined || taskId.startsWith("-")
+    ? "rmd claim: a task id is required"
+    : unknownArgError("claim", rest.slice(1), [], ["--drop"]);
+  if (badArg !== null) {
+    console.error(badArg + "\n" + USAGE);
+    return 2;
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(taskId)) {
+    console.error(`rmd claim: '${taskId}' is not a task id`);
+    return 2;
+  }
+  if (!(opts.isPlanned ?? plannedOnOriginMain)(taskId)) {
+    console.error(`rmd claim: ${taskId} is not in the plan on origin/main — refusing to claim an unplanned id`);
+    return 1;
+  }
+  const reserver = opts.reserver ?? dispatchClaimReserverFor(repoRoot);
+  const ref = dispatchClaimRef(taskId);
+  if (rest.includes("--drop")) {
+    const sha = reserver.holder(taskId);
+    if (!sha) {
+      console.error(`rmd claim: ${ref} is not held — nothing to drop`);
+      return 1;
+    }
+    const identity = parseClaimAnchorMessage(reserver.anchorMessage?.(taskId));
+    const localHost = opts.localHost ?? hostname();
+    if (!identity || identity.host !== localHost) {
+      const who = identity ? `${identity.pid}@${identity.host}` : "an unreadable anchor";
+      console.error(`rmd claim: ${ref} is held by ${who}, not by this host (${localHost}) — refusing to drop another host's claim`);
+      return 1;
+    }
+    if (!reserver.drop(taskId, { expect: sha })) {
+      console.error(`rmd claim: could not drop ${ref} (it moved or origin is unreachable)`);
+      return 1;
+    }
+    console.log(`dropped ${ref}`);
+    return 0;
+  }
+  const outcome = reserver.attempt(taskId, reserver.mintAnchor());
+  const decision = decideDispatchClaim(outcome, {
+    taskId,
+    holder: outcome === "taken" ? reserver.holder(taskId) : undefined,
+    stderr: outcome === "unreachable" ? reserver.lastAttemptStderr?.() : undefined,
+  });
+  if (!decision.proceed) {
+    console.error(`rmd claim: ${decision.reason}`);
+    return 1;
+  }
+  console.log(`claimed ${ref}`);
+  return 0;
+}
+
 const COMMANDS: readonly CommandSpec[] = [
   {
     name: "run-task",
@@ -51282,6 +51398,12 @@ const COMMANDS: readonly CommandSpec[] = [
     syntax: "rmd progress-watchdog [--json] [--state-root <dir>]",
     summary: "Name a stalled sweep by its progress (sweep.pass, review, merge), not its daemon pulse.",
     detail: "W1-T5687: reads the deduplicated union of every ledger archive and the live ledger and prints one verdict: PROGRESSING, IDLE (no open PRs), STALLED (newest progress row over 15 min old: capture-diagnostics; over 30 min: recycle), CRASH_LOOP (3 or more daemon.paths boots in 15 min that never reached daemon.boot: hold-revive) or UNKNOWN (no rows or no open-PR count; never a silent none). Progress is ONLY a sweep.pass, review.posted or verdict.merged row: daemon.* and runtime.* rows are a pulse, not progress, which is why the 318-minute crash loop of 2026-10-03 read live to every daemon-prefix reader. The open-PR count is the newest sweep.pass row's enumerated field. On capture-diagnostics it writes one bundle (ledger tail, docker ps, the tenant's docker logs --tail, the verdict) under <state>/diagnostics/progress-<ts>/, at most one per 15 min. READ-ONLY: it recycles nothing; the host launcher acting on recycle / hold-revive is W1-T5688.",
+  },
+  {
+    name: "claim",
+    syntax: "rmd claim <task-id> [--drop]",
+    summary: "Take (or with --drop, drop) the dispatch claim the fleet honours, for a hand-build.",
+    detail: "W1-T5859: mints and pushes refs/rmd-dispatch/<task-id> through the same git-ref create-if-absent claim the fleet's own lanes take, with the same anchor message, so a hand-built task is visible to dispatch before its branch or PR is. Refuses a task id that is not in the plan on origin/main. Prints `claimed refs/rmd-dispatch/<id>` and exits 0 when created; exits 1 naming the holder when the claim is taken, and exits 1 without claiming when origin is unreachable (fail-closed). --drop removes the claim only when its anchor's host is this host (an abandoned hand-build), never another host's. A claim needs no release verb: the existing release arms drop it once the task has landed.",
   },
   {
     name: "routing-ab",
@@ -52314,6 +52436,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["ledger-grep", (rest) => ledgerGrepCommand(rest, { usage: USAGE, commandSyntax: commandSyntax("ledger-grep") })],
   ["routing-ab", async (rest) => await routingAbCommand(rest)],
   ["progress-watchdog", (rest) => progressWatchdogCommand(rest)],
+  ["claim", (rest) => claimCommand(rest)],
   ["impossible-canary", async (rest) => await impossibleCanaryCommand(rest, (input) => runImpossibleCanary(input))],
   ["benchmark-aa", async (rest) => rest[0] === "prospective" ? await prospectiveAaCommand(rest.slice(1), (input) => runProspectiveAa(input))
     : rest[0] === "readiness" ? await benchmarkAaReadinessCommand(rest.slice(1),
