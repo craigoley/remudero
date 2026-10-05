@@ -1,7 +1,7 @@
 - id: W1-T5897
   title: "SERVE'S MAIN THREAD NEVER CLASSIFIES THE INBOX — every serve generation starts with an empty `inboxClassifyStates` memo and its inbox routes run a cold `classifyAllProposalsSliced` pass of 1 to 6.5 minutes over about 1,032 proposals, while serve forks a generation per merge: single reads blocked up to 13.8 s, past the console's 5 s budget, though the slow lane already classifies off-thread"
   repo: remudero
-  depends_on: []
+  depends_on: [W1-T5886]
   type: implement
   verify: auto
   principles: {tdd: strict}
