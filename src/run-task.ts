@@ -11195,6 +11195,7 @@ export async function runFixRung(opts: {
     const reachableRemedyFiles = [
       ...remedyFilesForFailingChecks((currentCiFailures ?? []).map((f) => f.name)),
       ...offeredCensusBaselines().map((path) => ({ path, job: "census-precheck" })),
+      ...ciLogNamedSourcePaths(currentCiFailures ?? [], opts.worktreePath),
     ];
     if (deps.fetchPrDiffFiles && baselineDiffFiles !== undefined) {
       let currentDiffFiles: string[] | undefined;
@@ -41664,6 +41665,21 @@ export function readRegistrationChanges(
   });
 }
 
+/** W1-T5801: a repair the failing check's own log names (an existing src/ or scripts/ file) is reachable for THIS repair, via the shared reachableRemedyFiles list. */
+export function ciLogNamedSourcePaths(
+  failures: readonly { name: string; logTail: string }[],
+  repoDir: string,
+): { path: string; job: string }[] {
+  const found = new Map<string, string>();
+  for (const failure of failures) {
+    for (const match of failure.logTail.matchAll(/(?:^|[\s("'])((?:src|scripts)\/[\w./-]+\.[cm]?[jt]s)\b/g)) {
+      const path = match[1]!;
+      if (path.split("/").includes("..") || found.has(path) || found.size >= 5) continue;
+      if (existsSync(join(repoDir, path))) found.set(path, failure.name);
+    }
+  }
+  return [...found].map(([path, job]) => ({ path, job }));
+}
 /**
  * W1-T3696 A1: COMMIT A WORKER'S EDITS FROM THE HARNESS, so the worker never needs a git tool.
  *
@@ -41685,6 +41701,7 @@ export function readRegistrationChanges(
  * however it is written. That is the whole point of doing this here rather than handing a cheap
  * model a shell to run `git commit` with.
  */
+
 export function commitWorkerEdits(
   repoDir: string,
   declaredPaths: readonly string[],
