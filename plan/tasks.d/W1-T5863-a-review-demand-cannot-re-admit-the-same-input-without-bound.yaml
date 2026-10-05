@@ -1,0 +1,44 @@
+- id: W1-T5863
+  title: "A REVIEW DEMAND CANNOT RE-ADMIT THE SAME INPUT WITHOUT BOUND — W1-T2860's success-recovery row re-runs the authoritative reviewer while its exact-input attempt count reads zero, and its only brake is a post REFUSAL, so a successful post that the count cannot see (any key or identity mismatch) re-reviews the same PR head every pass forever"
+  repo: remudero
+  depends_on: [W1-T5839]
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  budget_usd: 5.00
+  risk: high  # Rule 19: one concern — a post-review demand on one exact input is bounded and escalates instead of looping
+  band_meaning: span
+  origin: "operator session 2026-10-05: live review loop on #9305 (operator: 'this should not happen')"
+  plan_refs: [W1-T2860, W1-T5839, W1-T5813, W1-T3823, W1-T230]
+  files: [src/lib/sweep.ts, src/run-task.ts, test/a-review-demand-cannot-re-admit-the-same-input-without-bound.test.ts]
+  status: queued
+  priority: 1
+  attempts: 0
+  rationale: |
+    READ 2026-10-05 on origin/main and the fleet ledger. src/lib/sweep.ts's W1-T2860 disposition
+    (post-review, blocker awaiting-review) fires while `pr.priorReviewAttemptsForInput === 0`, a
+    count `reviewAttemptsForInput` (src/run-task.ts) makes over `review.posted` rows matching the
+    sweep's key. Its comment names its only bound: "one exact-input post refusal stops retries".
+    A successful post that the count cannot match leaves it at zero, and the row re-admits.
+    LIVE 2026-10-05: plan PR #9305 got 16 `review.posted` SUCCESS rows between 11:56Z and 12:27Z
+    (about one per minute, written under task_id `unfiled` while the sweep keyed `PR-9305`) and
+    never once reached the arm path; the same signature is in the ledger for #9155 (15 reviews),
+    #9138 (12), #9198 (7) and #9168 (4), the plan PRs the operator merged by hand on 2026-10-04.
+    W1-T5839 fixes that key; this task makes the next identity mismatch, whatever its cause, an
+    escalation after a bounded number of passes instead of an invisible infinite loop that burns
+    a reviewer run per minute.
+  design: |
+    Count the sweep's own `sweep.review_admitted` rows for the exact input (`pr_url`, `head_sha`,
+    `review_input_digest`; no task id) and the `review.posted` rows for that input by `pr_url`.
+    When a post-review demand would admit an input that already has a completed post at or after
+    its last admission, and has been admitted at least twice, the sweep does not admit it again:
+    it disposes the PR `post-review-loop` (a stuck, escalating disposition) naming the PR, the
+    input, the admission and post counts and the key the demand looked up, and raises the needs-
+    human escalation once per input. A new head or input digest starts a fresh count. The bound is
+    a constant tagged BACKSTOP. No other disposition changes.
+  acceptance:
+    - claim: "an input with two sweep admissions and completed review posts that the demand's attempt count cannot see is not admitted a third time and is disposed post-review-loop with one escalation naming the PR and both counts, a first or second admission still proceeds, and a new head starts a fresh count"
+      proof: "unit test: test/a-review-demand-cannot-re-admit-the-same-input-without-bound.test.ts"
+  falsifier: |
+    Remove the bound: the third pass over the looping fixture admits the review again and the test
+    fails.
