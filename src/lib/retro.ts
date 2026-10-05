@@ -802,6 +802,7 @@ export function* shippedSinceSteps(
     try {
       trailerMerges = trailerMergesSince(commits ?? (yield* step(() => github.mergedCommits?.() ?? [])), sinceTs);
     } catch (error) {
+      // Named, not read as "no commits": only the post-marker runs stay candidates this pass.
       discrepancies.push(`merged-commit read failed, so no run started before the marker is credited: ${String(error)}`);
     }
   }

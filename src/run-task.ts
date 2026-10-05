@@ -28550,14 +28550,14 @@ export function retroTriggerCheck(
 
 export function retroTriggerCheckAsync(
   now: Date = new Date(),
-  deps: { config?: Config; github?: ShippedGithubReads; policy?: Policy } = {},
+  deps: Omit<NonNullable<Parameters<typeof retroTriggerCheck>[1]>, "github"> & { github?: ShippedGithubReads } = {},
 ): Promise<RetroTriggerDecision | undefined> {
   return runStepsAsync(retroTriggerCheckSteps(now, deps, retroShippedGithubGatewayAsync));
 }
 
 function* retroTriggerCheckSteps(
   now: Date,
-  deps: { config?: Config; github?: ShippedGithubReads; policy?: Policy },
+  deps: NonNullable<Parameters<typeof retroTriggerCheckAsync>[1]>,
   defaultGithub: () => ShippedGithubReads,
 ): Steps<RetroTriggerDecision | undefined> {
   const config = deps.config ?? loadConfig();

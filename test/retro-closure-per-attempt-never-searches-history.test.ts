@@ -11,7 +11,6 @@
  * read holds the loop until the child exits, so no tick can observe it in flight.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,6 +38,7 @@ import {
   retroTriggerCheckAsync,
 } from "../src/run-task.js";
 import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
+import { gitRepo } from "./helpers/git-repo.js";
 
 const before = "2026-10-01T00:00:00.000Z";
 const marker = "2026-10-01T02:00:00.000Z";
@@ -269,11 +269,10 @@ test("the awaited gateway's arms: an unreachable head reads unresolved, a missed
   } finally {
     gh.restore();
   }
-  const foreign = makeTempDir("t5649-origin");
-  execFileSync("git", ["init", "-q", foreign]);
-  execFileSync("git", ["-C", foreign, "remote", "add", "origin", "nonsense"]);
-  await assert.rejects(async () => retroShippedGithubGatewayAsync(foreign).findMergedByTrailer("W1-T1"), /cannot parse owner\/repo/);
-  rmSync(foreign, { recursive: true, force: true });
+  const foreign = gitRepo({ seedCommit: false, kind: "t5649-origin" });
+  foreign.git("remote", "add", "origin", "nonsense");
+  await assert.rejects(async () => retroShippedGithubGatewayAsync(foreign.dir).findMergedByTrailer("W1-T1"), /cannot parse owner\/repo/);
+  foreign.cleanup();
 });
 
 test("the daemon hook returns the previous check's decision once, drops one begun before a fire, and rethrows a failure", async () => {
