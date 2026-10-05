@@ -2377,10 +2377,12 @@ export function buildSweepEffects(
     resolveTaskContractAtHeadImpl: resolveFixRungTaskContractAtHead,
     createFixRungWorktreeImpl: createFixRungWorktreeWithToolchain,
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit,
-    runFixRungImpl: (args: Parameters<typeof runFixRung>[0]) => runFixRung({
-      ...args,
-      deps: { ...args.deps, readPrerequisitePr: args.deps.readPrerequisitePr ?? fetchPrerequisitePrViaGh },
-    }),
+    runFixRungImpl: (args: Parameters<typeof runFixRung>[0]) => {
+      const deps: Parameters<typeof runFixRung>[0]["deps"] = {
+        ...args.deps, readPrerequisitePr: args.deps.readPrerequisitePr ?? fetchPrerequisitePrViaGh,
+      };
+      return runFixRung({ ...args, deps });
+    },
     runPlanScopedFixRoundImpl: runPlanScopedFixRound,
     materializePlanRoundWorktreeImpl: materializePlanRoundWorktree,
     pushFixRoundImpl: pushFixRound,
