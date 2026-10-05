@@ -243,8 +243,9 @@ test("production now view names an unreadable deploy marker instead of reading i
   // A self-referencing symlink makes stat fail with ELOOP: a real failure that is not the marker's absence.
   symlinkSync("DEPLOY_AUTO", deployAutoPath(root));
   append(drift(0), boot(0));
-  const source = read().humanGates!.sources.find((s) => s.name === "operator-items")!;
-  assert.deepEqual(read().humanGates!.gates.filter((g) => g.kind === "operator_item"), []);
+  const data = read();
+  const source = data.humanGates!.sources.find((s) => s.name === "operator-items")!;
+  assert.deepEqual(data.humanGates!.gates.filter((g) => g.kind === "operator_item"), []);
   assert.equal(source.state, "partial");
   assert.match(source.reason!, /deploy markers are unreadable \(DEPLOY_AUTO: .*ELOOP/);
 });
